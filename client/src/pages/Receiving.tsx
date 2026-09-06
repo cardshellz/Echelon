@@ -4,6 +4,8 @@ import { Link, useLocation, useSearch } from "wouter";
 import { useProcurementNavigation } from "@/hooks/use-procurement-navigation";
 import { parseProcurementRecord } from "@/lib/procurement-navigation";
 import { createReceivingNavigationSession } from "@/lib/receiving-navigation-session";
+import { ReceivingUnitControl } from "@/components/purchasing/ReceivingUnitControl";
+import { parseReceivingLineMutation, receivingSelectedFactor, receivingVariantChange, receivingCompleteAllCommand, receivingCountChange, receivingAddQuantity, recordedReceivingFactor, type ReceivingUnitLine } from "@/lib/receiving-units";
 import { ProcurementContext } from "@/components/procurement-context";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -94,7 +96,7 @@ function createReceivingIdempotencyKey(prefix: string): string {
   ) as string;
 }
 
-interface ReceivingLine {
+interface ReceivingLine extends ReceivingUnitLine {
   id: number;
   receivingOrderId: number;
   sku: string | null;
@@ -252,10 +254,14 @@ export default function Receiving() {
   const [showAddLineDialog, setShowAddLineDialog] = useState(false);
   // Resolution UI state
   const [resolvingLine, setResolvingLine] = useState<ReceivingLine | null>(null);
+  const [countDrafts, setCountDrafts] = useState<Record<number, { value: string; line: ReceivingLine }>>({});
+  const [unitErrors, setUnitErrors] = useState<Record<number, { message: string; needsRefresh: boolean }>>({});
+  const [reloadingUnits, setReloadingUnits] = useState(false);
+  const [legacyResolveVariant, setLegacyResolveVariant] = useState<number | null>(null);
   const [showResolveDialog, setShowResolveDialog] = useState(false);
   const [resolveMode, setResolveMode] = useState<'sku' | 'location'>('sku');
   const [resolveSkuSearch, setResolveSkuSearch] = useState("");
-  const [resolveSkuResults, setResolveSkuResults] = useState<{sku: string; name: string; productVariantId: number}[]>([]);
+  const [resolveSkuResults, setResolveSkuResults] = useState<{sku: string; name: string; productVariantId: number; unitsPerVariant?: number}[]>([]);
   const resolveSkuTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [newLine, setNewLine] = useState({
     sku: "",
@@ -264,7 +270,9 @@ export default function Receiving() {
     putawayLocationId: "",
     productId: null as number | null,
     productVariantId: null as number | null,
+    expectedUnitsPerVariant: null as number | null,
   });
+  const [addLineError, setAddLineError] = useState<string | null>(null);
   const [skuSearch, setSkuSearch] = useState("");
   const [skuResults, setSkuResults] = useState<{sku: string; name: string; productId: number | null; productVariantId: number; unitsPerVariant: number}[]>([]);
   const [showSkuDropdown, setShowSkuDropdown] = useState(false);
@@ -746,7 +754,10 @@ DEF-456,25,,,5.00,,Location TBD`;
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(line),
       });
-      if (!res.ok) throw new Error("Failed to add line");
+      if (!res.ok) {
+        const data = await res.json().catch(() => null);
+        throw Object.assign(new Error(data?.error || "Failed to add line"), { status: res.status });
+      }
       return res.json();
     },
     onSuccess: (updatedOrder, _variables, context) => {
@@ -756,6 +767,7 @@ DEF-456,25,,,5.00,,Location TBD`;
         setSelectedReceipt(updatedOrder);
       }
       setShowAddLineDialog(false);
+      setAddLineError(null);
       setNewLine({
         sku: "",
         productName: "",
@@ -763,115 +775,144 @@ DEF-456,25,,,5.00,,Location TBD`;
         putawayLocationId: "",
         productId: null,
         productVariantId: null,
+        expectedUnitsPerVariant: null,
       });
       setSkuSearch("");
       setSkuResults([]);
       toast({ title: "Line added successfully" });
     },
-    onError: (error) => {
-      toast({ 
-        title: "Failed to add line", 
-        description: error.message,
-        variant: "destructive" 
-      });
+    onError: (error: Error & { status?: number }, _variables, context) => {
+      if (!isCurrentReceiptNavigation(context)) return;
+      const message = error.status === 409 ? error.message + " Refresh and reselect the SKU, then review the count before adding it." : error.message;
+      if (error.status === 409) {
+        setNewLine((current) => ({ ...current, expectedUnitsPerVariant: null }));
+        setSkuResults([]); setShowSkuDropdown(false);
+      }
+      setAddLineError(message);
+      toast({ title: "Failed to add line", description: message, variant: "destructive" });
     },
   });
 
   const updateLineMutation = useMutation({
     onMutate: captureReceiptNavigation,
-    mutationFn: async ({ lineId, updates }: { lineId: number; updates: any }) => {
-      const res = await fetch(`/api/receiving/lines/${lineId}`, {
+    retry: false,
+    mutationFn: async ({ lineId, updates }: { lineId: number; updates: Record<string, unknown> }) => {
+      const expectedReceiptId = selectedReceipt?.id;
+      if (!expectedReceiptId || !selectedReceipt?.lines?.some((line) => line.id === lineId)) throw new Error("The receipt line is no longer selected. Load the latest receipt.");
+      const res = await fetch("/api/receiving/lines/" + lineId, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(updates),
       });
+      const body: unknown = await res.json().catch(() => null);
       if (!res.ok) {
-        const errJson = await res.json().catch(() => ({ error: "Failed to update line" }));
-        throw new Error(errJson.error || "Failed to update line");
+        const detail = body && typeof body === "object" && "error" in body ? String(body.error) : "Failed to update line";
+        throw Object.assign(new Error(detail), { status: res.status });
       }
-      return res.json();
+      return parseReceivingLineMutation(body, { id: lineId, receivingOrderId: expectedReceiptId, updates }) as ReceivingLine;
     },
-    onSuccess: (updatedLine, _variables, context) => {
+    onSuccess: (updatedLine, variables, context) => {
       queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
       if (!isCurrentReceiptNavigation(context)) return;
-      if (selectedReceipt && selectedReceipt.lines) {
-        const updatedLines = selectedReceipt.lines.map(line => 
-          line.id === updatedLine.id ? updatedLine : line
-        );
-        setSelectedReceipt({
-          ...selectedReceipt,
-          lines: updatedLines
-        });
-        
-        // Handle Line Status Toasts
-        if (updatedLine.status === "complete") {
-          const allComplete = updatedLines.every(l => l.status === "complete");
-          if (allComplete) {
-            toast({ 
-              title: "All lines complete!", 
-              description: "Receipt is ready to close. Click 'Close & Update Inventory' to finalize.",
-            });
-          } else {
-            toast({ title: "Line marked complete" });
-          }
-        } else if (updatedLine.status === "overage") {
-          toast({ 
-            title: "Overage Detected", 
-            description: "Please route the extra physical items to the Problem Solve bin for supervisor review.",
-            variant: "destructive"
-          });
-        }
+      setSelectedReceipt((current) => current?.id === updatedLine.receivingOrderId ? {
+        ...current, lines: current.lines?.map((line) => line.id === updatedLine.id ? updatedLine : line),
+      } : current);
+      setResolvingLine((current) => current?.id === updatedLine.id ? updatedLine : current);
+      setUnitErrors((current) => { const next = { ...current }; delete next[updatedLine.id]; return next; });
+      if ("receivedQty" in variables.updates) {
+        setCountDrafts((current) => { const next = { ...current }; delete next[updatedLine.id]; return next; });
+      }
+      if ("productVariantId" in variables.updates) {
+        setLegacyResolveVariant(null);
+        setShowResolveDialog(false);
+        toast({ title: "Receive unit confirmed", description: variables.updates.confirmLegacyUnit ? "The existing counts now have an explicitly confirmed unit." : "Expected, received and damaged piece totals were preserved." });
+      } else if ("receivedQty" in variables.updates) {
+        toast({ title: "Count saved", description: updatedLine.status === "overage" ? "The received count exceeds the expected quantity. Review the difference before closing." : undefined });
       }
     },
-    onError: (error: Error) => {
-      toast({ title: "Failed to update line", description: error.message, variant: "destructive" });
+    onError: (cause: Error & { status?: number }, variables, context) => {
+      if (!isCurrentReceiptNavigation(context)) return;
+      // A lost response may follow a committed update. Preserve the draft and
+      // require a source read; never silently rebase it onto a newer unit.
+      const needsRefresh = cause.status === undefined || cause.status >= 500 || cause.status === 409 || cause.status === 404;
+      setUnitErrors((current) => ({ ...current, [variables.lineId]: { message: cause.message, needsRefresh } }));
+      toast({ title: "Line change needs review", description: cause.message, variant: "destructive" });
     },
   });
 
-  // Auto-default each unresolved receive line to its product's LARGEST variant
-  // (e.g. "Case of 10"), so the operator gets a pre-filled, changeable pick
-  // instead of an "unmatched SKU" wall. Ref guard => apply once per line.
-  // Variants for a line's product, LARGEST pack first.
-  const variantsFor = (line: any) =>
-    variants.filter((v) => v.productId === line.productId)
-      .sort((a, b) => (b.unitsPerVariant || 1) - (a.unitsPerVariant || 1));
-  // Physical-unit noun for a variant ("case" / "pack" / "box" / "piece").
-  const unitNoun = (v: any) => {
-    if (!v) return "unit";
-    if ((v.unitsPerVariant || 1) === 1) return "piece";
-    const m = /^(pack|box|case)/i.exec(v.name || "");
-    return m ? m[1].toLowerCase() : "unit";
-  };
-  // Apply a pack to a line AND convert expected into that pack's units: recover
-  // base pieces from the current pack, divide by the new pack, reset received.
-  // So the server's complete/partial/overage compares cases-to-cases.
-  const applyVariant = (line: any, variantId: number) => {
-    const cur = variants.find((v) => v.id === line.productVariantId);
-    const next = variants.find((v) => v.id === variantId);
-    if (!next) return;
-    const basePieces = (line.expectedQty || 0) * (cur?.unitsPerVariant || 1);
-    const newExpected = Math.round(basePieces / (next.unitsPerVariant || 1));
-    updateLineMutation.mutate({
-      lineId: line.id,
-      updates: { productVariantId: variantId, expectedQty: newExpected, receivedQty: 0 },
+  function reportUnitError(lineId: number, cause: unknown, needsRefresh = false) {
+    const message = cause instanceof Error ? cause.message : "The receive unit could not be changed.";
+    setUnitErrors((current) => ({ ...current, [lineId]: { message, needsRefresh } }));
+    toast({ title: "Line change needs review", description: message, variant: "destructive" });
+  }
+
+  function applyVariant(line: ReceivingLine, variantId: number, confirmLegacyUnit = false, expectedUnitsPerVariant?: number) {
+    if (updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || unitErrors[line.id]?.needsRefresh) return;
+    try {
+      if (countDrafts[line.id]) throw new Error("Save or discard the received-count draft before changing its unit.");
+      const updates = receivingVariantChange(line, variantId, confirmLegacyUnit, expectedUnitsPerVariant);
+      updateLineMutation.mutate({ lineId: line.id, updates });
+    } catch (cause) { reportUnitError(line.id, cause); }
+  }
+
+  function setReceivedDraft(line: ReceivingLine, value: string) {
+    setCountDrafts((current) => {
+      const next = { ...current };
+      // An explicit zero is a draft too; saving never fills expectedQty.
+      next[line.id] = { value, line: current[line.id]?.line ?? { ...line } };
+      return next;
     });
-  };
+  }
 
-  // Auto-default each unresolved line to its product's largest pack and convert
-  // expected into that pack's units — pre-filled and changeable, no "unmatched".
-  const defaultedVariantLinesRef = useRef<Set<number>>(new Set());
-  useEffect(() => {
-    if (!selectedReceipt?.lines || selectedReceipt.status === "closed") return;
-    for (const line of selectedReceipt.lines) {
-      if (line.productVariantId != null || line.productId == null) continue;
-      if (defaultedVariantLinesRef.current.has(line.id)) continue;
-      const lv = variantsFor(line);
-      if (lv.length === 0) continue;
-      defaultedVariantLinesRef.current.add(line.id);
-      applyVariant(line, lv[0].id);
-    }
-  }, [selectedReceipt?.lines, variants]);
+  function saveReceivedCount(line: ReceivingLine) {
+    if (updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || unitErrors[line.id]?.needsRefresh) return;
+    try {
+      const draft = countDrafts[line.id];
+      updateLineMutation.mutate({ lineId: line.id, updates: receivingCountChange(draft?.line ?? line, draft?.value) });
+    } catch (cause) { reportUnitError(line.id, cause); }
+  }
 
+  async function reloadReceiptUnits(lineId: number) {
+    if (!selectedReceipt || updateLineMutation.isPending || reloadingUnits) return;
+    const id = selectedReceipt.id;
+    const context = captureReceiptNavigation();
+    setReloadingUnits(true);
+    try {
+      const [res, catalogResponse] = await Promise.all([fetch("/api/receiving/" + id), fetch("/api/product-variants")]);
+      if (!res.ok || !catalogResponse.ok) throw new Error("Latest receipt and catalog units could not be loaded. Your count draft is still preserved.");
+      const [current, catalog]: [unknown, unknown] = await Promise.all([res.json(), catalogResponse.json()]);
+      if (!Array.isArray(catalog)) throw new Error("The latest catalog units could not be verified. Your count draft is still preserved.");
+      if (!current || typeof current !== "object" || !("id" in current) || current.id !== id || !("lines" in current) || !Array.isArray(current.lines)) {
+        throw new Error("The latest receipt response was incomplete. Your draft is still preserved.");
+      }
+      if (!isCurrentReceiptNavigation(context)) return;
+      queryClient.setQueryData(["/api/product-variants"], catalog);
+      setSelectedReceipt(current as ReceivingOrder);
+      setCountDrafts((drafts) => { const next = { ...drafts }; delete next[lineId]; return next; });
+      setUnitErrors((errors) => { const next = { ...errors }; delete next[lineId]; return next; });
+      setResolvingLine((line) => line?.id === lineId ? (current.lines as ReceivingLine[]).find((item) => item.id === lineId) ?? null : line);
+      setLegacyResolveVariant(null);
+    } catch (cause) {
+      if (isCurrentReceiptNavigation(context)) reportUnitError(lineId, cause, true);
+    } finally { if (isCurrentReceiptNavigation(context)) setReloadingUnits(false); }
+  }
+
+  function renderUnitControl(line: ReceivingLine) {
+    return <div className="space-y-2">
+      <ReceivingUnitControl
+        line={line}
+        variants={variants}
+        mutable={!!selectedReceipt && !["closed", "cancelled"].includes(selectedReceipt.status)}
+        pending={updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || !!countDrafts[line.id] || !!unitErrors[line.id]?.needsRefresh}
+        onChange={(variantId, confirm, factor) => applyVariant(line, variantId, confirm, factor)}
+      />
+      {unitErrors[line.id] && <div role="alert" className="rounded border border-destructive/40 p-2 text-xs text-destructive">
+        <p>{unitErrors[line.id].message}</p>
+        {unitErrors[line.id].needsRefresh && <Button size="sm" variant="outline" className="mt-2 h-auto min-h-10 whitespace-normal" disabled={reloadingUnits || updateLineMutation.isPending} onClick={() => void reloadReceiptUnits(line.id)}>Load latest line and discard count draft</Button>}
+      </div>}
+      {countDrafts[line.id] && <Button size="sm" variant="ghost" disabled={updateLineMutation.isPending} onClick={() => setCountDrafts((current) => { const next = { ...current }; delete next[line.id]; return next; })}>Discard count draft</Button>}
+    </div>;
+  }
   const updateReceiptMutation = useMutation({
     onMutate: captureReceiptNavigation,
     mutationFn: async ({ id, updates }: { id: number; updates: Record<string, any> }) => {
@@ -894,103 +935,52 @@ DEF-456,25,,,5.00,,Location TBD`;
 
   const completeAllMutation = useMutation({
     onMutate: captureReceiptNavigation,
-    mutationFn: async (orderId: number) => {
-      const res = await fetch(`/api/receiving/${orderId}/complete-all`, {
-        method: "POST",
+    retry: false,
+    mutationFn: async ({ orderId, lines }: { orderId: number; lines: ReceivingLine[] }) => {
+      const body = receivingCompleteAllCommand(lines);
+      const res = await fetch("/api/receiving/" + orderId + "/complete-all", {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
       });
-      if (!res.ok) throw new Error("Failed to complete all lines");
-      return res.json();
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(data?.error || "Counts could not be completed. Load the latest receipt before continuing.");
+      if (data?.order?.id !== orderId || !Array.isArray(data.order.lines)) throw new Error("The saved counts could not be verified. Load the latest receipt before continuing.");
+      return data;
     },
     onSuccess: (data, _variables, context) => {
       queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
       if (!isCurrentReceiptNavigation(context)) return;
-      if (data.order) {
-        setSelectedReceipt(data.order);
-      }
-      toast({ title: "All lines marked complete" });
+      setSelectedReceipt(data.order);
+      toast({ title: "Counts saved", description: "Positive entered counts were preserved. Review any partial quantities before closing." });
+    },
+    onError: (cause: Error, variables, context) => {
+      if (!isCurrentReceiptNavigation(context)) return;
+      setUnitErrors((current) => Object.fromEntries([...Object.entries(current), ...variables.lines.map((line) => [line.id, { message: cause.message, needsRefresh: true }])]));
+      toast({ title: "Counts need review", description: cause.message, variant: "destructive" });
     },
   });
 
-  // Create a new product variant from a receiving line's SKU
+  // Catalog creation does not reinterpret receipt quantities or link siblings.
   const createVariantMutation = useMutation({
-    onMutate: () => ({
-      ...captureReceiptNavigation(),
-      // This workflow already links sibling lines after creating a variant.
-      // Capture its original scope so navigation cannot cancel those writes or
-      // redirect them onto a different receipt.
-      receipt: selectedReceipt ? {
-        ...selectedReceipt,
-        lines: selectedReceipt.lines?.map((line) => ({ ...line })),
-      } : null,
-    }),
+    onMutate: captureReceiptNavigation,
     mutationFn: async (lineId: number) => {
-      const res = await fetch(`/api/receiving/lines/${lineId}/create-variant`, {
-        method: "POST",
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ error: "Failed to create variant" }));
-        throw new Error(err.error || "Failed to create variant");
+      const res = await fetch("/api/receiving/lines/" + lineId + "/create-variant", { method: "POST" });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(data?.error || "Failed to create variant");
+      if (data?.line?.id !== lineId || !Number.isInteger(data?.variant?.id) || !Number.isInteger(data?.variant?.unitsPerVariant) || data.variant.unitsPerVariant <= 0 || typeof data.variant.name !== "string" || data.requiresUnitConfirmation !== true) {
+        throw new Error("The catalog result could not be verified. Search the catalog before trying again.");
       }
-      return res.json();
+      return data;
     },
-    onSuccess: async (data, _variables, context) => {
-      queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
-      const receiptAtStart = context?.receipt;
-      if (!receiptAtStart?.lines) return;
-
-      let updatedLines = receiptAtStart.lines.map(line =>
-        line.id === data.line.id ? data.line : line
-      );
-      const returnedLines = new Map<number, ReceivingLine>([[data.line.id, data.line]]);
-
-      // Auto-link other lines with the same SKU that are also missing productVariantId
-      const sameSku = updatedLines.filter(l =>
-        l.id !== data.line.id && l.sku?.toUpperCase() === data.variant.sku.toUpperCase() && !l.productVariantId
-      );
-      for (const sibling of sameSku) {
-        try {
-          const res = await fetch(`/api/receiving/lines/${sibling.id}`, {
-            method: "PATCH",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ productVariantId: data.variant.id, productName: `${data.product.name} — ${data.variant.name}` }),
-          });
-          if (res.ok) {
-            const updated = await res.json();
-            updatedLines = updatedLines.map(l => l.id === updated.id ? updated : l);
-            returnedLines.set(updated.id, updated);
-          }
-        } catch { /* continue */ }
-      }
-
-      queryClient.invalidateQueries({ queryKey: ["/api/receiving"] });
+    onSuccess: (data, _variables, context) => {
+      queryClient.invalidateQueries({ queryKey: ["/api/product-variants"] });
       if (!isCurrentReceiptNavigation(context)) return;
-      setSelectedReceipt((current) => current?.id === receiptAtStart.id ? {
-        ...current,
-        lines: current.lines?.map((line) => returnedLines.get(line.id) ?? line),
-      } : current);
-
-      const linkedCount = 1 + sameSku.length;
-      toast({
-        title: "Variant created & linked",
-        description: `${data.variant.sku} (${data.variant.name}) — linked to ${linkedCount} line${linkedCount > 1 ? 's' : ''}`,
-      });
-
-      // Auto-advance to next unresolved line
-      const nextIssue = updatedLines.find(l =>
-        l.receivedQty > 0 && (!l.productVariantId || !l.putawayLocationId) && l.id !== data.line.id
-      );
-      if (nextIssue) {
-        const mode = !nextIssue.productVariantId ? 'sku' : 'location';
-        setResolvingLine(nextIssue);
-        setResolveMode(mode);
-        setResolveSkuSearch(nextIssue.sku || "");
-        setResolveSkuResults([]);
-      } else {
-        setShowResolveDialog(false);
-      }
+      setResolvingLine(data.line);
+      setLegacyResolveVariant(data.variant.id);
+      setResolveSkuResults([{ productVariantId: data.variant.id, sku: data.variant.sku, name: data.variant.name, unitsPerVariant: data.variant.unitsPerVariant }]);
+      toast({ title: "Catalog variant created", description: "Review its receive unit below to link this line. Existing counts have not changed." });
     },
-    onError: (error: Error) => {
-      toast({ title: "Failed to create variant", description: error.message, variant: "destructive" });
+    onError: (error: Error, _variables, context) => {
+      if (isCurrentReceiptNavigation(context)) toast({ title: "Failed to create variant", description: error.message, variant: "destructive" });
     },
   });
 
@@ -1002,6 +992,7 @@ DEF-456,25,,,5.00,,Location TBD`;
   // Debounced SKU search for add line dialog
   const handleSkuSearch = (query: string) => {
     setSkuSearch(query);
+    if (query !== newLine.sku) setNewLine((current) => ({ ...current, sku: "", productName: "", productId: null, productVariantId: null, expectedUnitsPerVariant: null }));
     if (skuSearchTimeout) {
       clearTimeout(skuSearchTimeout);
     }
@@ -1114,13 +1105,18 @@ DEF-456,25,,,5.00,,Location TBD`;
     bulkImportMutation.mutate({ orderId: selectedReceipt.id, lines: result.lines });
   };
 
-  // Close receipt — server auto-resolves SKU→variant and blocks if data is missing
+  // Unit review and local count drafts must be resolved before inventory posting.
   const handlePreCloseValidation = () => {
     if (!selectedReceipt?.lines) return;
     closeReceiptMutation.mutate({ id: selectedReceipt.id });
   };
 
   // Compute issue counts for the current receipt
+  const receiveUnitsNeedReview = selectedReceipt?.lines?.some((line) => {
+    const factor = recordedReceivingFactor(line);
+    const catalog = variants.find((variant) => variant.id === line.productVariantId);
+    return factor === null || !line.unitVersion || !line.productVariantId || !!catalog && catalog.unitsPerVariant !== factor;
+  }) ?? false;
   const issueLines = selectedReceipt?.lines?.filter(l => l.receivedQty > 0 && (!l.productVariantId || !l.putawayLocationId)) || [];
   const skuIssueCount = issueLines.filter(l => !l.productVariantId).length;
   const locIssueCount = issueLines.filter(l => !l.putawayLocationId).length;
@@ -1137,6 +1133,7 @@ DEF-456,25,,,5.00,,Location TBD`;
 
   // Resolution: open dialog for a specific line + issue type
   const openResolve = (line: ReceivingLine, mode: 'sku' | 'location') => {
+    setLegacyResolveVariant(null);
     setResolvingLine(line);
     setResolveMode(mode);
     const sku = line.sku || "";
@@ -1189,6 +1186,11 @@ DEF-456,25,,,5.00,,Location TBD`;
   useEffect(() => {
     // A browser history change must not carry a pending editor into a different
     // receipt. Persisted receive quantities remain owned by the server.
+    setCountDrafts({});
+    setUnitErrors({});
+    setReloadingUnits(false);
+    setAddLineError(null);
+    setLegacyResolveVariant(null);
     setShowCSVImport(false);
     setShowImportResults(false);
     setImportResults(null);
@@ -1197,7 +1199,7 @@ DEF-456,25,,,5.00,,Location TBD`;
     setReverseTarget(null);
     setOverReceiptPrompt(null);
     setNextPoPrompt(null);
-  }, [requestedReceiptId, invalidReceiptId]);
+  }, [requestedReceiptId, invalidReceiptId, location, searchStr]);
 
   // The address identifies the open receipt, including after reload or browser
   // Back. Fetch it directly: list filters and empty lists must not block a link.
@@ -1369,7 +1371,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                         </div>
                         <div className="flex gap-4 mt-2 text-xs">
                           <span>Lines: {receipt.receivedLineCount || 0}/{receipt.expectedLineCount || 0}</span>
-                          <span>Units: {receipt.receivedTotalUnits || 0}/{receipt.expectedTotalUnits || 0}</span>
+                          <span>Receive counts (mixed units): {receipt.receivedTotalUnits ?? "—"}/{receipt.expectedTotalUnits ?? "—"}</span>
                         </div>
                         <div className="text-xs text-muted-foreground mt-1">
                           {format(new Date(receipt.createdAt), "MMM d, yyyy h:mm a")}
@@ -1452,7 +1454,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                         {receipt.receivedLineCount || 0} / {receipt.expectedLineCount || 0}
                       </TableCell>
                       <TableCell>
-                        {receipt.receivedTotalUnits || 0} / {receipt.expectedTotalUnits || 0}
+                        {receipt.receivedTotalUnits ?? "—"} / {receipt.expectedTotalUnits ?? "—"}<div className="text-xs text-muted-foreground">Receive counts; may mix pack sizes</div>
                       </TableCell>
                       <TableCell>
                         <Badge variant={STATUS_BADGES[receipt.status]?.variant || "secondary"}>
@@ -1850,7 +1852,7 @@ DEF-456,25,,,5.00,,Location TBD`;
 
       {/* Receipt Detail Dialog */}
       <Dialog open={showReceiptDetail} onOpenChange={(open) => { if (!open) closeReceiptDetail(); }}>
-        <DialogContent className="max-w-4xl md:max-w-4xl max-h-[90vh] overflow-y-auto p-4">
+        <DialogContent className="min-w-0 max-w-4xl max-h-[90vh] overflow-y-auto overflow-x-hidden p-4 [&>*]:min-w-0">
           <div className="pr-6">
             <Button asChild variant="ghost" size="sm">
               <Link href={procurementNavigation.backHref("/receiving")}>
@@ -1993,8 +1995,8 @@ DEF-456,25,,,5.00,,Location TBD`;
                       <Button 
                         variant="outline"
                         className="min-h-[44px] text-xs md:text-sm flex-1 sm:flex-none"
-                        onClick={() => completeAllMutation.mutate(selectedReceipt.id)}
-                        disabled={completeAllMutation.isPending}
+                        onClick={() => completeAllMutation.mutate({ orderId: selectedReceipt.id, lines: selectedReceipt.lines ?? [] })}
+                        disabled={completeAllMutation.isPending || updateLineMutation.isPending || reloadingUnits || Object.keys(countDrafts).length > 0 || Object.keys(unitErrors).length > 0 || !selectedReceipt.lines?.length || selectedReceipt.lines.some((line) => recordedReceivingFactor(line) === null || !line.unitVersion)}
                         data-testid="btn-complete-all"
                       >
                         <CheckCircle className="h-4 w-4 mr-1 md:mr-2" />
@@ -2003,7 +2005,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                       <Button
                         className="min-h-[44px] text-xs md:text-sm flex-1 sm:flex-none"
                         onClick={handlePreCloseValidation}
-                        disabled={closeReceiptMutation.isPending}
+                        disabled={closeReceiptMutation.isPending || updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || Object.keys(countDrafts).length > 0 || Object.keys(unitErrors).length > 0 || receiveUnitsNeedReview}
                         data-testid="btn-close-receipt"
                       >
                         <CheckCircle className="h-4 w-4 mr-1 md:mr-2" />
@@ -2029,6 +2031,10 @@ DEF-456,25,,,5.00,,Location TBD`;
                   )}
                 </div>
 
+                {selectedReceipt.status !== "closed" && (receiveUnitsNeedReview || Object.keys(countDrafts).length > 0 || Object.keys(unitErrors).length > 0) && (
+                  <p className="rounded border border-amber-400/50 p-3 text-sm text-amber-800 dark:text-amber-200">Before closing, confirm every receive unit and save or discard count drafts. Resolve line errors by loading the latest receipt.</p>
+                )}
+
                 {/* Receive-time validation warnings (Spec D, Part 2) — advisory,
                     never blocking. Shown inline before close. */}
                 {selectedReceipt.status !== "closed" &&
@@ -2053,7 +2059,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                 {selectedReceipt.sourceType === "shipment" && selectedReceipt.status !== "closed" && (
                   <div className="flex items-start gap-2 p-3 rounded-lg border bg-blue-50 border-blue-200 text-blue-800 text-sm">
                     <Package className="h-4 w-4 mt-0.5 shrink-0 text-blue-600" />
-                    <span>Receiving against an <strong>inbound shipment</strong>. Lot cost is provisional (product + packaging) until the shipment's freight is finalized — then freight is added per case.</span>
+                    <span>Receiving against an <strong>inbound shipment</strong>. Review freight and total costs from the linked shipment.</span>
                   </div>
                 )}
                 {selectedReceipt.sourceType === "po" && selectedReceipt.status !== "closed" && (
@@ -2116,7 +2122,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                 )}
 
                 {/* Lines section */}
-                <Card>
+                <Card className="min-w-0 max-w-full">
                   <CardHeader className="p-3 md:pb-2 flex flex-row items-center justify-between">
                     <CardTitle className="text-sm md:text-base">Lines ({selectedReceipt.lines?.length || 0})</CardTitle>
                     {selectedReceipt.status !== "closed" && (
@@ -2155,7 +2161,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                       </div>
                     </div>
                   )}
-                  <CardContent className="p-0">
+                  <CardContent className="min-w-0 max-w-full p-0">
                     {/* Mobile card view for lines */}
                     <div className="md:hidden p-2 space-y-2">
                       {sortedLines.length === 0 ? (
@@ -2201,9 +2207,10 @@ DEF-456,25,,,5.00,,Location TBD`;
                                   )}
                                 </div>
                               )}
+                              {renderUnitControl(line)}
                               <div className="grid grid-cols-2 gap-2 text-xs">
                                 <div>
-                                  <Label className="text-xs text-muted-foreground">Expected</Label>
+                                  <Label className="text-xs text-muted-foreground">Expected receive units</Label>
                                   <div className="font-medium">{line.expectedQty}</div>
                                 </div>
                                 <div>
@@ -2211,11 +2218,11 @@ DEF-456,25,,,5.00,,Location TBD`;
                                   {(selectedReceipt.status === "open" || selectedReceipt.status === "receiving") ? (
                                     <Input
                                       type="number"
-                                      value={line.receivedQty}
-                                      onChange={(e) => updateLineMutation.mutate({
-                                        lineId: line.id,
-                                        updates: { receivedQty: parseInt(e.target.value) || 0 }
-                                      })}
+                                      aria-label={"Received count for line " + line.id}
+                                      value={countDrafts[line.id]?.value ?? String(line.receivedQty)}
+                                      onChange={(e) => setReceivedDraft(line, e.target.value)}
+                                      onKeyDown={(e) => { if (e.key === "Enter") saveReceivedCount(line); }}
+                                      disabled={updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || recordedReceivingFactor(line) === null || !!unitErrors[line.id]?.needsRefresh}
                                       className="h-10 w-full mt-1"
                                       min={0}
                                       autoComplete="off"
@@ -2264,23 +2271,17 @@ DEF-456,25,,,5.00,,Location TBD`;
                                     )}
                                   </div>
                                 </div>
-                                {(selectedReceipt.status === "open" || selectedReceipt.status === "receiving") && line.status !== "complete" && (
+                                {(selectedReceipt.status === "open" || selectedReceipt.status === "receiving") && (line.status !== "complete" || !!countDrafts[line.id]) && (
                                   <Button
                                     variant="outline"
                                     size="sm"
                                     className="min-h-[44px]"
-                                    onClick={() => updateLineMutation.mutate({
-                                      lineId: line.id,
-                                      updates: {
-                                        receivedQty: line.expectedQty || 0,
-                                        status: "complete"
-                                      }
-                                    })}
-                                    disabled={updateLineMutation.isPending}
+                                    onClick={() => saveReceivedCount(line)}
+                                    disabled={updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || recordedReceivingFactor(line) === null || !!unitErrors[line.id]?.needsRefresh}
                                     data-testid={`btn-complete-line-mobile-${line.id}`}
                                   >
                                     <Check className="h-4 w-4 mr-1" />
-                                    Done
+                                    Save count
                                   </Button>
                                 )}
                                 {line.status === "complete" && (
@@ -2349,54 +2350,23 @@ DEF-456,25,,,5.00,,Location TBD`;
                             <TableRow key={line.id}>
                               <TableCell className="font-mono whitespace-nowrap">{line.sku || "-"}</TableCell>
                               <TableCell>{line.productName || "-"}</TableCell>
-                              <TableCell>
-                                {(() => {
-                                  const lv = variantsFor(line);
-                                  if (lv.length === 0) return <span className="text-muted-foreground text-sm">—</span>;
-                                  if (selectedReceipt.status === "closed") {
-                                    const cur = variants.find((v) => v.id === line.productVariantId);
-                                    return <span className="text-sm">{cur?.name || "—"}</span>;
-                                  }
-                                  return (
-                                    <select
-                                      className="h-9 text-sm border rounded-md px-2 bg-white min-w-[120px]"
-                                      value={line.productVariantId ?? lv[0].id}
-                                      onChange={(e) => applyVariant(line, Number(e.target.value))}
-                                      title="What pack did this arrive in?"
-                                    >
-                                      {lv.map((v) => (
-                                        <option key={v.id} value={v.id}>{v.name}</option>
-                                      ))}
-                                    </select>
-                                  );
-                                })()}
-                              </TableCell>
-                              <TableCell className="whitespace-nowrap">
-                                {(() => {
-                                  const cur = variants.find((v) => v.id === line.productVariantId);
-                                  const noun = unitNoun(cur);
-                                  return <span><b>{line.expectedQty}</b> {noun}{line.expectedQty === 1 ? "" : "s"}</span>;
-                                })()}
-                              </TableCell>
+                              <TableCell className="min-w-64">{renderUnitControl(line)}</TableCell>
+                              <TableCell className="whitespace-nowrap"><b>{line.expectedQty}</b> receive units</TableCell>
                               <TableCell>
                                 {(selectedReceipt.status === "open" || selectedReceipt.status === "receiving") ? (
                                   <div>
                                     <Input
                                       type="number"
-                                      value={line.receivedQty}
-                                      onChange={(e) => updateLineMutation.mutate({
-                                        lineId: line.id,
-                                        updates: { receivedQty: parseInt(e.target.value) || 0 }
-                                      })}
+                                      aria-label={"Received count for line " + line.id}
+                                      value={countDrafts[line.id]?.value ?? String(line.receivedQty)}
+                                      onChange={(e) => setReceivedDraft(line, e.target.value)}
+                                      onKeyDown={(e) => { if (e.key === "Enter") saveReceivedCount(line); }}
+                                      disabled={updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || recordedReceivingFactor(line) === null || !!unitErrors[line.id]?.needsRefresh}
                                       className="w-20 h-10"
                                       min={0}
                                       autoComplete="off"
                                     />
-                                    {(() => {
-                                      const cur = variants.find((v) => v.id === line.productVariantId);
-                                      if (!cur || (cur.unitsPerVariant || 1) === 1) return null;
-                                      return <div className="text-[11px] text-muted-foreground mt-1">{unitNoun(cur)}s of {cur.unitsPerVariant}</div>;
-                                    })()}
+
                                   </div>
                                 ) : selectedReceipt.status === "draft" ? (
                                   <span className="text-xs text-muted-foreground italic">Press Start to count</span>
@@ -2476,7 +2446,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                                 <TableCell>
                                   {(!line.productVariantId || !line.putawayLocationId) && (
                                     <div className="flex gap-1">
-                                      {!line.productVariantId && !variants.some((v) => v.productId === line.productId) && (
+                                      {!line.productVariantId && (
                                         <button
                                           className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs bg-amber-50 text-amber-700 border border-amber-200 hover:bg-amber-100"
                                           onClick={() => openResolve(line, 'sku')}
@@ -2501,19 +2471,14 @@ DEF-456,25,,,5.00,,Location TBD`;
                               {selectedReceipt.status !== "closed" && (
                                 <TableCell>
                                   {(selectedReceipt.status === "open" || selectedReceipt.status === "receiving") && (
-                                    line.status !== "complete" ? (
+                                    (line.status !== "complete" || !!countDrafts[line.id]) ? (
                                     <Button
                                       variant="ghost"
                                       size="sm"
                                       className="min-h-[44px]"
-                                      onClick={() => updateLineMutation.mutate({
-                                        lineId: line.id,
-                                        updates: {
-                                          receivedQty: line.expectedQty || 0,
-                                          status: "complete"
-                                        }
-                                      })}
-                                      disabled={updateLineMutation.isPending}
+                                      onClick={() => saveReceivedCount(line)}
+                                      disabled={updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || recordedReceivingFactor(line) === null || !!unitErrors[line.id]?.needsRefresh}
+                                      aria-label={"Save received count for line " + line.id}
                                       data-testid={`btn-complete-line-${line.id}`}
                                     >
                                       <Check className="h-4 w-4" />
@@ -2683,7 +2648,7 @@ DEF-456,25,,,5.00,,Location TBD`;
           <DialogHeader>
             <DialogTitle>Import from CSV</DialogTitle>
             <DialogDescription className="text-xs md:text-sm">
-              Paste CSV data with columns: sku, qty, location (optional)
+              Paste CSV data with columns: sku, qty, location (optional). Qty and damaged_qty count the selected SKU variant. unit_cost is the cost per piece, not per case.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
@@ -2754,7 +2719,7 @@ DEF-456,25,,,5.00,,Location TBD`;
       </Dialog>
 
       {/* Add Line Dialog */}
-      <Dialog open={showAddLineDialog} onOpenChange={setShowAddLineDialog}>
+      <Dialog open={showAddLineDialog} onOpenChange={(open) => { setShowAddLineDialog(open); if (!open) setAddLineError(null); }}>
         <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto p-4">
           <DialogHeader>
             <DialogTitle>Add Line</DialogTitle>
@@ -2793,7 +2758,9 @@ DEF-456,25,,,5.00,,Location TBD`;
                             productName: item.name,
                             productId: item.productId,
                             productVariantId: item.productVariantId,
+                            expectedUnitsPerVariant: item.unitsPerVariant,
                           });
+                          setAddLineError(null);
                           setSkuSearch(item.sku);
                           setShowSkuDropdown(false);
                         }}
@@ -2809,12 +2776,13 @@ DEF-456,25,,,5.00,,Location TBD`;
               {newLine.sku && (
                 <div className="text-xs text-muted-foreground">
                   Selected: {newLine.sku} - {newLine.productName}
+                  <div>{newLine.expectedUnitsPerVariant ? "Each count is one receive unit containing " + newLine.expectedUnitsPerVariant + " pieces." : "Refresh and reselect this SKU before adding a line."}</div>
                 </div>
               )}
             </div>
 
             <div className="space-y-2">
-              <Label className="text-sm">{selectedReceipt?.sourceType === "blind" ? "Quantity" : "Expected Qty"}</Label>
+              <Label className="text-sm">{selectedReceipt?.sourceType === "blind" ? "Quantity in selected receive units" : "Expected quantity in selected receive units"}</Label>
               <Input
                 className="h-11"
                 type="number"
@@ -2827,7 +2795,7 @@ DEF-456,25,,,5.00,,Location TBD`;
               />
               {selectedReceipt?.sourceType === "blind" && (
                 <div className="text-xs text-muted-foreground">
-                  For initial inventory loads, this is the quantity you're adding to inventory.
+                  For initial inventory loads, this counts the selected SKU variant. The receipt will also show its base-piece total.
                 </div>
               )}
             </div>
@@ -2849,6 +2817,10 @@ DEF-456,25,,,5.00,,Location TBD`;
               />
             </div>
 
+            {addLineError && <div role="alert" className="rounded border border-destructive/40 p-3 text-sm text-destructive">
+              {addLineError}
+              <Button variant="outline" className="mt-2" disabled={addLineMutation.isPending} onClick={() => handleSkuSearch(skuSearch)}>Refresh selected SKU</Button>
+            </div>}
             <div className="flex justify-end gap-2 pt-4">
               <Button variant="outline" className="min-h-[44px]" onClick={() => {
                 setShowAddLineDialog(false);
@@ -2861,6 +2833,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                   putawayLocationId: "",
                   productId: null,
                   productVariantId: null,
+                  expectedUnitsPerVariant: null,
                 });
               }}>
                 Cancel
@@ -2869,7 +2842,9 @@ DEF-456,25,,,5.00,,Location TBD`;
                 className="min-h-[44px]"
                 onClick={() => {
                   if (!selectedReceipt || !newLine.sku) return;
-                  const qty = parseInt(newLine.expectedQty) || 1;
+                  let qty: number;
+                  try { qty = receivingAddQuantity(newLine.expectedQty); if (newLine.productVariantId !== null) receivingSelectedFactor(newLine.expectedUnitsPerVariant); }
+                  catch (cause) { toast({ title: "Invalid quantity", description: cause instanceof Error ? cause.message : "Enter a positive whole quantity.", variant: "destructive" }); return; }
                   const isBlind = selectedReceipt.sourceType === "blind";
                   addLineMutation.mutate({
                     orderId: selectedReceipt.id,
@@ -2878,14 +2853,14 @@ DEF-456,25,,,5.00,,Location TBD`;
                       productName: newLine.productName,
                       expectedQty: qty,
                       receivedQty: isBlind ? qty : 0,
-                      status: isBlind ? "complete" : "pending",
                       putawayLocationId: newLine.putawayLocationId ? parseInt(newLine.putawayLocationId) : null,
                       productId: newLine.productId,
                       productVariantId: newLine.productVariantId,
+                      ...(newLine.productVariantId !== null ? { expectedUnitsPerVariant: newLine.expectedUnitsPerVariant } : {}),
                     },
                   });
                 }}
-                disabled={!newLine.sku || !newLine.putawayLocationId || addLineMutation.isPending}
+                disabled={!newLine.sku || !newLine.putawayLocationId || newLine.productVariantId !== null && !newLine.expectedUnitsPerVariant || addLineMutation.isPending}
                 data-testid="btn-confirm-add-line"
               >
                 <Plus className="h-4 w-4 mr-2" />
@@ -3006,12 +2981,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                       key={r.productVariantId}
                       className="w-full text-left px-3 py-2 text-sm rounded hover:bg-accent border-b last:border-0"
                       onClick={() => {
-                        updateLineMutation.mutate({
-                          lineId: resolvingLine.id,
-                          updates: { productVariantId: r.productVariantId }
-                        });
-                        setShowResolveDialog(false);
-                        toast({ title: "SKU linked", description: `${resolvingLine.sku} → ${r.sku}` });
+                        setLegacyResolveVariant(r.productVariantId);
                       }}
                     >
                       <div className="font-mono font-medium">{r.sku}</div>
@@ -3023,6 +2993,24 @@ DEF-456,25,,,5.00,,Location TBD`;
                   )}
                 </ScrollArea>
               </div>
+
+              {legacyResolveVariant !== null && (() => {
+                const candidate = variants.find((variant) => variant.id === legacyResolveVariant);
+                const result = resolveSkuResults.find((variant) => variant.productVariantId === legacyResolveVariant);
+                const label = candidate ? candidate.name + " (" + candidate.unitsPerVariant + " pieces)" : result ? result.name + (result.unitsPerVariant ? " (" + result.unitsPerVariant + " pieces)" : "") : "the selected variant";
+                const legacy = recordedReceivingFactor(resolvingLine) === null;
+                return <div className="rounded border border-amber-400/50 p-3 text-sm space-y-2">
+                  <p>{legacy ? "The count basis was not recorded. Confirm these existing counts only if the source document proves their unit. Counts will stay unchanged." : "The server will preserve expected, received and damaged piece totals, or reject a conversion that is not exact."}</p>
+                  <p>Expected {resolvingLine.expectedQty}; received {resolvingLine.receivedQty}; damaged {resolvingLine.damagedQty}.</p>
+                  <Button className="h-auto min-h-10 whitespace-normal" disabled={updateLineMutation.isPending || completeAllMutation.isPending || reloadingUnits || !!unitErrors[resolvingLine.id]?.needsRefresh} onClick={() => applyVariant(resolvingLine, legacyResolveVariant, legacy, candidate?.unitsPerVariant ?? result?.unitsPerVariant)}>
+                    {legacy ? "Confirm these counts are in " : "Apply receive variant: "}{label}
+                  </Button>
+                </div>;
+              })()}
+              {unitErrors[resolvingLine.id] && <div role="alert" className="text-sm text-destructive">
+                {unitErrors[resolvingLine.id].message}
+                {unitErrors[resolvingLine.id].needsRefresh && <Button variant="outline" className="mt-2 h-auto whitespace-normal" disabled={reloadingUnits} onClick={() => void reloadReceiptUnits(resolvingLine.id)}>Load latest line and discard count draft</Button>}
+              </div>}
 
               {/* Option 2: Create new variant from SKU pattern */}
               {(() => {
@@ -3041,7 +3029,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                         <span className="font-mono font-medium">{resolvingLine.sku?.toUpperCase()}</span>
                       </div>
                       <p className="text-xs text-muted-foreground">
-                        Creates the product (if it doesn't exist) and variant, then links it to this line.
+                        Creates the catalog product and variant only. Confirm the receive unit separately before linking this line.
                       </p>
                       <Button
                         className="w-full min-h-[44px]"
@@ -3051,7 +3039,7 @@ DEF-456,25,,,5.00,,Location TBD`;
                         {createVariantMutation.isPending ? (
                           <><span className="animate-spin mr-2">⏳</span> Creating...</>
                         ) : (
-                          <><Plus className="h-4 w-4 mr-2" /> Create & Link Variant</>
+                          <><Plus className="h-4 w-4 mr-2" /> Create catalog variant</>
                         )}
                       </Button>
                     </div>

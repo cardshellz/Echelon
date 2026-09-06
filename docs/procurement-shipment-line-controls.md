@@ -66,3 +66,7 @@ Unit and HTTP suites cover strict fields, precision/quantity limits, null cleari
 `shipment-line-commands.integration.test.ts` runs production command/service/storage code against a disposable PostgreSQL fixture built from actual schema columns/defaults and relevant foreign keys. It exercises real lock contention between competing shipments and closure, exact durable replay, partial imports, receipt/reversal evidence, and rollback after line, totals, allocation, and audit failures. The cost-command and financial-command PostgreSQL suites run separately so their schema fixtures cannot race.
 
 Browser tests run the React UI against fictional API fixtures, covering independent pieces/cartons, CSV errors/corrections, exact uncertain recovery, navigation, stale versions, and multi-line dimension progress. These tests establish behavior in controlled fixtures, not the deployed incidence or historical-data compatibility rate.
+
+## Subsequent receiving follow-up
+
+[W02a receiving unit and source integrity](procurement-receiving-unit-integrity.md) follows this baseline and corrects the partial-pack creation/conversion and exact receiving-source gaps described above. [The separate financial trace](procurement-receiving-cost-followup.md) records the remaining cost-component and propagation defects. The baseline observations in this document remain historical evidence.

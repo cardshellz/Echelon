@@ -35,11 +35,14 @@ function makeHarness(opts: {
   level?: Row | null;
   existingReversals?: Row[];
   apMatchedRows?: Row[];
+  postedReceipts?: Row[];
+  priorReversalTotals?: Row;
 }) {
   const line = {
     id: 1001,
     receiving_order_id: 100,
     received_qty: 360,
+    units_per_variant_snapshot: 1,
     reversed_qty: 0,
     product_variant_id: 11,
     purchase_order_line_id: 5001,
@@ -84,6 +87,10 @@ function makeHarness(opts: {
     : opts.level;
   const existingReversals = opts.existingReversals ?? [];
   const apMatchedRows = opts.apMatchedRows ?? [];
+  const postedReceipts = opts.postedReceipts ?? [{ receivingLineId: line.id, receivingOrderId: line.receiving_order_id,
+    purchaseOrderLineId: line.purchase_order_line_id, purchaseOrderId: poLine.purchase_order_id,
+    qtyReceived: line.received_qty * (line.units_per_variant_snapshot ?? 1) }];
+  const reads: string[] = [];
 
   // Mutation trackers
   const updates: Array<{ sqlText: string; params: any[] }> = [];
@@ -148,7 +155,18 @@ function makeHarness(opts: {
       }
     }
     const t = text.replace(/\s+/g, " ").trim();
+    if (t.startsWith("SELECT")) reads.push(t);
+    if (t.startsWith("SELECT receiving_order_id FROM procurement.receiving_lines")) return { rows: [{ receiving_order_id: line.receiving_order_id }] };
+    if (t.includes("FROM procurement.po_receipts")) return { rows: postedReceipts };
 
+    if (t.includes('AS "reversedBaseQty"') && t.includes("FROM procurement.receipt_reversals")) {
+      const initialFactor = line.units_per_variant_snapshot ?? postedReceipts[0]?.qtyReceived / line.received_qty;
+      return { rows: [opts.priorReversalTotals ?? {
+        reversedQty: line.reversed_qty + state.insertedReversals.reduce((sum, row) => sum + row.qty, 0),
+        reversedBaseQty: line.reversed_qty * initialFactor + state.insertedReversals.reduce((sum, row) => sum + row.base_units_reversed, 0),
+        invalidRows: 0,
+      }] };
+    }
     // Idempotency pre-check (order-scoped LIKE first, then exact key).
     if (t.includes("FROM procurement.receipt_reversals") && t.includes("idempotency_key LIKE")) {
       // Params: receiving_order_id, prefix-with-%.
@@ -287,7 +305,7 @@ function makeHarness(opts: {
     transaction: vi.fn(async (fn: any) => fn({ execute: vi.fn(async (query: any) => route(query)) })),
   } as any;
 
-  return { db, state, service: new ReceiptReversalService(db, inventoryCore as any) };
+  return { db, state, reads, inventoryCore, service: new ReceiptReversalService(db, inventoryCore as any) };
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -442,11 +460,12 @@ describe("ReceiptReversalService.reverseReceivingLine", () => {
     expect(state.insertedReversals[0].ap_reconciliation_reopened).toBe(1);
   });
 
-  it("multiplies by live units_per_variant (case variant reverses 360 cases = 270,000 pieces)", async () => {
+  it("uses frozen 750-piece units even when the live variant now contains 1000 pieces", async () => {
     // The rebook side of the dogfood case: variant upv=750, PO line received
     // 270,000 pieces; reversing 360 cases decrements 360 × 750 = 270,000.
     const { service, state } = makeHarness({
-      variant: { id: 11, units_per_variant: 750 },
+      line: { units_per_variant_snapshot: 750 },
+      variant: { id: 11, units_per_variant: 1000 },
       poLine: {
         id: 5001,
         purchase_order_id: 123,
@@ -617,5 +636,50 @@ describe("receipt reversal status helpers (pure)", () => {
       physicalStatus: "received",
       lines: [{ status: "received" }, { status: "open", lineType: "discount" }],
     })).toBeNull();
+  });
+});
+
+describe("Receipt reversal frozen units and source locks", () => {
+  const command = { receivingLineId: 1001, qty: 2, reason: "Recorded-unit correction", idempotencyKey: "frozen-unit-test" };
+  it("uses exact legacy PO posting units without reading today's variant", async () => {
+    const harness = makeHarness({
+      line: { units_per_variant_snapshot: null },
+      variant: { units_per_variant: 1000 },
+      poLine: { received_qty: 90000 },
+      postedReceipts: [{ receivingLineId: 1001, receivingOrderId: 100, purchaseOrderLineId: 5001, purchaseOrderId: 123, qtyReceived: 90000 }],
+    });
+    expect(await harness.service.reverseReceivingLine(command)).toMatchObject({ baseUnitsReversed: 500 });
+    expect(harness.state.poLineReceivedQty).toBe(89500);
+    expect(harness.reads.some((query) => query.includes("FROM catalog.product_variants"))).toBe(false);
+  });
+
+  it.each([
+    { line: { units_per_variant_snapshot: null }, postedReceipts: [] },
+    { postedReceipts: [] },
+    { postedReceipts: [{ receivingLineId: 1001, receivingOrderId: 100, purchaseOrderLineId: 5001, purchaseOrderId: 123, qtyReceived: 359 }] },
+    { poLine: { received_qty: 1 } },
+    { line: { reversed_qty: 1 }, priorReversalTotals: { reversedQty: 1, reversedBaseQty: 1000, invalidRows: 0 } },
+    { line: { order_po_id: 999 } },
+  ])("rejects incomplete or contradictory evidence before any compensation %j", async (options) => {
+    const harness = makeHarness(options);
+    const before = structuredClone(harness.state);
+    await expect(harness.service.reverseReceivingLine(command)).rejects.toMatchObject({
+      statusCode: 409, details: { code: "RECEIVING_UNIT_SNAPSHOT_REVIEW_REQUIRED" },
+    });
+    expect(harness.state).toEqual(before);
+    expect(harness.inventoryCore.reverseReceiptInventory).not.toHaveBeenCalled();
+  });
+
+  it("takes receipt parent then PO headers and lines before the receipt line lock", async () => {
+    const harness = makeHarness({});
+    await harness.service.reverseReceivingLine(command);
+    const parent = harness.reads.findIndex((query) => query.includes("FROM procurement.receiving_orders") && query.includes("FOR UPDATE"));
+    const po = harness.reads.findIndex((query) => query.startsWith("SELECT po.id FROM procurement.purchase_orders"));
+    const poLine = harness.reads.findIndex((query) => query.startsWith("SELECT pol.id FROM procurement.purchase_order_lines"));
+    const receiptLine = harness.reads.findIndex((query) => query.includes("FOR UPDATE OF rl"));
+    expect(parent).toBeGreaterThanOrEqual(0);
+    expect(po).toBeGreaterThan(parent);
+    expect(poLine).toBeGreaterThan(po);
+    expect(receiptLine).toBeGreaterThan(poLine);
   });
 });

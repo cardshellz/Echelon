@@ -157,6 +157,7 @@ function buildMockStorage(overrides: Partial<Record<string, any>> = {}) {
     getVendorProductById: vi.fn(),
     getPreferredVendorProduct: vi.fn().mockResolvedValue(null),
     getVendorById: vi.fn(),
+    getProductVariantsByProductId: vi.fn().mockResolvedValue([{ id: 5, productId: 50, unitsPerVariant: 1, isActive: true }]),
     getProductVariantById: vi.fn(),
     getProductById: vi.fn(),
     createReceivingOrder: vi.fn(),
@@ -408,7 +409,7 @@ describe("createReceiptFromPO — receipt idempotency", () => {
     const result = await svc.createReceiptFromPO(1, "user-1");
 
     expect(mockDb.transaction).toHaveBeenCalledOnce();
-    expect(mockDb.execute).toHaveBeenCalledTimes(2);
+    expect(mockDb.execute).toHaveBeenCalledTimes(4);
     expect((mockDb.execute as any).mock.invocationCallOrder[0]).toBeLessThan(
       (storage.createReceivingOrder as any).mock.invocationCallOrder[0],
     );
@@ -479,7 +480,7 @@ describe("createReceiptFromPO — expected-qty pack conversion (RCV-20260710-003
     });
   });
 
-  it("divides ordered pieces by the STAMPED variant's unitsPerVariant even when the PO UOM field is unset", async () => {
+  it("preserves partial-pack ordered pieces with a real piece variant when the PO pack is unset", async () => {
     // The bug: line stamps the Case-of-750 variant but expectedReceiveUnitsPerVariant
     // is null, so packSize fell back to unitsPerUom (1) → 269640 pieces shown as
     // "269640 cases" instead of ceil(269640/750) = 360.
@@ -500,19 +501,19 @@ describe("createReceiptFromPO — expected-qty pack conversion (RCV-20260710-003
         lineType: "product",
       },
     ]);
-    storage.getProductVariantById.mockImplementation(async (id: number) =>
-      id === 42 ? { id: 42, unitsPerVariant: 750 } : { id, unitsPerVariant: 1 },
-    );
+    storage.getProductVariantsByProductId.mockResolvedValue([
+      { id: 42, productId: 50, unitsPerVariant: 750, isActive: true },
+      { id: 7, productId: 50, unitsPerVariant: 1, isActive: true },
+    ]);
 
     await svc.createReceiptFromPO(1, "user-1");
 
     const lines = (storage.bulkCreateReceivingLines as any).mock.calls[0][0];
     expect(lines).toHaveLength(1);
-    expect(lines[0].productVariantId).toBe(42);
-    expect(lines[0].expectedQty).toBe(360); // ceil(269640 / 750), NOT 269640
+    expect(lines[0]).toMatchObject({ productVariantId: 7, expectedQty: 269640, unitsPerVariantSnapshot: 1 });
   });
 
-  it("falls back to the PO UOM field when the variant cannot be resolved", async () => {
+  it("rejects missing receive variants without stamping guessed packs", async () => {
     storage.getPurchaseOrderLines.mockResolvedValue([
       {
         id: 101,
@@ -529,12 +530,10 @@ describe("createReceiptFromPO — expected-qty pack conversion (RCV-20260710-003
         lineType: "product",
       },
     ]);
-    storage.getProductVariantById.mockResolvedValue(null); // unresolvable
-
-    await svc.createReceiptFromPO(1, "user-1");
-
-    const lines = (storage.bulkCreateReceivingLines as any).mock.calls[0][0];
-    expect(lines[0].expectedQty).toBe(100); // ceil(1000 / 10) via PO UOM fallback
+    storage.getProductVariantsByProductId.mockResolvedValue([]);
+    await expect(svc.createReceiptFromPO(1, "user-1")).rejects.toMatchObject({ details: { code: "RECEIVING_VARIANT_REVIEW_REQUIRED" } });
+    expect(storage.createReceivingOrder).not.toHaveBeenCalled();
+    expect(storage.bulkCreateReceivingLines).not.toHaveBeenCalled();
   });
 });
 
@@ -597,6 +596,9 @@ describe("onReceivingOrderClosed — auto-match", () => {
     // Receiving line has no purchaseOrderLineId, has productVariantId
     storage.getReceivingLineById.mockResolvedValue({
       id: 201,
+      receivedQty: 3,
+      unitsPerVariantSnapshot: 1,
+      damagedQty: 0,
       productId,
       productVariantId: 5,
     });
@@ -654,6 +656,9 @@ describe("onReceivingOrderClosed — auto-match", () => {
     storage.getPurchaseOrderLineById.mockResolvedValue(poLine);
     storage.getReceivingLineById.mockResolvedValue({
       id: 201,
+      receivedQty: 3,
+      unitsPerVariantSnapshot: 1,
+      damagedQty: 0,
       productId,
       productVariantId: 5,
     });
@@ -706,6 +711,9 @@ describe("onReceivingOrderClosed — auto-match", () => {
     storage.getPurchaseOrderLineById.mockResolvedValue(poLine);
     storage.getReceivingLineById.mockResolvedValue({
       id: 201,
+      receivedQty: 3,
+      unitsPerVariantSnapshot: 1,
+      damagedQty: 0,
       productId,
       productVariantId: 5,
     });
@@ -761,10 +769,13 @@ describe("onReceivingOrderClosed — auto-match", () => {
     storage.getPurchaseOrderLines.mockResolvedValue([poLine]);
     storage.getReceivingLineById.mockResolvedValue({
       id: 201,
+      receivedQty: 2,
+      unitsPerVariantSnapshot: 1000,
+      damagedQty: 1,
       productId,
       productVariantId: 5,
     });
-    storage.getProductVariantById.mockResolvedValue({ id: 5, productId, unitsPerVariant: 1000 });
+    storage.getProductVariantById.mockResolvedValue({ id: 5, productId, unitsPerVariant: 500 });
 
     await svc.onReceivingOrderClosed(99, [
       { receivingLineId: 201, purchaseOrderLineId: 100, receivedQty: 2, damagedQty: 1 },
@@ -859,6 +870,9 @@ describe("onReceivingOrderClosed — auto-match", () => {
     storage.getPurchaseOrderLineById.mockResolvedValue(poLine);
     storage.getReceivingLineById.mockResolvedValue({
       id: 201,
+      receivedQty: 3,
+      unitsPerVariantSnapshot: 1,
+      damagedQty: 0,
       productId,
       productVariantId: 5,
     });

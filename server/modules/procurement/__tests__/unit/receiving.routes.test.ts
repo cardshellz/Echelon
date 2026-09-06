@@ -130,6 +130,41 @@ describe("receiving routes", () => {
     expect(replenishment.checkReplenForLocation).toHaveBeenCalledWith(55);
   });
 
+  it("forwards the reviewed catalog factor when creating or confirming a receive unit", async () => {
+    const receiving = {
+      addLine: vi.fn().mockResolvedValue({ id: 20 }),
+      updateLine: vi.fn().mockResolvedValue({ id: 7 }),
+    };
+    server = await startServer(buildApp({ receiving }));
+    const create = await requestJson(server.url, "POST", "/api/receiving/20/lines", {
+      productVariantId: 100, productId: 5, expectedUnitsPerVariant: 250,
+      expectedQty: 4, receivedQty: 0,
+    });
+    const confirmation = { productVariantId: 100, expectedUnitsPerVariant: 250,
+      confirmLegacyUnit: true, expectedUnitVersion: "a".repeat(64) };
+    const confirm = await requestJson(server.url, "PATCH", "/api/receiving/lines/7", confirmation);
+    expect(create.status).toBe(201);
+    expect(confirm.status).toBe(200);
+    expect(receiving.addLine).toHaveBeenCalledWith(20, expect.objectContaining({
+      productVariantId: 100, expectedUnitsPerVariant: 250, receivedQty: 0,
+    }));
+    expect(receiving.updateLine).toHaveBeenCalledWith(7, confirmation, "test-user");
+  });
+
+  it("forwards the full bulk acceptance version set and preserves actionable conflict details", async () => {
+    const receiving = { completeAllLines: vi.fn().mockRejectedValue({
+      statusCode: 409, message: "Refresh the receipt.",
+      details: { code: "RECEIVING_UNIT_VERSION_CONFLICT", receivingLineId: 7 },
+    }) };
+    server = await startServer(buildApp({ receiving }));
+    const input = { expectedUnitVersions: [{ lineId: 7, unitVersion: "b".repeat(64) }] };
+    const response = await requestJson(server.url, "POST", "/api/receiving/20/complete-all", input);
+    expect(receiving.completeAllLines).toHaveBeenCalledWith(20, input, "test-user");
+    expect(response).toEqual({ status: 409, body: {
+      error: "Refresh the receipt.", code: "RECEIVING_UNIT_VERSION_CONFLICT", receivingLineId: 7,
+    } });
+  });
+
   it("delegates order and line writes to the receiving command service", async () => {
     const receiving = {
       createOrder: vi.fn().mockResolvedValue({ id: 19, receiptNumber: "RCV-19" }),
@@ -183,7 +218,7 @@ describe("receiving routes", () => {
       unitCost: 1,
       unitCostMills: 125,
     }));
-    expect(receiving.updateLine).toHaveBeenCalledWith(7, { receivedQty: 3 });
+    expect(receiving.updateLine).toHaveBeenCalledWith(7, { receivedQty: 3 }, "test-user");
     expect(receiving.deleteLine).toHaveBeenCalledWith(7);
     expect(receiving.deleteOrder).toHaveBeenCalledWith(20);
   });
