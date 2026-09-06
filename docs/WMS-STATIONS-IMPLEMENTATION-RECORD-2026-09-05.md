@@ -31,7 +31,7 @@ The main checkout's unrelated catalog work was preserved. The clean-worktree wor
 | Rejects inactive/unknown/3PL warehouse configurations | `server/modules/warehouse/work/application/work-configuration.service.ts`, private `warehouse()`, accepts active `operations` and `bulk_storage` warehouses only. External 3PL fulfillment is not represented as an internal workstation. |
 | Makes saves retry-safe and rejects stale editors | `WorkConfigurationService.save()` at line 55 canonicalizes the request, locks the warehouse, rechecks Identity, and returns a stored result only for the same command, payload, and actor. A new command must match the current revision. Access changes additionally require `warehouse_work:manage_access`. |
 | Saves revision, station projection, and access projection atomically | `server/modules/warehouse/work/infrastructure/work-configuration.repository.ts:27`, `transaction()`, and line 92, `persist()`. A failure rolls back all three writes. Station identity collisions across warehouses cannot overwrite the existing station. |
-| Retains station identity and complete before/after audit evidence | `validateConfigurationReferences()` at `server/modules/warehouse/work/domain/work-configuration.ts:42` requires existing stations to be disabled rather than deleted. `migrations/0654_warehouse_work_configuration.sql:2` stores actor, timestamp, reason, command, before/after configuration; its trigger at line 48 rejects UPDATE/DELETE/TRUNCATE of history. |
+| Retains station identity and complete before/after audit evidence | `validateConfigurationReferences()` at `server/modules/warehouse/work/domain/work-configuration.ts:42` requires existing stations to be disabled rather than deleted. `migrations/0655_warehouse_work_configuration.sql:2` stores actor, timestamp, reason, command, before/after configuration; its trigger at line 48 rejects UPDATE/DELETE/TRUNCATE of history. |
 | Protects warehouse/location association | Migration triggers at lines 67 and 80 reject foreign station locations and moving a referenced location into another warehouse. FKs prevent deleting referenced warehouse/location/user identities. Disabling a station does not erase these historical relationships. |
 | Does not let a lost HTTP response create a second logical save | `client/src/pages/warehouse-work/work-configuration-draft.ts:6`, `prepareWorkSaveAttempt`, retains the command ID for an identical draft. `ConfigurationEditor` retains unsaved edits when the server revision changes and requires explicit reload/review for conflicts. |
 | Leaves live execution unconnected | `workRevisionSchema` fixes `executionStatus` to `not_connected`; `previewWorkContext()` always returns `executionAllowed: false`. `registerWorkConfigurationRoutes()` exposes setup, save, history, and read-only context preview only. No task, build, inventory, claim, label, or fulfillment command is called. |
@@ -45,7 +45,7 @@ The main checkout's unrelated catalog work was preserved. The clean-worktree wor
 - `warehouse.work_stations`: stable UUID identities and current draft projection; unique code within a warehouse; location FK; enabled flag; multiple capabilities.
 - `warehouse.work_access_scopes`: current employee scope projection keyed by warehouse and user; does not grant a role capability by itself.
 
-The migration is additive. It does not seed stations, change location types, move materials, change stock, enable canonical inventory authority, or publish quantities. Migration prefix 0654 was checked against refreshed main; recheck it before publishing if main advances again.
+The migration is additive. It does not seed stations, change location types, move materials, change stock, enable canonical inventory authority, or publish quantities. Its current prefix is 0655, verified free on refreshed main at `6390f7cf542be1932249613e1d35c28d5b1bdbb7`. The original 0654 prefix was taken by the subsequently merged manual-transformation-review work; recheck prefix availability when main advances again.
 
 Role definitions are added to the existing RBAC permission catalogue. Existing `SYSTEM_ROLES.Administrator` includes that catalogue, so the normal application RBAC seed will make these permissions available to administrators on deployment. This is not a new shared operator account, not an automatic assignment of employees to stations, and not an activation of live work. Other roles must explicitly receive the relevant abilities.
 
@@ -81,6 +81,14 @@ The application does not hold this transaction open for any external API. It has
 | Rollback itself fails | Both failures retained in AggregateError; broken client discarded. |
 
 ## Verification
+
+### 2026-09-06 migration collision correction
+
+PR #1379 remained open, and its remote head `657e7314` already included main at `6390f7cf`. The local worktree was fast-forwarded to preserve that merge. The prefix guard reproduced the reported collision between the manual-review and warehouse-work migrations. Only the warehouse-work migration was renamed to `0655_warehouse_work_configuration.sql`; its integration loader and this record were updated. Old and new SQL Git blob hashes are identical (`368eb3b01aa0827613fefceb9c3788f717a588f4`), so there is no schema or runtime behavior change in this correction.
+
+After the rename, all 50 focused checks passed, including the collision guard and writer-ratchet. The seven PostgreSQL tests were skipped locally because the disposable database is still unavailable. GitHub reported PostgreSQL hardening success on the prior PR head; verification of the renamed loader is left to the new CI run. No production migration or data change was performed.
+
+### Initial implementation verification
 
 Confirmed locally:
 

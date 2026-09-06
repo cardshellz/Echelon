@@ -49,7 +49,7 @@ describeDatabase("warehouse work PostgreSQL guarantees", () => {
       INSERT INTO identity.auth_permissions(resource,action) VALUES ('warehouse_work','view'),('warehouse_work','configure'),('warehouse_work','manage_access'),('warehouse_work','assembly');
       INSERT INTO identity.auth_role_permissions(role_id,permission_id) SELECT 1,id FROM identity.auth_permissions;
     `);
-    await pool.query(readFileSync(resolve(process.cwd(), "migrations/0654_warehouse_work_configuration.sql"), "utf8"));
+    await pool.query(readFileSync(resolve(process.cwd(), "migrations/0655_warehouse_work_configuration.sql"), "utf8"));
     service = new WorkConfigurationService(new WorkConfigurationRepository(pool), () => new Date(TIME));
   });
   afterAll(async () => { if (pool) await pool.end(); });
