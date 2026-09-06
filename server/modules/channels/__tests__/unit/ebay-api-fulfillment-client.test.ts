@@ -129,6 +129,203 @@ describe("EbayApiClient.createShippingFulfillment", () => {
     expect((fetchMock.mock.calls[0][1] as RequestInit).method).toBe("GET");
   });
 
+  it("treats eBay's quantity-less read shape as idempotent when the line ids match", async () => {
+    // eBay's GET .../shipping_fulfillment returns each line as { lineItemId }
+    // with NO quantity key, even though the POST body requires one. Verified
+    // 2026-08-29 against production: 160 of 160 line items across the 115
+    // parked pushes had no quantity. Treating that omission as an unreadable
+    // package parked every eBay push ever attempted in `review`.
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      Response.json({
+        total: 1,
+        fulfillments: [
+          {
+            fulfillmentId: "track-1",
+            shipmentTrackingNumber: "track-1",
+            shippingCarrierCode: "USPS",
+            lineItems: [{ lineItemId: "line-1" }],
+          },
+        ],
+      }),
+    );
+
+    const result = await makeClient().createShippingFulfillment(
+      "22-14563-95067",
+      {
+        lineItems: [{ lineItemId: "line-1", quantity: 2 }],
+        shippedDate: "2026-05-02T18:49:25.469Z",
+        shippingCarrierCode: "USPS",
+        trackingNumber: "track-1",
+      },
+    );
+
+    expect(result).toEqual({ fulfillmentId: "track-1" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect((fetchMock.mock.calls[0][1] as RequestInit).method).toBe("GET");
+  });
+
+  it("matches a multi-line quantity-less read only when every line id is present", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      Response.json({
+        total: 1,
+        fulfillments: [
+          {
+            fulfillmentId: "track-1",
+            shipmentTrackingNumber: "track-1",
+            lineItems: [{ lineItemId: "line-2" }, { lineItemId: "line-1" }],
+          },
+        ],
+      }),
+    );
+
+    const result = await makeClient().createShippingFulfillment(
+      "22-14563-95067",
+      {
+        lineItems: [
+          { lineItemId: "line-1", quantity: 2 },
+          { lineItemId: "line-2", quantity: 4 },
+        ],
+        shippedDate: "2026-05-02T18:49:25.469Z",
+        shippingCarrierCode: "USPS",
+        trackingNumber: "track-1",
+      },
+    );
+
+    expect(result).toEqual({ fulfillmentId: "track-1" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("still refuses when eBay's package covers a different set of line ids", async () => {
+    // The guard's real job. Same tracking, but eBay's fulfillment is missing a
+    // line we intended to ship, so this is NOT the same physical package.
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      Response.json({
+        total: 1,
+        fulfillments: [
+          {
+            fulfillmentId: "track-1",
+            shipmentTrackingNumber: "track-1",
+            lineItems: [{ lineItemId: "line-1" }],
+          },
+        ],
+      }),
+    );
+
+    await expect(
+      makeClient().createShippingFulfillment("22-14563-95067", {
+        lineItems: [
+          { lineItemId: "line-1", quantity: 2 },
+          { lineItemId: "line-2", quantity: 1 },
+        ],
+        shippedDate: "2026-05-02T18:49:25.469Z",
+        shippingCarrierCode: "USPS",
+        trackingNumber: "track-1",
+      }),
+    ).rejects.toMatchObject({
+      code: "ebay_fulfillment_idempotency_conflict",
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("still refuses when eBay DOES report a quantity and it disagrees with ours", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      Response.json({
+        total: 1,
+        fulfillments: [
+          {
+            fulfillmentId: "track-1",
+            shipmentTrackingNumber: "track-1",
+            lineItems: [{ lineItemId: "line-1", quantity: 1 }],
+          },
+        ],
+      }),
+    );
+
+    await expect(
+      makeClient().createShippingFulfillment("22-14563-95067", {
+        lineItems: [{ lineItemId: "line-1", quantity: 2 }],
+        shippedDate: "2026-05-02T18:49:25.469Z",
+        shippingCarrierCode: "USPS",
+        trackingNumber: "track-1",
+      }),
+    ).rejects.toMatchObject({
+      code: "ebay_fulfillment_idempotency_conflict",
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("still refuses when eBay reports a line with no usable line item id", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+      Response.json({
+        total: 1,
+        fulfillments: [
+          {
+            fulfillmentId: "track-1",
+            shipmentTrackingNumber: "track-1",
+            lineItems: [{ lineItemId: "   " }],
+          },
+        ],
+      }),
+    );
+
+    await expect(
+      makeClient().createShippingFulfillment("22-14563-95067", {
+        lineItems: [{ lineItemId: "line-1", quantity: 2 }],
+        shippedDate: "2026-05-02T18:49:25.469Z",
+        shippingCarrierCode: "USPS",
+        trackingNumber: "track-1",
+      }),
+    ).rejects.toMatchObject({
+      code: "ebay_fulfillment_idempotency_conflict",
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("verifies a POSTed fulfillment against eBay's quantity-less read shape", async () => {
+    // The post-write verification read goes through the same matcher, so the
+    // asymmetry broke confirmation too, not just the preflight.
+    const fetchMock = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(Response.json({ total: 0, fulfillments: [] }))
+      .mockResolvedValueOnce(
+        new Response("", {
+          status: 201,
+          headers: {
+            Location:
+              "https://api.ebay.com/sell/fulfillment/v1/order/22-14563-95067/shipping_fulfillment/track-1",
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({
+          total: 1,
+          fulfillments: [
+            {
+              fulfillmentId: "track-1",
+              shipmentTrackingNumber: "track-1",
+              lineItems: [{ lineItemId: "line-1" }],
+            },
+          ],
+        }),
+      );
+
+    const result = await makeClient().createShippingFulfillment(
+      "22-14563-95067",
+      {
+        lineItems: [{ lineItemId: "line-1", quantity: 2 }],
+        shippedDate: "2026-05-02T18:49:25.469Z",
+        shippingCarrierCode: "USPS",
+        trackingNumber: "track-1",
+      },
+    );
+
+    expect(result.fulfillmentId).toBe("track-1");
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
   it("does not POST when the idempotency preflight cannot read eBay fulfillments", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
       new Response("upstream unavailable", { status: 503 }),
