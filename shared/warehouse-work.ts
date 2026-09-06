@@ -25,6 +25,11 @@ export const workStationSchema = z.object({
   locationId: warehouseIdSchema,
   capabilities: capabilitiesSchema,
   enabled: z.boolean(),
+  assemblyBindings: z.object({
+    materialLocationIds: z.array(warehouseIdSchema).min(1).max(500)
+      .refine((ids) => new Set(ids).size === ids.length, "Material locations must be unique"),
+    outputLocationId: warehouseIdSchema,
+  }).strict().optional(),
 }).strict();
 export type WorkStation = z.infer<typeof workStationSchema>;
 
@@ -96,8 +101,9 @@ export const workRevisionSchema = z.object({
   warehouseId: warehouseIdSchema,
   revision: z.number().int().nonnegative(),
   configuration: workConfigurationSchema,
-  // No route or command can activate execution in this foundation package.
-  executionStatus: z.literal("not_connected"),
+  // Saving configuration starts no jobs. Explicit handoffs require canonical
+  // authority, a reviewed route revision, and current employee permissions.
+  executionStatus: z.literal("explicit_handoff_only"),
   savedAt: z.string().datetime().nullable(),
   savedBy: z.string().nullable(),
   reason: z.string().nullable(),

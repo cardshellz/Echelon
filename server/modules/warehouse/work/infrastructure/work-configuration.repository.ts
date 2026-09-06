@@ -15,14 +15,14 @@ interface RevisionRow {
 function toRevision(row: RevisionRow): WorkRevision {
   const result = workRevisionSchema.safeParse({
     warehouseId: row.warehouse_id, revision: row.revision, configuration: row.configuration,
-    executionStatus: "not_connected", savedAt: row.saved_at.toISOString(), savedBy: row.actor_id, reason: row.reason,
+    executionStatus: "explicit_handoff_only", savedAt: row.saved_at.toISOString(), savedBy: row.actor_id, reason: row.reason,
   });
   if (!result.success) throw new Error("Stored warehouse work revision violates its contract");
   return result.data;
 }
 
 export class WorkConfigurationRepository {
-  constructor(private readonly pool: Pool) {}
+  constructor(private readonly pool: Pick<Pool, "connect">) {}
 
   async transaction<T>(operation: (client: PoolClient) => Promise<T>): Promise<T> {
     const client = await this.pool.connect();
@@ -60,13 +60,21 @@ export class WorkConfigurationRepository {
     return result.rows.map((row) => ({ id: row.id, code: row.code, zone: row.zone, active: row.is_active === 1 }));
   }
 
+  async locationsByIds(client: PoolClient, warehouseId: number, locationIds: readonly number[]): Promise<WorkLocation[]> {
+    const result = await client.query<{ id: number; code: string; zone: string | null; is_active: number }>(`
+      SELECT id, code, zone, is_active FROM warehouse.warehouse_locations
+      WHERE warehouse_id = $1 AND id = ANY($2::integer[]) ORDER BY id FOR SHARE
+    `, [warehouseId, [...new Set(locationIds)].sort((left, right) => left - right)]);
+    return result.rows.map((row) => ({ id: row.id, code: row.code, zone: row.zone, active: row.is_active === 1 }));
+  }
+
   async current(client: PoolClient, warehouseId: number): Promise<WorkRevision> {
     const result = await client.query<RevisionRow>(`
       SELECT * FROM warehouse.work_configuration_revisions WHERE warehouse_id = $1 ORDER BY revision DESC LIMIT 1
     `, [warehouseId]);
     return result.rows[0] ? toRevision(result.rows[0]) : {
       warehouseId, revision: 0, configuration: emptyWorkConfiguration(),
-      executionStatus: "not_connected", savedAt: null, savedBy: null, reason: null,
+      executionStatus: "explicit_handoff_only", savedAt: null, savedBy: null, reason: null,
     };
   }
 

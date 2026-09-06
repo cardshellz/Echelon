@@ -6,7 +6,7 @@ import { WorkConfigurationRepository } from "../../work/infrastructure/work-conf
 
 const TIME = "2026-09-05T12:00:00.000Z";
 const client = {} as PoolClient;
-const initial = (): WorkRevision => ({ warehouseId: 1, revision: 0, configuration: emptyWorkConfiguration(), executionStatus: "not_connected", savedAt: null, savedBy: null, reason: null });
+const initial = (): WorkRevision => ({ warehouseId: 1, revision: 0, configuration: emptyWorkConfiguration(), executionStatus: "explicit_handoff_only", savedAt: null, savedBy: null, reason: null });
 const command = (): SaveWorkConfiguration => ({ expectedRevision: 0, commandId: "00000000-0000-4000-8000-000000000001", reason: "Small team setup", configuration: emptyWorkConfiguration() });
 function fixture() {
   const repo = new WorkConfigurationRepository({} as Pool);
@@ -68,7 +68,7 @@ describe("warehouse work application commands", () => {
   });
   it("never writes on setup/history/context-preview reads", async () => {
     const f = fixture(); const setup = await f.service.setup("admin", 1);
-    expect(setup.revision.executionStatus).toBe("not_connected");
+    expect(setup.revision.executionStatus).toBe("explicit_handoff_only");
     await f.service.history("admin", 1, 100);
     expect(await f.service.preview("admin", 1, { capability: "picking", stationId: null, locationId: 1 })).toMatchObject({ executionAllowed: false, eligible: false });
     expect(f.persist).not.toHaveBeenCalled(); expect(f.clock).not.toHaveBeenCalled();

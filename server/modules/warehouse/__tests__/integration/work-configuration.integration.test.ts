@@ -73,7 +73,7 @@ describeDatabase("warehouse work PostgreSQL guarantees", () => {
   it("persists all projections and immutable who/what/before/after evidence", async () => {
     const id = await warehouse(); const request = command(id);
     const saved = await service.save("admin", id, request);
-    expect(saved).toMatchObject({ revision: 1, executionStatus: "not_connected", savedAt: TIME, savedBy: "admin" });
+    expect(saved).toMatchObject({ revision: 1, executionStatus: "explicit_handoff_only", savedAt: TIME, savedBy: "admin" });
     const evidence = await pool.query("SELECT before_configuration, configuration, actor_id FROM warehouse.work_configuration_revisions WHERE warehouse_id=$1", [id]);
     expect(evidence.rows[0].before_configuration).toEqual(emptyWorkConfiguration());
     expect(evidence.rows[0].configuration).toEqual(saved.configuration);

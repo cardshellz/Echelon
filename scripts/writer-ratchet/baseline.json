@@ -1011,6 +1011,12 @@
   "warehouse.work_stations": [
     "modules/warehouse"
   ],
+  "warehouse.work_items": [
+    "modules/warehouse"
+  ],
+  "warehouse.work_item_events": [
+    "modules/warehouse"
+  ],
   "wms.allocation_exceptions": [
     "modules/orders"
   ],

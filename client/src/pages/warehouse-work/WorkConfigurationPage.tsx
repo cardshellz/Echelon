@@ -72,7 +72,7 @@ export function ConfigurationEditor({ setup, url }: { setup: WorkSetup; url: str
     },
     onSuccess: (revision) => {
       setBase(revision); setConfiguration(revision.configuration); setReason(""); retry.current = null;
-      setNotice(`Draft revision ${revision.revision} saved. Live warehouse workflows are unchanged.`);
+      setNotice(`Revision ${revision.revision} saved. No work was started and no inventory was posted. New handoffs use the reviewed route; employee scope changes apply immediately.`);
       void queryClient.invalidateQueries({ queryKey: [url] });
     },
   });
@@ -80,7 +80,7 @@ export function ConfigurationEditor({ setup, url }: { setup: WorkSetup; url: str
     mutationFn: async () => workSetupSchema.parse(await request("GET", url)),
     onSuccess: (fresh) => {
       queryClient.setQueryData([url], fresh); setBase(fresh.revision); setConfiguration(fresh.revision.configuration);
-      setReason(""); retry.current = null; setNotice("Reloaded the saved draft."); save.reset(); setLocalError(null);
+      setReason(""); retry.current = null; setNotice("Reloaded the saved setup."); save.reset(); setLocalError(null);
     },
   });
   const dirty = JSON.stringify(configuration) !== JSON.stringify(base.configuration);
@@ -90,9 +90,9 @@ export function ConfigurationEditor({ setup, url }: { setup: WorkSetup; url: str
 
   return <div className="space-y-6">
     <div className="rounded-md border border-amber-400 bg-amber-50 p-4 text-sm text-amber-950" role="status">
-      <strong>Draft setup — live execution not connected.</strong> You can prepare stations, workflows, and employee scopes here.
-      Saving does not alter ATP, inventory, current roles, picking, replenishment posting, or shipping.
-      Physical completion and real handoffs will remain required when execution is connected.
+      <strong>Explicit assembly handoffs only — gun and packing integration is not connected yet.</strong>
+      Saving does not start jobs or post inventory. Assembly backend commands require a reviewed saved route and current employee permissions.
+      Scope changes apply to existing work; route/profile changes apply to new jobs. Other warehouse workflows are unchanged.
     </div>
     {setup.revision.revision > base.revision && <p role="alert" className="text-amber-700">A newer revision is available. Reload and review it before saving; your unsaved edits have been preserved.</p>}
     <fieldset disabled={disabled} className="space-y-6">
@@ -128,7 +128,31 @@ export function ConfigurationEditor({ setup, url }: { setup: WorkSetup; url: str
               </select></label>
             </div>
             <Capabilities value={station.capabilities} onChange={(capabilities) => update({ capabilities })} />
-            <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={station.enabled} onChange={(event) => update({ enabled: event.target.checked })} />Enabled in this draft</label>
+            {station.capabilities.includes("assembly") && <div className="space-y-3 rounded border p-3">
+              <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={!!station.assemblyBindings}
+                onChange={(event) => update({ assemblyBindings: event.target.checked ? { materialLocationIds: [], outputLocationId: 0 } : undefined })} />
+                Define assembly material and output locations
+              </label>
+              <p className="text-sm text-muted-foreground">These are existing inventory locations serving the bench, not new stations. Handoff never transfers stock. The canonical claim must already use these locations.</p>
+              {station.assemblyBindings && <div className="grid gap-3 md:grid-cols-2">
+                <fieldset className="max-h-48 space-y-1 overflow-y-auto"><legend className="text-sm font-medium">Materials at this station</legend>
+                  {setup.locations.map((location) => <label key={location.id} className="flex items-center gap-2 text-sm">
+                    <input type="checkbox" disabled={!location.active} checked={station.assemblyBindings!.materialLocationIds.includes(location.id)} onChange={(event) => update({ assemblyBindings: {
+                      ...station.assemblyBindings!, materialLocationIds: event.target.checked
+                        ? [...station.assemblyBindings!.materialLocationIds, location.id]
+                        : station.assemblyBindings!.materialLocationIds.filter((id) => id !== location.id),
+                    } })} />{location.code}{location.active ? "" : " (inactive)"}
+                  </label>)}
+                </fieldset>
+                <label className="text-sm">Finished output location<select className={selectClass} value={station.assemblyBindings.outputLocationId || ""} onChange={(event) => update({ assemblyBindings: {
+                  ...station.assemblyBindings!, outputLocationId: Number(event.target.value),
+                } })}>
+                  <option value="">Select output location</option>
+                  {setup.locations.map((location) => <option key={location.id} value={location.id} disabled={!location.active}>{location.code}{location.active ? "" : " (inactive)"}</option>)}
+                </select></label>
+              </div>}
+            </div>}
+            <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={station.enabled} onChange={(event) => update({ enabled: event.target.checked })} />Enabled for new handoffs</label>
             {!base.configuration.stations.some((row) => row.id === station.id) && <Button type="button" variant="outline" onClick={() => {
               if (configuration.access.some((access) => access.scope.kind === "stations" && access.scope.stationIds.includes(station.id))) {
                 setLocalError("Remove this station from employee scopes before removing it."); return;
@@ -175,7 +199,7 @@ export function ConfigurationEditor({ setup, url }: { setup: WorkSetup; url: str
       {(localError || save.error || reload.error) && <p role="alert" className="text-sm text-destructive">{localError ?? (save.error instanceof z.ZodError ? save.error.issues.map((issue) => issue.message).join("; ") : save.error?.message) ?? reload.error?.message}</p>}
       {notice && <p role="status" className="text-sm">{notice}</p>}
       <div className="flex flex-wrap gap-2">
-        <Button type="button" disabled={disabled || !dirty || reason.trim().length < 5} onClick={() => { setLocalError(null); save.mutate(); }}>{save.isPending ? "Saving…" : "Save draft setup"}</Button>
+        <Button type="button" disabled={disabled || !dirty || reason.trim().length < 5} onClick={() => { setLocalError(null); save.mutate(); }}>{save.isPending ? "Saving…" : "Save setup"}</Button>
         <Button type="button" variant="outline" disabled={save.isPending || reload.isPending} onClick={() => {
           if (!dirty || window.confirm("Discard your unsaved edits and reload the saved setup?")) reload.mutate();
         }}>Reload saved setup</Button>

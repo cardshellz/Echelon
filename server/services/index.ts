@@ -128,6 +128,10 @@ import { InventoryPublicationTransportRegistry } from "../modules/inventory-plan
 import { createEbayDropshipInventoryPublicationTransportAdapterFromEnv } from "../modules/dropship/infrastructure/dropship-ebay-inventory-publication.adapter";
 import { InventoryAvailabilityClaimService } from "../modules/inventory-planning/application/inventory-availability-claim.service";
 import { PostgresInventoryAvailabilityClaimRepository } from "../modules/inventory-planning/infrastructure/inventory-availability-claim.repository";
+import { AssemblyWorkOwner } from "../modules/warehouse/work/application/assembly-work-owner";
+import { AssemblyWorkService } from "../modules/warehouse/work/application/assembly-work.service";
+import { AssemblyWorkRepository } from "../modules/warehouse/work/infrastructure/assembly-work.repository";
+import { WorkConfigurationRepository } from "../modules/warehouse/work/infrastructure/work-configuration.repository";
 import { PostgresCanonicalClaimInventoryRepository } from "../modules/inventory/infrastructure/canonical-claim-inventory.repository";
 import { PostgresCanonicalClaimBuildRepository } from "../modules/inventory/infrastructure/canonical-claim-build.repository";
 import { PostgresCanonicalClaimPickerObservationReviewRepository } from "../modules/orders/canonical-claim-picker-observation-review.repository";
@@ -153,6 +157,7 @@ export function createServices(
   const canonicalClaimInventory = new PostgresCanonicalClaimInventoryRepository();
   const canonicalClaimBuild = new PostgresCanonicalClaimBuildRepository(canonicalClaimInventory);
   const canonicalClaimObservationReview = new PostgresCanonicalClaimPickerObservationReviewRepository();
+  const assemblyWorkOwner = new AssemblyWorkOwner(new WorkConfigurationRepository(databasePool), new AssemblyWorkRepository());
   const inventoryAvailabilityClaims = new InventoryAvailabilityClaimService(
     new PostgresInventoryAvailabilityClaimRepository(
       canonicalClaimInventory,
@@ -160,10 +165,12 @@ export function createServices(
       systemCanonicalClaimClock,
       canonicalClaimBuild,
       canonicalClaimObservationReview,
+      assemblyWorkOwner,
     ),
   );
 
   // Channel sync depends on ATP and must precede reservation wiring.
+  const assemblyWork = new AssemblyWorkService(assemblyWorkOwner, systemCanonicalClaimClock, inventoryAvailabilityClaims);
   const channelSync = createChannelSyncService(db, atp);
 
   // Build completion calls back from inside the inventory-posting transaction.
@@ -560,6 +567,7 @@ export function createServices(
     inventoryPublicationOutbox,
     inventoryPublicationReadback,
     inventoryAvailabilityClaims,
+    assemblyWork,
     oms,
     fulfillmentPush,
     channelFulfillmentAuthority,
