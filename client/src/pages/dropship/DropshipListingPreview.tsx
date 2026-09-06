@@ -11,10 +11,22 @@ import { formatCents, formatStatus, type DropshipEbayListingPolicyOverrideRespon
   type DropshipListingPreviewResult, type DropshipListingPreviewRow } from "@/lib/dropship-ops-surface";
 import { formatListingPreviewIssue, listingPreviewStatusTone, pageListingPreviews, safeListingImageUrl } from "@/lib/dropship-listing-preview";
 import { DropshipListingShippingEstimate } from "./DropshipListingShippingEstimate";
+import { DropshipListingPriceEditor } from "./DropshipListingPriceEditor";
 
 type PolicyOptions = DropshipEbayListingPolicyOverrideResponse["options"];
 
-export function DropshipListingPreview({ preview }: { preview: DropshipListingPreviewResult }) {
+export interface ListingPriceSaveCallbacks {
+  disabled?: boolean;
+  onSaveStarted: () => void;
+  onSaveSettled: () => void;
+  onSaved: () => Promise<void>;
+}
+
+export function DropshipListingPreview({ preview, priceSaveCallbacks, stale = false }: {
+  preview: DropshipListingPreviewResult;
+  priceSaveCallbacks?: ListingPriceSaveCallbacks;
+  stale?: boolean;
+}) {
   const queryClient = useQueryClient();
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
@@ -26,7 +38,7 @@ export function DropshipListingPreview({ preview }: { preview: DropshipListingPr
     ebayListingPolicyQueryKey(preview.storeConnectionId))?.options;
   return <div className="mt-4 space-y-3">
     <div className="flex flex-wrap items-center justify-between gap-3">
-      <p className="text-xs text-zinc-500">Product costs are for one sellable pack. Open a preview to inspect images and estimate shipping.</p>
+      <p className="text-xs text-zinc-500">Product costs are for one sellable pack. Open a preview to edit your listing price, inspect images, and estimate shipping.</p>
       {preview.rows.length > 1 && <div className="relative w-full sm:w-72">
         <Search aria-hidden="true" className="absolute left-3 top-3 h-4 w-4 text-zinc-400" />
         <Input aria-label="Search listing previews" placeholder="Search listing, variant, or SKU" className="pl-9" value={search}
@@ -49,7 +61,13 @@ export function DropshipListingPreview({ preview }: { preview: DropshipListingPr
           <SheetTitle>Listing preview</SheetTitle>
           <SheetDescription>Review what will be sent and your Card Shellz costs. This does not publish a listing.</SheetDescription>
         </SheetHeader>
+        {stale && <div role="status" className="mb-4 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+          This preview needs refreshing. Queueing is disabled until a fresh preview is generated.
+        </div>}
         <ListingPreviewDetailsContent row={activeRow} generatedAt={preview.generatedAt} policyOptions={policyOptions}
+          priceEditor={priceSaveCallbacks && <DropshipListingPriceEditor
+            storeConnectionId={preview.storeConnectionId} productVariantId={activeRow.productVariantId}
+            {...priceSaveCallbacks} />}
           shippingEstimate={<DropshipListingShippingEstimate key={`${preview.storeConnectionId}:${activeRow.productVariantId}:${preview.generatedAt}`}
             storeConnectionId={preview.storeConnectionId} productVariantId={activeRow.productVariantId}
             variantName={activeRow.presentation?.variantName ?? activeRow.sku ?? "sellable pack"} />} />
@@ -87,8 +105,8 @@ export function ListingPreviewTable({ rows, onOpen }: {
   </Table>;
 }
 
-export function ListingPreviewDetailsContent({ row, generatedAt, shippingEstimate, policyOptions }: {
-  row: DropshipListingPreviewRow; generatedAt: string; shippingEstimate?: ReactNode; policyOptions?: PolicyOptions;
+export function ListingPreviewDetailsContent({ row, generatedAt, shippingEstimate, policyOptions, priceEditor }: {
+  row: DropshipListingPreviewRow; generatedAt: string; shippingEstimate?: ReactNode; policyOptions?: PolicyOptions; priceEditor?: ReactNode;
 }) {
   const content = row.presentation;
   const economics = row.economics;
@@ -106,7 +124,7 @@ export function ListingPreviewDetailsContent({ row, generatedAt, shippingEstimat
       <h4 className="font-semibold">Your product costs</h4>
       <div className="mt-3 grid grid-cols-2 gap-4 sm:grid-cols-3">
         <MoneyDetail label="Your product cost" cents={economics?.vendorProductCostCents} />
-        <MoneyDetail label="Your listing price" cents={row.priceCents} />
+        <MoneyDetail label={priceEditor ? "Preview listing price" : "Your listing price"} cents={row.priceCents} />
         <MoneyDetail label="Catalog reference retail" cents={economics?.referenceRetailPriceCents} />
       </div>
       <p className="mt-3 text-xs text-zinc-600">Per sellable pack, before Card Shellz shipping. Marketplace fees are not included.</p>
@@ -114,6 +132,7 @@ export function ListingPreviewDetailsContent({ row, generatedAt, shippingEstimat
       <p className="mt-1 text-xs text-zinc-500">These are current reference costs, not a locked order quote. Catalog reference retail is not a suggested price.</p>
       <IssueList issues={economics?.issues ?? []} />
     </section>
+    {priceEditor}
     {shippingEstimate}
     <section aria-label="Listing details"><h4 className="mb-3 font-semibold">Listing details</h4>
       <dl className="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">

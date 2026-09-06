@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -62,7 +62,7 @@ import { DropshipPortalShell } from "./DropshipPortalShell";
 import { EbayListingSetupPanel } from "./EbayListingSetupPanel";
 import { EbayListingPolicyOverridePanel } from "./EbayListingPolicyOverridePanel";
 import { EbayStoreCategoryAuthorizationRecovery } from "./EbayStoreCategoryAuthorizationRecovery";
-import { DropshipListingPreview } from "./DropshipListingPreview";
+import { DropshipListingPreview, type ListingPriceSaveCallbacks } from "./DropshipListingPreview";
 export { formatListingPreviewIssue as formatIssue } from "@/lib/dropship-listing-preview";
 
 type PendingSelectionAction = string | null;
@@ -128,15 +128,19 @@ export default function DropshipPortalCatalog() {
   const [productIdFilter, setProductIdFilter] = useState(ALL_FILTER_VALUE);
   const [applied, setApplied] = useState<CatalogFilters>(defaultCatalogFilters);
   const [pendingSelectionAction, setPendingSelectionAction] = useState<PendingSelectionAction>(null);
-  const [pendingListingAction, setPendingListingAction] = useState<PendingListingAction>(null);
+  const [pendingListingAction, setPendingListingActionState] = useState<PendingListingAction>(null);
+  const pendingListingActionRef = useRef<PendingListingAction>(null);
   const [selectedStoreConnectionId, setSelectedStoreConnectionId] = useState("");
   const [listingPreview, setListingPreview] = useState<DropshipListingPreviewResult | null>(null);
+  const [listingPreviewStale, setListingPreviewStale] = useState(false);
+  const [pendingPriceSaves, setPendingPriceSaves] = useState(0);
+  const pendingPriceSavesRef = useRef(0);
+  const previewRequestVersion = useRef(0);
   const [listingPushResult, setListingPushResult] = useState<DropshipListingPushResponse | null>(null);
   const [emailCodeSent, setEmailCodeSent] = useState(false);
   const [verificationCode, setVerificationCode] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
-  const [retailPriceByVariantId, setRetailPriceByVariantId] = useState<Record<string, string>>({});
   const [pendingStoreCategoryVariantIds, setPendingStoreCategoryVariantIds] = useState<Set<number>>(
     () => new Set(),
   );
@@ -189,6 +193,10 @@ export default function DropshipPortalCatalog() {
     [settingsQuery.data?.settings.storeConnections],
   );
   const selectedStoreConnectionIdNumber = Number(selectedStoreConnectionId);
+  // Store/selection identity and a monotonic request version reject late preview responses.
+  const previewContextKey = `${selectedStoreConnectionId}:${selectedCatalogRows.map((row) => row.productVariantId).sort((a, b) => a - b).join(",")}`;
+  const currentPreviewContext = useRef(previewContextKey);
+  currentPreviewContext.current = previewContextKey;
   const selectedStoreConnection = launchReadyStoreConnections.find(
     (connection) => connection.storeConnectionId === selectedStoreConnectionIdNumber,
   ) ?? null;
@@ -223,6 +231,16 @@ export default function DropshipPortalCatalog() {
     setSelectedStoreConnectionId(String(launchReadyStoreConnections[0].storeConnectionId));
   }, [launchReadyStoreConnections, selectedStoreConnectionId]);
 
+  useEffect(() => {
+    invalidateListingPreview();
+  }, [previewContextKey]);
+
+  function setPendingListingAction(action: PendingListingAction | ((current: PendingListingAction) => PendingListingAction)) {
+    const next = typeof action === "function" ? action(pendingListingActionRef.current) : action;
+    pendingListingActionRef.current = next;
+    setPendingListingActionState(next);
+  }
+
   async function replaceSelection(action: DropshipVendorSelectionAction, rows: readonly DropshipCatalogRow[], actionKey: string) {
     if (!selectionRulesQuery.data) {
       setError("Selection rules are still loading.");
@@ -250,8 +268,7 @@ export default function DropshipPortalCatalog() {
         queryClient.invalidateQueries({ queryKey: ["/api/dropship/onboarding/state"] }),
       ]);
       setMessage(action === "include" ? "Catalog selection added." : "Catalog selection removed.");
-      setListingPreview(null);
-      setListingPushResult(null);
+      invalidateListingPreview();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Catalog selection update failed.");
     } finally {
@@ -259,37 +276,82 @@ export default function DropshipPortalCatalog() {
     }
   }
 
-  async function previewListings() {
+  function invalidateListingPreview(keepVisible = false) {
+    previewRequestVersion.current += 1;
+    setPendingListingAction((current) => current === "preview" ? null : current);
+    setListingPreviewStale(true);
+    if (!keepVisible) setListingPreview(null);
+    setListingPushResult(null);
+    setEmailCodeSent(false);
+    setVerificationCode("");
+  }
+
+  async function refreshListingPreview(expectedContext = previewContextKey) {
+    if (currentPreviewContext.current !== expectedContext) {
+      throw new Error("The store or catalog selection changed. Generate a preview for your current selection.");
+    }
+    const requestVersion = ++previewRequestVersion.current;
     setPendingListingAction("preview");
     setError("");
     setMessage("");
-    setListingPreview(null);
+    setListingPreviewStale(true);
     setListingPushResult(null);
     try {
       const request = buildListingPreviewRequest({
         storeConnectionId: selectedStoreConnectionIdNumber,
         rows: selectedCatalogRows,
-        retailPriceByVariantId,
       });
       if (request.productVariantIds.length === 0) {
-        setError("Select at least one catalog item before previewing listings.");
-        return;
+        throw new Error("Select at least one catalog item before previewing listings.");
       }
       const response = await postJson<DropshipListingPreviewResponse>("/api/dropship/listings/preview", request);
+      if (currentPreviewContext.current !== expectedContext || previewRequestVersion.current !== requestVersion) {
+        throw new Error("Listing settings changed during the refresh. Generate a fresh preview.");
+      }
+      if (response.preview.storeConnectionId !== request.storeConnectionId) {
+        throw new Error("The preview returned a different store. Please refresh the preview.");
+      }
       setListingPreview(response.preview);
+      setListingPreviewStale(false);
       setMessage("Listing preview generated.");
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Listing preview failed.");
     } finally {
-      setPendingListingAction(null);
+      if (previewRequestVersion.current === requestVersion) setPendingListingAction(null);
     }
   }
 
+  async function previewListings() {
+    if (pendingPriceSavesRef.current > 0) return;
+    try {
+      await refreshListingPreview();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Listing preview failed.");
+    }
+  }
+
+  const priceSaveCallbacks: ListingPriceSaveCallbacks = {
+    disabled: pendingListingAction !== null && pendingListingAction !== "preview",
+    onSaveStarted: () => {
+      if (pendingListingActionRef.current !== null && pendingListingActionRef.current !== "preview") {
+        throw new Error("Wait for the current listing action to finish before saving a price.");
+      }
+      pendingPriceSavesRef.current += 1;
+      setPendingPriceSaves(pendingPriceSavesRef.current);
+      invalidateListingPreview(true);
+    },
+    onSaveSettled: () => {
+      pendingPriceSavesRef.current = Math.max(0, pendingPriceSavesRef.current - 1);
+      setPendingPriceSaves(pendingPriceSavesRef.current);
+    },
+    onSaved: () => refreshListingPreview(previewContextKey),
+  };
+
   async function pushListings() {
-    if (!listingPreview) {
+    if (!listingPreview || listingPreviewStale || pendingPriceSavesRef.current > 0) {
       setError("Generate a listing preview before queueing a push.");
       return;
     }
+    const expectedPreviewVersion = previewRequestVersion.current;
+    const expectedContext = previewContextKey;
 
     if (!activeBulkPushProof) {
       if (principal?.hasPasskey) {
@@ -323,11 +385,14 @@ export default function DropshipPortalCatalog() {
     }
 
     await runListingAction("push", async () => {
+      if (previewRequestVersion.current !== expectedPreviewVersion
+        || currentPreviewContext.current !== expectedContext || pendingPriceSavesRef.current > 0) {
+        throw new Error("Listing settings changed. Generate a fresh preview before queueing.");
+      }
       const request = buildListingPushRequest({
         storeConnectionId: selectedStoreConnectionIdNumber,
         preview: listingPreview,
         idempotencyKey: createDropshipIdempotencyKey("listing-push"),
-        retailPriceByVariantId,
       });
       if (request.productVariantIds.length === 0) {
         setError("No preview rows are ready to push.");
@@ -353,21 +418,14 @@ export default function DropshipPortalCatalog() {
       await task();
       return true;
     } catch (caught) {
+      if (queryErrorCode(caught) === "DROPSHIP_LISTING_PRICE_VERSION_CONFLICT") {
+        invalidateListingPreview(true);
+      }
       setError(caught instanceof Error ? caught.message : "Listing request failed.");
       return false;
     } finally {
       setPendingListingAction(null);
     }
-  }
-
-  function updateRetailPrice(productVariantId: number, value: string) {
-    setRetailPriceByVariantId((current) => ({
-      ...current,
-      [String(productVariantId)]: value,
-    }));
-    setListingPreview(null);
-    setListingPushResult(null);
-    setMessage("");
   }
 
   async function updateEbayStoreCategoryAssignment(
@@ -398,8 +456,7 @@ export default function DropshipPortalCatalog() {
           ].sort((left, right) => left.productVariantId - right.productVariantId),
         } : current,
       );
-      setListingPreview(null);
-      setListingPushResult(null);
+      invalidateListingPreview();
       setMessage(storeCategoryIds.length > 0
         ? "eBay Store category assignment saved."
         : "Optional eBay Store category assignment cleared.");
@@ -422,8 +479,7 @@ export default function DropshipPortalCatalog() {
       productLineIds: productLineIdsFilter,
       productId: productIdFilter,
     });
-    setListingPreview(null);
-    setListingPushResult(null);
+    invalidateListingPreview();
   }
 
   function resetCatalogFilters() {
@@ -433,8 +489,7 @@ export default function DropshipPortalCatalog() {
     setProductLineIdsFilter(ALL_FILTER_VALUE);
     setProductIdFilter(ALL_FILTER_VALUE);
     setApplied(defaultCatalogFilters);
-    setListingPreview(null);
-    setListingPushResult(null);
+    invalidateListingPreview();
   }
 
   return (
@@ -546,7 +601,6 @@ export default function DropshipPortalCatalog() {
           ) : catalogQuery.data?.rows.length ? (
             <CatalogTable
               bulkSelectionDisabled={selectionRulesQuery.isLoading || pendingSelectionAction !== null}
-              retailPriceByVariantId={retailPriceByVariantId}
               pendingSelectionAction={pendingSelectionAction}
               rows={catalogQuery.data.rows}
               selectableRowCount={visibleSelectableRows.length}
@@ -555,7 +609,6 @@ export default function DropshipPortalCatalog() {
               onBulkDeselect={() => replaceSelection("exclude", visibleSelectedRows, "bulk:exclude")}
               onBulkSelect={() => replaceSelection("include", visibleSelectableRows, "bulk:include")}
               onDeselectRow={(row) => replaceSelection("exclude", [row], `variant:${row.productVariantId}:exclude`)}
-              onRetailPriceChange={updateRetailPrice}
               onSelectRow={(row) => replaceSelection("include", [row], `variant:${row.productVariantId}:include`)}
             />
           ) : (
@@ -576,10 +629,7 @@ export default function DropshipPortalCatalog() {
               storeConnectionId={selectedStoreConnectionIdNumber}
               storeName={selectedStoreName}
               onConfigurationChange={() => {
-                setListingPreview(null);
-                setListingPushResult(null);
-                setEmailCodeSent(false);
-                setVerificationCode("");
+                invalidateListingPreview();
               }}
             />
             <EbayListingPolicyOverridePanel
@@ -587,10 +637,7 @@ export default function DropshipPortalCatalog() {
               storeConnectionId={selectedStoreConnectionIdNumber}
               rows={selectedCatalogRows}
               onConfigurationChange={() => {
-                setListingPreview(null);
-                setListingPushResult(null);
-                setEmailCodeSent(false);
-                setVerificationCode("");
+                invalidateListingPreview();
               }}
             />
             <EbayStoreCategoryAssignmentPanel
@@ -615,6 +662,9 @@ export default function DropshipPortalCatalog() {
           launchReadyStoreConnections={launchReadyStoreConnections}
           emailCodeSent={emailCodeSent}
           listingPreview={listingPreview}
+          listingPreviewStale={listingPreviewStale}
+          priceSavePending={pendingPriceSaves > 0}
+          priceSaveCallbacks={priceSaveCallbacks}
           listingPushResult={listingPushResult}
           pendingListingAction={pendingListingAction}
           pushablePreviewCount={pushablePreviewCount}
@@ -625,8 +675,7 @@ export default function DropshipPortalCatalog() {
           onPush={pushListings}
           onSelectedStoreConnectionIdChange={(value) => {
             setSelectedStoreConnectionId(value);
-            setListingPreview(null);
-            setListingPushResult(null);
+            invalidateListingPreview();
           }}
           onVerificationCodeChange={setVerificationCode}
         />
@@ -1006,6 +1055,9 @@ function ListingPreviewPanel({
   emailCodeSent,
   launchReadyStoreConnections,
   listingPreview,
+  listingPreviewStale,
+  priceSavePending,
+  priceSaveCallbacks,
   listingPushResult,
   onPreview,
   onPush,
@@ -1020,6 +1072,9 @@ function ListingPreviewPanel({
   emailCodeSent: boolean;
   launchReadyStoreConnections: DropshipSettingsResponse["settings"]["storeConnections"];
   listingPreview: DropshipListingPreviewResult | null;
+  listingPreviewStale: boolean;
+  priceSavePending: boolean;
+  priceSaveCallbacks: ListingPriceSaveCallbacks;
   listingPushResult: DropshipListingPushResponse | null;
   onPreview: () => void;
   onPush: () => void;
@@ -1035,8 +1090,11 @@ function ListingPreviewPanel({
   const previewDisabled = launchReadyStoreConnections.length === 0
     || !selectedStoreConnectionId
     || selectedRowCount === 0
+    || priceSavePending
     || pendingListingAction !== null;
   const pushDisabled = !listingPreview
+    || listingPreviewStale
+    || priceSavePending
     || pushablePreviewCount === 0
     || pendingListingAction !== null
     || (emailCodeSent && verificationCode.length !== 6);
@@ -1161,7 +1219,11 @@ function ListingPreviewPanel({
         </div>
       )}
 
-      {listingPreview && <DropshipListingPreview key={`${listingPreview.storeConnectionId}:${listingPreview.generatedAt}`} preview={listingPreview} />}
+      {listingPreview && listingPreviewStale && <div role="status" className="mt-4 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+        {priceSavePending ? "Saving your listing price and refreshing the preview…" : "This preview is out of date. Generate a fresh preview before queueing listings."}
+      </div>}
+      {listingPreview && <DropshipListingPreview key={listingPreview.storeConnectionId} preview={listingPreview}
+        stale={listingPreviewStale} priceSaveCallbacks={priceSaveCallbacks} />}
 
       {listingPushResult && (
         <div className="mt-4 rounded-md border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
@@ -1177,10 +1239,8 @@ function CatalogTable({
   onBulkDeselect,
   onBulkSelect,
   onDeselectRow,
-  onRetailPriceChange,
   onSelectRow,
   pendingSelectionAction,
-  retailPriceByVariantId,
   rows,
   selectableRowCount,
   selectedRowCount,
@@ -1190,10 +1250,8 @@ function CatalogTable({
   onBulkDeselect: () => void;
   onBulkSelect: () => void;
   onDeselectRow: (row: DropshipCatalogRow) => void;
-  onRetailPriceChange: (productVariantId: number, value: string) => void;
   onSelectRow: (row: DropshipCatalogRow) => void;
   pendingSelectionAction: PendingSelectionAction;
-  retailPriceByVariantId: Readonly<Record<string, string>>;
   rows: DropshipCatalogRow[];
   selectableRowCount: number;
   selectedRowCount: number;
@@ -1236,7 +1294,6 @@ function CatalogTable({
               <TableHead>Variant</TableHead>
               <TableHead>Category</TableHead>
               <TableHead>Quantity</TableHead>
-              <TableHead>Retail price</TableHead>
               <TableHead>Status</TableHead>
               <TableHead className="text-right">Action</TableHead>
             </TableRow>
@@ -1259,16 +1316,6 @@ function CatalogTable({
                   )}
                 </TableCell>
                 <TableCell className="font-mono">{row.selectionDecision.marketplaceQuantity}</TableCell>
-                <TableCell>
-                  <Input
-                    value={retailPriceByVariantId[String(row.productVariantId)] ?? ""}
-                    onChange={(event) => onRetailPriceChange(row.productVariantId, event.target.value)}
-                    className="h-9 min-w-28"
-                    inputMode="decimal"
-                    placeholder="Default"
-                    disabled={!row.selectionDecision.selected}
-                  />
-                </TableCell>
                 <TableCell>
                   <Badge
                     variant="outline"

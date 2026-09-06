@@ -2251,6 +2251,8 @@ describe("dropship ops surface client helpers", () => {
       storeConnectionId: 12,
       productVariantIds: [42, 99],
       idempotencyKey: "push-1",
+      expectedPriceRevisionIdsByVariantId: { "42": null, "99": null },
+      expectedPriceCentsByVariantId: { "42": 1299, "99": 1299 },
       requestedRetailPricesByVariantId: {
         "42": 1000,
         "99": 1150,
@@ -2275,6 +2277,20 @@ describe("dropship ops surface client helpers", () => {
     ).toThrow(
       "Listing preview store connection must match the selected store connection.",
     );
+  });
+
+  it("queues only the price revisions and cents displayed on ready preview rows", () => {
+    const preview = makeListingPreview({ storeConnectionId: 12, rows: [
+      makeListingPreviewRow({ productVariantId: 42, priceCents: 999, priceSettingRevisionId: 7 }),
+      makeListingPreviewRow({ productVariantId: 99, priceCents: 899, priceSettingRevisionId: null }),
+      makeListingPreviewRow({ productVariantId: 100, previewStatus: "blocked", priceSettingRevisionId: 9 }),
+    ] });
+    const request = buildListingPushRequest({ storeConnectionId: 12, preview, idempotencyKey: "saved-prices" });
+    expect(request.expectedPriceRevisionIdsByVariantId).toEqual({ "42": 7, "99": null });
+    expect(request.expectedPriceCentsByVariantId).toEqual({ "42": 999, "99": 899 });
+    expect(request).not.toHaveProperty("requestedRetailPricesByVariantId");
+    preview.rows[0].priceSettingRevisionId = -1;
+    expect(() => buildListingPushRequest({ storeConnectionId: 12, preview, idempotencyKey: "invalid" })).toThrow();
   });
 
   it("parses dollar input to integer cents without floating point math", () => {
