@@ -44,6 +44,7 @@ export function toDropshipVendorListingPreview(preview: DropshipListingPreviewRe
       platform: row.platform, listingMode: row.listingMode, currentListingStatus: row.currentListingStatus,
       previewStatus: row.previewStatus, blockers: [...row.blockers], warnings: [...row.warnings],
       marketplaceQuantity: row.marketplaceQuantity, priceCents: row.priceCents,
+      priceSettingRevisionId: row.priceSettingRevisionId,
       marketplaceCategoryId: row.marketplaceCategoryId, marketplaceCategoryName: row.marketplaceCategoryName,
       storeCategoryNames: [...row.storeCategoryNames], businessPolicySelection: row.businessPolicySelection,
       previewHash: row.previewHash, adminExposureDecision: row.adminExposureDecision, selectionDecision: row.selectionDecision,
