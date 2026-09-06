@@ -17,6 +17,19 @@ export type {
 
 export type ProductOption = InventoryPlanningProductOptionsResponse["products"][number];
 
+/** Approval is not runtime selection; a sealed head alone is not proof of use. */
+export function transformationRuntimeLabel(
+  view: Pick<SupplyTransformationsAdminView, "runtimeSelection" | "head" | "activeModel">,
+): string {
+  if (!view.runtimeSelection) return "Runtime status unavailable";
+  if (view.runtimeSelection.authority === "legacy") return "Existing inventory rules are in use";
+  if (view.activeModel?.lifecycleStatus === "sealed"
+    && view.head?.activeModelId === view.activeModel.id) {
+    return `Active — in use: v${view.activeModel.version}`;
+  }
+  return "Canonical runtime selected, but this product has no verified active rules";
+}
+
 export type PathDraft = {
   rowId: number;
   sourceVariantId: number;

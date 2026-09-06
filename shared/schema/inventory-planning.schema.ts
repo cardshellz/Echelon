@@ -433,6 +433,7 @@ export const transformationModelVersions = inventoryPlanningSchema.table(
     origin: varchar("origin", { length: 30 }).notNull().default("operator"),
     originInputHash: varchar("origin_input_hash", { length: 64 }),
     originResultHash: varchar("origin_result_hash", { length: 64 }),
+    operatorInputHash: varchar("operator_input_hash", { length: 64 }),
     createdBy: varchar("created_by", { length: 100 }).notNull(),
     sealedBy: varchar("sealed_by", { length: 100 }),
     sealedAt: timestamp("sealed_at", { withTimezone: true }),
@@ -496,6 +497,11 @@ export const transformationModelVersions = inventoryPlanningSchema.table(
       "transformation_model_versions_predecessor_chk",
       sql`(${table.version} = 1 AND ${table.supersedesModelId} IS NULL)
         OR (${table.version} > 1 AND ${table.supersedesModelId} IS NOT NULL)`,
+    ),
+    operatorInputValid: check(
+      "transformation_model_versions_operator_input_chk",
+      sql`${table.operatorInputHash} IS NULL OR (${table.origin} = 'operator'
+        AND ${table.operatorInputHash} ~ '^[0-9a-f]{64}$')`,
     ),
     lifecycleValid: check(
       "transformation_model_versions_lifecycle_chk",

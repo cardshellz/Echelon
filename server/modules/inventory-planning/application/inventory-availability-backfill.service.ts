@@ -4,6 +4,7 @@ import type {
   ApplyInventoryAvailabilityBackfillDraftResult,
   InventoryAvailabilityBackfillQueueResponse,
   InventoryAvailabilityBackfillReview,
+  InventoryAvailabilityBackfillDefinition,
   InventoryAvailabilityChannelPreview,
   RefreshInventoryAvailabilityBackfillDraftResult,
 } from "@shared/types/inventory-availability-backfill";
@@ -43,6 +44,8 @@ export interface CapturedInventoryAvailabilityBackfillDraft {
   origin: "operator" | "phase3_backfill";
   originInputHash: string | null;
   originResultHash: string | null;
+  operatorInputHash?: string | null;
+  validationState?: "valid" | "invalid";
 }
 
 export interface CapturedInventoryAvailabilityBackfillReview {
@@ -59,6 +62,7 @@ export interface CapturedInventoryAvailabilityBackfillReview {
 export interface CapturedInventoryAvailabilityBackfillProduct {
   source: InventoryAvailabilityBackfillSource;
   draft: CapturedInventoryAvailabilityBackfillDraft | null;
+  draftDefinition?: InventoryAvailabilityBackfillDefinition | null;
   review: CapturedInventoryAvailabilityBackfillReview | null;
   latestShadow: {
     runId: string;
@@ -130,6 +134,11 @@ export class InventoryAvailabilityBackfillService {
           && captured.draft.originResultHash === candidate.resultHash,
       );
       const candidateMatch = definitionMatch && provenanceMatch;
+      const operatorDraft = captured.draft?.origin === "operator";
+      const operatorSourceMatch = operatorDraft
+        && captured.draft?.operatorInputHash === candidate.inputHash
+        && captured.draft?.validationState === "valid"
+        && captured.draftDefinition != null;
       const draft = captured.draft
         ? { ...captured.draft, definitionMatch, provenanceMatch, candidateMatch }
         : null;
@@ -140,7 +149,7 @@ export class InventoryAvailabilityBackfillService {
           ? "excluded" as const
         : !draft
           ? "not_backfilled" as const
-          : !candidateMatch
+          : !(operatorDraft ? operatorSourceMatch : candidateMatch)
             ? "conflicting_draft" as const
             : captured.review?.decision === "approved"
               ? "approved" as const
@@ -162,12 +171,21 @@ export class InventoryAvailabilityBackfillService {
         issues: candidate.issues,
         queueState,
         draft,
+        draftDefinition: captured.draftDefinition ?? null,
         review: captured.review,
         latestShadow: captured.latestShadow,
       };
     });
     const count = (state: typeof rows[number]["queueState"]) =>
       rows.filter((row) => row.queueState === state).length;
+    const generatedResultHash = calculateInventoryAvailabilityBackfillCatalogHash(
+      "result", candidates.map(({ candidate }) => candidate),
+    );
+    // Manual selections are not generated candidates; bind catalog previews to their
+    // exact saved versions without changing existing generated-only provenance.
+    const operatorSelections = rows.filter((row) => row.draft?.origin === "operator")
+      .sort((left, right) => left.productId - right.productId)
+      .map((row) => ({ productId: row.productId, draft: row.draft }));
     return inventoryAvailabilityBackfillQueueResponseSchema.parse({
       algorithmVersion: INVENTORY_AVAILABILITY_BACKFILL_ALGORITHM_VERSION,
       capturedAt: capture.capturedAt,
@@ -175,10 +193,9 @@ export class InventoryAvailabilityBackfillService {
         "input",
         candidates.map(({ candidate }) => candidate),
       ),
-      catalogResultHash: calculateInventoryAvailabilityBackfillCatalogHash(
-        "result",
-        candidates.map(({ candidate }) => candidate),
-      ),
+      catalogResultHash: operatorSelections.length === 0 ? generatedResultHash
+        : createHash("sha256").update(canonicalJson({ generatedResultHash, operatorSelections }))
+          .digest("hex"),
       summary: {
         totalActiveProducts: rows.length,
         blocked: count("blocked"),

@@ -193,6 +193,7 @@ export const transformationAdminModelSchema = z.object({
   origin: z.enum(["operator", "phase3_backfill"]),
   originInputHash: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
   originResultHash: z.string().regex(/^[0-9a-f]{64}$/).nullable(),
+  operatorInputHash: z.string().regex(/^[0-9a-f]{64}$/).nullable().optional(),
   validationState: z.enum(["valid", "invalid"]),
   validationErrors: z.array(z.unknown()),
   changeReason: z.string(),
@@ -229,6 +230,11 @@ export const supplyTransformationsAdminViewSchema = z.object({
   }).strict().nullable(),
   activeModel: transformationAdminModelSchema.nullable(),
   draftModel: transformationAdminModelSchema.nullable(),
+  runtimeSelection: z.object({
+    authority: z.enum(["legacy", "canonical"]),
+    revision: postgresBigintStringSchema,
+    activationRunId: postgresBigintStringSchema.nullable(),
+  }).strict().nullable().optional(),
   runtimeAuthority: z.object({
     kind: z.literal("legacy_inventory_strategy"),
     value: z.enum(PRODUCT_INVENTORY_STRATEGIES),

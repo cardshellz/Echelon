@@ -1,8 +1,10 @@
+import { createHash } from "node:crypto";
 import { and, asc, desc, eq, ilike, inArray, or, sql } from "drizzle-orm";
 import {
   buildRecipeComponents,
   buildRecipes,
   idempotencyKeys,
+  inventoryAvailabilityRuntimeAuthority,
   locationPromisePolicyHeads,
   locationPromisePolicyVersions,
   products,
@@ -28,6 +30,7 @@ import type {
 } from "@shared/types/inventory-availability-admin";
 import {
   createTransformationModelDraftResultSchema,
+  supplyTransformationsAdminViewSchema,
   transformationAdminRecipeSchema,
 } from "@shared/types/inventory-availability-admin";
 import {
@@ -50,10 +53,12 @@ import {
 } from "../domain/inventory-availability-master-data.contracts";
 import {
   planInventoryAvailabilityBackfill,
+  calculateInventoryAvailabilityBackfillInputHash,
 } from "../domain/inventory-availability-backfill";
 import {
   loadInventoryAvailabilityBackfillSources,
 } from "./inventory-availability-backfill.repository";
+import { retrySerializableMasterDataTransaction } from "./serializable-master-data-transaction";
 
 type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 type Executor = typeof db | Transaction;
@@ -96,79 +101,89 @@ implements InventoryAvailabilityMasterDataAdminStore {
   async getSupplyTransformationsAdminView(
     productId: number,
   ): Promise<SupplyTransformationsAdminView | null> {
-    const [product] = await this.database
-      .select({
-        id: products.id,
-        sku: products.sku,
-        name: products.name,
-        isActive: products.isActive,
-        inventoryStrategy: products.inventoryStrategy,
-      })
-      .from(products)
-      .where(eq(products.id, productId))
-      .limit(1);
-    if (!product) return null;
+    return this.database.transaction(async (tx) => {
+      await tx.execute(sql`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY`);
+      const [product] = await tx
+        .select({
+          id: products.id,
+          sku: products.sku,
+          name: products.name,
+          isActive: products.isActive,
+          inventoryStrategy: products.inventoryStrategy,
+        })
+        .from(products)
+        .where(eq(products.id, productId))
+        .limit(1);
+      if (!product) return null;
 
-    const variants = await this.database
-      .select({
-        id: productVariants.id,
-        productId: productVariants.productId,
-        sku: productVariants.sku,
-        name: productVariants.name,
-        unitsPerVariant: productVariants.unitsPerVariant,
-        uomType: productVariants.uomType,
-        isActive: productVariants.isActive,
-        salesEligibility: productVariants.salesEligibility,
-      })
-      .from(productVariants)
-      .where(and(
-        eq(productVariants.productId, productId),
-        eq(productVariants.requiresShipping, true),
-        sql`COALESCE(${productVariants.trackInventory}, true) = true`,
-      ))
-      .orderBy(
-        asc(productVariants.unitsPerVariant),
-        asc(productVariants.hierarchyLevel),
-        asc(productVariants.id),
-      );
-    const recipes = await loadAdminRecipes(this.database, productId);
-    const [head] = await this.database
-      .select()
-      .from(transformationModelHeads)
-      .where(eq(transformationModelHeads.productId, productId))
-      .limit(1);
-    const activeModel = head?.activeModelId
-      ? await loadTransformationModel(this.database, head.activeModelId)
-      : null;
-    const draftModel = head?.draftModelId
-      ? await loadTransformationModel(this.database, head.draftModelId)
-      : null;
+      const variants = await tx
+        .select({
+          id: productVariants.id,
+          productId: productVariants.productId,
+          sku: productVariants.sku,
+          name: productVariants.name,
+          unitsPerVariant: productVariants.unitsPerVariant,
+          uomType: productVariants.uomType,
+          isActive: productVariants.isActive,
+          salesEligibility: productVariants.salesEligibility,
+        })
+        .from(productVariants)
+        .where(and(
+          eq(productVariants.productId, productId),
+          eq(productVariants.requiresShipping, true),
+          sql`COALESCE(${productVariants.trackInventory}, true) = true`,
+        ))
+        .orderBy(
+          asc(productVariants.unitsPerVariant),
+          asc(productVariants.hierarchyLevel),
+          asc(productVariants.id),
+        );
+      const recipes = await loadAdminRecipes(tx, productId);
+      const [head] = await tx
+        .select()
+        .from(transformationModelHeads)
+        .where(eq(transformationModelHeads.productId, productId))
+        .limit(1);
+      const activeModel = head?.activeModelId
+        ? await loadTransformationModel(tx, head.activeModelId)
+        : null;
+      const draftModel = head?.draftModelId
+        ? await loadTransformationModel(tx, head.draftModelId)
+        : null;
 
-    return {
-      product: {
-        id: product.id,
-        sku: product.sku,
-        name: product.name,
-        isActive: product.isActive,
-        legacyInventoryStrategy: product.inventoryStrategy,
-      },
-      variants,
-      recipes,
-      head: head
-        ? {
-            revision: head.revision.toString(),
-            activeModelId: head.activeModelId,
-            draftModelId: head.draftModelId,
-          }
-        : null,
-      activeModel,
-      draftModel,
-      runtimeAuthority: {
-        kind: "legacy_inventory_strategy",
-        value: product.inventoryStrategy,
-        draftAffectsRuntime: false,
-      },
-    };
+      const [runtime] = await tx.select().from(inventoryAvailabilityRuntimeAuthority)
+        .where(eq(inventoryAvailabilityRuntimeAuthority.singletonKey, true)).limit(1);
+      return supplyTransformationsAdminViewSchema.parse({
+        product: {
+          id: product.id,
+          sku: product.sku,
+          name: product.name,
+          isActive: product.isActive,
+          legacyInventoryStrategy: product.inventoryStrategy,
+        },
+        variants,
+        recipes,
+        head: head
+          ? {
+              revision: head.revision.toString(),
+              activeModelId: head.activeModelId,
+              draftModelId: head.draftModelId,
+            }
+          : null,
+        activeModel,
+        draftModel,
+        runtimeSelection: runtime ? {
+          authority: runtime.authority,
+          revision: runtime.revision.toString(),
+          activationRunId: runtime.activationRunId?.toString() ?? null,
+        } : null,
+        runtimeAuthority: {
+          kind: "legacy_inventory_strategy",
+          value: product.inventoryStrategy,
+          draftAffectsRuntime: false,
+        },
+      });
+    });
   }
 
   async createTransformationModelDraft(
@@ -176,10 +191,8 @@ implements InventoryAvailabilityMasterDataAdminStore {
       InventoryAvailabilityMasterDataAdminStore["createTransformationModelDraft"]
     >[0],
   ) {
-    return this.database.transaction(async (tx) => {
-      if (command.backfillEvidence) {
-        await tx.execute(sql`SET TRANSACTION ISOLATION LEVEL SERIALIZABLE`);
-      }
+    return retrySerializableMasterDataTransaction("create_transformation_draft", () => this.database.transaction(async (tx) => {
+      await tx.execute(sql`SET TRANSACTION ISOLATION LEVEL SERIALIZABLE`);
       const productId = command.definition.productId;
       await lockIdempotencyKey(tx, command.idempotencyKey);
       await tx.execute(sql`
@@ -239,6 +252,8 @@ implements InventoryAvailabilityMasterDataAdminStore {
       }
       await assertTransformationReferences(tx, command.definition);
       const previous = await latestTransformationModel(tx, productId);
+      const operatorInputHash = command.backfillEvidence ? null
+        : await captureOperatorInputHash(tx, productId);
       const version = (previous?.version ?? 0) + 1;
       const definitionHash = calculateTransformationModelDefinitionHash(command.definition);
       const [created] = await tx
@@ -258,6 +273,7 @@ implements InventoryAvailabilityMasterDataAdminStore {
           origin: command.backfillEvidence ? "phase3_backfill" : "operator",
           originInputHash: command.backfillEvidence?.inputHash ?? null,
           originResultHash: command.backfillEvidence?.resultHash ?? null,
+          operatorInputHash,
           createdBy: command.actorId,
           createdAt: command.occurredAt,
           updatedAt: command.occurredAt,
@@ -316,7 +332,7 @@ implements InventoryAvailabilityMasterDataAdminStore {
         definitionHash,
         alreadyApplied: false,
       };
-    });
+    }));
   }
 
   async updateTransformationModelDraft(
@@ -324,8 +340,13 @@ implements InventoryAvailabilityMasterDataAdminStore {
       InventoryAvailabilityMasterDataAdminStore["updateTransformationModelDraft"]
     >[0],
   ) {
-    return this.database.transaction(async (tx) => {
+    return retrySerializableMasterDataTransaction("edit_transformation_draft", () => this.database.transaction(async (tx) => {
+      await tx.execute(sql`SET TRANSACTION ISOLATION LEVEL SERIALIZABLE`);
+      // Keep the public edit receipt separate from the successor's creation key.
+      const successorKey = `manual-revision:${createHash("sha256")
+        .update(`manual-revision:${command.idempotencyKey}`).digest("hex")}`;
       await lockIdempotencyKey(tx, command.idempotencyKey);
+      await lockIdempotencyKey(tx, successorKey);
       await tx.execute(sql`
         SELECT pg_advisory_xact_lock(
           ${TRANSFORMATION_MODEL_LOCK_NAMESPACE},
@@ -380,51 +401,54 @@ implements InventoryAvailabilityMasterDataAdminStore {
       const before = await loadTransformationModel(tx, command.draftModelId);
       if (!before) throw staleDraft();
       const definitionHash = calculateTransformationModelDefinitionHash(command.definition);
-      await replaceTransformationMembers(
-        tx,
-        command.draftModelId,
-        command.definition,
-        command.occurredAt,
-        true,
-      );
-      await tx
-        .update(transformationModelVersions)
-        .set({
-          buildToPromiseEnabled: command.definition.buildToPromiseEnabled,
-          definitionHash,
-          validationState: "valid",
-          validationErrors: [],
-          changeReason: command.changeReason,
-          updatedAt: command.occurredAt,
-        })
-        .where(eq(transformationModelVersions.id, command.draftModelId));
-      await tx
-        .update(transformationModelHeads)
-        .set({
-          revision: sql`${transformationModelHeads.revision} + 1`,
-          updatedBy: command.actorId,
-          updateReason: command.changeReason,
-          updatedAt: command.occurredAt,
-        })
-        .where(eq(transformationModelHeads.productId, command.productId));
-      const after = await loadTransformationModel(tx, command.draftModelId);
+      const operatorInputHash = await captureOperatorInputHash(tx, command.productId);
+      if (command.expectedVersion >= 2_147_483_647) {
+        throw new InventoryAvailabilityMasterDataError(409,
+          "INVENTORY_AVAILABILITY_MODEL_VERSION_EXHAUSTED", "The transformation model version range is exhausted.");
+      }
+      await assertIdempotencyKeyUnusedByOtherType(tx, successorKey, "transformation_model");
+      await tx.update(transformationModelVersions).set({
+        lifecycleStatus: "superseded", supersededBy: command.actorId,
+        supersededAt: command.occurredAt, supersessionReason: command.changeReason,
+        updatedAt: command.occurredAt,
+      }).where(eq(transformationModelVersions.id, command.draftModelId));
+      const version = command.expectedVersion + 1;
+      const [created] = await tx.insert(transformationModelVersions).values({
+        productId: command.productId, version, lifecycleStatus: "draft",
+        buildToPromiseEnabled: command.definition.buildToPromiseEnabled,
+        definitionHash, validationState: "invalid", validationErrors: [{ code: "members_pending" }],
+        supersedesModelId: command.draftModelId, changeReason: command.changeReason,
+        idempotencyKey: successorKey, requestHash: command.requestHash,
+        origin: "operator", operatorInputHash, createdBy: command.actorId,
+        createdAt: command.occurredAt, updatedAt: command.occurredAt,
+      }).returning({ id: transformationModelVersions.id });
+      await replaceTransformationMembers(tx, created.id, command.definition, command.occurredAt);
+      await tx.update(transformationModelVersions).set({
+        validationState: "valid", validationErrors: [], definitionHash, updatedAt: command.occurredAt,
+      }).where(eq(transformationModelVersions.id, created.id));
+      await pointTransformationDraftHead(tx, { productId: command.productId, modelId: created.id,
+        actorId: command.actorId, changeReason: command.changeReason,
+        occurredAt: command.occurredAt, headExists: true });
+      const after = await loadTransformationModel(tx, created.id);
       if (!after) throw staleDraft();
       const result = {
-        modelId: command.draftModelId,
-        version: command.expectedVersion,
+        modelId: created.id,
+        version,
         definitionHash,
         alreadyApplied: false,
       };
       await persistAuditEvent(tx, {
         actor: command.actorId,
         action: "inventory_availability.transformation_model.draft_updated",
-        target: `inventory.transformation_model:${command.draftModelId}`,
+        target: `inventory.transformation_model:${created.id}`,
         changes: { before, after },
         context: {
           changeReason: command.changeReason,
           idempotencyKey: command.idempotencyKey,
           requestHash: command.requestHash,
           previousHeadRevision: command.expectedHeadRevision,
+          supersededModelId: command.draftModelId,
+          operatorInputHash,
           nextHeadRevision: (BigInt(command.expectedHeadRevision) + BigInt(1)).toString(),
           runtimeAuthorityChanged: false,
         },
@@ -442,7 +466,7 @@ implements InventoryAvailabilityMasterDataAdminStore {
         })
         .where(eq(idempotencyKeys.key, draftUpdateReceiptKey(command.idempotencyKey)));
       return result;
-    });
+    }));
   }
 
   async supersedeTransformationModelBackfillDraft(
@@ -450,7 +474,7 @@ implements InventoryAvailabilityMasterDataAdminStore {
       InventoryAvailabilityMasterDataAdminStore["supersedeTransformationModelBackfillDraft"]
     >[0],
   ) {
-    return this.database.transaction(async (tx) => {
+    return retrySerializableMasterDataTransaction("refresh_transformation_draft", () => this.database.transaction(async (tx) => {
       await tx.execute(sql`SET TRANSACTION ISOLATION LEVEL SERIALIZABLE`);
       await lockIdempotencyKey(tx, command.idempotencyKey);
       await tx.execute(sql`
@@ -646,7 +670,7 @@ implements InventoryAvailabilityMasterDataAdminStore {
         supersededModelId: command.draftModelId,
         alreadyApplied: false,
       };
-    });
+    }));
   }
 
   async createLocationPromisePolicyDraft(
@@ -892,16 +916,7 @@ async function replaceTransformationMembers(
   modelId: number,
   definition: TransformationModelDefinition,
   occurredAt: Date,
-  replaceExisting = false,
 ): Promise<void> {
-  if (replaceExisting) {
-    await tx.delete(transformationModelPaths)
-      .where(eq(transformationModelPaths.modelId, modelId));
-    await tx.delete(transformationRecipeComponentSnapshots)
-      .where(eq(transformationRecipeComponentSnapshots.modelId, modelId));
-    await tx.delete(transformationRecipeBindings)
-      .where(eq(transformationRecipeBindings.modelId, modelId));
-  }
   const bindingIds = new Map<string, number>();
   for (const binding of definition.recipeBindings) {
     const [createdBinding] = await tx
@@ -1113,6 +1128,7 @@ async function loadTransformationModel(
     origin: model.origin as TransformationAdminModel["origin"],
     originInputHash: model.originInputHash,
     originResultHash: model.originResultHash,
+    operatorInputHash: model.operatorInputHash,
     validationState: model.validationState as TransformationAdminModel["validationState"],
     validationErrors: Array.isArray(model.validationErrors) ? model.validationErrors : [],
     changeReason: model.changeReason,
@@ -1268,6 +1284,12 @@ async function assertTransformationReferences(
       }
     }
   }
+}
+
+async function captureOperatorInputHash(tx: Transaction, productId: number): Promise<string> {
+  const [source] = await loadInventoryAvailabilityBackfillSources(tx, [productId]);
+  if (!source) throw invalidReference("The active catalog product no longer exists.");
+  return calculateInventoryAvailabilityBackfillInputHash(source);
 }
 
 async function findTransformationReplay(tx: Transaction, idempotencyKey: string) {

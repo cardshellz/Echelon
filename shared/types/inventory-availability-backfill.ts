@@ -49,6 +49,8 @@ export const inventoryAvailabilityBackfillDraftSchema = z.object({
   origin: z.enum(["operator", "phase3_backfill"]),
   originInputHash: sha256Hex.nullable(),
   originResultHash: sha256Hex.nullable(),
+  operatorInputHash: sha256Hex.nullable().optional(),
+  validationState: z.enum(["valid", "invalid"]).optional(),
   definitionMatch: z.boolean(),
   provenanceMatch: z.boolean(),
   candidateMatch: z.boolean(),
@@ -99,6 +101,7 @@ export const inventoryAvailabilityBackfillQueueRowSchema = z.object({
   issues: z.array(inventoryAvailabilityBackfillIssueSchema),
   queueState: inventoryAvailabilityBackfillQueueStateSchema,
   draft: inventoryAvailabilityBackfillDraftSchema.nullable(),
+  draftDefinition: inventoryAvailabilityBackfillDefinitionSchema.nullable().optional(),
   review: inventoryAvailabilityBackfillReviewSchema.nullable(),
   latestShadow: z.object({
     runId: plannerNonnegativeQuantitySchema.refine((value) => value !== "0"),

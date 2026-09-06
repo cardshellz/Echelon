@@ -78,6 +78,7 @@ import {
   type TransformationAdminRecipe,
   type TransformationAdminVariant,
   unavailableBuildBindingsForEdit,
+  transformationRuntimeLabel,
 } from "./supply-transformations-model";
 import { PromiseSafetyPolicyPanel } from "./promise-safety-policy-panel";
 import { InventoryCatalogBatchPanel } from "./inventory-catalog-batch-panel";
@@ -239,10 +240,10 @@ export default function SupplyTransformations() {
         queryKey: ["/api/inventory-planning/admin/migration-queue"],
       });
       toast({
-        title: input.kind === "create" ? "Draft created" : "Draft updated",
+        title: input.kind === "create" ? "Draft created" : "New draft version saved",
         description: input.kind === "create"
           ? `Validated draft v${result.version} was recorded. Runtime ATP is unchanged.`
-          : `Draft v${result.version} was updated in place. Its identity and version are unchanged.`,
+          : `Draft v${result.version} needs its own approval. Earlier versions and approvals are preserved. Live rules are unchanged.`,
       });
     },
     onError: async (error: Error) => {
@@ -340,6 +341,7 @@ export default function SupplyTransformations() {
         expectedModelVersion: row.draft.version,
         expectedDefinitionHash: row.draft.definitionHash,
         expectedHeadRevision: row.draft.headRevision,
+        expectedLatestReviewId: row.review?.reviewId ?? null,
         decision,
         reason: reviewReason,
         idempotencyKey: reviewIdempotencyKey.current
@@ -896,6 +898,7 @@ export default function SupplyTransformations() {
         queue={migrationQueueQuery.data ?? null}
         rows={filteredMigrationRows}
         selectedRow={selectedMigrationRow}
+        selectedView={view ?? null}
         isLoading={migrationQueueQuery.isLoading}
         error={migrationQueueQuery.error as Error | null}
         canEdit={canEdit}
@@ -1131,19 +1134,19 @@ export default function SupplyTransformations() {
             <CardHeader>
               <CardTitle className="flex flex-wrap items-center gap-2">
                 {view.product.sku ?? `Product ${view.product.id}`} — {view.product.name}
-                <Badge variant="outline">legacy: {view.runtimeAuthority.value}</Badge>
+                <Badge variant="outline">Legacy strategy: {view.product.legacyInventoryStrategy}</Badge>
                 {view.draftModel && <Badge>draft v{view.draftModel.version}</Badge>}
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-3 text-sm">
               <div>Head revision: {view.head?.revision ?? "not created"}</div>
               <div>
-                Active new-model authority: {view.activeModel
+                Sealed model: {view.activeModel
                   ? `sealed v${view.activeModel.version}`
                   : "none"}
               </div>
               <div className="font-medium text-amber-800">
-                Runtime ATP still reads legacy inventory strategy.
+                {transformationRuntimeLabel(view)}
               </div>
               {view.draftModel && !editingCurrentDraft && canEdit && draftEditIsUnsupported && (
                 <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-amber-900">
@@ -1160,8 +1163,9 @@ export default function SupplyTransformations() {
               {view.draftModel && editingCurrentDraft && (
                 <>
                   <div className="rounded-md border border-blue-300 bg-blue-50 p-3 text-blue-900">
-                    Editing draft v{view.draftModel.version}. Saving updates this draft in place;
-                    its ID and version remain unchanged. Runtime authority is still unaffected.
+                    Editing draft v{view.draftModel.version}. Saving creates a new manual version
+                    that needs its own approval. Earlier versions and approvals stay in history;
+                    automatic refresh cannot replace your manual rules. Live rules are unchanged.
                   </div>
                   {unavailableBuildBindings.length > 0 && (
                     <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-amber-900">
@@ -1284,6 +1288,7 @@ function MigrationQueuePanel({
   queue,
   rows,
   selectedRow,
+  selectedView,
   isLoading,
   error,
   canEdit,
@@ -1308,6 +1313,7 @@ function MigrationQueuePanel({
   queue: InventoryAvailabilityBackfillQueueResponse | null;
   rows: InventoryAvailabilityBackfillQueueRow[];
   selectedRow: InventoryAvailabilityBackfillQueueRow | null;
+  selectedView: SupplyTransformationsAdminView | null;
   isLoading: boolean;
   error: Error | null;
   canEdit: boolean;
@@ -1332,6 +1338,17 @@ function MigrationQueuePanel({
     decision: "approved" | "changes_required",
   ) => void;
 }) {
+  const isManual = selectedRow?.draft?.origin === "operator";
+  const reviewDefinition = isManual
+    ? selectedRow?.draftDefinition
+    : selectedRow?.candidateDefinition;
+  const variants = selectedView?.product.id === selectedRow?.productId
+    ? selectedView?.variants ?? [] : [];
+  const manualEvidenceReady = !isManual || (selectedView?.product.id === selectedRow?.productId
+    && selectedView?.draftModel?.id === selectedRow?.draft?.modelId
+    && selectedView?.draftModel?.definitionHash === selectedRow?.draft?.definitionHash
+    && selectedView?.head?.revision === selectedRow?.draft?.headRevision);
+  const variantById = new Map(variants.map((variant) => [variant.id, variant]));
   return (
     <Card>
       <CardHeader>
@@ -1443,15 +1460,40 @@ function MigrationQueuePanel({
                 {selectedRow.productSku ?? `Product ${selectedRow.productId}`} — {selectedRow.productName}
               </div>
               <div className="text-xs text-muted-foreground">
-                Candidate definition {selectedRow.candidateDefinitionHash?.slice(0, 12) ?? "blocked"} ·
+                {isManual ? "Saved manual rules" : "Generated candidate"} {(
+                  isManual ? selectedRow.draft?.definitionHash : selectedRow.candidateDefinitionHash
+                )?.slice(0, 12) ?? "blocked"} ·
                 input {selectedRow.inputHash.slice(0, 12)} · result {selectedRow.resultHash.slice(0, 12)}
               </div>
             </div>
-            {selectedRow.candidateDefinition && (
+            {reviewDefinition && (
               <div className="grid gap-3 text-sm md:grid-cols-3">
-                <div>Directed paths: {selectedRow.candidateDefinition.paths.length}</div>
-                <div>Recipe bindings: {selectedRow.candidateDefinition.recipeBindings.length}</div>
-                <div>Build-to-promise: {selectedRow.candidateDefinition.buildToPromiseEnabled ? "enabled" : "off"}</div>
+                <div>Directed paths: {reviewDefinition.paths.length}</div>
+                <div>Recipe bindings: {reviewDefinition.recipeBindings.length}</div>
+                <div>Build-to-promise: {reviewDefinition.buildToPromiseEnabled ? "enabled" : "off"}</div>
+              </div>
+            )}
+            {isManual && reviewDefinition && (
+              <div className="space-y-2 rounded-md border p-3 text-sm">
+                <div className="font-medium">Exact saved directions being reviewed</div>
+                {reviewDefinition.paths.map((path) => (
+                  <div key={`${path.sourceVariantId}:${path.destinationVariantId}`}>
+                    {path.inputQty} × {variantById.get(path.sourceVariantId)?.sku
+                      ?? `variant #${path.sourceVariantId}`} → {path.outputQty} ×{" "}
+                    {variantById.get(path.destinationVariantId)?.sku
+                      ?? `variant #${path.destinationVariantId}`} — {path.authorityState}
+                  </div>
+                ))}
+                <div className="text-muted-foreground">
+                  Every conversion step requires a listed allowed direction. Approving does not add the reverse direction.
+                  Review any saved recipe bindings in the draft evidence below.
+                </div>
+                {!manualEvidenceReady && (
+                  <div className="text-amber-800">
+                    Waiting for matching product and draft details. If they do not load, reload
+                    the page before reviewing.
+                  </div>
+                )}
               </div>
             )}
             {selectedRow.issues.length > 0 && (
@@ -1474,7 +1516,11 @@ function MigrationQueuePanel({
               <div className="text-sm">
                 Draft v{selectedRow.draft.version} · {selectedRow.draft.origin.replaceAll("_", " ")} ·
                 definition {selectedRow.draft.definitionHash.slice(0, 12)} ·
-                {selectedRow.draft.candidateMatch
+                {isManual
+                  ? selectedRow.draft.operatorInputHash === selectedRow.inputHash
+                    ? " manual rules; catalog source unchanged"
+                    : " manual rules; catalog source changed — save a new version before review"
+                  : selectedRow.draft.candidateMatch
                   ? " exact definition and provenance match"
                   : selectedRow.draft.definitionMatch
                     ? " definition matches, provenance is stale"
@@ -1545,15 +1591,15 @@ function MigrationQueuePanel({
                 <div className="flex flex-wrap gap-2">
                   <Button
                     type="button"
-                    disabled={!reviewReason.trim() || isReviewing}
+                    disabled={!reviewReason.trim() || isReviewing || !manualEvidenceReady}
                     onClick={() => onReview(selectedRow, "approved")}
                   >
-                    Approve exact candidate
+                    Approve saved rules
                   </Button>
                   <Button
                     type="button"
                     variant="outline"
-                    disabled={!reviewReason.trim() || isReviewing}
+                    disabled={!reviewReason.trim() || isReviewing || !manualEvidenceReady}
                     onClick={() => onReview(selectedRow, "changes_required")}
                   >
                     Require changes
@@ -1575,7 +1621,8 @@ function MigrationQueuePanel({
             )}
             {selectedRow.queueState === "approved" && (
               <div className="font-medium text-emerald-700">
-                This exact draft definition is approved. It is still inactive and unpublished.
+                Approved — not live. These saved rules are approved for activation, but this
+                approval does not change the rules currently in use.
               </div>
             )}
           </div>
@@ -2168,7 +2215,7 @@ function DraftEvidence({
         </div>
         <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-amber-900">
           Draft v{model.version} records recipe version and ordered BOM snapshots. Editing creates
-          an audited update to this same draft ID/version; live recipe changes do not silently
+          an audited new draft version requiring its own approval; live recipe changes do not silently
           rewrite its recorded evidence. It cannot be activated here and has no runtime effect.
         </div>
       </CardContent>

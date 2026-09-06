@@ -16,6 +16,7 @@ import {
   type TransformationAdminRecipe,
   type TransformationAdminVariant,
   unavailableBuildBindingsForEdit,
+  transformationRuntimeLabel,
 } from "../supply-transformations-model";
 
 const variants: TransformationAdminVariant[] = [
@@ -46,6 +47,21 @@ const conversionRecipe: TransformationAdminRecipe = {
 };
 
 describe("Supply & Transformations deterministic edit model", () => {
+  it("never equates approval or a sealed head alone with active runtime authority", () => {
+    expect(transformationRuntimeLabel({ head: null, activeModel: null }))
+      .toBe("Runtime status unavailable");
+    expect(transformationRuntimeLabel({ head: null, activeModel: null,
+      runtimeSelection: { authority: "legacy", revision: "1", activationRunId: null },
+    })).toBe("Existing inventory rules are in use");
+    expect(transformationRuntimeLabel({ head: null, activeModel: null,
+      runtimeSelection: { authority: "canonical", revision: "2", activationRunId: "1" },
+    })).toContain("no verified active rules");
+    expect(transformationRuntimeLabel({
+      head: { revision: "2", activeModelId: 501, draftModelId: null },
+      activeModel: { ...draftModel(), lifecycleStatus: "sealed" },
+      runtimeSelection: { authority: "canonical", revision: "2", activationRunId: "1" },
+    })).toBe("Active — in use: v4");
+  });
   it("derives reduced lossless ratios and operation direction in both directions", () => {
     expect(deriveLosslessPath(1, variants[0]!, variants[2]!)).toMatchObject({
       inputQty: "25",
