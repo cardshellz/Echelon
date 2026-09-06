@@ -102,6 +102,10 @@ jobs:
         run: >-
           npx vitest run --no-file-parallelism
           server/modules/inventory-planning/__tests__/integration/inventory-availability-foundation.integration.test.ts
+      - name: Warehouse workstation draft configuration PostgreSQL guarantees
+        run: >-
+          npx vitest run --no-file-parallelism
+          server/modules/warehouse/__tests__/integration/work-configuration.integration.test.ts
       - name: Named-schema channel, inventory, and shipping guarantees
         run: >-
           npx vitest run --no-file-parallelism

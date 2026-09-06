@@ -23,3 +23,4 @@ export * from "./marketplace-listings.schema";
 export * from "./returns.schema";
 export * from "./inventory-planning.schema";
 export * from "./build-demand.schema";
+export * from "./warehouse-work.schema";
