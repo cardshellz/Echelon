@@ -61,6 +61,15 @@ describe("warehouse inventory source HTTP boundary", () => {
     const response = await post(); expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ alreadyApplied: true });
   });
+  it("accepts saved settings and rejects authority overrides in that mode", async () => {
+    const { inventoryAuthority, fulfillmentAuthority, ...base } = request;
+    const body = { ...base, authoritySource: "warehouse_settings" };
+    expect((await post(body)).status).toBe(201);
+    expect(store.prepareDraft).toHaveBeenCalledWith(expect.objectContaining({ ...body, actorId: "operator" }));
+    store.prepareDraft.mockClear();
+    expect((await post({ ...body, inventoryAuthority, fulfillmentAuthority })).status).toBe(400);
+    expect(store.prepareDraft).not.toHaveBeenCalled();
+  });
   it("rejects forged actor and activation fields", async () => {
     expect((await post({ ...request, actorId: "forged", lifecycleStatus: "active" })).status).toBe(400);
     expect(store.prepareDraft).not.toHaveBeenCalled();
