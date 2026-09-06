@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
+import type { AssemblyWorkOwner } from "../../warehouse/work/application/assembly-work-owner";
+import { requireAssemblyOrderAuthority } from "../../orders/assembly-handoff-authority";
 
 import { pool } from "../../../db";
 import { canonicalJson } from "@shared/utils/canonical-json";
@@ -2432,6 +2434,7 @@ async function recordBuildHandoff(
     buildSystemNumber: string;
     adoptedReservationQty: bigint;
     occurredAt: Date;
+    workTaskId?: string;
   },
 ): Promise<CanonicalAvailabilityClaimBuildHandoffResult> {
   await client.query(
@@ -2471,6 +2474,7 @@ async function recordBuildHandoff(
     buildSystemNumber: input.buildSystemNumber,
     adoptedReservationQty: input.adoptedReservationQty.toString(),
     idempotentReplay: false,
+    ...(input.workTaskId ? { workTaskId: input.workTaskId } : {}),
   });
   await client.query(
     `INSERT INTO inventory.availability_claim_commands (
@@ -2522,9 +2526,17 @@ async function cancelOpenBuildHandoffs(
   client: PoolClient,
   buildWriter: CanonicalClaimBuildMutationPort | undefined,
   claim: PersistedClaim,
-  command: ClaimAuditCommand & { disposition: ClaimLifecycleDisposition },
+  command: ClaimAuditCommand & { disposition: ClaimLifecycleDisposition; idempotencyKey: string },
   occurredAt: Date,
+  workOwner?: AssemblyWorkOwner,
 ): Promise<void> {
+  // Every caller already owns the claim fence. Work-only start commands take
+  // that same fence before any task lock, so started physical work cannot race
+  // inventory release, replacement or cycle-count displacement.
+  await workOwner?.cancelUnstarted(client, {
+    claimId: claim.id.toString(), actorId: command.actor, reason: command.reason,
+    commandKey: `claim-lifecycle:${command.idempotencyKey}`, requestHash: hash(command), occurredAt: occurredAt.toISOString(),
+  });
   const openHandoffs = rows(await client.query(
     `SELECT handoff.id, handoff.claim_operation_id, handoff.build_order_id,
             handoff.adopted_reservation_qty, handoff.status,
@@ -3973,6 +3985,7 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
     private readonly clock: () => Date = () => new Date(),
     private readonly buildWriter?: CanonicalClaimBuildMutationPort,
     private readonly observationReviewWriter?: CanonicalClaimPickerObservationReviewPort,
+    private readonly workOwner?: AssemblyWorkOwner,
   ) {}
 
   async getReservationStatus(
@@ -4317,7 +4330,7 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
 
         await lockSnapshotResources(client, preliminarySnapshot);
         const lifecycleCommand = { ...command, disposition: "supersede" as const };
-        await cancelOpenBuildHandoffs(client, this.buildWriter, claim, lifecycleCommand, occurredAt);
+        await cancelOpenBuildHandoffs(client, this.buildWriter, claim, lifecycleCommand, occurredAt, this.workOwner);
         const released = await releaseClaimResources(client, {
           inventoryWriter: this.inventoryWriter,
           claim,
@@ -4741,6 +4754,7 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
             claim,
             { ...lifecycleCommand, disposition: "supersede" as const },
             occurredAt,
+            this.workOwner,
           );
           releasedByClaim.set(claim.id.toString(), await releaseClaimResources(client, {
             inventoryWriter: this.inventoryWriter,
@@ -5448,6 +5462,9 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
     rawCommand: CanonicalAvailabilityClaimBuildHandoffCommand,
   ): Promise<CanonicalAvailabilityClaimBuildHandoffResult> {
     const command = canonicalAvailabilityClaimBuildHandoffCommandSchema.parse(rawCommand);
+    if (command.work && !this.workOwner) {
+      throw new InventoryAvailabilityClaimRepositoryError("ASSEMBLY_WORK_OWNER_UNAVAILABLE", "The warehouse work owner is not configured.");
+    }
     const requestHash = hash(command);
     const occurredAt = this.clock();
     if (Number.isNaN(occurredAt.getTime())) {
@@ -5509,6 +5526,9 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
           );
         }
         const operation = await lockBuildOperation(client, claim.id, command.operationKey);
+        if (command.work) await requireAssemblyOrderAuthority(client, {
+          orderId: claim.orderId, orderItemId: operation.orderItemId, actorId: command.actor, action: "handoff",
+        });
         const plannedOperation = assertOperationMatchesPlan(claim, operation);
         const resources = await loadOperationExecutionResources(client, claim.id, operation, plannedOperation);
         const handoff = await this.buildWriter.handoffOperation({
@@ -5530,6 +5550,17 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
           actor: command.actor,
           occurredAt,
         });
+        const workTask = command.work ? await this.workOwner!.handoff(client, {
+          warehouseId: operation.warehouseId, claimId: claim.id.toString(), claimOperationId: operation.id.toString(),
+          operationKey: operation.operationKey, orderId: claim.orderId, orderItemId: operation.orderItemId,
+          buildOrderId: handoff.buildOrderId, buildSystemNumber: handoff.buildSystemNumber,
+          destinationVariantId: operation.destinationVariantId, outputQty: operation.outputQty.toString(),
+          outputLocationId: operation.outputLocationId,
+          inputs: plannedOperation.inputs.map((input) => ({ variantId: input.sourceVariantId, quantity: input.requiredQty })),
+          sourceLocationIds: resources.map((resource) => resource.warehouseLocationId), route: command.work,
+          actorId: command.actor, reason: command.reason, commandKey: `handoff:${command.idempotencyKey}`,
+          requestHash, occurredAt: occurredAt.toISOString(),
+        }) : null;
         const result = await recordBuildHandoff(client, {
           claim,
           operation,
@@ -5539,6 +5570,7 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
           buildSystemNumber: handoff.buildSystemNumber,
           adoptedReservationQty: handoff.adoptedReservationQty,
           occurredAt,
+          ...(workTask ? { workTaskId: workTask.id } : {}),
         });
         await client.query("COMMIT");
         return result;
@@ -5572,6 +5604,9 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
     rawCommand: CanonicalAvailabilityClaimOperationExecutionCommand,
   ): Promise<CanonicalAvailabilityClaimOperationExecutionResult> {
     const command = canonicalAvailabilityClaimOperationExecutionCommandSchema.parse(rawCommand);
+    if (command.work && !this.workOwner) {
+      throw new InventoryAvailabilityClaimRepositoryError("ASSEMBLY_WORK_OWNER_UNAVAILABLE", "The warehouse work owner is not configured.");
+    }
     const requestHash = hash(command);
     const occurredAt = this.clock();
     if (Number.isNaN(occurredAt.getTime())) {
@@ -5638,6 +5673,9 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
           );
         }
         const locked = await lockHandedOffBuildOperation(client, claim.id, command.operationKey);
+        if (command.work) await requireAssemblyOrderAuthority(client, {
+          orderId: claim.orderId, orderItemId: locked.operation.orderItemId, actorId: command.actor, action: "complete",
+        });
         const plannedOperation = assertOperationMatchesPlan(claim, locked.operation);
         const resources = await loadOperationExecutionResources(
           client,
@@ -5667,6 +5705,13 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
           actor: command.actor,
           reason: command.reason,
           occurredAt,
+        });
+        // Validate the worker fence and commit task evidence AFTER all owning
+        // inventory/cost locks. Any rejection rolls the entire posting back.
+        await this.workOwner?.recordCompletion(client, {
+          claimOperationId: locked.operation.id.toString(), producedQty: locked.operation.outputQty.toString(),
+          fence: command.work, actorId: command.actor, reason: command.reason,
+          commandKey: `complete:${command.idempotencyKey}`, requestHash, occurredAt: occurredAt.toISOString(),
         });
         const result = await recordOperationExecution(client, {
           claim,
@@ -5714,6 +5759,7 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
     rawCommand: CanonicalAvailabilityClaimOperationExecutionCommand,
   ): Promise<CanonicalAvailabilityClaimOperationExecutionResult> {
     const command = canonicalAvailabilityClaimOperationExecutionCommandSchema.parse(rawCommand);
+    if (command.work) throw new InventoryAvailabilityClaimRepositoryError("ASSEMBLY_WORK_NOT_PACKAGE_EXECUTION", "Assembly work fences cannot execute package conversions.");
     const requestHash = hash(command);
     const occurredAt = this.clock();
     if (Number.isNaN(occurredAt.getTime())) {
@@ -5941,7 +5987,7 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
             },
           );
         }
-        await cancelOpenBuildHandoffs(client, this.buildWriter, claim, command, occurredAt);
+        await cancelOpenBuildHandoffs(client, this.buildWriter, claim, command, occurredAt, this.workOwner);
         const released = await releaseClaimResources(client, {
           inventoryWriter: this.inventoryWriter,
           claim,

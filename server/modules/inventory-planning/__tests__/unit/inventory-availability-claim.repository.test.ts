@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { describe, expect, it, vi } from "vitest";
+import { WarehouseWorkError } from "../../../warehouse/work/domain/work-configuration";
 
 import { canonicalJson } from "@shared/utils/canonical-json";
 import {
@@ -1752,7 +1753,7 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
     ]);
   });
 
-  it("hands exact claim-owned lots to one build order without a second reservation", async () => {
+  it.each(["claim_only", "work", "work_rejected"])("hands exact claim-owned lots to one build order without a second reservation (%s)", async (mode) => {
     const plan = buildClaimPlan();
     const command = {
       claimId: "9",
@@ -1760,9 +1761,11 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
       idempotencyKey: "handoff-build:9:1",
       actor: "test-user",
       reason: "unit test",
+      ...(mode === "claim_only" ? {} : { work: { warehouseId: 1, stationId: "00000000-0000-4000-8000-000000000001", configurationRevision: 1, acknowledgeWorkOnlyHandoff: true as const } }),
     };
     const fake = createPool(async (text) => {
-      if (text.startsWith("BEGIN") || text === "COMMIT") return { rows: [] };
+      if (text.startsWith("BEGIN") || text === "COMMIT" || text === "ROLLBACK") return { rows: [] };
+      if (text.includes("FROM wms.orders AS orders")) return { rows: [{ warehouse_status: "in_progress", on_hold: 0, assigned_picker_id: "test-user", item_on_hold: 0, item_status: "pending", requires_shipping: 1 }] };
       if (text.includes("FROM inventory.availability_claim_commands")) return { rows: [] };
       if (text.includes("FROM inventory.availability_runtime_authority")) {
         return { rows: [{ authority: "canonical", activation_run_id: "8", revision: "2" }] };
@@ -1874,7 +1877,21 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
       buildWriter,
     );
 
-    await expect(repository.handoffBuildOperation(command)).resolves.toEqual({
+    const workOwner = { handoff: vi.fn(async () => {
+      if (mode === "work_rejected") throw new WarehouseWorkError("WORK_SCOPE_DENIED", "Denied", 403);
+      return { id: "44" };
+    }) };
+    const workRepository = mode === "claim_only" ? repository : new PostgresInventoryAvailabilityClaimRepository(
+      inventoryWriter, fake.pool, () => FIXED_TIME, buildWriter, undefined, workOwner as any,
+    );
+    if (mode === "work_rejected") {
+      await expect(workRepository.handoffBuildOperation(command)).rejects.toMatchObject({ code: "WORK_SCOPE_DENIED" });
+      expect(fake.query.mock.calls.map(([sql]) => sql)).toContain("ROLLBACK");
+      expect(fake.query.mock.calls.map(([sql]) => sql)).not.toContain("COMMIT");
+      expect(fake.query.mock.calls.some(([sql]) => sql.startsWith("INSERT INTO inventory.availability_claim_commands"))).toBe(false);
+      return;
+    }
+    await expect(workRepository.handoffBuildOperation(command)).resolves.toEqual({
       outcome: "build_handed_off",
       claimId: "9",
       claimOperationId: "10",
@@ -1883,7 +1900,12 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
       buildSystemNumber: "BLD-00000091",
       adoptedReservationQty: "5",
       idempotentReplay: false,
+      ...(mode === "work" ? { workTaskId: "44" } : {}),
     });
+    if (mode === "work") {
+      expect(workOwner.handoff.mock.invocationCallOrder[0]).toBeGreaterThan(buildWriter.handoffOperation.mock.invocationCallOrder[0]);
+      expect(workOwner.handoff).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ claimId: "9", claimOperationId: "10", sourceLocationIds: [2], outputLocationId: 3 }));
+    }
     expect(buildWriter.handoffOperation).toHaveBeenCalledWith(expect.objectContaining({
       claimId: BigInt(9),
       claimOperationId: BigInt(10),
@@ -1936,7 +1958,7 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
     expect(inventoryWriter.executePackageOperation).not.toHaveBeenCalled();
   });
 
-  it("executes a handed-off claim build and records its output ownership atomically", async () => {
+  it.each(["claim_only", "work", "work_rejected"])("executes a handed-off claim build and records its output ownership atomically (%s)", async (mode) => {
     const plan = buildClaimPlan();
     const command = {
       claimId: "9",
@@ -1944,9 +1966,11 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
       idempotencyKey: "execute-build:9:1",
       actor: "test-user",
       reason: "unit test build execution",
+      ...(mode === "claim_only" ? {} : { work: { taskId: "44", expectedVersion: 2, completedOutputQty: "3", confirmPhysicalAssembly: true as const } }),
     };
     const fake = createPool(async (text) => {
-      if (text.startsWith("BEGIN") || text === "COMMIT") return { rows: [] };
+      if (text.startsWith("BEGIN") || text === "COMMIT" || text === "ROLLBACK") return { rows: [] };
+      if (text.includes("FROM wms.orders AS orders")) return { rows: [{ warehouse_status: "in_progress", on_hold: 0, assigned_picker_id: "picker", item_on_hold: 0, item_status: "pending", requires_shipping: 1 }] };
       if (text.includes("FROM inventory.availability_claim_commands")) return { rows: [] };
       if (text.includes("FROM inventory.availability_runtime_authority")) {
         return { rows: [{ authority: "canonical", activation_run_id: "8", revision: "2" }] };
@@ -2077,7 +2101,21 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
       buildWriter,
     );
 
-    await expect(repository.executeBuildOperation(command)).resolves.toEqual({
+    const workOwner = { recordCompletion: vi.fn(async () => {
+      if (mode === "work_rejected") throw new WarehouseWorkError("WORK_TASK_VERSION_CONFLICT", "Stale revision", 409);
+    }) };
+    const workRepository = mode === "claim_only" ? repository : new PostgresInventoryAvailabilityClaimRepository(
+      createInventoryWriter(), fake.pool, () => FIXED_TIME, buildWriter, undefined, workOwner as any,
+    );
+    if (mode === "work_rejected") {
+      await expect(workRepository.executeBuildOperation(command)).rejects.toMatchObject({ code: "WORK_TASK_VERSION_CONFLICT" });
+      expect(buildWriter.executeOperation).toHaveBeenCalledOnce();
+      expect(fake.query.mock.calls.map(([sql]) => sql)).toContain("ROLLBACK");
+      expect(fake.query.mock.calls.map(([sql]) => sql)).not.toContain("COMMIT");
+      expect(fake.query.mock.calls.some(([sql]) => sql.startsWith("INSERT INTO inventory.availability_claim_commands"))).toBe(false);
+      return;
+    }
+    await expect(workRepository.executeBuildOperation(command)).resolves.toEqual({
       outcome: "executed",
       claimId: "9",
       claimOperationId: "10",
@@ -2099,9 +2137,13 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
     const commandInsert = fake.query.mock.calls.find(([text]) =>
       String(text).startsWith("INSERT INTO inventory.availability_claim_commands"));
     expect(commandInsert?.[1]?.[2]).toBe("execute_build");
+    if (mode === "work") {
+      expect(workOwner.recordCompletion.mock.invocationCallOrder[0]).toBeGreaterThan(buildWriter.executeOperation.mock.invocationCallOrder[0]);
+      expect(workOwner.recordCompletion).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ claimOperationId: "10", producedQty: "3", fence: command.work }));
+    }
   });
 
-  it("cancels unexecuted build handoffs before releasing their claim-owned inventory", async () => {
+  it.each(["claim_only", "queued", "started"])("cancels unexecuted build handoffs before releasing their claim-owned inventory (%s)", async (mode) => {
     const plan = buildClaimPlan();
     const command = {
       orderId: 70,
@@ -2111,7 +2153,7 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
       reason: "order cancelled",
     };
     const fake = createPool(async (text) => {
-      if (text.startsWith("BEGIN") || text === "COMMIT") return { rows: [] };
+      if (text.startsWith("BEGIN") || text === "COMMIT" || text === "ROLLBACK") return { rows: [] };
       if (text.includes("FROM inventory.availability_claim_commands")) return { rows: [] };
       if (text.includes("FROM inventory.availability_runtime_authority")) {
         return { rows: [{ authority: "canonical", activation_run_id: "8", revision: "2" }] };
@@ -2181,7 +2223,20 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
       buildWriter,
     );
 
-    await expect(repository.releaseOrderClaim(command)).resolves.toEqual({
+    const workOwner = { cancelUnstarted: vi.fn(async () => {
+      if (mode === "started") throw new WarehouseWorkError("WORK_PHYSICAL_RECOVERY_REQUIRED", "Started assembly needs recovery", 409);
+    }) };
+    const workRepository = mode === "claim_only" ? repository : new PostgresInventoryAvailabilityClaimRepository(
+      inventoryWriter, fake.pool, () => FIXED_TIME, buildWriter, undefined, workOwner as any,
+    );
+    if (mode === "started") {
+      await expect(workRepository.releaseOrderClaim(command)).rejects.toMatchObject({ code: "WORK_PHYSICAL_RECOVERY_REQUIRED" });
+      expect(inventoryWriter.releaseResources).not.toHaveBeenCalled();
+      expect(buildWriter.cancelOperation).not.toHaveBeenCalled();
+      expect(fake.query.mock.calls.map(([sql]) => sql)).toContain("ROLLBACK");
+      return;
+    }
+    await expect(workRepository.releaseOrderClaim(command)).resolves.toEqual({
       outcome: "released",
       claimId: "9",
       claimKey: plan.requestKey,
@@ -2201,6 +2256,7 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
       claimId: BigInt(9),
       resources: [expect.objectContaining({ claimResourceId: BigInt(12), releaseQty: BigInt(5) })],
     }));
+    if (mode === "queued") expect(workOwner.cancelUnstarted.mock.invocationCallOrder[0]).toBeLessThan(buildWriter.cancelOperation.mock.invocationCallOrder[0]);
   });
 
   it("releases the exact active claim when the locked order has no claimable demand", async () => {

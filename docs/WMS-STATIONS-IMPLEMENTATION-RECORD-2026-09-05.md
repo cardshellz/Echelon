@@ -124,3 +124,7 @@ No assumption about live stock, employees, station locations, provider configura
 The existing warehouse record is treated as a building/site because `shared/schema/warehouse.schema.ts` explicitly defines it that way. Warehouse profiles are explicit copies of the Small Team preset in this slice, not a new business-wide inheritance engine. One employee may have different scopes in different warehouses; one warehouse scope may be warehouse-wide, a zone, or a set of stations. More elaborate unions and sub-profile overrides remain future extensions, not hidden fallback behavior.
 
 The user approved implementation, not production activation. Keeping this configuration slice non-executing is deliberate sequencing, not a claim that a stub completes assembly. The next substantive package is the shared task/handoff engine connected to the real outbound assembly flow. No additional deployment is required merely to discuss or implement that next package.
+
+## Continuation — 2026-09-06
+
+The explicit canonical assembly-work backend is recorded in [WMS-ASSEMBLY-WORK-BACKEND-IMPLEMENTATION-2026-09-06.md](WMS-ASSEMBLY-WORK-BACKEND-IMPLEMENTATION-2026-09-06.md). It adds durable build jobs, employee receipt/assignment, guarded completion, and started-work release protection. The gun, bench/packing UI, partial accounting, and physical recovery are not complete. This is a local working-branch checkpoint, not another deployment request; the earlier foundation record above remains historical.

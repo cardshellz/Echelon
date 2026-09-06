@@ -9,7 +9,7 @@ import { prepareWorkSaveAttempt } from "../../work-configuration-draft";
 
 function setup(): WorkSetup {
   return { warehouse: { id: 1, code: "HQ", name: "Headquarters" },
-    revision: { warehouseId: 1, revision: 0, configuration: emptyWorkConfiguration(), executionStatus: "not_connected", savedAt: null, savedBy: null, reason: null },
+    revision: { warehouseId: 1, revision: 0, configuration: emptyWorkConfiguration(), executionStatus: "explicit_handoff_only", savedAt: null, savedBy: null, reason: null },
     locations: [], employees: [], canConfigure: true, canManageAccess: true };
 }
 function render(data: WorkSetup) {
@@ -19,12 +19,14 @@ function render(data: WorkSetup) {
 describe("warehouse work draft UI", () => {
   it("clearly labels inactive execution, combined defaults, and real physical stations", () => {
     const html = render(setup());
-    expect(html).toContain("live execution not connected");
+    expect(html).toContain("gun and packing integration is not connected yet");
+    expect(html).toContain("Saving does not start jobs or post inventory");
     expect(html).toContain("No stations configured");
     expect(html).toContain("Receive &amp; stow");
     expect(html).toContain("Same operator");
     expect(html).toContain("Combined station / operator");
-    expect(html).toContain("Save draft setup");
+    expect(html).toContain("Save setup");
+    expect(html).not.toContain("Save draft setup");
     expect(html).not.toContain("Activate execution");
   });
   it("disables configuration and distinguishes access-management permission", () => {
@@ -32,6 +34,15 @@ describe("warehouse work draft UI", () => {
     expect(html).toContain('fieldset disabled=""');
     expect(html).toContain("separate Manage access permission");
     expect(html).toContain("It does not grant role permissions");
+  });
+  it("shows explicit assembly bindings separately from the station's physical identity", () => {
+    const data = setup();
+    data.locations = [{ id: 1, code: "BENCH", active: true, zone: "PACK" }, { id: 2, code: "MATERIALS", active: true, zone: "PACK" }];
+    data.revision.configuration.stations = [{ id: "00000000-0000-4000-8000-000000000001", code: "ASM", name: "Assembly", locationId: 1,
+      capabilities: ["assembly"], enabled: true, assemblyBindings: { materialLocationIds: [2], outputLocationId: 1 } }];
+    const html = render(data);
+    expect(html).toContain("Materials at this station"); expect(html).toContain("Finished output location");
+    expect(html).toContain("Handoff never transfers stock"); expect(html).toContain("MATERIALS");
   });
   it("keeps the same command ID for exact retries without mutating draft state", () => {
     const draft = { expectedRevision: 0, configuration: emptyWorkConfiguration(), reason: "Small team setup" };

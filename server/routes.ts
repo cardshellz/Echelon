@@ -11,6 +11,7 @@ import { registerFinancialCommandOperationsRoutes } from "./platform/commands/fi
 import { registerShopifyRoutes } from "./routes/shopify.routes";
 import { registerWarehouseRoutes } from "./modules/warehouse/warehouse.routes";
 import { registerWorkConfigurationRoutes } from "./modules/warehouse/work/interfaces/work-configuration.routes";
+import { registerAssemblyWorkRoutes } from "./modules/warehouse/work/interfaces/assembly-work.routes";
 import { registerProductRoutes } from "./modules/catalog/catalog.routes";
 import { registerCatalogExportRoutes } from "./modules/catalog-export/interfaces/http/catalog-export.routes";
 import { registerInventoryRoutes } from "./modules/inventory/inventory.routes";
@@ -169,6 +170,7 @@ export async function registerRoutes(
   registerShopifyRoutes(app);
   registerWarehouseRoutes(app);
   registerWorkConfigurationRoutes(app);
+  registerAssemblyWorkRoutes(app);
   await registerProductRoutes(app);
   registerCatalogExportRoutes(app);
   registerInventoryRoutes(app);

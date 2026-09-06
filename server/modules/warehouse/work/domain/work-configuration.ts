@@ -21,7 +21,10 @@ export function canonicalConfiguration(input: WorkConfiguration): WorkConfigurat
   const config = workConfigurationSchema.parse(input); // Deep copy; never mutate caller input.
   config.stations.sort((a, b) => compare(a.id, b.id));
   config.access.sort((a, b) => compare(a.userId, b.userId));
-  for (const station of config.stations) station.capabilities.sort(compare);
+  for (const station of config.stations) {
+    station.capabilities.sort(compare);
+    station.assemblyBindings?.materialLocationIds.sort((left, right) => left - right);
+  }
   for (const access of config.access) {
     access.capabilities.sort(compare);
     if (access.scope.kind === "stations") access.scope.stationIds.sort(compare);
@@ -57,6 +60,12 @@ export function validateConfigurationReferences(
     const location = locationMap.get(station.locationId);
     if (!location || (station.enabled && !location.active)) {
       throw new WarehouseWorkError("WORK_LOCATION_INVALID", "An enabled station needs an active location in this warehouse", 422, { stationId: station.id });
+    }
+    if (station.assemblyBindings) {
+      const bindingIds = [...station.assemblyBindings.materialLocationIds, station.assemblyBindings.outputLocationId];
+      if (bindingIds.some((id) => !locationMap.has(id) || (station.enabled && !locationMap.get(id)!.active))) {
+        throw new WarehouseWorkError("WORK_ASSEMBLY_BINDING_INVALID", "Assembly bindings must reference locations in this warehouse; enabled stations require active locations", 422, { stationId: station.id });
+      }
     }
   }
   for (const access of next.access) {
