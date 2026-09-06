@@ -10,6 +10,7 @@ import { AssemblyWorkRepository } from "../../work/infrastructure/assembly-work.
 import { AssemblyWorkOwner } from "../../work/application/assembly-work-owner";
 import { AssemblyWorkService } from "../../work/application/assembly-work.service";
 import { lockAssemblyClaimForWork } from "../../../inventory-planning/application/assembly-work-claim-access";
+import { recordAssemblyOutputPickLocation } from "../../../wms/assembly-output-pick-command";
 import { config, start, TIME } from "../assembly-work.fixture";
 
 loadEnv({ path: resolve(process.cwd(), ".env.test") });
@@ -55,8 +56,8 @@ databaseSuite("assembly work PostgreSQL ownership and atomicity", () => {
       CREATE TABLE identity.auth_role_permissions (id serial PRIMARY KEY, role_id integer REFERENCES identity.auth_roles(id), permission_id integer REFERENCES identity.auth_permissions(id), constraints jsonb);
       CREATE TABLE inventory.availability_claims (id bigint PRIMARY KEY, status text NOT NULL);
       CREATE TABLE inventory.availability_claim_operations (id bigint PRIMARY KEY, claim_id bigint REFERENCES inventory.availability_claims(id), UNIQUE(id,claim_id));
-      CREATE TABLE wms.orders (id integer PRIMARY KEY, warehouse_status text NOT NULL, on_hold integer DEFAULT 0);
-      CREATE TABLE wms.order_items (id integer PRIMARY KEY, order_id integer REFERENCES wms.orders(id), status text NOT NULL, on_hold integer DEFAULT 0, requires_shipping integer NOT NULL DEFAULT 1);
+      CREATE TABLE wms.orders (id integer PRIMARY KEY, warehouse_status text NOT NULL, on_hold integer DEFAULT 0, assigned_picker_id varchar);
+      CREATE TABLE wms.order_items (id integer PRIMARY KEY, order_id integer REFERENCES wms.orders(id), status text NOT NULL, on_hold boolean NOT NULL DEFAULT false, requires_shipping integer NOT NULL DEFAULT 1, location varchar(50), zone varchar(10));
       -- Test-only stand-in for an upstream owner's posting, NOT an inventory simulation.
       CREATE TABLE inventory.work_test_postings (claim_id bigint NOT NULL);
       INSERT INTO identity.users(id,username) VALUES ('admin','admin'),('picker','picker'),('assembler','assembler'),('other','other');
@@ -122,6 +123,27 @@ databaseSuite("assembly work PostgreSQL ownership and atomicity", () => {
     expect(f.task).toMatchObject({ state: "queued", assignedTo: null, receivedAt: null, outputQty: "2", configurationRevision: 1 });
     expect(await eventCount(f.task.id)).toBe(1);
     expect((await service.queue("assembler", { warehouseId: f.id })).tasks.map((task) => task.id)).toEqual([f.task.id]);
+  });
+  it("uses boolean item holds and rolls back output-pick WMS evidence on failure", async () => {
+    const f = await fixture();
+    const configuration = structuredClone(f.configuration);
+    configuration.access.find((entry) => entry.userId === "assembler")!.capabilities.push("picking");
+    await setup.save("admin", f.id, { expectedRevision: 1, commandId: randomUUID(), reason: "Permit finished output picking", configuration });
+    await service.command("assembler", f.task.id, f.startCommand); await completion(f, 2);
+    const evidence = { fence: { taskId: f.task.id, expectedVersion: 3, confirmPhysicalOutput: true as const },
+      claimId: f.task.claimId, orderId: f.task.orderId, orderItemId: f.task.orderItemId, variantId: 105,
+      locationId: f.id * 10 + 3, quantity: "2", actorId: "assembler", producerOperationKeys: [f.task.operationKey] };
+    await query("UPDATE wms.order_items SET on_hold=true WHERE id=$1", [f.task.orderItemId]);
+    await expect(repository.transaction((client) => owner.authorizeOutputPick(client, evidence))).rejects.toMatchObject({ code: "WORK_ORDER_NOT_EXECUTABLE" });
+    await query("UPDATE wms.order_items SET on_hold=false WHERE id=$1", [f.task.orderItemId]);
+    await expect(repository.transaction(async (client) => {
+      const location = await owner.authorizeOutputPick(client, evidence);
+      await client.query("UPDATE wms.order_items SET status='completed' WHERE id=$1", [f.task.orderItemId]);
+      await recordAssemblyOutputPickLocation(client, { orderId: f.task.orderId, orderItemId: f.task.orderItemId, ...location });
+      throw new Error("Simulated receipt persistence failure");
+    })).rejects.toThrow("Simulated receipt persistence failure");
+    expect((await query("SELECT status,location,zone FROM wms.order_items WHERE id=$1", [f.task.orderItemId])).rows[0])
+      .toEqual({ status: "pending", location: null, zone: null });
   });
   it("lets exactly one competing employee claim/start the job", async () => {
     const f = await fixture();
@@ -197,9 +219,9 @@ databaseSuite("assembly work PostgreSQL ownership and atomicity", () => {
   });
   it("does not start work after a hold; blocking observations remain recordable", async () => {
     const f = await fixture();
-    await query("UPDATE wms.order_items SET on_hold=1 WHERE id=$1", [f.task.orderItemId]);
+    await query("UPDATE wms.order_items SET on_hold=true WHERE id=$1", [f.task.orderItemId]);
     await expect(service.command("assembler", f.task.id, f.startCommand)).rejects.toMatchObject({ code: "WORK_ORDER_NOT_EXECUTABLE" });
-    await query("UPDATE wms.order_items SET on_hold=0 WHERE id=$1", [f.task.orderItemId]);
+    await query("UPDATE wms.order_items SET on_hold=false WHERE id=$1", [f.task.orderItemId]);
     await service.command("assembler", f.task.id, f.startCommand);
     await query("UPDATE wms.orders SET on_hold=1 WHERE id=$1", [f.task.orderId]);
     await expect(service.command("assembler", f.task.id, { action: "block", commandId: randomUUID(), expectedVersion: 2, reason: "Order hold noticed" }))

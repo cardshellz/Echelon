@@ -11,7 +11,7 @@ export async function requireAssemblyOrderAuthority(client: PoolClient, input: {
 }): Promise<void> {
   const result = await client.query<{
     warehouse_status: string; on_hold: number; assigned_picker_id: string | null;
-    item_on_hold: number | null; item_status: string; requires_shipping: number;
+    item_on_hold: boolean; item_status: string; requires_shipping: number;
   }>(`
     SELECT orders.warehouse_status, orders.on_hold, orders.assigned_picker_id,
       item.on_hold AS item_on_hold, item.status AS item_status, item.requires_shipping
@@ -19,7 +19,7 @@ export async function requireAssemblyOrderAuthority(client: PoolClient, input: {
     WHERE orders.id=$1 AND item.id=$2
   `, [input.orderId, input.orderItemId]);
   const row = result.rows[0];
-  if (!row || row.requires_shipping !== 1 || row.on_hold === 1 || row.item_on_hold === 1
+  if (!row || row.requires_shipping !== 1 || row.on_hold !== 0 || row.item_on_hold !== false
     || ["shipped", "cancelled"].includes(row.warehouse_status) || ["cancelled", "completed", "short"].includes(row.item_status)) {
     throw new AssemblyOrderAuthorityError("WORK_ORDER_NOT_EXECUTABLE", "The order or line is held, terminal, or not physical warehouse work", { orderId: input.orderId, orderItemId: input.orderItemId });
   }

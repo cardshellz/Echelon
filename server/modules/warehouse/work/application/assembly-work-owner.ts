@@ -1,4 +1,6 @@
 import type { PoolClient } from "pg";
+import type { AssemblyOutputPickFence } from "@shared/warehouse-assembly-execution";
+import { requireAssemblyOrderAuthority } from "../../../orders/assembly-handoff-authority";
 import {
   type AssemblyTask, type AssemblyWorkRoute, type AssemblyWorkFence,
 } from "@shared/warehouse-assembly-work";
@@ -25,6 +27,35 @@ export class AssemblyWorkOwner {
     readonly tasks: AssemblyWorkRepository,
     private readonly actorReader: WorkActorReader = readWarehouseWorkActor,
   ) {}
+
+  /** Inventory owner calls after acquiring stock locks, before committing its pick. */
+  async authorizeOutputPick(client: PoolClient, input: {
+    fence: AssemblyOutputPickFence; claimId: string; orderId: number; orderItemId: number;
+    variantId: number; locationId: number; quantity: string; actorId: string;
+    producerOperationKeys: (string | null)[];
+  }): Promise<{ locationCode: string; zone: string | null }> {
+    const task = await this.tasks.byId(client, input.fence.taskId);
+    if (!task) throw new WarehouseWorkError("WORK_TASK_NOT_FOUND", "Assembly job not found", 404);
+    const context = await this.context(client, task.warehouseId, input.actorId,
+      { stationId: task.station.id, locationIds: [task.station.locationId, input.locationId] });
+    requireAssemblyScope(context.revision.configuration, context.actor, task.station, context.locations, "assembly");
+    requireAssemblyScope(context.revision.configuration, context.actor, task.station, context.locations, "picking");
+    const locked = await this.tasks.byId(client, task.id, true);
+    if (!locked || locked.version !== input.fence.expectedVersion || locked.version !== task.version) {
+      throw new WarehouseWorkError("WORK_TASK_VERSION_CONFLICT", "Assembly work changed; reload the job", 409);
+    }
+    if (task.state !== "completed" || task.assignedTo !== input.actorId || !task.receivedAt
+      || task.claimId !== input.claimId || task.orderId !== input.orderId || task.orderItemId !== input.orderItemId
+      || task.destinationVariantId !== input.variantId || task.station.assemblyBindings?.outputLocationId !== input.locationId
+      || BigInt(input.quantity) > BigInt(task.outputQty) || input.producerOperationKeys.length === 0
+      || input.producerOperationKeys.some((key) => key !== task.operationKey)) {
+      throw new WarehouseWorkError("WORK_OUTPUT_PICK_FENCE_INVALID", "Output must belong to this completed job, location, order, and assigned assembler", 409);
+    }
+    await requireAssemblyOrderAuthority(client, { orderId: task.orderId, orderItemId: task.orderItemId, actorId: input.actorId, action: "complete" });
+    const location = context.locations.find((row) => row.id === input.locationId && row.active);
+    if (!location) throw new WarehouseWorkError("WORK_OUTPUT_LOCATION_MISSING", "Assembly output location is unavailable", 409);
+    return { locationCode: location.code, zone: location.zone };
+  }
 
   async context(client: PoolClient, warehouseId: number, actorId: string, area?: { stationId: string; locationIds?: number[] }) {
     const warehouse = await this.configuration.warehouse(client, warehouseId, false);

@@ -13,7 +13,7 @@ function harness() {
   const query = vi.fn(async (sql: string) => {
     sequence.push(sql);
     if (sql.includes("FROM wms.orders")) return { rows: [{ warehouse_status: "in_progress", on_hold: 0 }] };
-    if (sql.includes("FROM wms.order_items")) return { rows: [{ status: "pending", on_hold: 0, requires_shipping: 1 }] };
+    if (sql.includes("FROM wms.order_items")) return { rows: [{ status: "pending", on_hold: false, requires_shipping: 1 }] };
     return { rows: sql.includes("availability_claims") ? [{ status: "active" }] : [] };
   });
   const client = { query, release: vi.fn() } as unknown as PoolClient;
@@ -48,6 +48,45 @@ function handoffEvidence() {
     route: { warehouseId: 1, stationId: STATION, configurationRevision: 1, acknowledgeWorkOnlyHandoff: true as const } };
 }
 describe("assembly work application boundary", () => {
+  function outputEvidence() {
+    return { fence: { taskId: "1", expectedVersion: 3, confirmPhysicalOutput: true as const },
+      claimId: "9", orderId: 70, orderItemId: 71, variantId: 105, locationId: 3, quantity: "2", actorId: "assembler",
+      producerOperationKeys: ["build:10"] as (string | null)[] };
+  }
+  function outputHarness() {
+    const h = harness();
+    h.configuration.access.find((entry) => entry.userId === "assembler")!.capabilities.push("picking");
+    vi.mocked(h.tasks.byId).mockResolvedValue(task({ state: "completed", version: 3, assignedTo: "assembler", receivedAt: TIME, receivedBy: "assembler", startedAt: TIME, completedAt: TIME }));
+    h.query.mockImplementation(async (sql: string) => ({ rows: sql.includes("AS item_on_hold")
+      ? [{ warehouse_status: "in_progress", on_hold: 0, item_on_hold: false, item_status: "pending", requires_shipping: 1 }] : [] }));
+    return h;
+  }
+  it("authorizes only the completed job's physical output without starting a second stock transaction", async () => {
+    const h = outputHarness(); h.configuration.stations[0].enabled = false;
+    await expect(h.owner.authorizeOutputPick(h.client, outputEvidence())).resolves.toEqual({ locationCode: "FINISHED", zone: "PACK" });
+    expect(h.tasks.byId).toHaveBeenLastCalledWith(h.client, "1", true);
+    expect(h.tasks.update).not.toHaveBeenCalled();
+    expect(h.query).not.toHaveBeenCalledWith("BEGIN");
+  });
+  it.each(["worker", "version", "claim", "order", "item", "variant", "location", "quantity", "producer", "missing-producer", "state", "receipt", "permission", "hold"])("rejects output-pick %s violations", async (invalid) => {
+    const h = outputHarness(); const evidence = outputEvidence();
+    if (invalid === "worker") evidence.actorId = "other";
+    if (invalid === "version") evidence.fence.expectedVersion = 2;
+    if (invalid === "claim") evidence.claimId = "99";
+    if (invalid === "order") evidence.orderId = 99;
+    if (invalid === "item") evidence.orderItemId = 99;
+    if (invalid === "variant") evidence.variantId = 999;
+    if (invalid === "location") evidence.locationId = 2;
+    if (invalid === "quantity") evidence.quantity = "3";
+    if (invalid === "producer") evidence.producerOperationKeys = [null];
+    if (invalid === "missing-producer") evidence.producerOperationKeys = [];
+    if (invalid === "state") vi.mocked(h.tasks.byId).mockResolvedValue(task());
+    if (invalid === "receipt") vi.mocked(h.tasks.byId).mockResolvedValue(task({ state: "completed", version: 3, assignedTo: "assembler" }));
+    if (invalid === "permission") h.configuration.access.find((entry) => entry.userId === "assembler")!.capabilities = ["assembly"];
+    if (invalid === "hold") h.query.mockImplementation(async () => ({ rows: [{ warehouse_status: "in_progress", on_hold: 0, item_on_hold: true, item_status: "pending", requires_shipping: 1 }] }));
+    await expect(h.owner.authorizeOutputPick(h.client, evidence)).rejects.toThrow();
+    expect(h.tasks.update).not.toHaveBeenCalled();
+  });
   it("locks the claim before identity/task locks and commits start plus immutable receipt together", async () => {
     const h = harness(); const result = await h.service.command("assembler", "1", start());
     expect(result).toMatchObject({ task: { assignedTo: "assembler", version: 2 }, idempotentReplay: false });
