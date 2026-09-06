@@ -35,7 +35,7 @@ export class WarehouseInventorySourceService {
     const parsed = prepareWarehouseInventorySourceRequestSchema.safeParse(input);
     if (!parsed.success) {
       throw new WarehouseInventorySourceError(400, "WAREHOUSE_INVENTORY_SOURCE_INVALID_REQUEST",
-        "Select a warehouse, both authority settings, and a reason using current warehouse data.");
+        "Select saved warehouse settings or both explicit authorities, and supply a reason using current warehouse data.");
     }
     const actor = z.string().trim().min(1).max(100).safeParse(actorInput);
     if (!actor.success) {
