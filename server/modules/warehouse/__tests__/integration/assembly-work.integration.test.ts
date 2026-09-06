@@ -57,6 +57,7 @@ databaseSuite("assembly work PostgreSQL ownership and atomicity", () => {
       CREATE TABLE identity.auth_user_roles (id serial PRIMARY KEY, user_id varchar REFERENCES identity.users(id), role_id integer REFERENCES identity.auth_roles(id));
       CREATE TABLE identity.auth_role_permissions (id serial PRIMARY KEY, role_id integer REFERENCES identity.auth_roles(id), permission_id integer REFERENCES identity.auth_permissions(id), constraints jsonb);
       CREATE TABLE inventory.availability_claims (id bigint PRIMARY KEY, status text NOT NULL);
+      CREATE TABLE inventory.availability_claim_lines (id bigint PRIMARY KEY, claim_id bigint REFERENCES inventory.availability_claims(id), order_item_id integer NOT NULL, requested_qty bigint NOT NULL, planned_qty bigint NOT NULL, picked_target_qty bigint NOT NULL, released_target_qty bigint NOT NULL DEFAULT 0, consumed_target_qty bigint NOT NULL DEFAULT 0, shortfall_qty bigint NOT NULL DEFAULT 0);
       CREATE TABLE inventory.availability_claim_operations (id bigint PRIMARY KEY, claim_id bigint REFERENCES inventory.availability_claims(id), UNIQUE(id,claim_id));
       CREATE TABLE wms.orders (id integer PRIMARY KEY, warehouse_status text NOT NULL, on_hold integer DEFAULT 0, assigned_picker_id varchar, warehouse_id integer, updated_at timestamptz);
       CREATE TABLE wms.order_items (id integer PRIMARY KEY, order_id integer REFERENCES wms.orders(id), status text NOT NULL, on_hold boolean NOT NULL DEFAULT false, requires_shipping integer NOT NULL DEFAULT 1, location varchar(50), zone varchar(10), sku text NOT NULL DEFAULT 'P5', quantity integer NOT NULL DEFAULT 2, picked_quantity integer NOT NULL DEFAULT 0);
@@ -137,6 +138,7 @@ databaseSuite("assembly work PostgreSQL ownership and atomicity", () => {
     // Test setup represents an already completed canonical pick; no stock math is simulated here.
     await query("UPDATE wms.orders SET warehouse_id=$1 WHERE id=$1", [f.id]);
     await query("UPDATE wms.order_items SET status='completed', picked_quantity=quantity, location='OUTPUT' WHERE id=$1", [f.task.orderItemId]);
+    await query("INSERT INTO inventory.availability_claim_lines(id,claim_id,order_item_id,requested_qty,planned_qty,picked_target_qty) VALUES ($1,$2,$3,2,2,2)", [f.id, f.task.claimId, f.task.orderItemId]);
     return { ...f, command: { commandId: randomUUID(), expectedVersion: 3, confirmReadyForPacking: true, reason: "Continue packing" },
       packing: new AssemblyPackingService(owner, new AssemblyPackingRepository(), () => new Date(TIME)) };
   }
@@ -163,6 +165,12 @@ databaseSuite("assembly work PostgreSQL ownership and atomicity", () => {
     await query("INSERT INTO inventory.replen_tasks(id,order_id,blocks_shipment,status) VALUES ($1,$1,true,'pending')", [f.id]);
     await expect(f.packing.ready("assembler", f.task.id, f.command)).rejects.toMatchObject({ code: "WORK_PACKING_BLOCKED" });
     expect((await query("SELECT status FROM inventory.replen_tasks WHERE id=$1", [f.id])).rows[0].status).toBe("pending");
+    expect((await query("SELECT warehouse_status FROM wms.orders WHERE id=$1", [f.id])).rows[0].warehouse_status).toBe("in_progress");
+  });
+  it("rejects WMS-completed lines whose canonical pick is incomplete", async () => {
+    const f = await packingFixture();
+    await query("UPDATE inventory.availability_claim_lines SET picked_target_qty=1 WHERE id=$1", [f.id]);
+    await expect(f.packing.ready("assembler", f.task.id, f.command)).rejects.toMatchObject({ code: "WORK_CANONICAL_PICK_INCOMPLETE" });
     expect((await query("SELECT warehouse_status FROM wms.orders WHERE id=$1", [f.id])).rows[0].warehouse_status).toBe("in_progress");
   });
   it("uses boolean item holds and rolls back output-pick WMS evidence on failure", async () => {

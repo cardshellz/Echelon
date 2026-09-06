@@ -8,10 +8,12 @@ import { AssemblyWorkOwner } from "../../work/application/assembly-work-owner";
 import { lockPackingReadiness, recordAssemblyPackingReady } from "../../../wms/assembly-packing-readiness";
 import { lockPackingReplenishmentBlockers } from "../../../inventory/application/packing-replenishment-reader";
 import { lockAssemblyClaimForWork } from "../../../inventory-planning/application/assembly-work-claim-access";
+import { lockAssemblyPackingPickEvidence } from "../../../inventory-planning/application/assembly-packing-claim-reader";
 import { config, task, locations, TIME, COMMAND } from "../assembly-work.fixture";
 vi.mock("../../../wms/assembly-packing-readiness", async (original) => ({ ...await original<object>(), lockPackingReadiness: vi.fn(), recordAssemblyPackingReady: vi.fn() }));
 vi.mock("../../../inventory/application/packing-replenishment-reader", () => ({ lockPackingReplenishmentBlockers: vi.fn() }));
 vi.mock("../../../inventory-planning/application/assembly-work-claim-access", () => ({ lockAssemblyClaimForWork: vi.fn() }));
+vi.mock("../../../inventory-planning/application/assembly-packing-claim-reader", () => ({ lockAssemblyPackingPickEvidence: vi.fn() }));
 const command = { commandId: COMMAND, expectedVersion: 3, confirmReadyForPacking: true, reason: "Continue at the assembly bench" };
 const evidence = () => ({ order: { id: 70, warehouse_id: 1, warehouse_status: "in_progress" as const, on_hold: 0 },
   items: [{ id: 71, sku: "P5", quantity: 2, picked_quantity: 2, status: "completed", on_hold: false, requires_shipping: 1, location: "FINISHED" }], exceptionIds: [] });
@@ -32,6 +34,7 @@ function harness() {
 }
 beforeEach(() => {
   vi.resetAllMocks(); vi.mocked(lockPackingReadiness).mockResolvedValue(evidence());
+  vi.mocked(lockAssemblyPackingPickEvidence).mockResolvedValue(true);
   vi.mocked(lockPackingReplenishmentBlockers).mockResolvedValue([]); vi.mocked(lockAssemblyClaimForWork).mockResolvedValue({ active: true });
 });
 describe("assembly packing handoff", () => {
@@ -54,7 +57,7 @@ describe("assembly packing handoff", () => {
     expect(await h.service.ready("assembler", "1", command)).toEqual({ ...first, idempotentReplay: true });
     expect(recordAssemblyPackingReady).not.toHaveBeenCalled(); expect(h.receipts.insert).not.toHaveBeenCalled();
   });
-  it.each(["hold", "warehouse", "partial", "exception", "replen", "scope", "role", "version", "claim", "worker", "separate"])("rejects %s without recording readiness", async (kind) => {
+  it.each(["hold", "warehouse", "partial", "exception", "replen", "scope", "role", "version", "claim", "canonical-pick", "worker", "separate"])("rejects %s without recording readiness", async (kind) => {
     const h = harness(); const row = evidence();
     if (kind === "hold") row.order.on_hold = 1;
     if (kind === "warehouse") row.order.warehouse_id = 2;
@@ -64,6 +67,7 @@ describe("assembly packing handoff", () => {
     if (kind === "scope") h.setup.access[1].capabilities = ["assembly"];
     if (kind === "role") h.identity.mockResolvedValue({ id: "assembler", active: true, permissions: [] });
     if (kind === "claim") vi.mocked(lockAssemblyClaimForWork).mockResolvedValue({ active: false });
+    if (kind === "canonical-pick") vi.mocked(lockAssemblyPackingPickEvidence).mockResolvedValue(false);
     if (kind === "version") vi.mocked(h.tasks.byId).mockResolvedValue(task({ version: 4 }));
     if (kind === "worker") vi.mocked(h.tasks.byId).mockResolvedValue(task({ version: 3, state: "completed", assignedTo: "other", receivedAt: TIME }));
     if (kind === "separate") vi.mocked(h.tasks.byId).mockResolvedValue(task({ version: 3, state: "completed", assignedTo: "assembler", receivedAt: TIME, profile: { ...config().profile, assemblyPacking: "separate" } }));
