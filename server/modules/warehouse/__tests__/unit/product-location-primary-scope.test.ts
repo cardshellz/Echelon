@@ -132,7 +132,7 @@ describe("promoteBestRemainingSlot", () => {
 });
 
 describe("setPrimaryLocation", () => {
-  const body = REPOSITORY_SRC.match(/export async function setPrimaryLocation\([\s\S]*?\n}\n/)?.[0] ?? "";
+  const body = REPOSITORY_SRC.match(/export async function setPrimaryLocation\([\s\S]*?\r?\n}\r?\n/)?.[0] ?? "";
 
   it("scopes demotion to the variant or SKU and never to the product", () => {
     expect(body).not.toBe("");

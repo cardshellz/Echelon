@@ -1,4 +1,5 @@
 import type { Express } from "express";
+import { registerWarehouseInventorySourceRoutes } from "./interfaces/warehouse-inventory-source.routes";
 import { z } from "zod";
 import { createBinAssignmentService, warehouseStorage } from "../warehouse";
 import {
@@ -62,6 +63,7 @@ function getLocationDeleteConflictMessage(error: any) {
 }
 
 export function registerWarehouseRoutes(app: Express) {
+  registerWarehouseInventorySourceRoutes(app);
   const binAssignments = createBinAssignmentService(db, storage);
 
   // ============================================

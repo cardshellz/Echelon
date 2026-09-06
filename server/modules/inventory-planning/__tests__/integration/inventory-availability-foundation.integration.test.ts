@@ -6,6 +6,9 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import * as databaseSchema from "@shared/schema";
+import { WarehouseInventorySourceService } from "../../../warehouse/application/warehouse-inventory-source.service";
+import { PostgresWarehouseInventorySourceStore } from "../../../warehouse/infrastructure/warehouse-inventory-source.repository";
+import { InventoryChannelExposureAdminService } from "../../application/inventory-channel-exposure-admin.service";
 
 import { PostgresInventoryAvailabilityMasterDataStore } from "../../infrastructure/inventory-availability-master-data.repository";
 import { PostgresInventoryPromiseSafetyAdminStore } from "../../infrastructure/inventory-promise-safety-admin.repository";
@@ -404,6 +407,111 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
     return result.rows[0].id;
   }
 
+
+  async function sourceSetup() {
+    const scope = await seedProductAndWarehouse();
+    const database = drizzle(pool, { schema: databaseSchema });
+    const service = new WarehouseInventorySourceService(
+      new PostgresWarehouseInventorySourceStore(database), { now: () => new Date(FIXED_TIME) },
+    );
+    const view = await service.getView();
+    const warehouse = view.warehouses.find(row => row.id === scope.warehouseId)!;
+    const request = {
+      warehouseId: warehouse.id, expectedWarehouseFingerprint: warehouse.fingerprint,
+      inventoryAuthority: "echelon" as const, fulfillmentAuthority: "echelon" as const,
+      changeReason: "Prepare existing warehouse for channel setup", idempotencyKey: "test-warehouse-source",
+    };
+    return { scope, database, service, request };
+  }
+
+  it("prepares an audited source and connects the existing disabled target and binding APIs without stock or outbox writes", async () => {
+    const { scope, database, service, request } = await sourceSetup();
+    await pool.query("INSERT INTO inventory.inventory_levels (warehouse_location_id,product_variant_id,variant_qty,reserved_qty) VALUES ($1,$2,13,2)",
+      [scope.locationId, scope.variantIds[0]]);
+    const stockBefore = (await pool.query("SELECT * FROM inventory.inventory_levels")).rows;
+    const saved = await service.prepareDraft(request, "operator");
+    expect(saved).toMatchObject({ warehouseId: scope.warehouseId, lifecycleStatus: "draft",
+      alreadyApplied: false, runtimeAuthorityChanged: false, providerWriteAttempted: false, outboxEnqueued: false });
+    await expect(service.prepareDraft(request, "operator")).resolves.toEqual({ ...saved, alreadyApplied: true });
+    expect((await pool.query("SELECT lifecycle_status,activated_at,provider_account_id,provider_location_id FROM warehouse.fulfillment_nodes")).rows)
+      .toEqual([{ lifecycle_status: "draft", activated_at: null, provider_account_id: null, provider_location_id: null }]);
+    const audit = (await pool.query("SELECT actor,changes,context FROM public.audit_events WHERE action='warehouse.inventory_source.prepared_draft'")).rows;
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatchObject({ actor: "operator", changes: { before: null,
+      after: { warehouseId: scope.warehouseId, lifecycleStatus: "draft" } },
+      context: { changeReason: request.changeReason, warehouseFingerprint: request.expectedWarehouseFingerprint } });
+    const channelId = (await pool.query("INSERT INTO channels.channels(name,provider) VALUES ('Source setup test','shopify') RETURNING id")).rows[0].id;
+    const connectionId = (await pool.query("INSERT INTO channels.channel_connections(channel_id) VALUES ($1) RETURNING id", [channelId])).rows[0].id;
+    const exposure = new InventoryChannelExposureAdminService(new PostgresInventoryChannelExposureAdminStore(database));
+    const target = await exposure.createPublicationTarget({
+      channelId, channelConnectionId: connectionId, legacyFulfillmentNodeId: saved.fulfillmentNodeId,
+      providerScopeType: "location", externalScopeId: "source-test-location", publicationAuthority: "echelon",
+      changeReason: "Prepare disabled exact destination", idempotencyKey: "source-test-target",
+    }, "operator");
+    expect(target).toMatchObject({ state: "disabled", providerWriteAttempted: false, outboxEnqueued: false });
+    await exposure.saveSourceBindingDraft({
+      publicationTargetId: target.publicationTargetId, fulfillmentNodeIds: [saved.fulfillmentNodeId],
+      expectedHeadRevision: "0", expectedDraftBindingId: null, expectedDraftDefinitionHash: null,
+      changeReason: "Use the explicitly prepared warehouse", idempotencyKey: "source-test-binding",
+    }, "operator");
+    expect((await pool.query("SELECT * FROM inventory.inventory_levels")).rows).toEqual(stockBefore);
+    expect((await pool.query("SELECT count(*)::int AS count FROM inventory.inventory_publication_outbox")).rows[0].count).toBe(0);
+    expect((await pool.query("SELECT authority,activation_run_id FROM inventory.availability_runtime_authority")).rows)
+      .toEqual([{ authority: "legacy", activation_run_id: null }]);
+    expect((await service.getView()).warehouses[0].source?.id).toBe(saved.fulfillmentNodeId);
+  });
+
+  it("serializes identical concurrent source retries into one audited record", async () => {
+    const { service, request } = await sourceSetup();
+    const results = await Promise.all([service.prepareDraft(request, "operator"), service.prepareDraft(request, "operator")]);
+    expect(new Set(results.map(row => row.fulfillmentNodeId)).size).toBe(1);
+    expect(results.map(row => row.alreadyApplied).sort()).toEqual([false, true]);
+    expect((await pool.query("SELECT count(*)::int AS count FROM warehouse.fulfillment_nodes")).rows[0].count).toBe(1);
+    expect((await pool.query("SELECT count(*)::int AS count FROM public.audit_events")).rows[0].count).toBe(1);
+    await expect(service.prepareDraft({ ...request, changeReason: "Changed payload" }, "operator"))
+      .rejects.toMatchObject({ code: "WAREHOUSE_INVENTORY_SOURCE_KEY_REUSED" });
+    await expect(service.prepareDraft(request, "other-operator"))
+      .rejects.toMatchObject({ code: "WAREHOUSE_INVENTORY_SOURCE_KEY_REUSED" });
+  });
+
+  it("serializes competing warehouse-source creators into one success and one domain conflict", async () => {
+    const { service, request } = await sourceSetup();
+    const results = await Promise.allSettled([
+      service.prepareDraft(request, "operator"),
+      service.prepareDraft({ ...request, idempotencyKey: "competing-source", inventoryAuthority: "manual" }, "operator"),
+    ]);
+    expect(results.filter(row => row.status === "fulfilled")).toHaveLength(1);
+    expect(results.find(row => row.status === "rejected")).toMatchObject({ reason: { code: "WAREHOUSE_INVENTORY_SOURCE_EXISTS", status: 409 } });
+    expect((await pool.query("SELECT count(*)::int AS count FROM public.idempotency_keys")).rows[0].count).toBe(1);
+  });
+
+  it("rejects stale, inactive and missing warehouse settings without writing a node or receipt", async () => {
+    const { scope, service, request } = await sourceSetup();
+    await pool.query("UPDATE warehouse.warehouses SET name='Changed site' WHERE id=$1", [scope.warehouseId]);
+    await expect(service.prepareDraft(request, "operator")).rejects.toMatchObject({ code: "WAREHOUSE_INVENTORY_SOURCE_STALE" });
+    await pool.query("UPDATE warehouse.warehouses SET is_active=0 WHERE id=$1", [scope.warehouseId]);
+    const refreshed = (await service.getView()).warehouses[0];
+    await expect(service.prepareDraft({ ...request, expectedWarehouseFingerprint: refreshed.fingerprint }, "operator"))
+      .rejects.toMatchObject({ code: "WAREHOUSE_INVENTORY_SOURCE_INACTIVE" });
+    await expect(service.prepareDraft({ ...request, warehouseId: 2147483647 }, "operator"))
+      .rejects.toMatchObject({ code: "WAREHOUSE_INVENTORY_SOURCE_NOT_FOUND" });
+    expect((await pool.query("SELECT count(*)::int AS count FROM warehouse.fulfillment_nodes")).rows[0].count).toBe(0);
+    expect((await pool.query("SELECT count(*)::int AS count FROM public.idempotency_keys")).rows[0].count).toBe(0);
+  });
+
+  it("rolls back the source and receipt when its immutable audit cannot be persisted", async () => {
+    const { service, request } = await sourceSetup();
+    await pool.query("ALTER TABLE public.audit_events ADD CONSTRAINT warehouse_source_test_audit_failure CHECK (action <> 'warehouse.inventory_source.prepared_draft')");
+    try {
+      await expect(service.prepareDraft(request, "operator"))
+        .rejects.toMatchObject({ code: "WAREHOUSE_INVENTORY_SOURCE_DATABASE_ERROR" });
+      expect((await pool.query("SELECT count(*)::int AS count FROM warehouse.fulfillment_nodes")).rows[0].count).toBe(0);
+      expect((await pool.query("SELECT count(*)::int AS count FROM public.idempotency_keys")).rows[0].count).toBe(0);
+    } finally {
+      await pool.query("ALTER TABLE public.audit_events DROP CONSTRAINT warehouse_source_test_audit_failure");
+    }
+    await expect(service.prepareDraft(request, "operator")).resolves.toMatchObject({ alreadyApplied: false });
+  });
   it("keeps runtime authority legacy and rejects an undeclared commit command", async () => {
     const dryRun = await pool.query<{ id: string }>(
       `INSERT INTO inventory.availability_activation_runs (

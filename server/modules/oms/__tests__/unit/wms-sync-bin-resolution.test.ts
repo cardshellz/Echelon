@@ -11,7 +11,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const SRC = readFileSync(resolve(__dirname, "../../wms-sync.service.ts"), "utf-8");
-const RESOLVER = SRC.match(/async function resolveAssignedBinLocation\([\s\S]*?\n}\n/)?.[0] ?? "";
+const RESOLVER = SRC.match(/async function resolveAssignedBinLocation\([\s\S]*?\r?\n}\r?\n/)?.[0] ?? "";
 
 describe("wms-sync.service :: order-line bin resolution", () => {
   it("ranks the primary flag through the shared candidate selector instead of filtering on it", () => {
