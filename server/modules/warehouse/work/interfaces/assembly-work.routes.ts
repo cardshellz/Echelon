@@ -1,5 +1,6 @@
 import type { Express, Request, Response } from "express";
 import { z, ZodError } from "zod";
+import { assemblyPackingCommandSchema, assemblyPackingResultSchema } from "@shared/warehouse-assembly-packing";
 import {
   assemblyQueueRequestSchema, assemblyTaskCommandSchema, assemblyQueueSchema, assemblyTaskSchema, assemblyTaskResultSchema,
   createAssemblyHandoffSchema, completeAssemblyTaskSchema, workEvidenceIdSchema,
@@ -18,6 +19,7 @@ import { CanonicalClaimInventoryMutationError } from "../../../inventory/infrast
 import { canonicalAvailabilityClaimBuildHandoffResultSchema, canonicalAvailabilityClaimOperationExecutionResultSchema, canonicalAvailabilityClaimPickResultSchema } from "@shared/types/inventory-availability-claims";
 
 interface Services {
+  assemblyPacking?: Pick<import("../application/assembly-packing.service").AssemblyPackingService, "ready">;
   assemblyWork: Pick<AssemblyWorkService, "queue" | "get" | "command" | "handoff" | "complete">;
   assemblyExecution?: Pick<AssemblyExecutionService, "contexts" | "order" | "task" | "pickOutput">;
 }
@@ -54,6 +56,12 @@ export function registerAssemblyWorkRoutes(app: Express, injected?: Services): v
     };
   }
   const root = "/api/warehouse/assembly-work";
+  app.post(`${root}/:id/packing-ready`, requireAuth, handler((req) => ({ id: workEvidenceIdSchema.parse(req.params.id), command: assemblyPackingCommandSchema.parse(req.body) }),
+    (req, input) => {
+      const service = services(req).assemblyPacking;
+      if (!service) throw new WarehouseWorkError("WORK_EXECUTION_NOT_CONFIGURED", "Packing handoff is not configured", 503);
+      return service.ready(actor(req), input.id, input.command);
+    }, assemblyPackingResultSchema));
   const execution = (req: Request) => {
     const service = services(req).assemblyExecution;
     if (!service) throw new WarehouseWorkError("WORK_EXECUTION_NOT_CONFIGURED", "Assembly execution is not configured", 503);

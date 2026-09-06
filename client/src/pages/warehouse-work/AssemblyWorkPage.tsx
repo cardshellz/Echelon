@@ -8,6 +8,7 @@ import { assemblyQueueSchema, assemblyTaskResultSchema } from "@shared/warehouse
 import { canonicalAvailabilityClaimOperationExecutionResultSchema, canonicalAvailabilityClaimPickResultSchema } from "@shared/types/inventory-availability-claims";
 import { assemblyRequest } from "./assembly-api";
 import { useAssemblyCommand } from "./use-assembly-command";
+import { AssemblyPackingHandoff } from "./AssemblyPackingHandoff";
 
 function CommandError({ error, uncertain, retry, pending }: { error: Error | null; uncertain: boolean; retry: () => void; pending: boolean }) {
   return <>{error && <p role="alert" className="text-sm text-destructive">{error.message}</p>}
@@ -67,7 +68,10 @@ export function AssemblyJob({ view, actorId }: { view: AssemblyTaskView; actorId
     </div>}
     {task.state === "completed" && <div className="space-y-3 border-t pt-3">
       <h3 className="font-semibold">Assembly recorded. Finished-goods pick is separate.</h3>
-      {view.pickedQuantity === view.itemQuantity && view.itemStatus === "completed" ? <p>All {view.itemQuantity} units are recorded picked for this order. Packing and active-label verification are not recorded by this screen; dispatch remains separate.</p> : <>
+      {view.pickedQuantity === view.itemQuantity && view.itemStatus === "completed" ? <>
+        <p>All {view.itemQuantity} units are recorded picked for this order. Packing and active-label verification are not recorded by this screen; dispatch remains separate.</p>
+        <AssemblyPackingHandoff view={view} actorId={actorId} />
+      </> : <>
         <p>Place {view.itemQuantity} × {view.sku} from {view.outputLocationCode ?? "the output location"} with order {view.orderNumber}. Leave any surplus at its recorded output location.</p>
         {view.outputPickBlocker ? <p role="status">{view.outputPickBlocker}</p> : <>
           <label className="flex gap-2 items-start"><input type="checkbox" checked={picked} disabled={pending || uncertain} onChange={(event) => setPicked(event.target.checked)} />I physically picked all {view.itemQuantity} finished units for this order.</label>

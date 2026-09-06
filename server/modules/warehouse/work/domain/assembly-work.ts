@@ -6,7 +6,7 @@ import { requireWorkPermission, WarehouseWorkError, type WorkActor, type WorkLoc
 
 export function requireAssemblyScope(
   configuration: WorkConfiguration, actor: WorkActor, station: WorkStation,
-  locations: readonly WorkLocation[], capability: "assembly" | "picking",
+  locations: readonly WorkLocation[], capability: "assembly" | "picking" | "packing",
 ): void {
   requireWorkPermission(actor, "view");
   requireWorkPermission(actor, capability);

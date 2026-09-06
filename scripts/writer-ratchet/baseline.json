@@ -1005,6 +1005,9 @@
   "warehouse.work_access_scopes": [
     "modules/warehouse"
   ],
+  "warehouse.assembly_packing_handoff_receipts": [
+    "modules/warehouse"
+  ],
   "warehouse.work_configuration_revisions": [
     "modules/warehouse"
   ],

@@ -144,6 +144,7 @@ export async function transitionOrderStatus(
   db: any,
   orderId: number,
   request: TransitionRequest,
+  clock: () => Date = () => new Date(),
 ): Promise<TransitionResult> {
   const { from, to, reason, setCompletedAt, setCancelledAt } = request;
 
@@ -163,7 +164,7 @@ export async function transitionOrderStatus(
   }
 
   // Build the UPDATE with guarded WHERE
-  const now = new Date();
+  const now = clock();
   const fromList = legalFrom.map((s) => `'${s}'`).join(", ");
 
   let setClauses = `warehouse_status = '${to}', updated_at = '${now.toISOString()}'`;

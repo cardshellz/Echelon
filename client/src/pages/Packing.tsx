@@ -1,4 +1,6 @@
 import { useMemo, useState } from "react";
+import { Link, useSearch } from "wouter";
+import { packingOrderSelection } from "@/lib/packing-order-selection";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -146,12 +148,14 @@ async function postJson<T>(url: string, body: unknown): Promise<T> {
 export default function Packing() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const [selectedOrderId, setSelectedOrderId] = useState<number | null>(null);
+  const searchParameters = useSearch();
+  const requestedOrderId = packingOrderSelection(searchParameters);
+  const [selectedOrderId, setSelectedOrderId] = useState<number | null>(() => packingOrderSelection(searchParameters));
   const [search, setSearch] = useState("");
 
   const queueQuery = useQuery<PackingQueueResponse>({
-    queryKey: [QUEUE_URL],
-    queryFn: () => fetchJson<PackingQueueResponse>(QUEUE_URL),
+    queryKey: [QUEUE_URL, requestedOrderId],
+    queryFn: () => fetchJson<PackingQueueResponse>(requestedOrderId ? `${QUEUE_URL}?orderId=${requestedOrderId}` : QUEUE_URL),
   });
 
   const invalidateQueue = () => queryClient.invalidateQueries({ queryKey: [QUEUE_URL] });
@@ -189,6 +193,10 @@ export default function Packing() {
 
   return (
     <div className="p-4 md:p-6 space-y-4">
+      {requestedOrderId && <div className="text-sm">
+        <p>Showing assembly handoff order #{requestedOrderId}. <Link href="/packing" className="underline">Show the full packing queue</Link></p>
+        {queueQuery.data && !orders.some((order) => order.id === requestedOrderId) && <p role="alert">This order is no longer eligible for packing. Review its current hold, shipment, or warehouse status; no package completion was recorded by this handoff.</p>}
+      </div>}
       <div className="flex items-center justify-between gap-3 flex-wrap">
         <div>
           <h1 className="text-2xl font-semibold flex items-center gap-2">

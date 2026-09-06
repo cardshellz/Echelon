@@ -9,6 +9,8 @@ import { WorkConfigurationService } from "../../work/application/work-configurat
 import { AssemblyWorkRepository } from "../../work/infrastructure/assembly-work.repository";
 import { AssemblyWorkOwner } from "../../work/application/assembly-work-owner";
 import { AssemblyWorkService } from "../../work/application/assembly-work.service";
+import { AssemblyPackingService } from "../../work/application/assembly-packing.service";
+import { AssemblyPackingRepository } from "../../work/infrastructure/assembly-packing.repository";
 import { lockAssemblyClaimForWork } from "../../../inventory-planning/application/assembly-work-claim-access";
 import { recordAssemblyOutputPickLocation } from "../../../wms/assembly-output-pick-command";
 import { config, start, TIME } from "../assembly-work.fixture";
@@ -56,18 +58,21 @@ databaseSuite("assembly work PostgreSQL ownership and atomicity", () => {
       CREATE TABLE identity.auth_role_permissions (id serial PRIMARY KEY, role_id integer REFERENCES identity.auth_roles(id), permission_id integer REFERENCES identity.auth_permissions(id), constraints jsonb);
       CREATE TABLE inventory.availability_claims (id bigint PRIMARY KEY, status text NOT NULL);
       CREATE TABLE inventory.availability_claim_operations (id bigint PRIMARY KEY, claim_id bigint REFERENCES inventory.availability_claims(id), UNIQUE(id,claim_id));
-      CREATE TABLE wms.orders (id integer PRIMARY KEY, warehouse_status text NOT NULL, on_hold integer DEFAULT 0, assigned_picker_id varchar);
-      CREATE TABLE wms.order_items (id integer PRIMARY KEY, order_id integer REFERENCES wms.orders(id), status text NOT NULL, on_hold boolean NOT NULL DEFAULT false, requires_shipping integer NOT NULL DEFAULT 1, location varchar(50), zone varchar(10));
+      CREATE TABLE wms.orders (id integer PRIMARY KEY, warehouse_status text NOT NULL, on_hold integer DEFAULT 0, assigned_picker_id varchar, warehouse_id integer, updated_at timestamptz);
+      CREATE TABLE wms.order_items (id integer PRIMARY KEY, order_id integer REFERENCES wms.orders(id), status text NOT NULL, on_hold boolean NOT NULL DEFAULT false, requires_shipping integer NOT NULL DEFAULT 1, location varchar(50), zone varchar(10), sku text NOT NULL DEFAULT 'P5', quantity integer NOT NULL DEFAULT 2, picked_quantity integer NOT NULL DEFAULT 0);
+      CREATE TABLE wms.allocation_exceptions (id integer PRIMARY KEY, order_id integer REFERENCES wms.orders(id), status text NOT NULL, metadata jsonb);
+      CREATE TABLE inventory.replen_tasks (id integer PRIMARY KEY, order_id integer REFERENCES wms.orders(id), blocks_shipment boolean NOT NULL, status text NOT NULL);
       -- Test-only stand-in for an upstream owner's posting, NOT an inventory simulation.
       CREATE TABLE inventory.work_test_postings (claim_id bigint NOT NULL);
       INSERT INTO identity.users(id,username) VALUES ('admin','admin'),('picker','picker'),('assembler','assembler'),('other','other');
       INSERT INTO identity.auth_roles VALUES (1),(2),(3),(4);
       INSERT INTO identity.auth_user_roles(user_id,role_id) VALUES ('admin',1),('picker',2),('assembler',3),('other',4);
-      INSERT INTO identity.auth_permissions(resource,action) VALUES ('warehouse_work','view'),('warehouse_work','configure'),('warehouse_work','manage_access'),('warehouse_work','assembly'),('warehouse_work','picking');
+      INSERT INTO identity.auth_permissions(resource,action) VALUES ('warehouse_work','view'),('warehouse_work','configure'),('warehouse_work','manage_access'),('warehouse_work','assembly'),('warehouse_work','picking'),('warehouse_work','packing');
       INSERT INTO identity.auth_role_permissions(role_id,permission_id) SELECT r.id,p.id FROM identity.auth_roles r CROSS JOIN identity.auth_permissions p;
     `);
     await query(readFileSync(resolve(process.cwd(), "migrations/0655_warehouse_work_configuration.sql"), "utf8"));
     await query(readFileSync(resolve(process.cwd(), "migrations/0656_warehouse_assembly_work.sql"), "utf8"));
+    await query(readFileSync(resolve(process.cwd(), "migrations/0658_assembly_packing_handoff_receipts.sql"), "utf8"));
     repository = new WorkConfigurationRepository({ connect } as Pick<Pool, "connect">);
     owner = new AssemblyWorkOwner(repository, new AssemblyWorkRepository());
     // Physical inventory math is covered by the real canonical owner tests;
@@ -123,6 +128,42 @@ databaseSuite("assembly work PostgreSQL ownership and atomicity", () => {
     expect(f.task).toMatchObject({ state: "queued", assignedTo: null, receivedAt: null, outputQty: "2", configurationRevision: 1 });
     expect(await eventCount(f.task.id)).toBe(1);
     expect((await service.queue("assembler", { warehouseId: f.id })).tasks.map((task) => task.id)).toEqual([f.task.id]);
+  });
+  async function packingFixture() {
+    const f = await fixture();
+    const configuration = structuredClone(f.configuration); configuration.access[1].capabilities.push("packing");
+    await setup.save("admin", f.id, { expectedRevision: 1, commandId: randomUUID(), reason: "Permit combined packing", configuration });
+    await service.command("assembler", f.task.id, f.startCommand); await completion(f, 2);
+    // Test setup represents an already completed canonical pick; no stock math is simulated here.
+    await query("UPDATE wms.orders SET warehouse_id=$1 WHERE id=$1", [f.id]);
+    await query("UPDATE wms.order_items SET status='completed', picked_quantity=quantity, location='OUTPUT' WHERE id=$1", [f.task.orderItemId]);
+    return { ...f, command: { commandId: randomUUID(), expectedVersion: 3, confirmReadyForPacking: true, reason: "Continue packing" },
+      packing: new AssemblyPackingService(owner, new AssemblyPackingRepository(), () => new Date(TIME)) };
+  }
+  it("serializes packing handoff retries and preserves an immutable receipt", async () => {
+    const f = await packingFixture();
+    const results = await Promise.all([f.packing.ready("assembler", f.task.id, f.command), f.packing.ready("assembler", f.task.id, f.command)]);
+    expect(results.map((result) => result.idempotentReplay).sort()).toEqual([false, true]);
+    expect(results[0].receipt).toEqual(results[1].receipt);
+    expect((await query("SELECT warehouse_status FROM wms.orders WHERE id=$1", [f.id])).rows[0].warehouse_status).toBe("ready_to_ship");
+    expect((await query("SELECT * FROM warehouse.assembly_packing_handoff_receipts WHERE order_id=$1", [f.id])).rowCount).toBe(1);
+    await expect(query("DELETE FROM warehouse.assembly_packing_handoff_receipts WHERE order_id=$1", [f.id])).rejects.toMatchObject({ code: "55000" });
+    await expect(f.packing.ready("assembler", f.task.id, { ...f.command, reason: "Altered intent" })).rejects.toMatchObject({ code: "WORK_COMMAND_REUSED" });
+  });
+  it("rolls back the actual order-header update when receipt persistence fails", async () => {
+    const f = await packingFixture();
+    class FailingReceipts extends AssemblyPackingRepository { override async insert(): Promise<void> { throw new Error("Receipt unavailable"); } }
+    const packing = new AssemblyPackingService(owner, new FailingReceipts(), () => new Date(TIME));
+    await expect(packing.ready("assembler", f.task.id, f.command)).rejects.toThrow("Receipt unavailable");
+    expect((await query("SELECT warehouse_status FROM wms.orders WHERE id=$1", [f.id])).rows[0].warehouse_status).toBe("in_progress");
+    expect((await query("SELECT * FROM warehouse.assembly_packing_handoff_receipts WHERE order_id=$1", [f.id])).rowCount).toBe(0);
+  });
+  it("blocks packing without cancelling or resolving replenishment", async () => {
+    const f = await packingFixture();
+    await query("INSERT INTO inventory.replen_tasks(id,order_id,blocks_shipment,status) VALUES ($1,$1,true,'pending')", [f.id]);
+    await expect(f.packing.ready("assembler", f.task.id, f.command)).rejects.toMatchObject({ code: "WORK_PACKING_BLOCKED" });
+    expect((await query("SELECT status FROM inventory.replen_tasks WHERE id=$1", [f.id])).rows[0].status).toBe("pending");
+    expect((await query("SELECT warehouse_status FROM wms.orders WHERE id=$1", [f.id])).rows[0].warehouse_status).toBe("in_progress");
   });
   it("uses boolean item holds and rolls back output-pick WMS evidence on failure", async () => {
     const f = await fixture();

@@ -1,4 +1,5 @@
 import { createElement } from "react";
+import { Router } from "wouter";
 import { renderToStaticMarkup } from "react-dom/server";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it } from "vitest";
@@ -13,9 +14,19 @@ function view(overrides: Partial<AssemblyTaskView> = {}): AssemblyTaskView {
     inputs: [{ variantId: 101, sku: "EA", name: "Each", quantity: "10" }], outputLocationCode: "FINISHED", outputPickBlocker: null, ...overrides };
 }
 function renderJob(data: AssemblyTaskView, actorId = "assembler") {
-  return renderToStaticMarkup(createElement(QueryClientProvider, { client: new QueryClient() }, createElement(AssemblyJob, { view: data, actorId })));
+  return renderToStaticMarkup(createElement(QueryClientProvider, { client: new QueryClient() }, createElement(Router, { ssrPath: "/assembly" }, createElement(AssemblyJob, { view: data, actorId }))));
 }
 describe("assembly operator safeguards", () => {
+  it("offers packing continuation to the responsible worker only after the output pick", () => {
+    const data = view({ task: task({ state: "completed", assignedTo: "assembler", version: 3 }), pickedQuantity: 2, itemStatus: "completed" });
+    expect(renderJob(data)).toContain("Continue to packing");
+    expect(renderJob(data, "other")).not.toContain("Continue to packing");
+    expect(renderJob({ ...data, pickedQuantity: 0, itemStatus: "pending" })).not.toContain("Continue to packing");
+  });
+  it("does not fabricate separate-station custody", () => {
+    const html = renderJob(view({ task: task({ state: "completed", assignedTo: "assembler", profile: { ...task().profile, assemblyPacking: "separate" } }), pickedQuantity: 2, itemStatus: "completed" }));
+    expect(html).toContain("Separate-station packing custody is not connected"); expect(html).not.toContain("Continue to packing");
+  });
   it("requires receipt confirmation before start and does not claim a label scan or shipment", () => {
     const html = renderJob(view());
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Receive &amp; start assembly/);
