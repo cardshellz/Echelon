@@ -2,7 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
-import { WarehouseInventorySourceSetup } from "../../WarehouseInventorySourceSetup";
+import { SavedWarehouseSourceSummary, WarehouseInventorySourceSetup } from "../../WarehouseInventorySourceSetup";
 
 vi.mock("@/hooks/use-toast", () => ({ useToast: () => ({ toast: vi.fn() }) }));
 function render(canEdit: boolean) {
@@ -26,15 +26,42 @@ describe("existing warehouse source setup UI", () => {
     expect(html).toContain("does not move stock");
     expect(html).not.toContain("Activate");
   });
-  it("requires explicit authority choices rather than preselecting ownership", () => {
+  it("reuses warehouse settings instead of asking for duplicate authority choices", () => {
     const html = render(true);
-    expect(html.match(/Choose explicitly/g)).toHaveLength(2);
+    expect(html).not.toContain("Choose explicitly");
+    expect(html).not.toContain("Who owns");
+    expect(html).toContain("already saved in Warehouse settings");
     expect(html).toContain('value="34" disabled=""');
     expect(html).toMatch(/<button[^>]*disabled=""[^>]*>Prepare warehouse source<\/button>/);
   });
   it("disables editing for a view-only operator", () => {
     const html = render(false);
-    expect(html.match(/<select[^>]*disabled=""/g)).toHaveLength(3);
+    expect(html.match(/<select[^>]*disabled=""/g)).toHaveLength(1);
     expect(html).toMatch(/<textarea[^>]*disabled=""/);
+  });
+  it("clearly describes an incoming feed without exposing an internal channel ID", () => {
+    const html = renderToStaticMarkup(createElement(SavedWarehouseSourceSummary, { configuration: {
+      status: "ready", inventoryAuthority: "external_provider", fulfillmentAuthority: "external_provider",
+      inventoryDirection: "inbound", sourceChannelId: 37,
+    } }));
+    expect(html).toContain("incoming inventory feed");
+    expect(html).toContain("does not enable sending quantities back");
+    expect(html).toContain("External warehouse");
+    expect(html).not.toContain("37");
+  });
+  it("describes internal stock at a storage-only warehouse", () => {
+    const html = renderToStaticMarkup(createElement(SavedWarehouseSourceSummary, { configuration: {
+      status: "ready", inventoryAuthority: "echelon", fulfillmentAuthority: "none",
+      inventoryDirection: "internal", sourceChannelId: null,
+    } }));
+    expect(html).toContain("Stock managed in Echelon");
+    expect(html).toContain("Storage only; does not fulfill orders");
+  });
+  it("shows missing or unsupported settings without inventing a fallback", () => {
+    expect(renderToStaticMarkup(createElement(SavedWarehouseSourceSummary, { configuration: undefined })))
+      .toContain("Reload to read");
+    expect(renderToStaticMarkup(createElement(SavedWarehouseSourceSummary, { configuration: {
+      status: "blocked", message: "Configure the source channel first",
+    } }))).toContain("Configure the source channel first");
   });
 });

@@ -216,6 +216,7 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
         name varchar(200) NOT NULL DEFAULT 'Integration warehouse',
         warehouse_type varchar(30) NOT NULL DEFAULT 'operations',
         inventory_source_type varchar(20) NOT NULL DEFAULT 'internal',
+        inventory_source_config jsonb,
         hub_warehouse_id integer,
         is_active integer NOT NULL DEFAULT 1,
         created_at timestamptz NOT NULL DEFAULT now()
@@ -418,7 +419,7 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
     const warehouse = view.warehouses.find(row => row.id === scope.warehouseId)!;
     const request = {
       warehouseId: warehouse.id, expectedWarehouseFingerprint: warehouse.fingerprint,
-      inventoryAuthority: "echelon" as const, fulfillmentAuthority: "echelon" as const,
+      authoritySource: "warehouse_settings" as const,
       changeReason: "Prepare existing warehouse for channel setup", idempotencyKey: "test-warehouse-source",
     };
     return { scope, database, service, request };
@@ -461,6 +462,56 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
     expect((await service.getView()).warehouses[0].source?.id).toBe(saved.fulfillmentNodeId);
   });
 
+  it("preserves a configured incoming channel feed in the draft and immutable audit without creating an outgoing target", async () => {
+    const { scope, service, request } = await sourceSetup();
+    await pool.query(`UPDATE warehouse.warehouses SET warehouse_type='3pl', inventory_source_type='channel',
+      inventory_source_config='{"channelId":37,"privateSetting":"not-for-the-client"}'::jsonb WHERE id=$1`, [scope.warehouseId]);
+    const row = (await service.getView()).warehouses.find(item => item.id === scope.warehouseId)!;
+    expect(row.configuredSource).toEqual({ status: "ready", inventoryAuthority: "external_provider",
+      fulfillmentAuthority: "external_provider", inventoryDirection: "inbound", sourceChannelId: 37 });
+    expect(JSON.stringify(row)).not.toContain("privateSetting");
+    const incomingRequest = { ...request, expectedWarehouseFingerprint: row.fingerprint };
+    const saved = await service.prepareDraft(incomingRequest, "operator");
+    expect((await pool.query("SELECT inventory_authority,fulfillment_authority,lifecycle_status FROM warehouse.fulfillment_nodes")).rows)
+      .toEqual([{ inventory_authority: "external_provider", fulfillment_authority: "external_provider", lifecycle_status: "draft" }]);
+    expect((await pool.query("SELECT context FROM public.audit_events WHERE action='warehouse.inventory_source.prepared_draft'")).rows[0].context)
+      .toMatchObject({ authoritySource: "warehouse_settings", warehouseSettings: {
+        warehouseType: "3pl", inventorySourceType: "channel", configuredSource: { inventoryDirection: "inbound", sourceChannelId: 37 },
+      } });
+    expect((await pool.query("SELECT count(*)::int AS count FROM inventory.inventory_publication_targets")).rows[0].count).toBe(0);
+    expect((await pool.query("SELECT count(*)::int AS count FROM inventory.inventory_publication_outbox")).rows[0].count).toBe(0);
+    expect((await pool.query("SELECT authority FROM inventory.availability_runtime_authority")).rows).toEqual([{ authority: "legacy" }]);
+    await pool.query(`UPDATE warehouse.warehouses SET inventory_source_config='{"channelId":36}'::jsonb WHERE id=$1`, [scope.warehouseId]);
+    // A replay acknowledges the original operation, never silently edits its source or audit.
+    await expect(service.prepareDraft(incomingRequest, "operator")).resolves.toEqual({ ...saved, alreadyApplied: true });
+    expect((await pool.query("SELECT count(*)::int AS count FROM public.audit_events")).rows[0].count).toBe(1);
+  });
+
+  it("rejects incomplete and changed incoming source settings before saving", async () => {
+    const { scope, service, request } = await sourceSetup();
+    await pool.query("UPDATE warehouse.warehouses SET inventory_source_type='channel' WHERE id=$1", [scope.warehouseId]);
+    const incomplete = (await service.getView()).warehouses.find(row => row.id === scope.warehouseId)!;
+    expect(incomplete.configuredSource?.status).toBe("blocked");
+    await expect(service.prepareDraft({ ...request, expectedWarehouseFingerprint: incomplete.fingerprint }, "operator"))
+      .rejects.toMatchObject({ code: "WAREHOUSE_INVENTORY_SOURCE_CONFIGURATION_REQUIRED" });
+    await pool.query(`UPDATE warehouse.warehouses SET inventory_source_config='{"channelId":37}'::jsonb WHERE id=$1`, [scope.warehouseId]);
+    const before = (await service.getView()).warehouses.find(row => row.id === scope.warehouseId)!;
+    await pool.query(`UPDATE warehouse.warehouses SET inventory_source_config='{"channelId":36}'::jsonb WHERE id=$1`, [scope.warehouseId]);
+    await expect(service.prepareDraft({ ...request, expectedWarehouseFingerprint: before.fingerprint }, "operator"))
+      .rejects.toMatchObject({ code: "WAREHOUSE_INVENTORY_SOURCE_STALE" });
+    expect((await pool.query("SELECT count(*)::int AS count FROM warehouse.fulfillment_nodes")).rows[0].count).toBe(0);
+    expect((await pool.query("SELECT count(*)::int AS count FROM public.idempotency_keys")).rows[0].count).toBe(0);
+  });
+
+  it("reuses bulk storage settings without making the building a fulfillment site", async () => {
+    const { scope, service, request } = await sourceSetup();
+    await pool.query("UPDATE warehouse.warehouses SET warehouse_type='bulk_storage' WHERE id=$1", [scope.warehouseId]);
+    const row = (await service.getView()).warehouses.find(item => item.id === scope.warehouseId)!;
+    await service.prepareDraft({ ...request, expectedWarehouseFingerprint: row.fingerprint }, "operator");
+    expect((await pool.query("SELECT inventory_authority,fulfillment_authority FROM warehouse.fulfillment_nodes")).rows)
+      .toEqual([{ inventory_authority: "echelon", fulfillment_authority: "none" }]);
+  });
+
   it("serializes identical concurrent source retries into one audited record", async () => {
     const { service, request } = await sourceSetup();
     const results = await Promise.all([service.prepareDraft(request, "operator"), service.prepareDraft(request, "operator")]);
@@ -478,7 +529,7 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
     const { service, request } = await sourceSetup();
     const results = await Promise.allSettled([
       service.prepareDraft(request, "operator"),
-      service.prepareDraft({ ...request, idempotencyKey: "competing-source", inventoryAuthority: "manual" }, "operator"),
+      service.prepareDraft({ ...request, idempotencyKey: "competing-source", changeReason: "Competing setup" }, "operator"),
     ]);
     expect(results.filter(row => row.status === "fulfilled")).toHaveLength(1);
     expect(results.find(row => row.status === "rejected")).toMatchObject({ reason: { code: "WAREHOUSE_INVENTORY_SOURCE_EXISTS", status: 409 } });

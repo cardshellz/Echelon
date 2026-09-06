@@ -31,9 +31,12 @@ const CONFIRM_FAILURE_STATUS: Record<string, number> = {
 };
 
 export function registerPackingRoutes(app: Express): void {
-  app.get("/api/shipping/packing/queue", requireAuth, async (_req, res) => {
+  app.get("/api/shipping/packing/queue", requireAuth, async (req, res) => {
     try {
-      const queue = await getPackingQueue();
+      const orderId = req.query.orderId === undefined ? undefined
+        : z.string().regex(/^[1-9][0-9]*$/).transform(Number).pipe(z.number().int().positive().max(2_147_483_647)).safeParse(req.query.orderId);
+      if (orderId !== undefined && !orderId.success) return res.status(400).json({ error: { code: "PACKING_INVALID_INPUT", message: "Invalid packing order ID" } });
+      const queue = await getPackingQueue(orderId?.data);
       return res.json(queue);
     } catch (error) {
       return sendPackingError(res, error, "load packing queue");
