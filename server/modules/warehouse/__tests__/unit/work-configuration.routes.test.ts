@@ -39,7 +39,7 @@ describe("warehouse work HTTP boundary", () => {
     expect(setup).not.toHaveBeenCalled();
   });
   it("uses the authenticated actor, not a request actor", async () => {
-    const save = vi.spyOn(service, "save").mockResolvedValue({ warehouseId: 1, revision: 1, configuration: emptyWorkConfiguration(), executionStatus: "not_connected", savedAt: null, savedBy: "session-user", reason: "draft" });
+    const save = vi.spyOn(service, "save").mockResolvedValue({ warehouseId: 1, revision: 1, configuration: emptyWorkConfiguration(), executionStatus: "explicit_handoff_only", savedAt: null, savedBy: "session-user", reason: "draft" });
     const body = { forgedActor: "another-person" };
     const result = await fetch(`${base}/1/work-configuration`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     expect(result.status).toBe(200);

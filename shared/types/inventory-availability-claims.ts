@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { assemblyWorkRouteSchema, assemblyWorkFenceSchema, workEvidenceIdSchema } from "../warehouse-assembly-work";
 
 import {
   claimPlanSchema,
@@ -68,6 +69,7 @@ export const canonicalAvailabilityClaimOperationExecutionCommandSchema = z.objec
   idempotencyKey: nonblank(120),
   actor: nonblank(100),
   reason: nonblank(1000),
+  work: assemblyWorkFenceSchema.optional(),
 }).strict();
 
 export const canonicalAvailabilityClaimBuildHandoffCommandSchema = z.object({
@@ -76,6 +78,7 @@ export const canonicalAvailabilityClaimBuildHandoffCommandSchema = z.object({
   idempotencyKey: nonblank(120),
   actor: nonblank(100),
   reason: nonblank(1000),
+  work: assemblyWorkRouteSchema.optional(),
 }).strict();
 
 const canonicalAvailabilityClaimPickCommandBaseSchema = z.object({
@@ -209,6 +212,7 @@ export const canonicalAvailabilityClaimBuildHandoffResultSchema = z.object({
   buildSystemNumber: nonblank(40),
   adoptedReservationQty: positiveBigintString,
   idempotentReplay: z.boolean(),
+  workTaskId: workEvidenceIdSchema.optional(),
 }).strict();
 
 export const canonicalAvailabilityClaimOperationExecutionResultSchema = z.object({
