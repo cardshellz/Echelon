@@ -9,6 +9,17 @@ import { PgDropshipListingPreviewRepository } from "../../infrastructure/dropshi
 
 describe("PgDropshipListingPreviewRepository", () => {
   afterEach(() => vi.unstubAllEnvs());
+  it("loads exact vendor/store scoped price revisions including explicit null resets", async () => {
+    const query = vi.fn(async () => ({ rows: [{ product_variant_id: 101, revision_id: 8, override_price_cents: null,
+      updated_at: new Date("2026-09-06T16:00:00.000Z") }] }));
+    const repository = new PgDropshipListingPreviewRepository({ query } as unknown as Pool);
+    expect(await repository.listSavedListingPrices({ vendorId: 10, storeConnectionId: 22, productVariantIds: [101] }))
+      .toEqual([{ productVariantId: 101, revisionId: 8, overridePriceCents: null, updatedAt: "2026-09-06T16:00:00.000Z" }]);
+    expect(query).toHaveBeenCalledWith(expect.stringContaining("vendor_id = $1 AND store_connection_id = $2"), [10, 22, [101]]);
+    query.mockClear();
+    expect(await repository.listSavedListingPrices({ vendorId: 10, storeConnectionId: 22, productVariantIds: [] })).toEqual([]);
+    expect(query).not.toHaveBeenCalled();
+  });
 
   it.each([35, null])("reads the canonical internal Dropship OMS channel partner-profile discount (%s)", async (discount) => {
     vi.stubEnv("DROPSHIP_OMS_CHANNEL_ID", "");

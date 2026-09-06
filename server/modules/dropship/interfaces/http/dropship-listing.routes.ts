@@ -59,6 +59,8 @@ export function registerDropshipListingRoutes(
           productVariantIds: req.body?.productVariantIds,
           requestedRetailPriceCents: req.body?.requestedRetailPriceCents,
           requestedRetailPricesByVariantId: req.body?.requestedRetailPricesByVariantId,
+          expectedPriceRevisionIdsByVariantId: req.body?.expectedPriceRevisionIdsByVariantId,
+          expectedPriceCentsByVariantId: req.body?.expectedPriceCentsByVariantId,
           idempotencyKey: resolveIdempotencyKey(req),
         });
         return res.status(result.idempotentReplay ? 200 : 201).json({
@@ -133,6 +135,7 @@ function statusForDropshipListingError(code: string): number {
     case "DROPSHIP_LISTING_IMAGE_NOT_FOUND":
       return 404;
     case "DROPSHIP_IDEMPOTENCY_CONFLICT":
+    case "DROPSHIP_LISTING_PRICE_VERSION_CONFLICT":
       return 409;
     default:
       return 500;
