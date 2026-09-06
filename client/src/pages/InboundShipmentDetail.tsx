@@ -1,3 +1,4 @@
+import { parseShipmentReceiptResolution, requiresReceiptUnitReview, shipmentReceiveCoverageLabel } from "@/lib/shipment-receipt-units";
 import { formatMills } from "@shared/utils/money";
 import { useEffect, useMemo, useState, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -525,7 +526,7 @@ export default function InboundShipmentDetail() {
     const res = await fetch(`/api/inbound-shipments/${params.shipmentId}/receipt-pack-resolution?${query.toString()}`);
     const body = await res.json().catch(() => null);
     if (!res.ok) throw new Error(body?.error || "Failed to check shipment receipt packs");
-    return body as ShipmentReceiptPackResolution;
+    return parseShipmentReceiptResolution(body, params);
   }
 
   async function createReceiptForShipment(
@@ -573,7 +574,7 @@ export default function InboundShipmentDetail() {
     try {
       const resolution = await fetchShipmentReceiptPackResolution(params);
       if (!navigation.isCurrent()) return false;
-      if (!resolution.canCreateReceipt) {
+      if (requiresReceiptUnitReview(resolution)) {
         setShipmentReceiptPackResolution(resolution);
         return true;
       }
@@ -595,7 +596,7 @@ export default function InboundShipmentDetail() {
     }
     try {
       const resolution = await fetchShipmentReceiptPackResolution(params);
-      if (!resolution.canCreateReceipt) {
+      if (requiresReceiptUnitReview(resolution)) {
         if (navigation.isCurrent()) setShipmentReceiptPackResolution(resolution);
         return;
       }
@@ -645,10 +646,8 @@ export default function InboundShipmentDetail() {
       receiptSetup: "1",
       returnTo,
     });
-    if (line?.unitsPerCarton && Number(line.unitsPerCarton) > 0) {
-      setupParams.set("unitsPerVariant", String(line.unitsPerCarton));
-      setupParams.set("hierarchyLevel", "3");
-    }
+    // Open the source product for explicit receive-variant setup; the catalog
+    // URL currently cannot seed a one-piece UOM without defaulting to a case.
     if (line?.sku) setupParams.set("shipmentSku", line.sku);
 
     if (line?.productId) {
@@ -2805,16 +2804,14 @@ export default function InboundShipmentDetail() {
           ) : (
             <div className="space-y-3">
               {(shipmentPoReceiveOptions?.purchaseOrders ?? []).map((option: any) => {
-                const fullyReceived = !option.receivable && option.remainingBaseQty <= 0 && option.receivedBaseQty > 0;
+                const { fullyReceived, text: coverageLabel } = shipmentReceiveCoverageLabel(option);
                 return (
                   <div key={option.purchaseOrderId} className="flex items-center justify-between gap-3 rounded-md border p-3">
                     <div className="min-w-0">
                       <div className="font-medium truncate">{option.poNumber ?? `PO #${option.purchaseOrderId}`}</div>
                       <div className="text-sm text-muted-foreground">
                         {option.lineCount} line{option.lineCount === 1 ? "" : "s"} ·{" "}
-                        {option.remainingBaseQty > 0
-                          ? `${option.remainingBaseQty.toLocaleString()} of ${option.qtyShipped.toLocaleString()} units remaining`
-                          : `${option.qtyShipped.toLocaleString()} units`}
+                        {coverageLabel}
                       </div>
                       {!fullyReceived && option.reason && (
                         <div className="text-xs text-muted-foreground mt-1">{option.reason}</div>

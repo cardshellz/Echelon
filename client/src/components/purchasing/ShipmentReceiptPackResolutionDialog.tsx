@@ -18,44 +18,8 @@ import {
   TableRow,
 } from "@/components/ui/table";
 
-export type ShipmentReceiptPackResolutionLine = {
-  shipmentLineId: number | null;
-  purchaseOrderLineId: number | null;
-  sku: string | null;
-  productId: number | null;
-  productName: string | null;
-  qtyShipped: number | null;
-  cartonCount: number | null;
-  unitsPerCarton: number | null;
-  status: string;
-  blocking: boolean;
-  issue: string | null;
-  matchedVariant: {
-    id: number;
-    sku: string | null;
-    name: string | null;
-    unitsPerVariant: number;
-  } | null;
-  activeVariants: Array<{
-    id: number;
-    sku: string | null;
-    name: string | null;
-    unitsPerVariant: number;
-  }>;
-};
-
-export type ShipmentReceiptPackResolution = {
-  shipmentId: number;
-  shipmentNumber: string | null;
-  status: string | null;
-  purchaseOrderId: number;
-  poNumber: string | null;
-  canCreateReceipt: boolean;
-  unresolvedCount: number;
-  lineCount: number;
-  issue: string | null;
-  lines: ShipmentReceiptPackResolutionLine[];
-};
+import type { ShipmentReceiptPackResolution, ShipmentReceiptPackResolutionLine } from "@/lib/shipment-receipt-units";
+export type { ShipmentReceiptPackResolution, ShipmentReceiptPackResolutionLine } from "@/lib/shipment-receipt-units";
 
 type Props = {
   open: boolean;
@@ -74,7 +38,10 @@ function statusLabel(line: ShipmentReceiptPackResolutionLine): string {
   if (line.status === "fractional_carton") return "Invalid cartons";
   if (line.status === "no_carton_count") return "Fallback config";
   if (line.status === "invalid_po_line") return "Invalid PO line";
-  return "Resolved";
+  if (line.status === "invalid_quantity") return "Invalid piece quantity";
+  if (line.status === "missing_piece_variant") return "Piece variant required";
+  if (line.status === "unit_mismatch") return "Unit source changed";
+  return line.status === "resolved" ? "Resolved" : "Needs review";
 }
 
 function formatVariantList(line: ShipmentReceiptPackResolutionLine): string {
@@ -86,8 +53,8 @@ function formatVariantList(line: ShipmentReceiptPackResolutionLine): string {
 
 function requiredSetupText(line: ShipmentReceiptPackResolutionLine): string {
   if (!line.productId) return "Link this shipment line to a product before creating the receipt.";
-  if (!line.unitsPerCarton) return "Set the shipment carton count and units per carton before creating the receipt.";
-  return `Create or activate a receive variant for Product ${line.productId} with ${line.unitsPerCarton} units per variant.`;
+  if (line.status === "missing_piece_variant") return "Create or activate a one-piece variant for this product. The shipped quantity cannot be represented as whole preferred packs.";
+  return line.issue ?? "Review the source line and its active receive variant, then refresh this check.";
 }
 
 export function ShipmentReceiptPackResolutionDialog({
@@ -107,7 +74,7 @@ export function ShipmentReceiptPackResolutionDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-5xl">
+      <DialogContent className="min-w-0 max-w-5xl max-h-[90vh] overflow-y-auto overflow-x-hidden [&>*]:min-w-0">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             {canCreate ? (
@@ -119,7 +86,7 @@ export function ShipmentReceiptPackResolutionDialog({
           </DialogTitle>
           <DialogDescription>
             {resolution?.shipmentNumber ?? `Shipment #${resolution?.shipmentId ?? ""}`}
-            {resolution?.poNumber ? ` for ${resolution.poNumber}` : ""}. Shipment cartons must map to an active receive variant before inventory can be posted.
+            {resolution?.poNumber ? ` for ${resolution.poNumber}` : ""}. Shipped pieces determine the receipt count. Cartons are a packing reference and do not define the receive unit.
           </DialogDescription>
         </DialogHeader>
 
@@ -135,7 +102,7 @@ export function ShipmentReceiptPackResolutionDialog({
               {unresolvedCount} line{unresolvedCount === 1 ? "" : "s"} need receive-pack setup before this receipt can be created.
             </div>
             <div>
-              Fix the blocking line below, then return here and refresh. The receipt will not be created until the shipment carton pack size maps to an active product variant.
+              Fix the blocking line below, then return here and refresh. An active receive variant must represent the shipped pieces exactly.
             </div>
             {primaryBlockingLine && (
               <div className="rounded border border-red-200 bg-white/70 p-2 text-red-900">
@@ -146,15 +113,31 @@ export function ShipmentReceiptPackResolutionDialog({
           </div>
         )}
 
-        <div className="overflow-x-auto rounded-md border">
+        <div className="space-y-3 md:hidden">
+          {(resolution?.lines ?? []).map((line, index) => <div key={line.shipmentLineId ?? index} className="min-w-0 rounded-md border p-3 text-sm space-y-2">
+            <div className="font-mono break-all">{line.sku ?? "Unlinked SKU"}</div>
+            <div className="break-words">{line.productName ?? "Product needs review"}</div>
+            <Badge variant={line.blocking ? "destructive" : "secondary"}>{statusLabel(line)}</Badge>
+            <dl className="grid grid-cols-2 gap-x-3 gap-y-2">
+              <dt className="text-muted-foreground">Remaining pieces</dt><dd className="text-right">{line.qtyShipped ?? "Unknown"}</dd>
+              <dt className="text-muted-foreground">Cartons (reference)</dt><dd className="text-right">{line.cartonCount ?? "Not recorded"}</dd>
+              <dt className="text-muted-foreground">Planned receive count</dt><dd className="text-right font-semibold">{line.receivePlan ? line.receivePlan.expectedQty.toLocaleString() + (line.receivePlan.countsAsPieces ? " pieces" : " receive units") : "Needs review"}</dd>
+              {line.receivePlan && <><dt className="text-muted-foreground">Pieces per receive unit</dt><dd className="text-right">{line.receivePlan.unitsPerVariant}</dd></>}
+            </dl>
+            {line.matchedVariant && <div className="break-words text-xs text-muted-foreground">{line.matchedVariant.name ?? "Receive variant"} — {line.matchedVariant.sku ?? "SKU not recorded"}</div>}
+            {line.issue && <p className="break-words text-xs text-muted-foreground">{line.issue}</p>}
+            {line.blocking && <Button variant="outline" size="sm" className="min-h-10" onClick={() => onOpenCatalog(line)}>Fix variant</Button>}
+          </div>)}
+        </div>
+        <div className="hidden min-w-0 max-w-full overflow-x-auto rounded-md border md:block">
           <Table>
             <TableHeader>
               <TableRow>
                 <TableHead>SKU</TableHead>
                 <TableHead>Product</TableHead>
-                <TableHead className="text-right">Shipped</TableHead>
-                <TableHead className="text-right">Cartons</TableHead>
-                <TableHead className="text-right">Units/Carton</TableHead>
+                <TableHead className="text-right">Remaining pieces to receive</TableHead>
+                <TableHead className="text-right">Cartons (reference)</TableHead>
+                <TableHead className="text-right">Planned receive count</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead>Receive Variant</TableHead>
               </TableRow>
@@ -171,7 +154,7 @@ export function ShipmentReceiptPackResolutionDialog({
                   </TableCell>
                   <TableCell className="text-right">{line.qtyShipped ?? "-"}</TableCell>
                   <TableCell className="text-right">{line.cartonCount ?? "-"}</TableCell>
-                  <TableCell className="text-right">{line.unitsPerCarton ?? "-"}</TableCell>
+                  <TableCell className="text-right">{line.receivePlan ? <div><b>{line.receivePlan.expectedQty.toLocaleString()}</b> {line.receivePlan.countsAsPieces ? "pieces" : "receive units"}<div className="text-xs text-muted-foreground">{line.receivePlan.unitsPerVariant} pieces per receive unit</div></div> : "Needs review"}</TableCell>
                   <TableCell>
                     <Badge variant={line.blocking ? "destructive" : "secondary"}>
                       {statusLabel(line)}
@@ -183,7 +166,7 @@ export function ShipmentReceiptPackResolutionDialog({
                       <div>
                         <div className="font-mono text-xs">{line.matchedVariant.sku ?? `Variant ${line.matchedVariant.id}`}</div>
                         <div className="text-xs text-muted-foreground">
-                          {line.matchedVariant.name ?? "Active variant"} ({line.matchedVariant.unitsPerVariant})
+                          {line.matchedVariant.name ?? "Active variant"} ({line.matchedVariant.unitsPerVariant} pieces)
                         </div>
                       </div>
                     ) : (
