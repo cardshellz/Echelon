@@ -10,13 +10,14 @@ import { db } from "../../../db";
 import { persistAuditEvent } from "../../../infrastructure/auditLogger";
 import { logger } from "../../../platform/observability/logger";
 import type { PrepareWarehouseInventorySourceCommand, WarehouseInventorySourceStore } from "../application/warehouse-inventory-source.service";
-import { planWarehouseInventorySource, warehouseInventorySourceFingerprint, WarehouseInventorySourceError } from "../domain/warehouse-inventory-source";
+import { planWarehouseInventorySource, resolveConfiguredWarehouseSource, warehouseInventorySourceFingerprint, WarehouseInventorySourceError } from "../domain/warehouse-inventory-source";
 
 // Resolve schema columns when a query runs, not while the public module loads.
 function warehouseColumns() {
   return {
     id: warehouses.id, code: warehouses.code, name: warehouses.name,
     warehouseType: warehouses.warehouseType, inventorySourceType: warehouses.inventorySourceType,
+    inventorySourceChannelId: sql<string | null>`${warehouses.inventorySourceConfig}->>'channelId'`,
     isActive: warehouses.isActive,
   };
 }
@@ -40,7 +41,8 @@ export class PostgresWarehouseInventorySourceStore implements WarehouseInventory
       // Parse before fingerprinting; a corrupt saved identity must not become an approved draft.
       return warehouseInventorySourceViewSchema.parse({ warehouses: rows.map(row => {
         const warehouse = warehouseInventorySourceWarehouseSchema.parse(row.warehouse);
-        return { ...warehouse, source: row.source, fingerprint: warehouseInventorySourceFingerprint(warehouse) };
+        return { ...warehouse, source: row.source, fingerprint: warehouseInventorySourceFingerprint(warehouse),
+          configuredSource: resolveConfiguredWarehouseSource(warehouse) };
       }) });
     } catch (error) {
       throw classifyError(error);
@@ -96,6 +98,11 @@ export class PostgresWarehouseInventorySourceStore implements WarehouseInventory
           context: {
             changeReason: command.changeReason, idempotencyKey: command.idempotencyKey,
             requestHash: command.requestHash, warehouseFingerprint: command.expectedWarehouseFingerprint,
+            authoritySource: command.authoritySource ?? "explicit",
+            warehouseSettings: command.authoritySource === "warehouse_settings" ? {
+              warehouseType: warehouse.warehouseType, inventorySourceType: warehouse.inventorySourceType,
+              configuredSource: resolveConfiguredWarehouseSource(warehouseInventorySourceWarehouseSchema.parse(warehouse)),
+            } : null,
             runtimeAuthorityChanged: false, providerWriteAttempted: false, outboxEnqueued: false,
           },
         }, { timestamp: command.occurredAt, emitStructuredLog: false });

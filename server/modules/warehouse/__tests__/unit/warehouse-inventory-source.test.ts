@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { prepareWarehouseInventorySourceRequestSchema } from "@shared/types/warehouse-inventory-source";
 import { WarehouseInventorySourceService, type PrepareWarehouseInventorySourceCommand } from "../../application/warehouse-inventory-source.service";
-import { planWarehouseInventorySource, warehouseInventorySourceFingerprint } from "../../domain/warehouse-inventory-source";
+import { planWarehouseInventorySource, resolveConfiguredWarehouseSource, warehouseInventorySourceFingerprint } from "../../domain/warehouse-inventory-source";
 
 const warehouse = Object.freeze({
   id: 1, code: "LEON", name: "Existing warehouse", warehouseType: "operations" as const,
@@ -17,12 +17,59 @@ const result = {
   runtimeAuthorityChanged: false as const, providerWriteAttempted: false as const, outboxEnqueued: false as const,
 };
 const time = new Date("2026-09-06T12:00:00Z");
+const savedRequest = Object.freeze({
+  warehouseId: request.warehouseId, expectedWarehouseFingerprint: request.expectedWarehouseFingerprint,
+  authoritySource: "warehouse_settings" as const, changeReason: request.changeReason, idempotencyKey: request.idempotencyKey,
+});
 function setup() {
   const store = { getView: vi.fn(async () => ({ warehouses: [] })), prepareDraft: vi.fn(async (_command: PrepareWarehouseInventorySourceCommand) => result) };
   return { store, service: new WarehouseInventorySourceService(store, { now: () => time }) };
 }
 
 describe("warehouse inventory source preparation", () => {
+  it.each([
+    ["operations", "internal", "echelon", "echelon", "internal"],
+    ["bulk_storage", "internal", "echelon", "none", "internal"],
+    ["3pl", "channel", "external_provider", "external_provider", "inbound"],
+    ["3pl", "manual", "manual", "external_provider", "manual"],
+    ["3pl", "internal", "echelon", "external_provider", "internal"],
+    ["operations", "channel", "external_provider", "echelon", "inbound"],
+    ["bulk_storage", "manual", "manual", "none", "manual"],
+  ] as const)("reuses %s/%s settings without conflating stock source and fulfillment", (warehouseType, inventorySourceType, inventoryAuthority, fulfillmentAuthority, inventoryDirection) => {
+    const input = { ...warehouse, warehouseType, inventorySourceType, inventorySourceChannelId: "37" };
+    expect(resolveConfiguredWarehouseSource(input)).toEqual({
+      status: "ready", inventoryAuthority, fulfillmentAuthority, inventoryDirection,
+      sourceChannelId: inventorySourceType === "channel" ? 37 : null,
+    });
+    expect(planWarehouseInventorySource(input, { ...savedRequest, expectedWarehouseFingerprint: warehouseInventorySourceFingerprint(input) }))
+      .toMatchObject({ inventoryAuthority, fulfillmentAuthority, lifecycleStatus: "draft", providerAccountId: null, providerLocationId: null });
+  });
+  it.each([undefined, null, "", "0", "-1", "1.5", "37x", " 37", "2147483648", "9".repeat(400)])("blocks an invalid incoming source channel: %j", inventorySourceChannelId => {
+    const input = { ...warehouse, inventorySourceType: "channel", inventorySourceChannelId };
+    expect(resolveConfiguredWarehouseSource(input)).toMatchObject({ status: "blocked" });
+    expect(() => planWarehouseInventorySource(input, { ...savedRequest, expectedWarehouseFingerprint: warehouseInventorySourceFingerprint(input) }))
+      .toThrow(expect.objectContaining({ code: "WAREHOUSE_INVENTORY_SOURCE_CONFIGURATION_REQUIRED" }));
+  });
+  it.each(["integration", "unrecognized"])("does not silently replace an unsupported %s source with internal stock", inventorySourceType => {
+    expect(resolveConfiguredWarehouseSource({ ...warehouse, inventorySourceType })).toMatchObject({ status: "blocked" });
+  });
+  it("includes the incoming channel identity in the stale-settings check", () => {
+    const before = { ...warehouse, inventorySourceType: "channel", inventorySourceChannelId: "37" };
+    expect(() => planWarehouseInventorySource({ ...before, inventorySourceChannelId: "36" }, {
+      ...savedRequest, expectedWarehouseFingerprint: warehouseInventorySourceFingerprint(before),
+    })).toThrow(expect.objectContaining({ code: "WAREHOUSE_INVENTORY_SOURCE_STALE" }));
+  });
+  it("accepts saved-settings commands, rejects overrides and keeps their idempotency hashes distinct", async () => {
+    const { store, service } = setup();
+    await expect(service.prepareDraft(savedRequest, "operator")).resolves.toEqual(result);
+    await service.prepareDraft(savedRequest, "operator");
+    expect(store.prepareDraft.mock.calls[0]![0].requestHash).toBe(store.prepareDraft.mock.calls[1]![0].requestHash);
+    await service.prepareDraft(request, "operator");
+    expect(store.prepareDraft.mock.calls[2]![0].requestHash).not.toBe(store.prepareDraft.mock.calls[0]![0].requestHash);
+    await expect(service.prepareDraft({ ...savedRequest, inventoryAuthority: "echelon" }, "operator"))
+      .rejects.toMatchObject({ code: "WAREHOUSE_INVENTORY_SOURCE_INVALID_REQUEST" });
+    expect(store.prepareDraft).toHaveBeenCalledTimes(3);
+  });
   it("copies an existing warehouse into a draft without inventing provider identity", () => {
     expect(planWarehouseInventorySource(warehouse, request)).toEqual({
       warehouseId: 1, code: "LEON", name: "Existing warehouse", nodeType: "internal_warehouse",
