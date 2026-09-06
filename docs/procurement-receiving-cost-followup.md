@@ -1,5 +1,7 @@
 # Receiving cost follow-up: source identity, unit basis, and cost layers
 
+Current follow-up: [cost application design and real-owner PostgreSQL evidence](procurement-cost-application-design.md), audited after PR #1387. In particular, current PO unit prices are product-only; the blended-price examples below are conditional historical cases.
+
 Audit baseline: `bb21c9647647682756e5663a022f40bb4a8afe77` (merged shipment-line controls). The source references below use that commit's line numbers. W02a quantity/source work is being implemented separately; this document records the financial follow-up and does not claim those writers have been corrected.
 
 Scope: receiving close, inventory receipt and lot creation, PO receipt reconciliation, approved invoice cost reconciliation, shipment landed-cost finalization/application, and receipt reversal. No production business rows were read or modified. Production frequency and affected monetary totals are unknown.
