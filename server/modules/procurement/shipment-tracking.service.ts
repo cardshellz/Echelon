@@ -21,10 +21,14 @@ import type {
   InboundShipmentStatusHistory,
   InventoryLot,
 } from "@shared/schema";
-import { inboundShipmentLines, inboundFreightCosts, vendors } from "@shared/schema";
+import { inboundShipmentLines, inboundFreightCosts, vendors, auditEvents } from "@shared/schema";
 import { centsToMills, millsToCents, perUnitMills } from "@shared/utils/money";
 import { createCOGSService } from "../inventory";
 import { Decimal } from "decimal.js";
+import { shipmentCostCreateSchema, shipmentCostResourceIdSchema, shipmentCostPatchSchema, shipmentCostDeleteSchema, SHIPMENT_COST_EDITABLE_FIELDS, type ShipmentCostCreateCommand } from "@shared/procurement/shipment-cost-command";
+import { shipmentHeaderCreateSchema, shipmentHeaderPatchSchema } from "@shared/procurement/shipment-header-input";
+import { shipmentCostVersion, versionShipmentCost } from "./shipment-cost-version";
+import type { ShipmentCostCommand } from "./shipment-cost-commands";
 import { eq, sql as sqlTag } from "drizzle-orm";
 
 /**
@@ -106,7 +110,7 @@ interface Storage {
   getInboundShipmentByNumber(shipmentNumber: string): Promise<InboundShipment | undefined>;
   createInboundShipment(data: InsertInboundShipment): Promise<InboundShipment>;
   updateInboundShipment(id: number, updates: Partial<InsertInboundShipment>, executor?: any): Promise<InboundShipment | null>;
-  deleteInboundShipment(id: number): Promise<boolean>;
+  deleteInboundShipment(id: number, executor?: any): Promise<boolean>;
   generateShipmentNumber(): Promise<string>;
   // Lines
   getInboundShipmentLines(inboundShipmentId: number, executor?: any): Promise<InboundShipmentLine[]>;
@@ -120,8 +124,8 @@ interface Storage {
   // Costs
   getInboundFreightCosts(inboundShipmentId: number, executor?: any): Promise<InboundFreightCost[]>;
   getInboundFreightCostById(id: number, executor?: any): Promise<InboundFreightCost | undefined>;
-  createInboundFreightCost(data: InsertInboundFreightCost, executor?: any): Promise<InboundFreightCost>;
-  updateInboundFreightCost(id: number, updates: Partial<InsertInboundFreightCost>, executor?: any): Promise<InboundFreightCost | null>;
+  createInboundFreightCost(data: InsertInboundFreightCost, executor?: any, recordedAt?: Date): Promise<InboundFreightCost>;
+  updateInboundFreightCost(id: number, updates: Partial<InsertInboundFreightCost>, executor?: any, recordedAt?: Date): Promise<InboundFreightCost | null>;
   deleteInboundFreightCost(id: number, executor?: any): Promise<boolean>;
   // Allocations
   getInboundFreightCostAllocations(inboundFreightCostId: number, executor?: any): Promise<any[]>;
@@ -137,7 +141,7 @@ interface Storage {
   deleteLandedCostSnapshotsForShipment(inboundShipmentId: number, executor?: any): Promise<void>;
   createLandedCostAdjustment(data: any, executor?: any): Promise<any>;
   // Status history
-  createInboundShipmentStatusHistory(data: any): Promise<InboundShipmentStatusHistory>;
+  createInboundShipmentStatusHistory(data: any, executor?: any): Promise<InboundShipmentStatusHistory>;
   getInboundShipmentStatusHistory(inboundShipmentId: number): Promise<InboundShipmentStatusHistory[]>;
   // Cross-references
   getInboundShipmentsByPo(purchaseOrderId: number): Promise<InboundShipment[]>;
@@ -318,6 +322,7 @@ export function createShipmentTrackingService(
   db: any,
   storage: Storage,
   lotCostRevalueService: LotCostRevalueService = createCOGSService(db),
+  clock: () => Date = () => new Date(),
 ) {
 
   async function runInTransaction<T>(fn: (tx: any) => Promise<T>): Promise<T> {
@@ -421,14 +426,19 @@ export function createShipmentTrackingService(
     toStatus: string,
     userId?: string,
     notes?: string,
+    executor?: any,
+    changedAt?: Date,
   ) {
-    await storage.createInboundShipmentStatusHistory({
+    const entry = {
       inboundShipmentId,
       fromStatus,
       toStatus,
       changedBy: userId || null,
       notes: notes || null,
-    });
+      ...(changedAt ? { changedAt } : {}),
+    };
+    if (executor) await storage.createInboundShipmentStatusHistory(entry, executor);
+    else await storage.createInboundShipmentStatusHistory(entry);
   }
 
   async function recomputeShipmentTotals(shipmentId: number, executor?: any) {
@@ -448,12 +458,24 @@ export function createShipmentTrackingService(
       totalCartons += line.cartonCount || 0;
     }
 
-    let estimatedTotalCostCents = 0;
-    let actualTotalCostCents = 0;
+    let estimatedTotal = BigInt(0);
+    let actualTotal = BigInt(0);
+    let effectiveTotal = BigInt(0);
     for (const cost of costs) {
-      estimatedTotalCostCents += cost.estimatedCents || 0;
-      actualTotalCostCents += cost.actualCents || 0;
+      for (const amount of [cost.estimatedCents, cost.actualCents]) {
+        if (amount !== null && amount !== undefined && !Number.isSafeInteger(amount)) {
+          throw new ShipmentTrackingError("Recorded charge amounts must be safe integer cents", 409, { code: "SHIPMENT_COST_AMOUNT_INVALID" });
+        }
+      }
+      estimatedTotal += BigInt(cost.estimatedCents ?? 0);
+      actualTotal += BigInt(cost.actualCents ?? 0);
+      effectiveTotal += BigInt(cost.actualCents ?? cost.estimatedCents ?? 0);
     }
+    if ([estimatedTotal, actualTotal, effectiveTotal].some((amount) => amount > BigInt(Number.MAX_SAFE_INTEGER) || amount < BigInt(Number.MIN_SAFE_INTEGER))) {
+      throw new ShipmentTrackingError("Shipment charge totals exceed the supported exact range", 409, { code: "SHIPMENT_COST_TOTAL_OVERFLOW" });
+    }
+    const estimatedTotalCostCents = Number(estimatedTotal);
+    const actualTotalCostCents = Number(actualTotal);
 
     // NOTE: grossWeightKg, totalGrossVolumeCbm, palletCount are user-entered at shipment level (from BOL) — never overwritten here
     await storage.updateInboundShipment(shipmentId, {
@@ -639,50 +661,31 @@ export function createShipmentTrackingService(
 
   // ─── CRUD ───────────────────────────────────────────────────────
 
-  async function createShipment(data: {
-    mode?: string;
-    carrierName?: string;
-    forwarderName?: string;
-    bookingReference?: string;
-    originPort?: string;
-    destinationPort?: string;
-    originCountry?: string;
-    destinationCountry?: string;
-    containerNumber?: string;
-    sealNumber?: string;
-    containerSize?: string;
-    containerCapacityCbm?: string;
-    bolNumber?: string;
-    houseBol?: string;
-    trackingNumber?: string;
-    etd?: Date;
-    eta?: Date;
-    warehouseId?: number;
-    notes?: string;
-    internalNotes?: string;
-  }, userId?: string) {
-    const shipmentNumber = (data as any).shipmentNumber || await storage.generateShipmentNumber();
+  async function createShipment(rawData: unknown, userId?: string) {
+    const parsed = shipmentHeaderCreateSchema.parse(rawData);
+    const data = {
+      ...parsed,
+      ...(parsed.eta !== undefined ? { eta: parsed.eta === null ? null : new Date(parsed.eta) } : {}),
+      ...(parsed.etd !== undefined ? { etd: parsed.etd === null ? null : new Date(parsed.etd) } : {}),
+    };
+    const shipmentNumber = data.shipmentNumber || await storage.generateShipmentNumber();
     const allocationMethodDefault = data.mode ? MODE_DEFAULT_ALLOCATION[data.mode] || "by_volume" : "by_volume";
 
     let shipment: InboundShipment;
     try {
       shipment = await storage.createInboundShipment({
+        ...data,
         shipmentNumber,
         status: "draft",
         allocationMethodDefault,
         createdBy: userId || null,
-        ...data,
-      } as any);
+      } as InsertInboundShipment);
     } catch (error: any) {
       if (error?.code === "23505") {
-        throw new ShipmentTrackingError(
-          `Shipment number '${shipmentNumber}' already in use by an active record.`,
-          409,
-        );
+        throw new ShipmentTrackingError(`Shipment number '${shipmentNumber}' already in use by an active record.`, 409);
       }
       throw error;
     }
-
     await recordStatusChange(shipment.id, null, "draft", userId, "Shipment created");
     return shipment;
   }
@@ -693,70 +696,81 @@ export function createShipmentTrackingService(
     return shipment;
   }
 
-  async function updateShipment(id: number, updates: Partial<InsertInboundShipment>) {
-    const shipment = await getShipment(id);
-    if (shipment.status === "closed" || shipment.status === "cancelled") {
-      throw new ShipmentTrackingError("Cannot edit a closed or cancelled shipment");
-    }
-    // If mode changed, update default allocation method
-    if (updates.mode && updates.mode !== shipment.mode) {
-      (updates as any).allocationMethodDefault = MODE_DEFAULT_ALLOCATION[updates.mode] || "by_volume";
-    }
-    return await storage.updateInboundShipment(id, updates);
+  async function updateShipment(id: number, rawUpdates: unknown) {
+    const parsed = shipmentHeaderPatchSchema.parse(rawUpdates);
+    const updates = {
+      ...parsed,
+      ...(parsed.eta !== undefined ? { eta: parsed.eta === null ? null : new Date(parsed.eta) } : {}),
+      ...(parsed.etd !== undefined ? { etd: parsed.etd === null ? null : new Date(parsed.etd) } : {}),
+    } as Partial<InsertInboundShipment>;
+    return runInTransaction(async (tx) => {
+      const shipment = await lockShipment(tx, id);
+      if (shipment.status === "closed" || shipment.status === "cancelled") {
+        throw new ShipmentTrackingError("Cannot edit a closed or cancelled shipment");
+      }
+      if (updates.mode && updates.mode !== shipment.mode) {
+        updates.allocationMethodDefault = MODE_DEFAULT_ALLOCATION[updates.mode] || "by_volume";
+      }
+      return storage.updateInboundShipment(id, updates, tx);
+    });
   }
 
   async function deleteShipment(id: number) {
-    const shipment = await getShipment(id);
-    if (shipment.status !== "draft") {
-      throw new ShipmentTrackingError("Only draft shipments can be deleted");
-    }
-    return await storage.deleteInboundShipment(id);
+    return runInTransaction(async (tx) => {
+      const shipment = await lockShipment(tx, id);
+      if (shipment.status !== "draft") throw new ShipmentTrackingError("Only draft shipments can be deleted");
+      const costs = await storage.getInboundFreightCosts(id, tx);
+      if (costs.length > 0) {
+        throw new ShipmentTrackingError("Remove draft charges individually before deleting this shipment. Invoice-referenced charges must retain their source shipment.", 409, { code: "SHIPMENT_HAS_COST_HISTORY" });
+      }
+      return storage.deleteInboundShipment(id, tx);
+    });
   }
 
   // ─── Status transitions ────────────────────────────────────────
 
   async function transitionTo(id: number, targetStatus: string, userId?: string, notes?: string, extraUpdates?: Partial<InsertInboundShipment>) {
-    const shipment = await getShipment(id);
-    assertTransition(shipment.status, targetStatus);
+    return await runInTransaction(async (tx) => {
+      // Re-check after the shared shipment lock: a transition that waited for
+      // close must not apply a decision made from the previous costing state.
+      const shipment = await lockShipment(tx, id);
+      assertTransition(shipment.status, targetStatus);
+      const changedAt = finalizationTime();
+      const updates: Partial<InsertInboundShipment> = { status: targetStatus, ...extraUpdates };
 
-    const updates: any = { status: targetStatus, ...extraUpdates };
-
-    // Validation + auto-set date fields
-    switch (targetStatus) {
-      case "booked": {
-        const lines = await storage.getInboundShipmentLines(id);
-        if (lines.length === 0) {
-          throw new ShipmentTrackingError("Cannot book a shipment with no lines");
+      // Preserve supplied event dates; the injected clock supplies only missing
+      // timestamps and the time this state transition was recorded.
+      switch (targetStatus) {
+        case "booked": {
+          const lines = await storage.getInboundShipmentLines(id, tx);
+          if (lines.length === 0) {
+            throw new ShipmentTrackingError("Cannot book a shipment with no lines");
+          }
+          break;
         }
-        break;
+        case "in_transit":
+          updates.shipDate = updates.shipDate || changedAt;
+          break;
+        case "at_port":
+          updates.actualArrival = updates.actualArrival || changedAt;
+          break;
+        case "delivered":
+          updates.deliveredDate = updates.deliveredDate || changedAt;
+          if (shipment.status === "customs_clearance") {
+            updates.customsClearedDate = updates.customsClearedDate || changedAt;
+          }
+          break;
+        case "closed":
+          updates.closedBy = userId || null;
+          updates.closedAt = changedAt;
+          break;
       }
-      case "in_transit":
-        updates.shipDate = updates.shipDate || new Date();
-        break;
-      case "at_port":
-        updates.actualArrival = updates.actualArrival || new Date();
-        break;
-      case "customs_clearance":
-        break;
-      case "delivered":
-        updates.deliveredDate = updates.deliveredDate || new Date();
-        if (shipment.status === "customs_clearance") {
-          updates.customsClearedDate = updates.customsClearedDate || new Date();
-        }
-        break;
-      case "costing":
-        break;
-      case "closed":
-        updates.closedBy = userId || null;
-        updates.closedAt = new Date();
-        break;
-      case "cancelled":
-        break;
-    }
 
-    await storage.updateInboundShipment(id, updates);
-    await recordStatusChange(id, shipment.status, targetStatus, userId, notes);
-    return await storage.getInboundShipmentById(id);
+      const updated = await storage.updateInboundShipment(id, updates, tx);
+      if (!updated) throw new ShipmentTrackingError("Shipment not found", 404);
+      await recordStatusChange(id, shipment.status, targetStatus, userId, notes, tx, changedAt);
+      return updated;
+    });
   }
 
   async function book(id: number, userId?: string, notes?: string) {
@@ -790,14 +804,33 @@ export function createShipmentTrackingService(
     // Best-effort: a push failure (e.g. nothing received yet) must NOT block the close;
     // the snapshots persist, the manual push remains as a re-trigger, and any receipt
     // created after close still picks up the landed cost at receive time.
-    // finalizeAllocations owns the dimension gate so all finalization entry points
-    // enforce the same landed-cost invariant.
-    await finalizeAllocations(id, userId);
-    const closed = await transitionTo(id, "closed", userId, notes || "Shipment closed — landed costs finalized");
+    // Hold the same shipment lock through finalization, closure and history.
+    // Releasing it after snapshots would let a charge amendment commit before
+    // closure and leave the closed shipment using stale finalized costs.
+    const closed = await runInTransaction(async (tx) => {
+      const shipment = await lockShipment(tx, id);
+      assertTransition(shipment.status, "closed");
+      const closedAt = finalizationTime();
+      await finalizeAllocationsInTransaction(tx, shipment, userId, closedAt);
+      const updated = await storage.updateInboundShipment(id, {
+        status: "closed", closedBy: userId || null, closedAt,
+      }, tx);
+      if (!updated) throw new ShipmentTrackingError("Shipment not found", 404);
+      await recordStatusChange(
+        id, shipment.status, "closed", userId,
+        notes || "Shipment closed — landed costs finalized", tx, closedAt,
+      );
+      return updated;
+    });
     try {
       await pushLandedCostsToLots(id);
     } catch (e: any) {
-      console.warn(`[ShipmentTracking] auto-push landed cost on close for shipment ${id} failed (non-fatal): ${e?.message ?? e}`);
+      console.warn(JSON.stringify({
+        event: "procurement.shipment.close_lot_cost_push_failed",
+        shipmentId: id, actorId: userId ?? null,
+        code: e instanceof ShipmentTrackingError ? e.details?.code ?? "SHIPMENT_LOT_COST_PUSH_FAILED" : "SHIPMENT_LOT_COST_PUSH_FAILED",
+        errorType: e instanceof Error ? e.name : typeof e,
+      }));
     }
     return closed;
   }
@@ -1180,88 +1213,144 @@ export function createShipmentTrackingService(
 
   // ─── Cost management ───────────────────────────────────────────
 
-  async function addCost(shipmentId: number, data: {
-    costType: string;
-    description?: string;
-    estimatedCents?: number;
-    actualCents?: number;
-    currency?: string;
-    exchangeRate?: string;
-    allocationMethod?: string;
-    costStatus?: string;
-    invoiceNumber?: string;
-    invoiceDate?: Date;
-    dueDate?: Date;
-    paidDate?: Date;
-    vendorId?: number | null;
-    performedByName?: string;
-    notes?: string;
-  }) {
-    const coerced: any = { ...data };
-    if (coerced.invoiceDate && typeof coerced.invoiceDate === "string") coerced.invoiceDate = new Date(coerced.invoiceDate);
-    if (coerced.dueDate && typeof coerced.dueDate === "string") coerced.dueDate = new Date(coerced.dueDate);
-    if (coerced.paidDate && typeof coerced.paidDate === "string") coerced.paidDate = new Date(coerced.paidDate);
+  function costError(message: string, statusCode: number, code: string): never {
+    throw new ShipmentTrackingError(message, statusCode, { code });
+  }
 
-    return await runInTransaction(async (tx) => {
-      const shipment = await lockShipment(tx, shipmentId);
-      if (shipment.status === "closed" || shipment.status === "cancelled") {
-        throw new ShipmentTrackingError("Cannot add costs to a closed or cancelled shipment");
+  async function invoiceSourceExists(tx: any, costId: number): Promise<boolean> {
+    const result = await tx.execute(sqlTag`
+      SELECT EXISTS (
+        SELECT 1 FROM procurement.vendor_invoice_lines WHERE freight_cost_id = ${costId}
+      ) AS "hasReference"
+    `);
+    return result.rows[0]?.hasReference === true;
+  }
+
+  async function versionCosts<T extends InboundFreightCost>(costs: T[], executor: any = db) {
+    if (costs.length === 0) return [];
+    const result = await executor.execute(sqlTag`
+      SELECT DISTINCT freight_cost_id AS id FROM procurement.vendor_invoice_lines
+      WHERE freight_cost_id = ANY(${sqlTag.param(costs.map((cost) => cost.id))}::int[])
+    `);
+    const referenced = new Set(result.rows.map((row: { id: number }) => row.id));
+    return costs.map((cost) => versionShipmentCost(cost, referenced.has(cost.id)));
+  }
+
+  function assertCostCurrencyBasis(cost: Pick<InboundFreightCost, "currency" | "exchangeRate">) {
+    if (cost.currency !== "USD" || cost.exchangeRate == null || !new Decimal(cost.exchangeRate).eq(1)) {
+      costError("This charge has an unsupported currency basis. Keep its recorded values and resolve currency evidence before changing shipment economics.", 409, "SHIPMENT_COST_CURRENCY_UNSUPPORTED");
+    }
+  }
+
+  function costFields(data: Record<string, unknown>): Partial<InsertInboundFreightCost> {
+    const fields = Object.fromEntries(SHIPMENT_COST_EDITABLE_FIELDS
+      .filter((field) => Object.prototype.hasOwnProperty.call(data, field))
+      .map((field) => [field, data[field]]));
+    if (typeof fields.invoiceDate === "string") fields.invoiceDate = new Date(fields.invoiceDate);
+    return fields as Partial<InsertInboundFreightCost>;
+  }
+
+  function costFieldChanged(before: InboundFreightCost, updates: Partial<InsertInboundFreightCost>, field: keyof InsertInboundFreightCost): boolean {
+    if (!Object.prototype.hasOwnProperty.call(updates, field)) return false;
+    const oldValue = before[field as keyof InboundFreightCost];
+    const newValue = updates[field];
+    // PostgreSQL numeric reads are scale-padded ("1.0000"); an equivalent
+    // USD rate must not turn a metadata correction into an economic amendment.
+    if (field === "exchangeRate" && oldValue != null && newValue != null) {
+      return !new Decimal(String(oldValue)).eq(String(newValue));
+    }
+    const comparable = (value: unknown) => value instanceof Date ? value.toISOString() : value ?? null;
+    return comparable(oldValue) !== comparable(newValue);
+  }
+
+  async function executeCostCommandInTransaction(
+    tx: any, command: ShipmentCostCommand, actorId: string, now: Date,
+  ) {
+    if (!tx || typeof tx.execute !== "function" || typeof tx.insert !== "function") {
+      costError("Database transaction support is required for shipment charge writes", 500, "SHIPMENT_COST_TRANSACTION_REQUIRED");
+    }
+    if (!shipmentCostResourceIdSchema.safeParse(command.resourceId).success) {
+      costError("Charge resource ID must be a positive PostgreSQL integer", 400, "SHIPMENT_COST_ID_INVALID");
+    }
+    if (typeof actorId !== "string" || !actorId.trim()) costError("An authenticated actor is required", 401, "SHIPMENT_COST_ACTOR_REQUIRED");
+    if (!(now instanceof Date) || !Number.isFinite(now.getTime())) {
+      costError("A valid command clock is required", 500, "SHIPMENT_COST_CLOCK_INVALID");
+    }
+    const data = command.operation === "create" ? shipmentCostCreateSchema.parse(command.body)
+      : command.operation === "update" ? shipmentCostPatchSchema.parse(command.body)
+      : command.operation === "delete" ? shipmentCostDeleteSchema.parse(command.body)
+      : costError("Unsupported charge command", 400, "SHIPMENT_COST_OPERATION_INVALID");
+    const initial = command.operation === "create" ? null : await storage.getInboundFreightCostById(command.resourceId, tx);
+    if (command.operation !== "create" && !initial) costError("Shipment charge not found", 404, "SHIPMENT_COST_NOT_FOUND");
+    const shipmentId = initial?.inboundShipmentId ?? command.resourceId;
+    const shipment = await lockShipment(tx, shipmentId);
+    if (shipment.status === "closed" || shipment.status === "cancelled") {
+      costError("Closed or cancelled shipment charges cannot be changed here.", 409, "SHIPMENT_COST_TERMINAL");
+    }
+
+    let before: InboundFreightCost | null = null;
+    let hasInvoiceSourceReference = false;
+    if (command.operation !== "create") {
+      await tx.execute(sqlTag`SELECT id FROM procurement.inbound_freight_costs WHERE id = ${command.resourceId} FOR UPDATE`);
+      before = await storage.getInboundFreightCostById(command.resourceId, tx) ?? null;
+      if (!before || before.inboundShipmentId !== shipmentId) costError("Shipment charge not found", 404, "SHIPMENT_COST_NOT_FOUND");
+      // AP link/unlink also locks this row. Re-read AFTER that lock so its
+      // current vendor/link state, not the preliminary lookup, is authoritative.
+      hasInvoiceSourceReference = await invoiceSourceExists(tx, before.id);
+      if (!("expectedVersion" in data) || data.expectedVersion !== shipmentCostVersion(before)) {
+        costError("This charge changed since you opened it. Load the latest charge and review your changes.", 409, "SHIPMENT_COST_VERSION_CONFLICT");
       }
+    }
 
-      const cost = await storage.createInboundFreightCost({
-        inboundShipmentId: shipmentId,
-        ...coerced,
-      } as any, tx);
+    const updates = command.operation === "delete" ? {} : costFields(data);
+    const allocationFields = ["costType", "estimatedCents", "actualCents", "currency", "exchangeRate", "allocationMethod"] as const;
+    const protectedFields = [...allocationFields, "vendorId", "invoiceDate"] as const;
+    const affectsEconomics = command.operation !== "update" || allocationFields.some((field) => costFieldChanged(before!, updates, field));
+    const protectedEdit = command.operation === "delete" || protectedFields.some((field) => before && costFieldChanged(before, updates, field));
+    if (before && (before.vendorInvoiceId !== null || hasInvoiceSourceReference) && protectedEdit) {
+      costError("This charge is referenced by an invoice. Edit the invoice through Accounts Payable; its source charge cannot be removed or financially amended here.", 409, "SHIPMENT_COST_AP_OWNED");
+    }
+
+    if (affectsEconomics) {
+      // Existing foreign/unknown-basis rows remain readable and permit metadata
+      // correction. Never combine them with USD or silently change their basis.
+      const costs = await storage.getInboundFreightCosts(shipmentId, tx);
+      for (const cost of costs) assertCostCurrencyBasis(cost);
+      if (before) assertCostCurrencyBasis(before);
+    }
+
+    let after: InboundFreightCost | null = null;
+    if (command.operation === "create") {
+      after = await storage.createInboundFreightCost({
+        ...updates, inboundShipmentId: shipmentId,
+        costType: (data as ShipmentCostCreateCommand).costType,
+        currency: "USD", exchangeRate: "1",
+        costStatus: updates.actualCents == null ? "estimated" : "finalized",
+      }, tx, now);
+    } else if (command.operation === "update") {
+      const patch = { ...updates };
+      if (costFieldChanged(before!, updates, "actualCents") && !before!.vendorInvoiceId && !hasInvoiceSourceReference) {
+        patch.costStatus = updates.actualCents === null ? "estimated" : "finalized";
+      }
+      after = await storage.updateInboundFreightCost(before!.id, patch, tx, now);
+      if (!after) costError("Shipment charge not found", 404, "SHIPMENT_COST_NOT_FOUND");
+    } else {
+      if (!await storage.deleteInboundFreightCost(before!.id, tx)) costError("Shipment charge not found", 404, "SHIPMENT_COST_NOT_FOUND");
+    }
+
+    if (affectsEconomics) {
       await recomputeShipmentTotals(shipmentId, tx);
       await refreshAllocationsForShipmentInTransaction(tx, shipmentId, shipment);
-      return cost;
+    }
+    const targetId = after?.id ?? before!.id;
+    await tx.insert(auditEvents).values({
+      timestamp: now, level: "AUDIT", actor: actorId,
+      action: `procurement.shipment_cost.${command.operation === "create" ? "created" : command.operation === "update" ? "amended" : "deleted"}`,
+      target: `shipment_cost:${targetId}`,
+      changes: { before, after },
+      context: { shipmentId, reason: data.reason ?? null },
     });
-  }
-
-  async function updateCost(costId: number, updates: Partial<InsertInboundFreightCost>) {
-    const coerced: any = { ...updates };
-    if (coerced.invoiceDate && typeof coerced.invoiceDate === "string") coerced.invoiceDate = new Date(coerced.invoiceDate);
-    if (coerced.dueDate && typeof coerced.dueDate === "string") coerced.dueDate = new Date(coerced.dueDate);
-    if (coerced.paidDate && typeof coerced.paidDate === "string") coerced.paidDate = new Date(coerced.paidDate);
-
-    return await runInTransaction(async (tx) => {
-      const initialCost = await storage.getInboundFreightCostById(costId, tx);
-      if (!initialCost) throw new ShipmentTrackingError("Cost not found", 404);
-      const shipment = await lockShipment(tx, initialCost.inboundShipmentId);
-      const cost = await storage.getInboundFreightCostById(costId, tx);
-      if (!cost || cost.inboundShipmentId !== shipment.id) {
-        throw new ShipmentTrackingError("Cost not found", 404);
-      }
-      if (shipment.status === "closed" || shipment.status === "cancelled") {
-        throw new ShipmentTrackingError("Cannot edit costs on a closed or cancelled shipment");
-      }
-
-      const updated = await storage.updateInboundFreightCost(costId, coerced, tx);
-      await recomputeShipmentTotals(cost.inboundShipmentId, tx);
-      await refreshAllocationsForShipmentInTransaction(tx, cost.inboundShipmentId, shipment);
-      return updated;
-    });
-  }
-
-  async function removeCost(costId: number) {
-    return await runInTransaction(async (tx) => {
-      const initialCost = await storage.getInboundFreightCostById(costId, tx);
-      if (!initialCost) throw new ShipmentTrackingError("Cost not found", 404);
-      const shipment = await lockShipment(tx, initialCost.inboundShipmentId);
-      const cost = await storage.getInboundFreightCostById(costId, tx);
-      if (!cost || cost.inboundShipmentId !== shipment.id) {
-        throw new ShipmentTrackingError("Cost not found", 404);
-      }
-      if (shipment.status === "closed" || shipment.status === "cancelled") {
-        throw new ShipmentTrackingError("Cannot remove costs from a closed or cancelled shipment");
-      }
-
-      const deleted = await storage.deleteInboundFreightCost(costId, tx);
-      if (!deleted) throw new ShipmentTrackingError("Cost not found", 404);
-      await recomputeShipmentTotals(cost.inboundShipmentId, tx);
-      await refreshAllocationsForShipmentInTransaction(tx, cost.inboundShipmentId, shipment);
-      return true;
-    });
+    return after ? versionShipmentCost(after, hasInvoiceSourceReference) : { success: true as const };
   }
 
   // ─── Allocation engine ─────────────────────────────────────────
@@ -1752,9 +1841,27 @@ export function createShipmentTrackingService(
     );
   }
 
+  function finalizationTime(): Date {
+    const now = clock();
+    if (!(now instanceof Date) || !Number.isFinite(now.getTime())) {
+      throw new ShipmentTrackingError("A valid finalization clock is required", 500, {
+        code: "SHIPMENT_FINALIZATION_CLOCK_INVALID",
+      });
+    }
+    return new Date(now.getTime());
+  }
+
   async function finalizeAllocations(shipmentId: number, userId?: string) {
     return await runInTransaction(async (tx) => {
-    const shipment = await lockShipment(tx, shipmentId);
+      const shipment = await lockShipment(tx, shipmentId);
+      return finalizeAllocationsInTransaction(tx, shipment, userId, finalizationTime());
+    });
+  }
+
+  async function finalizeAllocationsInTransaction(
+    tx: any, shipment: InboundShipment, userId: string | undefined, finalizedAt: Date,
+  ) {
+    const shipmentId = shipment.id;
     if (!["costing", "closed"].includes(shipment.status)) {
       throw new ShipmentTrackingError("Landed costs can only be finalized while shipment is in costing or closed status");
     }
@@ -1798,7 +1905,6 @@ export function createShipmentTrackingService(
 
     const snapshots: InsertLandedCostSnapshot[] = [];
     const adjustments: any[] = [];
-    const finalizedAt = new Date();
 
     for (const line of updatedLines) {
       // Get per-category breakdown
@@ -1886,7 +1992,6 @@ export function createShipmentTrackingService(
     }
     await storage.bulkCreateLandedCostSnapshots(snapshots, tx);
     return { finalized: snapshots.length, unchanged: false, adjustments: adjustments.length };
-    });
   }
 
   // ─── Receiving integration ─────────────────────────────────────
@@ -2144,9 +2249,8 @@ export function createShipmentTrackingService(
     getShippedQtyByPoLines: (poLineIds: number[]) => storage.getShippedQtyByPoLines(poLineIds),
 
     // Costs
-    addCost,
-    updateCost,
-    removeCost,
+    executeCostCommandInTransaction,
+    versionCosts,
     getCost: (costId: number) => storage.getInboundFreightCostById(costId),
     getCosts: async (shipmentId: number) => {
       const rows = await db
@@ -2157,7 +2261,7 @@ export function createShipmentTrackingService(
         .from(inboundFreightCosts)
         .leftJoin(vendors, eq(vendors.id, inboundFreightCosts.vendorId))
         .where(eq(inboundFreightCosts.inboundShipmentId, shipmentId));
-      return rows.map((r: any) => ({ ...r.cost, vendorName: r.counterpartyName }));
+      return versionCosts(rows.map((r: any) => ({ ...r.cost, vendorName: r.counterpartyName })));
     },
 
     // Allocation

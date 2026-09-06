@@ -78,6 +78,10 @@ jobs:
         run: >-
           npx vitest run
           server/modules/procurement/__tests__/integration/purchase-workspace.integration.test.ts
+      - name: Shipment cost command PostgreSQL guarantees
+        run: >-
+          npx vitest run
+          server/modules/procurement/__tests__/integration/shipment-cost-commands.integration.test.ts
       - name: PO lifecycle timestamp PostgreSQL guarantees
         run: >-
           npx vitest run

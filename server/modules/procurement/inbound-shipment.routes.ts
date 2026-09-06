@@ -1,5 +1,9 @@
-﻿import type { Express } from "express";
+import type { Express, Request, Response } from "express";
+import { createShipmentCostCommands, shipmentCostCommandScope, SHIPMENT_COST_COMMAND_PRINCIPAL, type ShipmentCostCommand } from "./shipment-cost-commands";
+import { financialCommandFromRequest } from "../../platform/commands/http-command";
+import { FinancialCommandError } from "../../platform/commands/transactional-command.service";
 import { z } from "zod";
+import { shipmentCostResourceIdSchema } from "@shared/procurement/shipment-cost-command";
 import { requirePermission } from "../../routes/middleware";
 import { requireIdempotency } from "../../middleware/idempotency";
 import { ShipmentTrackingError } from "./shipment-tracking.service";
@@ -12,6 +16,40 @@ function getActorId(req: any): string | undefined {
 
 export function registerInboundShipmentRoutes(app: Express) {
   const { shipmentTracking } = app.locals.services;
+  const shipmentCostCommands = createShipmentCostCommands(shipmentTracking);
+
+  async function handleCostCommand(req: Request, res: Response, operation: ShipmentCostCommand["operation"]) {
+    try {
+      const rawId = operation === "create" ? req.params.id : req.params.costId;
+      const resourceId = z.string().regex(/^[1-9]\d*$/).transform(Number).pipe(shipmentCostResourceIdSchema).parse(rawId);
+      const actorId = getActorId(req);
+      if (!actorId) throw new FinancialCommandError("An authenticated actor is required", 401, "SHIPMENT_COST_ACTOR_REQUIRED");
+      const descriptor = financialCommandFromRequest(req, {
+        actorType: "service", actorId: SHIPMENT_COST_COMMAND_PRINCIPAL,
+        ...shipmentCostCommandScope({ operation, resourceId }),
+      });
+      const result = await shipmentCostCommands.execute({ operation, resourceId, body: req.body }, actorId, descriptor);
+      res.setHeader("Idempotency-Replayed", result.replayed ? "true" : "false");
+      return res.status(result.httpStatus).json(result.body);
+    } catch (error) {
+      if (error instanceof FinancialCommandError) {
+        for (const [name, value] of Object.entries(error.responseHeaders ?? {})) res.setHeader(name, value);
+        return res.status(error.statusCode).json({ code: error.code, error: error.message, details: error.details });
+      }
+      if (error instanceof z.ZodError) return res.status(400).json({ code: "SHIPMENT_COST_ID_INVALID", error: "Charge resource ID must be a positive PostgreSQL integer." });
+      const cause = error instanceof Error ? error.cause ?? error : error;
+      const databaseCode = cause && typeof cause === "object" && "code" in cause
+        && typeof cause.code === "string" && /^[A-Z0-9]{5}$/.test(cause.code) ? cause.code : null;
+      console.error(JSON.stringify({
+        event: "procurement.shipment_cost.command_failed", operation,
+        resourceId: operation === "create" ? req.params.id : req.params.costId,
+        actorId: getActorId(req) ?? null, code: "SHIPMENT_COST_TRANSIENT_FAILURE",
+        databaseCode, errorType: error instanceof Error ? error.name : typeof error,
+      }));
+      return res.status(500).json({ code: "SHIPMENT_COST_TRANSIENT_FAILURE", error: "The charge command could not be completed. Retry with the same command key." });
+    }
+  }
+
 
   // ==========================================================================
   // INBOUND SHIPMENTS - Tracking, Costs, Landed Cost Allocation
@@ -72,6 +110,7 @@ export function registerInboundShipmentRoutes(app: Express) {
       const shipment = await shipmentTracking.createShipment(req.body, req.session.user?.id);
       res.status(201).json(shipment);
     } catch (error: any) {
+      if (error instanceof z.ZodError) return res.status(400).json({ code: "SHIPMENT_HEADER_INPUT_INVALID", error: "Invalid shipment fields", details: error.issues });
       if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
       res.status(500).json({ error: error.message });
     }
@@ -82,6 +121,7 @@ export function registerInboundShipmentRoutes(app: Express) {
       const shipment = await shipmentTracking.updateShipment(Number(req.params.id), req.body);
       res.json(shipment);
     } catch (error: any) {
+      if (error instanceof z.ZodError) return res.status(400).json({ code: "SHIPMENT_HEADER_INPUT_INVALID", error: "Invalid shipment fields", details: error.issues });
       if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
       res.status(500).json({ error: error.message });
     }
@@ -257,54 +297,15 @@ export function registerInboundShipmentRoutes(app: Express) {
   app.get("/api/inbound-shipments/:id/costs", requirePermission("purchasing", "view"), async (req, res) => {
     try {
       const costs = await apLedger.enrichCostsWithInvoiceInfo(Number(req.params.id));
-      res.json(costs);
+      res.json(await shipmentTracking.versionCosts(costs));
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
   });
 
-  app.post("/api/inbound-shipments/:id/costs", requirePermission("purchasing", "edit"), async (req, res) => {
-    try {
-      const cost = await shipmentTracking.addCost(Number(req.params.id), req.body);
-      res.status(201).json(cost);
-    } catch (error: any) {
-      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  app.patch("/api/inbound-shipments/costs/:costId", requirePermission("purchasing", "edit"), async (req, res) => {
-    try {
-      const costId = Number(req.params.costId);
-      // Validate: forbid changing vendor_id on invoiced cost rows
-      if (req.body.vendorId !== undefined) {
-        const existing = await shipmentTracking.getCost(costId);
-        if (existing?.vendorInvoiceId && existing.vendorId !== req.body.vendorId) {
-          return res.status(400).json({ error: "Cannot change vendor on an invoiced cost row" });
-        }
-      }
-      // Map client field name to schema field name
-      if (req.body.vendorName !== undefined && req.body.performedByName === undefined) {
-        req.body.performedByName = req.body.vendorName;
-        delete req.body.vendorName;
-      }
-      const cost = await shipmentTracking.updateCost(costId, req.body);
-      res.json(cost);
-    } catch (error: any) {
-      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  app.delete("/api/inbound-shipments/costs/:costId", requirePermission("purchasing", "edit"), async (req, res) => {
-    try {
-      await shipmentTracking.removeCost(Number(req.params.costId));
-      res.json({ success: true });
-    } catch (error: any) {
-      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.post("/api/inbound-shipments/:id/costs", requirePermission("purchasing", "edit"), (req, res) => handleCostCommand(req, res, "create"));
+  app.patch("/api/inbound-shipments/costs/:costId", requirePermission("purchasing", "edit"), (req, res) => handleCostCommand(req, res, "update"));
+  app.delete("/api/inbound-shipments/costs/:costId", requirePermission("purchasing", "edit"), (req, res) => handleCostCommand(req, res, "delete"));
 
   // Shipment cost to AP bridge
 
