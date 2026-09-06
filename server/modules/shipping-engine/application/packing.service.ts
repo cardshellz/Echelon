@@ -131,7 +131,8 @@ export interface PackingQueueResult {
   boxes: PackingBoxOption[];
 }
 
-export async function getPackingQueue(): Promise<PackingQueueResult> {
+export async function getPackingQueue(orderId?: number): Promise<PackingQueueResult> {
+  if (orderId !== undefined && (!Number.isInteger(orderId) || orderId <= 0 || orderId > 2_147_483_647)) throw new Error("Invalid packing order ID");
   const queueOrders = await db
     .select({
       id: orders.id,
@@ -146,6 +147,7 @@ export async function getPackingQueue(): Promise<PackingQueueResult> {
     .where(and(
       inArray(orders.warehouseStatus, [...PACKING_ELIGIBLE_WAREHOUSE_STATUSES]),
       eq(orders.onHold, 0),
+      orderId === undefined ? undefined : eq(orders.id, orderId),
     ))
     .orderBy(desc(orders.priority), asc(orders.createdAt))
     .limit(QUEUE_LIMIT);
