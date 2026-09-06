@@ -692,7 +692,7 @@ function assertRebuildMarketplaceMatches(
     );
   }
 }
-function parseEbayListingConfig(
+export function parseEbayListingConfig(
   intentConfig: Record<string, unknown>,
   connectionConfig: Record<string, unknown>,
 ): EbayListingConfig {
@@ -772,8 +772,8 @@ function assertEbayReady(
   }
 }
 
-function buildDropshipEbayListingDraft(
-  input: DropshipMarketplaceListingPushRequest,
+export function buildDropshipEbayListingDraft(
+  input: Pick<DropshipMarketplaceListingPushRequest, "productVariantId" | "listingIntent" | "existingExternalOfferId">,
   config: EbayListingConfig,
   listingBuilder: EbayListingBuilder,
 ) {
@@ -850,7 +850,7 @@ function buildDropshipEbayListingDraft(
 }
 
 function buildEbayAspects(
-  input: DropshipMarketplaceListingPushRequest,
+  input: Pick<DropshipMarketplaceListingPushRequest, "listingIntent">,
 ): Record<string, string[]> {
   const raw = input.listingIntent.itemSpecifics ?? {};
   const aspects: Record<string, string[]> = {};

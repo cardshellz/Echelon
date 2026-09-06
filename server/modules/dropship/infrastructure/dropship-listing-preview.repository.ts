@@ -1,5 +1,6 @@
 import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
+import { resolveDropshipOmsChannelIdWithClient } from "./dropship-order-intake.repository";
 import { DropshipError } from "../domain/errors";
 import type {
   CreateDropshipListingPushJobRepositoryInput,
@@ -154,6 +155,29 @@ interface JobItemRow {
 
 export class PgDropshipListingPreviewRepository implements DropshipListingPreviewRepository {
   constructor(private readonly dbPool: Pool = defaultPool) {}
+
+  async findVendorIdByMemberId(memberId: string): Promise<number | null> {
+    const result = await this.dbPool.query<{ id: number }>(
+      `SELECT id FROM dropship.dropship_vendors WHERE member_id::text = $1 LIMIT 1`,
+      [memberId],
+    );
+    return result.rows[0]?.id ?? null;
+  }
+
+  async loadChannelDiscountPercent(): Promise<number | null> {
+    const client = await this.dbPool.connect();
+    try {
+      const channelId = await resolveDropshipOmsChannelIdWithClient(client);
+      const result = await client.query<{ discount_percent: number | null }>(
+        `SELECT discount_percent FROM channels.partner_profiles WHERE channel_id = $1 LIMIT 1`,
+        [channelId],
+      );
+      // A missing profile is explicitly unavailable in a preview, never a fabricated discount.
+      return result.rows[0]?.discount_percent ?? null;
+    } finally {
+      client.release();
+    }
+  }
 
   async loadStoreContext(input: {
     vendorId: number;
@@ -807,6 +831,7 @@ function mapCandidateRow(row: CandidateRow): DropshipListingCatalogCandidate {
     productIsActive: row.product_is_active,
     variantIsActive: row.variant_is_active,
     unitsPerVariant: Math.max(1, row.units_per_variant),
+    catalogUnitsPerVariant: row.units_per_variant,
     defaultRetailPriceCents: row.default_retail_price_cents === null ? null : Number(row.default_retail_price_cents),
     sku: row.variant_sku ?? row.product_sku,
     productName: row.product_name,

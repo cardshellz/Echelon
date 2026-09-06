@@ -1,6 +1,7 @@
 import type { Express, Request, Response } from "express";
 import { ZodError } from "zod";
 import type { DropshipListingPreviewService } from "../../application/dropship-listing-preview-service";
+import { toDropshipVendorListingPreview } from "../../application/dropship-listing-dtos";
 import { DropshipError } from "../../domain/errors";
 import { createDropshipListingPreviewServiceFromEnv } from "../../infrastructure/dropship-listing-preview.factory";
 import {
@@ -12,6 +13,27 @@ export function registerDropshipListingRoutes(
   app: Express,
   service: DropshipListingPreviewService = createDropshipListingPreviewServiceFromEnv(),
 ): void {
+  app.get(
+    "/api/dropship/listings/stores/:storeConnectionId/variants/:productVariantId/assets/:assetId/file",
+    requireDropshipAuth,
+    async (req, res) => {
+      try {
+        const image = await service.imageForMember(req.session.dropship!.memberId, {
+          storeConnectionId: Number(req.params.storeConnectionId),
+          productVariantId: Number(req.params.productVariantId),
+          assetId: Number(req.params.assetId),
+        });
+        // Private data remains authorized on every request and must not enter shared caches.
+        res.set("Cache-Control", "private, no-store");
+        res.set("X-Content-Type-Options", "nosniff");
+        res.set("Content-Security-Policy", "default-src 'none'; sandbox");
+        res.type(image.mimeType);
+        return res.send(image.data);
+      } catch (error) {
+        return sendDropshipListingError(res, error);
+      }
+    },
+  );
   app.post("/api/dropship/listings/preview", requireDropshipAuth, async (req, res) => {
     try {
       const preview = await service.previewForMember(req.session.dropship!.memberId, {
@@ -20,7 +42,7 @@ export function registerDropshipListingRoutes(
         requestedRetailPriceCents: req.body?.requestedRetailPriceCents,
         requestedRetailPricesByVariantId: req.body?.requestedRetailPricesByVariantId,
       });
-      return res.json({ preview });
+      return res.json({ preview: toDropshipVendorListingPreview(preview) });
     } catch (error) {
       return sendDropshipListingError(res, error);
     }
@@ -42,7 +64,7 @@ export function registerDropshipListingRoutes(
         return res.status(result.idempotentReplay ? 200 : 201).json({
           job: result.job,
           items: result.items,
-          preview: result.preview,
+          preview: toDropshipVendorListingPreview(result.preview),
           idempotentReplay: result.idempotentReplay,
         });
       } catch (error) {
@@ -104,9 +126,11 @@ function statusForDropshipListingError(code: string): number {
     case "DROPSHIP_AUTH_REQUIRED":
       return 401;
     case "DROPSHIP_LISTING_VENDOR_BLOCKED":
+    case "DROPSHIP_LISTING_ENTITLEMENT_BLOCKED":
     case "DROPSHIP_LISTING_STORE_BLOCKED":
       return 403;
     case "DROPSHIP_STORE_CONNECTION_REQUIRED":
+    case "DROPSHIP_LISTING_IMAGE_NOT_FOUND":
       return 404;
     case "DROPSHIP_IDEMPOTENCY_CONFLICT":
       return 409;

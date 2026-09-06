@@ -39,7 +39,6 @@ import {
   createDropshipIdempotencyKey,
   fetchJson,
   formatStatus,
-  formatCents,
   listingPreviewPushableCount,
   listLaunchReadyStoreConnections,
   postJson,
@@ -63,6 +62,8 @@ import { DropshipPortalShell } from "./DropshipPortalShell";
 import { EbayListingSetupPanel } from "./EbayListingSetupPanel";
 import { EbayListingPolicyOverridePanel } from "./EbayListingPolicyOverridePanel";
 import { EbayStoreCategoryAuthorizationRecovery } from "./EbayStoreCategoryAuthorizationRecovery";
+import { DropshipListingPreview } from "./DropshipListingPreview";
+export { formatListingPreviewIssue as formatIssue } from "@/lib/dropship-listing-preview";
 
 type PendingSelectionAction = string | null;
 type PendingListingAction = "preview" | "send-code" | "verify-code" | "passkey-proof" | "push" | null;
@@ -1046,7 +1047,7 @@ function ListingPreviewPanel({
         <div>
           <h2 className="text-lg font-semibold">Listing preview and push</h2>
           <p className="mt-1 text-sm text-zinc-500">
-            Review everything you selected, then preview marketplace requirements before pushing to your store.
+            Review listing content, your product costs, and shipping estimates before pushing to your store.
           </p>
           <p className="mt-1 text-xs font-medium text-violet-700">
             Preview does not require verification. MFA is requested only when you queue ready listings.
@@ -1160,63 +1161,7 @@ function ListingPreviewPanel({
         </div>
       )}
 
-      {listingPreview && (
-        <div className="mt-4 overflow-hidden rounded-md border border-zinc-200">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Listing</TableHead>
-                <TableHead>Mode</TableHead>
-                <TableHead>Qty</TableHead>
-                <TableHead>Price</TableHead>
-                {listingPreview.platform === "ebay" && (
-                  <TableHead>Marketplace category</TableHead>
-                )}
-                <TableHead>Status</TableHead>
-                <TableHead>Blockers / Warnings</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {listingPreview.rows.map((row) => (
-                <TableRow key={row.productVariantId}>
-                  <TableCell>
-                    <div className="font-medium">{row.title}</div>
-                    <div className="text-xs text-zinc-500">{row.sku || `Variant ${row.productVariantId}`}</div>
-                  </TableCell>
-                  <TableCell>{formatStatus(row.listingMode || row.platform)}</TableCell>
-                  <TableCell className="font-mono">{row.marketplaceQuantity}</TableCell>
-                  <TableCell>{row.priceCents === null ? "Missing" : formatCents(row.priceCents)}</TableCell>
-                  {listingPreview.platform === "ebay" && (
-                    <TableCell>
-                      {row.marketplaceCategoryId ? (
-                        <div>
-                          <div className="font-medium">{row.marketplaceCategoryName || "eBay category"}</div>
-                          <div className="font-mono text-xs text-zinc-500">{row.marketplaceCategoryId}</div>
-                          <div className="mt-1 text-xs text-zinc-500">
-                            {row.storeCategoryNames.length > 0
-                              ? `Your Store: ${row.storeCategoryNames.join(", ")}`
-                              : "Your Store: eBay default"}
-                          </div>
-                        </div>
-                      ) : (
-                        <span className="text-sm text-red-700">Not mapped</span>
-                      )}
-                    </TableCell>
-                  )}
-                  <TableCell>
-                    <Badge variant="outline" className={previewStatusTone(row.previewStatus)}>
-                      {formatStatus(row.previewStatus)}
-                    </Badge>
-                  </TableCell>
-                  <TableCell>
-                    <PreviewIssues blockers={row.blockers} warnings={row.warnings} />
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </div>
-      )}
+      {listingPreview && <DropshipListingPreview key={`${listingPreview.storeConnectionId}:${listingPreview.generatedAt}`} preview={listingPreview} />}
 
       {listingPushResult && (
         <div className="mt-4 rounded-md border border-emerald-200 bg-emerald-50 p-4 text-sm text-emerald-900">
@@ -1377,47 +1322,6 @@ function PreviewMetric({ label, value }: { label: string; value: string }) {
       <div className="mt-1 text-lg font-semibold">{value}</div>
     </div>
   );
-}
-
-function PreviewIssues({ blockers, warnings }: { blockers: string[]; warnings: string[] }) {
-  const issues = [
-    ...blockers.map((issue) => ({ issue, tone: "border-rose-200 bg-rose-50 text-rose-800" })),
-    ...warnings.map((issue) => ({ issue, tone: "border-amber-200 bg-amber-50 text-amber-900" })),
-  ];
-
-  if (issues.length === 0) {
-    return <span className="text-sm text-zinc-500">None</span>;
-  }
-
-  return (
-    <div className="flex max-w-xl flex-wrap gap-1.5">
-      {issues.map((item) => (
-        <Badge key={item.issue} variant="outline" className={item.tone}>
-          {formatIssue(item.issue)}
-        </Badge>
-      ))}
-    </div>
-  );
-}
-
-export function formatIssue(value: string): string {
-  const actionableLabels: Record<string, string> = {
-    "missing_config:marketplaceId": "eBay setup: Marketplace",
-    "missing_config:merchantLocationKey": "eBay setup: Inventory location",
-    "missing_config:businessPolicies.paymentPolicyId": "eBay setup: Payment policy",
-    "missing_config:businessPolicies.returnPolicyId": "eBay setup: Return policy",
-    "missing_config:businessPolicies.fulfillmentPolicyId": "eBay setup: Fulfillment policy",
-    ebay_browse_category_required: "Card Shellz marketplace category setup required",
-  };
-  const actionable = actionableLabels[value];
-  if (actionable) return actionable;
-  return value.split(":").map((part) => formatStatus(part)).join(": ");
-}
-
-function previewStatusTone(status: DropshipListingPreviewResult["rows"][number]["previewStatus"]): string {
-  if (status === "ready") return "border-emerald-200 bg-emerald-50 text-emerald-800";
-  if (status === "warning") return "border-amber-200 bg-amber-50 text-amber-900";
-  return "border-rose-200 bg-rose-50 text-rose-800";
 }
 
 function pushButtonLabel(pendingListingAction: PendingListingAction, emailCodeSent: boolean): string {

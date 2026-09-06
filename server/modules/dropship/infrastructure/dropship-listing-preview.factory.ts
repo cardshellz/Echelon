@@ -1,4 +1,6 @@
 import { pool } from "../../../db";
+import { PgCatalogVariantMediaReader } from "../../catalog/catalog-media.reader";
+import { resolveDropshipPublicationPreview } from "./dropship-listing-publication-preview.provider";
 import { createAuthorityAwareInventoryAtpService } from "../../inventory-planning/infrastructure/inventory-availability-runtime-atp.repository";
 import {
   DropshipListingPreviewService,
@@ -12,13 +14,21 @@ import { createDropshipVendorProvisioningServiceFromEnv } from "./dropship-vendo
 import { createDropshipEbayFulfillmentPolicyGuardFromEnv } from "./dropship-ebay-fulfillment-policy-guard.factory";
 
 export function createDropshipListingPreviewServiceFromEnv(): DropshipListingPreviewService {
+  const repository = new PgDropshipListingPreviewRepository();
+  const logger = makeDropshipListingPreviewLogger();
   return new DropshipListingPreviewService({
     vendorProvisioning: createDropshipVendorProvisioningServiceFromEnv(),
-    repository: new PgDropshipListingPreviewRepository(),
+    repository,
+    presentation: {
+      media: new PgCatalogVariantMediaReader(pool),
+      loadChannelDiscountPercent: () => repository.loadChannelDiscountPercent(),
+      resolvePublication: resolveDropshipPublicationPreview,
+      logger,
+    },
     atp: new InventoryServiceDropshipAtpProvider(createAuthorityAwareInventoryAtpService(pool)),
     marketplaceListing: new ConfigDrivenDropshipMarketplaceListingProvider(),
     ebayFulfillmentPolicyGuard: createDropshipEbayFulfillmentPolicyGuardFromEnv(),
     clock: systemDropshipListingPreviewClock,
-    logger: makeDropshipListingPreviewLogger(),
+    logger,
   });
 }

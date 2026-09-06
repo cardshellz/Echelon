@@ -1,7 +1,8 @@
 # Dropship Margin-First Catalog — Design
 
-Status: Decisions recorded 2026-07-05; ready to build
+Status: Historical design; suggested pricing deferred by owner on 2026-09-06 (see punch list, section 8)
 Date: 2026-07-05
+Latest decision: 2026-09-06. The suggested-price scope and phasing below are historical, not approval to build it now. The deferral in section 8 supersedes those portions; the richer listing preview can proceed independently.
 Depends on: `docs/DROPSHIP-DEEP-REVIEW-2026-07-05.md` §8 (product review); owner decisions in §5 below
 Goal: the vendor sees **cost, suggested retail, and live product margin** at every pricing moment, and their **Card Shellz costs** on every order — using the exact numbers the wallet will later debit. Card Shellz never estimates the vendor's marketplace fees or computes their profit (owner decision).
 
@@ -111,3 +112,11 @@ Nothing new is stored. All fields derive from existing tables at read time. (Opt
 ## 7. Explicit non-goals
 
 Vendor profit/P&L computation (owner decision, Q3), marketplace fee estimates (owner decision, Q1), repricing automation, MAP enforcement changes (stays warn-only), suggested-retail admin overrides, currency other than USD.
+
+## 8. Punch list
+
+- [ ] **DSP-PRICE-01: Suggested list price — deferred (owner decision, 2026-09-06).** Build later as a separate pricing capability. It is not a prerequisite for the richer listing preview: listing content/images, vendor product cost, and destination/quantity-based estimates of Card Shellz shipping charges remain separate work.
+  - Before implementation, agree the recommendation source, ownership, calculation or maintenance rules, rounding, and missing/stale-data behavior. Do not assume the earlier equation of suggested retail with catalog retail remains the chosen recommendation rule.
+  - Keep suggested price distinct from catalog reference retail and the vendor's actual listing price. Adopting a suggestion must be explicit; it must not silently change listing prices or the catalog-retail basis used to calculate vendor purchase cost.
+  - Preserve the existing exclusions: no marketplace-fee estimates, vendor profit/P&L computation, or automatic repricing are authorized by this item.
+  - Completion evidence: agreed rules, deterministic tests for those rules and missing inputs, and UI coverage proving that viewing a suggestion does not change saved prices or purchase costs.

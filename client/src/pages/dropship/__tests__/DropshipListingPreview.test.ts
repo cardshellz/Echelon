@@ -1,0 +1,64 @@
+import * as React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { DropshipListingPreview, ListingPreviewDetailsContent, ListingPreviewTable } from "../DropshipListingPreview";
+import { ListingShippingEstimateResult } from "../DropshipListingShippingEstimate";
+import type { DropshipListingPreviewRow } from "@/lib/dropship-ops-surface";
+
+afterEach(() => vi.unstubAllGlobals());
+function row(): DropshipListingPreviewRow {
+  return { productVariantId: 1, productId: 1, sku: "ARM-50", title: "Mailers", platform: "ebay", listingMode: "draft_first",
+    currentListingStatus: "not_listed", previewStatus: "ready", blockers: [], warnings: [], marketplaceQuantity: 11840, priceCents: 899,
+    marketplaceCategoryId: "123", marketplaceCategoryName: "Envelopes", storeCategoryNames: ["Shipping supplies"],
+    businessPolicySelection: { fulfillmentPolicyId: "ground", returnPolicyId: "returns", paymentPolicyId: "payment", overriddenFields: ["returnPolicyId"] }, previewHash: "hash",
+    presentation: { source: "resolved_listing", title: "Mailers", descriptionText: '<script>alert("unsafe")</script> Useful mailers.', productName: "Mailers",
+      variantName: "Pack of 50", unitsPerVariant: 50, brand: "Card Shellz", condition: "New", itemSpecifics: [{ name: "Material", values: ["Paper"] }],
+      images: [{ assetId: 1, url: "https://images.example.test/photo.jpg", altText: "Mailer pack", source: "external_url", publicationStatus: "included", reason: null }], issues: [] },
+    economics: { currency: "USD", basis: "one_sellable_variant", unitsPerVariant: 50, referenceRetailPriceCents: 899, listingPriceCents: 899,
+      vendorProductCostCents: 450, channelDiscountPercent: 50, productCostStatus: "available", issues: [] } };
+}
+function render(component: React.ReactNode) { vi.stubGlobal("React", React); return renderToStaticMarkup(component); }
+describe("rich listing preview", () => {
+  it("shows actual price and vendor cost but no new suggested price or profit field", () => {
+    const markup = render(React.createElement(ListingPreviewTable, { rows: [row()], onOpen: () => {} }));
+    expect(markup).toContain("$4.50"); expect(markup).toContain("$8.99"); expect(markup).toContain("11840");
+    expect(markup).toContain("View preview for Mailers"); expect(markup).toContain("Pack of 50");
+    expect(markup).not.toContain("Suggested"); expect(markup).not.toContain("Profit");
+  });
+  it("renders description as text and shows effective policies and reference-cost exclusions", () => {
+    const markup = render(React.createElement(ListingPreviewDetailsContent, { row: row(), generatedAt: "2026-09-06T12:00:00.000Z" }));
+    expect(markup).toContain("&lt;script&gt;"); expect(markup).not.toContain("<script>");
+    expect(markup).toContain("Catalog reference retail"); expect(markup).toContain("Marketplace fees are not included");
+    expect(markup).toContain("Listing override"); expect(markup).toContain("Shipping supplies"); expect(markup).toContain("Material");
+    expect(markup).not.toContain("merchantLocationKey");
+  });
+  it("does not fabricate missing costs or images and labels catalog-only media", () => {
+    const value = row(); value.economics!.vendorProductCostCents = null;
+    value.presentation!.images = [{ assetId: 2, url: null, altText: null, source: "catalog_file", publicationStatus: "not_included", reason: "not_publishable" }];
+    const markup = render(React.createElement(ListingPreviewDetailsContent, { row: value, generatedAt: "2026-09-06T12:00:00.000Z" }));
+    expect(markup).toContain("Unavailable"); expect(markup).toContain("No image available"); expect(markup).toContain("not included in the listing payload");
+    expect(markup).not.toContain("$0.00");
+  });
+  it("keeps old responses usable with a new-preview prompt", () => {
+    const value = row(); delete value.economics; delete value.presentation;
+    const markup = render(React.createElement(ListingPreviewDetailsContent, { row: value, generatedAt: "2026-09-06T12:00:00.000Z" }));
+    expect(markup).toContain("Generate a new listing preview"); expect(markup).toContain("$8.99");
+  });
+  it("bounds 10,000 synthetic previews to 50 mounted rows", () => {
+    const client = new QueryClient({ defaultOptions: { queries: { gcTime: 0 } } });
+    try {
+      const rows = Array.from({ length: 10000 }, (_, index) => ({ ...row(), productVariantId: index + 1, title: `Listing ${index + 1}` }));
+      const markup = render(React.createElement(QueryClientProvider, { client }, React.createElement(DropshipListingPreview, {
+        preview: { vendorId: 1, storeConnectionId: 1, platform: "ebay", generatedAt: "2026-09-06T12:00:00.000Z", rows,
+          summary: { total: 10000, ready: 10000, blocked: 0, warning: 0 } } })));
+      expect(markup.match(/aria-label="View preview for Listing /g)).toHaveLength(50);
+      expect(markup).toContain("Page 1 of 200"); expect(markup).not.toContain("Estimate shipping");
+    } finally { client.clear(); }
+  });
+  it("shows missing shipping rates as unavailable, never free", () => {
+    const markup = render(React.createElement(ListingShippingEstimateResult, { result: { status: "unavailable", storeConnectionId: 1, productVariantId: 1,
+      quantity: 1, destination: { country: "US", region: null, postalCode: "16066" }, estimatedAt: "2026-09-06T12:00:00.000Z", warnings: [], code: "NO_RATE", message: "No configured rate matches." } }));
+    expect(markup).toContain("Shipping estimate unavailable"); expect(markup).not.toContain("$0.00");
+  });
+});

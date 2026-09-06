@@ -10,6 +10,7 @@ import {
 import type { DropshipLogEvent } from "../../application/dropship-ports";
 import {
   DropshipShippingQuoteService,
+  calculateDropshipShippingQuote,
   type CreateDropshipShippingQuoteSnapshotInput,
   type DropshipInsurancePoolPolicy,
   type DropshipShippingMarkupPolicy,
@@ -662,6 +663,42 @@ describe("DropshipShippingQuoteService", () => {
       idempotencyKey: "quote-005",
     })).rejects.toMatchObject({ code: "DROPSHIP_SHIPPING_INSURANCE_POLICY_REQUIRED" });
     expect(repository.snapshots).toHaveLength(0);
+  });
+});
+
+describe("read-only shipping calculation parity", () => {
+  it.each(["legacy", "shared"] as const)("matches persisted %s quotes exactly without snapshot or shadow writes", async (source) => {
+    const repository = new FakeShippingQuoteRepository();
+    const shadowComparison = new FakeShadowComparison();
+    const logger = { info: () => undefined, warn: () => undefined, error: () => undefined };
+    const calculationDeps = {
+      repository,
+      cartonization: new FakeCartonizationProvider(),
+      pricingProvider: new CutoverDropshipShippingPricingProvider({
+        cutoverPolicy: source === "legacy" ? legacyCutoverPolicy() : { mode: "live", storeConnectionIds: new Set<number>() },
+        legacyRateProvider: new FakeRateProvider(),
+        sharedQuoteProvider: new FakeSharedQuoteProvider(sharedQuote(800)),
+        logger,
+      }),
+    };
+    const request = { vendorId: 10, storeConnectionId: 22, warehouseId: 3, destination: { country: "US", region: "NY", postalCode: "10001" }, items: [{ productVariantId: 101, quantity: 2 }], quotedAt: now };
+    const calculation = await calculateDropshipShippingQuote(calculationDeps, request);
+    expect(repository.snapshots).toHaveLength(0);
+    expect(shadowComparison.snapshots).toHaveLength(0);
+    const quoteService = new DropshipShippingQuoteService({
+      ...calculationDeps,
+      vendorProvisioning: new FakeVendorProvisioningService() as unknown as DropshipVendorProvisioningService,
+      shadowComparison,
+      clock: { now: () => now },
+      logger,
+    });
+    const quote = await quoteService.quote({ vendorId: 10, storeConnectionId: 22, warehouseId: 3, destination: request.destination, items: request.items, idempotencyKey: `parity-${source}` });
+    expect(quote.totalShippingCents).toBe(calculation.totalShippingCents);
+    expect(quote.currency).toBe(calculation.currency);
+    expect(quote.internalBreakdown).toMatchObject({ baseRateCents: calculation.baseRateCents, markupCents: calculation.markupCents, insurancePoolCents: calculation.insurancePoolCents, dunnageCents: calculation.dunnageCents, rateTableId: calculation.rateTableId });
+    expect(repository.snapshots).toHaveLength(1);
+    expect(repository.snapshots[0].quotePayload).toEqual(calculation.quotePayload);
+    expect(shadowComparison.snapshots).toHaveLength(source === "legacy" ? 1 : 0);
   });
 });
 

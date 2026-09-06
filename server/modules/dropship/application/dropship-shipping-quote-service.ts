@@ -17,7 +17,7 @@ import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship
 import type {
   DropshipVendorProvisioningService,
 } from "./dropship-vendor-provisioning-service";
-import type { DropshipCartonizationProvider } from "./dropship-cartonization-provider";
+import type { DropshipCartonizationProvider, DropshipCartonizationResult } from "./dropship-cartonization-provider";
 import { quoteDropshipShippingForMemberInputSchema } from "./dropship-shipping-dtos";
 import type {
   DropshipShippingPricingProvider,
@@ -205,7 +205,7 @@ export class DropshipShippingQuoteService {
 
     const quotedAt = this.deps.clock.now();
     await this.assertQuoteContext(parsed);
-    const cartonization = await this.deps.cartonization.cartonize({
+    const calculation = await calculateDropshipShippingQuote(this.deps, {
       vendorId: parsed.vendorId,
       storeConnectionId: parsed.storeConnectionId,
       warehouseId: parsed.warehouseId,
@@ -213,66 +213,19 @@ export class DropshipShippingQuoteService {
       items: normalizedItems,
       quotedAt,
     });
-    const packages = cartonization.packages;
-
-    const pricing = await this.deps.pricingProvider.quote({
-      vendorId: parsed.vendorId,
-      storeConnectionId: parsed.storeConnectionId,
-      warehouseId: parsed.warehouseId,
-      destination: normalizedDestination,
-      items: normalizedItems,
-      packages,
-      cartonizationProvider: cartonization.engine,
-      quotedAt,
-    });
-    const currency = pricing.currency;
-    const baseRateCents = pricing.baseRateCents;
-    const [markupPolicy, insurancePolicy] = await Promise.all([
-      this.deps.repository.getActiveShippingMarkupPolicy(quotedAt),
-      this.deps.repository.getActiveInsurancePoolPolicy(quotedAt),
-    ]);
-    const resolvedMarkupPolicy = requireActiveShippingMarkupPolicy(markupPolicy, {
-      vendorId: parsed.vendorId,
-      storeConnectionId: parsed.storeConnectionId,
-      warehouseId: parsed.warehouseId,
-    });
-    const resolvedInsurancePolicy = requireActiveInsurancePoolPolicy(insurancePolicy, {
-      vendorId: parsed.vendorId,
-      storeConnectionId: parsed.storeConnectionId,
-      warehouseId: parsed.warehouseId,
-    });
-    const markupCents = calculateBasisPointsFeeCents(baseRateCents, {
-      bps: resolvedMarkupPolicy.markupBps,
-      fixedCents: resolvedMarkupPolicy.fixedMarkupCents,
-      minCents: resolvedMarkupPolicy.minMarkupCents,
-      maxCents: resolvedMarkupPolicy.maxMarkupCents,
-    });
-    const dunnageCents = 0;
-    const insurancePoolCents = calculateBasisPointsFeeCents(baseRateCents + markupCents + dunnageCents, {
-      bps: resolvedInsurancePolicy.feeBps,
-      minCents: resolvedInsurancePolicy.minFeeCents,
-      maxCents: resolvedInsurancePolicy.maxFeeCents,
-    });
-    const totalShippingCents = baseRateCents + markupCents + dunnageCents + insurancePoolCents;
-    const rateTableId = pricing.rateTableId;
-    const quotePayload = buildQuotePayload({
-      destination: normalizedDestination,
-      items: normalizedItems,
-      packages,
+    const {
+      cartonization,
       pricing,
-      cartonizationProvider: cartonization.engine,
-      cartonizationWarnings: cartonization.warnings,
-      packagingWarnings: cartonization.packagingWarnings,
-      markupPolicy: resolvedMarkupPolicy,
-      insurancePolicy: resolvedInsurancePolicy,
-      totals: {
-        baseRateCents,
-        markupCents,
-        insurancePoolCents,
-        dunnageCents,
-        totalShippingCents,
-      },
-    });
+      currency,
+      baseRateCents,
+      markupCents,
+      dunnageCents,
+      insurancePoolCents,
+      totalShippingCents,
+      rateTableId,
+      quotePayload,
+    } = calculation;
+    const packages = cartonization.packages;
 
     const snapshot = await this.deps.repository.createQuoteSnapshot({
       vendorId: parsed.vendorId,
@@ -385,6 +338,97 @@ export function makeDropshipShippingQuoteLogger(): DropshipLogger {
 export const systemDropshipShippingQuoteClock: DropshipClock = {
   now: () => new Date(),
 };
+
+export interface DropshipShippingCalculationDependencies {
+  cartonization: DropshipCartonizationProvider;
+  pricingProvider: DropshipShippingPricingProvider;
+  repository: Pick<DropshipShippingQuoteRepository, "getActiveShippingMarkupPolicy" | "getActiveInsurancePoolPolicy">;
+}
+
+export interface DropshipShippingCalculationResult {
+  cartonization: DropshipCartonizationResult;
+  pricing: DropshipShippingPricingResult;
+  currency: string;
+  rateTableId: number | null;
+  baseRateCents: number;
+  markupCents: number;
+  dunnageCents: number;
+  insurancePoolCents: number;
+  totalShippingCents: number;
+  quotePayload: Record<string, unknown>;
+}
+
+/** Read-only calculation shared by order quotes and listing estimates.
+ * This contract excludes provisioning, snapshots and audit writes.
+ * Callers own authorization; no launch or wallet state changes here.
+ */
+export async function calculateDropshipShippingQuote(
+  deps: DropshipShippingCalculationDependencies,
+  input: {
+    vendorId: number;
+    storeConnectionId: number;
+    warehouseId: number;
+    destination: NormalizedDropshipShippingDestination;
+    items: NormalizedDropshipShippingQuoteItem[];
+    quotedAt: Date;
+  },
+): Promise<DropshipShippingCalculationResult> {
+  const cartonization = await deps.cartonization.cartonize(input);
+  const pricing = await deps.pricingProvider.quote({
+    ...input,
+    packages: cartonization.packages,
+    cartonizationProvider: cartonization.engine,
+  });
+  const [markupPolicy, insurancePolicy] = await Promise.all([
+    deps.repository.getActiveShippingMarkupPolicy(input.quotedAt),
+    deps.repository.getActiveInsurancePoolPolicy(input.quotedAt),
+  ]);
+  const quoteContext = {
+    vendorId: input.vendorId,
+    storeConnectionId: input.storeConnectionId,
+    warehouseId: input.warehouseId,
+  };
+  const resolvedMarkupPolicy = requireActiveShippingMarkupPolicy(markupPolicy, quoteContext);
+  const resolvedInsurancePolicy = requireActiveInsurancePoolPolicy(insurancePolicy, quoteContext);
+  const baseRateCents = pricing.baseRateCents;
+  const markupCents = calculateBasisPointsFeeCents(baseRateCents, {
+    bps: resolvedMarkupPolicy.markupBps,
+    fixedCents: resolvedMarkupPolicy.fixedMarkupCents,
+    minCents: resolvedMarkupPolicy.minMarkupCents,
+    maxCents: resolvedMarkupPolicy.maxMarkupCents,
+  });
+  const dunnageCents = 0;
+  const insurancePoolCents = calculateBasisPointsFeeCents(baseRateCents + markupCents + dunnageCents, {
+    bps: resolvedInsurancePolicy.feeBps,
+    minCents: resolvedInsurancePolicy.minFeeCents,
+    maxCents: resolvedInsurancePolicy.maxFeeCents,
+  });
+  const totalShippingCents = baseRateCents + markupCents + dunnageCents + insurancePoolCents;
+  if ([baseRateCents, markupCents, dunnageCents, insurancePoolCents, totalShippingCents]
+    .some((amount) => !Number.isSafeInteger(amount) || amount < 0)) {
+    throw new DropshipError("DROPSHIP_SHIPPING_RATE_INVALID", "Shipping total is not a valid integer cent amount.");
+  }
+  const totals = { baseRateCents, markupCents, dunnageCents, insurancePoolCents, totalShippingCents };
+  return {
+    ...totals,
+    cartonization,
+    pricing,
+    currency: pricing.currency,
+    rateTableId: pricing.rateTableId,
+    quotePayload: buildQuotePayload({
+      destination: input.destination,
+      items: input.items,
+      packages: cartonization.packages,
+      pricing,
+      cartonizationProvider: cartonization.engine,
+      cartonizationWarnings: cartonization.warnings,
+      packagingWarnings: cartonization.packagingWarnings,
+      markupPolicy: resolvedMarkupPolicy,
+      insurancePolicy: resolvedInsurancePolicy,
+      totals,
+    }),
+  };
+}
 
 function assertVendorCanQuoteShipping(context: DropshipShippingStoreContext): void {
   if (["closed", "lapsed", "suspended"].includes(context.vendorStatus)) {

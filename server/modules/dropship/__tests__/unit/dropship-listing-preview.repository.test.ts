@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Pool, PoolClient } from "pg";
 
 vi.hoisted(() => {
@@ -8,6 +8,27 @@ vi.hoisted(() => {
 import { PgDropshipListingPreviewRepository } from "../../infrastructure/dropship-listing-preview.repository";
 
 describe("PgDropshipListingPreviewRepository", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it.each([35, null])("reads the canonical internal Dropship OMS channel partner-profile discount (%s)", async (discount) => {
+    vi.stubEnv("DROPSHIP_OMS_CHANNEL_ID", "");
+    const queries: Array<{ sql: string; values?: unknown[] }> = [];
+    const client = {
+      query: vi.fn(async (sql: string, values?: unknown[]) => {
+        queries.push({ sql, values });
+        if (sql.includes("FROM channels.channels")) return { rows: [{ id: 67, name: "Dropship OMS", status: "active", type: "internal", provider: "manual" }] };
+        if (sql.includes("FROM channels.partner_profiles")) return { rows: discount === null ? [] : [{ discount_percent: discount }] };
+        throw new Error("Unexpected pricing query");
+      }),
+      release: vi.fn(),
+    };
+    const repository = new PgDropshipListingPreviewRepository(makePool(client as unknown as PoolClient));
+    expect(await repository.loadChannelDiscountPercent()).toBe(discount);
+    expect(queries[1]?.values).toEqual([67]);
+    expect(queries[1]?.sql).toContain("WHERE channel_id = $1");
+    expect(queries.map((query) => query.sql).join(" ")).not.toMatch(/member|subscription|standard_cost|avg_cost/);
+    expect(client.release).toHaveBeenCalledTimes(1);
+  });
   it("maps launch readiness from store credential fields", async () => {
     const client = makeClient({
       vendor_id: 10,
