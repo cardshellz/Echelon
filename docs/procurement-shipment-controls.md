@@ -1,5 +1,7 @@
 # Procurement shipment command controls
 
+The following is the C1 audit record. The subsequent [W01 shipment-line controls](procurement-shipment-line-controls.md) document the implemented line, import, capacity, and receipt-source corrections; C1 baseline gaps below are historical findings.
+
 Evidence below was traced from `6390f7cf` before C1 edits. Line references identify that baseline; function names remain the primary lookup when subsequent changes move lines. No production records were inspected or changed during this audit.
 
 ## C1 contract boundary

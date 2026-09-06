@@ -1,4 +1,6 @@
 import React from "react";
+import { useAuth } from "@/lib/auth";
+import { createShipmentLineCommandClient, createShipmentLineRecoveryStore } from "@/lib/shipment-line-command";
 import {
   dollarsToCents,
   formatMills,
@@ -963,6 +965,11 @@ function displayScheduleDate(value: unknown): string {
 }
 
 export default function PurchaseOrderDetail() {
+  const { user: shipmentCommandUser } = useAuth();
+  const shipmentLineCommands = React.useMemo(() => shipmentCommandUser?.id ? createShipmentLineCommandClient(
+    () => "shipment-line-" + crypto.randomUUID(),
+    createShipmentLineRecoveryStore(() => window.sessionStorage, shipmentCommandUser.id),
+  ) : null, [shipmentCommandUser?.id]);
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [location, navigate] = useLocation();
@@ -1056,7 +1063,7 @@ export default function PurchaseOrderDetail() {
   const [lineSelections, setLineSelections] = useState<Record<number, { checked: boolean; qty: number }>>({});
   const [lineQtyErrors, setLineQtyErrors] = useState<Record<number, string>>({});
 
-  const { data: shippableLinesData } = useQuery<{ lines: any[] }>({
+  const { data: shippableLinesData } = useQuery<{ lines: any[]; reviewRequiredLines?: Array<{ id: number; sku: string | null; code: string; error: string }> }>({
     queryKey: [`/api/purchase-orders/${poId}/shippable-lines`],
     enabled: !!poId && showCreateShipmentDialog,
   });
@@ -2343,8 +2350,16 @@ export default function PurchaseOrderDetail() {
   });
 
   const createShipmentMutation = useMutation({
+    retry: false,
     onMutate: captureNavigation,
     mutationFn: async (form: typeof newShipmentForm) => {
+      if (!shipmentLineCommands) throw new Error("Sign in before creating a shipment.");
+      // Chain: add selected lines from PO
+      const selectedLines = (shippableLinesData?.lines ?? [])
+        .filter((line: any) => lineSelections[line.id]?.checked && lineSelections[line.id]?.qty > 0)
+        .map((line: any) => ({ poLineId: line.id, qty: lineSelections[line.id].qty }));
+
+
       const res = await fetch("/api/inbound-shipments", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -2359,23 +2374,12 @@ export default function PurchaseOrderDetail() {
       if (!res.ok) { const err = await res.json(); throw new Error(err.error || "Failed to create shipment"); }
       const shipment = await res.json();
 
-      // Chain: add selected lines from PO
-      const selectedLines = (shippableLinesData?.lines ?? [])
-        .filter((line: any) => lineSelections[line.id]?.checked && lineSelections[line.id]?.qty > 0)
-        .map((line: any) => ({ poLineId: line.id, qty: lineSelections[line.id].qty }));
-
       if (selectedLines.length > 0) {
         try {
-          const linesRes = await fetch(`/api/inbound-shipments/${shipment.id}/lines/from-po`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ purchaseOrderId: poId, lineSelections: selectedLines }),
+          const result = await shipmentLineCommands.execute(shipment.id, {
+            operation: "add-from-po", body: { purchaseOrderId: poId!, lineSelections: selectedLines },
           });
-          if (!linesRes.ok) {
-            const err = await linesRes.json();
-            return { shipment, lineError: err.error || "Failed to add lines", lineCount: 0 };
-          }
-          return { shipment, lineError: null, lineCount: selectedLines.length };
+          return { shipment, lineError: null, lineCount: result.operation === "add-from-po" ? result.lines.length : 0 };
         } catch (e: any) {
           return { shipment, lineError: e.message, lineCount: 0 };
         }
@@ -2387,7 +2391,7 @@ export default function PurchaseOrderDetail() {
       if (lineError) {
         toast({
           title: "Shipment created",
-          description: `${shipment.shipmentNumber} created but failed to add lines: ${lineError}. You can add lines manually on the shipment page.`,
+          description: `${shipment.shipmentNumber} created but failed to add lines: ${lineError}. Open the shipment and review any saved line command before adding more lines.`,
           variant: "destructive",
         });
       } else if (lineCount > 0) {
@@ -5382,6 +5386,12 @@ export default function PurchaseOrderDetail() {
                 )}
               </div>
 
+              {Array.isArray(shippableLinesData?.reviewRequiredLines) && shippableLinesData.reviewRequiredLines.length > 0 && (
+                <div role="alert" className="rounded border border-amber-500/50 p-3 text-sm space-y-1">
+                  <p className="font-medium">Some purchase lines need source review before shipping</p>
+                  {shippableLinesData.reviewRequiredLines.map((line: { id: number; sku: string | null; error: string }) => <p key={line.id}>{line.sku ?? `PO line ${line.id}`}: {line.error}</p>)}
+                </div>
+              )}
               {shippableLinesData?.lines && shippableLinesData.lines.length > 0 ? (
                 <div className="max-h-[300px] overflow-y-auto">
                   <Table>
@@ -5429,7 +5439,7 @@ export default function PurchaseOrderDetail() {
                                 disabled={!sel.checked}
                                 className={`h-8 text-xs text-right ${error ? "border-destructive" : ""}`}
                                 onChange={(e) => {
-                                  const val = parseInt(e.target.value, 10) || 0;
+                                  const val = /^\d+$/.test(e.target.value) ? Number(e.target.value) : 0;
                                   setLineSelections(prev => ({
                                     ...prev,
                                     [line.id]: { ...prev[line.id], qty: val },
@@ -5453,7 +5463,7 @@ export default function PurchaseOrderDetail() {
                 </div>
               ) : showCreateShipmentDialog && shippableLinesData ? (
                 <p className="text-sm text-muted-foreground py-4 text-center">
-                  All lines on this PO have been shipped. View shipments below.
+                  No purchase lines are currently eligible to add. Review source warnings and existing shipments.
                 </p>
               ) : null}
             </div>
@@ -5472,7 +5482,7 @@ export default function PurchaseOrderDetail() {
                 {createShipmentMutation.isPending ? "Creating..." : "Create Shipment"}
               </Button>
               {shippableLinesData !== undefined && shippableLinesData.lines.length === 0 && (
-                <p className="text-xs text-muted-foreground absolute -bottom-5 right-0">All lines already shipped — nothing to add.</p>
+                <p className="text-xs text-muted-foreground absolute -bottom-5 right-0">No eligible lines available to add.</p>
               )}
             </div>
           </div>

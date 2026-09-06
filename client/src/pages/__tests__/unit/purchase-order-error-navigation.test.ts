@@ -5,6 +5,7 @@ import { Router } from "wouter";
 import { describe, expect, it } from "vitest";
 
 import PurchaseOrderDetail from "../../PurchaseOrderDetail";
+import { AuthProvider } from "@/lib/auth";
 
 function renderFailure(path: string, status: number): string {
   const client = new QueryClient({
@@ -21,7 +22,7 @@ function renderFailure(path: string, status: number): string {
     return renderToStaticMarkup(createElement(Router, {
       ssrPath: path,
       ssrSearch: "?tab=shipments&purchase=purchase%3A17%3Ashipments&via=shipment%3A42%3Acosts",
-    }, createElement(QueryClientProvider, { client }, createElement(PurchaseOrderDetail))));
+    }, createElement(QueryClientProvider, { client }, createElement(AuthProvider, { children: createElement(PurchaseOrderDetail) }))));
   } finally {
     client.clear();
   }

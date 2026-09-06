@@ -84,11 +84,6 @@ function buildShipmentTrackingMock(overrides: Record<string, any> = {}) {
     startCosting: vi.fn(),
     close: vi.fn(),
     cancel: vi.fn(),
-    addLinesFromPO: vi.fn(),
-    importPackingList: vi.fn(),
-    resolveDimensionsForShipment: vi.fn(),
-    updateLineDimensions: vi.fn(),
-    removeLine: vi.fn(),
     versionCosts: vi.fn(async (costs: unknown[]) => costs),
     getCost: vi.fn(),
     runAllocation: vi.fn(),
@@ -240,31 +235,6 @@ describe("inbound shipment routes", () => {
     });
   });
 
-  it("adds shipment lines from selected purchase order lines", async () => {
-    const shipmentTracking = buildShipmentTrackingMock({
-      addLinesFromPO: vi.fn().mockResolvedValue([{ id: 8, poLineId: 100, qty: 3 }]),
-    });
-    server = await startServer(buildApp(shipmentTracking));
-
-    const { status, body } = await requestJson(
-      server.url,
-      "POST",
-      "/api/inbound-shipments/12/lines/from-po",
-      {
-        purchaseOrderId: 55,
-        lineSelections: [{ poLineId: 100, qty: 3 }],
-      },
-    );
-
-    expect(status).toBe(201);
-    expect(body).toEqual([{ id: 8, poLineId: 100, qty: 3 }]);
-    expect(shipmentTracking.addLinesFromPO).toHaveBeenCalledWith(
-      12,
-      55,
-      [{ poLineId: 100, qty: 3 }],
-      undefined,
-    );
-  });
 
   it("delegates inbound shipment cost reads through AP enrichment", async () => {
     mocks.apLedger.enrichCostsWithInvoiceInfo.mockResolvedValue([
