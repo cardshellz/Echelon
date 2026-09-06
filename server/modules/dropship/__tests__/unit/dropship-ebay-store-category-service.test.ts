@@ -78,13 +78,23 @@ describe("DropshipEbayStoreCategoryService", () => {
 
   it.each([
     ["shopify", "connected", "DROPSHIP_EBAY_STORE_REQUIRED"],
-    ["ebay", "needs_reauth", "DROPSHIP_EBAY_STORE_CONNECTION_BLOCKED"],
+    ["ebay", "needs_reauth", "DROPSHIP_EBAY_STORE_CATEGORIES_PERMISSION_REQUIRED"],
+    ["ebay", "paused", "DROPSHIP_EBAY_STORE_CONNECTION_BLOCKED"],
+    ["ebay", "disconnected", "DROPSHIP_EBAY_STORE_CONNECTION_BLOCKED"],
+    ["ebay", "grace_period", "DROPSHIP_EBAY_STORE_CONNECTION_BLOCKED"],
   ])("blocks invalid store context platform=%s status=%s", async (platform, status, code) => {
     const fixture = makeFixture({ context: { platform, status } });
 
     await expect(fixture.service.listForMember("member-1", { storeConnectionId: 44 }))
       .rejects.toMatchObject({ code });
     expect(fixture.directory.lastInput).toBeNull();
+  });
+
+  it("allows recoverable token health to reach automatic category credential recovery", async () => {
+    const fixture = makeFixture({ context: { status: "refresh_failed" } });
+    await expect(fixture.service.listForMember("member-1", { storeConnectionId: 44 }))
+      .resolves.toMatchObject({ storeConnectionId: 44 });
+    expect(fixture.directory.lastInput).toEqual({ vendorId: 10, storeConnectionId: 44 });
   });
 
   it("rejects duplicate Store category choices at the input boundary", async () => {

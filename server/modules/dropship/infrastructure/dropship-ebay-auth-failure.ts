@@ -3,9 +3,13 @@ import type {
   DropshipMarketplaceStoreCredentials,
 } from "./dropship-marketplace-credentials";
 
-const MAX_PROVIDER_ERROR_CODE_LENGTH = 100;
-const MAX_PROVIDER_ERROR_DESCRIPTION_LENGTH = 500;
-const MAX_PROVIDER_RESPONSE_BODY_LENGTH = 1_000;
+// Provider prose may echo tokens, URLs, or credentials. Persist only known OAuth
+// codes; neither audit logs nor customer-facing errors need a raw response body.
+const OAUTH_ERROR_CODES = new Set([
+  "invalid_request", "invalid_client", "invalid_grant", "unauthorized_client",
+  "unsupported_grant_type", "invalid_scope", "access_denied",
+  "temporarily_unavailable", "server_error",
+]);
 
 export interface EbayTokenRefreshFailureClassification {
   connectionStatus: "needs_reauth" | "refresh_failed";
@@ -27,7 +31,7 @@ export function classifyEbayTokenRefreshFailure(input: {
 }): EbayTokenRefreshFailureClassification {
   const providerError = parseOAuthError(input.responseBody);
   const providerErrorCode = providerError.code?.toLowerCase() ?? null;
-  const grantIsInvalid = providerErrorCode === "invalid_grant";
+  const grantIsInvalid = input.status === 400 && providerErrorCode === "invalid_grant";
 
   return {
     connectionStatus: grantIsInvalid ? "needs_reauth" : "refresh_failed",
@@ -58,6 +62,10 @@ export async function recordEbayTokenRefreshFailure(input: {
     vendorId: input.credential.vendorId,
     storeConnectionId: input.credential.storeConnectionId,
     platform: "ebay",
+    expectedCredential: {
+      accessTokenRef: input.credential.accessTokenRef,
+      refreshTokenRef: input.credential.refreshTokenRef,
+    },
     status: classification.connectionStatus,
     failureCode: input.failureCode,
     message: providerMessage,
@@ -83,6 +91,10 @@ export async function recordEbayAccessTokenRejection(input: {
     vendorId: input.credential.vendorId,
     storeConnectionId: input.credential.storeConnectionId,
     platform: "ebay",
+    expectedCredential: {
+      accessTokenRef: input.credential.accessTokenRef,
+      refreshTokenRef: input.credential.refreshTokenRef,
+    },
     status: "refresh_failed",
     failureCode: input.failureCode,
     message: input.message,
@@ -104,7 +116,6 @@ export function ebayTokenRefreshErrorContext(input: {
     authFailureStatus: input.classification.connectionStatus,
     providerErrorCode: input.classification.providerErrorCode,
     providerErrorDescription: input.classification.providerErrorDescription,
-    body: input.responseBody.slice(0, MAX_PROVIDER_RESPONSE_BODY_LENGTH),
   };
 }
 
@@ -117,22 +128,11 @@ function parseOAuthError(responseBody: string): {
     if (!isRecord(parsed)) {
       return { code: null, description: null };
     }
-    return {
-      code: normalizedProviderText(parsed.error, MAX_PROVIDER_ERROR_CODE_LENGTH),
-      description: normalizedProviderText(
-        parsed.error_description,
-        MAX_PROVIDER_ERROR_DESCRIPTION_LENGTH,
-      ),
-    };
+    const code = typeof parsed.error === "string" ? parsed.error.trim().toLowerCase() : "";
+    return { code: OAUTH_ERROR_CODES.has(code) ? code : null, description: null };
   } catch {
     return { code: null, description: null };
   }
-}
-
-function normalizedProviderText(value: unknown, maxLength: number): string | null {
-  if (typeof value !== "string") return null;
-  const normalized = value.trim();
-  return normalized ? normalized.slice(0, maxLength) : null;
 }
 
 function isRetryableHttpStatus(status: number): boolean {

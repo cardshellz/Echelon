@@ -242,7 +242,16 @@ export class DropshipEbayListingPolicyOverrideService {
         { vendorId, storeConnectionId, platform: context.platform },
       );
     }
-    if (context.status !== "connected") {
+    if (context.status === "needs_reauth") {
+      throw new DropshipError(
+        "DROPSHIP_EBAY_LISTING_SETUP_PERMISSION_REQUIRED",
+        "The eBay authorization has expired or been revoked. Reauthorize the connected store to continue.",
+        { vendorId, storeConnectionId, status: context.status, retryable: false },
+      );
+    }
+    // A recoverable refresh failure must reach the shared credential owner.
+    // Paused, disconnected, and revoked connections remain blocked.
+    if (context.status !== "connected" && context.status !== "refresh_failed") {
       throw new DropshipError(
         "DROPSHIP_EBAY_STORE_CONNECTION_BLOCKED",
         "Reconnect the eBay store before changing listing policy overrides.",

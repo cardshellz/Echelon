@@ -89,6 +89,7 @@ describe("eBay Store category directory", () => {
     expect(credentials.loadFreshForStoreConnection).toHaveBeenCalledWith({
       vendorId: 10,
       storeConnectionId: 44,
+      operation: "store_categories_read",
     });
     expect(fetchFn).toHaveBeenCalledWith(
       "https://api.ebay.com/sell/stores/v1/store/categories",
@@ -99,7 +100,7 @@ describe("eBay Store category directory", () => {
     );
   });
 
-  it("classifies missing Stores API permission as a reconnect requirement", async () => {
+  it("classifies persistent Stores API denial separately from revoked authorization", async () => {
     const directory = new EbayDropshipStoreCategoryDirectory(
       {
         loadFreshForStoreConnection: vi.fn(async () => credential()),
@@ -109,7 +110,7 @@ describe("eBay Store category directory", () => {
 
     await expect(directory.listLeafCategories({ vendorId: 10, storeConnectionId: 44 }))
       .rejects.toMatchObject({
-        code: "DROPSHIP_EBAY_STORE_CATEGORIES_PERMISSION_REQUIRED",
+        code: "DROPSHIP_EBAY_STORE_CATEGORIES_ACCESS_DENIED",
         context: expect.objectContaining({ status: 403, retryable: false }),
       });
   });

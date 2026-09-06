@@ -46,6 +46,7 @@ describe("dropship marketplace order cancellation providers", () => {
 
   it("cancels eBay orders with connection-level cancellation configuration", async () => {
     const credentials = new FakeCredentialRepository(ebayCredential({
+      providerEnvironment: "sandbox",
       config: {
         environment: "sandbox",
         cancellation: {
@@ -215,6 +216,9 @@ function ebayCredential(
     status: "connected",
     shopDomain: null,
     externalAccountId: "seller-1",
+    providerEnvironment: "production",
+    externalAccountIdentityScheme: "ebay_user_id",
+    externalAccountVerifiedAt: new Date("2026-05-01T00:00:00.000Z"),
     externalDisplayName: "seller-1",
     config: {},
     accessToken: "ebay-token",
