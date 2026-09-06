@@ -1,3 +1,5 @@
+import type { DropshipListingPresentation, DropshipListingEconomics } from "@shared/dropship/listing-presentation";
+
 export type DropshipSectionStatus =
   "ready" | "attention_required" | "coming_soon";
 export type DropshipSeverity = "info" | "warning" | "error";
@@ -1647,6 +1649,8 @@ export interface DropshipListingPreviewRow {
     overriddenFields: Array<"fulfillmentPolicyId" | "returnPolicyId" | "paymentPolicyId">;
   } | null;
   previewHash: string;
+  presentation?: DropshipListingPresentation;
+  economics?: DropshipListingEconomics;
 }
 
 export interface DropshipListingPreviewResult {

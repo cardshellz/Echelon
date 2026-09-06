@@ -371,7 +371,7 @@ function mapProcessingIntakeRow(row: ProcessingIntakeRow): DropshipOrderProcessi
   };
 }
 
-function mapProcessingConfig(config: Record<string, unknown> | null): DropshipOrderProcessingConfig {
+export function mapProcessingConfig(config: Record<string, unknown> | null): DropshipOrderProcessingConfig {
   const result = readDefaultWarehouseId(config ?? {});
   return result.ok
     ? { defaultWarehouseId: result.defaultWarehouseId, warehouseConfigError: null }

@@ -98,8 +98,10 @@ describe("DropshipPortalCatalog workflow", () => {
     expect(source).toContain("Your eBay Store organization (optional)");
     expect(source).toContain("Card Shellz supplies the required eBay marketplace category.");
     expect(source).toContain("Leaving both fields blank does not block preview or push.");
-    expect(source).toContain("Marketplace category");
-    expect(source).toContain("Your Store:");
+    const previewSource = readFileSync(join(process.cwd(), "client/src/pages/dropship/DropshipListingPreview.tsx"), "utf8");
+    expect(source).toContain("<DropshipListingPreview");
+    expect(previewSource).toContain("Marketplace category");
+    expect(previewSource).toContain("Your Store categories");
     expect(comboboxSource).toContain("Search your eBay Store categories...");
     expect(comboboxSource).toContain('className="max-h-64 overflow-y-auto overscroll-contain"');
   });

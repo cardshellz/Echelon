@@ -1,4 +1,8 @@
 import { createHash } from "crypto";
+import { z } from "zod";
+import type { DropshipListingPresentation, DropshipListingEconomics } from "../../../../shared/dropship/listing-presentation";
+import type { CatalogImageFile } from "../../catalog/catalog-media.reader";
+import { enrichDropshipListingRows, type DropshipListingPresentationDependencies } from "./dropship-listing-presentation";
 import type {
   DropshipSourcePlatform,
   DropshipStoreConnectionStatus,
@@ -59,6 +63,8 @@ export interface DropshipListingStoreContext {
 
 export interface DropshipListingCatalogCandidate extends DropshipCatalogVariantCandidate, DropshipCanonicalListingContent {
   unitsPerVariant: number;
+  /** Unmodified catalog value for advisory validation; do not change existing quantity semantics. */
+  catalogUnitsPerVariant?: number | null;
   defaultRetailPriceCents: number | null;
 }
 
@@ -90,6 +96,8 @@ export interface DropshipPricingPolicyRecord {
 }
 
 export interface DropshipListingPreviewRow {
+  presentation?: DropshipListingPresentation;
+  economics?: DropshipListingEconomics;
   productVariantId: number;
   productId: number;
   sku: string | null;
@@ -173,6 +181,7 @@ export interface CreateDropshipListingPushJobRepositoryResult {
 }
 
 export interface DropshipListingPreviewRepository {
+  findVendorIdByMemberId?(memberId: string): Promise<number | null>;
   loadStoreContext(input: {
     vendorId: number;
     storeConnectionId: number;
@@ -207,6 +216,7 @@ export interface DropshipListingPreviewRepository {
 }
 
 export interface DropshipListingPreviewServiceDependencies {
+  presentation?: DropshipListingPresentationDependencies;
   vendorProvisioning: DropshipVendorProvisioningService;
   repository: DropshipListingPreviewRepository;
   atp: DropshipAtpProvider;
@@ -218,6 +228,38 @@ export interface DropshipListingPreviewServiceDependencies {
 
 export class DropshipListingPreviewService {
   constructor(private readonly deps: DropshipListingPreviewServiceDependencies) {}
+
+  async imageForMember(memberId: string, input: unknown): Promise<CatalogImageFile> {
+    const parsed = z.object({
+      storeConnectionId: z.number().int().positive().safe(),
+      productVariantId: z.number().int().positive().safe(),
+      assetId: z.number().int().positive().safe(),
+    }).strict().parse(input);
+    const vendorId = await this.deps.repository.findVendorIdByMemberId?.(memberId);
+    if (!vendorId || !this.deps.presentation) {
+      throw new DropshipError("DROPSHIP_LISTING_IMAGE_NOT_FOUND", "Listing image is unavailable.");
+    }
+    await this.loadStoreContextForAction(vendorId, parsed.storeConnectionId, "preview");
+    const [candidates, adminRules, selectionRules, overrides] = await Promise.all([
+      this.deps.repository.listCatalogCandidates([parsed.productVariantId]),
+      this.deps.repository.listCatalogExposureRules(),
+      this.deps.repository.listSelectionRules(vendorId),
+      this.deps.repository.listVariantOverrides({ vendorId, productVariantIds: [parsed.productVariantId] }),
+    ]);
+    const candidate = candidates.find((row) => row.productVariantId === parsed.productVariantId);
+    if (!candidate) throw new DropshipError("DROPSHIP_LISTING_IMAGE_NOT_FOUND", "Listing image is unavailable.");
+    const exposure = evaluateDropshipCatalogExposure(candidate, adminRules, this.deps.clock.now());
+    const selection = evaluateDropshipVendorCatalogSelection({
+      candidate, adminExposureDecision: exposure, rules: selectionRules, rawAtpUnits: 0,
+      override: overrides.find((row) => row.productVariantId === parsed.productVariantId) ?? null,
+    });
+    if (!exposure.exposed || !selection.selected) {
+      throw new DropshipError("DROPSHIP_LISTING_IMAGE_NOT_FOUND", "Listing image is unavailable.");
+    }
+    const image = await this.deps.presentation.media.readImageFile(parsed);
+    if (!image) throw new DropshipError("DROPSHIP_LISTING_IMAGE_NOT_FOUND", "Listing image is unavailable.");
+    return image;
+  }
 
   async previewForMember(memberId: string, input: unknown): Promise<DropshipListingPreviewResult> {
     const parsed = generateVendorListingPreviewForMemberInputSchema.parse(input);
@@ -369,12 +411,15 @@ export class DropshipListingPreviewService {
       });
     });
 
+    const enrichedRows = this.deps.presentation
+      ? await enrichDropshipListingRows({ rows, candidates, storeConnectionId: parsed.storeConnectionId, deps: this.deps.presentation })
+      : rows;
     return {
       vendorId: parsed.vendorId,
       storeConnectionId: parsed.storeConnectionId,
       platform: context.platform,
       generatedAt,
-      rows,
+      rows: enrichedRows,
       summary: summarizeRows(rows),
     };
   }

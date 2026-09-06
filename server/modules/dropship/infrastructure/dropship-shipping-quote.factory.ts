@@ -25,11 +25,12 @@ import {
 import {
   readDropshipShippingCutoverConfig,
 } from "../application/dropship-shipping-cutover-policy";
+import type { DropshipLogger } from "../application/dropship-ports";
+import type { DropshipSharedShippingQuoteProvider } from "../application/dropship-shared-shipping-quote";
 
 export function createDropshipShippingQuoteServiceFromEnv(): DropshipShippingQuoteService {
   const logger = makeDropshipShippingQuoteLogger();
   const shadowConfig = readDropshipShippingShadowRolloutConfig();
-  const cutoverConfig = readDropshipShippingCutoverConfig();
   if (shadowConfig.configurationError !== null) {
     logger.error({
       code: "DROPSHIP_SHIPPING_SHADOW_CONFIG_INVALID",
@@ -37,16 +38,6 @@ export function createDropshipShippingQuoteServiceFromEnv(): DropshipShippingQuo
         "Dropship shared shipping shadow comparison was disabled by invalid configuration.",
       context: {
         error: shadowConfig.configurationError,
-      },
-    });
-  }
-  if (cutoverConfig.configurationError !== null) {
-    logger.error({
-      code: "DROPSHIP_SHIPPING_CUTOVER_CONFIG_INVALID",
-      message:
-        "Dropship shared shipping cutover remained on legacy pricing because its configuration is invalid.",
-      context: {
-        error: cutoverConfig.configurationError,
       },
     });
   }
@@ -66,14 +57,30 @@ export function createDropshipShippingQuoteServiceFromEnv(): DropshipShippingQuo
     vendorProvisioning: createDropshipVendorProvisioningServiceFromEnv(),
     repository: new PgDropshipShippingQuoteRepository(),
     cartonization: new BasicDropshipCartonizationProvider(),
-    pricingProvider: new CutoverDropshipShippingPricingProvider({
-      cutoverPolicy: cutoverConfig.policy,
-      legacyRateProvider: new CachedRateTableDropshipShippingRateProvider(),
-      sharedQuoteProvider,
-      logger,
-    }),
+    pricingProvider: createDropshipShippingPricingProviderFromEnv(logger, sharedQuoteProvider),
     shadowComparison,
     clock: systemDropshipShippingQuoteClock,
+    logger,
+  });
+}
+
+/** Both order quotes and estimates use this exact runtime rate-source decision. */
+export function createDropshipShippingPricingProviderFromEnv(
+  logger: DropshipLogger,
+  sharedQuoteProvider: DropshipSharedShippingQuoteProvider = createSharedEngineDropshipShippingQuoteProviderFromEnv(),
+): CutoverDropshipShippingPricingProvider {
+  const cutoverConfig = readDropshipShippingCutoverConfig();
+  if (cutoverConfig.configurationError !== null) {
+    logger.error({
+      code: "DROPSHIP_SHIPPING_CUTOVER_CONFIG_INVALID",
+      message: "Dropship shared shipping cutover remained on legacy pricing because its configuration is invalid.",
+      context: { error: cutoverConfig.configurationError },
+    });
+  }
+  return new CutoverDropshipShippingPricingProvider({
+    cutoverPolicy: cutoverConfig.policy,
+    legacyRateProvider: new CachedRateTableDropshipShippingRateProvider(),
+    sharedQuoteProvider,
     logger,
   });
 }
