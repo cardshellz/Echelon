@@ -3,11 +3,13 @@ import {
   bigint,
   boolean,
   check,
+  foreignKey,
   index,
   integer,
   jsonb,
   numeric,
   pgSchema,
+  primaryKey,
   text,
   timestamp,
   uniqueIndex,
@@ -425,6 +427,7 @@ export const dropshipStoreConnections = dropshipSchema.table(
   },
   (table) => [
     index("dropship_store_conn_vendor_idx").on(table.vendorId),
+    uniqueIndex("dropship_store_conn_owner_identity_idx").on(table.id, table.vendorId),
     index("dropship_store_conn_platform_idx").on(table.platform),
     uniqueIndex("dropship_store_conn_active_vendor_idx")
       .on(table.vendorId)
@@ -782,6 +785,51 @@ export const dropshipEbayListingPolicyOverrides = dropshipSchema.table(
     ),
   ],
 );
+
+export const dropshipListingPriceRevisions = dropshipSchema.table("dropship_listing_price_revisions", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  vendorId: integer("vendor_id").notNull().references(() => dropshipVendors.id),
+  storeConnectionId: integer("store_connection_id").notNull(),
+  productVariantId: integer("product_variant_id").notNull().references(() => productVariants.id),
+  previousRevisionId: integer("previous_revision_id"),
+  overridePriceCents: integer("override_price_cents"),
+  idempotencyKey: varchar("idempotency_key", { length: 200 }).notNull(),
+  requestHash: varchar("request_hash", { length: 64 }).notNull(),
+  actorId: varchar("actor_id", { length: 255 }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+}, (table) => [
+  foreignKey({ name: "dropship_listing_price_revision_owner_fk", columns: [table.storeConnectionId, table.vendorId],
+    foreignColumns: [dropshipStoreConnections.id, dropshipStoreConnections.vendorId] }),
+  foreignKey({ name: "dropship_listing_price_revision_previous_fk",
+    columns: [table.previousRevisionId, table.vendorId, table.storeConnectionId, table.productVariantId],
+    foreignColumns: [table.id, table.vendorId, table.storeConnectionId, table.productVariantId] }),
+  uniqueIndex("dropship_listing_price_revision_identity_uk").on(table.id, table.vendorId, table.storeConnectionId, table.productVariantId),
+  uniqueIndex("dropship_listing_price_revision_idempotency_uk").on(table.vendorId, table.idempotencyKey),
+  index("dropship_listing_price_revision_target_idx").on(table.storeConnectionId, table.productVariantId, table.id),
+  check("dropship_listing_price_revision_cents_chk", sql`${table.overridePriceCents} IS NULL OR ${table.overridePriceCents} > 0`),
+  check("dropship_listing_price_revision_key_chk", sql`${table.idempotencyKey} ~ '^[A-Za-z0-9:_-]+$'`),
+  check("dropship_listing_price_revision_hash_chk", sql`${table.requestHash} ~ '^[a-f0-9]{64}$'`),
+  check("dropship_listing_price_revision_actor_chk", sql`btrim(${table.actorId}) <> ''`),
+]);
+
+export const dropshipListingPriceSettings = dropshipSchema.table("dropship_listing_price_settings", {
+  vendorId: integer("vendor_id").notNull().references(() => dropshipVendors.id),
+  storeConnectionId: integer("store_connection_id").notNull(),
+  productVariantId: integer("product_variant_id").notNull().references(() => productVariants.id),
+  revisionId: integer("revision_id").notNull(),
+  overridePriceCents: integer("override_price_cents"),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+}, (table) => [
+  primaryKey({ columns: [table.storeConnectionId, table.productVariantId] }),
+  foreignKey({ name: "dropship_listing_price_setting_owner_fk", columns: [table.storeConnectionId, table.vendorId],
+    foreignColumns: [dropshipStoreConnections.id, dropshipStoreConnections.vendorId] }),
+  foreignKey({ name: "dropship_listing_price_setting_revision_fk",
+    columns: [table.revisionId, table.vendorId, table.storeConnectionId, table.productVariantId],
+    foreignColumns: [dropshipListingPriceRevisions.id, dropshipListingPriceRevisions.vendorId,
+      dropshipListingPriceRevisions.storeConnectionId, dropshipListingPriceRevisions.productVariantId] }),
+  index("dropship_listing_price_setting_vendor_idx").on(table.vendorId, table.storeConnectionId),
+  check("dropship_listing_price_setting_cents_chk", sql`${table.overridePriceCents} IS NULL OR ${table.overridePriceCents} > 0`),
+]);
 
 export const dropshipStoreSetupChecks = dropshipSchema.table(
   "dropship_store_setup_checks",

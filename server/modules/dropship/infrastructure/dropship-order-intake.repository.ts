@@ -310,7 +310,7 @@ async function updateExistingIntakeWithClient(
   ));
 }
 
-export async function resolveDropshipOmsChannelIdWithClient(client: PoolClient): Promise<number> {
+export async function resolveDropshipOmsChannelIdWithClient(client: Pick<PoolClient, "query">): Promise<number> {
   const configuredId = parseOptionalPositiveIntegerEnv(
     "DROPSHIP_OMS_CHANNEL_ID",
     process.env.DROPSHIP_OMS_CHANNEL_ID,

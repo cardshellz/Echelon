@@ -133,3 +133,4 @@ jobs:
         run: >-
           npx vitest run --no-file-parallelism
           server/modules/dropship/__tests__/integration/dropship-ebay-listing-policy-bulk.integration.test.ts
+          server/modules/dropship/__tests__/integration/dropship-listing-price.integration.test.ts

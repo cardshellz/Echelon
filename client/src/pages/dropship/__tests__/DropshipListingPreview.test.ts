@@ -20,6 +20,14 @@ function row(): DropshipListingPreviewRow {
 }
 function render(component: React.ReactNode) { vi.stubGlobal("React", React); return renderToStaticMarkup(component); }
 describe("rich listing preview", () => {
+  it("places the editable price separately from the preview price snapshot and product costs", () => {
+    const markup = render(React.createElement(ListingPreviewDetailsContent, { row: row(), generatedAt: "2026-09-06T12:00:00.000Z",
+      priceEditor: React.createElement("section", { "aria-label": "Price editor" }, "Save listing price") }));
+    expect(markup).toContain("Preview listing price");
+    expect(markup).toContain("Your product cost");
+    expect(markup).toContain("Save listing price");
+    expect(markup.indexOf("Save listing price")).toBeLessThan(markup.indexOf('aria-label="Listing details"'));
+  });
   it("shows actual price and vendor cost but no new suggested price or profit field", () => {
     const markup = render(React.createElement(ListingPreviewTable, { rows: [row()], onOpen: () => {} }));
     expect(markup).toContain("$4.50"); expect(markup).toContain("$8.99"); expect(markup).toContain("11840");

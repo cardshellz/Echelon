@@ -1649,6 +1649,7 @@ export interface DropshipListingPreviewRow {
     overriddenFields: Array<"fulfillmentPolicyId" | "returnPolicyId" | "paymentPolicyId">;
   } | null;
   previewHash: string;
+  priceSettingRevisionId?: number | null;
   presentation?: DropshipListingPresentation;
   economics?: DropshipListingEconomics;
 }
@@ -4311,6 +4312,8 @@ export function buildListingPushRequest(input: {
   productVariantIds: number[];
   idempotencyKey: string;
   requestedRetailPricesByVariantId?: Record<string, number>;
+  expectedPriceRevisionIdsByVariantId: Record<string, number | null>;
+  expectedPriceCentsByVariantId: Record<string, number | null>;
 } {
   const storeConnectionId = assertPositiveInteger(
     input.storeConnectionId,
@@ -4324,6 +4327,14 @@ export function buildListingPushRequest(input: {
   const productVariantIds = input.preview.rows
     .filter((row) => row.previewStatus !== "blocked")
     .map((row) => row.productVariantId);
+  const expectedPriceRevisionIdsByVariantId = Object.fromEntries(input.preview.rows
+    .filter((row) => row.previewStatus !== "blocked")
+    .map((row) => [String(row.productVariantId), row.priceSettingRevisionId == null ? null
+      : assertPositiveInteger(row.priceSettingRevisionId, "priceSettingRevisionId")]));
+  const expectedPriceCentsByVariantId = Object.fromEntries(input.preview.rows
+    .filter((row) => row.previewStatus !== "blocked")
+    .map((row) => [String(row.productVariantId), row.priceCents === null ? null
+      : assertPositiveInteger(row.priceCents, "priceCents")]));
   const requestedRetailPricesByVariantId =
     buildRequestedRetailPricesByVariantId({
       productVariantIds,
@@ -4334,6 +4345,8 @@ export function buildListingPushRequest(input: {
     storeConnectionId,
     productVariantIds,
     idempotencyKey: input.idempotencyKey,
+    expectedPriceRevisionIdsByVariantId,
+    expectedPriceCentsByVariantId,
     ...(Object.keys(requestedRetailPricesByVariantId).length > 0
       ? { requestedRetailPricesByVariantId }
       : {}),

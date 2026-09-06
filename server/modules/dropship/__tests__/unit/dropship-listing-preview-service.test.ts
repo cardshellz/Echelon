@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import type { SavedListingPriceRevision } from "../../../../../shared/dropship/listing-price";
 import { DropshipError } from "../../domain/errors";
 import type { DropshipLogEvent } from "../../application/dropship-ports";
 import {
@@ -105,6 +106,64 @@ describe("DropshipListingPreviewService", () => {
       quantity: 4,
       weightGrams: 100,
     });
+  });
+
+  it("uses saved draft prices in both preview and the immutable queued listing intent", async () => {
+    repository.savedPrices = [{ productVariantId: 101, revisionId: 8, overridePriceCents: 1899, updatedAt: now.toISOString() }];
+    const result = await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] });
+    expect(result.rows[0]).toMatchObject({ priceCents: 1899, priceSettingRevisionId: 8, listingIntent: { priceCents: 1899 } });
+    await service.createListingPushJobForMember("member-1", { storeConnectionId: 22, productVariantIds: [101],
+      expectedPriceRevisionIdsByVariantId: { "101": 8 }, idempotencyKey: "saved-price-job" });
+    const snapshot = repository.lastCreatedInput!.preview.rows[0].listingIntent;
+    expect(snapshot?.priceCents).toBe(1899);
+    repository.savedPrices = [{ ...repository.savedPrices[0], revisionId: 9, overridePriceCents: 1999 }];
+    expect(snapshot?.priceCents).toBe(1899);
+  });
+
+  it("retains legacy listing fallback until an explicit reset selects catalog default", async () => {
+    repository.existingListings = [{ productVariantId: 101, listingId: 1, status: "live", vendorRetailPriceCents: 2799,
+      quantityCap: null, externalListingId: null }];
+    const request = { storeConnectionId: 22, productVariantIds: [101] };
+    expect((await service.previewForMember("member-1", request)).rows[0].priceCents).toBe(2799);
+    repository.savedPrices = [{ productVariantId: 101, revisionId: 8, overridePriceCents: null, updatedAt: now.toISOString() }];
+    expect((await service.previewForMember("member-1", request)).rows[0].priceCents).toBe(repository.candidate.defaultRetailPriceCents);
+    repository.candidate.defaultRetailPriceCents = null;
+    expect((await service.previewForMember("member-1", request)).rows[0].priceCents).toBeNull();
+  });
+
+  it("keeps explicit API request prices backward compatible above saved draft prices", async () => {
+    repository.savedPrices = [{ productVariantId: 101, revisionId: 8, overridePriceCents: 1899, updatedAt: now.toISOString() }];
+    expect((await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101],
+      requestedRetailPricesByVariantId: { "101": 2099 } })).rows[0].priceCents).toBe(2099);
+  });
+
+  it("rejects another tab's price change instead of queueing an unreviewed price", async () => {
+    repository.savedPrices = [{ productVariantId: 101, revisionId: 8, overridePriceCents: 1899, updatedAt: now.toISOString() }];
+    await expect(service.createListingPushJobForMember("member-1", { storeConnectionId: 22, productVariantIds: [101],
+      expectedPriceRevisionIdsByVariantId: { "101": null }, idempotencyKey: "stale-price-job" }))
+      .rejects.toMatchObject({ code: "DROPSHIP_LISTING_PRICE_VERSION_CONFLICT" });
+    expect(repository.lastCreatedInput).toBeNull();
+  });
+
+  it("rejects changed catalog default even when no saved setting revision changed", async () => {
+    const reviewedPrice = repository.candidate.defaultRetailPriceCents;
+    repository.candidate.defaultRetailPriceCents = 4499;
+    await expect(service.createListingPushJobForMember("member-1", { storeConnectionId: 22, productVariantIds: [101],
+      expectedPriceRevisionIdsByVariantId: { "101": null }, expectedPriceCentsByVariantId: { "101": reviewedPrice },
+      idempotencyKey: "changed-default-price" })).rejects.toMatchObject({ code: "DROPSHIP_LISTING_PRICE_VERSION_CONFLICT" });
+    expect(repository.lastCreatedInput).toBeNull();
+  });
+
+  it("rejects partial revision maps and hashes a reset even if its effective price stays the same", async () => {
+    const request = { storeConnectionId: 22, productVariantIds: [101] };
+    const initial = await service.previewForMember("member-1", request);
+    repository.savedPrices = [{ productVariantId: 101, revisionId: 8, overridePriceCents: null, updatedAt: now.toISOString() }];
+    const reset = await service.previewForMember("member-1", request);
+    expect(reset.rows[0].priceCents).toBe(initial.rows[0].priceCents);
+    expect(reset.rows[0].previewHash).not.toBe(initial.rows[0].previewHash);
+    await expect(service.createListingPushJobForMember("member-1", { ...request,
+      expectedPriceRevisionIdsByVariantId: {}, idempotencyKey: "partial-price-job" }))
+      .rejects.toMatchObject({ code: "DROPSHIP_LISTING_PRICE_OVERRIDE_INVALID" });
   });
 
   it("carries the catalog product eBay category into preview and listing intent", async () => {
@@ -506,6 +565,17 @@ describe("DropshipListingPreviewService", () => {
       },
     })).rejects.toMatchObject({ code: "DROPSHIP_IDEMPOTENCY_CONFLICT" });
   });
+
+  it("replays unchanged reviewed prices and rejects changes to a retry's review contract", async () => {
+    const request = { storeConnectionId: 22, productVariantIds: [101],
+      expectedPriceRevisionIdsByVariantId: { "101": null },
+      expectedPriceCentsByVariantId: { "101": repository.candidate.defaultRetailPriceCents }, idempotencyKey: "reviewed-retry" };
+    const first = await service.createListingPushJobForMember("member-1", request);
+    const replay = await service.createListingPushJobForMember("member-1", request);
+    expect(replay.job.jobId).toBe(first.job.jobId); expect(replay.idempotentReplay).toBe(true);
+    await expect(service.createListingPushJobForMember("member-1", { ...request, expectedPriceCentsByVariantId: undefined }))
+      .rejects.toMatchObject({ code: "DROPSHIP_IDEMPOTENCY_CONFLICT" });
+  });
 });
 
 class FakeVendorProvisioningService {
@@ -525,6 +595,9 @@ class FakeAtpProvider implements DropshipAtpProvider {
 }
 
 class FakeListingPreviewRepository implements DropshipListingPreviewRepository {
+  savedPrices: SavedListingPriceRevision[] = [];
+  existingListings: DropshipExistingVendorListing[] = [];
+  async listSavedListingPrices(): Promise<SavedListingPriceRevision[]> { return this.savedPrices; }
   candidate = makeCandidate();
   storeCategoryAssignments: Array<{
     productVariantId: number;
@@ -593,7 +666,7 @@ class FakeListingPreviewRepository implements DropshipListingPreviewRepository {
   }
 
   async listExistingListings(): Promise<DropshipExistingVendorListing[]> {
-    return [];
+    return this.existingListings;
   }
 
   async listPricingPolicies(): Promise<DropshipPricingPolicyRecord[]> {
