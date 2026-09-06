@@ -1,3 +1,4 @@
+import { withReceivingUnitVersion } from "./receiving-unit-contract";
 import type { Express } from "express";
 import { procurementStorage } from "../procurement";
 import { catalogStorage } from "../catalog";
@@ -103,7 +104,7 @@ export function registerReceivingRoutes(app: Express) {
       const vendor = order.vendorId ? await storage.getVendorById(order.vendorId) : null;
       console.log("[RECEIVING] Vendor:", vendor ? vendor.name : "none");
       
-      res.json({ ...order, lines, vendor });
+      res.json({ ...order, lines: lines.map(withReceivingUnitVersion), vendor });
     } catch (error: any) {
       console.error("[RECEIVING] Error fetching receiving order:", error?.message || error);
       console.error("[RECEIVING] Stack:", error?.stack);
@@ -212,7 +213,7 @@ export function registerReceivingRoutes(app: Express) {
     try {
       const orderId = parseInt(req.params.orderId);
       const lines = await storage.getReceivingLines(orderId);
-      res.json(lines);
+      res.json(lines.map(withReceivingUnitVersion));
     } catch (error) {
       console.error("Error fetching receiving lines:", error);
       res.status(500).json({ error: "Failed to fetch receiving lines" });
@@ -228,6 +229,7 @@ export function registerReceivingRoutes(app: Express) {
         expectedQty,
         receivedQty,
         productVariantId,
+        expectedUnitsPerVariant,
         productId,
         barcode,
         unitCost,
@@ -252,10 +254,11 @@ export function registerReceivingRoutes(app: Express) {
       const updatedOrder = await rcvService.addLine(orderId, {
         sku: sku || null,
         productName: productName || null,
-        expectedQty: expectedQty || 0,
-        receivedQty: receivedQty || 0,
+        expectedQty: expectedQty ?? 0,
+        receivedQty: receivedQty ?? 0,
         damagedQty: 0,
         productVariantId: productVariantId || null,
+        expectedUnitsPerVariant,
         productId: productId || null,
         barcode: barcode || null,
         unitCost: resolved.cents,
@@ -297,7 +300,7 @@ export function registerReceivingRoutes(app: Express) {
       }
 
       const { receiving: rcvService } = req.app.locals.services;
-      const line = await rcvService.updateLine(lineId, updates);
+      const line = await rcvService.updateLine(lineId, updates, req.session.user?.id ?? null);
       if (!line) {
         return res.status(404).json({ error: "Receiving line not found" });
       }
@@ -309,7 +312,7 @@ export function registerReceivingRoutes(app: Express) {
     }
   });
   
-  // Create a product variant from a receiving line's SKU and link it
+  // Create a catalog variant; linking the receipt requires explicit unit confirmation.
   // Uses the same SKU pattern as Shopify sync: BASE-SKU-[P|B|C]###
   app.post("/api/receiving/lines/:lineId/create-variant", requirePermission("inventory", "create"), async (req, res) => {
     try {
@@ -327,10 +330,10 @@ export function registerReceivingRoutes(app: Express) {
   app.post("/api/receiving/:orderId/complete-all", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
       const { receiving: rcvService } = req.app.locals.services;
-      const result = await rcvService.completeAllLines(parseInt(req.params.orderId));
+      const result = await rcvService.completeAllLines(parseInt(req.params.orderId), req.body, req.session.user?.id ?? null);
       res.json(result);
     } catch (error: any) {
-      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message });
+      if (error.statusCode) return res.status(error.statusCode).json({ error: error.message, ...error.details });
       console.error("Error completing all lines:", error);
       res.status(500).json({ error: "Failed to complete all lines" });
     }

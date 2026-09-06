@@ -394,6 +394,9 @@ export const receivingLines = procurementSchema.table("receiving_lines", {
 
   // PO line linkage
   purchaseOrderLineId: integer("purchase_order_line_id"), // FK to purchase_order_lines (added post-definition)
+  // Frozen receive-unit evidence; legacy rows are intentionally not backfilled.
+  unitsPerVariantSnapshot: integer("units_per_variant_snapshot"),
+  inboundShipmentLineId: integer("inbound_shipment_line_id").references(() => inboundShipmentLines.id, { onDelete: "restrict" }),
 
   // Cost tracking.
   // `unitCost` (cents) is kept for back-compat; `unitCostMills` (4-decimal
@@ -416,7 +419,10 @@ export const receivingLines = procurementSchema.table("receiving_lines", {
   notes: text("notes"),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
+}, (table) => [
+  check("receiving_lines_unit_snapshot_positive_chk", sql`${table.unitsPerVariantSnapshot} IS NULL OR ${table.unitsPerVariantSnapshot} > 0`),
+  index("receiving_lines_inbound_shipment_line_idx").on(table.inboundShipmentLineId).where(sql`${table.inboundShipmentLineId} IS NOT NULL`),
+]);
 
 export const insertReceivingLineSchema = createInsertSchema(receivingLines).omit({
   id: true,

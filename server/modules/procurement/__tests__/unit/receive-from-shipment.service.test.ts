@@ -21,12 +21,14 @@ function sqlToStr(query: any): string {
 function shipmentReceiptDbRows(input: {
   posting?: Record<string, unknown>;
   coverage?: Array<Record<string, unknown>>;
+  poPostings?: Array<Record<string, unknown>>;
+  reversals?: Array<Record<string, unknown>>;
 } = {}) {
   return vi.fn(async (query: any) => {
     const text = sqlToStr(query);
-    if (text.includes("received_base_qty")) {
-      return { rows: input.coverage ?? [] };
-    }
+    if (text.includes("rl.units_per_variant_snapshot")) return { rows: input.coverage ?? [] };
+    if (text.includes("from procurement.po_receipts") && !text.includes("as line_count")) return { rows: input.poPostings ?? [] };
+    if (text.includes("from procurement.receipt_reversals")) return { rows: input.reversals ?? [] };
     if (text.includes("as line_count") && text.includes("po_receipt_count")) {
       return {
         rows: [input.posting ?? {
@@ -47,10 +49,11 @@ function build(overrides: Record<string, any> = {}, dbOverrides: Record<string, 
   const captured: { order: any; lines: any } = { order: null, lines: null };
   const tx = { execute: vi.fn(async (query: any) => {
     const text = sqlToStr(query);
-    return { rows: text.includes("from procurement.inbound_shipments") && text.includes("for update") ? [{ id: 84 }] : [] };
+    if (text.includes("from procurement.inbound_shipments") && text.includes("for update")) return { rows: [{ id: 84 }] };
+    return db.execute(query);
   }) };
   const db: any = {
-    execute: vi.fn(),
+    execute: shipmentReceiptDbRows(),
     select: vi.fn(),
     insert: vi.fn(),
     update: vi.fn(),
@@ -73,13 +76,13 @@ function build(overrides: Record<string, any> = {}, dbOverrides: Record<string, 
     }),
     getReceivingOrdersForPurchaseOrder: vi.fn().mockResolvedValue([]),
     getPurchaseOrderLines: vi.fn().mockResolvedValue([
-      { id: 228, productId: 327, sku: "COGS-TEST-001", productName: "Widget A", unitCostMills: 26000, unitCostCents: 260 },
-      { id: 229, productId: 328, sku: "COGS-TEST-002", productName: "Widget B", unitCostMills: 7867, unitCostCents: 79 },
+      { id: 228, purchaseOrderId: 140, expectedReceiveVariantId: 469, expectedReceiveUnitsPerVariant: 10, productId: 327, sku: "COGS-TEST-001", productName: "Widget A", unitCostMills: 26000, unitCostCents: 260 },
+      { id: 229, purchaseOrderId: 140, expectedReceiveVariantId: 471, expectedReceiveUnitsPerVariant: 50, productId: 328, sku: "COGS-TEST-002", productName: "Widget B", unitCostMills: 7867, unitCostCents: 79 },
     ]),
     getProductVariantsByProductId: vi.fn(async (pid: number) =>
       pid === 327
-        ? [{ id: 467, unitsPerVariant: 1 }, { id: 469, unitsPerVariant: 10 }]
-        : [{ id: 470, unitsPerVariant: 1 }, { id: 471, unitsPerVariant: 50 }]),
+        ? [{ id: 467, productId: 327, unitsPerVariant: 1, isActive: true }, { id: 469, productId: 327, unitsPerVariant: 10, isActive: true }]
+        : [{ id: 470, productId: 328, unitsPerVariant: 1, isActive: true }, { id: 471, productId: 328, unitsPerVariant: 50, isActive: true }]),
     getAllProductLocations: vi.fn().mockResolvedValue([]),
     generateReceiptNumber: vi.fn().mockResolvedValue("RCV-TEST-001"),
     createReceivingOrder: vi.fn(async (o: any) => { captured.order = o; return { id: 999, ...o }; }),
@@ -106,13 +109,13 @@ describe("createReceiptFromShipment", () => {
       poNumber: "PO-20260617-002",
       status: "draft",
     });
-    // Lines: Expected = ceil(qtyShipped / largest-pack units); cost from PO line (mills-first).
+    // Preferred variants divide the exact pieces; each row freezes that factor and shipment-line identity.
     expect(captured.lines).toHaveLength(2);
     expect(captured.lines[0]).toMatchObject({
-      productVariantId: 469, purchaseOrderLineId: 228, expectedQty: 2, unitCostMills: 26000, unitCost: 260,
+      productVariantId: 469, purchaseOrderLineId: 228, inboundShipmentLineId: 1, unitsPerVariantSnapshot: 10, expectedQty: 2, unitCostMills: 26000, unitCost: 260,
     });
     expect(captured.lines[1]).toMatchObject({
-      productVariantId: 471, purchaseOrderLineId: 229, expectedQty: 3, unitCostMills: 7867, unitCost: 79,
+      productVariantId: 471, purchaseOrderLineId: 229, inboundShipmentLineId: 2, unitsPerVariantSnapshot: 50, expectedQty: 3, unitCostMills: 7867, unitCost: 79,
     });
     expect(db.transaction).toHaveBeenCalledOnce();
     expect(storage.generateReceiptNumber).toHaveBeenCalledWith(tx);
@@ -207,7 +210,7 @@ describe("createReceiptFromShipment", () => {
       getPurchaseOrderLines: vi.fn().mockResolvedValue([
         { id: 300, purchaseOrderId: 141, productId: 329, sku: "COGS-TEST-003", productName: "Widget C", unitCostMills: 5000, unitCostCents: 50 },
       ]),
-      getProductVariantsByProductId: vi.fn().mockResolvedValue([{ id: 472, unitsPerVariant: 1 }]),
+      getProductVariantsByProductId: vi.fn().mockResolvedValue([{ id: 472, productId: 329, unitsPerVariant: 1, isActive: true }]),
     });
 
     const order: any = await svc.createReceiptFromShipment(84, "u1", { purchaseOrderId: 141 });
@@ -223,264 +226,79 @@ describe("createReceiptFromShipment", () => {
     expect(captured.lines[0]).toMatchObject({ purchaseOrderLineId: 300, expectedQty: 10 });
   });
 
-  it("uses shipment carton count as expected qty when cartons imply an active receive pack", async () => {
-    const { svc, captured } = build({
-      getInboundShipmentLines: vi.fn().mockResolvedValue([
-        {
-          id: 132,
-          purchaseOrderLineId: 176,
-          purchaseOrderId: 117,
-          productVariantId: null,
-          sku: "SHLZ-TOP-TOB",
-          qtyShipped: 5000,
-          cartonCount: 10,
-        },
-      ]),
-      getPurchaseOrderById: vi.fn().mockResolvedValue({
-        id: 117,
-        poNumber: "PO-20260511-004",
-        vendorId: 2,
-        warehouseId: 1,
-        expectedDeliveryDate: null,
-        confirmedDeliveryDate: null,
-      }),
-      getPurchaseOrderLines: vi.fn().mockResolvedValue([
-        {
-          id: 176,
-          purchaseOrderId: 117,
-          productId: 1,
-          sku: "SHLZ-TOP-TOB",
-          productName: "2\"x3\" Tobacco/Mini Toploader - Blue UV Hint",
-          unitCostMills: 604,
-          unitCostCents: 6,
-        },
-      ]),
-      getProductVariantsByProductId: vi.fn().mockResolvedValue([
-        { id: 1, productId: 1, sku: "SHLZ-TOP-TOB-P25", name: "1 Pack of 25", unitsPerVariant: 25, isActive: true },
-        { id: 500, productId: 1, sku: "SHLZ-TOP-TOB-C500", name: "Case of 500", unitsPerVariant: 500, isActive: true },
-        { id: 2, productId: 1, sku: "SHLZ-TOP-TOB-C1000", name: "Case of 1000", unitsPerVariant: 1000, isActive: true },
-        { id: 213, productId: 1, sku: "SHLZ-TOP-TOB-SK100000", name: "Skid of 10000", unitsPerVariant: 10000, isActive: false },
-      ]),
-    });
-
-    await svc.createReceiptFromShipment(84, "u1", { purchaseOrderId: 117 });
-
+  it("uses the recorded preferred pack independently of physical carton count", async () => {
+    const { svc, captured } = build({ getInboundShipmentLines: vi.fn().mockResolvedValue([
+      { id: 1, purchaseOrderLineId: 228, purchaseOrderId: 140, productVariantId: null, qtyShipped: 5000, cartonCount: 3 },
+    ]) });
+    await svc.createReceiptFromShipment(84, "u1");
     expect(captured.lines).toHaveLength(1);
-    expect(captured.lines[0]).toMatchObject({
-      purchaseOrderLineId: 176,
-      productVariantId: 500,
-      expectedQty: 10,
-    });
+    expect(captured.lines[0]).toMatchObject({ inboundShipmentLineId: 1, productVariantId: 469, expectedQty: 500, unitsPerVariantSnapshot: 10 });
   });
 
-  it("rejects shipment cartons when the implied receive pack has no active variant", async () => {
+  it.each([11, 3])("preserves 501 pieces recorded in %i cartons with a real one-piece variant", async (cartonCount) => {
+    const source = { id: 1, purchaseOrderLineId: 228, purchaseOrderId: 140, productVariantId: null, qtyShipped: 501, cartonCount };
+    const { svc, captured } = build({ getInboundShipmentLines: vi.fn().mockResolvedValue([source]) });
+    await svc.createReceiptFromShipment(84, "u1");
+    expect(captured.lines).toHaveLength(1);
+    expect(captured.lines[0]).toMatchObject({ inboundShipmentLineId: 1, productVariantId: 467, expectedQty: 501, unitsPerVariantSnapshot: 1 });
+    expect(source.cartonCount).toBe(cartonCount);
+    expect(source.qtyShipped).toBe(501);
+  });
+
+  it("fails before writes when a partial preferred pack has no active one-piece variant", async () => {
     const { svc, storage } = build({
-      getInboundShipmentLines: vi.fn().mockResolvedValue([
-        {
-          id: 132,
-          purchaseOrderLineId: 176,
-          purchaseOrderId: 117,
-          productVariantId: null,
-          sku: "SHLZ-TOP-TOB",
-          qtyShipped: 5000,
-          cartonCount: 10,
-        },
-      ]),
-      getPurchaseOrderById: vi.fn().mockResolvedValue({
-        id: 117,
-        poNumber: "PO-20260511-004",
-        vendorId: 2,
-        warehouseId: 1,
-        expectedDeliveryDate: null,
-        confirmedDeliveryDate: null,
-      }),
-      getPurchaseOrderLines: vi.fn().mockResolvedValue([
-        {
-          id: 176,
-          purchaseOrderId: 117,
-          productId: 1,
-          sku: "SHLZ-TOP-TOB",
-          productName: "2\"x3\" Tobacco/Mini Toploader - Blue UV Hint",
-          unitCostMills: 604,
-          unitCostCents: 6,
-        },
-      ]),
+      getInboundShipmentLines: vi.fn().mockResolvedValue([{ id: 1, purchaseOrderLineId: 228, purchaseOrderId: 140, qtyShipped: 501, cartonCount: 11 }]),
       getProductVariantsByProductId: vi.fn().mockResolvedValue([
-        { id: 1, productId: 1, sku: "SHLZ-TOP-TOB-P25", name: "1 Pack of 25", unitsPerVariant: 25, isActive: true },
-        { id: 2, productId: 1, sku: "SHLZ-TOP-TOB-C1000", name: "Case of 1000", unitsPerVariant: 1000, isActive: true },
-        { id: 213, productId: 1, sku: "SHLZ-TOP-TOB-SK100000", name: "Skid of 10000", unitsPerVariant: 10000, isActive: false },
+        { id: 469, productId: 327, unitsPerVariant: 10, isActive: true },
+        { id: 467, productId: 327, unitsPerVariant: 1, isActive: false },
       ]),
     });
-
-    await expect(svc.createReceiptFromShipment(84, "u1", { purchaseOrderId: 117 }))
-      .rejects.toThrow(/units_per_variant=500/);
+    await expect(svc.createReceiptFromShipment(84, "u1")).rejects.toMatchObject({ statusCode: 409, details: { code: "RECEIVING_PIECE_VARIANT_REQUIRED" } });
     expect(storage.createReceivingOrder).not.toHaveBeenCalled();
     expect(storage.bulkCreateReceivingLines).not.toHaveBeenCalled();
   });
 
-  it("reports unresolved shipment receipt packs before receipt creation", async () => {
+  it("shows an actionable missing-piece plan before receipt creation", async () => {
     const { svc, storage } = build({
-      getInboundShipmentLines: vi.fn().mockResolvedValue([
-        {
-          id: 132,
-          purchaseOrderLineId: 176,
-          purchaseOrderId: 117,
-          productVariantId: null,
-          sku: "SHLZ-TOP-TOB",
-          qtyShipped: 5000,
-          cartonCount: 10,
-        },
-      ]),
-      getPurchaseOrderById: vi.fn().mockResolvedValue({
-        id: 117,
-        poNumber: "PO-20260511-004",
-        vendorId: 2,
-        warehouseId: 1,
-        expectedDeliveryDate: null,
-        confirmedDeliveryDate: null,
-      }),
-      getPurchaseOrderLines: vi.fn().mockResolvedValue([
-        {
-          id: 176,
-          purchaseOrderId: 117,
-          productId: 1,
-          sku: "SHLZ-TOP-TOB",
-          productName: "2\"x3\" Tobacco/Mini Toploader - Blue UV Hint",
-          unitCostMills: 604,
-          unitCostCents: 6,
-        },
-      ]),
-      getProductVariantsByProductId: vi.fn().mockResolvedValue([
-        { id: 1, productId: 1, sku: "SHLZ-TOP-TOB-P25", name: "1 Pack of 25", unitsPerVariant: 25, isActive: true },
-        { id: 2, productId: 1, sku: "SHLZ-TOP-TOB-C1000", name: "Case of 1000", unitsPerVariant: 1000, isActive: true },
-        { id: 213, productId: 1, sku: "SHLZ-TOP-TOB-SK100000", name: "Skid of 10000", unitsPerVariant: 10000, isActive: false },
-      ]),
+      getInboundShipmentLines: vi.fn().mockResolvedValue([{ id: 1, purchaseOrderLineId: 228, purchaseOrderId: 140, qtyShipped: 501, cartonCount: 11 }]),
+      getProductVariantsByProductId: vi.fn().mockResolvedValue([{ id: 469, productId: 327, unitsPerVariant: 10, isActive: true }]),
     });
-
-    const resolution: any = await svc.getShipmentReceiptPackResolution(84, { purchaseOrderId: 117 });
-
-    expect(resolution).toMatchObject({
-      shipmentId: 84,
-      purchaseOrderId: 117,
-      canCreateReceipt: false,
-      unresolvedCount: 1,
-      lineCount: 1,
-    });
-    expect(resolution.lines[0]).toMatchObject({
-      shipmentLineId: 132,
-      purchaseOrderLineId: 176,
-      productId: 1,
-      sku: "SHLZ-TOP-TOB",
-      qtyShipped: 5000,
-      cartonCount: 10,
-      unitsPerCarton: 500,
-      status: "missing_variant",
-      blocking: true,
-      matchedVariant: null,
-    });
-    expect(resolution.lines[0].issue).toMatch(/units_per_variant=500/);
-    expect(resolution.lines[0].activeVariants.map((variant: any) => variant.unitsPerVariant)).toEqual([1000, 25]);
+    const resolution = await svc.getShipmentReceiptPackResolution(84, { purchaseOrderId: 140 });
+    expect(resolution).toMatchObject({ canCreateReceipt: false, unresolvedCount: 1, lineCount: 1 });
+    expect(resolution.lines[0]).toMatchObject({ shipmentLineId: 1, status: "missing_piece_variant", blocking: true, receivePlan: null, unitsPerCarton: null });
+    expect(resolution.lines[0].issue).toMatch(/one-piece variant/);
     expect(storage.createReceivingOrder).not.toHaveBeenCalled();
   });
 
-  it("reports shipment receipt packs as creatable when the implied variant is active", async () => {
-    const { svc } = build({
-      getInboundShipmentLines: vi.fn().mockResolvedValue([
-        {
-          id: 132,
-          purchaseOrderLineId: 176,
-          purchaseOrderId: 117,
-          productVariantId: null,
-          sku: "SHLZ-TOP-TOB",
-          qtyShipped: 5000,
-          cartonCount: 10,
-        },
-      ]),
-      getPurchaseOrderById: vi.fn().mockResolvedValue({
-        id: 117,
-        poNumber: "PO-20260511-004",
-        vendorId: 2,
-        warehouseId: 1,
-        expectedDeliveryDate: null,
-        confirmedDeliveryDate: null,
-      }),
-      getPurchaseOrderLines: vi.fn().mockResolvedValue([
-        {
-          id: 176,
-          purchaseOrderId: 117,
-          productId: 1,
-          sku: "SHLZ-TOP-TOB",
-          productName: "2\"x3\" Tobacco/Mini Toploader - Blue UV Hint",
-          unitCostMills: 604,
-          unitCostCents: 6,
-        },
-      ]),
-      getProductVariantsByProductId: vi.fn().mockResolvedValue([
-        { id: 500, productId: 1, sku: "SHLZ-TOP-TOB-C500", name: "Case of 500", unitsPerVariant: 500, isActive: true },
-      ]),
-    });
-
-    const resolution: any = await svc.getShipmentReceiptPackResolution(84, { purchaseOrderId: 117 });
-
+  it("shows the same exact receive plan that receipt creation persists", async () => {
+    const { svc, captured } = build({ getInboundShipmentLines: vi.fn().mockResolvedValue([
+      { id: 1, purchaseOrderLineId: 228, purchaseOrderId: 140, qtyShipped: 501, cartonCount: 3 },
+    ]) });
+    const resolution = await svc.getShipmentReceiptPackResolution(84, { purchaseOrderId: 140 });
     expect(resolution.canCreateReceipt).toBe(true);
-    expect(resolution.unresolvedCount).toBe(0);
-    expect(resolution.lines[0]).toMatchObject({
-      status: "resolved",
-      blocking: false,
-      matchedVariant: {
-        id: 500,
-        sku: "SHLZ-TOP-TOB-C500",
-        unitsPerVariant: 500,
-      },
-    });
+    expect(resolution.lines[0]).toMatchObject({ status: "resolved", blocking: false, unitsPerCarton: null,
+      receivePlan: { productVariantId: 467, expectedQty: 501, unitsPerVariant: 1, countsAsPieces: true, preferredUnitsPerVariant: 10 } });
+    await svc.createReceiptFromShipment(84, "u1");
+    expect(captured.lines[0]).toMatchObject({ productVariantId: resolution.lines[0].receivePlan!.productVariantId,
+      expectedQty: resolution.lines[0].receivePlan!.expectedQty, unitsPerVariantSnapshot: resolution.lines[0].receivePlan!.unitsPerVariant });
   });
 
-  it("does not choose inactive oversized variants when no shipment carton pack exists", async () => {
-    const { svc, captured } = build({
-      getInboundShipmentLines: vi.fn().mockResolvedValue([
-        {
-          id: 132,
-          purchaseOrderLineId: 176,
-          purchaseOrderId: 117,
-          productVariantId: null,
-          sku: "SHLZ-TOP-TOB",
-          qtyShipped: 5000,
-        },
-      ]),
-      getPurchaseOrderById: vi.fn().mockResolvedValue({
-        id: 117,
-        poNumber: "PO-20260511-004",
-        vendorId: 2,
-        warehouseId: 1,
-        expectedDeliveryDate: null,
-        confirmedDeliveryDate: null,
-      }),
-      getPurchaseOrderLines: vi.fn().mockResolvedValue([
-        {
-          id: 176,
-          purchaseOrderId: 117,
-          productId: 1,
-          sku: "SHLZ-TOP-TOB",
-          productName: "2\"x3\" Tobacco/Mini Toploader - Blue UV Hint",
-          unitCostMills: 604,
-          unitCostCents: 6,
-        },
-      ]),
-      getProductVariantsByProductId: vi.fn().mockResolvedValue([
-        { id: 1, productId: 1, sku: "SHLZ-TOP-TOB-P25", name: "1 Pack of 25", unitsPerVariant: 25, isActive: true },
-        { id: 2, productId: 1, sku: "SHLZ-TOP-TOB-C1000", name: "Case of 1000", unitsPerVariant: 1000, isActive: true },
-        { id: 213, productId: 1, sku: "SHLZ-TOP-TOB-SK100000", name: "Skid of 10000", unitsPerVariant: 10000, isActive: false },
-      ]),
+  it("rejects an inactive recorded preferred variant instead of silently selecting another pack", async () => {
+    const { svc, storage } = build({ getProductVariantsByProductId: vi.fn(async (productId: number) =>
+      productId === 327 ? [{ id: 469, productId, unitsPerVariant: 10, isActive: false }, { id: 467, productId, unitsPerVariant: 1, isActive: true }]
+        : [{ id: 471, productId, unitsPerVariant: 50, isActive: true }]),
     });
+    await expect(svc.createReceiptFromShipment(84, "u1")).rejects.toMatchObject({ statusCode: 409, details: { code: "RECEIVING_VARIANT_REVIEW_REQUIRED" } });
+    expect(storage.createReceivingOrder).not.toHaveBeenCalled();
+  });
 
-    await svc.createReceiptFromShipment(84, "u1", { purchaseOrderId: 117 });
-
-    expect(captured.lines).toHaveLength(1);
-    expect(captured.lines[0]).toMatchObject({
-      purchaseOrderLineId: 176,
-      productVariantId: 2,
-      expectedQty: 5,
+  it("rejects a live pack size that disagrees with the PO's recorded preferred units", async () => {
+    const { svc, storage } = build({ getProductVariantsByProductId: vi.fn(async (productId: number) =>
+      productId === 327 ? [{ id: 469, productId, unitsPerVariant: 20, isActive: true }, { id: 467, productId, unitsPerVariant: 1, isActive: true }]
+        : [{ id: 471, productId, unitsPerVariant: 50, isActive: true }]),
     });
+    await expect(svc.createReceiptFromShipment(84, "u1")).rejects.toMatchObject({ statusCode: 409, details: { code: "RECEIVING_UNIT_SOURCE_CHANGED" } });
+    expect(storage.createReceivingOrder).not.toHaveBeenCalled();
   });
 
   it("blocks duplicate shipment receipts after the shipment/PO pair was already closed", async () => {
@@ -491,14 +309,24 @@ describe("createReceiptFromShipment", () => {
     }, {
       execute: shipmentReceiptDbRows({
         coverage: [
-          { purchase_order_line_id: 228, received_base_qty: 20 },
-          { purchase_order_line_id: 229, received_base_qty: 150 },
+          { id: 600, receivingOrderId: 555, purchaseOrderId: 140, inboundShipmentId: 84, receiptStatus: "closed", purchaseOrderLineId: 228, inboundShipmentLineId: 1, unitsPerVariantSnapshot: 10, receivedQty: 2, reversedQty: 0 },
+          { id: 601, receivingOrderId: 555, purchaseOrderId: 140, inboundShipmentId: 84, receiptStatus: "closed", purchaseOrderLineId: 229, inboundShipmentLineId: 2, unitsPerVariantSnapshot: 50, receivedQty: 3, reversedQty: 0 },
         ],
       }),
     });
 
     await expect(svc.createReceiptFromShipment(84, "u1")).rejects.toThrow(/already been received/);
     expect(storage.createReceivingOrder).not.toHaveBeenCalled();
+  });
+
+  it("does not advertise a creatable receipt plan when exact source coverage is complete", async () => {
+    const { svc } = build({}, { execute: shipmentReceiptDbRows({ coverage: [
+      { id: 600, receivingOrderId: 555, purchaseOrderId: 140, inboundShipmentId: 84, receiptStatus: "closed", purchaseOrderLineId: 228, inboundShipmentLineId: 1, unitsPerVariantSnapshot: 10, receivedQty: 2, reversedQty: 0 },
+      { id: 601, receivingOrderId: 555, purchaseOrderId: 140, inboundShipmentId: 84, receiptStatus: "closed", purchaseOrderLineId: 229, inboundShipmentLineId: 2, unitsPerVariantSnapshot: 50, receivedQty: 3, reversedQty: 0 },
+    ] }) });
+    const resolution = await svc.getShipmentReceiptPackResolution(84, { purchaseOrderId: 140 });
+    expect(resolution.lines).toHaveLength(0);
+    expect(resolution.canCreateReceipt).toBe(false);
   });
 
   it("creates a follow-up shipment receipt only for remaining short-received shipment quantity", async () => {
@@ -509,8 +337,8 @@ describe("createReceiptFromShipment", () => {
     }, {
       execute: shipmentReceiptDbRows({
         coverage: [
-          { purchase_order_line_id: 228, received_base_qty: 10 },
-          { purchase_order_line_id: 229, received_base_qty: 150 },
+          { id: 600, receivingOrderId: 555, purchaseOrderId: 140, inboundShipmentId: 84, receiptStatus: "closed", purchaseOrderLineId: 228, inboundShipmentLineId: 1, unitsPerVariantSnapshot: 10, receivedQty: 1, reversedQty: 0 },
+          { id: 601, receivingOrderId: 555, purchaseOrderId: 140, inboundShipmentId: 84, receiptStatus: "closed", purchaseOrderLineId: 229, inboundShipmentLineId: 2, unitsPerVariantSnapshot: 50, receivedQty: 3, reversedQty: 0 },
         ],
       }),
     });
@@ -523,6 +351,37 @@ describe("createReceiptFromShipment", () => {
       productVariantId: 469,
       expectedQty: 1,
     });
+  });
+
+  it("creates the remainder against its exact source when one PO line has multiple shipment lines", async () => {
+    const coverage = [{ id: 600, receivingOrderId: 555, purchaseOrderId: 140, inboundShipmentId: 84, receiptStatus: "closed",
+      purchaseOrderLineId: 228, inboundShipmentLineId: 3, unitsPerVariantSnapshot: 10, receivedQty: 1, reversedQty: 0 }];
+    const { svc, captured } = build({
+      getInboundShipmentLines: vi.fn().mockResolvedValue([
+        { id: 1, purchaseOrderLineId: 228, purchaseOrderId: 140, qtyShipped: 20 },
+        { id: 3, purchaseOrderLineId: 228, purchaseOrderId: 140, qtyShipped: 20 },
+      ]),
+      getReceivingOrdersForPurchaseOrder: vi.fn().mockResolvedValue([{ id: 555, status: "closed", inboundShipmentId: 84, purchaseOrderId: 140 }]),
+    }, { execute: shipmentReceiptDbRows({ coverage }) });
+    await svc.createReceiptFromShipment(84, "u1");
+    expect(captured.lines).toEqual(expect.arrayContaining([
+      expect.objectContaining({ inboundShipmentLineId: 1, expectedQty: 2, unitsPerVariantSnapshot: 10 }),
+      expect.objectContaining({ inboundShipmentLineId: 3, expectedQty: 1, unitsPerVariantSnapshot: 10 }),
+    ]));
+  });
+
+  it("uses immutable reversal base pieces to reopen only the correct shipment remainder", async () => {
+    const { svc, captured } = build({
+      getInboundShipmentLines: vi.fn().mockResolvedValue([{ id: 1, purchaseOrderLineId: 228, purchaseOrderId: 140, qtyShipped: 20 }]),
+      getReceivingOrdersForPurchaseOrder: vi.fn().mockResolvedValue([{ id: 555, status: "closed", inboundShipmentId: 84, purchaseOrderId: 140 }]),
+    }, { execute: shipmentReceiptDbRows({
+      coverage: [{ id: 600, receivingOrderId: 555, purchaseOrderId: 140, inboundShipmentId: 84, receiptStatus: "closed",
+        purchaseOrderLineId: 228, inboundShipmentLineId: 1, unitsPerVariantSnapshot: 10, receivedQty: 2, reversedQty: 1 }],
+      reversals: [{ id: 700, receivingLineId: 600, receivingOrderId: 555, qty: 1, baseUnitsReversed: 10 }],
+    }) });
+    await svc.createReceiptFromShipment(84, "u1");
+    expect(captured.lines).toHaveLength(1);
+    expect(captured.lines[0]).toMatchObject({ inboundShipmentLineId: 1, expectedQty: 1, unitsPerVariantSnapshot: 10 });
   });
 
   it("reports closed zero-post shipment receipts as voidable receive options", async () => {
@@ -581,8 +440,8 @@ describe("createReceiptFromShipment", () => {
     }, {
       execute: shipmentReceiptDbRows({
         coverage: [
-          { purchase_order_line_id: 228, received_base_qty: 10 },
-          { purchase_order_line_id: 229, received_base_qty: 150 },
+          { id: 600, receivingOrderId: 555, purchaseOrderId: 140, inboundShipmentId: 84, receiptStatus: "closed", purchaseOrderLineId: 228, inboundShipmentLineId: 1, unitsPerVariantSnapshot: 10, receivedQty: 1, reversedQty: 0 },
+          { id: 601, receivingOrderId: 555, purchaseOrderId: 140, inboundShipmentId: 84, receiptStatus: "closed", purchaseOrderLineId: 229, inboundShipmentLineId: 2, unitsPerVariantSnapshot: 50, receivedQty: 3, reversedQty: 0 },
         ],
       }),
     });
@@ -741,6 +600,47 @@ describe("createReceiptFromShipment source serialization", () => {
     expect(storage.getInboundShipmentById).toHaveBeenLastCalledWith(84, tx);
     expect(storage.createReceivingOrder).toHaveBeenCalledTimes(1);
     expect(storage.bulkCreateReceivingLines).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a live catalog pack changed after preflight and before the locked write", async () => {
+    const { svc, storage } = build({ getProductVariantsByProductId: vi.fn(async (productId: number, executor?: unknown) =>
+      productId === 327 ? [{ id: 467, productId, unitsPerVariant: 1, isActive: true }, { id: 469, productId, unitsPerVariant: executor ? 20 : 10, isActive: true }]
+        : [{ id: 470, productId, unitsPerVariant: 1, isActive: true }, { id: 471, productId, unitsPerVariant: 50, isActive: true }]),
+    });
+    await expect(svc.createReceiptFromShipment(84)).rejects.toMatchObject({ statusCode: 409, details: { code: "RECEIVING_UNIT_SOURCE_CHANGED" } });
+    expect(storage.createReceivingOrder).not.toHaveBeenCalled();
+  });
+
+  it("rejects a PO source change after preparation even when shipment rows are unchanged", async () => {
+    const { svc, storage } = build();
+    const originalPoLines = await storage.getPurchaseOrderLines(140);
+    storage.getPurchaseOrderLines.mockImplementation(async (_poId: number, executor?: unknown) =>
+      executor ? originalPoLines.map((line: any) => ({ ...line, unitCostMills: line.unitCostMills + 1 })) : originalPoLines);
+    await expect(svc.createReceiptFromShipment(84)).rejects.toMatchObject({ statusCode: 409, details: { code: "RECEIVING_PO_SOURCE_CHANGED" } });
+    expect(storage.createReceivingOrder).not.toHaveBeenCalled();
+  });
+
+  it("rejects a changed PO destination header before persisting stale receipt details", async () => {
+    const { svc, storage } = build();
+    const initialHeader = await storage.getPurchaseOrderById(140);
+    storage.getPurchaseOrderById.mockImplementation(async (_poId: number, executor?: unknown) =>
+      executor ? { ...initialHeader, warehouseId: 2 } : initialHeader);
+    await expect(svc.createReceiptFromShipment(84)).rejects.toMatchObject({ statusCode: 409 });
+    expect(storage.createReceivingOrder).not.toHaveBeenCalled();
+  });
+
+  it("rejects newly closed receipt coverage that appears while the parent lock is acquired", async () => {
+    const { svc, storage, tx } = build();
+    const originalExecute = tx.execute.getMockImplementation()!;
+    tx.execute.mockImplementation(async (query: any) => {
+      if (sqlToStr(query).includes("rl.units_per_variant_snapshot")) {
+        return { rows: [{ id: 600, receivingOrderId: 555, purchaseOrderId: 140, inboundShipmentId: 84, receiptStatus: "closed",
+          purchaseOrderLineId: 228, inboundShipmentLineId: 1, unitsPerVariantSnapshot: 10, receivedQty: 1, reversedQty: 0 }] };
+      }
+      return originalExecute(query);
+    });
+    await expect(svc.createReceiptFromShipment(84)).rejects.toMatchObject({ statusCode: 409, details: { code: "SHIPMENT_RECEIPT_COVERAGE_CHANGED" } });
+    expect(storage.createReceivingOrder).not.toHaveBeenCalled();
   });
 
   it("treats row reordering as the same source snapshot", async () => {

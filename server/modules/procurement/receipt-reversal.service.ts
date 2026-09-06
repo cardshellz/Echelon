@@ -15,8 +15,7 @@
  *      passes allowNegative (elevated-permission override, audited on the
  *      reversal row).
  *   3. Decrements purchase_order_lines.received_qty by qty × units_per_variant
- *      (variant looked up live — same discipline as
- *      purchase-order-receipt-reconciliation.service.ts) and re-evaluates the
+ *      from the frozen receipt or exact original PO posting, and re-evaluates the
  *      PO line status + PO header status (received → partially_received when
  *      warranted).
  *   4. Re-opens AP invoice matching on the PO line when invoice lines were
@@ -28,6 +27,9 @@
  */
 
 import { sql } from "drizzle-orm";
+import { readPostedReceiptUnitEvidence, resolveReceivingUnitSnapshot, ReceivingUnitSnapshotError } from "./receiving-unit-snapshot";
+
+const MAX_RECEIPT_BASE_QUANTITY = 2_147_483_647;
 
 // ── Minimal dependency interfaces (same style as receiving.service.ts) ──────
 
@@ -337,6 +339,7 @@ export class ReceiptReversalService {
         });
       }
 
+      await this.lockReceiptPurchaseSources(tx, receivingOrderId);
       const lineRows = await tx.execute(sql`
         SELECT id, received_qty, reversed_qty
         FROM procurement.receiving_lines
@@ -426,11 +429,36 @@ export class ReceiptReversalService {
 
   // ── Internals ─────────────────────────────────────────────────────────────
 
+  /** Receipt mutations already lock their header first. Acquire all selected
+   * purchase headers, then PO lines, before receipt-line and inventory locks;
+   * shipment capacity commands use this same PO header -> line order. */
+  private async lockReceiptPurchaseSources(tx: any, receivingOrderId: number, receivingLineId?: number): Promise<void> {
+    const lineFilter = receivingLineId === undefined ? sql`TRUE` : sql`rl.id = ${receivingLineId}`;
+    await tx.execute(sql`
+      SELECT po.id FROM procurement.purchase_orders po
+      WHERE po.id IN (
+        SELECT pol.purchase_order_id FROM procurement.receiving_lines rl
+        JOIN procurement.purchase_order_lines pol ON pol.id = rl.purchase_order_line_id
+        WHERE rl.receiving_order_id = ${receivingOrderId} AND ${lineFilter}
+      )
+      ORDER BY po.id FOR UPDATE
+    `);
+    await tx.execute(sql`
+      SELECT pol.id FROM procurement.purchase_order_lines pol
+      WHERE pol.id IN (
+        SELECT rl.purchase_order_line_id FROM procurement.receiving_lines rl
+        WHERE rl.receiving_order_id = ${receivingOrderId} AND ${lineFilter}
+      )
+      ORDER BY pol.id FOR UPDATE
+    `);
+  }
+
   /**
    * Apply one line reversal inside an existing transaction. Returns the
    * reversal row plus the touched PO id (for header re-evaluation by the
    * caller).
    */
+
   private async applyLineReversal(
     tx: any,
     params: {
@@ -446,15 +474,30 @@ export class ReceiptReversalService {
   ): Promise<ReversalLineResult & { purchaseOrderId: number | null }> {
     const { receivingLineId, qty, reason, idempotencyKey, allowNegative, userId } = params;
 
-    // 1. Lock the line + its order. Order must be closed.
+    // Identify without a lock, then take the parent before any child/source lock.
+    const identity = await tx.execute(sql`
+      SELECT receiving_order_id FROM procurement.receiving_lines WHERE id = ${receivingLineId}
+    `);
+    const receivingOrderId = Number(identity.rows?.[0]?.receiving_order_id);
+    if (!Number.isSafeInteger(receivingOrderId) || receivingOrderId <= 0) throw new ReceiptReversalError("Receiving line not found", 404);
+    const parentRows = await tx.execute(sql`
+      SELECT id, status FROM procurement.receiving_orders WHERE id = ${receivingOrderId} FOR UPDATE
+    `);
+    if (parentRows.rows?.[0]?.status !== "closed") throw new ReceiptReversalError("Only closed receiving orders can be reversed", 409, {
+      code: "RECEIPT_NOT_CLOSED", receivingOrderId,
+    });
+    await this.lockReceiptPurchaseSources(tx, receivingOrderId, receivingLineId);
+
+    // 1. Lock and re-read the line after the parent and purchase source locks.
     const lineRows = await tx.execute(sql`
       SELECT rl.id, rl.receiving_order_id, rl.received_qty, rl.reversed_qty,
              rl.product_variant_id, rl.purchase_order_line_id, rl.putaway_location_id,
+             rl.units_per_variant_snapshot,
              ro.status AS order_status, ro.purchase_order_id AS order_po_id,
              ro.receipt_number
       FROM procurement.receiving_lines rl
       JOIN procurement.receiving_orders ro ON ro.id = rl.receiving_order_id
-      WHERE rl.id = ${receivingLineId}
+      WHERE rl.id = ${receivingLineId} AND rl.receiving_order_id = ${receivingOrderId}
       FOR UPDATE OF rl
     `);
     const line = lineRows.rows?.[0];
@@ -493,22 +536,48 @@ export class ReceiptReversalService {
       });
     }
 
-    // 2. Live variant lookup for units_per_variant (same discipline as the
-    //    forward reconciliation path).
-    const variantRows = await tx.execute(sql`
-      SELECT id, units_per_variant
-      FROM catalog.product_variants
-      WHERE id = ${productVariantId}
+    // 2. Unit evidence and PO capacity must be valid before any compensation.
+    const poLineId = Number(line.purchase_order_line_id);
+    const linkedPo = Number.isSafeInteger(poLineId) && poLineId > 0;
+    const poLineRows = linkedPo ? await tx.execute(sql`
+      SELECT id, purchase_order_id, order_qty, received_qty, damaged_qty, cancelled_qty, status
+      FROM procurement.purchase_order_lines WHERE id = ${poLineId} FOR UPDATE
+    `) : { rows: [] };
+    const poLine = poLineRows.rows?.[0];
+    if (linkedPo && !poLine) throw new ReceiptReversalError("The receipt's purchase source is missing. Review its posting before reversing.", 409, {
+      code: "RECEIVING_UNIT_SNAPSHOT_REVIEW_REQUIRED", receivingLineId,
+    });
+    if (poLine && line.order_po_id != null && Number(line.order_po_id) !== Number(poLine.purchase_order_id)) {
+      throw new ReceivingUnitSnapshotError(receivingLineId, "receipt and PO line ownership disagree");
+    }
+    const postedReceipts = await readPostedReceiptUnitEvidence(tx, receivingLineId);
+    if (linkedPo && postedReceipts.length !== 1) throw new ReceivingUnitSnapshotError(receivingLineId, "the linked PO receipt has no unique original posting");
+    const unitsPerVariant = resolveReceivingUnitSnapshot({
+      receivingLineId, receivingOrderId: Number(line.receiving_order_id),
+      purchaseOrderLineId: linkedPo ? poLineId : null,
+      purchaseOrderId: poLine ? Number(poLine.purchase_order_id) : null,
+      receivedQty,
+      unitsPerVariantSnapshot: line.units_per_variant_snapshot,
+      receiptStatus: String(line.order_status),
+      postedReceipts,
+    });
+    const reversalEvidence = await tx.execute(sql`
+      SELECT COALESCE(SUM(qty), 0) AS "reversedQty",
+             COALESCE(SUM(base_units_reversed), 0) AS "reversedBaseQty",
+             COUNT(*) FILTER (WHERE base_units_reversed IS NULL OR base_units_reversed <= 0 OR qty <= 0) AS "invalidRows"
+      FROM procurement.receipt_reversals WHERE receiving_line_id = ${receivingLineId}
     `);
-    const unitsPerVariant = Math.max(1, Number(variantRows.rows?.[0]?.units_per_variant) || 1);
+    const prior = reversalEvidence.rows?.[0];
+    if (!prior || Number(prior.invalidRows) !== 0 || Number(prior.reversedQty) !== reversedQty ||
+        Number(prior.reversedBaseQty) !== reversedQty * unitsPerVariant) {
+      throw new ReceivingUnitSnapshotError(receivingLineId, "prior reversal snapshots disagree with the recorded reversed quantity");
+    }
     const baseUnits = qty * unitsPerVariant;
-    if (!Number.isSafeInteger(baseUnits)) {
-      throw new ReceiptReversalError("Reversal quantity overflows safe integer range", 400, {
-        code: "REVERSAL_QTY_OVERFLOW",
-        receivingLineId,
-        qty,
-        unitsPerVariant,
-      });
+    if (!Number.isSafeInteger(baseUnits) || baseUnits > MAX_RECEIPT_BASE_QUANTITY) throw new ReceiptReversalError("Reversal quantity overflows the supported integer range", 400, {
+      code: "REVERSAL_QTY_OVERFLOW", receivingLineId, qty, unitsPerVariant,
+    });
+    if (poLine && (!Number.isSafeInteger(Number(poLine.received_qty)) || Number(poLine.received_qty) < baseUnits)) {
+      throw new ReceivingUnitSnapshotError(receivingLineId, "the PO received counter is below this reversal's recorded base quantity");
     }
 
     // 3. Increment reversed_qty on the line (additive tally; the only
@@ -612,48 +681,37 @@ export class ReceiptReversalService {
     //    re-evaluate the line status.
     let purchaseOrderId: number | null = null;
     let apReopened = false;
-    const poLineId = Number(line.purchase_order_line_id);
-    if (Number.isSafeInteger(poLineId) && poLineId > 0) {
-      const poLineRows = await tx.execute(sql`
-        SELECT id, purchase_order_id, order_qty, received_qty, damaged_qty,
-               cancelled_qty, status
-        FROM procurement.purchase_order_lines
+    if (poLine) {
+      purchaseOrderId = Number(poLine.purchase_order_id);
+      const currentReceived = Number(poLine.received_qty) || 0;
+      const newReceivedQty = currentReceived - baseUnits;
+      const newStatus = reevaluatePoLineStatusAfterReversal({
+        orderQty: Number(poLine.order_qty) || 0,
+        receivedQty: newReceivedQty,
+        cancelledQty: Number(poLine.cancelled_qty) || 0,
+        currentStatus: String(poLine.status),
+      });
+      await tx.execute(sql`
+        UPDATE procurement.purchase_order_lines
+        SET received_qty = ${newReceivedQty},
+            status = ${newStatus},
+            fully_received_date = CASE WHEN ${newStatus} = 'received' THEN fully_received_date ELSE NULL END,
+            updated_at = NOW()
         WHERE id = ${poLineId}
-        FOR UPDATE
       `);
-      const poLine = poLineRows.rows?.[0];
-      if (poLine) {
-        purchaseOrderId = Number(poLine.purchase_order_id);
-        const currentReceived = Number(poLine.received_qty) || 0;
-        const newReceivedQty = Math.max(0, currentReceived - baseUnits);
-        const newStatus = reevaluatePoLineStatusAfterReversal({
-          orderQty: Number(poLine.order_qty) || 0,
-          receivedQty: newReceivedQty,
-          cancelledQty: Number(poLine.cancelled_qty) || 0,
-          currentStatus: String(poLine.status),
-        });
-        await tx.execute(sql`
-          UPDATE procurement.purchase_order_lines
-          SET received_qty = ${newReceivedQty},
-              status = ${newStatus},
-              fully_received_date = CASE WHEN ${newStatus} = 'received' THEN fully_received_date ELSE NULL END,
-              updated_at = NOW()
-          WHERE id = ${poLineId}
-        `);
 
-        // 7. AP reconciliation: if any vendor invoice lines linked to this PO
-        //    line are already matched, re-open them (match_status → pending)
-        //    and flag the reversal row.
-        const apRows = await tx.execute(sql`
-          UPDATE procurement.vendor_invoice_lines
-          SET match_status = 'pending',
-              updated_at = NOW()
-          WHERE purchase_order_line_id = ${poLineId}
-            AND match_status = 'matched'
-          RETURNING id
-        `);
-        apReopened = (apRows.rows?.length ?? 0) > 0;
-      }
+      // 7. AP reconciliation: if any vendor invoice lines linked to this PO
+      //    line are already matched, re-open them (match_status → pending)
+      //    and flag the reversal row.
+      const apRows = await tx.execute(sql`
+        UPDATE procurement.vendor_invoice_lines
+        SET match_status = 'pending',
+            updated_at = NOW()
+        WHERE purchase_order_line_id = ${poLineId}
+          AND match_status = 'matched'
+        RETURNING id
+      `);
+      apReopened = (apRows.rows?.length ?? 0) > 0;
     }
 
     // 8. Backfill the reversal row with the lot cost snapshot + AP flag.
