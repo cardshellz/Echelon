@@ -19,6 +19,8 @@ import { renderPoHtml } from "./po-document";
 import { inArray } from "drizzle-orm";
 import { db } from "../../db";
 import { createPurchaseWorkspaceRepository } from "./purchase-workspace.repository";
+import { getShippablePurchaseOrderLines, ShipmentSourceCapacityError } from "./shipment-source-capacity";
+import { shipmentLineResourceIdSchema } from "@shared/procurement/shipment-line-command";
 import { createPurchaseWorkspaceService, PurchaseWorkspaceError } from "./purchase-workspace.service";
 import { z } from "zod";
 import { users as identityUsers } from "../../storage/base";
@@ -866,49 +868,17 @@ export function registerPurchaseOrderRoutes(app: Express) {
     }
   });
 
-  // Returns PO lines eligible for shipping with alreadyShippedQty computed.
-  // Filters out non-product lines, closed/cancelled lines, and fully-shipped lines.
+  // Indicative source-capacity snapshot. Mutation commands repeat the same
+  // calculation under shipment/PO locks before accepting quantities.
   app.get("/api/purchase-orders/:id/shippable-lines", requirePermission("purchasing", "view"), async (req, res) => {
     try {
-      const poId = Number(req.params.id);
-      const poLines = await purchasing.getPurchaseOrderLines(poId);
-
-      // Already-shipped qty per PO line, via the shared status-aware tally.
-      // This is the SAME computation the add-lines write path uses, so a
-      // cancelled shipment's lines are excluded here too — otherwise they would
-      // wrongly zero out the remaining qty and hide every line from the modal.
-      const poLineIds = (poLines as any[]).map((l) => l.id);
-      const shippedQtyByPoLine = await shipmentTracking.getShippedQtyByPoLines(poLineIds);
-
-      const result = (poLines as any[])
-        .filter((line) => {
-          // Only product lines
-          const isProduct = !line.lineType || line.lineType === "product";
-          if (!isProduct) return false;
-          // Skip closed/cancelled
-          if (line.status === "closed" || line.status === "cancelled") return false;
-          // Skip fully shipped
-          const orderQty = line.orderQty ?? 0;
-          const cancelledQty = line.cancelledQty ?? 0;
-          const alreadyShipped = shippedQtyByPoLine.get(line.id) ?? 0;
-          const remaining = orderQty - alreadyShipped - cancelledQty;
-          if (remaining <= 0) return false;
-          return true;
-        })
-        .map((line) => {
-          const orderQty = line.orderQty ?? 0;
-          const cancelledQty = line.cancelledQty ?? 0;
-          const alreadyShipped = shippedQtyByPoLine.get(line.id) ?? 0;
-          return {
-            ...line,
-            alreadyShippedQty: alreadyShipped,
-            remainingQty: orderQty - alreadyShipped - cancelledQty,
-          };
-        });
-
-      res.json({ lines: result });
-    } catch (error: any) {
-      res.status(500).json({ error: error.message });
+      const poId = z.string().regex(/^[1-9]\d*$/).transform(Number).pipe(shipmentLineResourceIdSchema).parse(req.params.id);
+      res.json(await getShippablePurchaseOrderLines(db, poId));
+    } catch (error) {
+      if (error instanceof z.ZodError) return res.status(400).json({ code: "SHIPMENT_LINE_SOURCE_IDS_INVALID", error: "Purchase order ID must be a positive PostgreSQL integer." });
+      if (error instanceof ShipmentSourceCapacityError) return res.status(error.statusCode).json({ code: error.details.code, error: error.message, details: error.details });
+      console.error(JSON.stringify({ event: "procurement.shipment_source.read_failed", purchaseOrderId: req.params.id, errorType: error instanceof Error ? error.name : typeof error }));
+      return res.status(500).json({ code: "SHIPMENT_LINE_SOURCE_READ_FAILED", error: "Shipment source quantities could not be loaded. Refresh and try again." });
     }
   });
 

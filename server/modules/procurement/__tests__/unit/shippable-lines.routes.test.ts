@@ -4,21 +4,13 @@ import type { Express, Request, Response, NextFunction } from "express";
 import http from "http";
 import { AddressInfo } from "net";
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Route-level regression test for GET /api/purchase-orders/:id/shippable-lines.
-//
-// The bug this guards against: the endpoint used to tally already-shipped qty
-// from ALL inbound_shipment_lines with no shipment-status filter, so a CANCELLED
-// shipment's lines still counted — zeroing out `remaining` and hiding every line
-// from the Create Shipment modal (button greyed as "all lines shipped") even
-// though nothing was really shipped.
-//
-// The fix routes the tally through the shared, status-aware
-// shipmentTracking.getShippedQtyByPoLines (cancelled excluded), the SAME source
-// the add-lines write path uses. Here we mock that helper and assert the
-// endpoint's remaining-qty math and filtering are correct, and that it no longer
-// uses the old unfiltered getLinesByPo path.
-// ─────────────────────────────────────────────────────────────────────────────
+// Quantity evidence is covered by the source-capacity domain tests. HTTP
+// forwards the shared projection, including separate unknown/review rows.
+const capacityRead = vi.hoisted(() => ({ get: vi.fn() }));
+vi.mock("../../shipment-source-capacity", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../shipment-source-capacity")>(),
+  getShippablePurchaseOrderLines: capacityRead.get,
+}));
 
 vi.mock("../../../../routes/middleware", () => {
   const pass = (req: Request, _res: Response, next: NextFunction) => {
@@ -126,64 +118,49 @@ describe("GET /api/purchase-orders/:id/shippable-lines", () => {
   let server: { url: string; close: () => Promise<void> };
   let purchasing: ReturnType<typeof buildPurchasingMock>;
   let shipmentTracking: { getShippedQtyByPoLines: any; getLinesByPo: any };
+  beforeEach(() => { capacityRead.get.mockReset(); });
+  afterEach(async () => { await server?.close(); });
 
-  afterEach(async () => { await server.close(); });
-
-  async function mount(lines: any[], shippedMap: Map<number, number>) {
+  async function mount(projection: { lines: any[]; reviewRequiredLines?: any[] } = { lines: [] }) {
     purchasing = buildPurchasingMock();
-    purchasing.getPurchaseOrderLines.mockResolvedValue(lines);
-    shipmentTracking = {
-      getShippedQtyByPoLines: vi.fn().mockResolvedValue(shippedMap),
-      // Old, unfiltered path — must NOT be used anymore.
-      getLinesByPo: vi.fn().mockResolvedValue([]),
-    };
+    shipmentTracking = { getShippedQtyByPoLines: vi.fn(), getLinesByPo: vi.fn() };
+    capacityRead.get.mockResolvedValue({ reviewRequiredLines: [], ...projection });
     server = await startServer(buildApp(purchasing, shipmentTracking));
   }
 
-  it("REGRESSION: a line whose only shipment was cancelled (tally returns 0) is offered as shippable", async () => {
-    // The shared tally excludes the cancelled shipment, so shipped = 0.
-    await mount([productLine({ id: 1, orderQty: 300 })], new Map());
-
+  it("forwards shared capacity instead of recomputing an incomplete tally", async () => {
+    const line = productLine({ alreadyShippedQty: 100, directReceivedQty: 50, remainingQty: 150 });
+    await mount({ lines: [line] });
     const { status, body } = await get(server.url, "/api/purchase-orders/112/shippable-lines");
-
     expect(status).toBe(200);
-    expect(body.lines).toHaveLength(1);
-    expect(body.lines[0]).toMatchObject({ id: 1, alreadyShippedQty: 0, remainingQty: 300 });
-    // Delegated to the shared status-aware tally, not the old unfiltered path.
-    expect(shipmentTracking.getShippedQtyByPoLines).toHaveBeenCalledWith([1]);
-    expect(shipmentTracking.getLinesByPo).not.toHaveBeenCalled();
+    expect(body).toEqual({ lines: [line], reviewRequiredLines: [] });
+    expect(capacityRead.get).toHaveBeenCalledWith({}, 112);
+    expect(shipmentTracking.getShippedQtyByPoLines).not.toHaveBeenCalled();
+    expect(purchasing.getPurchaseOrderLines).not.toHaveBeenCalled();
   });
 
-  it("filters out a line that is genuinely fully shipped on a live shipment", async () => {
-    await mount([productLine({ id: 1, orderQty: 300 })], new Map([[1, 300]]));
-
-    const { status, body } = await get(server.url, "/api/purchase-orders/1/shippable-lines");
-
+  it("returns unknown remaining quantities separately from selectable lines", async () => {
+    const review = productLine({ remainingQty: null, code: "SHIPMENT_LINE_SOURCE_REVIEW_REQUIRED", error: "Finish or cancel the direct receipt." });
+    await mount({ lines: [], reviewRequiredLines: [review] });
+    const { status, body } = await get(server.url, "/api/purchase-orders/112/shippable-lines");
     expect(status).toBe(200);
-    expect(body.lines).toHaveLength(0);
+    expect(body.lines).toEqual([]);
+    expect(body.reviewRequiredLines).toEqual([review]);
   });
 
-  it("computes remaining qty from the shared tally (partial shipment)", async () => {
-    await mount([productLine({ id: 1, orderQty: 300 })], new Map([[1, 100]]));
-
-    const { body } = await get(server.url, "/api/purchase-orders/1/shippable-lines");
-
-    expect(body.lines).toHaveLength(1);
-    expect(body.lines[0]).toMatchObject({ alreadyShippedQty: 100, remainingQty: 200 });
+  it.each(["0", "-1", "12garbage", "1.5", "2147483648"])("rejects invalid ID %s before reading", async (id) => {
+    await mount();
+    const { status } = await get(server.url, `/api/purchase-orders/${id}/shippable-lines`);
+    expect(status).toBe(400);
+    expect(capacityRead.get).not.toHaveBeenCalled();
   });
 
-  it("still excludes non-product and closed/cancelled PO lines", async () => {
-    await mount(
-      [
-        productLine({ id: 1, orderQty: 300 }),
-        productLine({ id: 2, lineType: "discount", orderQty: 1 }),
-        productLine({ id: 3, status: "cancelled", orderQty: 50 }),
-      ],
-      new Map(),
-    );
-
-    const { body } = await get(server.url, "/api/purchase-orders/1/shippable-lines");
-
-    expect(body.lines.map((l: any) => l.id)).toEqual([1]);
+  it("does not turn failed reads into empty success or expose raw errors", async () => {
+    await mount();
+    capacityRead.get.mockRejectedValue(new Error("raw database detail"));
+    const { status, body } = await get(server.url, "/api/purchase-orders/112/shippable-lines");
+    expect(status).toBe(500);
+    expect(body.code).toBe("SHIPMENT_LINE_SOURCE_READ_FAILED");
+    expect(JSON.stringify(body)).not.toContain("raw database detail");
   });
 });

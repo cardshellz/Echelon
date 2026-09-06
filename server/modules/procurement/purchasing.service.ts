@@ -12,6 +12,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { shipmentReceiptSourceVersion } from "./shipment-receipt-source-version";
 import { eq, and, sql, inArray, ne, lte, desc, getTableColumns } from "drizzle-orm";
 import {
   inboundShipmentLines,
@@ -243,8 +244,8 @@ interface Storage {
   getReceivingOrderById(id: number, executor?: any): Promise<any>;
 
   // Inbound shipments
-  getInboundShipmentById(id: number): Promise<any>;
-  getInboundShipmentLines(inboundShipmentId: number): Promise<any[]>;
+  getInboundShipmentById(id: number, executor?: any): Promise<any>;
+  getInboundShipmentLines(inboundShipmentId: number, executor?: any): Promise<any[]>;
   getInboundShipmentLinesByPo(purchaseOrderId: number): Promise<any[]>;
 
   // Settings
@@ -4107,6 +4108,7 @@ export function createPurchasingService(
     }
 
     const shipmentLines = await storage.getInboundShipmentLines(inboundShipmentId);
+    const preparedShipmentVersion = shipmentReceiptSourceVersion(shipment, shipmentLines);
     const linkedShipmentLines = shipmentLines.filter(
       (sl: any) => Number(sl.qtyShipped) > 0 && sl.purchaseOrderId && sl.purchaseOrderLineId,
     );
@@ -4352,6 +4354,30 @@ export function createPurchasingService(
 
     try {
       return await db.transaction(async (tx: any) => {
+        // Shipment line commands and close take this same parent lock first.
+        // Preparation above may have raced an edit; compare its raw source
+        // snapshot under the lock before writing any receiving records.
+        const shipmentLock = await tx.execute(sql`
+          SELECT id FROM procurement.inbound_shipments
+          WHERE id = ${inboundShipmentId}
+          FOR UPDATE
+        `);
+        if (!shipmentLock.rows?.some((row: any) => Number(row.id) === inboundShipmentId)) {
+          throw new PurchasingError("Inbound shipment not found", 404);
+        }
+        const lockedShipment = await storage.getInboundShipmentById(inboundShipmentId, tx);
+        if (!lockedShipment) throw new PurchasingError("Inbound shipment not found", 404);
+        const lockedShipmentLines = await storage.getInboundShipmentLines(inboundShipmentId, tx);
+        if (shipmentReceiptSourceVersion(lockedShipment, lockedShipmentLines) !== preparedShipmentVersion) {
+          throw new PurchasingError(
+            "Shipment details changed while the receipt was being prepared. Refresh the shipment, review its current quantities, and create the receipt again.",
+            409,
+            { code: "SHIPMENT_RECEIPT_SOURCE_CHANGED", inboundShipmentId },
+          );
+        }
+        if (!RECEIVABLE_SHIPMENT_STATUSES.has(lockedShipment.status)) {
+          throw new PurchasingError(`Cannot receive a shipment in '${lockedShipment.status}' status`, 409);
+        }
         if (typeof tx.execute === "function") {
           await tx.execute(sql`
             SELECT pg_advisory_xact_lock(
