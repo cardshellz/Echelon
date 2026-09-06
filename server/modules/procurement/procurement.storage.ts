@@ -84,7 +84,7 @@ export interface IProcurementStorage {
   updateReceivingLine(id: number, updates: Partial<InsertReceivingLine>, executor?: any): Promise<ReceivingLine | null>;
   deleteReceivingLine(id: number, executor?: any): Promise<boolean>;
   bulkCreateReceivingLines(lines: InsertReceivingLine[], executor?: any): Promise<ReceivingLine[]>;
-  getVendorProducts(filters?: { vendorId?: number; productId?: number; productVariantId?: number; isActive?: number }): Promise<VendorProduct[]>;
+  getVendorProducts(filters?: { vendorId?: number; productId?: number; productVariantId?: number; isActive?: number }, executor?: any): Promise<VendorProduct[]>;
   getVendorProductsByProductIds(productIds: number[]): Promise<VendorProduct[]>;
   getVendorProductById(id: number): Promise<VendorProduct | undefined>;
   getPreferredVendorProduct(productId: number, productVariantId?: number): Promise<VendorProduct | undefined>;
@@ -173,17 +173,17 @@ export interface IProcurementStorage {
   getInboundShipmentById(id: number, executor?: any): Promise<InboundShipment | undefined>;
   getInboundShipmentByNumber(shipmentNumber: string): Promise<InboundShipment | undefined>;
   createInboundShipment(data: InsertInboundShipment): Promise<InboundShipment>;
-  updateInboundShipment(id: number, updates: Partial<InsertInboundShipment>, executor?: any): Promise<InboundShipment | null>;
+  updateInboundShipment(id: number, updates: Partial<InsertInboundShipment>, executor?: any, recordedAt?: Date): Promise<InboundShipment | null>;
   deleteInboundShipment(id: number, executor?: any): Promise<boolean>;
   generateShipmentNumber(): Promise<string>;
   getInboundShipmentLines(inboundShipmentId: number, executor?: any): Promise<InboundShipmentLine[]>;
-  getInboundShipmentLineById(id: number): Promise<InboundShipmentLine | undefined>;
+  getInboundShipmentLineById(id: number, executor?: any): Promise<InboundShipmentLine | undefined>;
   getInboundShipmentLinesByPo(purchaseOrderId: number): Promise<InboundShipmentLine[]>;
   getShippedQtyByPoLines(poLineIds: number[], executor?: any): Promise<Map<number, number>>;
   createInboundShipmentLine(data: InsertInboundShipmentLine): Promise<InboundShipmentLine>;
-  bulkCreateInboundShipmentLines(lines: InsertInboundShipmentLine[]): Promise<InboundShipmentLine[]>;
-  updateInboundShipmentLine(id: number, updates: Partial<InsertInboundShipmentLine>, executor?: any): Promise<InboundShipmentLine | null>;
-  deleteInboundShipmentLine(id: number): Promise<boolean>;
+  bulkCreateInboundShipmentLines(lines: InsertInboundShipmentLine[], executor?: any, recordedAt?: Date): Promise<InboundShipmentLine[]>;
+  updateInboundShipmentLine(id: number, updates: Partial<InsertInboundShipmentLine>, executor?: any, recordedAt?: Date): Promise<InboundShipmentLine | null>;
+  deleteInboundShipmentLine(id: number, executor?: any): Promise<boolean>;
   getInboundFreightCosts(inboundShipmentId: number, executor?: any): Promise<InboundFreightCost[]>;
   getInboundFreightCostById(id: number, executor?: any): Promise<InboundFreightCost | undefined>;
   createInboundFreightCost(data: InsertInboundFreightCost, executor?: any, recordedAt?: Date): Promise<InboundFreightCost>;
@@ -369,14 +369,14 @@ export const procurementMethods: IProcurementStorage = {
     return await executor.insert(receivingLines).values(lines).returning();
   },
 
-  async getVendorProducts(filters?: { vendorId?: number; productId?: number; productVariantId?: number; isActive?: number }): Promise<VendorProduct[]> {
+  async getVendorProducts(filters?: { vendorId?: number; productId?: number; productVariantId?: number; isActive?: number }, executor: any = db): Promise<VendorProduct[]> {
     const conditions: any[] = [];
     if (filters?.vendorId) conditions.push(eq(vendorProducts.vendorId, filters.vendorId));
     if (filters?.productId) conditions.push(eq(vendorProducts.productId, filters.productId));
     if (filters?.productVariantId) conditions.push(eq(vendorProducts.productVariantId, filters.productVariantId));
     if (filters?.isActive !== undefined) conditions.push(eq(vendorProducts.isActive, filters.isActive));
 
-    let query = db.select().from(vendorProducts).orderBy(desc(vendorProducts.isPreferred), asc(vendorProducts.vendorId));
+    let query = executor.select().from(vendorProducts).orderBy(desc(vendorProducts.isPreferred), asc(vendorProducts.vendorId));
     if (conditions.length > 0) {
       query = query.where(and(...conditions)) as typeof query;
     }
@@ -1085,8 +1085,8 @@ export const procurementMethods: IProcurementStorage = {
     return result[0];
   },
 
-  async updateInboundShipment(id: number, updates: Partial<InsertInboundShipment>, executor: any = db): Promise<InboundShipment | null> {
-    const result = await executor.update(inboundShipments).set({ ...updates, updatedAt: new Date() } as any).where(eq(inboundShipments.id, id)).returning();
+  async updateInboundShipment(id: number, updates: Partial<InsertInboundShipment>, executor: any = db, recordedAt = new Date()): Promise<InboundShipment | null> {
+    const result = await executor.update(inboundShipments).set({ ...updates, updatedAt: recordedAt } as any).where(eq(inboundShipments.id, id)).returning();
     return result[0] || null;
   },
 
@@ -1120,8 +1120,8 @@ export const procurementMethods: IProcurementStorage = {
       .orderBy(asc(inboundShipmentLines.createdAt), asc(inboundShipmentLines.id));
   },
 
-  async getInboundShipmentLineById(id: number): Promise<InboundShipmentLine | undefined> {
-    const result = await db.select().from(inboundShipmentLines).where(eq(inboundShipmentLines.id, id)).limit(1);
+  async getInboundShipmentLineById(id: number, executor: any = db): Promise<InboundShipmentLine | undefined> {
+    const result = await executor.select().from(inboundShipmentLines).where(eq(inboundShipmentLines.id, id)).limit(1);
     return result[0];
   },
 
@@ -1129,18 +1129,11 @@ export const procurementMethods: IProcurementStorage = {
     return await db.select().from(inboundShipmentLines).where(eq(inboundShipmentLines.purchaseOrderId, purchaseOrderId));
   },
 
-  // SINGLE SOURCE OF TRUTH for "how much of each PO line has already shipped".
-  // Both the add-lines write path (validating remaining qty inside its FOR
-  // UPDATE transaction — it passes its `tx` as `executor`) and the
-  // shippable-lines read path (deciding which lines the Create Shipment modal
-  // offers) call this, so the status rule below can never drift between them.
-  //
-  // Cancelled shipments are excluded: their goods never left the origin. Cancel
-  // is a soft status change — the shipment header and its lines are retained for
-  // audit — so every "already shipped" calculation MUST filter them out. Statuses
-  // that represent real movement (closed, delivered, etc.) still count. Add any
-  // future non-counting status to NON_COUNTING_SHIPMENT_STATUSES and every
-  // caller inherits it.
+  // Legacy shipment-only tally for remaining read consumers. Authoritative
+  // command capacity and the shipment chooser use shipment-source-capacity.ts,
+  // which also verifies receipt/reversal evidence and direct PO receipts.
+  // Cancelled headers remain excluded by this legacy projection; this status
+  // alone does not prove that no goods moved or that receipt history is absent.
   async getShippedQtyByPoLines(poLineIds: number[], executor: any = db): Promise<Map<number, number>> {
     const NON_COUNTING_SHIPMENT_STATUSES = ["cancelled"];
     const map = new Map<number, number>();
@@ -1170,18 +1163,18 @@ export const procurementMethods: IProcurementStorage = {
     return result[0];
   },
 
-  async bulkCreateInboundShipmentLines(lines: InsertInboundShipmentLine[]): Promise<InboundShipmentLine[]> {
+  async bulkCreateInboundShipmentLines(lines: InsertInboundShipmentLine[], executor: any = db, recordedAt = new Date()): Promise<InboundShipmentLine[]> {
     if (lines.length === 0) return [];
-    return await db.insert(inboundShipmentLines).values(lines as any).returning();
+    return await executor.insert(inboundShipmentLines).values(lines.map((line) => ({ ...line, createdAt: recordedAt, updatedAt: recordedAt })) as any).returning();
   },
 
-  async updateInboundShipmentLine(id: number, updates: Partial<InsertInboundShipmentLine>, executor: any = db): Promise<InboundShipmentLine | null> {
-    const result = await executor.update(inboundShipmentLines).set({ ...updates, updatedAt: new Date() } as any).where(eq(inboundShipmentLines.id, id)).returning();
+  async updateInboundShipmentLine(id: number, updates: Partial<InsertInboundShipmentLine>, executor: any = db, recordedAt = new Date()): Promise<InboundShipmentLine | null> {
+    const result = await executor.update(inboundShipmentLines).set({ ...updates, updatedAt: recordedAt } as any).where(eq(inboundShipmentLines.id, id)).returning();
     return result[0] || null;
   },
 
-  async deleteInboundShipmentLine(id: number): Promise<boolean> {
-    const result = await db.delete(inboundShipmentLines).where(eq(inboundShipmentLines.id, id)).returning();
+  async deleteInboundShipmentLine(id: number, executor: any = db): Promise<boolean> {
+    const result = await executor.delete(inboundShipmentLines).where(eq(inboundShipmentLines.id, id)).returning();
     return result.length > 0;
   },
 

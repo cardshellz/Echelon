@@ -43,7 +43,7 @@ import {
   type ShipmentReceiptPackResolutionLine,
 } from "@/components/purchasing/ShipmentReceiptPackResolutionDialog";
 import { format } from "date-fns";
-import Papa from "papaparse";
+import { useShipmentLineActions } from "@/features/purchasing/use-shipment-line-actions";
 import {
   ArrowLeft,
   Ship,
@@ -344,8 +344,8 @@ export default function InboundShipmentDetail() {
   // Dialog states
   const [showEditDialog, setShowEditDialog] = useState(false);
   const [showCancelDialog, setShowCancelDialog] = useState(false);
-  const [showAddFromPoDialog, setShowAddFromPoDialog] = useState(false);
-  const [showImportDialog, setShowImportDialog] = useState(false);
+
+
   const [showAddCostDialog, setShowAddCostDialog] = useState(false);
   const [showEditCostDialog, setShowEditCostDialog] = useState(false);
   const [cancelReason, setCancelReason] = useState("");
@@ -363,36 +363,8 @@ export default function InboundShipmentDetail() {
   });
   const resumeShipmentReceiptHandled = useRef<string | null>(null);
 
-  // Edit line dialog state
-  const [editDialogLine, setEditDialogLine] = useState<any | null>(null);
-  const [showDimFixModal, setShowDimFixModal] = useState(false);
-  const [dimFixRows, setDimFixRows] = useState<Array<{ lineId: number; sku: string; lengthCm: string; widthCm: string; heightCm: string; weightPerCarton: string }>>([]);
-  const [lineEditForm, setLineEditForm] = useState({
-    cartonCount: "",
-    qtyShipped: "",
-    weightPerCarton: "",
-    lengthCm: "",
-    widthCm: "",
-    heightCm: "",
-    notes: "",
-  });
-
   // Edit shipment form
   const [editForm, setEditForm] = useState<any>({});
-
-  // Add from PO state
-  const [poSearch, setPoSearch] = useState("");
-  const [poOpen, setPoOpen] = useState(false);
-  const [selectedPoId, setSelectedPoId] = useState<number | null>(null);
-  const [selectedPoLineIds, setSelectedPoLineIds] = useState<number[]>([]);
-
-  // Import packing list state
-  const [importFile, setImportFile] = useState<File | null>(null);
-  const [importParsed, setImportParsed] = useState<any[]>([]);
-  const [importHeaders, setImportHeaders] = useState<string[]>([]);
-  const [importMapping, setImportMapping] = useState<Record<string, string>>({});
-  const [importStep, setImportStep] = useState<"upload" | "map" | "preview">("upload");
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Add cost form
   const [newCost, setNewCost] = useState<ShipmentCostForm>({
@@ -467,16 +439,6 @@ export default function InboundShipmentDetail() {
     enabled: !!shipmentId,
   });
 
-  const { data: posData } = useQuery<any>({
-    queryKey: ["/api/purchase-orders?limit=200"],
-    enabled: showAddFromPoDialog,
-  });
-
-  const { data: selectedPo } = useQuery<any>({
-    queryKey: [`/api/purchase-orders/${selectedPoId}`],
-    enabled: !!selectedPoId,
-  });
-
   const { data: allocationStatus } = useQuery<AllocationStatus>({
     queryKey: shipmentAllocationStatusQueryKey,
     // Loaded whenever the shipment is open so the missing-dimensions banner + fix modal
@@ -508,8 +470,8 @@ export default function InboundShipmentDetail() {
   const costs = shipment?.costs ?? [];
   const paymentStatus = shipment?.paymentStatus ?? null;
   const statusHistory = shipment?.statusHistory ?? [];
-  const purchaseOrders = posData?.pos ?? posData?.purchaseOrders ?? [];
-  const poLines = selectedPo?.lines ?? [];
+
+
   const lineAllocatedTotalCents = lines.reduce(
     (sum: number, line: any) => sum + Number(line.allocatedCostCents || 0),
     0,
@@ -520,27 +482,14 @@ export default function InboundShipmentDetail() {
   );
   const allocationChecksumDeltaCents = allocatableCostTotalCents - lineAllocatedTotalCents;
 
-  // Track which PO line IDs are already on this shipment (for duplicate detection)
-  const existingPoLineIds = new Set(
-    lines.filter((l: any) => l.purchaseOrderLineId).map((l: any) => l.purchaseOrderLineId)
-  );
-  // PO lines not yet added to this shipment
-  const availablePoLines = poLines.filter((l: any) => !existingPoLineIds.has(l.id));
-
   const isEditable = !["closed", "cancelled"].includes(shipment?.status || "");
+  const lineActions = useShipmentLineActions({ shipmentId, navigationIdentity, lines, editable: isEditable });
   const isPreClosed = !["closed", "cancelled"].includes(shipment?.status || "");
 
   // Container utilization
   const containerCapacityCbm = Number(shipment?.containerCapacityCbm || 0);
   const totalGrossVolumeCbm = Number(shipment?.totalGrossVolumeCbm || 0);
   const utilization = containerCapacityCbm > 0 ? (totalGrossVolumeCbm / containerCapacityCbm * 100) : null;
-
-  // ── Filtered POs for typeahead ──
-  const filteredPOs = (Array.isArray(purchaseOrders) ? purchaseOrders : [])
-    .filter((po: any) =>
-      !poSearch || po.poNumber?.toLowerCase().includes(poSearch.toLowerCase())
-    )
-    .slice(0, 50);
 
   // ── Mutations ──
 
@@ -797,84 +746,6 @@ export default function InboundShipmentDetail() {
     },
   });
 
-  // Line mutations
-  const addFromPoMutation = useMutation({
-    mutationFn: async (data: { purchaseOrderId: number; lineIds: number[] }) => {
-      const res = await apiRequest("POST", `/api/inbound-shipments/${shipmentId}/lines/from-po`, data);
-      return res.json();
-    },
-    onSuccess: async () => {
-      await refreshShipmentCostingViews();
-      setShowAddFromPoDialog(false);
-      setSelectedPoId(null);
-      setSelectedPoLineIds([]);
-      setPoSearch("");
-      toast({ title: "Lines added", description: "PO lines added to shipment" });
-    },
-    onError: (err: Error) => {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
-    },
-  });
-
-  const importPackingListMutation = useMutation({
-    mutationFn: async (rows: any[]) => {
-      const res = await apiRequest("POST", `/api/inbound-shipments/${shipmentId}/lines/import-packing-list`, { rows });
-      return res.json();
-    },
-    onSuccess: async (result) => {
-      await refreshShipmentCostingViews();
-      setShowImportDialog(false);
-      resetImportState();
-      toast({ title: "Import complete", description: `${result.imported ?? "Lines"} imported successfully` });
-    },
-    onError: (err: Error) => {
-      toast({ title: "Import failed", description: err.message, variant: "destructive" });
-    },
-  });
-
-  const resolveDimensionsMutation = useMutation({
-    mutationFn: async () => {
-      const res = await apiRequest("POST", `/api/inbound-shipments/${shipmentId}/lines/resolve-dimensions`);
-      return res.json();
-    },
-    onSuccess: async (result) => {
-      await refreshShipmentCostingViews();
-      toast({ title: "Dimensions resolved", description: `${result.resolved ?? "Lines"} updated from product data` });
-    },
-    onError: (err: Error) => {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
-    },
-  });
-
-  const updateLineMutation = useMutation({
-    mutationFn: async ({ lineId, data }: { lineId: number; data: any }) => {
-      const res = await apiRequest("PATCH", `/api/inbound-shipments/lines/${lineId}`, data);
-      return res.json();
-    },
-    onSuccess: async () => {
-      await refreshShipmentCostingViews();
-      setEditDialogLine(null);
-      toast({ title: "Line updated" });
-    },
-    onError: (err: Error) => {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
-    },
-  });
-
-  const deleteLineMutation = useMutation({
-    mutationFn: async (lineId: number) => {
-      const res = await apiRequest("DELETE", `/api/inbound-shipments/lines/${lineId}`);
-      return res.json();
-    },
-    onSuccess: async () => {
-      await refreshShipmentCostingViews();
-      toast({ title: "Line removed" });
-    },
-    onError: (err: Error) => {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
-    },
-  });
-
   // Cost commands retain the submitted version and key until the outcome is known.
   const refreshCostCommandViews = async (originatingShipmentId: number): Promise<boolean> => {
     try {
@@ -1071,165 +942,6 @@ export default function InboundShipmentDetail() {
       toast({ title: "Error", description: err.message, variant: "destructive" });
     },
   });
-
-  // Save the missing-dimensions modal: PATCH each line; the server recomputes
-  // totalVolumeCbm/Weight so the by-volume/by-weight gate clears.
-  const saveDimFixMutation = useMutation({
-    mutationFn: async () => {
-      for (const r of dimFixRows) {
-        await apiRequest("PATCH", `/api/inbound-shipments/lines/${r.lineId}`, {
-          lengthCm: r.lengthCm || null,
-          widthCm: r.widthCm || null,
-          heightCm: r.heightCm || null,
-          weightKg: r.weightPerCarton || null,
-        });
-      }
-    },
-    onSuccess: async () => {
-      await refreshShipmentCostingViews();
-      setShowDimFixModal(false);
-      toast({ title: "Dimensions saved", description: "Lines updated — you can close the shipment now." });
-    },
-    onError: (err: Error) => toast({ title: "Error", description: err.message, variant: "destructive" }),
-  });
-
-  // ── Import helpers ──
-
-  function resetImportState() {
-    setImportFile(null);
-    setImportParsed([]);
-    setImportHeaders([]);
-    setImportMapping({});
-    setImportStep("upload");
-  }
-
-  function handleFileSelect(file: File) {
-    setImportFile(file);
-    Papa.parse(file, {
-      header: true,
-      skipEmptyLines: true,
-      complete: (result) => {
-        if (result.data.length === 0) {
-          toast({ title: "Empty file", description: "No rows found in CSV", variant: "destructive" });
-          return;
-        }
-        const headers = result.meta.fields || [];
-        setImportHeaders(headers);
-        setImportParsed(result.data as any[]);
-        // Auto-map common column names
-        const autoMap: Record<string, string> = {};
-        const mappableFields = ["sku", "qty_shipped", "weight_kg", "length_cm", "width_cm", "height_cm", "carton_count"];
-        for (const field of mappableFields) {
-          const match = headers.find((h: string) =>
-            h.toLowerCase().replace(/[\s\-]/g, "_") === field ||
-            h.toLowerCase().replace(/[\s\-]/g, "_").includes(field.replace(/_/g, ""))
-          );
-          if (match) autoMap[field] = match;
-        }
-        setImportMapping(autoMap);
-        setImportStep("map");
-      },
-      error: (err) => {
-        toast({ title: "Parse error", description: err.message, variant: "destructive" });
-      },
-    });
-  }
-
-  function buildImportRows(): any[] {
-    return importParsed.map((row) => {
-      const mapped: any = {};
-      for (const [field, header] of Object.entries(importMapping)) {
-        if (header && row[header] !== undefined) {
-          mapped[field] = row[header];
-        }
-      }
-      return mapped;
-    });
-  }
-
-  // ── Edit line dialog helpers ──
-
-  function openEditDialog(line: any) {
-    setEditDialogLine(line);
-    setLineEditForm({
-      cartonCount: line.cartonCount != null ? String(line.cartonCount) : "",
-      qtyShipped: String(line.qtyShipped || ""),
-      weightPerCarton: Number(line.weightKg || 0) > 0 ? String(Number(line.weightKg)) : "",
-      lengthCm: line.lengthCm ? String(Number(line.lengthCm)) : "",
-      widthCm: line.widthCm ? String(Number(line.widthCm)) : "",
-      heightCm: line.heightCm ? String(Number(line.heightCm)) : "",
-      notes: line.notes || "",
-    });
-  }
-
-  function computeEditPieces(): number {
-    const upc = editDialogLine?.unitsPerVariant ?? 1;
-    if (upc <= 1) return Number(lineEditForm.qtyShipped) || 0;
-    const cases = Number(lineEditForm.cartonCount) || 0;
-    return cases * upc;
-  }
-
-  function computeEditMultiplier(): number {
-    const cartons = Number(lineEditForm.cartonCount) || 0;
-    return cartons > 0 ? cartons : (Number(lineEditForm.qtyShipped) || 0);
-  }
-
-  function computeEditTotalWeight(): number {
-    return (Number(lineEditForm.weightPerCarton) || 0) * computeEditMultiplier();
-  }
-
-  function computeEditTotalVolume(): number {
-    const l = Number(lineEditForm.lengthCm) || 0;
-    const w = Number(lineEditForm.widthCm) || 0;
-    const h = Number(lineEditForm.heightCm) || 0;
-    return computeEditMultiplier() * (l * w * h) / 1_000_000;
-  }
-
-  function handleSaveLineEdit() {
-    if (!editDialogLine) return;
-    const upc = editDialogLine.unitsPerVariant ?? 1;
-    const cartons = lineEditForm.cartonCount ? Number(lineEditForm.cartonCount) : null;
-    const qtyShipped = upc > 1 ? computeEditPieces() : (Number(lineEditForm.qtyShipped) || editDialogLine.qtyShipped);
-
-    updateLineMutation.mutate({
-      lineId: editDialogLine.id,
-      data: {
-        qtyShipped,
-        cartonCount: cartons,
-        weightKg: lineEditForm.weightPerCarton || null,
-        lengthCm: lineEditForm.lengthCm || null,
-        widthCm: lineEditForm.widthCm || null,
-        heightCm: lineEditForm.heightCm || null,
-        notes: lineEditForm.notes || null,
-      },
-    });
-  }
-
-  // Open the missing-dimensions fix modal, pre-filled with exactly the lines that lack
-  // a dimension required by an in-use dimensional allocation method (mirrors the server gate).
-  function openDimFixModal() {
-    const DIM_METHODS = ["by_volume", "by_weight", "by_chargeable_weight"];
-    const methodsInUse = (allocationStatus?.costs ?? [])
-      .filter((c) => (c.effectiveCents ?? 0) > 0 && DIM_METHODS.includes(c.method))
-      .map((c) => c.method);
-    const needsDims = (l: any) =>
-      methodsInUse.some((m) => {
-        const basis = m === "by_volume" ? Number(l.totalVolumeCbm || 0)
-          : m === "by_weight" ? Number(l.totalWeightKg || 0)
-          : Number(l.chargeableWeightKg || 0);
-        return basis <= 0;
-      });
-    const rows = (lines as any[]).filter(needsDims).map((l) => ({
-      lineId: l.id,
-      sku: l.sku || `line ${l.id}`,
-      lengthCm: l.lengthCm ? String(Number(l.lengthCm)) : "",
-      widthCm: l.widthCm ? String(Number(l.widthCm)) : "",
-      heightCm: l.heightCm ? String(Number(l.heightCm)) : "",
-      weightPerCarton: Number(l.weightKg || 0) > 0 ? String(Number(l.weightKg)) : "",
-    }));
-    setDimFixRows(rows);
-    setShowDimFixModal(true);
-  }
 
   // ── Loading / Not Found ──
 
@@ -1526,7 +1238,7 @@ export default function InboundShipmentDetail() {
 
           {shipment.status === "costing" && (
             <Button
-              onClick={() => closeMutation.mutate({}, { onError: (e: any) => { if (/dimension/i.test(e?.message || "")) openDimFixModal(); } })}
+              onClick={() => closeMutation.mutate({}, { onError: (e: any) => { if (/dimension/i.test(e?.message || "")) lineActions.openDimensions(); } })}
               disabled={closeMutation.isPending}
               className="flex-1 sm:flex-none min-h-[44px]"
             >
@@ -1588,6 +1300,7 @@ export default function InboundShipmentDetail() {
       </div>
 
       {/* ═══════ Tabs ═══════ */}
+      {lineActions.recoveryBanner}
       <Tabs value={activeTab} onValueChange={setActiveTab}>
         <TabsList>
           <TabsTrigger value="lines">Lines ({lines.length})</TabsTrigger>
@@ -1614,17 +1327,17 @@ export default function InboundShipmentDetail() {
                       ))}
                     </ul>
                     <div className="mt-2 flex flex-wrap items-center gap-2">
-                      <Button size="sm" className="bg-red-600 hover:bg-red-700" onClick={openDimFixModal}>
+                      <Button size="sm" className="bg-red-600 hover:bg-red-700" onClick={lineActions.openDimensions} disabled={!isEditable || lineActions.busy}>
                         Enter dimensions
                       </Button>
                       <Button
                         size="sm"
                         variant="outline"
                         className="border-red-300"
-                        onClick={() => resolveDimensionsMutation.mutate()}
-                        disabled={resolveDimensionsMutation.isPending || lines.length === 0}
+                        onClick={() => lineActions.resolve()}
+                        disabled={!isEditable || lineActions.busy || lines.length === 0}
                       >
-                        <RefreshCw className={`h-3.5 w-3.5 mr-1.5 ${resolveDimensionsMutation.isPending ? "animate-spin" : ""}`} />
+                        <RefreshCw className={`h-3.5 w-3.5 mr-1.5 ${lineActions.busy ? "animate-spin" : ""}`} />
                         Resolve from product data
                       </Button>
                     </div>
@@ -1636,27 +1349,21 @@ export default function InboundShipmentDetail() {
 
           {isEditable && (
             <div className="flex gap-2 flex-wrap">
-              <Button variant="outline" onClick={() => {
-                // Auto-select linked PO if shipment was created from one
-                if (shipment?.purchaseOrderId) {
-                  setSelectedPoId(shipment.purchaseOrderId);
-                }
-                setShowAddFromPoDialog(true);
-              }} className="min-h-[44px]">
+              <Button variant="outline" onClick={lineActions.openAdd} className="min-h-[44px]">
                 <Plus className="h-4 w-4 mr-2" />
                 Add from PO
               </Button>
-              <Button variant="outline" onClick={() => { resetImportState(); setShowImportDialog(true); }} className="min-h-[44px]">
+              <Button variant="outline" onClick={lineActions.openImport} className="min-h-[44px]">
                 <Upload className="h-4 w-4 mr-2" />
                 Import Packing List
               </Button>
               <Button
                 variant="outline"
-                onClick={() => resolveDimensionsMutation.mutate()}
-                disabled={resolveDimensionsMutation.isPending || lines.length === 0}
+                onClick={() => lineActions.resolve()}
+                disabled={!isEditable || lineActions.busy || lines.length === 0}
                 className="min-h-[44px]"
               >
-                <RefreshCw className={`h-4 w-4 mr-2 ${resolveDimensionsMutation.isPending ? "animate-spin" : ""}`} />
+                <RefreshCw className={`h-4 w-4 mr-2 ${lineActions.busy ? "animate-spin" : ""}`} />
                 Resolve Dimensions
               </Button>
             </div>
@@ -1674,7 +1381,7 @@ export default function InboundShipmentDetail() {
               lines.map((line: any) => {
                 const upc = line.unitsPerVariant ?? 1;
                 return (
-                  <Card key={line.id} className={isEditable ? "cursor-pointer hover:border-primary/50 transition-colors" : ""} onClick={() => isEditable && openEditDialog(line)}>
+                  <Card key={line.id} className={isEditable ? "cursor-pointer hover:border-primary/50 transition-colors" : ""} onClick={() => isEditable && lineActions.openEditor(line)}>
                     <CardContent className="p-3">
                       <div className="flex items-start justify-between gap-2">
                         <div className="flex-1 min-w-0">
@@ -1697,7 +1404,8 @@ export default function InboundShipmentDetail() {
                             variant="ghost"
                             size="sm"
                             className="min-h-[44px] min-w-[44px] p-0"
-                            onClick={(e) => { e.stopPropagation(); if (confirm("Remove this line?")) deleteLineMutation.mutate(line.id); }}
+                            aria-label="Remove shipment line" disabled={lineActions.busy}
+                            onClick={(e) => { e.stopPropagation(); lineActions.remove(line); }}
                           >
                             <Trash2 className="h-4 w-4 text-red-500" />
                           </Button>
@@ -1756,15 +1464,17 @@ export default function InboundShipmentDetail() {
                               <Button
                                 variant="ghost"
                                 size="sm"
-                                onClick={() => openEditDialog(line)}
+                                aria-label="Edit shipment line"
+                                onClick={() => lineActions.openEditor(line)}
                               >
                                 <Pencil className="h-4 w-4" />
                               </Button>
                               <Button
                                 variant="ghost"
                                 size="sm"
-                                onClick={() => { if (confirm("Remove this line?")) deleteLineMutation.mutate(line.id); }}
-                                disabled={deleteLineMutation.isPending}
+                                aria-label="Remove shipment line"
+                                onClick={() => { lineActions.remove(line); }}
+                                disabled={lineActions.busy}
                               >
                                 <Trash2 className="h-4 w-4 text-red-500" />
                               </Button>
@@ -2672,278 +2382,6 @@ export default function InboundShipmentDetail() {
         </DialogContent>
       </Dialog>
 
-      {/* ═══════ Add from PO Dialog ═══════ */}
-      <Dialog open={showAddFromPoDialog} onOpenChange={(open) => {
-        setShowAddFromPoDialog(open);
-        if (!open) { setSelectedPoId(null); setSelectedPoLineIds([]); setPoSearch(""); }
-      }}>
-        <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle>Add Lines from Purchase Order</DialogTitle>
-            <DialogDescription>
-              {shipment?.purchaseOrderId
-                ? "Select lines from the linked PO to add to this shipment."
-                : "Search for a PO and select lines to add to this shipment."}
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4">
-            {/* PO Search — only show if shipment isn't linked to a PO */}
-            {!shipment?.purchaseOrderId && (
-              <div className="space-y-2">
-                <Label>Purchase Order</Label>
-                <Popover open={poOpen} onOpenChange={setPoOpen}>
-                  <PopoverTrigger asChild>
-                    <Button variant="outline" className="w-full justify-between h-10 font-normal">
-                      {selectedPoId
-                        ? (Array.isArray(purchaseOrders) ? purchaseOrders : []).find((po: any) => po.id === selectedPoId)?.poNumber || `PO #${selectedPoId}`
-                        : "Search PO number..."}
-                      <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
-                    </Button>
-                  </PopoverTrigger>
-                  <PopoverContent className="w-[--radix-popover-trigger-width] p-0" align="start">
-                    <Command shouldFilter={false}>
-                      <CommandInput placeholder="Search PO number..." value={poSearch} onValueChange={setPoSearch} />
-                      <CommandList>
-                        <CommandEmpty>No purchase orders found.</CommandEmpty>
-                        <CommandGroup>
-                          {filteredPOs.map((po: any) => (
-                            <CommandItem
-                              key={po.id}
-                              value={String(po.id)}
-                              onSelect={() => {
-                                setSelectedPoId(po.id);
-                                setSelectedPoLineIds([]);
-                                setPoOpen(false);
-                                setPoSearch("");
-                              }}
-                            >
-                              <Check className={`mr-2 h-4 w-4 ${selectedPoId === po.id ? "opacity-100" : "opacity-0"}`} />
-                              <span className="font-mono text-sm mr-2">{po.poNumber}</span>
-                              <span className="text-muted-foreground text-xs">{po.vendor?.name || po.vendorName || ""}</span>
-                              <Badge variant="outline" className="ml-auto text-xs">{po.status}</Badge>
-                            </CommandItem>
-                          ))}
-                        </CommandGroup>
-                      </CommandList>
-                    </Command>
-                  </PopoverContent>
-                </Popover>
-              </div>
-            )}
-
-            {/* PO Lines selection */}
-            {selectedPoId && (
-              <div className="space-y-2">
-                <div className="flex items-center justify-between">
-                  <Label>Select Lines {availablePoLines.length < poLines.length && `(${poLines.length - availablePoLines.length} already added)`}</Label>
-                  {availablePoLines.length > 0 && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => {
-                        if (selectedPoLineIds.length === availablePoLines.length) {
-                          setSelectedPoLineIds([]);
-                        } else {
-                          setSelectedPoLineIds(availablePoLines.map((l: any) => l.id));
-                        }
-                      }}
-                    >
-                      {selectedPoLineIds.length === availablePoLines.length ? "Deselect All" : "Select All"}
-                    </Button>
-                  )}
-                </div>
-                {availablePoLines.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">
-                    {poLines.length === 0 ? "No lines found for this PO." : "All PO lines have already been added to this shipment."}
-                  </p>
-                ) : (
-                  <div className="border rounded-md divide-y max-h-60 overflow-y-auto">
-                    {availablePoLines.map((line: any) => (
-                      <div
-                        key={line.id}
-                        className="flex items-center gap-3 p-2 hover:bg-muted/50 cursor-pointer"
-                        onClick={() => {
-                          setSelectedPoLineIds((prev) =>
-                            prev.includes(line.id) ? prev.filter((id) => id !== line.id) : [...prev, line.id]
-                          );
-                        }}
-                      >
-                        <Checkbox
-                          checked={selectedPoLineIds.includes(line.id)}
-                          onCheckedChange={(checked) => {
-                            setSelectedPoLineIds((prev) =>
-                              checked ? [...prev, line.id] : prev.filter((id) => id !== line.id)
-                            );
-                          }}
-                        />
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center gap-2">
-                            <span className="font-mono text-sm">{line.sku || "—"}</span>
-                            <span className="text-sm truncate">{line.productName || ""}</span>
-                            {(line.orderQty - (line.receivedQty || 0)) <= 0 && (
-                              <span className="text-xs text-muted-foreground italic">fully received</span>
-                            )}
-                          </div>
-                          <div className="text-xs text-muted-foreground">
-                            {formatCents(line.unitCostCents, { unitCost: true })}/unit
-                            {" · "}
-                            Ordered: {line.orderQty}
-                            {(line.receivedQty || 0) > 0 && ` · Received: ${line.receivedQty}`}
-                            {" · "}
-                            <span className={(line.orderQty - (line.receivedQty || 0)) > 0 ? "text-foreground font-medium" : "text-muted-foreground"}>
-                              Open: {Math.max(0, line.orderQty - (line.receivedQty || 0))}
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-
-            <div className="flex gap-2 justify-end">
-              <Button variant="outline" onClick={() => setShowAddFromPoDialog(false)}>Cancel</Button>
-              <Button
-                onClick={() => {
-                  if (selectedPoId && selectedPoLineIds.length > 0) {
-                    addFromPoMutation.mutate({ purchaseOrderId: selectedPoId, lineIds: selectedPoLineIds });
-                  }
-                }}
-                disabled={!selectedPoId || selectedPoLineIds.length === 0 || addFromPoMutation.isPending}
-              >
-                {addFromPoMutation.isPending ? "Adding..." : `Add ${selectedPoLineIds.length} Line${selectedPoLineIds.length !== 1 ? "s" : ""}`}
-              </Button>
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
-
-      {/* ═══════ Import Packing List Dialog ═══════ */}
-      <Dialog open={showImportDialog} onOpenChange={(open) => { setShowImportDialog(open); if (!open) resetImportState(); }}>
-        <DialogContent className="max-w-2xl max-h-[80vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle>Import Packing List</DialogTitle>
-            <DialogDescription>
-              {importStep === "upload" && "Upload a CSV file with packing list data."}
-              {importStep === "map" && "Map CSV columns to shipment line fields."}
-              {importStep === "preview" && "Review the data before importing."}
-            </DialogDescription>
-          </DialogHeader>
-
-          {importStep === "upload" && (
-            <div className="space-y-4">
-              <div
-                className="border-2 border-dashed rounded-lg p-8 text-center cursor-pointer hover:border-primary/50 transition-colors"
-                onClick={() => fileInputRef.current?.click()}
-              >
-                <Upload className="h-8 w-8 mx-auto text-muted-foreground mb-2" />
-                <p className="text-sm text-muted-foreground">
-                  {importFile ? importFile.name : "Click to select a CSV file"}
-                </p>
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  accept=".csv"
-                  className="hidden"
-                  onChange={(e) => {
-                    const file = e.target.files?.[0];
-                    if (file) handleFileSelect(file);
-                  }}
-                />
-              </div>
-            </div>
-          )}
-
-          {importStep === "map" && (
-            <div className="space-y-4">
-              <p className="text-sm text-muted-foreground">Found {importParsed.length} rows and {importHeaders.length} columns.</p>
-              <div className="grid grid-cols-2 gap-3">
-                {[
-                  { field: "sku", label: "SKU *" },
-                  { field: "qty_shipped", label: "Qty Shipped *" },
-                  { field: "weight_kg", label: "Weight (kg)" },
-                  { field: "length_cm", label: "Length (cm)" },
-                  { field: "width_cm", label: "Width (cm)" },
-                  { field: "height_cm", label: "Height (cm)" },
-                  { field: "gross_volume_cbm", label: "Gross Vol (CBM)" },
-                  { field: "carton_count", label: "Carton Count" },
-                  { field: "pallet_count", label: "Pallet Count" },
-                ].map(({ field, label }) => (
-                  <div key={field} className="space-y-1">
-                    <Label className="text-xs">{label}</Label>
-                    <Select
-                      value={importMapping[field] || ""}
-                      onValueChange={(v) => setImportMapping((prev) => ({ ...prev, [field]: v }))}
-                    >
-                      <SelectTrigger className="h-9">
-                        <SelectValue placeholder="— Skip —" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="__skip__">— Skip —</SelectItem>
-                        {importHeaders.map((h) => (
-                          <SelectItem key={h} value={h}>{h}</SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                ))}
-              </div>
-              <div className="flex gap-2 justify-end">
-                <Button variant="outline" onClick={() => { setImportStep("upload"); }}>Back</Button>
-                <Button
-                  onClick={() => setImportStep("preview")}
-                  disabled={!importMapping.sku || importMapping.sku === "__skip__" || !importMapping.qty_shipped || importMapping.qty_shipped === "__skip__"}
-                >
-                  Preview
-                </Button>
-              </div>
-            </div>
-          )}
-
-          {importStep === "preview" && (
-            <div className="space-y-4">
-              <div className="border rounded-md overflow-x-auto max-h-60">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>SKU</TableHead>
-                      <TableHead className="text-right">Qty</TableHead>
-                      <TableHead className="text-right">Weight</TableHead>
-                      <TableHead className="text-right">Gross Vol</TableHead>
-                      <TableHead className="text-right">Cartons</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {buildImportRows().slice(0, 20).map((row, i) => (
-                      <TableRow key={i}>
-                        <TableCell className="font-mono text-xs">{row.sku || "—"}</TableCell>
-                        <TableCell className="text-right">{row.qty_shipped || "—"}</TableCell>
-                        <TableCell className="text-right">{row.weight_kg || "—"}</TableCell>
-                        <TableCell className="text-right">{row.gross_volume_cbm || "—"}</TableCell>
-                        <TableCell className="text-right">{row.carton_count || "—"}</TableCell>
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </div>
-              {importParsed.length > 20 && (
-                <p className="text-xs text-muted-foreground">Showing first 20 of {importParsed.length} rows.</p>
-              )}
-              <div className="flex gap-2 justify-end">
-                <Button variant="outline" onClick={() => setImportStep("map")}>Back</Button>
-                <Button
-                  onClick={() => importPackingListMutation.mutate(buildImportRows())}
-                  disabled={importPackingListMutation.isPending}
-                >
-                  {importPackingListMutation.isPending ? "Importing..." : `Import ${importParsed.length} Rows`}
-                </Button>
-              </div>
-            </div>
-          )}
-        </DialogContent>
-      </Dialog>
-
       {/* ═══════ Add Cost Dialog ═══════ */}
       <Dialog open={showAddCostDialog} onOpenChange={(open) => { if (!addCostMutation.isPending) setShowAddCostDialog(open); }}>
         <DialogContent className="max-w-md max-h-[90dvh] overflow-y-auto">
@@ -3337,244 +2775,7 @@ export default function InboundShipmentDetail() {
         </DialogContent>
       </Dialog>
 
-      {/* ═══════ Enter Missing Dimensions ═══════ */}
-      <Dialog open={showDimFixModal} onOpenChange={setShowDimFixModal}>
-        <DialogContent className="max-w-2xl">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <AlertTriangle className="h-5 w-5 text-red-600" /> Enter missing dimensions
-            </DialogTitle>
-            <DialogDescription>
-              Freight is allocated by volume / weight, so every line needs dimensions before the shipment can be
-              closed. Enter per-carton values below — totals are recomputed on save.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-3 max-h-[60vh] overflow-y-auto pr-1">
-            {dimFixRows.length === 0 ? (
-              <div className="py-6 text-center text-sm text-muted-foreground">All lines already have dimensions.</div>
-            ) : (
-              dimFixRows.map((row, idx) => {
-                const vol = (Number(row.lengthCm) || 0) * (Number(row.widthCm) || 0) * (Number(row.heightCm) || 0) / 1_000_000;
-                const set = (field: keyof typeof row, value: string) =>
-                  setDimFixRows((rows) => rows.map((r, i) => (i === idx ? { ...r, [field]: value } : r)));
-                return (
-                  <div key={row.lineId} className="rounded-lg border p-3">
-                    <div className="font-mono text-sm font-medium mb-2">{row.sku}</div>
-                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                      <div>
-                        <Label className="text-xs">Length (cm)</Label>
-                        <Input type="number" inputMode="decimal" value={row.lengthCm} onChange={(e) => set("lengthCm", e.target.value)} />
-                      </div>
-                      <div>
-                        <Label className="text-xs">Width (cm)</Label>
-                        <Input type="number" inputMode="decimal" value={row.widthCm} onChange={(e) => set("widthCm", e.target.value)} />
-                      </div>
-                      <div>
-                        <Label className="text-xs">Height (cm)</Label>
-                        <Input type="number" inputMode="decimal" value={row.heightCm} onChange={(e) => set("heightCm", e.target.value)} />
-                      </div>
-                      <div>
-                        <Label className="text-xs">Weight/carton (kg)</Label>
-                        <Input type="number" inputMode="decimal" value={row.weightPerCarton} onChange={(e) => set("weightPerCarton", e.target.value)} />
-                      </div>
-                    </div>
-                    {vol > 0 && <div className="mt-1.5 text-xs text-muted-foreground">Volume/carton: {vol.toFixed(5)} CBM</div>}
-                  </div>
-                );
-              })
-            )}
-          </div>
-          <div className="flex justify-end gap-2 pt-2">
-            <Button variant="outline" onClick={() => setShowDimFixModal(false)}>Cancel</Button>
-            <Button onClick={() => saveDimFixMutation.mutate()} disabled={saveDimFixMutation.isPending || dimFixRows.length === 0}>
-              {saveDimFixMutation.isPending ? "Saving..." : "Save dimensions"}
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
-
-      {/* ═══════ Edit Line Dialog ═══════ */}
-      <Dialog open={!!editDialogLine} onOpenChange={(open) => { if (!open) setEditDialogLine(null); }}>
-        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <Package className="h-5 w-5" />
-              Edit Line — {editDialogLine?.sku || "Unknown"}
-            </DialogTitle>
-            <DialogDescription>
-              {editDialogLine?.productName || "Update shipping quantities, weight, and volume."}
-            </DialogDescription>
-          </DialogHeader>
-
-          {editDialogLine && (() => {
-            const upc = editDialogLine.unitsPerVariant ?? 1;
-            const isCaseSku = upc > 1;
-            const computedPieces = computeEditPieces();
-            const computedWeight = computeEditTotalWeight();
-            const computedVolume = computeEditTotalVolume();
-            const multiplier = computeEditMultiplier();
-
-            return (
-              <div className="space-y-5">
-                {/* Section 1: Shipping Quantity */}
-                <div className="space-y-3">
-                  <h4 className="text-sm font-medium text-muted-foreground uppercase tracking-wide">Shipping Quantity</h4>
-                  {isCaseSku ? (
-                    <div className="space-y-2">
-                      <Label>Cases Shipped</Label>
-                      <Input
-                        type="number"
-                        min="0"
-                        value={lineEditForm.cartonCount}
-                        onChange={(e) => setLineEditForm(prev => ({ ...prev, cartonCount: e.target.value }))}
-                        className="h-10"
-                        placeholder="Number of cases"
-                      />
-                      <p className="text-sm text-muted-foreground">
-                        {"\u00d7"} {upc} pcs/case = <span className="font-mono font-medium text-foreground">{computedPieces.toLocaleString()} pieces</span>
-                      </p>
-                      {editDialogLine.poQtyOrdered != null && (
-                        <p className="text-xs text-muted-foreground">
-                          PO ordered: {editDialogLine.poQtyOrdered.toLocaleString()} pcs
-                          ({Math.ceil(editDialogLine.poQtyOrdered / upc)} cases)
-                        </p>
-                      )}
-                    </div>
-                  ) : (
-                    <div className="space-y-2">
-                      <div className="grid grid-cols-2 gap-4">
-                        <div>
-                          <Label>Qty Shipped (pieces)</Label>
-                          <Input
-                            type="number"
-                            min="0"
-                            value={lineEditForm.qtyShipped}
-                            onChange={(e) => setLineEditForm(prev => ({ ...prev, qtyShipped: e.target.value }))}
-                            className="h-10 mt-1"
-                            placeholder="Pieces"
-                          />
-                        </div>
-                        <div>
-                          <Label>Cartons</Label>
-                          <Input
-                            type="number"
-                            min="0"
-                            value={lineEditForm.cartonCount}
-                            onChange={(e) => setLineEditForm(prev => ({ ...prev, cartonCount: e.target.value }))}
-                            className="h-10 mt-1"
-                            placeholder="Optional"
-                          />
-                        </div>
-                      </div>
-                      {editDialogLine.poQtyOrdered != null && (
-                        <p className="text-xs text-muted-foreground">
-                          PO ordered: {editDialogLine.poQtyOrdered.toLocaleString()} pcs
-                        </p>
-                      )}
-                    </div>
-                  )}
-                </div>
-
-                <Separator />
-
-                {/* Section 2: Carton Specs */}
-                <div className="space-y-3">
-                  <h4 className="text-sm font-medium text-muted-foreground uppercase tracking-wide">Carton Specs</h4>
-                  <div className="space-y-2">
-                    <Label>Weight per Carton (kg)</Label>
-                    <Input
-                      type="number"
-                      step="0.001"
-                      min="0"
-                      value={lineEditForm.weightPerCarton}
-                      onChange={(e) => setLineEditForm(prev => ({ ...prev, weightPerCarton: e.target.value }))}
-                      className="h-10"
-                      placeholder="0.000"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <Label>Carton Dimensions L {"\u00d7"} W {"\u00d7"} H (cm)</Label>
-                    <div className="grid grid-cols-3 gap-2">
-                      <Input
-                        type="number"
-                        step="0.01"
-                        min="0"
-                        value={lineEditForm.lengthCm}
-                        onChange={(e) => setLineEditForm(prev => ({ ...prev, lengthCm: e.target.value }))}
-                        className="h-10"
-                        placeholder="L"
-                      />
-                      <Input
-                        type="number"
-                        step="0.01"
-                        min="0"
-                        value={lineEditForm.widthCm}
-                        onChange={(e) => setLineEditForm(prev => ({ ...prev, widthCm: e.target.value }))}
-                        className="h-10"
-                        placeholder="W"
-                      />
-                      <Input
-                        type="number"
-                        step="0.01"
-                        min="0"
-                        value={lineEditForm.heightCm}
-                        onChange={(e) => setLineEditForm(prev => ({ ...prev, heightCm: e.target.value }))}
-                        className="h-10"
-                        placeholder="H"
-                      />
-                    </div>
-                  </div>
-                  {multiplier > 0 && (Number(lineEditForm.weightPerCarton) > 0 || Number(lineEditForm.lengthCm) > 0) && (
-                    <p className="text-xs text-muted-foreground">
-                      {"\u00d7"} {multiplier} {isCaseSku ? "cases" : "cartons"} = {computedWeight.toFixed(1)} kg net, {computedVolume.toFixed(4)} CBM net
-                    </p>
-                  )}
-                </div>
-
-                <Separator />
-
-                {/* Section 3: Notes */}
-                <div className="space-y-2">
-                  <Label>Notes</Label>
-                  <Textarea
-                    value={lineEditForm.notes}
-                    onChange={(e) => setLineEditForm(prev => ({ ...prev, notes: e.target.value }))}
-                    rows={2}
-                    placeholder="Line notes..."
-                  />
-                </div>
-
-                {/* Summary bar */}
-                <div className="bg-muted/50 rounded-md p-3 text-sm space-y-1">
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">Pieces</span>
-                    <span className="font-mono font-medium">{(isCaseSku ? computedPieces : Number(lineEditForm.qtyShipped) || 0).toLocaleString()}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">Net Weight</span>
-                    <span className="font-mono font-medium">{computedWeight.toFixed(1)} kg</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-muted-foreground">Net CBM</span>
-                    <span className="font-mono font-medium">{computedVolume.toFixed(4)} CBM</span>
-                  </div>
-                </div>
-
-                {/* Actions */}
-                <div className="flex gap-2 justify-end">
-                  <Button variant="outline" onClick={() => setEditDialogLine(null)}>Cancel</Button>
-                  <Button
-                    onClick={handleSaveLineEdit}
-                    disabled={updateLineMutation.isPending}
-                  >
-                    {updateLineMutation.isPending ? "Saving..." : "Save"}
-                  </Button>
-                </div>
-              </div>
-            );
-          })()}
-        </DialogContent>
-      </Dialog>
+      {lineActions.dialogs}
       <ShipmentReceiptPackResolutionDialog
         open={!!shipmentReceiptPackResolution}
         onOpenChange={(open) => {

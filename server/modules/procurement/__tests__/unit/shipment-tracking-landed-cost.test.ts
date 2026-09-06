@@ -1,3 +1,4 @@
+import { shipmentLineVersion } from "../../shipment-line-version";
 import { describe, expect, it, vi } from "vitest";
 import {
   allocateCentsByBasis,
@@ -283,7 +284,7 @@ describe("ShipmentTrackingService.getLandedCostMillsForPoLine", () => {
   });
 });
 
-describe("ShipmentTrackingService.updateLineDimensions", () => {
+describe("ShipmentTrackingService.executeLineCommandInTransaction", () => {
   it("re-runs allocation after line weight changes", async () => {
     const { db, tx } = buildTransactionalDb();
     const originalLine = {
@@ -308,14 +309,18 @@ describe("ShipmentTrackingService.updateLineDimensions", () => {
       getInboundShipmentLineById: vi.fn()
         .mockResolvedValueOnce(originalLine)
         .mockResolvedValueOnce(updatedLine),
-      getInboundShipmentLines: vi.fn().mockResolvedValue([updatedLine]),
+      getInboundShipmentLines: vi.fn().mockResolvedValueOnce([originalLine]).mockResolvedValue([updatedLine]),
       getInboundFreightCosts: vi.fn().mockResolvedValue([
-        { id: 31, costType: "freight", actualCents: 1000, allocationMethod: "by_weight" },
+        { id: 31, costType: "freight", actualCents: 1000, allocationMethod: "by_weight", currency: "USD", exchangeRate: "1" },
       ]),
     });
     const service = createShipmentTrackingService(db as any, storage);
 
-    await service.updateLineDimensions(11, { weightKg: "2" });
+    const now = new Date("2026-09-06T16:00:00.000Z");
+    await service.executeLineCommandInTransaction(tx, {
+      operation: "update", resourceId: 11,
+      body: { expectedVersion: shipmentLineVersion(originalLine as any), weightKg: "2" },
+    }, "operator", now);
 
     expect(storage.deleteAllocationsForShipment).toHaveBeenCalledWith(1, tx);
     expect(storage.bulkCreateInboundFreightCostAllocations).toHaveBeenCalledWith([
@@ -330,7 +335,23 @@ describe("ShipmentTrackingService.updateLineDimensions", () => {
     expect(storage.updateInboundShipmentLine).toHaveBeenCalledWith(11, expect.objectContaining({
       allocatedCostCents: 1000,
       landedUnitCostCents: 100,
-    }), tx);
+    }), tx, now);
+  });
+
+  it("rejects reallocation of an unsupported historical currency basis", async () => {
+    const { db, tx } = buildTransactionalDb();
+    const line = { id: 11, inboundShipmentId: 1, qtyShipped: 5, cartonCount: null, weightKg: "1", totalWeightKg: "5", totalVolumeCbm: "0", chargeableWeightKg: "5" };
+    const storage = buildStorage({
+      getInboundShipmentLineById: vi.fn().mockResolvedValue(line),
+      getInboundShipmentLines: vi.fn().mockResolvedValue([line]),
+      getInboundFreightCosts: vi.fn().mockResolvedValue([{ id: 31, costType: "freight", actualCents: 100, currency: "EUR", exchangeRate: "0.9" }]),
+    });
+    const service = createShipmentTrackingService(db as any, storage);
+    await expect(service.executeLineCommandInTransaction(tx, {
+      operation: "update", resourceId: 11,
+      body: { expectedVersion: shipmentLineVersion(line as any), cartonCount: 5 },
+    }, "operator", new Date("2026-09-06T16:00:00Z"))).rejects.toMatchObject({ details: { code: "SHIPMENT_COST_CURRENCY_UNSUPPORTED" } });
+    expect(storage.deleteAllocationsForShipment).not.toHaveBeenCalled();
   });
 });
 
@@ -767,7 +788,7 @@ describe("ShipmentTrackingService cost mutation integrity", () => {
       expect.objectContaining({ inboundShipmentId: 1, costType: "freight", actualCents: 100 }),
       tx, new Date("2026-09-06T12:00:00.000Z"),
     );
-    expect(storage.updateInboundShipment).toHaveBeenCalledWith(1, expect.any(Object), tx);
+    expect(storage.updateInboundShipment).toHaveBeenCalledWith(1, expect.any(Object), tx, undefined);
     expect(storage.deleteAllocationsForShipment).not.toHaveBeenCalled();
     expect(db.transaction).toHaveBeenCalledTimes(1);
   });

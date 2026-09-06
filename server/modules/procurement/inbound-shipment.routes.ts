@@ -1,3 +1,5 @@
+import { shipmentLineResourceIdSchema } from "@shared/procurement/shipment-line-command";
+import { createShipmentLineCommands, shipmentLineCommandScope, SHIPMENT_LINE_COMMAND_PRINCIPAL, type ShipmentLineCommand } from "./shipment-line-commands";
 import type { Express, Request, Response } from "express";
 import { createShipmentCostCommands, shipmentCostCommandScope, SHIPMENT_COST_COMMAND_PRINCIPAL, type ShipmentCostCommand } from "./shipment-cost-commands";
 import { financialCommandFromRequest } from "../../platform/commands/http-command";
@@ -17,6 +19,7 @@ function getActorId(req: any): string | undefined {
 export function registerInboundShipmentRoutes(app: Express) {
   const { shipmentTracking } = app.locals.services;
   const shipmentCostCommands = createShipmentCostCommands(shipmentTracking);
+  const shipmentLineCommands = createShipmentLineCommands(shipmentTracking);
 
   async function handleCostCommand(req: Request, res: Response, operation: ShipmentCostCommand["operation"]) {
     try {
@@ -47,6 +50,38 @@ export function registerInboundShipmentRoutes(app: Express) {
         databaseCode, errorType: error instanceof Error ? error.name : typeof error,
       }));
       return res.status(500).json({ code: "SHIPMENT_COST_TRANSIENT_FAILURE", error: "The charge command could not be completed. Retry with the same command key." });
+    }
+  }
+
+  async function handleLineCommand(req: Request, res: Response, operation: ShipmentLineCommand["operation"]) {
+    try {
+      const rawId = (operation === "update" || operation === "delete") ? req.params.lineId : req.params.id;
+      const resourceId = z.string().regex(/^[1-9]\d*$/).transform(Number).pipe(shipmentLineResourceIdSchema).parse(rawId);
+      const actorId = getActorId(req);
+      if (!actorId) throw new FinancialCommandError("An authenticated actor is required", 401, "SHIPMENT_LINE_ACTOR_REQUIRED");
+      const descriptor = financialCommandFromRequest(req, {
+        actorType: "service", actorId: SHIPMENT_LINE_COMMAND_PRINCIPAL,
+        ...shipmentLineCommandScope({ operation, resourceId }),
+      });
+      const result = await shipmentLineCommands.execute({ operation, resourceId, body: req.body }, actorId, descriptor);
+      res.setHeader("Idempotency-Replayed", result.replayed ? "true" : "false");
+      return res.status(result.httpStatus).json(result.body);
+    } catch (error) {
+      if (error instanceof FinancialCommandError) {
+        for (const [name, value] of Object.entries(error.responseHeaders ?? {})) res.setHeader(name, value);
+        return res.status(error.statusCode).json({ code: error.code, error: error.message, details: error.details });
+      }
+      if (error instanceof z.ZodError) return res.status(400).json({ code: "SHIPMENT_LINE_ID_INVALID", error: "Line resource ID must be a positive PostgreSQL integer." });
+      const cause = error instanceof Error ? error.cause ?? error : error;
+      const databaseCode = cause && typeof cause === "object" && "code" in cause
+        && typeof cause.code === "string" && /^[A-Z0-9]{5}$/.test(cause.code) ? cause.code : null;
+      console.error(JSON.stringify({
+        event: "procurement.shipment_line.command_failed", operation,
+        resourceId: (operation === "update" || operation === "delete") ? req.params.lineId : req.params.id,
+        actorId: getActorId(req) ?? null, code: "SHIPMENT_LINE_TRANSIENT_FAILURE",
+        databaseCode, errorType: error instanceof Error ? error.name : typeof error,
+      }));
+      return res.status(500).json({ code: "SHIPMENT_LINE_TRANSIENT_FAILURE", error: "The shipment line command could not be completed. Retry with the same command key." });
     }
   }
 
@@ -228,69 +263,11 @@ export function registerInboundShipmentRoutes(app: Express) {
 
   // Shipment lines
 
-  const fromPoBodySchema = z.object({
-    purchaseOrderId: z.number().int().positive(),
-    lineIds: z.array(z.number().int().positive()).optional(),
-    lineSelections: z.array(z.object({ poLineId: z.number().int().positive(), qty: z.number().int().positive() })).optional(),
-  });
-
-  app.post("/api/inbound-shipments/:id/lines/from-po", requirePermission("purchasing", "edit"), async (req, res) => {
-    try {
-      const parsed = fromPoBodySchema.parse(req.body);
-      // New shape: lineSelections with per-line qty. Legacy shape: lineIds uses orderQty.
-      const lines = await shipmentTracking.addLinesFromPO(
-        Number(req.params.id),
-        parsed.purchaseOrderId,
-        parsed.lineSelections,
-        parsed.lineIds,
-      );
-      res.status(201).json(lines);
-    } catch (error: any) {
-      if (error instanceof z.ZodError) return res.status(400).json({ error: "Invalid request body: " + error.errors.map(e => e.message).join(", ") });
-      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  app.post("/api/inbound-shipments/:id/lines/import-packing-list", requirePermission("purchasing", "edit"), async (req, res) => {
-    try {
-      const result = await shipmentTracking.importPackingList(Number(req.params.id), req.body.rows);
-      res.json(result);
-    } catch (error: any) {
-      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  app.post("/api/inbound-shipments/:id/lines/resolve-dimensions", requirePermission("purchasing", "edit"), async (req, res) => {
-    try {
-      const result = await shipmentTracking.resolveDimensionsForShipment(Number(req.params.id));
-      res.json(result);
-    } catch (error: any) {
-      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  app.patch("/api/inbound-shipments/lines/:lineId", requirePermission("purchasing", "edit"), async (req, res) => {
-    try {
-      const line = await shipmentTracking.updateLineDimensions(Number(req.params.lineId), req.body);
-      res.json(line);
-    } catch (error: any) {
-      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
-      res.status(500).json({ error: error.message });
-    }
-  });
-
-  app.delete("/api/inbound-shipments/lines/:lineId", requirePermission("purchasing", "edit"), async (req, res) => {
-    try {
-      await shipmentTracking.removeLine(Number(req.params.lineId));
-      res.json({ success: true });
-    } catch (error: any) {
-      if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
-      res.status(500).json({ error: error.message });
-    }
-  });
+  app.post("/api/inbound-shipments/:id/lines/from-po", requirePermission("purchasing", "edit"), (req, res) => handleLineCommand(req, res, "add-from-po"));
+  app.post("/api/inbound-shipments/:id/lines/import-packing-list", requirePermission("purchasing", "edit"), (req, res) => handleLineCommand(req, res, "import"));
+  app.post("/api/inbound-shipments/:id/lines/resolve-dimensions", requirePermission("purchasing", "edit"), (req, res) => handleLineCommand(req, res, "resolve-dimensions"));
+  app.patch("/api/inbound-shipments/lines/:lineId", requirePermission("purchasing", "edit"), (req, res) => handleLineCommand(req, res, "update"));
+  app.delete("/api/inbound-shipments/lines/:lineId", requirePermission("purchasing", "edit"), (req, res) => handleLineCommand(req, res, "delete"));
 
   // Shipment costs
 

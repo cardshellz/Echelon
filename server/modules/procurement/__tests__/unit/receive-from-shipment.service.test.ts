@@ -45,7 +45,10 @@ function shipmentReceiptDbRows(input: {
 
 function build(overrides: Record<string, any> = {}, dbOverrides: Record<string, any> = {}) {
   const captured: { order: any; lines: any } = { order: null, lines: null };
-  const tx = { execute: vi.fn().mockResolvedValue({ rows: [] }) };
+  const tx = { execute: vi.fn(async (query: any) => {
+    const text = sqlToStr(query);
+    return { rows: text.includes("from procurement.inbound_shipments") && text.includes("for update") ? [{ id: 84 }] : [] };
+  }) };
   const db: any = {
     execute: vi.fn(),
     select: vi.fn(),
@@ -684,5 +687,73 @@ describe("createReceiptFromShipment", () => {
       freightWillCarry: false,
     });
     expect(options.shipmentOptions[0].reason).toMatch(/no lines/i);
+  });
+});
+
+
+describe("createReceiptFromShipment source serialization", () => {
+  const sourceLine = { id: 1, inboundShipmentId: 84, purchaseOrderLineId: 228, purchaseOrderId: 140, productVariantId: null, sku: "WIDGET", qtyShipped: 20 };
+
+  it.each([
+    ["quantity", { qtyShipped: 30 }],
+    ["cartons", { cartonCount: 4 }],
+    ["PO link", { purchaseOrderLineId: 229 }],
+    ["receive variant", { productVariantId: 467 }],
+    ["physical dimensions", { weightKg: "2.5" }],
+  ])("rejects stale receipt creation after a concurrent %s change", async (_name, change) => {
+    const { svc, storage, tx } = build();
+    storage.getInboundShipmentLines.mockResolvedValueOnce([sourceLine]).mockResolvedValue([{ ...sourceLine, ...(change as object) }]);
+    await expect(svc.createReceiptFromShipment(84, "user-1")).rejects.toMatchObject({
+      statusCode: 409, details: { code: "SHIPMENT_RECEIPT_SOURCE_CHANGED", inboundShipmentId: 84 },
+    });
+    expect(storage.getInboundShipmentLines).toHaveBeenLastCalledWith(84, tx);
+    expect(storage.createReceivingOrder).not.toHaveBeenCalled();
+    expect(storage.bulkCreateReceivingLines).not.toHaveBeenCalled();
+  });
+
+  it.each(["added", "removed"])("rejects a concurrently %s shipment line", async (change) => {
+    const { svc, storage } = build();
+    const lockedLines = change === "removed" ? [] : [sourceLine, { ...sourceLine, id: 2, purchaseOrderLineId: 229 }];
+    storage.getInboundShipmentLines.mockResolvedValueOnce([sourceLine]).mockResolvedValue(lockedLines);
+    await expect(svc.createReceiptFromShipment(84)).rejects.toMatchObject({ statusCode: 409, details: { code: "SHIPMENT_RECEIPT_SOURCE_CHANGED" } });
+    expect(storage.createReceivingOrder).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { status: "cancelled" },
+    { warehouseId: 2 },
+    { updatedAt: new Date("2026-09-06T12:00:01Z") },
+  ])("rejects a shipment header changed during preparation: %j", async (change) => {
+    const { svc, storage } = build();
+    const initial = { id: 84, status: "customs_clearance", warehouseId: 1, updatedAt: new Date("2026-09-06T12:00:00Z") };
+    storage.getInboundShipmentById.mockResolvedValueOnce(initial).mockResolvedValue({ ...initial, ...change });
+    await expect(svc.createReceiptFromShipment(84)).rejects.toMatchObject({ statusCode: 409, details: { code: "SHIPMENT_RECEIPT_SOURCE_CHANGED" } });
+    expect(storage.createReceivingOrder).not.toHaveBeenCalled();
+  });
+
+  it("locks shipment before the receipt advisory key and preserves unchanged source quantities", async () => {
+    const { svc, storage, tx } = build();
+    await svc.createReceiptFromShipment(84);
+    const queries = tx.execute.mock.calls.map(([query]: [any]) => sqlToStr(query));
+    expect(queries[0]).toContain("from procurement.inbound_shipments");
+    expect(queries[0]).toContain("for update");
+    expect(queries[1]).toContain("pg_advisory_xact_lock");
+    expect(storage.getInboundShipmentById).toHaveBeenLastCalledWith(84, tx);
+    expect(storage.createReceivingOrder).toHaveBeenCalledTimes(1);
+    expect(storage.bulkCreateReceivingLines).toHaveBeenCalledTimes(1);
+  });
+
+  it("treats row reordering as the same source snapshot", async () => {
+    const { svc, storage } = build();
+    const other = { ...sourceLine, id: 2, purchaseOrderLineId: 229 };
+    storage.getInboundShipmentLines.mockResolvedValueOnce([sourceLine, other]).mockResolvedValue([other, sourceLine]);
+    await expect(svc.createReceiptFromShipment(84)).resolves.toMatchObject({ id: 999 });
+  });
+
+  it("stops when the shipment was deleted before the parent lock", async () => {
+    const { svc, storage, tx } = build();
+    tx.execute.mockResolvedValue({ rows: [] });
+    await expect(svc.createReceiptFromShipment(84)).rejects.toMatchObject({ statusCode: 404 });
+    expect(storage.createReceivingOrder).not.toHaveBeenCalled();
   });
 });

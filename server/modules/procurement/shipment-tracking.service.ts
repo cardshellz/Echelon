@@ -9,6 +9,8 @@
  * Pushes finalized landed costs to inventory lots.
  */
 
+import { createShipmentLineMutationOwner, assertShipmentLineHistoryMutable } from "./shipment-line-mutations.service";
+import { versionShipmentLine } from "./shipment-line-version";
 import type {
   InboundShipment,
   InsertInboundShipment,
@@ -109,18 +111,18 @@ interface Storage {
   getInboundShipmentById(id: number, executor?: any): Promise<InboundShipment | undefined>;
   getInboundShipmentByNumber(shipmentNumber: string): Promise<InboundShipment | undefined>;
   createInboundShipment(data: InsertInboundShipment): Promise<InboundShipment>;
-  updateInboundShipment(id: number, updates: Partial<InsertInboundShipment>, executor?: any): Promise<InboundShipment | null>;
+  updateInboundShipment(id: number, updates: Partial<InsertInboundShipment>, executor?: any, recordedAt?: Date): Promise<InboundShipment | null>;
   deleteInboundShipment(id: number, executor?: any): Promise<boolean>;
   generateShipmentNumber(): Promise<string>;
   // Lines
   getInboundShipmentLines(inboundShipmentId: number, executor?: any): Promise<InboundShipmentLine[]>;
-  getInboundShipmentLineById(id: number): Promise<InboundShipmentLine | undefined>;
+  getInboundShipmentLineById(id: number, executor?: any): Promise<InboundShipmentLine | undefined>;
   getInboundShipmentLinesByPo(purchaseOrderId: number): Promise<InboundShipmentLine[]>;
   getShippedQtyByPoLines(poLineIds: number[], executor?: any): Promise<Map<number, number>>;
   createInboundShipmentLine(data: InsertInboundShipmentLine): Promise<InboundShipmentLine>;
-  bulkCreateInboundShipmentLines(lines: InsertInboundShipmentLine[]): Promise<InboundShipmentLine[]>;
-  updateInboundShipmentLine(id: number, updates: Partial<InsertInboundShipmentLine>, executor?: any): Promise<InboundShipmentLine | null>;
-  deleteInboundShipmentLine(id: number): Promise<boolean>;
+  bulkCreateInboundShipmentLines(lines: InsertInboundShipmentLine[], executor?: any, recordedAt?: Date): Promise<InboundShipmentLine[]>;
+  updateInboundShipmentLine(id: number, updates: Partial<InsertInboundShipmentLine>, executor?: any, recordedAt?: Date): Promise<InboundShipmentLine | null>;
+  deleteInboundShipmentLine(id: number, executor?: any): Promise<boolean>;
   // Costs
   getInboundFreightCosts(inboundShipmentId: number, executor?: any): Promise<InboundFreightCost[]>;
   getInboundFreightCostById(id: number, executor?: any): Promise<InboundFreightCost | undefined>;
@@ -147,11 +149,11 @@ interface Storage {
   getInboundShipmentsByPo(purchaseOrderId: number): Promise<InboundShipment[]>;
   getProvisionalLotsByShipment(inboundShipmentId: number, executor?: any): Promise<InventoryLot[]>;
   // PO references
-  getPurchaseOrderById(id: number): Promise<any>;
-  getPurchaseOrderLines(purchaseOrderId: number): Promise<any[]>;
+  getPurchaseOrderById(id: number, executor?: any): Promise<any>;
+  getPurchaseOrderLines(purchaseOrderId: number, executor?: any): Promise<any[]>;
   getPurchaseOrderLineById(id: number, executor?: any): Promise<any>;
   // Vendor product dimensions
-  getVendorProducts(filters?: any): Promise<any[]>;
+  getVendorProducts(filters?: any, executor?: any): Promise<any[]>;
   // Product variant + product lookups
   getProductVariantById(id: number, executor?: any): Promise<any>;
   getProductById(id: number): Promise<any>;
@@ -282,40 +284,6 @@ const COST_TYPE_ALLOCATION_OVERRIDES: Record<string, string> = {
   platform_fee: "by_line_count",
 };
 
-function positiveIntegerOrNull(value: unknown): number | null {
-  const numberValue = Number(value);
-  if (!Number.isInteger(numberValue) || numberValue <= 0) return null;
-  return numberValue;
-}
-
-function firstPositiveInteger(...values: unknown[]): number | null {
-  for (const value of values) {
-    const numberValue = positiveIntegerOrNull(value);
-    if (numberValue !== null) return numberValue;
-  }
-  return null;
-}
-
-function getReceiveVariantId(row: any): number | null {
-  return firstPositiveInteger(
-    row?.expectedReceiveVariantId,
-    row?.expected_receive_variant_id,
-    row?.productVariantId,
-    row?.product_variant_id,
-  );
-}
-
-function getReceiveUnitsPerVariant(row: any): number | null {
-  return firstPositiveInteger(
-    row?.expectedReceiveUnitsPerVariant,
-    row?.expected_receive_units_per_variant,
-    row?.unitsPerUom,
-    row?.units_per_uom,
-  );
-}
-
-// ── Service factory ─────────────────────────────────────────────────
-
 export type ShipmentTrackingService = ReturnType<typeof createShipmentTrackingService>;
 
 export function createShipmentTrackingService(
@@ -441,19 +409,19 @@ export function createShipmentTrackingService(
     else await storage.createInboundShipmentStatusHistory(entry);
   }
 
-  async function recomputeShipmentTotals(shipmentId: number, executor?: any) {
+  async function recomputeShipmentTotals(shipmentId: number, executor?: any, recordedAt?: Date) {
     const lines = await storage.getInboundShipmentLines(shipmentId, executor);
     const costs = await storage.getInboundFreightCosts(shipmentId, executor);
 
     // Aggregate NET totals from lines (weight/volume computed from per-carton values × cartonCount)
-    let totalWeightKg = 0;
-    let totalVolumeCbm = 0;
+    let totalWeightKg = new Decimal(0);
+    let totalVolumeCbm = new Decimal(0);
     let totalPieces = 0;
     let totalCartons = 0;
 
     for (const line of lines) {
-      totalWeightKg += Number(line.totalWeightKg || 0);
-      totalVolumeCbm += Number(line.totalVolumeCbm || 0);
+      totalWeightKg = totalWeightKg.plus(line.totalWeightKg ?? "0");
+      totalVolumeCbm = totalVolumeCbm.plus(line.totalVolumeCbm ?? "0");
       totalPieces += line.qtyShipped;
       totalCartons += line.cartonCount || 0;
     }
@@ -479,19 +447,20 @@ export function createShipmentTrackingService(
 
     // NOTE: grossWeightKg, totalGrossVolumeCbm, palletCount are user-entered at shipment level (from BOL) — never overwritten here
     await storage.updateInboundShipment(shipmentId, {
-      totalWeightKg: String(totalWeightKg),
-      totalVolumeCbm: String(totalVolumeCbm),
+      totalWeightKg: totalWeightKg.toFixed(),
+      totalVolumeCbm: totalVolumeCbm.toFixed(),
       totalPieces,
       totalCartons,
       estimatedTotalCostCents,
       actualTotalCostCents,
-    } as any, executor);
+    } as any, executor, recordedAt);
   }
 
   async function refreshAllocationsForShipmentInTransaction(
     tx: any,
     shipmentId: number,
     lockedShipment: InboundShipment,
+    recordedAt?: Date,
   ) {
     const lines = await storage.getInboundShipmentLines(shipmentId, tx);
     if (lines.length === 0) {
@@ -499,24 +468,7 @@ export function createShipmentTrackingService(
       return null;
     }
 
-    return await runAllocationInTransaction(tx, shipmentId, lockedShipment);
-  }
-
-  async function refreshAllocationsForShipment(shipmentId: number) {
-    return await runInTransaction(async (tx) => {
-      const shipment = await lockShipment(tx, shipmentId);
-      if (shipment.status === "closed") {
-        throw new ShipmentTrackingError(
-          "Closed shipment costs must be changed through landed-cost finalization so adjustments are recorded",
-          409,
-          { code: "CLOSED_SHIPMENT_ALLOCATION_REQUIRES_FINALIZATION", shipmentId },
-        );
-      }
-      if (shipment.status === "cancelled") {
-        throw new ShipmentTrackingError("Cannot allocate costs for a cancelled shipment");
-      }
-      return await refreshAllocationsForShipmentInTransaction(tx, shipmentId, shipment);
-    });
+    return await runAllocationInTransaction(tx, shipmentId, lockedShipment, recordedAt);
   }
 
   async function getAllocationBreakdownsByLine(shipmentId: number) {
@@ -556,30 +508,6 @@ export function createShipmentTrackingService(
     return breakdowns;
   }
 
-  function computeLineTotals(line: { qtyShipped: number; cartonCount?: number | null; weightKg?: string | null; lengthCm?: string | null; widthCm?: string | null; heightCm?: string | null }) {
-    // Multiplier: cartonCount for case SKUs (weight/dims are per-carton), qtyShipped for piece items
-    const multiplier = (line.cartonCount && line.cartonCount > 0) ? line.cartonCount : line.qtyShipped;
-    const weightKg = Number(line.weightKg || 0);
-    const lengthCm = Number(line.lengthCm || 0);
-    const widthCm = Number(line.widthCm || 0);
-    const heightCm = Number(line.heightCm || 0);
-
-    const totalWeightKg = multiplier * weightKg;
-    // Net volume: L * W * H in cm → CBM (divide by 1,000,000)
-    const unitVolumeCbm = (lengthCm * widthCm * heightCm) / 1_000_000;
-    const totalVolumeCbm = multiplier * unitVolumeCbm;
-    // Chargeable weight: max(actual, volumetric) — IATA formula: L*W*H / 5000 per unit
-    const volumetricWeightKg = (lengthCm * widthCm * heightCm) / 5000;
-    const chargeableWeightKg = multiplier * Math.max(weightKg, volumetricWeightKg);
-
-    return {
-      totalWeightKg: String(totalWeightKg),
-      totalVolumeCbm: String(totalVolumeCbm),
-      chargeableWeightKg: String(chargeableWeightKg),
-    };
-  }
-
-  // ─── Enrich lines with variant + PO data ────────────────────────
 
   async function getEnrichedLines(shipmentId: number) {
     const lines = await storage.getInboundShipmentLines(shipmentId);
@@ -637,7 +565,7 @@ export function createShipmentTrackingService(
           ? poUnitCostMills + totalAllocatedMillsPerUnit
           : null;
       return {
-        ...line,
+        ...versionShipmentLine(line),
         allocatedCostCents,
         sku: line.sku || pol?.sku || pv?.sku || product?.sku || null,
         unitsPerVariant: pv?.unitsPerVariant ?? 1,
@@ -723,6 +651,12 @@ export function createShipmentTrackingService(
       if (costs.length > 0) {
         throw new ShipmentTrackingError("Remove draft charges individually before deleting this shipment. Invoice-referenced charges must retain their source shipment.", 409, { code: "SHIPMENT_HAS_COST_HISTORY" });
       }
+      await assertShipmentLineHistoryMutable(tx, id);
+      const lines = await storage.getInboundShipmentLines(id, tx);
+      if (lines.length > 0) throw new ShipmentTrackingError(
+        "Remove draft lines individually before deleting the empty shipment so their changes remain audited.",
+        409, { code: "SHIPMENT_HAS_LINE_HISTORY" },
+      );
       return storage.deleteInboundShipment(id, tx);
     });
   }
@@ -842,376 +776,21 @@ export function createShipmentTrackingService(
 
   // ─── Line management ───────────────────────────────────────────
 
-  async function addLinesFromPO(
-    shipmentId: number,
-    purchaseOrderId: number,
-    lineSelections?: Array<{ poLineId: number; qty: number }>,
-    lineIds?: number[],
-  ) {
-    // Pre-flight checks (non-locked reads OK — shipment status is not contended)
-    const shipment = await getShipment(shipmentId);
-    if (shipment.status === "closed" || shipment.status === "cancelled") {
-      throw new ShipmentTrackingError("Cannot add lines to a closed or cancelled shipment");
-    }
-
-    const po = await storage.getPurchaseOrderById(purchaseOrderId);
-    if (!po) throw new ShipmentTrackingError("Purchase order not found", 404);
-
-    const poLines = await storage.getPurchaseOrderLines(purchaseOrderId);
-
-    // Build qty map from lineSelections (new behavior)
-    const qtyMap = new Map<number, number>(); // poLineId -> qty
-    if (lineSelections && lineSelections.length > 0) {
-      for (const sel of lineSelections) {
-        qtyMap.set(sel.poLineId, sel.qty);
-      }
-    }
-
-    // Legacy: lineIds filters to specific lines but uses orderQty
-    const candidateLines = qtyMap.size > 0
-      ? poLines.filter((l: any) => qtyMap.has(l.id))
-      : lineIds
-        ? poLines.filter((l: any) => lineIds.includes(l.id))
-        : poLines;
-
-    const candidateLineIds = candidateLines.map((l: any) => l.id);
-
-    if (candidateLineIds.length === 0) {
-      throw new ShipmentTrackingError("No new PO lines to add");
-    }
-
-    // ── Atomic: lock PO lines, re-read shipped qty, validate, insert ──
-    const created = await db.transaction(async (tx: any) => {
-      // 1. Lock candidate PO lines (serializes concurrent adds on same lines)
-      const lockedRows = await tx.execute(sqlTag`
-        SELECT
-          id,
-          line_type,
-          status,
-          order_qty,
-          cancelled_qty,
-          sku,
-          product_variant_id,
-          expected_receive_variant_id,
-          expected_receive_units_per_variant,
-          units_per_uom
-        FROM procurement.purchase_order_lines
-        WHERE id = ANY(ARRAY[${sqlTag.join(candidateLineIds, sqlTag`, `)}]::integer[])
-        FOR UPDATE
-      `);
-
-      const lockedLines = lockedRows.rows as any[];
-
-      // Deduplicate: skip PO lines already on this shipment
-      const existingOnShipment = await tx.execute(sqlTag`
-        SELECT purchase_order_line_id
-        FROM procurement.inbound_shipment_lines
-        WHERE inbound_shipment_id = ${shipmentId}
-          AND purchase_order_line_id = ANY(ARRAY[${sqlTag.join(candidateLineIds, sqlTag`, `)}]::integer[])
-      `);
-      const existingPoLineIds = new Set(
-        existingOnShipment.rows
-          .map((r: any) => r.purchase_order_line_id)
-          .filter((id: any) => id != null),
-      );
-      // Intersect locked lines with candidates (defense-in-depth; SQL already
-      // filters by candidateLineIds, but this guards against any edge case)
-      const candidateIdSet = new Set(candidateLineIds);
-      const linesToAdd = lockedLines.filter(
-        (l: any) => candidateIdSet.has(l.id) && !existingPoLineIds.has(l.id),
-      );
-
-      if (linesToAdd.length === 0) {
-        throw new ShipmentTrackingError("No new PO lines to add (all already on this shipment)");
-      }
-
-      // 2. Re-read alreadyShippedQty AFTER the lock (fresh data). Delegates to
-      //    the single shared tally (storage.getShippedQtyByPoLines) so this
-      //    write path and the shippable-lines read path can never disagree about
-      //    what counts as shipped — cancelled shipments are excluded there.
-      //    Passing `tx` runs it inside this locked transaction.
-      const shippedQtyByPoLine = await storage.getShippedQtyByPoLines(candidateLineIds, tx);
-
-      // 3. Validate per-line against locked, re-read data
-      if (qtyMap.size > 0) {
-        for (const poLine of linesToAdd) {
-          const isProduct = !poLine.line_type || poLine.line_type === "product";
-          if (!isProduct) {
-            throw new ShipmentTrackingError(
-              `Line ${poLine.sku || poLine.id} is a ${poLine.line_type || "non-product"} line and cannot be shipped`,
-            );
-          }
-          if (poLine.status === "closed" || poLine.status === "cancelled") {
-            throw new ShipmentTrackingError(
-              `Line ${poLine.sku || poLine.id} is ${poLine.status} and cannot be shipped`,
-            );
-          }
-
-          const qty = qtyMap.get(poLine.id)!;
-          if (qty <= 0) {
-            throw new ShipmentTrackingError(
-              `Line ${poLine.sku || poLine.id}: qty must be > 0 (got ${qty})`,
-            );
-          }
-
-          const orderQty = poLine.order_qty ?? 0;
-          const cancelledQty = poLine.cancelled_qty ?? 0;
-          const alreadyShipped = shippedQtyByPoLine.get(poLine.id) ?? 0;
-          const remaining = orderQty - alreadyShipped - cancelledQty;
-          if (qty > remaining) {
-            throw new ShipmentTrackingError(
-              `Line ${poLine.sku || poLine.id}: qty ${qty} exceeds remaining ${remaining} (ordered ${orderQty}, shipped ${alreadyShipped}, cancelled ${cancelledQty})`,
-            );
-          }
-        }
-      }
-
-      // 4. Insert new lines inside the transaction
-      const newLines = await Promise.all(linesToAdd.map(async (poLine: any) => {
-        const receiveVariantId = getReceiveVariantId(poLine);
-        const qtyPieces = qtyMap.size > 0 ? qtyMap.get(poLine.id)! : (poLine.order_qty ?? 0);
-        const dims = await resolveDimensionsForVariant(receiveVariantId, po.vendorId);
-
-        let cartonCount: number | null = null;
-        let receiveUnitsPerVariant = getReceiveUnitsPerVariant(poLine);
-        if (!receiveUnitsPerVariant && receiveVariantId) {
-          const receiveVariant = await storage.getProductVariantById(receiveVariantId);
-          receiveUnitsPerVariant = positiveIntegerOrNull(receiveVariant?.unitsPerVariant);
-        }
-        if (receiveUnitsPerVariant && receiveUnitsPerVariant > 1) {
-          cartonCount = Math.ceil(qtyPieces / receiveUnitsPerVariant);
-        }
-
-        const computed = computeLineTotals({
-          qtyShipped: qtyPieces,
-          cartonCount,
-          weightKg: dims.weightKg,
-          lengthCm: dims.lengthCm,
-          widthCm: dims.widthCm,
-          heightCm: dims.heightCm,
-        });
-
-        return {
-          inboundShipmentId: shipmentId,
-          purchaseOrderId,
-          purchaseOrderLineId: poLine.id,
-          productVariantId: receiveVariantId,
-          sku: poLine.sku || null,
-          qtyShipped: qtyPieces,
-          cartonCount,
-          weightKg: dims.weightKg,
-          lengthCm: dims.lengthCm,
-          widthCm: dims.widthCm,
-          heightCm: dims.heightCm,
-          ...computed,
-        };
-      }));
-
-      return await tx.insert(inboundShipmentLines).values(newLines).returning();
-    });
-
-    await recomputeShipmentTotals(shipmentId);
-    await refreshAllocationsForShipment(shipmentId);
-    return created;
-  }
-
-  async function removeLine(lineId: number) {
-    const line = await storage.getInboundShipmentLineById(lineId);
-    if (!line) throw new ShipmentTrackingError("Shipment line not found", 404);
-
-    const shipment = await getShipment(line.inboundShipmentId);
-    if (shipment.status === "closed" || shipment.status === "cancelled") {
-      throw new ShipmentTrackingError("Cannot remove lines from a closed or cancelled shipment");
-    }
-
-    await storage.deleteInboundShipmentLine(lineId);
-    await recomputeShipmentTotals(line.inboundShipmentId);
-    await refreshAllocationsForShipment(line.inboundShipmentId);
-    return true;
-  }
-
-  async function updateLineDimensions(lineId: number, updates: {
-    weightKg?: string;
-    lengthCm?: string;
-    widthCm?: string;
-    heightCm?: string;
-    cartonCount?: number;
-    qtyShipped?: number;
-    notes?: string;
-  }) {
-    const line = await storage.getInboundShipmentLineById(lineId);
-    if (!line) throw new ShipmentTrackingError("Shipment line not found", 404);
-
-    // Recompute totals from per-carton values × cartonCount
-    const qtyShipped = updates.qtyShipped ?? line.qtyShipped;
-    const cartonCount = updates.cartonCount ?? line.cartonCount;
-    const weightKg = updates.weightKg ?? line.weightKg;
-    const lengthCm = updates.lengthCm ?? line.lengthCm;
-    const widthCm = updates.widthCm ?? line.widthCm;
-    const heightCm = updates.heightCm ?? line.heightCm;
-
-    const computed = computeLineTotals({ qtyShipped, cartonCount, weightKg, lengthCm, widthCm, heightCm });
-
-    await storage.updateInboundShipmentLine(lineId, {
-      qtyShipped: updates.qtyShipped,
-      weightKg: updates.weightKg,
-      lengthCm: updates.lengthCm,
-      widthCm: updates.widthCm,
-      heightCm: updates.heightCm,
-      cartonCount: cartonCount,
-      notes: updates.notes,
-      ...computed,
-    } as any);
-
-    await recomputeShipmentTotals(line.inboundShipmentId);
-    await refreshAllocationsForShipment(line.inboundShipmentId);
-    return await storage.getInboundShipmentLineById(lineId);
-  }
-
-  async function resolveDimensionsForVariant(productVariantId: number | null, vendorId: number | null): Promise<{
-    weightKg: string | null;
-    lengthCm: string | null;
-    widthCm: string | null;
-    heightCm: string | null;
-  }> {
-    // Priority: vendor_products dims → product_variants dims → null
-    if (productVariantId && vendorId) {
-      const vendorProducts = await storage.getVendorProducts({ vendorId, productVariantId });
-      const vp = vendorProducts[0];
-      if (vp?.weightKg || vp?.lengthCm) {
-        return {
-          weightKg: vp.weightKg || null,
-          lengthCm: vp.lengthCm || null,
-          widthCm: vp.widthCm || null,
-          heightCm: vp.heightCm || null,
-        };
-      }
-    }
-
-    // Fall back to product_variants dimensions (convert mm→cm, g→kg)
-    if (productVariantId) {
-      const pv = await storage.getProductVariantById(productVariantId);
-      if (pv) {
-        const weightKg = pv.weightGrams ? String(Number(pv.weightGrams) / 1000) : null;
-        const lengthCm = pv.lengthMm ? String(Number(pv.lengthMm) / 10) : null;
-        const widthCm = pv.widthMm ? String(Number(pv.widthMm) / 10) : null;
-        const heightCm = pv.heightMm ? String(Number(pv.heightMm) / 10) : null;
-        if (weightKg || lengthCm) {
-          return { weightKg, lengthCm, widthCm, heightCm };
-        }
-      }
-    }
-
-    return { weightKg: null, lengthCm: null, widthCm: null, heightCm: null };
-  }
-
-  async function resolveDimensionsForShipment(shipmentId: number) {
-    const shipment = await getShipment(shipmentId);
-    const lines = await storage.getInboundShipmentLines(shipmentId);
-    let updated = 0;
-
-    for (const line of lines) {
-      // Only resolve if dimensions are missing
-      if (line.weightKg && line.lengthCm) continue;
-
-      // Get vendorId from the PO
-      let vendorId: number | null = null;
-      if (line.purchaseOrderId) {
-        const po = await storage.getPurchaseOrderById(line.purchaseOrderId);
-        vendorId = po?.vendorId || null;
-      }
-
-      const dims = await resolveDimensionsForVariant(line.productVariantId, vendorId);
-      if (!dims.weightKg && !dims.lengthCm) continue;
-
-      const computed = computeLineTotals({
-        qtyShipped: line.qtyShipped,
-        cartonCount: line.cartonCount,
-        weightKg: dims.weightKg,
-        lengthCm: dims.lengthCm,
-        widthCm: dims.widthCm,
-        heightCm: dims.heightCm,
-      });
-
-      await storage.updateInboundShipmentLine(line.id, {
-        weightKg: dims.weightKg,
-        lengthCm: dims.lengthCm,
-        widthCm: dims.widthCm,
-        heightCm: dims.heightCm,
-        ...computed,
-      } as any);
-
-      updated++;
-    }
-
-    await recomputeShipmentTotals(shipmentId);
-    await refreshAllocationsForShipment(shipmentId);
-    return { updated, total: lines.length };
-  }
-
-  async function importPackingList(shipmentId: number, rows: Array<{
-    sku?: string;
-    purchaseOrderLineId?: number;
-    productVariantId?: number;
-    qtyShipped: number;
-    weightKg?: number;
-    lengthCm?: number;
-    widthCm?: number;
-    heightCm?: number;
-    cartonCount?: number;
-  }>) {
-    const shipment = await getShipment(shipmentId);
-    if (shipment.status === "closed" || shipment.status === "cancelled") {
-      throw new ShipmentTrackingError("Cannot import to a closed or cancelled shipment");
-    }
-
-    const newLines: InsertInboundShipmentLine[] = [];
-    const errors: Array<{ row: number; error: string }> = [];
-
-    for (let i = 0; i < rows.length; i++) {
-      const row = rows[i];
-      if (!row.qtyShipped || row.qtyShipped <= 0) {
-        errors.push({ row: i + 1, error: "Quantity must be > 0" });
-        continue;
-      }
-
-      const computed = computeLineTotals({
-        qtyShipped: row.qtyShipped,
-        cartonCount: row.cartonCount,
-        weightKg: row.weightKg != null ? String(row.weightKg) : null,
-        lengthCm: row.lengthCm != null ? String(row.lengthCm) : null,
-        widthCm: row.widthCm != null ? String(row.widthCm) : null,
-        heightCm: row.heightCm != null ? String(row.heightCm) : null,
-      });
-
-      newLines.push({
-        inboundShipmentId: shipmentId,
-        purchaseOrderId: null,
-        purchaseOrderLineId: row.purchaseOrderLineId || null,
-        productVariantId: row.productVariantId || null,
-        sku: row.sku || null,
-        qtyShipped: row.qtyShipped,
-        weightKg: row.weightKg != null ? String(row.weightKg) : null,
-        lengthCm: row.lengthCm != null ? String(row.lengthCm) : null,
-        widthCm: row.widthCm != null ? String(row.widthCm) : null,
-        heightCm: row.heightCm != null ? String(row.heightCm) : null,
-        ...computed,
-        cartonCount: row.cartonCount || null,
-      } as any);
-    }
-
-    const created = await storage.bulkCreateInboundShipmentLines(newLines);
-    await recomputeShipmentTotals(shipmentId);
-    await refreshAllocationsForShipment(shipmentId);
-
+  async function resolveDimensionsForVariant(productVariantId: number, vendorId: number | undefined, executor?: any) {
+    const vendorProduct = vendorId
+      ? (await storage.getVendorProducts({ vendorId, productVariantId }, executor))[0] : undefined;
+    const variant = await storage.getProductVariantById(productVariantId, executor);
+    const convert = (value: unknown, divisor: number): string | null => value == null
+      ? null : new Decimal(String(value)).div(divisor).toFixed();
+    // Resolve each field independently so partial supplier evidence does not
+    // discard available catalog dimensions or overwrite entered line values.
     return {
-      imported: created.length,
-      errors,
-      lines: created,
+      weightKg: vendorProduct?.weightKg ?? convert(variant?.weightGrams, 1000),
+      lengthCm: vendorProduct?.lengthCm ?? convert(variant?.lengthMm, 10),
+      widthCm: vendorProduct?.widthCm ?? convert(variant?.widthMm, 10),
+      heightCm: vendorProduct?.heightCm ?? convert(variant?.heightMm, 10),
     };
   }
-
-  // ─── Cost management ───────────────────────────────────────────
 
   function costError(message: string, statusCode: number, code: string): never {
     throw new ShipmentTrackingError(message, statusCode, { code });
@@ -1355,7 +934,7 @@ export function createShipmentTrackingService(
 
   // ─── Allocation engine ─────────────────────────────────────────
 
-  async function runAllocationInTransaction(tx: any, shipmentId: number, lockedShipment?: InboundShipment): Promise<{
+  async function runAllocationInTransaction(tx: any, shipmentId: number, lockedShipment?: InboundShipment, recordedAt?: Date): Promise<{
     allocations: Array<{
       lineId: number;
       sku: string | null;
@@ -1497,7 +1076,7 @@ export function createShipmentTrackingService(
       await storage.updateInboundShipmentLine(update.lineId, {
         allocatedCostCents: update.allocatedCostCents,
         landedUnitCostCents: update.landedUnitCostCents,
-      } as any, tx);
+      } as any, tx, recordedAt);
     }
 
     return { allocations: resultLines, totalAllocated };
@@ -2238,11 +1817,16 @@ export function createShipmentTrackingService(
     cancel,
 
     // Lines
-    addLinesFromPO,
-    removeLine,
-    updateLineDimensions,
-    resolveDimensionsForShipment,
-    importPackingList,
+    executeLineCommandInTransaction: createShipmentLineMutationOwner({
+      storage, lockShipment, resolveDimensions: resolveDimensionsForVariant,
+      recomputeTotals: recomputeShipmentTotals,
+      refreshAllocations: async (tx, shipmentId, shipment, recordedAt) => {
+        // Physical line edits change charge distribution. Preserve the same
+        // verified currency basis required by the shipment charge owner.
+        for (const cost of await storage.getInboundFreightCosts(shipmentId, tx)) assertCostCurrencyBasis(cost);
+        return refreshAllocationsForShipmentInTransaction(tx, shipmentId, shipment, recordedAt);
+      },
+    }).executeLineCommandInTransaction,
     getLines: (shipmentId: number) => storage.getInboundShipmentLines(shipmentId),
     getEnrichedLines: getEnrichedLines,
     getLinesByPo: (poId: number) => storage.getInboundShipmentLinesByPo(poId),
