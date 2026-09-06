@@ -200,6 +200,7 @@ const navStructure: NavEntry[] = [
     children: [
       { label: "Orders", icon: ShoppingCart, href: "/orders", roles: ["admin", "lead"] },
       { label: "Picking", icon: ClipboardList, href: "/picking" },
+      { label: "Assembly work", icon: PackageCheck, href: "/assembly" },
       { label: "Pick Priority", icon: ArrowUpDown, href: "/pick-priority", roles: ["admin", "lead"] },
       { label: "Packing", icon: PackageCheck, href: "/packing" },
     ],

@@ -408,6 +408,7 @@ export class PickingUseCases {
     private readonly cartonization?: CartonizationLike,
     private readonly cartonizationShadowEnabled = false,
     private readonly runtimeClaimExecutor?: InventoryAvailabilityRuntimeClaimExecutor,
+    private readonly assemblyWorkload?: { handedOffOrderIds(orders: readonly { id: number; items: OrderItem[] }[]): Promise<Set<number>> },
   ) {}
 
   private async logRejectedPickCommand(params: {
@@ -3343,10 +3344,13 @@ export class PickingUseCases {
 
   async getPickQueue(warehouseId?: number): Promise<PickQueueOrder[]> {
     const allOrders = await this.storage.getPickQueueOrders();
+    const delegated = this.assemblyWorkload ? await this.assemblyWorkload.handedOffOrderIds(
+      allOrders.filter((order: Order) => order.onHold !== 1 && order.warehouseStatus === "in_progress"),
+    ) : new Set<number>();
 
     // Filter to orders with shippable items
     const filteredOrders = allOrders.filter((order: any) => {
-      return order.items.some((item: any) => item.requiresShipping === 1);
+      return !delegated.has(order.id) && order.items.some((item: any) => item.requiresShipping === 1);
     });
 
     // Batch resolve picker names
@@ -3513,6 +3517,7 @@ export function createPickingService(
   cartonization: CartonizationLike = { ensurePackPlan },
   cartonizationShadowEnabled = isWmsCartonizationShadowEnabled(),
   runtimeClaimExecutor?: InventoryAvailabilityRuntimeClaimExecutor,
+  assemblyWorkload?: { handedOffOrderIds(orders: readonly { id: number; items: OrderItem[] }[]): Promise<Set<number>> },
 ) {
   return new PickingUseCases(
     db,
@@ -3523,6 +3528,7 @@ export function createPickingService(
     cartonization,
     cartonizationShadowEnabled,
     runtimeClaimExecutor,
+    assemblyWorkload,
   );
 }
 

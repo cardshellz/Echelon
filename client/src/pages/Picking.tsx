@@ -50,6 +50,7 @@ import {
 import { cn } from "@/lib/utils";
 import { useSettings } from "@/lib/settings";
 import { useAuth } from "@/lib/auth";
+import AssemblyHandoffPanel from "@/pages/warehouse-work/AssemblyHandoffPanel";
 import { useToast } from "@/hooks/use-toast";
 import {
   findMatchingScannableItemIndex,
@@ -4216,6 +4217,17 @@ export default function Picking() {
         </div>
       </div>
 
+      {hasPermission("warehouse_work", "picking") && pickingMode === "single" && activeOrder &&
+        getSubOrderIds(activeOrder.id).map((orderId) => <AssemblyHandoffPanel key={orderId} orderId={orderId} onHandedOff={async (ticket, station) => {
+          toast({ title: `${ticket} sent to ${station}`, description: "Pass this order’s label and instructions to the station. Assembly is still outstanding." });
+          const fresh = await refetch();
+          setLocalSingleQueue([]);
+          if (fresh.data && getSubOrderIds(activeOrder.id).every((id) => !fresh.data.some((order) => order.id === id))) {
+            // Ownership has moved to assembly, not to shipped/picked. Do not
+            // invoke releaseOrder/readyToShip or synthesize completed items.
+            setView("queue"); setActiveOrderId(null); setCurrentItemIndex(0); setScanInput("");
+          }
+        }} />)}
       {/* Main Pick Interface */}
       {pickerViewMode === "focus" ? (
         /* FOCUS VIEW - Single item at a time, optimized for scanner */

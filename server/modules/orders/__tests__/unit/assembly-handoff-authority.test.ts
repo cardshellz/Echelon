@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { requireAssemblyOrderAuthority } from "../../assembly-handoff-authority";
 
 const input = { orderId: 70, orderItemId: 71, actorId: "picker", action: "handoff" as const };
-const row = { warehouse_status: "in_progress", on_hold: 0, assigned_picker_id: "picker", item_on_hold: 0, item_status: "pending", requires_shipping: 1 };
+const row = { warehouse_status: "in_progress", on_hold: 0, assigned_picker_id: "picker", item_on_hold: false, item_status: "pending", requires_shipping: 1 };
 function client(record: unknown) { return { query: vi.fn(async () => ({ rows: record ? [record] : [] })) } as unknown as PoolClient; }
 describe("WMS assembly handoff authority", () => {
   it("permits the owning picker and does not change the order or item", async () => {
@@ -12,7 +12,7 @@ describe("WMS assembly handoff authority", () => {
     expect(vi.mocked(db.query).mock.calls[0][0]).toContain("SELECT orders.warehouse_status");
   });
   it.each([null, { ...row, warehouse_status: "shipped" }, { ...row, warehouse_status: "cancelled" },
-    { ...row, on_hold: 1 }, { ...row, item_on_hold: 1 }, { ...row, requires_shipping: 0 }, { ...row, item_status: "cancelled" },
+    { ...row, on_hold: 1 }, { ...row, item_on_hold: true }, { ...row, requires_shipping: 0 }, { ...row, item_status: "cancelled" },
     { ...row, item_status: "completed" }, { ...row, item_status: "short" }])("rejects missing, held, terminal or nonphysical work", async (record) => {
     await expect(requireAssemblyOrderAuthority(client(record), input)).rejects.toMatchObject({ code: "WORK_ORDER_NOT_EXECUTABLE" });
   });
