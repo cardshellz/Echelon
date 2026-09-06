@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { ReceivingService } from "../../../../modules/procurement/receiving.service";
+import { receivingUnitVersion } from "../../receiving-unit-contract";
 
 function sqlToStr(query: any): string {
   if (Array.isArray(query?.queryChunks)) {
@@ -53,51 +54,45 @@ function makeZeroPostVoidTx(input: {
 }
 
 describe("ReceivingService - completeAllLines semantics", () => {
-  it("should preserve existing partial entries and backfill untouched lines with expectedQty", async () => {
-    const tx = {
-      execute: vi.fn().mockResolvedValue({ rows: [{ id: 1 }] }),
-    };
-    const lines = [
+  it("preserves positive partial entries and fills untouched zero counts using confirmed units", async () => {
+    const now = new Date("2026-09-06T12:00:00.000Z");
+    const tx = { execute: vi.fn().mockResolvedValue({ rows: [{ id: 1, product_id: 1, units_per_variant: 1, is_active: true }] }) };
+    let lines = [
       { id: 1, expectedQty: 10, receivedQty: 5, status: "pending" },
       { id: 2, expectedQty: 20, receivedQty: 0, status: "pending" },
-      { id: 3, expectedQty: 30, receivedQty: null, status: "pending" },
+      { id: 3, expectedQty: 30, receivedQty: 0, status: "pending" },
       { id: 4, expectedQty: 40, receivedQty: 40, status: "complete" },
-    ];
-    // Mock the storage layer
+    ].map((line) => ({ ...line, receivingOrderId: 1, productId: 1, productVariantId: 1,
+      unitsPerVariantSnapshot: 1, damagedQty: 0, updatedAt: now }));
+    const expectedUnitVersions = lines.map((line) => ({ lineId: line.id, unitVersion: receivingUnitVersion(line) }));
     const mockStorage = {
-      getReceivingLines: vi.fn().mockResolvedValue(lines),
-      updateReceivingLine: vi.fn().mockResolvedValue({}),
+      getReceivingLines: vi.fn(async () => lines.map((line) => ({ ...line }))),
+      updateReceivingLine: vi.fn(async (id: number, patch: Partial<typeof lines[number]>) => {
+        lines = lines.map((line) => line.id === id ? { ...line, ...patch } : line);
+        return lines.find((line) => line.id === id);
+      }),
       updateReceivingOrder: vi.fn().mockResolvedValue({}),
       getReceivingOrderById: vi.fn().mockResolvedValue({ id: 1, status: "open", vendorId: null }),
     };
     const db = { transaction: vi.fn(async (fn) => fn(tx)) };
+    const service = new ReceivingService(db as any, {} as any, {} as any, mockStorage as any,
+      null, null, null, null, null, null, () => now);
 
-    const service = new ReceivingService(db as any, {} as any, {} as any, mockStorage as any);
+    const result = await service.completeAllLines(1, { expectedUnitVersions }, "user-1");
 
-    const result = await service.completeAllLines(1);
-
-    // Assert that we correctly skip the completed line
     expect(mockStorage.updateReceivingLine).toHaveBeenCalledTimes(3);
-
-    // Line 1: Was partially received (5). Should retain its manual 5, NOT go to expected 10.
-    expect(mockStorage.updateReceivingLine).toHaveBeenCalledWith(1, {
-      receivedQty: 5,
-      status: "complete",
-    }, tx);
-
-    // Line 2: Untouched (0). Should backfill to expected (20).
-    expect(mockStorage.updateReceivingLine).toHaveBeenCalledWith(2, {
-      receivedQty: 20,
-      status: "complete",
-    }, tx);
-
-    // Line 3: Untouched (null). Should backfill to expected (30).
-    expect(mockStorage.updateReceivingLine).toHaveBeenCalledWith(3, {
-      receivedQty: 30,
-      status: "complete",
-    }, tx);
-
+    expect(mockStorage.updateReceivingLine).toHaveBeenCalledWith(1, expect.objectContaining({
+      receivedQty: 5, status: "partial",
+    }), tx);
+    expect(mockStorage.updateReceivingLine).toHaveBeenCalledWith(2, expect.objectContaining({
+      receivedQty: 20, status: "complete",
+    }), tx);
+    expect(mockStorage.updateReceivingLine).toHaveBeenCalledWith(3, expect.objectContaining({
+      receivedQty: 30, status: "complete",
+    }), tx);
     expect(result.updated).toBe(3);
+    expect(result.order.lines).toEqual(lines.map((line) => ({ ...line, unitVersion: receivingUnitVersion(line) })));
+    expect(tx.execute.mock.calls.some(([query]) => sqlToStr(query).includes("insert into public.audit_events"))).toBe(true);
   });
 });
 
@@ -181,10 +176,10 @@ describe("ReceivingService - mutation integrity", () => {
     const commands = [
       service.updateOrderDetails(41, { notes: "changed" }),
       service.addLine(41, { sku: "SKU-1", expectedQty: 1 }),
-      service.updateLine(9, { receivedQty: 1 }),
+      service.updateLine(9, { receivedQty: 1, expectedUnitVersion: "a".repeat(64) }, "user-1"),
       service.deleteLine(9),
       service.deleteOrder(41),
-      service.completeAllLines(41),
+      service.completeAllLines(41, { expectedUnitVersions: [] }, "user-1"),
     ];
     for (const command of commands) {
       await expect(command).rejects.toMatchObject({
@@ -382,7 +377,6 @@ describe("ReceivingService - close reconciliation semantics", () => {
     const storage = {
       getReceivingOrderById: vi.fn()
         .mockResolvedValueOnce(openOrder)
-        .mockResolvedValueOnce(openOrder)
         .mockResolvedValueOnce(closedOrder),
       getReceivingLines: vi.fn()
         .mockResolvedValueOnce(lines)
@@ -486,6 +480,8 @@ describe("ReceivingService - close reconciliation semantics", () => {
     const lines = [
       {
         id: 601,
+        expectedQty: 2,
+        unitsPerVariantSnapshot: 1,
         productVariantId: 5,
         purchaseOrderLineId: 100,
         receivedQty: 2,
@@ -502,7 +498,7 @@ describe("ReceivingService - close reconciliation semantics", () => {
           return { rows: [{ id: order.id }] };
         }
         if (text.includes("units_per_variant")) {
-          return { rows: [{ units_per_variant: 1 }] };
+          return { rows: [{ id: 5, product_id: 1, units_per_variant: 1, is_active: true }] };
         }
         return { rows: [] };
       }),
@@ -510,6 +506,7 @@ describe("ReceivingService - close reconciliation semantics", () => {
     const mockStorage = {
       getReceivingOrderById: vi.fn().mockResolvedValue(order),
       getReceivingLines: vi.fn().mockResolvedValue(lines),
+      getPurchaseOrderLineById: vi.fn().mockResolvedValue({ id: 100, productId: 1, purchaseOrderId: 1 }),
       getProductVariantById: vi.fn().mockResolvedValue({ id: 5, hierarchyLevel: 1 }),
       getProductVariantsByProductId: vi.fn().mockResolvedValue([]),
       updateReceivingLine: vi.fn().mockResolvedValue({}),
@@ -562,9 +559,9 @@ describe("ReceivingService - close reconciliation semantics", () => {
       updatedAt,
     };
     const lines = [
-      { id: 701, expectedQty: 10, receivedQty: 4, productVariantId: 5, putawayLocationId: 12, status: "partial", updatedAt },
-      { id: 702, expectedQty: 5, receivedQty: 0, productVariantId: 6, putawayLocationId: 13, status: "pending", updatedAt },
-      { id: 703, expectedQty: 3, receivedQty: 3, productVariantId: 7, putawayLocationId: 14, status: "complete", updatedAt },
+      { id: 701, damagedQty: 0, unitsPerVariantSnapshot: 1, expectedQty: 10, receivedQty: 4, productVariantId: 5, putawayLocationId: 12, status: "partial", updatedAt },
+      { id: 702, damagedQty: 0, unitsPerVariantSnapshot: 1, expectedQty: 5, receivedQty: 0, productVariantId: 6, putawayLocationId: 13, status: "pending", updatedAt },
+      { id: 703, damagedQty: 0, unitsPerVariantSnapshot: 1, expectedQty: 3, receivedQty: 3, productVariantId: 7, putawayLocationId: 14, status: "complete", updatedAt },
     ];
     const tx = {
       execute: vi.fn(async (query: any) => {
@@ -572,7 +569,7 @@ describe("ReceivingService - close reconciliation semantics", () => {
         if (text.includes("from procurement.receiving_orders") && text.includes("for update")) {
           return { rows: [{ id: order.id }] };
         }
-        return { rows: [{ units_per_variant: 1 }] };
+        return { rows: [{ id: 5, product_id: 1, units_per_variant: 1, is_active: true }] };
       }),
     };
     const mockStorage = {

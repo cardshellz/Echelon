@@ -15,6 +15,8 @@ type DrizzleDb = {
 
 // Import sql tagged template for raw queries
 import { sql } from "drizzle-orm";
+import { canonicalJson } from "@shared/utils/canonical-json";
+import { convertReceiptCounts, receiptInteger, receivingUnitVersion, withReceivingUnitVersion } from "./receiving-unit-contract";
 import { Decimal } from "decimal.js";
 import {
   millsToCents,
@@ -157,7 +159,7 @@ interface Storage {
   getVendorById(id: number): Promise<any>;
   // Inventory lookups
   getProductVariantBySku(sku: string): Promise<any>;
-  getProductVariantById(id: number): Promise<any>;
+  getProductVariantById(id: number, tx?: any): Promise<any>;
   getProductVariantsByProductId(productId: number): Promise<any[]>;
   getAllProductVariants(): Promise<any[]>;
   getProductBySku(sku: string): Promise<any>;
@@ -239,6 +241,11 @@ function assertOnlyAllowedFields(
       { code: "INVALID_RECEIVING_MUTATION_FIELDS", rejectedFields: rejected },
     );
   }
+}
+
+/** Include every persisted field: equal timestamps do not prove equal state. */
+function receivingLinesSnapshot(lines: readonly { id: number }[]): string {
+  return canonicalJson([...lines].sort((left, right) => left.id - right.id));
 }
 
 function requireNonNegativeInteger(value: unknown, field: string): number {
@@ -442,6 +449,7 @@ export class ReceivingService {
     private approvedInvoiceCostReconciler: ApprovedInvoiceCostReconciler | null = null,
     private receiveWarningEvaluator: ReceiveWarningEvaluator | null = null,
     private receiveWarningReporter: ReceiveWarningReporter | null = null,
+    private readonly clock: () => Date = () => new Date(),
   ) {}
 
   private async lockReceivingOrder(tx: any, orderId: number): Promise<any> {
@@ -485,6 +493,10 @@ export class ReceivingService {
 
     const order = await this.lockReceivingOrder(tx, receivingOrderId);
     this.assertReceivingOrderMutable(order);
+    if (order.purchaseOrderId) {
+      await tx.execute(sql`SELECT id FROM procurement.purchase_orders WHERE id = ${order.purchaseOrderId} FOR UPDATE`);
+      await tx.execute(sql`SELECT id FROM procurement.purchase_order_lines WHERE purchase_order_id = ${order.purchaseOrderId} ORDER BY id FOR UPDATE`);
+    }
     const lineLockResult = await tx.execute(sql`
       SELECT id
       FROM procurement.receiving_lines
@@ -864,14 +876,36 @@ export class ReceivingService {
   }
 
   async addLine(orderId: number, input: Record<string, unknown>) {
-    assertOnlyAllowedFields(input, RECEIVING_LINE_EDITABLE_FIELDS, "Receiving line create");
-    const lineData = this.normalizeLineMutation(input, null);
+    const { expectedUnitsPerVariant, ...fields } = input;
+    assertOnlyAllowedFields(fields, RECEIVING_LINE_EDITABLE_FIELDS, "Receiving line create");
+    const lineData = this.normalizeLineMutation(fields, null);
+    const expectedFactor = lineData.productVariantId
+      ? receiptInteger(expectedUnitsPerVariant, "Reviewed receive pack size", true)
+      : null;
+    if (!lineData.productVariantId && expectedUnitsPerVariant !== undefined) {
+      throw new ReceivingError("A reviewed pack size requires a selected receive variant.", 400);
+    }
 
     const result = await this.db.transaction(async (tx) => {
       const order = await this.lockReceivingOrder(tx, orderId);
       this.assertReceivingOrderMutable(order);
+      const productVariantId = lineData.productVariantId;
+      const unitData = productVariantId
+        ? await this.loadReceiveVariant(tx, Number(productVariantId), lineData.productId)
+        : null;
+      if (unitData && unitData.unitsPerVariant !== expectedFactor) {
+        throw new ReceivingError("The selected catalog pack changed. Select the receive unit again and review its counts before adding the line.", 409, {
+          code: "RECEIVING_UNIT_CHANGED", productVariantId,
+        });
+      }
+      const unitsPerVariantSnapshot = unitData?.unitsPerVariant ?? null;
+      const counts = { expectedQty: 0, receivedQty: 0, damagedQty: 0, ...lineData };
+      for (const field of ["expectedQty", "receivedQty", "damagedQty"] as const) receiptInteger(counts[field], field);
+      if (unitsPerVariantSnapshot !== null) this.validateReceiptBaseCounts(counts, unitsPerVariantSnapshot);
       const line = await this.storage.createReceivingLine({
         ...lineData,
+        productId: unitData?.productId ?? lineData.productId,
+        unitsPerVariantSnapshot,
         receivingOrderId: orderId,
         status: this.receivingLineStatus(
           Number(lineData.receivedQty) || 0,
@@ -886,27 +920,129 @@ export class ReceivingService {
     const vendor = result.order?.vendorId
       ? await this.storage.getVendorById(result.order.vendorId)
       : null;
-    return { ...result.order, lines: result.lines, vendor };
+    return { ...result.order, lines: result.lines.map(withReceivingUnitVersion), vendor };
   }
 
-  async updateLine(lineId: number, input: Record<string, unknown>) {
-    assertOnlyAllowedFields(input, RECEIVING_LINE_EDITABLE_FIELDS, "Receiving line update");
-    if (Object.keys(input).length === 0) {
-      throw new ReceivingError("Receiving line update requires at least one field", 400);
+  private async loadReceiveVariant(tx: any, variantId: number, expectedProductId?: unknown): Promise<{ id: number; productId: number; unitsPerVariant: number }> {
+    receiptInteger(variantId, "Receive variant ID", true);
+    const rows = await tx.execute(sql`
+      SELECT id, product_id, units_per_variant, is_active
+      FROM catalog.product_variants WHERE id = ${variantId} FOR SHARE
+    `);
+    const variant = rows.rows?.[0];
+    if (!variant || variant.is_active === false) {
+      throw new ReceivingError("Select an active receive variant before saving quantities.", 409, { code: "RECEIVING_VARIANT_REVIEW_REQUIRED", productVariantId: variantId });
     }
+    const productId = receiptInteger(variant.product_id, "Receive product ID", true);
+    const unitsPerVariant = receiptInteger(variant.units_per_variant, "Receive pack size", true);
+    if (expectedProductId != null && Number(expectedProductId) !== productId) {
+      throw new ReceivingError("The receive variant belongs to a different product than this receipt line.", 409, { code: "RECEIVING_VARIANT_PRODUCT_MISMATCH", productVariantId: variantId });
+    }
+    return { id: variantId, productId, unitsPerVariant };
+  }
+
+  private validateReceiptBaseCounts(line: Record<string, unknown>, factor: number): void {
+    receiptInteger(factor, "Recorded receive pack size", true);
+    for (const field of ["expectedQty", "receivedQty", "damagedQty"] as const) {
+      const count = receiptInteger(line[field], field);
+      receiptInteger(count * factor, `${field} in pieces`);
+    }
+  }
+
+  private async assertReceiptSourceProduct(tx: any, line: any, order: any, productId: number): Promise<void> {
+    if (line.inboundShipmentLineId != null && (!line.purchaseOrderLineId || !order.purchaseOrderId || !order.inboundShipmentId)) {
+      throw new ReceivingError("An exact shipment-line receipt needs its purchase line, purchase order and shipment header. Review the original source before posting.", 409, {
+        code: "RECEIVING_SHIPMENT_SOURCE_MISMATCH", receivingLineId: line.id,
+      });
+    }
+    if (!line.purchaseOrderLineId) return;
+    if (!this.storage.getPurchaseOrderLineById) throw new ReceivingError("Purchase source lookup is unavailable.", 503);
+    const source = await this.storage.getPurchaseOrderLineById(line.purchaseOrderLineId, tx);
+    if (!source || (source.lineType ?? "product") !== "product" || source.productId !== productId || (order.purchaseOrderId != null && source.purchaseOrderId !== order.purchaseOrderId)) {
+      throw new ReceivingError("The receiving product does not match its purchase source. Review the linked PO line before saving or posting.", 409, { code: "RECEIVING_SOURCE_PRODUCT_MISMATCH", receivingLineId: line.id, purchaseOrderLineId: line.purchaseOrderLineId });
+    }
+    if (line.inboundShipmentLineId) {
+      const result = await tx.execute(sql`SELECT inbound_shipment_id, purchase_order_id, purchase_order_line_id, qty_shipped FROM procurement.inbound_shipment_lines WHERE id = ${line.inboundShipmentLineId}`);
+      const shipmentSource = result.rows?.[0];
+      if (!shipmentSource || shipmentSource.inbound_shipment_id !== order.inboundShipmentId || shipmentSource.purchase_order_line_id !== line.purchaseOrderLineId || shipmentSource.purchase_order_id !== source.purchaseOrderId) {
+        throw new ReceivingError("The receiving shipment-line link is inconsistent. Review the original shipment source before posting.", 409, { code: "RECEIVING_SHIPMENT_SOURCE_MISMATCH", receivingLineId: line.id });
+      }
+      receiptInteger(shipmentSource.qty_shipped, "Shipment source pieces", true);
+    }
+  }
+
+  async updateLine(lineId: number, input: Record<string, unknown>, actorId?: string | null) {
+    const { expectedUnitVersion, expectedUnitsPerVariant, confirmLegacyUnit, ...fields } = input;
+    assertOnlyAllowedFields(fields, RECEIVING_LINE_EDITABLE_FIELDS, "Receiving line update");
+    if (Object.keys(fields).length === 0) throw new ReceivingError("Receiving line update requires at least one field", 400);
+    if (confirmLegacyUnit !== undefined && confirmLegacyUnit !== true) throw new ReceivingError("confirmLegacyUnit must be true when supplied", 400);
+    const expectedFactor = confirmLegacyUnit === true
+      ? receiptInteger(expectedUnitsPerVariant, "Reviewed receive pack size", true)
+      : null;
+    if (confirmLegacyUnit !== true && expectedUnitsPerVariant !== undefined) {
+      throw new ReceivingError("A reviewed pack size is only accepted with explicit legacy unit confirmation.", 400);
+    }
+    const changesUnits = ["productVariantId", "expectedQty", "receivedQty", "damagedQty", "productId"].some((field) => field in fields);
+    if (changesUnits && (typeof expectedUnitVersion !== "string" || !/^[a-f0-9]{64}$/.test(expectedUnitVersion))) {
+      throw new ReceivingError("Refresh and review the current receipt units before saving.", 409, { code: "RECEIVING_UNIT_VERSION_REQUIRED" });
+    }
+    if (changesUnits && !actorId) throw new ReceivingError("An authenticated actor is required to change receipt units.", 401);
 
     return await this.db.transaction(async (tx) => {
-      const { line } = await this.lockReceivingLineAndOrder(tx, lineId);
-      const updates = this.normalizeLineMutation(input, line);
-      if ("receivedQty" in updates || "expectedQty" in updates) {
-        updates.status = this.receivingLineStatus(
-          Number(updates.receivedQty ?? line.receivedQty) || 0,
-          Number(updates.expectedQty ?? line.expectedQty) || 0,
-        );
+      const { line, order } = await this.lockReceivingLineAndOrder(tx, lineId);
+      if (changesUnits && receivingUnitVersion(line) !== expectedUnitVersion) {
+        throw new ReceivingError("Receipt counts or units changed. Refresh, review the current line, and save again.", 409, { code: "RECEIVING_UNIT_VERSION_CONFLICT", receivingLineId: lineId });
       }
+      const updates = this.normalizeLineMutation(fields, line);
+      if ("productVariantId" in updates) {
+        if (!updates.productVariantId) throw new ReceivingError("A recorded receive unit cannot be cleared; select a valid variant.", 409);
+        if (["expectedQty", "receivedQty", "damagedQty"].some((field) => field in updates)) {
+          throw new ReceivingError("Change the receive unit separately from its counts so each quantity is converted exactly.", 400);
+        }
+        const variant = await this.loadReceiveVariant(tx, Number(updates.productVariantId), line.productId);
+        await this.assertReceiptSourceProduct(tx, line, order, variant.productId);
+        if (line.unitsPerVariantSnapshot == null) {
+          if (confirmLegacyUnit !== true || (line.productVariantId != null && variant.id !== line.productVariantId)) {
+            throw new ReceivingError("Confirm the current line's count unit before converting a legacy receipt.", 409, { code: "RECEIVING_UNIT_CONFIRMATION_REQUIRED", receivingLineId: lineId });
+          }
+          if (variant.unitsPerVariant !== expectedFactor) {
+            throw new ReceivingError("The selected catalog pack changed. Refresh and review the count unit before confirming it.", 409, {
+              code: "RECEIVING_UNIT_CHANGED", receivingLineId: lineId, productVariantId: variant.id,
+            });
+          }
+          // Explicit operator attestation of an unposted legacy count unit.
+          // Posted history is immutable and cannot reach this method.
+        } else {
+          if (confirmLegacyUnit) throw new ReceivingError("A recorded unit must be converted, not reinterpreted.", 409);
+          Object.assign(updates, convertReceiptCounts(line, line.unitsPerVariantSnapshot, variant.unitsPerVariant));
+        }
+        updates.productId = variant.productId;
+        updates.unitsPerVariantSnapshot = variant.unitsPerVariant;
+      } else if (confirmLegacyUnit) {
+        throw new ReceivingError("Unit confirmation requires an explicit receive variant.", 400);
+      }
+      if ("productId" in updates && !("productVariantId" in updates) && updates.productId !== line.productId) {
+        throw new ReceivingError("Select the receive variant to change an unresolved product; a linked product cannot be patched independently.", 409);
+      }
+      if (line.inboundShipmentLineId && "expectedQty" in fields && fields.expectedQty !== line.expectedQty) {
+        throw new ReceivingError("Expected pieces come from the shipment source. Record the actual count without rewriting the source expectation.", 409, { code: "RECEIVING_EXPECTED_SOURCE_IMMUTABLE" });
+      }
+      const next = { ...line, ...updates };
+      if (changesUnits && next.unitsPerVariantSnapshot != null) this.validateReceiptBaseCounts(next, next.unitsPerVariantSnapshot);
+      if ("receivedQty" in updates || "expectedQty" in updates) updates.status = this.receivingLineStatus(Number(next.receivedQty), Number(next.expectedQty));
+      const now = this.clock();
+      if (changesUnits) updates.updatedAt = now;
       const updated = await this.storage.updateReceivingLine(lineId, updates, tx);
       await this.updateReceivingOrderTotals(line.receivingOrderId, tx);
-      return updated;
+      if (changesUnits) {
+        await tx.execute(sql`
+          INSERT INTO public.audit_events (timestamp, level, actor, action, target, changes, context)
+          VALUES (${now}, 'AUDIT', ${actorId}, 'procurement.receiving.units', ${`receiving-line:${lineId}`},
+            ${JSON.stringify({ before: line, after: updated })}::jsonb,
+            ${JSON.stringify({ receivingOrderId: line.receivingOrderId, receivingLineId: lineId, legacyUnitConfirmed: confirmLegacyUnit === true })}::jsonb)
+        `);
+      }
+      return withReceivingUnitVersion(updated);
     });
   }
 
@@ -936,7 +1072,7 @@ export class ReceivingService {
     const normalized: Record<string, unknown> = { ...input };
     for (const field of ["expectedQty", "receivedQty", "damagedQty"] as const) {
       if (field in normalized) {
-        normalized[field] = requireNonNegativeInteger(normalized[field], field);
+        normalized[field] = receiptInteger(normalized[field], field);
       }
     }
     for (const field of ["productVariantId", "productId", "putawayLocationId"] as const) {
@@ -999,7 +1135,9 @@ export class ReceivingService {
       return this.buildCloseResult(order, closedLines, undefined, poReconciliation);
     }
 
+    const orderSnapshot = canonicalJson(order);
     let lines = await this.storage.getReceivingLines(orderId);
+    const lineSnapshot = receivingLinesSnapshot(lines);
     if (
       order.sourceType === "shipment" &&
       lines.length > 0 &&
@@ -1045,23 +1183,6 @@ export class ReceivingService {
       }
     }
 
-    // Auto-resolve missing productVariantId from SKU before processing
-    for (const line of lines) {
-      if (line.receivedQty > 0 && !line.productVariantId && line.sku) {
-        const variant = await this.storage.getProductVariantBySku(line.sku);
-        if (variant) {
-          await this.updateLine(line.id, { productVariantId: variant.id });
-          (line as any).productVariantId = variant.id;
-        }
-      }
-    }
-
-    // Auto-resolution above may have changed line identity. Refresh the close
-    // snapshot before entering the transaction so the locked comparison below
-    // can detect only genuinely concurrent edits.
-    order = await this.storage.getReceivingOrderById(orderId);
-    lines = await this.storage.getReceivingLines(orderId);
-
     // Block close if any received lines are still missing required data
     const unresolvable = lines.filter((l: any) => l.receivedQty > 0 && (!l.productVariantId || !l.putawayLocationId));
     if (unresolvable.length > 0) {
@@ -1079,7 +1200,8 @@ export class ReceivingService {
     }
 
     // Process each line using inventoryCore (atomic, transaction-wrapped)
-    const batchId = `RCV-${orderId}-${Date.now()}`;
+    const closeAt = this.clock();
+    const batchId = `RCV-${orderId}-${closeAt.getTime()}`;
     let totalReceived = 0;
     let linesReceived = 0;
     const receivedVariantIds = new Set<number>();
@@ -1094,7 +1216,7 @@ export class ReceivingService {
       if (lockedOrder.status === "closed") {
         return { updated: lockedOrder, replayed: true };
       }
-      if (new Date(order.updatedAt).getTime() !== new Date(lockedOrder.updatedAt).getTime()) {
+      if (orderSnapshot !== canonicalJson(lockedOrder)) {
         throw new ReceivingError(
           "Receiving order changed while close was starting. Review the current receipt and retry.",
           409,
@@ -1104,9 +1226,7 @@ export class ReceivingService {
       order = lockedOrder;
 
       const lockedLines = await this.storage.getReceivingLines(orderId, tx);
-      const snapshotVersion = lines.map((line: any) => `${line.id}:${new Date(line.updatedAt).getTime()}`).join("|");
-      const lockedVersion = lockedLines.map((line: any) => `${line.id}:${new Date(line.updatedAt).getTime()}`).join("|");
-      if (snapshotVersion !== lockedVersion) {
+      if (lineSnapshot !== receivingLinesSnapshot(lockedLines)) {
         throw new ReceivingError(
           "Receiving lines changed while close was starting. Review the current receipt and retry.",
           409,
@@ -1114,6 +1234,29 @@ export class ReceivingService {
         );
       }
       lines = lockedLines;
+      // Match the receiving/reversal order before taking inventory locks.
+      // Invoice reconciliation later in this transaction uses these PO rows.
+      if (order.purchaseOrderId) {
+        await tx.execute(sql`SELECT id FROM procurement.purchase_orders WHERE id = ${order.purchaseOrderId} FOR UPDATE`);
+        await tx.execute(sql`SELECT id FROM procurement.purchase_order_lines WHERE purchase_order_id = ${order.purchaseOrderId} ORDER BY id FOR UPDATE`);
+      }
+      // Keep catalog factors stable through inventory posting. A changed pack
+      // needs an explicit, exact conversion; never reinterpret old counts.
+      const receiveVariants = new Map<number, { id: number; productId: number; unitsPerVariant: number }>();
+      for (const variantId of [...new Set<number>(lines.filter((line: any) => line.receivedQty > 0).map((line: any) => Number(line.productVariantId)))].sort((a, b) => a - b)) {
+        receiveVariants.set(variantId, await this.loadReceiveVariant(tx, variantId));
+      }
+      for (const line of lines.filter((line: any) => line.receivedQty > 0)) {
+        const variant = receiveVariants.get(line.productVariantId)!;
+        if (line.unitsPerVariantSnapshot == null) {
+          throw new ReceivingError("Confirm the receive unit on each legacy line before closing this receipt.", 409, { code: "RECEIVING_UNIT_CONFIRMATION_REQUIRED", receivingLineId: line.id });
+        }
+        if (line.unitsPerVariantSnapshot !== variant.unitsPerVariant || (line.productId != null && line.productId !== variant.productId)) {
+          throw new ReceivingError("The selected catalog pack differs from the recorded receipt unit. Review and convert the receive unit before closing.", 409, { code: "RECEIVING_UNIT_SOURCE_CHANGED", receivingLineId: line.id });
+        }
+        this.validateReceiptBaseCounts(line, line.unitsPerVariantSnapshot);
+        await this.assertReceiptSourceProduct(tx, line, order, variant.productId);
+      }
 
       for (const line of lines) {
       if (line.receivedQty > 0 && line.productVariantId && line.putawayLocationId) {
@@ -1235,10 +1378,8 @@ export class ReceivingService {
         // cost booked on the lot is per that unit. Cost is carried in MILLS so the
         // per-unit × pack-size scale never amplifies cent rounding (the old cents × upv
         // turned a sub-cent per-piece rounding into real dollars on large packs).
-        const upvRow = await tx.execute(sql`
-          SELECT units_per_variant FROM catalog.product_variants WHERE id = ${line.productVariantId}
-        `);
-        const unitsPerVariant = Math.max(1, Number((upvRow.rows?.[0] as any)?.units_per_variant) || 1);
+        const unitsPerVariant = line.unitsPerVariantSnapshot;
+
 
         // Pull the PO line so we can cost the lot EXACTLY from its totals when this is a
         // plain PO receipt (no receiving-line override, no landed/typed adjustment).
@@ -1354,7 +1495,7 @@ export class ReceivingService {
     // Update order totals and close
     const updated = await this.storage.updateReceivingOrder(orderId, {
       status: "closed",
-      closedDate: new Date(),
+      closedDate: closeAt,
       closedBy: userId,
       receivedLineCount: linesReceived,
       receivedTotalUnits: totalReceived,
@@ -1407,40 +1548,60 @@ export class ReceivingService {
 
   // ─── Complete All Lines ───────────────────────────────────────
 
-  async completeAllLines(orderId: number) {
-    const { updated, updatedLines, order } = await this.db.transaction(async (tx) => {
-      const lockedOrder = await this.lockReceivingOrder(tx, orderId);
-      this.assertReceivingOrderMutable(lockedOrder);
+  async completeAllLines(orderId: number, input: unknown, actorId?: string | null) {
+    const result = await this.db.transaction(async (tx) => {
+      const order = await this.lockReceivingOrder(tx, orderId);
+      this.assertReceivingOrderMutable(order);
       const lines = await this.storage.getReceivingLines(orderId, tx);
-      if (!lines || lines.length === 0) {
-        throw new ReceivingError("No lines found for this order", 404);
+      if (!lines.length) throw new ReceivingError("No lines found for this order", 404);
+      const supplied = input && typeof input === "object" && !Array.isArray(input) ? input as Record<string, unknown> : {};
+      if (Object.keys(supplied).some((key) => key !== "expectedUnitVersions") || !Array.isArray(supplied.expectedUnitVersions) || supplied.expectedUnitVersions.length !== lines.length) {
+        throw new ReceivingError("Refresh and review all current receipt lines before completing their counts.", 409, { code: "RECEIVING_UNIT_VERSION_REQUIRED" });
       }
-
-      let updatedCount = 0;
+      const versions = new Map<number, string>();
+      for (const item of supplied.expectedUnitVersions) {
+        if (!item || typeof item !== "object" || Object.keys(item).some((key) => !["lineId", "unitVersion"].includes(key)) || typeof item.unitVersion !== "string" || !/^[a-f0-9]{64}$/.test(item.unitVersion) || versions.has(item.lineId)) {
+          throw new ReceivingError("Receipt line versions are invalid.", 400);
+        }
+        versions.set(receiptInteger(item.lineId, "Receiving line ID", true), item.unitVersion);
+      }
+      if (!actorId) throw new ReceivingError("An authenticated actor is required to complete receipt counts.", 401);
       for (const line of lines) {
-        if (line.status !== "complete") {
-          const effectiveQty = (line.receivedQty != null && line.receivedQty > 0)
-            ? line.receivedQty
-            : (line.expectedQty || 0);
-          await this.storage.updateReceivingLine(line.id, {
-            receivedQty: effectiveQty,
-            status: "complete",
-          }, tx);
-          updatedCount++;
+        if (versions.get(line.id) !== receivingUnitVersion(line)) throw new ReceivingError("Receipt counts or units changed. Refresh and review all current lines.", 409, { code: "RECEIVING_UNIT_VERSION_CONFLICT", receivingLineId: line.id });
+        if (line.unitsPerVariantSnapshot == null || !line.productVariantId) throw new ReceivingError("Confirm each receive unit before completing all counts.", 409, { code: "RECEIVING_UNIT_CONFIRMATION_REQUIRED", receivingLineId: line.id });
+        this.validateReceiptBaseCounts(line, line.unitsPerVariantSnapshot);
+      }
+      if (order.purchaseOrderId) {
+        await tx.execute(sql`SELECT id FROM procurement.purchase_orders WHERE id = ${order.purchaseOrderId} FOR UPDATE`);
+        await tx.execute(sql`SELECT id FROM procurement.purchase_order_lines WHERE purchase_order_id = ${order.purchaseOrderId} ORDER BY id FOR UPDATE`);
+      }
+      const variants = new Map<number, { id: number; productId: number; unitsPerVariant: number }>();
+      for (const id of [...new Set<number>(lines.map((line: any) => Number(line.productVariantId)))].sort((a, b) => a - b)) variants.set(id, await this.loadReceiveVariant(tx, id));
+      const now = this.clock();
+      let updated = 0;
+      for (const line of lines) {
+        const variant = variants.get(line.productVariantId)!;
+        if (variant.unitsPerVariant !== line.unitsPerVariantSnapshot || (line.productId != null && variant.productId !== line.productId)) throw new ReceivingError("A catalog pack changed. Review its recorded receive unit before completing counts.", 409, { code: "RECEIVING_UNIT_SOURCE_CHANGED", receivingLineId: line.id });
+        await this.assertReceiptSourceProduct(tx, line, order, variant.productId);
+        const receivedQty = line.receivedQty > 0 ? line.receivedQty : line.expectedQty;
+        const status = this.receivingLineStatus(receivedQty, line.expectedQty);
+        if (line.receivedQty !== receivedQty || line.status !== status) {
+          await this.storage.updateReceivingLine(line.id, { receivedQty, status, updatedAt: now }, tx);
+          updated++;
         }
       }
-
-      const currentLines = await this.updateReceivingOrderTotals(orderId, tx);
-      const currentOrder = await this.storage.getReceivingOrderById(orderId, tx);
-      return { updated: updatedCount, updatedLines: currentLines, order: currentOrder };
+      const updatedLines = await this.updateReceivingOrderTotals(orderId, tx);
+      const updatedOrder = await this.storage.getReceivingOrderById(orderId, tx);
+      await tx.execute(sql`
+        INSERT INTO public.audit_events (timestamp, level, actor, action, target, changes, context)
+        VALUES (${now}, 'AUDIT', ${actorId}, 'procurement.receiving.complete_counts', ${`receiving:${orderId}`},
+          ${JSON.stringify({ before: lines, after: updatedLines })}::jsonb, ${JSON.stringify({ receivingOrderId: orderId })}::jsonb)
+      `);
+      return { updated, order: updatedOrder, updatedLines };
     });
-
-    // Return enriched order
-    const vendor = order?.vendorId ? await this.storage.getVendorById(order.vendorId) : null;
-    return { message: `Completed ${updated} lines`, updated, order: { ...order, lines: updatedLines, vendor } };
+    const vendor = result.order?.vendorId ? await this.storage.getVendorById(result.order.vendorId) : null;
+    return { message: `Completed ${result.updated} lines`, updated: result.updated, order: { ...result.order, lines: result.updatedLines.map(withReceivingUnitVersion), vendor } };
   }
-
-  // ─── Create Variant From Line ─────────────────────────────────
 
   async createVariantFromLine(lineId: number) {
     const line = await this.db.transaction(async (tx) => {
@@ -1503,14 +1664,11 @@ export class ReceivingService {
       throw error;
     }
 
-    // Link the variant to the receiving line
-    const updatedLine = await this.updateLine(lineId, {
-      productVariantId: variant.id,
-      productName: `${product.name} — ${variantName}`,
-    });
-
+    // Catalog creation does not establish the count unit of a legacy line.
+    // The caller explicitly confirms/converts units with its content version.
     return {
-      line: updatedLine,
+      line: withReceivingUnitVersion(line),
+      requiresUnitConfirmation: true,
       product: { id: product.id, sku: product.sku, name: product.name },
       variant: { id: variant.id, sku: variant.sku, name: variant.name, unitsPerVariant: variant.unitsPerVariant },
     };
@@ -1547,6 +1705,7 @@ export class ReceivingService {
 
     // Fetch existing lines for this order to enable idempotent imports (update vs create)
     const existingLines = await this.storage.getReceivingLines(orderId);
+    const existingLineSnapshot = receivingLinesSnapshot(existingLines);
     const existingBySkuLocation = new Map(
       existingLines
         .filter((l: any) => l.sku)
@@ -1567,6 +1726,7 @@ export class ReceivingService {
       throw new ReceivingError("Receiving order not found", 404);
     }
     this.assertReceivingOrderMutable(receipt);
+    const receiptSnapshot = canonicalJson(receipt);
     const receiptWarehouseId = receipt?.warehouseId ?? null;
 
     // Pre-fetch warehouse locations — filter by receipt's warehouse when set
@@ -1703,8 +1863,20 @@ export class ReceivingService {
       // warning; the Decimal path is kept as a defensive fallback for cents
       // so we preserve prior behavior if mills parsing somehow rejects a
       // value that Decimal accepts.
-      const parsedQty = parseInt(String(qty)) || 0;
-      const parsedDamagedQty = parseInt(String(damaged_qty)) || 0;
+      const parseCount = (value: unknown, field: string): number => {
+        if (value === undefined || value === null || value === "") return 0;
+        if (typeof value === "string" && !/^[0-9]+$/.test(value.trim())) throw new ReceivingError(`${field} must contain a whole count`, 400);
+        return receiptInteger(typeof value === "string" ? Number(value.trim()) : value, field);
+      };
+      let parsedQty: number;
+      let parsedDamagedQty: number;
+      try {
+        parsedQty = parseCount(qty, "Quantity");
+        parsedDamagedQty = parseCount(damaged_qty, "Damaged quantity");
+      } catch (error) {
+        errors.push(`SKU ${sku}: ${error instanceof Error ? error.message : "invalid quantity"}`);
+        continue;
+      }
       let parsedUnitCostMills: number | null = null;
       let parsedUnitCost: number | null = null;
       if (unit_cost !== undefined && unit_cost !== null && String(unit_cost).trim() !== "") {
@@ -1780,7 +1952,7 @@ export class ReceivingService {
     const created = await this.db.transaction(async (tx) => {
       const lockedOrder = await this.lockReceivingOrder(tx, orderId);
       this.assertReceivingOrderMutable(lockedOrder);
-      if (new Date(lockedOrder.updatedAt).getTime() !== new Date(receipt.updatedAt).getTime()) {
+      if (canonicalJson(lockedOrder) !== receiptSnapshot) {
         throw new ReceivingError(
           "Receiving order changed while the import was being prepared. Review the current receipt and retry.",
           409,
@@ -1788,7 +1960,44 @@ export class ReceivingService {
         );
       }
 
+      if (lockedOrder.purchaseOrderId) {
+        await tx.execute(sql`SELECT id FROM procurement.purchase_orders WHERE id = ${lockedOrder.purchaseOrderId} FOR UPDATE`);
+        await tx.execute(sql`SELECT id FROM procurement.purchase_order_lines WHERE purchase_order_id = ${lockedOrder.purchaseOrderId} ORDER BY id FOR UPDATE`);
+      }
+      const currentLines = await this.storage.getReceivingLines(orderId, tx);
+      if (receivingLinesSnapshot(currentLines) !== existingLineSnapshot) {
+        throw new ReceivingError(
+          "Receiving lines changed while the import was being prepared. Review the current receipt and retry.",
+          409,
+          { code: "RECEIVING_IMPORT_SNAPSHOT_CHANGED", receivingOrderId: orderId },
+        );
+      }
+      const currentById = new Map(currentLines.map((line: any) => [line.id, line]));
+      const importedVariants = new Map<number, { id: number; productId: number; unitsPerVariant: number }>();
+      const importedRows = [...linesToCreate, ...linesToUpdate.map((item) => item.updates)];
+      for (const id of [...new Set<number>(importedRows.filter((row: any) => row.productVariantId).map((row: any) => Number(row.productVariantId)))].sort((a, b) => a - b)) importedVariants.set(id, await this.loadReceiveVariant(tx, id));
+      for (const row of linesToCreate) {
+        const variant = row.productVariantId ? importedVariants.get(row.productVariantId) : null;
+        row.unitsPerVariantSnapshot = variant?.unitsPerVariant ?? null;
+        if (variant) {
+          row.productId = variant.productId;
+          this.validateReceiptBaseCounts(row, variant.unitsPerVariant);
+        }
+      }
       for (const item of linesToUpdate) {
+        const current: any = currentById.get(item.id);
+        if (!current) throw new ReceivingError("The imported receipt line was removed. Refresh and review the import.", 409);
+        if (current.inboundShipmentLineId) throw new ReceivingError("Use the shipment receipt count controls for linked lines; an import cannot rewrite their source expectations.", 409, { code: "RECEIVING_EXPECTED_SOURCE_IMMUTABLE" });
+        const variant = item.updates.productVariantId ? importedVariants.get(item.updates.productVariantId) : null;
+        if (current.unitsPerVariantSnapshot != null && (!variant || variant.id !== current.productVariantId || variant.unitsPerVariant !== current.unitsPerVariantSnapshot)) throw new ReceivingError("An imported receive unit differs from the recorded line. Review and convert that line first.", 409, { code: "RECEIVING_UNIT_SOURCE_CHANGED", receivingLineId: item.id });
+        if (variant) {
+          if (current.productId != null && current.productId !== variant.productId) throw new ReceivingError("The imported variant belongs to another product.", 409, { code: "RECEIVING_VARIANT_PRODUCT_MISMATCH" });
+          await this.assertReceiptSourceProduct(tx, current, lockedOrder, variant.productId);
+          item.updates.productId = variant.productId;
+          this.validateReceiptBaseCounts(item.updates, variant.unitsPerVariant);
+        } else if (current.productId != null || current.productVariantId != null) {
+          throw new ReceivingError("An import cannot clear a recorded receive product or unit.", 409, { code: "RECEIVING_VARIANT_REVIEW_REQUIRED" });
+        }
         await this.storage.updateReceivingLine(item.id, item.updates, tx);
       }
       const inserted = await this.storage.bulkCreateReceivingLines(linesToCreate, tx);

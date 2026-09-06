@@ -1,3 +1,4 @@
+import { readPostedReceiptUnitEvidence, resolveReceivingUnitSnapshot, ReceivingUnitSnapshotError } from "./receiving-unit-snapshot";
 import { centsToMills, millsToCents } from "@shared/utils/money";
 
 export type ReceivingReconciliationLine = {
@@ -198,7 +199,7 @@ export async function reconcilePurchaseOrderReceipt(params: {
     }
 
     const poLine = await storage.getPurchaseOrderLineById(receivingLine.purchaseOrderLineId, executor);
-    if (!poLine || (poLine.lineType ?? "product") !== "product") {
+    if (!poLine || poLine.purchaseOrderId !== poId || (poLine.lineType ?? "product") !== "product") {
       skippedLines++;
       issues.push({
         receivingLineId: receivingLine.receivingLineId,
@@ -224,11 +225,7 @@ export async function reconcilePurchaseOrderReceipt(params: {
     const receivedQty = nonNegativeSafeInteger(receivingLine.receivedQty);
     const damagedQty = nonNegativeSafeInteger(receivingLine.damagedQty ?? 0);
     const productVariantId = positiveSafeInteger(receivingLineRecord.productVariantId);
-    const receivedVariant = productVariantId
-      ? await storage.getProductVariantById(productVariantId, executor)
-      : null;
-    const receivedUnitsPerVariant = positiveSafeInteger(receivedVariant?.unitsPerVariant);
-    if (receivedQty === null || damagedQty === null || !productVariantId || !receivedVariant || !receivedUnitsPerVariant) {
+    if (receivedQty === null || damagedQty === null || !productVariantId) {
       skippedLines++;
       issues.push({
         receivingLineId: receivingLine.receivingLineId,
@@ -239,6 +236,27 @@ export async function reconcilePurchaseOrderReceipt(params: {
       continue;
     }
 
+    // Resolve from frozen receipt evidence, never from mutable catalog packs.
+    // The normal application owner supplies its transaction; a legacy call
+    // without an executor cannot safely inspect the original PO posting.
+    if (!executor || typeof executor.execute !== "function") {
+      throw new Error("PO receipt reconciliation requires a transaction executor for frozen-unit evidence");
+    }
+    const receivingOrder = await storage.getReceivingOrderById(receivingOrderId, executor);
+    const receivedUnitsPerVariant = resolveReceivingUnitSnapshot({
+      receivingLineId: receivingLine.receivingLineId,
+      receivingOrderId,
+      purchaseOrderId: poId,
+      purchaseOrderLineId: poLine.id,
+      receivedQty: Number(receivingLineRecord.receivedQty),
+      unitsPerVariantSnapshot: receivingLineRecord.unitsPerVariantSnapshot,
+      receiptStatus: String(receivingOrder?.status ?? ""),
+      postedReceipts: await readPostedReceiptUnitEvidence(executor, receivingLine.receivingLineId),
+    });
+    if (receivedQty !== receivingLineRecord.receivedQty || damagedQty !== receivingLineRecord.damagedQty) {
+      throw new ReceivingUnitSnapshotError(receivingLine.receivingLineId,
+        "PO reconciliation received or damaged counts differ from the recorded receipt");
+    }
     const baseUnitsReceived = receivedQty * receivedUnitsPerVariant;
     const damagedBaseUnits = damagedQty * receivedUnitsPerVariant;
     const currentReceivedQty = nonNegativeSafeInteger(poLine.receivedQty ?? 0);

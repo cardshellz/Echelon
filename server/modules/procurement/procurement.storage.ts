@@ -81,7 +81,7 @@ export interface IProcurementStorage {
   getReceivingLines(receivingOrderId: number, executor?: any): Promise<ReceivingLine[]>;
   getReceivingLineById(id: number, executor?: any): Promise<ReceivingLine | undefined>;
   createReceivingLine(data: InsertReceivingLine, executor?: any): Promise<ReceivingLine>;
-  updateReceivingLine(id: number, updates: Partial<InsertReceivingLine>, executor?: any): Promise<ReceivingLine | null>;
+  updateReceivingLine(id: number, updates: Partial<InsertReceivingLine> & { updatedAt?: Date }, executor?: any): Promise<ReceivingLine | null>;
   deleteReceivingLine(id: number, executor?: any): Promise<boolean>;
   bulkCreateReceivingLines(lines: InsertReceivingLine[], executor?: any): Promise<ReceivingLine[]>;
   getVendorProducts(filters?: { vendorId?: number; productId?: number; productVariantId?: number; isActive?: number }, executor?: any): Promise<VendorProduct[]>;
@@ -351,9 +351,9 @@ export const procurementMethods: IProcurementStorage = {
     return result[0];
   },
 
-  async updateReceivingLine(id: number, updates: Partial<InsertReceivingLine>, executor: any = db): Promise<ReceivingLine | null> {
+  async updateReceivingLine(id: number, updates: Partial<InsertReceivingLine> & { updatedAt?: Date }, executor: any = db): Promise<ReceivingLine | null> {
     const result = await executor.update(receivingLines)
-      .set({ ...updates, updatedAt: new Date() })
+      .set({ ...updates, updatedAt: updates.updatedAt ?? new Date() })
       .where(eq(receivingLines.id, id))
       .returning();
     return result[0] || null;

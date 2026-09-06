@@ -1,3 +1,4 @@
+import { parseShipmentReceiptResolution, requiresReceiptUnitReview } from "@/lib/shipment-receipt-units";
 import React from "react";
 import { useAuth } from "@/lib/auth";
 import { createShipmentLineCommandClient, createShipmentLineRecoveryStore } from "@/lib/shipment-line-command";
@@ -1675,7 +1676,7 @@ export default function PurchaseOrderDetail() {
     const res = await fetch(`/api/inbound-shipments/${params.shipmentId}/receipt-pack-resolution?${query.toString()}`);
     const body = await res.json().catch(() => null);
     if (!res.ok) throw new Error(body?.error || "Failed to check shipment receipt packs");
-    return body as ShipmentReceiptPackResolution;
+    return parseShipmentReceiptResolution(body, params);
   }
 
   async function openShipmentReceiptPackBlocker(params: { shipmentId: number; purchaseOrderId: number } | undefined | null): Promise<boolean> {
@@ -1686,7 +1687,7 @@ export default function PurchaseOrderDetail() {
     try {
       const resolution = await fetchShipmentReceiptPackResolution(params);
       if (!navigation.isCurrent()) return false;
-      if (!resolution.canCreateReceipt) {
+      if (requiresReceiptUnitReview(resolution)) {
         setShipmentReceiptPackResolution(resolution);
         return true;
       }
@@ -1708,7 +1709,7 @@ export default function PurchaseOrderDetail() {
     }
     try {
       const resolution = await fetchShipmentReceiptPackResolution(params);
-      if (!resolution.canCreateReceipt) {
+      if (requiresReceiptUnitReview(resolution)) {
         if (navigation.isCurrent()) setShipmentReceiptPackResolution(resolution);
         return;
       }
@@ -1762,10 +1763,8 @@ export default function PurchaseOrderDetail() {
       receiptSetup: "1",
       returnTo,
     });
-    if (line?.unitsPerCarton && Number(line.unitsPerCarton) > 0) {
-      setupParams.set("unitsPerVariant", String(line.unitsPerCarton));
-      setupParams.set("hierarchyLevel", "3");
-    }
+    // Open the source product for explicit receive-variant setup; the catalog
+    // URL currently cannot seed a one-piece UOM without defaulting to a case.
     if (line?.sku) setupParams.set("shipmentSku", line.sku);
 
     if (line?.productId) {

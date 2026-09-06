@@ -147,7 +147,8 @@ function buildService(
   } = {},
 ) {
   const updatedAt = new Date("2026-07-20T12:00:00.000Z");
-  const versionedLines = lines.map((line) => ({ ...line, updatedAt }));
+  const versionedLines = lines.map((line) => ({ expectedQty: line.receivedQty, damagedQty: 0,
+    productId: 1, unitsPerVariantSnapshot: opts.unitsPerVariant ?? 1, ...line, updatedAt }));
   const updateReceivingLineCalls: Array<{ id: number; updates: any }> = [];
   const receiveInventoryCalls: Array<any> = [];
 
@@ -172,13 +173,13 @@ function buildService(
     getProductVariantById: vi.fn().mockResolvedValue({ id: 11, hierarchyLevel: 1, unitsPerVariant: 1, productId: 1 }),
     getProductVariantsByProductId: vi.fn().mockResolvedValue([]),
     getPurchaseOrderLineById: vi.fn((id: number) =>
-      Promise.resolve(poLines[id] ? { id, ...poLines[id] } : null),
+      Promise.resolve(versionedLines.some((line) => line.purchaseOrderLineId === id) ? { id, productId: 1, purchaseOrderId: 123, ...poLines[id] } : null),
     ),
   } as any;
 
   // The close runs SELECT units_per_variant via tx.execute when scaling cost to the
   // lot's variant unit; return a row so the per-unit × pack-size math has a value.
-  const upvRows = { rows: [{ units_per_variant: opts.unitsPerVariant ?? 1 }] };
+  const upvRows = { rows: [{ id: 11, product_id: 1, units_per_variant: opts.unitsPerVariant ?? 1, is_active: true }] };
   const transactionClient = { execute: vi.fn().mockResolvedValue(upvRows) };
   const db = {
     transaction: vi.fn(async (fn: any) =>

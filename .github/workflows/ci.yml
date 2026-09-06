@@ -86,6 +86,10 @@ jobs:
         run: >-
           npx vitest run
           server/modules/procurement/__tests__/integration/shipment-line-commands.integration.test.ts
+      - name: Receiving unit integrity PostgreSQL guarantees
+        run: >-
+          npx vitest run
+          server/modules/procurement/__tests__/integration/receiving-unit-integrity.integration.test.ts
       - name: PO lifecycle timestamp PostgreSQL guarantees
         run: >-
           npx vitest run
