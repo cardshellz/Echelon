@@ -814,6 +814,7 @@
   ],
   "public.idempotency_keys": [
     "modules/inventory-planning",
+    "modules/warehouse",
     "server/middleware/idempotency.ts"
   ],
   "public.notification_preferences": [
@@ -978,6 +979,9 @@
     "modules/orders",
     "modules/warehouse",
     "server/routes/pick-priority.routes.ts"
+  ],
+  "warehouse.fulfillment_nodes": [
+    "modules/warehouse"
   ],
   "warehouse.product_locations": [
     "modules/catalog",

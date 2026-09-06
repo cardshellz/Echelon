@@ -34,6 +34,7 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/lib/auth";
+import { WarehouseInventorySourceSetup } from "@/components/inventory/WarehouseInventorySourceSetup";
 
 type PolicyScopeType = ChannelExposurePolicyScope["scopeType"];
 type PolicyForm = {
@@ -367,6 +368,8 @@ export default function InventoryExposure() {
           <Badge variant="secondary">Legacy runtime retained</Badge>
         </div>
       </div>
+
+      <WarehouseInventorySourceSetup canEdit={canEdit} />
 
       <Card>
         <CardHeader>
