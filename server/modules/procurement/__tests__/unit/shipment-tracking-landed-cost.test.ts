@@ -7,6 +7,7 @@ import {
 
 function buildTransactionalDb() {
   const tx = {
+    insert: vi.fn(() => ({ values: vi.fn().mockResolvedValue(undefined) })),
     execute: vi.fn().mockResolvedValue({ rows: [{ id: 1 }] }),
   };
   const db = {
@@ -752,19 +753,19 @@ describe("ShipmentTrackingService cost mutation integrity", () => {
         { id: 11, sku: "SKU-1", qtyShipped: 0, totalWeightKg: "1" },
       ]),
       getInboundFreightCosts: vi.fn().mockResolvedValue([
-        { id: 31, inboundShipmentId: 1, costType: "freight", actualCents: 100, allocationMethod: "by_weight" },
+        { id: 31, inboundShipmentId: 1, costType: "freight", actualCents: 100, allocationMethod: "by_weight", currency: "USD", exchangeRate: "1" },
       ]),
     });
     const service = createShipmentTrackingService(db as any, storage);
 
-    await expect(service.addCost(1, { costType: "freight", actualCents: 100 })).rejects.toMatchObject({
+    await expect(db.transaction((executor) => service.executeCostCommandInTransaction(executor, { operation: "create", resourceId: 1, body: { costType: "freight", actualCents: 100 } }, "test-user", new Date("2026-09-06T12:00:00.000Z")))).rejects.toMatchObject({
       statusCode: 409,
       details: expect.objectContaining({ code: "INVALID_SHIPMENT_LINE_QUANTITY" }),
     });
 
     expect(storage.createInboundFreightCost).toHaveBeenCalledWith(
       expect.objectContaining({ inboundShipmentId: 1, costType: "freight", actualCents: 100 }),
-      tx,
+      tx, new Date("2026-09-06T12:00:00.000Z"),
     );
     expect(storage.updateInboundShipment).toHaveBeenCalledWith(1, expect.any(Object), tx);
     expect(storage.deleteAllocationsForShipment).not.toHaveBeenCalled();

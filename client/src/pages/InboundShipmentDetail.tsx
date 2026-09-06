@@ -1,4 +1,4 @@
-import { dollarsToCents, formatMills } from "@shared/utils/money";
+import { formatMills } from "@shared/utils/money";
 import { useEffect, useMemo, useState, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link, useLocation, useSearch } from "wouter";
@@ -21,6 +21,21 @@ import { Separator } from "@/components/ui/separator";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
+import { useAuth } from "@/lib/auth";
+import { createShipmentCostRecoveryStore, type ShipmentCostCreateRecovery } from "@/lib/shipment-cost-create-recovery";
+import {
+  createShipmentCostCommandClient,
+  createShipmentCostPayload,
+  effectiveShipmentCostCents,
+  deleteShipmentCostPayload,
+  canEditShipmentCostEconomics,
+  shipmentCostEditorFromRecord,
+  shipmentCostFormFromCreate,
+  shipmentCostNeedsRefresh,
+  updateShipmentCostPayload,
+  type ShipmentCostEditor,
+  type ShipmentCostForm,
+} from "@/lib/shipment-cost-command";
 import { AddInvoiceFromCostsModal } from "@/components/shipment/AddInvoiceFromCostsModal";
 import {
   ShipmentReceiptPackResolutionDialog,
@@ -290,6 +305,7 @@ function formatDate(val: string | Date | null | undefined): string {
 
 export default function InboundShipmentDetail() {
   const { toast } = useToast();
+  const { user } = useAuth();
   const queryClient = useQueryClient();
   const [location, navigate] = useLocation();
   const searchStr = useSearch();
@@ -379,7 +395,7 @@ export default function InboundShipmentDetail() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Add cost form
-  const [newCost, setNewCost] = useState({
+  const [newCost, setNewCost] = useState<ShipmentCostForm>({
     costType: "freight",
     description: "",
     amount: "",
@@ -393,10 +409,45 @@ export default function InboundShipmentDetail() {
   const [costVendorSearch, setCostVendorSearch] = useState("");
 
   // Edit cost form
-  const [editingCost, setEditingCost] = useState<any>(null);
+  const [editingCost, setEditingCost] = useState<ShipmentCostEditor | null>(null);
+  const [costEditConflict, setCostEditConflict] = useState(false);
+  const [reloadingCost, setReloadingCost] = useState(false);
+  const [costCreateRecovery, setCostCreateRecovery] = useState<ShipmentCostCreateRecovery | null>(null);
+  const [costCreateRecoveryError, setCostCreateRecoveryError] = useState<string | null>(null);
+  const costRecoveryStore = useMemo(() => user?.id
+    ? createShipmentCostRecoveryStore(() => window.sessionStorage, user.id) : null, [user?.id]);
+  const costCommands = useMemo(() => createShipmentCostCommandClient(
+    () => `shipment-cost-${crypto.randomUUID()}`, costRecoveryStore ?? undefined,
+  ), [costRecoveryStore]);
   const [editCostVendorOpen, setEditCostVendorOpen] = useState(false);
   const [editCostVendorSearch, setEditCostVendorSearch] = useState("");
 
+  const refreshCreateRecovery = () => {
+    if (!shipmentId || !costRecoveryStore) return;
+    try {
+      const recovery = costRecoveryStore.read(shipmentId);
+      setCostCreateRecovery(recovery);
+      setCostCreateRecoveryError(null);
+      if (recovery) {
+        setNewCost(shipmentCostFormFromCreate(recovery.body));
+        setShowAddCostDialog(true);
+      }
+    } catch (error) {
+      setCostCreateRecoveryError(error instanceof Error ? error.message : "Saved cost commands could not be read.");
+    }
+  };
+  useEffect(() => {
+    // A cost draft/version belongs to one shipment. Recovery never executes a command.
+    setShowAddCostDialog(false);
+    setShowEditCostDialog(false);
+    setEditingCost(null);
+    setCostEditConflict(false);
+    setReloadingCost(false);
+    setCostCreateRecovery(null);
+    setCostCreateRecoveryError(null);
+    setNewCost({ costType: "freight", description: "", amount: "", allocationMethod: "default", vendorName: "", vendorId: null, performedByName: "", costDate: "" });
+    refreshCreateRecovery();
+  }, [shipmentId, costRecoveryStore]);
   // Add Invoice modal (multi-step: vendor picker → invoice preview)
   const [showAddInvoiceModal, setShowAddInvoiceModal] = useState(false);
 
@@ -824,71 +875,128 @@ export default function InboundShipmentDetail() {
     },
   });
 
-  // Cost mutations
+  // Cost commands retain the submitted version and key until the outcome is known.
+  const refreshCostCommandViews = async (originatingShipmentId: number): Promise<boolean> => {
+    try {
+      await queryClient.invalidateQueries({
+        predicate: (query) => {
+          const key = query.queryKey[0];
+          return typeof key === "string" && (
+            key === "/api/inbound-shipments"
+            || key === `/api/inbound-shipments/${originatingShipmentId}`
+            || key.startsWith(`/api/inbound-shipments/${originatingShipmentId}/`)
+            || key.startsWith("/api/purchase-orders/")
+          );
+        },
+      }, { throwOnError: true });
+      return true;
+    } catch (error) {
+      console.error("Shipment cost command views could not be refreshed", { shipmentId: originatingShipmentId, error });
+      return false;
+    }
+  };
+  const openCostEditor = (cost: unknown) => {
+    try {
+      setEditingCost(shipmentCostEditorFromRecord(cost, shipmentId ?? undefined));
+      setCostEditConflict(false);
+      setShowEditCostDialog(true);
+    } catch (error) {
+      toast({ title: "Cannot edit cost", description: error instanceof Error ? error.message : "Refresh cost details and try again.", variant: "destructive" });
+    }
+  };
+  const reloadCostEditor = async () => {
+    if (!shipmentId || !editingCost) return;
+    const origin = captureNavigation();
+    const costId = editingCost.id;
+    setReloadingCost(true);
+    try {
+      const response = await apiRequest("GET", `/api/inbound-shipments/${shipmentId}/costs`);
+      const records: unknown = await response.json();
+      if (!Array.isArray(records)) throw new Error("The latest cost details could not be verified.");
+      const cost = records.find((record: unknown) => typeof record === "object" && record !== null && "id" in record && record.id === costId);
+      const editor = shipmentCostEditorFromRecord(cost, shipmentId ?? undefined);
+      if (origin.isCurrent()) {
+        setEditingCost(editor);
+        setCostEditConflict(false);
+      }
+    } catch (error) {
+      if (origin.isCurrent()) toast({ title: "Cannot reload cost", description: error instanceof Error ? error.message : "Refresh the shipment and try again.", variant: "destructive" });
+    } finally {
+      if (origin.isCurrent()) setReloadingCost(false);
+    }
+  };
+  const costCommandError = async (error: Error, originatingShipmentId: number, context: NavigationSnapshot | undefined, editing = false) => {
+    const conflict = shipmentCostNeedsRefresh(error);
+    if (conflict && context?.isCurrent() && editing) setCostEditConflict(true);
+    if (context?.isCurrent()) {
+      toast({
+        title: conflict ? "Cost changed — review latest details" : "Cost command failed",
+        description: conflict
+          ? editing ? "Your draft is preserved. Load the latest cost before saving again." : `${error.message} The shipment is being refreshed.`
+          : error.message,
+        variant: "destructive",
+      });
+    }
+    if (conflict) await refreshCostCommandViews(originatingShipmentId);
+  };
   const addCostMutation = useMutation({
-    mutationFn: async (data: any) => {
-      const { amount, costDate, vendorName: _vn, ...rest } = data;
-      const cents = dollarsToCents(amount || "0");
-      const payload = {
-        ...rest,
-        estimatedCents: cents,
-        actualCents: cents,
-        allocationMethod: data.allocationMethod === "default" ? null : data.allocationMethod,
-        invoiceDate: costDate ? new Date(costDate + "T00:00:00").toISOString() : null,
-      };
-      const res = await apiRequest("POST", `/api/inbound-shipments/${shipmentId}/costs`, payload);
-      return res.json();
+    mutationFn: async ({ originatingShipmentId, form, recoveryBody }: { originatingShipmentId: number; form: ShipmentCostForm; recoveryBody?: ReturnType<typeof createShipmentCostPayload> }) => {
+      if (!costRecoveryStore) throw new Error("Sign in before creating a shipment cost.");
+      await costCommands.execute({ method: "POST", shipmentId: originatingShipmentId, body: recoveryBody ?? createShipmentCostPayload(form) });
     },
-    onSuccess: async () => {
-      await refreshShipmentCostingViews();
+    onMutate: () => captureNavigation(),
+    onSuccess: async (_data, variables, context) => {
+      const refreshed = await refreshCostCommandViews(variables.originatingShipmentId);
+      if (!context?.isCurrent()) return;
       setShowAddCostDialog(false);
+      setCostCreateRecovery(null);
       setNewCost({ costType: "freight", description: "", amount: "", allocationMethod: "default", vendorName: "", vendorId: null, performedByName: "", costDate: "" });
       setCostVendorSearch("");
-      toast({ title: "Cost added" });
+      toast({ title: "Cost added", description: refreshed ? undefined : "The cost was saved, but the view could not refresh. Refresh the shipment to see current details." });
     },
-    onError: (err: Error) => {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
+    onError: (error: Error, variables, context) => {
+      if (context?.isCurrent()) refreshCreateRecovery();
+      return costCommandError(error, variables.originatingShipmentId, context);
     },
   });
-
   const updateCostMutation = useMutation({
-    mutationFn: async ({ costId, data }: { costId: number; data: any }) => {
-      const { amount, costDate, vendorName: _vn, ...rest } = data;
-      const cents = dollarsToCents(amount || "0");
-      const payload = {
-        ...rest,
-        estimatedCents: cents,
-        actualCents: cents,
-        allocationMethod: data.allocationMethod === "default" ? null : data.allocationMethod,
-        invoiceDate: costDate ? new Date(costDate + "T00:00:00").toISOString() : null,
-      };
-      const res = await apiRequest("PATCH", `/api/inbound-shipments/costs/${costId}`, payload);
-      return res.json();
+    mutationFn: async ({ originatingShipmentId, editor }: { originatingShipmentId: number; editor: ShipmentCostEditor }) => {
+      if (editor.inboundShipmentId !== originatingShipmentId) throw new Error("This edit belongs to a different shipment. Reopen its cost details.");
+      await costCommands.execute({ method: "PATCH", shipmentId: originatingShipmentId, costId: editor.id, body: updateShipmentCostPayload(editor) });
     },
-    onSuccess: async () => {
-      await refreshShipmentCostingViews();
+    onMutate: () => captureNavigation(),
+    onSuccess: async (_data, variables, context) => {
+      const refreshed = await refreshCostCommandViews(variables.originatingShipmentId);
+      if (!context?.isCurrent()) return;
       setShowEditCostDialog(false);
       setEditingCost(null);
-      toast({ title: "Cost updated" });
+      setCostEditConflict(false);
+      toast({ title: "Cost updated", description: refreshed ? undefined : "The cost was saved, but the view could not refresh. Refresh the shipment to see current details." });
     },
-    onError: (err: Error) => {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
-    },
+    onError: (error: Error, variables, context) => costCommandError(error, variables.originatingShipmentId, context, true),
   });
-
   const deleteCostMutation = useMutation({
-    mutationFn: async (costId: number) => {
-      const res = await apiRequest("DELETE", `/api/inbound-shipments/costs/${costId}`);
-      return res.json();
+    mutationFn: async ({ originatingShipmentId, cost }: { originatingShipmentId: number; cost: { id: number } }) => {
+      await costCommands.execute({ method: "DELETE", shipmentId: originatingShipmentId, costId: cost.id, body: deleteShipmentCostPayload(cost, originatingShipmentId) });
     },
-    onSuccess: async () => {
-      await refreshShipmentCostingViews();
-      toast({ title: "Cost removed" });
+    onMutate: () => captureNavigation(),
+    onSuccess: async (_data, variables, context) => {
+      const refreshed = await refreshCostCommandViews(variables.originatingShipmentId);
+      if (context?.isCurrent()) toast({ title: "Cost removed", description: refreshed ? undefined : "The cost was removed, but the view could not refresh. Refresh the shipment to see current details." });
     },
-    onError: (err: Error) => {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
-    },
+    onError: (error: Error, variables, context) => costCommandError(error, variables.originatingShipmentId, context),
   });
+  const costCommandPending = addCostMutation.isPending || updateCostMutation.isPending || deleteCostMutation.isPending;
+  useEffect(() => {
+    if (!costCreateRecovery && !addCostMutation.isPending) return;
+    const warnBeforeLeaving = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warnBeforeLeaving);
+    return () => window.removeEventListener("beforeunload", warnBeforeLeaving);
+  }, [costCreateRecovery, addCostMutation.isPending]);
+
 
   const createVendorMutation = useMutation({
     mutationFn: async (data: any) => {
@@ -1694,7 +1802,7 @@ export default function InboundShipmentDetail() {
         <TabsContent value="costs" className="space-y-4">
           <div className="flex flex-wrap items-center gap-2">
             {isEditable && (
-              <Button variant="outline" onClick={() => setShowAddCostDialog(true)} className="min-h-[44px]">
+              <Button variant="outline" onClick={() => setShowAddCostDialog(true)} disabled={!!costCreateRecoveryError} className="min-h-[44px]">
                 <Plus className="h-4 w-4 mr-2" />
                 Add Cost
               </Button>
@@ -1706,6 +1814,21 @@ export default function InboundShipmentDetail() {
               </Button>
             )}
           </div>
+
+          {costCreateRecovery && (
+            <div role="status" className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
+              <p className="font-medium">Cost creation needs review</p>
+              <p>The original request is retained. Review its result or retry it before creating another cost.</p>
+              <Button type="button" variant="outline" className="mt-2" onClick={() => setShowAddCostDialog(true)}>Review pending cost</Button>
+            </div>
+          )}
+
+          {costCreateRecoveryError && (
+            <div role="alert" className="rounded-md border border-destructive p-3 text-sm">
+              <p>{costCreateRecoveryError}</p>
+              <Button type="button" variant="outline" onClick={refreshCreateRecovery} className="mt-2">Check saved command</Button>
+            </div>
+          )}
 
           {/* Payment summary bar */}
           {paymentStatus?.summary && costs.length > 0 && (
@@ -1738,7 +1861,7 @@ export default function InboundShipmentDetail() {
                           </div>
                           {cost.description && <div className="text-sm mt-1 truncate">{cost.description}</div>}
                           <div className="flex items-center gap-2 mt-1">
-                            <span className="text-sm font-mono">{formatCents(cost.estimatedCents || cost.actualCents)}</span>
+                            <span className="text-sm font-mono">{formatCents(effectiveShipmentCostCents(cost))}</span>
                             {cost.vendorName && <span className="text-xs text-muted-foreground">Pay to: {cost.vendorName}</span>}
                             {cost.performedByName && <span className="text-xs text-muted-foreground">By: {cost.performedByName}</span>}
                             {(() => {
@@ -1764,31 +1887,20 @@ export default function InboundShipmentDetail() {
                               variant="ghost"
                               size="sm"
                               className="min-h-[44px] min-w-[44px] p-0"
-                              onClick={() => {
-                                setEditingCost({
-                                  id: cost.id,
-                                  costType: cost.costType,
-                                  description: cost.description || "",
-                                  amount: (cost.estimatedCents || cost.actualCents) ? ((cost.estimatedCents || cost.actualCents) / 100).toFixed(2) : "",
-                                  allocationMethod: cost.allocationMethod || "default",
-                                  vendorId: cost.vendorId || null,
-                                  vendorName: cost.vendorName || "",
-                                  performedByName: cost.performedByName || "",
-                                  costDate: cost.invoiceDate ? format(new Date(cost.invoiceDate), "yyyy-MM-dd") : "",
-                                });
-                                setShowEditCostDialog(true);
-                              }}
+                              aria-label="Edit cost" onClick={() => openCostEditor(cost)} disabled={costCommandPending}
                             >
                               <Pencil className="h-4 w-4" />
                             </Button>
+                            {canEditShipmentCostEconomics(cost) && (
                             <Button
                               variant="ghost"
                               size="sm"
                               className="min-h-[44px] min-w-[44px] p-0"
-                              onClick={() => { if (confirm("Remove this cost?")) deleteCostMutation.mutate(cost.id); }}
+                              disabled={costCommandPending} aria-label="Remove cost" onClick={() => { if (confirm("Remove this cost?")) deleteCostMutation.mutate({ originatingShipmentId: shipmentId!, cost }); }}
                             >
                               <Trash2 className="h-4 w-4 text-red-500" />
                             </Button>
+                            )}
                           </div>
                         )}
                       </div>
@@ -1800,7 +1912,7 @@ export default function InboundShipmentDetail() {
                   <CardContent className="p-3">
                     <div className="flex justify-between text-sm font-medium">
                       <span>Total</span>
-                      <span className="font-mono">{formatCents(costs.reduce((sum: number, c: any) => sum + (c.estimatedCents || c.actualCents || 0), 0))}</span>
+                      <span className="font-mono">{formatCents(costs.reduce((sum: number, c: any) => sum + (effectiveShipmentCostCents(c) ?? 0), 0))}</span>
                     </div>
                   </CardContent>
                 </Card>
@@ -1843,7 +1955,7 @@ export default function InboundShipmentDetail() {
                           <Badge variant="outline" className="text-xs capitalize">{cost.costType.replace(/_/g, " ")}</Badge>
                         </TableCell>
                         <TableCell className="max-w-[200px] truncate">{cost.description || "—"}</TableCell>
-                        <TableCell className="text-right font-mono">{formatCents(cost.estimatedCents || cost.actualCents)}</TableCell>
+                        <TableCell className="text-right font-mono">{formatCents(effectiveShipmentCostCents(cost))}</TableCell>
                         <TableCell className="text-sm">
                           {cost.vendorName || "—"}
                           {cost.linkedInvoice && (
@@ -1888,31 +2000,20 @@ export default function InboundShipmentDetail() {
                               <Button
                                 variant="ghost"
                                 size="sm"
-                                onClick={() => {
-                                  setEditingCost({
-                                    id: cost.id,
-                                    costType: cost.costType,
-                                    description: cost.description || "",
-                                    amount: (cost.estimatedCents || cost.actualCents) ? ((cost.estimatedCents || cost.actualCents) / 100).toFixed(2) : "",
-                                    allocationMethod: cost.allocationMethod || "default",
-                                    vendorId: cost.vendorId || null,
-                                    vendorName: cost.vendorName || "",
-                                    performedByName: cost.performedByName || "",
-                                    costDate: cost.invoiceDate ? format(new Date(cost.invoiceDate), "yyyy-MM-dd") : "",
-                                  });
-                                  setShowEditCostDialog(true);
-                                }}
+                                aria-label="Edit cost" onClick={() => openCostEditor(cost)} disabled={costCommandPending}
                               >
                                 <Pencil className="h-4 w-4" />
                               </Button>
+                            {canEditShipmentCostEconomics(cost) && (
                               <Button
                                 variant="ghost"
                                 size="sm"
-                                onClick={() => { if (confirm("Remove this cost?")) deleteCostMutation.mutate(cost.id); }}
-                                disabled={deleteCostMutation.isPending}
+                                aria-label="Remove cost" onClick={() => { if (confirm("Remove this cost?")) deleteCostMutation.mutate({ originatingShipmentId: shipmentId!, cost }); }}
+                                disabled={costCommandPending}
                               >
                                 <Trash2 className="h-4 w-4 text-red-500" />
                               </Button>
+                            )}
                             </div>
                           </TableCell>
                         )}
@@ -1922,7 +2023,7 @@ export default function InboundShipmentDetail() {
                     <TableRow className="bg-muted/50 font-medium">
                       <TableCell colSpan={3} className="text-right">Total</TableCell>
                       <TableCell className="text-right font-mono">
-                        {formatCents(costs.reduce((sum: number, c: any) => sum + (c.estimatedCents || c.actualCents || 0), 0))}
+                        {formatCents(costs.reduce((sum: number, c: any) => sum + (effectiveShipmentCostCents(c) ?? 0), 0))}
                       </TableCell>
                       <TableCell colSpan={isEditable ? 5 : 4} />
                     </TableRow>
@@ -2844,13 +2945,15 @@ export default function InboundShipmentDetail() {
       </Dialog>
 
       {/* ═══════ Add Cost Dialog ═══════ */}
-      <Dialog open={showAddCostDialog} onOpenChange={setShowAddCostDialog}>
-        <DialogContent className="max-w-md">
+      <Dialog open={showAddCostDialog} onOpenChange={(open) => { if (!addCostMutation.isPending) setShowAddCostDialog(open); }}>
+        <DialogContent className="max-w-md max-h-[90dvh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Add Shipment Cost</DialogTitle>
             <DialogDescription>Record a cost associated with this shipment.</DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
+            {costCreateRecovery && <p role="alert" className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">This cost may already be saved. Retry sends the original request and key to confirm the result. Its details stay locked until that result is known.</p>}
+            <fieldset disabled={addCostMutation.isPending || !!costCreateRecovery} className="min-w-0 space-y-4">
             <div className="space-y-2">
               <Label>Cost Type *</Label>
               <Select value={newCost.costType} onValueChange={(v) => setNewCost((prev) => ({
@@ -2950,7 +3053,6 @@ export default function InboundShipmentDetail() {
                 <Input
                   type="number"
                   step="0.01"
-                  min="0"
                   value={newCost.amount}
                   onChange={(e) => setNewCost((prev) => ({ ...prev, amount: e.target.value }))}
                   placeholder="0.00"
@@ -2975,13 +3077,14 @@ export default function InboundShipmentDetail() {
               </div>
             </div>
 
+            </fieldset>
             <div className="flex gap-2 justify-end">
-              <Button variant="outline" onClick={() => setShowAddCostDialog(false)}>Cancel</Button>
+              <Button variant="outline" disabled={addCostMutation.isPending} onClick={() => setShowAddCostDialog(false)}>{costCreateRecovery ? "Close" : "Cancel"}</Button>
               <Button
-                onClick={() => addCostMutation.mutate(newCost)}
+                onClick={() => addCostMutation.mutate({ originatingShipmentId: shipmentId!, form: newCost, recoveryBody: costCreateRecovery?.body })}
                 disabled={addCostMutation.isPending}
               >
-                {addCostMutation.isPending ? "Adding..." : "Add Cost"}
+                {addCostMutation.isPending ? "Saving..." : costCreateRecovery ? "Retry cost" : "Add Cost"}
               </Button>
             </div>
           </div>
@@ -2989,17 +3092,26 @@ export default function InboundShipmentDetail() {
       </Dialog>
 
       {/* ═══════ Edit Cost Dialog ═══════ */}
-      <Dialog open={showEditCostDialog} onOpenChange={(open) => { setShowEditCostDialog(open); if (!open) setEditingCost(null); }}>
-        <DialogContent className="max-w-md">
+      <Dialog open={showEditCostDialog} onOpenChange={(open) => { if (!updateCostMutation.isPending && !reloadingCost) { setShowEditCostDialog(open); if (!open) { setEditingCost(null); setCostEditConflict(false); } } }}>
+        <DialogContent className="max-w-md max-h-[90dvh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Edit Cost</DialogTitle>
             <DialogDescription>Update cost details.</DialogDescription>
+            {editingCost?.economicFieldsLocked && <p className="text-sm text-muted-foreground">This cost is controlled by an invoice or requires currency review. Only its description and performer can be edited here.</p>}
           </DialogHeader>
           {editingCost && (
-            <div className="space-y-4">
+            <fieldset disabled={updateCostMutation.isPending || reloadingCost} className="min-w-0 space-y-4">
+              {costEditConflict && (
+                <div role="alert" className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
+                  <p>Your draft is preserved. Loading the latest cost replaces this draft so you can review the current details before editing again.</p>
+                  <Button type="button" variant="outline" className="mt-2" disabled={reloadingCost} onClick={reloadCostEditor}>
+                    {reloadingCost ? "Loading..." : "Load latest cost"}
+                  </Button>
+                </div>
+              )}
               <div className="space-y-2">
                 <Label>Cost Type</Label>
-                <Select value={editingCost.costType} onValueChange={(v) => setEditingCost((prev: any) => ({
+                <Select disabled={editingCost.economicFieldsLocked} value={editingCost.costType} onValueChange={(v) => setEditingCost((prev: any) => ({
                   ...prev,
                   costType: v,
                   allocationMethod: COST_TYPE_ALLOCATION_OVERRIDES[v] || prev.allocationMethod,
@@ -3020,7 +3132,7 @@ export default function InboundShipmentDetail() {
                   <Label>Date</Label>
                   <Input
                     type="date"
-                    value={editingCost.costDate}
+                    disabled={editingCost.economicFieldsLocked} value={editingCost.costDate}
                     onChange={(e) => setEditingCost((prev: any) => ({ ...prev, costDate: e.target.value }))}
                     className="h-10"
                   />
@@ -3029,7 +3141,7 @@ export default function InboundShipmentDetail() {
                   <Label>Service Provider</Label>
                   <Popover open={editCostVendorOpen} onOpenChange={setEditCostVendorOpen}>
                     <PopoverTrigger asChild>
-                      <Button variant="outline" role="combobox" className="w-full justify-between h-10 font-normal">
+                      <Button disabled={editingCost.economicFieldsLocked} variant="outline" role="combobox" className="w-full justify-between h-10 font-normal">
                         {editingCost.vendorName || "Select vendor..."}
                         <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
                       </Button>
@@ -3095,8 +3207,7 @@ export default function InboundShipmentDetail() {
                   <Input
                     type="number"
                     step="0.01"
-                    min="0"
-                    value={editingCost.amount}
+                    disabled={editingCost.economicFieldsLocked} value={editingCost.amount}
                     onChange={(e) => setEditingCost((prev: any) => ({ ...prev, amount: e.target.value }))}
                     placeholder="0.00"
                     className="h-10"
@@ -3104,7 +3215,7 @@ export default function InboundShipmentDetail() {
                 </div>
                 <div className="space-y-2">
                   <Label>Allocation Method</Label>
-                  <Select value={editingCost.allocationMethod || "default"} onValueChange={(v) => setEditingCost((prev: any) => ({ ...prev, allocationMethod: v }))}>
+                  <Select disabled={editingCost.economicFieldsLocked} value={editingCost.allocationMethod || "default"} onValueChange={(v) => setEditingCost((prev: any) => ({ ...prev, allocationMethod: v }))}>
                     <SelectTrigger className="h-10">
                       <SelectValue />
                     </SelectTrigger>
@@ -3121,18 +3232,15 @@ export default function InboundShipmentDetail() {
               </div>
 
               <div className="flex gap-2 justify-end">
-                <Button variant="outline" onClick={() => { setShowEditCostDialog(false); setEditingCost(null); }}>Cancel</Button>
+                <Button variant="outline" disabled={updateCostMutation.isPending || reloadingCost} onClick={() => { setShowEditCostDialog(false); setEditingCost(null); setCostEditConflict(false); }}>Cancel</Button>
                 <Button
-                  onClick={() => {
-                    const { id, ...data } = editingCost;
-                    updateCostMutation.mutate({ costId: id, data });
-                  }}
-                  disabled={updateCostMutation.isPending}
+                  onClick={() => updateCostMutation.mutate({ originatingShipmentId: shipmentId!, editor: editingCost })}
+                  disabled={updateCostMutation.isPending || costEditConflict || reloadingCost}
                 >
                   {updateCostMutation.isPending ? "Saving..." : "Save Changes"}
                 </Button>
               </div>
-            </div>
+            </fieldset>
           )}
         </DialogContent>
       </Dialog>
