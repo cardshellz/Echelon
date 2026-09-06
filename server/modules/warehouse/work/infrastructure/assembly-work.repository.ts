@@ -19,6 +19,12 @@ function fromRow(row: TaskRow): AssemblyTask {
 
 /** All writes require the owning claim lock FIRST; this repository never calls an inventory owner. */
 export class AssemblyWorkRepository {
+  async forClaims(client: PoolClient, claimIds: readonly string[]): Promise<AssemblyTask[]> {
+    if (claimIds.length === 0) return [];
+    const result = await client.query<TaskRow>("SELECT * FROM warehouse.work_items WHERE claim_id=ANY($1::bigint[]) ORDER BY id LIMIT 10001", [[...new Set(claimIds)]]);
+    if (result.rows.length > 10000) throw new WarehouseWorkError("WORK_READ_LIMIT_EXCEEDED", "Narrow the work query", 422);
+    return result.rows.map(fromRow);
+  }
   async byId(client: PoolClient, id: string, lock = false): Promise<AssemblyTask | null> {
     const result = await client.query<TaskRow>(`SELECT * FROM warehouse.work_items WHERE id=$1 ${lock ? "FOR UPDATE" : ""}`, [id]);
     return result.rows[0] ? fromRow(result.rows[0]) : null;

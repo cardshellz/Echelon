@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { assemblyOutputPickFenceSchema } from "../warehouse-assembly-execution";
 import { assemblyWorkRouteSchema, assemblyWorkFenceSchema, workEvidenceIdSchema } from "../warehouse-assembly-work";
 
 import {
@@ -95,6 +96,7 @@ const canonicalAvailabilityClaimPickCommandBaseSchema = z.object({
    * repository tests; the authority-aware picker boundary requires it.
    */
   wmsProgress: canonicalWmsPickProgressSchema.optional(),
+  assemblyWork: assemblyOutputPickFenceSchema.optional(),
 });
 
 export const canonicalAvailabilityClaimPickCommandSchema = z.discriminatedUnion("locationStrategy", [
@@ -115,6 +117,9 @@ export const canonicalAvailabilityClaimPickCommandSchema = z.discriminatedUnion(
     }).strict(),
   }).strict(),
 ]).superRefine((command, context) => {
+  if (command.assemblyWork && (command.locationStrategy !== "strict" || !command.wmsProgress || command.wmsProgress.expectedPickedQuantity !== 0)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["assemblyWork"], message: "Assembly output requires a strict, full-line WMS pick with no previous picked quantity" });
+  }
   if (command.locationStrategy !== "reconcile_picker_observation") return;
   if (BigInt(command.observation.observedPhysicalQty) < BigInt(command.quantity)) {
     context.addIssue({

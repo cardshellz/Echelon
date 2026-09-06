@@ -603,10 +603,11 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
     expect(reviewWriter.recordReview).not.toHaveBeenCalled();
   });
 
-  it("picks an exact claim line with WMS progress and rolls the transaction back when the WMS compare-and-set fails", async () => {
+  it.each(["regular", "assembly", "assembly_rejected"] as const)("picks exact WMS progress and rolls back owner/fence failures: %s", async (mode) => {
     const plan = packageClaimPlan();
     let rejectWmsProgress = false;
     const command = {
+      ...(mode === "regular" ? {} : { assemblyWork: { taskId: "1", expectedVersion: 3, confirmPhysicalOutput: true as const } }),
       claimId: "9",
       orderItemId: 71,
       warehouseLocationId: 2,
@@ -686,6 +687,7 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
           }],
         };
       }
+      if (text.startsWith("SELECT producer_operation_key")) return { rows: [{ producer_operation_key: "build:10" }] };
       if (text.includes("FROM inventory.availability_claim_resources")) {
         return {
           rows: [{
@@ -754,7 +756,18 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
       }],
       totalCostMills: BigInt(375),
     });
-    const repository = new PostgresInventoryAvailabilityClaimRepository(writer, fake.pool, () => FIXED_TIME);
+    const work = { authorizeOutputPick: vi.fn(async () => {
+      if (mode === "assembly_rejected") throw new WarehouseWorkError("WORK_OUTPUT_PICK_FENCE_INVALID", "Wrong assembler", 409);
+      return { locationCode: "ASSEMBLY-OUTPUT", zone: "PACK" };
+    }) };
+    const repository = new PostgresInventoryAvailabilityClaimRepository(writer, fake.pool, () => FIXED_TIME, undefined, undefined, work as any);
+    if (mode === "assembly_rejected") {
+      await expect(repository.pickClaimLine(command)).rejects.toMatchObject({ code: "WORK_OUTPUT_PICK_FENCE_INVALID" });
+      expect(writer.pickResources).toHaveBeenCalledOnce();
+      expect(fake.query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
+      expect(fake.query.mock.calls.some(([sql]) => sql.startsWith("INSERT INTO inventory.availability_claim_commands"))).toBe(false);
+      return;
+    }
 
     await expect(repository.pickClaimLine(command)).resolves.toEqual({
       outcome: "picked",
@@ -770,6 +783,11 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
     });
 
     expect(writer.pickResources).toHaveBeenCalledOnce();
+    if (mode === "assembly") {
+      expect(work.authorizeOutputPick).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ producerOperationKeys: ["build:10"], actorId: "test-user" }));
+      expect(writer.pickResources.mock.invocationCallOrder[0]).toBeLessThan(work.authorizeOutputPick.mock.invocationCallOrder[0]);
+      expect(fake.query.mock.calls.some(([sql]) => sql.startsWith("UPDATE wms.order_items SET location="))).toBe(true);
+    }
     expect(fake.query.mock.calls.some(([text]) => String(text).startsWith("INSERT INTO inventory.availability_claim_pick_movements")))
       .toBe(true);
     const statements = fake.query.mock.calls.map(([text]) => String(text));
@@ -1765,7 +1783,7 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
     };
     const fake = createPool(async (text) => {
       if (text.startsWith("BEGIN") || text === "COMMIT" || text === "ROLLBACK") return { rows: [] };
-      if (text.includes("FROM wms.orders AS orders")) return { rows: [{ warehouse_status: "in_progress", on_hold: 0, assigned_picker_id: "test-user", item_on_hold: 0, item_status: "pending", requires_shipping: 1 }] };
+      if (text.includes("FROM wms.orders AS orders")) return { rows: [{ warehouse_status: "in_progress", on_hold: 0, assigned_picker_id: "test-user", item_on_hold: false, item_status: "pending", requires_shipping: 1 }] };
       if (text.includes("FROM inventory.availability_claim_commands")) return { rows: [] };
       if (text.includes("FROM inventory.availability_runtime_authority")) {
         return { rows: [{ authority: "canonical", activation_run_id: "8", revision: "2" }] };
@@ -1970,7 +1988,7 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
     };
     const fake = createPool(async (text) => {
       if (text.startsWith("BEGIN") || text === "COMMIT" || text === "ROLLBACK") return { rows: [] };
-      if (text.includes("FROM wms.orders AS orders")) return { rows: [{ warehouse_status: "in_progress", on_hold: 0, assigned_picker_id: "picker", item_on_hold: 0, item_status: "pending", requires_shipping: 1 }] };
+      if (text.includes("FROM wms.orders AS orders")) return { rows: [{ warehouse_status: "in_progress", on_hold: 0, assigned_picker_id: "picker", item_on_hold: false, item_status: "pending", requires_shipping: 1 }] };
       if (text.includes("FROM inventory.availability_claim_commands")) return { rows: [] };
       if (text.includes("FROM inventory.availability_runtime_authority")) {
         return { rows: [{ authority: "canonical", activation_run_id: "8", revision: "2" }] };

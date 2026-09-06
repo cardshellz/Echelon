@@ -90,7 +90,7 @@ export function ConfigurationEditor({ setup, url }: { setup: WorkSetup; url: str
 
   return <div className="space-y-6">
     <div className="rounded-md border border-amber-400 bg-amber-50 p-4 text-sm text-amber-950" role="status">
-      <strong>Explicit assembly handoffs only — gun and packing integration is not connected yet.</strong>
+      <strong>Explicit assembly handoffs — single-order gun and assembly execution connected; packing close is separate.</strong>
       Saving does not start jobs or post inventory. Assembly backend commands require a reviewed saved route and current employee permissions.
       Scope changes apply to existing work; route/profile changes apply to new jobs. Other warehouse workflows are unchanged.
     </div>
