@@ -116,6 +116,7 @@ function publicContext(context: Record<string, unknown> | undefined): Record<str
     "platform",
     "resource",
     "status",
+    "providerErrorIds",
     "invalidFields",
     "issues",
     "fulfillmentPolicyId",
@@ -136,6 +137,12 @@ function publicContext(context: Record<string, unknown> | undefined): Record<str
 
 function statusForError(code: string): number {
   switch (code) {
+    case "DROPSHIP_EBAY_TOKEN_REFRESH_FAILED":
+    case "DROPSHIP_EBAY_REFRESH_LOCK_UNAVAILABLE":
+    case "DROPSHIP_CREDENTIAL_CHANGED":
+    case "DROPSHIP_EBAY_TOKEN_REFRESH_INVALID_RESPONSE":
+    case "DROPSHIP_EBAY_OAUTH_NOT_CONFIGURED":
+      return 503;
     case "DROPSHIP_AUTH_REQUIRED":
       return 401;
     case "DROPSHIP_ENTITLEMENT_REQUIRED":
@@ -143,6 +150,7 @@ function statusForError(code: string): number {
     case "DROPSHIP_EBAY_STORE_REQUIRED":
     case "DROPSHIP_EBAY_STORE_CONNECTION_BLOCKED":
     case "DROPSHIP_EBAY_LISTING_SETUP_PERMISSION_REQUIRED":
+    case "DROPSHIP_EBAY_LISTING_SETUP_ACCESS_DENIED":
       return 403;
     case "DROPSHIP_STORE_CONNECTION_REQUIRED":
     case "DROPSHIP_STORE_CONNECTION_NOT_FOUND":

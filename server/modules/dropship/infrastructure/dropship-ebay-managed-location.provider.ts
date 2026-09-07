@@ -11,6 +11,7 @@ import { DropshipError } from "../domain/errors";
 import type {
   DropshipEbayRegistrationCredentialProvider,
 } from "./dropship-ebay-registration-credentials";
+import { ebayResourceErrorIdentifiers, withEbaySafeReadRecovery } from "./dropship-ebay-safe-read-recovery";
 import {
   resolveDropshipEbayProviderEnvironment,
 } from "./dropship-ebay-registration-credentials";
@@ -65,15 +66,32 @@ implements DropshipEbayManagedLocationProvider {
     storeConnectionId: number;
     originWarehouseId: number;
   }): Promise<DropshipEbayManagedLocation> {
-    const credential = await this.deps.credentials.loadFreshForStoreConnection({
-      vendorId: input.vendorId,
-      storeConnectionId: input.storeConnectionId,
+    const warehouse = await this.loadWarehouse(input.originWarehouseId);
+    const merchantLocationKey = managedMerchantLocationKeyForWarehouse(warehouse.id);
+    const { credential, existing } = await withEbaySafeReadRecovery({
+      ...input,
+      credentials: this.deps.credentials,
+      operation: "managed_location_read",
+      reauthorizationCode: "DROPSHIP_EBAY_LISTING_SETUP_PERMISSION_REQUIRED",
+      read: async (credential) => ({
+        credential,
+        existing: await this.getLocation({
+          accessToken: credential.accessToken,
+          baseUrl: EBAY_API_BASE_URLS[resolveDropshipEbayProviderEnvironment(credential)],
+          merchantLocationKey,
+          storeConnectionId: input.storeConnectionId,
+        }),
+      }),
     });
-    return this.ensureWithAccessToken({
+    // Recovery wraps only the initial GET. Never replay provisioning writes.
+    return this.ensureResolvedLocation({
       accessToken: credential.accessToken,
-      environment: resolveDropshipEbayProviderEnvironment(credential),
+      baseUrl: EBAY_API_BASE_URLS[resolveDropshipEbayProviderEnvironment(credential)],
       storeConnectionId: input.storeConnectionId,
-      originWarehouseId: input.originWarehouseId,
+      warehouse,
+      merchantLocationKey,
+      name: managedLocationName(warehouse),
+      existing,
     });
   }
 
@@ -101,6 +119,22 @@ implements DropshipEbayManagedLocationProvider {
       merchantLocationKey,
       storeConnectionId: input.storeConnectionId,
     });
+    return this.ensureResolvedLocation({
+      accessToken, baseUrl, merchantLocationKey, name, warehouse, existing,
+      storeConnectionId: input.storeConnectionId,
+    });
+  }
+
+  private async ensureResolvedLocation(input: {
+    accessToken: string;
+    baseUrl: string;
+    merchantLocationKey: string;
+    name: string;
+    warehouse: ManagedWarehouse;
+    existing: EbayInventoryLocationResponse | null;
+    storeConnectionId: number;
+  }): Promise<DropshipEbayManagedLocation> {
+    const { accessToken, baseUrl, merchantLocationKey, name, warehouse, existing } = input;
     if (!existing) {
       const created = await this.createLocation({
         accessToken,
@@ -356,15 +390,16 @@ implements DropshipEbayManagedLocationProvider {
     const permissionRequired = response.status === 401 || response.status === 403;
     throw new DropshipError(
       permissionRequired
-        ? "DROPSHIP_EBAY_LISTING_SETUP_PERMISSION_REQUIRED"
+        ? "DROPSHIP_EBAY_LISTING_SETUP_ACCESS_DENIED"
         : "DROPSHIP_EBAY_MANAGED_LOCATION_UNAVAILABLE",
       permissionRequired
-        ? "eBay did not grant the Inventory API access required to manage the dropship warehouse location."
+        ? "eBay denied Inventory API access. Card Shellz support must check application permissions and seller API eligibility."
         : "The Card Shellz-managed eBay inventory location could not be synchronized.",
       {
         storeConnectionId: input.storeConnectionId,
         operation: input.operation,
         status: response.status,
+        ...ebayResourceErrorIdentifiers(text),
         retryable: response.status === 429 || response.status >= 500,
       },
     );

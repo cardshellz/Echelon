@@ -1,4 +1,4 @@
-import type { Pool, PoolClient } from "pg";
+import type { Pool, PoolClient, QueryConfig } from "pg";
 import { pool as defaultPool } from "../../../db";
 import type { DropshipSourcePlatform } from "../../../../shared/schema/dropship.schema";
 import type { DropshipStoreConnectionTokenRecord } from "../application/dropship-store-connection-service";
@@ -36,6 +36,12 @@ export interface DropshipMarketplaceStoreCredentials {
   refreshTokenExpiresAt: Date | null;
 }
 
+/** Opaque vault references identify the exact credential generation used by a request. */
+export interface ExpectedDropshipCredential {
+  accessTokenRef: string;
+  refreshTokenRef: string | null;
+}
+
 export interface DropshipMarketplaceStoreAuthFailureInput {
   vendorId: number;
   storeConnectionId: number;
@@ -48,6 +54,7 @@ export interface DropshipMarketplaceStoreAuthFailureInput {
   providerErrorCode?: string | null;
   providerErrorDescription?: string | null;
   invalidateAccessToken?: boolean;
+  expectedCredential?: ExpectedDropshipCredential;
   now: Date;
 }
 
@@ -73,9 +80,14 @@ export interface DropshipMarketplaceCredentialRepository {
     accessToken: string;
     refreshToken: string | null;
     accessTokenExpiresAt: Date | null;
+    expectedCredential?: ExpectedDropshipCredential;
     now: Date;
   }): Promise<DropshipMarketplaceStoreCredentials>;
   recordAuthFailure?(input: DropshipMarketplaceStoreAuthFailureInput): Promise<DropshipMarketplaceStoreAuthFailureRecord>;
+  withEbayTokenRefreshLock?<T>(
+    input: { vendorId: number; storeConnectionId: number },
+    operation: (scopedRepository: DropshipMarketplaceCredentialRepository) => Promise<T>,
+  ): Promise<T>;
 }
 
 interface DropshipMarketplaceTokenCipher {
@@ -114,12 +126,19 @@ interface DropshipMarketplaceCredentialRepositoryOptions {
   tokenCipher?: DropshipMarketplaceTokenCipher;
   notificationSender?: DropshipNotificationSender;
   logger?: DropshipLogger;
+  ebayRefreshLockTimeoutMs?: number;
 }
+
+// Separate advisory namespace; store IDs are globally unique PostgreSQL integers.
+const EBAY_REFRESH_LOCK_NAMESPACE = 0x44534542;
+const DEFAULT_EBAY_REFRESH_LOCK_TIMEOUT_MS = 10_000;
+const LOCK_CLEANUP_TIMEOUT_MS = 5_000;
 
 export class PgDropshipMarketplaceCredentialRepository implements DropshipMarketplaceCredentialRepository {
   private readonly tokenCipher: DropshipMarketplaceTokenCipher;
   private readonly notificationSender?: DropshipNotificationSender;
   private readonly logger: DropshipLogger;
+  private readonly ebayRefreshLockTimeoutMs: number;
 
   constructor(
     private readonly dbPool: Pool = defaultPool,
@@ -128,6 +147,140 @@ export class PgDropshipMarketplaceCredentialRepository implements DropshipMarket
     this.tokenCipher = options.tokenCipher ?? new LazyEnvDropshipMarketplaceTokenCipher();
     this.notificationSender = options.notificationSender;
     this.logger = options.logger ?? makeDropshipStoreConnectionLogger();
+    this.ebayRefreshLockTimeoutMs = options.ebayRefreshLockTimeoutMs ?? DEFAULT_EBAY_REFRESH_LOCK_TIMEOUT_MS;
+    if (!Number.isSafeInteger(this.ebayRefreshLockTimeoutMs) || this.ebayRefreshLockTimeoutMs < 1
+      || this.ebayRefreshLockTimeoutMs > 60_000) {
+      throw new DropshipError("DROPSHIP_EBAY_REFRESH_LOCK_CONFIG_INVALID", "Invalid eBay refresh coordination timeout.");
+    }
+  }
+
+  async withEbayTokenRefreshLock<T>(
+    input: { vendorId: number; storeConnectionId: number },
+    operation: (scopedRepository: DropshipMarketplaceCredentialRepository) => Promise<T>,
+  ): Promise<T> {
+    assertLockIdentity(input);
+    const client = await this.dbPool.connect().catch(() => {
+      throw new DropshipError("DROPSHIP_EBAY_REFRESH_LOCK_UNAVAILABLE", "eBay authorization refresh coordination is temporarily unavailable.", {
+        vendorId: input.vendorId, storeConnectionId: input.storeConnectionId, retryable: true,
+      });
+    });
+    let acquired = false;
+    let destroyConnection = false;
+    let leaseLost = false;
+    const onLeaseError = () => { leaseLost = true; destroyConnection = true; };
+    // pg-pool removes its idle error listener at checkout. HTTP leaves this
+    // leased client idle, so a lost backend must not become an unhandled event.
+    client.on("error", onLeaseError);
+    const postReleaseNotifications: Array<() => Promise<void>> = [];
+    try {
+      // A session lock coordinates workers without retaining a transaction across HTTP.
+      // Both server lock_timeout and the client query deadline bound acquisition.
+      await client.query(boundedQuery("SELECT set_config('lock_timeout', $1, false)",
+        [`${this.ebayRefreshLockTimeoutMs}ms`], LOCK_CLEANUP_TIMEOUT_MS));
+      await client.query(boundedQuery("SELECT pg_advisory_lock($1::integer, $2::integer)",
+        [EBAY_REFRESH_LOCK_NAMESPACE, input.storeConnectionId], this.ebayRefreshLockTimeoutMs + LOCK_CLEANUP_TIMEOUT_MS));
+      acquired = true;
+      const scope = this.createLockScopedRepository(client, input, () => { destroyConnection = true; },
+        (notification) => { postReleaseNotifications.push(notification); }, () => !leaseLost);
+      try {
+        const result = await operation(scope.repository);
+        if (leaseLost) throw new DropshipError("DROPSHIP_EBAY_REFRESH_LOCK_UNAVAILABLE", "eBay refresh coordination was interrupted.", {
+          vendorId: input.vendorId, storeConnectionId: input.storeConnectionId, retryable: true,
+        });
+        return result;
+      } finally {
+        await scope.close();
+      }
+    } catch (error) {
+      if (!acquired) {
+        // An uncertain acquisition must never return a potentially locked session to the pool.
+        destroyConnection = true;
+        throw new DropshipError("DROPSHIP_EBAY_REFRESH_LOCK_UNAVAILABLE", "eBay authorization refresh coordination is temporarily unavailable.", {
+          vendorId: input.vendorId, storeConnectionId: input.storeConnectionId, retryable: true,
+        });
+      }
+      throw error;
+    } finally {
+      try {
+        if (acquired && !leaseLost) {
+          try {
+            const result = await client.query<{ unlocked: boolean }>(boundedQuery(
+              "SELECT pg_advisory_unlock($1::integer, $2::integer) AS unlocked",
+              [EBAY_REFRESH_LOCK_NAMESPACE, input.storeConnectionId], LOCK_CLEANUP_TIMEOUT_MS));
+            if (result.rows[0]?.unlocked !== true) throw new Error("Refresh coordination lock was not owned.");
+            await client.query(boundedQuery("RESET lock_timeout", [], LOCK_CLEANUP_TIMEOUT_MS));
+          } catch {
+            destroyConnection = true;
+            this.logger.error({ code: "DROPSHIP_EBAY_REFRESH_LOCK_CLEANUP_FAILED",
+              message: "Discarded an eBay refresh coordination session after lock cleanup failed.",
+              context: { vendorId: input.vendorId, storeConnectionId: input.storeConnectionId } });
+          }
+        }
+      } finally {
+        // Release must happen even if an injected diagnostic sink throws.
+        client.removeListener("error", onLeaseError);
+        client.release(destroyConnection);
+        // Notification delivery has its own DB work, so it must not retain a pool
+        // slot needed by that work. A committed failure still notifies if refresh throws.
+        for (const notify of postReleaseNotifications) await notify();
+      }
+    }
+  }
+
+  private createLockScopedRepository(
+    client: PoolClient,
+    identity: { vendorId: number; storeConnectionId: number },
+    discard: () => void,
+    deferNotification: (notification: () => Promise<void>) => void,
+    leaseUsable: () => boolean,
+  ): {
+    repository: DropshipMarketplaceCredentialRepository;
+    close: () => Promise<void>;
+  } {
+    let open = true;
+    let usable = true;
+    let pending = Promise.resolve();
+    const assertUsable = () => {
+      if (!leaseUsable()) throw new DropshipError("DROPSHIP_EBAY_REFRESH_LOCK_UNAVAILABLE", "eBay refresh coordination was interrupted.", { retryable: true });
+      if (!open || !usable) throw new DropshipError("DROPSHIP_EBAY_REFRESH_SCOPE_CLOSED", "eBay refresh credential scope is no longer available.", { retryable: true });
+    };
+    const assertScopedIdentity = (input: { vendorId: number; storeConnectionId: number; platform: DropshipSourcePlatform }) => {
+      if (input.vendorId !== identity.vendorId || input.storeConnectionId !== identity.storeConnectionId || input.platform !== "ebay") {
+        throw new DropshipError("DROPSHIP_EBAY_REFRESH_SCOPE_MISMATCH", "Credential operation does not match the coordinated eBay store.", { retryable: false });
+      }
+    };
+    const serialize = <T>(operation: () => Promise<T>): Promise<T> => {
+      const result = pending.then(() => { assertUsable(); return operation(); });
+      pending = result.then(() => undefined, () => undefined);
+      return result;
+    };
+    // Refresh callbacks must not need another pool checkout: one connection per store
+    // also works with a one-connection pool or when all pool slots are refreshing.
+    const boundPool = { connect: async () => {
+      assertUsable();
+      return { query: client.query.bind(client), release: (destroy?: boolean) => {
+        if (destroy) { usable = false; discard(); }
+      } };
+    } } as unknown as Pool;
+    const bound = new PgDropshipMarketplaceCredentialRepository(boundPool, {
+      tokenCipher: this.tokenCipher, logger: this.logger,
+      ebayRefreshLockTimeoutMs: this.ebayRefreshLockTimeoutMs,
+    });
+    return {
+      repository: {
+        loadForStoreConnection: (input) => serialize(() => { assertScopedIdentity(input); return bound.loadForStoreConnection(input); }),
+        replaceTokens: (input) => serialize(() => { assertScopedIdentity(input); return bound.replaceTokens(input); }),
+        recordAuthFailure: (input) => serialize(async () => {
+          assertScopedIdentity(input);
+          const record = await bound.recordAuthFailure(input);
+          if (record.transitioned && record.status === "needs_reauth") {
+            deferNotification(() => this.notifyStoreAuthFailure(input, record));
+          }
+          return record;
+        }),
+      },
+      close: async () => { open = false; await pending; },
+    };
   }
 
   async loadForStoreConnection(input: {
@@ -136,16 +289,24 @@ export class PgDropshipMarketplaceCredentialRepository implements DropshipMarket
     platform: DropshipSourcePlatform;
   }): Promise<DropshipMarketplaceStoreCredentials> {
     const client = await this.dbPool.connect();
+    let destroyConnection = false;
     try {
+      // References and ciphertexts must come from one snapshot during concurrent OAuth/refresh writes.
+      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
       const connection = await loadConnection(client, input);
       const tokens = await loadTokenRows(client, input.storeConnectionId);
-      return mapCredentials({
+      const credentials = mapCredentials({
         connection,
         tokens,
         tokenCipher: this.tokenCipher,
       });
+      await client.query("COMMIT");
+      return credentials;
+    } catch (error) {
+      destroyConnection = !(await rollbackQuietly(client));
+      throw error;
     } finally {
-      client.release();
+      client.release(destroyConnection);
     }
   }
 
@@ -156,12 +317,16 @@ export class PgDropshipMarketplaceCredentialRepository implements DropshipMarket
     accessToken: string;
     refreshToken: string | null;
     accessTokenExpiresAt: Date | null;
+    expectedCredential?: ExpectedDropshipCredential;
     now: Date;
   }): Promise<DropshipMarketplaceStoreCredentials> {
     const client = await this.dbPool.connect();
+    let destroyConnection = false;
     try {
       await client.query("BEGIN");
-      const connection = await loadConnection(client, input, true);
+      const connection = await loadConnectionForHealthUpdate(client, input);
+      assertExpectedCredential(connection, input.expectedCredential);
+      assertRefreshAllowed(connection);
       const accessRecord = this.tokenCipher.seal({
         tokenKind: "access",
         token: input.accessToken,
@@ -222,26 +387,30 @@ export class PgDropshipMarketplaceCredentialRepository implements DropshipMarket
         status: "connected",
       };
       const tokens = await loadTokenRows(client, input.storeConnectionId);
-      await client.query("COMMIT");
-      return mapCredentials({
+      const credentials = mapCredentials({
         connection: updatedConnection,
         tokens,
         tokenCipher: this.tokenCipher,
       });
+      await client.query("COMMIT");
+      return credentials;
     } catch (error) {
-      await rollbackQuietly(client);
+      destroyConnection = !(await rollbackQuietly(client));
       throw error;
     } finally {
-      client.release();
+      client.release(destroyConnection);
     }
   }
 
   async recordAuthFailure(input: DropshipMarketplaceStoreAuthFailureInput): Promise<DropshipMarketplaceStoreAuthFailureRecord> {
     const client = await this.dbPool.connect();
+    let destroyConnection = false;
     let record: DropshipMarketplaceStoreAuthFailureRecord;
     try {
       await client.query("BEGIN");
       const connection = await loadConnectionForHealthUpdate(client, input);
+      assertExpectedCredential(connection, input.expectedCredential);
+      if (input.expectedCredential || connection.status !== "needs_reauth") assertRefreshAllowed(connection);
       const previousStatus = connection.status;
       const effectiveStatus = previousStatus === "needs_reauth"
         ? "needs_reauth"
@@ -252,7 +421,7 @@ export class PgDropshipMarketplaceCredentialRepository implements DropshipMarket
         && previousStatus !== "grace_period"
         && previousStatus !== "paused";
 
-      if (transitioned) {
+      if (transitioned || (effectiveStatus === "refresh_failed" && input.invalidateAccessToken === true)) {
         await client.query(
           `UPDATE dropship.dropship_store_connections
            SET status = $4,
@@ -286,15 +455,18 @@ export class PgDropshipMarketplaceCredentialRepository implements DropshipMarket
         }
       }
 
-      await upsertStoreAuthHealthCheck(client, {
-        ...effectiveInput,
-        previousStatus,
-      });
-      await recordStoreAuthHealthAuditEvent(client, {
-        ...effectiveInput,
-        previousStatus,
-        transitioned,
-      });
+      // A legacy unguarded repeat for an already revoked grant must remain a no-op.
+      if (previousStatus !== "needs_reauth") {
+        await upsertStoreAuthHealthCheck(client, {
+          ...effectiveInput,
+          previousStatus,
+        });
+        await recordStoreAuthHealthAuditEvent(client, {
+          ...effectiveInput,
+          previousStatus,
+          transitioned,
+        });
+      }
 
       record = {
         vendorId: input.vendorId,
@@ -306,10 +478,10 @@ export class PgDropshipMarketplaceCredentialRepository implements DropshipMarket
       };
       await client.query("COMMIT");
     } catch (error) {
-      await rollbackQuietly(client);
+      destroyConnection = !(await rollbackQuietly(client));
       throw error;
     } finally {
-      client.release();
+      client.release(destroyConnection);
     }
 
     if (record.transitioned && record.status === "needs_reauth") {
@@ -377,6 +549,38 @@ class LazyEnvDropshipMarketplaceTokenCipher implements DropshipMarketplaceTokenC
   }
 }
 
+function assertLockIdentity(input: { vendorId: number; storeConnectionId: number }): void {
+  if (![input.vendorId, input.storeConnectionId].every((value) => (
+    Number.isSafeInteger(value) && value > 0 && value <= 2_147_483_647
+  ))) {
+    throw new DropshipError("DROPSHIP_EBAY_REFRESH_LOCK_IDENTITY_INVALID", "Invalid eBay refresh coordination identity.", {
+      retryable: false,
+    });
+  }
+}
+
+// pg supports per-query query_timeout at runtime; its QueryConfig declarations omit it.
+function boundedQuery(text: string, values: unknown[], timeoutMs: number): QueryConfig & { query_timeout: number } {
+  return { text, values, query_timeout: timeoutMs };
+}
+
+function assertExpectedCredential(connection: StoreConnectionCredentialRow, expected?: ExpectedDropshipCredential): void {
+  if (expected && (connection.access_token_ref !== expected.accessTokenRef
+    || connection.refresh_token_ref !== expected.refreshTokenRef)) {
+    throw new DropshipError("DROPSHIP_CREDENTIAL_CHANGED", "Store authorization changed while the request was in flight.", {
+      vendorId: connection.vendor_id, storeConnectionId: connection.id, retryable: true,
+    });
+  }
+}
+
+function assertRefreshAllowed(connection: StoreConnectionCredentialRow): void {
+  if (connection.status !== "connected" && connection.status !== "refresh_failed") {
+    throw new DropshipError("DROPSHIP_STORE_CONNECTION_NOT_CONNECTED", "Dropship store connection is not connected.", {
+      vendorId: connection.vendor_id, storeConnectionId: connection.id, status: connection.status, retryable: false,
+    });
+  }
+}
+
 async function loadConnection(
   client: PoolClient,
   input: {
@@ -407,14 +611,7 @@ async function loadConnection(
       retryable: false,
     });
   }
-  if (connection.status !== "connected" && connection.status !== "refresh_failed") {
-    throw new DropshipError("DROPSHIP_STORE_CONNECTION_NOT_CONNECTED", "Dropship store connection is not connected.", {
-      vendorId: input.vendorId,
-      storeConnectionId: input.storeConnectionId,
-      status: connection.status,
-      retryable: false,
-    });
-  }
+  assertRefreshAllowed(connection);
   return connection;
 }
 
@@ -669,10 +866,12 @@ function mapTokenRow(row: TokenRow): DropshipStoreConnectionTokenRecord {
   };
 }
 
-async function rollbackQuietly(client: PoolClient): Promise<void> {
+async function rollbackQuietly(client: PoolClient): Promise<boolean> {
   try {
     await client.query("ROLLBACK");
+    return true;
   } catch {
-    // Preserve the original error.
+    // Preserve the original error but do not recycle a session of uncertain transaction state.
+    return false;
   }
 }

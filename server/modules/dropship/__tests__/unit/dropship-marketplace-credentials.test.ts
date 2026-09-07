@@ -27,6 +27,7 @@ describe("PgDropshipMarketplaceCredentialRepository token vault configuration", 
 
   it("requires the token vault key when decrypting store credentials", async () => {
     const query = vi.fn(async (sql: string) => {
+      if (sql.startsWith("BEGIN") || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [] };
       if (sql.includes("FROM dropship.dropship_store_connections")) {
         return { rows: [makeConnectionRow()] };
       }
@@ -328,6 +329,120 @@ describe("PgDropshipMarketplaceCredentialRepository token vault configuration", 
 
     expect(result.transitioned).toBe(false);
     expect(send).not.toHaveBeenCalled();
+  });
+});
+
+describe("credential generation and refresh coordination guards", () => {
+  const identity = { vendorId: 10, storeConnectionId: 22, platform: "ebay" as const };
+  const expectedCredential = { accessTokenRef: "access-ref", refreshTokenRef: null };
+  const now = new Date("2026-09-06T16:00:00.000Z");
+  const failure = { ...identity, status: "needs_reauth" as const, failureCode: "INVALID_GRANT",
+    message: "The refresh grant was revoked.", retryable: false, now, expectedCredential };
+  const replacement = { ...identity, accessToken: "replacement-secret", refreshToken: null,
+    accessTokenExpiresAt: now, now, expectedCredential };
+
+  function makeRepository(row: ReturnType<typeof makeConnectionRow>) {
+    const query = vi.fn(async (sql: string) => ({ rows: sql.includes("FOR UPDATE") ? [row] : [] }));
+    const client = { query, release: vi.fn() };
+    const seal = vi.fn();
+    const send = vi.fn();
+    const repository = new PgDropshipMarketplaceCredentialRepository({ connect: async () => client } as unknown as Pool,
+      { tokenCipher: { seal, open: vi.fn() }, notificationSender: { send } });
+    return { repository, query, client, seal, send };
+  }
+
+  for (const changed of [{ access_token_ref: "oauth-new-access" }, { refresh_token_ref: "oauth-new-refresh" }]) {
+    it(`rejects stale success and failure when ${Object.keys(changed)[0]} changed`, async () => {
+      const { repository, query, seal, send } = makeRepository(makeConnectionRow(changed));
+      await expect(repository.replaceTokens(replacement)).rejects.toMatchObject({ code: "DROPSHIP_CREDENTIAL_CHANGED" });
+      const error = await repository.recordAuthFailure(failure).catch((value: unknown) => value);
+      expect(error).toMatchObject({ code: "DROPSHIP_CREDENTIAL_CHANGED", context: { retryable: true } });
+      expect(JSON.stringify(error)).not.toMatch(/access-ref|oauth-new|replacement-secret/);
+      expect(query.mock.calls.every(([sql]) => /^(BEGIN|ROLLBACK)|^SELECT/.test(sql.trim()))).toBe(true);
+      expect(seal).not.toHaveBeenCalled();
+      expect(send).not.toHaveBeenCalled();
+    });
+  }
+
+  it.each(["paused", "disconnected", "grace_period", "needs_reauth"])("never resurrects or changes health of %s", async (status) => {
+    const { repository, query, seal, send } = makeRepository(makeConnectionRow({ status }));
+    await expect(repository.replaceTokens(replacement)).rejects.toMatchObject({ code: "DROPSHIP_STORE_CONNECTION_NOT_CONNECTED" });
+    await expect(repository.recordAuthFailure(failure)).rejects.toMatchObject({ code: "DROPSHIP_STORE_CONNECTION_NOT_CONNECTED" });
+    expect(query.mock.calls.some(([sql]) => /^(UPDATE|DELETE|INSERT)/.test(sql.trim()))).toBe(false);
+    expect(seal).not.toHaveBeenCalled();
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("expires an access token rejected while the status is already refresh_failed", async () => {
+    const { repository, query } = makeRepository(makeConnectionRow({ status: "refresh_failed" }));
+    await expect(repository.recordAuthFailure({ ...failure, status: "refresh_failed", invalidateAccessToken: true }))
+      .resolves.toMatchObject({ transitioned: false });
+    expect(query.mock.calls.some(([sql]) => sql.includes("UPDATE dropship.dropship_store_connections"))).toBe(true);
+  });
+
+  it.each([false, true])("always releases the session lock after callback failure (unlock fails: %s)", async (unlockFails) => {
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const query = vi.fn(async (config: { text: string }) => {
+      if (config.text.includes("pg_advisory_unlock")) {
+        if (unlockFails) throw new Error("private network failure");
+        return { rows: [{ unlocked: true }] };
+      }
+      return { rows: [] };
+    });
+    const release = vi.fn();
+    const repository = new PgDropshipMarketplaceCredentialRepository({ connect: async () => ({ query, release, on: vi.fn(), removeListener: vi.fn() }) } as unknown as Pool, { logger });
+    const callbackError = new Error("operation failed");
+    await expect(repository.withEbayTokenRefreshLock(identity, async () => { throw callbackError; })).rejects.toBe(callbackError);
+    expect(release).toHaveBeenCalledWith(unlockFails);
+    expect(query.mock.calls.some(([config]) => config.text.includes("pg_advisory_unlock"))).toBe(true);
+    expect(query.mock.calls.some(([config]) => config.text.includes("BEGIN"))).toBe(false);
+    if (unlockFails) expect(logger.error).toHaveBeenCalledWith(expect.objectContaining({ code: "DROPSHIP_EBAY_REFRESH_LOCK_CLEANUP_FAILED" }));
+    else expect(query.mock.calls.some(([config]) => config.text === "RESET lock_timeout")).toBe(true);
+  });
+
+  it("fails closed and discards the session when lock acquisition fails", async () => {
+    const query = vi.fn(async (config: { text: string }) => {
+      if (config.text.includes("pg_advisory_lock")) throw new Error("sensitive connection diagnostic");
+      return { rows: [] };
+    });
+    const release = vi.fn();
+    const repository = new PgDropshipMarketplaceCredentialRepository({ connect: async () => ({ query, release, on: vi.fn(), removeListener: vi.fn() }) } as unknown as Pool);
+    const operation = vi.fn();
+    await expect(repository.withEbayTokenRefreshLock(identity, operation)).rejects.toMatchObject({
+      code: "DROPSHIP_EBAY_REFRESH_LOCK_UNAVAILABLE", context: { retryable: true },
+    });
+    expect(operation).not.toHaveBeenCalled();
+    expect(release).toHaveBeenCalledWith(true);
+  });
+
+  it("sanitizes pool acquisition failure before invoking refresh", async () => {
+    const connect = vi.fn(async () => { throw new Error("private connection detail"); });
+    const operation = vi.fn();
+    const repository = new PgDropshipMarketplaceCredentialRepository({ connect } as unknown as Pool);
+    const error = await repository.withEbayTokenRefreshLock(identity, operation).catch((value: unknown) => value);
+    expect(error).toMatchObject({ code: "DROPSHIP_EBAY_REFRESH_LOCK_UNAVAILABLE" });
+    expect(JSON.stringify(error)).not.toContain("private connection detail");
+    expect(operation).not.toHaveBeenCalled();
+  });
+
+  it("discards a session when rollback fails rather than returning uncertain transaction state", async () => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql === "ROLLBACK") throw new Error("connection lost");
+      return { rows: sql.includes("FOR UPDATE") ? [makeConnectionRow({ access_token_ref: "changed" })] : [] };
+    });
+    const release = vi.fn();
+    const repository = new PgDropshipMarketplaceCredentialRepository({ connect: async () => ({ query, release }) } as unknown as Pool);
+    await expect(repository.replaceTokens(replacement)).rejects.toMatchObject({ code: "DROPSHIP_CREDENTIAL_CHANGED" });
+    expect(release).toHaveBeenCalledWith(true);
+  });
+
+  it.each([0, -1, NaN, 2_147_483_648, 1.5])("rejects invalid lock identity %s before database access", async (storeConnectionId) => {
+    const connect = vi.fn();
+    const repository = new PgDropshipMarketplaceCredentialRepository({ connect } as unknown as Pool);
+    await expect(repository.withEbayTokenRefreshLock({ ...identity, storeConnectionId }, vi.fn())).rejects.toMatchObject({
+      code: "DROPSHIP_EBAY_REFRESH_LOCK_IDENTITY_INVALID",
+    });
+    expect(connect).not.toHaveBeenCalled();
   });
 });
 

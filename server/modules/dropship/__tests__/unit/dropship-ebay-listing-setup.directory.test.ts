@@ -147,8 +147,8 @@ describe("EbayDropshipListingSetupDirectory", () => {
       marketplaceId: "EBAY_US",
       storeConnectionId: 44,
     })).rejects.toMatchObject({
-      code: "DROPSHIP_EBAY_LISTING_SETUP_PERMISSION_REQUIRED",
-      message: "eBay did not grant the Inventory and Account API access required for listing setup.",
+      code: "DROPSHIP_EBAY_LISTING_SETUP_ACCESS_DENIED",
+      message: "eBay denied access to Inventory or Account settings. Card Shellz support must check application permissions and seller API eligibility.",
       context: {
         storeConnectionId: 44,
         resource: "merchantLocations",

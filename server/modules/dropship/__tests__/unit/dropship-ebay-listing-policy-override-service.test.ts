@@ -80,14 +80,26 @@ describe("DropshipEbayListingPolicyOverrideService", () => {
     expect(fixture.repository.lastBulkInput).toBeNull();
   });
 
-  it.each(["missing", "disconnected", "wrong-platform"])("rejects a %s store before loading options", async (state) => {
+  it.each(["missing", "disconnected", "needs_reauth", "paused", "grace_period", "wrong-platform"])("rejects a %s store before loading options", async (state) => {
     const fixture = makeFixture();
     if (state === "missing") fixture.repository.context = null;
-    else if (state === "disconnected") fixture.repository.context!.status = "needs_reauth";
-    else fixture.repository.context!.platform = "shopify";
+    else if (state === "wrong-platform") fixture.repository.context!.platform = "shopify";
+    else fixture.repository.context!.status = state;
     await expect(fixture.service.replaceManyForMember("member-1", bulkInput())).rejects.toBeInstanceOf(Error);
+    if (state === "needs_reauth") {
+      await expect(fixture.service.listForMember("member-1", { storeConnectionId: 44 }))
+        .rejects.toMatchObject({ code: "DROPSHIP_EBAY_LISTING_SETUP_PERMISSION_REQUIRED" });
+    }
     expect(fixture.listingSetup.getForMember).not.toHaveBeenCalled();
     expect(fixture.repository.lastBulkInput).toBeNull();
+  });
+
+  it("allows recoverable token health to reach listing-setup credential recovery", async () => {
+    const fixture = makeFixture();
+    fixture.repository.context!.status = "refresh_failed";
+    await fixture.service.replaceManyForMember("member-1", bulkInput());
+    expect(fixture.listingSetup.getForMember).toHaveBeenCalledTimes(1);
+    expect(fixture.repository.lastBulkInput).not.toBeNull();
   });
 
   it("rejects empty, oversized, duplicate, incomplete, unsafe, or unrecognized batch inputs", async () => {

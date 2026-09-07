@@ -5,25 +5,55 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
 import type { DropshipEbayListingSetupResponse } from "@/lib/dropship-ops-surface";
+import { DropshipApiError } from "@/lib/dropship-ops-surface";
 import { ebayListingSetupQueryKey } from "@/lib/dropship-ebay-listing-query-sync";
-import { buildEbayListingSetupDraft, EbayListingSetupPanel } from "../EbayListingSetupPanel";
+import { buildEbayListingSetupDraft, EbayListingSetupPanel, ListingSetupError } from "../EbayListingSetupPanel";
+
+vi.mock("../EbayStoreCategoryAuthorizationRecovery", () => ({
+  EbayStoreCategoryAuthorizationRecovery: () => React.createElement("button", null, "Start customer consent"),
+}));
 
 describe("EbayListingSetupPanel", () => {
-  it("keeps cached setup and a visible retry action when a later read fails", async () => {
+  it.each([
+    { code: "DROPSHIP_EBAY_LISTING_SETUP_ACCESS_DENIED", title: "eBay listing access needs support.", consent: false },
+    { code: "DROPSHIP_EBAY_LISTING_SETUP_PERMISSION_REQUIRED", title: "eBay listing authorization needs attention.", consent: true },
+    { code: "DROPSHIP_EBAY_TOKEN_REFRESH_FAILED", title: "eBay listing setup is unavailable.", consent: false },
+  ])("shows the correct recovery action for $code", ({ code, title, consent }) => {
+    vi.stubGlobal("React", React);
+    try {
+      const markup = renderToStaticMarkup(React.createElement(ListingSetupError, {
+        error: new DropshipApiError({ status: 403, code, message: "Temporary access failure" }),
+        storeConnectionId: 44, storeName: "Test store",
+      }));
+      expect(markup).toContain(title);
+      expect(markup.includes("Start customer consent")).toBe(consent);
+      expect(markup).not.toContain("Echelon");
+      if (code.endsWith("ACCESS_DENIED")) expect(markup).toContain("Do not keep reauthorizing");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it.each([
+    { code: "DROPSHIP_EBAY_TOKEN_REFRESH_FAILED", title: "Temporary setup outage", consent: false },
+    { code: "DROPSHIP_EBAY_LISTING_SETUP_PERMISSION_REQUIRED", title: "eBay listing authorization needs attention.", consent: true },
+    { code: "DROPSHIP_EBAY_LISTING_SETUP_ACCESS_DENIED", title: "eBay listing access needs support.", consent: false },
+  ])("keeps cached setup and the correct recovery action for $code", async ({ code, title, consent }) => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     vi.stubGlobal("React", React);
     try {
       client.setQueryData(ebayListingSetupQueryKey(44), setup({ complete: true }));
       await expect(client.fetchQuery({
         queryKey: ebayListingSetupQueryKey(44),
-        queryFn: async () => { throw new Error("Temporary setup outage"); },
+        queryFn: async () => { throw new DropshipApiError({ status: 403, code, message: "Temporary setup outage" }); },
       })).rejects.toThrow("Temporary setup outage");
       const markup = renderToStaticMarkup(React.createElement(QueryClientProvider, { client },
         React.createElement(EbayListingSetupPanel, {
           storeConnectionId: 44, storeName: "Test store", onConfigurationChange: () => undefined,
         }),
       ));
-      expect(markup).toContain("Temporary setup outage");
+      expect(markup).toContain(title);
+      expect(markup.includes("Start customer consent")).toBe(consent);
       expect(markup).toContain("Showing the last loaded setup");
       expect(markup).toContain("Refresh options");
       expect(markup).toContain("Card Shellz fulfillment capabilities");

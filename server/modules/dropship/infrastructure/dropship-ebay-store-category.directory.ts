@@ -5,6 +5,8 @@ import type {
 } from "../application/dropship-ebay-store-category-service";
 import type { DropshipEbayRegistrationCredentialProvider } from "./dropship-ebay-registration-credentials";
 import { resolveDropshipEbayProviderEnvironment } from "./dropship-ebay-registration-credentials";
+import type { DropshipMarketplaceStoreCredentials } from "./dropship-marketplace-credentials";
+import { ebayResourceErrorIdentifiers, withEbaySafeReadRecovery } from "./dropship-ebay-safe-read-recovery";
 
 type FetchLike = typeof fetch;
 
@@ -36,7 +38,19 @@ export class EbayDropshipStoreCategoryDirectory implements DropshipEbayStoreCate
     vendorId: number;
     storeConnectionId: number;
   }): Promise<DropshipEbayStoreCategory[]> {
-    const credential = await this.credentials.loadFreshForStoreConnection(input);
+    return withEbaySafeReadRecovery({
+      ...input,
+      credentials: this.credentials,
+      operation: "store_categories_read",
+      reauthorizationCode: "DROPSHIP_EBAY_STORE_CATEGORIES_PERMISSION_REQUIRED",
+      read: (credential) => this.readLeafCategories(credential, input.storeConnectionId),
+    });
+  }
+
+  private async readLeafCategories(
+    credential: DropshipMarketplaceStoreCredentials,
+    storeConnectionId: number,
+  ): Promise<DropshipEbayStoreCategory[]> {
     const environment = resolveDropshipEbayProviderEnvironment(credential);
     let response: Response;
     try {
@@ -55,7 +69,7 @@ export class EbayDropshipStoreCategoryDirectory implements DropshipEbayStoreCate
         "DROPSHIP_EBAY_STORE_CATEGORIES_UNAVAILABLE",
         "The connected eBay Store categories could not be loaded.",
         {
-          storeConnectionId: input.storeConnectionId,
+          storeConnectionId,
           retryable: true,
           errorName: error instanceof Error ? error.name : "UnknownError",
         },
@@ -67,20 +81,21 @@ export class EbayDropshipStoreCategoryDirectory implements DropshipEbayStoreCate
       const permissionFailure = response.status === 401 || response.status === 403;
       throw new DropshipError(
         permissionFailure
-          ? "DROPSHIP_EBAY_STORE_CATEGORIES_PERMISSION_REQUIRED"
+          ? "DROPSHIP_EBAY_STORE_CATEGORIES_ACCESS_DENIED"
           : "DROPSHIP_EBAY_STORE_CATEGORIES_UNAVAILABLE",
         permissionFailure
-          ? "Reconnect the eBay store to grant Store-category access."
+          ? "eBay denied Store-category access. Card Shellz support must check application permissions and seller API eligibility."
           : "The connected eBay account did not return a Store category hierarchy.",
         {
-          storeConnectionId: input.storeConnectionId,
+          storeConnectionId,
           status: response.status,
+          ...ebayResourceErrorIdentifiers(text),
           retryable: response.status === 429 || response.status >= 500,
         },
       );
     }
 
-    return parseEbayStoreCategories(text, input.storeConnectionId);
+    return parseEbayStoreCategories(text, storeConnectionId);
   }
 }
 

@@ -9,6 +9,7 @@ import type {
 import { DropshipError } from "../domain/errors";
 import type { DropshipEbayRegistrationCredentialProvider } from "./dropship-ebay-registration-credentials";
 import { resolveDropshipEbayProviderEnvironment } from "./dropship-ebay-registration-credentials";
+import { ebayResourceErrorIdentifiers, withEbaySafeReadRecovery } from "./dropship-ebay-safe-read-recovery";
 
 type FetchLike = typeof fetch;
 
@@ -36,29 +37,17 @@ export class EbayDropshipListingSetupDirectory implements DropshipEbayListingSet
     storeConnectionId: number;
     marketplaceId: string;
   }): Promise<DropshipEbayListingSetupDiscovery> {
-    let credential;
-    try {
-      credential = await this.credentials.loadFreshForStoreConnection(input);
-    } catch (error) {
-      if (requiresEbayListingSetupReauthorization(error)) {
-        throw new DropshipError(
-          "DROPSHIP_EBAY_LISTING_SETUP_PERMISSION_REQUIRED",
-          "eBay authorization must be refreshed before listing setup can be loaded.",
-          {
-            storeConnectionId: input.storeConnectionId,
-            resource: "authorization",
-            status: providerStatus(error),
-            retryable: false,
-          },
-        );
-      }
-      throw error;
-    }
-    return this.discoverWithAccessToken({
-      accessToken: credential.accessToken,
-      environment: resolveDropshipEbayProviderEnvironment(credential),
-      marketplaceId: input.marketplaceId,
-      storeConnectionId: input.storeConnectionId,
+    return withEbaySafeReadRecovery({
+      ...input,
+      credentials: this.credentials,
+      operation: "listing_setup_discovery",
+      reauthorizationCode: "DROPSHIP_EBAY_LISTING_SETUP_PERMISSION_REQUIRED",
+      read: (credential) => this.discoverWithAccessToken({
+        accessToken: credential.accessToken,
+        environment: resolveDropshipEbayProviderEnvironment(credential),
+        marketplaceId: input.marketplaceId,
+        storeConnectionId: input.storeConnectionId,
+      }),
     });
   }
 
@@ -67,29 +56,17 @@ export class EbayDropshipListingSetupDirectory implements DropshipEbayListingSet
     storeConnectionId: number;
     fulfillmentPolicyId: string;
   }): Promise<DropshipEbayFulfillmentPolicy> {
-    let credential;
-    try {
-      credential = await this.credentials.loadFreshForStoreConnection(input);
-    } catch (error) {
-      if (requiresEbayListingSetupReauthorization(error)) {
-        throw new DropshipError(
-          "DROPSHIP_EBAY_LISTING_SETUP_PERMISSION_REQUIRED",
-          "eBay authorization must be refreshed before the fulfillment policy can be verified.",
-          {
-            storeConnectionId: input.storeConnectionId,
-            resource: "authorization",
-            status: providerStatus(error),
-            retryable: false,
-          },
-        );
-      }
-      throw error;
-    }
-    return this.getFulfillmentPolicyWithAccessToken({
-      accessToken: credential.accessToken,
-      environment: resolveDropshipEbayProviderEnvironment(credential),
-      storeConnectionId: input.storeConnectionId,
-      fulfillmentPolicyId: input.fulfillmentPolicyId,
+    return withEbaySafeReadRecovery({
+      ...input,
+      credentials: this.credentials,
+      operation: "fulfillment_policy_read",
+      reauthorizationCode: "DROPSHIP_EBAY_LISTING_SETUP_PERMISSION_REQUIRED",
+      read: (credential) => this.getFulfillmentPolicyWithAccessToken({
+        accessToken: credential.accessToken,
+        environment: resolveDropshipEbayProviderEnvironment(credential),
+        storeConnectionId: input.storeConnectionId,
+        fulfillmentPolicyId: input.fulfillmentPolicyId,
+      }),
     });
   }
 
@@ -273,15 +250,16 @@ export class EbayDropshipListingSetupDirectory implements DropshipEbayListingSet
       const permissionRequired = response.status === 401 || response.status === 403;
       throw new DropshipError(
         permissionRequired
-          ? "DROPSHIP_EBAY_LISTING_SETUP_PERMISSION_REQUIRED"
+          ? "DROPSHIP_EBAY_LISTING_SETUP_ACCESS_DENIED"
           : "DROPSHIP_EBAY_LISTING_SETUP_UNAVAILABLE",
         permissionRequired
-          ? "eBay did not grant the Inventory and Account API access required for listing setup."
+          ? "eBay denied access to Inventory or Account settings. Card Shellz support must check application permissions and seller API eligibility."
           : "eBay did not return the connected store's listing setup.",
         {
           storeConnectionId: input.storeConnectionId,
           resource: input.resource.key,
           status: response.status,
+          ...ebayResourceErrorIdentifiers(text),
           retryable: response.status === 429 || response.status >= 500,
         },
       );
@@ -302,24 +280,6 @@ export class EbayDropshipListingSetupDirectory implements DropshipEbayListingSet
       );
     }
   }
-}
-
-function requiresEbayListingSetupReauthorization(error: unknown): error is DropshipError {
-  if (!(error instanceof DropshipError)) return false;
-  if (
-    error.code === "DROPSHIP_STORE_ACCESS_TOKEN_REQUIRED"
-    || error.code === "DROPSHIP_STORE_REFRESH_TOKEN_REQUIRED"
-    || error.code === "DROPSHIP_EBAY_REFRESH_TOKEN_REQUIRED"
-  ) {
-    return true;
-  }
-  return error.code === "DROPSHIP_EBAY_TOKEN_REFRESH_FAILED"
-    && error.context?.authFailureStatus === "needs_reauth";
-}
-
-function providerStatus(error: DropshipError): number | undefined {
-  const value = error.context?.status;
-  return typeof value === "number" && Number.isInteger(value) ? value : undefined;
 }
 
 function nextInventoryLocationPath(
