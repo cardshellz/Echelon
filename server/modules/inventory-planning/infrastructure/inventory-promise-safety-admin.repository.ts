@@ -27,6 +27,7 @@ import {
 import { db } from "../../../db";
 import { persistAuditEvent } from "../../../infrastructure/auditLogger";
 import { sqlIntegerArray } from "../../../infrastructure/postgres-array";
+import { assertCanonicalDemandDispatchEvidence, canonicalDemandDispatchInvalid, type DemandEvidenceExecutor } from "./inventory-demand-dispatch-evidence.repository";
 import type {
   InventoryPromiseSafetyAdminStore,
   RefreshDemandEvidenceCommand,
@@ -470,12 +471,15 @@ implements InventoryPromiseSafetyAdminStore {
   }
 }
 
-async function loadDemandConsumptionEvents(
-  tx: Transaction,
+export async function loadDemandConsumptionEvents(
+  tx: DemandEvidenceExecutor,
   productVariantIds: number[],
   windowStartedAt: Date,
   windowEndedAt: Date,
 ): Promise<DemandConsumptionEvent[]> {
+  const canonicalPhysicalIds = await assertCanonicalDemandDispatchEvidence(
+    tx, productVariantIds, windowStartedAt, windowEndedAt,
+  );
   const physicalRows = rows(await tx.execute(sql`
     WITH physical AS (
       SELECT
@@ -563,12 +567,16 @@ async function loadDemandConsumptionEvents(
         ledger_sku_variant.id
       ) AS product_variant_id,
       COALESCE(source_location.warehouse_id, target_order.warehouse_id) AS warehouse_id,
-      ABS(inventory_tx.variant_qty_delta) AS quantity_shipped,
+      CASE WHEN dispatch_receipt.id IS NOT NULL THEN dispatch_receipt.quantity
+        ELSE ABS(inventory_tx.variant_qty_delta::bigint) END AS quantity_shipped,
       inventory_tx.created_at AS occurred_at,
       COALESCE(legacy_item.shipment_item_purpose, 'unclassified') AS shipment_item_purpose
     FROM inventory.inventory_transactions AS inventory_tx
+    LEFT JOIN inventory.availability_claim_dispatch_receipts AS dispatch_receipt
+      ON dispatch_receipt.inventory_transaction_id = inventory_tx.id
     LEFT JOIN wms.physical_shipment_items AS physical_item
       ON physical_item.legacy_wms_shipment_item_id = inventory_tx.shipment_item_id
+      OR physical_item.id = dispatch_receipt.physical_shipment_item_id
     LEFT JOIN wms.outbound_shipment_items AS legacy_item
       ON legacy_item.id = inventory_tx.shipment_item_id
     LEFT JOIN wms.order_items AS original_order_item
@@ -587,7 +595,8 @@ async function loadDemandConsumptionEvents(
       ON source_location.id = inventory_tx.from_location_id
     WHERE inventory_tx.transaction_type = 'ship'
       AND inventory_tx.voided_at IS NULL
-      AND inventory_tx.variant_qty_delta < 0
+      AND (inventory_tx.variant_qty_delta < 0 OR dispatch_receipt.id IS NOT NULL
+        OR inventory_tx.reference_type = 'availability_claim_dispatch')
       AND inventory_tx.created_at >= ${windowStartedAt}
       AND inventory_tx.created_at < ${windowEndedAt}
       AND physical_item.id IS NULL
@@ -632,13 +641,20 @@ async function loadDemandConsumptionEvents(
   return [
     ...physicalRows.map((row): DemandConsumptionEvent => {
       const reasons: string[] = [];
+      const canonicalIdentity = canonicalPhysicalIds.get(String(row.id));
+      if (canonicalIdentity && (canonicalIdentity.productVariantId !== Number(row.product_variant_id)
+        || canonicalIdentity.warehouseId !== Number(row.warehouse_id))) {
+        canonicalDemandDispatchInvalid(canonicalIdentity.transactionId,
+          "resolved physical variant or warehouse disagrees with dispatch receipt");
+      }
       if (String(row.shipment_item_purpose) === "unclassified") {
         reasons.push(DEMAND_TRUST_REASON.unclassifiedPurpose);
       }
       if (String(row.shipment_status) === "review") {
         reasons.push(DEMAND_TRUST_REASON.shipmentReview);
       }
-      if (String(row.inventory_source_type) === "internal" && row.ship_ledger_id == null) {
+      if (String(row.inventory_source_type) === "internal" && row.ship_ledger_id == null
+        && !canonicalPhysicalIds.has(String(row.id))) {
         reasons.push(DEMAND_TRUST_REASON.missingShipLedger);
       }
       return {
