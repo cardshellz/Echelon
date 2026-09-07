@@ -24,6 +24,8 @@ import { channelConnections } from "@shared/schema";
 import { ShopifyAdapter } from "./adapters/shopify.adapter";
 import { ChannelIdentityService } from "./channel-identity.service";
 import { ChannelIdentityError } from "./channel-identity.domain";
+import { ChannelIdentityRepairService } from "./channel-identity-repair.service";
+import { registerChannelIdentityRepairRoutes } from "./channel-identity-repair.routes";
 import { runShopifyWeightBackfill, createShopifyWeightBackfillDeps } from "./shopify-weight-backfill.service";
 import { rowToListingDto } from "./channel-listings.transform";
 import { toPublicChannelConnection } from "./channel-connection.transform";
@@ -47,6 +49,7 @@ import {
 } from "./wms-order-listing";
 
 export function registerChannelRoutes(app: Express) {
+  registerChannelIdentityRepairRoutes(app, new ChannelIdentityRepairService(db));
 
   // ============================================
   // CHANNEL FEEDS (from inventory section)
@@ -92,8 +95,9 @@ export function registerChannelRoutes(app: Express) {
         if (productLines.length > 0 && !productLines.some((lineId: number) => channelLines.includes(lineId))) {
           return res.status(403).json({ error: "This product's product line is not assigned to this channel" });
         }
+        if (!req.session?.user?.id) return res.status(401).json({ error: "Authenticated operator required" });
         const feed = await new ChannelIdentityService(db).ensureShopifyFeed({
-          channelId, productVariantId, sku: variant.sku, actor: String((req as any).user?.id ?? "channel-feed-enable"),
+          channelId, productVariantId, sku: variant.sku, actor: `user:${req.session.user.id}`,
         });
         return res.json(feed);
       }

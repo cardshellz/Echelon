@@ -17,6 +17,20 @@ import {
 type Database = Pick<typeof defaultDatabase, "transaction">;
 type Transaction = Parameters<Parameters<typeof defaultDatabase.transaction>[0]>[0];
 
+/** Read a retained successful command through its owner; recovery callers validate the body contract. */
+export async function readSuccessfulFinancialCommand(
+  client: Pick<typeof defaultDatabase, "select">,
+  commandId: number,
+  commandName: string,
+) {
+  if (!Number.isSafeInteger(commandId) || commandId <= 0) throw new TypeError("Invalid financial command ID");
+  const [row] = await client.select({ body: financialCommandResults.responseBody }).from(financialCommandResults).where(and(
+    eq(financialCommandResults.id, commandId), eq(financialCommandResults.commandName, commandName),
+    eq(financialCommandResults.status, "succeeded"),
+  )).limit(1);
+  return row?.body ?? null;
+}
+
 const LEASE_SECONDS = 120;
 const RESULT_RETENTION_DAYS = 400;
 const DEFAULT_ATTEMPT_LIMIT = 5;

@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull, or } from "drizzle-orm";
+import { and, eq, inArray, isNull, ne, or } from "drizzle-orm";
 import type { ExternalInventorySnapshot } from "../inventory/application/external-inventory-source.contract";
 import { channelConnections, channelFeeds, channelListings, channels } from "@shared/schema";
 import { persistAuditEvent } from "../../infrastructure/auditLogger";
@@ -29,7 +29,11 @@ export class ChannelIdentityService {
     if (rows.length !== 1 || !rows[0].shopDomain || !rows[0].accessToken) {
       throw new ChannelIdentityError("CHANNEL_CONNECTION_UNRESOLVED", "Select exactly one configured Shopify account for this channel");
     }
-    return { ...rows[0], shopDomain: rows[0].shopDomain, accessToken: rows[0].accessToken, apiVersion: rows[0].apiVersion || "2024-01" };
+    const apiVersion = rows[0].apiVersion || "2024-01";
+    if (!/^[a-z0-9][a-z0-9-]*\.myshopify\.com$/i.test(rows[0].shopDomain) || !/^\d{4}-\d{2}$/.test(apiVersion)) {
+      throw new ChannelIdentityError("SHOPIFY_CONNECTION_INVALID", "Invalid Shopify domain or API version");
+    }
+    return { ...rows[0], shopDomain: rows[0].shopDomain, accessToken: rows[0].accessToken, apiVersion };
   }
 
   async inventoryIdentities(channelId: number): Promise<ChannelItemIdentity[]> {
@@ -47,9 +51,15 @@ export class ChannelIdentityService {
     internalIdentitySchema.parse(channelId);
     variantIds.forEach((id) => internalIdentitySchema.parse(id));
     if (variantIds.length === 0) return [];
-    return this.db.select().from(channelListings).where(and(
-      eq(channelListings.channelId, channelId), inArray(channelListings.productVariantId, [...variantIds]),
-    ));
+    const rows = [];
+    // Bound SQL parameters independently of catalog size.
+    const batchSize = 500;
+    for (let offset = 0; offset < variantIds.length; offset += batchSize) {
+      rows.push(...await this.db.select().from(channelListings).where(and(
+        eq(channelListings.channelId, channelId), inArray(channelListings.productVariantId, variantIds.slice(offset, offset + batchSize)),
+      )));
+    }
+    return rows;
   }
 
   async externalInventory(channelId: number, locationId?: string, connectionId?: number) {
@@ -98,6 +108,9 @@ export class ChannelIdentityService {
     if (!input.actor.trim()) throw new ChannelIdentityError("CHANNEL_IDENTITY_ACTOR_REQUIRED", "An actor is required for mapping changes");
     const connection = await this.shopifyConnection(input.channelId);
     const [listing] = await this.listingIdentities(input.channelId, [input.productVariantId]);
+    if (listing?.syncStatus === "requires_review") {
+      throw new ChannelIdentityError("CHANNEL_LISTING_REQUIRES_REVIEW", "Resolve the listing review before enabling inventory sync");
+    }
     const [before] = await this.db.select().from(channelFeeds).where(and(
       eq(channelFeeds.channelId, input.channelId), eq(channelFeeds.productVariantId, input.productVariantId),
     )).limit(1);
@@ -137,6 +150,11 @@ export class ChannelIdentityService {
         channelVariantId: evidence.id, channelProductId: evidence.product_id,
         channelInventoryItemId: evidence.inventory_item_id, channelSku: evidence.sku, isActive: 1,
       };
+      const conflicts = await tx.select({ id: channelFeeds.id }).from(channelFeeds).where(and(
+        eq(channelFeeds.channelId, input.channelId), ne(channelFeeds.productVariantId, input.productVariantId),
+        or(eq(channelFeeds.channelVariantId, evidence.id), eq(channelFeeds.channelInventoryItemId, evidence.inventory_item_id)),
+      )).limit(1).for("share");
+      if (conflicts.length) throw new ChannelIdentityError("CHANNEL_IDENTITY_CONFLICT", "Another internal variant owns this destination identity");
       if (current && Object.entries(values).every(([key, value]) => current[key as keyof typeof current] === value) && !current.quarantinedAt) return current;
       if (JSON.stringify(current ?? null) !== JSON.stringify(before ?? null)) {
         throw new ChannelIdentityError("CHANNEL_IDENTITY_CHANGED", "Mapping changed during verification; retry preview");

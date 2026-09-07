@@ -962,6 +962,7 @@ class EchelonSyncOrchestrator {
         listingExternalVariantId: channelListings.externalVariantId,
         listingExternalSku: channelListings.externalSku,
         listingLastSyncedPrice: channelListings.lastSyncedPrice,
+        listingSyncStatus: channelListings.syncStatus,
       })
       .from(channelPricing)
       .innerJoin(productVariants, eq(channelPricing.productVariantId, productVariants.id))
@@ -997,7 +998,7 @@ class EchelonSyncOrchestrator {
       const externalVariantId = pr.listingExternalVariantId;
       const externalSku = pr.listingExternalSku ?? pr.variantSku;
 
-      if (!externalVariantId) {
+      if (!externalVariantId || pr.listingSyncStatus === "requires_review") {
         result.details.push({
           variantId: pr.productVariantId!,
           sku: pr.variantSku,

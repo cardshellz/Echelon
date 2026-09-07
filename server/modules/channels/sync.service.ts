@@ -3,7 +3,6 @@ import { getSettingsForWarehouse } from "../warehouse/settings.resolver";
 import {
   channelFeeds,
   channelWarehouseAssignments,
-  channelConnections,
   channelReservations,
   channelProductAllocation,
   channelSyncLog,
@@ -13,11 +12,9 @@ import {
   warehouses,
   productLineProducts,
   channelProductLines,
-  warehouseSettings,
 } from "@shared/schema";
 import type {
   ChannelFeed,
-  ChannelConnection,
   ChannelReservation,
   ChannelProductAllocation,
   Channel,
@@ -584,6 +581,12 @@ class ChannelSyncService {
     const existingSet = new Set(existingFeeds.map((feed) => `${feed.channelId}:${feed.productVariantId}`));
     const channelLineRows = await this.db.select().from(channelProductLines).where(eq(channelProductLines.isActive, true));
     const productLineRows = await this.db.select().from(productLineProducts);
+    const linesByProduct = new Map<number, Set<number>>();
+    for (const row of productLineRows) {
+      const lines = linesByProduct.get(row.productId) ?? new Set<number>();
+      lines.add(row.productLineId);
+      linesByProduct.set(row.productId, lines);
+    }
     const identityService = new ChannelIdentityService(this.db);
     const blocked: string[] = [];
     let created = 0;
@@ -591,13 +594,13 @@ class ChannelSyncService {
       // Discovery repairs missing feed rows from this channel's listings only.
       // The provider reader verifies each candidate against this exact account.
       const listings = await identityService.listingIdentities(channel.id, allVariants.map((variant) => variant.id));
-      const listedVariants = new Set(listings.filter((listing) => listing.externalVariantId).map((listing) => listing.productVariantId));
+      const listedVariants = new Set(listings.filter((listing) => listing.externalVariantId && listing.syncStatus !== "requires_review").map((listing) => listing.productVariantId));
       const allowedLines = new Set<number>(channelLineRows.filter((row: { channelId: number }) => row.channelId === channel.id)
         .map((row: { productLineId: number }) => row.productLineId));
       for (const variant of allVariants) {
         if (existingSet.has(`${channel.id}:${variant.id}`) || !listedVariants.has(variant.id)) continue;
-        if (allowedLines.size > 0 && !productLineRows.some((row: { productId: number; productLineId: number }) =>
-          row.productId === variant.productId && allowedLines.has(row.productLineId))) continue;
+        const productLines = linesByProduct.get(variant.productId);
+        if (productLines?.size && !hasOverlap(productLines, allowedLines)) continue;
         try {
           await identityService.ensureShopifyFeed({ channelId: channel.id, productVariantId: variant.id, sku: variant.sku, actor: "channel-feed-discovery" });
           created++;
@@ -665,7 +668,7 @@ class ChannelSyncService {
     if (!feed.channelId || !feed.channelInventoryItemId || feed.isActive !== 1 || feed.quarantinedAt) {
       throw new ChannelIdentityError("CHANNEL_INVENTORY_MAPPING_REQUIRED", "An active, non-quarantined destination inventory mapping is required");
     }
-    const connection = await new ChannelIdentityService(this.db).shopifyConnection(feed.channelId);
+    await new ChannelIdentityService(this.db).shopifyConnection(feed.channelId);
     const [variant] = await this.db.select({ productId: productVariants.productId,
       requiresShipping: productVariants.requiresShipping, trackInventory: productVariants.trackInventory,
       salesEligibility: productVariants.salesEligibility,

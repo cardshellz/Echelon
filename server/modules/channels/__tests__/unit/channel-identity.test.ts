@@ -51,4 +51,13 @@ describe("channel-scoped identity boundary", () => {
     const request = vi.fn().mockResolvedValue(new Response("private provider response", { status: 429 }));
     await expect(new ShopifyIdentityReader(request).variant(connection, "3")).rejects.toMatchObject({ code: "SHOPIFY_IDENTITY_READ_REJECTED", failureClass: "transient" });
   });
+  it("classifies malformed JSON without exposing provider content", async () => {
+    const request = vi.fn().mockResolvedValue(new Response("private invalid JSON"));
+    await expect(new ShopifyIdentityReader(request).variant(connection, "3")).rejects.toMatchObject({ code: "SHOPIFY_IDENTITY_RESPONSE_INVALID" });
+  });
+  it("rejects malformed pagination before making another request", async () => {
+    const request = vi.fn().mockResolvedValue(response({ inventory_levels: [] }, { Link: '<not-a-url>; rel="next"' }));
+    await expect(new ShopifyIdentityReader(request).inventory(connection, "20")).rejects.toMatchObject({ code: "SHOPIFY_INVENTORY_PAGINATION_INVALID" });
+    expect(request).toHaveBeenCalledTimes(1);
+  });
 });

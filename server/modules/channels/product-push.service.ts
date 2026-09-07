@@ -119,7 +119,8 @@ export function createChannelProductPushService(db: any) {
     const variantOverrides = await storage.getChannelVariantOverridesByProduct(channelId, productId);
     const pricingOverrides = await storage.getChannelPricingByProduct(channelId, productId);
     const assetOverrides = await storage.getChannelAssetOverridesByProduct(channelId, productId);
-    const channelMappings = await storage.getChannelListingsByProduct(channelId, productId);
+    const channelMappings = (await storage.getChannelListingsByProduct(channelId, productId))
+      .filter((mapping) => mapping.syncStatus !== "requires_review");
     const mappingByVariant = new Map(channelMappings.map((mapping) => [mapping.productVariantId, mapping]));
     const externalProductIds = new Set(channelMappings.map((mapping) => mapping.externalProductId).filter(Boolean));
     if (externalProductIds.size > 1) {
@@ -301,9 +302,12 @@ export function createChannelProductPushService(db: any) {
     try {
       const connection = await identityService.shopifyConnection(channelId);
       const evidence = await new ShopifyIdentityReader().product(connection, externalProductId);
+      if (!Number.isSafeInteger(Number(externalProductId))) {
+        throw new ChannelIdentityError("CHANNEL_PRODUCT_IDENTITY_INVALID", "Destination product ID cannot be serialized safely by the REST connector");
+      }
       for (const variant of resolved.variants.filter((item) => item.isListed)) {
         const external = evidence.variants.find((item) => item.id === variant.shopifyVariantId);
-        if (!external || external.sku !== variant.sku) {
+        if (!external || external.sku !== variant.sku || !Number.isSafeInteger(Number(external.id))) {
           throw new ChannelIdentityError("CHANNEL_PRODUCT_IDENTITY_MISMATCH", "Destination product variants do not match the channel mapping");
         }
       }
@@ -344,6 +348,8 @@ export function createChannelProductPushService(db: any) {
     const url = `https://${shopDomain}/admin/api/${apiVersion}/products/${externalProductId}.json`;
     const response = await fetch(url, {
       method: "PUT",
+      redirect: "error",
+      signal: AbortSignal.timeout(15_000),
       headers: {
         "X-Shopify-Access-Token": accessToken,
         "Content-Type": "application/json",
@@ -352,11 +358,14 @@ export function createChannelProductPushService(db: any) {
     });
 
     if (!response.ok) {
-      const body = await response.text();
-      throw new Error(`Shopify update product failed (${response.status}): ${body}`);
+      throw new ChannelIdentityError("CHANNEL_PRODUCT_UPDATE_REJECTED", `Shopify product update returned HTTP ${response.status}`,
+        response.status === 429 || response.status >= 500 ? "transient" : "permanent");
     }
 
     const data = await response.json();
+    if (String(data?.product?.id) !== externalProductId) {
+      throw new ChannelIdentityError("CHANNEL_PRODUCT_UPDATE_UNCONFIRMED", "Shopify did not confirm the destination product ID");
+    }
     return data.product;
   }
 

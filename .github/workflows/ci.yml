@@ -132,6 +132,7 @@ jobs:
           npx vitest run --no-file-parallelism
           server/modules/channels/__tests__/integration/allocation-engine.integration.test.ts
           server/modules/channels/__tests__/integration/source-lock.integration.test.ts
+          server/modules/channels/__tests__/integration/channel-identity.integration.test.ts
           server/modules/inventory/__tests__/integration/allocation-concurrency.integration.test.ts
           server/modules/shipping/__tests__/integration/package-allocation-ledger.repository.integration.test.ts
       - name: Fulfillment provider connection PostgreSQL guarantees

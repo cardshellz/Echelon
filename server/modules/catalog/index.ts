@@ -12,3 +12,4 @@ export const catalogStorage: IProductStorage = productMethods;
 
 // Service types
 export type { ProductImportService, ContentSyncResult, ProductSyncResult } from "./product-import.service";
+export { readCatalogInventoryIdentity } from "./catalog-identity.reader";
