@@ -1,3 +1,4 @@
+import { SupplierSourcingEditor } from "@/features/supplier-catalog/SupplierSourcingEditor";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useLocation, useSearch } from "wouter";
@@ -1266,6 +1267,7 @@ export default function Suppliers() {
                                   </div>
                                 </div>
                                 <div className="flex gap-1 shrink-0">
+                                  <SupplierSourcingEditor vendorProductId={vp.id} label={resolveProductSku(vp)} currency={v.currency ?? "USD"} />
                                   <Button
                                     variant="ghost"
                                     size="icon"
@@ -1549,7 +1551,8 @@ export default function Suppliers() {
                                           )}
                                         </TableCell>
                                         <TableCell>
-                                          <div className="flex gap-1">
+                                          <div className="flex flex-wrap gap-1">
+                                            <SupplierSourcingEditor vendorProductId={vp.id} label={resolveProductSku(vp)} currency={v.currency ?? "USD"} />
                                             <Button
                                               variant="ghost"
                                               size="icon"

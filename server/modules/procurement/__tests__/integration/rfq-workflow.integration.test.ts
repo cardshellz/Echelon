@@ -1,3 +1,7 @@
+import { SupplierSourcingService } from "../../supplier-sourcing.service";
+import { SupplierSourcingRepository, attachSupplierSourcingCandidates } from "../../supplier-sourcing.repository";
+import { DEFAULT_SUPPLIER_SOURCING_POLICY } from "@shared/procurement/supplier-sourcing";
+import { generatePurchasingRecommendations } from "../../purchasing-recommendation.engine";
 import { readPurchaseRfqOrigins } from "../../purchase-rfq-origin.repository";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -18,7 +22,7 @@ const url = process.env.ECHELON_TEST_DATABASE_URL;
 const integration = url && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;
 const NOW = new Date("2026-09-07T12:00:00Z");
 const TABLES = [schema.products, schema.productVariants, schema.warehouses, schema.vendors, schema.vendorProducts,
-  schema.purchaseOrders, schema.purchaseOrderLines, schema.poStatusHistory, schema.poEvents];
+  schema.purchaseOrders, schema.purchaseOrderLines, schema.poStatusHistory, schema.poEvents, schema.purchasingRecommendationDecisions, schema.purchasingRecommendationPoHandoffs];
 
 integration.sequential("RFQ quote revisions and real purchase-owner transaction", () => {
   const suffix = randomUUID();
@@ -32,6 +36,8 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
   let modulePool: pg.Pool | undefined;
   let database: ReturnType<typeof drizzle<typeof schema>>;
   let service: ReturnType<typeof import("../../rfq-workflow.service").createRfqWorkflowService>;
+  let purchasingOwner: ReturnType<typeof import("../../purchasing.service").createPurchasingService>;
+  let recommendationHandoff: ReturnType<typeof import("../../recommendation-po-handoff.service").createRecommendationPoHandoffService>;
   let commands: ReturnType<typeof import("../../rfq-workflow.commands").createRfqWorkflowCommands>;
   let commandScope: typeof import("../../rfq-workflow.commands").rfqWorkflowCommandScope;
   let commandPrincipal: string;
@@ -44,9 +50,11 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
     if (!lock.rows[0].acquired) throw new Error("Another procurement fixture owns the schema lease");
     for (const name of ["catalog", "procurement", "warehouse"]) { await pool.query(`CREATE SCHEMA ${name}`); ownedSchemas.push(name); }
     for (const table of TABLES) await pool.query(fixtureTable(table));
+    await pool.query("CREATE UNIQUE INDEX purch_rec_decisions_id_rec_kind_uidx ON procurement.purchasing_recommendation_decisions(id,recommendation_id,kind)");
+    await pool.query("CREATE UNIQUE INDEX purchase_order_lines_po_id_line_id_uidx ON procurement.purchase_order_lines(purchase_order_id,id)");
     for (const statement of fixtureForeignKeys(TABLES)) await pool.query(statement);
     await pool.query("CREATE UNIQUE INDEX purchase_orders_po_number_unique ON procurement.purchase_orders(po_number)");
-    for (const migration of ["148_purchase_rfq_requests.sql", "158_rfq_allocation_override_evidence.sql", "224_rfq_quote_revisions_and_purchase_links.sql"]) await pool.query(readFileSync(resolve(process.cwd(), "migrations", migration), "utf8"));
+    for (const migration of ["130_atomic_recommendation_po_handoffs.sql", "148_purchase_rfq_requests.sql", "158_rfq_allocation_override_evidence.sql", "224_rfq_quote_revisions_and_purchase_links.sql", "228_supplier_sourcing_policies.sql"]) await pool.query(readFileSync(resolve(process.cwd(), "migrations", migration), "utf8"));
     if (!(await pool.query("SELECT to_regclass('public.audit_events') AS relation")).rows[0].relation) { await pool.query(fixtureTable(schema.auditEvents)); ownsAudit = true; }
     ownsCommands = !(await pool.query("SELECT to_regclass('public.financial_command_results') AS relation")).rows[0].relation;
     ownsRecoveries = !(await pool.query("SELECT to_regclass('public.financial_command_recoveries') AS relation")).rows[0].relation;
@@ -68,6 +76,10 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
       modulePool.connect = pool.connect.bind(pool) as typeof modulePool.connect;
       const storage = { ...procurement.procurementMethods, ...catalog.productMethods };
       const owner = purchasing.createPurchasingService(database, storage as never, { now: () => NOW });
+      const handoffRepository = await import("../../recommendation-po-handoff.repository");
+      const handoffService = await import("../../recommendation-po-handoff.service");
+      recommendationHandoff = handoffService.createRecommendationPoHandoffService(handoffRepository.createDrizzleRecommendationPoHandoffRepository(database));
+      purchasingOwner = owner;
       service = workflow.createRfqWorkflowService(database, owner);
       commands = commandModule.createRfqWorkflowCommands(service, repository.createDrizzleFinancialCommandRepository(database), () => NOW);
       commandScope = commandModule.rfqWorkflowCommandScope;
@@ -80,7 +92,8 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
 
   beforeEach(async () => {
     if (ownedSchemas.length !== 3) throw new Error("RFQ fixture schema ownership missing");
-    await pool.query(`TRUNCATE ${TABLES.map(qualifiedTable).join(",")}, procurement.purchase_recommendation_runs RESTART IDENTITY CASCADE`);
+    // Disable only the fixture's immutable TRUNCATE guard for isolated reset.
+    await pool.query(`BEGIN; ALTER TABLE procurement.supplier_sourcing_revisions DISABLE TRIGGER supplier_sourcing_history_truncate_immutable; TRUNCATE ${TABLES.map(qualifiedTable).join(",")}, procurement.purchase_recommendation_runs RESTART IDENTITY CASCADE; ALTER TABLE procurement.supplier_sourcing_revisions ENABLE TRIGGER supplier_sourcing_history_truncate_immutable; COMMIT`);
     await pool.query("DELETE FROM public.audit_events WHERE actor=$1", [actorId]);
     await pool.query("DELETE FROM public.financial_command_results WHERE idempotency_key LIKE $1", [`rfq-${suffix}-%`]);
     await pool.query(`
@@ -99,9 +112,9 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
   afterAll(async () => {
     try {
       if (pool) {
-        if (ownsAudit) await pool.query("DROP TABLE public.audit_events"); else await pool.query("DELETE FROM public.audit_events WHERE actor=$1", [actorId]);
+        if (ownsAudit) await pool.query("DROP TABLE public.audit_events"); else if ((await pool.query("SELECT to_regclass('public.audit_events') AS relation")).rows[0].relation) await pool.query("DELETE FROM public.audit_events WHERE actor=$1", [actorId]);
         if (ownsRecoveries) await pool.query("DROP TABLE public.financial_command_recoveries");
-        if (ownsCommands) await pool.query("DROP TABLE public.financial_command_results"); else await pool.query("DELETE FROM public.financial_command_results WHERE idempotency_key LIKE $1", [`rfq-${suffix}-%`]);
+        if (ownsCommands) await pool.query("DROP TABLE public.financial_command_results"); else if ((await pool.query("SELECT to_regclass('public.financial_command_results') AS relation")).rows[0].relation) await pool.query("DELETE FROM public.financial_command_results WHERE idempotency_key LIKE $1", [`rfq-${suffix}-%`]);
         for (const name of [...ownedSchemas].reverse()) await pool.query(`DROP SCHEMA ${name} CASCADE`);
       }
     } finally {
@@ -128,6 +141,77 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
     const command: RfqWorkflowCommand = { operation: "convert", rfqId: 10, body: { expectedVersion: workflow.version, lines: lineIds.map((rfqLineId) => ({ rfqLineId, quoteRevisionId: workflow.lines.find((line) => line.id === rfqLineId)!.latestQuote!.id })), quantityOverrideReason: null } };
     return { command, identity: descriptor(command) };
   }
+
+  it("preserves versioned supplier tiers through recommendation, final RFQ quote and real PO conversion", async () => {
+    const sourcing = new SupplierSourcingService(new SupplierSourcingRepository(database), () => NOW);
+    const policy = { ...DEFAULT_SUPPLIER_SOURCING_POLICY, priceList: { currency: "USD", basis: "per_purchase_uom" as const, purchaseUom: "case", piecesPerPurchaseUom: 50,
+      quoteReference: "CATALOG-TIER-1", quotedAt: "2026-09-01T00:00:00Z", validFrom: "2026-09-01", validUntil: "2026-09-30", tiers: [{ minimumQuantity: 1, unitCostMills: 100001 }, { minimumQuantity: 10, unitCostMills: 90001 }] } };
+    await sourcing.update(300, { expectedRevision: 0, idempotencyKey: randomUUID(), reason: "Synthetic supplier tier quote", policy }, actorId);
+    const rows = await attachSupplierSourcingCandidates(database, [{ product_id: 100, variant_id: 200, total_pieces: 0, total_outbound_pieces: 60, previous_outbound_pieces: 60, lead_time_days: 10, safety_stock_days: 0, on_order_pieces: 0, recommendation_analysis_date: "2026-09-07" }]);
+    const item = generatePurchasingRecommendations({ asOf: NOW, lookbackDays: 30, rows }).items[0];
+    const captured = item.supplierBasis.sourcingSelection;
+    await pool.query("TRUNCATE procurement.purchase_recommendation_lines RESTART IDENTITY CASCADE");
+    await pool.query("INSERT INTO procurement.purchase_recommendation_lines(id,run_id,recommendation_key,product_id,product_variant_id,warehouse_id,sku,product_name,recommended_pieces,preferred_vendor_id,preferred_vendor_product_id,evidence_snapshot) OVERRIDING SYSTEM VALUE VALUES(1,1,'tier-source',100,200,1,'RFQ-SKU-A','RFQ product A',150,5,300,$1::jsonb)", [JSON.stringify({ supplierBasis: item.supplierBasis })]);
+    await pool.query("INSERT INTO procurement.request_for_quote_lines(id,rfq_id,recommendation_line_id,vendor_product_id,requested_pieces) OVERRIDING SYSTEM VALUE VALUES(20,10,1,300,150)");
+    await sourcing.update(300, { expectedRevision: 1, idempotencyKey: randomUUID(), reason: "Later policy edit preserves earlier evidence", policy: { ...policy, priority: 5 } }, actorId);
+    expect((await service.getDetail(10)).lines[0].sourcingSelection).toEqual(captured);
+    await capture(); const attempt = await conversion();
+    attempt.command.body = { ...(attempt.command.body as object), quantityOverrideReason: "Supplier confirmed the final RFQ quantity and purchase units" };
+    attempt.identity = descriptor(attempt.command);
+    const converted = await commands.execute(attempt.command, actorId, attempt.identity);
+    expect(converted.httpStatus).toBe(201);
+    const result = rfqConversionResultSchema.parse(converted.body);
+    expect((await readPurchaseRfqOrigins(database, result.purchaseOrderId))[0].rfqLineId).toBe(20);
+    expect((await service.getDetail(10)).lines[0].sourcingSelection).toEqual(captured);
+    expect((await commands.execute(attempt.command, actorId, attempt.identity)).body).toEqual(converted.body);
+  });
+
+  it("uses an explicitly selected product-level supplier mapping without creating a replacement variant mapping", async () => {
+    await pool.query("UPDATE procurement.request_for_quotes SET status='cancelled',cancelled_at=$1 WHERE id=10", [NOW]);
+    await pool.query("UPDATE procurement.vendor_products SET product_variant_id=NULL WHERE id=300");
+    await pool.query("INSERT INTO procurement.purchase_recommendation_lines(id,run_id,recommendation_key,product_id,product_variant_id,warehouse_id,sku,product_name,recommended_pieces,preferred_vendor_id,preferred_vendor_product_id,evidence_snapshot) OVERRIDING SYSTEM VALUE VALUES(3,1,'exact-source',100,200,1,'RFQ-SKU-A','RFQ product A',150,5,300,'{}')");
+    const input = { idempotencyKey: `exact-source-${suffix}`, requestNote: "Operator selected the captured supplier mapping", lines: [{ recommendationLineId: 3, vendorId: 5, vendorProductId: 300, requestedPieces: 150 }] };
+    const result = await purchasingOwner.createRfqBatch(input, actorId);
+    expect(result.lines[0].vendorProductId).toBe(300);
+    expect((await pool.query("SELECT count(*)::int AS count FROM procurement.vendor_products WHERE product_id=100")).rows[0].count).toBe(1);
+    expect((await purchasingOwner.createRfqBatch(input, actorId)).reused).toBe(true);
+  });
+
+  async function tierAcceptance(validUntil = "2099-09-30", asOfDate = "2026-09-07") {
+    const sourcing = new SupplierSourcingService(new SupplierSourcingRepository(database), () => NOW);
+    const policy = { ...DEFAULT_SUPPLIER_SOURCING_POLICY, priceList: { currency: "USD", basis: "per_purchase_uom" as const, purchaseUom: "bundle", piecesPerPurchaseUom: 3,
+      quoteReference: "EXACT-TIER", quotedAt: "2026-09-01T00:00:00Z", validFrom: "2026-09-01", validUntil, tiers: [{ minimumQuantity: 1, unitCostMills: 100001 }] } };
+    await pool.query("UPDATE procurement.vendor_products SET is_preferred=1,lead_time_days=4 WHERE id=300");
+    await sourcing.update(300,{expectedRevision:0,idempotencyKey:randomUUID(),reason:"Exact supplier quote",policy},actorId);
+    const rows = await attachSupplierSourcingCandidates(database,[{product_id:100,variant_id:200,total_pieces:0,total_outbound_pieces:60,previous_outbound_pieces:60,safety_stock_days:0,on_order_pieces:0,recommendation_analysis_date:asOfDate}]);
+    const item = generatePurchasingRecommendations({asOf:`${asOfDate}T12:00:00Z`,lookbackDays:30,rows}).items[0];
+    const accepted = {...item,vendorProductId:item.supplierBasis.vendorProductId,pricingBasis:item.supplierBasis.pricingBasis,purchaseUom:item.supplierBasis.purchaseUom,quotedUnitCostMills:item.supplierBasis.quotedUnitCostMills,piecesPerPurchaseUom:item.supplierBasis.piecesPerPurchaseUom,quoteReference:item.supplierBasis.quoteReference,quotedAt:item.supplierBasis.quotedAt,quoteValidUntil:item.supplierBasis.quoteValidUntil};
+    const decision = await recommendationHandoff.recordDecision({recommendationId:item.recommendationId,kind:"held_by_policy",decision:"accepted_for_po",status:"active",decisionReason:"supplier_review",note:"Operator reviewed supplier quantity tiers",source:"operator",productId:100,productVariantId:200,vendorId:5,sku:"RFQ-SKU-A",productName:"RFQ product A",candidateScore:null,candidateBand:null,recommendationSnapshot:{item:accepted},decidedBy:actorId});
+    return {sourcing,policy,command:{actorId,items:[{acceptedDecisionId:decision.id,recommendationId:item.recommendationId,kind:"held_by_policy",productId:100,productVariantId:200,suggestedPieces:item.suggestedOrderPieces,orderUomUnits:item.orderUomUnits,orderUomLabel:item.orderUomLabel,vendorId:5,vendorProductId:300,sku:"RFQ-SKU-A",productName:"RFQ product A",candidateScore:null,candidateBand:null,recommendationSnapshot:{item:accepted}}]}};
+  }
+
+  it("writes exact tier money and signed normalization remainder through the real recommendation PO owner", async () => {
+    const accepted = await tierAcceptance();
+    const result = await recommendationHandoff.createAcceptedHandoff(accepted.command);
+    const row=(await pool.query("SELECT order_qty,quoted_unit_cost_mills,unit_cost_mills,total_product_cost_cents,pricing_remainder_mills,quote_reference,vendor_product_id,pieces_per_purchase_uom FROM procurement.purchase_order_lines WHERE purchase_order_id=$1",[result.pos[0].id])).rows[0];
+    expect(row).toMatchObject({order_qty:9,quoted_unit_cost_mills:"100001",unit_cost_mills:"33334",total_product_cost_cents:"3000",pricing_remainder_mills:"-3",quote_reference:"EXACT-TIER",vendor_product_id:300,pieces_per_purchase_uom:3});
+    const evidence=(await pool.query("SELECT recommendation_snapshot FROM procurement.purchasing_recommendation_decisions WHERE decision='accepted_for_po'")).rows[0].recommendation_snapshot;
+    expect(evidence.item.supplierBasis.sourcingSelection.options[0].tier.revision).toBe(1);
+  });
+
+  it("rejects a tier revision changed after persisted acceptance without creating financial rows", async () => {
+    const accepted = await tierAcceptance();
+    await accepted.sourcing.update(300,{expectedRevision:1,idempotencyKey:randomUUID(),reason:"Changed supplier terms",policy:{...accepted.policy,priority:5}},actorId);
+    await expect(recommendationHandoff.createAcceptedHandoff(accepted.command)).rejects.toMatchObject({code:"SUPPLIER_TIER_REVISION_CHANGED"});
+    expect((await pool.query("SELECT count(*)::int AS count FROM procurement.purchase_orders")).rows[0].count).toBe(0);
+    expect((await pool.query("SELECT count(*)::int AS count FROM procurement.purchasing_recommendation_decisions WHERE decision='po_handoff_created'")).rows[0].count).toBe(0);
+  });
+
+  it("rejects a tier that expired after recommendation capture without creating a PO", async () => {
+    const accepted = await tierAcceptance("2026-09-02","2026-09-01");
+    await expect(recommendationHandoff.createAcceptedHandoff(accepted.command)).rejects.toMatchObject({code:"SUPPLIER_TIER_QUANTITY_REVIEW_REQUIRED"});
+    expect((await pool.query("SELECT count(*)::int AS count FROM procurement.purchase_orders")).rows[0].count).toBe(0);
+  });
 
   it("captures exact quote economics and replays the original response once", async () => {
     const attempt = await capture();

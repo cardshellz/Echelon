@@ -25,7 +25,7 @@ function recommendation(overrides: Record<string, unknown> = {}) {
       forecastTrust: { severity: "ok" },
       qualityGate: { autoDraftEligible: false },
       autopilotBlockers: [{ area: "supplier_cost", code: "missing_supplier_cost" }],
-      supplierBasis: { costSource: "missing", costQuality: "missing", pricingBasis: "legacy_unknown" },
+      supplierBasis: { costSource: "missing", costQuality: "missing", pricingBasis: "legacy_unknown", sourcingSelection: { version: 1, selectedVendorProductId: 70, method: "preferred", rankBasis: "preferred_then_priority_then_variant_then_lead_time_then_identity", priceComparison: "not_performed", options: [{ vendorProductId: 70, vendorId: 7, vendorName: "Synthetic supplier", preferred: true, priority: 100, revision: 0, eligible: true, rejectionReasons: [], pricingReviewReasons: ["quote_missing"], currency: "USD", leadTimeDays: 10, minimumOrderPieces: 1, orderIncrementPieces: 1, proposedPieces: 100, estimatedUnitCostMills: null, tier: null }] } },
     },
     ...overrides,
   } as any;
@@ -204,4 +204,29 @@ describe("automatic RFQ draft service", () => {
     expect(tx.insert).not.toHaveBeenCalled();
   });
 
+});
+
+
+describe("automatic RFQ supplier capture compatibility", () => {
+  it("allows a current-quote alternate RFQ proposal while keeping PO acceptance blocked", () => {
+    const line = recommendation();
+    Object.assign(line.evidenceSnapshot.supplierBasis, { costQuality: "current", costSource: "vendor_unit_cost_mills", pricingBasis: "per_piece" });
+    line.evidenceSnapshot.supplierBasis.sourcingSelection.method = "ranked_alternate";
+    line.evidenceSnapshot.autopilotBlockers = [{ area: "supplier_catalog", severity: "block", code: "ranked_alternate_review" }];
+    expect(planAutomaticRfqDrafts([line], normalizeAutomaticRfqDraftPolicy({ rfqDraftAutomationMode: "preferred_vendor" })).selected).toHaveLength(1);
+  });
+
+  it("holds pre-ranking captures for new creation while replaying an existing durable RFQ", async () => {
+    const line = recommendation(); delete line.evidenceSnapshot.supplierBasis.sourcingSelection;
+    const policy = normalizeAutomaticRfqDraftPolicy({ rfqDraftAutomationMode: "preferred_vendor" });
+    expect(planAutomaticRfqDrafts([line], policy).skipped[0].code).toBe("supplier_selection_review_required");
+    const { database, tx } = fakeDatabase([[line], [{ id: 500, vendorId: 7, status: "draft" }], [{ id: 600, rfqId: 500 }]], []);
+    const result = await createAutomaticRfqDraftService(database).createDrafts({ recommendationRunId: 50, lines: [line], policy, actorId: "operator" });
+    expect(result).toMatchObject({ reused: true, rfqs: [{ id: 500 }], lines: [{ id: 600 }] });
+    expect(tx.insert).not.toHaveBeenCalled();
+  });
+  it("rejects a captured supplier that differs from the durable recommendation", () => {
+    const line = recommendation(); line.evidenceSnapshot.supplierBasis.sourcingSelection.selectedVendorProductId = 99;
+    expect(planAutomaticRfqDrafts([line], normalizeAutomaticRfqDraftPolicy({ rfqDraftAutomationMode: "preferred_vendor" })).skipped[0].code).toBe("supplier_selection_review_required");
+  });
 });

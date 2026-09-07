@@ -1,3 +1,4 @@
+import { SupplierSelectionEvidence } from "@/features/purchasing/SupplierSelectionEvidence";
 import { evaluateSupplierBundle, type SupplierBundleTerms } from "@shared/procurement/supplier-bundle";
 // Reorder Engine cockpit — the redesigned /reorder-analysis page
 // (design spec §4.6/§13–§14, mock 01-reorder-analysis.html). Behind the
@@ -165,6 +166,7 @@ interface CockpitForwardDemandContribution {
 }
 
 interface CockpitItem {
+  manualSourcingOverride?: boolean;
   supplierBundleTerms?: SupplierBundleTerms | null;
   planningBasis?: import("@shared/procurement/purchase-planning-policy").PurchasePlanningBasis;
   supplyTiming?: import("@shared/procurement/purchase-planning-policy").PurchaseSupplyTiming;
@@ -195,6 +197,7 @@ interface CockpitItem {
   estimatedCostMills: number | null;
   estimatedCostCents: number | null;
   supplierBasis: {
+    sourcingSelection?: import("@shared/procurement/supplier-sourcing").SupplierSelectionEvidence;
     vendorProductId: number | null;
     costSource: string;
     costQuality: string;
@@ -782,6 +785,8 @@ function MathDrawerBody({ item, asOfIsoDate }: { item: CockpitItem; asOfIsoDate:
         )}
       </DrawerStep>
 
+      <SupplierSelectionEvidence evidence={supplier.sourcingSelection} />
+
       <DrawerStep index={8} title="Outcome & automation gate">
         <div className="flex flex-wrap items-center gap-2">
           {item.supplyTiming?.signal === "unverified_receipts" ? <Badge variant="outline" className={TONE_BADGE_CLASSES.amber}>Receipt review</Badge> : <StatusBadge status={item.status} />}
@@ -1248,6 +1253,7 @@ export default function ReorderEngine() {
   const [orderSelection, setOrderSelection] = useState<OrderSelection>(new Map());
   const [builderOpen, setBuilderOpen] = useState(false);
   const [builderStage, setBuilderStage] = useState<"edit" | "confirm" | "result">("edit");
+  const [supplierOverrides, setSupplierOverrides] = useState<Record<string, number>>({});
   const [vendorMode, setVendorMode] = useState<Record<string, VendorOrderMode>>({});
   const [ackedControls, setAckedControls] = useState<ReadonlySet<string>>(new Set());
   const [approvedExceptions, setApprovedExceptions] = useState<ReadonlySet<string>>(new Set());
@@ -1276,10 +1282,17 @@ export default function ReorderEngine() {
       if (seen.has(item.recommendationId)) continue;
       seen.add(item.recommendationId);
       if (item.skippedReason === "excluded") continue;
-      list.push(item);
+      const overrideId = supplierOverrides[item.recommendationId];
+      const override = item.supplierBasis.sourcingSelection?.options.find((option) => option.vendorProductId === overrideId && option.eligible);
+      list.push(!override || override.vendorProductId === item.supplierBasis.vendorProductId ? item : {
+        ...item, manualSourcingOverride: true, preferredVendorId: override.vendorId, preferredVendorName: override.vendorName,
+        leadTimeDays: override.leadTimeDays, supplierBundleTerms: null, estimatedCostMills: null, estimatedCostCents: null,
+        supplierBasis: { ...item.supplierBasis, vendorProductId: override.vendorProductId, pricingBasis: "legacy_unknown", costSource: "missing", costQuality: "unverified",
+          purchaseUom: null, piecesPerPurchaseUom: null, packSize: override.orderIncrementPieces, minimumOrderPieces: override.minimumOrderPieces },
+      });
     }
     return list;
-  }, [items, skippedItems]);
+  }, [items, skippedItems, supplierOverrides]);
 
   const orderableById = useMemo(
     () => new Map(orderableItems.map((item) => [item.recommendationId, item])),
@@ -1320,7 +1333,7 @@ export default function ReorderEngine() {
         .map((item) => ({ item, state: orderSelection.get(item.recommendationId)! }))
         .filter((line) => line.state.pieces > 0);
       if (lines.length === 0) continue;
-      ((vendorMode[group.key] ?? "po") === "rfq" ? rfqGroups : poGroups).push({ group, lines });
+      ((group.lines.some((line) => line.manualSourcingOverride) ? "rfq" : vendorMode[group.key] ?? "po") === "rfq" ? rfqGroups : poGroups).push({ group, lines });
     }
     return { poGroups, rfqGroups };
   }, [builderGroups, orderSelection, vendorMode]);
@@ -1665,13 +1678,17 @@ export default function ReorderEngine() {
             failures.push({ sku: item.sku, step: "rfq", message: built.error });
             continue;
           }
-          rfqLineBodies.push(built.line);
+          if (item.manualSourcingOverride && !exceedReasonValid(state.exceedReason)) {
+            failures.push({ sku: item.sku, step: "rfq", message: "Record a reason for overriding the proposed supplier." });
+            continue;
+          }
+          rfqLineBodies.push({ ...built.line, ...(item.supplierBasis.sourcingSelection && item.supplierBasis.vendorProductId ? { vendorProductId: item.supplierBasis.vendorProductId } : {}) });
           rfqLineIds.push(item.recommendationId);
         }
         if (rfqLineBodies.length > 0) {
           const batch = await postPurchasingCommand("/api/purchasing/rfq-queue", {
             idempotencyKey: rfqIdempotencyKey,
-            requestNote: null,
+            requestNote: allRfqLines.filter(({ item }) => item.manualSourcingOverride).map(({ item, state }) => `${item.sku}: supplier override to ${item.preferredVendorName} (mapping ${item.supplierBasis.vendorProductId}). ${state.exceedReason.trim()}`).join("\n") || null,
             responseDueDate: null,
             lines: rfqLineBodies,
           });
@@ -1781,7 +1798,7 @@ export default function ReorderEngine() {
     let grandCents = 0;
     let missingCostCount = 0;
     for (const group of builderGroups.vendorGroups) {
-      const mode = vendorMode[group.key] ?? "po";
+      const mode = group.lines.some((line) => line.manualSourcingOverride) ? "rfq" : vendorMode[group.key] ?? "po";
       let vendorHasPieces = false;
       for (const item of group.lines) {
         const state = orderSelection.get(item.recommendationId);
@@ -1791,13 +1808,13 @@ export default function ReorderEngine() {
         const cents = orderLineValueCents(item, state.pieces);
         if (cents === null) missingCostCount += 1;
         else grandCents += cents;
-        const needsReason =
+        const needsReason = item.manualSourcingOverride || (
           mode === "rfq"
             ? rfqLineNeedsReason(
                 state.pieces,
                 rfqBaselinePieces(rfqLineMap.get(item.recommendationId)?.remainingPieces, item.suggestedOrderPieces),
               )
-            : exceedsSuggestion(state.pieces, item.suggestedOrderPieces);
+            : exceedsSuggestion(state.pieces, item.suggestedOrderPieces));
         if (needsReason && !exceedReasonValid(state.exceedReason) && !missingReason) {
           missingReason =
             mode === "rfq"
@@ -2282,8 +2299,20 @@ export default function ReorderEngine() {
                 {builderGroups.vendorGroups.length === 0 && builderGroups.needsSupplier.length === 0 && (
                   <div className="py-10 text-center text-sm text-zinc-500">No items — add SKUs from the table</div>
                 )}
+                {orderableItems.filter((item) => orderSelection.has(item.recommendationId) && (item.supplierBasis.sourcingSelection?.options.length ?? 0) > 1).map((item) => <div key={`supplier-choice-${item.recommendationId}`} className="rounded border p-3 text-xs">
+                  <label className="font-medium" htmlFor={`supplier-choice-${item.recommendationId}`}>Supplier for {item.sku}</label>
+                  <select id={`supplier-choice-${item.recommendationId}`} className="mt-1 h-9 w-full rounded border bg-background px-2" value={item.supplierBasis.vendorProductId ?? ""} onChange={(event) => {
+                    const mappingId = Number(event.target.value);
+                    const option = item.supplierBasis.sourcingSelection?.options.find((entry) => entry.vendorProductId === mappingId && entry.eligible);
+                    if (!option) return;
+                    setSupplierOverrides((current) => ({ ...current, [item.recommendationId]: mappingId }));
+                    setOrderSelection((current) => setOrderLinePieces(setOrderLineExceedReason(current, item.recommendationId, ""), item.recommendationId, option.proposedPieces));
+                    setPieceDrafts((current) => ({ ...current, [item.recommendationId]: String(option.proposedPieces) }));
+                  }}>{item.supplierBasis.sourcingSelection?.options.map((option) => <option key={option.vendorProductId} value={option.vendorProductId} disabled={!option.eligible}>{option.vendorName} - priority {option.priority} - {option.leadTimeDays} days{option.preferred ? " - preferred" : ""}{!option.eligible ? ` - ${option.rejectionReasons.join(", ")}` : ""}</option>)}</select>
+                  <p className="mt-1 text-muted-foreground">An override creates an RFQ for a final quote and leaves the preferred supplier unchanged. Proposed quantities use the selected supplier's lead time and order multiples.</p>
+                </div>)}
                 {builderGroups.vendorGroups.map((group) => {
-                  const mode = vendorMode[group.key] ?? "po";
+                  const mode = group.lines.some((line) => line.manualSourcingOverride) ? "rfq" : vendorMode[group.key] ?? "po";
                   const terms = group.lines[0]?.supplierBundleTerms;
                   const selectedLines = group.lines.filter((item) => (orderSelection.get(item.recommendationId)?.pieces ?? 0) > 0);
                   const bundle = terms === undefined ? null : evaluateSupplierBundle(terms,
@@ -2322,10 +2351,10 @@ export default function ReorderEngine() {
                                     item.suggestedOrderPieces,
                                   )
                                 : item.suggestedOrderPieces;
-                            const needsReason =
+                            const needsReason = item.manualSourcingOverride || (
                               mode === "rfq"
                                 ? rfqLineNeedsReason(state.pieces, baseline)
-                                : exceedsSuggestion(state.pieces, item.suggestedOrderPieces);
+                                : exceedsSuggestion(state.pieces, item.suggestedOrderPieces));
                             const soon = item.status === "order_soon" ? orderSoonDates(asOfIsoDate, item) : null;
                             return (
                               <Fragment key={item.recommendationId}>
@@ -2390,7 +2419,7 @@ export default function ReorderEngine() {
                                   <tr className="border-b last:border-b-0">
                                     <td colSpan={7} className="px-3 pb-2">
                                       <div className="text-[11px] font-semibold text-amber-600">
-                                        {mode === "rfq"
+                                        {item.manualSourcingOverride ? "Manual supplier override - record why this supplier was selected" : mode === "rfq"
                                           ? `Differs from the saved run baseline — ${baseline.toLocaleString()} pieces remaining`
                                           : `Exceeds the recommendation — suggested ${item.suggestedOrderPieces.toLocaleString()}`}
                                       </div>
@@ -2440,6 +2469,7 @@ export default function ReorderEngine() {
                               name={`order-mode-${group.key}`}
                               value="po"
                               checked={mode === "po"}
+                              disabled={group.lines.some((line) => line.manualSourcingOverride)}
                               onChange={() => setVendorMode((current) => ({ ...current, [group.key]: "po" }))}
                             />
                             Draft PO

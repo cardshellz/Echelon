@@ -1,3 +1,5 @@
+import { prepareSupplierSourcingRow } from "./supplier-sourcing-selection";
+import type { SupplierSelectionEvidence } from "@shared/procurement/supplier-sourcing";
 import { projectReplacementForecast, forecastMicros } from "@shared/procurement/purchase-replacement-forecast";
 import { supplierBundleTermsSchema, type SupplierBundleTerms } from "@shared/procurement/supplier-bundle";
 import { centsToMills, millsToCents } from "@shared/utils/money";
@@ -160,6 +162,8 @@ export interface PurchasingRecommendationForecastTrustDiagnostics {
 }
 
 export interface PurchasingRecommendationRawRow {
+  supplier_candidates?: unknown;
+  supplier_selection?: SupplierSelectionEvidence;
   product_id: number | string;
   variant_id?: number | string | null;
   base_sku?: string | null;
@@ -331,6 +335,7 @@ export interface PurchasingRecommendationItem {
   estimatedCostMills: number | null;
   estimatedCostCents: number | null;
   supplierBasis: {
+    sourcingSelection?: SupplierSelectionEvidence;
     vendorProductId: number | null;
     costSource: PurchasingRecommendationSupplierCostSource;
     costQuality: PurchasingRecommendationSupplierCostQuality;
@@ -1741,7 +1746,20 @@ export function passesAutoDraftApprovalPolicy(
   return false;
 }
 
-export function generatePurchasingRecommendations(
+export function generatePurchasingRecommendations(options: GeneratePurchasingRecommendationsOptions): PurchasingRecommendationResult {
+  const asOf = normalizeAsOf(options.asOf);
+  const rows = options.rows.map((row) => prepareSupplierSourcingRow(row,
+    row.recommendation_analysis_date ?? asOf.toISOString().slice(0, 10),
+    (candidateRow) => {
+      const result = generatePurchasingRecommendationsCore({ ...options, asOf, rows: [candidateRow] });
+      const item = result.items[0] ?? result.skippedItems[0];
+      if (!item) throw new Error("Supplier candidate did not resolve to a product recommendation");
+      return item;
+    }));
+  return generatePurchasingRecommendationsCore({ ...options, asOf, rows });
+}
+
+function generatePurchasingRecommendationsCore(
   options: GeneratePurchasingRecommendationsOptions,
 ): PurchasingRecommendationResult {
   const defaults = {
@@ -2129,6 +2147,13 @@ export function generatePurchasingRecommendations(
       qualityControls.push({ area: "inbound_supply", severity: "block", code: supplyTiming.signal,
         label: supplyTiming.signal === "unverified_receipts" ? "Receipt quantities need review" : "Inbound arrival coverage needs review", detail: supplyTiming.detail });
     }
+    if (row.supplier_selection?.method === "ranked_alternate") {
+      qualityControls.push({ area: "supplier_catalog", severity: "block", code: "ranked_alternate_review", label: "Review alternate supplier", detail: "An eligible alternate was selected by supplier priority. Review its terms before purchasing." });
+    }
+    const selectedSourcing = row.supplier_selection?.options.find((candidate) => candidate.vendorProductId === row.supplier_selection?.selectedVendorProductId);
+    if (selectedSourcing?.pricingReviewReasons.length) {
+      qualityControls.push({ area: "supplier_cost", severity: "block", code: "supplier_tier_quote_review", label: "Supplier price needs review", detail: selectedSourcing.pricingReviewReasons.join(", ").replaceAll("_", " ") });
+    }
     const autopilotBlockers = qualityControls;
     const qualityGate = buildQualityGate({
       actionable,
@@ -2205,6 +2230,7 @@ export function generatePurchasingRecommendations(
       estimatedCostMills,
       estimatedCostCents,
       supplierBasis: {
+        ...(row.supplier_selection ? { sourcingSelection: row.supplier_selection } : {}),
         vendorProductId,
         costSource: supplierCost.costSource,
         costQuality: supplierCost.costQuality,
