@@ -96,6 +96,7 @@ function publicDropshipEbayStoreCategoryErrorContext(
     "categoryId",
     "platform",
     "status",
+    "providerErrorIds",
     "retryable",
   ] as const;
   const safe = Object.fromEntries(
@@ -108,11 +109,18 @@ function publicDropshipEbayStoreCategoryErrorContext(
 
 function statusForDropshipEbayStoreCategoryError(code: string): number {
   switch (code) {
+    case "DROPSHIP_EBAY_TOKEN_REFRESH_FAILED":
+    case "DROPSHIP_EBAY_REFRESH_LOCK_UNAVAILABLE":
+    case "DROPSHIP_CREDENTIAL_CHANGED":
+    case "DROPSHIP_EBAY_TOKEN_REFRESH_INVALID_RESPONSE":
+    case "DROPSHIP_EBAY_OAUTH_NOT_CONFIGURED":
+      return 503;
     case "DROPSHIP_AUTH_REQUIRED":
       return 401;
     case "DROPSHIP_EBAY_STORE_REQUIRED":
     case "DROPSHIP_EBAY_STORE_CONNECTION_BLOCKED":
     case "DROPSHIP_EBAY_STORE_CATEGORIES_PERMISSION_REQUIRED":
+    case "DROPSHIP_EBAY_STORE_CATEGORIES_ACCESS_DENIED":
       return 403;
     case "DROPSHIP_STORE_CONNECTION_REQUIRED":
     case "DROPSHIP_CATALOG_VARIANT_NOT_FOUND":

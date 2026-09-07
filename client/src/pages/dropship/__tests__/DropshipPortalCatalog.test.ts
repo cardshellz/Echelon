@@ -159,6 +159,14 @@ describe("DropshipPortalCatalog workflow", () => {
 
     expect(shouldOfferEbayStoreReconnect(permissionError)).toBe(true);
     expect(shouldOfferEbayStoreReconnect(providerError)).toBe(false);
+    expect(shouldOfferEbayStoreReconnect(new DropshipApiError({
+      status: 403, code: "DROPSHIP_EBAY_STORE_CONNECTION_BLOCKED", message: "Store paused",
+    }))).toBe(false);
+    expect(shouldOfferEbayStoreReconnect(new DropshipApiError({
+      status: 403,
+      code: "DROPSHIP_EBAY_STORE_CATEGORIES_ACCESS_DENIED",
+      message: "eBay denied access after automatic refresh.",
+    }))).toBe(false);
 
     const markup = renderToStaticMarkup(React.createElement(EbayStoreCategoryAssignmentPanel, {
       authorizationRecovery: React.createElement("button", null, "Refresh eBay authorization"),

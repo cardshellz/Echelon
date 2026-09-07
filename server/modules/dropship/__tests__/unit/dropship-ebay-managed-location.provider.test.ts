@@ -153,7 +153,7 @@ describe("PgDropshipEbayManagedLocationProvider", () => {
       storeConnectionId: 44,
       originWarehouseId: 1,
     })).rejects.toMatchObject({
-      code: "DROPSHIP_EBAY_LISTING_SETUP_PERMISSION_REQUIRED",
+      code: "DROPSHIP_EBAY_LISTING_SETUP_ACCESS_DENIED",
       context: { storeConnectionId: 44, operation: "read", status: 403, retryable: false },
     });
   });

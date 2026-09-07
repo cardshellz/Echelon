@@ -105,7 +105,7 @@ export function EbayListingSetupPanel({
     } catch (caught) {
       setSaveError(caught instanceof Error ? caught.message : "eBay listing setup could not be saved.");
       setSaveAuthorizationError(
-        queryErrorCode(caught) === "DROPSHIP_EBAY_LISTING_SETUP_PERMISSION_REQUIRED"
+        ["DROPSHIP_EBAY_LISTING_SETUP_PERMISSION_REQUIRED", "DROPSHIP_EBAY_LISTING_SETUP_ACCESS_DENIED"].includes(queryErrorCode(caught) ?? "")
           ? caught
           : null,
       );
@@ -182,7 +182,7 @@ export function EbayListingSetupPanel({
         <div className="p-4">
           {setupQuery.error && !saveError && (
             <div role="alert" className="mb-4 rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950">
-              {queryErrorMessage(setupQuery.error, "Store setup could not be refreshed.")}
+              <ListingSetupError error={setupQuery.error} storeConnectionId={storeConnectionId} storeName={storeName} />
               <p className="mt-1">Showing the last loaded setup. Use Refresh options to try again.</p>
             </div>
           )}
@@ -246,11 +246,6 @@ export function EbayListingSetupPanel({
               eBay did not return every required compatible business policy. Create or update the policy in eBay Seller Hub, then refresh these options.
             </div>
           )}
-          {setupQuery.error && !saveError && !saving && (
-            <div role="alert" className="mt-4 rounded-md border border-rose-300 bg-rose-50 p-3 text-sm text-rose-900">
-              {queryErrorMessage(setupQuery.error, "The current store defaults could not be refreshed. Previously loaded choices are shown.")}
-            </div>
-          )}
           {saveError && (
             <div role="alert" className="mt-4 rounded-md border border-rose-300 bg-rose-50 p-3 text-sm text-rose-900">
               {saveError}
@@ -262,7 +257,7 @@ export function EbayListingSetupPanel({
                 </Button>
               )}
               {saveAuthorizationError !== null && (
-                <EbayStoreCategoryAuthorizationRecovery
+                <ListingSetupError
                   error={saveAuthorizationError}
                   storeConnectionId={storeConnectionId}
                   storeName={storeName}
@@ -307,7 +302,7 @@ export function EbayListingSetupPanel({
   );
 }
 
-function ListingSetupError({
+export function ListingSetupError({
   error,
   storeConnectionId,
   storeName,
@@ -317,23 +312,23 @@ function ListingSetupError({
   storeName: string;
 }) {
   const permissionRequired = queryErrorCode(error) === "DROPSHIP_EBAY_LISTING_SETUP_PERMISSION_REQUIRED";
+  const accessDenied = queryErrorCode(error) === "DROPSHIP_EBAY_LISTING_SETUP_ACCESS_DENIED";
   return (
     <div className="m-4 rounded-md border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950">
       <div className="font-medium">
         {permissionRequired
           ? "eBay listing authorization needs attention."
+          : accessDenied ? "eBay listing access needs support."
           : "eBay listing setup is unavailable."}
       </div>
       <div className="mt-1">
         {permissionRequired
-          ? "eBay rejected access to this store's Inventory locations or Account policies. Refresh authorization below so Echelon can load the real choices."
+          ? "The eBay authorization has expired or been revoked. Reauthorize the connected store below to continue."
+          : accessDenied ? "eBay denied Inventory or Account access. Do not keep reauthorizing; Card Shellz support must check application permissions and seller API eligibility. This error does not by itself mean your store disconnected."
           : queryErrorMessage(error, "The connected eBay store did not return its listing setup.")}
       </div>
       {permissionRequired && (
         <>
-          <div className="mt-1 text-xs">
-            If eBay still rejects access after authorization, Card Shellz support must inspect the application&apos;s granted scopes and the seller account&apos;s API eligibility.
-          </div>
           <EbayStoreCategoryAuthorizationRecovery
             error={error}
             storeConnectionId={storeConnectionId}
