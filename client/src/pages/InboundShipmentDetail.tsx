@@ -1,3 +1,4 @@
+import { InboundShipmentTracking } from "@/components/purchasing/InboundShipmentTracking";
 import { parseShipmentReceiptResolution, requiresReceiptUnitReview, shipmentReceiveCoverageLabel } from "@/lib/shipment-receipt-units";
 import { formatMills } from "@shared/utils/money";
 import { useEffect, useMemo, useState, useRef } from "react";
@@ -1301,12 +1302,13 @@ export default function InboundShipmentDetail() {
       {/* ═══════ Tabs ═══════ */}
       {lineActions.recoveryBanner}
       <Tabs value={activeTab} onValueChange={setActiveTab}>
-        <TabsList>
+        <TabsList className="h-auto flex-wrap justify-start gap-1">
           <TabsTrigger value="lines">Lines ({lines.length})</TabsTrigger>
           <TabsTrigger value="costs">Costs ({costs.length})</TabsTrigger>
           <TabsTrigger value="allocation">Allocation</TabsTrigger>
           <TabsTrigger value="invoices">Invoices ({invoicesData?.summary?.invoiceCount ?? 0})</TabsTrigger>
           <TabsTrigger value="timeline">Timeline</TabsTrigger>
+          <TabsTrigger value="tracking">Tracking</TabsTrigger>
         </TabsList>
 
         {/* ══ Tab 1: Lines ══ */}
@@ -2014,6 +2016,11 @@ export default function InboundShipmentDetail() {
               </CardContent>
             </Card>
           )}
+        </TabsContent>
+
+        {/* Carrier observations are separate from the operational timeline. */}
+        <TabsContent value="tracking" className="space-y-4">
+          <InboundShipmentTracking key={shipment.id} shipmentId={shipment.id} shipmentStatus={shipment.status} containerNumber={shipment.containerNumber} trackingNumber={shipment.trackingNumber} bolNumber={shipment.bolNumber} bookingReference={shipment.bookingReference} />
         </TabsContent>
 
         {/* ══ Tab 5: Timeline ══ */}
