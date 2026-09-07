@@ -2820,6 +2820,20 @@ export async function updateInvoiceLine(lineId: number, data: {
     "description",
     "notes",
   ]), "invoice line update");
+  // This route receives raw JSON. Do not let Number(null), booleans, or
+  // strings masquerade as a price/quantity change (notably legacy null mills).
+  for (const field of ["qtyInvoiced", "unitCostCents", "unitCostMills"] as const) {
+    const value = data[field];
+    if (value === undefined) continue;
+    const positive = field === "qtyInvoiced";
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value < (positive ? 1 : 0)) {
+      throw new ApLedgerError(
+        `${field} must be a ${positive ? "positive" : "non-negative"} safe integer number`,
+        400,
+        { code: positive ? "AP_INPUT_POSITIVE_INTEGER_REQUIRED" : "AP_INPUT_NONNEGATIVE_INTEGER_REQUIRED", field },
+      );
+    }
+  }
   const providedFields = Object.keys(data).filter(
     (field) => (data as Record<string, unknown>)[field] !== undefined,
   );
@@ -2864,31 +2878,50 @@ export async function updateInvoiceLine(lineId: number, data: {
       });
     }
 
-    const qtyInvoiced = data.qtyInvoiced === undefined
-      ? existing.qtyInvoiced
-      : requirePositiveInteger(data.qtyInvoiced, "qtyInvoiced");
-    const normalizedCost = data.unitCostCents === undefined && data.unitCostMills === undefined
-      ? normalizeUnitCost({
-        unitCostCents: existing.unitCostCents,
-        unitCostMills: existing.unitCostMills ?? undefined,
-      })
-      : normalizeUnitCost({
-        unitCostCents: data.unitCostCents,
-        unitCostMills: data.unitCostMills,
-      });
+    const qtyInvoiced = data.qtyInvoiced ?? existing.qtyInvoiced;
+    const suppliedCents = data.unitCostCents;
+    const suppliedMills = data.unitCostMills;
+    const unchangedMills = suppliedMills === undefined
+      || suppliedMills === existing.unitCostMills
+      || (existing.unitCostMills == null
+        && Number.isSafeInteger(existing.unitCostCents)
+        && BigInt(suppliedMills) === BigInt(existing.unitCostCents) * BigInt(100));
+    const economicsChanged = qtyInvoiced !== existing.qtyInvoiced
+      || (suppliedCents !== undefined && suppliedCents !== existing.unitCostCents)
+      || !unchangedMills;
     const updates: Record<string, unknown> = {
-      qtyInvoiced,
-      unitCostCents: normalizedCost.unitCostCents,
-      unitCostMills: normalizedCost.unitCostMills,
-      lineTotalCents: computeLineTotalCentsFromMills(normalizedCost.unitCostMills, qtyInvoiced),
-      matchStatus: "pending",
       updatedAt: new Date(),
     };
+    // Imported totals can include packaging, tax, discounts, and exact-cent
+    // residuals that unit price * quantity cannot reconstruct. Metadata edits
+    // and unchanged form echoes must also preserve legacy null/stale mirrors.
+    // Only an actual economic change follows the existing repricing path.
+    if (economicsChanged) {
+      const normalizedCost = suppliedCents === undefined && suppliedMills === undefined
+        ? normalizeUnitCost({
+          unitCostCents: existing.unitCostCents,
+          unitCostMills: existing.unitCostMills ?? undefined,
+        })
+        : normalizeUnitCost({ unitCostCents: suppliedCents, unitCostMills: suppliedMills });
+      Object.assign(updates, {
+        qtyInvoiced,
+        unitCostCents: normalizedCost.unitCostCents,
+        unitCostMills: normalizedCost.unitCostMills,
+        lineTotalCents: computeLineTotalCentsFromMills(normalizedCost.unitCostMills, qtyInvoiced),
+        matchStatus: "pending",
+      });
+    }
+    const metadataBefore: Record<string, string | null> = {};
+    const metadataAfter: Record<string, string | null> = {};
     if (data.description !== undefined) {
-      updates.description = normalizeOptionalText(data.description, "description", 10_000) ?? null;
+      metadataBefore.description = existing.description;
+      metadataAfter.description = normalizeOptionalText(data.description, "description", 10_000) ?? null;
+      updates.description = metadataAfter.description;
     }
     if (data.notes !== undefined) {
-      updates.notes = normalizeOptionalText(data.notes, "notes", 10_000) ?? null;
+      metadataBefore.notes = existing.notes;
+      metadataAfter.notes = normalizeOptionalText(data.notes, "notes", 10_000) ?? null;
+      updates.notes = metadataAfter.notes;
     }
 
     const [updated] = await tx
@@ -2896,16 +2929,40 @@ export async function updateInvoiceLine(lineId: number, data: {
       .set(updates)
       .where(eq(vendorInvoiceLines.id, normalizedLineId))
       .returning();
-    await recalculateInvoiceFromLines(existing.vendorInvoiceId, tx);
-    const affectedPoIds = await recomputeLinkedPurchaseOrders(existing.vendorInvoiceId, tx, {
-      actorId,
-      reason: `Invoice line ${normalizedLineId} updated.`,
-    });
+    let affectedPoIds: number[] = [];
+    if (economicsChanged) {
+      await recalculateInvoiceFromLines(existing.vendorInvoiceId, tx);
+      affectedPoIds = await recomputeLinkedPurchaseOrders(existing.vendorInvoiceId, tx, {
+        actorId,
+        reason: `Invoice line ${normalizedLineId} updated.`,
+      });
+    }
     await appendApMutationAudit(
       "invoice_line_updated",
       `invoice:${existing.vendorInvoiceId}`,
       actorId,
-      { invoiceId: existing.vendorInvoiceId, invoiceLineId: normalizedLineId, affectedPoIds },
+      {
+        invoiceId: existing.vendorInvoiceId,
+        invoiceLineId: normalizedLineId,
+        affectedPoIds,
+        economicsChanged,
+        economicsBefore: {
+          qtyInvoiced: existing.qtyInvoiced,
+          unitCostCents: existing.unitCostCents,
+          unitCostMills: existing.unitCostMills,
+          lineTotalCents: existing.lineTotalCents,
+          matchStatus: existing.matchStatus,
+        },
+        economicsAfter: {
+          qtyInvoiced: updated.qtyInvoiced,
+          unitCostCents: updated.unitCostCents,
+          unitCostMills: updated.unitCostMills,
+          lineTotalCents: updated.lineTotalCents,
+          matchStatus: updated.matchStatus,
+        },
+        metadataBefore,
+        metadataAfter,
+      },
       tx,
     );
     return { updated, affectedPoIds };
