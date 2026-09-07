@@ -30,3 +30,6 @@ export async function hasPermission(userId: string, resource: string, action: st
   const permissions = await repository.getUserPermissions(userId);
   return permissions.includes(`${resource}:${action}`);
 }
+
+export { readPurchaseApprovalActor } from "./infrastructure/purchase-approval-access.repository";
+export type { PurchaseApprovalActor } from "./domain/purchase-approval-authority";

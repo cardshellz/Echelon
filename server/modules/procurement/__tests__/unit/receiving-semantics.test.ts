@@ -377,13 +377,13 @@ describe("ReceivingService - close reconciliation semantics", () => {
     const storage = {
       getReceivingOrderById: vi.fn()
         .mockResolvedValueOnce(openOrder)
-        .mockResolvedValueOnce(closedOrder),
+        .mockResolvedValue(closedOrder),
       getReceivingLines: vi.fn()
         .mockResolvedValueOnce(lines)
         .mockResolvedValueOnce(lines)
         .mockResolvedValueOnce(lines),
     };
-    const db = { transaction: vi.fn(async (fn) => fn(tx)) };
+    const db = { execute: vi.fn().mockResolvedValue({ rows: [] }), transaction: vi.fn(async (fn) => fn(tx)) };
     const inventoryCore = { receiveInventory: vi.fn() };
     const channelSync = { queueSyncAfterInventoryChange: vi.fn() };
     const service = new ReceivingService(
@@ -584,14 +584,10 @@ describe("ReceivingService - close reconciliation semantics", () => {
           { ...lines[2], status: "complete" },
         ]),
       updateReceivingLine: vi.fn().mockResolvedValue({}),
-      updateReceivingOrder: vi.fn().mockResolvedValue({
-        ...order,
-        status: "closed",
-        receivedLineCount: 2,
-        receivedTotalUnits: 7,
-      }),
+      updateReceivingOrder: vi.fn(async (_id: number, patch: any) => { Object.assign(order, patch); return { ...order }; }),
     };
     const db = {
+      execute: vi.fn().mockResolvedValue({ rows: [] }),
       transaction: vi.fn(async (fn) => {
         events.push("transaction-start");
         const result = await fn(tx);

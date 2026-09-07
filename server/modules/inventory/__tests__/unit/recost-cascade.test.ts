@@ -1,5 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 
+// These owner units isolate SQL row fixtures from the shared lock boundary.
+// Actual lock ordering and rollback are exercised in cost-lineage-owners.integration.test.ts.
+vi.mock("../../infrastructure/cost-evidence.repository", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../infrastructure/cost-evidence.repository")>(),
+  lockInventoryCostGraph: vi.fn(async () => undefined),
+}));
+
 /**
  * COGS Phase 5: when a lot's cost changes (landed cost finalization),
  * cascadeRecostForLot must update all order_item_costs rows referencing
@@ -23,8 +30,8 @@ describe("COGSService.cascadeRecostForLot", () => {
           // SELECT affected rows
           return {
             rows: [
-              { id: 1, qty: 3, unit_cost_cents: 500 },
-              { id: 2, qty: 2, unit_cost_cents: 500 },
+              { id: 1, qty: 3, old_unit_cost_mills: 50000, unit_cost_cents: 500 },
+              { id: 2, qty: 2, old_unit_cost_mills: 50000, unit_cost_cents: 500 },
             ],
           };
         }
@@ -99,7 +106,7 @@ describe("COGSService.cascadeRecostForLot", () => {
           // cascadeRecostForLot SELECT
           executeCalls.push("cascade_select");
           return {
-            rows: [{ id: 1, qty: 5, unit_cost_cents: 300 }],
+            rows: [{ id: 1, qty: 5, old_unit_cost_mills: 30000, unit_cost_cents: 300 }],
           };
         }
         if (executeCallCount === 4) {
@@ -123,4 +130,18 @@ describe("COGSService.cascadeRecostForLot", () => {
     expect(executeCalls).toContain("cascade_select");
     expect(executeCalls).toContain("cascade_update");
   });
+  it("computes extended COGS deltas beyond Number multiplication precision exactly", async () => {
+    const { COGSService } = await import("../../cogs.service");
+    const db = { execute: vi.fn().mockResolvedValueOnce({ rows: [{ id: 1, qty: 16, old_unit_cost_mills: "0" }] }).mockResolvedValue({ rows: [] }) };
+    const result = await (new COGSService(db as any) as any).cascadeRecostForLotMills(10, Number.MAX_SAFE_INTEGER);
+    expect(result).toEqual({ rowsUpdated: 1, totalDeltaCents: 1441151880758559 });
+  });
+
+  it("rejects an unrepresentable aggregate delta before writing COGS", async () => {
+    const { COGSService } = await import("../../cogs.service");
+    const db = { execute: vi.fn().mockResolvedValue({ rows: [{ id: 1, qty: 101, old_unit_cost_mills: "0" }] }) };
+    await expect((new COGSService(db as any) as any).cascadeRecostForLotMills(10, Number.MAX_SAFE_INTEGER)).rejects.toMatchObject({ code: "COST_EVIDENCE_INVALID_INTEGER" });
+    expect(db.execute).toHaveBeenCalledTimes(1);
+  });
+
 });

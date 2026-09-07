@@ -1,3 +1,4 @@
+import { invoiceCostReviewCommands } from "./invoice-cost-review.service";
 ﻿import type { Express } from "express";
 import { requirePermission, upload } from "../../routes/middleware";
 import { requireIdempotency } from "../../middleware/idempotency";
@@ -236,6 +237,19 @@ export function registerApLedgerRoutes(app: Express) {
       res.status(201).json(line);
     } catch (err: any) {
       handleApLedgerError(res, err, 500);
+    }
+  });
+
+  app.post("/api/vendor-invoice-lines/:lineId/cost-components", requirePermission("purchasing", "approve"), async (req, res) => {
+    try {
+      const lineId = Number(req.params.lineId);
+      const actorId = getUserId(req);
+      const descriptor = financialCommandFromRequest(req, { actorId, routeTemplate: "/api/vendor-invoice-lines/:lineId/cost-components",
+        resourceKey: `vendor_invoice_line:${lineId}`, commandName: "ap.invoice.cost_components" });
+      return sendFinancialCommandResult(res, await invoiceCostReviewCommands.review(lineId, req.body, actorId || "", descriptor));
+    } catch (error) {
+      if (error instanceof FinancialCommandError) return sendFinancialCommandError(res, error);
+      return handleApLedgerError(res, error, 500);
     }
   });
 

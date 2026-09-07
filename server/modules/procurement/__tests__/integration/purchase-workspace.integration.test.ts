@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+import { recordCostRevision } from "../../cost-source-revision.repository";
 import { resolve } from "node:path";
 import { config } from "dotenv";
 import { getTableColumns, sql, type Table } from "drizzle-orm";
@@ -30,6 +32,7 @@ function fixtureTable(table: Parameters<typeof getTableConfig>[0], keys: readonl
 databaseTests.sequential("purchase workspace PostgreSQL read model", () => {
   let pool: pg.Pool;
   let ownsSchema = false;
+  let ownsInventorySchema = false;
   let database: ReturnType<typeof drizzle<typeof schema>>;
 
   beforeAll(async () => {
@@ -42,20 +45,27 @@ databaseTests.sequential("purchase workspace PostgreSQL read model", () => {
     });
     await pool.query("CREATE SCHEMA procurement");
     ownsSchema = true;
+    await pool.query("CREATE SCHEMA inventory");
+    ownsInventorySchema = true;
     const tables = [
       fixtureTable(schema.vendors, ["id", "name"]),
       fixtureTable(schema.purchaseOrders, ["id", "poNumber", "vendorId", "status", "physicalStatus", "financialStatus", "currency", "totalCents", "invoicedTotalCents", "paidTotalCents", "outstandingCents", "expectedDeliveryDate", "confirmedDeliveryDate", "actualDeliveryDate"]),
-      fixtureTable(schema.purchaseOrderLines, ["id", "purchaseOrderId", "lineNumber", "sku", "productName", "lineType", "orderQty", "receivedQty", "cancelledQty"]),
+      fixtureTable(schema.purchaseOrderLines, Object.keys(getTableColumns(schema.purchaseOrderLines))),
       fixtureTable(schema.receivingOrders, ["id", "receiptNumber", "status", "purchaseOrderId", "inboundShipmentId", "expectedDate", "receivedDate", "closedDate", "createdAt"]),
-      fixtureTable(schema.receivingLines, ["id", "receivingOrderId", "purchaseOrderLineId"]),
+      fixtureTable(schema.receivingLines, Object.keys(getTableColumns(schema.receivingLines))),
       fixtureTable(schema.poReceipts, ["id", "receivingOrderId", "purchaseOrderId"]),
       fixtureTable(schema.inboundShipments, ["id", "shipmentNumber", "status", "mode", "containerNumber", "eta", "deliveredDate", "estimatedTotalCostCents", "actualTotalCostCents", "createdAt"]),
       fixtureTable(schema.inboundShipmentLines, ["id", "inboundShipmentId", "purchaseOrderId", "purchaseOrderLineId", "sku", "qtyShipped", "allocatedCostCents"]),
       fixtureTable(schema.vendorInvoices, ["id", "invoiceNumber", "status", "currency", "invoiceDate", "dueDate", "inboundShipmentId", "invoicedAmountCents", "paidAmountCents", "balanceCents"]),
       fixtureTable(schema.vendorInvoicePoLinks, ["id", "vendorInvoiceId", "purchaseOrderId", "allocatedAmountCents"]),
-      fixtureTable(schema.inboundFreightCosts, ["id", "inboundShipmentId", "vendorInvoiceId"]),
+      fixtureTable(schema.inboundFreightCosts, Object.keys(getTableColumns(schema.inboundFreightCosts))),
+      fixtureTable(schema.vendorInvoiceLines, Object.keys(getTableColumns(schema.vendorInvoiceLines))),
+      fixtureTable(schema.inboundFreightAllocations, Object.keys(getTableColumns(schema.inboundFreightAllocations))),
+      fixtureTable(schema.inventoryTransactions, Object.keys(getTableColumns(schema.inventoryTransactions))),
+      fixtureTable(schema.inventoryLots, Object.keys(getTableColumns(schema.inventoryLots))),
     ];
     for (const ddl of tables) await pool.query(ddl);
+    await pool.query(await readFile(resolve(process.cwd(), "migrations/222_procurement_cost_evidence.sql"), "utf8"));
     await pool.query(`
       INSERT INTO procurement.vendors(id,name) VALUES (1,'Fixture supplier');
       INSERT INTO procurement.purchase_orders
@@ -96,11 +106,27 @@ databaseTests.sequential("purchase workspace PostgreSQL read model", () => {
         VALUES (411,41,1,40000),(412,41,2,60000),(431,43,1,NULL);
       INSERT INTO procurement.inbound_freight_costs (id,inbound_shipment_id,vendor_invoice_id) VALUES (421,7,42),(422,7,41);
     `);
+    await pool.query(`
+      UPDATE procurement.purchase_order_lines SET status='open', pricing_basis='extended_total',
+        pricing_source='manual', total_product_cost_cents=10000, packaging_cost_cents=1800,
+        discount_cents=0, tax_cents=0, line_total_cents=11800, unit_cost_mills=10000, pricing_remainder_mills=0,
+        product_id=CASE WHEN line_type='product' THEN id+100 ELSE NULL END;
+      UPDATE procurement.receiving_lines SET received_qty=1, reversed_qty=0;
+      UPDATE procurement.inbound_freight_costs SET cost_type='freight',currency='USD',exchange_rate=1,
+        cost_status='estimated', estimated_cents=9000;
+      INSERT INTO procurement.vendor_invoice_lines
+        (id,vendor_invoice_id,purchase_order_line_id,line_number,qty_invoiced,unit_cost_cents,unit_cost_mills,line_total_cents,match_status)
+        VALUES (4111,41,11,1,100,100,10000,11800,'matched');
+      INSERT INTO procurement.inbound_freight_allocations
+        (id,shipment_cost_id,inbound_shipment_line_id,allocated_cents,allocation_basis_value,allocation_basis_total)
+        VALUES (4211,421,71,5400,60,110),(4212,421,72,3600,50,110);
+    `);
     database = drizzle(pool, { schema });
   });
 
   afterAll(async () => {
     if (pool) {
+      if (ownsInventorySchema) await pool.query("DROP SCHEMA inventory CASCADE");
       if (ownsSchema) await pool.query("DROP SCHEMA procurement CASCADE");
       await pool.end();
     }
@@ -137,6 +163,65 @@ databaseTests.sequential("purchase workspace PostgreSQL read model", () => {
     expect(result.purchase.paidTotalCents).toBe(20000);
   });
 
+  it("reads quote components and exact purchase allocations without assigning whole charges or invoice residuals", async () => {
+    const result = await workspace();
+    expect(result.costTrace?.purchaseLines[0]).toMatchObject({
+      id: 11, productCents: 10000, packagingCents: 1800, outstandingPieces: 75, unreceivedQuoteCents: 8850,
+    });
+    expect(result.costTrace?.invoiceLines).toEqual([expect.objectContaining({
+      id: 4111, invoiceId: 41, purchaseOrderLineId: 11, componentEvidence: "unclassified", lineTotalCents: 11800,
+    })]);
+    expect(result.costTrace?.shipmentCharges.find((row) => row.id === 421)).toMatchObject({
+      amountEvidence: "estimated", amountScope: "whole_shipment_charge", estimatedCents: 9000, actualCents: null,
+      allocations: [expect.objectContaining({ id: 4211, shipmentLineId: 71, purchaseOrderLineId: 11, allocatedCents: 5400, currency: null })],
+    });
+    expect(result.costTrace?.receiptLines[0]).toMatchObject({ id: 341, frozenPiecesPerUnit: null, lineageEvidence: "review_required" });
+    expect(result.costTrace?.applicationEvidence).toBe("not_verified");
+  });
+
+  it("retains an actual zero and a signed shipment credit without inferring application", async () => {
+    await pool.query("UPDATE procurement.inbound_freight_costs SET actual_cents=0,cost_status='finalized' WHERE id=421");
+    await pool.query("UPDATE procurement.inbound_freight_costs SET actual_cents=-500 WHERE id=422");
+    try {
+      const result = await workspace();
+      expect(result.costTrace?.shipmentCharges.map((row) => [row.actualCents, row.amountEvidence])).toEqual([[0, "actual_recorded"], [-500, "actual_recorded"]]);
+      expect(result.costTrace?.applicationEvidence).toBe("not_verified");
+    } finally {
+      await pool.query("UPDATE procurement.inbound_freight_costs SET actual_cents=NULL,cost_status='estimated'");
+    }
+  });
+
+  it("follows exact receipt transaction identity to current lot components while retaining unknown currency", async () => {
+    await pool.query(`
+      UPDATE procurement.receiving_orders SET purchase_order_id=1,inbound_shipment_id=7,status='closed' WHERE id=34;
+      UPDATE procurement.receiving_lines SET product_variant_id=201,product_id=111,
+        units_per_variant_snapshot=50,inbound_shipment_line_id=71 WHERE id=341;
+      INSERT INTO inventory.inventory_lots
+        (id,lot_number,product_variant_id,warehouse_location_id,receiving_order_id,purchase_order_id,po_line_id,inbound_shipment_id,
+         qty_on_hand,qty_reserved,qty_picked,po_unit_cost_mills,packaging_cost_mills,landed_cost_mills,total_unit_cost_mills,cost_provisional)
+        VALUES (901,'LOT-EXACT-RECEIPT',201,9,34,1,11,7,1,0,0,500000,90000,25000,615000,0);
+      INSERT INTO inventory.inventory_transactions
+        (id,product_variant_id,transaction_type,variant_qty_delta,receiving_order_id,receiving_line_id,inventory_lot_id,created_at)
+        VALUES (9001,201,'receipt',1,34,341,901,'2026-09-03T12:00:00Z');
+    `);
+    try {
+      const result = await workspace();
+      expect(result.costTrace?.receiptLines[0]).toMatchObject({
+        id: 341, shipmentLineId: 71, frozenPiecesPerUnit: 50, lineageEvidence: "original_receipt_proven",
+        postings: [expect.objectContaining({ id: 9001, variantQuantity: 1, lot: expect.objectContaining({
+          id: 901, productUnitMills: 500000, packagingUnitMills: 90000, landedUnitMills: 25000,
+          totalUnitMills: 615000, currency: null, recordedProvisional: false,
+        }) })],
+      });
+      await pool.query("UPDATE inventory.inventory_lots SET inbound_shipment_id=8 WHERE id=901");
+      expect((await workspace()).costTrace?.receiptLines[0].lineageEvidence).toBe("review_required");
+    } finally {
+      await pool.query("DELETE FROM inventory.inventory_transactions WHERE id=9001");
+      await pool.query("DELETE FROM inventory.inventory_lots WHERE id=901");
+      await pool.query("UPDATE procurement.receiving_orders SET purchase_order_id=NULL,inbound_shipment_id=NULL,status='open' WHERE id=34");
+      await pool.query("UPDATE procurement.receiving_lines SET product_variant_id=NULL,product_id=NULL,units_per_variant_snapshot=NULL,inbound_shipment_line_id=NULL WHERE id=341");
+    }
+  });
   it("uses a real read-only repeatable-read transaction", async () => {
     let observed: Record<string, unknown> | undefined;
     const repository = createPurchaseWorkspaceRepository({
@@ -181,6 +266,78 @@ databaseTests.sequential("purchase workspace PostgreSQL read model", () => {
     }
   });
 
+  it("reads immutable applications and receipt cost attempts with exact PO scope and snapshot lineage", async () => {
+    const now = new Date("2026-09-07T12:00:00.000Z");
+    try {
+      await pool.query(`
+        UPDATE procurement.receiving_orders SET status='closed' WHERE id=34;
+        INSERT INTO inventory.inventory_lots
+          (id,lot_number,product_variant_id,warehouse_location_id,qty_received,qty_on_hand,qty_reserved,qty_picked,
+           po_unit_cost_mills,packaging_cost_mills,landed_cost_mills,total_unit_cost_mills,cost_provisional)
+          VALUES (901,'ORIGIN-901',201,9,1,0,0,0,500000,90000,25000,615000,0),
+                 (902,'TRANSFER-902',201,10,1,0,0,0,500000,90000,25000,615000,0);
+        INSERT INTO inventory.lot_cost_origins(inventory_lot_id,receiving_line_id,purchase_order_line_id,
+          units_per_variant_snapshot,received_variant_qty,purchase_start_base_piece,recorded_by,recorded_at)
+          VALUES (901,341,11,50,1,0,'fixture-owner','2026-09-07T12:00:00Z');
+        INSERT INTO inventory.lot_cost_contributions(source_lot_id,output_lot_id,operation_kind,operation_key,
+          source_qty,output_qty,output_start_qty,recorded_by,recorded_at)
+          VALUES (901,902,'transfer','fixture-transfer',1,1,0,'fixture-owner','2026-09-07T12:00:00Z');
+      `);
+      const source = await database.transaction((tx) => recordCostRevision(tx, {
+        contractVersion: 1, component: "product", scope: { kind: "purchase_order_line", purchaseOrderId: 1, purchaseOrderLineId: 11 },
+        sources: [{ kind: "vendor_invoice_line", documentId: 41, lineId: 4111, version: "a".repeat(64) }],
+        currency: "USD", totalMills: 1000000, basePieces: 100, evidence: "confirmed", packagingTreatment: "separate", issue: null, manualOverride: null,
+      }, "fixture-owner", now, { purchaseOrderLine: { id: 11 }, approvedInvoices: [{ id: 4111, productMills: 1000000 }] }));
+      const outcome = { status: "applied", lotsUpdated: 2, cogsRowsUpdated: 1, totalCogsDeltaCents: -500, issues: [] };
+      const applicationId = Number((await pool.query(`INSERT INTO inventory.cost_applications(application_key,source_revision_id,status,evidence,recorded_by,recorded_at)
+        VALUES ($1,$2,'applied',$3,'fixture-owner',$4) RETURNING id`, ["b".repeat(64), source.id, { result: outcome }, now])).rows[0].id);
+      const before = { productMills: 550000, packagingMills: 90000, landedMills: 25000 };
+      const after = { productMills: 500000, packagingMills: 90000, landedMills: 25000, totalMills: 615000,
+        component: "product", allocatedMills: 500000, quantity: 1, remainderMills: 0 };
+      await pool.query(`INSERT INTO inventory.cost_application_lots(application_id,inventory_lot_id,before_state,after_state)
+        VALUES ($1,901,$2,$3),($1,902,$2,$3)`, [applicationId, before, after]);
+      await pool.query(`INSERT INTO inventory.cost_reporting_events(application_id,contract_version,payload,recorded_at)
+        VALUES ($1,1,$2,$3)`, [applicationId, { contractVersion: 1, sourceRevisionId: source.id, sourceFingerprint: source.contract.fingerprint,
+        component: "product", currency: "USD", cogsDeltaCents: -500, changes: [901,902].map((lotId) => ({ lotId, before, after })) }, now]);
+      const requestId = Number((await pool.query(`INSERT INTO procurement.receipt_cost_requests(receiving_order_id,purchase_order_line_id,requested_by,requested_at)
+        VALUES (34,11,'fixture-owner',$1) RETURNING id`, [now])).rows[0].id);
+      await pool.query(`INSERT INTO procurement.cost_source_revisions(purchase_order_line_id,component,revision,fingerprint,contract,recorded_by,recorded_at)
+        VALUES (21,'product',1,$1,'{}','unrelated-fixture',$2)`, ["c".repeat(64), now]);
+      const result = await workspace();
+      expect(result.costTrace?.applicationEvidence).toBe("recorded");
+      const revisions = result.costTrace!.applicationHistory!.revisions;
+      expect(revisions).toHaveLength(1); expect(revisions[0].id).toBe(source.id);
+      expect(revisions[0].applications[0]).toMatchObject({ id: applicationId, evidenceState: "verified_record", outcome: { totalCogsDeltaCents: -500 },
+        reportingEvent: { evidenceState: "verified_record", externalDelivery: "not_verified" } });
+      expect(revisions[0].applications[0].lotChanges.map((change) => [change.lotId, change.lineage])).toEqual([[901,"original_receipt"],[902,"transformed"]]);
+      expect(result.costTrace?.receiptCostRequests).toEqual([expect.objectContaining({ id: requestId, state: "pending", receiptStatus: "closed" })]);
+      await pool.query(`INSERT INTO procurement.receipt_cost_attempts(request_id,state,result,recorded_by,recorded_at)
+        VALUES ($1,'retry_required',$2,'fixture-owner',$3)`, [requestId, { summary: { requestId, purchaseOrderLineId: 11, state: "retry_required", attemptRecorded: true,
+        issues: [{ code: "RECEIPT_COST_RETRY_REQUIRED", message: "Synthetic transaction failure." }] } }, now]);
+      await pool.query(`INSERT INTO procurement.receipt_cost_attempts(request_id,state,result,recorded_by,recorded_at)
+        VALUES ($1,'applied',$2,'fixture-owner',$3)`, [requestId, { summary: { requestId, purchaseOrderLineId: 11, state: "applied", attemptRecorded: true, issues: [] },
+        reconciliation: { costApplications: [{ ...outcome, applicationId }] } }, now]);
+      const queue = (await workspace()).costTrace!.receiptCostRequests!;
+      expect(queue[0].state).toBe("applied"); expect(queue[0].attempts).toHaveLength(2);
+      expect(queue[0].attempts[0]).toMatchObject({ evidenceState: "verified_record", applicationIds: [applicationId] });
+      expect(queue[0].attempts[1].state).toBe("retry_required");
+    } finally {
+      await pool.query(`TRUNCATE inventory.cost_applications,procurement.cost_source_revisions,inventory.lot_cost_origins,
+        inventory.lot_cost_contributions,procurement.receipt_cost_requests RESTART IDENTITY CASCADE`);
+      await pool.query("DELETE FROM inventory.inventory_lots WHERE id IN (901,902)");
+      await pool.query("UPDATE procurement.receiving_orders SET status='open' WHERE id=34");
+    }
+  });
+
+  it("rejects excess cost revision history instead of hiding older evidence", async () => {
+    await pool.query(`INSERT INTO procurement.cost_source_revisions(purchase_order_line_id,component,revision,fingerprint,contract,recorded_by,recorded_at)
+      SELECT 11,'packaging',n,$1,'{}','limit-fixture','2026-09-07T12:00:00Z' FROM generate_series(1,1001) n`, ["d".repeat(64)]);
+    try {
+      await expect(workspace()).rejects.toMatchObject({ code: "PURCHASE_WORKSPACE_TOO_LARGE", statusCode: 422 });
+    } finally {
+      await pool.query("TRUNCATE procurement.cost_source_revisions CASCADE");
+    }
+  });
   it("returns not found for an absent purchase without reading an unrelated graph", async () => {
     await expect(createPurchaseWorkspaceService(createPurchaseWorkspaceRepository(database)).getPurchaseWorkspace(987654))
       .rejects.toMatchObject({ code: "PURCHASE_WORKSPACE_NOT_FOUND", statusCode: 404 });

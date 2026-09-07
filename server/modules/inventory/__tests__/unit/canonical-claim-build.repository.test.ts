@@ -152,6 +152,7 @@ describe("PostgresCanonicalClaimBuildRepository", () => {
       })),
     };
     const query = vi.fn(async (text: string) => {
+      if (text.includes("pg_advisory_xact_lock")) return { rows: [] };
       if (text.includes("FROM inventory.build_orders")) {
         return { rows: [{
           id: 91,
@@ -237,6 +238,7 @@ describe("PostgresCanonicalClaimBuildRepository", () => {
       committedLotAllocations: expect.any(Array),
       totalInputCostMills: BigInt(625),
     });
+    expect(query.mock.calls[0][0]).toContain("pg_advisory_xact_lock");
     expect(inventoryWriter.executeBuildOperation).toHaveBeenCalledWith(expect.objectContaining({
       claimId: BigInt(9),
       claimOperationId: BigInt(10),
@@ -253,6 +255,7 @@ describe("PostgresCanonicalClaimBuildRepository", () => {
 
   it("cancels an unexecuted handoff without independently unreserving physical inventory", async () => {
     const query = vi.fn(async (text: string) => {
+      if (text.includes("pg_advisory_xact_lock")) return { rows: [] };
       if (text.includes("FROM inventory.build_orders")) {
         return { rows: [{ id: 91, system_number: "BLD-00000091", status: "released", completed_builds: 0 }] };
       }

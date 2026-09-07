@@ -146,7 +146,7 @@ export interface IProcurementStorage {
   createPurchaseOrder(data: InsertPurchaseOrder): Promise<PurchaseOrder>;
   updatePurchaseOrder(id: number, updates: Partial<InsertPurchaseOrder>, executor?: any): Promise<PurchaseOrder | null>;
   updatePurchaseOrderStatusWithHistory(id: number, updates: Partial<InsertPurchaseOrder>, historyData: Omit<InsertPoStatusHistory, 'purchaseOrderId'>, executor?: any): Promise<PurchaseOrder | null>;
-  deletePurchaseOrder(id: number): Promise<boolean>;
+  deletePurchaseOrder(id: number, executor?: any): Promise<boolean>;
   generatePoNumber(): Promise<string>;
   getPurchaseOrderLines(purchaseOrderId: number, executor?: any): Promise<PurchaseOrderLine[]>;
   getPurchaseOrderLineById(id: number, executor?: any): Promise<PurchaseOrderLine | undefined>;
@@ -853,8 +853,9 @@ export const procurementMethods: IProcurementStorage = {
     return executor ? await applyUpdate(executor) : await db.transaction(applyUpdate);
   },
 
-  async deletePurchaseOrder(id: number): Promise<boolean> {
-    const result = await db.delete(purchaseOrders).where(eq(purchaseOrders.id, id)).returning();
+  async deletePurchaseOrder(id: number, executor: any = db): Promise<boolean> {
+    const result = await executor.delete(purchaseOrders)
+      .where(and(eq(purchaseOrders.id, id), eq(purchaseOrders.status, "draft"))).returning();
     return result.length > 0;
   },
 

@@ -1,3 +1,4 @@
+import { PgDialect } from "drizzle-orm/pg-core";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -366,6 +367,25 @@ describe("purchase-order line command validation boundary", () => {
   });
 });
 
+describe("purchase line business locks follow the inventory graph lock", () => {
+  it.each(["add", "bulk", "update", "cancel"] as const)("acquires the actual graph lock SQL before %s source reads", async (operation) => {
+    const observed: string[] = [];
+    const tx = {
+      execute: vi.fn(async (query) => {
+        const text = new PgDialect().sqlToQuery(query).sql;
+        expect(text).toContain("pg_advisory_xact_lock(hashtext('inventory.cost_graph'), hashtext('version_1'))");
+        observed.push("graph"); return { rows: [] };
+      }),
+      select: vi.fn(() => { observed.push("source"); throw new Error("Stop at first source read"); }),
+    };
+    const commands = createPurchaseOrderLineCommands({ transaction: async (work: (value: typeof tx) => Promise<unknown>) => work(tx) } as any);
+    const result = operation === "add" ? commands.addLine(44, addInput)
+      : operation === "bulk" ? commands.addBulkLines(44, { expectedPoUpdatedAt: VERSION, lines: [{ productId: addInput.productId, pricing: addInput.pricing }] })
+        : operation === "update" ? commands.updateLine(55, updateInput) : commands.cancelLine(55, cancelInput);
+    await expect(result).rejects.toThrow("Stop at first source read");
+    expect(observed).toEqual(["graph", "source"]);
+  });
+});
 describe("vendor catalog pricing provenance", () => {
   it("never treats migrated legacy catalog economics as an explicit vendor quote", () => {
     expect(vendorCatalogPricingMatches(
@@ -504,7 +524,13 @@ describe("vendor catalog pricing provenance", () => {
       return [];
     };
     const tx: any = {
-      execute: vi.fn().mockResolvedValue({ rows: [{}] }),
+      execute: vi.fn(async (query) => {
+        const text = new PgDialect().sqlToQuery(query).sql;
+        if (text.includes("pg_advisory_xact_lock")) {
+          expect(text).toContain("inventory.cost_graph"); return { rows: [] };
+        }
+        expect(text).toContain("procurement.inbound_shipment_lines"); return { rows: [{}] };
+      }),
       update: vi.fn(),
       select: vi.fn(() => {
         let table: unknown;

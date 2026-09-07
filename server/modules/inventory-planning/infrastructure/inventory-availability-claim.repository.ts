@@ -1,3 +1,5 @@
+import { lockInventoryCostGraph } from "../../inventory/infrastructure/cost-evidence.repository";
+import { costEvidenceTransactionFromPg } from "../../inventory/infrastructure/cost-evidence-pg";
 import { createHash } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import type { AssemblyWorkOwner } from "../../warehouse/work/application/assembly-work-owner";
@@ -4920,6 +4922,9 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
       const client = await this.connectionPool.connect();
       try {
         await client.query("BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE");
+        if (command.locationStrategy === "reconcile_picker_observation") {
+          await lockInventoryCostGraph(costEvidenceTransactionFromPg(client));
+        }
         const replay = await loadPickReplay(client, command.idempotencyKey, requestHash, commandType);
         if (replay) {
           await client.query("COMMIT");
@@ -5640,6 +5645,7 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
       const client = await this.connectionPool.connect();
       try {
         await client.query("BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE");
+        await lockInventoryCostGraph(costEvidenceTransactionFromPg(client));
         const replay = await loadOperationExecutionReplay(
           client,
           command.idempotencyKey,
@@ -5793,6 +5799,7 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
       const client = await this.connectionPool.connect();
       try {
         await client.query("BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE");
+        await lockInventoryCostGraph(costEvidenceTransactionFromPg(client));
         const replay = await loadOperationExecutionReplay(
           client,
           command.idempotencyKey,

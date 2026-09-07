@@ -1,3 +1,5 @@
+import { recordShipmentCostRevisions, applyShipmentCostRevisions } from "../../shipment-cost-application.service";
+vi.mock("../../shipment-cost-application.service", () => ({ recordShipmentCostRevisions: vi.fn(), applyShipmentCostRevisions: vi.fn() }));
 import { describe, expect, it, vi } from "vitest";
 import { createShipmentTrackingService } from "../../shipment-tracking.service";
 
@@ -67,6 +69,16 @@ function harness() {
       return [];
     }),
   };
+  vi.mocked(recordShipmentCostRevisions).mockReset().mockImplementation(async (tx) => {
+    inTransaction(tx);
+    events.push("source-revisions");
+    return { revisions: [], issues: [] } as any;
+  });
+  vi.mocked(applyShipmentCostRevisions).mockReset().mockImplementation(async (tx) => {
+    expect(inTransaction(tx).shipment.status).toBe("closed");
+    events.push("push");
+    return { updated: 0, total: 0, skipped: [], costApplications: [] };
+  });
   const clock = vi.fn(() => commandTime);
   const cogs = { withTx: vi.fn(), updateLotLandedCostMills: vi.fn() };
   const service = createShipmentTrackingService(db, storage as any, cogs as any, clock);
@@ -83,10 +95,12 @@ describe("shipment close transaction", () => {
       inboundShipmentId: 1, fromStatus: "costing", toStatus: "closed", changedBy: "operator-1",
       notes: "Costs reviewed", changedAt: commandTime,
     }]);
-    expect(h.clock).toHaveBeenCalledTimes(1);
-    expect(h.events).toEqual(["snapshots", "closed", "history", "commit", "push", "commit"]);
+    expect(h.clock).toHaveBeenCalledTimes(2);
+    expect(h.events).toEqual(["snapshots", "source-revisions", "closed", "history", "commit", "push", "commit"]);
     expect(h.db.transaction).toHaveBeenCalledTimes(2);
     const closingTx = h.transactions[0];
+    expect(recordShipmentCostRevisions).toHaveBeenCalledWith(closingTx, 1, "operator-1", commandTime, { allocationJustFinalized: true });
+    expect(applyShipmentCostRevisions).toHaveBeenCalledWith(h.transactions[1], 1, expect.any(Object), "system:shipment-costs", commandTime);
     expect(h.storage.bulkCreateLandedCostSnapshots).toHaveBeenCalledWith(expect.any(Array), closingTx);
     expect(h.storage.updateInboundShipment).toHaveBeenCalledWith(1, expect.objectContaining({ status: "closed" }), closingTx);
     expect(h.storage.createInboundShipmentStatusHistory).toHaveBeenCalledWith(expect.any(Object), closingTx);
@@ -100,8 +114,9 @@ describe("shipment close transaction", () => {
     expect(h.state.snapshots).toEqual([]);
     expect(h.state.history).toEqual([]);
     expect(h.state.lines[0]).not.toHaveProperty("allocatedCostCents");
-    expect(h.events).toEqual(["snapshots", "closed", "rollback"]);
+    expect(h.events).toEqual(["snapshots", "source-revisions", "closed", "rollback"]);
     expect(h.storage.getProvisionalLotsByShipment).not.toHaveBeenCalled();
+    expect(applyShipmentCostRevisions).not.toHaveBeenCalled();
   });
 
   it("rolls back finalized snapshots if the header update fails", async () => {
@@ -112,6 +127,7 @@ describe("shipment close transaction", () => {
     expect(h.state.snapshots).toEqual([]);
     expect(h.storage.createInboundShipmentStatusHistory).not.toHaveBeenCalled();
     expect(h.storage.getProvisionalLotsByShipment).not.toHaveBeenCalled();
+    expect(applyShipmentCostRevisions).not.toHaveBeenCalled();
   });
 
   it("does not close or push if finalization fails", async () => {
@@ -121,6 +137,7 @@ describe("shipment close transaction", () => {
     expect(h.storage.updateInboundShipment).not.toHaveBeenCalled();
     expect(h.storage.createInboundShipmentStatusHistory).not.toHaveBeenCalled();
     expect(h.storage.getProvisionalLotsByShipment).not.toHaveBeenCalled();
+    expect(applyShipmentCostRevisions).not.toHaveBeenCalled();
     expect(h.state.lines[0]).not.toHaveProperty("allocatedCostCents");
   });
 
@@ -128,16 +145,17 @@ describe("shipment close transaction", () => {
     const h = harness();
     h.state.shipment.status = status;
     await expect(h.service.close(1, "operator-1")).rejects.toThrow("Cannot transition");
-    expect(h.transactions[0].execute).toHaveBeenCalledTimes(1);
+    expect(h.transactions[0].execute).toHaveBeenCalledTimes(2);
     expect(h.storage.getInboundShipmentLines).not.toHaveBeenCalled();
     expect(h.storage.updateInboundShipment).not.toHaveBeenCalled();
     expect(h.storage.getProvisionalLotsByShipment).not.toHaveBeenCalled();
+    expect(applyShipmentCostRevisions).not.toHaveBeenCalled();
   });
 
   it("keeps the committed close and logs a classified warning when the separate lot push fails", async () => {
     const h = harness();
     const warning = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    h.storage.getProvisionalLotsByShipment.mockRejectedValueOnce(new Error("Private DB diagnostic"));
+    vi.mocked(applyShipmentCostRevisions).mockRejectedValueOnce(new Error("Private DB diagnostic"));
     try {
       await expect(h.service.close(1, "operator-1")).resolves.toMatchObject({ status: "closed" });
       expect(h.state.shipment.status).toBe("closed");

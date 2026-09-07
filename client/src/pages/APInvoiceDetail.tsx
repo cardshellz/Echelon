@@ -1,3 +1,4 @@
+import { InvoiceLineCostReview } from "@/features/purchasing/InvoiceLineCostReview";
 import { centsToMills, dollarsToCents, dollarsToMills, formatMills } from "@shared/utils/money";
 import React, { useState, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -699,6 +700,7 @@ export default function APInvoiceDetail() {
                       <TableHead className="text-right">Unit Cost</TableHead>
                       <TableHead className="text-right">Line Total</TableHead>
                       <TableHead>Match</TableHead>
+                      <TableHead>Cost evidence</TableHead>
                       {canEdit && <TableHead></TableHead>}
                     </TableRow>
                   </TableHeader>
@@ -718,6 +720,7 @@ export default function APInvoiceDetail() {
                           <TableCell>
                             <span className={`text-xs px-1.5 py-0.5 rounded ${match.className}`}>{match.label}</span>
                           </TableCell>
+                          <TableCell><InvoiceLineCostReview line={line} currency={invoice.currency} invoiceStatus={invoice.status} onSaved={invalidate} /></TableCell>
                           {canEdit && (
                             <TableCell>
                               <Button size="sm" variant="ghost" className="h-7 text-muted-foreground"
@@ -739,6 +742,7 @@ export default function APInvoiceDetail() {
                       <TableCell className="hidden md:table-cell" />
                       <TableCell />
                       <TableCell className="text-right font-mono">{formatCents(lines.reduce((s: number, l: any) => s + Number(l.lineTotalCents), 0))}</TableCell>
+                      <TableCell />
                       <TableCell />
                       {canEdit && <TableCell />}
                     </TableRow>

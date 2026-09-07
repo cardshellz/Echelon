@@ -1,5 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 
+// These owner units isolate SQL row fixtures from the shared lock boundary.
+// Actual lock ordering and rollback are exercised in cost-lineage-owners.integration.test.ts.
+vi.mock("../../infrastructure/cost-evidence.repository", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../infrastructure/cost-evidence.repository")>(),
+  lockInventoryCostGraph: vi.fn(async () => undefined),
+}));
+
 /**
  * COGS Phase 6: when an invoice price differs from the PO price,
  * reconcileInvoiceVariance must update the affected lots and cascade
@@ -52,7 +59,7 @@ describe("COGSService.reconcileInvoiceVariance", () => {
           // cascadeRecostForLot: SELECT affected COGS rows
           return {
             rows: [
-              { id: 1, qty: 5, unit_cost_cents: 600 },
+              { id: 1, qty: 5, old_unit_cost_mills: 60000, unit_cost_cents: 600 },
             ],
           };
         }
@@ -117,7 +124,7 @@ describe("COGSService.reconcileInvoiceVariance", () => {
           }] };
         }
         if (executeCallCount === 4) {
-          return { rows: [{ id: 1, qty: 2, unit_cost_cents: 40, old_unit_cost_mills: 4000 }] };
+          return { rows: [{ id: 1, qty: 2, old_unit_cost_mills: 4000, unit_cost_cents: 40 }] };
         }
         return { rows: [] };
       }),

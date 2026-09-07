@@ -1,3 +1,6 @@
+import { PgDialect } from "drizzle-orm/pg-core";
+import { resolveReceiptCostEvidence } from "../../receipt-cost-evidence.service";
+vi.mock("../../receipt-cost-evidence.service", () => ({ resolveReceiptCostEvidence: vi.fn() }));
 import { describe, it, expect, vi } from "vitest";
 import {
   ReceivingService,
@@ -132,6 +135,7 @@ interface LineFixture {
   purchaseOrderLineId?: number;
   unitCost?: number | null;
   unitCostMills?: number | null;
+  costSourceKind?: "purchase_order_line";
 }
 
 function buildService(
@@ -151,20 +155,17 @@ function buildService(
     productId: 1, unitsPerVariantSnapshot: opts.unitsPerVariant ?? 1, ...line, updatedAt }));
   const updateReceivingLineCalls: Array<{ id: number; updates: any }> = [];
   const receiveInventoryCalls: Array<any> = [];
+  const order = { id: 1, status: "open", vendorId: null, purchaseOrderId: 123,
+    inboundShipmentId: opts.inboundShipmentId ?? null, updatedAt };
+  const costRequests: Array<{ id: number; purchase_order_line_id: number }> = [];
+  const costAttempts: Array<{ requestId: number; state: string; result: any }> = [];
+  const events: string[] = [];
+
 
   const storage = {
-    getReceivingOrderById: vi
-      .fn()
-      .mockResolvedValue({
-        id: 1,
-        status: "open",
-        vendorId: null,
-        purchaseOrderId: 123,
-        inboundShipmentId: opts.inboundShipmentId ?? null,
-        updatedAt,
-      }),
+    getReceivingOrderById: vi.fn(async () => ({ ...order })),
     getReceivingLines: vi.fn().mockResolvedValue(versionedLines),
-    updateReceivingOrder: vi.fn().mockResolvedValue({}),
+    updateReceivingOrder: vi.fn(async (_id: number, patch: any) => { Object.assign(order, patch); return { ...order }; }),
     updateReceivingLine: vi.fn((id: number, updates: any) => {
       updateReceivingLineCalls.push({ id, updates });
       return Promise.resolve({});
@@ -180,12 +181,32 @@ function buildService(
   // The close runs SELECT units_per_variant via tx.execute when scaling cost to the
   // lot's variant unit; return a row so the per-unit × pack-size math has a value.
   const upvRows = { rows: [{ id: 11, product_id: 1, units_per_variant: opts.unitsPerVariant ?? 1, is_active: true }] };
-  const transactionClient = { execute: vi.fn().mockResolvedValue(upvRows) };
+  const execute = async (query: any) => {
+    const rendered = new PgDialect().sqlToQuery(query);
+    if (rendered.sql.includes("INSERT INTO procurement.receipt_cost_requests")) {
+      const lineId = Number(rendered.params[1]);
+      if (!costRequests.some((request) => request.purchase_order_line_id === lineId)) costRequests.push({ id: costRequests.length + 1, purchase_order_line_id: lineId });
+      events.push("cost-request");
+      return { rows: [] };
+    }
+    if (rendered.sql.includes("FROM procurement.receipt_cost_requests")) return { rows: [...costRequests] };
+    if (rendered.sql.includes("FROM procurement.receipt_cost_attempts")) return { rows: costAttempts.filter((attempt) => attempt.requestId === Number(rendered.params[0])).slice(-1) };
+    if (rendered.sql.includes("INSERT INTO procurement.receipt_cost_attempts")) {
+      costAttempts.push({ requestId: Number(rendered.params[0]), state: String(rendered.params[1]), result: JSON.parse(String(rendered.params[2])) });
+      return { rows: [] };
+    }
+    return upvRows;
+  };
+  const transactions: any[] = [];
+  const transactionClient = { execute: vi.fn(execute) };
   const db = {
-    transaction: vi.fn(async (fn: any) =>
-      fn(transactionClient),
-    ),
-    execute: vi.fn().mockResolvedValue(upvRows),
+    transaction: vi.fn(async (fn: any) => {
+      const tx = transactions.length === 0 ? transactionClient : { execute: vi.fn(execute) };
+      transactions.push(tx);
+      try { const result = await fn(tx); events.push("commit"); return result; }
+      catch (error) { events.push("rollback"); throw error; }
+    }),
+    execute: vi.fn(execute),
   } as any;
 
   const inventoryCore = {
@@ -224,12 +245,14 @@ function buildService(
     inventoryCore,
     channelSync,
     storage,
-    null,
+    { onReceivingOrderClosed: vi.fn(async (_id: number, receivedLines: any[]) => ({
+      appliedLines: receivedLines.length, existingReceiptLines: 0, skippedLines: 0, issues: [],
+    })) } as any,
     shipmentTracking as any,
     null,
     opts.approvedInvoiceCostReconciler as any,
   );
-  return { svc, updateReceivingLineCalls, receiveInventoryCalls, storage, transactionClient };
+  return { svc, updateReceivingLineCalls, receiveInventoryCalls, storage, transactionClient, transactions, order, costRequests, costAttempts, events };
 }
 
 describe("ReceivingService.close — stamps unit_cost + unit_cost_mills", () => {
@@ -260,9 +283,9 @@ describe("ReceivingService.close — stamps unit_cost + unit_cost_mills", () => 
     expect(putaway!.updates.unitCostMills).toBe(375);
   });
 
-  it("replays approved invoice cost for each received PO line in the receiving transaction", async () => {
-    const reconcilePurchaseOrderLine = vi.fn().mockResolvedValue({ state: "invoice_actual" });
-    const { svc, transactionClient } = buildService(
+  it("replays approved invoice cost in a separate transaction after stock and its cost request commit", async () => {
+    const reconcilePurchaseOrderLine = vi.fn().mockResolvedValue({ state: "invoice_actual", costApplications: [{ status: "applied", issues: [] }] });
+    const { svc, transactionClient, transactions, events } = buildService(
       [{
         id: 500,
         receivedQty: 100,
@@ -277,12 +300,14 @@ describe("ReceivingService.close — stamps unit_cost + unit_cost_mills", () => 
     await svc.close(1, "u1");
 
     expect(reconcilePurchaseOrderLine).toHaveBeenCalledOnce();
-    expect(reconcilePurchaseOrderLine).toHaveBeenCalledWith(42, transactionClient, "u1");
+    expect(reconcilePurchaseOrderLine).toHaveBeenCalledWith(42, transactions[1], "u1");
+    expect(transactions[1]).not.toBe(transactionClient);
+    expect(events.indexOf("cost-request")).toBeLessThan(events.indexOf("commit"));
   });
 
-  it("does not close the receipt when approved invoice cost replay fails", async () => {
+  it("commits stock and its pending cost request when AP fails, then retries without receiving twice", async () => {
     const reconcilePurchaseOrderLine = vi.fn().mockRejectedValue(new Error("COGS replay failed"));
-    const { svc, storage } = buildService(
+    const { svc, storage, order, costRequests, receiveInventoryCalls } = buildService(
       [{
         id: 500,
         receivedQty: 100,
@@ -294,9 +319,16 @@ describe("ReceivingService.close — stamps unit_cost + unit_cost_mills", () => 
       { approvedInvoiceCostReconciler: { reconcilePurchaseOrderLine } },
     );
 
-    await expect(svc.close(1, "u1")).rejects.toThrow("COGS replay failed");
-
-    expect(storage.updateReceivingOrder).not.toHaveBeenCalled();
+    await expect(svc.close(1, "u1")).resolves.toMatchObject({ costReconciliation: { state: "retry_required" } });
+    expect(order.status).toBe("closed");
+    expect(storage.updateReceivingOrder).toHaveBeenCalledOnce();
+    expect(costRequests).toEqual([{ id: 1, purchase_order_line_id: 42 }]);
+    expect(receiveInventoryCalls).toHaveLength(1);
+    reconcilePurchaseOrderLine.mockResolvedValue({ costApplications: [{ status: "applied", issues: [] }] });
+    await expect(svc.retryCosts(1, "u1")).resolves.toMatchObject({ state: "applied" });
+    await expect(svc.retryCosts(1, "u1")).resolves.toMatchObject({ state: "applied" });
+    expect(reconcilePurchaseOrderLine).toHaveBeenCalledTimes(2);
+    expect(receiveInventoryCalls).toHaveLength(1);
   });
 
   it("manual override on receiving line round-trips (mills authoritative)", async () => {
@@ -365,7 +397,7 @@ describe("ReceivingService.close — stamps unit_cost + unit_cost_mills", () => 
     expect("unitCostMills" in putaway!.updates).toBe(false);
   });
 
-  it("landed cost override still mirrors mills from cents (no precision loss at cents level)", async () => {
+  it("keeps an unproven legacy number provisional instead of treating a shipment total as product cost", async () => {
     const { svc, updateReceivingLineCalls, receiveInventoryCalls } = buildService(
       [
         {
@@ -382,16 +414,16 @@ describe("ReceivingService.close — stamps unit_cost + unit_cost_mills", () => 
 
     await svc.close(1, "u1");
 
-    // inventoryCore sees landed cost (250c).
-    expect(receiveInventoryCalls[0].unitCostCents).toBe(250);
+    // Without explicit source lineage, the shipment total cannot replace product cost.
+    expect(receiveInventoryCalls[0].unitCostCents).toBe(100);
     expect(receiveInventoryCalls[0].inboundShipmentId).toBe(77);
-    expect(receiveInventoryCalls[0].costProvisional).toBe(0);
+    expect(receiveInventoryCalls[0].costProvisional).toBe(1);
     const putaway = updateReceivingLineCalls.find((c) => c.id === 505 && c.updates.putawayComplete === 1);
-    expect(putaway!.updates.unitCost).toBe(250);
-    expect(putaway!.updates.unitCostMills).toBe(25000); // centsToMills(250)
+    expect(putaway!.updates.unitCost).toBe(100);
+    expect(putaway!.updates.unitCostMills).toBe(10000);
   });
 
-  it("uses finalized shipment landed mills when shipment tracking exposes mills precision", async () => {
+  it("does not infer component authority from a higher-precision shipment total", async () => {
     const { svc, updateReceivingLineCalls, receiveInventoryCalls } = buildService(
       [
         {
@@ -412,13 +444,13 @@ describe("ReceivingService.close — stamps unit_cost + unit_cost_mills", () => 
 
     await svc.close(1, "u1");
 
-    expect(receiveInventoryCalls[0].unitCostCents).toBe(250);
-    expect(receiveInventoryCalls[0].unitCostMills).toBe(24995);
+    expect(receiveInventoryCalls[0].unitCostCents).toBe(100);
+    expect(receiveInventoryCalls[0].unitCostMills).toBe(10000);
     expect(receiveInventoryCalls[0].inboundShipmentId).toBe(77);
-    expect(receiveInventoryCalls[0].costProvisional).toBe(0);
+    expect(receiveInventoryCalls[0].costProvisional).toBe(1);
     const putaway = updateReceivingLineCalls.find((c) => c.id === 509 && c.updates.putawayComplete === 1);
-    expect(putaway!.updates.unitCost).toBe(250);
-    expect(putaway!.updates.unitCostMills).toBe(24995);
+    expect(putaway!.updates.unitCost).toBe(100);
+    expect(putaway!.updates.unitCostMills).toBe(10000);
   });
 
   it("marks shipment-linked receipt provisional when landed cost is not finalized", async () => {
@@ -492,7 +524,10 @@ describe("ReceivingService.close — stamps unit_cost + unit_cost_mills", () => 
     expect(putaway!.updates.unitCostMills).toBe(350);
   });
 
-  it("costs the lot EXACTLY from PO line totals — no per-piece rounding on a non-dividing line", async () => {
+  it("posts the exact component owner result for explicitly linked receipt evidence", async () => {
+    vi.mocked(resolveReceiptCostEvidence).mockResolvedValueOnce({ unitCostMills: 393333,
+      productUnitCostMills: 6667, packagingCostMills: 60000, landedCostMills: 0,
+      costProvisional: 1, revisions: [{ id: 1 }] } as any);
     // PO line: 150 pieces, $100 product + $18 packaging = $118.00 all-in.
     // Received as 3 Cases-of-50 (units_per_variant = 50). Per-case cost must come
     // straight from the line totals, NOT from the rounded per-piece mills (7867),
@@ -501,6 +536,7 @@ describe("ReceivingService.close — stamps unit_cost + unit_cost_mills", () => 
       [
         {
           id: 601,
+          costSourceKind: "purchase_order_line",
           receivedQty: 3,
           productVariantId: 11,
           putawayLocationId: 22,
@@ -525,6 +561,9 @@ describe("ReceivingService.close — stamps unit_cost + unit_cost_mills", () => 
     // per-case = round((10000+1800)*100*50/150) = round(393333.33) = 393333 mills.
     // 3 cases × 393333 = 1,179,999 mills → millsToCents = 11800 = exactly $118.00.
     expect(call.unitCostMills).toBe(393333);
+    expect(resolveReceiptCostEvidence).toHaveBeenLastCalledWith(expect.any(Object), expect.objectContaining({
+      receivingLineId: 601, purchaseOrderLineId: 42, purchaseOrderId: 123, unitsPerVariantSnapshot: 50,
+    }), "u1", expect.any(Date));
     expect(call.packagingCostMills).toBe(60000); // round(1800*100*50/150)
     // Implied product (remainder) = 333333 mills; cents mirror per case = 3933.
     expect(call.unitCostCents).toBe(3933);

@@ -40,7 +40,8 @@ describe("purchase workspace repository boundary", () => {
     expect(result?.directReceiptIds).toEqual([31]);
     expect(purchase.totalCents).toBe("12345");
     expect(transaction.mock.calls[0][1]).toEqual({ isolationLevel: "repeatable read", accessMode: "read only" });
-    expect(statements).toHaveLength(5);
+    expect(statements.some((statement) => statement.sql.includes("FROM inventory.cost_applications"))).toBe(true);
+    expect(statements.some((statement) => statement.sql.includes("FROM procurement.receipt_cost_requests"))).toBe(true);
     expect(statements.every((statement) => statement.sql.trimStart().startsWith("SELECT"))).toBe(true);
     expect(statements[0].params).toContain(17);
     expect(statements[0].sql).not.toContain("p.id = 17");

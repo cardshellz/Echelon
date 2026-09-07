@@ -1,3 +1,4 @@
+import { ReceivingError } from "./receiving.service";
 import { withReceivingUnitVersion } from "./receiving-unit-contract";
 import type { Express } from "express";
 import { procurementStorage } from "../procurement";
@@ -180,6 +181,18 @@ export function registerReceivingRoutes(app: Express) {
   });
   
   // Close/complete a receiving order - updates inventory
+  app.post("/api/receiving/:id/retry-costs", requirePermission("purchasing", "approve"), requireIdempotency(), async (req, res) => {
+    try {
+      const { receiving: rcvService } = req.app.locals.services;
+      const result = await rcvService.retryCosts(Number(req.params.id), req.session.user?.id || null);
+      res.json(result);
+    } catch (error) {
+      if (error instanceof ReceivingError) return res.status(error.statusCode).json({ error: error.message, details: error.details });
+      console.error("[Receiving] Cost retry failed", error);
+      res.status(500).json({ error: "Unable to retry receipt costs" });
+    }
+  });
+
   app.post("/api/receiving/:id/close", requirePermission("inventory", "adjust"), requireIdempotency(), async (req, res) => {
     try {
       const { receiving: rcvService } = req.app.locals.services;

@@ -1,3 +1,5 @@
+import { purchaseCostApplicationsFixture } from "../../../../../../test/fixtures/purchase-cost-applications";
+import { purchaseCostTraceFixture } from "../../../../../../test/fixtures/purchase-cost-trace";
 import React, { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { Router } from "wouter";
@@ -7,7 +9,7 @@ import { purchaseWorkspaceSchema, type PurchaseWorkspace } from "@shared/procure
 import { useProcurementNavigation } from "@/hooks/use-procurement-navigation";
 import { loadPurchaseWorkspace, purchaseWorkspaceQueryOptions, PurchaseLifecycleWorkspaceView } from "../../PurchaseLifecycleWorkspace";
 import { resolveWorkspaceRecord } from "../../PurchaseRecordInspector";
-import { formatWorkspaceMoney } from "../../purchase-workspace-format";
+import { formatWorkspaceMoney, formatWorkspaceMills } from "../../purchase-workspace-format";
 
 export function workspaceFixture(): PurchaseWorkspace {
   return purchaseWorkspaceSchema.parse({
@@ -225,5 +227,63 @@ describe("workspace money formatting", () => {
     expect(formatWorkspaceMoney(Number.MAX_SAFE_INTEGER, "USD")).toBe("$90,071,992,547,409.91");
     expect(() => formatWorkspaceMoney(1.5, "USD")).toThrow(RangeError);
     expect(() => formatWorkspaceMoney(Number.MAX_SAFE_INTEGER + 1, "USD")).toThrow(RangeError);
+  });
+});
+
+describe("cost trace rendering and response validation", () => {
+  it("shows quote/charge/lot amounts at separate source scopes with exact subcent precision", () => {
+    const data = workspaceFixture(); data.costTrace = purchaseCostTraceFixture();
+    const markup = renderWorkspace("tab=lifecycle", data);
+    expect(markup).toContain("Cost trace");
+    expect(markup).toContain("Recorded product quote");
+    expect(markup).toContain("$0.6667");
+    expect(markup).toContain("-$0.0050");
+    expect(markup).toContain("approximately $78.67");
+    expect(markup).toContain("0.00 EUR");
+    expect(markup).toContain("41.8350 (currency not recorded)");
+    expect(markup).toContain("Product and packaging composition is unclassified");
+    expect(markup).toContain("Cost application needs verification");
+  });
+
+  it("keeps exact original lot evidence inside the selected receipt inspector", () => {
+    const data = workspaceFixture(); data.costTrace = purchaseCostTraceFixture();
+    expect(renderWorkspace("tab=lifecycle&inspect=receipt:31", data)).toContain('aria-label="Receipt cost evidence"');
+    expect(renderWorkspace("tab=lifecycle&inspect=receipt:31", data)).toContain("Receipt transaction #3001");
+  });
+
+  it("accepts an earlier workspace response but rejects an unverified applied state and unsafe new money", () => {
+    expect(purchaseWorkspaceSchema.safeParse(workspaceFixture()).success).toBe(true);
+    const data = workspaceFixture(); data.costTrace = purchaseCostTraceFixture();
+    expect(purchaseWorkspaceSchema.safeParse(data).success).toBe(true);
+    expect(purchaseWorkspaceSchema.safeParse({ ...data, costTrace: { ...data.costTrace, applicationEvidence: "applied" } }).success).toBe(false);
+    data.costTrace.shipmentCharges[0].actualCents = Number.MAX_SAFE_INTEGER + 1;
+    expect(purchaseWorkspaceSchema.safeParse(data).success).toBe(false);
+  });
+
+  it("formats exact integer mills including zero, signed credits, unknown currency and the safe maximum", () => {
+    expect(formatWorkspaceMills(null, "USD")).toBe("Not recorded");
+    expect(formatWorkspaceMills(0, "USD")).toBe("$0.0000");
+    expect(formatWorkspaceMills(-1, "USD")).toBe("-$0.0001");
+    expect(formatWorkspaceMills(6667, null)).toBe("0.6667 (currency not recorded)");
+    expect(formatWorkspaceMills(Number.MAX_SAFE_INTEGER, "USD")).toBe("$900,719,925,474.0991");
+    expect(() => formatWorkspaceMills(1.5, "USD")).toThrow(RangeError);
+  });
+});
+describe("recorded cost application rendering", () => {
+  it("shows exact source and sold-cost outcomes with original/descendant snapshots and unknown external delivery", () => {
+    const data = workspaceFixture(); data.costTrace = purchaseCostApplicationsFixture();
+    expect(purchaseWorkspaceSchema.safeParse(data).success).toBe(true);
+    const markup = renderWorkspace("tab=lifecycle", data);
+    expect(markup).toContain("Applied to captured lots");
+    expect(markup).toContain("$99.0000");
+    expect(markup).toContain("-$0.34");
+    expect(markup).toContain("$33.3350");
+    expect(markup).toContain("$33.0000");
+    expect(markup).toContain("Contribution #31: source lot #901");
+    expect(markup).toContain("Internal reporting event #41");
+    expect(markup).toContain("Delivery to Archon or another external system is not verified");
+    expect(markup).toContain("The stock receipt remains recorded");
+    expect(markup).not.toContain("Retry receipt costs");
+    expect(markup).not.toContain("Cost application needs verification");
   });
 });

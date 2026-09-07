@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 
+vi.mock("../../infrastructure/cost-evidence.repository", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../infrastructure/cost-evidence.repository")>(),
+  recordLotCostContribution: vi.fn(async () => undefined),
+}));
+
 import {
   InventoryUseCases,
   ReplenishmentInventoryConflictError,
@@ -64,6 +69,7 @@ function caseBreakFixture(sourceLevel: { variantQty: number; reservedQty: number
     createInventoryTransaction: vi.fn(async (input: Record<string, unknown>) => ({ id: 1, ...input })),
   };
   const adjustLots = vi.fn(async () => ({
+    consumedLots: [{ lotId: 301, qty: 1 }],
     consumedCostCents: 500,
     consumedQty: 1,
     consumedPoCostMills: BigInt(49_001),
@@ -71,7 +77,8 @@ function caseBreakFixture(sourceLevel: { variantQty: number; reservedQty: number
     consumedLandedCostMills: BigInt(0),
     consumedCostProvisional: false,
   }));
-  const createLot = vi.fn(async (input: Record<string, unknown>) => ({ id: 31, ...input }));
+  let nextLotId = 31;
+  const createLot = vi.fn(async (input: Record<string, unknown>) => ({ id: nextLotId++, ...input }));
   const lotService = {
     withTx: vi.fn(() => ({ adjustLots, createLot })),
   };

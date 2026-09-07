@@ -1,3 +1,14 @@
+import { isPurchaseOrderHistoryConstraintViolation, readPurchaseOrderHistoryPresence } from "./purchase-order-history.repository";
+import { PURCHASE_ORDER_HISTORY_DELETE_MESSAGE, retainedPurchaseOrderHistoryKinds } from "./purchase-order-history.policy";
+import { readPurchaseApprovalActor, type PurchaseApprovalActor } from "../identity";
+import {
+  assertPurchaseApprovalPermission,
+  assertUniqueHighestApprovalTier,
+  buildPurchaseApprovalSnapshot,
+  purchaseApprovalSnapshotCovers,
+  PurchaseApprovalAuthorityError,
+} from "./purchase-order-approval.policy";
+import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
 /**
  * Purchasing service for Echelon WMS.
  *
@@ -186,7 +197,7 @@ interface Storage {
   createPurchaseOrder(data: any, historyData?: any): Promise<any>;
   updatePurchaseOrder(id: number, updates: any, executor?: any): Promise<any>;
   updatePurchaseOrderStatusWithHistory(id: number, updates: any, historyData: any, executor?: any): Promise<any>;
-  deletePurchaseOrder(id: number): Promise<boolean>;
+  deletePurchaseOrder(id: number, executor?: any): Promise<boolean>;
   getRecommendationPoHandoffForPo(purchaseOrderId: number): Promise<any | undefined>;
   generatePoNumber(): Promise<string>;
 
@@ -316,6 +327,10 @@ export type UpdateDraftPurchaseOrderWithLinesInput =
   };
 
 type CreatePurchaseOrderInternalOptions = {
+  // Internal financial owners reuse their existing transaction. Nested Drizzle
+  // transactions are savepoints, so a PO-number conflict can retry atomically.
+  transaction?: { transaction<T>(work: (tx: any) => Promise<T>): Promise<T> };
+  source?: "inline_editor" | "rfq_quote";
   additionalEvent?: {
     eventType: string;
     payload: Record<string, unknown>;
@@ -385,6 +400,7 @@ export function createPurchasingService(
   storage: Storage,
   options: {
     now?: () => Date;
+    readApprovalActor?: (tx: any, userId: string) => Promise<PurchaseApprovalActor>;
     reconcileApprovedInvoiceCost?: (
       purchaseOrderLineId: number,
       tx: any,
@@ -393,6 +409,7 @@ export function createPurchasingService(
   } = {},
 ) {
   const now = options.now ?? (() => new Date());
+  const readApprovalActor = options.readApprovalActor ?? readPurchaseApprovalActor;
   const reconcileApprovedInvoiceCost = options.reconcileApprovedInvoiceCost;
   const lineCommands = createPurchaseOrderLineCommands(db, {
     persistCatalogWrites: async (tx, vendorId, lines, userId) => {
@@ -1091,9 +1108,15 @@ export function createPurchasingService(
         lte(poApprovalTiersTable.thresholdCents, totalCents),
         eq(poApprovalTiersTable.active, 1),
       ))
-      .orderBy(desc(poApprovalTiersTable.thresholdCents))
-      .limit(1)
+      .orderBy(desc(poApprovalTiersTable.thresholdCents), poApprovalTiersTable.id)
+      .limit(2)
       .for("share");
+    try {
+      assertUniqueHighestApprovalTier(rows);
+    } catch (error) {
+      if (error instanceof PurchaseApprovalAuthorityError) throw new PurchasingError(error.message, error.statusCode, error.details);
+      throw error;
+    }
     return rows[0] ?? null;
   }
 
@@ -1396,6 +1419,7 @@ export function createPurchasingService(
     payload?: Record<string, unknown>,
   ): Promise<any | null> {
     return db.transaction(async (tx: any) => {
+      await lockInventoryCostGraph(tx);
       const updated = await updatePurchaseOrderStatusWithHistoryTx(
         tx,
         id,
@@ -1430,6 +1454,7 @@ export function createPurchasingService(
     const expectation = await observeLifecycleVersion(poId);
     const eventType = PHYSICAL_LIFECYCLE_EVENTS[target];
     const result = await db.transaction(async (tx: any) => {
+      await lockInventoryCostGraph(tx);
       const po = await lockLifecycleHeader(tx, poId, expectation);
       if (extraPatch?.confirmedDeliveryDate !== undefined) {
         const issues = validateDeliverySchedulePatch(po, {
@@ -1508,6 +1533,7 @@ export function createPurchasingService(
   ): Promise<any> {
     const expectation = await observeLifecycleVersion(poId);
     return db.transaction(async (tx: any) => {
+      await lockInventoryCostGraph(tx);
       const po = await lockLifecycleHeader(tx, poId, expectation);
       const change = (() => {
         try {
@@ -1696,6 +1722,7 @@ export function createPurchasingService(
     }
 
     return db.transaction(async (tx: any) => {
+      await lockInventoryCostGraph(tx);
       const po = await lockCleanDraftHeaderForMutation(tx, id);
 
       const change = buildPurchaseOrderDraftHeaderChange(po, parsed.data);
@@ -1752,6 +1779,7 @@ export function createPurchasingService(
     }
 
     return db.transaction(async (tx: any) => {
+      await lockInventoryCostGraph(tx);
       const locked = await tx
         .select()
         .from(purchaseOrdersTable)
@@ -1851,20 +1879,36 @@ export function createPurchasingService(
   }
 
   async function deletePO(id: number) {
-    const po = await storage.getPurchaseOrderById(id);
-    if (!po) throw new PurchasingError("Purchase order not found", 404);
-    if (po.status !== "draft") {
-      throw new PurchasingError("Can only delete POs in draft status", 400);
+    if (!Number.isSafeInteger(id) || id <= 0 || id > PG_INTEGER_MAX) {
+      throw new PurchasingError("Purchase order id must be a positive integer", 400, { code: "INVALID_PURCHASE_ORDER_ID" });
     }
-    const recommendationHandoff = await storage.getRecommendationPoHandoffForPo(id);
-    if (recommendationHandoff) {
-      throw new PurchasingError(
-        "Cannot delete a recommendation-created PO; cancel it to preserve the handoff audit trail",
-        409,
-        { code: "RECOMMENDATION_PO_DELETE_BLOCKED", handoffId: recommendationHandoff.id },
-      );
+    const expectation = await observeLifecycleState(id, ["draft"], () => "Can only delete POs in draft status");
+    try {
+      return await db.transaction(async (tx: any) => {
+        await lockInventoryCostGraph(tx);
+        await lockLifecycleHeader(tx, id, expectation);
+        const historyKinds = retainedPurchaseOrderHistoryKinds(await readPurchaseOrderHistoryPresence(tx, id));
+        if (historyKinds.length > 0) {
+          throw new PurchasingError(PURCHASE_ORDER_HISTORY_DELETE_MESSAGE, 409, { code: "PO_HISTORY_DELETE_BLOCKED", historyKinds });
+        }
+        const [handoff] = await tx.select({ id: purchasingRecommendationPoHandoffsTable.id })
+          .from(purchasingRecommendationPoHandoffsTable)
+          .where(eq(purchasingRecommendationPoHandoffsTable.purchaseOrderId, id))
+          .limit(1).for("share");
+        if (handoff) {
+          throw new PurchasingError("Cannot delete a recommendation-created PO; cancel it to preserve the handoff audit trail", 409,
+            { code: "RECOMMENDATION_PO_DELETE_BLOCKED", handoffId: handoff.id });
+        }
+        const deleted = await storage.deletePurchaseOrder(id, tx);
+        if (!deleted) throw new PurchasingError("Purchase order changed before deletion", 409, { code: "PO_LIFECYCLE_CONFLICT" });
+        return true;
+      });
+    } catch (error) {
+      if (isPurchaseOrderHistoryConstraintViolation(error)) {
+        throw new PurchasingError(PURCHASE_ORDER_HISTORY_DELETE_MESSAGE, 409, { code: "PO_HISTORY_DELETE_BLOCKED" });
+      }
+      throw error;
     }
-    return await storage.deletePurchaseOrder(id);
   }
 
   // ── INCOTERMS & HEADER CHARGES ────────────────────────────────────
@@ -1955,6 +1999,7 @@ export function createPurchasingService(
       }
 
       return db.transaction(async (tx: any) => {
+      await lockInventoryCostGraph(tx);
         const po = await lockCleanDraftHeaderForMutation(tx, id);
         const patch: Record<string, unknown> = {};
         const changedFields: string[] = [];
@@ -2454,6 +2499,7 @@ export function createPurchasingService(
     },
   ): Promise<LockedSendResult> {
     return db.transaction(async (tx: any) => {
+      await lockInventoryCostGraph(tx);
       const economics = await lockLifecycleEconomics(tx, poId, expectation);
       const po = economics.po;
       if (po.status !== "approved" && !(options.allowDraft && po.status === "draft")) {
@@ -2495,7 +2541,15 @@ export function createPurchasingService(
           const pendingPo = await moveLockedPoToPendingApproval(tx, economics, tier, userId);
           return { po: pendingPo, status: "pending_approval", pendingApproval: true };
         }
-        if (!approvalCoversLockedEconomics(economics, tier)) {
+        const approvalEvents = await tx.select({ payloadJson: poEventsTable.payloadJson })
+          .from(poEventsTable)
+          .where(and(eq(poEventsTable.poId, poId), eq(poEventsTable.eventType, "approved")))
+          .orderBy(desc(poEventsTable.id)).limit(1).for("share");
+        const authorityStillCovers = purchaseApprovalSnapshotCovers({
+          snapshot: approvalEvents[0]?.payloadJson?.approval_authority, tier,
+          totalCents: economics.totalCents, approvedBy: po.approvedBy ?? null,
+        });
+        if (!approvalCoversLockedEconomics(economics, tier) || !authorityStillCovers) {
           const pendingPo = await moveLockedPoToPendingApproval(
             tx,
             economics,
@@ -2565,6 +2619,7 @@ export function createPurchasingService(
       (status) => `Cannot submit PO in '${status}' status`,
     );
     return db.transaction(async (tx: any) => {
+      await lockInventoryCostGraph(tx);
       const economics = await lockLifecycleEconomics(tx, id, expectation);
       await assertLifecycleQuotesReadyTx(tx, economics);
       const tier = await getMatchingApprovalTierTx(tx, economics.totalCents);
@@ -2609,6 +2664,7 @@ export function createPurchasingService(
       (status) => `Cannot return PO in '${status}' status to draft`,
     );
     return db.transaction(async (tx: any) => {
+      await lockInventoryCostGraph(tx);
       const economics = await lockLifecycleEconomics(tx, id, expectation);
       const updated = await updateLockedLifecycleHeader(tx, economics, {
         ...lifecycleTotalsPatch(economics),
@@ -2644,15 +2700,25 @@ export function createPurchasingService(
   }
 
   async function approve(id: number, userId?: string, notes?: string) {
+    if (!userId?.trim()) {
+      console.warn(JSON.stringify({ event: "procurement.approval.denied", purchaseOrderId: id, code: "PO_APPROVAL_ACTOR_REQUIRED" }));
+      throw new PurchasingError("An authenticated user is required to approve this purchase order.", 403, { code: "PO_APPROVAL_ACTOR_REQUIRED" });
+    }
     const expectation = await observeLifecycleState(
       id,
       ["draft", "pending_approval"],
       (status) => `Cannot approve PO in '${status}' status`,
     );
     return db.transaction(async (tx: any) => {
+      await lockInventoryCostGraph(tx);
+      const actor = assertPurchaseApprovalPermission(await readApprovalActor(tx, userId));
       const economics = await lockLifecycleEconomics(tx, id, expectation);
       await assertLifecycleQuotesReadyTx(tx, economics);
-      const currentTier = await getMatchingApprovalTierTx(tx, economics.totalCents);
+      const settings = await getProcurementSettingsTx(tx);
+      const currentTier = settings.requireApproval ? await getMatchingApprovalTierTx(tx, economics.totalCents) : null;
+      const approvalAuthority = buildPurchaseApprovalSnapshot({
+        actor, requireApproval: settings.requireApproval, tier: currentTier, totalCents: economics.totalCents,
+      });
       if (
         economics.po.status === "pending_approval" &&
         currentTier &&
@@ -2692,11 +2758,20 @@ export function createPurchasingService(
             notes: notes ?? null,
             tier_id: currentTier?.id ?? economics.po.approvalTierId ?? null,
             total_cents: economics.totalCents,
+            approval_authority: approvalAuthority,
           },
         }],
         userId,
       );
       return updated;
+    }).catch((error: unknown) => {
+      if (error instanceof PurchaseApprovalAuthorityError) {
+        console.warn(JSON.stringify({ event: "procurement.approval.denied", purchaseOrderId: id, actorId: userId, ...error.details }));
+        throw new PurchasingError(error.message, error.statusCode, error.details);
+      }
+      console.error(JSON.stringify({ event: "procurement.approval.failed", purchaseOrderId: id, actorId: userId,
+        code: error instanceof PurchasingError ? error.details?.code ?? "PO_APPROVAL_REJECTED" : "PO_APPROVAL_TRANSACTION_FAILED" }));
+      throw error;
     });
   }
 
@@ -2748,6 +2823,7 @@ export function createPurchasingService(
     const expectation = await observeLifecycleVersion(id);
 
     const result = await db.transaction(async (tx: any) => {
+      await lockInventoryCostGraph(tx);
       const po = await lockLifecycleHeader(tx, id, expectation);
       if (!CANCELLABLE_FROM.has(po.status) && !VOIDABLE_FROM.has(po.status)) {
         throw new PurchasingError(`Cannot cancel/void PO in '${po.status}' status`, 400);
@@ -2945,6 +3021,7 @@ export function createPurchasingService(
     );
 
     const outcome = await db.transaction(async (tx: any) => {
+      await lockInventoryCostGraph(tx);
       const po = await lockLifecycleHeader(tx, id, expectation);
 
       // Receipts exist by close time, so derive the three-way match from the
@@ -3100,6 +3177,7 @@ export function createPurchasingService(
     );
 
     return db.transaction(async (tx: any) => {
+      await lockInventoryCostGraph(tx);
       const po = await lockLifecycleHeader(tx, id, expectation);
       const lines = await tx
         .select()
@@ -3204,6 +3282,7 @@ export function createPurchasingService(
   async function createReceiptFromPO(purchaseOrderId: number, userId?: string) {
     try {
       return await db.transaction(async (tx: any) => {
+      await lockInventoryCostGraph(tx);
         if (typeof tx.execute === "function") {
           await tx.execute(sql`
             SELECT pg_advisory_xact_lock(
@@ -3349,6 +3428,7 @@ export function createPurchasingService(
         purchaseOrderLineId: poLine.id,
         unitCost,
         unitCostMills,
+        costSourceKind: "purchase_order_line",
         putawayLocationId: autoLocationId,
         status: "pending",
       };
@@ -4123,6 +4203,7 @@ export function createPurchasingService(
         purchaseOrderLineId: sl.purchaseOrderLineId,
         unitCost,
         unitCostMills,
+        costSourceKind: "purchase_order_line",
         putawayLocationId: autoLocationId,
         status: "pending",
       };
@@ -4143,6 +4224,7 @@ export function createPurchasingService(
 
     try {
       return await db.transaction(async (tx: any) => {
+      await lockInventoryCostGraph(tx);
         // Shipment line commands and close take this same parent lock first.
         // Preparation above may have raced an edit; compare its raw source
         // snapshot under the lock before writing any receiving records.
@@ -4320,6 +4402,7 @@ export function createPurchasingService(
     userId?: string | null,
   ) {
     const result = await db.transaction(async (tx: any) => {
+      await lockInventoryCostGraph(tx);
       const receivingOrder = await storage.getReceivingOrderById(receivingOrderId, tx);
       let purchaseOrderId = parsePositiveInteger(receivingOrder?.purchaseOrderId);
       if (!purchaseOrderId) {
@@ -5739,7 +5822,8 @@ export function createPurchasingService(
     // A concurrent creator can choose the same max+1 number. The unique index
     // is the arbiter; a conflict rolls back the whole attempt and retries with
     // a freshly generated number.
-    const createAttempt = async (poNumber: string) => db.transaction(async (tx: any) => {
+    const createAttempt = async (poNumber: string) => (internalOptions?.transaction ?? db).transaction(async (tx: any) => {
+      await lockInventoryCostGraph(tx);
       await persistPurchaseOrderCatalogWritesTx(
         tx,
         input.vendorId,
@@ -5804,7 +5888,7 @@ export function createPurchasingService(
       // Event stream.
       const receiveNormalizations = receiveConfigurationNormalizations(resolvedLines);
       await emitPoEventTx(tx, header.id, "created", userId, {
-        source: "inline_editor",
+        source: internalOptions?.source ?? "inline_editor",
         line_count: resolvedLines.length,
         subtotal_cents: subtotalCents,
         ...(receiveNormalizations.length > 0
@@ -5889,6 +5973,7 @@ export function createPurchasingService(
     );
 
     return db.transaction(async (tx: any) => {
+      await lockInventoryCostGraph(tx);
       const lockedHeaders = await tx
         .select()
         .from(purchaseOrdersTable)
@@ -7168,6 +7253,7 @@ export function createPurchasingService(
 
     try {
       return await db.transaction(async (tx: any) => {
+      await lockInventoryCostGraph(tx);
         await lockVendorProductReferences(tx, data.vendorId, data.productId, variantId);
         const auditRows: Array<Record<string, unknown>> = [];
         if (Number(data.isActive ?? 1) === 1 && Number(data.isPreferred ?? 0) === 1) {
@@ -7234,6 +7320,7 @@ export function createPurchasingService(
 
     try {
       return await db.transaction(async (tx: any) => {
+      await lockInventoryCostGraph(tx);
         await lockVendorProductReferences(
           tx,
           Number(snapshot.vendorId),
@@ -7410,6 +7497,7 @@ export function createPurchasingService(
 
     try {
       return await db.transaction(async (tx: any) => {
+      await lockInventoryCostGraph(tx);
         const priorRfqs = await tx.select().from(requestForQuotesTable).where(
           eq(requestForQuotesTable.idempotencyKey, idempotencyKey),
         );
@@ -7626,6 +7714,9 @@ export function createPurchasingService(
         return { rfqs: createdRfqs, lines: createdLines, reused: false };
       });
     } catch (error: any) {
+      if (error?.code === "23514" && String(error?.message ?? "").includes("RFQ_SUPPLY_SNAPSHOT_STALE")) {
+        throw new PurchasingError("Purchase supply changed after this recommendation run. Generate fresh recommendations before creating another RFQ.", 409, { code: "RFQ_SUPPLY_SNAPSHOT_STALE" });
+      }
       if (error?.code === "23514" && String(error?.message ?? "").includes("allocation exceeds")) {
         throw new PurchasingError("Another RFQ consumed some of this recommendation; refresh and try again", 409, {
           code: "RFQ_ALLOCATION_CONFLICT",

@@ -1,3 +1,5 @@
+import { lockInventoryCostGraph } from "./cost-evidence.repository";
+import { costEvidenceTransactionFromPg } from "./cost-evidence-pg";
 import type {
   CanonicalClaimBuildCancellationResult,
   CanonicalClaimBuildExecutionResult,
@@ -421,6 +423,7 @@ export class PostgresCanonicalClaimBuildRepository implements CanonicalClaimBuil
   async executeOperation(
     input: Parameters<CanonicalClaimBuildMutationPort["executeOperation"]>[0],
   ): Promise<CanonicalClaimBuildExecutionResult> {
+    await lockInventoryCostGraph(costEvidenceTransactionFromPg(input.client));
     requireText(input.operationKey, "operationKey");
     requireText(input.actor, "actor");
     requireText(input.reason, "reason");

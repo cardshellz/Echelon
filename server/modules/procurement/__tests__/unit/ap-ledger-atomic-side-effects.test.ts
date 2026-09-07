@@ -1,5 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+// These owner fixtures isolate financial state changes. The real PostgreSQL
+// cost suites verify the shared graph lock and its transaction ordering.
+vi.mock("../../../inventory/infrastructure/cost-evidence.repository", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../../inventory/infrastructure/cost-evidence.repository")>(),
+  lockInventoryCostGraph: vi.fn(async () => undefined),
+}));
+
 const tables = vi.hoisted(() => ({
   apPayments: {
     id: "ap_payments.id",
@@ -77,7 +84,7 @@ const mocks = vi.hoisted(() => ({
   },
   detectOverpaid: vi.fn(),
   detectPastDue: vi.fn(),
-  reconcileInvoiceVariance: vi.fn(),
+  reconcilePurchaseCostEvidence: vi.fn(),
 }));
 
 vi.mock("../../../../db", () => ({ db: mocks.db }));
@@ -87,12 +94,9 @@ vi.mock("../../po-exceptions.service", () => ({
   detectOverpaid: mocks.detectOverpaid,
   detectPastDue: mocks.detectPastDue,
 }));
-vi.mock("../../../inventory/cogs.service", () => ({
-  COGSService: class {
-    reconcileInvoiceVariance(...args: any[]) {
-      return mocks.reconcileInvoiceVariance(...args);
-    }
-  },
+vi.mock("../../../inventory/cogs.service", () => ({ COGSService: class {} }));
+vi.mock("../../purchase-cost-application.service", () => ({
+  reconcilePurchaseCostEvidence: mocks.reconcilePurchaseCostEvidence,
 }));
 
 function makeSelectChain(result: unknown[]) {
@@ -141,10 +145,10 @@ describe("AP ledger atomic side effects", () => {
     vi.clearAllMocks();
     mocks.detectOverpaid.mockResolvedValue(undefined);
     mocks.detectPastDue.mockResolvedValue(undefined);
-    mocks.reconcileInvoiceVariance.mockResolvedValue({
+    mocks.reconcilePurchaseCostEvidence.mockResolvedValue({
       lotsUpdated: 0,
       cogsRowsUpdated: 0,
-      totalCogsDeltaCents: 0,
+      totalCogsDeltaCents: 0, costApplications: [],
     });
     mocks.db.select.mockReturnValue(makeSelectChain([]));
     mocks.db.insert.mockReturnValue({ values: vi.fn(() => Promise.resolve([])) });
@@ -535,22 +539,14 @@ describe("AP ledger atomic side effects", () => {
       }
       return makeUpdateChain();
     });
-    mocks.reconcileInvoiceVariance.mockRejectedValueOnce(new Error("COGS write failed"));
+    mocks.reconcilePurchaseCostEvidence.mockRejectedValueOnce(new Error("COGS write failed"));
 
     await expect(executeApInvoiceCommandInTransaction("approve_invoice", {
       invoiceId: 12,
       userId: "ops-user",
     }, tx)).rejects.toThrow("COGS write failed");
 
-    expect(mocks.reconcileInvoiceVariance).toHaveBeenCalledWith({
-      purchaseOrderId: 7,
-      purchaseOrderLineId: 50,
-      invoiceUnitCostCents: 551,
-      invoiceUnitCostMills: 55055,
-      invoiceNumber: "INV-001",
-      costSource: "invoice",
-      reason: "po_line_cost_reconciliation:invoice_actual",
-    }, tx);
+    expect(mocks.reconcilePurchaseCostEvidence).toHaveBeenCalledWith(tx, 50, expect.any(Object), "ops-user", expect.any(Date));
     expect(tx.insert).not.toHaveBeenCalledWith(tables.auditEvents);
   });
 

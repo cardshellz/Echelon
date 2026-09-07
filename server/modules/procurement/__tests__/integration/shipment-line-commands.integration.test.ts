@@ -24,7 +24,7 @@ const TABLES = [
   schema.purchaseOrders, schema.purchaseOrderLines, schema.inboundShipments, schema.inboundShipmentLines,
   schema.receivingOrders, schema.receivingLines, schema.poReceipts, schema.receiptReversals,
   schema.vendorInvoices, schema.vendorInvoiceLines, schema.inboundFreightCosts, schema.inboundFreightAllocations,
-  schema.landedCostSnapshots, schema.landedCostAdjustments, schema.inboundShipmentStatusHistory,
+  schema.landedCostSnapshots, schema.landedCostAdjustments, schema.inboundShipmentStatusHistory, schema.inventoryLots,
 ] as const;
 
 type Outcome = { ok: true; value: unknown } | { ok: false; error: unknown };
@@ -142,7 +142,7 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
       throw new Error("Shipment line tests require a separate explicitly disposable database");
     }
     pool = new pg.Pool({ connectionString: TEST_DB_URL, max: 8, ssl: /localhost|127\.0\.0\.1/.test(TEST_DB_URL!) ? false : { rejectUnauthorized: false } });
-    for (const name of ["catalog", "procurement"]) {
+    for (const name of ["catalog", "procurement", "inventory"]) {
       await pool.query(`CREATE SCHEMA ${name}`);
       ownedSchemas.push(name);
     }
@@ -171,6 +171,7 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
     for (const migration of ["136_financial_command_results.sql", "140_financial_command_operations.sql"]) {
       await pool.query(readFileSync(resolve(process.cwd(), "migrations", migration), "utf8"));
     }
+    await pool.query(readFileSync(resolve(process.cwd(), "migrations/222_procurement_cost_evidence.sql"), "utf8"));
     commandTablesReady = true;
     database = drizzle(pool, { schema });
 
@@ -200,7 +201,7 @@ databaseTests.sequential("shipment line command PostgreSQL guarantees", () => {
   });
 
   beforeEach(async () => {
-    if (ownedSchemas.length !== 2) throw new Error("Fixture schema ownership was not established");
+    if (ownedSchemas.length !== 3) throw new Error("Fixture schema ownership was not established");
     await pool.query(`TRUNCATE ${TABLES.map(qualifiedTable).join(", ")} RESTART IDENTITY CASCADE`);
     await pool.query("DELETE FROM public.audit_events WHERE actor = ANY($1::text[])", [[actorId, delegateId]]);
     await pool.query(`
