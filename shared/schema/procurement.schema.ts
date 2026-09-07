@@ -405,6 +405,8 @@ export const receivingLines = procurementSchema.table("receiving_lines", {
   // shared/utils/money.ts (millsToCents / centsToMills).
   unitCost: bigint("unit_cost", { mode: "number" }), // Cost per unit in cents
   unitCostMills: bigint("unit_cost_mills", { mode: "number" }), // Cost per unit in mills (4-decimal)
+  costSourceKind: varchar("cost_source_kind", { length: 30 }),
+  costSourceEvidence: jsonb("cost_source_evidence"),
 
   // Put-away location (where it goes after receiving)
   putawayLocationId: integer("putaway_location_id").references(() => warehouseLocations.id, { onDelete: "set null" }),
@@ -1802,6 +1804,7 @@ export type VendorInvoicePoLink = typeof vendorInvoicePoLinks.$inferSelect;
 // ===== VENDOR INVOICE LINES =====
 
 export const vendorInvoiceLines = procurementSchema.table("vendor_invoice_lines", {
+  costComponentEvidence: jsonb("cost_component_evidence"),
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   vendorInvoiceId: integer("vendor_invoice_id").notNull().references(() => vendorInvoices.id, { onDelete: "cascade" }),
   purchaseOrderLineId: integer("purchase_order_line_id").references(() => purchaseOrderLines.id, { onDelete: "set null" }),
