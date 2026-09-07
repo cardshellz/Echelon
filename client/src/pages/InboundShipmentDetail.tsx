@@ -1288,13 +1288,13 @@ export default function InboundShipmentDetail() {
         <Card>
           <CardContent className="p-3">
             <div className="text-xs text-muted-foreground">Est. Cost</div>
-            <div className="font-mono font-medium">{formatCents(shipment.estimatedTotalCostCents)}</div>
+            <div className="font-mono font-medium">{shipment.estimatedTotalCostCents == null ? "Not recorded" : formatCents(shipment.estimatedTotalCostCents)}</div>
           </CardContent>
         </Card>
         <Card>
           <CardContent className="p-3">
             <div className="text-xs text-muted-foreground">Actual Cost</div>
-            <div className="font-mono font-bold text-lg">{formatCents(shipment.actualTotalCostCents)}</div>
+            <div className="font-mono font-bold text-lg">{shipment.actualTotalCostCents == null ? "Not recorded" : formatCents(shipment.actualTotalCostCents)}</div>
           </CardContent>
         </Card>
       </div>

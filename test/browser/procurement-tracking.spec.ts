@@ -35,6 +35,8 @@ test("tracking deep link shows port ETA, actual versus estimated events and reta
   await page.reload();
   await expect(panel(page)).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await expect(page.getByText("Est. Cost", { exact: true }).locator("..")).toContainText("Not recorded");
+  await expect(page.getByText("Actual Cost", { exact: true }).locator("..")).toContainText("Not recorded");
   await page.screenshot({ path: testInfo.outputPath("inbound-tracking.png"), fullPage: true });
   expect(failures).toEqual([]);
 });

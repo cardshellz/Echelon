@@ -161,7 +161,7 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
     const converted = await commands.execute(attempt.command, actorId, attempt.identity);
     expect(converted.httpStatus).toBe(201);
     const result = rfqConversionResultSchema.parse(converted.body);
-    expect((await readPurchaseRfqOrigins(database, result.purchaseOrderId))[0].rfqLineId).toBe(20);
+    expect((await database.transaction((tx) => readPurchaseRfqOrigins(tx, result.purchaseOrderId)))[0].rfqLineId).toBe(20);
     expect((await service.getDetail(10)).lines[0].sourcingSelection).toEqual(captured);
     expect((await commands.execute(attempt.command, actorId, attempt.identity)).body).toEqual(converted.body);
   });
@@ -231,13 +231,13 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
     const result = await commands.execute(attempt.command, actorId, attempt.identity);
     expect(result.httpStatus).toBe(201);
     const created = rfqConversionResultSchema.parse(result.body);
-    const origins = await readPurchaseRfqOrigins(database, created.purchaseOrderId);
+    const origins = await database.transaction((tx) => readPurchaseRfqOrigins(tx, created.purchaseOrderId));
     expect(origins).toHaveLength(created.lines.length);
     expect(origins).toEqual(expect.arrayContaining(created.lines.map((line) => expect.objectContaining({
       rfqId: created.rfqId, rfqLineId: line.rfqLineId, quoteRevisionId: line.quoteRevisionId,
       purchaseOrderLineId: line.purchaseOrderLineId,
     }))));
-    expect(await readPurchaseRfqOrigins(database, 2147483647)).toEqual([]);
+    expect(await database.transaction((tx) => readPurchaseRfqOrigins(tx, 2147483647))).toEqual([]);
     const line = (await pool.query("SELECT * FROM procurement.purchase_order_lines WHERE id=$1", [created.lines[0].purchaseOrderLineId])).rows[0];
     expect(line).toMatchObject({ order_qty: 150, pricing_basis: "extended_total", total_product_cost_cents: "10000", packaging_cost_cents: "1800", pricing_remainder_mills: "-50", line_total_cents: "11800" });
     expect((await service.getDetail(10)).lines[0].purchaseOrder?.purchaseOrderLineId).toBe(created.lines[0].purchaseOrderLineId);

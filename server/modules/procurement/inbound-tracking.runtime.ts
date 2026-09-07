@@ -1,11 +1,17 @@
 import { pool } from "../../db";
+import { schedulerIsDisabled } from "../../infrastructure/scheduler-config";
 import { InboundTrackingRepository } from "./inbound-tracking.repository";
 import { createInboundTrackingProviders } from "./inbound-tracking.providers";
 import { InboundTrackingService } from "./inbound-tracking.service";
 const logger = { info: (event: Record<string, unknown>) => console.info(JSON.stringify(event)), error: (event: Record<string, unknown>) => console.error(JSON.stringify(event)) };
 let service: InboundTrackingService | undefined;
+/** Reads and manual refresh must reflect the same emergency stops as polling. */
+export function inboundTrackingPollingEnabled(environment: NodeJS.ProcessEnv = process.env): boolean {
+  return environment.PROCUREMENT_TRACKING_POLLING_ENABLED === "true"
+    && !schedulerIsDisabled("PROCUREMENT_TRACKING_DISABLED", environment);
+}
 export function getInboundTrackingService(): InboundTrackingService {
-  return service ??= new InboundTrackingService(new InboundTrackingRepository(pool), createInboundTrackingProviders(), process.env.PROCUREMENT_TRACKING_POLLING_ENABLED === "true", () => new Date(), logger);
+  return service ??= new InboundTrackingService(new InboundTrackingRepository(pool), createInboundTrackingProviders(), inboundTrackingPollingEnabled(), () => new Date(), logger);
 }
 export function startInboundTrackingScheduler(tracking = getInboundTrackingService()): { stop(): void } {
   let stopped = false; let running = false;

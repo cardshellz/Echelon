@@ -30,6 +30,8 @@ import { startControlTowerProjectionScheduler } from "./modules/operations/contr
 import { startPoEmailOutboxWorker } from "./modules/procurement/po-email-outbox.worker";
 import { startReceiptCostRecoveryWorker } from "./modules/procurement/receipt-cost-recovery.worker";
 import { createReceiptCostRecoveryRepository } from "./modules/procurement/receipt-cost-recovery.repository";
+import { startInboundTrackingScheduler } from "./modules/procurement/inbound-tracking.runtime";
+import { startCostReportingWorker } from "./modules/procurement/cost-reporting.service";
 import { startVariantAvailabilitySyncWorker } from "./modules/channels/variant-availability-sync.worker";
 import { startInventoryPublicationOutboxWorker } from "./modules/inventory-planning/application/inventory-publication-outbox.worker";
 import { startFinancialCommandRetentionWorker } from "./platform/commands/financial-command-retention.worker";
@@ -845,6 +847,24 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
 
       const receiptCostRecovery = startReceiptCostRecoveryWorker({ repository: createReceiptCostRecoveryRepository(dbPool), receiving: services.receiving });
       if (receiptCostRecovery) httpServer.once("close", () => receiptCostRecovery.stop());
+
+      if (!schedulersDisabled("PROCUREMENT_TRACKING_DISABLED")) {
+        const inboundTracking = startInboundTrackingScheduler();
+        httpServer.once("close", () => inboundTracking.stop());
+      } else {
+        logSchedulerDisabled("scheduler", "Inbound procurement tracking", "PROCUREMENT_TRACKING_DISABLED");
+      }
+
+      if (!schedulersDisabled("COST_REPORT_DELIVERY_DISABLED")) {
+        const stopCostReporting = startCostReportingWorker(services.costReporting);
+        httpServer.once("close", () => {
+          void stopCostReporting().catch(() => {
+            console.error(JSON.stringify({ event: "cost_reporting_shutdown_failed", code: "COST_REPORT_SHUTDOWN_FAILED" }));
+          });
+        });
+      } else {
+        logSchedulerDisabled("scheduler", "Procurement cost report delivery", "COST_REPORT_DELIVERY_DISABLED");
+      }
 
       if (!schedulersDisabled("FINANCIAL_COMMAND_RETENTION_WORKER_DISABLED")) {
         startFinancialCommandRetentionWorker();

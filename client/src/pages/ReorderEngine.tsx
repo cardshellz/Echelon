@@ -1977,7 +1977,7 @@ export default function ReorderEngine() {
             <Card>
               <CardContent className="p-4">
                 <div className="text-2xl font-bold tabular-nums">{formatMoneyCents(suggestedSpend.totalCents)}</div>
-                <div className="text-xs text-zinc-500">Suggested spend</div>
+                <div className="text-xs text-zinc-500">{suggestedSpend.missingCostCount > 0 ? "Suggested spend (priced items)" : "Suggested spend"}</div>
                 <div className="mt-1 text-[11px] text-zinc-500">
                   {suggestedSpend.skuCount} SKUs need ordering
                   {suggestedSpend.missingCostCount > 0 ? ` · ${suggestedSpend.missingCostCount} missing cost` : ""}
@@ -2252,7 +2252,7 @@ export default function ReorderEngine() {
               Review order —{" "}
               <b>
                 {barSummary.lineCount} item{barSummary.lineCount === 1 ? "" : "s"} ·{" "}
-                {formatMoneyCents(barSummary.totalCents)}
+                {formatMoneyCents(barSummary.totalCents)}{barSummary.missingCostCount > 0 ? " priced" : ""}
               </b>
               {barSummary.missingCostCount > 0 && (
                 <span className="text-zinc-400"> · {barSummary.missingCostCount} missing cost</span>
@@ -2885,7 +2885,7 @@ export default function ReorderEngine() {
             ) : (
               <>
                 <div className="text-sm">
-                  Order total <b className="tabular-nums">{formatMoneyCents(stage1.grandCents)}</b>
+                  {stage1.missingCostCount > 0 ? "Known subtotal" : "Order total"} <b className="tabular-nums">{formatMoneyCents(stage1.grandCents)}</b>
                   {builderStage === "confirm" && confirmBundleIssue && <p role="alert" className="max-w-sm text-xs text-amber-800">{confirmBundleIssue}</p>}
                   <div className="text-[11px] text-zinc-500">
                     {stage1.itemCount} item{stage1.itemCount === 1 ? "" : "s"} ·{" "}

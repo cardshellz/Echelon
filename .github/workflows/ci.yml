@@ -99,6 +99,12 @@ jobs:
         run: >-
           npx vitest run
           server/modules/procurement/__tests__/integration/rfq-workflow.integration.test.ts
+      - name: Procurement sourcing, tracking and reporting PostgreSQL guarantees
+        run: >-
+          npx vitest run --no-file-parallelism
+          server/modules/procurement/__tests__/integration/supplier-sourcing.integration.test.ts
+          server/modules/procurement/__tests__/integration/inbound-tracking.integration.test.ts
+          server/modules/procurement/__tests__/integration/cost-reporting.integration.test.ts
       - name: Purchase planning policy PostgreSQL guarantees
         run: >-
           npx vitest run

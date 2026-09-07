@@ -1,9 +1,19 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { InboundTrackingService } from "../../inbound-tracking.service";
 vi.mock("../../../../db",()=>({pool:{}}));
-import { startInboundTrackingScheduler } from "../../inbound-tracking.runtime";
+import { inboundTrackingPollingEnabled, startInboundTrackingScheduler } from "../../inbound-tracking.runtime";
 afterEach(()=>vi.useRealTimers());
 describe("inbound tracking scheduler",()=>{
+  it.each([
+    [{}, false],
+    [{ PROCUREMENT_TRACKING_POLLING_ENABLED: "true" }, true],
+    [{ PROCUREMENT_TRACKING_POLLING_ENABLED: "true", PROCUREMENT_TRACKING_DISABLED: "true" }, false],
+    [{ PROCUREMENT_TRACKING_POLLING_ENABLED: "true", DISABLE_SCHEDULERS: "true" }, false],
+    [{ PROCUREMENT_TRACKING_POLLING_ENABLED: "false", PROCUREMENT_TRACKING_DISABLED: "false" }, false],
+    [{ PROCUREMENT_TRACKING_POLLING_ENABLED: "true", PROCUREMENT_TRACKING_DISABLED: "false", DISABLE_SCHEDULERS: "false" }, true],
+  ] as const)("exposes effective polling state with stop controls %j", (environment, expected) => {
+    expect(inboundTrackingPollingEnabled(environment)).toBe(expected);
+  });
   it("does not overlap long polls and stops future work on shutdown",async()=>{
     vi.useFakeTimers(); let release:()=>void=()=>{};
     const poll=vi.fn(()=>new Promise<{claimed:number;failed:number}>((resolve)=>{release=()=>resolve({claimed:1,failed:0});}));
