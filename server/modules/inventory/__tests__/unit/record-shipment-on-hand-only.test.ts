@@ -1,4 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
+import { PgDialect } from "drizzle-orm/pg-core";
+
+const authorityRows = [{ authority: "legacy", authority_revision: "1", activation_run_id: null }];
+function emptyLegacyQuery(query: Parameters<PgDialect["sqlToQuery"]>[0]) {
+  return { rows: new PgDialect().sqlToQuery(query).sql.includes("availability_runtime_authority") ? authorityRows : [] };
+}
 
 /**
  * SHIP-BEFORE-PICK FALLBACK: when a shipment ships before it was ever picked,
@@ -10,7 +16,7 @@ import { describe, expect, it, vi } from "vitest";
 describe("InventoryUseCases.recordShipment — deductFromOnHandOnly", () => {
   function harness() {
     process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
-    const tx = { execute: vi.fn(async () => ({ rows: [] })) };
+    const tx = { execute: vi.fn(async (query) => emptyLegacyQuery(query)) };
     const rootDb = {
       select: vi.fn(),
       update: vi.fn(),
@@ -138,7 +144,7 @@ describe("InventoryUseCases.recordShipment — deductFromOnHandOnly", () => {
       const text = (query?.queryChunks ?? [])
         .map((chunk: any) => Array.isArray(chunk?.value) ? chunk.value.join("") : "")
         .join("");
-      return text.includes("FROM inventory.inventory_transactions")
+      return text.includes("availability_runtime_authority") ? { rows: authorityRows } : text.includes("FROM inventory.inventory_transactions")
         ? { rows: [{ id: 999 }] }
         : { rows: [] };
     });
@@ -157,7 +163,7 @@ describe("InventoryUseCases.recordShipment — deductFromOnHandOnly", () => {
     });
 
     expect(storage.lockInventoryLevel).not.toHaveBeenCalled();
-    expect(tx.execute).toHaveBeenCalledTimes(2);
+    expect(tx.execute).toHaveBeenCalledTimes(3);
   });
 });
 
@@ -165,7 +171,7 @@ describe("InventoryUseCases.recordReplacementShipmentFromAvailableInventory", ()
   function replacementHarness(existingLocationId?: number) {
     process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
     const tx = {
-      execute: vi.fn(async () => ({ rows: [] })),
+      execute: vi.fn(async () => ({ rows: [] as Record<string, unknown>[] })),
       select: vi.fn(() => {
         const query = {
           from: () => query,
@@ -176,6 +182,7 @@ describe("InventoryUseCases.recordReplacementShipmentFromAvailableInventory", ()
       }),
     };
     tx.execute
+      .mockResolvedValueOnce({ rows: authorityRows })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce(existingLocationId ? { rows: [{ from_location_id: existingLocationId }] } : { rows: [] });
     if (!existingLocationId) {

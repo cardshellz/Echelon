@@ -1,0 +1,69 @@
+# Canonical shipment runtime — 2026-09-07
+
+## Outcome and boundaries
+
+This batch connects the existing canonical picked-custody dispatcher to both real shipment ingress paths, with exact source resolution and the real transactional publication owner. It does **not** activate canonical inventory authority, alter ATP formulas, add a migration, reopen historical receipts, or execute production stock/configuration/provider changes.
+
+Baseline: PR #1406 was verified merged to main as `7da5e34f08ea703f54fd6f3271283ba91de76cd2`; deployment is user-reported, not independently verified against production. Implementation is isolated in `codex/inventory-shipment-runtime`. The original checkout's ten catalog/UOM changes were preserved. A final origin refresh showed unrelated dropship-content PR #1407 at `3a1505911e79624c18656e6327d91843898cff85`; its only overlap with this batch is another CI test-list addition. This branch's local validation uses the #1406 baseline; GitHub's main-target merge checks cover the newer base. This is not work delivered through #1407.
+
+## What the code definitely does
+
+Paths below are repository-relative; line numbers refer to this batch.
+
+| Conclusion | Exact evidence and reasoning |
+| --- | --- |
+| Both shipment callers use one persisted-authority-aware recorder. | `createServices`, `server/services/index.ts:167,507,526`, constructs the dispatcher with WMS/inventory/publication owners and injects `shipmentInventory` into ShipStation and channel ingress. The replacement method stays separately fenced rather than masquerading as ordinary canonical dispatch. |
+| A caller supplies exact shipment source identity, not claim/bin authority. | `AuthorityAwareInventoryShipmentRecorder.recordShipment`, `server/modules/inventory-planning/application/inventory-availability-runtime-shipment.service.ts:44`, validates IDs/quantity, preserves legacy flags only on the legacy route, and maps canonical input to the source request. NULL or guessed legacy bin hints do not select canonical custody. |
+| Legacy routing and its writes hold the same authority transaction. | `PostgresInventoryShipmentRuntimeExecutor.execute`, `infrastructure/inventory-availability-runtime-shipment.repository.ts:28`, binds Drizzle to the pinned client. Canonical routing releases that client before the dispatcher opens its transaction, relying on the existing irreversible authority transition in migration0638; canonical failures never select legacy. Infrastructure paths in this table without a module prefix are under `server/modules/inventory-planning/`. |
+| Direct legacy writers cannot bypass canonical authority. | `loadAndLockShipmentRuntimeAuthority`, `server/modules/inventory/application/inventory.use-cases.ts:166`; `recordShipmentInsideTransaction:737`; replacement recording's guard at873. Both pin/validate before replay or stock changes. Missing/malformed authority fails closed. A late unique violation now propagates and rolls back instead of being swallowed after mutations. |
+| Retries reuse original command identity. | `resolveReplay`, `infrastructure/inventory-availability-dispatch-source-command.repository.ts:73`, verifies original request/result hashes and exact receipt identity, including older dispatch keys found through the source receipt. It returns the original physical IDs, actor and reason. A changed business identity or quantity is a conflict, not another shipment. |
+| New source commands require reconciled picked ownership. | Resolver `resolve:46`, `loadPickedOwnership:111`, and `selectCanonicalClaimDispatchPickedOwner`, `domain/inventory-availability-dispatch-source-command.ts:68`, reconcile final resources, lot allocations and original pick/unpick/dispatch movements before accepting one claim/bin owner. No latest-claim, primary-bin, historic-pick or quantity-based guess is used. |
+| Source-bin assignment is WMS-owned and NULL-only. | `WmsCanonicalClaimDispatchSourceOwner.lockSourceForPreparation:65` and `bindSourceLocation:166`, `server/modules/wms/canonical-claim-dispatch-source.ts`, share source/physical authorization with normal dispatch. A mismatched existing bin is rejected, never overwritten. Assignment rolls back with failed dispatch. |
+| Source preparation, custody, immutable journals and publication commit together. | `PostgresCanonicalClaimDispatchRepository.dispatchPrepared`, `infrastructure/inventory-availability-dispatch.repository.ts:75`, resolves inside every SERIALIZABLE attempt and awaits its mandatory callback before COMMIT. `publishCanonicalDispatchInsideTransaction`, `infrastructure/inventory-availability-dispatch-publication.ts:6`, resolves the exact product and invokes the real planner/outbox on that client, with no provider IO. |
+| Publication cannot silently open a second transaction. | `PostgresTransactionScopedInventoryPublicationExecutor.execute`, `infrastructure/inventory-availability-runtime-publication.repository.ts:171`, checks SERIALIZABLE read-write isolation and reuses the same context as the standalone owner. Canonical authority and active activation remain mandatory; logs explicitly describe pending-commit work. |
+| Publication contention does not create the worker's cross-connection lock cycle. | `enqueueFullPublications`, `infrastructure/inventory-availability-runtime-publication.repository.ts`, uses sorted `pg_try_advisory_xact_lock` calls instead of waiting while holding activation SHARE. Busy returns `INVENTORY_PUBLICATION_TARGET_BUSY`; dispatch retries the entire transaction up to three times (`dispatch.repository.ts:36,75`). The real worker/acknowledgement cycle is reproduced in the PostgreSQL test. |
+| Channel preparation no longer persists canonical fallback-bin guesses. | `prepareReceipt`, `server/modules/oms/channel-fulfillment-ingress.repository.ts:1600`, pins authority before package/order locks. `findOrCreateLegacyPackage` writes a NULL bin for new canonical sources; legacy keeps its prior hint behavior. |
+| Echo recognition is not inventory-posting proof. | `loadCanonicalEchoInventoryItems`, `channel-fulfillment-ingress.repository.ts:693`, requires every canonical echo/existing physical item to link to an exact source with matching order, line, variant and persisted quantity. All echo branches and the existing-physical branch use it. Service `process`, `channel-fulfillment-ingress.service.ts:431`, posts/replays those sources before completing an echo as ignored. Legacy echoes are unchanged. |
+| Transient contention follows durable retry paths; permanent failures retain review evidence. | Channel `recordInventory`, `channel-fulfillment-ingress.service.ts:157,191`, propagates known serialization/deadlock/publication-busy codes to existing receipt backoff. `shipStationDispatchError`, `server/modules/oms/shipstation.service.ts`, now classifies publication busy as retryable for carrier confirmation. Neither path falls back to legacy. |
+| Missing OMS projection pointers or malformed loaded source rows do not silently skip recording. | ShipStation `applyShipNotifyV2EventToResolvedShipment` invokes the recorder even when its OMS pointer is NULL. `loadValidatedInventoryShipmentItems` preserves the existing review mark but throws `SHIPMENT_INVENTORY_SOURCE_INVALID` on invalid returned variant/quantity data. NULL bin hints still reach the owner. Actual carrier-confirmation tests cover these branches. |
+
+## Example and transaction behavior
+
+An order owns five already-picked units from two FIFO lots. The fixture deliberately has eight total units in the shared picked balance: three belong elsewhere. Shipping this source consumes only its five claim-owned units, leaves those other three picked units alone, leaves on-hand/reserved unchanged, and preserves the original COGS rows. The receipt and ship ledger describe five shipped units with on-hand delta zero.
+
+If physical-package creation happens after the first dispatch, replay still uses the original command's NULL physical pair; it does not mint a new command with the newly available pair. If the physical package existed first, the original pair remains bound. The connected runtime tests prove both orders.
+
+A two-line package can commit line one before line two fails. Each line's custody/receipt/publication transaction is atomic; the entire provider callback is **not** one transaction. Retrying replays line one without another debit and then finishes line two. This deliberately retains the existing separately committed status/materialization/projector sequence; it does not claim whole-package atomicity or equate label printing with carrier possession.
+
+## Lock order and failure modes
+
+New source dispatch follows: committed replay evidence; authority SHARE; WMS order → order item → outbound header/item → physical header/item; owning claims → lines → final resources → allocations → original picks; sorted legacy shipment advisory fences; inventory level → FIFO lots → original cost evidence; journals; publication activation SHARE → sorted nonblocking target-pair locks → latest outbox rows; COMMIT.
+
+The publication snapshot/target readers add no late transformation-graph locks. Existing canonical pick/unpick take graph locks before the same WMS order mutex; dispatch does not request graph locks after obtaining that order. This is a code trace, not proof that every writer in the application is deadlock-free. Known PostgreSQL serialization/deadlock errors cause full transaction retry. Persistent contention uses existing ingress retry budgets and can eventually require review.
+
+Missing or ambiguous custody, stale bins, unsupported source purposes, invalid lineage and inactive activation fail without canonical-to-legacy fallback. Missing authority tables/rows also stop legacy posting: the existing authority migrations are a deployment prerequisite. Existing legacy quantity/lot behavior remains intentionally unchanged apart from fencing and propagating aborted-transaction errors.
+
+## Validation
+
+- Full unit suite: **936 files passed, 1 skipped; 9,952 tests passed, 37 skipped**. Includes writer-ratchet and migration-prefix guards.
+- Combined PostgreSQL suite: **16 files, 274 tests passed**, including all six newly registered integration files and the existing inventory/history suites.
+- Actual0662 dispatch tests prove receipt/journal constraints, source resolution, stock ownership, rollback, both physical-ID orderings, concurrent duplicate arrivals, and multi-line recovery.
+- The migration-backed foundation test additionally runs the actual planner on uncommitted stock: the caller sees desired quantity4 while another connection still sees8; rollback restores both stock and queue (`inventory-availability-foundation.integration.test.ts:3811`). Reduced connected fixtures separately prove dispatch plus actual queue ownership; they do not pretend to replay every historical migration.
+- Typecheck and production build passed. Build retains the existing large-client-chunk warning; unit output retains existing nested-mock warnings.
+- The full suite initially found two stale structural assertions (old publisher variable name and swallowed ship unique violations). Those assertions were updated to the new safety contract; focused and full reruns passed.
+
+No production queries, activation, migration execution, inventory adjustments, configuration changes or provider requests were performed. PostgreSQL validation used only separately named local disposable databases.
+
+## What is likely / what is not proven
+
+- **Confirmed in PostgreSQL:** pick-A → unpick-A → repick-B can leave the old outbound source binA. The resolver rejects that mismatch; this batch does not silently repair historical source bins.
+- **HYPOTHESIS:** existing unpick/COGS-recost code can invert cost/lot locking. Unpick reads/locks original costs before levels/lots (`inventory-availability-claim.repository.ts:5275`); `COGSService.revalueLotCostMills` locks lots then invokes `cascadeRecostForLotMills` to update costs (`server/modules/inventory/cogs.service.ts:259,329,207`). An actual concurrent owner regression is still required; no incident or new dispatch-induced cycle is claimed.
+- **Not proven:** production release SHA, installed migration/trigger versions, current authority state, provider credentials/readbacks, real-data historical completeness, or global activation readiness.
+- **Not supported here:** canonical replacement/concession consumption, canonical omission materialization, historical correction commands, multi-owner/bin source assignment, or two distinct source rows for the same order item in one shipment. The existing legacy ship/order-item exclusion remains; this is not a schema relaxation.
+- **Still required:** previously terminal ignored/review receipts and already-shipped legacy demand/custody must be included in cutover reconstruction. This batch does not reopen or replay them. ShipStation's existing SQL excludes nonpositive source quantities before application validation; malformed returned-row tests are not proof of complete historical-zero-row handling.
+
+## Next connected batch / comparison to the previous record
+
+This implements the first three connected-runtime bullets from `INVENTORY-SHIPMENT-QUANTITY-CONTRACT-20260907.md` and adds the proven echo, source-hint and contention safeguards needed for those real consumers. It leaves that record's canonical omission-proof limitation in force.
+
+Next: finish the legacy demand/custody reconstruction and supported-purpose/correction compatibility evidence, then the global admission/configuration fence and reviewed atomic activation/recovery contract. Only after the canonical cutover is verified should legacy values/writers/UI be retired. A merged or deployed runtime PR does not itself authorize production activation or mean the overall inventory migration is complete.

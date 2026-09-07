@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
+import type { InventoryAvailabilityTransactionQueryClient } from "../application/inventory-availability-transaction-query.port";
 
 import type { ChannelExposurePolicyValue } from "@shared/types/inventory-channel-exposure";
 import { canonicalJson } from "@shared/utils/canonical-json";
@@ -114,43 +115,7 @@ implements InventoryAvailabilityRuntimePublicationExecutor {
       const connectedClient = client;
       await connectedClient.query("BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE");
       began = true;
-      const authority = await loadAndLockRuntimeAuthority(connectedClient);
-      if (authority.authority === "canonical") {
-        await assertActivationIsActive(connectedClient, authority.activationRunId!);
-      }
-      const result = await work({
-        authority: authority.authority,
-        authorityRevision: authority.authorityRevision,
-        activationRunId: authority.activationRunId,
-        listActivePublicationProductIds: (channelId) =>
-          listActivePublicationProductIds(connectedClient, channelId),
-        planProduct: async (productId, channelId) => {
-          const supplySnapshot = await captureActiveSupplySnapshotInsideTransaction(
-            connectedClient,
-            productId,
-          );
-          const managedSellableVariantIds = await loadManagedSellableVariantIds(
-            connectedClient,
-            productId,
-          );
-          const publicationTargets = await loadChannelExposurePublicationTargets(
-            connectedClient,
-            productId,
-            managedSellableVariantIds,
-            channelId,
-          );
-          return planInventoryChannelExposureProduct({
-            ...authority,
-            supplySnapshot,
-            managedSellableVariantIds,
-            publicationTargets,
-          }, productId, this.logger);
-        },
-        loadActivePublicationTargets: (input) =>
-          loadZeroPublicationTargets(connectedClient, input),
-        enqueueFullPublications: (activationRunId, intents) =>
-          enqueueFullPublications(connectedClient, activationRunId, intents),
-      });
+      const result = await work(await createPublicationContext(connectedClient, this.logger, false));
       await connectedClient.query("COMMIT");
       began = false;
       return result;
@@ -190,7 +155,101 @@ export function createAuthorityAwareInventoryPublicationService(
   );
 }
 
-async function assertActivationIsActive(client: PoolClient, activationRunId: string): Promise<void> {
+/**
+ * Uses only the caller's already-open SERIALIZABLE transaction. The caller must
+ * roll back the complete mutation on any error and retry the complete command,
+ * never just this callback. No connection, transaction control or provider IO is
+ * performed here. Canonical authority and active activation are mandatory.
+ */
+export class PostgresTransactionScopedInventoryPublicationExecutor
+implements InventoryAvailabilityRuntimePublicationExecutor {
+  constructor(
+    private readonly client: InventoryAvailabilityTransactionQueryClient,
+    private readonly logger?: InventoryAvailabilityRuntimePublicationLogger,
+  ) {}
+
+  async execute<T>(
+    work: (context: InventoryAvailabilityRuntimePublicationContext) => Promise<T>,
+  ): Promise<T> {
+    const settings = (await this.client.query<{ isolation: string; read_only: string }>(
+      "SELECT current_setting('transaction_isolation') AS isolation, current_setting('transaction_read_only') AS read_only",
+    )).rows;
+    if (settings.length !== 1 || settings[0].isolation !== "serializable" || settings[0].read_only !== "off") {
+      throw runtimeError("INVENTORY_PUBLICATION_TRANSACTION_REQUIRED",
+        "Caller-owned publication requires a SERIALIZABLE read-write transaction.", {});
+    }
+    return work(await createPublicationContext(this.client, this.logger, true));
+  }
+}
+
+export function createTransactionScopedInventoryPublicationService(
+  client: InventoryAvailabilityTransactionQueryClient,
+  options: {
+    channelId?: number;
+    logger?: InventoryAvailabilityRuntimePublicationLogger;
+  } = {},
+): AuthorityAwareInventoryPublicationService {
+  // The enclosing command may still fail after this callback. Never present
+  // these plan/queue observations as proof that the transaction committed.
+  const logger: InventoryAvailabilityRuntimePublicationLogger = {
+    info: (event) => options.logger
+      ? options.logger.info({ ...event, transactionState: "pending_commit" })
+      : console.info(JSON.stringify({ ...event, transactionState: "pending_commit" })),
+    warn: (event) => options.logger
+      ? options.logger.warn({ ...event, transactionState: "pending_commit" })
+      : console.warn(JSON.stringify({ ...event, transactionState: "pending_commit" })),
+  };
+  return new AuthorityAwareInventoryPublicationService(
+    new PostgresTransactionScopedInventoryPublicationExecutor(client, logger),
+    options.channelId,
+    logger,
+  );
+}
+
+async function createPublicationContext(
+  client: InventoryAvailabilityTransactionQueryClient,
+  logger: InventoryAvailabilityRuntimePublicationLogger | undefined,
+  requireCanonical: boolean,
+): Promise<InventoryAvailabilityRuntimePublicationContext> {
+  const authority = await loadAndLockRuntimeAuthority(client);
+  if (requireCanonical && authority.authority !== "canonical") {
+    throw runtimeError(
+      "INVENTORY_PUBLICATION_CANONICAL_AUTHORITY_REQUIRED",
+      "Transactional canonical publication cannot fall back to a legacy publisher.",
+      { authority: authority.authority, authorityRevision: authority.authorityRevision },
+    );
+  }
+  if (authority.authority === "canonical") {
+    await assertActivationIsActive(client, authority.activationRunId!);
+  }
+  return {
+    ...authority,
+    listActivePublicationProductIds: (channelId) => listActivePublicationProductIds(client, channelId),
+    planProduct: async (productId, channelId) => {
+      const supplySnapshot = await captureActiveSupplySnapshotInsideTransaction(client, productId);
+      const managedSellableVariantIds = await loadManagedSellableVariantIds(client, productId);
+      const publicationTargets = await loadChannelExposurePublicationTargets(
+        client, productId, managedSellableVariantIds, channelId,
+      );
+      return planInventoryChannelExposureProduct({
+        ...authority, supplySnapshot, managedSellableVariantIds, publicationTargets,
+      }, productId, logger);
+    },
+    loadActivePublicationTargets: (input) => loadZeroPublicationTargets(client, input),
+    enqueueFullPublications: (activationRunId, intents) => {
+      if (authority.authority !== "canonical" || activationRunId !== authority.activationRunId) {
+        throw runtimeError(
+          "INVENTORY_PUBLICATION_AUTHORITY_LINEAGE_MISMATCH",
+          "Publication must use the canonical activation pinned by this transaction.",
+          { activationRunId, pinnedActivationRunId: authority.activationRunId },
+        );
+      }
+      return enqueueFullPublications(client, activationRunId, intents);
+    },
+  };
+}
+
+async function assertActivationIsActive(client: InventoryAvailabilityTransactionQueryClient, activationRunId: string): Promise<void> {
   const row = (await client.query<{ state: string }>(
     `SELECT state
      FROM inventory.availability_activation_runs
@@ -208,7 +267,7 @@ async function assertActivationIsActive(client: PoolClient, activationRunId: str
 }
 
 async function listActivePublicationProductIds(
-  client: PoolClient,
+  client: InventoryAvailabilityTransactionQueryClient,
   channelId?: number,
 ): Promise<number[]> {
   const values: unknown[] = [];
@@ -236,7 +295,7 @@ async function listActivePublicationProductIds(
 }
 
 async function loadZeroPublicationTargets(
-  client: PoolClient,
+  client: InventoryAvailabilityTransactionQueryClient,
   input: {
     productId: number;
     productVariantIds: readonly number[];
@@ -492,7 +551,7 @@ function invalidPolicyMax(row: PolicyRow): never {
 }
 
 async function enqueueFullPublications(
-  client: PoolClient,
+  client: InventoryAvailabilityTransactionQueryClient,
   activationRunId: string,
   intents: readonly CanonicalInventoryPublicationIntent[],
 ): Promise<CanonicalInventoryPublicationEnqueueResult> {
@@ -505,10 +564,21 @@ async function enqueueFullPublications(
     left.publicationTargetId - right.publicationTargetId
     || left.productVariantId - right.productVariantId);
   for (const intent of ordered) {
-    await client.query(
-      "SELECT pg_advisory_xact_lock($1, $2)",
+    // A provider worker owns this pair's session lock while its acknowledgement
+    // transaction waits for the activation row. Waiting here with activation
+    // pinned would form an application-level cycle across three connections.
+    // Fail immediately so the outer command can release every lock and retry.
+    const targetLock = (await client.query<{ acquired: boolean }>(
+      "SELECT pg_try_advisory_xact_lock($1, $2) AS acquired",
       [intent.publicationTargetId, intent.productVariantId],
-    );
+    )).rows[0];
+    if (targetLock?.acquired !== true) {
+      throw runtimeError(
+        "INVENTORY_PUBLICATION_TARGET_BUSY",
+        "Publication target is busy; retry the complete owning transaction.",
+        { publicationTargetId: intent.publicationTargetId, productVariantId: intent.productVariantId, retryable: true },
+      );
+    }
     const latest = (await client.query<LatestPublicationRow>(
       `SELECT activation_run_id::text AS activation_run_id, state,
               desired_revision::text AS desired_revision,

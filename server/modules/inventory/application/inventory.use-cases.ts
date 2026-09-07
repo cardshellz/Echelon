@@ -1,5 +1,6 @@
 import { lockInventoryCostGraph, recordReceiptCostOrigin, recordLotCostContribution } from "../infrastructure/cost-evidence.repository";
 import { sql } from "drizzle-orm";
+import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type { IInventoryStorage } from "../infrastructure/inventory.repository";
 import type { InventoryLotService } from "../lots.service";
 import type { COGSService } from "../cogs.service";
@@ -96,6 +97,102 @@ type DrizzleDb = {
   execute: <T = any>(query: any) => Promise<{ rows: T[] }>;
   transaction: <T>(fn: (tx: any) => Promise<T>) => Promise<T>;
 };
+
+/** The caller owns BEGIN/COMMIT/ROLLBACK and must propagate every failure. */
+export type InventoryShipmentTransaction = Pick<NodePgDatabase, "execute" | "select" | "update" | "insert">;
+
+export interface RecordInventoryShipmentInput {
+  productVariantId: number;
+  warehouseLocationId: number;
+  qty: number;
+  orderId: number;
+  orderItemId?: number;
+  shipmentId?: string;
+  shipmentItemId?: number;
+  userId?: string;
+  /** Never-picked lines must not consume another order's shared picked pool. */
+  deductFromOnHandOnly?: boolean;
+  /** Concessions have no customer reservation to release. */
+  releaseReservation?: boolean;
+}
+
+export interface RecordReplacementInventoryShipmentInput {
+  productVariantId: number;
+  qty: number;
+  warehouseId: number | null;
+  orderId: number;
+  orderItemId?: number | null;
+  shipmentId: number;
+  shipmentItemId: number;
+  userId?: string;
+}
+
+const MAX_POSTGRES_INTEGER = 2_147_483_647;
+
+function validateShipmentInteger(value: unknown, field: string): void {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0 || value > MAX_POSTGRES_INTEGER) {
+    throw new ValidationError(`${field} must be a positive PostgreSQL integer`, { field });
+  }
+}
+
+function validateShipmentText(value: unknown, field: string): void {
+  if (typeof value !== "string" || value.trim().length === 0 || value.length > 100) {
+    throw new ValidationError(`${field} must contain between 1 and 100 characters`, { field });
+  }
+}
+
+function validateShipmentInput(params: RecordInventoryShipmentInput): void {
+  if (!params || typeof params !== "object") throw new ValidationError("Shipment input is required");
+  for (const field of ["productVariantId", "warehouseLocationId", "qty", "orderId"] as const) {
+    validateShipmentInteger(params[field], field);
+  }
+  for (const field of ["orderItemId", "shipmentItemId"] as const) {
+    if (params[field] !== undefined) validateShipmentInteger(params[field], field);
+  }
+  for (const field of ["shipmentId", "userId"] as const) {
+    if (params[field] !== undefined) validateShipmentText(params[field], field);
+  }
+  if (params.shipmentId !== undefined && Number.isInteger(Number(params.shipmentId))) {
+    validateShipmentInteger(Number(params.shipmentId), "shipmentId");
+  }
+  for (const field of ["deductFromOnHandOnly", "releaseReservation"] as const) {
+    if (params[field] !== undefined && typeof params[field] !== "boolean") {
+      throw new ValidationError(`${field} must be a boolean`, { field });
+    }
+  }
+}
+
+/** Pin and validate the persisted decision before source or shipment locks. */
+export async function loadAndLockShipmentRuntimeAuthority(
+  tx: InventoryShipmentTransaction,
+): Promise<"legacy" | "canonical"> {
+  const result = await tx.execute<{
+    authority: unknown; authority_revision: unknown; activation_run_id: unknown;
+  }>(sql`
+    SELECT authority, revision::text AS authority_revision, activation_run_id::text AS activation_run_id
+    FROM inventory.availability_runtime_authority
+    WHERE singleton_key = true
+    FOR SHARE
+  `);
+  const row = result.rows[0];
+  const validRevision = typeof row?.authority_revision === "string" && /^[1-9][0-9]*$/.test(row.authority_revision);
+  const validAuthority = row?.authority === "legacy" || row?.authority === "canonical";
+  const validLineage = row?.authority === "legacy"
+    ? row.activation_run_id === null
+    : typeof row?.activation_run_id === "string" && /^[1-9][0-9]*$/.test(row.activation_run_id);
+  if (result.rows.length !== 1 || !validAuthority || !validRevision || !validLineage) {
+    throw new AppError("The persisted shipment runtime authority is missing or invalid.",
+      "SHIPMENT_RUNTIME_AUTHORITY_INVALID", 503);
+  }
+  return row.authority as "legacy" | "canonical";
+}
+
+async function requireLegacyShipmentAuthority(tx: InventoryShipmentTransaction): Promise<void> {
+  if (await loadAndLockShipmentRuntimeAuthority(tx) !== "legacy") {
+    throw new AppError("Legacy shipment posting is disabled under canonical inventory authority.",
+      "LEGACY_SHIPMENT_AUTHORITY_DISABLED", 409);
+  }
+}
 
 export class InventoryUseCases {
   private onChangeCallbacks: ((productVariantId: number, triggeredBy: string) => void)[] = [];
@@ -628,142 +725,127 @@ export class InventoryUseCases {
   // SHIP
   // ---------------------------------------------------------------------------
 
-  async recordShipment(params: {
-    productVariantId: number;
-    warehouseLocationId: number;
-    qty: number;
-    orderId: number;
-    orderItemId?: number;
-    shipmentId?: string;
-    shipmentItemId?: number;
-    userId?: string;
-    // SHIP-BEFORE-PICK FALLBACK (removable once pick-before-push is enforced):
-    // when true, deduct entirely from on-hand and release the reservation
-    // rather than drawing the location's shared picked pool — a never-picked
-    // item has no picked qty of its own.
-    deductFromOnHandOnly?: boolean;
-    // Concession items were never reserved for the order. They may consume only
-    // genuinely unreserved on-hand stock and must not release another order's
-    // shared reservation counter.
-    releaseReservation?: boolean;
-  }): Promise<void> {
-    if (!Number.isSafeInteger(params.qty) || params.qty <= 0) throw new Error("qty must be a positive safe integer");
+  async recordShipment(params: RecordInventoryShipmentInput): Promise<void> {
+    validateShipmentInput(params);
+    await this.db.transaction((tx) => this.recordShipmentInsideTransaction(params, tx));
+  }
 
-    await this.db.transaction(async (tx) => {
-      if (params.shipmentId && (params.shipmentItemId || params.orderItemId)) {
-        await tx.execute(sql`
-          SELECT pg_advisory_xact_lock(
-            918407,
-            ${params.shipmentItemId ?? params.orderItemId}
-          )
-        `);
-        const existingShipmentTx = await tx.execute(sql`
-          SELECT id
-          FROM inventory.inventory_transactions
-          WHERE transaction_type = 'ship'
-            AND reference_id = ${params.shipmentId}
-            AND ${params.shipmentItemId
-              ? sql`shipment_item_id = ${params.shipmentItemId}`
-              : sql`order_item_id = ${params.orderItemId}`}
-          LIMIT 1
-        `);
-        if (existingShipmentTx.rows.length > 0) {
-          return;
-        }
+  /**
+   * Participate in the caller's transaction without starting or committing one.
+   * The authority SHARE lock survives until that caller commits or rolls back.
+   */
+  async recordShipmentInsideTransaction(
+    params: RecordInventoryShipmentInput,
+    tx: InventoryShipmentTransaction,
+  ): Promise<void> {
+    validateShipmentInput(params);
+    await requireLegacyShipmentAuthority(tx);
+    if (params.shipmentId && (params.shipmentItemId || params.orderItemId)) {
+      await tx.execute(sql`
+        SELECT pg_advisory_xact_lock(
+          918407,
+          ${params.shipmentItemId ?? params.orderItemId}
+        )
+      `);
+      const existingShipmentTx = await tx.execute(sql`
+        SELECT id
+        FROM inventory.inventory_transactions
+        WHERE transaction_type = 'ship'
+          AND reference_id = ${params.shipmentId}
+          AND ${params.shipmentItemId
+            ? sql`shipment_item_id = ${params.shipmentItemId}`
+            : sql`order_item_id = ${params.orderItemId}`}
+        LIMIT 1
+      `);
+      if (existingShipmentTx.rows.length > 0) {
+        return;
       }
+    }
 
-      const level = await this.storage.lockInventoryLevel(
-        params.warehouseLocationId,
-        params.productVariantId,
-        tx
+    const level = await this.storage.lockInventoryLevel(
+      params.warehouseLocationId,
+      params.productVariantId,
+      tx
+    );
+
+    if (!level) {
+      throw new Error(`No inventory level for variant ${params.productVariantId} at location ${params.warehouseLocationId}`);
+    }
+
+    const fromPicked = params.deductFromOnHandOnly
+      ? 0
+      : Math.min(level.pickedQty, params.qty);
+    const fromOnHand = params.qty - fromPicked;
+
+    if (fromOnHand > level.variantQty) {
+      throw new IntegrityError(
+        `Negative Inventory Guard: Cannot record shipment of ${params.qty}. Picked: ${fromPicked}, On-hand: ${level.variantQty}, Required from on-hand: ${fromOnHand}.`
       );
+    }
+    if (
+      params.releaseReservation === false
+      && fromOnHand > level.variantQty - level.reservedQty
+    ) {
+      throw new IntegrityError(
+        `Insufficient unreserved inventory: Cannot record shipment of ${params.qty}. ` +
+        `On-hand: ${level.variantQty}, Reserved: ${level.reservedQty}, Required: ${fromOnHand}.`
+      );
+    }
 
-      if (!level) {
-        throw new Error(`No inventory level for variant ${params.productVariantId} at location ${params.warehouseLocationId}`);
-      }
+    if (fromPicked > 0) {
+      await this.storage.adjustInventoryLevel(level.id, { pickedQty: -fromPicked }, tx);
+    }
 
-      const fromPicked = params.deductFromOnHandOnly
+    if (fromOnHand > 0) {
+      const reservedToRelease = params.releaseReservation === false
         ? 0
-        : Math.min(level.pickedQty, params.qty);
-      let fromOnHand = params.qty - fromPicked;
+        : Math.min(level.reservedQty, fromOnHand);
+      await this.storage.adjustInventoryLevel(level.id, {
+        variantQty: -fromOnHand,
+        ...(reservedToRelease > 0 ? { reservedQty: -reservedToRelease } : {}),
+      }, tx);
+    }
 
-      if (fromOnHand > level.variantQty) {
-        throw new IntegrityError(
-          `Negative Inventory Guard: Cannot record shipment of ${params.qty}. Picked: ${fromPicked}, On-hand: ${level.variantQty}, Required from on-hand: ${fromOnHand}.`
-        );
-      }
-      if (
-        params.releaseReservation === false
-        && fromOnHand > level.variantQty - level.reservedQty
-      ) {
-        throw new IntegrityError(
-          `Insufficient unreserved inventory: Cannot record shipment of ${params.qty}. ` +
-          `On-hand: ${level.variantQty}, Reserved: ${level.reservedQty}, Required: ${fromOnHand}.`
-        );
-      }
+    if (this.lotService) {
+      const lotSvc = this.lotService.withTx(tx);
+      await lotSvc.shipFromLots({
+        productVariantId: params.productVariantId,
+        warehouseLocationId: params.warehouseLocationId,
+        qty: params.qty,
+      });
+    }
 
-      if (fromPicked > 0) {
-        await this.storage.adjustInventoryLevel(level.id, { pickedQty: -fromPicked }, tx);
-      }
+    // COGS is recorded authoritatively at PICK time (pickFromLots →
+    // oms.order_item_costs), not at ship. The old recordShipmentCOGS path
+    // here wrote to the retired inventory.order_line_costs ledger AND
+    // re-decremented lot.qty_consumed — a double-consume hazard that, in
+    // practice, recorded nothing because consumeLotsFIFO only sees
+    // un-picked on-hand (already zero by ship time). Removed in COGS Phase 1.
 
-      if (fromOnHand > 0) {
-        const reservedToRelease = params.releaseReservation === false
-          ? 0
-          : Math.min(level.reservedQty, fromOnHand);
-        await this.storage.adjustInventoryLevel(level.id, {
-          variantQty: -fromOnHand,
-          ...(reservedToRelease > 0 ? { reservedQty: -reservedToRelease } : {}),
-        }, tx);
-      }
-
-      if (this.lotService) {
-        const lotSvc = this.lotService.withTx(tx);
-        await lotSvc.shipFromLots({
-          productVariantId: params.productVariantId,
-          warehouseLocationId: params.warehouseLocationId,
-          qty: params.qty,
-        });
-      }
-
-      // COGS is recorded authoritatively at PICK time (pickFromLots →
-      // oms.order_item_costs), not at ship. The old recordShipmentCOGS path
-      // here wrote to the retired inventory.order_line_costs ledger AND
-      // re-decremented lot.qty_consumed — a double-consume hazard that, in
-      // practice, recorded nothing because consumeLotsFIFO only sees
-      // un-picked on-hand (already zero by ship time). Removed in COGS Phase 1.
-
-      try {
-        await this.storage.createInventoryTransaction({
-          productVariantId: params.productVariantId,
-          fromLocationId: params.warehouseLocationId,
-          transactionType: "ship",
-          variantQtyDelta: -params.qty,
-          variantQtyBefore: level.variantQty,
-          variantQtyAfter: level.variantQty - fromOnHand,
-          sourceState: fromOnHand > 0 ? "on_hand" : "picked",
-          targetState: "shipped",
-          orderId: params.orderId,
-          orderItemId: params.orderItemId ?? null,
-          shipmentId:
-            params.shipmentId && Number.isInteger(Number(params.shipmentId))
-              ? Number(params.shipmentId)
-              : null,
-          shipmentItemId: params.shipmentItemId ?? null,
-          referenceType: "order",
-          referenceId: params.shipmentId ?? String(params.orderId),
-          userId: params.userId ?? null,
-          notes: fromOnHand > 0 ? `Shipped without pick: ${fromPicked} from picked, ${fromOnHand} from on-hand` : null,
-        }, tx);
-      } catch (err: any) {
-        if (
-          err?.code === "23505"
-          && ["ship_dedup", "ship_item_dedup"].some((name) => String(err?.constraint ?? "").includes(name))
-        ) {
-          return;
-        }
-        throw err;
-      }
-    });
+    // The pre-write advisory fence handles ordinary replay. A late unique
+    // violation must propagate: PostgreSQL has aborted this transaction, and
+    // pretending success could hide rolled-back balances or caller effects.
+    await this.storage.createInventoryTransaction({
+      productVariantId: params.productVariantId,
+      fromLocationId: params.warehouseLocationId,
+      transactionType: "ship",
+      variantQtyDelta: -params.qty,
+      variantQtyBefore: level.variantQty,
+      variantQtyAfter: level.variantQty - fromOnHand,
+      sourceState: fromOnHand > 0 ? "on_hand" : "picked",
+      targetState: "shipped",
+      orderId: params.orderId,
+      orderItemId: params.orderItemId ?? null,
+      shipmentId:
+        params.shipmentId && Number.isInteger(Number(params.shipmentId))
+          ? Number(params.shipmentId)
+          : null,
+      shipmentItemId: params.shipmentItemId ?? null,
+      referenceType: "order",
+      referenceId: params.shipmentId ?? String(params.orderId),
+      userId: params.userId ?? null,
+      notes: fromOnHand > 0 ? `Shipped without pick: ${fromPicked} from picked, ${fromOnHand} from on-hand` : null,
+    }, tx);
   }
 
   /**
@@ -774,33 +856,21 @@ export class InventoryUseCases {
    * evidence that the package shipped; this writer selects live, unreserved
    * stock and records the temporary pick plus the shipment atomically.
    */
-  async recordReplacementShipmentFromAvailableInventory(params: {
-    productVariantId: number;
-    qty: number;
-    warehouseId: number | null;
-    orderId: number;
-    orderItemId?: number | null;
-    shipmentId: number;
-    shipmentItemId: number;
-    userId?: string;
-  }): Promise<{ warehouseLocationId: number; alreadyRecorded: boolean }> {
-    if (!Number.isInteger(params.productVariantId) || params.productVariantId <= 0) {
-      throw new ValidationError("productVariantId must be a positive integer");
+  async recordReplacementShipmentFromAvailableInventory(
+    params: RecordReplacementInventoryShipmentInput,
+  ): Promise<{ warehouseLocationId: number; alreadyRecorded: boolean }> {
+    if (!params || typeof params !== "object") throw new ValidationError("Shipment input is required");
+    for (const field of ["productVariantId", "qty", "orderId", "shipmentId", "shipmentItemId"] as const) {
+      validateShipmentInteger(params[field], field);
     }
-    if (!Number.isInteger(params.qty) || params.qty <= 0) {
-      throw new ValidationError("qty must be a positive integer");
+    if (params.warehouseId !== null) validateShipmentInteger(params.warehouseId, "warehouseId");
+    if (params.orderItemId !== undefined && params.orderItemId !== null) {
+      validateShipmentInteger(params.orderItemId, "orderItemId");
     }
-    if (!Number.isInteger(params.orderId) || params.orderId <= 0) {
-      throw new ValidationError("orderId must be a positive integer");
-    }
-    if (!Number.isInteger(params.shipmentId) || params.shipmentId <= 0) {
-      throw new ValidationError("shipmentId must be a positive integer");
-    }
-    if (!Number.isInteger(params.shipmentItemId) || params.shipmentItemId <= 0) {
-      throw new ValidationError("shipmentItemId must be a positive integer");
-    }
+    if (params.userId !== undefined) validateShipmentText(params.userId, "userId");
 
     const result = await this.db.transaction(async (tx) => {
+      await requireLegacyShipmentAuthority(tx);
       await tx.execute(sql`
         SELECT pg_advisory_xact_lock(918407, ${params.shipmentItemId})
       `);

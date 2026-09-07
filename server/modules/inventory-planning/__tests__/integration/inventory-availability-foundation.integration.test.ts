@@ -13,7 +13,7 @@ import { InventoryChannelExposureAdminService } from "../../application/inventor
 import { PostgresInventoryAvailabilityMasterDataStore } from "../../infrastructure/inventory-availability-master-data.repository";
 import { PostgresInventoryPromiseSafetyAdminStore } from "../../infrastructure/inventory-promise-safety-admin.repository";
 import { PostgresInventoryChannelExposureAdminStore } from "../../infrastructure/inventory-channel-exposure-admin.repository";
-import { createAuthorityAwareInventoryPublicationService } from "../../infrastructure/inventory-availability-runtime-publication.repository";
+import { createAuthorityAwareInventoryPublicationService, createTransactionScopedInventoryPublicationService } from "../../infrastructure/inventory-availability-runtime-publication.repository";
 import { loadInventoryAvailabilityBackfillSources } from "../../infrastructure/inventory-availability-backfill.repository";
 import { planInventoryAvailabilityBackfill } from "../../domain/inventory-availability-backfill";
 import { InventoryAvailabilityBackfillService } from "../../application/inventory-availability-backfill.service";
@@ -3808,6 +3808,37 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
         }],
       },
     });
+
+    // The same production planner must observe the caller's uncommitted stock
+    // writes and stage its real trigger-guarded outbox on that exact client.
+    const shipmentClient = await pool.connect();
+    try {
+      await shipmentClient.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+      await shipmentClient.query(
+        "UPDATE inventory.inventory_levels SET variant_qty = 6 WHERE id = $1", [level.rows[0]!.id],
+      );
+      const legacyPublisher = vi.fn(async () => "legacy-must-not-run");
+      const scoped = await createTransactionScopedInventoryPublicationService(shipmentClient).publishProduct({
+        productId: scope.productId, dryRun: false, triggeredBy: "shipment_transaction_test",
+      }, legacyPublisher);
+      expect(scoped).toMatchObject({
+        authority: "canonical", publication: { enqueuedRows: 1, rows: [{ desiredQuantity: "4" }] },
+      });
+      expect(legacyPublisher).not.toHaveBeenCalled();
+      expect((await shipmentClient.query(
+        "SELECT desired_quantity::text AS quantity FROM inventory.inventory_publication_outbox WHERE state='queued'",
+      )).rows).toEqual([{ quantity: "4" }]);
+      expect((await pool.query(
+        "SELECT desired_quantity::text AS quantity FROM inventory.inventory_publication_outbox WHERE state='queued'",
+      )).rows).toEqual([{ quantity: "8" }]);
+    } finally {
+      await shipmentClient.query("ROLLBACK");
+      shipmentClient.release();
+    }
+    expect((await pool.query("SELECT variant_qty FROM inventory.inventory_levels WHERE id=$1", [level.rows[0]!.id])).rows[0])
+      .toEqual({ variant_qty: 10 });
+    expect((await pool.query("SELECT count(*)::int AS total FROM inventory.inventory_publication_outbox")).rows[0])
+      .toEqual({ total: 1 });
 
     const retry = await service.publishProduct({
       productId: scope.productId,
