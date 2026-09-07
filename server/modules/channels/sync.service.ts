@@ -2,6 +2,7 @@ import { eq, and, sql, inArray } from "drizzle-orm";
 import { getSettingsForWarehouse } from "../warehouse/settings.resolver";
 import {
   channelFeeds,
+  channelWarehouseAssignments,
   channelConnections,
   channelReservations,
   channelProductAllocation,
@@ -28,6 +29,7 @@ import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eli
 import { isCustomerSellableVariant } from "@shared/catalog/variant-sales-eligibility";
 import { ChannelIdentityService } from "./channel-identity.service";
 import { ChannelIdentityError } from "./channel-identity.domain";
+import { ShopifyAdapter } from "./adapters/shopify.adapter";
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -622,6 +624,7 @@ class ChannelSyncService {
         await this.pushToChannel(feed, atpUnits);
         return;
       } catch (err) {
+        if (err instanceof ChannelIdentityError && err.failureClass === "permanent") throw err;
         if (attempt === this.MAX_RETRIES) throw err;
         const delayMs = Math.min(1000 * Math.pow(2, attempt - 1), 10000);
         console.warn(`[ChannelSync] Push attempt ${attempt} failed, retrying in ${delayMs}ms`);
@@ -658,120 +661,47 @@ class ChannelSyncService {
     }
   }
 
-  private async pushToShopify(feed: ChannelFeed, atpUnits: number): Promise<void> {
-    if (!feed.channelId) {
-      throw new Error(`Feed ${feed.id} has no channelId — cannot resolve Shopify credentials`);
+  private async pushToShopify(feed: ChannelFeed, _atpUnits: number): Promise<void> {
+    if (!feed.channelId || !feed.channelInventoryItemId || feed.isActive !== 1 || feed.quarantinedAt) {
+      throw new ChannelIdentityError("CHANNEL_INVENTORY_MAPPING_REQUIRED", "An active, non-quarantined destination inventory mapping is required");
     }
-    const [conn] = await this.db
-      .select()
-      .from(channelConnections)
-      .where(eq(channelConnections.channelId, feed.channelId))
-      .limit(1);
-    if (!conn?.shopDomain || !conn?.accessToken) {
-      throw new Error(`Channel ${feed.channelId} has no Shopify credentials configured`);
+    const connection = await new ChannelIdentityService(this.db).shopifyConnection(feed.channelId);
+    const [variant] = await this.db.select({ productId: productVariants.productId,
+      requiresShipping: productVariants.requiresShipping, trackInventory: productVariants.trackInventory,
+      salesEligibility: productVariants.salesEligibility,
+    }).from(productVariants).where(eq(productVariants.id, feed.productVariantId)).limit(1);
+    if (!variant || !isInventoryManagedVariant(variant) || !isCustomerSellableVariant(variant)) {
+      throw new ChannelIdentityError("CHANNEL_VARIANT_INELIGIBLE", "Only sellable, inventory-managed variants may publish quantities");
     }
-
-    const [variantRow] = await this.db
-      .select({
-        productId: productVariants.productId,
-        shopifyInventoryItemId: productVariants.shopifyInventoryItemId,
-        requiresShipping: productVariants.requiresShipping,
-        trackInventory: productVariants.trackInventory,
-        salesEligibility: productVariants.salesEligibility,
-      })
-      .from(productVariants)
-      .where(eq(productVariants.id, feed.productVariantId))
-      .limit(1);
-
-    if (!variantRow?.shopifyInventoryItemId) {
-      throw new Error(
-        `Variant ${feed.productVariantId} has no shopifyInventoryItemId — run Shopify product sync first`,
-      );
-    }
-    if (!isInventoryManagedVariant(variantRow)) {
-      throw new Error(
-        `Variant ${feed.productVariantId} is digital or inventory-untracked; quantity publication is prohibited`,
-      );
-    }
-    if (!isCustomerSellableVariant(variantRow)) {
-      throw new Error(
-        `Variant ${feed.productVariantId} is internal-only; quantity publication is prohibited`,
-      );
-    }
-
-    const warehouseRows: Warehouse[] = await this.db
-      .select()
-      .from(warehouses)
-      .where(and(
-        eq(warehouses.isActive, 1),
-        sql`${warehouses.shopifyLocationId} IS NOT NULL`,
-        sql`COALESCE(${warehouses.inventorySourceType}, 'internal') = 'internal'`,
-      ));
-
-    if (warehouseRows.length > 0) {
-      for (const wh of warehouseRows) {
-        const warehouseAtp = await this.atpService.getAtpPerVariantByWarehouse(
-          variantRow.productId,
-          wh.id,
-        );
-        const variantAtp = warehouseAtp.find((v) => v.productVariantId === feed.productVariantId);
-        const qty = variantAtp?.atpUnits ?? 0;
-
-        await this.pushToShopifyLocation(
-          conn.shopDomain,
-          conn.accessToken,
-          variantRow.shopifyInventoryItemId,
-          wh.shopifyLocationId!,
-          qty,
-        );
+    const assignments: Array<{ warehouseId: number }> = await this.db.select({ warehouseId: channelWarehouseAssignments.warehouseId })
+      .from(channelWarehouseAssignments).where(and(eq(channelWarehouseAssignments.channelId, feed.channelId), eq(channelWarehouseAssignments.enabled, true)));
+    if (assignments.length === 0) throw new ChannelIdentityError("CHANNEL_WAREHOUSE_REQUIRED", "No warehouses are explicitly assigned to this channel");
+    const warehouseRows: Warehouse[] = await this.db.select().from(warehouses).where(and(
+      inArray(warehouses.id, assignments.map((assignment) => assignment.warehouseId)), eq(warehouses.isActive, 1),
+      sql`COALESCE(${warehouses.inventorySourceType}, 'internal') = 'internal'`,
+    ));
+    const breakdown: Array<{ warehouseId: number; externalLocationId: string; qty: number }> = [];
+    const locations = new Set<string>();
+    for (const warehouse of warehouseRows) {
+      if (!warehouse.shopifyLocationId || locations.has(warehouse.shopifyLocationId)) {
+        throw new ChannelIdentityError("CHANNEL_LOCATION_AMBIGUOUS", "Assigned warehouses require distinct explicit provider locations");
       }
-    } else {
-      const shopifyLocationId = process.env.SHOPIFY_LOCATION_ID;
-      if (!shopifyLocationId) {
-        throw new Error(
-          "No warehouses with shopify_location_id configured and SHOPIFY_LOCATION_ID env var not set",
-        );
-      }
-      await this.pushToShopifyLocation(
-        conn.shopDomain,
-        conn.accessToken,
-        variantRow.shopifyInventoryItemId,
-        shopifyLocationId,
-        atpUnits,
-      );
+      locations.add(warehouse.shopifyLocationId);
+      const atp = await this.atpService.getAtpPerVariantByWarehouse(variant.productId, warehouse.id);
+      const quantity = atp.find((item) => item.productVariantId === feed.productVariantId)?.atpUnits ?? 0;
+      if (!Number.isSafeInteger(quantity) || quantity < 0) throw new ChannelIdentityError("CHANNEL_QUANTITY_INVALID", "Allocated inventory quantity is invalid");
+      breakdown.push({ warehouseId: warehouse.id, externalLocationId: warehouse.shopifyLocationId, qty: quantity });
     }
-  }
-
-  private async pushToShopifyLocation(
-    shopifyDomain: string,
-    accessToken: string,
-    inventoryItemId: string,
-    shopifyLocationId: string,
-    available: number,
-  ): Promise<void> {
-    const url = `https://${shopifyDomain}/admin/api/2024-01/inventory_levels/set.json`;
-
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "X-Shopify-Access-Token": accessToken,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        location_id: Number(shopifyLocationId),
-        inventory_item_id: Number(inventoryItemId),
-        available,
-      }),
-    });
-
-    if (!response.ok) {
-      const body = await response.text();
-      throw new Error(`Shopify API error ${response.status} for location ${shopifyLocationId}: ${body}`);
+    if (breakdown.length === 0) throw new ChannelIdentityError("CHANNEL_WAREHOUSE_REQUIRED", "No assigned internal-stock warehouse is eligible for publication");
+    const quantity = breakdown.reduce((total, item) => total + item.qty, 0);
+    if (!Number.isSafeInteger(quantity)) throw new ChannelIdentityError("CHANNEL_QUANTITY_INVALID", "Combined inventory quantity exceeds the supported range");
+    const results = await new ShopifyAdapter(this.db).pushInventory(feed.channelId, [{
+      variantId: feed.productVariantId, sku: feed.channelSku, externalVariantId: feed.channelVariantId,
+      externalInventoryItemId: feed.channelInventoryItemId, allocatedQty: quantity, warehouseBreakdown: breakdown,
+    }]);
+    if (results.length !== 1 || results[0].status !== "success") {
+      throw new ChannelIdentityError("CHANNEL_INVENTORY_PUSH_FAILED", results[0]?.error || "Provider did not confirm inventory publication", results[0]?.retryable === false ? "permanent" : "transient");
     }
-
-    console.log(
-      `[ChannelSync] Pushed ${available} to Shopify location=${shopifyLocationId} item=${inventoryItemId}`,
-    );
   }
 
   /**

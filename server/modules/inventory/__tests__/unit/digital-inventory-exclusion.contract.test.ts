@@ -55,7 +55,7 @@ describe("digital inventory exclusion contract", () => {
     const orchestrator = read("../../../channels/echelon-sync-orchestrator.service.ts");
     const availability = read("../../../channels/variant-availability-sync.service.ts");
     const productPush = read("../../../channels/product-push.service.ts");
-    expect(sync).toContain("isInventoryManagedVariant(variantRow)");
+    expect(sync).toContain("isInventoryManagedVariant(variant)");
     expect(orchestrator).toContain("isInventoryManagedVariant(variant)");
     expect(availability).toContain("markVariantAvailabilityNotApplicable");
     expect(productPush).toContain(

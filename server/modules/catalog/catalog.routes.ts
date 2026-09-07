@@ -1,5 +1,6 @@
 import type { Express } from "express";
 import { db } from "../../db";
+import { ChannelIdentityService } from "../channels";
 import { and, asc, eq, ilike, inArray, isNull, or, sql } from "drizzle-orm";
 import {
   channelConnections,
@@ -218,23 +219,7 @@ async function getDefaultShopifyChannel(channelIdInput?: unknown) {
 }
 
 async function getShopifyCredentials(channelId: number) {
-  const [connection] = await db
-    .select()
-    .from(channelConnections)
-    .where(eq(channelConnections.channelId, channelId))
-    .limit(1);
-
-  const shopDomain = connection?.shopDomain || process.env.SHOPIFY_SHOP_DOMAIN;
-  const accessToken = connection?.accessToken || process.env.SHOPIFY_ACCESS_TOKEN;
-  if (!shopDomain || !accessToken) {
-    throw Object.assign(new Error("Shopify credentials are not configured for this channel"), { statusCode: 400 });
-  }
-
-  return {
-    shopDomain: normalizeShopDomain(shopDomain),
-    accessToken,
-    apiVersion: connection?.apiVersion || DEFAULT_SHOPIFY_API_VERSION,
-  };
+  return new ChannelIdentityService(db).shopifyConnection(channelId);
 }
 
 async function fetchShopifyJson(credentials: { shopDomain: string; accessToken: string; apiVersion: string }, path: string) {

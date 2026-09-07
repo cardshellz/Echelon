@@ -23,6 +23,8 @@
  */
 
 import { eq, and, sql, inArray } from "drizzle-orm";
+import { ChannelIdentityService } from "./channel-identity.service";
+import { providerRestIdentitySchema } from "./channel-identity.domain";
 import {
   products,
   productVariants,
@@ -309,7 +311,7 @@ class CatalogBackfillService {
     backfillPricing: boolean,
     backfillAssets: boolean,
   ): Promise<BackfillResult["mappings"][0] | null> {
-    const shopifyProductId = String(shopifyProduct.id);
+    const shopifyProductId = providerRestIdentitySchema.parse(shopifyProduct.id);
     const tags = shopifyProduct.tags
       ? shopifyProduct.tags.split(",").map((t) => t.trim()).filter(Boolean)
       : [];
@@ -507,8 +509,8 @@ class CatalogBackfillService {
     unitsPerVariant: number,
     hierarchyLevel: number,
   ): Promise<BackfillResult["mappings"][0]["variants"][0] | null> {
-    const shopifyVariantId = String(shopifyVariant.id);
-    const shopifyInventoryItemId = String(shopifyVariant.inventory_item_id);
+    const shopifyVariantId = providerRestIdentitySchema.parse(shopifyVariant.id);
+    const shopifyInventoryItemId = providerRestIdentitySchema.parse(shopifyVariant.inventory_item_id);
     const sku = shopifyVariant.sku?.trim()?.toUpperCase() || `SHOPIFY-${shopifyVariant.id}`;
     const priceCents = Math.round(parseFloat(shopifyVariant.price || "0") * 100);
     const compareAtPriceCents = shopifyVariant.compare_at_price
@@ -662,6 +664,7 @@ class CatalogBackfillService {
             channelVariantId: shopifyVariantId,
             channelProductId: shopifyProductId,
             channelSku: sku,
+            channelInventoryItemId: shopifyInventoryItemId,
             isActive: inventoryManaged ? 1 : 0,
             updatedAt: new Date(),
           })
@@ -675,6 +678,7 @@ class CatalogBackfillService {
           channelVariantId: shopifyVariantId,
           channelProductId: shopifyProductId,
           channelSku: sku,
+          channelInventoryItemId: shopifyInventoryItemId,
           isActive: inventoryManaged ? 1 : 0,
         });
         result.feeds.created++;
@@ -1201,26 +1205,8 @@ class CatalogBackfillService {
   /**
    * Get Shopify credentials for API calls.
    */
-  private async getShopifyCredentials(channelId: number): Promise<{
-    shopDomain: string;
-    accessToken: string;
-    apiVersion: string;
-  }> {
-    const [conn] = await this.db
-      .select()
-      .from(channelConnections)
-      .where(eq(channelConnections.channelId, channelId))
-      .limit(1);
-
-    if (!conn?.shopDomain || !conn?.accessToken) {
-      throw new Error(`No Shopify credentials for channel ${channelId}`);
-    }
-
-    return {
-      shopDomain: conn.shopDomain,
-      accessToken: conn.accessToken,
-      apiVersion: conn.apiVersion || "2024-01",
-    };
+  private async getShopifyCredentials(channelId: number) {
+    return new ChannelIdentityService(this.db).shopifyConnection(channelId);
   }
 
   /**
@@ -1272,12 +1258,7 @@ class CatalogBackfillService {
     channelId: number,
     filterIds?: string[],
   ): Promise<ShopifyProductRaw[]> {
-    // Get credentials from channel_connections
-    const [conn] = await this.db
-      .select()
-      .from(channelConnections)
-      .where(eq(channelConnections.channelId, channelId))
-      .limit(1);
+    const conn = await this.getShopifyCredentials(channelId);
 
     if (!conn?.shopDomain || !conn?.accessToken) {
       throw new Error(`No Shopify credentials for channel ${channelId}`);

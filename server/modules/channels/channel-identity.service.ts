@@ -1,4 +1,5 @@
-import { and, eq, inArray, isNull } from "drizzle-orm";
+import { and, eq, inArray, isNull, or } from "drizzle-orm";
+import type { ExternalInventorySnapshot } from "../inventory/application/external-inventory-source.contract";
 import { channelConnections, channelFeeds, channelListings, channels } from "@shared/schema";
 import { persistAuditEvent } from "../../infrastructure/auditLogger";
 import { ChannelIdentityError, internalIdentitySchema, indexInventoryIdentities, type ChannelItemIdentity } from "./channel-identity.domain";
@@ -63,11 +64,32 @@ export class ChannelIdentityService {
     const mappings = indexInventoryIdentities(await this.inventoryIdentities(channelId));
     const quantities = await this.reader.inventory(connection, selectedLocation);
     return {
-      channelId, connectionId: connection.id, externalLocationId: selectedLocation,
+      channelId, connectionId: connection.id, externalLocationId: selectedLocation, externalAccountId: connection.shopDomain,
       items: [...quantities].map(([externalInventoryItemId, quantity]) => ({
         externalInventoryItemId, productVariantId: mappings.get(externalInventoryItemId) ?? null, quantity,
       })),
     };
+  }
+
+  /** Called on the inventory owner's transaction immediately before a batch. */
+  async validateInventorySnapshot(snapshot: ExternalInventorySnapshot): Promise<void> {
+    await this.db.select({ id: channels.id }).from(channels).where(eq(channels.id, snapshot.channelId)).for("share");
+    const connections = await this.db.select().from(channelConnections).where(eq(channelConnections.channelId, snapshot.channelId)).limit(2).for("share");
+    if (connections.length !== 1 || connections[0].id !== snapshot.connectionId || connections[0].shopDomain !== snapshot.externalAccountId) {
+      throw new ChannelIdentityError("CHANNEL_CONNECTION_CHANGED", "Inventory source account changed after provider readback");
+    }
+    if (snapshot.items.length === 0) return;
+    const rows = await this.db.select().from(channelFeeds).where(and(eq(channelFeeds.channelId, snapshot.channelId), or(
+      inArray(channelFeeds.productVariantId, snapshot.items.flatMap((item) => item.productVariantId === null ? [] : [item.productVariantId])),
+      inArray(channelFeeds.channelInventoryItemId, snapshot.items.map((item) => item.externalInventoryItemId)),
+    ))).for("share");
+    const identities = indexInventoryIdentities(rows.filter((row) => row.isActive === 1 && !row.quarantinedAt).map((row) => ({
+      productVariantId: row.productVariantId, externalVariantId: row.channelVariantId,
+      externalProductId: row.channelProductId, externalInventoryItemId: row.channelInventoryItemId, externalSku: row.channelSku,
+    })));
+    if (snapshot.items.some((item) => identities.get(item.externalInventoryItemId) !== item.productVariantId)) {
+      throw new ChannelIdentityError("CHANNEL_IDENTITY_CHANGED", "Inventory mappings changed after provider readback");
+    }
   }
 
   /** Explicit enable/discovery only. A catalog ID is never a provider identity. */
