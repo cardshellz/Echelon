@@ -5,6 +5,7 @@ import type {
   CanonicalClaimCycleCountAdjustmentResult,
   CanonicalClaimInventoryReleaseResource,
   CanonicalClaimInventoryMutationPort,
+  CanonicalClaimInventoryDispatchPort,
   CanonicalClaimInventoryPickResource,
   CanonicalClaimInventoryUnpickResource,
   CanonicalClaimLotAllocation,
@@ -13,6 +14,7 @@ import type {
 } from "../../inventory-planning/application/canonical-claim-inventory.port";
 import { allocateBuildCostLayers } from "../domain/build.domain";
 import { buildMillsToRoundedCents, normalizeBuildLotCosts } from "./build.repository";
+import { dispatchCanonicalPickedResources, loadCanonicalDispatchCosts } from "./canonical-claim-dispatch-inventory";
 
 type CanonicalTransformationExecutionInput =
   | Parameters<CanonicalClaimInventoryMutationPort["executePackageOperation"]>[0]
@@ -138,7 +140,15 @@ async function lockLevel(
   ))[0];
 }
 
-export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaimInventoryMutationPort {
+export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaimInventoryMutationPort, CanonicalClaimInventoryDispatchPort {
+  loadDispatchCosts(input: Parameters<CanonicalClaimInventoryDispatchPort["loadDispatchCosts"]>[0]) {
+    return loadCanonicalDispatchCosts(input);
+  }
+
+  dispatchPickedResources(input: Parameters<CanonicalClaimInventoryDispatchPort["dispatchPickedResources"]>[0]) {
+    return dispatchCanonicalPickedResources(input);
+  }
+
   async ensureInventoryLevel(
     input: Parameters<CanonicalClaimInventoryMutationPort["ensureInventoryLevel"]>[0],
   ): Promise<number> {

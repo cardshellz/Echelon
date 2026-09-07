@@ -1,6 +1,46 @@
+import type { CanonicalClaimDispatchPlan } from "../../../../shared/types/inventory-availability-dispatch";
+
 export type CanonicalClaimTransactionClient = {
   query: (text: string, values?: unknown[]) => Promise<{ rows: any[]; rowCount?: number | null }>;
 };
+
+export type CanonicalClaimInventoryDispatchCost = {
+  id: number;
+  orderId: number;
+  orderItemId: number;
+  productVariantId: number;
+  inventoryLotId: number;
+  quantity: string;
+  unitCostMills: string;
+  totalCostMills: string;
+};
+
+export type CanonicalClaimInventoryDispatchResult = {
+  inventoryTransactionId: number;
+  quantity: string;
+  physicalOnHandDelta: "0";
+  reservedQuantityDelta: "0";
+  pickedQuantityDelta: string;
+};
+
+/**
+ * Dispatch is deliberately separate from the preexisting mutation port. The
+ * caller owns one PostgreSQL transaction, authorization, source/order and claim
+ * locks, exact command replay, claim counters, and the immutable dispatch receipt.
+ * It must roll back all owner writes if any later step fails. This owner never
+ * converts a label into dispatch authority or infers source shipment quantities.
+ */
+export interface CanonicalClaimInventoryDispatchPort {
+  loadDispatchCosts(input: {
+    client: CanonicalClaimTransactionClient;
+    costIds: readonly number[];
+  }): Promise<readonly CanonicalClaimInventoryDispatchCost[]>;
+  dispatchPickedResources(input: {
+    client: CanonicalClaimTransactionClient;
+    plan: CanonicalClaimDispatchPlan;
+    occurredAt: Date;
+  }): Promise<CanonicalClaimInventoryDispatchResult>;
+}
 
 export type CanonicalClaimLotAllocation = {
   inventoryLotId: number;

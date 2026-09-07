@@ -361,6 +361,12 @@
   "inventory.availability_claim_commands": [
     "modules/inventory-planning"
   ],
+  "inventory.availability_claim_dispatch_movements": [
+    "modules/inventory-planning"
+  ],
+  "inventory.availability_claim_dispatch_receipts": [
+    "modules/inventory-planning"
+  ],
   "inventory.availability_claim_events": [
     "modules/inventory-planning"
   ],
