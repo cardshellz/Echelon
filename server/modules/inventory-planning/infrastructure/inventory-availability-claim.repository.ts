@@ -5257,7 +5257,10 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
                   cost.order_id AS cost_order_id, cost.order_item_id AS cost_order_item_id,
                   cost.inventory_lot_id AS cost_inventory_lot_id,
                   cost.product_variant_id AS cost_product_variant_id,
-                  cost.qty AS cost_qty, cost.unit_cost_mills, cost.total_cost_mills
+                  cost.qty AS cost_qty, cost.unit_cost_mills, cost.total_cost_mills,
+                  COALESCE((SELECT sum(dispatch.quantity)
+                    FROM inventory.availability_claim_dispatch_movements AS dispatch
+                    WHERE dispatch.pick_movement_id = movement.id), 0)::text AS dispatched_quantity
            FROM inventory.availability_claim_pick_movements AS movement
            JOIN inventory.availability_claim_resources AS resource
              ON resource.id = movement.claim_resource_id AND resource.claim_id = movement.claim_id
@@ -5281,11 +5284,12 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
           if (String(row.movement_type) !== "pick") continue;
           const movementId = positiveBigInt(row.id, "pickMovement.id");
           const pickedQty = positiveBigInt(row.quantity, "pickMovement.quantity");
-          const available = pickedQty - (reversedByPick.get(movementId.toString()) ?? BigInt(0));
+          const dispatchedQty = nonnegativeBigInt(row.dispatched_quantity, "pickMovement.dispatchedQuantity");
+          const available = pickedQty - (reversedByPick.get(movementId.toString()) ?? BigInt(0)) - dispatchedQty;
           if (available < BigInt(0)) {
             throw new InventoryAvailabilityClaimRepositoryError(
               "CLAIM_UNPICK_LINEAGE_MISMATCH",
-              "Compensating unpick movements exceed their original pick movement.",
+              "Compensating unpick and dispatch movements exceed their original pick movement.",
               { pickMovementId: movementId.toString() },
             );
           }

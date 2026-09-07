@@ -803,7 +803,7 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
     expect(fake.query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
   });
 
-  it("reverses the latest unreversed pick movement and restores an active reservation", async () => {
+  it.each([false, true])("reverses only unshipped pick lineage and restores an active reservation (latest shipped=%s)", async (latestShipped) => {
     const plan = packageClaimPlan();
     const command = {
       claimId: "9",
@@ -904,6 +904,7 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
             movement_type: "pick",
             quantity: "3",
             reverses_pick_movement_id: null,
+            dispatched_quantity: "0",
             inventory_level_id: 11,
             warehouse_location_id: 2,
             source_variant_id: 105,
@@ -938,6 +939,26 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
       throw new Error(`Unexpected query: ${text}`);
     });
     const writer = createInventoryWriter();
+    if (latestShipped) {
+      const originalQuery = fake.query.getMockImplementation()!;
+      fake.query.mockImplementation(async (text, values) => {
+        const result = await originalQuery(text, values);
+        if (text.includes("FROM inventory.availability_claim_lines")) {
+          return { ...result, rows: result.rows.map((row: Record<string, unknown>) => ({ ...row, consumed_target_qty: "1", picked_target_qty: "2" })) };
+        }
+        if (text.includes("FROM inventory.availability_claim_resources") || text.includes("FROM inventory.availability_claim_lot_allocations")) {
+          return { ...result, rows: result.rows.map((row: Record<string, unknown>) => ({ ...row, consumed_qty: "1", picked_qty: "2" })) };
+        }
+        if (text.includes("FROM inventory.availability_claim_pick_movements")) {
+          const row = result.rows[0];
+          return { rows: [
+            { ...row, id: "30", quantity: "2", cost_qty: 2, total_cost_mills: "250", dispatched_quantity: "0" },
+            { ...row, id: "31", quantity: "1", cost_qty: 1, total_cost_mills: "125", dispatched_quantity: "1" },
+          ] };
+        }
+        return result;
+      });
+    }
     writer.unpickResources.mockResolvedValue({
       movements: [{
         claimResourceId: BigInt(12),
@@ -947,7 +968,7 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
         unitCostMills: BigInt(125),
         totalCostMills: BigInt(250),
         orderItemCostId: 82,
-        reversesPickMovementId: BigInt(31),
+        reversesPickMovementId: BigInt(latestShipped ? 30 : 31),
       }],
       totalCostMills: BigInt(250),
     });
@@ -965,7 +986,11 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
       totalCostMills: "250",
       idempotentReplay: false,
     });
-    expect(writer.unpickResources).toHaveBeenCalledWith(expect.objectContaining({ restoreReservation: true }));
+    expect(writer.unpickResources).toHaveBeenCalledWith(expect.objectContaining({ restoreReservation: true,
+      resources: [expect.objectContaining({ lotAllocations: [expect.objectContaining({
+        reversesPickMovementId: BigInt(latestShipped ? 30 : 31), unpickQty: BigInt(2),
+      })] })],
+    }));
     const statements = fake.query.mock.calls.map(([text]) => String(text));
     expect(statements.findIndex((text) => text.startsWith("UPDATE wms.order_items")))
       .toBeLessThan(statements.findIndex((text) => text.startsWith("INSERT INTO inventory.availability_claim_commands")));
