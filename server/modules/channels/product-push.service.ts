@@ -32,6 +32,9 @@ import {
   type ChannelListing,
 } from "@shared/schema";
 import { isCustomerSellableVariant } from "@shared/catalog/variant-sales-eligibility";
+import { ChannelIdentityService } from "./channel-identity.service";
+import { ChannelIdentityError } from "./channel-identity.domain";
+import { ShopifyIdentityReader } from "./adapters/shopify-identity.reader";
 import { catalogStorage } from "../catalog";
 import { channelsStorage } from "../channels";
 const storage = { ...catalogStorage, ...channelsStorage };
@@ -116,6 +119,12 @@ export function createChannelProductPushService(db: any) {
     const variantOverrides = await storage.getChannelVariantOverridesByProduct(channelId, productId);
     const pricingOverrides = await storage.getChannelPricingByProduct(channelId, productId);
     const assetOverrides = await storage.getChannelAssetOverridesByProduct(channelId, productId);
+    const channelMappings = await storage.getChannelListingsByProduct(channelId, productId);
+    const mappingByVariant = new Map(channelMappings.map((mapping) => [mapping.productVariantId, mapping]));
+    const externalProductIds = new Set(channelMappings.map((mapping) => mapping.externalProductId).filter(Boolean));
+    if (externalProductIds.size > 1) {
+      throw new ChannelIdentityError("CHANNEL_PRODUCT_IDENTITY_AMBIGUOUS", "This product maps to multiple external products in the selected channel");
+    }
 
     // Build override maps
     const voMap = new Map(variantOverrides.map((vo) => [vo.productVariantId, vo]));
@@ -143,7 +152,8 @@ export function createChannelProductPushService(db: any) {
         weight: vo?.weightOverride || null,
         price: pr?.price ?? v.priceCents ?? null,
         compareAtPrice: pr?.compareAtPrice ?? v.compareAtPriceCents ?? null,
-        shopifyVariantId: v.shopifyVariantId,
+        // Compatibility DTO field; value is always this channel's mapping.
+        shopifyVariantId: mappingByVariant.get(v.id)?.externalVariantId ?? null,
         isListed: isCustomerSellableVariant(v) && (vo ? vo.isListed === 1 : true),
         requiresShipping: v.requiresShipping !== false,
         trackInventory: v.trackInventory,
@@ -179,7 +189,7 @@ export function createChannelProductPushService(db: any) {
       isListed,
       variants: resolvedVariants,
       images: resolvedImages,
-      shopifyProductId: product.shopifyProductId,
+      shopifyProductId: channelMappings.find((mapping) => mapping.externalProductId)?.externalProductId ?? null,
     };
   }
 
@@ -282,205 +292,43 @@ export function createChannelProductPushService(db: any) {
   // Shopify-specific push
   // ---------------------------------------------------------------------------
 
-  async function pushToShopify(
-    resolved: ResolvedChannelProduct,
-    channelId: number,
-  ): Promise<ProductPushResult> {
-    // Get connection credentials
-    const [conn] = await db
-      .select()
-      .from(channelConnections)
-      .where(eq(channelConnections.channelId, channelId))
-      .limit(1);
-
-    if (!conn?.shopDomain || !conn?.accessToken) {
-      return {
-        productId: resolved.productId,
-        channelId,
-        status: "error",
-        error: "No Shopify credentials configured for this channel",
-      };
+  async function pushToShopify(resolved: ResolvedChannelProduct, channelId: number): Promise<ProductPushResult> {
+    const identityService = new ChannelIdentityService(db);
+    const externalProductId = resolved.shopifyProductId;
+    if (!externalProductId || resolved.variants.some((variant) => variant.isListed && !variant.shopifyVariantId)) {
+      return { productId: resolved.productId, channelId, status: "error", error: "Destination product/variant mapping required; routine sync cannot create products or variants" };
     }
-
-    const apiVersion = conn.apiVersion || "2024-01";
-
-    // Check if product already exists on Shopify via channelListings
-    const existingListings = await storage.getChannelListingsByProduct(channelId, resolved.productId);
-    const existingListing = existingListings[0];
-
-    // Also check by shopifyProductId
-    const externalProductId = existingListing?.externalProductId || resolved.shopifyProductId;
-
     try {
-      if (externalProductId) {
-        // UPDATE existing product
-        await updateShopifyProduct(
-          conn.shopDomain,
-          conn.accessToken,
-          apiVersion,
-          externalProductId,
-          resolved,
-        );
-
-        // Update listing sync status
-        if (existingListing) {
-          await storage.upsertChannelListing({
-            channelId,
-            productVariantId: existingListing.productVariantId,
-            externalProductId,
-            syncStatus: "synced",
-            lastSyncedAt: new Date(),
-            syncError: null,
-          });
+      const connection = await identityService.shopifyConnection(channelId);
+      const evidence = await new ShopifyIdentityReader().product(connection, externalProductId);
+      for (const variant of resolved.variants.filter((item) => item.isListed)) {
+        const external = evidence.variants.find((item) => item.id === variant.shopifyVariantId);
+        if (!external || external.sku !== variant.sku) {
+          throw new ChannelIdentityError("CHANNEL_PRODUCT_IDENTITY_MISMATCH", "Destination product variants do not match the channel mapping");
         }
-
-        // Ensure channel feeds exist for all listed variants (in case they were added after initial push)
-        for (const variant of resolved.variants) {
-          if (!variant.isListed) continue;
-          const inventoryManaged = variant.requiresShipping && variant.trackInventory !== false;
-          const existingFeed = await storage.getChannelFeedByChannelAndVariant(channelId, variant.id);
-          if (existingFeed) {
-            if ((existingFeed.isActive === 1) !== inventoryManaged) {
-              await storage.setChannelFeedActive(existingFeed.id, inventoryManaged);
-            }
-          } else {
-            const shopifyVariantId = variant.shopifyVariantId || null;
-            await storage.createChannelFeedDirect({
-              channelId,
-              productVariantId: variant.id,
-              channelType: "shopify",
-              channelVariantId: shopifyVariantId || variant.sku || String(variant.id),
-              channelProductId: externalProductId,
-              channelSku: variant.sku || null,
-              isActive: inventoryManaged ? 1 : 0,
-            });
-          }
-        }
-
-        // Update product lastPushedAt
-        await storage.updateProduct(resolved.productId, {
-          lastPushedAt: new Date(),
-        });
-
-        return {
-          productId: resolved.productId,
-          channelId,
-          status: "updated",
-          externalProductId,
-        };
-      } else {
-        // CREATE new product on Shopify
-        const shopifyProduct = await createShopifyProduct(
-          conn.shopDomain,
-          conn.accessToken,
-          apiVersion,
-          resolved,
-        );
-
-        const newExternalProductId = String(shopifyProduct.id);
-
-        // Create channel listings + channel feeds for all variants
-        for (const variant of resolved.variants) {
-          if (!variant.isListed) continue;
-          const shopifyVariant = shopifyProduct.variants?.find(
-            (sv: any) => sv.sku === variant.sku,
-          );
-          if (shopifyVariant) {
-            const shopifyVariantId = String(shopifyVariant.id);
-
-            await storage.upsertChannelListing({
-              channelId,
-              productVariantId: variant.id,
-              externalProductId: newExternalProductId,
-              externalVariantId: shopifyVariantId,
-              externalSku: variant.sku,
-              syncStatus: "synced",
-              lastSyncedAt: new Date(),
-            });
-
-            // Ensure channel feed exists so inventory sync picks this variant up
-            const existingFeed = await storage.getChannelFeedByChannelAndVariant(channelId, variant.id);
-            const inventoryManaged = variant.requiresShipping && variant.trackInventory !== false;
-            if (existingFeed) {
-              if ((existingFeed.isActive === 1) !== inventoryManaged) {
-                await storage.setChannelFeedActive(existingFeed.id, inventoryManaged);
-              }
-            } else {
-              await storage.createChannelFeedDirect({
-                channelId,
-                productVariantId: variant.id,
-                channelType: "shopify",
-                channelVariantId: shopifyVariantId,
-                channelProductId: newExternalProductId,
-                channelSku: variant.sku || null,
-                isActive: inventoryManaged ? 1 : 0,
-              });
-            }
-          }
-        }
-
-        // Update product shopifyProductId and lastPushedAt
-        await storage.updateProduct(resolved.productId, {
-          shopifyProductId: newExternalProductId,
-          lastPushedAt: new Date(),
-        });
-
-        return {
-          productId: resolved.productId,
-          channelId,
-          status: "created",
-          externalProductId: newExternalProductId,
-        };
       }
-    } catch (error: any) {
-      console.error(`[ChannelPush] Shopify push failed for product ${resolved.productId}:`, error.message);
-
-      // Record error in listing
-      if (existingListing) {
-        await storage.upsertChannelListing({
-          channelId,
-          productVariantId: existingListing.productVariantId,
-          externalProductId: existingListing.externalProductId,
-          syncStatus: "error",
-          syncError: error.message,
-          lastSyncedAt: new Date(),
-        });
+      await updateShopifyProduct(connection.shopDomain, connection.accessToken, connection.apiVersion, externalProductId, resolved);
+      for (const variant of resolved.variants.filter((item) => item.isListed)) {
+        const inventoryManaged = variant.requiresShipping && variant.trackInventory !== false;
+        const existingFeed = await storage.getChannelFeedByChannelAndVariant(channelId, variant.id);
+        if (existingFeed && !inventoryManaged && existingFeed.isActive === 1) {
+          await storage.setChannelFeedActive(existingFeed.id, false);
+        } else if (!existingFeed && inventoryManaged) {
+          await identityService.ensureShopifyFeed({ channelId, productVariantId: variant.id, sku: variant.sku, actor: "channel-product-update" });
+        }
+        // Do not reactivate intentionally disabled/quarantined feeds during a content update.
+        await storage.upsertChannelListing({ channelId, productVariantId: variant.id,
+          externalProductId, externalVariantId: variant.shopifyVariantId,
+          syncStatus: "synced", lastSyncedAt: new Date(), syncError: null });
       }
-
-      return {
-        productId: resolved.productId,
-        channelId,
-        status: "error",
-        error: error.message,
-      };
+      await storage.updateProduct(resolved.productId, { lastPushedAt: new Date() });
+      return { productId: resolved.productId, channelId, status: "updated", externalProductId };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Product update failed";
+      console.error(JSON.stringify({ action: "channel_product.update", outcome: "failed", channelId,
+        productId: resolved.productId, error_code: error instanceof ChannelIdentityError ? error.code : "CHANNEL_PRODUCT_UPDATE_FAILED" }));
+      return { productId: resolved.productId, channelId, status: "error", error: message };
     }
-  }
-
-  async function createShopifyProduct(
-    shopDomain: string,
-    accessToken: string,
-    apiVersion: string,
-    resolved: ResolvedChannelProduct,
-  ): Promise<any> {
-    const payload = buildShopifyProductPayload(resolved);
-
-    const url = `https://${shopDomain}/admin/api/${apiVersion}/products.json`;
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "X-Shopify-Access-Token": accessToken,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ product: payload }),
-    });
-
-    if (!response.ok) {
-      const body = await response.text();
-      throw new Error(`Shopify create product failed (${response.status}): ${body}`);
-    }
-
-    const data = await response.json();
-    return data.product;
   }
 
   async function updateShopifyProduct(

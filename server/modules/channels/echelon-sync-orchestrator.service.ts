@@ -16,6 +16,10 @@
 
 import { eq, and, or, isNull, isNotNull, sql, inArray } from "drizzle-orm";
 import { clearVelocityCache } from "./allocation-engine.service";
+import { ChannelIdentityService } from "./channel-identity.service";
+import { ChannelIdentityError } from "./channel-identity.domain";
+import { ShopifyIdentityReader } from "./adapters/shopify-identity.reader";
+import { catalogStorage } from "../catalog";
 import {
   products,
   productVariants,
@@ -1177,7 +1181,6 @@ class EchelonSyncOrchestrator {
         .where(
           and(
             eq(products.isActive, true),
-            sql`${products.shopifyProductId} IS NOT NULL`,
           ),
         );
     }
@@ -1200,9 +1203,17 @@ class EchelonSyncOrchestrator {
 
         if (lockedFields.has("images")) pushFields.push("images");
 
+        const resolved = await this.productPushService.getResolvedProductForChannel(product.id, channelId);
+        if (channel.provider === "shopify" && (!resolved?.shopifyProductId
+          || resolved.variants.some((variant: { isListed: boolean; shopifyVariantId: string | null }) => variant.isListed && !variant.shopifyVariantId))) {
+          result.skipped++;
+          result.details.push({ productId: product.id, direction: "skip", fields: [], status: "skipped",
+            error: "Destination product/variant mapping required; routine sync cannot create products" });
+          continue;
+        }
+
         // PUSH locked fields
         if (pushFields.length > 0) {
-          const resolved = await this.productPushService.getResolvedProductForChannel(product.id, channelId);
           if (resolved && resolved.isListed) {
             console.log(
               `[SyncOrchestrator] ${config.dryRun ? "DRY_RUN " : ""}Listings PUSH: ` +
@@ -1210,6 +1221,15 @@ class EchelonSyncOrchestrator {
             );
 
             if (!config.dryRun) {
+              if (channel.provider === "shopify") {
+                const connection = await new ChannelIdentityService(this.db).shopifyConnection(channelId);
+                const evidence = await new ShopifyIdentityReader().product(connection, resolved.shopifyProductId!);
+                for (const variant of resolved.variants.filter((item: { isListed: boolean }) => item.isListed)) {
+                  if (!evidence.variants.some((item) => item.id === variant.shopifyVariantId && item.sku === variant.sku)) {
+                    throw new ChannelIdentityError("CHANNEL_PRODUCT_IDENTITY_MISMATCH", "Destination product does not match its mapped variants");
+                  }
+                }
+              }
               // Build partial listing payload with only locked fields
               const listingPayload = {
                 productId: product.id,
@@ -1299,14 +1319,14 @@ class EchelonSyncOrchestrator {
         }
 
         // PULL unlocked fields from Shopify → Echelon
-        if (pullFields.length > 0 && product.shopifyProductId) {
+        if (pullFields.length > 0 && channel.provider === "shopify" && resolved?.shopifyProductId) {
           console.log(
             `[SyncOrchestrator] ${config.dryRun ? "DRY_RUN " : ""}Listings PULL: ` +
             `product="${product.name}" channel=${channel.name} fields=[${pullFields.join(",")}]`,
           );
 
           if (!config.dryRun) {
-            const shopifyData = await this.fetchShopifyProductData(channelId, product.shopifyProductId);
+            const shopifyData = await this.fetchShopifyProductData(channelId, resolved.shopifyProductId);
             if (shopifyData) {
               const updates: Partial<{ title: string; description: string | null; updatedAt: Date }> = {};
 
@@ -1319,10 +1339,7 @@ class EchelonSyncOrchestrator {
 
               if (Object.keys(updates).length > 0) {
                 updates.updatedAt = new Date();
-                await this.db
-                  .update(products)
-                  .set(updates)
-                  .where(eq(products.id, product.id));
+                await catalogStorage.updateProduct(product.id, updates);
 
                 result.pulled++;
                 result.details.push({
@@ -1732,36 +1749,9 @@ class EchelonSyncOrchestrator {
   /**
    * Fetch a single product from Shopify for pulling unlocked fields.
    */
-  private async fetchShopifyProductData(
-    channelId: number,
-    shopifyProductId: string,
-  ): Promise<{ title: string; body_html: string | null } | null> {
-    const [conn] = await this.db
-      .select()
-      .from(channelConnections)
-      .where(eq(channelConnections.channelId, channelId))
-      .limit(1);
-
-    if (!conn?.shopDomain || !conn?.accessToken) return null;
-
-    const apiVersion = conn.apiVersion || "2024-01";
-    const url = `https://${conn.shopDomain}/admin/api/${apiVersion}/products/${shopifyProductId}.json?fields=id,title,body_html`;
-
-    try {
-      const response = await fetch(url, {
-        headers: {
-          "X-Shopify-Access-Token": conn.accessToken,
-          "Content-Type": "application/json",
-        },
-      });
-
-      if (!response.ok) return null;
-
-      const data = await response.json();
-      return data?.product || null;
-    } catch {
-      return null;
-    }
+  private async fetchShopifyProductData(channelId: number, externalProductId: string) {
+    const connection = await new ChannelIdentityService(this.db).shopifyConnection(channelId);
+    return new ShopifyIdentityReader().product(connection, externalProductId);
   }
 
   /**

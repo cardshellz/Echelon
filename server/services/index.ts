@@ -143,6 +143,8 @@ import { createAuthorityAwareInventoryAtpService } from "../modules/inventory-pl
 import { createAuthorityAwareReservationRuntime } from "../modules/inventory-planning/infrastructure/inventory-availability-runtime-claim.repository";
 import { createAuthorityAwareInventoryPublicationService } from "../modules/inventory-planning/infrastructure/inventory-availability-runtime-publication.repository";
 import { productVariants as pvTable } from "@shared/schema";
+import { ChannelIdentityService } from "../modules/channels";
+import { createSessionAdvisoryLockRunner } from "../infrastructure/session-advisory-lock";
 import { eq as eqOp } from "drizzle-orm";
 
 const systemCanonicalClaimClock = (): Date => new Date();
@@ -154,7 +156,25 @@ export function createServices(
   // Foundation
   const inventoryLots = createInventoryLotService(db);
   const cogs = createCOGSService(db);
-  const inventoryCore = new InventoryUseCases(db, inventoryStorage, inventoryLots, cogs); // Temporary mapping
+  const channelIdentities = new ChannelIdentityService(db);
+  const inventoryImportLock = createSessionAdvisoryLockRunner(databasePool);
+  const inventoryCore = new InventoryUseCases(db, inventoryStorage, inventoryLots, cogs, {
+    clock: systemCanonicalClaimClock,
+    // Dedicated warehouse-import namespace: serialize provider read + local apply.
+    withWarehouseLock: (warehouseId, work) => inventoryImportLock({ namespace: 731903, key: warehouseId, label: "inventory.external_source_import" }, work),
+    read: (config, legacyLocationId) => {
+      if (typeof config.channelId !== "number"
+        || (config.channelConnectionId !== undefined && typeof config.channelConnectionId !== "number")
+        || (config.externalLocationId !== undefined && typeof config.externalLocationId !== "string")) {
+        throw new Error("Invalid external inventory source configuration");
+      }
+      if (config.externalLocationId && legacyLocationId && config.externalLocationId !== legacyLocationId) {
+        throw new Error("Warehouse and source configuration disagree on the external location");
+      }
+      return channelIdentities.externalInventory(config.channelId, config.externalLocationId || legacyLocationId || undefined, config.channelConnectionId);
+    },
+    validateSnapshot: (tx, snapshot) => new ChannelIdentityService(tx as ConstructorParameters<typeof ChannelIdentityService>[0]).validateInventorySnapshot(snapshot),
+  });
   const inventoryUseCases = inventoryCore;
   const recipeCapacity = createRecipeCapacityService(db);
   const atp = createAuthorityAwareInventoryAtpService(databasePool);

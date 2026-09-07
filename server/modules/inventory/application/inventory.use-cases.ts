@@ -2,7 +2,8 @@ import { sql } from "drizzle-orm";
 import type { IInventoryStorage } from "../infrastructure/inventory.repository";
 import type { InventoryLotService } from "../lots.service";
 import type { COGSService } from "../cogs.service";
-import { warehouses, warehouseLocations, channelConnections } from "../../../storage/base";
+import { warehouses, warehouseLocations } from "../../../storage/base";
+import type { ExternalInventoryImportDependencies, WarehouseInventorySyncResult } from "./external-inventory-source.contract";
 import { eq, and } from "drizzle-orm";
 import type { InventoryLevel, InsertInventoryTransaction, InventoryTransaction } from "../../../../shared/schema";
 import { AuditLogger } from "../../../infrastructure/auditLogger";
@@ -93,7 +94,7 @@ type DrizzleDb = {
   update: (...args: any[]) => any;
   insert: (...args: any[]) => any;
   execute: <T = any>(query: any) => Promise<{ rows: T[] }>;
-  transaction: <T>(fn: (tx: any) => Promise<T>) => Promise<T>;
+  transaction: <T>(fn: (tx: any) => Promise<T>, config?: { isolationLevel: "serializable" }) => Promise<T>;
 };
 
 export class InventoryUseCases {
@@ -104,6 +105,7 @@ export class InventoryUseCases {
     private readonly storage: IInventoryStorage,
     private readonly lotService: InventoryLotService | null = null,
     private readonly cogsService: COGSService | null = null,
+    private readonly externalImport: ExternalInventoryImportDependencies | null = null,
   ) {}
 
   private async assertNotFrozen(locationId: number, dbh?: any): Promise<void> {
@@ -1953,151 +1955,81 @@ export class InventoryUseCases {
   // EXTERNAL SOURCE SYNC
   // ---------------------------------------------------------------------------
 
-  async syncWarehouse(warehouseId: number): Promise<any> {
-    const [wh] = await this.db.select().from(warehouses).where(eq(warehouses.id, warehouseId)).limit(1);
-    if (!wh) throw new Error(`Warehouse ${warehouseId} not found`);
-
-    const result = {
-      warehouseId: wh.id,
-      warehouseCode: wh.code,
-      synced: 0,
-      skipped: 0,
-      errors: [] as string[],
-    };
-
-    if (wh.inventorySourceType === "internal" || wh.inventorySourceType === "manual") {
-      result.errors.push(`Warehouse ${wh.code} has source type '${wh.inventorySourceType}'`);
-      return result;
-    }
-
-    if (wh.inventorySourceType !== "channel") {
-      result.errors.push(`Only channel is supported currently (Shopify).`);
-      return result;
-    }
-
-    try {
-      await this.db.update(warehouses)
-        .set({ inventorySyncStatus: "syncing", updatedAt: new Date() })
-        .where(eq(warehouses.id, warehouseId));
-
-      const config = (wh.inventorySourceConfig as Record<string, any>) || {};
-      const channelId = config?.channelId;
-      if (!channelId) throw new Error(`No channelId configured for warehouse ${warehouseId}`);
-
-      const [conn] = await this.db.select()
-        .from(channelConnections)
-        .where(eq(channelConnections.channelId, channelId)).limit(1);
-
-      if (!conn?.shopDomain || !conn?.accessToken) {
-        throw new Error(`Shopify credentials missing for channel ${channelId}`);
+  async syncWarehouse(warehouseId: number): Promise<WarehouseInventorySyncResult> {
+    if (!Number.isSafeInteger(warehouseId) || warehouseId <= 0) throw new ValidationError("Invalid warehouse ID");
+    const source = this.externalImport;
+    if (!source) throw new ValidationError("External inventory import dependencies are not configured");
+    return source.withWarehouseLock(warehouseId, async () => {
+      const [warehouse] = await this.db.select().from(warehouses).where(eq(warehouses.id, warehouseId)).limit(1);
+      if (!warehouse) throw new ValidationError(`Warehouse ${warehouseId} not found`);
+      const result: WarehouseInventorySyncResult = { warehouseId, warehouseCode: warehouse.code, synced: 0, skipped: 0, errors: [] };
+      if (warehouse.inventorySourceType !== "channel") {
+        result.errors.push(`Warehouse ${warehouse.code} does not use a channel inventory source`);
+        return result;
       }
-
-      const shopifyLocationId = wh.shopifyLocationId;
-      const apiVersion = conn.apiVersion || "2024-01";
-      const items = new Map<string, number>();
-      let pageInfo: string | null = null;
-      let hasMore = true;
-
-      while (hasMore) {
-        const url: string = pageInfo
-          ? `https://${conn.shopDomain}/admin/api/${apiVersion}/inventory_levels.json?page_info=${pageInfo}&limit=250`
-          : `https://${conn.shopDomain}/admin/api/${apiVersion}/inventory_levels.json?location_ids=${shopifyLocationId}&limit=250`;
-
-        const response = await fetch(url, {
-          headers: {
-            "X-Shopify-Access-Token": conn.accessToken,
-            "Content-Type": "application/json",
-          },
-        });
-
-        if (!response.ok) throw new Error(`Shopify API error: ${response.status} ${response.statusText}`);
-
-        const data = await response.json();
-        const levels = data.inventory_levels || [];
-
-        for (const level of levels) {
-          items.set(String(level.inventory_item_id), level.available ?? 0);
-        }
-
-        const linkHeader: string | null = response.headers.get("Link");
-        if (linkHeader?.includes('rel="next"')) {
-          const match: RegExpMatchArray | null = linkHeader.match(/<[^>]*page_info=([^>&]*).*?>;\s*rel="next"/);
-          pageInfo = match?.[1] || null;
-          hasMore = !!pageInfo;
-        } else {
-          hasMore = false;
-        }
-      }
-
-      // Ensure a virtual location
-      const virtualCode = `${wh.code}-VIRTUAL`;
-      const [existingLoc] = await this.db.select()
-        .from(warehouseLocations)
-        .where(and(eq(warehouseLocations.warehouseId, warehouseId), eq(warehouseLocations.locationType, "3pl_virtual")))
-        .limit(1);
-
-      let virtualLocationId = existingLoc?.id;
-      if (!virtualLocationId) {
-        const [createdLoc] = await this.db.insert(warehouseLocations).values({
-          warehouseId,
-          code: virtualCode,
-          name: `${wh.code} Virtual Inventory`,
-          locationType: "3pl_virtual",
-          binType: "floor",
-          isPickable: 0,
-        }).returning();
-        virtualLocationId = createdLoc.id;
-      }
-
-      const inventoryItemIds = Array.from(items.keys());
-      if (inventoryItemIds.length > 0) {
-        const variants = await this.db.execute<{ id: number; shopify_inventory_item_id: string; }>(sql`
-          SELECT id, shopify_inventory_item_id FROM product_variants
-          WHERE shopify_inventory_item_id IN (${sql.join(inventoryItemIds.map(id => sql`${id}`), sql`, `)})
-        `);
-
-        const variantMap = new Map(variants.rows.map(v => [v.shopify_inventory_item_id, v.id]));
-
-        for (const [inventoryItemId, qty] of items) {
-          const variantId = variantMap.get(inventoryItemId);
-          if (!variantId) {
-            result.skipped++;
-            continue;
+      const config = warehouse.inventorySourceConfig as Record<string, unknown> | null;
+      try {
+        if (!config || typeof config !== "object" || Array.isArray(config)) throw new ValidationError("Invalid inventory source configuration");
+        // Complete provider validation before creating a location or applying any stock.
+        const snapshot = await source.read(config, warehouse.shopifyLocationId ?? null);
+        const variantIds = new Set<number>();
+        const externalIds = new Set<string>();
+        for (const item of snapshot.items) {
+          if (!Number.isSafeInteger(item.quantity) || item.quantity < 0 || !item.externalInventoryItemId
+            || externalIds.has(item.externalInventoryItemId)
+            || (item.productVariantId !== null && (!Number.isSafeInteger(item.productVariantId) || item.productVariantId <= 0 || variantIds.has(item.productVariantId)))) {
+            throw new ValidationError("External inventory observations contain invalid quantities or ambiguous identities");
           }
-
-          try {
-            const currentLevel = await this.storage.getInventoryLevelByLocationAndVariant(virtualLocationId, variantId);
-            const oldQty = currentLevel?.variantQty ?? 0;
-            const delta = qty - oldQty;
-
-            if (delta !== 0) {
-              await this.adjustInventory({
-                productVariantId: variantId,
-                warehouseLocationId: virtualLocationId,
-                qtyDelta: delta,
-                reason: `3PL sync (set to ${qty}, delta ${delta > 0 ? "+" : ""}${delta})`,
-                allowNegative: true,
-              });
+          externalIds.add(item.externalInventoryItemId);
+          if (item.productVariantId !== null) variantIds.add(item.productVariantId);
+          else { result.skipped++; result.errors.push(`Unmapped external inventory item ${item.externalInventoryItemId}`); }
+        }
+        const mapped = snapshot.items.filter((item) => item.productVariantId !== null)
+          .sort((a, b) => a.productVariantId! - b.productVariantId!);
+        const batchSize = 100; // Bound locks and transaction size; each committed batch is replay-safe.
+        for (let offset = 0; offset < mapped.length; offset += batchSize) {
+          const batch = mapped.slice(offset, offset + batchSize);
+          const effects: Array<() => Promise<void>> = [];
+          await this.db.transaction(async (tx) => {
+            const [currentWarehouse] = await tx.select().from(warehouses).where(eq(warehouses.id, warehouseId)).for("update");
+            if (!currentWarehouse || currentWarehouse.inventorySourceType !== "channel"
+              || JSON.stringify(currentWarehouse.inventorySourceConfig) !== JSON.stringify(config)
+              || currentWarehouse.shopifyLocationId !== warehouse.shopifyLocationId) {
+              throw new ValidationError("Warehouse inventory source changed during sync; retry from a fresh read");
             }
-            result.synced++;
-          } catch (err: any) {
-            result.errors.push(`Variant ${variantId}: ${err.message}`);
-          }
+            await source.validateSnapshot(tx, { ...snapshot, items: batch });
+            const locations = await tx.select().from(warehouseLocations).where(and(
+              eq(warehouseLocations.warehouseId, warehouseId), eq(warehouseLocations.locationType, "3pl_virtual"),
+            )).limit(2).for("update");
+            if (locations.length > 1) throw new ValidationError("Warehouse has multiple virtual inventory locations");
+            let locationId = locations[0]?.id;
+            if (!locationId) {
+              const [created] = await tx.insert(warehouseLocations).values({ warehouseId, code: `${warehouse.code}-VIRTUAL`,
+                name: `${warehouse.code} Virtual Inventory`, locationType: "3pl_virtual", binType: "floor", isPickable: 0 }).returning();
+              locationId = created.id;
+            }
+            const scoped = this.withTx(tx);
+            for (const item of batch) {
+              const variantId = item.productVariantId!;
+              const current = await this.storage.upsertInventoryLevel({ warehouseLocationId: locationId, productVariantId: variantId }, tx);
+              if (item.quantity < current.reservedQty) throw new ValidationError(`External quantity is below reserved stock for variant ${variantId}; review required`);
+              const delta = item.quantity - current.variantQty;
+              if (delta !== 0) await scoped.adjustInventory({ productVariantId: variantId, warehouseLocationId: locationId,
+                qtyDelta: delta, reason: `External inventory sync: channel ${snapshot.channelId}, connection ${snapshot.connectionId}, scope ${snapshot.externalLocationId}, item ${item.externalInventoryItemId}, target ${item.quantity}`,
+                deferUntilCommit: (effect) => effects.push(effect) });
+            }
+          }, { isolationLevel: "serializable" });
+          result.synced += batch.length;
+          for (const effect of effects) await effect();
         }
+      } catch (error) {
+        result.errors.push(error instanceof Error ? error.message : "External inventory sync failed");
       }
-
-      await this.db.update(warehouses)
-        .set({ inventorySyncStatus: "ok", lastInventorySyncAt: new Date(), updatedAt: new Date() })
-        .where(eq(warehouses.id, warehouseId));
-
-    } catch (err: any) {
-      await this.db.update(warehouses)
-        .set({ inventorySyncStatus: "error", updatedAt: new Date() })
-        .where(eq(warehouses.id, warehouseId));
-      result.errors.push(err.message);
-    }
-
-    return result;
+      const timestamp = source.clock();
+      await this.db.update(warehouses).set({ inventorySyncStatus: result.errors.length ? "error" : "ok",
+        ...(result.errors.length ? {} : { lastInventorySyncAt: timestamp }), updatedAt: timestamp }).where(eq(warehouses.id, warehouseId));
+      return result;
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -2132,7 +2064,8 @@ export class InventoryUseCases {
       txDb,
       this.storage,
       this.lotService,
-      this.cogsService
+      this.cogsService,
+      this.externalImport,
     );
     // Transaction-scoped clones must publish through the same dispatcher as
     // the root service. In particular, deferred post-commit adjustment effects

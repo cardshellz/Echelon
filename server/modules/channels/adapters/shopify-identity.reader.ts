@@ -17,6 +17,10 @@ const variantSchema = z.object({
   sku: z.string().nullable(),
 });
 export type ShopifyVariantIdentity = z.infer<typeof variantSchema>;
+const productSchema = z.object({
+  id: providerRestIdentitySchema, title: z.string(), body_html: z.string().nullable(),
+  variants: z.array(variantSchema),
+});
 
 const levelSchema = z.object({
   inventory_item_id: providerRestIdentitySchema,
@@ -60,6 +64,17 @@ export class ShopifyIdentityReader {
       throw new ChannelIdentityError("SHOPIFY_IDENTITY_RESPONSE_INVALID", "Shopify returned an invalid or different variant identity");
     }
     return parsed.data.variant;
+  }
+
+  async product(connection: ShopifyIdentityConnection, externalProductId: string) {
+    externalIdentitySchema.parse(externalProductId);
+    const response = await this.get(connection, `products/${externalProductId}.json`);
+    const parsed = z.object({ product: productSchema }).safeParse(await response.json());
+    if (!parsed.success || parsed.data.product.id !== externalProductId
+      || parsed.data.product.variants.some((variant) => variant.product_id !== externalProductId)) {
+      throw new ChannelIdentityError("SHOPIFY_PRODUCT_IDENTITY_INVALID", "Provider product identity is incomplete or inconsistent");
+    }
+    return parsed.data.product;
   }
 
   async inventory(connection: ShopifyIdentityConnection, locationId: string): Promise<Map<string, number>> {
