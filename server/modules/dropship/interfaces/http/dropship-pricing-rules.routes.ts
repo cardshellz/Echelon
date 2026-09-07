@@ -44,7 +44,7 @@ async function respond(res: Response, operation: () => Promise<unknown>): Promis
       const status = error.code === "DROPSHIP_AUTH_REQUIRED" ? 401 : error.code === "DROPSHIP_PRICING_NOT_ALLOWED" ? 403
         : ["DROPSHIP_STORE_CONNECTION_REQUIRED", "DROPSHIP_PRICING_REVIEW_NOT_FOUND"].includes(error.code) ? 404
           : ["DROPSHIP_PRICING_REVIEW_STALE", "DROPSHIP_IDEMPOTENCY_CONFLICT"].includes(error.code) ? 409
-            : ["DROPSHIP_PRICING_REVIEW_BLOCKED", "DROPSHIP_PRICING_REVIEW_TOO_LARGE"].includes(error.code) ? 422 : 500;
+            : ["DROPSHIP_PRICING_REVIEW_BLOCKED", "DROPSHIP_PRICING_REVIEW_TOO_LARGE", "DROPSHIP_CATALOG_TARGETS_TOO_LARGE"].includes(error.code) ? 422 : 500;
       console.warn(JSON.stringify({ code: error.code, message: "Pricing-rule request rejected.", context: error.context }));
       return res.status(status).json({ error: { code: error.code, message: error.message } });
     }

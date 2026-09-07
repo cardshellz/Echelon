@@ -7,6 +7,9 @@ on:
       - "package*.json"
       - "playwright.dropship-pricing.config.ts"
       - "test/browser/dropship-pricing-*.ts"
+      - "test/browser/dropship-content-*.ts"
+      - "test/browser/fixtures/dropship-content-harness.tsx"
+      - "server/modules/dropship/**"
       - "test/browser/fixtures/dropship-pricing-harness.tsx"
       - ".github/workflows/dropship-pricing.yml"
   workflow_dispatch:
