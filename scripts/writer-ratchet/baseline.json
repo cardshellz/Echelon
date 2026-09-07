@@ -478,6 +478,12 @@
   "inventory.location_replen_config": [
     "modules/inventory"
   ],
+  "inventory.lot_cost_contributions": [
+    "modules/inventory"
+  ],
+  "inventory.lot_cost_origins": [
+    "modules/inventory"
+  ],
   "inventory.planner_claim_simulation_runs": [
     "modules/inventory-planning"
   ],
@@ -691,6 +697,9 @@
     "modules/procurement"
   ],
   "procurement.ap_payments": [
+    "modules/procurement"
+  ],
+  "procurement.cost_source_revisions": [
     "modules/procurement"
   ],
   "procurement.demand_event_lines": [
