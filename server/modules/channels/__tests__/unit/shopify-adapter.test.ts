@@ -8,6 +8,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ShopifyAdapter } from "../../adapters/shopify.adapter";
+import { PgDialect } from "drizzle-orm/pg-core";
 
 // ---------------------------------------------------------------------------
 // Mock DB that returns credentials
@@ -29,7 +30,7 @@ function createMockDb(creds?: any) {
   });
 
   return {
-    select: vi.fn(() => chain([creds ?? defaultCreds])),
+    select: vi.fn(() => chain(Array.isArray(creds) ? creds : [creds ?? defaultCreds])),
     insert: vi.fn(() => chain([])),
     update: vi.fn(() => chain([])),
     delete: vi.fn(() => chain([])),
@@ -58,6 +59,69 @@ describe("Shopify Adapter", () => {
   // -----------------------------------------------------------------------
   // Adapter identity
   // -----------------------------------------------------------------------
+
+  describe("connection selection", () => {
+    it("rejects ambiguous channels before any provider request", async () => {
+      const ambiguousDb = createMockDb([
+        { shopDomain: "first.myshopify.com", accessToken: "first" },
+        { shopDomain: "second.myshopify.com", accessToken: "second" },
+      ]);
+      const scopedAdapter = new ShopifyAdapter(ambiguousDb);
+      globalThis.fetch = vi.fn();
+
+      await expect(scopedAdapter.pushPricing(1, [])).rejects.toMatchObject({
+        code: "SHOPIFY_CONNECTION_AMBIGUOUS",
+      });
+      expect(ambiguousDb.select.mock.results[0].value.limit).toHaveBeenCalledWith(2);
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+    });
+
+    it.each([0, -1, 1.5, NaN, Number.MAX_SAFE_INTEGER + 1])(
+      "rejects invalid channel identifier %s before querying credentials",
+      async (channelId) => {
+        globalThis.fetch = vi.fn();
+        await expect(adapter.pushPricing(channelId, [])).rejects.toMatchObject({
+          code: "SHOPIFY_CONNECTION_SCOPE_INVALID",
+        });
+        expect(db.select).not.toHaveBeenCalled();
+        expect(globalThis.fetch).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([0, -1, 1.5, NaN, Number.MAX_SAFE_INTEGER + 1])(
+      "rejects invalid connection identifier %s before querying credentials",
+      async (channelConnectionId) => {
+        globalThis.fetch = vi.fn();
+        await expect(adapter.readInventory(1, [], {
+          authority: "canonical_outbox",
+          channelConnectionId,
+          providerScopeType: "location",
+          externalScopeId: "98765",
+        })).rejects.toMatchObject({ code: "SHOPIFY_CONNECTION_SCOPE_INVALID" });
+        expect(db.select).not.toHaveBeenCalled();
+        expect(globalThis.fetch).not.toHaveBeenCalled();
+      },
+    );
+
+    it("does not fall back when the exact channel connection is absent", async () => {
+      const emptyDb = createMockDb([]);
+      const scopedAdapter = new ShopifyAdapter(emptyDb);
+      globalThis.fetch = vi.fn();
+      await expect(scopedAdapter.readInventory(1, [], {
+        authority: "canonical_outbox",
+        channelConnectionId: 17,
+        providerScopeType: "location",
+        externalScopeId: "98765",
+      })).rejects.toThrow("No Shopify credentials configured for channel 1 connection 17");
+
+      const predicate = emptyDb.select.mock.results[0].value.where.mock.calls[0][0];
+      const query = new PgDialect().sqlToQuery(predicate);
+      expect(query.sql).toContain('"channel_connections"."id" = $1');
+      expect(query.sql).toContain('"channel_connections"."channel_id" = $2');
+      expect(query.params).toEqual([17, 1]);
+      expect(globalThis.fetch).not.toHaveBeenCalled();
+    });
+  });
 
   describe("adapter identity", () => {
     it("should have correct adapter name", () => {

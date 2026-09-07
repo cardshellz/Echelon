@@ -617,7 +617,16 @@ export class ShopifyAdapter implements IChannelAdapter {
     channelId: number,
     channelConnectionId?: number,
   ): Promise<ShopifyCredentials> {
-    const [conn] = await this.db
+    if (!Number.isSafeInteger(channelId) || channelId <= 0
+      || (channelConnectionId !== undefined
+        && (!Number.isSafeInteger(channelConnectionId) || channelConnectionId <= 0))) {
+      throw new InventoryPublicationConfigurationError(
+        "SHOPIFY_CONNECTION_SCOPE_INVALID",
+        "Shopify channel and connection identifiers must be positive safe integers",
+      );
+    }
+
+    const connections = await this.db
       .select()
       .from(channelConnections)
       .where(channelConnectionId === undefined
@@ -626,7 +635,17 @@ export class ShopifyAdapter implements IChannelAdapter {
           eq(channelConnections.id, channelConnectionId),
           eq(channelConnections.channelId, channelId),
         ))
-      .limit(1);
+      .limit(2);
+
+    // Legacy callers may omit the connection only when the channel is unambiguous.
+    // Never let row order select a store account for a read or a write.
+    if (connections.length > 1) {
+      throw new InventoryPublicationConfigurationError(
+        "SHOPIFY_CONNECTION_AMBIGUOUS",
+        `Channel ${channelId} requires an explicit Shopify connection`,
+      );
+    }
+    const [conn] = connections;
 
     if (!conn?.shopDomain || !conn?.accessToken) {
       throw new Error(
