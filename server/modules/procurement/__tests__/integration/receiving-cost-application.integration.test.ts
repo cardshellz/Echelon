@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { createReceiptCostRecoveryRepository } from "../../receipt-cost-recovery.repository";
 import { runReceiptCostRecoveryBatch } from "../../receipt-cost-recovery.worker";
-import { recoveryRetryOutcome } from "../../receipt-cost-recovery.domain";
+import { receiptCostRecoveryOutcome, recoveryRetryOutcome } from "../../receipt-cost-recovery.domain";
+import { processReceiptCostRequests, type ReceiptCostQueueResult } from "../../receipt-cost-queue.service";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { config } from "dotenv";
@@ -407,6 +408,68 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     // worker captured an earlier transient result.
     await repository.complete(claim, recoveryRetryOutcome(claim, "TRANSIENT", recoveryTime()), recoveryTime());
     expect((await pool.query("SELECT state FROM procurement.receipt_cost_recovery_jobs")).rows[0].state).toBe("applied");
+  });
+
+  it.each(["applied", "review_required"] as const)("preserves concurrent manual %s evidence after an automatic financial rollback", async (terminalState) => {
+    const ids = await failedRecoveryReceipt();
+    const repository = await prepareRecovery();
+    const claim = (await repository.claimNext({ now: recoveryTime(), leaseMs: 300_000, leaseToken: randomUUID() }))!;
+    let signalRollback!: (error: unknown) => void;
+    let releaseAutomatic!: () => void;
+    const rolledBack = new Promise<unknown>((resolveRollback) => { signalRollback = resolveRollback; });
+    const resumeAutomatic = new Promise<void>((resolveResume) => { releaseAutomatic = resolveResume; });
+    let holdFirstRollback = true;
+    type FinancialTransaction = Parameters<Parameters<typeof database.transaction>[0]>[0];
+    const observedDatabase = {
+      execute: database.execute.bind(database),
+      transaction: async <T>(work: (tx: FinancialTransaction) => Promise<T>): Promise<T> => {
+        try { return await database.transaction(work); }
+        catch (error) {
+          if (holdFirstRollback) {
+            holdFirstRollback = false;
+            // The real AP audit failed and PostgreSQL released its graph lock.
+            // Hold only the caller so a manual transaction can commit before
+            // automatic recovery begins its separate failure-log transaction.
+            signalRollback(error);
+            await resumeAutomatic;
+          }
+          throw error;
+        }
+      },
+    };
+    let automatic: Promise<ReceiptCostQueueResult> | undefined;
+    try {
+      await failAudit(async () => {
+        automatic = processReceiptCostRequests(observedDatabase, ids.receiptId,
+          { reconcilePurchaseOrderLine: (id, tx, actor) => reconcile(id, tx, actor) },
+          "system:receipt-cost-recovery", recoveryTime, claim.requestId);
+        const failure = await Promise.race([rolledBack, automatic.then(() => { throw new Error("Expected the injected AP audit rollback"); })]);
+        expect(failure).toBeInstanceOf(Error);
+        expect((failure as Error).message).toMatch(/cost audit injected AP audit failure/);
+      });
+      expect((await pool.query("SELECT count(*)::int AS count FROM inventory.cost_applications")).rows[0].count).toBe(0);
+      await database.transaction(async (tx) => {
+        await lockInventoryCostGraph(tx);
+        await tx.execute(sql`UPDATE procurement.vendor_invoices SET status='approved' WHERE id=71`);
+        if (terminalState === "review_required") await tx.execute(sql`UPDATE procurement.vendor_invoice_lines SET cost_component_evidence=NULL WHERE id=72`);
+      });
+      const manual = await receiving.retryCosts(ids.receiptId, actorId);
+      expect(manual.state).toBe(terminalState);
+      const financialState = await state();
+      const applications = (await pool.query("SELECT * FROM inventory.cost_applications ORDER BY id")).rows;
+      releaseAutomatic();
+      const result = await automatic!;
+      expect(result).toEqual(manual);
+      expect((await pool.query("SELECT state FROM procurement.receipt_cost_attempts ORDER BY id")).rows)
+        .toEqual([{ state: "retry_required" }, { state: terminalState }]);
+      expect(await state()).toEqual(financialState);
+      expect((await pool.query("SELECT * FROM inventory.cost_applications ORDER BY id")).rows).toEqual(applications);
+      expect(await repository.complete(claim, receiptCostRecoveryOutcome(claim, result, recoveryTime()), recoveryTime())).toBe(terminalState);
+      expect(await runReceiptCostRecoveryBatch({ repository, receiving, clock: recoveryTime, leaseToken: randomUUID, logger: console })).toMatchObject({ claimed: 0 });
+    } finally {
+      releaseAutomatic();
+      await automatic;
+    }
   });
 
   it("grants a due request to only one simultaneous claimant", async () => {
