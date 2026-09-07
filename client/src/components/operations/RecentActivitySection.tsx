@@ -16,11 +16,13 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import { ChevronDown, ChevronRight } from "lucide-react";
+import { InventoryTransactionQuantity } from "@/components/inventory/InventoryTransactionQuantity";
 
 interface ActivityItem {
   id: number;
   transactionType: string;
   variantQtyDelta: number;
+  shipmentQuantityEvidence?: unknown;
   variantQtyBefore: number | null;
   variantQtyAfter: number | null;
   sourceState: string | null;
@@ -185,9 +187,7 @@ export default function RecentActivitySection({ locationId, variantId, onClearLo
                       )}
                     </div>
                     <div className="text-right shrink-0">
-                      <div className={`font-mono text-sm font-medium ${item.variantQtyDelta > 0 ? "text-green-600" : item.variantQtyDelta < 0 ? "text-red-600" : ""}`}>
-                        {item.variantQtyDelta > 0 ? "+" : ""}{item.variantQtyDelta}
-                      </div>
+                      <InventoryTransactionQuantity {...item} />
                       <div className="text-[10px] text-muted-foreground">{formatTime(item.createdAt)}</div>
                       {item.userId && (
                         <div className="text-[10px] text-muted-foreground">{item.userId}</div>

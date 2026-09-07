@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useDebounce } from "@/hooks/use-debounce";
 import { playSoundWithHaptic } from "@/lib/sounds";
+import { describeStaleInventoryTransaction } from "@/lib/inventory-transaction-quantity";
 import {
   ClipboardList,
   Plus,
@@ -2402,7 +2403,7 @@ export default function CycleCounts() {
                               <span className="font-medium">Stale count:</span> Inventory changed at this location since the count.
                               {ri.staleTransactions.length > 0 && (
                                 <span className="ml-1">
-                                  ({ri.staleTransactions.map(t => `${t.type} ${t.qty > 0 ? "+" : ""}${t.qty}`).join(", ")})
+                                  ({ri.staleTransactions.map(describeStaleInventoryTransaction).join(", ")})
                                 </span>
                               )}
                               <span className="block mt-0.5">Recount recommended.</span>
@@ -2799,7 +2800,7 @@ export default function CycleCounts() {
                                   {ri && ri.staleTransactions.length > 0 && (
                                     <div className="text-xs text-amber-600 mt-0.5">
                                       ⚠️ {ri.staleTransactions.length} transaction{ri.staleTransactions.length > 1 ? "s" : ""} since count
-                                      ({ri.staleTransactions.map(t => `${t.type} ${t.qty > 0 ? "+" : ""}${t.qty}`).join(", ")})
+                                      ({ri.staleTransactions.map(describeStaleInventoryTransaction).join(", ")})
                                     </div>
                                   )}
                                 </div>

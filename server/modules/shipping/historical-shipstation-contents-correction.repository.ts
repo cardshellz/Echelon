@@ -1,4 +1,9 @@
 import type { Pool, PoolClient } from "pg";
+import { sql } from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
+
+import { interpretInventoryShipmentQuantity } from "@shared/inventory/shipment-quantity";
+import { shipmentQuantityEvidenceProjection } from "../inventory/infrastructure/shipment-quantity-evidence.sql";
 
 import {
   HISTORICAL_SHIPSTATION_CONTENTS_REVIEW_RULE,
@@ -185,7 +190,7 @@ interface InventoryTransactionRow {
   readonly order_item_id: unknown;
   readonly product_variant_id: unknown;
   readonly from_location_id: unknown;
-  readonly variant_qty_delta: unknown;
+  readonly shipment_quantity_evidence: unknown;
 }
 
 interface CatalogVariantRow {
@@ -311,39 +316,50 @@ implements HistoricalShipStationContentsCorrectionRepository {
       });
 
       const shipmentIds = [...new Set(wmsRows.map((line) => line.shipmentId))];
+      // Compile the projection together with its caller so parameter numbering
+      // remains correct without opening a second connection or snapshot.
+      const transactionQuery = new PgDialect().sqlToQuery(sql`
+        SELECT inventory_txn.id, inventory_txn.shipment_id,
+               inventory_txn.shipment_item_id, inventory_txn.order_item_id,
+               inventory_txn.product_variant_id, inventory_txn.from_location_id,
+               ${shipmentQuantityEvidenceProjection(sql.raw("inventory_txn"))}
+                 AS shipment_quantity_evidence
+        FROM inventory.inventory_transactions AS inventory_txn
+        WHERE inventory_txn.transaction_type = 'ship'
+          AND inventory_txn.voided_at IS NULL
+          AND inventory_txn.shipment_id = ANY(${sql.param(shipmentIds)}::integer[])
+        ORDER BY inventory_txn.id
+      `);
       const transactionResult = shipmentIds.length === 0
         ? { rows: [] as InventoryTransactionRow[] }
         : await client.query<InventoryTransactionRow>(
-            `SELECT inventory_txn.id, inventory_txn.shipment_id,
-                    inventory_txn.shipment_item_id, inventory_txn.order_item_id,
-                    inventory_txn.product_variant_id, inventory_txn.from_location_id,
-                    inventory_txn.variant_qty_delta
-             FROM inventory.inventory_transactions AS inventory_txn
-             WHERE inventory_txn.transaction_type = 'ship'
-               AND inventory_txn.voided_at IS NULL
-               AND inventory_txn.shipment_id = ANY($1::integer[])
-             ORDER BY inventory_txn.id`,
-            [shipmentIds],
+            transactionQuery.sql,
+            transactionQuery.params,
           );
-      const transactions = transactionResult.rows.map((row) => Object.freeze({
-        id: positiveInteger(row.id, "inventoryTransactionId"),
-        shipmentId: positiveInteger(row.shipment_id, "inventory shipmentId"),
-        shipmentItemId: nullablePositiveInteger(row.shipment_item_id, "inventory shipmentItemId"),
-        orderItemId: nullablePositiveInteger(row.order_item_id, "inventory orderItemId"),
-        productVariantId: nullablePositiveInteger(row.product_variant_id, "inventory productVariantId"),
-        fromLocationId: nullablePositiveInteger(row.from_location_id, "inventory fromLocationId"),
-        quantity: (() => {
-          const delta = Number(row.variant_qty_delta);
-          if (!Number.isInteger(delta) || delta >= 0 || delta < -POSTGRES_INTEGER_MAX) {
-            throw new HistoricalShipStationContentsCorrectionRepositoryError(
-              "INVALID_DATABASE_EVIDENCE",
-              "Active inventory ship transaction has an invalid quantity delta",
-              Object.freeze({ inventoryTransactionId: row.id }),
-            );
-          }
-          return Math.abs(delta);
-        })(),
-      }));
+      const transactions = transactionResult.rows.map((row) => {
+        const quantity = interpretInventoryShipmentQuantity(row.shipment_quantity_evidence);
+        if (quantity.status !== "verified") {
+          throw new HistoricalShipStationContentsCorrectionRepositoryError(
+            "INVALID_DATABASE_EVIDENCE",
+            "Active inventory ship transaction has invalid shipment quantity evidence",
+            Object.freeze({
+              inventoryTransactionId: row.id,
+              evidenceCode: quantity.status === "invalid" ? quantity.code : "NOT_SHIPMENT",
+              reason: quantity.status === "invalid" ? quantity.reason : "Expected an active shipment posting",
+            }),
+          );
+        }
+        return Object.freeze({
+          id: positiveInteger(row.id, "inventoryTransactionId"),
+          shipmentId: positiveInteger(row.shipment_id, "inventory shipmentId"),
+          shipmentItemId: nullablePositiveInteger(row.shipment_item_id, "inventory shipmentItemId"),
+          orderItemId: nullablePositiveInteger(row.order_item_id, "inventory orderItemId"),
+          productVariantId: nullablePositiveInteger(row.product_variant_id, "inventory productVariantId"),
+          fromLocationId: nullablePositiveInteger(row.from_location_id, "inventory fromLocationId"),
+          quantity: quantity.quantity,
+          quantitySource: quantity.source,
+        });
+      });
 
       const providerSkus = input.providerLines?.map((line) => line.sku.toUpperCase()) ?? [];
       const variantIds = [...new Set(wmsRows
@@ -410,6 +426,7 @@ implements HistoricalShipStationContentsCorrectionRepository {
               productVariantId: entry.productVariantId,
               fromLocationId: entry.fromLocationId,
               quantity: entry.quantity,
+              quantitySource: entry.quantitySource,
               evidenceKind: entry.evidenceKind,
             })),
           });

@@ -149,6 +149,18 @@ function shipStation(overrides: Record<string, unknown> = {}) {
   } as any;
 }
 
+function originalInventoryPosting(canonical: boolean) {
+  const identity = { orderId: 42, orderItemId: 101, shipmentId: 10,
+    shipmentItemId: 501, productVariantId: 201, fromLocationId: 301 };
+  return { transactionId: 600, transactionType: "ship", ...identity,
+    variantQtyDelta: canonical ? 0 : -1, reservedQtyDelta: 0,
+    referenceType: canonical ? "availability_claim_dispatch" : null,
+    sourceState: "picked", targetState: "shipped",
+    receipt: canonical ? { ...identity, id: "1", quantity: "1", warehouseId: 1,
+      physicalShipmentId: null, physicalShipmentItemId: null,
+      movementQuantity: "1", invalidMovementCount: "0" } : null };
+}
+
 describe("ShipStation unmapped physical remediation", () => {
   it("loads current ShipStation and WMS evidence before reship adoption", async () => {
     const db = {
@@ -1027,7 +1039,7 @@ describe("ShipStation unmapped physical remediation", () => {
     expect(allSql).toContain("shipstation_original_identity_restored");
   });
 
-  it("records a packing omission against the exact original package line without new inventory authority", async () => {
+  it("records a legacy omission from exact original posting evidence without new inventory authority", async () => {
     const calls: string[] = [];
     const db: any = {
       transaction: async (work: (tx: any) => Promise<unknown>) => work(db),
@@ -1048,7 +1060,7 @@ describe("ShipStation unmapped physical remediation", () => {
             source_item_purpose: "customer_fulfillment",
             source_shipment_status: "shipped",
             source_candidate_count: 1,
-            source_inventory_shipped_quantity: 1,
+            source_inventory_ship_evidence: [originalInventoryPosting(false)],
             existing_correction_quantity: 0,
           }] };
         }
@@ -1141,7 +1153,14 @@ describe("ShipStation unmapped physical remediation", () => {
     expect(allSql).toContain('"correctionForShipmentItemId":501');
   });
 
-  it("refuses a packing omission unless the original inventory shipment is fully posted", async () => {
+  it.each([
+    { evidence: [], message: "SKU SKU-A has no complete original inventory shipment posting" },
+    { evidence: [originalInventoryPosting(true)], message: "has 1 recorded canonical shipped units; omission correction is not yet supported" },
+    { evidence: [{ ...originalInventoryPosting(true), receipt: null }], message: "Canonical dispatch marker and receipt must both be present" },
+    { evidence: [{ ...originalInventoryPosting(true), variantQtyDelta: -1 }], message: "without another on-hand" },
+    { evidence: [originalInventoryPosting(true), originalInventoryPosting(false)], message: "cannot be combined" },
+    { evidence: [{ ...originalInventoryPosting(false), shipmentItemId: 999 }], message: "another source identity" },
+  ])("rejects unproven original shipment evidence before any adoption ($message)", async ({ evidence, message }) => {
     const db: any = {
       execute: vi.fn(async (query: any) => {
         const text = queryText(query);
@@ -1159,7 +1178,7 @@ describe("ShipStation unmapped physical remediation", () => {
             source_item_purpose: "customer_fulfillment",
             source_shipment_status: "shipped",
             source_candidate_count: 1,
-            source_inventory_shipped_quantity: 0,
+            source_inventory_ship_evidence: evidence,
             existing_correction_quantity: 0,
           }] };
         }
@@ -1170,7 +1189,9 @@ describe("ShipStation unmapped physical remediation", () => {
       }),
     };
 
-    await expect(adoptShipStationUnmappedPhysicalAsReship(db, shipStation(), {
+    const provider = shipStation();
+    const fulfillmentAuthority = { ensureLegacyShipment: vi.fn() };
+    await expect(adoptShipStationUnmappedPhysicalAsReship(db, provider, {
       exceptionId: 77,
       operator: "ops:test",
       originalShipmentId: 10,
@@ -1181,7 +1202,9 @@ describe("ShipStation unmapped physical remediation", () => {
         orderItemId: 101,
         quantity: 1,
       }],
-    })).rejects.toThrow("SKU SKU-A has no complete original inventory shipment posting");
+    }, fulfillmentAuthority as any)).rejects.toThrow(message);
+    expect(fulfillmentAuthority.ensureLegacyShipment).not.toHaveBeenCalled();
+    expect(provider.processManualShipmentNotification).not.toHaveBeenCalled();
   });
   it("records an off-order catalog item as a concession without order-line authority", async () => {
     const calls: string[] = [];

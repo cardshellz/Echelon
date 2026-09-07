@@ -23,6 +23,8 @@ import {
 } from "lucide-react";
 import { format, subDays } from "date-fns";
 import { cn } from "@/lib/utils";
+import { InventoryTransactionQuantity } from "@/components/inventory/InventoryTransactionQuantity";
+import { shipmentQuantityCsvFields } from "@/lib/inventory-transaction-quantity";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -65,6 +67,7 @@ interface InventoryTransaction {
   transactionType: string;
   reasonId: number | null;
   variantQtyDelta: number;
+  shipmentQuantityEvidence?: unknown;
   variantQtyBefore: number | null;
   variantQtyAfter: number | null;
   baseQtyDelta: number;
@@ -152,6 +155,7 @@ export default function InventoryHistory() {
       from_location: tx.fromLocation?.code || "",
       to_location: tx.toLocation?.code || "",
       qty_delta: tx.variantQtyDelta,
+      ...shipmentQuantityCsvFields(tx),
       qty_before: tx.variantQtyBefore ?? "",
       qty_after: tx.variantQtyAfter ?? "",
       source_state: tx.sourceState || "",
@@ -350,13 +354,7 @@ export default function InventoryHistory() {
                             </div>
                             <span className="text-sm font-medium">{config.label}</span>
                           </div>
-                          <span className={cn(
-                            "font-mono font-bold text-sm",
-                            tx.variantQtyDelta > 0 ? "text-green-600" : 
-                            tx.variantQtyDelta < 0 ? "text-red-600" : "text-muted-foreground"
-                          )}>
-                            {tx.variantQtyDelta > 0 ? "+" : ""}{tx.variantQtyDelta}
-                          </span>
+                          <InventoryTransactionQuantity {...tx} />
                         </div>
                         <div className="space-y-1">
                           <div className="font-mono text-sm text-primary">{tx.product?.baseSku || "-"}</div>
@@ -400,7 +398,7 @@ export default function InventoryHistory() {
                       <TableHead>Item</TableHead>
                       <TableHead>Location</TableHead>
                       <TableHead className="w-32">State Change</TableHead>
-                      <TableHead className="w-20 text-right">Qty</TableHead>
+                      <TableHead className="w-36 text-right">Quantity / On-hand Δ</TableHead>
                       <TableHead className="w-28 text-right">Before / After</TableHead>
                       <TableHead>Reference</TableHead>
                       <TableHead>User</TableHead>
@@ -466,13 +464,7 @@ export default function InventoryHistory() {
                               )}
                             </TableCell>
                             <TableCell className="text-right">
-                              <span className={cn(
-                                "font-mono font-medium",
-                                tx.variantQtyDelta > 0 ? "text-green-600" :
-                                tx.variantQtyDelta < 0 ? "text-red-600" : "text-muted-foreground"
-                              )}>
-                                {tx.variantQtyDelta > 0 ? "+" : ""}{tx.variantQtyDelta}
-                              </span>
+                              <InventoryTransactionQuantity {...tx} />
                             </TableCell>
                             <TableCell className="text-right">
                               {tx.variantQtyBefore != null && tx.variantQtyAfter != null ? (

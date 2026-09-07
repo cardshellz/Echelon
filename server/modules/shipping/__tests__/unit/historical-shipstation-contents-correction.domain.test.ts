@@ -49,6 +49,17 @@ function facts(
   };
 }
 
+function canonicalLine(): HistoricalShipStationContentsCorrectionFacts["wmsLines"][number] {
+  const line = facts().wmsLines[0];
+  return {
+    ...line,
+    inventoryShipTransactions: [{
+      ...line.inventoryShipTransactions[0],
+      quantitySource: "canonical_dispatch_receipt",
+    }],
+  };
+}
+
 describe("historical ShipStation contents correction planning", () => {
   it("plans an exact inventory restoration when WMS over-recorded the provider package", () => {
     const plan = planHistoricalShipStationContentsCorrection(facts());
@@ -148,6 +159,132 @@ describe("historical ShipStation contents correction planning", () => {
         restorations: [],
       }],
     });
+  });
+
+  it("returns an exact no-op for matching canonical receipt quantities, not a false zero shipment", () => {
+    const plan = planHistoricalShipStationContentsCorrection(facts({
+      providerLines: [{ sku: "SKU-A", quantity: 2 }],
+      wmsLines: [canonicalLine()],
+    }));
+
+    expect(plan).toMatchObject({
+      evidenceComplete: true,
+      packageLineChangeRequired: false,
+      inventoryPostingRequired: false,
+      blockers: [],
+      lines: [{
+        recordedInventoryQuantity: 2,
+        inventoryQuantityDelta: 0,
+        inventoryAction: "none",
+        packageLineAdjustments: [],
+        restorations: [],
+      }],
+    });
+  });
+
+  it.each([0, 1, 3])("blocks canonical correction at provider quantity %s without proposing package edits or restoration", (quantity) => {
+    const plan = planHistoricalShipStationContentsCorrection(facts({
+      providerLines: quantity === 0 ? [] : [{ sku: "SKU-A", quantity }],
+      wmsLines: [canonicalLine()],
+    }));
+
+    expect(plan).toMatchObject({
+      evidenceComplete: false,
+      lines: [{
+        recordedInventoryQuantity: 2,
+        inventoryQuantityDelta: quantity - 2,
+        inventoryAction: "unknown",
+        packageLineAdjustments: [],
+        restorations: [],
+      }],
+    });
+    expect(plan.blockers.map((entry) => entry.code)).toEqual(["canonical_claim_correction_required"]);
+  });
+
+  it.each([1, 2, 3, 5])("does not invent retention/restoration authority for mixed legacy and canonical SKU quantities at %s", (quantity) => {
+    const legacy = facts().wmsLines[0];
+    const plan = planHistoricalShipStationContentsCorrection(facts({
+      providerLines: [{ sku: "SKU-A", quantity }],
+      wmsLines: [
+        {
+          ...legacy,
+          wmsShipmentItemId: 702,
+          inventoryShipTransactions: [{ ...legacy.inventoryShipTransactions[0], inventoryTransactionId: 402 }],
+        },
+        canonicalLine(),
+      ],
+    }));
+
+    expect(plan.evidenceComplete).toBe(false);
+    expect(plan.lines[0]).toMatchObject({
+      wmsQuantity: 4,
+      recordedInventoryQuantity: 4,
+      inventoryQuantityDelta: quantity - 4,
+      inventoryAction: "unknown",
+      packageLineAdjustments: [],
+      restorations: [],
+    });
+    expect(plan.blockers.map((entry) => entry.code)).toEqual(["canonical_claim_correction_required"]);
+  });
+
+  it("reports verified canonical units when the WMS line quantity disagrees without proposing a debit", () => {
+    const plan = planHistoricalShipStationContentsCorrection(facts({
+      providerLines: [{ sku: "SKU-A", quantity: 2 }],
+      wmsLines: [{ ...canonicalLine(), quantity: 3 }],
+    }));
+
+    expect(plan.lines[0]).toMatchObject({
+      wmsQuantity: 3,
+      recordedInventoryQuantity: 2,
+      inventoryQuantityDelta: 0,
+      packageQuantityDelta: -1,
+      inventoryAction: "unknown",
+      packageLineAdjustments: [],
+      restorations: [],
+    });
+    expect(plan.blockers.map((entry) => entry.code)).toEqual([
+      "canonical_claim_correction_required", "inventory_ship_evidence_mismatch",
+    ]);
+  });
+
+  it("blocks ambiguous canonical lineage rather than falling back to legacy correction", () => {
+    const canonical = canonicalLine();
+    const plan = planHistoricalShipStationContentsCorrection(facts({
+      wmsLines: [{
+        ...canonical,
+        inventoryShipTransactions: [
+          ...canonical.inventoryShipTransactions,
+          { ...facts().wmsLines[0].inventoryShipTransactions[0], inventoryTransactionId: 402 },
+        ],
+      }],
+    }));
+
+    expect(plan.lines[0]).toMatchObject({
+      recordedInventoryQuantity: null,
+      inventoryQuantityDelta: null,
+      inventoryAction: "unknown",
+      packageLineAdjustments: [],
+      restorations: [],
+    });
+    expect(plan.blockers.map((entry) => entry.code)).toEqual([
+      "canonical_claim_correction_required", "inventory_ship_evidence_ambiguous",
+    ]);
+  });
+
+  it("preserves legacy restoration behavior when the legacy quantity source is explicit", () => {
+    const legacy = facts().wmsLines[0];
+    const implicit = planHistoricalShipStationContentsCorrection(facts());
+    const explicit = planHistoricalShipStationContentsCorrection(facts({
+      wmsLines: [{
+        ...legacy,
+        inventoryShipTransactions: [{
+          ...legacy.inventoryShipTransactions[0], quantitySource: "legacy_on_hand_delta",
+        }],
+      }],
+    }));
+
+    expect(explicit.lines).toEqual(implicit.lines);
+    expect(explicit.blockers).toEqual(implicit.blockers);
   });
 
   it("does not invent a catalog identity for an unmatched provider SKU", () => {
