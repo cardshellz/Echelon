@@ -28,6 +28,8 @@ import { startOmsFlowReconciliationScheduler } from "./modules/oms/oms-flow-reco
 import { startOmsOpsAlertScheduler } from "./modules/oms/oms-ops-alert.service";
 import { startControlTowerProjectionScheduler } from "./modules/operations/control-tower-v2.scheduler";
 import { startPoEmailOutboxWorker } from "./modules/procurement/po-email-outbox.worker";
+import { startReceiptCostRecoveryWorker } from "./modules/procurement/receipt-cost-recovery.worker";
+import { createReceiptCostRecoveryRepository } from "./modules/procurement/receipt-cost-recovery.repository";
 import { startVariantAvailabilitySyncWorker } from "./modules/channels/variant-availability-sync.worker";
 import { startInventoryPublicationOutboxWorker } from "./modules/inventory-planning/application/inventory-publication-outbox.worker";
 import { startFinancialCommandRetentionWorker } from "./platform/commands/financial-command-retention.worker";
@@ -840,6 +842,9 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
       } else {
         logSchedulerDisabled("scheduler", "PO email outbox worker", "PO_EMAIL_OUTBOX_WORKER_DISABLED");
       }
+
+      const receiptCostRecovery = startReceiptCostRecoveryWorker({ repository: createReceiptCostRecoveryRepository(dbPool), receiving: services.receiving });
+      if (receiptCostRecovery) httpServer.once("close", () => receiptCostRecovery.stop());
 
       if (!schedulersDisabled("FINANCIAL_COMMAND_RETENTION_WORKER_DISABLED")) {
         startFinancialCommandRetentionWorker();

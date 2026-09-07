@@ -1,4 +1,7 @@
 import { randomUUID } from "node:crypto";
+import { createReceiptCostRecoveryRepository } from "../../receipt-cost-recovery.repository";
+import { runReceiptCostRecoveryBatch } from "../../receipt-cost-recovery.worker";
+import { recoveryRetryOutcome } from "../../receipt-cost-recovery.domain";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { config } from "dotenv";
@@ -74,6 +77,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
         reason VARCHAR(100), created_at TIMESTAMP NOT NULL DEFAULT NOW()
       )`);
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/222_procurement_cost_evidence.sql"), "utf8"));
+    await pool.query(readFileSync(resolve(process.cwd(), "migrations/231_receipt_cost_recovery.sql"), "utf8"));
     // The log is runtime DDL in server/db.ts:997, with money types aligned by migration0576.
     if (!(await pool.query("SELECT to_regclass('public.audit_events') AS relation")).rows[0].relation) {
       await pool.query(fixtureTable(schema.auditEvents)); ownsAudit = true;
@@ -357,6 +361,125 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     const applicationCount = (await pool.query("SELECT count(*)::int AS count FROM inventory.cost_applications")).rows[0].count;
     await receiving.retryCosts(ids.receiptId, actorId);
     expect((await pool.query("SELECT count(*)::int AS count FROM inventory.cost_applications")).rows[0].count).toBe(applicationCount);
+  });
+
+  async function failedRecoveryReceipt() {
+    const ids = await prepareReceipt();
+    await failAudit(async () => {
+      expect((await receiving.close(ids.receiptId, actorId)).costReconciliation.state).toBe("retry_required");
+    });
+    return ids;
+  }
+  const recoveryTime = () => new Date(NOW.getTime() + 180_000);
+  function recoveryRepository() { return createReceiptCostRecoveryRepository(pool); }
+  async function prepareRecovery() {
+    const repository = recoveryRepository();
+    await repository.prepare({ now: recoveryTime(), maxAttempts: 5, graceMs: 120_000, limit: 10 });
+    return repository;
+  }
+
+  it("automatically recovers the actual rolled-back AP owner without receiving stock twice", async () => {
+    await failedRecoveryReceipt();
+    const dependencies = { repository: recoveryRepository(), receiving, clock: recoveryTime, leaseToken: randomUUID, logger: console };
+    expect(await runReceiptCostRecoveryBatch(dependencies)).toMatchObject({ claimed: 1, applied: 1 });
+    expect((await pool.query("SELECT state,attempt_count FROM procurement.receipt_cost_recovery_jobs")).rows).toEqual([{ state: "applied", attempt_count: 1 }]);
+    expect((await pool.query("SELECT count(*)::int AS count FROM inventory.inventory_lots")).rows[0].count).toBe(1);
+    expect((await pool.query("SELECT state FROM procurement.receipt_cost_attempts ORDER BY id")).rows).toEqual([{ state: "retry_required" }, { state: "applied" }]);
+    const applicationCount = (await pool.query("SELECT count(*)::int AS count FROM inventory.cost_applications")).rows[0].count;
+    expect(applicationCount).toBeGreaterThan(0);
+    expect(await runReceiptCostRecoveryBatch(dependencies)).toMatchObject({ claimed: 0 });
+    expect((await pool.query("SELECT count(*)::int AS count FROM inventory.cost_applications")).rows[0].count).toBe(applicationCount);
+    expect((await pool.query("SELECT event_type FROM procurement.receipt_cost_recovery_events ORDER BY id")).rows).toEqual([{ event_type: "claimed" }, { event_type: "completed" }]);
+    await expect(pool.query("DELETE FROM procurement.receipt_cost_recovery_events")).rejects.toThrow(/immutable/);
+  });
+
+  it("serializes manual and automatic cost recovery through the real financial owner", async () => {
+    const ids = await failedRecoveryReceipt();
+    const repository = await prepareRecovery();
+    const claim = (await repository.claimNext({ now: recoveryTime(), leaseMs: 300_000, leaseToken: randomUUID() }))!;
+    await Promise.all([receiving.retryCosts(ids.receiptId, actorId), receiving.retryCostsAutomatically(ids.receiptId, claim.requestId)]);
+    expect((await pool.query("SELECT state FROM procurement.receipt_cost_attempts ORDER BY id")).rows).toEqual([{ state: "retry_required" }, { state: "applied" }]);
+    expect((await pool.query("SELECT count(*)::int AS count FROM inventory.inventory_lots")).rows[0].count).toBe(1);
+    // Recovery metadata follows the durable financial outcome even if this
+    // worker captured an earlier transient result.
+    await repository.complete(claim, recoveryRetryOutcome(claim, "TRANSIENT", recoveryTime()), recoveryTime());
+    expect((await pool.query("SELECT state FROM procurement.receipt_cost_recovery_jobs")).rows[0].state).toBe("applied");
+  });
+
+  it("grants a due request to only one simultaneous claimant", async () => {
+    await failedRecoveryReceipt(); const repository = await prepareRecovery();
+    const claims = await Promise.all(Array.from({ length: 4 }, () => repository.claimNext({ now: recoveryTime(), leaseMs: 300_000, leaseToken: randomUUID() })));
+    expect(claims.filter(Boolean)).toHaveLength(1);
+    expect((await pool.query("SELECT attempt_count FROM procurement.receipt_cost_recovery_jobs")).rows[0].attempt_count).toBe(1);
+  });
+
+  it("rolls back a claim when its immutable audit event cannot commit", async () => {
+    await failedRecoveryReceipt(); const repository = await prepareRecovery();
+    await pool.query(`CREATE FUNCTION procurement.reject_recovery_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'injected recovery audit failure'; END $$;
+      CREATE TRIGGER reject_recovery_audit BEFORE INSERT ON procurement.receipt_cost_recovery_events
+      FOR EACH ROW EXECUTE FUNCTION procurement.reject_recovery_audit()`);
+    try {
+      await expect(repository.claimNext({ now: recoveryTime(), leaseMs: 300_000, leaseToken: randomUUID() })).rejects.toThrow(/injected recovery audit failure/);
+      expect((await pool.query("SELECT state,attempt_count,lease_token FROM procurement.receipt_cost_recovery_jobs")).rows).toEqual([{ state: "queued", attempt_count: 0, lease_token: null }]);
+      expect((await pool.query("SELECT count(*)::int AS count FROM procurement.receipt_cost_recovery_events")).rows[0].count).toBe(0);
+    } finally {
+      await pool.query("DROP TRIGGER reject_recovery_audit ON procurement.receipt_cost_recovery_events; DROP FUNCTION procurement.reject_recovery_audit()");
+    }
+  });
+
+  it("fences an expired worker and preserves the replacement lease", async () => {
+    await failedRecoveryReceipt(); const repository = await prepareRecovery();
+    const first = (await repository.claimNext({ now: recoveryTime(), leaseMs: 1_000, leaseToken: randomUUID() }))!;
+    const later = new Date(recoveryTime().getTime() + 2_000);
+    const second = (await repository.claimNext({ now: later, leaseMs: 300_000, leaseToken: randomUUID() }))!;
+    expect(second.attemptCount).toBe(2);
+    expect(await repository.complete(first, recoveryRetryOutcome(first, "STALE", later), later)).toBeNull();
+    expect((await pool.query("SELECT lease_token FROM procurement.receipt_cost_recovery_jobs")).rows[0].lease_token).toBe(second.leaseToken);
+  });
+
+  it("reconciles a crash after a successful financial commit without another application", async () => {
+    const ids = await failedRecoveryReceipt(); const repository = await prepareRecovery();
+    const claim = (await repository.claimNext({ now: recoveryTime(), leaseMs: 1_000, leaseToken: randomUUID() }))!;
+    await receiving.retryCostsAutomatically(ids.receiptId, claim.requestId);
+    const later = new Date(recoveryTime().getTime() + 2_000);
+    await repository.prepare({ now: later, maxAttempts: 5, graceMs: 120_000, limit: 10 });
+    expect((await pool.query("SELECT state FROM procurement.receipt_cost_recovery_jobs")).rows[0].state).toBe("applied");
+    expect(await repository.claimNext({ now: later, leaseMs: 1_000, leaseToken: randomUUID() })).toBeNull();
+  });
+
+  it("stops after repeated abandoned leases and retains the manual recovery path", async () => {
+    const ids = await failedRecoveryReceipt(); const repository = await prepareRecovery();
+    for (let index = 0; index < 5; index++) {
+      const claim = await repository.claimNext({ now: new Date(recoveryTime().getTime() + index * 2_000), leaseMs: 1_000, leaseToken: randomUUID() });
+      expect(claim?.attemptCount).toBe(index + 1);
+    }
+    const later = new Date(recoveryTime().getTime() + 20_000);
+    await repository.prepare({ now: later, maxAttempts: 5, graceMs: 120_000, limit: 10 });
+    expect((await pool.query("SELECT state,attempt_count FROM procurement.receipt_cost_recovery_jobs")).rows).toEqual([{ state: "exhausted", attempt_count: 5 }]);
+    expect(await repository.claimNext({ now: later, leaseMs: 1_000, leaseToken: randomUUID() })).toBeNull();
+    expect((await receiving.retryCosts(ids.receiptId, actorId)).state).toBe("applied");
+  });
+
+  it("does not retry review-required evidence that arrives after its claim", async () => {
+    const ids = await failedRecoveryReceipt(); const repository = await prepareRecovery();
+    const claim = (await repository.claimNext({ now: recoveryTime(), leaseMs: 300_000, leaseToken: randomUUID() }))!;
+    const summary = { requestId: claim.requestId, purchaseOrderLineId: 21, state: "review_required", issues: [{ code: "UNCLASSIFIED", message: "Quote requires review" }], attemptRecorded: true };
+    await pool.query(`INSERT INTO procurement.receipt_cost_attempts(request_id,state,result,recorded_by,recorded_at)
+      VALUES($1,'review_required',$2::jsonb,$3,$4)`, [claim.requestId, JSON.stringify({ summary }), actorId, recoveryTime()]);
+    expect((await receiving.retryCostsAutomatically(ids.receiptId, claim.requestId)).state).toBe("review_required");
+    expect((await pool.query("SELECT count(*)::int AS count FROM inventory.cost_applications")).rows[0].count).toBe(0);
+    expect((await pool.query("SELECT count(*)::int AS count FROM procurement.receipt_cost_attempts")).rows[0].count).toBe(2);
+  });
+
+  it("never schedules open receipts, recent close work or terminal financial outcomes", async () => {
+    await failedRecoveryReceipt(); const repository = recoveryRepository();
+    await repository.prepare({ now: NOW, maxAttempts: 5, graceMs: 120_000, limit: 10 });
+    expect(await repository.claimNext({ now: recoveryTime(), leaseMs: 300_000, leaseToken: randomUUID() })).toBeNull();
+    const receipt = (await pool.query("SELECT receiving_order_id AS id FROM procurement.receipt_cost_requests")).rows[0];
+    await receiving.retryCosts(receipt.id, actorId);
+    await repository.prepare({ now: recoveryTime(), maxAttempts: 5, graceMs: 120_000, limit: 10 });
+    expect((await pool.query("SELECT count(*)::int AS count FROM procurement.receipt_cost_recovery_jobs")).rows[0].count).toBe(0);
   });
 
   it("uses final received quantity for an explicitly short closed purchase line", async () => {

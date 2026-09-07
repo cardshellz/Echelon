@@ -1,4 +1,5 @@
 import { enqueueReceiptCostRequests, processReceiptCostRequests } from "./receipt-cost-queue.service";
+import { RECEIPT_COST_RECOVERY_ACTOR } from "./receipt-cost-recovery.domain";
 import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
 /**
  * Receiving service for Echelon WMS.
@@ -1442,6 +1443,15 @@ export class ReceivingService {
     if (!receipt) throw new ReceivingError("Receiving order not found", 404);
     if (receipt.status !== "closed") throw new ReceivingError("Cost retry requires a completed physical receipt", 409);
     return processReceiptCostRequests(this.db, orderId, this.approvedInvoiceCostReconciler, userId || "system:receiving", this.clock);
+  }
+
+  /** Scheduler-only entry point: one durable request, no stock/source override.
+   * Review outcomes are never retried automatically. */
+  async retryCostsAutomatically(orderId: number, requestId: number) {
+    if (!Number.isSafeInteger(orderId) || orderId <= 0 || !Number.isSafeInteger(requestId) || requestId <= 0) {
+      throw new ReceivingError("Automatic receipt cost identifiers are invalid", 400);
+    }
+    return processReceiptCostRequests(this.db, orderId, this.approvedInvoiceCostReconciler, RECEIPT_COST_RECOVERY_ACTOR, this.clock, requestId);
   }
 
   async completeAllLines(orderId: number, input: unknown, actorId?: string | null) {

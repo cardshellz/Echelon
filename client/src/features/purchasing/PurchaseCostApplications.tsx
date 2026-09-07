@@ -3,6 +3,7 @@ import { Link } from "wouter";
 import type { PurchaseWorkspace } from "@shared/procurement/purchase-workspace";
 import type { PurchaseCostApplicationHistory } from "@shared/procurement/purchase-cost-applications";
 import type { ReceiptCostRequestHistory } from "@shared/procurement/receipt-cost-queue";
+import { describeReceiptCostRecovery } from "@shared/procurement/receipt-cost-recovery";
 import type { ProcurementNavigation } from "@/hooks/use-procurement-navigation";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -77,6 +78,11 @@ export function PurchaseReceiptCostQueue({ requests, data, navigation, actions }
       <p className="text-xs">PO line #{request.purchaseOrderLineId} · Request #{request.id} · Physical receipt: {formatWorkspaceStatus(request.receiptStatus)}.</p>
       <p className="text-xs text-muted-foreground">Requested {formatWorkspaceDate(request.requestedAt)} by {request.requestedBy}.{request.state === "applied" ? " Later source revisions are tracked separately above." : request.receiptStatus === "closed" ? " The stock receipt remains recorded while its costs are processed." : ""}</p>
       {request.attempts[0] && <EvidenceIssues issues={request.attempts[0].issues} />}
+      {request.automaticRecovery && <div className="space-y-1 rounded-md bg-muted/40 p-3 text-xs" data-testid={`receipt-cost-recovery-${request.id}`}>
+        <p>{describeReceiptCostRecovery(request.automaticRecovery, request.state)}</p>
+        {request.automaticRecovery.state === "queued" && ["pending", "retry_required"].includes(request.state) && <p>Next scheduled attempt: {formatWorkspaceDate(request.automaticRecovery.nextAttemptAt)}.</p>}
+        {request.automaticRecovery.lastErrorCode && request.state !== "applied" && <p className="break-all text-muted-foreground">{request.automaticRecovery.lastErrorCode}</p>}
+      </div>}
       {request.state !== "applied" && request.receiptStatus === "closed" && actions?.canRetry && <Button size="sm" variant="outline" disabled={actions.pendingReceiptId !== null} onClick={() => actions.onRetry(request.receiptId)}>{actions.pendingReceiptId === request.receiptId ? "Processing costs…" : "Retry receipt costs"}</Button>}
       {request.attempts.length > 0 && <details className="text-xs"><summary className="cursor-pointer font-medium">{request.attempts.length} recorded cost {request.attempts.length === 1 ? "attempt" : "attempts"}</summary><div className="mt-2 space-y-3">{request.attempts.map((attempt) => <div key={attempt.id} className="space-y-1 border-t pt-2"><p>Attempt #{attempt.id} · {formatWorkspaceStatus(attempt.state)} · {formatWorkspaceDate(attempt.recordedAt)} · {attempt.recordedBy}</p>{attempt.applicationIds.length > 0 && <p>Applications: {attempt.applicationIds.map((id) => `#${id}`).join(", ")}</p>}<EvidenceIssues issues={attempt.issues} /></div>)}</div></details>}
     </div>;

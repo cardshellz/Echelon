@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { receiptCostRecoverySchema } from "@shared/procurement/receipt-cost-recovery";
 import { receiptCostAttemptStateSchema, receiptCostRequestHistorySchema, receiptCostRequestResultSchema, type ReceiptCostRequestHistory } from "@shared/procurement/receipt-cost-queue";
 
 const id = z.number().int().positive().safe();
@@ -6,6 +7,7 @@ const date = z.string().datetime({ offset: true });
 export const receiptCostQueueReadSchema = z.object({
   requests: z.array(z.object({
     id, receiptId: id, receiptStatus: z.string(), purchaseOrderLineId: id, requestedBy: z.string(), requestedAt: date,
+    automaticRecovery: receiptCostRecoverySchema.nullable().optional(),
   })),
   attempts: z.array(z.object({
     id, requestId: id, state: receiptCostAttemptStateSchema, summary: z.unknown(), applications: z.unknown(), recordedBy: z.string(), recordedAt: date,

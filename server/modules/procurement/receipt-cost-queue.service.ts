@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import { z } from "zod";
+import { receiptCostRequestResultSchema } from "@shared/procurement/receipt-cost-queue";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { costFingerprint, costInteger, lockInventoryCostGraph, type CostEvidenceTransaction } from "../inventory/infrastructure/cost-evidence.repository";
 
@@ -40,12 +41,13 @@ export async function enqueueReceiptCostRequests(tx: CostEvidenceTransaction, re
 /** Each successful component application and its queue result commit together.
  * Failure rolls back financial effects, then records a separate retry outcome.
  * Even if that failure log cannot commit, the immutable request remains pending. */
-export async function processReceiptCostRequests(db: Database, receiptId: number, owner: ReceiptCostReconciler | null, actor: string, clock: () => Date): Promise<ReceiptCostQueueResult> {
+export async function processReceiptCostRequests(db: Database, receiptId: number, owner: ReceiptCostReconciler | null, actor: string, clock: () => Date, automaticRequestId?: number): Promise<ReceiptCostQueueResult> {
   costInteger(receiptId, "receiptId", 1);
+  if (automaticRequestId !== undefined) costInteger(automaticRequestId, "automaticRequestId", 1);
   if (!actor.trim()) throw new Error("Receipt cost retry requires an actor");
   let pending: Array<{ id: unknown; purchase_order_line_id: unknown }>;
   try {
-    pending = (await db.execute(sql`SELECT id,purchase_order_line_id FROM procurement.receipt_cost_requests WHERE receiving_order_id=${receiptId} ORDER BY id`)).rows;
+    pending = (await db.execute(sql`SELECT id,purchase_order_line_id FROM procurement.receipt_cost_requests WHERE receiving_order_id=${receiptId} ${automaticRequestId === undefined ? sql`` : sql`AND id=${automaticRequestId}`} ORDER BY id`)).rows;
   } catch (error) {
     console.error(JSON.stringify({ code: "RECEIPT_COST_QUEUE_UNAVAILABLE", receiptId, actor, error: error instanceof Error ? error.message : "unknown" }));
     return { state: "retry_required", requests: [] };
@@ -56,9 +58,21 @@ export async function processReceiptCostRequests(db: Database, receiptId: number
     const purchaseOrderLineId = costInteger(request.purchase_order_line_id, "purchaseOrderLineId", 1);
     try {
       const result = await db.transaction(async (tx) => {
+        if (automaticRequestId !== undefined) await tx.execute(sql`SET LOCAL statement_timeout = '60000ms'`);
         await lockInventoryCostGraph(tx);
         const latest = (await tx.execute(sql`SELECT state,result FROM procurement.receipt_cost_attempts WHERE request_id=${requestId} ORDER BY id DESC LIMIT 1`)).rows[0];
-        if (latest?.state === "applied") return { ...latest.result.summary, attemptRecorded: true } as ReceiptCostRequestResult;
+        if (automaticRequestId !== undefined) {
+          // Recheck after claiming, under the same graph lock as physical close.
+          const receipt = (await tx.execute(sql`SELECT status FROM procurement.receiving_orders WHERE id=${receiptId} FOR SHARE`)).rows[0];
+          if (receipt?.status !== "closed") throw new Error("Automatic cost recovery requires a closed receipt");
+        }
+        if (latest?.state === "applied" || (automaticRequestId !== undefined && latest?.state === "review_required")) {
+          const saved = receiptCostRequestResultSchema.parse(latest.result.summary);
+          if (saved.requestId !== requestId || saved.purchaseOrderLineId !== purchaseOrderLineId || saved.state !== latest.state || !saved.attemptRecorded) {
+            throw new Error("Receipt cost result does not identify this request");
+          }
+          return saved;
+        }
         if (!owner) throw new Error("Approved invoice cost owner is unavailable");
         const reconciliation = reconciliationSchema.parse(await owner.reconcilePurchaseOrderLine(purchaseOrderLineId, tx, actor));
         const issues = reconciliation.costApplications.flatMap((application) => application.issues);
