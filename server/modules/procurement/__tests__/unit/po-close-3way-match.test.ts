@@ -1,3 +1,4 @@
+import { costGraphLockExecute } from "./cost-graph.fixture";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   purchaseOrderLines,
@@ -61,6 +62,7 @@ function buildMockDb() {
     return [];
   };
   const tx: any = {
+    execute: costGraphLockExecute(),
     select: vi.fn(() => {
       let table: unknown;
       const chain: any = {

@@ -1,5 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+// These owner fixtures isolate financial state changes. The real PostgreSQL
+// cost suites verify the shared graph lock and its transaction ordering.
+vi.mock("../../../inventory/infrastructure/cost-evidence.repository", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../../inventory/infrastructure/cost-evidence.repository")>(),
+  lockInventoryCostGraph: vi.fn(async () => undefined),
+}));
+
 const tables = vi.hoisted(() => ({
   vendorInvoices: {
     id: "vendor_invoices.id",

@@ -1,3 +1,4 @@
+import { costGraphLockExecute } from "./cost-graph.fixture";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -77,6 +78,7 @@ describe("completed supplier purchase evidence", () => {
     });
 
     const db: any = {
+      execute: costGraphLockExecute(),
       select,
       update: vi.fn((table: unknown) => ({
         set: vi.fn((patch: any) => {

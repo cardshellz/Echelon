@@ -1,3 +1,4 @@
+import { lockInventoryCostGraph } from "../infrastructure/cost-evidence.repository";
 import { eq, and, sql } from "drizzle-orm";
 import {
   products,
@@ -86,7 +87,8 @@ export class BreakAssemblyUseCases {
 
   constructor(
     private db: any,
-    private inventoryUseCases: InventoryUseCases
+    private inventoryUseCases: InventoryUseCases,
+    private readonly clock: () => Date = () => new Date(),
   ) {}
 
   /** Register a callback to fire after break/assembly changes inventory */
@@ -180,6 +182,8 @@ export class BreakAssemblyUseCases {
     const batchId = this.generateBatchId("break");
 
     await this.db.transaction(async (tx: any) => {
+      await lockInventoryCostGraph(tx);
+      await this.assertConversionSnapshot(tx, sourceVariant, targetVariant);
 
       // Validate source stock within the transaction
       const { inventoryLevels } = await import("@shared/schema");
@@ -201,13 +205,14 @@ export class BreakAssemblyUseCases {
         productVariantId: sourceVariantId,
         warehouseLocationId,
         qtyDelta: -sourceQty,
+        includeConsumedCostEvidence: true,
         reason: noteText,
         userId: userId ?? undefined,
       });
 
-      // Propagate cost: total source cost ÷ target qty = per-target-unit cost
-      const sourceTotalCost = sourceResult.consumedCostCents ?? 0;
-      const targetUnitCost = targetQty > 0 ? Math.round(sourceTotalCost / targetQty) : 0;
+      if (!sourceResult.consumedLots?.length || sourceResult.consumedPoCostMills === undefined || sourceResult.consumedPackagingCostMills === undefined || sourceResult.consumedLandedCostMills === undefined) {
+        throw new Error("Conversion requires exact consumed FIFO component and lot evidence");
+      }
 
       // Increment target variant with propagated cost
       await inventoryTx.adjustInventory({
@@ -216,7 +221,10 @@ export class BreakAssemblyUseCases {
         qtyDelta: targetQty,
         reason: noteText,
         userId: userId ?? undefined,
-        unitCostCents: targetUnitCost > 0 ? targetUnitCost : undefined,
+        conversion: { sourceLots: sourceResult.consumedLots,
+          productMills: BigInt(sourceResult.consumedPoCostMills), packagingMills: BigInt(sourceResult.consumedPackagingCostMills),
+          landedMills: BigInt(sourceResult.consumedLandedCostMills), provisional: sourceResult.consumedCostProvisional ?? true,
+          operationKey: batchId, occurredAt: this.clock() },
       });
     });
 
@@ -285,6 +293,8 @@ export class BreakAssemblyUseCases {
     const batchId = this.generateBatchId("assemble");
 
     await this.db.transaction(async (tx: any) => {
+      await lockInventoryCostGraph(tx);
+      await this.assertConversionSnapshot(tx, sourceVariant, targetVariant);
 
       const { inventoryLevels } = await import("@shared/schema");
       const inventoryTx = this.inventoryUseCases.withTx(tx);
@@ -305,13 +315,14 @@ export class BreakAssemblyUseCases {
         productVariantId: sourceVariantId,
         warehouseLocationId,
         qtyDelta: -sourceQtyNeeded,
+        includeConsumedCostEvidence: true,
         reason: noteText,
         userId: userId ?? undefined,
       });
 
-      // Propagate cost: total source cost ÷ target qty = per-target-unit cost
-      const sourceTotalCost = sourceResult.consumedCostCents ?? 0;
-      const targetUnitCost = targetQty > 0 ? Math.round(sourceTotalCost / targetQty) : 0;
+      if (!sourceResult.consumedLots?.length || sourceResult.consumedPoCostMills === undefined || sourceResult.consumedPackagingCostMills === undefined || sourceResult.consumedLandedCostMills === undefined) {
+        throw new Error("Conversion requires exact consumed FIFO component and lot evidence");
+      }
 
       // Increment target variant with propagated cost
       await inventoryTx.adjustInventory({
@@ -320,7 +331,10 @@ export class BreakAssemblyUseCases {
         qtyDelta: targetQty,
         reason: noteText,
         userId: userId ?? undefined,
-        unitCostCents: targetUnitCost > 0 ? targetUnitCost : undefined,
+        conversion: { sourceLots: sourceResult.consumedLots,
+          productMills: BigInt(sourceResult.consumedPoCostMills), packagingMills: BigInt(sourceResult.consumedPackagingCostMills),
+          landedMills: BigInt(sourceResult.consumedLandedCostMills), provisional: sourceResult.consumedCostProvisional ?? true,
+          operationKey: batchId, occurredAt: this.clock() },
       });
     });
 
@@ -560,6 +574,19 @@ export class BreakAssemblyUseCases {
     return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   }
 
+  private async assertConversionSnapshot(tx: any, source: ProductVariant, target: ProductVariant): Promise<void> {
+    const product = (await tx.select({ inventoryStrategy: products.inventoryStrategy }).from(products)
+      .where(eq(products.id, source.productId)).for("share"))[0];
+    if (!product) throw new Error("Conversion product no longer exists");
+    if (!allowsDirectPackageConversion(product.inventoryStrategy)) throw new InventoryConversionStrategyError(source.productId, product.inventoryStrategy);
+    for (const expected of [source, target].sort((left, right) => left.id - right.id)) {
+      const current = (await tx.select().from(productVariants).where(eq(productVariants.id, expected.id)).for("share"))[0];
+      if (!current || current.productId !== expected.productId || current.unitsPerVariant !== expected.unitsPerVariant || current.parentVariantId !== expected.parentVariantId) {
+        throw new Error("Conversion unit or product changed. Refresh the conversion before posting.");
+      }
+    }
+  }
+
   private async fetchVariant(variantId: number): Promise<ProductVariant> {
     const rows: ProductVariant[] = await this.db
       .select()
@@ -605,7 +632,12 @@ export class BreakAssemblyUseCases {
     sourceUnitsPerVariant: number,
     targetUnitsPerVariant: number
   ): { targetQty: number; baseUnits: number } {
-    const baseUnits = sourceQty * sourceUnitsPerVariant;
+    for (const value of [sourceQty, sourceUnitsPerVariant, targetUnitsPerVariant]) {
+      if (!Number.isSafeInteger(value) || value <= 0) throw new Error("Conversion quantity and units must be positive safe integers");
+    }
+    const exactBaseUnits = BigInt(sourceQty) * BigInt(sourceUnitsPerVariant);
+    if (exactBaseUnits > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("Conversion exceeds the supported quantity range");
+    const baseUnits = Number(exactBaseUnits);
     const targetQty = baseUnits / targetUnitsPerVariant;
 
     if (!Number.isInteger(targetQty)) {

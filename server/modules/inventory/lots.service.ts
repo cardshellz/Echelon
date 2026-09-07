@@ -1,3 +1,4 @@
+import { CostEvidenceError, lockInventoryCostGraph, recordLotCostContribution } from "./infrastructure/cost-evidence.repository";
 /**
  * Inventory Lot Service for Echelon WMS.
  *
@@ -125,7 +126,12 @@ export class InventoryLotService {
     // PO (product) cost = remainder, so the breakdown always reconciles to total. This
     // also fixes the old double-count: landed used to be derived as (unitCost − product),
     // which counted packaging twice whenever unitCost was the product+packaging blend.
-    const poUnitCostMills = Math.max(0, totalUnitCostMills - packagingCostMills - landedCostMills);
+    for (const [name, value] of Object.entries({ totalUnitCostMills, packagingCostMills, landedCostMills })) {
+      if (!Number.isSafeInteger(value) || value < 0) throw new Error(`${name} must be nonnegative safe integer mills`);
+    }
+    const exactProduct = BigInt(totalUnitCostMills) - BigInt(packagingCostMills) - BigInt(landedCostMills);
+    if (exactProduct < BigInt(0)) throw new Error("Lot packaging and landed components exceed its all-in total");
+    const poUnitCostMills = Number(exactProduct);
     // Derived cent mirrors (display / GL / legacy readers until the COGS/valuation reads move to mills).
     const totalUnitCostCents = millsToCents(totalUnitCostMills);
     const poUnitCostCents = millsToCents(poUnitCostMills);
@@ -665,6 +671,7 @@ export class InventoryLotService {
     unitCostCents?: number;
     notes?: string;
   }): Promise<{
+    consumedLots: Array<{ lotId: number; qty: number }>;
     consumedCostCents: number;
     consumedQty: number;
     consumedPoCostMills: bigint;
@@ -691,6 +698,7 @@ export class InventoryLotService {
         notes: params.notes ?? "Manual adjustment",
       });
       return {
+        consumedLots: [],
         consumedCostCents: 0,
         consumedQty: 0,
         consumedPoCostMills: BigInt(0),
@@ -795,6 +803,7 @@ export class InventoryLotService {
     }
 
     return {
+      consumedLots: adjustUpdates.map((update) => ({ lotId: update.lotId, qty: update.take })),
       consumedCostCents,
       consumedQty,
       consumedPoCostMills,
@@ -819,7 +828,24 @@ export class InventoryLotService {
     toLocationId: number;
     qty: number;
     notes?: string;
+    actorId?: string;
+    occurredAt?: Date;
+    operationKey?: string;
   }): Promise<void> {
+    for (const field of ["productVariantId", "fromLocationId", "toLocationId", "qty"] as const) {
+      if (!Number.isInteger(params[field]) || params[field] <= 0 || params[field] > 2_147_483_647) {
+        throw new CostEvidenceError("COST_TRANSFER_INPUT_INVALID", `${field} must be a positive PostgreSQL integer.`, { field });
+      }
+    }
+    if (!params.actorId?.trim() || !(params.occurredAt instanceof Date) || !Number.isFinite(params.occurredAt.getTime())) {
+      throw new CostEvidenceError("COST_TRANSFER_AUDIT_REQUIRED", "A lot transfer requires its owning actor and operation time.");
+    }
+    if (params.fromLocationId === params.toLocationId || (params.operationKey !== undefined && !params.operationKey.trim())) {
+      throw new CostEvidenceError("COST_TRANSFER_INPUT_INVALID", "A lot transfer requires distinct locations and a nonblank operation key when supplied.");
+    }
+    // The physical use-case takes the same graph lock before location locks;
+    // repeat it here to protect direct transactional callers before cost reads.
+    await lockInventoryCostGraph(this.db);
     const lots = await this.getLotsAtLocation(
       params.productVariantId,
       params.fromLocationId,
@@ -921,7 +947,7 @@ export class InventoryLotService {
 
     // Create one destination lot per source layer — cost identity preserved
     for (const layer of layers) {
-      await this.createLot({
+      const outputLot = await this.createLot({
         productVariantId: params.productVariantId,
         warehouseLocationId: params.toLocationId,
         qty: layer.take,
@@ -938,6 +964,14 @@ export class InventoryLotService {
         receivedAt: layer.receivedAt,
         notes: params.notes ?? "Transfer",
       });
+      await recordLotCostContribution(this.db, {
+        sourceLotId: layer.lotId,
+        outputLotId: outputLot.id,
+        sourceQty: layer.take,
+        outputQty: layer.take,
+        operationKind: "transfer",
+        operationKey: params.operationKey ?? `inventory_transfer:${layer.lotId}:${outputLot.id}`,
+      }, params.actorId, params.occurredAt);
     }
   }
 

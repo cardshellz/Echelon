@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+// These owner fixtures isolate financial state changes. The real PostgreSQL
+// cost suites verify the shared graph lock and its transaction ordering.
+vi.mock("../../../inventory/infrastructure/cost-evidence.repository", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../../inventory/infrastructure/cost-evidence.repository")>(),
+  lockInventoryCostGraph: vi.fn(async () => undefined),
+}));
+
 const tables = vi.hoisted(() => ({
   vendorInvoiceLines: { id: "line.id", vendorInvoiceId: "line.invoice_id", purchaseOrderLineId: "line.po_line_id", lineTotalCents: "line.total" },
   vendorInvoices: { id: "invoice.id", vendorId: "invoice.vendor_id", status: "invoice.status", currency: "invoice.currency", paidAmountCents: "invoice.paid" },
@@ -166,11 +173,12 @@ describe("invoice line metadata preserves recorded economics", () => {
     });
   });
 
-  it("retains the existing economic recalculation path for an actual quantity change", async () => {
+  it("uses the explicitly reviewed extended total for an actual quantity change", async () => {
     const record = fixture();
     const state = configure(record, "received", [[{ total: 6_667 }], [{ id: 12, paidAmountCents: 0 }], []]);
     const { updateInvoiceLine } = await import("../../ap-ledger.service");
-    const updated = await updateInvoiceLine(33, { qtyInvoiced: 100 });
+    const updated = await updateInvoiceLine(33, { qtyInvoiced: 100, lineTotalCents: 6_667 });
+    expect(state.writes[0].values).toMatchObject({ costComponentEvidence: null });
     expect(updated).toMatchObject({ qtyInvoiced: 100, unitCostMills: 6_667, unitCostCents: 67, lineTotalCents: 6_667, matchStatus: "pending" });
     expect(state.writes[1]).toEqual({ table: tables.vendorInvoices, values: { invoicedAmountCents: 6_667, balanceCents: 6_667, updatedAt: fixedTime } });
     expect(state.audits[0].context).toMatchObject({
@@ -180,6 +188,15 @@ describe("invoice line metadata preserves recorded economics", () => {
     });
   });
 
+  it("requires a reviewed total before repricing an unexplained extended amount", async () => {
+    const state = configure(fixture());
+    const { updateInvoiceLine } = await import("../../ap-ledger.service");
+    await expect(updateInvoiceLine(33, { qtyInvoiced: 100 })).rejects.toMatchObject({
+      statusCode: 422, details: { code: "AP_INVOICE_EXTENDED_TOTAL_REQUIRED" },
+    });
+    expect(state.writes).toEqual([]);
+    expect(state.audits).toEqual([]);
+  });
   it("still rejects inconsistent newly supplied economic prices", async () => {
     const state = configure(fixture());
     const { updateInvoiceLine } = await import("../../ap-ledger.service");

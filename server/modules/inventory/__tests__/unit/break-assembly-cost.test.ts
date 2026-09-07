@@ -10,6 +10,8 @@ function makeVariantDb(variantSequence: any[]) {
   // which resolves as a thenable (no .limit). We return variants in the
   // order they'll be fetched (Promise.all preserves initiation order).
   let fetchIdx = 0;
+  let lockIndex = 0;
+  const lockedRows = [variantSequence[2], ...variantSequence.slice(0, 2).sort((a, b) => a.id-b.id)];
   return {
     select: vi.fn(() => ({
       from: vi.fn(() => ({
@@ -32,6 +34,7 @@ function makeVariantDb(variantSequence: any[]) {
         from: vi.fn(() => ({
           where: vi.fn(() => ({
             limit: vi.fn().mockResolvedValue([{ variantQty: 50 }]),
+            for: vi.fn(async () => [lockedRows[lockIndex++]]),
           })),
         })),
       })),
@@ -59,7 +62,7 @@ describe("BreakAssemblyUseCases — cost propagation", () => {
       adjustInventory: vi.fn(async (params: any) => {
         adjustCalls.push(params);
         if (params.qtyDelta < 0) {
-          return { orphanedQty: 0, consumedCostCents: 1000, consumedQty: 1 };
+          return { orphanedQty: 0, consumedCostCents: 1000, consumedQty: 1, consumedLots: [{ lotId: 11, qty: 1 }], consumedPoCostMills: "100000", consumedPackagingCostMills: "0", consumedLandedCostMills: "0", consumedCostProvisional: false };
         }
         return { orphanedQty: 0, consumedCostCents: 0, consumedQty: 0 };
       }),
@@ -84,7 +87,8 @@ describe("BreakAssemblyUseCases — cost propagation", () => {
     // 1000 cents / 10 packs = 100 cents per pack
     expect(adjustCalls[1].qtyDelta).toBe(10);
     expect(adjustCalls[1].productVariantId).toBe(2);
-    expect(adjustCalls[1].unitCostCents).toBe(100);
+    expect(adjustCalls[1].conversion).toMatchObject({ sourceLots: [{lotId:11,qty:1}], productMills: BigInt(100000), packagingMills: BigInt(0), landedMills: BigInt(0), provisional: false });
+    expect(adjustCalls[1].unitCostCents).toBeUndefined();
   });
 
   it("assembly propagates source cost to assembled target", async () => {
@@ -105,7 +109,7 @@ describe("BreakAssemblyUseCases — cost propagation", () => {
       adjustInventory: vi.fn(async (params: any) => {
         adjustCalls.push(params);
         if (params.qtyDelta < 0) {
-          return { orphanedQty: 0, consumedCostCents: 1000, consumedQty: 10 };
+          return { orphanedQty: 0, consumedCostCents: 1000, consumedQty: 10, consumedLots: [{ lotId: 11, qty: 10 }], consumedPoCostMills: "100000", consumedPackagingCostMills: "0", consumedLandedCostMills: "0", consumedCostProvisional: false };
         }
         return { orphanedQty: 0, consumedCostCents: 0, consumedQty: 0 };
       }),
@@ -128,7 +132,7 @@ describe("BreakAssemblyUseCases — cost propagation", () => {
     expect(adjustCalls[0].qtyDelta).toBe(-10);
     // 1000 cents / 1 case = 1000 cents per case
     expect(adjustCalls[1].qtyDelta).toBe(1);
-    expect(adjustCalls[1].unitCostCents).toBe(1000);
+    expect(adjustCalls[1].conversion).toMatchObject({ sourceLots: [{lotId:11,qty:10}], productMills: BigInt(100000), packagingMills: BigInt(0), landedMills: BigInt(0), provisional: false });
     expect(inventoryUseCases.withTx).toHaveBeenCalledTimes(1);
   });
 

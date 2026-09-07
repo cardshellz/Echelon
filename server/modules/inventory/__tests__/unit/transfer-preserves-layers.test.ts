@@ -1,3 +1,4 @@
+import { PgDialect } from "drizzle-orm/pg-core";
 import { describe, expect, it, vi } from "vitest";
 
 /**
@@ -61,7 +62,16 @@ describe("InventoryLotService.transferLots — layer preservation", () => {
           };
         }),
       })),
-      execute: vi.fn(async () => ({ rows: [{ id: 1 }, { id: 2 }] })),
+      execute: vi.fn(async (query: any) => {
+        const compiled = new PgDialect().sqlToQuery(query);
+        const statement = compiled.sql;
+        if (statement.includes("SELECT source.qty_received AS source_qty")) {
+          const source = sourceLots.find((lot) => lot.id === compiled.params[1])!;
+          const output = createdLots[Number(compiled.params[0]) - 101];
+          return { rows: [{ source_qty: source.qtyOnHand, output_qty: output.qtyReceived }] };
+        }
+        return { rows: statement.includes("UPDATE inventory.inventory_lots") ? [{ id: 1 }, { id: 2 }] : [] };
+      }),
       update: vi.fn(),
       delete: vi.fn(),
       transaction: vi.fn(),
@@ -73,10 +83,19 @@ describe("InventoryLotService.transferLots — layer preservation", () => {
       fromLocationId: 20,
       toLocationId: 30,
       qty: 8, // 5 from lot 1 ($5) + 3 from lot 2 ($7)
+      actorId: "unit-test", occurredAt: now,
     });
 
     // Source lots decremented
-    expect(db.execute).toHaveBeenCalledTimes(1);
+    const statements = db.execute.mock.calls.map(([query]: [any]) => new PgDialect().sqlToQuery(query));
+    expect(statements[0].sql).toContain("pg_advisory_xact_lock");
+    expect(statements.filter((row: any) => row.sql.includes("UPDATE inventory.inventory_lots"))).toHaveLength(1);
+    const contributions = statements.filter((row: any) => row.sql.includes("INSERT INTO inventory.lot_cost_contributions"));
+    expect(contributions.map((row: any) => row.params)).toEqual([
+      [1, 101, "transfer", "inventory_transfer:1:101", 5, 5, 0, "unit-test", now],
+      [2, 102, "transfer", "inventory_transfer:2:102", 3, 3, 0, "unit-test", now],
+    ]);
+    expect(db.execute.mock.invocationCallOrder[0]).toBeLessThan(db.select.mock.invocationCallOrder[0]);
 
     // Two separate destination lots created (not one averaged lot)
     expect(createdLots).toHaveLength(2);
@@ -98,6 +117,29 @@ describe("InventoryLotService.transferLots — layer preservation", () => {
     });
   });
 
+  it.each([
+    { patch: { qty: 0 }, code: "COST_TRANSFER_INPUT_INVALID" },
+    { patch: { qty: -1 }, code: "COST_TRANSFER_INPUT_INVALID" },
+    { patch: { qty: 1.5 }, code: "COST_TRANSFER_INPUT_INVALID" },
+    { patch: { qty: 2_147_483_648 }, code: "COST_TRANSFER_INPUT_INVALID" },
+    { patch: { productVariantId: Number.NaN }, code: "COST_TRANSFER_INPUT_INVALID" },
+    { patch: { fromLocationId: 0 }, code: "COST_TRANSFER_INPUT_INVALID" },
+    { patch: { toLocationId: 20 }, code: "COST_TRANSFER_INPUT_INVALID" },
+    { patch: { actorId: " " }, code: "COST_TRANSFER_AUDIT_REQUIRED" },
+    { patch: { occurredAt: new Date("invalid") }, code: "COST_TRANSFER_AUDIT_REQUIRED" },
+    { patch: { operationKey: " " }, code: "COST_TRANSFER_INPUT_INVALID" },
+  ])("rejects invalid transfer evidence before any database operation: $patch", async ({ patch, code }) => {
+    process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
+    const { InventoryLotService } = await import("../../lots.service");
+    const db = { select: vi.fn(), execute: vi.fn(), insert: vi.fn() } as any;
+    await expect(new InventoryLotService(db).transferLots({
+      productVariantId: 10, fromLocationId: 20, toLocationId: 30, qty: 2,
+      actorId: "unit-test", occurredAt: new Date("2024-06-01"), ...patch,
+    })).rejects.toMatchObject({ code });
+    expect(db.select).not.toHaveBeenCalled();
+    expect(db.execute).not.toHaveBeenCalled();
+    expect(db.insert).not.toHaveBeenCalled();
+  });
   it("fails closed before writing when exact unreserved FIFO quantity is unavailable", async () => {
     process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
     const { InventoryLotService } = await import("../../lots.service");
@@ -129,12 +171,13 @@ describe("InventoryLotService.transferLots — layer preservation", () => {
       fromLocationId: 20,
       toLocationId: 30,
       qty: 2,
+      actorId: "unit-test", occurredAt: new Date("2024-06-01"),
     })).rejects.toMatchObject({
       code: "LOT_TRANSFER_SHORTFALL",
       context: expect.objectContaining({ requestedQty: 2, attributableQty: 1 }),
     });
 
-    expect(db.execute).not.toHaveBeenCalled();
+    expect(db.execute).toHaveBeenCalledTimes(1); // Graph lock only; no quantity writes.
     expect(db.insert).not.toHaveBeenCalled();
   });
 });

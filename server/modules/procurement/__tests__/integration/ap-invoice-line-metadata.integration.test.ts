@@ -116,7 +116,7 @@ databaseTests.sequential("AP invoice line metadata PostgreSQL integrity", () => 
     if (patch.description !== undefined) expect(result.description).toBe(patch.description.trim());
     const audit = (await pool.query("SELECT action,target,context FROM public.audit_events WHERE actor=$1 ORDER BY id", [actorId])).rows;
     expect(audit).toEqual([expect.objectContaining({ action: "ap_ledger.invoice_line_updated", target: "invoice:71",
-      context: expect.objectContaining({ economicsChanged: false, affectedPoIds: [], invoiceLineId: 72, economicsBefore: { qtyInvoiced: 150, unitCostCents: 67, unitCostMills: 6667, lineTotalCents: 11800, matchStatus: "matched" }, economicsAfter: { qtyInvoiced: 150, unitCostCents: 67, unitCostMills: 6667, lineTotalCents: 11800, matchStatus: "matched" } }) })]);
+      context: expect.objectContaining({ economicsChanged: false, affectedPoIds: [], invoiceLineId: 72, economicsBefore: { qtyInvoiced: 150, unitCostCents: 67, unitCostMills: 6667, lineTotalCents: 11800, matchStatus: "matched", costComponentEvidence: null }, economicsAfter: { qtyInvoiced: 150, unitCostCents: 67, unitCostMills: 6667, lineTotalCents: 11800, matchStatus: "matched", costComponentEvidence: null } }) })]);
   });
 
   it.each([{ notes: "Legacy notes correction" }, { notes: "Legacy equivalent mills echo", unitCostMills: 6700 }])("keeps legacy null mills, exact total and match evidence for %j", async (patch) => {

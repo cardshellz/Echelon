@@ -1,3 +1,4 @@
+import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
 import { and, eq, ne, sql } from "drizzle-orm";
 import { z } from "zod";
 
@@ -932,6 +933,7 @@ export function createPurchaseOrderLineCommands(
     input: AddPurchaseOrderLineCommand,
     userId?: string,
   ) {
+    await lockInventoryCostGraph(tx);
     const header = await lockHeader(tx, purchaseOrderId);
     assertDraftHeader(header);
     assertExpectedVersion("purchase_order", header.updatedAt, input.expectedPoUpdatedAt);
@@ -994,6 +996,7 @@ export function createPurchaseOrderLineCommands(
     input: AddBulkPurchaseOrderLinesCommand,
     userId?: string,
   ) {
+    await lockInventoryCostGraph(tx);
     const header = await lockHeader(tx, purchaseOrderId);
     assertDraftHeader(header);
     assertExpectedVersion("purchase_order", header.updatedAt, input.expectedPoUpdatedAt);
@@ -1052,6 +1055,7 @@ export function createPurchaseOrderLineCommands(
     input: UpdatePurchaseOrderLineCommand,
     userId?: string,
   ) {
+    await lockInventoryCostGraph(tx);
       const parentRows = await tx
         .select({ purchaseOrderId: purchaseOrderLines.purchaseOrderId })
         .from(purchaseOrderLines)
@@ -1292,6 +1296,7 @@ export function createPurchaseOrderLineCommands(
     input: CancelPurchaseOrderLineCommand,
     userId?: string,
   ) {
+    await lockInventoryCostGraph(tx);
       const parentRows = await tx
         .select({ purchaseOrderId: purchaseOrderLines.purchaseOrderId })
         .from(purchaseOrderLines)

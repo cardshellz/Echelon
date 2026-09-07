@@ -1,3 +1,5 @@
+import { lockInventoryCostGraph, recordLotCostContribution } from "./cost-evidence.repository";
+import { costEvidenceTransactionFromPg } from "./cost-evidence-pg";
 import type {
   CanonicalClaimInventoryExecutionResource,
   CanonicalClaimInventoryObservationCostLayer,
@@ -768,6 +770,8 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
     input: Parameters<CanonicalClaimInventoryMutationPort["reconcileObservedPickResource"]>[0],
   ): Promise<CanonicalClaimInventoryObservedReconciliationResult> {
     validateAuditInput(input);
+    const costTransaction = costEvidenceTransactionFromPg(input.client);
+    await lockInventoryCostGraph(costTransaction);
     const claimedQty = positiveInteger(input.target.claimedQty, "target.claimedQty");
     positiveBigInt(input.target.claimResourceId, "target.claimResource.id");
     positiveInteger(input.target.inventoryLevelId, "target.inventoryLevel.id");
@@ -1209,6 +1213,14 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
         ],
       ))[0];
       const inventoryLotId = positiveInteger(insertedLot?.id, "observationInventoryLot.id");
+      await recordLotCostContribution(costTransaction, {
+        sourceLotId: relocation.inventoryLotId,
+        outputLotId: inventoryLotId,
+        sourceQty: quantity,
+        outputQty: quantity,
+        operationKind: "transfer",
+        operationKey: `claim_observation:${input.claimId}:${observationReference}`,
+      }, input.actor, input.occurredAt);
       relocatedInventoryLotIds.push(inventoryLotId);
       allocations.push({
         inventoryLotId,
@@ -1590,6 +1602,8 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
     input: CanonicalTransformationExecutionInput,
   ): Promise<Awaited<ReturnType<CanonicalClaimInventoryMutationPort["executePackageOperation"]>>> {
     validateAuditInput(input);
+    const costTransaction = costEvidenceTransactionFromPg(input.client);
+    await lockInventoryCostGraph(costTransaction);
     positiveBigInt(input.claimOperationId, "claimOperation.id");
     const operationKey = nonblank(input.operationKey, "operation.key", 300);
     const outputLocationId = positiveInteger(input.outputLocationId, "operation.outputLocationId");
@@ -1996,6 +2010,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
 
     const committedLotAllocations: CanonicalClaimProducedLotAllocation[] = [];
     let outputVariantBefore = nonnegativeInteger(outputLevel.variant_qty, "outputInventoryLevel.variantQty");
+    let outputCostOffset = 0;
     for (const [index, segment] of outputSegments.entries()) {
       const lotNumber = build
         ? `${build.buildSystemNumber}-R${build.buildRunNumber}-${String(index + 1).padStart(2, "0")}`
@@ -2058,6 +2073,21 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
         build ? [...lotValues, build.buildOrderId, build.buildRunId] : lotValues,
       ))[0];
       const outputLotId = positiveInteger(insertedLot?.id, "outputInventoryLot.id");
+      // Each cost layer receives every source contribution using the total
+      // operation output denominator, never this individual remainder layer.
+      for (const resource of resources) {
+        for (const allocation of resource.lotAllocations) {
+          await recordLotCostContribution(costTransaction, {
+            sourceLotId: allocation.inventoryLotId,
+            outputLotId,
+            sourceQty: positivePostgresInteger(allocation.consumeQty, "costContribution.sourceQty"),
+            outputQty,
+            outputStartQty: outputCostOffset,
+            operationKind: build ? "build" : input.operationType === "assemble_pack" ? "assembly" : "conversion",
+            operationKey: `claim_operation:${input.claimId}:${input.claimOperationId}`,
+          }, input.actor, input.occurredAt);
+        }
+      }
       const outputTransactionValues = [
         destinationVariantId,
         outputLocationId,
@@ -2101,6 +2131,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
         );
       }
       outputVariantBefore += segment.qty;
+      outputCostOffset += segment.qty;
       if (segment.reservedQty > 0) {
         committedLotAllocations.push({
           inventoryLotId: outputLotId,

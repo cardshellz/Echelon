@@ -23,3 +23,15 @@ export function formatWorkspaceStatus(value: string | null): string {
   if (!value) return "Not recorded";
   return value.replace(/_/g, " ").replace(/^./, (first) => first.toUpperCase());
 }
+
+/** Mills are integer 1/10000-dollar amounts; never round a lot unit to cents. */
+export function formatWorkspaceMills(mills: number | null, currency: string | null): string {
+  if (mills === null) return "Not recorded";
+  if (!Number.isSafeInteger(mills)) throw new RangeError("Workspace money must be safe integer mills.");
+  const amount = BigInt(mills);
+  const absolute = amount < BigInt(0) ? -amount : amount;
+  const whole = (absolute / BigInt(10000)).toLocaleString("en-US");
+  const fraction = (absolute % BigInt(10000)).toString().padStart(4, "0");
+  const sign = amount < BigInt(0) ? "-" : "";
+  return currency === "USD" ? `${sign}$${whole}.${fraction}` : `${sign}${whole}.${fraction} ${currency?.trim() || "(currency not recorded)"}`;
+}

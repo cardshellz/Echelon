@@ -328,7 +328,7 @@ export function registerPurchaseOrderRoutes(app: Express) {
       }
       res.json(result);
     } catch (error: any) {
-      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
+      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message, details: error.details });
       res.status(500).json({ error: error.message });
     }
   };
@@ -852,7 +852,7 @@ export function registerPurchaseOrderRoutes(app: Express) {
       await purchasing.deletePO(Number(req.params.id));
       res.json({ success: true });
     } catch (error: any) {
-      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message });
+      if (error instanceof PurchasingError) return res.status(error.statusCode).json({ error: error.message, details: error.details });
       res.status(500).json({ error: error.message });
     }
   });

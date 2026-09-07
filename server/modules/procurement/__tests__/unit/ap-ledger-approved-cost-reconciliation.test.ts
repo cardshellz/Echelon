@@ -1,5 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+// These owner fixtures isolate financial state changes. The real PostgreSQL
+// cost suites verify the shared graph lock and its transaction ordering.
+vi.mock("../../../inventory/infrastructure/cost-evidence.repository", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../../inventory/infrastructure/cost-evidence.repository")>(),
+  lockInventoryCostGraph: vi.fn(async () => undefined),
+}));
+
 const tables = vi.hoisted(() => ({
   purchaseOrderLines: {
     id: "purchase_order_lines.id",
@@ -40,7 +47,7 @@ const tables = vi.hoisted(() => ({
 }));
 
 const mocks = vi.hoisted(() => ({
-  reconcileInvoiceVariance: vi.fn(),
+  reconcilePurchaseCostEvidence: vi.fn(),
 }));
 
 vi.mock("../../../../db", () => ({ db: {} }));
@@ -63,12 +70,9 @@ vi.mock("../../po-exceptions.service", () => ({
   detectOverpaid: vi.fn(),
   detectPastDue: vi.fn(),
 }));
-vi.mock("../../../inventory/cogs.service", () => ({
-  COGSService: class {
-    reconcileInvoiceVariance(...args: any[]) {
-      return mocks.reconcileInvoiceVariance(...args);
-    }
-  },
+vi.mock("../../../inventory/cogs.service", () => ({ COGSService: class {} }));
+vi.mock("../../purchase-cost-application.service", () => ({
+  reconcilePurchaseCostEvidence: mocks.reconcilePurchaseCostEvidence,
 }));
 
 function selectChain(rows: unknown[]) {
@@ -121,17 +125,29 @@ function invoiceLine(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function componentResult(options: { evidence?: "confirmed" | "estimated" | "review_required"; product?: number; pieces?: number; review?: boolean } = {}) {
+  const evidence = options.evidence ?? "confirmed";
+  const review = options.review ?? evidence === "review_required";
+  const issue = evidence === "review_required" ? { code: "INVOICE_COMPONENT_REVIEW_REQUIRED", message: "Resolve invoice components." } : null;
+  return {
+    lotsUpdated: review ? 0 : 1, cogsRowsUpdated: review ? 0 : 2, totalCogsDeltaCents: review ? 0 : 10,
+    costApplications: [1, 2].map((id) => ({ applicationId: id, status: review ? "review_required" : "applied", lotsUpdated: 0, cogsRowsUpdated: 0, totalCogsDeltaCents: 0, issues: issue ? [issue] : [], replayed: false })),
+    costSources: (["product", "packaging"] as const).map((component, index) => ({ id: index + 1, contract: {
+      contractVersion: 1, revision: 1, fingerprint: "a".repeat(64), component,
+      scope: { kind: "purchase_order_line", purchaseOrderId: 7, purchaseOrderLineId: 50 },
+      sources: [{ kind: evidence === "estimated" ? "purchase_order_line" : "vendor_invoice_line", documentId: evidence === "estimated" ? 7 : 12, lineId: evidence === "estimated" ? 50 : 70, version: "b".repeat(64) }],
+      currency: "USD", totalMills: component === "product" ? options.product ?? 55_000 : 5000,
+      basePieces: options.pieces ?? 100, evidence, packagingTreatment: "separate", issue, manualOverride: null,
+    } })),
+  };
+}
 describe("approved invoice PO-line cost reconciliation", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.reconcileInvoiceVariance.mockResolvedValue({
-      lotsUpdated: 1,
-      cogsRowsUpdated: 2,
-      totalCogsDeltaCents: 10,
-    });
+    mocks.reconcilePurchaseCostEvidence.mockResolvedValue(componentResult());
   });
 
-  it("uses invoice actuals only with complete, single-cost approved coverage", async () => {
+  it("reports confirmed invoice components only after their applications succeed", async () => {
     const client = clientFor([
       [poLine],
       [invoiceLine()],
@@ -146,21 +162,19 @@ describe("approved invoice PO-line cost reconciliation", () => {
       "ops-user",
     );
 
+    const { lockInventoryCostGraph } = await import("../../../inventory/infrastructure/cost-evidence.repository");
+    expect(vi.mocked(lockInventoryCostGraph).mock.invocationCallOrder[0]).toBeLessThan(client.select.mock.invocationCallOrder[0]);
     expect(result).toMatchObject({
-      state: "invoice_actual",
+      state: "confirmed_invoice_cost",
       authoritativeUnitCostMills: 550,
       approvedInvoiceIds: [12],
       approvedQty: "100",
     });
-    expect(mocks.reconcileInvoiceVariance).toHaveBeenCalledWith(expect.objectContaining({
-      purchaseOrderId: 7,
-      purchaseOrderLineId: 50,
-      invoiceUnitCostMills: 550,
-      costSource: "invoice",
-    }), client);
+    expect(mocks.reconcilePurchaseCostEvidence).toHaveBeenCalledWith(client, 50, expect.any(Object), expect.any(String), expect.any(Date));
   });
 
-  it("keeps PO cost while approved invoice quantity is incomplete", async () => {
+  it("requires component review while approved invoice quantity is incomplete", async () => {
+    mocks.reconcilePurchaseCostEvidence.mockResolvedValue(componentResult({ evidence: "review_required" }));
     const client = clientFor([
       [poLine],
       [invoiceLine({ qtyInvoiced: 40 })],
@@ -172,17 +186,15 @@ describe("approved invoice PO-line cost reconciliation", () => {
     const result = await reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction(50, client);
 
     expect(result).toMatchObject({
-      state: "po_fallback_incomplete_invoice_quantity",
-      authoritativeUnitCostMills: 500,
+      state: "review_required",
+      authoritativeUnitCostMills: null,
       approvedQty: "40",
     });
-    expect(mocks.reconcileInvoiceVariance).toHaveBeenCalledWith(expect.objectContaining({
-      invoiceUnitCostMills: 500,
-      costSource: "po",
-    }), client);
+    expect(mocks.reconcilePurchaseCostEvidence).toHaveBeenCalledWith(client, 50, expect.any(Object), expect.any(String), expect.any(Date));
   });
 
-  it("uses quantity-weighted invoice mills when complete approved lines have different prices", async () => {
+  it("uses the exact component total even when legacy invoice unit prices disagree", async () => {
+    mocks.reconcilePurchaseCostEvidence.mockResolvedValue(componentResult({ product: 77700 }));
     const client = clientFor([
       [poLine],
       [
@@ -200,18 +212,16 @@ describe("approved invoice PO-line cost reconciliation", () => {
     const result = await reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction(50, client);
 
     expect(result).toMatchObject({
-      state: "invoice_actual",
-      authoritativeUnitCostMills: 565,
+      state: "confirmed_invoice_cost",
+      authoritativeUnitCostMills: 777,
       approvedInvoiceIds: [12, 13],
       approvedQty: "100",
     });
-    expect(mocks.reconcileInvoiceVariance).toHaveBeenCalledWith(expect.objectContaining({
-      invoiceUnitCostMills: 565,
-      costSource: "invoice",
-    }), client);
+    expect(mocks.reconcilePurchaseCostEvidence).toHaveBeenCalledWith(client, 50, expect.any(Object), expect.any(String), expect.any(Date));
   });
 
-  it("uses final received pieces as cost coverage for a short-closed PO line", async () => {
+  it("retains final received quantity diagnostics for a short-closed PO line", async () => {
+    mocks.reconcilePurchaseCostEvidence.mockResolvedValue(componentResult({ product: 33000, pieces: 60 }));
     const client = clientFor([
       [{ ...poLine, status: "closed", receivedQty: 60 }],
       [invoiceLine({ qtyInvoiced: 60 })],
@@ -223,13 +233,14 @@ describe("approved invoice PO-line cost reconciliation", () => {
     const result = await reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction(50, client);
 
     expect(result).toMatchObject({
-      state: "invoice_actual",
+      state: "confirmed_invoice_cost",
       authoritativeUnitCostMills: 550,
       approvedQty: "60",
     });
   });
 
-  it("ignores disputed and voided invoices when selecting actual cost", async () => {
+  it("reports estimated PO components when no invoice is approved", async () => {
+    mocks.reconcilePurchaseCostEvidence.mockResolvedValue(componentResult({ evidence: "estimated", product: 50000 }));
     const client = clientFor([
       [poLine],
       [invoiceLine()],
@@ -241,10 +252,35 @@ describe("approved invoice PO-line cost reconciliation", () => {
     const result = await reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction(50, client);
 
     expect(result).toMatchObject({
-      state: "po_fallback_no_approved_invoice",
+      state: "estimated_purchase_cost",
       authoritativeUnitCostMills: 500,
       approvedInvoiceIds: [],
       approvedQty: "0",
     });
+  });
+  it("does not claim an authoritative scalar while exact components need lineage review", async () => {
+    mocks.reconcilePurchaseCostEvidence.mockResolvedValue(componentResult({ review: true }));
+    const client = clientFor([[poLine], [invoiceLine()], [{ id: 12, status: "approved" }]]);
+    const { reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction } = await import("../../ap-ledger.service");
+    const result = await reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction(50, client, "operator");
+    expect(result).toMatchObject({ state: "review_required", authoritativeUnitCostMills: null,
+      costSourceState: "confirmed", costApplicationState: "review_required", quantityCoverage: { complete: true } });
+    expect(client.audits).toEqual([expect.objectContaining({ context: expect.objectContaining({ state: "review_required", authoritativeUnitCostMills: null }) })]);
+  });
+
+  it("preserves exact source totals without claiming a rounded per-piece scalar", async () => {
+    mocks.reconcilePurchaseCostEvidence.mockResolvedValue(componentResult({ product: 56501 }));
+    const client = clientFor([[poLine], [invoiceLine()], [{ id: 12, status: "approved" }]]);
+    const { reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction } = await import("../../ap-ledger.service");
+    const result = await reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction(50, client);
+    expect(result).toMatchObject({ state: "confirmed_invoice_cost", authoritativeUnitCostMills: null,
+      costSources: [{ contract: { totalMills: 56501, basePieces: 100 } }, { contract: { totalMills: 5000 } }] });
+  });
+
+  it("cannot treat missing component applications as completed cost authority", async () => {
+    mocks.reconcilePurchaseCostEvidence.mockResolvedValue({ ...componentResult(), costApplications: [] });
+    const client = clientFor([[poLine], [invoiceLine()], [{ id: 12, status: "approved" }]]);
+    const { reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction } = await import("../../ap-ledger.service");
+    expect(await reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction(50, client)).toMatchObject({ state: "review_required", authoritativeUnitCostMills: null });
   });
 });

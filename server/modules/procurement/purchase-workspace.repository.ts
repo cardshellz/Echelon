@@ -1,4 +1,7 @@
-import { sql, type SQL } from "drizzle-orm";
+import { readRows, dateValues, moneyValues, uniqueIds, PURCHASE_WORKSPACE_RECORD_LIMIT, PURCHASE_WORKSPACE_LINE_LIMIT, type Row } from "./purchase-workspace-read";
+import { readPurchaseCostEvidence } from "./purchase-cost-trace.repository";
+export { PURCHASE_WORKSPACE_RECORD_LIMIT, PURCHASE_WORKSPACE_LINE_LIMIT } from "./purchase-workspace-read";
+import { sql } from "drizzle-orm";
 import { db as defaultDatabase } from "../../db";
 import { purchaseWorkspaceSchema, type PurchaseWorkspace } from "@shared/procurement/purchase-workspace";
 import {
@@ -8,77 +11,6 @@ import {
 } from "./purchase-workspace.service";
 
 type Database = Pick<typeof defaultDatabase, "transaction">;
-type Transaction = Parameters<Parameters<typeof defaultDatabase.transaction>[0]>[0];
-type Row = Record<string, unknown>;
-
-// A single purchase workspace must remain bounded. Exceeding a limit fails
-// explicitly rather than presenting silently truncated historical relationships.
-export const PURCHASE_WORKSPACE_RECORD_LIMIT = 2_000;
-export const PURCHASE_WORKSPACE_LINE_LIMIT = 10_000;
-
-async function readRows(tx: Transaction, query: SQL, section: string, limit: number): Promise<Row[]> {
-  const result = await tx.execute(query);
-  const rows = result.rows as Row[];
-  if (rows.length > limit) {
-    throw new PurchaseWorkspaceError(
-      "PURCHASE_WORKSPACE_TOO_LARGE",
-      `The ${section} section exceeds the workspace limit. Open the source records to inspect this purchase.`,
-      422,
-    );
-  }
-  return rows;
-}
-
-function dateValues(row: Row, fields: readonly string[]): Row {
-  const result = { ...row };
-  for (const field of fields) {
-    const value = result[field];
-    if (value === null) continue;
-    if (!(value instanceof Date) && typeof value !== "string") {
-      throw new PurchaseWorkspaceError("PURCHASE_WORKSPACE_DATE_INVALID", `Invalid recorded date: ${field}.`, 500);
-    }
-    const date = value instanceof Date ? value : new Date(value);
-    if (!Number.isFinite(date.getTime())) {
-      throw new PurchaseWorkspaceError("PURCHASE_WORKSPACE_DATE_INVALID", `Invalid recorded date: ${field}.`, 500);
-    }
-    result[field] = date.toISOString();
-  }
-  return result;
-}
-
-function moneyValues(row: Row, fields: readonly string[]): Row {
-  const result = { ...row };
-  for (const field of fields) {
-    const value = result[field];
-    if (value === null) continue;
-    // Raw PostgreSQL bigint results are strings. Never round an unsafe amount
-    // into a JavaScript number before checking its exact integer range.
-    if (typeof value === "string" && /^-?\d+$/.test(value)) {
-      const exact = BigInt(value);
-      if (exact >= BigInt(Number.MIN_SAFE_INTEGER) && exact <= BigInt(Number.MAX_SAFE_INTEGER)) {
-        result[field] = Number(exact);
-        continue;
-      }
-    } else if (typeof value === "number" && Number.isSafeInteger(value)) {
-      continue;
-    }
-    throw new PurchaseWorkspaceError("PURCHASE_WORKSPACE_MONEY_INVALID", `Unsafe or invalid recorded amount: ${field}.`, 500);
-  }
-  return result;
-}
-
-function uniqueIds(values: unknown[]): number[] {
-  const result = new Set<number>();
-  for (const value of values) {
-    if (value === null) continue;
-    if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
-      throw new PurchaseWorkspaceError("PURCHASE_WORKSPACE_REFERENCE_INVALID", "A recorded document reference is invalid.", 500);
-    }
-    result.add(value);
-  }
-  return [...result].sort((left, right) => left - right);
-}
-
 export function createPurchaseWorkspaceRepository(database: Database = defaultDatabase): PurchaseWorkspaceRepository {
   return {
     async read(purchaseOrderId): Promise<PurchaseWorkspaceSnapshot | null> {
@@ -98,8 +30,8 @@ export function createPurchaseWorkspaceRepository(database: Database = defaultDa
         `, "purchase", 1);
         if (purchases.length === 0) return null;
 
-        const [purchaseLines, receiptRows, directShipmentRows, directInvoiceRows] = await Promise.all([
-          readRows(tx, sql`
+        const [purchaseLines, receiptRows, directShipmentRows, directInvoiceRows] = [
+          await readRows(tx, sql`
             SELECT id, sku, product_name AS "productName", line_type AS "lineType",
               order_qty AS "orderedQty", received_qty AS "receivedQty", cancelled_qty AS "cancelledQty",
               CASE WHEN line_type = 'product' THEN 'pieces' ELSE 'not_applicable' END AS "quantityBasis"
@@ -107,7 +39,7 @@ export function createPurchaseWorkspaceRepository(database: Database = defaultDa
             WHERE purchase_order_id = ${purchaseOrderId}
             ORDER BY line_number, id LIMIT ${PURCHASE_WORKSPACE_LINE_LIMIT + 1}
           `, "purchase lines", PURCHASE_WORKSPACE_LINE_LIMIT),
-          readRows(tx, sql`
+          await readRows(tx, sql`
             SELECT ro.id, ro.receipt_number AS "receiptNumber", ro.status,
               ro.purchase_order_id AS "purchaseOrderId", ro.inbound_shipment_id AS "inboundShipmentId",
               ro.expected_date AS "expectedDate", ro.received_date AS "receivedDate", ro.closed_date AS "closedDate"
@@ -124,29 +56,35 @@ export function createPurchaseWorkspaceRepository(database: Database = defaultDa
               )
             ORDER BY ro.created_at, ro.id LIMIT ${PURCHASE_WORKSPACE_RECORD_LIMIT + 1}
           `, "receipts", PURCHASE_WORKSPACE_RECORD_LIMIT),
-          readRows(tx, sql`
+          await readRows(tx, sql`
             SELECT DISTINCT sl.inbound_shipment_id AS id
             FROM procurement.inbound_shipment_lines sl
             LEFT JOIN procurement.purchase_order_lines pol ON pol.id = sl.purchase_order_line_id
             WHERE sl.purchase_order_id = ${purchaseOrderId} OR pol.purchase_order_id = ${purchaseOrderId}
             ORDER BY sl.inbound_shipment_id LIMIT ${PURCHASE_WORKSPACE_RECORD_LIMIT + 1}
           `, "purchase shipment links", PURCHASE_WORKSPACE_RECORD_LIMIT),
-          readRows(tx, sql`
+          await readRows(tx, sql`
             SELECT l.vendor_invoice_id AS "invoiceId", i.inbound_shipment_id AS "shipmentId"
             FROM procurement.vendor_invoice_po_links l
             JOIN procurement.vendor_invoices i ON i.id = l.vendor_invoice_id
             WHERE l.purchase_order_id = ${purchaseOrderId}
-            ORDER BY l.vendor_invoice_id LIMIT ${PURCHASE_WORKSPACE_RECORD_LIMIT + 1}
+            UNION
+            SELECT il.vendor_invoice_id AS "invoiceId", i.inbound_shipment_id AS "shipmentId"
+            FROM procurement.vendor_invoice_lines il
+            JOIN procurement.vendor_invoices i ON i.id = il.vendor_invoice_id
+            JOIN procurement.purchase_order_lines pol ON pol.id = il.purchase_order_line_id
+            WHERE pol.purchase_order_id = ${purchaseOrderId}
+            ORDER BY "invoiceId" LIMIT ${PURCHASE_WORKSPACE_RECORD_LIMIT + 1}
           `, "purchase invoice links", PURCHASE_WORKSPACE_RECORD_LIMIT),
-        ]);
+        ] as const;
 
         const shipmentIds = uniqueIds([
           ...directShipmentRows.map((row) => row.id),
           ...receiptRows.map((row) => row.inboundShipmentId),
           ...directInvoiceRows.map((row) => row.shipmentId),
         ]);
-        const [shipmentRows, shipmentLines, shipmentInvoiceRows, connectedReceiptRows] = shipmentIds.length === 0 ? [[], [], [], []] : await Promise.all([
-          readRows(tx, sql`
+        const [shipmentRows, shipmentLines, shipmentInvoiceRows, connectedReceiptRows] = shipmentIds.length === 0 ? [[], [], [], []] : [
+          await readRows(tx, sql`
             SELECT id, shipment_number AS "shipmentNumber", status, mode, container_number AS "containerNumber",
               eta, delivered_date AS "deliveredDate", estimated_total_cost_cents AS "estimatedTotalCostCents",
               actual_total_cost_cents AS "actualTotalCostCents"
@@ -154,7 +92,7 @@ export function createPurchaseWorkspaceRepository(database: Database = defaultDa
             WHERE id = ANY(${sql.param(shipmentIds)}::int[])
             ORDER BY created_at, id LIMIT ${PURCHASE_WORKSPACE_RECORD_LIMIT + 1}
           `, "shipments", PURCHASE_WORKSPACE_RECORD_LIMIT),
-          readRows(tx, sql`
+          await readRows(tx, sql`
             SELECT sl.id, sl.inbound_shipment_id AS "shipmentId", sl.purchase_order_id AS "purchaseOrderId",
               sl.purchase_order_line_id AS "purchaseOrderLineId",
               pol.purchase_order_id AS "purchaseOrderLinePurchaseOrderId",
@@ -164,7 +102,7 @@ export function createPurchaseWorkspaceRepository(database: Database = defaultDa
             WHERE sl.inbound_shipment_id = ANY(${sql.param(shipmentIds)}::int[])
             ORDER BY sl.inbound_shipment_id, sl.id LIMIT ${PURCHASE_WORKSPACE_LINE_LIMIT + 1}
           `, "shipment lines", PURCHASE_WORKSPACE_LINE_LIMIT),
-          readRows(tx, sql`
+          await readRows(tx, sql`
             SELECT id AS "invoiceId", inbound_shipment_id AS "shipmentId"
             FROM procurement.vendor_invoices WHERE inbound_shipment_id = ANY(${sql.param(shipmentIds)}::int[])
             UNION
@@ -173,7 +111,7 @@ export function createPurchaseWorkspaceRepository(database: Database = defaultDa
             WHERE inbound_shipment_id = ANY(${sql.param(shipmentIds)}::int[]) AND vendor_invoice_id IS NOT NULL
             ORDER BY "invoiceId", "shipmentId" LIMIT ${PURCHASE_WORKSPACE_LINE_LIMIT + 1}
           `, "shipment invoice links", PURCHASE_WORKSPACE_LINE_LIMIT),
-          readRows(tx, sql`
+          await readRows(tx, sql`
             SELECT id, receipt_number AS "receiptNumber", status,
               purchase_order_id AS "purchaseOrderId", inbound_shipment_id AS "inboundShipmentId",
               expected_date AS "expectedDate", received_date AS "receivedDate", closed_date AS "closedDate"
@@ -181,7 +119,7 @@ export function createPurchaseWorkspaceRepository(database: Database = defaultDa
             WHERE inbound_shipment_id = ANY(${sql.param(shipmentIds)}::int[])
             ORDER BY created_at, id LIMIT ${PURCHASE_WORKSPACE_RECORD_LIMIT + 1}
           `, "connected shipment receipts", PURCHASE_WORKSPACE_RECORD_LIMIT),
-        ]);
+        ] as const;
         const invoiceIds = uniqueIds([
           ...directInvoiceRows.map((row) => row.invoiceId),
           ...shipmentInvoiceRows.map((row) => row.invoiceId),
@@ -189,8 +127,8 @@ export function createPurchaseWorkspaceRepository(database: Database = defaultDa
         if (invoiceIds.length > PURCHASE_WORKSPACE_RECORD_LIMIT) {
           throw new PurchaseWorkspaceError("PURCHASE_WORKSPACE_TOO_LARGE", "Too many linked invoices for one workspace.", 422);
         }
-        const [invoiceRows, invoicePoLinks] = invoiceIds.length === 0 ? [[], []] : await Promise.all([
-          readRows(tx, sql`
+        const [invoiceRows, invoicePoLinks] = invoiceIds.length === 0 ? [[], []] : [
+          await readRows(tx, sql`
             SELECT id, invoice_number AS "invoiceNumber", status, currency,
               invoice_date AS "invoiceDate", due_date AS "dueDate", inbound_shipment_id AS "inboundShipmentId",
               invoiced_amount_cents AS "invoicedAmountCents", paid_amount_cents AS "paidAmountCents", balance_cents AS "balanceCents"
@@ -198,14 +136,14 @@ export function createPurchaseWorkspaceRepository(database: Database = defaultDa
             WHERE id = ANY(${sql.param(invoiceIds)}::int[])
             ORDER BY invoice_date, id LIMIT ${PURCHASE_WORKSPACE_RECORD_LIMIT + 1}
           `, "invoices", PURCHASE_WORKSPACE_RECORD_LIMIT),
-          readRows(tx, sql`
+          await readRows(tx, sql`
             SELECT vendor_invoice_id AS "invoiceId", purchase_order_id AS "purchaseOrderId",
               allocated_amount_cents AS "allocatedAmountCents"
             FROM procurement.vendor_invoice_po_links
             WHERE vendor_invoice_id = ANY(${sql.param(invoiceIds)}::int[])
             ORDER BY vendor_invoice_id, purchase_order_id LIMIT ${PURCHASE_WORKSPACE_LINE_LIMIT + 1}
           `, "invoice purchase links", PURCHASE_WORKSPACE_LINE_LIMIT),
-        ]);
+        ] as const;
 
         const linesByShipment = new Map<number, Row[]>();
         for (const line of shipmentLines) {
@@ -257,6 +195,7 @@ export function createPurchaseWorkspaceRepository(database: Database = defaultDa
 
         return {
           purchase,
+          costEvidence: await readPurchaseCostEvidence(tx, purchaseOrderId, shipmentIds),
           shipments,
           receipts,
           invoices,

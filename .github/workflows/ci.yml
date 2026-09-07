@@ -79,6 +79,20 @@ jobs:
         run: >-
           npx vitest run
           server/modules/procurement/__tests__/integration/procurement-cost-evidence.integration.test.ts
+      - name: Integrated procurement costing and lineage PostgreSQL guarantees
+        run: >-
+          npx vitest run --no-file-parallelism
+          server/modules/procurement/__tests__/integration/receiving-cost-application.integration.test.ts
+          server/modules/inventory/__tests__/integration/cost-lineage-owners.integration.test.ts
+          server/modules/inventory/__tests__/integration/canonical-claim-picker-observation.integration.test.ts
+      - name: Invoice component review PostgreSQL guarantees
+        run: >-
+          npx vitest run
+          server/modules/procurement/__tests__/integration/invoice-cost-review.integration.test.ts
+      - name: Purchase approval authority PostgreSQL guarantees
+        run: >-
+          npx vitest run
+          server/modules/procurement/__tests__/integration/purchase-approval-authority.integration.test.ts
       - name: PO email outbox PostgreSQL guarantees
         run: >-
           npx vitest run

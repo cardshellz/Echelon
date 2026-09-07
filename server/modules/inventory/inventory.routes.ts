@@ -2769,7 +2769,7 @@ export function registerInventoryRoutes(app: Express) {
       const note = String(req.body?.reason ?? "").trim();
       const reason = note ? `manual_recost: ${note}` : "manual_recost";
       const perPieceMills = Math.round(dollars * 10000);
-      const result = await cogs.recostLotPerPiece(lotId, perPieceMills, reason);
+      const result = await cogs.recostLotPerPiece(lotId, perPieceMills, reason, req.session.user?.id);
       if (!result) return res.status(404).json({ error: "Lot not found" });
       res.json(result);
     } catch (error: any) {

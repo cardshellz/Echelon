@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { purchaseCostTraceSchema } from "./purchase-cost-trace";
 
 const id = z.number().int().positive().safe();
 const integer = z.number().int().safe();
@@ -99,6 +100,7 @@ export const purchaseWorkspaceSchema = z.object({
       "shipment_invoice",
     ]),
   })),
+  costTrace: purchaseCostTraceSchema.nullable().optional(),
   limitations: z.array(z.string()),
 });
 export type PurchaseWorkspace = z.infer<typeof purchaseWorkspaceSchema>;

@@ -409,6 +409,18 @@
   "inventory.cost_adjustment_log": [
     "modules/inventory"
   ],
+  "inventory.cost_application_lots": [
+    "modules/inventory"
+  ],
+  "inventory.cost_applications": [
+    "modules/inventory"
+  ],
+  "inventory.cost_component_protections": [
+    "modules/inventory"
+  ],
+  "inventory.cost_reporting_events": [
+    "modules/inventory"
+  ],
   "inventory.cycle_count_items": [
     "modules/inventory"
   ],
@@ -780,6 +792,12 @@
   "procurement.purchasing_recommendation_po_handoffs": [
     "modules/procurement"
   ],
+  "procurement.receipt_cost_attempts": [
+    "modules/procurement"
+  ],
+  "procurement.receipt_cost_requests": [
+    "modules/procurement"
+  ],
   "procurement.receipt_reversals": [
     "modules/procurement"
   ],
@@ -990,6 +1008,9 @@
   "shipping.variant_shipping_attrs": [
     "modules/shipping-engine"
   ],
+  "warehouse.assembly_packing_handoff_receipts": [
+    "modules/warehouse"
+  ],
   "warehouse.echelon_settings": [
     "modules/orders",
     "modules/warehouse",
@@ -1020,19 +1041,16 @@
   "warehouse.work_access_scopes": [
     "modules/warehouse"
   ],
-  "warehouse.assembly_packing_handoff_receipts": [
-    "modules/warehouse"
-  ],
   "warehouse.work_configuration_revisions": [
     "modules/warehouse"
   ],
-  "warehouse.work_stations": [
+  "warehouse.work_item_events": [
     "modules/warehouse"
   ],
   "warehouse.work_items": [
     "modules/warehouse"
   ],
-  "warehouse.work_item_events": [
+  "warehouse.work_stations": [
     "modules/warehouse"
   ],
   "wms.allocation_exceptions": [

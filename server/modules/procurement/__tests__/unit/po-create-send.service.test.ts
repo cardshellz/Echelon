@@ -1,3 +1,4 @@
+import { costGraphLockExecute } from "./cost-graph.fixture";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { createPurchasingService, PurchasingError } from "../../purchasing.service";
 
@@ -37,7 +38,7 @@ function buildMockDb() {
         }),
       }),
     }),
-    transaction: vi.fn(async (fn: any) => fn({ insert: vi.fn().mockReturnValue(insertBuilder), update: vi.fn(), select: vi.fn() })),
+    transaction: vi.fn(async (fn: any) => fn({ execute: costGraphLockExecute(), insert: vi.fn().mockReturnValue(insertBuilder), update: vi.fn(), select: vi.fn() })),
   };
 }
 
@@ -46,6 +47,7 @@ function buildLifecycleDb(selectResults: any[][]) {
   const insertedRows: any[] = [];
   let selectIndex = 0;
   const tx: any = {
+    execute: costGraphLockExecute(),
     select: vi.fn(() => {
       const rows = selectResults[selectIndex++] ?? [];
       const chain: any = {

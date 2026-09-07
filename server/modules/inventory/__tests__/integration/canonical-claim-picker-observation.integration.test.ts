@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import { config } from "dotenv";
@@ -117,11 +118,11 @@ describeWithDisposableDb.sequential("canonical claim picker-observation PostgreS
         build_order_id integer,
         build_run_id integer,
         po_line_id integer,
-        unit_cost_cents numeric(10,4) NOT NULL DEFAULT 0,
-        po_unit_cost_cents numeric(10,4) NOT NULL DEFAULT 0,
-        packaging_cost_cents numeric(10,4) NOT NULL DEFAULT 0,
-        landed_cost_cents numeric(10,4) NOT NULL DEFAULT 0,
-        total_unit_cost_cents numeric(10,4) NOT NULL DEFAULT 0,
+        unit_cost_cents bigint NOT NULL DEFAULT 0,
+        po_unit_cost_cents bigint NOT NULL DEFAULT 0,
+        packaging_cost_cents bigint NOT NULL DEFAULT 0,
+        landed_cost_cents bigint NOT NULL DEFAULT 0,
+        total_unit_cost_cents bigint NOT NULL DEFAULT 0,
         unit_cost_mills bigint NOT NULL DEFAULT 0,
         po_unit_cost_mills bigint NOT NULL DEFAULT 0,
         packaging_cost_mills bigint NOT NULL DEFAULT 0,
@@ -152,7 +153,7 @@ describeWithDisposableDb.sequential("canonical claim picker-observation PostgreS
         reserved_qty_delta integer,
         source_state varchar(30),
         target_state varchar(30),
-        unit_cost_cents numeric(10,4),
+        unit_cost_cents bigint,
         unit_cost_mills bigint,
         total_cost_mills bigint,
         inventory_lot_id integer,
@@ -212,14 +213,21 @@ describeWithDisposableDb.sequential("canonical claim picker-observation PostgreS
         cost_provisional, cost_source, created_at
       ) VALUES
         (51, 'SOURCE-51', 105, 2, 401, 402, 403, 404,
-         1.25, 1.00, 0.20, 0.05, 1.25, 125, 100, 20, 5, 125,
+         1, 1, 0, 0, 1, 125, 100, 20, 5, 125,
          3, 3, 3, '${OCCURRED_AT.toISOString()}', 'active', 0, 'purchase_order', '${OCCURRED_AT.toISOString()}'),
         (52, 'TARGET-52', 105, 3, 405, 406, 407, 408,
-         1.25, 1.00, 0.20, 0.05, 1.25, 125, 100, 20, 5, 125,
+         1, 1, 0, 0, 1, 125, 100, 20, 5, 125,
          1, 1, 0, '${OCCURRED_AT.toISOString()}', 'active', 0, 'purchase_order', '${OCCURRED_AT.toISOString()}');
       INSERT INTO "${schemas.wms}".orders (id, order_number) VALUES (70, 'ORDER-70');
       INSERT INTO "${schemas.wms}".order_items (id, order_id, sku) VALUES (71, 70, 'P5');
     `);
+    const costMigration = await readFile(resolve(process.cwd(), "migrations/222_procurement_cost_evidence.sql"), "utf8");
+    const contributionStart = costMigration.indexOf("CREATE TABLE IF NOT EXISTS inventory.lot_cost_contributions (");
+    const contributionEnd = costMigration.indexOf("CREATE TABLE IF NOT EXISTS inventory.cost_applications (");
+    if (contributionStart < 0 || contributionEnd <= contributionStart) {
+      throw new Error("The cost contribution migration fixture boundaries changed.");
+    }
+    await pool.query(qualify(costMigration.slice(contributionStart, contributionEnd)));
   }, 300_000);
 
   afterAll(async () => {
@@ -309,6 +317,13 @@ describeWithDisposableDb.sequential("canonical claim picker-observation PostgreS
         observedRelocatedQuantity: BigInt(2),
       });
       expect(result.relocatedInventoryLotIds).toHaveLength(1);
+      const contributions = await client.query(qualify(`SELECT source_lot_id,output_lot_id,source_qty,output_qty,output_start_qty,operation_kind,operation_key,recorded_by
+        FROM inventory.lot_cost_contributions ORDER BY id`));
+      expect(contributions.rows).toEqual([{
+        source_lot_id: 51, output_lot_id: result.relocatedInventoryLotIds[0],
+        source_qty: 2, output_qty: 2, output_start_qty: 0, operation_kind: "transfer",
+        operation_key: `claim_observation:9:${"a".repeat(64)}`, recorded_by: "integration-test",
+      }]);
     } catch (error) {
       await client.query("ROLLBACK");
       throw error;
@@ -447,7 +462,7 @@ describeWithDisposableDb.sequential("canonical claim picker-observation PostgreS
         qty_received, qty_on_hand, qty_reserved, received_at, status,
         cost_provisional, cost_source, created_at
       ) VALUES
-        (61, 'COUNT-61', 205, 4, 1.25, 1.25, 1.25, 125, 125, 125,
+        (61, 'COUNT-61', 205, 4, 1, 1, 1, 125, 125, 125,
          6, 6, 4, '${OCCURRED_AT.toISOString()}', 'active', 0, 'purchase_order', '${OCCURRED_AT.toISOString()}'),
         (62, 'COUNT-62', 205, 4, 2.00, 2.00, 2.00, 200, 200, 200,
          4, 4, 0, '${OCCURRED_AT.toISOString()}', 'active', 0, 'purchase_order', '${OCCURRED_AT.toISOString()}');
