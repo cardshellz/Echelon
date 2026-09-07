@@ -4,9 +4,13 @@ import type { ListingPriceRepository, ListingPriceTransaction } from "../applica
 import { DropshipError } from "../domain/errors";
 import { pool as defaultPool } from "../../../db";
 import { PgDropshipListingPreviewRepository } from "./dropship-listing-preview.repository";
+import { readPricingProfile } from "./dropship-pricing-profile.reader";
+import { PgShellzClubProductCostAdapter } from "./shellz-club-product-cost.adapter";
+import { resolveListingRulePrice } from "../application/dropship-rule-price";
 
 interface PriceRow {
   product_variant_id: number; revision_id: number; override_price_cents: number | null; updated_at: Date;
+  pricing_mode?: "fixed" | "catalog_default" | "rules" | null;
 }
 interface RevisionRow extends PriceRow { request_hash: string; store_connection_id: number }
 
@@ -46,6 +50,12 @@ export class PgDropshipListingPriceRepository implements ListingPriceRepository 
       const result = await operation({
         vendorId, catalog: PgDropshipListingPreviewRepository.readerForTransaction(client),
         loadSaved: () => loadSaved(client, target),
+        loadRulePrice: async (candidate) => {
+          const state = await readPricingProfile(client, target.storeConnectionId, vendorId);
+          if (!state.profile) return null;
+          const costs = await PgShellzClubProductCostAdapter.forTransaction(client).loadProductCosts({ vendorId, productVariantIds: [candidate.productVariantId] });
+          return resolveListingRulePrice({ state, candidate, cost: costs.get(candidate.productVariantId) ?? null });
+        },
         save: (saveInput) => {
           if (!input.idempotencyKey || saveInput.idempotencyKey !== input.idempotencyKey) {
             throw new DropshipError("DROPSHIP_IDEMPOTENCY_CONFLICT", "Price writes require the transaction's original save key.");
@@ -63,7 +73,7 @@ export class PgDropshipListingPriceRepository implements ListingPriceRepository 
 }
 
 async function loadSaved(client: PoolClient, input: ListingPriceTarget & { vendorId: number }): Promise<SavedListingPriceRevision | null> {
-  const result = await client.query<PriceRow>(`SELECT product_variant_id, revision_id, override_price_cents, updated_at
+  const result = await client.query<PriceRow>(`SELECT product_variant_id, revision_id, override_price_cents, pricing_mode, updated_at
     FROM dropship.dropship_listing_price_settings
     WHERE vendor_id = $1 AND store_connection_id = $2 AND product_variant_id = $3 FOR UPDATE`,
     [input.vendorId, input.storeConnectionId, input.productVariantId]);
@@ -74,7 +84,7 @@ async function saveWithClient(client: PoolClient,
   target: ListingPriceTarget & { vendorId: number; memberId: string },
   input: SaveListingPriceInput & { requestHash: string; now: Date }): Promise<{ saved: SavedListingPriceRevision; idempotentReplay: boolean }> {
   const replay = await client.query<RevisionRow>(`SELECT id AS revision_id, product_variant_id,
-    store_connection_id, override_price_cents, created_at AS updated_at, request_hash
+    store_connection_id, override_price_cents, pricing_mode, created_at AS updated_at, request_hash
     FROM dropship.dropship_listing_price_revisions WHERE vendor_id = $1 AND idempotency_key = $2`,
     [target.vendorId, input.idempotencyKey]);
   if (replay.rows[0]) {
@@ -94,19 +104,23 @@ async function saveWithClient(client: PoolClient,
   }
   const revision = await client.query<{ id: number }>(`INSERT INTO dropship.dropship_listing_price_revisions
     (vendor_id, store_connection_id, product_variant_id, previous_revision_id, override_price_cents,
-     idempotency_key, request_hash, actor_id, created_at)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
+     idempotency_key, request_hash, actor_id, created_at, pricing_mode)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING id`,
     [target.vendorId, target.storeConnectionId, target.productVariantId, before?.revisionId ?? null,
-      input.priceCents, input.idempotencyKey, input.requestHash, target.memberId, input.now]);
+      input.priceCents, input.idempotencyKey, input.requestHash, target.memberId, input.now,
+      input.pricingMode ?? (input.priceCents === null ? "catalog_default" : "fixed")]);
   const revisionId = revision.rows[0]?.id;
   if (!revisionId) throw new Error("Listing price revision insert returned no identity.");
   await client.query(`INSERT INTO dropship.dropship_listing_price_settings
-    (vendor_id, store_connection_id, product_variant_id, revision_id, override_price_cents, updated_at)
-    VALUES ($1,$2,$3,$4,$5,$6)
+    (vendor_id, store_connection_id, product_variant_id, revision_id, override_price_cents, updated_at, pricing_mode)
+    VALUES ($1,$2,$3,$4,$5,$6,$7)
     ON CONFLICT (store_connection_id, product_variant_id) DO UPDATE SET
-      revision_id = EXCLUDED.revision_id, override_price_cents = EXCLUDED.override_price_cents, updated_at = EXCLUDED.updated_at`,
-    [target.vendorId, target.storeConnectionId, target.productVariantId, revisionId, input.priceCents, input.now]);
-  const saved = { productVariantId: target.productVariantId, revisionId, overridePriceCents: input.priceCents, updatedAt: input.now.toISOString() };
+      revision_id = EXCLUDED.revision_id, override_price_cents = EXCLUDED.override_price_cents, updated_at = EXCLUDED.updated_at,
+      pricing_mode = EXCLUDED.pricing_mode`,
+    [target.vendorId, target.storeConnectionId, target.productVariantId, revisionId, input.priceCents, input.now,
+      input.pricingMode ?? (input.priceCents === null ? "catalog_default" : "fixed")]);
+  const saved: SavedListingPriceRevision = { productVariantId: target.productVariantId, revisionId, overridePriceCents: input.priceCents,
+    pricingMode: input.pricingMode ?? (input.priceCents === null ? "catalog_default" : "fixed"), updatedAt: input.now.toISOString() };
   await client.query(`INSERT INTO dropship.dropship_audit_events
     (vendor_id, store_connection_id, entity_type, entity_id, event_type, actor_type, actor_id, severity, payload, created_at)
     VALUES ($1,$2,'dropship_listing_price_setting',$3,'listing_price_saved','vendor',$4,'info',$5::jsonb,$6)`,
@@ -116,5 +130,6 @@ async function saveWithClient(client: PoolClient,
 }
 function mapSaved(row: PriceRow): SavedListingPriceRevision {
   return { productVariantId: row.product_variant_id, revisionId: row.revision_id,
-    overridePriceCents: row.override_price_cents, updatedAt: row.updated_at.toISOString() };
+    overridePriceCents: row.override_price_cents, updatedAt: row.updated_at.toISOString(),
+    ...(row.pricing_mode ? { pricingMode: row.pricing_mode } : {}) };
 }
