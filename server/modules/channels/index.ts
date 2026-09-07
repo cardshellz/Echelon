@@ -10,6 +10,9 @@
  */
 
 // Storage
+export { ChannelIdentityService } from "./channel-identity.service";
+export { ChannelIdentityError } from "./channel-identity.domain";
+export type { ChannelItemIdentity } from "./channel-identity.domain";
 export { type IChannelStorage, channelMethods } from "./channels.storage";
 export { type IChannelCatalogStorage, channelCatalogMethods } from "./channel-catalog.storage";
 

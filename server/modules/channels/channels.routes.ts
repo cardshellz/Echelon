@@ -22,6 +22,8 @@ import {
 import { pool } from "../../db";
 import { channelConnections } from "@shared/schema";
 import { ShopifyAdapter } from "./adapters/shopify.adapter";
+import { ChannelIdentityService } from "./channel-identity.service";
+import { ChannelIdentityError } from "./channel-identity.domain";
 import { runShopifyWeightBackfill, createShopifyWeightBackfillDeps } from "./shopify-weight-backfill.service";
 import { rowToListingDto } from "./channel-listings.transform";
 import { toPublicChannelConnection } from "./channel-connection.transform";
@@ -64,10 +66,9 @@ export function registerChannelRoutes(app: Express) {
   // Enable a channel feed for a variant (create the link so sync can push inventory)
   app.post("/api/channel-feeds/enable", requirePermission("channels", "edit"), async (req, res) => {
     try {
-      const { channelId, productVariantId } = req.body;
-      if (!channelId || !productVariantId) {
-        return res.status(400).json({ error: "channelId and productVariantId are required" });
-      }
+      const parsed = z.object({ channelId: z.number().int().positive().safe(), productVariantId: z.number().int().positive().safe() }).safeParse(req.body);
+      if (!parsed.success) return res.status(400).json({ error: "Valid channelId and productVariantId are required" });
+      const { channelId, productVariantId } = parsed.data;
 
       const variant = await storage.getProductVariantById(productVariantId);
       if (!variant) return res.status(404).json({ error: "Variant not found" });
@@ -81,6 +82,20 @@ export function registerChannelRoutes(app: Express) {
         return res.status(409).json({
           error: "Digital or inventory-untracked variants cannot have an inventory feed",
         });
+      }
+
+      const destination = await storage.getChannelById(channelId);
+      if (!destination) return res.status(404).json({ error: "Channel not found" });
+      if (destination.provider === "shopify") {
+        const productLines = await storage.getProductLineIdsByProduct(variant.productId);
+        const channelLines = await storage.getActiveChannelProductLineIds(channelId);
+        if (productLines.length > 0 && !productLines.some((lineId: number) => channelLines.includes(lineId))) {
+          return res.status(403).json({ error: "This product's product line is not assigned to this channel" });
+        }
+        const feed = await new ChannelIdentityService(db).ensureShopifyFeed({
+          channelId, productVariantId, sku: variant.sku, actor: String((req as any).user?.id ?? "channel-feed-enable"),
+        });
+        return res.json(feed);
       }
 
       // Check if feed already exists
@@ -97,10 +112,8 @@ export function registerChannelRoutes(app: Express) {
       const channel = await storage.getChannelById(channelId);
       if (!channel) return res.status(404).json({ error: "Channel not found" });
 
-      // Use shopifyVariantId for Shopify channels, SKU for others
-      const channelVariantId = channel.provider === "shopify" && variant.shopifyVariantId
-        ? variant.shopifyVariantId
-        : variant.sku || String(variant.id);
+      // Shopify already returned through the verified identity owner above.
+      const channelVariantId = variant.sku || String(variant.id);
 
       const product = await storage.getProductById(variant.productId);
 
@@ -116,9 +129,7 @@ export function registerChannelRoutes(app: Express) {
         }
       }
 
-      const channelProductId = channel.provider === "shopify" && product?.shopifyProductId
-        ? product.shopifyProductId
-        : null;
+      const channelProductId = null;
 
       const feed = await storage.createChannelFeedDirect({
         channelId,
@@ -133,6 +144,7 @@ export function registerChannelRoutes(app: Express) {
       res.json(feed);
     } catch (error: any) {
       console.error("Error enabling channel feed:", error);
+      if (error instanceof ChannelIdentityError) return res.status(error.status).json({ code: error.code, error: error.message });
       res.status(500).json({ error: error.message || "Failed to enable feed" });
     }
   });
@@ -784,43 +796,10 @@ export function registerChannelRoutes(app: Express) {
         .filter((w: any) => w.shopifyLocationId)
         .map((w: any) => ({ warehouseId: w.id, warehouseCode: w.code, warehouseName: w.name, shopifyLocationId: w.shopifyLocationId }));
 
-      // Auto-create channel feeds for all product variants with Shopify variant IDs
-      let feedsCreated = 0;
-      let feedsUpdated = 0;
-      try {
-        const allVariants = await storage.getAllProductVariants();
-        const shopifyVariants = allVariants.filter(
-          (v: any) => v.shopifyVariantId && isCustomerSellableVariant(v),
-        );
-
-        // Build product ID → Shopify product ID map
-        const productIds = [...new Set(shopifyVariants.map((v: any) => v.productId))];
-        const productMap = new Map<number, string>();
-        for (const pid of productIds) {
-          const prod = await storage.getProductById(pid);
-          if (prod?.shopifyProductId) {
-            productMap.set(pid, prod.shopifyProductId);
-          }
-        }
-
-        for (const pv of shopifyVariants) {
-          const existing = await storage.getChannelFeedByVariantAndChannel(pv.id, 'shopify');
-          await storage.upsertChannelFeed({
-            channelId: channelId,
-            productVariantId: pv.id,
-            channelType: 'shopify',
-            channelVariantId: pv.shopifyVariantId!,
-            channelProductId: productMap.get(pv.productId) || null,
-            channelSku: pv.sku || null,
-            isActive: isInventoryManagedVariant(pv) ? 1 : 0,
-          });
-          if (existing) feedsUpdated++;
-          else feedsCreated++;
-        }
-        console.log(`[Setup Shopify] Channel feeds: ${feedsCreated} created, ${feedsUpdated} updated`);
-      } catch (feedErr) {
-        console.warn("Could not auto-create channel feeds:", feedErr);
-      }
+      // Connecting an account is not evidence that its products share catalog IDs.
+      // Feed discovery/enable verifies destination listings through the identity owner.
+      const feedsCreated = 0;
+      const feedsUpdated = 0;
 
       res.json({
         success: true,
@@ -832,7 +811,7 @@ export function registerChannelRoutes(app: Express) {
         },
         locations,
         mappings,
-        feeds: { created: feedsCreated, updated: feedsUpdated },
+        feeds: { created: feedsCreated, updated: feedsUpdated, requiresDestinationMapping: true },
       });
     } catch (error) {
       console.error("Error setting up Shopify connection:", error);
