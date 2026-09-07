@@ -38,7 +38,7 @@ No production defect frequency, inventory valuation impact or forecast accuracy 
 
 ## Next checks
 
-1. Review the three coordinated draft PRs together and check required CI on each exact head. Each incremental diff uses its immediate predecessor as the base.
+1. Foundation #1398 is already on main. Review runtime replacement #1404 and planning/lifecycle #1400 against main and verify CI on each exact head. Keep #1400 draft until #1404 is deployed; its main-based diff includes that prerequisite until it merges. Afterward update #1400 with current main if required and verify only the remaining planning/lifecycle changes before merging.
 2. Apply the release manifest in order. Preserve additive schemas and all recorded history. Code rollback does not undo posted quantities or costs; after lineage-writing commands begin, retain compatible physical writers or pause those commands while correcting forward.
 3. Review the first real daily recommendation run with known products: current stock, commitments, MOQ, lead stages, growth/replacement assumptions and missing evidence. Compare a representative domestic order and a long-lead imported order to the existing spreadsheet before treating the output as trusted daily input.
 4. Open representative split and consolidated purchases and reconcile their original RFQ, receipt quantities, invoice components, freight allocation and arrival evidence. Confirm pickable availability through the warehouse owner, separately from the procurement pipeline.

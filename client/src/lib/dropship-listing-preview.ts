@@ -23,6 +23,10 @@ export function safeListingImageUrl(value: string | null | undefined): string | 
 
 export function formatListingPreviewIssue(value: string): string {
   const labels: Record<string, string> = {
+    pricing_basis_unavailable: "The selected price basis is unavailable. No price was calculated.",
+    pricing_result_out_of_range: "The pricing rule must produce a positive price within the supported range.",
+    pricing_rule_priority_conflict: "Two matching groups share the winning priority. Give them different priorities.",
+    pricing_rules_not_configured: "Configure store pricing rules or save a fixed listing price.",
     "missing_config:marketplaceId": "eBay setup: Marketplace",
     "missing_config:merchantLocationKey": "eBay setup: Inventory location",
     "missing_config:businessPolicies.paymentPolicyId": "eBay setup: Payment policy",

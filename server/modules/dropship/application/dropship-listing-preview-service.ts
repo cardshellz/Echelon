@@ -1,5 +1,6 @@
 import { createHash } from "crypto";
 import { resolveListingPrice, type SavedListingPriceRevision } from "../../../../shared/dropship/listing-price";
+import type { ListingRulePrice } from "./dropship-rule-price";
 import { z } from "zod";
 import type { DropshipListingPresentation, DropshipListingEconomics } from "../../../../shared/dropship/listing-presentation";
 import type { CatalogImageFile } from "../../catalog/catalog-media.reader";
@@ -97,6 +98,8 @@ export interface DropshipPricingPolicyRecord {
 }
 
 export interface DropshipListingPreviewRow {
+  rulePriceEvidenceHash?: string | null;
+  pricingRuleName?: string | null;
   /** Local setting revision used to reject stale queue creation. */
   priceSettingRevisionId?: number | null;
   presentation?: DropshipListingPresentation;
@@ -184,6 +187,7 @@ export interface CreateDropshipListingPushJobRepositoryResult {
 }
 
 export interface DropshipListingPreviewRepository {
+  loadRulePrices?(input: { vendorId: number; storeConnectionId: number; candidates: readonly DropshipListingCatalogCandidate[] }): Promise<Map<number, ListingRulePrice>>;
   listSavedListingPrices(input: {
     vendorId: number; storeConnectionId: number; productVariantIds: readonly number[];
   }): Promise<SavedListingPriceRevision[]>;
@@ -345,6 +349,13 @@ export class DropshipListingPreviewService {
         storeConnectionId: parsed.storeConnectionId, productVariantIds: uniqueVariantIds }),
     ]);
 
+    const ruleEligibleCandidates = candidates.filter((candidate) => {
+      const exposure = evaluateDropshipCatalogExposure(candidate, adminRules, generatedAt);
+      return exposure.exposed && evaluateDropshipVendorCatalogSelection({ candidate, adminExposureDecision: exposure,
+        rules: selectionRules, rawAtpUnits: 0, override: overrides.find((row) => row.productVariantId === candidate.productVariantId) ?? null }).selected;
+    });
+    const rulePrices = await this.deps.repository.loadRulePrices?.({ vendorId: parsed.vendorId,
+      storeConnectionId: parsed.storeConnectionId, candidates: ruleEligibleCandidates }) ?? new Map<number, ListingRulePrice>();
     const ebayFulfillmentPreflights = context.platform === "ebay" && config
       ? await this.loadEbayFulfillmentPreflights({
           context,
@@ -409,6 +420,7 @@ export class DropshipListingPreviewService {
         pricingPolicies,
         existingListing,
         savedListingPrice: savedPricesByVariantId.get(productVariantId) ?? null,
+        rulePrice: rulePrices.get(productVariantId) ?? null,
         requestedRetailPriceCents: requestedRetailPriceByVariantId.get(productVariantId)
           ?? parsed.requestedRetailPriceCents
           ?? null,
@@ -422,9 +434,17 @@ export class DropshipListingPreviewService {
       });
     });
 
-    const enrichedRows = this.deps.presentation
+    const presentation = this.deps.presentation;
+    const enrichedRows = presentation
       ? await enrichDropshipListingRows({ rows, candidates, vendorId: parsed.vendorId,
-          storeConnectionId: parsed.storeConnectionId, deps: this.deps.presentation })
+          storeConnectionId: parsed.storeConnectionId, deps: { ...presentation,
+            productCosts: { loadProductCosts: async (input) => {
+              const remainingIds = input.productVariantIds.filter((id) => !rulePrices.has(id));
+              const costs = new Map(remainingIds.length ? await presentation.productCosts.loadProductCosts({ ...input, productVariantIds: remainingIds }) : []);
+              for (const id of input.productVariantIds) { const cost = rulePrices.get(id)?.productCost; if (cost) costs.set(id, cost); }
+              return costs;
+            } },
+          } })
       : rows;
     return {
       vendorId: parsed.vendorId,
@@ -550,6 +570,11 @@ export class DropshipListingPreviewService {
       actor: parsed.requestedBy,
     };
     const preview = await this.generatePreviewForContext(previewInput, context);
+    const ruleRows = preview.rows.filter((row) => row.rulePriceEvidenceHash);
+    if (ruleRows.some((row) => parsed.expectedRuleEvidenceHashesByVariantId?.[String(row.productVariantId)] !== row.rulePriceEvidenceHash)) {
+      throw new DropshipError("DROPSHIP_LISTING_PRICE_VERSION_CONFLICT",
+        "Review the current pricing rules and costs before queueing these listings.");
+    }
     if (parsed.expectedPriceRevisionIdsByVariantId !== undefined) {
       const expected = parsed.expectedPriceRevisionIdsByVariantId;
       const keys = Object.keys(expected);
@@ -573,6 +598,7 @@ export class DropshipListingPreviewService {
       }
     }
     const requestHash = hashListingPushJobRequest({
+      expectedRuleEvidenceHashesByVariantId: parsed.expectedRuleEvidenceHashesByVariantId,
       expectedPriceRevisionIdsByVariantId: parsed.expectedPriceRevisionIdsByVariantId,
       expectedPriceCentsByVariantId: parsed.expectedPriceCentsByVariantId,
       vendorId: parsed.vendorId,
@@ -676,6 +702,7 @@ export class DropshipListingPreviewService {
 }
 
 export function hashListingPushJobRequest(input: {
+  expectedRuleEvidenceHashesByVariantId?: Readonly<Record<string, string>>;
   expectedPriceRevisionIdsByVariantId?: Readonly<Record<string, number | null>>;
   expectedPriceCentsByVariantId?: Readonly<Record<string, number | null>>;
   vendorId: number;
@@ -692,7 +719,7 @@ export function hashListingPushJobRequest(input: {
     productVariantIds: [...input.productVariantIds].sort((left, right) => left - right),
     requestedRetailPriceCents: input.requestedRetailPriceCents,
   };
-  for (const key of ["expectedPriceRevisionIdsByVariantId", "expectedPriceCentsByVariantId"] as const) {
+  for (const key of ["expectedPriceRevisionIdsByVariantId", "expectedPriceCentsByVariantId", "expectedRuleEvidenceHashesByVariantId"] as const) {
     if (input[key] !== undefined) payload[key] = Object.fromEntries(Object.entries(input[key]).sort(([left], [right]) => Number(left) - Number(right)));
   }
   if (Object.keys(requestedRetailPricesByVariantId).length > 0) {
@@ -782,6 +809,7 @@ function buildListingPreviewRow(input: {
   pricingPolicies: readonly DropshipPricingPolicyRecord[];
   existingListing: DropshipExistingVendorListing | null;
   savedListingPrice: SavedListingPriceRevision | null;
+  rulePrice: ListingRulePrice | null;
   requestedRetailPriceCents: number | null;
   marketplaceListing: DropshipMarketplaceListingProvider;
   generatedAt: Date;
@@ -811,11 +839,19 @@ function buildListingPreviewRow(input: {
     blockers.push("active_rate_table_required");
   }
 
-  const priceCents = input.requestedRetailPriceCents ?? resolveListingPrice({
+  const ruleOwned = input.savedListingPrice?.pricingMode === "rules" || (!input.savedListingPrice
+    && input.existingListing?.vendorRetailPriceCents == null && input.rulePrice !== null);
+  const resolvedPrice = resolveListingPrice({
     saved: input.savedListingPrice,
     existingListingPriceCents: input.existingListing?.vendorRetailPriceCents ?? null,
     defaultPriceCents: input.candidate.defaultRetailPriceCents,
+    rulePrice: input.rulePrice,
   }).effectivePriceCents;
+  // Request-local legacy prices cannot silently override adopted pricing rules.
+  // An exception must be saved explicitly as a fixed listing price.
+  const priceCents = ruleOwned ? resolvedPrice : input.requestedRetailPriceCents ?? resolvedPrice;
+  if (ruleOwned && input.rulePrice?.issue) blockers.push(input.rulePrice.issue);
+  if (ruleOwned && !input.rulePrice) blockers.push("pricing_rules_not_configured");
   const pricingDecision = evaluateListingPricingPolicy(input.candidate, input.pricingPolicies, priceCents);
   blockers.push(...pricingDecision.blockers);
   warnings.push(...pricingDecision.warnings);
@@ -847,6 +883,7 @@ function buildListingPreviewRow(input: {
     ? buildBusinessPolicySelection(input.config, input.ebayListingPolicyOverride)
     : null;
   const previewHash = hashJson({
+    ...(ruleOwned ? { rulePriceEvidenceHash: input.rulePrice?.evidenceHash ?? null } : {}),
     priceSettingRevisionId: input.savedListingPrice?.revisionId ?? null,
     productVariantId: input.candidate.productVariantId,
     storeConnectionId: input.context.storeConnectionId,
@@ -869,6 +906,7 @@ function buildListingPreviewRow(input: {
 
   return {
     priceSettingRevisionId: input.savedListingPrice?.revisionId ?? null,
+    ...(ruleOwned ? { rulePriceEvidenceHash: input.rulePrice?.evidenceHash ?? null, pricingRuleName: input.rulePrice?.ruleName ?? null } : {}),
     productVariantId: input.candidate.productVariantId,
     productId: input.candidate.productId,
     sku: input.candidate.sku,
@@ -942,7 +980,7 @@ function missingCatalogPreviewRow(input: {
   };
 }
 
-function evaluateListingPricingPolicy(
+export function evaluateListingPricingPolicy(
   candidate: DropshipListingCatalogCandidate,
   policies: readonly DropshipPricingPolicyRecord[],
   priceCents: number | null,

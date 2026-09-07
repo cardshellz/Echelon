@@ -7,7 +7,8 @@ import {
 import { evaluateDropshipCatalogExposure } from "../domain/catalog-exposure";
 import { evaluateDropshipVendorCatalogSelection } from "../domain/vendor-selection";
 import { DropshipError } from "../domain/errors";
-import type { DropshipListingPreviewRepository } from "./dropship-listing-preview-service";
+import type { DropshipListingPreviewRepository, DropshipListingCatalogCandidate } from "./dropship-listing-preview-service";
+import type { ListingRulePrice } from "./dropship-rule-price";
 import type { DropshipClock, DropshipLogger } from "./dropship-ports";
 
 export type ListingPriceCatalogReader = Pick<DropshipListingPreviewRepository,
@@ -17,6 +18,7 @@ export interface ListingPriceTransaction {
   vendorId: number;
   catalog: ListingPriceCatalogReader;
   loadSaved(): Promise<SavedListingPriceRevision | null>;
+  loadRulePrice?(candidate: DropshipListingCatalogCandidate): Promise<ListingRulePrice | null>;
   save(input: SaveListingPriceInput & { requestHash: string; now: Date }): Promise<{
     saved: SavedListingPriceRevision; idempotentReplay: boolean;
   }>;
@@ -48,9 +50,13 @@ export class DropshipListingPriceService {
     const requestHash = createHash("sha256").update(JSON.stringify({
       operation: "listing_price_v1", ...parsedTarget,
       priceCents: parsed.priceCents, expectedRevisionId: parsed.expectedRevisionId,
+      ...(parsed.pricingMode ? { pricingMode: parsed.pricingMode } : {}),
     })).digest("hex");
     const result = await this.deps.repository.execute({ ...parsedTarget, memberId, idempotencyKey: parsed.idempotencyKey }, async (tx) => {
       const context = await this.authorize(tx, parsedTarget, now);
+      if (parsed.pricingMode === "rules" && !context.rulePrice) {
+        throw new DropshipError("DROPSHIP_PRICING_RULES_NOT_CONFIGURED", "Configure store pricing rules before using them for this listing.");
+      }
       const saved = await tx.save({ ...parsed, requestHash, now });
       return { price: projectSetting(parsedTarget, context, saved.saved), idempotentReplay: saved.idempotentReplay };
     });
@@ -93,16 +99,21 @@ export class DropshipListingPriceService {
       throw new DropshipError("DROPSHIP_LISTING_PRICE_NOT_AVAILABLE", "Select an available catalog item before setting its listing price.");
     }
     return { defaultPriceCents: candidate.defaultRetailPriceCents,
+      rulePrice: await tx.loadRulePrice?.(candidate) ?? null,
       existingListingPriceCents: listings.find((row) => row.productVariantId === target.productVariantId)?.vendorRetailPriceCents ?? null };
   }
 }
 
-interface PriceSources { defaultPriceCents: number | null; existingListingPriceCents: number | null }
+interface PriceSources { defaultPriceCents: number | null; existingListingPriceCents: number | null; rulePrice: ListingRulePrice | null }
 function projectSetting(target: ListingPriceTarget, sources: PriceSources, saved: SavedListingPriceRevision | null): ListingPriceSetting {
   const defaultPrice = listingPriceCentsSchema.safeParse(sources.defaultPriceCents);
   return listingPriceSettingSchema.parse({
     ...target, revisionId: saved?.revisionId ?? null, overridePriceCents: saved?.overridePriceCents ?? null,
     defaultPriceCents: defaultPrice.success ? defaultPrice.data : null,
+    pricingMode: saved?.pricingMode ?? (saved ? (saved.overridePriceCents === null ? "catalog_default" : "fixed")
+      : sources.existingListingPriceCents !== null ? "fixed" : sources.rulePrice ? "rules" : "catalog_default"),
+    ruleName: sources.rulePrice?.ruleName ?? null, pricingIssue: sources.rulePrice?.issue ?? null,
+    rulePriceCents: sources.rulePrice?.priceCents ?? null, rulesConfigured: sources.rulePrice !== null,
     ...resolveListingPrice({ ...sources, saved }), updatedAt: saved?.updatedAt ?? null,
   });
 }

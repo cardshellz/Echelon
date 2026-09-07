@@ -210,6 +210,18 @@
   "dropship.dropship_passkey_credentials": [
     "modules/dropship"
   ],
+  "dropship.dropship_pricing_applications": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_pricing_profile_revisions": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_pricing_profiles": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_pricing_reviews": [
+    "modules/dropship"
+  ],
   "dropship.dropship_rate_table_rows": [
     "modules/dropship"
   ],
