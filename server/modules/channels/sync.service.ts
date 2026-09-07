@@ -26,6 +26,8 @@ import type {
 } from "@shared/schema";
 import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
 import { isCustomerSellableVariant } from "@shared/catalog/variant-sales-eligibility";
+import { ChannelIdentityService } from "./channel-identity.service";
+import { ChannelIdentityError } from "./channel-identity.domain";
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -568,109 +570,43 @@ class ChannelSyncService {
    * has a channelFeed record linking it to that channel. Creates missing feeds
    * so the sync can push inventory without manual setup.
    */
-  async discoverFeeds(): Promise<{ created: number; channels: number }> {
-    const activeChannels: Channel[] = await this.db
-      .select()
-      .from(channels)
-      .where(eq(channels.status, "active"));
-
-    if (activeChannels.length === 0) return { created: 0, channels: 0 };
-
-    // All active variants with a Shopify variant ID
-    const allVariants: ProductVariant[] = await this.db
-      .select()
-      .from(productVariants)
-      .where(and(
-        eq(productVariants.isActive, true),
-        eq(productVariants.requiresShipping, true),
-        sql`COALESCE(${productVariants.trackInventory}, true) = true`,
-        eq(productVariants.salesEligibility, "sellable"),
-        sql`${productVariants.shopifyVariantId} IS NOT NULL`,
-      ));
-
-    if (allVariants.length === 0) return { created: 0, channels: 0 };
-
-    // Load all existing feeds keyed by channelId:variantId
-    const existingFeeds: ChannelFeed[] = await this.db
-      .select()
-      .from(channelFeeds);
-
-    const existingSet = new Set(
-      existingFeeds.map((f) => `${f.channelId}:${f.productVariantId}`),
-    );
-
-    // Load product line assignments: which product lines each channel carries
-    const channelLineRows = await this.db
-      .select({ channelId: channelProductLines.channelId, productLineId: channelProductLines.productLineId })
-      .from(channelProductLines)
-      .where(eq(channelProductLines.isActive, true));
-    const channelLineMap = new Map<number, Set<number>>();
-    for (const row of channelLineRows) {
-      if (!channelLineMap.has(row.channelId)) channelLineMap.set(row.channelId, new Set());
-      channelLineMap.get(row.channelId)!.add(row.productLineId);
-    }
-
-    // Load product → product line mapping
-    const productLineRows = await this.db
-      .select({ productId: productLineProducts.productId, productLineId: productLineProducts.productLineId })
-      .from(productLineProducts);
-    const productLineMap = new Map<number, Set<number>>();
-    for (const row of productLineRows) {
-      if (!productLineMap.has(row.productId)) productLineMap.set(row.productId, new Set());
-      productLineMap.get(row.productId)!.add(row.productLineId);
-    }
-
+  async discoverFeeds(): Promise<{ created: number; channels: number; blocked: string[] }> {
+    const activeChannels: Channel[] = await this.db.select().from(channels)
+      .where(and(eq(channels.status, "active"), eq(channels.provider, "shopify")));
+    const allVariants: ProductVariant[] = await this.db.select().from(productVariants).where(and(
+      eq(productVariants.isActive, true), eq(productVariants.requiresShipping, true),
+      sql`COALESCE(${productVariants.trackInventory}, true) = true`,
+      eq(productVariants.salesEligibility, "sellable"),
+    ));
+    const existingFeeds: ChannelFeed[] = await this.db.select().from(channelFeeds);
+    const existingSet = new Set(existingFeeds.map((feed) => `${feed.channelId}:${feed.productVariantId}`));
+    const channelLineRows = await this.db.select().from(channelProductLines).where(eq(channelProductLines.isActive, true));
+    const productLineRows = await this.db.select().from(productLineProducts);
+    const identityService = new ChannelIdentityService(this.db);
+    const blocked: string[] = [];
     let created = 0;
-    let channelsProcessed = 0;
-
     for (const channel of activeChannels) {
-      // Only auto-discover for Shopify channels (they share variant IDs from the catalog)
-      if (channel.provider !== "shopify") continue;
-
-      channelsProcessed++;
-      const channelLines = channelLineMap.get(channel.id);
-      const newFeeds: Array<{
-        channelId: number;
-        productVariantId: number;
-        channelType: string;
-        channelVariantId: string;
-        channelSku: string | null;
-        isActive: number;
-      }> = [];
-
-      for (const v of allVariants) {
-        if (existingSet.has(`${channel.id}:${v.id}`)) continue;
-
-        // Product line gate: skip if product's lines don't overlap with channel's lines
-        if (channelLines && channelLines.size > 0) {
-          const productLines = productLineMap.get(v.productId!);
-          if (!productLines || !hasOverlap(productLines, channelLines)) continue;
+      // Discovery repairs missing feed rows from this channel's listings only.
+      // The provider reader verifies each candidate against this exact account.
+      const listings = await identityService.listingIdentities(channel.id, allVariants.map((variant) => variant.id));
+      const listedVariants = new Set(listings.filter((listing) => listing.externalVariantId).map((listing) => listing.productVariantId));
+      const allowedLines = new Set<number>(channelLineRows.filter((row: { channelId: number }) => row.channelId === channel.id)
+        .map((row: { productLineId: number }) => row.productLineId));
+      for (const variant of allVariants) {
+        if (existingSet.has(`${channel.id}:${variant.id}`) || !listedVariants.has(variant.id)) continue;
+        if (allowedLines.size > 0 && !productLineRows.some((row: { productId: number; productLineId: number }) =>
+          row.productId === variant.productId && allowedLines.has(row.productLineId))) continue;
+        try {
+          await identityService.ensureShopifyFeed({ channelId: channel.id, productVariantId: variant.id, sku: variant.sku, actor: "channel-feed-discovery" });
+          created++;
+        } catch (error) {
+          const code = error instanceof ChannelIdentityError ? error.code : "CHANNEL_FEED_DISCOVERY_FAILED";
+          blocked.push(`${channel.id}:${variant.id}:${code}`);
         }
-
-        newFeeds.push({
-          channelId: channel.id,
-          productVariantId: v.id,
-          channelType: channel.provider,
-          channelVariantId: v.shopifyVariantId!,
-          channelSku: v.sku || null,
-          isActive: 1,
-        });
-      }
-
-      if (newFeeds.length > 0) {
-        // Batch insert in chunks of 100
-        for (let i = 0; i < newFeeds.length; i += 100) {
-          const chunk = newFeeds.slice(i, i + 100);
-          await this.db.insert(channelFeeds).values(chunk);
-        }
-        created += newFeeds.length;
-        console.log(
-          `[ChannelSync] Discovered ${newFeeds.length} new feeds for channel "${channel.name}" (${channel.id})`,
-        );
       }
     }
-
-    return { created, channels: channelsProcessed };
+    if (blocked.length > 0) console.warn(JSON.stringify({ action: "channel_feed.discovery", outcome: "blocked", blocked }));
+    return { created, channels: activeChannels.length, blocked };
   }
 
   // ---------------------------------------------------------------------------
