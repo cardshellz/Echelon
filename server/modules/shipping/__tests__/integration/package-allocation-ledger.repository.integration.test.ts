@@ -73,6 +73,7 @@ import { PgHistoricalShipStationContentsReviewRepository } from "../../historica
 import { HistoricalShipStationContentsReviewService } from "../../historical-shipstation-contents-review.service";
 import { PgHistoricalShipStationContentsCorrectionRepository } from "../../historical-shipstation-contents-correction.repository";
 import { HistoricalShipStationContentsCorrectionService } from "../../historical-shipstation-contents-correction.service";
+import { shipmentQuantityEvidenceFixtureSql } from "../fixtures/shipment-quantity-evidence.fixture";
 
 const PRIMARY_GROUP_KEY = "86e1be0d-c7d8-4c91-919f-04f5eb547f79";
 const COMPETING_GROUP_KEY = "96e1be0d-c7d8-4c91-919f-04f5eb547f80";
@@ -785,6 +786,9 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
   beforeAll(async () => {
     await runMigrations();
     pool = getTestPool();
+    // Historical correction now projects immutable dispatch evidence even when
+    // this legacy package fixture has no canonical receipts to read.
+    await pool.query(shipmentQuantityEvidenceFixtureSql);
     await installAuthorityReadinessTestRelations(pool);
     await installExecutionAuditRole(pool);
   }, 30_000);

@@ -1,4 +1,6 @@
 import { sql } from "drizzle-orm";
+import { shipmentQuantityEvidenceProjection } from "../inventory/infrastructure/shipment-quantity-evidence.sql";
+import { readSourceShipmentPostedQuantity, SourceShipmentQuantityEvidenceError } from "../inventory/domain/source-shipment-quantity-evidence";
 
 import type {
   ShipStationService,
@@ -1444,14 +1446,16 @@ async function prepareLines(
             AND candidate_source_item.shipment_item_purpose = 'customer_fulfillment'
         ) AS source_candidate_count,
         (
-          SELECT COALESCE(SUM(ABS(inventory_tx.variant_qty_delta)), 0)::int
+          SELECT COALESCE(jsonb_agg(${shipmentQuantityEvidenceProjection(sql`inventory_tx`)} ORDER BY inventory_tx.id), '[]'::jsonb)
           FROM inventory.inventory_transactions inventory_tx
           WHERE inventory_tx.transaction_type = 'ship'
             AND inventory_tx.shipment_id = ${originalShipmentId}
             AND inventory_tx.order_item_id = order_item.id
             AND inventory_tx.product_variant_id = source_item.product_variant_id
+            AND (inventory_tx.shipment_item_id = source_item.source_shipment_item_id
+              OR inventory_tx.shipment_item_id IS NULL)
             AND inventory_tx.voided_at IS NULL
-        ) AS source_inventory_shipped_quantity,
+        ) AS source_inventory_ship_evidence,
         (
           SELECT COALESCE(SUM(correction_item.qty), 0)::int
           FROM wms.outbound_shipment_items correction_item
@@ -1526,8 +1530,22 @@ async function prepareLines(
       if (correctionQuantity > sourceQuantity) {
         throw new Error(`omission-correction quantity for SKU ${mapping.sku} exceeds the original package line`);
       }
-      if (Number(source.source_inventory_shipped_quantity ?? 0) < sourceQuantity) {
+      const postingIdentity = {
+        orderId: context.wmsOrderId, orderItemId, shipmentId: originalShipmentId,
+        shipmentItemId: sourceShipmentItemId, productVariantId,
+      };
+      const posting = readSourceShipmentPostedQuantity(source.source_inventory_ship_evidence, postingIdentity);
+      if (posting.quantity < sourceQuantity) {
         throw new Error(`SKU ${mapping.sku} has no complete original inventory shipment posting`);
+      }
+      // Migration183 still requires a negative ship delta for omission adoption.
+      // Do not let a correctly quantified canonical receipt pass into the later
+      // legacy cascade after original-source physical projection has committed.
+      if (posting.source === "canonical_dispatch_receipt") {
+        throw new SourceShipmentQuantityEvidenceError(
+          `SKU ${mapping.sku} has ${posting.quantity} recorded canonical shipped units; omission correction is not yet supported by the database proof contract. No omission adoption was started.`,
+          Object.freeze(postingIdentity), "CANONICAL_OMISSION_CORRECTION_UNAVAILABLE",
+        );
       }
       correctionQuantityBySourceItem.set(
         sourceShipmentItemId,

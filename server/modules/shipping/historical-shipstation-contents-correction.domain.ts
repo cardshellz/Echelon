@@ -31,6 +31,9 @@ const inventoryShipTransactionSchema = z.object({
   fromLocationId: positiveInteger.nullable(),
   quantity: positiveInteger,
   evidenceKind: z.enum(["exact_shipment_item", "legacy_order_item"]),
+  // Older callers omitted this field because every shipment was an on-hand
+  // debit. Omission retains that legacy interpretation.
+  quantitySource: z.enum(["canonical_dispatch_receipt", "legacy_on_hand_delta"]).optional(),
 }).strict();
 
 const wmsLineSchema = z.object({
@@ -62,6 +65,7 @@ export type HistoricalShipStationContentsCorrectionFacts = z.infer<
 >;
 
 export type HistoricalShipStationContentsCorrectionBlockerCode =
+  | "canonical_claim_correction_required"
   | "catalog_variant_ambiguous"
   | "catalog_variant_unmatched"
   | "inventory_debit_source_unproven"
@@ -301,6 +305,12 @@ function planGroup(
   let wmsQuantity = 0;
   let recordedInventoryQuantity = 0;
   let inventoryEvidenceComplete = true;
+  let canonicalLineMismatch = false;
+  const hasCanonicalLineage = group.wmsLines.some((line) => (
+    line.inventoryShipTransactions.some(
+      (transaction) => transaction.quantitySource === "canonical_dispatch_receipt",
+    )
+  ));
   const recordedSegments: HistoricalShipStationContentsCorrectionRestoration[] = [];
   const recordedLineIds = new Set<number>();
   const transactionUseCounts = new Map<number, number>();
@@ -336,7 +346,6 @@ function planGroup(
     if (
       line.productVariantId === null
       || transaction.productVariantId !== line.productVariantId
-      || transaction.quantity !== line.quantity
     ) {
       inventoryEvidenceComplete = false;
       blockers.push(blocker(
@@ -347,13 +356,31 @@ function planGroup(
       ));
       continue;
     }
+    if (transaction.quantity !== line.quantity) {
+      blockers.push(blocker(
+        "inventory_ship_evidence_mismatch",
+        "The active inventory shipment posting does not match the WMS package line.",
+        group.displaySku,
+        line.wmsShipmentItemId,
+      ));
+      if (transaction.quantitySource !== "canonical_dispatch_receipt") {
+        inventoryEvidenceComplete = false;
+        continue;
+      }
+      // Verified dispatch quantity remains useful evidence even when the WMS
+      // line disagrees. It is never authority to reverse an on-hand debit.
+      canonicalLineMismatch = true;
+    }
     recordedInventoryQuantity = checkedAdd(
       recordedInventoryQuantity,
       transaction.quantity,
       group.displaySku,
     );
     recordedLineIds.add(line.wmsShipmentItemId);
-    if (transaction.fromLocationId !== null) {
+    if (
+      transaction.quantitySource !== "canonical_dispatch_receipt"
+      && transaction.fromLocationId !== null
+    ) {
       recordedSegments.push(Object.freeze({
         inventoryTransactionId: transaction.inventoryTransactionId,
         wmsShipmentItemId: line.wmsShipmentItemId,
@@ -369,14 +396,27 @@ function planGroup(
   const inventoryQuantityDelta = providerEvidenceAvailable && inventoryEvidenceComplete
     ? group.providerQuantity - recordedInventoryQuantity
     : null;
-  if (packageQuantityDelta !== null && packageQuantityDelta > 0) {
+  const canonicalCorrectionBlocked = hasCanonicalLineage && (
+    !inventoryEvidenceComplete
+    || canonicalLineMismatch
+    || (packageQuantityDelta !== null && packageQuantityDelta !== 0)
+    || (inventoryQuantityDelta !== null && inventoryQuantityDelta !== 0)
+  );
+  if (canonicalCorrectionBlocked) {
+    blockers.push(blocker(
+      "canonical_claim_correction_required",
+      "This SKU includes canonical claim dispatch. A claim-aware correction workflow must resolve the mismatch; legacy package edits and on-hand restoration are not authorized by shipment quantity evidence.",
+      group.displaySku,
+    ));
+  }
+  if (!hasCanonicalLineage && packageQuantityDelta !== null && packageQuantityDelta > 0) {
     blockers.push(blocker(
       "package_line_mapping_required",
       "ShipStation reports more units than existing WMS source lines can represent; reviewed line lineage is required.",
       group.displaySku,
     ));
   }
-  if (inventoryQuantityDelta !== null && inventoryQuantityDelta > 0) {
+  if (!hasCanonicalLineage && inventoryQuantityDelta !== null && inventoryQuantityDelta > 0) {
     blockers.push(blocker(
       "inventory_debit_source_unproven",
       "ShipStation reports units without an existing inventory shipment posting; an exact source location must be selected and revalidated before posting.",
@@ -385,7 +425,9 @@ function planGroup(
   }
 
   const packageLineAdjustments: HistoricalShipStationContentsCorrectionPackageLineAdjustment[] = [];
-  if (providerEvidenceAvailable) {
+  // Never allocate provider quantities between legacy and canonical postings:
+  // choosing which lineage to retain would invent restoration authority.
+  if (providerEvidenceAvailable && !hasCanonicalLineage) {
     let retainedProviderQuantity = group.providerQuantity;
     const linesByRetentionPriority = [...group.wmsLines].sort((left, right) => (
       Number(recordedLineIds.has(right.wmsShipmentItemId))
@@ -410,7 +452,7 @@ function planGroup(
   }
 
   const restorations: HistoricalShipStationContentsCorrectionRestoration[] = [];
-  if (inventoryQuantityDelta !== null && inventoryQuantityDelta < 0) {
+  if (!hasCanonicalLineage && inventoryQuantityDelta !== null && inventoryQuantityDelta < 0) {
     let retainedProviderQuantity = group.providerQuantity;
     for (const segment of recordedSegments) {
       const retained = Math.min(segment.quantity, retainedProviderQuantity);
@@ -445,7 +487,7 @@ function planGroup(
     recordedInventoryQuantity: inventoryEvidenceComplete ? recordedInventoryQuantity : null,
     packageQuantityDelta,
     inventoryQuantityDelta,
-    inventoryAction: inventoryQuantityDelta === null
+    inventoryAction: canonicalCorrectionBlocked || inventoryQuantityDelta === null
       ? "unknown"
       : inventoryQuantityDelta > 0
       ? "deduct"

@@ -56,7 +56,9 @@ The WMS `order_items.product_id` field is a historical product-or-variant hint, 
 
 ## Next implementation work
 
-Keep developing in the isolated branch; another production deployment is not required just to continue. The next connected work is the remaining shipment-quantity readers and source-bin persistence/runtime shipment composition with the real transactional publication owner, then legacy demand/custody reconstruction and final atomic activation/recovery. Activation remains a separately reviewed production action.
+The read-side follow-up and current runtime evidence are recorded in `docs/INVENTORY-SHIPMENT-QUANTITY-CONTRACT-20260907.md`. That batch separates shipment units from on-hand deltas, updates displays/readers, and blocks unsupported canonical legacy-correction commands. It also identifies the remaining migration183 omission-proof reader and confirms that canonical picking already persists some source bins. These updates supersede the corresponding unfinished-reader notes above; they do not activate dispatch.
+
+Keep developing in the isolated branch; another production deployment is not required just to continue. The next connected work is exact source/replay/runtime shipment composition with the real transactional publication owner, then legacy demand/custody reconstruction and final atomic activation/recovery. Activation remains a separately reviewed production action.
 
 ## Verification record
 

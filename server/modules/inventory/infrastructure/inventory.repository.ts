@@ -9,6 +9,18 @@ import {
   channelFeeds, productVariants, warehouseLocations, productLocations,
 } from "../../../storage/base";
 import { repointPendingWmsOrderItemsForInventoryTransfer } from "../../wms/order-item-commands";
+import { getTableColumns } from "drizzle-orm";
+import { interpretInventoryShipmentQuantity, type InventoryShipmentQuantityEvidence } from "@shared/inventory/shipment-quantity";
+import { shipmentQuantityEvidenceProjection } from "./shipment-quantity-evidence.sql";
+
+export type InventoryTransactionHistory = InventoryTransaction & {
+  shipmentQuantityEvidence: InventoryShipmentQuantityEvidence;
+};
+
+function transactionHistoryRow(row: InventoryTransaction & { rawShipmentQuantityEvidence: unknown }): InventoryTransactionHistory {
+  const { rawShipmentQuantityEvidence, ...transaction } = row;
+  return { ...transaction, shipmentQuantityEvidence: interpretInventoryShipmentQuantity(rawShipmentQuantityEvidence) };
+}
 
 export interface IInventoryStorage {
   getAllInventoryLevels(): Promise<InventoryLevel[]>;
@@ -23,7 +35,7 @@ export interface IInventoryStorage {
   getTotalReservedByProductVariantId(productVariantId: number): Promise<number>;
 
   createInventoryTransaction(transaction: InsertInventoryTransaction, tx?: any): Promise<InventoryTransaction>;
-  getInventoryTransactionsByProductVariantId(productVariantId: number, limit?: number): Promise<InventoryTransaction[]>;
+  getInventoryTransactionsByProductVariantId(productVariantId: number, limit?: number): Promise<InventoryTransactionHistory[]>;
   getInventoryTransactions(filters: {
     batchId?: string;
     transactionType?: string;
@@ -32,7 +44,7 @@ export interface IInventoryStorage {
     locationId?: number;
     limit?: number;
     offset?: number;
-  }): Promise<InventoryTransaction[]>;
+  }): Promise<InventoryTransactionHistory[]>;
 
   executeTransfer(params: {
     fromLocationId: number;
@@ -249,13 +261,16 @@ export function createInventoryMethods(
     return result[0];
   },
 
-  async getInventoryTransactionsByProductVariantId(productVariantId: number, limit: number = 100): Promise<InventoryTransaction[]> {
-    return await db
-      .select()
+  async getInventoryTransactionsByProductVariantId(productVariantId: number, limit: number = 100): Promise<InventoryTransactionHistory[]> {
+    const rows = await db
+      .select({ ...getTableColumns(inventoryTransactions),
+        rawShipmentQuantityEvidence: shipmentQuantityEvidenceProjection(sql`${inventoryTransactions}`),
+      })
       .from(inventoryTransactions)
       .where(eq(inventoryTransactions.productVariantId, productVariantId))
       .orderBy(desc(inventoryTransactions.createdAt))
       .limit(limit);
+    return rows.map(transactionHistoryRow);
   },
 
   async getInventoryTransactions(filters: {
@@ -266,7 +281,7 @@ export function createInventoryMethods(
     locationId?: number;
     limit?: number;
     offset?: number;
-  }): Promise<InventoryTransaction[]> {
+  }): Promise<InventoryTransactionHistory[]> {
     const conditions = [];
     if (filters.batchId) conditions.push(eq(inventoryTransactions.batchId, filters.batchId));
     if (filters.transactionType) conditions.push(eq(inventoryTransactions.transactionType, filters.transactionType));
@@ -280,7 +295,9 @@ export function createInventoryMethods(
     }
 
     let query = db
-      .select()
+      .select({ ...getTableColumns(inventoryTransactions),
+        rawShipmentQuantityEvidence: shipmentQuantityEvidenceProjection(sql`${inventoryTransactions}`),
+      })
       .from(inventoryTransactions)
       .orderBy(desc(inventoryTransactions.createdAt))
       .limit(filters.limit || 100)
@@ -290,7 +307,7 @@ export function createInventoryMethods(
       query = query.where(and(...conditions)) as typeof query;
     }
 
-    return await query;
+    return (await query).map(transactionHistoryRow);
   },
 
   async executeTransfer(params: {
