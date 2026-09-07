@@ -13,6 +13,7 @@ import {
   type EchelonSyncOrchestrator,
 } from "../../echelon-sync-orchestrator.service";
 import { ChannelAdapterRegistry, type IChannelAdapter } from "../../channel-adapter.interface";
+import { PgDialect } from "drizzle-orm/pg-core";
 
 // ---------------------------------------------------------------------------
 // Mock Helpers
@@ -42,7 +43,7 @@ function createMockDb() {
     _selectQueue: [] as any[][],
     _insertResult: [] as any[],
     _updateResult: [] as any[],
-    select: vi.fn(function (this: any) {
+    select: vi.fn(function (this: any, _fields?: unknown) {
       return thenableChain(this._selectQueue.length > 0 ? this._selectQueue.shift() : this._selectResult);
     }),
     insert: vi.fn(function (this: any) {
@@ -219,6 +220,54 @@ describe("EchelonSyncOrchestrator", () => {
   // -----------------------------------------------------------------------
 
   describe("syncInventoryForProduct", () => {
+    function queueShopifyInventory(mapping: Record<string, unknown> | null) {
+      db._selectQueue = [
+        [{ warehouseId: 1, warehouseName: "Warehouse A", shopifyLocationId: "loc-1" }],
+        [{ id: 100, sku: "TEST-P50", shopifyVariantId: "wrong-store-variant", shopifyInventoryItemId: "wrong-store-item" }],
+        mapping ? [{ productVariantId: 100, isActive: 1, channelVariantId: "store-variant", channelInventoryItemId: "store-item", lastSyncedQty: null, ...mapping }] : [],
+      ];
+    }
+
+    it("uses only this channel's inventory mapping and batches identity reads", async () => {
+      queueShopifyInventory({});
+      const results = await orchestrator.syncInventoryForProduct(1, { dryRun: false });
+      expect(mockAdapter.pushInventory).toHaveBeenCalledWith(1, [expect.objectContaining({
+        variantId: 100, externalVariantId: "store-variant", externalInventoryItemId: "store-item",
+      })]);
+      expect(results[0].variantsPushed).toBe(1);
+      // Three planning queries plus the existing product/feed audit lookups.
+      expect(db.select).toHaveBeenCalledTimes(5);
+      expect(db.select.mock.calls[1][0]).not.toHaveProperty("shopifyVariantId");
+      expect(db.select.mock.calls[1][0]).not.toHaveProperty("shopifyInventoryItemId");
+      const predicate = db.select.mock.results[2].value.where.mock.calls[0][0];
+      const query = new PgDialect().sqlToQuery(predicate);
+      expect(query.sql).toContain('"channel_feeds"."channel_id" = $1');
+      expect(query.params).toEqual([1, 100]);
+    });
+
+    it.each([
+      ["missing", null, "No active inventory mapping"],
+      ["disabled", { isActive: 0 }, "No active inventory mapping"],
+      ["missing item ID", { channelInventoryItemId: null }, "No channel inventory item ID"],
+      ["quarantined", { quarantinedAt: new Date("2026-01-01T00:00:00Z") }, "Mapping quarantined"],
+    ] as const)("does not use catalog IDs when the channel mapping is %s", async (_name, mapping, error) => {
+      queueShopifyInventory(mapping);
+      const results = await orchestrator.syncInventoryForProduct(1, { dryRun: false });
+      expect(mockAdapter.pushInventory).not.toHaveBeenCalled();
+      expect(db.update).not.toHaveBeenCalled();
+      expect(results[0]).toMatchObject({ variantsSkipped: 1, variantsPushed: 0 });
+      expect(results[0].details[0].error).toContain(error);
+    });
+
+    it("keeps dry runs read-only with a valid destination mapping", async () => {
+      queueShopifyInventory({});
+      const results = await orchestrator.syncInventoryForProduct(1, { dryRun: true });
+      expect(results[0].details[0].status).toBe("dry_run");
+      expect(mockAdapter.pushInventory).not.toHaveBeenCalled();
+      expect(db.update).not.toHaveBeenCalled();
+      expect(db.insert).not.toHaveBeenCalled();
+    });
+
     it("routes canonical authority only to the durable outbox result", async () => {
       const inventoryPublication = {
         publishProduct: vi.fn(async () => ({
@@ -588,6 +637,48 @@ describe("EchelonSyncOrchestrator", () => {
   // -----------------------------------------------------------------------
 
   describe("syncPricingForChannel", () => {
+    function queuePricing(channelId: number, externalVariantId: string | null, lastSyncedPrice: number | null = null) {
+      db._selectQueue = [
+        [{ id: channelId, name: `Store ${channelId}`, provider: "shopify", status: "active" }],
+        [{ productVariantId: 100, variantSku: "TEST-P50", price: 999, compareAtPrice: null,
+          currency: "USD", shopifyVariantId: "wrong-store-variant", listingExternalVariantId: externalVariantId,
+          listingExternalSku: "STORE-SKU", listingLastSyncedPrice: lastSyncedPrice }],
+      ];
+    }
+
+    it("publishes the same Echelon variant through each store's own listing ID", async () => {
+      for (const channelId of [1, 2]) {
+        queuePricing(channelId, `store-${channelId}-variant`);
+        const result = await orchestrator.syncPricingForChannel(channelId, { dryRun: false });
+        expect(result.variantsPushed).toBe(1);
+        expect(mockAdapter.pushPricing).toHaveBeenCalledWith(channelId, [expect.objectContaining({
+          variantId: 100, externalVariantId: `store-${channelId}-variant`, priceCents: 999,
+        })]);
+      }
+      expect(db.select).toHaveBeenCalledTimes(4);
+      const pricingQuery = db.select.mock.results[3].value;
+      const join = new PgDialect().sqlToQuery(pricingQuery.leftJoin.mock.calls[0][1]);
+      expect(join.sql).toContain('"channel_listings"."channel_id" = $1');
+      expect(join.params).toEqual([2]);
+    });
+
+    it("skips pricing without a destination listing even when catalog Shopify ID exists", async () => {
+      queuePricing(2, null);
+      const result = await orchestrator.syncPricingForChannel(2, { dryRun: false });
+      expect(result).toMatchObject({ variantsSkipped: 1, variantsPushed: 0 });
+      expect(result.details[0].error).toContain("No external variant id");
+      expect(mockAdapter.pushPricing).not.toHaveBeenCalled();
+      expect(db.update).not.toHaveBeenCalled();
+    });
+
+    it("skips an unchanged mapped price without an additional per-item query", async () => {
+      queuePricing(1, "store-variant", 999);
+      const result = await orchestrator.syncPricingForChannel(1, { dryRun: false });
+      expect(result.details[0].error).toBe("Price unchanged");
+      expect(mockAdapter.pushPricing).not.toHaveBeenCalled();
+      expect(db.select).toHaveBeenCalledTimes(2);
+    });
+
     it("should check source lock before pushing pricing", async () => {
       db._selectResult = [
         { id: 1, name: "Shopify DTC", provider: "shopify", status: "active" },
