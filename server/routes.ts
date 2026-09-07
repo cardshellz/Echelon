@@ -92,6 +92,7 @@ import { registerInventoryAvailabilityMasterDataRoutes } from "./modules/invento
 import { registerInventoryAvailabilityShadowRoutes } from "./modules/inventory-planning/interfaces/http/inventory-availability-shadow.routes";
 import { registerInventoryAvailabilityBackfillRoutes } from "./modules/inventory-planning/interfaces/http/inventory-availability-backfill.routes";
 import { registerInventoryAvailabilityPhase4Routes } from "./modules/inventory-planning/interfaces/http/inventory-availability-phase4.routes";
+import { registerInventoryCutoverPreflightRoutes } from "./modules/inventory-planning/interfaces/http/inventory-cutover-preflight.routes";
 import { registerInventoryChannelExposureRoutes } from "./modules/inventory-planning/interfaces/http/inventory-channel-exposure.routes";
 import { registerShippingDestinationNormalizationRoutes } from "./modules/shipping-engine/interfaces/http/shipping-destination-normalization.routes";
 import { registerFulfillmentRoutingAdminRoutes } from "./modules/shipping-engine/interfaces/http/fulfillment-routing-admin.routes";
@@ -141,6 +142,7 @@ export async function registerRoutes(
   registerInventoryAvailabilityShadowRoutes(app);
   registerInventoryAvailabilityBackfillRoutes(app);
   registerInventoryAvailabilityPhase4Routes(app);
+  registerInventoryCutoverPreflightRoutes(app);
   registerInventoryChannelExposureRoutes(app);
   registerShippingDestinationNormalizationRoutes(app);
   registerOutboundShipmentRoutes(app);
