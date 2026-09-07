@@ -18,6 +18,8 @@ function recommendation(overrides: Record<string, unknown> = {}) {
     preferredVendorProductId: 70,
     status: "open",
     evidenceSnapshot: {
+      onOrderPieces: 0,
+      supplyTiming: { reviewRequired: false, receiptEvidence: { version: 1, lines: [] } },
       confidence: "medium",
       rfqConfidence: "high",
       forecastTrust: { severity: "ok" },
@@ -161,4 +163,45 @@ describe("automatic RFQ draft service", () => {
     expect(result).toMatchObject({ reused: true, rfqs: [{ id: 501 }], lines: [{ id: 601 }] });
     expect(tx.insert).not.toHaveBeenCalled();
   });
+  it("holds historical missing capture while distinguishing a verified empty receipt history", () => {
+    const trusted = recommendation();
+    const legacy = recommendation({ id: 102, evidenceSnapshot: { ...trusted.evidenceSnapshot, supplyTiming: undefined } });
+    const result = planAutomaticRfqDrafts([trusted, legacy], normalizeAutomaticRfqDraftPolicy({ rfqDraftAutomationMode: "preferred_vendor" }));
+    expect(result.selected.map((line) => line.id)).toEqual([101]);
+    expect(result.skipped).toMatchObject([{ recommendationLineId: 102, code: "receipt_evidence_review_required" }]);
+  });
+
+  it("replays an existing historical RFQ without minting a new key or draft after a capture upgrade", async () => {
+    const trusted = recommendation();
+    const legacy = { ...trusted, evidenceSnapshot: { ...trusted.evidenceSnapshot, supplyTiming: undefined } };
+    const { database, tx } = fakeDatabase([
+      [legacy], [{ id: 501, vendorId: 7, idempotencyKey: "auto-rfq-recommendation-run:50", status: "draft" }],
+      [{ id: 601, rfqId: 501, recommendationLineId: 101, requestedPieces: 100 }],
+    ], []);
+    const result = await createAutomaticRfqDraftService(database).createDrafts({ recommendationRunId: 50, lines: [legacy],
+      policy: normalizeAutomaticRfqDraftPolicy({ rfqDraftAutomationMode: "preferred_vendor" }), actorId: "system:auto-draft" });
+    expect(result).toMatchObject({ reused: true, rfqs: [{ id: 501 }], lines: [{ id: 601 }], skipped: [{ code: "receipt_evidence_review_required" }] });
+    expect(tx.insert).not.toHaveBeenCalled();
+  });
+
+  it("creates no candidate when an old capture has no prior RFQ to replay", async () => {
+    const trusted = recommendation();
+    const legacy = { ...trusted, evidenceSnapshot: { ...trusted.evidenceSnapshot, supplyTiming: undefined } };
+    const { database, tx } = fakeDatabase([[legacy], []], []);
+    const result = await createAutomaticRfqDraftService(database).createDrafts({ recommendationRunId: 50, lines: [legacy],
+      policy: normalizeAutomaticRfqDraftPolicy({ rfqDraftAutomationMode: "preferred_vendor" }), actorId: "system:auto-draft" });
+    expect(result).toMatchObject({ reused: false, rfqs: [], lines: [], skipped: [{ code: "receipt_evidence_review_required" }] });
+    expect(tx.insert).not.toHaveBeenCalled();
+  });
+
+  it("validates the locked durable capture even when the caller supplies a clean copy", async () => {
+    const input = recommendation();
+    const legacy = { ...input, evidenceSnapshot: { ...input.evidenceSnapshot, supplyTiming: undefined } };
+    const { database, tx } = fakeDatabase([[legacy], []], []);
+    const result = await createAutomaticRfqDraftService(database).createDrafts({ recommendationRunId: 50, lines: [input],
+      policy: normalizeAutomaticRfqDraftPolicy({ rfqDraftAutomationMode: "preferred_vendor" }), actorId: "system:auto-draft" });
+    expect(result).toMatchObject({ rfqs: [], lines: [], skipped: [{ code: "receipt_evidence_review_required" }] });
+    expect(tx.insert).not.toHaveBeenCalled();
+  });
+
 });

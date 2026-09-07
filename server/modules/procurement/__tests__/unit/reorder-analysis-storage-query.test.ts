@@ -23,11 +23,13 @@ describe("catalog dimensions in reorder analysis query", () => {
   });
 });
 
-describe("earliest inbound ETA in reorder analysis query", () => {
-  it("exposes the open-PO earliest expected date per product", () => {
-    expect(STORAGE_SRC).toMatch(/on_order\.earliest_expected/);
-    expect(STORAGE_SRC).toMatch(
-      /MIN\(COALESCE\(pol\.expected_delivery_date, po\.expected_delivery_date, po\.confirmed_delivery_date\)\) AS earliest_expected/,
-    );
+describe("coherent receipt-aware supply source in reorder analysis", () => {
+  it("delegates warehouse and forecast reads to the receipt-aware snapshot owner", () => {
+    expect(STORAGE_SRC).toContain('return readPurchasePlanningSnapshot(db, async (tx) => {');
+    expect(STORAGE_SRC).toContain('await tx.execute(sql`');
+    expect(STORAGE_SRC).not.toContain('on_order.earliest_expected');
+    const source = readFileSync(resolve(__dirname, "../../purchase-planning-snapshot.repository.ts"), "utf8");
+    expect(source).toContain('const supply = await readPurchasePlanningSupply(tx)');
+    expect(source).toContain('isolationLevel: "repeatable read", accessMode: "read only"');
   });
 });

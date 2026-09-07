@@ -83,6 +83,14 @@ describe("chip filters (two-tier additive union)", () => {
     expect(isOrderQueueSelection(new Set<ChipKey>(["needs_order", "order_soon", "ok"]))).toBe(false);
   });
 
+  it("keeps zero-buy supply review visible in the default daily queue while preserving deliberate filters", () => {
+    const review = { ...chipItem("ok"), supplyTiming: { reviewRequired: true } };
+    const healthy = chipItem("ok");
+    expect(filterItemsByChips([review, healthy], new Set(DEFAULT_CHIP_SELECTION))).toEqual([review]);
+    expect(filterItemsByChips([review, healthy], new Set<ChipKey>(["order_soon"]))).toEqual([]);
+    expect(filterItemsByChips([review, healthy], new Set<ChipKey>(["ok"]))).toEqual([review, healthy]);
+  });
+
   it("sorts statuses by severity", () => {
     const order = ["stockout", "order_now", "order_soon", "on_order", "ok", "no_movement"];
     const ranks = order.map(statusSeverityRank);

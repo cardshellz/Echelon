@@ -199,6 +199,7 @@ export interface PurchasingRecommendationRawRow {
   seasonal_latest_demand_at?: string | Date | null;
   on_order_pieces?: number | string | null;
   inbound_schedule?: unknown;
+  receipt_supply_evidence?: unknown;
   open_po_count?: number | string | null;
   earliest_expected?: string | Date | null;
   lead_time_days?: number | string | null;
@@ -1969,7 +1970,7 @@ export function generatePurchasingRecommendations(
       asOfDate: planningDate,
       replacementForecasts: { productId, ranges: replacementRanges },
       availablePieces: available, dailyPieces: avgDailyUsage, leadTimeDays, safetyStockDays,
-      onOrderPieces, rawSchedule: row.inbound_schedule,
+      onOrderPieces, rawSchedule: row.inbound_schedule, rawReceiptEvidence: row.receipt_supply_evidence,
       forwardDemand: { pieces: forwardDemandPieces, captureComplete: forwardDemandContributionCapture.overlayCaptureComplete,
         events: forwardDemandContributionCapture.contributions.map((event) => ({ eventStartDate: event.eventStartDate, weightedPieces: event.weightedPieces })) },
     });
@@ -2081,7 +2082,7 @@ export function generatePurchasingRecommendations(
     });
 
     const reviewSignal = supplyTiming.reviewRequired
-      ? { action: "review_open_po" as const, severity: "warning" as const, label: "Review arrival coverage", detail: supplyTiming.detail }
+      ? { action: "review_open_po" as const, severity: "warning" as const, label: supplyTiming.signal === "unverified_receipts" ? "Review receipt evidence" : "Review arrival coverage", detail: supplyTiming.detail }
       : defaultReviewSignal;
     const confidence = buildConfidence({
       demandQuality,
@@ -2126,7 +2127,7 @@ export function generatePurchasingRecommendations(
     });
     if (supplyTiming.reviewRequired) {
       qualityControls.push({ area: "inbound_supply", severity: "block", code: supplyTiming.signal,
-        label: "Inbound arrival coverage needs review", detail: supplyTiming.detail });
+        label: supplyTiming.signal === "unverified_receipts" ? "Receipt quantities need review" : "Inbound arrival coverage needs review", detail: supplyTiming.detail });
     }
     const autopilotBlockers = qualityControls;
     const qualityGate = buildQualityGate({
@@ -2354,7 +2355,7 @@ export function generatePurchasingRecommendations(
     lowConfidenceCount: visibleItems.filter((item) => item.confidence === "low").length,
     autoDraftEligibleCount: visibleItems.filter((item) => item.qualityGate.autoDraftEligible).length,
     autoDraftReviewRequiredCount: visibleItems.filter(
-      (item) => item.actionable && !item.qualityGate.autoDraftEligible,
+      (item) => (item.actionable || item.supplyTiming?.signal === "unverified_receipts") && !item.qualityGate.autoDraftEligible,
     ).length,
   };
 

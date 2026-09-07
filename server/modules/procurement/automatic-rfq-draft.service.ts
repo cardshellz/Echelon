@@ -1,3 +1,4 @@
+import { inspectPurchaseReceiptSupplyCapture } from "@shared/procurement/purchase-receipt-supply-evidence";
 import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
 import { randomUUID } from "node:crypto";
 import { and, eq, inArray } from "drizzle-orm";
@@ -44,6 +45,7 @@ export type AutomaticRfqDraftSkipCode =
   | "confidence_below_policy"
   | "forecast_review_required"
   | "non_supplier_blocker"
+  | "receipt_evidence_review_required"
   | "recommendation_changed"
   | "inactive_supplier_catalog"
   | "already_allocated"
@@ -124,6 +126,11 @@ export function planAutomaticRfqDrafts(
       skip(line, "non_supplier_blocker", `Blocked by ${nonSupplierBlocker.label ?? nonSupplierBlocker.code ?? nonSupplierBlocker.area}.`);
       continue;
     }
+    const receiptCapture = inspectPurchaseReceiptSupplyCapture(evidence.supplyTiming?.receiptEvidence, evidence.onOrderPieces);
+    if (receiptCapture.reviewRequired) {
+      skip(line, "receipt_evidence_review_required", receiptCapture.detail ?? "Receipt quantities require review before unattended RFQ drafting.");
+      continue;
+    }
     if (selected.length >= policy.maximumLinesPerRun) {
       skip(line, "run_limit", `The ${policy.maximumLinesPerRun}-line automatic RFQ run limit was reached.`);
       continue;
@@ -154,18 +161,22 @@ export function createAutomaticRfqDraftService(database: any) {
     actorId: string;
   }): Promise<AutomaticRfqDraftResult> {
     const plan = planAutomaticRfqDrafts(input.lines, input.policy);
-    if (plan.selected.length === 0) return { rfqs: [], lines: [], skipped: plan.skipped, reused: false };
+    // A pre-capture recommendation may already have a durable RFQ from an
+    // earlier attempt. It is eligible only for exact replay, never new creation.
+    const receiptReviewIds = new Set(plan.skipped.filter((skip) => skip.code === "receipt_evidence_review_required").map((skip) => skip.recommendationLineId));
+    const candidates = [...plan.selected, ...input.lines.filter((line) => receiptReviewIds.has(line.id))];
+    if (candidates.length === 0) return { rfqs: [], lines: [], skipped: plan.skipped, reused: false };
 
     return database.transaction(async (tx: any) => {
       await lockInventoryCostGraph(tx);
-      const recommendationIds = plan.selected.map((line) => line.id).sort((left, right) => left - right);
+      const recommendationIds = candidates.map((line) => line.id).sort((left, right) => left - right);
       const persistedRows = await tx.select().from(purchaseRecommendationLinesTable).where(and(
         eq(purchaseRecommendationLinesTable.runId, input.recommendationRunId),
         inArray(purchaseRecommendationLinesTable.id, recommendationIds),
       )).orderBy(purchaseRecommendationLinesTable.id).for("update");
       const persistedById = new Map(persistedRows.map((line: any) => [Number(line.id), line]));
       const skipped = [...plan.skipped];
-      const current = plan.selected.flatMap((line) => {
+      const current = candidates.flatMap((line) => {
         const persisted = persistedById.get(line.id) as any;
         const unchanged = Boolean(persisted
           && persisted.status === "open"
@@ -186,9 +197,14 @@ export function createAutomaticRfqDraftService(database: any) {
         return [{ ...line, ...persisted, evidenceSnapshot: persisted.evidenceSnapshot ?? {} } as AutomaticRfqRecommendationLine];
       });
 
+      // Revalidate the locked immutable capture, not merely the caller's copy.
+      // Keep the run-scoped key unchanged across calculation upgrades so a retry
+      // cannot create a second same-day supplier draft from historical evidence.
+      const lockedPlan = planAutomaticRfqDrafts(current, input.policy);
+      for (const skip of lockedPlan.skipped) if (!skipped.some((existing) => existing.recommendationLineId === skip.recommendationLineId && existing.code === skip.code)) skipped.push(skip);
       const idempotencyKey = `auto-rfq-recommendation-run:${input.recommendationRunId}`;
       const candidatesByVendor = new Map<number, AutomaticRfqRecommendationLine[]>();
-      for (const line of current) {
+      for (const line of lockedPlan.selected) {
         const vendorId = Number(line.preferredVendorId);
         const group = candidatesByVendor.get(vendorId) ?? [];
         group.push(line);
@@ -198,7 +214,7 @@ export function createAutomaticRfqDraftService(database: any) {
       const createdRfqs: any[] = [];
       const createdLines: any[] = [];
       let reused = false;
-      for (const vendorId of Array.from(candidatesByVendor.keys())) {
+      for (const vendorId of Array.from(new Set(current.map((line) => Number(line.preferredVendorId)))).sort((left, right) => left - right)) {
         const existing = await tx.select().from(requestForQuotesTable).where(and(
           eq(requestForQuotesTable.vendorId, vendorId),
           eq(requestForQuotesTable.idempotencyKey, idempotencyKey),

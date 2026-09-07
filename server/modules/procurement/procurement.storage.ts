@@ -1,3 +1,4 @@
+import { readPurchasePlanningSnapshot } from "./purchase-planning-snapshot.repository";
 import { purchaseInventorySnapshotQuery } from "./purchase-inventory-snapshot.query";
 import { getPurchasePlanningPolicyService } from "./purchase-planning-policy.runtime";
 import {
@@ -1292,8 +1293,11 @@ export const procurementMethods: IProcurementStorage = {
   },
 
   async getReorderAnalysisData(lookbackDays: number): Promise<any[]> {
-    const normalizedLookbackDays = Math.max(1, Math.trunc(Number(lookbackDays) || 30));
-    const forecastSettings = await db.execute(sql`
+    // Physical receiving commits separately from PO reconciliation. Warehouse
+    // stock and exact closed receipts must come from one coherent snapshot.
+    return readPurchasePlanningSnapshot(db, async (tx) => {
+      const normalizedLookbackDays = Math.max(1, Math.trunc(Number(lookbackDays) || 30));
+      const forecastSettings = await tx.execute(sql`
       SELECT
         purchasing_forecast_method,
         purchasing_forecast_short_window_days,
@@ -1314,8 +1318,8 @@ export const procurementMethods: IProcurementStorage = {
       FROM inventory.warehouse_settings
       LIMIT 1
     `);
-    const configured = (forecastSettings.rows as any[])[0] ?? {};
-    const forecastPolicy = normalizePurchasingForecastPolicy({
+      const configured = (forecastSettings.rows as any[])[0] ?? {};
+      const forecastPolicy = normalizePurchasingForecastPolicy({
       method: configured.purchasing_forecast_method,
       shortWindowDays: configured.purchasing_forecast_short_window_days,
       standardWindowDays: normalizedLookbackDays,
@@ -1338,9 +1342,9 @@ export const procurementMethods: IProcurementStorage = {
       automationMinimumOrderCount: configured.purchasing_automation_min_order_count,
       automationMinimumActiveDays: configured.purchasing_automation_min_active_days,
     });
-    const shortWindowDays = Math.min(forecastPolicy.shortWindowDays, normalizedLookbackDays);
-    const longWindowDays = Math.max(forecastPolicy.longWindowDays, normalizedLookbackDays);
-    const seasonalWindowDays = forecastPolicy.seasonalWindowDays;
+      const shortWindowDays = Math.min(forecastPolicy.shortWindowDays, normalizedLookbackDays);
+      const longWindowDays = Math.max(forecastPolicy.longWindowDays, normalizedLookbackDays);
+      const seasonalWindowDays = forecastPolicy.seasonalWindowDays;
     const seasonalScanWindowDays = forecastPolicy.seasonalEnabled ? 365 + seasonalWindowDays * 2 : 0;
     const demandScanWindowDays = Math.max(
       normalizedLookbackDays * 2,
@@ -1353,7 +1357,7 @@ export const procurementMethods: IProcurementStorage = {
     // query (N+1 atpService calls would be prohibitively slow), and it needs per-location detail
     // (reserved vs on-hand breakdown) that the ATP service doesn't expose. This is a read-only
     // cross-boundary query for procurement decision support.
-    const rows = await db.execute(sql`
+      const rows = await tx.execute(sql`
       SELECT
         p.id AS product_id,
         p.sku AS base_sku,
@@ -1422,10 +1426,6 @@ export const procurementMethods: IProcurementStorage = {
         order_uom.units_per_variant AS order_uom_units,
         order_uom.sku AS order_uom_sku,
         order_uom.hierarchy_level AS order_uom_level,
-        COALESCE(on_order.on_order_pieces, 0)::bigint AS on_order_pieces,
-        COALESCE(on_order.open_po_count, 0)::int AS open_po_count,
-        on_order.earliest_expected,
-        COALESCE(on_order.inbound_schedule, '[]'::jsonb) AS inbound_schedule,
         (SELECT MAX(it2.created_at)
          FROM inventory.inventory_transactions it2
          JOIN catalog.product_variants pv2 ON pv2.id = it2.product_variant_id
@@ -1664,25 +1664,6 @@ export const procurementMethods: IProcurementStorage = {
         LIMIT 1
       ) preferred_vendor ON true
       LEFT JOIN (
-        SELECT pol.product_id,
-               SUM(GREATEST(pol.order_qty - COALESCE(pol.received_qty, 0) - COALESCE(pol.cancelled_qty, 0), 0)) AS on_order_pieces,
-               COUNT(DISTINCT po.id) AS open_po_count,
-               MIN(COALESCE(pol.expected_delivery_date, po.expected_delivery_date, po.confirmed_delivery_date)) AS earliest_expected,
-               JSONB_AGG(JSONB_BUILD_OBJECT(
-                 'purchaseOrderId', po.id,
-                 'purchaseOrderNumber', po.po_number,
-                 'purchaseOrderLineId', pol.id,
-                 'remainingPieces', GREATEST(pol.order_qty - COALESCE(pol.received_qty, 0) - COALESCE(pol.cancelled_qty, 0), 0),
-                 'expectedDate', COALESCE(pol.expected_delivery_date, po.expected_delivery_date, po.confirmed_delivery_date)::date::text
-               ) ORDER BY po.id, pol.id) AS inbound_schedule
-        FROM procurement.purchase_order_lines pol
-        JOIN procurement.purchase_orders po ON po.id = pol.purchase_order_id
-        WHERE po.status IN ('approved', 'sent', 'acknowledged', 'partially_received')
-          AND pol.status IN ('open', 'partially_received')
-          AND pol.product_id IS NOT NULL
-        GROUP BY pol.product_id
-      ) on_order ON on_order.product_id = p.id
-      LEFT JOIN (
         SELECT
           contribution.product_id,
           SUM(contribution.weighted_pieces) AS weighted_pieces,
@@ -1766,7 +1747,8 @@ export const procurementMethods: IProcurementStorage = {
       WHERE p.is_active = true
       ORDER BY p.sku, p.name
     `);
-    return rows.rows as any[];
+      return rows.rows as unknown as PurchasingRecommendationRawRow[];
+    });
   },
 
   async getOrderProfitabilityReport(limit: number, offset: number): Promise<any[]> {

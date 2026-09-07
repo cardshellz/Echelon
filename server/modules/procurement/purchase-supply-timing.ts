@@ -1,5 +1,6 @@
 import { projectReplacementForecast, forecastMicros, type PurchaseReplacementForecast } from "@shared/procurement/purchase-replacement-forecast";
 import { z } from "zod";
+import { inspectPurchaseReceiptSupplyCapture } from "@shared/procurement/purchase-receipt-supply-evidence";
 import type { PurchaseSupplyTiming } from "@shared/procurement/purchase-planning-policy";
 
 const DAY_MS = 86_400_000;
@@ -15,6 +16,7 @@ const scheduleSchema = z.array(z.object({
   purchaseOrderLineId: integer.refine((value) => value > 0),
   remainingPieces: integer,
   expectedDate: dateOnly.nullable(),
+  expectedDateSource: z.enum(["line_promised", "line_expected", "purchase_confirmed", "purchase_expected"]).nullable().optional(),
 }).strict()).max(10_000);
 
 function dayNumber(date: string): number {
@@ -42,6 +44,7 @@ export function buildPurchaseSupplyTiming(input: {
   safetyStockDays: number;
   onOrderPieces: number;
   rawSchedule: unknown;
+  rawReceiptEvidence?: unknown;
   forwardDemand?: { pieces: number; captureComplete: boolean; events: Array<{ eventStartDate: string; weightedPieces: number }> };
 }): PurchaseSupplyTiming {
   dateOnly.parse(input.asOfDate);
@@ -62,12 +65,15 @@ export function buildPurchaseSupplyTiming(input: {
   };
   const arrivalDate = shiftedDate(input.asOfDate, input.leadTimeDays);
   if (!arrivalDate) throw new RangeError("Purchase lead time exceeds the supported calendar range");
+  const receiptCapture = input.rawReceiptEvidence === undefined ? null : inspectPurchaseReceiptSupplyCapture(input.rawReceiptEvidence, input.onOrderPieces);
+  const receiptEvidence = receiptCapture?.evidence;
+  const receiptReviewRequired = receiptCapture?.reviewRequired ?? false;
   const parsed = scheduleSchema.safeParse(input.rawSchedule);
   const entries = parsed.success ? parsed.data.filter((entry) => entry.remainingPieces > 0) : [];
   const ids = new Set(entries.map((entry) => entry.purchaseOrderLineId));
   const total = entries.reduce((sum, entry) => sum + entry.remainingPieces, 0);
-  const scheduleComplete = (!parsed.success && input.onOrderPieces === 0) || (parsed.success && ids.size === entries.length
-    && Number.isSafeInteger(total) && total === input.onOrderPieces);
+  const scheduleComplete = !receiptReviewRequired && ((!parsed.success && input.onOrderPieces === 0) || (parsed.success && ids.size === entries.length
+    && Number.isSafeInteger(total) && total === input.onOrderPieces));
   const arrivals = scheduleComplete ? [...entries].sort((left, right) =>
     (left.expectedDate ?? "9999").localeCompare(right.expectedDate ?? "9999")
     || left.purchaseOrderLineId - right.purchaseOrderLineId) : [];
@@ -138,9 +144,11 @@ export function buildPurchaseSupplyTiming(input: {
   if (!stockoutDateWithoutReceipts && input.dailyPieces > 0) stockoutDateWithoutReceipts = shiftedDate(input.asOfDate, withoutReceiptDay + Math.max(0, Math.floor(withoutReceiptBalance / input.dailyPieces)));
   if (!demandComplete) stockoutDateWithoutReceipts = null;
   const uncertain = !scheduleComplete || undatedPieces > 0 || pastDuePieces > 0;
-  const signal = !demandComplete ? "unverified_demand_events" : uncertain ? "unverified_schedule" : input.onOrderPieces === 0 ? "no_open_supply"
+  const signal = receiptReviewRequired ? "unverified_receipts" : !demandComplete ? "unverified_demand_events" : uncertain ? "unverified_schedule" : input.onOrderPieces === 0 ? "no_open_supply"
     : firstGapDate ? "arrival_gap" : "scheduled";
-  const detail = signal === "unverified_demand_events"
+  const detail = signal === "unverified_receipts"
+    ? `Receipt quantities need review. ${receiptCapture?.unresolvedPieces == null ? "The open" : receiptCapture.unresolvedPieces + " pieces of"} PO commitment is unresolved; buy/no-buy and arrival coverage are not verified. ${receiptCapture?.detail}`
+    : signal === "unverified_demand_events"
     ? "The demand-event total has no complete dated evidence. Review forecast events before relying on arrival coverage."
     : signal === "no_open_supply"
     ? "No open PO supply is included. Dates use the forecast and configured lead time."
@@ -155,8 +163,8 @@ export function buildPurchaseSupplyTiming(input: {
     orderByDateWithoutReceipts: stockoutDateWithoutReceipts === null ? null
       : shiftedDate(stockoutDateWithoutReceipts, -input.leadTimeDays - input.safetyStockDays),
     newOrderArrivalDate: arrivalDate,
-    reviewRequired: !demandComplete || uncertain || (input.onOrderPieces > 0 && firstGapDate !== null),
-    signal, detail, firstGapDate, scheduledWithinCyclePieces, undatedPieces, pastDuePieces,
+    reviewRequired: receiptReviewRequired || !demandComplete || uncertain || (input.onOrderPieces > 0 && firstGapDate !== null),
+    signal, detail, ...(receiptEvidence ? { receiptEvidence } : {}), firstGapDate, scheduledWithinCyclePieces, undatedPieces, pastDuePieces,
     beyondCyclePieces, scheduleComplete, arrivals,
   };
 }

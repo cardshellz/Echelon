@@ -578,6 +578,7 @@ function buildRecommendationReviewHref(
 }
 
 function reviewQueueAction(item: PurchasingRecommendationItem, kind: RecommendationReviewQueueKind) {
+  if (item.supplyTiming?.signal === "unverified_receipts") return { action: "review_receipt_evidence", label: "Review receipt evidence", href: buildRecommendationReviewHref(item, kind, { reason: "unverified_receipts" }) };
   if (kind === "held_by_policy") {
     const band = item.recommendationCandidateScore?.band ?? "review_candidate";
     return {
@@ -622,6 +623,7 @@ function reviewQueueAction(item: PurchasingRecommendationItem, kind: Recommendat
 }
 
 function reviewQueueReason(item: PurchasingRecommendationItem, kind: RecommendationReviewQueueKind): { code: string; label: string; detail: string } {
+  if (item.supplyTiming?.signal === "unverified_receipts") return { code: "unverified_receipts", label: "Receipt quantities need review", detail: item.supplyTiming.detail };
   if (kind === "held_by_policy") {
     return {
       code: "held_by_approval_policy",
@@ -749,7 +751,7 @@ function buildRecommendationReviewQueue(result: ReturnType<typeof generatePurcha
     if (skippedById.has(item.recommendationId)) continue;
     if (item.qualityGate.autoDraftEligible && !passesAutoDraftApprovalPolicy(item, settings)) {
       pushEntry(item, "held_by_policy");
-    } else if (item.actionable && !item.qualityGate.autoDraftEligible) {
+    } else if ((item.actionable || item.supplyTiming?.signal === "unverified_receipts") && !item.qualityGate.autoDraftEligible) {
       pushEntry(item, "quality_review_required");
     }
   }

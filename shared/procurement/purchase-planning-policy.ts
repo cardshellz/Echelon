@@ -1,3 +1,4 @@
+import type { PurchaseReceiptSupplyEvidence } from "./purchase-receipt-supply-evidence";
 import { purchaseReplacementForecastsSchema, type PurchaseReplacementForecast } from "./purchase-replacement-forecast";
 import { z } from "zod";
 
@@ -78,6 +79,7 @@ export interface PurchaseInboundScheduleEntry {
   purchaseOrderLineId: number;
   remainingPieces: number;
   expectedDate: string | null;
+  expectedDateSource?: "line_promised" | "line_expected" | "purchase_confirmed" | "purchase_expected" | null;
 }
 
 export interface PurchaseSupplyTiming {
@@ -86,8 +88,9 @@ export interface PurchaseSupplyTiming {
   orderByDateWithoutReceipts: string | null;
   newOrderArrivalDate: string;
   reviewRequired: boolean;
-  signal: "no_open_supply" | "scheduled" | "arrival_gap" | "unverified_schedule" | "unverified_demand_events";
+  signal: "no_open_supply" | "scheduled" | "arrival_gap" | "unverified_schedule" | "unverified_demand_events" | "unverified_receipts";
   detail: string;
+  receiptEvidence?: PurchaseReceiptSupplyEvidence;
   firstGapDate: string | null;
   scheduledWithinCyclePieces: number;
   undatedPieces: number;

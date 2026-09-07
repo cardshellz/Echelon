@@ -3,7 +3,8 @@ import { z } from "zod";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { costSourceRevisionSchema } from "@shared/procurement/cost-source-contracts";
 import { purchasePipelineSchema, supplierProgressSchema, type PurchasePipeline, type PurchasePipelineCost, type PurchasePipelineRow } from "@shared/procurement/purchase-pipeline";
-import { resolveReceivingUnitSnapshot, type PostedReceiptUnitEvidence } from "./receiving-unit-snapshot";
+import { resolvePurchaseOrderArrival } from "./purchase-order-arrival";
+import { purchaseReceiptMirrorIssue, resolvePurchaseReceiptQuantities } from "./purchase-receipt-quantity-evidence";
 
 const id = z.number().int().positive().max(2_147_483_647);
 const quantity = z.number().int().nonnegative().max(2_147_483_647);
@@ -52,43 +53,9 @@ function uniqueIds(rows: readonly { id: number }[], label: string): void {
   if (new Set(rows.map((row) => row.id)).size !== rows.length) throw new PurchasePipelineError("PIPELINE_DUPLICATE_EVIDENCE", `Duplicate ${label} identities require review.`);
 }
 
-export function resolvePipelineReceiptQuantities(data: PipelineEvidence): { byLine: Map<number, number>; byShipmentLine: Map<number, number>; issues: Map<number, string[]>; unlinkedPurchaseIds: Set<number> } {
-  const postings = indexed(data.postings, (row) => row.receivingLineId);
-  const reversals = indexed(data.reversals, (row) => row.receivingLineId);
-  const sourceLines = new Map(data.lines.map((line) => [line.id, line]));
-  const shipmentLines = new Map(data.shipments.map((line) => [line.id, line]));
-  const shipmentCandidates = new Map<string, Shipment[]>();
-  for (const shipment of data.shipments) { const key = `${shipment.shipmentId}:${shipment.purchaseOrderLineId}`; const candidates = shipmentCandidates.get(key) ?? []; candidates.push(shipment); shipmentCandidates.set(key, candidates); }
-  const byLine = new Map<number, number>(); const byShipmentLine = new Map<number, number>(); const issues = new Map<number, string[]>(); const unlinkedPurchaseIds = new Set<number>();
-  for (const row of data.receipts) {
-    if (row.received === 0 && row.reversed === 0 && !postings.has(row.id) && !reversals.has(row.id)) continue;
-    if (row.purchaseOrderLineId === null) { if (row.purchaseOrderId !== null) unlinkedPurchaseIds.add(row.purchaseOrderId); continue; }
-    const line = sourceLines.get(row.purchaseOrderLineId);
-    if (!line) continue;
-    try {
-      if (row.purchaseOrderId !== null && row.purchaseOrderId !== line.purchaseOrderId) throw new Error("Receipt purchase identity conflicts with its exact line.");
-      const factor = resolveReceivingUnitSnapshot({ receivingLineId: row.id, receivingOrderId: row.receivingOrderId, purchaseOrderLineId: line.id, purchaseOrderId: line.purchaseOrderId,
-        receivedQty: row.received, unitsPerVariantSnapshot: row.units, receiptStatus: row.status, postedReceipts: (postings.get(row.id) ?? []) as PostedReceiptUnitEvidence[] });
-      const changes = reversals.get(row.id) ?? [];
-      if (row.reversed > row.received || exactSum(changes.map((change) => change.qty)) !== row.reversed || changes.some((change) => change.receivingOrderId !== row.receivingOrderId || change.baseUnitsReversed !== change.qty * factor)) throw new Error("Receipt reversal evidence is incomplete or conflicts with frozen units.");
-      const net = row.received * factor - exactSum(changes.map((change) => change.baseUnitsReversed!));
-      let shipment: Shipment | undefined;
-      if (row.shipmentLineId !== null) shipment = shipmentLines.get(row.shipmentLineId);
-      else if (row.shipmentId !== null) {
-        const candidates = shipmentCandidates.get(`${row.shipmentId}:${line.id}`) ?? [];
-        // Same fallback as the receipt owner: exactly one source and original PO posting.
-        if (candidates.length === 1 && (postings.get(row.id)?.length ?? 0) === 1) shipment = candidates[0];
-      }
-      if ((row.shipmentId !== null || row.shipmentLineId !== null) && (!shipment || shipment.purchaseOrderLineId !== line.id || shipment.shipmentId !== row.shipmentId || (shipment.purchaseOrderId !== null && shipment.purchaseOrderId !== line.purchaseOrderId))) throw new Error("Receipt cannot be assigned to one exact shipment line.");
-      byLine.set(line.id, exactSum([byLine.get(line.id) ?? 0, net]));
-      if (shipment) byShipmentLine.set(shipment.id, exactSum([byShipmentLine.get(shipment.id) ?? 0, net]));
-    } catch (error) {
-      const group = issues.get(line.id) ?? [];
-      group.push(`Receipt ${row.receivingOrderId}: ${error instanceof Error ? error.message : "Recorded units need review."}`); issues.set(line.id, group);
-    }
-  }
-  return { byLine, byShipmentLine, issues, unlinkedPurchaseIds };
-}
+// Compatibility export for existing pipeline consumers; planning uses the same
+// minimal physical-receipt authority without constructing cost/progress evidence.
+export const resolvePipelineReceiptQuantities = resolvePurchaseReceiptQuantities;
 
 // Cumulative proportional preview allocates every mill once, including signed
 // credit residuals. It never changes the inventory owner's accounting entries.
@@ -133,10 +100,9 @@ function componentCost(revisions: ReadonlyMap<string, PipelineEvidence["revision
 }
 
 function arrival(line: Line, shipment: Shipment | null, asOf: Date, horizonDays: 30 | 90): Pick<PurchasePipelineRow, "arrivalDate" | "arrivalSource" | "arrivalBucket" | "arrivalDestination"> {
-  const choices = shipment?.eta ? [[shipment.eta, "shipment_eta"]] : [[line.promisedDate, "line_promised"], [line.expectedDate, "line_expected"], [line.confirmedDate, "purchase_confirmed"], [line.purchaseExpectedDate, "purchase_expected"]];
-  const selected = choices.find(([date]) => date !== null);
-  const arrivalDate = selected?.[0] ?? null;
-  const arrivalSource = (selected?.[1] ?? null) as PurchasePipelineRow["arrivalSource"];
+  const selected = shipment?.eta ? { date: shipment.eta, source: "shipment_eta" as const } : resolvePurchaseOrderArrival(line);
+  const arrivalDate = selected.date;
+  const arrivalSource = selected.source;
   const day = asOf.toISOString().slice(0, 10); const dateDay = arrivalDate?.slice(0, 10);
   return { arrivalDate, arrivalSource, arrivalDestination: arrivalSource === "shipment_eta" ? "shipment_destination" : arrivalDate ? "warehouse" : "unknown",
     arrivalBucket: shipment?.deliveredAt ? "arrived" : !dateDay ? "unknown" : dateDay < day ? "overdue" : new Date(dateDay).getTime() < new Date(day).getTime() + horizonDays * DAY_MS ? "within_horizon" : "later" };
@@ -169,7 +135,8 @@ export function projectPurchasePipeline(input: PipelineEvidence, asOf: Date, hor
     const lineIssues = [...receipts.issues.get(line.id) ?? []];
     const physical = receipts.byLine.get(line.id) ?? 0;
     const netOrdered = line.ordered - line.cancelled;
-    if (physical < line.received) lineIssues.push("The PO received tally exceeds proven closed receipt quantities; original receipt detail must be reviewed.");
+    const mirrorIssue = purchaseReceiptMirrorIssue(line.id, line.received, receipts);
+    if (mirrorIssue) lineIssues.push(mirrorIssue);
     if (receipts.unlinkedPurchaseIds.has(line.purchaseOrderId)) lineIssues.push("A closed receipt on this purchase lacks an exact product-line link.");
     if (netOrdered < 0 || physical > netOrdered) lineIssues.push("Received/cancelled quantities exceed the ordered quantity.");
     const remaining = lineIssues.length ? null : netOrdered - physical;

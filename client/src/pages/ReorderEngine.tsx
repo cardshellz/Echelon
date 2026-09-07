@@ -552,6 +552,7 @@ function MathDrawerBody({ item, asOfIsoDate }: { item: CockpitItem; asOfIsoDate:
   const contributions = forward.contributions ?? [];
   const adjustedReorderPoint = forward.adjustedReorderPoint;
   const effectiveSupply = item.currentSupply.effectiveSupplyPieces;
+  const receiptReview = item.supplyTiming?.signal === "unverified_receipts";
   // Display-only difference of two engine numbers (the engine's order math
   // starts from this same shortfall; we never re-derive pieces from it).
   const shortfall = Math.max(0, adjustedReorderPoint - effectiveSupply);
@@ -714,14 +715,14 @@ function MathDrawerBody({ item, asOfIsoDate }: { item: CockpitItem; asOfIsoDate:
           <dd className="text-right font-medium tabular-nums">− {item.currentSupply.reservedPieces.toLocaleString()}</dd>
           <dt className="text-zinc-500">Available</dt>
           <dd className="text-right font-medium tabular-nums">{item.currentSupply.availablePieces.toLocaleString()}</dd>
-          <dt className="text-zinc-500">On order</dt>
+          <dt className="text-zinc-500">{receiptReview ? "Unresolved PO commitment" : "On order"}</dt>
           <dd className="text-right font-medium tabular-nums">
             + {item.openPoSupply.onOrderPieces.toLocaleString()}
-            {item.earliestInboundEta ? (
+            {!receiptReview && item.earliestInboundEta ? (
               <span className="text-zinc-500"> (ETA {formatIsoDateShort(item.earliestInboundEta)})</span>
             ) : null}
           </dd>
-          <dt className="text-zinc-500">Effective supply</dt>
+          <dt className="text-zinc-500">{receiptReview ? "Supply including unresolved commitment" : "Effective supply"}</dt>
           <dd className="text-right font-bold tabular-nums">{effectiveSupply.toLocaleString()}</dd>
         </dl>
         {item.supplyTiming && <div className={`mt-3 rounded border p-3 text-xs ${item.supplyTiming.reviewRequired ? "border-amber-300 bg-amber-50 text-amber-900" : "text-zinc-600"}`}>
@@ -733,9 +734,13 @@ function MathDrawerBody({ item, asOfIsoDate }: { item: CockpitItem; asOfIsoDate:
             <dt>New order placed today</dt><dd>Estimated arrival {item.supplyTiming.newOrderArrivalDate}</dd>
           </dl>
           {item.supplyTiming.arrivals.map((arrival) => <a key={arrival.purchaseOrderLineId} href={`/purchase-orders/${arrival.purchaseOrderId}`} className="mt-2 block underline">{arrival.purchaseOrderNumber} · line {arrival.purchaseOrderLineId} · {arrival.remainingPieces.toLocaleString()} pieces · ETA {arrival.expectedDate ?? "unknown"}</a>)}
+          {item.supplyTiming.receiptEvidence?.lines.filter((line) => line.reviewIssues.length > 0).map((line) => <div key={line.purchaseOrderLineId} className="mt-2">
+            <a href={`/purchase-orders/${line.purchaseOrderId}`} className="font-medium underline">{line.purchaseOrderNumber} · line {line.purchaseOrderLineId}</a>
+            {line.reviewIssues.map((issue, index) => <p key={index} className="mt-1">{issue}</p>)}
+          </div>)}
           <p className="mt-2">PO arrival dates are estimates. Receiving and putaway determine when goods become available.</p>
         </div>}
-        <CalcLine>
+        {receiptReview ? <p className="mt-2 text-xs text-amber-800">Supply coverage is unresolved until the closed receipt evidence is reviewed.</p> : <CalcLine>
           {shortfall > 0 ? (
             <>
               {adjustedReorderPoint.toLocaleString()} − {effectiveSupply.toLocaleString()} ={" "}
@@ -747,7 +752,7 @@ function MathDrawerBody({ item, asOfIsoDate }: { item: CockpitItem; asOfIsoDate:
               {adjustedReorderPoint.toLocaleString()}{item.supplyTiming?.reviewRequired ? " — arrival coverage needs review" : " — no additional quantity suggested"}
             </span>
           )}
-        </CalcLine>
+        </CalcLine>}
       </DrawerStep>
 
       <DrawerStep index={7} title="Order sizing">
@@ -755,7 +760,7 @@ function MathDrawerBody({ item, asOfIsoDate }: { item: CockpitItem; asOfIsoDate:
           <div className="text-xs text-zinc-500">
             Excluded from reorder analysis — no orders are ever suggested for this SKU.
           </div>
-        ) : item.suggestedOrderPieces > 0 ? (
+        ) : receiptReview ? <div className="text-xs text-amber-800">Order sizing requires receipt review. The displayed calculation retains the unresolved PO commitment; it is not verified buy/no-buy guidance.</div> : item.suggestedOrderPieces > 0 ? (
           <>
             <CalcLine>
               max({shortfall.toLocaleString()}, MOQ {(supplier.minimumOrderPieces ?? 0).toLocaleString()}) → round up
@@ -779,7 +784,7 @@ function MathDrawerBody({ item, asOfIsoDate }: { item: CockpitItem; asOfIsoDate:
 
       <DrawerStep index={8} title="Outcome & automation gate">
         <div className="flex flex-wrap items-center gap-2">
-          <StatusBadge status={item.status} />
+          {item.supplyTiming?.signal === "unverified_receipts" ? <Badge variant="outline" className={TONE_BADGE_CLASSES.amber}>Receipt review</Badge> : <StatusBadge status={item.status} />}
           <Badge variant="outline" className={TONE_BADGE_CLASSES[confidenceMeta.tone]}>
             {confidenceMeta.label} confidence
           </Badge>
@@ -2100,6 +2105,7 @@ export default function ReorderEngine() {
               <button type="button" className="font-semibold text-blue-600 hover:underline" onClick={selectAllChips}>
                 View all
               </button>
+              {searchedItems.some((item) => item.supplyTiming?.reviewRequired) && <span className="ml-2 text-amber-800">Includes {searchedItems.filter((item) => item.supplyTiming?.reviewRequired).length} supply evidence review(s), even when no purchase quantity is suggested.</span>}
             </div>
           )}
           <CardContent className="p-0">
@@ -2198,7 +2204,7 @@ export default function ReorderEngine() {
               <SheetHeader className="text-left">
                 <SheetTitle className="flex flex-wrap items-center gap-2 text-base">
                   <span className="font-mono">{drawerItem.sku}</span>
-                  <StatusBadge status={drawerItem.status} />
+                  {drawerItem.supplyTiming?.signal === "unverified_receipts" ? <Badge variant="outline" className={TONE_BADGE_CLASSES.amber}>Receipt review</Badge> : <StatusBadge status={drawerItem.status} />}
                   {drawerItem.skippedReason && (
                     <Badge variant="outline" className={TONE_BADGE_CLASSES.gray}>
                       {skippedReasonLabel(drawerItem.skippedReason)}
@@ -3045,7 +3051,7 @@ function ItemRow({
         </div>
       </TableCell>
       <TableCell>
-        {skipped ? (
+        {item.supplyTiming?.signal === "unverified_receipts" ? <Badge variant="outline" className={TONE_BADGE_CLASSES.amber}>Receipt review</Badge> : skipped ? (
           <>
             <Badge variant="outline" className={TONE_BADGE_CLASSES.gray}>
               {item.skippedReason === "excluded" ? "Excluded" : "Skipped"}
@@ -3055,7 +3061,7 @@ function ItemRow({
         ) : (
           <StatusBadge status={item.status} />
         )}
-        {item.supplyTiming?.reviewRequired && <button type="button" onClick={onExplain} className="mt-1 block text-left text-[11px] font-medium text-amber-700 underline">Review arrival coverage</button>}
+        {item.supplyTiming?.reviewRequired && <button type="button" onClick={onExplain} className="mt-1 block text-left text-[11px] font-medium text-amber-700 underline">{item.supplyTiming.signal === "unverified_receipts" ? "Review receipt evidence" : "Review arrival coverage"}</button>}
       </TableCell>
       <TableCell className="text-center">
         <TrendCell item={item} />
@@ -3068,7 +3074,7 @@ function ItemRow({
           <>
             <div>+{item.onOrderPieces.toLocaleString()}</div>
             <div className="text-[11px] text-zinc-500">
-              {item.earliestInboundEta ? `ETA ${formatIsoDateShort(item.earliestInboundEta)}` : `${item.openPoCount} PO${item.openPoCount === 1 ? "" : "s"}`}
+              {item.supplyTiming?.signal === "unverified_receipts" ? "Unresolved PO commitment" : item.earliestInboundEta ? `ETA ${formatIsoDateShort(item.earliestInboundEta)}` : `${item.openPoCount} PO${item.openPoCount === 1 ? "" : "s"}`}
             </div>
           </>
         ) : (

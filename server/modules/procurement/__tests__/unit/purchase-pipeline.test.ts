@@ -40,13 +40,19 @@ describe("purchase pipeline quantity and cost evidence", () => {
     const data = pipelineEvidence(); data.lines[0].received = 10;
     expect(projectPurchasePipeline(data, pipelineTime, 90).rows[0]).toMatchObject({ quantityPieces: null, remainingPieces: null, stage: "review" });
   });
+  it("does not let newly unposted physical receipts conceal missing old posted history", () => {
+    const data = pipelinePartialReceipt(); data.lines[0].received = 10;
+    expect(projectPurchasePipeline(data, pipelineTime, 90).rows[0]).toMatchObject({ stage: "review", quantityPieces: null, remainingPieces: null });
+  });
   it("uses exact original postings for a legacy receipt and requires complete reversal evidence", () => {
     const data = pipelinePartialReceipt(); data.receipts[0].units = null; data.receipts[0].shipmentLineId = null;
     data.postings.push({ receivingLineId: 31, receivingOrderId: 3, purchaseOrderId: 1, purchaseOrderLineId: 11, qtyReceived: 20 });
+    data.lines[0].received = 20; // PO posting and mirror commit together.
     expect(projectPurchasePipeline(data, pipelineTime, 90).rows[0].quantityPieces).toBe(40);
     data.receipts[0].reversed = 1;
     expect(projectPurchasePipeline(data, pipelineTime, 90).rows[0].quantityPieces).toBeNull();
     data.reversals.push({ id: 1, receivingLineId: 31, receivingOrderId: 3, qty: 1, baseUnitsReversed: 10 });
+    data.lines[0].received = 10; // Physical reversal updates the mirror atomically.
     expect(projectPurchasePipeline(data, pipelineTime, 90).rows[0]).toMatchObject({ receivedPieces: 10, quantityPieces: 50 });
   });
   it("does not spread an ambiguous historical receipt across two shipment lines", () => {

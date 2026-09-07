@@ -35,6 +35,7 @@ export const OVERSTOCK_DAYS_OF_SUPPLY = 180;
 export interface ChipFilterItem {
   status: string;
   daysOfSupply: number;
+  supplyTiming?: { reviewRequired: boolean };
 }
 
 export interface SuggestedSpendItem {
@@ -163,6 +164,7 @@ export function filterItemsByChips<T extends ChipFilterItem>(
 ): T[] {
   if (selected.size === 0 || allChipsSelected(selected)) return [...items];
   return items.filter((item) =>
+    (isOrderQueueSelection(selected) && item.supplyTiming?.reviewRequired === true) ||
     ALL_CHIP_KEYS.some((chip) => selected.has(chip) && chipMatchesItem(chip, item)),
   );
 }

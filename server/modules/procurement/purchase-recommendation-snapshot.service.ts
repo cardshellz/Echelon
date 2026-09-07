@@ -402,7 +402,7 @@ export function buildPurchaseRecommendationRunInput(input: {
     );
   }
   return {
-    calculationVersion: "purchasing-recommendation-v2",
+    calculationVersion: "purchasing-recommendation-v3-receipt-supply",
     source: input.source ?? "manual",
     sourceRunKey: input.sourceRunKey ?? null,
     asOf: input.asOf,

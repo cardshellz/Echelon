@@ -807,7 +807,7 @@ describe("purchasing recommendation routes", () => {
     mocks.db.select
       .mockReturnValueOnce(selectChain([{
         id: 701,
-        calculationVersion: "purchasing-recommendation-v2",
+        calculationVersion: "purchasing-recommendation-v3-receipt-supply",
         status: "completed",
         asOf: new Date("2026-07-17T12:00:00.000Z"),
         generatedAt: new Date("2026-07-17T12:01:00.000Z"),
