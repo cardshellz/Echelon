@@ -423,7 +423,8 @@ export class DropshipListingPreviewService {
     });
 
     const enrichedRows = this.deps.presentation
-      ? await enrichDropshipListingRows({ rows, candidates, storeConnectionId: parsed.storeConnectionId, deps: this.deps.presentation })
+      ? await enrichDropshipListingRows({ rows, candidates, vendorId: parsed.vendorId,
+          storeConnectionId: parsed.storeConnectionId, deps: this.deps.presentation })
       : rows;
     return {
       vendorId: parsed.vendorId,

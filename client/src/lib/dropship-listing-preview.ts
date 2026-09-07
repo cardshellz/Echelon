@@ -29,6 +29,18 @@ export function formatListingPreviewIssue(value: string): string {
     "missing_config:businessPolicies.returnPolicyId": "eBay setup: Return policy",
     "missing_config:businessPolicies.fulfillmentPolicyId": "eBay setup: Fulfillment policy",
     ebay_browse_category_required: "Card Shellz marketplace category setup required",
+    vendor_unavailable: "Your Shellz Club account is unavailable. Contact support.",
+    plan_unavailable: "Your .ops price list is unavailable. Contact support.",
+    entitlement_inactive: "Your Shellz Club .ops access is inactive. Contact support.",
+    variant_unmapped: "This product is not linked to your .ops price list. Contact support.",
+    variant_ambiguous: "The .ops product mapping needs support review.",
+    variant_identity_mismatch: "The product identity does not match your .ops price list. Contact support.",
+    override_ambiguous: "The .ops product price has conflicting entries. Contact support.",
+    override_invalid: "The .ops product price needs support review.",
+    retail_unavailable: "The catalog retail price is unavailable. Contact support.",
+    pricing_configuration_invalid: "Your .ops price list configuration needs support review.",
+    source_read_failed: "The .ops product cost could not be loaded. Refresh the preview; contact support if this continues.",
+    product_cost_source_unavailable: "The .ops product cost could not be loaded. Refresh the preview; contact support if this continues.",
   };
   return labels[value] ?? value.split(":").map(formatStatus).join(": ");
 }
