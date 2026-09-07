@@ -165,6 +165,11 @@ jobs:
           server/modules/inventory-planning/__tests__/integration/inventory-availability-foundation.integration.test.ts
           server/modules/inventory/__tests__/integration/inventory-cutover-encumbrance.integration.test.ts
           server/modules/inventory-planning/__tests__/integration/inventory-cutover-preflight.integration.test.ts
+          server/modules/inventory-planning/__tests__/integration/inventory-availability-dispatch-migration.integration.test.ts
+          server/modules/inventory-planning/__tests__/integration/inventory-availability-dispatch-runtime.integration.test.ts
+          server/modules/inventory/__tests__/integration/canonical-claim-dispatch-inventory.integration.test.ts
+          server/modules/wms/__tests__/integration/canonical-claim-dispatch-source.integration.test.ts
+          server/modules/inventory-planning/__tests__/integration/inventory-demand-dispatch.integration.test.ts
       - name: Warehouse workstation draft configuration PostgreSQL guarantees
         run: >-
           npx vitest run --no-file-parallelism
