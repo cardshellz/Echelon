@@ -201,6 +201,7 @@ jobs:
           npx vitest run --no-file-parallelism
           server/modules/dropship/__tests__/integration/dropship-ebay-listing-policy-bulk.integration.test.ts
           server/modules/dropship/__tests__/integration/dropship-listing-price.integration.test.ts
+          server/modules/dropship/__tests__/integration/dropship-listing-content.integration.test.ts
           server/modules/dropship/__tests__/integration/dropship-product-cost.integration.test.ts
       - name: eBay credential lifecycle PostgreSQL guarantees
         run: >-

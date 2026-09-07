@@ -64,6 +64,7 @@ import { EbayListingPolicyOverridePanel } from "./EbayListingPolicyOverridePanel
 import { EbayStoreCategoryAuthorizationRecovery } from "./EbayStoreCategoryAuthorizationRecovery";
 import { DropshipListingPreview, type ListingPriceSaveCallbacks } from "./DropshipListingPreview";
 import { DropshipPricingRulesPanel } from "./DropshipPricingRulesPanel";
+import { DropshipContentTemplatesPanel } from "./DropshipContentTemplatesPanel";
 export { formatListingPreviewIssue as formatIssue } from "@/lib/dropship-listing-preview";
 
 type PendingSelectionAction = string | null;
@@ -333,7 +334,7 @@ export default function DropshipPortalCatalog() {
     disabled: pendingListingAction !== null && pendingListingAction !== "preview",
     onSaveStarted: () => {
       if (pendingListingActionRef.current !== null && pendingListingActionRef.current !== "preview") {
-        throw new Error("Wait for the current listing action to finish before saving a price.");
+        throw new Error("Wait for the current listing action to finish before saving listing changes.");
       }
       pendingPriceSavesRef.current += 1;
       setPendingPriceSaves(pendingPriceSavesRef.current);
@@ -662,6 +663,8 @@ export default function DropshipPortalCatalog() {
 
         {selectedStoreConnectionIdNumber > 0 && <DropshipPricingRulesPanel storeConnectionId={selectedStoreConnectionIdNumber}
           storeName={selectedStoreName} onConfigurationChange={() => invalidateListingPreview(true)} />}
+        {selectedStoreConnectionIdNumber > 0 && <DropshipContentTemplatesPanel storeConnectionId={selectedStoreConnectionIdNumber}
+          storeName={selectedStoreName} {...priceSaveCallbacks} />}
 
         <ListingPreviewPanel
           launchReadyStoreConnections={launchReadyStoreConnections}

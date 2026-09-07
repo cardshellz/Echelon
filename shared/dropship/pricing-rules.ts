@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { catalogScopeSchema, matchesCatalogScope, catalogTargetsInputSchema, catalogTargetsResponseSchema } from "./catalog-scope";
 import { listingPriceCentsSchema, MAX_LISTING_PRICE_CENTS } from "./listing-price";
 
 export const PRICING_REVIEW_PAGE_SIZE = 50;
@@ -11,13 +12,7 @@ export const pricingRecipeSchema = z.object({
   flatCents: z.number().int().min(0).max(MAX_LISTING_PRICE_CENTS),
   rounding: z.enum(["cent", "up_99"]),
 }).strict();
-export const pricingScopeSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("category"), category: z.string().trim().min(1).max(255) }).strict(),
-  z.object({ type: z.literal("product_line"), productLineId: id }).strict(),
-  z.object({ type: z.literal("product"), productId: id }).strict(),
-  z.object({ type: z.literal("listings"), productVariantIds: z.array(id).min(1).max(MAX_PRICING_REVIEW_ITEMS)
-    .refine((ids) => new Set(ids).size === ids.length, "Duplicate listings are not allowed.") }).strict(),
-]);
+export const pricingScopeSchema = catalogScopeSchema;
 export const pricingGroupRuleSchema = z.object({
   id: z.string().min(1).max(80).regex(/^[A-Za-z0-9_-]+$/),
   name: z.string().trim().min(1).max(120), priority: z.number().int().min(1).max(100_000),
@@ -60,10 +55,8 @@ export type ReviewPricingRulesInput = z.infer<typeof reviewPricingRulesInputSche
 export type ApplyPricingRulesInput = z.infer<typeof applyPricingRulesInputSchema>;
 export type PricingImpactRow = z.infer<typeof pricingImpactRowSchema>;
 export type PricingReviewResponse = z.infer<typeof pricingReviewResponseSchema>;
-export const pricingTargetsInputSchema = z.object({ type: z.enum(["category", "product_line", "product", "listings"]),
-  search: z.string().trim().max(100).default(""), page: z.number().int().min(0).max(200).default(0) }).strict();
-export const pricingTargetsResponseSchema = z.object({ total: z.number().int().nonnegative(),
-  rows: z.array(z.object({ id: z.string(), name: z.string() }).strict()).max(PRICING_REVIEW_PAGE_SIZE) }).strict();
+export const pricingTargetsInputSchema = catalogTargetsInputSchema;
+export const pricingTargetsResponseSchema = catalogTargetsResponseSchema;
 
 export interface PricingRuleCandidate {
   productVariantId: number; productId: number; category: string | null; productLineIds: readonly number[];
@@ -91,14 +84,8 @@ export function resolvePricingRule(input: {
   productCostCents: number | null; catalogRetailCents: number | null;
 }): RulePriceResult {
   if (!input.profile) return { priceCents: null, ruleName: null, ruleId: null, issue: "pricing_rules_not_configured" };
-  const matches = input.profile.groups.filter(({ scope }) => {
-    switch (scope.type) {
-      case "category": return input.candidate.category === scope.category;
-      case "product_line": return input.candidate.productLineIds.includes(scope.productLineId);
-      case "product": return input.candidate.productId === scope.productId;
-      case "listings": return scope.productVariantIds.includes(input.candidate.productVariantId);
-    }
-  }).sort((a, b) => a.priority - b.priority || a.id.localeCompare(b.id));
+  const matches = input.profile.groups.filter(({ scope }) => matchesCatalogScope(scope, input.candidate))
+    .sort((a, b) => a.priority - b.priority || a.id.localeCompare(b.id));
   if (matches.length > 1 && matches[0].priority === matches[1].priority) {
     return { priceCents: null, ruleName: null, ruleId: null, issue: "pricing_rule_priority_conflict" };
   }

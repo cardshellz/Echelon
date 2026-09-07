@@ -23,6 +23,11 @@ export function safeListingImageUrl(value: string | null | undefined): string | 
 
 export function formatListingPreviewIssue(value: string): string {
   const labels: Record<string, string> = {
+    listing_content_template_conflict: "Two description groups share the winning priority. Give them different priorities.",
+    listing_content_catalog_review_required: "Catalog facts changed. Open the description editor to review and acknowledge them, or reset to catalog.",
+    listing_content_description_required: "Add a description or contact support to complete the catalog copy.",
+    listing_content_catalog_too_large: "The catalog description exceeds the supported size. Contact support.",
+    listing_content_description_too_large: "The assembled description is too long. Shorten the custom text or templates.",
     pricing_basis_unavailable: "The selected price basis is unavailable. No price was calculated.",
     pricing_result_out_of_range: "The pricing rule must produce a positive price within the supported range.",
     pricing_rule_priority_conflict: "Two matching groups share the winning priority. Give them different priorities.",
