@@ -32,6 +32,11 @@ const levelSchema = z.object({
 export class ShopifyIdentityReader {
   constructor(private readonly request: typeof fetch = fetch) {}
 
+  private async json(response: Response): Promise<unknown> {
+    try { return await response.json(); }
+    catch { throw new ChannelIdentityError("SHOPIFY_IDENTITY_RESPONSE_INVALID", "Shopify returned unreadable JSON"); }
+  }
+
   private async get(connection: ShopifyIdentityConnection, path: string): Promise<Response> {
     if (!/^[a-z0-9][a-z0-9-]*\.myshopify\.com$/i.test(connection.shopDomain)
       || !/^\d{4}-\d{2}$/.test(connection.apiVersion)) {
@@ -59,7 +64,7 @@ export class ShopifyIdentityReader {
   async variant(connection: ShopifyIdentityConnection, externalVariantId: string): Promise<ShopifyVariantIdentity> {
     externalIdentitySchema.parse(externalVariantId);
     const response = await this.get(connection, `variants/${externalVariantId}.json`);
-    const parsed = z.object({ variant: variantSchema }).safeParse(await response.json());
+    const parsed = z.object({ variant: variantSchema }).safeParse(await this.json(response));
     if (!parsed.success || parsed.data.variant.id !== externalVariantId) {
       throw new ChannelIdentityError("SHOPIFY_IDENTITY_RESPONSE_INVALID", "Shopify returned an invalid or different variant identity");
     }
@@ -69,7 +74,7 @@ export class ShopifyIdentityReader {
   async product(connection: ShopifyIdentityConnection, externalProductId: string) {
     externalIdentitySchema.parse(externalProductId);
     const response = await this.get(connection, `products/${externalProductId}.json`);
-    const parsed = z.object({ product: productSchema }).safeParse(await response.json());
+    const parsed = z.object({ product: productSchema }).safeParse(await this.json(response));
     if (!parsed.success || parsed.data.product.id !== externalProductId
       || parsed.data.product.variants.some((variant) => variant.product_id !== externalProductId)) {
       throw new ChannelIdentityError("SHOPIFY_PRODUCT_IDENTITY_INVALID", "Provider product identity is incomplete or inconsistent");
@@ -86,7 +91,7 @@ export class ShopifyIdentityReader {
     for (let page = 0; page < maxPages; page++) {
       const query = new URLSearchParams(cursor ? { page_info: cursor, limit: "250" } : { location_ids: locationId, limit: "250" });
       const response = await this.get(connection, `inventory_levels.json?${query}`);
-      const parsed = z.object({ inventory_levels: z.array(levelSchema) }).safeParse(await response.json());
+      const parsed = z.object({ inventory_levels: z.array(levelSchema) }).safeParse(await this.json(response));
       if (!parsed.success) throw new ChannelIdentityError("SHOPIFY_INVENTORY_RESPONSE_INVALID", "Inventory contains invalid IDs or quantities; no quantities may be applied");
       for (const level of parsed.data.inventory_levels) {
         if (level.location_id !== locationId || quantities.has(level.inventory_item_id)) {
@@ -98,7 +103,9 @@ export class ShopifyIdentityReader {
       const next = link?.split(",").find((part) => /rel="next"/.test(part));
       if (!next) return quantities;
       const href = next.match(/<([^>]+)>/)?.[1];
-      const nextUrl = href ? new URL(href) : null;
+      let nextUrl: URL | null = null;
+      try { nextUrl = href ? new URL(href) : null; }
+      catch { throw new ChannelIdentityError("SHOPIFY_INVENTORY_PAGINATION_INVALID", "Inventory pagination URL is invalid"); }
       cursor = nextUrl?.searchParams.get("page_info") ?? null;
       if (!cursor || cursors.has(cursor) || nextUrl?.hostname !== connection.shopDomain
         || nextUrl?.protocol !== "https:" || nextUrl?.port || nextUrl?.username || nextUrl?.password
