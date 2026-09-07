@@ -126,7 +126,10 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
       }
       reconcile = apModule.reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction;
       cogs = new cogsModule.COGSService(database);
-      inventory = new inventoryModule.InventoryUseCases(database,
+      // The legacy inventory port permits caller-selected generic rows; this fixture
+      // supplies the real Drizzle executor and never substitutes query results.
+      const inventoryDatabase = database as unknown as ConstructorParameters<typeof inventoryModule.InventoryUseCases>[0];
+      inventory = new inventoryModule.InventoryUseCases(inventoryDatabase,
         repositoryModule.createInventoryMethods(database), new lotModule.InventoryLotService(database), cogs);
       purchasing = purchasingModule.createPurchasingService(database, storage, {
         reconcileApprovedInvoiceCost: (id, tx, actor) => reconcile(id, tx, actor),
@@ -472,7 +475,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     expect((await pool.query("SELECT count(*)::int AS count FROM procurement.receipt_cost_attempts")).rows[0].count).toBe(2);
   });
 
-  it("never schedules open receipts, recent close work or terminal financial outcomes", async () => {
+  it("never schedules recent close work or terminal financial outcomes", async () => {
     await failedRecoveryReceipt(); const repository = recoveryRepository();
     await repository.prepare({ now: NOW, maxAttempts: 5, graceMs: 120_000, limit: 10 });
     expect(await repository.claimNext({ now: recoveryTime(), leaseMs: 300_000, leaseToken: randomUUID() })).toBeNull();
