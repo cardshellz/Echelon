@@ -11,6 +11,7 @@ describe("assembly work HTTP validation and identity", () => {
   const service = { queue: vi.fn(), get: vi.fn(), command: vi.fn(), handoff: vi.fn(), complete: vi.fn() };
   const execution = { contexts: vi.fn(), order: vi.fn(), task: vi.fn(), pickOutput: vi.fn() };
   const packing = { ready: vi.fn() };
+  const packageReview = { review: vi.fn() };
   beforeEach(async () => {
     vi.resetAllMocks(); authenticated = true;
     service.queue.mockResolvedValue({ tasks: [], nextBeforeId: null });
@@ -18,7 +19,7 @@ describe("assembly work HTTP validation and identity", () => {
     service.command.mockResolvedValue({ task: task(), idempotentReplay: false });
     const app = express(); app.use(express.json());
     app.use((req, _res, next) => { req.session = { user: authenticated ? { id: "session-user" } : undefined } as Request["session"]; next(); });
-    registerAssemblyWorkRoutes(app, { assemblyWork: service, assemblyExecution: execution, assemblyPacking: packing });
+    registerAssemblyWorkRoutes(app, { assemblyWork: service, assemblyExecution: execution, assemblyPacking: packing, assemblyPackageReview: packageReview });
     server = createServer(app); await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/warehouse/assembly-work`;
   });
@@ -26,6 +27,18 @@ describe("assembly work HTTP validation and identity", () => {
   async function post(path: string, body: unknown) {
     return fetch(`${base}${path}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
   }
+  it("scopes package review to the session actor and rejects unauthenticated or malformed requests", async () => {
+    authenticated = false;
+    expect((await fetch(`${base}/1/packages`)).status).toBe(401);
+    authenticated = true;
+    expect((await fetch(`${base}/0/packages`)).status).toBe(400);
+    expect(packageReview.review).not.toHaveBeenCalled();
+    packageReview.review.mockResolvedValue({ taskId: "1", orderId: 70, warehouseId: 1, readOnly: true, closesPackage: false, discoveryComplete: false, packages: [] });
+    expect((await fetch(`${base}/1/packages?actorId=admin`)).status).toBe(200);
+    expect(packageReview.review).toHaveBeenCalledWith("session-user", "1");
+    packageReview.review.mockRejectedValue(new WarehouseWorkError("WORK_SCOPE_DENIED", "Outside scope", 403));
+    expect((await fetch(`${base}/1/packages`)).status).toBe(403);
+  });
   it("authenticates and validates packing handoff, with session identity only", async () => {
     const command = { commandId: start().commandId, expectedVersion: 3, confirmReadyForPacking: true, reason: "Continue packing" };
     authenticated = false;

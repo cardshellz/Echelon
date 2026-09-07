@@ -47,6 +47,7 @@ import {
 import {
   PACKAGE_ALLOCATION_AUTHORITY_PREVIEW_REQUIRED_RELATIONS,
   PgPackageAllocationLedgerRepository,
+  readObservedPackagesForSources,
   type PersistedPackageAllocationEffectOutboxEntry,
   type PersistedPackageAllocationEntry,
   type PersistedPackageAllocationIntent,
@@ -2186,6 +2187,28 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       (intent) => intent.executable === false,
     )).toBe(true);
     expect(Object.values(await loadLedgerCounts(pool))).toEqual(Array(9).fill(0));
+  });
+
+  it("reads assembly package evidence under a SELECT-only role without creating allocation state", async () => {
+    const sourceId = await seedCustomerFulfillmentSource(pool, "ASSEMBLY-REVIEW", 2);
+    const providerOrderId = "assembly-review-order";
+    const labelId = await seedAuthorityReadinessLabel(pool, sourceId, { providerOrderId });
+    await seedAuthorityDiscoveryRelations(pool, sourceId, labelId, providerOrderId);
+    const countsBefore = await loadLedgerCounts(pool);
+    const result = await withExecutionAuditRole(pool, async (scopedPool) => {
+      const client = await scopedPool.connect();
+      try {
+        await client.query("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
+        const packages = await readObservedPackagesForSources(client, [sourceId]);
+        expect((await client.query("SHOW transaction_read_only")).rows[0].transaction_read_only).toBe("on");
+        await client.query("COMMIT");
+        return packages;
+      } catch (error) { await client.query("ROLLBACK"); throw error; }
+      finally { client.release(); }
+    });
+    expect(result).toHaveLength(1);
+    expect(result[0].persistedEvidence.shippingProviderLabelId).toBe(labelId);
+    expect(await loadLedgerCounts(pool)).toEqual(countsBefore);
   });
 
   it("discovers an empty sibling under the SELECT-only role without granting item authority", async () => {

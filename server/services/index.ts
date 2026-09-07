@@ -47,6 +47,7 @@ import { createSLAMonitorService } from "../modules/orders/sla-monitor.service";
 import { createPickingService } from "../modules/orders/picking.use-cases";
 import { AssemblyExecutionService } from "../modules/warehouse/work/application/assembly-execution.service";
 import { AssemblyPackingService } from "../modules/warehouse/work/application/assembly-packing.service";
+import { AssemblyPackageReviewService } from "../modules/warehouse/work/application/assembly-package-review.service";
 import { AssemblyPackingRepository } from "../modules/warehouse/work/infrastructure/assembly-packing.repository";
 import { createOrderCombiningService } from "../modules/orders/combining.service";
 import { createOperationsDashboardService } from "../modules/orders/operations-dashboard.service";
@@ -176,6 +177,7 @@ export function createServices(
   const assemblyWork = new AssemblyWorkService(assemblyWorkOwner, systemCanonicalClaimClock, inventoryAvailabilityClaims);
   const assemblyExecution = new AssemblyExecutionService(assemblyWorkOwner, assemblyWork, inventoryAvailabilityClaims);
   const assemblyPacking = new AssemblyPackingService(assemblyWorkOwner, new AssemblyPackingRepository(), systemCanonicalClaimClock);
+  const assemblyPackageReview = new AssemblyPackageReviewService(assemblyWork, databasePool);
   const channelSync = createChannelSyncService(db, atp);
 
   // Build completion calls back from inside the inventory-posting transaction.
@@ -575,6 +577,7 @@ export function createServices(
     assemblyWork,
     assemblyExecution,
     assemblyPacking,
+    assemblyPackageReview,
     oms,
     fulfillmentPush,
     channelFulfillmentAuthority,

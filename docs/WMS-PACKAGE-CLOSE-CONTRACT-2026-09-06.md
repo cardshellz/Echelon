@@ -1,5 +1,7 @@
 # Package-close contract checkpoint
 
+Later continuation: [connected assembly package evidence](WMS-ASSEMBLY-PACKAGE-REVIEW-2026-09-06.md). The pure close contract below remains unwired; the later read-only endpoint/UI does not manufacture its missing authority fields or close packages.
+
 ## Status and scope
 
 PR #1389 is verified merged at `03ea5b00983d1f59b181fa4d0c2b007832fd4a27`; the user reported deployment. This continuation is isolated on `codex/wms-assembly-package-close`, based on that commit. Unrelated catalog changes in the original checkout are untouched.
