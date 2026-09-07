@@ -19,7 +19,9 @@ import type { DropshipCatalogExposureRule } from "../domain/catalog-exposure";
 import { isDropshipStoreConnectionLaunchReady } from "../domain/store-connection";
 import type { DropshipVendorSelectionRule, DropshipVendorVariantOverride } from "../domain/vendor-selection";
 import type { SavedListingPriceRevision } from "../../../../shared/dropship/listing-price";
-import type { ListingPriceCatalogReader } from "../application/dropship-listing-price-service";
+import { resolveListingRulePrice, type ListingRulePrice } from "../application/dropship-rule-price";
+import { readPricingProfile } from "./dropship-pricing-profile.reader";
+import { PgShellzClubProductCostAdapter } from "./shellz-club-product-cost.adapter";
 
 type ListingDatabasePool = Pick<Pool, "query"> & {
   connect(): Promise<Pick<PoolClient, "query" | "release">>;
@@ -161,9 +163,20 @@ interface JobItemRow {
 export class PgDropshipListingPreviewRepository implements DropshipListingPreviewRepository {
   constructor(private readonly dbPool: ListingDatabasePool = defaultPool) {}
 
+  async loadRulePrices(input: { vendorId: number; storeConnectionId: number; candidates: readonly DropshipListingCatalogCandidate[] }): Promise<Map<number, ListingRulePrice>> {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      const prices = await loadRulePricesWithClient(client, input);
+      await client.query("COMMIT");
+      return prices;
+    } catch (error) { await rollbackQuietly(client); throw error; }
+    finally { client.release(); }
+  }
+
   /** The owner retains commit/release authority; these are the same catalog reads
    * as preview, but all execute inside the price-setting transaction. */
-  static readerForTransaction(client: PoolClient): ListingPriceCatalogReader {
+  static readerForTransaction(client: Pick<PoolClient, "query">): DropshipListingPreviewRepository {
     return new PgDropshipListingPreviewRepository({
       query: client.query.bind(client),
       connect: async () => ({ query: client.query.bind(client), release: () => undefined }),
@@ -176,12 +189,14 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
     if (!input.productVariantIds.length) return [];
     const result = await this.dbPool.query<{
       product_variant_id: number; revision_id: number; override_price_cents: number | null; updated_at: Date;
-    }>(`SELECT product_variant_id, revision_id, override_price_cents, updated_at
+      pricing_mode?: SavedListingPriceRevision["pricingMode"] | null;
+    }>(`SELECT product_variant_id, revision_id, override_price_cents, pricing_mode, updated_at
        FROM dropship.dropship_listing_price_settings
        WHERE vendor_id = $1 AND store_connection_id = $2 AND product_variant_id = ANY($3::int[])
        ORDER BY product_variant_id`, [input.vendorId, input.storeConnectionId, input.productVariantIds]);
     return result.rows.map((row) => ({ productVariantId: row.product_variant_id,
-      revisionId: row.revision_id, overridePriceCents: row.override_price_cents, updatedAt: row.updated_at.toISOString() }));
+      revisionId: row.revision_id, overridePriceCents: row.override_price_cents, updatedAt: row.updated_at.toISOString(),
+      ...(row.pricing_mode ? { pricingMode: row.pricing_mode } : {}) }));
   }
 
   async findVendorIdByMemberId(memberId: string): Promise<number | null> {
@@ -588,6 +603,17 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
       }
 
       const queuedItemCount = input.preview.rows.filter((row) => row.previewStatus !== "blocked").length;
+      const ruleRows = input.preview.rows.filter((row) => row.rulePriceEvidenceHash);
+      if (ruleRows.length) {
+        const reader = PgDropshipListingPreviewRepository.readerForTransaction(client);
+        const candidates = await reader.listCatalogCandidates(ruleRows.map((row) => row.productVariantId));
+        const currentRules = await loadRulePricesWithClient(client, { vendorId: input.vendorId,
+          storeConnectionId: input.storeConnectionId, candidates });
+        if (ruleRows.some((row) => currentRules.get(row.productVariantId)?.evidenceHash !== row.rulePriceEvidenceHash)) {
+          throw new DropshipError("DROPSHIP_LISTING_PRICE_VERSION_CONFLICT",
+            "Pricing rules or their cost basis changed while queueing. Generate a new preview.");
+        }
+      }
       // Preview is built before this transaction (and may perform provider reads).
       // Recheck its local pricing revision under the same lock as price saves.
       const pricedRows = input.preview.rows.filter((row) => row.priceSettingRevisionId !== undefined);
@@ -654,6 +680,18 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
       client.release();
     }
   }
+}
+
+async function loadRulePricesWithClient(client: Pick<PoolClient, "query">, input: {
+  vendorId: number; storeConnectionId: number; candidates: readonly DropshipListingCatalogCandidate[];
+}): Promise<Map<number, ListingRulePrice>> {
+  const state = await readPricingProfile(client, input.storeConnectionId, input.vendorId);
+  if (!state.profile) return new Map();
+  const costs = await PgShellzClubProductCostAdapter.forTransaction(client).loadProductCosts({
+    vendorId: input.vendorId, productVariantIds: input.candidates.map((row) => row.productVariantId),
+  });
+  return new Map(input.candidates.map((candidate) => [candidate.productVariantId,
+    resolveListingRulePrice({ state, candidate, cost: costs.get(candidate.productVariantId) ?? null })]));
 }
 
 async function findJobByIdempotencyKeyForUpdate(

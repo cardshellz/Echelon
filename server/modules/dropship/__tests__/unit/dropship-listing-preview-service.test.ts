@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { SavedListingPriceRevision } from "../../../../../shared/dropship/listing-price";
+import type { ListingRulePrice } from "../../application/dropship-rule-price";
 import { DropshipError } from "../../domain/errors";
 import type { DropshipLogEvent } from "../../application/dropship-ports";
 import {
@@ -106,6 +107,37 @@ describe("DropshipListingPreviewService", () => {
       quantity: 4,
       weightGrams: 100,
     });
+  });
+
+  it("uses adopted rule prices in the actual marketplace intent, not a request-local override", async () => {
+    repository.rulePrices.set(101, rulePrice());
+    repository.savedPrices = [{ productVariantId: 101, revisionId: 7, overridePriceCents: null, pricingMode: "rules", updatedAt: now.toISOString() }];
+    const preview = await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101], requestedRetailPriceCents: 1 });
+    expect(preview.rows[0]).toMatchObject({ priceCents: 1152, rulePriceEvidenceHash: "a".repeat(64), pricingRuleName: "Store default rule" });
+    expect(preview.rows[0].listingIntent).toMatchObject({ priceCents: 1152 });
+  });
+  it("requires exact reviewed rule/cost evidence even when the final cents have not changed", async () => {
+    repository.rulePrices.set(101, rulePrice());
+    const input = { storeConnectionId: 22, productVariantIds: [101], idempotencyKey: "rule-job-test",
+      expectedPriceCentsByVariantId: { "101": 1152 } };
+    await expect(service.createListingPushJobForMember("member-1", input)).rejects.toMatchObject({ code: "DROPSHIP_LISTING_PRICE_VERSION_CONFLICT" });
+    await expect(service.createListingPushJobForMember("member-1", { ...input, expectedRuleEvidenceHashesByVariantId: { "101": "b".repeat(64) } }))
+      .rejects.toMatchObject({ code: "DROPSHIP_LISTING_PRICE_VERSION_CONFLICT" });
+    expect(repository.jobs).toHaveLength(0);
+    const result = await service.createListingPushJobForMember("member-1", { ...input, expectedRuleEvidenceHashesByVariantId: { "101": "a".repeat(64) } });
+    expect(result.job.status).toBe("queued");
+  });
+  it("blocks an inherited price when its cost is missing", async () => {
+    repository.rulePrices.set(101, { ...rulePrice(), priceCents: null, issue: "pricing_basis_unavailable" });
+    const preview = await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] });
+    expect(preview.rows[0].priceCents).toBeNull(); expect(preview.rows[0].blockers).toContain("pricing_basis_unavailable");
+  });
+  it("does not request wholesale-derived prices for unavailable catalog candidates", async () => {
+    repository.candidate.variantIsActive = false;
+    repository.rulePrices.set(101, rulePrice());
+    const preview = await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] });
+    expect(repository.ruleCandidateIds).toEqual([]);
+    expect(preview.rows[0].rulePriceEvidenceHash).toBeUndefined();
   });
 
   it("uses saved draft prices in both preview and the immutable queued listing intent", async () => {
@@ -595,6 +627,12 @@ class FakeAtpProvider implements DropshipAtpProvider {
 }
 
 class FakeListingPreviewRepository implements DropshipListingPreviewRepository {
+  rulePrices = new Map<number, ListingRulePrice>();
+  ruleCandidateIds: number[] = [];
+  async loadRulePrices(input: { candidates: readonly DropshipListingCatalogCandidate[] }): Promise<Map<number, ListingRulePrice>> {
+    this.ruleCandidateIds = input.candidates.map((row) => row.productVariantId);
+    return new Map([...this.rulePrices].filter(([id]) => this.ruleCandidateIds.includes(id)));
+  }
   savedPrices: SavedListingPriceRevision[] = [];
   existingListings: DropshipExistingVendorListing[] = [];
   async listSavedListingPrices(): Promise<SavedListingPriceRevision[]> { return this.savedPrices; }
@@ -726,6 +764,10 @@ class FakeListingPreviewRepository implements DropshipListingPreviewRepository {
   }
 }
 
+function rulePrice(): ListingRulePrice {
+  return { priceCents: 1152, ruleName: "Store default rule", ruleId: null, issue: null, profileRevisionId: 1,
+    evidenceHash: "a".repeat(64), productCost: { status: "available", unitCostCents: 809, planId: "ops", source: "variant_fixed_price", overrideId: "fixed", issue: null } };
+}
 function makeCandidate(): DropshipListingCatalogCandidate {
   return {
     productId: 501,

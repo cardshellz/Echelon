@@ -34,7 +34,8 @@ describe("listing price local draft authority", () => {
   });
   it("loads catalog default without creating a setting or requiring launch readiness", async () => {
     expect(await service.getForMember("member-1", target)).toEqual({ ...target, revisionId: null,
-      overridePriceCents: null, effectivePriceCents: 899, defaultPriceCents: 899, source: "catalog_default", updatedAt: null });
+      overridePriceCents: null, effectivePriceCents: 899, defaultPriceCents: 899, source: "catalog_default", updatedAt: null,
+      pricingMode: "catalog_default", ruleName: null, pricingIssue: null, rulePriceCents: null, rulesConfigured: false });
     expect(tx.save).not.toHaveBeenCalled();
   });
   it.each(["connected", "needs_reauth", "refresh_failed"] as const)("saves local price while store is %s", async (status) => {
