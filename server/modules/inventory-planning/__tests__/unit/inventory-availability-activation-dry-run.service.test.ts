@@ -233,7 +233,189 @@ describe("inventory availability activation dry-run service", () => {
     expect(result.products[0]?.blockers.map((entry) => entry.code))
       .toContain("PUBLICATION_TARGET_SCOPE_AMBIGUOUS");
   });
+
+  describe.each(["external_provider", "manual"] as const)("%s publication authority", (authority) => {
+    it.each(["missing", "stale", "wrong_identity"] as const)(
+      "does not require %s Echelon write-verification evidence or imply custody readiness",
+      async (readbackState) => {
+        const fixture = readinessFixture(authority);
+        const target = fixture.publication.configuredTargets[0]!;
+        fixture.publication.lastAcknowledgedUnits = null;
+        fixture.publication.lastAcknowledgedAt = null;
+        if (readbackState === "missing") {
+          target.latestReadbackUnits = null;
+          target.latestReadbackAt = null;
+        } else if (readbackState === "stale") {
+          target.latestReadbackAt = "2026-08-27T16:00:00.000Z";
+        } else {
+          target.latestReadbackExternalInventoryItemId = "obsolete-provider-item";
+        }
+
+        const result = await runReadinessFixture(fixture);
+
+        expect(result.state).toBe("ready_for_publication");
+        expect(result.products[0]!.blockers).toEqual([expect.objectContaining({
+          code: "EXTERNALLY_MANAGED_PUBLICATION_OBSERVE_ONLY",
+          severity: "review",
+          context: expect.objectContaining({
+            publicationAuthority: authority,
+            providerWriteVerificationRequired: false,
+            externalInventoryCustodyEvaluated: false,
+          }),
+        })]);
+        expect(result.products[0]!.proposedPublications[0]).toMatchObject({
+          disposition: "observe_only",
+          canonicalAtpUnits: "10",
+          desiredUnits: "8",
+          differenceFromLastAcknowledgedUnits: null,
+        });
+        expect(result).toMatchObject({
+          runtimeAuthorityChanged: false, providerWriteAttempted: false, outboxEnqueued: false,
+        });
+      },
+    );
+
+    it("still requires exact target/SKU mapping", async () => {
+      const fixture = readinessFixture(authority);
+      fixture.preview.rows[0]!.mapping = null;
+      fixture.publication.configuredTargets[0]!.mapping = null;
+
+      const result = await runReadinessFixture(fixture);
+
+      expect(result.state).toBe("blocked");
+      expect(result.products[0]!.blockers.map((entry) => entry.code))
+        .toContain("EXACT_TARGET_VARIANT_MAPPING_MISSING");
+      expect(result.products[0]!.proposedPublications[0]!.disposition).toBe("blocked");
+    });
+
+    it.each(["CHANNEL_SOURCE_BINDING_MISSING", "CHANNEL_SOURCE_WAREHOUSE_MISSING_FROM_SHADOW"])(
+      "retains the %s source evidence blocker",
+      async (code) => {
+        const fixture = readinessFixture(authority);
+        fixture.preview.blockers.push({ code, message: "Source evidence requires review.", context: {} });
+        if (code === "CHANNEL_SOURCE_BINDING_MISSING") {
+          fixture.preview.sourceBindingId = null;
+          fixture.preview.sourceBindingVersion = null;
+          fixture.preview.sourceBindingDefinitionHash = null;
+          fixture.preview.sourceBindingAuthority = "missing";
+        }
+
+        const result = await runReadinessFixture(fixture);
+
+        expect(result.state).toBe("blocked");
+        expect(result.products[0]!.blockers).toContainEqual(expect.objectContaining({ code, severity: "blocking" }));
+      },
+    );
+  });
+
+  it.each(["missing", "stale", "future", "wrong_identity"] as const)(
+    "still blocks Echelon publication when provider readback is %s",
+    async (readbackState) => {
+      const fixture = readinessFixture("echelon");
+      const target = fixture.publication.configuredTargets[0]!;
+      const expectedCode = readbackState === "missing" ? "PROVIDER_READBACK_MISSING"
+        : readbackState === "wrong_identity" ? "PROVIDER_READBACK_IDENTITY_MISMATCH" : "PROVIDER_READBACK_STALE";
+      if (readbackState === "missing") target.latestReadbackUnits = null;
+      if (readbackState === "stale") target.latestReadbackAt = "2026-08-27T16:00:00.000Z";
+      if (readbackState === "future") target.latestReadbackAt = "2026-08-28T17:01:00.000Z";
+      if (readbackState === "wrong_identity") target.latestReadbackExternalScopeId = "another-location";
+
+      const result = await runReadinessFixture(fixture);
+
+      expect(result.state).toBe("blocked");
+      expect(result.products[0]!.blockers.map((entry) => entry.code)).toContain(expectedCode);
+    },
+  );
+
+  it("still requires legacy acknowledgement when any enabled target is Echelon-owned", async () => {
+    const fixture = readinessFixture("external_provider");
+    fixture.publication.lastAcknowledgedUnits = null;
+    fixture.publication.configuredTargets.push({
+      ...fixture.publication.configuredTargets[0]!, publicationTargetId: 2,
+      publicationAuthority: "echelon", externalScopeId: "second-location",
+      latestReadbackExternalScopeId: "second-location",
+    });
+
+    const result = await runReadinessFixture(fixture);
+
+    expect(result.state).toBe("blocked");
+    expect(result.products[0]!.blockers.map((entry) => entry.code))
+      .toContain("CURRENT_ACKNOWLEDGED_QUANTITY_MISSING");
+  });
+
+  it.each([
+    { publicationAuthority: "echelon" as const },
+    { providerScopeType: "account" as const },
+    { externalScopeId: "another-location" },
+    { revision: "2" },
+    { channelConnectionId: 11 },
+  ])("blocks target drift between catalog selection and preview: %j", async (change) => {
+    const fixture = readinessFixture("external_provider");
+    Object.assign(fixture.view.publicationTargets[0]!, change);
+
+    const result = await runReadinessFixture(fixture);
+
+    expect(result.state).toBe("blocked");
+    expect(result.products[0]!.blockers.map((entry) => entry.code))
+      .toContain("PUBLICATION_TARGET_CHANGED_DURING_DRY_RUN");
+  });
+
+  it.each([
+    { publicationAuthority: "echelon" as const },
+    { providerScopeType: "account" as const },
+    { externalScopeId: "another-location" },
+    { revision: "2" },
+    { channelConnectionId: 11 },
+    { state: "live" as const },
+  ])("blocks target drift after an external preview: %j", async (change) => {
+    const fixture = readinessFixture("external_provider");
+    Object.assign(fixture.publication.configuredTargets[0]!, change);
+
+    const result = await runReadinessFixture(fixture);
+
+    expect(result.state).toBe("blocked");
+    expect(result.products[0]!.blockers.map((entry) => entry.code))
+      .toContain("PUBLICATION_TARGET_CHANGED_DURING_DRY_RUN");
+  });
+
+  it.each([
+    { mappingId: 71 }, { version: 2 }, { definitionHash: HASH_B },
+    { authority: "active" as const }, { externalInventoryItemId: "another-item" }, { externalSku: "ANOTHER-SKU" },
+  ])("blocks exact mapping drift without relying on an external readback: %j", async (change) => {
+    const fixture = readinessFixture("external_provider");
+    Object.assign(fixture.publication.configuredTargets[0]!.mapping!, change);
+
+    const result = await runReadinessFixture(fixture);
+
+    expect(result.state).toBe("blocked");
+    expect(result.products[0]!.blockers.map((entry) => entry.code))
+      .toContain("PUBLICATION_VARIANT_MAPPING_CHANGED_DURING_DRY_RUN");
+  });
 });
+
+function readinessFixture(authority: "echelon" | "external_provider" | "manual") {
+  const view = exposureView();
+  const preview = targetPreview();
+  const publication = publicationEvidence();
+  view.publicationTargets[0]!.publicationAuthority = authority;
+  preview.publicationAuthority = authority;
+  publication.configuredTargets[0]!.publicationAuthority = authority;
+  return { view, preview, publication };
+}
+
+async function runReadinessFixture(fixture: ReturnType<typeof readinessFixture>) {
+  const service = new InventoryAvailabilityActivationDryRunService({
+    getMigrationQueue: vi.fn(async () => catalogQueue()),
+    getChannelPreview: vi.fn(async () => channelPreview()),
+  } as never, fakeStore([fixture.publication]), {
+    getView: vi.fn(async () => fixture.view),
+    preview: vi.fn(async () => fixture.preview),
+  }, sequenceClock(STARTED_AT, COMPLETED_AT));
+  return service.runDryRun({
+    expectedCatalogInputHash: HASH_A, expectedCatalogResultHash: HASH_B,
+    idempotencyKey: "authority-readiness-regression", reason: "Verify authority-scoped evidence",
+  }, "operator-1");
+}
 
 function fakeStore(publication: CurrentPublicationEvidence[]) {
   return {

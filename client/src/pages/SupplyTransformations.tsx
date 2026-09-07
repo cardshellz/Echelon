@@ -82,6 +82,7 @@ import {
 } from "./supply-transformations-model";
 import { PromiseSafetyPolicyPanel } from "./promise-safety-policy-panel";
 import { InventoryCatalogBatchPanel } from "./inventory-catalog-batch-panel";
+import { InventoryCutoverPreflightPanel } from "./inventory-cutover-preflight-panel";
 
 type DraftMutationInput =
   | { kind: "create"; request: CreateTransformationModelDraftRequest }
@@ -93,7 +94,7 @@ type DraftMutationInput =
     };
 
 export default function SupplyTransformations() {
-  const { hasPermission } = useAuth();
+  const { user, hasPermission } = useAuth();
   const canEdit = hasPermission("inventory_planning", "edit");
   const canActivate = hasPermission("inventory_planning", "activate");
   const queryClient = useQueryClient();
@@ -518,7 +519,7 @@ export default function SupplyTransformations() {
     onSuccess: (result) => {
       activationDryRunIdempotencyKey.current = null;
       toast({
-        title: result.state === "blocked" ? "Activation dry run found blockers" : "Activation dry run is ready",
+        title: result.state === "blocked" ? "Publication preparation dry run found blockers" : "Publication preparation dry run is ready",
         description: "Evidence was recorded without changing runtime ATP or contacting providers.",
         variant: result.state === "blocked" ? "destructive" : "default",
       });
@@ -924,9 +925,11 @@ export default function SupplyTransformations() {
         onReview={(row, decision) => reviewBackfillDraft.mutate({ row, decision })}
       />
 
+      <InventoryCutoverPreflightPanel canView={hasPermission("inventory_planning", "view")} actorId={user?.id ?? null} />
+
       <Card>
         <CardHeader>
-          <CardTitle>Phase 4 full-catalog activation dry run</CardTitle>
+          <CardTitle>Full-catalog publication preparation dry run</CardTitle>
           <p className="text-sm text-muted-foreground">
             First refresh exact provider quantities, then run the full-catalog dry run. A ready run
             may prepare conservative publication while legacy ATP and reservations stay authoritative.

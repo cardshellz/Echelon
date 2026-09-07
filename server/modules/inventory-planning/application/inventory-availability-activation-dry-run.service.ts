@@ -27,7 +27,7 @@ import { InventoryAvailabilityMasterDataError } from "../domain/inventory-availa
 import { findPartitionedShareOverages } from "../domain/inventory-channel-exposure";
 
 const actorSchema = z.string().trim().min(1).max(100);
-const ACTIVATION_DRY_RUN_CONTRACT_VERSION = "exact_publication_targets_v3";
+const ACTIVATION_DRY_RUN_CONTRACT_VERSION = "authority_scoped_publication_readiness_v4";
 const MAX_PROVIDER_READBACK_AGE_MS = 15 * 60 * 1000;
 
 export interface PublicationEvidenceKey {
@@ -182,7 +182,10 @@ export class InventoryAvailabilityActivationDryRunService {
                 || preview.channelId !== target.channelId
                 || preview.destinationKind !== target.destinationKind
                 || preview.channelConnectionId !== target.channelConnectionId
-                || preview.dropshipStoreConnectionId !== target.dropshipStoreConnectionId) {
+                || preview.dropshipStoreConnectionId !== target.dropshipStoreConnectionId
+                || preview.providerScopeType !== target.providerScopeType
+                || preview.externalScopeId !== target.externalScopeId
+                || preview.publicationAuthority !== target.publicationAuthority) {
                 blockers.push(blocker(
                   "PUBLICATION_TARGET_CHANGED_DURING_DRY_RUN",
                   "blocking",
@@ -516,15 +519,6 @@ function legacyPublicationCoverageBlockers(
       context,
     ));
   }
-  if (evidence.lastAcknowledgedUnits === null || evidence.lastAcknowledgedAt === null) {
-    blockers.push(blocker(
-      "CURRENT_ACKNOWLEDGED_QUANTITY_MISSING",
-      "blocking",
-      "The legacy feed has no complete last-acknowledged quantity evidence.",
-      productId,
-      context,
-    ));
-  }
   if (evidence.configuredTargets.length === 0) {
     blockers.push(blocker(
       "EXPLICIT_PUBLICATION_TARGET_MISSING",
@@ -535,6 +529,19 @@ function legacyPublicationCoverageBlockers(
     ));
   }
   const enabledTargets = evidence.configuredTargets.filter((target) => target.state !== "disabled");
+  // These quantities fence Echelon provider writes, not externally managed custody.
+  // External/manual targets still require exact coverage, mapping and source evidence.
+  const echelonTargets = enabledTargets.filter((target) => target.publicationAuthority === "echelon");
+  if (echelonTargets.length > 0
+    && (evidence.lastAcknowledgedUnits === null || evidence.lastAcknowledgedAt === null)) {
+    blockers.push(blocker(
+      "CURRENT_ACKNOWLEDGED_QUANTITY_MISSING",
+      "blocking",
+      "The legacy feed has no complete last-acknowledged quantity evidence for Echelon publication.",
+      productId,
+      context,
+    ));
+  }
   if (evidence.configuredTargets.length > 0 && enabledTargets.length === 0) {
     blockers.push(blocker(
       "PUBLICATION_TARGET_NOT_IN_PREVIEW",
@@ -566,7 +573,7 @@ function legacyPublicationCoverageBlockers(
       { ...context, publicationTargetIds: targetsMissingMapping },
     ));
   }
-  const targetsMissingReadback = enabledTargets
+  const targetsMissingReadback = echelonTargets
     .filter((target) => target.latestReadbackUnits === null || target.latestReadbackAt === null)
     .map((target) => target.publicationTargetId);
   if (targetsMissingReadback.length > 0) {
@@ -578,7 +585,7 @@ function legacyPublicationCoverageBlockers(
       { ...context, publicationTargetIds: targetsMissingReadback },
     ));
   }
-  const targetsWithStaleReadback = enabledTargets
+  const targetsWithStaleReadback = echelonTargets
     .filter((target) => target.latestReadbackAt !== null
       && readbackIsStale(target.latestReadbackAt, capturedAt))
     .map((target) => target.publicationTargetId);
@@ -592,7 +599,7 @@ function legacyPublicationCoverageBlockers(
         maxAgeMilliseconds: MAX_PROVIDER_READBACK_AGE_MS },
     ));
   }
-  const targetsWithStaleReadbackIdentity = enabledTargets
+  const targetsWithStaleReadbackIdentity = echelonTargets
     .filter((target) => target.mapping !== null
       && target.latestReadbackUnits !== null
       && target.latestReadbackAt !== null
@@ -634,6 +641,22 @@ function targetPublicationBlockers(
     )];
   }
   const blockers: ActivationDryRunBlocker[] = [];
+  if (target.revision !== preview.publicationTargetRevision
+    || target.state !== preview.publicationTargetState
+    || target.destinationKind !== preview.destinationKind
+    || target.channelConnectionId !== preview.channelConnectionId
+    || target.dropshipStoreConnectionId !== preview.dropshipStoreConnectionId
+    || target.providerScopeType !== preview.providerScopeType
+    || target.externalScopeId !== preview.externalScopeId
+    || target.publicationAuthority !== preview.publicationAuthority) {
+    blockers.push(blocker(
+      "PUBLICATION_TARGET_CHANGED_DURING_DRY_RUN",
+      "blocking",
+      "The exact publication target or its authority changed while publication evidence was captured.",
+      productId,
+      { ...context, previewRevision: preview.publicationTargetRevision, evidenceRevision: target.revision },
+    ));
+  }
   if (target.state === "disabled") {
     blockers.push(blocker(
       "PUBLICATION_TARGET_NOT_IN_PREVIEW",
@@ -654,7 +677,11 @@ function targetPublicationBlockers(
   }
   if (row.mapping && (
     target.mapping?.mappingId !== row.mapping.mappingId
+    || target.mapping.version !== row.mapping.version
     || target.mapping.definitionHash !== row.mapping.definitionHash
+    || target.mapping.authority !== row.mapping.authority
+    || target.mapping.externalInventoryItemId !== row.mapping.externalInventoryItemId
+    || target.mapping.externalSku !== row.mapping.externalSku
   )) {
     blockers.push(blocker(
       "PUBLICATION_VARIANT_MAPPING_CHANGED_DURING_DRY_RUN",
@@ -665,7 +692,20 @@ function targetPublicationBlockers(
         evidenceMappingId: target.mapping?.mappingId ?? null },
     ));
   }
-  if (row.policy?.eligible
+  const requiresProviderReadback = row.policy?.eligible && preview.publicationAuthority === "echelon";
+  if (preview.publicationAuthority !== "echelon") {
+    blockers.push(blocker(
+      "EXTERNALLY_MANAGED_PUBLICATION_OBSERVE_ONLY",
+      "review",
+      "This target remains observation-only: Echelon will not publish or verify a provider write. "
+        + "This publication dry run does not certify external inventory custody or data freshness; "
+        + "provider available quantity is not physical on-hand.",
+      productId,
+      { ...context, publicationAuthority: preview.publicationAuthority,
+        providerWriteVerificationRequired: false, externalInventoryCustodyEvaluated: false },
+    ));
+  }
+  if (requiresProviderReadback
     && (target.latestReadbackUnits === null || target.latestReadbackAt === null)) {
     blockers.push(blocker(
       "PROVIDER_READBACK_MISSING",
@@ -675,7 +715,7 @@ function targetPublicationBlockers(
       context,
     ));
   }
-  if (row.policy?.eligible && target.latestReadbackAt !== null
+  if (requiresProviderReadback && target.latestReadbackAt !== null
     && readbackIsStale(target.latestReadbackAt, capturedAt)) {
     blockers.push(blocker(
       "PROVIDER_READBACK_STALE",
@@ -686,7 +726,7 @@ function targetPublicationBlockers(
         maxAgeMilliseconds: MAX_PROVIDER_READBACK_AGE_MS },
     ));
   }
-  if (row.policy?.eligible && row.mapping
+  if (requiresProviderReadback && row.mapping
     && target.latestReadbackUnits !== null && target.latestReadbackAt !== null
     && (!readbackMatchesTarget(target)
       || target.latestReadbackExternalInventoryItemId !== row.mapping.externalInventoryItemId)) {
