@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { purchaseRfqOriginSchema } from "./purchase-rfq-origin";
 import { purchaseCostTraceSchema } from "./purchase-cost-trace";
 
 const id = z.number().int().positive().safe();
@@ -100,6 +101,7 @@ export const purchaseWorkspaceSchema = z.object({
       "shipment_invoice",
     ]),
   })),
+  rfqOrigins: z.array(purchaseRfqOriginSchema).optional(),
   costTrace: purchaseCostTraceSchema.nullable().optional(),
   limitations: z.array(z.string()),
 });

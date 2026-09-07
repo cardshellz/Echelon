@@ -780,6 +780,18 @@
   "procurement.purchase_pipeline_job_runs": [
     "modules/procurement"
   ],
+  "procurement.purchase_supplier_progress": [
+    "modules/procurement"
+  ],
+  "procurement.purchase_supplier_progress_revisions": [
+    "modules/procurement"
+  ],
+  "procurement.purchase_planning_policy": [
+    "modules/procurement"
+  ],
+  "procurement.purchase_planning_policy_revisions": [
+    "modules/procurement"
+  ],
   "procurement.purchase_recommendation_lines": [
     "modules/procurement"
   ],
@@ -811,6 +823,12 @@
     "modules/procurement"
   ],
   "procurement.request_for_quotes": [
+    "modules/procurement"
+  ],
+  "procurement.rfq_purchase_order_line_links": [
+    "modules/procurement"
+  ],
+  "procurement.rfq_quote_revisions": [
     "modules/procurement"
   ],
   "procurement.vendor_invoice_attachments": [

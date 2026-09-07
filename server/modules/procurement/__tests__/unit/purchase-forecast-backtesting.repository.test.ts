@@ -131,6 +131,23 @@ describe("purchase forecast backtesting repository", () => {
     expect(groupByClause).not.toContain("CASE");
   });
 
+  it("reads growth cohorts as version 2 and rejects relabelling them as legacy captures", async () => {
+    const growth = buildPurchasingForecastPolicyCohort({ growthPercent: 25 });
+    const row = {
+      forecast_policy_capture_version: "2", forecast_policy_fingerprint: growth.fingerprint,
+      forecast_policy_snapshot: growth.snapshot, forecast_method: "weighted_blend_v1", forecast_version: "2",
+      observation_count: "1", evaluation_count: "1", first_observed_from: "2026-09-01T00:00:00.000Z",
+      latest_observed_from: "2026-09-01T00:00:00.000Z", latest_evaluation_at: "2026-09-08T00:00:00.000Z",
+    };
+    const execute = vi.fn().mockResolvedValue({ rows: [row] });
+    const repository = createPurchaseForecastBacktestingRepository({ execute });
+    expect(await repository.loadPolicyCohorts({ evaluationVersion: 2 })).toEqual([
+      expect.objectContaining({ captureVersion: 2, fingerprint: growth.fingerprint, snapshot: expect.objectContaining({ growthPercent: 25 }) }),
+    ]);
+    execute.mockResolvedValue({ rows: [{ ...row, forecast_policy_capture_version: "1" }] });
+    await expect(repository.loadPolicyCohorts({ evaluationVersion: 2 })).rejects.toThrow("canonical policy snapshot");
+  });
+
   it("rejects a policy fingerprint that does not match its persisted snapshot", async () => {
     const repository = createPurchaseForecastBacktestingRepository({
       execute: vi.fn().mockResolvedValue({

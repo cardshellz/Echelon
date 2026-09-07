@@ -1,3 +1,4 @@
+import { evaluateSupplierBundle } from "@shared/procurement/supplier-bundle";
 import { z } from "zod";
 import {
   normalizePoLinePricing,
@@ -366,6 +367,8 @@ export interface RecommendationVendorProductRecord {
 }
 
 export interface RecommendationVendorRecord {
+  minimumOrderCents?: number | null;
+  freeFreightThresholdCents?: number | null;
   id: number;
   active: number;
   currency: string | null;
@@ -1306,6 +1309,12 @@ async function persistResolvedHandoffs(
       group.map((item) => item.lineTotalCents),
       "purchase order subtotal",
     );
+    const bundle = evaluateSupplierBundle({ currency, minimumOrderCents: vendor.minimumOrderCents ?? 0,
+      freeFreightThresholdCents: vendor.freeFreightThresholdCents ?? null }, group.map((item) => item.lineTotalCents));
+    if (bundle.status !== "ready") throw new RecommendationPoHandoffError(bundle.detail, 422, "SUPPLIER_BUNDLE_NOT_READY", {
+      vendorId, currency, subtotalCents, minimumOrderCents: vendor.minimumOrderCents ?? 0,
+      minimumShortfallCents: bundle.minimumShortfallCents, status: bundle.status,
+    });
     const po = await unitOfWork.createPurchaseOrder({
       vendorId,
       status: "draft",

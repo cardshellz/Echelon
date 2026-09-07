@@ -1,3 +1,4 @@
+import { evaluateSupplierBundle, type SupplierBundleTerms } from "@shared/procurement/supplier-bundle";
 // Reorder Engine cockpit — the redesigned /reorder-analysis page
 // (design spec §4.6/§13–§14, mock 01-reorder-analysis.html). Behind the
 // `useNewReorderCockpit` procurement-settings flag; the legacy PurchasingView
@@ -164,6 +165,9 @@ interface CockpitForwardDemandContribution {
 }
 
 interface CockpitItem {
+  supplierBundleTerms?: SupplierBundleTerms | null;
+  planningBasis?: import("@shared/procurement/purchase-planning-policy").PurchasePlanningBasis;
+  supplyTiming?: import("@shared/procurement/purchase-planning-policy").PurchaseSupplyTiming;
   recommendationId: string;
   productId: number;
   productVariantId?: number;
@@ -624,7 +628,7 @@ function MathDrawerBody({ item, asOfIsoDate }: { item: CockpitItem; asOfIsoDate:
         {blend && blendParts.length > 0 ? (
           <>
             <CalcLine>
-              {blend.avgDailyUsagePieces.toFixed(2)} = {blendParts.join(" + ")}
+              {(item.planningBasis?.historicalDailyPieces ?? blend.avgDailyUsagePieces).toFixed(2)} = {blendParts.join(" + ")}
             </CalcLine>
             {seasonalConfigured && !seasonalApplied && (
               <div className="mt-1.5 text-xs text-zinc-500">
@@ -640,26 +644,33 @@ function MathDrawerBody({ item, asOfIsoDate }: { item: CockpitItem; asOfIsoDate:
           </div>
         )}
         <div className="mt-1.5 text-xs">
-          <span className="font-semibold">Base velocity {basis.avgDailyUsagePieces.toFixed(2)} pieces/day</span>
+          <span className="font-semibold">Historical velocity {(item.planningBasis?.historicalDailyPieces ?? basis.avgDailyUsagePieces).toFixed(2)} pieces/day</span>
         </div>
       </DrawerStep>
 
       <DrawerStep index={3} title="Growth adjustments">
         <div className="text-xs text-zinc-500">
-          None configured — coming soon. Base velocity {basis.avgDailyUsagePieces.toFixed(2)}/day carries forward
-          unchanged.
+          {item.planningBasis ? <>
+            Historical {item.planningBasis.historicalDailyPieces.toFixed(2)}/day × {(100 + item.planningBasis.growthPercent)}% = <strong>{item.planningBasis.adjustedDailyPieces.toFixed(2)} pieces/day</strong>.
+            <div className="mt-1">Uniform growth adjustment: {item.planningBasis.growthPercent}%. Dated forecast events are added separately below.</div>
+          </> : "Growth policy evidence is unavailable for this analysis. Refresh to capture it."}
         </div>
       </DrawerStep>
 
       <DrawerStep index={4} title="Coverage target">
         <CalcLine>
-          ({lead.leadTimeDays}d lead + {lead.safetyStockDays}d safety) × {basis.avgDailyUsagePieces.toFixed(2)}/day →{" "}
-          <span className="font-bold">Reorder point {lead.reorderPointPieces.toLocaleString()}</span>
+          {item.planningBasis ? <>
+            {(item.planningBasis.excludedQuarantinePieces ?? 0) > 0 && <p className="mb-1 text-amber-800">{item.planningBasis.excludedQuarantinePieces!.toLocaleString()} quarantined pieces are excluded from usable warehouse stock.</p>}
+            Target cover {item.planningBasis.targetCoverDays}d · minimum stock buffer {item.planningBasis.minimumStockPieces.toLocaleString()} pieces → <span className="font-bold">Base stock target {item.planningBasis.targetStockPieces.toLocaleString()}</span>
+          </> : <>({lead.leadTimeDays}d lead + {lead.safetyStockDays}d safety) × {basis.avgDailyUsagePieces.toFixed(2)}/day → <span className="font-bold">Reorder point {lead.reorderPointPieces.toLocaleString()}</span></>}
         </CalcLine>
         <div className="mt-1.5 text-xs text-zinc-500">
           Lead-time source — {leadTimeSourceLabel(lead.leadTimeSource)}
           {item.preferredVendorName && lead.leadTimeSource === "vendor_product" ? `: ${item.preferredVendorName}` : ""}.
           Safety-stock source — {lead.safetyStockSource === "product" ? "product override" : "system default"}.
+          {item.planningBasis?.leadTimeStages && <div className="mt-1">RFQ {item.planningBasis.leadTimeStages.rfqDays}d + production {item.planningBasis.leadTimeStages.productionDays}d + transit {item.planningBasis.leadTimeStages.transitDays}d + receiving {item.planningBasis.leadTimeStages.receivingDays}d = {lead.leadTimeDays}d.</div>}
+          {item.planningBasis?.replacementForecasts?.map((range) => <div key={`${range.productId}:${range.startDate}`} className="mt-1 rounded border p-2">Replacement forecast: {range.startDate} through {range.endDate} · {range.totalPieces.toLocaleString()} pieces · {range.reference}. This replaces baseline demand on those dates.</div>)}
+          {item.planningBasis?.essential && <div className="mt-1 font-medium">Essential-item target is active. Availability still depends on demand and verified receipts.</div>}
         </div>
       </DrawerStep>
 
@@ -713,6 +724,17 @@ function MathDrawerBody({ item, asOfIsoDate }: { item: CockpitItem; asOfIsoDate:
           <dt className="text-zinc-500">Effective supply</dt>
           <dd className="text-right font-bold tabular-nums">{effectiveSupply.toLocaleString()}</dd>
         </dl>
+        {item.supplyTiming && <div className={`mt-3 rounded border p-3 text-xs ${item.supplyTiming.reviewRequired ? "border-amber-300 bg-amber-50 text-amber-900" : "text-zinc-600"}`}>
+          <div className="font-semibold">Arrival coverage as of {item.supplyTiming.asOfDate}</div>
+          <p className="mt-1">{item.supplyTiming.detail}</p>
+          <dl className="mt-2 grid grid-cols-2 gap-1">
+            <dt>Stockout without receipts</dt><dd>{item.supplyTiming.stockoutDateWithoutReceipts ?? "No dated forecast"}</dd>
+            <dt>Order by, before receipts</dt><dd>{item.supplyTiming.orderByDateWithoutReceipts ?? "No dated forecast"}</dd>
+            <dt>New order placed today</dt><dd>Estimated arrival {item.supplyTiming.newOrderArrivalDate}</dd>
+          </dl>
+          {item.supplyTiming.arrivals.map((arrival) => <a key={arrival.purchaseOrderLineId} href={`/purchase-orders/${arrival.purchaseOrderId}`} className="mt-2 block underline">{arrival.purchaseOrderNumber} · line {arrival.purchaseOrderLineId} · {arrival.remainingPieces.toLocaleString()} pieces · ETA {arrival.expectedDate ?? "unknown"}</a>)}
+          <p className="mt-2">PO arrival dates are estimates. Receiving and putaway determine when goods become available.</p>
+        </div>}
         <CalcLine>
           {shortfall > 0 ? (
             <>
@@ -722,7 +744,7 @@ function MathDrawerBody({ item, asOfIsoDate }: { item: CockpitItem; asOfIsoDate:
           ) : (
             <span className="text-green-700">
               Effective supply {effectiveSupply.toLocaleString()} covers adjusted RP{" "}
-              {adjustedReorderPoint.toLocaleString()} — no order needed
+              {adjustedReorderPoint.toLocaleString()}{item.supplyTiming?.reviewRequired ? " — arrival coverage needs review" : " — no additional quantity suggested"}
             </span>
           )}
         </CalcLine>
@@ -1189,6 +1211,7 @@ export default function ReorderEngine() {
     const sorted = [...filtered].sort(
       (a, b) =>
         statusSeverityRank(a.status) - statusSeverityRank(b.status) ||
+        Number(Boolean(b.planningBasis?.essential)) - Number(Boolean(a.planningBasis?.essential)) ||
         (suggestedValueCents(b) ?? 0) - (suggestedValueCents(a) ?? 0),
     );
     if (!showSkipped) return sorted;
@@ -1329,7 +1352,13 @@ export default function ReorderEngine() {
     [confirmView, rfqLineMap],
   );
 
-  const confirmMissing = firstUnmetConfirmRequirement({
+  const confirmBundleIssue = confirmView.poGroups.map(({ group, lines }) => {
+    const terms = group.lines[0]?.supplierBundleTerms;
+    if (terms === undefined) return null; // A rolling-deploy legacy response is still rechecked by the server owner.
+    const bundle = evaluateSupplierBundle(terms, lines.map(({ item, state }) => orderLineValueCents(item, state.pieces)));
+    return bundle.status === "ready" ? null : `${group.vendorName}: ${bundle.detail}`;
+  }).find((issue) => issue !== null) ?? null;
+  const confirmMissing = confirmBundleIssue ?? firstUnmetConfirmRequirement({
     poLines: confirmPoLines,
     rfqLines: confirmRfqLines,
     acknowledgedControlKeys: ackedControls,
@@ -1992,11 +2021,11 @@ export default function ReorderEngine() {
               <ChipButton
                 active={selectedChips.has("on_order")}
                 onClick={() => toggleChip("on_order")}
-                tooltip={`Below reorder point but open POs cover the gap.${
+                tooltip={`Open PO quantity is committed. Review arrival dates to confirm demand coverage.${
                   chipCounts.earliestEta ? ` Earliest ETA ${formatIsoDateShort(chipCounts.earliestEta)}.` : ""
                 }`}
               >
-                Inbound covers <span className="opacity-70">{chipCounts.onOrder}</span>
+                On order <span className="opacity-70">{chipCounts.onOrder}</span>
                 {chipCounts.earliestEta && (
                   <span className="text-[10px] opacity-70">· ETA {formatIsoDateShort(chipCounts.earliestEta)}</span>
                 )}
@@ -2249,6 +2278,10 @@ export default function ReorderEngine() {
                 )}
                 {builderGroups.vendorGroups.map((group) => {
                   const mode = vendorMode[group.key] ?? "po";
+                  const terms = group.lines[0]?.supplierBundleTerms;
+                  const selectedLines = group.lines.filter((item) => (orderSelection.get(item.recommendationId)?.pieces ?? 0) > 0);
+                  const bundle = terms === undefined ? null : evaluateSupplierBundle(terms,
+                    selectedLines.map((item) => orderLineValueCents(item, orderSelection.get(item.recommendationId)!.pieces)));
                   let vendorCents = 0;
                   return (
                     <div key={group.key} className="overflow-hidden rounded-md border">
@@ -2256,7 +2289,8 @@ export default function ReorderEngine() {
                         <span className="text-sm font-semibold">{group.vendorName}</span>
                         <span className="text-xs text-zinc-500">lead {group.lines[0]?.leadTimeDays ?? "?"}d</span>
                       </div>
-                      <table className="w-full text-xs">
+                      <div className="overflow-x-auto" tabIndex={0} aria-label={`Order lines for ${group.vendorName}`}>
+                      <table className="w-full min-w-[540px] text-xs">
                         <thead>
                           <tr className="border-b text-left text-[10px] uppercase tracking-wide text-zinc-500">
                             <th className="px-3 py-1.5 font-semibold">SKU</th>
@@ -2380,6 +2414,15 @@ export default function ReorderEngine() {
                           })}
                         </tbody>
                       </table>
+                      </div>
+                      {bundle && <div className={`border-t px-3 py-2 text-xs ${bundle.status === "ready" ? "text-zinc-600" : "bg-amber-50 text-amber-900"}`}>
+                        <p>{bundle.detail}</p>
+                        {bundle.terms && <p className="mt-1">Supplier minimum {formatMoneyCents(bundle.terms.minimumOrderCents)} {bundle.terms.currency}
+                          {bundle.minimumShortfallCents !== null && bundle.minimumShortfallCents > 0 && ` · ${formatMoneyCents(bundle.minimumShortfallCents)} short`}
+                          {bundle.terms.freeFreightThresholdCents !== null && ` · Free-freight target ${formatMoneyCents(bundle.terms.freeFreightThresholdCents)}`}
+                          {bundle.freeFreightShortfallCents !== null && ` (${formatMoneyCents(bundle.freeFreightShortfallCents)} remaining)`}</p>}
+                        {mode === "rfq" && bundle.status !== "ready" && <p className="mt-1">An RFQ can still be drafted for review; the supplier basket is unresolved.</p>}
+                      </div>}
                       <div className="flex flex-wrap items-center justify-between gap-2 border-t bg-zinc-50/60 px-3 py-2 text-xs">
                         <span>
                           Vendor total <b className="tabular-nums">{formatMoneyCents(vendorCents)}</b>
@@ -2393,7 +2436,7 @@ export default function ReorderEngine() {
                               checked={mode === "po"}
                               onChange={() => setVendorMode((current) => ({ ...current, [group.key]: "po" }))}
                             />
-                            Send as PO
+                            Draft PO
                           </label>
                           <label className="flex cursor-pointer items-center gap-1.5">
                             <input
@@ -2807,6 +2850,7 @@ export default function ReorderEngine() {
               <>
                 <div className="text-sm">
                   Order total <b className="tabular-nums">{formatMoneyCents(stage1.grandCents)}</b>
+                  {builderStage === "confirm" && confirmBundleIssue && <p role="alert" className="max-w-sm text-xs text-amber-800">{confirmBundleIssue}</p>}
                   <div className="text-[11px] text-zinc-500">
                     {stage1.itemCount} item{stage1.itemCount === 1 ? "" : "s"} ·{" "}
                     {stage1.poVendorCount + stage1.rfqVendorCount} vendor
@@ -2990,7 +3034,7 @@ function ItemRow({
           />
         )}
       </TableCell>
-      <TableCell className="font-mono text-xs">{item.sku}</TableCell>
+      <TableCell className="font-mono text-xs">{item.sku}{item.planningBasis?.essential && <Badge variant="outline" className="ml-1 text-[10px]">Essential</Badge>}</TableCell>
       <TableCell>
         <div className="max-w-[220px] truncate text-sm font-medium" title={item.productName}>
           {item.productName}
@@ -3011,6 +3055,7 @@ function ItemRow({
         ) : (
           <StatusBadge status={item.status} />
         )}
+        {item.supplyTiming?.reviewRequired && <button type="button" onClick={onExplain} className="mt-1 block text-left text-[11px] font-medium text-amber-700 underline">Review arrival coverage</button>}
       </TableCell>
       <TableCell className="text-center">
         <TrendCell item={item} />

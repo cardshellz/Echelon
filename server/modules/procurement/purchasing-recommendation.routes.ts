@@ -1,4 +1,8 @@
+import { assertRfqSupplySnapshotCurrent, isActiveRfqReservation, rfqPendingSourcingPieces, RfqSourcingSnapshotError } from "./domain/rfq-sourcing-reservation";
+import { loadLinkedRfqPurchases } from "./rfq-sourcing-reservation.repository";
+import { registerRfqWorkflowRoutes } from "./rfq-workflow.routes";
 import type { Express } from "express";
+import { registerPurchasePlanningPolicyRoutes } from "./purchase-planning-policy.routes";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import { centsToMills, computeLineTotalCentsFromMills } from "@shared/utils/money";
@@ -1079,6 +1083,8 @@ function buildAcceptedRecommendationHandoffSkipped(
 }
 
 export function registerPurchasingRecommendationRoutes(app: Express) {
+  registerPurchasePlanningPolicyRoutes(app);
+  registerRfqWorkflowRoutes(app);
   // ── Purchasing / Reorder Analysis ──────────────────────────────────
   app.get("/api/purchasing/kpis", requirePermission("inventory", "view"), async (req, res) => {
     try {
@@ -1224,7 +1230,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
         .orderBy(purchaseRecommendationLinesTable.id);
       const productIds = Array.from(new Set(lines.map((line) => line.productId)));
       const allocatedRecommendation = alias(purchaseRecommendationLinesTable, "allocated_recommendation");
-      const allocations = productIds.length === 0 ? [] : await db.select({
+      const allocationRows = productIds.length === 0 ? [] : await db.select({
         id: requestForQuoteLinesTable.id,
         recommendationLineId: requestForQuoteLinesTable.recommendationLineId,
         productId: allocatedRecommendation.productId,
@@ -1248,8 +1254,13 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
         .innerJoin(requestForQuotesTable, eq(requestForQuoteLinesTable.rfqId, requestForQuotesTable.id))
         .where(and(
           inArray(allocatedRecommendation.productId, productIds),
-          inArray(requestForQuoteLinesTable.status, ["draft", "sent", "quoted", "accepted", "ordered"]),
         ));
+      const linkedPurchases = await loadLinkedRfqPurchases(db, allocationRows.map((row) => row.id));
+      assertRfqSupplySnapshotCurrent(Array.from(linkedPurchases.values()), new Date(run.asOf));
+      const allocations = allocationRows.map((allocation) => ({
+        ...allocation,
+        reservedPieces: rfqPendingSourcingPieces(allocation.requestedPieces, linkedPurchases.get(allocation.id) ?? null, isActiveRfqReservation(allocation.rfqStatus, allocation.lineStatus)),
+      })).filter((allocation) => allocation.reservedPieces > 0);
       const vendorIds = Array.from(new Set([
         ...lines.map((line) => line.preferredVendorId).filter((id): id is number => id != null),
         ...allocations.map((allocation) => allocation.vendorId),
@@ -1268,7 +1279,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
       }
       const items = lines.map((line) => {
         const lineAllocations = allocationsBySku.get(purchasingSkuAllocationKey(line)) ?? [];
-        const allocatedPieces = lineAllocations.reduce((sum, allocation) => sum + Number(allocation.requestedPieces), 0);
+        const allocatedPieces = lineAllocations.reduce((sum, allocation) => sum + allocation.reservedPieces, 0);
         const remainingPieces = Math.max(Number(line.recommendedPieces) - allocatedPieces, 0);
         const excessPieces = Math.max(allocatedPieces - Number(line.recommendedPieces), 0);
         const evidence = (line.evidenceSnapshot ?? {}) as Record<string, any>;
@@ -1330,6 +1341,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
         items,
       });
     } catch (error) {
+      if (error instanceof RfqSourcingSnapshotError) return res.status(error.statusCode).json({ code: error.code, error: error.message });
       console.error("Error fetching purchasing recommendation queue:", error);
       res.status(500).json({ error: "Failed to fetch purchasing recommendations" });
     }
@@ -1373,14 +1385,8 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
     }
   });
 
-  // Read-only RFQ tracking list (workbench, design surface 05,
-  // /procurement/rfqs). Lists created request_for_quotes drafts newest-first
-  // with joined lines; the query logic lives in listRequestForQuotes
-  // (purchasing-rfq.service.ts). Deliberately has NO mutation counterpart:
-  // RFQ creation is the Order Builder's POST /api/purchasing/rfq-queue above,
-  // and the post-draft lifecycle (send / quote capture / award / PO
-  // conversion) is not built server-side yet
-  // (docs/PURCHASING-HARDENING-HANDOFF-2026-07-19.md).
+  // Bounded RFQ list. Quote revisions and draft conversions are registered
+  // separately by registerRfqWorkflowRoutes through their owning service.
   app.get("/api/purchasing/rfqs", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const result = await listRequestForQuotes(db, { limit: req.query.limit });

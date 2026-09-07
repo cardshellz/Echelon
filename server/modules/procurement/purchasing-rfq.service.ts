@@ -1,3 +1,5 @@
+import { assertRfqSupplySnapshotCurrent, isActiveRfqReservation, rfqPendingSourcingPieces } from "./domain/rfq-sourcing-reservation";
+import { loadLinkedRfqPurchases, loadRecommendationRunDates } from "./rfq-sourcing-reservation.repository";
 import { and, desc, eq, inArray } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import {
@@ -56,7 +58,7 @@ export function purchasingSkuAllocationKey(input: {
 
 export async function lockAndLoadActiveRfqAllocations(
   tx: any,
-  recommendations: Array<{ productId: number; productVariantId?: number | null; warehouseId?: number | null }>,
+  recommendations: Array<{ id: number; productId: number; productVariantId?: number | null; warehouseId?: number | null }>,
 ): Promise<Map<string, number>> {
   const productIds = Array.from(new Set<number>(recommendations.map((line) => Number(line.productId))))
     .sort((left, right) => left - right);
@@ -69,6 +71,9 @@ export async function lockAndLoadActiveRfqAllocations(
 
   const allocatedRecommendation = alias(purchaseRecommendationLinesTable, "allocated_recommendation");
   const allocations = await tx.select({
+    id: requestForQuoteLinesTable.id,
+    status: requestForQuoteLinesTable.status,
+    rfqStatus: requestForQuotesTable.status,
     productId: allocatedRecommendation.productId,
     productVariantId: allocatedRecommendation.productVariantId,
     warehouseId: allocatedRecommendation.warehouseId,
@@ -76,15 +81,26 @@ export async function lockAndLoadActiveRfqAllocations(
   }).from(requestForQuoteLinesTable).innerJoin(
     allocatedRecommendation,
     eq(requestForQuoteLinesTable.recommendationLineId, allocatedRecommendation.id),
-  ).where(and(
+  ).innerJoin(requestForQuotesTable, eq(requestForQuoteLinesTable.rfqId, requestForQuotesTable.id)).where(and(
     inArray(allocatedRecommendation.productId, productIds),
-    inArray(requestForQuoteLinesTable.status, ["draft", "sent", "quoted", "accepted", "ordered"]),
   ));
+  const linkedPurchases = await loadLinkedRfqPurchases(tx, allocations.map((row: { id: number }) => Number(row.id)));
+  if (Array.from(linkedPurchases.values()).some((purchase) => !["draft", "pending_approval"].includes(purchase.status))) {
+    const runDates = await loadRecommendationRunDates(tx, recommendations.map((line) => line.id));
+    for (const recommendation of recommendations) {
+      const related = allocations.filter((row: { productId: number; productVariantId?: number | null; warehouseId?: number | null }) => purchasingSkuAllocationKey(row) === purchasingSkuAllocationKey(recommendation))
+        .flatMap((row: { id: number }) => { const linked = linkedPurchases.get(Number(row.id)); return linked ? [linked] : []; });
+      assertRfqSupplySnapshotCurrent(related, runDates.get(recommendation.id)!);
+    }
+  }
 
   const allocatedBySku = new Map<string, number>();
   for (const allocation of allocations) {
     const key = purchasingSkuAllocationKey(allocation);
-    allocatedBySku.set(key, (allocatedBySku.get(key) ?? 0) + Number(allocation.requestedPieces));
+    const pieces = rfqPendingSourcingPieces(Number(allocation.requestedPieces), linkedPurchases.get(Number(allocation.id)) ?? null, isActiveRfqReservation(allocation.rfqStatus, allocation.status));
+    const total = (allocatedBySku.get(key) ?? 0) + pieces;
+    if (!Number.isSafeInteger(total)) throw new Error("RFQ allocation quantity exceeds the supported integer range");
+    allocatedBySku.set(key, total);
   }
   return allocatedBySku;
 }
@@ -139,6 +155,9 @@ export function buildPurchasingRfqQueue(
         effectiveSupplyPieces: item.currentSupply.effectiveSupplyPieces,
         reorderPointPieces: item.reorderPoint,
         suggestedOrderPieces: item.suggestedOrderPieces,
+        planningBasis: item.planningBasis,
+        supplierBundleTerms: item.supplierBundleTerms,
+        supplyTiming: item.supplyTiming,
         demandBasis: item.demandBasis,
         forecastProvenance: item.forecastProvenance,
       },
@@ -158,12 +177,9 @@ export function buildPurchasingRfqQueue(
 // Lists created procurement.request_for_quotes rows newest-first with their
 // lines joined to the immutable recommendation evidence (SKU / product name /
 // recommended pieces), the vendor-product mapping (vendor SKU), and the vendor
-// name. This is a TRACKING read: RFQ creation happens through the Order
-// Builder (POST /api/purchasing/rfq-queue) and the post-draft lifecycle
-// (send / quote capture / award / PO conversion) is not built server-side
-// (docs/PURCHASING-HARDENING-HANDOFF-2026-07-19.md), so in practice every row
-// is a draft — but the full schema status enums are passed through so rows
-// that ever carry other statuses render honestly instead of being masked.
+// name. Creation is owned by the Order Builder; quote revision capture and
+// draft-PO conversion are owned by rfq-workflow.service.ts. This list remains
+// a bounded read, preserving the legacy quote fields and every stored status.
 // ---------------------------------------------------------------------------
 
 export const RFQ_LIST_DEFAULT_LIMIT = 25;
@@ -200,8 +216,8 @@ export type RequestForQuoteListLine = {
   allocationOverrideApprovedAt: Date | string | null;
   allocationOverrideBaselinePieces: number | null;
   allocationOverrideExcessPieces: number | null;
-  // Quote-capture evidence. Null until the RFQ lifecycle ships; integer mills
-  // (never floats) when present.
+  // Quote compatibility mirrors. Immutable revisions are available through
+  // the workflow detail and history endpoints; amounts remain integer mills.
   quotedPieces: number | null;
   quotedUnitCostMills: number | null;
   quoteReference: string | null;

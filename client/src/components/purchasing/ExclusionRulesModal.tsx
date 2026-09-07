@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { PurchasePlanningPolicyEditor } from "./PurchasePlanningPolicyEditor";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Trash2, Plus, Filter } from "lucide-react";
 import {
@@ -345,6 +346,7 @@ export function ExclusionRulesModal({ open, onOpenChange }: Props) {
         </DialogHeader>
 
         <div className="space-y-5 py-2">
+          <PurchasePlanningPolicyEditor />
           {/* Active Rules */}
           <div>
             <div className="flex items-center gap-2 mb-2">

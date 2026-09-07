@@ -158,7 +158,7 @@ describe("reorder engine UI contract", () => {
     expect(app).toMatch(/procurement\/rfqs"[\s\S]{0,200}component=\{ProcurementRfqs\}/);
     // All five surfaces have shipped, so the coming-soon chip mechanism is
     // GONE — no inert aria-disabled chips — and NO dead links: the only hrefs
-    // in the whole page are the four sibling surfaces.
+    // in the tab strip are the four sibling surfaces.
     expect(page).not.toContain("ENGINE_TABS_COMING_SOON");
     expect(page).not.toContain("aria-disabled");
     const hrefs = Array.from(page.matchAll(/href="([^"]+)"/g)).map((match) => match[1]);
@@ -172,7 +172,9 @@ describe("reorder engine UI contract", () => {
     // that would let a link evade it: wouter's `to` alias and computed
     // href={…} expressions.
     expect(page).not.toMatch(/\bto="/);
-    expect(page).not.toMatch(/\bhref=\{/);
+    const tabStrip = page.slice(page.indexOf('aria-label="Reorder Engine sections"'), page.indexOf("</nav>", page.indexOf('aria-label="Reorder Engine sections"')));
+    expect(tabStrip).not.toMatch(/\bhref=\{/);
+    expect(page).toContain('href={`/purchase-orders/${arrival.purchaseOrderId}`}');
   });
 
   it("relabels the single Procurement nav entry when the cockpit flag is on (PR 5)", () => {

@@ -1,3 +1,4 @@
+import { PurchaseRfqOrigins } from "./PurchaseRfqOrigins";
 import { useReceiptCostActions } from "./use-receipt-cost-actions";
 import type { ReceiptCostActions } from "./PurchaseCostApplications";
 import { PurchaseCostTrace } from "./PurchaseCostTrace";
@@ -55,6 +56,7 @@ export function purchaseWorkspaceQueryOptions(purchaseOrderId: number) {
 export function PurchaseLifecycleWorkspaceView({ data, navigation, costActions }: { data: PurchaseWorkspace; navigation: ProcurementNavigation; costActions?: ReceiptCostActions }) {
   return (
     <div className="space-y-4" data-testid="purchase-lifecycle-workspace">
+      <PurchaseRfqOrigins key={data.purchase.id} sources={data.rfqOrigins ?? []} />
       <div className="grid min-w-0 gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)]">
         <div className="min-w-0 space-y-5"><PurchaseLifecycleOverview data={data} navigation={navigation} /><PurchaseCostTrace data={data} navigation={navigation} costActions={costActions} /></div>
         <PurchaseRecordInspector data={data} navigation={navigation} />

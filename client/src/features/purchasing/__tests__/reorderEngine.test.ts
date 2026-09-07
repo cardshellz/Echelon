@@ -16,6 +16,7 @@ import {
   isOrderQueueSelection,
   isOverstocked,
   orderSoonDates,
+  orderLineValueCents,
   parseReorderEngineDeepLink,
   skippedAppendixRows,
   skippedReasonLabel,
@@ -771,5 +772,17 @@ describe("order builder — server payload assembly", () => {
       expect(reduced.line.quantityOverrideReason).toBe("Budget cap");
       expect(reduced.line.allocationOverrideApproved).toBe(false);
     }
+  });
+});
+
+
+describe("selected supplier quote economics", () => {
+  it("uses the exact purchase-unit quote instead of extending rounded piece cost", () => {
+    const item = { suggestedOrderPieces: 300, estimatedCostMills: 33, estimatedCostCents: 0,
+      supplierBasis: { pricingBasis: "per_purchase_uom", purchaseUom: "case", piecesPerPurchaseUom: 3, quotedUnitCostMills: 100 } };
+    expect(orderLineValueCents(item, 300)).toBe(100);
+    expect(orderLineValueCents({ ...item, supplierBasis: undefined }, 300)).toBe(99);
+    expect(orderLineValueCents(item, 301)).toBeNull();
+    expect(orderLineValueCents({ ...item, supplierBasis: { ...item.supplierBasis, quotedUnitCostMills: null } }, 300)).toBeNull();
   });
 });

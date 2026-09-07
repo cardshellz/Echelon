@@ -97,6 +97,7 @@ export function createPurchaseWorkspaceService(repository: PurchaseWorkspaceRepo
         receipts: snapshot.receipts,
         invoices: snapshot.invoices,
         edges,
+        rfqOrigins: snapshot.rfqOrigins ?? [],
         costTrace: snapshot.costEvidence ? projectPurchaseCostTrace(snapshot.costEvidence, snapshot.purchase) : null,
         limitations: [
           "Shipment and invoice amounts describe whole documents, which may cover other purchases.",
@@ -104,7 +105,7 @@ export function createPurchaseWorkspaceService(repository: PurchaseWorkspaceRepo
           "Shipment header cost totals do not identify a reliable currency basis in this view.",
           "An invoice allocation that is not recorded is unknown; whole-invoice payments are not a payment allocation to this purchase.",
           "Receipt records include drafts and cancelled history. A receipt status alone does not establish inventory availability.",
-          "Original RFQ details are unavailable in this workspace.",
+          "RFQ origins use recorded quote-to-purchase links. Missing historical links are not inferred from supplier, SKU or dates.",
           "Cost history includes recorded source revisions, lot contributions and applications; missing legacy lineage remains review work. Internal reporting events do not prove external accounting delivery.",
         ],
       });

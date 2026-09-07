@@ -273,3 +273,30 @@ test("cost history stays inspectable without exposing a retry to users without a
   await expect(page.getByTestId("cost-revision-11")).toBeVisible();
   expect(failures).toEqual([]);
 });
+
+test("purchase source RFQ opens inline without losing shipment context", async ({ page }) => {
+  const failures = await setup(page);
+  const data = workspace();
+  data.rfqOrigins = [{ id: 1, rfqId: 10, rfqNumber: "TEST-RFQ-10", rfqLineId: 20,
+    purchaseOrderLineId: 171, quoteRevisionId: 7, quoteReference: "VENDOR-QUOTE-7", quotedPieces: 100,
+    currency: "USD", linkedAt: "2026-09-07T12:00:00.000Z" }];
+  await page.route("**/api/purchase-orders/17/workspace", (route) => route.fulfill({ json: data }));
+  await page.route("**/api/purchasing/rfqs/10", (route) => route.fulfill({ json: {
+    id: 10, rfqNumber: "TEST-RFQ-10", vendorId: 5, currency: "USD", status: "quoted", version: "a".repeat(64),
+    lines: [{ id: 20, status: "ordered", productId: 100, productVariantId: 200, warehouseId: 1,
+      vendorProductId: 300, sku: "TEST-SKU", productName: "Test product", requestedPieces: 100, latestQuote: null,
+      quantityReview: { recommendationRules: { vendorProductId: 300, minimumOrderPieces: 1, piecesPerPurchaseUom: null, packSize: 1, orderMultiplePieces: 1, orderMultipleSource: "base_piece" }, currentRules: { vendorProductId: 300, minimumOrderPieces: 1, piecesPerPurchaseUom: null, packSize: 1, orderMultiplePieces: 1, orderMultipleSource: "base_piece" }, evaluatedPieces: 100, issues: [], requiresReason: false, canConvert: true },
+      purchaseOrder: { purchaseOrderId: 17, purchaseOrderLineId: 171, quoteRevisionId: 7, poNumber: "TEST-PO-17", status: "acknowledged" } }],
+  } }));
+  await page.goto("/purchase-orders/17");
+  await page.getByRole("button", { name: "TEST-RFQ-10 · 1 purchase line" }).click();
+  await expect(page.getByRole("heading", { name: /TEST-RFQ-10/ })).toBeVisible();
+  await expect(page.getByText(/Quote VENDOR-QUOTE-7/)).toBeVisible();
+  await expect(page.getByRole("link", { name: "Open full RFQ" })).toHaveAttribute("href", "/procurement/rfqs?rfqId=10");
+  expect(new URL(page.url()).pathname).toBe("/purchase-orders/17");
+  await page.getByRole("button", { name: "Close RFQ details" }).click();
+  await overviewLink(page, "shipment:42").click();
+  await expect(inspector(page)).toContainText("TEST-SHIP-42");
+  expect(new URL(page.url()).pathname).toBe("/purchase-orders/17");
+  expect(failures).toEqual([]);
+});

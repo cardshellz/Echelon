@@ -376,6 +376,20 @@ function buildHarness(initialState = baseState()) {
 }
 
 describe("recommendation PO handoff service", () => {
+  it.each(["manual", "automatic"])("enforces the locked supplier bundle minimum for %s drafts without partial writes", async (mode) => {
+    const state = baseState(); state.vendors[0].minimumOrderCents = 151;
+    const harness = buildHarness(state);
+    const service = createRecommendationPoHandoffService(harness.repository);
+    await expect(mode === "automatic" ? service.createAutomaticHandoff(automaticCommand()) : service.createAcceptedHandoff(baseCommand())).rejects.toMatchObject({ code: "SUPPLIER_BUNDLE_NOT_READY", context: expect.objectContaining({ minimumShortfallCents: 1 }) });
+    expect(harness.state.pos).toEqual([]); expect(harness.state.lines).toEqual([]); expect(harness.state.handoffs).toEqual([]);
+  });
+  it("accepts an exact supplier minimum while leaving a freight target advisory", async () => {
+    const state = baseState(); state.vendors[0].minimumOrderCents = 150; state.vendors[0].freeFreightThresholdCents = 500;
+    const harness = buildHarness(state);
+    const result = await createRecommendationPoHandoffService(harness.repository).createAcceptedHandoff(baseCommand());
+    expect(result.pos[0].subtotalCents).toBe(150); expect(harness.state.lines[0].orderQty).toBe(300);
+  });
+
   it("creates the PO, exact receive line, audit decision, and mapping in mills", async () => {
     const harness = buildHarness();
     const service = createRecommendationPoHandoffService(harness.repository);

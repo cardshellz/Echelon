@@ -1,3 +1,4 @@
+import { purchaseReplacementForecastsSchema } from "@shared/procurement/purchase-replacement-forecast";
 import { z } from "zod";
 
 export const forecastEvaluationHorizons = [7, 30, 90] as const;
@@ -12,6 +13,8 @@ const horizonSchema = z.union([z.literal(7), z.literal(30), z.literal(90)]);
 const policyFingerprintSchema = z.string().regex(/^[0-9a-f]{64}$/);
 const forecastMethodSchema = z.enum(["recent_order_velocity_v1", "weighted_blend_v1"]);
 const forecastPolicySnapshotSchema = z.object({
+  replacementForecasts: purchaseReplacementForecastsSchema.optional(),
+  growthPercent: z.number().int().min(-100).max(1000).optional(),
   method: forecastMethodSchema,
   shortWindowDays: z.number().int().min(1).max(60),
   standardWindowDays: z.number().int().min(7).max(180),
@@ -34,7 +37,7 @@ const forecastPolicySnapshotSchema = z.object({
 }).strict();
 
 const forecastPolicyCohortSchema = z.object({
-  captureVersion: z.literal(1),
+  captureVersion: z.union([z.literal(1), z.literal(2), z.literal(3)]),
   fingerprint: policyFingerprintSchema,
   snapshot: forecastPolicySnapshotSchema,
   forecastMethod: forecastMethodSchema,
@@ -45,6 +48,9 @@ const forecastPolicyCohortSchema = z.object({
   latestObservedFrom: z.string().datetime(),
   latestEvaluationAt: z.string().datetime().nullable(),
 }).strict().superRefine((cohort, context) => {
+  if (cohort.captureVersion !== (cohort.snapshot.replacementForecasts?.length ? 3 : cohort.snapshot.growthPercent ? 2 : 1)) {
+    context.addIssue({ code: "custom", message: "Growth policy capture version does not match snapshot" });
+  }
   if (cohort.forecastMethod !== cohort.snapshot.method) {
     context.addIssue({ code: "custom", message: "Forecast policy cohort method does not match snapshot" });
   }
@@ -52,7 +58,7 @@ const forecastPolicyCohortSchema = z.object({
 
 const forecastBacktestSummarySchema = z.object({
   horizonDays: horizonSchema,
-  forecastPolicyCaptureVersion: z.literal(1),
+  forecastPolicyCaptureVersion: z.union([z.literal(1), z.literal(2), z.literal(3)]),
   forecastPolicyFingerprint: policyFingerprintSchema,
   forecastMethod: forecastMethodSchema,
   forecastVersion: positiveSafeInteger,
@@ -126,7 +132,7 @@ const forecastBacktestItemSchema = z.object({
   horizonDays: horizonSchema,
   forecastMethod: forecastMethodSchema,
   forecastVersion: positiveSafeInteger,
-  forecastPolicyCaptureVersion: z.literal(1),
+  forecastPolicyCaptureVersion: z.union([z.literal(1), z.literal(2), z.literal(3)]),
   forecastPolicyFingerprint: policyFingerprintSchema,
   observedFrom: z.string().datetime(),
   observedThroughExclusive: z.string().datetime(),
@@ -177,8 +183,8 @@ export const forecastBacktestReportSchema = z.object({
   evaluationVersion: positiveSafeInteger,
   measurement: z.object({
     scope: z.literal("product_all_warehouses"),
-    predictionScope: z.literal("historical_rate_with_optional_start_date_overlay"),
-    historicalPredictionScope: z.literal("historical_rate_only"),
+    predictionScope: z.enum(["historical_rate_with_optional_start_date_overlay", "baseline_with_date_replacements_and_optional_start_date_overlay"]),
+    historicalPredictionScope: z.enum(["historical_rate_only", "baseline_with_date_replacements"]),
     horizons: z.array(horizonSchema).min(1),
     wapeUnit: z.literal("basis_points"),
     quantityUnit: z.literal("base_piece"),

@@ -13,6 +13,7 @@ import type {
 import {
   buildPurchasingForecastPolicyCohort,
   PURCHASING_FORECAST_POLICY_CAPTURE_VERSION,
+  type PurchasingForecastPolicyCaptureVersion,
   type PurchasingForecastPolicyCohortSnapshot,
 } from "./purchasing-forecast-policy";
 import type { PurchasingForwardDemandContribution } from "./purchasing-forward-demand-contribution";
@@ -49,7 +50,7 @@ export type PurchaseForecastObservationInput = {
   productName: string;
   forecastMethod: string;
   forecastVersion: number;
-  forecastPolicyCaptureVersion: typeof PURCHASING_FORECAST_POLICY_CAPTURE_VERSION;
+  forecastPolicyCaptureVersion: PurchasingForecastPolicyCaptureVersion;
   forecastPolicyFingerprint: string;
   forecastPolicySnapshot: PurchasingForecastPolicyCohortSnapshot;
   forecastDailyPiecesMicros: number;
@@ -255,7 +256,7 @@ function validateForecastPolicyCapture(
     observation.forecastPolicyCaptureVersion,
     `${prefix}.forecastPolicyCaptureVersion`,
   );
-  if (observation.forecastPolicyCaptureVersion !== PURCHASING_FORECAST_POLICY_CAPTURE_VERSION) {
+  if (observation.forecastPolicyCaptureVersion !== 1 && observation.forecastPolicyCaptureVersion !== 2 && observation.forecastPolicyCaptureVersion !== 3) {
     throw new RangeError(`${prefix}.forecastPolicyCaptureVersion is unsupported`);
   }
   if (
@@ -273,7 +274,8 @@ function validateForecastPolicyCapture(
   }
   const canonical = buildPurchasingForecastPolicyCohort(observation.forecastPolicySnapshot);
   if (
-    canonical.fingerprint !== observation.forecastPolicyFingerprint
+    canonical.captureVersion !== observation.forecastPolicyCaptureVersion
+    || canonical.fingerprint !== observation.forecastPolicyFingerprint
     || JSON.stringify(canonical.snapshot) !== JSON.stringify(observation.forecastPolicySnapshot)
   ) {
     throw new RangeError(`${prefix} forecast policy cohort does not match its canonical snapshot`);
@@ -431,7 +433,8 @@ export function buildPurchaseRecommendationRunInput(input: {
       warehouseId: null,
       sku: item.sku,
       productName: item.productName,
-      requiredByDate: null,
+      requiredByDate: typeof item.demandSnapshot.supplyTiming === "object" && item.demandSnapshot.supplyTiming !== null
+        ? (item.demandSnapshot.supplyTiming as { stockoutDateWithoutReceipts?: string | null }).stockoutDateWithoutReceipts ?? null : null,
       recommendedPieces: item.requestedPieces,
       preferredVendorId: item.preferredVendorId,
       preferredVendorProductId: item.vendorProductId,
@@ -537,6 +540,9 @@ export function buildPurchaseForecastObservations(
           status: item.status,
           skippedReason: item.skippedReason,
           actionable: item.actionable,
+          planningBasis: item.planningBasis,
+          supplierBundleTerms: item.supplierBundleTerms,
+          supplyTiming: item.supplyTiming,
           demandBasis: item.demandBasis,
           forecastBlend: item.forecastProvenance.forecastBlend,
           demandWindowDiagnostics: item.forecastProvenance.demandWindowDiagnostics,

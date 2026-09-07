@@ -169,8 +169,8 @@ export function createPurchaseForecastBacktestingService(input: {
       const policyCohorts = policyEvidence.filter(
         (
           cohort,
-        ): cohort is Extract<PurchaseForecastPolicyCohortEvidence, { captureVersion: 1 }> => (
-          cohort.captureVersion === 1
+        ): cohort is Exclude<PurchaseForecastPolicyCohortEvidence, { captureVersion: 0 }> => (
+          cohort.captureVersion === 1 || cohort.captureVersion === 2 || cohort.captureVersion === 3
         ),
       );
       const seenCohortKeys = new Set<string>();
@@ -241,8 +241,8 @@ export function createPurchaseForecastBacktestingService(input: {
         evaluationVersion: PURCHASE_FORECAST_EVALUATION_VERSION,
         measurement: {
           scope: "product_all_warehouses",
-          predictionScope: "historical_rate_with_optional_start_date_overlay",
-          historicalPredictionScope: "historical_rate_only",
+          predictionScope: selectedPolicyCohort?.captureVersion === 3 ? "baseline_with_date_replacements_and_optional_start_date_overlay" : "historical_rate_with_optional_start_date_overlay",
+          historicalPredictionScope: selectedPolicyCohort?.captureVersion === 3 ? "baseline_with_date_replacements" : "historical_rate_only",
           horizons: [...PURCHASE_FORECAST_EVALUATION_HORIZONS],
           wapeUnit: "basis_points",
           quantityUnit: "base_piece",

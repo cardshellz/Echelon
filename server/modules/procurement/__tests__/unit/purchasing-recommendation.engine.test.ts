@@ -708,26 +708,27 @@ describe("purchasing recommendation engine", () => {
       actionable: false,
       skippedReason: "already_on_order",
       supplierCycleDiagnostics: {
-        signal: "open_supply_covers_cycle",
+        signal: "open_supply_partial",
         supplyCoverageRatio: 3.5,
         openPoCoverageRatio: 3.33,
       },
       recommendationCandidateScore: {
-        score: 29,
-        band: "watch",
+        score: 32,
+        band: "blocked",
         demandScore: 35,
-        supplyScore: 20,
-        readinessScore: 35,
+        supplyScore: 50,
+        readinessScore: 0,
         blockers: expect.arrayContaining([
           "thin_history",
           "product_lead_time_fallback",
           "missing_supplier_cost",
+          "unverified_schedule",
           "skipped:already_on_order",
         ]),
       },
       reviewSignal: {
         action: "review_open_po",
-        severity: "info",
+        severity: "warning",
       },
       qualityGate: {
         autoDraftEligible: false,

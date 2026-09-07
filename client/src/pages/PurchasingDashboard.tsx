@@ -1,3 +1,4 @@
+import { PurchasePipeline } from "@/features/purchasing/PurchasePipeline";
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
@@ -760,9 +761,7 @@ export default function PurchasingDashboard() {
 
   if (isLoading || !data) {
     return (
-      <div className="flex items-center justify-center h-full">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary" />
-      </div>
+      <div className="space-y-4 overflow-y-auto p-4"><PurchasePipeline /><p className="text-sm text-muted-foreground">{isLoading ? "Loading purchasing dashboard…" : "The remaining purchasing dashboard could not be loaded."}</p></div>
     );
   }
 
@@ -866,6 +865,7 @@ export default function PurchasingDashboard() {
       </div>
 
       <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-5">
+        <PurchasePipeline />
         {/* Alert Banner */}
         {(data.lastAutoDraftRun && (data.draftPoCount > 0 || data.lastAutoDraftRun.skippedNoVendor > 0)) && (
           <div className="bg-amber-50 border border-amber-200 rounded-md px-4 py-3 flex items-center gap-4 text-sm">
@@ -1291,7 +1291,7 @@ export default function PurchasingDashboard() {
             <Card className="border-t-2 border-t-blue-500 cursor-pointer hover:shadow-sm" onClick={() => navigate("/purchase-orders?status=sent")}>
               <CardContent className="p-3">
                 <div className="text-2xl font-bold text-blue-500">{data.inTransitCount}</div>
-                <div className="text-xs text-muted-foreground">In Transit</div>
+                <div className="text-xs text-muted-foreground">Sent / Acknowledged</div>
                 <div className="text-[10px] text-muted-foreground mt-1">Sent / acked ↗</div>
               </CardContent>
             </Card>

@@ -1,3 +1,4 @@
+import { registerPurchasePipelineRoutes } from "./purchase-pipeline.routes";
 import type { Express } from "express";
 import { procurementStorage } from "../procurement";
 import { catalogStorage } from "../catalog";
@@ -325,6 +326,7 @@ export function registerPurchasingRoutes(app: Express) {
   registerPurchaseOrderRoutes(app);
   registerPurchasingAdminRoutes(app);
 
+  registerPurchasePipelineRoutes(app);
   registerProcurementReportRoutes(app);
   registerProcurementHealthRoutes(app);
 

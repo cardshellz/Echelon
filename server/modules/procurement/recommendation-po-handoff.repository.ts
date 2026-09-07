@@ -213,6 +213,8 @@ function createUnitOfWork(tx: Transaction): RecommendationPoHandoffUnitOfWork {
           id: vendors.id,
           active: vendors.active,
           currency: vendors.currency,
+          minimumOrderCents: vendors.minimumOrderCents,
+          freeFreightThresholdCents: vendors.freeFreightThresholdCents,
           paymentTermsDays: vendors.paymentTermsDays,
           paymentTermsType: vendors.paymentTermsType,
           shipFromAddress: vendors.shipFromAddress,

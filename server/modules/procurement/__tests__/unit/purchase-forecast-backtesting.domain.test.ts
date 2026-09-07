@@ -38,6 +38,17 @@ function candidate(overrides: Partial<PurchaseForecastEvaluationCandidate> = {})
 }
 
 describe("purchase forecast backtesting domain", () => {
+  it("scores the captured replacement interval with additive events stacked separately", () => {
+    const result = buildPurchaseForecastEvaluation({ candidate: candidate({
+      replacementForecasts: [{ productId: 3, startDate: "2026-01-01", endDate: "2026-01-07", totalPieces: 70, reference: "Weekly plan" }],
+      forwardDemandPieces: 2, forwardDemandRawPieces: 2, overlayCaptureVersion: 2, overlayCaptureComplete: true,
+      overlayPlanningAsOfDate: "2026-01-01", overlayHorizonDays: 90,
+      overlayContributions: [{ demandEventId: 1, demandEventLineId: 11, eventStartDate: "2026-01-03", planningAsOfDate: "2026-01-01", expectedPieces: 2, weightedPieces: 2 }],
+    }), evaluatedAt: new Date("2026-01-09T00:00:00.000Z") });
+    expect(result).toMatchObject({ forecastDemandMicros: 70_000_000, baselineDemandMicros: 7_000_000,
+      overlayAdjustedForecastDemandMicros: 72_000_000, evidenceSnapshot: { predictionScope: "historical_rate_with_date_replacements", replacementForecast: { contributions: [{ reference: "Weekly plan", replacementMicros: 70_000_000 }] } }, overlayEvaluable: true });
+  });
+
   it("builds deterministic micro-piece errors without including aggregate overlays", () => {
     const result = buildPurchaseForecastEvaluation({
       candidate: candidate(),

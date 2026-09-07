@@ -1,3 +1,4 @@
+import { readPurchaseRfqOrigins } from "./purchase-rfq-origin.repository";
 import { readRows, dateValues, moneyValues, uniqueIds, PURCHASE_WORKSPACE_RECORD_LIMIT, PURCHASE_WORKSPACE_LINE_LIMIT, type Row } from "./purchase-workspace-read";
 import { readPurchaseCostEvidence } from "./purchase-cost-trace.repository";
 export { PURCHASE_WORKSPACE_RECORD_LIMIT, PURCHASE_WORKSPACE_LINE_LIMIT } from "./purchase-workspace-read";
@@ -196,6 +197,7 @@ export function createPurchaseWorkspaceRepository(database: Database = defaultDa
         return {
           purchase,
           costEvidence: await readPurchaseCostEvidence(tx, purchaseOrderId, shipmentIds),
+          rfqOrigins: await readPurchaseRfqOrigins(tx, purchaseOrderId),
           shipments,
           receipts,
           invoices,

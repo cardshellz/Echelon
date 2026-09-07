@@ -62,6 +62,7 @@ vi.mock("../../../../routes/middleware", () => {
 vi.mock("../..", () => ({ procurementStorage: mocks.procurement }));
 vi.mock("../../../../modules/inventory", () => ({ inventoryStorage: mocks.inventory }));
 vi.mock("../../../../db", () => ({ db: mocks.db }));
+vi.mock("../../purchase-planning-policy.runtime", () => ({ getPurchasePlanningPolicyService: () => ({ read: vi.fn(), history: vi.fn(), update: vi.fn(), describeProducts: vi.fn(), searchProducts: vi.fn() }) }));
 vi.mock("../../../../storage/base", () => ({
   products: {},
   reorderExclusionRules: {},

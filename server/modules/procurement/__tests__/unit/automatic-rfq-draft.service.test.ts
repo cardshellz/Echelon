@@ -46,6 +46,7 @@ function thenableChain(rows: any[]) {
 function fakeDatabase(selectResults: any[][], insertResults: any[][]) {
   const insertedValues: any[] = [];
   const tx = {
+    execute: vi.fn(async () => ({ rows: [] })),
     select: vi.fn(() => thenableChain(selectResults.shift() ?? [])),
     insert: vi.fn(() => ({
       values: (values: any) => {
@@ -119,7 +120,7 @@ describe("automatic RFQ draft service", () => {
       [],
       [{ id: 7, active: 1, currency: "USD" }],
       [{ id: 20 }],
-      [{ productId: 20, productVariantId: 30, warehouseId: null, requestedPieces: 40 }],
+      [{ id: 401, status: "draft", rfqStatus: "draft", productId: 20, productVariantId: 30, warehouseId: null, requestedPieces: 40 }],
       [{ id: 70, vendorId: 7, productId: 20, productVariantId: 30, isActive: 1, purchaseUom: null }],
     ], [
       [{ id: 501, rfqNumber: "RFQ-AUTO-TEST", vendorId: 7, status: "draft" }],

@@ -1,3 +1,5 @@
+import { purchaseInventorySnapshotQuery } from "./purchase-inventory-snapshot.query";
+import { getPurchasePlanningPolicyService } from "./purchase-planning-policy.runtime";
 import {
   db,
   type Vendor,
@@ -1380,9 +1382,13 @@ export const procurementMethods: IProcurementStorage = {
         preferred_vendor.last_purchased_at AS vendor_product_last_purchased_at,
         preferred_vendor.updated_at AS vendor_product_updated_at,
         preferred_vendor.lead_time_days AS vendor_lead_time_days,
+        preferred_vendor.currency AS vendor_currency,
+        preferred_vendor.minimum_order_cents AS vendor_minimum_order_cents,
+        preferred_vendor.free_freight_threshold_cents AS vendor_free_freight_threshold_cents,
         transaction_timestamp() AS recommendation_analysis_as_of,
         current_date::text AS recommendation_analysis_date,
         COALESCE(inv.total_pieces, 0)::bigint AS total_pieces,
+        COALESCE(inv.excluded_quarantine_pieces, 0)::bigint AS excluded_quarantine_pieces,
         COALESCE(inv.total_reserved_pieces, 0)::bigint AS total_reserved_pieces,
         COALESCE(vel.total_outbound_pieces, 0)::bigint AS total_outbound_pieces,
         COALESCE(vel.previous_outbound_pieces, 0)::bigint AS previous_outbound_pieces,
@@ -1419,6 +1425,7 @@ export const procurementMethods: IProcurementStorage = {
         COALESCE(on_order.on_order_pieces, 0)::bigint AS on_order_pieces,
         COALESCE(on_order.open_po_count, 0)::int AS open_po_count,
         on_order.earliest_expected,
+        COALESCE(on_order.inbound_schedule, '[]'::jsonb) AS inbound_schedule,
         (SELECT MAX(it2.created_at)
          FROM inventory.inventory_transactions it2
          JOIN catalog.product_variants pv2 ON pv2.id = it2.product_variant_id
@@ -1432,14 +1439,7 @@ export const procurementMethods: IProcurementStorage = {
         ${forecastPolicy.forwardDemandHorizonDays}::int AS forward_demand_horizon_days
       FROM catalog.products p
       LEFT JOIN (
-        SELECT pv.product_id,
-               SUM(il.variant_qty * pv.units_per_variant) AS total_pieces,
-               SUM(il.reserved_qty * pv.units_per_variant) AS total_reserved_pieces,
-               COUNT(DISTINCT pv.id) AS variant_count
-        FROM inventory.inventory_levels il
-        JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
-        WHERE pv.is_active = true
-        GROUP BY pv.product_id
+        ${purchaseInventorySnapshotQuery()}
       ) inv ON inv.product_id = p.id
       LEFT JOIN (
         SELECT pv.product_id,
@@ -1625,6 +1625,7 @@ export const procurementMethods: IProcurementStorage = {
           vp.id AS vendor_product_id,
           vp.vendor_id,
           v.name AS vendor_name,
+          v.currency, v.minimum_order_cents, v.free_freight_threshold_cents,
           vp.unit_cost_cents,
           vp.unit_cost_mills,
           vp.pricing_basis,
@@ -1666,7 +1667,14 @@ export const procurementMethods: IProcurementStorage = {
         SELECT pol.product_id,
                SUM(GREATEST(pol.order_qty - COALESCE(pol.received_qty, 0) - COALESCE(pol.cancelled_qty, 0), 0)) AS on_order_pieces,
                COUNT(DISTINCT po.id) AS open_po_count,
-               MIN(COALESCE(pol.expected_delivery_date, po.expected_delivery_date, po.confirmed_delivery_date)) AS earliest_expected
+               MIN(COALESCE(pol.expected_delivery_date, po.expected_delivery_date, po.confirmed_delivery_date)) AS earliest_expected,
+               JSONB_AGG(JSONB_BUILD_OBJECT(
+                 'purchaseOrderId', po.id,
+                 'purchaseOrderNumber', po.po_number,
+                 'purchaseOrderLineId', pol.id,
+                 'remainingPieces', GREATEST(pol.order_qty - COALESCE(pol.received_qty, 0) - COALESCE(pol.cancelled_qty, 0), 0),
+                 'expectedDate', COALESCE(pol.expected_delivery_date, po.expected_delivery_date, po.confirmed_delivery_date)::date::text
+               ) ORDER BY po.id, pol.id) AS inbound_schedule
         FROM procurement.purchase_order_lines pol
         JOIN procurement.purchase_orders po ON po.id = pol.purchase_order_id
         WHERE po.status IN ('approved', 'sent', 'acknowledged', 'partially_received')
@@ -2188,7 +2196,10 @@ export const procurementMethods: IProcurementStorage = {
       LIMIT 1
     `);
     const row = (rows.rows as any[])[0];
+    const planningPolicyRecord = await getPurchasePlanningPolicyService().read();
     return {
+      planningPolicy: planningPolicyRecord.policy,
+      planningPolicyRevision: planningPolicyRecord.revision,
       autoDraftMode: row?.auto_draft_mode === "review_only" ? "review_only" : "draft_po",
       approvalPolicy: row?.auto_draft_approval_policy === "high_confidence_and_strong_candidate"
         ? "high_confidence_and_strong_candidate"
@@ -2203,6 +2214,8 @@ export const procurementMethods: IProcurementStorage = {
       rfqDraftRequireTrustedForecast: row?.rfq_draft_require_trusted_forecast ?? true,
       rfqDraftMaximumLinesPerRun: Math.min(500, Math.max(1, Number(row?.rfq_draft_maximum_lines_per_run ?? 100))),
       forecastPolicy: normalizePurchasingForecastPolicy({
+        growthPercent: planningPolicyRecord.policy.growthPercent,
+        replacementForecasts: planningPolicyRecord.policy.replacementForecasts,
         method: row?.purchasing_forecast_method,
         shortWindowDays: row?.purchasing_forecast_short_window_days,
         standardWindowDays: row?.purchasing_forecast_standard_window_days,

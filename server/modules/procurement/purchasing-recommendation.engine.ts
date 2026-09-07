@@ -1,4 +1,8 @@
+import { projectReplacementForecast, forecastMicros } from "@shared/procurement/purchase-replacement-forecast";
+import { supplierBundleTermsSchema, type SupplierBundleTerms } from "@shared/procurement/supplier-bundle";
 import { centsToMills, millsToCents } from "@shared/utils/money";
+import { parsePurchasePlanningPolicy, type PurchasePlanningPolicy, type PurchasePlanningBasis, type PurchaseSupplyTiming } from "@shared/procurement/purchase-planning-policy";
+import { buildPurchaseSupplyTiming } from "./purchase-supply-timing";
 import {
   buildPurchasingDemandForecastBasis,
   buildPurchasingDemandForecastBlend,
@@ -42,7 +46,7 @@ export type PurchasingRecommendationSkipReason =
 export type PurchasingRecommendationConfidence = "low" | "medium" | "high";
 export type PurchasingRecommendationDemandQuality = PurchasingDemandForecastQuality;
 export type PurchasingRecommendationDemandTrend = PurchasingDemandForecastTrend;
-export type PurchasingRecommendationLeadTimeSource = "vendor_product" | "product" | "default";
+export type PurchasingRecommendationLeadTimeSource = "vendor_product" | "product" | "default" | "planning_policy";
 export type PurchasingRecommendationSafetyStockSource = "product" | "default";
 export type PurchasingRecommendationOrderUomSource = "supplier_quote" | "base_piece";
 export type PurchasingRecommendationSupplierCostSource =
@@ -116,7 +120,8 @@ export type PurchasingRecommendationQualityControlArea =
   | "supplier_cost"
   | "vendor"
   | "receive_configuration"
-  | "supplier_catalog";
+  | "supplier_catalog"
+  | "inbound_supply";
 export type PurchasingRecommendationQualityControlSeverity = "review" | "block";
 
 export interface PurchasingRecommendationQualityControl {
@@ -163,6 +168,7 @@ export interface PurchasingRecommendationRawRow {
   product_line_names?: unknown;
   variant_count?: number | string | null;
   total_pieces?: number | string | null;
+  excluded_quarantine_pieces?: number | string | null;
   total_reserved_pieces?: number | string | null;
   total_outbound_pieces?: number | string | null;
   previous_outbound_pieces?: number | string | null;
@@ -192,6 +198,7 @@ export interface PurchasingRecommendationRawRow {
   seasonal_demand_active_days?: number | string | null;
   seasonal_latest_demand_at?: string | Date | null;
   on_order_pieces?: number | string | null;
+  inbound_schedule?: unknown;
   open_po_count?: number | string | null;
   earliest_expected?: string | Date | null;
   lead_time_days?: number | string | null;
@@ -204,6 +211,9 @@ export interface PurchasingRecommendationRawRow {
   vendor_product_id?: number | string | null;
   preferred_vendor_id?: number | string | null;
   preferred_vendor_name?: string | null;
+  vendor_currency?: string | null;
+  vendor_minimum_order_cents?: number | string | null;
+  vendor_free_freight_threshold_cents?: number | string | null;
   estimated_cost_cents?: number | string | null;
   estimated_cost_mills?: number | string | null;
   vendor_pricing_basis?: string | null;
@@ -254,6 +264,8 @@ export interface PurchasingRecommendationDefaults {
 export type AutoDraftApprovalPolicy = "high_confidence_only" | "high_confidence_and_strong_candidate";
 
 export interface AutoDraftRecommendationSettings {
+  planningPolicy?: PurchasePlanningPolicy;
+  planningPolicyRevision?: number;
   autoDraftMode?: "draft_po" | "review_only";
   approvalPolicy?: AutoDraftApprovalPolicy;
   includeOrderSoon?: boolean;
@@ -281,6 +293,9 @@ export interface GeneratePurchasingRecommendationsOptions {
 }
 
 export interface PurchasingRecommendationItem {
+  planningBasis: PurchasePlanningBasis;
+  supplyTiming: PurchaseSupplyTiming;
+  supplierBundleTerms: SupplierBundleTerms | null;
   recommendationId: string;
   productId: number;
   productVariantId?: number;
@@ -667,7 +682,7 @@ function classifyRecommendation(input: {
   effectiveSupply: number;
 }): PurchasingRecommendationStatus {
   if (input.available <= 0) return "stockout";
-  if (input.avgDailyUsage === 0) return "no_movement";
+  if (input.avgDailyUsage === 0) return input.reorderPoint > input.effectiveSupply ? "order_now" : "no_movement";
   if (
     input.available <= input.reorderPoint &&
     input.onOrderPieces > 0 &&
@@ -709,7 +724,7 @@ function buildExplanation(input: {
     return "Recommendation blocked because no preferred vendor is configured.";
   }
   if (input.skippedReason === "already_on_order") {
-    return `Open PO supply covers the reorder point: effective supply ${input.effectiveSupply} pieces vs reorder point ${input.reorderPoint}.`;
+    return `Open PO quantity covers the reorder point: committed supply ${input.effectiveSupply} pieces vs reorder point ${input.reorderPoint}. Arrival coverage is assessed separately.`;
   }
   if (input.status === "no_movement") {
     return `No demand in the ${input.lookbackDays}-day lookback window.`;
@@ -719,11 +734,11 @@ function buildExplanation(input: {
   }
   return [
     `Available ${input.available} pieces plus open PO supply gives ${input.effectiveSupply} effective pieces.`,
-    `Reorder point is ${input.reorderPoint} pieces from ${input.avgDailyUsage.toFixed(2)} pieces/day ${
+    `Reorder point is ${input.reorderPoint} pieces with ${input.avgDailyUsage.toFixed(2)} pieces/day ${
       input.forecastMethod === "weighted_blend_v1"
         ? "using the configured multi-window blend"
         : `over ${input.lookbackDays} days`
-    }, ${input.leadTimeDays} lead days, and ${input.safetyStockDays} safety days.`,
+    }, ${input.leadTimeDays} lead days, ${input.safetyStockDays} safety days, and the captured stock-target and demand-event adjustments.`,
     `Recommend ${input.suggestedOrderQty} ${input.orderUomLabel} (${input.suggestedOrderPieces} pieces).`,
   ].join(" ");
 }
@@ -1163,7 +1178,9 @@ function buildConfidenceFactors(input: {
     );
   }
 
-  if (input.leadTimeSource === "vendor_product") {
+  if (input.leadTimeSource === "planning_policy") {
+    factors.push("Explicit RFQ, production, transit, and receiving lead-time stages are configured.");
+  } else if (input.leadTimeSource === "vendor_product") {
     factors.push("Vendor-specific lead time is configured.");
   } else if (input.leadTimeSource === "product") {
     factors.push("Product lead time is configured.");
@@ -1254,6 +1271,8 @@ function formatCoverage(ratio: number | null): string {
 }
 
 function buildSupplierCycleDiagnostics(input: {
+  asOf: Date;
+  supplyTiming: PurchaseSupplyTiming;
   available: number;
   effectiveSupply: number;
   reorderPoint: number;
@@ -1268,7 +1287,7 @@ function buildSupplierCycleDiagnostics(input: {
   const supplyCoverageRatio = input.reorderPoint > 0 ? roundRatio(input.effectiveSupply / input.reorderPoint) : null;
   const openPoCoverageRatio =
     input.reorderPoint > 0 && input.onOrderPieces > 0 ? roundRatio(input.onOrderPieces / input.reorderPoint) : null;
-  const now = new Date();
+  const now = input.asOf;
   const expectedDate = parseDate(input.earliestExpectedDate);
   const lastReceivedAt = parseDate(input.lastReceivedAt);
   const daysUntilEarliestExpected = expectedDate ? calendarDayDiff(now, expectedDate) : null;
@@ -1288,6 +1307,10 @@ function buildSupplierCycleDiagnostics(input: {
       };
     }
 
+    if (input.supplyTiming.reviewRequired) {
+      return { signal: "open_supply_partial", detail: input.supplyTiming.detail, cycleDays, supplyCoverageRatio,
+        openPoCoverageRatio, daysUntilEarliestExpected, daysSinceLastReceipt };
+    }
     if (input.reorderPoint > 0 && input.effectiveSupply >= input.reorderPoint) {
       return {
         signal: "open_supply_covers_cycle",
@@ -1727,9 +1750,12 @@ export function generatePurchasingRecommendations(
   const rules = options.exclusionRules ?? [];
   const settings = options.autoDraftSettings ?? {};
   const hasExplicitForecastPolicy = Boolean(settings.forecastPolicy);
-  const forecastPolicy = normalizePurchasingForecastPolicy(settings.forecastPolicy ?? {
-    ...DEFAULT_PURCHASING_FORECAST_POLICY,
-    method: "recent_order_velocity_v1",
+  const planningPolicy = parsePurchasePlanningPolicy(settings.planningPolicy);
+  const productPolicies = new Map(planningPolicy.products.map((policy) => [policy.productId, policy]));
+  const forecastPolicy = normalizePurchasingForecastPolicy({
+    ...(settings.forecastPolicy ?? { ...DEFAULT_PURCHASING_FORECAST_POLICY, method: "recent_order_velocity_v1" }),
+    growthPercent: planningPolicy.growthPercent,
+    replacementForecasts: planningPolicy.replacementForecasts,
   });
   const candidateScoreThresholds = normalizeCandidateScoreThresholds(settings);
   const lookbackDays = asPositiveInt(options.lookbackDays, 30);
@@ -1742,6 +1768,7 @@ export function generatePurchasingRecommendations(
     if (!productId) continue;
 
     const meta = getMeta(options.productMetaById, productId);
+    const productPolicy = productPolicies.get(productId);
     const productVariantId = row.variant_id == null ? undefined : asNumber(row.variant_id);
     const totalOnHand = asNumber(row.total_pieces);
     const totalReserved = asNumber(row.total_reserved_pieces);
@@ -1809,7 +1836,7 @@ export function generatePurchasingRecommendations(
       longWindow: longDemandForecast,
       seasonalWindow: seasonalDemandForecast,
     });
-    const forecastBlend = buildPurchasingDemandForecastBlend({
+    const historicalForecastBlend = buildPurchasingDemandForecastBlend({
       method: forecastPolicy.method,
       standardWindow: demandForecast,
       shortWindow: shortDemandForecast,
@@ -1818,6 +1845,10 @@ export function generatePurchasingRecommendations(
       seasonalEnabled: forecastPolicy.seasonalEnabled,
       weights: forecastPolicy.weights,
     });
+    const forecastBlend = {
+      ...historicalForecastBlend,
+      avgDailyUsagePieces: historicalForecastBlend.avgDailyUsagePieces * (100 + planningPolicy.growthPercent) / 100,
+    };
     const periodUsage = demandForecast.periodUsagePieces;
     const priorPeriodUsage = demandForecast.priorPeriodUsagePieces;
     const demandOrderCount = demandForecast.demandOrderCount;
@@ -1838,23 +1869,33 @@ export function generatePurchasingRecommendations(
     const daysOfSupply = avgDailyUsage > 0 ? Math.round(available / avgDailyUsage) : available > 0 ? 9999 : 0;
     const vendorLeadTime = row.vendor_lead_time_days == null ? null : asNumber(row.vendor_lead_time_days, NaN);
     const productLeadTime = row.lead_time_days == null ? null : asNumber(row.lead_time_days, NaN);
-    const leadTimeSource: PurchasingRecommendationLeadTimeSource = Number.isFinite(vendorLeadTime ?? NaN)
+    const leadTimeSource: PurchasingRecommendationLeadTimeSource = productPolicy?.leadTimeStages ? "planning_policy" : Number.isFinite(vendorLeadTime ?? NaN)
       ? "vendor_product"
       : Number.isFinite(productLeadTime ?? NaN)
         ? "product"
         : "default";
-    const leadTimeDays = Number.isFinite(vendorLeadTime ?? NaN)
+    const configuredLeadTimeDays = Number.isFinite(vendorLeadTime ?? NaN)
       ? Number(vendorLeadTime)
       : Number.isFinite(productLeadTime ?? NaN)
         ? Number(productLeadTime)
         : defaults.leadTimeDays;
+    const leadTimeDays = productPolicy?.leadTimeStages
+      ? Object.values(productPolicy.leadTimeStages).reduce((total, stage) => total + stage, 0)
+      : configuredLeadTimeDays;
     const safetyStockSource: PurchasingRecommendationSafetyStockSource =
       row.safety_stock_days == null || Number.isNaN(Number(row.safety_stock_days)) ? "default" : "product";
     const safetyStockDays =
       row.safety_stock_days == null || Number.isNaN(Number(row.safety_stock_days))
         ? defaults.safetyStockDays
         : asNumber(row.safety_stock_days);
-    const reorderPoint = Math.ceil((leadTimeDays + safetyStockDays) * avgDailyUsage);
+    const minimumStockPieces = productPolicy?.minimumStockPieces ?? 0;
+    const targetCoverDays = Math.max(leadTimeDays + safetyStockDays, productPolicy?.targetCoverDays ?? planningPolicy.targetCoverDays ?? 0);
+    const planningDate = typeof row.recommendation_analysis_date === "string" ? row.recommendation_analysis_date : asOf.toISOString().slice(0, 10);
+    const replacementRanges = (planningPolicy.replacementForecasts ?? []).filter((range) => range.productId === productId);
+    const targetDemand = (days: number) => replacementRanges.length === 0 ? days * avgDailyUsage
+      : projectReplacementForecast({ productId, fromDate: planningDate, days, baselineDailyMicros: forecastMicros(avgDailyUsage), ranges: replacementRanges }).totalMicros / 1_000_000;
+    const reorderPoint = Math.ceil(Math.max(targetDemand(targetCoverDays), targetDemand(leadTimeDays) + minimumStockPieces));
+    if (!Number.isSafeInteger(reorderPoint)) throw new RangeError(`Product ${productId} planning target exceeds safe quantity precision`);
     const forwardDemandPieces = forecastPolicy.forwardDemandEnabled ? asNumber(row.forward_demand_pieces) : 0;
     const forwardDemandRawPieces = forecastPolicy.forwardDemandEnabled ? asNumber(row.forward_demand_raw_pieces) : 0;
     const forwardDemandEventCount = forecastPolicy.forwardDemandEnabled ? asNumber(row.forward_demand_event_count) : 0;
@@ -1924,7 +1965,17 @@ export function generatePurchasingRecommendations(
       onOrderPieces,
       effectiveSupply,
     });
+    const supplyTiming = buildPurchaseSupplyTiming({
+      asOfDate: planningDate,
+      replacementForecasts: { productId, ranges: replacementRanges },
+      availablePieces: available, dailyPieces: avgDailyUsage, leadTimeDays, safetyStockDays,
+      onOrderPieces, rawSchedule: row.inbound_schedule,
+      forwardDemand: { pieces: forwardDemandPieces, captureComplete: forwardDemandContributionCapture.overlayCaptureComplete,
+        events: forwardDemandContributionCapture.contributions.map((event) => ({ eventStartDate: event.eventStartDate, weightedPieces: event.weightedPieces })) },
+    });
     const supplierCycleDiagnostics = buildSupplierCycleDiagnostics({
+      asOf,
+      supplyTiming,
       available,
       effectiveSupply,
       reorderPoint: adjustedReorderPoint,
@@ -2002,7 +2053,7 @@ export function generatePurchasingRecommendations(
     }
 
     const actionable = skippedReason === null && isActionableStatus(status, settings) && suggestedOrderQty > 0;
-    const explanation = buildExplanation({
+    const baseExplanation = buildExplanation({
       status,
       available,
       effectiveSupply,
@@ -2017,7 +2068,8 @@ export function generatePurchasingRecommendations(
       skippedReason,
       forecastMethod: forecastBlend.method,
     });
-    const reviewSignal = buildReviewSignal({
+    const explanation = `${baseExplanation} Planning policy: ${planningPolicy.growthPercent}% growth, ${targetCoverDays} days of target cover, and ${minimumStockPieces} pieces minimum stock buffer.${replacementRanges.length ? ` ${replacementRanges.length} explicit date-range forecast(s) replace baseline demand for their captured dates.` : ""} ${supplyTiming.detail}`;
+    const defaultReviewSignal = buildReviewSignal({
       status,
       skippedReason,
       suggestedOrderQty,
@@ -2028,6 +2080,9 @@ export function generatePurchasingRecommendations(
       actionable,
     });
 
+    const reviewSignal = supplyTiming.reviewRequired
+      ? { action: "review_open_po" as const, severity: "warning" as const, label: "Review arrival coverage", detail: supplyTiming.detail }
+      : defaultReviewSignal;
     const confidence = buildConfidence({
       demandQuality,
       demandTrend,
@@ -2069,6 +2124,10 @@ export function generatePurchasingRecommendations(
       automationMinimumOrderCount: hasExplicitForecastPolicy ? forecastPolicy.automationMinimumOrderCount : 0,
       automationMinimumActiveDays: hasExplicitForecastPolicy ? forecastPolicy.automationMinimumActiveDays : 0,
     });
+    if (supplyTiming.reviewRequired) {
+      qualityControls.push({ area: "inbound_supply", severity: "block", code: supplyTiming.signal,
+        label: "Inbound arrival coverage needs review", detail: supplyTiming.detail });
+    }
     const autopilotBlockers = qualityControls;
     const qualityGate = buildQualityGate({
       actionable,
@@ -2092,7 +2151,25 @@ export function generatePurchasingRecommendations(
       strongThreshold: candidateScoreThresholds.strongThreshold,
       reviewThreshold: candidateScoreThresholds.reviewThreshold,
     });
+    const excludedQuarantinePieces = row.excluded_quarantine_pieces == null ? 0 : asNonnegativeSafeIntegerOrNull(row.excluded_quarantine_pieces);
+    if (excludedQuarantinePieces === null) throw new RangeError(`Product ${productId} quarantine evidence exceeds safe quantity precision`);
+    const bundleTerms = supplierBundleTermsSchema.safeParse({
+      currency: row.vendor_currency ?? null,
+      minimumOrderCents: row.vendor_minimum_order_cents == null ? 0 : asNonnegativeSafeIntegerOrNull(row.vendor_minimum_order_cents),
+      freeFreightThresholdCents: row.vendor_free_freight_threshold_cents == null ? null : (asNonnegativeSafeIntegerOrNull(row.vendor_free_freight_threshold_cents) ?? Number.NaN),
+    });
     const item: PurchasingRecommendationItem = {
+      supplierBundleTerms: bundleTerms.success ? bundleTerms.data : null,
+      planningBasis: {
+        policyVersion: 1, policyRevision: asNonnegativeSafeIntegerOrNull(settings.planningPolicyRevision), growthPercent: planningPolicy.growthPercent,
+        historicalDailyPieces: historicalForecastBlend.avgDailyUsagePieces,
+        adjustedDailyPieces: avgDailyUsage, essential: productPolicy?.essential ?? false,
+        excludedQuarantinePieces,
+        minimumStockPieces, targetCoverDays, targetStockPieces: reorderPoint,
+        replacementForecasts: replacementRanges,
+        leadTimeStages: productPolicy?.leadTimeStages ?? null,
+      },
+      supplyTiming,
       recommendationId: `${productId}:${productVariantId ?? "product"}:${lookbackDays}`,
       productId,
       productVariantId,

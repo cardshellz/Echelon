@@ -1,3 +1,4 @@
+import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
 import { randomUUID } from "node:crypto";
 import { and, eq, inArray } from "drizzle-orm";
 import {
@@ -156,6 +157,7 @@ export function createAutomaticRfqDraftService(database: any) {
     if (plan.selected.length === 0) return { rfqs: [], lines: [], skipped: plan.skipped, reused: false };
 
     return database.transaction(async (tx: any) => {
+      await lockInventoryCostGraph(tx);
       const recommendationIds = plan.selected.map((line) => line.id).sort((left, right) => left - right);
       const persistedRows = await tx.select().from(purchaseRecommendationLinesTable).where(and(
         eq(purchaseRecommendationLinesTable.runId, input.recommendationRunId),

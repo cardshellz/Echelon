@@ -66,6 +66,11 @@ databaseTests.sequential("purchase workspace PostgreSQL read model", () => {
     ];
     for (const ddl of tables) await pool.query(ddl);
     await pool.query(await readFile(resolve(process.cwd(), "migrations/222_procurement_cost_evidence.sql"), "utf8"));
+    // The complete RFQ command/migration proof lives in rfq-workflow.integration.
+    // This read fixture supplies the exact origin projection's empty relations.
+    await pool.query(`CREATE TABLE procurement.request_for_quotes(id integer PRIMARY KEY,rfq_number text NOT NULL);
+      CREATE TABLE procurement.rfq_quote_revisions(id integer PRIMARY KEY,rfq_id integer,rfq_line_id integer,currency text);
+      CREATE TABLE procurement.rfq_purchase_order_line_links(id integer PRIMARY KEY,rfq_id integer,rfq_line_id integer,purchase_order_id integer,purchase_order_line_id integer,quote_revision_id integer,quote_reference text,quoted_pieces integer,created_at timestamptz);`);
     await pool.query(`
       INSERT INTO procurement.vendors(id,name) VALUES (1,'Fixture supplier');
       INSERT INTO procurement.purchase_orders
