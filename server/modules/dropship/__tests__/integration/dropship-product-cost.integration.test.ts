@@ -113,6 +113,21 @@ describeDatabase.sequential("Shellz Club product cost PostgreSQL source guarante
     return (await instrument().adapter.loadProductCosts({ vendorId, productVariantIds: [66] })).get(66);
   }
 
+  it("contains source failures inside a caller-owned transaction without committing or aborting it", async () => {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(qualify("ALTER TABLE membership.plan_variant_overrides RENAME TO temporarily_unavailable_overrides"));
+      const reader = PgShellzClubProductCostAdapter.forTransaction({ query: (sql: string, values?: unknown[]) => client.query(qualify(sql), values) } as Pick<PoolClient, "query">);
+      const result = await reader.loadProductCosts({ vendorId: 10, productVariantIds: [66] });
+      expect(result.get(66)).toMatchObject({ status: "unavailable", issue: "source_read_failed" });
+      expect((await client.query("SELECT 1 AS alive")).rows[0].alive).toBe(1);
+      await client.query("ROLLBACK");
+      // The caller's rollback restores the rename, proving the adapter did not commit it.
+      expect(await cost()).toMatchObject({ status: "available", unitCostCents: 809 });
+    } finally { await client.query("ROLLBACK"); client.release(); }
+  });
+
   it("reads the exact .ops fixed pack price as 809 cents without partner profiles or writes", async () => {
     const reader = instrument();
     expect((await reader.adapter.loadProductCosts({ vendorId: 10, productVariantIds: [66] })).get(66))

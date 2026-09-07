@@ -36,6 +36,7 @@ export const generateVendorListingPreviewInputSchema = z.object({
 }).strict();
 
 export const createListingPushJobInputSchema = z.object({
+  expectedRuleEvidenceHashesByVariantId: z.record(z.string().regex(/^[1-9]\d*$/), z.string().regex(/^[a-f0-9]{64}$/)).optional(),
   expectedPriceRevisionIdsByVariantId: z.record(z.string().regex(/^[1-9]\d*$/), z.number().int().positive().max(2_147_483_647).nullable()).optional(),
   expectedPriceCentsByVariantId: z.record(z.string().regex(/^[1-9]\d*$/), z.number().int().positive().max(2_147_483_647).nullable()).optional(),
   vendorId: positiveIdSchema,

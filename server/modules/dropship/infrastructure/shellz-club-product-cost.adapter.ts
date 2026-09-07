@@ -37,10 +37,15 @@ function groupBy<T, Key>(rows: readonly T[], key: (row: T) => Key): Map<Key, T[]
 /** Read the membership-owned source, not the asynchronous Shopify display projection.
  * Repeatable read keeps identity, exclusions and overrides from different edits apart. */
 export class PgShellzClubProductCostAdapter implements DropshipProductCostReader {
+  /** The caller owns the transaction/snapshot and commit. No nested BEGIN/COMMIT. */
+  static forTransaction(client: Pick<PoolClient, "query">): PgShellzClubProductCostAdapter {
+    return new PgShellzClubProductCostAdapter({ connect: async () => ({ query: client.query.bind(client), release: () => undefined }) }, undefined, false);
+  }
   constructor(
     private readonly dbPool: CostPool = defaultPool,
     private readonly reportReadFailure: (input: { vendorId: number; variantCount: number; code: "source_read_failed"; sqlState: string | null; stage: string }) => void =
       (input) => console.warn("[dropship-product-cost] source read unavailable", input),
+    private readonly ownsTransaction = true,
   ) {}
 
   async loadProductCosts(input: { vendorId: number; productVariantIds: readonly number[] }): Promise<ReadonlyMap<number, DropshipProductCost>> {
@@ -60,7 +65,8 @@ export class PgShellzClubProductCostAdapter implements DropshipProductCostReader
     try {
       client = await this.dbPool.connect();
       stage = "begin_snapshot";
-      await client.query("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      if (this.ownsTransaction) await client.query("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      else await client.query("SAVEPOINT dropship_product_cost_read");
       stage = "vendor_plan";
       const result = await client.query<VendorPlanRow>(
         `SELECT v.current_plan_id::text AS plan_id, v.entitlement_status,
@@ -81,7 +87,8 @@ export class PgShellzClubProductCostAdapter implements DropshipProductCostReader
       else if (vendor.entitlement_status !== "active") planIssue = "entitlement_inactive";
       else if (!planId || vendor.plan_is_active !== true || vendor.subscription_is_coherent !== true) planIssue = "plan_unavailable";
       if (planIssue) {
-        await client.query("COMMIT");
+        if (this.ownsTransaction) await client.query("COMMIT");
+        else await client.query("RELEASE SAVEPOINT dropship_product_cost_read");
         return unavailable(planIssue, planId);
       }
       // No name/tier subscription selection: current_plan_id was written by the
@@ -107,7 +114,8 @@ export class PgShellzClubProductCostAdapter implements DropshipProductCostReader
           || String(row.name ?? "").trim().toLowerCase().includes("dropship"));
       const planEligible = access.rows.length > 0 ? eligibleAccess.length > 0 : vendor!.includes_dropship === true;
       if (!planEligible) {
-        await client.query("COMMIT");
+        if (this.ownsTransaction) await client.query("COMMIT");
+        else await client.query("RELEASE SAVEPOINT dropship_product_cost_read");
         return unavailable("plan_unavailable", planId);
       }
       const channelId = configuredChannelId ?? (eligibleAccess.length === 1 ? eligibleAccess[0].channel_id : null);
@@ -196,11 +204,18 @@ export class PgShellzClubProductCostAdapter implements DropshipProductCostReader
         }));
       }
       stage = "commit_snapshot";
-      await client.query("COMMIT");
+      if (this.ownsTransaction) await client.query("COMMIT");
+      else await client.query("RELEASE SAVEPOINT dropship_product_cost_read");
       return resolved;
     } catch (error: unknown) {
-      if (client) {
+      if (client && this.ownsTransaction) {
         try { await client.query("ROLLBACK"); } catch { discardClient = true; }
+      } else if (client) {
+        // Preserve the caller's transaction when an advisory cost source is
+        // unavailable. Cost-based recipes still block; retail-based ones need
+        // not fail because an unrelated cost read failed.
+        await client.query("ROLLBACK TO SAVEPOINT dropship_product_cost_read");
+        await client.query("RELEASE SAVEPOINT dropship_product_cost_read");
       }
       // Never log SQL, connection strings, or raw database errors to the vendor.
       const rawCode = error && typeof error === "object" && "code" in error ? error.code : null;

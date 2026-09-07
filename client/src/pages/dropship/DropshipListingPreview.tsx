@@ -126,7 +126,7 @@ export function ListingPreviewTable({ rows, onOpen, priceEditing }: {
               {priceEditing && <Button type="button" size="sm" variant="ghost" className="h-8 px-2"
                 aria-label={`Edit listing price for ${row.sku || row.title}`} disabled={priceEditing.disabled}
                 onClick={() => priceEditing.onEdit(row.productVariantId)}>Edit price</Button>}
-            </div>}</TableCell>
+            </div>}{row.pricingRuleName && <p className="text-xs text-violet-700">{row.pricingRuleName}</p>}</TableCell>
           <TableCell className="font-mono">{row.marketplaceQuantity}</TableCell>
           <TableCell><PreviewStatus row={row} /></TableCell>
           <TableCell className="text-right"><Button type="button" size="sm" variant="outline"

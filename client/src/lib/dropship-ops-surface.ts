@@ -1650,6 +1650,8 @@ export interface DropshipListingPreviewRow {
   } | null;
   previewHash: string;
   priceSettingRevisionId?: number | null;
+  rulePriceEvidenceHash?: string | null;
+  pricingRuleName?: string | null;
   presentation?: DropshipListingPresentation;
   economics?: DropshipListingEconomics;
 }
@@ -4314,6 +4316,7 @@ export function buildListingPushRequest(input: {
   requestedRetailPricesByVariantId?: Record<string, number>;
   expectedPriceRevisionIdsByVariantId: Record<string, number | null>;
   expectedPriceCentsByVariantId: Record<string, number | null>;
+  expectedRuleEvidenceHashesByVariantId?: Record<string, string>;
 } {
   const storeConnectionId = assertPositiveInteger(
     input.storeConnectionId,
@@ -4335,6 +4338,9 @@ export function buildListingPushRequest(input: {
     .filter((row) => row.previewStatus !== "blocked")
     .map((row) => [String(row.productVariantId), row.priceCents === null ? null
       : assertPositiveInteger(row.priceCents, "priceCents")]));
+  const expectedRuleEvidenceHashesByVariantId = Object.fromEntries(input.preview.rows
+    .filter((row) => row.previewStatus !== "blocked" && row.rulePriceEvidenceHash)
+    .map((row) => [String(row.productVariantId), row.rulePriceEvidenceHash!]));
   const requestedRetailPricesByVariantId =
     buildRequestedRetailPricesByVariantId({
       productVariantIds,
@@ -4347,6 +4353,7 @@ export function buildListingPushRequest(input: {
     idempotencyKey: input.idempotencyKey,
     expectedPriceRevisionIdsByVariantId,
     expectedPriceCentsByVariantId,
+    ...(Object.keys(expectedRuleEvidenceHashesByVariantId).length ? { expectedRuleEvidenceHashesByVariantId } : {}),
     ...(Object.keys(requestedRetailPricesByVariantId).length > 0
       ? { requestedRetailPricesByVariantId }
       : {}),

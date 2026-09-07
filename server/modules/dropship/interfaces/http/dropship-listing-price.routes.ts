@@ -41,6 +41,7 @@ function respondError(res: Response, error: unknown): Response {
   if (error instanceof ZodError) return res.status(400).json({ error: { code: "DROPSHIP_LISTING_PRICE_INVALID_INPUT", message: "Enter a valid listing price and reload if this page is out of date." } });
   if (error instanceof DropshipError) {
     const status = error.code === "DROPSHIP_AUTH_REQUIRED" ? 401
+      : error.code === "DROPSHIP_PRICING_RULES_NOT_CONFIGURED" ? 422
       : ["DROPSHIP_STORE_CONNECTION_REQUIRED", "DROPSHIP_LISTING_PRICE_NOT_AVAILABLE"].includes(error.code) ? 404
         : ["DROPSHIP_IDEMPOTENCY_CONFLICT", "DROPSHIP_LISTING_PRICE_VERSION_CONFLICT"].includes(error.code) ? 409
           : ["DROPSHIP_LISTING_VENDOR_BLOCKED", "DROPSHIP_LISTING_ENTITLEMENT_BLOCKED", "DROPSHIP_LISTING_STORE_BLOCKED"].includes(error.code) ? 403 : 500;

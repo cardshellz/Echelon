@@ -63,6 +63,7 @@ import { EbayListingSetupPanel } from "./EbayListingSetupPanel";
 import { EbayListingPolicyOverridePanel } from "./EbayListingPolicyOverridePanel";
 import { EbayStoreCategoryAuthorizationRecovery } from "./EbayStoreCategoryAuthorizationRecovery";
 import { DropshipListingPreview, type ListingPriceSaveCallbacks } from "./DropshipListingPreview";
+import { DropshipPricingRulesPanel } from "./DropshipPricingRulesPanel";
 export { formatListingPreviewIssue as formatIssue } from "@/lib/dropship-listing-preview";
 
 type PendingSelectionAction = string | null;
@@ -658,6 +659,9 @@ export default function DropshipPortalCatalog() {
             />
           </>
         )}
+
+        {selectedStoreConnectionIdNumber > 0 && <DropshipPricingRulesPanel storeConnectionId={selectedStoreConnectionIdNumber}
+          storeName={selectedStoreName} onConfigurationChange={() => invalidateListingPreview(true)} />}
 
         <ListingPreviewPanel
           launchReadyStoreConnections={launchReadyStoreConnections}
