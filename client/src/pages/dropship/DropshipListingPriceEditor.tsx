@@ -4,6 +4,7 @@ import { Save } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { formatListingPreviewIssue } from "@/lib/dropship-listing-preview";
 import { createDropshipIdempotencyKey, DropshipApiError, fetchJson, putJson, queryErrorMessage } from "@/lib/dropship-ops-surface";
 import { displayListingPrice, draftFromListingPrice, isListingPriceDirty, listingPriceEndpoint, listingPriceInput,
   prepareListingPriceSave, readListingPrice, readSavedListingPrice, reconcileListingPriceDraft, type ListingPriceDraft,
@@ -49,7 +50,7 @@ function ListingPriceEditorSession({ storeConnectionId, productVariantId, disabl
   const busy = phase === "saving" || phase === "refreshing";
   const dirty = draft ? isListingPriceDirty(draft) : false;
   const price = priceQuery.data;
-  function updateDraft(change: Partial<Pick<ListingPriceDraft, "useDefault" | "value">>): void {
+  function updateDraft(change: Partial<Pick<ListingPriceDraft, "useDefault" | "useRules" | "value">>): void {
     if (disabled || busy || phase === "conflict" || phase === "refresh_error") return;
     setDraft((current) => current ? { ...current, ...change } : current);
     setError("");
@@ -168,19 +169,24 @@ function ListingPriceEditorSession({ storeConnectionId, productVariantId, disabl
       {compact ? <p className="text-xs text-zinc-500">Saved {displayListingPrice(price?.effectivePriceCents ?? null)} · Default {displayListingPrice(price?.defaultPriceCents ?? null)}</p>
         : <dl className="grid grid-cols-2 gap-3 text-sm">
         <div><dt className="text-xs text-zinc-500">Current saved price</dt><dd className="mt-1 font-medium">{displayListingPrice(price?.effectivePriceCents ?? null)}</dd>
-          <dd className="mt-1 text-xs text-zinc-500">{price?.source === "override" ? "Listing override" : price?.source === "catalog_default" ? "Catalog default" : price?.source === "saved_listing" ? "Previously saved listing" : "No price available"}</dd></div>
+          <dd className="mt-1 text-xs text-zinc-500">{price?.source === "override" ? "Listing override" : price?.source === "catalog_default" ? "Catalog default" : price?.source === "rules" ? price.ruleName ?? "Pricing rules" : price?.source === "saved_listing" ? "Previously saved listing" : "No price available"}</dd></div>
         <div><dt className="text-xs text-zinc-500">Catalog default</dt><dd className="mt-1 font-medium">{displayListingPrice(price?.defaultPriceCents ?? null)}</dd></div>
       </dl>}
       <div className="flex items-center gap-2"><input id={`${fieldId}-default`} type="checkbox" checked={draft.useDefault}
-        disabled={disabled || busy || phase === "conflict" || phase === "refresh_error"} onChange={(event) => updateDraft({ useDefault: event.target.checked })}
+        disabled={disabled || busy || phase === "conflict" || phase === "refresh_error"} onChange={(event) => updateDraft({ useDefault: event.target.checked, useRules: false })}
         className="h-4 w-4 accent-purple-600" /><Label htmlFor={`${fieldId}-default`} className={compact ? "text-xs" : undefined}>{compact ? "Use catalog default" : "Use catalog default (no price override)"}</Label></div>
       <div className="max-w-xs space-y-1"><Label htmlFor={`${fieldId}-price`}>Your listing price (USD)</Label>
+        {price?.rulesConfigured && <div className="flex items-center gap-2"><input id={`${fieldId}-rules`} type="checkbox" checked={draft.useRules ?? false}
+          disabled={disabled || busy || phase === "conflict" || phase === "refresh_error"}
+          onChange={(event) => updateDraft({ useRules: event.target.checked, useDefault: false })} />
+          <Label htmlFor={`${fieldId}-rules`}>Use pricing rules{price.ruleName ? ` (${price.ruleName})` : ""}</Label></div>}
         <Input id={`${fieldId}-price`} type="text" inputMode="decimal" autoComplete="off" placeholder="8.99"
-          disabled={disabled || draft.useDefault || busy || phase === "conflict" || phase === "refresh_error"}
-          value={draft.useDefault ? listingPriceInput(price?.defaultPriceCents ?? null) : draft.value}
+          disabled={disabled || draft.useDefault || draft.useRules || busy || phase === "conflict" || phase === "refresh_error"}
+          value={draft.useRules ? listingPriceInput(price?.rulePriceCents ?? null) : draft.useDefault ? listingPriceInput(price?.defaultPriceCents ?? null) : draft.value}
           aria-describedby={`${fieldId}-help`} onChange={(event) => updateDraft({ value: event.target.value })} />
       </div>
       <p id={`${fieldId}-help`} className="text-xs text-zinc-500">{compact ? "Per sellable pack. Save refreshes the preview; it does not publish." : "Changes apply only when you save. Saving updates your stored price and refreshes this preview; it does not publish or modify a live eBay listing."}</p>
+      {draft.useRules && price?.pricingIssue && <p className="text-xs text-amber-800">{formatListingPreviewIssue(price.pricingIssue)}</p>}
       <div className="flex flex-wrap items-center gap-2"><Button type="submit" size="sm" className="gap-2" disabled={disabled || !dirty || busy || phase === "conflict" || phase === "refresh_error"}>
         <Save aria-hidden="true" className="h-4 w-4" />{phase === "saving" ? "Saving listing price…" : phase === "refreshing" ? "Refreshing preview…" : "Save listing price"}
       </Button>{cancelButton}</div>

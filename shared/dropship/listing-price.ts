@@ -10,15 +10,22 @@ export const listingPriceTargetSchema = z.object({
 }).strict();
 export const saveListingPriceInputSchema = z.object({
   priceCents: listingPriceCentsSchema.nullable(),
+  pricingMode: z.enum(["fixed", "catalog_default", "rules"]).optional(),
   expectedRevisionId: z.number().int().positive().max(2_147_483_647).nullable(),
   idempotencyKey: z.string().min(1).max(200).regex(/^[A-Za-z0-9:_-]+$/),
-}).strict();
+}).strict().refine((input) => !input.pricingMode || (input.pricingMode === "fixed") === (input.priceCents !== null),
+  "Only a fixed price may contain a price override.");
 export const listingPriceSettingSchema = listingPriceTargetSchema.extend({
   revisionId: z.number().int().positive().max(2_147_483_647).nullable(),
   overridePriceCents: listingPriceCentsSchema.nullable(),
   effectivePriceCents: listingPriceCentsSchema.nullable(),
   defaultPriceCents: listingPriceCentsSchema.nullable(),
-  source: z.enum(["override", "catalog_default", "saved_listing", "unavailable"]),
+  source: z.enum(["override", "catalog_default", "saved_listing", "rules", "unavailable"]),
+  pricingMode: z.enum(["fixed", "catalog_default", "rules"]).optional(),
+  ruleName: z.string().nullable().optional(),
+  pricingIssue: z.string().nullable().optional(),
+  rulePriceCents: listingPriceCentsSchema.nullable().optional(),
+  rulesConfigured: z.boolean().optional(),
   updatedAt: z.string().datetime().nullable(),
 }).strict();
 export const listingPriceResponseSchema = z.object({ price: listingPriceSettingSchema }).strict();
@@ -32,14 +39,21 @@ export interface SavedListingPriceRevision {
   productVariantId: number;
   revisionId: number;
   overridePriceCents: number | null;
+  pricingMode?: "fixed" | "catalog_default" | "rules";
   updatedAt: string;
 }
 
 export function resolveListingPrice(input: {
-  saved: Pick<SavedListingPriceRevision, "overridePriceCents"> | null;
+  saved: Pick<SavedListingPriceRevision, "overridePriceCents" | "pricingMode"> | null;
   existingListingPriceCents: number | null;
   defaultPriceCents: number | null;
+  rulePrice?: { priceCents: number | null } | null;
 }): Pick<ListingPriceSetting, "effectivePriceCents" | "source"> {
+  if (input.saved?.pricingMode === "rules" || (!input.saved && input.existingListingPriceCents === null && input.rulePrice)) {
+    const parsed = listingPriceCentsSchema.safeParse(input.rulePrice?.priceCents);
+    return parsed.success ? { effectivePriceCents: parsed.data, source: "rules" }
+      : { effectivePriceCents: null, source: "unavailable" };
+  }
   // A saved null is an explicit reset, not absence. Never resurrect an older
   // published/queued price after the vendor chose the catalog default.
   const rawPrice = input.saved

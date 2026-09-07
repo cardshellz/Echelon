@@ -1,6 +1,8 @@
 # Release 2: component costs, lineage, review and controls
 
-Base: `codex/procurement-01-cost-foundation`. Release branch: `codex/procurement-02-cost-runtime`. Deploy after the foundation and its prerequisite PR #1391.
+PR target: `main`. Release branch: `codex/procurement-02-cost-runtime`. Foundation PR #1398 and prerequisite PR #1391 are already merged to main. This release must merge into main to enter the deployment path.
+
+PR #1399 was merged into the foundation feature branch rather than main. Its completed runtime changes are preserved here for the replacement PR against main. Merge and verify this runtime deployment before the planning/lifecycle release in PR #1400; that PR also targets main and remains draft until this prerequisite is deployed.
 
 ## Resulting behavior
 
@@ -19,7 +21,7 @@ Configured approval roles are checked against current active Identity records an
 
 ## Local verification
 
-These are the original prepared-candidate checks. The unpublished release was refreshed onto the updated prerequisite before bulk publication. The cost/runtime patch is unchanged; the latest upstream changes and all procurement CI entries were retained. GitHub CI must pass on the published head.
+These are the original prepared-candidate checks. The release was refreshed onto the updated prerequisite before bulk publication, then incorporated deployed main for the replacement PR. The cost/runtime patch is unchanged; the latest upstream changes and all procurement CI entries were retained. GitHub CI must pass on the published head.
 
 - Full release-prefix unit suite: **8,947 passed**, 37 intentionally skipped, across892 passing files and one skipped file.
 - TypeScript: passed. Client and server production build: passed; existing bundle-size warnings remain.

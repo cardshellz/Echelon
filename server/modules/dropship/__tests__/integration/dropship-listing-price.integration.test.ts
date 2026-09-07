@@ -6,6 +6,8 @@ import pg, { type Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { PgDropshipListingPriceRepository } from "../../infrastructure/dropship-listing-price.repository";
 import { PgDropshipListingPreviewRepository } from "../../infrastructure/dropship-listing-preview.repository";
+import { PgDropshipPricingRulesRepository } from "../../infrastructure/dropship-pricing-rules.repository";
+import type { StoredPricingReview } from "../../application/dropship-pricing-rules-service";
 import type { CreateDropshipListingPushJobRepositoryInput } from "../../application/dropship-listing-preview-service";
 import type { SaveListingPriceInput } from "../../../../../shared/dropship/listing-price";
 vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
@@ -20,6 +22,7 @@ describeDatabase.sequential("listing price PostgreSQL transaction guarantees", (
   let pool: pg.Pool | undefined;
   let repository: PgDropshipListingPriceRepository;
   let previews: PgDropshipListingPreviewRepository;
+  let pricingRules: PgDropshipPricingRulesRepository;
   let created = false;
   const qualify = (sql: string) => sql.replaceAll("dropship.", `"${schema}".`).replaceAll("catalog.", `"${schema}".`);
   beforeAll(async () => {
@@ -58,15 +61,19 @@ describeDatabase.sequential("listing price PostgreSQL transaction guarantees", (
       INSERT INTO catalog.product_variants VALUES (101,7), (102,7);
     `));
     await pool.query(qualify(readFileSync(resolve(process.cwd(), "migrations/0657_dropship_listing_price_settings.sql"), "utf8")));
+    await pool.query(qualify(readFileSync(resolve(process.cwd(), "migrations/0659_dropship_store_pricing_rules.sql"), "utf8")));
     const scopedPool = { connect: async () => { const client = await pool!.connect();
       return { query: (sql: string, values?: unknown[]) => client.query(qualify(sql), values), release: () => client.release() }; } } as unknown as Pool;
     repository = new PgDropshipListingPriceRepository(scopedPool);
     previews = new PgDropshipListingPreviewRepository(scopedPool);
+    pricingRules = new PgDropshipPricingRulesRepository(scopedPool);
   });
   beforeEach(async () => { await pool!.query(qualify(`TRUNCATE dropship.dropship_listing_price_settings,
     dropship.dropship_listing_price_revisions, dropship.dropship_audit_events,
     dropship.dropship_listing_push_jobs, dropship.dropship_vendor_listings,
-    dropship.dropship_listing_push_job_items RESTART IDENTITY`)); });
+    dropship.dropship_listing_push_job_items, dropship.dropship_pricing_profiles,
+    dropship.dropship_pricing_profile_revisions, dropship.dropship_pricing_reviews,
+    dropship.dropship_pricing_applications RESTART IDENTITY`)); });
   afterAll(async () => { if (created && pool) await pool.query(`DROP SCHEMA "${schema}" CASCADE`); await pool?.end(); });
 
   function save(key: string, priceCents: number | null = 1299, expectedRevisionId: number | null = null, variant = 101, store = 22) {
@@ -80,6 +87,86 @@ describeDatabase.sequential("listing price PostgreSQL transaction guarantees", (
     const audits = await pool!.query(qualify("SELECT payload FROM dropship.dropship_audit_events ORDER BY id"));
     return { settings: settings.rows, revisions: revisions.rows, audits: audits.rows };
   }
+  function ruleReview(ids = [101, 102]): StoredPricingReview {
+    return { id: "a1d45010-ded1-4428-a5c4-67367f8f5f39", createdAt: now, hash: "a".repeat(64),
+      input: { expectedRevisionId: null, releaseFixedOverrides: false,
+        profile: { defaultRecipe: { basis: "product_cost", markupBps: 3000, flatCents: 100, rounding: "cent" }, groups: [] } },
+      rows: ids.map((productVariantId) => ({ productVariantId, title: "Mailer", sku: `SKU-${productVariantId}`,
+        previousPriceCents: 899, priceCents: 1152, productCostCents: 809, ruleName: "Store default rule", preserved: false,
+        issues: [], settingRevisionId: null, evidenceHash: "b".repeat(64) })) };
+  }
+  async function storeRuleReview(review: StoredPricingReview) {
+    await pricingRules.execute("member-1", 22, (tx) => tx.storeReview(review));
+  }
+  async function applyRuleReview(review: StoredPricingReview, key = "rule-apply") {
+    const input = { reviewId: review.id, reviewHash: review.hash, idempotencyKey: key };
+    return pricingRules.execute("member-1", 22, async (tx) => {
+      const replay = await tx.findApplication(input);
+      return replay ? { ...replay, replay: true } : { revisionId: await tx.applyReview(review, input, now), replay: false };
+    });
+  }
+  it("adopts 1,000 rule-owned listings atomically using the real migration and repository", async () => {
+    await pool!.query(qualify("INSERT INTO catalog.product_variants (id, product_id) SELECT x,7 FROM generate_series(103,1100) x ON CONFLICT DO NOTHING"));
+    const review = ruleReview(Array.from({ length: 1000 }, (_, index) => index + 101));
+    await storeRuleReview(review);
+    expect(await applyRuleReview(review)).toEqual({ revisionId: 1, replay: false });
+    const result = await state();
+    expect(result.settings).toHaveLength(1000); expect(result.revisions).toHaveLength(1000);
+    expect(result.settings.every((row) => row.pricing_mode === "rules" && row.override_price_cents === null)).toBe(true);
+    expect(result.audits).toHaveLength(1);
+    expect(result.audits[0].payload).toMatchObject({ adoptedCount: 1000, preservedCount: 0, marketplaceWrite: false });
+    const current = await pricingRules.execute("member-1", 22, (tx) => tx.loadProfile());
+    expect(current).toMatchObject({ revisionId: 1, profile: review.input.profile });
+  });
+  it("keeps fixed exceptions and records rule inheritance as a distinct setting", async () => {
+    await save("fixed-exception", 1999);
+    const review = ruleReview(); review.rows[0] = { ...review.rows[0], preserved: true, settingRevisionId: 1 };
+    await storeRuleReview(review); await applyRuleReview(review);
+    const result = await state();
+    expect(result.settings[0]).toMatchObject({ product_variant_id: 101, pricing_mode: "fixed", override_price_cents: 1999 });
+    expect(result.settings[1]).toMatchObject({ product_variant_id: 102, pricing_mode: "rules", override_price_cents: null });
+  });
+  it("replays rule approval without duplicate revisions or audit entries", async () => {
+    const review = ruleReview(); await storeRuleReview(review); await applyRuleReview(review);
+    const before = await state();
+    expect(await applyRuleReview(review)).toEqual({ revisionId: 1, replay: true });
+    expect(await state()).toEqual(before);
+    await expect(applyRuleReview(review, "different-key")).rejects.toMatchObject({ code: "DROPSHIP_IDEMPOTENCY_CONFLICT" });
+  });
+  it("rolls back profile, bindings and application when the audit cannot be recorded", async () => {
+    const review = ruleReview(); await storeRuleReview(review);
+    await pool!.query(qualify("ALTER TABLE dropship.dropship_audit_events ADD CONSTRAINT reject_rule_audit CHECK (event_type <> 'pricing_rules_applied')"));
+    try {
+      await expect(applyRuleReview(review)).rejects.toMatchObject({ code: "23514" });
+      expect(await state()).toEqual({ settings: [], revisions: [], audits: [] });
+      expect((await pool!.query(qualify("SELECT * FROM dropship.dropship_pricing_profiles"))).rows).toHaveLength(0);
+      expect((await pool!.query(qualify("SELECT * FROM dropship.dropship_pricing_applications"))).rows).toHaveLength(0);
+    } finally { await pool!.query(qualify("ALTER TABLE dropship.dropship_audit_events DROP CONSTRAINT reject_rule_audit")); }
+  });
+  it("enforces immutable rule evidence and exact price-mode coherence", async () => {
+    const review = ruleReview(); await storeRuleReview(review); await applyRuleReview(review);
+    for (const table of ["dropship_pricing_reviews", "dropship_pricing_profile_revisions", "dropship_pricing_applications"]) {
+      await expect(pool!.query(qualify(`DELETE FROM dropship.${table}`))).rejects.toMatchObject({ code: "23514" });
+    }
+    await expect(pool!.query(qualify("UPDATE dropship.dropship_listing_price_settings SET pricing_mode = 'catalog_default' WHERE product_variant_id = 101")))
+      .rejects.toMatchObject({ code: "23514" });
+    await expect(pool!.query(qualify("UPDATE dropship.dropship_pricing_profiles SET revision_id = revision_id"))).resolves.toBeDefined();
+  });
+  it("isolates reviews and profiles by vendor and store", async () => {
+    const review = ruleReview(); await storeRuleReview(review);
+    expect(await pricingRules.execute("member-2", 23, (tx) => tx.loadReview(review.id))).toBeNull();
+    const operation = vi.fn();
+    await expect(pricingRules.execute("member-2", 22, operation)).rejects.toMatchObject({ code: "DROPSHIP_STORE_CONNECTION_REQUIRED" });
+    expect(operation).not.toHaveBeenCalled();
+  });
+  it("allows only one of two concurrent rule approvals and safely retries the winner", async () => {
+    const review = ruleReview(); await storeRuleReview(review);
+    const results = await Promise.allSettled([applyRuleReview(review), applyRuleReview(review)]);
+    expect(results.some((row) => row.status === "fulfilled")).toBe(true);
+    expect((await state()).revisions).toHaveLength(2);
+    expect(await applyRuleReview(review)).toEqual({ revisionId: 1, replay: true });
+    expect((await state()).audits).toHaveLength(1);
+  });
   it("persists a reset as a real current revision with before/after audit", async () => {
     const first = await save("first"); await save("reset", null, first.saved.revisionId);
     const result = await state();

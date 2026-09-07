@@ -2,7 +2,7 @@ import { listingPriceCentsSchema, listingPriceTargetSchema, listingPriceResponse
   type ListingPriceSetting, type SaveListingPriceInput } from "@shared/dropship/listing-price";
 
 export type ListingPriceIdentity = { storeConnectionId: number; productVariantId: number };
-export type ListingPriceDraft = { useDefault: boolean; value: string; baseline: ListingPriceSetting };
+export type ListingPriceDraft = { useDefault: boolean; useRules?: boolean; value: string; baseline: ListingPriceSetting };
 export type ListingPriceSaveAttempt = { fingerprint: string; request: SaveListingPriceInput };
 
 export function listingPriceEndpoint(identity: ListingPriceIdentity): string {
@@ -37,11 +37,14 @@ export function displayListingPrice(cents: number | null): string {
 }
 
 export function draftFromListingPrice(price: ListingPriceSetting): ListingPriceDraft {
-  return { useDefault: price.overridePriceCents === null && price.source !== "saved_listing",
+  return { useDefault: price.pricingMode !== "rules" && price.overridePriceCents === null && price.source !== "saved_listing",
+    ...(price.pricingMode === "rules" ? { useRules: true } : {}),
     value: listingPriceInput(price.overridePriceCents ?? price.effectivePriceCents), baseline: price };
 }
 
 export function isListingPriceDirty(draft: ListingPriceDraft): boolean {
+  if (draft.useRules) return draft.baseline.pricingMode !== "rules";
+  if (draft.baseline.pricingMode === "rules") return true;
   if (draft.useDefault) return draft.baseline.overridePriceCents !== null || draft.baseline.source === "saved_listing";
   try { return parseListingPriceCents(draft.value) !== (draft.baseline.source === "saved_listing"
     ? draft.baseline.effectivePriceCents : draft.baseline.overridePriceCents); }
@@ -58,11 +61,11 @@ export function reconcileListingPriceDraft(current: ListingPriceDraft | null, sa
 export function prepareListingPriceSave(identity: ListingPriceIdentity, draft: ListingPriceDraft,
   previous: ListingPriceSaveAttempt | null, createKey: () => string): ListingPriceSaveAttempt {
   listingPriceEndpoint(identity);
-  const priceCents = draft.useDefault ? null : parseListingPriceCents(draft.value);
+  const priceCents = draft.useDefault || draft.useRules ? null : parseListingPriceCents(draft.value);
   const expectedRevisionId = draft.baseline.revisionId;
-  const fingerprint = JSON.stringify([identity.storeConnectionId, identity.productVariantId, priceCents, expectedRevisionId]);
+  const fingerprint = JSON.stringify([identity.storeConnectionId, identity.productVariantId, priceCents, expectedRevisionId, ...(draft.useRules ? ["rules"] : [])]);
   if (previous?.fingerprint === fingerprint) return previous;
-  const request = saveListingPriceInputSchema.parse({ priceCents, expectedRevisionId, idempotencyKey: createKey() });
+  const request = saveListingPriceInputSchema.parse({ priceCents, expectedRevisionId, idempotencyKey: createKey(), ...(draft.useRules ? { pricingMode: "rules" } : {}) });
   return { fingerprint, request };
 }
 

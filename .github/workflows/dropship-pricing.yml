@@ -1,0 +1,32 @@
+name: Dropship pricing
+on:
+  pull_request:
+    paths:
+      - "client/src/**"
+      - "shared/dropship/**"
+      - "package*.json"
+      - "playwright.dropship-pricing.config.ts"
+      - "test/browser/dropship-pricing-*.ts"
+      - "test/browser/fixtures/dropship-pricing-harness.tsx"
+      - ".github/workflows/dropship-pricing.yml"
+  workflow_dispatch:
+jobs:
+  browser:
+    name: Dropship pricing browser journeys
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npx playwright test --config playwright.dropship-pricing.config.ts
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: dropship-pricing-browser-traces
+          path: test-results/
+          retention-days: 7
