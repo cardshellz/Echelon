@@ -20,6 +20,32 @@ function row(): DropshipListingPreviewRow {
 }
 function render(component: React.ReactNode) { vi.stubGlobal("React", React); return renderToStaticMarkup(component); }
 describe("rich listing preview", () => {
+  it("labels the actual .ops product-cost source without implying a channel-wide discount", () => {
+    const value = row();
+    value.economics!.productCostSource = "variant_fixed_price";
+    const markup = render(React.createElement(ListingPreviewDetailsContent, { row: value, generatedAt: "2026-09-07T12:00:00.000Z" }));
+    expect(markup).toContain("Source: your Shellz Club .ops price list (fixed product price)");
+    expect(markup).not.toContain("Configured product discount");
+    expect(markup).not.toContain("Suggested price");
+  });
+  it("puts a lazy inline price action next to the existing listing price", () => {
+    const markup = render(React.createElement(ListingPreviewTable, { rows: [row()], onOpen: () => {},
+      priceEditing: { variantId: null, disabled: false, onEdit: () => {}, editor: null } }));
+    expect(markup).toContain("Edit listing price for ARM-50");
+    expect(markup).toContain("Edit price");
+    expect(markup).toContain("$8.99");
+    expect(markup).not.toContain("Save listing price");
+  });
+  it("mounts an inline editor only for its target row and protects other actions until it closes", () => {
+    const markup = render(React.createElement(ListingPreviewTable, { rows: [row(), { ...row(), productVariantId: 2, sku: "OTHER" }], onOpen: () => {},
+      priceEditing: { variantId: 1, disabled: true, onEdit: () => {}, editor: React.createElement("div", null, "Inline saved-price form") } }));
+    expect(markup.match(/Inline saved-price form/g)).toHaveLength(1);
+    expect(markup).not.toContain("Edit listing price for ARM-50");
+    expect(markup).toContain("Edit listing price for OTHER");
+    const buttons = markup.match(/<button[^>]+>/g) ?? [];
+    expect(buttons).toHaveLength(3);
+    expect(buttons.every((button) => button.includes("disabled"))).toBe(true);
+  });
   it("places the editable price separately from the preview price snapshot and product costs", () => {
     const markup = render(React.createElement(ListingPreviewDetailsContent, { row: row(), generatedAt: "2026-09-06T12:00:00.000Z",
       priceEditor: React.createElement("section", { "aria-label": "Price editor" }, "Save listing price") }));
@@ -59,9 +85,13 @@ describe("rich listing preview", () => {
       const rows = Array.from({ length: 10000 }, (_, index) => ({ ...row(), productVariantId: index + 1, title: `Listing ${index + 1}` }));
       const markup = render(React.createElement(QueryClientProvider, { client }, React.createElement(DropshipListingPreview, {
         preview: { vendorId: 1, storeConnectionId: 1, platform: "ebay", generatedAt: "2026-09-06T12:00:00.000Z", rows,
-          summary: { total: 10000, ready: 10000, blocked: 0, warning: 0 } } })));
+          summary: { total: 10000, ready: 10000, blocked: 0, warning: 0 } },
+        priceSaveCallbacks: { onSaveStarted: () => {}, onSaveSettled: () => {}, onSaved: async () => {} } })));
       expect(markup.match(/aria-label="View preview for Listing /g)).toHaveLength(50);
       expect(markup).toContain("Page 1 of 200"); expect(markup).not.toContain("Estimate shipping");
+      expect(markup.match(/aria-label="Edit listing price for /g)).toHaveLength(50);
+      expect(markup).not.toContain("Loading saved price");
+      expect(client.getQueryCache().getAll().filter((query) => String(query.queryKey[0]).endsWith("/price"))).toHaveLength(0);
     } finally { client.clear(); }
   });
   it("shows missing shipping rates as unavailable, never free", () => {

@@ -10,6 +10,7 @@ import {
 import { InventoryServiceDropshipAtpProvider } from "./dropship-atp.provider";
 import { ConfigDrivenDropshipMarketplaceListingProvider } from "./dropship-config-driven-marketplace-listing.provider";
 import { PgDropshipListingPreviewRepository } from "./dropship-listing-preview.repository";
+import { PgShellzClubProductCostAdapter } from "./shellz-club-product-cost.adapter";
 import { createDropshipVendorProvisioningServiceFromEnv } from "./dropship-vendor-provisioning.factory";
 import { createDropshipEbayFulfillmentPolicyGuardFromEnv } from "./dropship-ebay-fulfillment-policy-guard.factory";
 
@@ -21,7 +22,10 @@ export function createDropshipListingPreviewServiceFromEnv(): DropshipListingPre
     repository,
     presentation: {
       media: new PgCatalogVariantMediaReader(pool),
-      loadChannelDiscountPercent: () => repository.loadChannelDiscountPercent(),
+      productCosts: new PgShellzClubProductCostAdapter(pool, (context) => logger.warn({
+        code: "DROPSHIP_PRODUCT_COST_SOURCE_UNAVAILABLE",
+        message: "Shellz Club product pricing could not be read.", context,
+      })),
       resolvePublication: resolveDropshipPublicationPreview,
       logger,
     },

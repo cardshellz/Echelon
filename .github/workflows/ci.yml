@@ -39,6 +39,10 @@ jobs:
           client/src/pages/dropship/__tests__/DropshipPortalCatalog.test.ts
           client/src/pages/dropship/__tests__/EbayListingSetupPanel.test.ts
           client/src/pages/dropship/__tests__/EbayListingPolicyOverridePanel.test.ts
+          client/src/lib/__tests__/dropship-listing-preview.test.ts
+          client/src/lib/__tests__/dropship-listing-price.test.ts
+          client/src/pages/dropship/__tests__/DropshipListingPreview.test.ts
+          client/src/pages/dropship/__tests__/DropshipListingPriceEditor.test.ts
 
   postgres-hardening:
     name: PostgreSQL hardening tests
@@ -139,6 +143,7 @@ jobs:
           npx vitest run --no-file-parallelism
           server/modules/dropship/__tests__/integration/dropship-ebay-listing-policy-bulk.integration.test.ts
           server/modules/dropship/__tests__/integration/dropship-listing-price.integration.test.ts
+          server/modules/dropship/__tests__/integration/dropship-product-cost.integration.test.ts
       - name: eBay credential lifecycle PostgreSQL guarantees
         run: >-
           npx vitest run --no-file-parallelism

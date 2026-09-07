@@ -1,6 +1,5 @@
 import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
-import { resolveDropshipOmsChannelIdWithClient } from "./dropship-order-intake.repository";
 import { DropshipError } from "../domain/errors";
 import type {
   CreateDropshipListingPushJobRepositoryInput,
@@ -191,21 +190,6 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
       [memberId],
     );
     return result.rows[0]?.id ?? null;
-  }
-
-  async loadChannelDiscountPercent(): Promise<number | null> {
-    const client = await this.dbPool.connect();
-    try {
-      const channelId = await resolveDropshipOmsChannelIdWithClient(client);
-      const result = await client.query<{ discount_percent: number | null }>(
-        `SELECT discount_percent FROM channels.partner_profiles WHERE channel_id = $1 LIMIT 1`,
-        [channelId],
-      );
-      // A missing profile is explicitly unavailable in a preview, never a fabricated discount.
-      return result.rows[0]?.discount_percent ?? null;
-    } finally {
-      client.release();
-    }
   }
 
   async loadStoreContext(input: {

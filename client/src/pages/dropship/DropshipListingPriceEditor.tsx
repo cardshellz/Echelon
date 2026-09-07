@@ -13,6 +13,8 @@ export type DropshipListingPriceEditorProps = {
   storeConnectionId: number;
   productVariantId: number;
   disabled?: boolean;
+  compact?: boolean;
+  onCancel?: () => void;
   onSaveStarted: () => void;
   onSaveSettled: () => void;
   onSaved: () => Promise<void>;
@@ -23,7 +25,7 @@ export function DropshipListingPriceEditor(props: DropshipListingPriceEditorProp
   return <ListingPriceEditorSession key={`${props.storeConnectionId}:${props.productVariantId}`} {...props} />;
 }
 
-function ListingPriceEditorSession({ storeConnectionId, productVariantId, disabled = false, onSaveStarted, onSaveSettled, onSaved }: DropshipListingPriceEditorProps) {
+function ListingPriceEditorSession({ storeConnectionId, productVariantId, disabled = false, compact = false, onCancel, onSaveStarted, onSaveSettled, onSaved }: DropshipListingPriceEditorProps) {
   const fieldId = useId();
   const queryClient = useQueryClient();
   const identity = { storeConnectionId, productVariantId };
@@ -106,6 +108,7 @@ function ListingPriceEditorSession({ storeConnectionId, productVariantId, disabl
     } catch (caught) {
       if (!mounted.current) return;
       if (caught instanceof DropshipApiError && caught.status === 409) {
+        attempt.current = null;
         setPhase("conflict");
         setError("The saved price changed or this save conflicts with an earlier request. Reload the current saved price before editing again.");
       } else {
@@ -148,34 +151,40 @@ function ListingPriceEditorSession({ storeConnectionId, productVariantId, disabl
     try { await refreshAfterSave(); } finally { inFlight.current = false; }
   }
 
-  return <section aria-label="Your listing price" className="rounded-lg border border-zinc-200 p-4">
-    <h4 className="font-semibold">Your listing price</h4>
-    <p className="mt-1 text-xs text-zinc-500">Your selling price in USD for one sellable pack—not your product cost.</p>
+  const cancelDisabled = busy || phase === "refresh_error" || attempt.current !== null;
+  const cancelButton = onCancel && <Button type="button" size="sm" variant="outline" disabled={cancelDisabled}
+    onClick={onCancel}>{phase === "saved" ? "Close" : "Cancel"}</Button>;
+
+  return <section aria-label="Your listing price" className={compact ? "min-w-64 max-w-sm whitespace-normal rounded-md border border-violet-200 bg-violet-50/30 p-3" : "rounded-lg border border-zinc-200 p-4"}>
+    {!compact && <><h4 className="font-semibold">Your listing price</h4>
+      <p className="mt-1 text-xs text-zinc-500">Your selling price in USD for one sellable pack—not your product cost.</p></>}
     {!draft && priceQuery.isPending && <p role="status" className="mt-3 text-sm">Loading saved price…</p>}
     {priceQuery.isError && !draft && <div role="alert" className="mt-3 text-sm text-rose-800">
       <p>{queryErrorMessage(priceQuery.error, "The saved price could not be loaded.")}</p>
       <Button className="mt-2" type="button" size="sm" variant="outline" onClick={() => void priceQuery.refetch()}>Retry loading price</Button>
     </div>}
-    {draft && <form onSubmit={(event) => void save(event)} className="mt-3 space-y-3">
-      <dl className="grid grid-cols-2 gap-3 text-sm">
+    {!draft && cancelButton && <div className="mt-2">{cancelButton}</div>}
+    {draft && <form onSubmit={(event) => void save(event)} className={compact ? "space-y-2" : "mt-3 space-y-3"}>
+      {compact ? <p className="text-xs text-zinc-500">Saved {displayListingPrice(price?.effectivePriceCents ?? null)} · Default {displayListingPrice(price?.defaultPriceCents ?? null)}</p>
+        : <dl className="grid grid-cols-2 gap-3 text-sm">
         <div><dt className="text-xs text-zinc-500">Current saved price</dt><dd className="mt-1 font-medium">{displayListingPrice(price?.effectivePriceCents ?? null)}</dd>
           <dd className="mt-1 text-xs text-zinc-500">{price?.source === "override" ? "Listing override" : price?.source === "catalog_default" ? "Catalog default" : price?.source === "saved_listing" ? "Previously saved listing" : "No price available"}</dd></div>
         <div><dt className="text-xs text-zinc-500">Catalog default</dt><dd className="mt-1 font-medium">{displayListingPrice(price?.defaultPriceCents ?? null)}</dd></div>
-      </dl>
+      </dl>}
       <div className="flex items-center gap-2"><input id={`${fieldId}-default`} type="checkbox" checked={draft.useDefault}
         disabled={disabled || busy || phase === "conflict" || phase === "refresh_error"} onChange={(event) => updateDraft({ useDefault: event.target.checked })}
-        className="h-4 w-4 accent-purple-600" /><Label htmlFor={`${fieldId}-default`}>Use catalog default (no price override)</Label></div>
+        className="h-4 w-4 accent-purple-600" /><Label htmlFor={`${fieldId}-default`} className={compact ? "text-xs" : undefined}>{compact ? "Use catalog default" : "Use catalog default (no price override)"}</Label></div>
       <div className="max-w-xs space-y-1"><Label htmlFor={`${fieldId}-price`}>Your listing price (USD)</Label>
         <Input id={`${fieldId}-price`} type="text" inputMode="decimal" autoComplete="off" placeholder="8.99"
           disabled={disabled || draft.useDefault || busy || phase === "conflict" || phase === "refresh_error"}
           value={draft.useDefault ? listingPriceInput(price?.defaultPriceCents ?? null) : draft.value}
           aria-describedby={`${fieldId}-help`} onChange={(event) => updateDraft({ value: event.target.value })} />
       </div>
-      <p id={`${fieldId}-help`} className="text-xs text-zinc-500">Changes apply only when you save. Saving updates your stored price and refreshes this preview; it does not publish or modify a live eBay listing.</p>
-      <Button type="submit" size="sm" className="gap-2" disabled={disabled || !dirty || busy || phase === "conflict" || phase === "refresh_error"}>
+      <p id={`${fieldId}-help`} className="text-xs text-zinc-500">{compact ? "Per sellable pack. Save refreshes the preview; it does not publish." : "Changes apply only when you save. Saving updates your stored price and refreshes this preview; it does not publish or modify a live eBay listing."}</p>
+      <div className="flex flex-wrap items-center gap-2"><Button type="submit" size="sm" className="gap-2" disabled={disabled || !dirty || busy || phase === "conflict" || phase === "refresh_error"}>
         <Save aria-hidden="true" className="h-4 w-4" />{phase === "saving" ? "Saving listing price…" : phase === "refreshing" ? "Refreshing preview…" : "Save listing price"}
-      </Button>
-      {dirty && !busy && phase === "editing" && <span className="ml-3 text-xs text-zinc-500">Unsaved price change</span>}
+      </Button>{cancelButton}</div>
+      {dirty && !busy && phase === "editing" && <span className="text-xs text-zinc-500">Unsaved price change</span>}
     </form>}
     {error && <div role="alert" className="mt-3 rounded border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
       {phase === "refresh_error" && <p className="mb-1 font-medium">Price saved, but the preview could not be refreshed.</p>}
