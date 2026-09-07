@@ -1,5 +1,6 @@
 import type { Express, Request, Response } from "express";
 import { z, ZodError } from "zod";
+import { assemblyPackageReviewSchema } from "@shared/assembly-package-review";
 import { assemblyPackingCommandSchema, assemblyPackingResultSchema } from "@shared/warehouse-assembly-packing";
 import {
   assemblyQueueRequestSchema, assemblyTaskCommandSchema, assemblyQueueSchema, assemblyTaskSchema, assemblyTaskResultSchema,
@@ -19,6 +20,7 @@ import { CanonicalClaimInventoryMutationError } from "../../../inventory/infrast
 import { canonicalAvailabilityClaimBuildHandoffResultSchema, canonicalAvailabilityClaimOperationExecutionResultSchema, canonicalAvailabilityClaimPickResultSchema } from "@shared/types/inventory-availability-claims";
 
 interface Services {
+  assemblyPackageReview?: Pick<import("../application/assembly-package-review.service").AssemblyPackageReviewService, "review">;
   assemblyPacking?: Pick<import("../application/assembly-packing.service").AssemblyPackingService, "ready">;
   assemblyWork: Pick<AssemblyWorkService, "queue" | "get" | "command" | "handoff" | "complete">;
   assemblyExecution?: Pick<AssemblyExecutionService, "contexts" | "order" | "task" | "pickOutput">;
@@ -56,6 +58,12 @@ export function registerAssemblyWorkRoutes(app: Express, injected?: Services): v
     };
   }
   const root = "/api/warehouse/assembly-work";
+  app.get(`${root}/:id/packages`, requireAuth, handler((req) => workEvidenceIdSchema.parse(req.params.id),
+    (req, id) => {
+      const service = services(req).assemblyPackageReview;
+      if (!service) throw new WarehouseWorkError("WORK_EXECUTION_NOT_CONFIGURED", "Package review is not configured", 503);
+      return service.review(actor(req), id);
+    }, assemblyPackageReviewSchema));
   app.post(`${root}/:id/packing-ready`, requireAuth, handler((req) => ({ id: workEvidenceIdSchema.parse(req.params.id), command: assemblyPackingCommandSchema.parse(req.body) }),
     (req, input) => {
       const service = services(req).assemblyPacking;
