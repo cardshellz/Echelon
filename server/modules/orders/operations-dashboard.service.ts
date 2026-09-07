@@ -9,6 +9,8 @@
 import { sql, inArray } from "drizzle-orm";
 import { inventoryLevels } from "@shared/schema";
 import { getSettingsForWarehouse } from "../warehouse/settings.resolver";
+import { interpretInventoryShipmentQuantity } from "@shared/inventory/shipment-quantity";
+import { shipmentQuantityEvidenceProjection } from "../inventory/infrastructure/shipment-quantity-evidence.sql";
 
 // ── Minimal DB duck-type ────────────────────────────────────────────
 type DrizzleDb = {
@@ -512,6 +514,7 @@ export class OperationsDashboardService {
 
     const result = await this.db.execute(sql`
       SELECT it.id, it.transaction_type, it.variant_qty_delta,
+             ${shipmentQuantityEvidenceProjection(sql`it`)} AS shipment_quantity_evidence,
              it.variant_qty_before, it.variant_qty_after,
              it.source_state, it.target_state,
              it.notes, it.user_id, it.created_at,
@@ -532,6 +535,7 @@ export class OperationsDashboardService {
       id: r.id,
       transactionType: r.transaction_type,
       variantQtyDelta: parseInt(r.variant_qty_delta) || 0,
+      shipmentQuantityEvidence: interpretInventoryShipmentQuantity(r.shipment_quantity_evidence),
       variantQtyBefore: r.variant_qty_before != null ? parseInt(r.variant_qty_before) : null,
       variantQtyAfter: r.variant_qty_after != null ? parseInt(r.variant_qty_after) : null,
       sourceState: r.source_state,

@@ -37,6 +37,11 @@ jobs:
           npx vitest run
           client/src/features/purchasing/__tests__/reorderEngine.test.ts
           client/src/features/purchasing/__tests__/forecastBacktesting.test.ts
+      - name: Inventory shipment quantity UI contracts
+        run: >-
+          npx vitest run
+          client/src/lib/__tests__/inventory-transaction-quantity.test.ts
+          client/src/pages/__tests__/inventory-history-shipment-quantity.test.ts
       - name: Dropship listing policy UI contracts
         run: >-
           npx vitest run
@@ -176,6 +181,8 @@ jobs:
           server/modules/inventory/__tests__/integration/canonical-claim-dispatch-inventory.integration.test.ts
           server/modules/wms/__tests__/integration/canonical-claim-dispatch-source.integration.test.ts
           server/modules/inventory-planning/__tests__/integration/inventory-demand-dispatch.integration.test.ts
+          server/modules/inventory/__tests__/integration/shipment-quantity-evidence.integration.test.ts
+          server/modules/shipping/__tests__/integration/historical-shipstation-contents-correction.repository.integration.test.ts
       - name: Warehouse workstation draft configuration PostgreSQL guarantees
         run: >-
           npx vitest run --no-file-parallelism
