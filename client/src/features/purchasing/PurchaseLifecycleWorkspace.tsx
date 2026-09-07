@@ -1,3 +1,4 @@
+import { PurchaseCostReporting } from "./PurchaseCostReporting";
 import { PurchaseRfqOrigins } from "./PurchaseRfqOrigins";
 import { useReceiptCostActions } from "./use-receipt-cost-actions";
 import type { ReceiptCostActions } from "./PurchaseCostApplications";
@@ -99,6 +100,7 @@ export function PurchaseLifecycleWorkspace({ purchaseOrderId, navigation }: Purc
       </div>
       {error && <p role="alert" className="rounded-md border p-3 text-sm text-amber-700 dark:text-amber-400">Refresh failed. Showing the previously loaded records; use Refresh to try again.</p>}
       <PurchaseLifecycleWorkspaceView data={data} navigation={navigation} costActions={costActions} />
+      <PurchaseCostReporting key={purchaseOrderId} purchaseOrderId={purchaseOrderId} />
     </div>
   );
 }
