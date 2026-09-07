@@ -290,6 +290,7 @@ describe("RefreshingDropshipEbayRegistrationCredentialProvider", () => {
     const repository: DropshipMarketplaceCredentialRepository = {
       loadForStoreConnection: vi.fn(async () => expired),
       replaceTokens,
+      withEbayTokenRefreshLock: async (_input, operation) => operation(repository),
     };
     const fetchFn = vi.fn(async () => new Response(JSON.stringify({
       access_token: "fresh-access-token",
@@ -312,9 +313,7 @@ describe("RefreshingDropshipEbayRegistrationCredentialProvider", () => {
       "https://api.sandbox.ebay.com/identity/v1/oauth2/token",
       expect.objectContaining({
         method: "POST",
-        body: expect.stringContaining(
-          encodeURIComponent("https://api.ebay.com/oauth/api_scope/sell.stores"),
-        ),
+        body: "grant_type=refresh_token&refresh_token=refresh-token",
       }),
     );
     expect(replaceTokens).toHaveBeenCalledWith({
@@ -322,6 +321,7 @@ describe("RefreshingDropshipEbayRegistrationCredentialProvider", () => {
       storeConnectionId: 21,
       platform: "ebay",
       accessToken: "fresh-access-token",
+      expectedCredential: { accessTokenRef: expired.accessTokenRef, refreshTokenRef: expired.refreshTokenRef },
       refreshToken: null,
       accessTokenExpiresAt: new Date("2026-08-04T15:00:00.000Z"),
       now: observedAt,
@@ -352,6 +352,7 @@ describe("RefreshingDropshipEbayRegistrationCredentialProvider", () => {
         loadForStoreConnection: vi.fn(async () => expired),
         replaceTokens: vi.fn(),
         recordAuthFailure,
+        withEbayTokenRefreshLock: async (_input, operation) => operation(repository),
       };
       const responseBody = JSON.stringify({
         error: providerErrorCode,
@@ -373,13 +374,13 @@ describe("RefreshingDropshipEbayRegistrationCredentialProvider", () => {
           status: 400,
           authFailureStatus: expectedStatus,
           providerErrorCode,
-          providerErrorDescription: `provider described ${providerErrorCode}`,
+          providerErrorDescription: null,
         },
       });
       expect(recordAuthFailure).toHaveBeenCalledWith(expect.objectContaining({
         status: expectedStatus,
         providerErrorCode,
-        providerErrorDescription: `provider described ${providerErrorCode}`,
+        providerErrorDescription: null,
       }));
     },
   );

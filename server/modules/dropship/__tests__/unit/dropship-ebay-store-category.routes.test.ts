@@ -115,7 +115,7 @@ describe("dropship eBay Store category routes", () => {
 
     const response = await jsonRequest(`${server.url}/api/dropship/ebay/store-categories/44`);
 
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(503);
     expect(response.body).toMatchObject({
       error: {
         code: "DROPSHIP_EBAY_TOKEN_REFRESH_FAILED",

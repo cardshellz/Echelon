@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   classifyEbayTokenRefreshFailure,
+  ebayTokenRefreshErrorContext,
   isEbayResourceAuthFailureStatus,
 } from "../../infrastructure/dropship-ebay-auth-failure";
 
@@ -23,7 +24,7 @@ describe("eBay auth failure classification", () => {
     })).toEqual({
       connectionStatus: "needs_reauth",
       providerErrorCode: "invalid_grant",
-      providerErrorDescription: "the refresh token is invalid or revoked",
+      providerErrorDescription: null,
       retryable: false,
     });
   });
@@ -34,10 +35,21 @@ describe("eBay auth failure classification", () => {
     [400, "not-json", false],
     [429, JSON.stringify({ error: "temporarily_unavailable" }), true],
     [503, "upstream unavailable", true],
+    [503, JSON.stringify({ error: "invalid_grant" }), true],
   ])("preserves the refresh grant for a non-definitive HTTP %i failure", (status, responseBody, retryable) => {
     expect(classifyEbayTokenRefreshFailure({ status, responseBody })).toMatchObject({
       connectionStatus: "refresh_failed",
       retryable,
     });
+  });
+
+  it("never exposes raw provider text, unknown codes, or credential echoes", () => {
+    const responseBody = JSON.stringify({ error: "secret-access-token", error_description: "secret-refresh-token" });
+    const classification = classifyEbayTokenRefreshFailure({ status: 400, responseBody });
+    expect(classification.providerErrorCode).toBeNull();
+    expect(classification.providerErrorDescription).toBeNull();
+    const context = ebayTokenRefreshErrorContext({ status: 400, responseBody, classification });
+    expect(context).not.toHaveProperty("body");
+    expect(JSON.stringify(context)).not.toContain("secret-");
   });
 });

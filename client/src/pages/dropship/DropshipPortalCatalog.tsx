@@ -635,6 +635,7 @@ export default function DropshipPortalCatalog() {
             <EbayListingPolicyOverridePanel
               key={selectedStoreConnectionIdNumber}
               storeConnectionId={selectedStoreConnectionIdNumber}
+              storeName={selectedStoreName}
               rows={selectedCatalogRows}
               onConfigurationChange={() => {
                 invalidateListingPreview();
@@ -854,7 +855,6 @@ function FilterSelect({
 
 const EBAY_STORE_CATEGORY_RECONNECT_ERROR_CODES = new Set([
   "DROPSHIP_EBAY_STORE_CATEGORIES_PERMISSION_REQUIRED",
-  "DROPSHIP_EBAY_STORE_CONNECTION_BLOCKED",
 ]);
 
 export function shouldOfferEbayStoreReconnect(error: unknown): boolean {
@@ -919,7 +919,7 @@ export function EbayStoreCategoryAssignmentPanel({
           </div>
           <div className="mt-1">
             {permissionRequired
-              ? "eBay rejected this connection's authorization for custom Store categories. Refreshing the authorization will request that optional access."
+              ? "The eBay authorization has expired or been revoked. Reauthorize the connected store to load its custom Store categories."
               : queryErrorMessage(error, "The connected eBay account did not return its Store categories.")}
           </div>
           <div className="mt-1 text-xs">You can still preview and push listings without this optional organization.</div>

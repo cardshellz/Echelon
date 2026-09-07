@@ -4,11 +4,42 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ebayListingPolicyQueryKey } from "@/lib/dropship-ebay-listing-query-sync";
 import type { DropshipCatalogRow, DropshipEbayListingPolicyOverrideResponse } from "@/lib/dropship-ops-surface";
+import { DropshipApiError } from "@/lib/dropship-ops-surface";
 import { EbayListingPolicyOverridePanel } from "../EbayListingPolicyOverridePanel";
+
+vi.mock("../EbayStoreCategoryAuthorizationRecovery", () => ({
+  EbayStoreCategoryAuthorizationRecovery: ({ storeName }: { storeName: string }) => React.createElement("button", null, `Authorize ${storeName}`),
+}));
 
 afterEach(() => vi.unstubAllGlobals());
 
 describe("compact listing policy panel rendering", () => {
+  it.each([
+    { code: "DROPSHIP_EBAY_LISTING_SETUP_PERMISSION_REQUIRED", consent: true },
+    { code: "DROPSHIP_EBAY_LISTING_SETUP_ACCESS_DENIED", consent: false },
+  ])("shows deliberate consent only for a revoked grant while policies are cached: $code", async ({ code, consent }) => {
+    vi.stubGlobal("React", React);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    try {
+      client.setQueryData(ebayListingPolicyQueryKey(1), {
+        storeConnectionId: 1, defaults: { fulfillmentPolicyId: null, returnPolicyId: null, paymentPolicyId: null },
+        options: { fulfillmentPolicies: [], returnPolicies: [], paymentPolicies: [] }, assignments: [],
+        fetchedAt: "2026-09-05T12:00:00Z",
+      });
+      await expect(client.fetchQuery({
+        queryKey: ebayListingPolicyQueryKey(1),
+        queryFn: async () => { throw new DropshipApiError({ status: 403, code, message: "Access failed" }); },
+      })).rejects.toThrow("Access failed");
+      const markup = renderToStaticMarkup(React.createElement(QueryClientProvider, { client },
+        React.createElement(EbayListingPolicyOverridePanel, { storeConnectionId: 1, storeName: "Target store", rows: [], onConfigurationChange: () => {} })));
+      expect(markup.includes("Authorize Target store")).toBe(consent);
+      expect(markup).toContain("The values below are from the last successful load");
+      if (!consent) expect(markup).toContain("Do not keep reauthorizing");
+    } finally {
+      client.clear();
+    }
+  });
+
   it("mounts only one page of summaries and no per-row policy dropdowns for 10,000 listings", () => {
     vi.stubGlobal("React", React);
     const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
@@ -32,7 +63,7 @@ describe("compact listing policy panel rendering", () => {
     } as DropshipCatalogRow));
     try {
       const markup = renderToStaticMarkup(React.createElement(QueryClientProvider, { client },
-        React.createElement(EbayListingPolicyOverridePanel, { storeConnectionId: 1, rows, onConfigurationChange: () => {} })));
+        React.createElement(EbayListingPolicyOverridePanel, { storeConnectionId: 1, storeName: "Test store", rows, onConfigurationChange: () => {} })));
       expect(markup.match(/aria-label="Edit policies for SKU-/g)).toHaveLength(50);
       expect(markup).toContain("Page 1 of 200");
       expect(markup).toContain("1–50 of 10000 matching");

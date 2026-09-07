@@ -17,14 +17,15 @@ import {
   type DropshipCatalogRow,
   type DropshipEbayListingPolicyOverrideResponse,
 } from "@/lib/dropship-ops-surface";
-import { ListingSetupCombobox } from "./EbayListingSetupPanel";
+import { ListingSetupCombobox, ListingSetupError } from "./EbayListingSetupPanel";
 
 type PolicyEditor = { productVariantIds: number[]; listingLabel?: string };
 
-export function EbayListingPolicyOverridePanel({ onConfigurationChange, rows, storeConnectionId }: {
+export function EbayListingPolicyOverridePanel({ onConfigurationChange, rows, storeConnectionId, storeName }: {
   onConfigurationChange: () => void;
   rows: readonly DropshipCatalogRow[];
   storeConnectionId: number;
+  storeName: string;
 }) {
   const queryClient = useQueryClient();
   const queryKey = ebayListingPolicyQueryKey(storeConnectionId);
@@ -107,7 +108,9 @@ export function EbayListingPolicyOverridePanel({ onConfigurationChange, rows, st
       </div>
       {(refreshError || policyQuery.error) && (
         <div role="alert" className="m-3 rounded-md border border-rose-300 bg-rose-50 p-3 text-sm text-rose-900">
-          {refreshError || queryErrorMessage(policyQuery.error, "Listing policies could not be loaded. Try Refresh policies again.")}
+          {policyQuery.error
+            ? <ListingSetupError error={policyQuery.error} storeConnectionId={storeConnectionId} storeName={storeName} />
+            : refreshError}
           {policyQuery.data && <p className="mt-1">The values below are from the last successful load.</p>}
         </div>
       )}

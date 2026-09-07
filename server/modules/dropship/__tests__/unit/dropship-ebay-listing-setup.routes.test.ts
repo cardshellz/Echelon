@@ -73,9 +73,9 @@ describe("dropship eBay listing setup routes", () => {
     expect(service.replaceCall).toBeNull();
   });
 
-  it("returns an actionable authorization error without leaking provider bodies", async () => {
+  it.each(["DROPSHIP_EBAY_LISTING_SETUP_PERMISSION_REQUIRED", "DROPSHIP_EBAY_LISTING_SETUP_ACCESS_DENIED"])("returns %s without leaking provider bodies", async (code) => {
     service.getError = new DropshipError(
-      "DROPSHIP_EBAY_LISTING_SETUP_PERMISSION_REQUIRED",
+      code,
       "eBay did not grant the required access.",
       {
         storeConnectionId: 44,
@@ -92,7 +92,7 @@ describe("dropship eBay listing setup routes", () => {
     expect(response.status).toBe(403);
     expect(response.body).toMatchObject({
       error: {
-        code: "DROPSHIP_EBAY_LISTING_SETUP_PERMISSION_REQUIRED",
+        code,
         context: {
           storeConnectionId: 44,
           resource: "paymentPolicies",
@@ -102,6 +102,18 @@ describe("dropship eBay listing setup routes", () => {
       },
     });
     expect(JSON.stringify(response.body)).not.toContain("provider-secret-diagnostic");
+  });
+
+  it.each([
+    "DROPSHIP_EBAY_REFRESH_LOCK_UNAVAILABLE",
+    "DROPSHIP_CREDENTIAL_CHANGED",
+    "DROPSHIP_EBAY_TOKEN_REFRESH_INVALID_RESPONSE",
+  ])("returns availability status for transient token owner failure %s", async (code) => {
+    service.getError = new DropshipError(code, "eBay token recovery could not finish.", { retryable: true });
+    server = await startServer(buildApp(service, true));
+    const response = await jsonRequest(`${server.url}/api/dropship/ebay/listing-setup/44`);
+    expect(response.status).toBe(503);
+    expect(response.body).toMatchObject({ error: { code, context: { retryable: true } } });
   });
 
   it("returns an actionable conflict when the managed warehouse address is incomplete", async () => {

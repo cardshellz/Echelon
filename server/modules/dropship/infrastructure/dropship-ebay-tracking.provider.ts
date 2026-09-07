@@ -11,11 +11,10 @@ import type {
 import { buildEbayShippingFulfillmentPath, extractEbayFulfillmentIdFromLocation, normalizeEbayTrackingNumber } from "../../channels/adapters/ebay/ebay-fulfillment.util";
 import { mapCarrierToEbay } from "../../channels/adapters/ebay/ebay-category-map";
 import {
-  ebayTokenRefreshErrorContext,
   isEbayResourceAuthFailureStatus,
   recordEbayAccessTokenRejection,
-  recordEbayTokenRefreshFailure,
 } from "./dropship-ebay-auth-failure";
+import { DropshipEbayTokenOwner, resolveDropshipEbayProviderEnvironment } from "./dropship-ebay-token-owner";
 
 type FetchLike = typeof fetch;
 type EbayEnvironment = "sandbox" | "production";
@@ -24,47 +23,38 @@ interface Clock {
   now(): Date;
 }
 
-interface EbayTokenResponse {
-  access_token?: string;
-  expires_in?: number;
-  refresh_token?: string;
-}
-
 const EBAY_BASE_URLS: Record<EbayEnvironment, string> = {
   sandbox: "https://api.sandbox.ebay.com",
   production: "https://api.ebay.com",
 };
 
-const EBAY_TOKEN_URLS: Record<EbayEnvironment, string> = {
-  sandbox: "https://api.sandbox.ebay.com/identity/v1/oauth2/token",
-  production: "https://api.ebay.com/identity/v1/oauth2/token",
-};
-
-const EBAY_REFRESH_BUFFER_MS = 5 * 60 * 1000;
 const EBAY_MAX_ATTEMPTS = 3;
-const EBAY_TRACKING_SCOPES = [
-  "https://api.ebay.com/oauth/api_scope",
-  "https://api.ebay.com/oauth/api_scope/sell.fulfillment",
-].join(" ");
 
 export class EbayDropshipMarketplaceTrackingProvider implements DropshipMarketplaceTrackingProvider {
+  private readonly tokenOwner: DropshipEbayTokenOwner;
+
   constructor(
     private readonly credentials: DropshipMarketplaceCredentialRepository,
     private readonly fetchImpl: FetchLike = fetch,
     private readonly clock: Clock = { now: () => new Date() },
-  ) {}
+  ) {
+    this.tokenOwner = new DropshipEbayTokenOwner({
+      credentials,
+      fetchFn: fetchImpl,
+      clock,
+    });
+  }
 
   async pushTracking(
     input: DropshipMarketplaceTrackingRequest,
   ): Promise<DropshipMarketplaceTrackingResult> {
-    let credential = await this.credentials.loadForStoreConnection({
+    const credential = await this.tokenOwner.loadFreshForStoreConnection({
       vendorId: input.vendorId,
       storeConnectionId: input.storeConnectionId,
-      platform: "ebay",
+      operation: "tracking",
     });
-    const environment = resolveEbayEnvironment(credential.config);
+    const environment = resolveDropshipEbayProviderEnvironment(credential);
     const marketplaceId = resolveMarketplaceId(credential.config);
-    credential = await this.ensureFreshAccessToken(credential, environment);
 
     const lineItems = input.lineItems
       .filter((line) => line.externalLineItemId && Number.isInteger(line.quantity) && line.quantity > 0)
@@ -110,90 +100,6 @@ export class EbayDropshipMarketplaceTrackingProvider implements DropshipMarketpl
         requestPath: path,
       },
     };
-  }
-
-  private async ensureFreshAccessToken(
-    credential: DropshipMarketplaceStoreCredentials,
-    environment: EbayEnvironment,
-  ): Promise<DropshipMarketplaceStoreCredentials> {
-    if (
-      credential.accessTokenExpiresAt
-      && credential.accessTokenExpiresAt.getTime() - this.clock.now().getTime() > EBAY_REFRESH_BUFFER_MS
-    ) {
-      return credential;
-    }
-    if (!credential.refreshToken) {
-      await this.recordNeedsReauth(credential, {
-        failureCode: "DROPSHIP_EBAY_REFRESH_TOKEN_REQUIRED",
-        message: "eBay refresh token is missing for dropship tracking push.",
-      });
-      throw new DropshipError("DROPSHIP_EBAY_REFRESH_TOKEN_REQUIRED", "eBay refresh token is required.", {
-        storeConnectionId: credential.storeConnectionId,
-        retryable: false,
-      });
-    }
-    const clientId = process.env.DROPSHIP_EBAY_CLIENT_ID ?? process.env.EBAY_CLIENT_ID;
-    const clientSecret = process.env.DROPSHIP_EBAY_CLIENT_SECRET ?? process.env.EBAY_CLIENT_SECRET;
-    if (!clientId || !clientSecret) {
-      throw new DropshipError("DROPSHIP_EBAY_OAUTH_NOT_CONFIGURED", "eBay OAuth client credentials are missing.", {
-        retryable: false,
-      });
-    }
-
-    const response = await this.fetchImpl(EBAY_TOKEN_URLS[environment], {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-        Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString("base64")}`,
-      },
-      body: new URLSearchParams({
-        grant_type: "refresh_token",
-        refresh_token: credential.refreshToken,
-        scope: EBAY_TRACKING_SCOPES,
-      }).toString(),
-    });
-    const text = await response.text();
-    if (!response.ok) {
-      const message = `eBay token refresh failed with HTTP ${response.status}.`;
-      const classification = await recordEbayTokenRefreshFailure({
-        credentials: this.credentials,
-        credential,
-        status: response.status,
-        responseBody: text,
-        failureCode: "DROPSHIP_EBAY_TOKEN_REFRESH_FAILED",
-        message,
-        now: this.clock.now(),
-      });
-      throw new DropshipError(
-        "DROPSHIP_EBAY_TOKEN_REFRESH_FAILED",
-        message,
-        ebayTokenRefreshErrorContext({
-          status: response.status,
-          responseBody: text,
-          classification,
-        }),
-      );
-    }
-    const token = parseEbayJson<EbayTokenResponse>({
-      text,
-      code: "DROPSHIP_EBAY_TOKEN_REFRESH_INVALID_RESPONSE",
-      message: "eBay token refresh returned invalid JSON.",
-    });
-    if (!token.access_token || typeof token.expires_in !== "number" || token.expires_in <= 0) {
-      throw new DropshipError("DROPSHIP_EBAY_TOKEN_REFRESH_INVALID", "eBay token refresh response was invalid.", {
-        retryable: true,
-      });
-    }
-    const now = this.clock.now();
-    return this.credentials.replaceTokens({
-      vendorId: credential.vendorId,
-      storeConnectionId: credential.storeConnectionId,
-      platform: "ebay",
-      accessToken: token.access_token,
-      refreshToken: token.refresh_token ?? null,
-      accessTokenExpiresAt: new Date(now.getTime() + token.expires_in * 1000),
-      now,
-    });
   }
 
   private async requestEbay(input: {
@@ -270,47 +176,12 @@ export class EbayDropshipMarketplaceTrackingProvider implements DropshipMarketpl
     });
   }
 
-  private async recordNeedsReauth(
-    credential: DropshipMarketplaceStoreCredentials,
-    input: {
-      failureCode: string;
-      message: string;
-      statusCode?: number;
-    },
-  ): Promise<void> {
-    await this.credentials.recordAuthFailure?.({
-      vendorId: credential.vendorId,
-      storeConnectionId: credential.storeConnectionId,
-      platform: "ebay",
-      status: "needs_reauth",
-      failureCode: input.failureCode,
-      message: input.message,
-      retryable: false,
-      statusCode: input.statusCode,
-      now: this.clock.now(),
-    });
-  }
-}
-
-function resolveEbayEnvironment(config: Record<string, unknown>): EbayEnvironment {
-  return config.environment === "sandbox" ? "sandbox" : "production";
 }
 
 function resolveMarketplaceId(config: Record<string, unknown>): string {
   return typeof config.marketplaceId === "string" && config.marketplaceId.trim()
     ? config.marketplaceId.trim()
     : "EBAY_US";
-}
-
-function parseEbayJson<T>(input: { text: string; code: string; message: string }): T {
-  try {
-    return JSON.parse(input.text) as T;
-  } catch {
-    throw new DropshipError(input.code, input.message, {
-      body: input.text.slice(0, 1000),
-      retryable: true,
-    });
-  }
 }
 
 function resolveRetryDelayMs(response: Response | null, attempt: number): number {
