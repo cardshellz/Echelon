@@ -10,7 +10,11 @@ The original checkout's unrelated catalog/UOM changes and the separate package-c
 
 ### Publication split
 
-The preserved source batch is commit `591731a7c`. Two clean publishing branches are based on main `bbb052ea3`: `codex/inventory-01-cutover-preflight` first, followed by the stacked `codex/inventory-02-claim-dispatch`. The second PR contains the dispatch/migration/demand changes only; the first supplies the evidence screen and shared disposable-test helper. Publication does not activate the new runtime. Validation above describes the original batch; each PR body records checks rerun on the refreshed split.
+The preserved source batch is commit `591731a7c`. Two clean publishing branches were based on main `bbb052ea3`: `codex/inventory-01-cutover-preflight` first, followed by the stacked `codex/inventory-02-claim-dispatch`. The second PR contains the dispatch/migration/demand changes only; the first supplies the evidence screen and shared disposable-test helper. Publication does not activate the new runtime. Validation below describes the original batch; each PR body records checks rerun on the refreshed split.
+
+### Main-target release correction
+
+PR #1402 merged into main at `d34825c99`. PR #1403 instead merged into `codex/inventory-01-cutover-preflight` at `17d338a45`; it did not deliver the dispatch changes to main. Refreshed main `a532aa90a` lacks migration `0662` and the dispatch repository. The corrective branch `codex/inventory-claim-dispatch-main-release` applies the existing #1403 commit `bccadd9ff` directly onto that main baseline, with no new runtime behavior. Its PR must target `main`, not another feature branch. Git merge evidence does not independently establish the production deployment SHA or applied migrations.
 
 ## What the code definitely does
 
