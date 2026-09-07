@@ -464,6 +464,21 @@ function sourceRegistrationMatches(
     && actual.sourceFingerprint === expected.sourceFingerprint;
 }
 
+/** Published read-only evidence access on the caller's repeatable-read client. */
+export async function readObservedPackagesForSources(
+  client: Pick<PoolClient, "query">,
+  sourceIds: readonly number[],
+): Promise<readonly LockedPackageAllocationAuthorityEvidence[]> {
+  if (sourceIds.length === 0) return [];
+  if (sourceIds.length > MAX_AUTHORITY_SOURCE_LINES || sourceIds.some((id) => !Number.isSafeInteger(id) || id <= 0 || id > 2_147_483_647)) {
+    throw new PackageAllocationLedgerRepositoryError("INVALID_DATABASE_EVIDENCE", "Invalid packing source selection");
+  }
+  const reader = new PgPackageAllocationLedgerTransaction(client);
+  const selection = await reader.discoverAuthorityReadinessPackageSelection(sourceIds);
+  if (selection.length === 0) return [];
+  return reader.readAuthorityReadinessPackages(selection.map((pkg) => pkg.shippingProviderLabelId));
+}
+
 class PgPackageAllocationLedgerTransaction
   implements PackageAllocationLedgerTransaction, PackageAllocationAuthorityPreviewTransaction {
   constructor(private readonly client: QueryClient) {}

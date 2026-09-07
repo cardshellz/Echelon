@@ -9,6 +9,7 @@ import { canonicalAvailabilityClaimOperationExecutionResultSchema, canonicalAvai
 import { assemblyRequest } from "./assembly-api";
 import { useAssemblyCommand } from "./use-assembly-command";
 import { AssemblyPackingHandoff } from "./AssemblyPackingHandoff";
+import { AssemblyPackageReview } from "./AssemblyPackageReview";
 
 function CommandError({ error, uncertain, retry, pending }: { error: Error | null; uncertain: boolean; retry: () => void; pending: boolean }) {
   return <>{error && <p role="alert" className="text-sm text-destructive">{error.message}</p>}
@@ -71,6 +72,7 @@ export function AssemblyJob({ view, actorId }: { view: AssemblyTaskView; actorId
       {view.pickedQuantity === view.itemQuantity && view.itemStatus === "completed" ? <>
         <p>All {view.itemQuantity} units are recorded picked for this order. Packing and active-label verification are not recorded by this screen; dispatch remains separate.</p>
         <AssemblyPackingHandoff view={view} actorId={actorId} />
+        {owned && <AssemblyPackageReview taskId={task.id} actorId={actorId} />}
       </> : <>
         <p>Place {view.itemQuantity} × {view.sku} from {view.outputLocationCode ?? "the output location"} with order {view.orderNumber}. Leave any surplus at its recorded output location.</p>
         {view.outputPickBlocker ? <p role="status">{view.outputPickBlocker}</p> : <>
