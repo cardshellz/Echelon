@@ -635,6 +635,35 @@ class EchelonSyncOrchestrator {
 
     const pushItems: InventoryPushItem[] = [];
 
+    // Fetch identities once per channel/product, not once per allocated variant.
+    // Catalog IDs identify our items; only the destination channel's mapping
+    // identifies the external resource. Never substitute legacy catalog Shopify IDs.
+    const allocatedVariantIds = [...new Set(allocations.map((item) => item.productVariantId))];
+    const variants: Array<Pick<typeof productVariants.$inferSelect,
+      "id" | "sku" | "requiresShipping" | "trackInventory" | "salesEligibility"
+    >> = await this.db.select({
+      id: productVariants.id,
+      sku: productVariants.sku,
+      requiresShipping: productVariants.requiresShipping,
+      trackInventory: productVariants.trackInventory,
+      salesEligibility: productVariants.salesEligibility,
+    }).from(productVariants).where(inArray(productVariants.id, allocatedVariantIds));
+    const feeds: Array<Pick<typeof channelFeeds.$inferSelect,
+      "productVariantId" | "channelVariantId" | "lastSyncedQty" | "channelInventoryItemId" | "isActive" | "quarantinedAt"
+    >> = await this.db.select({
+      productVariantId: channelFeeds.productVariantId,
+      channelVariantId: channelFeeds.channelVariantId,
+      lastSyncedQty: channelFeeds.lastSyncedQty,
+      channelInventoryItemId: channelFeeds.channelInventoryItemId,
+      isActive: channelFeeds.isActive,
+      quarantinedAt: channelFeeds.quarantinedAt,
+    }).from(channelFeeds).where(and(
+      eq(channelFeeds.channelId, channelId),
+      inArray(channelFeeds.productVariantId, allocatedVariantIds),
+    ));
+    const variantsById = new Map(variants.map((variant) => [variant.id, variant]));
+    const feedsByVariantId = new Map(feeds.map((feed) => [feed.productVariantId, feed]));
+
     // Main Loop: Iterate by Variant, aggregate by Warehouse
     for (const a of allocations) {
       const variantId = a.productVariantId;
@@ -679,15 +708,7 @@ class EchelonSyncOrchestrator {
 
       if (breakdownItems.length === 0) continue;
 
-      const [variant] = await this.db.select({
-        id: productVariants.id,
-        sku: productVariants.sku,
-        shopifyVariantId: productVariants.shopifyVariantId,
-        shopifyInventoryItemId: productVariants.shopifyInventoryItemId,
-        requiresShipping: productVariants.requiresShipping,
-        trackInventory: productVariants.trackInventory,
-        salesEligibility: productVariants.salesEligibility,
-      }).from(productVariants).where(eq(productVariants.id, variantId)).limit(1);
+      const variant = variantsById.get(variantId);
 
       if (!variant) {
         result.details.push({
@@ -723,11 +744,7 @@ class EchelonSyncOrchestrator {
         continue;
       }
 
-      const [feed] = await this.db.select({
-        lastSyncedQty: channelFeeds.lastSyncedQty,
-        channelInventoryItemId: channelFeeds.channelInventoryItemId,
-        quarantinedAt: channelFeeds.quarantinedAt,
-      }).from(channelFeeds).where(and(eq(channelFeeds.channelId, channelId), eq(channelFeeds.productVariantId, variantId))).limit(1);
+      const feed = feedsByVariantId.get(variantId);
 
       // Quarantined = the external resource is gone (repeated permanent
       // failures). Skipping is the point: no push, no 404, no error spam.
@@ -740,11 +757,20 @@ class EchelonSyncOrchestrator {
         continue;
       }
 
-      const inventoryItemId = feed?.channelInventoryItemId || variant.shopifyInventoryItemId;
+      if (!feed || feed.isActive !== 1) {
+        result.details.push({
+          productId, variantId, sku: a.sku, allocatedQty: totalPushQty, previousQty: null,
+          status: "skipped", error: "No active inventory mapping for this channel — link the destination item",
+        });
+        result.variantsSkipped++;
+        continue;
+      }
+
+      const inventoryItemId = feed.channelInventoryItemId;
 
       if (!inventoryItemId) {
         result.details.push({
-          productId, variantId, sku: a.sku, allocatedQty: totalPushQty, previousQty: null, status: "skipped", error: "No inventoryItemId"
+          productId, variantId, sku: a.sku, allocatedQty: totalPushQty, previousQty: null, status: "skipped", error: "No channel inventory item ID — verify the destination mapping"
         });
         result.variantsSkipped++;
         continue;
@@ -755,7 +781,7 @@ class EchelonSyncOrchestrator {
       pushItems.push({
         variantId,
         sku: variant.sku,
-        externalVariantId: variant.shopifyVariantId,
+        externalVariantId: feed.channelVariantId,
         externalInventoryItemId: inventoryItemId,
         allocatedQty: totalPushQty,
         warehouseBreakdown: breakdownItems,
@@ -929,9 +955,9 @@ class EchelonSyncOrchestrator {
         compareAtPrice: channelPricing.compareAtPrice,
         currency: channelPricing.currency,
         variantSku: productVariants.sku,
-        shopifyVariantId: productVariants.shopifyVariantId,
         listingExternalVariantId: channelListings.externalVariantId,
         listingExternalSku: channelListings.externalSku,
+        listingLastSyncedPrice: channelListings.lastSyncedPrice,
       })
       .from(channelPricing)
       .innerJoin(productVariants, eq(channelPricing.productVariantId, productVariants.id))
@@ -964,7 +990,7 @@ class EchelonSyncOrchestrator {
     const pushItems: PricingPushItem[] = [];
 
     for (const pr of pricingRows) {
-      const externalVariantId = pr.listingExternalVariantId ?? pr.shopifyVariantId;
+      const externalVariantId = pr.listingExternalVariantId;
       const externalSku = pr.listingExternalSku ?? pr.variantSku;
 
       if (!externalVariantId) {
@@ -981,18 +1007,7 @@ class EchelonSyncOrchestrator {
       }
 
       // Check if price actually changed vs. last synced
-      const [listing] = await this.db
-        .select({ lastSyncedPrice: channelListings.lastSyncedPrice })
-        .from(channelListings)
-        .where(
-          and(
-            eq(channelListings.channelId, channelId),
-            eq(channelListings.productVariantId, pr.productVariantId!),
-          ),
-        )
-        .limit(1);
-
-      const priceChanged = !listing || listing.lastSyncedPrice !== pr.price;
+      const priceChanged = pr.listingLastSyncedPrice !== pr.price;
 
       if (!priceChanged) {
         result.details.push({

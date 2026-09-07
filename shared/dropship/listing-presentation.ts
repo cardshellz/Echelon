@@ -32,7 +32,9 @@ export const dropshipListingEconomicsSchema = z.object({
   referenceRetailPriceCents: nullableCents,
   listingPriceCents: nullableCents,
   vendorProductCostCents: nullableCents,
+  // Retained for older clients; current costs come from the exact Shellz Club plan price source.
   channelDiscountPercent: z.number().int().min(0).max(100).nullable(),
+  productCostSource: z.enum(["variant_fixed_price", "variant_percent", "plan_percent", "retail"]).nullable().optional(),
   productCostStatus: z.enum(["available", "unavailable"]),
   issues: z.array(z.string()),
 }).strict();

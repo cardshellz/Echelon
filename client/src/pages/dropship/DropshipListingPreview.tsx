@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { ImageOff, Search } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -14,6 +14,13 @@ import { DropshipListingShippingEstimate } from "./DropshipListingShippingEstima
 import { DropshipListingPriceEditor } from "./DropshipListingPriceEditor";
 
 type PolicyOptions = DropshipEbayListingPolicyOverrideResponse["options"];
+
+const PRODUCT_COST_SOURCE_LABELS = {
+  variant_fixed_price: "your Shellz Club .ops price list (fixed product price)",
+  variant_percent: "your Shellz Club .ops price list (product-specific discount)",
+  plan_percent: "your Shellz Club .ops price list (plan discount)",
+  retail: "catalog retail (.ops discount excluded or not applicable)",
+} as const;
 
 export interface ListingPriceSaveCallbacks {
   disabled?: boolean;
@@ -31,28 +38,45 @@ export function DropshipListingPreview({ preview, priceSaveCallbacks, stale = fa
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(1);
   const [openVariantId, setOpenVariantId] = useState<number | null>(null);
+  const [inlineVariantId, setInlineVariantId] = useState<number | null>(null);
   const current = pageListingPreviews(preview.rows, search, page);
   const activeRow = preview.rows.find((row) => row.productVariantId === openVariantId);
+  const inlineRow = current.rows.find((row) => row.productVariantId === inlineVariantId);
+  const inlineEditing = Boolean(inlineRow && priceSaveCallbacks);
+  useEffect(() => {
+    if (inlineVariantId !== null && !preview.rows.some((row) => row.productVariantId === inlineVariantId)) {
+      setInlineVariantId(null);
+    }
+  }, [inlineVariantId, preview.rows]);
   // Names only enrich exact IDs from the preview; cached assignments never change its authority.
   const policyOptions = queryClient.getQueryData<DropshipEbayListingPolicyOverrideResponse>(
     ebayListingPolicyQueryKey(preview.storeConnectionId))?.options;
   return <div className="mt-4 space-y-3">
     <div className="flex flex-wrap items-center justify-between gap-3">
-      <p className="text-xs text-zinc-500">Product costs are for one sellable pack. Open a preview to edit your listing price, inspect images, and estimate shipping.</p>
+      <p className="text-xs text-zinc-500">Product costs are for one sellable pack. Edit the listing price here, or open a preview for details, images, and shipping estimates.</p>
       {preview.rows.length > 1 && <div className="relative w-full sm:w-72">
         <Search aria-hidden="true" className="absolute left-3 top-3 h-4 w-4 text-zinc-400" />
-        <Input aria-label="Search listing previews" placeholder="Search listing, variant, or SKU" className="pl-9" value={search}
+        <Input aria-label="Search listing previews" placeholder="Search listing, variant, or SKU" className="pl-9" value={search} disabled={inlineEditing}
           onChange={(event) => { setSearch(event.target.value); setPage(1); }} />
       </div>}
     </div>
     <div className="max-h-[28rem] overflow-auto rounded-md border border-zinc-200">
-      <ListingPreviewTable rows={current.rows} onOpen={setOpenVariantId} />
+      <ListingPreviewTable rows={current.rows} onOpen={setOpenVariantId}
+        priceEditing={priceSaveCallbacks ? {
+          variantId: inlineRow?.productVariantId ?? null,
+          disabled: inlineEditing || Boolean(activeRow) || Boolean(priceSaveCallbacks.disabled),
+          onEdit: setInlineVariantId,
+          editor: inlineRow && <DropshipListingPriceEditor compact
+            storeConnectionId={preview.storeConnectionId} productVariantId={inlineRow.productVariantId}
+            onCancel={() => setInlineVariantId(null)} {...priceSaveCallbacks} />,
+        } : undefined} />
     </div>
     <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-zinc-500">
       <span>{current.start}–{current.end} of {current.total} previews · Page {current.page} of {current.pages}</span>
+      {inlineEditing && <span>Finish or cancel the price edit before changing rows or pages.</span>}
       {current.pages > 1 && <nav aria-label="Listing preview pages" className="flex gap-2">
-        <Button type="button" variant="outline" size="sm" disabled={current.page === 1} onClick={() => setPage(current.page - 1)}>Previous</Button>
-        <Button type="button" variant="outline" size="sm" disabled={current.page === current.pages} onClick={() => setPage(current.page + 1)}>Next</Button>
+        <Button type="button" variant="outline" size="sm" disabled={inlineEditing || current.page === 1} onClick={() => setPage(current.page - 1)}>Previous</Button>
+        <Button type="button" variant="outline" size="sm" disabled={inlineEditing || current.page === current.pages} onClick={() => setPage(current.page + 1)}>Next</Button>
       </nav>}
     </div>
     <Sheet open={Boolean(activeRow)} onOpenChange={(open) => { if (!open) setOpenVariantId(null); }}>
@@ -76,8 +100,9 @@ export function DropshipListingPreview({ preview, priceSaveCallbacks, stale = fa
   </div>;
 }
 
-export function ListingPreviewTable({ rows, onOpen }: {
+export function ListingPreviewTable({ rows, onOpen, priceEditing }: {
   rows: readonly DropshipListingPreviewRow[]; onOpen: (variantId: number) => void;
+  priceEditing?: { variantId: number | null; disabled: boolean; onEdit: (variantId: number) => void; editor: ReactNode };
 }) {
   return <Table>
     <TableHeader className="sticky top-0 z-10 bg-white"><TableRow>
@@ -95,11 +120,18 @@ export function ListingPreviewTable({ rows, onOpen }: {
             </div>
           </div></TableCell>
           <TableCell className="whitespace-nowrap">{moneyOrUnavailable(row.economics?.vendorProductCostCents)}</TableCell>
-          <TableCell className="whitespace-nowrap">{moneyOrUnavailable(row.priceCents)}</TableCell>
+          <TableCell className="whitespace-nowrap">{priceEditing?.variantId === row.productVariantId
+            ? priceEditing.editor
+            : <div className="flex items-center gap-2"><span>{moneyOrUnavailable(row.priceCents)}</span>
+              {priceEditing && <Button type="button" size="sm" variant="ghost" className="h-8 px-2"
+                aria-label={`Edit listing price for ${row.sku || row.title}`} disabled={priceEditing.disabled}
+                onClick={() => priceEditing.onEdit(row.productVariantId)}>Edit price</Button>}
+            </div>}</TableCell>
           <TableCell className="font-mono">{row.marketplaceQuantity}</TableCell>
           <TableCell><PreviewStatus row={row} /></TableCell>
           <TableCell className="text-right"><Button type="button" size="sm" variant="outline"
-            aria-label={`View preview for ${row.title}`} onClick={() => onOpen(row.productVariantId)}>View preview</Button></TableCell>
+            aria-label={`View preview for ${row.title}`} disabled={priceEditing?.disabled}
+            onClick={() => onOpen(row.productVariantId)}>View preview</Button></TableCell>
         </TableRow>;
       })}</TableBody>
   </Table>;
@@ -128,7 +160,7 @@ export function ListingPreviewDetailsContent({ row, generatedAt, shippingEstimat
         <MoneyDetail label="Catalog reference retail" cents={economics?.referenceRetailPriceCents} />
       </div>
       <p className="mt-3 text-xs text-zinc-600">Per sellable pack, before Card Shellz shipping. Marketplace fees are not included.</p>
-      {economics?.channelDiscountPercent != null && <p className="mt-1 text-xs text-zinc-600">Configured product discount: {economics.channelDiscountPercent}% off catalog reference retail.</p>}
+      {economics?.productCostSource && <p className="mt-1 text-xs text-zinc-600">Source: {PRODUCT_COST_SOURCE_LABELS[economics.productCostSource]}.</p>}
       <p className="mt-1 text-xs text-zinc-500">These are current reference costs, not a locked order quote. Catalog reference retail is not a suggested price.</p>
       <IssueList issues={economics?.issues ?? []} />
     </section>

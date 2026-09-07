@@ -10,6 +10,10 @@ import { resolveDropshipPublicationPreview } from "../../infrastructure/dropship
 import { buildDropshipEbayListingDraft, parseEbayListingConfig } from "../../infrastructure/dropship-ebay-listing-push.provider";
 import { EbayListingBuilder } from "../../../channels/adapters/ebay/ebay-listing-builder";
 import { toDropshipVendorListingPreview } from "../../application/dropship-listing-dtos";
+import type { DropshipProductCost } from "../../application/dropship-product-cost";
+
+const productCost: DropshipProductCost = { status: "available", unitCostCents: 809,
+  planId: "ops-plan", source: "variant_fixed_price", overrideId: "override-1", issue: null };
 
 const candidate: DropshipListingCatalogCandidate = {
   productId: 5, productVariantId: 7, productLineIds: [], productIsActive: true, variantIsActive: true,
@@ -93,28 +97,34 @@ describe("dropship listing presentation", () => {
 });
 
 describe("dropship listing product cost", () => {
-  it("uses the acceptance rounding per sellable pack, independent of listing price", () => {
-    const economics = buildDropshipListingEconomics(candidate, 2000, 35);
+  it("uses the exact .ops product price per sellable pack, independent of listing price", () => {
+    const economics = buildDropshipListingEconomics(candidate, 2000, productCost);
     expect(economics).toMatchObject({ referenceRetailPriceCents: 1299, listingPriceCents: 2000,
-      vendorProductCostCents: 845, channelDiscountPercent: 35, basis: "one_sellable_variant", unitsPerVariant: 25,
+      vendorProductCostCents: 809, channelDiscountPercent: null, productCostSource: "variant_fixed_price",
+      basis: "one_sellable_variant", unitsPerVariant: 25,
       productCostStatus: "available", issues: [] });
-    expect(buildDropshipListingEconomics(candidate, 9000, 35).vendorProductCostCents).toBe(845);
+    expect(buildDropshipListingEconomics(candidate, 9000, productCost).vendorProductCostCents).toBe(809);
   });
 
-  it.each([null, -1, 1.5, 101, Number.NaN])("marks invalid or missing discount %s unavailable without inventing zero", (discount) => {
-    expect(buildDropshipListingEconomics(candidate, 2000, discount)).toMatchObject({ vendorProductCostCents: null, productCostStatus: "unavailable" });
+  it.each([null, -1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER + 1])("rejects invalid resolved cost %s without inventing zero", (unitCostCents) => {
+    expect(buildDropshipListingEconomics(candidate, 2000, { ...productCost, unitCostCents }))
+      .toMatchObject({ vendorProductCostCents: null, productCostStatus: "unavailable" });
   });
 
-  it.each([null, 0, -1, 1.5, Number.NaN, Number.MAX_SAFE_INTEGER])("handles missing/invalid/out-of-range retail %s explicitly", (retail) => {
-    expect(buildDropshipListingEconomics({ ...candidate, defaultRetailPriceCents: retail }, 2000, 35).vendorProductCostCents).toBeNull();
+  it.each([null, 0, -1, 1.5, Number.NaN])("does not require retail %s for an authoritative fixed product price", (retail) => {
+    expect(buildDropshipListingEconomics({ ...candidate, defaultRetailPriceCents: retail }, 2000, productCost).vendorProductCostCents).toBe(809);
   });
 
-  it("honors explicit zero and 100 percent discounts and rejects invalid raw pack size", () => {
-    expect(buildDropshipListingEconomics(candidate, 2000, 0).vendorProductCostCents).toBe(1299);
-    expect(buildDropshipListingEconomics(candidate, 2000, 100).vendorProductCostCents).toBe(0);
-    expect(buildDropshipListingEconomics({ ...candidate, catalogUnitsPerVariant: 0 }, 2000, 35)).toMatchObject({
+  it("honors an explicit free product price and rejects invalid raw pack size", () => {
+    expect(buildDropshipListingEconomics(candidate, 2000, { ...productCost, unitCostCents: 0 }).vendorProductCostCents).toBe(0);
+    expect(buildDropshipListingEconomics({ ...candidate, catalogUnitsPerVariant: 0 }, 2000, productCost)).toMatchObject({
       vendorProductCostCents: null, unitsPerVariant: null, issues: ["sellable_pack_size_invalid"],
     });
+  });
+
+  it("keeps a missing product source unavailable and never substitutes the listing price", () => {
+    expect(buildDropshipListingEconomics(candidate, 2000, null)).toMatchObject({ vendorProductCostCents: null,
+      productCostSource: null, productCostStatus: "unavailable", issues: ["product_cost_source_unavailable"] });
   });
 });
 
@@ -132,7 +142,7 @@ describe("dropship private listing image authorization", () => {
     };
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
     const service = new DropshipListingPreviewService({ repository: repository as unknown as DropshipListingPreviewRepository,
-      presentation: { media: { listImages: async () => new Map(), readImageFile }, loadChannelDiscountPercent: async () => 35,
+      presentation: { media: { listImages: async () => new Map(), readImageFile }, productCosts: { loadProductCosts: async () => new Map([[7, productCost]]) },
         resolvePublication: () => null, logger },
       clock: { now: () => new Date("2026-09-06T12:00:00Z") }, logger,
     } as ConstructorParameters<typeof DropshipListingPreviewService>[0]);
@@ -187,16 +197,28 @@ describe("vendor presentation transport and failure isolation", () => {
     expect(preview.rows[0].listingIntent).toBe(intent);
   });
 
-  it("does not change eligibility or payload hashes when advisory media or channel pricing fails", async () => {
+  it("does not change eligibility or payload hashes when advisory media or product pricing fails", async () => {
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
-    const rows = await enrichDropshipListingRows({ rows: [row], candidates: [candidate], storeConnectionId: 9,
+    const rows = await enrichDropshipListingRows({ rows: [row], candidates: [candidate], vendorId: 10, storeConnectionId: 9,
       deps: { media: { listImages: async () => { throw new Error("database unavailable"); }, readImageFile: async () => null },
-        loadChannelDiscountPercent: async () => { throw new Error("pricing unavailable"); },
+        productCosts: { loadProductCosts: async () => { throw new Error("pricing unavailable"); } },
         resolvePublication: resolveDropshipPublicationPreview, logger } });
     expect(rows[0]).toMatchObject({ previewHash: row.previewHash, previewStatus: "ready", blockers: [], warnings: [], priceCents: 2000 });
     expect(rows[0].listingIntent).toBe(intent);
     expect(rows[0].economics).toMatchObject({ productCostStatus: "unavailable", vendorProductCostCents: null });
     expect(rows[0].presentation?.issues).toContain("catalog_media_unavailable");
     expect(logger.warn).toHaveBeenCalledTimes(2);
+  });
+
+  it("batches costs for the authorized vendor and exposed variants only", async () => {
+    const loadProductCosts = vi.fn(async () => new Map([[7, productCost]]));
+    const hidden = { ...row, productVariantId: 8, adminExposureDecision: { ...row.adminExposureDecision, exposed: false } };
+    const rows = await enrichDropshipListingRows({ rows: [row, hidden], candidates: [candidate], vendorId: 10, storeConnectionId: 9,
+      deps: { media: { listImages: async () => new Map(), readImageFile: async () => null },
+        productCosts: { loadProductCosts }, resolvePublication: resolveDropshipPublicationPreview,
+        logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } } });
+    expect(loadProductCosts).toHaveBeenCalledWith({ vendorId: 10, productVariantIds: [7] });
+    expect(rows[0].economics).toMatchObject({ vendorProductCostCents: 809, productCostSource: "variant_fixed_price" });
+    expect(rows[1]).toBe(hidden);
   });
 });

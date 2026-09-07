@@ -13,6 +13,7 @@ import { AssemblyPackingService } from "../../work/application/assembly-packing.
 import { AssemblyPackingRepository } from "../../work/infrastructure/assembly-packing.repository";
 import { lockAssemblyClaimForWork } from "../../../inventory-planning/application/assembly-work-claim-access";
 import { recordAssemblyOutputPickLocation } from "../../../wms/assembly-output-pick-command";
+import { readOrderPackingSources } from "../../../wms/packing-source-reader";
 import { config, start, TIME } from "../assembly-work.fixture";
 
 loadEnv({ path: resolve(process.cwd(), ".env.test") });
@@ -62,6 +63,8 @@ databaseSuite("assembly work PostgreSQL ownership and atomicity", () => {
       CREATE TABLE wms.orders (id integer PRIMARY KEY, warehouse_status text NOT NULL, on_hold integer DEFAULT 0, assigned_picker_id varchar, warehouse_id integer, updated_at timestamptz);
       CREATE TABLE wms.order_items (id integer PRIMARY KEY, order_id integer REFERENCES wms.orders(id), status text NOT NULL, on_hold boolean NOT NULL DEFAULT false, requires_shipping integer NOT NULL DEFAULT 1, location varchar(50), zone varchar(10), sku text NOT NULL DEFAULT 'P5', quantity integer NOT NULL DEFAULT 2, picked_quantity integer NOT NULL DEFAULT 0);
       CREATE TABLE wms.allocation_exceptions (id integer PRIMARY KEY, order_id integer REFERENCES wms.orders(id), status text NOT NULL, metadata jsonb);
+      CREATE TABLE wms.outbound_shipments (id integer PRIMARY KEY, order_id integer REFERENCES wms.orders(id), status text NOT NULL);
+      CREATE TABLE wms.outbound_shipment_items (id integer PRIMARY KEY, shipment_id integer REFERENCES wms.outbound_shipments(id), order_item_id integer REFERENCES wms.order_items(id), shipment_item_purpose text NOT NULL, qty integer NOT NULL);
       CREATE TABLE inventory.replen_tasks (id integer PRIMARY KEY, order_id integer REFERENCES wms.orders(id), blocks_shipment boolean NOT NULL, status text NOT NULL);
       -- Test-only stand-in for an upstream owner's posting, NOT an inventory simulation.
       CREATE TABLE inventory.work_test_postings (claim_id bigint NOT NULL);
@@ -82,6 +85,27 @@ databaseSuite("assembly work PostgreSQL ownership and atomicity", () => {
     service = new AssemblyWorkService(owner, () => new Date(TIME), { handoffBuildOperation: unavailable, executeBuildOperation: unavailable });
     setup = new WorkConfigurationService(repository, () => new Date(TIME));
   });
+  it("reads packing sources only for the exact order and warehouse under READ ONLY", async () => {
+    await query("INSERT INTO wms.orders(id,warehouse_status,warehouse_id) VALUES (99001,'ready_to_ship',1),(99002,'ready_to_ship',2)");
+    await query("INSERT INTO wms.order_items(id,order_id,status,sku) VALUES (99001,99001,'completed','P5'),(99002,99002,'completed','OTHER')");
+    await query("INSERT INTO wms.outbound_shipments(id,order_id,status) VALUES (99001,99001,'queued'),(99002,99002,'queued')");
+    await query(`INSERT INTO wms.outbound_shipment_items(id,shipment_id,order_item_id,shipment_item_purpose,qty) VALUES
+      (99001,99001,99001,'customer_fulfillment',2),
+      (99002,99002,99002,'customer_fulfillment',2),
+      (99003,99002,99001,'customer_fulfillment',2),
+      (99004,99001,99001,'replacement',2)`);
+    const client = await connect();
+    try {
+      await client.query("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      expect(await readOrderPackingSources(client, 99001, 1)).toEqual([
+        { id: 99001, orderItemId: 99001, sku: "P5", quantity: 2, shipmentStatus: "queued" },
+      ]);
+      expect(await readOrderPackingSources(client, 99001, 2)).toEqual([]);
+      await client.query("COMMIT");
+    } catch (error) { await client.query("ROLLBACK"); throw error; }
+    finally { client.release(); }
+  });
+
   afterAll(async () => {
     if (!pool) return;
     for (const name of Object.values(schemas)) {

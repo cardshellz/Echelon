@@ -7,7 +7,7 @@ import {
 } from "../../../../shared/dropship/listing-presentation";
 import type { CatalogVariantImage, CatalogVariantMediaReader } from "../../catalog/catalog-media.reader";
 import { DropshipError } from "../domain/errors";
-import { calculateDiscountedWholesaleUnitCostCents } from "./dropship-order-acceptance-service";
+import type { DropshipProductCost, DropshipProductCostReader } from "./dropship-product-cost";
 import type { DropshipListingCatalogCandidate, DropshipListingPreviewRow } from "./dropship-listing-preview-service";
 import type { DropshipMarketplaceListingIntent } from "./dropship-marketplace-listing-provider";
 import type { DropshipLogger } from "./dropship-ports";
@@ -22,7 +22,7 @@ export interface DropshipPublicationPreview {
 
 export interface DropshipListingPresentationDependencies {
   media: CatalogVariantMediaReader;
-  loadChannelDiscountPercent(): Promise<number | null>;
+  productCosts: DropshipProductCostReader;
   resolvePublication(intent: DropshipMarketplaceListingIntent): DropshipPublicationPreview | null;
   logger: DropshipLogger;
 }
@@ -31,15 +31,17 @@ export interface DropshipListingPresentationDependencies {
 export async function enrichDropshipListingRows(input: {
   rows: readonly DropshipListingPreviewRow[];
   candidates: readonly DropshipListingCatalogCandidate[];
+  vendorId: number;
   storeConnectionId: number;
   deps: DropshipListingPresentationDependencies;
 }): Promise<DropshipListingPreviewRow[]> {
   const visibleRows = input.rows.filter((row) => row.adminExposureDecision.exposed);
-  const [media, discount] = await Promise.all([
+  const [media, productCosts] = await Promise.all([
     input.deps.media.listImages(visibleRows.map((row) => row.productVariantId))
       .catch((error: unknown) => { logFailure(input.deps.logger, "catalog_media_unavailable", error); return null; }),
-    input.deps.loadChannelDiscountPercent()
-      .catch((error: unknown) => { logFailure(input.deps.logger, "channel_pricing_unavailable", error); return null; }),
+    input.deps.productCosts.loadProductCosts({
+      vendorId: input.vendorId, productVariantIds: visibleRows.map((row) => row.productVariantId),
+    }).catch((error: unknown) => { logFailure(input.deps.logger, "product_cost_source_unavailable", error); return null; }),
   ]);
   const candidates = new Map(input.candidates.map((candidate) => [candidate.productVariantId, candidate]));
   return input.rows.map((row) => {
@@ -57,7 +59,7 @@ export async function enrichDropshipListingRows(input: {
         images: media?.get(row.productVariantId) ?? [],
         mediaUnavailable: media === null,
       }),
-      economics: buildDropshipListingEconomics(candidate, row.priceCents, discount),
+      economics: buildDropshipListingEconomics(candidate, row.priceCents, productCosts?.get(row.productVariantId) ?? null),
     };
   });
 }
@@ -65,26 +67,21 @@ export async function enrichDropshipListingRows(input: {
 export function buildDropshipListingEconomics(
   candidate: Pick<DropshipListingCatalogCandidate, "defaultRetailPriceCents" | "unitsPerVariant" | "catalogUnitsPerVariant">,
   listingPriceCents: number | null,
-  discountPercent: number | null,
+  productCost: DropshipProductCost | null,
 ): DropshipListingEconomics {
   const issues: string[] = [];
   const retail = safeCents(candidate.defaultRetailPriceCents);
   const units = presentationUnits(candidate);
-  const discount = Number.isInteger(discountPercent) && discountPercent !== null
-    && discountPercent >= 0 && discountPercent <= 100 ? discountPercent : null;
-  let cost: number | null = null;
-  if (retail === null || retail === 0) issues.push("catalog_retail_price_unavailable");
-  if (discount === null) issues.push("channel_discount_unavailable");
+  const resolvedCost = productCost?.status === "available" ? safeCents(productCost.unitCostCents) : null;
+  if (resolvedCost === null) issues.push(productCost?.issue ?? "product_cost_source_unavailable");
   if (units === null) issues.push("sellable_pack_size_invalid");
-  // The acceptance calculator multiplies integer cents by percent. Guard its safe-integer range.
-  if (retail !== null && retail > Math.floor(Number.MAX_SAFE_INTEGER / 100)) issues.push("catalog_retail_price_out_of_range");
-  if (issues.length === 0 && retail !== null && discount !== null) {
-    cost = calculateDiscountedWholesaleUnitCostCents(retail, discount);
-  }
+  // Fixed plan prices do not require a retail price, and never derive from the vendor's selling price.
+  const cost = issues.length === 0 ? resolvedCost : null;
   return dropshipListingEconomicsSchema.parse({
     currency: "USD", basis: "one_sellable_variant", unitsPerVariant: units,
     referenceRetailPriceCents: retail, listingPriceCents: safeCents(listingPriceCents),
-    vendorProductCostCents: cost, channelDiscountPercent: discount,
+    vendorProductCostCents: cost, channelDiscountPercent: null,
+    productCostSource: cost === null ? null : productCost?.source ?? null,
     productCostStatus: cost === null ? "unavailable" : "available", issues,
   });
 }

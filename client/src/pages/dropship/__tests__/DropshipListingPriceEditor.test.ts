@@ -10,18 +10,36 @@ function price(): ListingPriceSetting {
   return { storeConnectionId: 12, productVariantId: 34, revisionId: 9, overridePriceCents: 999, effectivePriceCents: 999,
     defaultPriceCents: 899, source: "override", updatedAt: "2026-09-06T12:00:00.000Z" };
 }
-function render(value: ListingPriceSetting | null, disabled = false): string {
+function render(value: ListingPriceSetting | null, disabled = false, compact = false): string {
   vi.stubGlobal("React", React);
   const client = new QueryClient({ defaultOptions: { queries: { gcTime: 0 } } });
   if (value) client.setQueryData(["/api/dropship/listings/stores/12/variants/34/price"], value);
   try {
     return renderToStaticMarkup(React.createElement(QueryClientProvider, { client }, React.createElement(DropshipListingPriceEditor, {
-      storeConnectionId: 12, productVariantId: 34, disabled, onSaveStarted: () => {}, onSaveSettled: () => {}, onSaved: async () => {},
+      storeConnectionId: 12, productVariantId: 34, disabled, compact, onCancel: compact ? () => {} : undefined,
+      onSaveStarted: () => {}, onSaveSettled: () => {}, onSaved: async () => {},
     })));
   } finally { client.clear(); }
 }
 
 describe("listing price editor presentation", () => {
+  it("reuses the saved-price form in a compact inline layout with explicit Save, Cancel, and default reset", () => {
+    const markup = render(price(), false, true);
+    expect(markup).toContain("Saved $9.99");
+    expect(markup).toContain("Default $8.99");
+    expect(markup).toContain("Save listing price");
+    expect(markup).toContain("Cancel");
+    expect(markup).toContain("Use catalog default");
+    expect(markup).toContain('value="9.99"');
+    expect(markup).toContain("it does not publish");
+    expect(markup).not.toContain("Current saved price</dt>");
+  });
+  it("lets an inline edit close without waiting for a price lookup", () => {
+    const markup = render(null, false, true);
+    expect(markup).toContain("Loading saved price");
+    expect(markup).toContain("Cancel");
+    expect(markup).not.toContain("Save listing price");
+  });
   it("has a labeled exact-decimal editor and explicit save action beside current/default prices", () => {
     const markup = render(price());
     expect(markup).toContain("Your listing price (USD)");

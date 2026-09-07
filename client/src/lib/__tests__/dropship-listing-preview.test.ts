@@ -1,6 +1,30 @@
 import { describe, expect, it } from "vitest";
-import { pageListingPreviews, safeListingImageUrl } from "../dropship-listing-preview";
+import { formatListingPreviewIssue, pageListingPreviews, safeListingImageUrl } from "../dropship-listing-preview";
 import type { DropshipListingPreviewRow } from "../dropship-ops-surface";
+
+describe("product-cost preview issues", () => {
+  it.each([
+    ["vendor_unavailable", "Your Shellz Club account is unavailable. Contact support."],
+    ["plan_unavailable", "Your .ops price list is unavailable. Contact support."],
+    ["entitlement_inactive", "Your Shellz Club .ops access is inactive. Contact support."],
+    ["variant_unmapped", "This product is not linked to your .ops price list. Contact support."],
+    ["variant_ambiguous", "The .ops product mapping needs support review."],
+    ["variant_identity_mismatch", "The product identity does not match your .ops price list. Contact support."],
+    ["override_ambiguous", "The .ops product price has conflicting entries. Contact support."],
+    ["override_invalid", "The .ops product price needs support review."],
+    ["retail_unavailable", "The catalog retail price is unavailable. Contact support."],
+    ["pricing_configuration_invalid", "Your .ops price list configuration needs support review."],
+    ["source_read_failed", "The .ops product cost could not be loaded. Refresh the preview; contact support if this continues."],
+    ["product_cost_source_unavailable", "The .ops product cost could not be loaded. Refresh the preview; contact support if this continues."],
+  ])("gives an actionable pricing explanation for %s", (code, label) => {
+    expect(formatListingPreviewIssue(code)).toBe(label);
+    expect(formatListingPreviewIssue(code)).not.toMatch(/reauth|eBay|channel discount/i);
+  });
+  it("retains existing setup labels and readable fallback for unrelated issues", () => {
+    expect(formatListingPreviewIssue("missing_config:businessPolicies.paymentPolicyId")).toBe("eBay setup: Payment policy");
+    expect(formatListingPreviewIssue("unrecognized_issue")).toBe("Unrecognized Issue");
+  });
+});
 
 describe("listing preview rendering bounds", () => {
   const rows = Array.from({ length: 10000 }, (_, index) => ({ productVariantId: index + 1, title: `Product ${index + 1}`, sku: `SKU-${index + 1}` } as DropshipListingPreviewRow));

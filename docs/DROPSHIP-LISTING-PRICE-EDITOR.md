@@ -2,7 +2,7 @@
 
 ## User workflow
 
-In the vendor portal, generate a listing preview and choose **View preview**. The drawer contains **Your listing price**, the current saved price/source, and the catalog default. Uncheck **Use catalog default** to enter an override, then choose **Save listing price**. Checking the default option and saving creates an explicit reset.
+In the vendor portal, generate a listing preview and choose **Edit price** in its table row or **View preview** to edit in the drawer. Both surfaces use the same editor and persisted setting. Uncheck **Use catalog default** to enter an override, then choose **Save listing price**. Checking the default option and saving creates an explicit reset. Canceling an unsaved edit changes nothing.
 
 The price is USD per sellable pack. It is the vendor's selling price, not the vendor's product cost, a shipping charge, or a suggested retail price. Suggested pricing remains deferred. The old unsaved Retail price input in Available catalog is removed so the UI has one price-editing authority.
 
@@ -51,4 +51,4 @@ After deployment:
 
 ## Separate known work
 
-This change does not correct the `.ops` product-cost lookup or the recurring eBay listing-setup authorization issue. Product cost and selling price are separate authorities. It also does not add suggested-price calculation, automatic repricing, shipping-charge edits, or bulk price changes.
+The `.ops` preview product-cost lookup is corrected separately in [the product-cost contract](DROPSHIP-OPS-PRODUCT-COST.md). Product cost and selling price remain separate authorities. This editor does not change eBay authorization, add suggested-price calculation, automatic repricing, shipping-charge edits, or bulk price changes.
