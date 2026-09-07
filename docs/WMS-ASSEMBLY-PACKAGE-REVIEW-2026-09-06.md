@@ -4,7 +4,7 @@
 
 The assigned assembler can now inspect linked provider labels and their exact declared contents from the selected assembly job, after its finished-output pick. This is connected application code: authenticated GET, scoped task owner, read-only database transaction, existing shipping evidence owner, strict response validation, and bench UI.
 
-**Package Close is not connected.** No completion receipt, stock allocation, label purchase, commercial fulfillment, carrier dispatch, or activation is performed here. Keep this branch unpublished until the close transaction and correction behavior are integrated; this is not another requested standalone deployment.
+**Package Close is not connected.** No completion receipt, stock allocation, label purchase, commercial fulfillment, carrier dispatch, or activation is performed here. The user subsequently requested a PR for this checkpoint. Publish it as scoped read-only package-evidence review, not as completed Package Close; the close transaction and correction behavior remain future work.
 
 Worktree: `worktrees/wms-assembly-package-close`, branch `codex/wms-assembly-package-close`. Integrated main `66e64a92` includes the unrelated eBay token PR #1390. PR #1389's merge and user-reported deployment remain the assembly-readiness baseline. Unrelated original-checkout changes are preserved.
 
