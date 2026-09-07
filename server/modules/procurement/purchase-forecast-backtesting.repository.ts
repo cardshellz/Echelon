@@ -7,6 +7,7 @@ import {
 import {
   buildPurchasingForecastPolicyCohort,
   PURCHASING_FORECAST_POLICY_CAPTURE_VERSION,
+  type PurchasingForecastPolicyCaptureVersion,
   type PurchasingForecastPolicyCohortSnapshot,
 } from "./purchasing-forecast-policy";
 import type {
@@ -29,7 +30,7 @@ export type PurchaseForecastPolicyCohortEvidence =
       latestEvaluationAt: Date | null;
     }
   | {
-      captureVersion: typeof PURCHASING_FORECAST_POLICY_CAPTURE_VERSION;
+      captureVersion: PurchasingForecastPolicyCaptureVersion;
       fingerprint: string;
       snapshot: PurchasingForecastPolicyCohortSnapshot;
       forecastMethod: string;
@@ -80,7 +81,7 @@ export type PurchaseForecastEvaluationReportItem = {
   horizonDays: PurchaseForecastEvaluationHorizonDays;
   forecastMethod: string;
   forecastVersion: number;
-  forecastPolicyCaptureVersion: typeof PURCHASING_FORECAST_POLICY_CAPTURE_VERSION;
+  forecastPolicyCaptureVersion: PurchasingForecastPolicyCaptureVersion;
   forecastPolicyFingerprint: string;
   evaluationVersion: number;
   observedFrom: Date;
@@ -249,7 +250,7 @@ function capturedPolicyCohort(input: {
   field: string;
 }) {
   const captureVersion = safeInteger(input.captureVersion, `${input.field}.captureVersion`, 0);
-  if (captureVersion !== PURCHASING_FORECAST_POLICY_CAPTURE_VERSION) {
+  if (captureVersion !== 1 && captureVersion !== 2 && captureVersion !== 3) {
     throw new RangeError(`${input.field}.captureVersion is unsupported`);
   }
   if (typeof input.fingerprint !== "string" || !/^[0-9a-f]{64}$/.test(input.fingerprint)) {
@@ -258,7 +259,8 @@ function capturedPolicyCohort(input: {
   const snapshot = jsonObject(input.snapshot, `${input.field}.snapshot`);
   const canonical = buildPurchasingForecastPolicyCohort(snapshot);
   if (
-    canonical.fingerprint !== input.fingerprint
+    canonical.captureVersion !== captureVersion
+    || canonical.fingerprint !== input.fingerprint
     || !isDeepStrictEqual(canonical.snapshot, snapshot)
   ) {
     throw new RangeError(`${input.field} does not match its canonical policy snapshot`);
@@ -312,7 +314,12 @@ function mapCandidate(row: any): PurchaseForecastEvaluationCandidate {
   if (row.scope !== "product_all_warehouses") {
     throw new RangeError(`Unsupported forecast observation scope: ${String(row.scope)}`);
   }
+  const capturedPolicy = Number(row.forecast_policy_capture_version) > 0 ? capturedPolicyCohort({
+    captureVersion: row.forecast_policy_capture_version, fingerprint: row.forecast_policy_fingerprint,
+    snapshot: row.forecast_policy_snapshot, field: "candidate.forecastPolicy",
+  }) : null;
   return {
+    ...(capturedPolicy?.snapshot.replacementForecasts?.length ? { replacementForecasts: capturedPolicy.snapshot.replacementForecasts } : {}),
     observationId: safeInteger(row.observation_id, "observationId", 1),
     runId: safeInteger(row.run_id, "runId", 1),
     productId: safeInteger(row.product_id, "productId", 1),
@@ -528,12 +535,12 @@ export function createPurchaseForecastBacktestingRepository(database: any) {
           observation.forecast_policy_fingerprint,
           observation.forecast_policy_snapshot,
           CASE
-            WHEN observation.forecast_policy_capture_version = ${PURCHASING_FORECAST_POLICY_CAPTURE_VERSION}
+            WHEN observation.forecast_policy_capture_version IN (1, 2, 3)
               THEN observation.forecast_method
             ELSE NULL
           END AS forecast_method,
           CASE
-            WHEN observation.forecast_policy_capture_version = ${PURCHASING_FORECAST_POLICY_CAPTURE_VERSION}
+            WHEN observation.forecast_policy_capture_version IN (1, 2, 3)
               THEN observation.forecast_version
             ELSE NULL
           END AS forecast_version
@@ -590,6 +597,9 @@ export function createPurchaseForecastBacktestingRepository(database: any) {
           observation.forecast_method,
           observation.forecast_version,
           observation.forecast_daily_pieces_micros,
+          observation.forecast_policy_capture_version,
+          observation.forecast_policy_fingerprint,
+          observation.forecast_policy_snapshot,
           observation.baseline_daily_pieces_micros,
           observation.forward_demand_pieces,
           observation.forward_demand_raw_pieces,
@@ -668,6 +678,9 @@ export function createPurchaseForecastBacktestingRepository(database: any) {
         candidate.forecast_method,
         candidate.forecast_version,
         candidate.forecast_daily_pieces_micros,
+        candidate.forecast_policy_capture_version,
+        candidate.forecast_policy_fingerprint,
+        candidate.forecast_policy_snapshot,
         candidate.baseline_daily_pieces_micros,
         candidate.forward_demand_pieces,
         candidate.forward_demand_raw_pieces,
@@ -771,7 +784,7 @@ export function createPurchaseForecastBacktestingRepository(database: any) {
         ON observation.id = evaluation.observation_id
       WHERE evaluation.evaluation_version = ${input.evaluationVersion}
         AND (${input.horizonDays ?? null}::int IS NULL OR evaluation.horizon_days = ${input.horizonDays ?? null})
-        AND observation.forecast_policy_capture_version = ${PURCHASING_FORECAST_POLICY_CAPTURE_VERSION}
+        AND observation.forecast_policy_capture_version IN (1, 2, 3)
         AND observation.forecast_policy_fingerprint = ${input.policyFingerprint}
         AND observation.forecast_method = ${input.forecastMethod}
         AND observation.forecast_version = ${input.forecastVersion}
@@ -839,7 +852,7 @@ export function createPurchaseForecastBacktestingRepository(database: any) {
         ON observation.id = evaluation.observation_id
       WHERE evaluation.evaluation_version = ${input.evaluationVersion}
         AND (${input.horizonDays ?? null}::int IS NULL OR evaluation.horizon_days = ${input.horizonDays ?? null})
-        AND observation.forecast_policy_capture_version = ${PURCHASING_FORECAST_POLICY_CAPTURE_VERSION}
+        AND observation.forecast_policy_capture_version IN (1, 2, 3)
         AND observation.forecast_policy_fingerprint = ${input.policyFingerprint}
         AND observation.forecast_method = ${input.forecastMethod}
         AND observation.forecast_version = ${input.forecastVersion}

@@ -36,6 +36,7 @@ function harness(options: {
   const tx = {
     execute: vi.fn(async (query: Parameters<PgDialect["sqlToQuery"]>[0]) => {
       const rendered = dialect.sqlToQuery(query);
+      if (rendered.sql.includes("inventory.cost_graph")) return { rows: [] };
       queries.push(rendered);
       if (rendered.sql.includes("FROM catalog.product_variants")) {
         return { rows: [{ id: rendered.params[0], product_id: options.catalogProductId ?? 1,

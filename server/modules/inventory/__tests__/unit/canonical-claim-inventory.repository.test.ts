@@ -7,8 +7,17 @@ import {
 
 const OCCURRED_AT = new Date("2026-09-02T02:00:00.000Z");
 
-function createClient(handler: (text: string, values: unknown[]) => Promise<any>) {
-  const query = vi.fn(async (text: string, values: unknown[] = []) => handler(text, values));
+function createClient(handler: (text: string, values: unknown[]) => Promise<any>, lotOriginalQuantities: ReadonlyMap<number, number> = new Map()) {
+  const query = vi.fn(async (text: string, values: unknown[] = []) => {
+    if (text.includes("pg_advisory_xact_lock") || text.includes("inventory.lot_cost_contributions")) return { rows: [] };
+    if (text.includes("SELECT source.qty_received AS source_qty")) {
+      const outputQty = lotOriginalQuantities.get(Number(values[0]));
+      const sourceQty = lotOriginalQuantities.get(Number(values[1]));
+      if (outputQty === undefined || sourceQty === undefined) throw new Error("Missing original lot quantity fixture for contribution bounds");
+      return { rows: [{ source_qty: sourceQty, output_qty: outputQty }] };
+    }
+    return handler(text, values);
+  });
   return { client: { query } as any, query };
 }
 
@@ -264,7 +273,7 @@ describe("PostgresCanonicalClaimInventoryRepository", () => {
         return { rows: [], rowCount: 1 };
       }
       throw new Error(`Unexpected query: ${text}`);
-    });
+    }, new Map([[51, 3], [53, 2]]));
     const repository = new PostgresCanonicalClaimInventoryRepository();
 
     await expect(repository.reconcileObservedPickResource({
@@ -341,6 +350,11 @@ describe("PostgresCanonicalClaimInventoryRepository", () => {
     expect(observedLot?.values?.[17]).toBe(2);
     expect(observedLot?.values?.[19]).toBe(0);
     expect(observedLot?.values?.[20]).toBe("purchase_order");
+    expect(calls[0].text).toContain("pg_advisory_xact_lock");
+    expect(calls.filter((call) => call.text.includes("INSERT INTO inventory.lot_cost_contributions"))
+      .map((call) => call.values)).toEqual([
+        [51, 53, "transfer", `claim_observation:9:${"a".repeat(64)}`, 2, 2, 0, "unit-test", OCCURRED_AT],
+      ]);
     const sourceLevelUpdate = calls.find((call) =>
       call.text.startsWith("UPDATE inventory.inventory_levels")
       && call.text.includes("variant_qty = variant_qty - $1"));
@@ -397,7 +411,7 @@ describe("PostgresCanonicalClaimInventoryRepository", () => {
       }
       if (text.startsWith("INSERT INTO inventory.inventory_transactions")) return { rows: [], rowCount: 1 };
       throw new Error(`Unexpected query: ${text}`);
-    });
+    }, new Map([[51, 5], [61, 1], [62, 2], [63, 1]]));
     const repository = new PostgresCanonicalClaimInventoryRepository();
 
     await expect(repository.executePackageOperation({
@@ -458,10 +472,15 @@ describe("PostgresCanonicalClaimInventoryRepository", () => {
     const levelLockIndex = calls.findIndex((call) => call.text.includes("FROM inventory.inventory_levels"));
     const lotLockIndex = calls.findIndex((call) => call.text.includes("FROM inventory.inventory_lots"));
     const firstConsumeIndex = calls.findIndex((call) => call.text.startsWith("UPDATE inventory.inventory_lots"));
+    expect(calls[0].text).toContain("pg_advisory_xact_lock");
     expect(levelLockIndex).toBeGreaterThanOrEqual(0);
     expect(lotLockIndex).toBeGreaterThan(levelLockIndex);
     expect(firstConsumeIndex).toBeGreaterThan(lotLockIndex);
     expect(calls.filter((call) => call.text.startsWith("INSERT INTO inventory.inventory_lots"))).toHaveLength(3);
+    const costContributions = calls.filter((call) => call.text.includes("INSERT INTO inventory.lot_cost_contributions"));
+    expect(costContributions.map((call) => call.values)).toEqual([61, 62, 63].map((outputLotId, index) => [
+      51, outputLotId, "assembly", "claim_operation:9:10", 5, 4, [0, 1, 3][index], "unit-test", OCCURRED_AT,
+    ]));
     expect(calls.find((call) => call.text.includes("SET variant_qty = variant_qty + $1"))?.values)
       .toEqual([4, 3, 12, OCCURRED_AT]);
   });
@@ -497,7 +516,7 @@ describe("PostgresCanonicalClaimInventoryRepository", () => {
       if (text.startsWith("INSERT INTO inventory.inventory_lots")) return { rows: [{ id: 61 }], rowCount: 1 };
       if (text.startsWith("INSERT INTO inventory.inventory_transactions")) return { rows: [], rowCount: 1 };
       throw new Error(`Unexpected query: ${text}`);
-    });
+    }, new Map([[51, 5], [61, 1]]));
     const repository = new PostgresCanonicalClaimInventoryRepository();
 
     await expect(repository.executeBuildOperation({
@@ -561,6 +580,9 @@ describe("PostgresCanonicalClaimInventoryRepository", () => {
     const outputLot = calls.find((call) => call.text.startsWith("INSERT INTO inventory.inventory_lots"));
     expect(outputLot?.text).toContain("build_order_id, build_run_id");
     expect(outputLot?.values?.slice(-2)).toEqual([91, 94]);
+    expect(calls[0].text).toContain("pg_advisory_xact_lock");
+    expect(calls.filter((call) => call.text.includes("INSERT INTO inventory.lot_cost_contributions")).map((call) => call.values))
+      .toEqual([[51, 61, "build", "claim_operation:9:10", 5, 1, 0, "unit-test", OCCURRED_AT]]);
   });
 
   it("moves exact reserved claim lots to picked and records immutable COGS evidence", async () => {

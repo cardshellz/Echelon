@@ -1095,7 +1095,7 @@ export const purchaseForecastObservations = procurementSchema.table("purchase_fo
         AND ${table.forecastPolicySnapshot} IS NULL
       )
       OR (
-        ${table.forecastPolicyCaptureVersion} = 1
+        ${table.forecastPolicyCaptureVersion} IN (1, 2, 3)
         AND ${table.forecastPolicyFingerprint} ~ '^[0-9a-f]{64}$'
         AND jsonb_typeof(${table.forecastPolicySnapshot}) = 'object'
       )`,
@@ -1130,6 +1130,23 @@ export const purchaseForecastObservations = procurementSchema.table("purchase_fo
     name: "purchase_forecast_observations_receive_variant_product_fk",
   }),
 ]);
+
+// Planning policy has one current record and immutable actor-attributed revisions.
+export const purchasePlanningPolicy = procurementSchema.table("purchase_planning_policy", {
+  id: integer("id").primaryKey(),
+  revision: integer("revision").notNull(),
+  policy: jsonb("policy").notNull(),
+}, (table) => [check("purchase_planning_policy_singleton_chk", sql`${table.id} = 1`), check("purchase_planning_policy_revision_chk", sql`${table.revision} >= 0`)]);
+
+export const purchasePlanningPolicyRevisions = procurementSchema.table("purchase_planning_policy_revisions", {
+  revision: integer("revision").primaryKey(),
+  idempotencyKey: varchar("idempotency_key", { length: 160 }).notNull().unique(),
+  requestHash: varchar("request_hash", { length: 64 }).notNull(),
+  actorId: varchar("actor_id", { length: 255 }).notNull(),
+  changedAt: timestamp("changed_at", { withTimezone: true }).notNull(),
+  beforePolicy: jsonb("before_policy").notNull(),
+  afterPolicy: jsonb("after_policy").notNull(),
+});
 
 export const purchaseForecastOverlayContributions = procurementSchema.table("purchase_forecast_overlay_contributions", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
@@ -1804,7 +1821,6 @@ export type VendorInvoicePoLink = typeof vendorInvoicePoLinks.$inferSelect;
 // ===== VENDOR INVOICE LINES =====
 
 export const vendorInvoiceLines = procurementSchema.table("vendor_invoice_lines", {
-  costComponentEvidence: jsonb("cost_component_evidence"),
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   vendorInvoiceId: integer("vendor_invoice_id").notNull().references(() => vendorInvoices.id, { onDelete: "cascade" }),
   purchaseOrderLineId: integer("purchase_order_line_id").references(() => purchaseOrderLines.id, { onDelete: "set null" }),
@@ -1818,6 +1834,7 @@ export const vendorInvoiceLines = procurementSchema.table("vendor_invoice_lines"
   qtyOrdered: integer("qty_ordered"),
   qtyReceived: integer("qty_received"),
   unitCostCents: bigint("unit_cost_cents", { mode: "number" }).notNull(),
+  costComponentEvidence: jsonb("cost_component_evidence"),
   // Per-unit invoiced cost in mills (4-decimal). Authoritative when non-null.
   unitCostMills: bigint("unit_cost_mills", { mode: "number" }),
   lineTotalCents: bigint("line_total_cents", { mode: "number" }).notNull(),

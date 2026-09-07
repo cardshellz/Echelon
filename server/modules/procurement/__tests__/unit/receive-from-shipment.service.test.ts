@@ -590,13 +590,14 @@ describe("createReceiptFromShipment source serialization", () => {
     expect(storage.createReceivingOrder).not.toHaveBeenCalled();
   });
 
-  it("locks shipment before the receipt advisory key and preserves unchanged source quantities", async () => {
+  it("locks the cost graph then shipment before the receipt advisory key and preserves unchanged source quantities", async () => {
     const { svc, storage, tx } = build();
     await svc.createReceiptFromShipment(84);
     const queries = tx.execute.mock.calls.map(([query]: [any]) => sqlToStr(query));
-    expect(queries[0]).toContain("from procurement.inbound_shipments");
-    expect(queries[0]).toContain("for update");
-    expect(queries[1]).toContain("pg_advisory_xact_lock");
+    expect(queries[0]).toContain("inventory.cost_graph");
+    expect(queries[1]).toContain("from procurement.inbound_shipments");
+    expect(queries[1]).toContain("for update");
+    expect(queries[2]).toContain("pg_advisory_xact_lock");
     expect(storage.getInboundShipmentById).toHaveBeenLastCalledWith(84, tx);
     expect(storage.createReceivingOrder).toHaveBeenCalledTimes(1);
     expect(storage.bulkCreateReceivingLines).toHaveBeenCalledTimes(1);

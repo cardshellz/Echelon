@@ -1,4 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+
+// These owner units isolate SQL row fixtures from the shared lock boundary.
+// Actual lock ordering and rollback are exercised in cost-lineage-owners.integration.test.ts.
+vi.mock("../../infrastructure/cost-evidence.repository", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../infrastructure/cost-evidence.repository")>(),
+  lockInventoryCostGraph: vi.fn(async () => undefined),
+}));
 import { InventoryUseCases } from "../../application/inventory.use-cases";
 
 /**
@@ -150,7 +157,7 @@ describe("transfer() — Option A move-reserved", () => {
     const h = makeHarness({ sourceLevel: { id: 1, variantQty: 10, reservedQty: 0 } });
     await expect(
       h.useCases.transfer({ productVariantId: 10, fromLocationId: 6, toLocationId: 4, qty: 0 }),
-    ).rejects.toThrow(/positive integer/);
+    ).rejects.toThrow(/positive safe integer/);
     await expect(
       h.useCases.transfer({ productVariantId: 10, fromLocationId: 6, toLocationId: 6, qty: 5 }),
     ).rejects.toThrow(/must differ/);

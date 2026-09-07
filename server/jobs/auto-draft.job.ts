@@ -440,6 +440,10 @@ const readinessActionByArea: Record<
     code: "configure_receive_variant",
     detail: "Assign an active receive variant with the correct units-per-variant.",
   },
+  inbound_supply: {
+    code: "review_inbound_arrival_coverage",
+    detail: "Confirm arrival dates and review forecast gaps on existing POs before another unattended draft.",
+  },
   supplier_catalog: {
     code: "complete_supplier_catalog",
     detail: "Complete the supplier quote basis, purchase UOM, quantity multiple, and MOQ configuration.",

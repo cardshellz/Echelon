@@ -1,3 +1,5 @@
+import { enqueueReceiptCostRequests, processReceiptCostRequests } from "./receipt-cost-queue.service";
+import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
 /**
  * Receiving service for Echelon WMS.
  *
@@ -18,6 +20,7 @@ import { sql } from "drizzle-orm";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { convertReceiptCounts, receiptInteger, receivingUnitVersion, withReceivingUnitVersion } from "./receiving-unit-contract";
 import { Decimal } from "decimal.js";
+import { resolveReceiptCostEvidence } from "./receipt-cost-evidence.service";
 import {
   millsToCents,
   centsToMills,
@@ -45,6 +48,9 @@ interface InventoryCore {
     unitCostMills?: number;
     packagingCostMills?: number;
     landedCostMills?: number;
+    unitsPerVariantSnapshot?: number;
+    inboundShipmentLineId?: number;
+    costRecordedAt?: Date;
     receivingOrderId?: number;
     receivingLineId?: number;
     purchaseOrderId?: number;
@@ -1031,13 +1037,19 @@ export class ReceivingService {
       if (changesUnits && next.unitsPerVariantSnapshot != null) this.validateReceiptBaseCounts(next, next.unitsPerVariantSnapshot);
       if ("receivedQty" in updates || "expectedQty" in updates) updates.status = this.receivingLineStatus(Number(next.receivedQty), Number(next.expectedQty));
       const now = this.clock();
-      if (changesUnits) updates.updatedAt = now;
+      const changesCost = ["unitCost", "unitCostMills"].some((field) => field in updates && updates[field] !== line[field]);
+      if (changesCost) {
+        if (!actorId) throw new ReceivingError("An authenticated actor is required to change receipt costs.", 401);
+        updates.costSourceKind = "manual_override";
+        updates.costSourceEvidence = { actorId, recordedAt: now.toISOString(), before: { unitCost: line.unitCost, unitCostMills: line.unitCostMills }, after: { unitCost: updates.unitCost ?? line.unitCost, unitCostMills: updates.unitCostMills ?? line.unitCostMills }, state: "review_required" };
+      }
+      if (changesUnits || changesCost) updates.updatedAt = now;
       const updated = await this.storage.updateReceivingLine(lineId, updates, tx);
       await this.updateReceivingOrderTotals(line.receivingOrderId, tx);
-      if (changesUnits) {
+      if (changesUnits || changesCost) {
         await tx.execute(sql`
           INSERT INTO public.audit_events (timestamp, level, actor, action, target, changes, context)
-          VALUES (${now}, 'AUDIT', ${actorId}, 'procurement.receiving.units', ${`receiving-line:${lineId}`},
+          VALUES (${now}, 'AUDIT', ${actorId}, ${changesCost ? 'procurement.receiving.cost_override' : 'procurement.receiving.units'}, ${`receiving-line:${lineId}`},
             ${JSON.stringify({ before: line, after: updated })}::jsonb,
             ${JSON.stringify({ receivingOrderId: line.receivingOrderId, receivingLineId: lineId, legacyUnitConfirmed: confirmLegacyUnit === true })}::jsonb)
         `);
@@ -1132,7 +1144,8 @@ export class ReceivingService {
     if (order.status === "closed") {
       const closedLines = await this.storage.getReceivingLines(orderId);
       const poReconciliation = await this.reconcileLinkedPurchaseOrder(orderId, order, closedLines, userId);
-      return this.buildCloseResult(order, closedLines, undefined, poReconciliation);
+      const costReconciliation = await this.retryCosts(orderId, userId);
+      return { ...this.buildCloseResult(order, closedLines, undefined, poReconciliation), costReconciliation };
     }
 
     const orderSnapshot = canonicalJson(order);
@@ -1209,6 +1222,7 @@ export class ReceivingService {
     const receivedPurchaseOrderLineIds = new Set<number>();
 
     const closeResult = await this.db.transaction(async (tx) => {
+      await lockInventoryCostGraph(tx);
       const lockedOrder = await this.lockReceivingOrder(tx, orderId);
       if (lockedOrder.status === "cancelled") {
         throw new ReceivingError("Order already cancelled");
@@ -1235,7 +1249,7 @@ export class ReceivingService {
       }
       lines = lockedLines;
       // Match the receiving/reversal order before taking inventory locks.
-      // Invoice reconciliation later in this transaction uses these PO rows.
+      // Source evidence and physical receipt links use these PO rows.
       if (order.purchaseOrderId) {
         await tx.execute(sql`SELECT id FROM procurement.purchase_orders WHERE id = ${order.purchaseOrderId} FOR UPDATE`);
         await tx.execute(sql`SELECT id FROM procurement.purchase_order_lines WHERE purchase_order_id = ${order.purchaseOrderId} ORDER BY id FOR UPDATE`);
@@ -1262,159 +1276,43 @@ export class ReceivingService {
       if (line.receivedQty > 0 && line.productVariantId && line.putawayLocationId) {
         const qtyToAdd = line.receivedQty;
 
-        // Determine unit cost: landed cost (if finalized) > receiving line
-        // override > PO line cost.
-        //
-        // Precision: mills (4-decimal) is authoritative whenever present —
-        // from either the receiving_line itself (manual override) or the
-        // linked PO line. Cents is derived via millsToCents (half-up) so
-        // downstream consumers that only speak cents stay correct.
-        //
-        // We resolve BOTH cents and mills up front so we can also persist
-        // the mills value back on the receiving_line row after successful
-        // receive. Today (pre-0562) only cents was stamped; mills makes
-        // $0.0375 survive round-trip for damaged-unit / freight-allocation
-        // overrides where the PO line isn't the right source.
-        const resolved = await resolveReceivingLineCost(line, this.storage as any);
-        let unitCostCents = resolved.cents;
-        let unitCostMills = resolved.mills;
-        const packagingCostCents = resolved.packagingCostCents ?? 0;
-        let costProvisional = 0;
-        const parsedInboundShipmentId = Number(order.inboundShipmentId);
-        const inboundShipmentId =
-          Number.isInteger(parsedInboundShipmentId) && parsedInboundShipmentId > 0
-            ? parsedInboundShipmentId
-            : undefined;
-
-        if (line.purchaseOrderLineId && this.shipmentTracking) {
-          try {
-            const landedCostCents = await this.shipmentTracking.getLandedCostForPoLine(line.purchaseOrderLineId);
-            const landedCostMills =
-              this.shipmentTracking.getLandedCostMillsForPoLine
-                ? await this.shipmentTracking.getLandedCostMillsForPoLine(line.purchaseOrderLineId)
-                : null;
-            if (landedCostCents !== null || landedCostMills !== null) {
-              // Keep the legacy cents mirror when shipment tracking has it,
-              // and preserve exact mills when finalized allocation data can reconstruct it.
-              unitCostMills =
-                landedCostMills !== null
-                  ? landedCostMills
-                  : centsToMills(landedCostCents!);
-              unitCostCents =
-                landedCostCents !== null
-                  ? landedCostCents
-                  : millsToCents(unitCostMills);
-            } else if (inboundShipmentId) {
-              // Shipment exists but costs not finalized - mark provisional.
-              costProvisional = 1;
-            }
-          } catch {
-            // Landed-cost lookup failure should not make a shipment-linked
-            // receipt look final. Keep the PO/line cost, but mark it provisional.
-            if (inboundShipmentId) {
-              costProvisional = 1;
-            }
-          }
-        } else if (inboundShipmentId) {
-          // Receiving order linked to shipment but no tracking service - mark provisional.
-          costProvisional = 1;
-        }
-
-        // Typed-lines allocator (Option C, 2026-04-28).
-        //
-        // If shipment-tracking didn't supply a landed cost AND the linked
-        // PO has typed non-product lines (discount / fee / tax / rebate /
-        // adjustment), spread those across the product lines and use the
-        // resulting landed unit cost. This makes COGS, margin, and
-        // inventory valuation correct for domestic POs that don't run
-        // through a formal inbound shipment.
-        //
-        // Skip if shipment-tracking already wrote a landed cost (its
-        // freight/duty allocation is more authoritative for international
-        // POs that run through a real shipment). Skip if there's no
-        // purchasing service, no PO line link, or no PO id known.
-        if (
-          line.purchaseOrderLineId &&
-          costProvisional === 0 &&
-          this.purchasing?.getAllocatedLineCostsForPo &&
-          (!this.shipmentTracking ||
-            // No shipment landed cost was applied above. We re-resolve here
-            // by checking whether the cost we have right now matches the
-            // shipment-tracking output — simpler: just always run if no
-            // shipment is linked.
-            !order.inboundShipmentId)
-        ) {
-          try {
-            const poLine =
-              typeof (this.storage as any).getPurchaseOrderLineById === "function"
-                ? await (this.storage as any).getPurchaseOrderLineById(
-                    line.purchaseOrderLineId,
-                  )
-                : null;
-            const poId = poLine?.purchaseOrderId;
-            if (poId) {
-              const allocation = await this.purchasing.getAllocatedLineCostsForPo(poId);
-              const match = allocation.perLine.find(
-                (p) => p.purchaseOrderLineId === line.purchaseOrderLineId,
-              );
-              // Only override when the allocation actually changed the cost
-              // (i.e. the PO has non-zero pooledCents). Avoids unnecessary
-              // writes on simple product-only POs.
-              if (
-                match &&
-                allocation.pooledCents !== 0 &&
-                allocation.unallocatedCents === 0
-              ) {
-                unitCostCents = match.landedUnitCostCents;
-                unitCostMills = match.landedUnitCostMills;
-              }
-            }
-          } catch {
-            // Non-critical — leave existing PO/line cost in place.
-          }
-        }
-
-        // Lots store quantity in the receiving variant's OWN units (e.g. cases), so the
-        // cost booked on the lot is per that unit. Cost is carried in MILLS so the
-        // per-unit × pack-size scale never amplifies cent rounding (the old cents × upv
-        // turned a sub-cent per-piece rounding into real dollars on large packs).
+        const inboundShipmentId = order.inboundShipmentId == null ? undefined : Number(order.inboundShipmentId);
         const unitsPerVariant = line.unitsPerVariantSnapshot;
-
-
-        // Pull the PO line so we can cost the lot EXACTLY from its totals when this is a
-        // plain PO receipt (no receiving-line override, no landed/typed adjustment).
-        let lotPoLine: any = null;
-        if (line.purchaseOrderLineId && typeof (this.storage as any).getPurchaseOrderLineById === "function") {
-          try { lotPoLine = await (this.storage as any).getPurchaseOrderLineById(line.purchaseOrderLineId); }
-          catch { lotPoLine = null; }
-        }
-        const lineQty = Number(lotPoLine?.orderQty) || 0;
-        const lineProductCents = Number(lotPoLine?.totalProductCostCents || 0);
-        const linePackagingCents = Number(lotPoLine?.packagingCostCents || 0);
-        const isProductPoLine = (lotPoLine?.lineType ?? "product") === "product";
-        // The per-unit mills the PO line itself implies. If the resolved blend equals
-        // this, nothing overrode the PO cost, so we can decompose straight from totals.
-        const poDerivedMills = (lineQty > 0 && isProductPoLine)
-          ? perUnitMills((lineProductCents + linePackagingCents) * 100, lineQty)
-          : undefined;
-
         let lotUnitCostMills: number | undefined;
         let lotPackagingCostMills = 0;
-        if (poDerivedMills != null && typeof unitCostMills === "number" && unitCostMills === poDerivedMills) {
-          // EXACT path: derive the lot's per-variant-unit cost from PO line TOTALS, so a
-          // 150-piece, $118 line received as 3 Cases-of-50 values to exactly $118 once
-          // valuation reads mills — no per-piece pre-rounding amplified by the pack size.
-          lotPackagingCostMills = perUnitMills(linePackagingCents * 100 * unitsPerVariant, lineQty);
-          const lotProductMills = perUnitMills(lineProductCents * 100 * unitsPerVariant, lineQty);
-          lotUnitCostMills = lotProductMills + lotPackagingCostMills;
-        } else if (typeof unitCostMills === "number") {
-          // Receiving-line override, finalized landed cost, typed-line allocation, or a
-          // manual receipt: scale the resolved per-unit mills by the pack size. Still
-          // mills (not cents), so no rounding amplification.
-          lotUnitCostMills = unitCostMills * unitsPerVariant;
-          lotPackagingCostMills = (typeof packagingCostCents === "number" ? centsToMills(packagingCostCents) : 0) * unitsPerVariant;
+        let lotLandedCostMills = 0;
+        let unitCostMills: number | undefined;
+        let unitCostCents: number | undefined;
+        let costProvisional = 1;
+        if (line.purchaseOrderLineId && order.purchaseOrderId && line.costSourceKind === "purchase_order_line") {
+          const evidence = await resolveReceiptCostEvidence(tx, {
+            receivingLineId: line.id, purchaseOrderLineId: line.purchaseOrderLineId,
+            purchaseOrderId: order.purchaseOrderId, inboundShipmentId: inboundShipmentId ?? null,
+            inboundShipmentLineId: line.inboundShipmentLineId ?? null,
+            unitsPerVariantSnapshot: unitsPerVariant, costSourceKind: line.costSourceKind,
+          }, userId || "system:receiving", this.clock());
+          lotUnitCostMills = evidence.unitCostMills;
+          lotPackagingCostMills = evidence.packagingCostMills;
+          lotLandedCostMills = evidence.landedCostMills;
+          unitCostMills = evidence.productUnitCostMills;
+          unitCostCents = millsToCents(unitCostMills);
+          costProvisional = evidence.costProvisional;
+          await this.storage.updateReceivingLine(line.id, {
+            costSourceEvidence: { contractVersion: 1, revisionIds: evidence.revisions.map((revision) => revision.id) },
+          }, tx);
+        } else {
+          const resolved = await resolveReceivingLineCost(line, this.storage as any);
+          unitCostMills = resolved.mills;
+          unitCostCents = resolved.cents;
+          if (unitCostMills !== undefined) {
+            const scaled = BigInt(unitCostMills) * BigInt(unitsPerVariant);
+            if (scaled > BigInt(Number.MAX_SAFE_INTEGER)) throw new ReceivingError("Receipt cost exceeds the supported mills range", 409, { code: "RECEIPT_COST_OVERFLOW" });
+            lotUnitCostMills = Number(scaled);
+          }
+          // An old copied number or a manual price is not provenance. Keep its
+          // physical receipt possible and its financial state visibly provisional.
         }
-        const lotUnitCostCents = lotUnitCostMills != null ? millsToCents(lotUnitCostMills) : undefined;
+        const lotUnitCostCents = lotUnitCostMills === undefined ? undefined : millsToCents(lotUnitCostMills);
 
         await this.inventoryCore.receiveInventory({
           productVariantId: line.productVariantId,
@@ -1426,6 +1324,10 @@ export class ReceivingService {
           unitCostCents: lotUnitCostCents,
           unitCostMills: lotUnitCostMills,
           packagingCostMills: lotPackagingCostMills,
+          landedCostMills: lotLandedCostMills,
+          unitsPerVariantSnapshot: unitsPerVariant,
+          costRecordedAt: closeAt,
+          inboundShipmentLineId: line.inboundShipmentLineId ?? undefined,
           receivingOrderId: orderId,
           receivingLineId: line.id,
           purchaseOrderId: order.purchaseOrderId || undefined,
@@ -1482,15 +1384,7 @@ export class ReceivingService {
     // physical events driven through break-assembly.use-cases.ts, not a side
     // effect of receiving.
 
-    if (this.approvedInvoiceCostReconciler) {
-      for (const purchaseOrderLineId of [...receivedPurchaseOrderLineIds].sort((left, right) => left - right)) {
-        await this.approvedInvoiceCostReconciler.reconcilePurchaseOrderLine(
-          purchaseOrderLineId,
-          tx,
-          userId || undefined,
-        );
-      }
-    }
+    await enqueueReceiptCostRequests(tx, orderId, [...receivedPurchaseOrderLineIds], userId || "system:receiving", closeAt);
 
     // Update order totals and close
     const updated = await this.storage.updateReceivingOrder(orderId, {
@@ -1538,15 +1432,17 @@ export class ReceivingService {
       }
     }
 
-    return this.buildCloseResult(
-      updated,
-      closedLines,
-      Array.from(putawayLocationIds),
-      poReconciliation,
-    );
+    const costReconciliation = await this.retryCosts(orderId, userId);
+    return { ...this.buildCloseResult(updated, closedLines, Array.from(putawayLocationIds), poReconciliation), costReconciliation };
   }
 
-  // ─── Complete All Lines ───────────────────────────────────────
+  async retryCosts(orderId: number, userId: string | null) {
+    if (!Number.isSafeInteger(orderId) || orderId <= 0) throw new ReceivingError("Receiving order ID is invalid", 400);
+    const receipt = await this.storage.getReceivingOrderById(orderId);
+    if (!receipt) throw new ReceivingError("Receiving order not found", 404);
+    if (receipt.status !== "closed") throw new ReceivingError("Cost retry requires a completed physical receipt", 409);
+    return processReceiptCostRequests(this.db, orderId, this.approvedInvoiceCostReconciler, userId || "system:receiving", this.clock);
+  }
 
   async completeAllLines(orderId: number, input: unknown, actorId?: string | null) {
     const result = await this.db.transaction(async (tx) => {

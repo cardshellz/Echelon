@@ -1,3 +1,4 @@
+import { costGraphLockExecute } from "./cost-graph.fixture";
 import { describe, expect, it, vi } from "vitest";
 import {
   poApprovalTiers,
@@ -295,7 +296,7 @@ describe("purchase-order lifecycle concurrency", () => {
         currentDate: "2029-01-02",
       }),
     });
-    expect(db.execute).toHaveBeenCalledTimes(1);
+    expect(db.execute).toHaveBeenCalledTimes(2);
     expect(db.updatePatches).toHaveLength(0);
     expect(db.insertedRows).toHaveLength(0);
   });
@@ -362,7 +363,7 @@ describe("purchase-order lifecycle concurrency", () => {
         pricingBasis: "legacy_unknown",
       }),
     });
-    expect(db.execute).not.toHaveBeenCalled();
+    expect(db.execute).toHaveBeenCalledTimes(1);
     // Legacy cent-field repairs are attempted under the same transaction and
     // therefore roll back with the lifecycle rejection. No header transition
     // or durable audit is allowed.
@@ -617,6 +618,7 @@ function inlineRetryDb(vendor: any) {
     transaction: vi.fn(async (fn: any) => {
       transactionAttempt++;
       const tx: any = {
+        execute: costGraphLockExecute(),
         select: vi.fn(() => {
           let table: unknown;
           const chain: any = {

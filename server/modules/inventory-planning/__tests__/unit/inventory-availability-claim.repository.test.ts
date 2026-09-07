@@ -17,7 +17,10 @@ function hash(value: unknown): string {
 }
 
 function createPool(handler: (text: string, values: unknown[]) => Promise<any>) {
-  const query = vi.fn(async (text: string, values: unknown[] = []) => handler(text, values));
+  const query = vi.fn(async (text: string, values: unknown[] = []) => {
+    if (text.includes("pg_advisory_xact_lock") && text.includes("inventory.cost_graph")) return { rows: [] };
+    return handler(text, values);
+  });
   const release = vi.fn();
   return {
     pool: { connect: vi.fn(async () => ({ query, release })) } as any,
@@ -1520,6 +1523,8 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
     }));
     expect(commandIndex).toBeGreaterThanOrEqual(0);
     expect(calls[commandIndex]?.values?.[2]).toBe("pick_observation");
+    expect(calls[0].text).toBe("BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE");
+    expect(calls[1].text).toContain("inventory.cost_graph");
     expect(calls.at(-1)?.text).toBe("COMMIT");
   });
 
@@ -1756,6 +1761,8 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
       totalInputCostMills: "625",
       idempotentReplay: false,
     });
+    expect(fake.query.mock.calls[0][0]).toContain("BEGIN");
+    expect(fake.query.mock.calls[1][0]).toContain("inventory.cost_graph");
     expect(writer.executePackageOperation).toHaveBeenCalledOnce();
     expect(writer.executePackageOperation).toHaveBeenCalledWith(expect.objectContaining({
       claimId: BigInt(9),

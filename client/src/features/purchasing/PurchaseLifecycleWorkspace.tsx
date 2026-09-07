@@ -1,3 +1,7 @@
+import { PurchaseRfqOrigins } from "./PurchaseRfqOrigins";
+import { useReceiptCostActions } from "./use-receipt-cost-actions";
+import type { ReceiptCostActions } from "./PurchaseCostApplications";
+import { PurchaseCostTrace } from "./PurchaseCostTrace";
 import React from "react";
 import { queryOptions, useQuery } from "@tanstack/react-query";
 import { RefreshCw } from "lucide-react";
@@ -25,7 +29,13 @@ export async function loadPurchaseWorkspace(purchaseOrderId: number, signal?: Ab
     throw new Error("You do not have access to this purchase workspace. Sign in with an authorized account and retry.");
   }
   if (response.status === 404) throw new Error("This purchase order is unavailable or no longer exists.");
-  if (response.status === 422) throw new Error("This purchase has too many connected records for this view. Use the Shipments, Receipts and Invoices tabs to inspect source records.");
+  if (response.status === 422) {
+    const failure: unknown = await response.json().catch(() => null);
+    if (failure && typeof failure === "object" && "code" in failure && failure.code === "PURCHASE_WORKSPACE_COST_SOURCE_CONFLICT") {
+      throw new Error("Recorded cost source links conflict. Review the shipment allocations before loading this cost workspace.");
+    }
+    throw new Error("This purchase has too many connected records for this view. Use the Shipments, Receipts and Invoices tabs to inspect source records.");
+  }
   if (!response.ok) throw new Error(`Could not load the purchase workspace (HTTP ${response.status}). Please retry.`);
   const result = purchaseWorkspaceSchema.safeParse(await response.json());
   if (!result.success || result.data.purchase.id !== purchaseOrderId) {
@@ -43,11 +53,12 @@ export function purchaseWorkspaceQueryOptions(purchaseOrderId: number) {
   });
 }
 
-export function PurchaseLifecycleWorkspaceView({ data, navigation }: { data: PurchaseWorkspace; navigation: ProcurementNavigation }) {
+export function PurchaseLifecycleWorkspaceView({ data, navigation, costActions }: { data: PurchaseWorkspace; navigation: ProcurementNavigation; costActions?: ReceiptCostActions }) {
   return (
     <div className="space-y-4" data-testid="purchase-lifecycle-workspace">
+      <PurchaseRfqOrigins key={data.purchase.id} sources={data.rfqOrigins ?? []} />
       <div className="grid min-w-0 gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.1fr)]">
-        <PurchaseLifecycleOverview data={data} navigation={navigation} />
+        <div className="min-w-0 space-y-5"><PurchaseLifecycleOverview data={data} navigation={navigation} /><PurchaseCostTrace data={data} navigation={navigation} costActions={costActions} /></div>
         <PurchaseRecordInspector data={data} navigation={navigation} />
       </div>
       {data.limitations.length > 0 && (
@@ -62,6 +73,7 @@ export function PurchaseLifecycleWorkspaceView({ data, navigation }: { data: Pur
 
 export function PurchaseLifecycleWorkspace({ purchaseOrderId, navigation }: PurchaseLifecycleWorkspaceProps) {
   const { data, error, isLoading, isFetching, refetch } = useQuery(purchaseWorkspaceQueryOptions(purchaseOrderId));
+  const costActions = useReceiptCostActions(purchaseOrderId);
 
   if (isLoading) {
     return <Card><CardContent role="status" className="flex items-center gap-3 p-6 text-sm text-muted-foreground"><RefreshCw className="h-4 w-4 animate-spin" aria-hidden="true" />Loading connected purchase records…</CardContent></Card>;
@@ -86,7 +98,7 @@ export function PurchaseLifecycleWorkspace({ purchaseOrderId, navigation }: Purc
         <Button variant="outline" size="sm" onClick={() => void refetch()} disabled={isFetching}><RefreshCw className={`h-4 w-4 ${isFetching ? "animate-spin" : ""}`} aria-hidden="true" />Refresh</Button>
       </div>
       {error && <p role="alert" className="rounded-md border p-3 text-sm text-amber-700 dark:text-amber-400">Refresh failed. Showing the previously loaded records; use Refresh to try again.</p>}
-      <PurchaseLifecycleWorkspaceView data={data} navigation={navigation} />
+      <PurchaseLifecycleWorkspaceView data={data} navigation={navigation} costActions={costActions} />
     </div>
   );
 }

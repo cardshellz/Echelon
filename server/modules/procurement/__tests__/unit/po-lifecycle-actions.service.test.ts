@@ -1,3 +1,4 @@
+import { costGraphLockExecute } from "./cost-graph.fixture";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockDetectQtyVariance = vi.fn().mockResolvedValue(undefined);
@@ -30,6 +31,7 @@ function buildMockDb(txSelectResults: any[][] = []) {
     return chain;
   });
   const db: any = {
+      execute: costGraphLockExecute(),
     insertedRows,
     updateCalls,
     insert: vi.fn(() => ({
@@ -187,7 +189,9 @@ describe("PO lifecycle actions", () => {
       getPurchaseOrderById: vi.fn().mockResolvedValue(po),
       updatePurchaseOrderStatusWithHistory: vi.fn().mockResolvedValue({ id: 2, status: "approved" }),
     });
-    const svc = createPurchasingService(db, storage);
+    const svc = createPurchasingService(db, storage, {
+      readApprovalActor: async (_tx, userId) => ({ userId, active: true, roles: [], approvalGrantIds: [1], hasScopedApprovalGrant: false }),
+    });
 
     await svc.approve(2, "user-2", "approved by ops");
 

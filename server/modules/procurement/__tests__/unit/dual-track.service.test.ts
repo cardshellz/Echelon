@@ -409,7 +409,7 @@ describe("createReceiptFromPO — receipt idempotency", () => {
     const result = await svc.createReceiptFromPO(1, "user-1");
 
     expect(mockDb.transaction).toHaveBeenCalledOnce();
-    expect(mockDb.execute).toHaveBeenCalledTimes(4);
+    expect(mockDb.execute).toHaveBeenCalledTimes(5);
     expect((mockDb.execute as any).mock.invocationCallOrder[0]).toBeLessThan(
       (storage.createReceivingOrder as any).mock.invocationCallOrder[0],
     );

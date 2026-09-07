@@ -1,3 +1,4 @@
+import { costGraphLockExecute } from "./cost-graph.fixture";
 import { describe, expect, it, vi } from "vitest";
 import {
   poEvents,
@@ -33,6 +34,7 @@ function buildDb(context: {
   }
 
   const tx: any = {
+    execute: costGraphLockExecute(),
     select: vi.fn(() => {
       let table: unknown;
       const chain: any = {

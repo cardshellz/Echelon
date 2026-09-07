@@ -421,6 +421,18 @@
   "inventory.cost_adjustment_log": [
     "modules/inventory"
   ],
+  "inventory.cost_application_lots": [
+    "modules/inventory"
+  ],
+  "inventory.cost_applications": [
+    "modules/inventory"
+  ],
+  "inventory.cost_component_protections": [
+    "modules/inventory"
+  ],
+  "inventory.cost_reporting_events": [
+    "modules/inventory"
+  ],
   "inventory.cycle_count_items": [
     "modules/inventory"
   ],
@@ -780,6 +792,18 @@
   "procurement.purchase_pipeline_job_runs": [
     "modules/procurement"
   ],
+  "procurement.purchase_supplier_progress": [
+    "modules/procurement"
+  ],
+  "procurement.purchase_supplier_progress_revisions": [
+    "modules/procurement"
+  ],
+  "procurement.purchase_planning_policy": [
+    "modules/procurement"
+  ],
+  "procurement.purchase_planning_policy_revisions": [
+    "modules/procurement"
+  ],
   "procurement.purchase_recommendation_lines": [
     "modules/procurement"
   ],
@@ -790,6 +814,12 @@
     "modules/procurement"
   ],
   "procurement.purchasing_recommendation_po_handoffs": [
+    "modules/procurement"
+  ],
+  "procurement.receipt_cost_attempts": [
+    "modules/procurement"
+  ],
+  "procurement.receipt_cost_requests": [
     "modules/procurement"
   ],
   "procurement.receipt_reversals": [
@@ -805,6 +835,12 @@
     "modules/procurement"
   ],
   "procurement.request_for_quotes": [
+    "modules/procurement"
+  ],
+  "procurement.rfq_purchase_order_line_links": [
+    "modules/procurement"
+  ],
+  "procurement.rfq_quote_revisions": [
     "modules/procurement"
   ],
   "procurement.vendor_invoice_attachments": [
@@ -1002,6 +1038,9 @@
   "shipping.variant_shipping_attrs": [
     "modules/shipping-engine"
   ],
+  "warehouse.assembly_packing_handoff_receipts": [
+    "modules/warehouse"
+  ],
   "warehouse.echelon_settings": [
     "modules/orders",
     "modules/warehouse",
@@ -1032,19 +1071,16 @@
   "warehouse.work_access_scopes": [
     "modules/warehouse"
   ],
-  "warehouse.assembly_packing_handoff_receipts": [
-    "modules/warehouse"
-  ],
   "warehouse.work_configuration_revisions": [
     "modules/warehouse"
   ],
-  "warehouse.work_stations": [
+  "warehouse.work_item_events": [
     "modules/warehouse"
   ],
   "warehouse.work_items": [
     "modules/warehouse"
   ],
-  "warehouse.work_item_events": [
+  "warehouse.work_stations": [
     "modules/warehouse"
   ],
   "wms.allocation_exceptions": [

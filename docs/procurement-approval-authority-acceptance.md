@@ -1,0 +1,43 @@
+# Purchase approval authority acceptance
+
+## What the code definitely does
+
+The Settings editor calls the field **Required Approver Role** and offers `lead` and `admin` (`client/src/pages/Settings.tsx`, approval-tier editor). `identity.domain.ts:SYSTEM_ROLES` maps those keys to the named system roles Team Lead and Administrator. `seedRBACUseCase` creates those roles and migrates legacy memberships. Neither contract defines a minimum-role hierarchy. This implementation therefore requires the exact configured role; Administrator does not implicitly satisfy a Team Lead requirement. An explicitly named custom role must match exactly.
+
+The default Team Lead permission list does **not** include `purchasing:approve`. Configuring a Team Lead tier therefore also requires granting that permission through the existing role controls. This change does not edit live users, roles, settings, or grants.
+
+The execution trace is:
+
+1. `purchase-order.routes.ts:handleLifecycleCommand` takes the actor ID from the authenticated session, not request data. `requirePermission` continues to check current permission records at the HTTP boundary. Structured purchase errors now retain `details` in the HTTP response.
+2. `purchasing.service.ts:approve` acquires the shared inventory cost-graph lock and reads authority through the Identity owner before locking purchase economics. `purchase-approval-access.repository.ts:readPurchaseApprovalActor` reads the current active account, assigned roles, and `purchasing:approve` grants. PostgreSQL share locks cover the account, membership, role, grant, and permission rows through transaction commit. No password is returned and legacy/session role strings do not authorize approval.
+3. `purchase-order-approval.policy.ts:assertPurchaseApprovalPermission` requires an active account and an unrestricted approval grant. Identity's arbitrary `constraints` JSON has no implemented generic scope contract, so a scoped-only grant fails closed. A separately recorded unrestricted grant remains valid.
+4. With `requireApproval=true`, `getMatchingApprovalTierTx` reads the two highest applicable active thresholds in deterministic threshold/ID order. `assertUniqueHighestApprovalTier` rejects tied highest thresholds with `PO_APPROVAL_TIER_AMBIGUOUS`, including duplicate tiers that name the same role. `buildPurchaseApprovalSnapshot` validates exact integer cents, matches the required role, and freezes the actor, role and grant IDs, tier role/threshold, and approved total.
+5. The approved header, status history, and approved event containing `approval_authority` commit in the existing transaction. Failure of the audit insertion rolls back all of them. A denied role also rolls back any provisional repair of legacy line economics.
+6. `sendWithLockedEconomics` checks the latest approved event against the current tier, amount, and approved actor ID in addition to the existing line-version checks. A changed role or threshold under the same tier ID, changed amount, missing history, or malformed snapshot returns the order to pending approval without sending it. Existing approved events remain unchanged by these commands.
+
+With `requireApproval=false`, sending keeps its existing behavior without requiring an approval snapshot. An optional manual approval still checks active identity and the actual approval permission but ignores dormant tier controls. This is independent of the existing combined `sendToVendor` endpoint, which continues to require no active tiers.
+
+## Assumptions and policy boundaries
+
+No hierarchy, Administrator override, warehouse scope interpretation, or client-supplied authority is assumed. Alias mapping comes from the existing Identity seed contract. The approval event records authority **at approval time**. Later role or grant changes prevent a new approval; they do not rewrite a previously committed approval event. This change does not introduce automatic retrospective revocation of valid decisions.
+
+Historical controlled approvals without the new authority snapshot require review again before sending. History is not backfilled with invented role or grant evidence. Cost posting, receipt availability, payment, vendor communication, and external reporting delivery are outside this command.
+
+## Tests and failure modes
+
+`purchase-approval-authority.integration.test.ts` passed **34 real PostgreSQL tests** against a separately named, explicitly disposable database. The real Express routes, HTTP permission middleware, Identity queries, purchasing service, domain policy, and transaction/audit writers execute. Only session establishment and the connection boundary are test adapters. Fixtures derive column names/types from the production Drizzle definitions and install relevant identity FK/unique constraints; this is an owner integration suite, not a substitute for the full migration suite.
+
+Coverage includes forged request/session role data; missing/inactive accounts; missing and scoped-only grants; exact Team Lead permission plus membership; successful approval and send; duplicate retries without duplicate approved events; policy/amount changes under the same tier ID; missing historical authority; both kinds of duplicate threshold; solo send and optional solo approval; rollback of provisional monetary repair and injected audit failure. Five concurrent cases observe PostgreSQL lock waiting while revoking the grant, membership, active account, role name, or permission, then verify the already authorized transaction commits before the revocation and that a later approval is denied.
+
+The policy, history boundary, existing lifecycle/HTTP, and recommendation handoff guard suites passed **100 tests**. The writer ratchet passed **3 tests**, and the migration prefix collision check passed **1 test**. `tsc --noEmit` passes. Invalid cents and malformed policy/actor evidence fail explicitly; unsupported or conflicting policy never silently selects a role.
+
+## Risks and what is not proven
+
+Migration **227_purchase_order_history_retention.sql** closes the identified cascade gap. It applies atomically, preserves existing rows, rejects every `po_events` UPDATE/DELETE/TRUNCATE, and prevents parent purchase DELETE/TRUNCATE when an event, status-history row, or revision exists. It adds purchase-ID indexes for the two older history tables. No legitimate production event mutation writer was found: the purchasing service, purchase-order line command owner, and recommendation handoff owner append events. Existing revision/status writers also append; their separate user/line `ON DELETE SET NULL` policies are outside this event immutability change.
+
+`purchasing.service.ts:deletePO` validates the identifier and locks graph then PO, checks all three history sources and the existing recommendation handoff guard, and rejects a recorded purchase with `PO_HISTORY_DELETE_BLOCKED` directing cancellation. `procurement.storage.ts:deletePurchaseOrder` now accepts the owning transaction and adds a draft-state delete predicate. Its scope is only that method and its interface signature. Database guard failures are classified into the same actionable domain error. History-free manual drafts retain their previous deletion behavior; drafts created through `createPurchaseOrderWithLines` have creation history and should be cancelled to retain it.
+
+All 34 PostgreSQL cases run with migration227 installed. Added coverage proves direct event UPDATE/DELETE/TRUNCATE rejection; parent DELETE/TRUNCATE CASCADE rejection; legacy status-only and revision-only protection; the actual approve → policy change → pending → return-to-draft → HTTP delete denial; successful cancellation; preserved original and new decisions on reapproval; idempotent migration replay; history-free draft deletion; recommendation handoff denial; and an actual owner delete waiting behind an uncommitted event FK lock before seeing and preserving the newly committed event. The disposable fixture resets its own guards only during between-case seeding and reinstalls the real migration before every owner action.
+
+Application rollback should retain this additive history guard. Reverting it would restore the observed history-deletion defect. Production history-table cardinality and index-build duration were not measured in this development task; deployment scheduling remains part of the integrated release review.
+No deployment, live role changes, vendor message, invoice posting, or external delivery was performed. The final integrated release must run its full regression and migration checks after combining this checkpoint with other workstreams.

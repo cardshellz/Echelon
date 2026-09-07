@@ -2,14 +2,8 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-// UI contract for the RFQ workbench page (design surface 05,
-// /procurement/rfqs) — the LAST engine surface re-homed before PurchasingView
-// retires. Pattern follows procurement-runs-ui-contract.test.ts: pin the
-// load-bearing strings so a refactor cannot silently drop a frozen contract —
-// the route + roles, the endpoints the page consumes, the READ-ONLY invariant
-// on BOTH sides (the page performs no mutations; the new server endpoint is
-// registered as a GET with no mutation sibling), the demoted-to-tracking
-// framing, and the engine tab-strip agreement across all four shipped pages.
+// Preserve the RFQ navigation and list contracts while the workflow panel owns
+// quote capture and draft conversion. Browser and PG tests verify its behavior.
 
 // Normalize CRLF so a core.autocrlf=true (Windows) checkout matches the same
 // bytes CI's LF checkout sees.
@@ -17,6 +11,8 @@ const readSource = (relativePath: string): string =>
   readFileSync(resolve(process.cwd(), relativePath), "utf8").replace(/\r\n/g, "\n");
 
 const page = readSource("client/src/pages/ProcurementRfqs.tsx");
+const panel = readSource("client/src/features/purchasing/RfqWorkflowPanel.tsx");
+const workflowRoutes = readSource("server/modules/procurement/rfq-workflow.routes.ts");
 const app = readSource("client/src/App.tsx");
 const routes = readSource("server/modules/procurement/purchasing-recommendation.routes.ts");
 const rfqService = readSource("server/modules/procurement/purchasing-rfq.service.ts");
@@ -40,19 +36,17 @@ describe("procurement RFQs UI contract", () => {
     expect(routes).toContain('app.get("/api/purchasing/rfq-queue"');
   });
 
-  it("performs NO mutations — the page is read-only", () => {
-    // RFQ creation lives in the cockpit's Order Builder (POST
-    // /api/purchasing/rfq-queue, pinned by reorder-engine-ui-contract), and
-    // the post-draft lifecycle is not built server-side. Nothing on this page
-    // may create, send, or award: no fetch method, no HTTP verb literal, no
-    // useMutation.
-    expect(page.match(/method: "/g)).toBeNull();
-    expect(page).not.toMatch(/"(?:POST|PATCH|PUT|DELETE)"/);
-    expect(page).not.toContain("useMutation");
-    // The creation affordance is a LINK back to the Order Builder.
+  it("delegates quote capture and draft conversion to the permission-aware workflow panel", () => {
+    expect(page).toContain("<RfqWorkflowPanel");
+    expect(panel).toContain('hasPermission("purchasing", "edit")');
+    expect(panel).toContain("financialCommandFetchJson");
+    expect(panel).toContain("Idempotency-Key");
+    expect(panel).toContain("/lines/${line.id}/quotes");
+    expect(panel).toContain("/rfqs/${rfqId}/convert");
+    expect(panel).toContain("quoteRevisionId: line.latestQuote!.id");
     expect(page).toContain("RFQs start in the Order Builder");
+    expect(workflowRoutes).toContain('requirePermission("purchasing", "edit")');
   });
-
   it("registers the new server endpoint read-only through the service seam", () => {
     // GET /api/purchasing/rfqs: permission consistent with the sibling
     // procurement read (GET /api/purchasing/rfq-queue is "inventory"/"view").
@@ -71,24 +65,18 @@ describe("procurement RFQs UI contract", () => {
     expect(rfqService).not.toMatch(/\.(insert|update|delete|execute)\(/);
   });
 
-  it("frames the demoted workbench honestly: tracking, not an entry point", () => {
-    // Spec §11.2/§11.3: quote requests START in the Order Builder; a line
-    // lands here only via "Request quote".
+  it("connects requests to quote review and their exact purchase orders", () => {
     expect(page).toContain("Request quote");
     expect(page).toContain("Order Builder");
     expect(page).toContain('href="/reorder-analysis"');
-    // The mock's send/compare/award stages are NOT built server-side — the
-    // unshipped lifecycle is one quiet line, not a fake pipeline.
-    expect(page).toContain(
-      "unlock when the RFQ lifecycle ships",
-    );
-    expect(page).not.toContain("Award & draft POs");
-    expect(page).not.toContain("comparison matrix");
+    expect(page).toContain("Record the final vendor quote here");
+    expect(page).toContain("focusedRfqId");
+    expect(panel).toContain("purchaseOrder.purchaseOrderId");
+    expect(panel).toContain("Quote history");
+    expect(panel).toContain("Create draft PO");
   });
-
   it("renders the full schema status enums instead of masking them", () => {
-    // request_for_quotes_status_chk — everything is draft until the lifecycle
-    // ships, but a row that ever carries another status must render honestly.
+    // Stored lifecycle statuses must render without masking quoted/ordered rows.
     for (const status of ["draft", "sent", "partially_quoted", "quoted", "declined", "cancelled", "expired"]) {
       expect(page).toContain(`${status}:`);
     }

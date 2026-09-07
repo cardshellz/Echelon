@@ -1,3 +1,4 @@
+import { projectReplacementForecast, type PurchaseReplacementForecast } from "@shared/procurement/purchase-replacement-forecast";
 import type { PurchaseForecastEvaluationHorizonDays } from "@shared/schema";
 
 export const PURCHASE_FORECAST_EVALUATION_VERSION = 2;
@@ -23,6 +24,7 @@ export type PurchaseForecastOverlayContributionCandidate = {
 };
 
 export type PurchaseForecastEvaluationCandidate = {
+  replacementForecasts?: PurchaseReplacementForecast[];
   observationId: number;
   runId: number;
   productId: number;
@@ -355,11 +357,12 @@ export function buildPurchaseForecastEvaluation(input: {
     assertValidDate(candidate.latestActualDemandAt, "latestActualDemandAt");
   }
 
-  const forecastDemandMicros = checkedMultiply(
-    candidate.forecastDailyPiecesMicros,
-    candidate.horizonDays,
-    "forecastDemandMicros",
-  );
+  const replacementProjection = candidate.replacementForecasts?.length
+    ? projectReplacementForecast({ productId: candidate.productId, fromDate: candidate.observedFrom.toISOString().slice(0, 10),
+      days: candidate.horizonDays, baselineDailyMicros: candidate.forecastDailyPiecesMicros, ranges: candidate.replacementForecasts })
+    : null;
+  const forecastDemandMicros = replacementProjection?.totalMicros
+    ?? checkedMultiply(candidate.forecastDailyPiecesMicros, candidate.horizonDays, "forecastDemandMicros");
   const baselineDemandMicros = checkedMultiply(
     candidate.baselineDailyPiecesMicros,
     candidate.horizonDays,
@@ -425,9 +428,10 @@ export function buildPurchaseForecastEvaluation(input: {
         requiresShipping: true,
         activeVariantSkuMatch: true,
       },
-      predictionScope: "historical_rate_only",
+      predictionScope: replacementProjection ? "historical_rate_with_date_replacements" : "historical_rate_only",
+      ...(replacementProjection ? { replacementForecast: replacementProjection } : {}),
       overlayAdjustedPredictionScope: overlayEvaluation.overlayEvaluable
-        ? "historical_rate_plus_start_date_overlay"
+        ? (replacementProjection ? "historical_rate_with_date_replacements_plus_start_date_overlay" : "historical_rate_plus_start_date_overlay")
         : null,
       forwardDemandOverlayIncluded:
         overlayEvaluation.overlayEvaluable && Number(overlayEvaluation.overlayWeightedDemandPieces) > 0,

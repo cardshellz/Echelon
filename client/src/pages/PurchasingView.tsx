@@ -80,6 +80,7 @@ interface RecommendationQualityControl {
 }
 
 interface ReorderItem {
+  supplyTiming?: import("@shared/procurement/purchase-planning-policy").PurchaseSupplyTiming;
   productId: number;
   productVariantId?: number;
   sku: string;
@@ -2093,7 +2094,7 @@ export default function PurchasingView() {
                         <TableCell className="font-mono font-medium">{item.sku}</TableCell>
                         <TableCell className="max-w-[200px] truncate text-sm" title={item.productName}>
                           {item.productName}
-                          {item.onOrderPieces > 0 && <div className="text-xs text-blue-500 mt-1">+{item.onOrderPieces} Inbound</div>}
+                          {item.onOrderPieces > 0 && <div className="text-xs text-blue-500 mt-1">+{item.onOrderPieces} {item.supplyTiming?.signal === "unverified_receipts" ? "Unresolved PO commitment" : "Inbound"}</div>}
                         </TableCell>
                         <TableCell>
                           <div className="flex flex-col gap-1.5">
@@ -2135,10 +2136,11 @@ export default function PurchasingView() {
                           ) : null}
                         </TableCell>
                         <TableCell className="text-right">
-                          <Badge variant="outline" className={`${cfg.bg} ${cfg.text} border-transparent gap-1 font-medium`}>
+                          {item.supplyTiming?.signal === "unverified_receipts" ? <Badge variant="outline" className="text-amber-800">Receipt review</Badge> : <Badge variant="outline" className={`${cfg.bg} ${cfg.text} border-transparent gap-1 font-medium`}>
                             <StatusIcon className="h-3 w-3" />
                             {cfg.label}
-                          </Badge>
+                          </Badge>}
+                          {item.supplyTiming?.reviewRequired && <div className="mt-1 max-w-[300px] whitespace-normal text-left text-xs text-amber-800">{item.supplyTiming.detail}</div>}
                         </TableCell>
                       </TableRow>
                     )

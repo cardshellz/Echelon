@@ -1,8 +1,11 @@
+import { purchaseReplacementForecastsSchema, type PurchaseReplacementForecast } from "@shared/procurement/purchase-replacement-forecast";
 import { createHash } from "node:crypto";
 
 export type PurchasingForecastMethod = "recent_order_velocity_v1" | "weighted_blend_v1";
 
 export interface PurchasingForecastPolicy {
+  growthPercent?: number;
+  replacementForecasts?: PurchaseReplacementForecast[];
   method: PurchasingForecastMethod;
   shortWindowDays: number;
   standardWindowDays: number;
@@ -42,6 +45,7 @@ export const DEFAULT_PURCHASING_FORECAST_POLICY: PurchasingForecastPolicy = {
 };
 
 export const PURCHASING_FORECAST_POLICY_CAPTURE_VERSION = 1;
+export type PurchasingForecastPolicyCaptureVersion = 1 | 2 | 3;
 
 export type PurchasingForecastPolicyCohortSnapshot = Omit<
   PurchasingForecastPolicy,
@@ -49,7 +53,7 @@ export type PurchasingForecastPolicyCohortSnapshot = Omit<
 >;
 
 export interface PurchasingForecastPolicyCohort {
-  captureVersion: typeof PURCHASING_FORECAST_POLICY_CAPTURE_VERSION;
+  captureVersion: PurchasingForecastPolicyCaptureVersion;
   fingerprint: string;
   snapshot: PurchasingForecastPolicyCohortSnapshot;
 }
@@ -75,6 +79,8 @@ export function normalizePurchasingForecastPolicy(
   const normalizedWeights = enabledWeightTotal > 0 ? weights : defaults.weights;
 
   return {
+    ...(value?.replacementForecasts?.length ? { replacementForecasts: purchaseReplacementForecastsSchema.parse(value.replacementForecasts).sort((a, b) => a.productId - b.productId || a.startDate.localeCompare(b.startDate)) } : {}),
+    ...(value?.growthPercent ? { growthPercent: boundedInteger(value.growthPercent, 0, -100, 1000) } : {}),
     method,
     shortWindowDays: boundedInteger(value?.shortWindowDays, defaults.shortWindowDays, 1, 60),
     standardWindowDays: boundedInteger(value?.standardWindowDays, defaults.standardWindowDays, 7, 180),
@@ -128,6 +134,7 @@ export function buildPurchasingForecastPolicyCohort(
   value?: Partial<PurchasingForecastPolicy> | null,
 ): PurchasingForecastPolicyCohort {
   const normalized = normalizePurchasingForecastPolicy(value);
+  // Versions 1 and 2 retain their byte-for-byte identity; nonempty replacement ranges select version 3.
   // Field order is part of the persisted fingerprint contract. Change it only with a capture-version migration.
   const snapshot: PurchasingForecastPolicyCohortSnapshot = {
     method: normalized.method,
@@ -150,11 +157,15 @@ export function buildPurchasingForecastPolicyCohort(
       low: normalized.forwardDemandConfidenceWeights.low,
     },
   };
+  // Version 1 hashes stay byte-for-byte stable. Growth is explicit version 2
+  // evidence; existing observations are never relabelled as growth forecasts.
+  if (normalized.growthPercent) snapshot.growthPercent = normalized.growthPercent;
+  if (normalized.replacementForecasts?.length) snapshot.replacementForecasts = normalized.replacementForecasts;
   const fingerprint = createHash("sha256")
     .update(JSON.stringify(snapshot), "utf8")
     .digest("hex");
   return {
-    captureVersion: PURCHASING_FORECAST_POLICY_CAPTURE_VERSION,
+    captureVersion: normalized.replacementForecasts?.length ? 3 : normalized.growthPercent ? 2 : PURCHASING_FORECAST_POLICY_CAPTURE_VERSION,
     fingerprint,
     snapshot,
   };

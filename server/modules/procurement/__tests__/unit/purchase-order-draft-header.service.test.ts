@@ -1,3 +1,4 @@
+import { costGraphLockExecute } from "./cost-graph.fixture";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../../po-exceptions.service", () => ({
@@ -38,6 +39,7 @@ function buildDb(
   });
 
   const tx: any = {
+    execute: costGraphLockExecute(),
     select,
     update: vi.fn(() => ({
       set: vi.fn((patch: Record<string, unknown>) => {

@@ -32,6 +32,7 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
   let repositoryFactory: typeof import("../../../../platform/commands/command-results.repository").createDrizzleFinancialCommandRepository;
   let defaultModulePool: pg.Pool | undefined;
   let ownsProcurement = false;
+  let ownsInventory = false;
   let ownsAudit = false;
   let auditReady = false;
   let commandTablesReady = false;
@@ -125,7 +126,9 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
     pool = new pg.Pool({ connectionString: TEST_DB_URL, max: 8, ssl: /localhost|127\.0\.0\.1/.test(TEST_DB_URL!) ? false : { rejectUnauthorized: false } });
     await pool.query("CREATE SCHEMA procurement");
     ownsProcurement = true;
-    for (const table of [schema.vendors, schema.inboundShipments, schema.inboundShipmentLines, schema.vendorInvoices, schema.inboundFreightCosts, schema.inboundFreightAllocations, schema.vendorInvoiceLines, schema.landedCostSnapshots, schema.landedCostAdjustments, schema.receivingOrders, schema.inboundShipmentStatusHistory]) {
+    await pool.query("CREATE SCHEMA inventory");
+    ownsInventory = true;
+    for (const table of [schema.vendors, schema.inboundShipments, schema.inboundShipmentLines, schema.vendorInvoices, schema.inboundFreightCosts, schema.inboundFreightAllocations, schema.vendorInvoiceLines, schema.landedCostSnapshots, schema.landedCostAdjustments, schema.receivingOrders, schema.inboundShipmentStatusHistory, schema.purchaseOrders, schema.purchaseOrderLines, schema.receivingLines, schema.inventoryLots]) {
       await pool.query(fixtureTable(table));
     }
     for (const foreignKey of [
@@ -163,6 +166,7 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
     for (const migration of ["136_financial_command_results.sql", "140_financial_command_operations.sql"]) {
       await pool.query(readFileSync(resolve(process.cwd(), "migrations", migration), "utf8"));
     }
+    await pool.query(readFileSync(resolve(process.cwd(), "migrations/222_procurement_cost_evidence.sql"), "utf8"));
     commandTablesReady = true;
     database = drizzle(pool, { schema });
 
@@ -222,6 +226,7 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
         if (commandTablesReady) cleanup.push(pool.query("DELETE FROM public.financial_command_results WHERE actor_id = $1 AND idempotency_key LIKE $2", ["procurement.shipment-cost", `${runId}-%`]));
         if (ownsAudit) cleanup.push(pool.query("DROP TABLE public.audit_events"));
         else if (auditReady) cleanup.push(pool.query("DELETE FROM public.audit_events WHERE actor = ANY($1::text[])", [[actorId, delegateId]]));
+        if (ownsInventory) await pool.query("DROP SCHEMA inventory CASCADE");
         if (ownsProcurement) cleanup.push(pool.query("DROP SCHEMA procurement CASCADE"));
         const failures = (await Promise.allSettled(cleanup)).filter((result): result is PromiseRejectedResult => result.status === "rejected");
         if (failures.length > 0) throw new AggregateError(failures.map((failure) => failure.reason), "Shipment command fixture cleanup failed");
@@ -430,8 +435,8 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
         }
         return lines;
       },
-      // This fixture proves procurement finalization. Inventory lot posting is
-      // a separate existing post-commit operation and has no fixture candidates.
+      // This historical line has no PO link. Finalization must remain available,
+      // with explicit cost review rather than inventing an inventory source.
       async getProvisionalLotsByShipment() { return []; },
     };
     const closingService = createService(database, closingStorage as Parameters<typeof createService>[1], undefined, () => NOW);
@@ -468,7 +473,12 @@ databaseTests.sequential("shipment cost command PostgreSQL guarantees", () => {
       const [editingPid, cancellationPid] = await Promise.all([ready, cancelReady]);
       await Promise.all([waitUntilBlocked(editingPid), waitUntilBlocked(cancellationPid)]);
       releaseClose();
-      expect(await closing).toMatchObject({ ok: true, value: { status: "closed", closedBy: actorId, closedAt: NOW } });
+      expect(await closing).toMatchObject({ ok: true, value: {
+        status: "closed", closedBy: actorId, closedAt: NOW,
+        costReviewIssues: [expect.objectContaining({ code: "LANDED_PURCHASE_SOURCE_MISSING" })],
+        costApplication: { status: "review_required", updated: 0,
+          skipped: [expect.objectContaining({ reason: "LANDED_PURCHASE_SOURCE_MISSING" })] },
+      } });
       expect(await editing).toMatchObject({ ok: false, error: { details: { code: "SHIPMENT_COST_TERMINAL" } } });
       expect(await cancelling).toMatchObject({ ok: false, error: { statusCode: 400, message: "Cannot transition from 'closed' to 'cancelled'" } });
       expect((await readCost()).actualCents).toBe(500);

@@ -1,3 +1,4 @@
+import { PurchaseReceiptCostLines } from "./PurchaseCostTrace";
 import React, { useEffect, useRef } from "react";
 import { Link } from "wouter";
 import { ArrowLeft, ExternalLink, Search, X } from "lucide-react";
@@ -228,7 +229,7 @@ export function PurchaseRecordInspector({ data, navigation }: { data: PurchaseWo
           <>
             {selected.kind === "purchase" && <PurchaseReadView purchase={selected.record} />}
             {selected.kind === "shipment" && <ShipmentReadView shipment={selected.record} purchaseOrderId={data.purchase.id} navigation={navigation} />}
-            {selected.kind === "receipt" && <ReceiptReadView receipt={selected.record} />}
+            {selected.kind === "receipt" && <><ReceiptReadView receipt={selected.record} />{data.costTrace && <section className="space-y-2 border-t pt-4" aria-label="Receipt cost evidence"><h4 className="text-sm font-semibold">Original receipt lots and current costs</h4><PurchaseReceiptCostLines trace={data.costTrace} receiptId={selected.record.id} data={data} navigation={navigation} /></section>}</>}
             {selected.kind === "invoice" && <InvoiceReadView invoice={selected.record} purchaseOrderId={data.purchase.id} navigation={navigation} />}
             {related.size > 0 && <section className="space-y-2 border-t pt-4" aria-label="Connected records"><h4 className="text-sm font-semibold">Connected records</h4><ul className="space-y-2">{[...related.values()].map((record) => <li key={`${record.kind}:${record.record.id}`}><Link href={navigation.inspectHref({ kind: record.kind, id: record.record.id })} className="rounded-sm text-sm text-primary underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">{recordTitle(record)}</Link></li>)}</ul></section>}
           </>

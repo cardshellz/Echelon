@@ -1,3 +1,4 @@
+import { PurchasePlanningPolicyEditor } from "@/components/purchasing/PurchasePlanningPolicyEditor";
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
@@ -537,6 +538,7 @@ function EventRow({
 }
 
 export default function DemandPlanner() {
+  const [replacementPolicyOpen, setReplacementPolicyOpen] = useState(false);
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [, navigate] = useLocation();
@@ -637,7 +639,8 @@ export default function DemandPlanner() {
           <h1 className="text-2xl font-bold">Demand Planner</h1>
           <p className="text-sm text-muted-foreground">Maintain future demand that feeds purchase recommendations.</p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
+          <Button variant="outline" onClick={() => setReplacementPolicyOpen(true)}>Growth and replacement forecasts</Button>
           <Button variant="outline" onClick={() => navigate("/reorder-analysis")}>Purchase recommendations</Button>
           <Button onClick={() => {
             setEditorEvent(null);
@@ -646,10 +649,16 @@ export default function DemandPlanner() {
         </div>
       </div>
 
+      <Dialog open={replacementPolicyOpen} onOpenChange={setReplacementPolicyOpen}>
+        <DialogContent className="max-h-[90vh] max-w-4xl overflow-y-auto">
+          <DialogHeader><DialogTitle>Growth and replacement forecasts</DialogTitle><DialogDescription>Review stock targets and exact demand totals for specific dates. Existing demand events remain additive.</DialogDescription></DialogHeader>
+          <PurchasePlanningPolicyEditor />
+        </DialogContent>
+      </Dialog>
       {policy && !policy.enabled && (
         <div className="flex items-center gap-3 border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
           <AlertTriangle className="h-5 w-5 shrink-0" />
-          Future-demand overlays are disabled in the purchasing forecast policy. Events remain stored but currently add zero pieces to recommendations.
+          Additive demand-event overlays are disabled in the purchasing forecast policy. Events remain stored but currently add zero pieces to recommendations.
         </div>
       )}
 
@@ -658,7 +667,7 @@ export default function DemandPlanner() {
           <CardHeader className="pb-3">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
-                <CardTitle className="flex items-center gap-2 text-lg"><TrendingUp className="h-5 w-5" />Forecast impact</CardTitle>
+                <CardTitle className="flex items-center gap-2 text-lg"><TrendingUp className="h-5 w-5" />Additive event impact</CardTitle>
                 <CardDescription>{policy.totalProducts} products inside the configured {policy.horizonDays}-day horizon</CardDescription>
               </div>
               <div className="flex gap-2 text-xs">

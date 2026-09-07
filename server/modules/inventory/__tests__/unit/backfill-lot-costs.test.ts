@@ -1,5 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 
+// These owner units isolate SQL row fixtures from the shared lock boundary.
+// Actual lock ordering and rollback are exercised in cost-lineage-owners.integration.test.ts.
+vi.mock("../../infrastructure/cost-evidence.repository", async (importOriginal) => ({
+  ...await importOriginal<typeof import("../../infrastructure/cost-evidence.repository")>(),
+  lockInventoryCostGraph: vi.fn(async () => undefined),
+}));
+
 /**
  * COGS Phase 7: backfill zero-cost lots from a manual SKU→cost upload.
  */
@@ -47,7 +54,7 @@ describe("COGSService.backfillLotCostsBySku", () => {
         }
         if (executeCallCount === 5) {
           // revalue lot 10: cascade SELECT
-          return { rows: [{ id: 1, qty: 3, unit_cost_cents: 0 }] };
+          return { rows: [{ id: 1, qty: 3, old_unit_cost_mills: 0, unit_cost_cents: 0 }] };
         }
         if (executeCallCount === 6) {
           // revalue lot 10: cascade UPDATE

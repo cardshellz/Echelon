@@ -16,6 +16,7 @@ import {
   isOrderQueueSelection,
   isOverstocked,
   orderSoonDates,
+  orderLineValueCents,
   parseReorderEngineDeepLink,
   skippedAppendixRows,
   skippedReasonLabel,
@@ -80,6 +81,14 @@ describe("chip filters (two-tier additive union)", () => {
     expect(isOrderQueueSelection(new Set<ChipKey>(DEFAULT_CHIP_SELECTION))).toBe(true);
     expect(isOrderQueueSelection(new Set<ChipKey>(["needs_order"]))).toBe(false);
     expect(isOrderQueueSelection(new Set<ChipKey>(["needs_order", "order_soon", "ok"]))).toBe(false);
+  });
+
+  it("keeps zero-buy supply review visible in the default daily queue while preserving deliberate filters", () => {
+    const review = { ...chipItem("ok"), supplyTiming: { reviewRequired: true } };
+    const healthy = chipItem("ok");
+    expect(filterItemsByChips([review, healthy], new Set(DEFAULT_CHIP_SELECTION))).toEqual([review]);
+    expect(filterItemsByChips([review, healthy], new Set<ChipKey>(["order_soon"]))).toEqual([]);
+    expect(filterItemsByChips([review, healthy], new Set<ChipKey>(["ok"]))).toEqual([review, healthy]);
   });
 
   it("sorts statuses by severity", () => {
@@ -771,5 +780,17 @@ describe("order builder — server payload assembly", () => {
       expect(reduced.line.quantityOverrideReason).toBe("Budget cap");
       expect(reduced.line.allocationOverrideApproved).toBe(false);
     }
+  });
+});
+
+
+describe("selected supplier quote economics", () => {
+  it("uses the exact purchase-unit quote instead of extending rounded piece cost", () => {
+    const item = { suggestedOrderPieces: 300, estimatedCostMills: 33, estimatedCostCents: 0,
+      supplierBasis: { pricingBasis: "per_purchase_uom", purchaseUom: "case", piecesPerPurchaseUom: 3, quotedUnitCostMills: 100 } };
+    expect(orderLineValueCents(item, 300)).toBe(100);
+    expect(orderLineValueCents({ ...item, supplierBasis: undefined }, 300)).toBe(99);
+    expect(orderLineValueCents(item, 301)).toBeNull();
+    expect(orderLineValueCents({ ...item, supplierBasis: { ...item.supplierBasis, quotedUnitCostMills: null } }, 300)).toBeNull();
   });
 });

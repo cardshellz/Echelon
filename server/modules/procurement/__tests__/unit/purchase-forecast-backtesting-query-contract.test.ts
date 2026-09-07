@@ -34,7 +34,7 @@ describe("purchase forecast backtesting actual-demand query", () => {
   });
 
   it("isolates accuracy aggregates and recent evidence to one captured policy fingerprint", () => {
-    expect(source).toContain("observation.forecast_policy_capture_version = ${PURCHASING_FORECAST_POLICY_CAPTURE_VERSION}");
+    expect(source).toContain("observation.forecast_policy_capture_version IN (1, 2, 3)");
     expect(source.match(/observation\.forecast_policy_fingerprint = \$\{input\.policyFingerprint\}/g))
       .toHaveLength(2);
     expect(source.match(/observation\.forecast_method = \$\{input\.forecastMethod\}/g))

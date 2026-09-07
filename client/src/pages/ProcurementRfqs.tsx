@@ -1,30 +1,8 @@
-// RFQ workbench page — design surface 05 (/procurement/rfqs, mockup
-// 05-rfq-workbench.html). The LAST engine surface to re-home before
-// PurchasingView retires.
-//
-// DEMOTED TO A TRACKING SURFACE (spec §11.2/§11.3): the workbench is no longer
-// an entry point. Quote requests start in the cockpit's Order Builder — a line
-// lands here only when the operator chose "Request quote" — so this page is:
-//   1. the created quote-request drafts (GET /api/purchasing/rfqs, the
-//      read-only tracking list added with this page), and
-//   2. the sourcing requirement queue (existing GET /api/purchasing/rfq-queue):
-//      latest-run requirement lines with remaining/allocated pieces and their
-//      active-RFQ references.
-//
-// HONESTY OVER CHROME (deliberate deviations from the mock): the mock's
-// send / quote-capture / comparison-matrix / award stages are the FUTURE
-// lifecycle — none of it exists server-side (the post-draft RFQ lifecycle is
-// the top unfinished boundary in
-// docs/PURCHASING-HARDENING-HANDOFF-2026-07-19.md). In practice every row is
-// a draft; the schema's other statuses render honestly if rows ever carry
-// them, and the unbuilt lifecycle is one quiet line, not a fake pipeline.
-//
-// READ-ONLY BY DESIGN: this page performs no mutations. RFQ draft creation
-// stays in the Order Builder (POST /api/purchasing/rfq-queue, pinned by the
-// reorder-engine contract suite); nothing here can create, send, or award.
+// RFQ request tracking, immutable quote capture, and reviewed draft PO handoff.
+import { RfqWorkflowPanel } from "@/features/purchasing/RfqWorkflowPanel";
 import { Fragment, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Link } from "wouter";
+import { Link, useSearch } from "wouter";
 import { formatMills } from "@shared/utils/money";
 import { ChevronDown, ChevronRight, ClipboardList, ExternalLink, Info } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -44,8 +22,7 @@ import {
 
 // GET /api/purchasing/rfqs — listRequestForQuotes in purchasing-rfq.service.ts.
 // Statuses mirror the schema enums (request_for_quotes_status_chk /
-// request_for_quote_lines_status_chk); everything is "draft" until the RFQ
-// lifecycle ships.
+// request_for_quote_lines_status_chk), including recorded quotes and purchases.
 interface RfqListLine {
   id: number;
   rfqId: number;
@@ -109,6 +86,7 @@ interface RfqQueueAllocation {
   rfqStatus: string;
   lineStatus: string;
   requestedPieces: number;
+  reservedPieces: number;
   vendorName: string | null;
 }
 
@@ -320,6 +298,7 @@ function RfqLineDetail({ rfq }: { rfq: RfqListItem }) {
           )}
         </tbody>
       </table>
+      <RfqWorkflowPanel rfqId={rfq.id} />
     </div>
   );
 }
@@ -329,6 +308,10 @@ function RfqLineDetail({ rfq }: { rfq: RfqListItem }) {
 // ---------------------------------------------------------------------------
 
 export default function ProcurementRfqs() {
+  const search = useSearch();
+  const requestedId = new URLSearchParams(search).get("rfqId");
+  const parsedId = requestedId && /^[1-9]\d*$/.test(requestedId) ? Number(requestedId) : null;
+  const focusedRfqId = parsedId !== null && Number.isSafeInteger(parsedId) && parsedId <= 2_147_483_647 ? parsedId : null;
   const [expandedRfqIds, setExpandedRfqIds] = useState<Set<number>>(new Set());
 
   const rfqListQuery = useQuery<RfqListResponse>({
@@ -375,11 +358,11 @@ export default function ProcurementRfqs() {
         <div className="min-w-0">
           <h1 className="text-xl font-bold md:text-2xl">RFQs</h1>
           <div className="mt-0.5 text-xs text-zinc-500">
-            Quote-request tracking — drafts created from the Order Builder and what still needs sourcing
+            Review supplier quotes and follow each request into its purchase order
           </div>
         </div>
         <div className="flex-1" />
-        {/* Read-only page: quote requests START in the cockpit's Order Builder. */}
+        {/* Quote requests start in the Order Builder; review continues here. */}
         <Link
           href="/reorder-analysis"
           className="inline-flex h-8 items-center gap-1.5 rounded-md border px-3 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-50 dark:text-zinc-200 dark:hover:bg-zinc-800"
@@ -422,18 +405,19 @@ export default function ProcurementRfqs() {
         </nav>
       </div>
 
-      {/* ---------------- Intro framing (workbench demoted to tracking) ---------------- */}
+      {/* ---------------- Quote workflow introduction ---------------- */}
       <div className="mb-4 flex items-start gap-2 rounded-md border border-zinc-200 bg-zinc-50/70 px-3 py-2 text-sm text-zinc-700 dark:border-zinc-800 dark:bg-zinc-900/50 dark:text-zinc-300">
         <Info className="mt-0.5 h-4 w-4 flex-none text-zinc-400" />
         <div>
-          Most orders go straight to a PO — you usually buy each SKU from one vendor at a known cost. A line
-          lands here only when you chose <b>Request quote</b> in the{" "}
+          Choose <b>Request quote</b> in the{" "}
           <Link href="/reorder-analysis" className="font-medium text-primary underline">
             Order Builder
           </Link>
-          . This page tracks those quote requests and the requirements behind them.
+          . Record the final vendor quote here, review the quantities and costs, then create a draft purchase order with its source history attached.
         </div>
       </div>
+
+      {focusedRfqId !== null && <Card className="mb-6 p-4"><RfqWorkflowPanel key={focusedRfqId} rfqId={focusedRfqId} /></Card>}
 
       {/* ---------------- 1 · Quote-request drafts ---------------- */}
       <Card className="mb-6 shadow-sm dark:bg-zinc-900">
@@ -537,11 +521,8 @@ export default function ProcurementRfqs() {
               </Table>
             </div>
           )}
-          {/* The honest lifecycle note — the mock's send/compare/award stages are
-              not built server-side; keep it to one quiet line. */}
           <div className="border-t px-4 py-2 text-[11px] text-zinc-500 dark:border-zinc-800">
-            Every request is a draft today — statuses beyond draft (send, quote capture, comparison, award)
-            unlock when the RFQ lifecycle ships.
+            Expand a request to capture supplier quotes, review revision history, and create a linked draft purchase order.
           </div>
         </CardContent>
       </Card>
@@ -585,7 +566,7 @@ export default function ProcurementRfqs() {
           {rfqQueueQuery.isLoading ? (
             <div className="p-4 text-sm text-zinc-500">Loading sourcing requirements…</div>
           ) : rfqQueueQuery.isError ? (
-            <div className="p-4 text-sm text-red-600">Failed to load the requirement queue.</div>
+            <div className="p-4 text-sm text-red-600">{rfqQueueQuery.error?.message ?? "Failed to load the requirement queue."}</div>
           ) : !queue?.run ? (
             <div className="p-6 text-sm text-zinc-500">
               No completed recommendation run yet — run the analysis from the{" "}
@@ -649,7 +630,7 @@ export default function ProcurementRfqs() {
                                   key={`${allocation.rfqId}-${index}`}
                                   variant="outline"
                                   className="border-violet-200 bg-violet-50 font-mono text-[10px] text-violet-700"
-                                  title={`${allocation.requestedPieces.toLocaleString()} pc · ${
+                                  title={`${allocation.reservedPieces.toLocaleString()} pc reserved (${allocation.requestedPieces.toLocaleString()} originally requested) · ${
                                     allocation.vendorName ?? "unknown vendor"
                                   } · line ${statusLabel(allocation.lineStatus)}`}
                                 >

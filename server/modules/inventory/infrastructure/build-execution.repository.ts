@@ -1,3 +1,4 @@
+import { lockInventoryCostGraph, recordLotCostContribution } from "./cost-evidence.repository";
 import { sql } from "drizzle-orm";
 import {
   allocateBuildCostLayers,
@@ -475,6 +476,7 @@ export class BuildExecutionRepository {
   }
 
   private async executeInTransaction(tx: Db, input: ExecuteBuildRunInput): Promise<BuildExecutionResult> {
+    await lockInventoryCostGraph(tx);
     await this.assertClaimBuildActionAvailable(tx, input.buildOrderId, "execute");
     const order = await this.lockOrder(tx, input.buildOrderId);
     const existingResult = await tx.execute(sql`
@@ -540,6 +542,16 @@ export class BuildExecutionRepository {
     `);
     const run = runResult.rows[0];
     const consumedCost = emptyCost();
+    const sourceQuantities = new Map<number, number>();
+    // Reuse the durable run timestamp; do not sample a second application clock.
+    if (!(run.created_at instanceof Date) && typeof run.created_at !== "string") {
+      throw new BuildDomainError("BUILD_COST_AUDIT_TIME_INVALID", "The build run has no recorded creation time.");
+    }
+    const lineageRecordedAt = run.created_at instanceof Date ? run.created_at : new Date(run.created_at);
+    if (!Number.isFinite(lineageRecordedAt.getTime())) {
+      throw new BuildDomainError("BUILD_COST_AUDIT_TIME_INVALID", "The build run has no valid recorded creation time.");
+    }
+    const lineageActor = input.actorId?.trim() || "system:build_execution";
     const requiredByVariant = new Map(
       quantities.components.map((item) => [item.componentVariantId, item.requiredQty]),
     );
@@ -632,6 +644,8 @@ export class BuildExecutionRepository {
 
         const costs = this.dependencies.normalizeBuildLotCosts(reservation);
         addCost(consumedCost, costs, take);
+        const sourceLotId = asInteger(reservation.id, "sourceLot.id");
+        sourceQuantities.set(sourceLotId, (sourceQuantities.get(sourceLotId) ?? 0) + take);
         await tx.execute(sql`
           INSERT INTO inventory.build_run_consumptions
             (build_run_id, build_order_component_id, inventory_lot_id, qty,
@@ -736,6 +750,7 @@ export class BuildExecutionRepository {
       WHERE id = ${outputLevel.id}
     `);
 
+    let outputCostOffset = 0;
     for (let index = 0; index < outputLayers.length; index += 1) {
       const layer = outputLayers[index];
       const lotNumber = `${order.system_number}-R${run.run_number}-${String(index + 1).padStart(2, "0")}`;
@@ -777,7 +792,19 @@ export class BuildExecutionRepository {
            ${`Produced by build ${order.system_number} run ${run.run_number}`},
            ${input.actorId ?? null})
       `);
+      for (const [sourceLotId, sourceQty] of sourceQuantities) {
+        await recordLotCostContribution(tx, {
+          sourceLotId,
+          outputLotId: asInteger(outputLot.rows[0].id, "outputLot.id"),
+          sourceQty,
+          outputQty: quantities.outputQty,
+          outputStartQty: outputCostOffset,
+          operationKind: "build",
+          operationKey: `build_run:${run.id}`,
+        }, lineageActor, lineageRecordedAt);
+      }
       outputBefore += layer.qty;
+      outputCostOffset += layer.qty;
     }
 
     await tx.execute(sql`

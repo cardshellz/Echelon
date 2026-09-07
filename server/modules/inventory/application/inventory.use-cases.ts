@@ -1,3 +1,4 @@
+import { lockInventoryCostGraph, recordReceiptCostOrigin, recordLotCostContribution } from "../infrastructure/cost-evidence.repository";
 import { sql } from "drizzle-orm";
 import type { IInventoryStorage } from "../infrastructure/inventory.repository";
 import type { InventoryLotService } from "../lots.service";
@@ -104,6 +105,7 @@ export class InventoryUseCases {
     private readonly storage: IInventoryStorage,
     private readonly lotService: InventoryLotService | null = null,
     private readonly cogsService: COGSService | null = null,
+    private readonly clock: () => Date = () => new Date(),
   ) {}
 
   private async assertNotFrozen(locationId: number, dbh?: any): Promise<void> {
@@ -151,6 +153,9 @@ export class InventoryUseCases {
     unitCostMills?: number;
     packagingCostMills?: number;
     landedCostMills?: number;
+    unitsPerVariantSnapshot?: number;
+    inboundShipmentLineId?: number;
+    costRecordedAt?: Date;
     receivingOrderId?: number;
     receivingLineId?: number;
     purchaseOrderId?: number;
@@ -158,10 +163,11 @@ export class InventoryUseCases {
     inboundShipmentId?: number;
     costProvisional?: number;
   }, externalTx?: any): Promise<void> {
-    if (params.qty <= 0) throw new Error("qty must be a positive integer");
+    if (!Number.isSafeInteger(params.qty) || params.qty <= 0) throw new Error("qty must be a positive safe integer");
 
     const doWork = async (tx: any) => {
       await this.assertNotFrozen(params.warehouseLocationId, tx);
+      await lockInventoryCostGraph(tx);
 
       // Serialize and replay-check the exact receiving line before any balance
       // or lot mutation. Legacy callers without a line identity retain the
@@ -236,6 +242,13 @@ export class InventoryUseCases {
           notes: params.notes,
         });
         lotId = lot.id;
+        if (params.receivingLineId && params.purchaseOrderLineId && params.unitsPerVariantSnapshot && params.costRecordedAt) {
+          await recordReceiptCostOrigin(tx, {
+            inventoryLotId: lot.id, receivingLineId: params.receivingLineId, purchaseOrderLineId: params.purchaseOrderLineId,
+            inboundShipmentLineId: params.inboundShipmentLineId ?? null,
+            unitsPerVariantSnapshot: params.unitsPerVariantSnapshot, receivedVariantQty: params.qty,
+          }, params.userId || "system:receiving", params.costRecordedAt);
+        }
 
         if (resolved.costCents > 0) {
           await lotSvc.updateVariantCosts(params.productVariantId, resolved.costCents);
@@ -469,7 +482,7 @@ export class InventoryUseCases {
     orderItemId?: number;
     userId?: string;
   }): Promise<boolean> {
-    if (params.qty <= 0) throw new Error("qty must be a positive integer");
+    if (!Number.isSafeInteger(params.qty) || params.qty <= 0) throw new Error("qty must be a positive safe integer");
 
     const result = await this.db.transaction(async (tx) => {
       const level = await this.storage.lockInventoryLevel(
@@ -545,7 +558,7 @@ export class InventoryUseCases {
     userId?: string;
     reason?: string;
   }): Promise<boolean> {
-    if (params.qty <= 0) throw new Error("qty must be a positive integer");
+    if (!Number.isSafeInteger(params.qty) || params.qty <= 0) throw new Error("qty must be a positive safe integer");
 
     const result = await this.db.transaction(async (tx) => {
       const level = await this.storage.lockInventoryLevel(
@@ -634,7 +647,7 @@ export class InventoryUseCases {
     // shared reservation counter.
     releaseReservation?: boolean;
   }): Promise<void> {
-    if (params.qty <= 0) throw new Error("qty must be a positive integer");
+    if (!Number.isSafeInteger(params.qty) || params.qty <= 0) throw new Error("qty must be a positive safe integer");
 
     await this.db.transaction(async (tx) => {
       if (params.shipmentId && (params.shipmentItemId || params.orderItemId)) {
@@ -958,6 +971,10 @@ export class InventoryUseCases {
     userId?: string;
     allowNegative?: boolean;
     unitCostCents?: number;
+    /** Internal conversion owner requests exact evidence in JSON-safe decimal strings. */
+    includeConsumedCostEvidence?: boolean;
+    /** Internal conversion output only; supplied from the consumed FIFO owner result. */
+    conversion?: { sourceLots: Array<{ lotId: number; qty: number }>; productMills: bigint; packagingMills: bigint; landedMills: bigint; provisional: boolean; operationKey: string; occurredAt: Date };
     /** Internal transaction orchestration hook; effects run only after the caller commits. */
     deferUntilCommit?: (effect: () => Promise<void>) => void;
   }): Promise<{
@@ -965,15 +982,22 @@ export class InventoryUseCases {
     adjustmentTransactionId: number;
     consumedCostCents?: number;
     consumedQty?: number;
+    consumedLots?: Array<{ lotId: number; qty: number }>;
+    consumedPoCostMills?: string;
+    consumedPackagingCostMills?: string;
+    consumedLandedCostMills?: string;
+    consumedCostProvisional?: boolean;
   }> {
-    if (params.qtyDelta === 0) throw new Error("qtyDelta must be non-zero");
+    if (!Number.isSafeInteger(params.qtyDelta) || params.qtyDelta === 0) throw new Error("qtyDelta must be a non-zero safe integer");
 
     let orphanedQty = 0;
     let consumedCostCents: number | undefined;
     let consumedQty: number | undefined;
+    let consumedDetail: { consumedLots: Array<{ lotId: number; qty: number }>; consumedPoCostMills: bigint; consumedPackagingCostMills: bigint; consumedLandedCostMills: bigint; consumedCostProvisional: boolean } | undefined;
     let adjustmentTransactionId: number | null = null;
 
     await this.db.transaction(async (tx) => {
+      if (params.conversion || params.includeConsumedCostEvidence) await lockInventoryCostGraph(tx);
       // Cycle-count adjustments are the ONE mutation allowed on frozen bins
       if (!params.cycleCountId) {
         await this.assertNotFrozen(params.warehouseLocationId, tx);
@@ -1007,6 +1031,22 @@ export class InventoryUseCases {
 
       if (this.lotService) {
         const lotSvc = this.lotService.withTx(tx);
+        if (params.conversion) {
+          if (params.qtyDelta <= 0 || params.conversion.sourceLots.length === 0) throw new IntegrityError("A conversion output requires positive quantity and exact source lots");
+          const layers = allocateBuildCostLayers({ poMills: params.conversion.productMills, packagingMills: params.conversion.packagingMills, landedMills: params.conversion.landedMills }, params.qtyDelta);
+          let outputStartQty = 0;
+          for (const layer of layers) {
+            const totalMills = safeMillsNumber(layer.totalMills, "conversion.totalMills");
+            const output = await lotSvc.createLot({ productVariantId: params.productVariantId, warehouseLocationId: params.warehouseLocationId,
+              qty: layer.qty, unitCostCents: millsToCents(totalMills), unitCostMills: totalMills,
+              packagingCostMills: safeMillsNumber(layer.packagingMills, "conversion.packagingMills"),
+              landedCostMills: safeMillsNumber(layer.landedMills, "conversion.landedMills"), costSource: "transformation",
+              costProvisional: params.conversion.provisional ? 1 : 0, receivedAt: params.conversion.occurredAt, notes: params.reason });
+            for (const source of params.conversion.sourceLots) await recordLotCostContribution(tx, { sourceLotId: source.lotId, outputLotId: output.id,
+              sourceQty: source.qty, outputQty: params.qtyDelta, outputStartQty, operationKind: "conversion", operationKey: params.conversion.operationKey }, params.userId || "system:conversion", params.conversion.occurredAt);
+            outputStartQty += layer.qty;
+          }
+        } else {
         const lotResult = await lotSvc.adjustLots({
           productVariantId: params.productVariantId,
           warehouseLocationId: params.warehouseLocationId,
@@ -1017,6 +1057,8 @@ export class InventoryUseCases {
         });
         consumedCostCents = lotResult.consumedCostCents;
         consumedQty = lotResult.consumedQty;
+        consumedDetail = lotResult;
+        }
       }
 
       const transaction = await this.storage.createInventoryTransaction({
@@ -1047,7 +1089,13 @@ export class InventoryUseCases {
     const notifyAfterCommit = async () => this.triggerNotifyChange(params.productVariantId, "adjustment");
     if (params.deferUntilCommit) params.deferUntilCommit(notifyAfterCommit);
     else this.triggerNotifyChange(params.productVariantId, "adjustment");
-    return { orphanedQty, adjustmentTransactionId, consumedCostCents, consumedQty };
+    return { orphanedQty, adjustmentTransactionId, consumedCostCents, consumedQty,
+      consumedLots: params.includeConsumedCostEvidence ? consumedDetail?.consumedLots : undefined,
+      consumedPoCostMills: params.includeConsumedCostEvidence ? consumedDetail?.consumedPoCostMills.toString() : undefined,
+      consumedPackagingCostMills: params.includeConsumedCostEvidence ? consumedDetail?.consumedPackagingCostMills.toString() : undefined,
+      consumedLandedCostMills: params.includeConsumedCostEvidence ? consumedDetail?.consumedLandedCostMills.toString() : undefined,
+      consumedCostProvisional: params.includeConsumedCostEvidence ? consumedDetail?.consumedCostProvisional : undefined,
+    };
   }
 
   async approveCycleCountItemReconciliation(params: {
@@ -1247,7 +1295,7 @@ export class InventoryUseCases {
     referenceType?: string;
     referenceId?: string;
   }, txOverride?: any): Promise<void> {
-    if (params.qty <= 0) throw new Error("qty must be a positive integer");
+    if (!Number.isSafeInteger(params.qty) || params.qty <= 0) throw new Error("qty must be a positive safe integer");
 
     const doWork = async (tx: any) => {
       const level = await this.storage.lockInventoryLevel(
@@ -1435,12 +1483,13 @@ export class InventoryUseCases {
       return { movedBaseUnits: plan.movedBaseUnits, qtyPickUnits: plan.qtyPickUnits };
     }
 
-    const occurredAt = params.occurredAt ?? new Date();
+    const occurredAt = params.occurredAt ?? this.clock();
     if (Number.isNaN(occurredAt.getTime())) {
       throw new ValidationError("Replenishment occurrence time must be valid", { taskId: params.taskId });
     }
 
     await this.db.transaction(async (tx) => {
+      await lockInventoryCostGraph(tx);
       const [fromLoc] = await tx
         .select()
         .from(warehouseLocations)
@@ -1525,9 +1574,10 @@ export class InventoryUseCases {
         packagingMills: consumed.consumedPackagingCostMills,
         landedMills: consumed.consumedLandedCostMills,
       }, plan.qtyPickUnits);
+      let outputStartQty = 0;
       for (const layer of outputLayers) {
         const totalMills = safeMillsNumber(layer.totalMills, "replenishment.output.totalMills");
-        await lotService.createLot({
+        const outputLot = await lotService.createLot({
           productVariantId: plan.pickVariantId,
           warehouseLocationId: params.toLocationId,
           qty: layer.qty,
@@ -1543,6 +1593,11 @@ export class InventoryUseCases {
           receivedAt: occurredAt,
           notes: params.notes ?? `Output from replen task #${params.taskId}`,
         });
+        for (const source of consumed.consumedLots) await recordLotCostContribution(tx, {
+          sourceLotId: source.lotId, outputLotId: outputLot.id, sourceQty: source.qty,
+          outputQty: plan.qtyPickUnits, outputStartQty, operationKind: "conversion", operationKey: `replenishment:${params.taskId}`,
+        }, params.userId || "system:replenishment", occurredAt);
+        outputStartQty += layer.qty;
       }
 
       const referenceId = String(params.taskId);
@@ -1611,13 +1666,14 @@ export class InventoryUseCases {
      */
     moveReserved?: boolean;
   }): Promise<{ reservedMoved: number; orderItemsRepointed: number }> {
-    if (params.qty <= 0) throw new Error("qty must be a positive integer");
+    if (!Number.isSafeInteger(params.qty) || params.qty <= 0) throw new Error("qty must be a positive safe integer");
     if (params.fromLocationId === params.toLocationId) throw new Error("Source and destination must differ");
 
     let reservedMoved = 0;
     let orderItemsRepointed = 0;
 
     await this.db.transaction(async (tx) => {
+      await lockInventoryCostGraph(tx);
       const [fromLoc] = await tx
         .select()
         .from(warehouseLocations)
@@ -1760,6 +1816,9 @@ export class InventoryUseCases {
           toLocationId: params.toLocationId,
           qty: params.qty,
           notes: params.notes,
+          actorId: params.userId || "system:inventory_transfer",
+          occurredAt: this.clock(),
+          operationKey: params.referenceId ? `${params.referenceType ?? "internal"}:${params.referenceId}` : undefined,
         });
       }
 
@@ -2132,7 +2191,8 @@ export class InventoryUseCases {
       txDb,
       this.storage,
       this.lotService,
-      this.cogsService
+      this.cogsService,
+      this.clock
     );
     // Transaction-scoped clones must publish through the same dispatcher as
     // the root service. In particular, deferred post-commit adjustment effects

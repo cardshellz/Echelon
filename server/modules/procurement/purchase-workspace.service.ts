@@ -1,3 +1,4 @@
+import { projectPurchaseCostTrace, type PurchaseCostEvidence } from "./purchase-cost-trace.service";
 import {
   purchaseWorkspaceSchema,
   type PurchaseWorkspace,
@@ -5,7 +6,8 @@ import {
 } from "@shared/procurement/purchase-workspace";
 import { resolveCurrentPhysicalStatus } from "./purchase-order-lifecycle.service";
 
-export interface PurchaseWorkspaceSnapshot extends Omit<PurchaseWorkspace, "edges" | "limitations"> {
+export interface PurchaseWorkspaceSnapshot extends Omit<PurchaseWorkspace, "edges" | "limitations" | "costTrace"> {
+  costEvidence?: PurchaseCostEvidence;
   directShipmentIds: number[];
   directReceiptIds: number[];
   directInvoiceIds: number[];
@@ -95,13 +97,16 @@ export function createPurchaseWorkspaceService(repository: PurchaseWorkspaceRepo
         receipts: snapshot.receipts,
         invoices: snapshot.invoices,
         edges,
+        rfqOrigins: snapshot.rfqOrigins ?? [],
+        costTrace: snapshot.costEvidence ? projectPurchaseCostTrace(snapshot.costEvidence, snapshot.purchase) : null,
         limitations: [
           "Shipment and invoice amounts describe whole documents, which may cover other purchases.",
           "Recorded PO invoice, payment and outstanding totals include whole linked invoices; they are not purchase-specific allocations.",
           "Shipment header cost totals do not identify a reliable currency basis in this view.",
           "An invoice allocation that is not recorded is unknown; whole-invoice payments are not a payment allocation to this purchase.",
           "Receipt records include drafts and cancelled history. A receipt status alone does not establish inventory availability.",
-          "RFQ origin and inventory lot history are not linked in this view.",
+          "RFQ origins use recorded quote-to-purchase links. Missing historical links are not inferred from supplier, SKU or dates.",
+          "Cost history includes recorded source revisions, lot contributions and applications; missing legacy lineage remains review work. Internal reporting events do not prove external accounting delivery.",
         ],
       });
     },

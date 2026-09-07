@@ -1,3 +1,6 @@
+import { PgDialect } from "drizzle-orm/pg-core";
+import type { SQL } from "drizzle-orm";
+import { costGraphLockExecute } from "./cost-graph.fixture";
 import { describe, expect, it, vi } from "vitest";
 import {
   purchaseOrderLines,
@@ -8,7 +11,7 @@ import { createPurchasingService, PurchasingError } from "../../purchasing.servi
 
 const VERSION = new Date("2026-07-13T12:00:00.000Z");
 
-function recommendationOwnedLineDb() {
+function recommendationOwnedLineDb(handoffId: number | null = 92) {
   const rowsFor = (table: unknown) => {
     if (table === purchaseOrderLines) return [{ id: 51, purchaseOrderId: 41 }];
     if (table === purchaseOrders) {
@@ -22,10 +25,18 @@ function recommendationOwnedLineDb() {
         updatedAt: VERSION,
       }];
     }
-    if (table === purchasingRecommendationPoHandoffs) return [{ id: 92 }];
+    if (table === purchasingRecommendationPoHandoffs) return handoffId === null ? [] : [{ id: handoffId }];
     return [];
   };
+  const graphExecute = costGraphLockExecute();
   const tx = {
+    execute: vi.fn(async (query: SQL) => {
+      const statement = new PgDialect().sqlToQuery(query).sql.replace(/\s+/g, " ").trim();
+      if (statement.startsWith("SELECT EXISTS (SELECT 1 FROM procurement.po_events WHERE po_id=")) {
+        return { rows: [{ hasEvents: false, hasStatusHistory: false, hasRevisions: false }] };
+      }
+      return graphExecute(query);
+    }),
     select: vi.fn(() => {
       let table: unknown;
       const builder: any = {
@@ -53,7 +64,7 @@ describe("recommendation PO handoff delete guards", () => {
       getRecommendationPoHandoffForPo: vi.fn().mockResolvedValue({ id: 91, purchaseOrderId: 41 }),
       deletePurchaseOrder: vi.fn(),
     };
-    const service = createPurchasingService({} as any, storage as any);
+    const service = createPurchasingService(recommendationOwnedLineDb(91) as any, storage as any);
 
     await expect(service.deletePO(41)).rejects.toMatchObject<PurchasingError>({
       statusCode: 409,
@@ -99,9 +110,9 @@ describe("recommendation PO handoff delete guards", () => {
       getRecommendationPoHandoffForPo: vi.fn().mockResolvedValue(undefined),
       deletePurchaseOrder: vi.fn().mockResolvedValue(true),
     };
-    const service = createPurchasingService({} as any, storage as any);
+    const service = createPurchasingService(recommendationOwnedLineDb(null) as any, storage as any);
 
     await expect(service.deletePO(41)).resolves.toBe(true);
-    expect(storage.deletePurchaseOrder).toHaveBeenCalledWith(41);
+    expect(storage.deletePurchaseOrder).toHaveBeenCalledWith(41, expect.any(Object));
   });
 });

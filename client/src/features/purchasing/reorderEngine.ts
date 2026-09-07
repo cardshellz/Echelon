@@ -1,3 +1,4 @@
+import { normalizePoLinePricing } from "@shared/utils/po-line-pricing";
 // Pure helpers for the Reorder Engine cockpit (client/src/pages/ReorderEngine.tsx).
 //
 // Everything here is presentation-layer: chip unions, grouping/rollups, date
@@ -34,9 +35,11 @@ export const OVERSTOCK_DAYS_OF_SUPPLY = 180;
 export interface ChipFilterItem {
   status: string;
   daysOfSupply: number;
+  supplyTiming?: { reviewRequired: boolean };
 }
 
 export interface SuggestedSpendItem {
+  supplierBasis?: { pricingBasis?: string; quotedUnitCostMills?: number | null; purchaseUom?: string | null; piecesPerPurchaseUom?: number | null };
   suggestedOrderPieces: number;
   estimatedCostMills: number | null;
   estimatedCostCents: number | null;
@@ -68,7 +71,7 @@ export const STATUS_META: Record<
   stockout: { label: "Stockout", tone: "red" },
   order_now: { label: "Order now", tone: "orange" },
   order_soon: { label: "Burn rate high", tone: "amber" },
-  on_order: { label: "Inbound covers", tone: "blue" },
+  on_order: { label: "On order", tone: "blue" },
   ok: { label: "Healthy", tone: "green" },
   no_movement: { label: "Stagnant", tone: "gray" },
 };
@@ -161,6 +164,7 @@ export function filterItemsByChips<T extends ChipFilterItem>(
 ): T[] {
   if (selected.size === 0 || allChipsSelected(selected)) return [...items];
   return items.filter((item) =>
+    (isOrderQueueSelection(selected) && item.supplyTiming?.reviewRequired === true) ||
     ALL_CHIP_KEYS.some((chip) => selected.has(chip) && chipMatchesItem(chip, item)),
   );
 }
@@ -786,6 +790,15 @@ export function orderBuilderGroups<T extends OrderableItem>(
 /** Line value for edited pieces; null when the vendor cost is missing and pieces > 0. */
 export function orderLineValueCents(item: SuggestedSpendItem, pieces: number): number | null {
   if (pieces <= 0) return 0;
+  if (item.supplierBasis?.pricingBasis === "per_purchase_uom") {
+    const basis = item.supplierBasis;
+    if (!basis.purchaseUom || basis.quotedUnitCostMills == null || !basis.piecesPerPurchaseUom) return null;
+    try {
+      return normalizePoLinePricing({ basis: "per_purchase_uom", purchaseUom: basis.purchaseUom,
+        uomQuantity: pieces / basis.piecesPerPurchaseUom, piecesPerUom: basis.piecesPerPurchaseUom,
+        quotedCostMillsPerUom: basis.quotedUnitCostMills }).totalProductCostCents;
+    } catch { return null; } // Incomplete case quantities remain visibly unpriced until corrected.
+  }
   const mills = unitCostMills(item);
   if (mills === null) return null;
   return computeLineTotalCentsFromMills(mills, pieces);

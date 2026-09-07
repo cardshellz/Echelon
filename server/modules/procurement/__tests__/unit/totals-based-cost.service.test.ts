@@ -1,3 +1,4 @@
+import { costGraphLockExecute } from "./cost-graph.fixture";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { productVariants, products, vendorProducts, vendors } from "@shared/schema";
 import { createPurchasingService, PurchasingError } from "../../purchasing.service";
@@ -78,6 +79,7 @@ function buildMockDb(
     return [];
   };
   const tx = {
+    execute: costGraphLockExecute(),
     insert: txInsert,
     update: vi.fn(),
     select: vi.fn(() => {

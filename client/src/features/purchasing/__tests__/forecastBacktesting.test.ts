@@ -176,6 +176,30 @@ describe("forecast backtesting client contract", () => {
     expect(formatOverlayExclusionReason("capture_horizon_insufficient")).toBe("Horizon not covered");
   });
 
+  it("accepts an isolated growth cohort and rejects a mismatched capture version", () => {
+    const original = report();
+    const growthCohort = { ...original.selectedPolicyCohort, captureVersion: 2, snapshot: { ...policySnapshot, growthPercent: 25 } };
+    const growthReport = { ...original, policyCohorts: [growthCohort], selectedPolicyCohort: growthCohort,
+      summaries: original.summaries.map((item) => ({ ...item, forecastPolicyCaptureVersion: 2 })),
+      items: original.items.map((item) => ({ ...item, forecastPolicyCaptureVersion: 2 })),
+    };
+    expect(forecastBacktestReportSchema.parse(growthReport).selectedPolicyCohort?.captureVersion).toBe(2);
+    expect(() => forecastBacktestReportSchema.parse({ ...growthReport, selectedPolicyCohort: { ...growthCohort, captureVersion: 1 } })).toThrow(/Growth policy capture version/);
+  });
+
+  it("accepts a replacement cohort without mixing it into growth-only evidence", () => {
+    const original = report();
+    const snapshot = { ...policySnapshot, growthPercent: 25, replacementForecasts: [{ productId: 10, startDate: "2026-09-01", endDate: "2026-09-30", totalPieces: 600, reference: "September forecast" }] };
+    const cohort = { ...original.selectedPolicyCohort, captureVersion: 3, snapshot };
+    const replacementReport = { ...original, policyCohorts: [cohort], selectedPolicyCohort: cohort,
+      summaries: original.summaries.map((item) => ({ ...item, forecastPolicyCaptureVersion: 3 })),
+      items: original.items.map((item) => ({ ...item, forecastPolicyCaptureVersion: 3 })),
+      measurement: { ...original.measurement, predictionScope: "baseline_with_date_replacements_and_optional_start_date_overlay", historicalPredictionScope: "baseline_with_date_replacements" },
+    };
+    expect(forecastBacktestReportSchema.parse(replacementReport).selectedPolicyCohort?.captureVersion).toBe(3);
+    expect(() => forecastBacktestReportSchema.parse({ ...replacementReport, selectedPolicyCohort: { ...cohort, captureVersion: 2 } })).toThrow(/Growth policy capture version/);
+  });
+
   it("rejects report totals and overlay states that do not reconcile", () => {
     expect(() => forecastBacktestReportSchema.parse({
       ...report(),

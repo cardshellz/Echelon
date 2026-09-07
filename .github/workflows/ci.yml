@@ -32,6 +32,11 @@ jobs:
         run: npm run check
       - name: Unit tests
         run: npm run test:unit
+      - name: Procurement planning client contracts
+        run: >-
+          npx vitest run
+          client/src/features/purchasing/__tests__/reorderEngine.test.ts
+          client/src/features/purchasing/__tests__/forecastBacktesting.test.ts
       - name: Dropship listing policy UI contracts
         run: >-
           npx vitest run
@@ -80,6 +85,36 @@ jobs:
         run: >-
           npx vitest run
           server/modules/procurement/__tests__/integration/procurement-cost-evidence.integration.test.ts
+      - name: Integrated procurement costing and lineage PostgreSQL guarantees
+        run: >-
+          npx vitest run --no-file-parallelism
+          server/modules/procurement/__tests__/integration/receiving-cost-application.integration.test.ts
+          server/modules/inventory/__tests__/integration/cost-lineage-owners.integration.test.ts
+          server/modules/inventory/__tests__/integration/canonical-claim-picker-observation.integration.test.ts
+      - name: Invoice component review PostgreSQL guarantees
+        run: >-
+          npx vitest run
+          server/modules/procurement/__tests__/integration/invoice-cost-review.integration.test.ts
+      - name: RFQ quote workflow PostgreSQL guarantees
+        run: >-
+          npx vitest run
+          server/modules/procurement/__tests__/integration/rfq-workflow.integration.test.ts
+      - name: Purchase planning policy PostgreSQL guarantees
+        run: >-
+          npx vitest run
+          server/modules/procurement/__tests__/integration/purchase-planning-policy.integration.test.ts
+      - name: Purchase approval authority PostgreSQL guarantees
+        run: >-
+          npx vitest run
+          server/modules/procurement/__tests__/integration/purchase-approval-authority.integration.test.ts
+      - name: Purchase pipeline PostgreSQL guarantees
+        run: >-
+          npx vitest run
+          server/modules/procurement/__tests__/integration/purchase-pipeline.integration.test.ts
+      - name: Receipt-aware purchase planning PostgreSQL guarantees
+        run: >-
+          npx vitest run
+          server/modules/procurement/__tests__/integration/purchase-planning-receipt-supply.integration.test.ts
       - name: PO email outbox PostgreSQL guarantees
         run: >-
           npx vitest run

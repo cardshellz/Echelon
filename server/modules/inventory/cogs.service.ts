@@ -1,3 +1,5 @@
+import { costInteger, lockInventoryCostGraph } from "./infrastructure/cost-evidence.repository";
+import type { CostComponent } from "@shared/procurement/cost-source-contracts";
 /**
  * FIFO COGS Engine for Echelon WMS.
  *
@@ -131,7 +133,16 @@ export interface LotCostRevalueResult extends CostAdjustmentLog {
 // ─── Service ────────────────────────────────────────────────────────
 
 export class COGSService {
-  constructor(private readonly db: DrizzleDb) {}
+  constructor(private readonly db: DrizzleDb, private readonly clock: () => Date = () => new Date()) {}
+
+  async revalueComponent(lotId: number, component: CostComponent, unitMills: number, reason: string, tx: any) {
+    return this.revalueLotCostMills({
+      lotId, productCostMills: component === "product" ? unitMills : undefined,
+      packagingCostMills: component === "packaging" ? unitMills : undefined,
+      landedCostMills: component === "landed" ? unitMills : undefined,
+      costSource: "cost_revision", reason, clearProvisional: false,
+    }, tx);
+  }
 
   private assertNonNegativeMills(value: number, field: string) {
     if (!Number.isSafeInteger(value) || value < 0) {
@@ -179,12 +190,18 @@ export class COGSService {
       return { rowsUpdated: 0, totalDeltaCents: 0 };
     }
 
-    let totalDeltaCents = 0;
+    let deltaCents = BigInt(0);
     for (const row of rows) {
-      const oldUnitMills = Number(row.old_unit_cost_mills) || centsToMills(Number(row.unit_cost_cents) || 0);
-      const qty = Number(row.qty) || 0;
-      totalDeltaCents += millsToCents(newUnitCostMills * qty) - millsToCents(oldUnitMills * qty);
+      const oldUnitMills = BigInt(costInteger(row.old_unit_cost_mills, "cogs.oldUnitCostMills"));
+      const qty = BigInt(costInteger(row.qty, "cogs.quantity"));
+      const nextTotal = BigInt(newUnitCostMills) * qty;
+      const priorTotal = oldUnitMills * qty;
+      // SQL stores bigint and rounds each extended row, not a rounded unit.
+      // Keep that same exact boundary for the audit/export delta.
+      if (nextTotal > BigInt("9223372036854775807")) throw new Error("COGS extended cost exceeds PostgreSQL bigint range");
+      deltaCents += (nextTotal + BigInt(50)) / BigInt(100) - (priorTotal + BigInt(50)) / BigInt(100);
     }
+    const totalDeltaCents = costInteger(deltaCents.toString(), "cogs.totalDeltaCents", -Number.MAX_SAFE_INTEGER);
 
     await tx.execute(sql`
       UPDATE oms.order_item_costs
@@ -211,11 +228,15 @@ export class COGSService {
     landedCostMills?: number;
     costSource: string;
     reason: string;
+    actorId?: string;
     preserveExistingCostSourceUnlessPo?: boolean;
     clearProvisional?: boolean;
     requiredCostSource?: string;
   }, client?: any): Promise<LotCostRevalueResult | null> {
     const revalue = async (tx: any): Promise<LotCostRevalueResult | null> => {
+      await lockInventoryCostGraph(tx);
+      const now = this.clock();
+      if (!Number.isFinite(now.getTime())) throw new Error("Invalid lot cost clock");
       const result = await tx.execute(sql`
         SELECT
           il.id,
@@ -257,7 +278,7 @@ export class COGSService {
       this.assertNonNegativeMills(packagingCostMills, "packagingCostMills");
       this.assertNonNegativeMills(landedCostMills, "landedCostMills");
 
-      const totalUnitCostMills = productCostMills + packagingCostMills + landedCostMills;
+      const totalUnitCostMills = costInteger((BigInt(productCostMills) + BigInt(packagingCostMills) + BigInt(landedCostMills)).toString(), "totalUnitCostMills");
       this.assertNonNegativeMills(totalUnitCostMills, "totalUnitCostMills");
 
       const oldTotalMills =
@@ -273,6 +294,20 @@ export class COGSService {
         params.preserveExistingCostSourceUnlessPo && existingCostSource && existingCostSource !== "po"
           ? existingCostSource
           : params.costSource;
+
+      const protectedComponents: CostComponent[] = [];
+      if (params.costSource === "manual") {
+        if (params.productCostMills !== undefined) protectedComponents.push("product");
+        if (params.packagingCostMills !== undefined) protectedComponents.push("packaging");
+        if (params.landedCostMills !== undefined) protectedComponents.push("landed");
+      } else if (existingCostSource === "manual") {
+        protectedComponents.push("product");
+      }
+      for (const component of protectedComponents) await tx.execute(sql`
+        INSERT INTO inventory.cost_component_protections(inventory_lot_id,component,reason,recorded_by,recorded_at)
+        VALUES (${params.lotId},${component},${params.costSource === "manual" ? params.reason : "Preserved pre-existing manual product cost"},${params.actorId || "system:inventory-cost"},${now})
+        ON CONFLICT (inventory_lot_id,component) DO NOTHING
+      `);
 
       await tx.execute(sql`
         UPDATE inventory.inventory_lots
@@ -305,7 +340,7 @@ export class COGSService {
           ${newCostCents},
           ${newCostCents - oldCostCents},
           ${params.reason},
-          NOW()
+          ${now}
         )
       `);
 
@@ -317,7 +352,7 @@ export class COGSService {
         oldCostCents,
         newCostCents,
         deltaCents: newCostCents - oldCostCents,
-        adjustedAt: new Date(),
+        adjustedAt: now,
         reason: params.reason,
         cogsRowsUpdated: cascade.rowsUpdated,
         totalCogsDeltaCents: cascade.totalDeltaCents,
@@ -563,6 +598,7 @@ export class COGSService {
     }
 
     const reconcile = async (tx: any) => {
+      await lockInventoryCostGraph(tx);
       // Lock every affected lot before revaluing any of them. Deterministic
       // ordering prevents concurrent invoice approvals from deadlocking.
       const affectedLots = await tx.execute(sql`
@@ -1083,20 +1119,23 @@ export class COGSService {
    * audit row in cost_adjustment_log with the given reason. Works on PO/landed/manual lots alike.
    */
   async recostLotPerPiece(
-    lotId: number,
-    perPieceMills: number,
-    reason: string,
+    lotId: number, perPieceMills: number, reason: string, actorId?: string,
   ): Promise<{ lotId: number; lotNumber: string; sku: string; oldCostCents: number; newCostCents: number } | null> {
-    const r = await this.db.execute(sql`
-      SELECT pv.units_per_variant AS upv
-      FROM inventory.inventory_lots il
-      JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
-      WHERE il.id = ${lotId}
-    `);
-    const row = r.rows?.[0];
-    if (!row) return null;
-    const upv = Number(row.upv) || 1;
-    return this.setLotProductCostMills(lotId, perPieceMills * upv, reason);
+    this.assertNonNegativeMills(perPieceMills, "perPieceMills");
+    if (!reason.trim()) throw new Error("Manual cost correction requires a reason");
+    return this.runInTransaction(async (tx) => {
+      await lockInventoryCostGraph(tx);
+      const result = await tx.execute(sql`
+        SELECT COALESCE(origin.units_per_variant_snapshot,pv.units_per_variant) AS upv
+        FROM inventory.inventory_lots lot JOIN catalog.product_variants pv ON pv.id=lot.product_variant_id
+        LEFT JOIN inventory.lot_cost_origins origin ON origin.inventory_lot_id=lot.id
+        WHERE lot.id=${lotId} FOR SHARE OF pv
+      `);
+      if (!result.rows[0]) return null;
+      const upv = costInteger(result.rows[0].upv, "lot.unitsPerVariant", 1);
+      return this.revalueLotCostMills({ lotId, productCostMills: costInteger((BigInt(perPieceMills) * BigInt(upv)).toString(), "manual.productMills"),
+        costSource: "manual", reason, actorId }, tx);
+    });
   }
 
   /**
