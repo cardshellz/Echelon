@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { DropshipError } from "../../domain/errors";
 import type { DropshipEbayListingSetupResult } from "../../application/dropship-ebay-listing-setup-service";
 import {
   DropshipEbayListingPolicyOverrideService,
@@ -338,6 +339,7 @@ function makeFixture() {
     })),
   } as unknown as DropshipVendorProvisioningService;
   const listingSetup = {
+    getSavedSelectionForMember: vi.fn(async () => setupResult().selection),
     getForMember: vi.fn(async () => setupResult()),
   };
   const service = new DropshipEbayListingPolicyOverrideService({
@@ -349,6 +351,65 @@ function makeFixture() {
   });
   return { service, repository, listingSetup };
 }
+
+describe("saved eBay policy display is independent from verification", () => {
+  it("classifies corrupt stored assignments as an internal response failure, not bad user input", async () => {
+    const fixture = makeFixture();
+    fixture.repository.assignments.push({ ...fixture.repository.assignments[0] });
+    await expect(fixture.service.listSavedForMember("member-1", { storeConnectionId: 44 }))
+      .rejects.toMatchObject({ code: "DROPSHIP_EBAY_SAVED_POLICIES_INVALID" });
+    expect(fixture.listingSetup.getForMember).not.toHaveBeenCalled();
+    expect(fixture.repository.lastReplaceInput).toBeNull();
+  });
+
+  it("returns saved defaults and overrides without any live provider discovery", async () => {
+    const fixture = makeFixture();
+    fixture.listingSetup.getForMember.mockRejectedValue(new DropshipError("DROPSHIP_EBAY_LISTING_SETUP_UNAVAILABLE", "Provider down."));
+    const result = await fixture.service.listSavedForMember("member-1", { storeConnectionId: 44 });
+    expect(result).toMatchObject({ storeConnectionId: 44, verification: "not_checked",
+      defaults: { fulfillmentPolicyId: "fulfillment-default" },
+      assignments: [{ productVariantId: 501, revisionId: 90, fulfillmentPolicyId: "fulfillment-compatible" }] });
+    expect(fixture.listingSetup.getForMember).not.toHaveBeenCalled();
+    expect(fixture.listingSetup.getSavedSelectionForMember).toHaveBeenCalledExactlyOnceWith("member-1", 44);
+    expect(fixture.repository.lastReplaceInput).toBeNull();
+  });
+
+  it.each(["needs_reauth", "paused", "disconnected"])("allows display for a %s store but still blocks policy writes", async (status) => {
+    const fixture = makeFixture();
+    fixture.repository.context!.status = status;
+    await expect(fixture.service.listSavedForMember("member-1", { storeConnectionId: 44 })).resolves.toMatchObject({ verification: "not_checked" });
+    await expect(fixture.service.replaceManyForMember("member-1", bulkInput())).rejects.toBeInstanceOf(DropshipError);
+    expect(fixture.repository.lastBulkInput).toBeNull();
+  });
+
+  it("does not expose another vendor's store or a non-eBay store", async () => {
+    const fixture = makeFixture();
+    fixture.repository.context = null;
+    await expect(fixture.service.listSavedForMember("member-1", { storeConnectionId: 44 })).rejects.toMatchObject({ code: "DROPSHIP_STORE_CONNECTION_REQUIRED" });
+    expect(fixture.listingSetup.getSavedSelectionForMember).not.toHaveBeenCalled();
+    const nonEbay = makeFixture(); nonEbay.repository.context!.platform = "shopify";
+    await expect(nonEbay.service.listSavedForMember("member-1", { storeConnectionId: 44 })).rejects.toMatchObject({ code: "DROPSHIP_EBAY_STORE_REQUIRED" });
+  });
+
+  it.each([{}, { storeConnectionId: 0 }, { storeConnectionId: 1.2 }])("validates saved read input before accessing the store", async (input) => {
+    const fixture = makeFixture();
+    await expect(fixture.service.listSavedForMember("member-1", input)).rejects.toThrow();
+    expect(fixture.listingSetup.getSavedSelectionForMember).not.toHaveBeenCalled();
+  });
+
+  it("continues to reject all writes if live verification fails, even after a successful saved read", async () => {
+    const fixture = makeFixture();
+    await fixture.service.listSavedForMember("member-1", { storeConnectionId: 44 });
+    const outage = new DropshipError("DROPSHIP_EBAY_LISTING_SETUP_UNAVAILABLE", "Provider down.");
+    fixture.listingSetup.getForMember.mockRejectedValue(outage);
+    await expect(fixture.service.replaceManyForMember("member-1", bulkInput())).rejects.toBe(outage);
+    await expect(fixture.service.replaceForMember("member-1", { storeConnectionId: 44, productVariantId: 501,
+      expectedRevisionId: 90, fulfillmentPolicyId: null, returnPolicyId: null, paymentPolicyId: null,
+      idempotencyKey: "failed-live-verification" })).rejects.toBe(outage);
+    expect(fixture.repository.lastBulkInput).toBeNull();
+    expect(fixture.repository.lastReplaceInput).toBeNull();
+  });
+});
 
 function bulkInput(): {
   storeConnectionId: number;
