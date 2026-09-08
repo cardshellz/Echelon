@@ -45,18 +45,32 @@ export function useContentDraft<State, Draft>(options: {
     if (phase !== "editing" || options.callbacks.disabled) return;
     setDraft(next); setError(""); setMessage(""); attempt.current = null;
   }
-  async function reload(keepDraft = false) {
-    if (inFlight.current) return;
+  function discard(): boolean {
+    // Cancel only a local edit. An uncertain write must be reconciled with the
+    // server, never presented as though it could be undone locally.
+    if (inFlight.current || phase !== "editing" || state === null || options.callbacks.disabled) return false;
+    setDraft(options.draftFrom(state)); setError(""); setMessage(""); attempt.current = null;
+    return true;
+  }
+  async function reload(keepDraft = false): Promise<boolean> {
+    if (inFlight.current) return false;
     inFlight.current = true; setPhase("loading"); setError("");
-    try { await load(keepDraft); attempt.current = null; if (mounted.current) { setPhase("editing"); setMessage(keepDraft ? "Latest saved content loaded below; your draft text is preserved above. Compare them before saving." : ""); } }
-    catch (caught) { if (mounted.current) { setError(queryErrorMessage(caught, "Content could not be reloaded.")); setPhase("conflict"); } }
+    try {
+      await load(keepDraft); attempt.current = null;
+      if (mounted.current) { setPhase("editing"); setMessage(keepDraft ? "Latest saved content loaded. Your draft is preserved; compare it before saving." : ""); }
+      return mounted.current;
+    }
+    catch (caught) {
+      if (mounted.current) { setError(queryErrorMessage(caught, "Content could not be reloaded.")); setPhase("conflict"); }
+      return false;
+    }
     finally { inFlight.current = false; }
   }
-  async function save() {
-    if (inFlight.current || !state || draft === null || options.callbacks.disabled || !["editing", "uncertain"].includes(phase)) return;
+  async function save(): Promise<boolean> {
+    if (inFlight.current || !state || draft === null || options.callbacks.disabled || !["editing", "uncertain"].includes(phase)) return false;
     let request: Record<string, unknown>;
     try { request = attempt.current ?? { ...options.request(state, draft), idempotencyKey: createDropshipIdempotencyKey("listing-content") }; }
-    catch (caught) { setError(queryErrorMessage(caught, "Check the description fields.")); return; }
+    catch (caught) { setError(queryErrorMessage(caught, "Check the description fields.")); return false; }
     attempt.current = request;
     inFlight.current = true; setPhase("saving"); setError(""); setMessage("");
     const callbacks = options.callbacks;
@@ -68,26 +82,32 @@ export function useContentDraft<State, Draft>(options: {
       await load();
       await callbacks.onSaved();
       if (mounted.current) { setPhase("editing"); setMessage("Draft saved and preview refreshed. No live listing was changed."); }
+      return mounted.current;
     } catch (caught) {
       if (mounted.current) {
         setPhase(saved ? "refresh_error" : caught instanceof DropshipApiError && caught.status < 500 ? "conflict" : "uncertain");
         setError(saved ? "Draft saved, but the preview could not be refreshed. Retry the preview refresh."
           : queryErrorMessage(caught, "Save was not confirmed. Retry the same save to confirm its outcome."));
       }
+      return false;
     } finally {
       inFlight.current = false;
       if (started) callbacks.onSaveSettled();
     }
   }
-  async function refreshPreview() {
-    if (inFlight.current) return;
+  async function refreshPreview(): Promise<boolean> {
+    if (inFlight.current) return false;
     inFlight.current = true; setPhase("loading"); setError("");
     try {
       await load(); await options.callbacks.onSaved();
       if (mounted.current) { setPhase("editing"); setMessage("Saved draft and preview refreshed. No live listing was changed."); }
-    } catch (caught) { if (mounted.current) { setError(queryErrorMessage(caught, "Preview refresh failed.")); setPhase("refresh_error"); } }
+      return mounted.current;
+    } catch (caught) {
+      if (mounted.current) { setError(queryErrorMessage(caught, "Preview refresh failed.")); setPhase("refresh_error"); }
+      return false;
+    }
     finally { inFlight.current = false; }
   }
-  return { state, draft, edit, save, reload, refreshPreview, phase, error, message,
+  return { state, draft, edit, discard, save, reload, refreshPreview, phase, error, message,
     busy: ["loading", "saving"].includes(phase), editable: phase === "editing" && !options.callbacks.disabled };
 }

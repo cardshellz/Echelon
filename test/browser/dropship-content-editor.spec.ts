@@ -11,7 +11,8 @@ test.use({ serviceWorkers: "allow" });
 async function setup(page: Page) {
   const state = { saved: null as SavedListingContent | null, profile: structuredClone(noContentProfile) as ContentProfileState,
     candidate: contentCandidate(), writes: [] as Record<string, unknown>[], templates: [] as Record<string, unknown>[],
-    replay: new Set<string>(), abortOnce: false, conflict: false, unexpected: [] as string[], errors: [] as string[] };
+    replay: new Set<string>(), abortOnce: false, conflict: false, failNextRead: false,
+    previews: [] as Record<string, unknown>[], unexpected: [] as string[], errors: [] as string[] };
   function setting(saved = state.saved) { return { storeConnectionId: 22, productVariantId: 101, customText: saved?.customText ?? null,
     revisionId: saved?.revisionId ?? null, updatedAt: saved?.updatedAt ?? null,
     resolved: resolveListingContent({ candidate: state.candidate, profile: state.profile, saved }) }; }
@@ -29,7 +30,7 @@ async function setup(page: Page) {
       return route.fulfill({ json: state.profile });
     }
     if (path.endsWith("/content/preview")) {
-      const input = route.request().postDataJSON();
+      const input = route.request().postDataJSON(); state.previews.push(input);
       return route.fulfill({ json: { content: setting({ revisionId: state.saved?.revisionId ?? 1, customText: input.customText,
         catalogHash: listingCatalogHash(state.candidate), updatedAt: "2026-09-07T12:00:00Z" }) } });
     }
@@ -43,6 +44,10 @@ async function setup(page: Page) {
         if (state.abortOnce) { state.abortOnce = false; return route.abort("failed"); }
         return route.fulfill({ json: { content: setting(), idempotentReplay: replay } });
       }
+      if (state.failNextRead) {
+        state.failNextRead = false;
+        return route.fulfill({ status: 503, json: { error: { message: "Description temporarily unavailable." } } });
+      }
       return route.fulfill({ json: { content: setting() } });
     }
     state.unexpected.push(path); return route.fulfill({ status: 500, json: { error: { message: "Unexpected API" } } });
@@ -52,49 +57,132 @@ async function setup(page: Page) {
     <body><main id="root" style="max-width:1000px;margin:24px auto;padding:12px"></main>
     <script type="module" src="/@fs/${resolve(process.cwd(), "test/browser/fixtures/dropship-content-harness.tsx").replaceAll("\\", "/")}"></script></body></html>` }));
   await page.goto("/__content-test");
-  await expect(page.getByText("Inheriting catalog description", { exact: true }), JSON.stringify(state.errors)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Edit", exact: true }), JSON.stringify(state.errors)).toBeVisible();
   return state;
 }
-test("edits, previews, saves and resets a description without publishing", async ({ page }, testInfo) => {
+test("places Edit and Reset below the description, then replaces the box with Save and Cancel editing", async ({ page }, testInfo) => {
   const state = await setup(page);
-  await page.getByRole("button", { name: "Copy catalog as editable text" }).click();
+  const editor = page.getByRole("region", { name: "Listing description editor" });
+  const frame = editor.locator('iframe[title="Description preview"]');
+  await expect(editor.locator("button:visible")).toHaveCount(2);
+  await expect(editor.getByRole("button", { name: "Reset", exact: true })).toBeDisabled();
+  const box = await frame.boundingBox();
+  const edit = await editor.getByRole("button", { name: "Edit", exact: true }).boundingBox();
+  expect(box).not.toBeNull(); expect(edit).not.toBeNull();
+  expect(edit!.y).toBeGreaterThanOrEqual(box!.y + box!.height);
+  await page.screenshot({ path: testInfo.outputPath("description-view.png"), fullPage: true });
+  await editor.getByRole("button", { name: "Edit", exact: true }).click();
+  await expect(frame).toHaveCount(0);
+  await expect(editor.locator("button:visible")).toHaveCount(3);
+  await expect(editor.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
+  await expect(page.getByLabel("Description text", { exact: true })).toBeFocused();
   await page.getByLabel("Description text", { exact: false }).fill("My shop copy\n\nSafe <script>alert(1)</script>");
-  await page.getByRole("button", { name: "Preview description draft" }).click();
-  await expect(page.getByText("Unsaved description preview")).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("description-edit.png"), fullPage: true });
+  await editor.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(editor.getByRole("status")).toContainText("Draft saved and preview refreshed");
+  await expect(editor.getByRole("button", { name: "Edit", exact: true })).toBeFocused();
+  await expect(page.getByLabel("Description text", { exact: true })).toHaveCount(0);
+  await expect(editor.locator("button:visible")).toHaveCount(2);
   await expect(page.frameLocator('iframe[title="Description preview"]').locator("body")).toContainText("My shop copy");
   await expect(page.frameLocator('iframe[title="Description preview"]').locator("script")).toHaveCount(0);
-  await page.getByRole("button", { name: "Save description draft" }).click();
-  await expect(page.getByRole("status")).toContainText("Draft saved and preview refreshed");
+  await expect(frame).toHaveAttribute("sandbox", "");
   expect(state.writes).toHaveLength(1); expect(state.saved?.customText).toContain("My shop copy");
-  await page.screenshot({ path: testInfo.outputPath("description-editor.png"), fullPage: true });
+  expect(state.previews).toHaveLength(0);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
-  await page.getByRole("button", { name: "Reset to catalog", exact: true }).click();
-  await page.getByRole("button", { name: "Save description draft" }).click();
+  expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("opening Edit and cancelling never converts inherited formatting or writes a draft", async ({ page }) => {
+  const state = await setup(page);
+  const frame = page.locator('iframe[title="Description preview"]');
+  const original = await frame.getAttribute("srcdoc");
+  await page.getByRole("button", { name: "Edit", exact: true }).click();
+  await expect(page.getByLabel("Description text", { exact: true })).toHaveValue(
+    resolveListingContent({ candidate: state.candidate, profile: state.profile, saved: null }).catalogText,
+  );
+  await expect(page.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
+  await page.getByLabel("Description text", { exact: true }).fill("Discard this local edit");
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(frame).toHaveAttribute("srcdoc", original!);
+  await expect(page.getByRole("button", { name: "Reset", exact: true })).toBeDisabled();
+  await page.getByRole("button", { name: "Edit", exact: true }).click();
+  await expect(page.getByLabel("Description text", { exact: true })).not.toHaveValue("Discard this local edit");
+  await expect(page.getByRole("button", { name: "Save", exact: true })).toBeDisabled();
+  expect(state.writes).toHaveLength(0); expect(state.saved).toBeNull(); expect(state.errors).toEqual([]);
+});
+
+test("Reset stages the catalog body and supports Cancel or Save without publishing", async ({ page }) => {
+  const state = await setup(page);
+  await page.getByRole("button", { name: "Edit", exact: true }).click();
+  await page.getByLabel("Description text", { exact: true }).fill("My saved description");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Edit", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Reset", exact: true }).click();
+  await expect(page.getByText("Catalog description restored in this draft.", { exact: false })).toBeVisible();
+  expect(state.writes).toHaveLength(1); expect(state.saved?.customText).toBe("My saved description");
+  await page.getByRole("button", { name: "Cancel", exact: true }).click();
+  await expect(page.frameLocator('iframe[title="Description preview"]').locator("body")).toContainText("My saved description");
+  await page.getByRole("button", { name: "Edit", exact: true }).click();
+  await expect(page.getByLabel("Description text", { exact: true })).toHaveValue("My saved description");
+  await page.getByRole("button", { name: "Reset", exact: true }).click();
+  await page.getByRole("button", { name: "Save", exact: true }).click();
   await expect(page.getByRole("status")).toContainText("Draft saved");
+  await expect(page.getByRole("button", { name: "Edit", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Reset", exact: true })).toBeDisabled();
+  const catalogHtml = resolveListingContent({ candidate: state.candidate, profile: state.profile, saved: null }).descriptionHtml;
+  expect(await page.locator('iframe[title="Description preview"]').getAttribute("srcdoc")).toContain(catalogHtml);
+  expect(state.writes).toHaveLength(2);
   expect(state.saved?.customText).toBeNull(); expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });
 test("preserves text and retry identity after an ambiguous save", async ({ page }) => {
   const state = await setup(page);
-  await page.getByRole("button", { name: "Copy catalog as editable text" }).click();
+  await page.getByRole("button", { name: "Edit", exact: true }).click();
   await page.getByLabel("Description text", { exact: false }).fill("Keep this draft");
   state.abortOnce = true;
-  await page.getByRole("button", { name: "Save description draft" }).click();
-  await expect(page.getByRole("button", { name: "Retry same description save" })).toBeVisible();
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Retry save", exact: true })).toBeVisible();
   await expect(page.getByLabel("Description text", { exact: false })).toHaveValue("Keep this draft");
   await expect(page.getByLabel("Description text", { exact: false })).toBeDisabled();
-  await page.getByRole("button", { name: "Retry same description save" }).click();
+  await expect(page.getByRole("button", { name: "Cancel", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Reset", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Retry save", exact: true }).click();
   await expect(page.getByRole("status")).toContainText("Draft saved");
+  await expect(page.getByRole("button", { name: "Edit", exact: true })).toBeVisible();
   expect(state.writes).toHaveLength(2); expect(state.writes[0]).toEqual(state.writes[1]); expect(state.saved?.revisionId).toBe(1);
 });
 test("requires reconciliation on conflicts rather than overwriting a newer description", async ({ page }) => {
   const state = await setup(page);
-  await page.getByRole("button", { name: "Copy catalog as editable text" }).click();
+  await page.getByRole("button", { name: "Edit", exact: true }).click();
   await page.getByLabel("Description text", { exact: false }).fill("Unsaved text to reconcile"); state.conflict = true;
-  await page.getByRole("button", { name: "Save description draft" }).click();
+  await page.getByRole("button", { name: "Save", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText("Catalog facts changed");
   await expect(page.getByLabel("Description text", { exact: false })).toHaveValue("Unsaved text to reconcile");
-  await expect(page.getByRole("button", { name: "Save description draft" })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Save", exact: true })).toHaveCount(0);
   expect(state.saved).toBeNull();
+  state.conflict = false;
+  state.saved = { revisionId: 2, customText: "A newer saved description", catalogHash: listingCatalogHash(state.candidate), updatedAt: "2026-09-07T12:00:00Z" };
+  await page.getByRole("button", { name: "Review latest", exact: true }).click();
+  await expect(page.getByLabel("Description text", { exact: true })).toHaveValue("Unsaved text to reconcile");
+  await expect(page.frameLocator('iframe[title="Latest saved description"]').locator("body")).toContainText("A newer saved description");
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Edit", exact: true })).toBeVisible();
+  expect(state.writes[1]).toMatchObject({ expectedRevisionId: 2, customText: "Unsaved text to reconcile" });
+  expect(state.errors).toEqual([]);
+});
+
+test("recovers a saved description after refresh failure without issuing another write", async ({ page }) => {
+  const state = await setup(page);
+  await page.getByRole("button", { name: "Edit", exact: true }).click();
+  await page.getByLabel("Description text", { exact: true }).fill("Saved before refresh failed");
+  state.failNextRead = true;
+  await page.getByRole("button", { name: "Save", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Retry preview refresh", exact: true })).toBeVisible();
+  await expect(page.getByLabel("Description text", { exact: true })).toBeDisabled();
+  expect(state.writes).toHaveLength(1);
+  await page.getByRole("button", { name: "Retry preview refresh", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Edit", exact: true })).toBeVisible();
+  await expect(page.frameLocator('iframe[title="Description preview"]').locator("body")).toContainText("Saved before refresh failed");
+  expect(state.writes).toHaveLength(1); expect(state.errors).toEqual([]);
 });
 test("applies reusable templates, keeps hidden drafts, and refreshes the open listing", async ({ page }) => {
   const state = await setup(page);
