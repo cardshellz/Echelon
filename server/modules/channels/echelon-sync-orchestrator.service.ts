@@ -53,6 +53,8 @@ import type { AllocationEngine, ProductAllocationResult } from "./allocation-eng
 import type { SourceLockService } from "./source-lock.service";
 import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
 import { isCustomerSellableVariant } from "@shared/catalog/variant-sales-eligibility";
+import type { ChannelQuantityPublicationTarget } from "./channel-quantity-publication-target";
+import { quantityPublicationScopeSchema, QuantityPublicationAdmissionError, type QuantityPublicationScope } from "../inventory-planning/domain/quantity-publication-admission";
 import type {
   AuthorityAwareInventoryPublicationService,
   CanonicalInventoryPublicationResult,
@@ -191,6 +193,14 @@ interface NonShopifyInventoryPushItem extends InventoryPushItem {
   listingId: number | null;
 }
 
+function assertExactCatchupResult(items: readonly InventoryPushItem[], results: readonly InventoryPushResult[]): void {
+  if (items.length !== 1 || results.length !== 1 || results[0].variantId !== items[0].variantId
+    || (results[0].status === "success" && results[0].pushedQty !== items[0].allocatedQty)) {
+    throw new QuantityPublicationAdmissionError("PUBLICATION_CATCHUP_RESULT_MISMATCH",
+      "The adapter did not confirm the exact requested item and quantity.");
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Permanent-failure quarantine (CLAUDE.md §6: never retry a permanent error)
 // ---------------------------------------------------------------------------
@@ -316,6 +326,36 @@ class EchelonSyncOrchestrator {
     return results;
   }
 
+  /** Called only inside the catch-up runtime's exact-scope legacy constraint. */
+  async syncInventoryForPublicationTarget(target: ChannelQuantityPublicationTarget): Promise<void> {
+    const scope = quantityPublicationScopeSchema.parse(target.scope);
+    if (![target.channelId, target.productId, target.productVariantId].every(id =>
+      Number.isSafeInteger(id) && id > 0 && id <= 2147483647)
+      || scope.destinationKind !== "channel_connection"
+      || (scope.productId !== null && scope.productId !== target.productId)
+      || (scope.productVariantId !== null && scope.productVariantId !== target.productVariantId)) {
+      throw new QuantityPublicationAdmissionError("PUBLICATION_CATCHUP_SCOPE_MISMATCH", "Resolved channel publication identity is inconsistent.");
+    }
+    // Allocation must still see all channels/variants to preserve shared-stock
+    // and channel-dial semantics. Only the external publication is narrowed.
+    const allocation = await this.allocationEngine.allocateProduct(target.productId, "quantity_publication_catchup");
+    const rows = allocation.allocations.filter(row => row.channelId === target.channelId
+      && row.productVariantId === target.productVariantId);
+    if (allocation.productId !== target.productId || rows.length !== 1 || rows[0].channelProvider !== scope.providerKey) {
+      throw new QuantityPublicationAdmissionError("PUBLICATION_CATCHUP_PLAN_OMITTED", "Current allocation did not authorize one exact channel item.");
+    }
+    const row = rows[0];
+    const result = await this.pushInventoryToChannelWarehouseAware(target.channelId,
+      { id: target.channelId, name: row.channelName, provider: row.channelProvider }, rows, target.productId,
+      { dryRun: false, forceInventoryPublication: true }, "quantity_publication_catchup", scope);
+    if (result.variantsPushed !== 1 || result.variantsErrored !== 0 || result.variantsSkipped !== 0
+      || result.details.length !== 1 || result.details[0].variantId !== target.productVariantId
+      || result.details[0].status !== "success" || result.details[0].error) {
+      throw new QuantityPublicationAdmissionError("PUBLICATION_CATCHUP_FAILED",
+        "The exact channel item did not complete its current quantity publication.", { scope, result });
+    }
+  }
+
   /**
    * Run allocation and push inventory for ALL active products.
    */
@@ -383,6 +423,7 @@ class EchelonSyncOrchestrator {
     productId: number,
     config: SyncOrchestratorConfig,
     triggeredBy?: string,
+    publicationScope?: QuantityPublicationScope,
   ): Promise<InventorySyncResult> {
     const result: InventorySyncResult = {
       channelId,
@@ -404,7 +445,7 @@ class EchelonSyncOrchestrator {
     }
 
     // Load assigned warehouses for this channel (enabled only)
-    const assignedWarehouses = await this.db
+    let assignedWarehouses = await this.db
       .select({
         warehouseId: channelWarehouseAssignments.warehouseId,
         shopifyLocationId: warehouses.shopifyLocationId,
@@ -419,6 +460,13 @@ class EchelonSyncOrchestrator {
           isNotNull(warehouses.shopifyLocationId),
         ),
       );
+
+    if (publicationScope?.providerKey === "shopify") {
+      assignedWarehouses = assignedWarehouses.filter((warehouse: { shopifyLocationId: string | null }) =>
+        warehouse.shopifyLocationId?.replace(/^gid:\/\/shopify\/Location\//, "") === publicationScope.externalScopeId);
+      if (assignedWarehouses.length !== 1) throw new QuantityPublicationAdmissionError(
+        "PUBLICATION_CATCHUP_LOCATION_CHANGED", "Exactly one enabled warehouse must still own the retained Shopify location.");
+    }
 
     if (assignedWarehouses.length === 0 && channel.provider !== "ebay") {
       console.log(`[SyncOrchestrator] No enabled warehouses assigned to channel ${channel.name}`);
@@ -441,6 +489,9 @@ class EchelonSyncOrchestrator {
         const externalSku = syncState?.listingExternalSku
           ?? syncState?.channelSku
           ?? a.sku;
+        if (publicationScope && externalSku !== publicationScope.externalInventoryItemId) {
+          throw new QuantityPublicationAdmissionError("PUBLICATION_CATCHUP_MAPPING_CHANGED", "The channel listing SKU changed before catch-up publication.");
+        }
         
         // Quarantined mapping — the external resource is gone; skip cleanly
         // instead of re-erroring every sweep (see recordPermanentPushFailure).
@@ -502,6 +553,7 @@ class EchelonSyncOrchestrator {
           const adapter = this.adapterRegistry.get(channel.provider);
           if (adapter) {
             const pushResults = await adapter.pushInventory(channelId, pushItems);
+            if (publicationScope) assertExactCatchupResult(pushItems, pushResults);
             const pushResultsByVariant = new Map<number, InventoryPushResult>();
             for (const pushResult of pushResults) {
               pushResultsByVariant.set(pushResult.variantId, pushResult);
@@ -676,6 +728,8 @@ class EchelonSyncOrchestrator {
       // pad 0 across all assigned locations so that Shopify properly unlists the quantity!
       let targetBreakdown = a.warehouseBreakdown;
       if (!targetBreakdown || targetBreakdown.length === 0) {
+        if (publicationScope && a.allocatedUnits !== 0) throw new QuantityPublicationAdmissionError(
+          "PUBLICATION_CATCHUP_PLAN_INCOMPLETE", "A positive allocation requires its current warehouse breakdown; catch-up cannot invent a location quantity.");
         targetBreakdown = assignedWarehouses.map((wh: any) => ({
           warehouseId: wh.warehouseId,
           qty: 0
@@ -687,13 +741,16 @@ class EchelonSyncOrchestrator {
         if (!wh?.shopifyLocationId) continue;
         
         const exists = warehouseVariantExistence.get(wh.warehouseId)?.has(variantId);
-        if (!exists) continue;
+        // An explicit current zero must clear the retained listing even after
+        // its last physical placement disappeared. Positive quantities retain
+        // the existing warehouse-placement requirement.
+        if (!exists && !(publicationScope && loc.qty === 0)) continue;
 
         const locationQty = loc.qty;
 
         breakdownItems.push({
           warehouseId: wh.warehouseId,
-          externalLocationId: wh.shopifyLocationId,
+          externalLocationId: publicationScope?.externalScopeId ?? wh.shopifyLocationId,
           qty: locationQty,
         });
 
@@ -770,6 +827,10 @@ class EchelonSyncOrchestrator {
 
       const inventoryItemId = feed.channelInventoryItemId;
 
+      if (publicationScope && inventoryItemId?.replace(/^gid:\/\/shopify\/InventoryItem\//, "") !== publicationScope.externalInventoryItemId) {
+        throw new QuantityPublicationAdmissionError("PUBLICATION_CATCHUP_MAPPING_CHANGED", "The channel inventory item changed before catch-up publication.");
+      }
+
       if (!inventoryItemId) {
         result.details.push({
           productId, variantId, sku: a.sku, allocatedQty: totalPushQty, previousQty: null, status: "skipped", error: "No channel inventory item ID — verify the destination mapping"
@@ -784,7 +845,7 @@ class EchelonSyncOrchestrator {
         variantId,
         sku: variant.sku,
         externalVariantId: feed.channelVariantId,
-        externalInventoryItemId: inventoryItemId,
+        externalInventoryItemId: publicationScope?.externalInventoryItemId ?? inventoryItemId,
         allocatedQty: totalPushQty,
         warehouseBreakdown: breakdownItems,
       });
@@ -809,6 +870,7 @@ class EchelonSyncOrchestrator {
     if (!config.dryRun && changedItems.length > 0) {
       try {
         const pushResults = await adapter.pushInventory(channelId, changedItems);
+        if (publicationScope) assertExactCatchupResult(changedItems, pushResults);
 
         for (const pr of pushResults) {
           const detail = result.details.find((d) => d.variantId === pr.variantId && d.status === "pending");
@@ -822,7 +884,9 @@ class EchelonSyncOrchestrator {
 
             await this.db.update(channelFeeds)
               .set({
-                lastSyncedQty: pr.pushedQty,
+                // A location-only retry cannot attest the whole-channel aggregate.
+                // Invalidate that watermark so the next full sync cannot skip it.
+                lastSyncedQty: publicationScope ? null : pr.pushedQty,
                 lastSyncedAt: new Date(),
                 updatedAt: new Date(),
                 // a successful push proves the mapping is alive

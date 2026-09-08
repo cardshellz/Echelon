@@ -84,7 +84,7 @@ export async function planCurrentCanonicalListingQuantity(scope: QuantityPublica
 
 /** A callback must inspect failures: resolving a promise is not evidence that legacy adapters published. */
 export function createQuantityPublicationCatchupService(input: {
-  refreshLegacyChannelProduct: (productId: number) => Promise<void>;
+  refreshLegacyChannelScope: (scope: QuantityPublicationScope) => Promise<void>;
 }): QuantityPublicationCatchupService {
   return new QuantityPublicationCatchupService(quantityPublicationAdmission, async (scope, claim) => {
     const authority = (await pool.query<{ authority: string }>(
@@ -97,18 +97,9 @@ export function createQuantityPublicationCatchupService(input: {
       await refreshDropshipQuantityPublicationCatchup(scope, claim);
       return;
     }
-    let productId = scope.productId;
-    if (productId === null) {
-      const products = (await pool.query<{ product_id: number }>(`SELECT DISTINCT v.product_id FROM catalog.product_variants v
-        LEFT JOIN inventory.publication_variant_mapping_versions m ON m.product_variant_id=v.id
-        WHERE ($1::integer IS NOT NULL AND v.id=$1) OR v.sku=$2 OR m.external_inventory_item_id=$2 LIMIT 2`,
-      [scope.productVariantId,scope.externalInventoryItemId])).rows;
-      if (products.length === 1) productId = products[0].product_id;
-    }
-    if (scope.destinationKind !== "channel_connection" || productId === null) {
-      throw new QuantityPublicationAdmissionError("PUBLICATION_CATCHUP_OWNER_UNRESOLVED",
-        "This exact listing identity needs its current listing-owner retry; no stored quantity payload has been replayed.", { scope });
-    }
-    await input.refreshLegacyChannelProduct(productId);
+    // Constrain the actual adapter admission, not the planning work. A resolver
+    // failure before provider I/O must not manufacture an uncertain write.
+    // The adapter still owns the gate, authority recheck and attempt journal.
+    await quantityPublicationAdmission.withLegacyCatchupScope(scope, () => input.refreshLegacyChannelScope(scope));
   });
 }
