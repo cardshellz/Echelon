@@ -90,7 +90,7 @@ function ContentEditorSession(props: ContentEditorProps) {
     if (await editor.refreshPreview()) returnToDescription();
   }
 
-  return <section aria-label="Listing description editor" className="space-y-3 rounded-lg border p-4">
+  return <><section aria-label="Listing description editor" className="space-y-3 rounded-lg border p-4">
     <h4 className="font-semibold">Your listing description</h4>
 
     {saved?.resolved.needsCatalogReview && <p role="alert" className="text-sm text-amber-800">
@@ -158,13 +158,18 @@ function ContentEditorSession(props: ContentEditorProps) {
           <p>Saving edited catalog copy replaces its formatting with plain text. Reset restores the current catalog body and formatting; templates still apply.</p>
         </>}
         <p>You are responsible for accurate claims. Descriptions must match the product facts and your accepted shipping and return policies.</p>
-        <p className="font-medium">Catalog facts (not editable)</p>
-        <dl className="grid grid-cols-2 gap-2">{saved.resolved.facts.map((fact) =>
-          <div key={fact.name}><dt className="text-zinc-500">{fact.name}</dt><dd>{fact.value}</dd></div>)}</dl>
       </div>
     </details>}
     {saved && saved.resolved.issues.length > 0 && <ul className="list-disc space-y-1 pl-4 text-xs text-amber-800">
       {saved.resolved.issues.map((issue) => <li key={issue}>{formatListingPreviewIssue(issue)}</li>)}
     </ul>}
-  </section>;
+  </section>
+    {saved && saved.resolved.facts.length > 0 && <details aria-label="Product facts" className="rounded-lg border p-4 text-sm">
+      <summary className="cursor-pointer font-medium">Product facts (read-only)</summary>
+      <p className="mt-2 text-xs text-zinc-500">Catalog reference only. These facts are not automatically added to your description.</p>
+      <dl className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">{saved.resolved.facts.map((fact) =>
+        <div key={fact.name} className="min-w-0"><dt className="text-xs text-zinc-500">{fact.name}</dt>
+          <dd className="break-words">{fact.value}</dd></div>)}</dl>
+    </details>}
+  </>;
 }

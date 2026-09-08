@@ -88,6 +88,8 @@ describe("DropshipListingPreviewService", () => {
     repository.loadListingContents = async () => new Map([[101, content]]);
     const preview = await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] });
     expect(preview.rows[0].listingIntent?.description).toBe(content.descriptionHtml);
+    expect(preview.rows[0].listingIntent?.description).toBe("<p>My shop description &lt;script&gt;literal&lt;/script&gt;</p>");
+    expect(content.facts.length).toBeGreaterThan(0);
     expect(preview.rows[0].contentEvidenceHash).toBe(content.evidenceHash);
     const request = { storeConnectionId: 22, productVariantIds: [101], idempotencyKey: "content-queue" };
     await expect(service.createListingPushJobForMember("member-1", request)).rejects.toMatchObject({ code: "DROPSHIP_CONTENT_VERSION_CONFLICT" });

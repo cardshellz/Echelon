@@ -73,6 +73,11 @@ const target = { storeConnectionId: 22, productVariantId: 101 };
   }
   it("atomically saves immutable history, current pointer, and before/after audit", async () => {
     const first = await save("first");
+    expect(first.content.resolved.descriptionHtml).toBe("<p>My copy</p>");
+    expect(first.content.resolved.facts).toContainEqual({ name: "SKU", value: "ARM-50" });
+    const reloaded = await service.getForMember("member-1", target);
+    expect(reloaded.resolved.descriptionHtml).toBe("<p>My copy</p>");
+    expect(reloaded.resolved.facts).toEqual(first.content.resolved.facts);
     const second = await save("second", null, first.content.revisionId);
     expect(second.content.customText).toBeNull(); expect(second.content.resolved.source).toBe("catalog");
     expect(await counts()).toEqual({ revisions: 2, settings: 1, audits: 2 });
