@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { MAX_LISTING_SHIPPING_ESTIMATE_QUANTITY, listingShippingEstimateInputSchema } from "../../../../../shared/dropship/listing-shipping-estimate";
+import { MAX_LISTING_SHIPPING_ESTIMATE_QUANTITY, listingShippingEstimateInputSchema,
+  LISTING_SHIPPING_ESTIMATE_UNAVAILABLE_CODE, LISTING_SHIPPING_ESTIMATE_UNAVAILABLE_MESSAGE,
+  LISTING_SHIPPING_ESTIMATE_WARNING } from "../../../../../shared/dropship/listing-shipping-estimate";
 import {
   DropshipListingShippingEstimateService,
   type DropshipListingShippingEstimateDependencies,
@@ -68,10 +70,9 @@ describe("read-only listing shipping estimate", () => {
   it("estimates onboarding/unfunded stores using all fees, configured origin and pack quantity", async () => {
     const original = structuredClone(input);
     const result = await service.estimateForMember("member-1", input);
-    expect(result).toMatchObject({ status: "estimated", warehouseId: 3, packageCount: 1, totalShippingCents: 1170, currency: "USD", estimatedAt: at.toISOString(), quantity: 2,
+    expect(result).toEqual({ status: "estimated", storeConnectionId: 22, productVariantId: 101,
+      totalShippingCents: 1170, currency: "USD", estimatedAt: at.toISOString(), quantity: 2, warnings: [],
       destination: { country: "US", region: "PA", postalCode: "17046" },
-      breakdown: { baseRateCents: 999, markupCents: 149, insurancePoolCents: 22, dunnageCents: 0 },
-      rate: { source: "legacy", rateTableIds: [33], rateBookId: null, serviceLevelCode: null, displayName: null },
     });
     expect(deps.contexts.loadForMember).toHaveBeenCalledWith("member-1", 22);
     expect(deps.calculation.cartonization.cartonize).toHaveBeenCalledWith(expect.objectContaining({ warehouseId: 3, items: [{ productVariantId: 101, quantity: 2 }], quotedAt: at }));
@@ -117,15 +118,22 @@ describe("read-only listing shipping estimate", () => {
   });
   it("returns explicit unavailable when origin is missing", async () => {
     deps.contexts.loadForMember.mockResolvedValue({ ...makeContext(), defaultWarehouseId: null });
-    await expect(service.estimateForMember("member-1", input)).resolves.toMatchObject({ status: "unavailable", code: "DROPSHIP_LISTING_SHIPPING_ORIGIN_REQUIRED" });
+    await expect(service.estimateForMember("member-1", input)).resolves.toMatchObject({ status: "unavailable", code: LISTING_SHIPPING_ESTIMATE_UNAVAILABLE_CODE });
+    expect(deps.logger.warn).toHaveBeenCalledWith(expect.objectContaining({ context: expect.objectContaining({ reasonCode: "DROPSHIP_LISTING_SHIPPING_ORIGIN_REQUIRED" }) }));
     expect(deps.calculation.cartonization.cartonize).not.toHaveBeenCalled();
   });
   it.each(["DROPSHIP_CATALOG_PACKAGE_DATA_REQUIRED", "DROPSHIP_SHIPPING_ZONE_REQUIRED", "DROPSHIP_SHIPPING_RATE_REQUIRED", "DROPSHIP_SHARED_SHIPPING_QUOTE_UNAVAILABLE"])("returns explicit unavailable for %s", async (code) => {
-    deps.calculation.pricingProvider.quote.mockRejectedValue(new DropshipError(code, "Required shipping data is missing."));
+    deps.calculation.pricingProvider.quote.mockRejectedValue(new DropshipError(code, "Private rate table configuration.", { weightGrams: 1225, packageSequence: 1 }));
     const result = await service.estimateForMember("member-1", input);
-    expect(result).toMatchObject({ status: "unavailable", code });
+    expect(result).toMatchObject({ status: "unavailable", code: LISTING_SHIPPING_ESTIMATE_UNAVAILABLE_CODE, message: LISTING_SHIPPING_ESTIMATE_UNAVAILABLE_MESSAGE });
     expect(result).not.toHaveProperty("totalShippingCents");
     expect(deps.logger.warn).toHaveBeenCalledOnce();
+    expect(deps.logger.warn).toHaveBeenCalledWith(expect.objectContaining({ context: expect.objectContaining({
+      reasonCode: code, quantity: 2, diagnostic: { weightGrams: 1225, packageSequence: 1 },
+      destination: { country: "US", region: "PA", postalCode: "17046" },
+    }) }));
+    expect(JSON.stringify(result)).not.toContain("Private rate table");
+    expect(result).not.toHaveProperty("diagnostic");
   });
   it.each(["getActiveShippingMarkupPolicy", "getActiveInsurancePoolPolicy"] as const)("fails closed without %s", async (method) => {
     deps.calculation.repository[method].mockResolvedValue(null);
@@ -148,19 +156,25 @@ describe("read-only listing shipping estimate", () => {
     deps.calculation.pricingProvider.quote.mockResolvedValue({ ...makePricing(), baseRateCents: Number.MAX_SAFE_INTEGER + 1 });
     await expect(service.estimateForMember("member-1", input)).rejects.toMatchObject({ code: "DROPSHIP_SHIPPING_INVALID_MONEY_INPUT" });
   });
-  it("returns shared rate book identity, Standard service and provider warnings", async () => {
+  it("uses the shared engine charge without exposing its rate identity or provider diagnostics", async () => {
     deps.calculation.pricingProvider.quote.mockResolvedValue({
       source: "shared", decision: { source: "shared", mode: "live", reasonCode: "LIVE_ENABLED" }, baseRateCents: 800, currency: "USD", rateTableId: 44,
       quote: { status: "quoted", baseRateCents: 800, currency: "USD", serviceLevelCode: "standard", rateBookId: 12, rateBookCode: "dropship", rateTableId: 44, resolvedZone: "1", ratedWeightGrams: 200, rateProvider: { name: "local_rate_table", version: "1" }, warnings: ["Shipping region inferred from postal code."], routing: {},
         selectedRate: { serviceLevelId: 4, serviceLevelCode: "standard", displayName: "Standard Shipping", description: null, fulfillmentMode: "parcel", pricingBasis: "shipment_weight", totalCents: 800, currency: "USD", promiseMinBusinessDays: null, promiseMaxBusinessDays: null, ratedMeasure: 200, maxShipmentWeightGrams: null, chargeModel: "fixed_band", perStartedPoundCents: null, billablePounds: null, rateTableId: 44, productPolicyApplied: false, calculationTrace: [] },
       },
     });
-    expect(await service.estimateForMember("member-1", input)).toMatchObject({ status: "estimated", totalShippingCents: 948, rate: { source: "shared", rateTableIds: [44], rateBookId: 12, serviceLevelCode: "standard", displayName: "Standard Shipping" }, warnings: ["Shipping region inferred from postal code."] });
+    const result = await service.estimateForMember("member-1", input);
+    expect(result).toEqual({ storeConnectionId: 22, productVariantId: 101, quantity: 2, destination: { country: "US", region: "PA", postalCode: "17046" },
+      estimatedAt: at.toISOString(), status: "estimated", totalShippingCents: 948, currency: "USD", warnings: [LISTING_SHIPPING_ESTIMATE_WARNING] });
+    expect(deps.logger.warn).toHaveBeenCalledWith(expect.objectContaining({
+      code: "DROPSHIP_LISTING_SHIPPING_ESTIMATE_WARNINGS",
+      context: expect.objectContaining({ rateWarnings: ["Shipping region inferred from postal code."] }),
+    }));
   });
-  it("retains packaging warnings", async () => {
+  it("replaces internal packaging warnings with a customer-safe advisory", async () => {
     const cartonization = await deps.calculation.cartonization.cartonize({ vendorId: 10, storeConnectionId: 22, warehouseId: 3, items: [{ productVariantId: 101, quantity: 2 }], destination: { country: "US", region: "PA", postalCode: "17046" }, quotedAt: at });
     deps.calculation.cartonization.cartonize.mockResolvedValue({ ...cartonization, warnings: ["Dimensions missing; estimated from weight."] });
-    expect(await service.estimateForMember("member-1", input)).toMatchObject({ status: "estimated", warnings: ["Dimensions missing; estimated from weight."] });
+    expect(await service.estimateForMember("member-1", input)).toMatchObject({ status: "estimated", warnings: [LISTING_SHIPPING_ESTIMATE_WARNING] });
   });
   it("accepts the resource cap without converting packs to eaches", async () => {
     expect(await service.estimateForMember("member-1", { ...input, quantity: MAX_LISTING_SHIPPING_ESTIMATE_QUANTITY })).toMatchObject({ status: "estimated", quantity: MAX_LISTING_SHIPPING_ESTIMATE_QUANTITY });

@@ -351,6 +351,8 @@ authoritative until the separate cutover PR is reviewed and enabled.
 
 The separate cutover path is controlled by:
 
+> Historical rollout behavior below: superseded by the [2026-09-08 engine integration](DROPSHIP-SHIPPING-ESTIMATE-ENGINE.md). With that correction, missing configuration defaults to shared pricing, invalid configuration blocks quotes, and an explicit `legacy` setting remains an operator-controlled rollback. The original July handoff below is retained as historical evidence.
+
 - `DROPSHIP_SHARED_SHIPPING_CUTOVER_MODE=legacy|test|live` (default `legacy`);
 - `DROPSHIP_SHARED_SHIPPING_CUTOVER_STORE_CONNECTION_IDS=<comma-separated IDs>` (required in `test` mode).
 

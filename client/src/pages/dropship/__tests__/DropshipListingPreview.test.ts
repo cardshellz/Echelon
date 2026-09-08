@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { DropshipListingPreview, ListingPreviewDetailsContent, ListingPreviewTable } from "../DropshipListingPreview";
 import { ListingShippingEstimateResult } from "../DropshipListingShippingEstimate";
 import type { DropshipListingPreviewRow } from "@/lib/dropship-ops-surface";
+import { LISTING_SHIPPING_ESTIMATE_UNAVAILABLE_CODE, LISTING_SHIPPING_ESTIMATE_UNAVAILABLE_MESSAGE } from "@shared/dropship/listing-shipping-estimate";
 
 afterEach(() => vi.unstubAllGlobals());
 function row(): DropshipListingPreviewRow {
@@ -96,7 +97,16 @@ describe("rich listing preview", () => {
   });
   it("shows missing shipping rates as unavailable, never free", () => {
     const markup = render(React.createElement(ListingShippingEstimateResult, { result: { status: "unavailable", storeConnectionId: 1, productVariantId: 1,
-      quantity: 1, destination: { country: "US", region: null, postalCode: "16066" }, estimatedAt: "2026-09-06T12:00:00.000Z", warnings: [], code: "NO_RATE", message: "No configured rate matches." } }));
+      quantity: 1, destination: { country: "US", region: null, postalCode: "16066" }, estimatedAt: "2026-09-06T12:00:00.000Z", warnings: [], code: LISTING_SHIPPING_ESTIMATE_UNAVAILABLE_CODE, message: LISTING_SHIPPING_ESTIMATE_UNAVAILABLE_MESSAGE } }));
     expect(markup).toContain("Shipping estimate unavailable"); expect(markup).not.toContain("$0.00");
+  });
+  it("shows only the final shipping charge and scenario, never internal rate or fee details", () => {
+    const markup = render(React.createElement(ListingShippingEstimateResult, { result: { status: "estimated", storeConnectionId: 1, productVariantId: 1,
+      quantity: 1, destination: { country: "US", region: null, postalCode: "16046" }, estimatedAt: "2026-09-08T12:00:00.000Z", warnings: [], totalShippingCents: 824, currency: "USD" } }));
+    expect(markup).toContain("$8.24");
+    expect(markup).toContain("16046, US");
+    for (const privateLabel of ["Rate and fee breakdown", "Rate-table charge", "Shipping markup", "Insurance pool", "Dunnage", "Rate table", "<details"]) {
+      expect(markup).not.toContain(privateLabel);
+    }
   });
 });

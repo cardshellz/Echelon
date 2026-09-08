@@ -1,6 +1,9 @@
 import { z } from "zod";
 
 const cutoverModeSchema = z.enum(["legacy", "test", "live"]);
+// Configured Shipping pricing programs own dropship charges unless an operator
+// explicitly selects a rollback or a store-scoped cutover.
+export const DEFAULT_DROPSHIP_SHIPPING_CUTOVER_MODE = "live";
 
 export interface DropshipShippingCutoverPolicy {
   mode: z.infer<typeof cutoverModeSchema>;
@@ -33,7 +36,7 @@ export function readDropshipShippingCutoverConfig(
 ): DropshipShippingCutoverConfig {
   const parsedMode = cutoverModeSchema.safeParse(
     env.DROPSHIP_SHARED_SHIPPING_CUTOVER_MODE?.trim().toLowerCase()
-      || "legacy",
+      || DEFAULT_DROPSHIP_SHIPPING_CUTOVER_MODE,
   );
   if (!parsedMode.success) {
     return legacyWithError(

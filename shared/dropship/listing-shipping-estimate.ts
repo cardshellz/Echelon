@@ -3,11 +3,16 @@ import { z } from "zod";
 // Bounds estimator/cartonization work; this is not an order quantity limit.
 // Quantity counts sellable variants (packs), never the eaches inside a pack.
 export const MAX_LISTING_SHIPPING_ESTIMATE_QUANTITY = 1000;
+// Customer-facing messages are allowlisted. Provider diagnostics, fee policies,
+// and pricing-program details belong in server logs, never this public DTO.
+export const LISTING_SHIPPING_ESTIMATE_UNAVAILABLE_CODE = "DROPSHIP_LISTING_SHIPPING_ESTIMATE_UNAVAILABLE";
+export const LISTING_SHIPPING_ESTIMATE_UNAVAILABLE_MESSAGE = "We couldn't estimate shipping for this quantity and destination. Please contact support.";
+export const LISTING_SHIPPING_ESTIMATE_WARNING = "This estimate uses the available fulfillment details; final shipping is confirmed during order processing.";
 const idSchema = z.number().int().positive().safe();
 const centsSchema = z.number().int().nonnegative().safe();
 const destinationInputSchema = z.object({
   country: z.string().trim().regex(/^[A-Za-z]{2}$/),
-  region: z.string().trim().min(1).max(100).optional(),
+  region: z.string().trim().regex(/^[A-Za-z]{2}$/, "Enter a two-letter state or region code."),
   postalCode: z.string().trim().min(1).max(20),
 }).strict();
 
@@ -24,26 +29,17 @@ const scenarioSchema = z.object({
   quantity: z.number().int().positive().max(MAX_LISTING_SHIPPING_ESTIMATE_QUANTITY),
   destination: z.object({ country: z.string().regex(/^[A-Z]{2}$/), region: z.string().nullable(), postalCode: z.string().min(1) }).strict(),
   estimatedAt: z.string().datetime(),
-  warnings: z.array(z.string()),
+  warnings: z.array(z.literal(LISTING_SHIPPING_ESTIMATE_WARNING)).max(1),
 });
 
 export const listingShippingEstimateResultSchema = z.discriminatedUnion("status", [
   scenarioSchema.extend({
     status: z.literal("estimated"),
-    warehouseId: idSchema,
-    packageCount: z.number().int().positive().safe(),
     totalShippingCents: centsSchema,
     currency: z.string().regex(/^[A-Z]{3}$/),
-    breakdown: z.object({ baseRateCents: centsSchema, markupCents: centsSchema, insurancePoolCents: centsSchema, dunnageCents: centsSchema }).strict(),
-    rate: z.object({
-      source: z.enum(["legacy", "shared"]),
-      rateTableIds: z.array(idSchema).min(1),
-      rateBookId: idSchema.nullable(),
-      serviceLevelCode: z.string().nullable(),
-      displayName: z.string().nullable(),
-    }).strict(),
   }).strict(),
-  scenarioSchema.extend({ status: z.literal("unavailable"), code: z.string().min(1), message: z.string().min(1) }).strict(),
+  scenarioSchema.extend({ status: z.literal("unavailable"), code: z.literal(LISTING_SHIPPING_ESTIMATE_UNAVAILABLE_CODE),
+    message: z.literal(LISTING_SHIPPING_ESTIMATE_UNAVAILABLE_MESSAGE) }).strict(),
 ]);
 
 export const listingShippingEstimateResponseSchema = z.object({ estimate: listingShippingEstimateResultSchema }).strict();

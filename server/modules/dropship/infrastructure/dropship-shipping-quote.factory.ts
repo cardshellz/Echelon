@@ -21,7 +21,9 @@ import {
 } from "./shared-engine-dropship-shipping.provider";
 import {
   CutoverDropshipShippingPricingProvider,
+  type DropshipShippingPricingProvider,
 } from "../application/dropship-shipping-pricing-service";
+import { DropshipError } from "../domain/errors";
 import {
   readDropshipShippingCutoverConfig,
 } from "../application/dropship-shipping-cutover-policy";
@@ -68,14 +70,24 @@ export function createDropshipShippingQuoteServiceFromEnv(): DropshipShippingQuo
 export function createDropshipShippingPricingProviderFromEnv(
   logger: DropshipLogger,
   sharedQuoteProvider: DropshipSharedShippingQuoteProvider = createSharedEngineDropshipShippingQuoteProviderFromEnv(),
-): CutoverDropshipShippingPricingProvider {
+): DropshipShippingPricingProvider {
   const cutoverConfig = readDropshipShippingCutoverConfig();
   if (cutoverConfig.configurationError !== null) {
     logger.error({
       code: "DROPSHIP_SHIPPING_CUTOVER_CONFIG_INVALID",
-      message: "Dropship shared shipping cutover remained on legacy pricing because its configuration is invalid.",
+      message: "Dropship shipping quotes are blocked because pricing configuration is invalid.",
       context: { error: cutoverConfig.configurationError },
     });
+    // Invalid settings must not silently switch the authority that determines
+    // customer charges. Block quotes, without taking the rest of the app down.
+    return {
+      async quote() {
+        throw new DropshipError(
+          "DROPSHIP_SHIPPING_CUTOVER_CONFIG_INVALID",
+          "Shipping pricing configuration needs attention.",
+        );
+      },
+    };
   }
   return new CutoverDropshipShippingPricingProvider({
     cutoverPolicy: cutoverConfig.policy,

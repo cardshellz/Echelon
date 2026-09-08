@@ -5,6 +5,7 @@ import type { DropshipListingShippingEstimateService } from "../../application/d
 import { DropshipError } from "../../domain/errors";
 import { createDropshipListingShippingEstimateServiceFromEnv } from "../../infrastructure/dropship-listing-shipping-estimate.factory";
 import { requireDropshipAuth } from "./dropship-auth.routes";
+import { listingShippingEstimateResponseSchema } from "../../../../../shared/dropship/listing-shipping-estimate";
 
 // Cartonization can be CPU-intensive. Bound requests per authenticated member,
 // independently of order placement and wallet rate limits.
@@ -23,10 +24,14 @@ export function registerDropshipListingShippingEstimateRoutes(
     legacyHeaders: false,
   });
   app.post("/api/dropship/listings/shipping-estimate", requireDropshipAuth, limiter, async (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
     try {
       const estimate = await service.estimateForMember(req.session.dropship!.memberId, req.body);
-      res.setHeader("Cache-Control", "no-store");
-      return res.json({ estimate });
+      const response = listingShippingEstimateResponseSchema.safeParse({ estimate });
+      if (!response.success) {
+        throw new DropshipError("DROPSHIP_LISTING_SHIPPING_ESTIMATE_INVALID", "Shipping estimate response failed its public contract.");
+      }
+      return res.json(response.data);
     } catch (error) {
       if (error instanceof ZodError) {
         return res.status(400).json({ error: { code: "DROPSHIP_LISTING_SHIPPING_INVALID_INPUT", message: "Shipping estimate input failed validation.", context: { issues: error.issues } } });
@@ -34,6 +39,7 @@ export function registerDropshipListingShippingEstimateRoutes(
       if (error instanceof DropshipError) {
         const status = statusForError(error.code);
         if (status >= 500) console.error(JSON.stringify({ code: error.code, message: "Listing shipping estimate failed.", context: error.context }));
+        if (status >= 500) return res.status(status).json({ error: { code: "DROPSHIP_LISTING_SHIPPING_INTERNAL_ERROR", message: "Shipping could not be estimated. Please try again." } });
         return res.status(status).json({ error: { code: error.code, message: error.message } });
       }
       console.error(JSON.stringify({ code: "DROPSHIP_LISTING_SHIPPING_INTERNAL_ERROR", message: "Listing shipping estimate failed.", error: error instanceof Error ? error.message : String(error) }));
@@ -52,6 +58,7 @@ function statusForError(code: string): number {
     case "DROPSHIP_LISTING_STORE_BLOCKED":
     case "DROPSHIP_LISTING_SHIPPING_VARIANT_NOT_SELECTED": return 403;
     case "DROPSHIP_SHARED_SHIPPING_QUOTE_FAILED":
+    case "DROPSHIP_SHIPPING_CUTOVER_CONFIG_INVALID":
     case "DROPSHIP_SHARED_SHIPPING_QUOTE_INVALID": return 503;
     default: return 500;
   }
