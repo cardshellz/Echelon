@@ -25,7 +25,7 @@ The DTO validates safe integer cents and preserves missing amounts/dates. It doe
 - `recomputePoFinancialAggregates` in `server/modules/procurement/ap-ledger.service.ts` selects and sums whole linked invoices' amounts and payments, then derives PO financial status. It does not use the link's allocated amount. The workspace suppresses those monetary PO rollups and labels the status as recorded. Each invoice retains its own currency, whole-invoice amounts and separately stored allocation to this purchase.
 - `recomputeShipmentTotals` in `server/modules/procurement/shipment-tracking.service.ts` sums recorded cost cents without currency conversion in that function. Shipment headers do not establish a reliable currency basis. The inspector withholds those monetary summaries and links to the source Costs tab. These observations establish a display limitation; live financial impact and remediation require separate investigation.
 
-Production relationship completeness and query performance have not been measured by these fixture tests. Pre-PO sourcing/RFQ lineage, production-stage detail, landed-cost reconciliation, lot drill-through, payment-page context, planning recommendations and further automation remain subsequent work. Purchasing decisions and financial posting rules are outside this change.
+Production relationship completeness and query performance are not established by these fixture tests. This document records the navigation release; later RFQ lineage, planning, pipeline, cost lineage and recovery work is described in the current [integrated acceptance ledger](procurement-integrated-acceptance.md). The navigation controls themselves do not authorize purchasing decisions or financial posting.
 
 
 ## Verification

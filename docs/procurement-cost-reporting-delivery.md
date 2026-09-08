@@ -1,5 +1,7 @@
 # Procurement cost reporting delivery v1
 
+**Deferred optional integration.** Echelon procurement runs without this connection. Keep `COST_REPORT_DELIVERY_ENABLED` unset or false until downstream reporting is resumed. The receiver-first instructions below apply only before enabling export, not before deploying or using Echelon. Retain migration 230 because the local delivery-status read model uses its tables even while transport is disabled.
+
 ## Authority and exact data
 
 `inventory/application/apply-cost-revision.ts:applyCostRevision` records an immutable
