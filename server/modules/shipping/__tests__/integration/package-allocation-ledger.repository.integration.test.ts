@@ -20,7 +20,12 @@ import {
   truncateTestData,
 } from "../../../../../test/setup-integration";
 import { createChannelFulfillmentAuthorityRepository } from "../../../oms/channel-fulfillment-authority.repository";
-import { createChannelFulfillmentAuthorityService } from "../../../oms/channel-fulfillment-authority.service";
+import {
+  createChannelFulfillmentAuthorityService,
+  createCompatibilityChannelFulfillmentProviderExecutor,
+} from "../../../oms/channel-fulfillment-authority.service";
+import { createFulfillmentPushService } from "../../../oms/fulfillment-push.service";
+import type { ShopifyAdminGraphQLClient } from "../../../shopify/admin-gql-client";
 import { PackageAllocationLabelCommercialFulfillmentService } from "../../package-allocation-label-commercial-fulfillment.service";
 import type {
   PackageAllocationEffectIntentV1,
@@ -84,6 +89,83 @@ const COMPETING_GROUP_KEY = "96e1be0d-c7d8-4c91-919f-04f5eb547f80";
 const CONCURRENCY_TEST_TIMEOUT_MS = 20_000;
 const BARRIER_TIMEOUT_MS = 5_000;
 const EXECUTION_AUDIT_ROLE = "package_allocation_discovery_execution_auditor";
+
+/**
+ * The named-schema fixture stops at command persistence. These additional
+ * columns use shared/schema/{oms,orders}.schema.ts definitions so this suite
+ * can execute the real provider adapter and persist its writeback audit too.
+ * No provider or owner SQL is mocked.
+ */
+async function installProviderExecutionTestRelations(pool: Pool): Promise<void> {
+  await pool.query(`
+    ALTER TABLE oms.oms_orders
+      ADD COLUMN ordered_at TIMESTAMP NOT NULL,
+      ADD COLUMN created_at TIMESTAMP NOT NULL DEFAULT now();
+    ALTER TABLE oms.oms_order_lines
+      ADD COLUMN shopify_fulfillment_order_id VARCHAR(100),
+      ADD COLUMN shopify_fulfillment_order_line_item_id VARCHAR(100),
+      ADD COLUMN provider_fulfillment_order_id VARCHAR(200),
+      ADD COLUMN provider_fulfillment_order_line_item_id VARCHAR(200);
+    ALTER TABLE wms.orders
+      ADD COLUMN channel_id INTEGER REFERENCES channels.channels(id) ON DELETE SET NULL,
+      ADD COLUMN source VARCHAR(20) NOT NULL DEFAULT 'shopify',
+      ADD COLUMN external_order_id VARCHAR(100),
+      ADD COLUMN combined_group_id INTEGER,
+      ADD COLUMN combined_role VARCHAR(20);
+    ALTER TABLE wms.outbound_shipments
+      ADD COLUMN channel_id INTEGER REFERENCES channels.channels(id),
+      ADD COLUMN shopify_fulfillment_id VARCHAR(100);
+    CREATE TABLE oms.oms_order_events (
+      id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      order_id BIGINT NOT NULL REFERENCES oms.oms_orders(id) ON DELETE CASCADE,
+      event_type VARCHAR(50) NOT NULL,
+      details JSONB,
+      created_at TIMESTAMP NOT NULL DEFAULT now()
+    );
+    CREATE INDEX idx_oms_events_order ON oms.oms_order_events(order_id);
+
+    -- Exact attempt/audit contract from 0593_fulfillment_authority_cutover_foundation.sql.
+    CREATE TABLE oms.channel_fulfillment_push_attempts (
+      id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      channel_fulfillment_push_id BIGINT NOT NULL
+        REFERENCES oms.channel_fulfillment_pushes(id) ON DELETE RESTRICT,
+      attempt_number INTEGER NOT NULL,
+      outcome VARCHAR(30) NOT NULL,
+      request_hash VARCHAR(64) NOT NULL,
+      provider_response_id VARCHAR(300),
+      error_code VARCHAR(100),
+      error_message VARCHAR(1000),
+      started_at TIMESTAMPTZ NOT NULL,
+      completed_at TIMESTAMPTZ NOT NULL,
+      correlation_id VARCHAR(100),
+      causation_id VARCHAR(100),
+      metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      CONSTRAINT channel_fulfillment_push_attempts_number_chk CHECK (attempt_number > 0),
+      CONSTRAINT channel_fulfillment_push_attempts_outcome_chk CHECK (
+        outcome IN ('success', 'retry_scheduled', 'ignored', 'review_required', 'dead_lettered')
+      ),
+      CONSTRAINT channel_fulfillment_push_attempts_hash_chk CHECK (
+        request_hash ~ '^[0-9a-f]{64}$'
+      ),
+      CONSTRAINT channel_fulfillment_push_attempts_time_chk CHECK (completed_at >= started_at),
+      CONSTRAINT channel_fulfillment_push_attempts_unique
+        UNIQUE (channel_fulfillment_push_id, attempt_number)
+    );
+    CREATE INDEX idx_channel_fulfillment_push_attempts_push
+      ON oms.channel_fulfillment_push_attempts(channel_fulfillment_push_id, attempt_number DESC);
+    CREATE OR REPLACE FUNCTION oms.reject_channel_fulfillment_attempt_mutation()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      RAISE EXCEPTION '% is append-only; % is not allowed', TG_TABLE_NAME, TG_OP
+        USING ERRCODE = '55000';
+    END;
+    $$;
+    CREATE TRIGGER channel_fulfillment_push_attempts_immutable
+      BEFORE UPDATE OR DELETE ON oms.channel_fulfillment_push_attempts
+      FOR EACH ROW EXECUTE FUNCTION oms.reject_channel_fulfillment_attempt_mutation();
+  `);
+}
 
 interface LedgerCounts {
   readonly groups: number;
@@ -233,8 +315,11 @@ async function seedCommercialFulfillmentAuthoritySource(
   );
   const omsOrder = await pool.query<{ id: string }>(
     `INSERT INTO oms.oms_orders (
-       external_order_id, channel_id, status, financial_status
-     ) VALUES ('gid://shopify/Order/640001', $1::integer, 'open', 'paid')
+       external_order_id, channel_id, status, financial_status, ordered_at
+     ) VALUES (
+       'gid://shopify/Order/640001', $1::integer, 'open', 'paid',
+       '2026-08-22T13:00:00.000'::timestamp
+     )
      RETURNING id::text AS id`,
     [channel.rows[0].id],
   );
@@ -848,6 +933,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     // Historical correction now projects immutable dispatch evidence even when
     // this legacy package fixture has no canonical receipts to read.
     await pool.query(shipmentQuantityEvidenceFixtureSql);
+    await installProviderExecutionTestRelations(pool);
     await installAuthorityReadinessTestRelations(pool);
     await installExecutionAuditRole(pool);
   }, 30_000);
@@ -2860,7 +2946,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     )).rejects.toMatchObject({ code: "23505" });
   });
 
-  it("materializes an exact B/C split into inert channel commands and replays without duplicates", async () => {
+  it.each([false, true])("executes exact B/C split quantities and replays without duplicates (stored Shopify mapping: %s)", async (storedShopifyMapping) => {
     const sourceId = await seedCommercialFulfillmentAuthoritySource(
       pool,
       "SKU-COMMERCIAL-SPLIT",
@@ -3136,6 +3222,203 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
          (SELECT COUNT(*)::int FROM oms.channel_fulfillment_push_items) AS push_items`,
     );
     expect(counts.rows[0]).toEqual({ physical_items: 2, pushes: 2, push_items: 2 });
+
+    const source = await pool.query<{
+      shipment_id: number;
+      order_id: number;
+      oms_order_id: string;
+      oms_order_line_id: string;
+      channel_id: number;
+      product_variant_id: number;
+    }>(
+      `SELECT si.shipment_id, oi.order_id, ol.order_id::text AS oms_order_id,
+              ol.id::text AS oms_order_line_id, o.channel_id, si.product_variant_id
+       FROM wms.outbound_shipment_items si
+       JOIN wms.order_items oi ON oi.id = si.order_item_id
+       JOIN oms.oms_order_lines ol ON ol.id = oi.oms_order_line_id
+       JOIN oms.oms_orders o ON o.id = ol.order_id
+       WHERE si.id = $1::integer`,
+      [sourceId],
+    );
+    const lineage = source.rows[0];
+    const warehouse = await pool.query<{ id: number }>(
+      `INSERT INTO warehouse.warehouses (code, name, shopify_location_id)
+       VALUES ('SPLIT-PROVIDER', 'Split provider integration', '640010')
+       RETURNING id`,
+    );
+    await pool.query(
+      `UPDATE wms.orders
+       SET channel_id = $2::integer, external_order_id = 'gid://shopify/Order/640001',
+           warehouse_id = $3::integer
+       WHERE id = $1::integer`,
+      [lineage.order_id, lineage.channel_id, warehouse.rows[0].id],
+    );
+    await pool.query(
+      `UPDATE wms.outbound_shipments SET channel_id = $2::integer
+       WHERE id = $1::integer`,
+      [lineage.shipment_id, lineage.channel_id],
+    );
+    if (storedShopifyMapping) {
+      await pool.query(
+        `UPDATE oms.oms_order_lines
+         SET provider_fulfillment_order_id = 'gid://shopify/FulfillmentOrder/640020',
+             provider_fulfillment_order_line_item_id = 'gid://shopify/FulfillmentOrderLineItem/640021'
+         WHERE id = $1::bigint`,
+        [lineage.oms_order_line_id],
+      );
+    }
+
+    // The legacy shipment can contain other same-SKU lines which are not in
+    // either package command. Neither stored-ID nor live lookup may send them.
+    const siblingLine = await pool.query<{ id: string }>(
+      `INSERT INTO oms.oms_order_lines (
+         order_id, external_line_item_id, fulfillment_provider,
+         paid_quantity, authority_fulfillable_quantity,
+         provider_fulfillment_order_id, provider_fulfillment_order_line_item_id
+       ) VALUES (
+         $1::bigint, 'gid://shopify/LineItem/640003', 'shopify', 3, 3,
+         'gid://shopify/FulfillmentOrder/640020', 'gid://shopify/FulfillmentOrderLineItem/640022'
+       ) RETURNING id::text AS id`,
+      [lineage.oms_order_id],
+    );
+    const siblingOrderItem = await pool.query<{ id: number }>(
+      `INSERT INTO wms.order_items (order_id, oms_order_line_id, sku, quantity)
+       VALUES ($1::integer, $2::bigint, 'SKU-COMMERCIAL-SPLIT', 3) RETURNING id`,
+      [lineage.order_id, siblingLine.rows[0].id],
+    );
+    await pool.query(
+      `INSERT INTO wms.outbound_shipment_items (
+         shipment_id, order_item_id, product_variant_id, qty
+       ) VALUES ($1::integer, $2::integer, $3::integer, 3)`,
+      [lineage.shipment_id, siblingOrderItem.rows[0].id, lineage.product_variant_id],
+    );
+
+    const createdPackages: Array<{ id: string; trackingNumber: string; quantity: number }> = [];
+    const request = vi.fn(async (query: string, variables?: Record<string, unknown>): Promise<unknown> => {
+      if (query.includes("exactFulfillmentPackageForOrder")) {
+        expect(variables).toEqual({ id: "gid://shopify/Order/640001" });
+        return { order: {
+          fulfillmentsCount: { count: createdPackages.length },
+          fulfillments: createdPackages.map((created) => ({
+            id: created.id,
+            status: "SUCCESS",
+            trackingInfo: [{ number: created.trackingNumber }],
+            fulfillmentLineItems: {
+              nodes: [{ quantity: created.quantity, lineItem: { id: "gid://shopify/LineItem/640002" } }],
+              pageInfo: { hasNextPage: false },
+            },
+          })),
+        } };
+      }
+      if (query.includes("fulfillmentCreateV2")) {
+        const fulfillment = recordValue(variables?.fulfillment, "Shopify fulfillment mutation");
+        expect(fulfillment.lineItemsByFulfillmentOrder).toEqual([{
+          fulfillmentOrderId: "gid://shopify/FulfillmentOrder/640020",
+          fulfillmentOrderLineItems: [{ id: "gid://shopify/FulfillmentOrderLineItem/640021", quantity: 1 }],
+        }]);
+        const tracking = recordValue(fulfillment.trackingInfo, "Shopify tracking input");
+        expect(typeof tracking.number).toBe("string");
+        const created = {
+          id: `gid://shopify/Fulfillment/${640030 + createdPackages.length}`,
+          trackingNumber: String(tracking.number),
+          quantity: 1,
+        };
+        createdPackages.push(created);
+        return { fulfillmentCreateV2: { fulfillment: { id: created.id }, userErrors: [] } };
+      }
+      if (query.includes("fulfillmentOrders(first:")) {
+        expect(variables).toEqual({ id: "gid://shopify/Order/640001" });
+        return { order: { fulfillmentOrders: { edges: [{ node: {
+          id: "gid://shopify/FulfillmentOrder/640020",
+          status: "OPEN",
+          assignedLocation: { location: { id: "gid://shopify/Location/640010" } },
+          lineItems: { edges: [
+            { node: {
+              id: "gid://shopify/FulfillmentOrderLineItem/640021",
+              sku: "SKU-COMMERCIAL-SPLIT",
+              lineItem: { id: "gid://shopify/LineItem/640002" },
+              remainingQuantity: 2 - createdPackages.reduce((sum, item) => sum + item.quantity, 0),
+            } },
+            { node: {
+              id: "gid://shopify/FulfillmentOrderLineItem/640022",
+              sku: "SKU-COMMERCIAL-SPLIT",
+              lineItem: { id: "gid://shopify/LineItem/640003" },
+              remainingQuantity: 3,
+            } },
+          ] },
+        } }] } } };
+      }
+      throw new Error("Unexpected Shopify query in split-package regression");
+    });
+    const client: ShopifyAdminGraphQLClient = {
+      request: async <T>(query: string, variables?: Record<string, unknown>): Promise<T> => (
+        await request(query, variables) as T
+      ),
+    };
+    const shopify = vi.fn(async (channelId: number) => {
+      expect(channelId).toBe(lineage.channel_id);
+      return {
+        channelId,
+        connectionId: 640040,
+        externalAccountId: "split-package-integration.myshopify.com",
+        client,
+      };
+    });
+    const ebay = vi.fn(async () => { throw new Error("Unexpected eBay account resolution"); });
+    const provider = createCompatibilityChannelFulfillmentProviderExecutor(
+      createFulfillmentPushService(getTestDb(), null, { providerClients: { shopify, ebay } }),
+    );
+    for (const command of claimable) {
+      expect(command.items).toHaveLength(1);
+      expect(command.items[0]).toMatchObject({ legacyWmsShipmentItemId: sourceId, quantity: 1 });
+      const executed = await provider.execute(command);
+      expect(executed.outcome).toBe("success");
+      await fulfillmentRepository.completeAttempt({
+        commandId: command.id,
+        leaseToken: command.leaseToken,
+        startedAt: activatedAt,
+        completedAt: new Date("2026-08-22T14:06:01.000Z"),
+        ...executed,
+      });
+    }
+    expect(createdPackages.map((item) => item.trackingNumber).sort()).toEqual([
+      "1Z0000000000044011",
+      "1Z0000000000044012",
+    ]);
+    expect(createdPackages.map((item) => item.quantity)).toEqual([1, 1]);
+
+    // Simulate retry after provider success: the exact package readback must
+    // recognize each quantity-1 package independently of the shared source2.
+    for (const command of claimable) {
+      await expect(provider.execute(command)).resolves.toMatchObject({ outcome: "ignored" });
+    }
+    expect(createdPackages).toHaveLength(2);
+    expect(ebay).not.toHaveBeenCalled();
+    const evidence = await pool.query<{ details: Record<string, unknown> }>(
+      `SELECT details FROM oms.oms_order_events
+       WHERE order_id = $1::bigint AND event_type = 'shopify_fulfillment_pushed'
+       ORDER BY id`,
+      [lineage.oms_order_id],
+    );
+    expect(evidence.rows).toHaveLength(2);
+    for (const event of evidence.rows) {
+      expect(event.details).toMatchObject({
+        requestedQuantity: 1,
+        pushedQuantity: 1,
+        writebackComplete: true,
+        lineEvidence: [{ shipmentItemId: sourceId, requestedQuantity: 1 }],
+      });
+    }
+    const completed = await pool.query<{ push_status: string; quantity_pushed: number }>(
+      `SELECT push.push_status, item.quantity_pushed
+       FROM oms.channel_fulfillment_pushes push
+       JOIN oms.channel_fulfillment_push_items item ON item.channel_fulfillment_push_id = push.id
+       ORDER BY push.id`,
+    );
+    expect(completed.rows).toEqual([
+      { push_status: "success", quantity_pushed: 1 },
+      { push_status: "success", quantity_pushed: 1 },
+    ]);
   });
 
   it.each([

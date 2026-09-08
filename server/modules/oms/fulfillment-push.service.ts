@@ -189,6 +189,9 @@ export class ChannelFulfillmentProviderInputError extends Error {
 }
 
 export interface ChannelFulfillmentProviderCommandItem {
+  /** Persisted allocation provenance; legacy commands omit both fields. */
+  readonly packageAllocationEntryId?: number | null;
+  readonly packageAllocationEffectIntentId?: number | null;
   readonly legacyWmsShipmentId: number;
   readonly legacyWmsShipmentItemId: number;
   readonly omsOrderLineId: number;
@@ -306,11 +309,14 @@ interface WmsShipmentItemForShopify {
   // warehouse SKU but are still real, fulfillable Shopify line items.
   external_line_item_id: string | null;
   qty: number;
+  stored_fulfillment_order_id?: string | null;
+  stored_fulfillment_order_line_item_id?: string | null;
 }
 
 interface LegacyShipmentLineSnapshot {
   shipment_id: number;
   shipment_item_id: number;
+  order_item_id?: number | null;
   oms_order_line_id: number | null;
   oms_order_id: number | null;
   fulfillment_provider: string | null;
@@ -486,6 +492,7 @@ function normalizeChannelCommandInput(
   const shipmentIdSet = new Set(legacyWmsShipmentIds);
   const seen = new Set<number>();
   const items = input.items.map((item) => {
+    const hasAllocation = item.packageAllocationEntryId != null || item.packageAllocationEffectIntentId != null;
     if (
       !Number.isInteger(item.legacyWmsShipmentId)
       || item.legacyWmsShipmentId <= 0
@@ -498,6 +505,10 @@ function normalizeChannelCommandInput(
       || item.quantity <= 0
       || !item.channelOrderLineId.trim()
       || seen.has(item.legacyWmsShipmentItemId)
+      || (hasAllocation && (
+        !Number.isSafeInteger(item.packageAllocationEntryId) || Number(item.packageAllocationEntryId) <= 0
+        || !Number.isSafeInteger(item.packageAllocationEffectIntentId) || Number(item.packageAllocationEffectIntentId) <= 0
+      ))
     ) {
       throw new ChannelFulfillmentProviderInputError(
         CHANNEL_FULFILLMENT_INVALID_INPUT,
@@ -507,6 +518,10 @@ function normalizeChannelCommandInput(
     }
     seen.add(item.legacyWmsShipmentItemId);
     return Object.freeze({
+      ...(hasAllocation ? {
+        packageAllocationEntryId: item.packageAllocationEntryId,
+        packageAllocationEffectIntentId: item.packageAllocationEffectIntentId,
+      } : {}),
       legacyWmsShipmentId: item.legacyWmsShipmentId,
       legacyWmsShipmentItemId: item.legacyWmsShipmentItemId,
       omsOrderLineId: item.omsOrderLineId,
@@ -949,6 +964,111 @@ export function createFulfillmentPushService(
   function requireProviderClients(): ChannelFulfillmentProviderClients {
     if (!options.providerClients) throw new ChannelFulfillmentProviderError("FULFILLMENT_ACCOUNT_RESOLVER_UNAVAILABLE", "Canonical fulfillment account resolution is not configured");
     return options.providerClients;
+  }
+
+  async function projectCanonicalCommandQuantities<T extends LegacyShipmentLineSnapshot>(
+    command: ChannelFulfillmentProviderCommandInput,
+    rows: readonly T[],
+    provider: "shopify" | "ebay",
+  ): Promise<T[]> {
+    const allocationItems = command.items.filter((item) => item.packageAllocationEntryId != null);
+
+    // The legacy line is a frozen source, not the quantity in every replacement
+    // package. Read the already-materialized, activated command's exact grant;
+    // never infer a partial grant from `command.quantity <= shipment.qty`.
+    const result = await db.execute(sql`
+      SELECT push.id AS command_id, push.oms_order_id, push.physical_shipment_id,
+             push.channel_provider, push.tracking_number, push.carrier,
+             push_item.oms_order_line_id, push_item.channel_order_line_id,
+             push_item.quantity_pushed, push_item.package_allocation_effect_intent_id,
+             physical_item.package_allocation_entry_id, physical_item.quantity_shipped,
+             entry.quantity AS allocation_quantity, entry.target_kind,
+             source.source_wms_shipment_item_id, source.source_quantity,
+             source.order_item_id AS source_order_item_id, source.shipment_item_purpose,
+             intent.quantity AS intent_quantity, intent.effect_type,
+             intent.id AS matched_intent_id, binding.id AS matched_binding_id,
+             activation.id AS matched_activation_id
+      FROM oms.channel_fulfillment_pushes AS push
+      JOIN oms.channel_fulfillment_push_items AS push_item ON push_item.channel_fulfillment_push_id = push.id
+      LEFT JOIN wms.physical_shipment_items AS physical_item ON physical_item.id = push_item.physical_shipment_item_id
+      LEFT JOIN wms.physical_shipments AS physical ON physical.id = physical_item.physical_shipment_id
+        AND physical.id = push.physical_shipment_id
+      LEFT JOIN wms.package_allocation_entries AS entry ON entry.id = physical_item.package_allocation_entry_id
+      LEFT JOIN wms.package_allocation_source_lines AS source ON source.id = entry.package_allocation_source_line_id
+      LEFT JOIN wms.package_allocation_package_bindings AS binding ON binding.id = entry.package_allocation_package_binding_id
+        AND binding.package_allocation_group_id = entry.package_allocation_group_id
+        AND binding.provider = physical.provider
+        AND binding.provider_physical_shipment_id = physical.provider_physical_shipment_id
+      LEFT JOIN wms.package_allocation_effect_intents AS intent ON intent.id = push_item.package_allocation_effect_intent_id
+        AND intent.package_allocation_source_line_id = source.id
+        AND intent.package_allocation_plan_id = entry.package_allocation_plan_id
+        AND intent.package_allocation_group_id = entry.package_allocation_group_id
+      LEFT JOIN oms.package_allocation_commercial_fulfillment_activations AS activation ON activation.channel_fulfillment_push_id = push.id
+        AND activation.package_allocation_plan_id = entry.package_allocation_plan_id
+      WHERE push.id = ${command.commandId}
+      ORDER BY physical_item.id
+    `);
+    const persistedItems: Array<Record<string, unknown>> = result?.rows ?? [];
+    const evidence = persistedItems.filter((row) => row.package_allocation_entry_id != null || row.package_allocation_effect_intent_id != null);
+    if (allocationItems.length === 0 && evidence.length === 0) {
+      assertExactChannelCommandLineage(command, rows, provider === "shopify" ? isShopifyFulfillmentProvider : isEbayFulfillmentProvider);
+      return [...rows];
+    }
+    const fail = (shipmentItemId?: number): never => {
+      throw new ChannelFulfillmentProviderInputError(
+        CHANNEL_FULFILLMENT_LINEAGE_MISMATCH,
+        `Canonical command ${command.commandId} lacks exact persisted package-allocation lineage`,
+        { commandId: command.commandId, legacyWmsShipmentItemId: shipmentItemId },
+      );
+    };
+    // Activated allocation commands never mix legacy/ungranted items (0645).
+    // Require the complete persisted package, not just a valid subset of it.
+    if (evidence.length !== allocationItems.length
+      || allocationItems.length !== command.items.length
+      || persistedItems.length !== command.items.length) fail();
+    const quantities = new Map<number, number>();
+    for (const item of allocationItems) {
+      const matches = evidence.filter((row) => Number(row.package_allocation_entry_id) === item.packageAllocationEntryId);
+      const current = rows.filter((row) => Number(row.shipment_item_id) === item.legacyWmsShipmentItemId);
+      if (matches.length !== 1 || current.length !== 1) fail(item.legacyWmsShipmentItemId);
+      const proof = matches[0];
+      const source = current[0];
+      if (Number(proof.command_id) !== command.commandId
+        || Number(proof.oms_order_id) !== command.omsOrderId
+        || Number(proof.physical_shipment_id) !== command.physicalShipmentId
+        || proof.channel_provider !== provider
+        || String(proof.tracking_number ?? "").trim() !== command.trackingNumber
+        || String(proof.carrier ?? "").trim() !== command.carrier
+        || Number(proof.oms_order_line_id) !== item.omsOrderLineId
+        || String(proof.channel_order_line_id ?? "").trim() !== item.channelOrderLineId
+        || Number(proof.package_allocation_effect_intent_id) !== item.packageAllocationEffectIntentId
+        || Number(proof.matched_intent_id) !== item.packageAllocationEffectIntentId
+        || !Number.isSafeInteger(Number(proof.matched_binding_id)) || Number(proof.matched_binding_id) <= 0
+        || !Number.isSafeInteger(Number(proof.matched_activation_id)) || Number(proof.matched_activation_id) <= 0
+        || Number(proof.source_wms_shipment_item_id) !== item.legacyWmsShipmentItemId
+        || !Number.isSafeInteger(Number(proof.source_order_item_id)) || Number(proof.source_order_item_id) <= 0
+        || Number(proof.source_order_item_id) !== Number(source.order_item_id)
+        || proof.shipment_item_purpose !== "customer_fulfillment"
+        || !Number.isSafeInteger(Number(proof.source_quantity)) || Number(proof.source_quantity) <= 0
+        || Number(proof.source_quantity) !== Number(source.qty)
+        || Number(proof.quantity_pushed) !== item.quantity
+        || Number(proof.quantity_shipped) !== item.quantity
+        || Number(proof.allocation_quantity) !== item.quantity
+        || item.quantity > Number(proof.source_quantity)
+        || proof.target_kind !== "package" || proof.effect_type !== "commercial_fulfillment"
+        || !Number.isSafeInteger(Number(proof.intent_quantity)) || Number(proof.intent_quantity) < item.quantity) {
+        fail(item.legacyWmsShipmentItemId);
+      }
+      quantities.set(item.legacyWmsShipmentItemId, item.quantity);
+    }
+    const projected = rows.map((row) => ({
+      ...row,
+      qty: quantities.get(Number(row.shipment_item_id)) ?? row.qty,
+    }));
+    // Retain every original source/order/provider identity check. Only a proven
+    // allocated row changes quantity; non-allocation legacy rows stay exact.
+    assertExactChannelCommandLineage(command, projected, provider === "shopify" ? isShopifyFulfillmentProvider : isEbayFulfillmentProvider);
+    return projected;
   }
 
   function shopifyFulfillmentWriteLockId(
@@ -1483,6 +1603,7 @@ export function createFulfillmentPushService(
       SELECT
         shipment_item.shipment_id,
         shipment_item.id AS shipment_item_id,
+        shipment_item.order_item_id,
         order_item.oms_order_line_id,
         order_line.order_id AS oms_order_id,
         order_line.fulfillment_provider,
@@ -1497,7 +1618,7 @@ export function createFulfillmentPushService(
       ORDER BY shipment_item.id
     `);
     const rawLineItems: LegacyShipmentLineSnapshot[] = lineResult?.rows ?? [];
-    assertExactChannelCommandLineage(command, rawLineItems, isEbayFulfillmentProvider);
+    await projectCanonicalCommandQuantities(command, rawLineItems, "ebay");
     const account = await requireProviderClients().ebay(order.channelId);
     if (account.channelId !== order.channelId) throw new ChannelFulfillmentProviderError("FULFILLMENT_ACCOUNT_CHANNEL_MISMATCH", "Resolved eBay account belongs to another channel");
 
@@ -1689,18 +1810,29 @@ export function createFulfillmentPushService(
       );
     }
 
-    // ---- 0. Load the legacy fulfillment handle -------------------------
-    // This is historical identity only. It is not completeness evidence:
-    // one Shopify fulfillment can cover only part of a later-expanded WMS
-    // package. Live fulfillment-order quantities below are the idempotency
-    // guard and prevent duplicate quantity on retries.
+    // ---- 0. Load fulfillment identity for this package -----------------
+    // Split packages share a legacy shipment header. Its first fulfillment ID
+    // therefore cannot identify each canonical physical package. Keep that
+    // compatibility handle only for legacy callers; canonical calls use their
+    // exact persisted command/package scope plus live tracking/line evidence.
     const legacyWmsShipmentIds = command?.legacyWmsShipmentIds ?? [shipmentId];
-    const idempotencyResult: any = await db.execute(sql`
-      SELECT id, shopify_fulfillment_id
-      FROM wms.outbound_shipments
-      WHERE id = ANY(${sqlBigintArray(legacyWmsShipmentIds)})
-      ORDER BY id
-    `);
+    const idempotencyResult: any = command
+      ? await db.execute(sql`
+          SELECT id, channel_fulfillment_id AS shopify_fulfillment_id
+          FROM oms.channel_fulfillment_pushes
+          WHERE physical_shipment_id = ${command.physicalShipmentId}
+            AND oms_order_id = ${command.omsOrderId}
+            AND channel_provider = 'shopify'
+            AND (id = ${command.commandId} OR push_status IN ('success', 'ignored'))
+            AND NULLIF(BTRIM(channel_fulfillment_id), '') IS NOT NULL
+          ORDER BY id
+        `)
+      : await db.execute(sql`
+          SELECT id, shopify_fulfillment_id
+          FROM wms.outbound_shipments
+          WHERE id = ANY(${sqlBigintArray(legacyWmsShipmentIds)})
+          ORDER BY id
+        `);
     const existingFulfillmentIds: string[] = [...new Set<string>(
       (idempotencyResult?.rows ?? [])
         .map((row: any) => String(row?.shopify_fulfillment_id ?? "").trim())
@@ -1945,6 +2077,8 @@ export function createFulfillmentPushService(
             ol.fulfillment_provider AS fulfillment_provider,
             oi.sku           AS sku,
             ol.external_line_item_id AS external_line_item_id,
+            COALESCE(NULLIF(ol.provider_fulfillment_order_id, ''), ol.shopify_fulfillment_order_id) AS stored_fulfillment_order_id,
+            COALESCE(NULLIF(ol.provider_fulfillment_order_line_item_id, ''), ol.shopify_fulfillment_order_line_item_id) AS stored_fulfillment_order_line_item_id,
             si.qty::int      AS qty
           FROM wms.outbound_shipment_items si
           JOIN wms.order_items oi ON oi.id = si.order_item_id
@@ -1973,9 +2107,11 @@ export function createFulfillmentPushService(
           WHERE si.shipment_id = ${shipmentId}
             AND COALESCE(oi.status, 'pending') <> 'cancelled'
         `);
-    const items: WmsShipmentItemForShopify[] = itemsResult?.rows ?? [];
+    const sourceItems: WmsShipmentItemForShopify[] = itemsResult?.rows ?? [];
+    const items = command
+      ? await projectCanonicalCommandQuantities(command, sourceItems, "shopify")
+      : sourceItems;
     const positiveItems = items.filter((it) => Number.isInteger(it.qty) && it.qty > 0);
-    if (command) assertExactChannelCommandLineage(command, items, isShopifyFulfillmentProvider);
     if (positiveItems.length === 0) {
       throw new ShopifyFulfillmentPushError(
         `pushShopifyFulfillment: shipment ${shipmentId} has no items with positive quantity`,
@@ -2120,7 +2256,18 @@ export function createFulfillmentPushService(
     // any item's stored FO line item id is null/stale — typical for
     // orders ingested before C22a/b shipped, transient Shopify errors,
     // or Shopify fulfillment-order changes after cancellations.
-    const pathARead = await tryReadPathA(db, shipmentId);
+    // Canonical Path A uses the same validated item snapshot and allocation
+    // quantity as Path B. Re-reading the anchor legacy shipment would restore
+    // its full source quantity or accidentally include an unallocated sibling.
+    const pathARead: PathARow[] | null = command
+      ? shopifyPositiveItems.map((item) => ({
+          shipmentItemId: item.shipment_item_id,
+          quantity: item.qty,
+          omsOrderLineId: item.oms_order_line_id,
+          fulfillmentOrderId: firstNonEmptyString(item.stored_fulfillment_order_id),
+          fulfillmentOrderLineItemId: firstNonEmptyString(item.stored_fulfillment_order_line_item_id),
+        }))
+      : await tryReadPathA(db, shipmentId);
     let resolved: ResolvedFulfillmentOrderLine[] = [];
     let pathAUsed = false;
     let pathAReason = "";
