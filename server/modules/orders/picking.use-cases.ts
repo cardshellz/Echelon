@@ -1306,13 +1306,22 @@ export class PickingUseCases {
       pickMethod?: string;
     },
   ): Promise<CompletedPickAtomicResult> {
+    const alreadyPickedQuantity = Number(input.beforeItem.pickedQuantity ?? 0);
+    const remainingPickQuantity = input.effectivePickedQuantity - alreadyPickedQuantity;
     const resolved = await this.resolveCanonicalPickTarget(
       input.beforeItem,
-      input.effectivePickedQuantity,
+      remainingPickQuantity,
       { warehouseLocationId: input.warehouseLocationId, warehouseId: input.warehouseId },
     );
     if (resolved.nonInventory) {
       return this.persistNonInventoryPickProgress(input);
+    }
+    if (!Number.isSafeInteger(alreadyPickedQuantity) || alreadyPickedQuantity < 0
+      || !Number.isSafeInteger(remainingPickQuantity) || remainingPickQuantity <= 0) {
+      throw new IntegrityError("Canonical completion requires a positive remaining pick quantity", {
+        reason: "canonical_pick_delta_invalid", orderId: input.beforeItem.orderId, orderItemId: input.itemId,
+        alreadyPickedQuantity, targetPickedQuantity: input.effectivePickedQuantity,
+      });
     }
     const target = resolved.target!;
     const claim = await context.getLatestClaim(input.beforeItem.orderId);
@@ -1336,7 +1345,7 @@ export class PickingUseCases {
     const reason = `Picker completed order item ${input.itemId} from ${target.locationCode}`;
     const wmsProgress = {
       expectedStatus: input.beforeItem.status as "pending" | "in_progress" | "short",
-      expectedPickedQuantity: Number(input.beforeItem.pickedQuantity ?? 0),
+      expectedPickedQuantity: alreadyPickedQuantity,
       targetStatus: "completed" as const,
       targetPickedQuantity: input.effectivePickedQuantity,
     };
@@ -1345,7 +1354,7 @@ export class PickingUseCases {
       orderId: input.beforeItem.orderId,
       orderItemId: input.itemId,
       warehouseLocationId: target.locationId,
-      quantity: input.effectivePickedQuantity,
+      quantity: remainingPickQuantity,
       actor,
       wmsProgress,
       pickMovementCursor,
@@ -1355,14 +1364,14 @@ export class PickingUseCases {
         claimId: claim.claimId,
         orderItemId: input.itemId,
         warehouseLocationId: target.locationId,
-        quantity: String(input.effectivePickedQuantity),
+        quantity: String(remainingPickQuantity),
         locationStrategy,
         ...(locationStrategy === "reconcile_picker_observation" ? {
           observation: {
             kind: input.pickMethod === "scan"
               ? "validated_item_scan" as const
               : "picker_confirmed_physical_stock" as const,
-            observedPhysicalQty: String(input.effectivePickedQuantity),
+            observedPhysicalQty: String(remainingPickQuantity),
             locationCode: target.locationCode,
             ...(input.deviceType ? { deviceType: input.deviceType } : {}),
             ...(input.sessionId ? { sessionId: input.sessionId } : {}),
@@ -1424,8 +1433,8 @@ export class PickingUseCases {
               ? "picker_scan_bin_shortage" as const
               : "picker_confirmed_bin_shortage" as const,
             adjustment: observedRelocated,
-            systemQtyBefore: Math.max(0, systemQtyAfter + input.effectivePickedQuantity - observedRelocated),
-            pickedQty: input.effectivePickedQuantity,
+            systemQtyBefore: Math.max(0, systemQtyAfter + remainingPickQuantity - observedRelocated),
+            pickedQty: remainingPickQuantity,
             message: `Picker observation reconciled ${observedRelocated} claim-owned unit(s) into ${target.locationCode} before pick.`,
           },
         } : {}),

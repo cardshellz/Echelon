@@ -9,6 +9,7 @@ import { createAuthorityAwareInventoryPublicationService } from "../server/modul
 import { createAllocationEngine } from "../server/modules/channels/allocation-engine.service";
 import { createSourceLockService } from "../server/modules/channels/source-lock.service";
 import { createShopifyAdapter } from "../server/modules/channels/adapters/shopify.adapter";
+import { PostgresQuantityPublicationAdmission } from "../server/modules/inventory-planning/infrastructure/quantity-publication-admission.repository";
 import { ChannelAdapterRegistry } from "../server/modules/channels/channel-adapter.interface";
 import { createChannelProductPushService } from "../server/modules/channels/product-push.service";
 import { createEchelonSyncOrchestrator } from "../server/modules/channels/echelon-sync-orchestrator.service";
@@ -20,7 +21,7 @@ async function main() {
   const atpService = createAuthorityAwareInventoryAtpService(pool);
   const allocationEngine = createAllocationEngine(db, atpService);
   const sourceLockService = createSourceLockService(db);
-  const shopifyAdapter = createShopifyAdapter(db);
+  const shopifyAdapter = createShopifyAdapter(db, new PostgresQuantityPublicationAdmission(pool));
   const productPushService = createChannelProductPushService(db);
   const adapterRegistry = new ChannelAdapterRegistry();
   adapterRegistry.register(shopifyAdapter);

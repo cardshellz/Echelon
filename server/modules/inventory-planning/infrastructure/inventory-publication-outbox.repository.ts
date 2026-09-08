@@ -161,7 +161,7 @@ export class PostgresInventoryPublicationOutboxRepository {
           unlockError = error;
         }
       }
-      client.release();
+      client.release(unlockError ? unlockError instanceof Error ? unlockError : new Error(String(unlockError)) : undefined);
       if (unlockError) {
         if (workError) {
           throw new AggregateError(
@@ -232,7 +232,7 @@ export class PostgresInventoryPublicationOutboxRepository {
       );
       await client.query(
         `UPDATE inventory.inventory_publication_outbox
-         SET state = $2, verified_at = CASE WHEN $2 = 'verified' THEN $3::timestamptz ELSE NULL END
+         SET state = $2::varchar, verified_at = CASE WHEN $2::varchar = 'verified' THEN $3::timestamptz ELSE NULL END
          WHERE id = $1 AND state = 'acknowledged'`,
         [claim.outboxId, matches ? "verified" : "drifted", input.completedAt.toISOString()],
       );

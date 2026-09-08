@@ -11,7 +11,7 @@ export const inventoryShipmentQuantityEvidenceSchema = z.discriminatedUnion("sta
   z.object({
     status: z.literal("verified"),
     quantity: z.number().int().positive().max(POSTGRES_INTEGER_MAX),
-    source: z.enum(["canonical_dispatch_receipt", "legacy_on_hand_delta"]),
+    source: z.enum(["canonical_dispatch_receipt", "operational_dispatch_receipt", "legacy_on_hand_delta"]),
     receiptId: positiveBigintText.nullable(),
   }).strict(),
   z.object({
@@ -20,7 +20,7 @@ export const inventoryShipmentQuantityEvidenceSchema = z.discriminatedUnion("sta
     reason: z.string().min(1).max(300),
   }).strict(),
 ]).refine((value) => value.status !== "verified"
-  || (value.source === "canonical_dispatch_receipt") === (value.receiptId !== null),
+  || (value.source !== "legacy_on_hand_delta") === (value.receiptId !== null),
 "Canonical quantities require a receipt; legacy quantities must not claim one");
 
 export type InventoryShipmentQuantityEvidence = z.infer<typeof inventoryShipmentQuantityEvidenceSchema>;
@@ -56,14 +56,46 @@ export function interpretInventoryShipmentQuantity(raw: unknown): InventoryShipm
   const row = object(raw);
   if (!row || typeof row.transactionType !== "string") return invalid("Missing inventory transaction evidence.");
   const canonicalMarker = row.referenceType === "availability_claim_dispatch";
+  const operationalMarker = row.referenceType === "operational_shipment";
+  const hasOperationalReceipt = row.operationalReceipt !== null && row.operationalReceipt !== undefined;
   const hasReceipt = row.receipt !== null && row.receipt !== undefined;
   if (row.transactionType !== "ship") {
-    return canonicalMarker || hasReceipt
+    return canonicalMarker || hasReceipt || operationalMarker || hasOperationalReceipt
       ? invalid("Dispatch evidence is attached to a non-shipment transaction.")
       : { status: "not_shipment" };
   }
   if (positiveId(row.transactionId) === null) return invalid("Invalid inventory transaction identity.");
   const delta = integer(row.variantQtyDelta);
+  if (operationalMarker || hasOperationalReceipt) {
+    const receipt = object(row.operationalReceipt);
+    if (!operationalMarker || !receipt || canonicalMarker || hasReceipt) return invalid("Operational shipment marker requires its own receipt, without customer dispatch evidence.");
+    const receiptId = positiveBigintText.safeParse(receipt.id);
+    const quantity = positiveId(receipt.quantity);
+    if (!receiptId.success || quantity === null || delta !== -quantity || integer(row.reservedQtyDelta) !== 0
+      || row.sourceState !== "on_hand" || row.targetState !== "shipped" || row.orderItemId !== null) {
+      return invalid("Operational shipment must debit its exact new on-hand quantity without customer reservation or picked custody.");
+    }
+    for (const field of ["orderId", "shipmentId", "shipmentItemId", "productVariantId", "fromLocationId"] as const) {
+      if (positiveId(row[field]) === null || positiveId(row[field]) !== positiveId(receipt[field])) {
+        return invalid(`Operational receipt does not match the shipment's ${field}.`);
+      }
+    }
+    if (positiveId(receipt.warehouseId) === null
+      || (receipt.physicalShipmentItemId !== null && !positiveBigintText.safeParse(receipt.physicalShipmentItemId).success)
+      || !((receipt.purpose === "replacement" && positiveId(receipt.replacementForOrderItemId) !== null)
+        || (receipt.purpose === "concession" && receipt.replacementForOrderItemId === null))) {
+      return invalid("Operational receipt lacks exact warehouse and non-customer purpose lineage.");
+    }
+    const nonnegativeMills = z.string().regex(/^(0|[1-9][0-9]{0,18})$/)
+      .refine((value) => BigInt(value) <= POSTGRES_BIGINT_MAX);
+    if (!nonnegativeMills.safeParse(receipt.totalCostMills).success
+      || String(row.totalCostMills) !== receipt.totalCostMills
+      || receipt.movementTotalCostMills !== receipt.totalCostMills
+      || integer(receipt.movementQuantity) !== quantity || integer(receipt.invalidMovementCount) !== 0) {
+      return invalid("Operational receipt does not reconcile to its complete exact FIFO quantity and mill-cost journal.");
+    }
+    return { status: "verified", quantity, source: "operational_dispatch_receipt", receiptId: receiptId.data };
+  }
   if (!canonicalMarker && !hasReceipt) {
     if (delta === null || delta >= 0 || delta < -POSTGRES_INTEGER_MAX) {
       return invalid("Shipment has neither a valid legacy debit nor a canonical dispatch receipt.");

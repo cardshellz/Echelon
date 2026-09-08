@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { QuantityPublicationAdmission } from "./quantity-publication-admission.port";
 
 import type {
   ClaimedInventoryPublication,
@@ -53,6 +54,7 @@ export class InventoryPublicationOutboxService {
     private readonly adapters: Pick<InventoryPublicationTransportRegistry, "get">,
     private readonly clock: InventoryPublicationClock = systemClock,
     private readonly leaseTokenFactory: () => string = randomUUID,
+    private readonly quantityAdmission?: QuantityPublicationAdmission,
   ) {}
 
   async processDue(input: { batchSize?: number; leaseSeconds?: number } = {}): Promise<InventoryPublicationBatchResult> {
@@ -113,7 +115,8 @@ export class InventoryPublicationOutboxService {
     };
     const operation = await this.store.runIfCurrent(claim, async () => {
       try {
-        const push = await adapter.publishAbsolute({ ...request, desiredQuantity });
+        const publish = () => adapter.publishAbsolute({ ...request, desiredQuantity });
+        const push = this.quantityAdmission ? await this.quantityAdmission.runOutbox(claim, publish) : await publish();
         if (push.publishedQuantity !== desiredQuantity) {
           throw retryable(
             "PROVIDER_RESPONSE_INVALID",

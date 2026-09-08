@@ -33,7 +33,7 @@ const inventoryShipTransactionSchema = z.object({
   evidenceKind: z.enum(["exact_shipment_item", "legacy_order_item"]),
   // Older callers omitted this field because every shipment was an on-hand
   // debit. Omission retains that legacy interpretation.
-  quantitySource: z.enum(["canonical_dispatch_receipt", "legacy_on_hand_delta"]).optional(),
+  quantitySource: z.enum(["canonical_dispatch_receipt", "operational_dispatch_receipt", "legacy_on_hand_delta"]).optional(),
 }).strict();
 
 const wmsLineSchema = z.object({
@@ -308,7 +308,8 @@ function planGroup(
   let canonicalLineMismatch = false;
   const hasCanonicalLineage = group.wmsLines.some((line) => (
     line.inventoryShipTransactions.some(
-      (transaction) => transaction.quantitySource === "canonical_dispatch_receipt",
+      (transaction) => transaction.quantitySource === "canonical_dispatch_receipt"
+        || transaction.quantitySource === "operational_dispatch_receipt",
     )
   ));
   const recordedSegments: HistoricalShipStationContentsCorrectionRestoration[] = [];
@@ -363,7 +364,7 @@ function planGroup(
         group.displaySku,
         line.wmsShipmentItemId,
       ));
-      if (transaction.quantitySource !== "canonical_dispatch_receipt") {
+      if (transaction.quantitySource !== "canonical_dispatch_receipt" && transaction.quantitySource !== "operational_dispatch_receipt") {
         inventoryEvidenceComplete = false;
         continue;
       }
@@ -378,7 +379,7 @@ function planGroup(
     );
     recordedLineIds.add(line.wmsShipmentItemId);
     if (
-      transaction.quantitySource !== "canonical_dispatch_receipt"
+      transaction.quantitySource !== "canonical_dispatch_receipt" && transaction.quantitySource !== "operational_dispatch_receipt"
       && transaction.fromLocationId !== null
     ) {
       recordedSegments.push(Object.freeze({
@@ -405,7 +406,7 @@ function planGroup(
   if (canonicalCorrectionBlocked) {
     blockers.push(blocker(
       "canonical_claim_correction_required",
-      "This SKU includes canonical claim dispatch. A claim-aware correction workflow must resolve the mismatch; legacy package edits and on-hand restoration are not authorized by shipment quantity evidence.",
+      "This SKU includes immutable claim or operational dispatch. Its owning correction workflow must resolve the mismatch; legacy package edits and on-hand restoration are not authorized by shipment quantity evidence.",
       group.displaySku,
     ));
   }

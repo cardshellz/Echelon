@@ -6,6 +6,7 @@ import type { Pool, PoolClient } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { interpretInventoryShipmentQuantity } from "@shared/inventory/shipment-quantity";
 import { shipmentQuantityEvidenceProjection } from "../../infrastructure/shipment-quantity-evidence.sql";
+import { operationalShipmentQuantityFixtureSql } from "../fixtures/operational-shipment-quantity";
 import { PostgresCanonicalClaimInventoryRepository } from "../../infrastructure/canonical-claim-inventory.repository";
 import { PostgresCanonicalClaimDispatchRepository } from "../../../inventory-planning/infrastructure/inventory-availability-dispatch.repository";
 import { WmsCanonicalClaimDispatchSourceOwner } from "../../../wms/canonical-claim-dispatch-source";
@@ -36,7 +37,7 @@ describeDatabase.sequential("shipment quantity evidence PostgreSQL read contract
 
   beforeAll(async () => {
     database = await createInventoryCutoverTestDatabase(databaseUrl, disposable,
-      `${dispatchRuntimeFixtureSql}\nALTER TABLE inventory.inventory_transactions ADD COLUMN voided_at timestamp;`);
+      `${dispatchRuntimeFixtureSql}\nALTER TABLE inventory.inventory_transactions ADD COLUMN voided_at timestamp;\n${operationalShipmentQuantityFixtureSql}`);
     pool = database.pool;
     await pool.query(migration);
   });

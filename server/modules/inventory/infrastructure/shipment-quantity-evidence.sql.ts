@@ -21,6 +21,29 @@ export function shipmentQuantityEvidenceProjection(transaction: SQL): SQL {
     'shipmentItemId', ${transaction}.shipment_item_id,
     'productVariantId', ${transaction}.product_variant_id,
     'fromLocationId', ${transaction}.from_location_id,
+    'totalCostMills', ${transaction}.total_cost_mills::text,
+    'operationalReceipt', (
+      SELECT jsonb_build_object(
+        'id', receipt.id::text, 'quantity', receipt.quantity::text,
+        'orderId', receipt.order_id, 'shipmentId', receipt.outbound_shipment_id,
+        'shipmentItemId', receipt.source_shipment_item_id, 'productVariantId', receipt.product_variant_id,
+        'fromLocationId', receipt.warehouse_location_id, 'warehouseId', receipt.warehouse_id,
+        'physicalShipmentItemId', receipt.physical_shipment_item_id::text,
+        'purpose', receipt.purpose, 'replacementForOrderItemId', receipt.replacement_for_order_item_id,
+        'totalCostMills', receipt.total_cost_mills::text,
+        'movementQuantity', journal.quantity::text,
+        'movementTotalCostMills', journal.total_cost_mills::text,
+        'invalidMovementCount', journal.invalid_count::text
+      )
+      FROM inventory.operational_shipment_dispatch_receipts receipt
+      LEFT JOIN LATERAL (
+        SELECT SUM(movement.quantity) AS quantity, SUM(movement.total_cost_mills) AS total_cost_mills,
+          COUNT(*) FILTER (WHERE movement.quantity <= 0 OR movement.unit_cost_mills < 0
+            OR movement.total_cost_mills <> movement.quantity::numeric * movement.unit_cost_mills) AS invalid_count
+        FROM inventory.operational_shipment_dispatch_lots movement WHERE movement.receipt_id=receipt.id
+      ) journal ON true
+      WHERE receipt.inventory_transaction_id=${transaction}.id
+    ),
     'receipt', (
       SELECT jsonb_build_object(
         'id', receipt.id::text,

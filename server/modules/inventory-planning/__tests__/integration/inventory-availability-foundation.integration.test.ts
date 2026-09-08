@@ -14,6 +14,10 @@ import { PostgresInventoryAvailabilityMasterDataStore } from "../../infrastructu
 import { PostgresInventoryPromiseSafetyAdminStore } from "../../infrastructure/inventory-promise-safety-admin.repository";
 import { PostgresInventoryChannelExposureAdminStore } from "../../infrastructure/inventory-channel-exposure-admin.repository";
 import { createAuthorityAwareInventoryPublicationService, createTransactionScopedInventoryPublicationService } from "../../infrastructure/inventory-availability-runtime-publication.repository";
+import { installOperationalPublicationPrerequisites } from "../fixtures/shipment-operational-publication";
+import { PostgresOperationalShipmentDispatchRepository } from "../../../inventory/infrastructure/operational-shipment-dispatch.repository";
+import { WmsOperationalShipmentSourceOwner } from "../../../wms/operational-shipment-source";
+import { publishOperationalShipmentInsideTransaction } from "../../infrastructure/inventory-availability-dispatch-publication";
 import { loadInventoryAvailabilityBackfillSources } from "../../infrastructure/inventory-availability-backfill.repository";
 import { planInventoryAvailabilityBackfill } from "../../domain/inventory-availability-backfill";
 import { InventoryAvailabilityBackfillService } from "../../application/inventory-availability-backfill.service";
@@ -3903,5 +3907,49 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       [activation.rows[0]!.id],
     );
     expect(activationEvidence.rows[0]!.outbox_enqueued).toBe(true);
+
+    // Actual operational inventory owner -> production publication callback ->
+    // production planner and trigger-guarded outbox. This is not a fake callback
+    // or a simulation of global cutover: runtime/model authority is the same
+    // real foundation setup already proven above.
+    await installOperationalPublicationPrerequisites(pool);
+    await pool.query(readFileSync(resolve(process.cwd(), "migrations/234_inventory_canonical_shipment_compatibility.sql"), "utf8"));
+    await pool.query("INSERT INTO wms.orders(id,warehouse_id) VALUES(70,$1)", [scope.warehouseId]);
+    await pool.query("INSERT INTO wms.order_items VALUES(71,70)");
+    await pool.query(`INSERT INTO wms.outbound_shipments(id,order_id) VALUES(90,70);
+      INSERT INTO wms.outbound_shipments(id,order_id,shipment_purpose,replaces_shipment_id,replacement_authorized_at,replacement_authorized_by)
+      VALUES(92,70,'replacement',90,'2026-09-07','operator')`);
+    await pool.query(`INSERT INTO wms.outbound_shipment_items(id,shipment_id,product_variant_id,qty,
+      from_location_id,shipment_item_purpose,replacement_for_order_item_id)
+      VALUES(103,92,$1,3,$2,'replacement',71)`, [scope.variantIds[0], scope.locationId]);
+    await pool.query(`INSERT INTO inventory.inventory_lots VALUES(401,$1,$2,9,2,4,'active','2026-09-01',111)`, [scope.locationId, scope.variantIds[0]]);
+    await pool.query("INSERT INTO oms.order_item_costs VALUES(301,2,222)");
+    const operationalRequest = { orderId: 70, outboundShipmentId: 92, sourceShipmentItemId: 103,
+      productVariantId: scope.variantIds[0]!, quantity: 3, actor: "integration-shipstation" };
+    const operationalOwner = (beforeCommit = publishOperationalShipmentInsideTransaction) =>
+      new PostgresOperationalShipmentDispatchRepository(pool, new WmsOperationalShipmentSourceOwner(), beforeCommit,
+        () => new Date(FIXED_TIME));
+    await expect(operationalOwner(async (input) => {
+      await publishOperationalShipmentInsideTransaction(input);
+      expect((await input.client.query("SELECT desired_quantity::text AS quantity FROM inventory.inventory_publication_outbox WHERE state='queued'")).rows)
+        .toEqual([{ quantity: "4" }]);
+      expect((await pool.query("SELECT desired_quantity::text AS quantity FROM inventory.inventory_publication_outbox WHERE state='queued'")).rows)
+        .toEqual([{ quantity: "7" }]);
+      throw new Error("rollback after actual operational publication");
+    }).dispatch(operationalRequest)).rejects.toThrow("rollback after actual operational publication");
+    expect((await pool.query("SELECT variant_qty FROM inventory.inventory_levels WHERE id=$1", [level.rows[0]!.id])).rows[0].variant_qty).toBe(9);
+    expect((await pool.query("SELECT count(*)::int AS total FROM inventory.operational_shipment_dispatch_receipts")).rows[0].total).toBe(0);
+    expect((await pool.query("SELECT count(*)::int AS total FROM inventory.inventory_publication_outbox")).rows[0].total).toBe(2);
+    await operationalOwner().dispatch(operationalRequest);
+    expect((await pool.query("SELECT variant_qty,reserved_qty FROM inventory.inventory_levels WHERE id=$1", [level.rows[0]!.id])).rows[0])
+      .toEqual({ variant_qty: 6, reserved_qty: 2 });
+    expect((await pool.query("SELECT qty_on_hand,qty_reserved,qty_picked FROM inventory.inventory_lots WHERE id=401")).rows[0])
+      .toEqual({ qty_on_hand: 6, qty_reserved: 2, qty_picked: 4 });
+    expect((await pool.query("SELECT * FROM oms.order_item_costs")).rows).toEqual([{ id: 301, qty: 2, total_cost_mills: "222" }]);
+    expect((await pool.query("SELECT desired_quantity::text AS quantity,publication_phase FROM inventory.inventory_publication_outbox WHERE state='queued'")).rows)
+      .toEqual([{ quantity: "4", publication_phase: "full" }]);
+    expect(await operationalOwner().dispatch(operationalRequest)).toMatchObject({ alreadyRecorded: true });
+    expect((await pool.query("SELECT count(*)::int AS total FROM inventory.inventory_publication_outbox")).rows[0].total).toBe(3);
+
   });
 });

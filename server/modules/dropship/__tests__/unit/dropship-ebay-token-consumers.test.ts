@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createAdmittedEbayQuantityTestOwner } from "../../../channels/__tests__/fixtures/quantity-publication-admission";
 import { EbayDropshipOrderIntakeProvider } from "../../infrastructure/dropship-ebay-order-intake.provider";
 import { EbayDropshipReturnIntakeProvider } from "../../infrastructure/dropship-ebay-return-intake.provider";
 import { EbayDropshipMarketplaceTrackingProvider } from "../../infrastructure/dropship-ebay-tracking.provider";
@@ -250,7 +251,7 @@ async function runConsumer(name: ConsumerName, repo: DropshipMarketplaceCredenti
   }, {
     ensureForStoreConnection: async () => location,
     ensureWithAccessToken: async () => location,
-  });
+  }, () => createAdmittedEbayQuantityTestOwner());
   if (name === "listing replacement") {
     return provider.createReplacementLifecycleClient({ ...identity, marketplaceConfig: policyConfig });
   }

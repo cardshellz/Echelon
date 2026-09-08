@@ -9,6 +9,7 @@
  */
 
 import { and, eq } from "drizzle-orm";
+import { createProviderRequestDeadline, boundedProviderRetryAfterSeconds } from "../provider-request-limits";
 import {
   channelConnections,
   warehouses,
@@ -36,6 +37,7 @@ import type {
 } from "../channel-adapter.interface";
 import { InventoryPublicationConfigurationError } from "../channel-adapter.interface";
 import { ShopifyMarketplaceListingConnector } from "../listing-connectors/shopify-listing.connector";
+import type { QuantityPublicationAdmission } from "../../inventory-planning/application/quantity-publication-admission.port";
 
 import crypto from "crypto";
 
@@ -51,6 +53,7 @@ type DrizzleDb = {
 };
 
 interface ShopifyCredentials {
+  channelConnectionId?: number;
   shopDomain: string;
   accessToken: string;
   apiVersion: string;
@@ -77,7 +80,7 @@ export class ShopifyAdapter implements IChannelAdapter {
   });
   private readonly listingConnector = new ShopifyMarketplaceListingConnector();
 
-  constructor(private readonly db: DrizzleDb) {}
+  constructor(private readonly db: DrizzleDb, private readonly quantityAdmission?: QuantityPublicationAdmission) {}
 
   // -------------------------------------------------------------------------
   // Listings
@@ -655,6 +658,7 @@ export class ShopifyAdapter implements IChannelAdapter {
     }
 
     return {
+      channelConnectionId: conn.id,
       shopDomain: conn.shopDomain,
       accessToken: conn.accessToken,
       apiVersion: conn.apiVersion || DEFAULT_API_VERSION,
@@ -681,12 +685,26 @@ export class ShopifyAdapter implements IChannelAdapter {
     path: string,
     body?: any,
   ): Promise<any> {
+    if (method !== "GET" && path === "/inventory_levels/set.json") {
+      if (!this.quantityAdmission) throw new Error("QUANTITY_PUBLICATION_ADMISSION_REQUIRED: Shopify quantity writes require an admitted owner.");
+      return this.quantityAdmission.run({ destinationKind: "channel_connection", connectionId: creds.channelConnectionId!,
+        providerKey: "shopify", providerScopeType: "location", externalScopeId: String(body.location_id),
+        externalInventoryItemId: String(body.inventory_item_id), productId: null, productVariantId: null },
+      () => this.shopifyRequestUnadmitted(creds, method, path, body));
+    }
+    return this.shopifyRequestUnadmitted(creds, method, path, body);
+  }
+
+  private async shopifyRequestUnadmitted(creds: ShopifyCredentials, method: string, path: string, body?: any): Promise<any> {
     const baseUrl = `https://${creds.shopDomain}/admin/api/${creds.apiVersion}`;
     const url = path.startsWith("/") ? `${baseUrl}${path}` : `${baseUrl}/${path}`;
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      const deadline = createProviderRequestDeadline();
+      try {
       const response = await fetch(url, {
         method,
+        signal: deadline.signal,
         headers: {
           "X-Shopify-Access-Token": creds.accessToken,
           "Content-Type": "application/json",
@@ -696,7 +714,7 @@ export class ShopifyAdapter implements IChannelAdapter {
 
       // Rate limit handling
       if (response.status === 429) {
-        const retryAfter = parseInt(response.headers.get("Retry-After") || "2", 10);
+        const retryAfter = boundedProviderRetryAfterSeconds(response.headers.get("Retry-After"), 2);
         console.warn(`[ShopifyAdapter] Rate limited, retrying in ${retryAfter}s (attempt ${attempt})`);
         await this.delay(retryAfter * 1000);
         continue;
@@ -713,7 +731,8 @@ export class ShopifyAdapter implements IChannelAdapter {
         throw new Error(`Shopify API ${method} ${path} failed (${response.status}): ${errorBody}`);
       }
 
-      return response.json();
+      return await response.json();
+      } finally { deadline.dispose(); }
     }
 
     throw new Error(`Shopify API ${method} ${path} failed after ${MAX_RETRIES} retries`);
@@ -728,8 +747,8 @@ export class ShopifyAdapter implements IChannelAdapter {
 // Factory
 // ---------------------------------------------------------------------------
 
-export function createShopifyAdapter(db: any): ShopifyAdapter {
-  return new ShopifyAdapter(db);
+export function createShopifyAdapter(db: any, quantityAdmission?: QuantityPublicationAdmission): ShopifyAdapter {
+  return new ShopifyAdapter(db, quantityAdmission);
 }
 
 function shopifyRestId(value: string, field: string): number {

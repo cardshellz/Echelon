@@ -13,6 +13,10 @@ import { supplySnapshotSchema } from "@shared/types/inventory-availability-plann
 import { canonicalJson } from "@shared/utils/canonical-json";
 
 import { pool } from "../../../db";
+import { acquireInventoryCutoverFenceInsideTransaction } from "./inventory-cutover-admission-fence.repository";
+import { buildInventoryCutoverManifest } from "../domain/inventory-cutover-manifest";
+import { projectInventoryCutoverStateInsideTransaction } from "./inventory-cutover-projection.repository";
+import { suppressQuantityPublicationInsideTransaction, releaseQuantityPublicationSuppressionInsideTransaction } from "./quantity-publication-admission.repository";
 import type {
   AbortInventoryActivationCommand,
   InventoryAvailabilityActivationStore,
@@ -20,8 +24,6 @@ import type {
 } from "../application/inventory-availability-activation.service";
 
 type ClientPool = Pick<Pool, "connect">;
-const CUTOVER_LOCK_NAMESPACE = 918_413;
-const CUTOVER_LOCK_KEY = 1;
 const MAX_PROVIDER_READBACK_AGE_MS = 15 * 60 * 1000;
 
 type PublicationIntent = {
@@ -79,10 +81,12 @@ implements InventoryAvailabilityActivationStore {
   }
 
   async prepare(command: PrepareInventoryActivationCommand): Promise<InventoryActivationCommandResult> {
-    return inSerializable(this.connectionPool, async (client) => {
-      await lockCutover(client);
+    return inCutoverTransaction(this.connectionPool, async (client) => {
       const replay = await loadCommandReplay(client, command.idempotencyKey, command.requestHash);
       if (replay) return replay;
+      const fence = await acquireInventoryCutoverFenceInsideTransaction(client, {
+        expectedAuthority: "legacy", expectedConfigurationRunId: null,
+      });
 
       const dryRun = await loadReadyDryRun(
         client,
@@ -90,7 +94,16 @@ implements InventoryAvailabilityActivationStore {
         command.expectedDryRunResultHash,
       );
       await assertDryRunSelectionsCurrent(client, dryRun);
-      const intents = await publicationIntents(client, dryRun, "conservative", command.occurredAt);
+      const manifest = buildInventoryCutoverManifest(dryRun, await selectedSnapshots(client, dryRun));
+      const proposed = await projectInventoryCutoverStateInsideTransaction(client, manifest, dryRun.activationRunId, fence.authorityRevision);
+      if (proposed.blockers.length > 0) {
+        throw invalidEvidence("ACTIVATION_RECONSTRUCTION_BLOCKED", "Resolve current demand, custody and publication findings before conservative preparation.", { blockers: proposed.blockers });
+      }
+      const quantities = new Map(proposed.publicationRows.map((row) => [`${row.publicationTargetId}:${row.productVariantId}`, row.desiredQuantity]));
+      const intents = await publicationIntents(client, dryRun, "conservative", command.occurredAt, quantities);
+      if (intents.length !== quantities.size) {
+        throw invalidEvidence("ACTIVATION_PUBLICATION_COVERAGE_CHANGED", "Current post-reconstruction quantities do not exactly match reviewed publication coverage.");
+      }
       const publicationRequired = intents.length > 0;
       const state = publicationRequired ? "publishing" as const : "publication_verified" as const;
       const evidenceHash = configurationDigest(dryRun);
@@ -139,6 +152,11 @@ implements InventoryAvailabilityActivationStore {
          ) VALUES ($1, $2, $3, $4, $5)`,
         [inserted.id, dryRun.activationRunId, evidenceHash, command.actor, command.occurredAt.toISOString()],
       );
+      // Suppression survives an uncertain older provider attempt. The outbox
+      // admission owner waits for its explicit reconciliation before writing.
+      const publicationDrain = await suppressQuantityPublicationInsideTransaction(client, {
+        activationRunId: String(inserted.id), actor: command.actor, now: command.occurredAt,
+      });
       for (const intent of intents) {
         await enqueuePublication(client, inserted.id, "conservative", intent, command.occurredAt);
       }
@@ -155,6 +173,9 @@ implements InventoryAvailabilityActivationStore {
         alreadyApplied: false,
       });
       const resultHash = hash(resultWithoutReplay(result));
+      // The run's captured evidence is immutable. Admission evidence belongs in
+      // this append-only preparation event, not a later update to that snapshot.
+      const preparationEvidence = { ...resultWithoutReplay(result), publicationDrain };
       await client.query(
         `UPDATE inventory.availability_activation_runs SET result_hash = $2 WHERE id = $1`,
         [inserted.id, resultHash],
@@ -165,8 +186,8 @@ implements InventoryAvailabilityActivationStore {
         toState: state,
         actor: command.actor,
         reason: command.reason,
-        evidenceHash: resultHash,
-        evidence: resultWithoutReplay(result),
+        evidenceHash: hash(preparationEvidence),
+        evidence: preparationEvidence,
         occurredAt: command.occurredAt,
       });
       await insertCommandReceipt(client, {
@@ -186,10 +207,12 @@ implements InventoryAvailabilityActivationStore {
   }
 
   async abort(command: AbortInventoryActivationCommand): Promise<InventoryActivationCommandResult> {
-    return inSerializable(this.connectionPool, async (client) => {
-      await lockCutover(client);
+    return inCutoverTransaction(this.connectionPool, async (client) => {
       const replay = await loadCommandReplay(client, command.idempotencyKey, command.requestHash);
       if (replay) return replay;
+      await acquireInventoryCutoverFenceInsideTransaction(client, {
+        expectedAuthority: "legacy", expectedConfigurationRunId: command.activationRunId,
+      });
       const run = (await client.query<Record<string, unknown>>(
         `SELECT * FROM inventory.availability_activation_runs WHERE id = $1 FOR UPDATE`,
         [command.activationRunId],
@@ -242,6 +265,9 @@ implements InventoryAvailabilityActivationStore {
          WHERE id = $1`,
         [command.activationRunId, command.occurredAt.toISOString()],
       );
+      await releaseQuantityPublicationSuppressionInsideTransaction(client, {
+        activationRunId: command.activationRunId, outcome: "aborted", actor: command.actor, now: command.occurredAt,
+      });
       const freezeReleased = await client.query(
         `UPDATE inventory.availability_activation_freezes
          SET released_by = $2, released_at = $3, release_reason = $4
@@ -259,6 +285,7 @@ implements InventoryAvailabilityActivationStore {
       const result = inventoryActivationCommandResultSchema.parse({
         activationRunId: command.activationRunId,
         commandType: "abort",
+        publicationCatchupPending: true,
         state: "failed",
         sourceDryRunId: String(run.source_dry_run_id),
         revalidationDryRunId: null,
@@ -309,13 +336,13 @@ async function loadActivationStatus(
 ): Promise<InventoryActivationStatus | null> {
   const where = selector.kind === "id"
     ? "run.id = $1 AND run.mode = 'activation'"
-    : "run.mode = 'activation' AND run.state IN ('publishing', 'publication_verified')";
+    : "run.mode = 'activation' AND run.state IN ('publishing', 'publication_verified', 'activating', 'active')";
   const params = selector.kind === "id" ? [selector.activationRunId] : [];
   const orderAndLimit = selector.kind === "open" ? "ORDER BY run.id DESC LIMIT 1" : "";
   const row = (await client.query<Record<string, unknown>>(
     `SELECT run.id, run.state, run.source_dry_run_id,
             run.provider_write_attempted, authority.authority,
-            (freeze.activation_run_id IS NOT NULL AND freeze.released_at IS NULL) AS configuration_frozen,
+            (configured_freeze.activation_run_id IS NOT NULL AND configured_freeze.released_at IS NULL) AS configuration_frozen,
             count(outbox.id)::text AS total,
             count(outbox.id) FILTER (WHERE outbox.state = 'queued')::text AS queued,
             count(outbox.id) FILTER (WHERE outbox.state = 'leased')::text AS leased,
@@ -325,13 +352,13 @@ async function loadActivationStatus(
             count(outbox.id) FILTER (WHERE outbox.state = 'cancelled')::text AS cancelled
      FROM inventory.availability_activation_runs AS run
      CROSS JOIN inventory.availability_runtime_authority AS authority
-     LEFT JOIN inventory.availability_activation_freezes AS freeze
-       ON freeze.activation_run_id = run.id
+     LEFT JOIN inventory.availability_activation_freezes AS configured_freeze
+       ON configured_freeze.activation_run_id = run.id
      LEFT JOIN inventory.inventory_publication_outbox AS outbox
        ON outbox.activation_run_id = run.id
      WHERE ${where} AND authority.singleton_key = true
      GROUP BY run.id, run.state, run.source_dry_run_id, run.provider_write_attempted,
-              authority.authority, freeze.activation_run_id, freeze.released_at
+              authority.authority, configured_freeze.activation_run_id, configured_freeze.released_at
      ${orderAndLimit}`,
     params,
   )).rows[0];
@@ -355,11 +382,13 @@ async function loadActivationStatus(
   });
 }
 
-async function inSerializable<T>(connectionPool: ClientPool, work: (client: PoolClient) => Promise<T>): Promise<T> {
+async function inCutoverTransaction<T>(connectionPool: ClientPool, work: (client: PoolClient) => Promise<T>): Promise<T> {
   const client = await connectionPool.connect();
   let began = false;
   try {
-    await client.query("BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE");
+    // The exclusive versioned admission fence drains preceding writers. RC is
+    // required so subsequent capture sees commits that completed while waiting.
+    await client.query("BEGIN TRANSACTION ISOLATION LEVEL READ COMMITTED");
     began = true;
     const result = await work(client);
     await client.query("COMMIT");
@@ -379,17 +408,13 @@ async function inSerializable<T>(connectionPool: ClientPool, work: (client: Pool
   }
 }
 
-async function lockCutover(client: PoolClient): Promise<void> {
-  await client.query("SELECT pg_advisory_xact_lock($1, $2)", [CUTOVER_LOCK_NAMESPACE, CUTOVER_LOCK_KEY]);
-}
-
-async function loadReadyDryRun(client: PoolClient, runId: string, expectedHash: string): Promise<InventoryActivationDryRun> {
+export async function loadReadyDryRun(client: PoolClient, runId: string, expectedHash: string, lockRows = true): Promise<InventoryActivationDryRun> {
   const row = (await client.query<Record<string, unknown>>(
     `SELECT id, mode, scope, state, request_hash, result_hash,
             captured_catalog_input_hash, captured_catalog_result_hash,
             evidence_payload, requested_by, reason, started_at, completed_at,
             runtime_authority_changed, provider_write_attempted, outbox_enqueued
-     FROM inventory.availability_activation_runs WHERE id = $1 FOR SHARE`,
+     FROM inventory.availability_activation_runs WHERE id = $1 ${lockRows ? "FOR SHARE" : ""}`,
     [runId],
   )).rows[0];
   if (!row || String(row.mode) !== "dry_run") {
@@ -444,14 +469,14 @@ function configurationDigest(dryRun: InventoryActivationDryRun): string {
   })));
 }
 
-async function assertDryRunSelectionsCurrent(client: PoolClient, dryRun: InventoryActivationDryRun): Promise<void> {
+export async function assertDryRunSelectionsCurrent(client: PoolClient, dryRun: InventoryActivationDryRun, lockRows = true): Promise<void> {
   const publications = dryRun.products.flatMap((product) => product.proposedPublications);
   const targetIds = unique(publications.map((row) => row.publicationTargetId));
   const targets = targetIds.length === 0 ? [] : (await client.query<Record<string, unknown>>(
     `SELECT id, destination_kind, channel_id, channel_connection_id,
             dropship_store_connection_id, provider_scope_type, external_scope_id,
             publication_authority, state, revision
-     FROM inventory.inventory_publication_targets WHERE id = ANY($1::integer[]) FOR SHARE`,
+     FROM inventory.inventory_publication_targets WHERE id = ANY($1::integer[]) ${lockRows ? "FOR SHARE" : ""}`,
     [targetIds],
   )).rows;
   const targetById = new Map(targets.map((row) => [Number(row.id), row]));
@@ -466,16 +491,18 @@ async function assertDryRunSelectionsCurrent(client: PoolClient, dryRun: Invento
       || String(current.external_scope_id) !== publication.externalScopeId
       || String(current.publication_authority) !== publication.publicationAuthority
       || String(current.revision) !== publication.publicationTargetRevision
-      || String(current.state) !== "preview") {
+      || (publication.publicationAuthority === "echelon"
+        ? String(current.state) !== "preview"
+        : !["preview", "live"].includes(String(current.state)))) {
       throw invalidEvidence("ACTIVATION_PUBLICATION_TARGET_CHANGED", "A publication target changed after dry-run capture.", {
         publicationTargetId: publication.publicationTargetId,
       });
     }
   }
-  await assertSelectedHeadRows(client, dryRun);
+  await assertSelectedHeadRows(client, dryRun, lockRows);
 }
 
-async function assertSelectedHeadRows(client: PoolClient, dryRun: InventoryActivationDryRun): Promise<void> {
+async function assertSelectedHeadRows(client: PoolClient, dryRun: InventoryActivationDryRun, lockRows = true): Promise<void> {
   const modelRefs = dryRun.products.map((product) => ({
     key: String(product.productId), id: product.draftModelId, hash: product.draftDefinitionHash,
   }));
@@ -503,6 +530,7 @@ async function assertSelectedHeadRows(client: PoolClient, dryRun: InventoryActiv
             WHERE head.publication_target_id = ANY($1::integer[])`,
     ids: sourceRefs.map((ref) => Number(ref.key)),
     code: "ACTIVATION_SOURCE_BINDING_CHANGED",
+    allowAbsent: true,
   });
   const mappingRefs = dedupeRefs(publications.map((row) => ({
     key: `${row.publicationTargetId}:${row.productVariantId}`,
@@ -519,7 +547,7 @@ async function assertSelectedHeadRows(client: PoolClient, dryRun: InventoryActiv
      WHERE head.publication_target_id = ANY($1::integer[])`,
     [mappingTargetIds],
   )).rows;
-  assertRefs(mappingRefs, mappingRows, "ACTIVATION_VARIANT_MAPPING_CHANGED");
+  assertRefs(mappingRefs, mappingRows, "ACTIVATION_VARIANT_MAPPING_CHANGED", true);
 
   const policyRefs = dedupeRefs(publications.flatMap((row) => row.policySelections.map((policy) => ({
     key: policy.scopeKey, id: policy.policyId, hash: policy.definitionHash,
@@ -534,7 +562,7 @@ async function assertSelectedHeadRows(client: PoolClient, dryRun: InventoryActiv
   )).rows;
   assertRefs(policyRefs, policyRows, "ACTIVATION_CHANNEL_POLICY_CHANGED");
 
-  const snapshots = await selectedSnapshots(client, dryRun);
+  const snapshots = await selectedSnapshots(client, dryRun, lockRows);
   const graphModelRefs = dedupeRefs(snapshots.flatMap((snapshot) =>
     snapshot.transformationModels.map((model) => ({
       key: String(model.productId), id: model.modelId, hash: model.definitionHash,
@@ -585,20 +613,25 @@ async function assertHeadSelection(client: PoolClient, input: {
   query: string;
   ids: number[];
   code: string;
+  allowAbsent?: boolean;
 }): Promise<void> {
   const refs = dedupeRefs(input.refs);
   const rows = input.ids.length === 0 ? [] : (await client.query<Record<string, unknown>>(input.query, [input.ids])).rows;
-  assertRefs(refs, rows, input.code);
+  assertRefs(refs, rows, input.code, input.allowAbsent);
 }
 
 function assertRefs(
   refs: Array<{ key: string; id: number | null; hash: string | null }>,
   rows: Record<string, unknown>[],
   code: string,
+  allowAbsent = false,
 ): void {
   const current = new Map(rows.map((row) => [String(row.key), row]));
   for (const ref of refs) {
     const row = current.get(ref.key);
+    // External/observe-only targets may intentionally select no binding or
+    // mapping. Preserve that absence exactly: a newly added head is still drift.
+    if (allowAbsent && ref.id === null && ref.hash === null && !row) continue;
     if (!row || ref.id === null || ref.hash === null
       || Number(row.id) !== ref.id || String(row.definition_hash) !== ref.hash) {
       throw invalidEvidence(code, "A selected inventory availability definition changed after dry-run capture.", {
@@ -613,9 +646,11 @@ async function publicationIntents(
   dryRun: InventoryActivationDryRun,
   phase: "conservative" | "full",
   occurredAt: Date,
+  currentQuantities?: ReadonlyMap<string, string>,
 ): Promise<PublicationIntent[]> {
   const publishRows = dryRun.products.flatMap((product) => product.proposedPublications)
-    .filter((row) => row.disposition === "publish")
+    .filter((row) => row.disposition === "publish" || (row.disposition === "skip_ineligible"
+      && row.publicationAuthority === "echelon" && row.mappingId !== null && row.sourceBindingId !== null))
     .sort((left, right) => left.publicationTargetId - right.publicationTargetId
       || left.productVariantId - right.productVariantId);
   if (publishRows.length === 0) return [];
@@ -667,7 +702,12 @@ async function publicationIntents(
     if (!row.externalInventoryItemId) {
       throw invalidEvidence("ACTIVATION_PUBLICATION_IDENTITY_MISSING", "A publish row has no provider inventory identity.");
     }
-    let desired = BigInt(row.desiredUnits);
+    const key = `${row.publicationTargetId}:${row.productVariantId}`;
+    const currentQuantity = currentQuantities?.get(key);
+    if (currentQuantities && currentQuantity === undefined) {
+      throw invalidEvidence("ACTIVATION_PUBLICATION_COVERAGE_CHANGED", "A reviewed target/SKU is absent from current planning.", { key });
+    }
+    let desired = BigInt(currentQuantity ?? row.desiredUnits);
     if (phase === "conservative") {
       const readback = readbackByKey.get(`${row.publicationTargetId}:${row.productVariantId}`);
       if (!readback
@@ -733,7 +773,27 @@ async function enqueuePublication(
   intent: PublicationIntent,
   occurredAt: Date,
 ): Promise<void> {
-  await client.query("SELECT pg_advisory_xact_lock($1, $2)", [intent.publicationTargetId, intent.productVariantId]);
+  const locked = (await client.query<{ acquired: boolean }>(
+    "SELECT pg_try_advisory_xact_lock($1, $2) AS acquired", [intent.publicationTargetId, intent.productVariantId],
+  )).rows[0]?.acquired;
+  if (locked !== true) {
+    throw invalidEvidence("INVENTORY_PUBLICATION_TARGET_BUSY", "Provider work is in flight; retry the complete activation command.");
+  }
+  const idempotencyKey = `availability:${runId}:${phase}:${intent.publicationTargetId}:${intent.productVariantId}`;
+  const existing = (await client.query<Record<string, unknown>>(
+    `SELECT activation_run_id, publication_phase, desired_revision::text, payload_hash
+     FROM inventory.inventory_publication_outbox WHERE idempotency_key = $1 FOR SHARE`, [idempotencyKey],
+  )).rows[0];
+  if (existing) {
+    // A replay uses its original revision; max(revision)+1 would invent a new
+    // payload and falsely conflict with the command's already-durable row.
+    const expectedHash = hash({ ...intent, phase, revision: String(existing.desired_revision) });
+    if (String(existing.activation_run_id) !== runId || String(existing.publication_phase) !== phase
+      || String(existing.payload_hash) !== expectedHash) {
+      throw invalidEvidence("ACTIVATION_OUTBOX_IDEMPOTENCY_CONFLICT", "Publication idempotency evidence conflicts.");
+    }
+    return;
+  }
   const latest = (await client.query<{ revision: string | null }>(
     `SELECT max(desired_revision)::text AS revision
      FROM inventory.inventory_publication_outbox
@@ -741,7 +801,6 @@ async function enqueuePublication(
     [intent.publicationTargetId, intent.productVariantId],
   )).rows[0]?.revision;
   const revision = (latest ? BigInt(latest) : BigInt(0)) + BigInt(1);
-  const idempotencyKey = `availability:${runId}:${phase}:${intent.publicationTargetId}:${intent.productVariantId}`;
   const payloadHash = hash({ ...intent, phase, revision: revision.toString() });
   const inserted = (await client.query<{ id: string }>(
     `INSERT INTO inventory.inventory_publication_outbox (
@@ -787,12 +846,12 @@ async function enqueuePublication(
   );
 }
 
-async function selectedSnapshots(client: PoolClient, dryRun: InventoryActivationDryRun) {
+export async function selectedSnapshots(client: PoolClient, dryRun: InventoryActivationDryRun, lockRows = true) {
   const shadowRunIds = uniqueStrings(dryRun.products.flatMap((product) =>
     product.shadowRunId ? [product.shadowRunId] : []));
   const shadowRows = shadowRunIds.length === 0 ? [] : (await client.query<Record<string, unknown>>(
     `SELECT id, snapshot_payload FROM inventory.planner_shadow_runs
-     WHERE id = ANY($1::bigint[]) FOR SHARE`,
+     WHERE id = ANY($1::bigint[]) ${lockRows ? "FOR SHARE" : ""}`,
     [shadowRunIds],
   )).rows;
   if (shadowRows.length !== shadowRunIds.length) {

@@ -57,6 +57,36 @@ function canonicalContext(canonical: Record<string, unknown>): InventoryAvailabi
 }
 
 describe("PickingUseCases canonical authority routing", () => {
+
+  it.each(["strict", "reconcile_picker_observation"] as const)("completes existing partial custody with only the remaining delta (%s)", async (strategy) => {
+    const beforeItem = item({ quantity: 6, pickedQuantity: 2, status: "in_progress", location: "UNASSIGNED" });
+    const pickClaimLine = vi.fn();
+    if (strategy === "reconcile_picker_observation") {
+      pickClaimLine.mockRejectedValueOnce(codedError("CLAIM_PICK_LOCATION_SHORTFALL"))
+        .mockRejectedValueOnce(codedError("CLAIM_LEVEL_CONFLICT"));
+    }
+    pickClaimLine.mockResolvedValue({ outcome: "picked", warehouseLocationIds: [1] });
+    const context = canonicalContext({ pickClaimLine });
+    const storage = {
+      getProductVariantBySku: vi.fn(async () => ({ id: 105, sku: "P5", requiresShipping: true, trackInventory: true })),
+      getInventoryLevelsByProductVariantId: vi.fn(async () => [{ warehouseLocationId: 1, variantQty: 4 }]),
+      getAllWarehouseLocations: vi.fn(async () => [{ id: 1, code: "A-01", warehouseId: 1,
+        isPickable: 1, isActive: 1, cycleCountFreezeId: null, locationType: "pick" }]),
+      getOrderItemById: vi.fn(async () => ({ ...beforeItem, pickedQuantity: 6, status: "completed" })),
+    };
+    const service = new PickingUseCases({} as any, { getLevel: vi.fn(async () => ({ variantQty: 0 })) } as any,
+      {} as any, storage as any);
+    await (service as any).completeCanonicalPick(context, { itemId: 500, beforeItem,
+      effectivePickedQuantity: 6, warehouseId: 1, userId: "picker", pickMethod: "scan" });
+    expect(pickClaimLine).toHaveBeenLastCalledWith(expect.objectContaining({
+      quantity: "4", locationStrategy: strategy,
+      wmsProgress: { expectedStatus: "in_progress", expectedPickedQuantity: 2,
+        targetStatus: "completed", targetPickedQuantity: 6 },
+      ...(strategy === "reconcile_picker_observation" ? { observation: expect.objectContaining({ observedPhysicalQty: "4" }) } : {}),
+    }));
+    expect(pickClaimLine.mock.calls.every(([command]) => command.quantity === "4")).toBe(true);
+  });
+
   it("routes a completed pick through strict, recorded-stock, and observed canonical reconciliation", async () => {
     const beforeItem = item();
     const completedItem = item({ status: "completed", pickedQuantity: 1, pickedAt: new Date() });

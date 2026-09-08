@@ -678,9 +678,10 @@ async function loadOrder(client: PoolClient, orderId: number, lock: boolean): Pr
              item.sku,
              item.product_id AS stored_product_id,
              item.requires_shipping AS order_item_requires_shipping,
+             item.short_reason AS short_reason,
              variant.id AS target_variant_id,
              CASE
-               WHEN item.status IN ('cancelled', 'completed', 'short') THEN 0
+               WHEN item.status IN ('cancelled', 'completed') THEN 0
                ELSE GREATEST(COALESCE(item.quantity, 0) - COALESCE(item.picked_quantity, 0), 0)
              END AS requested_qty,
             variant.product_id AS root_product_id,
@@ -699,6 +700,13 @@ async function loadOrder(client: PoolClient, orderId: number, lock: boolean): Pr
   ));
   const lines: OrderLine[] = [];
   for (const row of itemRows) {
+    // A warehouse shortage is still accepted demand. Refund-after-pick uses the
+    // same UI status but explicitly preserves historic quantity, so it cannot be
+    // reconstructed as newly authorized customer demand without refund review.
+    if (row.short_reason === "refund_after_pick") {
+      throw new InventoryAvailabilityClaimRepositoryError("ORDER_REFUND_CUSTODY_REVIEW_REQUIRED",
+        "Refund-after-pick custody must be reconciled before canonical order claiming.", { orderId, orderItemId: row.order_item_id });
+    }
     const requestedQty = nonnegativeInteger(row.requested_qty, "orderItem.requestedQty");
     if (requestedQty === 0) continue;
     const orderItemId = positiveInteger(row.order_item_id, "orderItem.id");
@@ -835,12 +843,17 @@ async function lockPlanningPolicyHeads(
   }
   const variantIds = uniqueSorted(snapshot.variants.map((variant) => variant.id));
   await client.query(
-    `SELECT scope_key
-     FROM inventory.promise_safety_policy_heads
-     WHERE scope_key = 'business'
-        OR product_variant_id = ANY($1::integer[])
-     ORDER BY scope_key
-     FOR SHARE`,
+    // Match captureActiveClaimSupplySnapshotInsideTransaction: scope ownership
+    // belongs to immutable versions, not heads. Include every active warehouse
+    // and network policy the snapshot reads, in the same stable scope order.
+    `SELECT head.scope_key
+     FROM inventory.promise_safety_policy_heads AS head
+     JOIN inventory.promise_safety_policy_versions AS policy
+       ON policy.id = head.active_policy_id AND policy.scope_key = head.scope_key
+     WHERE policy.scope_key = 'business'
+        OR policy.product_variant_id = ANY($1::integer[])
+     ORDER BY head.scope_key
+     FOR SHARE OF head`,
     [variantIds],
   );
 }
@@ -3981,6 +3994,111 @@ async function buildReservationStatusClaim(
   };
 }
 
+/** First-cutover owner entry point; the admitted caller owns the transaction. */
+export async function persistReconstructedCutoverClaim(
+  client: PoolClient,
+  inventoryWriter: CanonicalClaimInventoryMutationPort,
+  batch: import("../domain/inventory-cutover-reconstruction-planning").PlannedCutoverOrder,
+  command: import("@shared/types/inventory-cutover-reconstruction").CutoverReconstructionCommit,
+): Promise<string> {
+  const occurredAt = new Date(command.occurredAt);
+  const order: LockedOrder = { orderId: batch.order.orderId, warehouseId: batch.order.warehouseId,
+    warehouseStatus: "cutover_adoption", onHold: false, lines: batch.order.lines.map((line) => ({
+      orderItemId: line.orderItemId, targetVariantId: line.targetVariantId, rootProductId: line.productId,
+      requestedQty: positiveInteger(line.requestedQty, "reconstruction.requestedQty") })) };
+  const claimId = await insertClaimHeader(client, { order, revision: await nextClaimRevision(client, order.orderId),
+    authority: { activationRunId: BigInt(command.activationRunId), revision: BigInt(command.runtimeAuthorityRevision) },
+    request: batch.request, plan: batch.plan, command, occurredAt });
+  const lineIds = await insertClaimLines(client, claimId, order, batch.plan);
+  await insertClaimOperations(client, claimId, lineIds, batch.plan);
+  const insertAdoptionCommand = async (key: string, evidence: unknown): Promise<string> => {
+    const request = { ...command, orderId: order.orderId, claimId: claimId.toString(), evidence };
+    const result = { claimId: claimId.toString(), disposition: "adopted_existing_custody" };
+    const row = rows(await client.query(`INSERT INTO inventory.availability_claim_commands
+      (claim_id,order_id,command_type,idempotency_key,request_hash,result_hash,request_payload,result_payload,actor,reason,occurred_at)
+      VALUES ($1,$2,'cutover_adopt',$3,$4,$5,$6::jsonb,$7::jsonb,$8,$9,$10) RETURNING id`,
+    [claimId.toString(),order.orderId,key,hash(request),hash(result),JSON.stringify(request),JSON.stringify(result),command.actor,command.reason,occurredAt]))[0];
+    return positiveBigInt(row?.id,"cutover.commandId").toString();
+  };
+  await insertAdoptionCommand(`cutover:${command.activationRunId}:order:${order.orderId}`, { planHash: hash(batch.plan) });
+  for (const line of batch.order.lines) {
+    const claimLineId = lineIds.get(`order-item:${line.orderItemId}`)!.claimLineId;
+    await client.query("UPDATE inventory.availability_claim_lines SET picked_target_qty=$2 WHERE id=$1",
+      [claimLineId.toString(),line.pickedQty]);
+  }
+  for (const resource of batch.plan.resourceClaims) {
+    const lineId = lineIds.get(resource.lineKey)!;
+    const adoptedLine = batch.order.lines.find((line) => line.orderItemId === lineId.orderItemId)!;
+    const adopted = resource.consumerOperationKey === null
+      ? adoptedLine.allocations.find((allocation) => allocation.inventoryLevelId === resource.inventoryLevelId) : undefined;
+    const fresh = batch.freshPlan?.resourceClaims.find((candidate) => candidate.lineKey === resource.lineKey
+      && candidate.inventoryLevelId === resource.inventoryLevelId && candidate.consumerOperationKey === resource.consumerOperationKey);
+    const inserted = rows(await client.query(`INSERT INTO inventory.availability_claim_resources
+      (claim_id,claim_line_id,consumer_operation_key,warehouse_id,warehouse_location_id,inventory_level_id,source_variant_id,claimed_qty,picked_qty)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`, [claimId.toString(),lineId.claimLineId.toString(),resource.consumerOperationKey,
+      resource.warehouseId,resource.warehouseLocationId,resource.inventoryLevelId,resource.sourceVariantId,resource.claimedQty,adopted?.pickedQty ?? "0"]))[0];
+    const resourceId = positiveBigInt(inserted?.id,"cutover.resourceId");
+    const allocations = new Map<number, { claimedQty: bigint; pickedQty: bigint; cost: {
+      unitCostMills: bigint; poUnitCostMills: bigint; packagingUnitCostMills: bigint; landedUnitCostMills: bigint;
+    }; originalCosts: import("@shared/types/inventory-cutover-reconstruction").CutoverReconstructionCost[] }>();
+    for (const lot of adopted?.lots ?? []) allocations.set(lot.inventoryLotId, {
+      claimedQty: BigInt(lot.reservedQty) + BigInt(lot.pickedQty), pickedQty: BigInt(lot.pickedQty),
+      cost: { unitCostMills: BigInt(lot.cost.unitCostMills), poUnitCostMills: BigInt(lot.cost.poUnitCostMills),
+        packagingUnitCostMills: BigInt(lot.cost.packagingUnitCostMills), landedUnitCostMills: BigInt(lot.cost.landedUnitCostMills) },
+      originalCosts: lot.originalCosts });
+    if (fresh) {
+      const reservedLots = await inventoryWriter.reserveResource({ client, claimId, claimResourceId: resourceId,
+        inventoryLevelId: resource.inventoryLevelId, warehouseLocationId: resource.warehouseLocationId,
+        sourceVariantId: resource.sourceVariantId, claimedQty: positiveInteger(fresh.claimedQty,"cutover.freshQty"),
+        orderId: order.orderId, orderItemId: lineId.orderItemId, consumerOperationKey: resource.consumerOperationKey,
+        actor: command.actor, occurredAt });
+      for (const lot of reservedLots) {
+        const existing = allocations.get(lot.inventoryLotId);
+        if (existing) {
+          if (existing.cost.unitCostMills !== lot.unitCostMills || existing.cost.poUnitCostMills !== lot.poUnitCostMills
+            || existing.cost.packagingUnitCostMills !== lot.packagingUnitCostMills || existing.cost.landedUnitCostMills !== lot.landedUnitCostMills) {
+            throw new InventoryAvailabilityClaimRepositoryError("CUTOVER_LOT_COST_CHANGED", "Lot cost changed during admitted adoption.");
+          }
+          existing.claimedQty += BigInt(lot.qty);
+        } else allocations.set(lot.inventoryLotId, { claimedQty: BigInt(lot.qty), pickedQty: BigInt(0), cost: lot, originalCosts: [] });
+      }
+    }
+    if ([...allocations.values()].reduce((total,lot) => total + lot.claimedQty,BigInt(0)) !== BigInt(resource.claimedQty)) {
+      throw new InventoryAvailabilityClaimRepositoryError("CUTOVER_RESOURCE_LOTS_MISMATCH", "Exact lot allocations do not exhaust adopted plus fresh resource quantity.");
+    }
+    for (const [lotId, lot] of [...allocations].sort(([a],[b]) => a-b)) {
+      const insertedLot = rows(await client.query(`INSERT INTO inventory.availability_claim_lot_allocations
+        (claim_id,claim_resource_id,inventory_lot_id,claimed_qty,picked_qty,unit_cost_mills,po_unit_cost_mills,packaging_unit_cost_mills,landed_unit_cost_mills)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`, [claimId.toString(),resourceId.toString(),lotId,lot.claimedQty.toString(),
+        lot.pickedQty.toString(),lot.cost.unitCostMills.toString(),lot.cost.poUnitCostMills.toString(),lot.cost.packagingUnitCostMills.toString(),lot.cost.landedUnitCostMills.toString()]))[0];
+      const allocationId = positiveBigInt(insertedLot?.id,"cutover.lotAllocationId").toString();
+      for (const cost of lot.originalCosts) {
+        const commandId = await insertAdoptionCommand(`cutover:${command.activationRunId}:pick-cost:${cost.id}`, cost);
+        const movement = rows(await client.query(`INSERT INTO inventory.availability_claim_pick_movements
+          (claim_id,claim_line_id,claim_resource_id,claim_lot_allocation_id,inventory_lot_id,command_id,order_item_cost_id,
+           movement_type,quantity,unit_cost_mills,total_cost_mills,occurred_at)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,'pick',$8,$9,$10,$11) RETURNING id`, [claimId.toString(),lineId.claimLineId.toString(),
+          resourceId.toString(),allocationId,lotId,commandId,cost.id,cost.quantity,cost.unitCostMills,cost.totalCostMills,cost.occurredAt]))[0];
+        await client.query(`INSERT INTO inventory.availability_cutover_pick_sources
+          (order_item_cost_id,pick_movement_id,activation_run_id,evidence_hash,original_cost_payload)
+          VALUES ($1,$2,$3,$4,$5::jsonb)`, [cost.id,String(movement.id),command.activationRunId,command.expectedEvidenceHash,JSON.stringify(cost)]);
+      }
+    }
+  }
+  const event = { evidenceHash: command.expectedEvidenceHash, planHash: hash(batch.plan), kind: "adopt_existing_and_plan_remaining" };
+  await client.query(`INSERT INTO inventory.availability_claim_events
+    (claim_id,event_type,from_status,to_status,evidence_payload,evidence_hash,actor,reason,occurred_at)
+    VALUES ($1,'cutover_adopted',NULL,'active',$2::jsonb,$3,$4,$5,$6)`,
+    [claimId.toString(),JSON.stringify(event),hash(event),command.actor,command.reason,occurredAt]);
+  const adoptedClaim = await loadActiveClaim(client,order.orderId);
+  const currentDemand = await loadOrder(client,order.orderId,true);
+  if (!adoptedClaim || !await orderDemandMatchesClaim(client,currentDemand,adoptedClaim)) {
+    throw new InventoryAvailabilityClaimRepositoryError("CUTOVER_RUNTIME_DEMAND_MISMATCH",
+      "Adopted relational custody must match the actual canonical runtime demand reader.", { orderId: order.orderId });
+  }
+  return claimId.toString();
+}
+
 export class PostgresInventoryAvailabilityClaimRepository implements InventoryAvailabilityClaimStore {
   constructor(
     private readonly inventoryWriter: CanonicalClaimInventoryMutationPort,
@@ -4971,6 +5089,29 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
         }
         await requirePickableLocation(client, command.warehouseLocationId, order.warehouseId);
         let line = await loadFulfillmentClaimLine(client, claim.id, command.orderItemId);
+        if (command.wmsProgress) {
+          const expectedPicked = BigInt(command.wmsProgress.expectedPickedQuantity);
+          const resourcePicked = line.resources.reduce((sum, resource) => sum + resource.pickedQty, BigInt(0));
+          const lotsMatchResources = line.resources.every((resource) =>
+            resource.lots.reduce((sum, lot) => sum + lot.pickedQty, BigInt(0)) === resource.pickedQty);
+          if (line.pickedTargetQty !== expectedPicked || resourcePicked !== expectedPicked || !lotsMatchResources
+            || quantity !== BigInt(command.wmsProgress.targetPickedQuantity) - expectedPicked) {
+            throw new InventoryAvailabilityClaimRepositoryError(
+              "CLAIM_WMS_PICK_CUSTODY_MISMATCH",
+              "WMS completion must add only its remaining delta to exact existing claim-owned picked custody.",
+              { claimLineId: line.id.toString(), expectedPickedQty: expectedPicked.toString(),
+                actualPickedQty: line.pickedTargetQty.toString(), quantity: quantity.toString() },
+            );
+          }
+          if (line.resources.some((resource) =>
+            resource.pickedQty > BigInt(0) && resource.warehouseLocationId !== command.warehouseLocationId)) {
+            throw new InventoryAvailabilityClaimRepositoryError(
+              "CLAIM_PICK_PARTIAL_LOCATION_CONFLICT",
+              "Remaining completion must use the existing picked source bin; fully unpick before relocating a single-source item.",
+              { claimLineId: line.id.toString(), warehouseLocationId: command.warehouseLocationId },
+            );
+          }
+        }
         const openTarget = line.plannedQty - line.releasedTargetQty - line.consumedTargetQty - line.pickedTargetQty;
         if (openTarget < quantity) {
           throw new InventoryAvailabilityClaimRepositoryError(
@@ -5430,6 +5571,10 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
           movementQuantity: Number(quantity),
           orderId: claim.orderId,
           orderItemId: line.orderItemId,
+          targetVariantId: line.targetVariantId,
+          unpickedWarehouseLocationIds: uniqueSorted(
+            [...byResource.values()].map((resource) => resource.warehouseLocationId),
+          ),
           progress: command.wmsProgress,
           occurredAt,
         });

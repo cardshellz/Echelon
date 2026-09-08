@@ -1,6 +1,7 @@
 import type { QueryResultRow } from "pg";
 
 import { pool } from "./db";
+import { createDropshipEbayQuantityRequestAdmission } from "./modules/inventory-planning/infrastructure/quantity-publication-runtime";
 import {
   EbayMarketplaceListingReplacementProvider,
   ListingReplacementExecutionService,
@@ -57,6 +58,7 @@ export function createMarketplaceListingReplacementResolverFromEnv(): Marketplac
     new PgDropshipEbayManagedLocationProvider({
       credentials: createDropshipEbayRegistrationCredentialProviderFromEnv(),
     }),
+    createDropshipEbayQuantityRequestAdmission,
   );
   const ebayProvider = new EbayMarketplaceListingReplacementProvider({
     async forOwner(owner) {

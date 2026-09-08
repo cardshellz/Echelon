@@ -9,6 +9,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ShopifyAdapter } from "../../adapters/shopify.adapter";
 import { PgDialect } from "drizzle-orm/pg-core";
+import { createAdmittedQuantityTestOwner } from "../fixtures/quantity-publication-admission";
 
 // ---------------------------------------------------------------------------
 // Mock DB that returns credentials
@@ -16,6 +17,7 @@ import { PgDialect } from "drizzle-orm/pg-core";
 
 function createMockDb(creds?: any) {
   const defaultCreds = {
+    id: 17,
     channelId: 1,
     shopDomain: "test-store.myshopify.com",
     accessToken: "shpat_test_token",
@@ -45,10 +47,12 @@ describe("Shopify Adapter", () => {
   let adapter: ShopifyAdapter;
   let db: ReturnType<typeof createMockDb>;
   let originalFetch: typeof globalThis.fetch;
+  let quantityAdmission: ReturnType<typeof createAdmittedQuantityTestOwner>;
 
   beforeEach(() => {
     db = createMockDb();
-    adapter = new ShopifyAdapter(db as any);
+    quantityAdmission = createAdmittedQuantityTestOwner();
+    adapter = new ShopifyAdapter(db as any, quantityAdmission);
     originalFetch = globalThis.fetch;
   });
 
@@ -538,6 +542,9 @@ describe("Shopify Adapter", () => {
       expect(body.inventory_item_id).toBe(222);
       expect(body.location_id).toBe(12345);
       expect(body.available).toBe(500);
+      expect(quantityAdmission.run).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        connectionId: 17, providerKey: "shopify", externalScopeId: "12345", externalInventoryItemId: "222",
+      }), expect.any(Function));
 
       delete process.env.SHOPIFY_LOCATION_ID;
     });
@@ -579,6 +586,9 @@ describe("Shopify Adapter", () => {
       expect(results[0]).toMatchObject({ status: "success", pushedQty: 7 });
       const body = JSON.parse((globalThis.fetch as any).mock.calls[0][1].body);
       expect(body).toMatchObject({ inventory_item_id: 222, location_id: 98765, available: 7 });
+      expect(quantityAdmission.run).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        connectionId: 17, providerKey: "shopify", externalScopeId: "98765", externalInventoryItemId: "222",
+      }), expect.any(Function));
     });
 
     it("reads back the exact canonical target identity", async () => {
@@ -605,6 +615,7 @@ describe("Shopify Adapter", () => {
 
       expect(results).toEqual([{ variantId: 1, observedQty: 7, status: "success" }]);
       expect((globalThis.fetch as any).mock.calls[0][0]).toContain("location_ids=98765");
+      expect(quantityAdmission.run).not.toHaveBeenCalled();
     });
   });
 

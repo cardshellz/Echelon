@@ -403,6 +403,18 @@
   "inventory.availability_claims": [
     "modules/inventory-planning"
   ],
+  "inventory.availability_cutover_commits": [
+    "modules/inventory-planning"
+  ],
+  "inventory.availability_cutover_pick_sources": [
+    "modules/inventory-planning"
+  ],
+  "inventory.availability_cutover_reconstruction_receipts": [
+    "modules/inventory-planning"
+  ],
+  "inventory.availability_runtime_authority": [
+    "modules/inventory-planning"
+  ],
   "inventory.build_component_reservations": [
     "modules/inventory"
   ],
@@ -526,6 +538,12 @@
   "inventory.lot_cost_origins": [
     "modules/inventory"
   ],
+  "inventory.operational_shipment_dispatch_lots": [
+    "modules/inventory"
+  ],
+  "inventory.operational_shipment_dispatch_receipts": [
+    "modules/inventory"
+  ],
   "inventory.planner_claim_simulation_runs": [
     "modules/inventory-planning"
   ],
@@ -554,6 +572,18 @@
     "modules/inventory-planning"
   ],
   "inventory.publication_variant_mapping_versions": [
+    "modules/inventory-planning"
+  ],
+  "inventory.quantity_publication_attempt_resolutions": [
+    "modules/inventory-planning"
+  ],
+  "inventory.quantity_publication_attempts": [
+    "modules/inventory-planning"
+  ],
+  "inventory.quantity_publication_catchup": [
+    "modules/inventory-planning"
+  ],
+  "inventory.quantity_publication_gate": [
     "modules/inventory-planning"
   ],
   "inventory.replen_rules": [

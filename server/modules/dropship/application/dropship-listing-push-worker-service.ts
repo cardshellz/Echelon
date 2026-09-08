@@ -132,6 +132,7 @@ export interface DropshipListingPushWorkerRepository {
 }
 
 export interface DropshipListingPushWorkerServiceDependencies {
+  refreshListingIntent?: (input: { vendorId: number; storeConnectionId: number; productVariantId: number }) => Promise<DropshipMarketplaceListingIntent>;
   repository: DropshipListingPushWorkerRepository;
   marketplacePush: DropshipMarketplaceListingPushProvider;
   notificationSender?: DropshipNotificationSender;
@@ -233,6 +234,10 @@ export class DropshipListingPushWorkerService {
     }
 
     try {
+      // Persisted job intent identifies work, not a quantity snapshot to replay later.
+      const currentIntent = this.deps.refreshListingIntent ? await this.deps.refreshListingIntent({
+        vendorId: claim.job.vendorId, storeConnectionId: claim.job.storeConnectionId, productVariantId: item.productVariantId,
+      }) : intent!;
       const pushResult = await this.deps.marketplacePush.pushListing({
         vendorId: claim.job.vendorId,
         storeConnectionId: claim.job.storeConnectionId,
@@ -241,7 +246,7 @@ export class DropshipListingPushWorkerService {
         listingId: item.listing!.listingId,
         productVariantId: item.productVariantId,
         platform: claim.job.platform,
-        listingIntent: intent!,
+        listingIntent: currentIntent,
         existingExternalListingId: item.listing!.externalListingId,
         existingExternalOfferId: item.listing!.externalOfferId,
         idempotencyKey: `${parsed.idempotencyKey}:${item.itemId}`,
@@ -250,7 +255,7 @@ export class DropshipListingPushWorkerService {
       await this.deps.repository.completeItem({
         job: claim.job,
         item,
-        intent: intent!,
+        intent: currentIntent,
         pushResult,
         workerId: parsed.workerId,
         now: this.deps.clock.now(),

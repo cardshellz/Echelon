@@ -1,4 +1,6 @@
 import { DropshipError } from "../domain/errors";
+import { createProviderRequestDeadline } from "../../channels/provider-request-limits";
+import { ebayQuantityMutationIdentity, executeAdmittedEbayQuantityRequest, type EbayQuantityRequestAdmission } from "../../channels/quantity-publication-request";
 import type {
   DropshipMarketplaceListingPushProvider,
   DropshipMarketplaceListingPushRequest,
@@ -106,6 +108,7 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
     private readonly clock: Clock = { now: () => new Date() },
     private readonly fulfillmentPolicyGuard?: DropshipEbayFulfillmentPolicyGuard,
     private readonly managedLocations?: DropshipEbayManagedLocationProvider,
+    private readonly quantityAdmission?: (credential: DropshipMarketplaceStoreCredentials) => EbayQuantityRequestAdmission,
   ) {
     this.tokenOwner = new DropshipEbayTokenOwner({ credentials, fetchFn: fetchImpl, clock });
   }
@@ -492,8 +495,25 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
     expectNoContent?: boolean;
     baseUrl: string;
   }): Promise<T> {
+    if (ebayQuantityMutationIdentity(input.method, input.path, input.body)) {
+      if (!this.quantityAdmission) throw new DropshipError("QUANTITY_PUBLICATION_ADMISSION_REQUIRED", "eBay listing quantity writes require an admitted owner.", { retryable: false });
+      return executeAdmittedEbayQuantityRequest<T>(input, this.quantityAdmission(input.credential), request =>
+        this.requestEbayUnadmitted({ ...input, ...request, method: request.method as typeof input.method,
+          expectNoContent: request.expectNoContent }));
+    }
+    return this.requestEbayUnadmitted(input);
+  }
+
+  private async requestEbayUnadmitted<T = Record<string, unknown>>(input: {
+    credential: DropshipMarketplaceStoreCredentials; config: EbayListingConfig;
+    method: "GET" | "POST" | "PUT" | "DELETE"; path: string; body?: unknown;
+    expectNoContent?: boolean; baseUrl: string;
+  }): Promise<T> {
+    const deadline = createProviderRequestDeadline();
+    try {
     const response = await this.fetchImpl(`${input.baseUrl}${input.path}`, {
       method: input.method,
+      signal: deadline.signal,
       headers: {
         Authorization: `Bearer ${input.credential.accessToken}`,
         "Content-Type": "application/json",
@@ -534,6 +554,7 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
       code: "DROPSHIP_EBAY_LISTING_PUSH_INVALID_RESPONSE",
       message: "eBay listing push returned invalid JSON.",
     });
+    } finally { deadline.dispose(); }
   }
 
 }

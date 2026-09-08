@@ -609,6 +609,8 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
   it.each(["regular", "assembly", "assembly_rejected"] as const)("picks exact WMS progress and rolls back owner/fence failures: %s", async (mode) => {
     const plan = packageClaimPlan();
     let rejectWmsProgress = false;
+    let existingPicked = 0;
+    let existingPickedLocation = 2;
     const command = {
       ...(mode === "regular" ? {} : { assemblyWork: { taskId: "1", expectedVersion: 3, confirmPhysicalOutput: true as const } }),
       claimId: "9",
@@ -686,7 +688,7 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
             planned_qty: "3",
             released_target_qty: "0",
             consumed_target_qty: "0",
-            picked_target_qty: "0",
+            picked_target_qty: String(existingPicked),
           }],
         };
       }
@@ -697,12 +699,12 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
             id: "12",
             inventory_level_id: 11,
             warehouse_id: 1,
-            warehouse_location_id: 2,
+            warehouse_location_id: existingPickedLocation,
             source_variant_id: 105,
             claimed_qty: "3",
             released_qty: "0",
             consumed_qty: "0",
-            picked_qty: "0",
+            picked_qty: String(existingPicked),
           }],
         };
       }
@@ -715,7 +717,7 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
             claimed_qty: "3",
             released_qty: "0",
             consumed_qty: "0",
-            picked_qty: "0",
+            picked_qty: String(existingPicked),
             unit_cost_mills: "125",
             po_unit_cost_mills: "100",
             packaging_unit_cost_mills: "20",
@@ -804,6 +806,32 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
       idempotencyKey: "pick:9:71:wms-state-changed",
     })).rejects.toMatchObject({ code: "WMS_PICK_PROGRESS_CHANGED" });
     expect(fake.query.mock.calls.at(-1)?.[0]).toBe("ROLLBACK");
+
+    if (mode === "regular") {
+      rejectWmsProgress = false;
+      existingPicked = 1;
+      const partialCommand = { ...command, quantity: "2", idempotencyKey: "pick:remaining",
+        wmsProgress: { expectedStatus: "in_progress" as const, expectedPickedQuantity: 1,
+          targetStatus: "completed" as const, targetPickedQuantity: 3 } };
+      writer.pickResources.mockResolvedValue({ movements: [{
+        claimResourceId: BigInt(12), claimLotAllocationId: BigInt(21), inventoryLotId: 51,
+        quantity: BigInt(2), unitCostMills: BigInt(125), totalCostMills: BigInt(250),
+        orderItemCostId: 82, reversesPickMovementId: null,
+      }], totalCostMills: BigInt(250) });
+      await expect(repository.pickClaimLine(partialCommand)).resolves.toMatchObject({ quantity: "2", totalCostMills: "250" });
+      expect(writer.pickResources).toHaveBeenLastCalledWith(expect.objectContaining({
+        resources: [expect.objectContaining({ pickQty: BigInt(2) })],
+      }));
+      const calls = writer.pickResources.mock.calls.length;
+      await expect(repository.pickClaimLine({ ...partialCommand, idempotencyKey: "pick:wrong-custody",
+        wmsProgress: { ...partialCommand.wmsProgress, expectedPickedQuantity: 0 } }))
+        .rejects.toMatchObject({ code: "CLAIM_WMS_PICK_CUSTODY_MISMATCH" });
+      existingPickedLocation = 3;
+      await expect(repository.pickClaimLine({ ...partialCommand, idempotencyKey: "pick:wrong-bin" }))
+        .rejects.toMatchObject({ code: "CLAIM_PICK_PARTIAL_LOCATION_CONFLICT" });
+      expect(writer.pickResources).toHaveBeenCalledTimes(calls);
+    }
+
   });
 
   it.each([false, true])("reverses only unshipped pick lineage and restores an active reservation (latest shipped=%s)", async (latestShipped) => {

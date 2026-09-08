@@ -9,7 +9,8 @@ export function InventoryTransactionQuantity(input: InventoryTransactionQuantity
   if (evidence.status === "verified") {
     return <div className="text-right">
       <div className="font-mono font-medium" title={evidence.source === "canonical_dispatch_receipt"
-        ? `Canonical dispatch receipt ${evidence.receiptId}` : "Legacy shipment ledger evidence"}>
+        ? `Canonical dispatch receipt ${evidence.receiptId}`
+        : evidence.source === "operational_dispatch_receipt" ? `Operational shipment receipt ${evidence.receiptId}` : "Legacy shipment ledger evidence"}>
         {evidence.quantity} shipped
       </div>
       <div className="text-xs text-muted-foreground">On-hand Δ {delta}</div>

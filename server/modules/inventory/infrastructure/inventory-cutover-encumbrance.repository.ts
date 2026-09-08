@@ -54,6 +54,17 @@ export async function captureInventoryCutoverEncumbranceInsideTransaction(
     );
   }
 
+  return captureInventoryCutoverEncumbranceAfterAdmission(client, maxRows);
+}
+
+/** Evidence-only owner API; the final caller owns its exclusive admission barrier. */
+export async function captureInventoryCutoverEncumbranceAfterAdmission(
+  client: InventoryCutoverEncumbranceQueryClient,
+  maxRows = DEFAULT_MAX_ROWS,
+): Promise<InventoryCutoverEncumbranceDto> {
+  if (!Number.isSafeInteger(maxRows) || maxRows < 1 || maxRows > MAX_ROWS) {
+    throw new InventoryCutoverEncumbranceCaptureError("INVENTORY_CUTOVER_INVALID_CAPTURE_LIMIT", "Invalid cutover capture bound.");
+  }
   const totals = (await client.query<Record<string, unknown>>(
     `SELECT count(*)::text AS "inventoryLevelCount",
             COALESCE(sum(variant_qty::numeric), 0)::text AS "variantQty",

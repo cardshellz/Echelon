@@ -2,7 +2,10 @@
  * Reduced columns used by the shipment-quantity reader. This proves real query
  * execution, not the production dispatch migration's constraints or triggers.
  */
+import { operationalShipmentQuantityFixtureSql } from "../../../inventory/__tests__/fixtures/operational-shipment-quantity";
 export const shipmentQuantityEvidenceFixtureSql = `
+  ALTER TABLE inventory.inventory_transactions ADD COLUMN IF NOT EXISTS total_cost_mills bigint;
+  ${operationalShipmentQuantityFixtureSql}
   CREATE TABLE inventory.availability_claim_dispatch_receipts (
     id bigint PRIMARY KEY,
     inventory_transaction_id integer NOT NULL UNIQUE,

@@ -718,6 +718,14 @@ export async function captureActiveSupplySnapshotInsideTransaction(
   return captureInsideTransaction(client, validateProductId(productId), "active_only");
 }
 
+/** Read-only proposed-model capture for a caller-owned cutover review transaction. */
+export async function captureProposedSupplySnapshotInsideTransaction(
+  client: InventoryAvailabilitySnapshotQueryClient,
+  productId: number,
+): Promise<SupplySnapshotDto> {
+  return captureInsideTransaction(client, validateProductId(productId), "draft_preferred");
+}
+
 async function captureClaimInsideTransaction(
   client: QueryClient,
   targetVariantIds: readonly number[],
@@ -783,6 +791,13 @@ export async function captureActiveClaimSupplySnapshotInsideTransaction(
   targetVariantIds: readonly number[],
 ): Promise<ClaimSupplySnapshotDto> {
   return captureClaimInsideTransaction(client, targetVariantIds, "active_only");
+}
+
+export async function captureProposedClaimSupplySnapshotInsideTransaction(
+  client: InventoryAvailabilitySnapshotQueryClient,
+  targetVariantIds: readonly number[],
+): Promise<ClaimSupplySnapshotDto> {
+  return captureClaimInsideTransaction(client, targetVariantIds, "draft_preferred");
 }
 
 function validatePersistenceInput(input: PersistPlannerShadowRunInput): {
