@@ -175,7 +175,7 @@ function stateEvidenceFromSnapshot(
   });
 }
 
-function previousPlanFromPersisted(
+export function previousPlanFromPersisted(
   groupKey: string,
   plan: PersistedPackageAllocationPlan | null,
 ): PackageAllocationGroupPlannerInput["previousPlan"] {

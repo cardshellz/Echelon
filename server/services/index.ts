@@ -105,6 +105,8 @@ import { createShipStationTrackingEventsClient } from "../modules/shipping/ships
 import { createShipStationPhysicalRecoveryClient } from "../modules/shipping/shipstation-physical-recovery.client";
 import { createShipStationPhysicalRecoveryService } from "../modules/oms/shipstation-physical-recovery.service";
 import { createDefaultShopifyAdminClient } from "../modules/shopify/admin-gql-client";
+import { ChannelIdentityService } from "../modules/channels/channel-identity.service";
+import { createChannelFulfillmentProviderClients, createFulfillmentEbayAuth } from "../modules/channels/channel-fulfillment-provider-clients.service";
 import { WmsSyncService } from "../modules/oms/wms-sync.service";
 import { SyncRecoveryService } from "../modules/sync/sync-recovery.service";
 import { catalogStorage } from "../modules/catalog";
@@ -460,6 +462,11 @@ export function createServices(
   // fulfillments without relying on route-local setup.
   const fulfillmentPush = createFulfillmentPushService(db, null, {
     runExclusive: withAdvisoryLock,
+    providerClients: createChannelFulfillmentProviderClients({
+      channels: channelsStorage,
+      identities: new ChannelIdentityService(db),
+      ebayAuth: () => createFulfillmentEbayAuth(db),
+    }),
   });
   fulfillmentPush.setShopifyClient(createDefaultShopifyAdminClient());
   const channelFulfillmentAuthority = createChannelFulfillmentAuthorityService({
