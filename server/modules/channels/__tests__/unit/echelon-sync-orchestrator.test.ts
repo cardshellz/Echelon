@@ -219,6 +219,135 @@ describe("EchelonSyncOrchestrator", () => {
   // Inventory Sync
   // -----------------------------------------------------------------------
 
+  describe("exact publication catch-up", () => {
+    const target = {
+      channelId: 1, productId: 1, productVariantId: 100,
+      scope: { destinationKind: "channel_connection" as const, connectionId: 4,
+        providerKey: "shopify" as const, providerScopeType: "location" as const,
+        externalScopeId: "11", externalInventoryItemId: "123", productId: null, productVariantId: null },
+    };
+
+    function queueScopedShopify(feed: Record<string, unknown> = {}) {
+      allocationEngine.allocateProduct.mockResolvedValue({ productId: 1, totalAtpBase: 20,
+        allocations: [
+          { channelId: 1, channelName: "Shopify", channelProvider: "shopify", productVariantId: 100,
+            sku: "P5", allocatedUnits: 20, warehouseBreakdown: [{ warehouseId: 1, qty: 7 }, { warehouseId: 2, qty: 13 }] },
+          { channelId: 1, channelName: "Shopify", channelProvider: "shopify", productVariantId: 101, sku: "C25", allocatedUnits: 4 },
+          { channelId: 67, channelName: "Ebay", channelProvider: "ebay", productVariantId: 100, sku: "P5", allocatedUnits: 20 },
+          { channelId: 103, channelName: "Dropship OMS", channelProvider: "manual", productVariantId: 100, sku: "P5", allocatedUnits: 20 },
+        ], blocked: [] } as any);
+      db._selectQueue = [
+        [{ warehouseId: 1, shopifyLocationId: "11" }, { warehouseId: 2, shopifyLocationId: "22" }],
+        [{ id: 100, sku: "P5", requiresShipping: 1, trackInventory: 1 }],
+        [{ productVariantId: 100, isActive: 1, channelVariantId: "456", channelInventoryItemId: "gid://shopify/InventoryItem/123", lastSyncedQty: 7, ...feed }],
+      ];
+      vi.mocked(mockAdapter.pushInventory).mockResolvedValue([{ variantId: 100, pushedQty: 7, status: "success" }]);
+    }
+
+    it("recalculates all allocations but publishes only one item/location and invalidates the aggregate watermark", async () => {
+      queueScopedShopify();
+      await orchestrator.syncInventoryForPublicationTarget(target);
+      expect(allocationEngine.allocateProduct).toHaveBeenCalledWith(1, "quantity_publication_catchup");
+      expect(mockAdapter.pushInventory).toHaveBeenCalledExactlyOnceWith(1, [expect.objectContaining({
+        variantId: 100, allocatedQty: 7, externalInventoryItemId: "123",
+        warehouseBreakdown: [{ warehouseId: 1, externalLocationId: "11", qty: 7 }],
+      })]);
+      expect(db.update.mock.results[0].value.set).toHaveBeenCalledWith(expect.objectContaining({ lastSyncedQty: null }));
+    });
+
+    it("sends zero only to the retained location when current allocation is zero", async () => {
+      queueScopedShopify();
+      const allocation = await allocationEngine.allocateProduct();
+      allocation.allocations[0].warehouseBreakdown = [];
+      allocation.allocations[0].allocatedUnits = 0;
+      (db as any)._executeResult = [];
+      vi.mocked(mockAdapter.pushInventory).mockResolvedValue([{ variantId: 100, pushedQty: 0, status: "success" }]);
+      await orchestrator.syncInventoryForPublicationTarget(target);
+      expect(mockAdapter.pushInventory).toHaveBeenCalledWith(1, [expect.objectContaining({ allocatedQty: 0,
+        warehouseBreakdown: [{ warehouseId: 1, externalLocationId: "11", qty: 0 }] })]);
+    });
+
+    it("sends an explicit zero breakdown even after the last physical placement disappears", async () => {
+      queueScopedShopify();
+      const allocation = await allocationEngine.allocateProduct();
+      allocation.allocations[0].warehouseBreakdown = [{ warehouseId: 1, qty: 0 }, { warehouseId: 2, qty: 20 }];
+      (db as any)._executeResult = [];
+      vi.mocked(mockAdapter.pushInventory).mockResolvedValue([{ variantId: 100, pushedQty: 0, status: "success" }]);
+      await orchestrator.syncInventoryForPublicationTarget(target);
+      expect(mockAdapter.pushInventory).toHaveBeenCalledWith(1, [expect.objectContaining({ allocatedQty: 0,
+        warehouseBreakdown: [{ warehouseId: 1, externalLocationId: "11", qty: 0 }] })]);
+    });
+
+    it("does not invent a zero for a positive allocation with a missing warehouse plan", async () => {
+      queueScopedShopify();
+      const allocation = await allocationEngine.allocateProduct();
+      allocation.allocations[0].warehouseBreakdown = [];
+      await expect(orchestrator.syncInventoryForPublicationTarget(target)).rejects.toMatchObject({ code: "PUBLICATION_CATCHUP_PLAN_INCOMPLETE" });
+      expect(mockAdapter.pushInventory).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["item remapped", { channelInventoryItemId: "999" }],
+      ["mapping inactive", { isActive: 0 }],
+      ["mapping quarantined", { quarantinedAt: new Date("2026-09-01T00:00:00Z") }],
+    ])("keeps %s unresolved without sending", async (_name, feed) => {
+      queueScopedShopify(feed as Record<string, unknown>);
+      await expect(orchestrator.syncInventoryForPublicationTarget(target)).rejects.toBeInstanceOf(Error);
+      expect(mockAdapter.pushInventory).not.toHaveBeenCalled();
+    });
+
+    it("does not broaden to another warehouse if the retained location is no longer assigned", async () => {
+      queueScopedShopify();
+      await expect(orchestrator.syncInventoryForPublicationTarget({ ...target,
+        scope: { ...target.scope, externalScopeId: "33" } })).rejects.toMatchObject({ code: "PUBLICATION_CATCHUP_LOCATION_CHANGED" });
+      expect(mockAdapter.pushInventory).not.toHaveBeenCalled();
+    });
+
+    it.each([{ response: [] }, { response: [{ variantId: 100, status: "skipped", pushedQty: 0 }] },
+      { response: [{ variantId: 100, status: "error", pushedQty: 0, error: "Provider timeout" }] },
+      { response: [{ variantId: 999, status: "success", pushedQty: 7 }] },
+      { response: [{ variantId: 100, status: "success", pushedQty: 999 }] },
+    ])("does not report successful catch-up for an incomplete or mismatched adapter result %#", async ({ response }) => {
+      queueScopedShopify();
+      vi.mocked(mockAdapter.pushInventory).mockResolvedValue(response as any);
+      await expect(orchestrator.syncInventoryForPublicationTarget(target)).rejects.toMatchObject({ code: "PUBLICATION_CATCHUP_FAILED" });
+      expect(db.update).not.toHaveBeenCalled();
+    });
+
+    it("does not treat an omitted current allocation as delivered", async () => {
+      queueScopedShopify();
+      await expect(orchestrator.syncInventoryForPublicationTarget({ ...target, productVariantId: 999 })).rejects.toMatchObject({ code: "PUBLICATION_CATCHUP_PLAN_OMITTED" });
+      expect(mockAdapter.pushInventory).not.toHaveBeenCalled();
+    });
+
+    it("retries only the eBay SKU despite sibling SKUs, Shopify and internal manual allocations", async () => {
+      queueScopedShopify();
+      const ebayAdapter = { ...createMockAdapter(), adapterName: "MockEbay", providerKey: "ebay",
+        pushInventory: vi.fn().mockResolvedValue([{ variantId: 100, pushedQty: 20, status: "success" }]) };
+      adapterRegistry.register(ebayAdapter);
+      db._selectQueue = [[], [{ productVariantId: 100, listingId: 50,
+        listingExternalVariantId: "offer-100", listingExternalSku: "EXTERNAL-P5", feedLastSyncedQty: 20 }]];
+      await orchestrator.syncInventoryForPublicationTarget({ ...target, channelId: 67,
+        scope: { ...target.scope, connectionId: 34, providerKey: "ebay", providerScopeType: "account",
+          externalScopeId: "verified-account", externalInventoryItemId: "EXTERNAL-P5" } });
+      expect(ebayAdapter.pushInventory).toHaveBeenCalledExactlyOnceWith(67, [expect.objectContaining({
+        variantId: 100, sku: "EXTERNAL-P5", externalVariantId: "offer-100", allocatedQty: 20,
+      })]);
+      expect(mockAdapter.pushInventory).not.toHaveBeenCalled();
+    });
+
+    it("rejects an eBay remapping before the adapter can publish a different SKU", async () => {
+      queueScopedShopify();
+      const ebayAdapter = { ...createMockAdapter(), adapterName: "MockEbay", providerKey: "ebay" };
+      adapterRegistry.register(ebayAdapter);
+      db._selectQueue = [[], [{ productVariantId: 100, listingId: 50, listingExternalSku: "DIFFERENT" }]];
+      await expect(orchestrator.syncInventoryForPublicationTarget({ ...target, channelId: 67,
+        scope: { ...target.scope, connectionId: 34, providerKey: "ebay", providerScopeType: "account",
+          externalScopeId: "verified-account", externalInventoryItemId: "EXTERNAL-P5" } })).rejects.toMatchObject({ code: "PUBLICATION_CATCHUP_MAPPING_CHANGED" });
+      expect(ebayAdapter.pushInventory).not.toHaveBeenCalled();
+    });
+  });
+
   describe("syncInventoryForProduct", () => {
     function queueShopifyInventory(mapping: Record<string, unknown> | null) {
       db._selectQueue = [

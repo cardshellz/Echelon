@@ -129,6 +129,7 @@ import {
   MANUAL_CHANNEL_SHIPPING_CAPABILITY_DECLARATION,
 } from "../modules/channels/channel-shipping-capability.registry";
 import { createEchelonSyncOrchestrator } from "../modules/channels/echelon-sync-orchestrator.service";
+import { PostgresChannelQuantityPublicationCatchupRepository } from "../modules/channels/infrastructure/channel-quantity-publication-catchup.repository";
 import { createVariantAvailabilitySyncService } from "../modules/channels/variant-availability-sync.service";
 import { InventoryPublicationOutboxService } from "../modules/inventory-planning/application/inventory-publication-outbox.service";
 import { PostgresInventoryPublicationOutboxRepository } from "../modules/inventory-planning/infrastructure/inventory-publication-outbox.repository";
@@ -386,16 +387,11 @@ export function createServices(
     undefined,
     quantityPublicationAdmission,
   );
+  const channelQuantityCatchupTargets = new PostgresChannelQuantityPublicationCatchupRepository(databasePool);
   const quantityPublicationCatchup = createQuantityPublicationCatchupService({
-    refreshLegacyChannelProduct: async productId => {
-      const results = await echelonOrchestrator.syncInventoryForProduct(
-        productId, { dryRun: false, forceInventoryPublication: true }, "quantity_publication_catchup",
-      );
-      if (results.some(result => result.variantsErrored > 0 || result.details.some(detail => detail.error))) {
-        throw new Error("Current channel inventory catch-up returned publication failures.");
-      }
-      // The catch-up owner additionally requires exact successful scope evidence;
-      // empty/skipped orchestrator results alone never clear pending work.
+    refreshLegacyChannelScope: async scope => {
+      const target = await channelQuantityCatchupTargets.resolve(scope);
+      await echelonOrchestrator.syncInventoryForPublicationTarget(target);
     },
   });
   const inventoryPublicationReadback = new InventoryPublicationReadbackService(
