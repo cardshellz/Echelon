@@ -36,6 +36,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { FinancialCommandOperations } from "@/components/operations/FinancialCommandOperations";
+import { ChannelFulfillmentReviewRetryPanel } from "@/components/operations/ChannelFulfillmentReviewRetryPanel";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -56,6 +57,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/lib/auth";
+import { fulfillmentReviewScopeForWorkItem } from "@/lib/channel-fulfillment-review-retry";
 import {
   resolveFlowReplayAction,
   type FlowReplayAction,
@@ -1877,6 +1879,7 @@ export default function FlowMonitor() {
         onSnooze={() => setSnoozeOpen(true)}
         onSelectRelated={openWorkItem}
         onBack={() => setSelectedId(null)}
+        onFulfillmentRecheckQueued={invalidateTower}
         onHistoricalContentsChanged={async (decision) => {
           if (decision === "wms_confirmed") setSelectedId(null);
           await invalidateTower();
@@ -3019,10 +3022,12 @@ function WorkItemDetailPanel(props: {
   onSnooze: () => void;
   onSelectRelated: (id: number) => void;
   onBack: () => void;
+  onFulfillmentRecheckQueued: () => Promise<void>;
   onHistoricalContentsChanged: (decision: HistoricalContentsDecision) => Promise<void>;
   busy: boolean;
 }) {
   const { item } = props.detail;
+  const fulfillmentReviewScope = props.canTriage ? fulfillmentReviewScopeForWorkItem(item) : null;
   const primaryLink = item.availableActions.find((action) => action.kind === "navigate")
     ?? item.detailLocator.links?.[0]
     ?? null;
@@ -3098,6 +3103,14 @@ function WorkItemDetailPanel(props: {
             )}
           </div>
         </section>
+
+        {fulfillmentReviewScope && (
+          <ChannelFulfillmentReviewRetryPanel
+            key={`${item.id}:${item.rowVersion}:${item.sourceUpdatedAt}`}
+            scope={fulfillmentReviewScope}
+            onQueued={props.onFulfillmentRecheckQueued}
+          />
+        )}
 
         {item.code === "historical_shipstation_contents_review" && (
           <HistoricalContentsReviewPanel

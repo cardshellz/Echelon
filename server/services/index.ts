@@ -70,6 +70,8 @@ import { reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction } fro
 import { createOmsService } from "../modules/oms/oms.service";
 import { createFulfillmentPushService } from "../modules/oms/fulfillment-push.service";
 import { createChannelFulfillmentAuthorityRepository } from "../modules/oms/channel-fulfillment-authority.repository";
+import { createChannelFulfillmentReviewRetryRepository } from "../modules/oms/channel-fulfillment-review-retry.repository";
+import { createChannelFulfillmentReviewRetryService } from "../modules/oms/channel-fulfillment-review-retry.service";
 import { createChannelFulfillmentProjector } from "../modules/oms/channel-fulfillment-projection.repository";
 import {
   createChannelFulfillmentAuthorityService,
@@ -474,6 +476,10 @@ export function createServices(
     projector: createChannelFulfillmentProjector(db),
     providerExecutor: createCompatibilityChannelFulfillmentProviderExecutor(fulfillmentPush),
   });
+  const channelFulfillmentReviewRetry = createChannelFulfillmentReviewRetryService({
+    repository: createChannelFulfillmentReviewRetryRepository(db),
+    clock: { now: () => new Date() },
+  });
 
   // ShipStation — order push + webhook integration
   const carrierTrackingLogger = makeCarrierTrackingLogger();
@@ -615,6 +621,7 @@ export function createServices(
     oms,
     fulfillmentPush,
     channelFulfillmentAuthority,
+    channelFulfillmentReviewRetry,
     channelFulfillmentIngress,
     shipStation,
     shipStationPhysicalRecovery,

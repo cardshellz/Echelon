@@ -27,6 +27,11 @@ import {
   buildEbayShippingFulfillmentPath,
   extractEbayFulfillmentIdFromLocation,
 } from "./ebay-fulfillment.util";
+import {
+  proveWholeOrderFulfillmentQuantities,
+  readSingleOmittedQuantityFulfillment,
+  sameWholeOrderFulfillmentSnapshot,
+} from "./ebay-fulfillment-quantity-evidence";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -91,9 +96,11 @@ function normalizeFulfillmentLines(
   const quantities = new Map<string, number>();
   for (const candidate of value) {
     const lineItemId = String((candidate as any)?.lineItemId ?? "").trim();
-    const quantity = Number((candidate as any)?.quantity);
-    if (!lineItemId || !Number.isInteger(quantity) || quantity <= 0) return null;
-    quantities.set(lineItemId, (quantities.get(lineItemId) ?? 0) + quantity);
+    const quantity: unknown = (candidate as any)?.quantity;
+    if (!lineItemId || typeof quantity !== "number" || !Number.isSafeInteger(quantity) || quantity <= 0) return null;
+    const combinedQuantity = (quantities.get(lineItemId) ?? 0) + quantity;
+    if (!Number.isSafeInteger(combinedQuantity)) return null;
+    quantities.set(lineItemId, combinedQuantity);
   }
 
   return Object.freeze(
@@ -415,7 +422,8 @@ export class EbayApiClient {
         `[EbayApi] Shipping fulfillment already exists for order ${orderId} ` +
           `and tracking ${fulfillment.trackingNumber}; skipping POST`,
       );
-      return { fulfillmentId: existing.fulfillmentId };
+      return { fulfillmentId: existing.fulfillmentId,
+        ...(existing.quantityEvidenceSource ? { quantityEvidenceSource: existing.quantityEvidenceSource } : {}) };
     }
 
     const result = await this.createShippingFulfillmentWithRetry(
@@ -430,7 +438,8 @@ export class EbayApiClient {
       fulfillment,
       result.fulfillmentId,
     );
-    return { fulfillmentId: result.fulfillmentId || verified.fulfillmentId };
+    return { fulfillmentId: result.fulfillmentId || verified.fulfillmentId,
+      ...(verified.quantityEvidenceSource ? { quantityEvidenceSource: verified.quantityEvidenceSource } : {}) };
   }
 
   private async createShippingFulfillmentWithRetry(
@@ -539,7 +548,8 @@ export class EbayApiClient {
         true,
       );
       if (matched) {
-        return { fulfillmentId: matched.fulfillmentId };
+        return { fulfillmentId: matched.fulfillmentId,
+          ...(matched.quantityEvidenceSource ? { quantityEvidenceSource: matched.quantityEvidenceSource } : {}) };
       }
     }
 
@@ -555,7 +565,7 @@ export class EbayApiClient {
     expectedFulfillment: EbayShippingFulfillmentRequest,
     expectedFulfillmentId?: string | null,
     tolerateReadFailure = false,
-  ): Promise<{ fulfillmentId: string; trackingNumber: string } | null> {
+  ): Promise<(EbayShippingFulfillmentResponse & { trackingNumber: string }) | null> {
     const expectedTracking = expectedFulfillment.trackingNumber.trim();
     const expectedLines = normalizeFulfillmentLines(expectedFulfillment.lineItems);
     if (!expectedTracking || !expectedLines) {
@@ -626,6 +636,29 @@ export class EbayApiClient {
         },
       );
     }
+    let recoveredLines: readonly NormalizedEbayFulfillmentLine[] | null = null;
+    if (this.options.strictFulfillmentReadback) {
+      const candidate = readSingleOmittedQuantityFulfillment(body, expectedTracking, expectedFulfillmentId);
+      if (candidate) {
+        const orderPath = `/sell/fulfillment/v1/order/${encodeURIComponent(orderId.trim())}`;
+        const order = await this.readFulfillmentQuantityEvidence(orderPath, accessToken);
+        const proof = proveWholeOrderFulfillmentQuantities({
+          order, orderId: orderId.trim(), fulfillment: candidate,
+          // Validate the provider's href, but never follow an arbitrary URL.
+          expectedFulfillmentHref: `${this.baseUrl}${path}/${encodeURIComponent(candidate.fulfillmentId)}`,
+        });
+        if (proof) {
+          // Provider reads are not one transaction. Require the full collection
+          // to preserve the same sole complete package across the order read.
+          const secondBody = await this.readFulfillmentQuantityEvidence(path, accessToken);
+          const second = readSingleOmittedQuantityFulfillment(secondBody, expectedTracking, expectedFulfillmentId);
+          if (!second || !sameWholeOrderFulfillmentSnapshot(candidate, second)) {
+            throw new ChannelFulfillmentProviderError("EBAY_FULFILLMENT_READBACK_CHANGED", "eBay fulfillment evidence changed during quantity verification", "transient");
+          }
+          recoveredLines = proof;
+        }
+      }
+    }
     const identityMatches: Array<{
       fulfillmentId: string;
       trackingNumber: string;
@@ -650,7 +683,7 @@ export class EbayApiClient {
       identityMatches.push({
         fulfillmentId: itemFulfillmentId,
         trackingNumber: itemTracking,
-        lines: normalizeFulfillmentLines(item?.lineItems),
+        lines: recoveredLines ?? normalizeFulfillmentLines(item?.lineItems),
       });
     }
 
@@ -663,9 +696,15 @@ export class EbayApiClient {
       && fulfillmentLineSignature(candidate.lines) === expectedLineSignature,
     );
     if (identityMatches.length === 1 && exactMatches.length === 1) {
+      if (recoveredLines) {
+        console.info(JSON.stringify({ code: "EBAY_FULFILLMENT_QUANTITY_EVIDENCE_VERIFIED",
+          orderId, fulfillmentId: exactMatches[0].fulfillmentId,
+          quantityEvidenceSource: "provider_fulfilled_whole_order" }));
+      }
       return {
         fulfillmentId: exactMatches[0].fulfillmentId,
         trackingNumber: exactMatches[0].trackingNumber,
+        ...(recoveredLines ? { quantityEvidenceSource: "provider_fulfilled_whole_order" as const } : {}),
       };
     }
 
@@ -715,6 +754,27 @@ export class EbayApiClient {
         providerCandidates: identityMatches,
       },
     );
+  }
+
+  /** Fixed provider paths and the token already pinned for this attempt. */
+  private async readFulfillmentQuantityEvidence(path: string, accessToken: string): Promise<unknown> {
+    try {
+      const response = await (this.options.request ?? fetch)(`${this.baseUrl}${path}`, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${accessToken}`, Accept: "application/json",
+          "Accept-Language": EBAY_US_LOCALE, "X-EBAY-C-MARKETPLACE-ID": EBAY_US_MARKETPLACE_ID },
+      });
+      if (!response.ok) {
+        throw new ChannelFulfillmentProviderError("EBAY_FULFILLMENT_QUANTITY_EVIDENCE_UNAVAILABLE",
+          `eBay fulfillment quantity evidence returned HTTP ${response.status}`,
+          response.status === 408 || response.status === 429 || response.status >= 500 ? "transient" : "permanent");
+      }
+      return await response.json();
+    } catch (error) {
+      if (error instanceof ChannelFulfillmentProviderError) throw error;
+      throw new ChannelFulfillmentProviderError("EBAY_FULFILLMENT_QUANTITY_EVIDENCE_UNAVAILABLE",
+        "eBay fulfillment quantity evidence could not be read", "transient");
+    }
   }
 
   private formatEbayError(errorBody: string): string {
