@@ -2,6 +2,7 @@ import { attachSupplierSourcingCandidates } from "./supplier-sourcing.repository
 import { readPurchasePlanningSnapshot } from "./purchase-planning-snapshot.repository";
 import { purchaseInventorySnapshotQuery } from "./purchase-inventory-snapshot.query";
 import { getPurchasePlanningPolicyService } from "./purchase-planning-policy.runtime";
+import { getSettingsForWarehouse } from "../warehouse/settings.resolver";
 import {
   db,
   type Vendor,
@@ -1298,6 +1299,7 @@ export const procurementMethods: IProcurementStorage = {
     // stock and exact closed receipts must come from one coherent snapshot.
     return readPurchasePlanningSnapshot(db, async (tx) => {
       const normalizedLookbackDays = Math.max(1, Math.trunc(Number(lookbackDays) || 30));
+      const settings = await getSettingsForWarehouse(undefined, tx);
       const forecastSettings = await tx.execute(sql`
       SELECT
         purchasing_forecast_method,
@@ -1317,7 +1319,7 @@ export const procurementMethods: IProcurementStorage = {
         purchasing_automation_min_order_count,
         purchasing_automation_min_active_days
       FROM inventory.warehouse_settings
-      LIMIT 1
+      WHERE id = ${settings?.id ?? null}
     `);
       const configured = (forecastSettings.rows as any[])[0] ?? {};
       const forecastPolicy = normalizePurchasingForecastPolicy({
@@ -1424,6 +1426,7 @@ export const procurementMethods: IProcurementStorage = {
         vel.seasonal_latest_demand_at,
         inv.variant_count,
         order_uom.variant_id,
+        order_uom.receive_variant_selection,
         order_uom.units_per_variant AS order_uom_units,
         order_uom.sku AS order_uom_sku,
         order_uom.hierarchy_level AS order_uom_level,
@@ -1615,11 +1618,25 @@ export const procurementMethods: IProcurementStorage = {
         GROUP BY pv.product_id
       ) vel ON vel.product_id = p.id
       LEFT JOIN LATERAL (
-        SELECT pv.id AS variant_id, pv.units_per_variant, pv.sku, pv.hierarchy_level
+        -- A tied level is unresolved, never a default chosen by row order.
+        -- MIN is used for identity and pack fields only for a singleton set.
+        SELECT
+          CASE WHEN COUNT(*) = 1 THEN MIN(pv.id) END AS variant_id,
+          CASE WHEN COUNT(*) = 1 THEN MIN(pv.units_per_variant) END AS units_per_variant,
+          CASE WHEN COUNT(*) = 1 THEN MIN(pv.sku) END AS sku,
+          MAX(pv.hierarchy_level) AS hierarchy_level,
+          JSONB_BUILD_OBJECT(
+            'version', 1,
+            'highestHierarchyLevel', MAX(pv.hierarchy_level),
+            'candidateCount', COUNT(*),
+            'selectedVariantId', CASE WHEN COUNT(*) = 1 THEN MIN(pv.id) END
+          ) AS receive_variant_selection
         FROM catalog.product_variants pv
         WHERE pv.product_id = p.id AND pv.is_active = true
-        ORDER BY pv.hierarchy_level DESC
-        LIMIT 1
+          AND pv.hierarchy_level = (
+            SELECT MAX(highest.hierarchy_level) FROM catalog.product_variants highest
+            WHERE highest.product_id = p.id AND highest.is_active = true
+          )
       ) order_uom ON true
       LEFT JOIN LATERAL (
         SELECT
@@ -2131,7 +2148,9 @@ export const procurementMethods: IProcurementStorage = {
   },
 
   async getAutoDraftSettings(warehouseId?: number): Promise<any> {
-    const rows = await db.execute(sql`
+    const rows = await db.transaction(async (tx) => {
+      const settings = await getSettingsForWarehouse(warehouseId, tx);
+      return tx.execute(sql`
       SELECT
         COALESCE(auto_draft_mode, 'draft_po') AS auto_draft_mode,
         COALESCE(auto_draft_approval_policy, 'high_confidence_only') AS auto_draft_approval_policy,
@@ -2175,9 +2194,10 @@ export const procurementMethods: IProcurementStorage = {
         COALESCE(auto_draft_po_exception_critical_days, 3) AS auto_draft_po_exception_critical_days,
         COALESCE(auto_draft_po_closeout_warning_days, 7) AS auto_draft_po_closeout_warning_days,
         COALESCE(auto_draft_po_closeout_critical_days, 14) AS auto_draft_po_closeout_critical_days
-      FROM warehouse_settings
-      LIMIT 1
-    `);
+      FROM inventory.warehouse_settings
+      WHERE id = ${settings?.id ?? null}
+      `);
+    }, { isolationLevel: "repeatable read", accessMode: "read only" });
     const row = (rows.rows as any[])[0];
     const planningPolicyRecord = await getPurchasePlanningPolicyService().read();
     return {
@@ -2263,8 +2283,13 @@ export const procurementMethods: IProcurementStorage = {
       && settings.rfqDraftMaximumLinesPerRun <= 500
       ? settings.rfqDraftMaximumLinesPerRun
       : null;
-    await db.execute(sql`
-      UPDATE warehouse_settings SET
+    // Resolve and update one canonical row in the same snapshot. Concurrent
+    // changes to that row must serialize or fail, never retarget the write.
+    await db.transaction(async (tx) => {
+      const target = await getSettingsForWarehouse(warehouseId, tx);
+      if (!target) return;
+      await tx.execute(sql`
+      UPDATE inventory.warehouse_settings SET
         auto_draft_mode = COALESCE(${autoDraftMode}, auto_draft_mode),
         auto_draft_approval_policy = COALESCE(${approvalPolicy}, auto_draft_approval_policy),
         auto_draft_include_order_soon = COALESCE(${settings.includeOrderSoon ?? null}, auto_draft_include_order_soon),
@@ -2307,7 +2332,9 @@ export const procurementMethods: IProcurementStorage = {
         auto_draft_po_exception_critical_days = COALESCE(${settings.stalePoThresholds?.exceptionBlockedCriticalDays ?? null}, auto_draft_po_exception_critical_days),
         auto_draft_po_closeout_warning_days = COALESCE(${settings.stalePoThresholds?.closeoutWarningDays ?? null}, auto_draft_po_closeout_warning_days),
         auto_draft_po_closeout_critical_days = COALESCE(${settings.stalePoThresholds?.closeoutCriticalDays ?? null}, auto_draft_po_closeout_critical_days)
-    `);
+      WHERE id = ${target.id}
+      `);
+    }, { isolationLevel: "repeatable read" });
   },
 
   async getDashboardData(lookbackDays: number): Promise<any> {

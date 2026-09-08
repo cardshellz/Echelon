@@ -221,6 +221,7 @@ function automaticCommand(): AutomaticRecommendationPoHandoffCommand {
       recommendationSnapshot: {
         item: {
           explanation: "Order three cases.",
+          receiveVariantSelection: { version: 1, highestHierarchyLevel: 3, candidateCount: 1, selectedVariantId: 1001 },
           supplierBasis: { minimumOrderPieces: 1 },
         },
       },
@@ -377,6 +378,32 @@ function buildHarness(initialState = baseState()) {
 }
 
 describe("recommendation PO handoff service", () => {
+  it.each([
+    { name: "historical missing capture", evidence: undefined },
+    { name: "tied receiving configurations", evidence: { version: 1, highestHierarchyLevel: 3, candidateCount: 2, selectedVariantId: null } },
+    { name: "different captured identity", evidence: { version: 1, highestHierarchyLevel: 3, candidateCount: 1, selectedVariantId: 1002 } },
+  ])("refuses automatic PO handoff for $name before any transaction or financial write", async ({ evidence }) => {
+    const harness = buildHarness();
+    const command = automaticCommand();
+    const item = command.items[0].recommendationSnapshot.item as Record<string, unknown>;
+    item.receiveVariantSelection = evidence;
+    await expect(createRecommendationPoHandoffService(harness.repository).createAutomaticHandoff(command))
+      .rejects.toMatchObject({ statusCode: 409, code: "AUTOMATIC_RECEIVE_SELECTION_REVIEW_REQUIRED" });
+    expect(harness.transactionCalls).toBe(0);
+    expect(harness.state).toEqual(baseState());
+  });
+
+  it("preserves an operator's explicit receive selection without a new automatic capture", async () => {
+    const state = baseState();
+    state.variants.push({ ...state.variants[0], id: 1002, unitsPerVariant: 50 });
+    const harness = buildHarness(state);
+    const service = createRecommendationPoHandoffService(harness.repository);
+    const command = baseCommand();
+    const first = await service.createAcceptedHandoff(command);
+    expect(first.pos).toHaveLength(1);
+    expect(harness.state.pos).toHaveLength(1);
+    expect(harness.state.lines).toMatchObject([{ expectedReceiveVariantId: 1001, expectedReceiveUnitsPerVariant: 100 }]);
+  });
   it.each(["manual", "automatic"])("enforces the locked supplier bundle minimum for %s drafts without partial writes", async (mode) => {
     const state = baseState(); state.vendors[0].minimumOrderCents = 151;
     const harness = buildHarness(state);

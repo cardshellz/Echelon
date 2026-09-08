@@ -3,6 +3,13 @@ import express from "express";
 import type { Express, Request, Response, NextFunction } from "express";
 import http from "http";
 import { AddressInfo } from "net";
+import { PgDialect } from "drizzle-orm/pg-core";
+import type { SQL } from "drizzle-orm";
+import { defaultPurchasePlanningPolicy, type PurchasePlanningPolicy } from "@shared/procurement/purchase-planning-policy";
+import type { AutoDraftRecommendationSettings, PurchasingRecommendationRawRow } from "../../purchasing-recommendation.engine";
+import type { CreatePurchaseRecommendationRunInput } from "../../purchase-recommendation-snapshot.service";
+import { normalizePurchasingForecastPolicy } from "../../purchasing-forecast-policy";
+import type { ServiceRegistry } from "../../../../services";
 
 const mocks = vi.hoisted(() => ({
   procurement: {
@@ -37,7 +44,7 @@ const mocks = vi.hoisted(() => ({
   runAutoDraftJob: vi.fn(),
   startAutoDraftJob: vi.fn(),
   purchasingService: {
-    createPOFromReorder: vi.fn(),
+    createPO: vi.fn(),
     snapshotPurchaseRecommendations: vi.fn(),
     createRfqBatch: vi.fn(),
   },
@@ -80,10 +87,15 @@ import {
 function buildApp(): Express {
   const app = express();
   app.use(express.json());
-  app.locals.services = {
+  const services: {
+    purchasing: Pick<ServiceRegistry["purchasing"], keyof typeof mocks.purchasingService>;
+    recommendationPoHandoff: Pick<ServiceRegistry["recommendationPoHandoff"], keyof typeof mocks.recommendationPoHandoffService>;
+  } = {
     purchasing: mocks.purchasingService,
     recommendationPoHandoff: mocks.recommendationPoHandoffService,
   };
+  // This HTTP harness provides only the service methods exercised by these routes.
+  app.locals.services = services as ServiceRegistry;
   registerPurchasingRecommendationRoutes(app);
   registerPurchasingRecommendationAdminRoutes(app);
   return app;
@@ -188,7 +200,7 @@ describe("purchasing recommendation routes", () => {
       decidedAt: "2026-05-22T12:00:00.000Z",
       createdAt: "2026-05-22T12:00:00.000Z",
     }));
-    mocks.purchasingService.createPOFromReorder.mockResolvedValue([]);
+    mocks.purchasingService.createPO.mockResolvedValue([]);
     mocks.purchasingService.snapshotPurchaseRecommendations.mockImplementation(async (input) => ({
       run: { id: 701, calculationVersion: input.calculationVersion },
       lines: input.lines.map((line: any, index: number) => ({ id: index + 1, ...line })),
@@ -215,6 +227,30 @@ describe("purchasing recommendation routes", () => {
   afterEach(async () => {
     if (server) await server.close();
     server = undefined;
+    vi.useRealTimers();
+  });
+
+  it("keeps the receiving-choice blocker visible over HTTP for a no-demand product with no supplier", async () => {
+    const selection = { version: 1 as const, highestHierarchyLevel: 3, candidateCount: 2, selectedVariantId: null };
+    const row: PurchasingRecommendationRawRow = { product_id: 17, base_sku: "RECEIVE-CHOICE", product_name: "Synthetic receiving choice",
+      variant_id: null, receive_variant_selection: selection, total_pieces: 0, total_outbound_pieces: 0,
+      on_order_pieces: 0, preferred_vendor_id: null, order_uom_units: null };
+    mocks.inventory.getVelocityLookbackDays.mockResolvedValue(30);
+    mocks.procurement.getReorderAnalysisData.mockResolvedValue([row]);
+    server = await startServer(buildApp());
+    const response = await requestJson(server.url, "GET", "/api/purchasing/reorder-analysis");
+    expect(response.status).toBe(200);
+    expect(response.body.items).toHaveLength(1);
+    expect(response.body.items[0]).toMatchObject({ productId: 17, receiveVariantSelection: selection,
+      preferredVendorId: null, qualityGate: { autoDraftEligible: false,
+        detail: expect.stringContaining("2 active receiving configurations") },
+      qualityControls: expect.arrayContaining([expect.objectContaining({ code: "ambiguous_receive_configuration", label: "Choose a receiving unit" })]) });
+    const captured = await requestJson(server.url, "POST", "/api/purchasing/recommendation-runs");
+    expect(captured.status).toBe(201);
+    const input: CreatePurchaseRecommendationRunInput = mocks.purchasingService.snapshotPurchaseRecommendations.mock.calls[0][0];
+    expect(input.lines).toEqual([]);
+    expect(input.observations).toHaveLength(1);
+    expect(input.observations![0]).toMatchObject({ selectedReceiveVariantId: null, evidenceSnapshot: { receiveVariantSelection: selection } });
   });
 
   it("computes purchasing KPIs from reorder analysis and open PO pipeline", async () => {
@@ -337,6 +373,129 @@ describe("purchasing recommendation routes", () => {
     // Items keep contribution evidence for the cockpit math drawer; with no
     // demand events in the fixture the capture resolves to an empty array.
     expect(body.items[0].forwardDemandBasis.contributions).toEqual([]);
+  });
+
+  it.each([
+    {
+      label: "neutral policy compatibility",
+      policy: defaultPurchasePlanningPolicy(),
+      periodPieces: 300,
+      expected: { avgDailyUsage: 10, leadTimeDays: 30, reorderPoint: 350, suggestedOrderPieces: 264 },
+    },
+    {
+      label: "uniform growth",
+      policy: { ...defaultPurchasePlanningPolicy(), growthPercent: 50 },
+      periodPieces: 300,
+      expected: { avgDailyUsage: 15, reorderPoint: 525, suggestedOrderPieces: 432 },
+    },
+    {
+      label: "global stock target",
+      policy: { ...defaultPurchasePlanningPolicy(), targetCoverDays: 90 },
+      periodPieces: 300,
+      expected: { reorderPoint: 900, suggestedOrderPieces: 816, planningBasis: { targetCoverDays: 90 } },
+    },
+    {
+      label: "product stock target, essential buffer and staged lead time",
+      policy: {
+        ...defaultPurchasePlanningPolicy(), targetCoverDays: 90,
+        products: [{ productId: 10, essential: true, minimumStockPieces: 500, targetCoverDays: 180,
+          leadTimeStages: { rfqDays: 10, productionDays: 80, transitDays: 45, receivingDays: 5 } }],
+      },
+      periodPieces: 300,
+      expected: { leadTimeDays: 140, reorderPoint: 1900, suggestedOrderPieces: 1800,
+        leadTimeBasis: { leadTimeSource: "planning_policy" },
+        planningBasis: { essential: true, minimumStockPieces: 500, targetCoverDays: 180 } },
+    },
+    {
+      label: "essential stock without historical demand",
+      policy: {
+        ...defaultPurchasePlanningPolicy(),
+        products: [{ productId: 10, essential: true, minimumStockPieces: 200, targetCoverDays: null, leadTimeStages: null }],
+      },
+      periodPieces: 0,
+      expected: { status: "order_now", reorderPoint: 200, suggestedOrderPieces: 120, qualityGate: { autoDraftEligible: false } },
+    },
+    {
+      label: "dated replacement forecast with growth outside its dates",
+      policy: {
+        ...defaultPurchasePlanningPolicy(), growthPercent: 50,
+        products: [{ productId: 10, essential: false, minimumStockPieces: 0, targetCoverDays: null, leadTimeStages: null }],
+        replacementForecasts: [{ productId: 10, startDate: "2026-09-01", endDate: "2026-09-30", totalPieces: 600, reference: "September plan" }],
+      },
+      periodPieces: 300,
+      expected: { avgDailyUsage: 15, reorderPoint: 675, suggestedOrderPieces: 576 },
+    },
+  ] satisfies Array<{ label: string; policy: PurchasePlanningPolicy; periodPieces: number; expected: Record<string, unknown> }>)
+  ("keeps cockpit quantities and captured snapshot evidence aligned for $label", async ({ policy, periodPieces, expected }) => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-09-01T12:00:00.000Z"));
+    const row: PurchasingRecommendationRawRow = {
+      product_id: 10, variant_id: 100, base_sku: "STOCK", product_name: "Stock item",
+      total_pieces: 100, total_reserved_pieces: 0,
+      total_outbound_pieces: periodPieces, previous_outbound_pieces: periodPieces,
+      demand_order_count: periodPieces > 0 ? 20 : 0, demand_active_days: periodPieces > 0 ? 15 : 0,
+      latest_demand_at: periodPieces > 0 ? "2026-09-01" : null,
+      vendor_lead_time_days: 30, safety_stock_days: 5, on_order_pieces: 0, inbound_schedule: [],
+      preferred_vendor_id: 5, preferred_vendor_name: "Vendor", vendor_product_id: 50,
+      vendor_pack_size: 24, vendor_moq: 100,
+      recommendation_analysis_date: "2026-09-01", recommendation_analysis_as_of: "2026-09-01T12:00:00.000Z",
+    };
+    const settings: AutoDraftRecommendationSettings = {
+      autoDraftMode: "review_only", approvalPolicy: "high_confidence_only",
+      skipNoVendor: true, skipOnOpenPo: true, includeOrderSoon: false,
+      planningPolicy: policy, planningPolicyRevision: 7,
+      forecastPolicy: normalizePurchasingForecastPolicy({
+        method: "recent_order_velocity_v1", standardWindowDays: 30,
+        growthPercent: policy.growthPercent, replacementForecasts: policy.replacementForecasts,
+      }),
+    };
+    mocks.inventory.getVelocityLookbackDays.mockResolvedValue(30);
+    mocks.procurement.getReorderAnalysisData.mockResolvedValue([row]);
+    mocks.procurement.getAutoDraftSettings.mockResolvedValue(settings);
+    server = await startServer(buildApp());
+
+    const cockpit = await requestJson(server.url, "GET", "/api/purchasing/reorder-analysis");
+    expect(cockpit.status).toBe(200);
+    const item = cockpit.body.items.find((candidate: { productId: number }) => candidate.productId === 10);
+    expect(item).toMatchObject(expected);
+    expect(item.planningBasis).toMatchObject({ policyVersion: 1, policyRevision: 7, growthPercent: policy.growthPercent });
+    expect(mocks.purchasingService.snapshotPurchaseRecommendations).not.toHaveBeenCalled();
+    expect(mocks.purchasingService.createPO).not.toHaveBeenCalled();
+    expect(mocks.purchasingService.createRfqBatch).not.toHaveBeenCalled();
+
+    // Exercise the actual snapshot route and builder; persistence is the mocked boundary.
+    const snapshot = await requestJson(server.url, "POST", "/api/purchasing/recommendation-runs", {});
+    expect(snapshot.status).toBe(201);
+    const captured = mocks.purchasingService.snapshotPurchaseRecommendations.mock.calls[0][0] as CreatePurchaseRecommendationRunInput;
+    expect(captured.policySnapshot).toMatchObject({ planningPolicy: policy, planningPolicyRevision: 7 });
+    expect(captured.lines).toHaveLength(1);
+    expect(captured.lines[0].recommendedPieces).toBe(item.suggestedOrderPieces);
+    expect(captured.lines[0].evidenceSnapshot).toMatchObject({
+      reorderPointPieces: item.reorderPoint, leadTimeDays: item.leadTimeDays, planningBasis: item.planningBasis,
+    });
+    expect(captured.observations).toHaveLength(1);
+    expect(captured.observations![0].evidenceSnapshot.planningBasis).toEqual(item.planningBasis);
+    expect(captured.observations![0].forecastDailyPiecesMicros).toBe(item.avgDailyUsage * 1_000_000);
+  });
+
+  it("fails visibly when the stored planning policy is invalid", async () => {
+    mocks.inventory.getVelocityLookbackDays.mockResolvedValue(30);
+    mocks.procurement.getReorderAnalysisData.mockResolvedValue([]);
+    mocks.procurement.getAutoDraftSettings.mockResolvedValue({
+      planningPolicy: { ...defaultPurchasePlanningPolicy(), growthPercent: "50" },
+      planningPolicyRevision: 7,
+    });
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      server = await startServer(buildApp());
+      const { status, body } = await requestJson(server.url, "GET", "/api/purchasing/reorder-analysis");
+      expect(status).toBe(500);
+      expect(body).toEqual({ error: "Failed to fetch reorder analysis" });
+      expect(mocks.purchasingService.snapshotPurchaseRecommendations).not.toHaveBeenCalled();
+      expect(errorLog).toHaveBeenCalled();
+    } finally {
+      errorLog.mockRestore();
+    }
   });
 
   it("keeps forward-demand contributions on items and strips them from skippedItems", async () => {
@@ -803,7 +962,11 @@ describe("purchasing recommendation routes", () => {
     expect(input.observations).toHaveLength(1);
   });
 
-  it("returns the latest durable recommendation run with allocated and remaining quantities", async () => {
+  it.each([
+    { name: "unchanged receiving choice", priorVariantId: 3001, currentVariantId: 3001 },
+    { name: "unresolved receiving choice", priorVariantId: 3001, currentVariantId: null },
+    { name: "resolved receiving choice", priorVariantId: null, currentVariantId: 3001 },
+  ])("returns allocated and remaining quantities after $name", async ({ priorVariantId, currentVariantId }) => {
     mocks.db.select
       .mockReturnValueOnce(selectChain([{
         id: 701,
@@ -819,7 +982,7 @@ describe("purchasing recommendation routes", () => {
         runId: 701,
         recommendationKey: "301:3001:30",
         productId: 301,
-        productVariantId: 3001,
+        productVariantId: currentVariantId,
         warehouseId: null,
         requiredByDate: null,
         sku: "RFQ-NO-VENDOR",
@@ -833,7 +996,7 @@ describe("purchasing recommendation routes", () => {
         id: 22,
         recommendationLineId: 10,
         productId: 301,
-        productVariantId: 3001,
+        productVariantId: priorVariantId,
         warehouseId: null,
         requestedPieces: 40,
         lineStatus: "draft",
@@ -860,6 +1023,54 @@ describe("purchasing recommendation routes", () => {
     });
     expect(body.items[0].allocations[0]).toMatchObject({ rfqNumber: "RFQ-TEST", vendorName: "Supplier 77" });
     expect(body.items[0].allocations[0].recommendationLineId).toBe(10);
+  });
+
+  it.each([
+    { name: "same warehouse", recommendationWarehouseId: 90, allocationWarehouseId: 90, expectedStatus: 409 },
+    { name: "different warehouse", recommendationWarehouseId: 90, allocationWarehouseId: 91, expectedStatus: 200 },
+    { name: "global recommendation and local allocation", recommendationWarehouseId: null, allocationWarehouseId: 90, expectedStatus: 200 },
+    { name: "local recommendation and global allocation", recommendationWarehouseId: 90, allocationWarehouseId: null, expectedStatus: 200 },
+    { name: "same global scope", recommendationWarehouseId: null, allocationWarehouseId: null, expectedStatus: 409 },
+  ])("checks changed purchase supply only in the queue warehouse scope: $name", async ({ recommendationWarehouseId, allocationWarehouseId, expectedStatus }) => {
+    const asOf = new Date("2026-07-17T12:00:00.000Z");
+    mocks.db.select
+      .mockReturnValueOnce(selectChain([{
+        id: 701, calculationVersion: "purchasing-recommendation-v4-supplier-sourcing", status: "completed",
+        asOf, generatedAt: asOf, lookbackDays: 30, policySnapshot: {},
+      }]))
+      .mockReturnValueOnce(selectChain([{
+        id: 11, runId: 701, recommendationKey: "301:3001:30", productId: 301,
+        productVariantId: 3001, warehouseId: recommendationWarehouseId, requiredByDate: null,
+        sku: "WAREHOUSE-SCOPE", productName: "Warehouse scope fixture", recommendedPieces: 100,
+        preferredVendorId: null, preferredVendorProductId: null, evidenceSnapshot: {},
+      }]))
+      .mockReturnValueOnce(selectChain([{
+        id: 22, recommendationLineId: 10, productId: 301, productVariantId: 3001,
+        warehouseId: allocationWarehouseId, requestedPieces: 40, lineStatus: "ordered",
+        rfqId: 33, rfqNumber: "RFQ-SCOPE", rfqStatus: "quoted", vendorId: 77, createdAt: asOf,
+      }]));
+    // Return the linked purchase only when the repository requests its RFQ line,
+    // matching the query's ANY(integer[]) boundary without mocking its owner.
+    mocks.db.execute.mockImplementation(async (query: SQL) => {
+      const requestedIds: unknown = new PgDialect().sqlToQuery(query).params[0];
+      if (!Array.isArray(requestedIds)) throw new Error("Expected RFQ line IDs in linked purchase query");
+      return { rows: requestedIds.includes(22) ? [{
+        rfq_line_id: 22, purchase_order_id: 44, status: "approved", line_status: "open",
+        order_qty: 40, received_qty: 0, cancelled_qty: 0,
+        updated_at_ms: new Date("2026-07-17T13:00:00.000Z").getTime(),
+      }] : [] };
+    });
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "GET", "/api/purchasing/rfq-queue");
+
+    expect(status).toBe(expectedStatus);
+    if (expectedStatus === 409) {
+      expect(body).toMatchObject({ code: "RFQ_SUPPLY_SNAPSHOT_STALE" });
+    } else {
+      expect(body.items[0]).toMatchObject({ warehouseId: recommendationWarehouseId, allocatedPieces: 0, remainingPieces: 100 });
+      expect(mocks.db.execute).not.toHaveBeenCalled();
+    }
   });
 
   it("creates a supplier-grouped RFQ batch with a strict approval flag and no client-supplied approver", async () => {
@@ -3229,7 +3440,7 @@ describe("purchasing recommendation routes", () => {
       triggeredBy: "manual",
       triggeredByUser: "admin-user",
     });
-    expect(mocks.purchasingService.createPOFromReorder).not.toHaveBeenCalled();
+    expect(mocks.purchasingService.createPO).not.toHaveBeenCalled();
     expect(mocks.procurement.createAutoDraftRun).not.toHaveBeenCalled();
     expect(mocks.procurement.updateAutoDraftRun).not.toHaveBeenCalled();
     expect(body).toMatchObject({
@@ -3304,7 +3515,7 @@ describe("purchasing recommendation routes", () => {
     const { status, body } = await requestJson(server.url, "POST", "/api/purchasing/auto-draft-run");
 
     expect(status).toBe(200);
-    expect(mocks.purchasingService.createPOFromReorder).not.toHaveBeenCalled();
+    expect(mocks.purchasingService.createPO).not.toHaveBeenCalled();
     expect(mocks.runAutoDraftJob).toHaveBeenCalledWith({
       triggeredBy: "manual",
       triggeredByUser: "admin-user",
@@ -3389,7 +3600,7 @@ describe("purchasing recommendation routes", () => {
     const { status, body } = await requestJson(server.url, "POST", "/api/purchasing/auto-draft-run");
 
     expect(status).toBe(200);
-    expect(mocks.purchasingService.createPOFromReorder).not.toHaveBeenCalled();
+    expect(mocks.purchasingService.createPO).not.toHaveBeenCalled();
     expect(mocks.runAutoDraftJob).toHaveBeenCalledWith({
       triggeredBy: "manual",
       triggeredByUser: "admin-user",

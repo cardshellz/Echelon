@@ -1,3 +1,4 @@
+import { hasVerifiedUniqueReceiveSelection } from "@shared/procurement/purchase-receive-selection";
 import { millsToCents } from "@shared/utils/money";
 import { selectSupplierPriceTier, supplierSelectionEvidenceSchema, type SupplierSourcingRecord } from "@shared/procurement/supplier-sourcing";
 import { evaluateSupplierBundle } from "@shared/procurement/supplier-bundle";
@@ -1665,6 +1666,16 @@ export function createRecommendationPoHandoffService(
       input,
       "INVALID_AUTOMATIC_RECOMMENDATION_HANDOFF",
     );
+    for (const item of parsed.items) {
+      const snapshotItem = item.recommendationSnapshot.item;
+      const receiveSelection = snapshotItem && typeof snapshotItem === "object" && !Array.isArray(snapshotItem)
+        ? (snapshotItem as Record<string, unknown>).receiveVariantSelection : undefined;
+      if (!hasVerifiedUniqueReceiveSelection(receiveSelection, item.productVariantId)) {
+        throw new RecommendationPoHandoffError(
+          "This capture does not establish one receive configuration. Refresh analysis or select a receive configuration in a manual purchase.",
+          409, "AUTOMATIC_RECEIVE_SELECTION_REVIEW_REQUIRED", { recommendationId: item.recommendationId });
+      }
+    }
     const keys = parsed.items.map((item) => recommendationKey(item.recommendationId, "auto_draft_eligible"));
     const mutationKeys = parsed.items.map((item) => recommendationMutationLockKey(item.recommendationId));
     if (new Set(keys).size !== parsed.items.length) {

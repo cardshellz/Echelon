@@ -1,3 +1,4 @@
+import { hasVerifiedUniqueReceiveSelection } from "@shared/procurement/purchase-receive-selection";
 import { supplierSelectionEvidenceSchema } from "@shared/procurement/supplier-sourcing";
 import { loadSupplierSourcingRecords } from "./supplier-sourcing.repository";
 import { inspectPurchaseReceiptSupplyCapture } from "@shared/procurement/purchase-receipt-supply-evidence";
@@ -48,6 +49,7 @@ export type AutomaticRfqDraftSkipCode =
   | "forecast_review_required"
   | "non_supplier_blocker"
   | "receipt_evidence_review_required"
+  | "receive_selection_review_required"
   | "supplier_selection_review_required"
   | "recommendation_changed"
   | "inactive_supplier_catalog"
@@ -96,11 +98,15 @@ export function planAutomaticRfqDrafts(
       skip(line, "automation_disabled", "RFQ draft automation is configured for manual selection.");
       continue;
     }
+    const evidence = line.evidenceSnapshot ?? {};
+    if (!hasVerifiedUniqueReceiveSelection(evidence.receiveVariantSelection, line.productVariantId)) {
+      skip(line, "receive_selection_review_required", "The capture does not establish one highest active receive configuration. Review or refresh it before unattended RFQ creation; existing drafts remain replayable.");
+      continue;
+    }
     if (!line.preferredVendorId || !line.preferredVendorProductId) {
       skip(line, "no_preferred_supplier", "No preferred supplier catalog identity was present in the recommendation snapshot.");
       continue;
     }
-    const evidence = line.evidenceSnapshot ?? {};
     if (evidence.qualityGate?.autoDraftEligible === true) {
       skip(line, "po_ready", "The recommendation already has the supplier and usable quote needed for PO automation.");
       continue;
@@ -176,8 +182,8 @@ export function createAutomaticRfqDraftService(database: any) {
     const plan = planAutomaticRfqDrafts(input.lines, input.policy);
     // A pre-capture recommendation may already have a durable RFQ from an
     // earlier attempt. It is eligible only for exact replay, never new creation.
-    const receiptReviewIds = new Set(plan.skipped.filter((skip) => ["receipt_evidence_review_required", "supplier_selection_review_required"].includes(skip.code)).map((skip) => skip.recommendationLineId));
-    const candidates = [...plan.selected, ...input.lines.filter((line) => receiptReviewIds.has(line.id))];
+    const replayOnlyIds = new Set(plan.skipped.filter((skip) => ["receipt_evidence_review_required", "supplier_selection_review_required", "receive_selection_review_required"].includes(skip.code)).map((skip) => skip.recommendationLineId));
+    const candidates = [...plan.selected, ...input.lines.filter((line) => replayOnlyIds.has(line.id) && Number.isSafeInteger(line.preferredVendorId) && Number(line.preferredVendorId) > 0)];
     if (candidates.length === 0) return { rfqs: [], lines: [], skipped: plan.skipped, reused: false };
 
     return database.transaction(async (tx: any) => {

@@ -39,9 +39,15 @@ function recommendation(overrides: Record<string, unknown> = {}) {
 }
 
 describe("purchasing RFQ queue", () => {
-  it("uses product, variant, and warehouse as the durable allocation identity", () => {
-    expect(purchasingSkuAllocationKey({ productId: 20, productVariantId: 30, warehouseId: 90 })).toBe("20:30:90");
-    expect(purchasingSkuAllocationKey({ productId: 20, productVariantId: null, warehouseId: null })).toBe("20:base:all");
+  it("reserves the same product pieces across receiving choices while preserving warehouse scope", () => {
+    for (const productVariantId of [30, 31, null, undefined]) {
+      expect(purchasingSkuAllocationKey({ productId: 20, productVariantId, warehouseId: 90 })).toBe("20:90");
+      expect(purchasingSkuAllocationKey({ productId: 20, productVariantId, warehouseId: null })).toBe("20:all");
+    }
+    expect(purchasingSkuAllocationKey({ productId: 20 })).toBe("20:all");
+    expect(purchasingSkuAllocationKey({ productId: 20, warehouseId: 91 })).not.toBe("20:90");
+    expect(purchasingSkuAllocationKey({ productId: 21, warehouseId: 90 })).not.toBe("20:90");
+    expect(purchasingSkuAllocationKey({ productId: 20, warehouseId: null })).not.toBe("20:90");
   });
 
   it("surfaces the exact SKU and required pieces without a vendor or price", () => {

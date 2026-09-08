@@ -1,4 +1,5 @@
 import { prepareSupplierSourcingRow } from "./supplier-sourcing-selection";
+import { purchaseReceiveSelectionSchema, type PurchaseReceiveSelection } from "@shared/procurement/purchase-receive-selection";
 import type { SupplierSelectionEvidence } from "@shared/procurement/supplier-sourcing";
 import { projectReplacementForecast, forecastMicros } from "@shared/procurement/purchase-replacement-forecast";
 import { supplierBundleTermsSchema, type SupplierBundleTerms } from "@shared/procurement/supplier-bundle";
@@ -166,6 +167,7 @@ export interface PurchasingRecommendationRawRow {
   supplier_selection?: SupplierSelectionEvidence;
   product_id: number | string;
   variant_id?: number | string | null;
+  receive_variant_selection?: unknown;
   base_sku?: string | null;
   product_name?: string | null;
   product_category?: string | null;
@@ -304,6 +306,7 @@ export interface PurchasingRecommendationItem {
   recommendationId: string;
   productId: number;
   productVariantId?: number;
+  receiveVariantSelection?: PurchaseReceiveSelection;
   sku: string;
   productName: string;
   category: string | null;
@@ -1789,6 +1792,13 @@ function generatePurchasingRecommendationsCore(
     const meta = getMeta(options.productMetaById, productId);
     const productPolicy = productPolicies.get(productId);
     const productVariantId = row.variant_id == null ? undefined : asNumber(row.variant_id);
+    // Old read/fixture contracts remain readable, but automatic owners require
+    // the explicit versioned capture before they may create new work.
+    const receiveVariantSelection = row.receive_variant_selection === undefined
+      ? undefined : purchaseReceiveSelectionSchema.parse(row.receive_variant_selection);
+    if (receiveVariantSelection && receiveVariantSelection.selectedVariantId !== (productVariantId ?? null)) {
+      throw new RangeError(`Product ${productId} receive selection does not match its captured variant`);
+    }
     const totalOnHand = asNumber(row.total_pieces);
     const totalReserved = asNumber(row.total_reserved_pieces);
     const demandForecast = buildPurchasingDemandForecastBasis({
@@ -2143,6 +2153,12 @@ function generatePurchasingRecommendationsCore(
       automationMinimumOrderCount: hasExplicitForecastPolicy ? forecastPolicy.automationMinimumOrderCount : 0,
       automationMinimumActiveDays: hasExplicitForecastPolicy ? forecastPolicy.automationMinimumActiveDays : 0,
     });
+    if (receiveVariantSelection && receiveVariantSelection.candidateCount > 1) {
+      // Keep the cause visible even when no demand or supplier is available.
+      qualityControls.unshift({ area: "receive_configuration", severity: "block",
+        code: "ambiguous_receive_configuration", label: "Choose a receiving unit",
+        detail: `${receiveVariantSelection.candidateCount} active receiving configurations are possible. Automatic drafting is held until product setup is resolved. A manual purchase can explicitly choose the receiving unit.` });
+    }
     if (supplyTiming.reviewRequired) {
       qualityControls.push({ area: "inbound_supply", severity: "block", code: supplyTiming.signal,
         label: supplyTiming.signal === "unverified_receipts" ? "Receipt quantities need review" : "Inbound arrival coverage needs review", detail: supplyTiming.detail });
@@ -2199,6 +2215,7 @@ function generatePurchasingRecommendationsCore(
       recommendationId: `${productId}:${productVariantId ?? "product"}:${lookbackDays}`,
       productId,
       productVariantId,
+      ...(receiveVariantSelection ? { receiveVariantSelection } : {}),
       sku: row.base_sku || row.product_name || `product-${productId}`,
       productName: row.product_name || row.base_sku || `Product ${productId}`,
       category: normalizeProductCategory(row.product_category),
