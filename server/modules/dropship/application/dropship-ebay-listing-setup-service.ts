@@ -117,6 +117,14 @@ export class DropshipEbayListingSetupService {
     logger: DropshipLogger;
   }) {}
 
+  /** Saved selections are readable independently of live provider availability.
+   * Never use this display-only read for mutation or publication validation. */
+  async getSavedSelectionForMember(memberId: string, storeConnectionId: number): Promise<DropshipEbayListingSetupSelection> {
+    const current = await this.deps.listingConfig.getForMember(memberId, storeConnectionId);
+    assertEbayStore(current.storeConnection.platform, storeConnectionId);
+    return readSelection(current.config);
+  }
+
   async getForMember(
     memberId: string,
     storeConnectionId: number,

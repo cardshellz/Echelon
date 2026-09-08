@@ -5,7 +5,9 @@ import { config } from "dotenv";
 import pg, { type Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { PgDropshipEbayListingPolicyOverrideRepository } from "../../infrastructure/dropship-ebay-listing-policy-override.repository";
-import type { ReplaceDropshipEbayListingPoliciesRepositoryInput } from "../../application/dropship-ebay-listing-policy-override-service";
+import { DropshipEbayListingPolicyOverrideService, type ReplaceDropshipEbayListingPoliciesRepositoryInput } from "../../application/dropship-ebay-listing-policy-override-service";
+import type { DropshipVendorProvisioningService } from "../../application/dropship-vendor-provisioning-service";
+import { DropshipError } from "../../domain/errors";
 
 vi.mock("../../../../db", () => ({ pool: {} }));
 config({ path: resolve(process.cwd(), ".env.test") });
@@ -86,6 +88,30 @@ describeDatabase.sequential("bulk eBay listing policy PostgreSQL guarantees", ()
     const audits = await pool!.query(qualify("SELECT * FROM dropship.dropship_audit_events ORDER BY id"));
     return { assignments, revisions: revisions.rows, audits: audits.rows };
   }
+
+  it("reads persisted assignments during a provider outage without changing revisions or audit", async () => {
+    await repository.replaceAssignments(request("saved-outage"));
+    const before = await state();
+    const listingSetup = {
+      getSavedSelectionForMember: vi.fn(async () => ({ merchantLocationKey: "managed", fulfillmentPolicyId: "default-ground", returnPolicyId: "returns", paymentPolicyId: "payments" })),
+      getForMember: vi.fn(async () => { throw new DropshipError("DROPSHIP_EBAY_LISTING_SETUP_UNAVAILABLE", "Provider down."); }),
+    };
+    const service = new DropshipEbayListingPolicyOverrideService({ repository, listingSetup,
+      vendorProvisioning: { provisionForMember: vi.fn(async () => ({ vendor: { vendorId: 10 } })) } as unknown as DropshipVendorProvisioningService,
+      clock: { now: () => now }, logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    });
+    const saved = await service.listSavedForMember("member-10", { storeConnectionId: 44 });
+    expect(saved.verification).toBe("not_checked");
+    expect(saved.defaults.fulfillmentPolicyId).toBe("default-ground");
+    expect(saved.assignments.map((row) => row.productVariantId)).toEqual([501, 502]);
+    expect(listingSetup.getForMember).not.toHaveBeenCalled();
+    await expect(service.replaceManyForMember("member-10", { storeConnectionId: 44,
+      assignments: request("blocked-outage").assignments, idempotencyKey: "blocked-outage" }))
+      .rejects.toMatchObject({ code: "DROPSHIP_EBAY_LISTING_SETUP_UNAVAILABLE" });
+    await expect(service.listSavedForMember("member-10", { storeConnectionId: 45 }))
+      .rejects.toMatchObject({ code: "DROPSHIP_STORE_CONNECTION_REQUIRED" });
+    expect(await state()).toEqual(before);
+  });
 
   it("commits all assignments with immutable per-row revisions and before/after audit", async () => {
     const result = await repository.replaceAssignments(request("bulk-commit"));

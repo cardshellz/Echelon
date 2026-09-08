@@ -110,6 +110,8 @@ function publicDropshipEbayListingSetupErrorContext(
     "resource",
     "status",
     "providerErrorIds",
+    "diagnosticReference",
+    "attempts",
     "retryable",
     "invalidFields",
     "issues",

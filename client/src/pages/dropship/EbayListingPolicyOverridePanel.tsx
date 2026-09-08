@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -6,7 +6,8 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { EBAY_POLICY_FIELDS, effectiveEbayPolicies } from "@/lib/dropship-ebay-policy-assignment";
-import { ebayListingPolicyQueryKey } from "@/lib/dropship-ebay-listing-query-sync";
+import { ebayListingPolicyQueryKey, ebayListingSetupQueryOptions, refreshEbayListingConfiguration } from "@/lib/dropship-ebay-listing-query-sync";
+import { ebaySavedListingPoliciesSchema, type EbaySavedListingPolicies } from "@shared/dropship/ebay-saved-listing-policies";
 import { EBAY_POLICY_PAGE_SIZE, paginateEbayPolicyRows, summarizeEbayListingPolicy } from "@/lib/dropship-ebay-policy-view";
 import { MAX_EBAY_POLICY_BULK_ASSIGNMENTS } from "@shared/dropship-ebay-policy-limits";
 import { EbayListingPolicyBulkDialog } from "./EbayListingPolicyBulkDialog";
@@ -29,14 +30,31 @@ export function EbayListingPolicyOverridePanel({ onConfigurationChange, rows, st
 }) {
   const queryClient = useQueryClient();
   const queryKey = ebayListingPolicyQueryKey(storeConnectionId);
-  const policyQuery = useQuery<DropshipEbayListingPolicyOverrideResponse>({
+  const policyQuery = useQuery<EbaySavedListingPolicies>({
     queryKey,
-    queryFn: () => fetchJson<DropshipEbayListingPolicyOverrideResponse>(
-      `/api/dropship/ebay/listing-policy-overrides/${storeConnectionId}`,
-    ),
+    queryFn: async ({ signal }) => {
+      const parsed = ebaySavedListingPoliciesSchema.safeParse(await fetchJson<unknown>(
+        `/api/dropship/ebay/listing-policy-overrides/${storeConnectionId}/saved`, { signal }));
+      if (!parsed.success) throw new Error("Saved listing policies could not be read safely. Refresh policies to try again.");
+      const result = parsed.data;
+      if (result.storeConnectionId !== storeConnectionId) throw new Error("Saved policies did not match the selected store.");
+      return result;
+    },
     enabled: Number.isInteger(storeConnectionId) && storeConnectionId > 0,
     staleTime: 60_000,
   });
+  const setupQuery = useQuery(ebayListingSetupQueryOptions(storeConnectionId));
+  const policyData: DropshipEbayListingPolicyOverrideResponse | undefined = policyQuery.data ? {
+    ...policyQuery.data,
+    options: setupQuery.data?.options ?? { fulfillmentPolicies: [], returnPolicies: [], paymentPolicies: [] },
+  } : undefined;
+  const verificationAvailable = setupQuery.isSuccess && !setupQuery.isFetching && policyQuery.isSuccess && !policyQuery.isFetching;
+  const configurationChangeRef = useRef(onConfigurationChange);
+  configurationChangeRef.current = onConfigurationChange;
+  useEffect(() => {
+    // A failed verification invalidates previously reviewed publication evidence.
+    if (setupQuery.error) configurationChangeRef.current();
+  }, [setupQuery.error]);
   const [search, setSearch] = useState("");
   const [fulfillmentFilter, setFulfillmentFilter] = useState("__all__");
   const [page, setPage] = useState(1);
@@ -76,7 +94,7 @@ export function EbayListingPolicyOverridePanel({ onConfigurationChange, rows, st
     setRefreshError("");
     setSaveMessage("");
     try {
-      await refreshAssignments();
+      await refreshEbayListingConfiguration(queryClient, storeConnectionId);
       onConfigurationChange();
       setSaveMessage("Policies refreshed. Preview listings to use the current policies.");
     } catch (caught) {
@@ -101,8 +119,8 @@ export function EbayListingPolicyOverridePanel({ onConfigurationChange, rows, st
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <Badge variant="outline">{rows.length} selected for listing</Badge>
-            <Button size="sm" variant="outline" disabled={refreshPending || policyQuery.isFetching || editor !== null}
-              onClick={() => void refreshPolicies()}>{refreshPending || policyQuery.isFetching ? "Refreshing policies…" : "Refresh policies"}</Button>
+            <Button size="sm" variant="outline" disabled={refreshPending || policyQuery.isFetching || setupQuery.isFetching || editor !== null}
+              onClick={() => void refreshPolicies()}>{refreshPending || policyQuery.isFetching || setupQuery.isFetching ? "Refreshing policies…" : "Refresh policies"}</Button>
           </div>
         </div>
       </div>
@@ -114,12 +132,21 @@ export function EbayListingPolicyOverridePanel({ onConfigurationChange, rows, st
           {policyQuery.data && <p className="mt-1">The values below are from the last successful load.</p>}
         </div>
       )}
+      {setupQuery.error && <>
+        <ListingSetupError error={setupQuery.error} storeConnectionId={storeConnectionId} storeName={storeName} />
+        {policyData && <p role="status" className="mx-4 mb-3 text-sm text-amber-800">
+          Saved policies are shown below. Live eBay verification is unavailable; policy changes and publishing remain blocked.
+        </p>}
+      </>}
+      {!setupQuery.error && !policyQuery.error && !verificationAvailable && policyData && <p role="status" className="m-4 text-sm text-zinc-500">
+        Saved policies loaded. Checking current eBay options…
+      </p>}
       {saveMessage && <div role="status" className="m-3 text-sm text-emerald-800">{saveMessage}</div>}
       {policyQuery.isLoading ? (
         <div className="grid gap-3 p-4 md:grid-cols-3"><Skeleton className="h-16 w-full" /><Skeleton className="h-16 w-full" /><Skeleton className="h-16 w-full" /></div>
       ) : rows.length === 0 ? (
         <div className="p-4 text-sm text-zinc-500">Select catalog items to configure listing-level policies.</div>
-      ) : policyQuery.data ? (
+      ) : policyData ? (
         <>
           <div className="space-y-3 border-b border-zinc-200 p-3">
             <div className="grid gap-2 sm:grid-cols-2">
@@ -130,7 +157,7 @@ export function EbayListingPolicyOverridePanel({ onConfigurationChange, rows, st
                 onValueChange={(value) => { setFulfillmentFilter(value); setPage(1); }} options={[
                   { id: "__all__", name: "All fulfillment policies" },
                   { id: "__missing__", name: "Missing fulfillment policy" },
-                  ...policyQuery.data.options.fulfillmentPolicies,
+                  ...policyData.options.fulfillmentPolicies,
                 ]} />
             </div>
             <div className="flex flex-wrap items-center justify-between gap-2">
@@ -138,7 +165,7 @@ export function EbayListingPolicyOverridePanel({ onConfigurationChange, rows, st
               <div className="flex gap-2">
                 <Button size="sm" variant="outline" disabled={checkedRows.length === 0 || editor !== null}
                   onClick={() => setCheckedIds(new Set())}>Clear checks</Button>
-                <Button size="sm" disabled={checkedRows.length === 0 || checkedRows.length > MAX_EBAY_POLICY_BULK_ASSIGNMENTS || editor !== null || refreshPending}
+                <Button size="sm" disabled={!verificationAvailable || checkedRows.length === 0 || checkedRows.length > MAX_EBAY_POLICY_BULK_ASSIGNMENTS || editor !== null || refreshPending}
                   onClick={() => { setSaveMessage(""); setEditor({ productVariantIds: checkedRows.map((row) => row.productVariantId) }); }}>
                   Assign policies ({checkedRows.length})
                 </Button>
@@ -190,14 +217,14 @@ export function EbayListingPolicyOverridePanel({ onConfigurationChange, rows, st
                         <div className="truncate text-xs text-zinc-500" title={`${row.variantName} · ${row.variantSku}`}>{row.variantName} · {row.variantSku}</div>
                       </TableCell>
                       {EBAY_POLICY_FIELDS.map((field) => {
-                        const summary = summarizeEbayListingPolicy(policyQuery.data, assignment, field);
+                        const summary = summarizeEbayListingPolicy(policyData, assignment, field, setupQuery.isSuccess);
                         return <TableCell key={field}>
                           <div className={`truncate text-sm ${summary.needsAttention ? "text-amber-800" : ""}`} title={summary.name}>{summary.name}</div>
                           <div className={`text-xs ${summary.source === "Override" ? "text-violet-700" : "text-zinc-500"}`}>{summary.source}</div>
                         </TableCell>;
                       })}
                       <TableCell className="text-right">
-                        <Button size="sm" variant="outline" aria-label={`Edit policies for ${row.variantSku}`} disabled={editor !== null || refreshPending}
+                        <Button size="sm" variant="outline" aria-label={`Edit policies for ${row.variantSku}`} disabled={!verificationAvailable || editor !== null || refreshPending}
                           onClick={() => { setSaveMessage(""); setEditor({ productVariantIds: [row.productVariantId], listingLabel: `${row.productName} · ${row.variantSku}` }); }}>
                           Edit policies
                         </Button>
@@ -215,7 +242,7 @@ export function EbayListingPolicyOverridePanel({ onConfigurationChange, rows, st
               <Button size="sm" variant="outline" disabled={currentPage.page === currentPage.pageCount || editor !== null} onClick={() => setPage(currentPage.page + 1)}>Next</Button>
             </nav>
           </div>
-          {editor && <EbayListingPolicyBulkDialog data={policyQuery.data} productVariantIds={editor.productVariantIds} listingLabel={editor.listingLabel}
+          {editor && <EbayListingPolicyBulkDialog data={policyData} verificationAvailable={verificationAvailable} productVariantIds={editor.productVariantIds} listingLabel={editor.listingLabel}
             onClose={() => setEditor(null)} onConflict={refreshAssignments} onSaved={async (count) => {
               onConfigurationChange();
               await refreshAssignments();
