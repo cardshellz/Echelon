@@ -1658,6 +1658,7 @@ export function createFulfillmentPushService(
         provider: "ebay",
         fulfillmentId,
         channelFulfillmentCommandId: command.commandId,
+        ...(result.quantityEvidenceSource ? { quantityEvidenceSource: result.quantityEvidenceSource } : {}),
         channelId: account.channelId,
         externalAccountId: account.externalAccountId,
         physicalShipmentId: command.physicalShipmentId,

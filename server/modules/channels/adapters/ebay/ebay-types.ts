@@ -300,13 +300,15 @@ export interface EbayShippingFulfillmentRequest {
 
 export interface EbayShippingFulfillmentResponse {
   fulfillmentId: string;
+  /** Corroborated provider evidence, never an assumed quantity default. */
+  quantityEvidenceSource?: "provider_fulfilled_whole_order";
 }
 
 export interface EbayShippingFulfillmentRecord {
   fulfillmentId: string;
   lineItems: Array<{
     lineItemId: string;
-    quantity: number;
+    quantity?: number;
   }>;
   shippedDate?: string;
   shippingCarrierCode?: string;
