@@ -29,7 +29,7 @@ export function createShopifyFulfillmentClient(
       }
       if (!response.ok) {
         throw new ChannelFulfillmentProviderError("SHOPIFY_FULFILLMENT_HTTP_REJECTED", `Shopify fulfillment returned HTTP ${response.status}`,
-          response.status === 429 || response.status >= 500 ? "transient" : "permanent");
+          response.status === 408 || response.status === 429 || response.status >= 500 ? "transient" : "permanent");
       }
       let payload: unknown;
       try { payload = await response.json(); } catch {

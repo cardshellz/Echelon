@@ -42,6 +42,7 @@ describe("connection-scoped Shopify fulfillment transport", () => {
     { status: 302, failureClass: "permanent" },
     { status: 401, failureClass: "permanent" },
     { status: 403, failureClass: "permanent" },
+    { status: 408, failureClass: "transient" },
     { status: 429, failureClass: "transient" },
     { status: 500, failureClass: "transient" },
     { status: 503, failureClass: "transient" },

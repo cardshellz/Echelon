@@ -3,7 +3,7 @@ import type { Channel } from "@shared/schema";
 import { ChannelIdentityService } from "../../channel-identity.service";
 import { createChannelFulfillmentProviderClients, createFulfillmentEbayAuth } from "../../channel-fulfillment-provider-clients.service";
 import type { ShopifyIdentityConnection } from "../../adapters/shopify-identity.reader";
-import { EbayApiClient } from "../../adapters/ebay/ebay-api.client";
+import { EbayFulfillmentIdempotencyConflictError } from "../../adapters/ebay/ebay-api.client";
 import { EbayProviderAccountIdentityConflictError, type EbayObservedProviderAccount } from "../../adapters/ebay/ebay-auth.service";
 import type { EbayShippingFulfillmentRequest } from "../../adapters/ebay/ebay-types";
 
@@ -199,7 +199,6 @@ describe("channel-owned eBay fulfillment accounts", () => {
 
     const selected = await h.clients.ebay(31);
     h.auth.getAccessToken.mockResolvedValue("changed-after-authorization");
-    expect(selected.client).toBeInstanceOf(EbayApiClient);
     await expect(selected.client.createShippingFulfillment("order-31", fulfillment())).resolves.toEqual({ fulfillmentId: "fulfillment-31" });
 
     expect(selected).toMatchObject({ channelId: 31, externalAccountId: "seller-31" });
@@ -210,6 +209,8 @@ describe("channel-owned eBay fulfillment accounts", () => {
     for (const [url, init] of fetchMock.mock.calls) {
       expect(url).toBe("https://api.ebay.com/sell/fulfillment/v1/order/order-31/shipping_fulfillment");
       expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer test-only-seller-31");
+      expect(init?.redirect).toBe("error");
+      expect(init?.signal).toBeInstanceOf(AbortSignal);
     }
     expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual(fulfillment());
     expect(h.identities.shopifyConnection).not.toHaveBeenCalled();
@@ -241,6 +242,161 @@ describe("channel-owned eBay fulfillment accounts", () => {
       ["https://api.ebay.com/sell/fulfillment/v1/order/order-31/shipping_fulfillment", "GET", "Bearer test-only-seller-31"],
       ["https://api.ebay.com/sell/fulfillment/v1/order/order-32/shipping_fulfillment", "GET", "Bearer test-only-seller-32"],
     ]);
+  });
+
+  it.each((["duplicate read", "create", "verification read"] as const).flatMap((stage) => [
+    { stage, status: 401, failureClass: "permanent" },
+    { stage, status: 403, failureClass: "permanent" },
+    { stage, status: 408, failureClass: "transient" },
+    { stage, status: 429, failureClass: "transient" },
+    { stage, status: 503, failureClass: "transient" },
+  ]))("sanitizes $stage HTTP $status before legacy formatting or durable retry", async ({ stage, status, failureClass }) => {
+    const h = harness();
+    h.channels.getChannelById.mockResolvedValue(channel(31, "ebay"));
+    const rejectedResponse = new Response("private-provider-body test-only-seller-31", { status });
+    const readBody = vi.spyOn(rejectedResponse, "text");
+    const request = vi.mocked(fetch);
+    if (stage !== "duplicate read") request.mockResolvedValueOnce(Response.json({ total: 0, fulfillments: [] }));
+    if (stage === "verification read") request.mockResolvedValueOnce(new Response(null, {
+      status: 201, headers: { Location: "https://api.ebay.com/sell/fulfillment/v1/order/order-31/shipping_fulfillment/fulfillment-31" },
+    }));
+    request.mockResolvedValueOnce(rejectedResponse);
+    const selected = await h.clients.ebay(31);
+    const error = await selected.client.createShippingFulfillment("order-31", fulfillment()).catch((cause: unknown) => cause);
+
+    expect(error).toMatchObject({ code: "EBAY_FULFILLMENT_HTTP_REJECTED", failureClass });
+    expect(String(error)).not.toContain("private-provider-body");
+    expect(JSON.stringify(error)).not.toContain("test-only-seller-31");
+    expect(readBody).not.toHaveBeenCalled();
+    expect(rejectedResponse.bodyUsed).toBe(false);
+    expect(request.mock.calls.map(([, init]) => init?.method)).toEqual(
+      stage === "duplicate read" ? ["GET"] : stage === "create" ? ["GET", "POST"] : ["GET", "POST", "GET"],
+    );
+  });
+
+  it("reconciles an ambiguous aborted POST by exact readback on retry without a second POST", async () => {
+    const h = harness();
+    h.channels.getChannelById.mockResolvedValue(channel(31, "ebay"));
+    const controller = new AbortController();
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(controller.signal);
+    const request = vi.mocked(fetch)
+      .mockResolvedValueOnce(Response.json({ total: 0, fulfillments: [] }))
+      .mockImplementationOnce(async (_url, init) => new Promise<Response>((_resolve, reject) => {
+        if (!init?.signal) throw new Error("Canonical fulfillment POST requires an abort signal");
+        init.signal.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+        controller.abort(new Error("private-provider-body test-only-seller-31"));
+      }))
+      .mockResolvedValueOnce(fulfillmentRead());
+    const selected = await h.clients.ebay(31);
+    const error = await selected.client.createShippingFulfillment("order-31", fulfillment()).catch((cause: unknown) => cause);
+    expect(error).toMatchObject({ code: "EBAY_FULFILLMENT_TRANSPORT_FAILED", failureClass: "transient" });
+    expect(String(error)).not.toContain("test-only-seller-31");
+    expect(timeout.mock.calls).toEqual([[15_000], [15_000]]);
+    timeout.mockRestore();
+
+    await expect(selected.client.createShippingFulfillment("order-31", fulfillment())).resolves.toEqual({ fulfillmentId: "fulfillment-31" });
+    expect(request.mock.calls.map(([, init]) => init?.method)).toEqual(["GET", "POST", "GET"]);
+  });
+
+  it("sanitizes unexpected successful-body interpretation errors", async () => {
+    const h = harness();
+    h.channels.getChannelById.mockResolvedValue(channel(31, "ebay"));
+    const response = new Response(null, { status: 201 });
+    vi.spyOn(response, "text").mockRejectedValueOnce(new SyntaxError("private-provider-body test-only-seller-31"));
+    vi.mocked(fetch).mockResolvedValueOnce(Response.json({ total: 0, fulfillments: [] })).mockResolvedValueOnce(response);
+    const selected = await h.clients.ebay(31);
+    const error = await selected.client.createShippingFulfillment("order-31", fulfillment()).catch((cause: unknown) => cause);
+
+    expect(error).toMatchObject({ code: "EBAY_FULFILLMENT_RESPONSE_INVALID", failureClass: "transient" });
+    expect(String(error)).not.toContain("private-provider-body");
+    expect(JSON.stringify(error)).not.toContain("test-only-seller-31");
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    null, [], {}, { fulfillments: null }, { fulfillments: "unreadable" },
+    { fulfillments: [], total: "0" }, { fulfillments: [], total: -1 },
+    { fulfillments: [], total: 1 }, { fulfillments: [], total: 0.5 },
+    { fulfillments: [], next: "unread-page" },
+    { fulfillments: [null] }, { fulfillments: [{}] },
+    { fulfillments: [{ fulfillmentId: " " }] },
+  ])("refuses to infer absence from malformed or incomplete GET envelope %j", async (body) => {
+    const h = harness();
+    h.channels.getChannelById.mockResolvedValue(channel(31, "ebay"));
+    vi.mocked(fetch).mockResolvedValueOnce(Response.json(body));
+    const selected = await h.clients.ebay(31);
+    await expect(selected.client.createShippingFulfillment("order-31", fulfillment())).rejects.toMatchObject({
+      code: "EBAY_FULFILLMENT_READBACK_INVALID", failureClass: "transient",
+    });
+    expect(vi.mocked(fetch).mock.calls.map(([, init]) => init?.method)).toEqual(["GET"]);
+  });
+
+  it("does not POST when successful GET body is invalid JSON", async () => {
+    const h = harness();
+    h.channels.getChannelById.mockResolvedValue(channel(31, "ebay"));
+    vi.mocked(fetch).mockResolvedValueOnce(new Response("{private-provider-body test-only-seller-31"));
+    const selected = await h.clients.ebay(31);
+    const error = await selected.client.createShippingFulfillment("order-31", fulfillment()).catch((cause: unknown) => cause);
+    expect(error).toMatchObject({ code: "EBAY_FULFILLMENT_READBACK_INVALID", failureClass: "transient" });
+    expect(String(error)).not.toContain("private-provider-body");
+    expect(JSON.stringify(error)).not.toContain("test-only-seller-31");
+    expect(vi.mocked(fetch).mock.calls.map(([, init]) => init?.method)).toEqual(["GET"]);
+  });
+
+  it("does not interpret an aborted GET body as an empty fulfillment collection", async () => {
+    const h = harness();
+    h.channels.getChannelById.mockResolvedValue(channel(31, "ebay"));
+    const controller = new AbortController();
+    vi.spyOn(AbortSignal, "timeout").mockReturnValue(controller.signal);
+    let notifyBodyRead!: () => void;
+    const bodyReadStarted = new Promise<void>((resolve) => { notifyBodyRead = resolve; });
+    vi.mocked(fetch).mockImplementationOnce(async (_url, init) => {
+      if (!init?.signal) throw new Error("Canonical fulfillment GET requires an abort signal");
+      const signal = init.signal;
+      return new Response(new ReadableStream<Uint8Array>({
+        start(stream) { signal.addEventListener("abort", () => stream.error(signal.reason), { once: true }); },
+        pull() { notifyBodyRead(); },
+      }));
+    });
+    const selected = await h.clients.ebay(31);
+    const result = selected.client.createShippingFulfillment("order-31", fulfillment()).catch((cause: unknown) => cause);
+    await bodyReadStarted;
+    controller.abort(new Error("private-provider-body test-only-seller-31"));
+    const error = await result;
+    expect(error).toMatchObject({ code: "EBAY_FULFILLMENT_READBACK_INVALID", failureClass: "transient" });
+    expect(String(error)).not.toContain("test-only-seller-31");
+    expect(vi.mocked(fetch).mock.calls.map(([, init]) => init?.method)).toEqual(["GET"]);
+  });
+
+  it("accepts the documented full collection with omitted optional total", async () => {
+    const h = harness();
+    h.channels.getChannelById.mockResolvedValue(channel(31, "ebay"));
+    const request = vi.mocked(fetch)
+      .mockResolvedValueOnce(Response.json({ fulfillments: [] }))
+      .mockResolvedValueOnce(new Response(null, { status: 201, headers: {
+        Location: "https://api.ebay.com/sell/fulfillment/v1/order/order-31/shipping_fulfillment/fulfillment-31",
+      } }))
+      .mockResolvedValueOnce(Response.json({ fulfillments: [{
+        fulfillmentId: "fulfillment-31", shipmentTrackingNumber: "tracking-31",
+        lineItems: [{ lineItemId: "line-1", quantity: 2 }],
+      }] }));
+    const selected = await h.clients.ebay(31);
+    await expect(selected.client.createShippingFulfillment("order-31", fulfillment())).resolves.toEqual({ fulfillmentId: "fulfillment-31" });
+    expect(request.mock.calls.map(([, init]) => init?.method)).toEqual(["GET", "POST", "GET"]);
+  });
+
+  it("preserves a real duplicate-package quantity conflict for operator review", async () => {
+    const h = harness();
+    h.channels.getChannelById.mockResolvedValue(channel(31, "ebay"));
+    vi.mocked(fetch).mockResolvedValueOnce(Response.json({ total: 1, fulfillments: [{
+      fulfillmentId: "fulfillment-31", shipmentTrackingNumber: "tracking-31",
+      lineItems: [{ lineItemId: "line-1", quantity: 9 }],
+    }] }));
+    const selected = await h.clients.ebay(31);
+    const error = await selected.client.createShippingFulfillment("order-31", fulfillment()).catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(EbayFulfillmentIdempotencyConflictError);
+    expect(error).toMatchObject({ code: "ebay_fulfillment_idempotency_conflict" });
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 
   it("uses the verified auth owner's sandbox environment for fulfillment reads", async () => {

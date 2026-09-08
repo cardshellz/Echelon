@@ -4,10 +4,10 @@ import type { IChannelStorage } from "./channels.storage";
 import { ChannelIdentityError } from "./channel-identity.domain";
 import { ChannelFulfillmentProviderError } from "./channel-fulfillment-provider.error";
 import { createShopifyFulfillmentClient } from "./adapters/shopify-fulfillment.client";
-import { EbayApiClient } from "./adapters/ebay/ebay-api.client";
+import { EbayApiClient, EbayFulfillmentIdempotencyConflictError } from "./adapters/ebay/ebay-api.client";
 import { createEbayAuthConfig, EbayAuthService, EbayProviderAccountIdentityConflictError } from "./adapters/ebay/ebay-auth.service";
 
-const AUTHORIZATION_TIMEOUT_MS = 15_000;
+const EBAY_REQUEST_TIMEOUT_MS = 15_000;
 
 export interface ShopifyFulfillmentAccount {
   readonly channelId: number;
@@ -30,6 +30,7 @@ export function createChannelFulfillmentProviderClients(dependencies: {
   identities: Pick<ChannelIdentityService, "shopifyConnection">;
   ebayAuth: () => Pick<EbayAuthService, "getVerifiedProviderAccount" | "getAccessToken" | "observeProviderAccount" | "getEnvironment">;
   shopifyRequest?: typeof fetch;
+  ebayRequest?: typeof fetch;
 }): ChannelFulfillmentProviderClients {
   async function requireChannel(channelId: number, provider: string): Promise<void> {
     if (!Number.isInteger(channelId) || channelId <= 0 || channelId > 2_147_483_647) {
@@ -85,8 +86,21 @@ export function createChannelFulfillmentProviderClients(dependencies: {
       const client = new EbayApiClient({ async getAccessToken(requestedChannelId) {
         if (requestedChannelId !== channelId) throw new ChannelFulfillmentProviderError("EBAY_FULFILLMENT_CHANNEL_MISMATCH", "Pinned eBay authorization belongs to another channel");
         return token;
-      } }, channelId, auth.getEnvironment());
-      return Object.freeze({ channelId, externalAccountId: observed.externalAccountId, client });
+      } }, channelId, auth.getEnvironment(), {
+        request: createBoundedEbayRequest(dependencies.ebayRequest ?? fetch, "fulfillment"),
+        strictFulfillmentReadback: true,
+      });
+      // Successful HTTP envelopes can still fail while being interpreted by the
+      // legacy client. Preserve domain conflicts, never persist raw body errors.
+      const safeClient: Pick<EbayApiClient, "createShippingFulfillment"> = Object.freeze({
+        async createShippingFulfillment(orderId, fulfillment) {
+          try { return await client.createShippingFulfillment(orderId, fulfillment); } catch (error) {
+            if (error instanceof ChannelFulfillmentProviderError || error instanceof EbayFulfillmentIdempotencyConflictError) throw error;
+            throw new ChannelFulfillmentProviderError("EBAY_FULFILLMENT_RESPONSE_INVALID", "eBay fulfillment could not be verified", "transient");
+          }
+        },
+      });
+      return Object.freeze({ channelId, externalAccountId: observed.externalAccountId, client: safeClient });
     },
   };
 }
@@ -100,19 +114,26 @@ export function createFulfillmentEbayAuth(
   try { config = createEbayAuthConfig(); } catch {
     throw new ChannelFulfillmentProviderError("EBAY_FULFILLMENT_CONFIG_MISSING", "eBay fulfillment OAuth configuration is unavailable");
   }
-  return new EbayAuthService(db, config, { fetch: async (input, init) => {
+  return new EbayAuthService(db, config, { fetch: createBoundedEbayRequest(request, "authorization") });
+}
+
+function createBoundedEbayRequest(request: typeof fetch, scope: "authorization" | "fulfillment"): typeof fetch {
+  const description = scope === "authorization" ? "eBay account authorization" : "eBay fulfillment";
+  const transportCode = scope === "authorization" ? "EBAY_FULFILLMENT_AUTHORIZATION_FAILED" : "EBAY_FULFILLMENT_TRANSPORT_FAILED";
+  const httpCode = scope === "authorization" ? "EBAY_FULFILLMENT_AUTHORIZATION_REJECTED" : "EBAY_FULFILLMENT_HTTP_REJECTED";
+  return async (input, init) => {
     let response: Response;
     try {
       response = await request(input, {
-        ...init, redirect: "error", signal: AbortSignal.timeout(AUTHORIZATION_TIMEOUT_MS),
+        ...init, redirect: "error", signal: AbortSignal.timeout(EBAY_REQUEST_TIMEOUT_MS),
       });
     } catch {
-      throw new ChannelFulfillmentProviderError("EBAY_FULFILLMENT_AUTHORIZATION_FAILED", "eBay account authorization did not complete", "transient");
+      throw new ChannelFulfillmentProviderError(transportCode, `${description} did not complete`, "transient");
     }
     if (!response.ok) {
-      throw new ChannelFulfillmentProviderError("EBAY_FULFILLMENT_AUTHORIZATION_REJECTED", `eBay account authorization returned HTTP ${response.status}`,
+      throw new ChannelFulfillmentProviderError(httpCode, `${description} returned HTTP ${response.status}`,
         response.status === 408 || response.status === 429 || response.status >= 500 ? "transient" : "permanent");
     }
     return response;
-  } });
+  };
 }

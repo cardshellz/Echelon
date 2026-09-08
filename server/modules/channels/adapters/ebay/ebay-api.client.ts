@@ -10,6 +10,7 @@
  */
 
 import type { EbayAuthService } from "./ebay-auth.service";
+import { ChannelFulfillmentProviderError } from "../../channel-fulfillment-provider.error";
 import type {
   EbayInventoryItem,
   EbayOffer,
@@ -63,6 +64,11 @@ export class EbayFulfillmentIdempotencyConflictError extends Error {
 
 type HttpMethod = "GET" | "POST" | "PUT" | "DELETE";
 
+export interface EbayApiClientOptions {
+  request?: typeof fetch;
+  strictFulfillmentReadback?: boolean;
+}
+
 interface RequestOptions {
   method: HttpMethod;
   path: string;
@@ -115,6 +121,7 @@ export class EbayApiClient {
     private readonly authService: Pick<EbayAuthService, "getAccessToken">,
     private readonly channelId: number,
     private readonly environment: "sandbox" | "production" = "production",
+    private readonly options: EbayApiClientOptions = {},
   ) {
     this.baseUrl = API_BASE_URLS[environment];
     this.isDryRun = process.env.DRY_RUN === "true";
@@ -434,7 +441,7 @@ export class EbayApiClient {
   ): Promise<EbayShippingFulfillmentResponse> {
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       try {
-        const response = await fetch(url, {
+        const response = await (this.options.request ?? fetch)(url, {
           method: "POST",
           headers: {
             Authorization: `Bearer ${accessToken}`,
@@ -564,7 +571,7 @@ export class EbayApiClient {
     }
     const expectedLineSignature = fulfillmentLineSignature(expectedLines);
     const path = buildEbayShippingFulfillmentPath(orderId);
-    const response = await fetch(`${this.baseUrl}${path}`, {
+    const response = await (this.options.request ?? fetch)(`${this.baseUrl}${path}`, {
       method: "GET",
       headers: {
         Authorization: `Bearer ${accessToken}`,
@@ -582,7 +589,27 @@ export class EbayApiClient {
       );
     }
 
-    const body = await response.json().catch(() => null);
+    let body: any;
+    try { body = await response.json(); } catch {
+      if (this.options.strictFulfillmentReadback) {
+        throw new ChannelFulfillmentProviderError("EBAY_FULFILLMENT_READBACK_INVALID", "eBay fulfillment readback did not provide complete JSON", "transient");
+      }
+      body = null;
+    }
+    if (this.options.strictFulfillmentReadback && (
+      !body || typeof body !== "object" || Array.isArray(body)
+      || !Array.isArray(body.fulfillments)
+      || (body.total !== undefined && (!Number.isSafeInteger(body.total) || body.total < 0 || body.total !== body.fulfillments.length))
+      || (body.next !== undefined && body.next !== null && body.next !== "")
+      || body.fulfillments.some((item: unknown) => !item || typeof item !== "object" || Array.isArray(item)
+        || !("fulfillmentId" in item) || typeof item.fulfillmentId !== "string" || !item.fulfillmentId.trim())
+    )) {
+      // getShippingFulfillments returns all order fulfillments; total is optional.
+      // https://developer.ebay.com/api-docs/sell/static/orders/managing-fulfillments.html
+      // Canonical retries require the explicit full-collection array, not an
+      // unavailable/incomplete read interpreted as permission for another POST.
+      throw new ChannelFulfillmentProviderError("EBAY_FULFILLMENT_READBACK_INVALID", "eBay fulfillment readback completeness could not be verified", "transient");
+    }
     const fulfillments: any[] = Array.isArray(body?.fulfillments)
       ? body.fulfillments
       : [];
@@ -725,7 +752,7 @@ export class EbayApiClient {
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       try {
-        const response = await fetch(url, {
+        const response = await (this.options.request ?? fetch)(url, {
           method,
           headers: {
             Authorization: `Bearer ${accessToken}`,
