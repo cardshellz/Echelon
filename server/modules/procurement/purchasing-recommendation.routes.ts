@@ -1883,25 +1883,29 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
       // Also fetch the highest-level variant (ordering UOM) for rounding order quantities
       const rawRows = await storage.getReorderAnalysisData(lookbackDays);
       const settings = (await storage.getAutoDraftSettings()) as AutoDraftRecommendationSettings;
-      const approvalPolicySettings: AutoDraftRecommendationSettings = {
+      const analysisSettings: AutoDraftRecommendationSettings = {
         autoDraftMode: settings.autoDraftMode,
         approvalPolicy: settings.approvalPolicy,
         candidateScoreStrongThreshold: settings.candidateScoreStrongThreshold,
         candidateScoreReviewThreshold: settings.candidateScoreReviewThreshold,
         forecastPolicy: settings.forecastPolicy,
+        // Manual browsing keeps its existing filters while sharing the calculation
+        // policy and audited revision used by persisted recommendation snapshots.
+        planningPolicy: settings.planningPolicy,
+        planningPolicyRevision: settings.planningPolicyRevision,
       };
       const context = await loadPurchasingRecommendationContext();
       const recommendationResult = generatePurchasingRecommendations({
         rows: rawRows as PurchasingRecommendationRawRow[],
         lookbackDays,
-        autoDraftSettings: approvalPolicySettings,
+        autoDraftSettings: analysisSettings,
         ...context,
       });
 
       res.json({
         items: recommendationResult.items,
         summary: recommendationResult.summary,
-        approvalPolicyImpact: buildApprovalPolicyImpact(recommendationResult, approvalPolicySettings),
+        approvalPolicyImpact: buildApprovalPolicyImpact(recommendationResult, analysisSettings),
         skippedItems: recommendationResult.skippedItems.map(buildReorderAnalysisSkippedResponseItem),
         lookbackDays,
       });
