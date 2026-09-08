@@ -1,3 +1,5 @@
+import { cutoverShipmentSchemaFixtureSql } from "./inventory-cutover-shipment-schema.fixture";
+
 /** Reduced owner-query fixture. Actual 0640/0642/0647/0649/233 DDL is applied by the suite. */
 export const reconstructionDatabaseFixtureSql = `
 CREATE SCHEMA inventory; CREATE SCHEMA wms; CREATE SCHEMA oms; CREATE SCHEMA warehouse; CREATE SCHEMA catalog;
@@ -6,11 +8,7 @@ CREATE TABLE warehouse.warehouse_locations(id integer PRIMARY KEY, warehouse_id 
 CREATE TABLE catalog.product_variants(id integer PRIMARY KEY,product_id integer,sku text,is_active boolean,requires_shipping boolean,track_inventory boolean,sales_eligibility text);
 CREATE TABLE wms.orders(id integer PRIMARY KEY,warehouse_id integer,warehouse_status text,on_hold integer,channel_id integer,source text,external_order_id text,oms_fulfillment_order_id text,fulfillment_partition_key text);
 CREATE TABLE wms.order_items(id integer PRIMARY KEY,order_id integer,oms_order_line_id bigint,source_item_id text,sku text,product_id integer,quantity integer,picked_quantity integer,fulfilled_quantity integer,status text,on_hold boolean,requires_shipping integer,location text,short_reason text);
-CREATE TABLE wms.outbound_shipments(id integer PRIMARY KEY,order_id integer,status text,held boolean,requires_review boolean DEFAULT false);
-CREATE TABLE wms.outbound_shipment_items(id integer PRIMARY KEY,shipment_id integer,order_item_id integer,replacement_for_order_item_id integer,correction_for_shipment_item_id integer,product_variant_id integer,qty integer,shipment_item_purpose text,from_location_id integer);
-CREATE TABLE wms.physical_shipments(id bigint PRIMARY KEY,status text);
-CREATE TABLE wms.physical_shipment_items(id bigint PRIMARY KEY,physical_shipment_id bigint,wms_order_item_id integer,replacement_for_order_item_id integer,legacy_wms_shipment_item_id integer,package_allocation_entry_id bigint,product_variant_id integer,sku text,quantity_shipped integer,shipment_item_purpose text);
-CREATE TABLE wms.physical_shipment_item_quantity_adjustments(physical_shipment_item_id bigint PRIMARY KEY,quantity_delta integer);
+${cutoverShipmentSchemaFixtureSql}
 CREATE TABLE wms.order_build_demands(id integer PRIMARY KEY,order_id integer,order_item_id integer,target_variant_id integer,root_build_order_id integer,status text,requested_qty integer,promised_qty integer);
 CREATE TABLE oms.oms_orders(id bigint PRIMARY KEY,status text);
 CREATE TABLE oms.oms_order_lines(id bigint PRIMARY KEY,order_id bigint,product_variant_id integer,sku text,requires_shipping boolean,quantity integer,authority_fulfillable_quantity integer,wms_materialized_quantity integer,authorization_status text);
