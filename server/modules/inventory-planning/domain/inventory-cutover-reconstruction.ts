@@ -254,10 +254,16 @@ export function planCutoverReconstruction(raw: CutoverReconstructionEvidence): C
   for (const cost of evidence.costs) if (!allocatedCostIds.has(cost.id) && lines.has(cost.orderItemId)) {
     block("ORIGINAL_PICK_COST_UNATTRIBUTED", `cost:${cost.id}`, "Extant order COGS cannot be attributed to the exact outstanding picked level/lot.");
   }
+  // Outbound review is an orthogonal flag, captured by the WMS owner census;
+  // it is not a value in wms.shipment_status. Keep that evidence separate from
+  // OMS receipt processing states and physical-package lifecycle states.
+  const reviewedShipmentIds = new Set(evidence.shipmentReviewEvidence
+    .filter((review) => review.kind === "outbound_shipment_review").map((review) => review.id));
   for (const source of evidence.sourceItems) {
     const item = source.orderItemId == null ? undefined : items.get(source.orderItemId);
     const hasResidual = source.orderItemId != null && lines.has(source.orderItemId);
-    const cleanIntention = item && source.headerOrderId === item.orderId && source.purpose === "ordered"
+    const requiresReview = reviewedShipmentIds.has(String(source.shipmentId));
+    const cleanIntention = item && !requiresReview && source.headerOrderId === item.orderId && source.purpose === "customer_fulfillment"
       && source.quantity > 0 && ["planned", "queued", "labeled"].includes(source.shipmentStatus ?? "")
       && source.replacementForOrderItemId == null && source.correctionForShipmentItemId == null
       && source.productVariantId === lines.get(item.id)?.targetVariantId;
@@ -268,13 +274,13 @@ export function planCutoverReconstruction(raw: CutoverReconstructionEvidence): C
       && !lines.get(item.id)!.allocations.some((allocation) => allocation.warehouseLocationId === source.fromLocationId && BigInt(allocation.pickedQty) > BigInt(0))) {
       block("SHIPMENT_SOURCE_PICKED_BIN_CONFLICT", `source:${source.id}`, "Persisted source bin does not match original picked custody; do not overwrite immutable shipment evidence at cutover.");
     }
-    if (!cleanIntention && (hasResidual || !item || ["requires_review", "ignored"].includes(source.shipmentStatus ?? ""))) {
+    if (!cleanIntention && (hasResidual || !item || requiresReview)) {
       block("SHIPMENT_SOURCE_REQUIRES_REVIEW", `source:${source.id}`, "Shipment membership/status/purpose cannot be treated as an ordinary unshipped intention.");
     }
   }
   for (const physical of evidence.physicalItems) {
     if (physical.orderItemId === null || lines.has(physical.orderItemId)
-      || ["requires_review", "ignored"].includes(physical.packageStatus ?? "")) {
+      || physical.packageStatus === "review") {
       block("PHYSICAL_SHIPMENT_REQUIRES_REVIEW", `physical:${physical.id}`, "Physical shipment/adjustment evidence must be reconciled before adopting remaining picked custody.");
     }
   }

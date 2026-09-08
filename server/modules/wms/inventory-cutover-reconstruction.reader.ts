@@ -41,7 +41,7 @@ export async function readWmsCutoverReconstruction(client: PoolClient, residualO
     LEFT JOIN wms.order_items item ON item.id=source.order_item_id
     WHERE shipment.order_id=ANY($1::integer[]) OR source.order_item_id=ANY($2::integer[])
       OR source.replacement_for_order_item_id=ANY($2::integer[]) OR item.id IS NULL OR shipment.id IS NULL
-      OR shipment.status IN ('requires_review','ignored')
+      OR shipment.requires_review = true
     ORDER BY source.id LIMIT $3`, [orderIds, itemIds]);
   const physicalItems = await read(`SELECT item.id::text AS id, item.physical_shipment_id::text AS "physicalShipmentId",
     item.wms_order_item_id AS "orderItemId", item.replacement_for_order_item_id AS "replacementForOrderItemId",
@@ -55,7 +55,7 @@ export async function readWmsCutoverReconstruction(client: PoolClient, residualO
     LEFT JOIN wms.order_items demand ON demand.id=item.wms_order_item_id
     WHERE item.wms_order_item_id=ANY($1::integer[]) OR item.replacement_for_order_item_id=ANY($1::integer[])
       OR item.legacy_wms_shipment_item_id=ANY($2::integer[]) OR demand.id IS NULL OR package.id IS NULL
-      OR package.status IN ('requires_review','ignored')
+      OR package.status = 'review'
     ORDER BY item.id LIMIT $3`, [itemIds, sourceItems.map((row) => row.id)]);
   const buildDemands = await read(`SELECT id, order_id AS "orderId", order_item_id AS "orderItemId",
     target_variant_id AS "targetVariantId", root_build_order_id AS "rootBuildOrderId", status,
