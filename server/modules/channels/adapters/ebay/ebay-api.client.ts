@@ -112,7 +112,7 @@ export class EbayApiClient {
   private readonly isDryRun: boolean;
 
   constructor(
-    private readonly authService: EbayAuthService,
+    private readonly authService: Pick<EbayAuthService, "getAccessToken">,
     private readonly channelId: number,
     private readonly environment: "sandbox" | "production" = "production",
   ) {

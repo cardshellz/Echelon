@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { ChannelFulfillmentProviderError } from "../../../channels/channel-fulfillment-provider.error";
 
 import type {
   ChannelFulfillmentAuthorityRepository,
@@ -57,6 +58,19 @@ function repositoryMock(
 }
 
 describe("channel fulfillment authority service", () => {
+  it.each(["permanent", "transient"] as const)("classifies an account-bound provider %s failure without losing its code", async (failureClass) => {
+    const repository = repositoryMock([command()]);
+    const service = createChannelFulfillmentAuthorityService({ repository,
+      projector: { projectPhysicalShipment: vi.fn() },
+      providerExecutor: { execute: vi.fn().mockRejectedValue(new ChannelFulfillmentProviderError("ACCOUNT_FAILURE", "Safe message", failureClass)) },
+      clock: { now: () => new Date("2026-09-01T12:00:00Z") },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    });
+    const result = await service.runDueBatch();
+    expect(result).toMatchObject(failureClass === "permanent" ? { reviewRequired: 1, retryScheduled: 0 } : { reviewRequired: 0, retryScheduled: 1 });
+    expect(repository.completeAttempt).toHaveBeenCalledWith(expect.objectContaining({ errorCode: "ACCOUNT_FAILURE",
+      outcome: failureClass === "permanent" ? "review_required" : "retry_scheduled" }));
+  });
   it("materializes, projects, and activates exact package-allocation commands without remote dispatch", async () => {
     const repository = repositoryMock([]);
     vi.mocked(repository.materializePackageAllocationCommercialFulfillment).mockResolvedValue({

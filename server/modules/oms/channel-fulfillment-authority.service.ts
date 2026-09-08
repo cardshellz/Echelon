@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { z } from "zod";
+import { ChannelFulfillmentProviderError } from "../channels/channel-fulfillment-provider.error";
 
 import { EBAY_FULFILLMENT_IDEMPOTENCY_CONFLICT } from "../channels/adapters/ebay/ebay-api.client";
 import { isEbayTrackingConflictError } from "./channel-fulfillment-conflict";
@@ -134,7 +135,8 @@ function errorMessage(error: unknown): string {
 }
 
 function isReviewRequired(error: unknown): boolean {
-  return error instanceof UnsupportedChannelProviderError
+  return (error instanceof ChannelFulfillmentProviderError && error.failureClass === "permanent")
+    || error instanceof UnsupportedChannelProviderError
     || error instanceof FulfillmentAuthorityError
     || error instanceof ChannelFulfillmentProviderInputError
     || errorCode(error) === SHOPIFY_PUSH_INVALID_INPUT
