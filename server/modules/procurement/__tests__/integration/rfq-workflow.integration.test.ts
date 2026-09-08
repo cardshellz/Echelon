@@ -2,6 +2,7 @@ import { SupplierSourcingService } from "../../supplier-sourcing.service";
 import { SupplierSourcingRepository, attachSupplierSourcingCandidates } from "../../supplier-sourcing.repository";
 import { DEFAULT_SUPPLIER_SOURCING_POLICY } from "@shared/procurement/supplier-sourcing";
 import { generatePurchasingRecommendations } from "../../purchasing-recommendation.engine";
+import { createAutomaticRfqDraftService, normalizeAutomaticRfqDraftPolicy } from "../../automatic-rfq-draft.service";
 import { readPurchaseRfqOrigins } from "../../purchase-rfq-origin.repository";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -141,6 +142,33 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
     const command: RfqWorkflowCommand = { operation: "convert", rfqId: 10, body: { expectedVersion: workflow.version, lines: lineIds.map((rfqLineId) => ({ rfqLineId, quoteRevisionId: workflow.lines.find((line) => line.id === rfqLineId)!.latestQuote!.id })), quantityOverrideReason: null } };
     return { command, identity: descriptor(command) };
   }
+
+  it.each([
+    { name: "historical", evidence: {} },
+    { name: "ambiguous", evidence: { receiveVariantSelection: { version: 1, highestHierarchyLevel: 3, candidateCount: 2, selectedVariantId: null } } },
+  ])("replays a $name automatic RFQ from its original key while refusing a new draft from that capture", async ({ evidence }) => {
+    await pool.query("UPDATE procurement.request_for_quotes SET status='cancelled',cancelled_at=$1 WHERE id=10", [NOW]);
+    await pool.query("INSERT INTO procurement.purchase_recommendation_lines(id,run_id,recommendation_key,product_id,product_variant_id,warehouse_id,sku,product_name,recommended_pieces,preferred_vendor_id,preferred_vendor_product_id,evidence_snapshot) OVERRIDING SYSTEM VALUE VALUES(3,1,'receive-choice-capture',100,200,1,'RFQ-SKU-A','RFQ product A',150,5,300,$1::jsonb)", [JSON.stringify(evidence)]);
+    const line = (await database.select().from(schema.purchaseRecommendationLines)).find((row) => row.id === 3)!;
+    const automatic = createAutomaticRfqDraftService(database);
+    const input = { recommendationRunId: 1, lines: [{ ...line, evidenceSnapshot: evidence }], actorId,
+      policy: normalizeAutomaticRfqDraftPolicy({ rfqDraftAutomationMode: "preferred_vendor" }) };
+    const before = (await pool.query("SELECT count(*)::int AS count FROM procurement.request_for_quotes")).rows[0].count;
+    const held = await automatic.createDrafts(input);
+    expect(held).toMatchObject({ reused: false, rfqs: [], lines: [], skipped: [{ code: "receive_selection_review_required" }] });
+    expect((await pool.query("SELECT count(*)::int AS count FROM procurement.request_for_quotes")).rows[0].count).toBe(before);
+    const [savedRfq] = await database.insert(schema.requestForQuotes).values({
+      rfqNumber: "RFQ-SAVED-AUTOMATIC", vendorId: 5, idempotencyKey: "auto-rfq-recommendation-run:1", requestHash: "a".repeat(64),
+    }).returning();
+    const [savedLine] = await database.insert(schema.requestForQuoteLines).values({
+      rfqId: savedRfq.id, recommendationLineId: line.id, vendorProductId: 300, requestedPieces: 150,
+    }).returning();
+    const replay = await automatic.createDrafts(input);
+    expect(replay).toMatchObject({ reused: true, rfqs: [savedRfq], lines: [savedLine], skipped: [{ code: "receive_selection_review_required" }] });
+    expect((await automatic.createDrafts(input))).toEqual(replay);
+    expect((await pool.query("SELECT count(*)::int AS count FROM procurement.request_for_quotes")).rows[0].count).toBe(before + 1);
+    expect((await database.select().from(schema.purchaseRecommendationLines)).find((row) => row.id === line.id)?.evidenceSnapshot).toEqual(evidence);
+  });
 
   it("preserves versioned supplier tiers through recommendation, final RFQ quote and real PO conversion", async () => {
     const sourcing = new SupplierSourcingService(new SupplierSourcingRepository(database), () => NOW);

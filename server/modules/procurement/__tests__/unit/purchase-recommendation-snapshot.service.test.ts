@@ -77,6 +77,23 @@ function recommendation(overrides: Partial<PurchasingRecommendationItem> = {}): 
 }
 
 describe("purchase recommendation snapshot service", () => {
+  it("retains unresolved receiving evidence in both sourcing lines and forecast history without picking an identity", () => {
+    const selection = { version: 1 as const, highestHierarchyLevel: 3, candidateCount: 2, selectedVariantId: null };
+    const item = recommendation({ recommendationId: "10:product:30", productVariantId: undefined,
+      receiveVariantSelection: selection, skippedReason: "no_vendor" });
+    const input = buildPurchaseRecommendationRunInput({
+      recommendationResult: { items: [item], skippedItems: [item], summary: {} },
+      settings: { autoDraftMode: "review_only", skipNoVendor: true }, lookbackDays: 30,
+      asOf: new Date("2026-07-17T12:00:00Z"), source: "manual",
+    });
+    expect(input.lines).toHaveLength(1);
+    expect(input.lines[0]).toMatchObject({ productVariantId: null, preferredVendorId: null,
+      evidenceSnapshot: { receiveVariantSelection: selection } });
+    expect(input.observations).toHaveLength(1);
+    expect(input.observations![0]).toMatchObject({ selectedReceiveVariantId: null,
+      evidenceSnapshot: { receiveVariantSelection: selection } });
+    expect(item.receiveVariantSelection).toEqual(selection);
+  });
   it("builds a source-attributed run including requirements that still need a supplier", () => {
     const input = buildPurchaseRecommendationRunInput({
       recommendationResult: { items: [], skippedItems: [recommendation({ skippedReason: "no_vendor" })], summary: { actionableCount: 1 } },
@@ -219,7 +236,7 @@ describe("purchase recommendation snapshot service", () => {
       sku: "SKU-11",
       productName: "Product 11",
       suggestedOrderPieces: 0,
-      status: "healthy",
+      status: "ok",
       skippedReason: "not_actionable_status",
       actionable: false,
       avgDailyUsage: 2.345678,
@@ -230,7 +247,7 @@ describe("purchase recommendation snapshot service", () => {
       },
       forecastProvenance: {
         ...recommendation().forecastProvenance,
-        forecastBlend: { avgDailyUsagePieces: 2.345678 },
+        forecastBlend: { ...recommendation().forecastProvenance.forecastBlend, avgDailyUsagePieces: 2.345678 },
       },
     });
     const input = buildPurchaseRecommendationRunInput({

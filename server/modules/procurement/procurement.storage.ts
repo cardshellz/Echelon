@@ -1426,6 +1426,7 @@ export const procurementMethods: IProcurementStorage = {
         vel.seasonal_latest_demand_at,
         inv.variant_count,
         order_uom.variant_id,
+        order_uom.receive_variant_selection,
         order_uom.units_per_variant AS order_uom_units,
         order_uom.sku AS order_uom_sku,
         order_uom.hierarchy_level AS order_uom_level,
@@ -1617,11 +1618,25 @@ export const procurementMethods: IProcurementStorage = {
         GROUP BY pv.product_id
       ) vel ON vel.product_id = p.id
       LEFT JOIN LATERAL (
-        SELECT pv.id AS variant_id, pv.units_per_variant, pv.sku, pv.hierarchy_level
+        -- A tied level is unresolved, never a default chosen by row order.
+        -- MIN is used for identity and pack fields only for a singleton set.
+        SELECT
+          CASE WHEN COUNT(*) = 1 THEN MIN(pv.id) END AS variant_id,
+          CASE WHEN COUNT(*) = 1 THEN MIN(pv.units_per_variant) END AS units_per_variant,
+          CASE WHEN COUNT(*) = 1 THEN MIN(pv.sku) END AS sku,
+          MAX(pv.hierarchy_level) AS hierarchy_level,
+          JSONB_BUILD_OBJECT(
+            'version', 1,
+            'highestHierarchyLevel', MAX(pv.hierarchy_level),
+            'candidateCount', COUNT(*),
+            'selectedVariantId', CASE WHEN COUNT(*) = 1 THEN MIN(pv.id) END
+          ) AS receive_variant_selection
         FROM catalog.product_variants pv
         WHERE pv.product_id = p.id AND pv.is_active = true
-        ORDER BY pv.hierarchy_level DESC
-        LIMIT 1
+          AND pv.hierarchy_level = (
+            SELECT MAX(highest.hierarchy_level) FROM catalog.product_variants highest
+            WHERE highest.product_id = p.id AND highest.is_active = true
+          )
       ) order_uom ON true
       LEFT JOIN LATERAL (
         SELECT

@@ -228,6 +228,29 @@ describe("purchasing recommendation routes", () => {
     vi.useRealTimers();
   });
 
+  it("keeps the receiving-choice blocker visible over HTTP for a no-demand product with no supplier", async () => {
+    const selection = { version: 1 as const, highestHierarchyLevel: 3, candidateCount: 2, selectedVariantId: null };
+    const row: PurchasingRecommendationRawRow = { product_id: 17, base_sku: "RECEIVE-CHOICE", product_name: "Synthetic receiving choice",
+      variant_id: null, receive_variant_selection: selection, total_pieces: 0, total_outbound_pieces: 0,
+      on_order_pieces: 0, preferred_vendor_id: null, order_uom_units: null };
+    mocks.inventory.getVelocityLookbackDays.mockResolvedValue(30);
+    mocks.procurement.getReorderAnalysisData.mockResolvedValue([row]);
+    server = await startServer(buildApp());
+    const response = await requestJson(server.url, "GET", "/api/purchasing/reorder-analysis");
+    expect(response.status).toBe(200);
+    expect(response.body.items).toHaveLength(1);
+    expect(response.body.items[0]).toMatchObject({ productId: 17, receiveVariantSelection: selection,
+      preferredVendorId: null, qualityGate: { autoDraftEligible: false,
+        detail: expect.stringContaining("2 active receiving configurations") },
+      qualityControls: expect.arrayContaining([expect.objectContaining({ code: "ambiguous_receive_configuration", label: "Choose a receiving unit" })]) });
+    const captured = await requestJson(server.url, "POST", "/api/purchasing/recommendation-runs");
+    expect(captured.status).toBe(201);
+    const input: CreatePurchaseRecommendationRunInput = mocks.purchasingService.snapshotPurchaseRecommendations.mock.calls[0][0];
+    expect(input.lines).toEqual([]);
+    expect(input.observations).toHaveLength(1);
+    expect(input.observations![0]).toMatchObject({ selectedReceiveVariantId: null, evidenceSnapshot: { receiveVariantSelection: selection } });
+  });
+
   it("computes purchasing KPIs from reorder analysis and open PO pipeline", async () => {
     mocks.inventory.getVelocityLookbackDays.mockResolvedValue(10);
     mocks.procurement.getReorderAnalysisData.mockResolvedValue([

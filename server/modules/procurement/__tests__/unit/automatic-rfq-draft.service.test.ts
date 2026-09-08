@@ -18,6 +18,7 @@ function recommendation(overrides: Record<string, unknown> = {}) {
     preferredVendorProductId: 70,
     status: "open",
     evidenceSnapshot: {
+      receiveVariantSelection: { version: 1, highestHierarchyLevel: 3, candidateCount: 1, selectedVariantId: 30 },
       onOrderPieces: 0,
       supplyTiming: { reviewRequired: false, receiptEvidence: { version: 1, lines: [] } },
       confidence: "medium",
@@ -70,6 +71,44 @@ function fakeDatabase(selectResults: any[][], insertResults: any[][]) {
 }
 
 describe("automatic RFQ draft service", () => {
+  it.each([
+    { name: "missing", evidence: undefined },
+    { name: "ambiguous", evidence: { version: 1, highestHierarchyLevel: 3, candidateCount: 2, selectedVariantId: null } },
+    { name: "mismatched", evidence: { version: 1, highestHierarchyLevel: 3, candidateCount: 1, selectedVariantId: 31 } },
+  ])("holds $name receive evidence but exactly replays a saved RFQ", async ({ evidence }) => {
+    const line = recommendation();
+    line.evidenceSnapshot.receiveVariantSelection = evidence;
+    const policy = normalizeAutomaticRfqDraftPolicy({ rfqDraftAutomationMode: "preferred_vendor" });
+    expect(planAutomaticRfqDrafts([line], policy)).toMatchObject({ selected: [], skipped: [{ code: "receive_selection_review_required" }] });
+    const existingRfq = { id: 501, vendorId: 7, idempotencyKey: "auto-rfq-recommendation-run:50", status: "quoted" };
+    const existingLine = { id: 601, rfqId: 501, recommendationLineId: 101, requestedPieces: 100 };
+    const { database, tx } = fakeDatabase([[line], [existingRfq], [existingLine]], []);
+    const result = await createAutomaticRfqDraftService(database).createDrafts({ recommendationRunId: 50, lines: [line], policy, actorId: "operator" });
+    expect(result).toMatchObject({ reused: true, rfqs: [existingRfq], lines: [existingLine], skipped: [{ code: "receive_selection_review_required" }] });
+    expect(tx.insert).not.toHaveBeenCalled();
+  });
+
+  it("holds a locked ambiguous capture even when the caller supplies unique evidence and no prior RFQ exists", async () => {
+    const line = recommendation();
+    const persisted = { ...line, evidenceSnapshot: { ...line.evidenceSnapshot,
+      receiveVariantSelection: { version: 1, highestHierarchyLevel: 3, candidateCount: 2, selectedVariantId: null } } };
+    const { database, tx } = fakeDatabase([[persisted], []], []);
+    const result = await createAutomaticRfqDraftService(database).createDrafts({ recommendationRunId: 50, lines: [line],
+      policy: normalizeAutomaticRfqDraftPolicy({ rfqDraftAutomationMode: "preferred_vendor" }), actorId: "operator" });
+    expect(result).toMatchObject({ reused: false, rfqs: [], lines: [], skipped: [{ code: "receive_selection_review_required" }] });
+    expect(tx.insert).not.toHaveBeenCalled();
+  });
+
+  it("keeps the receive-choice reason when a tied capture has no supplier or receive identity", async () => {
+    const line = recommendation({ productVariantId: null, preferredVendorId: null, preferredVendorProductId: null });
+    line.evidenceSnapshot.receiveVariantSelection = { version: 1, highestHierarchyLevel: 3, candidateCount: 2, selectedVariantId: null };
+    const { database, tx } = fakeDatabase([], []);
+    const result = await createAutomaticRfqDraftService(database).createDrafts({ recommendationRunId: 50, lines: [line],
+      policy: normalizeAutomaticRfqDraftPolicy({ rfqDraftAutomationMode: "preferred_vendor" }), actorId: "operator" });
+    expect(result).toMatchObject({ reused: false, rfqs: [], lines: [], skipped: [{ code: "receive_selection_review_required" }] });
+    expect(tx.select).not.toHaveBeenCalled();
+    expect(tx.insert).not.toHaveBeenCalled();
+  });
   it("defaults to manual and clamps unattended policy inputs", () => {
     expect(normalizeAutomaticRfqDraftPolicy({})).toEqual({
       mode: "manual",
@@ -95,14 +134,17 @@ describe("automatic RFQ draft service", () => {
     const result = planAutomaticRfqDrafts([
       recommendation(),
       recommendation({ id: 102, sku: "PO-READY", evidenceSnapshot: {
+        receiveVariantSelection: { version: 1, highestHierarchyLevel: 3, candidateCount: 1, selectedVariantId: 30 },
         confidence: "high", forecastTrust: { severity: "ok" }, qualityGate: { autoDraftEligible: true }, autopilotBlockers: [],
       } }),
       recommendation({ id: 103, sku: "LEAD-TIME-REVIEW", evidenceSnapshot: {
+        receiveVariantSelection: { version: 1, highestHierarchyLevel: 3, candidateCount: 1, selectedVariantId: 30 },
         confidence: "high", forecastTrust: { severity: "ok" }, qualityGate: { autoDraftEligible: false },
         autopilotBlockers: [{ area: "lead_time", code: "lead_time_review" }],
       } }),
       recommendation({ id: 104, sku: "NO-SUPPLIER", preferredVendorId: null, preferredVendorProductId: null }),
       recommendation({ id: 105, sku: "CURRENT-QUOTE", evidenceSnapshot: {
+        receiveVariantSelection: { version: 1, highestHierarchyLevel: 3, candidateCount: 1, selectedVariantId: 30 },
         confidence: "medium", forecastTrust: { severity: "ok" }, qualityGate: { autoDraftEligible: false },
         autopilotBlockers: [], supplierBasis: { costSource: "vendor_unit_cost_mills", costQuality: "current", pricingBasis: "per_piece" },
       } }),

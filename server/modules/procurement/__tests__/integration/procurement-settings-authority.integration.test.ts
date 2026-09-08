@@ -34,6 +34,7 @@ vi.mock("../../../warehouse/settings.resolver", async (importOriginal) => {
   };
 });
 import { procurementMethods } from "../../procurement.storage";
+import { generatePurchasingRecommendations } from "../../purchasing-recommendation.engine";
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const suite = url && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;
@@ -125,6 +126,53 @@ suite.sequential("canonical procurement settings authority in PostgreSQL", () =>
     const result = await pool.query("SELECT * FROM inventory.warehouse_settings WHERE id=$1", [id]);
     return result.rows[0];
   }
+
+  it.each([50, 100])("records tied receive identity instead of selecting either %s-piece or 100-piece variant", async (alternatePieces) => {
+    await pool.query("UPDATE catalog.product_variants SET hierarchy_level=3,units_per_variant=100 WHERE id=100");
+    await pool.query("INSERT INTO procurement.vendors(id,code,name) VALUES(70,'RECEIVE-CHOICE','Synthetic receiving supplier')");
+    await pool.query("INSERT INTO procurement.vendor_products(id,vendor_id,product_id,product_variant_id,is_preferred) VALUES(700,70,10,100,1)");
+    try {
+      const [unique] = await procurementMethods.getReorderAnalysisData(30);
+      expect(unique).toMatchObject({ variant_id: 100, preferred_vendor_id: 70, order_uom_units: 100,
+        receive_variant_selection: { version: 1, highestHierarchyLevel: 3, candidateCount: 1, selectedVariantId: 100 } });
+      await pool.query("INSERT INTO catalog.product_variants(id,product_id,sku,name,units_per_variant,hierarchy_level) VALUES(101,10,'RECEIVE-ALT','Synthetic alternate',$1,3)", [alternatePieces]);
+      const assertUnresolved = async () => {
+        const rows = await procurementMethods.getReorderAnalysisData(30);
+        expect(rows).toHaveLength(1);
+        expect(rows[0]).toMatchObject({ variant_id: null, preferred_vendor_id: null, order_uom_units: null,
+          receive_variant_selection: { version: 1, highestHierarchyLevel: 3, candidateCount: 2, selectedVariantId: null } });
+        const result = generatePurchasingRecommendations({ rows, lookbackDays: 30, asOf: new Date("2026-09-07T12:00:00Z") });
+        expect(result.items).toHaveLength(1);
+        expect(result.items[0].productVariantId).toBeUndefined();
+        expect(result.items[0].preferredVendorId).toBeNull();
+        expect(result.items[0].qualityGate).toMatchObject({ autoDraftEligible: false, detail: expect.stringContaining("2 active receiving configurations") });
+        expect(result.items[0].qualityControls).toContainEqual({ area: "receive_configuration", severity: "block", code: "ambiguous_receive_configuration",
+          label: "Choose a receiving unit", detail: expect.any(String) });
+      };
+      await assertUnresolved();
+      // Change physical row versions in both directions: no query plan or heap
+      // order may turn this unresolved choice into a different supplier mapping.
+      await pool.query("UPDATE catalog.product_variants SET name=name || ' updated' WHERE id=100");
+      await assertUnresolved();
+      await pool.query("UPDATE catalog.product_variants SET name=name || ' updated' WHERE id=101");
+      await assertUnresolved();
+      await pool.query("UPDATE catalog.product_variants SET is_active=false,hierarchy_level=9 WHERE id=101");
+      expect((await procurementMethods.getReorderAnalysisData(30))[0]).toMatchObject({ variant_id: 100, preferred_vendor_id: 70,
+        receive_variant_selection: { version: 1, highestHierarchyLevel: 3, candidateCount: 1, selectedVariantId: 100 } });
+    } finally {
+      await pool.query("DELETE FROM procurement.vendor_products WHERE id=700; DELETE FROM procurement.vendors WHERE id=70; DELETE FROM catalog.product_variants WHERE id=101; UPDATE catalog.product_variants SET hierarchy_level=1,units_per_variant=1,name='Synthetic unit' WHERE id=100");
+    }
+  });
+
+  it("captures the absence of active receiving units without erasing the product", async () => {
+    await pool.query("UPDATE catalog.product_variants SET is_active=false WHERE id=100");
+    try {
+      const rows = await procurementMethods.getReorderAnalysisData(30);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ product_id: 10, variant_id: null, order_uom_units: null,
+        receive_variant_selection: { version: 1, highestHierarchyLevel: null, candidateCount: 0, selectedVariantId: null } });
+    } finally { await pool.query("UPDATE catalog.product_variants SET is_active=true WHERE id=100"); }
+  });
 
   it("uses DEFAULT for both real global reads despite conflicting warehouse and search-path rows", async () => {
     const settings = await procurementMethods.getAutoDraftSettings();

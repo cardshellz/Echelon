@@ -1880,7 +1880,8 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
       const lookbackDays = parseInt(req.query.lookbackDays as string) || configuredLookback;
 
       // Product-level query: aggregate inventory and velocity in base units (pieces)
-      // Also fetch the highest-level variant (ordering UOM) for rounding order quantities
+      // Capture a receive configuration only when the highest level is unique.
+      // Purchasing quantities follow supplier commercial units and pack rules.
       const rawRows = await storage.getReorderAnalysisData(lookbackDays);
       const settings = (await storage.getAutoDraftSettings()) as AutoDraftRecommendationSettings;
       const analysisSettings: AutoDraftRecommendationSettings = {

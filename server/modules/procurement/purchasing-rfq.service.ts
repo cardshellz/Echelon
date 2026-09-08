@@ -11,6 +11,7 @@ import {
   vendors as vendorsTable,
 } from "@shared/schema";
 import type { PurchasingRecommendationItem } from "./purchasing-recommendation.engine";
+import type { PurchaseReceiveSelection } from "@shared/procurement/purchase-receive-selection";
 
 const nonRfqSkipReasons = new Set([
   "excluded",
@@ -23,6 +24,7 @@ export type PurchasingRfqQueueItem = {
   recommendationId: string;
   productId: number;
   productVariantId: number | null;
+  receiveVariantSelection?: PurchaseReceiveSelection;
   sku: string;
   productName: string;
   requestedPieces: number;
@@ -124,6 +126,7 @@ export function buildPurchasingRfqQueue(
       recommendationId: item.recommendationId,
       productId: item.productId,
       productVariantId: item.productVariantId ?? null,
+      ...(item.receiveVariantSelection ? { receiveVariantSelection: item.receiveVariantSelection } : {}),
       sku: item.sku,
       productName: item.productName,
       requestedPieces: item.suggestedOrderPieces,
@@ -156,6 +159,7 @@ export function buildPurchasingRfqQueue(
         reorderPointPieces: item.reorderPoint,
         suggestedOrderPieces: item.suggestedOrderPieces,
         planningBasis: item.planningBasis,
+        ...(item.receiveVariantSelection ? { receiveVariantSelection: item.receiveVariantSelection } : {}),
         supplierBundleTerms: item.supplierBundleTerms,
         supplyTiming: item.supplyTiming,
         demandBasis: item.demandBasis,

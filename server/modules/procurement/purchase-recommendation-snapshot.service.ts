@@ -541,6 +541,7 @@ export function buildPurchaseForecastObservations(
           skippedReason: item.skippedReason,
           actionable: item.actionable,
           planningBasis: item.planningBasis,
+          ...(item.receiveVariantSelection ? { receiveVariantSelection: item.receiveVariantSelection } : {}),
           supplierBundleTerms: item.supplierBundleTerms,
           supplyTiming: item.supplyTiming,
           demandBasis: item.demandBasis,
