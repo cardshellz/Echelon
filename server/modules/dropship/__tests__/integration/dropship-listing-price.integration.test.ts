@@ -285,6 +285,8 @@ describeDatabase.sequential("listing price PostgreSQL transaction guarantees", (
     await saveContent("content-two", "Later draft", first.revisionId);
     const items = await pool!.query(qualify("SELECT result FROM dropship.dropship_listing_push_job_items"));
     expect(items.rows[0].result.listingIntent.description).toBe(resolved.descriptionHtml);
+    expect(items.rows[0].result.listingIntent.description).toBe("<p>Reviewed copy</p>");
+    expect(resolved.facts).toContainEqual({ name: "SKU", value: "ARM-50" });
   });
   it("saves do not rewrite an already queued publication snapshot or applied listing price", async () => {
     const first = await save("queue-price");

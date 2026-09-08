@@ -6,7 +6,9 @@ import { MAX_DESCRIPTION_HTML_LENGTH, resolvedListingContentSchema, type Content
 import type { DropshipListingCatalogCandidate } from "./dropship-listing-preview-service";
 import { descriptionAsPlainText } from "./dropship-listing-presentation";
 
-const CONTENT_RENDERER_VERSION = 1;
+// Version 2 keeps catalog facts outside the description. Previously reviewed
+// content must be refreshed before it can be queued under this renderer.
+const CONTENT_RENDERER_VERSION = 2;
 const ALLOWED_DESCRIPTION_TAGS = ["p", "br", "strong", "b", "em", "i", "u", "h2", "h3", "h4", "ul", "ol", "li", "blockquote", "div", "span", "table", "tbody", "thead", "tr", "th", "td"];
 const DROP_CONTENT_TAGS = ["script", "style", "textarea", "option", "noscript", "iframe", "object", "embed", "svg", "math", "xmp"];
 
@@ -59,8 +61,9 @@ export function resolveListingContent(input: {
   if (needsCatalogReview) issues.push("listing_content_catalog_review_required");
   const body = saved?.customText != null ? textDescriptionHtml(saved.customText) : catalogHtml;
   if (!descriptionAsPlainText(body).trim()) issues.push("listing_content_description_required");
-  const factsHtml = `<h3>Product details</h3><ul>${facts.map((fact) => `<li>${textDescriptionHtml(`${fact.name}: ${fact.value}`)}</li>`).join("")}</ul>`;
-  const assembled = `${textDescriptionHtml(template?.introduction ?? "")}${body}${factsHtml}${textDescriptionHtml(template?.footer ?? "")}`;
+  // Facts remain structured catalog-owned data for review and change detection.
+  // Do not inject them into vendor prose or strip text the author entered.
+  const assembled = `${textDescriptionHtml(template?.introduction ?? "")}${body}${textDescriptionHtml(template?.footer ?? "")}`;
   const htmlTooLarge = assembled.length > MAX_DESCRIPTION_HTML_LENGTH;
   if (htmlTooLarge) issues.push("listing_content_description_too_large");
   const descriptionHtml = htmlTooLarge ? "" : sanitizeListingDescription(assembled);

@@ -22,14 +22,36 @@ describe("description compilation", () => {
     }
     expect(hashes.size).toBe(1000); expect(profile).toEqual(before);
   });
-  it("inherits formatted catalog, appends escaped catalog facts, and does not mutate input", () => {
+  it("inherits formatted catalog and retains facts separately without mutating input", () => {
     const candidate = contentCandidate(); const before = structuredClone(candidate);
     const resolved = resolveListingContent({ candidate, profile: noContentProfile, saved: null });
     expect(resolved.source).toBe("catalog");
     expect(resolved.descriptionHtml).toContain("<ul><li>Durable mailer</li></ul>");
-    expect(resolved.descriptionText).toContain("Units per sellable pack: 50");
+    expect(resolved.descriptionHtml).toBe(candidate.description);
+    expect(resolved.descriptionText).not.toContain("Units per sellable pack");
+    expect(resolved.facts).toContainEqual({ name: "Units per sellable pack", value: "50" });
     expect(resolved.issues).toEqual([]); expect(candidate).toEqual(before);
     expect(resolveListingContent({ candidate, profile: noContentProfile, saved: null })).toEqual(resolved);
+  });
+  it("renders an existing custom revision as only the authored body with separate catalog facts", () => {
+    const candidate = contentCandidate();
+    const saved = { revisionId: 8, customText: "The armalope rules", catalogHash: listingCatalogHash(candidate), updatedAt: now.toISOString() };
+    const before = structuredClone(saved);
+    const result = resolveListingContent({ candidate, profile: noContentProfile, saved });
+    expect(result.descriptionHtml).toBe("<p>The armalope rules</p>");
+    expect(result.descriptionText).toBe("The armalope rules");
+    expect(result.facts).toContainEqual({ name: "SKU", value: "ARM-50" });
+    expect(result.needsCatalogReview).toBe(false);
+    expect(saved).toEqual(before);
+  });
+  it("does not strip product details intentionally included in authored or catalog text", () => {
+    const candidate = { ...contentCandidate(), description: "<h3>Product details</h3><p>Catalog-authored text.</p>" };
+    expect(resolveListingContent({ candidate, profile: noContentProfile, saved: null }).descriptionHtml).toBe(candidate.description);
+    const customText = "Product details\nSKU: my explanation";
+    const result = resolveListingContent({ candidate, profile: noContentProfile,
+      saved: { revisionId: 1, customText, catalogHash: listingCatalogHash(candidate), updatedAt: now.toISOString() } });
+    expect(result.descriptionHtml).toBe("<p>Product details<br />SKU: my explanation</p>");
+    expect(result.facts).toContainEqual({ name: "SKU", value: "ARM-50" });
   });
   it.each([
     '<script>alert(1)</script><p onclick="bad()">Safe</p>',
@@ -58,6 +80,7 @@ describe("description compilation", () => {
         template: { introduction: "Group intro", footer: "Group footer" } }] } };
     const saved: SavedListingContent = { revisionId: 1, customText: "My copy", catalogHash: listingCatalogHash(candidate), updatedAt: now.toISOString() };
     const result = resolveListingContent({ candidate, profile, saved });
+    expect(result.descriptionHtml).toBe("<p>Group intro</p><p>My copy</p><p>Group footer</p>");
     expect(result.descriptionText).toContain("Group intro"); expect(result.descriptionText).toContain("My copy");
     expect(result.descriptionText).not.toContain("Store intro"); expect(result.descriptionText).not.toContain("Protect your cards");
     const reset = resolveListingContent({ candidate, profile, saved: { ...saved, customText: null } });
@@ -120,7 +143,9 @@ describe("local description authority", () => {
   it("loads inheritance without writing and permits draft save without marketplace reauthorization", async () => {
     expect((await service.getForMember("member", target)).customText).toBeNull(); expect(tx.saveListing).not.toHaveBeenCalled();
     const result = await service.saveForMember("member", target, request());
-    expect(result.content.customText).toBe("My description"); expect(result.content.resolved.descriptionText).toContain("ARM-50");
+    expect(result.content.customText).toBe("My description");
+    expect(result.content.resolved.descriptionHtml).toBe("<p>My description</p>");
+    expect(result.content.resolved.facts).toContainEqual({ name: "SKU", value: "ARM-50" });
   });
   it("previews transient text without writing or inventing a persisted revision", async () => {
     const { idempotencyKey: _, ...input } = request();
