@@ -50,27 +50,17 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
 import { filterActionableWarehouseLocations } from "@/lib/warehouse-locations";
+import {
+  formatDashboardCents,
+  formatDashboardMills,
+  formatDashboardLotCost,
+  formatDashboardLotValue,
+  parseDashboardRecostInput,
+} from "@/lib/cost-dashboard-money";
 
 // ─── Helpers ────────────────────────────────────────────────────────
 
-function formatCostCents(cents: number | null | undefined): string {
-  if (cents === null || cents === undefined) return "$0.00";
-  const val = Number(cents);
-  if (val < 1) {
-    return `$${val.toFixed(4)}`;
-  }
-  return `$${val.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`;
-}
-
-function formatDollars(cents: number | null | undefined): string {
-  if (!cents && cents !== 0) return "$0.00";
-  return `$${(Number(cents) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-}
-
-function formatDollarsCents(cents: number | null | undefined): string {
-  if (!cents && cents !== 0) return "$0.00";
-  return `$${Number(cents).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`;
-}
+const RECORDED_LOT_UNITS_NOTE = "Quantities and unit costs are shown in recorded lot units. Pack sizes may differ; these values are not normalized to base pieces.";
 
 function formatDate(d: string | null | undefined): string {
   if (!d) return "—";
@@ -273,9 +263,9 @@ function CostUploadSection() {
                       <TableCell className="font-mono text-xs">{r.lotNumber ?? "—"}</TableCell>
                       <TableCell>{r.location ?? "—"}</TableCell>
                       <TableCell className="text-right">{r.qty ?? "—"}</TableCell>
-                      <TableCell className="text-right">{r.perPieceMills != null ? `$${(r.perPieceMills / 10000).toFixed(4)}` : "—"}</TableCell>
-                      <TableCell className="text-right">{r.oldCostCents != null ? formatDollars(r.oldCostCents) : "—"}</TableCell>
-                      <TableCell className="text-right font-medium">{r.newCostMills != null ? `$${(r.newCostMills / 10000).toFixed(4)}` : "—"}</TableCell>
+                      <TableCell className="text-right">{r.perPieceMills != null ? formatDashboardMills(r.perPieceMills) : "—"}</TableCell>
+                      <TableCell className="text-right">{r.oldCostCents != null ? formatDashboardCents(r.oldCostCents) : "—"}</TableCell>
+                      <TableCell className="text-right font-medium">{r.newCostMills != null ? formatDashboardMills(r.newCostMills) : "—"}</TableCell>
                       <TableCell className="text-xs text-muted-foreground">{r.message ?? ""}</TableCell>
                     </TableRow>
                   ))}
@@ -307,6 +297,7 @@ function ValuationSection() {
 
   return (
     <div className="space-y-6">
+      <p className="text-sm text-muted-foreground">{RECORDED_LOT_UNITS_NOTE}</p>
       {/* Big Numbers Row */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <Card>
@@ -318,7 +309,7 @@ function ValuationSection() {
               <div>
                 <p className="text-sm text-muted-foreground">Total Inventory Value</p>
                 <p className="text-2xl font-bold text-green-600 dark:text-green-400">
-                  {formatDollarsCents(valuation.totalValueCents)}
+                  {formatDashboardCents(valuation.totalValueCents)}
                 </p>
               </div>
             </div>
@@ -332,7 +323,7 @@ function ValuationSection() {
                 <Package className="h-5 w-5 text-blue-600 dark:text-blue-400" />
               </div>
               <div>
-                <p className="text-sm text-muted-foreground">Total Pieces</p>
+                <p className="text-sm text-muted-foreground">Recorded Lot Units</p>
                 <p className="text-2xl font-bold">
                   {(valuation.totalQty || 0).toLocaleString()}
                 </p>
@@ -365,7 +356,7 @@ function ValuationSection() {
                 <div>
                   <p className="text-sm text-muted-foreground">Landed Cost Pending</p>
                   <p className="text-lg font-bold text-amber-600">
-                    {valuation.landedPendingLots} lots · {formatDollarsCents(valuation.landedPendingValueCents)}
+                    {valuation.landedPendingLots} lots · {formatDashboardCents(valuation.landedPendingValueCents)}
                   </p>
                 </div>
               </div>
@@ -386,8 +377,8 @@ function ValuationSection() {
               <TableHeader>
                 <TableRow>
                   <TableHead>Product</TableHead>
-                  <TableHead className="text-right">Qty</TableHead>
-                  <TableHead className="text-right">Avg Cost/Piece</TableHead>
+                  <TableHead className="text-right">Lot Units</TableHead>
+                  <TableHead className="text-right">Avg Cost / Lot Unit</TableHead>
                   <TableHead className="text-right">Total Value</TableHead>
                   <TableHead className="text-right">Lots</TableHead>
                   <TableHead></TableHead>
@@ -421,10 +412,10 @@ function ValuationSection() {
                       {p.totalQty.toLocaleString()}
                     </TableCell>
                     <TableCell className="text-right font-mono text-sm">
-                      {formatCostCents(p.avgCostPerPiece)}
+                      {formatDashboardCents(p.avgCostPerPiece)}
                     </TableCell>
                     <TableCell className="text-right font-mono text-sm font-medium">
-                      {formatDollarsCents(p.totalValueCents)}
+                      {formatDashboardCents(p.totalValueCents)}
                     </TableCell>
                     <TableCell className="text-right text-sm">{p.activeLots}</TableCell>
                     <TableCell></TableCell>
@@ -497,6 +488,7 @@ function CostExplorer() {
 
   return (
     <div className="space-y-4">
+      <p className="text-sm text-muted-foreground">{RECORDED_LOT_UNITS_NOTE}</p>
       {/* Search + Filters */}
       <div className="flex flex-col sm:flex-row gap-3">
         <div className="relative flex-1">
@@ -532,10 +524,7 @@ function CostExplorer() {
           {grouped.map(({ product, lots: productLots }) => {
             const isExpanded = expandedLots.has(product.id);
             const totalQty = productLots.reduce((s: number, l: any) => s + Number(l.qty_on_hand || 0), 0);
-            const totalValue = productLots.reduce(
-              (s: number, l: any) => s + Number(l.qty_on_hand || 0) * Number(l.total_unit_cost_cents || l.unit_cost_cents || 0),
-              0,
-            );
+            const totalValue = formatDashboardLotValue(productLots);
             const hasLandedPending = productLots.some(isLandedPendingLot);
 
             return (
@@ -564,10 +553,10 @@ function CostExplorer() {
                     <div className="flex items-center gap-6 text-sm shrink-0 ml-4">
                       <div className="text-right">
                         <p className="font-mono">{totalQty.toLocaleString()}</p>
-                        <p className="text-xs text-muted-foreground">pieces</p>
+                        <p className="text-xs text-muted-foreground">lot units</p>
                       </div>
                       <div className="text-right">
-                        <p className="font-mono font-medium">{formatDollarsCents(totalValue)}</p>
+                        <p className="font-mono font-medium">{totalValue}</p>
                         <p className="text-xs text-muted-foreground">value</p>
                       </div>
                       <div className="text-right">
@@ -587,11 +576,11 @@ function CostExplorer() {
                             <TableHead className="text-xs">Lot</TableHead>
                             <TableHead className="text-xs">SKU</TableHead>
                             <TableHead className="text-xs">Received</TableHead>
-                            <TableHead className="text-xs text-right">PO Cost</TableHead>
-                            <TableHead className="text-xs text-right">Landed</TableHead>
-                            <TableHead className="text-xs text-right">Total/pc</TableHead>
-                            <TableHead className="text-xs text-right">Qty Recv</TableHead>
-                            <TableHead className="text-xs text-right">Remaining</TableHead>
+                            <TableHead className="text-xs text-right">PO / Lot Unit</TableHead>
+                            <TableHead className="text-xs text-right">Landed / Lot Unit</TableHead>
+                            <TableHead className="text-xs text-right">Total / Lot Unit</TableHead>
+                            <TableHead className="text-xs text-right">Received Units</TableHead>
+                            <TableHead className="text-xs text-right">Remaining Units</TableHead>
                             <TableHead className="text-xs">Source</TableHead>
                             <TableHead className="text-xs text-right">Age</TableHead>
                             <TableHead className="text-xs text-right">Recost</TableHead>
@@ -611,18 +600,14 @@ function CostExplorer() {
                                 <TableCell className="font-mono text-xs">{lot.sku}</TableCell>
                                 <TableCell className="text-xs">{formatDate(lot.received_at)}</TableCell>
                                 <TableCell className="text-right font-mono text-xs">
-                                  {formatCostCents(lot.po_unit_cost_cents)}
+                                  {formatDashboardLotCost(lot, "product")}
                                 </TableCell>
                                 <TableCell className="text-right font-mono text-xs">
-                                  {Number(lot.landed_cost_cents || 0) > 0
-                                    ? formatCostCents(lot.landed_cost_cents)
-                                    : landedPending
-                                      ? <span className="text-amber-600">⚠️ $0</span>
-                                      : "$0"
-                                  }
+                                  {landedPending && <span className="text-amber-600" aria-label="Landed cost pending">⚠️ </span>}
+                                  {formatDashboardLotCost(lot, "landed")}
                                 </TableCell>
                                 <TableCell className="text-right font-mono text-xs font-medium">
-                                  {formatCostCents(lot.total_unit_cost_cents || lot.unit_cost_cents)}
+                                  {formatDashboardLotCost(lot)}
                                 </TableCell>
                                 <TableCell className="text-right font-mono text-xs">
                                   {Number(lot.qty_received || 0).toLocaleString()}
@@ -690,33 +675,31 @@ function CostExplorer() {
 function RecostLotDialog({ lot, onClose }: { lot: any; onClose: () => void }) {
   const { toast } = useToast();
   const qc = useQueryClient();
-  const upv = Number(lot.units_per_variant) || 1;
   const [perPiece, setPerPiece] = useState("");
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
 
-  const dollars = Number(String(perPiece).replace(/[$,\s]/g, ""));
-  const valid = perPiece.trim() !== "" && Number.isFinite(dollars) && dollars >= 0;
-  const perVariant = valid ? dollars * upv : null;
+  const input = parseDashboardRecostInput(perPiece);
 
   async function save() {
-    if (!valid) return;
+    if (!input.valid) return;
     setBusy(true);
     try {
       const res = await fetch(`/api/cogs/lots/${lot.id}/recost`, {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cost_per_piece: dollars, reason }),
+        body: JSON.stringify({ cost_per_piece: input.dollars, reason }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "Recost failed");
-      toast({ title: "Lot recosted", description: `${lot.sku} ${lot.lot_number} → $${(perVariant ?? 0).toFixed(4)}/unit` });
+      toast({ title: "Lot recosted", description: `${lot.sku} ${lot.lot_number}: cost correction saved.` });
       qc.invalidateQueries({ queryKey: ["/api/cogs/lots"] });
       qc.invalidateQueries({ queryKey: ["/api/cogs/valuation"] });
       onClose();
-    } catch (e: any) {
-      toast({ title: "Error", description: e.message, variant: "destructive" });
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : "Recost failed";
+      toast({ title: "Error", description: `${message}. Refresh the lot and verify its recorded cost before trying again.`, variant: "destructive" });
     } finally {
       setBusy(false);
     }
@@ -728,27 +711,29 @@ function RecostLotDialog({ lot, onClose }: { lot: any; onClose: () => void }) {
         <DialogHeader>
           <DialogTitle>Recost lot {lot.lot_number}</DialogTitle>
           <DialogDescription>
-            {lot.sku} · pack of {upv} · current {formatCostCents(lot.total_unit_cost_cents || lot.unit_cost_cents)}/unit.
-            Enter the cost per piece; the lot is set to per-piece × {upv}. Cascades to booked COGS and is audit-logged.
+            {lot.sku} · current {formatDashboardLotCost(lot)}/lot unit.
+            Enter the product cost per piece. Existing packaging and freight costs are retained.
+            The correction also updates booked COGS and is recorded in cost history.
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-3">
           <div>
-            <Label className="text-xs">Cost per piece ($)</Label>
+            <Label className="text-xs">Product cost per piece ($)</Label>
             <Input
               type="number"
               inputMode="decimal"
               step="0.0001"
               value={perPiece}
+              aria-invalid={!input.valid && input.error !== null}
               placeholder="0.0000"
               onChange={(e) => setPerPiece(e.target.value)}
               autoFocus
             />
-            {valid && (
+            {input.valid ? (
               <p className="mt-1 text-xs text-muted-foreground">
-                → <span className="font-mono font-medium">${(perVariant ?? 0).toFixed(4)}</span> per unit (×{upv})
+                Entered product cost per piece: <span className="font-mono font-medium">{formatDashboardMills(input.perPieceMills)}</span>
               </p>
-            )}
+            ) : input.error && <p role="alert" className="mt-1 text-xs text-destructive">{input.error}</p>}
           </div>
           <div>
             <Label className="text-xs">Reason (optional)</Label>
@@ -757,7 +742,7 @@ function RecostLotDialog({ lot, onClose }: { lot: any; onClose: () => void }) {
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onClose}>Cancel</Button>
-          <Button onClick={save} disabled={!valid || busy}>{busy ? "Saving…" : "Recost lot"}</Button>
+          <Button onClick={save} disabled={!input.valid || busy}>{busy ? "Saving…" : "Recost lot"}</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>
@@ -856,19 +841,19 @@ function OrderCOGSSection() {
             <Card>
               <CardContent className="pt-4 pb-3">
                 <p className="text-xs text-muted-foreground">Order Total</p>
-                <p className="text-xl font-bold">{formatDollarsCents(cogsData.totalRevenueCents)}</p>
+                <p className="text-xl font-bold">{formatDashboardCents(cogsData.totalRevenueCents)}</p>
               </CardContent>
             </Card>
             <Card>
               <CardContent className="pt-4 pb-3">
                 <p className="text-xs text-muted-foreground">COGS</p>
-                <p className="text-xl font-bold text-red-600">{formatDollarsCents(cogsData.totalCogsCents)}</p>
+                <p className="text-xl font-bold text-red-600">{formatDashboardCents(cogsData.totalCogsCents)}</p>
               </CardContent>
             </Card>
             <Card>
               <CardContent className="pt-4 pb-3">
                 <p className="text-xs text-muted-foreground">Gross Margin</p>
-                <p className="text-xl font-bold text-green-600">{formatDollarsCents(cogsData.grossMarginCents)}</p>
+                <p className="text-xl font-bold text-green-600">{formatDashboardCents(cogsData.grossMarginCents)}</p>
               </CardContent>
             </Card>
             <Card>
@@ -907,7 +892,7 @@ function OrderCOGSSection() {
                       </div>
                       <div className="flex items-center gap-4 text-sm shrink-0">
                         <div className="text-right">
-                          <p className="font-mono text-xs">COGS: {formatDollarsCents(item.cogsCents)}</p>
+                          <p className="font-mono text-xs">COGS: {formatDashboardCents(item.cogsCents)}</p>
                         </div>
                         <div className="text-right">
                           <p className={`font-mono text-xs font-medium ${item.marginCents >= 0 ? "text-green-600" : "text-red-600"}`}>
@@ -933,8 +918,8 @@ function OrderCOGSSection() {
                               <TableRow key={i}>
                                 <TableCell className="font-mono text-xs">{lb.lotNumber}</TableCell>
                                 <TableCell className="text-right font-mono text-xs">{lb.qty}</TableCell>
-                                <TableCell className="text-right font-mono text-xs">{formatCostCents(lb.unitCostCents)}</TableCell>
-                                <TableCell className="text-right font-mono text-xs">{formatDollarsCents(lb.totalCostCents)}</TableCell>
+                                <TableCell className="text-right font-mono text-xs">{formatDashboardCents(lb.unitCostCents)}</TableCell>
+                                <TableCell className="text-right font-mono text-xs">{formatDashboardCents(lb.totalCostCents)}</TableCell>
                               </TableRow>
                             ))}
                           </TableBody>
@@ -1179,7 +1164,7 @@ function ManualEntrySection() {
       <Card>
         <CardHeader>
           <CardTitle className="text-lg">Manual Cost Lots</CardTitle>
-          <CardDescription>Manually entered cost lots. Can be edited or deleted if unconsumed.</CardDescription>
+          <CardDescription>Manually entered cost lots. Can be edited or deleted if unconsumed. {RECORDED_LOT_UNITS_NOTE}</CardDescription>
         </CardHeader>
         <CardContent>
           {lotsLoading ? (
@@ -1193,9 +1178,9 @@ function ManualEntrySection() {
                     <TableHead className="text-xs">SKU</TableHead>
                     <TableHead className="text-xs">Product</TableHead>
                     <TableHead className="text-xs">Batch</TableHead>
-                    <TableHead className="text-xs text-right">Qty</TableHead>
-                    <TableHead className="text-xs text-right">Cost/pc</TableHead>
-                    <TableHead className="text-xs text-right">Consumed</TableHead>
+                    <TableHead className="text-xs text-right">Lot Units</TableHead>
+                    <TableHead className="text-xs text-right">Cost / Lot Unit</TableHead>
+                    <TableHead className="text-xs text-right">Consumed Units</TableHead>
                     <TableHead className="text-xs">Created</TableHead>
                     <TableHead className="text-xs"></TableHead>
                   </TableRow>
@@ -1218,7 +1203,7 @@ function ManualEntrySection() {
                         {Number(lot.qty_on_hand || 0).toLocaleString()}
                       </TableCell>
                       <TableCell className="text-right font-mono text-xs">
-                        {formatCostCents(lot.total_unit_cost_cents || lot.po_unit_cost_cents)}
+                        {formatDashboardLotCost({ ...lot, unit_cost_cents: lot.po_unit_cost_cents })}
                       </TableCell>
                       <TableCell className="text-right font-mono text-xs">
                         {Number(lot.qty_consumed || 0).toLocaleString()}
@@ -1465,14 +1450,14 @@ function AdjustmentsSection() {
                       <TableCell className="font-mono text-xs">{adj.lotNumber}</TableCell>
                       <TableCell className="font-mono text-xs">{adj.sku}</TableCell>
                       <TableCell className="text-right font-mono text-xs">
-                        {formatCostCents(adj.oldCostCents)}
+                        {formatDashboardCents(adj.oldCostCents)}
                       </TableCell>
                       <TableCell className="text-right font-mono text-xs font-medium">
-                        {formatCostCents(adj.newCostCents)}
+                        {formatDashboardCents(adj.newCostCents)}
                       </TableCell>
                       <TableCell className="text-right font-mono text-xs">
                         <span className={adj.deltaCents > 0 ? "text-red-600" : "text-green-600"}>
-                          {adj.deltaCents > 0 ? "+" : ""}{formatCostCents(adj.deltaCents)}
+                          {adj.deltaCents > 0 ? "+" : ""}{formatDashboardCents(adj.deltaCents)}
                         </span>
                       </TableCell>
                       <TableCell className="text-xs">
