@@ -279,6 +279,20 @@ describe("PostgresInventoryAvailabilityRuntimePublicationExecutor", () => {
     expect(database.latest).toMatchObject({ desired_revision: "2", state: "queued" });
   });
 
+  it("enqueues full authority evidence even when verified conservative quantity is identical", async () => {
+    const database = publicationDatabase();
+    const executor = executorFor(database);
+    await executor.execute((context) => context.enqueueFullPublications("44", [publicationIntent("4")]));
+    database.latest!.publication_phase = "conservative";
+    database.latest!.state = "verified";
+    await expect(executor.execute((context) =>
+      context.enqueueFullPublications("44", [publicationIntent("4")]))).resolves.toMatchObject({
+      enqueuedRows: 1, coalescedRows: 0,
+    });
+    expect(database.insertedRevisions).toEqual(["1", "2"]);
+    expect(database.latest).toMatchObject({ publication_phase: "full", state: "queued" });
+  });
+
   it("rolls back the authority transaction when an outbox row cannot enter the queue", async () => {
     const database = publicationDatabase({ failQueueTransition: true });
     const executor = executorFor(database);
@@ -338,6 +352,7 @@ function publicationDatabase(options: { failQueueTransition?: boolean } = {}) {
           const revision = String(values?.[3]);
           database.insertedRevisions.push(revision);
           database.latest = {
+            publication_phase: "full",
             activation_run_id: String(values?.[0]),
             state: "desired",
             desired_revision: revision,

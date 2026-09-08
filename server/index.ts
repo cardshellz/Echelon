@@ -34,6 +34,7 @@ import { startInboundTrackingScheduler } from "./modules/procurement/inbound-tra
 import { startCostReportingWorker } from "./modules/procurement/cost-reporting.service";
 import { startVariantAvailabilitySyncWorker } from "./modules/channels/variant-availability-sync.worker";
 import { startInventoryPublicationOutboxWorker } from "./modules/inventory-planning/application/inventory-publication-outbox.worker";
+import { startQuantityPublicationCatchupWorker } from "./modules/inventory-planning/application/quantity-publication-catchup.worker";
 import { startFinancialCommandRetentionWorker } from "./platform/commands/financial-command-retention.worker";
 import {
   startWebhookRetryWorker,
@@ -831,6 +832,12 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
 
       if (!schedulersDisabled("INVENTORY_PUBLICATION_WORKER_DISABLED")) {
         startInventoryPublicationOutboxWorker(services.inventoryPublicationOutbox);
+        const catchupWorker = startQuantityPublicationCatchupWorker(services.quantityPublicationCatchup);
+        httpServer.once("close", () => {
+          void catchupWorker.stop().catch(() => {
+            console.error(JSON.stringify({ event: "quantity_publication_catchup_shutdown_failed", code: "PUBLICATION_CATCHUP_SHUTDOWN_FAILED" }));
+          });
+        });
       } else {
         logSchedulerDisabled(
           "scheduler",

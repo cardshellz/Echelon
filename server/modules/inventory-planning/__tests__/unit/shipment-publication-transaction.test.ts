@@ -6,8 +6,12 @@ import {
 } from "../../infrastructure/inventory-availability-runtime-publication.repository";
 import { shipmentPublicationIntent } from "../fixtures/shipment-publication.fixture";
 
-function setup(options: { authority?: "legacy" | "canonical"; state?: string; busy?: boolean; isolation?: string; readOnly?: string } = {}) {
+function setup(options: { authority?: "legacy" | "canonical"; state?: string; busy?: boolean; isolation?: string; readOnly?: string; ownsFence?: boolean } = {}) {
   const query = vi.fn(async (sql: string) => {
+    if (sql.includes("assert_cutover_admission_fence_owner")) {
+      if (!options.ownsFence) throw Object.assign(new Error("Exclusive cutover admission is not owned."), { code: "55000" });
+      return { rows: [{ epoch: "9" }] };
+    }
     if (sql.includes("current_setting")) return { rows: [{ isolation: options.isolation ?? "serializable", read_only: options.readOnly ?? "off" }] };
     if (sql.includes("FROM inventory.availability_runtime_authority")) return { rows: [{
       authority: options.authority ?? "canonical", authority_revision: "1",
@@ -28,12 +32,26 @@ function setup(options: { authority?: "legacy" | "canonical"; state?: string; bu
 }
 
 describe("shipment publication transaction ownership", () => {
-  it.each([{ isolation: "read committed" }, { readOnly: "on" }])("rejects an unsuitable transaction %j", async options => {
+  it.each([{ isolation: "repeatable read" }, { readOnly: "on" }])("rejects an unsuitable transaction %j", async options => {
     const { executor, query } = setup(options);
     const work = vi.fn();
     await expect(executor.execute(work)).rejects.toMatchObject({ code: "INVENTORY_PUBLICATION_TRANSACTION_REQUIRED" });
     expect(work).not.toHaveBeenCalled();
     expect(query).toHaveBeenCalledTimes(1);
+  });
+  it("rejects read committed without exclusive database admission before invoking work", async () => {
+    const { executor, query } = setup({ isolation: "read committed" });
+    const work = vi.fn();
+    await expect(executor.execute(work)).rejects.toMatchObject({ code: "55000" });
+    expect(work).not.toHaveBeenCalled();
+    expect(query).toHaveBeenCalledTimes(2);
+  });
+  it("allows read committed only after the database attests exclusive cutover ownership", async () => {
+    const { executor, query } = setup({ isolation: "read committed", ownsFence: true });
+    await expect(executor.execute(context => context.enqueueFullPublications("1", [shipmentPublicationIntent()])))
+      .resolves.toMatchObject({ enqueuedRows: 1 });
+    expect(query.mock.calls[1][0]).toContain("assert_cutover_admission_fence_owner");
+    expect(query.mock.calls.some(([sql]) => /^(BEGIN|COMMIT|ROLLBACK)/i.test(sql.trim()))).toBe(false);
   });
   it("stages the real outbox owner without acquiring, controlling or releasing a transaction", async () => {
     const { executor, query } = setup();

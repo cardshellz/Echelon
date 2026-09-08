@@ -201,6 +201,32 @@ describe("historical ShipStation contents correction planning", () => {
     expect(plan.blockers.map((entry) => entry.code)).toEqual(["canonical_claim_correction_required"]);
   });
 
+  it.each([0, 1, 2, 3])("preserves operational receipt ownership at provider quantity %s", (quantity) => {
+    const line = canonicalLine();
+    const plan = planHistoricalShipStationContentsCorrection(facts({
+      providerLines: quantity === 0 ? [] : [{ sku: "SKU-A", quantity }],
+      wmsLines: [{
+        ...line,
+        inventoryShipTransactions: [{
+          ...line.inventoryShipTransactions[0],
+          quantitySource: "operational_dispatch_receipt",
+        }],
+      }],
+    }));
+
+    expect(plan.lines[0]).toMatchObject({
+      recordedInventoryQuantity: 2,
+      inventoryQuantityDelta: quantity - 2,
+      inventoryAction: quantity === 2 ? "none" : "unknown",
+      packageLineAdjustments: [],
+      restorations: [],
+    });
+    expect(plan.evidenceComplete).toBe(quantity === 2);
+    expect(plan.blockers.map((entry) => entry.code)).toEqual(
+      quantity === 2 ? [] : ["canonical_claim_correction_required"],
+    );
+  });
+
   it.each([1, 2, 3, 5])("does not invent retention/restoration authority for mixed legacy and canonical SKU quantities at %s", (quantity) => {
     const legacy = facts().wmsLines[0];
     const plan = planHistoricalShipStationContentsCorrection(facts({

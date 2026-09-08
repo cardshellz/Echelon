@@ -100,6 +100,8 @@ type AtpService = {
 export interface SyncOrchestratorConfig {
   /** If true, log what would happen without making external API calls */
   dryRun: boolean;
+  /** Durable catch-up must send current quantities even when an old feed watermark matches. */
+  forceInventoryPublication?: boolean;
 }
 
 export interface InventorySyncResult {
@@ -457,7 +459,7 @@ class EchelonSyncOrchestrator {
         }
 
         // Skip if unchanged
-        if (previousQty !== null && previousQty === a.allocatedUnits) {
+        if (!config.forceInventoryPublication && previousQty !== null && previousQty === a.allocatedUnits) {
           result.variantsSkipped++;
           result.details.push({
             productId,
@@ -800,7 +802,7 @@ class EchelonSyncOrchestrator {
     // Filter unchanged aggregates based on previousQty
     const changedItems = pushItems.filter((item) => {
       const detail = result.details.find((d) => d.variantId === item.variantId);
-      return detail?.previousQty == null || detail.previousQty !== item.allocatedQty;
+      return config.forceInventoryPublication || detail?.previousQty == null || detail.previousQty !== item.allocatedQty;
     });
 
     // Execute atomic channel push for all changed variants

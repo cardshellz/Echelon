@@ -345,6 +345,7 @@ export async function persistCanonicalWmsPickProgress(
     orderItemId: number;
     targetVariantId?: number;
     warehouseLocationId?: number;
+    unpickedWarehouseLocationIds?: readonly number[];
     progress?: CanonicalWmsPickProgress;
     occurredAt: Date;
   },
@@ -360,12 +361,12 @@ export async function persistCanonicalWmsPickProgress(
 
   if (input.movementType === "pick") {
     if (progress.targetStatus !== "completed"
-      || progress.targetPickedQuantity !== input.movementQuantity
+      || progress.targetPickedQuantity - progress.expectedPickedQuantity !== input.movementQuantity
       || progress.expectedPickedQuantity > progress.targetPickedQuantity
       || !["pending", "in_progress", "short"].includes(progress.expectedStatus)) {
       throw new WmsOrderItemCommandError(
         "INVALID_WMS_PICK_PROGRESS",
-        "A canonical runtime pick must atomically complete the full WMS order-item quantity.",
+        "A canonical runtime pick must add only the remaining quantity while atomically completing the full WMS target.",
         { orderItemId: input.orderItemId, progress, movementQuantity: input.movementQuantity },
       );
     }
@@ -431,6 +432,20 @@ export async function persistCanonicalWmsPickProgress(
     );
   }
 
+  if (expectedTargetQuantity === 0) {
+    if (input.targetVariantId == null || !input.unpickedWarehouseLocationIds?.length
+      || input.unpickedWarehouseLocationIds.length > 1000) {
+      throw new WmsOrderItemCommandError(
+        "INVALID_WMS_UNPICK_PROGRESS",
+        "A full canonical unpick requires its exact variant and bounded released source locations.",
+        { orderItemId: input.orderItemId },
+      );
+    }
+    assertPositiveInteger(input.targetVariantId, "targetVariantId");
+    for (const locationId of input.unpickedWarehouseLocationIds) {
+      assertPositiveInteger(locationId, "unpickedWarehouseLocationId");
+    }
+  }
   const updated = await executor.query(
     `UPDATE wms.order_items
      SET status = $1,
@@ -456,6 +471,41 @@ export async function persistCanonicalWmsPickProgress(
       "WMS_PICK_PROGRESS_CHANGED",
       "The WMS order item changed while its canonical unpick was being recorded.",
       { orderId: input.orderId, orderItemId: input.orderItemId, progress },
+    );
+  }
+  if (expectedTargetQuantity === 0) {
+    // A planned source bin is a pick projection, not immutable shipment evidence.
+    // Clear only the custody just fully returned so a later pick can stamp its
+    // actual bin. Once any shipment/physical evidence exists, never rewrite it.
+    await executor.query(
+      `UPDATE wms.outbound_shipment_items AS shipment_item
+       SET from_location_id = NULL
+       FROM wms.outbound_shipments AS shipment
+       WHERE shipment_item.shipment_id = shipment.id
+         AND shipment.order_id = $1
+         AND shipment.status IN ('planned', 'queued')
+         AND shipment_item.order_item_id = $2
+         AND shipment_item.product_variant_id = $3
+         AND shipment_item.shipment_item_purpose = 'customer_fulfillment'
+         AND shipment_item.from_location_id = ANY($4::integer[])
+         AND NOT EXISTS (
+           SELECT 1 FROM wms.physical_shipment_items physical
+           WHERE physical.legacy_wms_shipment_item_id = shipment_item.id
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM inventory.availability_claim_dispatch_receipts receipt
+           WHERE receipt.source_shipment_item_id = shipment_item.id
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM inventory.inventory_transactions posting
+           WHERE posting.transaction_type = 'ship'
+             AND (posting.shipment_item_id = shipment_item.id OR (
+               posting.shipment_item_id IS NULL
+               AND posting.shipment_id = shipment_item.shipment_id
+               AND posting.order_item_id = shipment_item.order_item_id
+             ))
+         )`,
+      [input.orderId, input.orderItemId, input.targetVariantId, input.unpickedWarehouseLocationIds],
     );
   }
   await executor.query(

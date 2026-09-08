@@ -1039,7 +1039,7 @@ describe("ShipStation unmapped physical remediation", () => {
     expect(allSql).toContain("shipstation_original_identity_restored");
   });
 
-  it("records a legacy omission from exact original posting evidence without new inventory authority", async () => {
+  it.each([false, true])("records an omission from exact original posting evidence (canonical=%s) without new inventory authority", async (canonical) => {
     const calls: string[] = [];
     const db: any = {
       transaction: async (work: (tx: any) => Promise<unknown>) => work(db),
@@ -1060,7 +1060,7 @@ describe("ShipStation unmapped physical remediation", () => {
             source_item_purpose: "customer_fulfillment",
             source_shipment_status: "shipped",
             source_candidate_count: 1,
-            source_inventory_ship_evidence: [originalInventoryPosting(false)],
+            source_inventory_ship_evidence: [originalInventoryPosting(canonical)],
             existing_correction_quantity: 0,
           }] };
         }
@@ -1155,7 +1155,6 @@ describe("ShipStation unmapped physical remediation", () => {
 
   it.each([
     { evidence: [], message: "SKU SKU-A has no complete original inventory shipment posting" },
-    { evidence: [originalInventoryPosting(true)], message: "has 1 recorded canonical shipped units; omission correction is not yet supported" },
     { evidence: [{ ...originalInventoryPosting(true), receipt: null }], message: "Canonical dispatch marker and receipt must both be present" },
     { evidence: [{ ...originalInventoryPosting(true), variantQtyDelta: -1 }], message: "without another on-hand" },
     { evidence: [originalInventoryPosting(true), originalInventoryPosting(false)], message: "cannot be combined" },

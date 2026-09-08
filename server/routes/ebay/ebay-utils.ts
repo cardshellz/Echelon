@@ -1,6 +1,7 @@
 import { eq } from "drizzle-orm";
 import { createAuthorityAwareInventoryAtpService } from "../../modules/inventory-planning/infrastructure/inventory-availability-runtime-atp.repository";
 import https from "https";
+import { createProviderRequestDeadline, boundedProviderRetryAfterSeconds } from "../../modules/channels/provider-request-limits";
 import { db, pool } from "../../db";
 export const atpService = createAuthorityAwareInventoryAtpService(pool);
 import { channelConnections } from "@shared/schema";
@@ -93,8 +94,10 @@ export function ebayApiRequest(
     environment === "sandbox" ? "api.sandbox.ebay.com" : "api.ebay.com";
 
   return new Promise((resolve, reject) => {
+    const deadline = createProviderRequestDeadline();
     const payload = body ? JSON.stringify(body) : undefined;
     const options: https.RequestOptions = {
+      signal: deadline.signal,
       hostname,
       path,
       method,
@@ -109,12 +112,14 @@ export function ebayApiRequest(
     };
 
     const req = https.request(options, (res) => {
+      res.on("error", error => { deadline.dispose(); reject(error); });
       let data = "";
       res.on("data", (chunk) => (data += chunk));
       res.on("end", () => {
+        deadline.dispose();
         // Handle 429 rate limiting with retry
         if (res.statusCode === 429 && retryCount < 3) {
-          const retryAfter = parseInt(res.headers["retry-after"] || "30", 10);
+          const retryAfter = boundedProviderRetryAfterSeconds(res.headers["retry-after"], 15);
           const waitMs = retryAfter * 1000;
           console.log(`[eBay API] Rate limited (429), waiting ${retryAfter}s before retry ${retryCount + 1}/3...`);
           setTimeout(() => {
@@ -144,7 +149,7 @@ export function ebayApiRequest(
       });
     });
 
-    req.on("error", reject);
+    req.on("error", error => { deadline.dispose(); reject(error); });
     if (payload) req.write(payload);
     req.end();
   });
@@ -178,12 +183,15 @@ export async function ebayApiRequestWithRateNotify(
     };
 
     const makeRequest = (attempt: number) => {
-      const req = https.request(options, (res) => {
+      const deadline = createProviderRequestDeadline();
+      const req = https.request({ ...options, signal: deadline.signal }, (res) => {
+        res.on("error", error => { deadline.dispose(); reject(error); });
         let data = "";
         res.on("data", (chunk) => (data += chunk));
         res.on("end", () => {
+          deadline.dispose();
           if (res.statusCode === 429 && attempt < 3) {
-            const retryAfter = parseInt(res.headers["retry-after"] || "30", 10);
+            const retryAfter = boundedProviderRetryAfterSeconds(res.headers["retry-after"], 15);
             console.log(`[eBay API] Rate limited (429), waiting ${retryAfter}s before retry ${attempt + 1}/3...`);
             if (onRateLimit) onRateLimit(retryAfter);
             setTimeout(() => makeRequest(attempt + 1), retryAfter * 1000);
@@ -197,7 +205,7 @@ export async function ebayApiRequestWithRateNotify(
           reject(new Error(`eBay API ${method} ${path} failed (${res.statusCode}): ${data.substring(0, 1000)}`));
         });
       });
-      req.on("error", reject);
+      req.on("error", error => { deadline.dispose(); reject(error); });
       if (payload) req.write(payload);
       req.end();
     };

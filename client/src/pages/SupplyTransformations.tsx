@@ -83,6 +83,8 @@ import {
 import { PromiseSafetyPolicyPanel } from "./promise-safety-policy-panel";
 import { InventoryCatalogBatchPanel } from "./inventory-catalog-batch-panel";
 import { InventoryCutoverPreflightPanel } from "./inventory-cutover-preflight-panel";
+import { InventoryCutoverControls } from "./inventory-cutover-controls";
+import { InventoryPublicationRecoveryPanel } from "./inventory-publication-recovery-panel";
 
 type DraftMutationInput =
   | { kind: "create"; request: CreateTransformationModelDraftRequest }
@@ -568,10 +570,11 @@ export default function SupplyTransformations() {
   });
 
   const openActivationQuery = useQuery({
-    queryKey: ["/api/inventory-planning/admin/activation-runs/open"],
-    queryFn: () => fetchJson(
+    queryKey: ["/api/inventory-planning/admin/activation-runs/open", user?.id],
+    queryFn: ({ signal }) => fetchJson(
       "/api/inventory-planning/admin/activation-runs/open",
       openInventoryActivationStatusResponseSchema,
+      { signal, cache: "no-store" },
     ),
     enabled: canActivate,
     refetchInterval: (query) => query.state.data?.activation?.state === "publishing" ? 3_000 : false,
@@ -608,7 +611,7 @@ export default function SupplyTransformations() {
         title: result.state === "publication_verified"
           ? "Conservative preparation verified"
           : "Conservative publication queued",
-        description: "Legacy ATP and reservations remain authoritative. Canonical authority cannot be committed from this release.",
+        description: "Legacy ATP and reservations remain authoritative. Complete the final review below before explicitly switching authority.",
       });
     },
     onError: (error: Error) => {
@@ -638,13 +641,15 @@ export default function SupplyTransformations() {
         },
       );
     },
-    onSuccess: () => {
+    onSuccess: (result) => {
       activationAbortIdempotencyKey.current = null;
       setActivationAbortReason("");
       void openActivationQuery.refetch();
       toast({
         title: "Activation preparation aborted",
-        description: "The configuration freeze was released. Runtime authority remains legacy.",
+        description: result.publicationCatchupPending
+          ? "The configuration freeze was released. Legacy authority remains active; current-quantity catch-up is queued, not yet confirmed at providers."
+          : "The configuration freeze was released. Runtime authority remains legacy.",
       });
     },
     onError: (error: Error) => {
@@ -1053,6 +1058,7 @@ export default function SupplyTransformations() {
                       " "}{openActivationStatus.outbox.deadLetter} dead letter
                   </div>
                 )}
+                {displayedRuntimeAuthority === "legacy" && <>
                 {(openActivationStatus?.outbox.leased ?? 0) > 0 && (
                   <div className="text-xs text-amber-800">
                     Wait for {openActivationStatus!.outbox.leased} in-flight provider write(s) before aborting.
@@ -1072,7 +1078,8 @@ export default function SupplyTransformations() {
                   type="button"
                   variant="destructive"
                   disabled={
-                    !activationAbortReason.trim()
+                    !canActivate
+                    || !activationAbortReason.trim()
                     || abortActivation.isPending
                     || openActivationQuery.isFetching
                     || (openActivationStatus?.outbox.leased ?? 0) > 0
@@ -1081,11 +1088,30 @@ export default function SupplyTransformations() {
                 >
                   {abortActivation.isPending ? "Aborting…" : "Abort preparation"}
                 </Button>
+                </>}
+                {displayedRuntimeAuthority !== undefined && (
+                  <InventoryCutoverControls
+                    key={`${user?.id}:${displayedActivationId}:${displayedRuntimeAuthority}`}
+                    actorId={user?.id ?? null}
+                    canActivate={canActivate && !activationStatusUnavailable}
+                    activationRunId={displayedActivationId}
+                    runtimeAuthority={displayedRuntimeAuthority}
+                    onStateChanged={() => { void openActivationQuery.refetch(); }}
+                  />
+                )}
               </div>
             )}
           </div>
         </CardContent>
       </Card>
+
+      <InventoryPublicationRecoveryPanel
+        key={`${user?.id}:${displayedActivationId ?? "latest"}`}
+        actorId={user?.id ?? null}
+        canActivate={canActivate}
+        activationRunId={displayedActivationId ?? null}
+        onStateChanged={() => { void openActivationQuery.refetch(); }}
+      />
 
       <Card>
         <CardHeader><CardTitle>Select a product</CardTitle></CardHeader>

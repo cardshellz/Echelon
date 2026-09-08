@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 import { shipmentQuantityEvidenceProjection } from "../inventory/infrastructure/shipment-quantity-evidence.sql";
-import { readSourceShipmentPostedQuantity, SourceShipmentQuantityEvidenceError } from "../inventory/domain/source-shipment-quantity-evidence";
+import { readSourceShipmentPostedQuantity } from "../inventory/domain/source-shipment-quantity-evidence";
 
 import type {
   ShipStationService,
@@ -1538,15 +1538,8 @@ async function prepareLines(
       if (posting.quantity < sourceQuantity) {
         throw new Error(`SKU ${mapping.sku} has no complete original inventory shipment posting`);
       }
-      // Migration183 still requires a negative ship delta for omission adoption.
-      // Do not let a correctly quantified canonical receipt pass into the later
-      // legacy cascade after original-source physical projection has committed.
-      if (posting.source === "canonical_dispatch_receipt") {
-        throw new SourceShipmentQuantityEvidenceError(
-          `SKU ${mapping.sku} has ${posting.quantity} recorded canonical shipped units; omission correction is not yet supported by the database proof contract. No omission adoption was started.`,
-          Object.freeze(postingIdentity), "CANONICAL_OMISSION_CORRECTION_UNAVAILABLE",
-        );
-      }
+      // Migration234 accepts this same exact receipt/journal proof. An omission
+      // projects another physical package only; the source keeps inventory authority.
       correctionQuantityBySourceItem.set(
         sourceShipmentItemId,
         (correctionQuantityBySourceItem.get(sourceShipmentItemId) ?? 0) + mapping.quantity,

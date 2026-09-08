@@ -16,6 +16,7 @@ import { createAuthorityAwareInventoryPublicationService } from "../server/modul
 import { createAllocationEngine } from "../server/modules/channels/allocation-engine.service";
 import { createSourceLockService } from "../server/modules/channels/source-lock.service";
 import { createShopifyAdapter } from "../server/modules/channels/adapters/shopify.adapter";
+import { PostgresQuantityPublicationAdmission } from "../server/modules/inventory-planning/infrastructure/quantity-publication-admission.repository";
 import { createEbayAdapter } from "../server/modules/channels/adapters/ebay.adapter";
 import { ChannelAdapterRegistry } from "../server/modules/channels/channel-adapter.interface";
 import { createChannelProductPushService } from "../server/modules/channels/product-push.service";
@@ -56,7 +57,7 @@ async function main() {
   const sourceLockService = createSourceLockService(db);
   const realAdapter = channel.provider === "ebay"
     ? createEbayAdapter(db)
-    : createShopifyAdapter(db);
+    : createShopifyAdapter(db, new PostgresQuantityPublicationAdmission(pool));
   const productPushService = createChannelProductPushService(db);
 
   // Create a channel-gating proxy: only pushes to target channel, blocks all others

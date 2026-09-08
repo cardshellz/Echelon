@@ -187,6 +187,33 @@ export async function loadActivePublicationTargets(
   productVariantIds: readonly number[],
   channelId?: number,
 ): Promise<ActiveInventoryPublicationTargetSnapshot[]> {
+  return loadSelectedPublicationTargets(client, productId, productVariantIds, channelId, false);
+}
+
+/**
+ * Projects draft-preferred preview targets into their proposed post-cutover state.
+ * It writes nothing and must never be used by a live runtime reader/publisher.
+ */
+export async function loadProposedPublicationTargetsForCutover(
+  client: InventoryAvailabilityTransactionQueryClient,
+  productId: number,
+  productVariantIds: readonly number[],
+): Promise<ActiveInventoryPublicationTargetSnapshot[]> {
+  return loadSelectedPublicationTargets(client, productId, productVariantIds, undefined, true);
+}
+
+async function loadSelectedPublicationTargets(
+  client: InventoryAvailabilityTransactionQueryClient,
+  productId: number,
+  productVariantIds: readonly number[],
+  channelId: number | undefined,
+  proposed: boolean,
+): Promise<ActiveInventoryPublicationTargetSnapshot[]> {
+  const targetState = proposed ? "preview" : "live";
+  const bindingPointer = proposed ? "COALESCE(head.draft_binding_id, head.active_binding_id)" : "head.active_binding_id";
+  const policyPointer = proposed ? "COALESCE(head.draft_policy_id, head.active_policy_id)" : "head.active_policy_id";
+  const mappingPointer = proposed ? "COALESCE(head.draft_mapping_id, head.active_mapping_id)" : "head.active_mapping_id";
+  const definitionStates = proposed ? "('draft', 'sealed')" : "('sealed')";
   const targetValues: unknown[] = [];
   const channelFilter = channelId == null ? "" : "AND target.channel_id = $1";
   if (channelId != null) targetValues.push(positiveInteger(channelId, "channelId"));
@@ -210,7 +237,7 @@ export async function loadActivePublicationTargets(
      JOIN channels.channels AS policy_channel ON policy_channel.id = target.channel_id
      LEFT JOIN dropship.dropship_store_connections AS dropship_connection
        ON dropship_connection.id = target.dropship_store_connection_id
-     WHERE target.state = 'live'
+     WHERE target.state = '${targetState}'
        AND target.publication_authority = 'echelon'
        ${channelFilter}
      ORDER BY target.id`,
@@ -234,8 +261,8 @@ export async function loadActivePublicationTargets(
      LEFT JOIN inventory.publication_source_binding_heads AS head
        ON head.publication_target_id = target.id
      LEFT JOIN inventory.publication_source_binding_versions AS binding
-       ON binding.id = head.active_binding_id
-      AND binding.lifecycle_status = 'sealed'
+       ON binding.id = ${bindingPointer}
+      AND binding.lifecycle_status IN ${definitionStates}
      LEFT JOIN inventory.publication_source_binding_members AS member
        ON member.binding_id = binding.id
      LEFT JOIN warehouse.fulfillment_nodes AS node
@@ -262,8 +289,8 @@ export async function loadActivePublicationTargets(
             policy.min_publish_sellable_units::text AS min_publish_sellable_units
      FROM inventory.channel_exposure_policy_heads AS head
      JOIN inventory.channel_exposure_policy_versions AS policy
-       ON policy.id = head.active_policy_id
-      AND policy.lifecycle_status = 'sealed'
+       ON policy.id = ${policyPointer}
+      AND policy.lifecycle_status IN ${definitionStates}
      WHERE head.channel_id = ANY($1::integer[])
        AND (policy.scope_type = 'channel' OR policy.product_id = $2)
      ORDER BY head.channel_id, head.scope_key`,
@@ -281,8 +308,8 @@ export async function loadActivePublicationTargets(
                   mapping.external_sku
            FROM inventory.publication_variant_mapping_heads AS head
            JOIN inventory.publication_variant_mapping_versions AS mapping
-             ON mapping.id = head.active_mapping_id
-            AND mapping.lifecycle_status = 'sealed'
+             ON mapping.id = ${mappingPointer}
+            AND mapping.lifecycle_status IN ${definitionStates}
            WHERE head.publication_target_id = ANY($1::integer[])
              AND head.product_variant_id = ANY($2::integer[])
            ORDER BY head.publication_target_id, head.product_variant_id`,
@@ -315,6 +342,7 @@ export async function loadActivePublicationTargets(
         dropshipStoreConnectionId,
       });
     }
+    literal(row.publication_target_state, targetState, "publicationTarget.state");
     return {
       publicationTargetId,
       publicationTargetRevision: positiveBigintString(
@@ -330,7 +358,9 @@ export async function loadActivePublicationTargets(
       providerScopeType: providerScopeType(row.provider_scope_type),
       externalScopeId: nonblank(row.external_scope_id, "publicationTarget.externalScopeId"),
       publicationAuthority: literal(row.publication_authority, "echelon", "publicationTarget.authority"),
-      publicationTargetState: literal(row.publication_target_state, "live", "publicationTarget.state"),
+      // A proposal describes the state after activation; assert the actual source
+      // row separately so this never relabels an unexpected state as publishable.
+      publicationTargetState: "live",
       sourceBinding: bindings.get(publicationTargetId) ?? null,
       policies: policies.get(channelId) ?? [],
       mappings: mappings.get(publicationTargetId) ?? [],

@@ -983,7 +983,8 @@ export function redactSensitiveUrl(rawUrl: string): string {
 export interface ShipStationInventoryRecorder {
   recordShipment(input: InventoryShipmentRuntimeInput): Promise<void>;
   recordReplacementShipmentFromAvailableInventory:
-    InventoryUseCases["recordReplacementShipmentFromAvailableInventory"];
+    (input: Parameters<InventoryUseCases["recordReplacementShipmentFromAvailableInventory"]>[0]) =>
+      Promise<{ warehouseLocationId: number; alreadyRecorded: boolean; preserveSourceLocation?: true }>;
 }
 
 export function createShipStationService(
@@ -2532,7 +2533,9 @@ export function createShipStationService(
               shipmentItemId: item.id,
               userId: "system:shipstation:v2",
             });
-            await db.execute(sql`
+            // Canonical operational receipts own their actual allocated bin.
+            // Keep the old source hint immutable; only the legacy owner projects it.
+            if (!recorded.preserveSourceLocation) await db.execute(sql`
               UPDATE wms.outbound_shipment_items
               SET from_location_id = ${recorded.warehouseLocationId}
               WHERE id = ${item.id}

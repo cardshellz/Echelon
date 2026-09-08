@@ -12,7 +12,8 @@ import type {
   EbayInventoryItemGroup,
   EbayOffer,
 } from "../../modules/channels/adapters/ebay/ebay-types";
-import { ebayApiRequest, ebayApiRequestWithRateNotify } from "./ebay-utils";
+import { ebayApiRequest, ebayApiRequestWithRateNotify, getAuthService, EBAY_CHANNEL_ID } from "./ebay-utils";
+import { ebayQuantityMutationIdentity, executeAdmittedEbayQuantityRequest, type EbayQuantityHttpRequest, type EbayQuantityRequestAdmission } from "../../modules/channels/quantity-publication-request";
 
 const ebayListingConnector = new EbayMarketplaceListingConnector();
 
@@ -45,6 +46,7 @@ export function normalizeEbayObservedOffers(response: unknown): EbayObservedOffe
 interface EbayRouteClientInput {
   accessToken: string;
   onRateLimit?: (waitSeconds: number) => void;
+  quantityAdmission?: () => Promise<EbayQuantityRequestAdmission>;
 }
 
 export interface EbayRouteListingLifecycleClient extends EbayListingConnectorClient {
@@ -63,21 +65,22 @@ export interface EbayRouteListingLifecycleClient extends EbayListingConnectorCli
 }
 
 function createEbayRouteRequest(input: EbayRouteClientInput) {
+  const raw = async <T>(request: EbayQuantityHttpRequest): Promise<T> => input.onRateLimit
+    ? await ebayApiRequestWithRateNotify(request.method, request.path, input.accessToken, request.body, input.onRateLimit) as T
+    : await ebayApiRequest(request.method, request.path, input.accessToken, request.body) as T;
   return async <T>(
     method: string,
     path: string,
     body?: unknown,
   ): Promise<T> => {
-    if (input.onRateLimit) {
-      return (await ebayApiRequestWithRateNotify(
-        method,
-        path,
-        input.accessToken,
-        body,
-        input.onRateLimit,
-      )) as T;
-    }
-    return (await ebayApiRequest(method, path, input.accessToken, body)) as T;
+    if (!ebayQuantityMutationIdentity(method, path, body)) return raw<T>({ method, path, body });
+    const admission = input.quantityAdmission ? await input.quantityAdmission() : await (async () => {
+      const account = await getAuthService()?.getVerifiedProviderAccount(EBAY_CHANNEL_ID);
+      if (!account) throw new Error("Provider-verified eBay account identity is required for listing publication.");
+      const { createChannelEbayQuantityRequestAdmission } = await import("../../modules/inventory-planning/infrastructure/quantity-publication-runtime");
+      return createChannelEbayQuantityRequestAdmission({ channelId: EBAY_CHANNEL_ID, externalAccountId: account.externalAccountId });
+    })();
+    return executeAdmittedEbayQuantityRequest<T>({ method, path, body }, admission, raw);
   };
 }
 

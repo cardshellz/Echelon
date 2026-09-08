@@ -2,6 +2,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import type { Pool, PoolClient } from "pg";
 import * as schema from "@shared/schema";
 import type { InventoryUseCases } from "../../inventory/application/inventory.use-cases";
+import type { OperationalShipmentDispatcher } from "../../inventory/application/operational-shipment-dispatch.port";
 import type { CanonicalClaimDispatchSourceCommandResolver } from "../application/inventory-availability-dispatch-source-command.port";
 import {
   AuthorityAwareInventoryShipmentRecorder,
@@ -20,9 +21,11 @@ import { loadAndLockRuntimeAuthority } from "./inventory-availability-runtime-at
 export class PostgresInventoryShipmentRuntimeExecutor implements InventoryShipmentRuntimeExecutor {
   constructor(
     private readonly connectionPool: Pick<Pool, "connect">,
-    private readonly legacyOwner: Pick<InventoryUseCases, "recordShipmentInsideTransaction">,
+    private readonly legacyOwner: Pick<InventoryUseCases, "recordShipmentInsideTransaction">
+      & Partial<Pick<InventoryUseCases, "recordReplacementShipmentFromAvailableInventory">>,
     private readonly dispatcher: Pick<PostgresCanonicalClaimDispatchRepository, "dispatchPrepared">,
     private readonly sourceCommands: CanonicalClaimDispatchSourceCommandResolver,
+    private readonly operationalDispatcher?: OperationalShipmentDispatcher,
   ) {}
 
   async execute<T>(work: (context: InventoryShipmentRuntimeContext) => Promise<T>): Promise<T> {
@@ -46,15 +49,24 @@ export class PostgresInventoryShipmentRuntimeExecutor implements InventoryShipme
             await this.dispatcher.dispatchPrepared((transactionClient: PoolClient) =>
               this.sourceCommands.resolve(transactionClient, request));
           },
+          dispatchOperationalSource: this.operationalDispatcher
+            ? (request) => this.operationalDispatcher!.dispatch(request) : undefined,
         });
       }
       const transactionDb = drizzle(client, { schema });
       const result = await work({
         authority: "legacy",
         recordLegacy: (input) => this.legacyOwner.recordShipmentInsideTransaction(input, transactionDb),
+        recordLegacyReplacement: this.legacyOwner.recordReplacementShipmentFromAvailableInventory
+          ? async (input) => {
+            // The existing replacement owner starts and pins its own transaction.
+            // Release routing before invoking it; if cutover won the intervening
+            // race its own legacy-authority guard fails closed, never debits.
+            await client.query("COMMIT"); began = false; released = true; client.release();
+            return this.legacyOwner.recordReplacementShipmentFromAvailableInventory!(input);
+          } : undefined,
       });
-      await client.query("COMMIT");
-      began = false;
+      if (began) { await client.query("COMMIT"); began = false; }
       return result;
     } catch (error) {
       if (began) {
@@ -73,11 +85,13 @@ export class PostgresInventoryShipmentRuntimeExecutor implements InventoryShipme
 
 export function createAuthorityAwareInventoryShipmentRecorder(input: {
   connectionPool: Pick<Pool, "connect">;
-  legacyOwner: Pick<InventoryUseCases, "recordShipmentInsideTransaction">;
+  legacyOwner: Pick<InventoryUseCases, "recordShipmentInsideTransaction">
+    & Partial<Pick<InventoryUseCases, "recordReplacementShipmentFromAvailableInventory">>;
   dispatcher: Pick<PostgresCanonicalClaimDispatchRepository, "dispatchPrepared">;
   sourceCommands: CanonicalClaimDispatchSourceCommandResolver;
+  operationalDispatcher?: OperationalShipmentDispatcher;
 }): AuthorityAwareInventoryShipmentRecorder {
   return new AuthorityAwareInventoryShipmentRecorder(new PostgresInventoryShipmentRuntimeExecutor(
-    input.connectionPool, input.legacyOwner, input.dispatcher, input.sourceCommands,
+    input.connectionPool, input.legacyOwner, input.dispatcher, input.sourceCommands, input.operationalDispatcher,
   ));
 }

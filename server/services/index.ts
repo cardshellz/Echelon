@@ -130,6 +130,7 @@ import { createEchelonSyncOrchestrator } from "../modules/channels/echelon-sync-
 import { createVariantAvailabilitySyncService } from "../modules/channels/variant-availability-sync.service";
 import { InventoryPublicationOutboxService } from "../modules/inventory-planning/application/inventory-publication-outbox.service";
 import { PostgresInventoryPublicationOutboxRepository } from "../modules/inventory-planning/infrastructure/inventory-publication-outbox.repository";
+import { quantityPublicationAdmission, createQuantityPublicationCatchupService } from "../modules/inventory-planning/infrastructure/quantity-publication-runtime";
 import { InventoryPublicationReadbackService } from "../modules/inventory-planning/application/inventory-publication-readback.service";
 import { PostgresInventoryPublicationReadbackRepository } from "../modules/inventory-planning/infrastructure/inventory-publication-readback.repository";
 import { InventoryPublicationTransportRegistry } from "../modules/inventory-planning/application/inventory-publication-transport";
@@ -149,7 +150,9 @@ import { PostgresCanonicalClaimDispatchRepository } from "../modules/inventory-p
 import { PostgresCanonicalClaimDispatchSourceCommandResolver } from "../modules/inventory-planning/infrastructure/inventory-availability-dispatch-source-command.repository";
 import { WmsCanonicalClaimDispatchSourceOwner } from "../modules/wms/canonical-claim-dispatch-source";
 import { createAuthorityAwareInventoryShipmentRecorder } from "../modules/inventory-planning/infrastructure/inventory-availability-runtime-shipment.repository";
-import { publishCanonicalDispatchInsideTransaction } from "../modules/inventory-planning/infrastructure/inventory-availability-dispatch-publication";
+import { publishCanonicalDispatchInsideTransaction, publishOperationalShipmentInsideTransaction } from "../modules/inventory-planning/infrastructure/inventory-availability-dispatch-publication";
+import { PostgresOperationalShipmentDispatchRepository } from "../modules/inventory/infrastructure/operational-shipment-dispatch.repository";
+import { WmsOperationalShipmentSourceOwner } from "../modules/wms/operational-shipment-source";
 import { createAuthorityAwareInventoryPublicationService } from "../modules/inventory-planning/infrastructure/inventory-availability-runtime-publication.repository";
 import { productVariants as pvTable } from "@shared/schema";
 import { eq as eqOp } from "drizzle-orm";
@@ -181,6 +184,9 @@ export function createServices(
     legacyOwner: inventoryCore,
     dispatcher: canonicalDispatch,
     sourceCommands: new PostgresCanonicalClaimDispatchSourceCommandResolver(dispatchSourceOwner),
+    operationalDispatcher: new PostgresOperationalShipmentDispatchRepository(
+      databasePool, new WmsOperationalShipmentSourceOwner(), publishOperationalShipmentInsideTransaction, systemCanonicalClaimClock,
+    ),
   });
   const canonicalClaimBuild = new PostgresCanonicalClaimBuildRepository(canonicalClaimInventory);
   const canonicalClaimObservationReview = new PostgresCanonicalClaimPickerObservationReviewRepository();
@@ -335,7 +341,7 @@ export function createServices(
 
   const allocationEngine = createAllocationEngine(db, atp);
   const sourceLockService = createSourceLockService(db);
-  const shopifyAdapter = createShopifyAdapter(db);
+  const shopifyAdapter = createShopifyAdapter(db, quantityPublicationAdmission);
   const ebayAdapter = createEbayAdapter(db);
   const adapterRegistry = new ChannelAdapterRegistry();
   adapterRegistry.register(shopifyAdapter);
@@ -374,7 +380,22 @@ export function createServices(
   const inventoryPublicationOutbox = new InventoryPublicationOutboxService(
     new PostgresInventoryPublicationOutboxRepository(),
     inventoryPublicationTransports,
+    undefined,
+    undefined,
+    quantityPublicationAdmission,
   );
+  const quantityPublicationCatchup = createQuantityPublicationCatchupService({
+    refreshLegacyChannelProduct: async productId => {
+      const results = await echelonOrchestrator.syncInventoryForProduct(
+        productId, { dryRun: false, forceInventoryPublication: true }, "quantity_publication_catchup",
+      );
+      if (results.some(result => result.variantsErrored > 0 || result.details.some(detail => detail.error))) {
+        throw new Error("Current channel inventory catch-up returned publication failures.");
+      }
+      // The catch-up owner additionally requires exact successful scope evidence;
+      // empty/skipped orchestrator results alone never clear pending work.
+    },
+  });
   const inventoryPublicationReadback = new InventoryPublicationReadbackService(
     new PostgresInventoryPublicationReadbackRepository(),
     inventoryPublicationTransports,
@@ -516,7 +537,7 @@ export function createServices(
   const shipStation = createShipStationService(db, {
     recordShipment: (input) => shipmentInventory.recordShipment(input),
     recordReplacementShipmentFromAvailableInventory: (input) =>
-      inventoryCore.recordReplacementShipmentFromAvailableInventory(input),
+      shipmentInventory.recordReplacementShipmentFromAvailableInventory(input),
   }, {
     providerLabelObserver: carrierTracking,
     fulfillmentAuthority: channelFulfillmentAuthority,
@@ -606,6 +627,7 @@ export function createServices(
     echelonOrchestrator,
     variantAvailabilitySync,
     inventoryPublicationOutbox,
+    quantityPublicationCatchup,
     inventoryPublicationReadback,
     inventoryAvailabilityClaims,
     assemblyWork,

@@ -1,5 +1,6 @@
 import { z } from "zod";
-import type { RecordInventoryShipmentInput } from "../../inventory/application/inventory.use-cases";
+import type { RecordInventoryShipmentInput, RecordReplacementInventoryShipmentInput } from "../../inventory/application/inventory.use-cases";
+import type { OperationalShipmentRequest, OperationalShipmentResult } from "../../inventory/domain/operational-shipment-dispatch";
 import type { CanonicalClaimDispatchSourceRequest } from "./inventory-availability-dispatch-source-command.port";
 
 const id = z.number().int().positive().max(2_147_483_647);
@@ -23,8 +24,10 @@ const shipmentInputSchema = z.object({
 export type InventoryShipmentRuntimeInput = z.infer<typeof shipmentInputSchema>;
 
 export type InventoryShipmentRuntimeContext =
-  | { authority: "legacy"; recordLegacy(input: RecordInventoryShipmentInput): Promise<void> }
-  | { authority: "canonical"; dispatchSource(request: CanonicalClaimDispatchSourceRequest): Promise<void> };
+  | { authority: "legacy"; recordLegacy(input: RecordInventoryShipmentInput): Promise<void>;
+      recordLegacyReplacement?(input: RecordReplacementInventoryShipmentInput): Promise<{ warehouseLocationId: number; alreadyRecorded: boolean }> }
+  | { authority: "canonical"; dispatchSource(request: CanonicalClaimDispatchSourceRequest): Promise<void>;
+      dispatchOperationalSource?(request: OperationalShipmentRequest): Promise<OperationalShipmentResult> };
 
 export interface InventoryShipmentRuntimeExecutor {
   execute<T>(work: (context: InventoryShipmentRuntimeContext) => Promise<T>): Promise<T>;
@@ -40,6 +43,28 @@ export class InventoryShipmentRuntimeError extends Error {
 /** The channel supplies source identity, never the inventory authority or bin. */
 export class AuthorityAwareInventoryShipmentRecorder {
   constructor(private readonly executor: InventoryShipmentRuntimeExecutor) {}
+
+  async recordReplacementShipmentFromAvailableInventory(raw: RecordReplacementInventoryShipmentInput):
+    Promise<{ warehouseLocationId: number; alreadyRecorded: boolean; preserveSourceLocation?: true }> {
+    const input = z.object({
+      productVariantId: id, qty: id, warehouseId: id.nullable(), orderId: id,
+      orderItemId: id.nullable().optional(), shipmentId: id, shipmentItemId: id,
+      userId: z.string().trim().min(1).max(100).optional(),
+    }).strict().parse(raw);
+    return this.executor.execute(async (context) => {
+      if (context.authority === "legacy") {
+        if (!context.recordLegacyReplacement) throw new InventoryShipmentRuntimeError(
+          "LEGACY_REPLACEMENT_OWNER_UNAVAILABLE", "Legacy replacement owner is not connected.");
+        return context.recordLegacyReplacement(input);
+      }
+      if (!context.dispatchOperationalSource) throw new InventoryShipmentRuntimeError(
+        "OPERATIONAL_SHIPMENT_OWNER_UNAVAILABLE", "Canonical operational shipment owner is not connected.");
+      return context.dispatchOperationalSource({
+        orderId: input.orderId, outboundShipmentId: input.shipmentId, sourceShipmentItemId: input.shipmentItemId,
+        productVariantId: input.productVariantId, quantity: input.qty, actor: input.userId ?? "system:inventory-shipment",
+      });
+    });
+  }
 
   async recordShipment(rawInput: InventoryShipmentRuntimeInput): Promise<void> {
     const parsed = shipmentInputSchema.safeParse(rawInput);
@@ -57,9 +82,15 @@ export class AuthorityAwareInventoryShipmentRecorder {
         return context.recordLegacy({ ...input, warehouseLocationId: input.warehouseLocationId });
       }
       if (input.orderItemId === undefined || input.releaseReservation === false) {
-        throw new InventoryShipmentRuntimeError("CANONICAL_SHIPMENT_PURPOSE_UNSUPPORTED",
-          "Canonical dispatch requires an exact ordinary customer order line; concessions need their own custody command.",
+        if (!context.dispatchOperationalSource) throw new InventoryShipmentRuntimeError(
+          "CANONICAL_SHIPMENT_PURPOSE_UNSUPPORTED", "Canonical non-customer shipment owner is not connected.",
           { sourceShipmentItemId: input.shipmentItemId });
+        await context.dispatchOperationalSource({
+          orderId: input.orderId, outboundShipmentId: Number(input.shipmentId),
+          sourceShipmentItemId: input.shipmentItemId, productVariantId: input.productVariantId,
+          quantity: input.qty, actor: input.userId ?? "system:inventory-shipment",
+        });
+        return;
       }
       return context.dispatchSource({
         orderId: input.orderId,

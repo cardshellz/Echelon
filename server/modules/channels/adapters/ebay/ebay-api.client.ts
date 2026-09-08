@@ -11,6 +11,8 @@
 
 import type { EbayAuthService } from "./ebay-auth.service";
 import { ChannelFulfillmentProviderError } from "../../channel-fulfillment-provider.error";
+import { ebayQuantityMutationIdentity, executeAdmittedEbayQuantityRequest, type EbayQuantityRequestAdmission } from "../../quantity-publication-request";
+import { createProviderRequestDeadline, boundedProviderRetryAfterSeconds } from "../../provider-request-limits";
 import type {
   EbayInventoryItem,
   EbayOffer,
@@ -67,6 +69,7 @@ type HttpMethod = "GET" | "POST" | "PUT" | "DELETE";
 export interface EbayApiClientOptions {
   request?: typeof fetch;
   strictFulfillmentReadback?: boolean;
+  quantityAdmission?: () => Promise<EbayQuantityRequestAdmission>;
 }
 
 interface RequestOptions {
@@ -734,6 +737,17 @@ export class EbayApiClient {
   // -------------------------------------------------------------------------
 
   private async request<T = any>(options: RequestOptions): Promise<T> {
+    const identity = ebayQuantityMutationIdentity(options.method, options.path, options.body);
+    if (identity && !this.isDryRun) {
+      if (!this.options.quantityAdmission) throw new Error("QUANTITY_PUBLICATION_ADMISSION_REQUIRED: eBay quantity writes require an admitted owner.");
+      return executeAdmittedEbayQuantityRequest<T>(options, await this.options.quantityAdmission(),
+        request => this.requestUnadmitted({ ...options, ...request, method: request.method as HttpMethod,
+          expectNoContent: request.expectNoContent }));
+    }
+    return this.requestUnadmitted<T>(options);
+  }
+
+  private async requestUnadmitted<T = any>(options: RequestOptions): Promise<T> {
     const { method, path, body, headers: extraHeaders, expectNoContent } = options;
     const url = `${this.baseUrl}${path}`;
 
@@ -751,9 +765,11 @@ export class EbayApiClient {
     const accessToken = await this.authService.getAccessToken(this.channelId);
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      const deadline = createProviderRequestDeadline();
       try {
         const response = await (this.options.request ?? fetch)(url, {
           method,
+          signal: deadline.signal,
           headers: {
             Authorization: `Bearer ${accessToken}`,
             "Content-Type": "application/json",
@@ -770,10 +786,7 @@ export class EbayApiClient {
 
         // Rate limit handling
         if (response.status === 429) {
-          const retryAfter = parseInt(
-            response.headers.get("Retry-After") || "5",
-            10,
-          );
+          const retryAfter = boundedProviderRetryAfterSeconds(response.headers.get("Retry-After"), 5);
           console.warn(
             `[EbayApi] Rate limited on ${method} ${path}, ` +
             `retrying in ${retryAfter}s (attempt ${attempt}/${MAX_RETRIES})`,
@@ -826,6 +839,7 @@ export class EbayApiClient {
           );
         }
       } catch (err: any) {
+        if (deadline.signal.aborted) throw deadline.signal.reason;
         // Network errors — retry
         if (
           attempt < MAX_RETRIES &&
@@ -843,6 +857,8 @@ export class EbayApiClient {
           continue;
         }
         throw err;
+      } finally {
+        deadline.dispose();
       }
     }
 
@@ -876,5 +892,11 @@ export function createEbayApiClient(
     authService,
     channelId,
     environment || (process.env.EBAY_ENVIRONMENT as any) || "production",
+    { quantityAdmission: async () => {
+      const account = await authService.getVerifiedProviderAccount(channelId);
+      if (!account) throw new Error("Provider-verified eBay account identity is required for quantity publication.");
+      const { createChannelEbayQuantityRequestAdmission } = await import("../../../inventory-planning/infrastructure/quantity-publication-runtime");
+      return createChannelEbayQuantityRequestAdmission({ channelId, externalAccountId: account.externalAccountId });
+    } },
   );
 }

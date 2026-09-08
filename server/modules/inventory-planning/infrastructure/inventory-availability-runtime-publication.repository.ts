@@ -25,6 +25,7 @@ import {
   loadManagedSellableVariantIds,
 } from "./inventory-channel-exposure-runtime.repository";
 import { captureActiveSupplySnapshotInsideTransaction } from "./inventory-availability-shadow.repository";
+import { assertInventoryCutoverFenceHeldInsideTransaction } from "./inventory-cutover-admission-fence.repository";
 
 type ClientPool = Pick<Pool, "connect"> & { options?: { max?: number } };
 
@@ -71,6 +72,7 @@ interface MappingRow extends Record<string, unknown> {
 }
 
 interface LatestPublicationRow extends Record<string, unknown> {
+  publication_phase: string;
   state: string;
   desired_quantity: string;
   desired_revision: string;
@@ -156,7 +158,8 @@ export function createAuthorityAwareInventoryPublicationService(
 }
 
 /**
- * Uses only the caller's already-open SERIALIZABLE transaction. The caller must
+ * Uses the caller's SERIALIZABLE transaction, or READ COMMITTED only when the
+ * database attests exclusive ownership of the final cutover fence. The caller must
  * roll back the complete mutation on any error and retry the complete command,
  * never just this callback. No connection, transaction control or provider IO is
  * performed here. Canonical authority and active activation are mandatory.
@@ -174,7 +177,12 @@ implements InventoryAvailabilityRuntimePublicationExecutor {
     const settings = (await this.client.query<{ isolation: string; read_only: string }>(
       "SELECT current_setting('transaction_isolation') AS isolation, current_setting('transaction_read_only') AS read_only",
     )).rows;
-    if (settings.length !== 1 || settings[0].isolation !== "serializable" || settings[0].read_only !== "off") {
+    if (settings.length === 1 && settings[0].isolation === "read committed" && settings[0].read_only === "off") {
+      // The final cutover owns the DB-enforced exclusion barrier, which gives
+      // stronger write exclusion while permitting post-drain fresh snapshots.
+      // No arbitrary RC caller is accepted by this exception.
+      await assertInventoryCutoverFenceHeldInsideTransaction(this.client);
+    } else if (settings.length !== 1 || settings[0].isolation !== "serializable" || settings[0].read_only !== "off") {
       throw runtimeError("INVENTORY_PUBLICATION_TRANSACTION_REQUIRED",
         "Caller-owned publication requires a SERIALIZABLE read-write transaction.", {});
     }
@@ -580,7 +588,7 @@ async function enqueueFullPublications(
       );
     }
     const latest = (await client.query<LatestPublicationRow>(
-      `SELECT activation_run_id::text AS activation_run_id, state,
+      `SELECT activation_run_id::text AS activation_run_id, state, publication_phase,
               desired_revision::text AS desired_revision,
               desired_quantity::text AS desired_quantity,
               publication_target_revision_snapshot::text AS publication_target_revision_snapshot,
@@ -704,7 +712,8 @@ function sameDesiredPublication(
   activationRunId: string,
   intent: CanonicalInventoryPublicationIntent,
 ): boolean {
-  return String(row.activation_run_id) === activationRunId
+  return row.publication_phase === "full"
+    && String(row.activation_run_id) === activationRunId
     && String(row.desired_quantity) === intent.desiredQuantity
     && String(row.publication_target_revision_snapshot) === intent.publicationTargetRevision
     && Number(row.channel_id_snapshot) === intent.channelId

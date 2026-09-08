@@ -21,7 +21,7 @@ export class SourceShipmentQuantityEvidenceError extends Error {
 
 export interface SourceShipmentPostedQuantity {
   readonly quantity: number;
-  readonly source: "canonical_dispatch_receipt" | "legacy_on_hand_delta" | null;
+  readonly source: "canonical_dispatch_receipt" | "operational_dispatch_receipt" | "legacy_on_hand_delta" | null;
 }
 
 /** Quantifies existing postings only. It does not authorize a stock adjustment. */
@@ -59,7 +59,7 @@ export function readSourceShipmentPostedQuantity(raw: unknown, expected: SourceS
     }
     // A canonical source has exactly one full-source receipt. Combining it with
     // a legacy debit (or another receipt) would conceal double posting.
-    if (evidence.source === "canonical_dispatch_receipt" && rows.length !== 1) {
+    if (evidence.source !== "legacy_on_hand_delta" && rows.length !== 1) {
       fail("Canonical source shipment cannot be combined with other inventory postings.");
     }
     quantity += evidence.quantity;

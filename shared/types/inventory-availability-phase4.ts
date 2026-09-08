@@ -297,6 +297,7 @@ export const abortInventoryActivationRequestSchema = z.object({
 export const inventoryActivationCommandResultSchema = z.object({
   activationRunId: plannerPositiveQuantitySchema,
   commandType: z.enum(["prepare", "abort"]),
+  publicationCatchupPending: z.boolean().optional(),
   state: z.enum(["publishing", "publication_verified", "failed"]),
   sourceDryRunId: plannerPositiveQuantitySchema,
   revalidationDryRunId: z.null(),
@@ -308,9 +309,9 @@ export const inventoryActivationCommandResultSchema = z.object({
 
 export const inventoryActivationStatusSchema = z.object({
   activationRunId: plannerPositiveQuantitySchema,
-  state: z.enum(["publishing", "publication_verified", "failed"]),
+  state: z.enum(["publishing", "publication_verified", "activating", "active", "failed"]),
   sourceDryRunId: plannerPositiveQuantitySchema,
-  runtimeAuthority: z.literal("legacy"),
+  runtimeAuthority: z.enum(["legacy", "canonical"]),
   providerWriteAttempted: z.boolean(),
   configurationFrozen: z.boolean(),
   outbox: z.object({
