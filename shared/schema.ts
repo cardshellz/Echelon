@@ -2,3 +2,4 @@
 // New code should import from "@shared/schema" (resolves to shared/schema/index.ts)
 // or directly from the domain schema file (e.g., "@shared/schema/inventory.schema")
 export * from "./schema/index";
+export * from "./schema/supplier-sourcing.schema";

@@ -1,3 +1,5 @@
+import type { SupplierPriceList } from "@shared/procurement/supplier-sourcing";
+import { loadSupplierSourcingRecords } from "./supplier-sourcing.repository";
 import { isPurchaseOrderHistoryConstraintViolation, readPurchaseOrderHistoryPresence } from "./purchase-order-history.repository";
 import { PURCHASE_ORDER_HISTORY_DELETE_MESSAGE, retainedPurchaseOrderHistoryKinds } from "./purchase-order-history.policy";
 import { readPurchaseApprovalActor, type PurchaseApprovalActor } from "../identity";
@@ -7429,6 +7431,7 @@ export function createPurchasingService(
   type CreateRfqBatchLineInput = {
     recommendationLineId: number;
     vendorId: number;
+    vendorProductId?: number;
     vendorSku?: string | null;
     requestedPieces: number;
     quantityOverrideReason?: string | null;
@@ -7461,6 +7464,7 @@ export function createPurchasingService(
     for (const [index, line] of input.lines.entries()) {
       assertPositivePgInteger(line.recommendationLineId, `lines[${index}].recommendationLineId`);
       assertPositivePgInteger(line.vendorId, `lines[${index}].vendorId`);
+      if (line.vendorProductId !== undefined) assertPositivePgInteger(line.vendorProductId, `lines[${index}].vendorProductId`);
       assertPositivePgInteger(line.requestedPieces, `lines[${index}].requestedPieces`);
       assertOptionalCatalogText(line.vendorSku, `lines[${index}].vendorSku`, 100);
       assertOptionalCatalogText(line.quantityOverrideReason, `lines[${index}].quantityOverrideReason`, 2_000);
@@ -7488,6 +7492,7 @@ export function createPurchasingService(
       lines: normalizedLines.map((line) => ({
         recommendationLineId: line.recommendationLineId,
         vendorId: line.vendorId,
+        ...(line.vendorProductId === undefined ? {} : { vendorProductId: line.vendorProductId }),
         vendorSku: line.vendorSku,
         requestedPieces: line.requestedPieces,
         quantityOverrideReason: line.quantityOverrideReason,
@@ -7604,9 +7609,18 @@ export function createPurchasingService(
             const mappingRows = await tx.select().from(vendorProductsTable).where(and(
               eq(vendorProductsTable.vendorId, vendorId),
               eq(vendorProductsTable.productId, Number(recommendation.productId)),
-              sql`COALESCE(${vendorProductsTable.productVariantId}, 0) = ${variantId ?? 0}`,
+              selection.vendorProductId === undefined
+                ? sql`COALESCE(${vendorProductsTable.productVariantId}, 0) = ${variantId ?? 0}`
+                : and(eq(vendorProductsTable.id, selection.vendorProductId), sql`(${vendorProductsTable.productVariantId} IS NULL OR ${vendorProductsTable.productVariantId} = ${variantId})`),
             )).limit(1).for("update");
             const existingMapping = mappingRows[0] ?? null;
+            let sourcingQuote: SupplierPriceList | null = null;
+            if (selection.vendorProductId !== undefined) {
+              if (!existingMapping || existingMapping.isActive !== 1) throw new PurchasingError("The selected supplier mapping is inactive or does not match this recommendation", 409, { code: "RFQ_SUPPLIER_MAPPING_CHANGED" });
+              const policy = (await loadSupplierSourcingRecords(tx, [selection.vendorProductId])).get(selection.vendorProductId);
+              sourcingQuote = policy?.policy.priceList ?? null;
+              if (policy?.policy.eligibleForProposals === false) throw new PurchasingError("This supplier mapping is paused for proposals. Review its sourcing settings first.", 409, { code: "RFQ_SUPPLIER_PAUSED" });
+            }
             const makePreferred = recommendation.preferredVendorId == null;
             if (makePreferred) {
               const demotions = await demoteCompetingPreferredMappings(tx, {
@@ -7650,6 +7664,8 @@ export function createPurchasingService(
             }
             if (!vendorProduct) throw new PurchasingError("Supplier catalog mapping was not saved", 409);
 
+            const purchaseUom = sourcingQuote ? sourcingQuote.purchaseUom : vendorProduct.purchaseUom ?? null;
+            const piecesPerPurchaseUom = sourcingQuote ? sourcingQuote.piecesPerPurchaseUom : vendorProduct.piecesPerPurchaseUom ?? null;
             const insertedLines = await tx.insert(requestForQuoteLinesTable).values({
               rfqId: rfq.id,
               recommendationLineId: selection.recommendationLineId,
@@ -7662,10 +7678,10 @@ export function createPurchasingService(
               allocationOverrideApprovedAt: selection.allocationOverrideApprovedAt,
               allocationOverrideBaselinePieces: selection.allocationOverrideBaselinePieces,
               allocationOverrideExcessPieces: selection.allocationOverrideExcessPieces,
-              purchaseUom: vendorProduct.purchaseUom ?? null,
-              piecesPerPurchaseUom: vendorProduct.piecesPerPurchaseUom ?? null,
-              requestedPurchaseUomQty: vendorProduct.piecesPerPurchaseUom
-                ? String(selection.requestedPieces / Number(vendorProduct.piecesPerPurchaseUom))
+              purchaseUom,
+              piecesPerPurchaseUom,
+              requestedPurchaseUomQty: piecesPerPurchaseUom
+                ? String(selection.requestedPieces / Number(piecesPerPurchaseUom))
                 : null,
             }).returning();
             const rfqLine = insertedLines[0];

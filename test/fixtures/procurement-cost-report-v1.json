@@ -1,0 +1,43 @@
+{
+  "contractVersion": 1,
+  "eventType": "inventory.cost_application_recorded",
+  "sourceSystemId": "synthetic-echelon",
+  "destinationId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  "deliveryId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+  "sourceEventId": "9223372036854775807",
+  "applicationId": "1",
+  "purchaseOrderId": 10,
+  "purchaseOrderLineId": 21,
+  "payloadHash": "e5d4283eb0e0a995a0fc61c7f652659146346b844b04870a27be01e3cd8a2dea",
+  "payload": {
+    "contractVersion": 1,
+    "currency": "USD",
+    "sourceRevisionId": 1,
+    "sourceFingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "component": "product",
+    "changes": [
+      {
+        "lotId": 5,
+        "before": {
+          "productMills": 200,
+          "packagingMills": 2,
+          "landedMills": 3
+        },
+        "after": {
+          "productMills": 100,
+          "packagingMills": 2,
+          "landedMills": 3,
+          "totalMills": 105,
+          "component": "product",
+          "allocatedMills": 302,
+          "quantity": 3,
+          "remainderMills": 2
+        }
+      }
+    ],
+    "cogsDeltaCents": -7,
+    "actorId": "synthetic-user",
+    "recordedAt": "2026-09-07T12:00:00.000Z"
+  },
+  "reportHash": "b1e4f0b812b2b80a8ec30c420a421efede4ac64be38f44d507bf230cfcc77a9a"
+}

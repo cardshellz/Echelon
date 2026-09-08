@@ -1,3 +1,5 @@
+import { supplierSelectionEvidenceSchema } from "@shared/procurement/supplier-sourcing";
+import { loadSupplierSourcingRecords } from "./supplier-sourcing.repository";
 import { inspectPurchaseReceiptSupplyCapture } from "@shared/procurement/purchase-receipt-supply-evidence";
 import { lockInventoryCostGraph } from "../inventory/infrastructure/cost-evidence.repository";
 import { randomUUID } from "node:crypto";
@@ -46,6 +48,7 @@ export type AutomaticRfqDraftSkipCode =
   | "forecast_review_required"
   | "non_supplier_blocker"
   | "receipt_evidence_review_required"
+  | "supplier_selection_review_required"
   | "recommendation_changed"
   | "inactive_supplier_catalog"
   | "already_allocated"
@@ -103,7 +106,11 @@ export function planAutomaticRfqDrafts(
       continue;
     }
     const supplierBasis = evidence.supplierBasis ?? {};
-    const supplierQuoteNeedsWork = supplierBasis.costQuality !== "current"
+    // RFQs are review-only sourcing requests. A current price on a ranked
+    // alternate still warrants a proposed final-quote request; the alternate
+    // blocker prevents automatic PO acceptance, not this harmless proposal.
+    const alternateProposal = supplierBasis.sourcingSelection?.method === "ranked_alternate";
+    const supplierQuoteNeedsWork = alternateProposal || supplierBasis.costQuality !== "current"
       || supplierBasis.costSource === "last_purchase_cost"
       || supplierBasis.pricingBasis === "legacy_unknown";
     if (!supplierQuoteNeedsWork) {
@@ -129,6 +136,12 @@ export function planAutomaticRfqDrafts(
     const receiptCapture = inspectPurchaseReceiptSupplyCapture(evidence.supplyTiming?.receiptEvidence, evidence.onOrderPieces);
     if (receiptCapture.reviewRequired) {
       skip(line, "receipt_evidence_review_required", receiptCapture.detail ?? "Receipt quantities require review before unattended RFQ drafting.");
+      continue;
+    }
+    const sourcing = supplierSelectionEvidenceSchema.safeParse(evidence.supplierBasis?.sourcingSelection);
+    if (!sourcing.success || sourcing.data.selectedVendorProductId !== line.preferredVendorProductId
+      || !sourcing.data.options.some((option) => option.vendorProductId === line.preferredVendorProductId && option.vendorId === line.preferredVendorId && option.eligible)) {
+      skip(line, "supplier_selection_review_required", "This capture predates verified supplier ranking. Refresh analysis before creating a new automatic RFQ; existing drafts remain replayable.");
       continue;
     }
     if (selected.length >= policy.maximumLinesPerRun) {
@@ -163,7 +176,7 @@ export function createAutomaticRfqDraftService(database: any) {
     const plan = planAutomaticRfqDrafts(input.lines, input.policy);
     // A pre-capture recommendation may already have a durable RFQ from an
     // earlier attempt. It is eligible only for exact replay, never new creation.
-    const receiptReviewIds = new Set(plan.skipped.filter((skip) => skip.code === "receipt_evidence_review_required").map((skip) => skip.recommendationLineId));
+    const receiptReviewIds = new Set(plan.skipped.filter((skip) => ["receipt_evidence_review_required", "supplier_selection_review_required"].includes(skip.code)).map((skip) => skip.recommendationLineId));
     const candidates = [...plan.selected, ...input.lines.filter((line) => receiptReviewIds.has(line.id))];
     if (candidates.length === 0) return { rfqs: [], lines: [], skipped: plan.skipped, reused: false };
 
@@ -248,14 +261,22 @@ export function createAutomaticRfqDraftService(database: any) {
         .filter((mapping: any) => Number(mapping.isActive) === 1)
         .map((mapping: any) => [Number(mapping.id), mapping]));
 
+      const sourcingPolicies = await loadSupplierSourcingRecords(tx, vendorProductIds);
       const resolvedByVendor = new Map<number, ResolvedAutomaticRfqLine[]>();
       for (const line of pending) {
         const vendorId = Number(line.preferredVendorId);
         const mapping = mappingById.get(Number(line.preferredVendorProductId)) as any;
+        const selection = supplierSelectionEvidenceSchema.parse(line.evidenceSnapshot.supplierBasis.sourcingSelection);
+        const captured = selection.options.find((option) => option.vendorProductId === Number(line.preferredVendorProductId))!;
+        const currentPolicy = sourcingPolicies.get(Number(line.preferredVendorProductId));
+        if (captured.revision !== (currentPolicy?.revision ?? 0) || currentPolicy?.policy.eligibleForProposals === false) {
+          skipped.push({ recommendationLineId: line.id, sku: line.sku, code: "supplier_selection_review_required", detail: "Supplier sourcing policy changed after this recommendation; refresh before creating another draft." });
+          continue;
+        }
         const supplierIdentityIsActive = Boolean(activeVendorById.get(vendorId) && mapping
           && Number(mapping.vendorId) === vendorId
           && Number(mapping.productId) === Number(line.productId)
-          && (mapping.productVariantId ?? null) === (line.productVariantId ?? null));
+          && (mapping.productVariantId == null || mapping.productVariantId === line.productVariantId));
         if (!supplierIdentityIsActive) {
           skipped.push({
             recommendationLineId: line.id,
@@ -322,15 +343,18 @@ export function createAutomaticRfqDraftService(database: any) {
 
         for (const line of lines) {
           const mapping = mappingById.get(Number(line.preferredVendorProductId)) as any;
+          const sourcingQuote = sourcingPolicies.get(Number(line.preferredVendorProductId))?.policy.priceList;
+          const purchaseUom = sourcingQuote ? sourcingQuote.purchaseUom : mapping?.purchaseUom ?? null;
+          const piecesPerPurchaseUom = sourcingQuote ? sourcingQuote.piecesPerPurchaseUom : mapping?.piecesPerPurchaseUom ?? null;
           const insertedLines = await tx.insert(requestForQuoteLinesTable).values({
             rfqId: rfq.id,
             recommendationLineId: line.id,
             vendorProductId: Number(line.preferredVendorProductId),
             requestedPieces: line.requestedPieces,
-            purchaseUom: mapping?.purchaseUom ?? null,
-            piecesPerPurchaseUom: mapping?.piecesPerPurchaseUom ?? null,
-            requestedPurchaseUomQty: mapping?.piecesPerPurchaseUom
-              ? String(line.requestedPieces / Number(mapping.piecesPerPurchaseUom))
+            purchaseUom,
+            piecesPerPurchaseUom,
+            requestedPurchaseUomQty: piecesPerPurchaseUom
+              ? String(line.requestedPieces / Number(piecesPerPurchaseUom))
               : null,
             status: "draft",
             quantityOverrideReason: line.requestedPieces === Number(line.recommendedPieces)

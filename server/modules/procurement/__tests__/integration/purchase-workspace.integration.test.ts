@@ -66,6 +66,7 @@ databaseTests.sequential("purchase workspace PostgreSQL read model", () => {
     ];
     for (const ddl of tables) await pool.query(ddl);
     await pool.query(await readFile(resolve(process.cwd(), "migrations/222_procurement_cost_evidence.sql"), "utf8"));
+    await pool.query(await readFile(resolve(process.cwd(), "migrations/231_receipt_cost_recovery.sql"), "utf8"));
     // The complete RFQ command/migration proof lives in rfq-workflow.integration.
     // This read fixture supplies the exact origin projection's empty relations.
     await pool.query(`CREATE TABLE procurement.request_for_quotes(id integer PRIMARY KEY,rfq_number text NOT NULL);
@@ -308,7 +309,11 @@ databaseTests.sequential("purchase workspace PostgreSQL read model", () => {
         VALUES (34,11,'fixture-owner',$1) RETURNING id`, [now])).rows[0].id);
       await pool.query(`INSERT INTO procurement.cost_source_revisions(purchase_order_line_id,component,revision,fingerprint,contract,recorded_by,recorded_at)
         VALUES (21,'product',1,$1,'{}','unrelated-fixture',$2)`, ["c".repeat(64), now]);
+      await pool.query(`INSERT INTO procurement.receipt_cost_recovery_jobs(request_id,state,max_attempts,next_attempt_at,updated_at)
+        VALUES($1,'queued',5,$2,$2)`, [requestId, now]);
       const result = await workspace();
+      expect(result.costTrace?.receiptCostRequests?.[0].automaticRecovery).toMatchObject({ state: "queued", attemptCount: 0, maxAttempts: 5 });
+      expect(new Date(result.costTrace!.receiptCostRequests![0].automaticRecovery!.nextAttemptAt).getTime()).toBe(now.getTime());
       expect(result.costTrace?.applicationEvidence).toBe("recorded");
       const revisions = result.costTrace!.applicationHistory!.revisions;
       expect(revisions).toHaveLength(1); expect(revisions[0].id).toBe(source.id);

@@ -17,7 +17,7 @@ export interface ProcurementJourney {
 
 const TABS: Record<ProcurementRecordKind, readonly string[]> = {
   purchase: ["lines", "lifecycle", "receipts", "invoices", "payments", "shipments", "exceptions", "history"],
-  shipment: ["lines", "costs", "allocation", "invoices", "timeline"],
+  shipment: ["lines", "costs", "allocation", "invoices", "timeline", "tracking"],
   invoice: ["lines", "details", "attachments"],
   receipt: ["detail"],
 };

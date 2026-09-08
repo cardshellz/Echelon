@@ -1,3 +1,4 @@
+import { loadSupplierSourcingRecords } from "./supplier-sourcing.repository";
 import { and, desc, eq, inArray, like, or, sql } from "drizzle-orm";
 import {
   autoDraftRuns,
@@ -177,7 +178,7 @@ function createUnitOfWork(tx: Transaction): RecommendationPoHandoffUnitOfWork {
     async getVendorProducts(ids) {
       const safeIds = uniquePositiveIds(ids);
       if (safeIds.length === 0) return [];
-      return await tx
+      const rows = await tx
         .select({
           id: vendorProducts.id,
           vendorId: vendorProducts.vendorId,
@@ -203,6 +204,8 @@ function createUnitOfWork(tx: Transaction): RecommendationPoHandoffUnitOfWork {
         .where(inArray(vendorProducts.id, safeIds))
         .orderBy(vendorProducts.id)
         .for("share") as RecommendationVendorProductRecord[];
+      const sourcing = await loadSupplierSourcingRecords(tx, safeIds);
+      return rows.map((row) => ({ ...row, sourcing: sourcing.get(row.id) ?? null }));
     },
 
     async getVendors(ids) {

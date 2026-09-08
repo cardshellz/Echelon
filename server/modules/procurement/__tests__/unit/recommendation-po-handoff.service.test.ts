@@ -1,3 +1,4 @@
+import { selectSupplierPriceTier, DEFAULT_SUPPLIER_SOURCING_POLICY, type SupplierPriceList } from "@shared/procurement/supplier-sourcing";
 import { describe, expect, it } from "vitest";
 import {
   createRecommendationPoHandoffService,
@@ -1629,5 +1630,57 @@ describe("recommendation PO handoff service", () => {
     expect(harness.state.events[0]).toMatchObject({ actorType: "system", actorId: "system:auto" });
     expect(harness.state.handoffs[0]).toMatchObject({ createdBy: null });
     expect(harness.state.decisions[harness.state.decisions.length - 1]).toMatchObject({ decidedBy: "SYSTEM" });
+  });
+});
+
+
+function sourcingHandoffState(alternate = false): FakeState {
+  const state = baseState();
+  const priceList: SupplierPriceList = { currency: "USD", basis: "per_piece", purchaseUom: null, piecesPerPurchaseUom: null,
+    quoteReference: "TIER-QUOTE", quotedAt: "2026-07-01T12:00:00.000Z", validFrom: "2026-07-01", validUntil: "2026-08-31",
+    tiers: [{ minimumQuantity: 1, unitCostMills: 75 }, { minimumQuantity: 300, unitCostMills: 50 }] };
+  const tier = selectSupplierPriceTier({ vendorProductId: 701, revision: 1, priceList, pieces: 300, asOfDate: "2026-07-11", currency: "USD" }).evidence!;
+  state.vendorProducts[0].sourcing = { vendorProductId: 701, revision: 1, policy: { ...DEFAULT_SUPPLIER_SOURCING_POLICY, priceList }, recordedBy: "operator", recordedAt: NOW.toISOString(), reason: "Final supplier terms" };
+  state.vendorProducts[0].isPreferred = alternate ? 0 : 1;
+  const item = (state.decisions[0].recommendationSnapshot as any).item;
+  item.quoteReference = "TIER-QUOTE";
+  item.supplierBasis.sourcingSelection = { version: 1, selectedVendorProductId: 701, method: alternate ? "ranked_alternate" : "preferred", rankBasis: "preferred_then_priority_then_variant_then_lead_time_then_identity", priceComparison: "not_performed", options: [{ vendorProductId: 701, vendorId: 7, vendorName: "Synthetic vendor", preferred: !alternate, priority: 100, revision: 1, eligible: true, rejectionReasons: [], pricingReviewReasons: [], currency: "USD", leadTimeDays: 10, minimumOrderPieces: 1, orderIncrementPieces: 1, proposedPieces: 300, estimatedUnitCostMills: 50, tier }] };
+  return state;
+}
+describe("quantity-tier and alternate supplier PO handoff", () => {
+  it("uses the accepted versioned tier instead of the mutable legacy catalog price", async () => {
+    const state = sourcingHandoffState(); state.vendorProducts[0].unitCostMills = 99999;
+    const harness = buildHarness(state);
+    await createRecommendationPoHandoffService(harness.repository).createAcceptedHandoff(baseCommand());
+    expect(harness.state.lines[0]).toMatchObject({ orderQty: 300, unitCostMills: 50, quoteReference: "TIER-QUOTE", totalProductCostCents: 150 });
+  });
+  it("rejects a changed tier revision and a quantity edit across a threshold before writes", async () => {
+    const changed = sourcingHandoffState(); changed.vendorProducts[0].sourcing!.revision = 2;
+    const harness = buildHarness(changed);
+    await expect(createRecommendationPoHandoffService(harness.repository).createAcceptedHandoff(baseCommand())).rejects.toMatchObject({ code: "SUPPLIER_TIER_REVISION_CHANGED" });
+    expect(harness.state.pos).toHaveLength(0);
+    const fresh = buildHarness(sourcingHandoffState()); const command = baseCommand(); command.items[0].requestedPieces = 200;
+    await expect(createRecommendationPoHandoffService(fresh.repository).createAcceptedHandoff(command)).rejects.toMatchObject({ code: "SUPPLIER_TIER_QUANTITY_REVIEW_REQUIRED" });
+    expect(fresh.state.pos).toHaveLength(0);
+  });
+  it("allows an explicitly reviewed ranked alternate but refuses automatic acceptance", async () => {
+    const reviewed = buildHarness(sourcingHandoffState(true));
+    await createRecommendationPoHandoffService(reviewed.repository).createAcceptedHandoff(baseCommand());
+    expect(reviewed.state.pos).toHaveLength(1);
+    const automatedState = sourcingHandoffState(true); automatedState.decisions[0].source = "automatic";
+    const automated = buildHarness(automatedState);
+    await expect(createRecommendationPoHandoffService(automated.repository).createAcceptedHandoff(baseCommand())).rejects.toMatchObject({ code: "RECOMMENDATION_VENDOR_PRODUCT_INACTIVE" });
+  });
+  it("rejects mismatched accepted supplier identity before any purchase writes", async () => {
+    const state = sourcingHandoffState();
+    (state.decisions[0].recommendationSnapshot as any).item.supplierBasis.sourcingSelection.options[0].vendorId = 8;
+    const harness = buildHarness(state);
+    await expect(createRecommendationPoHandoffService(harness.repository).createAcceptedHandoff(baseCommand())).rejects.toMatchObject({ code: "ACCEPTED_SUPPLIER_SELECTION_MISMATCH" });
+    expect(harness.state.pos).toHaveLength(0);
+  });
+  it("does not authorize a new tier from legacy accepted economics", async () => {
+    const state = sourcingHandoffState(); delete (state.decisions[0].recommendationSnapshot as any).item.supplierBasis.sourcingSelection;
+    const harness = buildHarness(state);
+    await expect(createRecommendationPoHandoffService(harness.repository).createAcceptedHandoff(baseCommand())).rejects.toMatchObject({ code: "SUPPLIER_TIER_REVISION_CHANGED" });
   });
 });

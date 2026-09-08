@@ -300,3 +300,22 @@ test("purchase source RFQ opens inline without losing shipment context", async (
   expect(new URL(page.url()).pathname).toBe("/purchase-orders/17");
   expect(failures).toEqual([]);
 });
+
+test("automatic receipt-cost recovery shows retry timing and exhaustion in the purchase workspace", async ({ page }) => {
+  const failures = await setup(page);
+  const costTrace = purchaseCostApplicationsFixture();
+  const data = { ...workspace(), costTrace };
+  data.receipts[0] = { ...data.receipts[0], status: "closed", closedDate: "2026-09-07T12:00:00Z" };
+  costTrace.receiptCostRequests![0].automaticRecovery = { state: "queued", attemptCount: 2, maxAttempts: 5,
+    nextAttemptAt: "2026-09-07T12:05:00Z", leaseExpiresAt: null, lastErrorCode: "RECEIPT_COST_RETRY_REQUIRED", updatedAt: "2026-09-07T12:00:00Z" };
+  await page.route("**/api/purchase-orders/17/workspace", (route) => route.fulfill({ json: data }));
+  await page.goto("/purchase-orders/17?tab=lifecycle");
+  const recovery = page.getByTestId("receipt-cost-recovery-61");
+  await expect(recovery).toContainText("queued after 2 of 5 attempts");
+  await expect(recovery).toContainText("Next scheduled attempt");
+  costTrace.receiptCostRequests![0].automaticRecovery = { ...costTrace.receiptCostRequests![0].automaticRecovery!, state: "exhausted", attemptCount: 5 };
+  await page.reload();
+  await expect(recovery).toContainText("stopped after 5 attempts");
+  await expect(recovery).toContainText("retry receipt costs manually");
+  expect(failures).toEqual([]);
+});

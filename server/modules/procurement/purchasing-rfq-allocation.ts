@@ -43,6 +43,7 @@ export interface RfqBatchRequestIntent {
   approvedBy: string | null;
   lines: Array<{
     recommendationLineId: number;
+    vendorProductId?: number;
     vendorId: number;
     vendorSku: string | null;
     requestedPieces: number;
