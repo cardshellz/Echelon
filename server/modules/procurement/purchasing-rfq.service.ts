@@ -50,12 +50,15 @@ export type PurchasingRfqQueueItem = {
   demandSnapshot: Record<string, unknown>;
 };
 
+/** RFQs reserve product base pieces in the forecast's warehouse scope. Receiving
+ * choices remain immutable source evidence, but cannot partition that demand.
+ * This lookup key is not a recommendation identity or a durable replay key. */
 export function purchasingSkuAllocationKey(input: {
   productId: number;
   productVariantId?: number | null;
   warehouseId?: number | null;
 }): string {
-  return `${input.productId}:${input.productVariantId ?? "base"}:${input.warehouseId ?? "all"}`;
+  return `${input.productId}:${input.warehouseId ?? "all"}`;
 }
 
 export async function lockAndLoadActiveRfqAllocations(

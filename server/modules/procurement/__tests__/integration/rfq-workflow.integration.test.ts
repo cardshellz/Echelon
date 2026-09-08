@@ -2,7 +2,7 @@ import { SupplierSourcingService } from "../../supplier-sourcing.service";
 import { SupplierSourcingRepository, attachSupplierSourcingCandidates } from "../../supplier-sourcing.repository";
 import { DEFAULT_SUPPLIER_SOURCING_POLICY } from "@shared/procurement/supplier-sourcing";
 import { generatePurchasingRecommendations } from "../../purchasing-recommendation.engine";
-import { createAutomaticRfqDraftService, normalizeAutomaticRfqDraftPolicy } from "../../automatic-rfq-draft.service";
+import { createAutomaticRfqDraftService, normalizeAutomaticRfqDraftPolicy, type AutomaticRfqRecommendationLine } from "../../automatic-rfq-draft.service";
 import { readPurchaseRfqOrigins } from "../../purchase-rfq-origin.repository";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -55,7 +55,7 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
     await pool.query("CREATE UNIQUE INDEX purchase_order_lines_po_id_line_id_uidx ON procurement.purchase_order_lines(purchase_order_id,id)");
     for (const statement of fixtureForeignKeys(TABLES)) await pool.query(statement);
     await pool.query("CREATE UNIQUE INDEX purchase_orders_po_number_unique ON procurement.purchase_orders(po_number)");
-    for (const migration of ["130_atomic_recommendation_po_handoffs.sql", "148_purchase_rfq_requests.sql", "158_rfq_allocation_override_evidence.sql", "224_rfq_quote_revisions_and_purchase_links.sql", "228_supplier_sourcing_policies.sql"]) await pool.query(readFileSync(resolve(process.cwd(), "migrations", migration), "utf8"));
+    for (const migration of ["130_atomic_recommendation_po_handoffs.sql", "148_purchase_rfq_requests.sql", "158_rfq_allocation_override_evidence.sql", "224_rfq_quote_revisions_and_purchase_links.sql", "228_supplier_sourcing_policies.sql", "232_rfq_product_reservation_scope.sql"]) await pool.query(readFileSync(resolve(process.cwd(), "migrations", migration), "utf8"));
     if (!(await pool.query("SELECT to_regclass('public.audit_events') AS relation")).rows[0].relation) { await pool.query(fixtureTable(schema.auditEvents)); ownsAudit = true; }
     ownsCommands = !(await pool.query("SELECT to_regclass('public.financial_command_results') AS relation")).rows[0].relation;
     ownsRecoveries = !(await pool.query("SELECT to_regclass('public.financial_command_recoveries') AS relation")).rows[0].relation;
@@ -95,7 +95,7 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
     if (ownedSchemas.length !== 3) throw new Error("RFQ fixture schema ownership missing");
     // Disable only the fixture's immutable TRUNCATE guard for isolated reset.
     await pool.query(`BEGIN; ALTER TABLE procurement.supplier_sourcing_revisions DISABLE TRIGGER supplier_sourcing_history_truncate_immutable; TRUNCATE ${TABLES.map(qualifiedTable).join(",")}, procurement.purchase_recommendation_runs RESTART IDENTITY CASCADE; ALTER TABLE procurement.supplier_sourcing_revisions ENABLE TRIGGER supplier_sourcing_history_truncate_immutable; COMMIT`);
-    await pool.query("DELETE FROM public.audit_events WHERE actor=$1", [actorId]);
+    await pool.query("DELETE FROM public.audit_events WHERE actor = ANY($1::text[])", [[actorId, `user:${actorId}`]]);
     await pool.query("DELETE FROM public.financial_command_results WHERE idempotency_key LIKE $1", [`rfq-${suffix}-%`]);
     await pool.query(`
       INSERT INTO catalog.products(id,sku,name) VALUES(100,'RFQ-SKU-A','RFQ product A'),(101,'RFQ-SKU-B','RFQ product B');
@@ -113,7 +113,7 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
   afterAll(async () => {
     try {
       if (pool) {
-        if (ownsAudit) await pool.query("DROP TABLE public.audit_events"); else if ((await pool.query("SELECT to_regclass('public.audit_events') AS relation")).rows[0].relation) await pool.query("DELETE FROM public.audit_events WHERE actor=$1", [actorId]);
+        if (ownsAudit) await pool.query("DROP TABLE public.audit_events"); else if ((await pool.query("SELECT to_regclass('public.audit_events') AS relation")).rows[0].relation) await pool.query("DELETE FROM public.audit_events WHERE actor = ANY($1::text[])", [[actorId, `user:${actorId}`]]);
         if (ownsRecoveries) await pool.query("DROP TABLE public.financial_command_recoveries");
         if (ownsCommands) await pool.query("DROP TABLE public.financial_command_results"); else if ((await pool.query("SELECT to_regclass('public.financial_command_results') AS relation")).rows[0].relation) await pool.query("DELETE FROM public.financial_command_results WHERE idempotency_key LIKE $1", [`rfq-${suffix}-%`]);
         for (const name of [...ownedSchemas].reverse()) await pool.query(`DROP SCHEMA ${name} CASCADE`);
@@ -389,6 +389,172 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
     expect((await pool.query("SELECT count(*)::int AS count FROM procurement.purchase_orders")).rows[0].count).toBe(1);
   });
 
+  async function receivingChoiceRecommendation(id: number, variantId: number | null, pieces = 150, warehouseId: number | null = 1, evidenceSnapshot: Record<string, unknown> = {}): Promise<AutomaticRfqRecommendationLine> {
+    await pool.query("INSERT INTO procurement.purchase_recommendation_lines(id,run_id,recommendation_key,product_id,product_variant_id,warehouse_id,sku,product_name,recommended_pieces,preferred_vendor_id,preferred_vendor_product_id,evidence_snapshot) OVERRIDING SYSTEM VALUE VALUES($1,1,$2,100,$3,$4,'RFQ-SKU-A','RFQ product A',$5,5,302,$6::jsonb)", [id, `receive-scope-${id}`, variantId, warehouseId, pieces, JSON.stringify(evidenceSnapshot)]);
+    return { id, runId: 1, productId: 100, productVariantId: variantId, warehouseId, sku: "RFQ-SKU-A", recommendedPieces: pieces, preferredVendorId: 5, preferredVendorProductId: 302, status: "open", evidenceSnapshot };
+  }
+
+  async function persistedReceivingChoiceTransition(priorVariantId: number | null, currentVariantId: number | null) {
+    await pool.query("UPDATE procurement.request_for_quote_lines SET status='cancelled' WHERE id=20");
+    await pool.query("INSERT INTO procurement.vendor_products(id,vendor_id,product_id,product_variant_id) VALUES(302,5,100,NULL)");
+    const prior = await receivingChoiceRecommendation(3, priorVariantId);
+    const current = await receivingChoiceRecommendation(4, currentVariantId);
+    await pool.query("INSERT INTO procurement.request_for_quotes(id,rfq_number,vendor_id,idempotency_key,request_hash) OVERRIDING SYSTEM VALUE VALUES(11,'RFQ-RECEIVE-SCOPE',5,'rfq-receive-scope-original',repeat('d',64))");
+    await pool.query("INSERT INTO procurement.request_for_quote_lines(id,rfq_id,recommendation_line_id,vendor_product_id,requested_pieces) OVERRIDING SYSTEM VALUE VALUES(22,11,$1,302,150)", [prior.id]);
+    return { prior, current };
+  }
+
+  it.each([
+    { name: "variant to unresolved receiving choice", priorVariantId: 200, currentVariantId: null },
+    { name: "unresolved to unique receiving choice", priorVariantId: null, currentVariantId: 200 },
+  ])("retains persisted RFQ reservations across $name", async ({ priorVariantId, currentVariantId }) => {
+    const { current } = await persistedReceivingChoiceTransition(priorVariantId, currentVariantId);
+    const { lockAndLoadActiveRfqAllocations, purchasingSkuAllocationKey } = await import("../../purchasing-rfq.service");
+    const pending = await database.transaction((tx) => lockAndLoadActiveRfqAllocations(tx, [current]));
+    expect(pending.get(purchasingSkuAllocationKey(current))).toBe(150);
+    await expect(purchasingOwner.createRfqBatch({ idempotencyKey: `scope-unreviewed-${current.id}`, lines: [
+      { recommendationLineId: current.id, vendorId: 5, vendorProductId: 302, requestedPieces: 150 },
+    ] }, actorId)).rejects.toMatchObject({ details: { code: "RFQ_QUANTITY_REASON_REQUIRED" } });
+    const historical = await pool.query<{ product_variant_id: number | null; requested_pieces: number; idempotency_key: string; request_hash: string }>("SELECT r.product_variant_id,q.requested_pieces,h.idempotency_key,h.request_hash FROM procurement.request_for_quote_lines q JOIN procurement.purchase_recommendation_lines r ON r.id=q.recommendation_line_id JOIN procurement.request_for_quotes h ON h.id=q.rfq_id WHERE q.id=22");
+    expect(historical.rows).toEqual([{ product_variant_id: priorVariantId, requested_pieces: 150, idempotency_key: "rfq-receive-scope-original", request_hash: "d".repeat(64) }]);
+    expect((await pool.query<{ count: number }>("SELECT count(*)::int AS count FROM procurement.request_for_quote_lines WHERE recommendation_line_id=$1", [current.id])).rows[0].count).toBe(0);
+  });
+  function automaticReceivingEvidence(variantId: number): Record<string, unknown> {
+    return {
+      receiveVariantSelection: { version: 1, highestHierarchyLevel: 1, candidateCount: 1, selectedVariantId: variantId },
+      onOrderPieces: 0, supplyTiming: { receiptEvidence: { version: 1, lines: [] } },
+      confidence: "high", rfqConfidence: "high", forecastTrust: { severity: "ok" },
+      qualityGate: { autoDraftEligible: false }, autopilotBlockers: [{ area: "supplier_cost", code: "missing_supplier_cost" }],
+      supplierBasis: { costSource: "missing", costQuality: "missing", pricingBasis: "legacy_unknown", sourcingSelection: {
+        version: 1, selectedVendorProductId: 302, method: "preferred",
+        rankBasis: "preferred_then_priority_then_variant_then_lead_time_then_identity", priceComparison: "not_performed",
+        options: [{ vendorProductId: 302, vendorId: 5, vendorName: "Synthetic supplier", preferred: true, priority: 100, revision: 0,
+          eligible: true, rejectionReasons: [], pricingReviewReasons: ["quote_missing"], currency: "USD", leadTimeDays: 10,
+          minimumOrderPieces: 1, orderIncrementPieces: 1, proposedPieces: 150, estimatedUnitCostMills: null, tier: null }],
+      } },
+    };
+  }
+
+  it.each([
+    { name: "variant to unresolved receiving choice", priorVariantId: 200, currentVariantId: null },
+    { name: "unresolved to unique receiving choice", priorVariantId: null, currentVariantId: 200 },
+  ])("requires and preserves excess approval across $name", async ({ priorVariantId, currentVariantId }) => {
+    const { current } = await persistedReceivingChoiceTransition(priorVariantId, currentVariantId);
+    await pool.query("INSERT INTO procurement.request_for_quotes(id,rfq_number,vendor_id,idempotency_key,request_hash) OVERRIDING SYSTEM VALUE VALUES(12,'RFQ-DIRECT-EXCESS',5,'rfq-direct-excess',repeat('e',64))");
+    await expect(pool.query("INSERT INTO procurement.request_for_quote_lines(rfq_id,recommendation_line_id,vendor_product_id,requested_pieces) VALUES(12,$1,302,150)", [current.id]))
+      .rejects.toMatchObject({ code: "23514", message: expect.stringContaining("without complete approval evidence") });
+    await expect(pool.query("INSERT INTO procurement.request_for_quote_lines(rfq_id,recommendation_line_id,vendor_product_id,requested_pieces,quantity_override_reason,allocation_override_reason,allocation_override_approved_by,allocation_override_approved_at,allocation_override_baseline_pieces,allocation_override_excess_pieces) VALUES(12,$1,302,150,'Reviewed extra demand','Reviewed extra demand',$2,$3,150,0)", [current.id, actorId, NOW]))
+      .rejects.toMatchObject({ code: "23514", message: expect.stringContaining("does not match the locked recommendation baseline") });
+    const request = { idempotencyKey: `scope-approved-${current.id}`, lines: [
+      { recommendationLineId: current.id, vendorId: 5, vendorProductId: 302, requestedPieces: 150,
+        quantityOverrideReason: "Reviewed extra demand beyond existing RFQ", allocationOverrideApproved: true },
+    ] };
+    await expect(purchasingOwner.createRfqBatch({ ...request, lines: request.lines.map((line) => ({ ...line, allocationOverrideApproved: false })) }, actorId))
+      .rejects.toMatchObject({ details: { code: "RFQ_ALLOCATION_OVERRIDE_APPROVAL_REQUIRED" } });
+    const accepted = await purchasingOwner.createRfqBatch(request, actorId);
+    expect(accepted).toMatchObject({ reused: false, lines: [{ requestedPieces: 150,
+      allocationOverrideBaselinePieces: 0, allocationOverrideExcessPieces: 150, allocationOverrideApprovedBy: actorId }] });
+    expect((await pool.query<{ count: number }>("SELECT count(*)::int AS count FROM public.audit_events WHERE actor=$1 AND action='purchase_rfq.allocation_override_approved'", [`user:${actorId}`])).rows[0].count).toBe(1);
+    await receivingChoiceRecommendation(5, priorVariantId);
+    const replay = await purchasingOwner.createRfqBatch(request, actorId);
+    expect(replay).toEqual({ ...accepted, reused: true });
+    expect((await pool.query<{ count: number }>("SELECT count(*)::int AS count FROM public.audit_events WHERE actor=$1 AND action='purchase_rfq.allocation_override_approved'", [`user:${actorId}`])).rows[0].count).toBe(1);
+    await expect(pool.query("UPDATE procurement.request_for_quote_lines SET recommendation_line_id=$1 WHERE id=22", [current.id]))
+      .rejects.toMatchObject({ code: "23514", message: expect.stringContaining("sourcing identity is immutable") });
+    await expect(pool.query("UPDATE procurement.request_for_quote_lines SET requested_pieces=151 WHERE id=22"))
+      .rejects.toMatchObject({ code: "23514", message: expect.stringContaining("quantity and override evidence are immutable") });
+  });
+
+  it("sums each receiving-choice allocation and retains separate warehouse and product scopes", async () => {
+    const { current } = await persistedReceivingChoiceTransition(200, null);
+    await receivingChoiceRecommendation(5, 200, 500);
+    await receivingChoiceRecommendation(6, null, 500);
+    await pool.query("INSERT INTO warehouse.warehouses(id,code,name) VALUES(2,'RFQ-OTHER-WH','Synthetic second warehouse')");
+    await receivingChoiceRecommendation(7, 200, 500, 2);
+    await receivingChoiceRecommendation(8, null, 500, null);
+    await pool.query("INSERT INTO procurement.request_for_quote_lines(rfq_id,recommendation_line_id,vendor_product_id,requested_pieces) VALUES(11,5,302,50),(11,6,302,25),(11,7,302,40),(11,8,302,60)");
+    const { lockAndLoadActiveRfqAllocations } = await import("../../purchasing-rfq.service");
+    const pending = await database.transaction((tx) => lockAndLoadActiveRfqAllocations(tx, [current, { id: 2, productId: 101, productVariantId: 201, warehouseId: 1 }]));
+    expect(Object.fromEntries(pending)).toEqual({ "100:1": 225, "100:2": 40, "100:all": 60, "101:1": 150 });
+  });
+
+  it("holds an automatic RFQ after a receiving choice is resolved when existing sourcing already covers it", async () => {
+    await persistedReceivingChoiceTransition(null, 200);
+    const line = await receivingChoiceRecommendation(5, 200, 150, 1, automaticReceivingEvidence(200));
+    const result = await createAutomaticRfqDraftService(database).createDrafts({ recommendationRunId: 1, lines: [line], actorId,
+      policy: normalizeAutomaticRfqDraftPolicy({ rfqDraftAutomationMode: "preferred_vendor" }) });
+    expect(result).toMatchObject({ rfqs: [], lines: [], reused: false, skipped: [{ recommendationLineId: 5, code: "already_allocated" }] });
+    expect((await pool.query<{ count: number }>("SELECT count(*)::int AS count FROM procurement.request_for_quote_lines WHERE recommendation_line_id=5")).rows[0].count).toBe(0);
+  });
+
+  it("serializes manual and automatic requests sharing product demand across receiving choices", async () => {
+    await pool.query("UPDATE procurement.request_for_quote_lines SET status='cancelled' WHERE id=20");
+    await pool.query("INSERT INTO procurement.vendor_products(id,vendor_id,product_id,product_variant_id) VALUES(302,5,100,NULL)");
+    const manualLine = await receivingChoiceRecommendation(3, null);
+    const automaticLine = await receivingChoiceRecommendation(4, 200, 150, 1, automaticReceivingEvidence(200));
+    const [manual, automatic] = await Promise.allSettled([
+      purchasingOwner.createRfqBatch({ idempotencyKey: "scope-concurrent-manual", lines: [
+        { recommendationLineId: manualLine.id, vendorId: 5, vendorProductId: 302, requestedPieces: 150 },
+      ] }, actorId),
+      createAutomaticRfqDraftService(database).createDrafts({ recommendationRunId: 1, lines: [automaticLine], actorId,
+        policy: normalizeAutomaticRfqDraftPolicy({ rfqDraftAutomationMode: "preferred_vendor" }) }),
+    ]);
+    expect(automatic.status).toBe("fulfilled");
+    if (manual.status === "rejected") expect(manual.reason).toMatchObject({ details: { code: "RFQ_QUANTITY_REASON_REQUIRED" } });
+    if (automatic.status === "fulfilled" && automatic.value.lines.length === 0) {
+      expect(manual.status).toBe("fulfilled");
+      expect(automatic.value.skipped).toMatchObject([{ code: "already_allocated" }]);
+    }
+    const persisted = await pool.query<{ count: number; pieces: number }>("SELECT count(*)::int AS count,COALESCE(SUM(q.requested_pieces),0)::int AS pieces FROM procurement.request_for_quote_lines q JOIN procurement.purchase_recommendation_lines r ON r.id=q.recommendation_line_id WHERE r.product_id=100 AND q.status='draft'");
+    expect(persisted.rows).toEqual([{ count: 1, pieces: 150 }]);
+  });
+
+  it("serializes the database guard across concurrent unresolved and unique receiving choices", async () => {
+    await pool.query("UPDATE procurement.request_for_quote_lines SET status='cancelled' WHERE id=20");
+    await pool.query("INSERT INTO procurement.vendor_products(id,vendor_id,product_id,product_variant_id) VALUES(302,5,100,NULL)");
+    await receivingChoiceRecommendation(3, null);
+    await receivingChoiceRecommendation(4, 200);
+    await pool.query("INSERT INTO procurement.request_for_quotes(id,rfq_number,vendor_id,idempotency_key,request_hash) OVERRIDING SYSTEM VALUE VALUES(11,'RFQ-RACE-A',5,'rfq-race-a',repeat('f',64)),(12,'RFQ-RACE-B',5,'rfq-race-b',repeat('c',64))");
+    const results = await Promise.allSettled([
+      pool.query("INSERT INTO procurement.request_for_quote_lines(rfq_id,recommendation_line_id,vendor_product_id,requested_pieces) VALUES(11,3,302,150)"),
+      pool.query("INSERT INTO procurement.request_for_quote_lines(rfq_id,recommendation_line_id,vendor_product_id,requested_pieces) VALUES(12,4,302,150)"),
+    ]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    const rejected = results.filter((result) => result.status === "rejected");
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].reason).toMatchObject({ code: "23514", message: expect.stringContaining("without complete approval evidence") });
+    expect((await pool.query<{ pieces: number }>("SELECT COALESCE(SUM(requested_pieces),0)::int AS pieces FROM procurement.request_for_quote_lines WHERE recommendation_line_id IN(3,4)")).rows[0].pieces).toBe(150);
+  });
+
+  it("rejects stale linked purchase supply across a changed receiving choice in both owners and SQL", async () => {
+    await capture();
+    const attempt = await conversion();
+    const result = await commands.execute(attempt.command, actorId, attempt.identity);
+    expect(result.httpStatus).toBe(201);
+    const created = rfqConversionResultSchema.parse(result.body);
+    await pool.query("INSERT INTO procurement.vendor_products(id,vendor_id,product_id,product_variant_id) VALUES(302,5,100,NULL)");
+    const current = await receivingChoiceRecommendation(3, null);
+    const { lockAndLoadActiveRfqAllocations } = await import("../../purchasing-rfq.service");
+    expect((await database.transaction((tx) => lockAndLoadActiveRfqAllocations(tx, [current]))).get("100:1")).toBe(150);
+    await pool.query("UPDATE procurement.purchase_orders SET status='approved',updated_at='2026-09-06T00:00:00' WHERE id=$1", [created.purchaseOrderId]);
+    await pool.query("UPDATE procurement.purchase_order_lines SET updated_at='2026-09-07T13:00:00' WHERE id=$1", [created.lines[0].purchaseOrderLineId]);
+    await expect(database.transaction((tx) => lockAndLoadActiveRfqAllocations(tx, [current])))
+      .rejects.toMatchObject({ code: "RFQ_SUPPLY_SNAPSHOT_STALE" });
+    await expect(purchasingOwner.createRfqBatch({ idempotencyKey: "scope-stale-purchase", lines: [
+      { recommendationLineId: current.id, vendorId: 5, vendorProductId: 302, requestedPieces: 150 },
+    ] }, actorId)).rejects.toMatchObject({ code: "RFQ_SUPPLY_SNAPSHOT_STALE" });
+    await pool.query("INSERT INTO procurement.request_for_quotes(id,rfq_number,vendor_id,idempotency_key,request_hash) OVERRIDING SYSTEM VALUE VALUES(11,'RFQ-STALE-SUPPLY',5,'rfq-stale-supply',repeat('e',64))");
+    await expect(pool.query("INSERT INTO procurement.request_for_quote_lines(rfq_id,recommendation_line_id,vendor_product_id,requested_pieces) VALUES(11,$1,302,150)", [current.id]))
+      .rejects.toMatchObject({ code: "23514", message: expect.stringContaining("RFQ_SUPPLY_SNAPSHOT_STALE") });
+  });
+
+  it("reapplies the product-scope guard without rewriting historical RFQ identities or quantities", async () => {
+    const before = await pool.query<{ evidence: unknown }>("SELECT to_jsonb(q) AS evidence FROM procurement.request_for_quote_lines q ORDER BY id");
+    const migration = readFileSync(resolve(process.cwd(), "migrations/232_rfq_product_reservation_scope.sql"), "utf8");
+    await pool.query(migration);
+    await pool.query(migration);
+    expect((await pool.query<{ evidence: unknown }>("SELECT to_jsonb(q) AS evidence FROM procurement.request_for_quote_lines q ORDER BY id")).rows).toEqual(before.rows);
+  });
   async function pendingAllocation(recommendationId: number) {
     const { lockAndLoadActiveRfqAllocations } = await import("../../purchasing-rfq.service");
     return database.transaction((tx) => lockAndLoadActiveRfqAllocations(tx, [{ id: recommendationId, productId: 100, productVariantId: 200, warehouseId: 1 }]));
@@ -407,15 +573,15 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
     const result = await commands.execute(attempt.command, actorId, descriptor(attempt.command));
     expect(result.httpStatus, JSON.stringify(result.body)).toBe(201);
     const created = rfqConversionResultSchema.parse(result.body);
-    expect((await pendingAllocation(1)).get("100:200:1")).toBe(200);
+    expect((await pendingAllocation(1)).get("100:1")).toBe(200);
     await pool.query("UPDATE procurement.purchase_order_lines SET order_qty=120,cancelled_qty=20 WHERE id=$1", [created.lines[0].purchaseOrderLineId]);
     await pool.query("UPDATE procurement.request_for_quotes SET status='cancelled',cancelled_at=$1 WHERE id=10", [NOW]);
-    expect((await pendingAllocation(1)).get("100:200:1")).toBe(100);
+    expect((await pendingAllocation(1)).get("100:1")).toBe(100);
     expect((await pool.query("SELECT requested_pieces FROM procurement.request_for_quote_lines WHERE id=20")).rows[0].requested_pieces).toBe(150);
     await freshRecommendation(3, 1, 400);
     await pool.query("INSERT INTO procurement.request_for_quotes(id,rfq_number,vendor_id,idempotency_key,request_hash) OVERRIDING SYSTEM VALUE VALUES(11,'RFQ-NEXT',5,'rfq-next',repeat('b',64))");
     await nextRfqLine(3, 300);
-    expect((await pendingAllocation(3)).get("100:200:1")).toBe(400);
+    expect((await pendingAllocation(3)).get("100:1")).toBe(400);
   });
 
   it.each(["approved", "received", "closed", "cancelled"])("avoids double allocation after %s and blocks reuse of stale recommendations", async (status) => {
@@ -433,9 +599,9 @@ integration.sequential("RFQ quote revisions and real purchase-owner transaction"
     await expect(nextRfqLine(3, 100)).rejects.toMatchObject({ code: "23514", message: expect.stringContaining("RFQ_SUPPLY_SNAPSHOT_STALE") });
     await pool.query("INSERT INTO procurement.purchase_recommendation_runs(id,calculation_version,as_of,lookback_days,policy_snapshot) OVERRIDING SYSTEM VALUE VALUES(2,'rfq-test','2026-09-08T00:00:00Z',90,'{}')");
     await freshRecommendation(4, 2, 100);
-    expect((await pendingAllocation(4)).get("100:200:1")).toBe(0);
+    expect((await pendingAllocation(4)).get("100:1")).toBe(0);
     await nextRfqLine(4, 100);
-    expect((await pendingAllocation(4)).get("100:200:1")).toBe(100);
+    expect((await pendingAllocation(4)).get("100:1")).toBe(100);
   });
   it("keeps ambiguous packaging as evidence while refusing financial conversion", async () => {
     expect((await capture(20, { packagingTreatment: "unknown", packagingCostCents: null })).result.httpStatus).toBe(200);
