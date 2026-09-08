@@ -380,6 +380,43 @@ describe("channel fulfillment authority service", () => {
     });
   });
 
+  it.each(["shopify", "ebay"] as const)("preserves exact package allocation provenance for %s execution", async (channelProvider) => {
+    const pushShopifyFulfillmentForCommand = vi.fn().mockResolvedValue({
+      shopifyFulfillmentId: "gid://shopify/Fulfillment/1",
+      writebackComplete: true,
+    });
+    const pushTrackingForShipmentCommand = vi.fn().mockResolvedValue(true);
+    const executor = createCompatibilityChannelFulfillmentProviderExecutor({
+      pushShopifyFulfillmentForCommand,
+      pushTrackingForShipmentCommand,
+    });
+    const base = command({ channelProvider });
+    const packageCommand = command({
+      ...base,
+      items: Object.freeze([Object.freeze({
+        ...base.items[0],
+        quantity: 1,
+        packageAllocationEntryId: 518,
+        packageAllocationEffectIntentId: 1448,
+      })]),
+    });
+
+    await executor.execute(packageCommand);
+
+    const invokedProvider = channelProvider === "shopify"
+      ? pushShopifyFulfillmentForCommand
+      : pushTrackingForShipmentCommand;
+    expect(invokedProvider).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      items: [expect.objectContaining({
+        legacyWmsShipmentItemId: 700,
+        quantity: 1,
+        packageAllocationEntryId: 518,
+        packageAllocationEffectIntentId: 1448,
+      })],
+    }));
+    expect(packageCommand.items[0]).toMatchObject({ quantity: 1, packageAllocationEntryId: 518 });
+  });
+
   it("sends one eBay fulfillment for a physical package spanning legacy shipment rows", async () => {
     const pushTrackingForShipmentCommand = vi.fn().mockResolvedValue(true);
     const executor = createCompatibilityChannelFulfillmentProviderExecutor({

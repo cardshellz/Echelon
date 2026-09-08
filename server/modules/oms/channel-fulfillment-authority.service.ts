@@ -210,6 +210,8 @@ function providerCommandInput(
         omsOrderLineId: item.omsOrderLineId,
         channelOrderLineId: item.channelOrderLineId,
         quantity: item.quantity,
+        packageAllocationEntryId: item.packageAllocationEntryId ?? null,
+        packageAllocationEffectIntentId: item.packageAllocationEffectIntentId ?? null,
       }))),
   });
 }
