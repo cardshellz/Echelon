@@ -33,7 +33,7 @@ function digest(value: unknown): string { return createHash("sha256").update(can
 function retryable(error: unknown): boolean {
   if (!error || typeof error !== "object") return false;
   const { code, constraint } = error as { code?: unknown; constraint?: unknown };
-  return code === "40001" || code === "40P01"
+  return code === "40001" || code === "40P01" || code === "INVENTORY_PUBLICATION_TARGET_BUSY"
     || (code === "23505" && constraint === "availability_claim_commands_idempotency_uq");
 }
 function bounded<T>(rows: T[], maximum: number): T[] {
@@ -51,7 +51,7 @@ async function exactlyOne(client: PoolClient, sql: string, values: unknown[]): P
  * Lock order: authority SHARE -> WMS order/source owner -> claim/line -> resources
  * -> allocations/pick lineage -> inventory owner levels/lots. No graph lock is
  * acquired after the order: dispatch does not read or mutate graph policy.
- * No runtime construction/HTTP route is supplied by this repository.
+ * Source preparation, when used, runs again inside each full transaction retry.
  */
 export class PostgresCanonicalClaimDispatchRepository implements CanonicalClaimDispatchStore {
   constructor(
@@ -64,6 +64,17 @@ export class PostgresCanonicalClaimDispatchRepository implements CanonicalClaimD
 
   async dispatch(rawCommand: CanonicalClaimDispatchCommand): Promise<CanonicalClaimDispatchReceipt> {
     const command = canonicalClaimDispatchCommandSchema.parse(rawCommand);
+    return this.dispatchPrepared(async () => command);
+  }
+
+  /**
+   * Internal composition API, never an HTTP-supplied callback. The source owner
+   * must reuse committed request evidence before resolving any new source facts,
+   * and pin canonical authority before acquiring new WMS or claim locks.
+   */
+  async dispatchPrepared(
+    prepareCommand: (client: PoolClient) => Promise<CanonicalClaimDispatchCommand>,
+  ): Promise<CanonicalClaimDispatchReceipt> {
     const clockValue = this.clock();
     if (!(clockValue instanceof Date) || Number.isNaN(clockValue.getTime())) {
       fail("CLAIM_DISPATCH_INVALID_CLOCK", "The injected dispatch clock is invalid.");
@@ -80,6 +91,7 @@ export class PostgresCanonicalClaimDispatchRepository implements CanonicalClaimD
         await client.query("BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE");
         began = true; releaseError = undefined;
         await client.query("SET LOCAL statement_timeout = '30s'");
+        const command = canonicalClaimDispatchCommandSchema.parse(await prepareCommand(client));
         const replay = await loadReplay(client, command);
         if (replay) {
           await client.query("COMMIT"); began = false;

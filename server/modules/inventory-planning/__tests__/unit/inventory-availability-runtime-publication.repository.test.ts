@@ -320,7 +320,7 @@ function publicationDatabase(options: { failQueueTransition?: boolean } = {}) {
     {
       activationState: "active",
       query: async (sql, values) => {
-        if (sql.includes("pg_advisory_xact_lock")) return { rows: [] };
+        if (sql.includes("pg_try_advisory_xact_lock")) return { rows: [{ acquired: true }] };
         if (sql.includes("FROM inventory.inventory_publication_outbox")
           && sql.includes("ORDER BY desired_revision DESC")) {
           return { rows: database.latest ? [{ ...database.latest }] : [] };
