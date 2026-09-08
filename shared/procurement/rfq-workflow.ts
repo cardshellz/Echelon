@@ -1,3 +1,4 @@
+import { supplierSelectionEvidenceSchema } from "./supplier-sourcing";
 import { z } from "zod";
 import { rfqQuantityReviewSchema } from "./rfq-quantity-review";
 import { normalizePoLinePricing } from "../utils/po-line-pricing";
@@ -97,6 +98,7 @@ export const rfqWorkflowDetailSchema = z.object({
     productName: z.string(),
     requestedPieces: rfqResourceIdSchema,
     quantityReview: rfqQuantityReviewSchema,
+    sourcingSelection: supplierSelectionEvidenceSchema.nullable().optional(),
     latestQuote: rfqQuoteRevisionSchema.nullable(),
     purchaseOrder: rfqPurchaseOrderLinkSchema.nullable(),
   }).strict()).max(RFQ_WORKFLOW_MAX_LINES),

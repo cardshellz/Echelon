@@ -291,3 +291,34 @@ test("supplier minimum is visible before drafting and an unresolved RFQ remains 
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   expect(failures).toEqual([]);
 });
+
+
+test("manual supplier override captures an explained RFQ with exact supplier identity", async ({ page }, testInfo) => {
+  const { failures, analysis } = await setup(page, true);
+  const item = analysis.items[0];
+  const option = { vendorProductId: 20, vendorId: 2, vendorName: "Test supplier", preferred: true, priority: 100, revision: 0, eligible: true, rejectionReasons: [], pricingReviewReasons: ["quote_missing"], currency: "USD", leadTimeDays: 120, minimumOrderPieces: 1, orderIncrementPieces: 1, proposedPieces: item.suggestedOrderPieces, estimatedUnitCostMills: null, tier: null };
+  item.supplierBasis.sourcingSelection = { version: 1, selectedVendorProductId: 20, method: "preferred", rankBasis: "preferred_then_priority_then_variant_then_lead_time_then_identity", priceComparison: "not_performed", options: [option, { ...option, vendorProductId: 30, vendorId: 3, vendorName: "Alternate supplier", preferred: false, priority: 10, leadTimeDays: 20, proposedPieces: 100 }] };
+  const requests: Record<string, unknown>[] = [];
+  await page.route("**/api/purchasing/rfq-queue", async (route) => {
+    if (route.request().method() === "GET") return route.fulfill({ json: { items: [{ recommendationId: item.recommendationId, recommendationLineId: 901, remainingPieces: item.suggestedOrderPieces, vendorId: 2, vendorProductId: 20 }] } });
+    requests.push(route.request().postDataJSON());
+    return route.fulfill({ json: { rfqs: [{ id: 902 }], lines: [{ id: 903 }], reused: false } });
+  });
+  await page.goto("/reorder-analysis?chips=all");
+  await page.getByRole("checkbox", { name: "Add PLAN-TEST to order", exact: true }).click();
+  await page.getByRole("button", { name: "Open order builder", exact: true }).click();
+  await page.getByLabel("Supplier for PLAN-TEST", { exact: true }).selectOption("30");
+  await expect(page.getByRole("radio", { name: "Request quote", exact: true })).toBeChecked();
+  await expect(page.getByRole("radio", { name: "Draft PO", exact: true })).toBeDisabled();
+  const next = page.getByRole("button", { name: /Continue → confirm 1 RFQ/ });
+  await expect(next).toBeDisabled();
+  await page.getByPlaceholder("Reason for changing the requested quantity", { exact: true }).fill("Faster delivery for club member demand");
+  await next.click();
+  await expect(page.getByText("Alternate supplier", { exact: true })).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("manual-supplier-rfq-review.png"), fullPage: true });
+  await page.getByRole("button", { name: /^Create 1 RFQ/ }).click();
+  await expect.poll(() => requests.length).toBe(1);
+  expect(requests[0]).toMatchObject({ requestNote: expect.stringContaining("supplier override to Alternate supplier (mapping 30). Faster delivery for club member demand"), lines: [{ recommendationLineId: 901, vendorId: 3, vendorProductId: 30, requestedPieces: 100, quantityOverrideReason: "Faster delivery for club member demand" }] });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  expect(failures).toEqual([]);
+});

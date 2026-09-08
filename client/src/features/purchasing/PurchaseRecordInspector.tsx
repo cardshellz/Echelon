@@ -1,5 +1,6 @@
 import { PurchaseReceiptCostLines } from "./PurchaseCostTrace";
-import React, { useEffect, useRef } from "react";
+import { InboundShipmentTracking } from "@/components/purchasing/InboundShipmentTracking";
+import React, { useEffect, useRef, useState } from "react";
 import { Link } from "wouter";
 import { ArrowLeft, ExternalLink, Search, X } from "lucide-react";
 import type { PurchaseWorkspace, PurchaseWorkspaceRecord } from "@shared/procurement/purchase-workspace";
@@ -92,6 +93,7 @@ function PurchaseReadView({ purchase }: { purchase: PurchaseWorkspace["purchase"
 }
 
 function ShipmentReadView({ shipment, purchaseOrderId, navigation }: { shipment: PurchaseWorkspace["shipments"][number]; purchaseOrderId: number; navigation: ProcurementNavigation }) {
+  const [showTracking, setShowTracking] = useState(false);
   return (
     <div className="space-y-4">
       <p className="rounded-md border bg-muted/40 p-3 text-xs">The currency basis of shipment cost totals is unavailable here. Review the recorded charges and allocations in the full shipment cost view.</p>
@@ -102,6 +104,10 @@ function ShipmentReadView({ shipment, purchaseOrderId, navigation }: { shipment:
         <Field label="Shipment ETA">{formatWorkspaceDate(shipment.eta)}</Field>
         <Field label="Delivered date">{formatWorkspaceDate(shipment.deliveredDate)}</Field>
       </dl>
+      <section className="space-y-3 border-t pt-4" aria-label="Shipment carrier tracking">
+        <Button variant="outline" size="sm" onClick={() => setShowTracking(!showTracking)}>{showTracking ? "Hide carrier tracking" : "View carrier tracking"}</Button>
+        {showTracking && <InboundShipmentTracking key={shipment.id} shipmentId={shipment.id} shipmentStatus={shipment.status} containerNumber={shipment.containerNumber} />}
+      </section>
       <section className="space-y-2 border-t pt-4" aria-label="Shipment line links">
         <h4 className="text-sm font-semibold">Shipment lines</h4>
         <p className="text-xs text-muted-foreground">Each line shows its recorded shipment quantity and purchase order links.</p>
@@ -228,7 +234,7 @@ export function PurchaseRecordInspector({ data, navigation }: { data: PurchaseWo
         {missing ? <p role="alert" className="text-sm text-muted-foreground">This selection is invalid or is not among the records returned for this purchase. Close the inspector or select a connected record.</p> : selected ? (
           <>
             {selected.kind === "purchase" && <PurchaseReadView purchase={selected.record} />}
-            {selected.kind === "shipment" && <ShipmentReadView shipment={selected.record} purchaseOrderId={data.purchase.id} navigation={navigation} />}
+            {selected.kind === "shipment" && <ShipmentReadView key={selected.record.id} shipment={selected.record} purchaseOrderId={data.purchase.id} navigation={navigation} />}
             {selected.kind === "receipt" && <><ReceiptReadView receipt={selected.record} />{data.costTrace && <section className="space-y-2 border-t pt-4" aria-label="Receipt cost evidence"><h4 className="text-sm font-semibold">Original receipt lots and current costs</h4><PurchaseReceiptCostLines trace={data.costTrace} receiptId={selected.record.id} data={data} navigation={navigation} /></section>}</>}
             {selected.kind === "invoice" && <InvoiceReadView invoice={selected.record} purchaseOrderId={data.purchase.id} navigation={navigation} />}
             {related.size > 0 && <section className="space-y-2 border-t pt-4" aria-label="Connected records"><h4 className="text-sm font-semibold">Connected records</h4><ul className="space-y-2">{[...related.values()].map((record) => <li key={`${record.kind}:${record.record.id}`}><Link href={navigation.inspectHref({ kind: record.kind, id: record.record.id })} className="rounded-sm text-sm text-primary underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">{recordTitle(record)}</Link></li>)}</ul></section>}

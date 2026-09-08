@@ -1,3 +1,4 @@
+import { SupplierSelectionEvidence } from "./SupplierSelectionEvidence";
 import { rfqQuantityReviewMessage } from "@shared/procurement/rfq-quantity-review";
 import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -176,7 +177,8 @@ export function RfqWorkflowPanel({ rfqId }: { rfqId: number }) {
           {canEdit && ["draft", "sent", "quoted"].includes(line.status) && !line.purchaseOrder && <Button size="sm" variant="outline" disabled={locked || editingId !== null} onClick={() => setEditingId(line.id)}>{quote ? "Revise quote" : "Capture quote"}</Button>}
           <Button size="sm" variant="ghost" onClick={() => setHistoryId(historyId === line.id ? null : line.id)}>Quote history</Button>
         </div>
-        {historyId === line.id && <div className="mt-2"><QuoteHistory rfqId={rfqId} lineId={line.id} /></div>}
+        <SupplierSelectionEvidence evidence={line.sourcingSelection} actualVendorProductId={line.vendorProductId} />
+          {historyId === line.id && <div className="mt-2"><QuoteHistory rfqId={rfqId} lineId={line.id} /></div>}
       </div>;
     })}</div>
     {editingLine && <QuoteEditor key={editingLine.id} workflow={workflow} line={editingLine} onClose={() => setEditingId(null)} onSaved={() => { setEditingId(null); setSelected(new Set()); refresh(); }} />}

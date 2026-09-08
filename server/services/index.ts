@@ -59,6 +59,8 @@ import { createChannelProductPushService } from "../modules/channels/product-pus
 import { createSyncSettingsService } from "../modules/channels/sync-settings.service";
 import { createBinAssignmentService } from "../modules/warehouse/bin-assignment.service";
 import { createPurchasingService } from "../modules/procurement/purchasing.service";
+import { CostReportingRepository } from "../modules/procurement/cost-reporting.repository";
+import { createCostReportingService } from "../modules/procurement/cost-reporting.service";
 import { createVendorService } from "../modules/procurement/vendor.service";
 import { createRecommendationPoHandoffService } from "../modules/procurement/recommendation-po-handoff.service";
 import { createDrizzleRecommendationPoHandoffRepository } from "../modules/procurement/recommendation-po-handoff.repository";
@@ -269,6 +271,7 @@ export function createServices(
     ),
   });
   const vendor = createVendorService(db, procurementStorage);
+  const costReporting = createCostReportingService(new CostReportingRepository(databasePool));
   const recommendationPoHandoff = createRecommendationPoHandoffService(
     createDrizzleRecommendationPoHandoffRepository(db),
   );
@@ -587,6 +590,7 @@ export function createServices(
     channelProductPush,
     binAssignment,
     purchasing,
+    costReporting,
     vendor,
     recommendationPoHandoff,
     shipmentTracking,

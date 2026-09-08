@@ -1,3 +1,5 @@
+import { millsToCents } from "@shared/utils/money";
+import { selectSupplierPriceTier, supplierSelectionEvidenceSchema, type SupplierSourcingRecord } from "@shared/procurement/supplier-sourcing";
 import { evaluateSupplierBundle } from "@shared/procurement/supplier-bundle";
 import { z } from "zod";
 import {
@@ -345,6 +347,7 @@ export interface RecommendationAutoDraftRunRecord {
 }
 
 export interface RecommendationVendorProductRecord {
+  sourcing?: SupplierSourcingRecord | null;
   id: number;
   vendorId: number;
   productId: number;
@@ -1071,7 +1074,7 @@ function resolveCatalogRows(
     const acceptedBinding = acceptedById.get(item.acceptedDecisionId)!;
     const acceptedDecision = acceptedBinding.decision;
     const acceptedBasis = acceptedBinding.basis;
-    const vendorProduct = vendorProductById.get(item.vendorProductId)!;
+    let vendorProduct = vendorProductById.get(item.vendorProductId)!;
     const vendor = vendorById.get(item.vendorId)!;
     const product = productById.get(item.productId)!;
     const variant = variantById.get(item.productVariantId)!;
@@ -1106,7 +1109,17 @@ function resolveCatalogRows(
         { vendorProductId: vendorProduct.id },
       );
     }
-    if (vendorProduct.isActive !== 1 || vendorProduct.isPreferred !== 1) {
+    const acceptedSelection = acceptedBasis.supplierBasis.sourcingSelection === undefined ? null
+      : supplierSelectionEvidenceSchema.parse(acceptedBasis.supplierBasis.sourcingSelection);
+    const selectedOption = acceptedSelection?.options.find((option) => option.vendorProductId === vendorProduct.id && option.vendorId === vendor.id && option.eligible);
+    if (acceptedSelection && (acceptedSelection.selectedVendorProductId !== vendorProduct.id || !selectedOption)) {
+      throw new RecommendationPoHandoffError("The accepted supplier selection does not match the purchase supplier. Review a fresh recommendation.", 409, "ACCEPTED_SUPPLIER_SELECTION_MISMATCH");
+    }
+    const acceptedAlternate = acceptedSelection?.method === "ranked_alternate"
+      && acceptedSelection.selectedVendorProductId === vendorProduct.id && selectedOption !== undefined
+      && acceptedDecision.source === "operator";
+    if (vendorProduct.isActive !== 1 || (vendorProduct.isPreferred !== 1 && !acceptedAlternate)
+      || vendorProduct.sourcing?.policy.eligibleForProposals === false) {
       throw new RecommendationPoHandoffError(
         "The selected supplier catalog row is no longer active and preferred",
         409,
@@ -1153,6 +1166,27 @@ function resolveCatalogRows(
       }
       : null;
 
+    // A tier quote is authoritative only at its frozen quantity and revision.
+    // Quantity edits across thresholds must be reviewed as a fresh decision,
+    // never silently repriced during a financial command or its replay.
+    const acceptedTier = selectedOption?.tier ?? null;
+    const liveSourcing = vendorProduct.sourcing ?? null;
+    if (acceptedTier || liveSourcing?.policy.priceList) {
+      if (!acceptedTier || !liveSourcing?.policy.priceList || liveSourcing.revision !== acceptedTier.revision) {
+        throw new RecommendationPoHandoffError("Supplier quantity pricing changed. Refresh and review the recommendation.", 409, "SUPPLIER_TIER_REVISION_CHANGED");
+      }
+      const selection = selectSupplierPriceTier({ vendorProductId: vendorProduct.id, revision: liveSourcing.revision, priceList: liveSourcing.policy.priceList,
+        pieces: orderPieces, asOfDate: clock.date, currency: vendor.currency ?? "" });
+      if (!selection.evidence || selection.evidence.tierIndex !== acceptedTier.tierIndex
+        || selection.evidence.unitCostMills !== acceptedTier.unitCostMills) {
+        throw new RecommendationPoHandoffError("The requested quantity no longer has the accepted supplier tier. Refresh the proposal or request a final supplier quote.", 409, "SUPPLIER_TIER_QUANTITY_REVIEW_REQUIRED", { reason: selection.rejection });
+      }
+      const tier = selection.evidence;
+      const list = tier.priceList;
+      vendorProduct = { ...vendorProduct, pricingBasis: list.basis, purchaseUom: list.purchaseUom, piecesPerPurchaseUom: list.piecesPerPurchaseUom,
+        quotedUnitCostMills: tier.unitCostMills, unitCostMills: tier.normalizedUnitCostMills, unitCostCents: millsToCents(tier.normalizedUnitCostMills),
+        quotedAt: new Date(list.quotedAt), quotedAtDate: list.quotedAt.slice(0,10), quoteValidUntil: list.validUntil, quoteReference: list.quoteReference };
+    }
     const liveMinimumOrderPieces = requireValidSupplierMinimumOrder(vendorProduct);
     assertAcceptedMinimumOrderStillCurrent(
       acceptedBasis.supplierBasis.minimumOrderPieces,

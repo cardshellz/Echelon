@@ -1,3 +1,4 @@
+import { supplierSelectionEvidenceSchema } from "@shared/procurement/supplier-sourcing";
 import { sql, type SQL } from "drizzle-orm";
 import { z } from "zod";
 import {
@@ -78,6 +79,7 @@ export async function loadRfqWorkflow(executor: RfqWorkflowExecutor, rfqId: numb
   const lineRows = await executor.execute(sql`
     SELECT q.id, q.status, q.vendor_product_id, q.requested_pieces, r.product_id, r.product_variant_id,
       r.warehouse_id, r.sku, r.product_name, r.evidence_snapshot->'supplierBasis' AS recommendation_supplier_rules,
+      r.evidence_snapshot->'supplierBasis'->'sourcingSelection' AS sourcing_selection,
       vendor_product.id AS current_vendor_product_id, vendor_product.moq AS current_moq,
       vendor_product.pack_size AS current_pack_size, vendor_product.pieces_per_purchase_uom AS current_purchase_uom_pieces
     FROM procurement.request_for_quote_lines q JOIN procurement.purchase_recommendation_lines r ON r.id = q.recommendation_line_id
@@ -94,7 +96,7 @@ export async function loadRfqWorkflow(executor: RfqWorkflowExecutor, rfqId: numb
     id: header.id, rfqNumber: header.rfq_number, vendorId: header.vendor_id, currency: header.currency, status: header.status,
     lines: lineRows.rows.map((row) => {
       const line = readEvidence(lineSchema, row);
-      return { id: line.id, status: line.status, productId: line.product_id, productVariantId: line.product_variant_id, warehouseId: line.warehouse_id, vendorProductId: line.vendor_product_id, sku: line.sku, productName: line.product_name, requestedPieces: line.requested_pieces, quantityRuleEvidence: { recommendationRules: row.recommendation_supplier_rules, currentRules: { vendorProductId: row.current_vendor_product_id, minimumOrderPieces: row.current_moq, packSize: row.current_pack_size, piecesPerPurchaseUom: row.current_purchase_uom_pieces } }, latestQuote: latest.get(line.id) ?? null, purchaseOrder: byLine.get(line.id) ?? null };
+      return { sourcingSelection: row.sourcing_selection == null ? null : readEvidence(supplierSelectionEvidenceSchema, row.sourcing_selection), id: line.id, status: line.status, productId: line.product_id, productVariantId: line.product_variant_id, warehouseId: line.warehouse_id, vendorProductId: line.vendor_product_id, sku: line.sku, productName: line.product_name, requestedPieces: line.requested_pieces, quantityRuleEvidence: { recommendationRules: row.recommendation_supplier_rules, currentRules: { vendorProductId: row.current_vendor_product_id, minimumOrderPieces: row.current_moq, packSize: row.current_pack_size, piecesPerPurchaseUom: row.current_purchase_uom_pieces } }, latestQuote: latest.get(line.id) ?? null, purchaseOrder: byLine.get(line.id) ?? null };
     }),
   };
 }

@@ -741,6 +741,18 @@
   "procurement.ap_payments": [
     "modules/procurement"
   ],
+  "procurement.cost_report_deliveries": [
+    "modules/procurement"
+  ],
+  "procurement.cost_report_delivery_audit": [
+    "modules/procurement"
+  ],
+  "procurement.cost_report_retry_intents": [
+    "modules/procurement"
+  ],
+  "procurement.cost_reporting_destinations": [
+    "modules/procurement"
+  ],
   "procurement.cost_source_revisions": [
     "modules/procurement"
   ],
@@ -763,6 +775,18 @@
     "modules/procurement"
   ],
   "procurement.inbound_shipments": [
+    "modules/procurement"
+  ],
+  "procurement.inbound_tracking_attempts": [
+    "modules/procurement"
+  ],
+  "procurement.inbound_tracking_commands": [
+    "modules/procurement"
+  ],
+  "procurement.inbound_tracking_observations": [
+    "modules/procurement"
+  ],
+  "procurement.inbound_tracking_references": [
     "modules/procurement"
   ],
   "procurement.landed_cost_adjustments": [
@@ -810,12 +834,6 @@
   "procurement.purchase_pipeline_job_runs": [
     "modules/procurement"
   ],
-  "procurement.purchase_supplier_progress": [
-    "modules/procurement"
-  ],
-  "procurement.purchase_supplier_progress_revisions": [
-    "modules/procurement"
-  ],
   "procurement.purchase_planning_policy": [
     "modules/procurement"
   ],
@@ -828,6 +846,12 @@
   "procurement.purchase_recommendation_runs": [
     "modules/procurement"
   ],
+  "procurement.purchase_supplier_progress": [
+    "modules/procurement"
+  ],
+  "procurement.purchase_supplier_progress_revisions": [
+    "modules/procurement"
+  ],
   "procurement.purchasing_recommendation_decisions": [
     "modules/procurement"
   ],
@@ -835,6 +859,12 @@
     "modules/procurement"
   ],
   "procurement.receipt_cost_attempts": [
+    "modules/procurement"
+  ],
+  "procurement.receipt_cost_recovery_events": [
+    "modules/procurement"
+  ],
+  "procurement.receipt_cost_recovery_jobs": [
     "modules/procurement"
   ],
   "procurement.receipt_cost_requests": [
@@ -859,6 +889,9 @@
     "modules/procurement"
   ],
   "procurement.rfq_quote_revisions": [
+    "modules/procurement"
+  ],
+  "procurement.supplier_sourcing_revisions": [
     "modules/procurement"
   ],
   "procurement.vendor_invoice_attachments": [

@@ -20,6 +20,15 @@ export async function installFixtures(page: Page) {
     let json: unknown = [];
     if (path === "/api/auth/me") json = { user: { id: "test-user", username: "test", role: "admin" }, permissions: [], roles: ["admin"] };
     else if (path === "/api/settings/procurement") json = { useNewPoEditor: true };
+    else if (/^\/api\/purchase-orders\/\d+\/cost-reporting$/.test(path)) json = {
+      purchaseOrderId: Number(path.split("/")[3]), configuration: "not_configured", deliveries: [], unqueuedEventCount: 0, truncated: false,
+    };
+    else if (/^\/api\/inbound-shipments\/\d+\/tracking$/.test(path)) json = {
+      pollingEnabled: false, providers: [
+        { provider: "searates", configured: false, setup: "SeaRates credentials required." },
+        { provider: "shipstation", configured: false, setup: "ShipStation credentials required." },
+      ], references: [],
+    };
     else if (/^\/api\/purchase-orders\/(17|99)$/.test(path)) json = po(Number(path.split("/").at(-1)));
     else if (/\/purchase-orders\/\d+\/shipments$/.test(path)) json = [shipment];
     else if (/\/purchase-orders\/\d+\/receipts$/.test(path)) json = { receipts: [{ id: 1, receivingOrderId: 31, purchaseOrderLineId: 1, qtyReceived: 10 }] };

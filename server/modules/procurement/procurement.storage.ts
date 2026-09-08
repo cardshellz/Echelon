@@ -1,3 +1,4 @@
+import { attachSupplierSourcingCandidates } from "./supplier-sourcing.repository";
 import { readPurchasePlanningSnapshot } from "./purchase-planning-snapshot.repository";
 import { purchaseInventorySnapshotQuery } from "./purchase-inventory-snapshot.query";
 import { getPurchasePlanningPolicyService } from "./purchase-planning-policy.runtime";
@@ -1747,7 +1748,7 @@ export const procurementMethods: IProcurementStorage = {
       WHERE p.is_active = true
       ORDER BY p.sku, p.name
     `);
-      return rows.rows as unknown as PurchasingRecommendationRawRow[];
+      return attachSupplierSourcingCandidates(tx, rows.rows as unknown as PurchasingRecommendationRawRow[]);
     });
   },
 

@@ -1365,6 +1365,7 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
         responseDueDate: req.body.responseDueDate == null ? null : String(req.body.responseDueDate),
         lines: req.body.lines.map((line: any) => ({
           recommendationLineId: Number(line?.recommendationLineId),
+          ...(line?.vendorProductId === undefined ? {} : { vendorProductId: Number(line.vendorProductId) }),
           vendorId: Number(line?.vendorId),
           vendorSku: line?.vendorSku == null ? null : String(line.vendorSku),
           requestedPieces: Number(line?.requestedPieces),
