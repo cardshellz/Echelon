@@ -145,6 +145,11 @@ import { PostgresCanonicalClaimBuildRepository } from "../modules/inventory/infr
 import { PostgresCanonicalClaimPickerObservationReviewRepository } from "../modules/orders/canonical-claim-picker-observation-review.repository";
 import { createAuthorityAwareInventoryAtpService } from "../modules/inventory-planning/infrastructure/inventory-availability-runtime-atp.repository";
 import { createAuthorityAwareReservationRuntime } from "../modules/inventory-planning/infrastructure/inventory-availability-runtime-claim.repository";
+import { PostgresCanonicalClaimDispatchRepository } from "../modules/inventory-planning/infrastructure/inventory-availability-dispatch.repository";
+import { PostgresCanonicalClaimDispatchSourceCommandResolver } from "../modules/inventory-planning/infrastructure/inventory-availability-dispatch-source-command.repository";
+import { WmsCanonicalClaimDispatchSourceOwner } from "../modules/wms/canonical-claim-dispatch-source";
+import { createAuthorityAwareInventoryShipmentRecorder } from "../modules/inventory-planning/infrastructure/inventory-availability-runtime-shipment.repository";
+import { publishCanonicalDispatchInsideTransaction } from "../modules/inventory-planning/infrastructure/inventory-availability-dispatch-publication";
 import { createAuthorityAwareInventoryPublicationService } from "../modules/inventory-planning/infrastructure/inventory-availability-runtime-publication.repository";
 import { productVariants as pvTable } from "@shared/schema";
 import { eq as eqOp } from "drizzle-orm";
@@ -163,6 +168,20 @@ export function createServices(
   const recipeCapacity = createRecipeCapacityService(db);
   const atp = createAuthorityAwareInventoryAtpService(databasePool);
   const canonicalClaimInventory = new PostgresCanonicalClaimInventoryRepository();
+  const dispatchSourceOwner = new WmsCanonicalClaimDispatchSourceOwner();
+  const canonicalDispatch = new PostgresCanonicalClaimDispatchRepository(
+    databasePool,
+    dispatchSourceOwner,
+    canonicalClaimInventory,
+    publishCanonicalDispatchInsideTransaction,
+    systemCanonicalClaimClock,
+  );
+  const shipmentInventory = createAuthorityAwareInventoryShipmentRecorder({
+    connectionPool: databasePool,
+    legacyOwner: inventoryCore,
+    dispatcher: canonicalDispatch,
+    sourceCommands: new PostgresCanonicalClaimDispatchSourceCommandResolver(dispatchSourceOwner),
+  });
   const canonicalClaimBuild = new PostgresCanonicalClaimBuildRepository(canonicalClaimInventory);
   const canonicalClaimObservationReview = new PostgresCanonicalClaimPickerObservationReviewRepository();
   const assemblyWorkOwner = new AssemblyWorkOwner(new WorkConfigurationRepository(databasePool), new AssemblyWorkRepository());
@@ -494,7 +513,11 @@ export function createServices(
       fulfillmentAuthority: channelFulfillmentAuthority,
       reviewRepository: createPackageAllocationLabelCommercialReviewRepository(db),
     });
-  const shipStation = createShipStationService(db, inventoryCore as any, {
+  const shipStation = createShipStationService(db, {
+    recordShipment: (input) => shipmentInventory.recordShipment(input),
+    recordReplacementShipmentFromAvailableInventory: (input) =>
+      inventoryCore.recordReplacementShipmentFromAvailableInventory(input),
+  }, {
     providerLabelObserver: carrierTracking,
     fulfillmentAuthority: channelFulfillmentAuthority,
     labelCommercialFulfillment,
@@ -510,7 +533,7 @@ export function createServices(
   const channelFulfillmentIngress = createChannelFulfillmentIngressService({
     repository: createChannelFulfillmentIngressRepository(db),
     authority: channelFulfillmentAuthority,
-    inventory: inventoryCore,
+    inventory: shipmentInventory,
     cancelEngineShipment: async (candidate, occurredAt) => {
       if (candidate.engine !== shippingEngine.engineName) {
         throw Object.assign(

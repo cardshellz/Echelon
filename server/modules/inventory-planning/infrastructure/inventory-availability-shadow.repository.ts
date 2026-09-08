@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from "pg";
+import type { InventoryAvailabilityTransactionQueryClient } from "../application/inventory-availability-transaction-query.port";
 
 import { pool } from "../../../db";
 import {
@@ -23,7 +24,7 @@ import {
 } from "@shared/catalog/variant-sales-eligibility";
 
 type QueryResult = { rows: any[] };
-export type InventoryAvailabilitySnapshotQueryClient = Pick<PoolClient, "query">;
+export type InventoryAvailabilitySnapshotQueryClient = InventoryAvailabilityTransactionQueryClient;
 type QueryClient = InventoryAvailabilitySnapshotQueryClient;
 type ClientPool = Pick<Pool, "connect">;
 type SnapshotSelection = "draft_preferred" | "active_only";

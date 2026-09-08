@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from "pg";
+import type { InventoryAvailabilityTransactionQueryClient } from "../application/inventory-availability-transaction-query.port";
 
 import type { SupplySnapshotDto } from "@shared/types/inventory-availability-planner";
 import {
@@ -163,7 +164,7 @@ export function createInventoryChannelExposureRuntimeService(
 }
 
 export async function loadManagedSellableVariantIds(
-  client: PoolClient,
+  client: InventoryAvailabilityTransactionQueryClient,
   productId: number,
 ): Promise<number[]> {
   const result = await client.query<{ id: unknown }>(
@@ -181,7 +182,7 @@ export async function loadManagedSellableVariantIds(
 }
 
 export async function loadActivePublicationTargets(
-  client: PoolClient,
+  client: InventoryAvailabilityTransactionQueryClient,
   productId: number,
   productVariantIds: readonly number[],
   channelId?: number,
