@@ -36,7 +36,7 @@ export interface ChannelFulfillmentIngressLogger {
 export interface ChannelFulfillmentInventoryRecorder {
   recordShipment(input: {
     productVariantId: number;
-    warehouseLocationId: number;
+    warehouseLocationId: number | null;
     qty: number;
     orderId: number;
     orderItemId: number;
@@ -127,6 +127,7 @@ function inventoryFailure(
     code: "INVENTORY_RECORD_FAILED",
     message: errorMessage(error),
     context: Object.freeze({
+      causeCode: errorCode(error),
       legacyWmsShipmentId: item.legacyWmsShipmentId,
       legacyWmsShipmentItemId: item.legacyWmsShipmentItemId,
       wmsOrderId: item.wmsOrderId,
@@ -162,9 +163,9 @@ async function recordInventory(
   const failures: ProcessingFailure[] = [];
   for (const item of items) {
     await beforeEach();
-    if (!item.productVariantId || !item.warehouseLocationId) {
+    if (!item.productVariantId) {
       failures.push(inventoryFailure(item, new Error(
-        "Exact product variant and warehouse location lineage are required to post inventory",
+        "Exact product variant lineage is required to post inventory",
       )));
       continue;
     }
@@ -181,6 +182,13 @@ async function recordInventory(
         deductFromOnHandOnly: item.deductFromOnHandOnly,
       });
     } catch (error) {
+      // The dispatcher has already exhausted its bounded whole-transaction
+      // retries. Preserve the receipt's durable retry path for contention;
+      // earlier sources are safe to replay and must not turn this into a
+      // permanent inventory discrepancy. No provider-controlled retry flag is
+      // trusted and no canonical failure selects the legacy recorder.
+      const code = errorCode(error);
+      if (code === "40001" || code === "40P01" || code === "INVENTORY_PUBLICATION_TARGET_BUSY") throw error;
       failures.push(inventoryFailure(item, error));
     }
   }
@@ -421,6 +429,26 @@ export function createChannelFulfillmentIngressService(
       await dependencies.authority.projectPhysicalPackage(physicalShipmentId);
 
       if (prepared.sourceEcho) {
+        // Legacy echo preparation returns no inventory work. Canonical echoes
+        // carry exact existing sources: their recorder replays committed custody
+        // or repairs a missing posting, never creates another package or source.
+        const inventoryFailures = await recordInventory(dependencies, prepared.inventoryItems, renewLease);
+        if (inventoryFailures.length > 0) {
+          await recordReview(dependencies.repository, {
+            receiptId: staged.receiptId, leaseToken: activeLeaseToken, physicalShipmentId,
+            failure: inventoryFailures[0], completedAt: clock.now(),
+          });
+          logger.warn({
+            code: "CHANNEL_FULFILLMENT_SOURCE_ECHO_INVENTORY_REVIEW", ...context,
+            physicalShipmentId, inventoryFailures: inventoryFailures.length,
+            errorCode: inventoryFailures[0].code, errorMessage: inventoryFailures[0].message,
+          });
+          return Object.freeze({
+            receiptId: staged.receiptId, processingStatus: "review", physicalShipmentId,
+            sourceEcho: true, replayed: false, inventoryFailures: inventoryFailures.length,
+            cancellationFailures: 0, partialOverlapShipmentIds: Object.freeze([]),
+          });
+        }
         await renewLease();
         await dependencies.repository.completeReceipt({
           receiptId: staged.receiptId,

@@ -1,5 +1,6 @@
 import { drizzle } from "drizzle-orm/node-postgres";
 import type { Pool, PoolClient } from "pg";
+import type { InventoryAvailabilityTransactionQueryClient } from "../application/inventory-availability-transaction-query.port";
 
 import * as schema from "@shared/schema";
 
@@ -83,7 +84,7 @@ export function createAuthorityAwareInventoryAtpService(
   );
 }
 
-export async function loadAndLockRuntimeAuthority(client: PoolClient): Promise<{
+export async function loadAndLockRuntimeAuthority(client: InventoryAvailabilityTransactionQueryClient): Promise<{
   authority: "legacy" | "canonical";
   authorityRevision: string;
   activationRunId: string | null;

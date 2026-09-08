@@ -875,7 +875,10 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     );
   });
 
-  it("moves a whole shipment item into a physical split without writing zero quantity", async () => {
+  it.each([
+    { omsPointer: "9999", pickLocation: 50001 },
+    { omsPointer: null, pickLocation: null },
+  ])("records a whole physical split even with missing OMS/bin hints: %j", async ({ omsPointer, pickLocation }) => {
     const shipmentPayload = makeShipmentPayload({
       shipmentId: 7003,
       orderId: 555003,
@@ -939,7 +942,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
           order_item_id: 30001,
           product_variant_id: 40001,
           qty: 1,
-          pick_location_id: 50001,
+          pick_location_id: pickLocation,
         }],
       },
       { rows: [] },
@@ -954,8 +957,8 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
         }],
       },
       { rows: [] },
-      { rows: [{ oms_fulfillment_order_id: "9999" }] },
-      { rows: [{ status: "confirmed", financial_status: "paid" }] },
+      { rows: [{ oms_fulfillment_order_id: omsPointer }] },
+      ...(omsPointer === null ? [] : [{ rows: [{ status: "confirmed", financial_status: "paid" }] }]),
     ]);
     mock.db.transaction = vi.fn(async (work: (tx: any) => Promise<unknown>) => (
       work(mock.db)
@@ -971,6 +974,7 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
       shipmentItemId: 10001,
       qty: 1,
       shipmentId: "9001",
+      warehouseLocationId: pickLocation,
     }));
     const sqlText = mock.calls.map((call) => call.sqlText).join("\n");
     expect(sqlText).toMatch(/SET shipment_id =/);
@@ -1763,6 +1767,54 @@ describe("processShipNotify V2 :: canonical channel fulfillment handoff", () => 
         isReturnLabel: false,
       }),
     );
+  });
+
+  it.each([
+    ["INVENTORY_PUBLICATION_TARGET_BUSY", true],
+    ["CLAIM_DISPATCH_SOURCE_PICKED_MISSING", false],
+  ] as const)("classifies inventory failure %s at the real carrier confirmation boundary as retryable=%s", async (code, retryable) => {
+    const rows = happyPathRows();
+    // Inventory-aware confirmation additionally loads exact source rows and
+    // clears only its existing missing-data review before the shipped event.
+    rows.splice(5, 0, {
+      rows: [{ id: 10001, order_item_id: 30001, product_variant_id: 40001,
+        qty: 1, pick_location_id: null, reserved_location_id: null,
+        shipment_purpose: "customer_fulfillment", shipment_item_purpose: "customer_fulfillment" }],
+    }, { rows: [] });
+    const mock = makeDb(rows);
+    const inventoryCore = { recordShipment: vi.fn().mockRejectedValue(Object.assign(
+      new Error(code === "INVENTORY_PUBLICATION_TARGET_BUSY" ? "Publication target is busy" : "Exact picked custody is missing"), { code },
+    )) };
+    globalThis.fetch = mockFetchOnceOk({ shipments: [makeExactShipmentPayload()] }) as any;
+
+    await expect(createTestShipStationService(mock, inventoryCore).confirmDispatch(makeDispatchInput()))
+      .rejects.toMatchObject({ code: "CARRIER_DISPATCH_APPLICATION_FAILED", retryable, context: { sourceCode: code } });
+    expect(inventoryCore.recordShipment).toHaveBeenCalledOnce();
+    expect(inventoryCore.recordShipment).toHaveBeenCalledWith(expect.objectContaining({ shipmentItemId: 10001, warehouseLocationId: null }));
+    expect(mock.fulfillmentAuthority.recordPhysicalPackage).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { productVariantId: null, qty: 1 },
+    { productVariantId: 40001, qty: 0 },
+    { productVariantId: 40001, qty: -1 },
+  ])("marks malformed loaded source %j for review and stops carrier confirmation", async ({ productVariantId, qty }) => {
+    const rows = happyPathRows();
+    rows.splice(5, 0, { rows: [{ id: 10001, order_item_id: 30001, product_variant_id: productVariantId,
+      qty, pick_location_id: null, reserved_location_id: null }] }, { rows: [] });
+    const mock = makeDb(rows);
+    const inventoryCore = { recordShipment: vi.fn() };
+    globalThis.fetch = mockFetchOnceOk({ shipments: [makeExactShipmentPayload()] }) as any;
+
+    await expect(createTestShipStationService(mock, inventoryCore).confirmDispatch(makeDispatchInput()))
+      .rejects.toMatchObject({ code: "CARRIER_DISPATCH_APPLICATION_FAILED", retryable: false,
+        context: { sourceCode: "SHIPMENT_INVENTORY_SOURCE_INVALID" } });
+    expect(inventoryCore.recordShipment).not.toHaveBeenCalled();
+    expect(mock.fulfillmentAuthority.recordPhysicalPackage).not.toHaveBeenCalled();
+    expect(mock.fulfillmentAuthority.projectPhysicalPackage).not.toHaveBeenCalled();
+    const statements = mock.calls.map((call) => call.sqlText);
+    expect(statements.at(-1)).toMatch(/UPDATE wms\.outbound_shipments[\s\S]*requires_review = true[\s\S]*inventory_deduction_missing_item_data/);
+    expect(statements.some((statement) => /SET requires_review = false/.test(statement))).toBe(false);
   });
 
   it("rejects a voided label before any WMS or inventory transition", async () => {

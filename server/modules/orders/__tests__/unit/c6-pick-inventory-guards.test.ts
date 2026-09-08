@@ -86,15 +86,16 @@ describe("D-LEDGER: item status conditional on deduction success", () => {
 // ─── D-QGUARD structural checks ────────────────────────────────────
 
 describe("D-QGUARD: recordShipment DB-level dedup", () => {
-  it("catches unique constraint violation (23505) on ship_dedup", () => {
+  it("lets late unique violations abort instead of reporting rolled-back inventory as posted", () => {
     const recordShipmentBlock = INVENTORY_SRC.substring(
       INVENTORY_SRC.indexOf("async recordShipment"),
       INVENTORY_SRC.indexOf("async adjustInventory") > 0
         ? INVENTORY_SRC.indexOf("async adjustInventory")
         : INVENTORY_SRC.length,
     );
-    expect(recordShipmentBlock).toContain('err?.code === "23505"');
-    expect(recordShipmentBlock).toContain("ship_dedup");
+    expect(recordShipmentBlock).not.toContain('err?.code === "23505"');
+    expect(recordShipmentBlock).toContain("await this.storage.createInventoryTransaction(");
+    expect(recordShipmentBlock).toContain("await requireLegacyShipmentAuthority(tx)");
   });
 
   it("still has the application-level SELECT dedup as fast-path", () => {
