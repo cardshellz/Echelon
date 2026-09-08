@@ -8,6 +8,8 @@ on:
       - "playwright.dropship-pricing.config.ts"
       - "test/browser/dropship-pricing-*.ts"
       - "test/browser/dropship-content-*.ts"
+      - "test/browser/dropship-policy-*.ts"
+      - "test/browser/fixtures/dropship-policy-harness.tsx"
       - "test/browser/fixtures/dropship-content-harness.tsx"
       - "server/modules/dropship/**"
       - "test/browser/fixtures/dropship-pricing-harness.tsx"

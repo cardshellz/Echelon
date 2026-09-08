@@ -80,6 +80,35 @@ describe("dropship eBay listing policy override routes", () => {
     });
   });
 
+  it("serves the authenticated saved view independently from the live-discovery endpoint", async () => {
+    service.listError = new DropshipError("DROPSHIP_EBAY_LISTING_SETUP_UNAVAILABLE", "Provider unavailable.");
+    server = await startServer(buildApp(service, true));
+    const result = await jsonRequest(`${server.url}/api/dropship/ebay/listing-policy-overrides/44/saved`);
+    expect(result.status).toBe(200);
+    expect(result.body).toMatchObject({ verification: "not_checked" });
+    expect(service.savedCall).toEqual({ memberId: "member-1", input: { storeConnectionId: 44 } });
+    expect(service.listCall).toBeNull();
+  });
+
+  it("rejects unauthenticated saved-policy reads", async () => {
+    server = await startServer(buildApp(service, false));
+    expect((await jsonRequest(`${server.url}/api/dropship/ebay/listing-policy-overrides/44/saved`)).status).toBe(401);
+    expect(service.savedCall).toBeNull();
+  });
+
+  it("exposes safe failure references while dropping token and provider-body context", async () => {
+    service.listError = new DropshipError("DROPSHIP_EBAY_LISTING_SETUP_UNAVAILABLE", "Provider unavailable.", {
+      resource: "fulfillmentPolicies", status: 503, providerErrorIds: ["1001"], diagnosticReference: "reference-123",
+      attempts: 3, retryable: true, accessToken: "secret", body: "private-provider-body",
+    });
+    server = await startServer(buildApp(service, true));
+    const result = await jsonRequest(`${server.url}/api/dropship/ebay/listing-policy-overrides/44`);
+    expect(result.status).toBe(502);
+    expect(result.body).toMatchObject({ error: { context: { diagnosticReference: "reference-123", attempts: 3, status: 503 } } });
+    expect(JSON.stringify(result.body)).not.toContain("secret");
+    expect(JSON.stringify(result.body)).not.toContain("private-provider-body");
+  });
+
   it("passes all three explicit inheritance-or-override choices with one idempotency key", async () => {
     server = await startServer(buildApp(service, true));
 
@@ -251,6 +280,12 @@ describe("dropship eBay listing policy override routes", () => {
 });
 
 class FakeService {
+  savedCall: unknown = null;
+
+  async listSavedForMember(memberId: string, input: unknown) {
+    this.savedCall = { memberId, input };
+    return { storeConnectionId: 44, verification: "not_checked", defaults: {}, assignments: [], fetchedAt: new Date(0).toISOString() };
+  }
   listCall: unknown = null;
   listError: Error | null = null;
   replaceCall: unknown = null;

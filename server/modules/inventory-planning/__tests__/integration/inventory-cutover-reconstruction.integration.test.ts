@@ -51,6 +51,70 @@ dbDescribe.sequential("reviewed reconstruction with real claim DDL and inventory
       expect(first).toEqual(second); expect(first.ready).toBe(true);
     } finally { await client.query("ROLLBACK"); client.release(); }
   });
+  it.each(["planned", "queued", "labeled"])("recognizes genuine %s customer-fulfillment source rows", async (status) => transaction(async (client) => {
+    await client.query("INSERT INTO wms.outbound_shipments(id,order_id,status) VALUES(90,1,$1)", [status]);
+    // Use the production default instead of inventing a test-only purpose.
+    await client.query(`INSERT INTO wms.outbound_shipment_items
+      (id,shipment_id,order_item_id,product_variant_id,qty,from_location_id) VALUES(91,90,11,101,6,100)`);
+    const evidence = await repository.capture(client);
+    expect(evidence.sourceItems).toMatchObject([{ id:91, purpose:"customer_fulfillment", shipmentStatus:status }]);
+    expect(planCutoverReconstruction(evidence)).toMatchObject({ ready:true, blockers:[] });
+  }));
+  it("keeps terminal-linked outbound and physical reviews outside the ordinary demand census", async () => transaction(async (client) => {
+    await client.query(`
+      INSERT INTO wms.orders VALUES
+        (90,1,'shipped',0,36,'shopify','terminal-90','fo-90','default'),
+        (91,1,'shipped',0,36,'shopify','terminal-91','fo-91','default');
+      INSERT INTO wms.order_items
+        (id,order_id,sku,quantity,picked_quantity,fulfilled_quantity,status,on_hold,requires_shipping)
+        VALUES(900,90,'P5',1,1,1,'completed',false,1),(910,91,'P5',1,1,1,'completed',false,1);
+      INSERT INTO wms.outbound_shipments(id,order_id,status,requires_review)
+        VALUES(901,90,'shipped',true),(911,91,'shipped',false);
+      INSERT INTO wms.outbound_shipment_items(id,shipment_id,order_item_id,product_variant_id,qty)
+        VALUES(902,901,900,101,1),(912,911,910,101,1);
+      INSERT INTO wms.physical_shipments(id,status) VALUES(903,'review'),(913,'shipped');
+      INSERT INTO wms.physical_shipment_items(id,physical_shipment_id,wms_order_item_id,product_variant_id,sku,quantity_shipped)
+        VALUES(904,903,900,101,'P5',1),(914,913,910,101,'P5',1);
+    `);
+    // Both owners exist, but neither has current demand or residual custody.
+    // Physical rows have no legacy source link. Only the review predicates can
+    // include 902/904; the structurally identical non-review controls stay out.
+    const evidence = await repository.capture(client);
+    expect(evidence.orders.map((row) => row.id)).toEqual([1]);
+    expect(evidence.items.map((row) => row.id)).toEqual([11]);
+    expect(evidence.sourceItems.map((row) => row.id)).toEqual([902]);
+    expect(evidence.physicalItems.map((row) => row.id)).toEqual(["904"]);
+    expect(evidence.shipmentReviewEvidence).toMatchObject([
+      { id:"901", kind:"outbound_shipment_review", status:"shipped" },
+    ]);
+    const plan = planCutoverReconstruction(evidence);
+    expect(plan.ready).toBe(false);
+    expect(plan.blockers).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code:"SHIPMENT_SOURCE_REQUIRES_REVIEW", subject:"source:902" }),
+      expect.objectContaining({ code:"PHYSICAL_SHIPMENT_REQUIRES_REVIEW", subject:"physical:904" }),
+      expect.objectContaining({ code:"SHIPMENT_RECEIPT_REQUIRES_REVIEW", subject:"outbound_shipment_review:901" }),
+    ]));
+    expect((await client.query("SELECT count(*)::int AS count FROM inventory.availability_claims")).rows[0].count).toBe(0);
+
+    await client.query("UPDATE wms.outbound_shipments SET requires_review=false WHERE id=901; UPDATE wms.physical_shipments SET status='shipped' WHERE id=903");
+    const resolved = await repository.capture(client);
+    expect(resolved.sourceItems).toEqual([]);
+    expect(resolved.physicalItems).toEqual([]);
+    expect(resolved.shipmentReviewEvidence).toEqual([]);
+    expect(planCutoverReconstruction(resolved)).toMatchObject({ ready:true, blockers:[] });
+  }));
+  it.each(["requires_review", "ignored"])("rejects invented outbound lifecycle %s in the real enum fixture", async (status) => transaction(async (client) => {
+    await expect(client.query("INSERT INTO wms.outbound_shipments(id,status) VALUES(90,$1)", [status]))
+      .rejects.toMatchObject({ code:"22P02" });
+  }));
+  it.each(["requires_review", "ignored"])("rejects invented physical lifecycle %s in the production check fixture", async (status) => transaction(async (client) => {
+    await expect(client.query("INSERT INTO wms.physical_shipments(id,status) VALUES(90,$1)", [status]))
+      .rejects.toMatchObject({ code:"23514", constraint:"physical_shipments_status_chk" });
+  }));
+  it("rejects the invented ordered source purpose in the production check fixture", async () => transaction(async (client) => {
+    await expect(client.query("INSERT INTO wms.outbound_shipment_items(id,shipment_item_purpose) VALUES(90,'ordered')"))
+      .rejects.toMatchObject({ code:"23514", constraint:"outbound_shipment_items_purpose_chk" });
+  }));
   it("adopts original pick/lot/mills lineage and reserves only the fresh remainder", async () => transaction(async (client) => {
     const { planning, command } = await prepared(client);
     const beforeCosts = (await client.query("SELECT * FROM oms.order_item_costs ORDER BY id")).rows;

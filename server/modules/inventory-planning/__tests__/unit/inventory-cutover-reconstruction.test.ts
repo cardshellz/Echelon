@@ -4,6 +4,13 @@ import { planFreshCutoverClaims } from "../../domain/inventory-cutover-reconstru
 import { sealClaimSupplySnapshot } from "../../domain/inventory-availability-planner";
 import { reconstructionEvidence, reconstructionSupply } from "../fixtures/inventory-cutover-reconstruction.fixture";
 import { standaloneBuildReservation } from "../fixtures/inventory-cutover-preflight.fixture";
+import type { CutoverReconstructionEvidence } from "@shared/types/inventory-cutover-reconstruction";
+
+function ordinarySourceItem(): CutoverReconstructionEvidence["sourceItems"][number] {
+  return { id:91, shipmentId:90, headerOrderId:1, orderItemId:11, replacementForOrderItemId:null,
+    correctionForShipmentItemId:null, productVariantId:101, quantity:6, purpose:"customer_fulfillment",
+    fromLocationId:100, shipmentStatus:"labeled", shipmentHeld:false };
+}
 
 describe("exact legacy cutover reconstruction", () => {
   it("adopts existing held/picked stock with original mills and separately identifies fresh demand", () => {
@@ -18,6 +25,40 @@ describe("exact legacy cutover reconstruction", () => {
     const evidence = reconstructionEvidence(); evidence.levels.push({ ...evidence.levels[0], id: 12, warehouseLocationId: 200 });
     const hash = reconstructionEvidenceHash(evidence); evidence.levels.reverse(); expect(reconstructionEvidenceHash(evidence)).toBe(hash);
     evidence.costs[0].unitCostMills = "7"; expect(reconstructionEvidenceHash(evidence)).not.toBe(hash);
+  });
+  it.each(["planned", "queued", "labeled"])("accepts the owner customer_fulfillment purpose for %s intentions", (shipmentStatus) => {
+    const evidence = reconstructionEvidence();
+    evidence.sourceItems = [{ ...ordinarySourceItem(), shipmentStatus }];
+    expect(planCutoverReconstruction(evidence)).toMatchObject({ ready:true, blockers:[] });
+  });
+  it.each(["ordered", "replacement", "concession", "omission_correction", "unclassified"])("does not adopt %s sources as ordinary customer demand", (purpose) => {
+    const evidence = reconstructionEvidence();
+    evidence.sourceItems = [{ ...ordinarySourceItem(), purpose }];
+    expect(planCutoverReconstruction(evidence).blockers).toContainEqual(expect.objectContaining({
+      code:"SHIPMENT_SOURCE_REQUIRES_REVIEW", subject:"source:91",
+    }));
+  });
+  it("does not mistake a labeled source for clean authority when its orthogonal review flag is set", () => {
+    const evidence = reconstructionEvidence();
+    evidence.sourceItems = [ordinarySourceItem()];
+    evidence.shipmentReviewEvidence = [{ id:"90", kind:"outbound_shipment_review", status:"labeled", evidenceHash:"f".repeat(64) }];
+    expect(planCutoverReconstruction(evidence).blockers).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code:"SHIPMENT_SOURCE_REQUIRES_REVIEW", subject:"source:91" }),
+      expect.objectContaining({ code:"SHIPMENT_RECEIPT_REQUIRES_REVIEW", subject:"outbound_shipment_review:90" }),
+    ]));
+  });
+  it("keeps the real physical review state blocked even for a captured terminal item with no remaining custody", () => {
+    const evidence = reconstructionEvidence();
+    evidence.orders.push({ ...evidence.orders[0], id:2, status:"shipped" });
+    evidence.items.push({ ...evidence.items[0], id:12, orderId:2, quantity:1, pickedQuantity:1, fulfilledQuantity:1 });
+    evidence.physicalItems = [{ id:"100", physicalShipmentId:"99", orderItemId:12, replacementForOrderItemId:null,
+      legacySourceShipmentItemId:null, packageAllocationEntryId:null, productVariantId:101, sku:"P5",
+      originalQuantity:1, adjustmentQuantity:0, effectiveQuantity:"1", purpose:"customer_fulfillment", packageStatus:"review" }];
+    expect(planCutoverReconstruction(evidence).blockers).toContainEqual(expect.objectContaining({
+      code:"PHYSICAL_SHIPMENT_REQUIRES_REVIEW", subject:"physical:100",
+    }));
+    evidence.physicalItems[0].packageStatus = "shipped";
+    expect(planCutoverReconstruction(evidence)).toMatchObject({ ready:true, blockers:[] });
   });
   it("retains independent component reservations, without attributing them to order demand", () => {
     const evidence = reconstructionEvidence(); evidence.buildReservations.push({ ...standaloneBuildReservation(),buildOrderStatus:"released" });

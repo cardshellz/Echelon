@@ -49,13 +49,14 @@ export function summarizeEbayListingPolicy(
   data: DropshipEbayListingPolicyOverrideResponse,
   assignment: DropshipEbayListingPolicyOverride | undefined,
   field: EbayPolicyField,
+  optionsVerified = true,
 ): { name: string; source: "Store default" | "Override"; needsAttention: boolean } {
   const overrideId = assignment?.[field];
   const id = overrideId ?? data.defaults[field];
   const option = ebayPolicyDisplayOptions(data, field).find((candidate) => candidate.id === id);
   return {
-    name: id === null ? "Not configured" : option?.name ?? `Unavailable policy (${id})`,
+    name: id === null ? "Not configured" : option?.name ?? (optionsVerified ? `Unavailable policy (${id})` : `Saved policy (${id})`),
     source: overrideId ? "Override" : "Store default",
-    needsAttention: id === null || option === undefined || ("disabled" in option && option.disabled === true),
+    needsAttention: id === null || (optionsVerified && (option === undefined || ("disabled" in option && option.disabled === true))),
   };
 }

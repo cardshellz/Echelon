@@ -9,10 +9,11 @@ import { buildEbayBulkPolicyAssignments, EBAY_POLICY_FIELDS, EBAY_POLICY_LABELS,
 import { hasEbayPolicyEditorChange, singleEbayListingPolicyPatch } from "@/lib/dropship-ebay-policy-view";
 import { ListingSetupCombobox, type ListingSetupDisplayOption } from "./EbayListingSetupPanel";
 
-export function EbayListingPolicyBulkDialog({ data, productVariantIds, listingLabel, onClose, onSaved, onConflict }: {
+export function EbayListingPolicyBulkDialog({ data, productVariantIds, listingLabel, onClose, onSaved, onConflict, verificationAvailable = true }: {
   data: DropshipEbayListingPolicyOverrideResponse;
   productVariantIds: readonly number[];
   listingLabel?: string;
+  verificationAvailable?: boolean;
   onClose: () => void;
   onSaved: (count: number) => Promise<void>;
   onConflict: () => Promise<void>;
@@ -34,7 +35,7 @@ export function EbayListingPolicyBulkDialog({ data, productVariantIds, listingLa
   const hasChange = hasEbayPolicyEditorChange(patch, initialPatch);
 
   async function save() {
-    if (inFlight.current || conflicted) return;
+    if (inFlight.current || conflicted || (!verificationAvailable && savedCount === null)) return;
     inFlight.current = true;
     setPending(true);
     setError("");
@@ -118,11 +119,12 @@ export function EbayListingPolicyBulkDialog({ data, productVariantIds, listingLa
             </div>;
           })}
           <p className="text-xs text-zinc-500">Every selected listing is validated. All changes save together, or none do.</p>
+          {!verificationAvailable && savedCount === null && <p role="alert" className="text-sm text-amber-800">Live eBay verification is unavailable. Your draft is retained, but saving is blocked until verification succeeds.</p>}
           {error && <p role="alert" className="text-sm text-rose-700">{error}</p>}
         </div>
         <DialogFooter>
           <Button variant="outline" disabled={pending} onClick={onClose}>{savedCount === null ? "Cancel" : "Close"}</Button>
-          <Button disabled={pending || (!hasChange && savedCount === null) || conflicted} onClick={() => void save()}>
+          <Button disabled={pending || ((!hasChange || !verificationAvailable) && savedCount === null) || conflicted} onClick={() => void save()}>
             {pending ? savedCount === null ? "Saving policies…" : "Refreshing policies…"
               : savedCount === null ? "Save policies" : "Refresh saved policies"}
           </Button>

@@ -1,4 +1,5 @@
 import { createHash } from "crypto";
+import { ebaySavedListingPoliciesSchema, type EbaySavedListingPolicies } from "@shared/dropship/ebay-saved-listing-policies";
 import { DropshipError } from "../domain/errors";
 import type {
   DropshipEbayFulfillmentPolicyOption,
@@ -87,7 +88,7 @@ export interface DropshipEbayListingPolicyOverrideRepository {
   ): Promise<ReplaceDropshipEbayListingPoliciesRepositoryResult>;
 }
 
-type ListingSetupPort = Pick<DropshipEbayListingSetupService, "getForMember">;
+type ListingSetupPort = Pick<DropshipEbayListingSetupService, "getForMember" | "getSavedSelectionForMember">;
 
 export interface DropshipEbayListingPolicyOverrideResult {
   storeConnectionId: number;
@@ -113,6 +114,31 @@ export class DropshipEbayListingPolicyOverrideService {
     clock: DropshipClock;
     logger: DropshipLogger;
   }) {}
+
+  async listSavedForMember(memberId: string, input: unknown): Promise<EbaySavedListingPolicies> {
+    const parsed = listDropshipEbayListingPolicyOverridesForMemberInputSchema.parse(input);
+    const vendor = (await this.deps.vendorProvisioning.provisionForMember(memberId)).vendor;
+    await this.requireEbayStore(vendor.vendorId, parsed.storeConnectionId);
+    const [selection, assignments] = await Promise.all([
+      this.deps.listingSetup.getSavedSelectionForMember(memberId, parsed.storeConnectionId),
+      this.deps.repository.listAssignments({ vendorId: vendor.vendorId, storeConnectionId: parsed.storeConnectionId }),
+    ]);
+    const result = ebaySavedListingPoliciesSchema.safeParse({
+      storeConnectionId: parsed.storeConnectionId,
+      verification: "not_checked",
+      defaults: { fulfillmentPolicyId: selection.fulfillmentPolicyId,
+        returnPolicyId: selection.returnPolicyId, paymentPolicyId: selection.paymentPolicyId },
+      assignments: assignments.map((assignment) => ({ ...assignment, updatedAt: assignment.updatedAt.toISOString() })),
+      fetchedAt: this.deps.clock.now().toISOString(),
+    });
+    if (!result.success) {
+      const context = { vendorId: vendor.vendorId, storeConnectionId: parsed.storeConnectionId };
+      this.deps.logger.error({ code: "DROPSHIP_EBAY_SAVED_POLICIES_INVALID",
+        message: "Stored eBay policy data failed its response contract.", context });
+      throw new DropshipError("DROPSHIP_EBAY_SAVED_POLICIES_INVALID", "Saved listing policies could not be read safely.", context);
+    }
+    return result.data;
+  }
 
   async listForMember(memberId: string, input: unknown): Promise<DropshipEbayListingPolicyOverrideResult> {
     const parsed = listDropshipEbayListingPolicyOverridesForMemberInputSchema.parse(input);
@@ -223,7 +249,7 @@ export class DropshipEbayListingPolicyOverrideService {
     return result;
   }
 
-  private async requireConnectedEbayStore(
+  private async requireEbayStore(
     vendorId: number,
     storeConnectionId: number,
   ): Promise<DropshipEbayListingPolicyOverrideContext> {
@@ -242,6 +268,11 @@ export class DropshipEbayListingPolicyOverrideService {
         { vendorId, storeConnectionId, platform: context.platform },
       );
     }
+    return context;
+  }
+
+  private async requireConnectedEbayStore(vendorId: number, storeConnectionId: number): Promise<DropshipEbayListingPolicyOverrideContext> {
+    const context = await this.requireEbayStore(vendorId, storeConnectionId);
     if (context.status === "needs_reauth") {
       throw new DropshipError(
         "DROPSHIP_EBAY_LISTING_SETUP_PERMISSION_REQUIRED",
