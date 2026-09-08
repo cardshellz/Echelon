@@ -11,6 +11,7 @@ import { buildDropshipEbayListingDraft, parseEbayListingConfig } from "../../inf
 import { EbayListingBuilder } from "../../../channels/adapters/ebay/ebay-listing-builder";
 import { toDropshipVendorListingPreview } from "../../application/dropship-listing-dtos";
 import type { DropshipProductCost } from "../../application/dropship-product-cost";
+import { resolveListingContent, listingCatalogHash } from "../../application/dropship-listing-content-resolver";
 
 const productCost: DropshipProductCost = { status: "available", unitCostCents: 809,
   planId: "ops-plan", source: "variant_fixed_price", overrideId: "override-1", issue: null };
@@ -36,6 +37,19 @@ const intent: DropshipMarketplaceListingIntent = {
 };
 
 describe("dropship listing presentation", () => {
+  it("sends the authored description to eBay without appending facts or removing structured item specifics", () => {
+    const content = resolveListingContent({ candidate, profile: { revisionId: null, profile: null, updatedAt: null },
+      saved: { revisionId: 1, customText: "My product description", catalogHash: listingCatalogHash(candidate), updatedAt: "2026-09-08T12:00:00.000Z" } });
+    const input = { ...intent, description: content.descriptionHtml };
+    const draft = buildDropshipEbayListingDraft({ productVariantId: 7, listingIntent: input, existingExternalOfferId: null },
+      parseEbayListingConfig(input.marketplaceConfig, {}), new EbayListingBuilder());
+    const product = draft.inventoryItems[0]!.payload.product;
+    expect(product.description).toBe("<p>My product description</p>");
+    expect(product.aspects.Material).toEqual(["Plastic"]);
+    expect(product.aspects.UPC).toEqual([candidate.gtin]);
+    expect(content.facts).toContainEqual({ name: "SKU", value: "PACK-25" });
+    expect(candidate.description).toBe("<p>Protect <strong>25 cards</strong>.</p>");
+  });
   it("uses the exact eBay publication draft, including image cap, condition, specifics and description fallback", () => {
     const input = { ...intent, description: null, imageUrls: Array.from({ length: 14 }, (_, index) => `https://images.test/${index}.jpg`) };
     const draft = buildDropshipEbayListingDraft({ productVariantId: 7, listingIntent: input, existingExternalOfferId: null },

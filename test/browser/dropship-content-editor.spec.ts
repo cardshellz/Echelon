@@ -84,6 +84,15 @@ test("places Edit and Reset below the description, then replaces the box with Sa
   await expect(page.getByLabel("Description text", { exact: true })).toHaveCount(0);
   await expect(editor.locator("button:visible")).toHaveCount(2);
   await expect(page.frameLocator('iframe[title="Description preview"]').locator("body")).toContainText("My shop copy");
+  await expect(page.frameLocator('iframe[title="Description preview"]').locator("body")).not.toContainText("Product details");
+  await expect(page.frameLocator('iframe[title="Description preview"]').locator("body")).not.toContainText("ARM-50");
+  const facts = page.getByLabel("Product facts", { exact: true });
+  await expect(editor.getByLabel("Product facts", { exact: true })).toHaveCount(0);
+  await facts.getByText("Product facts (read-only)", { exact: true }).click();
+  await expect(facts).toContainText("ARM-50");
+  await expect(facts).toContainText("Units per sellable pack");
+  await expect(facts.locator("input, textarea, button")).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath("description-facts-separated.png"), fullPage: true });
   await expect(page.frameLocator('iframe[title="Description preview"]').locator("script")).toHaveCount(0);
   await expect(frame).toHaveAttribute("sandbox", "");
   expect(state.writes).toHaveLength(1); expect(state.saved?.customText).toContain("My shop copy");
@@ -131,6 +140,9 @@ test("Reset stages the catalog body and supports Cancel or Save without publishi
   await expect(page.getByRole("button", { name: "Reset", exact: true })).toBeDisabled();
   const catalogHtml = resolveListingContent({ candidate: state.candidate, profile: state.profile, saved: null }).descriptionHtml;
   expect(await page.locator('iframe[title="Description preview"]').getAttribute("srcdoc")).toContain(catalogHtml);
+  expect(catalogHtml).not.toContain("Product details");
+  expect(catalogHtml).not.toContain("ARM-50");
+  await expect(page.getByLabel("Product facts", { exact: true })).toContainText("ARM-50");
   expect(state.writes).toHaveLength(2);
   expect(state.saved?.customText).toBeNull(); expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });
