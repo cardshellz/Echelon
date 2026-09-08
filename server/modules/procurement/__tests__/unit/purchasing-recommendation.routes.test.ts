@@ -3,6 +3,8 @@ import express from "express";
 import type { Express, Request, Response, NextFunction } from "express";
 import http from "http";
 import { AddressInfo } from "net";
+import { PgDialect } from "drizzle-orm/pg-core";
+import type { SQL } from "drizzle-orm";
 import { defaultPurchasePlanningPolicy, type PurchasePlanningPolicy } from "@shared/procurement/purchase-planning-policy";
 import type { AutoDraftRecommendationSettings, PurchasingRecommendationRawRow } from "../../purchasing-recommendation.engine";
 import type { CreatePurchaseRecommendationRunInput } from "../../purchase-recommendation-snapshot.service";
@@ -960,7 +962,11 @@ describe("purchasing recommendation routes", () => {
     expect(input.observations).toHaveLength(1);
   });
 
-  it("returns the latest durable recommendation run with allocated and remaining quantities", async () => {
+  it.each([
+    { name: "unchanged receiving choice", priorVariantId: 3001, currentVariantId: 3001 },
+    { name: "unresolved receiving choice", priorVariantId: 3001, currentVariantId: null },
+    { name: "resolved receiving choice", priorVariantId: null, currentVariantId: 3001 },
+  ])("returns allocated and remaining quantities after $name", async ({ priorVariantId, currentVariantId }) => {
     mocks.db.select
       .mockReturnValueOnce(selectChain([{
         id: 701,
@@ -976,7 +982,7 @@ describe("purchasing recommendation routes", () => {
         runId: 701,
         recommendationKey: "301:3001:30",
         productId: 301,
-        productVariantId: 3001,
+        productVariantId: currentVariantId,
         warehouseId: null,
         requiredByDate: null,
         sku: "RFQ-NO-VENDOR",
@@ -990,7 +996,7 @@ describe("purchasing recommendation routes", () => {
         id: 22,
         recommendationLineId: 10,
         productId: 301,
-        productVariantId: 3001,
+        productVariantId: priorVariantId,
         warehouseId: null,
         requestedPieces: 40,
         lineStatus: "draft",
@@ -1017,6 +1023,54 @@ describe("purchasing recommendation routes", () => {
     });
     expect(body.items[0].allocations[0]).toMatchObject({ rfqNumber: "RFQ-TEST", vendorName: "Supplier 77" });
     expect(body.items[0].allocations[0].recommendationLineId).toBe(10);
+  });
+
+  it.each([
+    { name: "same warehouse", recommendationWarehouseId: 90, allocationWarehouseId: 90, expectedStatus: 409 },
+    { name: "different warehouse", recommendationWarehouseId: 90, allocationWarehouseId: 91, expectedStatus: 200 },
+    { name: "global recommendation and local allocation", recommendationWarehouseId: null, allocationWarehouseId: 90, expectedStatus: 200 },
+    { name: "local recommendation and global allocation", recommendationWarehouseId: 90, allocationWarehouseId: null, expectedStatus: 200 },
+    { name: "same global scope", recommendationWarehouseId: null, allocationWarehouseId: null, expectedStatus: 409 },
+  ])("checks changed purchase supply only in the queue warehouse scope: $name", async ({ recommendationWarehouseId, allocationWarehouseId, expectedStatus }) => {
+    const asOf = new Date("2026-07-17T12:00:00.000Z");
+    mocks.db.select
+      .mockReturnValueOnce(selectChain([{
+        id: 701, calculationVersion: "purchasing-recommendation-v4-supplier-sourcing", status: "completed",
+        asOf, generatedAt: asOf, lookbackDays: 30, policySnapshot: {},
+      }]))
+      .mockReturnValueOnce(selectChain([{
+        id: 11, runId: 701, recommendationKey: "301:3001:30", productId: 301,
+        productVariantId: 3001, warehouseId: recommendationWarehouseId, requiredByDate: null,
+        sku: "WAREHOUSE-SCOPE", productName: "Warehouse scope fixture", recommendedPieces: 100,
+        preferredVendorId: null, preferredVendorProductId: null, evidenceSnapshot: {},
+      }]))
+      .mockReturnValueOnce(selectChain([{
+        id: 22, recommendationLineId: 10, productId: 301, productVariantId: 3001,
+        warehouseId: allocationWarehouseId, requestedPieces: 40, lineStatus: "ordered",
+        rfqId: 33, rfqNumber: "RFQ-SCOPE", rfqStatus: "quoted", vendorId: 77, createdAt: asOf,
+      }]));
+    // Return the linked purchase only when the repository requests its RFQ line,
+    // matching the query's ANY(integer[]) boundary without mocking its owner.
+    mocks.db.execute.mockImplementation(async (query: SQL) => {
+      const requestedIds: unknown = new PgDialect().sqlToQuery(query).params[0];
+      if (!Array.isArray(requestedIds)) throw new Error("Expected RFQ line IDs in linked purchase query");
+      return { rows: requestedIds.includes(22) ? [{
+        rfq_line_id: 22, purchase_order_id: 44, status: "approved", line_status: "open",
+        order_qty: 40, received_qty: 0, cancelled_qty: 0,
+        updated_at_ms: new Date("2026-07-17T13:00:00.000Z").getTime(),
+      }] : [] };
+    });
+    server = await startServer(buildApp());
+
+    const { status, body } = await requestJson(server.url, "GET", "/api/purchasing/rfq-queue");
+
+    expect(status).toBe(expectedStatus);
+    if (expectedStatus === 409) {
+      expect(body).toMatchObject({ code: "RFQ_SUPPLY_SNAPSHOT_STALE" });
+    } else {
+      expect(body.items[0]).toMatchObject({ warehouseId: recommendationWarehouseId, allocatedPieces: 0, remainingPieces: 100 });
+      expect(mocks.db.execute).not.toHaveBeenCalled();
+    }
   });
 
   it("creates a supplier-grouped RFQ batch with a strict approval flag and no client-supplied approver", async () => {

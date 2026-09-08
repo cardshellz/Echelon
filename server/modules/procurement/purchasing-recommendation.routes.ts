@@ -1257,9 +1257,12 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
         .where(and(
           inArray(allocatedRecommendation.productId, productIds),
         ));
-      const linkedPurchases = await loadLinkedRfqPurchases(db, allocationRows.map((row) => row.id));
+      const reservationScopes = new Set(lines.map(purchasingSkuAllocationKey));
+      // Only the current run's product/warehouse scopes can invalidate its supply snapshot.
+      const scopedAllocationRows = allocationRows.filter((row) => reservationScopes.has(purchasingSkuAllocationKey(row)));
+      const linkedPurchases = await loadLinkedRfqPurchases(db, scopedAllocationRows.map((row) => row.id));
       assertRfqSupplySnapshotCurrent(Array.from(linkedPurchases.values()), new Date(run.asOf));
-      const allocations = allocationRows.map((allocation) => ({
+      const allocations = scopedAllocationRows.map((allocation) => ({
         ...allocation,
         reservedPieces: rfqPendingSourcingPieces(allocation.requestedPieces, linkedPurchases.get(allocation.id) ?? null, isActiveRfqReservation(allocation.rfqStatus, allocation.lineStatus)),
       })).filter((allocation) => allocation.reservedPieces > 0);
