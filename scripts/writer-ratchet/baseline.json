@@ -177,6 +177,18 @@
   "dropship.dropship_listing_price_revisions": [
     "modules/dropship"
   ],
+  "dropship.dropship_content_profile_revisions": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_content_profiles": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_listing_content_revisions": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_listing_content_settings": [
+    "modules/dropship"
+  ],
   "dropship.dropship_listing_price_settings": [
     "modules/dropship"
   ],

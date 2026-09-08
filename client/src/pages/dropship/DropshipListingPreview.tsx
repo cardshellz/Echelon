@@ -12,6 +12,7 @@ import { formatCents, formatStatus, type DropshipEbayListingPolicyOverrideRespon
 import { formatListingPreviewIssue, listingPreviewStatusTone, pageListingPreviews, safeListingImageUrl } from "@/lib/dropship-listing-preview";
 import { DropshipListingShippingEstimate } from "./DropshipListingShippingEstimate";
 import { DropshipListingPriceEditor } from "./DropshipListingPriceEditor";
+import { DropshipListingContentEditor } from "./DropshipListingContentEditor";
 
 type PolicyOptions = DropshipEbayListingPolicyOverrideResponse["options"];
 
@@ -89,6 +90,9 @@ export function DropshipListingPreview({ preview, priceSaveCallbacks, stale = fa
           This preview needs refreshing. Queueing is disabled until a fresh preview is generated.
         </div>}
         <ListingPreviewDetailsContent row={activeRow} generatedAt={preview.generatedAt} policyOptions={policyOptions}
+          contentEditor={priceSaveCallbacks && <DropshipListingContentEditor
+            storeConnectionId={preview.storeConnectionId} productVariantId={activeRow.productVariantId}
+            previewEvidenceHash={activeRow.contentEvidenceHash} {...priceSaveCallbacks} />}
           priceEditor={priceSaveCallbacks && <DropshipListingPriceEditor
             storeConnectionId={preview.storeConnectionId} productVariantId={activeRow.productVariantId}
             {...priceSaveCallbacks} />}
@@ -137,8 +141,9 @@ export function ListingPreviewTable({ rows, onOpen, priceEditing }: {
   </Table>;
 }
 
-export function ListingPreviewDetailsContent({ row, generatedAt, shippingEstimate, policyOptions, priceEditor }: {
+export function ListingPreviewDetailsContent({ row, generatedAt, shippingEstimate, policyOptions, priceEditor, contentEditor }: {
   row: DropshipListingPreviewRow; generatedAt: string; shippingEstimate?: ReactNode; policyOptions?: PolicyOptions; priceEditor?: ReactNode;
+  contentEditor?: ReactNode;
 }) {
   const content = row.presentation;
   const economics = row.economics;
@@ -185,10 +190,10 @@ export function ListingPreviewDetailsContent({ row, generatedAt, shippingEstimat
         </dl>
       </div>}
     </section>
-    <section aria-label="Listing description"><h4 className="mb-2 font-semibold">Description</h4>
+    {contentEditor ?? <section aria-label="Listing description"><h4 className="mb-2 font-semibold">Description</h4>
       <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-zinc-700">{content?.descriptionText || "No description available."}</p>
       <p className="mt-2 text-xs text-zinc-500">Text preview; marketplace formatting may differ.</p>
-    </section>
+    </section>}
     {Boolean(content?.itemSpecifics.length) && <section><h4 className="mb-2 font-semibold">Item specifics</h4><dl className="grid gap-3 text-sm sm:grid-cols-2">
       {content?.itemSpecifics.map((item) => <Detail key={item.name} label={item.name} value={item.values.join(", ")} />)}
     </dl></section>}

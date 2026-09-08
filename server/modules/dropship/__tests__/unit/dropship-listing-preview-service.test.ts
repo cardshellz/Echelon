@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import { resolveListingContent, listingCatalogHash } from "../../application/dropship-listing-content-resolver";
+import { noContentProfile } from "../fixtures/listing-content.fixture";
 import type { SavedListingPriceRevision } from "../../../../../shared/dropship/listing-price";
 import type { ListingRulePrice } from "../../application/dropship-rule-price";
 import { DropshipError } from "../../domain/errors";
@@ -79,6 +81,35 @@ describe("DropshipListingPreviewService", () => {
     });
   });
 
+  it("uses the exact sanitized description and rejects unreviewed content before queueing", async () => {
+    const saved = { revisionId: 1, customText: "My shop description <script>literal</script>",
+      catalogHash: listingCatalogHash(repository.candidate), updatedAt: now.toISOString() };
+    const content = resolveListingContent({ candidate: repository.candidate, profile: noContentProfile, saved });
+    repository.loadListingContents = async () => new Map([[101, content]]);
+    const preview = await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] });
+    expect(preview.rows[0].listingIntent?.description).toBe(content.descriptionHtml);
+    expect(preview.rows[0].contentEvidenceHash).toBe(content.evidenceHash);
+    const request = { storeConnectionId: 22, productVariantIds: [101], idempotencyKey: "content-queue" };
+    await expect(service.createListingPushJobForMember("member-1", request)).rejects.toMatchObject({ code: "DROPSHIP_CONTENT_VERSION_CONFLICT" });
+    await expect(service.createListingPushJobForMember("member-1", { ...request, expectedContentEvidenceHashesByVariantId: { "101": "a".repeat(64) } }))
+      .rejects.toMatchObject({ code: "DROPSHIP_CONTENT_VERSION_CONFLICT" });
+    expect(repository.jobs).toHaveLength(0);
+    await service.createListingPushJobForMember("member-1", { ...request, expectedContentEvidenceHashesByVariantId: { "101": content.evidenceHash } });
+    expect(repository.lastCreatedInput?.preview.rows[0].listingIntent?.description).toBe(content.descriptionHtml);
+    expect(repository.candidate.description).not.toBe(content.descriptionHtml);
+  });
+  it("blocks a custom description when its catalog facts changed", async () => {
+    const content = resolveListingContent({ candidate: repository.candidate, profile: noContentProfile,
+      saved: { revisionId: 1, customText: "Preserved copy", catalogHash: "a".repeat(64), updatedAt: now.toISOString() } });
+    repository.loadListingContents = async () => new Map([[101, content]]);
+    const preview = await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] });
+    expect(preview.rows[0].blockers).toContain("listing_content_catalog_review_required");
+    expect(preview.rows[0].previewStatus).toBe("blocked");
+  });
+  it("does not fall back to unsanitized catalog when the content reader returns an incomplete result", async () => {
+    repository.loadListingContents = async () => new Map();
+    await expect(service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] })).rejects.toThrow("incomplete catalog result");
+  });
   it("builds a ready listing preview from store connection listing config", async () => {
     const result = await service.previewForMember("member-1", {
       storeConnectionId: 22,
@@ -627,6 +658,7 @@ class FakeAtpProvider implements DropshipAtpProvider {
 }
 
 class FakeListingPreviewRepository implements DropshipListingPreviewRepository {
+  loadListingContents?: DropshipListingPreviewRepository["loadListingContents"];
   rulePrices = new Map<number, ListingRulePrice>();
   ruleCandidateIds: number[] = [];
   async loadRulePrices(input: { candidates: readonly DropshipListingCatalogCandidate[] }): Promise<Map<number, ListingRulePrice>> {

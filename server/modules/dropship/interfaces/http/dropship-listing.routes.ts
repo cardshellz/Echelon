@@ -136,6 +136,7 @@ function statusForDropshipListingError(code: string): number {
       return 404;
     case "DROPSHIP_IDEMPOTENCY_CONFLICT":
     case "DROPSHIP_LISTING_PRICE_VERSION_CONFLICT":
+    case "DROPSHIP_CONTENT_VERSION_CONFLICT":
       return 409;
     default:
       return 500;

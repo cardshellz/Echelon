@@ -21,6 +21,7 @@ import type { DropshipVendorSelectionRule, DropshipVendorVariantOverride } from 
 import type { SavedListingPriceRevision } from "../../../../shared/dropship/listing-price";
 import { resolveListingRulePrice, type ListingRulePrice } from "../application/dropship-rule-price";
 import { readPricingProfile } from "./dropship-pricing-profile.reader";
+import { readResolvedListingContents } from "./dropship-listing-content.reader";
 import { PgShellzClubProductCostAdapter } from "./shellz-club-product-cost.adapter";
 
 type ListingDatabasePool = Pick<Pool, "query"> & {
@@ -571,6 +572,19 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
     }
   }
 
+  async loadListingContents(input: { vendorId: number; storeConnectionId: number; candidates: readonly DropshipListingCatalogCandidate[] }) {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      const result = await readResolvedListingContents(client, input);
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      try { await client.query("ROLLBACK"); } catch { /* Preserve original failure. */ }
+      throw error;
+    } finally { client.release(); }
+  }
+
   async createListingPushJob(
     input: CreateDropshipListingPushJobRepositoryInput,
   ): Promise<CreateDropshipListingPushJobRepositoryResult> {
@@ -603,6 +617,20 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
       }
 
       const queuedItemCount = input.preview.rows.filter((row) => row.previewStatus !== "blocked").length;
+      const contentRows = input.preview.rows.filter((row) => row.contentEvidenceHash);
+      if (contentRows.length) {
+        const ids = contentRows.map((row) => row.productVariantId);
+        // Stabilize catalog facts and template membership until the frozen job is
+        // inserted. Vendor content/profile saves already share the store lock.
+        await client.query("LOCK TABLE catalog.product_line_products IN SHARE MODE");
+        await client.query(`SELECT pv.id FROM catalog.product_variants pv JOIN catalog.products p ON p.id = pv.product_id
+          WHERE pv.id = ANY($1::int[]) FOR SHARE OF pv, p`, [ids]);
+        const candidates = await PgDropshipListingPreviewRepository.readerForTransaction(client).listCatalogCandidates(ids);
+        const current = await readResolvedListingContents(client, { vendorId: input.vendorId, storeConnectionId: input.storeConnectionId, candidates });
+        if (contentRows.some((row) => current.get(row.productVariantId)?.evidenceHash !== row.contentEvidenceHash)) {
+          throw new DropshipError("DROPSHIP_CONTENT_VERSION_CONFLICT", "Listing content changed while queueing. Review a new preview.");
+        }
+      }
       const ruleRows = input.preview.rows.filter((row) => row.rulePriceEvidenceHash);
       if (ruleRows.length) {
         const reader = PgDropshipListingPreviewRepository.readerForTransaction(client);

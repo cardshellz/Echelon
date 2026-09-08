@@ -7,6 +7,9 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { PgDropshipListingPriceRepository } from "../../infrastructure/dropship-listing-price.repository";
 import { PgDropshipListingPreviewRepository } from "../../infrastructure/dropship-listing-preview.repository";
 import { PgDropshipPricingRulesRepository } from "../../infrastructure/dropship-pricing-rules.repository";
+import { PgDropshipListingContentRepository } from "../../infrastructure/dropship-listing-content.repository";
+import { resolveListingContent, listingCatalogHash } from "../../application/dropship-listing-content-resolver";
+import { contentCandidate, noContentProfile } from "../fixtures/listing-content.fixture";
 import type { StoredPricingReview } from "../../application/dropship-pricing-rules-service";
 import type { CreateDropshipListingPushJobRepositoryInput } from "../../application/dropship-listing-preview-service";
 import type { SaveListingPriceInput } from "../../../../../shared/dropship/listing-price";
@@ -23,6 +26,7 @@ describeDatabase.sequential("listing price PostgreSQL transaction guarantees", (
   let repository: PgDropshipListingPriceRepository;
   let previews: PgDropshipListingPreviewRepository;
   let pricingRules: PgDropshipPricingRulesRepository;
+  let contentRepository: PgDropshipListingContentRepository;
   let created = false;
   const qualify = (sql: string) => sql.replaceAll("dropship.", `"${schema}".`).replaceAll("catalog.", `"${schema}".`);
   beforeAll(async () => {
@@ -62,18 +66,21 @@ describeDatabase.sequential("listing price PostgreSQL transaction guarantees", (
     `));
     await pool.query(qualify(readFileSync(resolve(process.cwd(), "migrations/0657_dropship_listing_price_settings.sql"), "utf8")));
     await pool.query(qualify(readFileSync(resolve(process.cwd(), "migrations/0659_dropship_store_pricing_rules.sql"), "utf8")));
+    await pool.query(qualify(readFileSync(resolve(process.cwd(), "migrations/0660_dropship_vendor_listing_content.sql"), "utf8")));
     const scopedPool = { connect: async () => { const client = await pool!.connect();
       return { query: (sql: string, values?: unknown[]) => client.query(qualify(sql), values), release: () => client.release() }; } } as unknown as Pool;
     repository = new PgDropshipListingPriceRepository(scopedPool);
     previews = new PgDropshipListingPreviewRepository(scopedPool);
     pricingRules = new PgDropshipPricingRulesRepository(scopedPool);
+    contentRepository = new PgDropshipListingContentRepository(scopedPool);
   });
   beforeEach(async () => { await pool!.query(qualify(`TRUNCATE dropship.dropship_listing_price_settings,
     dropship.dropship_listing_price_revisions, dropship.dropship_audit_events,
     dropship.dropship_listing_push_jobs, dropship.dropship_vendor_listings,
     dropship.dropship_listing_push_job_items, dropship.dropship_pricing_profiles,
     dropship.dropship_pricing_profile_revisions, dropship.dropship_pricing_reviews,
-    dropship.dropship_pricing_applications RESTART IDENTITY`)); });
+    dropship.dropship_pricing_applications, dropship.dropship_content_profiles, dropship.dropship_content_profile_revisions,
+    dropship.dropship_listing_content_settings, dropship.dropship_listing_content_revisions RESTART IDENTITY`)); });
   afterAll(async () => { if (created && pool) await pool.query(`DROP SCHEMA "${schema}" CASCADE`); await pool?.end(); });
 
   function save(key: string, priceCents: number | null = 1299, expectedRevisionId: number | null = null, variant = 101, store = 22) {
@@ -239,6 +246,45 @@ describeDatabase.sequential("listing price PostgreSQL transaction guarantees", (
     await save("after-preview", 1599, first.saved.revisionId);
     await expect(previews.createListingPushJob(queueInput(first.saved.revisionId))).rejects.toMatchObject({ code: "DROPSHIP_LISTING_PRICE_VERSION_CONFLICT" });
     expect((await pool!.query(qualify("SELECT * FROM dropship.dropship_listing_push_jobs"))).rows).toEqual([]);
+  });
+  async function saveContent(key: string, customText: string, revision: number | null = null) {
+    return contentRepository.execute({ memberId: "member-1", storeConnectionId: 22, productVariantId: 101, idempotencyKey: key }, async (tx) => {
+      await tx.saveListing(101, { customText, expectedRevisionId: revision, expectedCatalogHash: listingCatalogHash(contentCandidate()),
+        expectedProfileRevisionId: null, idempotencyKey: key }, createHash("sha256").update(key).digest("hex"), now);
+      return (await tx.loadSaved(101))!;
+    });
+  }
+  function fixtureContentReader() {
+    const original = PgDropshipListingPreviewRepository.readerForTransaction;
+    return vi.spyOn(PgDropshipListingPreviewRepository, "readerForTransaction").mockImplementation((client) => {
+      const reader = original(client);
+      vi.spyOn(reader, "listCatalogCandidates").mockResolvedValue([contentCandidate()]);
+      return reader;
+    });
+  }
+  it("rejects a description edit after preview but before the queue transaction", async () => {
+    const price = await save("price");
+    const first = await saveContent("content-one", "Reviewed copy");
+    const resolved = resolveListingContent({ candidate: contentCandidate(), profile: noContentProfile, saved: first });
+    await saveContent("content-two", "Unreviewed copy", first.revisionId);
+    const input = queueInput(price.saved.revisionId); input.preview.rows[0].contentEvidenceHash = resolved.evidenceHash;
+    const spy = fixtureContentReader();
+    try {
+      await expect(previews.createListingPushJob(input)).rejects.toMatchObject({ code: "DROPSHIP_CONTENT_VERSION_CONFLICT" });
+      expect((await pool!.query(qualify("SELECT * FROM dropship.dropship_listing_push_jobs"))).rows).toEqual([]);
+    } finally { spy.mockRestore(); }
+  });
+  it("freezes the exact reviewed description; subsequent local edits do not rewrite queued jobs", async () => {
+    const price = await save("price"); const first = await saveContent("content-one", "Reviewed copy");
+    const resolved = resolveListingContent({ candidate: contentCandidate(), profile: noContentProfile, saved: first });
+    const input = queueInput(price.saved.revisionId);
+    input.preview.rows[0].contentEvidenceHash = resolved.evidenceHash;
+    input.preview.rows[0].listingIntent!.description = resolved.descriptionHtml;
+    const spy = fixtureContentReader();
+    try { await previews.createListingPushJob(input); } finally { spy.mockRestore(); }
+    await saveContent("content-two", "Later draft", first.revisionId);
+    const items = await pool!.query(qualify("SELECT result FROM dropship.dropship_listing_push_job_items"));
+    expect(items.rows[0].result.listingIntent.description).toBe(resolved.descriptionHtml);
   });
   it("saves do not rewrite an already queued publication snapshot or applied listing price", async () => {
     const first = await save("queue-price");
