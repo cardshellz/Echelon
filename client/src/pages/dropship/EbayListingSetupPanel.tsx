@@ -16,17 +16,17 @@ import { Label } from "@/components/ui/label";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
-  fetchJson,
   putJson,
   queryErrorCode,
   queryErrorMessage,
+  DropshipApiError,
   type DropshipEbayListingSetupOption,
   type DropshipEbayListingSetupResponse,
   type ReplaceDropshipEbayListingSetupInput,
 } from "@/lib/dropship-ops-surface";
 import { cn } from "@/lib/utils";
 import {
-  ebayListingSetupQueryKey,
+  ebayListingSetupQueryOptions,
   refreshEbayListingConfiguration,
   synchronizeSavedEbayListingSetup,
 } from "@/lib/dropship-ebay-listing-query-sync";
@@ -48,15 +48,7 @@ export function EbayListingSetupPanel({
   storeName: string;
 }) {
   const queryClient = useQueryClient();
-  const queryKey = ebayListingSetupQueryKey(storeConnectionId);
-  const setupQuery = useQuery<DropshipEbayListingSetupResponse>({
-    queryKey,
-    queryFn: () => fetchJson<DropshipEbayListingSetupResponse>(
-      `/api/dropship/ebay/listing-setup/${storeConnectionId}`,
-    ),
-    enabled: Number.isInteger(storeConnectionId) && storeConnectionId > 0,
-    staleTime: 60_000,
-  });
+  const setupQuery = useQuery(ebayListingSetupQueryOptions(storeConnectionId));
   const [draft, setDraft] = useState<ReplaceDropshipEbayListingSetupInput>(EMPTY_SELECTION);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
@@ -85,9 +77,10 @@ export function EbayListingSetupPanel({
   const managedLocationNeedsReconciliation = Boolean(
     setupQuery.data?.missingFields.includes("merchantLocationKey"),
   );
+  const verificationAvailable = setupQuery.isSuccess && !setupQuery.isFetching;
 
   async function saveSetup(): Promise<void> {
-    if (!draftComplete || inFlight.current || savedStoreToRefresh !== null) return;
+    if (!verificationAvailable || !draftComplete || inFlight.current || savedStoreToRefresh !== null) return;
     inFlight.current = true;
     setSaving(true);
     setSaveError("");
@@ -156,11 +149,11 @@ export function EbayListingSetupPanel({
         {setupQuery.data && (
           <Badge
             variant="outline"
-            className={setupQuery.data.complete
+            className={setupQuery.data.complete && verificationAvailable
               ? "w-fit border-emerald-200 bg-emerald-50 text-emerald-800"
               : "w-fit border-amber-300 bg-amber-50 text-amber-900"}
           >
-            {setupQuery.data.complete ? "Ready" : "Setup required"}
+            {!verificationAvailable ? "Verification pending" : setupQuery.data.complete ? "Ready" : "Setup required"}
           </Badge>
         )}
       </div>
@@ -186,7 +179,7 @@ export function EbayListingSetupPanel({
               <p className="mt-1">Showing the last loaded setup. Use Refresh options to try again.</p>
             </div>
           )}
-          {setupQuery.data.complete && (
+          {setupQuery.data.complete && verificationAvailable && (
             <div className="mb-4 flex items-start gap-2 rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
               <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" />
               <span>The Card Shellz-managed inventory destination and your default eBay business policies are ready.</span>
@@ -289,7 +282,7 @@ export function EbayListingSetupPanel({
             <Button
               type="button"
               className="gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
-              disabled={saving || savedStoreToRefresh !== null || !draftComplete || (!draftChanged && !managedLocationNeedsReconciliation)}
+              disabled={!verificationAvailable || saving || savedStoreToRefresh !== null || !draftComplete || (!draftChanged && !managedLocationNeedsReconciliation)}
               onClick={saveSetup}
             >
               <Save className="h-4 w-4" />
@@ -313,6 +306,8 @@ export function ListingSetupError({
 }) {
   const permissionRequired = queryErrorCode(error) === "DROPSHIP_EBAY_LISTING_SETUP_PERMISSION_REQUIRED";
   const accessDenied = queryErrorCode(error) === "DROPSHIP_EBAY_LISTING_SETUP_ACCESS_DENIED";
+  const context = error instanceof DropshipApiError ? error.context : null;
+  const reference = typeof context?.diagnosticReference === "string" ? context.diagnosticReference : null;
   return (
     <div className="m-4 rounded-md border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950">
       <div className="font-medium">
@@ -336,6 +331,12 @@ export function ListingSetupError({
           />
         </>
       )}
+      {reference && <details className="mt-2 text-xs">
+        <summary className="cursor-pointer">Support details</summary>
+        <p>Reference: {reference}</p>
+        {typeof context?.resource === "string" && <p>Resource: {context.resource}</p>}
+        {typeof context?.status === "number" && <p>Provider status: {context.status}</p>}
+      </details>}
     </div>
   );
 }

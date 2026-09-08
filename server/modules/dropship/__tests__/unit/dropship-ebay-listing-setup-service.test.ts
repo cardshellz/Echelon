@@ -90,6 +90,17 @@ describe("DropshipEbayListingSetupService", () => {
     });
   });
 
+  it("reads saved selections without provider discovery, location reconciliation, or config replacement", async () => {
+    listingConfig.config = makeConfig({ businessPolicies: { fulfillmentPolicyId: "saved-ground", returnPolicyId: "saved-return", paymentPolicyId: "saved-payment" } });
+    const discover = vi.spyOn(directory, "discoverForStoreConnection").mockRejectedValue(new Error("Provider outage"));
+    await expect(service.getSavedSelectionForMember("member-1", 44)).resolves.toEqual({
+      merchantLocationKey: null, fulfillmentPolicyId: "saved-ground", returnPolicyId: "saved-return", paymentPolicyId: "saved-payment",
+    });
+    expect(discover).not.toHaveBeenCalled();
+    expect(listingConfig.replaceMember).not.toHaveBeenCalled();
+    expect(listingConfig.replaceAdmin).not.toHaveBeenCalled();
+  });
+
   it("uses the Card Shellz-managed location even when other seller locations exist", async () => {
     directory.discovery = {
       ...directory.discovery,

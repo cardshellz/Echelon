@@ -1,4 +1,5 @@
 import type { QueryClient } from "@tanstack/react-query";
+import { fetchJson } from "./dropship-ops-surface";
 import type {
   DropshipEbayListingPolicyOverrideResponse,
   DropshipEbayListingSetupResponse,
@@ -6,6 +7,19 @@ import type {
 
 export function ebayListingSetupQueryKey(storeConnectionId: number) {
   return ["/api/dropship/ebay/listing-setup", storeConnectionId] as const;
+}
+
+/** Both panels observe one provider read. Server retries are bounded; do not multiply them here. */
+export function ebayListingSetupQueryOptions(storeConnectionId: number) {
+  return {
+    queryKey: ebayListingSetupQueryKey(storeConnectionId),
+    queryFn: ({ signal }: { signal: AbortSignal }) => fetchJson<DropshipEbayListingSetupResponse>(
+      `/api/dropship/ebay/listing-setup/${storeConnectionId}`, { signal }),
+    enabled: Number.isInteger(storeConnectionId) && storeConnectionId > 0,
+    staleTime: 60_000,
+    refetchOnMount: true,
+    retry: false,
+  } as const;
 }
 
 export function ebayListingPolicyQueryKey(storeConnectionId: number) {

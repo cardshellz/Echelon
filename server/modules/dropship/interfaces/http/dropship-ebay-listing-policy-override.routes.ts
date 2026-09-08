@@ -10,6 +10,20 @@ export function registerDropshipEbayListingPolicyOverrideRoutes(
   service: DropshipEbayListingPolicyOverrideService = createDropshipEbayListingPolicyOverrideServiceFromEnv(),
 ): void {
   app.get(
+    "/api/dropship/ebay/listing-policy-overrides/:storeConnectionId/saved",
+    requireDropshipAuth,
+    async (req, res) => {
+      try {
+        return res.json(await service.listSavedForMember(req.session.dropship!.memberId, {
+          storeConnectionId: Number(req.params.storeConnectionId),
+        }));
+      } catch (error) {
+        return sendError(res, error);
+      }
+    },
+  );
+
+  app.get(
     "/api/dropship/ebay/listing-policy-overrides/:storeConnectionId",
     requireDropshipAuth,
     async (req, res) => {
@@ -117,6 +131,8 @@ function publicContext(context: Record<string, unknown> | undefined): Record<str
     "resource",
     "status",
     "providerErrorIds",
+    "diagnosticReference",
+    "attempts",
     "invalidFields",
     "issues",
     "fulfillmentPolicyId",

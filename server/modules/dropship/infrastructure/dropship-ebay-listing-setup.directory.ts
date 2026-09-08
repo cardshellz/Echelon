@@ -10,6 +10,8 @@ import { DropshipError } from "../domain/errors";
 import type { DropshipEbayRegistrationCredentialProvider } from "./dropship-ebay-registration-credentials";
 import { resolveDropshipEbayProviderEnvironment } from "./dropship-ebay-registration-credentials";
 import { ebayResourceErrorIdentifiers, withEbaySafeReadRecovery } from "./dropship-ebay-safe-read-recovery";
+import { defaultEbaySetupReadRuntime, EBAY_SETUP_READ_TIMEOUT_MS, retryAfterMilliseconds,
+  retryEbaySetupRead, type EbaySetupReadRuntime } from "./dropship-ebay-setup-read-retry";
 
 type FetchLike = typeof fetch;
 
@@ -30,6 +32,7 @@ export class EbayDropshipListingSetupDirectory implements DropshipEbayListingSet
   constructor(
     private readonly credentials: DropshipEbayRegistrationCredentialProvider,
     private readonly fetchFn: FetchLike = fetch,
+    private readonly readRuntime: EbaySetupReadRuntime = defaultEbaySetupReadRuntime,
   ) {}
 
   async discoverForStoreConnection(input: {
@@ -221,16 +224,30 @@ export class EbayDropshipListingSetupDirectory implements DropshipEbayListingSet
     resource: ProviderResource;
     storeConnectionId: number;
   }): Promise<Record<string, unknown>> {
+    return retryEbaySetupRead(() => this.fetchResourceOnce(input), this.readRuntime);
+  }
+
+  private async fetchResourceOnce(input: {
+    accessToken: string;
+    baseUrl: string;
+    resource: ProviderResource;
+    storeConnectionId: number;
+  }): Promise<Record<string, unknown>> {
     let response: Response;
+    let text: string;
     try {
       response = await this.fetchFn(`${input.baseUrl}${input.resource.path}`, {
         method: "GET",
+        signal: AbortSignal.timeout(EBAY_SETUP_READ_TIMEOUT_MS),
+        redirect: "error",
         headers: {
           Accept: "application/json",
           Authorization: `Bearer ${input.accessToken}`,
         },
       });
+      text = await readBoundedSetupResponse(response, input.storeConnectionId, input.resource.key);
     } catch (error) {
+      if (error instanceof DropshipError) throw error;
       throw new DropshipError(
         "DROPSHIP_EBAY_LISTING_SETUP_UNAVAILABLE",
         "eBay listing setup could not be loaded.",
@@ -241,10 +258,6 @@ export class EbayDropshipListingSetupDirectory implements DropshipEbayListingSet
           errorName: error instanceof Error ? error.name : "UnknownError",
         },
       );
-    }
-    const text = await response.text();
-    if (text.length > MAX_RESPONSE_BYTES) {
-      throw invalidResponse(input.storeConnectionId, input.resource.key);
     }
     if (!response.ok) {
       const permissionRequired = response.status === 401 || response.status === 403;
@@ -261,6 +274,7 @@ export class EbayDropshipListingSetupDirectory implements DropshipEbayListingSet
           status: response.status,
           ...ebayResourceErrorIdentifiers(text),
           retryable: response.status === 429 || response.status >= 500,
+          retryAfterMs: retryAfterMilliseconds(response.headers.get("Retry-After"), this.readRuntime.now()),
         },
       );
     }
@@ -280,6 +294,26 @@ export class EbayDropshipListingSetupDirectory implements DropshipEbayListingSet
       );
     }
   }
+}
+
+async function readBoundedSetupResponse(response: Response, storeConnectionId: number, resource: ProviderResource["key"]): Promise<string> {
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > MAX_RESPONSE_BYTES) {
+        await reader.cancel();
+        throw invalidResponse(storeConnectionId, resource);
+      }
+      chunks.push(value);
+    }
+    return Buffer.concat(chunks).toString("utf8");
+  } finally { reader.releaseLock(); }
 }
 
 function nextInventoryLocationPath(
