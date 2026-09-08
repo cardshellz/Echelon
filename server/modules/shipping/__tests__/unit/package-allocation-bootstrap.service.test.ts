@@ -15,7 +15,12 @@ import {
   type LockedPackageAllocationAuthorityEvidence,
   type PackageAllocationLedgerRepository,
   type PackageAllocationLedgerTransaction,
+  type PersistedPackageAllocationPlan,
 } from "../../package-allocation-ledger.repository";
+import type {
+  PackageAllocationPlanAuthoritySnapshotV1,
+  PersistPackageAllocationPlanCommand,
+} from "../../package-allocation-planning.service";
 import type { PackageAllocationSourceFacts } from "../../package-allocation-source-identity.domain";
 
 const sourceId = 7_001;
@@ -126,6 +131,8 @@ function fixture(options: {
   const pkg = options.packageEvidence ?? lockedPackage();
   const groupKey = derivePackageAllocationBootstrapGroupKey([sourceId]);
   const transaction = {
+    lockSourceGroupClosure: vi.fn(async () => null),
+    loadPlanByVersion: vi.fn(async () => null),
     lockGroup: vi.fn(async (requestedKey: string, createIfMissing: boolean) => {
       calls.push(`group:${requestedKey}:${createIfMissing}`);
       if (options.currentVersion === undefined) return null;
@@ -149,7 +156,11 @@ function fixture(options: {
     }),
   } as unknown as PackageAllocationLedgerTransaction;
   const planning = {
-    persistInTransaction: vi.fn(async () => ({
+    persistInTransaction: vi.fn(async (
+      _transaction: PackageAllocationLedgerTransaction,
+      _command: PersistPackageAllocationPlanCommand,
+      _snapshot: PackageAllocationPlanAuthoritySnapshotV1,
+    ) => ({
       kind: "created" as const,
       groupId: "1",
       planId: "101",
@@ -179,6 +190,37 @@ function fixture(options: {
     transaction,
     attempts: () => attempts,
   };
+}
+
+async function versionedFixture() {
+  const initial = fixture();
+  const first = await new PackageAllocationBootstrapPersistenceService(
+    initial.repository,
+    initial.planning,
+  ).persistDiscovered(command());
+  if (first.resolution === null)
+    throw new Error("Expected a resolved initial plan");
+  const planner = first.resolution.plannerResult;
+  const originalAuthority =
+    initial.planning.persistInTransaction.mock.calls[0][2];
+  const persisted: PersistedPackageAllocationPlan = {
+    id: "101",
+    packageAllocationGroupId: "1",
+    planVersion: 1,
+    expectedGroupVersion: 0,
+    inputHash: planner.evidenceHash,
+    stateHash: planner.stateHash,
+    outcome: "proposed",
+    plannerVersion: "package-allocation-group-v2",
+    reason: command().writeContext.reason,
+    createdBy: command().writeContext.createdBy,
+    authoritySnapshot: originalAuthority,
+    stateSnapshot: planner.state,
+    reviewSnapshot: { contractVersion: 1, reviews: [] },
+  };
+  const current = fixture({ currentVersion: 1 });
+  vi.mocked(current.transaction.loadPlanByVersion).mockResolvedValue(persisted);
+  return { ...current, persisted, originalAuthority };
 }
 
 describe("PackageAllocationBootstrapPersistenceService", () => {
@@ -230,6 +272,99 @@ describe("PackageAllocationBootstrapPersistenceService", () => {
     expect(result.resolution?.plannerResult.state.desiredEffectIntents.every(
       (intent) => intent.executable === false,
     )).toBe(true);
+  });
+
+  it("retains original authority only for additive corroboration of unchanged state", async () => {
+    const f = await versionedFixture();
+    const before = structuredClone(f.originalAuthority);
+    vi.mocked(
+      f.transaction.discoverAuthorityReadinessPackageSelection,
+    ).mockResolvedValue([
+      {
+        shippingProviderLabelId: 42,
+        relationshipTypes: [
+          "shipping_engine_order_link",
+          "legacy_wms_shipment_link",
+          "provider_order_id_match",
+        ],
+      },
+    ]);
+    const result = await new PackageAllocationBootstrapPersistenceService(
+      f.repository,
+      f.planning,
+    ).persistDiscovered(command());
+    expect(result.resolution?.outcome).toBe("unchanged");
+    expect(f.planning.persistInTransaction.mock.calls[0][2]).toEqual(before);
+    expect(
+      result.relationshipSelectionEvidence.packages[0].relationshipTypes,
+    ).toEqual([
+      "legacy_wms_shipment_link",
+      "provider_order_id_match",
+      "shipping_engine_order_link",
+    ]);
+    expect(f.originalAuthority).toEqual(before);
+  });
+
+  it.each(["source_scope", "label_scope", "removed_relationship"] as const)(
+    "does not reuse an unchanged plan's old authority when %s differs",
+    async (difference) => {
+      const f = await versionedFixture();
+      const changedAuthority = structuredClone(f.originalAuthority);
+      if (
+        changedAuthority.selectionAuthority !== "database_relationship_closure"
+      ) {
+        throw new Error("Expected database relationship authority");
+      }
+      const evidence = changedAuthority.relationshipSelectionEvidence;
+      if (difference === "source_scope")
+        evidence.sourceWmsShipmentItemIds = [sourceId + 1];
+      else if (difference === "label_scope")
+        evidence.packages[0].shippingProviderLabelId = 43;
+      else
+        evidence.packages[0].relationshipTypes.push("legacy_wms_shipment_link");
+      const { evidenceHash: _oldHash, ...projection } = evidence;
+      evidence.evidenceHash = sha256(canonicalJson(projection));
+      vi.mocked(f.transaction.loadPlanByVersion).mockResolvedValue({
+        ...f.persisted,
+        authoritySnapshot: changedAuthority,
+      });
+      await new PackageAllocationBootstrapPersistenceService(
+        f.repository,
+        f.planning,
+      ).persistDiscovered(command());
+      // The real persistence service keeps its exact snapshot comparison and
+      // rejects this mismatch; the bootstrap may not substitute the prior proof.
+      expect(f.planning.persistInTransaction.mock.calls[0][2]).toEqual(
+        f.originalAuthority,
+      );
+      expect(f.planning.persistInTransaction.mock.calls[0][2]).not.toEqual(
+        changedAuthority,
+      );
+    },
+  );
+
+  it("rejects a corrupt original relationship hash before persistence", async () => {
+    const f = await versionedFixture();
+    const changedAuthority = structuredClone(f.originalAuthority);
+    if (
+      changedAuthority.selectionAuthority !== "database_relationship_closure"
+    ) {
+      throw new Error("Expected database relationship authority");
+    }
+    changedAuthority.relationshipSelectionEvidence.evidenceHash = "0".repeat(
+      64,
+    );
+    vi.mocked(f.transaction.loadPlanByVersion).mockResolvedValue({
+      ...f.persisted,
+      authoritySnapshot: changedAuthority,
+    });
+    await expect(
+      new PackageAllocationBootstrapPersistenceService(
+        f.repository,
+        f.planning,
+      ).persistDiscovered(command()),
+    ).rejects.toMatchObject({ code: "PERSISTED_STATE_INVALID" });
+    expect(f.planning.persistInTransaction).not.toHaveBeenCalled();
   });
 
   it("returns review without creating a group or plan when contents are not authoritative", async () => {
@@ -300,14 +435,14 @@ describe("PackageAllocationBootstrapPersistenceService", () => {
     expect(f.attempts()).toBe(0);
   });
 
-  it("refuses to bootstrap over a multi-version group history", async () => {
+  it("refuses a versioned group whose immutable current history is missing", async () => {
     const f = fixture({ currentVersion: 2 });
     await expect(new PackageAllocationBootstrapPersistenceService(
       f.repository,
       f.planning,
     ).persistDiscovered(command())).rejects.toMatchObject({
-      code: "EXISTING_GROUP_REQUIRES_VERSIONED_REPLAY",
-      context: { groupKey: f.groupKey, currentVersion: 2 },
+      code: "CURRENT_PLAN_MISSING",
+      context: { groupKey: f.groupKey, expectedGroupVersion: 2 },
     });
     expect(f.transaction.lockSourceFacts).not.toHaveBeenCalled();
     expect(f.planning.persistInTransaction).not.toHaveBeenCalled();

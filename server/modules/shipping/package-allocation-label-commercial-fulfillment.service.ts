@@ -18,6 +18,8 @@ import type {
   PackageAllocationLabelCommercialReviewRepository,
 } from "./package-allocation-label-commercial-review.repository";
 import { parseExactPositiveWmsShipmentItems } from "./shipstation-provider-contents.domain";
+import { PackageAllocationAuthorityResolutionError } from "./package-allocation-authority-resolution.domain";
+import { PackageAllocationGroupError } from "./package-allocation-group.domain";
 
 const ACTIVATION_ACTOR = "system:shipstation_label_commercial_fulfillment";
 const ACTIVATION_REASON =
@@ -61,6 +63,9 @@ interface ReviewableError {
 const REVIEWABLE_LEDGER_CODES = new Set([
   "PACKAGE_EVIDENCE_NOT_FOUND",
   "SOURCE_EVIDENCE_NOT_FOUND",
+  "SOURCE_ALREADY_GROUPED",
+  "SOURCE_REGISTRATION_CONFLICT",
+  "PACKAGE_BINDING_CONFLICT",
 ]);
 
 const REVIEWABLE_FULFILLMENT_CODES = new Set([
@@ -105,6 +110,9 @@ function nullableText(value: unknown): string | null {
 }
 
 function reviewableError(error: unknown): ReviewableError | null {
+  if (error instanceof PackageAllocationAuthorityResolutionError || error instanceof PackageAllocationGroupError) {
+    return { reasonCode: error.code, details: error.context };
+  }
   if (
     error instanceof PackageAllocationBootstrapPersistenceError
     && error.code === "EXISTING_GROUP_REQUIRES_VERSIONED_REPLAY"

@@ -23,6 +23,8 @@ import {
   sqlTextArray,
 } from "../../infrastructure/postgres-array";
 import type { EbayApiClient } from "../channels/adapters/ebay/ebay-api.client";
+import type { ChannelFulfillmentProviderClients, ShopifyFulfillmentAccount } from "../channels/channel-fulfillment-provider-clients.service";
+import { ChannelFulfillmentProviderError } from "../channels/channel-fulfillment-provider.error";
 import type { EbayShippingFulfillmentRequest } from "../channels/adapters/ebay/ebay-types";
 import type {
   ShopifyAdminGraphQLClient,
@@ -230,6 +232,8 @@ export type FulfillmentPushExclusiveRunner = <T>(
 ) => Promise<T | null>;
 
 export interface FulfillmentPushServiceOptions {
+  /** Canonical commands must resolve their own originating account; never use legacy singletons. */
+  providerClients?: ChannelFulfillmentProviderClients;
   /**
    * Production injects a dedicated-session Postgres advisory-lock runner.
    * Tests default to direct execution so they remain deterministic and do not
@@ -448,7 +452,7 @@ function normalizeChannelCommandInput(
     ["omsOrderId", input.omsOrderId],
   ];
   for (const [field, value] of positiveFields) {
-    if (!Number.isInteger(value) || value <= 0) {
+    if (!Number.isSafeInteger(value) || value <= 0) {
       throw new ChannelFulfillmentProviderInputError(
         CHANNEL_FULFILLMENT_INVALID_INPUT,
         `${field} must be a positive integer`,
@@ -857,7 +861,7 @@ async function fetchExactShopifyPackageState(input: {
       priorItems: input.priorItems,
     });
   } catch (error) {
-    if (error instanceof ShopifyFulfillmentPushError) throw error;
+    if (error instanceof ShopifyFulfillmentPushError || error instanceof ChannelFulfillmentProviderError) throw error;
     throw new ShopifyFulfillmentPushError(
       `pushShopifyFulfillment: failed to read exact Shopify package state for shipment ${input.shipmentId}`,
       {
@@ -919,6 +923,33 @@ export function createFulfillmentPushService(
     | undefined;
   const runExclusive: FulfillmentPushExclusiveRunner =
     options.runExclusive ?? (async (_lockId, fn) => fn());
+
+  async function loadCanonicalFulfillmentOrder(command: ChannelFulfillmentProviderCommandInput, provider: "shopify" | "ebay") {
+    const result = await db.execute(sql`
+      SELECT oms_order.id AS oms_order_id, oms_order.channel_id, oms_order.external_order_id,
+             oms_order.ordered_at, oms_order.created_at AS oms_created_at,
+             LOWER(channel.provider) AS channel_provider
+      FROM oms.oms_orders oms_order
+      JOIN channels.channels channel ON channel.id = oms_order.channel_id
+      WHERE oms_order.id = ${command.omsOrderId}
+    `);
+    const rows: Array<Record<string, unknown>> = result?.rows ?? [];
+    const row = rows[0];
+    const channelId = Number(row?.channel_id);
+    const externalOrderId = typeof row?.external_order_id === "string" ? row.external_order_id.trim() : "";
+    if (rows.length !== 1 || Number(row.oms_order_id) !== command.omsOrderId
+      || !Number.isInteger(channelId) || channelId <= 0 || channelId > 2_147_483_647
+      || row.channel_provider !== provider || !externalOrderId) {
+      throw new ChannelFulfillmentProviderInputError(CHANNEL_FULFILLMENT_LINEAGE_MISMATCH,
+        "Canonical fulfillment requires the exact originating OMS channel and order", { commandId: command.commandId, omsOrderId: command.omsOrderId });
+    }
+    return Object.freeze({ channelId, externalOrderId, ordered_at: row.ordered_at, oms_created_at: row.oms_created_at });
+  }
+
+  function requireProviderClients(): ChannelFulfillmentProviderClients {
+    if (!options.providerClients) throw new ChannelFulfillmentProviderError("FULFILLMENT_ACCOUNT_RESOLVER_UNAVAILABLE", "Canonical fulfillment account resolution is not configured");
+    return options.providerClients;
+  }
 
   function shopifyFulfillmentWriteLockId(
     scope: "oms_order" | "combined_group",
@@ -1444,40 +1475,8 @@ export function createFulfillmentPushService(
     input: ChannelFulfillmentProviderCommandInput,
   ): Promise<boolean> {
     const command = normalizeChannelCommandInput(input);
-    if (!_ebayApiClient) {
-      throw Object.assign(new Error("eBay fulfillment provider is not initialized"), {
-        code: "CHANNEL_PROVIDER_NOT_READY",
-      });
-    }
-
-    const orderResult: any = await db.execute(sql`
-      SELECT
-        oms_order.id AS oms_order_id,
-        oms_order.external_order_id,
-        oms_order.ordered_at,
-        oms_order.created_at AS oms_created_at,
-        LOWER(channel.provider) AS channel_provider
-      FROM oms.oms_orders oms_order
-      JOIN channels.channels channel ON channel.id = oms_order.channel_id
-      WHERE oms_order.id = ${command.omsOrderId}
-      LIMIT 1
-    `);
-    const order = orderResult?.rows?.[0];
-    if (!order || String(order.channel_provider ?? "").trim().toLowerCase() !== "ebay") {
-      throw new ChannelFulfillmentProviderInputError(
-        CHANNEL_FULFILLMENT_LINEAGE_MISMATCH,
-        `Canonical command ${command.commandId} is not linked to an eBay OMS order`,
-        { commandId: command.commandId, omsOrderId: command.omsOrderId },
-      );
-    }
-    const externalOrderId = String(order.external_order_id ?? "").trim();
-    if (!externalOrderId) {
-      throw new ChannelFulfillmentProviderInputError(
-        CHANNEL_FULFILLMENT_LINEAGE_MISMATCH,
-        `eBay OMS order ${command.omsOrderId} has no external order identity`,
-        { commandId: command.commandId, omsOrderId: command.omsOrderId },
-      );
-    }
+    const order = await loadCanonicalFulfillmentOrder(command, "ebay");
+    const externalOrderId = order.externalOrderId;
 
     const shipmentItemIds = command.items.map((item) => item.legacyWmsShipmentItemId);
     const lineResult: any = await db.execute(sql`
@@ -1499,6 +1498,8 @@ export function createFulfillmentPushService(
     `);
     const rawLineItems: LegacyShipmentLineSnapshot[] = lineResult?.rows ?? [];
     assertExactChannelCommandLineage(command, rawLineItems, isEbayFulfillmentProvider);
+    const account = await requireProviderClients().ebay(order.channelId);
+    if (account.channelId !== order.channelId) throw new ChannelFulfillmentProviderError("FULFILLMENT_ACCOUNT_CHANNEL_MISMATCH", "Resolved eBay account belongs to another channel");
 
     const quantityByLine = new Map<string, number>();
     for (const item of command.items) {
@@ -1520,10 +1521,7 @@ export function createFulfillmentPushService(
       shippingCarrierCode: mapCarrierCode(command.carrier),
       trackingNumber: normalizeEbayTrackingNumber(command.trackingNumber),
     };
-    const result = await _ebayApiClient.createShippingFulfillment(
-      externalOrderId,
-      fulfillmentPayload,
-    );
+    const result = await account.client.createShippingFulfillment(externalOrderId, fulfillmentPayload);
     const fulfillmentId = String(result?.fulfillmentId ?? "").trim();
     if (!fulfillmentId) {
       throw Object.assign(
@@ -1539,6 +1537,8 @@ export function createFulfillmentPushService(
         provider: "ebay",
         fulfillmentId,
         channelFulfillmentCommandId: command.commandId,
+        channelId: account.channelId,
+        externalAccountId: account.externalAccountId,
         physicalShipmentId: command.physicalShipmentId,
         wmsShipmentIds: command.legacyWmsShipmentIds,
         trackingNumber: command.trackingNumber,
@@ -1615,11 +1615,12 @@ export function createFulfillmentPushService(
         command.omsOrderId,
         anchorShipmentId,
       );
-      const execute = () => pushSingleShipmentFulfillment(
-        anchorShipmentId,
-        sharedTrackingInfo,
-        command,
-      );
+      const execute = async () => {
+        const order = await loadCanonicalFulfillmentOrder(command, "shopify");
+        const account = await requireProviderClients().shopify(order.channelId);
+        if (account.channelId !== order.channelId) throw new ChannelFulfillmentProviderError("FULFILLMENT_ACCOUNT_CHANNEL_MISMATCH", "Resolved Shopify account belongs to another channel");
+        return pushSingleShipmentFulfillment(anchorShipmentId, sharedTrackingInfo, command, { order, account });
+      };
       return await runShopifyFulfillmentExclusive(
         lockScope,
         anchorShipmentId,
@@ -1666,8 +1667,10 @@ export function createFulfillmentPushService(
     shipmentId: number,
     sharedTrackingInfo?: { number: string; company: string; url?: string },
     commandInput?: ChannelFulfillmentProviderCommandInput,
+    canonicalTarget?: { order: Awaited<ReturnType<typeof loadCanonicalFulfillmentOrder>>; account: ShopifyFulfillmentAccount },
   ): Promise<ShopifyFulfillmentPushResult> {
     const command = commandInput ? normalizeChannelCommandInput(commandInput) : null;
+    const shopifyClient = canonicalTarget?.account.client ?? (command ? null : _shopifyClient);
     if (command && !command.legacyWmsShipmentIds.includes(shipmentId)) {
       throw new ChannelFulfillmentProviderInputError(
         CHANNEL_FULFILLMENT_LINEAGE_MISMATCH,
@@ -1807,6 +1810,16 @@ export function createFulfillmentPushService(
         { code: SHOPIFY_PUSH_INVALID_INPUT, shipmentId, field: "order", value: shipment.order_id },
       );
     }
+    if (command && (!canonicalTarget || order.channel_id !== canonicalTarget.order.channelId
+      || (shipment.channel_id != null && shipment.channel_id !== canonicalTarget.order.channelId)
+      || resolveShopifyOrderGid(order.external_order_id ?? "") !== resolveShopifyOrderGid(canonicalTarget.order.externalOrderId))) {
+      throw new ChannelFulfillmentProviderInputError(CHANNEL_FULFILLMENT_LINEAGE_MISMATCH,
+        "WMS shipment header does not match the originating OMS channel/order", { commandId: command.commandId, shipmentId });
+    }
+    const canonicalWarehouseLocationId = command ? order.ship_from_location_id?.trim() ?? "" : null;
+    if (command && !/^(?:gid:\/\/shopify\/Location\/)?[1-9]\d*$/.test(canonicalWarehouseLocationId ?? "")) {
+      throw new ChannelFulfillmentProviderError("SHOPIFY_FULFILLMENT_LOCATION_UNRESOLVED", "The shipment warehouse has no explicit Shopify location mapping");
+    }
 
     // ---- 3b. Combined-group dispatch (§6 Commit 25 + Overlord D8) ------
     // If this order is part of a combined-order group AND we are not
@@ -1883,7 +1896,7 @@ export function createFulfillmentPushService(
       const provider = (channelResult?.rows?.[0]?.provider ?? "").toLowerCase();
       providerIsShopify = provider === "shopify";
     }
-    if (!sourceIsShopify && !providerIsShopify) {
+    if (!command && !sourceIsShopify && !providerIsShopify) {
       // Non-Shopify channel — silent no-op per brief. The eBay path is
       // owned by `pushTracking`/`pushToEbay` above.
       return { shopifyFulfillmentId: null, alreadyPushed: false, writebackComplete: true };
@@ -1895,7 +1908,7 @@ export function createFulfillmentPushService(
         { code: SHOPIFY_PUSH_INVALID_INPUT, shipmentId, field: "external_order_id", value: null },
       );
     }
-    const shopifyOrderGid = resolveShopifyOrderGid(order.external_order_id);
+    const shopifyOrderGid = resolveShopifyOrderGid(canonicalTarget?.order.externalOrderId ?? order.external_order_id);
     if (!shopifyOrderGid) {
       throw new ShopifyFulfillmentPushError(
         `pushShopifyFulfillment: order ${order.id} has invalid Shopify external_order_id`,
@@ -1909,7 +1922,7 @@ export function createFulfillmentPushService(
     }
 
     // ---- 5. Shopify client must be set ---------------------------------
-    if (!_shopifyClient) {
+    if (!shopifyClient) {
       throw new ShopifyFulfillmentPushError(
         "shopify client not initialized",
         { code: SHOPIFY_PUSH_CLIENT_NOT_SET, shipmentId },
@@ -1962,6 +1975,7 @@ export function createFulfillmentPushService(
         `);
     const items: WmsShipmentItemForShopify[] = itemsResult?.rows ?? [];
     const positiveItems = items.filter((it) => Number.isInteger(it.qty) && it.qty > 0);
+    if (command) assertExactChannelCommandLineage(command, items, isShopifyFulfillmentProvider);
     if (positiveItems.length === 0) {
       throw new ShopifyFulfillmentPushError(
         `pushShopifyFulfillment: shipment ${shipmentId} has no items with positive quantity`,
@@ -1976,9 +1990,6 @@ export function createFulfillmentPushService(
     const shopifyPositiveItems = positiveItems.filter((item) =>
       isShopifyFulfillmentProvider(item.fulfillment_provider),
     );
-    if (command) {
-      assertExactChannelCommandLineage(command, items, isShopifyFulfillmentProvider);
-    }
     const packageSignature = buildShopifyPackageSignature(shopifyPositiveItems);
     const requestedQuantity = shopifyPositiveItems.reduce(
       (sum, item) => sum + item.qty,
@@ -2038,7 +2049,7 @@ export function createFulfillmentPushService(
         quantity: Number(row.quantity),
       }));
       const providerPackageState = await fetchExactShopifyPackageState({
-        client: _shopifyClient,
+        client: shopifyClient,
         shopifyOrderGid,
         shipmentId,
         trackingNumber,
@@ -2069,6 +2080,7 @@ export function createFulfillmentPushService(
           eventType: "shopify_fulfillment_reconciled",
           order,
           omsOrderId: command.omsOrderId,
+          originAccount: canonicalTarget?.account,
           shipmentId,
           wmsShipmentIds: command.legacyWmsShipmentIds,
           trackingNumber,
@@ -2112,7 +2124,14 @@ export function createFulfillmentPushService(
     let resolved: ResolvedFulfillmentOrderLine[] = [];
     let pathAUsed = false;
     let pathAReason = "";
-    let liveCandidates: ShopifyFulfillmentOrderLineCandidate[] | null = null;
+    let liveCandidates: ShopifyFulfillmentOrderLineCandidate[] | null = command
+      ? await fetchFulfillmentOrderLineCandidates(shopifyClient, shopifyOrderGid, shipmentId)
+      : null;
+    if (command && !liveCandidates?.some((candidate) => candidate.assignedLocationId === normaliseShopifyLocationId(canonicalWarehouseLocationId!))) {
+      // A global warehouse mapping is not account proof. The exact originating
+      // store must expose that location on this order before either Path A or B.
+      throw new ChannelFulfillmentProviderError("SHOPIFY_FULFILLMENT_LOCATION_MISMATCH", "The shipment warehouse location is not assigned to this order in its originating Shopify store");
+    }
     let alreadySatisfiedQuantity = 0;
 
     if (pathARead === null) {
@@ -2122,8 +2141,8 @@ export function createFulfillmentPushService(
     } else if (pathARead.some((r) => !r.fulfillmentOrderId || !r.fulfillmentOrderLineItemId)) {
       pathAReason = "some oms_order_lines have null FO line item id";
     } else {
-      liveCandidates = await fetchFulfillmentOrderLineCandidates(
-        _shopifyClient,
+      liveCandidates ??= await fetchFulfillmentOrderLineCandidates(
+        shopifyClient,
         shopifyOrderGid,
         shipmentId,
       );
@@ -2132,6 +2151,7 @@ export function createFulfillmentPushService(
         pathARead,
         shipmentId,
         liveCandidates,
+        canonicalWarehouseLocationId,
       );
       if (validation.ok) {
         resolved = validation.resolved;
@@ -2153,7 +2173,7 @@ export function createFulfillmentPushService(
       // fulfillment ticket. Sourced from the order load (no extra query).
       // Null when no warehouse→location mapping exists (single-location
       // stores) → location-agnostic matching.
-      const shipFromLocationId = order.ship_from_location_id ?? null;
+      const shipFromLocationId = canonicalWarehouseLocationId ?? order.ship_from_location_id ?? null;
       const reconciliation = liveCandidates
         ? reconcileFulfillmentOrderLinesFromCandidates(
             shopifyOrderGid,
@@ -2163,7 +2183,7 @@ export function createFulfillmentPushService(
             shipFromLocationId,
           )
         : await reconcileFulfillmentOrderLines(
-            _shopifyClient,
+            shopifyClient,
             shopifyOrderGid,
             shopifyPositiveItems,
             shipmentId,
@@ -2274,7 +2294,7 @@ export function createFulfillmentPushService(
     //
     // TODO(C22d+): add `oms_order_lines.shopify_fulfillment_order_location_id`
     // (or cache on a per-shipment basis) so Path A can skip this query.
-    const ourLocationIds = await getOurShopifyLocationIds(
+    const ourLocationIds = command ? [canonicalWarehouseLocationId!] : await getOurShopifyLocationIds(
       db,
       order.channel_id ?? null,
       shipmentId,
@@ -2290,12 +2310,15 @@ export function createFulfillmentPushService(
     } else {
       const foIds = Array.from(new Set(resolved.map((r) => r.fulfillmentOrderId)));
       const allowedFoIds = await fetchOurFulfillmentOrderIds(
-        _shopifyClient,
+        shopifyClient,
         shopifyOrderGid,
         foIds,
         ourLocationIds,
         shipmentId,
       );
+      if (command && resolved.some((line) => !allowedFoIds.has(line.fulfillmentOrderId))) {
+        throw new ChannelFulfillmentProviderError("SHOPIFY_FULFILLMENT_LOCATION_MISMATCH", "Canonical fulfillment lines are not assigned to the proven shipment warehouse location");
+      }
 
       const beforeCount = resolved.length;
       resolved = resolved.filter((r) => allowedFoIds.has(r.fulfillmentOrderId));
@@ -2392,8 +2415,9 @@ export function createFulfillmentPushService(
 
     let mutationResult: any;
     try {
-      mutationResult = await _shopifyClient.request<any>(mutation, variables);
+      mutationResult = await shopifyClient.request<any>(mutation, variables);
     } catch (err: any) {
+      if (err instanceof ChannelFulfillmentProviderError) throw err;
       throw new ShopifyFulfillmentPushError(
         `Shopify fulfillmentCreateV2 transport error: ${err?.message ?? String(err)}`,
         {
@@ -2449,6 +2473,7 @@ export function createFulfillmentPushService(
       eventType: "shopify_fulfillment_pushed",
       order,
       omsOrderId: command?.omsOrderId,
+      originAccount: canonicalTarget?.account,
       shipmentId,
       wmsShipmentIds: legacyWmsShipmentIds,
       trackingNumber,
@@ -2492,6 +2517,7 @@ export function createFulfillmentPushService(
     eventType: "shopify_fulfillment_pushed" | "shopify_fulfillment_reconciled";
     order: WmsOrderForShopify;
     omsOrderId?: number;
+    originAccount?: Pick<ShopifyFulfillmentAccount, "channelId" | "connectionId" | "externalAccountId">;
     shipmentId: number;
     wmsShipmentIds?: readonly number[];
     trackingNumber: string;
@@ -2521,6 +2547,11 @@ export function createFulfillmentPushService(
 
     const details = JSON.stringify({
       provider: "shopify",
+      ...(args.originAccount ? { originAccount: {
+        channelId: args.originAccount.channelId,
+        connectionId: args.originAccount.connectionId,
+        externalAccountId: args.originAccount.externalAccountId,
+      } } : {}),
       wmsShipmentId: args.shipmentId,
       wmsShipmentIds: args.wmsShipmentIds ?? [args.shipmentId],
       trackingNumber: args.trackingNumber,
@@ -3551,6 +3582,7 @@ async function fetchFulfillmentOrderLineCandidates(
   try {
     response = await client.request<any>(FULFILLMENT_ORDERS_QUERY, { id: shopifyOrderGid });
   } catch (err: any) {
+    if (err instanceof ChannelFulfillmentProviderError) throw err;
     throw new ShopifyFulfillmentPushError(
       `Shopify fulfillmentOrders lookup transport error: ${err?.message ?? String(err)}`,
       {
@@ -3800,6 +3832,7 @@ function validatePathAAgainstLiveCandidates(
   pathARead: PathARow[],
   shipmentId: number,
   candidates: ShopifyFulfillmentOrderLineCandidate[],
+  expectedLocationId?: string | null,
 ): { ok: true; resolved: ResolvedFulfillmentOrderLine[] } | { ok: false; reason: string } {
   const working = candidates.map((candidate) => ({ ...candidate }));
   const resolved: ResolvedFulfillmentOrderLine[] = [];
@@ -3821,6 +3854,9 @@ function validatePathAAgainstLiveCandidates(
         ok: false,
         reason: `shipment ${shipmentId} stored FO ${candidate.fulfillmentOrderId} is ${candidate.status}`,
       };
+    }
+    if (expectedLocationId && candidate.assignedLocationId !== normaliseShopifyLocationId(expectedLocationId)) {
+      return { ok: false, reason: "stored fulfillment-order line is assigned to a different warehouse" };
     }
     if (candidate.remaining < row.quantity) {
       return {
@@ -4023,6 +4059,7 @@ async function fetchOurFulfillmentOrderIds(
       id: shopifyOrderGid,
     });
   } catch (err: any) {
+    if (err instanceof ChannelFulfillmentProviderError) throw err;
     throw new ShopifyFulfillmentPushError(
       `Shopify fulfillmentOrders location lookup transport error: ${err?.message ?? String(err)}`,
       {

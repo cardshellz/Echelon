@@ -17,7 +17,8 @@ These are application choices, not claims about marketplace limits:
 
 - Vendor-authored descriptions are plain text (20,000 characters); paragraphs and line breaks are preserved. HTML entered by a vendor is literal text.
 - Inherited catalog HTML preserves only basic formatting through a strict server sanitizer: paragraphs, simple headings/lists/tables, no attributes, links, images, scripts or styles. Listing images remain in the existing image pipeline.
-- Copy catalog as editable text explicitly converts formatting to text. Reset to catalog restores the current catalog body; store/group templates still apply.
+- The description box has Edit and Reset directly beneath it. Edit replaces the preview with a text box and Save/Cancel/Reset. Opening Edit alone does not create an override or change catalog formatting; typing creates the local custom draft. Save returns to the rendered description.
+- Reset stages the current catalog body and formatting; Save applies it, and Cancel retains the saved description. Store/group templates still apply. Formatting explanations and product facts are in collapsed Description details; retry/reconciliation controls appear only when needed.
 - Introduction and footer are each limited to 4,000 characters. A profile supports 100 groups and 10,000 total named-listing assignments. Category, product-line and product groups avoid large explicit ID lists.
 - One winning group replaces the default wrapper, never stacks with it. Lowest priority number wins; an equal-priority tie blocks affected previews.
 - Shared profile hashes and named-group membership sets are prepared once per batch. Individual editor bodies are loaded on demand. Catalog selectors retain the existing keyset scan and 50-choice pages; named target discovery retains the existing 10,000-selected-item ceiling. Existing publication requests retain their separate batch cap.
@@ -50,14 +51,14 @@ Rolling the application back leaves the additive tables intact, but the older ap
 - `dropship-listing-preview-service.test.ts`: exact description intent, missing/stale evidence rejection, catalog review blockers, and fail-closed incomplete content reads.
 - `dropship-listing-content.integration.test.ts`: real PostgreSQL migration syntax, simultaneous saves, idempotency, store isolation, immutable history, predecessor/FK enforcement and audit rollback.
 - `dropship-listing-price.integration.test.ts`: description changes between preview/queue and frozen content after later edits, alongside the existing pricing transaction tests.
-- `test/browser/dropship-content-editor.spec.ts`: desktop/mobile edit-preview-save-reset, uncertain retries, conflict text preservation, hidden template draft preservation, group selectors and open-preview refresh.
+- `test/browser/dropship-content-editor.spec.ts`: desktop/mobile button placement/count, edit-save-cancel-reset, inherited formatting preservation, uncertain retries, conflict reconciliation, refresh recovery without another write, hidden template draft preservation, group selectors and open-preview refresh.
 - Existing pricing browser journeys, full unit suite, typecheck, production build, writer-ratchet and migration-prefix guard are included in validation. Browser tests use synthetic local APIs, not customer data.
 
 ## Deployment acceptance test
 
 1. Open Catalog, generate a fresh preview, and open one selected listing. Its description should inherit the catalog and show catalog-owned product details.
-2. Copy catalog as editable text, edit it, preview it, and save. The drawer and parent preview should refresh without a browser reload. No marketplace job should be created by saving.
-3. Reset to catalog and save; the current catalog body should return.
+2. Click Edit beneath the description box, type, and Save. The text box should return to the rendered description, and the drawer and parent preview should refresh without a browser reload. No marketplace job should be created by saving. Repeat with Cancel and verify the saved description is unchanged.
+3. Click Reset beneath the box. It should stage the catalog body without saving. Cancel should retain the custom description; repeat Reset then Save to restore the catalog body and formatting.
 4. Add a store introduction/footer. Confirm it appears in a fresh listing preview without creating per-listing overrides.
 5. Add a category/product-line/product/named-listing group, choose its priority, and save. Check a matching and nonmatching listing.
 6. Open two tabs on the same listing. Save in one, then try saving the older draft in the other. It must require reconciliation and retain the unsaved text.

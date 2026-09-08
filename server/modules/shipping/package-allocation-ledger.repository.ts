@@ -7,9 +7,10 @@ import type {
   PackageAllocationGroupPackageEvidenceV1,
   PackageAllocationGroupStateV1,
 } from "./package-allocation-group.domain";
-import type {
-  PackageAllocationSourceFacts,
-  PackageAllocationSourceRegistrationV1,
+import {
+  derivePackageAllocationSourceRegistration,
+  type PackageAllocationSourceFacts,
+  type PackageAllocationSourceRegistrationV1,
 } from "./package-allocation-source-identity.domain";
 import {
   PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_MAX_PACKAGES,
@@ -89,6 +90,11 @@ export interface LockedPackageAllocationGroup {
   readonly id: string;
   readonly groupKey: string;
   readonly currentVersion: number;
+}
+
+export interface LockedPackageAllocationSourceGroupClosure {
+  readonly group: LockedPackageAllocationGroup;
+  readonly sourceWmsShipmentItemIds: readonly number[];
 }
 
 export interface PersistedPackageAllocationPlan {
@@ -198,6 +204,7 @@ export interface PackageAllocationAuthorityPreviewRepository {
 }
 
 export interface PackageAllocationLedgerTransaction {
+  lockSourceGroupClosure(sourceWmsShipmentItemIds: readonly number[]): Promise<LockedPackageAllocationSourceGroupClosure | null>;
   lockGroup(groupKey: string, createIfMissing: boolean): Promise<LockedPackageAllocationGroup | null>;
   lockSourceFacts(sourceWmsShipmentItemIds: readonly number[]): Promise<readonly PackageAllocationSourceFacts[]>;
   discoverAuthorityReadinessPackageSelection(
@@ -464,6 +471,49 @@ function sourceRegistrationMatches(
     && actual.sourceFingerprint === expected.sourceFingerprint;
 }
 
+/** Canonical materialization may add a request after legacy allocation was saved.
+ * This only identifies a possible enrichment; persisted owner lineage must also
+ * prove it. Both fingerprints are rederived, never replaced or ignored. */
+function isLegacyRequestEnrichment(
+  actual: PackageAllocationSourceRegistrationV1,
+  observed: PackageAllocationSourceRegistrationV1,
+): boolean {
+  if (
+    actual.shipmentRequestItemId !== null ||
+    observed.shipmentRequestItemId === null ||
+    actual.shipmentItemPurpose !== "customer_fulfillment" ||
+    observed.shipmentItemPurpose !== "customer_fulfillment"
+  ) {
+    return false;
+  }
+  const facts: PackageAllocationSourceFacts = {
+    sourceWmsShipmentItemId: observed.sourceWmsShipmentItemId,
+    shipmentRequestItemId: observed.shipmentRequestItemId,
+    sourceQuantity: observed.sourceQuantity,
+    shipmentItemPurpose: observed.shipmentItemPurpose,
+    orderItemId: observed.orderItemId,
+    replacementForOrderItemId: observed.replacementForOrderItemId,
+    correctionForShipmentItemId: observed.correctionForShipmentItemId,
+    productVariantId: observed.productVariantId,
+    orderItemSku: observed.sku,
+    replacementOrderItemSku: null,
+    productVariantSku: null,
+  };
+  return (
+    sourceRegistrationMatches(
+      observed,
+      derivePackageAllocationSourceRegistration(facts),
+    ) &&
+    sourceRegistrationMatches(
+      actual,
+      derivePackageAllocationSourceRegistration({
+        ...facts,
+        shipmentRequestItemId: null,
+      }),
+    )
+  );
+}
+
 /** Published read-only evidence access on the caller's repeatable-read client. */
 export async function readObservedPackagesForSources(
   client: Pick<PoolClient, "query">,
@@ -482,6 +532,80 @@ export async function readObservedPackagesForSources(
 class PgPackageAllocationLedgerTransaction
   implements PackageAllocationLedgerTransaction, PackageAllocationAuthorityPreviewTransaction {
   constructor(private readonly client: QueryClient) {}
+
+  async lockSourceGroupClosure(
+    sourceWmsShipmentItemIds: readonly number[],
+  ): Promise<LockedPackageAllocationSourceGroupClosure | null> {
+    const sourceIds = [...sourceWmsShipmentItemIds]
+      .map((id) => positiveInteger(id, "sourceWmsShipmentItemId"))
+      .sort((a, b) => a - b);
+    if (
+      sourceIds.length === 0 ||
+      sourceIds.length > MAX_AUTHORITY_SOURCE_LINES ||
+      new Set(sourceIds).size !== sourceIds.length
+    ) {
+      throw new PackageAllocationLedgerRepositoryError(
+        "INVALID_DATABASE_EVIDENCE",
+        "Source-group discovery requires a bounded unique source selection",
+      );
+    }
+    const matches = await this.client.query(
+      `SELECT source.source_wms_shipment_item_id, allocation_group.group_key::text
+      FROM wms.package_allocation_source_lines source
+      JOIN wms.package_allocation_group_source_lines membership ON membership.package_allocation_source_line_id = source.id
+      JOIN wms.package_allocation_groups allocation_group ON allocation_group.id = membership.package_allocation_group_id
+      WHERE source.source_wms_shipment_item_id = ANY($1::integer[])
+      ORDER BY source.source_wms_shipment_item_id LIMIT $2`,
+      [sourceIds, MAX_AUTHORITY_SOURCE_LINES + 1],
+    );
+    if (matches.rows.length === 0) return null;
+    const groupKeys = [
+      ...new Set(
+        matches.rows.map((row) => requiredText(row.group_key, "group_key")),
+      ),
+    ];
+    if (groupKeys.length !== 1 || matches.rows.length !== sourceIds.length) {
+      throw new PackageAllocationLedgerRepositoryError(
+        "SOURCE_ALREADY_GROUPED",
+        "Observed source items span different existing groups or include unregistered additions; automatic group merging is not authorized",
+        { sourceWmsShipmentItemIds: sourceIds, groupKeys },
+      );
+    }
+    const group = await this.lockGroup(groupKeys[0], false);
+    if (!group)
+      throw new PackageAllocationLedgerRepositoryError(
+        "LEDGER_INVARIANT_VIOLATION",
+        "The registered source group disappeared",
+      );
+    const complete = await this.client.query(
+      `SELECT source.source_wms_shipment_item_id
+      FROM wms.package_allocation_group_source_lines membership
+      JOIN wms.package_allocation_source_lines source ON source.id = membership.package_allocation_source_line_id
+      WHERE membership.package_allocation_group_id = $1::bigint
+      ORDER BY source.source_wms_shipment_item_id LIMIT $2 FOR KEY SHARE OF membership, source`,
+      [group.id, MAX_AUTHORITY_SOURCE_LINES + 1],
+    );
+    const allSourceIds = complete.rows.map((row) =>
+      positiveInteger(
+        row.source_wms_shipment_item_id,
+        "source_wms_shipment_item_id",
+      ),
+    );
+    if (
+      allSourceIds.length > MAX_AUTHORITY_SOURCE_LINES ||
+      sourceIds.some((id) => !allSourceIds.includes(id))
+    ) {
+      throw new PackageAllocationLedgerRepositoryError(
+        "SOURCE_REGISTRATION_CONFLICT",
+        "The locked allocation group does not contain one complete bounded source closure",
+        { groupKey: group.groupKey },
+      );
+    }
+    return Object.freeze({
+      group,
+      sourceWmsShipmentItemIds: Object.freeze(allSourceIds),
+    });
+  }
 
   async readGroup(
     groupKey: string,
@@ -1117,7 +1241,8 @@ class PgPackageAllocationLedgerTransaction
     allowCreate: boolean,
   ): Promise<ReadonlyMap<number, RegisteredPackageAllocationSource>> {
     const sorted = [...registrations].sort(
-      (left, right) => left.sourceWmsShipmentItemId - right.sourceWmsShipmentItemId,
+      (left, right) =>
+        left.sourceWmsShipmentItemId - right.sourceWmsShipmentItemId,
     );
     const sourceRows = sorted.map((registration) => ({
       source_wms_shipment_item_id: registration.sourceWmsShipmentItemId,
@@ -1185,39 +1310,86 @@ class PgPackageAllocationLedgerTransaction
        FOR KEY SHARE`,
       [sorted.map((row) => row.sourceWmsShipmentItemId)],
     );
-    const expectedByWmsId = new Map(sorted.map((registration) => [
-      registration.sourceWmsShipmentItemId,
-      registration,
-    ]));
+    const expectedByWmsId = new Map(
+      sorted.map((registration) => [
+        registration.sourceWmsShipmentItemId,
+        registration,
+      ]),
+    );
     const registered = new Map<number, RegisteredPackageAllocationSource>();
+    const legacyRequestEnrichments: Array<{
+      readonly sourceId: string;
+      readonly sourceWmsShipmentItemId: number;
+      readonly requestItemId: string;
+    }> = [];
     for (const raw of result.rows) {
       const row = raw as Record<string, unknown>;
-      const wmsId = positiveInteger(row.source_wms_shipment_item_id, "source_wms_shipment_item_id");
+      const wmsId = positiveInteger(
+        row.source_wms_shipment_item_id,
+        "source_wms_shipment_item_id",
+      );
       const actual: PackageAllocationSourceRegistrationV1 = Object.freeze({
         contractVersion: 1,
         sourceWmsShipmentItemId: wmsId,
-        shipmentRequestItemId: optionalBigintText(row.shipment_request_item_id, "shipment_request_item_id"),
+        shipmentRequestItemId: optionalBigintText(
+          row.shipment_request_item_id,
+          "shipment_request_item_id",
+        ),
         sourceQuantity: positiveInteger(row.source_quantity, "source_quantity"),
-        shipmentItemPurpose: requiredText(row.shipment_item_purpose, "shipment_item_purpose") as PackageAllocationSourceRegistrationV1["shipmentItemPurpose"],
-        orderItemId: nullablePositiveInteger(row.order_item_id, "order_item_id"),
-        replacementForOrderItemId: nullablePositiveInteger(row.replacement_for_order_item_id, "replacement_for_order_item_id"),
-        correctionForShipmentItemId: nullablePositiveInteger(row.correction_for_shipment_item_id, "correction_for_shipment_item_id"),
-        productVariantId: nullablePositiveInteger(row.product_variant_id, "product_variant_id"),
+        shipmentItemPurpose: requiredText(
+          row.shipment_item_purpose,
+          "shipment_item_purpose",
+        ) as PackageAllocationSourceRegistrationV1["shipmentItemPurpose"],
+        orderItemId: nullablePositiveInteger(
+          row.order_item_id,
+          "order_item_id",
+        ),
+        replacementForOrderItemId: nullablePositiveInteger(
+          row.replacement_for_order_item_id,
+          "replacement_for_order_item_id",
+        ),
+        correctionForShipmentItemId: nullablePositiveInteger(
+          row.correction_for_shipment_item_id,
+          "correction_for_shipment_item_id",
+        ),
+        productVariantId: nullablePositiveInteger(
+          row.product_variant_id,
+          "product_variant_id",
+        ),
         sku: requiredText(row.sku, "sku"),
-        sourceFingerprint: requiredText(row.source_fingerprint, "source_fingerprint"),
+        sourceFingerprint: requiredText(
+          row.source_fingerprint,
+          "source_fingerprint",
+        ),
       });
       const expected = expectedByWmsId.get(wmsId);
-      if (!expected || !sourceRegistrationMatches(actual, expected)) {
+      const matches =
+        expected !== undefined && sourceRegistrationMatches(actual, expected);
+      if (
+        !matches &&
+        expected !== undefined &&
+        expected.shipmentRequestItemId !== null &&
+        isLegacyRequestEnrichment(actual, expected)
+      ) {
+        legacyRequestEnrichments.push({
+          sourceId: bigintText(row.id, "package_allocation_source_lines.id"),
+          sourceWmsShipmentItemId: wmsId,
+          requestItemId: expected.shipmentRequestItemId,
+        });
+      } else if (!matches) {
         throw new PackageAllocationLedgerRepositoryError(
           "SOURCE_REGISTRATION_CONFLICT",
           "A WMS shipment item is already registered with different immutable evidence",
           { sourceWmsShipmentItemId: wmsId },
         );
       }
-      registered.set(wmsId, Object.freeze({
-        id: bigintText(row.id, "package_allocation_source_lines.id"),
-        registration: actual,
-      }));
+      registered.set(
+        wmsId,
+        Object.freeze({
+          id: bigintText(row.id, "package_allocation_source_lines.id"),
+          registration: actual,
+        }),
+      );
     }
     if (registered.size !== sorted.length) {
       throw new PackageAllocationLedgerRepositoryError(
@@ -1230,6 +1402,10 @@ class PgPackageAllocationLedgerTransaction
         },
       );
     }
+    await this.assertMaterializedLegacyRequestLinks(
+      group,
+      legacyRequestEnrichments,
+    );
     if (allowCreate) {
       const memberships = [...registered.values()].map((source) => ({
         package_allocation_group_id: group.id,
@@ -1259,19 +1435,132 @@ class PgPackageAllocationLedgerTransaction
        FOR KEY SHARE OF membership`,
       [group.id],
     );
-    const actualMembership = membershipResult.rows.map((row: any) => (
-      positiveInteger(row.source_wms_shipment_item_id, "source_wms_shipment_item_id")
-    ));
+    const actualMembership = membershipResult.rows.map((row: any) =>
+      positiveInteger(
+        row.source_wms_shipment_item_id,
+        "source_wms_shipment_item_id",
+      ),
+    );
     const expectedMembership = sorted.map((row) => row.sourceWmsShipmentItemId);
-    if (JSON.stringify(actualMembership) !== JSON.stringify(expectedMembership)) {
-      const overlapping = actualMembership.filter((id) => !expectedMembership.includes(id));
+    if (
+      JSON.stringify(actualMembership) !== JSON.stringify(expectedMembership)
+    ) {
+      const overlapping = actualMembership.filter(
+        (id) => !expectedMembership.includes(id),
+      );
       throw new PackageAllocationLedgerRepositoryError(
-        overlapping.length > 0 ? "SOURCE_ALREADY_GROUPED" : "SOURCE_REGISTRATION_CONFLICT",
+        overlapping.length > 0
+          ? "SOURCE_ALREADY_GROUPED"
+          : "SOURCE_REGISTRATION_CONFLICT",
         "The package allocation group source membership does not match the planner source set",
         { groupKey: group.groupKey, actualMembership, expectedMembership },
       );
     }
     return registered;
+  }
+
+  private async assertMaterializedLegacyRequestLinks(
+    group: LockedPackageAllocationGroup,
+    enrichments: readonly {
+      readonly sourceId: string;
+      readonly sourceWmsShipmentItemId: number;
+      readonly requestItemId: string;
+    }[],
+  ): Promise<void> {
+    if (enrichments.length === 0) return;
+    // The immutable physical item binds the added request to the ORIGINAL
+    // allocation entry. A newly inserted lookalike request is not sufficient.
+    // Lock mutable owner identities while retaining the original source row/hash.
+    const proof = await this.client.query(
+      `SELECT source.source_wms_shipment_item_id
+       FROM jsonb_to_recordset($1::jsonb) AS expected(source_id bigint, request_item_id bigint)
+       JOIN wms.package_allocation_source_lines source ON source.id = expected.source_id
+       JOIN wms.outbound_shipment_items shipment_item
+         ON shipment_item.id = source.source_wms_shipment_item_id
+        AND shipment_item.order_item_id = source.order_item_id
+        AND shipment_item.qty = source.source_quantity
+        AND shipment_item.shipment_item_purpose = source.shipment_item_purpose
+        AND shipment_item.product_variant_id IS NOT DISTINCT FROM source.product_variant_id
+       JOIN wms.order_items order_item ON order_item.id = source.order_item_id
+        AND BTRIM(order_item.sku) = source.sku
+       JOIN wms.outbound_shipments shipment ON shipment.id = shipment_item.shipment_id
+       JOIN wms.orders wms_order ON wms_order.id = shipment.order_id
+        AND order_item.order_id = wms_order.id
+       JOIN wms.shipment_request_items request_item ON request_item.id = expected.request_item_id
+        AND request_item.legacy_wms_shipment_item_id = source.source_wms_shipment_item_id
+        AND request_item.wms_order_item_id = source.order_item_id
+        AND request_item.quantity_requested = source.source_quantity
+       JOIN wms.shipment_requests request ON request.id = request_item.shipment_request_id
+        AND request.legacy_wms_shipment_id = shipment.id
+        AND request.wms_order_id = wms_order.id
+        AND request.warehouse_id IS NOT DISTINCT FROM wms_order.warehouse_id
+       JOIN wms.fulfillment_plan_lines plan_line ON plan_line.id = request_item.fulfillment_plan_line_id
+        AND plan_line.wms_order_item_id = source.order_item_id
+        AND plan_line.product_variant_id IS NOT DISTINCT FROM source.product_variant_id
+        AND plan_line.sku = source.sku
+        AND plan_line.quantity_planned >= source.source_quantity
+       JOIN wms.fulfillment_plans plan ON plan.id = plan_line.fulfillment_plan_id
+        AND plan.id = request.fulfillment_plan_id AND plan.wms_order_id = wms_order.id
+       JOIN oms.oms_order_lines oms_line ON oms_line.id = order_item.oms_order_line_id
+        AND oms_line.id = plan_line.oms_order_line_id AND oms_line.order_id = plan.oms_order_id
+       WHERE source.shipment_request_item_id IS NULL
+         AND source.shipment_item_purpose = 'customer_fulfillment'
+         AND EXISTS (
+           SELECT 1 FROM wms.physical_shipment_items physical_item
+           JOIN wms.package_allocation_entries entry ON entry.id = physical_item.package_allocation_entry_id
+           WHERE entry.package_allocation_source_line_id = source.id
+             AND entry.package_allocation_group_id = $2::bigint
+             AND entry.target_kind = 'package'
+             AND physical_item.shipment_request_item_id = request_item.id
+             AND physical_item.fulfillment_plan_line_id = plan_line.id
+             AND physical_item.wms_order_item_id = source.order_item_id
+             AND physical_item.product_variant_id IS NOT DISTINCT FROM source.product_variant_id
+             AND physical_item.sku = source.sku
+             AND physical_item.quantity_shipped = entry.quantity
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM wms.physical_shipment_items physical_item
+           JOIN wms.package_allocation_entries entry ON entry.id = physical_item.package_allocation_entry_id
+           WHERE entry.package_allocation_source_line_id = source.id
+             AND (physical_item.shipment_request_item_id IS DISTINCT FROM request_item.id
+               OR physical_item.fulfillment_plan_line_id IS DISTINCT FROM plan_line.id
+               OR physical_item.wms_order_item_id IS DISTINCT FROM source.order_item_id)
+         )
+       ORDER BY source.source_wms_shipment_item_id
+       FOR SHARE OF shipment_item, order_item, shipment, wms_order, request_item, request, plan_line, plan, oms_line`,
+      [
+        JSON.stringify(
+          enrichments.map((entry) => ({
+            source_id: entry.sourceId,
+            request_item_id: entry.requestItemId,
+          })),
+        ),
+        group.id,
+      ],
+    );
+    const proven = new Set(
+      proof.rows.map((row) =>
+        positiveInteger(
+          row.source_wms_shipment_item_id,
+          "source_wms_shipment_item_id",
+        ),
+      ),
+    );
+    if (
+      proof.rows.length !== enrichments.length ||
+      proven.size !== enrichments.length ||
+      enrichments.some((entry) => !proven.has(entry.sourceWmsShipmentItemId))
+    ) {
+      throw new PackageAllocationLedgerRepositoryError(
+        "SOURCE_REGISTRATION_CONFLICT",
+        "A later canonical request does not retain the original materialized source lineage",
+        {
+          sourceWmsShipmentItemIds: enrichments
+            .filter((entry) => !proven.has(entry.sourceWmsShipmentItemId))
+            .map((entry) => entry.sourceWmsShipmentItemId),
+        },
+      );
+    }
   }
 
   async ensurePackageBindings(
