@@ -178,7 +178,8 @@ describe("inventory availability runtime publication routing contract", () => {
       "server/modules/inventory-planning/infrastructure/inventory-availability-runtime-atp.repository.ts",
     );
     expect(runtimeRepository).toContain("BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE");
-    expect(runtimeRepository).toContain("loadAndLockRuntimeAuthority(connectedClient)");
+    expect(runtimeRepository).toContain("createPublicationContext(connectedClient, this.logger, false)");
+    expect(runtimeRepository).toContain("loadAndLockRuntimeAuthority(client)");
     expect(authorityRepository).toContain("FROM inventory.availability_runtime_authority");
     expect(authorityRepository).toContain("FOR SHARE");
     expect(runtimeRepository).not.toMatch(/UPDATE\s+inventory\.availability_runtime_authority/i);

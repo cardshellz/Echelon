@@ -178,7 +178,13 @@ jobs:
           server/modules/inventory-planning/__tests__/integration/inventory-cutover-preflight.integration.test.ts
           server/modules/inventory-planning/__tests__/integration/inventory-availability-dispatch-migration.integration.test.ts
           server/modules/inventory-planning/__tests__/integration/inventory-availability-dispatch-runtime.integration.test.ts
+          server/modules/inventory-planning/__tests__/integration/inventory-availability-dispatch-source-command.integration.test.ts
+          server/modules/inventory-planning/__tests__/integration/inventory-availability-runtime-shipment.integration.test.ts
+          server/modules/inventory-planning/__tests__/integration/shipment-publication-transaction.integration.test.ts
           server/modules/inventory/__tests__/integration/canonical-claim-dispatch-inventory.integration.test.ts
+          server/modules/inventory/__tests__/integration/legacy-shipment-authority-fence.integration.test.ts
+          server/modules/oms/__tests__/integration/channel-shipment-runtime-preparation.integration.test.ts
+          server/modules/oms/__tests__/integration/shipment-canonical-echo-preparation.integration.test.ts
           server/modules/wms/__tests__/integration/canonical-claim-dispatch-source.integration.test.ts
           server/modules/inventory-planning/__tests__/integration/inventory-demand-dispatch.integration.test.ts
           server/modules/inventory/__tests__/integration/shipment-quantity-evidence.integration.test.ts

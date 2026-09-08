@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { PgDialect } from "drizzle-orm/pg-core";
 
 /**
  * COGS Phase 1 regression: recordShipment must NOT call the retired
@@ -12,9 +13,10 @@ describe("InventoryUseCases.recordShipment — no dead COGS write", () => {
     process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
     const { InventoryUseCases } = await import("../../application/inventory.use-cases");
 
-    // tx.execute is used for the ship-idempotency probe (returns no prior ship).
+    // Pin legacy authority, then return no prior ship for the replay probe.
     const tx = {
-      execute: vi.fn(async () => ({ rows: [] })),
+      execute: vi.fn(async (query) => ({ rows: new PgDialect().sqlToQuery(query).sql.includes("availability_runtime_authority")
+        ? [{ authority: "legacy", authority_revision: "1", activation_run_id: null }] : [] })),
     };
 
     const rootDb = {

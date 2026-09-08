@@ -49,7 +49,8 @@ import {
   proveShipStationOrderAdoption,
   resolveShipStationHandoffCommands,
 } from "./shipstation-order-adoption";
-import { ReplacementInventoryUnavailableError } from "../inventory/application/inventory.use-cases";
+import { ReplacementInventoryUnavailableError, type InventoryUseCases } from "../inventory/application/inventory.use-cases";
+import type { InventoryShipmentRuntimeInput } from "../inventory-planning/application/inventory-availability-runtime-shipment.service";
 import {
   type ExactWmsShipmentItem,
   isPositivePostgresInteger,
@@ -979,9 +980,15 @@ export function redactSensitiveUrl(rawUrl: string): string {
 // Service Factory
 // ---------------------------------------------------------------------------
 
+export interface ShipStationInventoryRecorder {
+  recordShipment(input: InventoryShipmentRuntimeInput): Promise<void>;
+  recordReplacementShipmentFromAvailableInventory:
+    InventoryUseCases["recordReplacementShipmentFromAvailableInventory"];
+}
+
 export function createShipStationService(
   db: any,
-  inventoryCore?: any,
+  inventoryCore?: ShipStationInventoryRecorder,
   dependencies: {
     providerLabelObserver?: ShippingProviderLabelObserver;
     fulfillmentAuthority?: ChannelFulfillmentAuthorityService;
@@ -2380,7 +2387,6 @@ export function createShipStationService(
     });
     const invalidItems = rows.filter((item) =>
       !item.product_variant_id ||
-      (item.shipment_purpose !== "replacement" && !item.from_location_id) ||
       !Number.isInteger(Number(item.qty)) ||
       Number(item.qty) <= 0
     );
@@ -2392,11 +2398,19 @@ export function createShipStationService(
             updated_at = NOW()
         WHERE id = ${shipmentId}
       `);
-      console.error(
-        `[ShipStation Webhook V2] Inventory deduction skipped for shipment ${shipmentId}: ${invalidItems.length} item(s) missing product_variant_id, from_location_id, or positive qty. Fulfillment will continue.`,
-      );
-      // Return empty array to skip inventory deduction, but allow the rest of the process to continue.
-      return [];
+      const message = `Shipment ${shipmentId} has ${invalidItems.length} inventory source item(s) without a product variant or positive quantity; fulfillment requires review.`;
+      console.error(JSON.stringify({
+        level: "error", component: "shipstation", code: "SHIPMENT_INVENTORY_SOURCE_INVALID",
+        shipmentId, invalidItemCount: invalidItems.length, message,
+      }));
+      // Missing source identity is not an empty shipment or successful posting.
+      // Keep the review flag, and stop before inventory posting and the later
+      // physical-package materialization (earlier source synchronization remains).
+      throw Object.assign(new Error(message), {
+        code: "SHIPMENT_INVENTORY_SOURCE_INVALID",
+        classification: "permanent",
+        context: Object.freeze({ shipmentId, invalidItemCount: invalidItems.length }),
+      });
     }
 
     // Data is complete. If this shipment was previously flagged for the
@@ -2543,7 +2557,9 @@ export function createShipStationService(
         }
         await inventoryCore.recordShipment({
           productVariantId: item.product_variant_id,
-          warehouseLocationId: item.from_location_id,
+          // Legacy hints are not canonical source authority. An absent bin is
+          // resolved (or explicitly rejected) by the authority-aware recorder.
+          warehouseLocationId: item.from_location_id ?? null,
           qty: item.qty,
           orderId: wmsOrderId,
           orderItemId: item.inventory_order_item_id ?? item.order_item_id,
@@ -3241,6 +3257,12 @@ export function createShipStationService(
       wmsShipmentRow.id,
     );
     if (omsOrderId === null) {
+      // Missing OMS projection linkage is not evidence that WMS inventory was
+      // posted. Exact WMS source identity is sufficient for the inventory owner
+      // to authorize or reject this command; do not silently skip it here.
+      if (event.kind === "shipped" && inventoryCore) {
+        await recordInventoryForShipment(wmsShipmentRow.id, wmsOrderId, inventoryItemsToRecord);
+      }
       return {
         processed: true,
         fallback: false,
@@ -4361,6 +4383,10 @@ export function createShipStationService(
       /\((?:408|425|429|500|502|503|504)\)/.test(sourceMessage);
     const retryable =
       retryableDatabaseCode
+      // Canonical dispatch rolls back when the provider worker owns this
+      // target/variant publication lock. Its exhausted local attempts require
+      // the durable carrier retry schedule, not permanent operator review.
+      || sourceCode === "INVENTORY_PUBLICATION_TARGET_BUSY"
       || retryableTransportCode
       || retryableHttpStatus
       || sourceName === "AbortError";
