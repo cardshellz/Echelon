@@ -21,6 +21,10 @@ import { enqueueWebhookInboxReplay } from "../modules/oms/webhook-inbox.service"
 import { requeueDeadWebhookRetry } from "../modules/oms/webhook-retry.worker";
 import { hasPermission } from "../modules/identity";
 import {
+  CHANNEL_FULFILLMENT_REVIEW_RETRY,
+  ChannelFulfillmentReviewRetryError,
+} from "../modules/oms/channel-fulfillment-review-retry.domain";
+import {
   adoptShipStationUnmappedPhysicalAsReship,
   getShipStationUnmappedPhysicalPreview,
   resolveShipStationUnmappedPhysicalAsProviderEcho,
@@ -42,6 +46,7 @@ export function registerOmsRoutes(app: Express) {
     return {
       reservation: services.reservation ?? null,
       fulfillmentAuthority: services.channelFulfillmentAuthority,
+      reviewRetry: services.channelFulfillmentReviewRetry,
     };
   };
 
@@ -376,20 +381,37 @@ export function registerOmsRoutes(app: Express) {
     requirePermission("operations", "triage"),
     async (req: Request, res: Response) => {
       try {
-        const operator =
+        const code = String(req.body?.code || "");
+        const userId = req.session.user?.id;
+        if (code === CHANNEL_FULFILLMENT_REVIEW_RETRY
+          && (!Number.isSafeInteger(userId) || Number(userId) <= 0)) {
+          throw new ChannelFulfillmentReviewRetryError(
+            "REVIEW_RETRY_ACTOR_REQUIRED", "An authenticated operator is required for reviewed recovery", 403,
+          );
+        }
+        const operator = code === CHANNEL_FULFILLMENT_REVIEW_RETRY ? `user:${userId}` : (
           req.session.user?.username ||
           req.session.user?.displayName ||
-          String(req.session.user?.id || "unknown");
+          String(req.session.user?.id || "unknown")
+        );
         const result = await remediateOmsFlowIssue(db, {
-          code: String(req.body?.code || ""),
+          code,
           omsOrderId: req.body?.omsOrderId,
           wmsOrderId: req.body?.wmsOrderId,
           shipmentId: req.body?.shipmentId,
+          commandId: req.body?.commandId,
+          previewOnly: req.body?.previewOnly,
+          expectedStateFingerprint: req.body?.expectedStateFingerprint,
+          reason: req.body?.reason,
           operator,
         }, getFlowReconciliationDependencies(req));
         res.json(result);
       } catch (err: any) {
         console.error("[OMS Routes] Reconciliation remediation error:", err);
+        if (err instanceof ChannelFulfillmentReviewRetryError) {
+          res.status(err.status).json({ error: err.message, code: err.code, context: err.context });
+          return;
+        }
         const message = err?.message || "Failed to remediate OMS flow issue";
         const status = /positive integer/i.test(message)
           ? 400

@@ -15,6 +15,12 @@ import {
 } from "./channel-fulfillment-authority.handoff";
 import type { ChannelFulfillmentAuthorityService } from "./channel-fulfillment-authority.service";
 import {
+  CHANNEL_FULFILLMENT_REVIEW_RETRY,
+  ChannelFulfillmentReviewRetryError,
+  type ChannelFulfillmentReviewRetryResult,
+} from "./channel-fulfillment-review-retry.domain";
+import type { ChannelFulfillmentReviewRetryService } from "./channel-fulfillment-review-retry.service";
+import {
   recordRunCompleted,
   runBootCatchUpIfBehind,
 } from "../../infrastructure/scheduler-run-registry";
@@ -33,6 +39,7 @@ const REMEDIABLE_CODES = new Set([
   "SHOPIFY_SHIPMENT_FULFILLMENT_NOT_PUSHED",
   "WMS_SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED",
   "SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED",
+  CHANNEL_FULFILLMENT_REVIEW_RETRY,
 ]);
 const AUTO_TRACKING_RETRY_LIMIT = 10;
 const AUTO_CHANNEL_WRITEBACK_RETRY_LIMIT = 100;
@@ -61,6 +68,7 @@ export interface FlowReconciliationReservation {
 export interface OmsFlowReconciliationDependencies {
   reservation: FlowReconciliationReservation | null;
   fulfillmentAuthority: ChannelFulfillmentAuthorityService;
+  reviewRetry?: ChannelFulfillmentReviewRetryService;
 }
 
 function requireFlowFulfillmentAuthority(
@@ -106,6 +114,10 @@ export interface OmsFlowRemediationInput {
   wmsOrderId?: number;
   shipmentId?: number;
   operator: string;
+  commandId?: unknown;
+  previewOnly?: unknown;
+  expectedStateFingerprint?: unknown;
+  reason?: unknown;
 }
 
 export interface OmsFlowRemediationResult {
@@ -119,6 +131,7 @@ export interface OmsFlowRemediationResult {
   sourceInboxId?: number | null;
   provider?: string | null;
   topic?: string | null;
+  reviewRetry?: ChannelFulfillmentReviewRetryResult;
 }
 
 function getDefaultDb(): any {
@@ -1250,6 +1263,30 @@ export async function remediateOmsFlowIssue(
 ): Promise<OmsFlowRemediationResult> {
   if (!REMEDIABLE_CODES.has(input.code)) {
     throw new Error(`Unsupported OMS flow remediation code: ${input.code}`);
+  }
+
+  if (input.code === CHANNEL_FULFILLMENT_REVIEW_RETRY) {
+    if (!dependencies.reviewRetry) {
+      throw new ChannelFulfillmentReviewRetryError(
+        "REVIEW_RETRY_UNAVAILABLE", "Reviewed fulfillment recovery is unavailable", 503,
+      );
+    }
+    const reviewRetry = await dependencies.reviewRetry.review({
+      commandId: input.commandId,
+      omsOrderId: input.omsOrderId,
+      previewOnly: input.previewOnly,
+      expectedStateFingerprint: input.expectedStateFingerprint,
+      reason: input.reason,
+    }, input.operator);
+    return {
+      code: input.code,
+      action: reviewRetry.mode === "preview" ? "previewed_channel_command_recheck" : "reviewed_channel_command_recheck",
+      changed: reviewRetry.requeued,
+      omsOrderId: reviewRetry.omsOrderId,
+      wmsOrderId: null,
+      shipmentId: null,
+      reviewRetry,
+    };
   }
 
   if (input.code === "OMS_PAID_WITHOUT_WMS") {

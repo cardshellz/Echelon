@@ -20,11 +20,13 @@ import {
   truncateTestData,
 } from "../../../../../test/setup-integration";
 import { createChannelFulfillmentAuthorityRepository } from "../../../oms/channel-fulfillment-authority.repository";
+import { createChannelFulfillmentReviewRetryRepository } from "../../../oms/channel-fulfillment-review-retry.repository";
 import {
   createChannelFulfillmentAuthorityService,
   createCompatibilityChannelFulfillmentProviderExecutor,
 } from "../../../oms/channel-fulfillment-authority.service";
 import { createFulfillmentPushService } from "../../../oms/fulfillment-push.service";
+import { EbayApiClient } from "../../../channels/adapters/ebay/ebay-api.client";
 import type { ShopifyAdminGraphQLClient } from "../../../shopify/admin-gql-client";
 import { PackageAllocationLabelCommercialFulfillmentService } from "../../package-allocation-label-commercial-fulfillment.service";
 import type {
@@ -99,9 +101,11 @@ const EXECUTION_AUDIT_ROLE = "package_allocation_discovery_execution_auditor";
 async function installProviderExecutionTestRelations(pool: Pool): Promise<void> {
   await pool.query(`
     ALTER TABLE oms.oms_orders
+      ADD COLUMN external_order_number VARCHAR(50),
       ADD COLUMN ordered_at TIMESTAMP NOT NULL,
       ADD COLUMN created_at TIMESTAMP NOT NULL DEFAULT now();
     ALTER TABLE oms.oms_order_lines
+      ADD COLUMN sku VARCHAR(100),
       ADD COLUMN shopify_fulfillment_order_id VARCHAR(100),
       ADD COLUMN shopify_fulfillment_order_line_item_id VARCHAR(100),
       ADD COLUMN provider_fulfillment_order_id VARCHAR(200),
@@ -164,6 +168,28 @@ async function installProviderExecutionTestRelations(pool: Pool): Promise<void> 
     CREATE TRIGGER channel_fulfillment_push_attempts_immutable
       BEFORE UPDATE OR DELETE ON oms.channel_fulfillment_push_attempts
       FOR EACH ROW EXECUTE FUNCTION oms.reject_channel_fulfillment_attempt_mutation();
+
+    -- Existing production audit contract from 171_historical_fulfillment_repair_audit.sql.
+    CREATE TABLE oms.channel_fulfillment_push_requeues (
+      id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      channel_fulfillment_push_id BIGINT NOT NULL REFERENCES oms.channel_fulfillment_pushes(id) ON DELETE RESTRICT,
+      idempotency_key VARCHAR(200) NOT NULL,
+      operator VARCHAR(200) NOT NULL,
+      reason TEXT NOT NULL,
+      previous_status VARCHAR(30) NOT NULL,
+      previous_attempt_count INTEGER NOT NULL,
+      previous_error_code VARCHAR(100),
+      previous_error_message TEXT,
+      previous_request_hash VARCHAR(64),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT uq_channel_fulfillment_push_requeues_idempotency UNIQUE(channel_fulfillment_push_id,idempotency_key),
+      CHECK (BTRIM(operator) <> ''), CHECK (BTRIM(idempotency_key) <> ''), CHECK (BTRIM(reason) <> ''),
+      CHECK (previous_status = 'review'), CHECK (previous_attempt_count >= 0),
+      CHECK (previous_request_hash IS NULL OR LENGTH(previous_request_hash) = 64)
+    );
+    CREATE TRIGGER channel_fulfillment_push_requeues_immutable
+      BEFORE UPDATE OR DELETE ON oms.channel_fulfillment_push_requeues
+      FOR EACH ROW EXECUTE FUNCTION wms.reject_shipping_evidence_ledger_mutation();
   `);
 }
 
@@ -2946,6 +2972,199 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     )).rejects.toMatchObject({ code: "23505" });
   });
 
+  it.each([1, 3])("reconciles omitted eBay package quantity %s without another provider write", async (quantity) => {
+    const sourceId = await seedCommercialFulfillmentAuthoritySource(pool, "SKU-EBAY-OMITTED-QUANTITY", quantity);
+    const source = await pool.query<{
+      shipment_id: number;
+      order_id: number;
+      oms_order_id: string;
+      oms_line_id: string;
+      channel_id: number;
+    }>(`SELECT si.shipment_id, oi.order_id, ol.order_id::text AS oms_order_id,
+      ol.id::text AS oms_line_id, o.channel_id
+      FROM wms.outbound_shipment_items si JOIN wms.order_items oi ON oi.id=si.order_item_id
+      JOIN oms.oms_order_lines ol ON ol.id=oi.oms_order_line_id
+      JOIN oms.oms_orders o ON o.id=ol.order_id WHERE si.id=$1`, [sourceId]);
+    const lineage = source.rows[0];
+    const externalOrderId = "09-10000-10001";
+    const externalLineId = "10083776958108";
+    const trackingNumber = "9400150106151382305802";
+    await pool.query("UPDATE channels.channels SET provider='ebay' WHERE id=$1", [lineage.channel_id]);
+    await pool.query("UPDATE oms.oms_orders SET external_order_id=$2 WHERE id=$1", [lineage.oms_order_id, externalOrderId]);
+    await pool.query("UPDATE oms.oms_order_lines SET external_line_item_id=$2, fulfillment_provider='ebay' WHERE id=$1", [lineage.oms_line_id, externalLineId]);
+    await pool.query("UPDATE wms.orders SET channel_id=$2,source='ebay',external_order_id=$3 WHERE id=$1", [lineage.order_id, lineage.channel_id, externalOrderId]);
+    await pool.query("UPDATE wms.outbound_shipments SET channel_id=$2,tracking_number=$3,carrier='USPS' WHERE id=$1", [lineage.shipment_id, lineage.channel_id, trackingNumber]);
+    await seedOutboundBusinessShipmentLabel(pool, {
+      providerPhysicalShipmentId: "44010", trackingNumber,
+      labelStatus: "active", ordinal: 44010, carrier: "stamps_com",
+    });
+    await pool.query(`INSERT INTO wms.physical_shipments (provider,provider_physical_shipment_id,tracking_number,carrier,status)
+      VALUES ('shipstation','44010',$1,'USPS','shipped')`, [trackingNumber]);
+    const planning = new PackageAllocationPlanningService(new PgPackageAllocationLedgerRepository(pool));
+    const persisted = await planning.persist({
+      contractVersion: 1,
+      authorityMode: "shadow_only",
+      groupKey: "a6e1be0d-c7d8-4c91-919f-04f5eb547f81",
+      expectedGroupVersion: 0,
+      sourceLines: [{ wmsShipmentItemId: sourceId, sourceQuantity: quantity,
+        physicalConsumptionAuthorityQuantity: quantity, authorityVersion: 1 }],
+      packages: [{
+        packageKey: "A", allocationRole: "primary",
+        membership: { status: "proven", evidenceKey: "membership:A" },
+        lifecycle: {
+          provider: "shipstation", providerPhysicalShipmentId: "44010",
+          events: [{
+            kind: "outbound_label_observed", eventKey: "shipstation:44010:observed",
+            observedAt: "2026-08-22T14:00:00.000Z", providerOccurredAt: "2026-08-22T13:59:50.000Z", trackingNumber,
+            contentsEvidence: { status: "authoritative", lines: [{ wmsShipmentItemId: sourceId, quantity }] },
+          }],
+        },
+      }],
+      actions: [],
+      writeContext: { createdBy: "integration:ebay-quantity-evidence", reason: "Prove existing whole-order fulfillment readback" },
+    });
+    expect(persisted.planId).not.toBeNull();
+    const repository = createChannelFulfillmentAuthorityRepository(getTestDb());
+    const materialized = await repository.materializePackageAllocationCommercialFulfillment({
+      packageAllocationPlanId: persisted.planId!, source: "integration:ebay-quantity-evidence",
+    });
+    expect(materialized.channelCommands).toHaveLength(1);
+    const now = new Date("2026-08-22T14:06:00.000Z");
+    await repository.activatePackageAllocationCommercialFulfillment({
+      packageAllocationPlanId: persisted.planId!, activatedBy: "integration:ebay-quantity-evidence",
+      reason: "Prove exact readback without duplicate provider fulfillment", activatedAt: now,
+    });
+    const commandId = materialized.channelCommands[0].id;
+    let claimed = await repository.claimCommands({
+      now, leaseToken: "ebay-omitted-quantity", leaseDurationMs: 60000, limit: 1, commandIds: [commandId],
+    });
+    expect(claimed).toHaveLength(1);
+    // Reproduce the previous terminal failure through the owner, not a direct
+    // status update. Review recovery must preserve this immutable first attempt.
+    await repository.completeAttempt({
+      commandId, leaseToken: claimed[0].leaseToken, startedAt: now, completedAt: now,
+      outcome: "review_required", errorCode: "ebay_fulfillment_idempotency_conflict",
+      errorMessage: "Existing matching package omitted quantity",
+    });
+    const reviewRetry = createChannelFulfillmentReviewRetryRepository(getTestDb());
+    const scope = { commandId, omsOrderId: Number(lineage.oms_order_id) };
+    const preview = await reviewRetry.preview(scope);
+    expect(preview).toMatchObject({ eligibleForRecheck: true, providerValidation: "not_performed",
+      snapshot: { status: "review", attemptCount: 1, items: [{ quantity }] } });
+    await expect(reviewRetry.preview({ ...scope, omsOrderId: scope.omsOrderId + 999 })).rejects.toMatchObject({
+      code: "REVIEW_RETRY_COMMAND_NOT_FOUND", status: 404,
+    });
+    const retryInput = { ...scope, expectedStateFingerprint: preview.stateFingerprint,
+      actor: "integration:reviewer", reason: "Provider whole-order readback now proves the omitted quantity", requeuedAt: now };
+    await expect(reviewRetry.requeue({ ...retryInput, expectedStateFingerprint: "0".repeat(64) })).rejects.toMatchObject({
+      code: "REVIEW_RETRY_STATE_CHANGED", status: 409,
+    });
+    const countAudits = async (): Promise<number> => Number((await pool.query<{ count: string }>(
+      "SELECT count(*)::text AS count FROM oms.channel_fulfillment_push_requeues WHERE channel_fulfillment_push_id=$1", [commandId],
+    )).rows[0].count);
+    expect(await countAudits()).toBe(0);
+    if (quantity === 3) {
+      // Fail after the audit insert. PostgreSQL must roll both audit and command
+      // transition back; a second request must still be able to perform recovery.
+      await pool.query(`CREATE FUNCTION oms.reject_test_review_retry_pending() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN IF OLD.push_status='review' AND NEW.push_status='pending' THEN
+          RAISE EXCEPTION 'Injected retry transition failure'; END IF; RETURN NEW; END $$;
+        CREATE TRIGGER reject_test_review_retry_pending BEFORE UPDATE ON oms.channel_fulfillment_pushes
+          FOR EACH ROW EXECUTE FUNCTION oms.reject_test_review_retry_pending();`);
+      try {
+        await expect(reviewRetry.requeue(retryInput)).rejects.toMatchObject({ code: "REVIEW_RETRY_DATABASE_ERROR" });
+        expect(await countAudits()).toBe(0);
+        expect((await reviewRetry.preview(scope)).stateFingerprint).toBe(preview.stateFingerprint);
+      } finally {
+        await pool.query(`DROP TRIGGER reject_test_review_retry_pending ON oms.channel_fulfillment_pushes;
+          DROP FUNCTION oms.reject_test_review_retry_pending();`);
+      }
+    }
+    const outcomes = await Promise.all([reviewRetry.requeue(retryInput), reviewRetry.requeue(retryInput)]);
+    expect(outcomes.filter((outcome) => outcome.requeued)).toHaveLength(1);
+    expect(outcomes.filter((outcome) => outcome.replayed)).toHaveLength(1);
+    expect(await countAudits()).toBe(1);
+    await expect(reviewRetry.requeue({ ...retryInput, reason: "A competing distinct operator decision" })).rejects.toMatchObject({
+      code: "REVIEW_RETRY_STATE_CHANGED", status: 409,
+    });
+    const audit = await pool.query(`SELECT operator,previous_status,previous_attempt_count,previous_error_code,previous_request_hash
+      FROM oms.channel_fulfillment_push_requeues WHERE channel_fulfillment_push_id=$1`, [commandId]);
+    expect(audit.rows).toEqual([expect.objectContaining({ operator: retryInput.actor,
+      previous_status: "review", previous_attempt_count: 1,
+      previous_error_code: "ebay_fulfillment_idempotency_conflict", previous_request_hash: preview.snapshot.requestHash })]);
+    await expect(pool.query("DELETE FROM oms.channel_fulfillment_push_requeues WHERE channel_fulfillment_push_id=$1", [commandId]))
+      .rejects.toMatchObject({ code: "55000" });
+    claimed = await repository.claimCommands({
+      now, leaseToken: "ebay-reviewed-recovery", leaseDurationMs: 60000, limit: 1, commandIds: [commandId],
+    });
+    expect(claimed).toHaveLength(1);
+    expect(claimed[0].attemptNumber).toBe(2);
+    const fulfillmentPath = `/sell/fulfillment/v1/order/${externalOrderId}/shipping_fulfillment`;
+    const providerRequest = vi.fn(async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      expect(init?.method).toBe("GET");
+      expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer fixture-ebay-token");
+      const requested = new URL(String(url));
+      expect(requested.origin).toBe("https://api.ebay.com");
+      if (requested.pathname === fulfillmentPath) {
+        return Response.json({ total: 1, fulfillments: [{ fulfillmentId: trackingNumber,
+          shipmentTrackingNumber: trackingNumber, shippedDate: "2026-08-22T14:00:00.000Z",
+          lineItems: [{ lineItemId: externalLineId }] }] });
+      }
+      if (requested.pathname === `/sell/fulfillment/v1/order/${externalOrderId}`) {
+        return Response.json({
+          orderId: externalOrderId, orderFulfillmentStatus: "FULFILLED",
+          fulfillmentHrefs: [`https://api.ebay.com${fulfillmentPath}/${trackingNumber}`],
+          cancelStatus: { cancelState: "NONE_REQUESTED", cancelRequests: [] },
+          lineItems: [{ lineItemId: externalLineId, quantity, lineItemFulfillmentStatus: "FULFILLED" }],
+        });
+      }
+      throw new Error(`Unexpected eBay request path ${requested.pathname}`);
+    });
+    const client = new EbayApiClient({
+      getAccessToken: async (channelId) => {
+        expect(channelId).toBe(lineage.channel_id);
+        return "fixture-ebay-token";
+      },
+    }, lineage.channel_id, "production", { request: providerRequest, strictFulfillmentReadback: true });
+    const shopify = vi.fn(async () => { throw new Error("Unexpected Shopify account resolution"); });
+    const ebay = vi.fn(async (channelId: number) => {
+      expect(channelId).toBe(lineage.channel_id);
+      return { channelId, externalAccountId: "fixture-ebay-seller", client };
+    });
+    const executor = createCompatibilityChannelFulfillmentProviderExecutor(
+      createFulfillmentPushService(getTestDb(), null, { providerClients: { shopify, ebay } }),
+    );
+    const result = await executor.execute(claimed[0]);
+    expect(result.outcome).toBe("success");
+    await repository.completeAttempt({ commandId, leaseToken: claimed[0].leaseToken,
+      startedAt: now, completedAt: new Date("2026-08-22T14:06:01.000Z"), ...result });
+    // Replaying the provider boundary must recognize the same external package,
+    // not issue another fulfillment even though legacy headers have no quantity.
+    await expect(executor.execute(claimed[0])).resolves.toMatchObject({ outcome: "success" });
+    expect(providerRequest.mock.calls.every(([, init]) => init?.method === "GET")).toBe(true);
+    expect(shopify).not.toHaveBeenCalled();
+    const events = await pool.query<{ details: Record<string, unknown> }>(`SELECT details FROM oms.oms_order_events
+      WHERE order_id=$1 AND event_type='tracking_pushed' ORDER BY id`, [lineage.oms_order_id]);
+    expect(events.rows).toHaveLength(2);
+    for (const event of events.rows) expect(event.details).toMatchObject({
+      channelFulfillmentCommandId: commandId, fulfillmentId: trackingNumber,
+      externalAccountId: "fixture-ebay-seller", quantityEvidenceSource: "provider_fulfilled_whole_order",
+      lineItems: [{ lineItemId: externalLineId, quantity }],
+    });
+    const completed = await pool.query(`SELECT push.push_status,item.quantity_pushed FROM oms.channel_fulfillment_pushes push
+      JOIN oms.channel_fulfillment_push_items item ON item.channel_fulfillment_push_id=push.id WHERE push.id=$1`, [commandId]);
+    expect(completed.rows).toEqual([{ push_status: "success", quantity_pushed: quantity }]);
+    await expect(reviewRetry.requeue(retryInput)).resolves.toMatchObject({ replayed: true, requeued: false });
+    expect(await countAudits()).toBe(1);
+    expect((await reviewRetry.preview(scope)).snapshot).toMatchObject({ status: "success", attemptCount: 2 });
+    const attempts = await pool.query(`SELECT attempt_number,outcome,error_code FROM oms.channel_fulfillment_push_attempts
+      WHERE channel_fulfillment_push_id=$1 ORDER BY attempt_number`, [commandId]);
+    expect(attempts.rows).toEqual([
+      { attempt_number: 1, outcome: "review_required", error_code: "ebay_fulfillment_idempotency_conflict" },
+      { attempt_number: 2, outcome: "success", error_code: null },
+    ]);
+  });
+
   it.each([false, true])("executes exact B/C split quantities and replays without duplicates (stored Shopify mapping: %s)", async (storedShopifyMapping) => {
     const sourceId = await seedCommercialFulfillmentAuthoritySource(
       pool,
@@ -3371,11 +3590,30 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     for (const command of claimable) {
       expect(command.items).toHaveLength(1);
       expect(command.items[0]).toMatchObject({ legacyWmsShipmentItemId: sourceId, quantity: 1 });
-      const executed = await provider.execute(command);
+      // The deployed quantity fix also needs an explicit, audited way to
+      // recheck commands stopped by the old full-source equality guard.
+      await fulfillmentRepository.completeAttempt({
+        commandId: command.id, leaseToken: command.leaseToken,
+        startedAt: activatedAt, completedAt: activatedAt,
+        outcome: "review_required", errorCode: "channel_fulfillment_lineage_mismatch",
+        errorMessage: "Old guard rejected package quantity one against source two",
+      });
+      const recovery = createChannelFulfillmentReviewRetryRepository(getTestDb());
+      const scope = { commandId: command.id, omsOrderId: command.omsOrderId };
+      const preview = await recovery.preview(scope);
+      expect(preview.eligibleForRecheck).toBe(true);
+      await recovery.requeue({ ...scope, expectedStateFingerprint: preview.stateFingerprint,
+        actor: "integration:shopify-reviewer", reason: "Recheck exact allocated quantity after provider fix", requeuedAt: activatedAt });
+      const [reclaimed] = await fulfillmentRepository.claimCommands({
+        now: activatedAt, leaseToken: `shopify-reviewed-recovery:${command.id}`,
+        leaseDurationMs: 60000, limit: 1, commandIds: [command.id],
+      });
+      expect(reclaimed.attemptNumber).toBe(2);
+      const executed = await provider.execute(reclaimed);
       expect(executed.outcome).toBe("success");
       await fulfillmentRepository.completeAttempt({
         commandId: command.id,
-        leaseToken: command.leaseToken,
+        leaseToken: reclaimed.leaseToken,
         startedAt: activatedAt,
         completedAt: new Date("2026-08-22T14:06:01.000Z"),
         ...executed,
