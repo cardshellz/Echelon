@@ -25,7 +25,7 @@ import { warehouseSettings, warehouses } from "@shared/schema";
 import type { WarehouseSettings } from "@shared/schema";
 import { getDefaultFulfillmentWarehouse } from "./infrastructure/warehouse.repository";
 
-type DbLike = typeof defaultDb;
+type DbLike = Pick<typeof defaultDb, "select">;
 
 export async function getSettingsForWarehouse(
   warehouseId?: number | null,
