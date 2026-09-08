@@ -21,6 +21,7 @@ import {
   type ChannelFulfillmentWritebackPolicyDecision,
 } from "./channel-fulfillment-authority.policy";
 import { resolveProviderOrderId } from "./shipping-engine-order-identity";
+import { validateInheritedCommercialIntents } from "./package-allocation-commercial-inheritance.domain";
 
 const positiveIntegerSchema = z.number().int().positive();
 const positiveBigintTextSchema = z.string().regex(/^[1-9]\d*$/).refine(
@@ -2530,6 +2531,222 @@ async function loadCompletedPackageAllocationCommercialMaterialization(
   });
 }
 
+/** Later tracking/lifecycle plans do not reissue commercial quantity. Under the
+ * current-group and command locks, prove the exact original activation instead.
+ * This is read-only: unactivated or changed authority remains an Operations Tower exception. */
+async function loadInheritedActivatedCommercialMaterialization(
+  tx: Pick<typeof import("../../db").db, "execute">,
+  input: { readonly packageAllocationPlanId: string; readonly source?: string },
+): Promise<MaterializePackageAllocationCommercialFulfillmentResult> {
+  const plan = firstRow<Record<string, unknown>>(
+    await tx.execute(sql`SELECT plan.plan_version, plan.outcome,
+      plan.package_allocation_group_id::text AS group_id, plan.state_snapshot, allocation_group.current_version
+    FROM wms.package_allocation_plans plan JOIN wms.package_allocation_groups allocation_group ON allocation_group.id = plan.package_allocation_group_id
+    WHERE plan.id = ${input.packageAllocationPlanId}::bigint FOR UPDATE OF plan, allocation_group`),
+  );
+  const version = asPositiveInteger(plan?.plan_version);
+  if (
+    !plan ||
+    !version ||
+    version <= 1 ||
+    version !== asPositiveInteger(plan.current_version) ||
+    plan.outcome !== "proposed"
+  ) {
+    throw new FulfillmentAuthorityError(
+      "PACKAGE_ALLOCATION_PLAN_STALE",
+      "Inherited commercial replay requires the current proposed versioned group plan",
+      { packageAllocationPlanId: input.packageAllocationPlanId },
+    );
+  }
+  const rows = rowsOf<Record<string, unknown>>(
+    await tx.execute(sql`SELECT intent.id::text AS intent_id,
+      origin.id::text AS origin_plan_id, origin.plan_version AS origin_plan_version, intent.intent_key,
+      intent.payload_hash, intent.payload, intent.executable, intent.quantity,
+      source.id::text AS source_line_id, source.source_wms_shipment_item_id, source.source_quantity
+    FROM wms.package_allocation_effect_intents intent
+    JOIN wms.package_allocation_plans origin ON origin.id = intent.package_allocation_plan_id
+    JOIN wms.package_allocation_source_lines source ON source.id = intent.package_allocation_source_line_id
+    JOIN wms.package_allocation_group_source_lines membership ON membership.package_allocation_source_line_id = source.id
+      AND membership.package_allocation_group_id = origin.package_allocation_group_id
+    WHERE origin.package_allocation_group_id = ${String(plan.group_id)}::bigint AND intent.effect_type = 'commercial_fulfillment'
+    ORDER BY intent.id LIMIT 501 FOR UPDATE OF intent`),
+  );
+  let inherited: ReturnType<typeof validateInheritedCommercialIntents>;
+  try {
+    inherited = validateInheritedCommercialIntents(
+      plan.state_snapshot,
+      version,
+      rows.map((row) => ({
+        intentId: row.intent_id,
+        originPlanId: row.origin_plan_id,
+        originPlanVersion: Number(row.origin_plan_version),
+        intentKey: row.intent_key,
+        payloadHash: row.payload_hash,
+        payload: row.payload,
+        executable: row.executable,
+        quantity: Number(row.quantity),
+        sourceLineId: row.source_line_id,
+        sourceWmsShipmentItemId: Number(row.source_wms_shipment_item_id),
+        sourceQuantity: Number(row.source_quantity),
+      })),
+    );
+  } catch (error) {
+    throw new FulfillmentAuthorityError(
+      "PACKAGE_ALLOCATION_EFFECT_CONFLICT",
+      "The current plan does not retain one exact inherited commercial effect set",
+      {
+        packageAllocationPlanId: input.packageAllocationPlanId,
+        reason:
+          error instanceof Error ? error.message : "Invalid persisted evidence",
+      },
+    );
+  }
+  const intentIds = sql.join(
+    inherited.map((intent) => sql`${intent.intentId}::bigint`),
+    sql`, `,
+  );
+  const commands = rowsOf<Record<string, unknown>>(
+    await tx.execute(sql`SELECT command.id, command.push_status, command.metadata,
+      activation.package_allocation_plan_id::text AS activated_plan_id, activation.metadata AS activation_metadata,
+      EXISTS (SELECT 1 FROM oms.channel_fulfillment_push_items item WHERE item.channel_fulfillment_push_id = command.id
+        AND (item.package_allocation_effect_intent_id IS NULL OR item.package_allocation_effect_intent_id NOT IN (${intentIds}))) AS has_unscoped_items
+    FROM oms.channel_fulfillment_pushes command
+    LEFT JOIN oms.package_allocation_commercial_fulfillment_activations activation ON activation.channel_fulfillment_push_id = command.id
+    WHERE EXISTS (SELECT 1 FROM oms.channel_fulfillment_push_items item WHERE item.channel_fulfillment_push_id = command.id
+      AND item.package_allocation_effect_intent_id IN (${intentIds}))
+    ORDER BY command.id FOR UPDATE OF command`),
+  );
+  if (commands.length === 0)
+    throw new FulfillmentAuthorityError(
+      "PACKAGE_ALLOCATION_ACTIVATION_CONFLICT",
+      "Inherited commercial authority has not been materialized and activated",
+      { packageAllocationPlanId: input.packageAllocationPlanId },
+    );
+  const origins = [...new Set(inherited.map((intent) => intent.originPlanId))];
+  const sourceByPlan = new Map<string, string>();
+  for (const command of commands) {
+    const metadata =
+      command.metadata && typeof command.metadata === "object"
+        ? (command.metadata as Record<string, unknown>)
+        : {};
+    const activation =
+      command.activation_metadata &&
+      typeof command.activation_metadata === "object"
+        ? (command.activation_metadata as Record<string, unknown>)
+        : {};
+    const origin = String(metadata.packageAllocationPlanId);
+    const source = normalizedNullable(metadata.source);
+    if (
+      !origins.includes(origin) ||
+      command.activated_plan_id !== origin ||
+      command.push_status === "shadow" ||
+      command.has_unscoped_items !== false ||
+      metadata.materializationContract !==
+        "package-allocation-commercial-shadow-v1" ||
+      activation.activationContract !==
+        "package-allocation-commercial-activation-v1" ||
+      activation.contractVersion !== 1 ||
+      !source ||
+      (input.source !== undefined && input.source !== source) ||
+      (sourceByPlan.has(origin) && sourceByPlan.get(origin) !== source)
+    ) {
+      throw new FulfillmentAuthorityError(
+        "PACKAGE_ALLOCATION_ACTIVATION_CONFLICT",
+        "Inherited commands lack exact original activation provenance",
+        {
+          packageAllocationPlanId: input.packageAllocationPlanId,
+          commandId: command.id,
+        },
+      );
+    }
+    sourceByPlan.set(origin, source);
+  }
+  const lineageConflict = firstRow(
+    await tx.execute(sql`SELECT item.id FROM oms.channel_fulfillment_push_items item
+    JOIN oms.channel_fulfillment_pushes command ON command.id = item.channel_fulfillment_push_id
+    JOIN wms.package_allocation_effect_intents intent ON intent.id = item.package_allocation_effect_intent_id
+    JOIN wms.package_allocation_source_lines source ON source.id = intent.package_allocation_source_line_id
+    LEFT JOIN wms.physical_shipment_items physical_item ON physical_item.id = item.physical_shipment_item_id
+    LEFT JOIN wms.package_allocation_entries entry ON entry.id = physical_item.package_allocation_entry_id
+    LEFT JOIN wms.order_items order_item ON order_item.id = source.order_item_id
+    LEFT JOIN oms.oms_order_lines oms_line ON oms_line.id = order_item.oms_order_line_id
+    WHERE intent.id IN (${intentIds}) AND (entry.package_allocation_source_line_id IS DISTINCT FROM source.id
+      OR entry.package_allocation_plan_id IS DISTINCT FROM intent.package_allocation_plan_id
+      OR entry.target_kind IS DISTINCT FROM 'package' OR physical_item.quantity_shipped IS DISTINCT FROM item.quantity_pushed
+      OR physical_item.physical_shipment_id IS DISTINCT FROM command.physical_shipment_id
+      OR item.oms_order_line_id IS DISTINCT FROM order_item.oms_order_line_id
+      OR item.channel_order_line_id IS DISTINCT FROM oms_line.external_line_item_id
+      OR command.oms_order_id IS DISTINCT FROM oms_line.order_id)
+    LIMIT 1`),
+  );
+  if (lineageConflict)
+    throw new FulfillmentAuthorityError(
+      "OMS_LINEAGE_MISSING",
+      "Inherited commercial items do not retain exact immutable source and channel lineage",
+      { packageAllocationPlanId: input.packageAllocationPlanId },
+    );
+  const materialized: MaterializedChannelCommand[] = [];
+  let itemCount = 0;
+  for (const origin of origins) {
+    const source = sourceByPlan.get(origin);
+    if (!source)
+      throw new FulfillmentAuthorityError(
+        "PACKAGE_ALLOCATION_ACTIVATION_CONFLICT",
+        "An inherited effect has no activated originating command",
+        { originPlanId: origin },
+      );
+    const intents: PackageAllocationCommercialIntent[] = inherited
+      .filter((intent) => intent.originPlanId === origin)
+      .map((intent) => ({
+        id: intent.intentId,
+        packageAllocationSourceLineId: intent.sourceLineId,
+        sourceWmsShipmentItemId: intent.sourceWmsShipmentItemId,
+        quantity: intent.quantity,
+      }));
+    // Reuse the existing OMS cap, customer-source, and exact materialized quantity checks.
+    await loadPackageAllocationCommercialCustomerItems(
+      tx,
+      origin,
+      intents.length,
+    );
+    const completed =
+      await loadCompletedPackageAllocationCommercialMaterialization(
+        tx,
+        {
+          packageAllocationPlanId: origin,
+          source,
+          correlationId: null,
+          causationId: null,
+        },
+        intents,
+      );
+    if (!completed)
+      throw new FulfillmentAuthorityError(
+        "PACKAGE_ALLOCATION_EFFECT_CONFLICT",
+        "Inherited effects lack complete original materialization",
+        { originPlanId: origin },
+      );
+    materialized.push(...completed.channelCommands);
+    itemCount += completed.customerFulfillmentItemCount;
+  }
+  if (
+    new Set(materialized.map((command) => command.id)).size !== commands.length
+  )
+    throw new FulfillmentAuthorityError(
+      "PACKAGE_ALLOCATION_ACTIVATION_CONFLICT",
+      "Inherited command coverage is ambiguous",
+      { packageAllocationPlanId: input.packageAllocationPlanId },
+    );
+  return Object.freeze({
+    packageAllocationPlanId: input.packageAllocationPlanId,
+    // No new physical projection is needed: this path only proves the prior activation.
+    physicalShipmentIds: Object.freeze([]),
+    channelCommands: Object.freeze(materialized.sort((a, b) => a.id - b.id)),
+    customerFulfillmentItemCount: itemCount,
+    replayed: true,
+  });
+}
+
 async function loadExistingChannelCommandSnapshots(
   tx: any,
   command: ChannelFulfillmentCommand,
@@ -2973,6 +3190,7 @@ export function createChannelFulfillmentAuthorityRepository(
         input.packageAllocationPlanId,
       );
       if (intents.length === 0) {
+        if (planState.planVersion > 1) return loadInheritedActivatedCommercialMaterialization(tx, input);
         return Object.freeze({
           packageAllocationPlanId: input.packageAllocationPlanId,
           physicalShipmentIds: Object.freeze([]),
@@ -3237,6 +3455,10 @@ export function createChannelFulfillmentAuthorityRepository(
     }
 
     return db.transaction(async (tx: any) => {
+      // Materialization and replay take the group before any plan lock. Match
+      // that order here so concurrent label replays cannot deadlock each other.
+      // This helper observes historical plans without requiring current status.
+      await lockCurrentPackageAllocationCommercialPlan(tx, input.packageAllocationPlanId);
       const plan = firstRow<Record<string, unknown>>(await tx.execute(sql`
         SELECT
           allocation_plan.id::text AS plan_id,
@@ -3273,11 +3495,13 @@ export function createChannelFulfillmentAuthorityRepository(
         ORDER BY intent.id
       `));
       if (intents.length === 0) {
-        throw new FulfillmentAuthorityError(
-          "PACKAGE_ALLOCATION_EFFECT_CONFLICT",
-          "Package-allocation commercial fulfillment activation found no effect intents",
-          { packageAllocationPlanId: input.packageAllocationPlanId },
-        );
+        if (asPositiveInteger(plan.plan_version) === 1) throw new FulfillmentAuthorityError(
+          "PACKAGE_ALLOCATION_EFFECT_CONFLICT", "Commercial activation requires persisted commercial effect intents",
+          { packageAllocationPlanId: input.packageAllocationPlanId });
+        const inherited = await loadInheritedActivatedCommercialMaterialization(tx, input);
+        const commandIds = Object.freeze(inherited.channelCommands.map((command) => command.id));
+        return Object.freeze({ packageAllocationPlanId: input.packageAllocationPlanId, commandIds,
+          activatedCommandCount: commandIds.length, replayed: true });
       }
       for (const intent of intents) {
         const intentId = bigintTextOrNull(intent.intent_id);

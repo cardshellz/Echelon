@@ -2,6 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 
 import { PackageAllocationBootstrapPersistenceError } from "../../package-allocation-bootstrap.service";
 import { PackageAllocationPersistenceError } from "../../package-allocation-planning.service";
+import { PackageAllocationLedgerRepositoryError } from "../../package-allocation-ledger.repository";
+import { PackageAllocationAuthorityResolutionError } from "../../package-allocation-authority-resolution.domain";
+import { PackageAllocationGroupError } from "../../package-allocation-group.domain";
 import {
   PackageAllocationLabelCommercialFulfillmentService,
 } from "../../package-allocation-label-commercial-fulfillment.service";
@@ -146,7 +149,19 @@ describe("PackageAllocationLabelCommercialFulfillmentService", () => {
       .not.toHaveBeenCalled();
   });
 
-  it("routes an existing multi-version group to review", async () => {
+  it.each([
+    new PackageAllocationLedgerRepositoryError("SOURCE_ALREADY_GROUPED", "Multiple registered groups", { groupKeys: ["one", "two"] }),
+    new PackageAllocationAuthorityResolutionError("AMBIGUOUS_PRIMARY_PACKAGE", "No explicit primary proof"),
+    new PackageAllocationGroupError("CONFLICTING_ACTION_REPLAY", "Persisted authorization differs", { actionKey: "action" }),
+  ])("routes ambiguous or conflicting versioned evidence to review: $code", async (error) => {
+    const f = fixture();
+    f.bootstrap.persistDiscovered.mockRejectedValue(error);
+    await expect(f.service.process(shipment(), observation)).resolves.toEqual({ outcome: "review", reason: error.code });
+    expect(f.reviewRepository.record).toHaveBeenCalledWith(expect.objectContaining({ reasonCode: error.code, details: error.context }));
+    expect(f.fulfillmentAuthority.materializeAndActivatePackageAllocationCommercialFulfillment).not.toHaveBeenCalled();
+  });
+
+  it("retains compatibility with a versioned replay error from an older bootstrap implementation", async () => {
     const f = fixture();
     f.bootstrap.persistDiscovered.mockRejectedValue(
       new PackageAllocationBootstrapPersistenceError(

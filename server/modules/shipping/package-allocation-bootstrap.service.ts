@@ -14,9 +14,15 @@ import {
   type PackageAllocationLedgerTransaction,
 } from "./package-allocation-ledger.repository";
 import {
+  PackageAllocationPersistenceError,
   PackageAllocationPlanningService,
+  packageAllocationPlanAuthoritySnapshotSchema,
+  previousPlanFromPersisted,
+  type PackageAllocationPlanAuthoritySnapshotV1,
   type PersistPackageAllocationPlanResult,
 } from "./package-allocation-planning.service";
+import { packageAllocationPackageKey } from "./package-allocation-authority-resolution.domain";
+import { packageAllocationGroupPreviousPlanSchema } from "./package-allocation-group.domain";
 
 const POSTGRES_INTEGER_MAX = 2_147_483_647;
 const MAX_SOURCE_LINES = 500;
@@ -67,7 +73,7 @@ export interface PackageAllocationBootstrapPersistenceResultV1 {
   readonly authority: "shadow_only";
   readonly groupKey: string;
   readonly outcome: "review" | "persisted";
-  readonly reviewReason: "no_related_packages_discovered" | null;
+  readonly reviewReason: "no_related_packages_discovered" | "persisted_package_history_missing" | null;
   readonly selectedShippingProviderLabelIds: readonly number[];
   readonly relationshipSelectionEvidence:
     PackageAllocationAuthorityRelationshipSelectionEvidenceV1;
@@ -169,14 +175,89 @@ function normalizeCommand(
   });
 }
 
+/** Extra discovery links corroborate the same selection; they do not rewrite
+ * the authority snapshot of an otherwise unchanged immutable allocation plan. */
+function unchangedAuthoritySnapshot(
+  previous: unknown,
+  observed: PackageAllocationPlanAuthoritySnapshotV1,
+): PackageAllocationPlanAuthoritySnapshotV1 {
+  if (previous === undefined) return observed;
+  const parsed =
+    packageAllocationPlanAuthoritySnapshotSchema.safeParse(previous);
+  if (!parsed.success)
+    throw new PackageAllocationPersistenceError(
+      "PERSISTED_STATE_INVALID",
+      "The prior bootstrap authority snapshot is invalid",
+      { issues: parsed.error.issues },
+    );
+  const prior = parsed.data;
+  if (
+    prior.selectionAuthority !== "database_relationship_closure" ||
+    observed.selectionAuthority !== "database_relationship_closure"
+  )
+    return observed;
+  const priorEvidence = prior.relationshipSelectionEvidence;
+  const currentEvidence = observed.relationshipSelectionEvidence;
+  const { evidenceHash, ...hashProjection } = priorEvidence;
+  if (
+    createHash("sha256")
+      .update(canonicalJson(hashProjection), "utf8")
+      .digest("hex") !== evidenceHash
+  ) {
+    throw new PackageAllocationPersistenceError(
+      "PERSISTED_STATE_INVALID",
+      "The prior bootstrap authority evidence hash is invalid",
+    );
+  }
+  const currentPackages = new Map(
+    currentEvidence.packages.map((pkg) => [pkg.shippingProviderLabelId, pkg]),
+  );
+  if (
+    currentPackages.size !== currentEvidence.packages.length ||
+    new Set(priorEvidence.packages.map((pkg) => pkg.shippingProviderLabelId))
+      .size !== priorEvidence.packages.length ||
+    priorEvidence.packages.length !== currentEvidence.packages.length ||
+    priorEvidence.packages.some((pkg) => {
+      const current = currentPackages.get(pkg.shippingProviderLabelId);
+      return (
+        !current ||
+        new Set(pkg.relationshipTypes).size !== pkg.relationshipTypes.length ||
+        new Set(current.relationshipTypes).size !==
+          current.relationshipTypes.length ||
+        pkg.relationshipTypes.some(
+          (type) => !current.relationshipTypes.includes(type),
+        )
+      );
+    })
+  )
+    return observed;
+  // Compare every other strict-schema field exactly. The fresh evidence was
+  // normalized and hashed by buildPackageAllocationAuthorityRelationshipSelectionEvidence.
+  const corroboratedPrior = {
+    ...prior,
+    relationshipSelectionEvidence: {
+      ...priorEvidence,
+      packages: currentEvidence.packages,
+      evidenceHash: currentEvidence.evidenceHash,
+    },
+  };
+  return canonicalJson(corroboratedPrior) === canonicalJson(observed)
+    ? prior
+    : observed;
+}
+
 export class PackageAllocationBootstrapPersistenceService {
-  private readonly planning: Pick<PackageAllocationPlanningService, "persistInTransaction">;
+  private readonly planning: Pick<
+    PackageAllocationPlanningService,
+    "persistInTransaction"
+  >;
 
   constructor(
     private readonly repository: PackageAllocationLedgerRepository,
     planning?: Pick<PackageAllocationPlanningService, "persistInTransaction">,
   ) {
-    this.planning = planning ?? new PackageAllocationPlanningService(repository);
+    this.planning =
+      planning ?? new PackageAllocationPlanningService(repository);
   }
 
   async persistDiscovered(
@@ -186,12 +267,16 @@ export class PackageAllocationBootstrapPersistenceService {
     let attempt = 1;
     while (true) {
       try {
-        return await this.repository.withSerializableTransaction((transaction) =>
-          this.persistDiscoveredInTransaction(transaction, command));
+        return await this.repository.withSerializableTransaction(
+          (transaction) =>
+            this.persistDiscoveredInTransaction(transaction, command),
+        );
       } catch (error) {
-        if (!(error instanceof PackageAllocationLedgerRepositoryError)
-            || error.code !== "CONCURRENT_WRITE"
-            || attempt >= MAX_SERIALIZABLE_ATTEMPTS) {
+        if (
+          !(error instanceof PackageAllocationLedgerRepositoryError) ||
+          error.code !== "CONCURRENT_WRITE" ||
+          attempt >= MAX_SERIALIZABLE_ATTEMPTS
+        ) {
           throw error;
         }
         attempt += 1;
@@ -201,30 +286,75 @@ export class PackageAllocationBootstrapPersistenceService {
 
   private async persistDiscoveredInTransaction(
     transaction: PackageAllocationLedgerTransaction,
-    command: z.output<typeof persistDiscoveredPackageAllocationBootstrapCommandSchema>,
+    command: z.output<
+      typeof persistDiscoveredPackageAllocationBootstrapCommandSchema
+    >,
   ): Promise<PackageAllocationBootstrapPersistenceResultV1> {
-    const groupKey = derivePackageAllocationBootstrapGroupKey(
+    // A later label may contain only one part of an existing group. Retain the
+    // registered group's identity and complete immutable source set; never derive
+    // a second group merely because this observation supplied fewer source items.
+    const closure = await transaction.lockSourceGroupClosure(
       command.sourceWmsShipmentItemIds,
     );
-    const existingGroup = await transaction.lockGroup(groupKey, false);
-    if (existingGroup !== null && existingGroup.currentVersion > 1) {
-      throw new PackageAllocationBootstrapPersistenceError(
-        "EXISTING_GROUP_REQUIRES_VERSIONED_REPLAY",
-        "Package-allocation bootstrap cannot replace a versioned group history",
-        { groupKey, currentVersion: existingGroup.currentVersion },
+    const sourceWmsShipmentItemIds =
+      closure?.sourceWmsShipmentItemIds ?? command.sourceWmsShipmentItemIds;
+    const groupKey =
+      closure?.group.groupKey ??
+      derivePackageAllocationBootstrapGroupKey(sourceWmsShipmentItemIds);
+    const existingGroup =
+      closure?.group ?? (await transaction.lockGroup(groupKey, false));
+    const expectedGroupVersion = existingGroup?.currentVersion ?? 0;
+    const persistedPlan =
+      existingGroup && expectedGroupVersion > 0
+        ? await transaction.loadPlanByVersion(
+            existingGroup.id,
+            expectedGroupVersion,
+          )
+        : null;
+    if (expectedGroupVersion > 0 && !persistedPlan)
+      throw new PackageAllocationPersistenceError(
+        "CURRENT_PLAN_MISSING",
+        "The registered allocation group has no current immutable plan",
+        { groupKey, expectedGroupVersion },
+      );
+    const persistedPreviousPlan = previousPlanFromPersisted(
+      groupKey,
+      persistedPlan,
+    );
+    // The resolution boundary accepts a validated mutable DTO, while the ledger
+    // reconstruction exposes immutable evidence. Parsing also clones the arrays.
+    const previousPlan = persistedPreviousPlan
+      ? packageAllocationGroupPreviousPlanSchema.parse(persistedPreviousPlan)
+      : null;
+    if (
+      previousPlan &&
+      canonicalJson(
+        previousPlan.sourceEvidence
+          .map((source) => source.wmsShipmentItemId)
+          .sort((a, b) => a - b),
+      ) !== canonicalJson(sourceWmsShipmentItemIds)
+    ) {
+      throw new PackageAllocationPersistenceError(
+        "SOURCE_EVIDENCE_CONFLICT",
+        "The locked source closure differs from the group's immutable plan",
+        { groupKey },
       );
     }
+    // Only replay already persisted, schema-validated authorizations. A new label
+    // or a void status is never a fabricated transfer/cancel instruction.
+    const actions =
+      previousPlan?.actionEvidence.map((evidence) => evidence.action) ?? [];
 
     const sourceFacts = await transaction.lockSourceFacts(
-      command.sourceWmsShipmentItemIds,
+      sourceWmsShipmentItemIds,
     );
-    const discoveredPackages = await transaction
-      .discoverAuthorityReadinessPackageSelection(
-        command.sourceWmsShipmentItemIds,
+    const discoveredPackages =
+      await transaction.discoverAuthorityReadinessPackageSelection(
+        sourceWmsShipmentItemIds,
       );
     const relationshipSelectionEvidence =
       buildPackageAllocationAuthorityRelationshipSelectionEvidence(
-        command.sourceWmsShipmentItemIds,
+        sourceWmsShipmentItemIds,
         discoveredPackages,
       );
     const selectedShippingProviderLabelIds = Object.freeze(
@@ -249,16 +379,42 @@ export class PackageAllocationBootstrapPersistenceService {
     const packages = await transaction.lockAuthorityReadinessPackages(
       selectedShippingProviderLabelIds,
     );
+    const currentPackageKeys = new Set(
+      packages.map((pkg) =>
+        packageAllocationPackageKey(
+          pkg.persistedEvidence.provider,
+          pkg.persistedEvidence.providerPhysicalShipmentId,
+        ),
+      ),
+    );
+    if (
+      previousPlan?.packageEvidence.some(
+        (pkg) => !currentPackageKeys.has(pkg.packageKey),
+      )
+    ) {
+      return Object.freeze({
+        contractVersion: 1,
+        authority: "shadow_only",
+        groupKey,
+        outcome: "review",
+        reviewReason: "persisted_package_history_missing",
+        selectedShippingProviderLabelIds,
+        relationshipSelectionEvidence,
+        readiness: null,
+        resolution: null,
+        persistence: null,
+      });
+    }
     const evidenceResolution = resolvePackageAllocationAuthorityEvidence({
       groupKey,
-      expectedGroupVersion: 0,
-      previousPlan: null,
+      expectedGroupVersion,
+      previousPlan,
       sourceFacts,
       packages,
-      actions: [],
+      actions,
     });
     const resolution = evidenceResolution.resolution;
-    if (resolution === null || resolution.outcome !== "proposed") {
+    if (resolution === null || resolution.outcome === "review") {
       return Object.freeze({
         contractVersion: 1 as const,
         authority: "shadow_only" as const,
@@ -280,7 +436,9 @@ export class PackageAllocationBootstrapPersistenceService {
         authorityMode: resolution.plannerInput.authorityMode,
         groupKey: resolution.plannerInput.groupKey,
         expectedGroupVersion: resolution.plannerInput.expectedGroupVersion,
-        sourceLines: resolution.plannerInput.sourceLines.map((source) => ({ ...source })),
+        sourceLines: resolution.plannerInput.sourceLines.map((source) => ({
+          ...source,
+        })),
         packages: resolution.plannerInput.packages.map((pkg) => ({
           ...pkg,
           membership: { ...pkg.membership },
@@ -289,27 +447,36 @@ export class PackageAllocationBootstrapPersistenceService {
             events: pkg.lifecycle.events.map((event) => ({ ...event })),
           },
         })),
-        actions: [],
+        actions,
         writeContext: command.writeContext,
       },
-      Object.freeze({
-        contractVersion: 1 as const,
-        authorityMode: "shadow_only" as const,
-        selectionAuthority: "database_relationship_closure" as const,
-        selectionCompleteness: "unproven_outside_persisted_relationships" as const,
-        relationshipSelectionEvidence: {
-          contractVersion: relationshipSelectionEvidence.contractVersion,
-          evidenceType: relationshipSelectionEvidence.evidenceType,
-          evidenceHash: relationshipSelectionEvidence.evidenceHash,
-          sourceWmsShipmentItemIds: [
-            ...relationshipSelectionEvidence.sourceWmsShipmentItemIds,
-          ],
-          packages: relationshipSelectionEvidence.packages.map((pkg) => ({
-            shippingProviderLabelId: pkg.shippingProviderLabelId,
-            relationshipTypes: [...pkg.relationshipTypes],
-          })),
-        },
-      }),
+      unchangedAuthoritySnapshot(
+        persistedPlan !== null &&
+          resolution.outcome === "unchanged" &&
+          resolution.plannerResult.outcome === "unchanged" &&
+          resolution.plannerResult.stateHash === persistedPlan.stateHash
+          ? persistedPlan.authoritySnapshot
+          : undefined,
+        Object.freeze({
+          contractVersion: 1 as const,
+          authorityMode: "shadow_only" as const,
+          selectionAuthority: "database_relationship_closure" as const,
+          selectionCompleteness:
+            "unproven_outside_persisted_relationships" as const,
+          relationshipSelectionEvidence: {
+            contractVersion: relationshipSelectionEvidence.contractVersion,
+            evidenceType: relationshipSelectionEvidence.evidenceType,
+            evidenceHash: relationshipSelectionEvidence.evidenceHash,
+            sourceWmsShipmentItemIds: [
+              ...relationshipSelectionEvidence.sourceWmsShipmentItemIds,
+            ],
+            packages: relationshipSelectionEvidence.packages.map((pkg) => ({
+              shippingProviderLabelId: pkg.shippingProviderLabelId,
+              relationshipTypes: [...pkg.relationshipTypes],
+            })),
+          },
+        }),
+      ),
     );
     return Object.freeze({
       contractVersion: 1 as const,
