@@ -193,6 +193,7 @@ jobs:
           server/modules/inventory-planning/__tests__/integration/shipment-publication-transaction.integration.test.ts
           server/modules/inventory/__tests__/integration/canonical-claim-dispatch-inventory.integration.test.ts
           server/modules/inventory/__tests__/integration/legacy-shipment-authority-fence.integration.test.ts
+          server/modules/inventory/__tests__/integration/shipment-lot-parity.integration.test.ts
           server/modules/oms/__tests__/integration/channel-shipment-runtime-preparation.integration.test.ts
           server/modules/oms/__tests__/integration/shipment-canonical-echo-preparation.integration.test.ts
           server/modules/wms/__tests__/integration/canonical-claim-dispatch-source.integration.test.ts
