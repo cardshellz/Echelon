@@ -181,6 +181,8 @@ jobs:
           server/modules/inventory-planning/__tests__/integration/inventory-cutover-admission-fence.integration.test.ts
           server/modules/inventory-planning/__tests__/integration/inventory-cutover-composition.integration.test.ts
           server/modules/inventory-planning/__tests__/integration/quantity-publication-admission.integration.test.ts
+          server/modules/inventory-planning/__tests__/integration/quantity-publication-catchup-canonical.integration.test.ts
+          server/modules/channels/__tests__/integration/channel-quantity-publication-catchup.integration.test.ts
           server/modules/inventory-planning/__tests__/integration/inventory-availability-dispatch-migration.integration.test.ts
           server/modules/inventory-planning/__tests__/integration/inventory-availability-dispatch-runtime.integration.test.ts
           server/modules/inventory-planning/__tests__/integration/inventory-availability-dispatch-source-command.integration.test.ts

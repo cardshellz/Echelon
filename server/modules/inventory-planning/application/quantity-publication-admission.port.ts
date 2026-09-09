@@ -44,6 +44,13 @@ export class QuantityPublicationCatchupService {
     const result = { completed: 0, failed: 0 };
     for (const claim of await this.store.listDue(limit)) {
       try {
+        // A provider may have completed after retention, or before a prior
+        // worker lost its acknowledgement. Prove that exact revision first:
+        // unrelated planning failures must not repeatedly retry delivered work.
+        if (await this.store.complete(claim)) {
+          result.completed += 1;
+          continue;
+        }
         const evidence = await this.replan(claim.scope, claim);
         if (await this.store.complete(claim, evidence || undefined)) result.completed += 1;
         else {

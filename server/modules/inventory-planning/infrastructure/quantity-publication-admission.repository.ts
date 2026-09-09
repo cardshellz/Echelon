@@ -10,6 +10,9 @@ import { QuantityPublicationAdmissionError, quantityPublicationScopeSchema, quan
 // Separate namespace from authority, inventory-admission, and target/variant locks.
 export const QUANTITY_PUBLICATION_LOCK_NAMESPACE = 918419;
 const session = new AsyncLocalStorage<{ scope: QuantityPublicationScope; externalSku: string | null; memberKeys: ReadonlySet<string> }>();
+// A catch-up expectation binds an eventual provider admission without itself
+// representing a provider request. Resolver failures must not create uncertainty.
+const legacyCatchupScope = new AsyncLocalStorage<QuantityPublicationScope>();
 const hash = (value: unknown): string => createHash("sha256").update(canonicalJson(value)).digest("hex");
 const key = (scope: QuantityPublicationScope): string => hash({ ...scope, productId: null, productVariantId: null });
 const fail = (code: string, message: string, context: Record<string, unknown> = {}): never => {
@@ -149,6 +152,14 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
     }
   }
 
+  async withLegacyCatchupScope<T>(raw: QuantityPublicationScope, work: () => Promise<T>): Promise<T> {
+    const scope = quantityPublicationScopeSchema.parse(raw);
+    if (legacyCatchupScope.getStore() || session.getStore()) {
+      fail("PUBLICATION_CATCHUP_NESTING_INVALID", "A legacy catch-up scope cannot inherit or replace another provider capability.");
+    }
+    return legacyCatchupScope.run(scope, work);
+  }
+
   run<T>(raw: QuantityPublicationScope, work: () => Promise<T>): Promise<T> {
     const scope = quantityPublicationScopeSchema.parse(raw);
     const parent = session.getStore();
@@ -225,6 +236,10 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
   private async execute<T>(scope: QuantityPublicationScope, claim: QuantityPublicationOutboxClaim | null,
     work: () => Promise<T>, resolveCurrentPlan?: () => Promise<Array<{ outboxId: string; quantity: number; scope: QuantityPublicationScope }>>,
     memberScopes: readonly QuantityPublicationScope[] = []): Promise<T> {
+    const expectedScope = legacyCatchupScope.getStore();
+    if (expectedScope && (claim !== null || memberScopes.length > 0 || key(expectedScope) !== key(scope))) {
+      fail("PUBLICATION_CATCHUP_SCOPE_MISMATCH", "A legacy catch-up retry can admit only its exact destination and item, without outbox or group expansion.");
+    }
     // Catch-up restores quantity, not stale group metadata. Known members each get
     // their own resolvable obligation; the attempt still owns the entire group.
     const retainWork = async (connection: Client, runId: string | null, reason: string): Promise<void> => {
@@ -278,6 +293,9 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
           "SELECT authority FROM inventory.availability_runtime_authority WHERE singleton_key=true",
         )).rows[0];
         if (!authority) fail("PUBLICATION_AUTHORITY_MISSING", "Runtime publication authority is missing.");
+        if (expectedScope && authority.authority !== "legacy") {
+          fail("PUBLICATION_AUTHORITY_CHANGED", "Legacy catch-up authority changed before actual provider admission; replan using the current owner.");
+        }
         if (authority.authority === "canonical") {
           if (!resolveCurrentPlan) {
             await retainWork(client, null, "canonical_outbox_required");
@@ -415,25 +433,71 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
     } finally { client.release(); }
   }
   async complete(claim: QuantityPublicationCatchup, evidence?: { outboxId: string }): Promise<boolean> {
+    const catchupId = id(claim.catchupId); const revision = id(claim.revision);
+    const boundary = claim.attemptBoundaryId;
+    if (!/^(0|[1-9][0-9]{0,18})$/.test(boundary) || BigInt(boundary) > BigInt("9223372036854775807")) {
+      fail("PUBLICATION_ID_INVALID", "Expected a nonnegative database attempt boundary.");
+    }
+    const scopeKey = key(quantityPublicationScopeSchema.parse(claim.scope));
+    const outboxId = evidence ? id(evidence.outboxId) : null;
     const client = await this.pool.connect();
-    try { return (await client.query(`UPDATE inventory.quantity_publication_catchup SET completed_revision=$2,
-      last_error_code=NULL,last_error_message=NULL WHERE id=$1 AND revision=$2 AND (
-      EXISTS (SELECT 1 FROM inventory.quantity_publication_attempts a WHERE a.affected_scope_keys @> ARRAY[quantity_publication_catchup.scope_key]
-        AND a.id>quantity_publication_catchup.attempt_boundary_id AND a.state='succeeded')
-      OR EXISTS (SELECT 1 FROM inventory.inventory_publication_outbox o
+    let transactionOpen = false; let discard: Error | undefined;
+    try {
+      await client.query("BEGIN"); transactionOpen = true;
+      await client.query("SET LOCAL lock_timeout='2s'");
+      await client.query("SET LOCAL statement_timeout='10s'");
+      await client.query("SET LOCAL idle_in_transaction_session_timeout='15s'");
+      // The same gate and exact-scope locks used by provider owners prevent a
+      // newer request from starting between proof capture and acknowledgement.
+      // TRY-only acquisition never waits in reverse of an activation fence.
+      const gateAcquired = (await client.query<{ acquired: boolean }>(
+        "SELECT pg_try_advisory_xact_lock_shared($1,0) AS acquired", [QUANTITY_PUBLICATION_LOCK_NAMESPACE])).rows[0]?.acquired;
+      const scopeAcquired = gateAcquired && (await client.query<{ acquired: boolean }>(
+        "SELECT pg_try_advisory_xact_lock(hashtextextended($1,918420)) AS acquired", [scopeKey])).rows[0]?.acquired;
+      if (!scopeAcquired) { await client.query("ROLLBACK"); transactionOpen = false; return false; }
+      const completed = (await client.query(`WITH current_canonical_outboxes AS (
+        SELECT o.id FROM inventory.inventory_publication_outbox o
         JOIN inventory.availability_runtime_authority auth ON auth.activation_run_id=o.activation_run_id AND auth.authority='canonical'
         JOIN inventory.availability_activation_runs run ON run.id=o.activation_run_id AND run.state='active'
-        WHERE o.id=$3 AND o.publication_phase='full' AND o.state IN ('desired','queued','leased','acknowledged','verified','retryable')
-        AND o.destination_kind_snapshot=quantity_publication_catchup.scope->>'destinationKind'
-        AND COALESCE(o.channel_connection_id_snapshot,o.dropship_store_connection_id_snapshot)::text=quantity_publication_catchup.scope->>'connectionId'
-        AND o.external_scope_id_snapshot=quantity_publication_catchup.scope->>'externalScopeId'
-        AND o.provider_key_snapshot=quantity_publication_catchup.scope->>'providerKey'
-        AND o.provider_scope_type_snapshot=quantity_publication_catchup.scope->>'providerScopeType'
-        AND o.external_inventory_item_id_snapshot=quantity_publication_catchup.scope->>'externalInventoryItemId'
+        JOIN inventory.quantity_publication_catchup catchup ON catchup.id=$1
+        WHERE auth.singleton_key=true AND o.publication_phase='full'
+        AND o.state IN ('desired','queued','leased','acknowledged','verified','retryable')
+        AND o.destination_kind_snapshot=catchup.scope->>'destinationKind'
+        AND COALESCE(o.channel_connection_id_snapshot,o.dropship_store_connection_id_snapshot)::text=catchup.scope->>'connectionId'
+        AND o.external_scope_id_snapshot=catchup.scope->>'externalScopeId'
+        AND o.provider_key_snapshot=catchup.scope->>'providerKey'
+        AND o.provider_scope_type_snapshot=catchup.scope->>'providerScopeType'
+        AND o.external_inventory_item_id_snapshot=catchup.scope->>'externalInventoryItemId'
         AND NOT EXISTS (SELECT 1 FROM inventory.inventory_publication_outbox newer WHERE newer.publication_target_id=o.publication_target_id
-          AND newer.product_variant_id=o.product_variant_id AND newer.desired_revision>o.desired_revision))) RETURNING id`,
-      [id(claim.catchupId),id(claim.revision),evidence ? id(evidence.outboxId) : null])).rowCount === 1;
-    } finally { client.release(); }
+          AND newer.product_variant_id=o.product_variant_id AND newer.desired_revision>o.desired_revision)
+      ) UPDATE inventory.quantity_publication_catchup catchup SET completed_revision=$2,
+        last_error_code=NULL,last_error_message=NULL
+      FROM inventory.quantity_publication_gate gate,inventory.availability_runtime_authority authority
+      WHERE catchup.id=$1 AND catchup.revision=$2 AND catchup.completed_revision<catchup.revision
+        AND catchup.attempt_boundary_id=$4 AND catchup.scope_key=$5
+        AND gate.singleton=true AND gate.activation_run_id IS NULL AND authority.singleton_key=true
+        AND NOT EXISTS (SELECT 1 FROM inventory.quantity_publication_attempts unresolved
+          WHERE unresolved.affected_scope_keys @> ARRAY[catchup.scope_key] AND unresolved.state IN ('running','uncertain'))
+        AND (
+          EXISTS (SELECT 1 FROM inventory.quantity_publication_attempts attempt
+            WHERE attempt.affected_scope_keys @> ARRAY[catchup.scope_key]
+              AND attempt.id>catchup.attempt_boundary_id AND attempt.gate_epoch=gate.epoch
+              AND attempt.state='succeeded' AND attempt.resolution_basis='owner_completion' AND attempt.completed_at IS NOT NULL
+              AND NOT EXISTS (SELECT 1 FROM inventory.quantity_publication_attempts newer_attempt
+                WHERE newer_attempt.affected_scope_keys @> ARRAY[catchup.scope_key] AND newer_attempt.id>attempt.id)
+              AND ((authority.authority='legacy' AND attempt.owner_kind='legacy' AND attempt.outbox_id IS NULL
+                AND attempt.planned_outbox_id IS NULL AND cardinality(attempt.planned_outbox_ids)=0)
+                OR (authority.authority='canonical' AND EXISTS (SELECT 1 FROM current_canonical_outboxes current_outbox
+                  WHERE current_outbox.id=attempt.outbox_id OR current_outbox.id=ANY(attempt.planned_outbox_ids)))))
+          OR ($3::bigint IS NOT NULL AND EXISTS (SELECT 1 FROM current_canonical_outboxes WHERE id=$3))
+        ) RETURNING catchup.id`, [catchupId,revision,outboxId,boundary,scopeKey])).rowCount === 1;
+      await client.query("COMMIT"); transactionOpen = false;
+      return completed;
+    } catch (error) {
+      if (transactionOpen) try { await client.query("ROLLBACK"); }
+      catch (rollbackError) { discard = rollbackError instanceof Error ? rollbackError : new Error(String(rollbackError)); }
+      throw error;
+    } finally { client.release(discard); }
   }
   async fail(claim: QuantityPublicationCatchup, errorCode: string, message: string): Promise<void> {
     const client = await this.pool.connect();
