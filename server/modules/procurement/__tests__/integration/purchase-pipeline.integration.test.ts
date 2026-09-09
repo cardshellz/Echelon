@@ -25,7 +25,7 @@ suite.sequential("purchase pipeline and supplier progress PostgreSQL", () => {
     await pool.query(`
       CREATE TABLE procurement.vendors(id integer PRIMARY KEY,name text NOT NULL);
       CREATE TABLE procurement.purchase_orders(id integer PRIMARY KEY,vendor_id integer NOT NULL REFERENCES procurement.vendors(id),po_number text NOT NULL,status text NOT NULL,currency text,confirmed_delivery_date timestamptz,expected_delivery_date timestamptz);
-      CREATE TABLE procurement.purchase_order_lines(id integer PRIMARY KEY,purchase_order_id integer NOT NULL REFERENCES procurement.purchase_orders(id),line_type text NOT NULL DEFAULT 'product',status text NOT NULL DEFAULT 'open',sku text,product_name text,order_qty integer NOT NULL,received_qty integer NOT NULL DEFAULT 0,cancelled_qty integer NOT NULL DEFAULT 0,pricing_basis text NOT NULL DEFAULT 'per_piece',quoted_unit_cost_mills bigint,quoted_total_cents bigint,purchase_uom_quantity integer,pieces_per_purchase_uom integer,packaging_cost_cents bigint,quote_reference text,expected_delivery_date timestamptz,promised_date timestamptz);
+      CREATE TABLE procurement.purchase_order_lines(id integer PRIMARY KEY,purchase_order_id integer NOT NULL REFERENCES procurement.purchase_orders(id),line_type text NOT NULL DEFAULT 'product',status text NOT NULL DEFAULT 'open',sku text,product_name text,order_qty integer NOT NULL,received_qty integer NOT NULL DEFAULT 0,cancelled_qty integer NOT NULL DEFAULT 0,pricing_basis text NOT NULL DEFAULT 'per_piece',quoted_unit_cost_mills bigint,quoted_total_cents bigint,total_product_cost_cents bigint NOT NULL DEFAULT 0,purchase_uom_quantity integer,pieces_per_purchase_uom integer,packaging_cost_cents bigint,quote_reference text,expected_delivery_date timestamptz,promised_date timestamptz);
       CREATE TABLE procurement.inbound_shipments(id integer PRIMARY KEY,shipment_number text NOT NULL,status text NOT NULL,eta timestamptz,delivered_date timestamptz);
       CREATE TABLE procurement.inbound_shipment_lines(id integer PRIMARY KEY,inbound_shipment_id integer NOT NULL REFERENCES procurement.inbound_shipments(id),purchase_order_id integer,purchase_order_line_id integer,qty_shipped integer NOT NULL);
       CREATE TABLE procurement.receiving_orders(id integer PRIMARY KEY,purchase_order_id integer,inbound_shipment_id integer,status text NOT NULL);
@@ -57,6 +57,40 @@ suite.sequential("purchase pipeline and supplier progress PostgreSQL", () => {
     expect(result.rows.filter((row) => row.purchaseOrderLineId === 22).map((row) => [row.shipmentId,row.quantityPieces])).toEqual([[7,25],[8,25]]);
     expect(result.totals.some((row) => row.currency === "EUR")).toBe(true);
     expect(result.rows.find((row) => row.shipmentId === 8)?.arrivalBucket).toBe("overdue");
+  });
+  it("reads existing legacy PO component totals as exact strings and apportions them over split shipments after receipt", async () => {
+    // The original quote basis is absent, but historical PO totals are present.
+    // Distinct IDs keep this read-model fixture separate from progress writes.
+    await pool.query(`
+      INSERT INTO procurement.purchase_orders(id,vendor_id,po_number,status,currency) VALUES(4,1,'TEST-LEGACY','sent','USD');
+      INSERT INTO procurement.purchase_order_lines(id,purchase_order_id,sku,order_qty,pricing_basis,total_product_cost_cents,packaging_cost_cents)
+        VALUES(44,4,'TEST-LEGACY-ITEM',100,'legacy_unknown',98765,1234);
+      INSERT INTO procurement.inbound_shipment_lines VALUES(441,7,4,44,60),(442,8,4,44,40);
+      INSERT INTO procurement.receiving_orders VALUES(4,4,7,'closed');
+      INSERT INTO procurement.receiving_lines VALUES(41,4,44,441,2,0,10);
+    `);
+    try {
+      const evidence = await repository.read();
+      expect(evidence.lines.find((line) => line.id === 44)).toMatchObject({ pricingBasis: "legacy_unknown", quotedUnitMills: null, productCents: "98765", packagingCents: "1234" });
+      const rows = projectPurchasePipeline(evidence, at, 90).rows.filter((row) => row.purchaseOrderLineId === 44);
+      expect(rows.map((row) => [row.shipmentId, row.quantityPieces])).toEqual([[7, 40], [8, 40]]);
+      expect(rows.every((row) => row.costs[0].source === "purchase_order" && row.costs[0].evidence === "estimated")).toBe(true);
+      expect(rows.reduce((sum, row) => sum + BigInt(row.costs[0].amountMills!), BigInt(0))).toBe(BigInt(7901200));
+      expect(rows.reduce((sum, row) => sum + BigInt(row.costs[1].amountMills!), BigInt(0))).toBe(BigInt(98720));
+      expect(rows.every((row) => row.costs[2].amountMills === null)).toBe(true);
+      await pool.query("UPDATE procurement.purchase_order_lines SET total_product_cost_cents=9007199254740993 WHERE id=44");
+      const large = projectPurchasePipeline(await repository.read(), at, 90).rows.filter((row) => row.purchaseOrderLineId === 44);
+      expect(large.reduce((sum, row) => sum + BigInt(row.costs[0].amountMills!), BigInt(0))).toBe(BigInt("720575940379279440"));
+      expect((await pool.query("SELECT pricing_basis,quoted_unit_cost_mills,total_product_cost_cents FROM procurement.purchase_order_lines WHERE id=44")).rows[0]).toEqual({ pricing_basis: "legacy_unknown", quoted_unit_cost_mills: null, total_product_cost_cents: "9007199254740993" });
+      await pool.query("UPDATE procurement.purchase_order_lines SET total_product_cost_cents=0,packaging_cost_cents=0 WHERE id=44");
+      const unknown = projectPurchasePipeline(await repository.read(), at, 90).rows.filter((row) => row.purchaseOrderLineId === 44);
+      expect(unknown.every((row) => row.costs.every((cost) => cost.amountMills === null && cost.evidence === "unknown"))).toBe(true);
+      await pool.query("UPDATE procurement.purchase_order_lines SET pricing_basis='per_piece',quoted_unit_cost_mills=0 WHERE id=44");
+      const explicitZero = projectPurchasePipeline(await repository.read(), at, 90).rows.filter((row) => row.purchaseOrderLineId === 44);
+      expect(explicitZero.every((row) => row.costs.slice(0, 2).every((cost) => cost.amountMills === "0" && cost.evidence === "estimated"))).toBe(true);
+    } finally {
+      await pool.query("DELETE FROM procurement.receiving_lines WHERE id=41; DELETE FROM procurement.receiving_orders WHERE id=4; DELETE FROM procurement.inbound_shipment_lines WHERE id IN (441,442); DELETE FROM procurement.purchase_order_lines WHERE id=44; DELETE FROM procurement.purchase_orders WHERE id=4;");
+    }
   });
   it("records report, immutable before/after and actor/time in one transaction without inventory/AP writes", async () => {
     const result = await service.update(11,command(0),"pipeline-operator");

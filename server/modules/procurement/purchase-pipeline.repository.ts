@@ -37,6 +37,7 @@ export function createPurchasePipelineRepository(database: PipelineDatabase) {
             po.status AS "poStatus",l.status,l.sku,l.product_name AS "productName",po.currency,
             l.order_qty AS ordered,COALESCE(l.received_qty,0) AS received,COALESCE(l.cancelled_qty,0) AS cancelled,
             l.pricing_basis AS "pricingBasis",l.quoted_unit_cost_mills::text AS "quotedUnitMills",l.quoted_total_cents::text AS "quotedTotalCents",
+            l.total_product_cost_cents::text AS "productCents",
             l.purchase_uom_quantity AS "purchaseUomQuantity",l.pieces_per_purchase_uom AS "piecesPerPurchaseUom",l.packaging_cost_cents::text AS "packagingCents",
             l.quote_reference AS "quoteReference",l.expected_delivery_date AS "expectedDate",l.promised_date AS "promisedDate",
             po.confirmed_delivery_date AS "confirmedDate",po.expected_delivery_date AS "purchaseExpectedDate",

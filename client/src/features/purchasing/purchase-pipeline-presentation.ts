@@ -1,5 +1,6 @@
 import {
   purchasePipelineStages,
+  type PurchasePipelineCost,
   type PurchasePipelineRow,
 } from "@shared/procurement/purchase-pipeline";
 
@@ -33,7 +34,10 @@ export type PipelinePurchaseFilters = {
 
 // The API boundary validates rows with purchasePipelineSchema. These helpers
 // only project that validated DTO; they never recalculate receipt or cost evidence.
-export function summarizePipelineCosts(rows: readonly PurchasePipelineRow[]): PipelineMoneySummary[] {
+export function summarizePipelineCosts(
+  rows: readonly PurchasePipelineRow[],
+  component?: PurchasePipelineCost["component"],
+): PipelineMoneySummary[] {
   const summaries = new Map<string | null, PipelineMoneySummary>();
   for (const row of rows) {
     const summary = summaries.get(row.currency) ?? {
@@ -46,6 +50,7 @@ export function summarizePipelineCosts(rows: readonly PurchasePipelineRow[]): Pi
       missingComponents: 0,
     };
     for (const cost of row.costs) {
+      if (component !== undefined && cost.component !== component) continue;
       if (cost.amountMills === null || (cost.evidence !== "confirmed" && cost.evidence !== "estimated")) {
         summary.missingComponents++;
         continue;
