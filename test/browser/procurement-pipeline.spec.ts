@@ -197,6 +197,34 @@ async function setup(
   return { failures, data };
 }
 
+async function expectMoneyInsideCells(table: Locator) {
+  await table.evaluate(async (element) => {
+    await element.ownerDocument.fonts.ready;
+  });
+  const unreadableAmounts = await table
+    .locator("[data-pipeline-money]")
+    .evaluateAll((spans) =>
+      spans.flatMap((span) => {
+        const cell = span.closest("td")!;
+        const textBox = span.getBoundingClientRect();
+        const cellBox = cell.getBoundingClientRect();
+        return span.getClientRects().length === 1 &&
+          textBox.left >= cellBox.left &&
+          textBox.right <= cellBox.right
+          ? []
+          : [
+              {
+                amount: span.textContent,
+                lineCount: span.getClientRects().length,
+                textWidth: textBox.width,
+                cellWidth: cellBox.width,
+              },
+            ];
+      }),
+    );
+  expect(unreadableAmounts).toEqual([]);
+}
+
 async function scrollDashboardTo(target: Locator) {
   await target.evaluate((element) => {
     let container = element.parentElement;
@@ -438,11 +466,9 @@ test("daily buying priorities stay ahead of forty purchase slices and diagnostic
   expect(purchaseOrdersBox!.x + purchaseOrdersBox!.width).toBeLessThanOrEqual(
     page.viewportSize()!.width,
   );
-  const diagnostics = page
-    .locator("details")
-    .filter({
-      has: page.locator("summary", { hasText: "Planning and system details" }),
-    });
+  const diagnostics = page.locator("details").filter({
+    has: page.locator("summary", { hasText: "Planning and system details" }),
+  });
   await expect(diagnostics).toHaveCount(1);
   await expect(diagnostics).not.toHaveAttribute("open", "");
   await expect(
@@ -509,11 +535,9 @@ test("daily buying priorities stay ahead of forty purchase slices and diagnostic
   await expect(lineTable.getByRole("button")).toHaveCount(0);
   await expect(lineTable).not.toContainText("BULK-PO-1");
   await expect(lineTable).not.toContainText("BULK-SUPPLIER-1");
-  const sources = firstPurchase
-    .locator("details")
-    .filter({
-      has: page.locator("summary", { hasText: "Cost sources and notes" }),
-    });
+  const sources = firstPurchase.locator("details").filter({
+    has: page.locator("summary", { hasText: "Cost sources and notes" }),
+  });
   await expect(sources).toHaveCount(1);
   await expect(sources).not.toHaveAttribute("open", "");
   const rowHeights = await lineTable
@@ -543,30 +567,7 @@ test("daily buying priorities stay ahead of forty purchase slices and diagnostic
     expect(costColumn!.x + costColumn!.width).toBeLessThanOrEqual(
       regionBox!.x + regionBox!.width + 1,
     );
-    const unreadableAmounts = await lineTable
-      .locator("td span")
-      .evaluateAll((spans) =>
-        spans.flatMap((span) => {
-          const amount = span.textContent ?? "";
-          if (!amount.startsWith("$")) return [];
-          const cell = span.closest("td")!;
-          const textBox = span.getBoundingClientRect();
-          const cellBox = cell.getBoundingClientRect();
-          return span.getClientRects().length === 1 &&
-            textBox.left >= cellBox.left &&
-            textBox.right <= cellBox.right
-            ? []
-            : [
-                {
-                  amount,
-                  lineCount: span.getClientRects().length,
-                  textWidth: textBox.width,
-                  cellWidth: cellBox.width,
-                },
-              ];
-        }),
-      );
-    expect(unreadableAmounts).toEqual([]);
+    await expectMoneyInsideCells(lineTable);
   }
   if (testInfo.project.name === "mobile") {
     expect(
@@ -787,11 +788,9 @@ for (const canEdit of [true, false]) {
       }),
     ).toHaveCount(0);
     await expect(page.getByRole("dialog")).toHaveCount(0);
-    const sources = purchase
-      .locator("details")
-      .filter({
-        has: page.locator("summary", { hasText: "Cost sources and notes" }),
-      });
+    const sources = purchase.locator("details").filter({
+      has: page.locator("summary", { hasText: "Cost sources and notes" }),
+    });
     await expect(sources).toHaveCount(1);
     await expect(sources).not.toHaveAttribute("open", "");
     expect(progressRequests).toEqual([]);
@@ -804,11 +803,9 @@ for (const canEdit of [true, false]) {
       "shipment destination; warehouse arrival not confirmed",
     );
     expect(progressRequests).toEqual([]);
-    const history = sources
-      .locator("details")
-      .filter({
-        has: page.locator("summary", { hasText: "Supplier report history" }),
-      });
+    const history = sources.locator("details").filter({
+      has: page.locator("summary", { hasText: "Supplier report history" }),
+    });
     await expect(history).not.toHaveAttribute("open", "");
     await history.locator("summary").click();
     await expect(
@@ -878,18 +875,14 @@ test("supplier history failures retry only on demand and reject another purchase
   await page.goto("/purchasing");
   await showPurchaseDetails(page, "TEST-PO-1");
   const purchase = page.locator('[data-purchase-order="1"]');
-  const sources = purchase
-    .locator("details")
-    .filter({
-      has: page.locator("summary", { hasText: "Cost sources and notes" }),
-    });
+  const sources = purchase.locator("details").filter({
+    has: page.locator("summary", { hasText: "Cost sources and notes" }),
+  });
   await sources.locator("summary").first().click();
   expect(attempts).toBe(0);
-  const history = sources
-    .locator("details")
-    .filter({
-      has: page.locator("summary", { hasText: "Supplier report history" }),
-    });
+  const history = sources.locator("details").filter({
+    has: page.locator("summary", { hasText: "Supplier report history" }),
+  });
   await history.locator("summary").click();
   await expect(history.getByRole("alert")).toContainText(
     "Supplier report history could not be loaded",
@@ -940,17 +933,13 @@ test("history loading preserves the current recorded report when earlier revisio
   await page.goto("/purchasing");
   await showPurchaseDetails(page, "TEST-PO-1");
   const purchase = page.locator('[data-purchase-order="1"]');
-  const sources = purchase
-    .locator("details")
-    .filter({
-      has: page.locator("summary", { hasText: "Cost sources and notes" }),
-    });
+  const sources = purchase.locator("details").filter({
+    has: page.locator("summary", { hasText: "Cost sources and notes" }),
+  });
   await sources.locator("summary").first().click();
-  const history = sources
-    .locator("details")
-    .filter({
-      has: page.locator("summary", { hasText: "Supplier report history" }),
-    });
+  const history = sources.locator("details").filter({
+    has: page.locator("summary", { hasText: "Supplier report history" }),
+  });
   await history.locator("summary").click();
   try {
     await expect(history.getByRole("status")).toContainText(
@@ -1008,11 +997,9 @@ test("legacy PO product and packaging amounts remain visible without inventing u
   await expect(table).not.toContainText("2,468.1000 USD");
   await expect(purchase).toContainText("Incomplete cost");
   await expect(purchase).toContainText("includes estimates");
-  const sources = purchase
-    .locator("details")
-    .filter({
-      has: page.locator("summary", { hasText: "Cost sources and notes" }),
-    });
+  const sources = purchase.locator("details").filter({
+    has: page.locator("summary", { hasText: "Cost sources and notes" }),
+  });
   await sources.locator("summary").click();
   await expect(sources).toContainText("PO line total");
   await expect(sources).toContainText("2,468.1000 USD");
@@ -1080,11 +1067,9 @@ test("confirmed cost revisions keep their source link and evidence in the purcha
     .locator("[data-pipeline-row]");
   await expect(row.getByText("$70.00", { exact: true })).toBeVisible();
   await expect(row.getByText("$80.00", { exact: true })).toBeVisible();
-  const sources = purchase
-    .locator("details")
-    .filter({
-      has: page.locator("summary", { hasText: "Cost sources and notes" }),
-    });
+  const sources = purchase.locator("details").filter({
+    has: page.locator("summary", { hasText: "Cost sources and notes" }),
+  });
   await sources.locator("summary").click();
   await expect(sources).toContainText("70.0000 USD");
   await expect(sources).toContainText("confirmed");
@@ -1125,5 +1110,65 @@ test("refresh failure retains a visibly dated snapshot and malformed initial evi
       .filter({ hasText: "Purchase records could not be loaded" }),
   ).toBeVisible();
   await expect(page.getByTestId("purchase-pipeline")).toHaveCount(0);
+  expect(failures).toEqual([]);
+});
+
+test("large USD and EUR totals fit their cells across font metrics without page overflow", async ({
+  page,
+}, testInfo) => {
+  const data = manyPurchaseLines(2, 2);
+  for (const line of data.lines) {
+    line.currency = line.purchaseOrderId === 1 ? "USD" : "EUR";
+    line.pricingBasis = "extended_total";
+    line.quotedTotalCents = "1234567890123";
+    line.packagingCents = "123456789";
+  }
+  const { failures } = await setup(page, true, true, data);
+  await page.goto("/purchasing");
+  for (const purchaseId of [1, 2]) {
+    await showPurchaseDetails(page, `BULK-PO-${purchaseId}`);
+    const table = page.getByRole("table", {
+      name: `Line items for BULK-PO-${purchaseId}`,
+      exact: true,
+    });
+    await expect(
+      table.getByText(
+        purchaseId === 1 ? "$12,345,678,901.23" : "EUR 12,345,678,901.23",
+        { exact: true },
+      ),
+    ).toHaveCount(2);
+    // Intrinsic widths must protect both line values and bold aggregate totals,
+    // including fallback font metrics and values longer than the desktop view.
+    for (const family of ["sans-serif", "serif", "monospace"]) {
+      await table.evaluate((element, fontFamily) => {
+        element.style.fontFamily = fontFamily;
+      }, family);
+      await expectMoneyInsideCells(table);
+    }
+    const purchase = page.locator(`[data-purchase-order="${purchaseId}"]`);
+    const region = purchase.getByRole("region", {
+      name: `Scroll line items for BULK-PO-${purchaseId}`,
+      exact: true,
+    });
+    const lastAmount = table.locator("[data-pipeline-money]").last();
+    await lastAmount.scrollIntoViewIfNeeded();
+    const amountBox = await lastAmount.boundingBox();
+    const regionBox = await region.boundingBox();
+    expect(amountBox).not.toBeNull();
+    expect(regionBox).not.toBeNull();
+    expect(amountBox!.x).toBeGreaterThanOrEqual(regionBox!.x);
+    expect(amountBox!.x + amountBox!.width).toBeLessThanOrEqual(
+      regionBox!.x + regionBox!.width,
+    );
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= window.innerWidth,
+      ),
+    ).toBe(true);
+  }
+  await page.screenshot({
+    path: testInfo.outputPath("wide-currency-values.png"),
+    fullPage: false,
+  });
   expect(failures).toEqual([]);
 });

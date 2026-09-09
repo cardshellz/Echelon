@@ -51,6 +51,7 @@ function CostAmount({
   }
   return (
     <span
+      data-pipeline-money
       className="whitespace-nowrap"
       title={formatPipelineMills(cost.amountMills!, currency)}
     >
@@ -68,7 +69,7 @@ function KnownAmount({ cost }: { cost: PipelineMoneySummary | undefined }) {
     );
   }
   return (
-    <span className="whitespace-nowrap">
+    <span data-pipeline-money className="whitespace-nowrap">
       {formatPipelineCurrency(cost.knownMills, cost.currency)}
     </span>
   );
@@ -328,21 +329,24 @@ export function PurchasePipelineLines({
       >
         <table
           aria-label={`Line items for ${purchase.poNumber}`}
-          className="w-full min-w-[920px] table-fixed text-left text-sm"
+          className="w-full min-w-[920px] table-auto text-left text-sm"
         >
           <caption className="sr-only">
             Outstanding quantities and their costs. Split shipments have
             separate rows under the same product.
           </caption>
+          {/* Currency cells keep their intrinsic width, including bold totals.
+              Product text uses the remaining space; wide values scroll inside
+              this table instead of overlapping adjacent financial columns. */}
           <colgroup>
             <col className="w-[21%]" />
-            <col className="w-[8%]" />
-            <col className="w-[12%]" />
-            <col className="w-[11%]" />
-            <col className="w-[12%]" />
-            <col className="w-[11%]" />
-            <col className="w-[12%]" />
-            <col className="w-[13%]" />
+            <col />
+            <col />
+            <col />
+            <col />
+            <col />
+            <col />
+            <col />
           </colgroup>
           <thead className="border-b bg-muted/50 text-xs text-muted-foreground">
             <tr>
