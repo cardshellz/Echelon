@@ -178,6 +178,7 @@ jobs:
           server/modules/inventory/__tests__/integration/inventory-cutover-encumbrance.integration.test.ts
           server/modules/inventory-planning/__tests__/integration/inventory-cutover-preflight.integration.test.ts
           server/modules/inventory-planning/__tests__/integration/inventory-cutover-reconstruction.integration.test.ts
+          server/modules/oms/__tests__/integration/inventory-cutover-receipt-evidence.integration.test.ts
           server/modules/inventory-planning/__tests__/integration/inventory-cutover-admission-fence.integration.test.ts
           server/modules/inventory-planning/__tests__/integration/inventory-cutover-composition.integration.test.ts
           server/modules/inventory-planning/__tests__/integration/quantity-publication-admission.integration.test.ts

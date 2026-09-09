@@ -14,6 +14,8 @@ import { planFreshCutoverClaims } from "../domain/inventory-cutover-reconstructi
 import { assertInventoryCutoverFenceHeldInsideTransaction } from "./inventory-cutover-admission-fence.repository";
 import { captureActiveClaimSupplySnapshotInsideTransaction } from "./inventory-availability-shadow.repository";
 import { persistReconstructedCutoverClaim } from "./inventory-availability-claim.repository";
+import type { InventoryCutoverLegacyPromisePort } from "../application/inventory-cutover-legacy-promise.port";
+import { PostgresInventoryCutoverLegacyPromiseRepository } from "../../inventory/infrastructure/inventory-cutover-legacy-promise.repository";
 
 export class CutoverReconstructionError extends Error {
   constructor(readonly code: string, message: string, readonly context: Record<string, unknown> = {}) { super(message); this.name = "CutoverReconstructionError"; }
@@ -21,7 +23,8 @@ export class CutoverReconstructionError extends Error {
 
 /** No connection checkout, commit, rollback, stock correction, COGS rewrite or publication. */
 export class PostgresInventoryCutoverReconstructionRepository implements InventoryCutoverReconstructionStore {
-  constructor(private readonly inventoryWriter: CanonicalClaimInventoryMutationPort = new PostgresCanonicalClaimInventoryRepository()) {}
+  constructor(private readonly inventoryWriter: CanonicalClaimInventoryMutationPort = new PostgresCanonicalClaimInventoryRepository(),
+    private readonly promiseWriter: InventoryCutoverLegacyPromisePort = new PostgresInventoryCutoverLegacyPromiseRepository()) {}
 
   async capture(client: PoolClient): Promise<CutoverReconstructionEvidence> {
     const transaction = (await client.query(`SELECT current_setting('transaction_isolation') AS isolation,
@@ -79,10 +82,14 @@ export class PostgresInventoryCutoverReconstructionRepository implements Invento
       impactHash: reconstructionHash({ evidenceHash: reconstruction.evidenceHash, freshReservationsByLevel: [], orders: [] }) }
       : planFreshCutoverClaims(await captureActiveClaimSupplySnapshotInsideTransaction(client, targetIds), reconstruction);
     if (planning.impactHash !== expectedImpactHash) throw new CutoverReconstructionError("CUTOVER_FRESH_DEMAND_IMPACT_CHANGED", "Canonical remaining-demand allocation changed from reviewed preview.");
+    const legacyPromiseReleaseTransactionIds = reconstruction.legacyPromiseReleases.length === 0 ? []
+      : await this.promiseWriter.releaseForReplanning({ client, command, releases: reconstruction.legacyPromiseReleases });
     const claimIds: string[] = [];
     for (const order of planning.orders) claimIds.push(await persistReconstructedCutoverClaim(client, this.inventoryWriter, order, command));
     const receipt = cutoverReconstructionReceiptSchema.parse({ evidenceHash: reconstruction.evidenceHash, claimIds,
-      orderIds: reconstruction.orders.map((order) => order.orderId), retainedIndependentBuildReservationIds: reconstruction.retainedIndependentBuildReservationIds });
+      orderIds: reconstruction.orders.map((order) => order.orderId), retainedIndependentBuildReservationIds: reconstruction.retainedIndependentBuildReservationIds,
+      ...(reconstruction.legacyPromiseReleases.length > 0 ? { legacyPromiseReleases: reconstruction.legacyPromiseReleases,
+        legacyPromiseReleaseTransactionIds } : {}) });
     await client.query(`INSERT INTO inventory.availability_cutover_reconstruction_receipts
       (activation_run_id,evidence_hash,impact_hash,request_hash,result_hash,request_payload,result_payload,evidence_payload,actor,reason,occurred_at)
       VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7::jsonb,$8::jsonb,$9,$10,$11)`, [command.activationRunId,reconstruction.evidenceHash,

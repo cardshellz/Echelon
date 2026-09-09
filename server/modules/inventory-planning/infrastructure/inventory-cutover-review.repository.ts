@@ -50,6 +50,7 @@ export async function captureInventoryCutoverReviewInsideTransaction(
   const stableEvidence = {
     activationRunId, authorityRevision: run.authority_revision, manifest,
     reconstructionHash: reconstruction.evidenceHash, freshClaimImpactHash: impactHash,
+    legacyPromiseReleases: reconstruction.legacyPromiseReleases,
     stockFingerprints, configurationEvidence, providerEvidence, publicationDrain, publicationRows, blockers: sortedBlockers,
   };
   return inventoryCutoverReviewSchema.parse({
@@ -58,7 +59,9 @@ export async function captureInventoryCutoverReviewInsideTransaction(
     selectionManifestHash: inventoryCutoverEvidenceHash(manifest), reconstructionHash: reconstruction.evidenceHash,
     freshClaimImpactHash: impactHash, ready: sortedBlockers.length === 0, manifest,
     summary: { orders: reconstruction.orders.length, lines: reconstruction.orders.reduce((sum, order) => sum + order.lines.length, 0),
-      retainedIndependentBuildHolds: reconstruction.retainedIndependentBuildReservationIds.length },
+      retainedIndependentBuildHolds: reconstruction.retainedIndependentBuildReservationIds.length,
+      legacyPromiseReplanning: { positions: reconstruction.legacyPromiseReleases.length,
+        orderLines: reconstruction.legacyPromiseReleases.reduce((total, release) => total + release.owners.length, 0) } },
     publicationRows, blockers: sortedBlockers, operationalWriteAttempted: false, providerWriteAttempted: false,
   });
 }

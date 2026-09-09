@@ -88,6 +88,10 @@ export function InventoryCutoverControls(props: Props) {
     {evidence.data && <>
       <p className="text-xs text-muted-foreground">Evidence captured {evidence.data.capturedAt}. A changed result requires another review.</p>
       {!canonical && review.data && <p className="text-sm">{review.data.summary.orders} orders · {review.data.summary.lines} lines · {review.data.publicationRows.length} channel/variant quantities.</p>}
+      {!canonical && review.data?.summary.legacyPromiseReplanning && review.data.summary.legacyPromiseReplanning.positions > 0 &&
+        <p className="text-sm" role="note">Re-plan {review.data.summary.legacyPromiseReplanning.orderLines} existing order line(s)
+          {" "}from {review.data.summary.legacyPromiseReplanning.positions} empty-bin reservation position(s).
+          {" "}Customer demand is retained. This handoff does not change on-hand or picked stock counts.</p>}
       {canonical && verification.data && <p className="text-sm">{verification.data.verifiedPublicationRows}/{verification.data.expectedPublicationRows} latest full publications verified.</p>}
       {evidence.data.blockers.length > 0 && <div className="space-y-2">
         <p className="font-medium text-sm">{evidence.data.blockers.length} finding(s) prevent this step.</p>
