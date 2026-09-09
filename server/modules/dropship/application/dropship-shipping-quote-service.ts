@@ -379,6 +379,23 @@ export async function calculateDropshipShippingQuote(
     packages: cartonization.packages,
     cartonizationProvider: cartonization.engine,
   });
+  if (pricing.source === 'shared' && pricing.quote.programCharges) {
+    // The shared program already applied fees. Never read or add the legacy
+    // Dropship policies on this path. Historical v1-v3 snapshots remain readable.
+    const charge = pricing.quote.programCharges;
+    const totals = { baseRateCents: charge.baseCents, markupCents: charge.markupCents,
+      insurancePoolCents: charge.insuranceCents, dunnageCents: 0, totalShippingCents: charge.totalCents };
+    if (Object.values(totals).some((value) => !Number.isSafeInteger(value) || value < 0)
+      || BigInt(charge.baseCents) + BigInt(charge.markupCents) + BigInt(charge.insuranceCents) !== BigInt(charge.totalCents)) {
+      throw new DropshipError('DROPSHIP_SHIPPING_RATE_INVALID', 'Shared shipping charge evidence is invalid.');
+    }
+    return { ...totals, cartonization, pricing, currency: pricing.currency, rateTableId: pricing.rateTableId,
+      quotePayload: { version: 4, destination: input.destination, items: input.items,
+        packages: cartonization.packages, packaging: cartonization.packaging ?? null,
+        providers: { cartonization: cartonization.engine, rates: pricing.quote.rateProvider },
+        warnings: { cartonization: cartonization.warnings, packaging: cartonization.packagingWarnings, rates: pricing.quote.warnings },
+        pricing: { scope: 'shipment', source: 'shared_engine', ...pricing.quote }, totals } };
+  }
   const [markupPolicy, insurancePolicy] = await Promise.all([
     deps.repository.getActiveShippingMarkupPolicy(input.quotedAt),
     deps.repository.getActiveInsurancePoolPolicy(input.quotedAt),

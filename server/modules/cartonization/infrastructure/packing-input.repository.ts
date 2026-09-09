@@ -17,8 +17,6 @@ import { and, eq, inArray, isNotNull } from "drizzle-orm";
 import {
   productVariants,
   products,
-  shippingBoxCatalog,
-  shippingBoxWarehouseStock,
   shippingGroups,
   shippingVariantAttrs,
 } from "@shared/schema";
@@ -112,61 +110,10 @@ export async function resolveVariantIdsBySku(
   return bySku;
 }
 
-/**
- * Load the active box suite for cartonization.
- *
- * Warehouse availability semantics: box_warehouse_stock is an OPT-IN
- * restriction. A box with NO stock rows at all is treated as available at
- * every warehouse (the catalog predates per-warehouse stocking and most
- * boxes are universal). A box WITH stock rows is only offered at
- * warehouses that have an is_stocked=true row. When no warehouseId is
- * given, every active box qualifies.
- */
-export async function loadActiveBoxes(warehouseId?: number): Promise<CartonizeBox[]> {
-  const boxes = await db
-    .select({
-      id: shippingBoxCatalog.id,
-      code: shippingBoxCatalog.code,
-      kind: shippingBoxCatalog.kind,
-      lengthMm: shippingBoxCatalog.lengthMm,
-      widthMm: shippingBoxCatalog.widthMm,
-      heightMm: shippingBoxCatalog.heightMm,
-      tareWeightGrams: shippingBoxCatalog.tareWeightGrams,
-      maxWeightGrams: shippingBoxCatalog.maxWeightGrams,
-      costCents: shippingBoxCatalog.costCents,
-      fillFactorBps: shippingBoxCatalog.fillFactorBps,
-      isActive: shippingBoxCatalog.isActive,
-    })
-    .from(shippingBoxCatalog)
-    .where(eq(shippingBoxCatalog.isActive, true));
-
-  const toCartonizeBox = (box: (typeof boxes)[number]): CartonizeBox => ({
-    ...box,
-    // The DB CHECK constrains kind to these values; coerce for the domain type.
-    kind: box.kind as CartonizeBox["kind"],
-  });
-
-  if (warehouseId == null || boxes.length === 0) {
-    return boxes.map(toCartonizeBox);
-  }
-
-  const stockRows = await db
-    .select({
-      boxId: shippingBoxWarehouseStock.boxId,
-      warehouseId: shippingBoxWarehouseStock.warehouseId,
-      isStocked: shippingBoxWarehouseStock.isStocked,
-    })
-    .from(shippingBoxWarehouseStock)
-    .where(inArray(shippingBoxWarehouseStock.boxId, boxes.map((b) => b.id)));
-
-  const restricted = new Set<number>();
-  const stockedHere = new Set<number>();
-  for (const row of stockRows) {
-    restricted.add(row.boxId);
-    if (row.warehouseId === warehouseId && row.isStocked) stockedHere.add(row.boxId);
-  }
-
-  return boxes
-    .filter((box) => !restricted.has(box.id) || stockedHere.has(box.id))
-    .map(toCartonizeBox);
+/** Resolve the shared channel suite, then restrict it to warehouse availability. */
+export async function loadActiveBoxes(warehouseId?: number, channel: FulfillmentChannel = 'internal'): Promise<CartonizeBox[]> {
+  if (!warehouseId) throw new Error('SHIPPING_WAREHOUSE_REQUIRED');
+  return (await new SharedShippingConfigurationRepository().loadPackaging(channel,warehouseId)).boxes;
 }
+import { SharedShippingConfigurationRepository } from '../../shipping-engine/infrastructure/shared-configuration.repository';
+import type { FulfillmentChannel } from '@shared/shipping/configuration';

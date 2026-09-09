@@ -131,7 +131,9 @@ export async function runShadow(
   const boxesForWarehouse = async (warehouseId: number): Promise<CartonizeBox[]> => {
     const cached = boxCache.get(warehouseId);
     if (cached) return cached;
-    const boxes = await deps.loadActiveBoxes(warehouseId);
+    // This replay explicitly rates Shopify checkout below, so it must use
+    // Shopify's packaging assignment rather than the internal WMS default.
+    const boxes = await deps.loadActiveBoxes(warehouseId, 'shopify');
     boxCache.set(warehouseId, boxes);
     return boxes;
   };

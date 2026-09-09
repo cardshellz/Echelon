@@ -353,6 +353,11 @@ function projectSharedVendorCharge(
   dunnageCents: number;
   totalShippingCents: number;
 } {
+  if (shared.programCharges) {
+    const charge = shared.programCharges;
+    return { baseRateCents: charge.baseCents,markupCents: charge.markupCents,
+      insurancePoolCents: charge.insuranceCents,dunnageCents: 0,totalShippingCents: charge.totalCents };
+  }
   const markupCents = calculateBasisPointsFeeCents(shared.baseRateCents, {
     bps: payload.policies.shippingMarkup.markupBps,
     fixedCents: payload.policies.shippingMarkup.fixedMarkupCents,

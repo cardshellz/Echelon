@@ -37,6 +37,9 @@ import type { ShippingRateContext } from "../domain/shipping-channel";
 import { resolveZone, type ZoneRule } from "../domain/zones";
 import { loadActiveRateBookAssignments } from "../infrastructure/rate-book.repository";
 import { loadProductRateRules } from "../infrastructure/product-rate-policy.repository";
+import { SharedShippingConfigurationRepository } from "../infrastructure/shared-configuration.repository";
+import { applyProgramCharges } from "../domain/program-charges";
+import type { ProgramChargeEvidence } from "@shared/shipping/configuration";
 
 export const RATE_QUOTE_ENGINE = { name: "cardshellz-rates", version: "2.0.0" } as const;
 
@@ -85,6 +88,8 @@ export interface RateQuoteOptions {
 }
 
 export interface RateQuoteLine {
+  /** Internal evidence; adapters must project only the final charge to buyers. */
+  programCharges?: ProgramChargeEvidence;
   serviceLevelId: number;
   serviceLevelCode: string;
   displayName: string;
@@ -229,6 +234,7 @@ export async function quoteShipmentRates(
     selectedRates.map((quote) => quote.rateTableId),
   );
   const quotes: RateQuoteLine[] = [];
+  const chargePolicy = await new SharedShippingConfigurationRepository().loadCharges(rateBook.id, quotedAt);
   for (const quote of selectedRates) {
     const rules = policiesByTable.get(quote.rateTableId) ?? [];
     let totalCents = quote.rateCents;
@@ -283,14 +289,16 @@ export async function quoteShipmentRates(
       productPolicyApplied = calculationTrace.some((step) => step.ruleId !== null);
     }
 
+    const programCharges = applyProgramCharges(totalCents, chargePolicy.charges, chargePolicy.revision);
     quotes.push({
+      programCharges,
       serviceLevelId: quote.serviceLevelId,
       serviceLevelCode: quote.serviceLevelCode,
       displayName: quote.displayName,
       description: quote.description,
       fulfillmentMode: quote.fulfillmentMode,
       pricingBasis: quote.pricingBasis,
-      totalCents,
+      totalCents: programCharges.totalCents,
       currency: quote.currency.toUpperCase(),
       promiseMinBusinessDays: quote.promiseMinBusinessDays,
       promiseMaxBusinessDays: quote.promiseMaxBusinessDays,

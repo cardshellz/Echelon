@@ -44,6 +44,15 @@ const MEDIUM = box({ id: 2, code: "M", lengthMm: 250, widthMm: 200, heightMm: 10
 const LARGE = box({ id: 3, code: "L", lengthMm: 450, widthMm: 350, heightMm: 250 });
 const BOXES = [SMALL, MEDIUM, LARGE];
 
+describe('outer shipping dimensions',() => {
+  it('packs against inner dimensions and reports measured outer dimensions',() => {
+    const measured = { ...SMALL,outerLengthMm: 160,outerWidthMm: 110,outerHeightMm: 60 };
+    const candidate = cartonize([item({ productVariantId: 101 })],[measured]).candidates[0];
+    expect(candidate.parcels[0]).toMatchObject({ boxId: SMALL.id,lengthMm: 160,widthMm: 110,heightMm: 60 });
+    expectPlacementsToFit(candidate.parcels[0].placements,SMALL);
+  });
+});
+
 function firstCandidate(
   items: CartonizeItem[],
   boxes = BOXES,
