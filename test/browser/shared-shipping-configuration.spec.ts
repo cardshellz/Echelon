@@ -1,6 +1,10 @@
 import { test, expect, type Page } from "playwright/test";
 import { resolve } from "node:path";
-import { NO_PROGRAM_CHARGES } from "../../shared/shipping/configuration";
+import {
+  NO_PROGRAM_CHARGES,
+  type PackagingConfiguration,
+  type DropshipSharedShippingConfig,
+} from "../../shared/shipping/configuration";
 
 async function setup(page: Page, mode = "") {
   const state = {
@@ -8,7 +12,7 @@ async function setup(page: Page, mode = "") {
     errors: [] as string[],
     fail: false,
   };
-  const packaging = {
+  const packaging: PackagingConfiguration = {
     suites: [
       { id: 1, name: "Default cartons", revision: 1, boxIds: [1] },
       { id: 2, name: "Small mailers", revision: 1, boxIds: [2] },
@@ -25,7 +29,7 @@ async function setup(page: Page, mode = "") {
       { id: 2, name: "West" },
     ],
   };
-  const data = {
+  const data: DropshipSharedShippingConfig = {
     packaging,
     programs: [
       { id: 1, name: "Vendor pricing" },
@@ -69,17 +73,50 @@ async function setup(page: Page, mode = "") {
         id: body.serviceLevelId,
         revision: body.expectedRevision + 1,
       };
-    if (path.endsWith("/packaging"))
+    if (path.endsWith("/program")) {
+      data.assignments = data.assignments.filter(
+        (a) => a.warehouseId !== body.warehouseId,
+      );
+      data.assignments.push({
+        warehouseId: body.warehouseId,
+        rateBookId: body.rateBookId,
+      });
+    }
+    if (path.endsWith("/program/reset"))
+      data.assignments = data.assignments.filter(
+        (a) => a.warehouseId !== body.warehouseId,
+      );
+    if (path.endsWith("/packaging/reset") || path.endsWith("/assignment/reset"))
+      packaging.assignments = packaging.assignments.filter(
+        (a) => a.channel !== body.channel || a.warehouseId !== body.warehouseId,
+      );
+    if (path.endsWith("/packaging") || path.endsWith("/assignment")) {
+      packaging.assignments = packaging.assignments.filter(
+        (a) => a.channel !== body.channel || a.warehouseId !== body.warehouseId,
+      );
       packaging.assignments.push({
         channel: body.channel,
         warehouseId: body.warehouseId,
         suiteId: body.suiteId,
         revision: body.expectedRevision + 1,
       });
+    }
     if (path.endsWith("/charges"))
       charges = { charges: body.charges, revision: body.expectedRevision + 1 };
-    if (path.endsWith("/box-suites"))
-      Object.assign(packaging.suites[0], body, {
+    if (path.endsWith("/box-suites")) {
+      const current = packaging.suites.find((s) => s.id === body.id);
+      if (current)
+        Object.assign(current, body, { revision: body.expectedRevision + 1 });
+      else
+        packaging.suites.push({
+          ...body,
+          id: Math.max(...packaging.suites.map((s) => s.id)) + 1,
+          revision: 1,
+        });
+    }
+    if (path.endsWith("/box-suites/status"))
+      Object.assign(packaging.suites.find((s) => s.id === body.id)!, {
+        archived: body.archived,
         revision: body.expectedRevision + 1,
       });
     return route.fulfill({ json: {} });
@@ -94,21 +131,145 @@ async function setup(page: Page, mode = "") {
   await page.goto(`/__shared-shipping-test?mode=${mode}`);
   return state;
 }
-test("selects shared program, warehouse suite, and service without legacy rate editors", async ({
+test("saves program changes, reloads them, and preserves another warehouse", async ({
+  page,
+}) => {
+  const state = await setup(page);
+  await page.getByRole("button", { name: "Edit West pricing program" }).click();
+  await expect(page.getByLabel("Dropship pricing program")).toHaveValue(
+    "inherit",
+  );
+  await page.getByLabel("Dropship pricing program").selectOption("2");
+  await page.getByRole("button", { name: "Save program", exact: true }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  const west = page
+    .getByRole("row")
+    .filter({
+      has: page.getByRole("rowheader", { name: "West", exact: true }),
+    });
+  const main = page
+    .getByRole("row")
+    .filter({
+      has: page.getByRole("rowheader", { name: "Main", exact: true }),
+    });
+  await expect(west).toContainText("Priority pricing");
+  await expect(main).toContainText("Vendor pricing");
+  await page.reload();
+  await expect(west).toContainText("Priority pricing");
+  await page.getByRole("button", { name: "Edit West pricing program" }).click();
+  await expect(page.getByLabel("Dropship pricing program")).toHaveValue("2");
+  await expect(
+    page.getByRole("button", { name: "Save program", exact: true }),
+  ).toBeDisabled();
+  await page.getByLabel("Dropship pricing program").selectOption("inherit");
+  await page.getByRole("button", { name: "Save program", exact: true }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(west).toContainText("Vendor pricing");
+  expect(state.writes.map((w) => w.path)).toEqual([
+    "/api/dropship/admin/shipping/shared/program",
+    "/api/dropship/admin/shipping/shared/program/reset",
+  ]);
+});
+
+test("keeps failed program edits and retries the same command", async ({
+  page,
+}) => {
+  const state = await setup(page);
+  await page.getByRole("button", { name: "Edit West pricing program" }).click();
+  await page.getByLabel("Dropship pricing program").selectOption("2");
+  state.fail = true;
+  await page.getByRole("button", { name: "Save program", exact: true }).click();
+  await expect(page.getByRole("dialog").getByRole("alert")).toContainText(
+    "Please retry",
+  );
+  await expect(page.getByLabel("Dropship pricing program")).toHaveValue("2");
+  state.fail = false;
+  await page.getByRole("button", { name: "Save program", exact: true }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  expect(state.writes).toHaveLength(2);
+  expect(state.writes[0].body.commandId).toBe(state.writes[1].body.commandId);
+});
+
+test("supports duplicate, archive and restore without an assignment form in suites", async ({
+  page,
+}, info) => {
+  await setup(page, "suites");
+  await expect(
+    page.getByRole("button", { name: "Save assignment" }),
+  ).toHaveCount(0);
+  const mailer = page
+    .getByRole("article")
+    .filter({
+      has: page.getByRole("heading", { name: "Small mailers", exact: true }),
+    });
+  await mailer.getByRole("button", { name: "Duplicate" }).click();
+  await expect(page.getByLabel("Suite name")).toHaveValue("Small mailers copy");
+  await page.getByRole("button", { name: "Save suite" }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  const copy = page
+    .getByRole("article")
+    .filter({
+      has: page.getByRole("heading", {
+        name: "Small mailers copy",
+        exact: true,
+      }),
+    });
+  await copy.getByRole("button", { name: "Archive", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Archive suite", exact: true })
+    .click();
+  await expect(copy).toHaveCount(0);
+  await page.getByLabel("Show archived suites").check();
+  await copy.getByRole("button", { name: "Restore", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Restore suite", exact: true })
+    .click();
+  await page.getByLabel("Show archived suites").uncheck();
+  await expect(copy).toBeVisible();
+  await page.screenshot({
+    path: info.outputPath("box-suites.png"),
+    fullPage: true,
+  });
+});
+
+test("edits assignment from its warehouse row and resets to the displayed default", async ({
+  page,
+}, info) => {
+  await setup(page, "assignments");
+  await page.getByRole("button", { name: "Edit West packaging" }).click();
+  await page.getByLabel("Assigned box suite").selectOption("2");
+  await page.getByRole("button", { name: "Save assignment" }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  const west = page
+    .getByRole("row")
+    .filter({ has: page.getByRole("cell", { name: "West", exact: true }) });
+  await expect(west).toContainText("Small mailers");
+  await expect(west).toContainText("Warehouse override");
+  await page.getByRole("button", { name: "Edit West packaging" }).click();
+  await page.getByLabel("Assigned box suite").selectOption("inherit");
+  await page.getByRole("button", { name: "Save assignment" }).click();
+  await expect(west).toContainText("Default cartons");
+  await page.screenshot({
+    path: info.outputPath("packaging-assignments.png"),
+    fullPage: true,
+  });
+});
+
+test("selects warehouse suite and service without legacy rate editors", async ({
   page,
 }, info) => {
   const state = await setup(page);
   await page.getByLabel("Dropship fulfillment service").selectOption("2");
   await page.getByRole("button", { name: "Save service level" }).click();
-  await expect(page.getByRole("status")).toContainText("Saved");
+  await expect(page.getByRole("status")).toContainText("saved");
   expect(state.writes[0].body).toMatchObject({
     channel: "dropship",
     serviceLevelId: 2,
     expectedRevision: 1,
   });
-  await page.getByLabel("Configuration scope").selectOption("2");
-  await page.getByLabel("Dropship packaging suite").selectOption("2");
-  await page.getByRole("button", { name: "Save suite assignment" }).click();
+  await page.getByRole("button", { name: "Edit West packaging" }).click();
+  await page.getByLabel("Assigned box suite").selectOption("2");
+  await page.getByRole("button", { name: "Save assignment" }).click();
   await expect.poll(() => state.writes.length).toBe(2);
   expect(state.writes[1].body).toMatchObject({
     channel: "dropship",

@@ -1,11 +1,17 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
-import { getJson, putJson } from "./pricing-programs/api";
-import { useConfigurationCommand } from "./BoxSuitesPanel";
+import { Input } from "@/components/ui/input";
 import { dropshipSharedShippingConfigSchema } from "@shared/shipping/configuration";
+import {
+  getJson,
+  putJson,
+  invalidateShippingAdmin,
+} from "./pricing-programs/api";
+import { useConfigurationCommand } from "./configuration-client";
+import { PackagingAssignmentEditor } from "./PackagingAssignmentsPanel";
+import { DropshipProgramEditor } from "./DropshipProgramEditor";
 
-const selectClass = "h-10 w-full rounded-md border bg-background px-3 text-sm";
 export function DropshipSharedShippingPanel() {
   const query = useQuery({
     queryKey: ["/api/dropship/admin/shipping/shared"],
@@ -14,82 +20,90 @@ export function DropshipSharedShippingPanel() {
         await getJson("/api/dropship/admin/shipping/shared"),
       ),
   });
-  const [warehouse, setWarehouse] = useState("");
-  const [program, setProgram] = useState("");
-  const [suite, setSuite] = useState("");
-  const [service, setService] = useState("");
+  const client = useQueryClient();
+  const [editing, setEditing] = useState<{
+    part: "program" | "packaging";
+    warehouseId: number | null;
+  } | null>(null);
+  const [service, setService] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const [search, setSearch] = useState("");
+  const [page, setPage] = useState(0);
   const commandFor = useConfigurationCommand();
   const data = query.data;
-  const warehouseId = warehouse ? Number(warehouse) : null;
-  const assignment = data?.assignments.find(
-    (a) => a.warehouseId === warehouseId,
-  );
-  const inheritedProgram =
-    assignment ?? data?.assignments.find((a) => a.warehouseId === null);
-  const packaging =
-    data?.packaging.assignments.filter((a) => a.channel === "dropship") ?? [];
-  const boxAssignment = packaging.find((a) => a.warehouseId === warehouseId);
-  const inheritedSuite =
-    boxAssignment ?? packaging.find((a) => a.warehouseId === null);
-  async function save(part: string, body: Record<string, unknown>) {
-    setBusy(true);
-    setError("");
-    setMessage("");
-    try {
-      await putJson(`/api/dropship/admin/shipping/shared/${part}`, {
-        ...body,
-        commandId: commandFor({ part, ...body }),
-      });
-      await query.refetch({ throwOnError: true });
-      setProgram("");
-      setSuite("");
-      setService("");
-      setMessage("Saved. New quotes use the updated shared configuration.");
-    } catch (e) {
-      setError(
-        e instanceof Error
-          ? e.message
-          : "Unable to save shipping configuration.",
-      );
-    } finally {
-      setBusy(false);
-    }
-  }
   if (!data)
     return (
-      <div role={query.isError ? "alert" : undefined}>
+      <p role={query.isError ? "alert" : undefined}>
         {query.isLoading
           ? "Loading shared shipping configuration…"
           : "Unable to load shipping configuration."}
         <Button variant="outline" onClick={() => query.refetch()}>
           Refresh
         </Button>
-      </div>
+      </p>
     );
+  const selectedService = service ?? String(data.selectedService?.id ?? "");
+  const packaging = data.packaging.assignments.filter(
+    (a) => a.channel === "dropship",
+  );
+  const defaultSuite = packaging.find((a) => a.warehouseId === null);
+  const defaultProgram = data.assignments.find((a) => a.warehouseId === null);
+  const matches = data.packaging.warehouses.filter((w) =>
+    w.name.toLowerCase().includes(search.toLowerCase()),
+  );
+  const totalPages = Math.max(1, Math.ceil(matches.length / 50));
+  const currentPage = Math.min(page, totalPages - 1);
+  const rows = [
+    { id: null, name: "Channel default" },
+    ...matches.slice(currentPage * 50, (currentPage + 1) * 50),
+  ];
+  const edit = (part: "program" | "packaging", warehouseId: number | null) => {
+    setMessage("");
+    setError("");
+    setEditing({ part, warehouseId });
+  };
+  const refreshed = async () => {
+    await query.refetch({ throwOnError: true });
+    setMessage(
+      "Assignment saved. Updated values are shown below and in shared Shipping Settings.",
+    );
+  };
   return (
     <section className="space-y-5 rounded-lg border bg-card p-5">
-      <div className="flex flex-wrap justify-between gap-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 className="text-lg font-semibold">Dropship shipping</h2>
           <p className="text-sm text-muted-foreground">
-            Shared packing and pricing, with assignments specific to Dropship.
-            Vendor store connections do not maintain separate rate cards.
+            Shared pricing and packaging, with channel defaults and warehouse
+            overrides.
           </p>
         </div>
-        <Button variant="outline" onClick={() => query.refetch()}>
+        <Button
+          disabled={busy}
+          variant="outline"
+          onClick={async () => {
+            setMessage("");
+            setError("");
+            try {
+              invalidateShippingAdmin(client);
+              await query.refetch({ throwOnError: true });
+            } catch {
+              setError("Could not refresh shipping configuration.");
+            }
+          }}
+        >
           Refresh
         </Button>
       </div>
       {error && (
-        <p role="alert" className="text-sm text-destructive">
+        <p role="alert" className="text-destructive">
           {error}
         </p>
       )}
       {message && (
-        <p role="status" className="text-sm text-emerald-700">
+        <p role="status" className="text-emerald-700">
           {message}
         </p>
       )}
@@ -100,157 +114,186 @@ export function DropshipSharedShippingPanel() {
           className="rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950"
         >
           {data.runtimeConfigurationError ??
-            `Deployment shipping mode is ${data.runtimeMode}. Shared pricing applies only to enabled stores; the remaining stores still use preserved legacy rates. Switch the deployment to live before retiring rollback configuration.`}
+            `Deployment shipping mode is ${data.runtimeMode}. Some stores still use preserved legacy rates.`}
         </p>
       )}
-      <label className="grid max-w-sm gap-1 text-sm">
-        Configuration scope
-        <select
-          className={selectClass}
-          value={warehouse}
+      <div className="space-y-3">
+        <h3 className="font-medium">Pricing and packaging assignments</h3>
+        <p className="text-sm text-muted-foreground">
+          Each warehouse can have its own program and suite, or inherit the
+          channel default. This table does not enable warehouses for
+          fulfillment.
+        </p>
+        {data.configuredChannelId && (
+          <p className="text-sm">
+            Pricing uses versioned channel routing, including destination rules.{" "}
+            <a
+              className="underline"
+              href="/shipping-settings?tab=channel-routing"
+            >
+              Edit pricing routing
+            </a>
+          </p>
+        )}
+        <Input
+          className="max-w-sm"
+          aria-label="Search assignment warehouses"
+          placeholder="Search warehouses"
+          value={search}
           onChange={(e) => {
-            setWarehouse(e.target.value);
-            setProgram("");
-            setSuite("");
+            setSearch(e.target.value);
+            setPage(0);
           }}
-        >
-          <option value="">Channel default</option>
-          {data.packaging.warehouses.map((w) => (
-            <option key={w.id} value={w.id}>
-              {w.name}
-            </option>
-          ))}
-        </select>
-      </label>
-      <div className="grid gap-5 md:grid-cols-2">
-        <section className="space-y-3 rounded border p-4">
-          <h3 className="font-medium">Pricing program</h3>
-          <p className="text-sm">
-            {data.configuredChannelId ? (
-              data.programs
-                .filter((p) =>
-                  data.assignments.some((a) => a.rateBookId === p.id),
-                )
-                .map((p) => p.name)
-                .join(", ") || "No active pricing program in routing"
-            ) : (
-              <>
-                {data.programs.find(
-                  (p) => p.id === inheritedProgram?.rateBookId,
-                )?.name ?? "Not configured"}
-                {!assignment && inheritedProgram ? " · inherited" : ""}
-              </>
-            )}
-          </p>
-          {data.configuredChannelId ? (
-            <p className="text-sm text-muted-foreground">
-              Channel routing owns this selection, including warehouse and
-              destination overrides. Edit it there to publish a validated
-              routing revision.
-            </p>
-          ) : (
-            <>
-              <select
-                aria-label="Dropship pricing program"
-                className={selectClass}
-                value={program}
-                onChange={(e) => setProgram(e.target.value)}
-              >
-                <option value="">Choose pricing program</option>
-                {data.programs.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
-                ))}
-              </select>
-              <Button
-                disabled={
-                  busy || !program || assignment?.rateBookId === Number(program)
-                }
-                onClick={() =>
-                  save("program", {
-                    warehouseId,
-                    rateBookId: Number(program),
-                    expectedProgramId: assignment?.rateBookId ?? null,
-                  })
-                }
-              >
-                Save program
-              </Button>
-            </>
-          )}
-          <p className="text-xs text-muted-foreground">
-            Rates, destination coverage, markup and insurance charges are
-            maintained in the program.
-          </p>
+        />
+        <div className="max-h-[28rem] overflow-auto rounded border">
+          <table className="w-full text-left text-sm">
+            <thead className="sticky top-0 bg-background">
+              <tr className="border-b">
+                <th className="p-3">Warehouse</th>
+                <th className="p-3">Pricing program</th>
+                <th className="p-3">Box suite</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((w) => {
+                const programAssignment = data.assignments.find(
+                  (a) => a.warehouseId === w.id,
+                );
+                const program = data.programs.find(
+                  (p) =>
+                    p.id === (programAssignment ?? defaultProgram)?.rateBookId,
+                );
+                const suiteAssignment = packaging.find(
+                  (a) => a.warehouseId === w.id,
+                );
+                const suite = data.packaging.suites.find(
+                  (s) => s.id === (suiteAssignment ?? defaultSuite)?.suiteId,
+                );
+                const routingNames = data.programs.filter((p) =>
+                  data.assignments.some(
+                    (a) =>
+                      (a.warehouseId === w.id || a.warehouseId === null) &&
+                      a.rateBookId === p.id,
+                  ),
+                );
+                return (
+                  <tr
+                    className="border-b align-top last:border-0"
+                    key={w.id ?? "default"}
+                  >
+                    <th scope="row" className="p-3 font-medium">
+                      {w.name}
+                    </th>
+                    <td className="p-3">
+                      <div>
+                        {data.configuredChannelId ? (
+                          routingNames.map((p) => p.name).join(", ") ||
+                          "No matching program"
+                        ) : program ? (
+                          <a
+                            className="underline"
+                            href={`/shipping-settings?tab=pricing-programs&program=${program.id}`}
+                          >
+                            {program.name}
+                          </a>
+                        ) : (
+                          "Not configured"
+                        )}
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        {data.configuredChannelId
+                          ? "Managed by routing"
+                          : w.id === null
+                            ? "Default"
+                            : programAssignment
+                              ? "Warehouse override"
+                              : "Inherited from default"}
+                      </div>
+                      {!data.configuredChannelId && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          aria-label={`Edit ${w.name} pricing program`}
+                          onClick={() => edit("program", w.id)}
+                        >
+                          Edit
+                        </Button>
+                      )}
+                    </td>
+                    <td className="p-3">
+                      <div>{suite?.name ?? "Not configured"}</div>
+                      <div className="text-xs text-muted-foreground">
+                        {w.id === null
+                          ? "Default"
+                          : suiteAssignment
+                            ? "Warehouse override"
+                            : "Inherited from default"}
+                      </div>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        aria-label={`Edit ${w.name} packaging`}
+                        onClick={() => edit("packaging", w.id)}
+                      >
+                        Edit
+                      </Button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        {totalPages > 1 && (
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              disabled={currentPage === 0}
+              onClick={() => setPage(currentPage - 1)}
+            >
+              Previous
+            </Button>
+            <span>
+              Page {currentPage + 1} of {totalPages}
+            </span>
+            <Button
+              variant="outline"
+              disabled={currentPage + 1 >= totalPages}
+              onClick={() => setPage(currentPage + 1)}
+            >
+              Next
+            </Button>
+          </div>
+        )}
+        <div className="flex flex-wrap gap-4 text-sm">
           <a
-            className="block text-sm underline"
-            href={`/shipping-settings?tab=${data.configuredChannelId ? "channel-routing" : "pricing-programs"}`}
+            className="underline"
+            href="/shipping-settings?tab=pricing-programs"
           >
-            Edit shared pricing configuration
+            Manage pricing programs
           </a>
-        </section>
-        <section className="space-y-3 rounded border p-4">
-          <h3 className="font-medium">Packaging suite</h3>
-          <p className="text-sm">
-            {data.packaging.suites.find((s) => s.id === inheritedSuite?.suiteId)
-              ?.name ?? "Not configured"}
-            {!boxAssignment && inheritedSuite ? " · inherited" : ""}
-          </p>
-          <select
-            aria-label="Dropship packaging suite"
-            className={selectClass}
-            value={suite}
-            onChange={(e) => setSuite(e.target.value)}
-          >
-            <option value="">Choose suite</option>
-            {data.packaging.suites.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.name}
-              </option>
-            ))}
-          </select>
-          <Button
-            disabled={
-              busy || !suite || boxAssignment?.suiteId === Number(suite)
-            }
-            onClick={() =>
-              save("packaging", {
-                channel: "dropship",
-                warehouseId,
-                suiteId: Number(suite),
-                expectedRevision: boxAssignment?.revision ?? 0,
-              })
-            }
-          >
-            Save suite assignment
-          </Button>
-          <p className="text-xs text-muted-foreground">
-            Only suite members available at the fulfillment warehouse can be
-            used. This selection is independent of pricing.
-          </p>
-          <a
-            className="block text-sm underline"
-            href="/shipping-settings?tab=boxes"
-          >
-            Edit shared boxes and suites
+          <a className="underline" href="/shipping-settings?tab=box-suites">
+            Manage box suites
           </a>
-        </section>
+        </div>
       </div>
       <section className="space-y-3 rounded border p-4">
         <h3 className="font-medium">Vendor fulfillment service level</h3>
-        <p className="text-sm">
-          {data.serviceLevels.find((s) => s.id === data.selectedService?.id)
-            ?.name ?? "Not configured"}
-        </p>
         <div className="flex flex-wrap gap-3">
           <select
             aria-label="Dropship fulfillment service"
-            className={`${selectClass} max-w-sm`}
-            value={service}
-            onChange={(e) => setService(e.target.value)}
+            className="h-10 w-full max-w-sm rounded border bg-background px-3"
+            value={selectedService}
+            disabled={busy}
+            onChange={(e) => {
+              setService(e.target.value);
+              setMessage("");
+              setError("");
+            }}
           >
-            <option value="">Choose service level</option>
+            <option value="" disabled>
+              Choose service level
+            </option>
             {data.serviceLevels.map((s) => (
               <option key={s.id} value={s.id}>
                 {s.name}
@@ -259,15 +302,38 @@ export function DropshipSharedShippingPanel() {
           </select>
           <Button
             disabled={
-              busy || !service || Number(service) === data.selectedService?.id
+              busy ||
+              !selectedService ||
+              Number(selectedService) === data.selectedService?.id
             }
-            onClick={() =>
-              save("service", {
+            onClick={async () => {
+              setBusy(true);
+              setError("");
+              setMessage("");
+              const body = {
                 channel: "dropship",
-                serviceLevelId: Number(service),
+                serviceLevelId: Number(selectedService),
                 expectedRevision: data.selectedService?.revision ?? 0,
-              })
-            }
+              };
+              try {
+                await putJson("/api/dropship/admin/shipping/shared/service", {
+                  ...body,
+                  commandId: commandFor(body),
+                });
+                invalidateShippingAdmin(client);
+                await query.refetch({ throwOnError: true });
+                setService(null);
+                setMessage("Service level saved.");
+              } catch (e) {
+                setError(
+                  e instanceof Error
+                    ? e.message
+                    : "Unable to save service level.",
+                );
+              } finally {
+                setBusy(false);
+              }
+            }}
           >
             Save service level
           </Button>
@@ -277,11 +343,24 @@ export function DropshipSharedShippingPanel() {
           program. Carrier methods remain configured on the service level.
         </p>
       </section>
-      <p className="text-sm text-muted-foreground">
-        Test the complete vendor charge in a listing preview using its quantity
-        and destination. Shared pricing programs also provide “Test live rates”
-        for rate coverage checks.
-      </p>
+      {editing?.part === "packaging" && (
+        <PackagingAssignmentEditor
+          data={data.packaging}
+          channel="dropship"
+          dropship
+          warehouseId={editing.warehouseId}
+          onClose={() => setEditing(null)}
+          onSaved={refreshed}
+        />
+      )}
+      {editing?.part === "program" && (
+        <DropshipProgramEditor
+          data={data}
+          warehouseId={editing.warehouseId}
+          onClose={() => setEditing(null)}
+          onSaved={refreshed}
+        />
+      )}
     </section>
   );
 }
