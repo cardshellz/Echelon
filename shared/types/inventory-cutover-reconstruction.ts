@@ -73,9 +73,23 @@ export type CutoverReconstructionLine = {
 export type CutoverReconstructionOrder = {
   orderId: number; warehouseId: number; lines: CutoverReconstructionLine[];
 };
+const positiveQuantity = z.string().regex(/^[1-9][0-9]*$/).max(10)
+  .refine((value) => BigInt(value) <= BigInt(2_147_483_647), "Quantity exceeds the inventory counter range");
+/** A whole empty position, never an arbitrary subset of its customer promises. */
+export const cutoverLegacyPromiseReleaseSchema = z.object({
+  inventoryLevelId: id, warehouseLocationId: id, warehouseId: id, productVariantId: id,
+  variantQty: z.literal("0"), reservedQty: positiveQuantity, pickedQty: raw, packedQty: z.literal("0"),
+  owners: z.array(z.object({ orderId: id, orderItemId: id, reservedQty: positiveQuantity,
+    journalCount: positiveQuantity, journalHash: hash }).strict()).min(1),
+}).strict().refine((release) => BigInt(release.pickedQty) >= BigInt(0)
+  && new Set(release.owners.map((owner) => owner.orderItemId)).size === release.owners.length
+  && release.owners.reduce((total, owner) => total + BigInt(owner.reservedQty), BigInt(0)) === BigInt(release.reservedQty),
+"Every promise must have one distinct owner and exhaust the complete level reservation");
+export type CutoverLegacyPromiseRelease = z.infer<typeof cutoverLegacyPromiseReleaseSchema>;
 export type CutoverReconstructionPlan = {
   evidenceHash: string; ready: boolean; blockers: CutoverReconstructionBlocker[];
   orders: CutoverReconstructionOrder[]; retainedIndependentBuildReservationIds: number[];
+  legacyPromiseReleases: CutoverLegacyPromiseRelease[];
 };
 export const cutoverReconstructionCommitSchema = z.object({
   expectedEvidenceHash: hash, activationRunId: z.string().regex(/^[1-9][0-9]{0,18}$/),
@@ -87,8 +101,19 @@ export type CutoverReconstructionCommit = z.infer<typeof cutoverReconstructionCo
 export const cutoverReconstructionReceiptSchema = z.object({
   evidenceHash: hash, claimIds: z.array(z.string().regex(/^[1-9][0-9]{0,18}$/)), orderIds: z.array(id),
   retainedIndependentBuildReservationIds: z.array(id),
+  // Missing on older immutable receipts means no promise handoff was performed.
+  legacyPromiseReleases: z.array(cutoverLegacyPromiseReleaseSchema).optional(),
+  legacyPromiseReleaseTransactionIds: z.array(id).optional(),
 }).strict().refine((receipt) => receipt.claimIds.length===receipt.orderIds.length
   && new Set(receipt.claimIds).size===receipt.claimIds.length && new Set(receipt.orderIds).size===receipt.orderIds.length
   && new Set(receipt.retainedIndependentBuildReservationIds).size===receipt.retainedIndependentBuildReservationIds.length,
-  "Reconstruction receipt identities must be unique and each order must have exactly one claim");
+  "Reconstruction receipt identities must be unique and each order must have exactly one claim")
+  .refine((receipt) => {
+    if (receipt.legacyPromiseReleases === undefined && receipt.legacyPromiseReleaseTransactionIds === undefined) return true;
+    if (!receipt.legacyPromiseReleases || !receipt.legacyPromiseReleaseTransactionIds) return false;
+    const owners = receipt.legacyPromiseReleases.flatMap((release) => release.owners.map((owner) => owner.orderItemId));
+    return new Set(receipt.legacyPromiseReleases.map((release) => release.inventoryLevelId)).size === receipt.legacyPromiseReleases.length
+      && new Set(owners).size === owners.length && receipt.legacyPromiseReleaseTransactionIds.length === owners.length
+      && new Set(receipt.legacyPromiseReleaseTransactionIds).size === owners.length;
+  }, "Every handed-off promise must have exactly one distinct audit transaction");
 export type CutoverReconstructionReceipt = z.infer<typeof cutoverReconstructionReceiptSchema>;

@@ -23,7 +23,9 @@ export function reconstructionSupply(evidence = reconstructionEvidence()) {
     rootProducts: [{ productId: 20, legacyInventoryStrategy: "physical_only" }],
     variants: [{ id: 101, productId: 20, sku: "P5", name: "Pack", unitsPerVariant: 5, isActive: true, salesEligibility: "sellable" }],
     warehouses: [{ id: 1, code: "MAIN", isActive: true, hubWarehouseId: null }],
-    locations: [{ id: 100, warehouseId: 1, code: "PICK", locationType: "pick", isPickable: true, isActive: true, isFrozen: false, promisePolicy: null }],
+    locations: [...new Map(evidence.levels.map((level) => [level.warehouseLocationId, {
+      id: level.warehouseLocationId, warehouseId: level.warehouseId, code: level.warehouseLocationId === 100 ? "PICK" : `PICK-${level.warehouseLocationId}`,
+      locationType: "pick", isPickable: true, isActive: true, isFrozen: false, promisePolicy: null }])).values()],
     inventoryPositions: evidence.levels.map(({ id, warehouseId: _warehouse, ...level }) => ({ inventoryLevelId: id, ...level })),
     safetyPolicies: [{ policyId: 1,version: 1,lifecycleSelection: "active_head",scopeKey: "business",scopeType: "business",
       productVariantId: null,warehouseId: null,policyMode: "off",fixedUnits: null,daysOfCoverMilliDays: null,
@@ -32,4 +34,16 @@ export function reconstructionSupply(evidence = reconstructionEvidence()) {
       lifecycleSelection: "active_head", lifecycleStatus: "sealed", buildToPromiseEnabled: false, definitionHash: "c".repeat(64),
       validationState: "valid", validationErrors: [], paths: [], recipeBindings: [] }],
     legacyRecipes: [], outputLocations: [], claimProjectionSource: "inventory_levels.reserved_qty" });
+}
+
+export function emptyBinPromiseEvidence(supplyQty = "20"): CutoverReconstructionEvidence {
+  const evidence = reconstructionEvidence();
+  evidence.items[0].pickedQuantity = 0;
+  evidence.costs = [];
+  evidence.levels[0] = { ...evidence.levels[0], variantQty: "0", reservedQty: "6", pickedQty: "0" };
+  evidence.lots[0] = { ...evidence.lots[0], onHandQty: "0", reservedQty: "0", pickedQty: "0" };
+  evidence.journals[0] = { ...evidence.journals[0], reservedQty: "6", pickedQty: "0", journalCount: "1" };
+  evidence.levels.push({ ...evidence.levels[0], id: 20, warehouseLocationId: 200, variantQty: supplyQty, reservedQty: "0" });
+  evidence.lots.push({ ...evidence.lots[0], id: 5, warehouseLocationId: 200, onHandQty: supplyQty });
+  return evidence;
 }

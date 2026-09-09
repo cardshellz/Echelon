@@ -47,6 +47,11 @@ export const inventoryCutoverReviewSchema = z.object({
     orders: z.number().int().nonnegative(),
     lines: z.number().int().nonnegative(),
     retainedIndependentBuildHolds: z.number().int().nonnegative(),
+    // Optional for responses captured before the promise-handoff extension.
+    legacyPromiseReplanning: z.object({ positions: z.number().int().nonnegative(),
+      orderLines: z.number().int().nonnegative() }).strict().refine((summary) =>
+      summary.orderLines >= summary.positions && (summary.positions > 0 || summary.orderLines === 0),
+    "Every promise position must have at least one retained demand line").optional(),
   }).strict(),
   publicationRows: z.array(z.object({
     publicationTargetId: id,
