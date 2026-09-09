@@ -73,6 +73,11 @@ describe("InventoryUseCases.recordShipment — deductFromOnHandOnly", () => {
       ([, adj]: any[]) => adj && "pickedQty" in adj,
     );
     expect(touchedPicked).toBe(false);
+    expect(lotService.withTx().shipFromLots).toHaveBeenCalledWith({
+      productVariantId: 30, warehouseLocationId: 20, qty: 2,
+      fromPicked: 0, fromOnHand: 2, reservedToRelease: 2,
+    });
+    expect(storage.createInventoryTransaction).toHaveBeenCalledWith(expect.objectContaining({ reservedQtyDelta: -2 }), tx);
   });
 
   it("by default (flag unset) still draws from the picked pool first", async () => {
@@ -96,6 +101,10 @@ describe("InventoryUseCases.recordShipment — deductFromOnHandOnly", () => {
       ([, adj]: any[]) => adj && "variantQty" in adj,
     );
     expect(touchedOnHand).toBe(false);
+    expect(lotService.withTx().shipFromLots).toHaveBeenCalledWith({
+      productVariantId: 30, warehouseLocationId: 20, qty: 2,
+      fromPicked: 2, fromOnHand: 0, reservedToRelease: 0,
+    });
   });
 
   it("deducts a concession only from unreserved on-hand inventory", async () => {
@@ -116,6 +125,10 @@ describe("InventoryUseCases.recordShipment — deductFromOnHandOnly", () => {
     });
 
     expect(storage.adjustInventoryLevel).toHaveBeenCalledWith(10, { variantQty: -2 }, tx);
+    expect(lotService.withTx().shipFromLots).toHaveBeenCalledWith({
+      productVariantId: 30, warehouseLocationId: 20, qty: 2,
+      fromPicked: 0, fromOnHand: 2, reservedToRelease: 0,
+    });
   });
 
   it("refuses a concession that would consume another order's reserved stock", async () => {
@@ -259,7 +272,8 @@ describe("InventoryUseCases.recordReplacementShipmentFromAvailableInventory", ()
       recordOrderItemCosts: false,
       allowReservedStock: false,
     }));
-    expect(shipFromLots).toHaveBeenCalledWith(expect.objectContaining({ qty: 2 }));
+    expect(shipFromLots).toHaveBeenCalledWith({ productVariantId: 30, warehouseLocationId: 21,
+      qty: 2, fromPicked: 2, fromOnHand: 0, reservedToRelease: 0 });
     expect(storage.createInventoryTransaction).toHaveBeenCalledTimes(2);
     expect(storage.createInventoryTransaction.mock.calls[0][0]).toEqual(expect.objectContaining({
       transactionType: "pick",

@@ -85,6 +85,9 @@ export interface ShippingCartonPlacement {
 // ---------------------------------------------------------------------------
 
 export const shippingBoxCatalog = shippingSchema.table("box_catalog", {
+  outerLengthMm: integer('outer_length_mm'),
+  outerWidthMm: integer('outer_width_mm'),
+  outerHeightMm: integer('outer_height_mm'),
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   code: varchar("code", { length: 80 }).notNull(),
   name: varchar("name", { length: 200 }).notNull(),
@@ -108,6 +111,9 @@ export const shippingBoxCatalog = shippingSchema.table("box_catalog", {
   check("shipping_box_dims_chk", sql`${table.lengthMm} > 0 AND ${table.widthMm} > 0 AND ${table.heightMm} > 0 AND ${table.tareWeightGrams} >= 0`),
   check("shipping_box_cost_chk", sql`${table.costCents} >= 0`),
   check("shipping_box_fill_chk", sql`${table.fillFactorBps} > 0 AND ${table.fillFactorBps} <= 10000`),
+  check('shipping_box_outer_dimensions_chk',sql`(${table.outerLengthMm} IS NULL AND ${table.outerWidthMm} IS NULL AND ${table.outerHeightMm} IS NULL)
+    OR (${table.outerLengthMm} IS NOT NULL AND ${table.outerWidthMm} IS NOT NULL AND ${table.outerHeightMm} IS NOT NULL
+      AND ${table.outerLengthMm} >= ${table.lengthMm} AND ${table.outerWidthMm} >= ${table.widthMm} AND ${table.outerHeightMm} >= ${table.heightMm})`),
 ]);
 
 export const shippingBoxWarehouseStock = shippingSchema.table("box_warehouse_stock", {
@@ -171,6 +177,7 @@ export const shippingZoneSets = shippingSchema.table("zone_sets", {
 ]);
 
 export const shippingRateBooks = shippingSchema.table("rate_books", {
+  chargePolicyRequired: boolean('charge_policy_required').notNull().default(false),
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   code: varchar("code", { length: 80 }).notNull(),
   name: varchar("name", { length: 160 }).notNull(),
@@ -1311,6 +1318,7 @@ export const shippingTransitMatrix = shippingSchema.table("transit_matrix", {
 // ---------------------------------------------------------------------------
 
 export const shippingPackPlans = shippingSchema.table("pack_plans", {
+  packagingSnapshot: jsonb('packaging_snapshot'),
   id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
   wmsOrderId: integer("wms_order_id").references(() => orders.id, { onDelete: "cascade" }),
   shipmentRequestId: bigint("shipment_request_id", { mode: "number" }).references(() => shipmentRequests.id, { onDelete: "set null" }),

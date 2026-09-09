@@ -1,4 +1,7 @@
 import { useEffect, useState } from "react";
+import { dollarsToCents } from '@shared/utils/money';
+import { BoxSuitesPanel } from '@/components/shipping/BoxSuitesPanel';
+import { PackagingAssignmentsPanel } from '@/components/shipping/PackagingAssignmentsPanel';
 import { useQuery, useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -45,6 +48,9 @@ import {
 // ===== Types (API contract: /api/shipping/admin/*) =====
 
 interface ShippingBox {
+  outerLengthMm?: number | null;
+  outerWidthMm?: number | null;
+  outerHeightMm?: number | null;
   id: number;
   code: string;
   name: string;
@@ -254,6 +260,9 @@ function apiErrorFromBody(body: unknown, status: number): ApiRequestError {
 // ===== Box catalog =====
 
 interface BoxPayload {
+  outerLengthMm?: number | null;
+  outerWidthMm?: number | null;
+  outerHeightMm?: number | null;
   id?: number;
   code: string;
   name: string;
@@ -270,6 +279,9 @@ interface BoxPayload {
 }
 
 interface BoxFormState {
+  outerLengthIn: string;
+  outerWidthIn: string;
+  outerHeightIn: string;
   code: string;
   name: string;
   kind: string;
@@ -286,6 +298,7 @@ interface BoxFormState {
 
 function emptyBoxForm(): BoxFormState {
   return {
+    outerLengthIn: '',outerWidthIn: '',outerHeightIn: '',
     code: "",
     name: "",
     kind: "box",
@@ -303,6 +316,9 @@ function emptyBoxForm(): BoxFormState {
 
 function boxFormFromBox(box: ShippingBox): BoxFormState {
   return {
+    outerLengthIn: formatMeasurementInput(box.outerLengthMm ?? null,MILLIMETERS_PER_INCH),
+    outerWidthIn: formatMeasurementInput(box.outerWidthMm ?? null,MILLIMETERS_PER_INCH),
+    outerHeightIn: formatMeasurementInput(box.outerHeightMm ?? null,MILLIMETERS_PER_INCH),
     code: box.code,
     name: box.name,
     kind: box.kind,
@@ -335,13 +351,21 @@ function buildBoxPayload(form: BoxFormState, editingId: number | null): BoxPaylo
     ? toStoredMeasurement(form.tareOz, "Tare weight", GRAMS_PER_OUNCE)
     : 0;
   const maxWeightGrams = toStoredMeasurement(form.maxWeightLb, "Max weight", GRAMS_PER_POUND);
+  const outerLengthMm = toStoredMeasurement(form.outerLengthIn,'Outer length',MILLIMETERS_PER_INCH);
+  const outerWidthMm = toStoredMeasurement(form.outerWidthIn,'Outer width',MILLIMETERS_PER_INCH);
+  const outerHeightMm = toStoredMeasurement(form.outerHeightIn,'Outer height',MILLIMETERS_PER_INCH);
+  const outer = [outerLengthMm,outerWidthMm,outerHeightMm];
+  if (outer.some((value) => value !== null) && (outer.some((value) => value === null)
+    || outerLengthMm! < lengthMm || outerWidthMm! < widthMm || outerHeightMm! < heightMm)) {
+    throw new Error('Enter all three outer dimensions, each at least as large as its inner dimension.');
+  }
 
   const costTrimmed = form.costUsd.trim();
-  const costParsed = costTrimmed ? Number(costTrimmed) : 0;
-  if (!Number.isFinite(costParsed) || costParsed < 0) {
-    throw new Error("Cost must be zero or greater.");
+  if (costTrimmed && !/^\d+(\.\d{1,2})?$/.test(costTrimmed)) {
+    throw new Error("Cost must be a non-negative amount with at most two decimal places.");
   }
-  const costCents = Math.round(costParsed * 100);
+  const costCents = dollarsToCents(costTrimmed || '0');
+  if (!Number.isSafeInteger(costCents)) throw new Error('Cost is too large.');
 
   const fillParsed = Number(form.fillFactorPct.trim() || "0");
   if (!Number.isFinite(fillParsed) || fillParsed <= 0 || fillParsed > 100) {
@@ -354,6 +378,7 @@ function buildBoxPayload(form: BoxFormState, editingId: number | null): BoxPaylo
     code,
     name,
     kind: form.kind,
+    outerLengthMm,outerWidthMm,outerHeightMm,
     lengthMm,
     widthMm,
     heightMm,
@@ -368,6 +393,7 @@ function buildBoxPayload(form: BoxFormState, editingId: number | null): BoxPaylo
 
 function boxToPayload(box: ShippingBox): BoxPayload {
   return {
+    outerLengthMm: box.outerLengthMm ?? null,outerWidthMm: box.outerWidthMm ?? null,outerHeightMm: box.outerHeightMm ?? null,
     id: box.id,
     code: box.code,
     name: box.name,
@@ -630,6 +656,10 @@ function BoxCatalogTab({
                 />
               </div>
             </div>
+            <fieldset className="space-y-2"><legend className="text-sm font-medium">Outer shipping dimensions (optional, inches)</legend>
+              <p className="text-xs text-muted-foreground">Measured outside the closed package. Inner dimensions control fit; outer dimensions describe the shipment. Leave all three blank if not measured.</p>
+              <div className="grid grid-cols-3 gap-3">{([['outerLengthIn','Outer length'],['outerWidthIn','Outer width'],['outerHeightIn','Outer height']] as const).map(([key,label]) => <label key={key} className="space-y-1 text-sm">{label}<Input type="number" min="0" step="0.001" value={form[key]} onChange={(e) => setForm((previous) => ({ ...previous,[key]: e.target.value }))} /></label>)}</div>
+            </fieldset>
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
                 <Label>Tare weight (oz)</Label>
@@ -1273,15 +1303,17 @@ export default function ShippingSettings() {
       <Tabs defaultValue={initialShippingSettingsTab()}>
         <TabsList className="h-auto flex-wrap justify-start">
           <TabsTrigger value="boxes">Box catalog</TabsTrigger>
+          <TabsTrigger value="box-suites">Box suites</TabsTrigger>
           <TabsTrigger value="packing-attrs">Packing attributes</TabsTrigger>
           <TabsTrigger value="fulfillment-providers">Fulfillment providers</TabsTrigger>
           <TabsTrigger value="destinations">Destinations</TabsTrigger>
           <TabsTrigger value="pricing-programs">Pricing programs</TabsTrigger>
           <TabsTrigger value="channel-routing">Channel routing</TabsTrigger>
         </TabsList>
-        <TabsContent value="boxes" className="mt-4">
+        <TabsContent value="boxes" className="mt-4 space-y-4">
           <BoxCatalogTab boxes={config?.boxes || []} warehouses={warehouses} isLoading={configLoading} />
         </TabsContent>
+        <TabsContent value="box-suites" className="mt-4"><BoxSuitesPanel /></TabsContent>
         <TabsContent value="packing-attrs" className="mt-4">
           <PackingAttributesTab />
         </TabsContent>
@@ -1295,7 +1327,11 @@ export default function ShippingSettings() {
           <PricingProgramsTab />
         </TabsContent>
         <TabsContent value="channel-routing" className="mt-4">
-          <ChannelRoutingTab />
+          <Tabs defaultValue={new URLSearchParams(window.location.search).get('section') === 'packaging' ? 'packaging' : 'pricing'}>
+            <TabsList><TabsTrigger value="pricing">Pricing routing</TabsTrigger><TabsTrigger value="packaging">Packaging assignments</TabsTrigger></TabsList>
+            <TabsContent value="pricing" className="mt-4"><ChannelRoutingTab /></TabsContent>
+            <TabsContent value="packaging" className="mt-4"><PackagingAssignmentsPanel /></TabsContent>
+          </Tabs>
         </TabsContent>
       </Tabs>
     </div>
@@ -1305,5 +1341,5 @@ export default function ShippingSettings() {
 function initialShippingSettingsTab(): string {
   if (typeof window === "undefined") return "boxes";
   const requested = new URLSearchParams(window.location.search).get("tab");
-  return requested === "fulfillment-providers" ? requested : "boxes";
+  return requested && ['boxes','box-suites','packing-attrs','fulfillment-providers','destinations','pricing-programs','channel-routing'].includes(requested) ? requested : 'boxes';
 }

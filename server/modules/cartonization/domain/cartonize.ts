@@ -43,6 +43,9 @@ export interface CartonizeItem {
 }
 
 export interface CartonizeBox {
+  outerLengthMm?: number | null;
+  outerWidthMm?: number | null;
+  outerHeightMm?: number | null;
   id: number;
   code: string;
   kind: "box" | "mailer" | "envelope";
@@ -526,6 +529,11 @@ function downsize(parcel: OpenParcel, boxesByVolumeAsc: CartonizeBox[]): void {
 
 function finalizeParcel(parcel: OpenParcel, dimDivisor: number, reason: string): CartonParcel {
   const est = parcel.contentWeightGrams + parcel.box.tareWeightGrams;
+  // Fit and placement use inner dimensions. Shipping uses measured outer
+  // dimensions when available; old catalogs retain their previous estimate.
+  const length = parcel.box.outerLengthMm ?? parcel.box.lengthMm;
+  const width = parcel.box.outerWidthMm ?? parcel.box.widthMm;
+  const height = parcel.box.outerHeightMm ?? parcel.box.heightMm;
   return {
     boxId: parcel.box.id,
     boxCode: parcel.box.code,
@@ -534,11 +542,11 @@ function finalizeParcel(parcel: OpenParcel, dimDivisor: number, reason: string):
     placements: parcel.placements.map((placement) => ({ ...placement })),
     estWeightGrams: est,
     billableWeightGrams: billableWeightGrams(
-      parcel.box.lengthMm, parcel.box.widthMm, parcel.box.heightMm, est, dimDivisor,
+      length, width, height, est, dimDivisor,
     ),
-    lengthMm: parcel.box.lengthMm,
-    widthMm: parcel.box.widthMm,
-    heightMm: parcel.box.heightMm,
+    lengthMm: length,
+    widthMm: width,
+    heightMm: height,
     shippingGroupCode: parcel.shippingGroupCode,
     reason,
   };

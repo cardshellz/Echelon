@@ -15,6 +15,8 @@ export interface DropshipCartonizationRequest {
 }
 
 export interface DropshipCartonizationResult {
+  /** Internal evidence identifies the shared suite and exact box specifications. */
+  packaging?: { suiteId: number; suiteRevision: number; assignmentRevision: number; boxes: unknown[] };
   packages: DropshipCartonizedPackage[];
   engine: {
     name: string;

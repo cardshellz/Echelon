@@ -153,6 +153,12 @@
   "dropship.dropship_collection_attempts": [
     "modules/dropship"
   ],
+  "dropship.dropship_content_profile_revisions": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_content_profiles": [
+    "modules/dropship"
+  ],
   "dropship.dropship_ebay_listing_policy_override_revisions": [
     "modules/dropship"
   ],
@@ -174,19 +180,13 @@
   "dropship.dropship_insurance_pool_ledger": [
     "modules/dropship"
   ],
-  "dropship.dropship_listing_price_revisions": [
-    "modules/dropship"
-  ],
-  "dropship.dropship_content_profile_revisions": [
-    "modules/dropship"
-  ],
-  "dropship.dropship_content_profiles": [
-    "modules/dropship"
-  ],
   "dropship.dropship_listing_content_revisions": [
     "modules/dropship"
   ],
   "dropship.dropship_listing_content_settings": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_listing_price_revisions": [
     "modules/dropship"
   ],
   "dropship.dropship_listing_price_settings": [
@@ -1033,6 +1033,15 @@
   "shipping.box_catalog": [
     "modules/shipping-engine"
   ],
+  "shipping.box_suite_members": [
+    "modules/shipping-engine"
+  ],
+  "shipping.box_suite_revisions": [
+    "modules/shipping-engine"
+  ],
+  "shipping.box_suites": [
+    "modules/shipping-engine"
+  ],
   "shipping.box_warehouse_stock": [
     "modules/shipping-engine"
   ],
@@ -1045,10 +1054,16 @@
   "shipping.channel_policy_routes": [
     "modules/shipping-engine"
   ],
+  "shipping.configuration_commands": [
+    "modules/shipping-engine"
+  ],
   "shipping.destination_scope_members": [
     "modules/shipping-engine"
   ],
   "shipping.destination_scopes": [
+    "modules/shipping-engine"
+  ],
+  "shipping.fulfillment_channel_services": [
     "modules/shipping-engine"
   ],
   "shipping.fulfillment_provider_connection_events": [
@@ -1077,6 +1092,9 @@
     "modules/cartonization",
     "modules/shipping-engine"
   ],
+  "shipping.packaging_assignments": [
+    "modules/shipping-engine"
+  ],
   "shipping.product_set_members": [
     "modules/shipping-engine"
   ],
@@ -1087,6 +1105,9 @@
     "modules/shipping-engine"
   ],
   "shipping.rate_book_assignments": [
+    "modules/shipping-engine"
+  ],
+  "shipping.rate_book_charge_revisions": [
     "modules/shipping-engine"
   ],
   "shipping.rate_book_destination_group_members": [

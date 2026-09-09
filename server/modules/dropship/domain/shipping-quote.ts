@@ -46,7 +46,7 @@ export interface NormalizedDropshipShippingQuoteItem extends DropshipShippingQuo
 
 /**
  * Physical facts come from catalog.product_variants (canonical). Channel
- * defaults (carrier/service/box) come from dropship.dropship_package_profiles.
+ * compatibility packing preferences come from shipping.channel_packing_preferences.
  * Dims may be null — that degrades packaging to weight-only, it does not
  * block quoting. Weight may NOT be null: the current rate engine cannot
  * price without it, so a missing weight remains a hard data error.
@@ -67,6 +67,12 @@ export interface DropshipPackageProfile {
 }
 
 export interface DropshipBoxCatalogEntry {
+  outerLengthMm?: number | null;
+  outerWidthMm?: number | null;
+  outerHeightMm?: number | null;
+  kind?: CartonizeBox['kind'];
+  costCents?: number;
+  fillFactorBps?: number;
   id: number;
   code: string;
   name: string;
@@ -76,6 +82,22 @@ export interface DropshipBoxCatalogEntry {
   tareWeightGrams: number;
   maxWeightGrams: number | null;
   isActive: boolean;
+}
+
+/** A migrated preference may narrow a suite, but may never bypass it or make
+ * a deliberate suite replacement unusable. Historical profiles stay intact. */
+export function resolvePackageProfilesForSuite(
+  profiles: readonly DropshipPackageProfile[],
+  availableBoxIds: readonly number[],
+): { profiles: DropshipPackageProfile[]; ignoredPreference: boolean } {
+  const allowed = new Set(availableBoxIds);
+  const ignoredPreference = profiles.some((profile) => profile.defaultBoxId !== null && !allowed.has(profile.defaultBoxId));
+  return {
+    ignoredPreference,
+    profiles: profiles.map((profile) => ({ ...profile,
+      defaultBoxId: profile.defaultBoxId !== null && allowed.has(profile.defaultBoxId) ? profile.defaultBoxId : null,
+    })),
+  };
 }
 
 export interface DropshipCartonizedPackage {
@@ -425,16 +447,19 @@ function mapDropshipBoxToCartonizeBox(
   box: DropshipBoxCatalogEntry,
 ): CartonizeBox {
   return {
+    outerLengthMm: box.outerLengthMm,
+    outerWidthMm: box.outerWidthMm,
+    outerHeightMm: box.outerHeightMm,
     id: box.id,
     code: box.code,
-    kind: "box",
+    kind: box.kind ?? "box",
     lengthMm: box.lengthMm,
     widthMm: box.widthMm,
     heightMm: box.heightMm,
     tareWeightGrams: box.tareWeightGrams,
     maxWeightGrams: box.maxWeightGrams,
-    costCents: 0,
-    fillFactorBps: 10_000,
+    costCents: box.costCents ?? 0,
+    fillFactorBps: box.fillFactorBps ?? 10_000,
     isActive: box.isActive,
   };
 }
