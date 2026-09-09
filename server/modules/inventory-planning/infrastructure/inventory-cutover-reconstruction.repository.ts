@@ -16,6 +16,10 @@ import { captureActiveClaimSupplySnapshotInsideTransaction } from "./inventory-a
 import { persistReconstructedCutoverClaim } from "./inventory-availability-claim.repository";
 import type { InventoryCutoverLegacyPromisePort } from "../application/inventory-cutover-legacy-promise.port";
 import { PostgresInventoryCutoverLegacyPromiseRepository } from "../../inventory/infrastructure/inventory-cutover-legacy-promise.repository";
+import { captureInventoryCutoverStage } from "./inventory-cutover-capture-stage";
+
+const inventoryCaptureSchema = cutoverReconstructionEvidenceSchema.pick({ levels: true, lots: true,
+  journals: true, buildReservations: true, canonicalResources: true, canonicalClaimCount: true, canonicalClaimHash: true });
 
 export class CutoverReconstructionError extends Error {
   constructor(readonly code: string, message: string, readonly context: Record<string, unknown> = {}) { super(message); this.name = "CutoverReconstructionError"; }
@@ -27,26 +31,33 @@ export class PostgresInventoryCutoverReconstructionRepository implements Invento
     private readonly promiseWriter: InventoryCutoverLegacyPromisePort = new PostgresInventoryCutoverLegacyPromiseRepository()) {}
 
   async capture(client: PoolClient): Promise<CutoverReconstructionEvidence> {
-    const transaction = (await client.query(`SELECT current_setting('transaction_isolation') AS isolation,
-      current_setting('transaction_read_only') AS readonly`)).rows[0];
-    if (!(transaction?.readonly === "on" && ["repeatable read","serializable"].includes(transaction.isolation))) {
-      await assertInventoryCutoverFenceHeldInsideTransaction(client);
-    }
-    const inventory = await readInventoryCutoverReconstruction(client);
+    await captureInventoryCutoverStage("transaction_guard", async () => {
+      const transaction = (await client.query(`SELECT current_setting('transaction_isolation') AS isolation,
+        current_setting('transaction_read_only') AS readonly`)).rows[0];
+      if (!(transaction?.readonly === "on" && ["repeatable read","serializable"].includes(transaction.isolation))) {
+        await assertInventoryCutoverFenceHeldInsideTransaction(client);
+      }
+    });
+    const inventory = await captureInventoryCutoverStage("inventory_custody", async () =>
+      inventoryCaptureSchema.parse(await readInventoryCutoverReconstruction(client)));
     const residual = inventory.journals.filter((row) => BigInt(row.reservedQty) !== BigInt(0) || BigInt(row.pickedQty) !== BigInt(0));
-    const wms = await readWmsCutoverReconstruction(client,
+    const wms = await captureInventoryCutoverStage("wms_demand_and_packages", () => readWmsCutoverReconstruction(client,
       [...new Set(residual.flatMap((row) => row.orderId == null ? [] : [row.orderId]))],
-      [...new Set(residual.flatMap((row) => row.orderItemId == null ? [] : [row.orderItemId]))]);
-    const variants = (await client.query(`SELECT id, product_id AS "productId", sku, is_active AS "isActive",
+      [...new Set(residual.flatMap((row) => row.orderItemId == null ? [] : [row.orderItemId]))]));
+    const variants = await captureInventoryCutoverStage("variant_identity", async () => {
+      const rows = (await client.query(`SELECT id, product_id AS "productId", sku, is_active AS "isActive",
       requires_shipping AS "requiresShipping", COALESCE(track_inventory,true) AS "trackInventory", sales_eligibility AS "salesEligibility"
       FROM catalog.product_variants WHERE upper(sku)=ANY($1::text[]) ORDER BY id LIMIT 100001`,
-    [[...new Set(wms.items.map((item) => item.sku.toUpperCase()))]])).rows;
-    if (variants.length > 100_000) throw new CutoverReconstructionError("CUTOVER_VARIANT_CENSUS_LIMIT_EXCEEDED", "Variant evidence exceeds the complete bounded census.");
-    const costs = await readCutoverOriginalCosts(client, wms.items.map((item) => item.id));
-    const oms = await readOmsCutoverReconstruction(client);
-    const shipmentReviews = await readWmsCutoverShipmentReviews(client);
-    return cutoverReconstructionEvidenceSchema.parse({ schemaVersion: "inventory_cutover_reconstruction_v1", ...inventory, ...wms, ...oms,
-      variants, costs, shipmentReviewEvidence: [...oms.shipmentReviewEvidence, ...shipmentReviews] });
+      [[...new Set(wms.items.map((item) => item.sku.toUpperCase()))]])).rows;
+      if (rows.length > 100_000) throw new CutoverReconstructionError("CUTOVER_VARIANT_CENSUS_LIMIT_EXCEEDED", "Variant evidence exceeds the complete bounded census.");
+      return rows;
+    });
+    const costs = await captureInventoryCutoverStage("original_costs", () => readCutoverOriginalCosts(client, wms.items.map((item) => item.id)));
+    const oms = await captureInventoryCutoverStage("oms_demand_and_receipts", () => readOmsCutoverReconstruction(client));
+    const shipmentReviews = await captureInventoryCutoverStage("shipment_reviews", () => readWmsCutoverShipmentReviews(client));
+    return captureInventoryCutoverStage("evidence_validation", async () => cutoverReconstructionEvidenceSchema.parse({
+      schemaVersion: "inventory_cutover_reconstruction_v1", ...inventory, ...wms, ...oms,
+      variants, costs, shipmentReviewEvidence: [...oms.shipmentReviewEvidence, ...shipmentReviews] }));
   }
 
   async preview(client: PoolClient): Promise<CutoverReconstructionPlan> { return planCutoverReconstruction(await this.capture(client)); }

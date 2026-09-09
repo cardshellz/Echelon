@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { canonicalJson } from "@shared/utils/canonical-json";
-import { groupCutoverReceiptEvidence } from "../../domain/inventory-cutover-receipt-evidence";
+import { CUTOVER_RECEIPT_EVIDENCE_FORMAT, groupCutoverReceiptEvidence } from "../../domain/inventory-cutover-receipt-evidence";
 
 function receipt(id: string, overrides: Record<string, unknown> = {}) {
   return {
@@ -9,8 +9,9 @@ function receipt(id: string, overrides: Record<string, unknown> = {}) {
     attemptErrorCode: null, sourceEcho: true, attemptCount: 2, attemptNumber: 2,
     sourceProvider: "shopify", sourceChannelId: "36", sourceOrderId: "provider-order",
     sourceFulfillmentId: "provider-package", omsOrderId: "500", physicalShipmentId: "700",
-    evidence: { receipt: { id, processing_status: "ignored", raw_payload: { lines: [1, 2] } },
-      latestAttempt: { attempt_number: 2, metadata: { sourceEcho: true, inventory: { quantity: 2 } } } },
+    evidence: { format: CUTOVER_RECEIPT_EVIDENCE_FORMAT,
+      databaseRowHash: digest({ receipt: { id, raw_payload: { lines: [1, 2] } },
+        latestAttempt: { attempt_number: 2, metadata: { sourceEcho: true } } }) },
     ...overrides,
   };
 }
@@ -112,9 +113,11 @@ describe("cutover recorded shipment acknowledgment evidence", () => {
     expect(groupCutoverReceiptEvidence([...rows].reverse())).toEqual(result);
   });
 
-  it("is deterministic across input order and recursively reordered evidence object keys", () => {
-    const first = receipt("1", { evidence: { z: [1, { b: 2, a: 1 }], a: { d: 4, c: 3 } } });
-    const equivalent = receipt("1", { evidence: { a: { c: 3, d: 4 }, z: [1, { a: 1, b: 2 }] } });
+  it("is deterministic across input order and reordered compact evidence object keys", () => {
+    const first = receipt("1");
+    const equivalent = receipt("1", { evidence: {
+      databaseRowHash: first.evidence.databaseRowHash, format: CUTOVER_RECEIPT_EVIDENCE_FORMAT,
+    } });
     expect(groupCutoverReceiptEvidence([first, receipt("2")]))
       .toEqual(groupCutoverReceiptEvidence([receipt("2"), equivalent]));
   });
@@ -124,15 +127,14 @@ describe("cutover recorded shipment acknowledgment evidence", () => {
     const baseline = groupCutoverReceiptEvidence([first, second])[0].evidenceHash;
     for (const changed of [
       [first], [first, second, receipt("3")], [first, receipt("3")],
-      [first, receipt("2", { evidence: { ...second.evidence, additionalReceiptField: "changed" } })],
-      [first, receipt("2", { evidence: { ...second.evidence,
-        latestAttempt: { attempt_number: 2, metadata: { sourceEcho: true, inventory: { quantity: 3 } } } } })],
+      [first, receipt("2", { evidence: { ...second.evidence, databaseRowHash: digest("changed receipt field") } })],
+      [first, receipt("2", { evidence: { ...second.evidence, databaseRowHash: digest("changed latest attempt") } })],
     ]) expect(groupCutoverReceiptEvidence(changed)[0].evidenceHash).not.toBe(baseline);
   });
 
   it("includes fallback receipt payload and attempt evidence in the individual hash", () => {
     const original = receipt("1", { sourceEcho: false });
-    const changed = { ...original, evidence: { ...original.evidence, latestAttempt: { error_code: "changed" } } };
+    const changed = { ...original, evidence: { ...original.evidence, databaseRowHash: digest("changed latest attempt") } };
     expect(groupCutoverReceiptEvidence([original])[0].evidenceHash)
       .not.toBe(groupCutoverReceiptEvidence([changed])[0].evidenceHash);
   });
@@ -170,6 +172,18 @@ describe("cutover recorded shipment acknowledgment evidence", () => {
       receipt("1", { evidence: { invalid: Number.NaN } }), receipt("1", { evidence: { invalid: Number.POSITIVE_INFINITY } })]) {
       expect(() => groupCutoverReceiptEvidence([row])).toThrow();
     }
+  });
+
+  it.each([
+    {}, { format: CUTOVER_RECEIPT_EVIDENCE_FORMAT },
+    { format: "inventory_cutover_receipt_digest_v1", databaseRowHash: "a".repeat(64) },
+    { format: CUTOVER_RECEIPT_EVIDENCE_FORMAT, databaseRowHash: "A".repeat(64) },
+    { format: CUTOVER_RECEIPT_EVIDENCE_FORMAT, databaseRowHash: "a".repeat(63) },
+    { format: CUTOVER_RECEIPT_EVIDENCE_FORMAT, databaseRowHash: null },
+    { format: CUTOVER_RECEIPT_EVIDENCE_FORMAT, databaseRowHash: "a".repeat(64), ignoredField: "not allowed" },
+    { receiptJson: "{}", latestAttemptJson: null },
+  ])("rejects absent, malformed or unversioned database digest evidence: %#", (evidence) => {
+    expect(() => groupCutoverReceiptEvidence([receipt("1", { evidence })])).toThrow();
   });
 
   it("returns no invented evidence for an empty census", () => {

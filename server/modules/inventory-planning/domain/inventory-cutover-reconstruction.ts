@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { canonicalJson } from "@shared/utils/canonical-json";
+import { WMS_WAREHOUSE_STATUS_VALUES, isTerminalWmsDemandStatus } from "@shared/enums/order-status";
 import { cutoverReconstructionEvidenceSchema, type CutoverReconstructionEvidence,
   type CutoverReconstructionPlan, type CutoverReconstructionLine,
   type CutoverReconstructionAllocation } from "@shared/types/inventory-cutover-reconstruction";
@@ -129,9 +130,12 @@ export function planCutoverReconstruction(raw: CutoverReconstructionEvidence): C
     const picked = sum(journals.map((row) => row.pickedQty));
     const residual = reservation !== BigInt(0) || picked !== BigInt(0);
     if (!order) { block("DEMAND_OWNER_MISSING", subject, "Demand has no owning WMS order."); continue; }
-    const terminal = ["shipped", "cancelled"].includes(order.status ?? "");
-    if (terminal) {
+    if (isTerminalWmsDemandStatus(order.status)) {
       if (residual) block("TERMINAL_ORDER_RESIDUAL_REQUIRES_REVIEW", subject, "Terminal order still owns signed reservation or picked custody. It is not free supply.");
+      continue;
+    }
+    if (!(WMS_WAREHOUSE_STATUS_VALUES as readonly (string | null)[]).includes(order.status)) {
+      block("ORDER_STATE_REQUIRES_REVIEW", subject, "Unknown warehouse order state cannot authorize new demand or adoption of existing custody.");
       continue;
     }
     if (item.quantity < 0 || item.pickedQuantity < 0 || item.fulfilledQuantity < 0
@@ -238,7 +242,10 @@ export function planCutoverReconstruction(raw: CutoverReconstructionEvidence): C
     const subject = `journal:${journal.orderId}:${journal.orderItemId}:${journal.warehouseLocationId}:${journal.productVariantId}`;
     const item = journal.orderItemId == null ? undefined : items.get(journal.orderItemId);
     if (BigInt(journal.unknownCount) > BigInt(0)) {
-      block("JOURNAL_CUSTODY_UNKNOWN", subject, "Missing quantity/state or mixed shipment custody cannot establish exact ownership.");
+      const causes = (journal.issues ?? []).map((issue) => `${issue.code}: ${issue.transactionCount} transaction(s), examples ${issue.transactionIds.join(",")}`);
+      block("JOURNAL_CUSTODY_UNKNOWN", subject, causes.length > 0
+        ? `Exact ownership remains unproven. ${causes.join("; ")}`
+        : "Missing quantity/state or mixed shipment custody cannot establish exact ownership.");
     }
     if (journal.orderItemId !== null && promiseItems.has(journal.orderItemId)) continue;
     if (BigInt(journal.reservedQty) === BigInt(0) && BigInt(journal.pickedQty) === BigInt(0)) continue;

@@ -1,6 +1,7 @@
 import type { PoolClient } from "pg";
 import { createHash } from "node:crypto";
 import { canonicalJson } from "@shared/utils/canonical-json";
+import { TERMINAL_WMS_DEMAND_STATUSES } from "@shared/enums/order-status";
 import type { CutoverReconstructionEvidence } from "@shared/types/inventory-cutover-reconstruction";
 
 const MAX_ROWS = 100_000;
@@ -19,11 +20,15 @@ export async function readWmsCutoverReconstruction(client: PoolClient, residualO
     if (result.rows.length > MAX_ROWS) throw new Error("WMS_CUTOVER_RECONSTRUCTION_CENSUS_LIMIT_EXCEEDED");
     return result.rows;
   };
+  // A residual journal's order header may be missing or disagree with its item.
+  // Capture both identities; the planner must review, never repair, that conflict.
   const orders = await read(`SELECT id, warehouse_id AS "warehouseId", warehouse_status AS status,
     on_hold AS "onHold", channel_id AS "channelId", source, external_order_id AS "externalOrderId",
     oms_fulfillment_order_id AS "omsFulfillmentOrderId", fulfillment_partition_key AS "fulfillmentPartitionKey"
-    FROM wms.orders WHERE warehouse_status IS NULL OR warehouse_status NOT IN ('shipped','cancelled')
-      OR id=ANY($1::integer[]) ORDER BY id LIMIT $2`, [residualOrderIds]);
+    FROM wms.orders WHERE warehouse_status IS NULL OR NOT (warehouse_status = ANY($2::text[]))
+      OR id=ANY($1::integer[])
+      OR id IN (SELECT order_id FROM wms.order_items WHERE id=ANY($3::integer[]))
+    ORDER BY id LIMIT $4`, [residualOrderIds, TERMINAL_WMS_DEMAND_STATUSES, residualItemIds]);
   const orderIds = orders.map((row) => row.id);
   const items = await read(`SELECT id, order_id AS "orderId", oms_order_line_id::text AS "omsOrderLineId",
     source_item_id AS "sourceItemId", sku, product_id AS "productId", quantity,

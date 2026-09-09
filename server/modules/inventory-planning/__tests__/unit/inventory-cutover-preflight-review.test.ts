@@ -94,7 +94,7 @@ describe("independent cutover evidence review regressions", () => {
     expect(buildInventoryCutoverPreflight(facts).findings.map((finding) => finding.code)).toContain("BUILD_CLAIM_LINEAGE_UNVERIFIED");
   });
 
-  it.each([null, "invented", "shipped", "cancelled"])("does not infer physical demand for unknown or terminal captured order state %s", (status) => {
+  it.each([null, "invented", "shipped", "completed", "cancelled"])("does not infer physical demand for unknown or terminal captured order state %s", (status) => {
     const facts = cutoverPreflightFacts(); facts.demand.orders[0]!.status = status;
     const report = buildInventoryCutoverPreflight(facts);
     expect(report.lines[0]!.candidateDemandQty).toBeNull();

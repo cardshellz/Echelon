@@ -1,10 +1,12 @@
-import type { Pool } from "pg";
+import { createHash } from "node:crypto";
+import type { Pool, PoolClient } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { cutoverReceiptSchemaFixtureSql } from "../../../inventory-planning/__tests__/fixtures/inventory-cutover-receipt-schema.fixture";
 import { reconstructionEvidence } from "../../../inventory-planning/__tests__/fixtures/inventory-cutover-reconstruction.fixture";
 import { planCutoverReconstruction } from "../../../inventory-planning/domain/inventory-cutover-reconstruction";
 import { readOmsCutoverReconstruction } from "../../inventory-cutover-reconstruction.reader";
+import { CUTOVER_RECEIPT_EVIDENCE_FORMAT } from "../../domain/inventory-cutover-receipt-evidence";
 
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
@@ -75,12 +77,17 @@ describeDatabase.sequential("cutover receipt acknowledgment PostgreSQL query gua
     }
   }
 
-  async function capture() {
+  async function capture(observeReceipts?: (rows: Record<string, unknown>[]) => void) {
     const client = await pool.connect();
     try {
       await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
       expect((await client.query("SHOW transaction_read_only")).rows).toEqual([{ transaction_read_only: "on" }]);
-      return await readOmsCutoverReconstruction(client);
+      const observedClient = { query: async (text: string, values?: unknown[]) => {
+        const result = await client.query(text, values);
+        if (text.includes("FROM oms.channel_fulfillment_receipts receipt")) observeReceipts?.(result.rows);
+        return result;
+      } } as unknown as PoolClient;
+      return await readOmsCutoverReconstruction(observedClient);
     } finally {
       await client.query("ROLLBACK");
       client.release();
@@ -252,4 +259,72 @@ describeDatabase.sequential("cutover receipt acknowledgment PostgreSQL query gua
     await expect(pool.query(`INSERT INTO oms.channel_fulfillment_receipt_attempts
       (receipt_id,attempt_number,outcome) VALUES (1,1,'ignored')`)).rejects.toMatchObject({ code: "23505" });
   });
+
+  it.each([false, true])("hashes every database receipt and latest-attempt field before transport (missing attempt: %s)", async (withoutAttempt) => {
+    await seedReceipt({ id: "9007199254740993", withoutAttempt });
+    await pool.query(`UPDATE oms.channel_fulfillment_receipts SET
+      raw_payload='{"providerLineId":9007199254740993,"text":"snowman: ☃"}',
+      error_message='audit-only field',lease_token='leased-before-snapshot' WHERE id=9007199254740993`);
+    const full = (await pool.query(`SELECT jsonb_build_object('receipt',to_jsonb(receipt),
+      'latestAttempt',to_jsonb(attempt))::text AS envelope
+      FROM oms.channel_fulfillment_receipts receipt
+      LEFT JOIN LATERAL (SELECT * FROM oms.channel_fulfillment_receipt_attempts
+        WHERE receipt_id=receipt.id ORDER BY attempt_number DESC LIMIT 1) attempt ON true`)).rows[0];
+    let transportRows: Record<string, unknown>[] = [];
+    await capture((rows) => { transportRows = rows; });
+    expect(transportRows).toHaveLength(1);
+    expect(transportRows[0].evidence).toEqual({ format: CUTOVER_RECEIPT_EVIDENCE_FORMAT,
+      databaseRowHash: createHash("sha256").update(full.envelope).digest("hex") });
+    expect(JSON.stringify(transportRows)).not.toContain("leased-before-snapshot");
+    expect(JSON.stringify(transportRows)).not.toContain("providerLineId");
+    const baseline = (await capture()).shipmentReviewEvidence[0];
+    await pool.query(`UPDATE oms.channel_fulfillment_receipts SET lease_token='changed-audit-only-field' WHERE id=9007199254740993`);
+    expect((await capture()).shipmentReviewEvidence[0].evidenceHash).not.toBe(baseline.evidenceHash);
+  });
+
+  it("keeps transferred evidence compact when complete provider payloads grow", async () => {
+    await seedReceipt({ id: "1" });
+    let smallBytes = 0;
+    const before = await capture((rows) => { smallBytes = Buffer.byteLength(JSON.stringify(rows)); });
+    await pool.query(`UPDATE oms.channel_fulfillment_receipts
+      SET raw_payload=jsonb_build_object('rawProviderData',repeat('complete payload ',20000)) WHERE id=1`);
+    let largeBytes = 0;
+    const after = await capture((rows) => { largeBytes = Buffer.byteLength(JSON.stringify(rows)); });
+    expect(largeBytes).toBe(smallBytes);
+    expect(largeBytes).toBeLessThan(1000);
+    expect(after.shipmentReviewEvidence[0].evidenceHash).not.toBe(before.shipmentReviewEvidence[0].evidenceHash);
+  });
+
+  it("includes newly added owner columns in the digest without changing the reader projection", async () => {
+    await seedReceipt({ id: "1" });
+    const before = (await capture()).shipmentReviewEvidence[0];
+    try {
+      await pool.query("ALTER TABLE oms.channel_fulfillment_receipt_attempts ADD COLUMN future_audit_evidence text");
+      await pool.query("UPDATE oms.channel_fulfillment_receipt_attempts SET future_audit_evidence='new evidence'");
+      expect((await capture()).shipmentReviewEvidence[0].evidenceHash).not.toBe(before.evidenceHash);
+    } finally {
+      await pool.query("ALTER TABLE oms.channel_fulfillment_receipt_attempts DROP COLUMN IF EXISTS future_audit_evidence");
+    }
+  });
+
+  it("keeps malformed large sourceEcho metadata individual and compact without omitting it from the hash", async () => {
+    await seedReceipt({ id: "1", attemptMetadata: { sourceEcho: { invalid: "small" } } });
+    let smallBytes = 0;
+    const before = await capture((rows) => { smallBytes = Buffer.byteLength(JSON.stringify(rows)); });
+    await pool.query(`UPDATE oms.channel_fulfillment_receipt_attempts
+      SET metadata=jsonb_build_object('sourceEcho',jsonb_build_object('invalid',repeat('not a boolean ',20000)))`);
+    let largeBytes = 0;
+    const after = await capture((rows) => { largeBytes = Buffer.byteLength(JSON.stringify(rows)); });
+    expect(largeBytes).toBe(smallBytes);
+    expect(after.shipmentReviewEvidence[0].kind).toBe("channel_fulfillment_receipt");
+    expect(after.shipmentReviewEvidence[0].evidenceHash).not.toBe(before.shipmentReviewEvidence[0].evidenceHash);
+  });
+
+  it("rejects the real 100001-row census instead of returning a truncated receipt review", async () => {
+    await pool.query(`INSERT INTO oms.channel_fulfillment_receipts (id,processing_status)
+      SELECT n,'review' FROM generate_series(1,100001) AS n`);
+    await expect(capture()).rejects.toMatchObject({ code: "OMS_CUTOVER_CENSUS_LIMIT_EXCEEDED" });
+    expect((await pool.query("SELECT count(*)::text AS count FROM oms.channel_fulfillment_receipts")).rows)
+      .toEqual([{ count: "100001" }]);
+  }, 30_000);
 });

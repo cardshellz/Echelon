@@ -47,6 +47,20 @@ export const WMS_WAREHOUSE_STATUS_VALUES = [
 
 export type WmsWarehouseStatus = (typeof WMS_WAREHOUSE_STATUS_VALUES)[number];
 
+/**
+ * No new warehouse demand is created for these order states. `completed` is
+ * the completeWmsOrderAndRelease lifecycle, NOT proof of carrier shipment.
+ * Existing reservation, picked, lot, cost and package evidence must still be
+ * reconciled independently; terminal demand never makes held stock free.
+ */
+export const TERMINAL_WMS_DEMAND_STATUSES: readonly WmsWarehouseStatus[] = Object.freeze([
+  "shipped", "completed", "cancelled",
+]);
+
+export function isTerminalWmsDemandStatus(status: string | null): boolean {
+  return (TERMINAL_WMS_DEMAND_STATUSES as readonly (string | null)[]).includes(status);
+}
+
 // ─── Shipment status (per shipment, not per order) ───────────────────
 //
 // New enum; becomes a PG enum type via migration 060. See plan §4.3 +
