@@ -4,13 +4,15 @@ import { canonicalJson } from "@shared/utils/canonical-json";
 import type { CutoverReconstructionEvidence } from "@shared/types/inventory-cutover-reconstruction";
 
 const databaseId = z.string().regex(/^[1-9][0-9]{0,18}$/);
-type JsonValue = string | number | boolean | null | JsonValue[] | { [key: string]: JsonValue };
-const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() => z.union([
-  z.string(), z.number().finite(), z.boolean(), z.null(), z.array(jsonValueSchema), z.record(jsonValueSchema),
-]));
-// PostgreSQL JSONB evidence must be present and complete. Undefined values or
-// non-JSON values must not disappear silently when computing a reviewed digest.
-const receiptRowSchema = z.object({ id: databaseId, status: z.string(), evidence: z.record(jsonValueSchema) }).passthrough();
+export const CUTOVER_RECEIPT_EVIDENCE_FORMAT = "inventory_cutover_receipt_digest_v2";
+// The owner reader hashes COMPLETE database rows before their payloads cross the
+// network. Versioning deliberately invalidates prior full-payload review hashes;
+// accepting an absent, malformed or older digest would conceal changed evidence.
+const receiptDigestSchema = z.object({
+  format: z.literal(CUTOVER_RECEIPT_EVIDENCE_FORMAT),
+  databaseRowHash: z.string().regex(/^[0-9a-f]{64}$/),
+}).strict();
+const receiptRowSchema = z.object({ id: databaseId, status: z.string(), evidence: receiptDigestSchema }).passthrough();
 const acknowledgementSchema = z.object({
   status: z.literal("ignored"), errorCode: z.null(),
   attemptOutcome: z.literal("ignored"), attemptErrorCode: z.null(), sourceEcho: z.literal(true),

@@ -6,6 +6,7 @@ import { PostgresInventoryCutoverCommitRepository } from "../../infrastructure/i
 import { InventoryCutoverManifestError } from "../../domain/inventory-cutover-manifest";
 import { CutoverReconstructionError } from "../../infrastructure/inventory-cutover-reconstruction.repository";
 import { InventoryAvailabilityActivationRepositoryError } from "../../infrastructure/inventory-availability-activation.repository";
+import { InventoryCutoverCaptureError } from "../../infrastructure/inventory-cutover-capture-stage";
 
 const noStore: RequestHandler = (_req, res, next) => { res.setHeader("Cache-Control", "no-store"); next(); };
 
@@ -31,6 +32,11 @@ export function registerInventoryCutoverCommitRoutes(app: Express,
 }
 
 export function sendInventoryCutoverError(res: Response, error: unknown): Response {
+  if (error instanceof InventoryCutoverCaptureError) {
+    console.error(JSON.stringify({ event: "inventory_cutover_capture_failed", code: error.code,
+      stage: error.stage, postgresCode: error.postgresCode }));
+    return res.status(error.status).json({ error: { code: error.code, message: error.message, context: { stage: error.stage } } });
+  }
   if (error instanceof InventoryCutoverCommitError && error.status >= 400 && error.status < 500) {
     return res.status(error.status).json({ error: { code: error.code, message: error.message, context: error.context } });
   }

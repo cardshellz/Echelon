@@ -22,6 +22,91 @@ const dbDescribe = databaseUrl && disposable ? describe : describe.skip;
 dbDescribe.sequential("reviewed reconstruction with real claim DDL and inventory owner", () => {
   let database: InventoryCutoverTestDatabase;
   const repository = new PostgresInventoryCutoverReconstructionRepository();
+  it("completes a NULL journal order from its exact item FK and leaves the journal unchanged", async () => transaction(async (client) => {
+    await client.query("UPDATE inventory.inventory_transactions SET order_id=NULL WHERE transaction_type='pick'");
+    const evidence = await repository.capture(client);
+    expect(evidence.journals).toMatchObject([{ orderId: 1, orderItemId: 11, reservedQty: "3", pickedQty: "2",
+      identityCompletedCount: "1", unknownCount: "0", journalCount: "2", issues: [] }]);
+    expect(planCutoverReconstruction(evidence)).toMatchObject({ ready: true, blockers: [] });
+    expect((await client.query("SELECT order_id FROM inventory.inventory_transactions WHERE transaction_type='pick'")).rows[0].order_id).toBeNull();
+  }));
+  it("completes NULL source-journal owners through exact customer source FKs without supplying cost or quantity", async () => transaction(async (client) => {
+    await client.query(`INSERT INTO wms.outbound_shipments(id,order_id,status) VALUES(50,1,'planned');
+      INSERT INTO wms.outbound_shipment_items(id,shipment_id,order_item_id,product_variant_id,qty,from_location_id)
+        VALUES(51,50,11,101,6,100);
+      UPDATE inventory.inventory_transactions SET order_id=NULL,order_item_id=NULL,shipment_id=50,shipment_item_id=51 WHERE transaction_type='pick'`);
+    const evidence = await repository.capture(client);
+    expect(evidence.journals).toMatchObject([{ orderId: 1, orderItemId: 11, reservedQty: "3", pickedQty: "2", identityCompletedCount: "1", issues: [] }]);
+    expect(planCutoverReconstruction(evidence)).toMatchObject({ ready: true, blockers: [] });
+    const originalHash = evidence.journals[0].journalHash;
+    await client.query("UPDATE inventory.inventory_transactions SET notes='Additional original evidence' WHERE transaction_type='pick'");
+    const rawChanged = (await repository.capture(client)).journals[0].journalHash;
+    expect(rawChanged).not.toBe(originalHash);
+    await client.query("UPDATE wms.outbound_shipment_items SET qty=5 WHERE id=51");
+    expect((await repository.capture(client)).journals[0].journalHash).not.toBe(rawChanged);
+    expect((await client.query("SELECT order_id,order_item_id FROM inventory.inventory_transactions WHERE transaction_type='pick'")).rows[0])
+      .toEqual({ order_id: null, order_item_id: null });
+    await client.query("UPDATE inventory.inventory_transactions SET reserved_qty_delta=NULL WHERE transaction_type='pick'");
+    const missingDelta = await repository.capture(client);
+    expect(missingDelta.journals[0]).toMatchObject({ orderId: 1, orderItemId: 11, reservedQty: "5", identityCompletedCount: "1",
+      unknownCount: "1", issues: [{ code: "RESERVATION_DELTA_MISSING", transactionCount: "1" }] });
+    expect(planCutoverReconstruction(missingDelta).blockers).toContainEqual(expect.objectContaining({ code: "JOURNAL_CUSTODY_UNKNOWN",
+      message: expect.stringContaining("RESERVATION_DELTA_MISSING") }));
+    await client.query("UPDATE inventory.inventory_transactions SET reserved_qty_delta=-2 WHERE transaction_type='pick'; DELETE FROM oms.order_item_costs");
+    expect(planCutoverReconstruction(await repository.capture(client)).blockers.map((blocker) => blocker.code)).toContain("PICK_COST_CUSTODY_MISMATCH");
+  }));
+  it("does not complete an item owner across a conflicting directly recorded shipment header", async () => transaction(async (client) => {
+    await client.query(`INSERT INTO wms.outbound_shipments(id,order_id,status) VALUES(50,99,'planned');
+      UPDATE inventory.inventory_transactions SET order_id=NULL,shipment_id=50 WHERE transaction_type='pick'`);
+    const evidence = await repository.capture(client);
+    expect(evidence.journals.find((journal) => journal.orderId === null)).toMatchObject({ orderItemId: 11,
+      identityCompletedCount: "0", unknownCount: "1", issues: [{ code: "OWNER_FOREIGN_KEY_CONFLICT" }] });
+    expect(planCutoverReconstruction(evidence).ready).toBe(false);
+  }));
+  it.each([1, null])("keeps the actual legacy replacement journal association blocked without misreporting a customer FK conflict (order: %s)", async (orderId) => transaction(async (client) => {
+    // ShipStation's loader uses COALESCE(order_item_id,replacement_for_order_item_id)
+    // as inventory_order_item_id; the replacement recorder persists that direct ID.
+    await client.query(`INSERT INTO wms.outbound_shipments(id,order_id,status) VALUES(50,1,'shipped');
+      INSERT INTO wms.outbound_shipment_items(id,shipment_id,order_item_id,replacement_for_order_item_id,
+        product_variant_id,qty,from_location_id,shipment_item_purpose) VALUES(51,50,NULL,11,101,2,100,'replacement')`);
+    await client.query(`INSERT INTO inventory.inventory_transactions(order_id,order_item_id,product_variant_id,
+      from_location_id,transaction_type,variant_qty_delta,reserved_qty_delta,source_state,shipment_id,shipment_item_id)
+      VALUES($1,11,101,100,'ship',-2,NULL,'picked',50,51)`, [orderId]);
+    const evidence = await repository.capture(client);
+    const blockedJournal = evidence.journals.find((journal) => journal.unknownCount !== "0");
+    expect(blockedJournal).toMatchObject({ orderId, orderItemId: 11, identityCompletedCount: "0", unknownCount: "1",
+      issues: [{ code: "SOURCE_PURPOSE_UNSUPPORTED", transactionCount: "1" }] });
+    const plan = planCutoverReconstruction(evidence);
+    expect(plan.ready).toBe(false);
+    expect(plan.blockers).toContainEqual(expect.objectContaining({ code: "JOURNAL_CUSTODY_UNKNOWN",
+      message: expect.stringContaining("SOURCE_PURPOSE_UNSUPPORTED") }));
+    expect(plan.legacyPromiseReleases).toEqual([]);
+  }));
+  it.each([
+    ["recorded order conflict", "UPDATE inventory.inventory_transactions SET order_id=99 WHERE transaction_type='pick'", "OWNER_FOREIGN_KEY_CONFLICT"],
+    ["source variant conflict", "UPDATE wms.outbound_shipment_items SET product_variant_id=999 WHERE id=51", "OWNER_FOREIGN_KEY_CONFLICT"],
+    ["replacement", "UPDATE wms.outbound_shipment_items SET shipment_item_purpose='replacement' WHERE id=51", "SOURCE_PURPOSE_UNSUPPORTED"],
+    ["voided source", "UPDATE wms.outbound_shipments SET status='voided' WHERE id=50", "SOURCE_LIFECYCLE_UNSAFE"],
+    ["review source", "UPDATE wms.outbound_shipments SET requires_review=true WHERE id=50", "SOURCE_LIFECYCLE_UNSAFE"],
+    ["source bin conflict", "UPDATE wms.outbound_shipment_items SET from_location_id=999 WHERE id=51", "LOCATION_IDENTITY_UNRESOLVED"],
+    ["orphan source", "DELETE FROM wms.outbound_shipment_items WHERE id=51", "OWNER_FOREIGN_KEY_MISSING"],
+  ])("retains %s instead of using a conflicting source identity", async (_name, mutation, code) => transaction(async (client) => {
+    await client.query(`INSERT INTO wms.outbound_shipments(id,order_id,status) VALUES(50,1,'planned');
+      INSERT INTO wms.outbound_shipment_items(id,shipment_id,order_item_id,product_variant_id,qty,from_location_id) VALUES(51,50,11,101,6,100);
+      UPDATE inventory.inventory_transactions SET order_id=NULL,order_item_id=NULL,shipment_id=50,shipment_item_id=51 WHERE transaction_type='pick'`);
+    await client.query(mutation);
+    const evidence = await repository.capture(client);
+    const unresolved = evidence.journals.find((journal) => journal.orderItemId === null)!;
+    expect(unresolved).toMatchObject({ orderItemId: null, identityCompletedCount: "0", unknownCount: "1", issues: [{ code }] });
+    expect(planCutoverReconstruction(evidence).ready).toBe(false);
+  }));
+  it("excludes voided and canonical journals without treating them as historical owner evidence", async () => transaction(async (client) => {
+    await client.query(`INSERT INTO inventory.inventory_transactions(order_id,order_item_id,product_variant_id,from_location_id,transaction_type,variant_qty_delta,reserved_qty_delta,source_state,voided_at,reference_type)
+      VALUES(NULL,NULL,101,100,'ship',-9,NULL,'on_hand',now(),NULL),(NULL,NULL,101,100,'ship',-9,NULL,'on_hand',NULL,'availability_claim_dispatch')`);
+    const evidence = await repository.capture(client);
+    expect(evidence.journals).toMatchObject([{ journalCount: "2", unknownCount: "0", issues: [] }]);
+    expect(planCutoverReconstruction(evidence).ready).toBe(true);
+  }));
   beforeAll(async () => {
     database = await createInventoryCutoverTestDatabase(databaseUrl, disposable, reconstructionDatabaseFixtureSql);
     for (const file of ["0640_inventory_availability_claim_lineage.sql","0642_inventory_availability_claim_execution_contract.sql",
@@ -303,7 +388,9 @@ dbDescribe.sequential("reviewed reconstruction with real claim DDL and inventory
   }));
   it("requires an admitted writer transaction", async () => {
     const client = await database.pool.connect();
-    try { await client.query("BEGIN"); await expect(repository.capture(client)).rejects.toThrow("exclusive fence required"); }
+    try { await client.query("BEGIN"); await expect(repository.capture(client)).rejects.toMatchObject({
+      code: "CUTOVER_EVIDENCE_CAPTURE_FAILED", stage: "transaction_guard", cause: expect.objectContaining({ message: "exclusive fence required" }),
+    }); }
     finally { await client.query("ROLLBACK"); client.release(); }
   });
   it("rolls back every adoption/fresh hold when the caller fails after persistence", async () => {

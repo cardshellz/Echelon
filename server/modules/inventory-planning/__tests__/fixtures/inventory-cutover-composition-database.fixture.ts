@@ -40,7 +40,7 @@ CREATE TABLE inventory.inventory_lots(id integer PRIMARY KEY,warehouse_location_
  unit_cost_cents bigint DEFAULT 0,po_unit_cost_cents bigint DEFAULT 0,packaging_cost_cents bigint DEFAULT 0,landed_cost_cents bigint DEFAULT 0,total_unit_cost_cents bigint DEFAULT 0);
 CREATE TABLE inventory.inventory_transactions(id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,order_id integer,order_item_id integer,product_variant_id integer,to_location_id integer,from_location_id integer,
  transaction_type text,variant_qty_delta integer,variant_qty_before integer,variant_qty_after integer,reserved_qty_delta integer,source_state text,target_state text,reference_type text,reference_id text,
- user_id text,notes text,voided_at timestamptz,created_at timestamptz DEFAULT now(),unit_cost_cents bigint,inventory_lot_id integer);
+ user_id text,notes text,voided_at timestamptz,created_at timestamptz DEFAULT now(),unit_cost_cents bigint,inventory_lot_id integer,shipment_id integer,shipment_item_id integer);
 CREATE TABLE inventory.build_orders(id integer PRIMARY KEY,status text,warehouse_id integer);
 CREATE TABLE inventory.build_order_components(id integer PRIMARY KEY,build_order_id integer,component_variant_id integer,source_location_id integer);
 CREATE TABLE inventory.build_component_reservations(id integer PRIMARY KEY,build_order_component_id integer,inventory_lot_id integer,reserved_qty integer,consumed_qty integer,released_qty integer,reservation_owner text,availability_claim_id bigint,availability_claim_lot_allocation_id bigint);

@@ -242,7 +242,10 @@ export function planCutoverReconstruction(raw: CutoverReconstructionEvidence): C
     const subject = `journal:${journal.orderId}:${journal.orderItemId}:${journal.warehouseLocationId}:${journal.productVariantId}`;
     const item = journal.orderItemId == null ? undefined : items.get(journal.orderItemId);
     if (BigInt(journal.unknownCount) > BigInt(0)) {
-      block("JOURNAL_CUSTODY_UNKNOWN", subject, "Missing quantity/state or mixed shipment custody cannot establish exact ownership.");
+      const causes = (journal.issues ?? []).map((issue) => `${issue.code}: ${issue.transactionCount} transaction(s), examples ${issue.transactionIds.join(",")}`);
+      block("JOURNAL_CUSTODY_UNKNOWN", subject, causes.length > 0
+        ? `Exact ownership remains unproven. ${causes.join("; ")}`
+        : "Missing quantity/state or mixed shipment custody cannot establish exact ownership.");
     }
     if (journal.orderItemId !== null && promiseItems.has(journal.orderItemId)) continue;
     if (BigInt(journal.reservedQty) === BigInt(0) && BigInt(journal.pickedQty) === BigInt(0)) continue;

@@ -80,9 +80,44 @@ COGS proof. Incomplete, processing, failed, mismatched and review attempts remai
 individual blockers. Different channel/order/provider/package scopes never merge.
 
 The group digest preserves full receipt membership and latest-attempt evidence.
-JSONB is retained as database text inside the evidence envelope so bigint IDs and
-provider numeric values above JavaScript's safe-integer range cannot hash as the
-same rounded number. Group identities use a full scope hash, not truncated IDs.
+PostgreSQL hashes the complete receipt and latest-attempt JSONB rows before
+transferring a compact, versioned digest to the application. Bigint IDs and
+provider numeric values above JavaScript's safe-integer range are not rounded
+before hashing. Unknown/future database fields remain covered. Group identities
+use a full scope hash, not truncated IDs. Prior review hashes require refresh.
+
+The receipt census remains one bounded SQL statement with an overflow sentinel.
+It is not independently keyset-paged: final commitment uses READ COMMITTED so
+waiting identical commands can see the preceding command's receipt, and multiple
+evidence queries must not silently replace a single statement's snapshot.
+
+## Exact journal identity completion and capture failures
+
+The inventory owner reads compact original-journal facts and persisted foreign-key
+links in one statement. A pure resolver may fill a missing order identity from an
+existing order-item foreign key, or missing order/item identity from an exact
+ordinary shipment-item chain. It verifies every other recorded order/shipment
+reference and the relevant warehouse/location identity. Missing or conflicting
+links, unsupported shipment purposes, review states and ambiguous locations stay
+blocked; SKU and human-readable text are never used as owner-identity shortcuts.
+
+Completing an identity does not reconstruct a missing reservation delta or an
+original lot cost. Signed amounts remain unchanged. Unknown causes are reported
+separately, with complete counts and bounded example transaction IDs, while the
+original row and relevant linked evidence are covered by the group hash.
+
+The raw journal census rejects more than 100,000 rows, and aggregation rejects
+more than 50,000 owner/position groups. Overflow is an incomplete census, never a
+partial ready result. Receipt and original-cost bounds remain 100,000 rows.
+These explicit limits require capacity planning before extending this one-time
+legacy adoption to larger historical datasets.
+
+Capture failures identify the inventory, WMS, catalog, original-cost, OMS or
+shipment-review stage. HTTP responses and structured logs expose only safe stage
+and error classifications, not raw SQL or customer payloads. A database cancel,
+concurrency conflict, bound overflow or invalid evidence produces no partial
+review and triggers no automatic retry or timeout increase. The caller retains
+transaction ownership and rolls back a failed commitment.
 
 ## Historical shipment/cost exceptions
 
