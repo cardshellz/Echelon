@@ -47,7 +47,7 @@ dbDescribe.sequential("verified opening persistence with real PostgreSQL admissi
     await pool.query(cutoverCompositionSeedSql);
     await installCutoverAdmissionFixturePrerequisites(pool);
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/236_inventory_cutover_admission.sql"), "utf8"));
-    await pool.query(readFileSync(resolve(process.cwd(), "migrations/239_inventory_cutover_verified_opening.sql"), "utf8"));
+    await pool.query(readFileSync(resolve(process.cwd(), "migrations/240_inventory_cutover_verified_opening.sql"), "utf8"));
     await pool.query(`UPDATE wms.orders SET order_number='#OPENING-1';
       UPDATE warehouse.warehouses SET code='MAIN',name='Main warehouse';
       UPDATE warehouse.warehouse_locations SET code='PICK-A',name='Pick bin';

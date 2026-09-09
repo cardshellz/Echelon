@@ -3,12 +3,12 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { INVENTORY_CUTOVER_CONFIGURATION_TABLES, INVENTORY_CUTOVER_OPERATIONAL_TABLES } from "../../domain/inventory-cutover-admission-fence";
 
-const migration = readFileSync(resolve(process.cwd(), "migrations/239_inventory_cutover_verified_opening.sql"), "utf8");
+const migration = readFileSync(resolve(process.cwd(), "migrations/240_inventory_cutover_verified_opening.sql"), "utf8");
 describe("verified opening evidence migration contract", () => {
   it("sorts after the real admission and claim prerequisites in release-runner order", () => {
     // run-migrations.ts sorts filenames lexically, not their numeric prefixes.
     const ordered = readdirSync(resolve(process.cwd(), "migrations")).filter(file => file.endsWith(".sql")).sort();
-    const openingIndex = ordered.indexOf("239_inventory_cutover_verified_opening.sql");
+    const openingIndex = ordered.indexOf("240_inventory_cutover_verified_opening.sql");
     expect(openingIndex).toBeGreaterThan(-1);
     for (const prerequisite of ["236_inventory_cutover_admission.sql", "233_inventory_cutover_reconstruction.sql"]) {
       expect(ordered.indexOf(prerequisite)).toBeGreaterThan(-1);

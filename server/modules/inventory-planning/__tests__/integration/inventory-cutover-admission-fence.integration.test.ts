@@ -12,7 +12,7 @@ const DISPOSABLE = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
 const databaseDescribe = URL && DISPOSABLE ? describe : describe.skip;
 const migration = readFileSync(resolve(process.cwd(), "migrations/236_inventory_cutover_admission.sql"), "utf8");
 const legacyMigration = readFileSync(resolve(process.cwd(), "migrations/0638_inventory_availability_cutover.sql"), "utf8");
-// This suite installs historical migration236 only. Migration239 separately
+// This suite installs historical migration236 only. Migration240 separately
 // adds receipt/attempt/build-demand admission; its real guards/races are covered by the
 // opening integration suite instead of pretending236 installed later triggers.
 const OPENING_SUPPLEMENTAL_TABLES = new Set(["oms.channel_fulfillment_receipts", "oms.channel_fulfillment_receipt_attempts", "wms.order_build_demands"]);

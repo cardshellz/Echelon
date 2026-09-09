@@ -41,7 +41,7 @@ Displaced findings are recorded as **unresolved historical exceptions**, never m
 
 ## Persistence, concurrency and stale evidence
 
-Migration `239_inventory_cutover_verified_opening.sql` adds the inventory-planning-owned `inventory.availability_cutover_opening_snapshots` audit. Insert requires the existing admission-fence owner, legacy authority at the reviewed revision and the expected open configuration freeze. The audit rejects update, delete and truncate. Semantic command identity includes the authenticated actor, verification, reason and idempotency key. Exact retry returns the original record; a conflicting retry or competing verification for the same source/revision cannot overwrite it.
+Migration `240_inventory_cutover_verified_opening.sql` adds the inventory-planning-owned `inventory.availability_cutover_opening_snapshots` audit. Insert requires the existing admission-fence owner, legacy authority at the reviewed revision and the expected open configuration freeze. The audit rejects update, delete and truncate. Semantic command identity includes the authenticated actor, verification, reason and idempotency key. Exact retry returns the original record; a conflicting retry or competing verification for the same source/revision cannot overwrite it.
 
 The migration also pins receipt, latest-attempt and legacy build-demand writers into the existing statement-level cutover admission mechanism. Those records are part of the full census; they cannot introduce pending work between capture and admitted save/activation. Existing admission uses fail-fast locking rather than waiting in conflicting lock order.
 

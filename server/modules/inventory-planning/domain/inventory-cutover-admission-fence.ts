@@ -19,7 +19,7 @@ export const inventoryCutoverFenceReceiptSchema = z.object({
 export type InventoryCutoverFenceReceipt = z.infer<typeof inventoryCutoverFenceReceiptSchema>;
 
 /**
- * Admission manifest installed by migration236, extended by migration239 for
+ * Admission manifest installed by migration236, extended by migration240 for
  * complete receipt/attempt and legacy build demand capture. This contract is not live deployment proof.
  * Covers supplySnapshot, WMS demand, inventory encumbrance, source/custody and
  * channel identity inputs; admission is independent of application entry point.
