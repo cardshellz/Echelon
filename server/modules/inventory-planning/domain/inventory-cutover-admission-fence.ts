@@ -19,8 +19,8 @@ export const inventoryCutoverFenceReceiptSchema = z.object({
 export type InventoryCutoverFenceReceipt = z.infer<typeof inventoryCutoverFenceReceiptSchema>;
 
 /**
- * Proposed admission manifest for migration232 (not yet present or approved).
- * This list is a review contract, not proof that database guards are installed.
+ * Admission manifest installed by migration236, extended by migration239 for
+ * complete receipt/attempt and legacy build demand capture. This contract is not live deployment proof.
  * Covers supplySnapshot, WMS demand, inventory encumbrance, source/custody and
  * channel identity inputs; admission is independent of application entry point.
  */
@@ -63,6 +63,7 @@ export const INVENTORY_CUTOVER_CONFIGURATION_TABLES = [
 export const INVENTORY_CUTOVER_OPERATIONAL_TABLES = [
   "wms.orders",
   "wms.order_items",
+  "wms.order_build_demands",
   "wms.outbound_shipments",
   "wms.outbound_shipment_items",
   "wms.physical_shipments",
@@ -74,6 +75,8 @@ export const INVENTORY_CUTOVER_OPERATIONAL_TABLES = [
   "oms.oms_order_lines",
   "oms.oms_order_line_authority_events",
   "oms.order_item_costs",
+  "oms.channel_fulfillment_receipts",
+  "oms.channel_fulfillment_receipt_attempts",
   "inventory.inventory_levels",
   "inventory.inventory_lots",
   "inventory.inventory_transactions",

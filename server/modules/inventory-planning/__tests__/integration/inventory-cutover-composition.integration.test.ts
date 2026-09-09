@@ -45,6 +45,7 @@ dbDescribe.sequential("cutover composition with actual snapshot, claim and recei
     await database.pool.query(cutoverCompositionSeedSql);
     await installCutoverAdmissionFixturePrerequisites(database.pool);
     await database.pool.query(readFileSync(resolve(process.cwd(),"migrations/236_inventory_cutover_admission.sql"),"utf8"));
+    await database.pool.query(readFileSync(resolve(process.cwd(),"migrations/239_inventory_cutover_verified_opening.sql"),"utf8"));
   }, 30_000);
   afterAll(async () => { await database?.close(); });
 
@@ -167,6 +168,7 @@ dbDescribe.sequential("empty-bin promise handoff through complete cutover compos
         VALUES(1,11,101,100,'reserve',0,0,0,6,'on_hand','committed')`);
     await installCutoverAdmissionFixturePrerequisites(database.pool);
     await database.pool.query(readFileSync(resolve(process.cwd(), "migrations/236_inventory_cutover_admission.sql"), "utf8"));
+    await database.pool.query(readFileSync(resolve(process.cwd(), "migrations/239_inventory_cutover_verified_opening.sql"), "utf8"));
   }, 30_000);
   afterAll(async () => { await database?.close(); });
 
@@ -248,6 +250,7 @@ dbDescribe.sequential("cutover abort, concurrent provider and external-owned des
     await database.pool.query(cutoverCompositionObserveOnlySeedSql);
     await installCutoverAdmissionFixturePrerequisites(database.pool);
     await database.pool.query(readFileSync(resolve(process.cwd(),"migrations/236_inventory_cutover_admission.sql"),"utf8"));
+    await database.pool.query(readFileSync(resolve(process.cwd(),"migrations/239_inventory_cutover_verified_opening.sql"),"utf8"));
     dryRun=await seedCompositionReviewedDryRun(database.pool); now=new Date(Date.parse(dryRun.completedAt)+10);
   },30_000);
   afterAll(async () => { await database?.close(); });
@@ -324,6 +327,7 @@ dbDescribe.sequential("cutover composition with one actual publication target", 
         SELECT scope_key,id,0,'operator','Test complete safety scope locking' FROM inventory.promise_safety_policy_versions WHERE scope_key<>'business'`);
     await installCutoverAdmissionFixturePrerequisites(database.pool);
     await database.pool.query(readFileSync(resolve(process.cwd(),"migrations/236_inventory_cutover_admission.sql"),"utf8"));
+    await database.pool.query(readFileSync(resolve(process.cwd(),"migrations/239_inventory_cutover_verified_opening.sql"),"utf8"));
     dryRun = await seedCompositionReviewedDryRun(database.pool);
     now = new Date(Date.parse(dryRun.completedAt)+10);
   },30_000);

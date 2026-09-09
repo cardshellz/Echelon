@@ -6,6 +6,9 @@ import { inventoryCutoverBuildReservationSchema, inventoryCutoverCanonicalResour
 const id = z.number().int().positive().max(2_147_483_647);
 const raw = z.string().regex(/^-?(0|[1-9][0-9]*)$/).max(80);
 const hash = z.string().regex(/^[0-9a-f]{64}$/);
+export const cutoverOpeningProvenanceSchema = z.object({ sourceEvidenceHash: hash, verificationHash: hash,
+  historicalExceptionHash: hash, historicalExceptionCount: z.number().int().nonnegative(),
+  snapshotId: z.string().regex(/^[1-9][0-9]{0,18}$/).optional() }).strict();
 const nullableId = id.nullable();
 export const cutoverReconstructionLevelSchema = z.object({
   id, warehouseLocationId: id, warehouseId: nullableId, productVariantId: id,
@@ -115,6 +118,7 @@ export type CutoverReconstructionPlan = {
   evidenceHash: string; ready: boolean; blockers: CutoverReconstructionBlocker[];
   orders: CutoverReconstructionOrder[]; retainedIndependentBuildReservationIds: number[];
   legacyPromiseReleases: CutoverLegacyPromiseRelease[];
+  openingBalance?: z.infer<typeof cutoverOpeningProvenanceSchema>;
 };
 export const cutoverReconstructionCommitSchema = z.object({
   expectedEvidenceHash: hash, activationRunId: z.string().regex(/^[1-9][0-9]{0,18}$/),
@@ -129,6 +133,7 @@ export const cutoverReconstructionReceiptSchema = z.object({
   // Missing on older immutable receipts means no promise handoff was performed.
   legacyPromiseReleases: z.array(cutoverLegacyPromiseReleaseSchema).optional(),
   legacyPromiseReleaseTransactionIds: z.array(id).optional(),
+  openingBalance: cutoverOpeningProvenanceSchema.optional(),
 }).strict().refine((receipt) => receipt.claimIds.length===receipt.orderIds.length
   && new Set(receipt.claimIds).size===receipt.claimIds.length && new Set(receipt.orderIds).size===receipt.orderIds.length
   && new Set(receipt.retainedIndependentBuildReservationIds).size===receipt.retainedIndependentBuildReservationIds.length,

@@ -29,7 +29,7 @@ export function isDefinitiveCutoverRejection(error: unknown): boolean {
 /** Explicit administrative commands only. A response is never trusted merely
  * because HTTP succeeded; uncertainty retains the caller's original retry key. */
 export async function postInventoryPlanningCommand<T>(
-  namespace: "cutover" | "publication-recovery", action: string, body: unknown,
+  namespace: "cutover" | "publication-recovery" | "cutover-opening", action: string, body: unknown,
   schema: z.ZodType<T>, signal?: AbortSignal,
 ): Promise<T> {
   const response = await fetch(`/api/inventory-planning/admin/${namespace}/${action}`, {

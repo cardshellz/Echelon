@@ -14,6 +14,13 @@ does not activate canonical authority or modify production reservations.
 
 ## Whole-position eligibility
 
+The original strict-ledger path below remains available when no opening verification
+has been saved. An explicitly approved alternative now accepts independently verified
+current stock and owner/lot obligations while preserving old discrepancies separately:
+see [Verified current-inventory opening](INVENTORY-CUTOVER-VERIFIED-OPENING.md).
+That path does not repair stock or historical costs, and a stale selected verification
+blocks rather than falling back silently. Its audit and final activation are distinct actions.
+
 `planCutoverReconstruction` classifies a position only when all of the following
 are established by the captured owner evidence:
 
