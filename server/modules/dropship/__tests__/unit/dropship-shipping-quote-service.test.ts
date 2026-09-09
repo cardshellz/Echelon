@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import { applyProgramCharges } from '../../../shipping-engine/domain/program-charges';
 import { DropshipError } from "../../domain/errors";
 import {
   calculateBasisPointsFeeCents,
@@ -498,6 +499,24 @@ describe("DropshipShippingQuoteService", () => {
       ...input,
       warehouseId: 4,
     })).rejects.toMatchObject({ code: "DROPSHIP_IDEMPOTENCY_CONFLICT" });
+  });
+
+  it('uses the shared final charge without reading or adding legacy fees', async () => {
+    const charge = applyProgramCharges(800,{ markup: { bps: 100,fixedCents: 0,minCents: null,maxCents: null }, insurance: { bps: 200,fixedCents: 0,minCents: null,maxCents: null } },3);
+    const quote = sharedQuote(800);
+    quote.programCharges = charge;
+    quote.selectedRate.totalCents = charge.totalCents;
+    const calculated = await calculateDropshipShippingQuote({ cartonization,
+      repository: { getActiveShippingMarkupPolicy: async () => { throw new Error('Legacy markup must not be read'); },
+        getActiveInsurancePoolPolicy: async () => { throw new Error('Legacy insurance must not be read'); } },
+      pricingProvider: new CutoverDropshipShippingPricingProvider({
+        cutoverPolicy: { mode: 'test',storeConnectionIds: new Set([22]) },legacyRateProvider: rateProvider,
+        sharedQuoteProvider: new FakeSharedQuoteProvider(quote),logger: { info: () => {},warn: () => {},error: () => {} },
+      }),
+    },{ vendorId: 10,storeConnectionId: 22,warehouseId: 3,destination: { country: 'US',region: 'PA',postalCode: '16046' },items: [{ productVariantId: 101,quantity: 2 }],quotedAt: now });
+    expect(calculated.totalShippingCents).toBe(824);
+    expect(calculated.quotePayload).toMatchObject({ version: 4,pricing: { programCharges: { revision: 3,totalCents: 824 } } });
+    expect(rateProvider.requests).toHaveLength(0);
   });
 
   it("creates one shipment-scoped shared snapshot and preserves it across rollback", async () => {

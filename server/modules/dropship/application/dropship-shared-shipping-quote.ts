@@ -1,3 +1,4 @@
+import type { ProgramChargeEvidence } from "@shared/shipping/configuration";
 import type {
   ProductRateTraceStep,
 } from "../../shipping-engine/domain/product-rate-policy";
@@ -64,6 +65,7 @@ export interface DropshipSharedShippingSelectedRate {
 export type DropshipSharedShippingQuoteResult =
   | {
       status: "quoted";
+      programCharges?: ProgramChargeEvidence;
       baseRateCents: number;
       currency: string;
       serviceLevelCode: string;

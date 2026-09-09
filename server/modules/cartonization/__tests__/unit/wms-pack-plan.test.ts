@@ -145,6 +145,24 @@ function fakeDeps(input: {
 // buildBoxInstruction (pure)
 // ---------------------------------------------------------------------------
 
+describe('shared packaging plan evidence',() => {
+  it('uses the order channel and warehouse and persists the suite revision',async () => {
+    const { deps,persisted } = fakeDeps({});
+    deps.loadOrder = async () => ({ id: 42,warehouseId: 2,fulfillmentChannel: 'dropship' });
+    const packaging = { suiteId: 9,suiteRevision: 3,assignmentRevision: 2,boxes: [box()] };
+    deps.loadPackaging = vi.fn(async () => packaging);
+    const first = await ensurePackPlan({ wmsOrderId: 42 },deps);
+    expect(deps.loadPackaging).toHaveBeenCalledWith('dropship',2);
+    expect(persisted[0].packagingSnapshot).toEqual(packaging);
+    expect(first).not.toBeNull();
+    deps.findActivePlan = async () => first!.plan;
+    deps.loadPackaging = async () => ({ ...packaging,suiteRevision: 4 });
+    await ensurePackPlan({ wmsOrderId: 42 },deps);
+    expect(persisted).toHaveLength(2);
+    expect(persisted[1].inputHash).not.toBe(persisted[0].inputHash);
+  });
+});
+
 describe("buildBoxInstruction", () => {
   it("renders multi-box counts grouped by box code", () => {
     const instruction = buildBoxInstruction([

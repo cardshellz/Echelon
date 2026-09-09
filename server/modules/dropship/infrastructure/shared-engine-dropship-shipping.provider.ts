@@ -1,3 +1,4 @@
+import { SharedShippingConfigurationRepository } from "../../shipping-engine/infrastructure/shared-configuration.repository";
 import type {
   ShipmentLineInput,
   ShipmentParcelPlan,
@@ -36,9 +37,9 @@ const DROPSHIP_VENDOR_RATE_CONTEXT = {
   purpose: "vendor_fulfillment_charge",
 } as const;
 const DROPSHIP_OMS_CHANNEL_PROVIDER = "manual";
-const DROPSHIP_LAUNCH_SERVICE_LEVEL_CODE = "standard";
 
 interface SharedEngineDropshipShippingDependencies {
+  loadServiceLevel: () => Promise<string>;
   loadCatalogFacts: typeof loadCatalogShippingFactsByVariantIds;
   resolveChannelShipping(input: {
     originWarehouseId: number;
@@ -134,13 +135,14 @@ implements DropshipSharedShippingQuoteProvider {
       ...shipmentQuote.parcelPlan.warnings,
       ...shipmentQuote.rates.warnings,
     ];
+    const serviceLevelCode = await this.deps.loadServiceLevel();
     const standardRate = shipmentQuote.rates.quotes.find(
-      (rate) => rate.serviceLevelCode === DROPSHIP_LAUNCH_SERVICE_LEVEL_CODE,
+      (rate) => rate.serviceLevelCode === serviceLevelCode,
     );
     if (!standardRate || !shipmentQuote.rates.rateBook) {
       return unavailable(
         "DROPSHIP_SHARED_SHIPPING_STANDARD_RATE_UNAVAILABLE",
-        "The shared shipping engine returned no active Standard Shipping rate.",
+        "The shared shipping engine returned no rate for the configured fulfillment service level.",
         warnings,
         routingSummary(routing),
       );
@@ -148,7 +150,8 @@ implements DropshipSharedShippingQuoteProvider {
 
     return {
       status: "quoted",
-      baseRateCents: standardRate.totalCents,
+      programCharges: standardRate.programCharges,
+      baseRateCents: standardRate.programCharges?.baseCents ?? standardRate.totalCents,
       currency: standardRate.currency,
       serviceLevelCode: standardRate.serviceLevelCode,
       rateBookId: shipmentQuote.rates.rateBook.id,
@@ -190,6 +193,7 @@ export function createSharedEngineDropshipShippingQuoteProviderFromEnv():
 SharedEngineDropshipShippingQuoteProvider {
   const policyStore = new PostgresChannelShippingPolicyRuntimeStore();
   return new SharedEngineDropshipShippingQuoteProvider({
+    loadServiceLevel: async () => (await new SharedShippingConfigurationRepository().loadService('dropship')).serviceLevelCode,
     loadCatalogFacts: loadCatalogShippingFactsByVariantIds,
     resolveChannelShipping: (input) =>
       resolveRuntimeChannelShipping(policyStore, {

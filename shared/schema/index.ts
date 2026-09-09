@@ -17,6 +17,7 @@ export * from "./shopify.schema";
 export * from "./audit.schema";
 export * from "./fulfillment.schema";
 export * from "./shipping.schema";
+export * from "./shipping-configuration.schema";
 export * from "./operations.schema";
 export * from "./carrier-tracking-label-poll.schema";
 export * from "./marketplace-listings.schema";

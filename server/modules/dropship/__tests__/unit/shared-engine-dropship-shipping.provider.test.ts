@@ -23,6 +23,17 @@ import {
 } from "../../infrastructure/shared-engine-dropship-shipping.provider";
 
 describe("SharedEngineDropshipShippingQuoteProvider", () => {
+  it('selects the configured service rather than hardcoding Standard',async () => {
+    const provider = makeProvider({ serviceLevelCode: 'expedited',quoteShipment: async (input,dependencies) => {
+      const packed = await dependencies.parcelProvider.plan(input.lines);
+      if (!packed.ok) throw new Error('expected parcel plan');
+      const result = quotedResult(packed.plan);
+      if (!result.ok) throw new Error('expected rates');
+      result.rates.quotes.push({ ...result.rates.quotes[0],serviceLevelId: 2,serviceLevelCode: 'expedited',totalCents: 1299 });
+      return result;
+    } });
+    expect(await provider.quote(request())).toMatchObject({ status: 'quoted',serviceLevelCode: 'expedited',baseRateCents: 1299 });
+  });
   it("forwards the exact warehouse, destination, carton weights, and canonical lines", async () => {
     let capturedRequest: ShipmentQuoteRequest | null = null;
     let capturedParcels: unknown = null;
@@ -180,6 +191,7 @@ describe("SharedEngineDropshipShippingQuoteProvider", () => {
 });
 
 function makeProvider(overrides: {
+  serviceLevelCode?: string;
   routing?: RuntimeChannelShippingResolution;
   facts?: Map<number, CatalogShippingFactByVariant>;
   quoteShipment?: (
@@ -197,6 +209,7 @@ function makeProvider(overrides: {
     },
   };
   return new SharedEngineDropshipShippingQuoteProvider({
+    loadServiceLevel: async () => overrides.serviceLevelCode ?? 'standard',
     loadCatalogFacts: async () => overrides.facts ?? new Map([[
       101,
       {

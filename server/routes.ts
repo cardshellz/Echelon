@@ -86,6 +86,7 @@ import { registerShadowAdminRoutes } from "./modules/shipping-engine/interfaces/
 import { registerPackingRoutes } from "./modules/shipping-engine/interfaces/http/packing.routes";
 import { registerRateTableAdminRoutes } from "./modules/shipping-engine/interfaces/http/rate-table-admin.routes";
 import { registerRateBookAdminRoutes } from "./modules/shipping-engine/interfaces/http/rate-book-admin.routes";
+import { registerSharedConfigurationAdminRoutes } from "./modules/shipping-engine/interfaces/http/shared-configuration-admin.routes";
 import { registerRateProgramCloneRoutes } from "./modules/shipping-engine/interfaces/http/rate-program-clone.routes";
 import { registerProductRatePolicyAdminRoutes } from "./modules/shipping-engine/interfaces/http/product-rate-policy-admin.routes";
 import { registerManualRateQuoteRoutes } from "./modules/shipping-engine/interfaces/http/manual-rate-quote.routes";
@@ -128,6 +129,8 @@ export async function registerRoutes(
   registerDropshipAdminListingPushOpsRoutes(app);
   registerDropshipAdminTrackingPushOpsRoutes(app);
   registerDropshipAdminNotificationOpsRoutes(app);
+  // Retired Dropship shipping writes must be intercepted before legacy routes.
+  registerSharedConfigurationAdminRoutes(app);
   registerDropshipAdminShippingConfigRoutes(app);
   registerDropshipAdminCarrierProtectionRoutes(app);
   registerDropshipAdminCarrierClaimRoutes(app);
