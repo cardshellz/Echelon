@@ -41,8 +41,10 @@ describe("readWmsCutoverDemand", () => {
   });
   it("selects all nonterminal states including null and reports terminal exclusions separately", async () => {
     const f = fixture(); await readWmsCutoverDemand(f.client);
-    expect(f.query.mock.calls[1][0]).toContain("warehouse_status IS NULL OR warehouse_status NOT IN ('shipped','cancelled')");
-    expect(f.query.mock.calls[0][0]).toContain("warehouse_status IN ('shipped','cancelled')");
+    expect(f.query.mock.calls[1][0]).toContain("warehouse_status IS NULL OR NOT (warehouse_status = ANY($1::text[]))");
+    expect(f.query.mock.calls[0][0]).toContain("warehouse_status = ANY($1::text[])");
+    expect(f.query.mock.calls[0][1]).toEqual([["shipped", "completed", "cancelled"]]);
+    expect(f.query.mock.calls[1][1]).toEqual([["shipped", "completed", "cancelled"], 10_001]);
     expect(f.query.mock.calls[2][1]).toEqual([[70], 50_001]);
   });
   it("retains negative and zero quantities, holds, and unknown states as evidence instead of hiding them", async () => {
