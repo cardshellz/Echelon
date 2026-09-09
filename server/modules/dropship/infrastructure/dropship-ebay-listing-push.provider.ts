@@ -1,5 +1,6 @@
 import { DropshipError } from "../domain/errors";
 import { createProviderRequestDeadline } from "../../channels/provider-request-limits";
+import { executeEbayQuantityHttp } from "../../channels/adapters/ebay/ebay-quantity-http";
 import { ebayQuantityMutationIdentity, executeAdmittedEbayQuantityRequest, type EbayQuantityRequestAdmission } from "../../channels/quantity-publication-request";
 import type {
   DropshipMarketplaceListingPushProvider,
@@ -509,6 +510,13 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
     method: "GET" | "POST" | "PUT" | "DELETE"; path: string; body?: unknown;
     expectNoContent?: boolean; baseUrl: string;
   }): Promise<T> {
+    if (ebayQuantityMutationIdentity(input.method,input.path,input.body)) {
+      return executeEbayQuantityHttp<T>({ url: `${input.baseUrl}${input.path}`,method: input.method,path: input.path,body: input.body,
+        headers: { Authorization: `Bearer ${input.credential.accessToken}`,"Content-Type": "application/json",Accept: "application/json",
+          "Content-Language": "en-US","X-EBAY-C-MARKETPLACE-ID": input.config.marketplaceId },
+        request: this.fetchImpl,now: () => this.clock.now(),
+        onFailure: (status,text) => this.throwListingHttpError(input.credential,status,text) });
+    }
     const deadline = createProviderRequestDeadline();
     try {
     const response = await this.fetchImpl(`${input.baseUrl}${input.path}`, {
@@ -528,26 +536,7 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
       if (response.ok) return undefined as T;
     }
     if (!response.ok) {
-      const accessTokenRejected = isEbayResourceAuthFailureStatus(response.status);
-      if (accessTokenRejected) {
-        await recordEbayAccessTokenRejection({
-          credentials: this.credentials,
-          credential: input.credential,
-          status: response.status,
-          failureCode: "DROPSHIP_EBAY_LISTING_PUSH_HTTP_ERROR",
-          message: `eBay listing push failed with HTTP ${response.status}.`,
-          now: this.clock.now(),
-        });
-      }
-      throw new DropshipError(
-        "DROPSHIP_EBAY_LISTING_PUSH_HTTP_ERROR",
-        `eBay listing push failed with HTTP ${response.status}.`,
-        {
-          retryable: accessTokenRejected || response.status === 429 || response.status >= 500,
-          status: response.status,
-          body: text.slice(0, 1000),
-        },
-      );
+      await this.throwListingHttpError(input.credential,response.status,text);
     }
     return parseEbayJson<T>({
       text,
@@ -555,6 +544,29 @@ export class EbayDropshipListingPushProvider implements DropshipMarketplaceListi
       message: "eBay listing push returned invalid JSON.",
     });
     } finally { deadline.dispose(); }
+  }
+
+  private async throwListingHttpError(credential: DropshipMarketplaceStoreCredentials,status: number,text: string): Promise<never> {
+      const accessTokenRejected = isEbayResourceAuthFailureStatus(status);
+      if (accessTokenRejected) {
+        await recordEbayAccessTokenRejection({
+          credentials: this.credentials,
+          credential,
+          status,
+          failureCode: "DROPSHIP_EBAY_LISTING_PUSH_HTTP_ERROR",
+          message: `eBay listing push failed with HTTP ${status}.`,
+          now: this.clock.now(),
+        });
+      }
+      throw new DropshipError(
+        "DROPSHIP_EBAY_LISTING_PUSH_HTTP_ERROR",
+        `eBay listing push failed with HTTP ${status}.`,
+        {
+          retryable: accessTokenRejected || status === 429 || status >= 500,
+          status,
+          body: text.slice(0, 1000),
+        },
+      );
   }
 
 }

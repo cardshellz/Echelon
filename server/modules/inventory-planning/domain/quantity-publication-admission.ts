@@ -47,7 +47,7 @@ export interface QuantityPublicationDrainProof {
     gateEpoch: string;
     owner: "legacy" | "outbox";
     completedAt: string | null;
-    resolutionBasis: "owner_completion" | "operator_attestation" | null;
+    resolutionBasis: "owner_completion" | "operator_attestation" | "provider_rejection" | null;
   }>;
   pendingCatchupCount: number;
 }
@@ -60,6 +60,6 @@ export const quantityPublicationDrainProofSchema: z.ZodType<QuantityPublicationD
   latestAttemptsByScope: z.array(z.object({ scope: quantityPublicationScopeSchema, attemptId: databaseBigInt,
     outboxId: databaseBigInt.nullable(), gateEpoch: nonnegativeBigInt,
     owner: z.enum(["legacy","outbox"]), completedAt: z.string().datetime().nullable(),
-    resolutionBasis: z.enum(["owner_completion","operator_attestation"]).nullable() }).strict()).max(10000),
+    resolutionBasis: z.enum(["owner_completion","operator_attestation","provider_rejection"]).nullable() }).strict()).max(10000),
   pendingCatchupCount: z.number().int().nonnegative().safe(),
 }).strict();

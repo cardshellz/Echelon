@@ -13,6 +13,7 @@ import type { EbayAuthService } from "./ebay-auth.service";
 import { ChannelFulfillmentProviderError } from "../../channel-fulfillment-provider.error";
 import { ebayQuantityMutationIdentity, executeAdmittedEbayQuantityRequest, type EbayQuantityRequestAdmission } from "../../quantity-publication-request";
 import { createProviderRequestDeadline, boundedProviderRetryAfterSeconds } from "../../provider-request-limits";
+import { executeEbayQuantityHttp } from "./ebay-quantity-http";
 import type {
   EbayInventoryItem,
   EbayOffer,
@@ -73,6 +74,7 @@ type HttpMethod = "GET" | "POST" | "PUT" | "DELETE";
 
 export interface EbayApiClientOptions {
   request?: typeof fetch;
+  now?: () => Date;
   strictFulfillmentReadback?: boolean;
   quantityAdmission?: () => Promise<EbayQuantityRequestAdmission>;
 }
@@ -823,6 +825,14 @@ export class EbayApiClient {
     }
 
     const accessToken = await this.authService.getAccessToken(this.channelId);
+
+    if (ebayQuantityMutationIdentity(method, path, body)) {
+      return executeEbayQuantityHttp<T>({ url, method, path, body,
+        headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json",
+          Accept: "application/json", "Accept-Language": EBAY_US_LOCALE, "Content-Language": EBAY_US_LOCALE,
+          "X-EBAY-C-MARKETPLACE-ID": EBAY_US_MARKETPLACE_ID, ...extraHeaders },
+        request: this.options.request ?? fetch, now: this.options.now ?? (() => new Date()) });
+    }
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       const deadline = createProviderRequestDeadline();

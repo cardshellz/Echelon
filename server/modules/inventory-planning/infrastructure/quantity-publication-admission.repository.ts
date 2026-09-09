@@ -4,6 +4,8 @@ import type { Pool, PoolClient } from "pg";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import type { InventoryAvailabilityTransactionQueryClient as Client } from "../application/inventory-availability-transaction-query.port";
 import type { QuantityPublicationAdmission, QuantityPublicationCatchup, QuantityPublicationCatchupStore, QuantityPublicationOutboxClaim } from "../application/quantity-publication-admission.port";
+import { QuantityProviderEvidenceCollector } from "../application/quantity-provider-request-evidence";
+import { PostgresQuantityProviderRequestEvidenceStore } from "./quantity-provider-request-evidence.repository";
 import { QuantityPublicationAdmissionError, quantityPublicationScopeSchema, quantityPublicationRecoverySchema,
   type QuantityPublicationScope, type QuantityPublicationDrainProof, type QuantityPublicationRecovery } from "../domain/quantity-publication-admission";
 
@@ -72,7 +74,7 @@ export async function captureQuantityPublicationDrainInsideTransaction(client: C
   )).rows;
   if (unresolved.length > 1000) fail("PUBLICATION_DRAIN_EVIDENCE_LIMIT", "Resolve the outstanding publication attempt backlog before capture.");
   const latest = (await client.query<{ id: string; outbox_id: string | null; gate_epoch: string; owner_kind: "legacy" | "outbox"; scope: unknown;
-    completed_at: Date | null; resolution_basis: "owner_completion" | "operator_attestation" | null }>(
+    completed_at: Date | null; resolution_basis: "owner_completion" | "operator_attestation" | "provider_rejection" | null }>(
     `SELECT DISTINCT ON (member.scope_key) a.id::text,a.outbox_id::text,a.gate_epoch::text,a.owner_kind,
        a.affected_scopes->(member.ordinality::int-1) AS scope,a.completed_at,a.resolution_basis
      FROM inventory.quantity_publication_attempts a
@@ -334,6 +336,19 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
         await client.query("COMMIT"); inTransaction = false;
         fail("PUBLICATION_PRIOR_OUTCOME_UNRESOLVED", "A prior provider quantity outcome requires reconciliation.", { attemptId: unresolved.id });
       }
+      const cooldown = (await client.query<{ retry_not_before: Date }>(`SELECT MAX(retry_not_before) AS retry_not_before
+        FROM inventory.quantity_publication_cooldowns c
+        JOIN jsonb_to_recordset($1::jsonb) AS incoming("providerKey" text,"providerScopeType" text,"externalScopeId" text,"externalInventoryItemId" text)
+          ON c.provider_key=incoming."providerKey" AND c.provider_scope_type=incoming."providerScopeType"
+          AND c.external_scope_id=incoming."externalScopeId" AND c.external_inventory_item_id IN ('',incoming."externalInventoryItemId")
+        WHERE retry_not_before>$2`,
+      [JSON.stringify([scope,...memberScopes]),now(this.clock())])).rows[0]?.retry_not_before;
+      if (cooldown) {
+        await retainWork(client, gate.activation_run_id, "provider_cooldown");
+        await client.query("COMMIT"); inTransaction = false;
+        fail("PUBLICATION_PROVIDER_COOLDOWN", "The provider retry window has not opened; no quantity request was sent.",
+          { retryNotBefore: cooldown.toISOString() });
+      }
       // Per-scope session lock serializes providers without holding a DB transaction during HTTP.
       attemptId = (await client.query<{ id: string }>(`INSERT INTO inventory.quantity_publication_attempts
         (owner_token,owner_kind,gate_epoch,scope_key,scope,outbox_id,state,started_at,planned_outbox_id,affected_scope_keys,planned_outbox_ids,affected_scopes)
@@ -342,15 +357,23 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
         planned[0]?.outboxId ?? null,lockedScopeKeys,planned.map(row => row.outboxId),
         JSON.stringify(lockedScopeKeys.map(scopeKey => [scope, ...memberScopes].find(member => key(member) === scopeKey)))])).rows[0].id;
       await client.query("COMMIT"); inTransaction = false;
+      const requestEvidence = new QuantityProviderEvidenceCollector(
+        new PostgresQuantityProviderRequestEvidenceStore(client, attemptId!, ownerToken, [scope,...memberScopes]), this.clock);
       let result: T;
       try {
-        result = await session.run({ scope, externalSku: claim?.externalSku ?? null, memberKeys: new Set(memberScopes.map(key)) }, work);
+        result = await requestEvidence.run(() => session.run({ scope, externalSku: claim?.externalSku ?? null,
+          memberKeys: new Set(memberScopes.map(key)) }, work));
+        requestEvidence.assertNoAmbiguousRequests();
       } catch (error) {
         await client.query("BEGIN"); inTransaction = true;
-        await client.query(`UPDATE inventory.quantity_publication_attempts SET state='uncertain',error_code=$3
+        const rejected = requestEvidence.provesTerminalRejection();
+        await client.query(`UPDATE inventory.quantity_publication_attempts
+          SET state=$4,error_code=$3,completed_at=$5,outcome_hash=$6,resolution_basis=$7
           WHERE id=$1 AND owner_token=$2 AND state='running'`,
-        [attemptId, ownerToken, error instanceof Error && "code" in error ? String(error.code) : "PROVIDER_OUTCOME_UNCERTAIN"]);
-        await retainWork(client, gate.activation_run_id, "uncertain_provider_outcome");
+        [attemptId, ownerToken, error instanceof Error && "code" in error ? String(error.code) : "PROVIDER_OUTCOME_UNCERTAIN",
+          rejected ? "rejected" : "uncertain", rejected ? now(this.clock()) : null,
+          rejected ? requestEvidence.evidenceHash() : null, rejected ? "provider_rejection" : null]);
+        await retainWork(client, gate.activation_run_id, rejected ? "provider_rejected_quantity_write" : "uncertain_provider_outcome");
         await client.query("COMMIT"); inTransaction = false;
         throw error;
       }
@@ -426,7 +449,11 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
   async listDue(limit: number): Promise<QuantityPublicationCatchup[]> {
     const client = await this.pool.connect();
     try { return (await client.query<{ id: string; revision: string; attempt_boundary_id: string; scope: unknown }>(`SELECT id::text,revision::text,attempt_boundary_id::text,scope
-      FROM inventory.quantity_publication_catchup WHERE completed_revision<revision AND next_attempt_at<=$1
+      FROM inventory.quantity_publication_catchup catchup WHERE completed_revision<revision AND next_attempt_at<=$1
+      AND NOT EXISTS (SELECT 1 FROM inventory.quantity_publication_cooldowns cooldown
+        WHERE cooldown.provider_key=catchup.scope->>'providerKey' AND cooldown.provider_scope_type=catchup.scope->>'providerScopeType'
+          AND cooldown.external_scope_id=catchup.scope->>'externalScopeId'
+          AND cooldown.external_inventory_item_id IN ('',catchup.scope->>'externalInventoryItemId') AND cooldown.retry_not_before>$1)
       AND NOT EXISTS (SELECT 1 FROM inventory.quantity_publication_gate WHERE activation_run_id IS NOT NULL)
       ORDER BY next_attempt_at,id LIMIT $2`, [now(this.clock()),limit])).rows.map(row => ({
       catchupId: row.id, revision: row.revision, attemptBoundaryId: row.attempt_boundary_id, scope: quantityPublicationScopeSchema.parse(row.scope) }));

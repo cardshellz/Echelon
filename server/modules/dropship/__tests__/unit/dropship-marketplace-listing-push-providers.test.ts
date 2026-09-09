@@ -5,6 +5,7 @@ import type {
 } from "../../application/dropship-marketplace-listing-push-provider";
 import { ShopifyDropshipListingPushProvider } from "../../infrastructure/dropship-shopify-listing-push.provider";
 import { EbayDropshipListingPushProvider } from "../../infrastructure/dropship-ebay-listing-push.provider";
+import { QuantityProviderEvidenceCollector, type QuantityProviderResponseEvidence } from "../../../inventory-planning/application/quantity-provider-request-evidence";
 import type {
   DropshipMarketplaceCredentialRepository,
   DropshipMarketplaceStoreAuthFailureInput,
@@ -14,6 +15,20 @@ import type {
 
 describe("dropship marketplace listing push providers", () => {
   beforeEach(() => { quantityAdmission = createAdmittedEbayQuantityTestOwner(); });
+  it("retains daily-limit request evidence through the Dropship listing error wrapper", async () => {
+    const credentials = new FakeCredentialRepository(ebayCredential());
+    const fetcher = new FakeFetch([jsonResponse({ offers: [] }),new Response(JSON.stringify({ errors: [{ errorId: 25001,
+      message: "You have exceeded your maximum call limit of 250 for item per day. Try back after 1 day." }] }),{ status: 400 })]);
+    const provider = createEbayProvider(credentials,fetcher.fetch);
+    const evidence: QuantityProviderResponseEvidence[] = [];
+    const collector = new QuantityProviderEvidenceCollector({ start: async () => "1",finish: async (_id,row) => { evidence.push(row); } },
+      () => new Date("2026-09-01T12:00:00.000Z"));
+    await expect(collector.run(() => provider.pushListing(makeRequest({ platform: "ebay",marketplaceConfig: ebayMarketplaceConfig() }))))
+      .rejects.toMatchObject({ code: "DROPSHIP_EBAY_LISTING_PUSH_HTTP_ERROR" });
+    expect(collector.provesTerminalRejection()).toBe(true);
+    expect(evidence).toEqual([expect.objectContaining({ outcome: "rejected",httpStatus: 400,retryNotBefore: "2026-09-02T12:00:00.000Z" })]);
+    expect(fetcher.calls).toHaveLength(2);
+  });
   it("pushes Shopify listings through GraphQL productSet using deterministic money strings", async () => {
     const credentials = new FakeCredentialRepository(shopifyCredential());
     const fetcher = new FakeFetch([

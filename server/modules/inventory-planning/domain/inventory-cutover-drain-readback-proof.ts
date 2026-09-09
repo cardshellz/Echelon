@@ -49,6 +49,7 @@ export function validateCutoverDrainReadbacks(rawProof: unknown, runId: string, 
     if (latest.length !== 1 || latest.some(attempt => attempt.owner !== "outbox"
       || attempt.outboxId !== row.publicationId
       || attempt.resolutionBasis === null
+      || attempt.resolutionBasis === "provider_rejection"
       || BigInt(attempt.gateEpoch) !== BigInt(proof.gateEpoch)
       || BigInt(attempt.attemptId) > BigInt(proof.latestAttemptId)
       || attempt.completedAt === null || row.observedAt === null

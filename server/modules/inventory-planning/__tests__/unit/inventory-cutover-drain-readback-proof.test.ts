@@ -38,7 +38,7 @@ describe("publication drain to exact readback lineage", () => {
 
   it.each([
     { owner: "legacy", outboxId: null }, { outboxId: "9" }, { outboxId: null }, { completedAt: null },
-    { completedAt: "2026-09-08T19:55:00.001Z" }, { resolutionBasis: null }, { gateEpoch: "1" },
+    { completedAt: "2026-09-08T19:55:00.001Z" }, { resolutionBasis: null }, { resolutionBasis: "provider_rejection" }, { gateEpoch: "1" },
     { gateEpoch: "3" }, { attemptId: "21" },
   ])("rejects stale, unrelated or unfinished latest admission: %#", override => {
     const proof = completionDrain();

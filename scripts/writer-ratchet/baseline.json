@@ -574,6 +574,12 @@
   "inventory.publication_variant_mapping_versions": [
     "modules/inventory-planning"
   ],
+  "inventory.quantity_provider_request_results": [
+    "modules/inventory-planning"
+  ],
+  "inventory.quantity_provider_requests": [
+    "modules/inventory-planning"
+  ],
   "inventory.quantity_publication_attempt_resolutions": [
     "modules/inventory-planning"
   ],
@@ -581,6 +587,9 @@
     "modules/inventory-planning"
   ],
   "inventory.quantity_publication_catchup": [
+    "modules/inventory-planning"
+  ],
+  "inventory.quantity_publication_cooldowns": [
     "modules/inventory-planning"
   ],
   "inventory.quantity_publication_gate": [
