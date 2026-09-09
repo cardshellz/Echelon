@@ -28,8 +28,10 @@ import {
   calculateUnreservedLotOnHand,
 } from "./domain/inventory.domain";
 import { millsToCents, centsToMills } from "@shared/utils/money";
-import { AppError, IntegrityError } from "../../../shared/errors";
+import { AppError, IntegrityError, ValidationError } from "../../../shared/errors";
 import { normalizeBuildLotCosts } from "./infrastructure/build.repository";
+import { planShipmentLotDepletion, ShipmentLotConflictError, shipmentLotDepletionRequestSchema,
+  type ShipmentLotDepletionRequest } from "./domain/shipment-lot-depletion";
 
 export class LotInventoryConflictError extends AppError {
   constructor(code: "LOT_ADJUSTMENT_SHORTFALL" | "LOT_ADJUSTMENT_CONFLICT" | "LOT_TRANSFER_SHORTFALL" | "LOT_TRANSFER_CONFLICT", message: string, context: Record<string, unknown>) {
@@ -562,96 +564,66 @@ export class InventoryLotService {
   }
 
   // ---------------------------------------------------------------------------
-  // SHIP (deplete picked lots)
+  // SHIP (apply the aggregate owner's exact picked/on-hand bucket split)
   // ---------------------------------------------------------------------------
 
-  /**
-   * Record shipment against lots. Decrements qtyPicked.
-   * Lots with all quantities at 0 → status = 'depleted'.
-   */
-  async shipFromLots(params: {
-    productVariantId: number;
-    warehouseLocationId: number;
-    qty: number;
-  }): Promise<void> {
-    // Find lots with picked qty, FIFO order
+  /** Caller owns the transaction and locked level; failures MUST roll it back. */
+  async shipFromLots(input: ShipmentLotDepletionRequest): Promise<void> {
+    const parsed = shipmentLotDepletionRequestSchema.safeParse(input);
+    if (!parsed.success) throw new ValidationError("Invalid shipment bucket request.");
+    const params = parsed.data;
+    const maxLots = 10_000;
+    // Lock by primary key, then plan FIFO in memory. Never infer a second bucket
+    // split from lot counters after the aggregate owner has selected its split.
     const lots = await this.db
-      .select()
+      .select({ id: inventoryLots.id, qtyOnHand: inventoryLots.qtyOnHand,
+        qtyReserved: inventoryLots.qtyReserved, qtyPicked: inventoryLots.qtyPicked,
+        receivedAt: inventoryLots.receivedAt, status: inventoryLots.status })
       .from(inventoryLots)
       .where(
         and(
           eq(inventoryLots.productVariantId, params.productVariantId),
           eq(inventoryLots.warehouseLocationId, params.warehouseLocationId),
-          gt(inventoryLots.qtyPicked, 0),
+          // Empty historical lots cannot supply any bucket. Keep negative rows
+          // in the census so invalid current balances fail validation.
+          sql`(${inventoryLots.qtyOnHand} <> 0 OR ${inventoryLots.qtyReserved} <> 0 OR ${inventoryLots.qtyPicked} <> 0)`,
         ),
       )
-      .orderBy(asc(inventoryLots.receivedAt));
-
-    let remaining = params.qty;
-    const pickedUpdates: Array<{ lotId: number; take: number }> = [];
-    for (const lot of lots) {
-      if (remaining <= 0) break;
-
-      const take = Math.min(lot.qtyPicked, remaining);
-      pickedUpdates.push({ lotId: lot.id, take });
-      remaining -= take;
+      .orderBy(asc(inventoryLots.id))
+      .limit(maxLots + 1)
+      .for("update");
+    if (lots.length > maxLots) {
+      throw new ShipmentLotConflictError("LOT_SHIPMENT_CENSUS_LIMIT",
+        "Shipment lot position exceeds its complete bounded census.", {
+          productVariantId: params.productVariantId, warehouseLocationId: params.warehouseLocationId,
+        });
     }
-
-    if (pickedUpdates.length > 0) {
-      await this.db.execute(sql`
-        WITH updates AS (
-          SELECT * FROM jsonb_to_recordset(${JSON.stringify(pickedUpdates)}::jsonb) AS x("lotId" int, take int)
-        )
-        UPDATE inventory.inventory_lots AS il
-        SET qty_picked = il.qty_picked - u.take,
-            status = CASE WHEN il.qty_on_hand = 0 AND il.qty_reserved = 0 AND (il.qty_picked - u.take) = 0 THEN 'depleted' ELSE il.status END
-        FROM updates u
-        WHERE il.id = u."lotId"
-      `);
-    }
-
-    // If shipped without pick (direct ship), consume from on-hand lots
-    if (remaining > 0) {
-      const onHandLots = await this.db
-        .select()
-        .from(inventoryLots)
-        .where(
-          and(
-            eq(inventoryLots.productVariantId, params.productVariantId),
-            eq(inventoryLots.warehouseLocationId, params.warehouseLocationId),
-            eq(inventoryLots.status, "active"),
-            gt(inventoryLots.qtyOnHand, 0),
-          ),
-        )
-        .orderBy(asc(inventoryLots.receivedAt));
-
-      const onHandUpdates: Array<{ lotId: number; take: number; reservedRelease: number }> = [];
-
-      for (const lot of onHandLots) {
-        if (remaining <= 0) break;
-        const available = calculateLotPickableOnHand(lot, true);
-        if (available <= 0) continue;
-
-        const take = Math.min(available, remaining);
-        const reservedRelease = Math.min(lot.qtyReserved, take);
-
-        onHandUpdates.push({ lotId: lot.id, take, reservedRelease });
-        remaining -= take;
-      }
-
-      if (onHandUpdates.length > 0) {
-        await this.db.execute(sql`
-          WITH updates AS (
-            SELECT * FROM jsonb_to_recordset(${JSON.stringify(onHandUpdates)}::jsonb) AS x("lotId" int, take int, "reservedRelease" int)
-          )
-          UPDATE inventory.inventory_lots AS il
-          SET qty_on_hand = il.qty_on_hand - u.take,
-              qty_reserved = il.qty_reserved - u."reservedRelease",
-              status = CASE WHEN (il.qty_on_hand - u.take) = 0 AND (il.qty_reserved - u."reservedRelease") = 0 AND il.qty_picked = 0 THEN 'depleted' ELSE il.status END
-          FROM updates u
-          WHERE il.id = u."lotId"
-        `);
-      }
+    const plan = planShipmentLotDepletion(params, lots);
+    const updated = await this.db.execute(sql`
+      WITH updates AS (
+        SELECT * FROM jsonb_to_recordset(${JSON.stringify(plan)}::jsonb)
+          AS x("lotId" int, "fromPicked" int, "fromOnHand" int, "reservedToRelease" int,
+            "expectedOnHand" int, "expectedReserved" int, "expectedPicked" int, "expectedStatus" text)
+      )
+      UPDATE inventory.inventory_lots AS il
+      SET qty_on_hand = il.qty_on_hand - u."fromOnHand",
+          qty_reserved = il.qty_reserved - u."reservedToRelease",
+          qty_picked = il.qty_picked - u."fromPicked",
+          status = CASE WHEN il.qty_on_hand - u."fromOnHand" = 0
+            AND il.qty_reserved - u."reservedToRelease" = 0
+            AND il.qty_picked - u."fromPicked" = 0 THEN 'depleted' ELSE il.status END
+      FROM updates u
+      WHERE il.id = u."lotId" AND il.product_variant_id = ${params.productVariantId}
+        AND il.warehouse_location_id = ${params.warehouseLocationId}
+        AND il.qty_on_hand = u."expectedOnHand" AND il.qty_reserved = u."expectedReserved"
+        AND il.qty_picked = u."expectedPicked" AND il.status = u."expectedStatus"
+      RETURNING il.id
+    `);
+    if (updated.rows.length !== plan.length) {
+      throw new ShipmentLotConflictError("LOT_SHIPMENT_CONFLICT",
+        "A lot changed during shipment posting; the complete shipment must roll back.", {
+          productVariantId: params.productVariantId, warehouseLocationId: params.warehouseLocationId,
+        });
     }
   }
 
