@@ -776,6 +776,8 @@ export class InventoryUseCases {
       ? 0
       : Math.min(level.pickedQty, params.qty);
     const fromOnHand = params.qty - fromPicked;
+    const reservedToRelease = params.releaseReservation === false
+      ? 0 : Math.min(level.reservedQty, fromOnHand);
 
     if (fromOnHand > level.variantQty) {
       throw new IntegrityError(
@@ -797,9 +799,6 @@ export class InventoryUseCases {
     }
 
     if (fromOnHand > 0) {
-      const reservedToRelease = params.releaseReservation === false
-        ? 0
-        : Math.min(level.reservedQty, fromOnHand);
       await this.storage.adjustInventoryLevel(level.id, {
         variantQty: -fromOnHand,
         ...(reservedToRelease > 0 ? { reservedQty: -reservedToRelease } : {}),
@@ -812,6 +811,9 @@ export class InventoryUseCases {
         productVariantId: params.productVariantId,
         warehouseLocationId: params.warehouseLocationId,
         qty: params.qty,
+        fromPicked,
+        fromOnHand,
+        reservedToRelease,
       });
     }
 
@@ -832,6 +834,7 @@ export class InventoryUseCases {
       variantQtyDelta: -params.qty,
       variantQtyBefore: level.variantQty,
       variantQtyAfter: level.variantQty - fromOnHand,
+      reservedQtyDelta: -reservedToRelease,
       sourceState: fromOnHand > 0 ? "on_hand" : "picked",
       targetState: "shipped",
       orderId: params.orderId,
@@ -995,6 +998,9 @@ export class InventoryUseCases {
           productVariantId: params.productVariantId,
           warehouseLocationId: locationId,
           qty: params.qty,
+          fromPicked: params.qty,
+          fromOnHand: 0,
+          reservedToRelease: 0,
         });
       }
 
@@ -1006,6 +1012,7 @@ export class InventoryUseCases {
         variantQtyBefore: selectedLevel.variantQty - params.qty,
         variantQtyAfter: selectedLevel.variantQty - params.qty,
         sourceState: "picked",
+        reservedQtyDelta: 0,
         targetState: "shipped",
         orderId: params.orderId,
         orderItemId: params.orderItemId ?? null,
