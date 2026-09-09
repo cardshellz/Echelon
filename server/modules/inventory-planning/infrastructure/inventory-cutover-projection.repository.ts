@@ -3,8 +3,8 @@ import type { InventoryCutoverReview, InventoryCutoverManifest } from "@shared/t
 import type { SupplySnapshotDto } from "@shared/types/inventory-availability-planner";
 import { planInventoryChannelExposureProduct } from "../application/inventory-channel-exposure-runtime.service";
 import { inventoryCutoverEvidenceHash } from "../domain/inventory-cutover-manifest";
-import { sealSupplySnapshot } from "../domain/inventory-availability-planner";
-import { planFreshCutoverClaims } from "../domain/inventory-cutover-reconstruction-planning";
+import { parseSupplySnapshot, sealSupplySnapshot } from "../domain/inventory-availability-planner";
+import { planFreshCutoverClaims, projectCutoverPromiseReservations } from "../domain/inventory-cutover-reconstruction-planning";
 import { captureProposedClaimSupplySnapshotInsideTransaction, captureProposedSupplySnapshotInsideTransaction } from "./inventory-availability-shadow.repository";
 import { loadManagedSellableVariantIds, loadProposedPublicationTargetsForCutover } from "./inventory-channel-exposure-runtime.repository";
 import { PostgresInventoryCutoverReconstructionRepository } from "./inventory-cutover-reconstruction.repository";
@@ -22,6 +22,7 @@ export async function projectInventoryCutoverStateInsideTransaction(
   const targetVariants = [...new Set(reconstruction.orders.flatMap((order) => order.lines.map((line) => line.targetVariantId)))].sort((a, b) => a - b);
   let impactHash = inventoryCutoverEvidenceHash({ evidenceHash: reconstruction.evidenceHash, freshReservationsByLevel: [], orders: [] });
   let additions: Array<{ inventoryLevelId: number; reservedQty: string }> = [];
+  let claimsProjected = false;
   if (reconstruction.ready && targetVariants.length > 0) {
     try {
       const claimSnapshot = await captureProposedClaimSupplySnapshotInsideTransaction(client, targetVariants);
@@ -31,6 +32,7 @@ export async function projectInventoryCutoverStateInsideTransaction(
       const fresh = planFreshCutoverClaims(claimSnapshot, reconstruction);
       impactHash = fresh.impactHash;
       additions = fresh.freshReservationsByLevel;
+      claimsProjected = true;
     } catch (error) {
       if (error instanceof Error && "code" in error && error.code === "CUTOVER_FRESH_DEMAND_BLOCKED") {
         blockers.push({ code: error.code, subject: "accepted_demand", message: error.message });
@@ -46,11 +48,16 @@ export async function projectInventoryCutoverStateInsideTransaction(
   const stockFingerprints: Array<{ productId: number; fingerprint: string }> = [];
   const configurationEvidence: unknown[] = [];
   for (const productId of manifest.productIds) {
-    const original = await captureProposedSupplySnapshotInsideTransaction(client, productId);
+    const original = parseSupplySnapshot(await captureProposedSupplySnapshotInsideTransaction(client, productId));
     stockFingerprints.push({ productId, fingerprint: original.snapshotFingerprint });
     checkGraphSelections(manifest, original, blockers);
     const { snapshotFingerprint: _fingerprint, ...content } = original;
-    const snapshot = sealSupplySnapshot({ ...content, inventoryPositions: content.inventoryPositions.map((row) => ({
+    // Only an executable reconstruction projects a release. Blocked evidence
+    // retains every legacy counter and cannot inflate channel publication.
+    const releasedPositions = claimsProjected
+      ? projectCutoverPromiseReservations(content.inventoryPositions, reconstruction.legacyPromiseReleases)
+      : content.inventoryPositions;
+    const snapshot = sealSupplySnapshot({ ...content, inventoryPositions: releasedPositions.map((row) => ({
       ...row, reservedQty: (BigInt(row.reservedQty) + (additionalByLevel.get(row.inventoryLevelId) ?? BigInt(0))).toString(),
     })) });
     const variants = await loadManagedSellableVariantIds(client, productId);

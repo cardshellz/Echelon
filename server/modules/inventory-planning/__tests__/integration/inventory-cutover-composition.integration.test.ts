@@ -145,6 +145,92 @@ dbDescribe.sequential("cutover composition with actual snapshot, claim and recei
   });
 });
 
+dbDescribe.sequential("empty-bin promise handoff through complete cutover composition", () => {
+  let database: InventoryCutoverTestDatabase;
+  beforeAll(async () => {
+    database = await createInventoryCutoverTestDatabase(databaseUrl, disposable, cutoverCompositionBaseSql);
+    await installCutoverCompositionMigrations(database.pool);
+    await database.pool.query(cutoverCompositionSeedSql);
+    await database.pool.query(cutoverCompositionChannelSeedSql);
+    await database.pool.query(`DELETE FROM oms.order_item_costs; DELETE FROM inventory.inventory_transactions;
+      UPDATE wms.order_items SET picked_quantity=0;
+      UPDATE inventory.inventory_levels SET variant_qty=0,reserved_qty=6,picked_qty=0;
+      UPDATE inventory.inventory_lots SET qty_on_hand=0,qty_reserved=0,qty_picked=0;
+      INSERT INTO warehouse.warehouse_locations(id,warehouse_id,code) VALUES(200,1,'OTHER-PICK');
+      INSERT INTO inventory.inventory_levels(id,warehouse_location_id,product_variant_id,variant_qty,reserved_qty,picked_qty,packed_qty)
+        VALUES(20,200,101,20,0,0,0);
+      INSERT INTO inventory.inventory_lots(id,warehouse_location_id,product_variant_id,qty_on_hand,qty_reserved,qty_picked,status,received_at,
+        unit_cost_mills,po_unit_cost_mills,packaging_cost_mills,landed_cost_mills,total_unit_cost_mills)
+        VALUES(5,200,101,20,0,0,'active','2026-09-01T00:00:00Z',1000,1000,0,0,1000);
+      INSERT INTO inventory.inventory_transactions(order_id,order_item_id,product_variant_id,to_location_id,transaction_type,
+        variant_qty_delta,variant_qty_before,variant_qty_after,reserved_qty_delta,source_state,target_state)
+        VALUES(1,11,101,100,'reserve',0,0,0,6,'on_hand','committed')`);
+    await installCutoverAdmissionFixturePrerequisites(database.pool);
+    await database.pool.query(readFileSync(resolve(process.cwd(), "migrations/236_inventory_cutover_admission.sql"), "utf8"));
+  }, 30_000);
+  afterAll(async () => { await database?.close(); });
+
+  it("agrees on conservative/full publication, rolls back later failures, and serializes concurrent retries", async () => {
+    const dryRun = await seedCompositionReviewedDryRun(database.pool);
+    const now = new Date(Date.parse(dryRun.completedAt) + 10);
+    const clock = { now: () => now };
+    const activation = new InventoryAvailabilityActivationService(new PostgresInventoryAvailabilityActivationRepository(database.pool), clock);
+    const prepared = await activation.prepare({ sourceDryRunId: dryRun.activationRunId, expectedDryRunResultHash: dryRun.resultHash,
+      idempotencyKey: "promise-composition-prepare", reason: "Preserve reviewed empty-bin customer demand" }, "operator");
+    expect(prepared).toMatchObject({ state: "publishing", runtimeAuthority: "legacy" });
+    expect((await database.pool.query("SELECT desired_quantity::text,publication_phase FROM inventory.inventory_publication_outbox")).rows)
+      .toEqual([{ desired_quantity: "14", publication_phase: "conservative" }]);
+    expect((await database.pool.query("SELECT id,reserved_qty FROM inventory.inventory_levels ORDER BY id")).rows)
+      .toEqual([{ id: 10, reserved_qty: 6 }, { id: 20, reserved_qty: 0 }]);
+
+    let observed = 20;
+    const transports = new InventoryPublicationTransportRegistry();
+    const publishAbsolute = vi.fn(async (request: AbsoluteInventoryPublicationRequest) => {
+      observed = request.desiredQuantity; return { publishedQuantity: observed, providerResponse: { testOnly: true } };
+    });
+    transports.register({ destinationKind: "channel_connection", providerKey: "shopify", supportedScopeTypes: ["location"], publishAbsolute,
+      readAbsolute: async () => ({ observedQuantity: observed, providerResponse: { testOnly: true } }) });
+    const publisher = new InventoryPublicationOutboxService(new PostgresInventoryPublicationOutboxRepository(database.pool), transports,
+      clock, () => "promise-composition-lease", new PostgresQuantityPublicationAdmission(database.pool, () => now,
+        () => "00000000-0000-4000-8000-000000000040"));
+    expect(await publisher.processDue({ batchSize: 1, leaseSeconds: 60 })).toEqual({ claimed: 1, verified: 1, failed: 0, superseded: 0 });
+    expect(publishAbsolute).toHaveBeenCalledOnce();
+    const cutover = new InventoryCutoverCommitService(new PostgresInventoryCutoverCommitRepository(database.pool), clock);
+    const review = await cutover.preview({ activationRunId: prepared.activationRunId }, "operator");
+    expect(review.blockers).toEqual([]);
+    expect(review.publicationRows).toEqual([{ publicationTargetId: 1, productVariantId: 101, desiredQuantity: "14" }]);
+    const command = { activationRunId: prepared.activationRunId, expectedAuthorityRevision: review.authorityRevision,
+      expectedReviewHash: review.reviewHash, idempotencyKey: "promise-composition-commit", reason: "Preserve exact demand with new physical allocation" };
+    await database.pool.query(`CREATE FUNCTION public.fail_promise_cutover_receipt() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'test promise final receipt failure'; END $$;
+      CREATE TRIGGER zz_promise_receipt_failure BEFORE INSERT ON inventory.availability_cutover_commits
+        FOR EACH ROW EXECUTE FUNCTION public.fail_promise_cutover_receipt()`);
+    try { await expect(cutover.commit(command, "operator")).rejects.toThrow("test promise final receipt failure"); }
+    finally { await database.pool.query("DROP TRIGGER zz_promise_receipt_failure ON inventory.availability_cutover_commits; DROP FUNCTION public.fail_promise_cutover_receipt()"); }
+    expect((await database.pool.query("SELECT authority FROM inventory.availability_runtime_authority")).rows).toEqual([{ authority: "legacy" }]);
+    expect((await database.pool.query("SELECT id,reserved_qty FROM inventory.inventory_levels ORDER BY id")).rows)
+      .toEqual([{ id: 10, reserved_qty: 6 }, { id: 20, reserved_qty: 0 }]);
+    expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.inventory_transactions WHERE reference_type='inventory_cutover_promise'")).rows[0].count).toBe(0);
+    expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.availability_claims")).rows[0].count).toBe(0);
+    expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.availability_cutover_reconstruction_receipts")).rows[0].count).toBe(0);
+    expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.availability_cutover_commits")).rows[0].count).toBe(0);
+    expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.inventory_publication_outbox WHERE publication_phase='full'")).rows[0].count).toBe(0);
+    const outcomes = await Promise.all([cutover.commit(command, "operator"), cutover.commit(command, "operator")]);
+    expect(outcomes.map((outcome) => outcome.alreadyApplied).sort()).toEqual([false, true]);
+    expect((await database.pool.query("SELECT id,variant_qty,reserved_qty,picked_qty FROM inventory.inventory_levels ORDER BY id")).rows)
+      .toEqual([{ id: 10, variant_qty: 0, reserved_qty: 0, picked_qty: 0 }, { id: 20, variant_qty: 20, reserved_qty: 6, picked_qty: 0 }]);
+    expect((await database.pool.query("SELECT id,qty_on_hand,qty_reserved,qty_picked,total_unit_cost_mills::text FROM inventory.inventory_lots ORDER BY id")).rows)
+      .toEqual([{ id: 4, qty_on_hand: 0, qty_reserved: 0, qty_picked: 0, total_unit_cost_mills: "9007199254740995" },
+        { id: 5, qty_on_hand: 20, qty_reserved: 6, qty_picked: 0, total_unit_cost_mills: "1000" }]);
+    expect((await database.pool.query("SELECT requested_qty::text,planned_qty::text,shortfall_qty::text FROM inventory.availability_claim_lines")).rows)
+      .toEqual([{ requested_qty: "6", planned_qty: "6", shortfall_qty: "0" }]);
+    expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.inventory_transactions WHERE reference_type='inventory_cutover_promise'")).rows[0].count).toBe(1);
+    expect((await database.pool.query("SELECT desired_quantity::text FROM inventory.inventory_publication_outbox WHERE publication_phase='full'")).rows)
+      .toEqual([{ desired_quantity: "14" }]);
+    expect((await database.pool.query("SELECT * FROM oms.order_item_costs")).rows).toEqual([]);
+  }, 20_000);
+});
+
 dbDescribe.sequential("cutover abort, concurrent provider and external-owned destination composition", () => {
   let database:InventoryCutoverTestDatabase;
   let dryRun:InventoryActivationDryRun;

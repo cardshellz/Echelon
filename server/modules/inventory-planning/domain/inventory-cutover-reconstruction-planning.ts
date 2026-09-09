@@ -1,7 +1,7 @@
-import { claimPlanSchema, claimPlanRequestSchema, claimSupplySnapshotSchema,
+import { claimPlanSchema, claimPlanRequestSchema,
   type ClaimPlanDto, type ClaimPlanRequestDto, type ClaimSupplySnapshotDto } from "@shared/types/inventory-availability-planner";
-import type { CutoverReconstructionOrder, CutoverReconstructionPlan } from "@shared/types/inventory-cutover-reconstruction";
-import { planCanonicalClaim, sealClaimSupplySnapshot } from "./inventory-availability-planner";
+import type { CutoverReconstructionOrder, CutoverReconstructionPlan, CutoverLegacyPromiseRelease } from "@shared/types/inventory-cutover-reconstruction";
+import { parseClaimSupplySnapshot, planCanonicalClaim, sealClaimSupplySnapshot } from "./inventory-availability-planner";
 import { reconstructionHash } from "./inventory-cutover-reconstruction";
 
 export type PlannedCutoverOrder = { order: CutoverReconstructionOrder; request: ClaimPlanRequestDto; plan: ClaimPlanDto; freshPlan: ClaimPlanDto | null };
@@ -9,11 +9,40 @@ export type CutoverReconstructionPlanningResult = { orders: PlannedCutoverOrder[
   freshReservationsByLevel: Array<{ inventoryLevelId: number; reservedQty: string }>;
   impactHash: string; inventoryPositions: ClaimSupplySnapshotDto["inventoryPositions"] };
 
+/** Shared by demand and per-product publication preview; never edits raw stock. */
+export function projectCutoverPromiseReservations(
+  positions: ClaimSupplySnapshotDto["inventoryPositions"], releases: readonly CutoverLegacyPromiseRelease[],
+): ClaimSupplySnapshotDto["inventoryPositions"] {
+  const byLevel = new Map(releases.map((release) => [release.inventoryLevelId, release]));
+  return positions.map((position) => {
+    const release = byLevel.get(position.inventoryLevelId);
+    if (!release) return { ...position };
+    if (position.warehouseLocationId !== release.warehouseLocationId || position.productVariantId !== release.productVariantId
+      || position.variantQty !== release.variantQty || position.reservedQty !== release.reservedQty
+      || position.pickedQty !== release.pickedQty || position.packedQty !== release.packedQty) {
+      throw Object.assign(new Error("The reviewed legacy promise position changed before projection."), {
+        code: "CUTOVER_LEGACY_PROMISE_PROJECTION_CHANGED", context: { inventoryLevelId: position.inventoryLevelId } });
+    }
+    return { ...position, reservedQty: "0" };
+  });
+}
+
 /** Same pure planning batch for preview and commit. Each order sees the previous
  * order's additional claims, never a fresh copy of the same free inventory. */
 export function planFreshCutoverClaims(rawSnapshot: ClaimSupplySnapshotDto, reconstruction: CutoverReconstructionPlan): CutoverReconstructionPlanningResult {
   if (!reconstruction.ready) throw new Error("CUTOVER_RECONSTRUCTION_BLOCKED");
-  let snapshot = claimSupplySnapshotSchema.parse(rawSnapshot);
+  // Projection is permitted to reseal only an already verified original census.
+  let snapshot = parseClaimSupplySnapshot(rawSnapshot);
+  const capturedLevelIds = new Set(snapshot.inventoryPositions.map((position) => position.inventoryLevelId));
+  if (reconstruction.legacyPromiseReleases.some((release) => !capturedLevelIds.has(release.inventoryLevelId))) {
+    throw Object.assign(new Error("The claim snapshot does not contain every reviewed promise position."), {
+      code: "CUTOVER_LEGACY_PROMISE_PROJECTION_CHANGED" });
+  }
+  if (reconstruction.legacyPromiseReleases.length > 0) {
+    const { snapshotFingerprint: _beforeRelease, ...content } = snapshot;
+    snapshot = sealClaimSupplySnapshot({ ...content,
+      inventoryPositions: projectCutoverPromiseReservations(snapshot.inventoryPositions, reconstruction.legacyPromiseReleases) });
+  }
   const orders: PlannedCutoverOrder[] = [];
   const additional = new Map<number, bigint>();
   for (const order of [...reconstruction.orders].sort((a, b) => a.orderId - b.orderId)) {
@@ -65,6 +94,8 @@ export function planFreshCutoverClaims(rawSnapshot: ClaimSupplySnapshotDto, reco
   // Definition IDs/hashes and resulting quantities are review evidence; capture
   // time and draft-to-active lifecycle labels change during the approved commit.
   const impactHash = reconstructionHash({ evidenceHash: reconstruction.evidenceHash, freshReservationsByLevel,
+    // Keep old no-handoff impact payloads stable for already reviewed evidence.
+    ...(reconstruction.legacyPromiseReleases.length > 0 ? { legacyPromiseReleases: reconstruction.legacyPromiseReleases } : {}),
     orders: orders.map(({ order, plan }) => ({ orderId: order.orderId, lines: plan.lines,
       resourceClaims: plan.resourceClaims, operations: plan.operations,
       modelEvidence: plan.modelEvidence.map(({ lifecycleSelection: _selection, ...definition }) => definition) })) });

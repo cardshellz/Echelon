@@ -34,7 +34,7 @@ function groupBy<T, K>(rows: readonly T[], key: (row: T) => K): Map<K, T[]> {
 export function planCutoverReconstruction(raw: CutoverReconstructionEvidence): CutoverReconstructionPlan {
   const evidence = sortedEvidence(raw);
   const result: CutoverReconstructionPlan = { evidenceHash: reconstructionEvidenceHash(evidence), ready: false,
-    blockers: [], orders: [], retainedIndependentBuildReservationIds: [] };
+    blockers: [], orders: [], retainedIndependentBuildReservationIds: [], legacyPromiseReleases: [] };
   const block = (code: string, subject: string, message: string) => result.blockers.push({ code, subject, message });
   const sum = (values: readonly string[]) => values.reduce((total, value) => total + BigInt(value), BigInt(0));
   const levels = new Map(evidence.levels.map((row) => [row.id, row]));
@@ -48,6 +48,11 @@ export function planCutoverReconstruction(raw: CutoverReconstructionEvidence): C
   const positionKey = (locationId: number | null, variantId: number | null) => `${locationId}:${variantId}`;
   const levelsByPosition = groupBy(evidence.levels,(row) => positionKey(row.warehouseLocationId,row.productVariantId));
   const lotsByPosition = groupBy(evidence.lots,(row) => positionKey(row.warehouseLocationId,row.productVariantId));
+  const journalsByPosition = groupBy(evidence.journals,(row) => positionKey(row.warehouseLocationId,row.productVariantId));
+  const sourceItemIds = new Set(evidence.sourceItems.flatMap((row) => [row.orderItemId, row.replacementForOrderItemId]));
+  const physicalItemIds = new Set(evidence.physicalItems.flatMap((row) => [row.orderItemId, row.replacementForOrderItemId]));
+  const buildDemandItemIds = new Set(evidence.buildDemands.map((row) => row.orderItemId));
+  const buildHoldPositions = new Set(evidence.buildReservations.map((row) => positionKey(row.sourceLocationId, row.componentVariantId)));
   const plannedOrders = new Map<number,CutoverReconstructionPlan["orders"][number]>();
   const retainedByLot = new Map<number, bigint>();
   const lines = new Map<number, CutoverReconstructionLine>();
@@ -105,8 +110,13 @@ export function planCutoverReconstruction(raw: CutoverReconstructionEvidence): C
       block("OMS_ACCEPTED_DEMAND_NOT_COVERED", `oms-line:${demand.lineId}`, "Accepted physical OMS demand is not exactly covered by captured WMS demand; missing/external projection needs explicit owner reconciliation.");
     }
   }
-  for (const review of evidence.shipmentReviewEvidence) block("SHIPMENT_RECEIPT_REQUIRES_REVIEW", `${review.kind}:${review.id}`,
-    "Pending, ignored or review shipment authority evidence must be resolved before inventory authority changes.");
+  for (const review of evidence.shipmentReviewEvidence) {
+    if (review.kind === "channel_fulfillment_acknowledgment") {
+      block("SHIPMENT_ACKNOWLEDGMENT_REQUIRES_INVENTORY_RECONCILIATION", `${review.kind}:${review.id}`,
+        "Recorded channel acknowledgments identify an existing package; inventory and original cost evidence must still be reconciled before authority changes.");
+    } else block("SHIPMENT_RECEIPT_REQUIRES_REVIEW", `${review.kind}:${review.id}`,
+      "Pending, ignored or review shipment authority evidence must be resolved before inventory authority changes.");
+  }
   for (const demand of evidence.buildDemands) {
     if (["planning", "awaiting_build"].includes(demand.status)) block("LEGACY_BUILD_DEMAND_REQUIRES_HANDOFF", `build-demand:${demand.id}`,
       "Existing build promise needs an explicit canonical operation handoff; its independent component holds cannot be freed or promised again.");
@@ -163,6 +173,53 @@ export function planCutoverReconstruction(raw: CutoverReconstructionEvidence): C
     if (!plannedOrder) { plannedOrder = { orderId: order.id, warehouseId: order.warehouseId, lines: [] }; result.orders.push(plannedOrder); plannedOrders.set(order.id,plannedOrder); }
     plannedOrder.lines.push(line);
   }
+  // Legacy ATP reservations could be product-wide promises written against an
+  // empty assigned bin. They are demand, not evidence of physical lot ownership.
+  // Only an entire, exactly explained position can cross this bridge. Historical
+  // unknowns, transfers, terminal residuals and partial lot holds stay blocked.
+  const promiseItems = new Set<number>();
+  const promiseReleasedByLevel = new Map<number, bigint>();
+  for (const level of evidence.levels) {
+    const position = positionKey(level.warehouseLocationId, level.productVariantId);
+    const levelLots = lotsByPosition.get(position) ?? [];
+    const grouped = journalsByPosition.get(position) ?? [];
+    const holds = grouped.filter((journal) => BigInt(journal.reservedQty) !== BigInt(0));
+    if (level.warehouseId === null || level.variantQty !== "0" || level.packedQty !== "0"
+      || BigInt(level.pickedQty) < BigInt(0) || BigInt(level.reservedQty) <= BigInt(0)
+      || levelsByPosition.get(position)?.length !== 1 || holds.length === 0
+      || levelLots.some((lot) => lot.onHandQty !== "0" || lot.reservedQty !== "0")
+      || buildHoldPositions.has(position)
+      || grouped.some((journal) => BigInt(journal.unknownCount) !== BigInt(0))) continue;
+    const owners = holds.map((journal) => {
+      const item = journal.orderItemId === null ? undefined : items.get(journal.orderItemId);
+      const order = item ? orders.get(item.orderId) : undefined;
+      const line = item ? lines.get(item.id) : undefined;
+      if (!item || !order || !line || order.id !== journal.orderId || order.warehouseId !== level.warehouseId
+        || order.status !== "ready" || order.onHold !== 0 || item.status !== "pending" || item.onHold
+        || item.pickedQuantity !== 0 || item.fulfilledQuantity !== 0 || item.shortReason !== null
+        || line.targetVariantId !== level.productVariantId || BigInt(journal.reservedQty) !== BigInt(item.quantity)
+        || journal.pickedQty !== "0" || journal.shippedQty !== "0" || BigInt(journal.journalCount) <= BigInt(0)
+        || journalsByItem.get(item.id)?.length !== 1 || (costsByItem.get(item.id)?.length ?? 0) !== 0
+        || sourceItemIds.has(item.id) || physicalItemIds.has(item.id) || buildDemandItemIds.has(item.id)) return null;
+      return { orderId: order.id, orderItemId: item.id, reservedQty: journal.reservedQty,
+        journalCount: journal.journalCount, journalHash: journal.journalHash };
+    });
+    if (owners.some((owner) => owner === null)
+      || new Set(owners.map((owner) => owner?.orderItemId)).size !== owners.length
+      || sum(holds.map((journal) => journal.reservedQty)) !== BigInt(level.reservedQty)) continue;
+    result.legacyPromiseReleases.push({ inventoryLevelId: level.id, warehouseId: level.warehouseId,
+      warehouseLocationId: level.warehouseLocationId, productVariantId: level.productVariantId,
+      variantQty: "0", reservedQty: level.reservedQty, pickedQty: level.pickedQty, packedQty: "0",
+      owners: owners.filter((owner): owner is NonNullable<typeof owner> => owner !== null)
+        .sort((a, b) => a.orderId - b.orderId || a.orderItemId - b.orderItemId) });
+    promiseReleasedByLevel.set(level.id, BigInt(level.reservedQty));
+    for (const owner of owners) if (owner) {
+      promiseItems.add(owner.orderItemId);
+      const line = lines.get(owner.orderItemId)!;
+      line.reservedQty = "0";
+      line.freshDemandQty = line.requestedQty;
+    }
+  }
   const allocationFor = (line: CutoverReconstructionLine, levelId: number): CutoverReconstructionAllocation | null => {
     const level = levels.get(levelId);
     if (!level || !level.warehouseId) return null;
@@ -180,9 +237,10 @@ export function planCutoverReconstruction(raw: CutoverReconstructionEvidence): C
   for (const journal of evidence.journals) {
     const subject = `journal:${journal.orderId}:${journal.orderItemId}:${journal.warehouseLocationId}:${journal.productVariantId}`;
     const item = journal.orderItemId == null ? undefined : items.get(journal.orderItemId);
-    if (BigInt(journal.unknownCount) > BigInt(0) && (item !== undefined || BigInt(journal.reservedQty) !== BigInt(0) || BigInt(journal.pickedQty) !== BigInt(0))) {
+    if (BigInt(journal.unknownCount) > BigInt(0)) {
       block("JOURNAL_CUSTODY_UNKNOWN", subject, "Missing quantity/state or mixed shipment custody cannot establish exact ownership.");
     }
+    if (journal.orderItemId !== null && promiseItems.has(journal.orderItemId)) continue;
     if (BigInt(journal.reservedQty) === BigInt(0) && BigInt(journal.pickedQty) === BigInt(0)) continue;
     const matched = levelsByPosition.get(positionKey(journal.warehouseLocationId,journal.productVariantId)) ?? [];
     if (!item || item.orderId !== journal.orderId || matched.length !== 1 || !lines.has(item.id)) {
@@ -221,13 +279,14 @@ export function planCutoverReconstruction(raw: CutoverReconstructionEvidence): C
     const holdOwners = allocations.filter((row) => BigInt(row.reservedQty) > BigInt(0));
     const residualLots = levelLots.map((lot) => ({ lot, qty: BigInt(lot.reservedQty) - (retainedByLot.get(lot.id) ?? BigInt(0)) })).filter((row) => row.qty !== BigInt(0));
     const independentlyHeld = levelLots.reduce((total, lot) => total + (retainedByLot.get(lot.id) ?? BigInt(0)), BigInt(0));
+    const physicalReserved = BigInt(level.reservedQty) - (promiseReleasedByLevel.get(level.id) ?? BigInt(0));
     if ([level.variantQty, level.reservedQty, level.pickedQty, level.packedQty].some((qty) => BigInt(qty) < BigInt(0))
-      || BigInt(level.reservedQty) > BigInt(level.variantQty)) block("LEVEL_BALANCE_INVALID", subject, "Physical/reserved counters are invalid.");
+      || physicalReserved < BigInt(0) || physicalReserved > BigInt(level.variantQty)) block("LEVEL_BALANCE_INVALID", subject, "Physical/reserved counters are invalid.");
     if (BigInt(level.packedQty) !== BigInt(0)) block("PACKED_CUSTODY_UNATTRIBUTED", subject, "Legacy packed custody has no exact lot/owner lineage in this importer.");
     if (sum(levelLots.map((lot) => lot.onHandQty)) !== BigInt(level.variantQty)
-      || sum(levelLots.map((lot) => lot.reservedQty)) !== BigInt(level.reservedQty)
+      || sum(levelLots.map((lot) => lot.reservedQty)) !== physicalReserved
       || sum(levelLots.map((lot) => lot.pickedQty)) !== BigInt(level.pickedQty)
-      || sum(allocations.map((row) => row.reservedQty)) + independentlyHeld !== BigInt(level.reservedQty)
+      || sum(allocations.map((row) => row.reservedQty)) + independentlyHeld !== physicalReserved
       || sum(allocations.map((row) => row.pickedQty)) !== BigInt(level.pickedQty)) {
       block("LEVEL_ENCUMBRANCE_UNEXPLAINED", subject, "Exact order/build ownership and lot counters must exhaust every reserved/picked unit without excess.");
     }
@@ -287,6 +346,7 @@ export function planCutoverReconstruction(raw: CutoverReconstructionEvidence): C
   result.orders.sort((a, b) => a.orderId - b.orderId);
   for (const order of result.orders) order.lines.sort((a, b) => a.orderItemId - b.orderItemId);
   result.retainedIndependentBuildReservationIds.sort((a, b) => a - b);
+  result.legacyPromiseReleases.sort((a, b) => a.inventoryLevelId - b.inventoryLevelId);
   result.blockers.sort((a, b) => a.subject.localeCompare(b.subject) || a.code.localeCompare(b.code));
   result.ready = result.blockers.length === 0;
   return result;

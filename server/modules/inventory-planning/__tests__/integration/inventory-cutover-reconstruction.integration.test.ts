@@ -11,6 +11,7 @@ import { reconstructionDatabaseFixtureSql, reconstructionDatabaseSeedSql } from 
 import { captureActiveClaimSupplySnapshotInsideTransaction } from "../../infrastructure/inventory-availability-shadow.repository";
 import { PostgresInventoryAvailabilityClaimRepository } from "../../infrastructure/inventory-availability-claim.repository";
 import { PostgresCanonicalClaimInventoryRepository } from "../../../inventory/infrastructure/canonical-claim-inventory.repository";
+import { PostgresInventoryCutoverLegacyPromiseRepository } from "../../../inventory/infrastructure/inventory-cutover-legacy-promise.repository";
 
 vi.mock("../../infrastructure/inventory-availability-shadow.repository", () => ({ captureActiveClaimSupplySnapshotInsideTransaction: vi.fn() }));
 vi.mock("../../../../db", () => ({ pool: {} }));
@@ -44,6 +45,101 @@ dbDescribe.sequential("reviewed reconstruction with real claim DDL and inventory
       actor: "cutover-operator", reason: "Reviewed exact legacy ownership", occurredAt: "2026-09-07T12:00:00.000Z" };
     return { evidence, plan, planning, command };
   }
+  async function seedEmptyBinPromise(client: PoolClient, supplyQty = 20) {
+    await client.query(`DELETE FROM oms.order_item_costs; DELETE FROM inventory.inventory_transactions;
+      UPDATE wms.order_items SET picked_quantity=0;
+      UPDATE inventory.inventory_levels SET variant_qty=0,reserved_qty=6,picked_qty=0;
+      UPDATE inventory.inventory_lots SET qty_on_hand=0,qty_reserved=0,qty_picked=0;
+      INSERT INTO warehouse.warehouse_locations(id,warehouse_id) VALUES(200,1);
+      INSERT INTO inventory.inventory_transactions
+        (order_id,order_item_id,product_variant_id,to_location_id,transaction_type,variant_qty_delta,
+         variant_qty_before,variant_qty_after,reserved_qty_delta,source_state,target_state)
+        VALUES(1,11,101,100,'reserve',0,0,0,6,'on_hand','committed')`);
+    await client.query(`INSERT INTO inventory.inventory_levels
+      (id,warehouse_location_id,product_variant_id,variant_qty,reserved_qty,picked_qty,packed_qty)
+      VALUES(20,200,101,$1,0,0,0)`, [supplyQty]);
+    await client.query(`INSERT INTO inventory.inventory_lots
+      (id,warehouse_location_id,product_variant_id,qty_on_hand,qty_reserved,qty_picked,status,received_at,
+       unit_cost_mills,po_unit_cost_mills,packaging_cost_mills,landed_cost_mills,total_unit_cost_mills)
+      VALUES(5,200,101,$1,0,0,'active','2026-09-01T00:00:00Z',1000,1000,0,0,1000)`, [supplyQty]);
+  }
+  it("hands off an exact empty-bin promise and replays without double release or double reservation", async () => transaction(async (client) => {
+    await seedEmptyBinPromise(client);
+    const { plan, planning, command } = await prepared(client);
+    expect(plan.legacyPromiseReleases).toHaveLength(1);
+    const physicalBefore = (await client.query("SELECT id,variant_qty,picked_qty,packed_qty FROM inventory.inventory_levels ORDER BY id")).rows;
+    const lotsBefore = (await client.query("SELECT id,qty_on_hand,qty_picked,total_unit_cost_mills FROM inventory.inventory_lots ORDER BY id")).rows;
+    const originalBinLot = (await client.query("SELECT * FROM inventory.inventory_lots WHERE id=4")).rows;
+    const receipt = await repository.persistReviewed(client, command, planning.impactHash);
+    expect(receipt.legacyPromiseReleases).toEqual(plan.legacyPromiseReleases);
+    expect(receipt.legacyPromiseReleaseTransactionIds).toHaveLength(1);
+    expect((await client.query("SELECT id,reserved_qty FROM inventory.inventory_levels ORDER BY id")).rows)
+      .toEqual([{ id: 10, reserved_qty: 0 }, { id: 20, reserved_qty: 6 }]);
+    expect((await client.query("SELECT id,variant_qty,picked_qty,packed_qty FROM inventory.inventory_levels ORDER BY id")).rows).toEqual(physicalBefore);
+    expect((await client.query("SELECT id,qty_on_hand,qty_picked,total_unit_cost_mills FROM inventory.inventory_lots ORDER BY id")).rows).toEqual(lotsBefore);
+    expect((await client.query("SELECT * FROM inventory.inventory_lots WHERE id=4")).rows).toEqual(originalBinLot);
+    expect((await client.query("SELECT * FROM oms.order_item_costs")).rows).toEqual([]);
+    expect((await client.query("SELECT requested_qty::text,planned_qty::text,shortfall_qty::text FROM inventory.availability_claim_lines")).rows)
+      .toEqual([{ requested_qty: "6", planned_qty: "6", shortfall_qty: "0" }]);
+    expect((await client.query("SELECT inventory_level_id,claimed_qty::text FROM inventory.availability_claim_resources")).rows)
+      .toEqual([{ inventory_level_id: 20, claimed_qty: "6" }]);
+    expect((await client.query(`SELECT order_id,order_item_id,variant_qty_delta,reserved_qty_delta,reference_id,user_id
+      FROM inventory.inventory_transactions WHERE id=ANY($1::integer[])`, [receipt.legacyPromiseReleaseTransactionIds])).rows)
+      .toEqual([{ order_id: 1, order_item_id: 11, variant_qty_delta: 0, reserved_qty_delta: -6,
+        reference_id: "cutover:1:item:11", user_id: "cutover-operator" }]);
+    expect(await repository.persistReviewed(client, { ...command, actor: "retry-worker" }, planning.impactHash)).toEqual(receipt);
+    expect((await client.query("SELECT count(*)::int AS count FROM inventory.inventory_transactions WHERE reference_type='inventory_cutover_promise'")).rows[0].count).toBe(1);
+    expect((await client.query("SELECT count(*)::int AS count FROM inventory.inventory_transactions WHERE reference_type='availability_claim'")).rows[0].count).toBe(1);
+  }));
+  it("keeps unmet promised demand as an explicit canonical shortfall", async () => transaction(async (client) => {
+    await seedEmptyBinPromise(client, 2);
+    const { planning, command } = await prepared(client);
+    await repository.persistReviewed(client, command, planning.impactHash);
+    expect((await client.query("SELECT requested_qty::text,planned_qty::text,shortfall_qty::text FROM inventory.availability_claim_lines")).rows)
+      .toEqual([{ requested_qty: "6", planned_qty: "2", shortfall_qty: "4" }]);
+    expect((await client.query("SELECT id,reserved_qty FROM inventory.inventory_levels ORDER BY id")).rows)
+      .toEqual([{ id: 10, reserved_qty: 0 }, { id: 20, reserved_qty: 2 }]);
+  }));
+  it("retains ownerless reserve_move uncertainty at both source and destination positions", async () => transaction(async (client) => {
+    await seedEmptyBinPromise(client);
+    await client.query(`INSERT INTO inventory.inventory_transactions
+      (product_variant_id,from_location_id,to_location_id,transaction_type,variant_qty_delta,reserved_qty_delta)
+      VALUES(101,100,200,'reserve_move',1,NULL)`);
+    const evidence = await repository.capture(client);
+    const moves = evidence.journals.filter((journal) => journal.orderId === null);
+    expect(moves.map((row) => ({ location: row.warehouseLocationId, unknown: row.unknownCount, reserved: row.reservedQty })))
+      .toEqual([{ location: 100, unknown: "1", reserved: "0" }, { location: 200, unknown: "1", reserved: "0" }]);
+    expect(moves[0].journalHash).toBe(moves[1].journalHash);
+    const plan = planCutoverReconstruction(evidence);
+    expect(plan.ready).toBe(false); expect(plan.legacyPromiseReleases).toEqual([]);
+    expect(plan.blockers.filter((blocker) => blocker.code === "JOURNAL_CUSTODY_UNKNOWN")).toHaveLength(2);
+  }));
+  it.each(["counter", "owner", "lot"])("owner API rejects %s drift before its first write", async (kind) => transaction(async (client) => {
+    await seedEmptyBinPromise(client);
+    const { plan, command } = await prepared(client);
+    if (kind === "counter") await client.query("UPDATE inventory.inventory_levels SET reserved_qty=5 WHERE id=10");
+    if (kind === "owner") await client.query("UPDATE inventory.inventory_transactions SET notes='changed reviewed evidence' WHERE order_item_id=11");
+    if (kind === "lot") await client.query("UPDATE inventory.inventory_lots SET qty_reserved=1 WHERE id=4");
+    await expect(new PostgresInventoryCutoverLegacyPromiseRepository().releaseForReplanning({ client, command, releases: plan.legacyPromiseReleases }))
+      .rejects.toMatchObject({ code: kind === "counter" ? "CUTOVER_PROMISE_POSITION_CHANGED"
+        : kind === "owner" ? "CUTOVER_PROMISE_OWNER_CHANGED" : "CUTOVER_PROMISE_LOT_HOLD_CHANGED" });
+    expect((await client.query("SELECT count(*)::int AS count FROM inventory.inventory_transactions WHERE reference_type='inventory_cutover_promise'")).rows[0].count).toBe(0);
+  }));
+  it("rolls back the handoff and claim headers if exact fresh allocation fails", async () => transaction(async (client) => {
+    await seedEmptyBinPromise(client);
+    const { planning, command } = await prepared(client);
+    const writer = new PostgresCanonicalClaimInventoryRepository();
+    vi.spyOn(writer, "reserveResource").mockRejectedValue(new Error("PROMISE_TEST_ALLOCATION_FAILURE"));
+    await client.query("SAVEPOINT promise_handoff");
+    await expect(new PostgresInventoryCutoverReconstructionRepository(writer).persistReviewed(client, command, planning.impactHash))
+      .rejects.toThrow("PROMISE_TEST_ALLOCATION_FAILURE");
+    await client.query("ROLLBACK TO SAVEPOINT promise_handoff");
+    expect((await client.query("SELECT id,reserved_qty FROM inventory.inventory_levels ORDER BY id")).rows)
+      .toEqual([{ id: 10, reserved_qty: 6 }, { id: 20, reserved_qty: 0 }]);
+    expect((await client.query("SELECT count(*)::int AS count FROM inventory.inventory_transactions WHERE reference_type='inventory_cutover_promise'")).rows[0].count).toBe(0);
+    expect((await client.query("SELECT count(*)::int AS count FROM inventory.availability_claims")).rows[0].count).toBe(0);
+    expect((await client.query("SELECT count(*)::int AS count FROM inventory.availability_cutover_reconstruction_receipts")).rows[0].count).toBe(0);
+  }));
   it("captures stable exact signed evidence in a caller read-only preview", async () => {
     const client = await database.pool.connect();
     try { await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
@@ -161,7 +257,7 @@ dbDescribe.sequential("reviewed reconstruction with real claim DDL and inventory
     expect((await client.query("SELECT reserved_qty FROM inventory.build_component_reservations")).rows[0].reserved_qty).toBe(3);
   }));
   it("censuses historical terminal demand, orphan lots and ignored receipts without filtering", async () => transaction(async (client) => {
-    await client.query("UPDATE wms.orders SET warehouse_status='shipped'; INSERT INTO oms.channel_fulfillment_receipts VALUES(8,'ignored')");
+    await client.query("UPDATE wms.orders SET warehouse_status='shipped'; INSERT INTO oms.channel_fulfillment_receipts(id,processing_status) VALUES(8,'ignored')");
     const plan = await repository.preview(client);
     expect(plan.blockers.map((row) => row.code)).toContain("TERMINAL_ORDER_RESIDUAL_REQUIRES_REVIEW");
     expect(plan.blockers.map((row) => row.code)).toContain("SHIPMENT_RECEIPT_REQUIRES_REVIEW");

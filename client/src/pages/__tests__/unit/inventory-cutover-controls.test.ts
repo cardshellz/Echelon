@@ -62,6 +62,23 @@ describe("final cutover operator controls", () => {
     expect(html).toContain("Await exact provider readback"); expect(html).toContain("target:2");
     expect(html).toMatch(/<button[^>]*disabled[^>]*>Switch to canonical authority/);
   });
+  it("discloses proposed empty-bin promise handoffs without automatically applying them", () => {
+    state.review = { ...review(), summary: { ...review().summary,
+      legacyPromiseReplanning: { positions: 2, orderLines: 3 } } };
+    const html = render();
+    expect(html).toContain("Re-plan 3 existing order line(s)");
+    expect(html).toContain("from 2 empty-bin reservation position(s)");
+    expect(html).toContain("Customer demand is retained");
+    expect(html).toContain("does not change on-hand or picked stock counts");
+    expect(state.mutate).not.toHaveBeenCalled();
+  });
+  it("does not invent a handoff for older or zero-handoff reviews", () => {
+    state.review = review();
+    expect(render()).not.toContain("empty-bin reservation position(s)");
+    state.review = { ...review(), summary: { ...review().summary,
+      legacyPromiseReplanning: { positions: 0, orderLines: 0 } } };
+    expect(render()).not.toContain("empty-bin reservation position(s)");
+  });
   it("does not enable mutation from stale cached data after refresh failure", () => {
     state.review = review(); state.error = new Error("Review unavailable");
     const html = render();
