@@ -43,7 +43,8 @@ describe("BasicDropshipCartonizationProvider", () => {
     expect(packageQuery?.sql).toContain("pv.weight_grams");
     expect(packageQuery?.sql).toContain("pv.ships_in_own_container");
     expect(packageQuery?.sql).toContain("catalog.shipping_groups");
-    expect(packageQuery?.sql).toContain("LEFT JOIN dropship.dropship_package_profiles pp");
+    expect(packageQuery?.sql).toContain("LEFT JOIN shipping.channel_packing_preferences pp");
+    expect(packageQuery?.sql).not.toContain('dropship.dropship_package_profiles');
     expect(packageQuery?.sql).not.toContain("pp.weight_grams");
     expect(packageQuery?.sql).not.toContain("pp.ship_alone");
     // Variants with incomplete package data must flow through to the domain —
@@ -132,7 +133,7 @@ function makeRequest() {
 }
 
 function makePool(client: PoolClient): Pool {
-  return { connect: vi.fn(async () => client) } as unknown as Pool;
+  return { connect: vi.fn(async () => client),query: client.query } as unknown as Pool;
 }
 
 function makeClient(input: { packageRows: Record<string, unknown>[] }): PoolClient & {
@@ -146,18 +147,19 @@ function makeClient(input: { packageRows: Record<string, unknown>[] }): PoolClie
       if (sql.includes("FROM catalog.product_variants pv")) {
         return result(input.packageRows);
       }
-      if (sql.includes("FROM dropship.dropship_box_catalog")) {
-        return result([{
+      if (sql.includes("FROM shipping.packaging_assignments")) {
+        expect(params).toEqual(['dropship',30]);
+        return result([{ channel: 'dropship', warehouseId: null, suiteId: 1, suiteRevision: 2, revision: 1, boxes: [{
           id: 7,
           code: "SMALL",
           name: "Small box",
-          length_mm: 200,
-          width_mm: 150,
-          height_mm: 50,
-          tare_weight_grams: 20,
-          max_weight_grams: 1000,
-          is_active: true,
-        }]);
+          lengthMm: 200,
+          widthMm: 150,
+          heightMm: 50,
+          tareWeightGrams: 20,
+          maxWeightGrams: 1000,
+          isActive: true,kind: 'box',costCents: 0,fillFactorBps: 10000,
+        }] }]);
       }
       throw new Error(`Unexpected query: ${sql}`);
     }),

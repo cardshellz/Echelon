@@ -271,7 +271,7 @@ function assertValidSharedQuote(
     || quote.rateBookId <= 0
     || !Number.isSafeInteger(quote.rateTableId)
     || quote.rateTableId <= 0
-    || quote.selectedRate.totalCents !== quote.baseRateCents
+    || quote.selectedRate.totalCents !== (quote.programCharges?.totalCents ?? quote.baseRateCents)
     || quote.selectedRate.currency !== quote.currency
     || quote.selectedRate.serviceLevelCode !== quote.serviceLevelCode
     || quote.selectedRate.rateTableId !== quote.rateTableId

@@ -60,6 +60,7 @@ import {
 import { CopyProgramRatesDialog } from "./CopyProgramRatesDialog";
 import { DiscardRateTableDraftButton } from "./DiscardRateTableDraftButton";
 import { ProgramFormDialog } from "./ProgramFormDialog";
+import { ProgramChargesPanel } from "./ProgramChargesPanel";
 import { RateTestDialog } from "./RateTestDialog";
 import { programStatusBadge, revisionStatusBadge } from "./status";
 
@@ -227,6 +228,7 @@ export function ProgramDetail({
         )}
       </div>
 
+      <ProgramChargesPanel key={book.id} bookId={book.id} disabled={retired} />
       {servesShopifyCheckout && (
         <section className="space-y-2">
           <div>

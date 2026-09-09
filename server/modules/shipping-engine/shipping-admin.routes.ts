@@ -28,6 +28,13 @@ const upsertBoxSchema = insertShippingBoxSchema.extend({
   // Blank in the dialog means "no weight cap" — omission clears, not keeps.
   maxWeightGrams: z.number().int().positive().nullable().default(null),
   warehouseIds: z.array(z.number().int().positive()).default([]),
+}).superRefine((box,ctx) => {
+  const outer = [box.outerLengthMm,box.outerWidthMm,box.outerHeightMm];
+  if (outer.every((value) => value == null)) return;
+  if (outer.some((value) => value == null) || box.outerLengthMm! < box.lengthMm
+    || box.outerWidthMm! < box.widthMm || box.outerHeightMm! < box.heightMm) {
+    ctx.addIssue({ code: 'custom',path: ['outerLengthMm'],message: 'Supply all outer dimensions, each at least as large as its inner dimension.' });
+  }
 });
 
 const upsertVariantAttrsSchema = insertShippingVariantAttrsSchema.pick({
