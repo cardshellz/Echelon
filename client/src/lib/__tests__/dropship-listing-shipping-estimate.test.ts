@@ -1,14 +1,16 @@
 import { describe, expect, it } from "vitest";
+import { LISTING_SHIPPING_ESTIMATE_UNAVAILABLE_CODE, LISTING_SHIPPING_ESTIMATE_UNAVAILABLE_MESSAGE } from "@shared/dropship/listing-shipping-estimate";
 import { buildListingShippingEstimateRequest, readListingShippingEstimateResponse } from "../dropship-listing-shipping-estimate";
 
 const fields = { quantity: "1", country: "us", region: " PA ", postalCode: " 16066 " };
 const request = buildListingShippingEstimateRequest(1, 2, fields);
 function response() { return { estimate: { status: "estimated", storeConnectionId: 1, productVariantId: 2, quantity: 1,
   destination: { country: "US", region: "PA", postalCode: "16066" }, estimatedAt: "2026-09-06T12:00:00.000Z", warnings: [],
-  warehouseId: 1, packageCount: 1, totalShippingCents: 615, currency: "USD",
-  breakdown: { baseRateCents: 500, markupCents: 100, insurancePoolCents: 15, dunnageCents: 0 },
-  rate: { source: "shared", rateTableIds: [1], rateBookId: 1, serviceLevelCode: "standard", displayName: "Standard Shipping" } } }; }
+  totalShippingCents: 615, currency: "USD" } }; }
 describe("shipping scenario boundary", () => {
+  it.each(["", "P", "Pennsylvania", "12"])("requires an explicit valid region: %s", (region) => {
+    expect(() => buildListingShippingEstimateRequest(1, 2, { ...fields, region })).toThrow("two-letter state or region");
+  });
   it("normalizes an explicit scenario and never includes stock quantity or quote idempotency", () => {
     expect(request).toEqual({ storeConnectionId: 1, productVariantId: 2, quantity: 1, destination: { country: "US", region: "PA", postalCode: "16066" } });
   });
@@ -23,10 +25,26 @@ describe("shipping scenario boundary", () => {
   it("validates a success and preserves unavailable rather than showing a zero quote", () => {
     expect(readListingShippingEstimateResponse(response(), request)).toMatchObject({ status: "estimated", totalShippingCents: 615 });
     expect(readListingShippingEstimateResponse({ estimate: { status: "unavailable", storeConnectionId: 1, productVariantId: 2, quantity: 1,
-      destination: { country: "US", region: "PA", postalCode: "16066" }, estimatedAt: "2026-09-06T12:00:00.000Z", warnings: [], code: "NO_RATE", message: "No applicable rate." } }, request)).toMatchObject({ status: "unavailable" });
+      destination: { country: "US", region: "PA", postalCode: "16066" }, estimatedAt: "2026-09-06T12:00:00.000Z", warnings: [], code: LISTING_SHIPPING_ESTIMATE_UNAVAILABLE_CODE, message: LISTING_SHIPPING_ESTIMATE_UNAVAILABLE_MESSAGE } }, request)).toMatchObject({ status: "unavailable" });
   });
-  it("rejects a different row, destination, quantity, malformed response or inconsistent amount", () => {
-    for (const change of [{ productVariantId: 3 }, { storeConnectionId: 3 }, { quantity: 2 }, { totalShippingCents: 999 },
+  it("accepts valid server-calculated totals without receiving private fee arithmetic", () => {
+    for (const totalShippingCents of [0, 824, 999]) {
+      const next = response();
+      next.estimate.totalShippingCents = totalShippingCents;
+      expect(readListingShippingEstimateResponse(next, request)).toMatchObject({ totalShippingCents });
+    }
+  });
+  it.each([-1, 1.5, NaN, Number.MAX_SAFE_INTEGER + 1])("rejects invalid cents %s", (totalShippingCents) => {
+    expect(() => readListingShippingEstimateResponse({ estimate: { ...response().estimate, totalShippingCents } }, request)).toThrow();
+  });
+  it.each([
+    { breakdown: { markupCents: 100 } }, { rate: { rateTableIds: [1] } }, { warehouseId: 1 },
+    { packageCount: 1 }, { warnings: ["Private provider calculation"] },
+  ])("rejects private diagnostics in the public response: %j", (privateFields) => {
+    expect(() => readListingShippingEstimateResponse({ estimate: { ...response().estimate, ...privateFields } }, request)).toThrow();
+  });
+  it("rejects a different row, destination, quantity or malformed response", () => {
+    for (const change of [{ productVariantId: 3 }, { storeConnectionId: 3 }, { quantity: 2 },
       { destination: { country: "US", region: "PA", postalCode: "90210" } },
       { destination: { country: "US", region: "CA", postalCode: "16066" } }]) {
       const next = response();

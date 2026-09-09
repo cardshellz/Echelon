@@ -5,21 +5,21 @@ import {
 } from "../../application/dropship-shipping-cutover-policy";
 
 describe("dropship shipping cutover policy", () => {
-  it("defaults to legacy pricing", () => {
+  it("defaults to the configured shared-engine rate card", () => {
     const config = readDropshipShippingCutoverConfig({});
 
     expect(config).toMatchObject({
-      policy: { mode: "legacy" },
+      policy: { mode: "live" },
       configurationError: null,
     });
     expect(resolveDropshipShippingCutover(config.policy, 22)).toEqual({
-      source: "legacy",
-      mode: "legacy",
-      reasonCode: "LEGACY_MODE",
+      source: "shared",
+      mode: "live",
+      reasonCode: "LIVE_ENABLED",
     });
   });
 
-  it("fails back to legacy when mode or store IDs are invalid", () => {
+  it("reports invalid settings for the runtime to reject before using the placeholder policy", () => {
     const invalidMode = readDropshipShippingCutoverConfig({
       DROPSHIP_SHARED_SHIPPING_CUTOVER_MODE: "enabled",
     });

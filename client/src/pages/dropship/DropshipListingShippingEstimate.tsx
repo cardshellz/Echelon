@@ -59,8 +59,8 @@ export function DropshipListingShippingEstimate({ storeConnectionId, productVari
           <Input id={`${fieldId}-country`} maxLength={2} required placeholder="US" autoComplete="country" disabled={pending}
             value={fields.country} onChange={(event) => update("country", event.target.value.toUpperCase())} /></div>
         <div className="space-y-1"><Label htmlFor={`${fieldId}-region`}>State / region</Label>
-          <Input id={`${fieldId}-region`} maxLength={100} placeholder="Optional" autoComplete="address-level1" disabled={pending}
-            value={fields.region} onChange={(event) => update("region", event.target.value)} /></div>
+          <Input id={`${fieldId}-region`} maxLength={2} minLength={2} pattern="[A-Za-z]{2}" required placeholder="PA" autoComplete="address-level1" disabled={pending}
+            value={fields.region} onChange={(event) => update("region", event.target.value.toUpperCase())} /></div>
         <div className="space-y-1"><Label htmlFor={`${fieldId}-postal`}>Postal code</Label>
           <Input id={`${fieldId}-postal`} maxLength={20} required autoComplete="postal-code" disabled={pending}
             value={fields.postalCode} onChange={(event) => update("postalCode", event.target.value)} /></div>
@@ -85,15 +85,6 @@ export function ListingShippingEstimateResult({ result }: { result: ListingShipp
     <div className="flex flex-wrap items-center justify-between gap-2"><div><p className="text-sm font-medium">Estimated shipping total</p>
       <p className="mt-1 text-xs text-zinc-500">{result.quantity} sellable pack(s) to {[result.destination.region, result.destination.postalCode, result.destination.country].filter(Boolean).join(", ")}</p>
     </div><p className="text-xl font-semibold">{money(result.totalShippingCents)}</p></div>
-    <details className="mt-3 text-xs"><summary className="cursor-pointer font-medium">Rate and fee breakdown</summary>
-      <dl className="mt-2 space-y-1">
-        {([['Rate-table charge', result.breakdown.baseRateCents], ['Shipping markup', result.breakdown.markupCents],
-          ['Insurance pool', result.breakdown.insurancePoolCents], ['Dunnage', result.breakdown.dunnageCents]] as const).map(([label, cents]) =>
-          <div className="flex justify-between gap-4" key={label}><dt>{label}</dt><dd>{money(cents)}</dd></div>)}
-      </dl>
-      <p className="mt-2 text-zinc-500">{result.rate.displayName ?? result.rate.serviceLevelCode ?? "Configured fulfillment rate"} · Rate table(s) {result.rate.rateTableIds.join(", ")}</p>
-      <p className="mt-1 text-zinc-500">Estimated {new Date(result.estimatedAt).toLocaleString()}</p>
-    </details>
     <EstimateWarnings warnings={result.warnings} />
   </div>;
 }

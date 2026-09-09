@@ -1,6 +1,9 @@
 import {
   listingShippingEstimateInputSchema,
   listingShippingEstimateResultSchema,
+  LISTING_SHIPPING_ESTIMATE_UNAVAILABLE_CODE,
+  LISTING_SHIPPING_ESTIMATE_UNAVAILABLE_MESSAGE,
+  LISTING_SHIPPING_ESTIMATE_WARNING,
   type ListingShippingEstimateResult,
 } from "../../../../shared/dropship/listing-shipping-estimate";
 import { evaluateDropshipCatalogExposure } from "../domain/catalog-exposure";
@@ -74,13 +77,10 @@ export class DropshipListingShippingEstimateService {
     };
     if (context.warehouseConfigError || context.defaultWarehouseId === null
       || !Number.isSafeInteger(context.defaultWarehouseId) || context.defaultWarehouseId <= 0) {
-      return validateResult({
-        ...scenario,
-        status: "unavailable",
-        code: context.warehouseConfigError?.code ?? "DROPSHIP_LISTING_SHIPPING_ORIGIN_REQUIRED",
-        message: context.warehouseConfigError?.message ?? "Card Shellz must configure this store's fulfillment warehouse before shipping can be estimated.",
-        warnings: [],
-      });
+      return this.unavailable(context, scenario, new DropshipError(
+        context.warehouseConfigError?.code ?? "DROPSHIP_LISTING_SHIPPING_ORIGIN_REQUIRED",
+        context.warehouseConfigError?.message ?? "Listing shipping origin is not configured.",
+      ));
     }
     try {
       const result = await calculateDropshipShippingQuote(this.deps.calculation, {
@@ -93,50 +93,47 @@ export class DropshipListingShippingEstimateService {
         quotedAt,
       });
       const pricing = result.pricing;
-      const rate = pricing.source === "shared"
-        ? {
-          source: pricing.source,
-          rateTableIds: [pricing.rateTableId],
-          rateBookId: pricing.quote.rateBookId,
-          serviceLevelCode: pricing.quote.serviceLevelCode,
-          displayName: pricing.quote.selectedRate.displayName,
-        }
-        : {
-          source: pricing.source,
-          rateTableIds: [...new Set(pricing.rateMatches.map((match) => match.rateTableId))].sort((a, b) => a - b),
-          rateBookId: null,
-          serviceLevelCode: null,
-          displayName: null,
-        };
-      const warnings = [...new Set([
-        ...result.cartonization.warnings,
-        ...(pricing.source === "shared" ? pricing.quote.warnings : []),
-      ])];
+      const hasWarnings = result.cartonization.warnings.length > 0
+        || (pricing.source === "shared" && pricing.quote.warnings.length > 0);
+      if (hasWarnings) {
+        this.deps.logger.warn({
+          code: "DROPSHIP_LISTING_SHIPPING_ESTIMATE_WARNINGS",
+          message: "Listing shipping estimate has internal calculation warnings.",
+          context: {
+            vendorId: context.vendorId,
+            warehouseId: context.defaultWarehouseId,
+            ...scenario,
+            packagingWarnings: result.cartonization.warnings,
+            rateWarnings: pricing.source === "shared" ? pricing.quote.warnings : [],
+          },
+        });
+      }
       return validateResult({
         ...scenario,
         status: "estimated",
-        warehouseId: context.defaultWarehouseId,
-        packageCount: result.cartonization.packages.length,
         totalShippingCents: result.totalShippingCents,
         currency: result.currency,
-        breakdown: {
-          baseRateCents: result.baseRateCents,
-          markupCents: result.markupCents,
-          insurancePoolCents: result.insurancePoolCents,
-          dunnageCents: result.dunnageCents,
-        },
-        rate,
-        warnings,
+        warnings: hasWarnings ? [LISTING_SHIPPING_ESTIMATE_WARNING] : [],
       });
     } catch (error) {
       if (!(error instanceof DropshipError) || !UNAVAILABLE_CODES.has(error.code)) throw error;
-      this.deps.logger.warn({
-        code: "DROPSHIP_LISTING_SHIPPING_ESTIMATE_UNAVAILABLE",
-        message: "Listing shipping estimate has no usable shipping data.",
-        context: { vendorId: context.vendorId, storeConnectionId: context.storeConnectionId, productVariantId: parsed.productVariantId, reasonCode: error.code },
-      });
-      return validateResult({ ...scenario, status: "unavailable", code: error.code, message: error.message, warnings: [] });
+      return this.unavailable(context, scenario, error);
     }
+  }
+
+  private unavailable(
+    context: ListingShippingEstimateContext,
+    scenario: Pick<ListingShippingEstimateResult, "storeConnectionId" | "productVariantId" | "quantity" | "destination" | "estimatedAt">,
+    reason: DropshipError,
+  ): ListingShippingEstimateResult {
+    this.deps.logger.warn({
+      code: LISTING_SHIPPING_ESTIMATE_UNAVAILABLE_CODE,
+      message: "Listing shipping estimate has no usable shipping data.",
+      context: { vendorId: context.vendorId, warehouseId: context.defaultWarehouseId, ...scenario,
+        reasonCode: reason.code, reasonMessage: reason.message, diagnostic: reason.context },
+    });
+    return validateResult({ ...scenario, status: "unavailable", code: LISTING_SHIPPING_ESTIMATE_UNAVAILABLE_CODE,
+      message: LISTING_SHIPPING_ESTIMATE_UNAVAILABLE_MESSAGE, warnings: [] });
   }
 
   private async assertVariantSelected(vendorId: number, productVariantId: number, now: Date): Promise<void> {

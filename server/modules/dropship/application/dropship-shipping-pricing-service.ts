@@ -211,7 +211,8 @@ function assertEveryPackageHasRate(
     throw new DropshipError(
       "DROPSHIP_SHIPPING_RATE_REQUIRED",
       "Active dropship shipping rate data is required before quoting shipping.",
-      { packageSequence: missingPackage.packageSequence },
+      { packageSequence: missingPackage.packageSequence, weightGrams: missingPackage.weightGrams,
+        requestedCarrier: missingPackage.requestedCarrier, requestedService: missingPackage.requestedService },
     );
   }
 }

@@ -2,13 +2,16 @@ import http from "http";
 import type { AddressInfo } from "net";
 import express, { type Request } from "express";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { listingShippingEstimateInputSchema, type ListingShippingEstimateResult } from "../../../../../shared/dropship/listing-shipping-estimate";
+import { listingShippingEstimateInputSchema, LISTING_SHIPPING_ESTIMATE_UNAVAILABLE_CODE,
+  LISTING_SHIPPING_ESTIMATE_UNAVAILABLE_MESSAGE, type ListingShippingEstimateResult } from "../../../../../shared/dropship/listing-shipping-estimate";
 import { DropshipError } from "../../domain/errors";
 vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
 import { registerDropshipListingShippingEstimateRoutes, LISTING_SHIPPING_ESTIMATE_REQUESTS_PER_MINUTE } from "../../interfaces/http/dropship-listing-shipping-estimate.routes";
 
-const input = { storeConnectionId: 22, productVariantId: 101, quantity: 1, destination: { country: "US", postalCode: "17046" } };
-const unavailable: ListingShippingEstimateResult = { status: "unavailable", storeConnectionId: 22, productVariantId: 101, quantity: 1, destination: { country: "US", region: null, postalCode: "17046" }, estimatedAt: "2026-09-06T12:00:00.000Z", warnings: [], code: "DROPSHIP_SHIPPING_RATE_REQUIRED", message: "Rate not configured." };
+const input = { storeConnectionId: 22, productVariantId: 101, quantity: 1, destination: { country: "US", region: "PA", postalCode: "17046" } };
+const unavailable: ListingShippingEstimateResult = { status: "unavailable", storeConnectionId: 22, productVariantId: 101, quantity: 1, destination: { country: "US", region: "PA", postalCode: "17046" }, estimatedAt: "2026-09-06T12:00:00.000Z", warnings: [], code: LISTING_SHIPPING_ESTIMATE_UNAVAILABLE_CODE, message: LISTING_SHIPPING_ESTIMATE_UNAVAILABLE_MESSAGE };
+const estimated: ListingShippingEstimateResult = { status: "estimated", storeConnectionId: 22, productVariantId: 101, quantity: 1,
+  destination: unavailable.destination, estimatedAt: unavailable.estimatedAt, warnings: [], totalShippingCents: 824, currency: "USD" };
 
 describe("listing shipping estimate endpoint", () => {
   let server: http.Server;
@@ -54,6 +57,39 @@ describe("listing shipping estimate endpoint", () => {
     const response = await request("member-1", { ...input, warehouseId: 999 });
     expect(response.status).toBe(400);
     expect(await response.json()).toMatchObject({ error: { code: "DROPSHIP_LISTING_SHIPPING_INVALID_INPUT" } });
+  });
+  it("rejects a missing region instead of reporting a missing rate card", async () => {
+    const response = await request("member-1", { ...input, destination: { country: "US", postalCode: "16046" } });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { code: "DROPSHIP_LISTING_SHIPPING_INVALID_INPUT" } });
+  });
+  it("serializes only the final charge and customer scenario", async () => {
+    estimateForMember.mockResolvedValueOnce(estimated);
+    const response = await request();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ estimate: estimated });
+  });
+  it.each([
+    { breakdown: { markupCents: 8, insurancePoolCents: 16 } }, { rate: { rateTableIds: [1] } },
+    { warnings: ["PRIVATE_PRICING_LOGIC"] }, { warehouseId: 1 }, { packageCount: 1 },
+  ])("fails closed if an application result tries to expose private data: %j", async (privateFields) => {
+    estimateForMember.mockResolvedValueOnce({ ...estimated, ...privateFields } as ListingShippingEstimateResult);
+    const response = await request();
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: { code: "DROPSHIP_LISTING_SHIPPING_INTERNAL_ERROR", message: "Shipping could not be estimated. Please try again." } });
+    expect(response.headers.get("cache-control")).toBe("no-store");
+  });
+  it("does not expose raw unavailable diagnostics", async () => {
+    estimateForMember.mockResolvedValueOnce({ ...unavailable, message: "PRIVATE_PRICING_LOGIC" } as ListingShippingEstimateResult);
+    const response = await request();
+    expect(response.status).toBe(500);
+    expect(await response.text()).not.toContain("PRIVATE_PRICING_LOGIC");
+  });
+  it.each(["DROPSHIP_SHARED_SHIPPING_QUOTE_FAILED", "DROPSHIP_LISTING_SHIPPING_ESTIMATE_INVALID"])("keeps internal failure %s private", async (code) => {
+    estimateForMember.mockRejectedValueOnce(new DropshipError(code, "PRIVATE_PRICING_LOGIC", { rateTableId: 1 }));
+    const response = await request();
+    expect(response.status).toBeGreaterThanOrEqual(500);
+    expect(await response.json()).toEqual({ error: { code: "DROPSHIP_LISTING_SHIPPING_INTERNAL_ERROR", message: "Shipping could not be estimated. Please try again." } });
   });
   it.each([
     ["DROPSHIP_SHIPPING_INVALID_DESTINATION", 400],
