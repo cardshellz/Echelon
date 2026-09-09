@@ -81,10 +81,15 @@ receipts whose latest attempt is also ignored, has boolean `sourceEcho: true`,
 matches the current attempt counter, has no error, and contains complete scoped
 provider/channel/order/fulfillment/physical-package identities.
 
-Each grouped acknowledgment **remains an inventory-reconciliation blocker**.
+On the original strict-ledger path, each grouped acknowledgment **remains an inventory-reconciliation blocker**.
 Grouping is not current package-content verification, shipment posting proof, or
 COGS proof. Incomplete, processing, failed, mismatched and review attempts remain
 individual blockers. Different channel/order/provider/package scopes never merge.
+
+The separately approved [verified current opening](INVENTORY-CUTOVER-VERIFIED-OPENING.md)
+can retain terminal ignored acknowledgments as unresolved historical evidence
+instead, but only with complete independently verified current custody. Grouping
+alone never authorizes that alternative.
 
 The group digest preserves full receipt membership and latest-attempt evidence.
 PostgreSQL hashes the complete receipt and latest-attempt JSONB rows before
