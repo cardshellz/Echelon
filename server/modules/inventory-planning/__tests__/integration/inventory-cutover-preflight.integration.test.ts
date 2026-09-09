@@ -143,6 +143,19 @@ describeDatabase.sequential("inventory cutover connected preflight PostgreSQL", 
     expect(releaseCount()).toBe(1);
   });
 
+  it("excludes completed demand without assigning a warehouse, changing history or erasing current holds", async () => {
+    await pool.query(`INSERT INTO wms.orders VALUES
+      (13,NULL,'completed',0,36,'shopify','historical-13',NULL,NULL);
+      INSERT INTO wms.order_items VALUES
+      (14,13,1400,'source-14','TEST-P5',30,5,0,0,'pending',false,1,NULL,NULL)`);
+    const before = await snapshotAllFixtureRows();
+    const result = await connectedService().service.preview("reviewer");
+    expect(result.excludedTerminalOrderCount).toBe("2");
+    expect(result.lines.map((line) => line.orderItemId)).toEqual([7]);
+    expect(result.inventoryLevels[0]).toMatchObject({ recordedReservedQty: "3", standaloneBuildOpenQty: "3" });
+    expect(await snapshotAllFixtureRows()).toEqual(before);
+  });
+
   it("does not equate WMS picker progress with attributed inventory custody", async () => {
     await pool.query("UPDATE wms.order_items SET picked_quantity=2,status='in_progress' WHERE id=7");
     const result = await connectedService().service.preview("reviewer");

@@ -1,5 +1,6 @@
 import type { PoolClient } from "pg";
 import { z } from "zod";
+import { TERMINAL_WMS_DEMAND_STATUSES } from "@shared/enums/order-status";
 import {
   wmsCutoverDemandCaptureSchema, wmsCutoverDemandOrderSchema, wmsCutoverDemandItemSchema,
   wmsCutoverSourceItemSchema, wmsCutoverPhysicalItemSchema,
@@ -57,7 +58,8 @@ export async function readWmsCutoverDemand(
   const metadata = await client.query(`SELECT transaction_timestamp() AS "capturedAt",
     current_setting('transaction_isolation') AS isolation,
     current_setting('transaction_read_only') AS "readOnly",
-    (SELECT count(*)::text FROM wms.orders WHERE warehouse_status IN ('shipped','cancelled')) AS "excludedTerminalOrderCount"`);
+    (SELECT count(*)::text FROM wms.orders WHERE warehouse_status = ANY($1::text[])) AS "excludedTerminalOrderCount"`,
+  [TERMINAL_WMS_DEMAND_STATUSES]);
   const meta = metadata.rows[0];
   if (!meta || !["repeatable read", "serializable"].includes(meta.isolation) || meta.readOnly !== "on") {
     throw new WmsCutoverDemandCaptureError("WMS_CUTOVER_SNAPSHOT_REQUIRED", "WMS demand capture requires the caller's repeatable-read READ ONLY transaction");
@@ -69,8 +71,8 @@ export async function readWmsCutoverDemand(
   const orderRows = await client.query(`SELECT id, warehouse_id AS "warehouseId", warehouse_status AS status,
     on_hold AS "onHold", channel_id AS "channelId", source, external_order_id AS "externalOrderId",
     oms_fulfillment_order_id AS "omsFulfillmentOrderId", fulfillment_partition_key AS "fulfillmentPartitionKey"
-    FROM wms.orders WHERE warehouse_status IS NULL OR warehouse_status NOT IN ('shipped','cancelled')
-    ORDER BY id LIMIT $1`, [limits.orders + 1]);
+    FROM wms.orders WHERE warehouse_status IS NULL OR NOT (warehouse_status = ANY($1::text[]))
+    ORDER BY id LIMIT $2`, [TERMINAL_WMS_DEMAND_STATUSES, limits.orders + 1]);
   const orders = parseRows(wmsCutoverDemandOrderSchema, orderRows.rows, limits.orders, "orders");
   const orderIds = orders.map((order) => order.id);
   if (!orderIds.length) return wmsCutoverDemandCaptureSchema.parse({

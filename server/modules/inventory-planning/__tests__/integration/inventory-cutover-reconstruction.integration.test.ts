@@ -156,7 +156,7 @@ dbDescribe.sequential("reviewed reconstruction with real claim DDL and inventory
     expect(evidence.sourceItems).toMatchObject([{ id:91, purpose:"customer_fulfillment", shipmentStatus:status }]);
     expect(planCutoverReconstruction(evidence)).toMatchObject({ ready:true, blockers:[] });
   }));
-  it("keeps terminal-linked outbound and physical reviews outside the ordinary demand census", async () => transaction(async (client) => {
+  it.each(["shipped", "completed", "cancelled"])("keeps %s outbound and physical reviews outside ordinary demand", async (status) => transaction(async (client) => {
     await client.query(`
       INSERT INTO wms.orders VALUES
         (90,1,'shipped',0,36,'shopify','terminal-90','fo-90','default'),
@@ -172,6 +172,7 @@ dbDescribe.sequential("reviewed reconstruction with real claim DDL and inventory
       INSERT INTO wms.physical_shipment_items(id,physical_shipment_id,wms_order_item_id,product_variant_id,sku,quantity_shipped)
         VALUES(904,903,900,101,'P5',1),(914,913,910,101,'P5',1);
     `);
+    await client.query("UPDATE wms.orders SET warehouse_status=$1 WHERE id=ANY($2::integer[])", [status, [90,91]]);
     // Both owners exist, but neither has current demand or residual custody.
     // Physical rows have no legacy source link. Only the review predicates can
     // include 902/904; the structurally identical non-review controls stay out.
@@ -256,11 +257,49 @@ dbDescribe.sequential("reviewed reconstruction with real claim DDL and inventory
     expect((await client.query("SELECT reserved_qty FROM inventory.inventory_levels")).rows[0].reserved_qty).toBe(7);
     expect((await client.query("SELECT reserved_qty FROM inventory.build_component_reservations")).rows[0].reserved_qty).toBe(3);
   }));
-  it("censuses historical terminal demand, orphan lots and ignored receipts without filtering", async () => transaction(async (client) => {
-    await client.query("UPDATE wms.orders SET warehouse_status='shipped'; INSERT INTO oms.channel_fulfillment_receipts(id,processing_status) VALUES(8,'ignored')");
+  it.each(["shipped", "completed", "cancelled"])("censuses %s residual custody and ignored receipts without filtering", async (status) => transaction(async (client) => {
+    await client.query("UPDATE wms.orders SET warehouse_status=$1", [status]);
+    await client.query("INSERT INTO oms.channel_fulfillment_receipts(id,processing_status) VALUES(8,'ignored')");
     const plan = await repository.preview(client);
     expect(plan.blockers.map((row) => row.code)).toContain("TERMINAL_ORDER_RESIDUAL_REQUIRES_REVIEW");
     expect(plan.blockers.map((row) => row.code)).toContain("SHIPMENT_RECEIPT_REQUIRES_REVIEW");
+  }));
+  it("does not recreate completed historical demand, but keeps null and unknown order states visible", async () => transaction(async (client) => {
+    await client.query(`INSERT INTO wms.orders VALUES
+      (90,NULL,'completed',0,36,'shopify','historical-90','fo-90','default'),
+      (91,1,NULL,0,36,'shopify','unknown-91','fo-91','default'),
+      (92,1,'invented',0,36,'shopify','unknown-92','fo-92','default');
+      INSERT INTO wms.order_items
+      (id,order_id,sku,product_id,quantity,picked_quantity,fulfilled_quantity,status,on_hold,requires_shipping)
+      VALUES(900,90,'P5',101,6,0,0,'pending',false,1),
+        (910,91,'P5',101,6,0,0,'pending',false,1),(920,92,'P5',101,6,0,0,'pending',false,1)`);
+    const evidence = await repository.capture(client);
+    expect(evidence.orders.map((order) => order.id)).toEqual([1,91,92]);
+    expect(evidence.items.map((item) => item.id)).toEqual([11,910,920]);
+    const plan = planCutoverReconstruction(evidence);
+    expect(plan.orders.map((order) => order.orderId)).toEqual([1]);
+    expect(plan.blockers).toEqual([
+      { code: "ORDER_STATE_REQUIRES_REVIEW", subject: "order-item:910", message: expect.any(String) },
+      { code: "ORDER_STATE_REQUIRES_REVIEW", subject: "order-item:920", message: expect.any(String) },
+    ]);
+    expect((await client.query("SELECT warehouse_id,warehouse_status FROM wms.orders WHERE id=90")).rows)
+      .toEqual([{ warehouse_id: null, warehouse_status: "completed" }]);
+  }));
+  it.each([null, 999])("retains a completed residual item's real parent when journal order identity is %s", async (journalOrderId) => transaction(async (client) => {
+    await client.query("UPDATE wms.orders SET warehouse_status='completed'; UPDATE wms.order_items SET picked_quantity=0");
+    await client.query("UPDATE inventory.inventory_transactions SET order_id=$1", [journalOrderId]);
+    const evidence = await repository.capture(client);
+    expect(evidence.orders).toMatchObject([{ id: 1, status: "completed" }]);
+    expect(evidence.items.map((item) => item.id)).toEqual([11]);
+    expect(evidence.costs.map((cost) => cost.id)).toEqual([9]);
+    const plan = planCutoverReconstruction(evidence);
+    expect(plan.orders).toEqual([]);
+    expect(plan.legacyPromiseReleases).toEqual([]);
+    expect(plan.blockers.map((blocker) => blocker.code)).toContain("TERMINAL_ORDER_RESIDUAL_REQUIRES_REVIEW");
+    expect(plan.blockers.map((blocker) => blocker.code)).not.toContain("DEMAND_OWNER_MISSING");
+    // Reading the real parent is not permission to repair a conflicting journal.
+    expect(evidence.journals.every((journal) => journal.orderId === journalOrderId)).toBe(true);
+    expect(plan.blockers.map((blocker) => blocker.code)).toContain("ENCUMBRANCE_OWNER_UNRESOLVED");
   }));
   it("requires an admitted writer transaction", async () => {
     const client = await database.pool.connect();

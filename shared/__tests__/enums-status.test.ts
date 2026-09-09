@@ -12,6 +12,8 @@ import {
   WMS_WAREHOUSE_STATUS_VALUES,
   SHIPMENT_STATUS_VALUES,
   TERMINAL_SHIPMENT_STATUSES,
+  TERMINAL_WMS_DEMAND_STATUSES,
+  isTerminalWmsDemandStatus,
   deriveOmsFromWms,
   deriveWmsFromShipments,
   isShipmentShipped,
@@ -22,6 +24,17 @@ import {
 } from "../enums/order-status";
 
 describe("enum value sets", () => {
+  it.each(WMS_WAREHOUSE_STATUS_VALUES)("classifies %s for new demand independently of shipment status", (status) => {
+    expect(isTerminalWmsDemandStatus(status)).toBe(["shipped", "completed", "cancelled"].includes(status));
+  });
+
+  it("does not mistake demand completion for shipment proof or silently retire unknown demand", () => {
+    expect(TERMINAL_WMS_DEMAND_STATUSES).toEqual(["shipped", "completed", "cancelled"]);
+    expect(Object.isFrozen(TERMINAL_WMS_DEMAND_STATUSES)).toBe(true);
+    expect(deriveOmsFromWms("completed")).toBeNull();
+    for (const status of [null, "invented", "", "COMPLETED"]) expect(isTerminalWmsDemandStatus(status)).toBe(false);
+  });
+
   it("OMS_ORDER_STATUS_VALUES is the expected 7-element union", () => {
     expect(OMS_ORDER_STATUS_VALUES).toEqual([
       "pending",

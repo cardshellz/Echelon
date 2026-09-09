@@ -53,9 +53,9 @@ describe("exact legacy cutover reconstruction", () => {
       expect.objectContaining({ code:"SHIPMENT_RECEIPT_REQUIRES_REVIEW", subject:"outbound_shipment_review:90" }),
     ]));
   });
-  it("keeps the real physical review state blocked even for a captured terminal item with no remaining custody", () => {
+  it.each(["shipped", "completed", "cancelled"])("keeps physical review blocked for a %s item without remaining custody", (status) => {
     const evidence = reconstructionEvidence();
-    evidence.orders.push({ ...evidence.orders[0], id:2, status:"shipped" });
+    evidence.orders.push({ ...evidence.orders[0], id:2, status });
     evidence.items.push({ ...evidence.items[0], id:12, orderId:2, quantity:1, pickedQuantity:1, fulfilledQuantity:1 });
     evidence.physicalItems = [{ id:"100", physicalShipmentId:"99", orderItemId:12, replacementForOrderItemId:null,
       legacySourceShipmentItemId:null, packageAllocationEntryId:null, productVariantId:101, sku:"P5",
@@ -73,9 +73,39 @@ describe("exact legacy cutover reconstruction", () => {
     expect(plan.retainedIndependentBuildReservationIds).toEqual([1]);
     expect(plan.orders[0].lines[0].allocations[0].lots[0].reservedQty).toBe("3");
   });
-  it.each(["shipped", "cancelled"])("does not erase %s order residual custody", (status) => {
+  it.each(["shipped", "completed", "cancelled"])("does not erase %s order residual custody", (status) => {
     const evidence = reconstructionEvidence(); evidence.orders[0].status = status;
     expect(planCutoverReconstruction(evidence).blockers.map((row) => row.code)).toContain("TERMINAL_ORDER_RESIDUAL_REQUIRES_REVIEW");
+  });
+  it("does not recreate pending historical lines under a completed order with no warehouse", () => {
+    const evidence = reconstructionEvidence();
+    evidence.orders.push({ ...evidence.orders[0], id: 2, warehouseId: null, status: "completed" });
+    evidence.items.push({ ...evidence.items[0], id: 12, orderId: 2, pickedQuantity: 0, status: "pending" });
+    const plan = planCutoverReconstruction(evidence);
+    expect(plan).toMatchObject({ ready: true, blockers: [] });
+    expect(plan.orders.map((order) => order.orderId)).toEqual([1]);
+    expect(plan.legacyPromiseReleases).toEqual([]);
+  });
+  it.each(["reservedQty", "pickedQty"] as const)("retains negative %s on completed orders for review", (field) => {
+    const evidence = reconstructionEvidence(); evidence.orders[0].status = "completed";
+    Object.assign(evidence.journals[0], { reservedQty: "0", pickedQty: "0", [field]: "-1" });
+    const plan = planCutoverReconstruction(evidence);
+    expect(plan.orders).toEqual([]);
+    expect(plan.legacyPromiseReleases).toEqual([]);
+    expect(plan.blockers).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "TERMINAL_ORDER_RESIDUAL_REQUIRES_REVIEW" }),
+      expect.objectContaining({ code: "ENCUMBRANCE_OWNER_UNRESOLVED" }),
+    ]));
+  });
+  it.each([null, "invented", "COMPLETED"])("never adopts custody or creates fresh demand for unknown state %s", (status) => {
+    const evidence = reconstructionEvidence(); evidence.orders[0].status = status;
+    const plan = planCutoverReconstruction(evidence);
+    expect(plan.orders).toEqual([]);
+    expect(plan.legacyPromiseReleases).toEqual([]);
+    expect(plan.blockers).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "ORDER_STATE_REQUIRES_REVIEW" }),
+      expect.objectContaining({ code: "ENCUMBRANCE_OWNER_UNRESOLVED" }),
+    ]));
   });
   it("blocks ambiguous multiple orders over multiple reserved lots", () => {
     const evidence = reconstructionEvidence(); evidence.items.push({ ...evidence.items[0], id: 12, quantity: 2, pickedQuantity: 0 });

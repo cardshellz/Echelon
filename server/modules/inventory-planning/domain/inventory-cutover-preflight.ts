@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { canonicalJson } from "@shared/utils/canonical-json";
-import { WMS_WAREHOUSE_STATUS_VALUES } from "@shared/enums/order-status";
+import { WMS_WAREHOUSE_STATUS_VALUES, isTerminalWmsDemandStatus } from "@shared/enums/order-status";
 import { wmsCutoverDemandCaptureSchema, type WmsCutoverDemandCapture } from "@shared/types/inventory-cutover-demand";
 import { inventoryCutoverEncumbranceSchema, type InventoryCutoverEncumbranceDto } from "@shared/types/inventory-cutover-encumbrance";
 import {
@@ -168,7 +168,7 @@ function classifyDemandLines(
       if (lineFindings.length === 0) { disposition = "no_inventory_demand"; candidateDemandQty = "0"; }
     } else {
       if (!(WMS_WAREHOUSE_STATUS_VALUES as readonly (string | null)[]).includes(order.status)
-        || ["shipped", "cancelled"].includes(order.status ?? "")) {
+        || isTerminalWmsDemandStatus(order.status)) {
         issue("ORDER_STATE_REVIEW", "The captured order state is not a recognized nonterminal state; do not infer demand from it.");
       }
       if (![0, 1].includes(order.onHold)) issue("ORDER_HOLD_STATE_INVALID", "The order's hold flag is not a recognized value.");

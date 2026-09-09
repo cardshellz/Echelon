@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { canonicalJson } from "@shared/utils/canonical-json";
+import { WMS_WAREHOUSE_STATUS_VALUES, isTerminalWmsDemandStatus } from "@shared/enums/order-status";
 import { cutoverReconstructionEvidenceSchema, type CutoverReconstructionEvidence,
   type CutoverReconstructionPlan, type CutoverReconstructionLine,
   type CutoverReconstructionAllocation } from "@shared/types/inventory-cutover-reconstruction";
@@ -129,9 +130,12 @@ export function planCutoverReconstruction(raw: CutoverReconstructionEvidence): C
     const picked = sum(journals.map((row) => row.pickedQty));
     const residual = reservation !== BigInt(0) || picked !== BigInt(0);
     if (!order) { block("DEMAND_OWNER_MISSING", subject, "Demand has no owning WMS order."); continue; }
-    const terminal = ["shipped", "cancelled"].includes(order.status ?? "");
-    if (terminal) {
+    if (isTerminalWmsDemandStatus(order.status)) {
       if (residual) block("TERMINAL_ORDER_RESIDUAL_REQUIRES_REVIEW", subject, "Terminal order still owns signed reservation or picked custody. It is not free supply.");
+      continue;
+    }
+    if (!(WMS_WAREHOUSE_STATUS_VALUES as readonly (string | null)[]).includes(order.status)) {
+      block("ORDER_STATE_REQUIRES_REVIEW", subject, "Unknown warehouse order state cannot authorize new demand or adoption of existing custody.");
       continue;
     }
     if (item.quantity < 0 || item.pickedQuantity < 0 || item.fulfilledQuantity < 0
