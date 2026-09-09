@@ -170,6 +170,36 @@ export function registerSharedConfigurationAdminRoutes(
     requirePermission("settings", "edit"),
     run((req) => service.saveAssignment(req.body, actor(req))),
   );
+  app.post(
+    "/api/dropship/admin/shipping/shared/program/reset",
+    requirePermission("dropship", "manage_operations"),
+    run((req) =>
+      service.resetDropshipProgram(req.body, actor(req), configuredChannelId()),
+    ),
+  );
+  app.put(
+    "/api/shipping/admin/box-suites/status",
+    requirePermission("settings", "edit"),
+    run((req) => service.changeSuiteStatus(req.body, actor(req))),
+  );
+  app.post(
+    "/api/shipping/admin/packaging/assignment/reset",
+    requirePermission("settings", "edit"),
+    run((req) => service.resetAssignment(req.body, actor(req))),
+  );
+  app.post(
+    "/api/dropship/admin/shipping/shared/packaging/reset",
+    requirePermission("dropship", "manage_operations"),
+    run((req) => {
+      if (req.body?.channel !== "dropship")
+        throw new ShippingConfigurationError(
+          "SHIPPING_CHANNEL_FORBIDDEN",
+          "This endpoint only configures Dropship.",
+          403,
+        );
+      return service.resetAssignment(req.body, actor(req));
+    }),
+  );
   app.get(
     "/api/shipping/admin/rate-books/:id/charges",
     requirePermission("settings", "view"),

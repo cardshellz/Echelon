@@ -1,5 +1,5 @@
-import { useRef, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -9,238 +9,276 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
-  getJson,
   postJson,
   putJson,
   invalidateShippingAdmin,
 } from "./pricing-programs/api";
-import {
-  packagingConfigurationSchema,
-  type BoxSuiteSummary,
-  type FulfillmentChannel,
-} from "@shared/shipping/configuration";
+import type { BoxSuiteSummary } from "@shared/shipping/configuration";
 import { ConfigurationHistory } from "./ConfigurationHistory";
+import {
+  channelLabels,
+  packagingAssignmentUrl,
+  useConfigurationCommand,
+  usePackagingConfiguration,
+} from "./configuration-client";
+export { useConfigurationCommand } from "./configuration-client";
 
-export function useConfigurationCommand() {
-  const command = useRef<{ body: string; id: string } | undefined>(undefined);
-  return (body: unknown) => {
-    const serialized = JSON.stringify(body);
-    if (command.current?.body !== serialized)
-      command.current = { body: serialized, id: crypto.randomUUID() };
-    return command.current.id;
-  };
-}
-const fieldClass = "h-9 rounded-md border bg-background px-3 text-sm";
-export function BoxSuitesPanel({
-  channelOnly,
-}: {
-  channelOnly?: FulfillmentChannel;
-}) {
+export function BoxSuitesPanel() {
   const client = useQueryClient();
-  const query = useQuery({
-    queryKey: ["/api/shipping/admin/packaging"],
-    queryFn: async () =>
-      packagingConfigurationSchema.parse(
-        await getJson("/api/shipping/admin/packaging"),
-      ),
-  });
+  const query = usePackagingConfiguration();
   const [editing, setEditing] = useState<BoxSuiteSummary | null>();
+  const [statusTarget, setStatusTarget] = useState<BoxSuiteSummary | null>(
+    null,
+  );
   const [name, setName] = useState("");
   const [boxIds, setBoxIds] = useState<number[]>([]);
   const [search, setSearch] = useState("");
+  const [suiteSearch, setSuiteSearch] = useState("");
+  const [showArchived, setShowArchived] = useState(false);
   const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
-  const [channel, setChannel] = useState<FulfillmentChannel>(
-    channelOnly ?? "dropship",
-  );
-  const [warehouse, setWarehouse] = useState("");
-  const [suite, setSuite] = useState("");
   const commandFor = useConfigurationCommand();
   const data = query.data;
-  async function save(task: () => Promise<unknown>) {
+  async function save(task: () => Promise<unknown>, success: string) {
     setBusy(true);
     setError("");
+    setMessage("");
     try {
       await task();
       invalidateShippingAdmin(client);
       await query.refetch({ throwOnError: true });
       setEditing(undefined);
+      setStatusTarget(null);
+      setMessage(success);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Unable to save packaging.");
     } finally {
       setBusy(false);
     }
   }
-  if (query.isLoading) return <p>Loading packaging suites…</p>;
+  if (query.isLoading) return <p>Loading box suites…</p>;
   if (!data)
     return (
       <p role="alert">
-        Unable to load packaging.{" "}
-        <Button variant="outline" onClick={() => query.refetch()}>
-          Retry
-        </Button>
+        Unable to load box suites.{" "}
+        <Button onClick={() => query.refetch()}>Retry</Button>
       </p>
     );
-  const assignments = data.assignments.filter(
-    (a) => !channelOnly || a.channel === channelOnly,
-  );
-  const matchingAssignment = data.assignments.find(
-    (a) =>
-      a.channel === channel &&
-      a.warehouseId === (warehouse ? Number(warehouse) : null),
-  );
-  const affected = editing
-    ? data.assignments.filter((a) => a.suiteId === editing.id)
-    : [];
-  const open = (value: BoxSuiteSummary | null) => {
-    setEditing(value);
-    setName(value?.name ?? "");
+  const open = (value: BoxSuiteSummary | null, duplicate = false) => {
+    setEditing(duplicate ? null : value);
+    setName(
+      duplicate && value
+        ? `${value.name.slice(0, 150)} copy`
+        : (value?.name ?? ""),
+    );
     setBoxIds(value?.boxIds ?? []);
     setSearch("");
     setError("");
+    setMessage("");
   };
+  const affected = editing
+    ? data.assignments.filter((a) => a.suiteId === editing.id)
+    : [];
+  const suites = data.suites.filter(
+    (s) =>
+      Boolean(s.archived) === showArchived &&
+      s.name.toLowerCase().includes(suiteSearch.toLowerCase()),
+  );
   return (
-    <section className="space-y-4 rounded-lg border p-4">
-      <div className="flex items-center justify-between gap-3">
+    <section className="space-y-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h3 className="font-semibold">Box suites</h3>
+          <h2 className="text-lg font-semibold">Box suites</h2>
           <p className="text-sm text-muted-foreground">
-            Reusable packaging choices. A warehouse override replaces the
-            channel default; only boxes available there can be used.
+            Group existing boxes and mailers into reusable packaging choices.
+            Assign suites in channel shipping configuration.
           </p>
+          <a className="text-sm underline" href="/shipping-settings?tab=boxes">
+            Manage individual boxes in Box catalog
+          </a>
         </div>
-        {!channelOnly && (
-          <Button variant="outline" onClick={() => open(null)}>
-            New suite
-          </Button>
-        )}
+        <Button onClick={() => open(null)}>New suite</Button>
+      </div>
+      <div className="flex flex-wrap items-center gap-3">
+        <Input
+          className="max-w-sm"
+          aria-label="Search suites"
+          placeholder="Search suites"
+          value={suiteSearch}
+          onChange={(e) => setSuiteSearch(e.target.value)}
+        />
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={showArchived}
+            onChange={(e) => setShowArchived(e.target.checked)}
+          />
+          Show archived suites
+        </label>
       </div>
       {error && (
-        <p role="alert" className="text-sm text-destructive">
+        <p role="alert" className="text-destructive">
           {error}
         </p>
       )}
-      {!channelOnly && (
-        <div className="max-h-60 overflow-auto divide-y rounded border">
-          {data.suites.map((s) => (
-            <div
-              key={s.id}
-              className="flex items-center justify-between gap-3 p-2 text-sm"
-            >
-              <span>
-                {s.name}{" "}
-                <span className="text-muted-foreground">
-                  · {s.boxIds.length} boxes · revision {s.revision}
-                </span>
-              </span>
-              <Button size="sm" variant="outline" onClick={() => open(s)}>
-                Edit
-              </Button>
-            </div>
-          ))}
-        </div>
+      {message && (
+        <p role="status" className="text-emerald-700">
+          {message}
+        </p>
       )}
-      <div className="max-h-60 overflow-auto rounded border">
-        <table className="w-full text-left text-sm">
-          <thead>
-            <tr className="border-b">
-              <th className="p-2">Channel</th>
-              <th>Warehouse</th>
-              <th>Suite</th>
-            </tr>
-          </thead>
-          <tbody>
-            {assignments.map((a) => (
-              <tr
-                className="border-b last:border-0"
-                key={`${a.channel}:${a.warehouseId}`}
-              >
-                <td className="p-2">{a.channel}</td>
-                <td>
-                  {data.warehouses.find((w) => w.id === a.warehouseId)?.name ??
-                    "Channel default"}
-                </td>
-                <td>
-                  {data.suites.find((s) => s.id === a.suiteId)?.name ??
-                    "Unavailable"}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      <form
-        className="flex flex-wrap items-end gap-3"
-        onSubmit={(e) => {
-          e.preventDefault();
-          const body = {
-            channel,
-            warehouseId: warehouse ? Number(warehouse) : null,
-            suiteId: Number(suite),
-            expectedRevision: matchingAssignment?.revision ?? 0,
-          };
-          void save(() =>
-            putJson("/api/shipping/admin/packaging/assignment", {
-              ...body,
-              commandId: commandFor(body),
-            }),
+      <div className="max-h-[32rem] overflow-auto divide-y rounded border">
+        {!suites.length && (
+          <p className="p-4 text-sm text-muted-foreground">
+            No {showArchived ? "archived " : ""}suites match.
+          </p>
+        )}
+        {suites.map((s) => {
+          const usages = data.assignments.filter((a) => a.suiteId === s.id);
+          return (
+            <article
+              key={s.id}
+              className="flex flex-wrap items-center justify-between gap-3 p-3"
+            >
+              <div className="min-w-0">
+                <h3 className="font-medium">{s.name}</h3>
+                <p className="text-sm text-muted-foreground">
+                  {s.boxIds.length} packaging{" "}
+                  {s.boxIds.length === 1 ? "type" : "types"} ·{" "}
+                  {s.archived ? "Archived" : "Active"}
+                </p>
+                {s.imported && (
+                  <p className="text-xs text-muted-foreground">
+                    Imported from your previous packaging configuration. You can
+                    rename or edit it.
+                  </p>
+                )}
+                <div className="flex flex-wrap gap-x-3 text-xs">
+                  <span className="text-muted-foreground">Used by:</span>
+                  {usages.length ? (
+                    usages.slice(0, 2).map((a) => (
+                      <a
+                        key={`${a.channel}:${a.warehouseId}`}
+                        className="underline"
+                        href={packagingAssignmentUrl(a.channel)}
+                      >
+                        {channelLabels[a.channel]} ·{" "}
+                        {a.warehouseId === null
+                          ? "Default"
+                          : (data.warehouses.find((w) => w.id === a.warehouseId)
+                              ?.name ?? `Warehouse ${a.warehouseId}`)}
+                      </a>
+                    ))
+                  ) : (
+                    <span>Not assigned</span>
+                  )}
+                  {usages.length > 2 && (
+                    <a
+                      className="underline"
+                      href="/shipping-settings?tab=channel-routing&section=packaging"
+                    >
+                      +{usages.length - 2} more assignments
+                    </a>
+                  )}
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {!s.archived && (
+                  <>
+                    <Button size="sm" variant="outline" onClick={() => open(s)}>
+                      Edit
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => open(s, true)}
+                    >
+                      Duplicate
+                    </Button>
+                  </>
+                )}
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => {
+                    setStatusTarget(s);
+                    setError("");
+                    setMessage("");
+                  }}
+                >
+                  {s.archived ? "Restore" : "Archive"}
+                </Button>
+              </div>
+            </article>
           );
+        })}
+      </div>
+      <Dialog
+        open={Boolean(statusTarget)}
+        onOpenChange={(value) => {
+          if (!value && !busy) setStatusTarget(null);
         }}
       >
-        {!channelOnly && (
-          <label className="grid gap-1 text-sm">
-            Channel
-            <select
-              className={fieldClass}
-              value={channel}
-              onChange={(e) => setChannel(e.target.value as FulfillmentChannel)}
-            >
-              {["dropship", "shopify", "internal", "ebay"].map((c) => (
-                <option key={c}>{c}</option>
-              ))}
-            </select>
-          </label>
-        )}
-        <label className="grid gap-1 text-sm">
-          Warehouse
-          <select
-            className={fieldClass}
-            value={warehouse}
-            onChange={(e) => setWarehouse(e.target.value)}
-          >
-            <option value="">Channel default</option>
-            {data.warehouses.map((w) => (
-              <option key={w.id} value={w.id}>
-                {w.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="grid gap-1 text-sm">
-          Suite
-          <select
-            required
-            className={fieldClass}
-            value={suite}
-            onChange={(e) => setSuite(e.target.value)}
-          >
-            <option value="">Choose suite</option>
-            {data.suites.map((s) => (
-              <option key={s.id} value={s.id}>
-                {s.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <Button
-          type="submit"
-          disabled={
-            busy || !suite || matchingAssignment?.suiteId === Number(suite)
-          }
-        >
-          Save assignment
-        </Button>
-      </form>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              {statusTarget?.archived ? "Restore" : "Archive"} suite
+            </DialogTitle>
+          </DialogHeader>
+          {statusTarget && (
+            <>
+              <p>
+                {statusTarget.archived
+                  ? "Make this suite available for new assignments again."
+                  : "Hide this suite from new assignments. Its history and previous shipments are preserved."}
+              </p>
+              <p className="font-medium">{statusTarget.name}</p>
+              {!statusTarget.archived &&
+              data.assignments.some((a) => a.suiteId === statusTarget.id) ? (
+                <p role="alert">
+                  This suite is still assigned. Use its “Used by” links to
+                  reassign it before archiving.
+                </p>
+              ) : (
+                <Button
+                  disabled={busy}
+                  onClick={() => {
+                    const body = {
+                      id: statusTarget.id,
+                      expectedRevision: statusTarget.revision,
+                      archived: !statusTarget.archived,
+                    };
+                    void save(
+                      () =>
+                        putJson("/api/shipping/admin/box-suites/status", {
+                          ...body,
+                          commandId: commandFor(body),
+                        }),
+                      statusTarget.archived
+                        ? "Suite restored."
+                        : "Suite archived.",
+                    );
+                  }}
+                >
+                  {statusTarget.archived ? "Restore suite" : "Archive suite"}
+                </Button>
+              )}
+              {error && (
+                <p role="alert" className="text-destructive">
+                  {error}
+                </p>
+              )}
+              <Button
+                variant="outline"
+                disabled={busy}
+                onClick={() => setStatusTarget(null)}
+              >
+                Cancel
+              </Button>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
       <Dialog
         open={editing !== undefined}
         onOpenChange={(value) => {
@@ -263,11 +301,13 @@ export function BoxSuitesPanel({
                 boxIds: [...boxIds].sort((a, b) => a - b),
                 expectedRevision: editing?.revision ?? 0,
               };
-              void save(() =>
-                postJson("/api/shipping/admin/box-suites", {
-                  ...body,
-                  commandId: commandFor(body),
-                }),
+              void save(
+                () =>
+                  postJson("/api/shipping/admin/box-suites", {
+                    ...body,
+                    commandId: commandFor(body),
+                  }),
+                "Suite saved.",
               );
             }}
           >
@@ -275,13 +315,14 @@ export function BoxSuitesPanel({
               Suite name
               <Input
                 required
+                maxLength={160}
                 value={name}
                 onChange={(e) => setName(e.target.value)}
               />
             </label>
             <Input
               aria-label="Search boxes"
-              placeholder="Search boxes"
+              placeholder="Search boxes and mailers"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />
@@ -315,28 +356,36 @@ export function BoxSuitesPanel({
                 ))}
             </div>
             <p className="text-sm text-muted-foreground">
-              {boxIds.length} boxes selected.{" "}
+              {boxIds.length} packaging types selected.{" "}
               {affected.length
-                ? `Saving affects ${affected.length} channel/warehouse assignments: ${affected.map((a) => `${a.channel} / ${data.warehouses.find((w) => w.id === a.warehouseId)?.name ?? "default"}`).join(", ")}.`
-                : "No channel assignments currently use this suite."}{" "}
-              Existing shipment snapshots stay unchanged.
+                ? `Saving affects ${affected.length} channel/warehouse assignments.`
+                : "Not assigned yet. Choose where to use this suite in channel configuration."}{" "}
+              Previous shipment snapshots stay unchanged.
             </p>
             {editing && (
-              <ConfigurationHistory resourceKey={`suite:${editing.id}`} />
+              <details>
+                <summary className="cursor-pointer text-sm">
+                  Change history
+                </summary>
+                <ConfigurationHistory resourceKey={`suite:${editing.id}`} />
+              </details>
             )}
             {error && (
-              <p role="alert" className="text-sm text-destructive">
+              <p role="alert" className="text-destructive">
                 {error}
               </p>
             )}
             <div className="flex gap-2">
-              <Button disabled={busy || !boxIds.length} type="submit">
+              <Button
+                disabled={busy || !boxIds.length || !name.trim()}
+                type="submit"
+              >
                 Save suite
               </Button>
               <Button
                 disabled={busy}
-                type="button"
                 variant="outline"
+                type="button"
                 onClick={() => setEditing(undefined)}
               >
                 Cancel

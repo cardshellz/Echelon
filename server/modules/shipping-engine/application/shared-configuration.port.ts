@@ -12,6 +12,9 @@ import type {
   saveFulfillmentServiceSchema,
   savePackagingAssignmentSchema,
   saveProgramChargesSchema,
+  changeSuiteStatusSchema,
+  resetPackagingAssignmentSchema,
+  resetDropshipProgramSchema,
 } from "@shared/shipping/configuration";
 
 export interface SharedShippingConfigurationStore {
@@ -35,6 +38,16 @@ export interface SharedShippingConfigurationStore {
     actor: string,
     now: Date,
   ): Promise<PackagingAssignment>;
+  changeSuiteStatus(
+    input: z.infer<typeof changeSuiteStatusSchema>,
+    actor: string,
+    now: Date,
+  ): Promise<BoxSuiteSummary>;
+  resetAssignment(
+    input: z.infer<typeof resetPackagingAssignmentSchema>,
+    actor: string,
+    now: Date,
+  ): Promise<{ warehouseId: number; channel: FulfillmentChannel }>;
   readChargeConfiguration(
     bookId: number,
   ): Promise<{ revision: number; charges: ProgramCharges }>;
@@ -52,6 +65,11 @@ export interface SharedShippingConfigurationStore {
     actor: string,
     now: Date,
   ): Promise<{ warehouseId: number | null; rateBookId: number }>;
+  resetDropshipProgram(
+    input: z.infer<typeof resetDropshipProgramSchema>,
+    actor: string,
+    now: Date,
+  ): Promise<{ warehouseId: number }>;
   saveService(
     input: z.infer<typeof saveFulfillmentServiceSchema>,
     actor: string,

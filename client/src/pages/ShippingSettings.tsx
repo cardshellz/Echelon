@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { dollarsToCents } from '@shared/utils/money';
 import { BoxSuitesPanel } from '@/components/shipping/BoxSuitesPanel';
+import { PackagingAssignmentsPanel } from '@/components/shipping/PackagingAssignmentsPanel';
 import { useQuery, useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -1302,6 +1303,7 @@ export default function ShippingSettings() {
       <Tabs defaultValue={initialShippingSettingsTab()}>
         <TabsList className="h-auto flex-wrap justify-start">
           <TabsTrigger value="boxes">Box catalog</TabsTrigger>
+          <TabsTrigger value="box-suites">Box suites</TabsTrigger>
           <TabsTrigger value="packing-attrs">Packing attributes</TabsTrigger>
           <TabsTrigger value="fulfillment-providers">Fulfillment providers</TabsTrigger>
           <TabsTrigger value="destinations">Destinations</TabsTrigger>
@@ -1309,9 +1311,9 @@ export default function ShippingSettings() {
           <TabsTrigger value="channel-routing">Channel routing</TabsTrigger>
         </TabsList>
         <TabsContent value="boxes" className="mt-4 space-y-4">
-          <BoxSuitesPanel />
           <BoxCatalogTab boxes={config?.boxes || []} warehouses={warehouses} isLoading={configLoading} />
         </TabsContent>
+        <TabsContent value="box-suites" className="mt-4"><BoxSuitesPanel /></TabsContent>
         <TabsContent value="packing-attrs" className="mt-4">
           <PackingAttributesTab />
         </TabsContent>
@@ -1325,7 +1327,11 @@ export default function ShippingSettings() {
           <PricingProgramsTab />
         </TabsContent>
         <TabsContent value="channel-routing" className="mt-4">
-          <ChannelRoutingTab />
+          <Tabs defaultValue={new URLSearchParams(window.location.search).get('section') === 'packaging' ? 'packaging' : 'pricing'}>
+            <TabsList><TabsTrigger value="pricing">Pricing routing</TabsTrigger><TabsTrigger value="packaging">Packaging assignments</TabsTrigger></TabsList>
+            <TabsContent value="pricing" className="mt-4"><ChannelRoutingTab /></TabsContent>
+            <TabsContent value="packaging" className="mt-4"><PackagingAssignmentsPanel /></TabsContent>
+          </Tabs>
         </TabsContent>
       </Tabs>
     </div>
@@ -1335,5 +1341,5 @@ export default function ShippingSettings() {
 function initialShippingSettingsTab(): string {
   if (typeof window === "undefined") return "boxes";
   const requested = new URLSearchParams(window.location.search).get("tab");
-  return requested && ['boxes','packing-attrs','fulfillment-providers','destinations','pricing-programs','channel-routing'].includes(requested) ? requested : 'boxes';
+  return requested && ['boxes','box-suites','packing-attrs','fulfillment-providers','destinations','pricing-programs','channel-routing'].includes(requested) ? requested : 'boxes';
 }

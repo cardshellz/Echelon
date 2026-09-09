@@ -65,6 +65,22 @@ export const savePackagingAssignmentSchema = z
     commandId: z.string().uuid(),
   })
   .strict();
+export const changeSuiteStatusSchema = z
+  .object({
+    id: z.number().int().positive(),
+    expectedRevision: z.number().int().positive(),
+    archived: z.boolean(),
+    commandId: z.string().uuid(),
+  })
+  .strict();
+export const resetPackagingAssignmentSchema = z
+  .object({
+    channel: fulfillmentChannelSchema,
+    warehouseId: z.number().int().positive(),
+    expectedRevision: z.number().int().positive(),
+    commandId: z.string().uuid(),
+  })
+  .strict();
 export interface ProgramChargeEvidence {
   revision: number;
   baseCents: number;
@@ -78,6 +94,8 @@ export interface BoxSuiteSummary {
   name: string;
   revision: number;
   boxIds: number[];
+  archived?: boolean;
+  imported?: boolean;
 }
 export interface PackagingAssignment {
   channel: FulfillmentChannel;
@@ -107,6 +125,13 @@ export const saveDropshipProgramSchema = z
     commandId: z.string().uuid(),
   })
   .strict();
+export const resetDropshipProgramSchema = z
+  .object({
+    warehouseId: z.number().int().positive(),
+    expectedProgramId: z.number().int().positive(),
+    commandId: z.string().uuid(),
+  })
+  .strict();
 export interface DropshipSharedShippingConfig {
   runtimeMode?: "legacy" | "test" | "live";
   runtimeConfigurationError?: string | null;
@@ -125,6 +150,8 @@ export const packagingConfigurationSchema: z.ZodType<PackagingConfiguration> =
         name: z.string(),
         revision: z.number().int().positive(),
         boxIds: z.array(z.number().int().positive()),
+        archived: z.boolean().optional(),
+        imported: z.boolean().optional(),
       }),
     ),
     assignments: z.array(
