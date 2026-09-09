@@ -33,7 +33,10 @@ describe.skipIf(!enabled)(
       const client = await db.connect();
       try {
         await client.query("BEGIN");
-        for (const name of ["238_shared_packaging_and_program_charges.sql"]) {
+        for (const name of [
+          "238_shared_packaging_and_program_charges.sql",
+          "239_packaging_suite_lifecycle.sql",
+        ]) {
           await client.query(readFileSync(resolve("migrations", name), "utf8"));
         }
         await client.query("COMMIT");
@@ -50,6 +53,177 @@ describe.skipIf(!enabled)(
         await admin.query(`DROP DATABASE IF EXISTS "${database}"`);
         await admin.end();
       }
+    });
+    it("archives, restores and rejects stale suite editors without erasing history", async () => {
+      const suite = await repo.saveSuite(
+        {
+          name: "Lifecycle test",
+          boxIds: [1],
+          expectedRevision: 0,
+          commandId: randomUUID(),
+        },
+        "admin",
+        now,
+      );
+      const command = {
+        id: suite.id,
+        expectedRevision: 1,
+        archived: true,
+        commandId: randomUUID(),
+      };
+      const archived = await repo.changeSuiteStatus(command, "admin", now);
+      expect(archived).toMatchObject({
+        archived: true,
+        revision: 2,
+        boxIds: [1],
+      });
+      expect(await repo.changeSuiteStatus(command, "admin", now)).toEqual(
+        archived,
+      );
+      await expect(
+        repo.saveAssignment(
+          {
+            channel: "internal",
+            warehouseId: 1,
+            suiteId: suite.id,
+            expectedRevision: 0,
+            commandId: randomUUID(),
+          },
+          "admin",
+          now,
+        ),
+      ).rejects.toMatchObject({ code: "SHIPPING_SUITE_EMPTY_AT_WAREHOUSE" });
+      await repo.changeSuiteStatus(
+        {
+          id: suite.id,
+          expectedRevision: 2,
+          archived: false,
+          commandId: randomUUID(),
+        },
+        "admin",
+        now,
+      );
+      await expect(
+        repo.saveSuite(
+          {
+            id: suite.id,
+            name: "Stale",
+            boxIds: [1],
+            expectedRevision: 1,
+            commandId: randomUUID(),
+          },
+          "admin",
+          now,
+        ),
+      ).rejects.toMatchObject({ code: "SHIPPING_CONFIG_CHANGED" });
+      expect((await repo.history(`suite:${suite.id}`)).length).toBe(3);
+    });
+    it("requires reassignment before archive and restores warehouse inheritance safely", async () => {
+      const suite = await repo.saveSuite(
+        {
+          name: "Override lifecycle test",
+          boxIds: [1],
+          expectedRevision: 0,
+          commandId: randomUUID(),
+        },
+        "admin",
+        now,
+      );
+      const assigned = await repo.saveAssignment(
+        {
+          channel: "internal",
+          warehouseId: 1,
+          suiteId: suite.id,
+          expectedRevision: 0,
+          commandId: randomUUID(),
+        },
+        "admin",
+        now,
+      );
+      await expect(
+        repo.changeSuiteStatus(
+          {
+            id: suite.id,
+            expectedRevision: 1,
+            archived: true,
+            commandId: randomUUID(),
+          },
+          "admin",
+          now,
+        ),
+      ).rejects.toMatchObject({ code: "SHIPPING_SUITE_IN_USE" });
+      const reset = {
+        channel: "internal" as const,
+        warehouseId: 1,
+        expectedRevision: assigned.revision,
+        commandId: randomUUID(),
+      };
+      await repo.resetAssignment(reset, "admin", now);
+      await repo.resetAssignment(reset, "admin", now);
+      expect((await repo.loadPackaging("internal", 1)).suiteId).not.toBe(
+        suite.id,
+      );
+      const reassigned = await repo.saveAssignment(
+        {
+          channel: "internal",
+          warehouseId: 1,
+          suiteId: suite.id,
+          expectedRevision: 0,
+          commandId: randomUUID(),
+        },
+        "admin",
+        now,
+      );
+      expect(reassigned.revision).toBeGreaterThan(assigned.revision);
+      await expect(
+        repo.resetAssignment(
+          { ...reset, commandId: randomUUID() },
+          "admin",
+          now,
+        ),
+      ).rejects.toMatchObject({ code: "SHIPPING_CONFIG_CHANGED" });
+      await repo.resetAssignment(
+        {
+          ...reset,
+          expectedRevision: reassigned.revision,
+          commandId: randomUUID(),
+        },
+        "admin",
+        now,
+      );
+      await repo.changeSuiteStatus(
+        {
+          id: suite.id,
+          expectedRevision: 1,
+          archived: true,
+          commandId: randomUUID(),
+        },
+        "admin",
+        now,
+      );
+    });
+    it("preserves the default and other warehouses when resetting pricing overrides", async () => {
+      await repo.saveDropshipProgram(
+        {
+          warehouseId: 1,
+          rateBookId: 2,
+          expectedProgramId: null,
+          commandId: randomUUID(),
+        },
+        "admin",
+        now,
+      );
+      await repo.resetDropshipProgram(
+        { warehouseId: 1, expectedProgramId: 2, commandId: randomUUID() },
+        "admin",
+        now,
+      );
+      const config = await repo.dropshipConfig(null);
+      expect(config.assignments).toContainEqual({
+        warehouseId: null,
+        rateBookId: 1,
+      });
+      expect(config.assignments.some((a) => a.warehouseId === 1)).toBe(false);
     });
     it("migrates distinct catalog identities and preserves each channel suite", async () => {
       const config = await repo.listPackaging();
@@ -242,17 +416,39 @@ describe.skipIf(!enabled)(
           ?.revision,
       ).toBe(suite.revision);
     });
-    it('keeps a replacement suite authoritative over migrated box preferences',async () => {
+    it("keeps a replacement suite authoritative over migrated box preferences", async () => {
       await db.query("INSERT INTO warehouse.warehouses VALUES(3,'East')");
-      await db.query('INSERT INTO shipping.box_warehouse_stock VALUES(1,3,true)');
-      const suite = (await repo.listPackaging()).suites.find((row) => row.name === 'Reusable')!;
-      await repo.saveAssignment({ channel: 'dropship',warehouseId: 3,suiteId: suite.id,expectedRevision: 0,commandId: randomUUID() },'admin',now);
-      const result = await new BasicDropshipCartonizationProvider(db).cartonize({
-        vendorId: 1,storeConnectionId: 1,warehouseId: 3,quotedAt: now,
-        destination: { country: 'US',region: 'PA',postalCode: '16046' },items: [{ productVariantId: 66,quantity: 1 }],
-      });
-      expect(result.packages[0].boxCode).toBe('SHARED');
-      expect(result.warnings).toContain('An unavailable legacy box preference was ignored; the assigned suite supplied the packaging.');
+      await db.query(
+        "INSERT INTO shipping.box_warehouse_stock VALUES(1,3,true)",
+      );
+      const suite = (await repo.listPackaging()).suites.find(
+        (row) => row.name === "Reusable",
+      )!;
+      await repo.saveAssignment(
+        {
+          channel: "dropship",
+          warehouseId: 3,
+          suiteId: suite.id,
+          expectedRevision: 0,
+          commandId: randomUUID(),
+        },
+        "admin",
+        now,
+      );
+      const result = await new BasicDropshipCartonizationProvider(db).cartonize(
+        {
+          vendorId: 1,
+          storeConnectionId: 1,
+          warehouseId: 3,
+          quotedAt: now,
+          destination: { country: "US", region: "PA", postalCode: "16046" },
+          items: [{ productVariantId: 66, quantity: 1 }],
+        },
+      );
+      expect(result.packages[0].boxCode).toBe("SHARED");
+      expect(result.warnings).toContain(
+        "An unavailable legacy box preference was ignored; the assigned suite supplied the packaging.",
+      );
       expect(result.packagingWarnings).toEqual([]);
     });
     it("rejects partial or undersized outer dimensions", async () => {

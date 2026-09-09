@@ -17,6 +17,9 @@ import {
   type saveFulfillmentServiceSchema,
   type saveDropshipProgramSchema,
   type DropshipSharedShippingConfig,
+  type changeSuiteStatusSchema,
+  type resetPackagingAssignmentSchema,
+  type resetDropshipProgramSchema,
 } from "@shared/shipping/configuration";
 import { resolvePackagingAssignment } from "../domain/packaging-assignment";
 import type { CartonizeBox } from "../../cartonization/domain/cartonize";
@@ -129,6 +132,53 @@ export class SharedShippingConfigurationRepository
     );
   }
 
+  async resetDropshipProgram(
+    input: z.infer<typeof resetDropshipProgramSchema>,
+    actor: string,
+    now: Date,
+  ) {
+    return this.command(
+      `dropship-program:${input.warehouseId}`,
+      input,
+      actor,
+      now,
+      async (client) => {
+        const current = (
+          await client.query(
+            `SELECT id,rate_book_id FROM shipping.rate_book_assignments
+        WHERE pricing_channel='dropship' AND rate_purpose='vendor_fulfillment_charge' AND is_active
+        AND origin_warehouse_id=$1 FOR UPDATE`,
+            [input.warehouseId],
+          )
+        ).rows;
+        if (
+          current.length !== 1 ||
+          current[0].rate_book_id !== input.expectedProgramId
+        )
+          throw conflict();
+        const fallback = (
+          await client.query(`SELECT a.id FROM shipping.rate_book_assignments a
+        JOIN shipping.rate_books b ON b.id=a.rate_book_id AND b.status='active'
+        WHERE a.pricing_channel='dropship' AND a.rate_purpose='vendor_fulfillment_charge' AND a.is_active
+        AND a.origin_warehouse_id IS NULL FOR UPDATE OF a,b`)
+        ).rows;
+        if (fallback.length !== 1)
+          throw new ShippingConfigurationError(
+            "SHIPPING_PROGRAM_DEFAULT_UNAVAILABLE",
+            "Configure one active channel-default program before removing a warehouse override.",
+          );
+        await client.query(
+          "UPDATE shipping.rate_book_assignments SET is_active=false,updated_at=$2 WHERE id=$1",
+          [current[0].id, now],
+        );
+        return {
+          before: current[0],
+          after: { warehouseId: input.warehouseId },
+        };
+      },
+    );
+  }
+
   async saveService(
     input: z.infer<typeof saveFulfillmentServiceSchema>,
     actor: string,
@@ -231,7 +281,7 @@ export class SharedShippingConfigurationRepository
           OR EXISTS (SELECT 1 FROM shipping.box_warehouse_stock stock
             WHERE stock.box_id=b.id AND stock.warehouse_id=$2 AND stock.is_stocked))), '[]'::jsonb) AS boxes
       FROM shipping.packaging_assignments a JOIN shipping.box_suites s ON s.id=a.suite_id
-      WHERE a.channel=$1 AND (a.warehouse_id=$2 OR a.warehouse_id IS NULL)`,
+      WHERE a.is_active AND NOT s.archived AND a.channel=$1 AND (a.warehouse_id=$2 OR a.warehouse_id IS NULL)`,
       [channel, warehouseId],
     );
     const assignment = resolvePackagingAssignment(
@@ -342,13 +392,13 @@ export class SharedShippingConfigurationRepository
   async listPackaging(): Promise<PackagingConfiguration> {
     // One statement gives the UI a consistent snapshot of suites and assignments.
     const result = await this.dbPool.query(`SELECT
-      COALESCE((SELECT jsonb_agg(jsonb_build_object('id',s.id,'name',s.name,'revision',s.current_revision,
+      COALESCE((SELECT jsonb_agg(jsonb_build_object('id',s.id,'name',s.name,'revision',s.current_revision,'archived',s.archived,'imported',s.imported,
         'boxIds',COALESCE((SELECT jsonb_agg(m.box_id ORDER BY m.box_id) FROM shipping.box_suite_members m
           WHERE m.suite_id=s.id AND m.revision=s.current_revision),'[]'::jsonb)) ORDER BY s.name)
         FROM shipping.box_suites s),'[]'::jsonb) AS suites,
       COALESCE((SELECT jsonb_agg(jsonb_build_object('channel',channel,'warehouseId',warehouse_id,
         'suiteId',suite_id,'revision',revision) ORDER BY channel,warehouse_id NULLS FIRST)
-        FROM shipping.packaging_assignments),'[]'::jsonb) AS assignments,
+        FROM shipping.packaging_assignments WHERE is_active),'[]'::jsonb) AS assignments,
       COALESCE((SELECT jsonb_agg(jsonb_build_object('id',id,'code',code,'name',name,'isActive',is_active) ORDER BY code)
         FROM shipping.box_catalog),'[]'::jsonb) AS boxes,
       COALESCE((SELECT jsonb_agg(jsonb_build_object('id',id,'name',name) ORDER BY name)
@@ -370,7 +420,7 @@ export class SharedShippingConfigurationRepository
         const current = input.id
           ? (
               await client.query(
-                "SELECT id,name,current_revision FROM shipping.box_suites WHERE id=$1 FOR UPDATE",
+                "SELECT id,name,current_revision,archived FROM shipping.box_suites WHERE id=$1 FOR UPDATE",
                 [input.id],
               )
             ).rows[0]
@@ -380,6 +430,11 @@ export class SharedShippingConfigurationRepository
           (input.id && !current)
         )
           throw conflict();
+        if (current?.archived)
+          throw new ShippingConfigurationError(
+            "SHIPPING_SUITE_ARCHIVED",
+            "Restore this suite before editing it.",
+          );
         const boxes = await client.query(
           "SELECT id FROM shipping.box_catalog WHERE id=ANY($1::int[]) AND is_active=true",
           [input.boxIds],
@@ -394,10 +449,10 @@ export class SharedShippingConfigurationRepository
           // this suite currently wins, including inherited channel defaults.
           const stranded = await client.query(
             `SELECT DISTINCT w.name FROM warehouse.warehouses w
-          JOIN shipping.packaging_assignments a ON a.suite_id=$1 AND
+          JOIN shipping.packaging_assignments a ON a.is_active AND a.suite_id=$1 AND
             (a.warehouse_id=w.id OR (a.warehouse_id IS NULL AND NOT EXISTS
               (SELECT 1 FROM shipping.packaging_assignments override
-                WHERE override.channel=a.channel AND override.warehouse_id=w.id)))
+                WHERE override.is_active AND override.channel=a.channel AND override.warehouse_id=w.id)))
           WHERE NOT EXISTS (SELECT 1 FROM shipping.box_catalog b WHERE b.id=ANY($2::int[]) AND b.is_active
             AND (NOT EXISTS(SELECT 1 FROM shipping.box_warehouse_stock stock WHERE stock.box_id=b.id)
               OR EXISTS(SELECT 1 FROM shipping.box_warehouse_stock stock
@@ -463,13 +518,15 @@ export class SharedShippingConfigurationRepository
             [input.channel, input.warehouseId],
           )
         ).rows[0];
-        if ((current?.revision ?? 0) !== input.expectedRevision)
+        if (
+          (current?.is_active ? current.revision : 0) !== input.expectedRevision
+        )
           throw conflict();
         const available = await client.query(
           `SELECT 1 FROM shipping.box_suites s
         JOIN shipping.box_suite_members m ON m.suite_id=s.id AND m.revision=s.current_revision
         JOIN shipping.box_catalog b ON b.id=m.box_id AND b.is_active
-        WHERE s.id=$1 AND ($2::int IS NULL
+        WHERE s.id=$1 AND NOT s.archived AND ($2::int IS NULL
           OR NOT EXISTS(SELECT 1 FROM shipping.box_warehouse_stock stock WHERE stock.box_id=b.id)
           OR EXISTS(SELECT 1 FROM shipping.box_warehouse_stock stock WHERE stock.box_id=b.id AND stock.warehouse_id=$2 AND stock.is_stocked)) LIMIT 1`,
           [input.suiteId, input.warehouseId],
@@ -479,10 +536,10 @@ export class SharedShippingConfigurationRepository
             "SHIPPING_SUITE_EMPTY_AT_WAREHOUSE",
             "This suite has no active boxes available for this assignment.",
           );
-        const revision = input.expectedRevision + 1;
+        const revision = (current?.revision ?? 0) + 1;
         if (current)
           await client.query(
-            "UPDATE shipping.packaging_assignments SET suite_id=$2,revision=$3 WHERE id=$1",
+            "UPDATE shipping.packaging_assignments SET suite_id=$2,revision=$3,is_active=true WHERE id=$1",
             [current.id, input.suiteId, revision],
           );
         else
@@ -498,6 +555,123 @@ export class SharedShippingConfigurationRepository
             suiteId: input.suiteId,
             revision,
           },
+        };
+      },
+    );
+  }
+
+  async changeSuiteStatus(
+    input: z.infer<typeof changeSuiteStatusSchema>,
+    actor: string,
+    now: Date,
+  ): Promise<BoxSuiteSummary> {
+    return this.command(
+      `suite:${input.id}`,
+      input,
+      actor,
+      now,
+      async (client) => {
+        const current = (
+          await client.query(
+            "SELECT id,name,current_revision,archived FROM shipping.box_suites WHERE id=$1 FOR UPDATE",
+            [input.id],
+          )
+        ).rows[0];
+        if (!current || current.current_revision !== input.expectedRevision)
+          throw conflict();
+        if (input.archived) {
+          const usages = (
+            await client.query(
+              "SELECT channel,warehouse_id FROM shipping.packaging_assignments WHERE suite_id=$1 AND is_active ORDER BY channel,warehouse_id NULLS FIRST",
+              [input.id],
+            )
+          ).rows;
+          if (usages.length)
+            throw new ShippingConfigurationError(
+              "SHIPPING_SUITE_IN_USE",
+              "Reassign this suite before archiving it. It is still used by " +
+                usages
+                  .map(
+                    (a) =>
+                      `${a.channel} / ${a.warehouse_id === null ? "channel default" : `warehouse ${a.warehouse_id}`}`,
+                  )
+                  .join(", ") +
+                ".",
+            );
+        }
+        const revision = current.current_revision + 1;
+        // Lifecycle changes also advance the revision, invalidating stale editors.
+        await client.query(
+          "INSERT INTO shipping.box_suite_revisions(suite_id,revision,name,created_at,actor_id) VALUES($1,$2,$3,$4,$5)",
+          [input.id, revision, current.name, now, actor],
+        );
+        const members = (
+          await client.query(
+            "INSERT INTO shipping.box_suite_members(suite_id,revision,box_id) SELECT suite_id,$2,box_id FROM shipping.box_suite_members WHERE suite_id=$1 AND revision=$3 RETURNING box_id",
+            [input.id, revision, current.current_revision],
+          )
+        ).rows;
+        await client.query(
+          "UPDATE shipping.box_suites SET archived=$2,current_revision=$3 WHERE id=$1",
+          [input.id, input.archived, revision],
+        );
+        return {
+          before: current,
+          after: {
+            id: input.id,
+            name: current.name as string,
+            archived: input.archived,
+            revision,
+            boxIds: members
+              .map((m) => m.box_id as number)
+              .sort((a, b) => a - b),
+          },
+        };
+      },
+    );
+  }
+
+  async resetAssignment(
+    input: z.infer<typeof resetPackagingAssignmentSchema>,
+    actor: string,
+    now: Date,
+  ) {
+    return this.command(
+      `packaging:${input.channel}:${input.warehouseId}`,
+      input,
+      actor,
+      now,
+      async (client) => {
+        const current = (
+          await client.query(
+            "SELECT * FROM shipping.packaging_assignments WHERE channel=$1 AND warehouse_id=$2 AND is_active FOR UPDATE",
+            [input.channel, input.warehouseId],
+          )
+        ).rows[0];
+        if (!current || current.revision !== input.expectedRevision)
+          throw conflict();
+        const fallback = await client.query(
+          `SELECT 1 FROM shipping.packaging_assignments a
+        JOIN shipping.box_suites s ON s.id=a.suite_id AND NOT s.archived
+        JOIN shipping.box_suite_members m ON m.suite_id=s.id AND m.revision=s.current_revision
+        JOIN shipping.box_catalog b ON b.id=m.box_id AND b.is_active
+        WHERE a.channel=$1 AND a.warehouse_id IS NULL AND a.is_active AND
+        (NOT EXISTS(SELECT 1 FROM shipping.box_warehouse_stock stock WHERE stock.box_id=b.id)
+         OR EXISTS(SELECT 1 FROM shipping.box_warehouse_stock stock WHERE stock.box_id=b.id AND stock.warehouse_id=$2 AND stock.is_stocked)) LIMIT 1`,
+          [input.channel, input.warehouseId],
+        );
+        if (!fallback.rows.length)
+          throw new ShippingConfigurationError(
+            "SHIPPING_PACKAGING_DEFAULT_UNAVAILABLE",
+            "The channel default has no available packaging at this warehouse. Configure a usable default before removing this override.",
+          );
+        await client.query(
+          "UPDATE shipping.packaging_assignments SET is_active=false,revision=revision+1 WHERE id=$1",
+          [current.id],
+        );
+        return {
+          before: current,
+          after: { channel: input.channel, warehouseId: input.warehouseId },
         };
       },
     );

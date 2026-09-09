@@ -6,6 +6,9 @@ import {
   saveFulfillmentServiceSchema,
   saveDropshipProgramSchema,
   saveProgramChargesSchema,
+  changeSuiteStatusSchema,
+  resetPackagingAssignmentSchema,
+  resetDropshipProgramSchema,
 } from "@shared/shipping/configuration";
 import { ShippingConfigurationError } from "../domain/configuration-error";
 import type { SharedShippingConfigurationStore } from "./shared-configuration.port";
@@ -41,6 +44,20 @@ export class SharedShippingConfigurationService {
       this.clock(),
     );
   }
+  changeSuiteStatus(body: unknown, actor: string) {
+    return this.repository.changeSuiteStatus(
+      changeSuiteStatusSchema.parse(body),
+      z.string().min(1).parse(actor),
+      this.clock(),
+    );
+  }
+  resetAssignment(body: unknown, actor: string) {
+    return this.repository.resetAssignment(
+      resetPackagingAssignmentSchema.parse(body),
+      z.string().min(1).parse(actor),
+      this.clock(),
+    );
+  }
   loadCharges(id: unknown) {
     return this.repository.readChargeConfiguration(positiveId.parse(id));
   }
@@ -69,6 +86,18 @@ export class SharedShippingConfigurationService {
       );
     return this.repository.saveService(
       input,
+      z.string().min(1).parse(actor),
+      this.clock(),
+    );
+  }
+  resetDropshipProgram(body: unknown, actor: string, channelId: number | null) {
+    if (channelId !== null)
+      throw new ShippingConfigurationError(
+        "SHIPPING_CANONICAL_ROUTING_REQUIRED",
+        "This channel uses versioned routing. Change its pricing program in Shipping Settings > Channel routing.",
+      );
+    return this.repository.resetDropshipProgram(
+      resetDropshipProgramSchema.parse(body),
       z.string().min(1).parse(actor),
       this.clock(),
     );

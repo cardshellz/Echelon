@@ -411,7 +411,8 @@ export function invalidateShippingAdmin(queryClient: QueryClient): void {
   queryClient.invalidateQueries({
     predicate: (query) =>
       typeof query.queryKey[0] === "string"
-      && query.queryKey[0].startsWith("/api/shipping/admin"),
+      && (query.queryKey[0].startsWith("/api/shipping/admin")
+        || query.queryKey[0] === "/api/dropship/admin/shipping/shared"),
   });
 }
 

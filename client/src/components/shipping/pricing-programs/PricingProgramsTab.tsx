@@ -84,7 +84,10 @@ type View =
 export function PricingProgramsTab() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const [view, setView] = useState<View>({ kind: "overview" });
+  const [view, setView] = useState<View>(() => {
+    const id = Number(new URLSearchParams(window.location.search).get("program"));
+    return Number.isSafeInteger(id) && id > 0 ? { kind: "program", bookId: id } : { kind: "overview" };
+  });
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("active");
   const [channelFilter, setChannelFilter] = useState("all");
