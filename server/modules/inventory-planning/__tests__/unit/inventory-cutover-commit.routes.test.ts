@@ -8,6 +8,7 @@ import { InventoryCutoverCommitError, InventoryCutoverCommitService } from "../.
 import { InventoryCutoverManifestError } from "../../domain/inventory-cutover-manifest";
 import { CutoverReconstructionError } from "../../infrastructure/inventory-cutover-reconstruction.repository";
 import { InventoryAvailabilityActivationRepositoryError } from "../../infrastructure/inventory-availability-activation.repository";
+import { InventoryCutoverCaptureError } from "../../infrastructure/inventory-cutover-capture-stage";
 
 const { hasPermission } = vi.hoisted(() => ({ hasPermission: vi.fn(async () => true) }));
 vi.mock("../../../identity", () => ({ hasPermission }));
@@ -114,6 +115,37 @@ describe("cutover review and commit routes", () => {
     expect(service.commit).toHaveBeenCalledTimes(1);
     expect(JSON.stringify(response.body)).not.toContain("secret");
     expect(response.headers["cache-control"]).toBe("no-store");
+  });
+
+  it.each([
+    ["57014", 503, "CUTOVER_EVIDENCE_CAPTURE_TIMEOUT"],
+    ["40001", 409, "CUTOVER_EVIDENCE_CAPTURE_CONFLICT"],
+    ["OMS_CUTOVER_CENSUS_LIMIT_EXCEEDED", 422, "CUTOVER_EVIDENCE_CAPTURE_LIMIT_EXCEEDED"],
+    ["CUTOVER_JOURNAL_ROW_LIMIT_EXCEEDED", 422, "CUTOVER_EVIDENCE_CAPTURE_LIMIT_EXCEEDED"],
+    ["XX000", 500, "CUTOVER_EVIDENCE_CAPTURE_FAILED"],
+  ])("reports a named capture stage for %s without exposing evidence or retrying", async (databaseCode, status, code) => {
+    const cause = Object.assign(new Error("secret SQL password and customer payload"), { code: databaseCode, detail: "private" });
+    service.preview.mockRejectedValue(new InventoryCutoverCaptureError("oms_demand_and_receipts", cause));
+    const response = await request(server.url + ROOT + "/review", { activationRunId: "1" });
+    expect(response).toMatchObject({ status, body: { error: { code, context: { stage: "oms_demand_and_receipts" } } } });
+    expect(response.body.error.message).toContain("sales-channel demand and shipment acknowledgments");
+    expect(response.body.error.message).toContain("No complete review");
+    expect(response.body).not.toHaveProperty("ready");
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(service.preview).toHaveBeenCalledTimes(1);
+    expect(service.commit).not.toHaveBeenCalled();
+    expect(JSON.stringify(response.body)).not.toMatch(/secret|password|private|payload/);
+    expect(JSON.stringify(vi.mocked(console.error).mock.calls)).not.toMatch(/secret|password|private|payload/);
+    expect(console.error).toHaveBeenCalledWith(expect.stringContaining('"event":"inventory_cutover_capture_failed"'));
+  });
+
+  it("does not trust a spoofed capture-stage exception", async () => {
+    service.preview.mockRejectedValue(Object.assign(new Error("private SQL"), {
+      code: "CUTOVER_EVIDENCE_CAPTURE_TIMEOUT", stage: "oms_demand_and_receipts", status: 503,
+    }));
+    expect(await request(server.url + ROOT + "/review", { activationRunId: "1" })).toMatchObject({
+      status: 500, body: { error: { code: "CUTOVER_COMMAND_FAILED" } },
+    });
   });
 
   it.each([

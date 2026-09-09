@@ -16,12 +16,37 @@ export const cutoverReconstructionLotSchema = z.object({
   onHandQty: raw, reservedQty: raw, pickedQty: raw, status: z.string(),
   unitCostMills: raw, poUnitCostMills: raw, packagingUnitCostMills: raw, landedUnitCostMills: raw,
 }).strict();
+export const cutoverJournalIssueCodeSchema = z.enum([
+  "RESERVATION_DELTA_MISSING", "PHYSICAL_DELTA_MISSING", "SHIPMENT_BUCKET_SPLIT_UNRECORDED",
+  "RESERVATION_TRANSFER_OWNER_UNRECORDED", "OWNER_FOREIGN_KEY_MISSING", "OWNER_FOREIGN_KEY_CONFLICT",
+  "SOURCE_PURPOSE_UNSUPPORTED", "SOURCE_LIFECYCLE_UNSAFE", "LOCATION_IDENTITY_UNRESOLVED",
+]);
+export type CutoverJournalIssueCode = z.infer<typeof cutoverJournalIssueCodeSchema>;
 /** Raw signed journal evidence, including unattributed/terminal residuals. Never clamp. */
 export const cutoverReconstructionJournalSchema = z.object({
   orderId: nullableId, orderItemId: nullableId, productVariantId: nullableId,
   warehouseLocationId: nullableId, reservedQty: raw, pickedQty: raw,
   shippedQty: raw, unknownCount: raw, journalCount: raw, journalHash: hash,
-}).strict();
+  // Optional only for older persisted evidence. New captures retain bounded,
+  // exact row examples; the hash and transaction count cover every row.
+  identityCompletedCount: raw.optional(),
+  issues: z.array(z.object({ code: cutoverJournalIssueCodeSchema,
+    transactionCount: z.string().regex(/^[1-9][0-9]*$/), transactionIds: z.array(id).min(1).max(10),
+  }).strict()).optional(),
+}).strict().superRefine((journal, context) => {
+  if (journal.identityCompletedCount !== undefined && (BigInt(journal.identityCompletedCount) < BigInt(0)
+    || BigInt(journal.identityCompletedCount) > BigInt(journal.journalCount))) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Completed identities must be within the journal row count" });
+  }
+  if (journal.issues !== undefined && ((journal.issues.length === 0) !== (BigInt(journal.unknownCount) === BigInt(0))
+    || new Set(journal.issues.map((issue) => issue.code)).size !== journal.issues.length
+    || BigInt(journal.unknownCount) > BigInt(journal.journalCount)
+    || journal.issues.some((issue) => BigInt(issue.transactionCount) > BigInt(journal.unknownCount)
+      || BigInt(issue.transactionIds.length) > BigInt(issue.transactionCount)
+      || new Set(issue.transactionIds).size !== issue.transactionIds.length))) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Unknown diagnostics must reconcile to exact journal row counts and distinct examples" });
+  }
+});
 export const cutoverReconstructionCostSchema = z.object({
   id, orderId: id, orderItemId: id, inventoryLotId: id, productVariantId: id,
   quantity: raw, unitCostMills: raw, totalCostMills: raw,
