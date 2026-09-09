@@ -106,13 +106,108 @@ describe("purchase pipeline quantity and cost evidence", () => {
     expect(projectPurchasePipeline(data, pipelineTime, 90).rows[0].costs[0].amountMills).toBe("10000");
   });
   it("uses fingerprint-verified confirmed component revisions while keeping other components estimated", () => {
-    const data = pipelineEvidence(); const sourceEvidence = { invoice: "synthetic" };
+    const data = pipelineEvidence(); Object.assign(data.lines[0], { pricingBasis: "legacy_unknown", quotedUnitMills: null }); const sourceEvidence = { invoice: "synthetic" };
     const input = { contractVersion: 1, component: "product", scope: { kind: "purchase_order_line", purchaseOrderId: 1, purchaseOrderLineId: 11 }, sources: [{ kind: "vendor_invoice_line", documentId: 8, lineId: 9, version: "a".repeat(64) }], currency: "USD", totalMills: 700000, basePieces: 100, evidence: "confirmed", packagingTreatment: "separate", issue: null, manualOverride: null };
     const fingerprint = createHash("sha256").update(canonicalJson({ input, sourceEvidence })).digest("hex");
     data.revisions.push({ id: 44, purchaseOrderLineId: 11, shipmentLineId: null, component: "product", revision: 1, fingerprint, contract: { ...input, revision: 1, fingerprint }, sourceEvidence, recordedAt: pipelineTime.toISOString() });
     expect(projectPurchasePipeline(data, pipelineTime, 90).rows[0].costs).toMatchObject([{ evidence: "confirmed", amountMills: "700000", sourceRevisionId: 44 }, { evidence: "estimated" }, { evidence: "unknown" }]);
     data.revisions[0].sourceEvidence = { tampered: true };
     expect(projectPurchasePipeline(data, pipelineTime, 90).rows[0].costs[0]).toMatchObject({ evidence: "review_required", amountMills: null });
+  });
+  it("uses existing legacy PO component totals without inventing a quote basis or multiplying a rounded unit price", () => {
+    const data = pipelineEvidence();
+    Object.assign(data.lines[0], { pricingBasis: "legacy_unknown", quotedUnitMills: null, productCents: "12345678", packagingCents: "321", ordered: 400000, quoteReference: null });
+    const before = JSON.stringify(data);
+    const result = projectPurchasePipeline(data, pipelineTime, 90);
+    expect(result.rows[0].costs).toEqual([
+      { component: "product", amountMills: "1234567800", evidence: "estimated", source: "purchase_order", sourceRevisionId: null, recordedAt: null, reference: "TEST-PO-1" },
+      { component: "packaging", amountMills: "32100", evidence: "estimated", source: "purchase_order", sourceRevisionId: null, recordedAt: null, reference: "TEST-PO-1" },
+      { component: "landed", amountMills: null, evidence: "unknown", source: "missing", sourceRevisionId: null, recordedAt: null, reference: null },
+    ]);
+    expect(result.totals[0]).toMatchObject({ estimatedMills: "1234599900", unknownComponentCount: 1 });
+    expect(JSON.stringify(data)).toBe(before);
+  });
+  it("allocates saved PO totals once across physical receipts and split stages", () => {
+    const data = pipelinePartialReceipt();
+    Object.assign(data.lines[0], { pricingBasis: "legacy_unknown", quotedUnitMills: null, productCents: "98765", packagingCents: "1234" });
+    const rows = projectPurchasePipeline(data, pipelineTime, 90).rows;
+    expect(rows.map((row) => row.quantityPieces)).toEqual([40, 10, 30]);
+    expect(rows.reduce((sum, row) => sum + BigInt(row.costs[0].amountMills!), BigInt(0))).toBe(BigInt(7901200));
+    expect(rows.reduce((sum, row) => sum + BigInt(row.costs[1].amountMills!), BigInt(0))).toBe(BigInt(98720));
+    data.lines[0].cancelled = 10;
+    data.lines[0].progress.report = null;
+    const afterCancellation = projectPurchasePipeline(data, pipelineTime, 90);
+    expect(afterCancellation.rows.map((row) => row.quantityPieces)).toEqual([40, 30]);
+    expect(afterCancellation.totals.reduce((sum, total) => sum + BigInt(total.estimatedMills), BigInt(0))).toBe(BigInt(6999930));
+  });
+  it("retains exact residual cents across split shipments for a legacy total", () => {
+    const data = pipelineEvidence();
+    Object.assign(data.lines[0], { ordered: 3, pricingBasis: "legacy_unknown", quotedUnitMills: null, productCents: "1", packagingCents: "2" });
+    data.shipments.push(...[1, 2, 3].map((id) => pipelineShipment({ id, shipmentId: id, quantity: 1 })));
+    const rows = projectPurchasePipeline(data, pipelineTime, 90).rows;
+    expect(rows.map((row) => row.costs[0].amountMills)).toEqual(["33", "33", "34"]);
+    expect(rows.map((row) => row.costs[1].amountMills)).toEqual(["66", "67", "67"]);
+    expect(projectPurchasePipeline(data, pipelineTime, 90).totals[0].estimatedMills).toBe("300");
+  });
+  it.each([
+    { productCents: "0", packagingCents: "0", productMills: null, packagingMills: null },
+    { productCents: "100", packagingCents: "0", productMills: "10000", packagingMills: null },
+    { productCents: "0", packagingCents: "100", productMills: null, packagingMills: "10000" },
+    { productCents: null, packagingCents: "100", productMills: null, packagingMills: "10000" },
+    { productCents: "100", packagingCents: null, productMills: "10000", packagingMills: null },
+    { productCents: "-1", packagingCents: "-2", productMills: null, packagingMills: null },
+    { productCents: "9007199254740993", packagingCents: "1", productMills: "900719925474099300", packagingMills: "100" },
+  ])("keeps saved component amounts independent and exact: %j", ({ productCents, packagingCents, productMills, packagingMills }) => {
+    const data = pipelineEvidence();
+    Object.assign(data.lines[0], { pricingBasis: "legacy_unknown", quotedUnitMills: null, productCents, packagingCents });
+    const [product, packaging] = projectPurchasePipeline(data, pipelineTime, 90).rows[0].costs;
+    expect(product.amountMills).toBe(productMills);
+    expect(packaging.amountMills).toBe(packagingMills);
+    expect(product.evidence).toBe(productMills === null ? "unknown" : "estimated");
+    expect(packaging.evidence).toBe(packagingMills === null ? "unknown" : "estimated");
+  });
+  it("distinguishes a legacy default zero from explicit zero product and packaging quotes", () => {
+    const data = pipelineEvidence();
+    Object.assign(data.lines[0], { quotedUnitMills: "0", productCents: "0", packagingCents: "0" });
+    const [product, packaging] = projectPurchasePipeline(data, pipelineTime, 90).rows[0].costs;
+    expect(product).toMatchObject({ amountMills: "0", evidence: "estimated", source: "purchase_quote" });
+    expect(packaging).toMatchObject({ amountMills: "0", evidence: "estimated", source: "purchase_order" });
+    data.lines[0].quotedUnitMills = null;
+    expect(projectPurchasePipeline(data, pipelineTime, 90).rows[0].costs.slice(0, 2).every((cost) => cost.amountMills === null)).toBe(true);
+  });
+  it("honors verified zero component revisions even when legacy PO zeros cannot establish the amount", () => {
+    const data = pipelineEvidence();
+    Object.assign(data.lines[0], { pricingBasis: "legacy_unknown", quotedUnitMills: null, productCents: "0", packagingCents: "0" });
+    for (const [index, component] of (["product", "packaging"] as const).entries()) {
+      const input = { contractVersion: 1, component, scope: { kind: "purchase_order_line", purchaseOrderId: 1, purchaseOrderLineId: 11 }, sources: [{ kind: "vendor_invoice_line", documentId: 8, lineId: 9, version: "a".repeat(64) }], currency: "USD", totalMills: 0, basePieces: 100, evidence: "confirmed", packagingTreatment: "separate", issue: null, manualOverride: null };
+      const sourceEvidence = { invoice: "synthetic zero component" };
+      const fingerprint = createHash("sha256").update(canonicalJson({ input, sourceEvidence })).digest("hex");
+      data.revisions.push({ id: 44 + index, purchaseOrderLineId: 11, shipmentLineId: null, component, revision: 1, fingerprint, contract: { ...input, revision: 1, fingerprint }, sourceEvidence, recordedAt: pipelineTime.toISOString() });
+    }
+    expect(projectPurchasePipeline(data, pipelineTime, 90).rows[0].costs.slice(0, 2)).toMatchObject([
+      { amountMills: "0", evidence: "confirmed", source: "recorded_revision" },
+      { amountMills: "0", evidence: "confirmed", source: "recorded_revision" },
+    ]);
+  });
+  it("preserves exact explicit quote precedence and never replaces an incomplete explicit quote with a legacy estimate", () => {
+    const data = pipelineEvidence();
+    Object.assign(data.lines[0], { pricingBasis: "per_purchase_uom", ordered: 3, purchaseUomQuantity: 1, piecesPerPurchaseUom: 3, quotedUnitMills: "10001", productCents: "100" });
+    expect(projectPurchasePipeline(data, pipelineTime, 90).rows[0].costs[0]).toMatchObject({ amountMills: "10001", source: "purchase_quote" });
+    data.lines[0].piecesPerPurchaseUom = 2;
+    expect(projectPurchasePipeline(data, pipelineTime, 90).rows[0].costs[0]).toMatchObject({ amountMills: null, evidence: "unknown" });
+    expect(projectPurchasePipeline(data, pipelineTime, 90).rows[0].costs[1]).toMatchObject({ amountMills: "100000", source: "purchase_order" });
+  });
+  it("never extrapolates saved PO totals across an unproven receipt quantity", () => {
+    const data = pipelineEvidence();
+    Object.assign(data.lines[0], { pricingBasis: "legacy_unknown", quotedUnitMills: null, received: 10, productCents: "10000" });
+    const row = projectPurchasePipeline(data, pipelineTime, 90).rows[0];
+    expect(row.quantityPieces).toBeNull();
+    expect(row.costs.every((cost) => cost.amountMills === null && cost.evidence === "review_required")).toBe(true);
+  });
+  it("rejects invalid saved monetary values before allocation", () => {
+    const data = pipelineEvidence();
+    Object.assign(data.lines[0], { pricingBasis: "legacy_unknown", quotedUnitMills: null, productCents: "12.5" });
+    expect(() => projectPurchasePipeline(data, pipelineTime, 90)).toThrow();
   });
   it("preserves signed residuals across exact quantity intervals", () => {
     for (const total of [BigInt(7), BigInt(-7)]) expect([0, 1, 2].reduce((sum, start) => sum + BigInt(pipelineIntervalMills(total, 3, start, 1)), BigInt(0))).toBe(total);

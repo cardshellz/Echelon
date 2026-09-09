@@ -17,7 +17,7 @@ export const pipelineEvidenceSchema = z.object({
     id, purchaseOrderId: id, poNumber: z.string(), vendorName: z.string(), poStatus: z.string(), status: z.string(),
     sku: z.string().nullable(), productName: z.string().nullable(), currency: z.string().nullable(),
     ordered: quantity, received: quantity, cancelled: quantity,
-    pricingBasis: z.string(), quotedUnitMills: money, quotedTotalCents: money, purchaseUomQuantity: quantity.nullable(), piecesPerPurchaseUom: quantity.nullable(), packagingCents: money,
+    pricingBasis: z.string(), quotedUnitMills: money, quotedTotalCents: money, productCents: money, purchaseUomQuantity: quantity.nullable(), piecesPerPurchaseUom: quantity.nullable(), packagingCents: money,
     quoteReference: z.string().nullable(), expectedDate: date.nullable(), promisedDate: date.nullable(), confirmedDate: date.nullable(), purchaseExpectedDate: date.nullable(),
     progress: supplierProgressSchema,
   })).max(PIPELINE_EVIDENCE_LIMIT),
@@ -93,10 +93,29 @@ function componentCost(revisions: ReadonlyMap<string, PipelineEvidence["revision
     // presented as a resolved component value.
     return { ...missing, source: "recorded_revision", sourceRevisionId: row.id, recordedAt: row.recordedAt, evidence: "review_required" };
   }
-  const product = quoteProduct(line);
-  const total = component === "product" ? product : component === "packaging" && product !== null && line.packagingCents !== null ? BigInt(line.packagingCents) * BigInt(100) : null;
+  let total: bigint | null = null;
+  let source: "purchase_quote" | "purchase_order" = "purchase_order";
+  if (component === "product") {
+    total = quoteProduct(line);
+    if (total !== null) source = "purchase_quote";
+    else if (line.pricingBasis === "legacy_unknown" && line.productCents !== null) {
+      // Legacy quote units are unknown, but the stored PO component total is
+      // still a recorded amount. Never infer its original purchase UOM or
+      // reconstruct it from today's catalog/rounded per-piece price. Legacy
+      // zero was also the migration default, so it cannot prove a free item.
+      const recorded = BigInt(line.productCents) * BigInt(100);
+      if (recorded > BigInt(0)) total = recorded;
+    }
+  } else if (component === "packaging" && line.packagingCents !== null) {
+    // Positive packaging is independently recorded. Migration 070 defaulted
+    // legacy packaging to zero when its breakdown was unknown; only an explicit
+    // quote (or the revision path above) can establish a known zero component.
+    const recorded = BigInt(line.packagingCents) * BigInt(100);
+    const explicitProduct = quoteProduct(line);
+    if (recorded > BigInt(0) || (recorded === BigInt(0) && explicitProduct !== null && explicitProduct >= BigInt(0))) total = recorded;
+  }
   if (total === null || total < BigInt(0)) return missing;
-  return { component, amountMills: pipelineIntervalMills(total, line.ordered, start, count), evidence: "estimated", source: "purchase_quote", sourceRevisionId: null, recordedAt: null, reference: line.quoteReference };
+  return { component, amountMills: pipelineIntervalMills(total, line.ordered, start, count), evidence: "estimated", source, sourceRevisionId: null, recordedAt: null, reference: source === "purchase_quote" ? line.quoteReference : line.poNumber };
 }
 
 function arrival(line: Line, shipment: Shipment | null, asOf: Date, horizonDays: 30 | 90): Pick<PurchasePipelineRow, "arrivalDate" | "arrivalSource" | "arrivalBucket" | "arrivalDestination"> {

@@ -34,7 +34,7 @@ const cost = z.object({
   component: z.enum(["product", "packaging", "landed"]),
   amountMills: mills.nullable(),
   evidence: z.enum(["estimated", "confirmed", "unknown", "review_required"]),
-  source: z.enum(["purchase_quote", "recorded_revision", "missing"]),
+  source: z.enum(["purchase_quote", "purchase_order", "recorded_revision", "missing"]),
   sourceRevisionId: pieces.positive().nullable(),
   recordedAt: date.nullable(),
   reference: z.string().nullable(),

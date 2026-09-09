@@ -101,6 +101,20 @@ describe("purchase pipeline presentation grouping", () => {
 });
 
 describe("purchase pipeline cost summaries", () => {
+  it("totals each displayed cost column independently without combining currencies or accepting unresolved amounts", () => {
+    const rows = [
+      row({ costs: [cost("product", "10000", "confirmed"), cost("packaging", "2000"), cost("landed", null)] }),
+      row({ costs: [cost("product", "-1000", "confirmed"), cost("packaging", "9000", "review_required"), cost("landed", "3000")] }),
+      row({ currency: "EUR", costs: [cost("product", "5000"), cost("packaging", "0", "confirmed"), cost("landed", null)] }),
+    ];
+    const original = structuredClone(rows);
+    expect(summarizePipelineCosts(rows, "product").map(({ currency, knownMills, missingComponents }) => ({ currency, knownMills, missingComponents })))
+      .toEqual([{ currency: "EUR", knownMills: "5000", missingComponents: 0 }, { currency: "USD", knownMills: "9000", missingComponents: 0 }]);
+    expect(summarizePipelineCosts(rows, "packaging")[1]).toMatchObject({ knownMills: "2000", estimatedComponents: 1, missingComponents: 1 });
+    expect(summarizePipelineCosts(rows, "landed")[0]).toMatchObject({ knownMills: "0", estimatedComponents: 0, confirmedComponents: 0, missingComponents: 1 });
+    expect(rows).toEqual(original);
+  });
+
   it("keeps currency, confidence and missing component counts separate with signed credits", () => {
     const summaries = summarizePipelineCosts([
       row({ costs: [cost("product", "1000", "confirmed"), cost("packaging", "0"), cost("landed", null)] }),

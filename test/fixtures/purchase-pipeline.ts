@@ -3,7 +3,7 @@ import type { PipelineEvidence } from "../../server/modules/procurement/purchase
 export const pipelineTime = new Date("2026-09-07T12:00:00.000Z");
 export function pipelineLine(overrides: Partial<PipelineEvidence["lines"][number]> = {}): PipelineEvidence["lines"][number] {
   return { id: 11, purchaseOrderId: 1, poNumber: "TEST-PO-1", vendorName: "Test supplier", poStatus: "acknowledged", status: "open", sku: "TEST-ITEM", productName: "Test item", currency: "USD",
-    ordered: 100, received: 0, cancelled: 0, pricingBasis: "per_piece", quotedUnitMills: "10000", quotedTotalCents: null, purchaseUomQuantity: null, piecesPerPurchaseUom: null, packagingCents: "1000", quoteReference: "TEST-QUOTE", expectedDate: "2026-10-17T12:00:00.000Z", promisedDate: null, confirmedDate: null, purchaseExpectedDate: null, progress: emptySupplierProgress(), ...overrides };
+    ordered: 100, received: 0, cancelled: 0, pricingBasis: "per_piece", quotedUnitMills: "10000", quotedTotalCents: null, productCents: "10000", purchaseUomQuantity: null, piecesPerPurchaseUom: null, packagingCents: "1000", quoteReference: "TEST-QUOTE", expectedDate: "2026-10-17T12:00:00.000Z", promisedDate: null, confirmedDate: null, purchaseExpectedDate: null, progress: emptySupplierProgress(), ...overrides };
 }
 export function pipelineShipment(overrides: Partial<PipelineEvidence["shipments"][number]> = {}): PipelineEvidence["shipments"][number] {
   return { id: 111, shipmentId: 7, purchaseOrderId: 1, purchaseOrderLineId: 11, shipmentNumber: "TEST-SHIP-7", status: "in_transit", quantity: 60, eta: "2026-09-27T12:00:00.000Z", deliveredAt: null, ...overrides };
