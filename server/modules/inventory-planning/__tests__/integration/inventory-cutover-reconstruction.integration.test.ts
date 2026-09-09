@@ -382,8 +382,14 @@ dbDescribe.sequential("reviewed reconstruction with real claim DDL and inventory
     expect(plan.legacyPromiseReleases).toEqual([]);
     expect(plan.blockers.map((blocker) => blocker.code)).toContain("TERMINAL_ORDER_RESIDUAL_REQUIRES_REVIEW");
     expect(plan.blockers.map((blocker) => blocker.code)).not.toContain("DEMAND_OWNER_MISSING");
-    // Reading the real parent is not permission to repair a conflicting journal.
-    expect(evidence.journals.every((journal) => journal.orderId === journalOrderId)).toBe(true);
+    // Main's exact-FK resolver may complete a NULL in captured evidence, but
+    // neither that completion nor this census repairs stored or conflicting IDs.
+    expect(evidence.journals.every((journal) => journal.orderId === (journalOrderId ?? 1))).toBe(true);
+    const storedJournals = (await client.query("SELECT order_id FROM inventory.inventory_transactions")).rows;
+    expect(storedJournals.every((journal) => journal.order_id === journalOrderId)).toBe(true);
+    if (journalOrderId !== null) expect(evidence.journals[0].issues).toEqual([
+      expect.objectContaining({ code: "OWNER_FOREIGN_KEY_CONFLICT" }),
+    ]);
     expect(plan.blockers.map((blocker) => blocker.code)).toContain("ENCUMBRANCE_OWNER_UNRESOLVED");
   }));
   it("requires an admitted writer transaction", async () => {

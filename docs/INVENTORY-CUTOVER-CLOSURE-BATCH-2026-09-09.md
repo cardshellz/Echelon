@@ -1,5 +1,13 @@
 # Inventory cutover closure batch — September 9, 2026
 
+## PR publication update
+
+The user subsequently requested a PR. `origin/main` was refreshed to `535a21329` (merged PR1425, census/journal hardening) and merged into this isolated branch. Both upstream hardening and this batch's terminal-demand correction are retained. The NULL-journal regression now distinguishes upstream's proven, in-memory FK completion from a stored journal mutation; conflicting stored IDs remain unchanged and blocked.
+
+The investigation snapshots, counts, hashes and code references below describe the **pre-publication candidate against baseline `c59cedf67`**, not a new production capture after PR1425. They must not be reused as current activation evidence. Publication does not perform production queries, change authority/configuration or resolve the remaining blockers.
+
+Fresh post-integration validation: **11,653 unit tests passed, 37 skipped; 995 files passed, 1 skipped.** The five PostgreSQL preflight/reconstruction/composition/capture-stage/OMS receipt suites passed **112 tests**, with no skips. Typecheck, production build and the four explicit writer-ratchet/migration-prefix assertions passed. The task-owned PostgreSQL cluster was verified and stopped. Results are retained locally in `.codex-artifacts/closure-pr-{unit-tests,postgres-tests,typecheck,build,architecture-guards}.log`; remote CI status is separate.
+
 ## Outcome
 
 One local correctness batch plus a read-only review of the remaining cutover gates. **Not activated; not ready to activate.** No production inventory, orders, recipes, configuration, reservations, ATP authority or channel quantities were changed by this investigation.
