@@ -406,6 +406,9 @@
   "inventory.availability_cutover_commits": [
     "modules/inventory-planning"
   ],
+  "inventory.availability_cutover_opening_snapshots": [
+    "modules/inventory-planning"
+  ],
   "inventory.availability_cutover_pick_sources": [
     "modules/inventory-planning"
   ],

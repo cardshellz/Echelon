@@ -9,7 +9,8 @@ import { readInventoryCutoverReconstruction } from "../../inventory/infrastructu
 import { readWmsCutoverReconstruction, readWmsCutoverShipmentReviews } from "../../wms/inventory-cutover-reconstruction.reader";
 import { readCutoverOriginalCosts } from "../../orders/inventory-cutover-reconstruction-cost.reader";
 import { readOmsCutoverReconstruction } from "../../oms/inventory-cutover-reconstruction.reader";
-import { planCutoverReconstruction, reconstructionHash } from "../domain/inventory-cutover-reconstruction";
+import { planCutoverReconstruction, reconstructionEvidenceHash, reconstructionHash } from "../domain/inventory-cutover-reconstruction";
+import { loadLatestCutoverOpening } from "./inventory-cutover-opening.reader";
 import { planFreshCutoverClaims } from "../domain/inventory-cutover-reconstruction-planning";
 import { assertInventoryCutoverFenceHeldInsideTransaction } from "./inventory-cutover-admission-fence.repository";
 import { captureActiveClaimSupplySnapshotInsideTransaction } from "./inventory-availability-shadow.repository";
@@ -60,7 +61,29 @@ export class PostgresInventoryCutoverReconstructionRepository implements Invento
       variants, costs, shipmentReviewEvidence: [...oms.shipmentReviewEvidence, ...shipmentReviews] }));
   }
 
-  async preview(client: PoolClient): Promise<CutoverReconstructionPlan> { return planCutoverReconstruction(await this.capture(client)); }
+  async preview(client: PoolClient): Promise<CutoverReconstructionPlan> { return this.resolvePlan(client, await this.capture(client)); }
+
+  private async resolvePlan(client: PoolClient, evidence: CutoverReconstructionEvidence): Promise<CutoverReconstructionPlan> {
+    const opening = await loadLatestCutoverOpening(client);
+    if (!opening) return planCutoverReconstruction(evidence);
+    const authority = (await client.query(`SELECT authority, revision::text AS revision
+      FROM inventory.availability_runtime_authority WHERE singleton_key=true`)).rows;
+    if (authority.length !== 1 || authority[0].authority !== "legacy"
+      || authority[0].revision !== opening.saved.authorityRevision
+      || reconstructionEvidenceHash(evidence) !== opening.saved.sourceEvidenceHash) {
+      const strict = planCutoverReconstruction(evidence);
+      return { ...strict, ready: false, orders: [], legacyPromiseReleases: [], blockers: [...strict.blockers, {
+        code: "CUTOVER_OPENING_EVIDENCE_CHANGED", subject: `opening:${opening.saved.id}`,
+        message: "The selected opening verification is stale. Independently verify the current snapshot; no older verification or strict-mode fallback is selected automatically.",
+      }] };
+    }
+    // The reader verifies immutable request/result/evidence hashes and rebuilds
+    // this plan from the original verified facts. Current source equality above
+    // binds it to this transaction; no inventory or historical row is changed.
+    const plan = structuredClone(opening.assessment.plan);
+    plan.openingBalance = { ...plan.openingBalance!, snapshotId: opening.saved.id };
+    return plan;
+  }
 
   async persistReviewed(client: PoolClient, rawCommand: CutoverReconstructionCommit, expectedImpactHash: string): Promise<CutoverReconstructionReceipt> {
     const command = cutoverReconstructionCommitSchema.parse(rawCommand);
@@ -84,7 +107,7 @@ export class PostgresInventoryCutoverReconstructionRepository implements Invento
       return originalResult;
     }
     const evidence = await this.capture(client);
-    const reconstruction = planCutoverReconstruction(evidence);
+    const reconstruction = await this.resolvePlan(client, evidence);
     if (reconstruction.evidenceHash !== command.expectedEvidenceHash) throw new CutoverReconstructionError("CUTOVER_RECONSTRUCTION_EVIDENCE_CHANGED", "Demand, custody, lot costs or independent build ownership changed since review.");
     if (!reconstruction.ready) throw new CutoverReconstructionError("CUTOVER_RECONSTRUCTION_BLOCKED", "Current ownership evidence does not support safe canonical adoption.", { blockers: reconstruction.blockers });
     const targetIds = [...new Set(reconstruction.orders.flatMap((order) => order.lines.map((line) => line.targetVariantId)))].sort((a,b) => a-b);
@@ -98,6 +121,7 @@ export class PostgresInventoryCutoverReconstructionRepository implements Invento
     const claimIds: string[] = [];
     for (const order of planning.orders) claimIds.push(await persistReconstructedCutoverClaim(client, this.inventoryWriter, order, command));
     const receipt = cutoverReconstructionReceiptSchema.parse({ evidenceHash: reconstruction.evidenceHash, claimIds,
+      ...(reconstruction.openingBalance ? { openingBalance: reconstruction.openingBalance } : {}),
       orderIds: reconstruction.orders.map((order) => order.orderId), retainedIndependentBuildReservationIds: reconstruction.retainedIndependentBuildReservationIds,
       ...(reconstruction.legacyPromiseReleases.length > 0 ? { legacyPromiseReleases: reconstruction.legacyPromiseReleases,
         legacyPromiseReleaseTransactionIds } : {}) });
