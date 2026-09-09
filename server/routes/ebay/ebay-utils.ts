@@ -2,6 +2,8 @@ import { eq } from "drizzle-orm";
 import { createAuthorityAwareInventoryAtpService } from "../../modules/inventory-planning/infrastructure/inventory-availability-runtime-atp.repository";
 import https from "https";
 import { createProviderRequestDeadline, boundedProviderRetryAfterSeconds } from "../../modules/channels/provider-request-limits";
+import { executeEbayQuantityHttp } from "../../modules/channels/adapters/ebay/ebay-quantity-http";
+import { ebayQuantityMutationIdentity } from "../../modules/channels/quantity-publication-request";
 import { db, pool } from "../../db";
 export const atpService = createAuthorityAwareInventoryAtpService(pool);
 import { channelConnections } from "@shared/schema";
@@ -93,6 +95,8 @@ export function ebayApiRequest(
   const hostname =
     environment === "sandbox" ? "api.sandbox.ebay.com" : "api.ebay.com";
 
+  if (ebayQuantityMutationIdentity(method,path,body)) return requestQuantity(method,path,accessToken,hostname,body);
+
   return new Promise((resolve, reject) => {
     const deadline = createProviderRequestDeadline();
     const payload = body ? JSON.stringify(body) : undefined;
@@ -166,6 +170,8 @@ export async function ebayApiRequestWithRateNotify(
   const hostname =
     environment === "sandbox" ? "api.sandbox.ebay.com" : "api.ebay.com";
 
+  if (ebayQuantityMutationIdentity(method,path,body)) return requestQuantity(method,path,accessToken,hostname,body);
+
   return new Promise((resolve, reject) => {
     const payload = body ? JSON.stringify(body) : undefined;
     const options: https.RequestOptions = {
@@ -212,4 +218,10 @@ export async function ebayApiRequestWithRateNotify(
 
     makeRequest(0);
   });
+}
+
+function requestQuantity(method: string,path: string,accessToken: string,hostname: string,body: unknown): Promise<unknown> {
+  return executeEbayQuantityHttp({ url: `https://${hostname}${path}`,method,path,body,
+    headers: { Authorization: `Bearer ${accessToken}`,"Content-Language": "en-US","Accept-Language": "en-US",
+      "Content-Type": "application/json",Accept: "application/json" },request: fetch,now: () => new Date() });
 }

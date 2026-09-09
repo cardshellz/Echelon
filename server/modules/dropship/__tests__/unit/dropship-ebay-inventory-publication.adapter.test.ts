@@ -4,8 +4,37 @@ import {
   EbayDropshipInventoryPublicationTransportAdapter,
 } from "../../infrastructure/dropship-ebay-inventory-publication.adapter";
 import type { DropshipMarketplaceStoreCredentials } from "../../infrastructure/dropship-marketplace-credentials";
+import { QuantityProviderEvidenceCollector, type QuantityProviderResponseEvidence } from "../../../inventory-planning/application/quantity-provider-request-evidence";
 
 describe("EbayDropshipInventoryPublicationTransportAdapter", () => {
+  it("preserves the retryable transport contract for an ambiguous write failure", async () => {
+    const fetchFn = vi.fn().mockResolvedValueOnce(jsonResponse(inventoryItem(2))).mockRejectedValueOnce(new Error("fetch failed"));
+    const { adapter } = fixture(fetchFn);
+    const evidence: QuantityProviderResponseEvidence[] = [];
+    const collector = new QuantityProviderEvidenceCollector({ start: async () => "1",finish: async (_id,row) => { evidence.push(row); } },
+      () => new Date("2026-09-04T12:00:00.000Z"));
+    await expect(collector.run(() => adapter.publishAbsolute({ ...request(),desiredQuantity: 7 })))
+      .rejects.toMatchObject({ code: "DROPSHIP_EBAY_INVENTORY_NETWORK_ERROR",retryable: true });
+    expect(evidence[0].outcome).toBe("uncertain");
+    expect(collector.provesTerminalRejection()).toBe(false);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+  it.each([400,401])("retains terminal HTTP %s evidence while preserving Dropship errors and auth health", async status => {
+    const fetchFn = vi.fn().mockResolvedValueOnce(jsonResponse(inventoryItem(2))).mockResolvedValueOnce(new Response(JSON.stringify({ errors: [{
+      errorId: 25001,message: "You have exceeded your maximum call limit of 250 for item per day. Try back after 1 day.",
+    }] }),{ status }));
+    const { adapter,health } = fixture(fetchFn);
+    const evidence: QuantityProviderResponseEvidence[] = [];
+    const collector = new QuantityProviderEvidenceCollector({ start: async () => "1",
+      finish: async (_id,row) => { evidence.push(row); } },() => new Date("2026-09-04T12:00:00.000Z"));
+    await expect(collector.run(() => adapter.publishAbsolute({ ...request(),desiredQuantity: 7 })))
+      .rejects.toMatchObject({ code: "DROPSHIP_EBAY_INVENTORY_HTTP_ERROR" });
+    expect(collector.provesTerminalRejection()).toBe(true);
+    expect(evidence).toEqual([expect.objectContaining({ outcome: "rejected",httpStatus: status,
+      retryNotBefore: status===400 ? "2026-09-05T12:00:00.000Z" : "2026-09-04T12:01:00.000Z" })]);
+    expect(health.recordAuthFailure).toHaveBeenCalledTimes(status===401 ? 1 : 0);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
   it("publishes the supplied absolute quantity through the exact Dropship store", async () => {
     const fetchFn = vi.fn()
       .mockResolvedValueOnce(jsonResponse(inventoryItem(2)))

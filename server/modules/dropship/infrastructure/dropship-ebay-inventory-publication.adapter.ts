@@ -1,4 +1,6 @@
 import type { Pool } from "pg";
+import { executeEbayQuantityHttpResponse } from "../../channels/adapters/ebay/ebay-quantity-http";
+import { observeEbayQuantityRequest } from "../../inventory-planning/application/quantity-provider-request-evidence";
 
 import { pool as defaultPool } from "../../../db";
 import {
@@ -244,7 +246,22 @@ export class EbayDropshipInventoryPublicationTransportAdapter
     path: string;
     body: Record<string, unknown>;
   }): Promise<Record<string, unknown>> {
-    const response = await this.request(input);
+    const response = await observeEbayQuantityRequest(input,async () => {
+      try {
+        return await executeEbayQuantityHttpResponse({
+          url: `${input.baseUrl}${input.path}`,method: input.method,path: input.path,body: input.body,
+          headers: { Authorization: `Bearer ${input.credential.accessToken}`,"Content-Type": "application/json",
+            Accept: "application/json","Content-Language": "en-US" },
+          request: this.fetchFn,now: () => this.clock.now(),
+          onFailure: (status,text) => this.throwInventoryHttpError(input.destination,status,text),
+        });
+      } catch (error) {
+        if (error instanceof InventoryPublicationTransportError) throw error;
+        throw new InventoryPublicationTransportError("DROPSHIP_EBAY_INVENTORY_NETWORK_ERROR",
+          "eBay inventory publication did not yield a conclusive response.",true,
+          { errorName: error instanceof Error ? error.name : "UnknownError" },{ cause: error });
+      }
+    });
     return { status: response.status };
   }
 
@@ -278,8 +295,12 @@ export class EbayDropshipInventoryPublicationTransportAdapter
       );
     }
     if (response.ok) return response;
-    const responseBody = (await response.text()).slice(0, 1_000);
-    const accessTokenRejected = isEbayResourceAuthFailureStatus(response.status);
+    return this.throwInventoryHttpError(input.destination,response.status,await response.text());
+  }
+
+  private async throwInventoryHttpError(destination: DropshipInventoryPublicationDestination,status: number,text: string): Promise<never> {
+    const responseBody = text.slice(0,1_000);
+    const accessTokenRejected = isEbayResourceAuthFailureStatus(status);
     if (accessTokenRejected) {
       const now = this.clock.now();
       if (!(now instanceof Date) || Number.isNaN(now.getTime())) {
@@ -289,28 +310,28 @@ export class EbayDropshipInventoryPublicationTransportAdapter
         );
       }
       await this.credentialHealth.recordAuthFailure?.({
-        vendorId: input.destination.vendorId,
-        storeConnectionId: input.destination.storeConnectionId,
+        vendorId: destination.vendorId,
+        storeConnectionId: destination.storeConnectionId,
         platform: "ebay",
         status: "refresh_failed",
         failureCode: "DROPSHIP_EBAY_INVENTORY_HTTP_ERROR",
-        message: `eBay inventory publication failed with HTTP ${response.status}.`,
+        message: `eBay inventory publication failed with HTTP ${status}.`,
         retryable: true,
-        statusCode: response.status,
+        statusCode: status,
         invalidateAccessToken: true,
         now,
       });
     }
     const retryable = accessTokenRejected
-      || response.status === 408
-      || response.status === 425
-      || response.status === 429
-      || response.status >= 500;
+      || status === 408
+      || status === 425
+      || status === 429
+      || status >= 500;
     throw new InventoryPublicationTransportError(
       "DROPSHIP_EBAY_INVENTORY_HTTP_ERROR",
-      `eBay inventory publication failed with HTTP ${response.status}.`,
+      `eBay inventory publication failed with HTTP ${status}.`,
       retryable,
-      { status: response.status, body: responseBody },
+      { status, body: responseBody },
     );
   }
 }

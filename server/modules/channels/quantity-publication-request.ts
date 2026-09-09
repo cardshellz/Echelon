@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { QuantityPublicationAdmissionError } from "../inventory-planning/domain/quantity-publication-admission";
+import { observeEbayQuantityRequest } from "../inventory-planning/application/quantity-provider-request-evidence";
 
 export interface EbayQuantityHttpRequest {
   method: string; path: string; body?: unknown; expectNoContent?: boolean;
@@ -52,7 +53,9 @@ export function rewriteEbayCanonicalQuantities(value: unknown, quantity: number)
  * refreshes ALL member inventory items/offers under the group's held member locks.
  */
 export async function executeAdmittedEbayQuantityRequest<T>(input: EbayQuantityHttpRequest,
-  admission: EbayQuantityRequestAdmission, request: <R>(input: EbayQuantityHttpRequest) => Promise<R>): Promise<T> {
+  admission: EbayQuantityRequestAdmission, rawRequest: <R>(input: EbayQuantityHttpRequest) => Promise<R>): Promise<T> {
+  const request = <R>(next: EbayQuantityHttpRequest): Promise<R> =>
+    observeEbayQuantityRequest(next, () => rawRequest<R>(next));
   const identity = ebayQuantityMutationIdentity(input.method, input.path, input.body);
   if (!identity) return request<T>(input);
   const body = record(input.body);
@@ -62,7 +65,7 @@ export async function executeAdmittedEbayQuantityRequest<T>(input: EbayQuantityH
     if (body.requests.length > 250) throw invalid("An eBay quantity batch exceeds the bounded owner limit.");
     const responses: unknown[] = [];
     for (const row of body.requests) {
-      const result = await executeAdmittedEbayQuantityRequest<{ responses: unknown[] }>({ ...input, body: { ...body, requests: [row] } }, admission, request);
+      const result = await executeAdmittedEbayQuantityRequest<{ responses: unknown[] }>({ ...input, body: { ...body, requests: [row] } }, admission, rawRequest);
       if (!Array.isArray(result?.responses)) throw invalid("eBay bulk quantity response omitted its result array.");
       responses.push(...result.responses);
     }
@@ -145,7 +148,7 @@ function assertBulkSuccess(value: unknown, body: unknown): void {
   const rows = record(value).responses;
   const failed = (value: unknown): boolean => {
     const row = record(value);
-    return typeof row.statusCode !== "number" || row.statusCode < 200 || row.statusCode >= 300
+    return typeof row.statusCode !== "number" || ![200,201,204].includes(row.statusCode)
       || (Array.isArray(row.errors) && row.errors.length > 0)
       || (Array.isArray(row.offers) && row.offers.some(failed));
   };
@@ -225,7 +228,7 @@ async function refreshCanonicalEbayQuantity(sku: string, quantity: number, marke
       body: { requests: [{ sku, shipToLocationAvailability: { quantity }, offers }] } }));
     const results = Array.isArray(updated.responses) ? updated.responses.map(record) : [];
     const successful = (result: Record<string, unknown>) => typeof result.statusCode === "number"
-      && result.statusCode >= 200 && result.statusCode < 300 && (!Array.isArray(result.errors) || result.errors.length === 0);
+      && [200,201,204].includes(result.statusCode) && (!Array.isArray(result.errors) || result.errors.length === 0);
     if (results.length === 0 || results.some(result => !successful(result)) || offers.some(offer => !results.some(result =>
       result.offerId === offer.offerId || (result.sku === sku && Array.isArray(result.offers)
         && result.offers.some(raw => { const nested = record(raw); return nested.offerId === offer.offerId && successful(nested); }))))) {
