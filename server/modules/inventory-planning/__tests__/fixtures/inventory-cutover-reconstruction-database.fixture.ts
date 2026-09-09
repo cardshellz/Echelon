@@ -19,6 +19,15 @@ ALTER TABLE wms.order_items ADD COLUMN picked_at timestamptz;
 CREATE TABLE inventory.availability_runtime_authority(singleton_key boolean PRIMARY KEY,authority text,activation_run_id bigint,revision bigint);
 CREATE TABLE inventory.transformation_model_heads(product_id integer PRIMARY KEY);
 CREATE TABLE inventory.availability_activation_runs(id bigint PRIMARY KEY);
+-- Strict-mode query coverage only: this table intentionally stays empty. Real
+-- opening DDL, immutable guards and receipt admission pins require236 and are
+-- exercised in the opening/composition suites, never substituted by this fixture.
+CREATE TABLE inventory.availability_cutover_opening_snapshots(
+ id bigint PRIMARY KEY,authority_revision bigint,configuration_run_id bigint,
+ source_evidence_hash varchar(64),verification_hash varchar(64),historical_exception_hash varchar(64),
+ request_hash varchar(64),result_hash varchar(64),evidence_payload jsonb,verification_payload jsonb,
+ assessment_payload jsonb,request_payload jsonb,result_payload jsonb,actor varchar(100),reason varchar(1000),
+ idempotency_key varchar(120),verified_at timestamptz,occurred_at timestamptz);
 CREATE TABLE inventory.inventory_levels(id integer PRIMARY KEY,warehouse_location_id integer,product_variant_id integer,variant_qty integer,reserved_qty integer,picked_qty integer,packed_qty integer,backorder_qty integer DEFAULT 0,updated_at timestamptz);
 CREATE TABLE inventory.inventory_lots(id integer PRIMARY KEY,warehouse_location_id integer,product_variant_id integer,qty_on_hand integer,qty_reserved integer,qty_picked integer,status text,received_at timestamptz,
  unit_cost_mills bigint,po_unit_cost_mills bigint,packaging_cost_mills bigint,landed_cost_mills bigint,total_unit_cost_mills bigint,

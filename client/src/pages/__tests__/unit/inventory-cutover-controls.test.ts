@@ -79,6 +79,13 @@ describe("final cutover operator controls", () => {
       legacyPromiseReplanning: { positions: 0, orderLines: 0 } } };
     expect(render()).not.toContain("empty-bin reservation position(s)");
   });
+  it("shows the saved opening provenance without calling preserved history resolved", () => {
+    state.review = { ...review(), summary: { ...review().summary, openingBalance: { snapshotId: "7",
+      sourceEvidenceHash: HASH, verificationHash: HASH, historicalExceptionHash: HASH, historicalExceptionCount: 12 } } };
+    const html = render(); expect(html).toContain("independently verified opening record 7");
+    expect(html).toContain("12 unresolved historical finding(s)"); expect(html).toContain("not declared resolved");
+    expect(state.mutate).not.toHaveBeenCalled();
+  });
   it("does not enable mutation from stale cached data after refresh failure", () => {
     state.review = review(); state.error = new Error("Review unavailable");
     const html = render();

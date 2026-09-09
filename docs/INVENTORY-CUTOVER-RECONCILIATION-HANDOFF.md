@@ -14,6 +14,13 @@ does not activate canonical authority or modify production reservations.
 
 ## Whole-position eligibility
 
+The original strict-ledger path below remains available when no opening verification
+has been saved. An explicitly approved alternative now accepts independently verified
+current stock and owner/lot obligations while preserving old discrepancies separately:
+see [Verified current-inventory opening](INVENTORY-CUTOVER-VERIFIED-OPENING.md).
+That path does not repair stock or historical costs, and a stale selected verification
+blocks rather than falling back silently. Its audit and final activation are distinct actions.
+
 `planCutoverReconstruction` classifies a position only when all of the following
 are established by the captured owner evidence:
 
@@ -74,10 +81,15 @@ receipts whose latest attempt is also ignored, has boolean `sourceEcho: true`,
 matches the current attempt counter, has no error, and contains complete scoped
 provider/channel/order/fulfillment/physical-package identities.
 
-Each grouped acknowledgment **remains an inventory-reconciliation blocker**.
+On the original strict-ledger path, each grouped acknowledgment **remains an inventory-reconciliation blocker**.
 Grouping is not current package-content verification, shipment posting proof, or
 COGS proof. Incomplete, processing, failed, mismatched and review attempts remain
 individual blockers. Different channel/order/provider/package scopes never merge.
+
+The separately approved [verified current opening](INVENTORY-CUTOVER-VERIFIED-OPENING.md)
+can retain terminal ignored acknowledgments as unresolved historical evidence
+instead, but only with complete independently verified current custody. Grouping
+alone never authorizes that alternative.
 
 The group digest preserves full receipt membership and latest-attempt evidence.
 PostgreSQL hashes the complete receipt and latest-attempt JSONB rows before

@@ -15,7 +15,10 @@ function sortedEvidence(raw: CutoverReconstructionEvidence): CutoverReconstructi
   const sorted = Object.fromEntries(Object.entries(evidence).map(([key, value]) => [key,
     Array.isArray(value) ? value.map((row) => ({ row, key: canonicalJson(row) }))
       .sort((a,b) => a.key < b.key ? -1 : a.key > b.key ? 1 : 0).map(({ row }) => row) : value]));
-  return cutoverReconstructionEvidenceSchema.parse(sorted);
+  // The schema boundary above already validated every row and scalar. This
+  // transformation only replaces arrays with reordered copies of those same
+  // validated rows; parsing again would duplicate the entire large census.
+  return sorted as CutoverReconstructionEvidence;
 }
 export function reconstructionEvidenceHash(raw: CutoverReconstructionEvidence): string {
   return reconstructionHash(sortedEvidence(raw));
@@ -34,7 +37,7 @@ function groupBy<T, K>(rows: readonly T[], key: (row: T) => K): Map<K, T[]> {
  */
 export function planCutoverReconstruction(raw: CutoverReconstructionEvidence): CutoverReconstructionPlan {
   const evidence = sortedEvidence(raw);
-  const result: CutoverReconstructionPlan = { evidenceHash: reconstructionEvidenceHash(evidence), ready: false,
+  const result: CutoverReconstructionPlan = { evidenceHash: reconstructionHash(evidence), ready: false,
     blockers: [], orders: [], retainedIndependentBuildReservationIds: [], legacyPromiseReleases: [] };
   const block = (code: string, subject: string, message: string) => result.blockers.push({ code, subject, message });
   const sum = (values: readonly string[]) => values.reduce((total, value) => total + BigInt(value), BigInt(0));

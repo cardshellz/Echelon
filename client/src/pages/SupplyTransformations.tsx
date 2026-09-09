@@ -84,6 +84,7 @@ import { PromiseSafetyPolicyPanel } from "./promise-safety-policy-panel";
 import { InventoryCatalogBatchPanel } from "./inventory-catalog-batch-panel";
 import { InventoryCutoverPreflightPanel } from "./inventory-cutover-preflight-panel";
 import { InventoryCutoverControls } from "./inventory-cutover-controls";
+import { InventoryCutoverOpeningPanel } from "./inventory-cutover-opening-panel";
 import { InventoryPublicationRecoveryPanel } from "./inventory-publication-recovery-panel";
 
 type DraftMutationInput =
@@ -931,6 +932,8 @@ export default function SupplyTransformations() {
       />
 
       <InventoryCutoverPreflightPanel canView={hasPermission("inventory_planning", "view")} actorId={user?.id ?? null} />
+      <InventoryCutoverOpeningPanel key={`opening:${user?.id}`} actorId={user?.id ?? null} canActivate={canActivate}
+        onStateChanged={() => { void openActivationQuery.refetch(); }} />
 
       <Card>
         <CardHeader>

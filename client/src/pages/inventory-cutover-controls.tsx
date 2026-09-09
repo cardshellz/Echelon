@@ -88,6 +88,11 @@ export function InventoryCutoverControls(props: Props) {
     {evidence.data && <>
       <p className="text-xs text-muted-foreground">Evidence captured {evidence.data.capturedAt}. A changed result requires another review.</p>
       {!canonical && review.data && <p className="text-sm">{review.data.summary.orders} orders · {review.data.summary.lines} lines · {review.data.publicationRows.length} channel/variant quantities.</p>}
+      {!canonical && review.data?.summary.openingBalance && <p className="rounded border p-2 text-sm" role="note">
+        This review uses independently verified opening record {review.data.summary.openingBalance.snapshotId}.
+        {" "}{review.data.summary.openingBalance.historicalExceptionCount} unresolved historical finding(s) are carried forward separately, not declared resolved.
+        The final server check still rejects changed current stock, commitments or evidence.
+      </p>}
       {!canonical && review.data?.summary.legacyPromiseReplanning && review.data.summary.legacyPromiseReplanning.positions > 0 &&
         <p className="text-sm" role="note">Re-plan {review.data.summary.legacyPromiseReplanning.orderLines} existing order line(s)
           {" "}from {review.data.summary.legacyPromiseReplanning.positions} empty-bin reservation position(s).

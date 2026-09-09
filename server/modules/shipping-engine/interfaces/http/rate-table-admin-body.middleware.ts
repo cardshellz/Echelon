@@ -5,6 +5,7 @@ import express, {
   type Response,
 } from "express";
 import { logger } from "../../../../platform/observability/logger";
+import { isInventoryCutoverOpeningBulkJsonRequest } from "../../../inventory-planning/interfaces/http/inventory-cutover-opening-body.middleware";
 
 const RATE_TABLE_ADMIN_BULK_POST_PATHS = new Set([
   "/api/shipping/admin/rate-tables/parse-csv",
@@ -41,7 +42,8 @@ interface BodyParserError extends Error {
 
 export function installGlobalJsonBodyParser(app: Express): void {
   app.use((req, res, next) => {
-    if (isRateTableAdminBulkJsonRequest(req.method, req.path)) {
+    if (isRateTableAdminBulkJsonRequest(req.method, req.path)
+      || isInventoryCutoverOpeningBulkJsonRequest(req.method, req.path)) {
       next();
       return;
     }
