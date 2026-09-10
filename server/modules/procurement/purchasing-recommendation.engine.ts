@@ -1,6 +1,9 @@
 import { prepareSupplierSourcingRow } from "./supplier-sourcing-selection";
+import { purchaseBuyingCounts } from "@shared/procurement/purchase-buying-review";
+import { isPurchaseInventoryManaged } from "@shared/procurement/purchase-inventory-eligibility";
 import { purchaseReceiveSelectionSchema, type PurchaseReceiveSelection } from "@shared/procurement/purchase-receive-selection";
 import type { SupplierSelectionEvidence } from "@shared/procurement/supplier-sourcing";
+import type { PurchaseOrderRounding } from "@shared/procurement/purchase-order-rounding";
 import { projectReplacementForecast, forecastMicros } from "@shared/procurement/purchase-replacement-forecast";
 import { supplierBundleTermsSchema, type SupplierBundleTerms } from "@shared/procurement/supplier-bundle";
 import { centsToMills, millsToCents } from "@shared/utils/money";
@@ -163,6 +166,7 @@ export interface PurchasingRecommendationForecastTrustDiagnostics {
 }
 
 export interface PurchasingRecommendationRawRow {
+  inventory_variant_policies?: unknown;
   supplier_candidates?: unknown;
   supplier_selection?: SupplierSelectionEvidence;
   product_id: number | string;
@@ -326,6 +330,7 @@ export interface PurchasingRecommendationItem {
   recommendedOrderQty: number;
   orderUomUnits: number;
   orderUomLabel: string;
+  orderRounding?: PurchaseOrderRounding;
   onOrderQty: number;
   onOrderPieces: number;
   openPoCount: number;
@@ -690,6 +695,11 @@ function classifyRecommendation(input: {
   onOrderPieces: number;
   effectiveSupply: number;
 }): PurchasingRecommendationStatus {
+  // Zero inventory alone is not a purchasing stockout when there is no demand
+  // or stock floor. Essential targets still proceed through the normal ladder.
+  if (input.avgDailyUsage === 0 && input.reorderPoint <= input.effectiveSupply) {
+    return input.onOrderPieces > 0 ? "on_order" : "no_movement";
+  }
   if (input.available <= 0) return "stockout";
   if (input.avgDailyUsage === 0) return input.reorderPoint > input.effectiveSupply ? "order_now" : "no_movement";
   if (
@@ -715,7 +725,7 @@ function buildExplanation(input: {
   status: PurchasingRecommendationStatus;
   available: number;
   effectiveSupply: number;
-  reorderPoint: number;
+  adjustedReorderPoint: number;
   avgDailyUsage: number;
   lookbackDays: number;
   leadTimeDays: number;
@@ -733,17 +743,17 @@ function buildExplanation(input: {
     return "Recommendation blocked because no preferred vendor is configured.";
   }
   if (input.skippedReason === "already_on_order") {
-    return `Open PO quantity covers the reorder point: committed supply ${input.effectiveSupply} pieces vs reorder point ${input.reorderPoint}. Arrival coverage is assessed separately.`;
+    return `Open PO quantity covers the reorder point: committed supply ${input.effectiveSupply} pieces vs reorder point ${input.adjustedReorderPoint}. Arrival coverage is assessed separately.`;
   }
   if (input.status === "no_movement") {
     return `No demand in the ${input.lookbackDays}-day lookback window.`;
   }
   if (input.suggestedOrderQty <= 0) {
-    return `Effective supply ${input.effectiveSupply} pieces covers the reorder point ${input.reorderPoint}.`;
+    return `Effective supply ${input.effectiveSupply} pieces covers the reorder point ${input.adjustedReorderPoint}.`;
   }
   return [
     `Available ${input.available} pieces plus open PO supply gives ${input.effectiveSupply} effective pieces.`,
-    `Reorder point is ${input.reorderPoint} pieces with ${input.avgDailyUsage.toFixed(2)} pieces/day ${
+    `Reorder point is ${input.adjustedReorderPoint} pieces with ${input.avgDailyUsage.toFixed(2)} pieces/day ${
       input.forecastMethod === "weighted_blend_v1"
         ? "using the configured multi-window blend"
         : `over ${input.lookbackDays} days`
@@ -1790,6 +1800,7 @@ function generatePurchasingRecommendationsCore(
     if (!productId) continue;
 
     const meta = getMeta(options.productMetaById, productId);
+    const inventoryManaged = isPurchaseInventoryManaged(row.inventory_variant_policies);
     const productPolicy = productPolicies.get(productId);
     const productVariantId = row.variant_id == null ? undefined : asNumber(row.variant_id);
     // Old read/fixture contracts remain readable, but automatic owners require
@@ -1973,12 +1984,13 @@ function generatePurchasingRecommendationsCore(
     // fallback for per-piece quotes whose vendor still ships in cases. With no
     // known pack the increment stays one piece.
     const vendorPackSize = asPositiveSafeIntegerOrNull(row.vendor_pack_size);
-    const effectiveOrderIncrement =
+    const orderRounding: PurchaseOrderRounding =
       supplierQuote.piecesPerPurchaseUom !== null && supplierQuote.piecesPerPurchaseUom > 1
-        ? supplierQuote.piecesPerPurchaseUom
+        ? { incrementPieces: supplierQuote.piecesPerPurchaseUom, source: "supplier_quote" }
         : vendorPackSize !== null && vendorPackSize > 1
-          ? vendorPackSize
-          : 1;
+          ? { incrementPieces: vendorPackSize, source: "vendor_pack" }
+          : { incrementPieces: 1, source: "base_piece" };
+    const effectiveOrderIncrement = orderRounding.incrementPieces;
     const suggestedOrderPieces = rawOrderQtyPieces > 0
       ? Math.ceil(
         Math.max(rawOrderQtyPieces, effectiveMinimumOrderPieces) / effectiveOrderIncrement,
@@ -2069,9 +2081,11 @@ function generatePurchasingRecommendationsCore(
     });
 
     let skippedReason: PurchasingRecommendationSkipReason | null = null;
-    if (isExcluded(row, meta, rules)) {
+    if (!inventoryManaged || isExcluded(row, meta, rules)) {
       skippedReason = "excluded";
-    } else if (settings.skipOnOpenPo && onOrderPieces > 0 && effectiveSupply >= reorderPoint) {
+    } else if (settings.skipOnOpenPo && onOrderPieces > 0 && effectiveSupply >= adjustedReorderPoint) {
+      // Existing commitments must cover the same forecast-adjusted target used
+      // for order sizing; covering baseline demand alone can still leave a gap.
       skippedReason = "already_on_order";
     } else if (!isActionableStatus(status, settings)) {
       skippedReason = "not_actionable_status";
@@ -2082,11 +2096,13 @@ function generatePurchasingRecommendationsCore(
     }
 
     const actionable = skippedReason === null && isActionableStatus(status, settings) && suggestedOrderQty > 0;
-    const baseExplanation = buildExplanation({
+    const baseExplanation = !inventoryManaged
+      ? "Not inventory-managed: every active catalog variant is digital or has inventory tracking disabled."
+      : buildExplanation({
       status,
       available,
       effectiveSupply,
-      reorderPoint: adjustedReorderPoint,
+      adjustedReorderPoint,
       avgDailyUsage,
       lookbackDays,
       leadTimeDays,
@@ -2235,6 +2251,7 @@ function generatePurchasingRecommendationsCore(
       recommendedOrderQty: suggestedOrderQty,
       orderUomUnits,
       orderUomLabel,
+      orderRounding,
       onOrderQty: orderUomUnits > 1 ? Math.floor(onOrderPieces / orderUomUnits) : onOrderPieces,
       onOrderPieces,
       openPoCount,
@@ -2382,11 +2399,12 @@ function generatePurchasingRecommendationsCore(
   }
 
   const visibleItems = items.filter((item) => item.skippedReason !== "excluded");
+  const buyingCounts = purchaseBuyingCounts(visibleItems);
   const summary: PurchasingRecommendationSummary = {
     totalProducts: visibleItems.length,
-    outOfStock: visibleItems.filter((item) => item.status === "stockout").length,
-    belowReorderPoint: visibleItems.filter((item) => item.status === "order_now").length,
-    orderSoon: visibleItems.filter((item) => item.status === "order_soon").length,
+    outOfStock: buyingCounts.stockout,
+    belowReorderPoint: buyingCounts.orderNow,
+    orderSoon: buyingCounts.orderSoon,
     noMovement: visibleItems.filter((item) => item.status === "no_movement").length,
     totalOnHand: visibleItems.reduce((sum, item) => sum + item.totalOnHand, 0),
     excludedCount: skippedItems.filter((item) => item.skippedReason === "excluded").length,

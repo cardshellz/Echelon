@@ -1,4 +1,7 @@
 import { attachSupplierSourcingCandidates } from "./supplier-sourcing.repository";
+import { comparePurchaseBuyingPriority, purchaseBuyingDisposition } from "@shared/procurement/purchase-buying-review";
+import { readShipmentPurchaseOrders } from "./shipment-purchase-orders.repository";
+import type { ShipmentPurchaseOrderReference } from "@shared/procurement/shipment-purchase-orders";
 import { readPurchasePlanningSnapshot } from "./purchase-planning-snapshot.repository";
 import { purchaseInventorySnapshotQuery } from "./purchase-inventory-snapshot.query";
 import { getPurchasePlanningPolicyService } from "./purchase-planning-policy.runtime";
@@ -174,6 +177,7 @@ export interface IProcurementStorage {
     receipt: InsertPoReceipt;
   }, executor?: any): Promise<{ applied: boolean; receipt?: PoReceipt; purchaseOrderLine?: PurchaseOrderLine | null }>;
   getInboundShipments(filters?: any): Promise<InboundShipment[]>;
+  getInboundShipmentPurchaseOrders(shipmentIds: readonly number[]): Promise<Map<number, ShipmentPurchaseOrderReference[]>>;
   getInboundShipmentsCount(filters?: any): Promise<number>;
   getInboundShipmentById(id: number, executor?: any): Promise<InboundShipment | undefined>;
   getInboundShipmentByNumber(shipmentNumber: string): Promise<InboundShipment | undefined>;
@@ -1076,6 +1080,10 @@ export const procurementMethods: IProcurementStorage = {
     return Number(result[0]?.count || 0);
   },
 
+  getInboundShipmentPurchaseOrders(shipmentIds: readonly number[]): Promise<Map<number, ShipmentPurchaseOrderReference[]>> {
+    return readShipmentPurchaseOrders(db, shipmentIds);
+  },
+
   async getInboundShipmentById(id: number, executor: any = db): Promise<InboundShipment | undefined> {
     const result = await executor.select().from(inboundShipments).where(eq(inboundShipments.id, id)).limit(1);
     return result[0];
@@ -1427,6 +1435,13 @@ export const procurementMethods: IProcurementStorage = {
         inv.variant_count,
         order_uom.variant_id,
         order_uom.receive_variant_selection,
+        (SELECT JSONB_AGG(JSONB_BUILD_OBJECT(
+          'requiresShipping', eligibility.requires_shipping,
+          'trackInventory', eligibility.track_inventory
+        ) ORDER BY eligibility.id)
+         FROM catalog.product_variants eligibility
+         WHERE eligibility.product_id = p.id AND eligibility.is_active = true
+        ) AS inventory_variant_policies,
         order_uom.units_per_variant AS order_uom_units,
         order_uom.sku AS order_uom_sku,
         order_uom.hierarchy_level AS order_uom_level,
@@ -2390,8 +2405,11 @@ export const procurementMethods: IProcurementStorage = {
     const activeItems = recommendationResult.items;
 
     // Categorize
-    const stockoutItems = activeItems.filter((i: any) => i.status === "stockout");
-    const orderNowItems = activeItems.filter((i: any) => i.status === "order_now");
+    const purchaseNeeds = activeItems
+      .filter((item) => purchaseBuyingDisposition(item) === "purchase_now")
+      .sort(comparePurchaseBuyingPriority);
+    const stockoutItems = purchaseNeeds.filter((item) => item.status === "stockout");
+    const orderNowItems = purchaseNeeds.filter((item) => item.status === "order_now");
     const healthBreakdown = {
       stockout: activeItems.filter((i: any) => i.status === "stockout").length,
       order_now: activeItems.filter((i: any) => i.status === "order_now").length,
@@ -2494,8 +2512,8 @@ export const procurementMethods: IProcurementStorage = {
     const inTransitCount = inFlightPos.filter((po: any) => ["sent", "acknowledged"].includes(po.status)).length;
 
     return {
-      stockouts: healthBreakdown.stockout,
-      orderNow: healthBreakdown.order_now,
+      stockouts: stockoutItems.length,
+      orderNow: orderNowItems.length,
       draftPoCount: draftPos.length,
       inTransitCount,
       openPoValueCents,

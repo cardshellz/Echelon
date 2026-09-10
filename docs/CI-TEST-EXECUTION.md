@@ -36,6 +36,11 @@ paths, and missing test files. It drops only a generated database whose creation
 it confirmed; setup, execution, and cleanup failures fail the shard. Do not point
 these tests at an application database.
 
+The procurement acceptance repair adds canonical cost-report reads and shipment
+purchase-order references, bringing the current inventory to 72 files (nine per
+shard). The coverage guard retains the original 70-file digest and asserts both
+additions, so the integration does not silently drop existing coverage.
+
 Add new PostgreSQL CI suites to the manifest and update its coverage contract with
 an explicit explanation. Do not add standalone serial commands back to the workflow.
 

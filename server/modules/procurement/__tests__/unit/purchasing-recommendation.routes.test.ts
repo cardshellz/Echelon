@@ -10,6 +10,7 @@ import type { AutoDraftRecommendationSettings, PurchasingRecommendationRawRow } 
 import type { CreatePurchaseRecommendationRunInput } from "../../purchase-recommendation-snapshot.service";
 import { normalizePurchasingForecastPolicy } from "../../purchasing-forecast-policy";
 import type { ServiceRegistry } from "../../../../services";
+import { forwardDemandBuyingRow, PURCHASE_BUYING_AS_OF } from "../fixtures/purchase-buying-review.fixture";
 
 const mocks = vi.hoisted(() => ({
   procurement: {
@@ -70,9 +71,10 @@ vi.mock("../..", () => ({ procurementStorage: mocks.procurement }));
 vi.mock("../../../../modules/inventory", () => ({ inventoryStorage: mocks.inventory }));
 vi.mock("../../../../db", () => ({ db: mocks.db }));
 vi.mock("../../purchase-planning-policy.runtime", () => ({ getPurchasePlanningPolicyService: () => ({ read: vi.fn(), history: vi.fn(), update: vi.fn(), describeProducts: vi.fn(), searchProducts: vi.fn() }) }));
-vi.mock("../../../../storage/base", () => ({
-  products: {},
-  reorderExclusionRules: {},
+vi.mock("../../../../storage/base", async () => ({
+  ...await import("@shared/schema"),
+  ...await import("drizzle-orm"),
+  db: mocks.db,
 }));
 vi.mock("../../../../jobs/auto-draft.job", () => ({
   runAutoDraftJob: mocks.runAutoDraftJob,
@@ -305,6 +307,67 @@ describe("purchasing recommendation routes", () => {
       totalOpenLines: 2,
     });
     expect(body.lastComputedAt).toEqual(expect.any(String));
+  });
+
+  it("counts the same purchase needs in KPIs and analysis, retaining supplier work", async () => {
+    const base = { total_pieces: 0, total_outbound_pieces: 300, lead_time_days: 30, safety_stock_days: 7 };
+    mocks.inventory.getVelocityLookbackDays.mockResolvedValue(30);
+    mocks.procurement.getReorderAnalysisData.mockResolvedValue([
+      { ...base, product_id: 1, base_sku: "BUY", preferred_vendor_id: 10 },
+      { ...base, product_id: 2, base_sku: "SOURCE", preferred_vendor_id: null },
+      { ...base, product_id: 3, base_sku: "EMPTY", total_outbound_pieces: 0 },
+      { ...base, product_id: 4, base_sku: "ARRIVAL", on_order_pieces: 1000, open_po_count: 1 },
+      { ...base, product_id: 5, base_sku: "DIGITAL", inventory_variant_policies: [{ requiresShipping: false, trackInventory: false }] },
+    ]);
+    mocks.procurement.getOpenPoSummaryReport.mockResolvedValue([]);
+    server = await startServer(buildApp());
+    const kpis = await requestJson(server.url, "GET", "/api/purchasing/kpis");
+    const analysis = await requestJson(server.url, "GET", "/api/purchasing/reorder-analysis");
+    expect(kpis.status).toBe(200);
+    expect(analysis.status).toBe(200);
+    expect(kpis.body.criticalRestocks).toBe(2);
+    expect(analysis.body.summary.outOfStock + analysis.body.summary.belowReorderPoint).toBe(2);
+    expect(analysis.body.items.map((item: { sku: string }) => item.sku)).not.toContain("DIGITAL");
+  });
+
+  it.each([
+    { inboundPieces: 100, expectedNeeds: 1, expectedQuantity: 70 },
+    { inboundPieces: 170, expectedNeeds: 0, expectedQuantity: 0 },
+  ])("aligns dashboard, KPI and manual forecast buying counts with $inboundPieces pieces on order", async ({ inboundPieces, expectedNeeds, expectedQuantity }) => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date(PURCHASE_BUYING_AS_OF));
+    mocks.inventory.getVelocityLookbackDays.mockResolvedValue(30);
+    mocks.procurement.getReorderAnalysisData.mockResolvedValue([forwardDemandBuyingRow(inboundPieces)]);
+    mocks.procurement.getOpenPoSummaryReport.mockResolvedValue([]);
+    mocks.procurement.getLatestAutoDraftRun.mockResolvedValue(null);
+
+    // Exercise the actual dashboard calculation as well as both HTTP engine
+    // paths. Only persistence reads are mocked; no expected counts are injected.
+    const { procurementMethods } = await import("../../procurement.storage");
+    const dashboardReader = {
+      ...procurementMethods,
+      getReorderAnalysisData: mocks.procurement.getReorderAnalysisData,
+      getAutoDraftSettings: mocks.procurement.getAutoDraftSettings,
+      getLatestAutoDraftRun: mocks.procurement.getLatestAutoDraftRun,
+    };
+    mocks.procurement.getDashboardData.mockImplementationOnce((lookbackDays: number) => dashboardReader.getDashboardData(lookbackDays));
+    server = await startServer(buildApp());
+
+    const dashboard = await requestJson(server.url, "GET", "/api/purchasing/dashboard");
+    const kpis = await requestJson(server.url, "GET", "/api/purchasing/kpis");
+    const analysis = await requestJson(server.url, "GET", "/api/purchasing/reorder-analysis");
+    expect([dashboard.status, kpis.status, analysis.status]).toEqual([200, 200, 200]);
+    expect(dashboard.body.stockouts + dashboard.body.orderNow).toBe(expectedNeeds);
+    expect(kpis.body.criticalRestocks).toBe(expectedNeeds);
+    expect(analysis.body.summary.outOfStock + analysis.body.summary.belowReorderPoint).toBe(expectedNeeds);
+    expect(analysis.body.items[0]).toMatchObject({
+      suggestedOrderPieces: expectedQuantity, reorderPoint: 470,
+      forwardDemandBasis: { overlayCaptureComplete: true },
+      qualityGate: { autoDraftEligible: false },
+    });
+    expect(analysis.body.summary.autoDraftEligibleCount).toBe(0);
+    expect(mocks.purchasingService.createPO).not.toHaveBeenCalled();
+    expect(mocks.runAutoDraftJob).not.toHaveBeenCalled();
   });
 
   it("returns reorder analysis items and summary with configured lookback", async () => {
@@ -652,15 +715,8 @@ describe("purchasing recommendation routes", () => {
     mocks.db.select.mockImplementation(() =>
       selectChain([{ id: 1, field: "category", value: "dropship" }]),
     );
-    const stringifySql = (query: unknown) => {
-      try {
-        return JSON.stringify(query) ?? "";
-      } catch {
-        return "";
-      }
-    };
-    mocks.db.execute.mockImplementation(async (query: unknown) => {
-      const text = stringifySql(query);
+    mocks.db.execute.mockImplementation(async (query: SQL) => {
+      const text = new PgDialect().sqlToQuery(query).sql;
       if (text.includes("echelon_settings")) {
         return {
           rows: [
@@ -2045,13 +2101,8 @@ describe("purchasing recommendation routes", () => {
         vendor_product_updated_at: "2026-05-18T12:00:00.000Z",
       }),
     ]);
-    mocks.db.execute.mockImplementation(async (query: unknown) => {
-      let text = "";
-      try {
-        text = JSON.stringify(query) ?? "";
-      } catch {
-        text = "";
-      }
+    mocks.db.execute.mockImplementation(async (query: SQL) => {
+      const text = new PgDialect().sqlToQuery(query).sql;
       if (text.includes("reorder_excluded")) {
         return {
           rows: [
@@ -2831,13 +2882,8 @@ describe("purchasing recommendation routes", () => {
       },
     ]);
     // The product was excluded AFTER the acceptance below was recorded.
-    mocks.db.execute.mockImplementation(async (query: unknown) => {
-      let text = "";
-      try {
-        text = JSON.stringify(query) ?? "";
-      } catch {
-        text = "";
-      }
+    mocks.db.execute.mockImplementation(async (query: SQL) => {
+      const text = new PgDialect().sqlToQuery(query).sql;
       if (text.includes("reorder_excluded")) {
         return {
           rows: [

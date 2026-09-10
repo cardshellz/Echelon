@@ -1,6 +1,9 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
+import { ShipmentPurchaseOrderLinks } from "@/features/purchasing/ShipmentPurchaseOrderLinks";
+import { procurementChildHref } from "@/lib/procurement-navigation";
+import type { ShipmentPurchaseOrderReference } from "@shared/procurement/shipment-purchase-orders";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -123,6 +126,7 @@ type InboundShipment = {
   lineCount: number;
   notes: string | null;
   createdAt: string;
+  purchaseOrders?: ShipmentPurchaseOrderReference[];
 };
 
 export default function InboundShipments() {
@@ -601,6 +605,12 @@ export default function InboundShipments() {
                       {renderLandedCostFollowupBadges(shipment.id)}
                     </div>
                     <div className="text-sm mt-1">{shipment.carrierName || "No carrier"}</div>
+                    <div className="mt-1 text-sm" data-testid={`shipment-purchases-${shipment.id}`}>
+                      <ShipmentPurchaseOrderLinks
+                        purchaseOrders={shipment.purchaseOrders}
+                        hrefFor={(id) => procurementChildHref(`/shipments/${shipment.id}`, "", `/purchase-orders/${id}?tab=shipments`)}
+                      />
+                    </div>
                     <div className="flex gap-4 mt-1 text-xs text-muted-foreground">
                       <span>{renderRoute(shipment)}</span>
                       {shipment.containerNumber && <span>#{shipment.containerNumber}</span>}
@@ -627,7 +637,7 @@ export default function InboundShipments() {
               <TableHead>Mode</TableHead>
               <TableHead>Carrier</TableHead>
               <TableHead>Container #</TableHead>
-              <TableHead className="text-right">POs</TableHead>
+              <TableHead>Purchase orders</TableHead>
               <TableHead>Route</TableHead>
               <TableHead>ETA</TableHead>
               <TableHead>Status</TableHead>
@@ -654,7 +664,12 @@ export default function InboundShipments() {
                   <TableCell>{renderModeBadge(shipment.mode)}</TableCell>
                   <TableCell>{shipment.carrierName || "—"}</TableCell>
                   <TableCell className="font-mono text-sm">{shipment.containerNumber || "—"}</TableCell>
-                  <TableCell className="text-right">—</TableCell>
+                  <TableCell className="min-w-[10rem]" data-testid={`shipment-purchases-${shipment.id}`}>
+                    <ShipmentPurchaseOrderLinks
+                      purchaseOrders={shipment.purchaseOrders}
+                      hrefFor={(id) => procurementChildHref(`/shipments/${shipment.id}`, "", `/purchase-orders/${id}?tab=shipments`)}
+                    />
+                  </TableCell>
                   <TableCell className="text-sm">{renderRoute(shipment)}</TableCell>
                   <TableCell>
                     {shipment.eta ? format(new Date(shipment.eta), "MMM d, yyyy") : "—"}

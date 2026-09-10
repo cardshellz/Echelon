@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
+import { formatProcurementScheduleDate } from "@/lib/procurement-schedule-date";
 import {
   PO_PHYSICAL_STATUSES,
   PO_FINANCIAL_STATUSES,
@@ -789,7 +790,7 @@ export default function PurchaseOrders() {
                     </div>
                     <div className="text-xs text-muted-foreground mt-1">
                       {format(new Date(po.createdAt), "MMM d, yyyy")}
-                      {po.expectedDeliveryDate && ` • ETA ${format(new Date(po.expectedDeliveryDate), "MMM d")}`}
+                      {po.expectedDeliveryDate && ` • ETA ${formatProcurementScheduleDate(po.expectedDeliveryDate, { includeYear: false })}`}
                     </div>
                   </div>
                   {po.status === "draft" && (
@@ -871,7 +872,7 @@ export default function PurchaseOrders() {
                   <TableCell className="text-right">{po.lineCount || 0}</TableCell>
                   <TableCell className="text-right font-mono">{formatCents(po.totalCents)}</TableCell>
                   <TableCell>
-                    {po.expectedDeliveryDate ? format(new Date(po.expectedDeliveryDate), "MMM d, yyyy") : "-"}
+                    {formatProcurementScheduleDate(po.expectedDeliveryDate, { empty: "-" })}
                   </TableCell>
                   <TableCell className="text-sm">{format(new Date(po.createdAt), "MMM d, yyyy")}</TableCell>
                   <TableCell onClick={e => e.stopPropagation()}>

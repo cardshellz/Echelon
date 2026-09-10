@@ -58,6 +58,8 @@ describe("purchasing recommendation run detail", () => {
       poMutations: [{ vendorId: 7, poId: 99, action: "created", linesAdded: 1 }],
     });
 
+    expect(detail.actionableRecommendations[0]?.orderRounding).toEqual({ incrementPieces: 1, source: "base_piece" });
+
     expect(detail).toMatchObject({
       version: 1,
       generatedAt: "2026-05-18T12:00:00.000Z",

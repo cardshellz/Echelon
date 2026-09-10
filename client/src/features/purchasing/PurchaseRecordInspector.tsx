@@ -10,6 +10,7 @@ import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { WorkspaceStatus } from "./PurchaseLifecycleOverview";
 import { formatWorkspaceDate, formatWorkspaceMoney, formatWorkspaceStatus } from "./purchase-workspace-format";
+import { formatProcurementScheduleDate } from "@/lib/procurement-schedule-date";
 
 export type ResolvedWorkspaceRecord =
   | { kind: "purchase"; record: PurchaseWorkspace["purchase"] }
@@ -66,8 +67,8 @@ function PurchaseReadView({ purchase }: { purchase: PurchaseWorkspace["purchase"
         <Field label="PO total">{formatWorkspaceMoney(purchase.totalCents, purchase.currency)}</Field>
         <Field label="Goods status">{formatWorkspaceStatus(purchase.physicalStatus)}</Field>
         <Field label="Recorded financial status">{formatWorkspaceStatus(purchase.financialStatus)}</Field>
-        <Field label="Expected delivery">{formatWorkspaceDate(purchase.expectedDeliveryDate)}</Field>
-        <Field label="Confirmed delivery">{formatWorkspaceDate(purchase.confirmedDeliveryDate)}</Field>
+        <Field label="Expected delivery">{formatProcurementScheduleDate(purchase.expectedDeliveryDate)}</Field>
+        <Field label="Confirmed delivery">{formatProcurementScheduleDate(purchase.confirmedDeliveryDate)}</Field>
         <Field label="Actual delivery">{formatWorkspaceDate(purchase.actualDeliveryDate)}</Field>
       </dl>
       <section className="space-y-2 border-t pt-4" aria-label="Purchase order lines">

@@ -269,6 +269,7 @@ function summarizeRecommendation(item: PurchasingRecommendationItem) {
     suggestedOrderQty: item.suggestedOrderQty,
     suggestedOrderPieces: item.suggestedOrderPieces,
     orderUomLabel: item.orderUomLabel,
+    ...(item.orderRounding ? { orderRounding: item.orderRounding } : {}),
     estimatedCostMills: item.estimatedCostMills,
     estimatedCostCents: item.estimatedCostCents,
     confidence: item.confidence,

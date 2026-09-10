@@ -32,6 +32,10 @@ const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
 const dbDescribe = databaseUrl && disposable ? describe : describe.skip;
 const NOW = "2026-09-10T16:00:00.000Z";
+// These legacy ports declare raw execute generics differently from node-postgres.
+// Adapt the real test database handle at the constructor boundary, not query data.
+type InventoryUseCaseDatabase = ConstructorParameters<typeof InventoryUseCases>[0];
+type BuildExecutionDatabase = ConstructorParameters<typeof BuildExecutionRepository>[0];
 const d = (onHand = 0, reserved = 0, picked = 0, packed = 0) => ({ onHand, reserved, picked, packed });
 const movement = (delta: QuantityMovement["delta"]): QuantityMovement => ({ inventoryLotId: 4, inventoryLevelId: 10,
   productVariantId: 101, warehouseLocationId: 100, warehouseId: 1, delta });
@@ -332,7 +336,7 @@ dbDescribe.sequential("single quantity owner / real PostgreSQL", () => {
 
   function operationalOwner(client: PoolClient) {
     const db = drizzle(client, { schema: inventorySchema });
-    return new InventoryUseCases(db, createInventoryMethods(db as any), new InventoryLotService(db), null, () => new Date(NOW)).withTx(db);
+    return new InventoryUseCases(db as InventoryUseCaseDatabase, createInventoryMethods(db as any), new InventoryLotService(db), null, () => new Date(NOW)).withTx(db);
   }
 
   async function prepareOperationalMetadata(packageDirection?: "break" | "assemble") {
@@ -442,7 +446,7 @@ dbDescribe.sequential("single quantity owner / real PostgreSQL", () => {
         VALUES(71,70,1,101,20,1,2,2,0,100);
     `);
     const db = drizzle(pool, { schema: inventorySchema });
-    const build = new BuildExecutionRepository(db, { normalizeBuildLotCosts, buildMillsToRoundedCents,
+    const build = new BuildExecutionRepository(db as BuildExecutionDatabase, { normalizeBuildLotCosts, buildMillsToRoundedCents,
       loadActiveBuildVariantFacts: async () => new Map([[101, { variantId: 101, productId: 20, unitsPerVariant: 1 }],
         [102, { variantId: 102, productId: 21, unitsPerVariant: 1 }]]) });
     await build.releaseOrder(70, "operator");
@@ -500,7 +504,7 @@ dbDescribe.sequential("single quantity owner / real PostgreSQL", () => {
 
   function packageOwner() {
     const db = drizzle(pool, { schema: inventorySchema });
-    return new BreakAssemblyUseCases(db, new InventoryUseCases(db, createInventoryMethods(db as any), new InventoryLotService(db),
+    return new BreakAssemblyUseCases(db, new InventoryUseCases(db as InventoryUseCaseDatabase, createInventoryMethods(db as any), new InventoryLotService(db),
       null, () => new Date(NOW)), () => new Date(NOW));
   }
 
@@ -592,7 +596,7 @@ dbDescribe.sequential("single quantity owner / real PostgreSQL", () => {
 
   function catalogOwner() {
     const db = drizzle(pool, { schema: inventorySchema });
-    const inventory = new InventoryUseCases(db, createInventoryMethods(db as any), new InventoryLotService(db), null, () => new Date(NOW));
+    const inventory = new InventoryUseCases(db as InventoryUseCaseDatabase, createInventoryMethods(db as any), new InventoryLotService(db), null, () => new Date(NOW));
     return createCatalogInventoryCommandService(db, inventory);
   }
 

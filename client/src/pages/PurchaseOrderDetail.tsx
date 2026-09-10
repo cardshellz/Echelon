@@ -21,6 +21,7 @@ import { useProcurementNavigation } from "@/hooks/use-procurement-navigation";
 import { parseProcurementJourney, procurementRecordHref } from "@/lib/procurement-navigation";
 import { ProcurementContext } from "@/components/procurement-context";
 import { PurchaseLifecycleWorkspace } from "@/features/purchasing/PurchaseLifecycleWorkspace";
+import { formatProcurementScheduleDate, procurementScheduleDateInput } from "@/lib/procurement-schedule-date";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -952,19 +953,6 @@ function parsePositiveInt(value: string | null): number | null {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
-function dateInputValue(value: unknown): string {
-  if (!value) return "";
-  const date = new Date(String(value));
-  return Number.isNaN(date.getTime()) ? "" : date.toISOString().slice(0, 10);
-}
-
-function displayScheduleDate(value: unknown): string {
-  const input = dateInputValue(value);
-  if (!input) return "Not set";
-  const [year, month, day] = input.split("-").map(Number);
-  return format(new Date(year, month - 1, day), "MMM d, yyyy");
-}
-
 export default function PurchaseOrderDetail() {
   const { user: shipmentCommandUser } = useAuth();
   const shipmentLineCommands = React.useMemo(() => shipmentCommandUser?.id ? createShipmentLineCommandClient(
@@ -1337,12 +1325,12 @@ export default function PurchaseOrderDetail() {
   const canSetConfirmedDelivery = Boolean(
     po && !["draft", "pending_approval", "approved"].includes(scheduleStatus),
   );
-  const scheduleMinimumDate = dateInputValue(po?.sentToVendorAt ?? po?.orderDate ?? po?.createdAt);
+  const scheduleMinimumDate = procurementScheduleDateInput(po?.sentToVendorAt ?? po?.orderDate ?? po?.createdAt);
 
   const openScheduleEditor = () => {
     setScheduleData({
-      expectedDeliveryDate: dateInputValue(po?.expectedDeliveryDate),
-      confirmedDeliveryDate: dateInputValue(po?.confirmedDeliveryDate),
+      expectedDeliveryDate: procurementScheduleDateInput(po?.expectedDeliveryDate),
+      confirmedDeliveryDate: procurementScheduleDateInput(po?.confirmedDeliveryDate),
       notes: "",
     });
     setShowScheduleDialog(true);
@@ -2684,9 +2672,9 @@ export default function PurchaseOrderDetail() {
               </span>
             )}
             <span>•</span>
-            <span>Requested: {displayScheduleDate(po.expectedDeliveryDate)}</span>
+            <span>Requested: {formatProcurementScheduleDate(po.expectedDeliveryDate, { empty: "Not set" })}</span>
             <span>•</span>
-            <span>Vendor confirmed: {displayScheduleDate(po.confirmedDeliveryDate)}</span>
+            <span>Vendor confirmed: {formatProcurementScheduleDate(po.confirmedDeliveryDate, { empty: "Not set" })}</span>
             {canEditSchedule && (
               <TooltipProvider>
                 <Tooltip>
