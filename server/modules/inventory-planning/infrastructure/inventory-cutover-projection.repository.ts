@@ -26,7 +26,8 @@ export async function projectInventoryCutoverStateInsideTransaction(
     blockers.push({ code: "QUANTITY_VERIFIED_OPENING_REQUIRED", subject: "inventory_quantity",
       message: "Verify the complete current lot/custody opening before cutover. Independently maintained legacy bin and lot totals cannot become the new quantity authority." });
   }
-  const targetVariants = [...new Set(reconstruction.orders.flatMap((order) => order.lines.map((line) => line.targetVariantId)))].sort((a, b) => a - b);
+  const targetVariants = [...new Set([...reconstruction.orders.flatMap((order) => order.lines.map((line) => line.targetVariantId)),
+    ...(reconstruction.openingReservationRebases ?? []).map(row => row.productVariantId)])].sort((a, b) => a - b);
   let impactHash = inventoryCutoverEvidenceHash({ evidenceHash: reconstruction.evidenceHash, freshReservationsByLevel: [], orders: [] });
   let additions: Array<{ inventoryLevelId: number; reservedQty: string }> = [];
   let claimsProjected = false;
@@ -60,7 +61,7 @@ export async function projectInventoryCutoverStateInsideTransaction(
     // before projecting lot observations. Blocked claims cannot grant a release.
     const { snapshotFingerprint: _recordedFingerprint, ...recordedContent } = recorded;
     const promiseProjected = claimsProjected
-      ? sealSupplySnapshot({ ...recordedContent, inventoryPositions: projectCutoverPromiseReservations(recorded.inventoryPositions, reconstruction.legacyPromiseReleases) })
+      ? sealSupplySnapshot({ ...recordedContent, inventoryPositions: projectCutoverPromiseReservations(recorded.inventoryPositions, reconstruction.legacyPromiseReleases, reconstruction.openingReservationRebases) })
       : recorded;
     const original = projectVerifiedOpeningSupply(promiseProjected, opening?.verification ?? null);
     stockFingerprints.push({ productId, fingerprint: recorded.snapshotFingerprint });

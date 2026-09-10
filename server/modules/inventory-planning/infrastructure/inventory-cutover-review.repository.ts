@@ -52,6 +52,7 @@ export async function captureInventoryCutoverReviewInsideTransaction(
     reconstructionHash: reconstruction.evidenceHash, freshClaimImpactHash: impactHash,
     ...(reconstruction.openingBalance ? { openingBalance: reconstruction.openingBalance } : {}),
     legacyPromiseReleases: reconstruction.legacyPromiseReleases,
+    ...(reconstruction.openingReservationRebases?.length ? { openingReservationRebases: reconstruction.openingReservationRebases } : {}),
     stockFingerprints, configurationEvidence, providerEvidence, publicationDrain, publicationRows, blockers: sortedBlockers,
   };
   return inventoryCutoverReviewSchema.parse({
@@ -62,6 +63,7 @@ export async function captureInventoryCutoverReviewInsideTransaction(
     summary: { orders: reconstruction.orders.length, lines: reconstruction.orders.reduce((sum, order) => sum + order.lines.length, 0),
       retainedIndependentBuildHolds: reconstruction.retainedIndependentBuildReservationIds.length,
       ...(reconstruction.openingBalance ? { openingBalance: reconstruction.openingBalance } : {}),
+      ...(reconstruction.openingReservationRebases?.length ? { openingReservationRebases: reconstruction.openingReservationRebases } : {}),
       legacyPromiseReplanning: { positions: reconstruction.legacyPromiseReleases.length,
         orderLines: reconstruction.legacyPromiseReleases.reduce((total, release) => total + release.owners.length, 0) } },
     publicationRows, blockers: sortedBlockers, operationalWriteAttempted: false, providerWriteAttempted: false,

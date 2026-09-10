@@ -33,6 +33,7 @@ export function InventoryCutoverOpeningPanel(props: Props) {
   const [verification, setVerification] = useState<OpeningVerification | null>(null);
   const [assessment, setAssessment] = useState<OpeningAssessment | null>(null);
   const [confirmed, setConfirmed] = useState(false);
+  const [currentReservationBasis, setCurrentReservationBasis] = useState(false);
   const [reason, setReason] = useState("");
   const [inputError, setInputError] = useState<Error | null>(null);
   const [importing, setImporting] = useState(false);
@@ -76,7 +77,7 @@ export function InventoryCutoverOpeningPanel(props: Props) {
   }
   function downloadWorksheet() {
     if (!usable || !source.data || busy || retained) return;
-    const blob = new Blob([createOpeningWorksheet(source.data)], { type: "application/json" });
+    const blob = new Blob([createOpeningWorksheet(source.data, currentReservationBasis ? "verified_current_lot_custody" : undefined)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url; link.download = `inventory-opening-${source.data.evidenceHash.slice(0, 12)}.json`;
@@ -98,13 +99,18 @@ export function InventoryCutoverOpeningPanel(props: Props) {
           These are database records, not proof of a physical count.</p>
         {source.data.runtimeAuthority !== "legacy" && <p role="note">Inventory authority has already changed. Opening verification is unavailable.</p>}
         <OpeningRecordedEvidence source={source.data} />
+        <Label htmlFor="opening-current-custody-policy" className="flex items-start gap-2"><input id="opening-current-custody-policy" type="checkbox" checked={currentReservationBasis} disabled={!usable || busy || retained}
+          onChange={event => setCurrentReservationBasis(event.target.checked)} />
+          Use independently verified current lot custody for the reservation handoff, including bins that still contain stock.
+          This permits a reviewed final translation of excess legacy counters; it does not approve this worksheet or change stock.</Label>
         <Button variant="outline" disabled={!usable || busy || retained} onClick={downloadWorksheet}>Download blank verification worksheet</Button>
         <p className="text-sm">Count each lot once and verify its current order owners. Lot and owner quantities start blank, including explicit zero counts.
           SKU/bin totals are calculated from those lot observations; do not count or edit a second balance. Preserve the original cost layers and record exact reserved/picked lot allocations.
           Recorded reference values and labels are not imported as verification. Saving is review-only; the approved cutover posts the new opening.</p>
         <p className="text-sm">Recorded reservation counters may include a promise against an empty bin. Those raw counters stay in the recorded reference; the new physical totals come from lot observations.
           An order owner's reserved and picked quantities describe physical holds only. For a proven unpicked promise with no physical hold, independently verify both owner quantities as zero with no lot allocations,
-          while keeping the full remaining order demand. The server must prove the complete empty-bin promise before proposing a handoff; unknown or mixed cases remain blocked.</p>
+          while keeping the full remaining order demand. Without the current-custody option, the server must prove the complete empty-bin promise from history.
+          With that option, independently verified physical lot holds and every current order replace missing historical ownership as the opening basis; unexplained physical custody still blocks.</p>
         <Label htmlFor="opening-verification-file">Import completed verification JSON</Label>
         <Input id="opening-verification-file" type="file" accept=".json,application/json" disabled={!usable || busy || retained}
           onChange={event => { const file = event.target.files?.[0]; event.target.value = ""; void importFile(file); }} />
@@ -112,8 +118,9 @@ export function InventoryCutoverOpeningPanel(props: Props) {
       {verification && <section className="space-y-3 rounded border p-3">
         <p className="text-sm">Imported {verification.levels.length} positions, {verification.lots.length} lots and {verification.owners.length} order lines.</p>
         <p className="text-sm break-all">Evidence reference: {verification.verificationReference} · verified {verification.verifiedAt}</p>
+        {verification.reservationBasis && <p role="note">This document explicitly requests the current-custody reservation handoff. All remaining orders and physical lot holds must be verified; old discrepancies stay unresolved.</p>}
         {source.data && <OpeningVerifiedEvidence source={source.data} verification={verification} />}
-        <Label className="flex items-start gap-2"><input type="checkbox" checked={confirmed} disabled={busy || retained}
+        <Label htmlFor="opening-independent-confirmation" className="flex items-start gap-2"><input id="opening-independent-confirmation" type="checkbox" checked={confirmed} disabled={busy || retained}
           onChange={event => { setConfirmed(event.target.checked); setAssessment(null); }} />
           I independently verified these quantities, order commitments and lot/cost allocations against the referenced evidence. I am not treating the recorded database values as a physical count.</Label>
         <Button variant="outline" disabled={!usable || busy || retained || !confirmed} onClick={() => preview.mutate()}>
@@ -123,6 +130,7 @@ export function InventoryCutoverOpeningPanel(props: Props) {
         <p className="text-sm">{assessment.ready ? "Verification is consistent and can be saved for later cutover review." : `${assessment.blockers.length} finding(s) prevent saving this verification.`}
           {" "}{assessment.historicalExceptions.length} historical finding(s) remain recorded separately; they are not declared resolved.</p>
         {source.data && <OpeningPromiseHandoffEvidence source={source.data} assessment={assessment} />}
+        {source.data && <OpeningReservationBasisEvidence source={source.data} assessment={assessment} />}
         <OpeningFindings title="Current verification blockers" rows={assessment.blockers} />
         <OpeningFindings title="Preserved historical exceptions" rows={assessment.historicalExceptions} />
       </section>}
@@ -204,6 +212,24 @@ export function OpeningPromiseHandoffEvidence({ source, assessment }: { source: 
       <td>{label("order", owner.orderId)} / line {owner.orderItemId}</td>
       <td>{label("variant", release.productVariantId)} / {label("warehouse", release.warehouseId)} / {label("location", release.warehouseLocationId)} · level {release.inventoryLevelId}</td>
       <td>{owner.reservedQty}</td><td>{line?.requestedQty ?? "Not proven in the returned plan"}</td>
+    </tr>)}</tbody></table>} />
+  </section>;
+}
+
+export function OpeningReservationBasisEvidence({ source, assessment }: { source: OpeningSource; assessment: OpeningAssessment }) {
+  const rows = assessment.plan.openingReservationRebases ?? [];
+  if (rows.length === 0) return null;
+  const labels = new Map(source.labels.map(row => [`${row.kind}:${row.id}`, row.label]));
+  const label = (kind: string, id: number) => labels.get(`${kind}:${id}`) ?? `${kind} ${id} (label unavailable)`;
+  return <section aria-label="Verified reservation counter translations" className="space-y-2 rounded border p-3">
+    <h4 className="font-medium text-sm">Verified current-custody handoff: {rows.length} position(s)</h4>
+    <p className="text-sm">Only the excess reservation counter changes at final activation. On-hand stock, picked stock, physical lot holds and original costs stay intact.
+      Every remaining order is carried forward; any shortage remains owed. No counter changes during preview or verification save.</p>
+    <OpeningRows rows={rows} render={page => <table className="w-full text-sm"><thead><tr>
+      <th>SKU / warehouse / bin</th><th>Recorded reserved</th><th>Physical reserved kept</th><th>Counter reduction</th>
+    </tr></thead><tbody>{page.map(row => <tr key={row.inventoryLevelId}>
+      <td>{label("variant",row.productVariantId)} / {label("warehouse",row.warehouseId)} / {label("location",row.warehouseLocationId)}</td>
+      <td>{row.reservedQty}</td><td>{row.physicalReservedQty}</td><td>{(BigInt(row.reservedQty)-BigInt(row.physicalReservedQty)).toString()}</td>
     </tr>)}</tbody></table>} />
   </section>;
 }

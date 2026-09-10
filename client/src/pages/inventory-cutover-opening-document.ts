@@ -14,7 +14,7 @@ const worksheetSchema = z.object({ contractVersion: z.literal("inventory_cutover
  * from those lots; raw counters, including empty-bin promises, remain in the
  * recorded reference. Owner reservedQty/pickedQty describe physical holds only;
  * eligibility to replan a promise is assessed by the server, never this export. */
-export function createOpeningWorksheet(source: OpeningSource): string {
+export function createOpeningWorksheet(source: OpeningSource, reservationBasis?: OpeningVerification["reservationBasis"]): string {
   return JSON.stringify({ contractVersion: "inventory_cutover_opening_worksheet_v1",
     recordedReference: { capturedAt: source.capturedAt, labels: source.labels,
       levels: source.evidence.levels, lots: source.evidence.lots,
@@ -22,6 +22,7 @@ export function createOpeningWorksheet(source: OpeningSource): string {
     verification: { contractVersion: "inventory_cutover_opening_v2", expectedEvidenceHash: source.evidenceHash,
       expectedAuthorityRevision: source.authorityRevision, expectedConfigurationRunId: source.configurationRunId,
       verificationReference: "", verificationEvidenceHash: "", verifiedAt: "", historicalDisposition: "preserve_unresolved",
+      ...(reservationBasis ? { reservationBasis } : {}),
       // Position quantities are outputs recalculated from lot observations on
       // import and on the server. They are not a second count worksheet.
       levels: source.evidence.levels.map(level => ({ ...level, variantQty: "0", reservedQty: "0", pickedQty: "0", packedQty: "0" })),

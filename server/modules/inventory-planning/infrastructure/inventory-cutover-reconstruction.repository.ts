@@ -18,6 +18,8 @@ import { persistReconstructedCutoverClaim } from "./inventory-availability-claim
 import type { InventoryCutoverLegacyPromisePort } from "../application/inventory-cutover-legacy-promise.port";
 import { PostgresInventoryCutoverLegacyPromiseRepository } from "../../inventory/infrastructure/inventory-cutover-legacy-promise.repository";
 import { captureInventoryCutoverStage } from "./inventory-cutover-capture-stage";
+import type { InventoryOpeningReservationPort } from "../application/inventory-opening-reservation.port";
+import { PostgresInventoryOpeningReservationRepository } from "../../inventory/infrastructure/inventory-opening-reservation.repository";
 import { PostgresInventoryQuantityLedger } from "../../inventory/infrastructure/quantity-ledger.repository";
 
 const inventoryCaptureSchema = cutoverReconstructionEvidenceSchema.pick({ levels: true, lots: true,
@@ -30,7 +32,8 @@ export class CutoverReconstructionError extends Error {
 /** No connection checkout, commit, rollback, stock correction, COGS rewrite or publication. */
 export class PostgresInventoryCutoverReconstructionRepository implements InventoryCutoverReconstructionStore {
   constructor(private readonly inventoryWriter: CanonicalClaimInventoryMutationPort = new PostgresCanonicalClaimInventoryRepository(),
-    private readonly promiseWriter: InventoryCutoverLegacyPromisePort = new PostgresInventoryCutoverLegacyPromiseRepository()) {}
+    private readonly promiseWriter: InventoryCutoverLegacyPromisePort = new PostgresInventoryCutoverLegacyPromiseRepository(),
+    private readonly openingWriter: InventoryOpeningReservationPort = new PostgresInventoryOpeningReservationRepository()) {}
 
   async capture(client: PoolClient): Promise<CutoverReconstructionEvidence> {
     await captureInventoryCutoverStage("transaction_guard", async () => {
@@ -111,7 +114,8 @@ export class PostgresInventoryCutoverReconstructionRepository implements Invento
     const reconstruction = await this.resolvePlan(client, evidence);
     if (reconstruction.evidenceHash !== command.expectedEvidenceHash) throw new CutoverReconstructionError("CUTOVER_RECONSTRUCTION_EVIDENCE_CHANGED", "Demand, custody, lot costs or independent build ownership changed since review.");
     if (!reconstruction.ready) throw new CutoverReconstructionError("CUTOVER_RECONSTRUCTION_BLOCKED", "Current ownership evidence does not support safe canonical adoption.", { blockers: reconstruction.blockers });
-    const targetIds = [...new Set(reconstruction.orders.flatMap((order) => order.lines.map((line) => line.targetVariantId)))].sort((a,b) => a-b);
+    const targetIds = [...new Set([...reconstruction.orders.flatMap((order) => order.lines.map((line) => line.targetVariantId)),
+      ...(reconstruction.openingReservationRebases ?? []).map(row => row.productVariantId)])].sort((a,b) => a-b);
     if (targetIds.length > 500) throw new CutoverReconstructionError("CUTOVER_CLAIM_TARGET_LIMIT_EXCEEDED", "Full demand exceeds the current complete claim snapshot bound; no targets are truncated.");
     const opening = reconstruction.openingBalance ? await loadLatestCutoverOpening(client) : null;
     const planning = targetIds.length === 0 ? { orders: [], freshReservationsByLevel: [],
@@ -122,6 +126,11 @@ export class PostgresInventoryCutoverReconstructionRepository implements Invento
     // with physical projections. Opening, fresh holds and ATP remain atomic.
     const legacyPromiseReleaseTransactionIds = reconstruction.legacyPromiseReleases.length === 0 ? []
       : await this.promiseWriter.releaseForReplanning({ client, command, releases: reconstruction.legacyPromiseReleases });
+    // Translate and audit RAW legacy counters before establishing the single
+    // lot-derived quantity authority. Never subtract this delta from that ledger.
+    const openingReservationRebaseTransactionIds = reconstruction.openingReservationRebases?.length
+      ? await this.openingWriter.translate({ client, command, snapshotId: reconstruction.openingBalance!.snapshotId!,
+        sourceEvidenceHash: reconstruction.openingBalance!.sourceEvidenceHash, rebases: reconstruction.openingReservationRebases }) : [];
     if (opening) {
       if (opening.saved.id !== reconstruction.openingBalance?.snapshotId) throw new CutoverReconstructionError("CUTOVER_OPENING_EVIDENCE_CHANGED", "The selected opening changed before quantity posting.");
       const levels = new Map(opening.verification.levels.map(level => [`${level.productVariantId}:${level.warehouseLocationId}`, level]));
@@ -145,6 +154,8 @@ export class PostgresInventoryCutoverReconstructionRepository implements Invento
     for (const order of planning.orders) claimIds.push(await persistReconstructedCutoverClaim(client, this.inventoryWriter, order, command));
     const receipt = cutoverReconstructionReceiptSchema.parse({ evidenceHash: reconstruction.evidenceHash, claimIds,
       ...(reconstruction.openingBalance ? { openingBalance: reconstruction.openingBalance } : {}),
+      ...(reconstruction.openingReservationRebases?.length ? { openingReservationRebases: reconstruction.openingReservationRebases,
+        openingReservationRebaseTransactionIds } : {}),
       orderIds: reconstruction.orders.map((order) => order.orderId), retainedIndependentBuildReservationIds: reconstruction.retainedIndependentBuildReservationIds,
       ...(reconstruction.legacyPromiseReleases.length > 0 ? { legacyPromiseReleases: reconstruction.legacyPromiseReleases,
         legacyPromiseReleaseTransactionIds } : {}) });

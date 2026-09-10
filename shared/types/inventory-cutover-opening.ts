@@ -2,7 +2,7 @@ import { z } from "zod";
 import { isTerminalWmsDemandStatus } from "../enums/order-status";
 import { deriveVerifiedOpeningPositions } from "./inventory-opening-quantity-projection";
 import { cutoverOpeningProvenanceSchema, cutoverReconstructionEvidenceSchema, cutoverReconstructionLevelSchema, cutoverReconstructionLotSchema,
-  cutoverReconstructionCostSchema, cutoverLegacyPromiseReleaseSchema, type CutoverReconstructionEvidence } from "./inventory-cutover-reconstruction";
+  cutoverReconstructionCostSchema, cutoverLegacyPromiseReleaseSchema, openingReservationRebaseSchema, type CutoverReconstructionEvidence } from "./inventory-cutover-reconstruction";
 
 const id = z.number().int().positive().max(2_147_483_647);
 const bigintId = z.string().regex(/^[1-9][0-9]{0,18}$/).refine(value => BigInt(value) <= BigInt("9223372036854775807"));
@@ -25,6 +25,8 @@ export const openingVerificationSchema = z.object({
   expectedEvidenceHash: hash, expectedAuthorityRevision: bigintId, expectedConfigurationRunId: bigintId.nullable(),
   verificationReference: text(1000), verificationEvidenceHash: hash, verifiedAt: z.string().datetime(),
   historicalDisposition: z.literal("preserve_unresolved"),
+  // Opt-in: existing saved v1 attestations retain their original policy/hashes.
+  reservationBasis: z.literal("verified_current_lot_custody").optional(),
   levels: z.array(cutoverReconstructionLevelSchema).max(50_000),
   lots: z.array(cutoverReconstructionLotSchema).max(50_000), owners: z.array(openingOwnerSchema).max(50_000),
 }).strict().transform((verification, context) => {
@@ -46,6 +48,7 @@ const plan = z.object({ evidenceHash: hash, ready: z.boolean(), blockers: z.arra
     targetVariantId: id, productId: id, requestedQty: quantity, reservedQty: quantity, pickedQty: quantity,
     freshDemandQty: quantity, allocations: z.array(allocation) }).strict()) }).strict()),
   retainedIndependentBuildReservationIds: z.array(id), legacyPromiseReleases: z.array(cutoverLegacyPromiseReleaseSchema),
+  openingReservationRebases: z.array(openingReservationRebaseSchema).min(1).max(50_000).optional(),
   openingBalance: openingProvenanceSchema.optional(),
 }).strict();
 export const openingAssessmentSchema = z.object({ sourceEvidenceHash: hash, verificationHash: hash,
