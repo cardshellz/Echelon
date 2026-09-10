@@ -61,7 +61,11 @@ export async function createQuantityLedgerTestContext(connectionString: string |
         allocations: [{ inventoryLevelId: 10, lots: [{ inventoryLotId: 4, reservedQty: "3", pickedQty: "2", originalCostIds: [9] }] }] }] };
     const saved = await openingService.save({ verification, reason: "Verified opening", idempotencyKey: "quantity-opening-verification" }, "operator");
     const dryRun = await seedCompositionReviewedDryRun(pool);
-    const activation = new InventoryAvailabilityActivationService(new PostgresInventoryAvailabilityActivationRepository(pool), { now: () => new Date(dryRun.completedAt) });
+    // The reviewed snapshot uses the database clock. Keep all activation
+    // milestones on that captured clock; QUANTITY_TEST_TIME belongs only to
+    // historical quantity evidence and can predate preparation on later runs.
+    const activationTime = dryRun.completedAt;
+    const activation = new InventoryAvailabilityActivationService(new PostgresInventoryAvailabilityActivationRepository(pool), { now: () => new Date(activationTime) });
     const prepared = await activation.prepare({ sourceDryRunId: dryRun.activationRunId, expectedDryRunResultHash: dryRun.resultHash,
       idempotencyKey: "quantity-opening-prepare", reason: "Prepare independent quantity basis" }, "operator");
     return transaction(async client => {
@@ -78,7 +82,7 @@ export async function createQuantityLedgerTestContext(connectionString: string |
         await client.query("UPDATE inventory.availability_activation_runs SET state='activating' WHERE id=$1", [prepared.activationRunId]);
         await client.query(`UPDATE inventory.availability_runtime_authority SET authority='canonical',revision=2,activation_run_id=$1,
           changed_by='operator',change_reason='Test quantity opening' WHERE singleton_key=true`, [prepared.activationRunId]);
-        await client.query("UPDATE inventory.availability_activation_runs SET state='active',runtime_authority_changed=true,activated_at=$2 WHERE id=$1", [prepared.activationRunId,QUANTITY_TEST_TIME]);
+        await client.query("UPDATE inventory.availability_activation_runs SET state='active',runtime_authority_changed=true,activated_at=$2 WHERE id=$1", [prepared.activationRunId,activationTime]);
       }
       return posted;
     });
