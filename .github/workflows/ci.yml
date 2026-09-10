@@ -4,9 +4,9 @@ name: CI
 # GitHub repo settings → Branches → require "Typecheck + unit tests"
 # status check to pass before merge.
 #
-# The PostgreSQL hardening job covers self-contained financial-command and
-# PO-email-outbox guarantees plus the disposable named-schema channel/inventory
-# harness.
+# PostgreSQL coverage is listed in scripts/ci/postgres-test-manifest.ts. Eight
+# independent runners execute it with a fresh database and process per file;
+# the original PostgreSQL check name aggregates every shard's result.
 
 on:
   pull_request:
@@ -59,9 +59,17 @@ jobs:
           client/src/pages/dropship/__tests__/DropshipListingPreview.test.ts
           client/src/pages/dropship/__tests__/DropshipListingPriceEditor.test.ts
 
-  postgres-hardening:
-    name: PostgreSQL hardening tests
+  postgres-hardening-shard:
+    name: PostgreSQL hardening (shard ${{ matrix.shard }}/8)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+    # Each matrix job owns a separate runner and disposable PostgreSQL service.
+    # The runner also creates a fresh database and Vitest process for every file:
+    # some legacy suites leave schemas behind even when files execute serially.
     services:
       postgres:
         image: postgres:16
@@ -86,165 +94,31 @@ jobs:
           node-version: 20
           cache: npm
       - run: npm ci
-      - name: Financial command PostgreSQL guarantees
-        run: >-
-          npx vitest run
-          server/platform/__tests__/integration/financial-command-results.integration.test.ts
-      - name: Immutable procurement cost evidence PostgreSQL guarantees
-        run: >-
-          npx vitest run
-          server/modules/procurement/__tests__/integration/procurement-cost-evidence.integration.test.ts
-      - name: Procurement acceptance read-model PostgreSQL guarantees
-        run: >-
-          npx vitest run --no-file-parallelism
-          server/modules/inventory/__tests__/integration/cost-report-reads.integration.test.ts
-          server/modules/procurement/__tests__/integration/shipment-purchase-orders.integration.test.ts
-      - name: Integrated procurement costing and lineage PostgreSQL guarantees
-        run: >-
-          npx vitest run --no-file-parallelism
-          server/modules/procurement/__tests__/integration/receiving-cost-application.integration.test.ts
-          server/modules/inventory/__tests__/integration/cost-lineage-owners.integration.test.ts
-          server/modules/inventory/__tests__/integration/canonical-claim-picker-observation.integration.test.ts
-      - name: Invoice component review PostgreSQL guarantees
-        run: >-
-          npx vitest run
-          server/modules/procurement/__tests__/integration/invoice-cost-review.integration.test.ts
-      - name: Single inventory quantity authority PostgreSQL guarantees
-        run: >-
-          npx vitest run --no-file-parallelism
-          server/modules/inventory/__tests__/integration/quantity-ledger.integration.test.ts
-          server/modules/inventory/__tests__/integration/quantity-ledger-hardening.integration.test.ts
-          server/modules/inventory/__tests__/integration/replenishment-claim-safety.integration.test.ts
-      - name: RFQ quote workflow PostgreSQL guarantees
-        run: >-
-          npx vitest run
-          server/modules/procurement/__tests__/integration/rfq-workflow.integration.test.ts
-      - name: Procurement sourcing, tracking and reporting PostgreSQL guarantees
-        run: >-
-          npx vitest run --no-file-parallelism
-          server/modules/procurement/__tests__/integration/supplier-sourcing.integration.test.ts
-          server/modules/procurement/__tests__/integration/inbound-tracking.integration.test.ts
-          server/modules/procurement/__tests__/integration/cost-reporting.integration.test.ts
-          server/modules/procurement/__tests__/integration/procurement-settings-authority.integration.test.ts
-      - name: Purchase planning policy PostgreSQL guarantees
-        run: >-
-          npx vitest run
-          server/modules/procurement/__tests__/integration/purchase-planning-policy.integration.test.ts
-      - name: Purchase approval authority PostgreSQL guarantees
-        run: >-
-          npx vitest run
-          server/modules/procurement/__tests__/integration/purchase-approval-authority.integration.test.ts
-      - name: Purchase pipeline PostgreSQL guarantees
-        run: >-
-          npx vitest run
-          server/modules/procurement/__tests__/integration/purchase-pipeline.integration.test.ts
-      - name: Receipt-aware purchase planning PostgreSQL guarantees
-        run: >-
-          npx vitest run
-          server/modules/procurement/__tests__/integration/purchase-planning-receipt-supply.integration.test.ts
-      - name: PO email outbox PostgreSQL guarantees
-        run: >-
-          npx vitest run
-          server/modules/procurement/__tests__/integration/po-email-outbox.integration.test.ts
-      - name: Purchase workspace PostgreSQL guarantees
-        run: >-
-          npx vitest run
-          server/modules/procurement/__tests__/integration/purchase-workspace.integration.test.ts
-      - name: Shipment cost command PostgreSQL guarantees
-        run: >-
-          npx vitest run
-          server/modules/procurement/__tests__/integration/shipment-cost-commands.integration.test.ts
-      - name: Shipment line command PostgreSQL guarantees
-        run: >-
-          npx vitest run
-          server/modules/procurement/__tests__/integration/shipment-line-commands.integration.test.ts
-      - name: Receiving unit integrity PostgreSQL guarantees
-        run: >-
-          npx vitest run
-          server/modules/procurement/__tests__/integration/receiving-unit-integrity.integration.test.ts
-      - name: PO lifecycle timestamp PostgreSQL guarantees
-        run: >-
-          npx vitest run
-          server/modules/procurement/__tests__/integration/po-lifecycle-timestamp.integration.test.ts
-      - name: Historical PO supplier evidence PostgreSQL guarantees
-        run: >-
-          npx vitest run
-          server/modules/procurement/__tests__/integration/historical-po-supplier-evidence-backfill.integration.test.ts
-      - name: Legacy PO receive configuration PostgreSQL guarantees
-        run: >-
-          npx vitest run
-          server/modules/procurement/__tests__/integration/legacy-po-receive-config-remediation.integration.test.ts
-      - name: Invoice variance and COGS PostgreSQL guarantees
-        run: >-
-          npx vitest run
-          server/modules/inventory/__tests__/integration/invoice-variance-cogs.integration.test.ts
-      - name: Invoice line metadata PostgreSQL guarantees
-        run: >-
-          npx vitest run
-          server/modules/procurement/__tests__/integration/ap-invoice-line-metadata.integration.test.ts
-      - name: Lot cost column type PostgreSQL guarantees
-        run: >-
-          npx vitest run
-          server/modules/inventory/__tests__/integration/lot-cost-column-types.integration.test.ts
-      - name: Inventory availability foundation PostgreSQL guarantees
-        run: >-
-          npx vitest run --no-file-parallelism
-          server/modules/inventory-planning/__tests__/integration/inventory-availability-foundation.integration.test.ts
-          server/modules/inventory/__tests__/integration/inventory-cutover-encumbrance.integration.test.ts
-          server/modules/inventory-planning/__tests__/integration/inventory-cutover-preflight.integration.test.ts
-          server/modules/inventory-planning/__tests__/integration/inventory-cutover-reconstruction.integration.test.ts
-          server/modules/inventory-planning/__tests__/integration/inventory-cutover-capture-stage.integration.test.ts
-          server/modules/inventory-planning/__tests__/integration/inventory-cutover-opening.integration.test.ts
-          server/modules/oms/__tests__/integration/inventory-cutover-receipt-evidence.integration.test.ts
-          server/modules/inventory-planning/__tests__/integration/inventory-cutover-admission-fence.integration.test.ts
-          server/modules/inventory-planning/__tests__/integration/inventory-cutover-composition.integration.test.ts
-          server/modules/inventory-planning/__tests__/integration/quantity-publication-admission.integration.test.ts
-          server/modules/inventory-planning/__tests__/integration/quantity-publication-catchup-canonical.integration.test.ts
-          server/modules/channels/__tests__/integration/channel-quantity-publication-catchup.integration.test.ts
-          server/modules/inventory-planning/__tests__/integration/inventory-availability-dispatch-migration.integration.test.ts
-          server/modules/inventory-planning/__tests__/integration/inventory-availability-dispatch-runtime.integration.test.ts
-          server/modules/inventory-planning/__tests__/integration/inventory-availability-dispatch-source-command.integration.test.ts
-          server/modules/inventory-planning/__tests__/integration/inventory-availability-runtime-shipment.integration.test.ts
-          server/modules/inventory-planning/__tests__/integration/shipment-publication-transaction.integration.test.ts
-          server/modules/inventory/__tests__/integration/canonical-claim-dispatch-inventory.integration.test.ts
-          server/modules/inventory/__tests__/integration/legacy-shipment-authority-fence.integration.test.ts
-          server/modules/inventory/__tests__/integration/shipment-lot-parity.integration.test.ts
-          server/modules/oms/__tests__/integration/channel-shipment-runtime-preparation.integration.test.ts
-          server/modules/oms/__tests__/integration/shipment-canonical-echo-preparation.integration.test.ts
-          server/modules/wms/__tests__/integration/canonical-claim-dispatch-source.integration.test.ts
-          server/modules/inventory-planning/__tests__/integration/inventory-demand-dispatch.integration.test.ts
-          server/modules/inventory/__tests__/integration/shipment-quantity-evidence.integration.test.ts
-          server/modules/inventory/__tests__/integration/shipment-operational-dispatch.integration.test.ts
-          server/modules/oms/__tests__/integration/shipment-omission-compatibility.integration.test.ts
-          server/modules/wms/__tests__/integration/shipment-unpick-source-bin.integration.test.ts
-          server/modules/shipping/__tests__/integration/historical-shipstation-contents-correction.repository.integration.test.ts
-      - name: Warehouse workstation draft configuration PostgreSQL guarantees
-        run: >-
-          npx vitest run --no-file-parallelism
-          server/modules/warehouse/__tests__/integration/work-configuration.integration.test.ts
-      - name: Warehouse assembly work PostgreSQL guarantees
-        run: >-
-          npx vitest run --no-file-parallelism
-          server/modules/warehouse/__tests__/integration/assembly-work.integration.test.ts
-      - name: Named-schema channel, inventory, and shipping guarantees
-        run: >-
-          npx vitest run --no-file-parallelism
-          server/modules/channels/__tests__/integration/allocation-engine.integration.test.ts
-          server/modules/channels/__tests__/integration/source-lock.integration.test.ts
-          server/modules/inventory/__tests__/integration/allocation-concurrency.integration.test.ts
-          server/modules/shipping/__tests__/integration/package-allocation-ledger.repository.integration.test.ts
-      - name: Fulfillment provider connection PostgreSQL guarantees
-        run: >-
-          npx vitest run --no-file-parallelism
-          server/modules/shipping-engine/__tests__/integration/fulfillment-provider-connections.integration.test.ts
-      - name: Bulk eBay listing policy PostgreSQL guarantees
-        run: >-
-          npx vitest run --no-file-parallelism
-          server/modules/dropship/__tests__/integration/dropship-ebay-listing-policy-bulk.integration.test.ts
-          server/modules/dropship/__tests__/integration/dropship-listing-price.integration.test.ts
-          server/modules/dropship/__tests__/integration/dropship-listing-content.integration.test.ts
-          server/modules/dropship/__tests__/integration/dropship-product-cost.integration.test.ts
-      - name: eBay credential lifecycle PostgreSQL guarantees
-        run: >-
-          npx vitest run --no-file-parallelism
-          server/modules/dropship/__tests__/integration/dropship-marketplace-credentials.integration.test.ts
+      - name: Run PostgreSQL shard
+        env:
+          POSTGRES_SHARD: ${{ matrix.shard }}/8
+        run: node --import tsx scripts/ci/postgres-tests.ts "$POSTGRES_SHARD"
+      - name: Upload PostgreSQL test results
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: postgres-hardening-${{ matrix.shard }}
+          path: test-results/postgres-hardening-${{ matrix.shard }}/
+          if-no-files-found: warn
+          retention-days: 7
+
+  postgres-hardening:
+    # Retain the existing check identity; success requires every shard to pass.
+    name: PostgreSQL hardening tests
+    needs: [postgres-hardening-shard]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all PostgreSQL shards
+        env:
+          SHARD_RESULT: ${{ needs.postgres-hardening-shard.result }}
+        run: |
+          if [ "$SHARD_RESULT" != "success" ]; then
+            echo "::error::PostgreSQL shards did not all pass (result: $SHARD_RESULT)"
+            exit 1
+          fi

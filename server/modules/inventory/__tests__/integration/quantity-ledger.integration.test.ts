@@ -81,24 +81,27 @@ dbDescribe.sequential("single quantity owner / real PostgreSQL", () => {
     expect(await state()).toEqual(before);
     expect((await pool.query("SELECT authority FROM inventory.availability_runtime_authority")).rows[0].authority).toBe("legacy");
   });
-  it.each([-1, 1])("keeps activation milestones ordered with the opening clock %i day from the database clock", async dayOffset => {
-    // Exercise both clock orderings relative to the actual database, without
-    // giving this regression a fixed calendar date on which it expires.
-    const clock = (await pool.query<{ occurred_at: Date }>(
-      "SELECT transaction_timestamp() + $1::integer * INTERVAL '1 day' AS occurred_at", [dayOffset],
-    )).rows[0].occurred_at.toISOString();
-    await context.open(true, clock);
-    const milestones = (await pool.query(`SELECT
-      run.prepared_at >= run.started_at AS preparation_ordered,
-      run.publication_verified_at >= run.prepared_at AS publication_ordered,
-      run.activated_at >= run.publication_verified_at AS activation_ordered,
-      run.activated_at >= $1::timestamptz AS opening_precedes_activation
-      FROM inventory.availability_activation_runs run
-      JOIN inventory.availability_runtime_authority authority ON authority.activation_run_id=run.id
-      WHERE authority.singleton_key=true AND authority.authority='canonical'`, [clock])).rows;
-    expect(milestones).toEqual([{
-      preparation_ordered: true, publication_ordered: true,
-      activation_ordered: true, opening_precedes_activation: true,
+  it("keeps activation milestones on the captured dry-run clock, not historical quantity time", async () => {
+    await open();
+    const milestones = await pool.query<{
+      state: string;
+      started_with_snapshot: boolean;
+      prepared_with_snapshot: boolean;
+      verified_with_snapshot: boolean;
+      activated_with_snapshot: boolean;
+    }>(`SELECT activation.state,
+        activation.started_at = dry_run.completed_at AS started_with_snapshot,
+        activation.prepared_at = dry_run.completed_at AS prepared_with_snapshot,
+        activation.publication_verified_at = dry_run.completed_at AS verified_with_snapshot,
+        activation.activated_at = dry_run.completed_at AS activated_with_snapshot
+      FROM inventory.availability_activation_runs activation
+      JOIN inventory.availability_activation_runs dry_run ON dry_run.id = activation.source_dry_run_id
+      WHERE activation.mode = 'activation'`);
+    // Equality catches the clock mismatch even before the historical timestamp,
+    // when the chronology constraint alone would still allow the old fixture.
+    expect(milestones.rows).toEqual([{
+      state: "active", started_with_snapshot: true, prepared_with_snapshot: true,
+      verified_with_snapshot: true, activated_with_snapshot: true,
     }]);
   });
   it("posts the complete reserve/pick/pack/ship lifecycle once and derives both balances", async () => {
@@ -577,13 +580,12 @@ dbDescribe.sequential("single quantity owner / real PostgreSQL", () => {
     await transaction(async client => {
       const run = (await client.query("SELECT activation_run_id::text AS id FROM inventory.availability_activation_freezes WHERE released_at IS NULL")).rows[0];
       await acquireInventoryCutoverFenceInsideTransaction(client, { expectedAuthority: "canonical", expectedConfigurationRunId: run.id });
-      // The fixed command clock may precede the database's cutover milestones.
-      // Release only after both acquisition and the fixture's completed activation.
-      await client.query(`UPDATE inventory.availability_activation_freezes freeze_record
-        SET released_at=GREATEST($1::timestamptz,freeze_record.acquired_at,activation.activated_at),
-          released_by='operator',release_reason='Post-cutover catalog fixture'
+      // Release on the same captured activation clock, not historical quantity
+      // time, which can be earlier than this freeze's database acquisition.
+      await client.query(`UPDATE inventory.availability_activation_freezes activation_freeze
+        SET released_at=activation.activated_at,released_by='operator',release_reason='Post-cutover catalog fixture'
         FROM inventory.availability_activation_runs activation
-        WHERE freeze_record.activation_run_id=$2 AND activation.id=freeze_record.activation_run_id`, [NOW, run.id]);
+        WHERE activation_freeze.activation_run_id=$1 AND activation.id=activation_freeze.activation_run_id`, [run.id]);
     });
     for (const table of [inventorySchema.channelFeeds, inventorySchema.replenRules, inventorySchema.replenTasks]) {
       const definition = getTableConfig(table);
@@ -605,6 +607,16 @@ dbDescribe.sequential("single quantity owner / real PostgreSQL", () => {
         unitCostCents: input.mills / 100, unitCostMills: input.mills, userId: "operator" }));
     }
   }
+
+  it("releases the catalog fixture freeze on its persisted activation clock", async () => {
+    await prepareCatalogInventoryMetadata();
+    const release = await pool.query<{ released_with_activation: boolean; chronological: boolean }>(`
+      SELECT activation_freeze.released_at = activation.activated_at AS released_with_activation,
+        activation_freeze.released_at >= activation_freeze.acquired_at AS chronological
+      FROM inventory.availability_activation_freezes activation_freeze
+      JOIN inventory.availability_activation_runs activation ON activation.id=activation_freeze.activation_run_id`);
+    expect(release.rows).toEqual([{ released_with_activation: true, chronological: true }]);
+  });
 
   it("archives multiple catalog source SKUs as one exact command and replays before source enumeration", async () => {
     await prepareCatalogInventoryMetadata();

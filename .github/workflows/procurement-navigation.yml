@@ -2,32 +2,92 @@ name: Procurement navigation
 
 on:
   pull_request:
-    paths:
-      - "client/src/**"
-      - "shared/**"
-      - "package*.json"
-      - "playwright.procurement.config.ts"
-      - "test/browser/procurement-*.ts"
-      - ".github/workflows/procurement-navigation.yml"
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: procurement-browser-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  browser:
-    name: Procurement browser journeys
+  select:
+    name: Select procurement browser coverage
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.impact.outputs.run }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - id: impact
+        name: Check suite dependencies (uncertainty runs coverage)
+        env:
+          BROWSER_SUITE: procurement
+          BROWSER_EVENT_NAME: ${{ github.event_name }}
+          BROWSER_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BROWSER_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: node scripts/ci/browser-suite-impact.mjs
+
+  browser:
+    name: Procurement browser journeys (${{ matrix.shard }}/4)
+    needs: select
+    # A missing output or failed selector must never silently bypass coverage.
+    if: ${{ !cancelled() && (needs.select.result != 'success' || needs.select.outputs.run != 'false') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
       - run: npm ci
       - run: npx playwright install --with-deps chromium
-      - run: npx playwright test --config playwright.procurement.config.ts
+      # Keep one worker inside each runner; shards have isolated browser/server state.
+      - run: npx playwright test --config playwright.procurement.config.ts --shard=${{ matrix.shard }}/4
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
-          name: procurement-browser-traces
+          name: procurement-browser-traces-${{ matrix.shard }}
           path: test-results/
           retention-days: 7
+
+  result:
+    name: Procurement browser journeys
+    needs: [select, browser]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require complete browser coverage or an explicit safe skip
+        env:
+          SELECT_RESULT: ${{ needs.select.result }}
+          RUN_SUITE: ${{ needs.select.outputs.run }}
+          SHARD_RESULT: ${{ needs.browser.result }}
+        run: |
+          if [ "$SELECT_RESULT" != "success" ]; then
+            echo "::error::Browser coverage selection failed"
+            exit 1
+          fi
+          if [ "$RUN_SUITE" = "false" ] && [ "$SHARD_RESULT" = "skipped" ]; then
+            echo "Dependency analysis found no affected procurement browser coverage."
+            exit 0
+          fi
+          if [ "$RUN_SUITE" != "true" ] || [ "$SHARD_RESULT" != "success" ]; then
+            echo "::error::Procurement browser shards did not all pass (result: $SHARD_RESULT)"
+            exit 1
+          fi
