@@ -158,12 +158,11 @@ describe("catalog command boundary", () => {
     fillFactorBps: 10000,
     isActive: true,
     branding: "unbranded",
-    warehouseIds: [],
     expectedRevision: 0,
     commandId: "e9329d01-6a48-42e3-8ee3-dcebf2c84c4b",
   };
-  it("allows zero cost and an explicitly empty warehouse list", () =>
-    expect(saveCatalogBoxSchema.parse(box).warehouseIds).toEqual([]));
+  it("allows zero cost without warehouse writes", () =>
+    expect(saveCatalogBoxSchema.parse(box).costCents).toBe(0));
   it.each([
     { costCents: 0.1 },
     { costCents: -1 },

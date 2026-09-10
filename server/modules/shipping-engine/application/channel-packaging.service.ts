@@ -8,9 +8,32 @@ import {
   type SaveChannelPackaging,
   type ChannelPackagingPolicy,
   type PackagingPolicyOverview,
+  bulkBoxBrandingSchema,
+  warehouseAvailabilitySchema,
+  warehouseSuiteAssignmentSchema,
+  packagingBulkResultSchema,
+  type BulkBoxBranding,
+  type WarehouseAvailability,
+  type WarehouseSuiteAssignment,
+  type PackagingBulkResult,
 } from "@shared/shipping/packaging-policy";
 
 export interface ChannelPackagingStore {
+  bulkBranding(
+    input: BulkBoxBranding,
+    actor: string,
+    now: Date,
+  ): Promise<PackagingBulkResult>;
+  saveAvailability(
+    input: WarehouseAvailability,
+    actor: string,
+    now: Date,
+  ): Promise<PackagingBulkResult>;
+  assignWarehouseSuites(
+    input: WarehouseSuiteAssignment,
+    actor: string,
+    now: Date,
+  ): Promise<PackagingBulkResult>;
   overview(): Promise<PackagingPolicyOverview>;
   savePolicy(
     input: SaveChannelPackaging,
@@ -32,6 +55,33 @@ export class ChannelPackagingService {
   ) {}
   async overview() {
     return packagingPolicyOverviewSchema.parse(await this.store.overview());
+  }
+  async bulkBranding(body: unknown, actor: string) {
+    return packagingBulkResultSchema.parse(
+      await this.store.bulkBranding(
+        bulkBoxBrandingSchema.parse(body),
+        z.string().trim().min(1).parse(actor),
+        this.clock(),
+      ),
+    );
+  }
+  async saveAvailability(body: unknown, actor: string) {
+    return packagingBulkResultSchema.parse(
+      await this.store.saveAvailability(
+        warehouseAvailabilitySchema.parse(body),
+        z.string().trim().min(1).parse(actor),
+        this.clock(),
+      ),
+    );
+  }
+  async assignWarehouseSuites(body: unknown, actor: string) {
+    return packagingBulkResultSchema.parse(
+      await this.store.assignWarehouseSuites(
+        warehouseSuiteAssignmentSchema.parse(body),
+        z.string().trim().min(1).parse(actor),
+        this.clock(),
+      ),
+    );
   }
   async dropshipOverview() {
     const data = await this.overview();

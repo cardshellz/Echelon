@@ -24,7 +24,6 @@ import {
   orders,
   productVariants,
   shippingBoxCatalog,
-  shippingBoxWarehouseStock,
   shippingPackPlanParcelItems,
   shippingPackPlanParcels,
   shippingPackPlans,
@@ -509,7 +508,7 @@ export async function confirmParcel(
         .select({
           id: shippingBoxCatalog.id,
           branding: shippingBoxCatalog.branding,
-          reviewed: shippingBoxCatalog.availabilityReviewed,
+          reviewed: sql<boolean>`shipping.box_available_at(${shippingBoxCatalog.id},${permission.warehouseId ?? 0},true)`,
         })
         .from(shippingBoxCatalog)
         .where(
@@ -528,21 +527,6 @@ export async function confirmParcel(
             box.branding !== "unbranded")
         )
           return { ok: false as const, code: "BOX_NOT_PERMITTED" as const };
-        const [stock] = await tx
-          .select({ stocked: shippingBoxWarehouseStock.isStocked })
-          .from(shippingBoxWarehouseStock)
-          .where(
-            and(
-              eq(shippingBoxWarehouseStock.boxId, selectedBoxId),
-              eq(shippingBoxWarehouseStock.warehouseId, permission.warehouseId),
-            ),
-          )
-          .limit(1);
-        if (!stock?.stocked)
-          return {
-            ok: false as const,
-            code: "BOX_UNAVAILABLE_AT_WAREHOUSE" as const,
-          };
       }
     }
 
