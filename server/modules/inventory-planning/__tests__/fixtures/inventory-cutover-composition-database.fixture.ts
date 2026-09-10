@@ -5,6 +5,7 @@ import type { ActivationDryRunProduct } from "@shared/types/inventory-availabili
 import { captureProposedSupplySnapshotInsideTransaction } from "../../infrastructure/inventory-availability-shadow.repository";
 import { PostgresInventoryAvailabilityActivationDryRunRepository } from "../../infrastructure/inventory-availability-activation-dry-run.repository";
 import { inventoryCutoverEvidenceHash } from "../../domain/inventory-cutover-manifest";
+import { sealSupplySnapshot } from "../../domain/inventory-availability-planner";
 import { loadProposedPublicationTargetsForCutover } from "../../infrastructure/inventory-channel-exposure-runtime.repository";
 import { planInventoryChannelExposureProduct } from "../../application/inventory-channel-exposure-runtime.service";
 import { cutoverShipmentSchemaFixtureSql } from "./inventory-cutover-shipment-schema.fixture";
@@ -96,11 +97,16 @@ INSERT INTO inventory.promise_safety_policy_heads(scope_key,draft_policy_id,revi
  * owner still has to validate every persisted selection against current state.
  * This fixture does not claim to exercise the preceding admin approval workflow.
  */
-export async function seedCompositionReviewedDryRun(pool: Pool) {
+export async function seedCompositionReviewedDryRun(pool: Pool, capturedAt?: string) {
   const client = await pool.connect();
   try {
     await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
-    const snapshot = await captureProposedSupplySnapshotInsideTransaction(client, 20);
+    const recorded = await captureProposedSupplySnapshotInsideTransaction(client, 20);
+    // Controlled fixture clocks must also govern the historical review packet.
+    // Otherwise database wall time can put preparation after a fixed activation.
+    // Preserve the actual graph and reseal it using the normal validated contract.
+    const { snapshotFingerprint: _fingerprint, ...content } = recorded;
+    const snapshot = capturedAt === undefined ? recorded : sealSupplySnapshot({ ...content, capturedAt });
     const targets = await loadProposedPublicationTargetsForCutover(client,20,[101]);
     const exposure = planInventoryChannelExposureProduct({ authority:"canonical",authorityRevision:"1",activationRunId:"1",
       supplySnapshot:snapshot,managedSellableVariantIds:[101],publicationTargets:targets },20);

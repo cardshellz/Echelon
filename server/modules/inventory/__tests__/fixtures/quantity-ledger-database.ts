@@ -60,7 +60,7 @@ export async function createQuantityLedgerTestContext(connectionString: string |
       owners: [{ orderId: 1, orderItemId: 11, remainingQty: "6", reservedQty: "3", pickedQty: "2",
         allocations: [{ inventoryLevelId: 10, lots: [{ inventoryLotId: 4, reservedQty: "3", pickedQty: "2", originalCostIds: [9] }] }] }] };
     const saved = await openingService.save({ verification, reason: "Verified opening", idempotencyKey: "quantity-opening-verification" }, "operator");
-    const dryRun = await seedCompositionReviewedDryRun(pool);
+    const dryRun = await seedCompositionReviewedDryRun(pool, QUANTITY_TEST_TIME);
     const activation = new InventoryAvailabilityActivationService(new PostgresInventoryAvailabilityActivationRepository(pool), { now: () => new Date(dryRun.completedAt) });
     const prepared = await activation.prepare({ sourceDryRunId: dryRun.activationRunId, expectedDryRunResultHash: dryRun.resultHash,
       idempotencyKey: "quantity-opening-prepare", reason: "Prepare independent quantity basis" }, "operator");

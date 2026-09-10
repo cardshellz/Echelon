@@ -77,6 +77,19 @@ dbDescribe.sequential("single quantity owner / real PostgreSQL", () => {
     expect(await state()).toEqual(before);
     expect((await pool.query("SELECT authority FROM inventory.availability_runtime_authority")).rows[0].authority).toBe("legacy");
   });
+  it("uses one fixed fixture time for review, preparation and activation regardless of database wall time", async () => {
+    await open();
+    const milestones = (await pool.query(`SELECT started_at,prepared_at,publication_verified_at,activated_at
+      FROM inventory.availability_activation_runs WHERE mode='activation'`)).rows;
+    expect(milestones).toHaveLength(1);
+    for (const field of ["started_at", "prepared_at", "publication_verified_at", "activated_at"]) {
+      expect(new Date(milestones[0][field]).toISOString()).toBe(NOW);
+    }
+    const reviews = (await pool.query("SELECT captured_at,completed_at FROM inventory.planner_shadow_runs")).rows;
+    expect(reviews).toHaveLength(1);
+    expect(new Date(reviews[0].captured_at).toISOString()).toBe(NOW);
+    expect(new Date(reviews[0].completed_at).toISOString()).toBe(NOW);
+  });
   it("posts the complete reserve/pick/pack/ship lifecycle once and derives both balances", async () => {
     await open();
     for (const c of [command("reserve", "reserve", d(0,2)), command("pick", "pick", d(-5,-5,5)),
