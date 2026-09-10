@@ -32,6 +32,10 @@ const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
 const dbDescribe = databaseUrl && disposable ? describe : describe.skip;
 const NOW = "2026-09-10T16:00:00.000Z";
+// These legacy ports declare raw execute generics differently from node-postgres.
+// Adapt the real test database handle at the constructor boundary, not query data.
+type InventoryUseCaseDatabase = ConstructorParameters<typeof InventoryUseCases>[0];
+type BuildExecutionDatabase = ConstructorParameters<typeof BuildExecutionRepository>[0];
 const d = (onHand = 0, reserved = 0, picked = 0, packed = 0) => ({ onHand, reserved, picked, packed });
 const movement = (delta: QuantityMovement["delta"]): QuantityMovement => ({ inventoryLotId: 4, inventoryLevelId: 10,
   productVariantId: 101, warehouseLocationId: 100, warehouseId: 1, delta });
@@ -76,6 +80,26 @@ dbDescribe.sequential("single quantity owner / real PostgreSQL", () => {
     await expect(open(false)).rejects.toThrow(/QUANTITY_OPENING_CUTOVER_INCOMPLETE/);
     expect(await state()).toEqual(before);
     expect((await pool.query("SELECT authority FROM inventory.availability_runtime_authority")).rows[0].authority).toBe("legacy");
+  });
+  it.each([-1, 1])("keeps activation milestones ordered with the opening clock %i day from the database clock", async dayOffset => {
+    // Exercise both clock orderings relative to the actual database, without
+    // giving this regression a fixed calendar date on which it expires.
+    const clock = (await pool.query<{ occurred_at: Date }>(
+      "SELECT transaction_timestamp() + $1::integer * INTERVAL '1 day' AS occurred_at", [dayOffset],
+    )).rows[0].occurred_at.toISOString();
+    await context.open(true, clock);
+    const milestones = (await pool.query(`SELECT
+      run.prepared_at >= run.started_at AS preparation_ordered,
+      run.publication_verified_at >= run.prepared_at AS publication_ordered,
+      run.activated_at >= run.publication_verified_at AS activation_ordered,
+      run.activated_at >= $1::timestamptz AS opening_precedes_activation
+      FROM inventory.availability_activation_runs run
+      JOIN inventory.availability_runtime_authority authority ON authority.activation_run_id=run.id
+      WHERE authority.singleton_key=true AND authority.authority='canonical'`, [clock])).rows;
+    expect(milestones).toEqual([{
+      preparation_ordered: true, publication_ordered: true,
+      activation_ordered: true, opening_precedes_activation: true,
+    }]);
   });
   it("posts the complete reserve/pick/pack/ship lifecycle once and derives both balances", async () => {
     await open();
@@ -309,7 +333,7 @@ dbDescribe.sequential("single quantity owner / real PostgreSQL", () => {
 
   function operationalOwner(client: PoolClient) {
     const db = drizzle(client, { schema: inventorySchema });
-    return new InventoryUseCases(db, createInventoryMethods(db as any), new InventoryLotService(db), null, () => new Date(NOW)).withTx(db);
+    return new InventoryUseCases(db as InventoryUseCaseDatabase, createInventoryMethods(db as any), new InventoryLotService(db), null, () => new Date(NOW)).withTx(db);
   }
 
   async function prepareOperationalMetadata(packageDirection?: "break" | "assemble") {
@@ -419,7 +443,7 @@ dbDescribe.sequential("single quantity owner / real PostgreSQL", () => {
         VALUES(71,70,1,101,20,1,2,2,0,100);
     `);
     const db = drizzle(pool, { schema: inventorySchema });
-    const build = new BuildExecutionRepository(db, { normalizeBuildLotCosts, buildMillsToRoundedCents,
+    const build = new BuildExecutionRepository(db as BuildExecutionDatabase, { normalizeBuildLotCosts, buildMillsToRoundedCents,
       loadActiveBuildVariantFacts: async () => new Map([[101, { variantId: 101, productId: 20, unitsPerVariant: 1 }],
         [102, { variantId: 102, productId: 21, unitsPerVariant: 1 }]]) });
     await build.releaseOrder(70, "operator");
@@ -477,7 +501,7 @@ dbDescribe.sequential("single quantity owner / real PostgreSQL", () => {
 
   function packageOwner() {
     const db = drizzle(pool, { schema: inventorySchema });
-    return new BreakAssemblyUseCases(db, new InventoryUseCases(db, createInventoryMethods(db as any), new InventoryLotService(db),
+    return new BreakAssemblyUseCases(db, new InventoryUseCases(db as InventoryUseCaseDatabase, createInventoryMethods(db as any), new InventoryLotService(db),
       null, () => new Date(NOW)), () => new Date(NOW));
   }
 
@@ -553,7 +577,13 @@ dbDescribe.sequential("single quantity owner / real PostgreSQL", () => {
     await transaction(async client => {
       const run = (await client.query("SELECT activation_run_id::text AS id FROM inventory.availability_activation_freezes WHERE released_at IS NULL")).rows[0];
       await acquireInventoryCutoverFenceInsideTransaction(client, { expectedAuthority: "canonical", expectedConfigurationRunId: run.id });
-      await client.query("UPDATE inventory.availability_activation_freezes SET released_at=$1,released_by='operator',release_reason='Post-cutover catalog fixture' WHERE activation_run_id=$2", [NOW, run.id]);
+      // The fixed command clock may precede the database's cutover milestones.
+      // Release only after both acquisition and the fixture's completed activation.
+      await client.query(`UPDATE inventory.availability_activation_freezes freeze_record
+        SET released_at=GREATEST($1::timestamptz,freeze_record.acquired_at,activation.activated_at),
+          released_by='operator',release_reason='Post-cutover catalog fixture'
+        FROM inventory.availability_activation_runs activation
+        WHERE freeze_record.activation_run_id=$2 AND activation.id=freeze_record.activation_run_id`, [NOW, run.id]);
     });
     for (const table of [inventorySchema.channelFeeds, inventorySchema.replenRules, inventorySchema.replenTasks]) {
       const definition = getTableConfig(table);
@@ -564,7 +594,7 @@ dbDescribe.sequential("single quantity owner / real PostgreSQL", () => {
 
   function catalogOwner() {
     const db = drizzle(pool, { schema: inventorySchema });
-    const inventory = new InventoryUseCases(db, createInventoryMethods(db as any), new InventoryLotService(db), null, () => new Date(NOW));
+    const inventory = new InventoryUseCases(db as InventoryUseCaseDatabase, createInventoryMethods(db as any), new InventoryLotService(db), null, () => new Date(NOW));
     return createCatalogInventoryCommandService(db, inventory);
   }
 

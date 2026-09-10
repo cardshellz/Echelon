@@ -50,13 +50,13 @@ export async function createQuantityLedgerTestContext(connectionString: string |
     finally { client.release(); }
   }
 
-  async function open(switchAuthority = true) {
-    const openingService = new InventoryCutoverOpeningService(new PostgresInventoryCutoverOpeningRepository(pool), { now: () => new Date(QUANTITY_TEST_TIME) });
+  async function open(switchAuthority = true, openingOccurredAt = QUANTITY_TEST_TIME) {
+    const openingService = new InventoryCutoverOpeningService(new PostgresInventoryCutoverOpeningRepository(pool), { now: () => new Date(openingOccurredAt) });
     const source = await openingService.capture("operator");
     const verification: OpeningVerification = { contractVersion: "inventory_cutover_opening_v1",
       expectedEvidenceHash: source.evidenceHash, expectedAuthorityRevision: source.authorityRevision, expectedConfigurationRunId: source.configurationRunId,
       verificationReference: "Independent warehouse observation", verificationEvidenceHash: "e".repeat(64),
-      verifiedAt: QUANTITY_TEST_TIME, historicalDisposition: "preserve_unresolved", levels: source.evidence.levels, lots: source.evidence.lots,
+      verifiedAt: openingOccurredAt, historicalDisposition: "preserve_unresolved", levels: source.evidence.levels, lots: source.evidence.lots,
       owners: [{ orderId: 1, orderItemId: 11, remainingQty: "6", reservedQty: "3", pickedQty: "2",
         allocations: [{ inventoryLevelId: 10, lots: [{ inventoryLotId: 4, reservedQty: "3", pickedQty: "2", originalCostIds: [9] }] }] }] };
     const saved = await openingService.save({ verification, reason: "Verified opening", idempotencyKey: "quantity-opening-verification" }, "operator");
@@ -67,7 +67,7 @@ export async function createQuantityLedgerTestContext(connectionString: string |
     return transaction(async client => {
       await acquireInventoryCutoverFenceInsideTransaction(client, { expectedAuthority: "legacy", expectedConfigurationRunId: prepared.activationRunId });
       const command: QuantityCommand = { contractVersion: "inventory_quantity_v1", kind: "opening", idempotencyKey: "opening",
-        actor: "operator", reason: "Exact custody test", occurredAt: QUANTITY_TEST_TIME,
+        actor: "operator", reason: "Exact custody test", occurredAt: openingOccurredAt,
         reference: { type: "quantity_test", id: "opening" }, reversesCommandId: null,
         movements: [{ inventoryLotId: 4, inventoryLevelId: 10, productVariantId: 101, warehouseLocationId: 100,
           warehouseId: 1, delta: { onHand: 20, reserved: 3, picked: 2, packed: 0 } }] };
@@ -78,7 +78,13 @@ export async function createQuantityLedgerTestContext(connectionString: string |
         await client.query("UPDATE inventory.availability_activation_runs SET state='activating' WHERE id=$1", [prepared.activationRunId]);
         await client.query(`UPDATE inventory.availability_runtime_authority SET authority='canonical',revision=2,activation_run_id=$1,
           changed_by='operator',change_reason='Test quantity opening' WHERE singleton_key=true`, [prepared.activationRunId]);
-        await client.query("UPDATE inventory.availability_activation_runs SET state='active',runtime_authority_changed=true,activated_at=$2 WHERE id=$1", [prepared.activationRunId,QUANTITY_TEST_TIME]);
+        // The reviewed dry run uses the database snapshot clock. Complete the
+        // fixture no earlier than either its fixed opening clock or the real
+        // publication milestone; a fixed future date eventually becomes past.
+        await client.query(`UPDATE inventory.availability_activation_runs
+          SET state='active',runtime_authority_changed=true,
+            activated_at=GREATEST($2::timestamptz,publication_verified_at)
+          WHERE id=$1`, [prepared.activationRunId,openingOccurredAt]);
       }
       return posted;
     });
