@@ -2,7 +2,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { fetchOpeningSource, InventoryCutoverOpeningPanel, OpeningPromiseHandoffEvidence } from "../../inventory-cutover-opening-panel";
+import { fetchOpeningSource, InventoryCutoverOpeningPanel, OpeningPromiseHandoffEvidence, OpeningReservationBasisEvidence } from "../../inventory-cutover-opening-panel";
 import { openingAssessment, openingSaved, openingSource } from "../../../../../server/modules/inventory-planning/__tests__/fixtures/inventory-cutover-opening-interface.fixture";
 
 const state = vi.hoisted(() => ({ source: null as unknown, error: null as Error | null, fetching: false,
@@ -18,6 +18,15 @@ beforeEach(() => { state.source = null; state.error = null; state.fetching = fal
 afterEach(() => vi.unstubAllGlobals());
 
 describe("existing-page opening verification panel", () => {
+  it("shows exact verified counter reductions without summing unlike units", () => {
+    const source = openingSource(), assessment = openingAssessment();
+    assessment.plan.openingReservationRebases = [{ inventoryLevelId: 10, warehouseLocationId: 100,
+      warehouseId: 1, productVariantId: 101, variantQty: "20", reservedQty: "69", physicalReservedQty: "3", pickedQty: "2", packedQty: "0" }];
+    const html = renderToStaticMarkup(createElement(OpeningReservationBasisEvidence, { source, assessment }));
+    expect(html).toContain("P5"); expect(html).toContain("PICK-A-01");
+    expect(html).toContain("69"); expect(html).toContain("66");
+    expect(html).toContain("any shortage remains owed"); expect(html).toContain("No counter changes during preview");
+  });
   it.each([{ actorId: null }, { canActivate: false }])("does not expose actions without activation authority %j", props => {
     state.source = openingSource(); expect(render(props)).toBe("");
   });
@@ -35,7 +44,8 @@ describe("existing-page opening verification panel", () => {
     expect(html).toContain("Every quantity is deliberately blank");
     expect(html).toContain("Do not change that counter to zero in the worksheet");
     expect(html).toContain("An order owner&#x27;s reserved and picked quantities describe physical holds only");
-    expect(html).toContain("unknown or mixed cases remain blocked");
+    expect(html).toContain("unexplained physical custody still blocks");
+    expect(html).toContain("Use independently verified current lot custody");
     expect(html).not.toContain("Switch to canonical authority");
   });
   it("does not allow import or template export from stale source after refresh failure", () => {

@@ -1,6 +1,6 @@
 import { claimPlanSchema, claimPlanRequestSchema,
   type ClaimPlanDto, type ClaimPlanRequestDto, type ClaimSupplySnapshotDto } from "@shared/types/inventory-availability-planner";
-import type { CutoverReconstructionOrder, CutoverReconstructionPlan, CutoverLegacyPromiseRelease } from "@shared/types/inventory-cutover-reconstruction";
+import { openingReservationRebaseSchema, type OpeningReservationRebase, type CutoverReconstructionOrder, type CutoverReconstructionPlan, type CutoverLegacyPromiseRelease } from "@shared/types/inventory-cutover-reconstruction";
 import { parseClaimSupplySnapshot, planCanonicalClaim, sealClaimSupplySnapshot } from "./inventory-availability-planner";
 import { reconstructionHash } from "./inventory-cutover-reconstruction";
 
@@ -12,9 +12,21 @@ export type CutoverReconstructionPlanningResult = { orders: PlannedCutoverOrder[
 /** Shared by demand and per-product publication preview; never edits raw stock. */
 export function projectCutoverPromiseReservations(
   positions: ClaimSupplySnapshotDto["inventoryPositions"], releases: readonly CutoverLegacyPromiseRelease[],
+  rebases: readonly OpeningReservationRebase[] = [],
 ): ClaimSupplySnapshotDto["inventoryPositions"] {
   const byLevel = new Map(releases.map((release) => [release.inventoryLevelId, release]));
+  const translated = new Map(rebases.map(row => { const parsed = openingReservationRebaseSchema.parse(row); return [parsed.inventoryLevelId, parsed] as const; }));
+  if (translated.size !== rebases.length || rebases.some(row => byLevel.has(row.inventoryLevelId))) throw new Error("CUTOVER_OPENING_REBASE_DUPLICATE");
   return positions.map((position) => {
+    const rebase = translated.get(position.inventoryLevelId);
+    if (rebase) {
+      if (position.warehouseLocationId !== rebase.warehouseLocationId || position.productVariantId !== rebase.productVariantId
+        || position.variantQty !== rebase.variantQty || position.reservedQty !== rebase.reservedQty
+        || position.pickedQty !== rebase.pickedQty || position.packedQty !== rebase.packedQty) {
+        throw Object.assign(new Error("The independently verified reservation basis changed before projection."), { code: "CUTOVER_OPENING_REBASE_CHANGED" });
+      }
+      return { ...position, reservedQty: rebase.physicalReservedQty };
+    }
     const release = byLevel.get(position.inventoryLevelId);
     if (!release) return { ...position };
     if (position.warehouseLocationId !== release.warehouseLocationId || position.productVariantId !== release.productVariantId
@@ -34,14 +46,15 @@ export function planFreshCutoverClaims(rawSnapshot: ClaimSupplySnapshotDto, reco
   // Projection is permitted to reseal only an already verified original census.
   let snapshot = parseClaimSupplySnapshot(rawSnapshot);
   const capturedLevelIds = new Set(snapshot.inventoryPositions.map((position) => position.inventoryLevelId));
-  if (reconstruction.legacyPromiseReleases.some((release) => !capturedLevelIds.has(release.inventoryLevelId))) {
+  if ([...reconstruction.legacyPromiseReleases, ...(reconstruction.openingReservationRebases ?? [])]
+    .some((release) => !capturedLevelIds.has(release.inventoryLevelId))) {
     throw Object.assign(new Error("The claim snapshot does not contain every reviewed promise position."), {
       code: "CUTOVER_LEGACY_PROMISE_PROJECTION_CHANGED" });
   }
-  if (reconstruction.legacyPromiseReleases.length > 0) {
+  if (reconstruction.legacyPromiseReleases.length > 0 || reconstruction.openingReservationRebases?.length) {
     const { snapshotFingerprint: _beforeRelease, ...content } = snapshot;
     snapshot = sealClaimSupplySnapshot({ ...content,
-      inventoryPositions: projectCutoverPromiseReservations(snapshot.inventoryPositions, reconstruction.legacyPromiseReleases) });
+      inventoryPositions: projectCutoverPromiseReservations(snapshot.inventoryPositions, reconstruction.legacyPromiseReleases, reconstruction.openingReservationRebases) });
   }
   const orders: PlannedCutoverOrder[] = [];
   const additional = new Map<number, bigint>();
@@ -96,6 +109,7 @@ export function planFreshCutoverClaims(rawSnapshot: ClaimSupplySnapshotDto, reco
   const impactHash = reconstructionHash({ evidenceHash: reconstruction.evidenceHash, freshReservationsByLevel,
     // Keep old no-handoff impact payloads stable for already reviewed evidence.
     ...(reconstruction.legacyPromiseReleases.length > 0 ? { legacyPromiseReleases: reconstruction.legacyPromiseReleases } : {}),
+    ...(reconstruction.openingReservationRebases?.length ? { openingReservationRebases: reconstruction.openingReservationRebases } : {}),
     orders: orders.map(({ order, plan }) => ({ orderId: order.orderId, lines: plan.lines,
       resourceClaims: plan.resourceClaims, operations: plan.operations,
       modelEvidence: plan.modelEvidence.map(({ lifecycleSelection: _selection, ...definition }) => definition) })) });

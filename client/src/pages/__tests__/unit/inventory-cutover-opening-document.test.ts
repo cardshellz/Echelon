@@ -3,6 +3,17 @@ import { createOpeningWorksheet, OPENING_DOCUMENT_LIMIT_BYTES, parseOpeningDocum
 import { openingAssessment, openingSource, openingVerification } from "../../../../../server/modules/inventory-planning/__tests__/fixtures/inventory-cutover-opening-interface.fixture";
 
 describe("independent opening verification document", () => {
+  it("requires an explicit current-custody basis without preapproving worksheet observations", () => {
+    const source = openingSource();
+    expect(JSON.parse(createOpeningWorksheet(source)).verification.reservationBasis).toBeUndefined();
+    const worksheet = JSON.parse(createOpeningWorksheet(source, "verified_current_lot_custody"));
+    expect(worksheet.verification.reservationBasis).toBe("verified_current_lot_custody");
+    expect(worksheet.verification.levels[0].reservedQty).toBe("");
+    expect(worksheet.verification.owners[0].reservedQty).toBe("");
+    expect(() => parseOpeningDocument(JSON.stringify(worksheet), source)).toThrow("incomplete or invalid");
+    worksheet.verification = { ...openingVerification(), reservationBasis: "verified_current_lot_custody" };
+    expect(parseOpeningDocument(JSON.stringify(worksheet), source)).toEqual(worksheet.verification);
+  });
   it("exports recorded references separately while every verification quantity remains blank", () => {
     const source = openingSource(); const before = structuredClone(source);
     const worksheet = JSON.parse(createOpeningWorksheet(source));

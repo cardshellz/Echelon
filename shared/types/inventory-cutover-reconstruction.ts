@@ -114,10 +114,21 @@ export const cutoverLegacyPromiseReleaseSchema = z.object({
   && release.owners.reduce((total, owner) => total + BigInt(owner.reservedQty), BigInt(0)) === BigInt(release.reservedQty),
 "Every promise must have one distinct owner and exhaust the complete level reservation");
 export type CutoverLegacyPromiseRelease = z.infer<typeof cutoverLegacyPromiseReleaseSchema>;
+const counter = z.string().regex(/^(0|[1-9][0-9]*)$/).max(10)
+  .refine(value => BigInt(value) <= BigInt(2_147_483_647));
+/** Explicit verified-opening counter translation, not a historical owner release. */
+export const openingReservationRebaseSchema = z.object({
+  inventoryLevelId: id, warehouseId: id, warehouseLocationId: id, productVariantId: id,
+  variantQty: counter, reservedQty: counter, pickedQty: counter, packedQty: z.literal("0"),
+  physicalReservedQty: counter,
+}).strict().refine(row => BigInt(row.reservedQty) > BigInt(row.physicalReservedQty)
+  && BigInt(row.physicalReservedQty) <= BigInt(row.variantQty), "Only excess nonphysical counters can be translated");
+export type OpeningReservationRebase = z.infer<typeof openingReservationRebaseSchema>;
 export type CutoverReconstructionPlan = {
   evidenceHash: string; ready: boolean; blockers: CutoverReconstructionBlocker[];
   orders: CutoverReconstructionOrder[]; retainedIndependentBuildReservationIds: number[];
   legacyPromiseReleases: CutoverLegacyPromiseRelease[];
+  openingReservationRebases?: OpeningReservationRebase[];
   openingBalance?: z.infer<typeof cutoverOpeningProvenanceSchema>;
 };
 export const cutoverReconstructionCommitSchema = z.object({
@@ -133,6 +144,8 @@ export const cutoverReconstructionReceiptSchema = z.object({
   // Missing on older immutable receipts means no promise handoff was performed.
   legacyPromiseReleases: z.array(cutoverLegacyPromiseReleaseSchema).optional(),
   legacyPromiseReleaseTransactionIds: z.array(id).optional(),
+  openingReservationRebases: z.array(openingReservationRebaseSchema).min(1).max(50_000).optional(),
+  openingReservationRebaseTransactionIds: z.array(id).min(1).max(50_000).optional(),
   openingBalance: cutoverOpeningProvenanceSchema.optional(),
 }).strict().refine((receipt) => receipt.claimIds.length===receipt.orderIds.length
   && new Set(receipt.claimIds).size===receipt.claimIds.length && new Set(receipt.orderIds).size===receipt.orderIds.length
@@ -145,5 +158,12 @@ export const cutoverReconstructionReceiptSchema = z.object({
     return new Set(receipt.legacyPromiseReleases.map((release) => release.inventoryLevelId)).size === receipt.legacyPromiseReleases.length
       && new Set(owners).size === owners.length && receipt.legacyPromiseReleaseTransactionIds.length === owners.length
       && new Set(receipt.legacyPromiseReleaseTransactionIds).size === owners.length;
-  }, "Every handed-off promise must have exactly one distinct audit transaction");
+  }, "Every handed-off promise must have exactly one distinct audit transaction")
+  .refine(receipt => {
+    const rows = receipt.openingReservationRebases, ids = receipt.openingReservationRebaseTransactionIds;
+    if (!rows && !ids) return true;
+    return !!rows && !!ids && !!receipt.openingBalance?.snapshotId && ids.length === rows.length
+      && new Set(ids).size === ids.length && new Set(rows.map(row => row.inventoryLevelId)).size === rows.length
+      && !rows.some(row => receipt.legacyPromiseReleases?.some(release => release.inventoryLevelId === row.inventoryLevelId));
+  }, "Every verified counter translation requires an opening snapshot and one distinct audit transaction");
 export type CutoverReconstructionReceipt = z.infer<typeof cutoverReconstructionReceiptSchema>;

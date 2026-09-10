@@ -14,7 +14,7 @@ const worksheetSchema = z.object({ contractVersion: z.literal("inventory_cutover
  * reservedQty is the exact recorded counter, which can include an empty-bin
  * promise. Owner reservedQty/pickedQty describe verified physical holds only;
  * eligibility to replan a promise is assessed by the server, never this export. */
-export function createOpeningWorksheet(source: OpeningSource): string {
+export function createOpeningWorksheet(source: OpeningSource, reservationBasis?: OpeningVerification["reservationBasis"]): string {
   return JSON.stringify({ contractVersion: "inventory_cutover_opening_worksheet_v1",
     recordedReference: { capturedAt: source.capturedAt, labels: source.labels,
       levels: source.evidence.levels, lots: source.evidence.lots,
@@ -22,6 +22,7 @@ export function createOpeningWorksheet(source: OpeningSource): string {
     verification: { contractVersion: "inventory_cutover_opening_v1", expectedEvidenceHash: source.evidenceHash,
       expectedAuthorityRevision: source.authorityRevision, expectedConfigurationRunId: source.configurationRunId,
       verificationReference: "", verificationEvidenceHash: "", verifiedAt: "", historicalDisposition: "preserve_unresolved",
+      ...(reservationBasis ? { reservationBasis } : {}),
       levels: source.evidence.levels.map(level => ({ ...level, variantQty: "", reservedQty: "", pickedQty: "", packedQty: "" })),
       lots: source.evidence.lots.map(lot => ({ ...lot, onHandQty: "", reservedQty: "", pickedQty: "",
         unitCostMills: "", poUnitCostMills: "", packagingUnitCostMills: "", landedUnitCostMills: "" })),

@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { cutoverOpeningProvenanceSchema } from "./inventory-cutover-reconstruction";
+import { cutoverOpeningProvenanceSchema, openingReservationRebaseSchema } from "./inventory-cutover-reconstruction";
 
 const id = z.number().int().positive().max(2_147_483_647);
 const bigintId = z.string().regex(/^[1-9][0-9]*$/).max(19)
@@ -49,6 +49,7 @@ export const inventoryCutoverReviewSchema = z.object({
     lines: z.number().int().nonnegative(),
     retainedIndependentBuildHolds: z.number().int().nonnegative(),
     openingBalance: cutoverOpeningProvenanceSchema.optional(),
+    openingReservationRebases: z.array(openingReservationRebaseSchema).min(1).max(50_000).optional(),
     // Optional for responses captured before the promise-handoff extension.
     legacyPromiseReplanning: z.object({ positions: z.number().int().nonnegative(),
       orderLines: z.number().int().nonnegative() }).strict().refine((summary) =>

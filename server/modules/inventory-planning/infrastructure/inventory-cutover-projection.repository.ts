@@ -19,7 +19,8 @@ export async function projectInventoryCutoverStateInsideTransaction(
   const blockers: Blocker[] = [];
   const reconstruction = await new PostgresInventoryCutoverReconstructionRepository().preview(client);
   blockers.push(...reconstruction.blockers);
-  const targetVariants = [...new Set(reconstruction.orders.flatMap((order) => order.lines.map((line) => line.targetVariantId)))].sort((a, b) => a - b);
+  const targetVariants = [...new Set([...reconstruction.orders.flatMap((order) => order.lines.map((line) => line.targetVariantId)),
+    ...(reconstruction.openingReservationRebases ?? []).map(row => row.productVariantId)])].sort((a, b) => a - b);
   let impactHash = inventoryCutoverEvidenceHash({ evidenceHash: reconstruction.evidenceHash, freshReservationsByLevel: [], orders: [] });
   let additions: Array<{ inventoryLevelId: number; reservedQty: string }> = [];
   let claimsProjected = false;
@@ -55,7 +56,7 @@ export async function projectInventoryCutoverStateInsideTransaction(
     // Only an executable reconstruction projects a release. Blocked evidence
     // retains every legacy counter and cannot inflate channel publication.
     const releasedPositions = claimsProjected
-      ? projectCutoverPromiseReservations(content.inventoryPositions, reconstruction.legacyPromiseReleases)
+      ? projectCutoverPromiseReservations(content.inventoryPositions, reconstruction.legacyPromiseReleases, reconstruction.openingReservationRebases)
       : content.inventoryPositions;
     const snapshot = sealSupplySnapshot({ ...content, inventoryPositions: releasedPositions.map((row) => ({
       ...row, reservedQty: (BigInt(row.reservedQty) + (additionalByLevel.get(row.inventoryLevelId) ?? BigInt(0))).toString(),

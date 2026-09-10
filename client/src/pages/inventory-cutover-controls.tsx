@@ -98,6 +98,15 @@ export function InventoryCutoverControls(props: Props) {
           {" "}from {review.data.summary.legacyPromiseReplanning.positions} empty-bin reservation position(s).
           {" "}Customer demand is retained. This handoff does not change on-hand or picked stock counts.</p>}
       {canonical && verification.data && <p className="text-sm">{verification.data.verifiedPublicationRows}/{verification.data.expectedPublicationRows} latest full publications verified.</p>}
+      {!canonical && review.data?.summary.openingReservationRebases && <details>
+        <summary className="cursor-pointer text-sm">Verified reservation counter translations: {review.data.summary.openingReservationRebases.length} positions</summary>
+        <p className="text-sm">Physical stock, picked custody and outstanding demand are preserved. Only these reviewed legacy counters are reduced to verified physical holds at activation.</p>
+        <EvidencePage rows={review.data.summary.openingReservationRebases} render={page => <table className="w-full text-sm"><thead><tr>
+          <th>Warehouse / location / variant</th><th>Before reserved</th><th>Physical reserved kept</th>
+        </tr></thead><tbody>{page.map(row => <tr key={row.inventoryLevelId}>
+          <td>{row.warehouseId} / {row.warehouseLocationId} / {row.productVariantId}</td><td>{row.reservedQty}</td><td>{row.physicalReservedQty}</td>
+        </tr>)}</tbody></table>} />
+      </details>}
       {evidence.data.blockers.length > 0 && <div className="space-y-2">
         <p className="font-medium text-sm">{evidence.data.blockers.length} finding(s) prevent this step.</p>
         <details open><summary className="cursor-pointer text-sm">Review findings</summary>

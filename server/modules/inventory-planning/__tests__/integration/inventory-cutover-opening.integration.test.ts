@@ -22,6 +22,7 @@ import { PostgresInventoryPublicationOutboxRepository } from "../../infrastructu
 import { InventoryPublicationOutboxService } from "../../application/inventory-publication-outbox.service";
 import { InventoryPublicationTransportRegistry } from "../../application/inventory-publication-transport";
 import { PostgresQuantityPublicationAdmission } from "../../infrastructure/quantity-publication-admission.repository";
+import { PostgresInventoryOpeningReservationRepository } from "../../../inventory/infrastructure/inventory-opening-reservation.repository";
 
 vi.mock("../../../../db", () => ({ pool: {} }));
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
@@ -71,6 +72,69 @@ dbDescribe.sequential("verified opening persistence with real PostgreSQL admissi
     const source = await service.capture("operator");
     return { verification: verification(source), reason: "Verified current inventory and all open commitments", idempotencyKey: key };
   }
+  it.each(["fence", "proof", "counter", "lot", "invalid", "duplicate"])("rejects a counter translation with invalid %s evidence", async kind => {
+    await pool.query("UPDATE inventory.inventory_levels SET reserved_qty=69 WHERE id=10");
+    const input = await request(`mixed-${kind}`); input.verification.reservationBasis = "verified_current_lot_custody";
+    const assessment = await service.preview(input.verification, "operator");
+    const saved = await service.save(input, "operator");
+    const before = await immutableBusinessState();
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      if (kind !== "fence") await acquireInventoryCutoverFenceInsideTransaction(client, { expectedAuthority: "legacy", expectedConfigurationRunId: null });
+      if (kind === "counter") await client.query("UPDATE inventory.inventory_levels SET reserved_qty=68 WHERE id=10");
+      if (kind === "lot") await client.query("UPDATE inventory.inventory_lots SET qty_reserved=2 WHERE id=4");
+      const rows = assessment.plan.openingReservationRebases!;
+      const command = { expectedEvidenceHash: assessment.plan.evidenceHash, activationRunId: "1", runtimeAuthorityRevision: "1",
+        actor: "operator", reason: "Verify exact proof rejection", occurredAt: NOW.toISOString() };
+      const expected = kind === "fence" ? "OPENING_REBASE_DATABASE_ERROR" : kind === "proof" ? "OPENING_REBASE_PROOF_CHANGED"
+        : kind === "invalid" ? "OPENING_REBASE_INPUT_INVALID" : kind === "duplicate" ? "OPENING_REBASE_DUPLICATE" : "OPENING_REBASE_POSITION_CHANGED";
+      await expect(new PostgresInventoryOpeningReservationRepository().translate({ client, command,
+        snapshotId: saved.id, sourceEvidenceHash: kind === "proof" ? "f".repeat(64) : assessment.sourceEvidenceHash,
+        rebases: kind === "invalid" ? [{ ...rows[0], physicalReservedQty: "-1" }] : kind === "duplicate" ? [...rows, ...rows] : rows,
+      })).rejects.toMatchObject({ code: expected });
+    } finally { await client.query("ROLLBACK"); client.release(); }
+    expect(await immutableBusinessState()).toEqual(before);
+  });
+  it("translates verified mixed-bin counters atomically and replays after a late rollback", async () => {
+    await pool.query("UPDATE inventory.inventory_levels SET reserved_qty=69 WHERE id=10");
+    const input = await request("mixed-opening"); input.verification.reservationBasis = "verified_current_lot_custody";
+    const before = await immutableBusinessState();
+    const assessment = await service.preview(input.verification, "operator");
+    expect(assessment).toMatchObject({ ready: true, plan: { legacyPromiseReleases: [],
+      openingReservationRebases: [{ inventoryLevelId: 10, reservedQty: "69", physicalReservedQty: "3", variantQty: "20", pickedQty: "2" }] } });
+    const saved = await service.save(input, "operator"); expect(await immutableBusinessState()).toEqual(before);
+    expect((await loadLatestCutoverOpening(pool))?.assessment.plan.openingReservationRebases).toEqual(assessment.plan.openingReservationRebases);
+    const dryRun = await seedCompositionReviewedDryRun(pool), clock = { now: () => new Date(dryRun.completedAt) };
+    const activation = new InventoryAvailabilityActivationService(new PostgresInventoryAvailabilityActivationRepository(pool), clock);
+    const prepared = await activation.prepare({ sourceDryRunId: dryRun.activationRunId, expectedDryRunResultHash: dryRun.resultHash,
+      idempotencyKey: "mixed-prepare", reason: "Prepare verified mixed-bin custody" }, "operator");
+    const cutover = new InventoryCutoverCommitService(new PostgresInventoryCutoverCommitRepository(pool), clock);
+    const review = await cutover.preview({ activationRunId: prepared.activationRunId }, "operator");
+    expect(review.ready).toBe(true); expect(review.summary.openingReservationRebases).toEqual(assessment.plan.openingReservationRebases);
+    const command = { activationRunId: prepared.activationRunId, expectedAuthorityRevision: review.authorityRevision,
+      expectedReviewHash: review.reviewHash, idempotencyKey: "mixed-commit", reason: "Preserve custody and remaining demand" };
+    const beforeFailure = await immutableBusinessState();
+    await pool.query(`CREATE FUNCTION public.fail_mixed_receipt() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'mixed late failure'; END $$;
+      CREATE TRIGGER zz_mixed_failure BEFORE INSERT ON inventory.availability_cutover_commits FOR EACH ROW EXECUTE FUNCTION public.fail_mixed_receipt()`);
+    await expect(cutover.commit(command, "operator")).rejects.toThrow("mixed late failure");
+    expect(await immutableBusinessState()).toEqual(beforeFailure);
+    await pool.query("DROP TRIGGER zz_mixed_failure ON inventory.availability_cutover_commits; DROP FUNCTION public.fail_mixed_receipt()");
+    const outcomes = await Promise.all([cutover.commit(command, "operator"), cutover.commit(command, "operator")]);
+    expect(outcomes.map(row => row.alreadyApplied).sort()).toEqual([false, true]);
+    expect((await pool.query("SELECT variant_qty,reserved_qty,picked_qty FROM inventory.inventory_levels WHERE id=10")).rows)
+      .toEqual([{ variant_qty: 20, reserved_qty: 4, picked_qty: 2 }]);
+    expect((await pool.query("SELECT qty_on_hand,qty_reserved,qty_picked FROM inventory.inventory_lots WHERE id=4")).rows)
+      .toEqual([{ qty_on_hand: 20, qty_reserved: 4, qty_picked: 2 }]);
+    expect((await pool.query("SELECT reserved_qty_delta,variant_qty_delta,order_id,order_item_id FROM inventory.inventory_transactions WHERE reference_type='availability_opening_rebase'")).rows)
+      .toEqual([{ reserved_qty_delta: -66, variant_qty_delta: 0, order_id: null, order_item_id: null }]);
+    const receipt = (await pool.query("SELECT result_payload FROM inventory.availability_cutover_reconstruction_receipts")).rows[0].result_payload;
+    expect(receipt.openingBalance.snapshotId).toBe(saved.id); expect(receipt.openingReservationRebaseTransactionIds).toHaveLength(1);
+    const after = await immutableBusinessState();
+    for (const field of ["costs", "orders", "items", "build_reservations", "build_demands", "receipts", "receipt_attempts"]) expect(after[field]).toEqual(beforeFailure[field]);
+  }, 30_000);
+
   async function immutableBusinessState() {
     return (await pool.query(`SELECT
       (SELECT jsonb_agg(to_jsonb(row) ORDER BY id)::text FROM inventory.inventory_levels row) AS levels,
