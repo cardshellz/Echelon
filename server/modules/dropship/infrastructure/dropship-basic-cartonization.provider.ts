@@ -12,6 +12,7 @@ import {
 } from "../domain/shipping-quote";
 import { CARTONIZE_ENGINE } from "../../cartonization/domain/cartonize";
 import { SharedShippingConfigurationRepository } from "../../shipping-engine/infrastructure/shared-configuration.repository";
+import { resolveDropshipPackagingChannel } from "./dropship-packaging-channel";
 
 const BASIC_DROPSHIP_CARTONIZATION_ENGINE = CARTONIZE_ENGINE;
 
@@ -35,19 +36,21 @@ interface PackageProfileRow {
 
 
 export class BasicDropshipCartonizationProvider implements DropshipCartonizationProvider {
-  constructor(private readonly dbPool: Pool = defaultPool) {}
+  constructor(private readonly dbPool: Pool = defaultPool,
+    private readonly resolveChannelId: (pool: Pool) => Promise<number | null> = resolveDropshipPackagingChannel) {}
 
   async cartonize(input: DropshipCartonizationRequest): Promise<DropshipCartonizationResult> {
     const productVariantIds = input.items.map((item) => item.productVariantId);
     const [packageProfiles, packaging] = await Promise.all([
       this.listPackageProfiles(productVariantIds),
-      new SharedShippingConfigurationRepository(this.dbPool).loadPackaging('dropship', input.warehouseId),
+      this.resolveChannelId(this.dbPool).then(channelId => new SharedShippingConfigurationRepository(this.dbPool).loadPackaging('dropship', input.warehouseId, channelId)),
     ]);
 
     const preferences = resolvePackageProfilesForSuite(packageProfiles,packaging.boxes.map((box) => box.id));
     const result = cartonizeDropshipItems({
       items: input.items,
-      packageProfiles: preferences.profiles,
+      // Unclassified product-owned cartons cannot satisfy a white-label policy.
+      packageProfiles: packaging.requirement === 'unbranded' ? preferences.profiles.map(p => ({ ...p, shipsInOwnContainer: false })) : preferences.profiles,
       boxes: packaging.boxes.map((box) => ({ ...box, name: box.code })),
     });
 

@@ -22,6 +22,7 @@ export interface SharedShippingConfigurationStore {
   loadPackaging(
     channel: FulfillmentChannel,
     warehouseId: number,
+    channelId?: number | null,
   ): Promise<{
     suiteId: number;
     suiteRevision: number;
