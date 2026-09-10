@@ -45,6 +45,16 @@ async function setup(page: Page, mode = "") {
     configuredChannelId: null,
   };
   let charges = { revision: 0, charges: NO_PROGRAM_CHARGES };
+  if (mode === "warehouse100")
+    packaging.warehouses = Array.from({ length: 100 }, (_, i) => ({
+      id: i + 1,
+      name: `Warehouse ${String(i + 1).padStart(3, "0")}`,
+    }));
+  const availability = new Map<number, number[]>([
+    [1, [1, 2]],
+    [2, [1, 2]],
+  ]);
+  const warehouseRevisions = new Map<number, number>();
   let catalogBoxes = [
     {
       id: 1,
@@ -102,12 +112,15 @@ async function setup(page: Page, mode = "") {
       },
     ],
     policies,
-    warehouses: packaging.warehouses,
+    warehouses: packaging.warehouses.map((w) => ({
+      ...w,
+      packagingRevision: warehouseRevisions.get(w.id) ?? 0,
+    })),
     boxes: packaging.boxes.map((b) => ({
       ...b,
       branding: b.id === 1 ? "unbranded" : "branded",
       availabilityReviewed: true,
-      warehouseIds: [1, 2],
+      warehouseIds: availability.get(b.id) ?? [],
     })),
     suites: packaging.suites.map((s) => ({
       ...s,
@@ -150,6 +163,57 @@ async function setup(page: Page, mode = "") {
         status: 503,
         json: { error: { message: "Please retry this request." } },
       });
+    if (path.endsWith("/catalog-boxes/branding")) {
+      catalogBoxes = catalogBoxes.map((b) =>
+        body.boxes.some((item: { id: number }) => item.id === b.id)
+          ? {
+              ...b,
+              branding: body.branding,
+              configurationRevision: b.configurationRevision + 1,
+            }
+          : b,
+      );
+      return route.fulfill({
+        json: { changed: body.boxes.length, skipped: 0 },
+      });
+    }
+    if (path.endsWith("/warehouse-packaging/availability")) {
+      for (const b of body.boxIds) {
+        const ids = new Set(availability.get(b) ?? []);
+        for (const w of body.warehouses) {
+          if (body.available) ids.add(w.id);
+          else ids.delete(w.id);
+        }
+        availability.set(b, [...ids]);
+      }
+      for (const w of body.warehouses)
+        warehouseRevisions.set(w.id, w.revision + 1);
+      return route.fulfill({
+        json: {
+          changed: body.boxIds.length * body.warehouses.length,
+          skipped: 0,
+        },
+      });
+    }
+    if (path.endsWith("/warehouse-packaging/suites")) {
+      const policy = policies.find((p) => p.channelId === body.channelId)!;
+      let changed = 0;
+      for (const id of body.warehouseIds) {
+        if (
+          policy.overrides.some((o) => o.warehouseId === id) &&
+          !body.replaceExisting
+        )
+          continue;
+        policy.overrides = policy.overrides.filter((o) => o.warehouseId !== id);
+        if (body.suiteId)
+          policy.overrides.push({ warehouseId: id, suiteId: body.suiteId });
+        changed++;
+      }
+      policy.revision++;
+      return route.fulfill({
+        json: { changed, skipped: body.warehouseIds.length - changed },
+      });
+    }
     if (path.endsWith("/catalog-boxes")) {
       catalogBoxes = catalogBoxes.map((b) =>
         b.id === body.id
@@ -248,10 +312,10 @@ test("saves program changes, reloads them, and preserves another warehouse", asy
   await page.getByRole("button", { name: "Save program", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
   const west = page.getByRole("row").filter({
-    has: page.getByRole("button", { name: "Edit West packaging", exact: true }),
+    has: page.getByRole("link", { name: "Edit West packaging", exact: true }),
   });
   const main = page.getByRole("row").filter({
-    has: page.getByRole("button", { name: "Edit Main packaging", exact: true }),
+    has: page.getByRole("link", { name: "Edit Main packaging", exact: true }),
   });
   await expect(west).toContainText("Priority pricing");
   await expect(main).toContainText("Vendor pricing");
@@ -299,7 +363,7 @@ test("keeps concrete channels separate and blocks graphic boxes for white-label 
   await page.getByLabel("Branding requirement").selectOption("unbranded");
   await page.getByRole("button", { name: "Save packaging" }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
-  await page.getByRole("button", { name: "Edit West packaging" }).click();
+  await page.getByRole("button", { name: "Edit default" }).click();
   await page.getByLabel("Assigned box suite").selectOption("2");
   await expect(page.getByRole("dialog")).toContainText(
     "branded or unclassified",
@@ -311,7 +375,7 @@ test("keeps concrete channels separate and blocks graphic boxes for white-label 
   await page.getByLabel("Fulfillment configuration").selectOption("12");
   await expect(
     page.getByRole("row").filter({
-      has: page.getByRole("button", { name: "Edit West packaging" }),
+      has: page.getByRole("link", { name: "Edit West packaging" }),
     }),
   ).toContainText("Small mailers");
   expect(state.writes).toHaveLength(1);
@@ -323,7 +387,7 @@ test("failed packaging saves retain the editor and reuse the command ID", async 
   page,
 }) => {
   const state = await setup(page, "assignments");
-  await page.getByRole("button", { name: "Edit West packaging" }).click();
+  await page.getByRole("button", { name: "Edit default" }).click();
   await page.getByLabel("Assigned box suite").selectOption("2");
   state.fail = true;
   await page.getByRole("button", { name: "Save packaging" }).click();
@@ -374,26 +438,38 @@ test("supports duplicate, archive and restore without an assignment form in suit
   });
 });
 
-test("edits assignment from its warehouse row and resets to the displayed default", async ({
+test("edits assignment from its warehouse and resets to the displayed default", async ({
   page,
 }, info) => {
-  await setup(page, "assignments");
-  await page.getByRole("button", { name: "Edit West packaging" }).click();
-  await page.getByLabel("Assigned box suite").selectOption("2");
-  await page.getByRole("button", { name: "Save packaging" }).click();
+  const state = await setup(page, "warehouse");
+  const west = page
+    .getByRole("article")
+    .filter({ has: page.getByRole("heading", { name: "West", exact: true }) });
+  await west.getByRole("button", { name: "Assign suite", exact: true }).click();
+  await page
+    .getByLabel("Fulfillment program", { exact: true })
+    .selectOption("11");
+  await page.getByLabel("Suite", { exact: true }).selectOption("2");
+  await page.getByRole("button", { name: "Review changes" }).click();
+  await page.getByRole("button", { name: "Save changes", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
-  const west = page.getByRole("row").filter({
-    has: page.getByRole("button", {
-      name: "Edit West packaging",
-      exact: true,
-    }),
-  });
   await expect(west).toContainText("Small mailers");
-  await expect(west).toContainText("Warehouse override");
-  await page.getByRole("button", { name: "Edit West packaging" }).click();
-  await page.getByLabel("Assigned box suite").selectOption("inherit");
-  await page.getByRole("button", { name: "Save packaging" }).click();
+  await expect(west).toContainText("Warehouse assignment");
+  await west.getByRole("button", { name: "Assign suite", exact: true }).click();
+  await page
+    .getByLabel("Fulfillment program", { exact: true })
+    .selectOption("11");
+  await page.getByLabel("Replace existing warehouse assignments").check();
+  await page.getByRole("button", { name: "Review changes" }).click();
+  await page.getByRole("button", { name: "Save changes", exact: true }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
   await expect(west).toContainText("Default cartons");
+  expect(state.writes[0].body.replaceExisting).toBe(false);
+  expect(state.writes[1].body).toMatchObject({
+    warehouseIds: [2],
+    suiteId: null,
+    replaceExisting: true,
+  });
   await page.screenshot({
     path: info.outputPath("packaging-assignments.png"),
     fullPage: true,
@@ -412,15 +488,10 @@ test("selects warehouse suite and service without legacy rate editors", async ({
     serviceLevelId: 2,
     expectedRevision: 1,
   });
-  await page.getByRole("button", { name: "Edit West packaging" }).click();
-  await page.getByLabel("Assigned box suite").selectOption("2");
-  await page.getByRole("button", { name: "Save packaging" }).click();
-  await expect.poll(() => state.writes.length).toBe(2);
-  expect(state.writes[1].body).toMatchObject({
-    channelId: 11,
-    overrides: [{ warehouseId: 2, suiteId: 2 }],
-    expectedRevision: 1,
-  });
+  await expect(
+    page.getByRole("link", { name: "Edit West packaging" }),
+  ).toHaveAttribute("href", "/warehouse/packaging?channelId=11");
+  expect(state.writes).toHaveLength(1);
   await expect(
     page.getByText("Create rate table", { exact: true }),
   ).toHaveCount(0);
@@ -443,20 +514,24 @@ test("edits suite membership in a bounded dialog and shows affected assignments"
   await expect(page.getByRole("dialog")).toContainText(
     "Saving affects 1 channel/warehouse assignments",
   );
-  await page.getByRole("checkbox", { name: "Padded mailer · MAILER" }).check();
+  await page.getByRole("checkbox", { name: /MAILER · Padded mailer/ }).check();
   await page.getByRole("button", { name: "Save suite", exact: true }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
   expect(state.writes[0].body.boxIds).toEqual([1, 2]);
   expect(state.errors).toEqual([]);
 });
-test("reviews box branding and both warehouses, then refreshes saved catalog state", async ({
+test("catalog edits never submit warehouse availability", async ({
   page,
 }, info) => {
   const state = await setup(page, "catalog");
-  await expect(page.getByText("Availability needs review")).toBeVisible();
+  await expect(
+    page.getByRole("columnheader", { name: "Warehouses", exact: true }),
+  ).toHaveCount(0);
   await page.getByRole("button", { name: "Edit WHITE box" }).click();
   await page.getByLabel("Packaging branding").selectOption("unbranded");
-  await page.getByRole("checkbox", { name: "West (WEST)" }).check();
+  await expect(
+    page.getByText("Stocked warehouses", { exact: true }),
+  ).toHaveCount(0);
   await page.getByRole("button", { name: "Save Changes" }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
   expect(state.writes[0]).toMatchObject({
@@ -464,25 +539,95 @@ test("reviews box branding and both warehouses, then refreshes saved catalog sta
     body: {
       id: 1,
       branding: "unbranded",
-      warehouseIds: [1, 2],
       expectedRevision: 1,
     },
   });
+  expect(state.writes[0].body).not.toHaveProperty("warehouseIds");
   await expect(page.getByText("Availability needs review")).toHaveCount(0);
   await expect(
-    page.getByText("White label / unbranded", { exact: true }),
+    page
+      .getByRole("table")
+      .getByText("White label / unbranded", { exact: true }),
   ).toBeVisible();
   await page.getByRole("button", { name: "Edit WHITE box" }).click();
   await expect(page.getByLabel("Packaging branding")).toHaveValue("unbranded");
-  await expect(
-    page.getByRole("checkbox", { name: "West (WEST)" }),
-  ).toBeChecked();
+  await expect(page.getByRole("dialog").getByRole("checkbox")).toHaveCount(0);
   await page.screenshot({
     path: info.outputPath("box-catalog-review.png"),
     fullPage: true,
     animations: "disabled",
   });
   expect(state.errors).toEqual([]);
+});
+
+test("bulk branding reviews selected catalog items and refreshes the table", async ({
+  page,
+}) => {
+  const state = await setup(page, "catalog");
+  await page
+    .getByLabel("Filter branding", { exact: true })
+    .selectOption("unclassified");
+  await page
+    .getByRole("button", { name: "Select all 1 matching", exact: true })
+    .click();
+  await page.getByLabel("Set selected branding").selectOption("unbranded");
+  await expect(page.getByRole("dialog")).toContainText(
+    "Warehouse availability and suite membership will not change",
+  );
+  await page
+    .getByRole("button", { name: "Save branding", exact: true })
+    .click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  expect(state.writes[0].body).toMatchObject({
+    boxes: [{ id: 1, revision: 1 }],
+    branding: "unbranded",
+  });
+  expect(state.writes[0].body).not.toHaveProperty("warehouseIds");
+});
+
+test("bulk availability covers 100 warehouses with review, stable retry, and bounded rendering", async ({
+  page,
+}, info) => {
+  const state = await setup(page, "warehouse100");
+  await expect(page.getByRole("article")).toHaveCount(25);
+  await page
+    .getByRole("button", { name: "Select all 100 matching warehouses" })
+    .click();
+  await page
+    .getByRole("button", { name: "Update available packaging" })
+    .click();
+  await page.getByLabel("Choose from", { exact: true }).selectOption("1");
+  await page.getByRole("button", { name: "Select all matching boxes" }).click();
+  await page
+    .getByRole("button", { name: "Review changes", exact: true })
+    .click();
+  await expect(page.getByRole("dialog")).toContainText(
+    "1 packaging types at 100 warehouses",
+  );
+  state.fail = true;
+  await page.getByRole("button", { name: "Save changes", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("retry");
+  state.fail = false;
+  await page.getByRole("button", { name: "Save changes", exact: true }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  expect(state.writes[0].body.commandId).toBe(state.writes[1].body.commandId);
+  expect(state.writes[1].body.warehouses).toHaveLength(100);
+  expect(state.writes[1].body).toMatchObject({
+    boxIds: [1],
+    sourceSuite: { id: 1, revision: 1 },
+    available: true,
+  });
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
+  expect(state.errors).toEqual([]);
+  await page.screenshot({
+    path: info.outputPath("warehouse-packaging.png"),
+    fullPage: false,
+    animations: "disabled",
+  });
 });
 
 test("saves percent plus flat charges with a stable retry command", async ({

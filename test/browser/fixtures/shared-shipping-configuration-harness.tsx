@@ -10,6 +10,7 @@ import { DropshipSharedShippingPanel } from "../../../client/src/components/ship
 import { BoxSuitesPanel } from "../../../client/src/components/shipping/BoxSuitesPanel";
 import { PackagingAssignmentsPanel } from "../../../client/src/components/shipping/PackagingAssignmentsPanel";
 import { ProgramChargesPanel } from "../../../client/src/components/shipping/pricing-programs/ProgramChargesPanel";
+import { WarehousePackagingPanel } from "../../../client/src/components/shipping/WarehousePackagingPanel";
 import "../../../client/src/index.css";
 
 const mode = new URLSearchParams(location.search).get("mode");
@@ -21,7 +22,6 @@ function CatalogHarness() {
   return (
     <BoxCatalogTab
       boxes={query.data?.boxes ?? []}
-      warehouses={query.data?.warehouses ?? []}
       isLoading={query.isLoading}
     />
   );
@@ -30,7 +30,9 @@ createRoot(document.getElementById("root")!).render(
   <QueryClientProvider
     client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
   >
-    {mode === "catalog" ? (
+    {mode === "warehouse" || mode === "warehouse100" ? (
+      <WarehousePackagingPanel canEdit />
+    ) : mode === "catalog" ? (
       <CatalogHarness />
     ) : mode === "suites" ? (
       <BoxSuitesPanel />

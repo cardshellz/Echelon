@@ -1057,9 +1057,6 @@
   "shipping.box_suites": [
     "modules/shipping-engine"
   ],
-  "shipping.box_warehouse_stock": [
-    "modules/shipping-engine"
-  ],
   "shipping.channel_packaging_overrides": [
     "modules/shipping-engine"
   ],
@@ -1171,6 +1168,12 @@
     "modules/shipping-engine"
   ],
   "shipping.variant_shipping_attrs": [
+    "modules/shipping-engine"
+  ],
+  "shipping.warehouse_packaging_availability": [
+    "modules/shipping-engine"
+  ],
+  "shipping.warehouse_packaging_revisions": [
     "modules/shipping-engine"
   ],
   "warehouse.assembly_packing_handoff_receipts": [

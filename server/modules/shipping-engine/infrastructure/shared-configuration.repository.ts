@@ -288,9 +288,7 @@ export class SharedShippingConfigurationRepository
         'costCents',b.cost_cents,'fillFactorBps',b.fill_factor_bps,'isActive',b.is_active) ORDER BY b.id)
         FROM shipping.box_suite_members m JOIN shipping.box_catalog b ON b.id=m.box_id
         WHERE m.suite_id=s.id AND m.revision=s.current_revision AND b.is_active
-        AND ((NOT b.availability_reviewed AND NOT EXISTS (SELECT 1 FROM shipping.box_warehouse_stock stock WHERE stock.box_id=b.id))
-          OR EXISTS (SELECT 1 FROM shipping.box_warehouse_stock stock
-            WHERE stock.box_id=b.id AND stock.warehouse_id=$2 AND stock.is_stocked))), '[]'::jsonb) AS boxes
+        AND shipping.box_available_at(b.id,$2,false)), '[]'::jsonb) AS boxes
       FROM shipping.packaging_assignments a JOIN shipping.box_suites s ON s.id=a.suite_id
       WHERE a.is_active AND NOT s.archived AND a.channel=$1 AND (a.warehouse_id=$2 OR a.warehouse_id IS NULL)`,
       [channel, warehouseId],
@@ -433,9 +431,7 @@ export class SharedShippingConfigurationRepository
               (SELECT 1 FROM shipping.packaging_assignments override
                 WHERE override.is_active AND override.channel=a.channel AND override.warehouse_id=w.id)))
           WHERE NOT EXISTS (SELECT 1 FROM shipping.box_catalog b WHERE b.id=ANY($2::int[]) AND b.is_active
-            AND ((NOT b.availability_reviewed AND NOT EXISTS(SELECT 1 FROM shipping.box_warehouse_stock stock WHERE stock.box_id=b.id))
-              OR EXISTS(SELECT 1 FROM shipping.box_warehouse_stock stock
-                WHERE stock.box_id=b.id AND stock.warehouse_id=w.id AND stock.is_stocked)))`,
+            AND shipping.box_available_at(b.id,w.id,false))`,
             [current.id, input.boxIds],
           );
           if (stranded.rows.length)
@@ -506,8 +502,7 @@ export class SharedShippingConfigurationRepository
         JOIN shipping.box_suite_members m ON m.suite_id=s.id AND m.revision=s.current_revision
         JOIN shipping.box_catalog b ON b.id=m.box_id AND b.is_active
         WHERE s.id=$1 AND NOT s.archived AND ($2::int IS NULL
-          OR (NOT b.availability_reviewed AND NOT EXISTS(SELECT 1 FROM shipping.box_warehouse_stock stock WHERE stock.box_id=b.id))
-          OR EXISTS(SELECT 1 FROM shipping.box_warehouse_stock stock WHERE stock.box_id=b.id AND stock.warehouse_id=$2 AND stock.is_stocked)) LIMIT 1`,
+          OR shipping.box_available_at(b.id,$2,false)) LIMIT 1`,
           [input.suiteId, input.warehouseId],
         );
         if (!available.rows.length)
@@ -635,8 +630,7 @@ export class SharedShippingConfigurationRepository
         JOIN shipping.box_suite_members m ON m.suite_id=s.id AND m.revision=s.current_revision
         JOIN shipping.box_catalog b ON b.id=m.box_id AND b.is_active
         WHERE a.channel=$1 AND a.warehouse_id IS NULL AND a.is_active AND
-        ((NOT b.availability_reviewed AND NOT EXISTS(SELECT 1 FROM shipping.box_warehouse_stock stock WHERE stock.box_id=b.id))
-         OR EXISTS(SELECT 1 FROM shipping.box_warehouse_stock stock WHERE stock.box_id=b.id AND stock.warehouse_id=$2 AND stock.is_stocked)) LIMIT 1`,
+        shipping.box_available_at(b.id,$2,false) LIMIT 1`,
           [input.channel, input.warehouseId],
         );
         if (!fallback.rows.length)

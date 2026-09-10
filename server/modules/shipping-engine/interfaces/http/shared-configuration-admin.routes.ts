@@ -98,6 +98,21 @@ export function registerSharedConfigurationAdminRoutes(
     run(() => packagingPolicies.overview()),
   );
   app.put(
+    "/api/shipping/admin/catalog-boxes/branding",
+    requirePermission("settings", "edit"),
+    run((req) => packagingPolicies.bulkBranding(req.body, actor(req))),
+  );
+  app.put(
+    "/api/shipping/admin/warehouse-packaging/availability",
+    requirePermission("settings", "edit"),
+    run((req) => packagingPolicies.saveAvailability(req.body, actor(req))),
+  );
+  app.put(
+    "/api/shipping/admin/warehouse-packaging/suites",
+    requirePermission("settings", "edit"),
+    run((req) => packagingPolicies.assignWarehouseSuites(req.body, actor(req))),
+  );
+  app.put(
     "/api/shipping/admin/packaging-policies",
     requirePermission("settings", "edit"),
     run((req) => packagingPolicies.savePolicy(req.body, actor(req))),
