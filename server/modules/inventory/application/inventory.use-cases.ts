@@ -1,5 +1,9 @@
 import { lockInventoryCostGraph, recordReceiptCostOrigin, recordLotCostContribution } from "../infrastructure/cost-evidence.repository";
+import { openOperationalQuantityPosting, type OperationalQuantityPosting } from "../infrastructure/operational-quantity-posting";
+import { assertLegacyQuantityImportAllowed } from "./legacy-quantity-import";
 import { sql } from "drizzle-orm";
+import { z } from "zod";
+import { createHash } from "node:crypto";
 import type { NodePgDatabase } from "drizzle-orm/node-postgres";
 import type { IInventoryStorage } from "../infrastructure/inventory.repository";
 import type { InventoryLotService } from "../lots.service";
@@ -128,6 +132,13 @@ export interface RecordReplacementInventoryShipmentInput {
 }
 
 const MAX_POSTGRES_INTEGER = 2_147_483_647;
+const adjustmentReplaySchema = z.object({
+  orphanedQty: z.number().int().nonnegative(), adjustmentTransactionId: z.number().int().positive(),
+  consumedCostCents: z.number().int().nonnegative().optional(), consumedQty: z.number().int().nonnegative().optional(),
+  consumedLots: z.array(z.object({ lotId: z.number().int().positive(), qty: z.number().int().positive() })).optional(),
+  consumedPoCostMills: z.string().regex(/^\d+$/).optional(), consumedPackagingCostMills: z.string().regex(/^\d+$/).optional(),
+  consumedLandedCostMills: z.string().regex(/^\d+$/).optional(), consumedCostProvisional: z.boolean().optional(),
+});
 
 function validateShipmentInteger(value: unknown, field: string): void {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0 || value > MAX_POSTGRES_INTEGER) {
@@ -236,6 +247,7 @@ export class InventoryUseCases {
   // ---------------------------------------------------------------------------
 
   async receiveInventory(params: {
+    commandKey?: string;
     productVariantId: number;
     warehouseLocationId: number;
     qty: number;
@@ -262,7 +274,14 @@ export class InventoryUseCases {
   }, externalTx?: any): Promise<void> {
     if (!Number.isSafeInteger(params.qty) || params.qty <= 0) throw new Error("qty must be a positive safe integer");
 
+    let replayed = false;
     const doWork = async (tx: any) => {
+      const quantityPosting = await openOperationalQuantityPosting(tx);
+      if (quantityPosting && !this.lotService) throw new IntegrityError("Ledger receiving requires exact FIFO lot ownership");
+      const quantityKey = params.commandKey ?? (params.receivingLineId ? `receiving_line:${params.receivingLineId}`
+        : params.receivingOrderId ? `receiving_order:${params.receivingOrderId}:${params.productVariantId}:${params.warehouseLocationId}` : undefined);
+      if (quantityPosting && await quantityPosting.beginOperation(quantityKey, { operation: "receive", ...params,
+        costRecordedAt: params.costRecordedAt?.toISOString() ?? null })) { replayed = true; return; }
       await this.assertNotFrozen(params.warehouseLocationId, tx);
       await lockInventoryCostGraph(tx);
 
@@ -310,10 +329,11 @@ export class InventoryUseCases {
       }, tx);
 
       // 2. Adjust Balance
-      await this.storage.adjustInventoryLevel(level.id, { variantQty: params.qty }, tx);
+      if (!quantityPosting) await this.storage.adjustInventoryLevel(level.id, { variantQty: params.qty }, tx);
 
       // 3. FIFO Lot Generation — resolve cost via waterfall when not provided
       let lotId: number | undefined;
+      let resolvedCostCents: number | undefined;
       if (this.lotService) {
         const lotSvc = this.lotService.withTx(tx);
         const resolved = await resolveCost(tx, params.productVariantId, params.unitCostCents);
@@ -337,8 +357,10 @@ export class InventoryUseCases {
           inboundShipmentId: params.inboundShipmentId,
           costProvisional: params.costProvisional ?? (resolved.provisional ? 1 : 0),
           notes: params.notes,
+          quantityPosting,
         });
         lotId = lot.id;
+        resolvedCostCents = resolved.costCents;
         if (params.receivingLineId && params.purchaseOrderLineId && params.unitsPerVariantSnapshot && params.costRecordedAt) {
           await recordReceiptCostOrigin(tx, {
             inventoryLotId: lot.id, receivingLineId: params.receivingLineId, purchaseOrderLineId: params.purchaseOrderLineId,
@@ -347,14 +369,14 @@ export class InventoryUseCases {
           }, params.userId || "system:receiving", params.costRecordedAt);
         }
 
-        if (resolved.costCents > 0) {
+        if (!quantityPosting && resolved.costCents > 0) {
           await lotSvc.updateVariantCosts(params.productVariantId, resolved.costCents);
         }
       }
 
       // 4. Record Audit
       try {
-        await this.storage.createInventoryTransaction({
+        const receipt = await this.storage.createInventoryTransaction({
           productVariantId: params.productVariantId,
           toLocationId: params.warehouseLocationId,
           transactionType: "receipt",
@@ -372,6 +394,17 @@ export class InventoryUseCases {
           unitCostCents: params.unitCostCents ?? null,
           inventoryLotId: lotId ?? null,
         }, tx);
+        if (quantityPosting) {
+          await quantityPosting.post({
+            idempotencyKey: quantityKey!, kind: "receive",
+            actor: params.userId || "system:receiving", reason: params.notes || "Posted warehouse receipt",
+            reference: { type: "inventory_transaction", id: String(receipt.id) }, occurredAt: this.clock().toISOString(),
+          });
+          if (resolvedCostCents !== undefined && resolvedCostCents > 0) {
+            await this.lotService!.withTx(tx).updateVariantCosts(params.productVariantId, resolvedCostCents);
+          }
+          await quantityPosting.finishOperation({ completed: true });
+        }
       } catch (err: any) {
         // Inventory balance and lot writes already occurred in this transaction.
         // Never convert a ledger uniqueness failure into a successful receive.
@@ -385,7 +418,7 @@ export class InventoryUseCases {
       await this.db.transaction(doWork);
     }
 
-    this.triggerNotifyChange(params.productVariantId, "receive");
+    if (!replayed) this.triggerNotifyChange(params.productVariantId, "receive");
   }
 
   // ---------------------------------------------------------------------------
@@ -429,14 +462,24 @@ export class InventoryUseCases {
     const allowNegative = params.allowNegative === true;
 
     const doWork = async (tx: any): Promise<{ lotUnitCostMills: number | null }> => {
+      const quantityPosting = await openOperationalQuantityPosting(tx);
+      const quantityKey = `receipt_reversal:${params.reversalId}`;
+      const replay = quantityPosting && await quantityPosting.beginOperation(quantityKey, { operation: "receipt_reversal", ...params });
+      if (replay) return z.object({ lotUnitCostMills: z.number().int().nonnegative().nullable() }).parse(replay.result);
+      // An override cannot make negative physical custody truthful in the new
+      // ledger. The caller must resolve the missing stock instead.
+      if (quantityPosting && allowNegative) throw new ValidationError("Negative receipt reversal is unavailable after quantity-ledger activation");
       if (params.warehouseLocationId !== null) {
         await this.assertNotFrozen(params.warehouseLocationId, tx);
       }
+      const activeLevel = quantityPosting && params.warehouseLocationId !== null
+        ? await this.storage.lockInventoryLevel(params.warehouseLocationId, params.productVariantId, tx) : null;
+      if (quantityPosting && !activeLevel) throw new IntegrityError("Receipt reversal requires the exact receipt SKU/location level");
 
       // 1. Lots created by this receiving line (resolved through the ledger —
       //    the receipt transaction row carries the exact lot linkage).
       const lotRows = await tx.execute(sql`
-        SELECT l.id, l.qty_on_hand, l.unit_cost_mills
+        SELECT l.id, l.qty_on_hand, l.qty_reserved, l.unit_cost_mills
         FROM inventory.inventory_lots l
         JOIN inventory.inventory_transactions t
           ON t.inventory_lot_id = l.id
@@ -471,9 +514,10 @@ export class InventoryUseCases {
           if (remainingToReverse <= 0) break;
           const lotId = Number(lot.id);
           const onHand = Number(lot.qty_on_hand) || 0;
+          const available = quantityPosting ? onHand - Number(lot.qty_reserved) : onHand;
           const decrement = Math.min(
             remainingToReverse,
-            allowNegative ? remainingToReverse : onHand,
+            allowNegative ? remainingToReverse : available,
           );
           if (decrement <= 0) continue;
 
@@ -481,6 +525,9 @@ export class InventoryUseCases {
             lotUnitCostMills = Number(lot.unit_cost_mills);
           }
 
+          if (quantityPosting) {
+            await quantityPosting.addLot(lotId, { onHand: -decrement, reserved: 0, picked: 0, packed: 0 });
+          } else {
           const updated = await tx.execute(sql`
             UPDATE inventory.inventory_lots
             SET qty_on_hand = qty_on_hand - ${decrement},
@@ -499,13 +546,18 @@ export class InventoryUseCases {
               available: onHand,
             });
           }
+          }
           remainingToReverse -= decrement;
         }
+        if (quantityPosting && remainingToReverse !== 0) throw new InsufficientOnHandForReversalError({
+          receivingLineId: params.receivingLineId, qty: params.qty, available: params.qty - remainingToReverse,
+        });
       }
+      if (quantityPosting && lotRows.rows.length === 0) throw new IntegrityError("Receipt reversal requires exact original lot evidence");
 
       // 2. Location level decrement.
-      let qtyBefore: number | null = null;
-      if (params.warehouseLocationId !== null) {
+      let qtyBefore: number | null = activeLevel?.variantQty ?? null;
+      if (!quantityPosting && params.warehouseLocationId !== null) {
         const levelRows = await tx.execute(sql`
           SELECT id, variant_qty
           FROM inventory.inventory_levels
@@ -558,6 +610,13 @@ export class InventoryUseCases {
           ${lotUnitCostMills === null ? null : millsToCents(lotUnitCostMills)}
         )
       `);
+
+      if (quantityPosting) await quantityPosting.post({
+        idempotencyKey: quantityKey, kind: "receipt_reversal",
+        actor: params.userId || "system:receiving", reason: params.reason,
+        reference: { type: "receipt_reversal", id: String(params.reversalId) }, occurredAt: this.clock().toISOString(),
+      });
+      if (quantityPosting) await quantityPosting.finishOperation({ lotUnitCostMills });
 
       return { lotUnitCostMills };
     };
@@ -1038,6 +1097,7 @@ export class InventoryUseCases {
   // ---------------------------------------------------------------------------
 
   async adjustInventory(params: {
+    commandKey?: string;
     productVariantId: number;
     warehouseLocationId: number;
     qtyDelta: number;
@@ -1054,7 +1114,7 @@ export class InventoryUseCases {
     conversion?: { sourceLots: Array<{ lotId: number; qty: number }>; productMills: bigint; packagingMills: bigint; landedMills: bigint; provisional: boolean; operationKey: string; occurredAt: Date };
     /** Internal transaction orchestration hook; effects run only after the caller commits. */
     deferUntilCommit?: (effect: () => Promise<void>) => void;
-  }): Promise<{
+  }, sharedPosting?: OperationalQuantityPosting): Promise<{
     orphanedQty: number;
     adjustmentTransactionId: number;
     consumedCostCents?: number;
@@ -1072,9 +1132,18 @@ export class InventoryUseCases {
     let consumedQty: number | undefined;
     let consumedDetail: { consumedLots: Array<{ lotId: number; qty: number }>; consumedPoCostMills: bigint; consumedPackagingCostMills: bigint; consumedLandedCostMills: bigint; consumedCostProvisional: boolean } | undefined;
     let adjustmentTransactionId: number | null = null;
+    let replayedResult: z.infer<typeof adjustmentReplaySchema> | undefined;
 
     await this.db.transaction(async (tx) => {
-      if (params.conversion || params.includeConsumedCostEvidence) await lockInventoryCostGraph(tx);
+      const quantityPosting = sharedPosting ?? await openOperationalQuantityPosting(tx);
+      if (quantityPosting && !this.lotService) throw new IntegrityError("Ledger adjustments require exact FIFO lot ownership");
+      const quantityKey = params.commandKey ?? (params.cycleCountItemId ? `cycle_count_item:${params.cycleCountItemId}`
+        : params.conversion ? `${params.conversion.operationKey}:output:${params.productVariantId}:${params.warehouseLocationId}` : undefined);
+      const replay = quantityPosting && !sharedPosting && await quantityPosting.beginOperation(quantityKey, { operation: "adjust", ...params,
+        conversion: params.conversion ? { ...params.conversion, productMills: params.conversion.productMills.toString(),
+          packagingMills: params.conversion.packagingMills.toString(), landedMills: params.conversion.landedMills.toString() } : null });
+      if (replay) { replayedResult = adjustmentReplaySchema.parse(replay.result); return; }
+      if (quantityPosting || params.conversion || params.includeConsumedCostEvidence) await lockInventoryCostGraph(tx);
       // Cycle-count adjustments are the ONE mutation allowed on frozen bins
       if (!params.cycleCountId) {
         await this.assertNotFrozen(params.warehouseLocationId, tx);
@@ -1100,8 +1169,9 @@ export class InventoryUseCases {
         orphanedQty = level.reservedQty - expectedNewQty;
         adjustReserved = -orphanedQty;
       }
+      if (quantityPosting && adjustReserved !== 0) throw new IntegrityError("This adjustment would consume claimed inventory; use the claim-aware discrepancy command");
 
-      await this.storage.adjustInventoryLevel(level.id, { 
+      if (!quantityPosting) await this.storage.adjustInventoryLevel(level.id, {
         variantQty: params.qtyDelta,
         reservedQty: adjustReserved !== 0 ? adjustReserved : undefined
       }, tx);
@@ -1118,7 +1188,7 @@ export class InventoryUseCases {
               qty: layer.qty, unitCostCents: millsToCents(totalMills), unitCostMills: totalMills,
               packagingCostMills: safeMillsNumber(layer.packagingMills, "conversion.packagingMills"),
               landedCostMills: safeMillsNumber(layer.landedMills, "conversion.landedMills"), costSource: "transformation",
-              costProvisional: params.conversion.provisional ? 1 : 0, receivedAt: params.conversion.occurredAt, notes: params.reason });
+              costProvisional: params.conversion.provisional ? 1 : 0, receivedAt: params.conversion.occurredAt, notes: params.reason, quantityPosting });
             for (const source of params.conversion.sourceLots) await recordLotCostContribution(tx, { sourceLotId: source.lotId, outputLotId: output.id,
               sourceQty: source.qty, outputQty: params.qtyDelta, outputStartQty, operationKind: "conversion", operationKey: params.conversion.operationKey }, params.userId || "system:conversion", params.conversion.occurredAt);
             outputStartQty += layer.qty;
@@ -1131,6 +1201,7 @@ export class InventoryUseCases {
           reservedQtyDelta: adjustReserved !== 0 ? adjustReserved : undefined,
           unitCostCents: params.unitCostCents,
           notes: params.reason,
+          quantityPosting,
         });
         consumedCostCents = lotResult.consumedCostCents;
         consumedQty = lotResult.consumedQty;
@@ -1145,8 +1216,10 @@ export class InventoryUseCases {
         transactionType: "adjustment",
         reasonId: params.reasonId ?? null,
         variantQtyDelta: params.qtyDelta,
-        variantQtyBefore: level.variantQty,
-        variantQtyAfter: level.variantQty + params.qtyDelta,
+        // A composed transform posts atomically only once. Its exact before/
+        // after evidence belongs to quantity_entries, not child audit counters.
+        variantQtyBefore: sharedPosting ? null : level.variantQty,
+        variantQtyAfter: sharedPosting ? null : level.variantQty + params.qtyDelta,
         sourceState: "on_hand",
         targetState: "on_hand",
         cycleCountId: params.cycleCountId ?? null,
@@ -1160,8 +1233,22 @@ export class InventoryUseCases {
         userId: params.userId ?? null,
       }, tx);
       adjustmentTransactionId = transaction.id;
+      if (quantityPosting && !sharedPosting) await quantityPosting.post({
+        idempotencyKey: quantityKey!, kind: params.conversion ? "transform" : "adjust",
+        actor: params.userId || "system:inventory_adjustment", reason: params.reason,
+        reference: { type: "inventory_transaction", id: String(transaction.id) },
+        occurredAt: (params.conversion?.occurredAt ?? this.clock()).toISOString(),
+      });
+      if (quantityPosting && !sharedPosting) await quantityPosting.finishOperation({ orphanedQty, adjustmentTransactionId, consumedCostCents, consumedQty,
+        consumedLots: params.includeConsumedCostEvidence ? consumedDetail?.consumedLots : undefined,
+        consumedPoCostMills: params.includeConsumedCostEvidence ? consumedDetail?.consumedPoCostMills.toString() : undefined,
+        consumedPackagingCostMills: params.includeConsumedCostEvidence ? consumedDetail?.consumedPackagingCostMills.toString() : undefined,
+        consumedLandedCostMills: params.includeConsumedCostEvidence ? consumedDetail?.consumedLandedCostMills.toString() : undefined,
+        consumedCostProvisional: params.includeConsumedCostEvidence ? consumedDetail?.consumedCostProvisional : undefined,
+      });
     });
 
+    if (replayedResult) return replayedResult;
     if (adjustmentTransactionId == null) throw new Error("Inventory adjustment transaction was not recorded");
     const notifyAfterCommit = async () => this.triggerNotifyChange(params.productVariantId, "adjustment");
     if (params.deferUntilCommit) params.deferUntilCommit(notifyAfterCommit);
@@ -1566,6 +1653,12 @@ export class InventoryUseCases {
     }
 
     await this.db.transaction(async (tx) => {
+      const quantityPosting = await openOperationalQuantityPosting(tx);
+      const quantityKey = `replenishment_transform:${params.taskId}`;
+      if (quantityPosting && await quantityPosting.beginOperation(quantityKey, { operation: "replenishment_transform",
+        taskId: params.taskId, sourceVariant: params.sourceVariant, pickVariant: params.pickVariant,
+        fromLocationId: params.fromLocationId, toLocationId: params.toLocationId, qtySourceUnits: params.qtySourceUnits,
+        qtyTargetUnits: params.qtyTargetUnits, userId: params.userId, notes: params.notes, replenMethod: params.replenMethod })) return;
       await lockInventoryCostGraph(tx);
       const [fromLoc] = await tx
         .select()
@@ -1602,6 +1695,10 @@ export class InventoryUseCases {
         });
       }
 
+      if (quantityPosting) await tx.execute(sql`SELECT id FROM inventory.inventory_levels
+        WHERE (product_variant_id = ${plan.sourceVariantId} AND warehouse_location_id = ${params.fromLocationId})
+          OR (product_variant_id = ${plan.pickVariantId} AND warehouse_location_id = ${params.toLocationId})
+        ORDER BY warehouse_location_id, product_variant_id, id FOR UPDATE`);
       const sourceLevel = await this.storage.lockInventoryLevel(
         params.fromLocationId,
         plan.sourceVariantId,
@@ -1634,6 +1731,7 @@ export class InventoryUseCases {
         warehouseLocationId: params.fromLocationId,
         qtyDelta: -plan.qtySourceUnits,
         notes: params.notes ?? `Replen task #${params.taskId} case break`,
+        quantityPosting,
       });
       if (consumed.consumedQty !== plan.qtySourceUnits) {
         throw new IntegrityError("Case-break FIFO consumption did not match its frozen task quantity", {
@@ -1643,8 +1741,10 @@ export class InventoryUseCases {
         });
       }
 
-      await this.storage.adjustInventoryLevel(sourceLevel.id, { variantQty: -plan.qtySourceUnits }, tx);
-      await this.storage.adjustInventoryLevel(targetLevel.id, { variantQty: plan.qtyPickUnits }, tx);
+      if (!quantityPosting) {
+        await this.storage.adjustInventoryLevel(sourceLevel.id, { variantQty: -plan.qtySourceUnits }, tx);
+        await this.storage.adjustInventoryLevel(targetLevel.id, { variantQty: plan.qtyPickUnits }, tx);
+      }
 
       const outputLayers = allocateBuildCostLayers({
         poMills: consumed.consumedPoCostMills,
@@ -1669,6 +1769,7 @@ export class InventoryUseCases {
           costProvisional: consumed.consumedCostProvisional ? 1 : 0,
           receivedAt: occurredAt,
           notes: params.notes ?? `Output from replen task #${params.taskId}`,
+          quantityPosting,
         });
         for (const source of consumed.consumedLots) await recordLotCostContribution(tx, {
           sourceLotId: source.lotId, outputLotId: outputLot.id, sourceQty: source.qty,
@@ -1707,6 +1808,12 @@ export class InventoryUseCases {
         userId: params.userId ?? null,
         notes,
       }, tx);
+      if (quantityPosting) await quantityPosting.post({
+        idempotencyKey: quantityKey, kind: "transform",
+        actor: params.userId || "system:replenishment", reason: notes,
+        reference: { type: "replenishment_task", id: String(params.taskId) }, occurredAt: occurredAt.toISOString(),
+      });
+      if (quantityPosting) await quantityPosting.finishOperation({ movedBaseUnits: plan.movedBaseUnits, qtyPickUnits: plan.qtyPickUnits });
     });
 
     const notifyAfterCommit = async () => {
@@ -1723,6 +1830,7 @@ export class InventoryUseCases {
   // ---------------------------------------------------------------------------
 
   async transfer(params: {
+    commandKey?: string;
     productVariantId: number;
     fromLocationId: number;
     toLocationId: number;
@@ -1748,8 +1856,17 @@ export class InventoryUseCases {
 
     let reservedMoved = 0;
     let orderItemsRepointed = 0;
+    let replayed = false;
 
     await this.db.transaction(async (tx) => {
+      const quantityPosting = await openOperationalQuantityPosting(tx);
+      if (quantityPosting && !this.lotService) throw new IntegrityError("Ledger transfers require exact FIFO lot ownership");
+      const quantityKey = params.commandKey ?? (params.referenceId ? `${params.referenceType ?? "internal"}:${params.referenceId}` : undefined);
+      const replay = quantityPosting && await quantityPosting.beginOperation(quantityKey, { operation: "transfer", ...params });
+      if (replay) {
+        const result = z.object({ reservedMoved: z.number().int().nonnegative(), orderItemsRepointed: z.number().int().nonnegative() }).parse(replay.result);
+        reservedMoved = result.reservedMoved; orderItemsRepointed = result.orderItemsRepointed; replayed = true; return;
+      }
       await lockInventoryCostGraph(tx);
       const [fromLoc] = await tx
         .select()
@@ -1776,6 +1893,10 @@ export class InventoryUseCases {
         );
       }
 
+      if (quantityPosting) await tx.execute(sql`SELECT id FROM inventory.inventory_levels
+        WHERE product_variant_id = ${params.productVariantId}
+          AND warehouse_location_id IN (${params.fromLocationId}, ${params.toLocationId})
+        ORDER BY warehouse_location_id, product_variant_id, id FOR UPDATE`);
       const sourceLevel = await this.storage.lockInventoryLevel(
         params.fromLocationId,
         params.productVariantId,
@@ -1821,6 +1942,7 @@ export class InventoryUseCases {
       // already picked at the source bin, refuse and ask the user to finish or
       // cancel that pick first.
       if (reservedToMove > 0) {
+        if (quantityPosting) throw new IntegrityError("A transfer cannot relocate canonical claim ownership; release and replan the claim first");
         // order_items has no variant FK; it links to a variant by SKU
         // (catalog.product_variants.sku). Match through that.
         const conflict = await tx.execute(sql`
@@ -1848,7 +1970,7 @@ export class InventoryUseCases {
 
       // Source: decrement on-hand and (if moving) reserved in a SINGLE update so
       // the row never transiently violates check_reserved_lte_on_hand.
-      await this.storage.adjustInventoryLevel(
+      if (!quantityPosting) await this.storage.adjustInventoryLevel(
         sourceLevel.id,
         {
           variantQty: -params.qty,
@@ -1864,7 +1986,7 @@ export class InventoryUseCases {
 
       // Destination: increment on-hand and (if moving) reserved together. on-hand
       // rises by qty >= reservedToMove, so reserved <= on-hand holds.
-      await this.storage.adjustInventoryLevel(
+      if (!quantityPosting) await this.storage.adjustInventoryLevel(
         targetLevel.id,
         {
           variantQty: params.qty,
@@ -1896,10 +2018,11 @@ export class InventoryUseCases {
           actorId: params.userId || "system:inventory_transfer",
           occurredAt: this.clock(),
           operationKey: params.referenceId ? `${params.referenceType ?? "internal"}:${params.referenceId}` : undefined,
+          quantityPosting,
         });
       }
 
-      await this.storage.createInventoryTransaction({
+      const transferReceipt = await this.storage.createInventoryTransaction({
         productVariantId: params.productVariantId,
         fromLocationId: params.fromLocationId,
         toLocationId: params.toLocationId,
@@ -1914,6 +2037,11 @@ export class InventoryUseCases {
         notes: params.notes ?? null,
         userId: params.userId ?? null,
       }, tx);
+      if (quantityPosting) await quantityPosting.post({
+        idempotencyKey: quantityKey!, kind: "transfer",
+        actor: params.userId || "system:inventory_transfer", reason: params.notes || "Warehouse stock transfer",
+        reference: { type: "inventory_transaction", id: String(transferReceipt.id) }, occurredAt: this.clock().toISOString(),
+      });
 
       // Separate ledger row for the reserved movement so a single order's audit
       // trail explains why its reservation hopped bins.
@@ -1938,11 +2066,14 @@ export class InventoryUseCases {
         }, tx);
         reservedMoved = reservedToMove;
       }
+      if (quantityPosting) await quantityPosting.finishOperation({ reservedMoved, orderItemsRepointed });
     });
 
     const notifyAfterCommit = async () => this.triggerNotifyChange(params.productVariantId, "transfer");
-    if (params.deferUntilCommit) params.deferUntilCommit(notifyAfterCommit);
-    else await notifyAfterCommit();
+    if (!replayed) {
+      if (params.deferUntilCommit) params.deferUntilCommit(notifyAfterCommit);
+      else await notifyAfterCommit();
+    }
     return { reservedMoved, orderItemsRepointed };
   }
 
@@ -1951,13 +2082,15 @@ export class InventoryUseCases {
   // ---------------------------------------------------------------------------
 
   async convertSku(params: {
+    commandKey?: string;
     fromVariantId: number;
     toVariantId: number;
     locationId?: number;
     quantity?: number;
     notes?: string;
     userId?: string;
-  }): Promise<{ totalConverted: number; conversions: { locationCode: string; qty: number }[]; batchId: string }> {
+    deferUntilCommit?: (effect: () => Promise<void>) => void;
+  }, sharedPosting?: OperationalQuantityPosting): Promise<{ totalConverted: number; conversions: { locationCode: string; qty: number }[]; batchId: string }> {
     if (params.fromVariantId === params.toVariantId) {
       throw new ValidationError("Source and destination variants must be different");
     }
@@ -1967,22 +2100,35 @@ export class InventoryUseCases {
       throw new ValidationError("Quantity must be a positive integer");
     }
 
-    const batchId = `skuconv-${Date.now()}`;
+    const batchId = params.commandKey ? `skuconv-${createHash("sha256").update(params.commandKey).digest("hex").slice(0, 32)}` : `skuconv-${Date.now()}`;
     const conversions: { locationCode: string; qty: number }[] = [];
 
     const result = await this.db.transaction(async (tx) => {
+      const quantityPosting = sharedPosting ?? await openOperationalQuantityPosting(tx);
+      const replay = quantityPosting && !sharedPosting && await quantityPosting.beginOperation(params.commandKey, { operation: "sku_correction", ...params });
+      if (replay) return z.object({ totalConverted: z.number().int().nonnegative(), batchId: z.string(),
+        conversions: z.array(z.object({ locationCode: z.string(), qty: z.number().int().positive() })) }).parse(replay.result);
+      if (quantityPosting) {
+        if (!this.lotService) throw new IntegrityError("SKU correction requires exact FIFO lot ownership");
+        await lockInventoryCostGraph(tx);
+        await tx.execute(sql`SELECT id FROM inventory.inventory_levels
+          WHERE product_variant_id IN (${params.fromVariantId}, ${params.toVariantId})
+            ${params.locationId ? sql`AND warehouse_location_id = ${params.locationId}` : sql``}
+          ORDER BY warehouse_location_id, product_variant_id, id FOR UPDATE`);
+      }
       // Find all inventory for the source variant
       const sourceInventoryResp = await tx.execute(sql`
         SELECT
           il.warehouse_location_id as warehouse_location_id,
           il.variant_qty as variant_qty,
           wl.code as location_code
-        FROM inventory_levels il
-        JOIN warehouse_locations wl ON il.warehouse_location_id = wl.id
+        FROM inventory.inventory_levels il
+        JOIN warehouse.warehouse_locations wl ON il.warehouse_location_id = wl.id
         WHERE il.product_variant_id = ${params.fromVariantId}
           ${params.locationId ? sql`AND il.warehouse_location_id = ${params.locationId}` : sql``}
           AND il.variant_qty > 0
-        FOR UPDATE
+        ORDER BY il.warehouse_location_id, il.product_variant_id, il.id
+        FOR UPDATE OF il
       `);
       
       const sourceInventory = sourceInventoryResp.rows;
@@ -2006,16 +2152,17 @@ export class InventoryUseCases {
           productVariantId: params.fromVariantId,
           warehouseLocationId: inv.warehouse_location_id,
         }, tx);
+        if (quantityPosting) await this.assertNotFrozen(inv.warehouse_location_id, tx);
         
-        await this.storage.adjustInventoryLevel(sourceLevel.id, { variantQty: -qtyToConvert }, tx);
+        if (!quantityPosting) await this.storage.adjustInventoryLevel(sourceLevel.id, { variantQty: -qtyToConvert }, tx);
         
         await this.storage.createInventoryTransaction({
           productVariantId: params.fromVariantId,
           fromLocationId: inv.warehouse_location_id,
           transactionType: "sku_correction",
           variantQtyDelta: -qtyToConvert,
-          variantQtyBefore: sourceLevel.variantQty,
-          variantQtyAfter: sourceLevel.variantQty - qtyToConvert,
+          variantQtyBefore: sharedPosting ? null : sourceLevel.variantQty,
+          variantQtyAfter: sharedPosting ? null : sourceLevel.variantQty - qtyToConvert,
           sourceState: "on_hand",
           targetState: "on_hand",
           batchId,
@@ -2031,15 +2178,39 @@ export class InventoryUseCases {
           warehouseLocationId: inv.warehouse_location_id,
         }, tx);
         
-        await this.storage.adjustInventoryLevel(destLevel.id, { variantQty: qtyToConvert }, tx);
+        if (quantityPosting) {
+          const lotService = this.lotService!.withTx(tx);
+          const consumed = await lotService.adjustLots({ productVariantId: params.fromVariantId,
+            warehouseLocationId: inv.warehouse_location_id, qtyDelta: -qtyToConvert, quantityPosting, notes: params.notes });
+          const layers = allocateBuildCostLayers({ poMills: consumed.consumedPoCostMills,
+            packagingMills: consumed.consumedPackagingCostMills, landedMills: consumed.consumedLandedCostMills }, qtyToConvert);
+          let outputStartQty = 0;
+          const occurredAt = this.clock();
+          for (const layer of layers) {
+            const total = safeMillsNumber(layer.totalMills, "sku_correction.totalMills");
+            const lot = await lotService.createLot({ productVariantId: params.toVariantId, warehouseLocationId: inv.warehouse_location_id,
+              qty: layer.qty, unitCostCents: millsToCents(total), unitCostMills: total,
+              packagingCostMills: safeMillsNumber(layer.packagingMills, "sku_correction.packagingMills"),
+              landedCostMills: safeMillsNumber(layer.landedMills, "sku_correction.landedMills"),
+              costSource: "sku_correction", costProvisional: consumed.consumedCostProvisional ? 1 : 0,
+              notes: params.notes, receivedAt: occurredAt, quantityPosting });
+            for (const source of consumed.consumedLots) await recordLotCostContribution(tx, {
+              sourceLotId: source.lotId, outputLotId: lot.id, sourceQty: source.qty, outputQty: qtyToConvert,
+              outputStartQty, operationKind: "conversion", operationKey: batchId,
+            }, params.userId || "system:sku_correction", occurredAt);
+            outputStartQty += layer.qty;
+          }
+        } else await this.storage.adjustInventoryLevel(destLevel.id, { variantQty: qtyToConvert }, tx);
         
         await this.storage.createInventoryTransaction({
           productVariantId: params.toVariantId,
           toLocationId: inv.warehouse_location_id,
           transactionType: "sku_correction",
           variantQtyDelta: qtyToConvert,
-          variantQtyBefore: destLevel.variantQty,
-          variantQtyAfter: destLevel.variantQty + qtyToConvert,
+          // Shared batches may accumulate several cost layers at this target;
+          // only the final quantity entry/projection owns balance transitions.
+          variantQtyBefore: sharedPosting ? null : destLevel.variantQty,
+          variantQtyAfter: sharedPosting ? null : destLevel.variantQty + qtyToConvert,
           sourceState: "on_hand",
           targetState: "on_hand",
           batchId,
@@ -2050,7 +2221,7 @@ export class InventoryUseCases {
         }, tx);
 
         // Cleanup empty source
-        if (sourceLevel.variantQty - qtyToConvert <= 0) {
+        if (!quantityPosting && sourceLevel.variantQty - qtyToConvert <= 0) {
           const hasAssignment = await tx.execute(sql`
             SELECT 1 FROM product_locations
             WHERE product_variant_id = ${params.fromVariantId}
@@ -2066,9 +2237,17 @@ export class InventoryUseCases {
         remaining -= qtyToConvert;
       }
       
-      return { totalConverted: conversions.reduce((s, c) => s + c.qty, 0), conversions, batchId };
+      const result = { totalConverted: conversions.reduce((s, c) => s + c.qty, 0), conversions, batchId };
+      if (quantityPosting && !sharedPosting) {
+        await quantityPosting.post({ idempotencyKey: params.commandKey!, kind: "transform",
+          actor: params.userId || "system:sku_correction", reason: params.notes || "Explicit SKU inventory correction",
+          reference: { type: "sku_correction", id: batchId }, occurredAt: this.clock().toISOString() });
+        await quantityPosting.finishOperation(result);
+      }
+      return result;
     });
 
+    const notifyAfterCommit = async () => {
     AuditLogger.log({
       actor: params.userId || "system",
       action: "convert_sku",
@@ -2081,6 +2260,9 @@ export class InventoryUseCases {
 
     this.triggerNotifyChange(params.fromVariantId, "convert-sku-out");
     this.triggerNotifyChange(params.toVariantId, "convert-sku-in");
+    };
+    if (params.deferUntilCommit) params.deferUntilCommit(notifyAfterCommit);
+    else await notifyAfterCommit();
 
     return result;
   }
@@ -2090,6 +2272,9 @@ export class InventoryUseCases {
   // ---------------------------------------------------------------------------
 
   async syncWarehouse(warehouseId: number): Promise<any> {
+    // Provider availability is not an exact physical-lot receipt. External
+    // observations must not be converted into local stock by this legacy path.
+    await assertLegacyQuantityImportAllowed(this.db, "Legacy external inventory sync");
     const [wh] = await this.db.select().from(warehouses).where(eq(warehouses.id, warehouseId)).limit(1);
     if (!wh) throw new Error(`Warehouse ${warehouseId} not found`);
 

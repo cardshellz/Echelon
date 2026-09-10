@@ -26,6 +26,7 @@ import { PostgresInventoryCutoverCompletionRepository } from "../../infrastructu
 import { PostgresInventoryAvailabilityClaimRepository } from "../../infrastructure/inventory-availability-claim.repository";
 import { PostgresCanonicalClaimInventoryRepository } from "../../../inventory/infrastructure/canonical-claim-inventory.repository";
 import { createAuthorityAwareInventoryPublicationService } from "../../infrastructure/inventory-availability-runtime-publication.repository";
+import { installQuantityCutoverFixture, saveCompositionQuantityOpening } from "../fixtures/inventory-quantity-cutover.fixture";
 
 // Only the application's process-global connection is disabled. Every owner under
 // test receives the uniquely created disposable pool/client; no owner is mocked.
@@ -46,6 +47,8 @@ dbDescribe.sequential("cutover composition with actual snapshot, claim and recei
     await installCutoverAdmissionFixturePrerequisites(database.pool);
     await database.pool.query(readFileSync(resolve(process.cwd(),"migrations/236_inventory_cutover_admission.sql"),"utf8"));
     await database.pool.query(readFileSync(resolve(process.cwd(),"migrations/240_inventory_cutover_verified_opening.sql"),"utf8"));
+    await installQuantityCutoverFixture(database.pool);
+    await saveCompositionQuantityOpening(database.pool);
   }, 30_000);
   afterAll(async () => { await database?.close(); });
 
@@ -169,6 +172,8 @@ dbDescribe.sequential("empty-bin promise handoff through complete cutover compos
     await installCutoverAdmissionFixturePrerequisites(database.pool);
     await database.pool.query(readFileSync(resolve(process.cwd(), "migrations/236_inventory_cutover_admission.sql"), "utf8"));
     await database.pool.query(readFileSync(resolve(process.cwd(), "migrations/240_inventory_cutover_verified_opening.sql"), "utf8"));
+    await installQuantityCutoverFixture(database.pool);
+    await saveCompositionQuantityOpening(database.pool);
   }, 30_000);
   afterAll(async () => { await database?.close(); });
 
@@ -226,7 +231,9 @@ dbDescribe.sequential("empty-bin promise handoff through complete cutover compos
         { id: 5, qty_on_hand: 20, qty_reserved: 6, qty_picked: 0, total_unit_cost_mills: "1000" }]);
     expect((await database.pool.query("SELECT requested_qty::text,planned_qty::text,shortfall_qty::text FROM inventory.availability_claim_lines")).rows)
       .toEqual([{ requested_qty: "6", planned_qty: "6", shortfall_qty: "0" }]);
-    expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.inventory_transactions WHERE reference_type='inventory_cutover_promise'")).rows[0].count).toBe(1);
+    // Old counter-only promises stay in historical evidence. They are not a
+    // fabricated lot reservation/release in the new opening ledger.
+    expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.inventory_transactions WHERE reference_type='inventory_cutover_promise'")).rows[0].count).toBe(0);
     expect((await database.pool.query("SELECT desired_quantity::text FROM inventory.inventory_publication_outbox WHERE publication_phase='full'")).rows)
       .toEqual([{ desired_quantity: "14" }]);
     expect((await database.pool.query("SELECT * FROM oms.order_item_costs")).rows).toEqual([]);
@@ -251,6 +258,8 @@ dbDescribe.sequential("cutover abort, concurrent provider and external-owned des
     await installCutoverAdmissionFixturePrerequisites(database.pool);
     await database.pool.query(readFileSync(resolve(process.cwd(),"migrations/236_inventory_cutover_admission.sql"),"utf8"));
     await database.pool.query(readFileSync(resolve(process.cwd(),"migrations/240_inventory_cutover_verified_opening.sql"),"utf8"));
+    await installQuantityCutoverFixture(database.pool);
+    await saveCompositionQuantityOpening(database.pool);
     dryRun=await seedCompositionReviewedDryRun(database.pool); now=new Date(Date.parse(dryRun.completedAt)+10);
   },30_000);
   afterAll(async () => { await database?.close(); });
@@ -328,6 +337,7 @@ dbDescribe.sequential("cutover composition with one actual publication target", 
     await installCutoverAdmissionFixturePrerequisites(database.pool);
     await database.pool.query(readFileSync(resolve(process.cwd(),"migrations/236_inventory_cutover_admission.sql"),"utf8"));
     await database.pool.query(readFileSync(resolve(process.cwd(),"migrations/240_inventory_cutover_verified_opening.sql"),"utf8"));
+    await installQuantityCutoverFixture(database.pool);
     dryRun = await seedCompositionReviewedDryRun(database.pool);
     now = new Date(Date.parse(dryRun.completedAt)+10);
   },30_000);
@@ -343,6 +353,7 @@ dbDescribe.sequential("cutover composition with one actual publication target", 
         VALUES(2,1,'ready',0,36,'shopify','example-2','fo-2','default');
       INSERT INTO wms.order_items(id,order_id,oms_order_line_id,source_item_id,sku,product_id,quantity,picked_quantity,fulfilled_quantity,status,on_hold,requires_shipping)
         VALUES(12,2,12,'source-12','P5',101,2,0,0,'pending',false,1)`);
+    await saveCompositionQuantityOpening(database.pool);
     const service = new InventoryAvailabilityActivationService(new PostgresInventoryAvailabilityActivationRepository(database.pool),{ now:() => now });
     prepared = await service.prepare({ sourceDryRunId:dryRun.activationRunId,expectedDryRunResultHash:dryRun.resultHash,
       idempotencyKey:"composition-channel-prepare",reason:"Prepare one exact channel" },"operator");
@@ -390,7 +401,8 @@ dbDescribe.sequential("cutover composition with one actual publication target", 
     // A real operational change after review invalidates the hash even when
     // the observed conservative quantity remains below the new safe quantity.
     await database.pool.query("UPDATE inventory.inventory_levels SET variant_qty=21 WHERE id=10; UPDATE inventory.inventory_lots SET qty_on_hand=21 WHERE id=4");
-    try { await expect(service.commit(request,"operator")).rejects.toMatchObject({ code:"CUTOVER_REVIEW_CHANGED" }); }
+    try { await expect(service.commit(request,"operator")).rejects.toMatchObject({ code:"CUTOVER_REVIEW_BLOCKED",
+      context: { blockers: expect.arrayContaining([expect.objectContaining({ code: "CUTOVER_OPENING_EVIDENCE_CHANGED" })]) } }); }
     finally { await database.pool.query("UPDATE inventory.inventory_levels SET variant_qty=20 WHERE id=10; UPDATE inventory.inventory_lots SET qty_on_hand=20 WHERE id=4"); }
     // A real DB failure after all claim/authority/outbox changes must undo the
     // complete transaction. The existing production guards remain installed.

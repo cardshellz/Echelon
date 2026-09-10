@@ -18,11 +18,12 @@ export function normalizeOpeningVerification(input: OpeningVerification): Openin
 
 /**
  * A new, independently verified current-custody basis, NOT repaired history.
- * Physical counters and valuation must already match. Existing owner correction
- * workflows must resolve discrepancies first; this path never changes stock.
+ * V1 preserves the semantics of existing immutable audits. V2 replaces dual
+ * counter verification with exact lot observations and derived positions. This
+ * evaluator changes no data; only admitted cutover can post that opening.
  */
 export function evaluateCutoverOpening(rawEvidence: unknown, input: OpeningVerification): OpeningAssessment {
-  const evidence = cutoverReconstructionEvidenceSchema.parse(rawEvidence);
+  let evidence = cutoverReconstructionEvidenceSchema.parse(rawEvidence);
   const verification = normalizeOpeningVerification(input);
   // The strict planner returns the canonical hash of the exact validated census.
   // Reuse it rather than parsing and sorting another complete copy for hashing.
@@ -55,14 +56,35 @@ export function evaluateCutoverOpening(rawEvidence: unknown, input: OpeningVerif
   }
   const sameRows = (left: readonly { id: number }[], right: readonly { id: number }[]) =>
     canonicalJson([...left].sort((a,b) => a.id-b.id)) === canonicalJson([...right].sort((a,b) => a.id-b.id));
-  if (!sameRows(verification.levels, evidence.levels)) block("OPENING_LEVEL_VERIFICATION_MISMATCH", "levels", "Independent verification must cover every exact current level and counter. Correct discrepancies through the inventory owner first.");
-  if (!sameRows(verification.lots, evidence.lots)) block("OPENING_LOT_VERIFICATION_MISMATCH", "lots", "Independent verification must cover every exact lot quantity and cost component; no missing lot or new valuation is inferred.");
+  if (verification.contractVersion === "inventory_cutover_opening_v1") {
+    if (!sameRows(verification.levels, evidence.levels)) block("OPENING_LEVEL_VERIFICATION_MISMATCH", "levels", "Independent verification must cover every exact current level and counter. Correct discrepancies through the inventory owner first.");
+    if (!sameRows(verification.lots, evidence.lots)) block("OPENING_LOT_VERIFICATION_MISMATCH", "lots", "Independent verification must cover every exact lot quantity and cost component; no missing lot or new valuation is inferred.");
+  } else {
+    const levelIdentity = ({ variantQty: _onHand, reservedQty: _reserved, pickedQty: _picked, packedQty: _packed, ...identity }: CutoverReconstructionEvidence["levels"][number]) => identity;
+    const lotIdentity = ({ onHandQty: _onHand, reservedQty: _reserved, pickedQty: _picked, ...identity }: CutoverReconstructionEvidence["lots"][number]) => identity;
+    if (!sameRows(verification.levels.map(levelIdentity), evidence.levels.map(levelIdentity))) {
+      block("OPENING_LEVEL_IDENTITY_MISMATCH", "levels", "The opening must preserve every current exact SKU/bin/warehouse identity; quantities are derived from verified lots.");
+    }
+    if (!sameRows(verification.lots.map(lotIdentity), evidence.lots.map(lotIdentity))) {
+      block("OPENING_LOT_IDENTITY_OR_COST_CHANGED", "lots", "All original lot identities and exact cost layers must be preserved. Observed quantities cannot invent a lot or revalue historical costs.");
+    }
+    if (evidence.levels.some(level => BigInt(level.packedQty) !== BigInt(0))) {
+      block("OPENING_PACKED_CUSTODY_REQUIRES_REVIEW", "levels", "Existing packed custody needs exact lot and owner evidence; the opening must not silently erase it.");
+    }
+  }
   const required = requiredOpeningItems(evidence);
   if (new Set(verification.owners.map(owner => owner.orderItemId)).size !== verification.owners.length
     || canonicalJson(verification.owners.map(owner => owner.orderItemId)) !== canonicalJson(required.map(item => item.id))) {
     block("OPENING_OWNER_COVERAGE_MISMATCH", "owners", "Every current physical order line requires exactly one explicit verification, including unstarted demand and zero remaining quantity.");
   }
   if (blockers.length > 0) return finish(strict);
+  if (verification.contractVersion === "inventory_cutover_opening_v2") {
+    evidence = { ...evidence, levels: verification.levels, lots: verification.lots.map(lot => {
+      const physical = BigInt(lot.onHandQty) + BigInt(lot.pickedQty);
+      return { ...lot, status: lot.status === "depleted" && physical > BigInt(0) ? "active"
+        : lot.status === "active" && physical === BigInt(0) && lot.reservedQty === "0" ? "depleted" : lot.status };
+    }) };
+  }
   const levels = new Map(evidence.levels.map(row => [row.id,row]));
   const lots = new Map(evidence.lots.map(row => [row.id,row]));
   const costs = new Map(evidence.costs.map(row => [row.id,row]));

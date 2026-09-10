@@ -16,10 +16,12 @@ export function createOpeningWorksheet(source: OpeningSource): string {
     recordedReference: { capturedAt: source.capturedAt, labels: source.labels,
       levels: source.evidence.levels, lots: source.evidence.lots,
       orders: source.evidence.orders, items: requiredOpeningItems(source.evidence), costs: source.evidence.costs },
-    verification: { contractVersion: "inventory_cutover_opening_v1", expectedEvidenceHash: source.evidenceHash,
+    verification: { contractVersion: "inventory_cutover_opening_v2", expectedEvidenceHash: source.evidenceHash,
       expectedAuthorityRevision: source.authorityRevision, expectedConfigurationRunId: source.configurationRunId,
       verificationReference: "", verificationEvidenceHash: "", verifiedAt: "", historicalDisposition: "preserve_unresolved",
-      levels: source.evidence.levels.map(level => ({ ...level, variantQty: "", reservedQty: "", pickedQty: "", packedQty: "" })),
+      // Position quantities are outputs recalculated from lot observations on
+      // import and on the server. They are not a second count worksheet.
+      levels: source.evidence.levels.map(level => ({ ...level, variantQty: "0", reservedQty: "0", pickedQty: "0", packedQty: "0" })),
       lots: source.evidence.lots.map(lot => ({ ...lot, onHandQty: "", reservedQty: "", pickedQty: "",
         unitCostMills: "", poUnitCostMills: "", packagingUnitCostMills: "", landedUnitCostMills: "" })),
       owners: requiredOpeningItems(source.evidence).map(item => ({ orderId: item.orderId, orderItemId: item.id,

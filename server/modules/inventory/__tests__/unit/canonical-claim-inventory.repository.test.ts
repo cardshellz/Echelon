@@ -9,6 +9,7 @@ const OCCURRED_AT = new Date("2026-09-02T02:00:00.000Z");
 
 function createClient(handler: (text: string, values: unknown[]) => Promise<any>, lotOriginalQuantities: ReadonlyMap<number, number> = new Map()) {
   const query = vi.fn(async (text: string, values: unknown[] = []) => {
+    if (text.includes("FROM inventory.quantity_ledger_opening")) return { rows: [] };
     if (text.includes("pg_advisory_xact_lock") || text.includes("inventory.lot_cost_contributions")) return { rows: [] };
     if (text.includes("SELECT source.qty_received AS source_qty")) {
       const outputQty = lotOriginalQuantities.get(Number(values[0]));
@@ -350,7 +351,7 @@ describe("PostgresCanonicalClaimInventoryRepository", () => {
     expect(observedLot?.values?.[17]).toBe(2);
     expect(observedLot?.values?.[19]).toBe(0);
     expect(observedLot?.values?.[20]).toBe("purchase_order");
-    expect(calls[0].text).toContain("pg_advisory_xact_lock");
+    expect(calls.find(call => !call.text.includes("quantity_ledger_opening"))?.text).toContain("pg_advisory_xact_lock");
     expect(calls.filter((call) => call.text.includes("INSERT INTO inventory.lot_cost_contributions"))
       .map((call) => call.values)).toEqual([
         [51, 53, "transfer", `claim_observation:9:${"a".repeat(64)}`, 2, 2, 0, "unit-test", OCCURRED_AT],
@@ -987,7 +988,7 @@ describe("PostgresCanonicalClaimInventoryRepository", () => {
       }
       if (text.startsWith("INSERT INTO inventory.inventory_lots")) {
         expect(values).toEqual([
-          "CC-8-81", 101, 2, "250", "25000", 3, OCCURRED_AT, 1, "last_paid", "approved physical count",
+          "CC-8-81", 101, 2, "250", "25000", 3, OCCURRED_AT, 1, "last_paid", "approved physical count", 3,
         ]);
         return { rows: [{ id: 53 }], rowCount: 1 };
       }

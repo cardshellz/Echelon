@@ -23,6 +23,7 @@ import {
 } from "@shared/schema";
 import { calculateUnreservedLotOnHand } from "./domain/inventory.domain";
 import type { InventoryLot } from "@shared/schema";
+import { assertLegacyQuantityImportAllowed } from "./application/legacy-quantity-import";
 
 /**
  * Parse one lot-cost CSV row. Pure + exported for unit testing.
@@ -381,6 +382,7 @@ export class COGSService {
     receivedAt?: Date;
     notes?: string;
   }): Promise<InventoryLot> {
+    await assertLegacyQuantityImportAllowed(this.db, "Legacy cost-lot import");
     const poUnitCost = params.poUnitCostCents ?? 0;
     const packagingCost = params.packagingCostCents ?? 0;
     const landedCost = params.landedCostCents ?? 0;

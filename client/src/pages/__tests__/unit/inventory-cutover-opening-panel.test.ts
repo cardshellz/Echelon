@@ -32,7 +32,8 @@ describe("existing-page opening verification panel", () => {
     for (const label of ["Order #CS-1001", "P5", "MAIN — Main warehouse", "PICK-A-01"]) expect(html).toContain(label);
     expect(html).toContain("database records, not proof of a physical count");
     expect(html).toContain("Saving here does not correct stock, change authority or publish quantities");
-    expect(html).toContain("Every quantity is deliberately blank");
+    expect(html).toContain("Lot and owner quantities start blank");
+    expect(html).toContain("SKU/bin totals are calculated from those lot observations");
     expect(html).not.toContain("Switch to canonical authority");
   });
   it("does not allow import or template export from stale source after refresh failure", () => {

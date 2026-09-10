@@ -1,5 +1,6 @@
 import { sql, type SQL } from "drizzle-orm";
 import { resolveReturnCost } from "../cost-resolver";
+import { openOperationalQuantityPosting } from "../infrastructure/operational-quantity-posting";
 
 export interface ReturnRestockExecutor {
   execute(query: SQL): Promise<unknown>;
@@ -68,6 +69,7 @@ export async function applyReturnRestock(
   rawInput: ApplyReturnRestockInput,
 ): Promise<ApplyReturnRestockResult> {
   const input = normalizeInput(rawInput);
+  const quantityPosting = await openOperationalQuantityPosting(executor);
   await executor.execute(sql`
     SELECT pg_advisory_xact_lock(
       hashtext('inventory.apply_return_restock'),
@@ -150,7 +152,7 @@ export async function applyReturnRestock(
       ${lotNumber}, ${input.productVariantId}, ${input.warehouseLocationId},
       ${unitCostCents}, ${unitCostCents}, 0, 0, ${unitCostCents},
       ${unitCostMills}, ${unitCostMills}, 0, 0, ${unitCostMills},
-      ${input.quantity}, 0, 0, ${input.quantity}, 0,
+      ${quantityPosting ? 0 : input.quantity}, 0, 0, ${input.quantity}, 0,
       ${input.now}, 'active', ${cost.provisional ? 1 : 0}, ${cost.source},
       ${input.notes}, ${input.now}
     )
@@ -159,7 +161,7 @@ export async function applyReturnRestock(
   if (!lot) throw integrity("RETURN_RESTOCK_LOT_INSERT_FAILED", "Return inventory lot was not created.", input);
   const inventoryLotId = readPositiveInteger(lot.id, "return inventory lot id");
 
-  await executor.execute(sql`
+  if (!quantityPosting) await executor.execute(sql`
     UPDATE inventory.inventory_levels
     SET variant_qty = ${quantityAfter}, updated_at = ${input.now}
     WHERE id = ${readPositiveInteger(level.id, "inventory level id")}
@@ -182,6 +184,14 @@ export async function applyReturnRestock(
     RETURNING id
   `));
   if (!transaction) throw integrity("RETURN_RESTOCK_LEDGER_INSERT_FAILED", "Return inventory transaction was not created.", input);
+  if (quantityPosting) {
+    await quantityPosting.addLot(inventoryLotId, { onHand: input.quantity, reserved: 0, picked: 0, packed: 0 });
+    await quantityPosting.post({
+      idempotencyKey: `return_inventory_treatment:${input.dispositionItemId}`, kind: "return",
+      actor: input.actor, reason: input.notes || "Approved sellable return restock",
+      reference: { type: REFERENCE_TYPE, id: String(input.dispositionItemId) }, occurredAt: input.now.toISOString(),
+    });
+  }
 
   return {
     productVariantId: input.productVariantId,

@@ -12,14 +12,20 @@ import { insertWarehouseLocationSchema, insertProductSchema, insertProductVarian
 import Papa from "papaparse";
 import { projectInventoryLevels } from "./application/inventory-levels.query";
 import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
+import { requireLegacyQuantityImport, sendInventoryQuantityError, validateInventoryCommandKey } from "./interfaces/quantity-command.middleware";
+import { readInventoryQuantityCapabilities } from "./infrastructure/quantity-authority.query";
 
 export function registerInventoryRoutes(app: Express) {
+  app.get("/api/inventory/quantity-capabilities", requireAuth, async (_req, res, next) => {
+    try { res.json(await readInventoryQuantityCapabilities()); }
+    catch (error) { next(error); }
+  });
 
   // ============================================
   // INVENTORY ADJUSTMENTS
   // ============================================
 
-  app.post("/api/inventory/adjust", requirePermission("inventory", "adjust"), async (req, res) => {
+  app.post("/api/inventory/adjust", requirePermission("inventory", "adjust"), validateInventoryCommandKey, async (req, res) => {
     try {
       const { inventoryCore } = req.app.locals.services;
       const { inventoryItemId, productVariantId: pvId, warehouseLocationId, baseUnitsDelta, qtyDelta: bodyQtyDelta, reason } = req.body;
@@ -32,6 +38,7 @@ export function registerInventoryRoutes(app: Express) {
       }
 
       await inventoryCore.adjustInventory({
+        commandKey: req.body.commandKey,
         productVariantId: adjustVariantId,
         warehouseLocationId,
         qtyDelta,
@@ -55,6 +62,7 @@ export function registerInventoryRoutes(app: Express) {
       res.json({ success: true });
     } catch (error) {
       console.error("Error adjusting inventory:", error);
+      if (sendInventoryQuantityError(res, error)) return;
       res.status(500).json({ error: "Failed to adjust inventory" });
     }
   });
@@ -105,7 +113,7 @@ export function registerInventoryRoutes(app: Express) {
   // BIN-TO-BIN TRANSFERS
   // ============================================
   
-  app.post("/api/inventory/transfer", requirePermission("inventory", "adjust"), async (req, res) => {
+  app.post("/api/inventory/transfer", requirePermission("inventory", "adjust"), validateInventoryCommandKey, async (req, res) => {
     try {
       const { inventoryCore } = req.app.locals.services;
       const { fromLocationId, toLocationId, variantId, quantity, notes, moveReserved } = req.body;
@@ -151,6 +159,7 @@ export function registerInventoryRoutes(app: Express) {
       }
 
       const transferResult = await inventoryCore.transfer({
+        commandKey: req.body.commandKey,
         productVariantId: varId,
         fromLocationId: fromLocId,
         toLocationId: toLocId,
@@ -190,13 +199,14 @@ export function registerInventoryRoutes(app: Express) {
         });
       }
       console.error("Transfer error:", error);
+      if (sendInventoryQuantityError(res, error)) return;
       res.status(400).json({ error: String(error) });
     }
   });
 
   // SKU Conversion — move inventory from one variant to another across all locations
   // Delegates to InventoryUseCases.convertSku which handles tx + ledger atomically.
-  app.post("/api/inventory/convert-sku", requirePermission("inventory", "adjust"), async (req, res) => {
+  app.post("/api/inventory/convert-sku", requirePermission("inventory", "adjust"), validateInventoryCommandKey, async (req, res) => {
     try {
       const { inventoryCore } = req.app.locals.services;
       const { fromVariantId, toVariantId, locationId, quantity, notes } = req.body;
@@ -223,6 +233,7 @@ export function registerInventoryRoutes(app: Express) {
       }
 
       const result = await inventoryCore.convertSku({
+        commandKey: req.body.commandKey,
         fromVariantId: fromVarId,
         toVariantId: toVarId,
         locationId: locId,
@@ -248,6 +259,7 @@ export function registerInventoryRoutes(app: Express) {
       });
     } catch (error) {
       console.error("SKU conversion error:", error);
+      if (sendInventoryQuantityError(res, error)) return;
       res.status(400).json({ error: String(error) });
     }
   });
@@ -332,7 +344,7 @@ export function registerInventoryRoutes(app: Express) {
   });
 
   // CSV Inventory Upload - bulk update inventory levels
-  app.post("/api/inventory/upload-csv", requireAuth, upload.single("file"), async (req, res) => {
+  app.post("/api/inventory/upload-csv", requireAuth, requireLegacyQuantityImport, upload.single("file"), async (req, res) => {
     try {
       if (!req.session.user || (req.session.user.role !== "admin" && req.session.user.role !== "lead")) {
         return res.status(403).json({ error: "Admin or lead access required" });
@@ -518,7 +530,7 @@ export function registerInventoryRoutes(app: Express) {
     res.send(template);
   });
 
-  app.post("/api/inventory/receive", requireAuth, async (req, res) => {
+  app.post("/api/inventory/receive", requireAuth, validateInventoryCommandKey, async (req, res) => {
     if (!req.session.user) {
       return res.status(401).json({ error: "Unauthorized" });
     }
@@ -552,9 +564,10 @@ export function registerInventoryRoutes(app: Express) {
       const variantQty = quantity;
 
       // Generate a reference ID if not provided
-      const refId = referenceId || `RCV-${Date.now()}`;
+      const refId = referenceId || (req.body.commandKey ? `RCV-${req.body.commandKey}` : `RCV-${Date.now()}`);
 
       await inventoryCore.receiveInventory({
+        commandKey: req.body.commandKey,
         productVariantId: variantId,
         warehouseLocationId,
         qty: variantQty,
@@ -574,6 +587,7 @@ export function registerInventoryRoutes(app: Express) {
       res.json({ success: true, variantQtyReceived: variantQty });
     } catch (error) {
       console.error("Error receiving inventory:", error);
+      if (sendInventoryQuantityError(res, error)) return;
       res.status(500).json({ error: "Failed to receive inventory" });
     }
   });
@@ -835,7 +849,7 @@ export function registerInventoryRoutes(app: Express) {
   // BREAK / ASSEMBLY ROUTES
   // ============================================
 
-  app.post("/api/inventory/break", requirePermission("inventory", "adjust"), async (req, res) => {
+  app.post("/api/inventory/break", requirePermission("inventory", "adjust"), validateInventoryCommandKey, async (req, res) => {
     try {
       const { breakAssembly } = req.app.locals.services;
       const { sourceVariantId, targetVariantId, sourceQty, warehouseLocationId, targetLocationId } = req.body;
@@ -846,6 +860,7 @@ export function registerInventoryRoutes(app: Express) {
       }
 
       const result = await breakAssembly.breakVariant({
+        commandKey: req.body.commandKey,
         sourceVariantId,
         targetVariantId,
         sourceQty,
@@ -865,11 +880,12 @@ export function registerInventoryRoutes(app: Express) {
       res.json(result);
     } catch (error: any) {
       console.error("Error breaking variant:", error);
+      if (sendInventoryQuantityError(res, error)) return;
       res.status(400).json({ error: error.message || "Failed to break variant" });
     }
   });
 
-  app.post("/api/inventory/assemble", requirePermission("inventory", "adjust"), async (req, res) => {
+  app.post("/api/inventory/assemble", requirePermission("inventory", "adjust"), validateInventoryCommandKey, async (req, res) => {
     try {
       const { breakAssembly } = req.app.locals.services;
       const { sourceVariantId, targetVariantId, targetQty, warehouseLocationId } = req.body;
@@ -880,6 +896,7 @@ export function registerInventoryRoutes(app: Express) {
       }
 
       const result = await breakAssembly.assembleVariant({
+        commandKey: req.body.commandKey,
         sourceVariantId,
         targetVariantId,
         targetQty,
@@ -897,6 +914,7 @@ export function registerInventoryRoutes(app: Express) {
       res.json(result);
     } catch (error: any) {
       console.error("Error assembling variant:", error);
+      if (sendInventoryQuantityError(res, error)) return;
       res.status(400).json({ error: error.message || "Failed to assemble variant" });
     }
   });
@@ -1267,7 +1285,7 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
-  app.post("/api/inventory/lots/create-legacy", requirePermission("inventory", "adjust"), async (req, res) => {
+  app.post("/api/inventory/lots/create-legacy", requirePermission("inventory", "adjust"), requireLegacyQuantityImport, async (req, res) => {
     try {
       const { inventoryLots } = req.app.locals.services;
       const result = await inventoryLots.createLegacyLots();
@@ -2307,7 +2325,7 @@ export function registerInventoryRoutes(app: Express) {
     }
   });
 
-  app.post("/api/inventory/add-stock", requirePermission("inventory", "adjust"), async (req, res) => {
+  app.post("/api/inventory/add-stock", requirePermission("inventory", "adjust"), validateInventoryCommandKey, async (req, res) => {
     try {
       const { inventoryCore } = req.app.locals.services;
       const { variantId, warehouseLocationId, variantQty, notes } = req.body;
@@ -2323,10 +2341,11 @@ export function registerInventoryRoutes(app: Express) {
       }
 
       await inventoryCore.receiveInventory({
+        commandKey: req.body.commandKey,
         productVariantId: variantId,
         warehouseLocationId,
         qty: variantQty,
-        referenceId: `ADD-${Date.now()}`,
+        referenceId: req.body.commandKey ? `ADD-${req.body.commandKey}` : `ADD-${Date.now()}`,
         notes: notes || "Stock added via inventory page",
         userId,
       });
@@ -2346,11 +2365,12 @@ export function registerInventoryRoutes(app: Express) {
       res.json({ success: true, variantQtyAdded: variantQty });
     } catch (error) {
       console.error("Error adding stock:", error);
+      if (sendInventoryQuantityError(res, error)) return;
       res.status(500).json({ error: "Failed to add stock" });
     }
   });
 
-  app.post("/api/inventory/adjust-stock", requirePermission("inventory", "adjust"), async (req, res) => {
+  app.post("/api/inventory/adjust-stock", requirePermission("inventory", "adjust"), validateInventoryCommandKey, async (req, res) => {
     try {
       const { inventoryCore } = req.app.locals.services;
       const { variantId, warehouseLocationId, variantQtyDelta, reasonCode, notes } = req.body;
@@ -2366,6 +2386,7 @@ export function registerInventoryRoutes(app: Express) {
       }
 
       await inventoryCore.adjustInventory({
+        commandKey: req.body.commandKey,
         productVariantId: variantId,
         warehouseLocationId,
         qtyDelta: variantQtyDelta,
@@ -2388,11 +2409,12 @@ export function registerInventoryRoutes(app: Express) {
       res.json({ success: true, variantQtyDelta });
     } catch (error) {
       console.error("Error adjusting stock:", error);
+      if (sendInventoryQuantityError(res, error)) return;
       res.status(500).json({ error: "Failed to adjust stock" });
     }
   });
 
-  app.post("/api/inventory/import-csv", requirePermission("inventory", "upload"), upload.single("file"), async (req, res) => {
+  app.post("/api/inventory/import-csv", requirePermission("inventory", "upload"), requireLegacyQuantityImport, upload.single("file"), async (req, res) => {
     try {
       if (!req.file) {
         return res.status(400).json({ error: "No file uploaded" });
@@ -2638,7 +2660,7 @@ export function registerInventoryRoutes(app: Express) {
   });
 
   // Manual cost entry — single lot
-  app.post("/api/cogs/manual-entry", requirePermission("inventory", "adjust"), async (req, res) => {
+  app.post("/api/cogs/manual-entry", requirePermission("inventory", "adjust"), requireLegacyQuantityImport, async (req, res) => {
     try {
       const { cogs } = req.app.locals.services;
       const { productVariantId, warehouseLocationId, qty, unitCostCents, landedCostCents, batchNumber, receivedAt, notes } = req.body;
@@ -2661,12 +2683,13 @@ export function registerInventoryRoutes(app: Express) {
       res.json({ success: true, lot });
     } catch (error: any) {
       console.error("Error creating manual cost entry:", error);
+      if (sendInventoryQuantityError(res, error)) return;
       res.status(500).json({ error: error.message || "Failed to create manual cost entry" });
     }
   });
 
   // Bulk import (from spreadsheet paste)
-  app.post("/api/cogs/bulk-import", requirePermission("inventory", "adjust"), async (req, res) => {
+  app.post("/api/cogs/bulk-import", requirePermission("inventory", "adjust"), requireLegacyQuantityImport, async (req, res) => {
     try {
       const { cogs } = req.app.locals.services;
       const { entries } = req.body; // Array of { sku, qty, unitCostCents, batchNumber }
@@ -2679,6 +2702,7 @@ export function registerInventoryRoutes(app: Express) {
       res.json(result);
     } catch (error: any) {
       console.error("Error bulk importing costs:", error);
+      if (sendInventoryQuantityError(res, error)) return;
       res.status(500).json({ error: error.message || "Failed to bulk import" });
     }
   });
@@ -2741,7 +2765,7 @@ export function registerInventoryRoutes(app: Express) {
   });
 
   // Delete manual lot
-  app.delete("/api/cogs/manual-lots/:lotId", requirePermission("inventory", "adjust"), async (req, res) => {
+  app.delete("/api/cogs/manual-lots/:lotId", requirePermission("inventory", "adjust"), requireLegacyQuantityImport, async (req, res) => {
     try {
       const { cogs } = req.app.locals.services;
       const lotId = parseInt(req.params.lotId);

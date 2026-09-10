@@ -1,4 +1,5 @@
 import React, { useState, useMemo } from "react";
+import { useInventoryQuantityCapabilities } from "@/hooks/use-inventory-quantity-capabilities";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -948,6 +949,8 @@ function OrderCOGSSection() {
 // ═══════════════════════════════════════════════════════════════════════
 
 function ManualEntrySection() {
+  const { data: quantityCapabilities } = useInventoryQuantityCapabilities();
+  const legacyQuantityImportAllowed = quantityCapabilities?.legacyQuantityImportAllowed === true;
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const [showBulkDialog, setShowBulkDialog] = useState(false);
@@ -1035,13 +1038,19 @@ function ManualEntrySection() {
                 All costs in cents per piece.
               </CardDescription>
             </div>
-            <Button variant="outline" size="sm" onClick={() => setShowBulkDialog(true)}>
+            <Button variant="outline" size="sm" disabled={!legacyQuantityImportAllowed} onClick={() => setShowBulkDialog(true)}>
               <Upload className="h-4 w-4 mr-1.5" />
               Bulk Import
             </Button>
           </div>
         </CardHeader>
         <CardContent>
+          {quantityCapabilities?.legacyQuantityImportAllowed === false && (
+            <p className="mb-4 text-sm text-muted-foreground">
+              Ledger authority is active. Create stock through receiving or an audited adjustment, not cost-lot import.
+              Existing lot costs can still be corrected without creating or deleting stock.
+            </p>
+          )}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             <div>
               <Label>Product Variant</Label>
@@ -1147,7 +1156,7 @@ function ManualEntrySection() {
           <div className="mt-4">
             <Button
               onClick={() => createMutation.mutate()}
-              disabled={!variantId || !locationId || !qty || !unitCost || createMutation.isPending}
+              disabled={!legacyQuantityImportAllowed || !variantId || !locationId || !qty || !unitCost || createMutation.isPending}
             >
               {createMutation.isPending ? (
                 <RefreshCw className="h-4 w-4 mr-1.5 animate-spin" />
@@ -1223,7 +1232,7 @@ function ManualEntrySection() {
                             variant="ghost"
                             size="icon"
                             className="h-7 w-7 text-destructive"
-                            disabled={Number(lot.qty_consumed || 0) > 0}
+                            disabled={!legacyQuantityImportAllowed || Number(lot.qty_consumed || 0) > 0}
                             onClick={() => {
                               if (confirm("Delete this manual cost lot?")) {
                                 deleteMutation.mutate(lot.id);
@@ -1257,6 +1266,7 @@ function ManualEntrySection() {
 // ─── Bulk Import Dialog ──────────────────────────────────────────────
 
 function BulkImportDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (v: boolean) => void }) {
+  const { data: quantityCapabilities } = useInventoryQuantityCapabilities();
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const [pasteData, setPasteData] = useState("");
@@ -1319,7 +1329,7 @@ function BulkImportDialog({ open, onOpenChange }: { open: boolean; onOpenChange:
           <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
           <Button
             onClick={() => importMutation.mutate()}
-            disabled={!pasteData.trim() || importMutation.isPending}
+            disabled={quantityCapabilities?.legacyQuantityImportAllowed !== true || !pasteData.trim() || importMutation.isPending}
           >
             {importMutation.isPending ? "Importing..." : "Import"}
           </Button>

@@ -57,6 +57,9 @@ databaseTests.sequential("cost contribution physical owners on PostgreSQL", () =
       await pool.query(tableDdl(table));
     }
     await pool.query(`
+      CREATE TABLE inventory.cutover_admission_fence(singleton_key boolean PRIMARY KEY, epoch bigint NOT NULL);
+      INSERT INTO inventory.cutover_admission_fence VALUES(true,1);
+      CREATE TABLE inventory.quantity_ledger_opening(singleton_key boolean PRIMARY KEY, command_id bigint NOT NULL);
       CREATE TABLE inventory.availability_claim_build_handoffs (build_order_id integer, claim_id bigint, claim_operation_id bigint, status text);
       CREATE UNIQUE INDEX level_identity ON inventory.inventory_levels(product_variant_id,warehouse_location_id);
       CREATE UNIQUE INDEX reservation_identity ON inventory.build_component_reservations(build_order_component_id,inventory_lot_id);

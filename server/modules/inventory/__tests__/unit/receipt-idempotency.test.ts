@@ -138,3 +138,5 @@ describe("Receipt idempotency (H4)", () => {
     expect(mockStorage.createInventoryTransaction).not.toHaveBeenCalled();
   });
 });
+// Explicit pre-opening compatibility fixture. Active posting is covered against PostgreSQL.
+vi.mock("../../infrastructure/operational-quantity-posting", () => ({ openOperationalQuantityPosting: vi.fn(async () => null) }));

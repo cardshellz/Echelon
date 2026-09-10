@@ -1,5 +1,6 @@
 import { lockInventoryCostGraph, recordLotCostContribution } from "./cost-evidence.repository";
 import { sql } from "drizzle-orm";
+import { openOperationalQuantityPosting } from "./operational-quantity-posting";
 import {
   allocateBuildCostLayers,
   assertBuildRunOutputUntouched,
@@ -195,6 +196,28 @@ export class BuildExecutionRepository {
     return result.rows;
   }
 
+  /** Complete inventory lock set before the first FIFO/custody lock. Claims do
+   * not take the manual-build cost lock, so per-component locking is unsafe. */
+  private async lockQuantityInventory(tx: Db, order: any): Promise<void> {
+    const levels = await tx.execute(sql`SELECT level.id FROM inventory.inventory_levels level
+      WHERE (level.product_variant_id = ${order.output_variant_id} AND level.warehouse_location_id = ${order.output_location_id})
+        OR EXISTS (SELECT 1 FROM inventory.build_order_components component
+          WHERE component.build_order_id = ${order.id} AND component.component_variant_id = level.product_variant_id
+            AND component.source_location_id = level.warehouse_location_id)
+        OR EXISTS (SELECT 1 FROM inventory.build_run_consumptions consumption JOIN inventory.build_runs run ON run.id = consumption.build_run_id
+          JOIN inventory.inventory_lots consumed_lot ON consumed_lot.id = consumption.inventory_lot_id
+          WHERE run.build_order_id = ${order.id} AND consumed_lot.product_variant_id = level.product_variant_id
+            AND consumed_lot.warehouse_location_id = level.warehouse_location_id)
+      ORDER BY level.warehouse_location_id, level.product_variant_id, level.id FOR UPDATE OF level`);
+    const ids = levels.rows.map(row => Number(row.id));
+    if (ids.length === 0) return;
+    await tx.execute(sql`SELECT lot.id FROM inventory.inventory_lots lot
+      JOIN inventory.inventory_levels level ON level.product_variant_id = lot.product_variant_id
+        AND level.warehouse_location_id = lot.warehouse_location_id
+      WHERE level.id = ANY(${sql.param(ids)}::integer[])
+      ORDER BY lot.warehouse_location_id, lot.product_variant_id, lot.received_at, lot.id FOR UPDATE OF lot`);
+  }
+
   private async assertConfigurationCurrent(tx: Db, order: any, components: any[]): Promise<void> {
     const buildOrderId = Number(order.id);
     const variantFacts = await this.dependencies.loadActiveBuildVariantFacts(
@@ -286,6 +309,8 @@ export class BuildExecutionRepository {
     components: any[],
     actorId?: string,
   ): Promise<number> {
+    const quantityPosting = await openOperationalQuantityPosting(tx);
+    let quantityReceipt: { id: number; created_at: Date | string } | undefined;
     let newlyReservedQty = 0;
     for (const component of components) {
       const componentId = Number(component.id);
@@ -365,7 +390,8 @@ export class BuildExecutionRepository {
         const take = Math.min(lotAvailable, remaining);
         if (take <= 0) continue;
 
-        await tx.execute(sql`
+        if (quantityPosting) await quantityPosting.addLot(Number(lot.id), { onHand: 0, reserved: take, picked: 0, packed: 0 });
+        else await tx.execute(sql`
           UPDATE inventory.inventory_lots
           SET qty_reserved = qty_reserved + ${take}
           WHERE id = ${lot.id}
@@ -379,7 +405,7 @@ export class BuildExecutionRepository {
             reserved_qty = inventory.build_component_reservations.reserved_qty + EXCLUDED.reserved_qty,
             updated_at = now()
         `);
-        await tx.execute(sql`
+        const receipt = await tx.execute(sql`
           INSERT INTO inventory.inventory_transactions
             (product_variant_id, from_location_id, transaction_type, variant_qty_delta,
              variant_qty_before, variant_qty_after, reserved_qty_delta, batch_id,
@@ -390,7 +416,9 @@ export class BuildExecutionRepository {
              ${take}, ${String(order.system_number) + "-RESERVE"}, 'on_hand', 'reserved',
              ${lot.id}, 'build_order', ${order.system_number}, ${order.id}, ${componentId},
              ${`Reserved for build ${order.system_number}`}, ${actorId ?? null})
+          RETURNING id, created_at
         `);
+        quantityReceipt ??= receipt.rows[0];
         remaining -= take;
         newlyReservedQty += take;
       }
@@ -406,11 +434,20 @@ export class BuildExecutionRepository {
           },
         );
       }
-      await tx.execute(sql`
+      if (!quantityPosting) await tx.execute(sql`
         UPDATE inventory.inventory_levels
         SET reserved_qty = reserved_qty + ${missingQty}, updated_at = now()
         WHERE id = ${level.id}
       `);
+    }
+    if (quantityPosting && newlyReservedQty > 0) {
+      if (!quantityReceipt) throw new BuildDomainError("BUILD_QUANTITY_RECEIPT_MISSING", "Build reservation audit receipt is missing");
+      await quantityPosting.post({
+        idempotencyKey: `build_reservation:${quantityReceipt.id}`, kind: "reserve",
+        actor: actorId || "system:build_execution", reason: `Reserved for build ${order.system_number}`,
+        reference: { type: "inventory_transaction", id: String(quantityReceipt.id) },
+        occurredAt: new Date(quantityReceipt.created_at).toISOString(),
+      });
     }
     return newlyReservedQty;
   }
@@ -435,8 +472,10 @@ export class BuildExecutionRepository {
 
   async releaseOrder(buildOrderId: number, actorId?: string, txOverride?: Db): Promise<any> {
     const work = async (tx: Db) => {
+      const quantityPosting = await openOperationalQuantityPosting(tx);
       await this.assertClaimBuildActionAvailable(tx, buildOrderId, "release");
       const order = await this.lockOrder(tx, buildOrderId);
+      if (quantityPosting) await this.lockQuantityInventory(tx, order);
       if (order.status === "completed") return order;
       if (order.status !== "draft" && order.status !== "released") {
         throw new BuildDomainError(
@@ -476,9 +515,11 @@ export class BuildExecutionRepository {
   }
 
   private async executeInTransaction(tx: Db, input: ExecuteBuildRunInput): Promise<BuildExecutionResult> {
+    const quantityPosting = await openOperationalQuantityPosting(tx);
     await lockInventoryCostGraph(tx);
     await this.assertClaimBuildActionAvailable(tx, input.buildOrderId, "execute");
     const order = await this.lockOrder(tx, input.buildOrderId);
+    if (quantityPosting) await this.lockQuantityInventory(tx, order);
     const existingResult = await tx.execute(sql`
       SELECT *
       FROM inventory.build_runs
@@ -663,7 +704,10 @@ export class BuildExecutionRepository {
           SET consumed_qty = consumed_qty + ${take}, updated_at = now()
           WHERE id = ${reservation.reservation_id}
         `);
-        await tx.execute(sql`
+        if (quantityPosting) {
+          await quantityPosting.addLot(Number(reservation.id), { onHand: -take, reserved: -take, picked: 0, packed: 0 });
+          await tx.execute(sql`UPDATE inventory.inventory_lots SET qty_consumed = COALESCE(qty_consumed, 0) + ${take} WHERE id = ${reservation.id}`);
+        } else await tx.execute(sql`
           UPDATE inventory.inventory_lots
           SET qty_on_hand = qty_on_hand - ${take},
               qty_reserved = qty_reserved - ${take},
@@ -708,7 +752,7 @@ export class BuildExecutionRepository {
           },
         );
       }
-      await tx.execute(sql`
+      if (!quantityPosting) await tx.execute(sql`
         UPDATE inventory.inventory_levels
         SET variant_qty = variant_qty - ${requiredQty},
             reserved_qty = reserved_qty - ${requiredQty},
@@ -744,7 +788,7 @@ export class BuildExecutionRepository {
     `);
     const outputLevel = outputLevelResult.rows[0];
     let outputBefore = asInteger(outputLevel.variant_qty, "output.variant_qty");
-    await tx.execute(sql`
+    if (!quantityPosting) await tx.execute(sql`
       UPDATE inventory.inventory_levels
       SET variant_qty = variant_qty + ${quantities.outputQty}, updated_at = now()
       WHERE id = ${outputLevel.id}
@@ -772,11 +816,14 @@ export class BuildExecutionRepository {
            ${packagingCostCents}, ${landedCostCents}, ${totalCostCents},
            ${layer.totalMills.toString()}::bigint, ${layer.poMills.toString()}::bigint,
            ${layer.packagingMills.toString()}::bigint, ${layer.landedMills.toString()}::bigint,
-           ${layer.totalMills.toString()}::bigint, ${layer.qty}, ${layer.qty}, 0, 0,
+           ${layer.totalMills.toString()}::bigint, ${layer.qty}, ${quantityPosting ? 0 : layer.qty}, 0, 0,
            now(), 'active', 0, 'build',
            ${`Output from build ${order.system_number} run ${run.run_number}`})
         RETURNING id
       `);
+      if (quantityPosting) await quantityPosting.addLot(Number(outputLot.rows[0].id), {
+        onHand: layer.qty, reserved: 0, picked: 0, packed: 0,
+      });
       await tx.execute(sql`
         INSERT INTO inventory.inventory_transactions
           (product_variant_id, to_location_id, transaction_type, variant_qty_delta,
@@ -806,6 +853,11 @@ export class BuildExecutionRepository {
       outputBefore += layer.qty;
       outputCostOffset += layer.qty;
     }
+    if (quantityPosting) await quantityPosting.post({
+      idempotencyKey: `build_execution:${input.idempotencyKey}`, kind: "transform",
+      actor: lineageActor, reason: `Executed build ${order.system_number} run ${run.run_number}`,
+      reference: { type: "build_run", id: String(run.id) }, occurredAt: lineageRecordedAt.toISOString(),
+    });
 
     await tx.execute(sql`
       UPDATE inventory.build_runs
@@ -892,6 +944,8 @@ export class BuildExecutionRepository {
     order: any,
     actorId?: string,
   ): Promise<number> {
+    const quantityPosting = await openOperationalQuantityPosting(tx);
+    let quantityReceipt: { id: number; created_at: Date | string } | undefined;
     const reservations = await tx.execute(sql`
       SELECT reservation.id AS reservation_id,
              reservation.reserved_qty,
@@ -933,17 +987,18 @@ export class BuildExecutionRepository {
         SET released_qty = released_qty + ${openQty}, updated_at = now()
         WHERE id = ${row.reservation_id}
       `);
-      await tx.execute(sql`
+      if (quantityPosting) await quantityPosting.addLot(Number(row.lot_id), { onHand: 0, reserved: -openQty, picked: 0, packed: 0 });
+      else await tx.execute(sql`
         UPDATE inventory.inventory_lots
         SET qty_reserved = qty_reserved - ${openQty}
         WHERE id = ${row.lot_id}
       `);
-      await tx.execute(sql`
+      if (!quantityPosting) await tx.execute(sql`
         UPDATE inventory.inventory_levels
         SET reserved_qty = reserved_qty - ${openQty}, updated_at = now()
         WHERE id = ${row.level_id}
       `);
-      await tx.execute(sql`
+      const receipt = await tx.execute(sql`
         INSERT INTO inventory.inventory_transactions
           (product_variant_id, from_location_id, transaction_type, variant_qty_delta,
            variant_qty_before, variant_qty_after, reserved_qty_delta, batch_id,
@@ -955,16 +1010,28 @@ export class BuildExecutionRepository {
            ${String(order.system_number) + "-CANCEL"}, 'reserved', 'on_hand', ${row.lot_id},
            'build_order', ${order.system_number}, ${order.id}, ${row.component_id},
            ${`Released by cancellation of build ${order.system_number}`}, ${actorId ?? null})
+        RETURNING id, created_at
       `);
+      quantityReceipt ??= receipt.rows[0];
       releasedQty += openQty;
+    }
+    if (quantityPosting && releasedQty > 0) {
+      if (!quantityReceipt) throw new BuildDomainError("BUILD_QUANTITY_RECEIPT_MISSING", "Build release audit receipt is missing");
+      await quantityPosting.post({
+        idempotencyKey: `build_release:${quantityReceipt.id}`, kind: "release", actor: actorId || "system:build_execution",
+        reason: `Released reservations for build ${order.system_number}`,
+        reference: { type: "inventory_transaction", id: String(quantityReceipt.id) }, occurredAt: new Date(quantityReceipt.created_at).toISOString(),
+      });
     }
     return releasedQty;
   }
 
   async cancelOrder(input: CancelBuildOrderInput, txOverride?: Db): Promise<BuildCancellationResult> {
     const work = async (tx: Db): Promise<BuildCancellationResult> => {
+      const quantityPosting = await openOperationalQuantityPosting(tx);
       await this.assertClaimBuildActionAvailable(tx, input.buildOrderId, "cancel");
       const order = await this.lockOrder(tx, input.buildOrderId);
+      if (quantityPosting) await this.lockQuantityInventory(tx, order);
       if (order.status === "cancelled") {
         if (String(order.cancellation_reason ?? "") !== input.reason) {
           throw new BuildDomainError(
@@ -1016,8 +1083,11 @@ export class BuildExecutionRepository {
 
   async reverseRun(input: ReverseBuildRunInput): Promise<BuildReversalResult> {
     return this.db.transaction(async (tx) => {
+      const quantityPosting = await openOperationalQuantityPosting(tx);
+      if (quantityPosting) await lockInventoryCostGraph(tx);
       await this.assertClaimBuildActionAvailable(tx, input.buildOrderId, "reverse");
       const order = await this.lockOrder(tx, input.buildOrderId);
+      if (quantityPosting) await this.lockQuantityInventory(tx, order);
       if (order.status === "cancelled") {
         throw new BuildDomainError(
           "INVALID_BUILD_STATUS",
@@ -1213,7 +1283,10 @@ export class BuildExecutionRepository {
           SET consumed_qty = consumed_qty - ${qty}, updated_at = now()
           WHERE id = ${consumption.reservation_id}
         `);
-        await tx.execute(sql`
+        if (quantityPosting) {
+          await quantityPosting.addLot(Number(consumption.inventory_lot_id), { onHand: qty, reserved: qty, picked: 0, packed: 0 });
+          await tx.execute(sql`UPDATE inventory.inventory_lots SET qty_consumed = qty_consumed - ${qty} WHERE id = ${consumption.inventory_lot_id}`);
+        } else await tx.execute(sql`
           UPDATE inventory.inventory_lots
           SET qty_on_hand = qty_on_hand + ${qty},
               qty_reserved = qty_reserved + ${qty},
@@ -1221,7 +1294,7 @@ export class BuildExecutionRepository {
               status = 'active'
           WHERE id = ${consumption.inventory_lot_id}
         `);
-        await tx.execute(sql`
+        if (!quantityPosting) await tx.execute(sql`
           UPDATE inventory.inventory_levels
           SET variant_qty = variant_qty + ${qty},
               reserved_qty = reserved_qty + ${qty},
@@ -1283,7 +1356,10 @@ export class BuildExecutionRepository {
       let outputBefore = Number(outputLevel.variant_qty);
       for (const lot of outputLotsResult.rows) {
         const qty = Number(lot.qty_received);
-        await tx.execute(sql`
+        if (quantityPosting) {
+          await quantityPosting.addLot(Number(lot.id), { onHand: -qty, reserved: 0, picked: 0, packed: 0 });
+          await tx.execute(sql`UPDATE inventory.inventory_lots SET qty_consumed = COALESCE(qty_consumed, 0) + ${qty} WHERE id = ${lot.id}`);
+        } else await tx.execute(sql`
           UPDATE inventory.inventory_lots
           SET qty_on_hand = 0,
               qty_consumed = COALESCE(qty_consumed, 0) + ${qty},
@@ -1307,11 +1383,16 @@ export class BuildExecutionRepository {
         `);
         outputBefore -= qty;
       }
-      await tx.execute(sql`
+      if (!quantityPosting) await tx.execute(sql`
         UPDATE inventory.inventory_levels
         SET variant_qty = variant_qty - ${removedOutputQty}, updated_at = now()
         WHERE id = ${outputLevel.id}
       `);
+      if (quantityPosting) await quantityPosting.post({
+        idempotencyKey: `build_reversal:${input.idempotencyKey}`, kind: "transform", actor: input.actorId || "system:build_execution",
+        reason: input.reason, reference: { type: "build_reversal", id: String(reversal.id) },
+        occurredAt: new Date(reversal.created_at).toISOString(),
+      });
       await tx.execute(sql`
         UPDATE inventory.build_runs
         SET status = 'reversed'

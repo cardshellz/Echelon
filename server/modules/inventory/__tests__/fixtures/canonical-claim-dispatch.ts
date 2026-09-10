@@ -35,6 +35,7 @@ export function dispatchCosts() {
 /** Reduced real-column owner fixture; not a proof of every production migration or publication trigger. */
 export const dispatchOwnerFixtureSql = `
   CREATE SCHEMA inventory; CREATE SCHEMA oms; CREATE SCHEMA wms; CREATE SCHEMA warehouse;
+  CREATE TABLE inventory.quantity_ledger_opening(singleton_key boolean PRIMARY KEY, command_id bigint NOT NULL);
   CREATE TABLE warehouse.warehouses(id integer PRIMARY KEY);
   CREATE TABLE warehouse.warehouse_locations(id integer PRIMARY KEY, warehouse_id integer NOT NULL REFERENCES warehouse.warehouses);
   CREATE TABLE wms.orders(id integer PRIMARY KEY);

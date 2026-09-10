@@ -17,6 +17,7 @@ import { PostgresInventoryCutoverCommitRepository } from "../../infrastructure/i
 import { projectInventoryCutoverStateInsideTransaction } from "../../infrastructure/inventory-cutover-projection.repository";
 import { buildInventoryCutoverManifest } from "../../domain/inventory-cutover-manifest";
 import { acquireInventoryCutoverFenceInsideTransaction } from "../../infrastructure/inventory-cutover-admission-fence.repository";
+import { installQuantityCutoverFixture } from "../fixtures/inventory-quantity-cutover.fixture";
 
 vi.mock("../../../../db", () => ({ pool: {} }));
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
@@ -48,6 +49,7 @@ dbDescribe.sequential("verified opening persistence with real PostgreSQL admissi
     await installCutoverAdmissionFixturePrerequisites(pool);
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/236_inventory_cutover_admission.sql"), "utf8"));
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/240_inventory_cutover_verified_opening.sql"), "utf8"));
+    await installQuantityCutoverFixture(pool);
     await pool.query(`UPDATE wms.orders SET order_number='#OPENING-1';
       UPDATE warehouse.warehouses SET code='MAIN',name='Main warehouse';
       UPDATE warehouse.warehouse_locations SET code='PICK-A',name='Pick bin';
@@ -104,7 +106,7 @@ dbDescribe.sequential("verified opening persistence with real PostgreSQL admissi
       FROM pg_trigger trigger JOIN pg_class relation ON relation.oid=trigger.tgrelid
       JOIN pg_namespace namespace ON namespace.oid=relation.relnamespace
       WHERE trigger.tgname='aa_cutover_writer_admission' ORDER BY namespace.nspname,relation.relname`)).rows;
-    expect(rows).toHaveLength(80);
+    expect(rows).toHaveLength(83); // prior80 plus quantity commands, entries and durable operation replies
     expect(rows).toEqual(expect.arrayContaining([
       { relation: "oms.channel_fulfillment_receipts" }, { relation: "oms.channel_fulfillment_receipt_attempts" },
       { relation: "wms.order_build_demands" },
@@ -366,7 +368,7 @@ dbDescribe.sequential("verified opening persistence with real PostgreSQL admissi
   it("database guards forbid mutation, deletion, truncation and an insertion without exclusive admission", async () => {
     await service.save(await request(), "operator");
     for (const sql of ["UPDATE inventory.availability_cutover_opening_snapshots SET reason=reason",
-      "DELETE FROM inventory.availability_cutover_opening_snapshots", "TRUNCATE inventory.availability_cutover_opening_snapshots"]) {
+      "DELETE FROM inventory.availability_cutover_opening_snapshots", "TRUNCATE inventory.availability_cutover_opening_snapshots CASCADE"]) {
       await expect(pool.query(sql)).rejects.toMatchObject({ code: "23514" });
     }
     await expect(pool.query(`INSERT INTO inventory.availability_cutover_opening_snapshots OVERRIDING SYSTEM VALUE

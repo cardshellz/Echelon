@@ -99,8 +99,9 @@ export function InventoryCutoverOpeningPanel(props: Props) {
         {source.data.runtimeAuthority !== "legacy" && <p role="note">Inventory authority has already changed. Opening verification is unavailable.</p>}
         <OpeningRecordedEvidence source={source.data} />
         <Button variant="outline" disabled={!usable || busy || retained} onClick={downloadWorksheet}>Download blank verification worksheet</Button>
-        <p className="text-sm">Complete the worksheet's verification section using retained independent evidence. Every quantity is deliberately blank, including zero quantities.
-          Include each stock position, lot and current order owner; record exact lot allocations for reserved or picked units. Recorded reference values and labels are not imported as verification.</p>
+        <p className="text-sm">Count each lot once and verify its current order owners. Lot and owner quantities start blank, including explicit zero counts.
+          SKU/bin totals are calculated from those lot observations; do not count or edit a second balance. Preserve the original cost layers and record exact reserved/picked lot allocations.
+          Recorded reference values and labels are not imported as verification. Saving is review-only; the approved cutover posts the new opening.</p>
         <Label htmlFor="opening-verification-file">Import completed verification JSON</Label>
         <Input id="opening-verification-file" type="file" accept=".json,application/json" disabled={!usable || busy || retained}
           onChange={event => { const file = event.target.files?.[0]; event.target.value = ""; void importFile(file); }} />

@@ -1293,6 +1293,7 @@ async function reserveClaimResource(
   const claimResourceId = positiveBigInt(insertedResource?.id, "claimResource.id");
   const lotAllocations = await inventoryWriter.reserveResource({
     client,
+    commandKey: `canonical:reserve-resource:${claimResourceId}`,
     claimId: input.claimId,
     claimResourceId,
     inventoryLevelId: input.resource.inventoryLevelId,
@@ -1418,6 +1419,7 @@ async function releaseClaimResources(
   client: PoolClient,
   input: {
     inventoryWriter: CanonicalClaimInventoryMutationPort;
+    commandKey: string;
     claim: PersistedClaim;
     orderId: number;
     actor: string;
@@ -1546,6 +1548,7 @@ async function releaseClaimResources(
 
   await input.inventoryWriter.releaseResources({
     client,
+    commandKey: input.commandKey,
     claimId: input.claim.id,
     resources: pendingReleases.map((release) => release.inventory),
     orderId: input.orderId,
@@ -3069,6 +3072,7 @@ async function reconcilePickLocation(
   client: PoolClient,
   inventoryWriter: CanonicalClaimInventoryMutationPort,
   input: {
+    commandKey: string;
     claim: FulfillmentClaim;
     line: FulfillmentClaimLine;
     orderWarehouseId: number | null;
@@ -3128,6 +3132,7 @@ async function reconcilePickLocation(
   const targetResourceId = positiveBigInt(targetResourceRow?.id, "targetClaimResource.id");
   const allocations = await inventoryWriter.reconcilePickResource({
     client,
+    commandKey: input.commandKey,
     claimId: input.claim.id,
     releases: releases.map((release) => release.inventory),
     target: {
@@ -3322,6 +3327,7 @@ async function reconcileObservedPickLocation(
   const targetResourceId = positiveBigInt(targetResourceRow?.id, "targetClaimResource.id");
   const reconciled = await inventoryWriter.reconcileObservedPickResource({
     client,
+    commandKey: `canonical:observe:${input.command.idempotencyKey}`,
     claimId: input.claim.id,
     releases: releases.map((release) => release.inventory),
     sourceCostLayers: releases.flatMap((release) => release.allocations.map((allocation) => ({
@@ -4048,6 +4054,7 @@ export async function persistReconstructedCutoverClaim(
       originalCosts: lot.originalCosts });
     if (fresh) {
       const reservedLots = await inventoryWriter.reserveResource({ client, claimId, claimResourceId: resourceId,
+        commandKey: `canonical:cutover-reserve:${resourceId}`,
         inventoryLevelId: resource.inventoryLevelId, warehouseLocationId: resource.warehouseLocationId,
         sourceVariantId: resource.sourceVariantId, claimedQty: positiveInteger(fresh.claimedQty,"cutover.freshQty"),
         orderId: order.orderId, orderItemId: lineId.orderItemId, consumerOperationKey: resource.consumerOperationKey,
@@ -4454,6 +4461,7 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
         await cancelOpenBuildHandoffs(client, this.buildWriter, claim, lifecycleCommand, occurredAt, this.workOwner);
         const released = await releaseClaimResources(client, {
           inventoryWriter: this.inventoryWriter,
+          commandKey: `canonical:replace-release:${command.idempotencyKey}`,
           claim,
           orderId: command.orderId,
           actor: command.actor,
@@ -4879,6 +4887,7 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
           );
           releasedByClaim.set(claim.id.toString(), await releaseClaimResources(client, {
             inventoryWriter: this.inventoryWriter,
+            commandKey: `canonical:count-release:${command.cycleCountId}:${command.cycleCountItemId}:${claim.id}`,
             claim,
             orderId: claim.orderId,
             actor: command.actor,
@@ -5174,6 +5183,7 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
             );
           } else {
             await reconcilePickLocation(client, this.inventoryWriter, {
+              commandKey: `canonical:reconcile:${command.idempotencyKey}`,
               claim,
               line,
               orderWarehouseId: order.warehouseId,
@@ -5189,6 +5199,7 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
         const pickResources = selectPickResources(line, command.warehouseLocationId, quantity);
         const picked = await this.inventoryWriter.pickResources({
           client,
+          commandKey: `canonical:pick:${command.idempotencyKey}`,
           claimId: claim.id,
           claimLineId: line.id,
           resources: pickResources,
@@ -5497,6 +5508,7 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
         const restoreReservation = claim.status === "active";
         const unpicked = await this.inventoryWriter.unpickResources({
           client,
+          commandKey: `canonical:unpick:${command.idempotencyKey}`,
           claimId: claim.id,
           claimLineId: line.id,
           resources: [...byResource.values()],
@@ -6164,6 +6176,7 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
         await cancelOpenBuildHandoffs(client, this.buildWriter, claim, command, occurredAt, this.workOwner);
         const released = await releaseClaimResources(client, {
           inventoryWriter: this.inventoryWriter,
+          commandKey: `canonical:release:${command.idempotencyKey}`,
           claim,
           orderId: command.orderId,
           actor: command.actor,

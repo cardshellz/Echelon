@@ -19,6 +19,13 @@ and the first authority cutover cannot roll back to legacy ATP. Phase 3 follows
 the implementation record in
 `docs/INVENTORY-AVAILABILITY-PHASE-3-BACKFILL-AND-REVIEW.md`.
 
+The subsequent one-source-of-truth quantity implementation is recorded in
+`docs/INVENTORY-SINGLE-QUANTITY-AUTHORITY.md`. It replaces independently maintained
+lot/bin quantity counters with one immutable journal and protected projections,
+using a verified lot-based opening in the same transaction as canonical ATP
+cutover. That record supersedes historical dual-counter assumptions below; it
+does not itself authorize production activation.
+
 The program must preserve existing physical inventory, reservations, lot costs,
 channel mappings, and operational history. The migration changes how availability
 is derived and reserved; it does not rewrite inventory to make the new model fit.

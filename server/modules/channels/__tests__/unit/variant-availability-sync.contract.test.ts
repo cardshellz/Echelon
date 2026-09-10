@@ -29,13 +29,23 @@ describe("inactive variant availability contracts", () => {
       routes.indexOf('app.post("/api/product-variants/:id/archive"'),
       routes.indexOf('app.delete("/api/product-variants/:id"'),
     );
+    const owner = repoFile("server/modules/catalog/application/catalog-inventory-command.service.ts");
+    const repository = repoFile("server/modules/catalog/infrastructure/catalog-inventory-command.repository.ts");
 
     for (const archiveHandler of [productArchive, variantArchive]) {
       expect(archiveHandler).not.toContain("DELETE FROM channels.channel_listings");
       expect(archiveHandler).not.toContain("inventory zeroed");
-      expect(archiveHandler).toContain("if (transferToVariantId)");
-      expect(archiveHandler).toContain("inventoryPreserved");
+      expect(archiveHandler).toContain("owner.execute(");
+      expect(archiveHandler).toContain("targetVariantId: transferToVariantId");
     }
+    // The transactional owner now implements the archive, not route-local DB
+    // mutations. Only an explicit correction target may move/delete source bins.
+    expect(owner).toContain("inventoryPreserved: command.targetVariantId === null ? initialOnHand : 0");
+    expect(repository).toContain("if (command.targetVariantId !== null)");
+    expect(repository).toContain("if (!posting) result.inventoryCleared");
+    expect(repository).not.toContain("delete(channelFeeds)");
+    expect(repository).not.toContain("delete(channelListings)");
+    expect(repository).toContain("tx.update(channelFeeds).set({ isActive: 0");
   });
 
   it("uses a lease and row locking so multiple app instances cannot own the same transition", () => {
