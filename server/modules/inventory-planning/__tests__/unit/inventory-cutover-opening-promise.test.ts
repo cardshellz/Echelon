@@ -16,15 +16,16 @@ function verifyUnfilledPromises(evidence: CutoverReconstructionEvidence): Openin
 }
 
 describe("verified opening preserves journal-proven unfilled promises", () => {
-  it("retains the full accepted demand and exact raw proof without treating the promise as held stock", () => {
+  it.each(["inventory_cutover_opening_v1", "inventory_cutover_opening_v2"] as const)("%s retains full demand and raw proof without treating the promise as held stock", contractVersion => {
     const evidence = emptyBinPromiseEvidence(), verification = verifyUnfilledPromises(evidence);
+    verification.contractVersion = contractVersion;
     const original = structuredClone({ evidence, verification });
     const result = evaluateCutoverOpening(evidence, verification);
     expect(result).toMatchObject({ ready: true, blockers: [] });
     expect(result.plan.legacyPromiseReleases).toEqual(planCutoverReconstruction(evidence).legacyPromiseReleases);
     expect(result.plan.orders[0].lines[0]).toMatchObject({ requestedQty: "6", reservedQty: "0", pickedQty: "0",
       freshDemandQty: "6", allocations: [] });
-    const planned = planFreshCutoverClaims(reconstructionSupply(evidence), result.plan);
+    const planned = planFreshCutoverClaims(reconstructionSupply(evidence), result.plan, verification);
     expect(planned.freshReservationsByLevel).toEqual([{ inventoryLevelId: 20, reservedQty: "6" }]);
     expect(planned.orders[0].plan.lines[0]).toMatchObject({ requestedQty: "6", plannedQty: "6", shortfallQty: "0" });
     expect({ evidence, verification }).toEqual(original);

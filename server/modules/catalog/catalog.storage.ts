@@ -231,7 +231,14 @@ export const productMethods: IProductStorage = {
   },
 
   async deleteInventoryLevelsByVariantId(variantId: number): Promise<number> {
-    const result = await db.delete(inventoryLevels).where(eq(inventoryLevels.productVariantId, variantId)).returning();
+    // A ledger-era level is a permanent identity even after stock moves away.
+    // Legacy cleanup may remove only genuinely empty, unclaimed rows.
+    const result = await db.delete(inventoryLevels).where(and(
+      eq(inventoryLevels.productVariantId, variantId),
+      eq(inventoryLevels.variantQty, 0), eq(inventoryLevels.reservedQty, 0),
+      eq(inventoryLevels.pickedQty, 0), eq(inventoryLevels.packedQty, 0),
+      sql`NOT EXISTS (SELECT 1 FROM inventory.quantity_ledger_opening)`,
+    )).returning();
     return result.length;
   },
 

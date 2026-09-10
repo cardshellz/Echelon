@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { canonicalClaimDispatchPlanSchema } from "../../../../shared/types/inventory-availability-dispatch";
+import { CanonicalClaimQuantityPosting } from "./canonical-claim-quantity-posting";
 import type {
   CanonicalClaimInventoryDispatchCost,
   CanonicalClaimInventoryDispatchPort,
@@ -177,18 +178,27 @@ export async function dispatchCanonicalPickedResources(
     }
   }
   // All exact layers are verified before the first write. No FIFO substitution.
+  const quantityPosting = await CanonicalClaimQuantityPosting.forCommand(input.client, {
+    key: `canonical:dispatch:${command.idempotencyKey}`, kind: "ship", actor: command.actor,
+    reason: command.reason, occurredAt: input.occurredAt,
+    reference: { type: "availability_claim_dispatch", id: plan.commandHash },
+  });
   for (const lot of lots.rows) {
-    const changed = await input.client.query(
+    quantityPosting?.add({ inventoryLotId: lot.id, inventoryLevelId: level.id,
+      productVariantId: command.productVariantId, warehouseLocationId: command.warehouseLocationId,
+      delta: { onHand: 0, reserved: 0, picked: -Number(lotQuantities.get(lot.id)), packed: 0 } });
+    const changed = quantityPosting ? null : await input.client.query(
       `UPDATE inventory.inventory_lots SET qty_picked = qty_picked - $1,
          status = CASE WHEN status = 'active' AND qty_on_hand = 0 AND qty_reserved = 0 AND qty_picked = $1
                        THEN 'depleted' ELSE status END
        WHERE id = $2 AND qty_picked >= $1`, [Number(lotQuantities.get(lot.id)), lot.id]);
-    if (changed.rowCount !== 1) fail("CLAIM_DISPATCH_PICKED_CONFLICT", "Exact picked lot changed during dispatch.");
+    if (changed && changed.rowCount !== 1) fail("CLAIM_DISPATCH_PICKED_CONFLICT", "Exact picked lot changed during dispatch.");
   }
-  const changed = await input.client.query(
+  const changed = quantityPosting ? null : await input.client.query(
     `UPDATE inventory.inventory_levels SET picked_qty = picked_qty - $1, updated_at = $3
      WHERE id = $2 AND picked_qty >= $1`, [quantity, level.id, input.occurredAt]);
-  if (changed.rowCount !== 1) fail("CLAIM_DISPATCH_PICKED_CONFLICT", "Exact picked inventory level changed during dispatch.");
+  if (changed && changed.rowCount !== 1) fail("CLAIM_DISPATCH_PICKED_CONFLICT", "Exact picked inventory level changed during dispatch.");
+  if (quantityPosting) await quantityPosting.post();
   // Pick already reduced on-hand and recorded COGS. A second -quantity here
   // would falsify the on-hand replay; exact shipment quantity lives in the
   // caller's immutable receipt and its source item, not a second stock delta.

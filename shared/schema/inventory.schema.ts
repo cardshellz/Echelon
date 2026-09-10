@@ -912,6 +912,7 @@ export const inventoryLots = inventorySchema.table("inventory_lots", {
   qtyOnHand: integer("qty_on_hand").notNull().default(0),
   qtyReserved: integer("qty_reserved").notNull().default(0),
   qtyPicked: integer("qty_picked").notNull().default(0),
+  qtyPacked: integer("qty_packed").notNull().default(0), // Derived custody projection of quantity_entries after opening
   receivedAt: timestamp("received_at").notNull(), // FIFO sort key
   expiryDate: timestamp("expiry_date"), // Future (perishables)
   buildRunId: integer("build_run_id").references(() => buildRuns.id, { onDelete: "set null" }),

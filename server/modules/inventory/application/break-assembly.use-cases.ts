@@ -1,20 +1,25 @@
 import { lockInventoryCostGraph } from "../infrastructure/cost-evidence.repository";
+import { createHash } from "node:crypto";
+import { z } from "zod";
+import { openOperationalQuantityPosting, type OperationalQuantityPosting } from "../infrastructure/operational-quantity-posting";
+import type { db } from "../../../db";
+import { InventoryUseCases } from "./inventory.use-cases";
 import { eq, and, sql } from "drizzle-orm";
 import {
   products,
   productVariants,
   inventoryLevels,
-  inventoryTransactions,
   productLocations,
   warehouseLocations,
   type ProductVariant,
   type InventoryLevel,
-  type InsertInventoryTransaction,
 } from "@shared/schema";
 import {
   allowsDirectPackageConversion,
   type ProductInventoryStrategy,
 } from "@shared/catalog/inventory-strategy";
+
+type PackageConversionTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
 export class InventoryConversionStrategyError extends Error {
   readonly code = "DIRECT_CONVERSION_NOT_ALLOWED";
@@ -80,8 +85,6 @@ interface BreakableVariantInfo {
  * Every operation runs inside a single DB transaction and produces a linked
  * pair of inventory transactions sharing the same batchId.
  */
-import { InventoryUseCases } from "./inventory.use-cases";
-
 export class BreakAssemblyUseCases {
   private onChangeCallback: ((variantId: number, trigger: string) => void) | null = null;
 
@@ -89,7 +92,7 @@ export class BreakAssemblyUseCases {
     private db: any,
     private inventoryUseCases: InventoryUseCases,
     private readonly clock: () => Date = () => new Date(),
-  ) {}
+  ) { }
 
   /** Register a callback to fire after break/assembly changes inventory */
   onInventoryChange(cb: (variantId: number, trigger: string) => void): void {
@@ -119,6 +122,7 @@ export class BreakAssemblyUseCases {
    *   baseUnitsConverted = 100
    */
   async breakVariant(params: {
+    commandKey?: string;
     sourceVariantId: number;
     targetVariantId: number;
     warehouseLocationId: number;    // source (case) location
@@ -127,63 +131,66 @@ export class BreakAssemblyUseCases {
     userId?: string;
     notes?: string;
   }): Promise<BreakResult> {
-    const { sourceVariantId, targetVariantId, warehouseLocationId, sourceQty, userId, notes } = params;
+    return this.runConversion("break", params, async (tx, quantityPosting, effects) => {
+      const { sourceVariantId, targetVariantId, warehouseLocationId, sourceQty, userId, notes } = params;
 
-    // ----- Load & validate -----
-    const [sourceVariant, targetVariant] = await Promise.all([
-      this.fetchVariant(sourceVariantId),
-      this.fetchVariant(targetVariantId),
-    ]);
+      // ----- Load & validate -----
+      const [sourceVariant, targetVariant] = await Promise.all([
+        this.fetchVariant(sourceVariantId),
+        this.fetchVariant(targetVariantId),
+      ]);
 
-    this.validateSameProduct(sourceVariant, targetVariant);
-    await this.assertDirectConversionAllowed(sourceVariant.productId);
+      this.validateSameProduct(sourceVariant, targetVariant);
+      await this.assertDirectConversionAllowed(sourceVariant.productId);
 
-    if (sourceVariant.unitsPerVariant <= targetVariant.unitsPerVariant) {
-      throw new Error(
-        `Cannot break: source variant "${sourceVariant.name}" (${sourceVariant.unitsPerVariant} units) ` +
-        `must have MORE units per variant than target "${targetVariant.name}" (${targetVariant.unitsPerVariant} units).`
-      );
-    }
-
-    // Enforce direct parent-child: target's parentVariantId must point to source
-    if (sourceVariant.parentVariantId !== targetVariant.id) {
-      throw new Error(
-        `Cannot break: "${sourceVariant.sku ?? sourceVariant.name}" does not break directly into ` +
-        `"${targetVariant.sku ?? targetVariant.name}". Only direct parent→child breaks are allowed.`
-      );
-    }
-
-    const { targetQty, baseUnits } = this.calculateConversion(
-      sourceQty,
-      sourceVariant.unitsPerVariant,
-      targetVariant.unitsPerVariant
-    );
-
-    // Resolve destination: explicit > bin assignment > fall back to source
-    let resolvedTargetLocationId: number = params.targetLocationId ?? warehouseLocationId;
-    if (!params.targetLocationId) {
-      const assignment = await this.db
-        .select({ warehouseLocationId: productLocations.warehouseLocationId })
-        .from(productLocations)
-        .innerJoin(warehouseLocations, eq(productLocations.warehouseLocationId, warehouseLocations.id))
-        .where(
-          and(
-            eq(sql`UPPER(${productLocations.sku})`, targetVariant.sku?.toUpperCase() ?? ""),
-            eq(warehouseLocations.isPickable, 1)
-          )
-        )
-        .limit(1);
-      if (assignment[0]?.warehouseLocationId) {
-        resolvedTargetLocationId = assignment[0].warehouseLocationId;
+      if (sourceVariant.unitsPerVariant <= targetVariant.unitsPerVariant) {
+        throw new Error(
+          `Cannot break: source variant "${sourceVariant.name}" (${sourceVariant.unitsPerVariant} units) ` +
+          `must have MORE units per variant than target "${targetVariant.name}" (${targetVariant.unitsPerVariant} units).`
+        );
       }
-    }
 
-    // ----- Execute inside a transaction -----
-    const batchId = this.generateBatchId("break");
+      // Enforce direct parent-child: target's parentVariantId must point to source
+      if (sourceVariant.parentVariantId !== targetVariant.id) {
+        throw new Error(
+          `Cannot break: "${sourceVariant.sku ?? sourceVariant.name}" does not break directly into ` +
+          `"${targetVariant.sku ?? targetVariant.name}". Only direct parent→child breaks are allowed.`
+        );
+      }
 
-    await this.db.transaction(async (tx: any) => {
+      const { targetQty, baseUnits } = this.calculateConversion(
+        sourceQty,
+        sourceVariant.unitsPerVariant,
+        targetVariant.unitsPerVariant
+      );
+
+      // Resolve destination: explicit > bin assignment > fall back to source
+      let resolvedTargetLocationId: number = params.targetLocationId ?? warehouseLocationId;
+      if (!params.targetLocationId) {
+        const assignment = await this.db
+          .select({ warehouseLocationId: productLocations.warehouseLocationId })
+          .from(productLocations)
+          .innerJoin(warehouseLocations, eq(productLocations.warehouseLocationId, warehouseLocations.id))
+          .where(
+            and(
+              eq(sql`UPPER(${productLocations.sku})`, targetVariant.sku?.toUpperCase() ?? ""),
+              eq(warehouseLocations.isPickable, 1)
+            )
+          )
+          .limit(1);
+        if (assignment[0]?.warehouseLocationId) {
+          resolvedTargetLocationId = assignment[0].warehouseLocationId;
+        }
+      }
+
+      // ----- Execute inside a transaction -----
+      const batchId = this.generateBatchId("break", params.commandKey);
+
       await lockInventoryCostGraph(tx);
       await this.assertConversionSnapshot(tx, sourceVariant, targetVariant);
+
+      if (quantityPosting) await this.lockConversionLevels(tx, sourceVariantId, warehouseLocationId,
+        targetVariantId, resolvedTargetLocationId);
 
       // Validate source stock within the transaction
       const { inventoryLevels } = await import("@shared/schema");
@@ -208,7 +215,8 @@ export class BreakAssemblyUseCases {
         includeConsumedCostEvidence: true,
         reason: noteText,
         userId: userId ?? undefined,
-      });
+        deferUntilCommit: effect => effects.push(effect),
+      }, quantityPosting ?? undefined);
 
       if (!sourceResult.consumedLots?.length || sourceResult.consumedPoCostMills === undefined || sourceResult.consumedPackagingCostMills === undefined || sourceResult.consumedLandedCostMills === undefined) {
         throw new Error("Conversion requires exact consumed FIFO component and lot evidence");
@@ -221,17 +229,17 @@ export class BreakAssemblyUseCases {
         qtyDelta: targetQty,
         reason: noteText,
         userId: userId ?? undefined,
-        conversion: { sourceLots: sourceResult.consumedLots,
+        deferUntilCommit: effect => effects.push(effect),
+        conversion: {
+          sourceLots: sourceResult.consumedLots,
           productMills: BigInt(sourceResult.consumedPoCostMills), packagingMills: BigInt(sourceResult.consumedPackagingCostMills),
           landedMills: BigInt(sourceResult.consumedLandedCostMills), provisional: sourceResult.consumedCostProvisional ?? true,
-          operationKey: batchId, occurredAt: this.clock() },
-      });
+          operationKey: batchId, occurredAt: this.clock()
+        },
+      }, quantityPosting ?? undefined);
+
+      return { sourceQtyRemoved: sourceQty, targetQtyAdded: targetQty, baseUnitsConverted: baseUnits, batchId };
     });
-
-    // Notify channel sync — both source and target variant ATP changed
-    // break does not change ATP — same fungible pool
-
-    return { sourceQtyRemoved: sourceQty, targetQtyAdded: targetQty, baseUnitsConverted: baseUnits, batchId };
   }
 
   /**
@@ -243,6 +251,7 @@ export class BreakAssemblyUseCases {
    *   baseUnitsConverted = 100
    */
   async assembleVariant(params: {
+    commandKey?: string;
     sourceVariantId: number;
     targetVariantId: number;
     warehouseLocationId: number;
@@ -250,51 +259,54 @@ export class BreakAssemblyUseCases {
     userId?: string;
     notes?: string;
   }): Promise<AssembleResult> {
-    const { sourceVariantId, targetVariantId, warehouseLocationId, targetQty, userId, notes } = params;
+    return this.runConversion("assemble", params, async (tx, quantityPosting, effects) => {
+      const { sourceVariantId, targetVariantId, warehouseLocationId, targetQty, userId, notes } = params;
 
-    // ----- Load & validate -----
-    const [sourceVariant, targetVariant] = await Promise.all([
-      this.fetchVariant(sourceVariantId),
-      this.fetchVariant(targetVariantId),
-    ]);
+      // ----- Load & validate -----
+      const [sourceVariant, targetVariant] = await Promise.all([
+        this.fetchVariant(sourceVariantId),
+        this.fetchVariant(targetVariantId),
+      ]);
 
-    this.validateSameProduct(sourceVariant, targetVariant);
-    await this.assertDirectConversionAllowed(sourceVariant.productId);
+      this.validateSameProduct(sourceVariant, targetVariant);
+      await this.assertDirectConversionAllowed(sourceVariant.productId);
 
-    if (sourceVariant.unitsPerVariant >= targetVariant.unitsPerVariant) {
-      throw new Error(
-        `Cannot assemble: source variant "${sourceVariant.name}" (${sourceVariant.unitsPerVariant} units) ` +
-        `must have FEWER units per variant than target "${targetVariant.name}" (${targetVariant.unitsPerVariant} units).`
-      );
-    }
+      if (sourceVariant.unitsPerVariant >= targetVariant.unitsPerVariant) {
+        throw new Error(
+          `Cannot assemble: source variant "${sourceVariant.name}" (${sourceVariant.unitsPerVariant} units) ` +
+          `must have FEWER units per variant than target "${targetVariant.name}" (${targetVariant.unitsPerVariant} units).`
+        );
+      }
 
-    // Enforce direct parent-child: source's parentVariantId must point to target
-    if (sourceVariant.parentVariantId !== targetVariant.id) {
-      throw new Error(
-        `Cannot assemble: "${sourceVariant.sku ?? sourceVariant.name}" is not a direct child of ` +
-        `"${targetVariant.sku ?? targetVariant.name}". Only direct child→parent assembly is allowed.`
-      );
-    }
+      // Enforce direct parent-child: source's parentVariantId must point to target
+      if (sourceVariant.parentVariantId !== targetVariant.id) {
+        throw new Error(
+          `Cannot assemble: "${sourceVariant.sku ?? sourceVariant.name}" is not a direct child of ` +
+          `"${targetVariant.sku ?? targetVariant.name}". Only direct child→parent assembly is allowed.`
+        );
+      }
 
-    // How many source units do we need to produce targetQty of the target?
-    const baseUnits = targetQty * targetVariant.unitsPerVariant;
-    const sourceQtyNeeded = baseUnits / sourceVariant.unitsPerVariant;
+      // How many source units do we need to produce targetQty of the target?
+      const baseUnits = targetQty * targetVariant.unitsPerVariant;
+      const sourceQtyNeeded = baseUnits / sourceVariant.unitsPerVariant;
 
-    if (!Number.isInteger(sourceQtyNeeded)) {
-      throw new Error(
-        `Conversion produces fractional source quantity (${sourceQtyNeeded}). ` +
-        `${targetQty} x ${targetVariant.sku ?? targetVariant.name} (${targetVariant.unitsPerVariant} ea) ` +
-        `requires ${baseUnits} base units, which is not evenly divisible by ` +
-        `${sourceVariant.sku ?? sourceVariant.name}'s ${sourceVariant.unitsPerVariant} units per variant.`
-      );
-    }
+      if (!Number.isInteger(sourceQtyNeeded)) {
+        throw new Error(
+          `Conversion produces fractional source quantity (${sourceQtyNeeded}). ` +
+          `${targetQty} x ${targetVariant.sku ?? targetVariant.name} (${targetVariant.unitsPerVariant} ea) ` +
+          `requires ${baseUnits} base units, which is not evenly divisible by ` +
+          `${sourceVariant.sku ?? sourceVariant.name}'s ${sourceVariant.unitsPerVariant} units per variant.`
+        );
+      }
 
-    // ----- Execute inside a transaction -----
-    const batchId = this.generateBatchId("assemble");
+      // ----- Execute inside a transaction -----
+      const batchId = this.generateBatchId("assemble", params.commandKey);
 
-    await this.db.transaction(async (tx: any) => {
       await lockInventoryCostGraph(tx);
       await this.assertConversionSnapshot(tx, sourceVariant, targetVariant);
+
+      if (quantityPosting) await this.lockConversionLevels(tx, sourceVariantId, warehouseLocationId,
+        targetVariantId, warehouseLocationId);
 
       const { inventoryLevels } = await import("@shared/schema");
       const inventoryTx = this.inventoryUseCases.withTx(tx);
@@ -318,7 +330,8 @@ export class BreakAssemblyUseCases {
         includeConsumedCostEvidence: true,
         reason: noteText,
         userId: userId ?? undefined,
-      });
+        deferUntilCommit: effect => effects.push(effect),
+      }, quantityPosting ?? undefined);
 
       if (!sourceResult.consumedLots?.length || sourceResult.consumedPoCostMills === undefined || sourceResult.consumedPackagingCostMills === undefined || sourceResult.consumedLandedCostMills === undefined) {
         throw new Error("Conversion requires exact consumed FIFO component and lot evidence");
@@ -331,22 +344,22 @@ export class BreakAssemblyUseCases {
         qtyDelta: targetQty,
         reason: noteText,
         userId: userId ?? undefined,
-        conversion: { sourceLots: sourceResult.consumedLots,
+        deferUntilCommit: effect => effects.push(effect),
+        conversion: {
+          sourceLots: sourceResult.consumedLots,
           productMills: BigInt(sourceResult.consumedPoCostMills), packagingMills: BigInt(sourceResult.consumedPackagingCostMills),
           landedMills: BigInt(sourceResult.consumedLandedCostMills), provisional: sourceResult.consumedCostProvisional ?? true,
-          operationKey: batchId, occurredAt: this.clock() },
-      });
+          operationKey: batchId, occurredAt: this.clock()
+        },
+      }, quantityPosting ?? undefined);
+
+      return {
+        sourceQtyRemoved: sourceQtyNeeded,
+        targetQtyAdded: targetQty,
+        baseUnitsConverted: baseUnits,
+        batchId,
+      };
     });
-
-    // Notify channel sync — both source and target variant ATP changed
-    // assemble does not change ATP — same fungible pool
-
-    return {
-      sourceQtyRemoved: sourceQtyNeeded,
-      targetQtyAdded: targetQty,
-      baseUnitsConverted: baseUnits,
-      batchId,
-    };
   }
 
   /**
@@ -570,8 +583,44 @@ export class BreakAssemblyUseCases {
   // Private helpers
   // --------------------------------------------------------------------------
 
-  private generateBatchId(prefix: string): string {
+  private async runConversion(
+    kind: "break" | "assemble",
+    params: Record<string, unknown> & { commandKey?: string; userId?: string; notes?: string },
+    execute: (tx: PackageConversionTransaction, posting: OperationalQuantityPosting | null, effects: Array<() => Promise<void>>) => Promise<BreakResult>,
+  ): Promise<BreakResult> {
+    const effects: Array<() => Promise<void>> = [];
+    const result = await this.db.transaction(async (tx: PackageConversionTransaction) => {
+      const posting = await openOperationalQuantityPosting(tx);
+      const key = params.commandKey ? `package_${kind}:${params.commandKey}` : undefined;
+      const replay = posting && await posting.beginOperation(key, { operation: kind, ...params });
+      if (replay) return packageConversionResultSchema.parse(replay.result);
+      const converted = packageConversionResultSchema.parse(await execute(tx, posting, effects));
+      if (posting) {
+        await posting.post({
+          idempotencyKey: key!, kind: "transform", actor: params.userId ?? "system:package_conversion",
+          reason: params.notes ?? `${kind} exact physical package units`, occurredAt: this.clock().toISOString(),
+          reference: { type: "package_conversion", id: converted.batchId }
+        });
+        await posting.finishOperation({ ...converted });
+      }
+      return converted;
+    });
+    for (const effect of effects) await effect();
+    return result;
+  }
+
+  private generateBatchId(prefix: string, commandKey?: string): string {
+    if (commandKey) return `${prefix}_${createHash("sha256").update(`${prefix}:${commandKey}`).digest("hex").slice(0, 40)}`;
     return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  /** Acquire the complete existing cell set before either FIFO owner locks lots. */
+  private async lockConversionLevels(tx: PackageConversionTransaction, sourceVariantId: number,
+    sourceLocationId: number, targetVariantId: number, targetLocationId: number): Promise<void> {
+    await tx.execute(sql`SELECT id FROM inventory.inventory_levels
+      WHERE (product_variant_id = ${sourceVariantId} AND warehouse_location_id = ${sourceLocationId})
+         OR (product_variant_id = ${targetVariantId} AND warehouse_location_id = ${targetLocationId})
+      ORDER BY warehouse_location_id, product_variant_id, id FOR UPDATE`);
   }
 
   private async assertConversionSnapshot(tx: any, source: ProductVariant, target: ProductVariant): Promise<void> {
@@ -651,73 +700,13 @@ export class BreakAssemblyUseCases {
     return { targetQty, baseUnits };
   }
 
-  /**
-   * Fetch an inventory level row within a transaction context.
-   */
-  private async fetchLevel(
-    tx: any,
-    productVariantId: number,
-    warehouseLocationId: number
-  ): Promise<InventoryLevel | null> {
-    const rows: InventoryLevel[] = await tx
-      .select()
-      .from(inventoryLevels)
-      .where(
-        and(
-          eq(inventoryLevels.productVariantId, productVariantId),
-          eq(inventoryLevels.warehouseLocationId, warehouseLocationId)
-        )
-      );
-    return rows[0] ?? null;
-  }
-
-  /**
-   * Delta-based adjustment within a transaction context.
-   * Mirrors storage.adjustInventoryLevel but operates on the tx handle.
-   */
-  private async adjustWithinTx(
-    tx: any,
-    levelId: number,
-    deltas: { variantQty?: number }
-  ): Promise<void> {
-    const { sql } = await import("drizzle-orm");
-    const updates: Record<string, any> = { updatedAt: new Date() };
-
-    if (deltas.variantQty !== undefined) {
-      updates.variantQty = sql`${inventoryLevels.variantQty} + ${deltas.variantQty}`;
-    }
-
-    await tx
-      .update(inventoryLevels)
-      .set(updates)
-      .where(eq(inventoryLevels.id, levelId));
-  }
-
-  /**
-   * Insert a new inventory level row within a transaction context.
-   */
-  private async insertLevel(
-    tx: any,
-    data: {
-      productVariantId: number;
-      warehouseLocationId: number;
-      variantQty: number;
-      reservedQty: number;
-      pickedQty: number;
-      packedQty: number;
-      backorderQty: number;
-    }
-  ): Promise<void> {
-    await tx.insert(inventoryLevels).values(data);
-  }
-
-  /**
-   * Log an inventory transaction within a transaction context.
-   */
-  private async logTx(tx: any, data: InsertInventoryTransaction): Promise<void> {
-    await tx.insert(inventoryTransactions).values(data);
-  }
 }
+
+const packageConversionResultSchema = z.object({
+  sourceQtyRemoved: z.number().int().positive().max(2_147_483_647),
+  targetQtyAdded: z.number().int().positive().max(2_147_483_647),
+  baseUnitsConverted: z.number().int().positive().safe(), batchId: z.string().min(1).max(50),
+}).strict();
 
 // ============================================================================
 // Factory

@@ -15,6 +15,7 @@ import { PostgresInventoryPromiseSafetyAdminStore } from "../../infrastructure/i
 import { PostgresInventoryChannelExposureAdminStore } from "../../infrastructure/inventory-channel-exposure-admin.repository";
 import { createAuthorityAwareInventoryPublicationService, createTransactionScopedInventoryPublicationService } from "../../infrastructure/inventory-availability-runtime-publication.repository";
 import { installOperationalPublicationPrerequisites } from "../fixtures/shipment-operational-publication";
+import { installUnopenedQuantityLedgerFixture } from "../../../inventory/__tests__/fixtures/pre-opening-quantity-authority.fixture";
 import { PostgresOperationalShipmentDispatchRepository } from "../../../inventory/infrastructure/operational-shipment-dispatch.repository";
 import { WmsOperationalShipmentSourceOwner } from "../../../wms/operational-shipment-source";
 import { publishOperationalShipmentInsideTransaction } from "../../infrastructure/inventory-availability-dispatch-publication";
@@ -3913,6 +3914,9 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
     // or a simulation of global cutover: runtime/model authority is the same
     // real foundation setup already proven above.
     await installOperationalPublicationPrerequisites(pool);
+    // Component-level publication proof; full quantity/ATP cutover is covered
+    // by the composition suites with actual ledger migrations and opening.
+    await installUnopenedQuantityLedgerFixture(pool);
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/234_inventory_canonical_shipment_compatibility.sql"), "utf8"));
     await pool.query("INSERT INTO wms.orders(id,warehouse_id) VALUES(70,$1)", [scope.warehouseId]);
     await pool.query("INSERT INTO wms.order_items VALUES(71,70)");

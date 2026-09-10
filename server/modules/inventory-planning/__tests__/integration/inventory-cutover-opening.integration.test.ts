@@ -17,6 +17,7 @@ import { PostgresInventoryCutoverCommitRepository } from "../../infrastructure/i
 import { projectInventoryCutoverStateInsideTransaction } from "../../infrastructure/inventory-cutover-projection.repository";
 import { buildInventoryCutoverManifest } from "../../domain/inventory-cutover-manifest";
 import { acquireInventoryCutoverFenceInsideTransaction } from "../../infrastructure/inventory-cutover-admission-fence.repository";
+import { installQuantityCutoverFixture } from "../fixtures/inventory-quantity-cutover.fixture";
 import { planCutoverReconstruction } from "../../domain/inventory-cutover-reconstruction";
 import { PostgresInventoryPublicationOutboxRepository } from "../../infrastructure/inventory-publication-outbox.repository";
 import { InventoryPublicationOutboxService } from "../../application/inventory-publication-outbox.service";
@@ -53,6 +54,7 @@ dbDescribe.sequential("verified opening persistence with real PostgreSQL admissi
     await installCutoverAdmissionFixturePrerequisites(pool);
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/236_inventory_cutover_admission.sql"), "utf8"));
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/240_inventory_cutover_verified_opening.sql"), "utf8"));
+    await installQuantityCutoverFixture(pool);
     await pool.query(`UPDATE wms.orders SET order_number='#OPENING-1';
       UPDATE warehouse.warehouses SET code='MAIN',name='Main warehouse';
       UPDATE warehouse.warehouse_locations SET code='PICK-A',name='Pick bin';
@@ -112,10 +114,11 @@ dbDescribe.sequential("verified opening persistence with real PostgreSQL admissi
         VALUES(9,8,4,1,0,0,'build_order',NULL,NULL)`);
   }
 
-  async function promiseOpeningRequest() {
+  async function promiseOpeningRequest(contractVersion: OpeningVerification["contractVersion"] = "inventory_cutover_opening_v1") {
     const source = await service.capture("operator");
     const input = { verification: verification(source), reason: "Verify physical custody and preserve the complete unfilled promise",
       idempotencyKey: "promise-opening" };
+    input.verification.contractVersion = contractVersion;
     input.verification.owners.push({ orderId: 2, orderItemId: 22, remainingQty: "20", reservedQty: "0", pickedQty: "0", allocations: [] });
     return { source, input };
   }
@@ -169,7 +172,7 @@ dbDescribe.sequential("verified opening persistence with real PostgreSQL admissi
       FROM pg_trigger trigger JOIN pg_class relation ON relation.oid=trigger.tgrelid
       JOIN pg_namespace namespace ON namespace.oid=relation.relnamespace
       WHERE trigger.tgname='aa_cutover_writer_admission' ORDER BY namespace.nspname,relation.relname`)).rows;
-    expect(rows).toHaveLength(80);
+    expect(rows).toHaveLength(83); // prior80 plus quantity commands, entries and durable operation replies
     expect(rows).toEqual(expect.arrayContaining([
       { relation: "oms.channel_fulfillment_receipts" }, { relation: "oms.channel_fulfillment_receipt_attempts" },
       { relation: "wms.order_build_demands" },
@@ -211,10 +214,10 @@ dbDescribe.sequential("verified opening persistence with real PostgreSQL admissi
     expect((await service.capture("operator")).latestVerification).toEqual(saved);
   });
 
-  it("carries original empty-bin proof through opening, publication and atomic handoff without losing physical custody or demand", async () => {
+  it.each(["inventory_cutover_opening_v1", "inventory_cutover_opening_v2"] as const)("%s carries empty-bin proof through opening, publication and atomic handoff without losing custody or demand", async contractVersion => {
     await seedOpeningPromise();
     await pool.query(cutoverCompositionChannelSeedSql);
-    const { source, input } = await promiseOpeningRequest();
+    const { source, input } = await promiseOpeningRequest(contractVersion);
     const strict = planCutoverReconstruction(source.evidence);
     expect(strict.ready).toBe(false);
     expect(strict.blockers).toContainEqual(expect.objectContaining({ code: "JOURNAL_CUSTODY_UNKNOWN" }));
@@ -540,7 +543,7 @@ dbDescribe.sequential("verified opening persistence with real PostgreSQL admissi
   it("database guards forbid mutation, deletion, truncation and an insertion without exclusive admission", async () => {
     await service.save(await request(), "operator");
     for (const sql of ["UPDATE inventory.availability_cutover_opening_snapshots SET reason=reason",
-      "DELETE FROM inventory.availability_cutover_opening_snapshots", "TRUNCATE inventory.availability_cutover_opening_snapshots"]) {
+      "DELETE FROM inventory.availability_cutover_opening_snapshots", "TRUNCATE inventory.availability_cutover_opening_snapshots CASCADE"]) {
       await expect(pool.query(sql)).rejects.toMatchObject({ code: "23514" });
     }
     await expect(pool.query(`INSERT INTO inventory.availability_cutover_opening_snapshots OVERRIDING SYSTEM VALUE

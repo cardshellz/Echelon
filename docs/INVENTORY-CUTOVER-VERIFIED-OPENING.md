@@ -1,5 +1,26 @@
 # Verified current-inventory opening
 
+## Superseding quantity-authority update
+
+The sections below retain the original **v1** design and evidence. The current
+v2 workflow is described in [One physical quantity authority](INVENTORY-SINGLE-QUANTITY-AUTHORITY.md).
+It derives bin totals from independently verified lot observations instead of
+requiring both legacy counters to match. Differences in those quantity counters
+can be established by the approved opening; exact lot identities, original
+costs, complete current ownership and all other safety checks remain required.
+The opening is posted with the canonical ATP cutover in one transaction.
+Historical v1 saved assessments keep their original semantics. Saving either
+verification is still not activation, and deployment alone changes no counts.
+
+The exact journal-proven promise handoff from PR #1433 is retained in both
+formats. V1 verifies the raw reservation counter; V2 keeps it only in the
+recorded reference and derives physical reservations from lot observations.
+Both preserve the complete unfilled order demand. Claim and publication preview
+validate the promise against raw evidence before projecting V2 observations.
+Final commit releases the proven legacy counter **before** posting the quantity
+opening, then creates fresh claims and switches ATP in the same transaction.
+It never subtracts a nonphysical promise from an already physical ledger balance.
+
 ## Approved policy and scope
 
 The operator approved building a controlled opening-balance cutover from independently verified current stock and outstanding orders, with unresolved historical discrepancies preserved separately. This is an explicit alternative to reconstructing every current owner from incomplete legacy journals. It is not proof that the old journals, shipments or historical costs have been repaired.

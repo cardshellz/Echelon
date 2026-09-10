@@ -10,19 +10,21 @@ const worksheetSchema = z.object({ contractVersion: z.literal("inventory_cutover
   recordedReference: z.unknown(), verification: z.unknown() }).strict();
 
 /** Recorded values are references, not an attestation. Every independently
- * verified quantity starts blank, including explicit zero positions. Level
- * reservedQty is the exact recorded counter, which can include an empty-bin
- * promise. Owner reservedQty/pickedQty describe verified physical holds only;
+ * verified lot/owner quantity starts blank. V2 level quantities derive only
+ * from those lots; raw counters, including empty-bin promises, remain in the
+ * recorded reference. Owner reservedQty/pickedQty describe physical holds only;
  * eligibility to replan a promise is assessed by the server, never this export. */
 export function createOpeningWorksheet(source: OpeningSource): string {
   return JSON.stringify({ contractVersion: "inventory_cutover_opening_worksheet_v1",
     recordedReference: { capturedAt: source.capturedAt, labels: source.labels,
       levels: source.evidence.levels, lots: source.evidence.lots,
       orders: source.evidence.orders, items: requiredOpeningItems(source.evidence), costs: source.evidence.costs },
-    verification: { contractVersion: "inventory_cutover_opening_v1", expectedEvidenceHash: source.evidenceHash,
+    verification: { contractVersion: "inventory_cutover_opening_v2", expectedEvidenceHash: source.evidenceHash,
       expectedAuthorityRevision: source.authorityRevision, expectedConfigurationRunId: source.configurationRunId,
       verificationReference: "", verificationEvidenceHash: "", verifiedAt: "", historicalDisposition: "preserve_unresolved",
-      levels: source.evidence.levels.map(level => ({ ...level, variantQty: "", reservedQty: "", pickedQty: "", packedQty: "" })),
+      // Position quantities are outputs recalculated from lot observations on
+      // import and on the server. They are not a second count worksheet.
+      levels: source.evidence.levels.map(level => ({ ...level, variantQty: "0", reservedQty: "0", pickedQty: "0", packedQty: "0" })),
       lots: source.evidence.lots.map(lot => ({ ...lot, onHandQty: "", reservedQty: "", pickedQty: "",
         unitCostMills: "", poUnitCostMills: "", packagingUnitCostMills: "", landedUnitCostMills: "" })),
       owners: requiredOpeningItems(source.evidence).map(item => ({ orderId: item.orderId, orderItemId: item.id,

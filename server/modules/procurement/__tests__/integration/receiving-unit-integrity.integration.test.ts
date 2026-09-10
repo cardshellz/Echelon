@@ -10,6 +10,7 @@ import * as schema from "@shared/schema";
 import { receivingUnitVersion } from "../../receiving-unit-contract";
 import { readClosedShipmentReceivedBaseQtyByLine } from "../../receiving-shipment-coverage";
 import { fixtureForeignKeys, fixtureTable, qualifiedTable } from "./shipment-line-fixture";
+import { installPreOpeningQuantityAuthorityFixture } from "../../../inventory/__tests__/fixtures/pre-opening-quantity-authority.fixture";
 
 config({ path: resolve(process.cwd(), ".env.test") });
 const DATABASE_URL = process.env.ECHELON_TEST_DATABASE_URL;
@@ -110,6 +111,7 @@ databaseTests.sequential("receiving frozen units PostgreSQL guarantees", () => {
       ownedSchemas.push(name);
     }
     for (const table of TABLES) await pool.query(fixtureTable(table));
+    await installPreOpeningQuantityAuthorityFixture(pool);
     // Start from real pre-221 column shape and preserve a historical line. No
     // application backfill is run, and replay uses the same migration text.
     await pool.query(`ALTER TABLE procurement.receiving_lines DROP COLUMN units_per_variant_snapshot, DROP COLUMN inbound_shipment_line_id;
@@ -261,6 +263,21 @@ databaseTests.sequential("receiving frozen units PostgreSQL guarantees", () => {
       expect((await pool.query("SELECT count(*)::int AS count FROM inventory.inventory_transactions")).rows[0].count).toBe(0);
     } finally { if (open) await holder.query("ROLLBACK"); holder.release(); if (pending) await pending.result; }
   });
+
+  it.each(["cutover_admission_fence", "quantity_ledger_opening"] as const)(
+    "rejects a missing %s without posting receipt, quantity or audit changes", async (table) => {
+      const before = await state();
+      // Rename only the table owned by this disposable fixture, and restore it
+      // even if an assertion fails. Missing schema is not pre-opening consent.
+      await pool.query(`ALTER TABLE inventory.${table} RENAME TO receiving_fixture_hidden_authority`);
+      try {
+        await expect(service.close(50, actorId)).rejects.toMatchObject({ code: "42P01" });
+        expect(await state()).toEqual(before);
+      } finally {
+        await pool.query(`ALTER TABLE inventory.receiving_fixture_hidden_authority RENAME TO ${table}`);
+      }
+    },
+  );
 
   it("posts exactly 501 pieces once while unavailable PO reconciliation remains explicitly retryable", async () => {
     await pool.query(`UPDATE procurement.receiving_orders SET source_type='shipment',inbound_shipment_id=1,purchase_order_id=10 WHERE id=50;

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { isTerminalWmsDemandStatus } from "../enums/order-status";
+import { deriveVerifiedOpeningPositions } from "./inventory-opening-quantity-projection";
 import { cutoverOpeningProvenanceSchema, cutoverReconstructionEvidenceSchema, cutoverReconstructionLevelSchema, cutoverReconstructionLotSchema,
   cutoverReconstructionCostSchema, cutoverLegacyPromiseReleaseSchema, type CutoverReconstructionEvidence } from "./inventory-cutover-reconstruction";
 
@@ -16,15 +17,24 @@ export const openingOwnerSchema = z.object({ orderId: id, orderItemId: id,
   allocations: z.array(z.object({ inventoryLevelId: id, lots: z.array(lotAllocation).max(50_000) }).strict()).max(50_000),
 }).strict();
 
-/** Independent verification, not an instruction to overwrite recorded counters. */
+/** V1 remains readable for immutable prior audits. V2 observes each lot once;
+ * position quantities are a derived output, never another inventory authority.
+ * Saving either version is review-only. Only admitted cutover posts an opening. */
 export const openingVerificationSchema = z.object({
-  contractVersion: z.literal("inventory_cutover_opening_v1"),
+  contractVersion: z.enum(["inventory_cutover_opening_v1", "inventory_cutover_opening_v2"]),
   expectedEvidenceHash: hash, expectedAuthorityRevision: bigintId, expectedConfigurationRunId: bigintId.nullable(),
   verificationReference: text(1000), verificationEvidenceHash: hash, verifiedAt: z.string().datetime(),
   historicalDisposition: z.literal("preserve_unresolved"),
   levels: z.array(cutoverReconstructionLevelSchema).max(50_000),
   lots: z.array(cutoverReconstructionLotSchema).max(50_000), owners: z.array(openingOwnerSchema).max(50_000),
-}).strict();
+}).strict().transform((verification, context) => {
+  if (verification.contractVersion === "inventory_cutover_opening_v1") return verification;
+  try { return { ...verification, levels: deriveVerifiedOpeningPositions(verification.levels, verification.lots) }; }
+  catch (error) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["lots"], message: error instanceof Error ? error.message : "Invalid opening quantities" });
+    return z.NEVER;
+  }
+});
 export type OpeningVerification = z.infer<typeof openingVerificationSchema>;
 
 const allocation = z.object({ inventoryLevelId: id, warehouseId: id, warehouseLocationId: id, productVariantId: id,

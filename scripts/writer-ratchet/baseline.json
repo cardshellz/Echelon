@@ -577,6 +577,18 @@
   "inventory.publication_variant_mapping_versions": [
     "modules/inventory-planning"
   ],
+  "inventory.quantity_commands": [
+    "modules/inventory"
+  ],
+  "inventory.quantity_entries": [
+    "modules/inventory"
+  ],
+  "inventory.quantity_ledger_opening": [
+    "modules/inventory"
+  ],
+  "inventory.quantity_operation_receipts": [
+    "modules/inventory"
+  ],
   "inventory.quantity_provider_request_results": [
     "modules/inventory-planning"
   ],
