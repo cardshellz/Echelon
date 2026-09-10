@@ -1,4 +1,5 @@
 import { normalizePoLinePricing } from "@shared/utils/po-line-pricing";
+import { purchaseBuyingDisposition, type PurchaseBuyingReviewItem } from "@shared/procurement/purchase-buying-review";
 // Pure helpers for the Reorder Engine cockpit (client/src/pages/ReorderEngine.tsx).
 //
 // Everything here is presentation-layer: chip unions, grouping/rollups, date
@@ -32,21 +33,23 @@ export const INFINITE_DAYS_OF_SUPPLY = 9999;
 /** Overstock display threshold (days of supply), per design spec rev 1-3. */
 export const OVERSTOCK_DAYS_OF_SUPPLY = 180;
 
-export interface ChipFilterItem {
-  status: string;
+export interface ChipFilterItem extends PurchaseBuyingReviewItem {
   daysOfSupply: number;
-  supplyTiming?: { reviewRequired: boolean };
 }
 
 export interface SuggestedSpendItem {
+  /** Present for recommendations; omitted by standalone money-formatting callers. */
+  status?: string;
+  onOrderPieces?: number;
+  supplyTiming?: PurchaseBuyingReviewItem["supplyTiming"];
   supplierBasis?: { pricingBasis?: string; quotedUnitCostMills?: number | null; purchaseUom?: string | null; piecesPerPurchaseUom?: number | null };
   suggestedOrderPieces: number;
   estimatedCostMills: number | null;
   estimatedCostCents: number | null;
   /**
    * Engine skip reason. The engine dual-lists non-excluded skipped rows
-   * (no_vendor, already_on_order, …) in BOTH `items` and `skippedItems`;
-   * their Suggested cell renders "—", so spend aggregation must ignore them.
+   * (no_vendor, already_on_order, …) in BOTH `items` and `skippedItems`.
+   * Human buying disposition determines which still need a quantity shown.
    */
   skippedReason?: string | null;
 }
@@ -131,9 +134,9 @@ export function isOverstocked(item: ChipFilterItem): boolean {
 export function chipMatchesItem(chip: ChipKey, item: ChipFilterItem): boolean {
   switch (chip) {
     case "needs_order":
-      return item.status === "stockout" || item.status === "order_now";
+      return purchaseBuyingDisposition(item) === "purchase_now";
     case "order_soon":
-      return item.status === "order_soon";
+      return purchaseBuyingDisposition(item) === "purchase_soon";
     case "on_order":
       return item.status === "on_order";
     case "ok":
@@ -164,7 +167,7 @@ export function filterItemsByChips<T extends ChipFilterItem>(
 ): T[] {
   if (selected.size === 0 || allChipsSelected(selected)) return [...items];
   return items.filter((item) =>
-    (isOrderQueueSelection(selected) && item.supplyTiming?.reviewRequired === true) ||
+    (isOrderQueueSelection(selected) && purchaseBuyingDisposition(item) === "supply_review") ||
     ALL_CHIP_KEYS.some((chip) => selected.has(chip) && chipMatchesItem(chip, item)),
   );
 }
@@ -334,15 +337,16 @@ export interface SuggestedSpendSummary {
  * engine suggests ordering. Client-side per design spec §13 ("suggested-spend
  * (client-computed acceptable)"). Items without a usable cost are counted but
  * contribute $0 — the count is surfaced so the KPI is honest about coverage.
- * Skipped rows (the engine dual-lists them in `items`) never count: their
- * table row renders "—", so the KPI must not disagree with the table.
+ * Recommendation rows use the same purchase disposition as their quantity
+ * cells, including supplier work. Standalone callers without a status retain
+ * the legacy explicit-skip contract.
  */
 export function computeSuggestedSpend(items: readonly SuggestedSpendItem[]): SuggestedSpendSummary {
   let totalCents = 0;
   let skuCount = 0;
   let missingCostCount = 0;
   for (const item of items) {
-    if (item.skippedReason) continue;
+    if (!hasSuggestedPurchase(item)) continue;
     if (item.suggestedOrderPieces <= 0) continue;
     skuCount += 1;
     const cents = suggestedValueCents(item);
@@ -353,6 +357,13 @@ export function computeSuggestedSpend(items: readonly SuggestedSpendItem[]): Sug
     totalCents += cents;
   }
   return { totalCents, skuCount, missingCostCount };
+}
+
+function hasSuggestedPurchase(item: SuggestedSpendItem): boolean {
+  if (item.suggestedOrderPieces <= 0) return false;
+  if (item.status === undefined) return !item.skippedReason;
+  const disposition = purchaseBuyingDisposition({ ...item, status: item.status });
+  return disposition === "purchase_now" || disposition === "purchase_soon";
 }
 
 /** Available on-hand value in cents (available pieces × per-piece cost); 0 when cost missing. */
@@ -399,17 +410,15 @@ export function computeGroupRollup<T extends GroupableItem>(items: readonly T[])
   let suggestedCents = 0;
   let onHandCents = 0;
   for (const item of items) {
-    const skipped = item.skippedReason !== null && item.skippedReason !== undefined;
+    const purchaseNeeded = hasSuggestedPurchase(item);
     if (
-      !skipped &&
+      purchaseNeeded &&
       item.currentSupply.effectiveSupplyPieces < item.forwardDemandBasis.adjustedReorderPoint
     ) {
       belowReorderPointCount += 1;
     }
-    // Skipped rows render "—" in the Suggested column, so their (possibly
-    // positive) engine suggestion must not inflate the group's suggested $.
-    // On-hand value is real stock regardless, so it always counts.
-    if (!skipped) suggestedCents += suggestedValueCents(item) ?? 0;
+    // Sum only displayed purchase quantities. On-hand value is independent.
+    if (purchaseNeeded) suggestedCents += suggestedValueCents(item) ?? 0;
     onHandCents += availableValueCents(item);
   }
   return { skuCount: items.length, belowReorderPointCount, suggestedCents, onHandCents };

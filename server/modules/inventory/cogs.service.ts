@@ -24,6 +24,7 @@ import {
 import { calculateUnreservedLotOnHand } from "./domain/inventory.domain";
 import type { InventoryLot } from "@shared/schema";
 import { assertLegacyQuantityImportAllowed } from "./application/legacy-quantity-import";
+import { parseCostLotsReport, parseInventoryValuationReport } from "@shared/inventory/cost-report-read";
 
 /**
  * Parse one lot-cost CSV row. Pure + exported for unit testing.
@@ -818,7 +819,7 @@ export class COGSService {
       SELECT
         p.id as product_id,
         p.name as product_name,
-        p.base_sku,
+        p.sku AS base_sku,
         SUM(il.qty_on_hand) as total_qty,
         CASE WHEN SUM(il.qty_on_hand) > 0
           THEN SUM(il.qty_on_hand * COALESCE(NULLIF(il.total_unit_cost_mills, 0), il.unit_cost_mills, 0)) / SUM(il.qty_on_hand)
@@ -832,7 +833,7 @@ export class COGSService {
       JOIN catalog.product_variants pv ON pv.id = il.product_variant_id
       JOIN catalog.products p ON p.id = pv.product_id
       WHERE il.status = 'active' AND il.qty_on_hand > 0
-      GROUP BY p.id, p.name, p.base_sku
+      GROUP BY p.id, p.name, p.sku
       ORDER BY total_value_mills DESC
     `);
 
@@ -865,7 +866,7 @@ export class COGSService {
     `);
     const pending = pendingResult.rows?.[0] as any || {};
 
-    return {
+    return parseInventoryValuationReport({
       totalValueCents,
       totalQty,
       zeroCostQty,
@@ -873,7 +874,7 @@ export class COGSService {
       landedPendingLots: Number(pending.landed_pending_count) || 0,
       landedPendingValueCents: millsToCents(Math.round(Number(pending.landed_pending_value_mills) || 0)),
       byProduct,
-    };
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -1049,7 +1050,7 @@ export class COGSService {
              pv.units_per_variant AS units_per_variant,
              p.name as product_name,
              p.id as product_id,
-             p.base_sku,
+             p.sku AS base_sku,
              po.po_number,
              ish.shipment_number,
              wl.code as location_code,
@@ -1065,10 +1066,10 @@ export class COGSService {
       LIMIT ${limit} OFFSET ${offset}
     `);
 
-    return {
+    return parseCostLotsReport({
       lots: result.rows || [],
       total: Number(countResult.rows?.[0]?.total) || 0,
-    };
+    });
   }
 
   // ---------------------------------------------------------------------------

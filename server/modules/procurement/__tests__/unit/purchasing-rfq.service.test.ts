@@ -102,7 +102,7 @@ describe("purchasing RFQ queue", () => {
   });
 
   it("preserves the demand evidence used to justify the RFQ quantity", () => {
-    const [item] = buildPurchasingRfqQueue({ items: [], skippedItems: [recommendation()] });
+    const [item] = buildPurchasingRfqQueue({ items: [], skippedItems: [recommendation({ orderRounding: { incrementPieces: 24, source: "vendor_pack" } })] });
 
     expect(item.demandSnapshot).toMatchObject({
       recommendationId: "20:30:90",
@@ -111,6 +111,7 @@ describe("purchasing RFQ queue", () => {
       effectiveSupplyPieces: 12,
       reorderPointPieces: 108,
       suggestedOrderPieces: 96,
+      orderRounding: { incrementPieces: 24, source: "vendor_pack" },
       generatedForLookbackDays: 90,
     });
   });

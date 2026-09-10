@@ -20,7 +20,7 @@ export default defineConfig({
   ],
   webServer: {
     // Frontend only. All API requests are mocked; no DB or application server starts.
-    command: "npx vite --host 127.0.0.1 --port 5179 --strictPort",
+    command: "node node_modules/vite/bin/vite.js --host 127.0.0.1 --port 5179 --strictPort",
     url: "http://127.0.0.1:5179",
     reuseExistingServer: false,
     timeout: 60_000,

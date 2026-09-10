@@ -52,6 +52,12 @@ import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
 import { filterActionableWarehouseLocations } from "@/lib/warehouse-locations";
 import {
+  parseCostLotsReport,
+  parseInventoryValuationReport,
+  type CostLotReport,
+} from "@shared/inventory/cost-report-read";
+import { costReportErrorMessage, readCostReport } from "@/lib/cost-report-read";
+import {
   formatDashboardCents,
   formatDashboardMills,
   formatDashboardLotCost,
@@ -284,17 +290,45 @@ function CostUploadSection() {
 // SECTION 1: VALUATION SUMMARY
 // ═══════════════════════════════════════════════════════════════════════
 
+function CostReportError({ title, error, retrying, onRetry }: {
+  title: string;
+  error: unknown;
+  retrying: boolean;
+  onRetry: () => void;
+}) {
+  return (
+    <Card role="alert" className="border-destructive/40">
+      <CardContent className="flex flex-col gap-3 pt-6 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <p className="font-medium">{title} could not be loaded</p>
+          <p className="text-sm text-muted-foreground">{costReportErrorMessage(error)}</p>
+        </div>
+        <Button variant="outline" disabled={retrying} onClick={onRetry} aria-label={`Retry ${title.toLowerCase()}`}>
+          <RefreshCw className={`mr-2 h-4 w-4 ${retrying ? "animate-spin" : ""}`} />
+          {retrying ? "Retrying…" : "Retry"}
+        </Button>
+      </CardContent>
+    </Card>
+  );
+}
+
 function ValuationSection() {
-  const { data, isLoading } = useQuery<any>({
+  const { data, isLoading, isError, error, isFetching, refetch } = useQuery({
     queryKey: ["/api/cogs/valuation"],
+    queryFn: ({ signal }) => readCostReport("/api/cogs/valuation", parseInventoryValuationReport, signal),
   });
 
   if (isLoading) {
     return <LoadingSpinner />;
   }
 
-  const valuation = data || {};
-  const byProduct: any[] = valuation.byProduct || [];
+  // A failed refresh also hides cached totals: they must not look current.
+  if (isError || !data) {
+    return <CostReportError title="Inventory valuation" error={error} retrying={isFetching} onRetry={() => { void refetch(); }} />;
+  }
+
+  const valuation = data;
+  const byProduct = valuation.byProduct;
 
   return (
     <div className="space-y-6">
@@ -326,7 +360,7 @@ function ValuationSection() {
               <div>
                 <p className="text-sm text-muted-foreground">Recorded Lot Units</p>
                 <p className="text-2xl font-bold">
-                  {(valuation.totalQty || 0).toLocaleString()}
+                  {valuation.totalQty.toLocaleString()}
                 </p>
               </div>
             </div>
@@ -389,11 +423,11 @@ function ValuationSection() {
                 {byProduct.length === 0 && (
                   <TableRow>
                     <TableCell colSpan={6} className="text-center text-muted-foreground py-12">
-                      No cost data yet. Add manual cost entries or receive inventory with PO costs.
+                      No active cost lots with remaining inventory were found.
                     </TableCell>
                   </TableRow>
                 )}
-                {byProduct.map((p: any) => (
+                {byProduct.map((p) => (
                   <TableRow key={p.productId}>
                     <TableCell>
                       <div className="flex items-center gap-2">
@@ -445,26 +479,24 @@ function CostExplorer() {
 
   const debouncedSearch = useDebounce(search, 300);
 
-  const { data, isLoading } = useQuery<any>({
+  const { data, isLoading, isError, error, isFetching, refetch } = useQuery({
     queryKey: ["/api/cogs/lots", { search: debouncedSearch, onlyPending, limit: pageSize, offset: page * pageSize }],
-    queryFn: async () => {
+    queryFn: ({ signal }) => {
       const params = new URLSearchParams();
       if (debouncedSearch) params.set("search", debouncedSearch);
       if (onlyPending) params.set("onlyPending", "true");
       params.set("limit", String(pageSize));
       params.set("offset", String(page * pageSize));
-      const res = await fetch(`/api/cogs/lots?${params}`);
-      if (!res.ok) throw new Error("Failed to fetch");
-      return res.json();
+      return readCostReport(`/api/cogs/lots?${params}`, parseCostLotsReport, signal);
     },
   });
 
-  const lots: any[] = data?.lots || [];
-  const total = data?.total || 0;
+  const lots = data?.lots ?? [];
+  const total = data?.total ?? 0;
 
   // Group lots by product
   const grouped = useMemo(() => {
-    const map = new Map<number, { product: any; lots: any[] }>();
+    const map = new Map<number, { product: { id: number; name: string; baseSku: string | null }; lots: CostLotReport[] }>();
     for (const lot of lots) {
       const pid = lot.product_id;
       if (!map.has(pid)) {
@@ -514,6 +546,8 @@ function CostExplorer() {
 
       {isLoading ? (
         <LoadingSpinner />
+      ) : isError || !data ? (
+        <CostReportError title="Cost explorer" error={error} retrying={isFetching} onRetry={() => { void refetch(); }} />
       ) : grouped.length === 0 ? (
         <Card>
           <CardContent className="py-12 text-center text-muted-foreground">
@@ -524,7 +558,7 @@ function CostExplorer() {
         <div className="space-y-2">
           {grouped.map(({ product, lots: productLots }) => {
             const isExpanded = expandedLots.has(product.id);
-            const totalQty = productLots.reduce((s: number, l: any) => s + Number(l.qty_on_hand || 0), 0);
+            const totalQty = productLots.reduce((sum, lot) => sum + lot.qty_on_hand, 0);
             const totalValue = formatDashboardLotValue(productLots);
             const hasLandedPending = productLots.some(isLandedPendingLot);
 
@@ -588,7 +622,7 @@ function CostExplorer() {
                           </TableRow>
                         </TableHeader>
                         <TableBody>
-                          {productLots.map((lot: any) => {
+                          {productLots.map((lot) => {
                             const landedPending = isLandedPendingLot(lot);
                             return (
                               <TableRow key={lot.id} className={landedPending ? "bg-amber-50/50 dark:bg-amber-950/10" : ""}>
@@ -599,7 +633,7 @@ function CostExplorer() {
                                   )}
                                 </TableCell>
                                 <TableCell className="font-mono text-xs">{lot.sku}</TableCell>
-                                <TableCell className="text-xs">{formatDate(lot.received_at)}</TableCell>
+                                <TableCell className="text-xs">{formatDate(lot.received_at instanceof Date ? lot.received_at.toISOString() : lot.received_at)}</TableCell>
                                 <TableCell className="text-right font-mono text-xs">
                                   {formatDashboardLotCost(lot, "product")}
                                 </TableCell>
@@ -611,10 +645,10 @@ function CostExplorer() {
                                   {formatDashboardLotCost(lot)}
                                 </TableCell>
                                 <TableCell className="text-right font-mono text-xs">
-                                  {Number(lot.qty_received || 0).toLocaleString()}
+                                  {lot.qty_received === null ? "Not recorded" : lot.qty_received.toLocaleString()}
                                 </TableCell>
                                 <TableCell className="text-right font-mono text-xs">
-                                  {Number(lot.qty_on_hand || 0).toLocaleString()}
+                                  {lot.qty_on_hand.toLocaleString()}
                                 </TableCell>
                                 <TableCell className="text-xs">
                                   <SourceBadge lot={lot} />

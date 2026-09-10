@@ -1,4 +1,7 @@
 import { SupplierSelectionEvidence } from "@/features/purchasing/SupplierSelectionEvidence";
+import { comparePurchaseBuyingPriority, purchaseBuyingCounts, purchaseBuyingDisposition } from "@shared/procurement/purchase-buying-review";
+import { formatForecastWeight, formatOrderRounding } from "@/features/purchasing/reorder-explanation-format";
+import type { PurchaseOrderRounding } from "@shared/procurement/purchase-order-rounding";
 import { evaluateSupplierBundle, type SupplierBundleTerms } from "@shared/procurement/supplier-bundle";
 // Reorder Engine cockpit — the redesigned /reorder-analysis page
 // (design spec §4.6/§13–§14, mock 01-reorder-analysis.html). Behind the
@@ -95,7 +98,6 @@ import {
   skippedAppendixRows,
   skippedReasonLabel,
   snapPiecesUpToCase,
-  statusSeverityRank,
   suggestedValueCents,
   toggleOrderLine,
   trendDisplay,
@@ -188,6 +190,7 @@ interface CockpitItem {
   suggestedOrderPieces: number;
   orderUomUnits: number;
   orderUomLabel: string;
+  orderRounding?: PurchaseOrderRounding;
   onOrderPieces: number;
   openPoCount: number;
   earliestInboundEta: string | null;
@@ -575,12 +578,13 @@ function MathDrawerBody({ item, asOfIsoDate }: { item: CockpitItem; asOfIsoDate:
       const weight = blend.appliedWeights?.[label] ?? 0;
       const snapshot = windowByLabel[label];
       if (weight > 0 && snapshot) {
-        blendParts.push(`${snapshot.avgDailyUsagePieces.toFixed(2)}×${weight}%`);
+        blendParts.push(`${snapshot.avgDailyUsagePieces.toFixed(2)}×${formatForecastWeight(weight)}`);
       }
     }
   }
   const seasonalConfigured = (blend?.configuredWeights?.seasonal ?? 0) > 0;
   const seasonalApplied = (blend?.appliedWeights?.seasonal ?? 0) > 0;
+  const seasonalRedistributed = blend?.method === "weighted_blend_v1" && seasonalConfigured && !seasonalApplied && blend.seasonalHistoryAvailable === false;
 
   const soon = item.status === "order_soon" ? orderSoonDates(asOfIsoDate, item) : null;
   const qualityControls = item.qualityControls ?? [];
@@ -634,10 +638,9 @@ function MathDrawerBody({ item, asOfIsoDate }: { item: CockpitItem; asOfIsoDate:
             <CalcLine>
               {(item.planningBasis?.historicalDailyPieces ?? blend.avgDailyUsagePieces).toFixed(2)} = {blendParts.join(" + ")}
             </CalcLine>
-            {seasonalConfigured && !seasonalApplied && (
+            {seasonalRedistributed && (
               <div className="mt-1.5 text-xs text-zinc-500">
-                Seasonal weight is 0 — no sales in the last-year window, so its configured{" "}
-                {blend.configuredWeights.seasonal}% was redistributed across the other windows.
+                Seasonal history was not available for this blend; the configured seasonal weight was redistributed across the other windows.
               </div>
             )}
           </>
@@ -766,8 +769,8 @@ function MathDrawerBody({ item, asOfIsoDate }: { item: CockpitItem; asOfIsoDate:
         ) : receiptReview ? <div className="text-xs text-amber-800">Order sizing requires receipt review. The displayed calculation retains the unresolved PO commitment; it is not verified buy/no-buy guidance.</div> : item.suggestedOrderPieces > 0 ? (
           <>
             <CalcLine>
-              max({shortfall.toLocaleString()}, MOQ {(supplier.minimumOrderPieces ?? 0).toLocaleString()}) → round up
-              to {item.orderUomLabel} of {item.orderUomUnits.toLocaleString()} →{" "}
+              max({shortfall.toLocaleString()}, MOQ {(supplier.minimumOrderPieces ?? 0).toLocaleString()}) →{" "}
+              {formatOrderRounding(item.orderRounding)} →{" "}
               <span className="font-bold">
                 {item.suggestedOrderPieces.toLocaleString()} pieces
                 {lineValue !== null ? ` = ${formatMoneyCents(lineValue)}` : ""}
@@ -1162,9 +1165,7 @@ export default function ReorderEngine() {
   const searchedItems = useMemo(() => items.filter((item) => matchesSearch(item, search)), [items, search]);
 
   const chipCounts = useMemo(() => {
-    let stockout = 0;
-    let orderNow = 0;
-    let orderSoonCount = 0;
+    const buyingCounts = purchaseBuyingCounts(searchedItems);
     let onOrder = 0;
     let ok = 0;
     let stagnant = 0;
@@ -1174,10 +1175,7 @@ export default function ReorderEngine() {
     let overstockCents = 0;
     const orderSoonSkus: CockpitItem[] = [];
     for (const item of searchedItems) {
-      if (item.status === "stockout") stockout += 1;
-      else if (item.status === "order_now") orderNow += 1;
-      else if (item.status === "order_soon") {
-        orderSoonCount += 1;
+      if (purchaseBuyingDisposition(item) === "purchase_soon") {
         orderSoonSkus.push(item);
       } else if (item.status === "on_order") {
         onOrder += 1;
@@ -1195,9 +1193,10 @@ export default function ReorderEngine() {
       }
     }
     return {
-      stockout,
-      orderNow,
-      orderSoon: orderSoonCount,
+      stockout: buyingCounts.stockout,
+      orderNow: buyingCounts.orderNow,
+      orderSoon: buyingCounts.orderSoon,
+      supplyReview: buyingCounts.supplyReview,
       orderSoonSkus,
       onOrder,
       ok,
@@ -1210,7 +1209,7 @@ export default function ReorderEngine() {
     };
   }, [searchedItems]);
 
-  const suggestedSpend = useMemo(() => computeSuggestedSpend(items), [items]);
+  const suggestedSpend = useMemo(() => computeSuggestedSpend(searchedItems), [searchedItems]);
   const idleSkuCount = useMemo(
     () => items.filter((item) => item.daysOfSupply > 180 && item.totalOnHand > 0).length,
     [items],
@@ -1218,12 +1217,7 @@ export default function ReorderEngine() {
 
   const visibleRows = useMemo(() => {
     const filtered = filterItemsByChips(searchedItems, selectedChips);
-    const sorted = [...filtered].sort(
-      (a, b) =>
-        statusSeverityRank(a.status) - statusSeverityRank(b.status) ||
-        Number(Boolean(b.planningBasis?.essential)) - Number(Boolean(a.planningBasis?.essential)) ||
-        (suggestedValueCents(b) ?? 0) - (suggestedValueCents(a) ?? 0),
-    );
+    const sorted = [...filtered].sort(comparePurchaseBuyingPriority);
     if (!showSkipped) return sorted;
     // Skipped rows render greyed at the end (or inside their groups); they are
     // search-filtered but not chip-filtered — the chips describe the active
@@ -1947,18 +1941,18 @@ export default function ReorderEngine() {
           </div>
         ) : kpis ? (
           <>
-            <Card className={kpis.criticalRestocks > 0 ? "border-red-200 bg-gradient-to-b from-red-50 to-white" : ""}>
+            <Card className={chipCounts.stockout + chipCounts.orderNow > 0 ? "border-red-200 bg-gradient-to-b from-red-50 to-white" : ""}>
               <CardContent className="p-4">
-                <div className="text-2xl font-bold tabular-nums">{kpis.criticalRestocks.toLocaleString()}</div>
+                <div className="text-2xl font-bold tabular-nums" data-testid="buying-needs-order-count">{(chipCounts.stockout + chipCounts.orderNow).toLocaleString()}</div>
                 <div className="text-xs text-zinc-500">Needs order</div>
                 <div className="mt-1 text-[11px] text-red-600">
                   {chipCounts.stockout} stockouts · {chipCounts.orderNow} below reorder point
                 </div>
               </CardContent>
             </Card>
-            <Card className={kpis.upcomingRestocks > 0 ? "border-amber-200 bg-gradient-to-b from-amber-50 to-white" : ""}>
+            <Card className={chipCounts.orderSoon > 0 ? "border-amber-200 bg-gradient-to-b from-amber-50 to-white" : ""}>
               <CardContent className="p-4">
-                <div className="text-2xl font-bold tabular-nums">{kpis.upcomingRestocks.toLocaleString()}</div>
+                <div className="text-2xl font-bold tabular-nums" data-testid="buying-order-soon-count">{chipCounts.orderSoon.toLocaleString()}</div>
                 <div className="text-xs text-zinc-500">Order soon</div>
                 <div className="mt-1 text-[11px] text-amber-600">
                   {chipCounts.orderSoon === 1 && chipCounts.orderSoonSkus[0]
@@ -2020,7 +2014,7 @@ export default function ReorderEngine() {
                 active={selectedChips.has("needs_order")}
                 onClick={() => toggleChip("needs_order")}
                 className={selectedChips.has("needs_order") ? "!border-red-600 !bg-red-50 !text-red-700 ring-1 ring-red-600" : "!text-red-700"}
-                tooltip={`Below reorder point — order today. ${chipCounts.stockout} out of stock · ${chipCounts.orderNow} below reorder point.`}
+                tooltip={`Positive purchase recommendations: ${chipCounts.stockout} out of stock · ${chipCounts.orderNow} below reorder point. Supplier and quote review may still be required.`}
               >
                 Needs order <span className="opacity-70">{chipCounts.stockout + chipCounts.orderNow}</span>
               </ChipButton>
@@ -3046,7 +3040,10 @@ function ItemRow({
   inOrder: boolean;
   onToggleOrder: () => void;
 }) {
-  const skipped = item.skippedReason !== null && item.skippedReason !== undefined;
+  const disposition = purchaseBuyingDisposition(item);
+  const purchaseNeeded = disposition === "purchase_now" || disposition === "purchase_soon";
+  const skipped = !purchaseNeeded && disposition !== "supply_review"
+    && item.skippedReason !== null && item.skippedReason !== undefined;
   // Any non-excluded row can join the order (rev 2: healthy rows exist for
   // MOQ/freight top-offs); analysis membership is managed on Planning Policy.
   const orderable = item.skippedReason !== "excluded";
@@ -3081,10 +3078,14 @@ function ItemRow({
         </div>
       </TableCell>
       <TableCell>
-        {item.supplyTiming?.signal === "unverified_receipts" ? <Badge variant="outline" className={TONE_BADGE_CLASSES.amber}>Receipt review</Badge> : skipped ? (
+        {item.supplyTiming?.signal === "unverified_receipts" ? <Badge variant="outline" className={TONE_BADGE_CLASSES.amber}>Receipt review</Badge> : disposition === "supply_review" ? (
+          <Badge variant="outline" className={TONE_BADGE_CLASSES.amber}>Arrival review</Badge>
+        ) : purchaseNeeded && !item.preferredVendorId ? (
+          <Badge variant="outline" className={TONE_BADGE_CLASSES.amber}>Supplier needed</Badge>
+        ) : skipped ? (
           <>
             <Badge variant="outline" className={TONE_BADGE_CLASSES.gray}>
-              {item.skippedReason === "excluded" ? "Excluded" : "Skipped"}
+              {item.skippedReason === "excluded" ? "Excluded" : "No purchase needed"}
             </Badge>
             <div className="mt-0.5 text-[11px]">{skippedReasonLabel(item.skippedReason)}</div>
           </>
@@ -3137,7 +3138,7 @@ function ItemRow({
         )}
       </TableCell>
       <TableCell className="text-right tabular-nums">
-        {item.suggestedOrderPieces > 0 && !skipped ? (
+        {purchaseNeeded && item.suggestedOrderPieces > 0 ? (
           <>
             <div className="font-semibold">{item.suggestedOrderPieces.toLocaleString()}</div>
             <div className="text-[11px] text-zinc-500">{lineValue !== null ? formatMoneyCents(lineValue) : "cost missing"}</div>

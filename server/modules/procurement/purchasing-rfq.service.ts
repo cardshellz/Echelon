@@ -161,6 +161,7 @@ export function buildPurchasingRfqQueue(
         effectiveSupplyPieces: item.currentSupply.effectiveSupplyPieces,
         reorderPointPieces: item.reorderPoint,
         suggestedOrderPieces: item.suggestedOrderPieces,
+        ...(item.orderRounding ? { orderRounding: item.orderRounding } : {}),
         planningBasis: item.planningBasis,
         ...(item.receiveVariantSelection ? { receiveVariantSelection: item.receiveVariantSelection } : {}),
         supplierBundleTerms: item.supplierBundleTerms,

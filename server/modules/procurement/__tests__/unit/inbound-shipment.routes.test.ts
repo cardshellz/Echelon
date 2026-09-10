@@ -3,6 +3,7 @@ import express from "express";
 import type { Express, Request, Response, NextFunction } from "express";
 import http from "http";
 import { AddressInfo } from "net";
+import type { ServiceRegistry } from "../../../../services";
 
 const mocks = vi.hoisted(() => ({
   idempotencyMiddleware: vi.fn((_req: any, _res: any, next: any) => next()),
@@ -70,6 +71,7 @@ function buildShipmentTrackingMock(overrides: Record<string, any> = {}) {
     getShipments: vi.fn(),
     getShipmentsCount: vi.fn(),
     getShipment: vi.fn(),
+    getShipmentPurchaseOrders: vi.fn().mockResolvedValue([]),
     getEnrichedLines: vi.fn(),
     getCosts: vi.fn(),
     getStatusHistory: vi.fn(),
@@ -99,7 +101,8 @@ function buildShipmentTrackingMock(overrides: Record<string, any> = {}) {
 function buildApp(shipmentTracking: any): Express {
   const app = express();
   app.use(express.json());
-  app.locals.services = { shipmentTracking };
+  // This route harness supplies only its shipment dependency; AP is mocked above.
+  app.locals.services = { shipmentTracking } as ServiceRegistry;
   registerInboundShipmentRoutes(app);
   return app;
 }
@@ -174,6 +177,36 @@ describe("inbound shipment routes", () => {
       offset: 5,
     });
     expect(body).toEqual({ shipments: [{ id: 11, shipmentNumber: "S-11" }], total: 1 });
+  });
+
+  it("returns actual PO references alongside shipment detail without changing line associations", async () => {
+    const lines = [{ id: 1, purchaseOrderId: 17 }, { id: 2, purchaseOrderId: 99 }];
+    const purchaseOrders = [{ id: 17, poNumber: "TEST-PO-17" }, { id: 99, poNumber: "TEST-PO-99" }];
+    const shipmentTracking = buildShipmentTrackingMock({
+      getShipment: vi.fn().mockResolvedValue({ id: 42, shipmentNumber: "S-42" }),
+      getEnrichedLines: vi.fn().mockResolvedValue(lines),
+      getShipmentPurchaseOrders: vi.fn().mockResolvedValue(purchaseOrders),
+      getCosts: vi.fn().mockResolvedValue([]),
+      getStatusHistory: vi.fn().mockResolvedValue([]),
+    });
+    mocks.apLedger.getShipmentCostPaymentStatus.mockResolvedValue(null);
+    server = await startServer(buildApp(shipmentTracking));
+    const response = await requestJson(server.url, "GET", "/api/inbound-shipments/42");
+    expect(response).toEqual({ status: 200, body: {
+      id: 42, shipmentNumber: "S-42", lines, purchaseOrders, costs: [], statusHistory: [], paymentStatus: null,
+    } });
+    expect(shipmentTracking.getShipmentPurchaseOrders).toHaveBeenCalledExactlyOnceWith(42);
+  });
+
+  it("does not conceal a failed purchase-reference read as an unlinked shipment", async () => {
+    const shipmentTracking = buildShipmentTrackingMock({
+      getShipment: vi.fn().mockResolvedValue({ id: 42, shipmentNumber: "S-42" }),
+      getShipmentPurchaseOrders: vi.fn().mockRejectedValue(new Error("Purchase references unavailable")),
+    });
+    server = await startServer(buildApp(shipmentTracking));
+    expect(await requestJson(server.url, "GET", "/api/inbound-shipments/42")).toEqual({
+      status: 500, body: { error: "Purchase references unavailable" },
+    });
   });
 
   it("returns landed cost health summary", async () => {

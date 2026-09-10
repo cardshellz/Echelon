@@ -6,6 +6,7 @@ import type { ProcurementNavigation } from "@/hooks/use-procurement-navigation";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { formatWorkspaceDate, formatWorkspaceMoney, formatWorkspaceStatus } from "./purchase-workspace-format";
+import { formatProcurementScheduleDate } from "@/lib/procurement-schedule-date";
 
 interface OverviewProps {
   data: PurchaseWorkspace;
@@ -100,7 +101,7 @@ export function PurchaseLifecycleOverview({ data, navigation }: OverviewProps) {
         <CardContent className="space-y-3 p-4 pt-0">
           <dl className="grid grid-cols-2 gap-3 text-sm">
             <div><dt className="text-xs text-muted-foreground">PO total</dt><dd className="mt-1 break-words font-mono font-semibold">{formatWorkspaceMoney(purchase.totalCents, purchase.currency)}</dd></div>
-            <div><dt className="text-xs text-muted-foreground">Confirmed delivery</dt><dd className="mt-1">{formatWorkspaceDate(purchase.confirmedDeliveryDate)}</dd></div>
+            <div><dt className="text-xs text-muted-foreground">Confirmed delivery</dt><dd className="mt-1">{formatProcurementScheduleDate(purchase.confirmedDeliveryDate)}</dd></div>
             <div><dt className="text-xs text-muted-foreground">Goods status</dt><dd className="mt-1">{formatWorkspaceStatus(purchase.physicalStatus)}</dd></div>
             <div><dt className="text-xs text-muted-foreground">Recorded financial status</dt><dd className="mt-1">{formatWorkspaceStatus(purchase.financialStatus)}</dd></div>
           </dl>

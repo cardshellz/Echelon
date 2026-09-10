@@ -1062,7 +1062,8 @@ describe("purchasing recommendation engine", () => {
     });
 
     expect(result.items[0]).toMatchObject({
-      skippedReason: "zero_suggested_quantity",
+      status: "no_movement",
+      skippedReason: "not_actionable_status",
       demandBasis: {
         demandQuality: "no_recent_demand",
         latestDemandAt: null,
@@ -1581,6 +1582,7 @@ describe("purchasing recommendation engine", () => {
       suggestedOrderQty: 24,
       orderUomUnits: 1,
       orderUomLabel: "pieces",
+      orderRounding: { incrementPieces: 24, source: "vendor_pack" },
       forecastProvenance: expect.objectContaining({ orderUomSource: "base_piece" }),
       supplierBasis: expect.objectContaining({ packSize: 24, piecesPerPurchaseUom: null }),
     });
@@ -1589,20 +1591,37 @@ describe("purchasing recommendation engine", () => {
       suggestedOrderQty: 1,
       orderUomUnits: 6,
       orderUomLabel: "pack",
+      orderRounding: { incrementPieces: 6, source: "supplier_quote" },
       supplierBasis: expect.objectContaining({ packSize: 24, piecesPerPurchaseUom: 6 }),
     });
     expect(bySku.get("NO-PACK")).toMatchObject({
       suggestedOrderPieces: 6,
       suggestedOrderQty: 6,
       orderUomUnits: 1,
+      orderRounding: { incrementPieces: 1, source: "base_piece" },
       supplierBasis: expect.objectContaining({ packSize: null }),
     });
     expect(bySku.get("PACK-WITH-MOQ")).toMatchObject({
       suggestedOrderPieces: 48,
       suggestedOrderQty: 48,
       orderUomUnits: 1,
+      orderRounding: { incrementPieces: 24, source: "vendor_pack" },
       supplierBasis: expect.objectContaining({ packSize: 24, minimumOrderPieces: 31 }),
     });
+  });
+
+  it.each([0, -1, 1.5, "invalid", Number.MAX_SAFE_INTEGER + 1])("captures the single-piece fallback when the vendor pack is invalid: %s", (packSize) => {
+    const result = generatePurchasingRecommendations({
+      asOf: "2026-09-10T12:00:00Z",
+      lookbackDays: 30,
+      rows: [{
+        product_id: 94, variant_id: 941, vendor_product_id: 9410, preferred_vendor_id: 94,
+        base_sku: "INVALID-PACK", total_pieces: 0, total_reserved_pieces: 0, total_outbound_pieces: 60,
+        on_order_pieces: 0, vendor_lead_time_days: 2, safety_stock_days: 1, vendor_pricing_basis: "per_piece",
+        vendor_quoted_unit_cost_mills: 10000, estimated_cost_mills: 10000, vendor_pack_size: packSize,
+      }],
+    });
+    expect(result.items[0]).toMatchObject({ suggestedOrderPieces: 6, orderRounding: { incrementPieces: 1, source: "base_piece" } });
   });
 
   it("blocks automation when a stored vendor MOQ is not a positive base-piece integer", () => {

@@ -1,4 +1,5 @@
 import { assertRfqSupplySnapshotCurrent, isActiveRfqReservation, rfqPendingSourcingPieces, RfqSourcingSnapshotError } from "./domain/rfq-sourcing-reservation";
+import { purchaseBuyingCounts } from "@shared/procurement/purchase-buying-review";
 import { loadLinkedRfqPurchases } from "./rfq-sourcing-reservation.repository";
 import { registerRfqWorkflowRoutes } from "./rfq-workflow.routes";
 import type { Express } from "express";
@@ -1101,20 +1102,13 @@ export function registerPurchasingRecommendationRoutes(app: Express) {
         ...context,
       });
 
-      let criticalRestocks = 0;
-      let upcomingRestocks = 0;
+      const buyingCounts = purchaseBuyingCounts(recommendationResult.items);
+      const criticalRestocks = buyingCounts.stockout + buyingCounts.orderNow;
+      const upcomingRestocks = buyingCounts.orderSoon;
       let idleCapitalCents = 0;
 
       for (const item of recommendationResult.items) {
-        const effectiveSupply = item.currentSupply.effectiveSupplyPieces;
-        const avgDailyUsage = item.demandBasis.avgDailyUsagePieces;
         const costMills = item.estimatedCostMills ?? centsToMills(item.estimatedCostCents ?? 0);
-
-        if (effectiveSupply < item.reorderPoint) {
-          criticalRestocks++;
-        } else if (effectiveSupply < item.reorderPoint + 14 * avgDailyUsage && avgDailyUsage > 0) {
-          upcomingRestocks++;
-        }
 
         if (item.daysOfSupply > 180 && item.totalOnHand > 0) {
           idleCapitalCents += computeLineTotalCentsFromMills(costMills, item.totalOnHand);

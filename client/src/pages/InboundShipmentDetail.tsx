@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Link, useLocation, useSearch } from "wouter";
 import { useProcurementNavigation } from "@/hooks/use-procurement-navigation";
+import { ShipmentPurchaseOrderLinks } from "@/features/purchasing/ShipmentPurchaseOrderLinks";
 import { parseProcurementJourney, procurementRecordHref } from "@/lib/procurement-navigation";
 import { ProcurementContext } from "@/components/procurement-context";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -464,8 +465,7 @@ export default function InboundShipmentDetail() {
   const linkedPurchaseOrderIds = useMemo(
     () => [...new Set<number>(
       [shipment?.purchaseOrderId, ...lines.map((line: any) => line.purchaseOrderId)]
-        .map(Number)
-        .filter((id): id is number => Number.isSafeInteger(id) && id > 0),
+        .filter((id): id is number => typeof id === "number" && Number.isInteger(id) && id > 0 && id <= 2_147_483_647),
     )],
     [shipment?.purchaseOrderId, lines],
   );
@@ -1037,18 +1037,14 @@ export default function InboundShipmentDetail() {
             )}
           </div>
 
-          {linkedPurchaseOrderIds.length > 0 && (
-            <div className="flex items-center gap-2 mt-1 text-sm flex-wrap">
+          {(shipment.purchaseOrders !== undefined || linkedPurchaseOrderIds.length > 0) && (
+            <div className="flex items-center gap-2 mt-1 text-sm flex-wrap" data-testid="shipment-purchase-links">
               <span className="text-muted-foreground">Purchase orders:</span>
-              {linkedPurchaseOrderIds.map((purchaseOrderId) => (
-                <Link
-                  key={purchaseOrderId}
-                  href={procurementNavigation.childHref(`/purchase-orders/${purchaseOrderId}?tab=shipments`)}
-                  className="text-primary hover:underline"
-                >
-                  PO #{purchaseOrderId}
-                </Link>
-              ))}
+              <ShipmentPurchaseOrderLinks
+                purchaseOrders={shipment.purchaseOrders}
+                legacyPurchaseOrderIds={linkedPurchaseOrderIds}
+                hrefFor={(id) => procurementNavigation.childHref(`/purchase-orders/${id}?tab=shipments`)}
+              />
             </div>
           )}
 

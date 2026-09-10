@@ -7,8 +7,8 @@ const valuation = {
   totalValueCents: 450000, totalQty: 1500, zeroCostQty: 0, provisionalQty: 600,
   landedPendingLots: 1, landedPendingValueCents: 138000,
   byProduct: [
-    { productId: 1, productName: "Synthetic A", baseSku: "COST-A", totalQty: 1000, avgCostPerPiece: 230, totalValueCents: 230000, activeLots: 2, hasLandedPending: true },
-    { productId: 2, productName: "Synthetic B", baseSku: "COST-B", totalQty: 500, avgCostPerPiece: 440, totalValueCents: 220000, activeLots: 1, hasLandedPending: false },
+    { productId: 1, productName: "Synthetic A", baseSku: "COST-A", totalQty: 1000, avgCostPerPiece: 230, totalValueCents: 230000, activeLots: 2, zeroCostQty: 0, hasLandedPending: true },
+    { productId: 2, productName: "Synthetic B", baseSku: "COST-B", totalQty: 500, avgCostPerPiece: 440, totalValueCents: 220000, activeLots: 1, zeroCostQty: 0, hasLandedPending: false },
   ],
 };
 const orderCogs = {
@@ -108,7 +108,7 @@ test("packed lots stay in recorded lot units across valuation, explorer and manu
     if (path === "/api/cogs/valuation") return route.fulfill({ json: {
       totalValueCents: 46000, totalQty: 2, zeroCostQty: 0, provisionalQty: 0, landedPendingLots: 0, landedPendingValueCents: 0,
       byProduct: [{ productId: 3, productName: packedLot.product_name, baseSku: packedLot.base_sku,
-        totalQty: 2, avgCostPerPiece: 23000, totalValueCents: 46000, activeLots: 1, hasLandedPending: false }],
+        totalQty: 2, avgCostPerPiece: 23000, totalValueCents: 46000, activeLots: 1, zeroCostQty: 0, hasLandedPending: false }],
     } });
     if (path === "/api/cogs/lots") return route.fulfill({ json: { lots: [packedLot], total: 1 } });
     if (path === "/api/cogs/manual-lots") return route.fulfill({ json: [packedLot] });

@@ -15,6 +15,7 @@ import { COGSService } from "../inventory/cogs.service";
 
 import { createShipmentLineMutationOwner, assertShipmentLineHistoryMutable } from "./shipment-line-mutations.service";
 import { versionShipmentLine } from "./shipment-line-version";
+import type { ShipmentPurchaseOrderReference } from "@shared/procurement/shipment-purchase-orders";
 import type {
   InboundShipment,
   InsertInboundShipment,
@@ -111,6 +112,7 @@ export function allocateCentsByBasis(
 interface Storage {
   // Inbound Shipments
   getInboundShipments(filters?: any): Promise<InboundShipment[]>;
+  getInboundShipmentPurchaseOrders(shipmentIds: readonly number[]): Promise<Map<number, ShipmentPurchaseOrderReference[]>>;
   getInboundShipmentsCount(filters?: any): Promise<number>;
   getInboundShipmentById(id: number, executor?: any): Promise<InboundShipment | undefined>;
   getInboundShipmentByNumber(shipmentNumber: string): Promise<InboundShipment | undefined>;
@@ -565,6 +567,16 @@ export function createShipmentTrackingService(
     const shipment = await storage.getInboundShipmentById(id, executor);
     if (!shipment) throw new ShipmentTrackingError("Shipment not found", 404);
     return shipment;
+  }
+
+  async function getShipments(filters?: any) {
+    const shipments = await storage.getInboundShipments(filters);
+    const purchaseOrdersByShipment = await storage.getInboundShipmentPurchaseOrders(shipments.map((shipment) => shipment.id));
+    return shipments.map((shipment) => ({ ...shipment, purchaseOrders: purchaseOrdersByShipment.get(shipment.id) ?? [] }));
+  }
+
+  async function getShipmentPurchaseOrders(id: number): Promise<ShipmentPurchaseOrderReference[]> {
+    return (await storage.getInboundShipmentPurchaseOrders([id])).get(id) ?? [];
   }
 
   async function updateShipment(id: number, rawUpdates: unknown) {
@@ -1597,7 +1609,8 @@ export function createShipmentTrackingService(
     // CRUD
     createShipment,
     getShipment,
-    getShipments: (filters?: any) => storage.getInboundShipments(filters),
+    getShipments,
+    getShipmentPurchaseOrders,
     getShipmentsCount: (filters?: any) => storage.getInboundShipmentsCount(filters),
     getShipmentByNumber: (num: string) => storage.getInboundShipmentByNumber(num),
     updateShipment,

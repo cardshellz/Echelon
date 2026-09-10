@@ -37,6 +37,10 @@ jobs:
           npx vitest run
           client/src/features/purchasing/__tests__/reorderEngine.test.ts
           client/src/features/purchasing/__tests__/forecastBacktesting.test.ts
+          client/src/features/purchasing/__tests__/reorder-explanation-format.test.ts
+          client/src/lib/__tests__/procurement-schedule-date.test.ts
+          shared/procurement/__tests__/purchase-buying-review.test.ts
+          shared/inventory/__tests__/cost-report-read.test.ts
       - name: Inventory shipment quantity UI contracts
         run: >-
           npx vitest run
@@ -90,6 +94,11 @@ jobs:
         run: >-
           npx vitest run
           server/modules/procurement/__tests__/integration/procurement-cost-evidence.integration.test.ts
+      - name: Procurement acceptance read-model PostgreSQL guarantees
+        run: >-
+          npx vitest run --no-file-parallelism
+          server/modules/inventory/__tests__/integration/cost-report-reads.integration.test.ts
+          server/modules/procurement/__tests__/integration/shipment-purchase-orders.integration.test.ts
       - name: Integrated procurement costing and lineage PostgreSQL guarantees
         run: >-
           npx vitest run --no-file-parallelism

@@ -16,7 +16,6 @@ import {
   isOrderQueueSelection,
   isOverstocked,
   orderSoonDates,
-  orderLineValueCents,
   parseReorderEngineDeepLink,
   skippedAppendixRows,
   skippedReasonLabel,
@@ -29,7 +28,7 @@ import {
 } from "../reorderEngine";
 
 function chipItem(status: string, daysOfSupply = 10) {
-  return { status, daysOfSupply };
+  return { status, daysOfSupply, suggestedOrderPieces: 10 };
 }
 
 function groupable(overrides: Partial<GroupableItem> = {}): GroupableItem {
@@ -81,6 +80,15 @@ describe("chip filters (two-tier additive union)", () => {
     expect(isOrderQueueSelection(new Set<ChipKey>(DEFAULT_CHIP_SELECTION))).toBe(true);
     expect(isOrderQueueSelection(new Set<ChipKey>(["needs_order"]))).toBe(false);
     expect(isOrderQueueSelection(new Set<ChipKey>(["needs_order", "order_soon", "ok"]))).toBe(false);
+  });
+
+  it("filters zero-quantity stockouts without hiding supplier and arrival work", () => {
+    const empty = { ...chipItem("stockout"), suggestedOrderPieces: 0 };
+    const supplier = { ...chipItem("stockout"), skippedReason: "no_vendor" };
+    const arrival = { ...empty, skippedReason: "already_on_order", supplyTiming: { reviewRequired: true } };
+    expect(filterItemsByChips([empty, supplier, arrival], new Set(DEFAULT_CHIP_SELECTION))).toEqual([supplier, arrival]);
+    expect(filterItemsByChips([empty, supplier, arrival], new Set<ChipKey>(["needs_order"]))).toEqual([supplier]);
+    expect(filterItemsByChips([empty, supplier, arrival], new Set(ALL_CHIP_KEYS))).toEqual([empty, supplier, arrival]);
   });
 
   it("keeps zero-buy supply review visible in the default daily queue while preserving deliberate filters", () => {
@@ -165,6 +173,17 @@ describe("order-soon date labels", () => {
 });
 
 describe("suggested spend (integer cents; engine pieces × supplier cost)", () => {
+  it("matches visible recommendation quantities including sourcing work", () => {
+    const rows = [
+      { status: "stockout", suggestedOrderPieces: 10, estimatedCostMills: 10_000, estimatedCostCents: 100, skippedReason: "no_vendor" },
+      { status: "order_now", suggestedOrderPieces: 5, estimatedCostMills: null, estimatedCostCents: null, skippedReason: "no_vendor" },
+      { status: "stockout", suggestedOrderPieces: 20, estimatedCostMills: 10_000, estimatedCostCents: 100, skippedReason: "already_on_order" },
+      { status: "ok", suggestedOrderPieces: 30, estimatedCostMills: 10_000, estimatedCostCents: 100, skippedReason: "not_actionable_status" },
+      { status: "stockout", suggestedOrderPieces: 270, estimatedCostMills: 10_000, estimatedCostCents: 100, supplyTiming: { reviewRequired: true, signal: "unverified_receipts" } },
+      { status: "order_soon", suggestedOrderPieces: 0, estimatedCostMills: 10_000, estimatedCostCents: 100 },
+    ];
+    expect(computeSuggestedSpend(rows)).toEqual({ totalCents: 1_000, skuCount: 2, missingCostCount: 1 });
+  });
   it("prefers mills precision and rounds half-up once per line", () => {
     // 1 cent = 100 mills in this codebase (shared/utils/money.ts).
     // 4650 cents/piece = 465,000 mills; 390 pieces => $18,135.00

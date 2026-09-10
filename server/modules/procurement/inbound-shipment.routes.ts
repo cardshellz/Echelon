@@ -127,13 +127,14 @@ export function registerInboundShipmentRoutes(app: Express) {
   app.get("/api/inbound-shipments/:id", requirePermission("purchasing", "view"), async (req, res) => {
     try {
       const shipment = await shipmentTracking.getShipment(Number(req.params.id));
-      const [lines, costs, history, paymentStatus] = await Promise.all([
+      const [lines, costs, history, paymentStatus, purchaseOrders] = await Promise.all([
         shipmentTracking.getEnrichedLines(shipment.id),
         shipmentTracking.getCosts(shipment.id),
         shipmentTracking.getStatusHistory(shipment.id),
         apLedger.getShipmentCostPaymentStatus(shipment.id),
+        shipmentTracking.getShipmentPurchaseOrders(shipment.id),
       ]);
-      res.json({ ...shipment, lines, costs, statusHistory: history, paymentStatus });
+      res.json({ ...shipment, lines, costs, statusHistory: history, paymentStatus, purchaseOrders });
     } catch (error: any) {
       if (error instanceof ShipmentTrackingError) return res.status(error.statusCode).json({ error: error.message });
       res.status(500).json({ error: error.message });

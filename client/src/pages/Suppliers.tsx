@@ -379,7 +379,7 @@ export default function Suppliers() {
   });
 
   // Vendor products for the currently expanded vendor
-  const { data: vendorProducts = [], isLoading: vpLoading, isFetched: vpFetched } = useQuery<
+  const { data: vendorProducts = [], isLoading: vpLoading, isFetched: vpFetched, isError: vpError } = useQuery<
     VendorProduct[]
   >({
     queryKey: ["/api/vendors", expandedVendorId, "products"],
@@ -411,16 +411,9 @@ export default function Suppliers() {
     );
   }, [vendors, search]);
 
-  // Count products per vendor from expanded data is not efficient for summary.
-  // The summary bar uses aggregate counts computed from vendorProducts if we
-  // stored them globally. For now compute from the vendors list directly.
-
   const stats = useMemo(() => {
     const total = vendors.length;
     const active = vendors.filter((v) => v.active === 1).length;
-    // Product count and preferred count require vendor_products data per vendor.
-    // Since we only fetch for expanded vendor, we show "..." placeholder or
-    // use a quick heuristic. For production, the API should return counts.
     return { total, active };
   }, [vendors]);
 
@@ -937,15 +930,19 @@ export default function Suppliers() {
   }
 
   // -----------------------------------------------------------------------
-  // Summary bar values (products mapped / preferred)
-  // We track these from the expanded vendor's products for now, or show "-" if
-  // no vendor is expanded. For a richer summary the API could return aggregates.
+  // Mapping counts describe only the expanded catalog, never all suppliers.
   // -----------------------------------------------------------------------
 
-  const productsMapped = expandedVendorId ? vendorProducts.length : null;
-  const preferredCount = expandedVendorId
+  const expandedVendor = vendors.find((vendor) => vendor.id === expandedVendorId);
+  const catalogCountsAvailable = expandedVendorId !== null && vpFetched && !vpLoading && !vpError;
+  const productsMapped = catalogCountsAvailable ? vendorProducts.length : null;
+  const preferredCount = catalogCountsAvailable
     ? vendorProducts.filter((vp) => vp.isPreferred === 1).length
     : null;
+  const catalogCountPlaceholder = vpError ? "Unavailable" : vpLoading ? "Loading…" : "—";
+  const catalogCountScope = expandedVendor
+    ? `For ${expandedVendor.name}`
+    : "Expand a supplier to view counts";
 
   // -----------------------------------------------------------------------
   // Render
@@ -1053,24 +1050,26 @@ export default function Suppliers() {
             </div>
           </CardContent>
         </Card>
-        <Card>
+        <Card data-testid="supplier-catalog-count">
           <CardContent className="p-3 md:p-4">
             <div className="text-xl md:text-2xl font-bold text-blue-600">
-              {productsMapped != null ? productsMapped : "-"}
+              {productsMapped ?? catalogCountPlaceholder}
             </div>
             <div className="text-xs md:text-sm text-muted-foreground">
-              Products Mapped
+              Catalog mappings
             </div>
+            <p className="mt-1 break-words text-xs text-muted-foreground">{catalogCountScope}</p>
           </CardContent>
         </Card>
-        <Card>
+        <Card data-testid="supplier-preferred-count">
           <CardContent className="p-3 md:p-4">
             <div className="text-xl md:text-2xl font-bold text-amber-500">
-              {preferredCount != null ? preferredCount : "-"}
+              {preferredCount ?? catalogCountPlaceholder}
             </div>
             <div className="text-xs md:text-sm text-muted-foreground">
-              Preferred Mappings
+              Preferred mappings
             </div>
+            <p className="mt-1 break-words text-xs text-muted-foreground">{catalogCountScope}</p>
           </CardContent>
         </Card>
       </div>
