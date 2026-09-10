@@ -1,5 +1,6 @@
 import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
+import { PostgresInventoryQuantityLedger } from "./quantity-ledger.repository";
 import { loadAndLockRuntimeAuthority } from "../../inventory-planning/infrastructure/inventory-availability-runtime-atp.repository";
 import type { OperationalShipmentBeforeCommit, OperationalShipmentDispatcher, OperationalShipmentSourceOwner } from "../application/operational-shipment-dispatch.port";
 import { OperationalShipmentError, operationalShipmentRequestSchema, planOperationalShipmentConsumption,
@@ -45,6 +46,7 @@ export class PostgresOperationalShipmentDispatchRepository implements Operationa
         await client.query("SET LOCAL statement_timeout = '30s'");
         const authority = await loadAndLockRuntimeAuthority(client);
         if (authority.authority !== "canonical") fail("OPERATIONAL_SHIPMENT_CANONICAL_REQUIRED", "Operational owner requires canonical authority.");
+        const quantityLedgerActive = (await client.query("SELECT command_id FROM inventory.quantity_ledger_opening WHERE singleton_key = true")).rows.length === 1;
         const replay = await this.replay(client, request);
         if (replay) { await client.query("COMMIT"); began = false; return replay; }
         const source = await this.sourceOwner.lockSource(client, request);
@@ -91,14 +93,26 @@ export class PostgresOperationalShipmentDispatchRepository implements Operationa
           if (plan) break;
         }
         if (!plan) fail("REPLACEMENT_INVENTORY_UNAVAILABLE", "No single authorized warehouse bin has complete unreserved balance and FIFO stock.");
-        for (const lot of plan.lots) {
-          await expectUpdate(client, `UPDATE inventory.inventory_lots
-            SET qty_on_hand=qty_on_hand-$1,
-              status=CASE WHEN qty_on_hand=$1 AND qty_reserved=0 AND qty_picked=0 THEN 'depleted' ELSE status END
-            WHERE id=$2 AND qty_on_hand-qty_reserved >= $1`, [lot.quantity, lot.lotId]);
+        if (quantityLedgerActive) {
+          await new PostgresInventoryQuantityLedger().postInsideTransaction(client, {
+            contractVersion: "inventory_quantity_v1", idempotencyKey: `operational_shipment:${request.sourceShipmentItemId}`,
+            kind: "ship", actor: request.actor, reason: "Authorized non-customer shipment from exact unreserved FIFO stock",
+            reference: { type: "operational_shipment", id: String(request.sourceShipmentItemId) },
+            occurredAt: occurredAt.toISOString(), reversesCommandId: null,
+            movements: plan.lots.map(lot => ({ inventoryLotId: lot.lotId, inventoryLevelId: plan!.level.id,
+              productVariantId: request.productVariantId, warehouseLocationId: plan!.level.locationId, warehouseId: source.warehouseId,
+              delta: { onHand: -lot.quantity, reserved: 0, picked: 0, packed: 0 } })),
+          });
+        } else {
+          for (const lot of plan.lots) {
+            await expectUpdate(client, `UPDATE inventory.inventory_lots
+              SET qty_on_hand=qty_on_hand-$1,
+                status=CASE WHEN qty_on_hand=$1 AND qty_reserved=0 AND qty_picked=0 THEN 'depleted' ELSE status END
+              WHERE id=$2 AND qty_on_hand-qty_reserved >= $1`, [lot.quantity, lot.lotId]);
+          }
+          await expectUpdate(client, `UPDATE inventory.inventory_levels SET variant_qty=variant_qty-$1,updated_at=$3
+            WHERE id=$2 AND variant_qty-reserved_qty >= $1`, [request.quantity, plan.level.id, occurredAt]);
         }
-        await expectUpdate(client, `UPDATE inventory.inventory_levels SET variant_qty=variant_qty-$1,updated_at=$3
-          WHERE id=$2 AND variant_qty-reserved_qty >= $1`, [request.quantity, plan.level.id, occurredAt]);
         const posting = await client.query(`INSERT INTO inventory.inventory_transactions (
           transaction_type,product_variant_id,from_location_id,variant_qty_delta,variant_qty_before,variant_qty_after,
           reserved_qty_delta,source_state,target_state,order_id,order_item_id,shipment_id,shipment_item_id,

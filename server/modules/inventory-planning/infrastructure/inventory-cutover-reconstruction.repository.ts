@@ -20,6 +20,7 @@ import { PostgresInventoryCutoverLegacyPromiseRepository } from "../../inventory
 import { captureInventoryCutoverStage } from "./inventory-cutover-capture-stage";
 import type { InventoryOpeningReservationPort } from "../application/inventory-opening-reservation.port";
 import { PostgresInventoryOpeningReservationRepository } from "../../inventory/infrastructure/inventory-opening-reservation.repository";
+import { PostgresInventoryQuantityLedger } from "../../inventory/infrastructure/quantity-ledger.repository";
 
 const inventoryCaptureSchema = cutoverReconstructionEvidenceSchema.pick({ levels: true, lots: true,
   journals: true, buildReservations: true, canonicalResources: true, canonicalClaimCount: true, canonicalClaimHash: true });
@@ -116,15 +117,39 @@ export class PostgresInventoryCutoverReconstructionRepository implements Invento
     const targetIds = [...new Set([...reconstruction.orders.flatMap((order) => order.lines.map((line) => line.targetVariantId)),
       ...(reconstruction.openingReservationRebases ?? []).map(row => row.productVariantId)])].sort((a,b) => a-b);
     if (targetIds.length > 500) throw new CutoverReconstructionError("CUTOVER_CLAIM_TARGET_LIMIT_EXCEEDED", "Full demand exceeds the current complete claim snapshot bound; no targets are truncated.");
+    const opening = reconstruction.openingBalance ? await loadLatestCutoverOpening(client) : null;
     const planning = targetIds.length === 0 ? { orders: [], freshReservationsByLevel: [],
       impactHash: reconstructionHash({ evidenceHash: reconstruction.evidenceHash, freshReservationsByLevel: [], orders: [] }) }
-      : planFreshCutoverClaims(await captureActiveClaimSupplySnapshotInsideTransaction(client, targetIds), reconstruction);
+      : planFreshCutoverClaims(await captureActiveClaimSupplySnapshotInsideTransaction(client, targetIds), reconstruction, opening?.verification ?? null);
     if (planning.impactHash !== expectedImpactHash) throw new CutoverReconstructionError("CUTOVER_FRESH_DEMAND_IMPACT_CHANGED", "Canonical remaining-demand allocation changed from reviewed preview.");
+    // Verify/release the raw nonphysical counter before the ledger replaces it
+    // with physical projections. Opening, fresh holds and ATP remain atomic.
     const legacyPromiseReleaseTransactionIds = reconstruction.legacyPromiseReleases.length === 0 ? []
       : await this.promiseWriter.releaseForReplanning({ client, command, releases: reconstruction.legacyPromiseReleases });
+    // Translate and audit RAW legacy counters before establishing the single
+    // lot-derived quantity authority. Never subtract this delta from that ledger.
     const openingReservationRebaseTransactionIds = reconstruction.openingReservationRebases?.length
       ? await this.openingWriter.translate({ client, command, snapshotId: reconstruction.openingBalance!.snapshotId!,
         sourceEvidenceHash: reconstruction.openingBalance!.sourceEvidenceHash, rebases: reconstruction.openingReservationRebases }) : [];
+    if (opening) {
+      if (opening.saved.id !== reconstruction.openingBalance?.snapshotId) throw new CutoverReconstructionError("CUTOVER_OPENING_EVIDENCE_CHANGED", "The selected opening changed before quantity posting.");
+      const levels = new Map(opening.verification.levels.map(level => [`${level.productVariantId}:${level.warehouseLocationId}`, level]));
+      await new PostgresInventoryQuantityLedger().openInsideTransaction(client, {
+        contractVersion: "inventory_quantity_v1", kind: "opening", idempotencyKey: `cutover:${command.activationRunId}:quantity-opening`,
+        actor: command.actor, reason: command.reason, occurredAt: command.occurredAt,
+        reference: { type: "verified_cutover_opening", id: opening.saved.id }, reversesCommandId: null,
+        movements: opening.verification.lots.filter(lot => BigInt(lot.onHandQty) !== BigInt(0)
+          || BigInt(lot.reservedQty) !== BigInt(0) || BigInt(lot.pickedQty) !== BigInt(0)).map(lot => {
+          const level = levels.get(`${lot.productVariantId}:${lot.warehouseLocationId}`);
+          if (!level || level.warehouseId === null || lot.warehouseLocationId === null) {
+            throw new CutoverReconstructionError("CUTOVER_OPENING_POSITION_CHANGED", "A verified nonzero lot has no exact SKU/bin/warehouse identity.");
+          }
+          return { inventoryLotId: lot.id, inventoryLevelId: level.id, productVariantId: lot.productVariantId,
+            warehouseLocationId: lot.warehouseLocationId, warehouseId: level.warehouseId,
+            delta: { onHand: Number(lot.onHandQty), reserved: Number(lot.reservedQty), picked: Number(lot.pickedQty), packed: 0 } };
+        }),
+      }, { verifiedOpeningId: opening.saved.id, authorityRevision: command.runtimeAuthorityRevision, sourceEvidenceHash: opening.saved.sourceEvidenceHash });
+    }
     const claimIds: string[] = [];
     for (const order of planning.orders) claimIds.push(await persistReconstructedCutoverClaim(client, this.inventoryWriter, order, command));
     const receipt = cutoverReconstructionReceiptSchema.parse({ evidenceHash: reconstruction.evidenceHash, claimIds,

@@ -41,6 +41,11 @@ describe("shared configuration administration boundaries", () => {
       history: vi.fn(),
     };
     packagingStore = {
+      bulkBranding: vi.fn().mockResolvedValue({ changed: 1, skipped: 0 }),
+      saveAvailability: vi.fn().mockResolvedValue({ changed: 1, skipped: 0 }),
+      assignWarehouseSuites: vi
+        .fn()
+        .mockResolvedValue({ changed: 1, skipped: 0 }),
       overview: vi.fn(),
       savePolicy: vi.fn(),
       saveBox: vi.fn(),
@@ -126,6 +131,55 @@ describe("shared configuration administration boundaries", () => {
     expectedRevision: 0,
     commandId: "123e4567-e89b-42d3-a456-426614174000",
   };
+  it.each([
+    [
+      "catalog-boxes/branding",
+      { boxes: [{ id: 1, revision: 1 }], branding: "unbranded" },
+      "bulkBranding",
+    ],
+    [
+      "warehouse-packaging/availability",
+      { warehouses: [{ id: 1, revision: 0 }], boxIds: [1], available: true },
+      "saveAvailability",
+    ],
+    [
+      "warehouse-packaging/suites",
+      {
+        channelId: 11,
+        expectedRevision: 1,
+        warehouseIds: [1],
+        suiteId: 1,
+        replaceExisting: false,
+      },
+      "assignWarehouseSuites",
+    ],
+  ] as const)(
+    "validates and authenticates %s",
+    async (path, fields, method) => {
+      const body = { ...fields, commandId: valid.commandId };
+      expect(
+        (await call(`put:/api/shipping/admin/${path}`, body, {})).statusCode,
+      ).toBe(401);
+      expect(
+        (
+          await call(`put:/api/shipping/admin/${path}`, {
+            ...body,
+            actorId: "spoofed",
+          })
+        ).statusCode,
+      ).toBe(400);
+      expect(packagingStore[method]).not.toHaveBeenCalled();
+      expect(
+        (await call(`put:/api/shipping/admin/${path}`, body)).statusCode,
+      ).toBe(200);
+      expect(packagingStore[method]).toHaveBeenCalledWith(
+        body,
+        "admin-7",
+        new Date("2026-09-09T12:00:00Z"),
+      );
+      expect(permission).toHaveBeenCalledWith("settings", "edit");
+    },
+  );
   it("validates packaging commands and authenticates catalog changes before persistence", async () => {
     const body = {
       channelId: 11,

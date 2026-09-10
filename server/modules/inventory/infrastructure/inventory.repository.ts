@@ -12,6 +12,9 @@ import { repointPendingWmsOrderItemsForInventoryTransfer } from "../../wms/order
 import { getTableColumns } from "drizzle-orm";
 import { interpretInventoryShipmentQuantity, type InventoryShipmentQuantityEvidence } from "@shared/inventory/shipment-quantity";
 import { shipmentQuantityEvidenceProjection } from "./shipment-quantity-evidence.sql";
+import { openOperationalQuantityPosting } from "./operational-quantity-posting";
+import { lockInventoryCostGraph } from "./cost-evidence.repository";
+import { InventoryLotService } from "../lots.service";
 
 export type InventoryTransactionHistory = InventoryTransaction & {
   shipmentQuantityEvidence: InventoryShipmentQuantityEvidence;
@@ -47,6 +50,7 @@ export interface IInventoryStorage {
   }): Promise<InventoryTransactionHistory[]>;
 
   executeTransfer(params: {
+    commandKey?: string;
     fromLocationId: number;
     toLocationId: number;
     productVariantId: number;
@@ -311,6 +315,7 @@ export function createInventoryMethods(
   },
 
   async executeTransfer(params: {
+    commandKey?: string;
     fromLocationId: number;
     toLocationId: number;
     productVariantId: number;
@@ -325,6 +330,34 @@ export function createInventoryMethods(
     }
 
     const { fromLocationId, toLocationId, productVariantId, quantity, userId, notes } = params;
+    const quantityPosting = await openOperationalQuantityPosting(tx);
+    if (quantityPosting) {
+      const replay = await quantityPosting.beginOperation(params.commandKey, { operation: "storage_transfer", ...params });
+      if (replay) {
+        const transaction = replay.result.transaction;
+        if (!transaction || typeof transaction !== "object" || !Number.isInteger((transaction as InventoryTransaction).id)) {
+          throw new Error("Stored transfer replay has an invalid transaction identity");
+        }
+        const restored = transaction as InventoryTransaction;
+        const createdAt = new Date(restored.createdAt);
+        if (!Number.isFinite(createdAt.getTime())) throw new Error("Stored transfer replay has an invalid receipt time");
+        return { ...restored, createdAt, voidedAt: restored.voidedAt ? new Date(restored.voidedAt) : null };
+      }
+      for (const value of [fromLocationId, toLocationId, productVariantId, quantity]) {
+        if (!Number.isInteger(value) || value <= 0 || value > 2_147_483_647) throw new Error("Transfer identities and quantity must be positive PostgreSQL integers");
+      }
+      if (fromLocationId === toLocationId || !userId.trim()) throw new Error("Transfer requires distinct locations and an actor");
+      await lockInventoryCostGraph(tx);
+      const locations = (await tx.execute(sql`SELECT id, warehouse_id, is_active, cycle_count_freeze_id
+        FROM warehouse.warehouse_locations WHERE id IN (${fromLocationId}, ${toLocationId}) ORDER BY id FOR SHARE`)).rows;
+      if (locations.length !== 2 || locations.some((location: any) => location.is_active !== 1 || location.cycle_count_freeze_id !== null)
+        || locations[0].warehouse_id == null || locations[0].warehouse_id !== locations[1].warehouse_id) {
+        throw new Error("Transfer requires active unfrozen locations in the same warehouse");
+      }
+      await tx.execute(sql`SELECT id FROM inventory.inventory_levels
+        WHERE warehouse_location_id IN (${fromLocationId}, ${toLocationId}) AND product_variant_id = ${productVariantId}
+        ORDER BY warehouse_location_id, product_variant_id, id FOR UPDATE`);
+    }
 
     const sourceResult = await tx.execute(sql`
       SELECT id, variant_qty, reserved_qty FROM inventory.inventory_levels
@@ -355,10 +388,11 @@ export function createInventoryMethods(
     if (sourceReserved > sourceOnHandAfter) {
       reservedToMove = Math.min(sourceReserved - sourceOnHandAfter, quantity, sourceReserved);
     }
+    if (quantityPosting && reservedToMove > 0) throw new Error("Transfer cannot relocate canonical claim ownership; release and replan the claim first");
 
     // Source: decrement on-hand and (if needed) reserved in a SINGLE update so the
     // row never transiently violates check_reserved_lte_on_hand.
-    await tx
+    if (!quantityPosting) await tx
       .update(inventoryLevels)
       .set({
         variantQty: sql`${inventoryLevels.variantQty} - ${quantity}`,
@@ -376,7 +410,7 @@ export function createInventoryMethods(
     const destLevel = destResult.rows && destResult.rows.length > 0 ? destResult.rows[0] : null;
 
     if (destLevel) {
-      await tx
+      if (!quantityPosting) await tx
         .update(inventoryLevels)
         .set({
           variantQty: sql`${inventoryLevels.variantQty} + ${quantity}`,
@@ -388,7 +422,7 @@ export function createInventoryMethods(
       await tx.insert(inventoryLevels).values({
         warehouseLocationId: toLocationId,
         productVariantId: productVariantId,
-        variantQty: quantity,
+        variantQty: quantityPosting ? 0 : quantity,
         reservedQty: reservedToMove,
         pickedQty: 0,
         packedQty: 0,
@@ -436,6 +470,18 @@ export function createInventoryMethods(
       notes: notes || `Transfer by ${userId}`,
       userId
     }).returning();
+
+    if (quantityPosting) {
+      const receipt = transaction[0];
+      await new InventoryLotService(tx).transferLots({ productVariantId, fromLocationId, toLocationId, qty: quantity,
+        notes, actorId: userId, occurredAt: receipt.createdAt, operationKey: `inventory_transfer:${receipt.id}`, quantityPosting });
+      await quantityPosting.post({
+        idempotencyKey: params.commandKey!, kind: "transfer", actor: userId,
+        reason: notes || "Warehouse stock transfer", occurredAt: receipt.createdAt.toISOString(),
+        reference: { type: "inventory_transaction", id: String(receipt.id) },
+      });
+      await quantityPosting.finishOperation({ transaction: receipt });
+    }
 
     // Separate ledger row for the reserved movement, for a complete audit trail.
     if (reservedToMove > 0) {
@@ -527,7 +573,11 @@ export function createInventoryMethods(
   },
 
   async undoTransfer(transactionId: number, userId: string): Promise<InventoryTransaction> {
-    const original = await db
+    return db.transaction(async (tx) => {
+    // Serializes both replay detection and the compensating transfer; two undo
+    // clicks cannot create two new physical debits.
+    await tx.execute(sql`SELECT id FROM inventory.inventory_transactions WHERE id = ${transactionId} FOR UPDATE`);
+    const original = await tx
       .select()
       .from(inventoryTransactions)
       .where(eq(inventoryTransactions.id, transactionId))
@@ -542,7 +592,7 @@ export function createInventoryMethods(
       throw new Error("Can only undo transfer transactions");
     }
     
-    const alreadyUndone = await db
+    const alreadyUndone = await tx
       .select()
       .from(inventoryTransactions)
       .where(and(
@@ -555,13 +605,15 @@ export function createInventoryMethods(
       throw new Error("This transfer has already been undone");
     }
     
-    return await (this as any).executeTransfer({
+    return await this.executeTransfer({
+      commandKey: `undo_transfer:${transactionId}`,
       fromLocationId: txn.toLocationId!,
       toLocationId: txn.fromLocationId!,
       productVariantId: txn.productVariantId!,
       quantity: txn.variantQtyDelta || 0,
       userId,
       notes: `Undo of transfer ${transactionId}`
+    }, tx);
     });
   },
 

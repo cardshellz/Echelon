@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
+// Explicit pre-opening compatibility fixture; real active package postings are
+// exercised by quantity-ledger.integration.test.ts.
+vi.mock("../../infrastructure/operational-quantity-posting", () => ({ openOperationalQuantityPosting: vi.fn(async () => null) }));
 
 /**
  * COGS Phase 3: break/assembly must propagate cost from source lots to target.

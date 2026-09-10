@@ -41,8 +41,9 @@ describe("existing-page opening verification panel", () => {
     for (const label of ["Order #CS-1001", "P5", "MAIN — Main warehouse", "PICK-A-01"]) expect(html).toContain(label);
     expect(html).toContain("database records, not proof of a physical count");
     expect(html).toContain("Saving here does not correct stock, change authority or publish quantities");
-    expect(html).toContain("Every quantity is deliberately blank");
-    expect(html).toContain("Do not change that counter to zero in the worksheet");
+    expect(html).toContain("Lot and owner quantities start blank");
+    expect(html).toContain("SKU/bin totals are calculated from those lot observations");
+    expect(html).toContain("Those raw counters stay in the recorded reference");
     expect(html).toContain("An order owner&#x27;s reserved and picked quantities describe physical holds only");
     expect(html).toContain("unexplained physical custody still blocks");
     expect(html).toContain("Use independently verified current lot custody");

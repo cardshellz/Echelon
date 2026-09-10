@@ -21,6 +21,21 @@ function fixture() {
 }
 
 describe("explicit independently verified reservation basis", () => {
+  it("uses v2 lot-derived positions without subtracting the raw counter twice", () => {
+    const { evidence, verification } = fixture(); verification.contractVersion = "inventory_cutover_opening_v2";
+    const result = evaluateCutoverOpening(evidence, verification);
+    expect(result.ready).toBe(true);
+    expect(result.plan.openingReservationRebases?.[0]).toMatchObject({ reservedQty: "69", physicalReservedQty: "3" });
+    const fresh = planFreshCutoverClaims(reconstructionSupply(evidence), result.plan, verification);
+    expect(fresh.inventoryPositions[0]).toMatchObject({ variantQty: "20", reservedQty: "4", pickedQty: "2" });
+  });
+  it("cannot combine a reservation-only v2 handoff with a different physical lot observation", () => {
+    const { evidence, verification } = fixture(); verification.contractVersion = "inventory_cutover_opening_v2";
+    verification.lots[0].onHandQty = "25";
+    const result = evaluateCutoverOpening(evidence, verification);
+    expect(result.ready).toBe(false); expect(result.plan.openingReservationRebases).toBeUndefined();
+    expect(result.blockers).toContainEqual(expect.objectContaining({ code: "OPENING_LOT_VERIFICATION_MISMATCH" }));
+  });
   it("retains independent build holds without making their stock available to customers", () => {
     const { evidence, verification } = fixture();
     evidence.buildReservations.push({ ...standaloneBuildReservation(), buildOrderStatus: "released" });

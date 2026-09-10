@@ -8,19 +8,20 @@ describe("independent opening verification document", () => {
     expect(JSON.parse(createOpeningWorksheet(source)).verification.reservationBasis).toBeUndefined();
     const worksheet = JSON.parse(createOpeningWorksheet(source, "verified_current_lot_custody"));
     expect(worksheet.verification.reservationBasis).toBe("verified_current_lot_custody");
-    expect(worksheet.verification.levels[0].reservedQty).toBe("");
+    expect(worksheet.verification.levels[0].reservedQty).toBe("0"); // Derived placeholder, not an observation.
     expect(worksheet.verification.owners[0].reservedQty).toBe("");
     expect(() => parseOpeningDocument(JSON.stringify(worksheet), source)).toThrow("incomplete or invalid");
     worksheet.verification = { ...openingVerification(), reservationBasis: "verified_current_lot_custody" };
     expect(parseOpeningDocument(JSON.stringify(worksheet), source)).toEqual(worksheet.verification);
   });
-  it("exports recorded references separately while every verification quantity remains blank", () => {
+  it("exports blank lot/owner observations and non-authoritative derived position placeholders", () => {
     const source = openingSource(); const before = structuredClone(source);
     const worksheet = JSON.parse(createOpeningWorksheet(source));
     expect(worksheet.recordedReference.levels[0].variantQty).toBe("20");
     expect(worksheet.recordedReference.labels).toContainEqual({ kind: "order", id: "1", label: "Order #CS-1001" });
     expect(worksheet.verification).toMatchObject({ verificationReference: "", verificationEvidenceHash: "", verifiedAt: "",
-      levels: [{ variantQty: "", reservedQty: "", pickedQty: "", packedQty: "" }],
+      contractVersion: "inventory_cutover_opening_v2",
+      levels: [{ variantQty: "0", reservedQty: "0", pickedQty: "0", packedQty: "0" }],
       lots: [{ onHandQty: "", reservedQty: "", pickedQty: "", unitCostMills: "", poUnitCostMills: "", packagingUnitCostMills: "", landedUnitCostMills: "" }],
       owners: [{ remainingQty: "", reservedQty: "", pickedQty: "", allocations: [] }] });
     expect(source).toEqual(before);
@@ -41,7 +42,7 @@ describe("independent opening verification document", () => {
     source.evidence.items[0].pickedQuantity = 0;
     const worksheet = JSON.parse(createOpeningWorksheet(source));
     expect(worksheet.recordedReference.levels[0]).toMatchObject({ variantQty: "0", reservedQty: "6" });
-    expect(worksheet.verification.levels[0].reservedQty).toBe("");
+    expect(worksheet.verification.levels[0].reservedQty).toBe("0"); // Derived placeholder, not another count input.
     expect(worksheet.verification.owners[0]).toMatchObject({ remainingQty: "", reservedQty: "", pickedQty: "", allocations: [] });
     expect(() => parseOpeningDocument(JSON.stringify(worksheet), source)).toThrow("incomplete or invalid");
   });

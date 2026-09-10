@@ -366,6 +366,9 @@ function Router() {
         <Route path="/warehouse/locations">
           <ProtectedRoute component={WarehousePage} allowedRoles={["admin", "lead"]} />
         </Route>
+        <Route path="/warehouse/packaging">
+          <ProtectedRoute component={WarehousePage} requiredPermission={{ resource: "settings", action: "view" }} />
+        </Route>
         <Route path="/warehouse">
           <ProtectedRoute component={WarehousePage} allowedRoles={["admin", "lead"]} />
         </Route>

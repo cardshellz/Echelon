@@ -27,6 +27,39 @@ import {
 } from "./shipping.schema";
 import type { ProgramCharges } from "../shipping/configuration";
 
+export const warehousePackagingRevisions = shippingSchema.table(
+  "warehouse_packaging_revisions",
+  {
+    warehouseId: integer("warehouse_id")
+      .primaryKey()
+      .references(() => warehouses.id),
+    revision: integer("revision").notNull(),
+  },
+  (t) => [
+    check(
+      "warehouse_packaging_revisions_revision_check",
+      sql`${t.revision} > 0`,
+    ),
+  ],
+);
+
+export const warehousePackagingAvailability = shippingSchema.table(
+  "warehouse_packaging_availability",
+  {
+    warehouseId: integer("warehouse_id")
+      .notNull()
+      .references(() => warehouses.id),
+    boxId: integer("box_id")
+      .notNull()
+      .references(() => shippingBoxCatalog.id),
+    available: boolean("available").notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.warehouseId, t.boxId] }),
+    index("warehouse_packaging_availability_box_idx").on(t.boxId),
+  ],
+);
+
 export const shippingChannelPackagingPolicies = shippingSchema.table(
   "channel_packaging_policies",
   {

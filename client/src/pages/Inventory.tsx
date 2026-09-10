@@ -1,4 +1,6 @@
 import React, { useState, useMemo, useEffect } from "react";
+import { useInventoryCommand } from "@/lib/inventory-command";
+import { useInventoryQuantityCapabilities } from "@/hooks/use-inventory-quantity-capabilities";
 import { useLocation } from "wouter";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import OperationsView from "./OperationsView";
@@ -485,6 +487,8 @@ function FungibleLocationRows({ variantId, sku, sourceSku, parentUnitsPerVariant
 }
 
 export default function Inventory() {
+  const inventoryCommand = useInventoryCommand();
+  const { data: quantityCapabilities } = useInventoryQuantityCapabilities();
   const [, navigate] = useLocation();
   const [searchQuery, setSearchQuery] = useState("");
   const [adjustDialogOpen, setAdjustDialogOpen] = useState(false);
@@ -722,8 +726,7 @@ export default function Inventory() {
 
   const adjustInventoryMutation = useMutation({
     mutationFn: async (data: { productVariantId: number; warehouseLocationId: number; qtyDelta: number; reason: string }) => {
-      const response = await apiRequest("POST", "/api/inventory/adjust", data);
-      return response.json();
+      return inventoryCommand("/api/inventory/adjust", data);
     },
     onSuccess: () => {
       toast({ title: "Inventory adjusted successfully" });
@@ -769,8 +772,7 @@ export default function Inventory() {
 
   const convertSkuMutation = useMutation({
     mutationFn: async (data: { fromVariantId: number; toVariantId: number; quantity?: number; notes?: string }) => {
-      const response = await apiRequest("POST", "/api/inventory/convert-sku", data);
-      return response.json();
+      return inventoryCommand<{ fromSku: string; toSku: string; totalConverted: number }>("/api/inventory/convert-sku", data);
     },
     onSuccess: (data: { fromSku: string; toSku: string; totalConverted: number }) => {
       toast({ title: "SKU Conversion Complete", description: `Converted ${data.totalConverted} units: ${data.fromSku} → ${data.toSku}` });
@@ -1078,7 +1080,10 @@ export default function Inventory() {
               <Repeat2 size={14} />
               <span className="hidden lg:inline text-xs ml-1">Convert</span>
             </Button>
-            <Button variant="outline" size="sm" className="h-8 px-2" onClick={() => setCsvUploadOpen(true)} data-testid="button-upload-csv">
+            <Button variant="outline" size="sm" className="h-8 px-2" onClick={() => setCsvUploadOpen(true)}
+              disabled={quantityCapabilities?.legacyQuantityImportAllowed !== true}
+              title="Legacy quantity imports are unavailable under ledger authority; use receiving, adjustments or cycle counts."
+              data-testid="button-upload-csv">
               <Upload size={14} />
               <span className="hidden lg:inline text-xs ml-1">Upload</span>
             </Button>
@@ -2386,7 +2391,7 @@ export default function Inventory() {
             {!csvResults && (
               <Button 
                 onClick={handleCsvUpload}
-                disabled={!csvFile || csvUploading}
+                disabled={quantityCapabilities?.legacyQuantityImportAllowed !== true || !csvFile || csvUploading}
                 className="w-full sm:w-auto min-h-[44px]"
               >
                 {csvUploading ? "Uploading..." : "Upload & Process"}

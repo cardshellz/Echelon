@@ -17,6 +17,7 @@ import type {
 import { allocateBuildCostLayers } from "../domain/build.domain";
 import { buildMillsToRoundedCents, normalizeBuildLotCosts } from "./build.repository";
 import { dispatchCanonicalPickedResources, loadCanonicalDispatchCosts } from "./canonical-claim-dispatch-inventory";
+import { CanonicalClaimQuantityPosting } from "./canonical-claim-quantity-posting";
 
 type CanonicalTransformationExecutionInput =
   | Parameters<CanonicalClaimInventoryMutationPort["executePackageOperation"]>[0]
@@ -280,6 +281,11 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
     }
 
     const quantityDelta = countedQty - quantityBefore;
+    const quantityPosting = await CanonicalClaimQuantityPosting.forCommand(input.client, {
+      key: `canonical:cycle-count:${cycleCountId}:${cycleCountItemId}`, kind: "adjust",
+      actor: input.actor, reason: input.reason, occurredAt: input.occurredAt,
+      reference: { type: "cycle_count_item", id: String(cycleCountItemId) },
+    });
     let consumedQty = BigInt(0);
     let consumedCostMills = BigInt(0);
     const lotEffects: Array<{
@@ -299,7 +305,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
         const take = Math.min(Math.max(0, qtyOnHand - qtyReserved), remaining);
         if (take === 0) continue;
         const unitCostMills = postgresBigInt(BigInt(String(lot.total_unit_cost_mills ?? 0)), "inventoryLot.totalUnitCostMills");
-        const updated = await input.client.query(
+        const updated = quantityPosting ? null : await input.client.query(
           `UPDATE inventory.inventory_lots
            SET qty_on_hand = qty_on_hand - $1,
                status = CASE
@@ -309,7 +315,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
            WHERE id = $2 AND qty_on_hand - qty_reserved >= $1`,
           [take, lotId],
         );
-        if (updated.rowCount !== 1) {
+        if (updated && updated.rowCount !== 1) {
           throw new CanonicalClaimInventoryMutationError(
             "CYCLE_COUNT_LOT_CHANGED",
             "A FIFO lot changed while the cycle-count shortage was being applied.",
@@ -373,7 +379,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
            received_at, status, cost_provisional, cost_source, notes
          ) VALUES (
            $1, $2, $3, $4, $4, 0, 0, $4, $5, $5, 0, 0, $5,
-           $6, $6, 0, 0, $7, 'active', $8, $9, $10
+           $6, $11, 0, 0, $7, 'active', $8, $9, $10
          )
          RETURNING id`,
         [
@@ -387,6 +393,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
           1,
           String(costRow.cost_source),
           input.reason,
+          quantityPosting ? 0 : quantityDelta,
         ],
       ))[0];
       const inventoryLotId = positiveInteger(insertedLot?.id, "inventoryLot.id");
@@ -398,13 +405,13 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
       });
     }
 
-    const updatedLevel = await input.client.query(
+    const updatedLevel = quantityPosting ? null : await input.client.query(
       `UPDATE inventory.inventory_levels
        SET variant_qty = $1, updated_at = $2
        WHERE id = $3 AND variant_qty = $4 AND reserved_qty <= $1`,
       [countedQty, input.occurredAt, inventoryLevelId, quantityBefore],
     );
-    if (updatedLevel.rowCount !== 1) {
+    if (updatedLevel && updatedLevel.rowCount !== 1) {
       throw new CanonicalClaimInventoryMutationError(
         "CYCLE_COUNT_LEVEL_CHANGED",
         "The counted inventory level changed before its aggregate quantity could be recorded.",
@@ -421,6 +428,9 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
     let runningQuantity = quantityBefore;
     let adjustmentTransactionId: number | null = null;
     for (const effect of lotEffects) {
+      quantityPosting?.add({ inventoryLotId: effect.inventoryLotId, inventoryLevelId,
+        warehouseLocationId, productVariantId,
+        delta: { onHand: effect.quantityDelta, reserved: 0, picked: 0, packed: 0 } });
       const nextQuantity = runningQuantity + effect.quantityDelta;
       const transaction = rows(await input.client.query(
         `INSERT INTO inventory.inventory_transactions (
@@ -460,6 +470,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
         { inventoryLevelId, quantityBefore, countedQty, runningQuantity },
       );
     }
+    if (quantityPosting) await quantityPosting.post();
     return {
       adjustmentTransactionId,
       consumedQty,
@@ -542,6 +553,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
 
   async reserveResource(
     input: Parameters<CanonicalClaimInventoryMutationPort["reserveResource"]>[0],
+    enclosingPosting?: CanonicalClaimQuantityPosting | null,
   ): Promise<readonly CanonicalClaimLotAllocation[]> {
     validateAuditInput(input);
     positiveBigInt(input.claimResourceId, "claimResource.id");
@@ -550,6 +562,12 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
     positiveInteger(input.sourceVariantId, "sourceVariant.id");
     positiveInteger(input.orderItemId, "orderItem.id");
     const claimedQty = positiveInteger(input.claimedQty, "claimResource.claimedQty");
+    const quantityPosting = enclosingPosting === undefined
+      ? await CanonicalClaimQuantityPosting.forCommand(input.client, {
+        key: input.commandKey, kind: "reserve", actor: input.actor,
+        reason: input.consumerOperationKey == null ? "Canonical direct finished allocation" : `Canonical source allocation for operation ${input.consumerOperationKey}`,
+        occurredAt: input.occurredAt, reference: { type: "availability_claim_resource", id: String(input.claimResourceId) },
+      }) : enclosingPosting;
     const level = await lockLevel(input.client, input.inventoryLevelId);
     if (!level
       || positiveInteger(level.warehouse_location_id, "inventoryLevel.locationId") !== input.warehouseLocationId
@@ -629,13 +647,16 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
       );
     }
     for (const allocation of allocations) {
-      const updated = await input.client.query(
+      quantityPosting?.add({ inventoryLotId: allocation.inventoryLotId, inventoryLevelId: input.inventoryLevelId,
+        warehouseLocationId: input.warehouseLocationId, productVariantId: input.sourceVariantId,
+        delta: { onHand: 0, reserved: allocation.qty, picked: 0, packed: 0 } });
+      const updated = quantityPosting ? null : await input.client.query(
         `UPDATE inventory.inventory_lots
          SET qty_reserved = qty_reserved + $1
          WHERE id = $2 AND qty_reserved + $1 <= qty_on_hand`,
         [allocation.qty, allocation.inventoryLotId],
       );
-      if (updated.rowCount !== 1) {
+      if (updated && updated.rowCount !== 1) {
         throw new CanonicalClaimInventoryMutationError(
           "CLAIM_LOT_CONFLICT",
           "A locked FIFO lot changed while the canonical claim was being persisted.",
@@ -644,13 +665,13 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
       }
     }
 
-    const updatedLevel = await input.client.query(
+    const updatedLevel = quantityPosting ? null : await input.client.query(
       `UPDATE inventory.inventory_levels
        SET reserved_qty = reserved_qty + $1, updated_at = $3
        WHERE id = $2 AND reserved_qty + $1 <= variant_qty`,
       [claimedQty, input.inventoryLevelId, input.occurredAt],
     );
-    if (updatedLevel.rowCount !== 1) {
+    if (updatedLevel && updatedLevel.rowCount !== 1) {
       throw new CanonicalClaimInventoryMutationError(
         "CLAIM_LEVEL_CONFLICT",
         "A locked inventory level changed while the canonical claim was being persisted.",
@@ -680,6 +701,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
         input.occurredAt,
       ],
     );
+    if (quantityPosting && enclosingPosting === undefined) await quantityPosting.post();
     return allocations;
   }
 
@@ -687,6 +709,10 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
     input: Parameters<CanonicalClaimInventoryMutationPort["reconcilePickResource"]>[0],
   ): Promise<readonly CanonicalClaimLotAllocation[]> {
     validateAuditInput(input);
+    const quantityPosting = await CanonicalClaimQuantityPosting.forCommand(input.client, {
+      key: input.commandKey, kind: "transfer", actor: input.actor, reason: input.reason,
+      occurredAt: input.occurredAt, reference: { type: "availability_claim_reconciliation", id: String(input.claimId) },
+    });
     const claimedQty = positiveInteger(input.target.claimedQty, "target.claimedQty");
     positiveBigInt(input.target.claimResourceId, "target.claimResource.id");
     positiveInteger(input.target.inventoryLevelId, "target.inventoryLevel.id");
@@ -759,8 +785,8 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
       actor: input.actor,
       reason: input.reason,
       occurredAt: input.occurredAt,
-    });
-    return this.reserveResource({
+    }, quantityPosting);
+    const allocations = await this.reserveResource({
       client: input.client,
       claimId: input.claimId,
       claimResourceId: input.target.claimResourceId,
@@ -773,13 +799,19 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
       consumerOperationKey: null,
       actor: input.actor,
       occurredAt: input.occurredAt,
-    });
+    }, quantityPosting);
+    if (quantityPosting) await quantityPosting.post();
+    return allocations;
   }
 
   async reconcileObservedPickResource(
     input: Parameters<CanonicalClaimInventoryMutationPort["reconcileObservedPickResource"]>[0],
   ): Promise<CanonicalClaimInventoryObservedReconciliationResult> {
     validateAuditInput(input);
+    const quantityPosting = await CanonicalClaimQuantityPosting.forCommand(input.client, {
+      key: input.commandKey, kind: "transfer", actor: input.actor, reason: input.reason,
+      occurredAt: input.occurredAt, reference: { type: "availability_claim_observation", id: input.observationReference },
+    });
     const costTransaction = costEvidenceTransactionFromPg(input.client);
     await lockInventoryCostGraph(costTransaction);
     const claimedQty = positiveInteger(input.target.claimedQty, "target.claimedQty");
@@ -1082,7 +1114,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
         actor: input.actor,
         reason: input.reason,
         occurredAt: input.occurredAt,
-      });
+      }, quantityPosting);
     }
 
     const allocations: CanonicalClaimLotAllocation[] = [];
@@ -1100,7 +1132,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
         consumerOperationKey: null,
         actor: input.actor,
         occurredAt: input.occurredAt,
-      }));
+      }, quantityPosting));
     }
 
     const relocatedInventoryLotIds: number[] = [];
@@ -1158,7 +1190,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
         );
       }
       const totalCostCents = buildMillsToRoundedCents(layer.unitCostMills).toString();
-      const updatedSourceLot = await input.client.query(
+      const updatedSourceLot = quantityPosting ? null : await input.client.query(
         `UPDATE inventory.inventory_lots
          SET qty_on_hand = qty_on_hand - $1,
              qty_reserved = qty_reserved - $1,
@@ -1168,7 +1200,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
          WHERE id = $2 AND qty_on_hand >= $1 AND qty_reserved >= $1`,
         [quantity, relocation.inventoryLotId],
       );
-      if (updatedSourceLot.rowCount !== 1) {
+      if (updatedSourceLot && updatedSourceLot.rowCount !== 1) {
         throw new CanonicalClaimInventoryMutationError(
           "CLAIM_OBSERVATION_SOURCE_CONFLICT",
           "An exact source FIFO lot changed while observed relocation was posting.",
@@ -1187,7 +1219,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
            cost_source, notes, created_at
          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
                    $10, $11, $12, $13, $10, $14, $15, $16, $17, $14,
-                   $18, $18, $18, 0, 0, $19, 'active', $20,
+                   $18, $24, $24, 0, 0, $19, 'active', $20,
                    $21, $22, $23)
          RETURNING id`,
         [
@@ -1220,9 +1252,17 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
           costSource,
           `Relocated by picker observation for claim ${input.claimId} from lot ${relocation.inventoryLotId}`,
           input.occurredAt,
+          quantityPosting ? 0 : quantity,
         ],
       ))[0];
       const inventoryLotId = positiveInteger(insertedLot?.id, "observationInventoryLot.id");
+      quantityPosting?.add({ inventoryLotId: relocation.inventoryLotId,
+        inventoryLevelId: relocation.resource.inventoryLevelId,
+        productVariantId: relocation.resource.sourceVariantId, warehouseLocationId: relocation.resource.warehouseLocationId,
+        delta: { onHand: -quantity, reserved: -quantity, picked: 0, packed: 0 } });
+      quantityPosting?.add({ inventoryLotId, inventoryLevelId: input.target.inventoryLevelId,
+        productVariantId: input.target.sourceVariantId, warehouseLocationId: input.target.warehouseLocationId,
+        delta: { onHand: quantity, reserved: quantity, picked: 0, packed: 0 } });
       await recordLotCostContribution(costTransaction, {
         sourceLotId: relocation.inventoryLotId,
         outputLotId: inventoryLotId,
@@ -1298,7 +1338,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
     }
     for (const [inventoryLevelId, quantity] of relocationByLevel) {
       const relocateQty = positivePostgresInteger(quantity, "observationLevel.relocationQty");
-      const updatedSourceLevel = await input.client.query(
+      const updatedSourceLevel = quantityPosting ? null : await input.client.query(
         `UPDATE inventory.inventory_levels
          SET variant_qty = variant_qty - $1,
              reserved_qty = reserved_qty - $1,
@@ -1306,7 +1346,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
          WHERE id = $2 AND variant_qty >= $1 AND reserved_qty >= $1`,
         [relocateQty, inventoryLevelId, input.occurredAt],
       );
-      if (updatedSourceLevel.rowCount !== 1) {
+      if (updatedSourceLevel && updatedSourceLevel.rowCount !== 1) {
         throw new CanonicalClaimInventoryMutationError(
           "CLAIM_OBSERVATION_SOURCE_LEVEL_CONFLICT",
           "A source inventory level changed while observed relocation was posting.",
@@ -1315,7 +1355,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
       }
     }
     const observedQty = positivePostgresInteger(observedRelocatedQuantity, "observation.relocatedQty");
-    const updatedLevel = await input.client.query(
+    const updatedLevel = quantityPosting ? null : await input.client.query(
       `UPDATE inventory.inventory_levels
        SET variant_qty = variant_qty + $1,
            reserved_qty = reserved_qty + $1,
@@ -1325,7 +1365,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
          AND reserved_qty <= 2147483647 - $1`,
       [observedQty, input.target.inventoryLevelId, input.occurredAt],
     );
-    if (updatedLevel.rowCount !== 1) {
+    if (updatedLevel && updatedLevel.rowCount !== 1) {
       throw new CanonicalClaimInventoryMutationError(
         "CLAIM_OBSERVATION_LEVEL_CONFLICT",
         "The observed inventory relocation could not be applied to its locked target level.",
@@ -1333,6 +1373,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
       );
     }
 
+    if (quantityPosting) await quantityPosting.post();
     return {
       allocations,
       recordedReconciledQuantity,
@@ -1353,6 +1394,10 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
     const resources = validatePickResources(input.resources);
     const { levelsById, lotsById } = await lockPickInventory(input.client, resources);
     validatePickInventory(resources, levelsById, lotsById);
+    const quantityPosting = await CanonicalClaimQuantityPosting.forCommand(input.client, {
+      key: input.commandKey, kind: "pick", actor: input.actor, reason: input.reason,
+      occurredAt: input.occurredAt, reference: { type: "availability_claim_pick", id: String(input.claimLineId) },
+    });
 
     const runningLevels = new Map<number, { variantQty: number; reservedQty: number }>(
       [...levelsById].map(([id, level]) => [id, {
@@ -1365,9 +1410,12 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
     for (const resource of resources) {
       for (const allocation of resource.lotAllocations) {
         const pickQty = positivePostgresInteger(allocation.pickQty, "claimLot.pickQty");
+        quantityPosting?.add({ inventoryLotId: allocation.inventoryLotId, inventoryLevelId: resource.inventoryLevelId,
+          warehouseLocationId: resource.warehouseLocationId, productVariantId: resource.sourceVariantId,
+          delta: { onHand: -pickQty, reserved: -pickQty, picked: pickQty, packed: 0 } });
         const totalMills = allocation.unitCostMills * BigInt(pickQty);
         postgresBigInt(totalMills, "claimLot.totalCostMills");
-        const updatedLot = await input.client.query(
+        const updatedLot = quantityPosting ? null : await input.client.query(
           `UPDATE inventory.inventory_lots
            SET qty_on_hand = qty_on_hand - $1,
                qty_reserved = qty_reserved - $1,
@@ -1376,7 +1424,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
              AND qty_picked <= 2147483647 - $1`,
           [pickQty, allocation.inventoryLotId],
         );
-        if (updatedLot.rowCount !== 1) {
+        if (updatedLot && updatedLot.rowCount !== 1) {
           throw new CanonicalClaimInventoryMutationError(
             "CLAIM_LOT_PICK_CONFLICT",
             "An exact claim-owned FIFO lot changed while its pick was posting.",
@@ -1446,7 +1494,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
     }
     for (const [levelId, quantities] of [...sumPickByLevel(resources)].sort(([left], [right]) => left - right)) {
       const qty = positivePostgresInteger(quantities, "inventoryLevel.pickQty");
-      const updatedLevel = await input.client.query(
+      const updatedLevel = quantityPosting ? null : await input.client.query(
         `UPDATE inventory.inventory_levels
          SET variant_qty = variant_qty - $1,
              reserved_qty = reserved_qty - $1,
@@ -1456,7 +1504,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
            AND picked_qty <= 2147483647 - $1`,
         [qty, levelId, input.occurredAt],
       );
-      if (updatedLevel.rowCount !== 1) {
+      if (updatedLevel && updatedLevel.rowCount !== 1) {
         throw new CanonicalClaimInventoryMutationError(
           "CLAIM_LEVEL_PICK_CONFLICT",
           "An exact claim-owned inventory level changed while its pick was posting.",
@@ -1464,6 +1512,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
         );
       }
     }
+    if (quantityPosting) await quantityPosting.post();
     return { movements, totalCostMills };
   }
 
@@ -1476,6 +1525,10 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
     const resources = validateUnpickResources(input.resources);
     const { levelsById, lotsById } = await lockUnpickInventory(input.client, resources);
     validateUnpickInventory(resources, levelsById, lotsById, input.restoreReservation);
+    const quantityPosting = await CanonicalClaimQuantityPosting.forCommand(input.client, {
+      key: input.commandKey, kind: "unpick", actor: input.actor, reason: input.reason,
+      occurredAt: input.occurredAt, reference: { type: "availability_claim_unpick", id: String(input.claimLineId) },
+    });
 
     const runningLevels = new Map<number, { variantQty: number; reservedQty: number }>(
       [...levelsById].map(([id, level]) => [id, {
@@ -1488,9 +1541,12 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
     for (const resource of resources) {
       for (const allocation of resource.lotAllocations) {
         const unpickQty = positivePostgresInteger(allocation.unpickQty, "claimLot.unpickQty");
+        quantityPosting?.add({ inventoryLotId: allocation.inventoryLotId, inventoryLevelId: resource.inventoryLevelId,
+          warehouseLocationId: resource.warehouseLocationId, productVariantId: resource.sourceVariantId,
+          delta: { onHand: unpickQty, reserved: input.restoreReservation ? unpickQty : 0, picked: -unpickQty, packed: 0 } });
         const totalMills = allocation.unitCostMills * BigInt(unpickQty);
         postgresBigInt(totalMills, "claimLot.totalCostMills");
-        const updatedLot = await input.client.query(
+        const updatedLot = quantityPosting ? null : await input.client.query(
           `UPDATE inventory.inventory_lots
            SET qty_on_hand = qty_on_hand + $1,
                qty_reserved = qty_reserved + $2,
@@ -1501,7 +1557,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
              AND qty_reserved <= 2147483647 - $2`,
           [unpickQty, input.restoreReservation ? unpickQty : 0, allocation.inventoryLotId],
         );
-        if (updatedLot.rowCount !== 1) {
+        if (updatedLot && updatedLot.rowCount !== 1) {
           throw new CanonicalClaimInventoryMutationError(
             "CLAIM_LOT_UNPICK_CONFLICT",
             "An exact canonical picked FIFO lot changed while its unpick was posting.",
@@ -1574,7 +1630,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
     for (const [levelId, quantity] of [...sumUnpickByLevel(resources)].sort(([left], [right]) => left - right)) {
       const qty = positivePostgresInteger(quantity, "inventoryLevel.unpickQty");
       const reservedRestore = input.restoreReservation ? qty : 0;
-      const updatedLevel = await input.client.query(
+      const updatedLevel = quantityPosting ? null : await input.client.query(
         `UPDATE inventory.inventory_levels
          SET variant_qty = variant_qty + $1,
              reserved_qty = reserved_qty + $2,
@@ -1585,7 +1641,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
            AND reserved_qty <= 2147483647 - $2`,
         [qty, reservedRestore, levelId, input.occurredAt],
       );
-      if (updatedLevel.rowCount !== 1) {
+      if (updatedLevel && updatedLevel.rowCount !== 1) {
         throw new CanonicalClaimInventoryMutationError(
           "CLAIM_LEVEL_UNPICK_CONFLICT",
           "An exact canonical picked inventory level changed while its unpick was posting.",
@@ -1593,6 +1649,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
         );
       }
     }
+    if (quantityPosting) await quantityPosting.post();
     return { movements, totalCostMills };
   }
 
@@ -1616,6 +1673,11 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
     await lockInventoryCostGraph(costTransaction);
     positiveBigInt(input.claimOperationId, "claimOperation.id");
     const operationKey = nonblank(input.operationKey, "operation.key", 300);
+    const quantityPosting = await CanonicalClaimQuantityPosting.forCommand(input.client, {
+      key: `canonical:transform:${input.claimId}:${input.claimOperationId}`, kind: "transform",
+      actor: input.actor, reason: input.reason, occurredAt: input.occurredAt,
+      reference: { type: "availability_claim_operation", id: String(input.claimOperationId) },
+    });
     const outputLocationId = positiveInteger(input.outputLocationId, "operation.outputLocationId");
     const destinationVariantId = positiveInteger(input.destinationVariantId, "operation.destinationVariantId");
     const outputQty = positivePostgresInteger(input.outputQty, "operation.outputQty");
@@ -1891,7 +1953,12 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
     const referenceId = `claim:${input.claimId}:operation:${input.claimOperationId}`;
     for (const { resource, allocation } of allocationEntries) {
       const consumeQty = positivePostgresInteger(allocation.consumeQty, "claimLotAllocation.consumeQty");
-      const updatedLot = await input.client.query(
+      quantityPosting?.add({ inventoryLotId: allocation.inventoryLotId, inventoryLevelId: resource.inventoryLevelId,
+        warehouseLocationId: resource.warehouseLocationId, productVariantId: resource.sourceVariantId,
+        delta: { onHand: -consumeQty, reserved: -consumeQty, picked: 0, packed: 0 } });
+      const updatedLot = await input.client.query(quantityPosting
+        ? `UPDATE inventory.inventory_lots SET qty_consumed = COALESCE(qty_consumed, 0) + $1 WHERE id = $2`
+        :
         `UPDATE inventory.inventory_lots
          SET qty_on_hand = qty_on_hand - $1,
              qty_reserved = qty_reserved - $1,
@@ -1964,7 +2031,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
       }
     }
     for (const [levelId, consumeQty] of [...consumeByLevel].sort(([left], [right]) => left - right)) {
-      const updatedLevel = await input.client.query(
+      const updatedLevel = quantityPosting ? null : await input.client.query(
         `UPDATE inventory.inventory_levels
          SET variant_qty = variant_qty - $1,
              reserved_qty = reserved_qty - $1,
@@ -1972,7 +2039,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
          WHERE id = $2 AND variant_qty >= $1 AND reserved_qty >= $1`,
         [consumeQty, levelId, input.occurredAt],
       );
-      if (updatedLevel.rowCount !== 1) {
+      if (updatedLevel && updatedLevel.rowCount !== 1) {
         throw new CanonicalClaimInventoryMutationError(
           "CLAIM_LEVEL_EXECUTION_CONFLICT",
           "A claim-owned source level changed while transformation consumption was posting.",
@@ -1981,7 +2048,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
       }
     }
 
-    const updatedOutputLevel = await input.client.query(
+    const updatedOutputLevel = quantityPosting ? null : await input.client.query(
       `UPDATE inventory.inventory_levels
        SET variant_qty = variant_qty + $1,
            reserved_qty = reserved_qty + $2,
@@ -1991,7 +2058,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
          AND reserved_qty <= 2147483647 - $2`,
       [outputQty, committedOutputQty, outputLevel.id, input.occurredAt],
     );
-    if (updatedOutputLevel.rowCount !== 1) {
+    if (updatedOutputLevel && updatedOutputLevel.rowCount !== 1) {
       throw new CanonicalClaimInventoryMutationError(
         "CLAIM_OUTPUT_LEVEL_OVERFLOW",
         "The transformation output would overflow its inventory level.",
@@ -2050,11 +2117,12 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
         segment.packagingMills.toString(),
         segment.landedMills.toString(),
         segment.qty,
-        segment.reservedQty,
+        quantityPosting ? 0 : segment.reservedQty,
         input.occurredAt,
         build
           ? `Output from canonical claim build ${build.buildSystemNumber}`
           : `Output from canonical operation ${operationKey}`,
+        quantityPosting ? 0 : segment.qty,
       ];
       const insertedLot = rows(await input.client.query(
         build
@@ -2066,8 +2134,8 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
                total_unit_cost_mills, qty_received, qty_on_hand, qty_reserved,
                qty_picked, qty_consumed, received_at, status, cost_provisional,
                cost_source, notes, created_at
-             ) VALUES ($1, $2, $3, $16, $17, $4, $5, $6, $7, $4, $8, $9, $10, $11, $8,
-                       $12, $12, $13, 0, 0, $14, 'active', 0, 'build', $15, $14)
+             ) VALUES ($1, $2, $3, $17, $18, $4, $5, $6, $7, $4, $8, $9, $10, $11, $8,
+                       $12, $16, $13, 0, 0, $14, 'active', 0, 'build', $15, $14)
              RETURNING id`
           : `INSERT INTO inventory.inventory_lots (
                lot_number, product_variant_id, warehouse_location_id,
@@ -2078,11 +2146,14 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
                qty_picked, qty_consumed, received_at, status, cost_provisional,
                cost_source, notes, created_at
              ) VALUES ($1, $2, $3, $4, $5, $6, $7, $4, $8, $9, $10, $11, $8,
-                       $12, $12, $13, 0, 0, $14, 'active', 0, 'transformation', $15, $14)
+                       $12, $16, $13, 0, 0, $14, 'active', 0, 'transformation', $15, $14)
              RETURNING id`,
         build ? [...lotValues, build.buildOrderId, build.buildRunId] : lotValues,
       ))[0];
       const outputLotId = positiveInteger(insertedLot?.id, "outputInventoryLot.id");
+      quantityPosting?.add({ inventoryLotId: outputLotId, inventoryLevelId: positiveInteger(outputLevel.id, "outputInventoryLevel.id"),
+        warehouseLocationId: outputLocationId, productVariantId: destinationVariantId,
+        delta: { onHand: segment.qty, reserved: segment.reservedQty, picked: 0, packed: 0 } });
       // Each cost layer receives every source contribution using the total
       // operation output denominator, never this individual remainder layer.
       for (const resource of resources) {
@@ -2155,6 +2226,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
     }
 
     const totalInputCostMills = totalCosts.poMills + totalCosts.packagingMills + totalCosts.landedMills;
+    if (quantityPosting) await quantityPosting.post();
     return {
       outputInventoryLevelId: positiveInteger(outputLevel.id, "outputInventoryLevel.id"),
       committedLotAllocations,
@@ -2164,9 +2236,15 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
 
   async releaseResources(
     input: Parameters<CanonicalClaimInventoryMutationPort["releaseResources"]>[0],
+    enclosingPosting?: CanonicalClaimQuantityPosting | null,
   ): Promise<void> {
     validateAuditInput(input);
     if (input.resources.length === 0) return;
+    const quantityPosting = enclosingPosting === undefined
+      ? await CanonicalClaimQuantityPosting.forCommand(input.client, {
+        key: input.commandKey, kind: "release", actor: input.actor, reason: input.reason,
+        occurredAt: input.occurredAt, reference: { type: "availability_claim_release", id: String(input.claimId) },
+      }) : enclosingPosting;
     for (const resource of input.resources) {
       positiveBigInt(resource.claimResourceId, "claimResource.id");
       positiveInteger(resource.inventoryLevelId, "inventoryLevel.id");
@@ -2239,13 +2317,16 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
     for (const resource of orderedResources) {
       for (const allocation of resource.lotAllocations) {
         const releaseQty = positivePostgresInteger(allocation.releaseQty, "claimLot.releaseQty");
-        const updatedLot = await input.client.query(
+        quantityPosting?.add({ inventoryLotId: allocation.inventoryLotId, inventoryLevelId: resource.inventoryLevelId,
+          warehouseLocationId: resource.warehouseLocationId, productVariantId: resource.sourceVariantId,
+          delta: { onHand: 0, reserved: -releaseQty, picked: 0, packed: 0 } });
+        const updatedLot = quantityPosting ? null : await input.client.query(
           `UPDATE inventory.inventory_lots
            SET qty_reserved = qty_reserved - $1
            WHERE id = $2 AND qty_reserved >= $1`,
           [releaseQty, allocation.inventoryLotId],
         );
-        if (updatedLot.rowCount !== 1) {
+        if (updatedLot && updatedLot.rowCount !== 1) {
           throw new CanonicalClaimInventoryMutationError(
             "CLAIM_LOT_RELEASE_CONFLICT",
             "An exact claim-owned FIFO lot changed while its release was being posted.",
@@ -2254,13 +2335,13 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
         }
       }
       const releaseQty = positivePostgresInteger(resource.releaseQty, "claimResource.releaseQty");
-      const updatedLevel = await input.client.query(
+      const updatedLevel = quantityPosting ? null : await input.client.query(
         `UPDATE inventory.inventory_levels
          SET reserved_qty = reserved_qty - $1, updated_at = $3
          WHERE id = $2 AND reserved_qty >= $1`,
         [releaseQty, resource.inventoryLevelId, input.occurredAt],
       );
-      if (updatedLevel.rowCount !== 1) {
+      if (updatedLevel && updatedLevel.rowCount !== 1) {
         throw new CanonicalClaimInventoryMutationError(
           "CLAIM_LEVEL_RELEASE_CONFLICT",
           "A claim-owned inventory level changed while its release was being posted.",
@@ -2291,6 +2372,7 @@ export class PostgresCanonicalClaimInventoryRepository implements CanonicalClaim
         ],
       );
     }
+    if (quantityPosting && enclosingPosting === undefined) await quantityPosting.post();
   }
 }
 

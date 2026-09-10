@@ -288,7 +288,7 @@ export function ChannelPackagingPanel({
                             ) : (
                               <div>
                                 No reviewed boxes are available here. Update
-                                catalog availability or assign another suite.
+                                warehouse availability or assign another suite.
                               </div>
                             )}
                           </details>
@@ -299,16 +299,14 @@ export function ChannelPackagingPanel({
                       <Button
                         size="sm"
                         variant="outline"
-                        disabled={!policy}
                         aria-label={`Edit ${w.name} packaging`}
-                        onClick={() =>
-                          setEditing({
-                            channelId: channel.id,
-                            warehouseId: w.id,
-                          })
-                        }
+                        asChild
                       >
-                        Edit
+                        <a
+                          href={`/warehouse/packaging?channelId=${channel.id}`}
+                        >
+                          Manage in Warehouses
+                        </a>
                       </Button>
                     </td>
                   </tr>
@@ -340,14 +338,21 @@ export function ChannelPackagingPanel({
       )}
       <p className="text-xs text-muted-foreground">
         Packaging assignments do not enable warehouses or change order routing.
-        Availability is configured per box, not a live stock count.
+        Availability is configured within each warehouse, not a live stock
+        count.
       </p>
       <div className="flex gap-4 text-sm">
         <a className="underline" href="/shipping-settings?tab=boxes">
-          Box catalog and availability
+          Box catalog
         </a>
         <a className="underline" href="/shipping-settings?tab=box-suites">
           Manage suites
+        </a>
+        <a
+          className="underline"
+          href={`/warehouse/packaging?channelId=${channel.id}`}
+        >
+          Manage warehouse packaging
         </a>
       </div>
       {editing && (
@@ -394,9 +399,7 @@ export function ChannelPackagingEditor({
             ?.suiteId ?? "inherit",
         );
   const [suite, setSuite] = useState(initialSuite);
-  const [warehouseOverrides, setWarehouseOverrides] = useState(
-    policy?.overrides ?? [],
-  );
+  const [warehouseOverrides] = useState(policy?.overrides ?? []);
   const [requirement, setRequirement] = useState<
     ChannelPackagingPolicy["requirement"]
   >(policy?.requirement ?? "any");
@@ -484,53 +487,17 @@ export function ChannelPackagingEditor({
           </select>
         </label>
         {warehouseId === null && (
-          <details className="rounded border p-3 text-sm">
-            <summary>Warehouse exceptions (optional)</summary>
-            <p className="mt-2 text-xs text-muted-foreground">
-              Use another suite where the default is not available. All changes
-              save together.
-            </p>
-            <div className="mt-2 max-h-52 space-y-2 overflow-auto">
-              {opened.warehouses.map((w) => (
-                <label key={w.id} className="grid gap-1">
-                  {w.name}
-                  <select
-                    aria-label={`${w.name} suite override`}
-                    className="h-9 rounded border bg-background px-2"
-                    disabled={busy}
-                    value={
-                      warehouseOverrides.find((o) => o.warehouseId === w.id)
-                        ?.suiteId ?? "inherit"
-                    }
-                    onChange={(e) =>
-                      setWarehouseOverrides((current) =>
-                        [
-                          ...current.filter((o) => o.warehouseId !== w.id),
-                          ...(e.target.value === "inherit"
-                            ? []
-                            : [
-                                {
-                                  warehouseId: w.id,
-                                  suiteId: Number(e.target.value),
-                                },
-                              ]),
-                        ].sort((a, b) => a.warehouseId - b.warehouseId),
-                      )
-                    }
-                  >
-                    <option value="inherit">Use configuration default</option>
-                    {opened.suites
-                      .filter((s) => !s.archived)
-                      .map((s) => (
-                        <option key={s.id} value={s.id}>
-                          {s.name}
-                        </option>
-                      ))}
-                  </select>
-                </label>
-              ))}
-            </div>
-          </details>
+          <p className="text-sm text-muted-foreground">
+            Existing warehouse exceptions are preserved. Manage individual or
+            bulk assignments in{" "}
+            <a
+              className="underline"
+              href={`/warehouse/packaging?channelId=${channelId}`}
+            >
+              Warehouse packaging
+            </a>
+            .
+          </p>
         )}
         {conflict && (
           <p role="alert" className="text-destructive">
@@ -542,7 +509,7 @@ export function ChannelPackagingEditor({
           <p role="alert" className="text-destructive">
             No reviewed boxes are available
             {warehouseId === null ? " at any warehouse" : " at this warehouse"}.
-            Review availability in the box catalog first.
+            Review availability in warehouse packaging first.
           </p>
         )}
         {!policy && (

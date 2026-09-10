@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { useInventoryCommand } from "@/lib/inventory-command";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRoute, useLocation, useSearch } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -1480,6 +1481,7 @@ function VariantShippingBehavior({
 }
 
 export default function ProductDetail() {
+  const inventoryCommand = useInventoryCommand();
   const [, params] = useRoute("/products/:id");
   const [, setLocation] = useLocation();
   const searchStr = useSearch();
@@ -1834,16 +1836,7 @@ export default function ProductDetail() {
       if (transferMode && transferTargetVariant) {
         body.transferToVariantId = transferTargetVariant.id;
       }
-      const res = await fetch(`/api/products/${product?.productId}/archive`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || "Failed to archive product");
-      }
-      return res.json();
+      return inventoryCommand<{ archived: { inventoryTransferred: number; variants: number; inventoryPreserved: number } }>(`/api/products/${product?.productId}/archive`, body);
     },
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}`] });
@@ -2530,16 +2523,7 @@ export default function ProductDetail() {
       if (variantTransferMode && variantTransferTarget) {
         body.transferToVariantId = variantTransferTarget.id;
       }
-      const res = await fetch(`/api/product-variants/${archiveVariant?.id}/archive`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || "Failed to archive variant");
-      }
-      return res.json();
+      return inventoryCommand<{ archived: { inventoryTransferred: number; variant: { sku: string } } }>(`/api/product-variants/${archiveVariant?.id}/archive`, body);
     },
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}`] });

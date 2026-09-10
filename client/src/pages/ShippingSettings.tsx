@@ -282,7 +282,6 @@ interface BoxPayload {
   costCents: number;
   fillFactorBps: number;
   isActive: boolean;
-  warehouseIds: number[];
 }
 
 interface BoxFormState {
@@ -302,7 +301,6 @@ interface BoxFormState {
   costUsd: string;
   fillFactorPct: string;
   isActive: boolean;
-  warehouseIds: number[];
 }
 
 function emptyBoxForm(): BoxFormState {
@@ -320,7 +318,6 @@ function emptyBoxForm(): BoxFormState {
     costUsd: "",
     fillFactorPct: "100",
     isActive: true,
-    warehouseIds: [],
   };
 }
 
@@ -341,7 +338,6 @@ function boxFormFromBox(box: ShippingBox): BoxFormState {
     costUsd: box.costCents ? (box.costCents / 100).toFixed(2) : "",
     fillFactorPct: formatMeasurementInput(box.fillFactorBps, 100) || "100",
     isActive: box.isActive,
-    warehouseIds: box.warehouseIds || [],
   };
 }
 
@@ -399,7 +395,6 @@ function buildBoxPayload(form: BoxFormState, editingId: number | null): BoxPaylo
     costCents,
     fillFactorBps,
     isActive: form.isActive,
-    warehouseIds: form.warehouseIds,
   };
 }
 
@@ -421,17 +416,14 @@ function boxToPayload(box: ShippingBox): BoxPayload {
     costCents: box.costCents,
     fillFactorBps: box.fillFactorBps,
     isActive: box.isActive,
-    warehouseIds: box.warehouseIds || [],
   };
 }
 
 export function BoxCatalogTab({
   boxes,
-  warehouses,
   isLoading,
 }: {
   boxes: ShippingBox[];
-  warehouses: WarehouseType[];
   isLoading: boolean;
 }) {
   const { toast } = useToast();
@@ -441,28 +433,75 @@ export function BoxCatalogTab({
   const [form, setForm] = useState<BoxFormState>(emptyBoxForm());
   const commandFor = useConfigurationCommand();
 
-  const warehouseById = new Map(warehouses.map((w) => [w.id, w]));
+  const [search, setSearch] = useState("");
+  const [brandingFilter, setBrandingFilter] = useState("all");
+  const [page, setPage] = useState(0);
+  const [selected, setSelected] = useState<number[]>([]);
+  const [bulkBranding, setBulkBranding] = useState<BoxBranding | null>(null);
+  const [reviewBoxes, setReviewBoxes] = useState<
+    { id: number; revision: number }[]
+  >([]);
+  const filtered = boxes.filter(
+    (box) =>
+      `${box.code} ${box.name}`.toLowerCase().includes(search.toLowerCase()) &&
+      (brandingFilter === "all" || box.branding === brandingFilter),
+  );
+  const currentPage = Math.min(
+    page,
+    Math.max(0, Math.ceil(filtered.length / 50) - 1),
+  );
+  const brandingMutation = useMutation({
+    mutationFn: () => {
+      const body = { boxes: reviewBoxes, branding: bulkBranding };
+      return putJson<{ changed: number; skipped: number }>(
+        "/api/shipping/admin/catalog-boxes/branding",
+        { ...body, commandId: commandFor(body) },
+      );
+    },
+    onSuccess: (result) => {
+      invalidateShippingAdmin(queryClient);
+      setBulkBranding(null);
+      setSelected([]);
+      toast({ title: `Branding updated for ${result.changed} boxes` });
+    },
+  });
 
   const saveBoxMutation = useMutation({
-    mutationFn: (payload: BoxPayload) => putJson<{ box: ShippingBox }>("/api/shipping/admin/catalog-boxes", { ...payload, commandId: commandFor(payload) }),
+    mutationFn: (payload: BoxPayload) =>
+      putJson<{ box: ShippingBox }>("/api/shipping/admin/catalog-boxes", {
+        ...payload,
+        commandId: commandFor(payload),
+      }),
     onSuccess: () => {
       invalidateShippingAdmin(queryClient);
       setDialogOpen(false);
       toast({ title: "Box saved" });
     },
     onError: (e: Error) => {
-      toast({ title: "Failed to save box", description: e.message, variant: "destructive" });
+      toast({
+        title: "Failed to save box",
+        description: e.message,
+        variant: "destructive",
+      });
     },
   });
 
   const toggleBoxMutation = useMutation({
-    mutationFn: (payload: BoxPayload) => putJson<{ box: ShippingBox }>("/api/shipping/admin/catalog-boxes", { ...payload, commandId: commandFor(payload) }),
+    mutationFn: (payload: BoxPayload) =>
+      putJson<{ box: ShippingBox }>("/api/shipping/admin/catalog-boxes", {
+        ...payload,
+        commandId: commandFor(payload),
+      }),
     onSuccess: (_data, payload) => {
       invalidateShippingAdmin(queryClient);
       toast({ title: payload.isActive ? "Box activated" : "Box deactivated" });
     },
     onError: (e: Error) => {
-      toast({ title: "Failed to update box", description: e.message, variant: "destructive" });
+      toast({
+        title: "Failed to update box",
+        description: e.message,
+        variant: "destructive",
+      });
     },
   });
 
@@ -482,17 +521,12 @@ export function BoxCatalogTab({
     try {
       saveBoxMutation.mutate(buildBoxPayload(form, editingBoxId));
     } catch (e) {
-      toast({ title: "Invalid box", description: (e as Error).message, variant: "destructive" });
+      toast({
+        title: "Invalid box",
+        description: (e as Error).message,
+        variant: "destructive",
+      });
     }
-  };
-
-  const toggleWarehouse = (warehouseId: number, checked: boolean) => {
-    setForm((prev) => ({
-      ...prev,
-      warehouseIds: checked
-        ? [...prev.warehouseIds, warehouseId]
-        : prev.warehouseIds.filter((id) => id !== warehouseId),
-    }));
   };
 
   return (
@@ -504,7 +538,8 @@ export function BoxCatalogTab({
             Box catalog
           </CardTitle>
           <CardDescription className="text-xs md:text-sm">
-            Containers the packing optimizer can choose from. Inner dimensions shown in inches.
+            Define packaging specifications and branding here. Choose suite
+            members in Box suites; configure availability in Warehouses.
           </CardDescription>
         </div>
         <Button size="sm" onClick={openCreate} className="min-h-[36px]">
@@ -513,6 +548,69 @@ export function BoxCatalogTab({
         </Button>
       </CardHeader>
       <CardContent className="p-3 md:p-6 pt-0 md:pt-0">
+        <div className="flex flex-wrap gap-2 mb-3">
+          <Input
+            className="max-w-sm"
+            aria-label="Search catalog boxes"
+            placeholder="Search code or name"
+            value={search}
+            onChange={(e) => {
+              setSearch(e.target.value);
+              setPage(0);
+            }}
+          />
+          <select
+            className="border rounded px-2"
+            aria-label="Filter branding"
+            value={brandingFilter}
+            onChange={(e) => {
+              setBrandingFilter(e.target.value);
+              setPage(0);
+            }}
+          >
+            <option value="all">All branding</option>
+            <option value="unclassified">Not classified</option>
+            <option value="unbranded">White label / unbranded</option>
+            <option value="branded">Branded / graphics</option>
+          </select>
+          <Button
+            variant="outline"
+            disabled={!filtered.length || filtered.length > 1000}
+            onClick={() => setSelected(filtered.map((b) => b.id))}
+          >
+            Select all {filtered.length} matching
+          </Button>
+          <Button
+            variant="ghost"
+            disabled={!selected.length}
+            onClick={() => setSelected([])}
+          >
+            Clear selection
+          </Button>
+          <select
+            className="border rounded px-2"
+            aria-label="Set selected branding"
+            value=""
+            disabled={!selected.length}
+            onChange={(e) => {
+              setReviewBoxes(
+                boxes
+                  .filter((b) => selected.includes(b.id))
+                  .map((b) => ({
+                    id: b.id,
+                    revision: b.configurationRevision,
+                  })),
+              );
+              setBulkBranding(boxBrandingSchema.parse(e.target.value));
+              brandingMutation.reset();
+            }}
+          >
+            <option value="">Set branding ({selected.length})</option>
+            <option value="unclassified">Not classified</option>
+            <option value="unbranded">White label / unbranded</option>
+            <option value="branded">Branded / graphics</option>
+          </select>
+        </div>
         {isLoading ? (
           <div className="flex justify-center p-8">
             <Loader2 className="w-6 h-6 animate-spin" />
@@ -520,13 +618,19 @@ export function BoxCatalogTab({
         ) : boxes.length === 0 ? (
           <div className="text-center p-8 text-muted-foreground">
             <Box className="w-12 h-12 mx-auto mb-2 opacity-50" />
-            <p>No boxes yet. Add the boxes each warehouse stocks so the packing optimizer can use them.</p>
+            <p>
+              No boxes yet. Add packaging specifications, then group boxes into
+              suites.
+            </p>
           </div>
         ) : (
           <div className="overflow-x-auto">
             <Table>
               <TableHeader>
                 <TableRow>
+                  <TableHead>
+                    <span className="sr-only">Select</span>
+                  </TableHead>
                   <TableHead>Code</TableHead>
                   <TableHead>Name</TableHead>
                   <TableHead>Kind</TableHead>
@@ -535,98 +639,215 @@ export function BoxCatalogTab({
                   <TableHead>Max weight</TableHead>
                   <TableHead>Cost</TableHead>
                   <TableHead>Fill</TableHead>
-                  <TableHead>Warehouses</TableHead>
                   <TableHead>Active</TableHead>
                   <TableHead className="w-10"></TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {boxes.map((box) => (
-                  <TableRow key={box.id} className={!box.isActive ? "opacity-60" : undefined}>
-                    <TableCell className="font-mono text-xs font-medium">{box.code}</TableCell>
-                    <TableCell className="text-sm">{box.name}<div className="text-xs text-muted-foreground">{box.branding === 'unbranded' ? 'White label / unbranded' : box.branding === 'branded' ? 'Branded / graphics' : 'Branding not reviewed'}</div></TableCell>
-                    <TableCell>
-                      <Badge variant="outline" className="text-[10px] capitalize">{box.kind}</Badge>
-                    </TableCell>
-                    <TableCell className="text-sm whitespace-nowrap">
-                      {formatDimsIn(box.lengthMm, box.widthMm, box.heightMm)}
-                    </TableCell>
-                    <TableCell className="text-sm whitespace-nowrap">{formatWeight(box.tareWeightGrams)}</TableCell>
-                    <TableCell className="text-sm whitespace-nowrap">{formatWeight(box.maxWeightGrams)}</TableCell>
-                    <TableCell className="text-sm">{formatCostUsd(box.costCents)}</TableCell>
-                    <TableCell className="text-sm">{formatFillFactor(box.fillFactorBps)}</TableCell>
-                    <TableCell>
-                      <div className="flex flex-wrap gap-1">
-                        {(box.warehouseIds || []).length === 0 ? (
-                          <span className="text-xs text-muted-foreground">{box.availabilityReviewed ? 'None available' : 'Availability not reviewed'}</span>
-                        ) : (
-                          box.warehouseIds.map((id) => (
-                            <Badge key={id} variant="secondary" className="text-[10px]">
-                              {warehouseById.get(id)?.code || `#${id}`}
-                            </Badge>
-                          ))
-                        )}
-                      </div>
-                      {!box.availabilityReviewed && box.warehouseIds?.length > 0 && <div className="text-xs text-amber-700">Availability needs review</div>}
-                    </TableCell>
-                    <TableCell>
-                      <Switch
-                        checked={box.isActive}
-                        disabled={toggleBoxMutation.isPending}
-                        onCheckedChange={(checked) => {
-                          if (!box.availabilityReviewed) { openEdit(box); return; }
-                          toggleBoxMutation.mutate({ ...boxToPayload(box), isActive: checked === true });
-                        }}
-                      />
-                    </TableCell>
-                    <TableCell>
-                      <Button variant="ghost" size="icon" className="h-8 w-8" aria-label={`Edit ${box.code} box`} onClick={() => openEdit(box)}>
-                        <Pencil className="h-3.5 w-3.5" />
-                      </Button>
-                    </TableCell>
-                  </TableRow>
-                ))}
+                {filtered
+                  .slice(currentPage * 50, (currentPage + 1) * 50)
+                  .map((box) => (
+                    <TableRow
+                      key={box.id}
+                      className={!box.isActive ? "opacity-60" : undefined}
+                    >
+                      <TableCell>
+                        <input
+                          type="checkbox"
+                          aria-label={`Select ${box.code}`}
+                          checked={selected.includes(box.id)}
+                          onChange={(e) =>
+                            setSelected((ids) =>
+                              e.target.checked
+                                ? [...ids, box.id]
+                                : ids.filter((id) => id !== box.id),
+                            )
+                          }
+                        />
+                      </TableCell>
+                      <TableCell className="font-mono text-xs font-medium">
+                        {box.code}
+                      </TableCell>
+                      <TableCell className="text-sm">
+                        {box.name}
+                        <div className="text-xs text-muted-foreground">
+                          {box.branding === "unbranded"
+                            ? "White label / unbranded"
+                            : box.branding === "branded"
+                              ? "Branded / graphics"
+                              : "Branding not reviewed"}
+                        </div>
+                      </TableCell>
+                      <TableCell>
+                        <Badge
+                          variant="outline"
+                          className="text-[10px] capitalize"
+                        >
+                          {box.kind}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="text-sm whitespace-nowrap">
+                        {formatDimsIn(box.lengthMm, box.widthMm, box.heightMm)}
+                      </TableCell>
+                      <TableCell className="text-sm whitespace-nowrap">
+                        {formatWeight(box.tareWeightGrams)}
+                      </TableCell>
+                      <TableCell className="text-sm whitespace-nowrap">
+                        {formatWeight(box.maxWeightGrams)}
+                      </TableCell>
+                      <TableCell className="text-sm">
+                        {formatCostUsd(box.costCents)}
+                      </TableCell>
+                      <TableCell className="text-sm">
+                        {formatFillFactor(box.fillFactorBps)}
+                      </TableCell>
+                      <TableCell>
+                        <Switch
+                          checked={box.isActive}
+                          disabled={toggleBoxMutation.isPending}
+                          onCheckedChange={(checked) => {
+                            toggleBoxMutation.mutate({
+                              ...boxToPayload(box),
+                              isActive: checked === true,
+                            });
+                          }}
+                        />
+                      </TableCell>
+                      <TableCell>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-8 w-8"
+                          aria-label={`Edit ${box.code} box`}
+                          onClick={() => openEdit(box)}
+                        >
+                          <Pencil className="h-3.5 w-3.5" />
+                        </Button>
+                      </TableCell>
+                    </TableRow>
+                  ))}
               </TableBody>
             </Table>
           </div>
         )}
+        <div className="flex flex-wrap items-center gap-3 mt-3 text-sm">
+          <span>
+            {filtered.length} matching · {selected.length} selected across pages
+            · Page {currentPage + 1}
+          </span>
+          <Button
+            variant="outline"
+            disabled={currentPage === 0}
+            onClick={() => setPage(currentPage - 1)}
+          >
+            Previous
+          </Button>
+          <Button
+            variant="outline"
+            disabled={(currentPage + 1) * 50 >= filtered.length}
+            onClick={() => setPage(currentPage + 1)}
+          >
+            Next
+          </Button>
+        </div>
       </CardContent>
+      <Dialog
+        open={bulkBranding !== null}
+        onOpenChange={(open) => {
+          if (!open && !brandingMutation.isPending) setBulkBranding(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Review branding change</DialogTitle>
+            <DialogDescription>
+              Set {reviewBoxes.length} selected boxes to {bulkBranding}.
+              Warehouse availability and suite membership will not change. An
+              incompatible assigned suite blocks the entire change.
+            </DialogDescription>
+          </DialogHeader>
+          {brandingMutation.error && (
+            <p role="alert">{brandingMutation.error.message}</p>
+          )}
+          <Button
+            disabled={brandingMutation.isPending}
+            onClick={() => brandingMutation.mutate()}
+          >
+            Save branding
+          </Button>
+          <Button
+            variant="outline"
+            disabled={brandingMutation.isPending}
+            onClick={() => setBulkBranding(null)}
+          >
+            Cancel
+          </Button>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
         <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
           <DialogHeader>
-            <DialogTitle>{editingBoxId !== null ? "Edit Box" : "Add Box"}</DialogTitle>
-            <DialogDescription className="sr-only">Form to add or edit a shipping box</DialogDescription>
+            <DialogTitle>
+              {editingBoxId !== null ? "Edit Box" : "Add Box"}
+            </DialogTitle>
+            <DialogDescription className="sr-only">
+              Form to add or edit a shipping box
+            </DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-2">
-            <label className="grid gap-2 text-sm">Packaging branding
-              <select aria-label="Packaging branding" className="h-10 rounded border bg-background px-2" value={form.branding}
-                onChange={e => setForm(prev => ({ ...prev, branding: boxBrandingSchema.parse(e.target.value) }))}>
+            <label className="grid gap-2 text-sm">
+              Packaging branding
+              <select
+                aria-label="Packaging branding"
+                className="h-10 rounded border bg-background px-2"
+                value={form.branding}
+                onChange={(e) =>
+                  setForm((prev) => ({
+                    ...prev,
+                    branding: boxBrandingSchema.parse(e.target.value),
+                  }))
+                }
+              >
                 <option value="unclassified">Not yet classified</option>
                 <option value="unbranded">White label / unbranded</option>
                 <option value="branded">Branded / graphics</option>
               </select>
             </label>
-            <p className="text-sm text-muted-foreground">Saving confirms the warehouse availability checked below. Unchecked warehouses cannot use this box under reviewed packaging policies. This is availability configuration, not a live stock count.</p>
+            <p className="text-sm text-muted-foreground">
+              Saving changes this catalog item only. Manage availability in
+              warehouse packaging settings.
+            </p>
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
                 <Label>Code</Label>
                 <Input
                   value={form.code}
-                  onChange={(e) => setForm((prev) => ({ ...prev, code: e.target.value }))}
+                  onChange={(e) =>
+                    setForm((prev) => ({ ...prev, code: e.target.value }))
+                  }
                   placeholder="BOX-12x9x4"
                   className="h-10 font-mono"
                 />
               </div>
               <div className="space-y-1.5">
                 <Label>Kind</Label>
-                <Select value={form.kind} onValueChange={(v) => setForm((prev) => ({ ...prev, kind: v }))}>
+                <Select
+                  value={form.kind}
+                  onValueChange={(v) =>
+                    setForm((prev) => ({ ...prev, kind: v }))
+                  }
+                >
                   <SelectTrigger className="h-10">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
                     {BOX_KINDS.map((kind) => (
-                      <SelectItem key={kind} value={kind} className="capitalize">
+                      <SelectItem
+                        key={kind}
+                        value={kind}
+                        className="capitalize"
+                      >
                         {kind}
                       </SelectItem>
                     ))}
@@ -638,7 +859,9 @@ export function BoxCatalogTab({
               <Label>Name</Label>
               <Input
                 value={form.name}
-                onChange={(e) => setForm((prev) => ({ ...prev, name: e.target.value }))}
+                onChange={(e) =>
+                  setForm((prev) => ({ ...prev, name: e.target.value }))
+                }
                 placeholder="12 × 9 × 4 shipper"
                 className="h-10"
               />
@@ -651,7 +874,9 @@ export function BoxCatalogTab({
                   min="0"
                   step="0.001"
                   value={form.lengthIn}
-                  onChange={(e) => setForm((prev) => ({ ...prev, lengthIn: e.target.value }))}
+                  onChange={(e) =>
+                    setForm((prev) => ({ ...prev, lengthIn: e.target.value }))
+                  }
                   placeholder="12"
                   className="h-10"
                 />
@@ -663,7 +888,9 @@ export function BoxCatalogTab({
                   min="0"
                   step="0.001"
                   value={form.widthIn}
-                  onChange={(e) => setForm((prev) => ({ ...prev, widthIn: e.target.value }))}
+                  onChange={(e) =>
+                    setForm((prev) => ({ ...prev, widthIn: e.target.value }))
+                  }
                   placeholder="9"
                   className="h-10"
                 />
@@ -675,15 +902,48 @@ export function BoxCatalogTab({
                   min="0"
                   step="0.001"
                   value={form.heightIn}
-                  onChange={(e) => setForm((prev) => ({ ...prev, heightIn: e.target.value }))}
+                  onChange={(e) =>
+                    setForm((prev) => ({ ...prev, heightIn: e.target.value }))
+                  }
                   placeholder="4"
                   className="h-10"
                 />
               </div>
             </div>
-            <fieldset className="space-y-2"><legend className="text-sm font-medium">Outer shipping dimensions (optional, inches)</legend>
-              <p className="text-xs text-muted-foreground">Measured outside the closed package. Inner dimensions control fit; outer dimensions describe the shipment. Leave all three blank if not measured.</p>
-              <div className="grid grid-cols-3 gap-3">{([['outerLengthIn','Outer length'],['outerWidthIn','Outer width'],['outerHeightIn','Outer height']] as const).map(([key,label]) => <label key={key} className="space-y-1 text-sm">{label}<Input type="number" min="0" step="0.001" value={form[key]} onChange={(e) => setForm((previous) => ({ ...previous,[key]: e.target.value }))} /></label>)}</div>
+            <fieldset className="space-y-2">
+              <legend className="text-sm font-medium">
+                Outer shipping dimensions (optional, inches)
+              </legend>
+              <p className="text-xs text-muted-foreground">
+                Measured outside the closed package. Inner dimensions control
+                fit; outer dimensions describe the shipment. Leave all three
+                blank if not measured.
+              </p>
+              <div className="grid grid-cols-3 gap-3">
+                {(
+                  [
+                    ["outerLengthIn", "Outer length"],
+                    ["outerWidthIn", "Outer width"],
+                    ["outerHeightIn", "Outer height"],
+                  ] as const
+                ).map(([key, label]) => (
+                  <label key={key} className="space-y-1 text-sm">
+                    {label}
+                    <Input
+                      type="number"
+                      min="0"
+                      step="0.001"
+                      value={form[key]}
+                      onChange={(e) =>
+                        setForm((previous) => ({
+                          ...previous,
+                          [key]: e.target.value,
+                        }))
+                      }
+                    />
+                  </label>
+                ))}
+              </div>
             </fieldset>
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
@@ -693,11 +953,15 @@ export function BoxCatalogTab({
                   min="0"
                   step="0.001"
                   value={form.tareOz}
-                  onChange={(e) => setForm((prev) => ({ ...prev, tareOz: e.target.value }))}
+                  onChange={(e) =>
+                    setForm((prev) => ({ ...prev, tareOz: e.target.value }))
+                  }
                   placeholder="5"
                   className="h-10"
                 />
-                <p className="text-xs text-muted-foreground">Weight of the empty container</p>
+                <p className="text-xs text-muted-foreground">
+                  Weight of the empty container
+                </p>
               </div>
               <div className="space-y-1.5">
                 <Label>Max weight (lb)</Label>
@@ -706,11 +970,18 @@ export function BoxCatalogTab({
                   min="0"
                   step="0.001"
                   value={form.maxWeightLb}
-                  onChange={(e) => setForm((prev) => ({ ...prev, maxWeightLb: e.target.value }))}
+                  onChange={(e) =>
+                    setForm((prev) => ({
+                      ...prev,
+                      maxWeightLb: e.target.value,
+                    }))
+                  }
                   placeholder="Optional"
                   className="h-10"
                 />
-                <p className="text-xs text-muted-foreground">Blank = no limit</p>
+                <p className="text-xs text-muted-foreground">
+                  Blank = no limit
+                </p>
               </div>
             </div>
             <div className="grid grid-cols-2 gap-3">
@@ -721,7 +992,9 @@ export function BoxCatalogTab({
                   min="0"
                   step="0.01"
                   value={form.costUsd}
-                  onChange={(e) => setForm((prev) => ({ ...prev, costUsd: e.target.value }))}
+                  onChange={(e) =>
+                    setForm((prev) => ({ ...prev, costUsd: e.target.value }))
+                  }
                   placeholder="0.42"
                   className="h-10"
                 />
@@ -734,41 +1007,31 @@ export function BoxCatalogTab({
                   max="100"
                   step="0.01"
                   value={form.fillFactorPct}
-                  onChange={(e) => setForm((prev) => ({ ...prev, fillFactorPct: e.target.value }))}
+                  onChange={(e) =>
+                    setForm((prev) => ({
+                      ...prev,
+                      fillFactorPct: e.target.value,
+                    }))
+                  }
                   placeholder="85"
                   className="h-10"
                 />
-                <p className="text-xs text-muted-foreground">Usable share of the inner volume</p>
+                <p className="text-xs text-muted-foreground">
+                  Usable share of the inner volume
+                </p>
               </div>
-            </div>
-            <div className="space-y-1.5">
-              <Label>Stocked warehouses</Label>
-              {warehouses.length === 0 ? (
-                <p className="text-xs text-muted-foreground">No warehouses configured.</p>
-              ) : (
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 rounded-md border p-3">
-                  {warehouses.map((wh) => (
-                    <div key={wh.id} className="flex items-center gap-2">
-                      <Checkbox
-                        id={`box-wh-${wh.id}`}
-                        checked={form.warehouseIds.includes(wh.id)}
-                        onCheckedChange={(checked) => toggleWarehouse(wh.id, checked === true)}
-                      />
-                      <label htmlFor={`box-wh-${wh.id}`} className="text-sm cursor-pointer">
-                        {wh.name} <span className="text-muted-foreground">({wh.code})</span>
-                      </label>
-                    </div>
-                  ))}
-                </div>
-              )}
             </div>
             <div className="flex items-center gap-2">
               <Switch
                 id="box-active"
                 checked={form.isActive}
-                onCheckedChange={(checked) => setForm((prev) => ({ ...prev, isActive: checked === true }))}
+                onCheckedChange={(checked) =>
+                  setForm((prev) => ({ ...prev, isActive: checked === true }))
+                }
               />
-              <Label htmlFor="box-active" className="cursor-pointer">Active</Label>
+              <Label htmlFor="box-active" className="cursor-pointer">
+                Active
+              </Label>
             </div>
           </div>
           <DialogFooter className="gap-2">
@@ -1336,7 +1599,7 @@ export default function ShippingSettings() {
           <TabsTrigger value="channel-routing">Channel routing</TabsTrigger>
         </TabsList>
         <TabsContent value="boxes" className="mt-4 space-y-4">
-          <BoxCatalogTab boxes={config?.boxes || []} warehouses={warehouses} isLoading={configLoading} />
+          <BoxCatalogTab boxes={config?.boxes || []} isLoading={configLoading} />
         </TabsContent>
         <TabsContent value="box-suites" className="mt-4"><BoxSuitesPanel /></TabsContent>
         <TabsContent value="packing-attrs" className="mt-4">

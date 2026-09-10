@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
+import { useInventoryCommand } from "@/lib/inventory-command";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -54,6 +55,7 @@ interface SkuResult {
 type MobileStep = "source" | "sku" | "quantity" | "destination" | "confirm";
 
 export default function Transfers() {
+  const inventoryCommand = useInventoryCommand();
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const [isMobile, setIsMobile] = useState(false);
@@ -201,26 +203,7 @@ export default function Transfers() {
   
   const transferMutation = useMutation({
     mutationFn: async (data: { fromLocationId: number; toLocationId: number; variantId: number; quantity: number; notes?: string; moveReserved?: boolean }) => {
-      // Use fetch directly (not apiRequest) so we can inspect the 409 body and
-      // surface the "move reserved too?" confirm flow instead of a generic error.
-      const res = await fetch("/api/inventory/transfer", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify(data),
-      });
-      if (res.status === 409) {
-        const body = await res.json().catch(() => ({} as any));
-        const err: any = new Error(body.error || "Transfer blocked");
-        err.code = body.code;
-        err.context = body.context;
-        throw err;
-      }
-      if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        throw new Error(text || `Transfer failed (${res.status})`);
-      }
-      return res.json();
+      return inventoryCommand("/api/inventory/transfer", data);
     },
     onSuccess: async (transferResult: any) => {
       playSoundWithHaptic("success", "classic", true);
@@ -264,8 +247,9 @@ export default function Transfers() {
     onError: (error: any, variables) => {
       // Reserved stock blocks the transfer: offer to move the reservation too
       // (Option A) instead of dead-ending. Re-fires with moveReserved: true.
-      if (error?.code === "TRANSFER_BLOCKED_BY_RESERVATION" && error.context) {
-        setReservationPrompt({ payload: variables, ...error.context });
+      const context = error?.context ?? error?.responseBody?.context;
+      if (error?.code === "TRANSFER_BLOCKED_BY_RESERVATION" && context) {
+        setReservationPrompt({ payload: variables, ...context });
         return;
       }
       // Fallback: if a cached client bundle routes through apiRequest's

@@ -17,6 +17,7 @@ import { PostgresInventoryCutoverCommitRepository } from "../../infrastructure/i
 import { projectInventoryCutoverStateInsideTransaction } from "../../infrastructure/inventory-cutover-projection.repository";
 import { buildInventoryCutoverManifest } from "../../domain/inventory-cutover-manifest";
 import { acquireInventoryCutoverFenceInsideTransaction } from "../../infrastructure/inventory-cutover-admission-fence.repository";
+import { installQuantityCutoverFixture } from "../fixtures/inventory-quantity-cutover.fixture";
 import { planCutoverReconstruction } from "../../domain/inventory-cutover-reconstruction";
 import { PostgresInventoryPublicationOutboxRepository } from "../../infrastructure/inventory-publication-outbox.repository";
 import { InventoryPublicationOutboxService } from "../../application/inventory-publication-outbox.service";
@@ -54,6 +55,7 @@ dbDescribe.sequential("verified opening persistence with real PostgreSQL admissi
     await installCutoverAdmissionFixturePrerequisites(pool);
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/236_inventory_cutover_admission.sql"), "utf8"));
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/240_inventory_cutover_verified_opening.sql"), "utf8"));
+    await installQuantityCutoverFixture(pool);
     await pool.query(`UPDATE wms.orders SET order_number='#OPENING-1';
       UPDATE warehouse.warehouses SET code='MAIN',name='Main warehouse';
       UPDATE warehouse.warehouse_locations SET code='PICK-A',name='Pick bin';
@@ -96,9 +98,10 @@ dbDescribe.sequential("verified opening persistence with real PostgreSQL admissi
     } finally { await client.query("ROLLBACK"); client.release(); }
     expect(await immutableBusinessState()).toEqual(before);
   });
-  it("translates verified mixed-bin counters atomically and replays after a late rollback", async () => {
+  it.each(["inventory_cutover_opening_v1", "inventory_cutover_opening_v2"] as const)("translates verified mixed-bin counters atomically and replays after a late rollback (%s)", async contractVersion => {
     await pool.query("UPDATE inventory.inventory_levels SET reserved_qty=69 WHERE id=10");
     const input = await request("mixed-opening"); input.verification.reservationBasis = "verified_current_lot_custody";
+    input.verification.contractVersion = contractVersion;
     const before = await immutableBusinessState();
     const assessment = await service.preview(input.verification, "operator");
     expect(assessment).toMatchObject({ ready: true, plan: { legacyPromiseReleases: [],
@@ -131,6 +134,9 @@ dbDescribe.sequential("verified opening persistence with real PostgreSQL admissi
       .toEqual([{ reserved_qty_delta: -66, variant_qty_delta: 0, order_id: null, order_item_id: null }]);
     const receipt = (await pool.query("SELECT result_payload FROM inventory.availability_cutover_reconstruction_receipts")).rows[0].result_payload;
     expect(receipt.openingBalance.snapshotId).toBe(saved.id); expect(receipt.openingReservationRebaseTransactionIds).toHaveLength(1);
+    expect((await pool.query("SELECT on_hand::text,reserved::text,picked::text FROM inventory.quantity_level_balances WHERE inventory_level_id=10")).rows)
+      .toEqual([{ on_hand: "20", reserved: "4", picked: "2" }]);
+    expect((await pool.query("SELECT count(*)::integer AS count FROM inventory.quantity_commands WHERE kind='opening'")).rows).toEqual([{ count: 1 }]);
     const after = await immutableBusinessState();
     for (const field of ["costs", "orders", "items", "build_reservations", "build_demands", "receipts", "receipt_attempts"]) expect(after[field]).toEqual(beforeFailure[field]);
   }, 30_000);
@@ -149,6 +155,9 @@ dbDescribe.sequential("verified opening persistence with real PostgreSQL admissi
       (SELECT jsonb_agg(to_jsonb(row) ORDER BY id)::text FROM oms.channel_fulfillment_receipt_attempts row) AS receipt_attempts,
       (SELECT count(*)::text FROM inventory.availability_claims) AS claims,
       (SELECT count(*)::text FROM inventory.inventory_publication_outbox) AS publications,
+      (SELECT count(*)::text FROM inventory.quantity_commands) AS quantity_commands,
+      (SELECT count(*)::text FROM inventory.quantity_entries) AS quantity_entries,
+      (SELECT count(*)::text FROM inventory.quantity_ledger_opening) AS quantity_openings,
       (SELECT to_jsonb(row)::text FROM inventory.availability_runtime_authority row WHERE singleton_key=true) AS authority`)).rows[0];
   }
 
@@ -176,10 +185,11 @@ dbDescribe.sequential("verified opening persistence with real PostgreSQL admissi
         VALUES(9,8,4,1,0,0,'build_order',NULL,NULL)`);
   }
 
-  async function promiseOpeningRequest() {
+  async function promiseOpeningRequest(contractVersion: OpeningVerification["contractVersion"] = "inventory_cutover_opening_v1") {
     const source = await service.capture("operator");
     const input = { verification: verification(source), reason: "Verify physical custody and preserve the complete unfilled promise",
       idempotencyKey: "promise-opening" };
+    input.verification.contractVersion = contractVersion;
     input.verification.owners.push({ orderId: 2, orderItemId: 22, remainingQty: "20", reservedQty: "0", pickedQty: "0", allocations: [] });
     return { source, input };
   }
@@ -233,7 +243,7 @@ dbDescribe.sequential("verified opening persistence with real PostgreSQL admissi
       FROM pg_trigger trigger JOIN pg_class relation ON relation.oid=trigger.tgrelid
       JOIN pg_namespace namespace ON namespace.oid=relation.relnamespace
       WHERE trigger.tgname='aa_cutover_writer_admission' ORDER BY namespace.nspname,relation.relname`)).rows;
-    expect(rows).toHaveLength(80);
+    expect(rows).toHaveLength(83); // prior80 plus quantity commands, entries and durable operation replies
     expect(rows).toEqual(expect.arrayContaining([
       { relation: "oms.channel_fulfillment_receipts" }, { relation: "oms.channel_fulfillment_receipt_attempts" },
       { relation: "wms.order_build_demands" },
@@ -275,10 +285,10 @@ dbDescribe.sequential("verified opening persistence with real PostgreSQL admissi
     expect((await service.capture("operator")).latestVerification).toEqual(saved);
   });
 
-  it("carries original empty-bin proof through opening, publication and atomic handoff without losing physical custody or demand", async () => {
+  it.each(["inventory_cutover_opening_v1", "inventory_cutover_opening_v2"] as const)("%s carries empty-bin proof through opening, publication and atomic handoff without losing custody or demand", async contractVersion => {
     await seedOpeningPromise();
     await pool.query(cutoverCompositionChannelSeedSql);
-    const { source, input } = await promiseOpeningRequest();
+    const { source, input } = await promiseOpeningRequest(contractVersion);
     const strict = planCutoverReconstruction(source.evidence);
     expect(strict.ready).toBe(false);
     expect(strict.blockers).toContainEqual(expect.objectContaining({ code: "JOURNAL_CUSTODY_UNKNOWN" }));
@@ -604,7 +614,7 @@ dbDescribe.sequential("verified opening persistence with real PostgreSQL admissi
   it("database guards forbid mutation, deletion, truncation and an insertion without exclusive admission", async () => {
     await service.save(await request(), "operator");
     for (const sql of ["UPDATE inventory.availability_cutover_opening_snapshots SET reason=reason",
-      "DELETE FROM inventory.availability_cutover_opening_snapshots", "TRUNCATE inventory.availability_cutover_opening_snapshots"]) {
+      "DELETE FROM inventory.availability_cutover_opening_snapshots", "TRUNCATE inventory.availability_cutover_opening_snapshots CASCADE"]) {
       await expect(pool.query(sql)).rejects.toMatchObject({ code: "23514" });
     }
     await expect(pool.query(`INSERT INTO inventory.availability_cutover_opening_snapshots OVERRIDING SYSTEM VALUE

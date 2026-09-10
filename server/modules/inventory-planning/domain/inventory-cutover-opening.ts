@@ -19,12 +19,14 @@ export function normalizeOpeningVerification(input: OpeningVerification): Openin
 
 /**
  * A new, independently verified current-custody basis, NOT repaired history.
- * Physical stock and valuation must already match. Default verification permits
- * only journal-proven empty-bin promises; explicit current-lot-custody verification
- * may propose a counter translation. Neither preview nor save changes inventory.
+ * V1 preserves the semantics of existing immutable audits. V2 replaces dual
+ * counter verification with exact lot observations and derived positions. This
+ * evaluator changes no data; only admitted cutover can post that opening.
+ * Explicit current-custody opt-in permits audited reservation-only translation
+ * when recorded physical stock matches verified lots. Default policy is unchanged.
  */
 export function evaluateCutoverOpening(rawEvidence: unknown, input: OpeningVerification): OpeningAssessment {
-  const evidence = cutoverReconstructionEvidenceSchema.parse(rawEvidence);
+  let evidence = cutoverReconstructionEvidenceSchema.parse(rawEvidence);
   const verification = normalizeOpeningVerification(input);
   // The strict planner returns the canonical hash of the exact validated census.
   // Reuse it rather than parsing and sorting another complete copy for hashing.
@@ -71,14 +73,40 @@ export function evaluateCutoverOpening(rawEvidence: unknown, input: OpeningVerif
   }
   const sameRows = (left: readonly { id: number }[], right: readonly { id: number }[]) =>
     canonicalJson([...left].sort((a,b) => a.id-b.id)) === canonicalJson([...right].sort((a,b) => a.id-b.id));
-  if (!sameRows(verification.levels, evidence.levels)) block("OPENING_LEVEL_VERIFICATION_MISMATCH", "levels", "Independent verification must cover every exact current level and counter. Correct discrepancies through the inventory owner first.");
-  if (!sameRows(verification.lots, evidence.lots)) block("OPENING_LOT_VERIFICATION_MISMATCH", "lots", "Independent verification must cover every exact lot quantity and cost component; no missing lot or new valuation is inferred.");
+  // A reservation-only translation must not be combined with a physical count
+  // adjustment. V2 without this opt-in retains its independent count semantics.
+  if (currentBasis && !sameRows(verification.lots, evidence.lots)) {
+    block("OPENING_LOT_VERIFICATION_MISMATCH", "lots", "Reservation-only handoff requires unchanged independently verified physical lot quantities and costs.");
+  }
+  if (verification.contractVersion === "inventory_cutover_opening_v1") {
+    if (!sameRows(verification.levels, evidence.levels)) block("OPENING_LEVEL_VERIFICATION_MISMATCH", "levels", "Independent verification must cover every exact current level and counter. Correct discrepancies through the inventory owner first.");
+    if (!sameRows(verification.lots, evidence.lots)) block("OPENING_LOT_VERIFICATION_MISMATCH", "lots", "Independent verification must cover every exact lot quantity and cost component; no missing lot or new valuation is inferred.");
+  } else {
+    const levelIdentity = ({ variantQty: _onHand, reservedQty: _reserved, pickedQty: _picked, packedQty: _packed, ...identity }: CutoverReconstructionEvidence["levels"][number]) => identity;
+    const lotIdentity = ({ onHandQty: _onHand, reservedQty: _reserved, pickedQty: _picked, ...identity }: CutoverReconstructionEvidence["lots"][number]) => identity;
+    if (!sameRows(verification.levels.map(levelIdentity), evidence.levels.map(levelIdentity))) {
+      block("OPENING_LEVEL_IDENTITY_MISMATCH", "levels", "The opening must preserve every current exact SKU/bin/warehouse identity; quantities are derived from verified lots.");
+    }
+    if (!sameRows(verification.lots.map(lotIdentity), evidence.lots.map(lotIdentity))) {
+      block("OPENING_LOT_IDENTITY_OR_COST_CHANGED", "lots", "All original lot identities and exact cost layers must be preserved. Observed quantities cannot invent a lot or revalue historical costs.");
+    }
+    if (evidence.levels.some(level => BigInt(level.packedQty) !== BigInt(0))) {
+      block("OPENING_PACKED_CUSTODY_REQUIRES_REVIEW", "levels", "Existing packed custody needs exact lot and owner evidence; the opening must not silently erase it.");
+    }
+  }
   const required = requiredOpeningItems(evidence);
   if (new Set(verification.owners.map(owner => owner.orderItemId)).size !== verification.owners.length
     || canonicalJson(verification.owners.map(owner => owner.orderItemId)) !== canonicalJson(required.map(item => item.id))) {
     block("OPENING_OWNER_COVERAGE_MISMATCH", "owners", "Every current physical order line requires exactly one explicit verification, including unstarted demand and zero remaining quantity.");
   }
   if (blockers.length > 0) return finish(strict);
+  if (verification.contractVersion === "inventory_cutover_opening_v2") {
+    evidence = { ...evidence, levels: verification.levels, lots: verification.lots.map(lot => {
+      const physical = BigInt(lot.onHandQty) + BigInt(lot.pickedQty);
+      return { ...lot, status: lot.status === "depleted" && physical > BigInt(0) ? "active"
+        : lot.status === "active" && physical === BigInt(0) && lot.reservedQty === "0" ? "depleted" : lot.status };
+    }) };
+  }
   const levels = new Map(evidence.levels.map(row => [row.id,row]));
   const lots = new Map(evidence.lots.map(row => [row.id,row]));
   const costs = new Map(evidence.costs.map(row => [row.id,row]));
@@ -92,8 +120,12 @@ export function evaluateCutoverOpening(rawEvidence: unknown, input: OpeningVerif
   const observations: CutoverReconstructionEvidence["journals"] = [];
   const add = (map: Map<number,bigint>, key: number, qty: string) => map.set(key, (map.get(key) ?? BigInt(0))+BigInt(qty));
   for (const level of evidence.levels) {
+    // V2 positions already derive from physical lot observations. Subtracting
+    // the raw nonphysical promise again would create a negative physical hold.
+    const rawPromise = verification.contractVersion === "inventory_cutover_opening_v1"
+      ? promisesByLevel.get(level.id)?.reservedQty ?? "0" : "0";
     const physicalReserved = rebasesByLevel.has(level.id) ? BigInt(rebasesByLevel.get(level.id)!.physicalReservedQty)
-      : BigInt(level.reservedQty) - BigInt(promisesByLevel.get(level.id)?.reservedQty ?? "0");
+      : BigInt(level.reservedQty) - BigInt(rawPromise);
     if (physicalReserved < BigInt(0) || physicalReserved > BigInt(level.variantQty)
       || BigInt(level.variantQty) < BigInt(0) || BigInt(level.pickedQty) < BigInt(0) || BigInt(level.packedQty) !== BigInt(0)) {
       block("OPENING_CURRENT_BALANCE_INVALID", `level:${level.id}`, "Current physical counters must be valid under the selected reservation basis. Physical discrepancies and packed custody still require a supported handoff.");
@@ -188,12 +220,12 @@ export function evaluateCutoverOpening(rawEvidence: unknown, input: OpeningVerif
   }
   if (blockers.length > 0) return finish(strict);
   const projected: CutoverReconstructionEvidence = { ...evidence,
-    // Verification above still matches the complete RAW level counters. This
-    // projection applies the selected verified reservation basis for planning; on-hand,
-    // picked, packed, lot quantities and valuation remain exactly as captured.
-    levels: evidence.levels.map(level => rebasesByLevel.has(level.id)
-      ? { ...level, reservedQty: rebasesByLevel.get(level.id)!.physicalReservedQty }
-      : promisesByLevel.has(level.id) ? { ...level, reservedQty: "0" } : level),
+    // V1 verifies raw counters; V2 already contains only observed physical holds.
+    levels: verification.contractVersion === "inventory_cutover_opening_v1"
+      ? evidence.levels.map(level => rebasesByLevel.has(level.id)
+        ? { ...level, reservedQty: rebasesByLevel.get(level.id)!.physicalReservedQty }
+        : promisesByLevel.has(level.id) ? { ...level, reservedQty: "0" } : level)
+      : evidence.levels,
     journals: observations,
     items: evidence.items.map(item => { const owner = owners.get(item.id); return owner ? { ...item,
       quantity: Number(owner.remainingQty), pickedQuantity: Number(owner.pickedQty), fulfilledQuantity: 0 } : item; }),

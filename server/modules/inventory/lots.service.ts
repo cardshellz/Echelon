@@ -1,4 +1,5 @@
 import { CostEvidenceError, lockInventoryCostGraph, recordLotCostContribution } from "./infrastructure/cost-evidence.repository";
+import type { OperationalQuantityPosting } from "./infrastructure/operational-quantity-posting";
 /**
  * Inventory Lot Service for Echelon WMS.
  *
@@ -9,7 +10,9 @@ import { CostEvidenceError, lockInventoryCostGraph, recordLotCostContribution } 
  * Relationship to inventory_levels:
  *   inventory_levels = fast aggregate (sum of all lots).
  *   inventory_lots   = per-layer cost detail.
- * Both updated atomically within the same transaction.
+ * Before quantity-ledger activation both are legacy transactional counters.
+ * After activation, FIFO owners choose exact lots and the ledger alone derives
+ * both projections. Explicit posting contexts below never write either counter.
  *
  * All quantities in variant units.
  */
@@ -113,6 +116,7 @@ export class InventoryLotService {
     costSource?: string;
     receivedAt?: Date;
     notes?: string;
+    quantityPosting?: OperationalQuantityPosting | null;
   }): Promise<InventoryLot> {
     const lotNumber = await this.generateLotNumber();
 
@@ -161,7 +165,7 @@ export class InventoryLotService {
         qtyReceived: params.qty,
         costSource: params.costSource ?? ((params.poLineId || params.purchaseOrderId) ? "po" : "manual"),
         poLineId: params.poLineId ?? null,
-        qtyOnHand: params.qty,
+        qtyOnHand: params.quantityPosting ? 0 : params.qty,
         qtyReserved: 0,
         qtyPicked: 0,
         receivedAt: params.receivedAt ?? new Date(),
@@ -173,6 +177,10 @@ export class InventoryLotService {
         notes: params.notes ?? null,
       } as any)
       .returning();
+
+    if (params.quantityPosting) await params.quantityPosting.addLot(lot.id, {
+      onHand: params.qty, reserved: 0, picked: 0, packed: 0,
+    });
 
     return lot as InventoryLot;
   }
@@ -206,7 +214,7 @@ export class InventoryLotService {
           eq(inventoryLots.status, "active"),
         ),
       )
-      .orderBy(asc(inventoryLots.receivedAt));
+      .orderBy(asc(inventoryLots.receivedAt), asc(inventoryLots.id));
   }
 
   /** All active lots for a variant across all locations, ordered FIFO. */
@@ -642,6 +650,7 @@ export class InventoryLotService {
     reservedQtyDelta?: number;
     unitCostCents?: number;
     notes?: string;
+    quantityPosting?: OperationalQuantityPosting | null;
   }): Promise<{
     consumedLots: Array<{ lotId: number; qty: number }>;
     consumedCostCents: number;
@@ -668,6 +677,7 @@ export class InventoryLotService {
         unitCostCents: resolved.costCents,
         costProvisional: resolved.provisional ? 1 : 0,
         notes: params.notes ?? "Manual adjustment",
+        quantityPosting: params.quantityPosting,
       });
       return {
         consumedLots: [],
@@ -746,7 +756,11 @@ export class InventoryLotService {
       );
     }
 
-    if (adjustUpdates.length > 0) {
+    if (params.quantityPosting) {
+      for (const update of adjustUpdates) await params.quantityPosting.addLot(update.lotId, {
+        onHand: -update.take, reserved: -update.reservedRelease, picked: 0, packed: 0,
+      });
+    } else if (adjustUpdates.length > 0) {
       const updated = await this.db.execute(sql`
         WITH updates AS (
           SELECT * FROM jsonb_to_recordset(${JSON.stringify(adjustUpdates)}::jsonb) AS x("lotId" int, take int, "reservedRelease" int)
@@ -803,6 +817,7 @@ export class InventoryLotService {
     actorId?: string;
     occurredAt?: Date;
     operationKey?: string;
+    quantityPosting?: OperationalQuantityPosting | null;
   }): Promise<void> {
     for (const field of ["productVariantId", "fromLocationId", "toLocationId", "qty"] as const) {
       if (!Number.isInteger(params[field]) || params[field] <= 0 || params[field] > 2_147_483_647) {
@@ -893,6 +908,11 @@ export class InventoryLotService {
 
     // Decrement source lots
     const transferUpdates = layers.map(l => ({ lotId: l.lotId, take: l.take }));
+    if (params.quantityPosting) {
+      for (const update of transferUpdates) await params.quantityPosting.addLot(update.lotId, {
+        onHand: -update.take, reserved: 0, picked: 0, packed: 0,
+      });
+    } else {
     const updated = await this.db.execute(sql`
       WITH updates AS (
         SELECT * FROM jsonb_to_recordset(${JSON.stringify(transferUpdates)}::jsonb) AS x("lotId" int, take int)
@@ -916,6 +936,7 @@ export class InventoryLotService {
         },
       );
     }
+    }
 
     // Create one destination lot per source layer — cost identity preserved
     for (const layer of layers) {
@@ -935,6 +956,7 @@ export class InventoryLotService {
         costProvisional: layer.costProvisional,
         receivedAt: layer.receivedAt,
         notes: params.notes ?? "Transfer",
+        quantityPosting: params.quantityPosting,
       });
       await recordLotCostContribution(this.db, {
         sourceLotId: layer.lotId,

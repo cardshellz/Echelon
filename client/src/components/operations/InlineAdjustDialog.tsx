@@ -21,7 +21,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
-import { apiRequest } from "@/lib/queryClient";
+import { useInventoryCommand } from "@/lib/inventory-command";
 
 interface InlineAdjustDialogProps {
   open: boolean;
@@ -51,6 +51,7 @@ export default function InlineAdjustDialog({
 }: InlineAdjustDialogProps) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const inventoryCommand = useInventoryCommand();
 
   const [qtyDelta, setQtyDelta] = useState("");
   const [reasonId, setReasonId] = useState<string>("");
@@ -76,7 +77,7 @@ export default function InlineAdjustDialog({
 
   const adjustMutation = useMutation({
     mutationFn: async () => {
-      const res = await apiRequest("POST", "/api/inventory/adjust", {
+      return inventoryCommand("/api/inventory/adjust", {
         productVariantId: variantId,
         warehouseLocationId: locationId,
         qtyDelta: parseInt(qtyDelta),
@@ -84,13 +85,12 @@ export default function InlineAdjustDialog({
         reasonId: reasonId ? parseInt(reasonId) : undefined,
         notes: notes || undefined,
       });
-      return res.json();
     },
     onSuccess: () => {
       const delta = parseInt(qtyDelta);
       toast({
         title: "Adjustment applied",
-        description: `${sku}: ${delta > 0 ? "+" : ""}${delta} (now ${(currentQty ?? 0) + delta})`,
+        description: `${sku}: ${delta > 0 ? "+" : ""}${delta}. Inventory is refreshing.`,
       });
       queryClient.invalidateQueries({ queryKey: ["/api/operations/bin-inventory"] });
       queryClient.invalidateQueries({ queryKey: ["/api/operations/location-health"] });

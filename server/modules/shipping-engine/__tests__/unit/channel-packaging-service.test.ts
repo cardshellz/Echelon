@@ -43,6 +43,7 @@ const command: SaveChannelPackaging = {
 const now = new Date("2026-09-09T12:00:00Z");
 function setup(binding: () => Promise<number | null> = async () => 11) {
   const store: ChannelPackagingStore = {
+    bulkBranding: vi.fn(), saveAvailability: vi.fn(), assignWarehouseSuites: vi.fn(),
     overview: vi.fn(async () => overview),
     savePolicy: vi.fn(async (input) => ({
       channelId: input.channelId,

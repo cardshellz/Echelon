@@ -21,7 +21,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
-import { apiRequest } from "@/lib/queryClient";
+import { useInventoryCommand } from "@/lib/inventory-command";
 import { filterActionableWarehouseLocations } from "@/lib/warehouse-locations";
 
 interface InlineTransferDialogProps {
@@ -65,6 +65,7 @@ export default function InlineTransferDialog({
 }: InlineTransferDialogProps) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const inventoryCommand = useInventoryCommand();
 
   const [fromLocationId, setFromLocationId] = useState<number | null>(null);
   const [toLocationId, setToLocationId] = useState<number | null>(null);
@@ -114,14 +115,13 @@ export default function InlineTransferDialog({
 
   const transferMutation = useMutation({
     mutationFn: async () => {
-      const res = await apiRequest("POST", "/api/inventory/transfer", {
+      return inventoryCommand("/api/inventory/transfer", {
         fromLocationId,
         toLocationId,
         variantId,
         quantity: parseInt(quantity),
         notes: notes || undefined,
       });
-      return res.json();
     },
     onSuccess: () => {
       const sku = defaultSku || skusAtLocation?.find((s) => s.variantId === variantId)?.sku || "";

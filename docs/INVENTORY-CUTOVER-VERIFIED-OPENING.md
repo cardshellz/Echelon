@@ -1,5 +1,26 @@
 # Verified current-inventory opening
 
+## Superseding quantity-authority update
+
+The sections below retain the original **v1** design and evidence. The current
+v2 workflow is described in [One physical quantity authority](INVENTORY-SINGLE-QUANTITY-AUTHORITY.md).
+It derives bin totals from independently verified lot observations instead of
+requiring both legacy counters to match. Differences in those quantity counters
+can be established by the approved opening; exact lot identities, original
+costs, complete current ownership and all other safety checks remain required.
+The opening is posted with the canonical ATP cutover in one transaction.
+Historical v1 saved assessments keep their original semantics. Saving either
+verification is still not activation, and deployment alone changes no counts.
+
+The exact journal-proven promise handoff from PR #1433 is retained in both
+formats. V1 verifies the raw reservation counter; V2 keeps it only in the
+recorded reference and derives physical reservations from lot observations.
+Both preserve the complete unfilled order demand. Claim and publication preview
+validate the promise against raw evidence before projecting V2 observations.
+Final commit releases the proven legacy counter **before** posting the quantity
+opening, then creates fresh claims and switches ATP in the same transaction.
+It never subtracts a nonphysical promise from an already physical ledger balance.
+
 ## Approved policy and scope
 
 The operator approved building a controlled opening-balance cutover from independently verified current stock and outstanding orders, with unresolved historical discrepancies preserved separately. This is an explicit alternative to reconstructing every current owner from incomplete legacy journals. It is not proof that the old journals, shipments or historical costs have been repaired.
@@ -48,15 +69,17 @@ The existing final review and immutable receipt retain the exact handoff and its
 
 ### Opt-in current-custody basis, including nonempty bins
 
-An operator may explicitly select `reservationBasis: "verified_current_lot_custody"` in the independently verified worksheet. Omitting this optional field preserves the earlier strict policy and immutable hashes; saved attestations are never silently upgraded. The checkbox only selects the exported worksheet policy. It does not fill or approve any observations, and an uploaded document retains its own explicit policy.
+An operator may explicitly select `reservationBasis: "verified_current_lot_custody"` in the independently verified worksheet. Omitting this optional field preserves that document version's existing policy and immutable hashes; saved attestations are never silently upgraded. The checkbox only selects the exported worksheet policy. It does not fill or approve any observations, and an uploaded document retains its own explicit policy.
 
-Under this policy, raw level reservation counters still must match the captured records exactly. Separately verified current customer holds and retained independent build holds must exhaust all physical lot reservations and picked stock. All lots, including inactive lots, participate in the physical reconciliation. On-hand and picked totals must match the level, reservations must be nonnegative and within lot on-hand, packed custody is blocked, and physical reservations cannot exceed the recorded level counter. This is not permission to fabricate missing stock or increase a reservation to conceal missing custody.
+Under this policy, raw level reservation counters are bound to the captured evidence. V1 verifies those raw levels directly; V2 derives level quantities from verified lots and keeps raw counters in the recorded reference. Separately verified current customer holds and retained independent build holds must exhaust all physical lot reservations and picked stock. All lots, including inactive lots, participate in the physical reconciliation. Recorded on-hand and picked totals must match the lots, reservations must be nonnegative and within lot on-hand, packed custody is blocked, and physical reservations cannot exceed the recorded level counter. Reservation-only handoff requires verified lot quantities/costs to equal the recorded lots in either version. It cannot be combined with a physical count adjustment; the separate V2 observation path without this option retains its existing semantics.
 
 If the recorded level counter exceeds the fully verified physical reservation total, `planOpeningReservationBasis` proposes one exact before/after translation for that position. Mixed/nonempty positions are supported. For example, a bin with 20 on-hand units, a recorded reservation counter of 69, three physically reserved units and two picked units proposes 69 to 3; on-hand and picked quantities do not change. If the current order still needs six units, the planner retains its three reserved and two picked units and seeks the remaining one. If none is available, that one remains an explicit shortage. Independent build holds are never made available to customer demand.
 
 Preview lists each SKU, warehouse/bin and exact counter change. Save appends the proof only. Final review binds the proposals into its review and impact hashes. Only final, separately approved activation calls the inventory-owned `PostgresInventoryOpeningReservationRepository.translate` under the existing admission fence and transaction. The writer verifies the immutable opening, locks and rechecks every affected level and lot, and records a new `availability_opening_rebase` inventory transaction with the exact reservation delta, opening/level identity, evidence hash, actor, reason and timestamp. It does not invent an old order owner or rewrite old journals, costs, orders or lot balances. Fresh demand reservations subsequently use the existing inventory owner.
 
 The opening receipt links each translated position to its distinct audit transaction. Changed proof, counters or physical lots reject activation. A late activation failure rolls back the translations, fresh reservations, imported claims, authority and publication together; a successful command retry returns the existing receipt. Variants with a translation but no remaining current order are still included in supply/publication projection. This policy reuses the existing immutable opening and inventory journal; no new migration is required.
+
+The combined activation retains the single quantity authority introduced by migration242. It audits/translates legacy counters first, then establishes the quantity ledger from the exact verified lot observations, then imports claims and posts any additional fresh reservations. The old counter delta is never applied to the new quantity ledger. Claim and channel projections use the same order: validate raw counter translation once, apply V2 lot-derived quantities, then add fresh holds. Combined V1/V2 PostgreSQL tests assert one opening command, final ledger/projection agreement, no duplicate reduction, and rollback of quantity commands, entries and opening receipt after a late failure.
 
 This establishes a verified starting point, not a finding that all excess counters were erroneous. Legacy bin counters can encode replenishment/backorder promises. Every current order's remaining quantity is independently preserved, while unknown historical attribution stays unresolved. Outstanding shipment/receipt, cost, lineage, physical-balance and configuration blockers still block.
 

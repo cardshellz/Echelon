@@ -104,9 +104,10 @@ export function InventoryCutoverOpeningPanel(props: Props) {
           Use independently verified current lot custody for the reservation handoff, including bins that still contain stock.
           This permits a reviewed final translation of excess legacy counters; it does not approve this worksheet or change stock.</Label>
         <Button variant="outline" disabled={!usable || busy || retained} onClick={downloadWorksheet}>Download blank verification worksheet</Button>
-        <p className="text-sm">Complete the worksheet's verification section using retained independent evidence. Every quantity is deliberately blank, including zero quantities.
-          Include each stock position, lot and current order owner; record exact lot allocations for reserved or picked units. Recorded reference values and labels are not imported as verification.</p>
-        <p className="text-sm">The stock-position reservation counter must match the current record, even when it includes a promise against an empty bin. Do not change that counter to zero in the worksheet.
+        <p className="text-sm">Count each lot once and verify its current order owners. Lot and owner quantities start blank, including explicit zero counts.
+          SKU/bin totals are calculated from those lot observations; do not count or edit a second balance. Preserve the original cost layers and record exact reserved/picked lot allocations.
+          Recorded reference values and labels are not imported as verification. Saving is review-only; the approved cutover posts the new opening.</p>
+        <p className="text-sm">Recorded reservation counters may include a promise against an empty bin. Those raw counters stay in the recorded reference; the new physical totals come from lot observations.
           An order owner's reserved and picked quantities describe physical holds only. For a proven unpicked promise with no physical hold, independently verify both owner quantities as zero with no lot allocations,
           while keeping the full remaining order demand. Without the current-custody option, the server must prove the complete empty-bin promise from history.
           With that option, independently verified physical lot holds and every current order replace missing historical ownership as the opening basis; unexplained physical custody still blocks.</p>

@@ -12,6 +12,7 @@ import { PostgresCanonicalClaimInventoryRepository } from "../../infrastructure/
 import { buildMillsToRoundedCents, normalizeBuildLotCosts } from "../../infrastructure/build.repository";
 import { lockInventoryCostGraph } from "../../infrastructure/cost-evidence.repository";
 import { costEvidenceTransactionFromPg } from "../../infrastructure/cost-evidence-pg";
+import { installPreOpeningQuantityAuthorityFixture } from "../fixtures/pre-opening-quantity-authority.fixture";
 
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 const enabled = databaseUrl && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
@@ -56,6 +57,7 @@ databaseTests.sequential("cost contribution physical owners on PostgreSQL", () =
       schema.buildOrders, schema.buildOrderComponents, schema.buildRuns, schema.buildRunConsumptions, schema.buildComponentReservations]) {
       await pool.query(tableDdl(table));
     }
+    await installPreOpeningQuantityAuthorityFixture(pool);
     await pool.query(`
       CREATE TABLE inventory.availability_claim_build_handoffs (build_order_id integer, claim_id bigint, claim_operation_id bigint, status text);
       CREATE UNIQUE INDEX level_identity ON inventory.inventory_levels(product_variant_id,warehouse_location_id);
