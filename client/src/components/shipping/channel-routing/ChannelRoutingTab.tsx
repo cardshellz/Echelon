@@ -34,7 +34,7 @@ interface EditorSelection {
 }
 
 export function ChannelRoutingTab() {
-  const [search, setSearch] = useState("");
+  const [search, setSearch] = useState(() => new URLSearchParams(location.search).get("channelId") ?? "");
   const [editor, setEditor] = useState<EditorSelection | null>(null);
   const { data, isLoading, isError, refetch } = useQuery({
     queryKey: [CHANNEL_ROUTING_KEY],

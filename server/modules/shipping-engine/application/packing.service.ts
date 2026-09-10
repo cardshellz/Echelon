@@ -14,12 +14,17 @@
  * transitions stay with the orders module (order-status-core).
  */
 
-import { and, asc, desc, eq, inArray } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
+import {
+  packingPermission,
+  permittedPlanBoxIds,
+} from "../domain/packing-permission";
 import {
   orderItems,
   orders,
   productVariants,
   shippingBoxCatalog,
+  shippingBoxWarehouseStock,
   shippingPackPlanParcelItems,
   shippingPackPlanParcels,
   shippingPackPlans,
@@ -52,7 +57,9 @@ export function isParcelConfirmed(parcel: { packedAt: Date | null }): boolean {
 }
 
 /** Plan is fully packed when EVERY parcel is confirmed (and there is at least one). */
-export function allParcelsConfirmed(parcels: readonly { packedAt: Date | null }[]): boolean {
+export function allParcelsConfirmed(
+  parcels: readonly { packedAt: Date | null }[],
+): boolean {
   return parcels.length > 0 && parcels.every(isParcelConfirmed);
 }
 
@@ -100,6 +107,7 @@ export interface PackingParcelView {
 }
 
 export interface PackingPlanView {
+  permittedBoxIds: number[];
   id: number;
   status: string;
   engineVersion: string;
@@ -131,8 +139,14 @@ export interface PackingQueueResult {
   boxes: PackingBoxOption[];
 }
 
-export async function getPackingQueue(orderId?: number): Promise<PackingQueueResult> {
-  if (orderId !== undefined && (!Number.isInteger(orderId) || orderId <= 0 || orderId > 2_147_483_647)) throw new Error("Invalid packing order ID");
+export async function getPackingQueue(
+  orderId?: number,
+): Promise<PackingQueueResult> {
+  if (
+    orderId !== undefined &&
+    (!Number.isInteger(orderId) || orderId <= 0 || orderId > 2_147_483_647)
+  )
+    throw new Error("Invalid packing order ID");
   const queueOrders = await db
     .select({
       id: orders.id,
@@ -144,11 +158,15 @@ export async function getPackingQueue(orderId?: number): Promise<PackingQueueRes
       unitCount: orders.unitCount,
     })
     .from(orders)
-    .where(and(
-      inArray(orders.warehouseStatus, [...PACKING_ELIGIBLE_WAREHOUSE_STATUSES]),
-      eq(orders.onHold, 0),
-      orderId === undefined ? undefined : eq(orders.id, orderId),
-    ))
+    .where(
+      and(
+        inArray(orders.warehouseStatus, [
+          ...PACKING_ELIGIBLE_WAREHOUSE_STATUSES,
+        ]),
+        eq(orders.onHold, 0),
+        orderId === undefined ? undefined : eq(orders.id, orderId),
+      ),
+    )
     .orderBy(desc(orders.priority), asc(orders.createdAt))
     .limit(QUEUE_LIMIT);
 
@@ -180,7 +198,10 @@ export async function getPackingQueue(orderId?: number): Promise<PackingQueueRes
       .orderBy(asc(shippingBoxCatalog.code)),
   ]);
 
-  const itemsByOrder = new Map<number, { sku: string; name: string; quantity: number }[]>();
+  const itemsByOrder = new Map<
+    number,
+    { sku: string; name: string; quantity: number }[]
+  >();
   for (const row of itemRows) {
     if (row.requiresShipping !== 1 || row.quantity <= 0) continue;
     const list = itemsByOrder.get(row.orderId) ?? [];
@@ -202,17 +223,21 @@ export async function getPackingQueue(orderId?: number): Promise<PackingQueueRes
  * Newest displayable plan per order: an 'active' plan wins over 'packed'
  * (a re-cartonized order supersedes its packed history), then highest id.
  */
-async function loadPlansForOrders(orderIds: number[]): Promise<Map<number, PackingPlanView>> {
+async function loadPlansForOrders(
+  orderIds: number[],
+): Promise<Map<number, PackingPlanView>> {
   const result = new Map<number, PackingPlanView>();
   if (orderIds.length === 0) return result;
 
   const planRows = await db
     .select()
     .from(shippingPackPlans)
-    .where(and(
-      inArray(shippingPackPlans.wmsOrderId, orderIds),
-      inArray(shippingPackPlans.status, ["active", "packed"]),
-    ))
+    .where(
+      and(
+        inArray(shippingPackPlans.wmsOrderId, orderIds),
+        inArray(shippingPackPlans.status, ["active", "packed"]),
+      ),
+    )
     .orderBy(desc(shippingPackPlans.id));
 
   const chosenByOrder = new Map<number, ShippingPackPlan>();
@@ -233,6 +258,10 @@ async function loadPlansForOrders(orderIds: number[]): Promise<Map<number, Packi
   const parcelsByPlan = await loadParcelViews(chosenPlans.map((p) => p.id));
   for (const plan of chosenPlans) {
     result.set(plan.wmsOrderId as number, {
+      permittedBoxIds: permittedPlanBoxIds(
+        plan.packagingSnapshot,
+        (parcelsByPlan.get(plan.id) ?? []).map((p) => p.boxId),
+      ),
       id: plan.id,
       status: plan.status,
       engineVersion: plan.engineVersion,
@@ -243,7 +272,9 @@ async function loadPlansForOrders(orderIds: number[]): Promise<Map<number, Packi
   return result;
 }
 
-async function loadParcelViews(planIds: number[]): Promise<Map<number, PackingParcelView[]>> {
+async function loadParcelViews(
+  planIds: number[],
+): Promise<Map<number, PackingParcelView[]>> {
   const byPlan = new Map<number, PackingParcelView[]>();
   if (planIds.length === 0) return byPlan;
 
@@ -255,26 +286,42 @@ async function loadParcelViews(planIds: number[]): Promise<Map<number, PackingPa
       siocSku: productVariants.sku,
     })
     .from(shippingPackPlanParcels)
-    .leftJoin(shippingBoxCatalog, eq(shippingBoxCatalog.id, shippingPackPlanParcels.boxId))
-    .leftJoin(productVariants, eq(productVariants.id, shippingPackPlanParcels.siocProductVariantId))
+    .leftJoin(
+      shippingBoxCatalog,
+      eq(shippingBoxCatalog.id, shippingPackPlanParcels.boxId),
+    )
+    .leftJoin(
+      productVariants,
+      eq(productVariants.id, shippingPackPlanParcels.siocProductVariantId),
+    )
     .where(inArray(shippingPackPlanParcels.packPlanId, planIds))
-    .orderBy(asc(shippingPackPlanParcels.packPlanId), asc(shippingPackPlanParcels.parcelSequence));
+    .orderBy(
+      asc(shippingPackPlanParcels.packPlanId),
+      asc(shippingPackPlanParcels.parcelSequence),
+    );
 
   const parcelIds = parcelRows.map((r) => r.parcel.id);
-  const itemRows = parcelIds.length === 0
-    ? []
-    : await db
-        .select({
-          parcelId: shippingPackPlanParcelItems.parcelId,
-          productVariantId: shippingPackPlanParcelItems.productVariantId,
-          quantity: shippingPackPlanParcelItems.quantity,
-          isRider: shippingPackPlanParcelItems.isRider,
-          sku: productVariants.sku,
-          name: productVariants.name,
-        })
-        .from(shippingPackPlanParcelItems)
-        .leftJoin(productVariants, eq(productVariants.id, shippingPackPlanParcelItems.productVariantId))
-        .where(inArray(shippingPackPlanParcelItems.parcelId, parcelIds));
+  const itemRows =
+    parcelIds.length === 0
+      ? []
+      : await db
+          .select({
+            parcelId: shippingPackPlanParcelItems.parcelId,
+            productVariantId: shippingPackPlanParcelItems.productVariantId,
+            quantity: shippingPackPlanParcelItems.quantity,
+            isRider: shippingPackPlanParcelItems.isRider,
+            sku: productVariants.sku,
+            name: productVariants.name,
+          })
+          .from(shippingPackPlanParcelItems)
+          .leftJoin(
+            productVariants,
+            eq(
+              productVariants.id,
+              shippingPackPlanParcelItems.productVariantId,
+            ),
+          )
+          .where(inArray(shippingPackPlanParcelItems.parcelId, parcelIds));
 
   const itemsByParcel = new Map<number, PackingParcelItemView[]>();
   for (const row of itemRows) {
@@ -305,7 +352,10 @@ async function loadParcelViews(planIds: number[]): Promise<Map<number, PackingPa
       placements: parcel.placements,
       actualBoxId: parcel.actualBoxId,
       actualWeightGrams: parcel.actualWeightGrams,
-      weightDeltaGrams: weightDeltaGrams(parcel.estWeightGrams, parcel.actualWeightGrams),
+      weightDeltaGrams: weightDeltaGrams(
+        parcel.estWeightGrams,
+        parcel.actualWeightGrams,
+      ),
       packedAt: parcel.packedAt,
       packedBy: parcel.packedBy,
       items: itemsByParcel.get(parcel.id) ?? [],
@@ -328,8 +378,24 @@ export interface ConfirmParcelInput {
 }
 
 export type ConfirmParcelResult =
-  | { ok: true; planStatus: string; parcel: ShippingPackPlanParcel; allConfirmed: boolean }
-  | { ok: false; code: "PLAN_NOT_FOUND" | "PARCEL_NOT_FOUND" | "PLAN_NOT_CONFIRMABLE" | "BOX_NOT_FOUND" };
+  | {
+      ok: true;
+      planStatus: string;
+      parcel: ShippingPackPlanParcel;
+      allConfirmed: boolean;
+    }
+  | {
+      ok: false;
+      code:
+        | "PLAN_NOT_FOUND"
+        | "PARCEL_NOT_FOUND"
+        | "PLAN_NOT_CONFIRMABLE"
+        | "BOX_NOT_FOUND"
+        | "BOX_NOT_PERMITTED"
+        | "BOX_UNAVAILABLE_AT_WAREHOUSE"
+        | "INVALID_INPUT"
+        | "ACTOR_REQUIRED";
+    };
 
 /**
  * Record the actual box/weight for one parcel and stamp packed_at/packed_by.
@@ -338,13 +404,39 @@ export type ConfirmParcelResult =
  * Re-confirming an already-confirmed parcel overwrites the actuals (packers
  * correct mistakes); packed_at is refreshed so the newest reading wins.
  */
-export async function confirmParcel(input: ConfirmParcelInput): Promise<ConfirmParcelResult> {
-  return db.transaction(async (tx) => {
+export async function confirmParcel(
+  input: ConfirmParcelInput,
+  clock: () => Date = () => new Date(),
+  database: Pick<typeof db, "transaction"> = db,
+): Promise<ConfirmParcelResult> {
+  if (
+    ![input.planId, input.parcelId].every(
+      (n) => Number.isSafeInteger(n) && n > 0,
+    ) ||
+    [input.actualBoxId, input.actualWeightGrams].some(
+      (n) =>
+        n != null && (!Number.isSafeInteger(n) || n <= 0 || n > 2_147_483_647),
+    )
+  )
+    return { ok: false, code: "INVALID_INPUT" };
+  if (
+    typeof input.packedBy !== "string" ||
+    !input.packedBy.trim() ||
+    input.packedBy.trim().length > 120
+  )
+    return { ok: false, code: "ACTOR_REQUIRED" };
+  return database.transaction(async (tx) => {
+    // Catalog edits take the exclusive form of this lock. A confirmation cannot
+    // race an availability/branding change while validating its actual box.
+    await tx.execute(
+      sql`SELECT pg_advisory_xact_lock_shared(hashtext('shipping-shared-config'))`,
+    );
     const [plan] = await tx
       .select()
       .from(shippingPackPlans)
       .where(eq(shippingPackPlans.id, input.planId))
-      .limit(1);
+      .limit(1)
+      .for("update");
     if (!plan) return { ok: false as const, code: "PLAN_NOT_FOUND" as const };
     if (plan.status !== "active" && plan.status !== "packed") {
       // Superseded/cancelled plans must never collect actuals — they no
@@ -352,29 +444,129 @@ export async function confirmParcel(input: ConfirmParcelInput): Promise<ConfirmP
       return { ok: false as const, code: "PLAN_NOT_CONFIRMABLE" as const };
     }
 
-    if (input.actualBoxId != null) {
+    const [existingParcel] = await tx
+      .select()
+      .from(shippingPackPlanParcels)
+      .where(
+        and(
+          eq(shippingPackPlanParcels.id, input.parcelId),
+          eq(shippingPackPlanParcels.packPlanId, input.planId),
+        ),
+      )
+      .limit(1)
+      .for("update");
+    if (!existingParcel)
+      return { ok: false as const, code: "PARCEL_NOT_FOUND" as const };
+    const packedBy = input.packedBy?.trim() || null;
+    // A retry reports the already-committed result, even if catalog availability
+    // changed afterwards. A correction below must pass current validation.
+    if (
+      existingParcel.packedAt &&
+      existingParcel.actualBoxId === (input.actualBoxId ?? null) &&
+      existingParcel.actualWeightGrams === (input.actualWeightGrams ?? null) &&
+      existingParcel.packedBy === packedBy
+    ) {
+      const siblings = await tx
+        .select({ packedAt: shippingPackPlanParcels.packedAt })
+        .from(shippingPackPlanParcels)
+        .where(eq(shippingPackPlanParcels.packPlanId, input.planId));
+      return {
+        ok: true as const,
+        planStatus: plan.status,
+        parcel: existingParcel,
+        allConfirmed: allParcelsConfirmed(siblings),
+      };
+    }
+    const permission = packingPermission(
+      plan.packagingSnapshot,
+      existingParcel.boxId,
+      input.actualBoxId ?? null,
+    );
+    if (!permission.allowed)
+      return { ok: false as const, code: "BOX_NOT_PERMITTED" as const };
+    if (permission.canonical) {
+      const [order] =
+        plan.wmsOrderId == null
+          ? []
+          : await tx
+              .select({
+                warehouseId: orders.warehouseId,
+                channelId: orders.channelId,
+              })
+              .from(orders)
+              .where(eq(orders.id, plan.wmsOrderId))
+              .limit(1);
+      if (
+        !permission.warehouseId ||
+        order?.warehouseId !== permission.warehouseId ||
+        order.channelId !== permission.channelId
+      )
+        return { ok: false as const, code: "BOX_NOT_PERMITTED" as const };
+    }
+    const selectedBoxId = input.actualBoxId ?? existingParcel.boxId;
+    if (selectedBoxId != null) {
       const [box] = await tx
-        .select({ id: shippingBoxCatalog.id })
+        .select({
+          id: shippingBoxCatalog.id,
+          branding: shippingBoxCatalog.branding,
+          reviewed: shippingBoxCatalog.availabilityReviewed,
+        })
         .from(shippingBoxCatalog)
-        .where(eq(shippingBoxCatalog.id, input.actualBoxId))
+        .where(
+          and(
+            eq(shippingBoxCatalog.id, selectedBoxId),
+            eq(shippingBoxCatalog.isActive, true),
+          ),
+        )
         .limit(1);
       if (!box) return { ok: false as const, code: "BOX_NOT_FOUND" as const };
+      if (permission.canonical) {
+        if (
+          !permission.warehouseId ||
+          !box.reviewed ||
+          (permission.requirement === "unbranded" &&
+            box.branding !== "unbranded")
+        )
+          return { ok: false as const, code: "BOX_NOT_PERMITTED" as const };
+        const [stock] = await tx
+          .select({ stocked: shippingBoxWarehouseStock.isStocked })
+          .from(shippingBoxWarehouseStock)
+          .where(
+            and(
+              eq(shippingBoxWarehouseStock.boxId, selectedBoxId),
+              eq(shippingBoxWarehouseStock.warehouseId, permission.warehouseId),
+            ),
+          )
+          .limit(1);
+        if (!stock?.stocked)
+          return {
+            ok: false as const,
+            code: "BOX_UNAVAILABLE_AT_WAREHOUSE" as const,
+          };
+      }
     }
+
+    const now = clock();
 
     const [parcel] = await tx
       .update(shippingPackPlanParcels)
       .set({
         actualBoxId: input.actualBoxId ?? null,
         actualWeightGrams: input.actualWeightGrams ?? null,
-        packedAt: new Date(),
-        packedBy: input.packedBy?.trim() || null,
+        packedAt: now,
+        packedBy,
       })
-      .where(and(
-        eq(shippingPackPlanParcels.id, input.parcelId),
-        eq(shippingPackPlanParcels.packPlanId, input.planId),
-      ))
+      .where(
+        and(
+          eq(shippingPackPlanParcels.id, input.parcelId),
+          eq(shippingPackPlanParcels.packPlanId, input.planId),
+        ),
+      )
       .returning();
-    if (!parcel) return { ok: false as const, code: "PARCEL_NOT_FOUND" as const };
+    if (!parcel)
+      return { ok: false as const, code: "PARCEL_NOT_FOUND" as const };
+    await tx.execute(sql`INSERT INTO shipping.packaging_confirmation_events(plan_id,parcel_id,actor_id,created_at,before_state,after_state)
+      VALUES(${plan.id},${parcel.id},${packedBy!},${now},${JSON.stringify(existingParcel)}::jsonb,${JSON.stringify(parcel)}::jsonb)`);
 
     const siblings = await tx
       .select({ packedAt: shippingPackPlanParcels.packedAt })
@@ -386,11 +578,13 @@ export async function confirmParcel(input: ConfirmParcelInput): Promise<ConfirmP
     if (allConfirmed && plan.status === "active") {
       await tx
         .update(shippingPackPlans)
-        .set({ status: "packed", updatedAt: new Date() })
-        .where(and(
-          eq(shippingPackPlans.id, input.planId),
-          eq(shippingPackPlans.status, "active"),
-        ));
+        .set({ status: "packed", updatedAt: now })
+        .where(
+          and(
+            eq(shippingPackPlans.id, input.planId),
+            eq(shippingPackPlans.status, "active"),
+          ),
+        );
       planStatus = "packed";
     }
 

@@ -14,7 +14,10 @@ import type { Express, Request, Response } from "express";
 import { z } from "zod";
 import { requireAuth } from "../../../../routes/middleware";
 import { ensurePackPlan } from "../../../cartonization/application/wms-pack-plan.service";
-import { confirmParcel, getPackingQueue } from "../../application/packing.service";
+import {
+  confirmParcel,
+  getPackingQueue,
+} from "../../application/packing.service";
 
 const confirmParcelSchema = z.object({
   actualBoxId: z.number().int().positive().nullable().optional(),
@@ -28,14 +31,33 @@ const CONFIRM_FAILURE_STATUS: Record<string, number> = {
   PARCEL_NOT_FOUND: 404,
   BOX_NOT_FOUND: 400,
   PLAN_NOT_CONFIRMABLE: 409,
+  BOX_NOT_PERMITTED: 409,
+  BOX_UNAVAILABLE_AT_WAREHOUSE: 409,
+  INVALID_INPUT: 400,
+  ACTOR_REQUIRED: 401,
 };
 
 export function registerPackingRoutes(app: Express): void {
   app.get("/api/shipping/packing/queue", requireAuth, async (req, res) => {
     try {
-      const orderId = req.query.orderId === undefined ? undefined
-        : z.string().regex(/^[1-9][0-9]*$/).transform(Number).pipe(z.number().int().positive().max(2_147_483_647)).safeParse(req.query.orderId);
-      if (orderId !== undefined && !orderId.success) return res.status(400).json({ error: { code: "PACKING_INVALID_INPUT", message: "Invalid packing order ID" } });
+      const orderId =
+        req.query.orderId === undefined
+          ? undefined
+          : z
+              .string()
+              .regex(/^[1-9][0-9]*$/)
+              .transform(Number)
+              .pipe(z.number().int().positive().max(2_147_483_647))
+              .safeParse(req.query.orderId);
+      if (orderId !== undefined && !orderId.success)
+        return res
+          .status(400)
+          .json({
+            error: {
+              code: "PACKING_INVALID_INPUT",
+              message: "Invalid packing order ID",
+            },
+          });
       const queue = await getPackingQueue(orderId?.data);
       return res.json(queue);
     } catch (error) {
@@ -51,13 +73,37 @@ export function registerPackingRoutes(app: Express): void {
         const planId = parsePositiveInt(req.params.planId);
         const parcelId = parsePositiveInt(req.params.parcelId);
         if (planId === null || parcelId === null) {
-          return res.status(400).json({ error: { code: "PACKING_INVALID_INPUT", message: "invalid plan or parcel id" } });
+          return res
+            .status(400)
+            .json({
+              error: {
+                code: "PACKING_INVALID_INPUT",
+                message: "invalid plan or parcel id",
+              },
+            });
         }
         const parsed = confirmParcelSchema.safeParse(req.body ?? {});
         if (!parsed.success) {
-          return res.status(400).json({ error: { code: "PACKING_INVALID_INPUT", issues: parsed.error.issues } });
+          return res
+            .status(400)
+            .json({
+              error: {
+                code: "PACKING_INVALID_INPUT",
+                issues: parsed.error.issues,
+              },
+            });
         }
 
+        const actor = sessionUserLabel(req);
+        if (!actor)
+          return res
+            .status(401)
+            .json({
+              error: {
+                code: "PACKING_ACTOR_REQUIRED",
+                message: "Sign in before confirming packaging.",
+              },
+            });
         const result = await confirmParcel({
           planId,
           parcelId,
@@ -65,10 +111,22 @@ export function registerPackingRoutes(app: Express): void {
           actualWeightGrams: parsed.data.actualWeightGrams ?? null,
           // Session identity wins over the client-sent name — the station
           // login is the accountable packer.
-          packedBy: sessionUserLabel(req) ?? parsed.data.packedBy ?? null,
+          packedBy: actor,
         });
         if (!result.ok) {
-          return res.status(CONFIRM_FAILURE_STATUS[result.code] ?? 500).json({ error: { code: `PACKING_${result.code}` } });
+          return res
+            .status(CONFIRM_FAILURE_STATUS[result.code] ?? 500)
+            .json({
+              error: {
+                code: `PACKING_${result.code}`,
+                message:
+                  result.code === "BOX_NOT_PERMITTED"
+                    ? "This box is not permitted by this pack plan. Regenerate the plan if its packaging configuration changed."
+                    : result.code === "BOX_UNAVAILABLE_AT_WAREHOUSE"
+                      ? "This box is no longer available at the fulfillment warehouse. Update the pack plan."
+                      : result.code,
+              },
+            });
         }
         return res.json({
           planStatus: result.planStatus,
@@ -88,7 +146,14 @@ export function registerPackingRoutes(app: Express): void {
       try {
         const wmsOrderId = parsePositiveInt(req.params.wmsOrderId);
         if (wmsOrderId === null) {
-          return res.status(400).json({ error: { code: "PACKING_INVALID_INPUT", message: "invalid order id" } });
+          return res
+            .status(400)
+            .json({
+              error: {
+                code: "PACKING_INVALID_INPUT",
+                message: "invalid order id",
+              },
+            });
         }
         const result = await ensurePackPlan({ wmsOrderId });
         if (!result) {
@@ -97,7 +162,8 @@ export function registerPackingRoutes(app: Express): void {
           return res.status(422).json({
             error: {
               code: "PACKING_PLAN_UNAVAILABLE",
-              message: "No pack plan could be generated — item dims/packing attributes are incomplete.",
+              message:
+                "No pack plan could be generated — item dims/packing attributes are incomplete.",
             },
           });
         }
@@ -120,10 +186,15 @@ function parsePositiveInt(raw: string): number | null {
 function sessionUserLabel(req: Request): string | null {
   const user = (req as any).session?.user;
   if (!user) return null;
-  return user.displayName || user.username || user.id || null;
+  const identity = user.id ?? user.username;
+  return identity == null ? null : String(identity);
 }
 
-function sendPackingError(res: Response, error: unknown, action: string): Response {
+function sendPackingError(
+  res: Response,
+  error: unknown,
+  action: string,
+): Response {
   console.error(`[PackingRoutes] Failed to ${action}:`, error);
   return res.status(500).json({
     error: { code: "PACKING_INTERNAL_ERROR", message: `Failed to ${action}.` },

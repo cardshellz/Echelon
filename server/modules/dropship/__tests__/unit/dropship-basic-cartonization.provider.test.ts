@@ -25,7 +25,7 @@ describe("BasicDropshipCartonizationProvider", () => {
         default_box_id: 7,
       }],
     });
-    const provider = new BasicDropshipCartonizationProvider(makePool(client));
+    const provider = new BasicDropshipCartonizationProvider(makePool(client), async () => null);
 
     const result = await provider.cartonize(makeRequest());
 
@@ -69,7 +69,7 @@ describe("BasicDropshipCartonizationProvider", () => {
         default_box_id: null,
       }],
     });
-    const provider = new BasicDropshipCartonizationProvider(makePool(client));
+    const provider = new BasicDropshipCartonizationProvider(makePool(client), async () => null);
 
     const result = await provider.cartonize(makeRequest());
 
@@ -108,7 +108,7 @@ describe("BasicDropshipCartonizationProvider", () => {
         default_box_id: null,
       }],
     });
-    const provider = new BasicDropshipCartonizationProvider(makePool(client));
+    const provider = new BasicDropshipCartonizationProvider(makePool(client), async () => null);
 
     await expect(provider.cartonize(makeRequest())).rejects.toMatchObject({
       code: "DROPSHIP_CATALOG_PACKAGE_DATA_REQUIRED",

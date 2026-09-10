@@ -3,12 +3,13 @@ import { and, asc, eq, ilike, inArray, isNotNull, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import { db } from "../../db";
 import { requirePermission } from "../../routes/middleware";
+import { ChannelPackagingService } from "./application/channel-packaging.service";
+import { ChannelPackagingRepository } from "./infrastructure/channel-packaging.repository";
+import { ShippingConfigurationError } from "./domain/configuration-error";
 import {
-  insertShippingBoxSchema,
   insertShippingVariantAttrsSchema,
   productVariants,
   products,
-  SHIPPING_BOX_KINDS,
   shippingBoxCatalog,
   shippingBoxWarehouseStock,
   shippingServiceLevels,
@@ -21,21 +22,6 @@ import {
  * Rate tables and zone rules get their own routes with the rates PR — they
  * are calibration-fed, not hand-edited, so their admin is read/import only.
  */
-
-const upsertBoxSchema = insertShippingBoxSchema.extend({
-  id: z.number().int().positive().optional(),
-  kind: z.enum(SHIPPING_BOX_KINDS),
-  // Blank in the dialog means "no weight cap" — omission clears, not keeps.
-  maxWeightGrams: z.number().int().positive().nullable().default(null),
-  warehouseIds: z.array(z.number().int().positive()).default([]),
-}).superRefine((box,ctx) => {
-  const outer = [box.outerLengthMm,box.outerWidthMm,box.outerHeightMm];
-  if (outer.every((value) => value == null)) return;
-  if (outer.some((value) => value == null) || box.outerLengthMm! < box.lengthMm
-    || box.outerWidthMm! < box.widthMm || box.outerHeightMm! < box.heightMm) {
-    ctx.addIssue({ code: 'custom',path: ['outerLengthMm'],message: 'Supply all outer dimensions, each at least as large as its inner dimension.' });
-  }
-});
 
 const upsertVariantAttrsSchema = insertShippingVariantAttrsSchema.pick({
   productVariantId: true,
@@ -64,18 +50,26 @@ export function registerShippingAdminRoutes(app: Express): void {
     async (_req, res) => {
       try {
         const [boxes, stock, levels, coverage] = await Promise.all([
-          db.select().from(shippingBoxCatalog).orderBy(asc(shippingBoxCatalog.code)),
+          db
+            .select()
+            .from(shippingBoxCatalog)
+            .orderBy(asc(shippingBoxCatalog.code)),
           db.select().from(shippingBoxWarehouseStock),
-          db.select().from(shippingServiceLevels).orderBy(asc(shippingServiceLevels.sortOrder)),
-          db.select({
-            variantsTotal: sql<number>`count(*)::int`,
-            variantsWithDims: sql<number>`count(*) filter (
+          db
+            .select()
+            .from(shippingServiceLevels)
+            .orderBy(asc(shippingServiceLevels.sortOrder)),
+          db
+            .select({
+              variantsTotal: sql<number>`count(*)::int`,
+              variantsWithDims: sql<number>`count(*) filter (
               where ${productVariants.weightGrams} > 0
                 and ${productVariants.lengthMm} > 0
                 and ${productVariants.widthMm} > 0
                 and ${productVariants.heightMm} > 0
             )::int`,
-          }).from(productVariants),
+            })
+            .from(productVariants),
         ]);
 
         const stockByBox = new Map<number, number[]>();
@@ -86,9 +80,15 @@ export function registerShippingAdminRoutes(app: Express): void {
           stockByBox.set(row.boxId, list);
         }
         return res.json({
-          boxes: boxes.map((box) => ({ ...box, warehouseIds: stockByBox.get(box.id) ?? [] })),
+          boxes: boxes.map((box) => ({
+            ...box,
+            warehouseIds: stockByBox.get(box.id) ?? [],
+          })),
           serviceLevels: levels,
-          dimsCoverage: coverage[0] ?? { variantsTotal: 0, variantsWithDims: 0 },
+          dimsCoverage: coverage[0] ?? {
+            variantsTotal: 0,
+            variantsWithDims: 0,
+          },
         });
       } catch (error) {
         return sendShippingAdminError(res, error, "load shipping config");
@@ -101,46 +101,46 @@ export function registerShippingAdminRoutes(app: Express): void {
     requirePermission("settings", "edit"),
     async (req, res) => {
       try {
-        const parsed = upsertBoxSchema.safeParse(req.body);
-        if (!parsed.success) {
-          return res.status(400).json({ error: { code: "SHIPPING_ADMIN_INVALID_INPUT", issues: parsed.error.issues } });
-        }
-        const { id, warehouseIds, ...fields } = parsed.data;
-
-        const box = await db.transaction(async (tx) => {
-          let record;
-          if (id != null) {
-            const updated = await tx.update(shippingBoxCatalog)
-              .set({ ...fields, updatedAt: new Date() })
-              .where(eq(shippingBoxCatalog.id, id))
-              .returning();
-            if (updated.length === 0) return null;
-            record = updated[0];
-          } else {
-            const inserted = await tx.insert(shippingBoxCatalog)
-              .values(fields)
-              .onConflictDoUpdate({
-                target: shippingBoxCatalog.code,
-                set: { ...fields, updatedAt: new Date() },
-              })
-              .returning();
-            record = inserted[0];
-          }
-
-          await tx.delete(shippingBoxWarehouseStock).where(eq(shippingBoxWarehouseStock.boxId, record.id));
-          if (warehouseIds.length > 0) {
-            await tx.insert(shippingBoxWarehouseStock).values(
-              warehouseIds.map((warehouseId) => ({ boxId: record.id, warehouseId, isStocked: true })),
-            );
-          }
-          return { ...record, warehouseIds };
-        });
-
-        if (!box) {
-          return res.status(404).json({ error: { code: "SHIPPING_ADMIN_BOX_NOT_FOUND" } });
-        }
-        return res.json({ box });
+        const actor = (
+          req.session?.user as { id?: string | number } | undefined
+        )?.id;
+        if (actor == null)
+          return res
+            .status(401)
+            .json({
+              error: {
+                code: "SHIPPING_ACTOR_REQUIRED",
+                message: "Sign in before changing box configuration.",
+              },
+            });
+        if (!req.body?.commandId || req.body?.expectedRevision == null)
+          return res
+            .status(409)
+            .json({
+              error: {
+                code: "SHIPPING_EDITOR_OUTDATED",
+                message:
+                  "Refresh the box editor before saving. Revision and request identity are required.",
+              },
+            });
+        const service = new ChannelPackagingService(
+          new ChannelPackagingRepository(),
+        );
+        return res.json(await service.saveBox(req.body, String(actor)));
       } catch (error) {
+        if (error instanceof z.ZodError)
+          return res
+            .status(400)
+            .json({
+              error: {
+                code: "SHIPPING_ADMIN_INVALID_INPUT",
+                issues: error.issues,
+              },
+            });
+        if (error instanceof ShippingConfigurationError)
+          return res
+            .status(error.status)
+            .json({ error: { code: error.code, message: error.message } });
         return sendShippingAdminError(res, error, "upsert box");
       }
     },
@@ -151,7 +151,8 @@ export function registerShippingAdminRoutes(app: Express): void {
     requirePermission("settings", "view"),
     async (req, res) => {
       try {
-        const search = typeof req.query.search === "string" ? req.query.search.trim() : "";
+        const search =
+          typeof req.query.search === "string" ? req.query.search.trim() : "";
         const filters = search
           ? or(
               ilike(productVariants.sku, `%${search}%`),
@@ -176,13 +177,17 @@ export function registerShippingAdminRoutes(app: Express): void {
             siocSuggested: shippingVariantAttrs.siocSuggested,
             riderEligible: shippingVariantAttrs.riderEligible,
             riderVoidCm3: shippingVariantAttrs.riderVoidCm3,
-            riderVoidMaxWeightGrams: shippingVariantAttrs.riderVoidMaxWeightGrams,
+            riderVoidMaxWeightGrams:
+              shippingVariantAttrs.riderVoidMaxWeightGrams,
             riderVoidMaxItems: shippingVariantAttrs.riderVoidMaxItems,
             notes: shippingVariantAttrs.notes,
           })
           .from(productVariants)
           .innerJoin(products, eq(products.id, productVariants.productId))
-          .leftJoin(shippingVariantAttrs, eq(shippingVariantAttrs.productVariantId, productVariants.id))
+          .leftJoin(
+            shippingVariantAttrs,
+            eq(shippingVariantAttrs.productVariantId, productVariants.id),
+          )
           .where(filters)
           .orderBy(asc(productVariants.sku))
           .limit(100);
@@ -208,22 +213,37 @@ export function registerShippingAdminRoutes(app: Express): void {
       try {
         const parsed = upsertVariantAttrsSchema.safeParse(req.body);
         if (!parsed.success) {
-          return res.status(400).json({ error: { code: "SHIPPING_ADMIN_INVALID_INPUT", issues: parsed.error.issues } });
+          return res
+            .status(400)
+            .json({
+              error: {
+                code: "SHIPPING_ADMIN_INVALID_INPUT",
+                issues: parsed.error.issues,
+              },
+            });
         }
-        const variant = await db.select({ id: productVariants.id })
+        const variant = await db
+          .select({ id: productVariants.id })
           .from(productVariants)
           .where(eq(productVariants.id, parsed.data.productVariantId))
           .limit(1);
         if (variant.length === 0) {
-          return res.status(404).json({ error: { code: "SHIPPING_ADMIN_VARIANT_NOT_FOUND" } });
+          return res
+            .status(404)
+            .json({ error: { code: "SHIPPING_ADMIN_VARIANT_NOT_FOUND" } });
         }
 
-        const [attrs] = await db.insert(shippingVariantAttrs)
+        const [attrs] = await db
+          .insert(shippingVariantAttrs)
           .values({ ...parsed.data, siocSuggested: false })
           .onConflictDoUpdate({
             target: shippingVariantAttrs.productVariantId,
             // A manual save resolves any pending suggestion.
-            set: { ...parsed.data, siocSuggested: false, updatedAt: new Date() },
+            set: {
+              ...parsed.data,
+              siocSuggested: false,
+              updatedAt: new Date(),
+            },
           })
           .returning();
         return res.json({ attrs });
@@ -237,10 +257,12 @@ export function registerShippingAdminRoutes(app: Express): void {
   // catalog.product_variants (migration 185): confirming flips the variant;
   // dismissing records an attrs row with siocSuggested=false so the heuristic
   // does not suggest the variant again.
-  const siocDecisionSchema = z.object({
-    productVariantId: z.number().int().positive(),
-    confirmed: z.boolean(),
-  }).strict();
+  const siocDecisionSchema = z
+    .object({
+      productVariantId: z.number().int().positive(),
+      confirmed: z.boolean(),
+    })
+    .strict();
 
   app.put(
     "/api/shipping/admin/sioc-decision",
@@ -249,23 +271,33 @@ export function registerShippingAdminRoutes(app: Express): void {
       try {
         const parsed = siocDecisionSchema.safeParse(req.body);
         if (!parsed.success) {
-          return res.status(400).json({ error: { code: "SHIPPING_ADMIN_INVALID_INPUT", issues: parsed.error.issues } });
+          return res
+            .status(400)
+            .json({
+              error: {
+                code: "SHIPPING_ADMIN_INVALID_INPUT",
+                issues: parsed.error.issues,
+              },
+            });
         }
         const { productVariantId, confirmed } = parsed.data;
         const result = await db.transaction(async (tx) => {
-          const variant = await tx.select({ id: productVariants.id })
+          const variant = await tx
+            .select({ id: productVariants.id })
             .from(productVariants)
             .where(eq(productVariants.id, productVariantId))
             .limit(1);
           if (variant.length === 0) return null;
 
           if (confirmed) {
-            await tx.update(productVariants)
+            await tx
+              .update(productVariants)
               .set({ shipsInOwnContainer: true, updatedAt: new Date() })
               .where(eq(productVariants.id, productVariantId));
           }
           // Either way the suggestion is resolved for this variant.
-          await tx.insert(shippingVariantAttrs)
+          await tx
+            .insert(shippingVariantAttrs)
             .values({ productVariantId, siocSuggested: false })
             .onConflictDoUpdate({
               target: shippingVariantAttrs.productVariantId,
@@ -274,7 +306,9 @@ export function registerShippingAdminRoutes(app: Express): void {
           return { productVariantId, confirmed };
         });
         if (!result) {
-          return res.status(404).json({ error: { code: "SHIPPING_ADMIN_VARIANT_NOT_FOUND" } });
+          return res
+            .status(404)
+            .json({ error: { code: "SHIPPING_ADMIN_VARIANT_NOT_FOUND" } });
         }
         return res.json({ decision: result });
       } catch (error) {
@@ -305,15 +339,20 @@ export function registerShippingAdminRoutes(app: Express): void {
             heightMm: productVariants.heightMm,
           })
           .from(productVariants)
-          .leftJoin(shippingVariantAttrs, eq(shippingVariantAttrs.productVariantId, productVariants.id))
-          .where(and(
-            sql`${productVariants.hierarchyLevel} >= 2`,
-            sql`${productVariants.unitsPerVariant} >= 2`,
-            isNotNull(productVariants.weightGrams),
-            isNotNull(productVariants.lengthMm),
-            eq(productVariants.shipsInOwnContainer, false),
-            sql`${shippingVariantAttrs.id} is null`,
-          ))
+          .leftJoin(
+            shippingVariantAttrs,
+            eq(shippingVariantAttrs.productVariantId, productVariants.id),
+          )
+          .where(
+            and(
+              sql`${productVariants.hierarchyLevel} >= 2`,
+              sql`${productVariants.unitsPerVariant} >= 2`,
+              isNotNull(productVariants.weightGrams),
+              isNotNull(productVariants.lengthMm),
+              eq(productVariants.shipsInOwnContainer, false),
+              sql`${shippingVariantAttrs.id} is null`,
+            ),
+          )
           .orderBy(asc(productVariants.sku))
           .limit(50);
         return res.json({ rows });
@@ -330,53 +369,83 @@ export function registerShippingAdminRoutes(app: Express): void {
       try {
         const id = Number(req.params.id);
         if (!Number.isInteger(id) || id <= 0) {
-          return res.status(400).json({ error: { code: "SHIPPING_ADMIN_INVALID_INPUT", message: "invalid id" } });
+          return res
+            .status(400)
+            .json({
+              error: {
+                code: "SHIPPING_ADMIN_INVALID_INPUT",
+                message: "invalid id",
+              },
+            });
         }
         const parsed = updateServiceLevelSchema.safeParse(req.body);
         if (!parsed.success) {
-          return res.status(400).json({ error: { code: "SHIPPING_ADMIN_INVALID_INPUT", issues: parsed.error.issues } });
+          return res
+            .status(400)
+            .json({
+              error: {
+                code: "SHIPPING_ADMIN_INVALID_INPUT",
+                issues: parsed.error.issues,
+              },
+            });
         }
-        const [current] = await db.select().from(shippingServiceLevels)
+        const [current] = await db
+          .select()
+          .from(shippingServiceLevels)
           .where(eq(shippingServiceLevels.id, id))
           .limit(1);
         if (!current) {
-          return res.status(404).json({ error: { code: "SHIPPING_ADMIN_SERVICE_LEVEL_NOT_FOUND" } });
+          return res
+            .status(404)
+            .json({
+              error: { code: "SHIPPING_ADMIN_SERVICE_LEVEL_NOT_FOUND" },
+            });
         }
-        if (parsed.data.isActive === true && current.code !== INITIAL_CHECKOUT_SERVICE_LEVEL_CODE) {
+        if (
+          parsed.data.isActive === true &&
+          current.code !== INITIAL_CHECKOUT_SERVICE_LEVEL_CODE
+        ) {
           return res.status(409).json({
             error: {
               code: "SHIPPING_ADMIN_SERVICE_LEVEL_NOT_AVAILABLE",
-              message: "Only Standard Shipping is available in the initial rollout.",
+              message:
+                "Only Standard Shipping is available in the initial rollout.",
             },
           });
         }
-        const nextPromiseMin = parsed.data.promiseMinBusinessDays === undefined
-          ? current.promiseMinBusinessDays
-          : parsed.data.promiseMinBusinessDays;
-        const nextPromiseMax = parsed.data.promiseMaxBusinessDays === undefined
-          ? current.promiseMaxBusinessDays
-          : parsed.data.promiseMaxBusinessDays;
+        const nextPromiseMin =
+          parsed.data.promiseMinBusinessDays === undefined
+            ? current.promiseMinBusinessDays
+            : parsed.data.promiseMinBusinessDays;
+        const nextPromiseMax =
+          parsed.data.promiseMaxBusinessDays === undefined
+            ? current.promiseMaxBusinessDays
+            : parsed.data.promiseMaxBusinessDays;
         if (
-          (nextPromiseMin === null) !== (nextPromiseMax === null)
-          || (
-            nextPromiseMin !== null
-            && nextPromiseMax !== null
-            && nextPromiseMax < nextPromiseMin
-          )
+          (nextPromiseMin === null) !== (nextPromiseMax === null) ||
+          (nextPromiseMin !== null &&
+            nextPromiseMax !== null &&
+            nextPromiseMax < nextPromiseMin)
         ) {
           return res.status(400).json({
             error: {
               code: "SHIPPING_ADMIN_INVALID_PROMISE",
-              message: "Delivery promise minimum and maximum must both be blank or form a valid range.",
+              message:
+                "Delivery promise minimum and maximum must both be blank or form a valid range.",
             },
           });
         }
-        const updated = await db.update(shippingServiceLevels)
+        const updated = await db
+          .update(shippingServiceLevels)
           .set({ ...parsed.data, updatedAt: new Date() })
           .where(eq(shippingServiceLevels.id, id))
           .returning();
         if (updated.length === 0) {
-          return res.status(404).json({ error: { code: "SHIPPING_ADMIN_SERVICE_LEVEL_NOT_FOUND" } });
+          return res
+            .status(404)
+            .json({
+              error: { code: "SHIPPING_ADMIN_SERVICE_LEVEL_NOT_FOUND" },
+            });
         }
         return res.json({ serviceLevel: updated[0] });
       } catch (error) {
@@ -384,12 +453,18 @@ export function registerShippingAdminRoutes(app: Express): void {
       }
     },
   );
-
 }
 
-function sendShippingAdminError(res: Response, error: unknown, action: string): Response {
+function sendShippingAdminError(
+  res: Response,
+  error: unknown,
+  action: string,
+): Response {
   console.error(`[ShippingAdminRoutes] Failed to ${action}:`, error);
   return res.status(500).json({
-    error: { code: "SHIPPING_ADMIN_INTERNAL_ERROR", message: `Failed to ${action}.` },
+    error: {
+      code: "SHIPPING_ADMIN_INTERNAL_ERROR",
+      message: `Failed to ${action}.`,
+    },
   });
 }
