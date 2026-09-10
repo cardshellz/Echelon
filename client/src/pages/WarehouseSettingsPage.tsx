@@ -4,6 +4,7 @@ import { useParams, Link, useLocation } from "wouter";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
+import { WarehousePackagingPanel } from "@/components/shipping/WarehousePackagingPanel";
 
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -144,6 +145,7 @@ export default function WarehouseSettingsPage() {
 
   // Local form state (so we can edit before saving)
   const [form, setForm] = useState<Partial<WarehouseSettings> | null>(null);
+  const [activeTab, setActiveTab] = useState("picking");
 
   useEffect(() => {
     if (current) setForm({ ...current });
@@ -233,17 +235,19 @@ export default function WarehouseSettingsPage() {
             <p className="text-xs md:text-sm text-muted-foreground mt-1">{titleSub}</p>
           </div>
         </div>
-        <Button
-          onClick={() => saveMutation.mutate()}
-          disabled={saveMutation.isPending}
-          data-testid="btn-save-settings"
-        >
-          {saveMutation.isPending ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Save className="w-4 h-4 mr-2" />}
-          Save Changes
-        </Button>
+        {activeTab !== "packaging" && (
+          <Button
+            onClick={() => saveMutation.mutate()}
+            disabled={saveMutation.isPending}
+            data-testid="btn-save-settings"
+          >
+            {saveMutation.isPending ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Save className="w-4 h-4 mr-2" />}
+            Save Changes
+          </Button>
+        )}
       </div>
 
-      <Tabs defaultValue="picking" className="w-full">
+      <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
         {!isDefault && hasPermission("warehouse_work", "view") && (
           <div className="mb-4">
             <Button variant="outline" asChild>
@@ -258,7 +262,15 @@ export default function WarehouseSettingsPage() {
           <TabsTrigger value="sync">Channel Sync</TabsTrigger>
           <TabsTrigger value="velocity">Velocity</TabsTrigger>
           <TabsTrigger value="waves">Waves</TabsTrigger>
+          {!isDefault && hasPermission("settings", "view") && (
+            <TabsTrigger value="packaging">Packaging</TabsTrigger>
+          )}
         </TabsList>
+        {!isDefault && hasPermission("settings", "view") && (
+          <TabsContent value="packaging">
+            <WarehousePackagingPanel warehouseId={Number(routeId)} canEdit={hasPermission("settings", "edit")} />
+          </TabsContent>
+        )}
 
         {/* ================ PICKING ================ */}
         <TabsContent value="picking">

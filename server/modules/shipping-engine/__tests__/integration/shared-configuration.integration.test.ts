@@ -37,6 +37,7 @@ describe.skipIf(!enabled)(
           "238_shared_packaging_and_program_charges.sql",
           "239_packaging_suite_lifecycle.sql",
           "241_channel_packaging_policies.sql",
+          "243_warehouse_packaging_availability.sql",
         ]) {
           await client.query(readFileSync(resolve("migrations", name), "utf8"));
         }

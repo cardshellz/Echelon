@@ -55,7 +55,13 @@ export const packagingPolicyOverviewSchema = z.object({
     }),
   ),
   policies: z.array(channelPackagingPolicySchema),
-  warehouses: z.array(z.object({ id, name: z.string() })),
+  warehouses: z.array(
+    z.object({
+      id,
+      name: z.string(),
+      packagingRevision: z.number().int().nonnegative().default(0),
+    }),
+  ),
   boxes: z.array(
     z.object({
       id,
@@ -65,6 +71,7 @@ export const packagingPolicyOverviewSchema = z.object({
       isActive: z.boolean(),
       availabilityReviewed: z.boolean(),
       warehouseIds: z.array(id),
+      configurationRevision: z.number().int().positive().default(1),
     }),
   ),
   suites: z.array(
@@ -110,7 +117,6 @@ export const saveCatalogBoxSchema = z
     fillFactorBps: z.number().int().positive().max(10000),
     isActive: z.boolean(),
     branding: boxBrandingSchema,
-    warehouseIds: z.array(id).max(1000),
     expectedRevision: z.number().int().nonnegative(),
     commandId: z.string().uuid(),
   })
@@ -131,12 +137,80 @@ export const saveCatalogBoxSchema = z
           "Supply all outer dimensions, at least as large as inner dimensions.",
       });
     }
-    if (new Set(box.warehouseIds).size !== box.warehouseIds.length) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["warehouseIds"],
-        message: "Warehouse selections must be unique.",
-      });
-    }
   });
 export type SaveCatalogBox = z.infer<typeof saveCatalogBoxSchema>;
+
+const revisionTarget = z
+  .object({ id, revision: z.number().int().nonnegative() })
+  .strict();
+const targets = z
+  .array(revisionTarget)
+  .min(1)
+  .max(1000)
+  .refine(
+    (rows) => new Set(rows.map((row) => row.id)).size === rows.length,
+    "Selections must be unique.",
+  );
+export const bulkBoxBrandingSchema = z
+  .object({
+    commandId: z.string().uuid(),
+    boxes: targets,
+    branding: boxBrandingSchema,
+  })
+  .strict();
+export type BulkBoxBranding = z.infer<typeof bulkBoxBrandingSchema>;
+export const warehouseAvailabilitySchema = z
+  .object({
+    commandId: z.string().uuid(),
+    warehouses: targets,
+    boxIds: z
+      .array(id)
+      .min(1)
+      .max(1000)
+      .refine(
+        (ids) => new Set(ids).size === ids.length,
+        "Box selections must be unique.",
+      ),
+    available: z.boolean(),
+    // A suite is a reviewed snapshot for this command, never ongoing stock inheritance.
+    sourceSuite: revisionTarget.optional(),
+  })
+  .strict()
+  .refine(
+    (value) => value.warehouses.length * value.boxIds.length <= 100000,
+    "Select at most 100,000 warehouse/box pairs per operation.",
+  );
+export type WarehouseAvailability = z.infer<typeof warehouseAvailabilitySchema>;
+export const warehouseSuiteAssignmentSchema = z
+  .object({
+    commandId: z.string().uuid(),
+    channelId: id,
+    expectedRevision: z.number().int().nonnegative(),
+    initialPolicy: z
+      .object({ defaultSuiteId: id, requirement: packagingRequirementSchema })
+      .strict()
+      .optional(),
+    warehouseIds: z
+      .array(id)
+      .min(1)
+      .max(1000)
+      .refine(
+        (ids) => new Set(ids).size === ids.length,
+        "Warehouse selections must be unique.",
+      ),
+    suiteId: id.nullable(),
+    replaceExisting: z.boolean(),
+  })
+  .strict()
+  .refine(
+    (value) => (value.expectedRevision === 0) === Boolean(value.initialPolicy),
+    "Supply explicit program defaults only when creating a new policy.",
+  );
+export type WarehouseSuiteAssignment = z.infer<
+  typeof warehouseSuiteAssignmentSchema
+>;
+export const packagingBulkResultSchema = z.object({
+  changed: z.number().int().nonnegative(),
+  skipped: z.number().int().nonnegative(),
+});
+export type PackagingBulkResult = z.infer<typeof packagingBulkResultSchema>;

@@ -101,12 +101,11 @@ describe("manual packing transaction guard", () => {
       [plan],
       [parcel],
       [{ warehouseId: 2, channelId: 11 }],
-      [{ id: 10, branding: "unbranded", reviewed: true }],
-      [],
+      [{ id: 10, branding: "unbranded", reviewed: false }],
     ];
     expect(await confirmParcel(input, () => now)).toMatchObject({
       ok: false,
-      code: "BOX_UNAVAILABLE_AT_WAREHOUSE",
+      code: "BOX_NOT_PERMITTED",
     });
     expect(mocked.updates).toHaveLength(0);
   });
@@ -116,7 +115,6 @@ describe("manual packing transaction guard", () => {
       [parcel],
       [{ warehouseId: 2, channelId: 11 }],
       [{ id: 10, branding: "unbranded", reviewed: true }],
-      [{ stocked: true }],
       [{ packedAt: now }],
     ];
     expect(await confirmParcel(input, () => now)).toMatchObject({

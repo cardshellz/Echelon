@@ -46,12 +46,11 @@ describe.skipIf(!enabled)(
     const box = (
       code: string,
       branding: SaveCatalogBox["branding"],
-      warehouseIds: number[],
+      _warehouseIds: number[],
     ): SaveCatalogBox => ({
       code,
       name: code,
       branding,
-      warehouseIds,
       kind: "box",
       lengthMm: 400,
       widthMm: 300,
@@ -85,6 +84,7 @@ describe.skipIf(!enabled)(
           "238_shared_packaging_and_program_charges.sql",
           "239_packaging_suite_lifecycle.sql",
           "241_channel_packaging_policies.sql",
+          "243_warehouse_packaging_availability.sql",
         ])
           await client.query(readFileSync(resolve("migrations", name), "utf8"));
         await client.query("COMMIT");
@@ -102,6 +102,19 @@ describe.skipIf(!enabled)(
       graphicId = (
         await repo.saveBox(box("GRAPHIC", "branded", [1, 2]), "admin", now)
       ).box.id;
+      await repo.saveAvailability(
+        {
+          commandId: randomUUID(),
+          warehouses: [
+            { id: 1, revision: 0 },
+            { id: 2, revision: 0 },
+          ],
+          boxIds: [whiteId, graphicId],
+          available: true,
+        },
+        "admin",
+        now,
+      );
       whiteSuite = (
         await shared.saveSuite(
           {
@@ -299,6 +312,23 @@ describe.skipIf(!enabled)(
       );
       const localBox = box("WEST-ONLY", "unbranded", [2]);
       const localId = (await repo.saveBox(localBox, "admin", now)).box.id;
+      await repo.saveAvailability(
+        {
+          commandId: randomUUID(),
+          warehouses: [
+            {
+              id: 2,
+              revision: (await repo.overview()).warehouses.find(
+                (w) => w.id === 2,
+              )!.packagingRevision,
+            },
+          ],
+          boxIds: [localId],
+          available: true,
+        },
+        "admin",
+        now,
+      );
       const localSuite = await shared.saveSuite(
         {
           name: "West only",
@@ -335,13 +365,19 @@ describe.skipIf(!enabled)(
         now,
       );
       const before = await repo.resolve(20, 2);
-      await repo.saveBox(
+      await repo.saveAvailability(
         {
-          ...localBox,
-          id: localId,
-          expectedRevision: 1,
           commandId: randomUUID(),
-          warehouseIds: [],
+          warehouses: [
+            {
+              id: 2,
+              revision: (await repo.overview()).warehouses.find(
+                (w) => w.id === 2,
+              )!.packagingRevision,
+            },
+          ],
+          boxIds: [localId],
+          available: false,
         },
         "admin",
         now,

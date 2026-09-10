@@ -15,6 +15,8 @@ import {
 } from "./pricing-programs/api";
 import type { BoxSuiteSummary } from "@shared/shipping/configuration";
 import { ConfigurationHistory } from "./ConfigurationHistory";
+import { CatalogBoxPicker } from "./CatalogBoxPicker";
+import { useChannelPackagingOverview } from "./ChannelPackagingPanel";
 import {
   channelLabels,
   packagingAssignmentUrl,
@@ -26,13 +28,13 @@ export { useConfigurationCommand } from "./configuration-client";
 export function BoxSuitesPanel() {
   const client = useQueryClient();
   const query = usePackagingConfiguration();
+  const catalog = useChannelPackagingOverview();
   const [editing, setEditing] = useState<BoxSuiteSummary | null>();
   const [statusTarget, setStatusTarget] = useState<BoxSuiteSummary | null>(
     null,
   );
   const [name, setName] = useState("");
   const [boxIds, setBoxIds] = useState<number[]>([]);
-  const [search, setSearch] = useState("");
   const [suiteSearch, setSuiteSearch] = useState("");
   const [showArchived, setShowArchived] = useState(false);
   const [error, setError] = useState("");
@@ -73,7 +75,6 @@ export function BoxSuitesPanel() {
         : (value?.name ?? ""),
     );
     setBoxIds(value?.boxIds ?? []);
-    setSearch("");
     setError("");
     setMessage("");
   };
@@ -97,7 +98,8 @@ export function BoxSuitesPanel() {
           <h2 className="text-lg font-semibold">Box suites</h2>
           <p className="text-sm text-muted-foreground">
             Group existing boxes and mailers into reusable packaging choices.
-            Assign suites in channel shipping configuration.
+            Assign suites in warehouse packaging configuration. Membership does
+            not change physical warehouse availability or a box's branding.
           </p>
           <a className="text-sm underline" href="/shipping-settings?tab=boxes">
             Manage individual boxes in Box catalog
@@ -163,11 +165,15 @@ export function BoxSuitesPanel() {
                 )}
                 <div className="flex flex-wrap gap-x-3 text-xs">
                   <span className="text-muted-foreground">Used by:</span>
-                  {concreteUsages.map((a) => (
+                  {concreteUsages.slice(0, 3).map((a) => (
                     <a
                       key={`${a.channelId}:${a.warehouseId}`}
                       className="underline"
-                      href={`/shipping-settings?tab=channel-routing&section=packaging&channelId=${a.channelId}`}
+                      href={
+                        a.warehouseId === null
+                          ? `/shipping-settings?tab=channel-routing&section=packaging&channelId=${a.channelId}`
+                          : `/warehouse/packaging?channelId=${a.channelId}`
+                      }
                     >
                       {a.channelName} ·{" "}
                       {a.warehouseId === null
@@ -176,6 +182,11 @@ export function BoxSuitesPanel() {
                             ?.name}
                     </a>
                   ))}
+                  {concreteUsages.length > 3 && (
+                    <a className="underline" href="/warehouse/packaging">
+                      +{concreteUsages.length - 3} more assignments
+                    </a>
+                  )}
                   {usages.length ? (
                     usages.slice(0, 2).map((a) => (
                       <a
@@ -344,46 +355,31 @@ export function BoxSuitesPanel() {
                 onChange={(e) => setName(e.target.value)}
               />
             </label>
-            <Input
-              aria-label="Search boxes"
-              placeholder="Search boxes and mailers"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-            />
-            <div className="max-h-64 overflow-auto rounded border p-2">
-              {data.boxes
-                .filter((b) =>
-                  `${b.code} ${b.name}`
-                    .toLowerCase()
-                    .includes(search.toLowerCase()),
-                )
-                .map((b) => (
-                  <label
-                    key={b.id}
-                    className="flex items-center gap-2 py-1 text-sm"
-                  >
-                    <input
-                      type="checkbox"
-                      disabled={!b.isActive && !boxIds.includes(b.id)}
-                      checked={boxIds.includes(b.id)}
-                      onChange={(e) =>
-                        setBoxIds(
-                          e.target.checked
-                            ? [...boxIds, b.id]
-                            : boxIds.filter((id) => id !== b.id),
-                        )
-                      }
-                    />
-                    {b.name} · {b.code}
-                    {!b.isActive && " (inactive)"}
-                  </label>
-                ))}
-            </div>
+            {catalog.data ? (
+              <CatalogBoxPicker
+                boxes={catalog.data.boxes}
+                selected={boxIds}
+                onChange={setBoxIds}
+              />
+            ) : (
+              <p role="alert">
+                {catalog.isLoading
+                  ? "Loading catalog…"
+                  : "Unable to load catalog."}
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => catalog.refetch()}
+                >
+                  Retry catalog
+                </Button>
+              </p>
+            )}
             <p className="text-sm text-muted-foreground">
               {boxIds.length} packaging types selected.{" "}
               {affected.length
                 ? `Saving affects ${affected.length} channel/warehouse assignments.`
-                : "Not assigned yet. Choose where to use this suite in channel configuration."}{" "}
+                : "Not assigned yet. Choose where to use this suite in warehouse packaging."}{" "}
               Previous shipment snapshots stay unchanged.
             </p>
             {editing && (
@@ -401,7 +397,9 @@ export function BoxSuitesPanel() {
             )}
             <div className="flex gap-2">
               <Button
-                disabled={busy || !boxIds.length || !name.trim()}
+                disabled={
+                  busy || !catalog.data || !boxIds.length || !name.trim()
+                }
                 type="submit"
               >
                 Save suite
