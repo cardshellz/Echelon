@@ -3,13 +3,14 @@ import { createOpeningWorksheet, OPENING_DOCUMENT_LIMIT_BYTES, parseOpeningDocum
 import { openingAssessment, openingSource, openingVerification } from "../../../../../server/modules/inventory-planning/__tests__/fixtures/inventory-cutover-opening-interface.fixture";
 
 describe("independent opening verification document", () => {
-  it("exports recorded references separately while every verification quantity remains blank", () => {
+  it("exports blank lot/owner observations and non-authoritative derived position placeholders", () => {
     const source = openingSource(); const before = structuredClone(source);
     const worksheet = JSON.parse(createOpeningWorksheet(source));
     expect(worksheet.recordedReference.levels[0].variantQty).toBe("20");
     expect(worksheet.recordedReference.labels).toContainEqual({ kind: "order", id: "1", label: "Order #CS-1001" });
     expect(worksheet.verification).toMatchObject({ verificationReference: "", verificationEvidenceHash: "", verifiedAt: "",
-      levels: [{ variantQty: "", reservedQty: "", pickedQty: "", packedQty: "" }],
+      contractVersion: "inventory_cutover_opening_v2",
+      levels: [{ variantQty: "0", reservedQty: "0", pickedQty: "0", packedQty: "0" }],
       lots: [{ onHandQty: "", reservedQty: "", pickedQty: "", unitCostMills: "", poUnitCostMills: "", packagingUnitCostMills: "", landedUnitCostMills: "" }],
       owners: [{ remainingQty: "", reservedQty: "", pickedQty: "", allocations: [] }] });
     expect(source).toEqual(before);
@@ -22,6 +23,30 @@ describe("independent opening verification document", () => {
     worksheet.recordedReference = { forgedOrder: "MALICIOUS", levels: [{ variantQty: "999" }] };
     expect(parseOpeningDocument(JSON.stringify(worksheet), source)).toEqual(verification);
     expect(parseOpeningDocument(JSON.stringify(verification), source)).toEqual(verification);
+  });
+  it("keeps an empty-bin promise counter as recorded reference without pre-verifying physical owner holds", () => {
+    const source = openingSource(); const level = source.evidence.levels[0]; const lot = source.evidence.lots[0];
+    source.evidence.levels = [{ ...level, variantQty: "0", reservedQty: "6", pickedQty: "0", packedQty: "0" }];
+    source.evidence.lots = [{ ...lot, onHandQty: "0", reservedQty: "0", pickedQty: "0" }];
+    source.evidence.items[0].pickedQuantity = 0;
+    const worksheet = JSON.parse(createOpeningWorksheet(source));
+    expect(worksheet.recordedReference.levels[0]).toMatchObject({ variantQty: "0", reservedQty: "6" });
+    expect(worksheet.verification.levels[0].reservedQty).toBe("0"); // Derived placeholder, not another count input.
+    expect(worksheet.verification.owners[0]).toMatchObject({ remainingQty: "", reservedQty: "", pickedQty: "", allocations: [] });
+    expect(() => parseOpeningDocument(JSON.stringify(worksheet), source)).toThrow("incomplete or invalid");
+  });
+  it("preserves an explicitly verified promise counter and full demand without inventing physical allocations", () => {
+    const source = openingSource(); const verification = openingVerification();
+    verification.levels[0] = { ...verification.levels[0], variantQty: "0", reservedQty: "6", pickedQty: "0", packedQty: "0" };
+    verification.lots[0] = { ...verification.lots[0], onHandQty: "0", reservedQty: "0", pickedQty: "0" };
+    verification.owners[0] = { ...verification.owners[0], remainingQty: "6", reservedQty: "0", pickedQty: "0", allocations: [] };
+    source.evidence.levels = structuredClone(verification.levels); source.evidence.lots = structuredClone(verification.lots);
+    source.evidence.items[0].pickedQuantity = 0;
+    const parsed = parseOpeningDocument(JSON.stringify(verification), source);
+    expect(parsed.levels[0].reservedQty).toBe("6"); expect(parsed.owners[0]).toEqual(verification.owners[0]);
+    // Import only validates the packet. Eligibility is still decided by the
+    // server preview; the client cannot turn these zeros into a handoff.
+    expect(() => prepareOpeningSave(parsed, source, null, "Reviewed promise evidence", "promise-1")).toThrow("without blockers");
   });
   it.each(["expectedEvidenceHash", "expectedAuthorityRevision", "expectedConfigurationRunId"] as const)("rejects a different source %s", field => {
     const verification = openingVerification();

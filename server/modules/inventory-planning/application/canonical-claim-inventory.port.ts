@@ -189,6 +189,8 @@ export interface CanonicalClaimInventoryMutationPort {
   }): Promise<number>;
 
   reserveResource(input: {
+    /** Required after quantity-ledger opening; stable outer receipt identity. */
+    commandKey?: string;
     client: CanonicalClaimTransactionClient;
     claimId: bigint;
     claimResourceId: bigint;
@@ -204,6 +206,7 @@ export interface CanonicalClaimInventoryMutationPort {
   }): Promise<readonly CanonicalClaimLotAllocation[]>;
 
   releaseResources(input: {
+    commandKey?: string;
     client: CanonicalClaimTransactionClient;
     claimId: bigint;
     resources: readonly CanonicalClaimInventoryReleaseResource[];
@@ -214,6 +217,7 @@ export interface CanonicalClaimInventoryMutationPort {
   }): Promise<void>;
 
   reconcilePickResource(input: {
+    commandKey?: string;
     client: CanonicalClaimTransactionClient;
     claimId: bigint;
     releases: readonly CanonicalClaimInventoryReleaseResource[];
@@ -232,6 +236,7 @@ export interface CanonicalClaimInventoryMutationPort {
   }): Promise<readonly CanonicalClaimLotAllocation[]>;
 
   reconcileObservedPickResource(input: {
+    commandKey?: string;
     client: CanonicalClaimTransactionClient;
     claimId: bigint;
     releases: readonly CanonicalClaimInventoryReleaseResource[];
@@ -252,6 +257,7 @@ export interface CanonicalClaimInventoryMutationPort {
   }): Promise<CanonicalClaimInventoryObservedReconciliationResult>;
 
   pickResources(input: {
+    commandKey?: string;
     client: CanonicalClaimTransactionClient;
     claimId: bigint;
     claimLineId: bigint;
@@ -264,6 +270,7 @@ export interface CanonicalClaimInventoryMutationPort {
   }): Promise<CanonicalClaimInventoryPickResult>;
 
   unpickResources(input: {
+    commandKey?: string;
     client: CanonicalClaimTransactionClient;
     claimId: bigint;
     claimLineId: bigint;

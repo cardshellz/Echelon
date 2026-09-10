@@ -45,6 +45,8 @@ function harness(options: {
     const statement = render(query);
     queries.push(statement);
     const text = statement.sql;
+    if (text.includes("FROM inventory.cutover_admission_fence")) return { rows: [{ epoch: 1 }] };
+    if (text.includes("FROM inventory.quantity_ledger_opening")) return { rows: [] };
     if (text.startsWith("SELECT pg_advisory_xact_lock")) return { rows: [] };
     if (text.includes("FROM inventory.inventory_transactions") && text.includes("FOR UPDATE")) {
       return { rows: options.existing ? [options.existing] : [] };
@@ -119,7 +121,7 @@ describe("applyReturnRestock", () => {
     });
 
     await expect(applyReturnRestock(executor, input())).resolves.toMatchObject({ replayed: true });
-    expect(queries).toHaveLength(2);
+    expect(queries).toHaveLength(4);
     expect(queries.some((query) => query.sql.startsWith("INSERT INTO inventory.inventory_lots"))).toBe(false);
     expect(queries.some((query) => query.sql.startsWith("UPDATE inventory.inventory_levels"))).toBe(false);
   });
@@ -138,7 +140,7 @@ describe("applyReturnRestock", () => {
     await expect(applyReturnRestock(executor, input())).rejects.toMatchObject({
       code: "RETURN_RESTOCK_REPLAY_CONFLICT",
     });
-    expect(queries).toHaveLength(2);
+    expect(queries).toHaveLength(4);
   });
 
   it.each([

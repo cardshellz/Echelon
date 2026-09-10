@@ -3,6 +3,8 @@ import { claimPlanSchema, claimPlanRequestSchema,
 import type { CutoverReconstructionOrder, CutoverReconstructionPlan, CutoverLegacyPromiseRelease } from "@shared/types/inventory-cutover-reconstruction";
 import { parseClaimSupplySnapshot, planCanonicalClaim, sealClaimSupplySnapshot } from "./inventory-availability-planner";
 import { reconstructionHash } from "./inventory-cutover-reconstruction";
+import type { OpeningVerification } from "@shared/types/inventory-cutover-opening";
+import { projectVerifiedOpeningClaimSupply } from "./inventory-opening-supply-projection";
 
 export type PlannedCutoverOrder = { order: CutoverReconstructionOrder; request: ClaimPlanRequestDto; plan: ClaimPlanDto; freshPlan: ClaimPlanDto | null };
 export type CutoverReconstructionPlanningResult = { orders: PlannedCutoverOrder[];
@@ -29,7 +31,8 @@ export function projectCutoverPromiseReservations(
 
 /** Same pure planning batch for preview and commit. Each order sees the previous
  * order's additional claims, never a fresh copy of the same free inventory. */
-export function planFreshCutoverClaims(rawSnapshot: ClaimSupplySnapshotDto, reconstruction: CutoverReconstructionPlan): CutoverReconstructionPlanningResult {
+export function planFreshCutoverClaims(rawSnapshot: ClaimSupplySnapshotDto, reconstruction: CutoverReconstructionPlan,
+  opening: OpeningVerification | null = null): CutoverReconstructionPlanningResult {
   if (!reconstruction.ready) throw new Error("CUTOVER_RECONSTRUCTION_BLOCKED");
   // Projection is permitted to reseal only an already verified original census.
   let snapshot = parseClaimSupplySnapshot(rawSnapshot);
@@ -43,6 +46,9 @@ export function planFreshCutoverClaims(rawSnapshot: ClaimSupplySnapshotDto, reco
     snapshot = sealClaimSupplySnapshot({ ...content,
       inventoryPositions: projectCutoverPromiseReservations(snapshot.inventoryPositions, reconstruction.legacyPromiseReleases) });
   }
+  // Validate the promise against raw counters first. V2 then replaces those
+  // counters with independently observed physical stock, without a second release.
+  snapshot = projectVerifiedOpeningClaimSupply(snapshot, opening);
   const orders: PlannedCutoverOrder[] = [];
   const additional = new Map<number, bigint>();
   for (const order of [...reconstruction.orders].sort((a, b) => a.orderId - b.orderId)) {

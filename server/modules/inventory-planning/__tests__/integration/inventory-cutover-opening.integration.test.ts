@@ -4,7 +4,7 @@ import type { Pool, PoolClient } from "pg";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { OpeningSource, OpeningVerification } from "@shared/types/inventory-cutover-opening";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
-import { cutoverCompositionBaseSql, cutoverCompositionSeedSql, installCutoverCompositionMigrations, seedCompositionReviewedDryRun } from "../fixtures/inventory-cutover-composition-database.fixture";
+import { cutoverCompositionBaseSql, cutoverCompositionSeedSql, cutoverCompositionChannelSeedSql, installCutoverCompositionMigrations, seedCompositionReviewedDryRun } from "../fixtures/inventory-cutover-composition-database.fixture";
 import { installCutoverAdmissionFixturePrerequisites } from "../fixtures/inventory-cutover-admission.fixture";
 import { InventoryCutoverOpeningService } from "../../application/inventory-cutover-opening.service";
 import { PostgresInventoryCutoverOpeningRepository } from "../../infrastructure/inventory-cutover-opening.repository";
@@ -17,6 +17,12 @@ import { PostgresInventoryCutoverCommitRepository } from "../../infrastructure/i
 import { projectInventoryCutoverStateInsideTransaction } from "../../infrastructure/inventory-cutover-projection.repository";
 import { buildInventoryCutoverManifest } from "../../domain/inventory-cutover-manifest";
 import { acquireInventoryCutoverFenceInsideTransaction } from "../../infrastructure/inventory-cutover-admission-fence.repository";
+import { installQuantityCutoverFixture } from "../fixtures/inventory-quantity-cutover.fixture";
+import { planCutoverReconstruction } from "../../domain/inventory-cutover-reconstruction";
+import { PostgresInventoryPublicationOutboxRepository } from "../../infrastructure/inventory-publication-outbox.repository";
+import { InventoryPublicationOutboxService } from "../../application/inventory-publication-outbox.service";
+import { InventoryPublicationTransportRegistry } from "../../application/inventory-publication-transport";
+import { PostgresQuantityPublicationAdmission } from "../../infrastructure/quantity-publication-admission.repository";
 
 vi.mock("../../../../db", () => ({ pool: {} }));
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
@@ -48,6 +54,7 @@ dbDescribe.sequential("verified opening persistence with real PostgreSQL admissi
     await installCutoverAdmissionFixturePrerequisites(pool);
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/236_inventory_cutover_admission.sql"), "utf8"));
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/240_inventory_cutover_verified_opening.sql"), "utf8"));
+    await installQuantityCutoverFixture(pool);
     await pool.query(`UPDATE wms.orders SET order_number='#OPENING-1';
       UPDATE warehouse.warehouses SET code='MAIN',name='Main warehouse';
       UPDATE warehouse.warehouse_locations SET code='PICK-A',name='Pick bin';
@@ -83,6 +90,67 @@ dbDescribe.sequential("verified opening persistence with real PostgreSQL admissi
       (SELECT to_jsonb(row)::text FROM inventory.availability_runtime_authority row WHERE singleton_key=true) AS authority`)).rows[0];
   }
 
+  async function seedOpeningPromise() {
+    // Keep the fixture's unrelated unknown pick delta and ignored receipt: the
+    // opening is still required. Only the new empty position has complete proof.
+    await pool.query(`INSERT INTO wms.orders(id,warehouse_id,warehouse_status,on_hold,channel_id,source,
+        external_order_id,oms_fulfillment_order_id,fulfillment_partition_key,order_number)
+      VALUES(2,1,'ready',0,36,'shopify','example-2','fo-2','default','#PROMISE-2');
+      INSERT INTO wms.order_items(id,order_id,oms_order_line_id,source_item_id,sku,product_id,quantity,
+        picked_quantity,fulfilled_quantity,status,on_hold,requires_shipping,location)
+      VALUES(22,2,22,'source-22','P5',101,20,0,0,'pending',false,1,'EMPTY');
+      INSERT INTO warehouse.warehouse_locations(id,warehouse_id,code) VALUES(200,1,'EMPTY');
+      INSERT INTO inventory.inventory_levels(id,warehouse_location_id,product_variant_id,variant_qty,reserved_qty,picked_qty,packed_qty)
+        VALUES(20,200,101,0,20,0,0);
+      INSERT INTO inventory.inventory_transactions(order_id,order_item_id,product_variant_id,to_location_id,transaction_type,
+        variant_qty_delta,variant_qty_before,variant_qty_after,reserved_qty_delta,source_state,target_state)
+        VALUES(2,22,101,200,'reserve',0,0,0,20,'on_hand','committed');
+      UPDATE inventory.inventory_levels SET reserved_qty=4 WHERE id=10;
+      UPDATE inventory.inventory_lots SET qty_reserved=4 WHERE id=4;
+      INSERT INTO inventory.build_orders(id,status,warehouse_id) VALUES(7,'released',1);
+      INSERT INTO inventory.build_order_components(id,build_order_id,component_variant_id,source_location_id) VALUES(8,7,101,100);
+      INSERT INTO inventory.build_component_reservations(id,build_order_component_id,inventory_lot_id,reserved_qty,
+        consumed_qty,released_qty,reservation_owner,availability_claim_id,availability_claim_lot_allocation_id)
+        VALUES(9,8,4,1,0,0,'build_order',NULL,NULL)`);
+  }
+
+  async function promiseOpeningRequest(contractVersion: OpeningVerification["contractVersion"] = "inventory_cutover_opening_v1") {
+    const source = await service.capture("operator");
+    const input = { verification: verification(source), reason: "Verify physical custody and preserve the complete unfilled promise",
+      idempotencyKey: "promise-opening" };
+    input.verification.contractVersion = contractVersion;
+    input.verification.owners.push({ orderId: 2, orderItemId: 22, remainingQty: "20", reservedQty: "0", pickedQty: "0", allocations: [] });
+    return { source, input };
+  }
+
+  async function prepareOpeningPromiseCutover() {
+    const dryRun = await seedCompositionReviewedDryRun(pool);
+    const now = new Date(Date.parse(dryRun.completedAt) + 10);
+    const clock = { now: () => now };
+    const activation = new InventoryAvailabilityActivationService(new PostgresInventoryAvailabilityActivationRepository(pool), clock);
+    const prepared = await activation.prepare({ sourceDryRunId: dryRun.activationRunId, expectedDryRunResultHash: dryRun.resultHash,
+      idempotencyKey: "promise-opening-prepare", reason: "Prepare verified physical custody and exact unfilled demand" }, "operator");
+    if (prepared.state === "publishing") {
+      // Only this in-memory transport represents the external provider. All
+      // publication leases, admission and persisted readbacks use real owners.
+      let observed = 20;
+      const transports = new InventoryPublicationTransportRegistry();
+      transports.register({ destinationKind: "channel_connection", providerKey: "shopify", supportedScopeTypes: ["location"],
+        publishAbsolute: async request => { observed = request.desiredQuantity; return { publishedQuantity: observed, providerResponse: { testOnly: true } }; },
+        readAbsolute: async () => ({ observedQuantity: observed, providerResponse: { testOnly: true } }) });
+      const publisher = new InventoryPublicationOutboxService(new PostgresInventoryPublicationOutboxRepository(pool), transports,
+        clock, () => "promise-opening-lease", new PostgresQuantityPublicationAdmission(pool, () => now,
+          () => "00000000-0000-4000-8000-000000000041"));
+      expect(await publisher.processDue({ batchSize: 1, leaseSeconds: 60 })).toEqual({ claimed: 1, verified: 1, failed: 0, superseded: 0 });
+    } else expect(prepared.state).toBe("publication_verified");
+    const cutover = new InventoryCutoverCommitService(new PostgresInventoryCutoverCommitRepository(pool), clock);
+    const review = await cutover.preview({ activationRunId: prepared.activationRunId }, "operator");
+    expect(review).toMatchObject({ ready: true, blockers: [], summary: {
+      orders: 2, lines: 2, retainedIndependentBuildHolds: 1, legacyPromiseReplanning: { positions: 1, orderLines: 1 } } });
+    return { cutover, review, command: { activationRunId: prepared.activationRunId, expectedAuthorityRevision: review.authorityRevision,
+      expectedReviewHash: review.reviewHash, idempotencyKey: "promise-opening-cutover", reason: "Atomically replace the exact promise with fully retained demand" } };
+  }
+
   async function expectSupplementalCensusWritersBlocked() {
     // A new pending receipt must not appear between the owner capture and its
     // audit/commit. Cover attempts separately: they change latest-echo evidence.
@@ -104,7 +172,7 @@ dbDescribe.sequential("verified opening persistence with real PostgreSQL admissi
       FROM pg_trigger trigger JOIN pg_class relation ON relation.oid=trigger.tgrelid
       JOIN pg_namespace namespace ON namespace.oid=relation.relnamespace
       WHERE trigger.tgname='aa_cutover_writer_admission' ORDER BY namespace.nspname,relation.relname`)).rows;
-    expect(rows).toHaveLength(80);
+    expect(rows).toHaveLength(83); // prior80 plus quantity commands, entries and durable operation replies
     expect(rows).toEqual(expect.arrayContaining([
       { relation: "oms.channel_fulfillment_receipts" }, { relation: "oms.channel_fulfillment_receipt_attempts" },
       { relation: "wms.order_build_demands" },
@@ -145,6 +213,115 @@ dbDescribe.sequential("verified opening persistence with real PostgreSQL admissi
     expect(persisted).toMatchObject({ saved, verification: input.verification, assessment: preview });
     expect((await service.capture("operator")).latestVerification).toEqual(saved);
   });
+
+  it.each(["inventory_cutover_opening_v1", "inventory_cutover_opening_v2"] as const)("%s carries empty-bin proof through opening, publication and atomic handoff without losing custody or demand", async contractVersion => {
+    await seedOpeningPromise();
+    await pool.query(cutoverCompositionChannelSeedSql);
+    const { source, input } = await promiseOpeningRequest(contractVersion);
+    const strict = planCutoverReconstruction(source.evidence);
+    expect(strict.ready).toBe(false);
+    expect(strict.blockers).toContainEqual(expect.objectContaining({ code: "JOURNAL_CUSTODY_UNKNOWN" }));
+    expect(strict.legacyPromiseReleases).toMatchObject([{ inventoryLevelId: 20, reservedQty: "20",
+      owners: [{ orderId: 2, orderItemId: 22, reservedQty: "20" }] }]);
+    const beforeOpening = await immutableBusinessState();
+    const assessment = await service.preview(input.verification, "operator");
+    expect(assessment).toMatchObject({ ready: true, blockers: [], plan: {
+      retainedIndependentBuildReservationIds: [9], legacyPromiseReleases: strict.legacyPromiseReleases,
+      orders: [{ orderId: 1, lines: [{ orderItemId: 11, requestedQty: "6", reservedQty: "3", pickedQty: "2", freshDemandQty: "1" }] },
+        { orderId: 2, lines: [{ orderItemId: 22, requestedQty: "20", reservedQty: "0", pickedQty: "0", freshDemandQty: "20", allocations: [] }] }] } });
+    expect(assessment.historicalExceptions).toContainEqual(expect.objectContaining({ code: "JOURNAL_CUSTODY_UNKNOWN" }));
+    expect(await immutableBusinessState()).toEqual(beforeOpening);
+    const saves = await Promise.all([service.save(input, "operator"), service.save(input, "operator")]);
+    expect(saves.map(row => row.alreadyApplied).sort()).toEqual([false, true]);
+    expect(saves[0].id).toBe(saves[1].id);
+    expect(await immutableBusinessState()).toEqual(beforeOpening);
+    const persistedOpening = await loadLatestCutoverOpening(pool);
+    expect(persistedOpening?.assessment.plan.legacyPromiseReleases).toEqual(strict.legacyPromiseReleases);
+
+    const { cutover, review, command } = await prepareOpeningPromiseCutover();
+    expect(review.summary.openingBalance).toMatchObject({ snapshotId: saves[0].id });
+    expect(review.publicationRows).toEqual([{ publicationTargetId: 1, productVariantId: 101, desiredQuantity: "0" }]);
+    const beforeCommit = await immutableBusinessState();
+    const publicationBefore = (await pool.query("SELECT to_jsonb(row) AS row FROM inventory.inventory_publication_outbox row ORDER BY id")).rows;
+    expect(beforeCommit.levels).toBe(beforeOpening.levels);
+    expect(beforeCommit.lots).toBe(beforeOpening.lots);
+    expect(beforeCommit.claims).toBe("0");
+    await pool.query(`CREATE FUNCTION public.fail_opening_promise_receipt() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'test opening promise final receipt failure'; END $$;
+      CREATE TRIGGER zz_opening_promise_receipt_failure BEFORE INSERT ON inventory.availability_cutover_commits
+        FOR EACH ROW EXECUTE FUNCTION public.fail_opening_promise_receipt()`);
+    try { await expect(cutover.commit(command, "operator")).rejects.toThrow("test opening promise final receipt failure"); }
+    finally { await pool.query("DROP TRIGGER zz_opening_promise_receipt_failure ON inventory.availability_cutover_commits; DROP FUNCTION public.fail_opening_promise_receipt()"); }
+    expect(await immutableBusinessState()).toEqual(beforeCommit);
+    expect((await pool.query("SELECT to_jsonb(row) AS row FROM inventory.inventory_publication_outbox row ORDER BY id")).rows).toEqual(publicationBefore);
+    for (const table of ["availability_claim_pick_movements", "availability_cutover_reconstruction_receipts", "availability_cutover_commits"]) {
+      expect((await pool.query(`SELECT count(*)::integer AS count FROM inventory.${table}`)).rows[0].count).toBe(0);
+    }
+    expect((await pool.query("SELECT count(*)::integer AS count FROM inventory.inventory_transactions WHERE reference_type='inventory_cutover_promise'")).rows[0].count).toBe(0);
+    expect((await pool.query("SELECT lifecycle_status FROM inventory.transformation_model_versions")).rows).toEqual([{ lifecycle_status: "draft" }]);
+    expect((await pool.query("SELECT state FROM inventory.inventory_publication_targets")).rows).toEqual([{ state: "preview" }]);
+    expect(await loadLatestCutoverOpening(pool)).toEqual(persistedOpening);
+
+    const results = await Promise.all([cutover.commit(command, "operator"), cutover.commit(command, "operator")]);
+    expect(results.map(row => row.alreadyApplied).sort()).toEqual([false, true]);
+    expect(await cutover.commit(command, "operator")).toMatchObject({ alreadyApplied: true, runtimeAuthority: "canonical" });
+    expect((await pool.query("SELECT id,variant_qty,reserved_qty,picked_qty,packed_qty FROM inventory.inventory_levels ORDER BY id")).rows)
+      .toEqual([{ id: 10, variant_qty: 20, reserved_qty: 20, picked_qty: 2, packed_qty: 0 },
+        { id: 20, variant_qty: 0, reserved_qty: 0, picked_qty: 0, packed_qty: 0 }]);
+    expect((await pool.query("SELECT qty_on_hand,qty_reserved,qty_picked,total_unit_cost_mills::text FROM inventory.inventory_lots WHERE id=4")).rows)
+      .toEqual([{ qty_on_hand: 20, qty_reserved: 20, qty_picked: 2, total_unit_cost_mills: "9007199254740995" }]);
+    expect((await pool.query("SELECT order_item_id,requested_qty::text,planned_qty::text,shortfall_qty::text FROM inventory.availability_claim_lines ORDER BY order_item_id")).rows)
+      .toEqual([{ order_item_id: 11, requested_qty: "6", planned_qty: "6", shortfall_qty: "0" },
+        { order_item_id: 22, requested_qty: "20", planned_qty: "15", shortfall_qty: "5" }]);
+    expect((await pool.query("SELECT order_id,order_item_id,reserved_qty_delta,variant_qty_delta,from_location_id FROM inventory.inventory_transactions WHERE reference_type='inventory_cutover_promise'")).rows)
+      .toEqual([{ order_id: 2, order_item_id: 22, reserved_qty_delta: -20, variant_qty_delta: 0, from_location_id: 200 }]);
+    expect((await pool.query("SELECT result_payload->'legacyPromiseReleases' AS releases,jsonb_array_length(result_payload->'legacyPromiseReleaseTransactionIds') AS audits FROM inventory.availability_cutover_reconstruction_receipts")).rows)
+      .toEqual([{ releases: strict.legacyPromiseReleases, audits: 1 }]);
+    expect((await pool.query("SELECT quantity::text,total_cost_mills::text,order_item_cost_id FROM inventory.availability_claim_pick_movements")).rows)
+      .toEqual([{ quantity: "2", total_cost_mills: "18014398509481990", order_item_cost_id: 9 }]);
+    expect((await pool.query("SELECT desired_quantity::text FROM inventory.inventory_publication_outbox WHERE publication_phase='full'")).rows)
+      .toEqual([{ desired_quantity: "0" }]);
+    expect((await pool.query("SELECT count(*)::integer AS count FROM inventory.availability_cutover_commits")).rows[0].count).toBe(1);
+    const after = await immutableBusinessState();
+    for (const field of ["costs", "orders", "items", "build_reservations", "build_demands", "receipts", "receipt_attempts"] as const) {
+      expect(after[field]).toEqual(beforeOpening[field]);
+    }
+    expect((await pool.query("SELECT jsonb_agg(to_jsonb(row) ORDER BY id)::text AS journals FROM inventory.inventory_transactions row WHERE id IN (1,2,3)")).rows[0].journals)
+      .toBe(beforeOpening.journals);
+    expect(await loadLatestCutoverOpening(pool)).toEqual(persistedOpening);
+  }, 30_000);
+
+  it.each(["remaining", "reserved"])("blocks a verified promise owner with altered %s quantity without releasing anything", async field => {
+    await seedOpeningPromise();
+    const { input } = await promiseOpeningRequest();
+    if (field === "remaining") input.verification.owners[1].remainingQty = "19";
+    else input.verification.owners[1].reservedQty = "20";
+    const before = await immutableBusinessState();
+    const assessment = await service.preview(input.verification, "operator");
+    expect(assessment).toMatchObject({ ready: false, plan: { orders: [], legacyPromiseReleases: [] } });
+    expect(assessment.blockers).toContainEqual(expect.objectContaining({ code: "OPENING_PROMISE_OWNER_MISMATCH", subject: "order-item:22" }));
+    await expect(service.save(input, "operator")).rejects.toMatchObject({ code: "CUTOVER_OPENING_BLOCKED" });
+    expect(await immutableBusinessState()).toEqual(before);
+    expect((await pool.query("SELECT count(*)::integer AS count FROM inventory.availability_cutover_opening_snapshots")).rows[0].count).toBe(0);
+  });
+
+  it.each(["journal", "counter"])("blocks a saved opening promise after its %s changes before the atomic commit", async field => {
+    await seedOpeningPromise();
+    const { input } = await promiseOpeningRequest();
+    await service.save(input, "operator");
+    const { cutover, command } = await prepareOpeningPromiseCutover();
+    await pool.query(field === "journal"
+      ? "UPDATE inventory.inventory_transactions SET notes='changed exact promise proof' WHERE order_item_id=22"
+      : "UPDATE inventory.inventory_levels SET reserved_qty=19 WHERE id=20");
+    const before = await immutableBusinessState();
+    const stale = await cutover.preview({ activationRunId: command.activationRunId }, "operator");
+    expect(stale.ready).toBe(false);
+    expect(stale.blockers).toContainEqual(expect.objectContaining({ code: "CUTOVER_OPENING_EVIDENCE_CHANGED" }));
+    await expect(cutover.commit(command, "operator")).rejects.toMatchObject({ code: "CUTOVER_REVIEW_BLOCKED" });
+    expect(await immutableBusinessState()).toEqual(before);
+    expect((await pool.query("SELECT count(*)::integer AS count FROM inventory.inventory_transactions WHERE reference_type='inventory_cutover_promise'")).rows[0].count).toBe(0);
+    expect((await pool.query("SELECT count(*)::integer AS count FROM inventory.availability_cutover_commits")).rows[0].count).toBe(0);
+  }, 30_000);
 
   it("keeps missing original picked costs blocked instead of persisting a partial opening audit", async () => {
     await pool.query("DELETE FROM oms.order_item_costs WHERE id=9");
@@ -366,7 +543,7 @@ dbDescribe.sequential("verified opening persistence with real PostgreSQL admissi
   it("database guards forbid mutation, deletion, truncation and an insertion without exclusive admission", async () => {
     await service.save(await request(), "operator");
     for (const sql of ["UPDATE inventory.availability_cutover_opening_snapshots SET reason=reason",
-      "DELETE FROM inventory.availability_cutover_opening_snapshots", "TRUNCATE inventory.availability_cutover_opening_snapshots"]) {
+      "DELETE FROM inventory.availability_cutover_opening_snapshots", "TRUNCATE inventory.availability_cutover_opening_snapshots CASCADE"]) {
       await expect(pool.query(sql)).rejects.toMatchObject({ code: "23514" });
     }
     await expect(pool.query(`INSERT INTO inventory.availability_cutover_opening_snapshots OVERRIDING SYSTEM VALUE

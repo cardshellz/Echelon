@@ -152,3 +152,5 @@ describe("reverseReceiptInventory", () => {
     await expect(uc.reverseReceiptInventory({ ...baseParams, qty: -5 })).rejects.toThrow();
   });
 });
+// Explicit pre-opening compatibility fixture. Active posting is covered against PostgreSQL.
+vi.mock("../../infrastructure/operational-quantity-posting", () => ({ openOperationalQuantityPosting: vi.fn(async () => null) }));

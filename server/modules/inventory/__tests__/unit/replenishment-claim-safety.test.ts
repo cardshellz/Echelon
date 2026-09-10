@@ -182,6 +182,7 @@ describe("InventoryUseCases claim-safe replenishment", () => {
     })).resolves.toEqual({ movedBaseUnits: 100, qtyPickUnits: 10 });
 
     expect(fixture.adjustLots).toHaveBeenCalledWith({
+      quantityPosting: null,
       productVariantId: 100,
       warehouseLocationId: 11,
       qtyDelta: -1,
@@ -200,3 +201,5 @@ describe("InventoryUseCases claim-safe replenishment", () => {
     expect(postCommitEffects).toHaveLength(1);
   });
 });
+// Explicit pre-opening compatibility fixture. Active posting is covered against PostgreSQL.
+vi.mock("../../infrastructure/operational-quantity-posting", () => ({ openOperationalQuantityPosting: vi.fn(async () => null) }));

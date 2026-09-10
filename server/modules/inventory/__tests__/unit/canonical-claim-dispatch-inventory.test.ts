@@ -10,6 +10,7 @@ function fixture() {
   ];
   const state = { level, lots, costs: dispatchCosts(), existing: [] as { id: number }[], updateCount: 1, journalId: 801 };
   const query = vi.fn(async (sql: string, values?: unknown[]) => {
+    if (sql.includes("FROM inventory.quantity_ledger_opening")) return { rows: [] };
     if (sql.startsWith("SELECT pg_advisory")) return { rows: [] };
     if (sql.includes("SELECT id FROM inventory.inventory_transactions")) return { rows: state.existing };
     if (sql.includes("FROM inventory.inventory_levels")) return { rows: [state.level] };

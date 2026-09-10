@@ -21,7 +21,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useToast } from "@/hooks/use-toast";
-import { apiRequest } from "@/lib/queryClient";
+import { useInventoryCommand } from "@/lib/inventory-command";
 import { filterActionableWarehouseLocations, isActionableWarehouseLocation } from "@/lib/warehouse-locations";
 
 interface InlineCaseBreakDialogProps {
@@ -58,6 +58,7 @@ export default function InlineCaseBreakDialog({
 }: InlineCaseBreakDialogProps) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const inventoryCommand = useInventoryCommand();
 
   const [toLocationId, setToLocationId] = useState<number | null>(null);
   const [qtySourceUnits, setQtySourceUnits] = useState("1");
@@ -116,27 +117,18 @@ export default function InlineCaseBreakDialog({
 
   const caseBreakMutation = useMutation({
     mutationFn: async () => {
-      const res = await apiRequest("POST", "/api/inventory/break", {
-        warehouseLocationId: defaultFromLocationId?.toString(),
-        targetLocationId: toLocationId?.toString(),
-        sourceVariantId: sourceVariantId?.toString(),
-        targetVariantId: pickVariantId?.toString(),
-        sourceQty: qtySourceUnits,
+      return inventoryCommand<{ sourceQtyRemoved: number; targetQtyAdded: number }>("/api/inventory/break", {
+        warehouseLocationId: defaultFromLocationId,
+        targetLocationId: toLocationId,
+        sourceVariantId,
+        targetVariantId: pickVariantId,
+        sourceQty: Number(qtySourceUnits),
         notes: notes || undefined,
       });
-      return res.json();
     },
     onSuccess: (data) => {
-      if (data.autoExecuteError) {
-        toast({ title: "Task created but execution failed", description: data.autoExecuteError, variant: "destructive", duration: 8000 });
-      } else {
-        onOpenChange(false);
-        if (data.autoExecuted) {
-          toast({ title: "Case break completed", description: `Broke ${qtySourceUnits} ${sourceSku} into ${data.moved} ${pickSku}` });
-        } else {
-          toast({ title: "Case break task created" });
-        }
-      }
+      onOpenChange(false);
+      toast({ title: "Case break completed", description: `Broke ${data.sourceQtyRemoved} ${sourceSku} into ${data.targetQtyAdded} ${pickSku}` });
       queryClient.invalidateQueries({ queryKey: ["/api/operations/bin-inventory"] });
       queryClient.invalidateQueries({ queryKey: ["/api/inventory/levels"] });
       queryClient.invalidateQueries({ queryKey: ["/api/replen/tasks"] });

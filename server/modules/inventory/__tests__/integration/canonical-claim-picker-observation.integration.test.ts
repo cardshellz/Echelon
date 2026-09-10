@@ -87,6 +87,9 @@ describeWithDisposableDb.sequential("canonical claim picker-observation PostgreS
       CREATE SCHEMA "${schemas.warehouse}";
       CREATE SCHEMA "${schemas.inventory}";
       CREATE SCHEMA "${schemas.wms}";
+      CREATE TABLE "${schemas.inventory}".quantity_ledger_opening (
+        singleton_key boolean PRIMARY KEY, command_id bigint NOT NULL
+      );
 
       CREATE TABLE "${schemas.warehouse}".warehouse_locations (
         id integer PRIMARY KEY,

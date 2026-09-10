@@ -44,8 +44,10 @@ import {
 import { decideImportedShopifyProductMapping } from "../catalog/shopify-product-mapping.domain";
 import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
 import { isCustomerSellableVariant } from "@shared/catalog/variant-sales-eligibility";
+import { assertLegacyQuantityImportAllowed } from "../inventory/application/legacy-quantity-import";
 
 type DrizzleDb = {
+  execute: (query: import("drizzle-orm").SQL) => Promise<unknown>;
   select: (...args: any[]) => any;
   insert: (...args: any[]) => any;
   update: (...args: any[]) => any;
@@ -825,6 +827,10 @@ class CatalogBackfillService {
     channelId: number,
     result: BackfillResult,
   ): Promise<void> {
+    // A channel's offered quantity is not proof of physical warehouse stock.
+    // Catalog/mapping import may continue, but this old stock-seeding path ends
+    // at the same one-way quantity cutover as every other direct balance writer.
+    await assertLegacyQuantityImportAllowed(this.db, "Shopify quantity backfill");
     console.log(`[CatalogBackfill] Starting inventory backfill...`);
 
     // 1. Resolve default warehouse and location for new inventory records

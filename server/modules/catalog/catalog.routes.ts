@@ -1,4 +1,7 @@
 import type { Express } from "express";
+import { sendInventoryQuantityError, validateInventoryCommandKey } from "../inventory/interfaces/quantity-command.middleware";
+import { CatalogInventoryCommandError } from "./application/catalog-inventory-command.service";
+import { createCatalogInventoryCommandService } from "./infrastructure/catalog-inventory-command.repository";
 import { db } from "../../db";
 import { and, asc, eq, ilike, inArray, isNull, or, sql } from "drizzle-orm";
 import {
@@ -1265,11 +1268,17 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
   });
 
   // Archive product — soft-delete with dependency cleanup
-  app.post("/api/products/:id/archive", requirePermission("inventory", "edit"), async (req, res) => {
+  app.post("/api/products/:id/archive", requirePermission("inventory", "edit"), validateInventoryCommandKey, async (req, res) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = Number(req.params.id);
       const force = req.body?.force === true;
-      const transferToVariantId = req.body?.transferToVariantId ? parseInt(req.body.transferToVariantId) : null;
+      const transferToVariantId = req.body?.transferToVariantId == null ? null : Number(req.body.transferToVariantId);
+
+      if (force) {
+        const owner = createCatalogInventoryCommandService(db, req.app.locals.services.inventoryCore);
+        return res.json(await owner.execute({ operation: "product_archive", sourceId: id,
+          targetVariantId: transferToVariantId, commandKey: req.body.commandKey, actor: req.session.user?.id ?? "" }));
+      }
 
       const product = await storage.getProductById(id);
       if (!product) {
@@ -1342,108 +1351,11 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
 
       const hasBlockers = totalInventory > 0 || pendingShipments.length > 0;
 
-      if (!force) {
-        return res.json({ blocked: hasBlockers, dependencies, product: { id: product.id, sku: product.sku, name: product.name } });
-      }
-
-      // Execute archive
-      let inventoryCleared = 0;
-      let inventoryTransferred = 0;
-      let binAssignmentsCleared = 0;
-      let channelFeedsDeactivated = 0;
-      const userId = (req as any).user?.username || "system";
-
-      // SKU correction transfer — move inventory to target variant before archive
-      if (transferToVariantId) {
-        const targetVariant = await storage.getProductVariantById(transferToVariantId);
-        if (!targetVariant || !targetVariant.isActive) {
-          return res.status(400).json({ error: "Target variant not found or inactive" });
-        }
-
-        const { inventoryCore } = req.app.locals.services;
-        const batchId = `sku_correction_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-
-        for (const v of variants) {
-          const levels = await storage.getInventoryLevelsByVariantId(v.id);
-          for (const level of levels) {
-            if (level.variantQty > 0) {
-              if (level.reservedQty > 0) {
-                return res.status(400).json({
-                  error: `Cannot transfer: variant ${v.sku} has ${level.reservedQty} reserved units. Fulfill or cancel those orders first.`,
-                });
-              }
-
-              await inventoryCore.adjustInventory({
-                productVariantId: v.id,
-                warehouseLocationId: level.warehouseLocationId,
-                qtyDelta: -level.variantQty,
-                reason: `SKU correction: ${v.sku} → ${targetVariant.sku} (archive transfer) [Batch: ${batchId}]`,
-                userId,
-              });
-              await inventoryCore.adjustInventory({
-                productVariantId: transferToVariantId,
-                warehouseLocationId: level.warehouseLocationId,
-                qtyDelta: level.variantQty,
-                reason: `SKU correction: ${v.sku} → ${targetVariant.sku} (archive transfer) [Batch: ${batchId}]`,
-                userId,
-              });
-              inventoryTransferred += level.variantQty;
-            }
-          }
-        }
-
-        // Sync target variant inventory to channels
-        const { channelSync } = req.app.locals.services;
-        if (channelSync) {
-          channelSync.queueSyncAfterInventoryChange(transferToVariantId).catch((err: any) =>
-            console.warn(`[ChannelSync] Post-SKU-correction sync failed:`, err)
-          );
-        }
-
-        console.log(`[ARCHIVE] SKU correction: transferred ${inventoryTransferred} units to variant ${targetVariant.sku} (batch: ${batchId})`);
-      }
-
-      for (const v of variants) {
-        // An explicit SKU-correction transfer moves stock away from the source SKU,
-        // so its now-empty inventory and bin rows can be removed. A normal archive is
-        // reversible and must preserve local physical inventory and bin assignments.
-        if (transferToVariantId) {
-          inventoryCleared += await storage.deleteInventoryLevelsByVariantId(v.id);
-          binAssignmentsCleared += await storage.deleteProductLocationsByVariantId(v.id);
-        }
-
-        // Preserve the channel/listing identity. The is_active transition trigger
-        // durably queues a provider update that makes this variant unavailable.
-        channelFeedsDeactivated += await storage.deactivateChannelFeedsByVariantId(v.id);
-
-        // Deactivate variant
-        await storage.updateProductVariant(v.id, { isActive: false });
-      }
-
-      const replenDeactivated = await storage.deactivateReplenRulesByProductId(id);
-      const replenTasksCancelled = await storage.cancelReplenTasksByProductId(id);
-
-      // Archive the product
-      await storage.updateProduct(id, { isActive: false, status: "archived" });
-
-      console.log(`[ARCHIVE] Product ${id} (${product.sku}) archived: ${variants.length} variants, ${inventoryCleared} inventory rows, ${binAssignmentsCleared} bin assignments, ${channelFeedsDeactivated} feeds, ${replenDeactivated} replen rules, ${replenTasksCancelled} replen tasks`);
-
-      res.json({
-        success: true,
-        archived: {
-          product: { id: product.id, sku: product.sku, name: product.name },
-          variants: variants.length,
-          inventoryCleared,
-          inventoryPreserved: transferToVariantId ? 0 : totalInventory,
-          inventoryTransferred,
-          binAssignmentsCleared,
-          channelFeedsDeactivated,
-          replenDeactivated,
-          replenTasksCancelled,
-        },
-      });
+      return res.json({ blocked: hasBlockers, dependencies, product: { id: product.id, sku: product.sku, name: product.name } });
     } catch (error) {
       console.error("Error archiving product:", error);
+      if (sendInventoryQuantityError(res, error)) return;
+      if (error instanceof CatalogInventoryCommandError) return res.status(error.statusCode).json({ error: error.message, code: error.code });
       res.status(500).json({ error: "Failed to archive product" });
     }
   });
@@ -2594,72 +2506,33 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
   });
 
   // Merge source variant's inventory into target variant, then deactivate source
-  app.post("/api/product-variants/:id/merge", requirePermission("inventory", "update"), async (req, res) => {
+  app.post("/api/product-variants/:id/merge", requirePermission("inventory", "update"), validateInventoryCommandKey, async (req, res) => {
     try {
-      const targetId = parseInt(req.params.id);
-      const sourceId = parseInt(req.body.sourceVariantId);
-      if (!sourceId || sourceId === targetId) {
-        return res.status(400).json({ error: "Invalid source variant" });
-      }
-
-      const target = await storage.getProductVariantById(targetId);
-      const source = await storage.getProductVariantById(sourceId);
-      if (!target) return res.status(404).json({ error: "Target variant not found" });
-      if (!source) return res.status(404).json({ error: "Source variant not found" });
-
-      // Move on-hand from source → target through the guarded, ledgered, tx-wrapped
-      // convertSku use-case (fixes M5: the old reassignInventoryLevelsToVariant
-      // re-pointed product_variant_id with no ledger rows and no transaction, and
-      // would violate the unique(variant,location) constraint when the target
-      // already had stock at the same bin). convertSku writes signed sku_correction
-      // rows per location and upserts into the target safely.
-      const { inventoryCore: mergeCore } = req.app.locals.services;
-      let movedInventoryCount = 0;
-      try {
-        const conv = await mergeCore.convertSku({
-          fromVariantId: sourceId,
-          toVariantId: targetId,
-          notes: `Variant merge: ${source.sku || sourceId} → ${target.sku || targetId}`,
-          userId: req.session.user?.id || "system",
-        });
-        movedInventoryCount = conv.conversions.length;
-      } catch (err: any) {
-        // A merge of a zero-stock source is legitimate — only re-throw real errors.
-        if (!/No inventory found/i.test(String(err?.message))) throw err;
-      }
-
-      // Move product_locations (assignment metadata) from source to target
-      const movedLocationCount = await storage.reassignProductLocationsToVariant(sourceId, targetId);
-
-      // Trigger notifyChange for both variants so channel sync picks up the merged inventory
-      if (mergeCore && movedInventoryCount > 0) {
-        mergeCore.triggerNotifyChange(sourceId, "variant_merge_source");
-        mergeCore.triggerNotifyChange(targetId, "variant_merge_target");
-      }
-
-      // Deactivate source variant
-      await storage.updateProductVariant(sourceId, { isActive: false } as any);
-
-      console.log(`[VARIANT MERGE] ${source.sku} (id=${sourceId}) → ${target.sku} (id=${targetId}): ${movedInventoryCount} inventory, ${movedLocationCount} locations`);
-
-      res.json({
-        ok: true,
-        movedInventoryCount,
-        movedLocationCount,
-        deactivatedVariantId: sourceId,
-      });
+      const targetId = Number(req.params.id);
+      const sourceId = Number(req.body.sourceVariantId);
+      const owner = createCatalogInventoryCommandService(db, req.app.locals.services.inventoryCore);
+      return res.json(await owner.execute({ operation: "variant_merge", sourceId, targetVariantId: targetId,
+        commandKey: req.body.commandKey, actor: req.session.user?.id ?? "" }));
     } catch (error) {
       console.error("Error merging variants:", error);
+      if (sendInventoryQuantityError(res, error)) return;
+      if (error instanceof CatalogInventoryCommandError) return res.status(error.statusCode).json({ error: error.message, code: error.code });
       res.status(500).json({ error: "Failed to merge variants" });
     }
   });
 
   // Archive variant — soft-delete with dependency cleanup (mirrors product archive)
-  app.post("/api/product-variants/:id/archive", requirePermission("inventory", "edit"), async (req, res) => {
+  app.post("/api/product-variants/:id/archive", requirePermission("inventory", "edit"), validateInventoryCommandKey, async (req, res) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = Number(req.params.id);
       const force = req.body?.force === true;
-      const transferToVariantId = req.body?.transferToVariantId ? parseInt(req.body.transferToVariantId) : null;
+      const transferToVariantId = req.body?.transferToVariantId == null ? null : Number(req.body.transferToVariantId);
+
+      if (force) {
+        const owner = createCatalogInventoryCommandService(db, req.app.locals.services.inventoryCore);
+        return res.json(await owner.execute({ operation: "variant_archive", sourceId: id,
+          targetVariantId: transferToVariantId, commandKey: req.body.commandKey, actor: req.session.user?.id ?? "" }));
+      }
 
       const variant = await storage.getProductVariantById(id);
       if (!variant) {
@@ -2706,88 +2579,11 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
 
       const hasBlockers = totalQty > 0 || pendingShipments.length > 0;
 
-      if (!force) {
-        return res.json({ blocked: hasBlockers, dependencies, variant: { id: variant.id, sku: variant.sku, name: variant.name } });
-      }
-
-      // Execute archive
-      let inventoryCleared = 0;
-      let inventoryTransferred = 0;
-      let binAssignmentsCleared = 0;
-      let channelFeedsDeactivated = 0;
-      const userId = (req as any).user?.username || "system";
-
-      // SKU correction transfer
-      if (transferToVariantId) {
-        const targetVariant = await storage.getProductVariantById(transferToVariantId);
-        if (!targetVariant || !targetVariant.isActive) {
-          return res.status(400).json({ error: "Target variant not found or inactive" });
-        }
-
-        const { inventoryCore } = req.app.locals.services;
-        const batchId = `sku_correction_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-
-        for (const level of levels) {
-          if (level.variantQty > 0) {
-            if (level.reservedQty > 0) {
-              return res.status(400).json({
-                error: `Cannot transfer: ${level.reservedQty} reserved units. Fulfill or cancel those orders first.`,
-              });
-            }
-            await inventoryCore.adjustInventory({
-              productVariantId: id,
-              warehouseLocationId: level.warehouseLocationId,
-              qtyDelta: -level.variantQty,
-              reason: `SKU correction: ${variant.sku} → ${targetVariant.sku} (variant archive transfer) [Batch: ${batchId}]`,
-              userId,
-            });
-            await inventoryCore.adjustInventory({
-              productVariantId: transferToVariantId,
-              warehouseLocationId: level.warehouseLocationId,
-              qtyDelta: level.variantQty,
-              reason: `SKU correction: ${variant.sku} → ${targetVariant.sku} (variant archive transfer) [Batch: ${batchId}]`,
-              userId,
-            });
-            inventoryTransferred += level.variantQty;
-          }
-        }
-
-        const { channelSync } = req.app.locals.services;
-        if (channelSync) {
-          channelSync.queueSyncAfterInventoryChange(transferToVariantId).catch((err: any) =>
-            console.warn(`[ChannelSync] Post-SKU-correction sync failed:`, err)
-          );
-        }
-        console.log(`[ARCHIVE-VARIANT] SKU correction: transferred ${inventoryTransferred} units from ${variant.sku} to ${targetVariant.sku} (batch: ${batchId})`);
-      }
-
-      // An explicit SKU-correction transfer moves stock away from the source SKU.
-      // A normal archive is reversible and preserves inventory and bin assignments.
-      if (transferToVariantId) {
-        inventoryCleared = await storage.deleteInventoryLevelsByVariantId(id);
-        binAssignmentsCleared = await storage.deleteProductLocationsByVariantId(id);
-      }
-
-      // Preserve the channel/listing identity. The is_active transition trigger
-      // durably queues a provider update that makes this variant unavailable.
-      channelFeedsDeactivated = await storage.deactivateChannelFeedsByVariantId(id);
-      await storage.updateProductVariant(id, { isActive: false });
-
-      console.log(`[ARCHIVE-VARIANT] Variant ${id} (${variant.sku}) archived: ${inventoryCleared} inventory rows, ${binAssignmentsCleared} bin assignments, ${channelFeedsDeactivated} feeds`);
-
-      res.json({
-        success: true,
-        archived: {
-          variant: { id: variant.id, sku: variant.sku, name: variant.name },
-          inventoryCleared,
-          inventoryPreserved: transferToVariantId ? 0 : totalQty,
-          inventoryTransferred,
-          binAssignmentsCleared,
-          channelFeedsDeactivated,
-        },
-      });
+      return res.json({ blocked: hasBlockers, dependencies, variant: { id: variant.id, sku: variant.sku, name: variant.name } });
     } catch (error) {
       console.error("Error archiving variant:", error);
+      if (sendInventoryQuantityError(res, error)) return;
+      if (error instanceof CatalogInventoryCommandError) return res.status(error.statusCode).json({ error: error.message, code: error.code });
       res.status(500).json({ error: "Failed to archive variant" });
     }
   });

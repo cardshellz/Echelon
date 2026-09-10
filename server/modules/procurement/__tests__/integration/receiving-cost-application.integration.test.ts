@@ -12,6 +12,7 @@ import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import * as schema from "@shared/schema";
 import { lockInventoryCostGraph } from "../../../inventory/infrastructure/cost-evidence.repository";
+import { installPreOpeningQuantityAuthorityFixture } from "../../../inventory/__tests__/fixtures/pre-opening-quantity-authority.fixture";
 import { receivingUnitVersion } from "../../receiving-unit-contract";
 import { fixtureForeignKeys, fixtureTable, qualifiedTable } from "./shipment-line-fixture";
 
@@ -66,6 +67,7 @@ audit.sequential("receipt/AP/freight cost revisions with real owners", () => {
     }
     for (const table of TABLES) await pool.query(fixtureTable(table));
     for (const statement of fixtureForeignKeys(TABLES)) await pool.query(statement);
+    await installPreOpeningQuantityAuthorityFixture(pool);
     await pool.query(readFileSync(resolve(process.cwd(), "migrations/221_receiving_unit_snapshots.sql"), "utf8"));
     await pool.query(`
       CREATE UNIQUE INDEX audit_po_receipt_unique ON procurement.po_receipts(purchase_order_line_id,receiving_line_id);
