@@ -94,5 +94,31 @@ fresh-per-file database design passed those same tests without modifying their
 assertions or application code. Local validation used PostgreSQL 17; GitHub's
 existing PostgreSQL 16 service version remains unchanged and must pass CI.
 
+### First hosted run: quantity fixture clock regression
+
+The first hosted run exposed a separate time-dependent quantity fixture failure:
+`seedCompositionReviewedDryRun` captures PostgreSQL transaction time, and the
+quantity fixture uses that timestamp for preparation/publication verification,
+but it previously forced final activation to `2026-09-10T16:00:00Z`. Runs after
+that instant correctly failed `availability_activation_runs_milestone_time_chk`.
+The earlier local run occurred before the cutoff; hosted shards 7 and 8 failed
+afterward. Both affected files shared this cause, reproduced locally without
+parallel execution.
+
+The fixture now uses its captured dry-run clock for all activation milestones
+and its persisted activation timestamp for the post-cutover catalog freeze
+release. The first repair rerun exposed this latter clock mismatch in three
+catalog tests after they could get past activation. Historical quantity evidence
+retains its existing fixed timestamp. New database regressions assert that every
+activation milestone equals the source dry-run timestamp and the freeze release
+matches activation, detecting mixed clocks even before the cutoff. Production
+code, constraints, and existing test assertions are unchanged.
+
+After both repairs, local PostgreSQL validation covered all eight shards:
+**70 distinct files, 1,133 tests**, zero failures, errors, or skips. All generated
+test databases were removed. The 83 CI contracts, repository TypeScript, actionlint,
+and whitespace checks also passed. Hosted PostgreSQL 16 validation remains the
+separate merge-time check; these local results used PostgreSQL 17.
+
 References: [Playwright sharding](https://playwright.dev/docs/test-sharding) and
 [GitHub matrix jobs](https://docs.github.com/en/actions/using-jobs/using-a-matrix-for-your-jobs).

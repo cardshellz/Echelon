@@ -77,6 +77,29 @@ dbDescribe.sequential("single quantity owner / real PostgreSQL", () => {
     expect(await state()).toEqual(before);
     expect((await pool.query("SELECT authority FROM inventory.availability_runtime_authority")).rows[0].authority).toBe("legacy");
   });
+  it("keeps activation milestones on the captured dry-run clock, not historical quantity time", async () => {
+    await open();
+    const milestones = await pool.query<{
+      state: string;
+      started_with_snapshot: boolean;
+      prepared_with_snapshot: boolean;
+      verified_with_snapshot: boolean;
+      activated_with_snapshot: boolean;
+    }>(`SELECT activation.state,
+        activation.started_at = dry_run.completed_at AS started_with_snapshot,
+        activation.prepared_at = dry_run.completed_at AS prepared_with_snapshot,
+        activation.publication_verified_at = dry_run.completed_at AS verified_with_snapshot,
+        activation.activated_at = dry_run.completed_at AS activated_with_snapshot
+      FROM inventory.availability_activation_runs activation
+      JOIN inventory.availability_activation_runs dry_run ON dry_run.id = activation.source_dry_run_id
+      WHERE activation.mode = 'activation'`);
+    // Equality catches the clock mismatch even before the historical timestamp,
+    // when the chronology constraint alone would still allow the old fixture.
+    expect(milestones.rows).toEqual([{
+      state: "active", started_with_snapshot: true, prepared_with_snapshot: true,
+      verified_with_snapshot: true, activated_with_snapshot: true,
+    }]);
+  });
   it("posts the complete reserve/pick/pack/ship lifecycle once and derives both balances", async () => {
     await open();
     for (const c of [command("reserve", "reserve", d(0,2)), command("pick", "pick", d(-5,-5,5)),
@@ -553,7 +576,12 @@ dbDescribe.sequential("single quantity owner / real PostgreSQL", () => {
     await transaction(async client => {
       const run = (await client.query("SELECT activation_run_id::text AS id FROM inventory.availability_activation_freezes WHERE released_at IS NULL")).rows[0];
       await acquireInventoryCutoverFenceInsideTransaction(client, { expectedAuthority: "canonical", expectedConfigurationRunId: run.id });
-      await client.query("UPDATE inventory.availability_activation_freezes SET released_at=$1,released_by='operator',release_reason='Post-cutover catalog fixture' WHERE activation_run_id=$2", [NOW, run.id]);
+      // Release on the same captured activation clock, not historical quantity
+      // time, which can be earlier than this freeze's database acquisition.
+      await client.query(`UPDATE inventory.availability_activation_freezes activation_freeze
+        SET released_at=activation.activated_at,released_by='operator',release_reason='Post-cutover catalog fixture'
+        FROM inventory.availability_activation_runs activation
+        WHERE activation_freeze.activation_run_id=$1 AND activation.id=activation_freeze.activation_run_id`, [run.id]);
     });
     for (const table of [inventorySchema.channelFeeds, inventorySchema.replenRules, inventorySchema.replenTasks]) {
       const definition = getTableConfig(table);
@@ -575,6 +603,16 @@ dbDescribe.sequential("single quantity owner / real PostgreSQL", () => {
         unitCostCents: input.mills / 100, unitCostMills: input.mills, userId: "operator" }));
     }
   }
+
+  it("releases the catalog fixture freeze on its persisted activation clock", async () => {
+    await prepareCatalogInventoryMetadata();
+    const release = await pool.query<{ released_with_activation: boolean; chronological: boolean }>(`
+      SELECT activation_freeze.released_at = activation.activated_at AS released_with_activation,
+        activation_freeze.released_at >= activation_freeze.acquired_at AS chronological
+      FROM inventory.availability_activation_freezes activation_freeze
+      JOIN inventory.availability_activation_runs activation ON activation.id=activation_freeze.activation_run_id`);
+    expect(release.rows).toEqual([{ released_with_activation: true, chronological: true }]);
+  });
 
   it("archives multiple catalog source SKUs as one exact command and replays before source enumeration", async () => {
     await prepareCatalogInventoryMetadata();
