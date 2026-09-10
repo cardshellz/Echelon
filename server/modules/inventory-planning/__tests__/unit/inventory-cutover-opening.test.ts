@@ -98,7 +98,7 @@ describe("independently verified current inventory opening", () => {
     const evidence=reconstructionEvidence(); evidence.levels[0].packedQty="1";
     expect(codes(evidence)).toContain("OPENING_CURRENT_BALANCE_INVALID");
   });
-  it("does not turn an empty-bin promise into a counter release", () => {
+  it("does not release an empty-bin reservation that still contains a real lot hold", () => {
     const evidence=reconstructionEvidence(); evidence.levels[0].variantQty="0"; evidence.lots[0].onHandQty="0";
     const result=evaluateCutoverOpening(evidence,verification(evidence)); expect(result.ready).toBe(false);
     expect(result.plan.legacyPromiseReleases).toEqual([]);

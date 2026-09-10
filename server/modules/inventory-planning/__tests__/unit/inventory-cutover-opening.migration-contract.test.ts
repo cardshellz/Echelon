@@ -3,7 +3,10 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { INVENTORY_CUTOVER_CONFIGURATION_TABLES, INVENTORY_CUTOVER_OPERATIONAL_TABLES } from "../../domain/inventory-cutover-admission-fence";
 
-const migration = readFileSync(resolve(process.cwd(), "migrations/240_inventory_cutover_verified_opening.sql"), "utf8");
+// Git may check this SQL out with CRLF on Windows. Assert the same statements
+// on either platform without editing the deployed migration or its content hash.
+const migration = readFileSync(resolve(process.cwd(), "migrations/240_inventory_cutover_verified_opening.sql"), "utf8")
+  .replace(/\r\n/g, "\n");
 describe("verified opening evidence migration contract", () => {
   it("sorts after the real admission and claim prerequisites in release-runner order", () => {
     // run-migrations.ts sorts filenames lexically, not their numeric prefixes.
