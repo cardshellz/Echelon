@@ -4,6 +4,7 @@ import { openingAssessmentSchema, openingVerificationSchema, requiredOpeningItem
 import { cutoverReconstructionEvidenceSchema, type CutoverReconstructionEvidence, type CutoverReconstructionPlan,
   type CutoverReconstructionAllocation, type CutoverReconstructionBlocker } from "@shared/types/inventory-cutover-reconstruction";
 import { planCutoverReconstruction, reconstructionHash } from "./inventory-cutover-reconstruction";
+import { planOpeningReservationBasis } from "./inventory-opening-reservation-basis";
 
 /** Order-independent verification identity. Never mutate an uploaded observation. */
 export function normalizeOpeningVerification(input: OpeningVerification): OpeningVerification {
@@ -21,8 +22,8 @@ export function normalizeOpeningVerification(input: OpeningVerification): Openin
  * V1 preserves the semantics of existing immutable audits. V2 replaces dual
  * counter verification with exact lot observations and derived positions. This
  * evaluator changes no data; only admitted cutover can post that opening.
- * Nonphysical promise handoffs require complete original journal proof in both
- * versions; observed lot counts cannot authorize a new promise release.
+ * Explicit current-custody opt-in permits audited reservation-only translation
+ * when recorded physical stock matches verified lots. Default policy is unchanged.
  */
 export function evaluateCutoverOpening(rawEvidence: unknown, input: OpeningVerification): OpeningAssessment {
   let evidence = cutoverReconstructionEvidenceSchema.parse(rawEvidence);
@@ -33,12 +34,15 @@ export function evaluateCutoverOpening(rawEvidence: unknown, input: OpeningVerif
   // Reuse the original journal-backed proof, never infer a promise from a
   // counter discrepancy or from uploaded verification alone. These actions are
   // executed only by the inventory owner during the final atomic handoff.
-  const promiseReleases = strict.legacyPromiseReleases;
+  const currentBasis = verification.reservationBasis === "verified_current_lot_custody";
+  const basis = currentBasis ? planOpeningReservationBasis(evidence) : { rebases: [], blockers: [] };
+  const rebasesByLevel = new Map(basis.rebases.map(row => [row.inventoryLevelId, row]));
+  const promiseReleases = currentBasis ? [] : strict.legacyPromiseReleases;
   const promisesByLevel = new Map(promiseReleases.map(release => [release.inventoryLevelId, release]));
   const promiseOwners = new Map(promiseReleases.flatMap(release => release.owners.map(owner => [owner.orderItemId, owner] as const)));
   const sourceEvidenceHash = strict.evidenceHash;
   const verificationHash = reconstructionHash(verification);
-  const blockers: CutoverReconstructionBlocker[] = [];
+  const blockers: CutoverReconstructionBlocker[] = [...basis.blockers];
   const block = (code: string, subject: string, message: string) => blockers.push({ code, subject, message });
   const finish = (plan: CutoverReconstructionPlan): OpeningAssessment => {
     const unique = [...new Map([...blockers, ...plan.blockers].map(row => [`${row.code}:${row.subject}`, row])).values()]
@@ -53,9 +57,13 @@ export function evaluateCutoverOpening(rawEvidence: unknown, input: OpeningVerif
     const result: CutoverReconstructionPlan = { ...plan, evidenceHash: reconstructionHash({
       contractVersion: "inventory_cutover_opening_v1", ...provenance }),
       ready: unique.length === 0, blockers: unique,
-      legacyPromiseReleases: unique.length === 0 ? promiseReleases : [], openingBalance: provenance };
+      legacyPromiseReleases: unique.length === 0 ? promiseReleases : [], openingBalance: provenance,
+      ...(unique.length === 0 && basis.rebases.length > 0 ? { openingReservationRebases: basis.rebases } : {}) };
     // No blocked partial adoption is consumable by the claim planner.
-    if (!result.ready) result.orders = [];
+    if (!result.ready) {
+      result.orders = [];
+      delete result.openingReservationRebases;
+    }
     return openingAssessmentSchema.parse({ sourceEvidenceHash, verificationHash, ready: result.ready,
       blockers: unique, historicalExceptions, historicalExceptionHash, plan: result });
   };
@@ -65,6 +73,11 @@ export function evaluateCutoverOpening(rawEvidence: unknown, input: OpeningVerif
   }
   const sameRows = (left: readonly { id: number }[], right: readonly { id: number }[]) =>
     canonicalJson([...left].sort((a,b) => a.id-b.id)) === canonicalJson([...right].sort((a,b) => a.id-b.id));
+  // A reservation-only translation must not be combined with a physical count
+  // adjustment. V2 without this opt-in retains its independent count semantics.
+  if (currentBasis && !sameRows(verification.lots, evidence.lots)) {
+    block("OPENING_LOT_VERIFICATION_MISMATCH", "lots", "Reservation-only handoff requires unchanged independently verified physical lot quantities and costs.");
+  }
   if (verification.contractVersion === "inventory_cutover_opening_v1") {
     if (!sameRows(verification.levels, evidence.levels)) block("OPENING_LEVEL_VERIFICATION_MISMATCH", "levels", "Independent verification must cover every exact current level and counter. Correct discrepancies through the inventory owner first.");
     if (!sameRows(verification.lots, evidence.lots)) block("OPENING_LOT_VERIFICATION_MISMATCH", "lots", "Independent verification must cover every exact lot quantity and cost component; no missing lot or new valuation is inferred.");
@@ -111,10 +124,11 @@ export function evaluateCutoverOpening(rawEvidence: unknown, input: OpeningVerif
     // the raw nonphysical promise again would create a negative physical hold.
     const rawPromise = verification.contractVersion === "inventory_cutover_opening_v1"
       ? promisesByLevel.get(level.id)?.reservedQty ?? "0" : "0";
-    const physicalReserved = BigInt(level.reservedQty) - BigInt(rawPromise);
+    const physicalReserved = rebasesByLevel.has(level.id) ? BigInt(rebasesByLevel.get(level.id)!.physicalReservedQty)
+      : BigInt(level.reservedQty) - BigInt(rawPromise);
     if (physicalReserved < BigInt(0) || physicalReserved > BigInt(level.variantQty)
       || BigInt(level.variantQty) < BigInt(0) || BigInt(level.pickedQty) < BigInt(0) || BigInt(level.packedQty) !== BigInt(0)) {
-      block("OPENING_CURRENT_BALANCE_INVALID", `level:${level.id}`, "Current physical counters must be valid. Only an exact journal-proven empty-bin promise can transfer as unfilled demand; other discrepancies and packed custody still require a supported handoff.");
+      block("OPENING_CURRENT_BALANCE_INVALID", `level:${level.id}`, "Current physical counters must be valid under the selected reservation basis. Physical discrepancies and packed custody still require a supported handoff.");
     }
   }
   for (const owner of verification.owners) {
@@ -208,7 +222,9 @@ export function evaluateCutoverOpening(rawEvidence: unknown, input: OpeningVerif
   const projected: CutoverReconstructionEvidence = { ...evidence,
     // V1 verifies raw counters; V2 already contains only observed physical holds.
     levels: verification.contractVersion === "inventory_cutover_opening_v1"
-      ? evidence.levels.map(level => promisesByLevel.has(level.id) ? { ...level, reservedQty: "0" } : level)
+      ? evidence.levels.map(level => rebasesByLevel.has(level.id)
+        ? { ...level, reservedQty: rebasesByLevel.get(level.id)!.physicalReservedQty }
+        : promisesByLevel.has(level.id) ? { ...level, reservedQty: "0" } : level)
       : evidence.levels,
     journals: observations,
     items: evidence.items.map(item => { const owner = owners.get(item.id); return owner ? { ...item,

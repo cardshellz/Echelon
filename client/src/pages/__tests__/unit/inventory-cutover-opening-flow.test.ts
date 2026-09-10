@@ -42,7 +42,7 @@ async function invoke(index: number) {
 }
 function confirmAndReason() {
   let root = render();
-  const checkbox = nodes(root).find(props => props.type === "checkbox")!;
+  const checkbox = field(root, "opening-independent-confirmation");
   (checkbox.onChange as (event: unknown) => void)({ target: { checked: true } });
   root = render();
   (field(root, "opening-verification-reason").onChange as (event: unknown) => void)({ target: { value: "Exact reviewed reason" } });
@@ -53,6 +53,14 @@ beforeEach(() => { hooks.cells = []; hooks.cursor = 0; hooks.source = openingSou
 afterEach(() => vi.unstubAllGlobals());
 
 describe("opening verification explicit operator and retry flow", () => {
+  it("cannot substitute policy selection for independent confirmation", async () => {
+    const fetchMock = vi.fn(); vi.stubGlobal("fetch", fetchMock);
+    await importVerification(); const root = render();
+    (field(root, "opening-current-custody-policy").onChange as (event: unknown) => void)({ target: { checked: true } });
+    render(); await expect(invoke(0)).rejects.toThrow("independently verify");
+    await expect(invoke(1)).rejects.toThrow("independently verified");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
   it("requires independent confirmation after import and cannot skip server preview", async () => {
     const fetchMock = vi.fn(); vi.stubGlobal("fetch", fetchMock);
     await importVerification(); render();
