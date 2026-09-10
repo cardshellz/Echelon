@@ -104,6 +104,12 @@ export interface PackagingAssignment {
   revision: number;
 }
 export interface PackagingConfiguration {
+  configurationAssignments?: {
+    channelId: number;
+    channelName: string;
+    warehouseId: number | null;
+    suiteId: number;
+  }[];
   suites: BoxSuiteSummary[];
   assignments: PackagingAssignment[];
   boxes: { id: number; code: string; name: string; isActive: boolean }[];
@@ -144,6 +150,16 @@ export interface DropshipSharedShippingConfig {
 }
 export const packagingConfigurationSchema: z.ZodType<PackagingConfiguration> =
   z.object({
+    configurationAssignments: z
+      .array(
+        z.object({
+          channelId: z.number().int().positive(),
+          channelName: z.string(),
+          warehouseId: z.number().int().positive().nullable(),
+          suiteId: z.number().int().positive(),
+        }),
+      )
+      .optional(),
     suites: z.array(
       z.object({
         id: z.number().int().positive(),

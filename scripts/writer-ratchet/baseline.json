@@ -1048,6 +1048,12 @@
   "shipping.box_warehouse_stock": [
     "modules/shipping-engine"
   ],
+  "shipping.channel_packaging_overrides": [
+    "modules/shipping-engine"
+  ],
+  "shipping.channel_packaging_policies": [
+    "modules/shipping-engine"
+  ],
   "shipping.channel_policies": [
     "modules/shipping-engine"
   ],
@@ -1096,6 +1102,9 @@
     "modules/shipping-engine"
   ],
   "shipping.packaging_assignments": [
+    "modules/shipping-engine"
+  ],
+  "shipping.packaging_confirmation_events": [
     "modules/shipping-engine"
   ],
   "shipping.product_set_members": [

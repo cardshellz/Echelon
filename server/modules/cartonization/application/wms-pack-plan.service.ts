@@ -23,10 +23,10 @@
  */
 
 import { createHash } from "crypto";
-import { resolvePackingFulfillmentChannel } from '../domain/fulfillment-channel';
+import { resolvePackingFulfillmentChannel } from "../domain/fulfillment-channel";
 import { and, desc, eq, sql } from "drizzle-orm";
-import { SharedShippingConfigurationRepository } from '../../shipping-engine/infrastructure/shared-configuration.repository';
-import type { FulfillmentChannel } from '@shared/shipping/configuration';
+import { SharedShippingConfigurationRepository } from "../../shipping-engine/infrastructure/shared-configuration.repository";
+import type { FulfillmentChannel } from "@shared/shipping/configuration";
 import {
   orderItems,
   channels,
@@ -51,9 +51,6 @@ import {
   loadPackingInputs,
   resolveVariantIdsBySku,
 } from "../infrastructure/packing-input.repository";
-
-/** Origin used when an order has no warehouse assigned (primary warehouse). */
-const DEFAULT_ORIGIN_WAREHOUSE_ID = 1;
 
 /** Hard cap so ShipStation internalNotes never balloons past readability. */
 export const PACK_INSTRUCTION_MAX_LENGTH = 200;
@@ -89,12 +86,17 @@ export interface PackPlanOrderLine {
 export interface PackPlanDeps {
   loadOrder: (
     wmsOrderId: number,
-  ) => Promise<{ id: number; warehouseId: number | null; fulfillmentChannel?: FulfillmentChannel } | null>;
+  ) => Promise<{
+    id: number;
+    warehouseId: number | null;
+    channelId?: number | null;
+    fulfillmentChannel?: FulfillmentChannel;
+  } | null>;
   loadOrderItems: (wmsOrderId: number) => Promise<PackPlanOrderLine[]>;
   resolveVariantIdsBySku: typeof resolveVariantIdsBySku;
   loadPackingInputs: typeof loadPackingInputs;
   loadActiveBoxes: typeof loadActiveBoxes;
-  loadPackaging?: SharedShippingConfigurationRepository['loadPackaging'];
+  loadPackaging?: SharedShippingConfigurationRepository["loadPackaging"];
   findActivePlan: (wmsOrderId: number) => Promise<ShippingPackPlan | null>;
   /** Transactional: supersede prior active plans + insert plan/parcels/items. */
   persistPlan: (input: PersistPlanInput) => Promise<ShippingPackPlan>;
@@ -132,7 +134,8 @@ export function buildBoxInstruction(parcels: CartonParcel[]): string | null {
     if (parcel.boxCode != null) {
       boxCounts.set(parcel.boxCode, (boxCounts.get(parcel.boxCode) ?? 0) + 1);
     } else if (parcel.siocProductVariantId != null) {
-      const sku = parcel.items[0]?.sku ?? `variant-${parcel.siocProductVariantId}`;
+      const sku =
+        parcel.items[0]?.sku ?? `variant-${parcel.siocProductVariantId}`;
       siocCounts.set(sku, (siocCounts.get(sku) ?? 0) + 1);
     } else {
       // Neither a box nor a SIOC container — cannot describe it truthfully.
@@ -151,7 +154,10 @@ export function buildBoxInstruction(parcels: CartonParcel[]): string | null {
     // Truncate on a part boundary and mark the omission — a clipped-but-valid
     // prefix beats an ambiguous mid-token cut.
     const suffix = " +…";
-    while (parts.length > 1 && instruction.length + suffix.length > PACK_INSTRUCTION_MAX_LENGTH) {
+    while (
+      parts.length > 1 &&
+      instruction.length + suffix.length > PACK_INSTRUCTION_MAX_LENGTH
+    ) {
       parts.pop();
       instruction = `BOX: ${parts.join(" + ")}`;
     }
@@ -189,9 +195,11 @@ export function computePackPlanInputHash(
         riderVoidMaxWeightGrams: i.riderVoidMaxWeightGrams,
         riderVoidMaxItems: i.riderVoidMaxItems,
       }))
-      .sort((a, b) =>
-        a.productVariantId - b.productVariantId
-        || (a.sku ?? "").localeCompare(b.sku ?? "")),
+      .sort(
+        (a, b) =>
+          a.productVariantId - b.productVariantId ||
+          (a.sku ?? "").localeCompare(b.sku ?? ""),
+      ),
     boxes: boxes
       .map((box) => ({
         id: box.id,
@@ -227,7 +235,14 @@ export async function ensurePackPlan(
     loadActiveBoxes,
     // Preserve the existing injectable box-loader test seam; production always
     // resolves a revisioned suite with its full specification snapshot.
-    loadPackaging: overrides.loadActiveBoxes ? undefined : (channel,warehouseId) => new SharedShippingConfigurationRepository().loadPackaging(channel,warehouseId),
+    loadPackaging: overrides.loadActiveBoxes
+      ? undefined
+      : (channel, warehouseId, channelId) =>
+          new SharedShippingConfigurationRepository().loadPackaging(
+            channel,
+            warehouseId,
+            channelId,
+          ),
     findActivePlan: findActivePlanForOrder,
     persistPlan: persistPlanTransactional,
     ...overrides,
@@ -236,7 +251,9 @@ export async function ensurePackPlan(
   try {
     const wmsOrderId = request.wmsOrderId;
     if (!Number.isInteger(wmsOrderId) || wmsOrderId <= 0) {
-      console.warn(`[PackPlan] invalid wmsOrderId ${String(wmsOrderId)}; no plan`);
+      console.warn(
+        `[PackPlan] invalid wmsOrderId ${String(wmsOrderId)}; no plan`,
+      );
       return null;
     }
 
@@ -248,26 +265,56 @@ export async function ensurePackPlan(
 
     const lines = await deps.loadOrderItems(wmsOrderId);
     if (lines.length === 0) {
-      console.warn(`[PackPlan] wms order ${wmsOrderId} has no shippable items; no plan`);
+      console.warn(
+        `[PackPlan] wms order ${wmsOrderId} has no shippable items; no plan`,
+      );
       return null;
     }
 
-    const variantIdBySku = await deps.resolveVariantIdsBySku(lines.map((l) => l.sku));
-    const packingInputs = await deps.loadPackingInputs([...variantIdBySku.values()]);
+    const variantIdBySku = await deps.resolveVariantIdsBySku(
+      lines.map((l) => l.sku),
+    );
+    const packingInputs = await deps.loadPackingInputs([
+      ...variantIdBySku.values(),
+    ]);
     const { items, warnings: itemWarnings } = buildCartonizeItems(
-      lines, variantIdBySku, packingInputs,
+      lines,
+      variantIdBySku,
+      packingInputs,
     );
 
-    const originWarehouseId = order.warehouseId ?? DEFAULT_ORIGIN_WAREHOUSE_ID;
-    const packaging = deps.loadPackaging ? await deps.loadPackaging(order.fulfillmentChannel ?? 'internal',originWarehouseId) : null;
-    const boxes = packaging?.boxes ?? await deps.loadActiveBoxes(originWarehouseId,order.fulfillmentChannel ?? 'internal');
+    if (order.warehouseId == null) {
+      console.warn(
+        `[PackPlan] order ${wmsOrderId}: fulfillment warehouse is missing; no packaging authority can be resolved`,
+      );
+      return null;
+    }
+    const originWarehouseId = order.warehouseId;
+    const packaging = deps.loadPackaging
+      ? await deps.loadPackaging(
+          order.fulfillmentChannel ?? "internal",
+          originWarehouseId,
+          order.channelId,
+        )
+      : null;
+    const boxes =
+      packaging?.boxes ??
+      (await deps.loadActiveBoxes(
+        originWarehouseId,
+        order.fulfillmentChannel ?? "internal",
+      ));
 
-    const packing = cartonize(items, boxes);
+    const effectiveItems =
+      packaging?.requirement === "unbranded"
+        ? items.map((item) => ({ ...item, shipsInOwnContainer: false }))
+        : items;
+    const packing = cartonize(effectiveItems, boxes);
     // candidates[0] is the primary strategy (fewest-parcels, or fallback).
     const candidate = packing.candidates[0];
     const parcels = candidate.parcels;
     const instruction = buildBoxInstruction(parcels);
-    const complete = instruction !== null && isCartonizeCandidateVerified(candidate);
+    const complete =
+      instruction !== null && isCartonizeCandidateVerified(candidate);
 
     if (!complete) {
       // Fallback/degraded packings are never persisted: fallback parcels can
@@ -281,16 +328,21 @@ export async function ensurePackPlan(
       return null;
     }
 
-    const boxHash = computePackPlanInputHash(items, boxes);
-    const inputHash = packaging ? createHash('sha256').update(JSON.stringify({ boxHash,packaging })).digest('hex') : boxHash;
+    const boxHash = computePackPlanInputHash(effectiveItems, boxes);
+    const inputHash = packaging
+      ? createHash("sha256")
+          .update(JSON.stringify({ boxHash, packaging }))
+          .digest("hex")
+      : boxHash;
 
     const requestedShipmentId = request.shipmentRequestId ?? null;
     const existing = await deps.findActivePlan(wmsOrderId);
     if (
-      existing
-      && existing.inputHash === inputHash
-      && existing.engineVersion === ENGINE_VERSION
-      && (requestedShipmentId === null || existing.shipmentRequestId === requestedShipmentId)
+      existing &&
+      existing.inputHash === inputHash &&
+      existing.engineVersion === ENGINE_VERSION &&
+      (requestedShipmentId === null ||
+        existing.shipmentRequestId === requestedShipmentId)
     ) {
       // Same inputs and engine version mean the stored plan is already this
       // deterministic packing. Return it unchanged — no supersede, no insert.
@@ -359,20 +411,42 @@ export async function maybeGetPackInstruction(
 
 async function loadWmsOrder(
   wmsOrderId: number,
-): Promise<{ id: number; warehouseId: number | null; fulfillmentChannel: FulfillmentChannel } | null> {
+): Promise<{
+  id: number;
+  warehouseId: number | null;
+  channelId: number | null;
+  fulfillmentChannel: FulfillmentChannel;
+} | null> {
   const rows = await db
-    .select({ id: orders.id, warehouseId: orders.warehouseId,source: orders.source,
-      channelName: channels.name,channelType: channels.type,channelProvider: channels.provider,shippingConfig: channels.shippingConfig })
+    .select({
+      id: orders.id,
+      warehouseId: orders.warehouseId,
+      channelId: orders.channelId,
+      source: orders.source,
+      channelName: channels.name,
+      channelType: channels.type,
+      channelProvider: channels.provider,
+      shippingConfig: channels.shippingConfig,
+    })
     .from(orders)
-    .leftJoin(channels,eq(channels.id,orders.channelId))
+    .leftJoin(channels, eq(channels.id, orders.channelId))
     .where(eq(orders.id, wmsOrderId))
     .limit(1);
   const row = rows[0];
-  return row ? { id: row.id,warehouseId: row.warehouseId,fulfillmentChannel: resolvePackingFulfillmentChannel(row) } : null;
+  return row
+    ? {
+        id: row.id,
+        warehouseId: row.warehouseId,
+        channelId: row.channelId,
+        fulfillmentChannel: resolvePackingFulfillmentChannel(row),
+      }
+    : null;
 }
 
 /** Remaining physical lines only; held and already-fulfilled units do not enter this pack plan. */
-async function loadShippableOrderLines(wmsOrderId: number): Promise<PackPlanOrderLine[]> {
+async function loadShippableOrderLines(
+  wmsOrderId: number,
+): Promise<PackPlanOrderLine[]> {
   const rows = await db
     .select({
       sku: orderItems.sku,
@@ -389,18 +463,25 @@ async function loadShippableOrderLines(wmsOrderId: number): Promise<PackPlanOrde
       ...row,
       remainingQuantity: Math.max(0, row.quantity - row.fulfilledQuantity),
     }))
-    .filter((row) => row.requiresShipping === 1 && !row.onHold && row.remainingQuantity > 0)
+    .filter(
+      (row) =>
+        row.requiresShipping === 1 && !row.onHold && row.remainingQuantity > 0,
+    )
     .map((row) => ({ sku: row.sku, quantity: row.remainingQuantity }));
 }
 
-async function findActivePlanForOrder(wmsOrderId: number): Promise<ShippingPackPlan | null> {
+async function findActivePlanForOrder(
+  wmsOrderId: number,
+): Promise<ShippingPackPlan | null> {
   const rows = await db
     .select()
     .from(shippingPackPlans)
-    .where(and(
-      eq(shippingPackPlans.wmsOrderId, wmsOrderId),
-      eq(shippingPackPlans.status, "active"),
-    ))
+    .where(
+      and(
+        eq(shippingPackPlans.wmsOrderId, wmsOrderId),
+        eq(shippingPackPlans.status, "active"),
+      ),
+    )
     .orderBy(desc(shippingPackPlans.id))
     .limit(1);
   return rows[0] ?? null;
@@ -411,15 +492,19 @@ async function findActivePlanForOrder(wmsOrderId: number): Promise<ShippingPackP
  * the new plan + parcels + parcel items/placements. All writes to shipping.pack_plans*
  * MUST stay in this module (writer ratchet).
  */
-async function persistPlanTransactional(input: PersistPlanInput): Promise<ShippingPackPlan> {
+async function persistPlanTransactional(
+  input: PersistPlanInput,
+): Promise<ShippingPackPlan> {
   return db.transaction(async (tx) => {
     await tx
       .update(shippingPackPlans)
       .set({ status: "superseded", updatedAt: new Date() })
-      .where(and(
-        eq(shippingPackPlans.wmsOrderId, input.wmsOrderId),
-        eq(shippingPackPlans.status, "active"),
-      ));
+      .where(
+        and(
+          eq(shippingPackPlans.wmsOrderId, input.wmsOrderId),
+          eq(shippingPackPlans.status, "active"),
+        ),
+      );
 
     const [plan] = await tx
       .insert(shippingPackPlans)
@@ -443,7 +528,8 @@ async function persistPlanTransactional(input: PersistPlanInput): Promise<Shippi
           parcelSequence: i + 1,
           // Exactly one of boxId / siocProductVariantId (DB XOR check).
           boxId: parcel.boxId,
-          siocProductVariantId: parcel.boxId == null ? parcel.siocProductVariantId : null,
+          siocProductVariantId:
+            parcel.boxId == null ? parcel.siocProductVariantId : null,
           estWeightGrams: parcel.estWeightGrams,
           billableWeightGrams: parcel.billableWeightGrams,
           lengthMm: parcel.lengthMm,
@@ -456,7 +542,10 @@ async function persistPlanTransactional(input: PersistPlanInput): Promise<Shippi
       // Aggregate by variant: pack_plan_parcel_items is unique per
       // (parcel, variant); a rider absorbed next to a boxed line of the same
       // variant must merge rather than violate the index.
-      const byVariant = new Map<number, { quantity: number; isRider: boolean }>();
+      const byVariant = new Map<
+        number,
+        { quantity: number; isRider: boolean }
+      >();
       for (const line of parcel.items) {
         const existing = byVariant.get(line.productVariantId);
         if (existing) {

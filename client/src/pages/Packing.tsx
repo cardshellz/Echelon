@@ -40,6 +40,7 @@ interface PackingParcel {
 }
 
 interface PackingPlan {
+  permittedBoxIds: number[];
   id: number;
   status: string;
   engineVersion: string;
@@ -276,7 +277,7 @@ export default function Packing() {
           <OrderDetail
             key={selectedOrder.id}
             order={selectedOrder}
-            boxes={boxes}
+            boxes={boxes.filter(box => selectedOrder.plan?.permittedBoxIds?.includes(box.id))}
             onGeneratePlan={() => generatePlanMutation.mutate(selectedOrder.id)}
             generating={generatePlanMutation.isPending}
             onConfirmed={invalidateQueue}

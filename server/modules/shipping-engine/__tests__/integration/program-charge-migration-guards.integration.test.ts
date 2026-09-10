@@ -20,7 +20,7 @@ describe.skipIf(!enabled)("program charge migration preflight", () => {
       name: "canonical routing shared with retail",
       code: "SHIPPING_PROGRAM_SHARED_WITH_RETAIL",
       extra:
-        "INSERT INTO shipping.channel_policies VALUES(1,'active','customer_checkout'); INSERT INTO shipping.channel_policy_routes VALUES(1,1)",
+        "INSERT INTO shipping.channel_policies(id,status,purpose) VALUES(1,'active','customer_checkout'); INSERT INTO shipping.channel_policy_routes(policy_id,rate_book_id) VALUES(1,1)",
     },
     {
       name: "overlapping legacy charges",

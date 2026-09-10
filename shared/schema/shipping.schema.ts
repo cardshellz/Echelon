@@ -85,6 +85,9 @@ export interface ShippingCartonPlacement {
 // ---------------------------------------------------------------------------
 
 export const shippingBoxCatalog = shippingSchema.table("box_catalog", {
+  branding: text("branding").notNull().default("unclassified"),
+  availabilityReviewed: boolean("availability_reviewed").notNull().default(false),
+  configurationRevision: integer("configuration_revision").notNull().default(1),
   outerLengthMm: integer('outer_length_mm'),
   outerWidthMm: integer('outer_width_mm'),
   outerHeightMm: integer('outer_height_mm'),

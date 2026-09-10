@@ -111,9 +111,9 @@ export async function resolveVariantIdsBySku(
 }
 
 /** Resolve the shared channel suite, then restrict it to warehouse availability. */
-export async function loadActiveBoxes(warehouseId?: number, channel: FulfillmentChannel = 'internal'): Promise<CartonizeBox[]> {
+export async function loadActiveBoxes(warehouseId?: number, channel: FulfillmentChannel = 'internal', channelId?: number | null): Promise<CartonizeBox[]> {
   if (!warehouseId) throw new Error('SHIPPING_WAREHOUSE_REQUIRED');
-  return (await new SharedShippingConfigurationRepository().loadPackaging(channel,warehouseId)).boxes;
+  return (await new SharedShippingConfigurationRepository().loadPackaging(channel,warehouseId,channelId)).boxes;
 }
 import { SharedShippingConfigurationRepository } from '../../shipping-engine/infrastructure/shared-configuration.repository';
 import type { FulfillmentChannel } from '@shared/shipping/configuration';

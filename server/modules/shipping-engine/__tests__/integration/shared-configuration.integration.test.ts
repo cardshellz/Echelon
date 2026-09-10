@@ -36,6 +36,7 @@ describe.skipIf(!enabled)(
         for (const name of [
           "238_shared_packaging_and_program_charges.sql",
           "239_packaging_suite_lifecycle.sql",
+          "241_channel_packaging_policies.sql",
         ]) {
           await client.query(readFileSync(resolve("migrations", name), "utf8"));
         }

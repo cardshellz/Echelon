@@ -71,7 +71,9 @@ function boxedParcel(overrides: Partial<CartonParcel> = {}): CartonParcel {
     boxId: 1,
     boxCode: "M",
     siocProductVariantId: null,
-    items: [{ productVariantId: 101, sku: "SLV-100", quantity: 2, isRider: false }],
+    items: [
+      { productVariantId: 101, sku: "SLV-100", quantity: 2, isRider: false },
+    ],
     placements: [],
     estWeightGrams: 340,
     billableWeightGrams: 400,
@@ -89,7 +91,9 @@ function siocParcel(overrides: Partial<CartonParcel> = {}): CartonParcel {
     boxId: null,
     boxCode: null,
     siocProductVariantId: 201,
-    items: [{ productVariantId: 201, sku: "QUAD-BOX", quantity: 1, isRider: false }],
+    items: [
+      { productVariantId: 201, sku: "QUAD-BOX", quantity: 1, isRider: false },
+    ],
     placements: [],
     estWeightGrams: 900,
     billableWeightGrams: 900,
@@ -127,10 +131,14 @@ function fakeDeps(input: {
 } {
   const persisted: PersistPlanInput[] = [];
   const deps: PackPlanDeps = {
-    loadOrder: async () => (input.order === undefined ? { id: 42, warehouseId: 2 } : input.order),
-    loadOrderItems: async () => input.lines ?? [{ sku: "SLV-100", quantity: 2 }],
-    resolveVariantIdsBySku: async () => input.variantIdBySku ?? new Map([["SLV-100", 101]]),
-    loadPackingInputs: async () => input.packingInputs ?? new Map([[101, packingInput()]]),
+    loadOrder: async () =>
+      input.order === undefined ? { id: 42, warehouseId: 2 } : input.order,
+    loadOrderItems: async () =>
+      input.lines ?? [{ sku: "SLV-100", quantity: 2 }],
+    resolveVariantIdsBySku: async () =>
+      input.variantIdBySku ?? new Map([["SLV-100", 101]]),
+    loadPackingInputs: async () =>
+      input.packingInputs ?? new Map([[101, packingInput()]]),
     loadActiveBoxes: async () => input.boxes ?? [box()],
     findActivePlan: async () => input.activePlan ?? null,
     persistPlan: async (p) => {
@@ -145,19 +153,63 @@ function fakeDeps(input: {
 // buildBoxInstruction (pure)
 // ---------------------------------------------------------------------------
 
-describe('shared packaging plan evidence',() => {
-  it('uses the order channel and warehouse and persists the suite revision',async () => {
-    const { deps,persisted } = fakeDeps({});
-    deps.loadOrder = async () => ({ id: 42,warehouseId: 2,fulfillmentChannel: 'dropship' });
-    const packaging = { suiteId: 9,suiteRevision: 3,assignmentRevision: 2,boxes: [box()] };
+describe("shared packaging plan evidence", () => {
+  it("does not guess a warehouse when none is assigned", async () => {
+    const { deps, persisted } = fakeDeps({
+      order: { id: 42, warehouseId: null },
+    });
+    deps.loadPackaging = vi.fn();
+    expect(await ensurePackPlan({ wmsOrderId: 42 }, deps)).toBeNull();
+    expect(deps.loadPackaging).not.toHaveBeenCalled();
+    expect(persisted).toEqual([]);
+  });
+  it("requires an outer permitted box instead of SIOC for white-label policies", async () => {
+    const { deps, persisted } = fakeDeps({
+      packingInputs: new Map([
+        [101, packingInput({ shipsInOwnContainer: true })],
+      ]),
+    });
+    deps.loadPackaging = async () => ({
+      channelId: 11,
+      warehouseId: 2,
+      requirement: "unbranded",
+      source: "default",
+      suiteId: 9,
+      suiteRevision: 1,
+      assignmentRevision: 1,
+      boxes: [box()],
+    });
+    const result = await ensurePackPlan({ wmsOrderId: 42 }, deps);
+    expect(result).not.toBeNull();
+    expect(persisted[0].parcels.length).toBeGreaterThan(0);
+    expect(
+      persisted[0].parcels.every(
+        (p) => p.boxId === 1 && p.siocProductVariantId === null,
+      ),
+    ).toBe(true);
+  });
+  it("uses the order channel and warehouse and persists the suite revision", async () => {
+    const { deps, persisted } = fakeDeps({});
+    deps.loadOrder = async () => ({
+      id: 42,
+      warehouseId: 2,
+      channelId: 123,
+      fulfillmentChannel: "dropship",
+    });
+    const packaging = {
+      suiteId: 9,
+      suiteRevision: 3,
+      assignmentRevision: 2,
+      boxes: [box()],
+    };
     deps.loadPackaging = vi.fn(async () => packaging);
-    const first = await ensurePackPlan({ wmsOrderId: 42 },deps);
-    expect(deps.loadPackaging).toHaveBeenCalledWith('dropship',2);
+    const first = await ensurePackPlan({ wmsOrderId: 42 }, deps);
+    expect(deps.loadPackaging).toHaveBeenCalledWith("dropship", 2, 123);
     expect(persisted[0].packagingSnapshot).toEqual(packaging);
     expect(first).not.toBeNull();
     deps.findActivePlan = async () => first!.plan;
-    deps.loadPackaging = async () => ({ ...packaging,suiteRevision: 4 });
-    await ensurePackPlan({ wmsOrderId: 42 },deps);
+    deps.loadPackaging = async () => ({ ...packaging, suiteRevision: 4 });
+    await ensurePackPlan({ wmsOrderId: 42 }, deps);
     expect(persisted).toHaveLength(2);
     expect(persisted[1].inputHash).not.toBe(persisted[0].inputHash);
   });
@@ -187,10 +239,16 @@ describe("buildBoxInstruction", () => {
     const withRider = buildBoxInstruction([
       siocParcel({
         items: [
-          { productVariantId: 201, sku: "QUAD-BOX", quantity: 1, isRider: false },
+          {
+            productVariantId: 201,
+            sku: "QUAD-BOX",
+            quantity: 1,
+            isRider: false,
+          },
           { productVariantId: 101, sku: "SLV-100", quantity: 3, isRider: true },
         ],
-        reason: "ships in own container (QUAD-BOX); absorbed 3 rider item(s), eliminated a parcel",
+        reason:
+          "ships in own container (QUAD-BOX); absorbed 3 rider item(s), eliminated a parcel",
       }),
     ]);
     expect(withRider).toBe(withoutRider);
@@ -201,7 +259,8 @@ describe("buildBoxInstruction", () => {
     const instruction = buildBoxInstruction([
       boxedParcel(),
       boxedParcel({
-        reason: "fallback: could not verify fit for SLV-999; assigned largest box",
+        reason:
+          "fallback: could not verify fit for SLV-999; assigned largest box",
       }),
     ]);
     expect(instruction).toBeNull();
@@ -213,11 +272,16 @@ describe("buildBoxInstruction", () => {
 
   it("caps the instruction at the max length without cutting mid-token", () => {
     const parcels = Array.from({ length: 40 }, (_, i) =>
-      boxedParcel({ boxId: i + 1, boxCode: `LONG-BOX-CODE-${String(i).padStart(3, "0")}` }),
+      boxedParcel({
+        boxId: i + 1,
+        boxCode: `LONG-BOX-CODE-${String(i).padStart(3, "0")}`,
+      }),
     );
     const instruction = buildBoxInstruction(parcels);
     expect(instruction).not.toBeNull();
-    expect(instruction!.length).toBeLessThanOrEqual(PACK_INSTRUCTION_MAX_LENGTH);
+    expect(instruction!.length).toBeLessThanOrEqual(
+      PACK_INSTRUCTION_MAX_LENGTH,
+    );
     expect(instruction).toMatch(/^BOX: /);
     expect(instruction).toMatch(/\+…$/); // omission is marked
   });
@@ -228,8 +292,16 @@ describe("buildBoxInstruction", () => {
 // ---------------------------------------------------------------------------
 
 describe("computePackPlanInputHash", () => {
-  const itemA = packingInput({ productVariantId: 101, sku: "SLV-100", quantity: 2 });
-  const itemB = packingInput({ productVariantId: 202, sku: "TL-35", quantity: 1 });
+  const itemA = packingInput({
+    productVariantId: 101,
+    sku: "SLV-100",
+    quantity: 2,
+  });
+  const itemB = packingInput({
+    productVariantId: 202,
+    sku: "TL-35",
+    quantity: 1,
+  });
   const boxes = [box({ id: 1 }), box({ id: 2, code: "BOX-M" })];
 
   it("is stable across item and box ordering", () => {
@@ -246,7 +318,10 @@ describe("computePackPlanInputHash", () => {
 
   it("changes when a packing attribute changes", () => {
     const h1 = computePackPlanInputHash([itemA], boxes);
-    const h2 = computePackPlanInputHash([{ ...itemA, shipsInOwnContainer: true }], boxes);
+    const h2 = computePackPlanInputHash(
+      [{ ...itemA, shipsInOwnContainer: true }],
+      boxes,
+    );
     expect(h1).not.toBe(h2);
   });
 
@@ -258,10 +333,10 @@ describe("computePackPlanInputHash", () => {
 
   it("changes when an existing box's physical definition changes", () => {
     const h1 = computePackPlanInputHash([itemA], boxes);
-    const h2 = computePackPlanInputHash([itemA], [
-      { ...boxes[0], lengthMm: boxes[0].lengthMm - 1 },
-      boxes[1],
-    ]);
+    const h2 = computePackPlanInputHash(
+      [itemA],
+      [{ ...boxes[0], lengthMm: boxes[0].lengthMm - 1 }, boxes[1]],
+    );
     expect(h1).not.toBe(h2);
   });
 });
@@ -355,13 +430,19 @@ describe("ensurePackPlan", () => {
   it("returns null for a missing order / empty lines / invalid id (never throws)", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const missingOrder = fakeDeps({ order: null });
-    expect(await ensurePackPlan({ wmsOrderId: 42 }, missingOrder.deps)).toBeNull();
+    expect(
+      await ensurePackPlan({ wmsOrderId: 42 }, missingOrder.deps),
+    ).toBeNull();
 
     const noLines = fakeDeps({ lines: [] });
     expect(await ensurePackPlan({ wmsOrderId: 42 }, noLines.deps)).toBeNull();
 
-    expect(await ensurePackPlan({ wmsOrderId: 0 }, fakeDeps({}).deps)).toBeNull();
-    expect(await ensurePackPlan({ wmsOrderId: 1.5 }, fakeDeps({}).deps)).toBeNull();
+    expect(
+      await ensurePackPlan({ wmsOrderId: 0 }, fakeDeps({}).deps),
+    ).toBeNull();
+    expect(
+      await ensurePackPlan({ wmsOrderId: 1.5 }, fakeDeps({}).deps),
+    ).toBeNull();
     warn.mockRestore();
   });
 

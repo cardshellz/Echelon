@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { dollarsToCents } from '@shared/utils/money';
+import { useConfigurationCommand } from '@/components/shipping/configuration-client';
+import { boxBrandingSchema, type BoxBranding } from '@shared/shipping/packaging-policy';
 import { BoxSuitesPanel } from '@/components/shipping/BoxSuitesPanel';
 import { PackagingAssignmentsPanel } from '@/components/shipping/PackagingAssignmentsPanel';
 import { useQuery, useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
@@ -48,6 +50,9 @@ import {
 // ===== Types (API contract: /api/shipping/admin/*) =====
 
 interface ShippingBox {
+  branding: BoxBranding;
+  availabilityReviewed: boolean;
+  configurationRevision: number;
   outerLengthMm?: number | null;
   outerWidthMm?: number | null;
   outerHeightMm?: number | null;
@@ -182,7 +187,7 @@ const BOX_KINDS = ["box", "mailer", "envelope"] as const;
 function invalidateShippingAdmin(queryClient: QueryClient) {
   queryClient.invalidateQueries({
     predicate: (q) =>
-      typeof q.queryKey[0] === "string" && q.queryKey[0].startsWith("/api/shipping/admin"),
+      typeof q.queryKey[0] === "string" && (q.queryKey[0].startsWith("/api/shipping/admin") || q.queryKey[0].startsWith("/api/dropship/admin/shipping/shared")),
   });
 }
 
@@ -260,6 +265,8 @@ function apiErrorFromBody(body: unknown, status: number): ApiRequestError {
 // ===== Box catalog =====
 
 interface BoxPayload {
+  branding: BoxBranding;
+  expectedRevision: number;
   outerLengthMm?: number | null;
   outerWidthMm?: number | null;
   outerHeightMm?: number | null;
@@ -279,6 +286,8 @@ interface BoxPayload {
 }
 
 interface BoxFormState {
+  branding: BoxBranding;
+  expectedRevision: number;
   outerLengthIn: string;
   outerWidthIn: string;
   outerHeightIn: string;
@@ -298,6 +307,7 @@ interface BoxFormState {
 
 function emptyBoxForm(): BoxFormState {
   return {
+    branding: 'unclassified', expectedRevision: 0,
     outerLengthIn: '',outerWidthIn: '',outerHeightIn: '',
     code: "",
     name: "",
@@ -316,6 +326,7 @@ function emptyBoxForm(): BoxFormState {
 
 function boxFormFromBox(box: ShippingBox): BoxFormState {
   return {
+    branding: box.branding ?? 'unclassified', expectedRevision: box.configurationRevision,
     outerLengthIn: formatMeasurementInput(box.outerLengthMm ?? null,MILLIMETERS_PER_INCH),
     outerWidthIn: formatMeasurementInput(box.outerWidthMm ?? null,MILLIMETERS_PER_INCH),
     outerHeightIn: formatMeasurementInput(box.outerHeightMm ?? null,MILLIMETERS_PER_INCH),
@@ -375,6 +386,7 @@ function buildBoxPayload(form: BoxFormState, editingId: number | null): BoxPaylo
 
   return {
     ...(editingId !== null ? { id: editingId } : {}),
+    branding: form.branding, expectedRevision: form.expectedRevision,
     code,
     name,
     kind: form.kind,
@@ -393,6 +405,7 @@ function buildBoxPayload(form: BoxFormState, editingId: number | null): BoxPaylo
 
 function boxToPayload(box: ShippingBox): BoxPayload {
   return {
+    branding: box.branding ?? 'unclassified', expectedRevision: box.configurationRevision,
     outerLengthMm: box.outerLengthMm ?? null,outerWidthMm: box.outerWidthMm ?? null,outerHeightMm: box.outerHeightMm ?? null,
     id: box.id,
     code: box.code,
@@ -412,7 +425,7 @@ function boxToPayload(box: ShippingBox): BoxPayload {
   };
 }
 
-function BoxCatalogTab({
+export function BoxCatalogTab({
   boxes,
   warehouses,
   isLoading,
@@ -426,11 +439,12 @@ function BoxCatalogTab({
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editingBoxId, setEditingBoxId] = useState<number | null>(null);
   const [form, setForm] = useState<BoxFormState>(emptyBoxForm());
+  const commandFor = useConfigurationCommand();
 
   const warehouseById = new Map(warehouses.map((w) => [w.id, w]));
 
   const saveBoxMutation = useMutation({
-    mutationFn: (payload: BoxPayload) => putJson<{ box: ShippingBox }>("/api/shipping/admin/boxes", payload),
+    mutationFn: (payload: BoxPayload) => putJson<{ box: ShippingBox }>("/api/shipping/admin/catalog-boxes", { ...payload, commandId: commandFor(payload) }),
     onSuccess: () => {
       invalidateShippingAdmin(queryClient);
       setDialogOpen(false);
@@ -442,7 +456,7 @@ function BoxCatalogTab({
   });
 
   const toggleBoxMutation = useMutation({
-    mutationFn: (payload: BoxPayload) => putJson<{ box: ShippingBox }>("/api/shipping/admin/boxes", payload),
+    mutationFn: (payload: BoxPayload) => putJson<{ box: ShippingBox }>("/api/shipping/admin/catalog-boxes", { ...payload, commandId: commandFor(payload) }),
     onSuccess: (_data, payload) => {
       invalidateShippingAdmin(queryClient);
       toast({ title: payload.isActive ? "Box activated" : "Box deactivated" });
@@ -530,7 +544,7 @@ function BoxCatalogTab({
                 {boxes.map((box) => (
                   <TableRow key={box.id} className={!box.isActive ? "opacity-60" : undefined}>
                     <TableCell className="font-mono text-xs font-medium">{box.code}</TableCell>
-                    <TableCell className="text-sm">{box.name}</TableCell>
+                    <TableCell className="text-sm">{box.name}<div className="text-xs text-muted-foreground">{box.branding === 'unbranded' ? 'White label / unbranded' : box.branding === 'branded' ? 'Branded / graphics' : 'Branding not reviewed'}</div></TableCell>
                     <TableCell>
                       <Badge variant="outline" className="text-[10px] capitalize">{box.kind}</Badge>
                     </TableCell>
@@ -544,7 +558,7 @@ function BoxCatalogTab({
                     <TableCell>
                       <div className="flex flex-wrap gap-1">
                         {(box.warehouseIds || []).length === 0 ? (
-                          <span className="text-xs text-muted-foreground">—</span>
+                          <span className="text-xs text-muted-foreground">{box.availabilityReviewed ? 'None available' : 'Availability not reviewed'}</span>
                         ) : (
                           box.warehouseIds.map((id) => (
                             <Badge key={id} variant="secondary" className="text-[10px]">
@@ -553,18 +567,20 @@ function BoxCatalogTab({
                           ))
                         )}
                       </div>
+                      {!box.availabilityReviewed && box.warehouseIds?.length > 0 && <div className="text-xs text-amber-700">Availability needs review</div>}
                     </TableCell>
                     <TableCell>
                       <Switch
                         checked={box.isActive}
                         disabled={toggleBoxMutation.isPending}
-                        onCheckedChange={(checked) =>
-                          toggleBoxMutation.mutate({ ...boxToPayload(box), isActive: checked === true })
-                        }
+                        onCheckedChange={(checked) => {
+                          if (!box.availabilityReviewed) { openEdit(box); return; }
+                          toggleBoxMutation.mutate({ ...boxToPayload(box), isActive: checked === true });
+                        }}
                       />
                     </TableCell>
                     <TableCell>
-                      <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => openEdit(box)}>
+                      <Button variant="ghost" size="icon" className="h-8 w-8" aria-label={`Edit ${box.code} box`} onClick={() => openEdit(box)}>
                         <Pencil className="h-3.5 w-3.5" />
                       </Button>
                     </TableCell>
@@ -583,6 +599,15 @@ function BoxCatalogTab({
             <DialogDescription className="sr-only">Form to add or edit a shipping box</DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-2">
+            <label className="grid gap-2 text-sm">Packaging branding
+              <select aria-label="Packaging branding" className="h-10 rounded border bg-background px-2" value={form.branding}
+                onChange={e => setForm(prev => ({ ...prev, branding: boxBrandingSchema.parse(e.target.value) }))}>
+                <option value="unclassified">Not yet classified</option>
+                <option value="unbranded">White label / unbranded</option>
+                <option value="branded">Branded / graphics</option>
+              </select>
+            </label>
+            <p className="text-sm text-muted-foreground">Saving confirms the warehouse availability checked below. Unchecked warehouses cannot use this box under reviewed packaging policies. This is availability configuration, not a live stock count.</p>
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
                 <Label>Code</Label>

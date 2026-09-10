@@ -9,6 +9,10 @@ vi.mock("../../../../routes/middleware", () => ({
 import { registerSharedConfigurationAdminRoutes } from "../../interfaces/http/shared-configuration-admin.routes";
 import { SharedShippingConfigurationService } from "../../application/shared-configuration.service";
 import type { SharedShippingConfigurationStore } from "../../application/shared-configuration.port";
+import {
+  ChannelPackagingService,
+  type ChannelPackagingStore,
+} from "../../application/channel-packaging.service";
 
 describe("shared configuration administration boundaries", () => {
   const routes = new Map<
@@ -16,6 +20,7 @@ describe("shared configuration administration boundaries", () => {
     (req: Request, res: Response) => Promise<void>
   >();
   let store: SharedShippingConfigurationStore;
+  let packagingStore: ChannelPackagingStore;
   beforeEach(() => {
     vi.stubEnv("DROPSHIP_OMS_CHANNEL_ID", "");
     routes.clear();
@@ -35,6 +40,11 @@ describe("shared configuration administration boundaries", () => {
       saveService: vi.fn(),
       history: vi.fn(),
     };
+    packagingStore = {
+      overview: vi.fn(),
+      savePolicy: vi.fn(),
+      saveBox: vi.fn(),
+    };
     const app = Object.fromEntries(
       ["get", "post", "put", "use"].map((method) => [
         method,
@@ -49,6 +59,11 @@ describe("shared configuration administration boundaries", () => {
       new SharedShippingConfigurationService(
         store,
         () => new Date("2026-09-09T12:00:00Z"),
+      ),
+      new ChannelPackagingService(
+        packagingStore,
+        () => new Date("2026-09-09T12:00:00Z"),
+        async () => 11,
       ),
     );
   });
@@ -111,6 +126,53 @@ describe("shared configuration administration boundaries", () => {
     expectedRevision: 0,
     commandId: "123e4567-e89b-42d3-a456-426614174000",
   };
+  it("validates packaging commands and authenticates catalog changes before persistence", async () => {
+    const body = {
+      channelId: 11,
+      defaultSuiteId: 1,
+      requirement: "unbranded",
+      overrides: [],
+      expectedRevision: 0,
+      commandId: valid.commandId,
+    };
+    expect(
+      (
+        await call("put:/api/shipping/admin/packaging-policies", {
+          ...body,
+          actorId: "spoofed",
+        })
+      ).statusCode,
+    ).toBe(400);
+    expect(
+      (await call("put:/api/shipping/admin/catalog-boxes", {}, {})).statusCode,
+    ).toBe(401);
+    expect(packagingStore.savePolicy).not.toHaveBeenCalled();
+    expect(packagingStore.saveBox).not.toHaveBeenCalled();
+    expect(
+      (await call("put:/api/shipping/admin/packaging-policies", body))
+        .statusCode,
+    ).toBe(200);
+    expect(packagingStore.savePolicy).toHaveBeenCalledWith(
+      body,
+      "admin-7",
+      new Date("2026-09-09T12:00:00Z"),
+    );
+  });
+  it("cannot configure another real channel through the Dropship endpoint", async () => {
+    const response = await call(
+      "put:/api/dropship/admin/shipping/shared/packaging-policies",
+      {
+        channelId: 12,
+        defaultSuiteId: 1,
+        requirement: "any",
+        overrides: [],
+        expectedRevision: 0,
+        commandId: valid.commandId,
+      },
+    );
+    expect(response.statusCode).toBe(403);
+    expect(packagingStore.savePolicy).not.toHaveBeenCalled();
+  });
   it("uses authenticated identity and an injected clock for audited writes", async () => {
     expect(
       (await call("post:/api/shipping/admin/box-suites", valid)).statusCode,

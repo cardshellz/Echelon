@@ -1,5 +1,7 @@
 import { sql } from "drizzle-orm";
 import {
+  boolean,
+  bigint,
   check,
   foreignKey,
   index,
@@ -14,13 +16,72 @@ import {
 import { productVariants } from "./catalog.schema";
 import { dropshipBoxCatalog } from "./dropship.schema";
 import { warehouses } from "./warehouse.schema";
+import { channels } from "./channels.schema";
 import {
   shippingSchema,
   shippingBoxCatalog,
   shippingRateBooks,
   shippingServiceLevels,
+  shippingPackPlans,
+  shippingPackPlanParcels,
 } from "./shipping.schema";
 import type { ProgramCharges } from "../shipping/configuration";
+
+export const shippingChannelPackagingPolicies = shippingSchema.table(
+  "channel_packaging_policies",
+  {
+    channelId: integer("channel_id")
+      .primaryKey()
+      .references(() => channels.id),
+    revision: integer("revision").notNull(),
+    defaultSuiteId: integer("default_suite_id")
+      .notNull()
+      .references(() => shippingBoxSuites.id),
+    requirement: text("requirement").notNull(),
+  },
+  (t) => [
+    check("channel_packaging_revision_positive", sql`${t.revision}>0`),
+    check(
+      "channel_packaging_requirement",
+      sql`${t.requirement} IN ('any','unbranded')`,
+    ),
+  ],
+);
+
+export const shippingChannelPackagingOverrides = shippingSchema.table(
+  "channel_packaging_overrides",
+  {
+    channelId: integer("channel_id")
+      .notNull()
+      .references(() => shippingChannelPackagingPolicies.channelId),
+    warehouseId: integer("warehouse_id")
+      .notNull()
+      .references(() => warehouses.id),
+    suiteId: integer("suite_id")
+      .notNull()
+      .references(() => shippingBoxSuites.id),
+  },
+  (t) => [primaryKey({ columns: [t.channelId, t.warehouseId] })],
+);
+
+export const shippingPackagingConfirmationEvents = shippingSchema.table(
+  "packaging_confirmation_events",
+  {
+    id: bigint("id", { mode: "bigint" })
+      .primaryKey()
+      .generatedAlwaysAsIdentity(),
+    planId: bigint("plan_id", { mode: "number" })
+      .notNull()
+      .references(() => shippingPackPlans.id),
+    parcelId: bigint("parcel_id", { mode: "number" })
+      .notNull()
+      .references(() => shippingPackPlanParcels.id),
+    actorId: text("actor_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    beforeState: jsonb("before_state").notNull(),
+    afterState: jsonb("after_state").notNull(),
+  },
+);
 
 // SQL migrations additionally own deferred current-revision FKs and immutable
 // history triggers. Never replace those transactional guarantees with db:push.
@@ -53,6 +114,8 @@ export const shippingBoxSuites = shippingSchema.table(
     id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
     name: text("name").notNull(),
     currentRevision: integer("current_revision").notNull(),
+    archived: boolean("archived").notNull().default(false),
+    imported: boolean("imported").notNull().default(false),
   },
   (t) => [
     uniqueIndex("shipping_box_suites_name_idx").on(sql`lower(${t.name})`),
@@ -104,6 +167,7 @@ export const shippingPackagingAssignments = shippingSchema.table(
   {
     id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
     channel: text("channel").notNull(),
+    isActive: boolean("is_active").notNull().default(true),
     warehouseId: integer("warehouse_id").references(() => warehouses.id),
     suiteId: integer("suite_id")
       .notNull()

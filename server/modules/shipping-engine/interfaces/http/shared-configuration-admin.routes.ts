@@ -5,11 +5,20 @@ import { SharedShippingConfigurationService } from "../../application/shared-con
 import { ShippingConfigurationError } from "../../infrastructure/shared-configuration.repository";
 import { SharedShippingConfigurationRepository } from "../../infrastructure/shared-configuration.repository";
 import { readDropshipShippingCutoverConfig } from "../../../dropship/application/dropship-shipping-cutover-policy";
+import { ChannelPackagingService } from "../../application/channel-packaging.service";
+import { ChannelPackagingRepository } from "../../infrastructure/channel-packaging.repository";
+import { resolveDropshipPackagingChannel } from "../../../dropship/infrastructure/dropship-packaging-channel";
+import { pool } from "../../../../db";
 
 export function registerSharedConfigurationAdminRoutes(
   app: Express,
   service = new SharedShippingConfigurationService(
     new SharedShippingConfigurationRepository(),
+  ),
+  packagingPolicies = new ChannelPackagingService(
+    new ChannelPackagingRepository(),
+    undefined,
+    () => resolveDropshipPackagingChannel(pool),
   ),
 ): void {
   const run =
@@ -83,6 +92,31 @@ export function registerSharedConfigurationAdminRoutes(
       );
     return value;
   };
+  app.get(
+    "/api/shipping/admin/packaging-policies",
+    requirePermission("settings", "view"),
+    run(() => packagingPolicies.overview()),
+  );
+  app.put(
+    "/api/shipping/admin/packaging-policies",
+    requirePermission("settings", "edit"),
+    run((req) => packagingPolicies.savePolicy(req.body, actor(req))),
+  );
+  app.put(
+    "/api/shipping/admin/catalog-boxes",
+    requirePermission("settings", "edit"),
+    run((req) => packagingPolicies.saveBox(req.body, actor(req))),
+  );
+  app.get(
+    "/api/dropship/admin/shipping/shared/packaging-policies",
+    requirePermission("dropship", "view"),
+    run(() => packagingPolicies.dropshipOverview()),
+  );
+  app.put(
+    "/api/dropship/admin/shipping/shared/packaging-policies",
+    requirePermission("dropship", "manage_operations"),
+    run((req) => packagingPolicies.saveDropshipPolicy(req.body, actor(req))),
+  );
   app.get(
     "/api/dropship/admin/shipping/shared",
     requirePermission("dropship", "view"),

@@ -78,7 +78,12 @@ export function BoxSuitesPanel() {
     setMessage("");
   };
   const affected = editing
-    ? data.assignments.filter((a) => a.suiteId === editing.id)
+    ? [
+        ...data.assignments.filter((a) => a.suiteId === editing.id),
+        ...(data.configurationAssignments ?? []).filter(
+          (a) => a.suiteId === editing.id,
+        ),
+      ]
     : [];
   const suites = data.suites.filter(
     (s) =>
@@ -135,6 +140,9 @@ export function BoxSuitesPanel() {
         )}
         {suites.map((s) => {
           const usages = data.assignments.filter((a) => a.suiteId === s.id);
+          const concreteUsages = (data.configurationAssignments ?? []).filter(
+            (a) => a.suiteId === s.id,
+          );
           return (
             <article
               key={s.id}
@@ -155,6 +163,19 @@ export function BoxSuitesPanel() {
                 )}
                 <div className="flex flex-wrap gap-x-3 text-xs">
                   <span className="text-muted-foreground">Used by:</span>
+                  {concreteUsages.map((a) => (
+                    <a
+                      key={`${a.channelId}:${a.warehouseId}`}
+                      className="underline"
+                      href={`/shipping-settings?tab=channel-routing&section=packaging&channelId=${a.channelId}`}
+                    >
+                      {a.channelName} ·{" "}
+                      {a.warehouseId === null
+                        ? "Default"
+                        : data.warehouses.find((w) => w.id === a.warehouseId)
+                            ?.name}
+                    </a>
+                  ))}
                   {usages.length ? (
                     usages.slice(0, 2).map((a) => (
                       <a
@@ -162,14 +183,14 @@ export function BoxSuitesPanel() {
                         className="underline"
                         href={packagingAssignmentUrl(a.channel)}
                       >
-                        {channelLabels[a.channel]} ·{" "}
+                        Legacy {channelLabels[a.channel]} ·{" "}
                         {a.warehouseId === null
                           ? "Default"
                           : (data.warehouses.find((w) => w.id === a.warehouseId)
                               ?.name ?? `Warehouse ${a.warehouseId}`)}
                       </a>
                     ))
-                  ) : (
+                  ) : concreteUsages.length ? null : (
                     <span>Not assigned</span>
                   )}
                   {usages.length > 2 && (
@@ -234,7 +255,10 @@ export function BoxSuitesPanel() {
               </p>
               <p className="font-medium">{statusTarget.name}</p>
               {!statusTarget.archived &&
-              data.assignments.some((a) => a.suiteId === statusTarget.id) ? (
+              [
+                ...data.assignments,
+                ...(data.configurationAssignments ?? []),
+              ].some((a) => a.suiteId === statusTarget.id) ? (
                 <p role="alert">
                   This suite is still assigned. Use its “Used by” links to
                   reassign it before archiving.

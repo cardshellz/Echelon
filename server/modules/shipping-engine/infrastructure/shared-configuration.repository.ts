@@ -1,4 +1,5 @@
-import { createHash } from "node:crypto";
+import { configurationCommand } from "./configuration-command";
+import { ChannelPackagingRepository } from "./channel-packaging.repository";
 import type { Pool, PoolClient } from "pg";
 import { pool } from "../../../db";
 import { z } from "zod";
@@ -259,12 +260,22 @@ export class SharedShippingConfigurationRepository
   async loadPackaging(
     channel: FulfillmentChannel,
     warehouseId: number,
+    channelId?: number | null,
   ): Promise<{
+    channelId?: number;
+    warehouseId?: number;
+    requirement?: "any" | "unbranded";
     suiteId: number;
     suiteRevision: number;
     assignmentRevision: number;
     boxes: CartonizeBox[];
   }> {
+    if (channelId != null) {
+      const canonical = await new ChannelPackagingRepository(
+        this.dbPool,
+      ).resolve(channelId, warehouseId);
+      if (canonical) return canonical;
+    }
     // One MVCC statement: membership, current revision, and stock cannot come
     // from different admin edits during a quote.
     const result = await this.dbPool.query(
@@ -277,7 +288,7 @@ export class SharedShippingConfigurationRepository
         'costCents',b.cost_cents,'fillFactorBps',b.fill_factor_bps,'isActive',b.is_active) ORDER BY b.id)
         FROM shipping.box_suite_members m JOIN shipping.box_catalog b ON b.id=m.box_id
         WHERE m.suite_id=s.id AND m.revision=s.current_revision AND b.is_active
-        AND (NOT EXISTS (SELECT 1 FROM shipping.box_warehouse_stock stock WHERE stock.box_id=b.id)
+        AND ((NOT b.availability_reviewed AND NOT EXISTS (SELECT 1 FROM shipping.box_warehouse_stock stock WHERE stock.box_id=b.id))
           OR EXISTS (SELECT 1 FROM shipping.box_warehouse_stock stock
             WHERE stock.box_id=b.id AND stock.warehouse_id=$2 AND stock.is_stocked))), '[]'::jsonb) AS boxes
       FROM shipping.packaging_assignments a JOIN shipping.box_suites s ON s.id=a.suite_id
@@ -342,51 +353,15 @@ export class SharedShippingConfigurationRepository
     work: (client: PoolClient) => Promise<{ before: unknown; after: T }>,
     historyKey: (after: T) => string = () => key,
   ): Promise<T> {
-    const client = await this.dbPool.connect();
-    const hash = createHash("sha256")
-      .update(JSON.stringify({ key, input, actor }))
-      .digest("hex");
-    try {
-      await client.query("BEGIN");
-      await client.query(
-        "SELECT pg_advisory_xact_lock(hashtext('shipping-shared-config'))",
-      );
-      const replay = await client.query(
-        "SELECT request_hash,after_state FROM shipping.configuration_commands WHERE command_id=$1",
-        [input.commandId],
-      );
-      if (replay.rows.length) {
-        if (replay.rows[0].request_hash !== hash)
-          throw new ShippingConfigurationError(
-            "SHIPPING_COMMAND_REUSED",
-            "Command was already used for different settings.",
-          );
-        await client.query("COMMIT");
-        return replay.rows[0].after_state as T;
-      }
-      const result = await work(client);
-      await client.query(
-        `INSERT INTO shipping.configuration_commands
-        (command_id,request_hash,actor_id,resource_key,before_state,after_state,created_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-        [
-          input.commandId,
-          hash,
-          actor,
-          historyKey(result.after),
-          JSON.stringify(result.before),
-          JSON.stringify(result.after),
-          now,
-        ],
-      );
-      await client.query("COMMIT");
-      return result.after;
-    } catch (error) {
-      await client.query("ROLLBACK");
-      throw error;
-    } finally {
-      client.release();
-    }
+    return configurationCommand(
+      this.dbPool,
+      key,
+      input,
+      actor,
+      now,
+      work,
+      historyKey,
+    );
   }
 
   async listPackaging(): Promise<PackagingConfiguration> {
@@ -399,6 +374,10 @@ export class SharedShippingConfigurationRepository
       COALESCE((SELECT jsonb_agg(jsonb_build_object('channel',channel,'warehouseId',warehouse_id,
         'suiteId',suite_id,'revision',revision) ORDER BY channel,warehouse_id NULLS FIRST)
         FROM shipping.packaging_assignments WHERE is_active),'[]'::jsonb) AS assignments,
+      COALESCE((SELECT jsonb_agg(jsonb_build_object('channelId',a.channel_id,'channelName',c.name,'warehouseId',a.warehouse_id,'suiteId',a.suite_id))
+        FROM (SELECT channel_id,NULL::int AS warehouse_id,default_suite_id AS suite_id FROM shipping.channel_packaging_policies
+          UNION ALL SELECT channel_id,warehouse_id,suite_id FROM shipping.channel_packaging_overrides) a
+        JOIN channels.channels c ON c.id=a.channel_id),'[]'::jsonb) AS "configurationAssignments",
       COALESCE((SELECT jsonb_agg(jsonb_build_object('id',id,'code',code,'name',name,'isActive',is_active) ORDER BY code)
         FROM shipping.box_catalog),'[]'::jsonb) AS boxes,
       COALESCE((SELECT jsonb_agg(jsonb_build_object('id',id,'name',name) ORDER BY name)
@@ -454,7 +433,7 @@ export class SharedShippingConfigurationRepository
               (SELECT 1 FROM shipping.packaging_assignments override
                 WHERE override.is_active AND override.channel=a.channel AND override.warehouse_id=w.id)))
           WHERE NOT EXISTS (SELECT 1 FROM shipping.box_catalog b WHERE b.id=ANY($2::int[]) AND b.is_active
-            AND (NOT EXISTS(SELECT 1 FROM shipping.box_warehouse_stock stock WHERE stock.box_id=b.id)
+            AND ((NOT b.availability_reviewed AND NOT EXISTS(SELECT 1 FROM shipping.box_warehouse_stock stock WHERE stock.box_id=b.id))
               OR EXISTS(SELECT 1 FROM shipping.box_warehouse_stock stock
                 WHERE stock.box_id=b.id AND stock.warehouse_id=w.id AND stock.is_stocked)))`,
             [current.id, input.boxIds],
@@ -527,7 +506,7 @@ export class SharedShippingConfigurationRepository
         JOIN shipping.box_suite_members m ON m.suite_id=s.id AND m.revision=s.current_revision
         JOIN shipping.box_catalog b ON b.id=m.box_id AND b.is_active
         WHERE s.id=$1 AND NOT s.archived AND ($2::int IS NULL
-          OR NOT EXISTS(SELECT 1 FROM shipping.box_warehouse_stock stock WHERE stock.box_id=b.id)
+          OR (NOT b.availability_reviewed AND NOT EXISTS(SELECT 1 FROM shipping.box_warehouse_stock stock WHERE stock.box_id=b.id))
           OR EXISTS(SELECT 1 FROM shipping.box_warehouse_stock stock WHERE stock.box_id=b.id AND stock.warehouse_id=$2 AND stock.is_stocked)) LIMIT 1`,
           [input.suiteId, input.warehouseId],
         );
@@ -656,7 +635,7 @@ export class SharedShippingConfigurationRepository
         JOIN shipping.box_suite_members m ON m.suite_id=s.id AND m.revision=s.current_revision
         JOIN shipping.box_catalog b ON b.id=m.box_id AND b.is_active
         WHERE a.channel=$1 AND a.warehouse_id IS NULL AND a.is_active AND
-        (NOT EXISTS(SELECT 1 FROM shipping.box_warehouse_stock stock WHERE stock.box_id=b.id)
+        ((NOT b.availability_reviewed AND NOT EXISTS(SELECT 1 FROM shipping.box_warehouse_stock stock WHERE stock.box_id=b.id))
          OR EXISTS(SELECT 1 FROM shipping.box_warehouse_stock stock WHERE stock.box_id=b.id AND stock.warehouse_id=$2 AND stock.is_stocked)) LIMIT 1`,
           [input.channel, input.warehouseId],
         );
