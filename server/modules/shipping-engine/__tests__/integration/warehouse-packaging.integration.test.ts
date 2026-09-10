@@ -34,7 +34,7 @@ describe.skipIf(!enabled)("warehouse-owned packaging commands", () => {
       "238_shared_packaging_and_program_charges.sql",
       "239_packaging_suite_lifecycle.sql",
       "241_channel_packaging_policies.sql",
-      "242_warehouse_packaging_availability.sql",
+      "243_warehouse_packaging_availability.sql",
     ])
       await db.query(readFileSync(resolve("migrations", name), "utf8"));
     await db.query(

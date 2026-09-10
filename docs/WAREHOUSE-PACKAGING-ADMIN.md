@@ -23,7 +23,7 @@ Adding packaging from a suite uses a revision-checked snapshot of the selected m
 
 ## Consistency and compatibility
 
-Migration `242_warehouse_packaging_availability.sql` adds warehouse-owned availability overrides and independent warehouse revisions. It does not populate availability or change existing configuration.
+Migration `243_warehouse_packaging_availability.sql` adds warehouse-owned availability overrides and independent warehouse revisions. It does not populate availability or change existing configuration.
 
 `shipping.box_available_at` resolves an explicit warehouse override first. Otherwise it retains the prior availability baseline. This is intentional: reviewing warehouse A must not change historical implicit availability at warehouse B. The old `box_warehouse_stock` data is a compatibility baseline, not a second editable admin surface. New catalog items start unavailable everywhere.
 
