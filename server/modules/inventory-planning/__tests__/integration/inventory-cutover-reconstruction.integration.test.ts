@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import type { PoolClient } from "pg";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
+import { installUnopenedQuantityLedgerFixture } from "../../../inventory/__tests__/fixtures/pre-opening-quantity-authority.fixture";
 import { PostgresInventoryCutoverReconstructionRepository } from "../../infrastructure/inventory-cutover-reconstruction.repository";
 import { planCutoverReconstruction } from "../../domain/inventory-cutover-reconstruction";
 import { planFreshCutoverClaims } from "../../domain/inventory-cutover-reconstruction-planning";
@@ -109,6 +110,7 @@ dbDescribe.sequential("reviewed reconstruction with real claim DDL and inventory
   }));
   beforeAll(async () => {
     database = await createInventoryCutoverTestDatabase(databaseUrl, disposable, reconstructionDatabaseFixtureSql);
+    await installUnopenedQuantityLedgerFixture(database.pool);
     for (const file of ["0640_inventory_availability_claim_lineage.sql","0642_inventory_availability_claim_execution_contract.sql",
       "0647_inventory_availability_claim_pick_lineage.sql","0649_inventory_availability_claim_replacement.sql","233_inventory_cutover_reconstruction.sql"]) {
       await database.pool.query(readFileSync(resolve(process.cwd(),"migrations",file),"utf8"));
