@@ -9,7 +9,7 @@ import { captureProposedClaimSupplySnapshotInsideTransaction, captureProposedSup
 import { loadManagedSellableVariantIds, loadProposedPublicationTargetsForCutover } from "./inventory-channel-exposure-runtime.repository";
 import { PostgresInventoryCutoverReconstructionRepository } from "./inventory-cutover-reconstruction.repository";
 import { loadLatestCutoverOpening } from "./inventory-cutover-opening.reader";
-import { projectVerifiedOpeningClaimSupply, projectVerifiedOpeningSupply } from "../domain/inventory-opening-supply-projection";
+import { projectVerifiedOpeningSupply } from "../domain/inventory-opening-supply-projection";
 type Blocker = InventoryCutoverReview["blockers"][number];
 
 /** Read-only proposed post-reconstruction state, shared by preparation and final review.
@@ -32,11 +32,11 @@ export async function projectInventoryCutoverStateInsideTransaction(
   let claimsProjected = false;
   if (reconstruction.ready && targetVariants.length > 0) {
     try {
-      const claimSnapshot = projectVerifiedOpeningClaimSupply(await captureProposedClaimSupplySnapshotInsideTransaction(client, targetVariants), opening?.verification ?? null);
+      const claimSnapshot = await captureProposedClaimSupplySnapshotInsideTransaction(client, targetVariants);
       // Accepted demand can include products with no channel listing. Their graph
       // must also be in the operator's manifest before adopting any new promise.
       checkGraphSelections(manifest, claimSnapshot, blockers);
-      const fresh = planFreshCutoverClaims(claimSnapshot, reconstruction);
+      const fresh = planFreshCutoverClaims(claimSnapshot, reconstruction, opening?.verification ?? null);
       impactHash = fresh.impactHash;
       additions = fresh.freshReservationsByLevel;
       claimsProjected = true;
@@ -56,16 +56,17 @@ export async function projectInventoryCutoverStateInsideTransaction(
   const configurationEvidence: unknown[] = [];
   for (const productId of manifest.productIds) {
     const recorded = parseSupplySnapshot(await captureProposedSupplySnapshotInsideTransaction(client, productId));
-    const original = projectVerifiedOpeningSupply(recorded, opening?.verification ?? null);
+    // Same order as claim planning: verify the promise against RAW counters
+    // before projecting lot observations. Blocked claims cannot grant a release.
+    const { snapshotFingerprint: _recordedFingerprint, ...recordedContent } = recorded;
+    const promiseProjected = claimsProjected
+      ? sealSupplySnapshot({ ...recordedContent, inventoryPositions: projectCutoverPromiseReservations(recorded.inventoryPositions, reconstruction.legacyPromiseReleases) })
+      : recorded;
+    const original = projectVerifiedOpeningSupply(promiseProjected, opening?.verification ?? null);
     stockFingerprints.push({ productId, fingerprint: recorded.snapshotFingerprint });
     checkGraphSelections(manifest, original, blockers);
     const { snapshotFingerprint: _fingerprint, ...content } = original;
-    // Only an executable reconstruction projects a release. Blocked evidence
-    // retains every legacy counter and cannot inflate channel publication.
-    const releasedPositions = claimsProjected
-      ? projectCutoverPromiseReservations(content.inventoryPositions, reconstruction.legacyPromiseReleases)
-      : content.inventoryPositions;
-    const snapshot = sealSupplySnapshot({ ...content, inventoryPositions: releasedPositions.map((row) => ({
+    const snapshot = sealSupplySnapshot({ ...content, inventoryPositions: content.inventoryPositions.map((row) => ({
       ...row, reservedQty: (BigInt(row.reservedQty) + (additionalByLevel.get(row.inventoryLevelId) ?? BigInt(0))).toString(),
     })) });
     const variants = await loadManagedSellableVariantIds(client, productId);

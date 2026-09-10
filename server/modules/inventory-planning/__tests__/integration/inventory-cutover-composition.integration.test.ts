@@ -231,9 +231,13 @@ dbDescribe.sequential("empty-bin promise handoff through complete cutover compos
         { id: 5, qty_on_hand: 20, qty_reserved: 6, qty_picked: 0, total_unit_cost_mills: "1000" }]);
     expect((await database.pool.query("SELECT requested_qty::text,planned_qty::text,shortfall_qty::text FROM inventory.availability_claim_lines")).rows)
       .toEqual([{ requested_qty: "6", planned_qty: "6", shortfall_qty: "0" }]);
-    // Old counter-only promises stay in historical evidence. They are not a
-    // fabricated lot reservation/release in the new opening ledger.
-    expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.inventory_transactions WHERE reference_type='inventory_cutover_promise'")).rows[0].count).toBe(0);
+    // The proven legacy counter handoff has one audit, but it must never be
+    // fabricated as physical lot custody or a release in the new quantity ledger.
+    expect((await database.pool.query(`SELECT order_id,order_item_id,from_location_id,variant_qty_delta,reserved_qty_delta
+      FROM inventory.inventory_transactions WHERE reference_type='inventory_cutover_promise'`)).rows)
+      .toEqual([{ order_id: 1, order_item_id: 11, from_location_id: 100, variant_qty_delta: 0, reserved_qty_delta: -6 }]);
+    expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.quantity_commands WHERE kind='release'")).rows[0].count).toBe(0);
+    expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.quantity_entries WHERE inventory_lot_id=4")).rows[0].count).toBe(0);
     expect((await database.pool.query("SELECT desired_quantity::text FROM inventory.inventory_publication_outbox WHERE publication_phase='full'")).rows)
       .toEqual([{ desired_quantity: "14" }]);
     expect((await database.pool.query("SELECT * FROM oms.order_item_costs")).rows).toEqual([]);

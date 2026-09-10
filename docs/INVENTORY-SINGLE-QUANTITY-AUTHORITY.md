@@ -204,7 +204,7 @@ picker discrepancy handling, or existing publication admission contracts.
 | Explicit independent opening owner | `server/modules/inventory/infrastructure/quantity-ledger.repository.ts:33`, `openInsideTransaction` |
 | Bucket contract and reservation overlap | `server/modules/inventory/domain/quantity-ledger.ts:10`, `quantityBalanceSchema`; `:28`, `quantityCommandSchema` |
 | Bin opening derives from lot observations | `shared/types/inventory-opening-quantity-projection.ts:8`, `deriveVerifiedOpeningPositions` |
-| Opening posts before fresh claim reservations | `server/modules/inventory-planning/infrastructure/inventory-cutover-reconstruction.repository.ts:90`, `persistReviewed` |
+| Opening posts before fresh claim reservations | `server/modules/inventory-planning/infrastructure/inventory-cutover-reconstruction.repository.ts:89`, `persistReviewed` |
 | Immutable zero-history identities | `migrations/242_inventory_quantity_ledger.sql:318`, `guard_quantity_projection_identity` |
 | Replay before FIFO; explicit empty intent | `server/modules/inventory/infrastructure/operational-quantity-posting.ts:47`, `beginOperation`; `:77`, `finishNoMovement` |
 | Atomic full-source catalog batch | `server/modules/catalog/application/catalog-inventory-command.service.ts:62`, `execute`; `server/modules/catalog/infrastructure/catalog-inventory-command.repository.ts:14`, `transaction` |
@@ -212,7 +212,7 @@ picker discrepancy handling, or existing publication admission contracts.
 
 ## Validation and remaining acceptance
 
-Final local validation on September 10, 2026:
+Initial local validation before PR #1434 on September 10, 2026:
 
 - `npm run check`: passed.
 - `npm run build`: passed; the existing large-client-bundle warning remains.
@@ -240,6 +240,51 @@ multi-SKU catalog transfers, empty-operation replay, and reload-safe client
 intents. Full cutover cases prove late failures roll back the opening, claims,
 authority and publication records together. Existing v1 compatibility and v2
 lot-derived opening behavior are both exercised.
+
+### PR #1434 CI correction and current-main integration
+
+The initial inventory-only integration run did not cover the complete PostgreSQL
+CI job. The reported 33 procurement failures all stopped at
+`openOperationalQuantityPosting` (`operational-quantity-posting.ts:126`) because
+the receiving-cost fixture omitted `inventory.cutover_admission_fence`. The
+complete job also exposed seven receiving-unit failures and eight
+reconstruction/publication failures from the same missing prerequisite family.
+
+The reduced component fixtures now explicitly install unopened quantity
+authority using `installPreOpeningQuantityAuthorityFixture` /
+`installUnopenedQuantityLedgerFixture`. These are pre-opening component tests,
+not migration/activation proof; their opening table rejects all inserts.
+Runtime missing-schema guards remain unchanged. Two real receiving integration
+cases remove the admission/opening table individually and require SQLSTATE
+42P01 with unchanged receipt, inventory and audit state.
+
+CI now explicitly runs both quantity-ledger integration suites and the real
+replenishment claim-safety suite. Full migration/opening/rollback tests continue
+using actual migrations, constraints and isolated databases.
+
+Main advanced to `9464bf947` (PR #1433) during this correction. Its proven-promise
+handoff is integrated with V2 lot observations: evaluate raw promise proof first,
+project physical observations without subtracting the promise twice, release
+the legacy counter before ledger opening, and retain fresh demand and ATP in
+the same transaction. Both V1 and V2 full-cutover tests exercise late rollback,
+concurrent replay, original costs, preserved demand and publication outcomes.
+
+Final correction validation (September 10, 2026, after integrating that main):
+
+- All **29 PostgreSQL CI test commands** passed: **1,131 tests across 70 files**,
+  no skips. Commands ran serially against an explicitly disposable local
+  PostgreSQL 17 database; CI uses PostgreSQL 16 on Ubuntu and remains a separate
+  verification. Failed groups were rerun in full after their corrections.
+- The original three-suite failing group: **46 passed**. Receiving-unit coverage:
+  **25 passed**, including both new missing-schema rollback cases. The complete
+  inventory/publication group: **530 passed across 29 files**.
+- `npm run check`: passed. `npm run build`: passed with the existing bundle-size
+  warning. Full unit run: **12,119 passed**, 39 skipped, 1,024 files passed and
+  one skipped. Database-only cases skipped by the unit command were exercised
+  separately by the PostgreSQL job commands.
+- `git diff --check` and staged whitespace checks passed. No production state
+  was changed. GitHub checks for the pushed revision must still be verified;
+  local success is not deployment or activation evidence.
 
 ### Assumptions, risks and failure modes
 

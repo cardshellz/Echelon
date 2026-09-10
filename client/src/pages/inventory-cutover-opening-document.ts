@@ -10,7 +10,10 @@ const worksheetSchema = z.object({ contractVersion: z.literal("inventory_cutover
   recordedReference: z.unknown(), verification: z.unknown() }).strict();
 
 /** Recorded values are references, not an attestation. Every independently
- * verified quantity starts blank, including explicit zero positions. */
+ * verified lot/owner quantity starts blank. V2 level quantities derive only
+ * from those lots; raw counters, including empty-bin promises, remain in the
+ * recorded reference. Owner reservedQty/pickedQty describe physical holds only;
+ * eligibility to replan a promise is assessed by the server, never this export. */
 export function createOpeningWorksheet(source: OpeningSource): string {
   return JSON.stringify({ contractVersion: "inventory_cutover_opening_worksheet_v1",
     recordedReference: { capturedAt: source.capturedAt, labels: source.labels,

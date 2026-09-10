@@ -102,6 +102,9 @@ export function InventoryCutoverOpeningPanel(props: Props) {
         <p className="text-sm">Count each lot once and verify its current order owners. Lot and owner quantities start blank, including explicit zero counts.
           SKU/bin totals are calculated from those lot observations; do not count or edit a second balance. Preserve the original cost layers and record exact reserved/picked lot allocations.
           Recorded reference values and labels are not imported as verification. Saving is review-only; the approved cutover posts the new opening.</p>
+        <p className="text-sm">Recorded reservation counters may include a promise against an empty bin. Those raw counters stay in the recorded reference; the new physical totals come from lot observations.
+          An order owner's reserved and picked quantities describe physical holds only. For a proven unpicked promise with no physical hold, independently verify both owner quantities as zero with no lot allocations,
+          while keeping the full remaining order demand. The server must prove the complete empty-bin promise before proposing a handoff; unknown or mixed cases remain blocked.</p>
         <Label htmlFor="opening-verification-file">Import completed verification JSON</Label>
         <Input id="opening-verification-file" type="file" accept=".json,application/json" disabled={!usable || busy || retained}
           onChange={event => { const file = event.target.files?.[0]; event.target.value = ""; void importFile(file); }} />
@@ -119,6 +122,7 @@ export function InventoryCutoverOpeningPanel(props: Props) {
       {assessment && <section className="space-y-3" aria-label="Opening verification assessment">
         <p className="text-sm">{assessment.ready ? "Verification is consistent and can be saved for later cutover review." : `${assessment.blockers.length} finding(s) prevent saving this verification.`}
           {" "}{assessment.historicalExceptions.length} historical finding(s) remain recorded separately; they are not declared resolved.</p>
+        {source.data && <OpeningPromiseHandoffEvidence source={source.data} assessment={assessment} />}
         <OpeningFindings title="Current verification blockers" rows={assessment.blockers} />
         <OpeningFindings title="Preserved historical exceptions" rows={assessment.historicalExceptions} />
       </section>}
@@ -142,7 +146,7 @@ function OpeningRecordedEvidence({ source }: { source: OpeningSource }) {
   const labels = new Map(source.labels.map(row => [`${row.kind}:${row.id}`, row.label]));
   const label = (kind: string, id: string | number | null) => id === null ? "Unknown" : labels.get(`${kind}:${id}`) ?? `${kind} ${id} (label unavailable)`;
   return <details><summary className="cursor-pointer text-sm">Inspect recorded SKU, bin and order references</summary>
-    <OpeningRows rows={source.evidence.levels} render={rows => <table className="w-full text-sm"><thead><tr><th>SKU</th><th>Warehouse / bin</th><th>Recorded units</th><th>Reserved / picked / packed</th></tr></thead><tbody>
+    <OpeningRows rows={source.evidence.levels} render={rows => <table className="w-full text-sm"><thead><tr><th>SKU</th><th>Warehouse / bin</th><th>Recorded units</th><th>Recorded reservation counter / picked / packed</th></tr></thead><tbody>
       {rows.map(row => <tr key={row.id}><td>{label("variant", row.productVariantId)}</td><td>{label("warehouse", row.warehouseId)} / {label("location", row.warehouseLocationId)}<br />Level {row.id}</td>
         <td>{row.variantQty}</td><td>{row.reservedQty} / {row.pickedQty} / {row.packedQty}</td></tr>)}</tbody></table>} />
     <OpeningRows rows={source.evidence.items} render={rows => <table className="w-full text-sm"><thead><tr><th>Order / line</th><th>SKU</th><th>Ordered / picked / fulfilled</th></tr></thead><tbody>
@@ -159,14 +163,14 @@ function OpeningVerifiedEvidence({ source, verification }: { source: OpeningSour
   }))));
   return <details><summary className="cursor-pointer text-sm">Review imported stock, order ownership and lot costs</summary>
     <h4 className="mt-2 text-sm font-medium">Verified stock positions</h4>
-    <OpeningRows rows={verification.levels} render={rows => <table className="w-full text-sm"><thead><tr><th>SKU / bin</th><th>Units</th><th>Reserved / picked / packed</th></tr></thead><tbody>
+    <OpeningRows rows={verification.levels} render={rows => <table className="w-full text-sm"><thead><tr><th>SKU / bin</th><th>Units</th><th>Recorded reservation counter / picked / packed</th></tr></thead><tbody>
       {rows.map(row => <tr key={row.id}><td>{label("variant", row.productVariantId)} / {label("warehouse", row.warehouseId)} / {label("location", row.warehouseLocationId)} · level {row.id}</td>
         <td>{row.variantQty}</td><td>{row.reservedQty} / {row.pickedQty} / {row.packedQty}</td></tr>)}</tbody></table>} />
     <h4 className="mt-2 text-sm font-medium">Verified order commitments</h4>
-    <OpeningRows rows={verification.owners} render={rows => <table className="w-full text-sm"><thead><tr><th>Order / line</th><th>Remaining</th><th>Reserved / picked</th></tr></thead><tbody>
+    <OpeningRows rows={verification.owners} render={rows => <table className="w-full text-sm"><thead><tr><th>Order / line</th><th>Remaining demand kept</th><th>Physical reserved / picked</th></tr></thead><tbody>
       {rows.map(row => <tr key={row.orderItemId}><td>{label("order", row.orderId)} / line {row.orderItemId}</td><td>{row.remainingQty}</td><td>{row.reservedQty} / {row.pickedQty}</td></tr>)}</tbody></table>} />
     <h4 className="mt-2 text-sm font-medium">Verified owner allocations</h4>
-    <OpeningRows rows={allocations} render={rows => <table className="w-full text-sm"><thead><tr><th>Order / line</th><th>SKU / bin / lot</th><th>Reserved / picked</th><th>Original cost records</th></tr></thead><tbody>
+    <OpeningRows rows={allocations} render={rows => <table className="w-full text-sm"><thead><tr><th>Order / line</th><th>SKU / bin / lot</th><th>Physical reserved / picked</th><th>Original cost records</th></tr></thead><tbody>
       {rows.map((row, index) => { const level = levels.get(row.inventoryLevelId); return <tr key={`${row.orderItemId}:${row.inventoryLevelId}:${row.inventoryLotId}:${index}`}>
         <td>{label("order", row.orderId)} / line {row.orderItemId}</td><td>{level ? `${label("variant", level.productVariantId)} / ${label("location", level.warehouseLocationId)}` : `Unknown level ${row.inventoryLevelId}`} / lot {row.inventoryLotId}</td>
         <td>{row.reservedQty} / {row.pickedQty}</td><td>{row.originalCostIds.length} exact record(s); see worksheet IDs</td></tr>; })}</tbody></table>} />
@@ -175,6 +179,33 @@ function OpeningVerifiedEvidence({ source, verification }: { source: OpeningSour
       {rows.map(row => <tr key={row.id}><td>{label("variant", row.productVariantId)} / {label("location", row.warehouseLocationId)} / lot {row.id}</td><td>{row.onHandQty} / {row.reservedQty} / {row.pickedQty}</td>
         <td>{row.unitCostMills} / {row.poUnitCostMills} / {row.packagingUnitCostMills} / {row.landedUnitCostMills}</td></tr>)}</tbody></table>} />
   </details>;
+}
+
+/** Render only the server's exact complete-position proposals. A zero-looking
+ * bin in the captured source is never enough for the browser to infer a release. */
+export function OpeningPromiseHandoffEvidence({ source, assessment }: { source: OpeningSource; assessment: OpeningAssessment }) {
+  const releases = assessment.plan.legacyPromiseReleases;
+  if (releases.length === 0) return null;
+  const labels = new Map(source.labels.map(row => [`${row.kind}:${row.id}`, row.label]));
+  const label = (kind: string, id: number) => labels.get(`${kind}:${id}`) ?? `${kind} ${id} (label unavailable)`;
+  const plannedLines = new Map(assessment.plan.orders.flatMap(order => order.lines.map(line => [`${order.orderId}:${line.orderItemId}`, line] as const)));
+  const rows = releases.flatMap(release => release.owners.map(owner => ({ release, owner,
+    line: plannedLines.get(`${owner.orderId}:${owner.orderItemId}`) })));
+  return <section className="space-y-2 rounded border p-3" aria-label="Proven empty-bin promise handoffs">
+    <h4 className="font-medium text-sm">Proven empty-bin promises to re-plan</h4>
+    <p className="text-sm">{releases.length} complete empty-bin position(s), for {rows.length} order line(s).
+      No physical stock is released by this handoff. The full remaining customer demand is kept, including any shortage.</p>
+    <p className="text-sm">Preview and verification save change no counters. Only a separately reviewed final activation may remove these exact nonphysical reservation counters
+      through the inventory owner and re-plan demand atomically. Physical reservations, picked stock and build holds are not cleared by this handoff.</p>
+    {!assessment.ready && <p className="text-sm" role="note">Other findings still block this opening. Showing these proposals does not authorize saving or activation.</p>}
+    <OpeningRows rows={rows} render={page => <table className="w-full text-sm"><thead><tr>
+      <th>Order / line</th><th>SKU / warehouse / bin</th><th>Recorded promise units</th><th>Remaining demand kept</th>
+    </tr></thead><tbody>{page.map(({ release, owner, line }) => <tr key={`${release.inventoryLevelId}:${owner.orderId}:${owner.orderItemId}`}>
+      <td>{label("order", owner.orderId)} / line {owner.orderItemId}</td>
+      <td>{label("variant", release.productVariantId)} / {label("warehouse", release.warehouseId)} / {label("location", release.warehouseLocationId)} · level {release.inventoryLevelId}</td>
+      <td>{owner.reservedQty}</td><td>{line?.requestedQty ?? "Not proven in the returned plan"}</td>
+    </tr>)}</tbody></table>} />
+  </section>;
 }
 
 function OpeningFindings({ title, rows }: { title: string; rows: Array<{ code: string; subject: string; message: string }> }) {
