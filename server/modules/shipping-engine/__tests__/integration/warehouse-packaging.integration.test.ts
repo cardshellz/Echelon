@@ -7,6 +7,9 @@ import { ChannelPackagingRepository } from "../../infrastructure/channel-packagi
 import { SharedShippingConfigurationRepository } from "../../infrastructure/shared-configuration.repository";
 import { SHARED_SHIPPING_LEGACY_FIXTURE_SQL } from "./fixtures/shared-shipping-legacy";
 import { saveCatalogBoxSchema } from "@shared/shipping/packaging-policy";
+import { drizzle } from "drizzle-orm/node-postgres";
+import { eq } from "drizzle-orm";
+import { shippingBoxCatalog, shippingPackPlanParcels } from "@shared/schema/shipping.schema";
 
 const enabled =
   Boolean(process.env.ECHELON_TEST_DATABASE_URL) &&
@@ -30,11 +33,15 @@ describe.skipIf(!enabled)("warehouse-owned packaging commands", () => {
     repo = new ChannelPackagingRepository(db);
     shared = new SharedShippingConfigurationRepository(db);
     await db.query(SHARED_SHIPPING_LEGACY_FIXTURE_SQL);
+    await db.query(`ALTER TABLE shipping.pack_plan_parcels
+      ADD COLUMN length_mm integer, ADD COLUMN width_mm integer, ADD COLUMN height_mm integer;
+      INSERT INTO shipping.pack_plan_parcels VALUES(1,203,152,0)`);
     for (const name of [
       "238_shared_packaging_and_program_charges.sql",
       "239_packaging_suite_lifecycle.sql",
       "241_channel_packaging_policies.sql",
       "243_warehouse_packaging_availability.sql",
+      "244_box_dimension_precision.sql",
     ])
       await db.query(readFileSync(resolve("migrations", name), "utf8"));
     await db.query(
@@ -94,6 +101,66 @@ describe.skipIf(!enabled)("warehouse-owned packaging commands", () => {
       actor,
       now,
     );
+
+  it("migrates existing measurements exactly and keeps numeric API/parcel contracts", async () => {
+    const orm = drizzle(db);
+    expect(await orm.select({ lengthMm: shippingBoxCatalog.lengthMm, widthMm: shippingBoxCatalog.widthMm,
+      heightMm: shippingBoxCatalog.heightMm }).from(shippingBoxCatalog)
+      .where(eq(shippingBoxCatalog.code, "migrated-dropship-7")))
+      .toEqual([{ lengthMm: 203, widthMm: 152, heightMm: 102 }]);
+    const parcelDimensions = { lengthMm: shippingPackPlanParcels.lengthMm,
+      widthMm: shippingPackPlanParcels.widthMm, heightMm: shippingPackPlanParcels.heightMm };
+    expect(await orm.select(parcelDimensions).from(shippingPackPlanParcels))
+      .toEqual([{ lengthMm: 203, widthMm: 152, heightMm: 0 }]);
+    const measured = { lengthMm: 209.55, widthMm: 158.75, heightMm: 107.9754 };
+    await orm.update(shippingPackPlanParcels).set(measured).where(eq(shippingPackPlanParcels.id, 1));
+    expect(await orm.select(parcelDimensions).from(shippingPackPlanParcels)).toEqual([measured]);
+    expect((await db.query("SELECT height_mm FROM shipping.pack_plan_parcels WHERE id=1")).rows[0].height_mm)
+      .toBe("107.9754");
+    await expect(db.query("UPDATE shipping.pack_plan_parcels SET height_mm='NaN' WHERE id=1"))
+      .rejects.toMatchObject({ code: "23514" });
+  });
+
+  it("saves, audits, replays and resolves fractional box dimensions without losing precision", async () => {
+    const input = saveCatalogBoxSchema.parse({
+      code: "PRECISION", name: "Measured 8-inch box", kind: "box", branding: "unbranded",
+      lengthMm: 203.2254, widthMm: 152.4, heightMm: 101.6,
+      outerLengthMm: 209.55, outerWidthMm: 158.75, outerHeightMm: 107.9754,
+      tareWeightGrams: 45, costCents: 25, fillFactorBps: 8500, isActive: true,
+      expectedRevision: 0, commandId: randomUUID(),
+    });
+    const saved = await repo.saveBox(input, actor, now);
+    expect(saved.box).toMatchObject({ lengthMm: 203.2254, outerHeightMm: 107.9754 });
+    expect(await repo.saveBox(input, actor, now)).toEqual(saved);
+    const journal = await db.query("SELECT before_state,after_state FROM shipping.configuration_commands WHERE command_id=$1", [input.commandId]);
+    expect(journal.rows).toHaveLength(1);
+    expect(journal.rows[0].after_state.box.lengthMm).toBe(203.2254);
+    const typed = await drizzle(db).select().from(shippingBoxCatalog).where(eq(shippingBoxCatalog.id, saved.box.id));
+    expect(typed[0]).toMatchObject({ lengthMm: 203.2254, widthMm: 152.4, outerHeightMm: 107.9754 });
+    await availability([1], [saved.box.id]);
+    const suite = await createSuite("Precise cartons", [saved.box.id]);
+    await db.query("INSERT INTO channels.channels VALUES(900,'Precision channel','internal','manual','active',NULL)");
+    await repo.savePolicy({ channelId: 900, defaultSuiteId: suite.id, requirement: "any", overrides: [],
+      expectedRevision: 0, commandId: randomUUID() }, actor, now);
+    expect((await shared.loadPackaging("internal", 1, 900)).boxes[0])
+      .toMatchObject({ lengthMm: 203.2254, outerHeightMm: 107.9754 });
+    await shared.saveAssignment({ channel: "internal", warehouseId: 1, suiteId: suite.id,
+      expectedRevision: 0, commandId: randomUUID() }, actor, now);
+    expect((await shared.loadPackaging("internal", 1)).boxes[0])
+      .toMatchObject({ lengthMm: 203.2254, outerHeightMm: 107.9754 });
+    const competing = await Promise.allSettled([202.1, 202.2].map((lengthMm) => repo.saveBox({ ...input,
+      id: saved.box.id, expectedRevision: 1, lengthMm, commandId: randomUUID() }, actor, now)));
+    expect(competing.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(competing.filter((result) => result.status === "rejected")).toHaveLength(1);
+    const updated = await drizzle(db).select().from(shippingBoxCatalog).where(eq(shippingBoxCatalog.id, saved.box.id));
+    expect(updated[0].configurationRevision).toBe(2);
+    expect([202.1, 202.2]).toContain(updated[0].lengthMm);
+    expect(updated[0].outerHeightMm).toBe(107.9754);
+    for (const invalid of ["NaN", "2147483648"]) {
+      await expect(db.query("UPDATE shipping.box_catalog SET length_mm=$1 WHERE id=$2", [invalid, saved.box.id]))
+        .rejects.toMatchObject({ code: "23514" });
+    }
+  });
 
   it("metadata edits never rewrite availability; new boxes start nowhere", async () => {
     const { input, box } = await create("META");

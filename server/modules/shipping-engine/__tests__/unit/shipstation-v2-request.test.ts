@@ -44,6 +44,8 @@ describe("unit conversions", () => {
 
   it("converts mm to inches at 2dp", () => {
     expect(mmToInches(254)).toBe(10);
+    expect(mmToInches(203.2)).toBe(8);
+    expect(mmToInches(209.55)).toBe(8.25);
     expect(mmToInches(100)).toBe(3.94);
     expect(mmToInches(0)).toBe(0);
   });
