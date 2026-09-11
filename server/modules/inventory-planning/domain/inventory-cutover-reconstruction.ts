@@ -21,7 +21,29 @@ function sortedEvidence(raw: CutoverReconstructionEvidence): CutoverReconstructi
   return sorted as CutoverReconstructionEvidence;
 }
 export function reconstructionEvidenceHash(raw: CutoverReconstructionEvidence): string {
-  return reconstructionHash(sortedEvidence(raw));
+  const evidence = cutoverReconstructionEvidenceSchema.parse(raw);
+  const digest = createHash("sha256");
+  // Preserve canonical bytes while hashing one collection at a time, without
+  // cloning and stringifying a second complete census.
+  digest.update("{");
+  let firstField = true;
+  for (const key of Object.keys(evidence).sort()) {
+    const value = evidence[key as keyof CutoverReconstructionEvidence];
+    if (value === undefined) continue;
+    if (!firstField) digest.update(",");
+    firstField = false;
+    digest.update(JSON.stringify(key)).update(":");
+    if (Array.isArray(value)) {
+      const rows = value.map(row => canonicalJson(row)).sort();
+      digest.update("[");
+      for (let index = 0; index < rows.length; index++) {
+        if (index) digest.update(",");
+        digest.update(rows[index]);
+      }
+      digest.update("]");
+    } else digest.update(canonicalJson(value));
+  }
+  return digest.update("}").digest("hex");
 }
 function groupBy<T, K>(rows: readonly T[], key: (row: T) => K): Map<K, T[]> {
   const result = new Map<K, T[]>();

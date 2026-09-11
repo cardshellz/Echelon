@@ -1,4 +1,11 @@
 import { z, ZodError } from "zod";
+import { AsyncLocalStorage } from "node:async_hooks";
+
+type CaptureObserver = (stage: string, metrics?: { elapsedMs: number; rssBytes: number }) => Promise<void>;
+const captureObserver = new AsyncLocalStorage<CaptureObserver>();
+export function observeInventoryCapture<T>(observer: CaptureObserver, work: () => Promise<T>): Promise<T> {
+  return captureObserver.run(observer, work);
+}
 
 const captureStageSchema = z.enum([
   "transaction_guard", "inventory_custody", "wms_demand_and_packages", "variant_identity",
@@ -69,7 +76,14 @@ export class InventoryCutoverCaptureError extends Error {
 /** No retry, partial result, timeout increase or transaction mutation. */
 export async function captureInventoryCutoverStage<T>(stage: InventoryCutoverCaptureStage, work: () => Promise<T>): Promise<T> {
   captureStageSchema.parse(stage);
-  try { return await work(); }
+  const observer = captureObserver.getStore();
+  const started = performance.now();
+  try {
+    await observer?.(stage);
+    const result = await work();
+    await observer?.(stage, { elapsedMs: Math.round(performance.now() - started), rssBytes: process.memoryUsage().rss });
+    return result;
+  }
   catch (cause) {
     if (cause instanceof InventoryCutoverCaptureError) throw cause;
     throw new InventoryCutoverCaptureError(stage, cause);

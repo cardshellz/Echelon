@@ -6,6 +6,9 @@ import { InventoryCutoverOpeningError, InventoryCutoverOpeningService } from "..
 import { PostgresInventoryCutoverOpeningRepository } from "../../infrastructure/inventory-cutover-opening.repository";
 import { sendInventoryCutoverError } from "./inventory-cutover-commit.routes";
 import { parseInventoryCutoverOpeningJson } from "./inventory-cutover-opening-body.middleware";
+import { registerInventoryOpeningCaptureRoutes } from "./inventory-opening-capture.routes";
+import { PostgresInventoryOpeningCaptureRepository } from "../../infrastructure/inventory-opening-capture.repository";
+import { pool } from "../../../../db";
 
 const ROOT = "/api/inventory-planning/admin/cutover-opening";
 const noStore: RequestHandler = (_req, res, next) => { res.setHeader("Cache-Control", "no-store"); next(); };
@@ -14,6 +17,7 @@ export function registerInventoryCutoverOpeningRoutes(app: Express,
   service: Pick<InventoryCutoverOpeningService, "capture" | "preview" | "save"> =
     new InventoryCutoverOpeningService(new PostgresInventoryCutoverOpeningRepository()),
 ): void {
+  registerInventoryOpeningCaptureRoutes(app, new PostgresInventoryOpeningCaptureRepository(pool));
   app.get(ROOT + "/source", noStore, requirePermission("inventory_planning", "activate"), async (req, res) => {
     try {
       if (Object.keys(req.query).length > 0) throw invalid("Source capture does not accept query filters.");
