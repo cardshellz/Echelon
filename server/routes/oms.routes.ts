@@ -31,6 +31,12 @@ import {
   resolveShipStationUnmappedPhysicalAsReturnLabel,
   resolveShipStationUnmappedPhysicalAsVoidedLabel,
 } from "../modules/oms/shipstation-unmapped-remediation.service";
+import {
+  createHistoricalOrderLineIdentityRepairService,
+} from "../modules/oms/application/historical-order-line-identity-repair.service";
+import {
+  HistoricalIdentityRepairError,
+} from "../modules/oms/domain/historical-order-line-identity-repair";
 
 export function registerOmsRoutes(app: Express) {
   const getOms = (req: Request): OmsService => (req.app.locals.services as any).oms;
@@ -48,6 +54,28 @@ export function registerOmsRoutes(app: Express) {
       fulfillmentAuthority: services.channelFulfillmentAuthority,
       reviewRetry: services.channelFulfillmentReviewRetry,
     };
+  };
+  const getHistoricalIdentityRepair = (req: Request) => {
+    const reservation = (req.app.locals.services as any)?.reservation;
+    if (!reservation?.reconcileOrderDemand) {
+      throw new HistoricalIdentityRepairError(
+        "REPAIR_CLAIM_OWNER_UNAVAILABLE",
+        "Canonical inventory claim owner is unavailable",
+        503,
+      );
+    }
+    return createHistoricalOrderLineIdentityRepairService(db, reservation);
+  };
+  const sendHistoricalIdentityRepairError = (
+    res: Response,
+    error: unknown,
+    fallback: string,
+  ) => {
+    if (error instanceof HistoricalIdentityRepairError) {
+      res.status(error.status).json({ error: error.message, code: error.code, context: error.context });
+      return;
+    }
+    res.status(500).json({ error: fallback, code: "REPAIR_UNEXPECTED_ERROR" });
   };
 
   // -----------------------------------------------------------------------
@@ -74,6 +102,50 @@ export function registerOmsRoutes(app: Express) {
       res.status(500).json({ error: err.message });
     }
   });
+
+  // Deploying these routes is inert. A triage operator must first review the
+  // exact source/catalog/WMS evidence hash, then submit that hash to apply one
+  // order atomically. The apply path resumes its canonical claim handoff by a
+  // durable idempotency key; it is not a startup backfill.
+  app.get(
+    "/api/oms/ops/historical-line-identity-repair/:omsOrderId/preview",
+    requirePermission("operations", "triage"),
+    async (req: Request, res: Response) => {
+      try {
+        res.setHeader("Cache-Control", "private, no-store");
+        res.json(await getHistoricalIdentityRepair(req).preview(Number(req.params.omsOrderId)));
+      } catch (error) {
+        console.error("[OMS Routes] Historical line identity repair preview failed", error);
+        sendHistoricalIdentityRepairError(res, error, "Failed to preview historical line identity repair");
+      }
+    },
+  );
+
+  app.post(
+    "/api/oms/ops/historical-line-identity-repair/:omsOrderId/apply",
+    requirePermission("operations", "triage"),
+    async (req: Request, res: Response) => {
+      try {
+        const userId = req.session.user?.id;
+        if (!Number.isSafeInteger(userId) || Number(userId) <= 0) {
+          throw new HistoricalIdentityRepairError(
+            "REPAIR_OPERATOR_REQUIRED",
+            "An authenticated operator is required",
+            403,
+          );
+        }
+        res.setHeader("Cache-Control", "private, no-store");
+        res.json(await getHistoricalIdentityRepair(req).apply(
+          Number(req.params.omsOrderId),
+          req.body,
+          { operator: `user:${Number(userId)}`, userId: String(Number(userId)) },
+        ));
+      } catch (error) {
+        console.error("[OMS Routes] Historical line identity repair apply failed", error);
+        sendHistoricalIdentityRepairError(res, error, "Failed to apply historical line identity repair");
+      }
+    },
+  );
 
   // -----------------------------------------------------------------------
   // GET /api/oms/ops/flow-waterfall — funnel view of where orders diverge
