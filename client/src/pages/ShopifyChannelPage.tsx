@@ -37,6 +37,11 @@ import {
   RefreshCw, Send, Search, Loader2, Package, Clock, Download, Upload,
   Image as ImageIcon, ShieldCheck,
 } from "lucide-react";
+import {
+  summarizeShopifyProductSync,
+  type ShopifyProductSyncResult,
+} from "@/lib/shopify-product-sync-result";
+import { useAuth } from "@/lib/auth";
 
 interface Channel {
   id: number;
@@ -128,6 +133,8 @@ const mappingIssueLabels: Record<ShopifyMappingIssueCode, string> = {
 export default function ShopifyChannelPage() {
   const [, navigate] = useLocation();
   const { toast } = useToast();
+  const { hasPermission } = useAuth();
+  const canSyncShopifyCatalog = hasPermission("inventory", "edit");
   const queryClient = useQueryClient();
   const [feedFilter, setFeedFilter] = useState<FeedStatus>("all");
   const [feedSearch, setFeedSearch] = useState("");
@@ -260,14 +267,16 @@ export default function ShopifyChannelPage() {
     mutationFn: async () => {
       const res = await fetch("/api/shopify/sync-products", { method: "POST", credentials: "include" });
       if (!res.ok) throw new Error("Sync failed");
-      return res.json();
+      return res.json() as Promise<ShopifyProductSyncResult>;
     },
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["/api/products"] });
       queryClient.invalidateQueries({ queryKey: ["/api/channels", shopifyChannel?.id, "listings"] });
+      const outcome = summarizeShopifyProductSync(data);
       toast({
-        title: "Sync Complete",
-        description: `Products: ${data.products?.created || 0} created, ${data.products?.updated || 0} updated`,
+        title: outcome.title,
+        description: outcome.description,
+        variant: outcome.needsReview ? "destructive" : "default",
       });
     },
     onError: () => {
@@ -840,8 +849,9 @@ export default function ShopifyChannelPage() {
                 variant="outline"
                 size="sm"
                 className="min-h-[44px] sm:min-h-0"
-                disabled={syncFromShopifyMutation.isPending || !shopifyChannel}
+                disabled={syncFromShopifyMutation.isPending || !shopifyChannel || !canSyncShopifyCatalog}
                 onClick={() => syncFromShopifyMutation.mutate()}
+                title={canSyncShopifyCatalog ? undefined : "Inventory edit permission is required"}
               >
                 {syncFromShopifyMutation.isPending ? (
                   <Loader2 className="h-4 w-4 mr-2 animate-spin" />

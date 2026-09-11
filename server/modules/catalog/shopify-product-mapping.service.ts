@@ -14,6 +14,7 @@ import {
   buildShopifyProductMappingSummary,
   evaluateShopifyProductMappingRepair,
   normalizeShopifyId,
+  type ImportedShopifyVariantBinding,
   type ShopifyProductMappingSource,
   type ShopifyProductMappingSummary,
   type ShopifyVariantMappingResolution,
@@ -35,10 +36,10 @@ interface LoadedMapping {
   shippingGroupCode: string | null;
 }
 
-interface VerifiedShopifyProduct {
-  id: string;
-  title: string | null;
-  variants: VerifiedShopifyVariantIdentity[];
+export interface VerifiedShopifyProduct {
+  readonly id: string;
+  readonly title: string | null;
+  readonly variants: readonly VerifiedShopifyVariantIdentity[];
 }
 
 export interface ShopifyProductMappingRepairResult {
@@ -385,6 +386,57 @@ async function fetchVerifiedShopifyProduct(
   };
 }
 
+/**
+ * Catalog import has already fetched this product from Shopify. Revalidate that
+ * snapshot before allowing it to replace the extra provider round trip used by
+ * the manual repair path. This remains an internal trust boundary: HTTP callers
+ * cannot provide a snapshot through the mapping-repair route.
+ */
+function validateVerifiedShopifyProduct(
+  input: VerifiedShopifyProduct,
+  targetProductId: string,
+): VerifiedShopifyProduct {
+  const productId = normalizeShopifyId(input?.id);
+  if (productId !== targetProductId || !Array.isArray(input?.variants)) {
+    throw new ShopifyProductMappingError(
+      "SHOPIFY_PRODUCT_SNAPSHOT_INVALID",
+      "The imported Shopify product snapshot does not match the requested product",
+      502,
+      { targetProductId, snapshotProductId: productId },
+    );
+  }
+
+  const variantsById = new Map<string, VerifiedShopifyVariantIdentity>();
+  for (const [index, variant] of input.variants.entries()) {
+    const variantId = normalizeShopifyId(variant?.id);
+    if (!variantId || variantsById.has(variantId)) {
+      throw new ShopifyProductMappingError(
+        "SHOPIFY_PRODUCT_SNAPSHOT_INVALID",
+        variantId
+          ? "The imported Shopify product snapshot contains a duplicate variant"
+          : "The imported Shopify product snapshot contains an invalid variant",
+        502,
+        { targetProductId, variantId, index },
+      );
+    }
+    variantsById.set(variantId, {
+      id: variantId,
+      sku: typeof variant.sku === "string" ? variant.sku.trim() || null : null,
+      barcode: typeof variant.barcode === "string" ? variant.barcode.trim() || null : null,
+      inventoryItemId: normalizeShopifyId(variant.inventoryItemId),
+    });
+  }
+
+  return Object.freeze({
+    id: productId,
+    title: typeof input.title === "string" ? input.title : null,
+    variants: Object.freeze(
+      [...variantsById.values()].sort((left, right) =>
+        left.id.localeCompare(right.id, "en", { numeric: true })),
+    ),
+  });
+}
+
 function normalizedIdSql(column: unknown, targetProductId: string) {
   return sql`substring(${column} from '([0-9]+)$') = ${targetProductId}`;
 }
@@ -449,6 +501,10 @@ export function createShopifyProductMappingService() {
     targetProductId: string | number;
     channelId?: number | null;
     actor: string;
+    /** Live snapshot supplied only by the internal catalog-import owner. */
+    verifiedShopifyProduct?: VerifiedShopifyProduct;
+    /** Exact local/remote rows produced by that same internal catalog import. */
+    importedVariantBindings?: readonly ImportedShopifyVariantBinding[];
     expectedVariant?: {
       variantId: number;
       remoteVariantId: string | number;
@@ -463,16 +519,26 @@ export function createShopifyProductMappingService() {
       );
     }
 
+    if (input.importedVariantBindings && !input.verifiedShopifyProduct) {
+      throw new ShopifyProductMappingError(
+        "SHOPIFY_IMPORT_BINDINGS_REQUIRE_SNAPSHOT",
+        "Imported Shopify variant bindings require the verified import snapshot",
+        500,
+      );
+    }
     const loaded = await loadMapping(db, input.productId, input.channelId);
     const before = loaded.summary;
-    const verifiedShopifyProduct = await fetchVerifiedShopifyProduct(
-      before.channel.id,
-      targetProductId,
-    );
+    const verifiedShopifyProduct = input.verifiedShopifyProduct
+      ? validateVerifiedShopifyProduct(input.verifiedShopifyProduct, targetProductId)
+      : await fetchVerifiedShopifyProduct(before.channel.id, targetProductId);
     const repairEvaluation = evaluateShopifyProductMappingRepair({
       summary: before,
       requestedProductId: targetProductId,
       verifiedRemoteVariants: verifiedShopifyProduct.variants,
+      allowUnmappedAdoption: Boolean(
+        input.verifiedShopifyProduct && input.importedVariantBindings?.length,
+      ),
+      importedVariantBindings: input.importedVariantBindings,
       expectedVariant: input.expectedVariant,
     });
     if (!repairEvaluation.ok) {

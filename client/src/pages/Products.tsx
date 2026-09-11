@@ -24,6 +24,11 @@ import {
   Plus
 } from "lucide-react";
 import { Switch } from "@/components/ui/switch";
+import {
+  summarizeShopifyProductSync,
+  type ShopifyProductSyncResult,
+} from "@/lib/shopify-product-sync-result";
+import { useAuth } from "@/lib/auth";
 
 interface ProductVariant {
   id: number;
@@ -74,6 +79,8 @@ interface ProductCategory {
 export default function Products() {
   const [, setLocation] = useLocation();
   const { toast } = useToast();
+  const { hasPermission } = useAuth();
+  const canSyncShopifyCatalog = hasPermission("inventory", "edit");
   const queryClient = useQueryClient();
   const [viewMode, setViewMode] = useState<"grid" | "table">("table");
   const [searchQuery, setSearchQuery] = useState("");
@@ -169,13 +176,15 @@ export default function Products() {
     mutationFn: async () => {
       const res = await fetch("/api/shopify/sync-products", { method: "POST" });
       if (!res.ok) throw new Error("Sync failed");
-      return res.json();
+      return res.json() as Promise<ShopifyProductSyncResult>;
     },
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["/api/products"] });
-      toast({ 
-        title: "Sync Complete", 
-        description: `Products: ${data.products?.created || 0} created, ${data.products?.updated || 0} updated. Variants: ${data.variants?.created || 0} created, ${data.variants?.updated || 0} updated.` 
+      const outcome = summarizeShopifyProductSync(data);
+      toast({
+        title: outcome.title,
+        description: outcome.description,
+        variant: outcome.needsReview ? "destructive" : "default",
       });
     },
     onError: () => {
@@ -261,7 +270,8 @@ export default function Products() {
           <Button
             variant="outline"
             onClick={() => syncMutation.mutate()}
-            disabled={syncMutation.isPending}
+            disabled={syncMutation.isPending || !canSyncShopifyCatalog}
+            title={canSyncShopifyCatalog ? undefined : "Inventory edit permission is required"}
             className="min-h-[44px] flex-1 md:flex-none"
             data-testid="btn-sync-shopify"
           >
