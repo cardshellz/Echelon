@@ -124,6 +124,161 @@ describe("InventoryLotService — pick idempotency + unpick COGS reversal", () =
     });
   });
 
+  it("appends only the next pick delta when prior COGS matches WMS progress", async () => {
+    process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
+    const { InventoryLotService } = await import("../../lots.service");
+    const insertedCosts: any[] = [];
+    let selectCallCount = 0;
+    const db = {
+      select: vi.fn(() => {
+        selectCallCount++;
+        if (selectCallCount === 1) {
+          return {
+            from: vi.fn().mockReturnThis(),
+            where: vi.fn().mockResolvedValue([{
+              inventoryLotId: 10,
+              productVariantId: 10,
+              qty: 1,
+              unitCostCents: 500,
+            }]),
+          };
+        }
+        return {
+          from: vi.fn().mockReturnThis(),
+          where: vi.fn().mockReturnThis(),
+          orderBy: vi.fn().mockResolvedValue([{
+            id: 10,
+            productVariantId: 10,
+            warehouseLocationId: 20,
+            unitCostCents: 500,
+            unitCostMills: 50_000,
+            qtyOnHand: 4,
+            qtyReserved: 2,
+            qtyPicked: 1,
+            receivedAt: new Date(),
+            status: "active",
+          }]),
+        };
+      }),
+      insert: vi.fn(() => ({
+        values: vi.fn(async (values: any[]) => { insertedCosts.push(...values); }),
+      })),
+      execute: vi.fn(async () => ({ rows: [] })),
+    } as any;
+
+    const svc = new InventoryLotService(db);
+    await expect(svc.pickFromLots({
+      productVariantId: 10,
+      warehouseLocationId: 20,
+      qty: 1,
+      orderId: 100,
+      orderItemId: 200,
+      expectedExistingCostQuantity: 1,
+    })).resolves.toEqual([{ lotId: 10, qty: 1, unitCostCents: 500 }]);
+
+    expect(db.execute).toHaveBeenCalledOnce();
+    expect(insertedCosts).toEqual([expect.objectContaining({
+      orderId: 100,
+      orderItemId: 200,
+      inventoryLotId: 10,
+      qty: 1,
+      totalCostMills: 50_000,
+    })]);
+  });
+
+  it("rejects a new pick delta when existing COGS does not match WMS progress", async () => {
+    process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
+    const { InventoryLotService } = await import("../../lots.service");
+    const db = {
+      select: vi.fn(() => ({
+        from: vi.fn().mockReturnThis(),
+        where: vi.fn().mockResolvedValue([{
+          inventoryLotId: 10,
+          productVariantId: 10,
+          qty: 1,
+          unitCostCents: 500,
+        }]),
+      })),
+      insert: vi.fn(),
+      execute: vi.fn(),
+    } as any;
+
+    await expect(new InventoryLotService(db).pickFromLots({
+      productVariantId: 10,
+      warehouseLocationId: 20,
+      qty: 1,
+      orderId: 100,
+      orderItemId: 200,
+      expectedExistingCostQuantity: 2,
+    })).rejects.toMatchObject({
+      code: "DATA_INTEGRITY_VIOLATION",
+      context: expect.objectContaining({
+        reason: "order_item_pick_cost_custody_mismatch",
+        expectedExistingCostQuantity: 2,
+        actualExistingCostQuantity: 1,
+      }),
+    });
+    expect(db.execute).not.toHaveBeenCalled();
+    expect(db.insert).not.toHaveBeenCalled();
+  });
+
+  it("rejects an incremental pick that would split legacy WMS custody across locations", async () => {
+    process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
+    const { InventoryLotService } = await import("../../lots.service");
+    let selectCallCount = 0;
+    const db = {
+      select: vi.fn(() => {
+        selectCallCount++;
+        if (selectCallCount === 1) {
+          return {
+            from: vi.fn().mockReturnThis(),
+            where: vi.fn().mockResolvedValue([{
+              inventoryLotId: 10,
+              productVariantId: 10,
+              qty: 1,
+              unitCostCents: 500,
+            }]),
+          };
+        }
+        return {
+          from: vi.fn().mockReturnThis(),
+          where: vi.fn().mockReturnThis(),
+          orderBy: vi.fn().mockResolvedValue([{
+            id: 11,
+            productVariantId: 10,
+            warehouseLocationId: 21,
+            unitCostCents: 500,
+            qtyOnHand: 4,
+            qtyReserved: 0,
+            qtyPicked: 0,
+            receivedAt: new Date(),
+            status: "active",
+          }]),
+        };
+      }),
+      insert: vi.fn(),
+      execute: vi.fn(),
+    } as any;
+
+    await expect(new InventoryLotService(db).pickFromLots({
+      productVariantId: 10,
+      warehouseLocationId: 21,
+      qty: 1,
+      orderId: 100,
+      orderItemId: 200,
+      expectedExistingCostQuantity: 1,
+    })).rejects.toMatchObject({
+      code: "DATA_INTEGRITY_VIOLATION",
+      context: expect.objectContaining({
+        reason: "order_item_pick_cost_location_mismatch",
+        warehouseLocationId: 21,
+        mismatchedInventoryLotIds: [10],
+      }),
+    });
+    expect(db.execute).not.toHaveBeenCalled();
+    expect(db.insert).not.toHaveBeenCalled();
+  });
+
   it("does not subtract already-picked units from remaining lot on-hand", async () => {
     process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
     const { InventoryLotService } = await import("../../lots.service");
@@ -172,6 +327,55 @@ describe("InventoryLotService — pick idempotency + unpick COGS reversal", () =
 
     expect(result).toEqual([{ lotId: 10, qty: 1, unitCostCents: 500 }]);
     expect(db.execute).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a COGS mill total that exceeds the safe integer range before inventory moves", async () => {
+    process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
+    const { InventoryLotService } = await import("../../lots.service");
+    let selectCallCount = 0;
+    const db = {
+      select: vi.fn(() => {
+        selectCallCount++;
+        if (selectCallCount === 1) {
+          return {
+            from: vi.fn().mockReturnThis(),
+            where: vi.fn().mockResolvedValue([]),
+          };
+        }
+        return {
+          from: vi.fn().mockReturnThis(),
+          where: vi.fn().mockReturnThis(),
+          orderBy: vi.fn().mockResolvedValue([{
+            id: 10,
+            productVariantId: 10,
+            warehouseLocationId: 20,
+            unitCostCents: 0,
+            unitCostMills: Number.MAX_SAFE_INTEGER,
+            qtyOnHand: 2,
+            qtyReserved: 2,
+            qtyPicked: 0,
+            receivedAt: new Date(),
+            status: "active",
+          }]),
+        };
+      }),
+      insert: vi.fn(),
+      execute: vi.fn(),
+    } as any;
+
+    await expect(new InventoryLotService(db).pickFromLots({
+      productVariantId: 10,
+      warehouseLocationId: 20,
+      qty: 2,
+      orderId: 100,
+      orderItemId: 200,
+    })).rejects.toMatchObject({
+      code: "DATA_INTEGRITY_VIOLATION",
+      context: expect.objectContaining({ field: "orderItemCost.totalCostMills" }),
+    });
+
+    expect(db.execute).not.toHaveBeenCalled();
+    expect(db.insert).not.toHaveBeenCalled();
   });
 
   it("keeps replacement picks out of stock reserved for customer orders", async () => {
@@ -230,7 +434,10 @@ describe("InventoryLotService — pick idempotency + unpick COGS reversal", () =
     const db = {
       select: vi.fn(() => ({
         from: vi.fn().mockReturnThis(),
-        where: vi.fn().mockResolvedValue(cogsRows),
+        where: vi.fn().mockReturnThis(),
+        orderBy: vi.fn(() => ({
+          for: vi.fn().mockResolvedValue(cogsRows),
+        })),
       })),
       delete: vi.fn(() => ({
         where: vi.fn(() => {
@@ -238,7 +445,7 @@ describe("InventoryLotService — pick idempotency + unpick COGS reversal", () =
           return Promise.resolve();
         }),
       })),
-      execute: vi.fn(async () => ({ rows: [] })),
+      execute: vi.fn(async () => ({ rows: [{ id: 10 }, { id: 11 }] })),
       insert: vi.fn(),
       update: vi.fn(),
       transaction: vi.fn(),
@@ -249,6 +456,7 @@ describe("InventoryLotService — pick idempotency + unpick COGS reversal", () =
       orderId: 100,
       orderItemId: 200,
       productVariantId: 10,
+      warehouseLocationId: 20,
       qty: 5, // full unpick
     });
 
@@ -258,5 +466,85 @@ describe("InventoryLotService — pick idempotency + unpick COGS reversal", () =
     expect(db.execute).toHaveBeenCalledTimes(1);
     // COGS rows deleted
     expect(deleteCalled).toBe(true);
+  });
+
+  it("partially unpicks the newest allocation without deleting remaining COGS", async () => {
+    process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
+    const { InventoryLotService } = await import("../../lots.service");
+    const set = vi.fn().mockReturnThis();
+    const where = vi.fn().mockReturnThis();
+    const returning = vi.fn(async () => [{ id: 2 }]);
+    const db = {
+      select: vi.fn(() => ({
+        from: vi.fn().mockReturnThis(),
+        where: vi.fn().mockReturnThis(),
+        orderBy: vi.fn(() => ({
+          for: vi.fn().mockResolvedValue([
+            { id: 2, orderId: 100, orderItemId: 200, inventoryLotId: 11,
+              productVariantId: 10, qty: 2, unitCostCents: 700, unitCostMills: 70_000, totalCostCents: 1400 },
+            { id: 1, orderId: 100, orderItemId: 200, inventoryLotId: 10,
+              productVariantId: 10, qty: 3, unitCostCents: 500, unitCostMills: 50_000, totalCostCents: 1500 },
+          ]),
+        })),
+      })),
+      execute: vi.fn(async () => ({ rows: [{ id: 11 }] })),
+      delete: vi.fn(),
+      update: vi.fn(() => ({ set, where, returning })),
+    } as any;
+
+    await expect(new InventoryLotService(db).unpickFromLots({
+      orderId: 100,
+      orderItemId: 200,
+      productVariantId: 10,
+      warehouseLocationId: 20,
+      qty: 1,
+    })).resolves.toEqual({ reversedCostCents: 700 });
+
+    expect(db.delete).not.toHaveBeenCalled();
+    expect(set).toHaveBeenCalledWith({ qty: 1, totalCostMills: 70_000, totalCostCents: 700 });
+    expect(returning).toHaveBeenCalledOnce();
+  });
+
+  it("rejects an unpick shortfall before changing lots or COGS", async () => {
+    process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
+    const { InventoryLotService } = await import("../../lots.service");
+    const db = {
+      select: vi.fn(() => ({
+        from: vi.fn().mockReturnThis(),
+        where: vi.fn().mockReturnThis(),
+        orderBy: vi.fn(() => ({
+          for: vi.fn().mockResolvedValue([{
+            id: 1,
+            orderId: 100,
+            orderItemId: 200,
+            inventoryLotId: 10,
+            productVariantId: 10,
+            qty: 1,
+            unitCostCents: 500,
+          }]),
+        })),
+      })),
+      execute: vi.fn(),
+      delete: vi.fn(),
+      update: vi.fn(),
+    } as any;
+
+    await expect(new InventoryLotService(db).unpickFromLots({
+      orderId: 100,
+      orderItemId: 200,
+      productVariantId: 10,
+      warehouseLocationId: 20,
+      qty: 2,
+    })).rejects.toMatchObject({
+      code: "DATA_INTEGRITY_VIOLATION",
+      context: expect.objectContaining({
+        reason: "order_item_unpick_cost_custody_shortfall",
+        requestedQuantity: 2,
+        availableQuantity: 1,
+      }),
+    });
+    expect(db.execute).not.toHaveBeenCalled();
+    expect(db.delete).not.toHaveBeenCalled();
+    expect(db.update).not.toHaveBeenCalled();
   });
 });

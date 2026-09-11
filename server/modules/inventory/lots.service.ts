@@ -17,7 +17,7 @@ import type { OperationalQuantityPosting } from "./infrastructure/operational-qu
  * All quantities in variant units.
  */
 
-import { eq, and, sql, asc, gt, inArray } from "drizzle-orm";
+import { eq, and, sql, asc, desc, gt, inArray } from "drizzle-orm";
 import {
   inventoryLots,
   orderItemCosts,
@@ -50,6 +50,43 @@ function safeMillsNumber(value: bigint, field: string): number {
     });
   }
   return Number(value);
+}
+
+function assertPositiveSafeInteger(value: number, field: string): void {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new ValidationError(`${field} must be a positive safe integer`);
+  }
+}
+
+function storedUnitCostMills(
+  row: { unitCostCents: unknown; unitCostMills?: unknown },
+  context: Record<string, unknown>,
+): number {
+  const unitCostCents = Number(row.unitCostCents);
+  if (!Number.isSafeInteger(unitCostCents) || unitCostCents < 0) {
+    throw new IntegrityError("Stored order-item unit cost cents are invalid", {
+      reason: "order_item_cost_value_invalid",
+      ...context,
+      unitCostCents: row.unitCostCents,
+    });
+  }
+
+  if (row.unitCostMills == null) return centsToMills(unitCostCents);
+  const unitCostMills = Number(row.unitCostMills);
+  if (!Number.isSafeInteger(unitCostMills) || unitCostMills < 0) {
+    throw new IntegrityError("Stored order-item unit cost mills are invalid", {
+      reason: "order_item_cost_value_invalid",
+      ...context,
+      unitCostMills: row.unitCostMills,
+    });
+  }
+
+  // Historical rows were backfilled through a zero default before mills
+  // became authoritative. Retain their exact cent value rather than treating
+  // a positive cent cost as free inventory.
+  return unitCostMills === 0 && unitCostCents > 0
+    ? centsToMills(unitCostCents)
+    : unitCostMills;
 }
 
 type DrizzleDb = {
@@ -348,6 +385,46 @@ export class InventoryLotService {
   // FIFO PICK (consume from reserved lots, create order_item_costs)
   // ---------------------------------------------------------------------------
 
+  async getOrderItemPickedCostQuantity(params: {
+    orderId: number;
+    orderItemId: number;
+    productVariantId: number;
+  }): Promise<number> {
+    assertPositiveSafeInteger(params.orderId, "orderId");
+    assertPositiveSafeInteger(params.orderItemId, "orderItemId");
+    assertPositiveSafeInteger(params.productVariantId, "productVariantId");
+    const rows = await this.db
+      .select({ qty: orderItemCosts.qty, productVariantId: orderItemCosts.productVariantId })
+      .from(orderItemCosts)
+      .where(and(
+        eq(orderItemCosts.orderId, params.orderId),
+        eq(orderItemCosts.orderItemId, params.orderItemId),
+      ));
+    return rows.reduce((sum: number, row: any) => {
+      const quantity = Number(row.qty);
+      const productVariantId = Number(row.productVariantId);
+      if (!Number.isSafeInteger(quantity) || quantity <= 0
+        || productVariantId !== params.productVariantId) {
+        throw new IntegrityError("Order-item cost custody is invalid", {
+          reason: "order_item_pick_cost_custody_invalid",
+          orderId: params.orderId,
+          orderItemId: params.orderItemId,
+          expectedProductVariantId: params.productVariantId,
+          actualProductVariantId: row.productVariantId,
+          quantity: row.qty,
+        });
+      }
+      const next = sum + quantity;
+      if (!Number.isSafeInteger(next)) {
+        throw new IntegrityError("Order-item cost custody exceeds the supported quantity range", {
+          orderId: params.orderId,
+          orderItemId: params.orderItemId,
+        });
+      }
+      return next;
+    }, 0);
+  }
+
   /**
    * Pick qty from reserved lots at a location (FIFO).
    * Decrements qtyOnHand + qtyReserved, increments qtyPicked.
@@ -360,18 +437,41 @@ export class InventoryLotService {
     qty: number;
     orderId: number;
     orderItemId?: number;
+    /**
+     * When supplied by the picker transaction, existing COGS must exactly
+     * match the WMS quantity that was already picked. A matching value permits
+     * this call to append the next physical pick delta.
+     */
+    expectedExistingCostQuantity?: number;
     // Replacement packages consume a second physical unit but must not write a
     // second customer-order COGS row. They also may not consume another order's
     // reservation while finding live stock.
     recordOrderItemCosts?: boolean;
     allowReservedStock?: boolean;
   }): Promise<Array<{ lotId: number; qty: number; unitCostCents: number }>> {
-    // Idempotency: if COGS rows already exist for this order item, this is a
-    // retry — return the existing allocations without double-writing.
+    assertPositiveSafeInteger(params.productVariantId, "productVariantId");
+    assertPositiveSafeInteger(params.warehouseLocationId, "warehouseLocationId");
+    assertPositiveSafeInteger(params.qty, "qty");
+    assertPositiveSafeInteger(params.orderId, "orderId");
+    if (params.orderItemId !== undefined) {
+      assertPositiveSafeInteger(params.orderItemId, "orderItemId");
+    }
+    if (params.expectedExistingCostQuantity !== undefined
+      && (!Number.isSafeInteger(params.expectedExistingCostQuantity)
+        || params.expectedExistingCostQuantity < 0)) {
+      throw new ValidationError("expectedExistingCostQuantity must be a non-negative safe integer");
+    }
+
+    let existingCostLotIds: number[] = [];
+
+    // Legacy callers without an expected quantity retain the original retry
+    // behavior. Picker progress supplies the expected cumulative COGS quantity,
+    // which proves prior custody before appending the next delta.
     if (params.recordOrderItemCosts !== false && params.orderItemId) {
       const existing = await this.db
         .select({
           inventoryLotId: orderItemCosts.inventoryLotId,
+          productVariantId: orderItemCosts.productVariantId,
           qty: orderItemCosts.qty,
           unitCostCents: orderItemCosts.unitCostCents,
         })
@@ -383,12 +483,42 @@ export class InventoryLotService {
           ),
         );
 
-      if (existing.length > 0) {
+      if (params.expectedExistingCostQuantity === undefined && existing.length > 0) {
         return existing.map((e: any) => ({
           lotId: e.inventoryLotId,
           qty: e.qty,
           unitCostCents: e.unitCostCents,
         }));
+      }
+      if (params.expectedExistingCostQuantity !== undefined) {
+        const existingQuantity = existing.reduce((sum: number, row: any) => {
+          const quantity = Number(row.qty);
+          const inventoryLotId = Number(row.inventoryLotId);
+          if (!Number.isSafeInteger(quantity) || quantity <= 0
+            || !Number.isSafeInteger(inventoryLotId) || inventoryLotId <= 0
+            || Number(row.productVariantId) !== params.productVariantId) {
+            throw new IntegrityError("Existing order-item cost quantity is invalid", {
+              orderId: params.orderId,
+              orderItemId: params.orderItemId,
+              quantity: row.qty,
+              inventoryLotId: row.inventoryLotId,
+              expectedProductVariantId: params.productVariantId,
+              actualProductVariantId: row.productVariantId,
+            });
+          }
+          return sum + quantity;
+        }, 0);
+        if (!Number.isSafeInteger(existingQuantity)
+          || existingQuantity !== params.expectedExistingCostQuantity) {
+          throw new IntegrityError("WMS pick progress does not match its existing lot-cost custody", {
+            reason: "order_item_pick_cost_custody_mismatch",
+            orderId: params.orderId,
+            orderItemId: params.orderItemId,
+            expectedExistingCostQuantity: params.expectedExistingCostQuantity,
+            actualExistingCostQuantity: existingQuantity,
+          });
+        }
+        existingCostLotIds = existing.map((row: any) => Number(row.inventoryLotId));
       }
     }
 
@@ -403,6 +533,21 @@ export class InventoryLotService {
         ),
       )
       .orderBy(asc(inventoryLots.receivedAt)); // FIFO
+
+    if (existingCostLotIds.length > 0) {
+      const targetLotIds = new Set(lots.map((lot: InventoryLot) => Number(lot.id)));
+      const mismatchedLotIds = [...new Set(existingCostLotIds.filter((lotId) => !targetLotIds.has(lotId)))];
+      if (mismatchedLotIds.length > 0) {
+        throw new IntegrityError("Existing order-item cost custody belongs to a different inventory location", {
+          reason: "order_item_pick_cost_location_mismatch",
+          orderId: params.orderId,
+          orderItemId: params.orderItemId,
+          productVariantId: params.productVariantId,
+          warehouseLocationId: params.warehouseLocationId,
+          mismatchedInventoryLotIds: mismatchedLotIds,
+        });
+      }
+    }
 
     let remaining = params.qty;
     const costAllocations: Array<{ lotId: number; qty: number; unitCostCents: number }> = [];
@@ -433,8 +578,14 @@ export class InventoryLotService {
         // COGS in MILLS (lot.unitCostMills mirrors the lot's total per-variant-unit
         // cost). cents columns are derived mirrors (half-up), so the period COGS stays
         // exact when summed in mills (take × per-unit-mills, rounded once at display).
-        const lotUnitMills = Number((lot as any).unitCostMills) || centsToMills(lot.unitCostCents);
-        const totalCostMills = take * lotUnitMills;
+        const lotUnitMills = storedUnitCostMills(lot as any, {
+          inventoryLotId: lot.id,
+          productVariantId: params.productVariantId,
+        });
+        const totalCostMills = safeMillsNumber(
+          BigInt(take) * BigInt(lotUnitMills),
+          "orderItemCost.totalCostMills",
+        );
         newCosts.push({
           orderId: params.orderId,
           orderItemId: params.orderItemId,
@@ -495,8 +646,15 @@ export class InventoryLotService {
     orderId: number;
     orderItemId: number;
     productVariantId: number;
+    warehouseLocationId: number;
     qty: number;
   }): Promise<{ reversedCostCents: number }> {
+    assertPositiveSafeInteger(params.orderId, "orderId");
+    assertPositiveSafeInteger(params.orderItemId, "orderItemId");
+    assertPositiveSafeInteger(params.productVariantId, "productVariantId");
+    assertPositiveSafeInteger(params.warehouseLocationId, "warehouseLocationId");
+    assertPositiveSafeInteger(params.qty, "qty");
+
     // Find the COGS rows written by the original pick
     const cogsRows = await this.db
       .select()
@@ -506,68 +664,141 @@ export class InventoryLotService {
           eq(orderItemCosts.orderId, params.orderId),
           eq(orderItemCosts.orderItemId, params.orderItemId),
         ),
-      );
+      )
+      .orderBy(desc(orderItemCosts.id))
+      .for("update");
 
     if (cogsRows.length === 0) {
       return { reversedCostCents: 0 };
     }
 
-    let reversedCostCents = 0;
-    const restoreUpdates: Array<{ lotId: number; restore: number }> = [];
+    let reversedCostMills = BigInt(0);
+    const restoreByLot = new Map<number, number>();
+    const fullCostIds: number[] = [];
+    let partialCost:
+      | { id: number; originalQty: number; remainingQty: number; unitCostMills: number }
+      | null = null;
 
-    // Figure out how much to reverse from each lot (may be partial unpick)
+    // Reverse the newest pick allocations first. This preserves FIFO ownership
+    // for the quantity that remains picked and supports repeated incremental
+    // picks against the same order item and lot.
     let remaining = params.qty;
     for (const row of cogsRows) {
       if (remaining <= 0) break;
-      const restore = Math.min(row.qty, remaining);
-      restoreUpdates.push({ lotId: row.inventoryLotId, restore });
-      reversedCostCents += restore * row.unitCostCents;
+      const rowQuantity = Number(row.qty);
+      const costId = Number(row.id);
+      const lotId = Number(row.inventoryLotId);
+      const productVariantId = Number(row.productVariantId);
+      if (!Number.isSafeInteger(rowQuantity) || rowQuantity <= 0
+        || !Number.isSafeInteger(costId) || costId <= 0
+        || !Number.isSafeInteger(lotId) || lotId <= 0
+        || productVariantId !== params.productVariantId) {
+        throw new IntegrityError("Order-item cost custody is invalid for unpick", {
+          reason: "order_item_unpick_cost_custody_invalid",
+          orderId: params.orderId,
+          orderItemId: params.orderItemId,
+          orderItemCostId: row.id,
+          rowQuantity: row.qty,
+          inventoryLotId: row.inventoryLotId,
+          expectedProductVariantId: params.productVariantId,
+          actualProductVariantId: row.productVariantId,
+        });
+      }
+      const restore = Math.min(rowQuantity, remaining);
+      restoreByLot.set(lotId, (restoreByLot.get(lotId) ?? 0) + restore);
+      const unitCostMills = storedUnitCostMills(row, {
+        orderId: params.orderId,
+        orderItemId: params.orderItemId,
+        orderItemCostId: costId,
+      });
+      reversedCostMills += BigInt(restore) * BigInt(unitCostMills);
+      if (restore === rowQuantity) {
+        fullCostIds.push(costId);
+      } else {
+        partialCost = {
+          id: costId,
+          originalQty: rowQuantity,
+          remainingQty: rowQuantity - restore,
+          unitCostMills,
+        };
+      }
       remaining -= restore;
     }
+    if (remaining > 0) {
+      throw new IntegrityError("Order item does not have enough exact lot-cost custody to unpick", {
+        reason: "order_item_unpick_cost_custody_shortfall",
+        orderId: params.orderId,
+        orderItemId: params.orderItemId,
+        requestedQuantity: params.qty,
+        availableQuantity: params.qty - remaining,
+      });
+    }
+
+    const restoreUpdates = [...restoreByLot.entries()].map(([lotId, restore]) => ({ lotId, restore }));
 
     // Restore lot quantities: move units from picked back to on-hand
     if (restoreUpdates.length > 0) {
-      await this.db.execute(sql`
+      const restored = await this.db.execute(sql`
         WITH updates AS (
           SELECT * FROM jsonb_to_recordset(${JSON.stringify(restoreUpdates)}::jsonb) AS x("lotId" int, restore int)
         )
         UPDATE inventory.inventory_lots AS il
         SET qty_on_hand = il.qty_on_hand + u.restore,
-            qty_picked = GREATEST(il.qty_picked - u.restore, 0),
+            qty_picked = il.qty_picked - u.restore,
             status = 'active'
         FROM updates u
         WHERE il.id = u."lotId"
+          AND il.product_variant_id = ${params.productVariantId}
+          AND il.warehouse_location_id = ${params.warehouseLocationId}
+          AND il.qty_picked >= u.restore
+        RETURNING il.id
       `);
-    }
-
-    // Delete COGS rows. For a full unpick, delete all; for partial, delete
-    // proportionally (simplification: delete all and re-pick will re-create).
-    if (remaining <= 0) {
-      // Full unpick — delete all COGS rows for this order item
-      await this.db
-        .delete(orderItemCosts)
-        .where(
-          and(
-            eq(orderItemCosts.orderId, params.orderId),
-            eq(orderItemCosts.orderItemId, params.orderItemId),
-          ),
-        );
-    } else {
-      // Partial unpick — delete the rows we restored from
-      const restoredLotIds = restoreUpdates.map(u => u.lotId);
-      if (restoredLotIds.length > 0) {
-        await this.db
-          .delete(orderItemCosts)
-          .where(
-            and(
-              eq(orderItemCosts.orderId, params.orderId),
-              eq(orderItemCosts.orderItemId, params.orderItemId),
-              inArray(orderItemCosts.inventoryLotId, restoredLotIds),
-            ),
-          );
+      if (!Array.isArray(restored?.rows) || restored.rows.length !== restoreUpdates.length) {
+        throw new IntegrityError("Exact picked lot custody changed while the unpick was applied", {
+          reason: "order_item_unpick_lot_custody_conflict",
+          orderId: params.orderId,
+          orderItemId: params.orderItemId,
+          expectedLots: restoreUpdates.length,
+          updatedLots: Array.isArray(restored?.rows) ? restored.rows.length : null,
+        });
       }
     }
 
+    if (fullCostIds.length > 0) {
+      await this.db
+        .delete(orderItemCosts)
+        .where(inArray(orderItemCosts.id, fullCostIds));
+    }
+    if (partialCost) {
+      const totalCostMills = safeMillsNumber(
+        BigInt(partialCost.remainingQty) * BigInt(partialCost.unitCostMills),
+        "orderItemCost.totalCostMills",
+      );
+      const updated = await this.db
+        .update(orderItemCosts)
+        .set({
+          qty: partialCost.remainingQty,
+          totalCostMills,
+          totalCostCents: millsToCents(totalCostMills),
+        })
+        .where(and(
+          eq(orderItemCosts.id, partialCost.id),
+          eq(orderItemCosts.qty, partialCost.originalQty),
+        ))
+        .returning({ id: orderItemCosts.id });
+      if (updated.length !== 1) {
+        throw new IntegrityError("Order-item cost custody changed while the unpick was applied", {
+          reason: "order_item_unpick_cost_custody_conflict",
+          orderId: params.orderId,
+          orderItemId: params.orderItemId,
+          orderItemCostId: partialCost.id,
+        });
+      }
+    }
+
+    const reversedCostCents = millsToCents(
+      safeMillsNumber(reversedCostMills, "unpick.reversedCostMills"),
+    );
     return { reversedCostCents };
   }
 

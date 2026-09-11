@@ -55,8 +55,15 @@ describe("InventoryUseCases.withTx", () => {
         expect(tx).toBe(outerTx);
       }),
     } as any;
+    const pickFromLots = vi.fn(async () => [{ lotId: 60, qty: 1, unitCostCents: 100 }]);
+    const lotService = {
+      withTx: vi.fn((tx: any) => {
+        expect(tx).toBe(outerTx);
+        return { pickFromLots };
+      }),
+    };
 
-    const txBoundInventory = new InventoryUseCases(rootDb as any, storage).withTx(outerTx);
+    const txBoundInventory = new InventoryUseCases(rootDb as any, storage, lotService as any).withTx(outerTx);
 
     const picked = await txBoundInventory.pickItem({
       productVariantId: 30,
@@ -64,6 +71,7 @@ describe("InventoryUseCases.withTx", () => {
       qty: 1,
       orderId: 40,
       orderItemId: 50,
+      expectedPriorPickedQuantity: 2,
       userId: "tester",
     });
 
@@ -76,6 +84,14 @@ describe("InventoryUseCases.withTx", () => {
       outerTx,
     );
     expect(storage.createInventoryTransaction).toHaveBeenCalledTimes(1);
+    expect(pickFromLots).toHaveBeenCalledWith({
+      productVariantId: 30,
+      warehouseLocationId: 20,
+      qty: 1,
+      orderId: 40,
+      orderItemId: 50,
+      expectedExistingCostQuantity: 2,
+    });
   });
 
   it("passes orphaned reservation releases to lot adjustments", async () => {

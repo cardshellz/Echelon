@@ -110,7 +110,10 @@ function makePickItemHarness(replenResult: { task: any; moved: number } | null) 
   };
 
   const tx = {
-    execute: vi.fn(async () => ({ rows: [{ status: "pending" }] })),
+    execute: vi.fn()
+      .mockResolvedValueOnce({ rows: [{ warehouse_status: "ready", on_hold: 0 }] })
+      .mockResolvedValueOnce({ rows: [{ status: "pending", picked_quantity: 0, quantity: 1, short_reason: null }] })
+      .mockResolvedValue({ rows: [] }),
     update: vi.fn(() => ({
       set: vi.fn(() => ({
         where: vi.fn(() => ({
@@ -185,6 +188,7 @@ function makePickItemHarness(replenResult: { task: any; moved: number } | null) 
 }
 
 function makePickNoopHarness(beforeItem: any) {
+  const updatedItem = { ...beforeItem, status: "completed", pickedQuantity: beforeItem.quantity, pickedAt: new Date() };
   const storage = {
     getOrderItemById: vi.fn(async () => beforeItem),
     getOrderById: vi.fn(async () => ({
@@ -194,10 +198,18 @@ function makePickNoopHarness(beforeItem: any) {
       assignedPickerId: "picker-1",
     })),
     getUser: vi.fn(async (id: string) => ({ id, username: "picker", role: "picker" })),
-    updateOrderItemStatus: vi.fn(),
-    createPickingLog: vi.fn(),
+    updateOrderItemStatus: vi.fn(async () => updatedItem),
+    createPickingLog: vi.fn(async () => ({})),
+    getAllWarehouseSettings: vi.fn(async () => []),
+    getOrderItems: vi.fn(async () => [updatedItem]),
+    updateOrderProgress: vi.fn(async () => ({ id: beforeItem.orderId, warehouseStatus: "ready_to_ship" })),
   };
-  const service = new PickingUseCases({} as any, {} as any, {} as any, storage as any);
+  const service = new PickingUseCases(
+    { execute: vi.fn(async () => ({ rows: [] })) } as any,
+    {} as any,
+    {} as any,
+    storage as any,
+  );
   return { service, storage };
 }
 
@@ -239,20 +251,29 @@ function expectPickCommandRejectedLog(
 }
 
 describe("PickingUseCases pick progress validation", () => {
-  it("treats a fully picked line with stale active status as idempotently complete", async () => {
+  it("rejects a stale full picked counter until physical custody is reconfirmed", async () => {
     const beforeItem = makeItem({ status: "in_progress", pickedQuantity: 2, quantity: 2 });
     const { service, storage } = makePickNoopHarness(beforeItem);
 
     const result = await service.pickItem(beforeItem.id, {
       status: "completed",
-      pickedQuantity: 1,
+      pickedQuantity: 2,
       pickMethod: "pick_all",
       userId: "picker-1",
     });
 
-    expect(result).toMatchObject({ success: true, item: beforeItem });
+    expect(result).toEqual({
+      success: false,
+      error: "pick_custody_reconfirmation_required",
+      message: "This line already has a full picked counter without completed custody; unpick it and rescan the physical units",
+    });
     expect(storage.updateOrderItemStatus).not.toHaveBeenCalled();
-    expect(storage.createPickingLog).not.toHaveBeenCalled();
+    expect(storage.createPickingLog).toHaveBeenCalledOnce();
+    expectPickCommandRejectedLog(storage, beforeItem, "pick_custody_reconfirmation_required", {
+      status: "completed",
+      pickedQuantity: 2,
+      pickMethod: "pick_all",
+    });
   });
   it("rejects a pending pick request that does not change quantity or status", async () => {
     const beforeItem = makeItem({ status: "pending", pickedQuantity: 0, quantity: 1 });
@@ -278,7 +299,7 @@ describe("PickingUseCases pick progress validation", () => {
     });
   });
 
-  it("rejects an in-progress pick request that repeats the current picked quantity", async () => {
+  it("treats an exact in-progress retry as idempotent", async () => {
     const beforeItem = makeItem({ status: "in_progress", pickedQuantity: 5, quantity: 6 });
     const { service, storage } = makePickNoopHarness(beforeItem);
 
@@ -289,16 +310,257 @@ describe("PickingUseCases pick progress validation", () => {
       userId: "picker-1",
     });
 
-    expect(result).toMatchObject({
-      success: false,
-      error: "no_pick_progress",
-    });
+    expect(result).toMatchObject({ success: true, item: beforeItem });
     expect(storage.updateOrderItemStatus).not.toHaveBeenCalled();
-    expectPickCommandRejectedLog(storage, beforeItem, "no_pick_progress", {
+    expect(storage.createPickingLog).not.toHaveBeenCalled();
+  });
+
+  it("returns the committed row when an exact legacy retry reaches the lock second", async () => {
+    const beforeItem = makeItem({ status: "pending", pickedQuantity: 0, quantity: 3, pickedAt: null });
+    const committedAt = new Date("2026-09-11T12:00:00.000Z");
+    const tx = {
+      execute: vi.fn()
+        .mockResolvedValueOnce({ rows: [{ warehouse_status: "ready", on_hold: 0 }] })
+        .mockResolvedValueOnce({ rows: [{
+          status: "in_progress",
+          picked_quantity: 1,
+          quantity: 3,
+          short_reason: null,
+          picked_at: committedAt,
+        }] }),
+      update: vi.fn(),
+    };
+    const db = {
+      transaction: vi.fn(async (work: (selected: typeof tx) => Promise<unknown>) => work(tx)),
+    };
+    const txInventoryCore = { pickItem: vi.fn() };
+    const inventoryCore = { withTx: vi.fn(() => txInventoryCore), pickItem: vi.fn() };
+    const storage = {
+      getOrderItemById: vi.fn(async () => beforeItem),
+      getOrderById: vi.fn(async () => ({
+        id: 900,
+        orderNumber: "#900",
+        warehouseId: 1,
+        warehouseStatus: "ready",
+        assignedPickerId: "picker-1",
+        onHold: 0,
+      })),
+      createPickingLog: vi.fn(),
+    };
+    const channelSync = { queueSyncAfterInventoryChange: vi.fn() };
+    const service = new PickingUseCases(
+      db as any,
+      inventoryCore as any,
+      {} as any,
+      storage as any,
+      channelSync as any,
+    );
+
+    await expect(service.pickItem(500, {
       status: "in_progress",
-      pickedQuantity: 5,
-      pickMethod: "manual",
+      pickedQuantity: 1,
+      userId: "picker-1",
+    })).resolves.toMatchObject({
+      success: true,
+      item: { status: "in_progress", pickedQuantity: 1, pickedAt: committedAt },
     });
+
+    expect(txInventoryCore.pickItem).not.toHaveBeenCalled();
+    expect(tx.update).not.toHaveBeenCalled();
+    expect(storage.createPickingLog).not.toHaveBeenCalled();
+    expect(channelSync.queueSyncAfterInventoryChange).not.toHaveBeenCalled();
+  });
+
+  it("rejects a status-only short update after a concurrent quantity increment", async () => {
+    const beforeItem = makeItem({ status: "in_progress", pickedQuantity: 1, quantity: 3 });
+    const tx = {
+      execute: vi.fn()
+        .mockResolvedValueOnce({ rows: [{ warehouse_status: "ready", on_hold: 0 }] })
+        .mockResolvedValueOnce({ rows: [{
+          status: "in_progress",
+          picked_quantity: 2,
+          quantity: 3,
+          short_reason: null,
+          picked_at: new Date("2026-09-11T12:00:00.000Z"),
+        }] }),
+      update: vi.fn(),
+    };
+    const db = {
+      transaction: vi.fn(async (work: (selected: typeof tx) => Promise<unknown>) => work(tx)),
+    };
+    const storage = {
+      getOrderItemById: vi.fn(async () => beforeItem),
+      getOrderById: vi.fn(async () => ({
+        id: 900,
+        orderNumber: "#900",
+        warehouseId: 1,
+        warehouseStatus: "ready",
+        assignedPickerId: "picker-1",
+        onHold: 0,
+      })),
+      createPickingLog: vi.fn(),
+    };
+    const service = new PickingUseCases(
+      db as any,
+      {} as any,
+      {} as any,
+      storage as any,
+    );
+
+    await expect(service.pickItem(500, {
+      status: "short",
+      pickedQuantity: 1,
+      shortReason: "Shelf was empty",
+      userId: "picker-1",
+    })).rejects.toMatchObject({
+      code: "DATA_INTEGRITY_VIOLATION",
+      context: expect.objectContaining({
+        reason: "pick_progress_conflict",
+        expectedPickedQuantity: 1,
+        actualPickedQuantity: 2,
+      }),
+    });
+
+    expect(tx.update).not.toHaveBeenCalled();
+    expect(storage.createPickingLog).not.toHaveBeenCalled();
+  });
+
+  it("posts each legacy picker increment exactly once before a partial short or completion", async () => {
+    let currentItem = makeItem({
+      status: "pending",
+      pickedQuantity: 0,
+      quantity: 3,
+      requiresShipping: 1,
+    });
+    const level = { warehouseLocationId: 1, variantQty: 10 };
+    const effects: string[] = [];
+    let executeIndex = 0;
+    const orderLockPositions = new Set([0, 3, 6, 8]);
+    const itemLockPositions = new Set([1, 4, 7, 9]);
+    const tx = {
+      execute: vi.fn(async () => {
+        const position = executeIndex++;
+        if (orderLockPositions.has(position)) {
+          return { rows: [{ warehouse_status: "ready", on_hold: 0 }] };
+        }
+        if (itemLockPositions.has(position)) {
+          return { rows: [{
+            status: currentItem.status,
+            picked_quantity: currentItem.pickedQuantity,
+            quantity: currentItem.quantity,
+            short_reason: currentItem.shortReason,
+            picked_at: currentItem.pickedAt,
+          }] };
+        }
+        return { rows: [] };
+      }),
+      update: vi.fn(() => ({
+        set: vi.fn((patch: Record<string, unknown>) => ({
+          where: vi.fn(() => ({
+            returning: vi.fn(async () => {
+              currentItem = { ...currentItem, ...patch };
+              return [currentItem];
+            }),
+          })),
+        })),
+      })),
+    };
+    const db = {
+      transaction: vi.fn(async (work: (selected: any) => Promise<unknown>) => {
+        const result = await work(tx);
+        effects.push("commit");
+        return result;
+      }),
+      execute: vi.fn(async () => ({ rows: [] })),
+    };
+    const inventoryCore: any = {
+      withTx: vi.fn(() => inventoryCore),
+      pickItem: vi.fn(async (params: { qty: number }) => {
+        level.variantQty -= params.qty;
+        return true;
+      }),
+      getLevel: vi.fn(async () => ({ ...level })),
+    };
+    const storage = {
+      getOrderItemById: vi.fn(async () => ({ ...currentItem })),
+      getOrderById: vi.fn(async () => ({
+        id: 900,
+        orderNumber: "#900",
+        warehouseId: 1,
+        warehouseStatus: "ready",
+        assignedPickerId: "picker-1",
+        onHold: 0,
+      })),
+      getProductVariantBySku: vi.fn(async () => ({
+        id: 100,
+        sku: "SKU-1",
+        productId: 10,
+        unitsPerVariant: 1,
+        requiresShipping: true,
+        trackInventory: true,
+      })),
+      getInventoryLevelsByProductVariantId: vi.fn(async () => [{ ...level }]),
+      getAllWarehouseLocations: vi.fn(async () => [{
+        id: 1,
+        code: "A-01",
+        warehouseId: 1,
+        isPickable: 1,
+        isActive: 1,
+        cycleCountFreezeId: null,
+        locationType: "pick",
+      }]),
+      updateOrderItemStatus: vi.fn(async (_id: number, nextStatus: string, picked: number, reason?: string | null) => {
+        currentItem = {
+          ...currentItem,
+          status: nextStatus,
+          pickedQuantity: picked,
+          shortReason: reason === undefined ? currentItem.shortReason : reason,
+        };
+        return currentItem;
+      }),
+      getUser: vi.fn(async () => ({ id: "picker-1", username: "picker", role: "picker" })),
+      createPickingLog: vi.fn(async () => ({})),
+      getAllWarehouseSettings: vi.fn(async () => [{ warehouseId: 1, postPickStatus: "in_progress" }]),
+      updateOrderProgress: vi.fn(async () => ({ id: 900, warehouseStatus: "in_progress" })),
+    };
+    const replenishment = {
+      createAndExecuteReplen: vi.fn(async () => null),
+      ensureQueuedReplenForShortPick: vi.fn(async () => null),
+    };
+    const channelSync = {
+      queueSyncAfterInventoryChange: vi.fn(async () => { effects.push("sync"); }),
+    };
+    const service = new PickingUseCases(
+      db as any,
+      inventoryCore,
+      replenishment as any,
+      storage as any,
+      channelSync,
+    );
+
+    await expect(service.pickItem(500, { status: "in_progress", pickedQuantity: 1, userId: "picker-1" }))
+      .resolves.toMatchObject({ success: true, item: { pickedQuantity: 1, status: "in_progress" } });
+    await expect(service.pickItem(500, { status: "in_progress", pickedQuantity: 2, userId: "picker-1" }))
+      .resolves.toMatchObject({ success: true, item: { pickedQuantity: 2, status: "in_progress" } });
+    await expect(service.pickItem(500, { status: "short", pickedQuantity: 2, shortReason: "partial", userId: "picker-1" }))
+      .resolves.toMatchObject({ success: true, item: { pickedQuantity: 2, status: "short" } });
+    await expect(service.pickItem(500, { status: "completed", pickedQuantity: 3, userId: "picker-1" }))
+      .resolves.toMatchObject({
+        success: true,
+        item: { pickedQuantity: 3, status: "completed", shortReason: null },
+      });
+
+    expect(inventoryCore.pickItem.mock.calls.map(([input]: any[]) => ({
+      qty: input.qty,
+      expectedPriorPickedQuantity: input.expectedPriorPickedQuantity,
+    }))).toEqual([
+      { qty: 1, expectedPriorPickedQuantity: 0 },
+      { qty: 1, expectedPriorPickedQuantity: 1 },
+      { qty: 1, expectedPriorPickedQuantity: 2 },
+    ]);
+    expect(level.variantQty).toBe(7);
+    expect(channelSync.queueSyncAfterInventoryChange).toHaveBeenCalledTimes(3);
+    expect(effects).toEqual(["commit", "sync", "commit", "sync", "commit", "commit", "sync"]);
   });
 
   it("rejects an in-progress pick request that carries zero picked quantity", async () => {
@@ -323,6 +585,88 @@ describe("PickingUseCases pick progress validation", () => {
       pickedQuantity: 0,
       pickMethod: "manual",
     });
+  });
+
+  it("rejects an implicit zero-quantity in-progress status", async () => {
+    const beforeItem = makeItem({ status: "pending", pickedQuantity: 0, quantity: 6 });
+    const { service, storage } = makePickNoopHarness(beforeItem);
+
+    const result = await service.pickItem(beforeItem.id, {
+      status: "in_progress",
+      pickMethod: "manual",
+      userId: "picker-1",
+    });
+
+    expect(result).toMatchObject({
+      success: false,
+      error: "in_progress_requires_positive_quantity",
+    });
+    expect(storage.updateOrderItemStatus).not.toHaveBeenCalled();
+  });
+
+  it("rejects positive progress represented as pending", async () => {
+    const beforeItem = makeItem({ status: "pending", pickedQuantity: 0, quantity: 6 });
+    const { service, storage } = makePickNoopHarness(beforeItem);
+
+    const result = await service.pickItem(beforeItem.id, {
+      status: "pending",
+      pickedQuantity: 1,
+      pickMethod: "manual",
+      userId: "picker-1",
+    });
+
+    expect(result).toMatchObject({
+      success: false,
+      error: "pending_requires_zero_quantity",
+    });
+    expect(storage.updateOrderItemStatus).not.toHaveBeenCalled();
+  });
+
+  it.each(["in_progress", "short"] as const)("rejects full quantity represented as %s", async (status) => {
+    const beforeItem = makeItem({ status: "pending", pickedQuantity: 0, quantity: 6 });
+    const { service, storage } = makePickNoopHarness(beforeItem);
+
+    const result = await service.pickItem(beforeItem.id, {
+      status,
+      pickedQuantity: 6,
+      ...(status === "short" ? { shortReason: "partial" } : {}),
+      pickMethod: "manual",
+      userId: "picker-1",
+    });
+
+    expect(result).toMatchObject({
+      success: false,
+      error: "active_pick_requires_partial_quantity",
+    });
+    expect(storage.updateOrderItemStatus).not.toHaveBeenCalled();
+  });
+
+  it("rejects an explicitly blank short reason at the service boundary", async () => {
+    const beforeItem = makeItem({ status: "pending", pickedQuantity: 0, quantity: 6 });
+    const { service, storage } = makePickNoopHarness(beforeItem);
+
+    await expect(service.pickItem(beforeItem.id, {
+      status: "short",
+      pickedQuantity: 0,
+      shortReason: "   ",
+      pickMethod: "short",
+      userId: "picker-1",
+    })).rejects.toThrow("shortReason must contain between 1 and 1000 characters");
+    expect(storage.getOrderItemById).not.toHaveBeenCalled();
+  });
+
+  it("rejects a short reason attached to non-short picker progress", async () => {
+    const beforeItem = makeItem({ status: "pending", pickedQuantity: 0, quantity: 6 });
+    const { service, storage } = makePickNoopHarness(beforeItem);
+
+    await expect(service.pickItem(beforeItem.id, {
+      status: "in_progress",
+      pickedQuantity: 1,
+      shortReason: "not valid for active progress",
+      pickMethod: "manual",
+      userId: "picker-1",
+    })).rejects.toThrow("shortReason may only be provided for short pick progress");
+    expect(storage.getOrderItemById).not.toHaveBeenCalled();
   });
 
   it("rejects completed pick requests that do not pick the full line quantity", async () => {
@@ -723,7 +1067,26 @@ describe("PickingUseCases post-pick replen context", () => {
       pickedQuantity: 0,
       shortReason: "out_of_stock",
     };
+    const tx = {
+      execute: vi.fn()
+        .mockResolvedValueOnce({ rows: [{ warehouse_status: "ready", on_hold: 0 }] })
+        .mockResolvedValueOnce({ rows: [{
+          status: "pending",
+          picked_quantity: 0,
+          quantity: 2,
+          short_reason: null,
+          picked_at: null,
+        }] }),
+      update: vi.fn(() => ({
+        set: vi.fn(() => ({
+          where: vi.fn(() => ({
+            returning: vi.fn(async () => [updatedItem]),
+          })),
+        })),
+      })),
+    };
     const db = {
+      transaction: vi.fn(async (work: (selected: typeof tx) => Promise<unknown>) => work(tx)),
       select: vi.fn(() => ({
         from: () => ({
           where: () => ({

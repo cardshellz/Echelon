@@ -80,6 +80,53 @@ databaseSuite.sequential("canonical full-unpick planned source-bin compatibility
     expect(await sourceBin()).toBe(50);
   });
 
+  it("persists incremental canonical pick progress before completing the line", async () => {
+    await pool.query("UPDATE wms.order_items SET status='pending',picked_quantity=0,picked_at=NULL WHERE id=71");
+    await transaction((client) => persistCanonicalWmsPickProgress(client, {
+      ...pickB(),
+      movementQuantity: 2,
+      progress: {
+        expectedStatus: "pending",
+        expectedPickedQuantity: 0,
+        targetStatus: "in_progress",
+        targetPickedQuantity: 2,
+      },
+    }));
+    expect((await pool.query("SELECT status,picked_quantity,picked_at IS NOT NULL AS has_picked_at FROM wms.order_items WHERE id=71")).rows[0])
+      .toEqual({ status: "in_progress", picked_quantity: 2, has_picked_at: true });
+    expect(await sourceBin()).toBe(51);
+
+    await transaction((client) => persistCanonicalWmsPickProgress(client, {
+      ...pickB(),
+      movementQuantity: 3,
+      progress: {
+        expectedStatus: "in_progress",
+        expectedPickedQuantity: 2,
+        targetStatus: "completed",
+        targetPickedQuantity: 5,
+      },
+    }));
+    expect((await pool.query("SELECT status,picked_quantity FROM wms.order_items WHERE id=71")).rows[0])
+      .toEqual({ status: "completed", picked_quantity: 5 });
+  });
+
+  it("persists a partial short only when its positive movement matches the target delta", async () => {
+    await pool.query("UPDATE wms.order_items SET status='pending',picked_quantity=0,picked_at=NULL,short_reason=NULL WHERE id=71");
+    await transaction((client) => persistCanonicalWmsPickProgress(client, {
+      ...pickB(),
+      movementQuantity: 2,
+      progress: {
+        expectedStatus: "pending",
+        expectedPickedQuantity: 0,
+        targetStatus: "short",
+        targetPickedQuantity: 2,
+        targetShortReason: "partial",
+      },
+    }));
+    expect((await pool.query("SELECT status,picked_quantity,short_reason FROM wms.order_items WHERE id=71")).rows[0])
+      .toEqual({ status: "short", picked_quantity: 2, short_reason: "partial" });
+  });
+
   it("rejects submitting the full target as a new movement after partial picking", async () => {
     await pool.query("UPDATE wms.order_items SET status='in_progress',picked_quantity=3 WHERE id=71");
     await expect(transaction((client) => persistCanonicalWmsPickProgress(client, {

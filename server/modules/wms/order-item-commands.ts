@@ -322,6 +322,7 @@ export interface CanonicalWmsPickProgress {
   expectedPickedQuantity: number;
   targetStatus: ItemStatus;
   targetPickedQuantity: number;
+  targetShortReason?: string | null;
 }
 
 type WmsSqlTransaction = {
@@ -358,15 +359,29 @@ export async function persistCanonicalWmsPickProgress(
   assertPositiveInteger(input.orderItemId, "orderItemId");
   assertNonNegativeInteger(progress.expectedPickedQuantity, "expectedPickedQuantity");
   assertNonNegativeInteger(progress.targetPickedQuantity, "targetPickedQuantity");
+  const targetShortReason = typeof progress.targetShortReason === "string"
+    ? progress.targetShortReason.trim()
+    : progress.targetShortReason;
+  if (progress.targetShortReason !== undefined) {
+    if ((targetShortReason !== null
+        && (typeof targetShortReason !== "string" || targetShortReason.length === 0 || targetShortReason.length > 1000))
+      || (targetShortReason !== null && progress.targetStatus !== "short")) {
+      throw new WmsOrderItemCommandError(
+        "INVALID_WMS_PICK_PROGRESS",
+        "A canonical WMS short reason must be a nonblank bounded string attached to short progress.",
+        { orderItemId: input.orderItemId, targetStatus: progress.targetStatus },
+      );
+    }
+  }
 
   if (input.movementType === "pick") {
-    if (progress.targetStatus !== "completed"
+    if (!["in_progress", "completed", "short"].includes(progress.targetStatus)
       || progress.targetPickedQuantity - progress.expectedPickedQuantity !== input.movementQuantity
       || progress.expectedPickedQuantity > progress.targetPickedQuantity
       || !["pending", "in_progress", "short"].includes(progress.expectedStatus)) {
       throw new WmsOrderItemCommandError(
         "INVALID_WMS_PICK_PROGRESS",
-        "A canonical runtime pick must add only the remaining quantity while atomically completing the full WMS target.",
+        "A canonical runtime pick must atomically add one positive WMS progress delta.",
         { orderItemId: input.orderItemId, progress, movementQuantity: input.movementQuantity },
       );
     }
@@ -382,20 +397,28 @@ export async function persistCanonicalWmsPickProgress(
 
     const updated = await executor.query(
       `UPDATE wms.order_items
-       SET status = 'completed', picked_quantity = $1, picked_at = $2
-       WHERE id = $3
-         AND order_id = $4
-         AND status = $5
-         AND picked_quantity = $6
-         AND quantity = $1
+       SET status = $1,
+           picked_quantity = $2,
+           picked_at = COALESCE(picked_at, $3),
+           short_reason = CASE WHEN $8::boolean THEN $9::text ELSE short_reason END
+       WHERE id = $4
+         AND order_id = $5
+         AND status = $6
+         AND picked_quantity = $7
+         AND $2 BETWEEN 1 AND quantity
+         AND (($1 = 'completed' AND $2 = quantity)
+           OR ($1 IN ('in_progress', 'short') AND $2 < quantity))
        RETURNING id`,
       [
+        progress.targetStatus,
         progress.targetPickedQuantity,
         input.occurredAt,
         input.orderItemId,
         input.orderId,
         progress.expectedStatus,
         progress.expectedPickedQuantity,
+        progress.targetShortReason !== undefined,
+        targetShortReason ?? null,
       ],
     );
     if (Number(updated.rowCount ?? updated.rows?.length ?? 0) !== 1) {
@@ -422,7 +445,7 @@ export async function persistCanonicalWmsPickProgress(
 
   const expectedTargetQuantity = progress.expectedPickedQuantity - input.movementQuantity;
   const expectedTargetStatus = expectedTargetQuantity === 0 ? "pending" : "in_progress";
-  if (!["completed", "in_progress"].includes(progress.expectedStatus)
+  if (!["completed", "in_progress", "short"].includes(progress.expectedStatus)
     || progress.targetPickedQuantity !== expectedTargetQuantity
     || progress.targetStatus !== expectedTargetStatus) {
     throw new WmsOrderItemCommandError(
@@ -450,7 +473,8 @@ export async function persistCanonicalWmsPickProgress(
     `UPDATE wms.order_items
      SET status = $1,
          picked_quantity = $2,
-         picked_at = CASE WHEN $2 = 0 THEN NULL ELSE picked_at END
+         picked_at = CASE WHEN $2 = 0 THEN NULL ELSE picked_at END,
+         short_reason = CASE WHEN $5 = 'short' THEN NULL ELSE short_reason END
      WHERE id = $3
        AND order_id = $4
        AND status = $5

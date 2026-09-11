@@ -636,9 +636,18 @@ export class InventoryUseCases {
     qty: number;
     orderId: number;
     orderItemId?: number;
+    expectedPriorPickedQuantity?: number;
     userId?: string;
   }): Promise<boolean> {
     if (!Number.isSafeInteger(params.qty) || params.qty <= 0) throw new Error("qty must be a positive safe integer");
+    if (params.expectedPriorPickedQuantity !== undefined) {
+      if (!Number.isSafeInteger(params.expectedPriorPickedQuantity) || params.expectedPriorPickedQuantity < 0) {
+        throw new Error("expectedPriorPickedQuantity must be a non-negative safe integer");
+      }
+      if (!params.orderItemId) {
+        throw new Error("orderItemId is required when expectedPriorPickedQuantity is provided");
+      }
+    }
 
     const result = await this.db.transaction(async (tx) => {
       const level = await this.storage.lockInventoryLevel(
@@ -672,6 +681,7 @@ export class InventoryUseCases {
           qty: params.qty,
           orderId: params.orderId,
           orderItemId: params.orderItemId,
+          expectedExistingCostQuantity: params.expectedPriorPickedQuantity,
         });
       }
 
@@ -701,6 +711,21 @@ export class InventoryUseCases {
     return result;
   }
 
+  async getOrderItemPickedCostQuantity(params: {
+    orderId: number;
+    orderItemId: number;
+    productVariantId: number;
+  }): Promise<number> {
+    if (!this.lotService) {
+      throw new IntegrityError("Inventory lot-cost custody service is not configured", {
+        reason: "order_item_pick_cost_custody_unavailable",
+        orderId: params.orderId,
+        orderItemId: params.orderItemId,
+      });
+    }
+    return this.lotService.withTx(this.db).getOrderItemPickedCostQuantity(params);
+  }
+
   // ---------------------------------------------------------------------------
   // UNPICK (reverse a pick — returns inventory from picked back to on-hand)
   // ---------------------------------------------------------------------------
@@ -728,18 +753,37 @@ export class InventoryUseCases {
       const actualUnpick = Math.min(level.pickedQty, params.qty);
       if (actualUnpick <= 0) return false;
 
+      let lotSvc: ReturnType<InventoryLotService["withTx"]> | null = null;
+      if (this.lotService && params.orderItemId) {
+        lotSvc = this.lotService.withTx(tx);
+        const costCustodyQuantity = await lotSvc.getOrderItemPickedCostQuantity({
+          orderId: params.orderId,
+          orderItemId: params.orderItemId,
+          productVariantId: params.productVariantId,
+        });
+        if (costCustodyQuantity < actualUnpick) {
+          throw new IntegrityError("Order item does not have enough exact lot-cost custody to unpick", {
+            reason: "order_item_unpick_cost_custody_shortfall",
+            orderId: params.orderId,
+            orderItemId: params.orderItemId,
+            requestedQuantity: actualUnpick,
+            availableQuantity: costCustodyQuantity,
+          });
+        }
+      }
+
       await this.storage.adjustInventoryLevel(level.id, {
         variantQty: actualUnpick,
         pickedQty: -actualUnpick,
       }, tx);
 
       // Reverse COGS: restore lot quantities and delete order_item_costs rows
-      if (this.lotService && params.orderItemId) {
-        const lotSvc = this.lotService.withTx(tx);
+      if (lotSvc && params.orderItemId) {
         await lotSvc.unpickFromLots({
           orderId: params.orderId,
           orderItemId: params.orderItemId,
           productVariantId: params.productVariantId,
+          warehouseLocationId: params.warehouseLocationId,
           qty: actualUnpick,
         });
       }
