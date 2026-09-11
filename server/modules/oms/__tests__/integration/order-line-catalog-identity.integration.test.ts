@@ -1,19 +1,22 @@
 import { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { getTableConfig, PgDialect, type PgTable } from "drizzle-orm/pg-core";
-import { beforeAll, beforeEach, afterAll, describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, afterAll, describe, expect, it, vi } from "vitest";
 import * as schema from "@shared/schema";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { resolveOrderLineCatalogIdentity } from "../../order-line-catalog-identity.service";
 import { createOmsService } from "../../oms.service";
 import { normalizeShopifyLineItems } from "../../shopify-line-item-normalizer";
 import { buildWmsLineItemFromOmsLine } from "../../wms-sync.service";
+import { createHistoricalOrderLineIdentityRepairService } from "../../application/historical-order-line-identity-repair.service";
 
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
 const describeDatabase = databaseUrl && disposable ? describe : describe.skip;
 const tables = [schema.productVariants, schema.channelListings, schema.omsOrders, schema.omsOrderLines,
-  schema.omsOrderEvents, schema.omsOrderLineAuthorityEvents, schema.productLocations, schema.warehouseLocations];
+  schema.omsOrderEvents, schema.omsOrderLineAuthorityEvents, schema.webhookInbox,
+  schema.wmsOrders, schema.wmsOrderItems, schema.omsHistoricalLineIdentityRepairCommands,
+  schema.productLocations, schema.warehouseLocations];
 const quote = (name: string): string => `"${name.replaceAll('"', '""')}"`;
 
 // Query/transaction fixture derived from current columns, not a production migration or trigger test.
@@ -42,6 +45,8 @@ const fixtureSql = namespaces.map(name => `CREATE SCHEMA ${quote(name)};`).join(
   + tables.map(fixtureTable).join("\n") + `
     CREATE UNIQUE INDEX oms_channel_order_unique ON oms.oms_orders(channel_id,external_order_id);
     CREATE UNIQUE INDEX oms_authority_event_unique ON oms.oms_order_line_authority_events(event_key);
+    CREATE UNIQUE INDEX oms_hist_identity_command_unique
+      ON oms.historical_order_line_identity_repair_commands(idempotency_key);
   `;
 
 describeDatabase.sequential("order line identity PostgreSQL and WMS handoff", () => {
@@ -53,7 +58,9 @@ describeDatabase.sequential("order line identity PostgreSQL and WMS handoff", ()
   });
   beforeEach(async () => {
     await database.pool.query(`TRUNCATE catalog.product_variants, channels.channel_listings,
-      oms.oms_orders, oms.oms_order_lines, oms.oms_order_events, oms.oms_order_line_authority_events RESTART IDENTITY`);
+      oms.oms_orders, oms.oms_order_lines, oms.oms_order_events, oms.oms_order_line_authority_events,
+      oms.webhook_inbox, wms.orders, wms.order_items,
+      oms.historical_order_line_identity_repair_commands RESTART IDENTITY`);
     await database.pool.query(`INSERT INTO catalog.product_variants(id,product_id,name,sku,compare_at_price_cents)
       VALUES (11,1,'Example pack','EXAMPLE-P5',2500), (12,1,'Example case','EXAMPLE-C25',10000);
       INSERT INTO channels.channel_listings(channel_id,product_variant_id,external_product_id,external_variant_id)
@@ -206,5 +213,88 @@ describeDatabase.sequential("order line identity PostgreSQL and WMS handoff", ()
     } finally {
       await database.pool.query("ALTER TABLE oms.oms_order_events DROP CONSTRAINT fixture_audit_failure");
     }
+  });
+
+  it("repairs historical OMS and WMS identity atomically, preserves source SKU, and claims once", async () => {
+    await database.pool.query(`
+      INSERT INTO oms.oms_orders(id,channel_id,external_order_id,status,financial_status,fulfillment_status,ordered_at)
+      VALUES (71,2,'historical-order-71','confirmed','paid','unfulfilled','2026-09-01T12:00:00Z');
+      INSERT INTO oms.webhook_inbox(id,provider,topic,event_id,idempotency_key,status,payload)
+      VALUES (81,'shopify','orders/updated','event-81','shopify:orders/updated:event-81','succeeded',
+        '{"line_items":[{"id":9001,"product_id":1000,"variant_id":1001,"sku":null,"requires_shipping":true,"gift_card":false,"product_exists":true}]}'::jsonb);
+      INSERT INTO oms.oms_order_lines(id,order_id,external_line_item_id,external_product_id,sku,quantity,
+        requires_shipping,gift_card,product_exists,authority_source_inbox_id)
+      VALUES (91,71,'9001','1000',NULL,2,true,false,true,81);
+      INSERT INTO wms.orders(id,oms_fulfillment_order_id,source,order_number,customer_name,warehouse_status)
+      VALUES (101,'71','oms','#71','Historical Customer','ready');
+      INSERT INTO wms.order_items(id,order_id,oms_order_line_id,product_id,sku,name,quantity,status,picked_quantity,fulfilled_quantity)
+      VALUES (111,101,91,NULL,'UNKNOWN','Example pack',2,'pending',0,0);
+    `);
+    const reconcileOrderDemand = vi.fn(async () => ({
+      reconciled: true,
+      release: { released: 0, failed: [] },
+      reservation: { orderId: 101, reserved: 1, promised: 0, failed: [], totalBaseUnits: 10, totalPromisedBaseUnits: 0 },
+    }));
+    const service = createHistoricalOrderLineIdentityRepairService(orm, { reconcileOrderDemand },
+      () => new Date("2026-09-11T15:00:00Z"));
+    const preview = await service.preview(71);
+    expect(preview).toMatchObject({ omsOrderId: 71, safeCount: 1, reviewCount: 0,
+      lines: [{ omsOrderLineId: 91, externalVariantId: "1001", resolvedVariantId: 11,
+        resolvedCatalogSku: "EXAMPLE-P5", wmsOrderItemId: 111 }] });
+
+    const request = { expectedPreviewHash: preview.previewHash,
+      idempotencyKey: "ba01e537-6af2-46f1-bc92-9de0105aff19", reason: "Reviewed fixture repair" };
+    const result = await service.apply(71, request, { operator: "user:7", userId: "7" });
+    expect(result).toMatchObject({ status: "succeeded", idempotentReplay: false,
+      repair: { omsOrderId: 71, wmsOrderId: 101, repairedLines: [{ productVariantId: 11, catalogSku: "EXAMPLE-P5" }] } });
+    expect((await database.pool.query("SELECT product_variant_id, sku FROM oms.oms_order_lines WHERE id=91")).rows[0])
+      .toEqual({ product_variant_id: 11, sku: null });
+    expect((await database.pool.query("SELECT product_id, sku FROM wms.order_items WHERE id=111")).rows[0])
+      .toEqual({ product_id: 11, sku: "EXAMPLE-P5" });
+    expect((await database.pool.query("SELECT status, operator FROM oms.historical_order_line_identity_repair_commands")).rows)
+      .toEqual([{ status: "succeeded", operator: "user:7" }]);
+    expect((await database.pool.query(`SELECT event_type FROM oms.oms_order_events
+      WHERE order_id=71 ORDER BY id`)).rows.map((row) => row.event_type)).toEqual([
+      "line_catalog_identity_resolved",
+      "historical_line_identity_repair_prepared",
+      "historical_line_identity_claim_reconciled",
+    ]);
+    expect(reconcileOrderDemand).toHaveBeenCalledTimes(1);
+
+    const replay = await service.apply(71, request, { operator: "user:7", userId: "7" });
+    expect(replay.idempotentReplay).toBe(true);
+    expect(reconcileOrderDemand).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses a historical repair after WMS physical progress and writes nothing", async () => {
+    await database.pool.query(`
+      INSERT INTO oms.oms_orders(id,channel_id,external_order_id,status,financial_status,fulfillment_status,ordered_at)
+      VALUES (72,2,'historical-order-72','confirmed','paid','unfulfilled','2026-09-01T12:00:00Z');
+      INSERT INTO oms.webhook_inbox(id,provider,topic,event_id,idempotency_key,status,payload)
+      VALUES (82,'shopify','orders/updated','event-82','shopify:orders/updated:event-82','succeeded',
+        '{"line_items":[{"id":9002,"product_id":1000,"variant_id":1001,"sku":null,"requires_shipping":true}]}'::jsonb);
+      INSERT INTO oms.oms_order_lines(id,order_id,external_line_item_id,external_product_id,sku,quantity,
+        requires_shipping,gift_card,product_exists,authority_source_inbox_id)
+      VALUES (92,72,'9002','1000',NULL,2,true,false,true,82);
+      INSERT INTO wms.orders(id,oms_fulfillment_order_id,source,order_number,customer_name,warehouse_status)
+      VALUES (102,'72','oms','#72','Historical Customer','ready');
+      INSERT INTO wms.order_items(id,order_id,oms_order_line_id,product_id,sku,name,quantity,status,picked_quantity,fulfilled_quantity)
+      VALUES (112,102,92,NULL,'UNKNOWN','Example pack',2,'pending',1,0);
+    `);
+    const reconcileOrderDemand = vi.fn();
+    const service = createHistoricalOrderLineIdentityRepairService(orm, { reconcileOrderDemand });
+    const preview = await service.preview(72);
+    expect(preview).toMatchObject({ safeCount: 0, reviewCount: 1,
+      lines: [{ code: "WMS_PHYSICAL_PROGRESS_PRESENT", pickedQuantity: 1 }] });
+    await expect(service.apply(72, {
+      expectedPreviewHash: preview.previewHash,
+      idempotencyKey: "f1fb83fb-8334-4545-ae62-461a2d931a5a",
+      reason: "Must not rewrite picked work",
+    }, { operator: "user:7" })).rejects.toMatchObject({ code: "REPAIR_REVIEW_REQUIRED" });
+    expect((await database.pool.query("SELECT product_variant_id FROM oms.oms_order_lines WHERE id=92")).rows[0].product_variant_id)
+      .toBeNull();
+    expect((await database.pool.query("SELECT count(*)::int AS count FROM oms.historical_order_line_identity_repair_commands")).rows[0].count)
+      .toBe(0);
+    expect(reconcileOrderDemand).not.toHaveBeenCalled();
   });
 });

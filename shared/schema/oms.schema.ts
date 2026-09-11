@@ -6,7 +6,7 @@
  * The existing WMS pick/pack/ship flow (orders, order_items) is NOT modified.
  */
 
-import { pgTable, varchar, integer, bigint, timestamp, jsonb, text, boolean, uniqueIndex, index, pgSchema, numeric } from "drizzle-orm/pg-core";
+import { pgTable, varchar, integer, bigint, timestamp, jsonb, text, boolean, uniqueIndex, index, pgSchema, numeric, uuid } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
@@ -303,6 +303,53 @@ export const insertOmsOrderEventSchema = createInsertSchema(omsOrderEvents).omit
 
 export type InsertOmsOrderEvent = z.infer<typeof insertOmsOrderEventSchema>;
 export type OmsOrderEvent = typeof omsOrderEvents.$inferSelect;
+
+// ============================================
+// HISTORICAL ORDER-LINE IDENTITY REPAIR COMMANDS
+// ============================================
+
+/**
+ * Durable control record for the operator-gated repair of historical OMS/WMS
+ * lines that predate canonical channel-variant identity resolution.
+ *
+ * Deploying this table performs no repair. A command is created only after a
+ * reviewed preview hash is revalidated under locks. `claim_pending` is a
+ * deliberate durable handoff: OMS/WMS identity changes commit atomically, then
+ * the canonical whole-order claim owner is invoked with the command's stable
+ * identity. A failed or interrupted handoff can therefore resume safely.
+ */
+export const omsHistoricalLineIdentityRepairCommands = omsSchema.table(
+  "historical_order_line_identity_repair_commands",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    omsOrderId: bigint("oms_order_id", { mode: "number" }).notNull()
+      .references(() => omsOrders.id, { onDelete: "restrict" }),
+    wmsOrderId: integer("wms_order_id").notNull()
+      .references(() => orders.id, { onDelete: "restrict" }),
+    idempotencyKey: uuid("idempotency_key").notNull(),
+    requestHash: varchar("request_hash", { length: 64 }).notNull(),
+    previewHash: varchar("preview_hash", { length: 64 }).notNull(),
+    operator: varchar("operator", { length: 120 }).notNull(),
+    reason: varchar("reason", { length: 500 }).notNull(),
+    status: varchar("status", { length: 24 }).notNull().default("claim_pending"),
+    targetOmsLineIds: jsonb("target_oms_line_ids").notNull(),
+    repairResult: jsonb("repair_result").notNull(),
+    claimResult: jsonb("claim_result"),
+    lastErrorCode: varchar("last_error_code", { length: 100 }),
+    lastError: text("last_error"),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+  },
+  (table) => [
+    uniqueIndex("oms_hist_line_identity_repair_idempotency_uidx").on(table.idempotencyKey),
+    index("oms_hist_line_identity_repair_order_idx").on(table.omsOrderId, table.createdAt),
+    index("oms_hist_line_identity_repair_status_idx").on(table.status, table.updatedAt),
+  ],
+);
+
+export type OmsHistoricalLineIdentityRepairCommand =
+  typeof omsHistoricalLineIdentityRepairCommands.$inferSelect;
 
 // ============================================
 // FULFILLMENT ROUTING RULES
