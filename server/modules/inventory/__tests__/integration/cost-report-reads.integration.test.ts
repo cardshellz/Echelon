@@ -1,10 +1,16 @@
 import { drizzle } from "drizzle-orm/node-postgres";
 import { sql } from "drizzle-orm";
 import pg from "pg";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import * as schema from "@shared/schema";
 import { COGSService } from "../../cogs.service";
 import { fixtureTable } from "../../../procurement/__tests__/integration/shipment-line-fixture";
+import { getFinanceSummary, getFinanceOrders, getFinanceOrderDetail } from "../../../oms/finance-analytics.service";
+
+// Redirect only the legacy module-level transport. Every statement still runs
+// against the explicitly owned PostgreSQL fixture below.
+const financeTransport = vi.hoisted(() => ({ execute: vi.fn() }));
+vi.mock("../../../../db", () => ({ db: financeTransport }));
 
 const url = process.env.ECHELON_TEST_DATABASE_URL;
 const suite = url && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true" ? describe : describe.skip;
@@ -19,21 +25,26 @@ suite.sequential("COGS read queries against the canonical PostgreSQL schema", ()
       || [process.env.DATABASE_URL, process.env.EXTERNAL_DATABASE_URL].filter(Boolean).includes(url!)) {
       throw new Error("Cost read tests require a separate explicitly disposable local PostgreSQL database.");
     }
-    pool = new pg.Pool({ connectionString: url, ssl: false, max: 2, statement_timeout: 15_000 });
+    pool = new pg.Pool({ connectionString: url, ssl: false, max: 2, statement_timeout: 15_000,
+      options: "-c search_path=channels,catalog,public" });
     // CREATE without IF NOT EXISTS prevents adopting or deleting existing data.
-    for (const name of ["catalog", "inventory", "procurement", "warehouse", "wms", "oms"]) {
+    for (const name of ["catalog", "inventory", "procurement", "warehouse", "wms", "oms", "channels"]) {
       await pool.query(`CREATE SCHEMA ${name}`);
       ownedSchemas.push(name);
     }
     for (const table of [schema.products, schema.productVariants, schema.inventoryLots,
       schema.purchaseOrders, schema.inboundShipments, schema.warehouseLocations,
-      schema.orders, schema.orderItems, schema.orderItemCosts]) {
+      schema.orders, schema.orderItems, schema.orderItemCosts, schema.channels,
+      schema.omsOrders, schema.omsOrderLines, schema.omsOrderLineAdjustments, schema.omsOrderEvents]) {
       await pool.query(fixtureTable(table));
     }
     service = new COGSService(drizzle(pool, { schema }));
   });
 
   beforeEach(async () => {
+    const database = drizzle(pool, { schema });
+    financeTransport.execute.mockReset().mockImplementation(database.execute.bind(database));
+    await pool.query("TRUNCATE channels.channels, oms.oms_orders, oms.oms_order_lines, oms.order_line_adjustments, oms.oms_order_events RESTART IDENTITY");
     await pool.query("TRUNCATE oms.order_item_costs, wms.order_items, wms.orders, inventory.inventory_lots, catalog.product_variants, catalog.products RESTART IDENTITY");
   });
 
@@ -58,6 +69,55 @@ suite.sequential("COGS read queries against the canonical PostgreSQL schema", ()
       INSERT INTO inventory.inventory_lots (id, lot_number, product_variant_id, warehouse_location_id, qty_on_hand, received_at, status)
         VALUES (24, 'LOT-INACTIVE', 11, 1, 8, '2026-09-03T12:00:00Z', 'depleted');`);
   }
+
+  async function seedFinanceLinks() {
+    await seed();
+    await pool.query(`INSERT INTO channels.channels (id, name, provider) VALUES (1, 'Synthetic channel', 'shopify');
+      INSERT INTO oms.oms_orders (id, channel_id, external_order_id, ordered_at, total_cents, subtotal_cents)
+        VALUES (101, 1, 'provider-101', '2026-09-10', 10000, 10000),
+          (102, 1, 'provider-102', '2026-09-10', 20000, 20000);
+      INSERT INTO wms.orders (id, order_number, customer_name, source, oms_fulfillment_order_id, source_table_id)
+        VALUES (31, 'FIN-DIRECT', 'Synthetic', 'oms', '101', '102'),
+          (32, 'FIN-LEGACY', 'Synthetic', 'shopify', 'gid://shopify/Order/11998330978463', '101'),
+          (33, 'FIN-GID', 'Synthetic', 'shopify', 'gid://shopify/Order/11998330978463', NULL),
+          (34, 'FIN-PROVIDER-COLLISION', 'Synthetic', 'shopify', '101', NULL),
+          (35, 'FIN-OVERFLOW', 'Synthetic', 'oms', '999999999999999999999999999999999', NULL),
+          (36, 'FIN-OTHER', 'Synthetic', 'oms', '102', NULL);
+      INSERT INTO wms.order_items (id, order_id, sku, name, quantity)
+        SELECT id + 10, id, 'PACK-A', 'Synthetic item', 1 FROM wms.orders;
+      INSERT INTO oms.order_item_costs (order_id, order_item_id, inventory_lot_id, product_variant_id, qty, unit_cost_cents, total_cost_cents)
+        SELECT id, id + 10, 21, 11, 1, CASE WHEN id=31 THEN 100 WHEN id=32 THEN 200 WHEN id=36 THEN 50 ELSE 999 END,
+          CASE WHEN id=31 THEN 100 WHEN id=32 THEN 200 WHEN id=36 THEN 50 ELSE 999 END FROM wms.orders;`);
+  }
+
+  it("attributes finance summary, channel, list and detail costs consistently across internal and legacy links", async () => {
+    await seedFinanceLinks();
+    const from = new Date('2026-09-10T00:00:00Z');
+    const to = new Date('2026-09-11T00:00:00Z');
+    const summary = await getFinanceSummary(from, to);
+    expect(summary.waterfall.cogsCents).toMatchObject({ value: 350, priorValue: 0 });
+    expect(summary.waterfall.grossMarginCents.value).toBe(29650);
+    expect(summary.channels).toMatchObject([{ channelId: 1, cogsCents: 350 }]);
+    const list = await getFinanceOrders({ from, to });
+    expect(list.orders.find(order => order.id === 101)?.cogsCents).toBe(300);
+    expect(list.orders.find(order => order.id === 102)?.cogsCents).toBe(50);
+    const detail = await getFinanceOrderDetail(101);
+    expect(detail?.cogsTotalCents).toBe(300);
+    expect(detail?.costs.map(cost => cost.totalCostCents)).toEqual([100, 200]);
+  });
+
+  it("does not turn an unavailable aggregate COGS query into zero cost and inflated margin", async () => {
+    const database = drizzle(pool, { schema });
+    financeTransport.execute.mockImplementation(async (query) => {
+      const compiled = new (await import('drizzle-orm/pg-core')).PgDialect().sqlToQuery(query).sql;
+      if (compiled.includes('AS cogs_mills') && !compiled.includes('oo.channel_id')) {
+        throw Object.assign(new Error('Synthetic COGS read failure'), { code: '57014' });
+      }
+      return database.execute(query);
+    });
+    await expect(getFinanceSummary(new Date('2026-09-10'), new Date('2026-09-11')))
+      .rejects.toMatchObject({ code: '57014' });
+  });
 
   it("returns an explicit successful-empty response from both read queries", async () => {
     await expect(service.getInventoryValuation()).resolves.toEqual({
