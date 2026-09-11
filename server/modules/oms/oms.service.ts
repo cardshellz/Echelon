@@ -9,7 +9,6 @@ import { eq, and, sql, desc, asc, gte, lte, or, ilike, count } from "drizzle-orm
 import {
   omsOrders, omsOrderLines, omsOrderEvents,
   type InsertOmsOrder, type InsertOmsOrderLine, type OmsOrder, type OmsOrderLine,
-  productVariants,
   channels,
 } from "@shared/schema";
 import type { ShopifyAdminGraphQLClient } from "../shopify/admin-gql-client";
@@ -18,6 +17,7 @@ import {
   type OmsLineAuthorityState,
 } from "./oms-line-authority";
 import { recordOmsLineAuthorityEvent } from "./oms-line-authority-ledger";
+import { resolveOrderLineCatalogIdentity, recordOrderLineCatalogIdentity } from "./order-line-catalog-identity.service";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -75,6 +75,7 @@ export interface OrderData {
 export interface LineItemData {
   externalLineItemId?: string;
   externalProductId?: string | null;
+  externalVariantId?: string | null;
   sku?: string | null;
   title?: string;
   name?: string | null;
@@ -269,20 +270,9 @@ export function createOmsService(db: any, reservationService?: any) {
       if (!inserted) return null;
 
       for (const item of data.lineItems) {
-        let productVariantId: number | null = null;
-        let variantCompareAtPrice = null;
-
-        if (item.sku) {
-          const [variant] = await tx
-            .select({ id: productVariants.id, compareAtPriceCents: productVariants.compareAtPriceCents })
-            .from(productVariants)
-            .where(eq(productVariants.sku, item.sku.toUpperCase()))
-            .limit(1);
-          if (variant) {
-            productVariantId = variant.id;
-            variantCompareAtPrice = variant.compareAtPriceCents;
-          }
-        }
+        const identity = await resolveOrderLineCatalogIdentity(tx, { ...item, channelId });
+        const productVariantId = identity?.id ?? null;
+        const variantCompareAtPrice = identity?.compareAtPriceCents ?? null;
 
         const authority = buildLineAuthorityState(data, item);
         const [insertedLine] = await tx.insert(omsOrderLines).values({
@@ -317,6 +307,8 @@ export function createOmsService(db: any, reservationService?: any) {
         } satisfies InsertOmsOrderLine).onConflictDoNothing().returning({ id: omsOrderLines.id });
 
         if (insertedLine) {
+          await recordOrderLineCatalogIdentity(tx, { orderId: inserted.id, orderLineId: insertedLine.id,
+            channelId, previousVariantId: null, identity, source: { ...item, channelId }, sourceEventId: data.sourceEventId });
           await recordOmsLineAuthorityEvent({
             db: tx,
             orderId: inserted.id,
@@ -398,21 +390,6 @@ export function createOmsService(db: any, reservationService?: any) {
       let updatedLines = 0;
 
       for (const item of data.lineItems) {
-        let productVariantId: number | null = null;
-        let variantCompareAtPrice = null;
-
-        if (item.sku) {
-          const [variant] = await db
-            .select({ id: productVariants.id, compareAtPriceCents: productVariants.compareAtPriceCents })
-            .from(productVariants)
-            .where(eq(productVariants.sku, item.sku.toUpperCase()))
-            .limit(1);
-          if (variant) {
-            productVariantId = variant.id;
-            variantCompareAtPrice = variant.compareAtPriceCents;
-          }
-        }
-
         const existingLine = item.externalLineItemId
           ? existingLineByExternalId.get(item.externalLineItemId)
           : undefined;
@@ -426,6 +403,11 @@ export function createOmsService(db: any, reservationService?: any) {
               .for("update")
               .limit(1);
             const previousAuthority = lockedLine ?? existingLine;
+            const identity = await resolveOrderLineCatalogIdentity(tx, {
+              ...item, channelId, previousVariantId: previousAuthority.productVariantId,
+            });
+            const productVariantId = identity?.id ?? null;
+            const variantCompareAtPrice = identity?.compareAtPriceCents ?? null;
             const authority = buildLineAuthorityState(data, item, previousAuthority);
 
             await tx
@@ -461,6 +443,9 @@ export function createOmsService(db: any, reservationService?: any) {
               })
               .where(eq(omsOrderLines.id, existingLine.id));
 
+            await recordOrderLineCatalogIdentity(tx, { orderId: existingOrder.id, orderLineId: existingLine.id,
+              channelId, previousVariantId: previousAuthority.productVariantId, identity,
+              source: { ...item, channelId }, sourceEventId: data.sourceEventId });
             await recordOmsLineAuthorityEvent({
               db: tx,
               orderId: existingOrder.id,
@@ -477,6 +462,9 @@ export function createOmsService(db: any, reservationService?: any) {
 
         const authority = buildLineAuthorityState(data, item);
         await db.transaction(async (tx: any) => {
+          const identity = await resolveOrderLineCatalogIdentity(tx, { ...item, channelId });
+          const productVariantId = identity?.id ?? null;
+          const variantCompareAtPrice = identity?.compareAtPriceCents ?? null;
           const [insertedLine] = await tx.insert(omsOrderLines).values({
             orderId: existingOrder.id,
             productVariantId,
@@ -509,6 +497,8 @@ export function createOmsService(db: any, reservationService?: any) {
           } satisfies InsertOmsOrderLine).onConflictDoNothing().returning({ id: omsOrderLines.id });
 
           if (insertedLine) {
+            await recordOrderLineCatalogIdentity(tx, { orderId: existingOrder.id, orderLineId: insertedLine.id,
+              channelId, previousVariantId: null, identity, source: { ...item, channelId }, sourceEventId: data.sourceEventId });
             await recordOmsLineAuthorityEvent({
               db: tx,
               orderId: existingOrder.id,
