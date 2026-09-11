@@ -179,12 +179,18 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
     expect(await evidence()).toEqual(before);
   });
 
-  it.each([
-    ["inactive-user", "PO_APPROVAL_ACTOR_INACTIVE"], ["scoped-user", "PO_APPROVAL_SCOPE_UNSUPPORTED"],
-  ])("rejects %s in the real HTTP owner even when generic permission middleware passes", async (userId, code) => {
-    requestActor = userId;
+  it("rejects an inactive account at HTTP permission and direct approval-owner boundaries", async () => {
+    requestActor = "inactive-user";
     const before = await evidence();
-    expect(await postApproval()).toMatchObject({ status: 403, body: { details: { code } } });
+    expect(await postApproval()).toMatchObject({ status: 403, body: { error: "Permission denied: purchasing:approve" } });
+    await expect(service.approve(1, "inactive-user")).rejects.toMatchObject({ statusCode: 403, details: { code: "PO_APPROVAL_ACTOR_INACTIVE" } });
+    expect(await evidence()).toEqual(before);
+  });
+
+  it("rejects unsupported scoped authority in the real approval owner even when generic permission middleware passes", async () => {
+    requestActor = "scoped-user";
+    const before = await evidence();
+    expect(await postApproval()).toMatchObject({ status: 403, body: { details: { code: "PO_APPROVAL_SCOPE_UNSUPPORTED" } } });
     expect(await evidence()).toEqual(before);
   });
 

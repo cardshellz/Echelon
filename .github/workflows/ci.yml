@@ -41,6 +41,7 @@ jobs:
           client/src/lib/__tests__/procurement-schedule-date.test.ts
           shared/procurement/__tests__/purchase-buying-review.test.ts
           shared/inventory/__tests__/cost-report-read.test.ts
+          shared/inventory/__tests__/order-cogs-report.test.ts
       - name: Inventory shipment quantity UI contracts
         run: >-
           npx vitest run

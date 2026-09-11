@@ -1,4 +1,5 @@
 import { drizzle } from "drizzle-orm/node-postgres";
+import { sql } from "drizzle-orm";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import * as schema from "@shared/schema";
@@ -20,19 +21,20 @@ suite.sequential("COGS read queries against the canonical PostgreSQL schema", ()
     }
     pool = new pg.Pool({ connectionString: url, ssl: false, max: 2, statement_timeout: 15_000 });
     // CREATE without IF NOT EXISTS prevents adopting or deleting existing data.
-    for (const name of ["catalog", "inventory", "procurement", "warehouse"]) {
+    for (const name of ["catalog", "inventory", "procurement", "warehouse", "wms", "oms"]) {
       await pool.query(`CREATE SCHEMA ${name}`);
       ownedSchemas.push(name);
     }
     for (const table of [schema.products, schema.productVariants, schema.inventoryLots,
-      schema.purchaseOrders, schema.inboundShipments, schema.warehouseLocations]) {
+      schema.purchaseOrders, schema.inboundShipments, schema.warehouseLocations,
+      schema.orders, schema.orderItems, schema.orderItemCosts]) {
       await pool.query(fixtureTable(table));
     }
     service = new COGSService(drizzle(pool, { schema }));
   });
 
   beforeEach(async () => {
-    await pool.query("TRUNCATE inventory.inventory_lots, catalog.product_variants, catalog.products RESTART IDENTITY");
+    await pool.query("TRUNCATE oms.order_item_costs, wms.order_items, wms.orders, inventory.inventory_lots, catalog.product_variants, catalog.products RESTART IDENTITY");
   });
 
   afterAll(async () => {
@@ -110,5 +112,86 @@ suite.sequential("COGS read queries against the canonical PostgreSQL schema", ()
     const report = await concurrentService.getAllCostLots();
     expect(report.total).toBe(0);
     expect(report.lots.map((lot) => lot.id)).toEqual([21, 22]);
+  });
+
+  it("uses recorded order and extended line cents without inventing quantities or repeating same-SKU costs", async () => {
+    await seed();
+    await pool.query(`INSERT INTO wms.orders (id, order_number, customer_name, total_cents) VALUES (31, 'COST-READ-31', 'Synthetic cost read', 1500);
+      INSERT INTO wms.order_items (id, order_id, sku, name, quantity, unit_price_cents, paid_price_cents, total_price_cents)
+        VALUES (41, 31, 'PACK-A', 'First pack line', 3, 333, 333, 1000),
+          (42, 31, 'PACK-A', 'Second pack line', 1, 300, 300, 300),
+          (43, 31, 'PIECE-B', 'Cancelled zero-quantity line', 0, 500, 500, 0);
+      INSERT INTO oms.order_item_costs (order_id, order_item_id, inventory_lot_id, product_variant_id, qty, unit_cost_cents, total_cost_cents)
+        VALUES (31, 41, 21, 11, 2, 100, 200), (31, 41, 21, 11, 1, 105, 105),
+          (31, 42, 21, 11, 1, 100, 100);`);
+    const report = await service.getOrderCOGSByNumber('COST-READ-31');
+    expect(report).toMatchObject({ orderId: 31, totalRevenueCents: 1500, totalCogsCents: 405, grossMarginCents: 1095, marginPercent: 73 });
+    expect(report?.lineItems).toMatchObject([
+      { orderItemId: 41, productName: 'First pack line', qty: 3, revenueCents: 1000, cogsCents: 305, marginCents: 695, marginPercent: 69.5 },
+      { orderItemId: 42, productName: 'Second pack line', qty: 1, revenueCents: 300, cogsCents: 100, marginCents: 200, marginPercent: 66.67 },
+      { orderItemId: 43, productName: 'Cancelled zero-quantity line', qty: 0, revenueCents: 0, cogsCents: 0, marginCents: 0, marginPercent: 0 },
+    ]);
+    expect(report?.lineItems.map((line) => line.lotBreakdown.length)).toEqual([2, 1, 0]);
+  });
+
+  it("distinguishes a missing order from an existing empty zero-total order", async () => {
+    await expect(service.getOrderCOGS(999)).resolves.toBeNull();
+    await pool.query("INSERT INTO wms.orders (id, order_number, customer_name, total_cents) VALUES (31, 'EMPTY-31', 'Synthetic cost read', 0)");
+    await expect(service.getOrderCOGS(31)).resolves.toMatchObject({ totalRevenueCents: 0, totalCogsCents: 0, grossMarginCents: 0, marginPercent: 0, lineItems: [] });
+  });
+
+  it("rejects a stored order total beyond the exact JSON integer range", async () => {
+    await pool.query("INSERT INTO wms.orders (id, order_number, customer_name, total_cents) VALUES (31, 'UNSAFE-31', 'Synthetic cost read', 9007199254740992)");
+    await expect(service.getOrderCOGS(31)).rejects.toMatchObject({ code: 'ORDER_COGS_INVALID_DATA' });
+  });
+
+  it("rounds authoritative extended mills only after aggregation and rejects unsupported order currency", async () => {
+    await seed();
+    await pool.query(`INSERT INTO wms.orders (id, order_number, customer_name, total_cents, currency)
+        VALUES (31, 'PRECISE-31', 'Synthetic cost read', 100, 'USD');
+      INSERT INTO wms.order_items (id, order_id, sku, name, quantity, total_price_cents)
+        VALUES (41, 31, 'PACK-A', 'Precise cost line', 2, 100);
+      INSERT INTO oms.order_item_costs (order_id, order_item_id, inventory_lot_id, product_variant_id, qty,
+        unit_cost_cents, total_cost_cents, unit_cost_mills, total_cost_mills)
+        VALUES (31, 41, 21, 11, 1, 0, 0, 49, 49), (31, 41, 21, 11, 1, 0, 0, 49, 49);`);
+    const report = await service.getOrderCOGS(31);
+    expect(report).toMatchObject({ totalRevenueCents: 100, totalCogsCents: 1, totalCogsMills: '98', grossMarginCents: 99 });
+    expect(report?.lineItems[0]).toMatchObject({ cogsCents: 1, cogsMills: '98' });
+    await pool.query("UPDATE wms.orders SET currency='EUR' WHERE id=31");
+    await expect(service.getOrderCOGS(31)).rejects.toMatchObject({ code: 'ORDER_COGS_CURRENCY_UNSUPPORTED', currency: 'EUR' });
+  });
+
+  it("keeps one consistent snapshot while a writer commits another order line and its cost", async () => {
+    await seed();
+    await pool.query(`INSERT INTO wms.orders (id, order_number, customer_name, total_cents) VALUES (31, 'SNAPSHOT-31', 'Synthetic cost read', 100);
+      INSERT INTO wms.order_items (id, order_id, sku, name, quantity, total_price_cents) VALUES (41, 31, 'PACK-A', 'Original line', 1, 100);`);
+    const database = drizzle(pool, { schema });
+    let inserted = false;
+    const concurrentService = new COGSService({
+      select: database.select.bind(database), insert: database.insert.bind(database), update: database.update.bind(database),
+      delete: database.delete.bind(database), execute: database.execute.bind(database),
+      transaction: (callback, config) => database.transaction(async (tx) => {
+        // The reader has already loaded its order/items when it requests the
+        // ledger. Commit an independent writer before that SQL statement runs.
+        const reader = { select: tx.select.bind(tx), execute: async (query: Parameters<typeof tx.execute>[0]) => {
+          if (!inserted) {
+            inserted = true;
+            await database.transaction(async (writer) => writer.execute(sql`
+              UPDATE wms.orders SET total_cents=200 WHERE id=31;
+              INSERT INTO wms.order_items (id, order_id, sku, name, quantity, total_price_cents) VALUES (42, 31, 'PACK-A', 'New line', 1, 100);
+              INSERT INTO oms.order_item_costs (order_id, order_item_id, inventory_lot_id, product_variant_id, qty,
+                unit_cost_cents, total_cost_cents, unit_cost_mills, total_cost_mills) VALUES (31, 42, 21, 11, 1, 50, 50, 5000, 5000);
+            `));
+          }
+          return tx.execute(query);
+        } };
+        return callback(reader);
+      }, config),
+    });
+    expect(await concurrentService.getOrderCOGS(31)).toMatchObject({ totalRevenueCents: 100, totalCogsCents: 0,
+      lineItems: [{ orderItemId: 41 }] });
+    const next = await service.getOrderCOGS(31);
+    expect(next).toMatchObject({ totalRevenueCents: 200, totalCogsCents: 50 });
+    expect(next?.lineItems.map((line) => line.orderItemId)).toEqual([41, 42]);
   });
 });
