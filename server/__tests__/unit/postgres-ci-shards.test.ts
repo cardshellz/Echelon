@@ -53,14 +53,15 @@ function runnerFixture() {
 }
 
 describe("PostgreSQL CI coverage and isolation", () => {
-  it("preserves all 70 prior files plus procurement reads and OMS identity regressions", () => {
+  it("preserves all 70 prior files plus procurement reads, background capture and OMS identity regressions", () => {
     const addedReadSuites = [
       "server/modules/inventory/__tests__/integration/cost-report-reads.integration.test.ts",
       "server/modules/procurement/__tests__/integration/shipment-purchase-orders.integration.test.ts",
       "server/modules/oms/__tests__/integration/order-line-catalog-identity.integration.test.ts",
+      "server/modules/inventory-planning/__tests__/integration/inventory-opening-capture.integration.test.ts",
     ];
-    expect(POSTGRES_TEST_FILES).toHaveLength(73);
-    expect(new Set(POSTGRES_TEST_FILES).size).toBe(73);
+    expect(POSTGRES_TEST_FILES).toHaveLength(74);
+    expect(new Set(POSTGRES_TEST_FILES).size).toBe(74);
     expect(POSTGRES_TEST_FILES).toEqual(expect.arrayContaining(addedReadSuites));
     // Preserve the original inventory digest as well as every explicit addition.
     const priorFiles = POSTGRES_TEST_FILES.filter((file) => !addedReadSuites.includes(file));
@@ -72,7 +73,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
 
   it("assigns every file exactly once across 8 deterministic balanced shards", () => {
     const shards = Array.from({ length: POSTGRES_SHARD_COUNT }, (_, index) => selectPostgresShardFiles({ index: index + 1, count: 8 }));
-    expect(shards.map((files) => files.length)).toEqual([10, 9, 9, 9, 9, 9, 9, 9]);
+    expect(shards.map((files) => files.length)).toEqual([10, 10, 9, 9, 9, 9, 9, 9]);
     expect(shards.flat().sort()).toEqual([...POSTGRES_TEST_FILES].sort());
     expect(new Set(shards.flat()).size).toBe(POSTGRES_TEST_FILES.length);
     expect(selectPostgresShardFiles({ index: 1, count: 8 })).toEqual(shards[0]);
@@ -101,7 +102,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
         reports.push(args.at(-1)!);
       }
     }
-    expect(new Set(reports).size).toBe(73);
+    expect(new Set(reports).size).toBe(74);
     expect(() => buildPostgresVitestArgs({ index: 1, count: 8 }, POSTGRES_TEST_FILES[1])).toThrow();
     const source = readFileSync(resolve(POSTGRES_REPOSITORY_ROOT, "scripts/ci/postgres-tests.ts"), "utf8");
     expect(source).toContain("spawnSync(process.execPath, [...args]");

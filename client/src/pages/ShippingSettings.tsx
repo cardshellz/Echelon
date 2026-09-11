@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { dollarsToCents } from '@shared/utils/money';
+import { dimensionInputToMm, formatDimensionInches, MILLIMETERS_PER_INCH } from '@shared/shipping/dimensions';
 import { useConfigurationCommand } from '@/components/shipping/configuration-client';
 import { boxBrandingSchema, type BoxBranding } from '@shared/shipping/packaging-policy';
 import { BoxSuitesPanel } from '@/components/shipping/BoxSuitesPanel';
@@ -114,10 +115,9 @@ interface WarehouseType {
 }
 
 
-// ===== Unit conversion helpers (copied from ProductDetail.tsx — keep in sync) =====
+// ===== Weight and volume conversion helpers =====
 
 const GRAMS_PER_POUND = 453.59237;
-const MILLIMETERS_PER_INCH = 25.4;
 // Derived from the constants above — do not introduce new base constants.
 const GRAMS_PER_OUNCE = GRAMS_PER_POUND / 16;
 const CUBIC_CM_PER_CUBIC_INCH = Math.pow(MILLIMETERS_PER_INCH / 10, 3);
@@ -324,15 +324,15 @@ function emptyBoxForm(): BoxFormState {
 function boxFormFromBox(box: ShippingBox): BoxFormState {
   return {
     branding: box.branding ?? 'unclassified', expectedRevision: box.configurationRevision,
-    outerLengthIn: formatMeasurementInput(box.outerLengthMm ?? null,MILLIMETERS_PER_INCH),
-    outerWidthIn: formatMeasurementInput(box.outerWidthMm ?? null,MILLIMETERS_PER_INCH),
-    outerHeightIn: formatMeasurementInput(box.outerHeightMm ?? null,MILLIMETERS_PER_INCH),
+    outerLengthIn: formatDimensionInches(box.outerLengthMm),
+    outerWidthIn: formatDimensionInches(box.outerWidthMm),
+    outerHeightIn: formatDimensionInches(box.outerHeightMm),
     code: box.code,
     name: box.name,
     kind: box.kind,
-    lengthIn: formatMeasurementInput(box.lengthMm, MILLIMETERS_PER_INCH),
-    widthIn: formatMeasurementInput(box.widthMm, MILLIMETERS_PER_INCH),
-    heightIn: formatMeasurementInput(box.heightMm, MILLIMETERS_PER_INCH),
+    lengthIn: formatDimensionInches(box.lengthMm),
+    widthIn: formatDimensionInches(box.widthMm),
+    heightIn: formatDimensionInches(box.heightMm),
     tareOz: formatMeasurementInput(box.tareWeightGrams || null, GRAMS_PER_OUNCE),
     maxWeightLb: formatMeasurementInput(box.maxWeightGrams, GRAMS_PER_POUND),
     costUsd: box.costCents ? (box.costCents / 100).toFixed(2) : "",
@@ -341,15 +341,15 @@ function boxFormFromBox(box: ShippingBox): BoxFormState {
   };
 }
 
-function buildBoxPayload(form: BoxFormState, editingId: number | null): BoxPayload {
+function buildBoxPayload(form: BoxFormState, originalBox: ShippingBox | null): BoxPayload {
   const code = form.code.trim();
   const name = form.name.trim();
   if (!code) throw new Error("Code is required.");
   if (!name) throw new Error("Name is required.");
 
-  const lengthMm = toStoredMeasurement(form.lengthIn, "Inner length", MILLIMETERS_PER_INCH);
-  const widthMm = toStoredMeasurement(form.widthIn, "Inner width", MILLIMETERS_PER_INCH);
-  const heightMm = toStoredMeasurement(form.heightIn, "Inner height", MILLIMETERS_PER_INCH);
+  const lengthMm = dimensionInputToMm(form.lengthIn, "Inner length", originalBox?.lengthMm);
+  const widthMm = dimensionInputToMm(form.widthIn, "Inner width", originalBox?.widthMm);
+  const heightMm = dimensionInputToMm(form.heightIn, "Inner height", originalBox?.heightMm);
   if (lengthMm === null || widthMm === null || heightMm === null) {
     throw new Error("Inner dimensions (L × W × H) are required.");
   }
@@ -358,9 +358,9 @@ function buildBoxPayload(form: BoxFormState, editingId: number | null): BoxPaylo
     ? toStoredMeasurement(form.tareOz, "Tare weight", GRAMS_PER_OUNCE)
     : 0;
   const maxWeightGrams = toStoredMeasurement(form.maxWeightLb, "Max weight", GRAMS_PER_POUND);
-  const outerLengthMm = toStoredMeasurement(form.outerLengthIn,'Outer length',MILLIMETERS_PER_INCH);
-  const outerWidthMm = toStoredMeasurement(form.outerWidthIn,'Outer width',MILLIMETERS_PER_INCH);
-  const outerHeightMm = toStoredMeasurement(form.outerHeightIn,'Outer height',MILLIMETERS_PER_INCH);
+  const outerLengthMm = dimensionInputToMm(form.outerLengthIn, 'Outer length', originalBox?.outerLengthMm);
+  const outerWidthMm = dimensionInputToMm(form.outerWidthIn, 'Outer width', originalBox?.outerWidthMm);
+  const outerHeightMm = dimensionInputToMm(form.outerHeightIn, 'Outer height', originalBox?.outerHeightMm);
   const outer = [outerLengthMm,outerWidthMm,outerHeightMm];
   if (outer.some((value) => value !== null) && (outer.some((value) => value === null)
     || outerLengthMm! < lengthMm || outerWidthMm! < widthMm || outerHeightMm! < heightMm)) {
@@ -381,7 +381,7 @@ function buildBoxPayload(form: BoxFormState, editingId: number | null): BoxPaylo
   const fillFactorBps = Math.round(fillParsed * 100);
 
   return {
-    ...(editingId !== null ? { id: editingId } : {}),
+    ...(originalBox !== null ? { id: originalBox.id } : {}),
     branding: form.branding, expectedRevision: form.expectedRevision,
     code,
     name,
@@ -429,7 +429,9 @@ export function BoxCatalogTab({
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [dialogOpen, setDialogOpen] = useState(false);
-  const [editingBoxId, setEditingBoxId] = useState<number | null>(null);
+  // Capture measurements and revision together; a background refetch must not
+  // replace the original values while an edit is in progress.
+  const [editingBox, setEditingBox] = useState<ShippingBox | null>(null);
   const [form, setForm] = useState<BoxFormState>(emptyBoxForm());
   const commandFor = useConfigurationCommand();
 
@@ -506,20 +508,20 @@ export function BoxCatalogTab({
   });
 
   const openCreate = () => {
-    setEditingBoxId(null);
+    setEditingBox(null);
     setForm(emptyBoxForm());
     setDialogOpen(true);
   };
 
   const openEdit = (box: ShippingBox) => {
-    setEditingBoxId(box.id);
+    setEditingBox({ ...box });
     setForm(boxFormFromBox(box));
     setDialogOpen(true);
   };
 
   const handleSave = () => {
     try {
-      saveBoxMutation.mutate(buildBoxPayload(form, editingBoxId));
+      saveBoxMutation.mutate(buildBoxPayload(form, editingBox));
     } catch (e) {
       toast({
         title: "Invalid box",
@@ -789,7 +791,7 @@ export function BoxCatalogTab({
         <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>
-              {editingBoxId !== null ? "Edit Box" : "Add Box"}
+              {editingBox !== null ? "Edit Box" : "Add Box"}
             </DialogTitle>
             <DialogDescription className="sr-only">
               Form to add or edit a shipping box
@@ -856,8 +858,9 @@ export function BoxCatalogTab({
               </div>
             </div>
             <div className="space-y-1.5">
-              <Label>Name</Label>
+              <Label htmlFor="box-name">Name</Label>
               <Input
+                id="box-name"
                 value={form.name}
                 onChange={(e) =>
                   setForm((prev) => ({ ...prev, name: e.target.value }))
@@ -866,10 +869,15 @@ export function BoxCatalogTab({
                 className="h-10"
               />
             </div>
+            <p className="text-xs text-muted-foreground">
+              Inner dimensions are the measured space inside the container, used
+              to check product fit. Enter inches; fractional measurements are preserved.
+            </p>
             <div className="grid grid-cols-3 gap-3">
               <div className="space-y-1.5">
-                <Label>Inner length (in)</Label>
+                <Label htmlFor="box-inner-length">Inner length (in)</Label>
                 <Input
+                  id="box-inner-length"
                   type="number"
                   min="0"
                   step="0.001"
@@ -882,8 +890,9 @@ export function BoxCatalogTab({
                 />
               </div>
               <div className="space-y-1.5">
-                <Label>Inner width (in)</Label>
+                <Label htmlFor="box-inner-width">Inner width (in)</Label>
                 <Input
+                  id="box-inner-width"
                   type="number"
                   min="0"
                   step="0.001"
@@ -896,8 +905,9 @@ export function BoxCatalogTab({
                 />
               </div>
               <div className="space-y-1.5">
-                <Label>Inner height (in)</Label>
+                <Label htmlFor="box-inner-height">Inner height (in)</Label>
                 <Input
+                  id="box-inner-height"
                   type="number"
                   min="0"
                   step="0.001"
@@ -916,8 +926,8 @@ export function BoxCatalogTab({
               </legend>
               <p className="text-xs text-muted-foreground">
                 Measured outside the closed package. Inner dimensions control
-                fit; outer dimensions describe the shipment. Leave all three
-                blank if not measured.
+                fit; outer dimensions are used for shipping estimates. If all
+                three are blank, estimates use the inner dimensions as a fallback.
               </p>
               <div className="grid grid-cols-3 gap-3">
                 {(
@@ -1000,8 +1010,9 @@ export function BoxCatalogTab({
                 />
               </div>
               <div className="space-y-1.5">
-                <Label>Fill factor (%)</Label>
+                <Label htmlFor="box-fill-factor">Fill factor (%)</Label>
                 <Input
+                  id="box-fill-factor"
                   type="number"
                   min="0"
                   max="100"
@@ -1017,7 +1028,8 @@ export function BoxCatalogTab({
                   className="h-10"
                 />
                 <p className="text-xs text-muted-foreground">
-                  Usable share of the inner volume
+                  Maximum usable inner volume. 85% reserves 15% for padding and
+                  packing gaps; it does not replace measuring the inside dimensions.
                 </p>
               </div>
             </div>
@@ -1044,7 +1056,7 @@ export function BoxCatalogTab({
               ) : (
                 <Save className="w-4 h-4 mr-2" />
               )}
-              {editingBoxId !== null ? "Save Changes" : "Create Box"}
+              {editingBox !== null ? "Save Changes" : "Create Box"}
             </Button>
           </DialogFooter>
         </DialogContent>

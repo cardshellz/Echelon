@@ -20,6 +20,8 @@ import { channels } from "./channels.schema";
 import { shipmentRequests } from "./fulfillment.schema";
 import { orders } from "./orders.schema";
 import { warehouses } from "./warehouse.schema";
+import { dimensionMillimeters } from "./dimension-column";
+import { boxDimensionMmSchema, MAX_DIMENSION_MM } from "../shipping/dimensions";
 import type {
   ShippingChannelEligibilityMode,
   ShippingChannelPolicyPurpose,
@@ -88,17 +90,17 @@ export const shippingBoxCatalog = shippingSchema.table("box_catalog", {
   branding: text("branding").notNull().default("unclassified"),
   availabilityReviewed: boolean("availability_reviewed").notNull().default(false),
   configurationRevision: integer("configuration_revision").notNull().default(1),
-  outerLengthMm: integer('outer_length_mm'),
-  outerWidthMm: integer('outer_width_mm'),
-  outerHeightMm: integer('outer_height_mm'),
+  outerLengthMm: dimensionMillimeters('outer_length_mm'),
+  outerWidthMm: dimensionMillimeters('outer_width_mm'),
+  outerHeightMm: dimensionMillimeters('outer_height_mm'),
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   code: varchar("code", { length: 80 }).notNull(),
   name: varchar("name", { length: 200 }).notNull(),
   kind: varchar("kind", { length: 20 }).notNull().default("box"),
   // Inner (usable) dimensions — cartonization fits against these, not outer dims.
-  lengthMm: integer("length_mm").notNull(),
-  widthMm: integer("width_mm").notNull(),
-  heightMm: integer("height_mm").notNull(),
+  lengthMm: dimensionMillimeters("length_mm").notNull(),
+  widthMm: dimensionMillimeters("width_mm").notNull(),
+  heightMm: dimensionMillimeters("height_mm").notNull(),
   tareWeightGrams: integer("tare_weight_grams").notNull().default(0),
   maxWeightGrams: integer("max_weight_grams"),
   costCents: integer("cost_cents").notNull().default(0),
@@ -112,6 +114,10 @@ export const shippingBoxCatalog = shippingSchema.table("box_catalog", {
   uniqueIndex("shipping_box_code_idx").on(table.code),
   check("shipping_box_kind_chk", sql`${table.kind} IN ('box', 'mailer', 'envelope')`),
   check("shipping_box_dims_chk", sql`${table.lengthMm} > 0 AND ${table.widthMm} > 0 AND ${table.heightMm} > 0 AND ${table.tareWeightGrams} >= 0`),
+  check("shipping_box_dimension_range_chk", sql`${table.lengthMm} <= ${MAX_DIMENSION_MM} AND ${table.widthMm} <= ${MAX_DIMENSION_MM} AND ${table.heightMm} <= ${MAX_DIMENSION_MM}
+    AND (${table.outerLengthMm} IS NULL OR ${table.outerLengthMm} <= ${MAX_DIMENSION_MM})
+    AND (${table.outerWidthMm} IS NULL OR ${table.outerWidthMm} <= ${MAX_DIMENSION_MM})
+    AND (${table.outerHeightMm} IS NULL OR ${table.outerHeightMm} <= ${MAX_DIMENSION_MM})`),
   check("shipping_box_cost_chk", sql`${table.costCents} >= 0`),
   check("shipping_box_fill_chk", sql`${table.fillFactorBps} > 0 AND ${table.fillFactorBps} <= 10000`),
   check('shipping_box_outer_dimensions_chk',sql`(${table.outerLengthMm} IS NULL AND ${table.outerWidthMm} IS NULL AND ${table.outerHeightMm} IS NULL)
@@ -1348,9 +1354,9 @@ export const shippingPackPlanParcels = shippingSchema.table("pack_plan_parcels",
   siocProductVariantId: integer("sioc_product_variant_id").references(() => productVariants.id, { onDelete: "restrict" }),
   estWeightGrams: integer("est_weight_grams").notNull(),
   billableWeightGrams: integer("billable_weight_grams").notNull(),
-  lengthMm: integer("length_mm").notNull(),
-  widthMm: integer("width_mm").notNull(),
-  heightMm: integer("height_mm").notNull(),
+  lengthMm: dimensionMillimeters("length_mm").notNull(),
+  widthMm: dimensionMillimeters("width_mm").notNull(),
+  heightMm: dimensionMillimeters("height_mm").notNull(),
   // Verified per-unit positions and rotations produced by the cartonizer.
   placements: jsonb("placements")
     .$type<ShippingCartonPlacement[]>()
@@ -1370,6 +1376,8 @@ export const shippingPackPlanParcels = shippingSchema.table("pack_plan_parcels",
     OR (${table.boxId} IS NULL AND ${table.siocProductVariantId} IS NOT NULL)
   `),
   check("shipping_parcel_weights_chk", sql`${table.estWeightGrams} > 0 AND ${table.billableWeightGrams} > 0`),
+  check("shipping_parcel_dimension_range_chk", sql`${table.lengthMm} BETWEEN 0 AND ${MAX_DIMENSION_MM}
+    AND ${table.widthMm} BETWEEN 0 AND ${MAX_DIMENSION_MM} AND ${table.heightMm} BETWEEN 0 AND ${MAX_DIMENSION_MM}`),
   check("shipping_parcel_placements_array_chk", sql`jsonb_typeof(${table.placements}) = 'array'`),
   check("shipping_parcel_actual_weight_chk", sql`${table.actualWeightGrams} IS NULL OR ${table.actualWeightGrams} > 0`),
 ]);
@@ -1419,9 +1427,12 @@ export const insertShippingBoxSchema = createInsertSchema(shippingBoxCatalog, {
   code: z.string().trim().min(1).max(80),
   name: z.string().trim().min(1).max(200),
   kind: z.enum(SHIPPING_BOX_KINDS),
-  lengthMm: z.number().int().positive(),
-  widthMm: z.number().int().positive(),
-  heightMm: z.number().int().positive(),
+  lengthMm: boxDimensionMmSchema,
+  widthMm: boxDimensionMmSchema,
+  heightMm: boxDimensionMmSchema,
+  outerLengthMm: boxDimensionMmSchema.nullable().optional(),
+  outerWidthMm: boxDimensionMmSchema.nullable().optional(),
+  outerHeightMm: boxDimensionMmSchema.nullable().optional(),
   tareWeightGrams: z.number().int().min(0),
   maxWeightGrams: z.number().int().positive().nullable().optional(),
   costCents: z.number().int().min(0),

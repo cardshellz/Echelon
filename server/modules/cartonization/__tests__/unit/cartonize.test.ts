@@ -45,6 +45,20 @@ const LARGE = box({ id: 3, code: "L", lengthMm: 450, widthMm: 350, heightMm: 250
 const BOXES = [SMALL, MEDIUM, LARGE];
 
 describe('outer shipping dimensions',() => {
+  it('preserves fractional millimeters for exact fit and reports outer dimensions without truncation', () => {
+    const measured = box({ id: 20, code: '8-inch', lengthMm: 203.2, widthMm: 152.4, heightMm: 101.6,
+      outerLengthMm: 209.55, outerWidthMm: 158.75, outerHeightMm: 107.9754, fillFactorBps: 10000 });
+    const product = item({ productVariantId: 102, lengthMm: 203.2, widthMm: 152.4, heightMm: 101.6 });
+    const candidate = cartonize([product], [measured]).candidates[0];
+    expect(isCartonizeCandidateVerified(candidate)).toBe(true);
+    expect(candidate.parcels[0]).toMatchObject({ boxId: 20, lengthMm: 209.55, widthMm: 158.75, heightMm: 107.9754 });
+    expectPlacementsToFit(candidate.parcels[0].placements, measured);
+    expect(candidate.parcels[0].placements[0]).toMatchObject({ lengthMm: 203.2, widthMm: 152.4, heightMm: 101.6 });
+    const oversized = cartonize([{ ...product, lengthMm: 203.2001 }], [measured]).candidates[0];
+    expect(isCartonizeCandidateVerified(oversized)).toBe(false);
+    const reserved = cartonize([product], [{ ...measured, fillFactorBps: 8500 }]).candidates[0];
+    expect(isCartonizeCandidateVerified(reserved)).toBe(false);
+  });
   it('packs against inner dimensions and reports measured outer dimensions',() => {
     const measured = { ...SMALL,outerLengthMm: 160,outerWidthMm: 110,outerHeightMm: 60 };
     const candidate = cartonize([item({ productVariantId: 101 })],[measured]).candidates[0];

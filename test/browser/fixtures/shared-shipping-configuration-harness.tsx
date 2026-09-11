@@ -11,6 +11,7 @@ import { BoxSuitesPanel } from "../../../client/src/components/shipping/BoxSuite
 import { PackagingAssignmentsPanel } from "../../../client/src/components/shipping/PackagingAssignmentsPanel";
 import { ProgramChargesPanel } from "../../../client/src/components/shipping/pricing-programs/ProgramChargesPanel";
 import { WarehousePackagingPanel } from "../../../client/src/components/shipping/WarehousePackagingPanel";
+import { Toaster } from "../../../client/src/components/ui/toaster";
 import "../../../client/src/index.css";
 
 const mode = new URLSearchParams(location.search).get("mode");
@@ -43,5 +44,6 @@ createRoot(document.getElementById("root")!).render(
     ) : (
       <DropshipSharedShippingPanel />
     )}
+    <Toaster />
   </QueryClientProvider>,
 );

@@ -540,6 +540,9 @@ test("catalog edits never submit warehouse availability", async ({
       id: 1,
       branding: "unbranded",
       expectedRevision: 1,
+      lengthMm: 200,
+      widthMm: 150,
+      heightMm: 100,
     },
   });
   expect(state.writes[0].body).not.toHaveProperty("warehouseIds");
@@ -557,6 +560,41 @@ test("catalog edits never submit warehouse availability", async ({
     fullPage: true,
     animations: "disabled",
   });
+  expect(state.errors).toEqual([]);
+});
+
+test("box measurements round trip in inches while inside, outside and fill stay separate", async ({ page }, info) => {
+  const state = await setup(page, "catalog");
+  await page.getByRole("button", { name: "Edit WHITE box" }).click();
+  await page.getByLabel("Inner length (in)", { exact: true }).fill("8");
+  await page.getByLabel("Inner width (in)", { exact: true }).fill("6");
+  await page.getByLabel("Inner height (in)", { exact: true }).fill("4.001");
+  await page.getByLabel("Outer length", { exact: true }).fill("8.25");
+  await page.getByLabel("Outer width", { exact: true }).fill("6.25");
+  await page.getByLabel("Outer height", { exact: true }).fill("4.25");
+  await page.getByLabel("Fill factor (%)", { exact: true }).fill("85");
+  await page.getByRole("button", { name: "Save Changes" }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  expect(state.writes[0].body).toMatchObject({ lengthMm: 203.2, widthMm: 152.4, heightMm: 101.6254,
+    outerLengthMm: 209.55, outerWidthMm: 158.75, outerHeightMm: 107.95, fillFactorBps: 8500 });
+  await expect(page.getByText("8 × 6 × 4.001 in", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Edit WHITE box" }).click();
+  await expect(page.getByLabel("Inner length (in)", { exact: true })).toHaveValue("8");
+  await expect(page.getByLabel("Inner height (in)", { exact: true })).toHaveValue("4.001");
+  await expect(page.getByLabel("Outer length", { exact: true })).toHaveValue("8.25");
+  await expect(page.getByLabel("Fill factor (%)", { exact: true })).toHaveValue("85");
+  await page.screenshot({ path: info.outputPath("precise-box-dimensions.png"), fullPage: true, animations: "disabled" });
+  await page.getByLabel("Name", { exact: true }).fill("Renamed without remeasuring");
+  await page.getByRole("button", { name: "Save Changes" }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  expect(state.writes[1].body).toMatchObject({ lengthMm: 203.2, widthMm: 152.4, heightMm: 101.6254,
+    outerLengthMm: 209.55, outerWidthMm: 158.75, outerHeightMm: 107.95, fillFactorBps: 8500, expectedRevision: 2 });
+  await page.getByRole("button", { name: "Edit WHITE box" }).click();
+  await page.getByLabel("Outer length", { exact: true }).fill("7.9");
+  await page.getByRole("button", { name: "Save Changes" }).click();
+  // Match the visible description, not Radix's longer live-region announcement.
+  await expect(page.getByText("Enter all three outer dimensions, each at least as large as its inner dimension.", { exact: true })).toBeVisible();
+  expect(state.writes).toHaveLength(2);
   expect(state.errors).toEqual([]);
 });
 

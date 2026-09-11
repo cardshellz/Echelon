@@ -1,5 +1,6 @@
 import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
+import { boxDimensionMmSchema, databaseMillimetersSchema } from "@shared/shipping/dimensions";
 import { pool as defaultPool } from "../../../db";
 import {
   boxBrandingSchema,
@@ -31,17 +32,18 @@ const conflict = () =>
     "SHIPPING_CONFIG_CHANGED",
     "Configuration changed. Reload before saving.",
   );
+const databaseBoxDimension = databaseMillimetersSchema.pipe(boxDimensionMmSchema);
 const boxSchema = z.object({
   id: z.number().int().positive(),
   code: z.string(),
   name: z.string(),
   kind: z.enum(["box", "mailer", "envelope"]),
-  lengthMm: z.number().int().positive(),
-  widthMm: z.number().int().positive(),
-  heightMm: z.number().int().positive(),
-  outerLengthMm: z.number().int().positive().nullable(),
-  outerWidthMm: z.number().int().positive().nullable(),
-  outerHeightMm: z.number().int().positive().nullable(),
+  lengthMm: databaseBoxDimension,
+  widthMm: databaseBoxDimension,
+  heightMm: databaseBoxDimension,
+  outerLengthMm: databaseBoxDimension.nullable(),
+  outerWidthMm: databaseBoxDimension.nullable(),
+  outerHeightMm: databaseBoxDimension.nullable(),
   tareWeightGrams: z.number().int().nonnegative(),
   maxWeightGrams: z.number().int().positive().nullable(),
   costCents: z.number().int().nonnegative(),

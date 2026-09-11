@@ -24,6 +24,8 @@ import { InventoryPublicationOutboxService } from "../../application/inventory-p
 import { InventoryPublicationTransportRegistry } from "../../application/inventory-publication-transport";
 import { PostgresQuantityPublicationAdmission } from "../../infrastructure/quantity-publication-admission.repository";
 import { PostgresInventoryOpeningReservationRepository } from "../../../inventory/infrastructure/inventory-opening-reservation.repository";
+import { PostgresInventoryOpeningCaptureRepository } from "../../infrastructure/inventory-opening-capture.repository";
+import { runOpeningCapture } from "../../application/inventory-opening-capture.worker";
 
 vi.mock("../../../../db", () => ({ pool: {} }));
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
@@ -69,6 +71,51 @@ dbDescribe.sequential("verified opening persistence with real PostgreSQL admissi
     service = new InventoryCutoverOpeningService(store, { now: () => NOW });
   }, 30_000);
   afterAll(async () => { await database?.close(); });
+
+  it("captures real opening evidence through the queue without creating verification or changing stock", async () => {
+    await pool.query(readFileSync(resolve("migrations/245_inventory_opening_capture_jobs.sql"),"utf8"));
+    const jobs = new PostgresInventoryOpeningCaptureRepository(pool);
+    await jobs.heartbeat();
+    const before = (await pool.query("SELECT * FROM inventory.inventory_levels ORDER BY id")).rows;
+    const queued = await jobs.enqueue("opening-test-operator", "d907b4ae-9f2e-4ca6-9d91-36603a350c46");
+    expect(await runOpeningCapture(jobs, { capture: async () => store.capture(NOW) }, () => undefined)).toBe(true);
+    const done = await jobs.status("opening-test-operator", queued.id);
+    expect(done.state).toBe("complete");
+    const parts: string[] = [];
+    for (let index = 0; index < done.chunkCount; index++) parts.push((await jobs.chunk("opening-test-operator",queued.id,index)).text);
+    expect(JSON.parse(parts.join(""))).toEqual(await store.capture(NOW));
+    expect((await pool.query("SELECT * FROM inventory.inventory_levels ORDER BY id")).rows).toEqual(before);
+    expect((await pool.query("SELECT count(*) FROM inventory.availability_cutover_opening_snapshots")).rows[0].count).toBe("0");
+  });
+
+  it("keeps one read-only snapshot across journal cursor batches while orders change", async () => {
+    await pool.query(`INSERT INTO inventory.inventory_transactions(order_id,order_item_id,product_variant_id,to_location_id,
+      transaction_type,variant_qty_delta,reserved_qty_delta,source_state)
+      SELECT 1,11,101,100,'reserve',0,0,'on_hand' FROM generate_series(1,1001)`);
+    const client = await pool.connect();
+    let changed = false;
+    try {
+      await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+      // Instrument only the client boundary, not the capture/planning code. The
+      // separate connection's committed update occurs between FETCH batches.
+      const query = client.query.bind(client);
+      const observed = { query: async (sql: string, values?: unknown[]) => {
+        const result = await query(sql,values);
+        if (!changed && sql.startsWith("FETCH")) {
+          changed = true;
+          await pool.query("UPDATE wms.orders SET order_number='#CHANGED-DURING-CAPTURE' WHERE id=1");
+        }
+        return result;
+      } } as unknown as PoolClient;
+      const evidence = await new PostgresInventoryCutoverReconstructionRepository().capture(observed);
+      expect(changed).toBe(true);
+      expect(evidence.journals.reduce((total,row)=>total+Number(row.journalCount),0)).toBe(1003);
+      expect((await client.query("SELECT order_number FROM wms.orders WHERE id=1")).rows[0].order_number).toBe('#OPENING-1');
+      await client.query("COMMIT");
+      expect((await pool.query("SELECT order_number FROM wms.orders WHERE id=1")).rows[0].order_number).toBe('#CHANGED-DURING-CAPTURE');
+    } catch(error) { await client.query("ROLLBACK"); throw error; }
+    finally { client.release(); }
+  });
 
   async function request(key = "opening-1") {
     const source = await service.capture("operator");

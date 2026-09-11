@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { boxDimensionMmSchema } from "./dimensions";
 
 const id = z.number().int().positive().max(2_147_483_647);
 export const boxBrandingSchema = z.enum([
@@ -105,12 +106,12 @@ export const saveCatalogBoxSchema = z
     code: z.string().trim().min(1).max(80),
     name: z.string().trim().min(1).max(200),
     kind: z.enum(["box", "mailer", "envelope"]),
-    lengthMm: id,
-    widthMm: id,
-    heightMm: id,
-    outerLengthMm: id.nullable().default(null),
-    outerWidthMm: id.nullable().default(null),
-    outerHeightMm: id.nullable().default(null),
+    lengthMm: boxDimensionMmSchema,
+    widthMm: boxDimensionMmSchema,
+    heightMm: boxDimensionMmSchema,
+    outerLengthMm: boxDimensionMmSchema.nullable().default(null),
+    outerWidthMm: boxDimensionMmSchema.nullable().default(null),
+    outerHeightMm: boxDimensionMmSchema.nullable().default(null),
     tareWeightGrams: z.number().int().nonnegative().max(2_147_483_647),
     maxWeightGrams: id.nullable().default(null),
     costCents: z.number().int().nonnegative().max(2_147_483_647),
