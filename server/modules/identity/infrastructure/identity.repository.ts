@@ -57,7 +57,10 @@ export async function getUserPermissions(userId: string, tx: Tx = db): Promise<s
   const userRoles = await tx
     .select({ roleId: authUserRoles.roleId })
     .from(authUserRoles)
-    .where(eq(authUserRoles.userId, userId));
+    .innerJoin(users, eq(users.id, authUserRoles.userId))
+    // A saved session can outlive account deactivation. Resolve activity from
+    // the current account row whenever permissions are requested.
+    .where(and(eq(authUserRoles.userId, userId), eq(users.active, 1)));
   
   if (userRoles.length === 0) return [];
   

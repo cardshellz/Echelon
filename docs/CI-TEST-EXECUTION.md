@@ -36,10 +36,15 @@ paths, and missing test files. It drops only a generated database whose creation
 it confirmed; setup, execution, and cleanup failures fail the shard. Do not point
 these tests at an application database.
 
-The procurement acceptance repair adds canonical cost-report reads and shipment
-purchase-order references, bringing the current inventory to 72 files (nine per
-shard). The coverage guard retains the original 70-file digest and asserts both
-additions, so the integration does not silently drop existing coverage.
+The procurement acceptance repairs add canonical cost-report reads and shipment
+purchase-order references. Controlled acceptance also adds three persisted suites:
+planning/RFQ conversion, the RFQ-to-receiving-to-sold-COGS cost chain, and AP payment
+controls. With the background opening-capture and OMS identity suites merged from
+main, the inventory is now 77 files (10/10/10/10/10/9/9/9 across the eight shards).
+The coverage guard retains the original 70-file digest and asserts all five
+additions, so the integration does not silently drop existing coverage. These
+service/SQL checks use synthetic records and do not certify live provider behavior
+or operator acceptance; see `PROCUREMENT-CONTROLLED-ACCEPTANCE-2026-09-10.md`.
 
 Add new PostgreSQL CI suites to the manifest and update its coverage contract with
 an explicit explanation. Do not add standalone serial commands back to the workflow.

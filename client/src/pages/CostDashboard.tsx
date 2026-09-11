@@ -58,6 +58,12 @@ import {
 } from "@shared/inventory/cost-report-read";
 import { costReportErrorMessage, readCostReport } from "@/lib/cost-report-read";
 import {
+  OrderCOGSResponseError,
+  parseOrderCOGSReport,
+  unsupportedOrderCOGSCurrencySchema,
+  type OrderCOGSResult,
+} from "@shared/inventory/order-cogs-report";
+import {
   formatDashboardCents,
   formatDashboardMills,
   formatDashboardLotCost,
@@ -802,26 +808,67 @@ function SourceBadge({ lot }: { lot: any }) {
 // SECTION 3: ORDER COGS
 // ═══════════════════════════════════════════════════════════════════════
 
+class OrderCOGSRequestError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: "ORDER_COGS_REQUEST_FAILED" | "ORDER_COGS_CURRENCY_UNSUPPORTED" = "ORDER_COGS_REQUEST_FAILED",
+  ) {
+    super(code === "ORDER_COGS_CURRENCY_UNSUPPORTED"
+      ? "Order margins require a recorded exchange rate to compare this order's currency with USD inventory costs."
+      : "Could not load order costs. Retry to load the recorded totals.");
+    this.name = "OrderCOGSRequestError";
+  }
+}
+
+async function readOrderCOGS(orderNumber: string, signal: AbortSignal): Promise<OrderCOGSResult | null> {
+  const response = await fetch(`/api/cogs/order?orderNumber=${encodeURIComponent(orderNumber)}`, {
+    credentials: "include", signal,
+  });
+  if (response.status === 404) return null;
+  if (!response.ok && response.status !== 422) throw new OrderCOGSRequestError(response.status);
+
+  let value: unknown;
+  try {
+    value = await response.json();
+  } catch {
+    // Preserve the HTTP failure classification when an error body is not JSON.
+    // Successful responses must be valid JSON before any financial data renders.
+    if (!response.ok) throw new OrderCOGSRequestError(response.status);
+    throw new OrderCOGSResponseError(["response"]);
+  }
+  if (!response.ok) {
+    const code = unsupportedOrderCOGSCurrencySchema.safeParse(value).success
+      ? "ORDER_COGS_CURRENCY_UNSUPPORTED" : "ORDER_COGS_REQUEST_FAILED";
+    throw new OrderCOGSRequestError(response.status, code);
+  }
+  return parseOrderCOGSReport(value);
+}
+
+function orderCOGSErrorMessage(error: unknown): string {
+  return error instanceof OrderCOGSRequestError || error instanceof OrderCOGSResponseError
+    ? error.message : "Could not load order costs. Check your connection and retry.";
+}
+
 function OrderCOGSSection() {
   const [orderNumber, setOrderNumber] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
   const [expandedItems, setExpandedItems] = useState<Set<number>>(new Set());
 
-  const { data: cogsData, isLoading, error } = useQuery<any>({
+  const { data: cogsData, isLoading, isFetching, error, refetch } = useQuery<OrderCOGSResult | null>({
     queryKey: ["/api/cogs/order", { orderNumber: searchTerm }],
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       if (!searchTerm) return null;
-      const res = await fetch(`/api/cogs/order?orderNumber=${encodeURIComponent(searchTerm)}`);
-      if (res.status === 404) return null;
-      if (!res.ok) throw new Error("Failed to fetch");
-      return res.json();
+      return readOrderCOGS(searchTerm, signal);
     },
     enabled: !!searchTerm,
+    retry: false,
   });
 
   const handleSearch = () => {
     const cleaned = orderNumber.trim().replace(/^#/, "");
-    if (cleaned) setSearchTerm(cleaned);
+    if (!cleaned) return;
+    if (cleaned === searchTerm) void refetch();
+    else setSearchTerm(cleaned);
   };
 
   const toggleItem = (itemId: number) => {
@@ -838,7 +885,9 @@ function OrderCOGSSection() {
       <Card>
         <CardHeader>
           <CardTitle className="text-lg">Order COGS Lookup</CardTitle>
-          <CardDescription>Search by order number to see cost of goods sold breakdown</CardDescription>
+          <CardDescription>
+            Search by order number to see costs recorded so far. Outstanding or unpicked fulfillment may add costs.
+          </CardDescription>
         </CardHeader>
         <CardContent>
           <div className="flex gap-2">
@@ -861,7 +910,19 @@ function OrderCOGSSection() {
 
       {isLoading && <LoadingSpinner />}
 
-      {searchTerm && !isLoading && !cogsData && (
+      {error && (
+        <Card>
+          <CardContent role="alert" className="space-y-3 py-8 text-center">
+            <p className="text-destructive">{orderCOGSErrorMessage(error)}</p>
+            <Button variant="outline" onClick={() => void refetch()} disabled={isFetching} aria-label="Retry order costs">
+              <RefreshCw className={`mr-2 h-4 w-4 ${isFetching ? "animate-spin" : ""}`} aria-hidden="true" />
+              {isFetching ? "Loading…" : "Retry"}
+            </Button>
+          </CardContent>
+        </Card>
+      )}
+
+      {searchTerm && !isLoading && !error && !cogsData && (
         <Card>
           <CardContent className="py-8 text-center text-muted-foreground">
             No order found for "{searchTerm}". Try a different order number.
@@ -869,7 +930,7 @@ function OrderCOGSSection() {
         </Card>
       )}
 
-      {cogsData && (
+      {cogsData && !error && (
         <div className="space-y-4">
           {/* Order Summary */}
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -908,7 +969,7 @@ function OrderCOGSSection() {
             </CardHeader>
             <CardContent>
               <div className="space-y-2">
-                {cogsData.lineItems.map((item: any) => (
+                {cogsData.lineItems.map((item) => (
                   <div key={item.orderItemId} className="border rounded-lg">
                     <button
                       onClick={() => toggleItem(item.orderItemId)}
@@ -949,12 +1010,12 @@ function OrderCOGSSection() {
                             </TableRow>
                           </TableHeader>
                           <TableBody>
-                            {item.lotBreakdown.map((lb: any, i: number) => (
+                            {item.lotBreakdown.map((lb, i) => (
                               <TableRow key={i}>
                                 <TableCell className="font-mono text-xs">{lb.lotNumber}</TableCell>
                                 <TableCell className="text-right font-mono text-xs">{lb.qty}</TableCell>
-                                <TableCell className="text-right font-mono text-xs">{formatDashboardCents(lb.unitCostCents)}</TableCell>
-                                <TableCell className="text-right font-mono text-xs">{formatDashboardCents(lb.totalCostCents)}</TableCell>
+                                <TableCell className="text-right font-mono text-xs">{lb.unitCostMills === undefined ? formatDashboardCents(lb.unitCostCents) : formatDashboardMills(lb.unitCostMills)}</TableCell>
+                                <TableCell className="text-right font-mono text-xs">{lb.totalCostMills === undefined ? formatDashboardCents(lb.totalCostCents) : formatDashboardMills(lb.totalCostMills)}</TableCell>
                               </TableRow>
                             ))}
                           </TableBody>

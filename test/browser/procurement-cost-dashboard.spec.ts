@@ -79,6 +79,142 @@ test("order revenue, sold cost, loss and consumed lot detail use the same cent s
   expect(failures).toEqual([]);
 });
 
+test("a failed order cost read is not reported as a missing order", async ({ page }) => {
+  const failures = await setup(page);
+  let failed = true;
+  await page.route("**/api/cogs/order?*", (route) => failed
+    ? route.fulfill({ status: 500, json: { error: "Failed to get order COGS" } })
+    : route.fulfill({ json: orderCogs }));
+  await page.getByRole("tab", { name: "Order COGS", exact: true }).click();
+  await page.getByPlaceholder("Enter order number (e.g., 1234 or #CS-1234)").fill("TEST-COST-7");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("Could not load order costs");
+  await expect(page.getByText('No order found for "TEST-COST-7". Try a different order number.')).toHaveCount(0);
+  await expect(page.getByText("Gross Margin", { exact: true })).toHaveCount(0);
+  failed = false;
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(page.getByText("$200.00", { exact: true })).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  expect(failures).toEqual([]);
+});
+
+for (const malformed of ["incomplete response", "invalid JSON"] as const) {
+  test(`order costs reject ${malformed} and recover through explicit retry`, async ({ page }) => {
+    const failures = await setup(page);
+    const pageErrors: string[] = [];
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    let failed = true;
+    let attempts = 0;
+    await page.route("**/api/cogs/order?*", (route) => {
+      attempts++;
+      if (!failed) return route.fulfill({ json: orderCogs });
+      return malformed === "incomplete response"
+        ? route.fulfill({ json: { ...orderCogs, lineItems: null } })
+        : route.fulfill({ status: 200, contentType: "application/json", body: "{incomplete" });
+    });
+    await page.getByRole("tab", { name: "Order COGS", exact: true }).click();
+    await expect(page.getByText(/costs recorded so far\. Outstanding or unpicked fulfillment may add costs/)).toBeVisible();
+    await page.getByPlaceholder("Enter order number (e.g., 1234 or #CS-1234)").fill("TEST-COST-7");
+    await page.getByRole("button", { name: "Search", exact: true }).click();
+    await expect(page.getByRole("alert")).toContainText("The order cost response is incomplete or invalid");
+    await expect(page.getByText('No order found for "TEST-COST-7". Try a different order number.')).toHaveCount(0);
+    await expect(page.getByText("Gross Margin", { exact: true })).toHaveCount(0);
+    expect(attempts).toBe(1);
+    failed = false;
+    await page.getByRole("button", { name: "Retry order costs", exact: true }).click();
+    await expect(page.getByText("$200.00", { exact: true })).toBeVisible();
+    await expect(page.getByRole("alert")).toHaveCount(0);
+    expect(attempts).toBe(2);
+    expect(pageErrors).toEqual([]);
+    expect(failures).toEqual([]);
+  });
+}
+
+test("unsupported order currency requests recorded exchange evidence without rendering server text or invented conversion", async ({ page }) => {
+  const failures = await setup(page);
+  let unsupported = true;
+  await page.route("**/api/cogs/order?*", (route) => unsupported
+    ? route.fulfill({ status: 422, json: { code: "ORDER_COGS_CURRENCY_UNSUPPORTED", currency: "PRIVATE-CURRENCY",
+      error: "PRIVATE-SERVER-TEXT: assume an exchange rate of 1" } })
+    : route.fulfill({ json: orderCogs }));
+  await page.getByRole("tab", { name: "Order COGS", exact: true }).click();
+  await page.getByPlaceholder("Enter order number (e.g., 1234 or #CS-1234)").fill("TEST-COST-7");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("Order margins require a recorded exchange rate");
+  await expect(page.getByRole("alert")).toContainText("USD inventory costs");
+  await expect(page.getByText(/PRIVATE-SERVER-TEXT|PRIVATE-CURRENCY/)).toHaveCount(0);
+  await expect(page.getByText("Gross Margin", { exact: true })).toHaveCount(0);
+  await expect(page.getByText('No order found for "TEST-COST-7". Try a different order number.')).toHaveCount(0);
+  unsupported = false;
+  await page.getByRole("button", { name: "Retry order costs", exact: true }).click();
+  await expect(page.getByText("$200.00", { exact: true })).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  expect(failures).toEqual([]);
+});
+
+test("a malformed refresh hides previously successful order totals until a validated response recovers", async ({ page }) => {
+  const failures = await setup(page);
+  let malformed = false;
+  await page.route("**/api/cogs/order?*", (route) => route.fulfill({
+    json: malformed ? { ...orderCogs, marginPercent: null } : orderCogs,
+  }));
+  await page.getByRole("tab", { name: "Order COGS", exact: true }).click();
+  await page.getByPlaceholder("Enter order number (e.g., 1234 or #CS-1234)").fill("TEST-COST-7");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(page.getByText("$200.00", { exact: true })).toBeVisible();
+  malformed = true;
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("The order cost response is incomplete or invalid");
+  await expect(page.getByText("Gross Margin", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("$200.00", { exact: true })).toHaveCount(0);
+  malformed = false;
+  await page.getByRole("button", { name: "Retry order costs", exact: true }).click();
+  await expect(page.getByText("$200.00", { exact: true })).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  expect(failures).toEqual([]);
+});
+
+test("recorded order zero and a confirmed missing order remain distinct from failed reads", async ({ page }) => {
+  const failures = await setup(page);
+  await page.route("**/api/cogs/order?*", (route) => new URL(route.request().url()).searchParams.get("orderNumber") === "MISSING"
+    ? route.fulfill({ status: 404, json: { error: "Order not found" } })
+    : route.fulfill({ json: { ...orderCogs, totalRevenueCents: 0, totalCogsCents: 0,
+      totalCogsMills: "0", grossMarginCents: 0, marginPercent: 0, lineItems: [] } }));
+  await page.getByRole("tab", { name: "Order COGS", exact: true }).click();
+  const input = page.getByPlaceholder("Enter order number (e.g., 1234 or #CS-1234)");
+  await input.fill("TEST-COST-7");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(page.getByText("$0.00", { exact: true })).toHaveCount(3);
+  await expect(page.getByText("No COGS data recorded for this order yet.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  await input.fill("MISSING");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(page.getByText('No order found for "MISSING". Try a different order number.')).toBeVisible();
+  await expect(page.getByText("Gross Margin", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  expect(failures).toEqual([]);
+});
+
+test("order lot detail preserves exact subcent costs while summary cents round after aggregation", async ({ page }) => {
+  const failures = await setup(page);
+  await page.route("**/api/cogs/order?*", (route) => route.fulfill({ json: {
+    ...orderCogs, totalRevenueCents: 1000, totalCogsCents: 1, totalCogsMills: "98", grossMarginCents: 999, marginPercent: 99.9,
+    lineItems: [8, 10].map((id) => ({ ...orderCogs.lineItems[0], orderItemId: id, qty: 1, revenueCents: 500,
+      cogsCents: 0, cogsMills: "49", marginCents: 500, marginPercent: 100,
+      lotBreakdown: [{ ...orderCogs.lineItems[0].lotBreakdown[0], qty: 1, unitCostCents: 0,
+        totalCostCents: 0, unitCostMills: "49", totalCostMills: "49" }] })),
+  } }));
+  await page.getByRole("tab", { name: "Order COGS", exact: true }).click();
+  await page.getByPlaceholder("Enter order number (e.g., 1234 or #CS-1234)").fill("TEST-COST-7");
+  await page.getByRole("button", { name: "Search", exact: true }).click();
+  await expect(page.getByText("$0.01", { exact: true })).toBeVisible();
+  await expect(page.getByText("$9.99", { exact: true })).toBeVisible();
+  await page.getByRole("button").filter({ hasText: "COGS: $0.00" }).first().click();
+  await expect(page.getByRole("row").filter({ hasText: "TEST-LOT-9" }).getByRole("cell", { name: "$0.0049", exact: true })).toHaveCount(2);
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  expect(failures).toEqual([]);
+});
+
 test("explorer preserves subcent mills, legacy cents, recorded zero and exact extended value", async ({ page }) => {
   const failures = await setup(page);
   await page.getByRole("tab", { name: "Explorer", exact: true }).click();

@@ -13,6 +13,7 @@ import type { CostComponent } from "@shared/procurement/cost-source-contracts";
  */
 
 import { eq, and, sql, asc, gt, desc, isNull, isNotNull } from "drizzle-orm";
+import type { PgTransactionConfig } from "drizzle-orm/pg-core";
 import { millsToCents, centsToMills } from "@shared/utils/money";
 import {
   inventoryLots,
@@ -25,6 +26,8 @@ import { calculateUnreservedLotOnHand } from "./domain/inventory.domain";
 import type { InventoryLot } from "@shared/schema";
 import { assertLegacyQuantityImportAllowed } from "./application/legacy-quantity-import";
 import { parseCostLotsReport, parseInventoryValuationReport } from "@shared/inventory/cost-report-read";
+import { buildOrderCOGSReport, type OrderCOGSResult } from "./domain/order-cogs-read";
+export type { OrderCOGSResult, OrderLineCOGS } from "./domain/order-cogs-read";
 
 /**
  * Parse one lot-cost CSV row. Pure + exported for unit testing.
@@ -54,7 +57,7 @@ type DrizzleDb = {
   update: (...args: any[]) => any;
   delete: (...args: any[]) => any;
   execute: (query: any) => Promise<any>;
-  transaction: <T>(fn: (tx: any) => Promise<T>) => Promise<T>;
+  transaction: <T>(fn: (tx: any) => Promise<T>, config?: PgTransactionConfig) => Promise<T>;
 };
 
 // ─── Types ──────────────────────────────────────────────────────────
@@ -65,34 +68,6 @@ export interface CostLotConsumption {
   qty: number;
   unitCostCents: number;
   totalCostCents: number;
-}
-
-export interface OrderCOGSResult {
-  orderId: number;
-  orderNumber: string;
-  totalRevenueCents: number;
-  totalCogsCents: number;
-  grossMarginCents: number;
-  marginPercent: number;
-  lineItems: OrderLineCOGS[];
-}
-
-export interface OrderLineCOGS {
-  orderItemId: number;
-  sku: string;
-  productName: string;
-  qty: number;
-  revenueCents: number;
-  cogsCents: number;
-  marginCents: number;
-  marginPercent: number;
-  lotBreakdown: Array<{
-    lotId: number;
-    lotNumber: string;
-    qty: number;
-    unitCostCents: number;
-    totalCostCents: number;
-  }>;
 }
 
 export interface InventoryValuationResult {
@@ -717,9 +692,18 @@ export class COGSService {
   // ---------------------------------------------------------------------------
 
   async getOrderCOGS(orderId: number): Promise<OrderCOGSResult | null> {
+    costInteger(orderId, "orderId", 1);
+    // Financial snapshots and cost rows can change while this report is read.
+    // One repeatable-read snapshot avoids combining old lines with new COGS.
+    return this.db.transaction((tx) => this.readOrderCOGS(orderId, tx), {
+      isolationLevel: "repeatable read", accessMode: "read only",
+    });
+  }
+
+  private async readOrderCOGS(orderId: number, reader: Pick<DrizzleDb, "select" | "execute">): Promise<OrderCOGSResult | null> {
     // Get order details
-    const [order] = await this.db
-      .select()
+    const [order] = await reader
+      .select({ id: orders.id, orderNumber: orders.orderNumber, totalCents: orders.totalCents, currency: orders.currency })
       .from(orders)
       .where(eq(orders.id, orderId))
       .limit(1);
@@ -727,72 +711,28 @@ export class COGSService {
     if (!order) return null;
 
     // Get order items
-    const items = await this.db
-      .select()
+    const items = await reader
+      .select({ id: orderItems.id, sku: orderItems.sku, name: orderItems.name,
+        quantity: orderItems.quantity, totalPriceCents: orderItems.totalPriceCents })
       .from(orderItems)
-      .where(eq(orderItems.orderId, orderId));
+      .where(eq(orderItems.orderId, orderId))
+      .orderBy(asc(orderItems.id));
 
     // Get COGS entries from the live ledger (oms.order_item_costs, written at
     // pick time by pickFromLots). The legacy inventory.order_line_costs ledger
     // is retired — see recordShipmentCOGS note. Alias columns to the legacy
     // shape (lot_id, qty_consumed) so downstream mapping is unchanged.
-    const cogsResult = await this.db.execute(sql`
-      SELECT olc.order_id, olc.order_item_id, olc.product_variant_id,
+    const cogsResult = await reader.execute(sql`
+      SELECT olc.order_id, olc.order_item_id,
              olc.inventory_lot_id AS lot_id, olc.qty AS qty_consumed,
-             olc.unit_cost_cents, olc.total_cost_cents,
-             pv.sku, p.name as product_name, il.lot_number
+             olc.unit_cost_cents, olc.total_cost_cents, olc.unit_cost_mills, olc.total_cost_mills,
+             il.lot_number
       FROM oms.order_item_costs olc
-      LEFT JOIN catalog.product_variants pv ON pv.id = olc.product_variant_id
-      LEFT JOIN catalog.products p ON p.id = pv.product_id
       LEFT JOIN inventory.inventory_lots il ON il.id = olc.inventory_lot_id
       WHERE olc.order_id = ${orderId}
       ORDER BY olc.id ASC
     `);
-    const cogsRows = cogsResult.rows || [];
-
-    let totalCogsCents = 0;
-    const lineItems: OrderLineCOGS[] = [];
-
-    for (const item of items) {
-      const itemCogs = cogsRows.filter((r: any) =>
-        r.order_item_id === item.id || r.product_variant_id === item.productVariantId,
-      );
-      const cogsCents = itemCogs.reduce((sum: number, r: any) => sum + Number(r.total_cost_cents || 0), 0);
-      const revenueCents = Number(item.priceCents || 0) * (item.quantity || 1);
-      totalCogsCents += cogsCents;
-
-      lineItems.push({
-        orderItemId: item.id,
-        sku: (item as any).sku || '',
-        productName: itemCogs[0]?.product_name || '',
-        qty: item.quantity || 1,
-        revenueCents,
-        cogsCents,
-        marginCents: revenueCents - cogsCents,
-        marginPercent: revenueCents > 0 ? Math.round(((revenueCents - cogsCents) / revenueCents) * 10000) / 100 : 0,
-        lotBreakdown: itemCogs.map((r: any) => ({
-          lotId: r.lot_id,
-          lotNumber: r.lot_number || '',
-          qty: r.qty_consumed,
-          unitCostCents: Number(r.unit_cost_cents),
-          totalCostCents: Number(r.total_cost_cents),
-        })),
-      });
-    }
-
-    const totalRevenueCents = Number(order.totalAmount || 0) * 100;
-
-    return {
-      orderId,
-      orderNumber: order.orderNumber,
-      totalRevenueCents,
-      totalCogsCents,
-      grossMarginCents: totalRevenueCents - totalCogsCents,
-      marginPercent: totalRevenueCents > 0
-        ? Math.round(((totalRevenueCents - totalCogsCents) / totalRevenueCents) * 10000) / 100
-        : 0,
-      lineItems,
-    };
+    return buildOrderCOGSReport({ order, items, costs: cogsResult.rows });
   }
 
   // ---------------------------------------------------------------------------

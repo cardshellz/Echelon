@@ -14,6 +14,7 @@ import { projectInventoryLevels } from "./application/inventory-levels.query";
 import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
 import { requireLegacyQuantityImport, sendInventoryQuantityError, validateInventoryCommandKey } from "./interfaces/quantity-command.middleware";
 import { readInventoryQuantityCapabilities } from "./infrastructure/quantity-authority.query";
+import { OrderCOGSCurrencyError } from "./domain/order-cogs-read";
 
 export function registerInventoryRoutes(app: Express) {
   app.get("/api/inventory/quantity-capabilities", requireAuth, async (_req, res, next) => {
@@ -2629,8 +2630,8 @@ export function registerInventoryRoutes(app: Express) {
     try {
       const { cogs } = req.app.locals.services;
       const orderNumber = String(req.query.orderNumber || "").trim();
-      if (!orderNumber) {
-        return res.status(400).json({ error: "orderNumber query parameter required" });
+      if (!orderNumber || orderNumber.length > 50) {
+        return res.status(400).json({ error: "orderNumber must contain 1 to 50 characters" });
       }
       const result = await cogs.getOrderCOGSByNumber(orderNumber);
       if (!result) {
@@ -2639,6 +2640,9 @@ export function registerInventoryRoutes(app: Express) {
       res.json(result);
     } catch (error: any) {
       console.error("Error getting order COGS:", error);
+      if (error instanceof OrderCOGSCurrencyError) {
+        return res.status(422).json({ error: error.message, code: error.code, currency: error.currency });
+      }
       res.status(500).json({ error: "Failed to get order COGS" });
     }
   });
@@ -2647,7 +2651,10 @@ export function registerInventoryRoutes(app: Express) {
   app.get("/api/cogs/order/:orderId", requirePermission("inventory", "view"), async (req, res) => {
     try {
       const { cogs } = req.app.locals.services;
-      const orderId = parseInt(req.params.orderId);
+      const orderId = Number(req.params.orderId);
+      if (!/^[1-9]\d*$/.test(req.params.orderId) || !Number.isSafeInteger(orderId)) {
+        return res.status(400).json({ error: "orderId must be a positive safe integer" });
+      }
       const result = await cogs.getOrderCOGS(orderId);
       if (!result) {
         return res.status(404).json({ error: "Order not found" });
@@ -2655,6 +2662,9 @@ export function registerInventoryRoutes(app: Express) {
       res.json(result);
     } catch (error: any) {
       console.error("Error getting order COGS:", error);
+      if (error instanceof OrderCOGSCurrencyError) {
+        return res.status(422).json({ error: error.message, code: error.code, currency: error.currency });
+      }
       res.status(500).json({ error: "Failed to get order COGS" });
     }
   });
