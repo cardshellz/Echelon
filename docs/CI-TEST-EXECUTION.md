@@ -39,7 +39,8 @@ these tests at an application database.
 The procurement acceptance repairs add canonical cost-report reads and shipment
 purchase-order references. Controlled acceptance also adds three persisted suites:
 planning/RFQ conversion, the RFQ-to-receiving-to-sold-COGS cost chain, and AP payment
-controls. The inventory is now 75 files (10/10/10/9/9/9/9/9 across the eight shards).
+controls. With the background opening-capture suite merged from main, the inventory
+is now 76 files (10/10/10/10/9/9/9/9 across the eight shards).
 The coverage guard retains the original 70-file digest and asserts all five
 additions, so the integration does not silently drop existing coverage. These
 service/SQL checks use synthetic records and do not certify live provider behavior

@@ -53,20 +53,21 @@ function runnerFixture() {
 }
 
 describe("PostgreSQL CI coverage and isolation", () => {
-  it("preserves all 70 prior files plus two read regressions and three controlled procurement suites", () => {
-    const addedProcurementSuites = [
+  it("preserves all 70 prior files plus two read regressions and three controlled procurement suites plus background capture", () => {
+    const addedSuites = [
+      "server/modules/inventory-planning/__tests__/integration/inventory-opening-capture.integration.test.ts",
       "server/modules/inventory/__tests__/integration/cost-report-reads.integration.test.ts",
       "server/modules/procurement/__tests__/integration/shipment-purchase-orders.integration.test.ts",
       "server/modules/procurement/__tests__/integration/procurement-rfq-controlled-acceptance.integration.test.ts",
       "server/modules/procurement/__tests__/integration/procurement-flow-cost-controlled-acceptance.integration.test.ts",
       "server/modules/procurement/__tests__/integration/procurement-payment-controlled-acceptance.integration.test.ts",
     ];
-    expect(POSTGRES_TEST_FILES).toHaveLength(75);
-    expect(new Set(POSTGRES_TEST_FILES).size).toBe(75);
-    expect(POSTGRES_TEST_FILES).toEqual(expect.arrayContaining(addedProcurementSuites));
-    // Preserve the original inventory digest as well as the five additions;
+    expect(POSTGRES_TEST_FILES).toHaveLength(76);
+    expect(new Set(POSTGRES_TEST_FILES).size).toBe(76);
+    expect(POSTGRES_TEST_FILES).toEqual(expect.arrayContaining(addedSuites));
+    // Preserve the original inventory digest as well as the six additions;
     // adding procurement coverage must not silently remove an older suite.
-    const priorFiles = POSTGRES_TEST_FILES.filter((file) => !addedProcurementSuites.includes(file));
+    const priorFiles = POSTGRES_TEST_FILES.filter((file) => !addedSuites.includes(file));
     expect(priorFiles).toHaveLength(70);
     const digest = createHash("sha256").update([...priorFiles].sort().join("\n")).digest("hex");
     expect(digest).toBe("8d6c96c5651ea0352e914985eb98ce15267503b535b50d63dec5a0780a80868a");
@@ -75,7 +76,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
 
   it("assigns every file exactly once across 8 deterministic balanced shards", () => {
     const shards = Array.from({ length: POSTGRES_SHARD_COUNT }, (_, index) => selectPostgresShardFiles({ index: index + 1, count: 8 }));
-    expect(shards.map((files) => files.length)).toEqual([10, 10, 10, 9, 9, 9, 9, 9]);
+    expect(shards.map((files) => files.length)).toEqual([10, 10, 10, 10, 9, 9, 9, 9]);
     expect(shards.flat().sort()).toEqual([...POSTGRES_TEST_FILES].sort());
     expect(new Set(shards.flat()).size).toBe(POSTGRES_TEST_FILES.length);
     expect(selectPostgresShardFiles({ index: 1, count: 8 })).toEqual(shards[0]);
@@ -104,7 +105,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
         reports.push(args.at(-1)!);
       }
     }
-    expect(new Set(reports).size).toBe(75);
+    expect(new Set(reports).size).toBe(76);
     expect(() => buildPostgresVitestArgs({ index: 1, count: 8 }, POSTGRES_TEST_FILES[1])).toThrow();
     const source = readFileSync(resolve(POSTGRES_REPOSITORY_ROOT, "scripts/ci/postgres-tests.ts"), "utf8");
     expect(source).toContain("spawnSync(process.execPath, [...args]");

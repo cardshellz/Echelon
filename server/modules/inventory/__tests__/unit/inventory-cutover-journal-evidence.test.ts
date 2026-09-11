@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { aggregateCutoverJournalEvidence, type CutoverJournalRow, MAX_CUTOVER_JOURNAL_ROWS } from "../../domain/inventory-cutover-journal-evidence";
+import { aggregateCutoverJournalEvidence, CutoverJournalAccumulator, type CutoverJournalRow, MAX_CUTOVER_JOURNAL_ROWS } from "../../domain/inventory-cutover-journal-evidence";
 import { cutoverReconstructionJournalSchema } from "@shared/types/inventory-cutover-reconstruction";
 
 function row(overrides: Partial<CutoverJournalRow> = {}): CutoverJournalRow {
@@ -26,6 +26,14 @@ function sourceRow(overrides: Partial<CutoverJournalRow> = {}): CutoverJournalRo
 function issueCodes(input: CutoverJournalRow): string[] { return aggregateCutoverJournalEvidence([input])[0].issues!.map((issue) => issue.code); }
 
 describe("cutover exact foreign-key journal identity and unknown causes", () => {
+  it("produces identical groups and hashes across bounded batches and rejects boundary duplicates", () => {
+    const rows = Array.from({length:1001},(_,index)=>row({id:index+1, reservedQtyDelta:index%2?null:3}));
+    const accumulator = new CutoverJournalAccumulator();
+    for (const offset of [0,500,1000]) for (const item of rows.slice(offset,offset+500)) accumulator.add(item);
+    expect(accumulator.finish()).toEqual(aggregateCutoverJournalEvidence(rows));
+    const duplicate = new CutoverJournalAccumulator(); duplicate.add(rows[500]);
+    expect(()=>duplicate.add(rows[500])).toThrow(expect.objectContaining({code:"CUTOVER_JOURNAL_DUPLICATE_ID"}));
+  });
   it("completes only a NULL order through its directly recorded item, without mutation", () => {
     const input = row({ orderId: null }); const before = structuredClone(input);
     expect(aggregateCutoverJournalEvidence([input])[0]).toMatchObject({ orderId: 10, orderItemId: 20, reservedQty: "3",

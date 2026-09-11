@@ -10,6 +10,7 @@ import { CutoverHttpError, postInventoryPlanningCommand } from "./inventory-cuto
 import { createOpeningWorksheet, OPENING_DOCUMENT_LIMIT_BYTES, parseOpeningDocument, prepareOpeningSave,
   type OpeningAssessment, type OpeningSource, type OpeningVerification } from "./inventory-cutover-opening-document";
 import { evidencePage } from "./inventory-cutover-preflight-panel";
+import { fetchBackgroundOpeningSource } from "./inventory-opening-capture";
 
 type Props = { actorId: string | null; canActivate: boolean; onStateChanged(): void };
 const SOURCE_URL = "/api/inventory-planning/admin/cutover-opening/source";
@@ -38,11 +39,19 @@ export function InventoryCutoverOpeningPanel(props: Props) {
   const [inputError, setInputError] = useState<Error | null>(null);
   const [importing, setImporting] = useState(false);
   const [saved, setSaved] = useState<z.infer<typeof openingSavedSchema> | null>(null);
+  const [captureProgress, setCaptureProgress] = useState("");
+  const captureKey = useRef<string | null>(null);
   const attempt = useRef<z.infer<typeof saveOpeningRequestSchema> | null>(null);
   const enabled = props.canActivate && props.actorId !== null;
   const source = useQuery({ queryKey: [SOURCE_URL, props.actorId], enabled: false, retry: false, gcTime: 0,
     refetchOnMount: false, refetchOnWindowFocus: false, refetchOnReconnect: false,
-    queryFn: ({ signal }) => { if (!enabled) throw new Error("An authorized operator is required."); return fetchOpeningSource(signal); } });
+    queryFn: async ({ signal }) => {
+      if (!enabled) throw new Error("An authorized operator is required.");
+      captureKey.current ??= crypto.randomUUID();
+      const result = await fetchBackgroundOpeningSource(captureKey.current,setCaptureProgress,signal);
+      captureKey.current = null;
+      return result;
+    } });
   const usable = enabled && !source.isError && !source.isFetching && source.data?.runtimeAuthority === "legacy";
   const preview = useMutation({ mutationFn: async () => {
     if (!usable || !source.data || !verification || !confirmed) throw new Error("Capture source records and independently verify the complete document first.");
@@ -93,6 +102,11 @@ export function InventoryCutoverOpeningPanel(props: Props) {
       <Button variant="outline" disabled={busy || retained} onClick={() => {
         setVerification(null); setAssessment(null); setConfirmed(false); setSaved(null); setInputError(null); void source.refetch();
       }}>{source.isFetching ? "Capturing recorded data…" : "Capture current recorded data"}</Button>
+      {captureProgress && <p role="status" className="text-sm">{captureProgress}</p>}
+      {source.isError && <Button variant="outline" disabled={busy} onClick={() => {
+        captureKey.current = null; setCaptureProgress(""); setVerification(null); setAssessment(null);
+        setConfirmed(false); setSaved(null); setInputError(null); void source.refetch();
+      }}>Start a new capture after failure</Button>}
       {error && <p role="alert" className="text-sm text-destructive">{error.message}{source.isError && source.data ? " Previous source records below may be stale; they cannot authorize a new save." : ""}</p>}
       {source.data && <>
         <p className="text-sm">Recorded snapshot: {source.data.capturedAt} · {source.data.evidence.levels.length} stock positions · {source.data.evidence.lots.length} lots.

@@ -145,12 +145,23 @@ export function aggregateCutoverJournalEvidence(raw: unknown): Journal[] {
   // Sort lightweight references, then validate one row at a time. The pg result
   // already owns the raw objects; do not retain another fully parsed census.
   const rows = raw.map((value) => ({ id: z.object({ id }).parse(value).id, value })).sort((a, b) => a.id - b.id);
-  const seen = new Set<number>();
-  const groups = new Map<string, Group>();
-  for (const entry of rows) {
-    const row = cutoverJournalRowSchema.parse(entry.value);
-    if (seen.has(row.id)) throw new CutoverJournalEvidenceError("CUTOVER_JOURNAL_DUPLICATE_ID", "A journal identity appeared more than once in the census.");
-    seen.add(row.id);
+  const accumulator = new CutoverJournalAccumulator();
+  for (const entry of rows) accumulator.add(entry.value);
+  return accumulator.finish();
+}
+
+/** Ordered cursor batches retain only aggregate groups, never the full raw
+ * journal. Strict ordering catches duplicates across batch boundaries. */
+export class CutoverJournalAccumulator {
+  private readonly groups = new Map<string, Group>();
+  private lastId = 0;
+  private count = 0;
+  add(raw: unknown): void {
+    const row = cutoverJournalRowSchema.parse(raw);
+    if (++this.count > MAX_CUTOVER_JOURNAL_ROWS) throw new CutoverJournalEvidenceError("CUTOVER_JOURNAL_ROW_LIMIT_EXCEEDED", "Complete journal evidence exceeds its bounded census.");
+    if (row.id <= this.lastId) throw new CutoverJournalEvidenceError("CUTOVER_JOURNAL_DUPLICATE_ID", "Journal identities must be unique and ordered across every batch.");
+    this.lastId = row.id;
+    const groups = this.groups;
     const issues = custodyIssues(row);
     const owner = resolveOwner(row, issues);
     const locations = row.transactionType === "reserve_move"
@@ -184,8 +195,10 @@ export function aggregateCutoverJournalEvidence(raw: unknown): Journal[] {
       group.digest.update(canonicalJson({ ...row, resolvedOrderId: owner.orderId, resolvedOrderItemId: owner.orderItemId })).update("\n");
     }
   }
-  return [...groups.values()].map((group) => ({ ...group.journal, journalHash: group.digest.digest("hex"),
-    issues: [...group.issues.values()].sort((a, b) => a.code < b.code ? -1 : a.code > b.code ? 1 : 0) }))
-    .sort((a, b) => (a.orderId ?? 0) - (b.orderId ?? 0) || (a.orderItemId ?? 0) - (b.orderItemId ?? 0)
-      || (a.productVariantId ?? 0) - (b.productVariantId ?? 0) || (a.warehouseLocationId ?? 0) - (b.warehouseLocationId ?? 0));
+  finish(): Journal[] {
+    return [...this.groups.values()].map((group) => ({ ...group.journal, journalHash: group.digest.digest("hex"),
+      issues: [...group.issues.values()].sort((a, b) => a.code < b.code ? -1 : a.code > b.code ? 1 : 0) }))
+      .sort((a, b) => (a.orderId ?? 0) - (b.orderId ?? 0) || (a.orderItemId ?? 0) - (b.orderItemId ?? 0)
+        || (a.productVariantId ?? 0) - (b.productVariantId ?? 0) || (a.warehouseLocationId ?? 0) - (b.warehouseLocationId ?? 0));
+  }
 }
