@@ -165,7 +165,7 @@ function toNullableBoolean(value: unknown): boolean | null {
  * warehouse location are excluded by the inner join — they cannot direct a
  * picker anywhere.
  */
-async function resolveAssignedBinLocation(
+export async function resolveAssignedBinLocation(
   database: DbLike,
   variantId: number,
 ): Promise<WmsBinLocation | null> {

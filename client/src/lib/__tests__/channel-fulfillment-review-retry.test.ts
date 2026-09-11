@@ -145,7 +145,10 @@ describe("Operations Tower reviewed-command integration contract", () => {
     expect(source).toContain("onQueued={props.onFulfillmentRecheckQueued}");
   });
   it("requires a separate reason and confirmation and disables automatic mutation retries", () => {
-    const source = readFileSync(resolve(process.cwd(), "client/src/components/operations/ChannelFulfillmentReviewRetryPanel.tsx"), "utf8");
+    const source = readFileSync(
+      resolve(process.cwd(), "client/src/components/operations/ChannelFulfillmentReviewRetryPanel.tsx"),
+      "utf8",
+    ).replaceAll("\r\n", "\n");
     expect(source.match(/retry: false/g)).toHaveLength(2);
     expect(source).toContain("Preview shipment recheck");
     expect(source).toContain("Reason for recheck (required)");
