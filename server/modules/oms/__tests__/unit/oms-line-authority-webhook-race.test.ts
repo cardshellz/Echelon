@@ -120,7 +120,9 @@ describe("oms.service duplicate ingest", () => {
     const marker = "const previousAuthority = lockedLine ?? existingLine";
     const idx = OMS_SERVICE_SRC.indexOf(marker);
     expect(idx).toBeGreaterThan(-1);
-    const block = OMS_SERVICE_SRC.slice(idx - 350, idx + 3600);
+    const end = OMS_SERVICE_SRC.indexOf("updatedLines += 1", idx);
+    expect(end).toBeGreaterThan(idx);
+    const block = OMS_SERVICE_SRC.slice(idx - 350, end);
 
     expect(block).toContain('.for("update")');
     expect(block).toContain(marker);

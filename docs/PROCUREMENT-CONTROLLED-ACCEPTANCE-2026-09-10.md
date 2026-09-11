@@ -125,7 +125,7 @@ source details are not granted invented confirmation.
 
 The CI manifest retains its original 70-suite digest, preserves the two previous
 read regressions, and includes these three controlled scenarios plus main's newly
-merged opening-capture suite: 76 PostgreSQL files across eight deterministic shards.
+merged opening-capture and OMS identity suites: 77 PostgreSQL files across eight deterministic shards.
 Each file receives its own database and
 process. See `CI-TEST-EXECUTION.md` for the safe execution contract.
 
@@ -149,7 +149,9 @@ all-green full unit invocation. Logs retain both full runs and targeted results.
 
 The merge from main preserves both manifest additions; all 83 PostgreSQL CI and
 browser-selection guard tests passed afterward. The 75-file database evidence
-above predates that merge; CI must validate the combined 76-file inventory.
+above predates those merges; CI must validate the combined 77-file inventory.
+After PR #1441 landed, its OMS suite was preserved alongside all procurement
+additions, and all 83 inventory/browser-selection guards passed again.
 
 Still not proven by this batch: the complete activated quantity-authority chain;
 actual carrier/container tracking; live historical cost completeness; all
