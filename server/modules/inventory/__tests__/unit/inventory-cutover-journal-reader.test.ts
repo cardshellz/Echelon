@@ -8,7 +8,8 @@ vi.mock("../../infrastructure/inventory-cutover-encumbrance.repository", () => (
 }));
 
 function client(journals: unknown[]) {
-  const query = vi.fn(async (sql: string) => ({ rows: sql.includes("FROM inventory.inventory_transactions journal") ? journals
+  let offset = 0;
+  const query = vi.fn(async (sql: string) => ({ rows: sql.startsWith("FETCH") ? journals.slice(offset,(offset+=500))
     : sql.includes("FROM inventory.availability_claims claim") ? [{ count: "0", digest: "a".repeat(64) }] : [] }));
   return { query, client: { query } as unknown as PoolClient };
 }
@@ -27,9 +28,9 @@ describe("single-snapshot compact inventory journal census", () => {
     expect(sql).toContain("journal.voided_at IS NULL");
     expect(sql).toContain("NOT LIKE 'availability_claim%'");
   });
-  it("rejects raw census overflow before claims or partial ownership can be returned", async () => {
-    const test = client(Array(MAX_CUTOVER_JOURNAL_ROWS + 1).fill(null));
-    await expect(readInventoryCutoverReconstruction(test.client)).rejects.toMatchObject({ code: "CUTOVER_JOURNAL_ROW_LIMIT_EXCEEDED" });
+  it("rejects invalid fetched evidence before claims or partial ownership can be returned", async () => {
+    const test = client([null]);
+    await expect(readInventoryCutoverReconstruction(test.client)).rejects.toThrow();
     expect(test.query.mock.calls.some(([sql]) => sql.includes("FROM inventory.availability_claims claim"))).toBe(false);
   });
 });

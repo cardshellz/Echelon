@@ -541,6 +541,15 @@
   "inventory.lot_cost_origins": [
     "modules/inventory"
   ],
+  "inventory.opening_capture_chunks": [
+    "modules/inventory-planning"
+  ],
+  "inventory.opening_capture_jobs": [
+    "modules/inventory-planning"
+  ],
+  "inventory.opening_capture_worker": [
+    "modules/inventory-planning"
+  ],
   "inventory.operational_shipment_dispatch_lots": [
     "modules/inventory"
   ],
