@@ -81,7 +81,12 @@ databaseSuite.sequential("canonical full-unpick planned source-bin compatibility
   });
 
   it("persists incremental canonical pick progress before completing the line", async () => {
-    await pool.query("UPDATE wms.order_items SET status='pending',picked_quantity=0,picked_at=NULL WHERE id=71");
+    await pool.query(`UPDATE wms.order_items
+      SET status='pending',picked_quantity=0,picked_at=NULL
+      WHERE id=71;
+      UPDATE wms.outbound_shipment_items
+      SET from_location_id=NULL
+      WHERE id=101`);
     await transaction((client) => persistCanonicalWmsPickProgress(client, {
       ...pickB(),
       movementQuantity: 2,
