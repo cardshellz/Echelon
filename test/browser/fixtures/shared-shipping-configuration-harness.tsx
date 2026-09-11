@@ -37,7 +37,7 @@ createRoot(document.getElementById("root")!).render(
       <CatalogHarness />
     ) : mode === "suites" ? (
       <BoxSuitesPanel />
-    ) : mode === "assignments" ? (
+    ) : mode === "assignments" || mode === "assignments-none" ? (
       <PackagingAssignmentsPanel />
     ) : mode === "charges" ? (
       <ProgramChargesPanel bookId={1} />

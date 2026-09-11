@@ -88,8 +88,22 @@ export function ChannelPackagingPanel({
   const policy = data.policies.find((p) => p.channelId === channel.id);
   const suiteName = (id?: number) =>
     data.suites.find((s) => s.id === id)?.name ?? "Not configured";
-  const warehouses = data.warehouses.filter((w) =>
-    w.name.toLowerCase().includes(search.toLowerCase()),
+  const enabledWarehouseIds = new Set(
+    data.warehouseAssignments
+      .filter(
+        (assignment) =>
+          assignment.channelId === channel.id && assignment.enabled,
+      )
+      .map((assignment) => assignment.warehouseId),
+  );
+  const inactiveOverrides =
+    policy?.overrides.filter(
+      (override) => !enabledWarehouseIds.has(override.warehouseId),
+    ) ?? [];
+  const warehouses = data.warehouses.filter(
+    (warehouse) =>
+      enabledWarehouseIds.has(warehouse.id) &&
+      warehouse.name.toLowerCase().includes(search.toLowerCase()),
   );
   const pages = Math.max(1, Math.ceil(warehouses.length / 50));
   const currentPage = Math.min(page, pages - 1);
@@ -98,11 +112,11 @@ export function ChannelPackagingPanel({
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h2 className="text-lg font-semibold">
-            Warehouse packaging assignments
+            Fulfillment program packaging
           </h2>
           <p className="text-sm text-muted-foreground">
-            Choose permitted packaging independently of pricing. Warehouses can
-            serve multiple configurations with different suites.
+            Set the program default, then add a suite exception only where an
+            enabled warehouse needs different packaging.
           </p>
         </div>
         <Button variant="outline" onClick={() => query.refetch()}>
@@ -110,9 +124,9 @@ export function ChannelPackagingPanel({
         </Button>
       </div>
       <label className="grid max-w-md gap-1 text-sm">
-        Fulfillment configuration
+        Fulfillment program
         <select
-          aria-label="Fulfillment configuration"
+          aria-label="Fulfillment program"
           className="h-10 rounded border bg-background px-2"
           value={channel.id}
           onChange={(e) => {
@@ -128,6 +142,16 @@ export function ChannelPackagingPanel({
           ))}
         </select>
       </label>
+      {enabledWarehouseIds.size === 0 && (
+        <div
+          role="status"
+          className="rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950"
+        >
+          {channel.name} has no explicitly enabled fulfillment warehouse.{" "}
+          Enable the warehouse for this program in Channel Allocation before
+          configuring its packaging.
+        </div>
+      )}
       {!policy && (
         <div
           role="status"
@@ -138,6 +162,19 @@ export function ChannelPackagingPanel({
           changed automatically.
         </div>
       )}
+      {inactiveOverrides.length > 0 && (
+        <div
+          role="status"
+          className="rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-950"
+        >
+          {inactiveOverrides.length} saved warehouse{" "}
+          {inactiveOverrides.length === 1
+            ? "exception references"
+            : "exceptions reference"}{" "}
+          a warehouse that is no longer enabled for {channel.name}. Saving the
+          program default removes these stale exceptions.
+        </div>
+      )}
       <div className="flex flex-wrap items-center justify-between gap-3 rounded border p-4">
         <div>
           <h3 className="font-medium">Default packaging for {channel.name}</h3>
@@ -146,11 +183,12 @@ export function ChannelPackagingPanel({
             {policy
               ? `${policy.requirement === "unbranded" ? "White label only" : "Any branding"} · Revision ${policy.revision}`
               : "Needs review"}
-            . A warehouse override replaces this default.
+            . A warehouse exception replaces this default.
           </p>
         </div>
         <Button
           variant="outline"
+          disabled={!enabledWarehouseIds.size}
           onClick={() =>
             setEditing({ channelId: channel.id, warehouseId: null })
           }
@@ -169,28 +207,61 @@ export function ChannelPackagingPanel({
           {message}
         </p>
       )}
-      <Input
-        className="max-w-sm"
-        aria-label="Search packaging warehouses"
-        placeholder="Search warehouses"
-        value={search}
-        onChange={(e) => {
-          setSearch(e.target.value);
-          setPage(0);
-        }}
-      />
+      <div>
+        <h3 className="font-medium">Enabled fulfillment warehouses</h3>
+        <p className="text-sm text-muted-foreground">
+          Only warehouses already enabled for {channel.name} appear here.
+          Packaging settings never enable, disable, or prioritize warehouses.
+        </p>
+      </div>
+      {enabledWarehouseIds.size > 0 && (
+        <Input
+          className="max-w-sm"
+          aria-label="Search enabled warehouses"
+          placeholder="Search enabled warehouses"
+          value={search}
+          onChange={(e) => {
+            setSearch(e.target.value);
+            setPage(0);
+          }}
+        />
+      )}
       <div className="max-h-[30rem] overflow-auto rounded border">
         <table className="w-full text-left text-sm">
           <thead className="sticky top-0 bg-background">
             <tr className="border-b">
               <th className="p-3">Warehouse</th>
-              <th className="p-3">Pricing configuration</th>
-              <th className="p-3">Box suite</th>
-              <th className="p-3">Available boxes</th>
+              {renderPricing && (
+                <th className="p-3">Pricing program</th>
+              )}
+              <th className="p-3">Effective suite</th>
+              <th className="p-3">Usable packaging</th>
               <th className="p-3 text-right">Action</th>
             </tr>
           </thead>
           <tbody>
+            {enabledWarehouseIds.size === 0 && (
+              <tr>
+                <td
+                  className="p-6 text-center text-muted-foreground"
+                  colSpan={renderPricing ? 5 : 4}
+                >
+                  No warehouse is explicitly enabled for this fulfillment
+                  program. Enable at least one warehouse in Channel Allocation
+                  before assigning packaging.
+                </td>
+              </tr>
+            )}
+            {enabledWarehouseIds.size > 0 && warehouses.length === 0 && (
+              <tr>
+                <td
+                  className="p-6 text-center text-muted-foreground"
+                  colSpan={renderPricing ? 5 : 4}
+                >
+                  No enabled warehouse matches the search.
+                </td>
+              </tr>
+            )}
             {warehouses
               .slice(currentPage * 50, (currentPage + 1) * 50)
               .map((w) => {
@@ -205,61 +276,23 @@ export function ChannelPackagingPanel({
                   w.id,
                   policy?.requirement ?? "any",
                 );
-                const prices = [
-                  ...new Set(
-                    data.pricing
-                      .filter(
-                        (p) =>
-                          p.channelId === channel.id &&
-                          (p.warehouseId === null || p.warehouseId === w.id),
-                      )
-                      .map((p) => p.name),
-                  ),
-                ];
-                const eligibility = data.warehouseAssignments.find(
-                  (a) => a.channelId === channel.id && a.warehouseId === w.id,
-                );
                 return (
                   <tr key={w.id} className="border-b align-top last:border-0">
                     <th scope="row" className="p-3 font-medium">
                       {w.name}
                       <div className="text-xs font-normal text-muted-foreground">
-                        {eligibility
-                          ? eligibility.enabled
-                            ? "Assigned to channel"
-                            : "Channel assignment disabled"
-                          : "No explicit channel warehouse assignment"}
+                        Enabled for fulfillment
                       </div>
                     </th>
-                    <td className="p-3">
-                      {renderPricing ? (
-                        renderPricing(w.id)
-                      ) : (
-                        <>
-                          <div>
-                            {prices.join(", ") ||
-                              "No versioned pricing configured"}
-                          </div>
-                          <a
-                            className="text-xs underline"
-                            href={`/shipping-settings?tab=channel-routing&channelId=${channel.id}`}
-                          >
-                            Manage pricing separately
-                          </a>
-                          {prices.length > 0 && (
-                            <div className="text-xs text-muted-foreground">
-                              Destination rules determine the applicable rate.
-                            </div>
-                          )}
-                        </>
-                      )}
-                    </td>
+                    {renderPricing && (
+                      <td className="p-3">{renderPricing(w.id)}</td>
+                    )}
                     <td className="p-3">
                       {suite?.name ?? "Legacy / not reviewed"}
                       <div className="text-xs text-muted-foreground">
                         {policy
                           ? override
-                            ? "Warehouse override"
+                            ? "Warehouse exception"
                             : "Inherited default"
                           : "Not migrated"}
                       </div>
@@ -299,14 +332,16 @@ export function ChannelPackagingPanel({
                       <Button
                         size="sm"
                         variant="outline"
-                        aria-label={`Edit ${w.name} packaging`}
-                        asChild
+                        aria-label={`Edit ${w.name} suite`}
+                        disabled={!policy}
+                        onClick={() =>
+                          setEditing({
+                            channelId: channel.id,
+                            warehouseId: w.id,
+                          })
+                        }
                       >
-                        <a
-                          href={`/warehouse/packaging?channelId=${channel.id}`}
-                        >
-                          Manage in Warehouses
-                        </a>
+                        {override ? "Edit exception" : "Add exception"}
                       </Button>
                     </td>
                   </tr>
@@ -337,24 +372,10 @@ export function ChannelPackagingPanel({
         </div>
       )}
       <p className="text-xs text-muted-foreground">
-        Packaging assignments do not enable warehouses or change order routing.
-        Availability is configured within each warehouse, not a live stock
-        count.
+        The program chooses a suite; each warehouse separately controls which
+        physical packaging is available there. A warehouse exception changes
+        only this program at that warehouse.
       </p>
-      <div className="flex gap-4 text-sm">
-        <a className="underline" href="/shipping-settings?tab=boxes">
-          Box catalog
-        </a>
-        <a className="underline" href="/shipping-settings?tab=box-suites">
-          Manage suites
-        </a>
-        <a
-          className="underline"
-          href={`/warehouse/packaging?channelId=${channel.id}`}
-        >
-          Manage warehouse packaging
-        </a>
-      </div>
       {editing && (
         <ChannelPackagingEditor
           key={`${editing.channelId}:${editing.warehouseId}`}
@@ -410,20 +431,65 @@ export function ChannelPackagingEditor({
   const selectedSuiteId =
     suite === "inherit" ? policy?.defaultSuiteId : Number(suite);
   const selected = opened.suites.find((s) => s.id === selectedSuiteId);
-  const members = opened.boxes.filter((b) => selected?.boxIds.includes(b.id));
-  const conflict = members.some(
-    (b) => !packagingBrandingAllowed(requirement, b.branding),
+  const enabledWarehouseIds = new Set(
+    opened.warehouseAssignments
+      .filter(
+        (assignment) =>
+          assignment.channelId === channelId && assignment.enabled,
+      )
+      .map((assignment) => assignment.warehouseId),
   );
-  const available =
+  const nextOverrides = (
     warehouseId === null
-      ? members.filter(
-          (b) => b.isActive && b.availabilityReviewed && b.warehouseIds.length,
-        )
-      : eligiblePackagingBoxes(members, warehouseId, requirement);
+      ? warehouseOverrides
+      : [
+          ...(policy?.overrides ?? []).filter(
+            (override) => override.warehouseId !== warehouseId,
+          ),
+          ...(suite === "inherit"
+            ? []
+            : [{ warehouseId, suiteId: Number(suite) }]),
+        ]
+  )
+    .filter((override) => enabledWarehouseIds.has(override.warehouseId))
+    .sort((left, right) => left.warehouseId - right.warehouseId);
+  const nextDefaultSuiteId =
+    warehouseId === null ? Number(suite) : policy?.defaultSuiteId;
+  const enabledWarehouses = opened.warehouses.filter((warehouse) =>
+    enabledWarehouseIds.has(warehouse.id),
+  );
+  const relevantSuiteIds = new Set(
+    [nextDefaultSuiteId, ...nextOverrides.map((override) => override.suiteId)]
+      .filter((id): id is number => Boolean(id)),
+  );
+  const conflictingSuites = opened.suites.filter(
+    (candidate) =>
+      relevantSuiteIds.has(candidate.id) &&
+      opened.boxes
+        .filter((box) => candidate.boxIds.includes(box.id))
+        .some(
+          (box) => !packagingBrandingAllowed(requirement, box.branding),
+        ),
+  );
+  const strandedWarehouses = enabledWarehouses.filter((warehouse) => {
+    const suiteId =
+      nextOverrides.find(
+        (override) => override.warehouseId === warehouse.id,
+      )?.suiteId ?? nextDefaultSuiteId;
+    const candidate = opened.suites.find((item) => item.id === suiteId);
+    const members = opened.boxes.filter((box) =>
+      candidate?.boxIds.includes(box.id),
+    );
+    return !eligiblePackagingBoxes(
+      members,
+      warehouse.id,
+      requirement,
+    ).length;
+  });
   const dirty =
     suite !== initialSuite ||
     requirement !== (policy?.requirement ?? "any") ||
-    JSON.stringify(warehouseOverrides) !==
+    JSON.stringify(nextOverrides) !==
       JSON.stringify(policy?.overrides ?? []);
   return (
     <Dialog
@@ -435,12 +501,14 @@ export function ChannelPackagingEditor({
       <DialogContent className="max-h-[90dvh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>
-            {warehouseId === null ? "Default packaging" : "Warehouse packaging"}
+            {warehouseId === null
+              ? "Program packaging default"
+              : "Warehouse suite exception"}
           </DialogTitle>
           <DialogDescription>
             {opened.channels.find((c) => c.id === channelId)?.name} ·{" "}
             {warehouseId === null
-              ? "All warehouses without an override"
+              ? "All enabled warehouses without an exception"
               : opened.warehouses.find((w) => w.id === warehouseId)?.name}
           </DialogDescription>
         </DialogHeader>
@@ -462,7 +530,7 @@ export function ChannelPackagingEditor({
           </label>
         )}
         <label className="grid gap-1 text-sm">
-          Box suite
+          {warehouseId === null ? "Default suite" : "Suite exception"}
           <select
             aria-label="Assigned box suite"
             className="h-10 rounded border bg-background px-2"
@@ -475,7 +543,7 @@ export function ChannelPackagingEditor({
                 Choose suite
               </option>
             ) : (
-              <option value="inherit">Use configuration default</option>
+              <option value="inherit">Use program default</option>
             )}
             {opened.suites
               .filter((s) => !s.archived)
@@ -488,28 +556,30 @@ export function ChannelPackagingEditor({
         </label>
         {warehouseId === null && (
           <p className="text-sm text-muted-foreground">
-            Existing warehouse exceptions are preserved. Manage individual or
-            bulk assignments in{" "}
-            <a
-              className="underline"
-              href={`/warehouse/packaging?channelId=${channelId}`}
-            >
-              Warehouse packaging
-            </a>
-            .
+            Existing warehouse exceptions are preserved. Edit an enabled
+            warehouse in the program table to add or remove its exception.
           </p>
         )}
-        {conflict && (
+        {conflictingSuites.length > 0 && (
           <p role="alert" className="text-destructive">
-            This suite contains branded or unclassified boxes. White-label
-            policies require every member to be unbranded.
+            White-label packaging conflicts with{" "}
+            {conflictingSuites.map((candidate) => candidate.name).join(", ")}.
+            Every suite used by this program must contain only unbranded
+            packaging.
           </p>
         )}
-        {selected && !available.length && (
+        {selected && strandedWarehouses.length > 0 && (
           <p role="alert" className="text-destructive">
-            No reviewed boxes are available
-            {warehouseId === null ? " at any warehouse" : " at this warehouse"}.
-            Review availability in warehouse packaging first.
+            This configuration leaves no usable packaging at{" "}
+            {strandedWarehouses
+              .slice(0, 5)
+              .map((warehouse) => warehouse.name)
+              .join(", ")}
+            {strandedWarehouses.length > 5
+              ? " and " + (strandedWarehouses.length - 5) + " more"
+              : ""}
+            . Update physical warehouse availability or choose a different
+            suite.
           </p>
         )}
         {!policy && (
@@ -525,31 +595,24 @@ export function ChannelPackagingEditor({
         )}
         <div className="flex gap-2">
           <Button
-            disabled={busy || !dirty || !suite || conflict || !available.length}
+            disabled={
+              busy ||
+              !dirty ||
+              !suite ||
+              !selected ||
+              conflictingSuites.length > 0 ||
+              strandedWarehouses.length > 0
+            }
             onClick={async () => {
               setBusy(true);
               setError("");
               try {
-                const overrides =
-                  warehouseId === null
-                    ? warehouseOverrides
-                    : [
-                        ...(policy?.overrides ?? []).filter(
-                          (o) => o.warehouseId !== warehouseId,
-                        ),
-                        ...(suite === "inherit"
-                          ? []
-                          : [{ warehouseId, suiteId: Number(suite) }]),
-                      ];
                 const body = {
                   channelId,
                   expectedRevision: policy?.revision ?? 0,
-                  defaultSuiteId:
-                    warehouseId === null
-                      ? Number(suite)
-                      : policy!.defaultSuiteId,
+                  defaultSuiteId: nextDefaultSuiteId!,
                   requirement,
-                  overrides,
+                  overrides: nextOverrides,
                 };
                 await putJson(
                   dropship
@@ -569,7 +632,11 @@ export function ChannelPackagingEditor({
               }
             }}
           >
-            {busy ? "Saving…" : "Save packaging"}
+            {busy
+              ? "Saving…"
+              : warehouseId === null
+                ? "Save program default"
+                : "Save warehouse exception"}
           </Button>
           <Button variant="outline" disabled={busy} onClick={onClose}>
             Cancel

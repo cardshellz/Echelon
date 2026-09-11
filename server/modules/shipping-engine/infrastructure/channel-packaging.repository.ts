@@ -174,15 +174,23 @@ export class ChannelPackagingRepository implements ChannelPackagingStore {
         "Choose an active fulfillment channel.",
       );
     const warehouseIds = input.overrides.map((o) => o.warehouseId);
-    const warehouses = await client.query(
-      "SELECT id FROM warehouse.warehouses WHERE id=ANY($1::int[])",
-      [warehouseIds],
-    );
-    if (warehouses.rows.length !== warehouseIds.length)
-      throw new ShippingConfigurationError(
-        "SHIPPING_WAREHOUSE_REQUIRED",
-        "An assigned warehouse no longer exists.",
+    if (warehouseIds.length > 0) {
+      const enabledWarehouses = await client.query(
+        `SELECT a.warehouse_id AS id
+           FROM channels.channel_warehouse_assignments a
+           JOIN warehouse.warehouses w ON w.id=a.warehouse_id
+          WHERE a.channel_id=$1
+            AND a.enabled
+            AND a.warehouse_id=ANY($2::int[])
+          FOR SHARE OF a`,
+        [input.channelId, warehouseIds],
       );
+      if (enabledWarehouses.rows.length !== warehouseIds.length)
+        throw new ShippingConfigurationError(
+          "SHIPPING_WAREHOUSE_NOT_ENABLED",
+          "A packaging exception can only target a warehouse enabled for this fulfillment program.",
+        );
+    }
     // Load each reusable suite once, even when hundreds of warehouses inherit it.
     const suiteBoxes = new Map<number, CatalogBox[]>();
     for (const suiteId of new Set([
