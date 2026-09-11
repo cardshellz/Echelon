@@ -306,6 +306,28 @@ describe.skipIf(!enabled)(
         data.warehouseAssignments.filter((a) => a.channelId === 11),
       ).toHaveLength(2);
     });
+    it("rejects a suite exception for a warehouse not enabled for the program", async () => {
+      await db.query(
+        "INSERT INTO channels.channels VALUES(21,'Disabled warehouse test','internal','manual','active',NULL); INSERT INTO channels.channel_warehouse_assignments VALUES(21,1,false)",
+      );
+      await expect(
+        repo.savePolicy(
+          {
+            ...policy(21, whiteSuite),
+            overrides: [{ warehouseId: 1, suiteId: whiteSuite }],
+          },
+          "admin",
+          now,
+        ),
+      ).rejects.toMatchObject({ code: "SHIPPING_WAREHOUSE_NOT_ENABLED" });
+      expect(
+        (
+          await db.query(
+            "SELECT count(*)::integer AS count FROM shipping.channel_packaging_policies WHERE channel_id=21",
+          )
+        ).rows[0].count,
+      ).toBe(0);
+    });
     it("requires coverage for both enabled warehouses, supports atomic exceptions and reset to default", async () => {
       await db.query(
         "INSERT INTO channels.channels VALUES(20,'Coverage test','internal','manual','active',NULL); INSERT INTO channels.channel_warehouse_assignments VALUES(20,1,true),(20,2,true)",

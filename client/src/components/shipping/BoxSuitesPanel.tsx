@@ -98,8 +98,9 @@ export function BoxSuitesPanel() {
           <h2 className="text-lg font-semibold">Box suites</h2>
           <p className="text-sm text-muted-foreground">
             Group existing boxes and mailers into reusable packaging choices.
-            Assign suites in warehouse packaging configuration. Membership does
-            not change physical warehouse availability or a box's branding.
+            Fulfillment programs choose these suites as defaults or warehouse
+            exceptions. Suite membership does not change physical warehouse
+            availability or a box's branding.
           </p>
           <a className="text-sm underline" href="/shipping-settings?tab=boxes">
             Manage individual boxes in Box catalog
@@ -169,11 +170,7 @@ export function BoxSuitesPanel() {
                     <a
                       key={`${a.channelId}:${a.warehouseId}`}
                       className="underline"
-                      href={
-                        a.warehouseId === null
-                          ? `/shipping-settings?tab=channel-routing&section=packaging&channelId=${a.channelId}`
-                          : `/warehouse/packaging?channelId=${a.channelId}`
-                      }
+                      href={`/shipping-settings?tab=channel-routing&section=packaging&channelId=${a.channelId}`}
                     >
                       {a.channelName} ·{" "}
                       {a.warehouseId === null
@@ -183,7 +180,10 @@ export function BoxSuitesPanel() {
                     </a>
                   ))}
                   {concreteUsages.length > 3 && (
-                    <a className="underline" href="/warehouse/packaging">
+                    <a
+                      className="underline"
+                      href="/shipping-settings?tab=channel-routing&section=packaging"
+                    >
                       +{concreteUsages.length - 3} more assignments
                     </a>
                   )}
@@ -378,8 +378,8 @@ export function BoxSuitesPanel() {
             <p className="text-sm text-muted-foreground">
               {boxIds.length} packaging types selected.{" "}
               {affected.length
-                ? `Saving affects ${affected.length} channel/warehouse assignments.`
-                : "Not assigned yet. Choose where to use this suite in warehouse packaging."}{" "}
+                ? `Saving affects ${affected.length} fulfillment-program ${affected.length === 1 ? "assignment" : "assignments"}.`
+                : "Not assigned yet. Choose it in Fulfillment program packaging."}{" "}
               Previous shipment snapshots stay unchanged.
             </p>
             {editing && (

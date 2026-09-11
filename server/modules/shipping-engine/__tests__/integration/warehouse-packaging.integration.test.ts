@@ -439,6 +439,9 @@ describe.skipIf(!enabled)("warehouse-owned packaging commands", () => {
     });
   });
   it("program bulk assignment preserves exceptions, other channels, and physical availability", async () => {
+    await db.query(
+      "INSERT INTO channels.channel_warehouse_assignments VALUES(21,1,true),(21,2,true),(22,1,true),(22,2,true)",
+    );
     const a = await create("POLICY-A"),
       b = await create("POLICY-B");
     await availability([1, 2], [a.box.id, b.box.id]);
@@ -504,6 +507,9 @@ describe.skipIf(!enabled)("warehouse-owned packaging commands", () => {
       ),
     ).rejects.toMatchObject({ code: "SHIPPING_PACKAGING_POLICY_CONFLICT" });
     expect((await repo.overview()).boxes).toEqual(before);
+    await db.query(
+      "DELETE FROM channels.channel_warehouse_assignments WHERE channel_id IN (21,22)",
+    );
   });
   it("audit insertion failure rolls back availability and revision changes", async () => {
     const { box } = await create("ROLLBACK");
