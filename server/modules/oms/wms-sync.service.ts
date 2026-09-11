@@ -65,6 +65,8 @@ import {
   getOmsLineRemainingMaterializableQuantity,
 } from "./oms-line-authority";
 import { refreshOmsLineMaterializedQuantities } from "./oms-line-materialization.repository";
+import { selectWmsCatalogSku } from "./domain/order-line-catalog-identity";
+import { createOrderLineCatalogIdentityRepository } from "./infrastructure/order-line-catalog-identity.repository";
 
 type WmsBinLocation = { location: string; zone: string };
 type DbLike = typeof db | any;
@@ -232,7 +234,7 @@ function mapLockedOmsLine(row: any): MaterializableOmsLine {
   };
 }
 
-async function buildWmsLineItemFromOmsLine(
+export async function buildWmsLineItemFromOmsLine(
   database: DbLike,
   line: MaterializableOmsLine,
   materializableQuantity: number,
@@ -244,6 +246,9 @@ async function buildWmsLineItemFromOmsLine(
   }
 
   const variantId = line.productVariantId || null;
+  const catalogSku = variantId
+    ? await createOrderLineCatalogIdentityRepository(database).catalogSku(variantId)
+    : null;
   let binLocation: WmsBinLocation | null = null;
   if (variantId) {
     try {
@@ -271,7 +276,7 @@ async function buildWmsLineItemFromOmsLine(
   return {
     orderId,
     omsOrderLineId: line.id,
-    sku: line.sku || "UNKNOWN",
+    sku: selectWmsCatalogSku(line.sku, catalogSku),
     name: buildChannelLineDisplayName({
       name: line.name,
       title: line.title,
@@ -2111,11 +2116,15 @@ export class WmsSyncService {
 
       const omsQty = getOmsLineMaterializableQuantity(omsLine);
       const wmsQty = wmsItem.quantity;
+      const catalogSku = omsLine.productVariantId
+        ? await createOrderLineCatalogIdentityRepository(db).catalogSku(omsLine.productVariantId)
+        : null;
+      const resolvedSku = selectWmsCatalogSku(omsLine.sku, catalogSku);
 
       if (omsQty === wmsQty) {
         // Qty unchanged — check for SKU/name/variant updates
         const updates: Record<string, any> = {};
-        if (omsLine.sku && omsLine.sku !== wmsItem.sku) updates.sku = omsLine.sku;
+        if (resolvedSku !== "UNKNOWN" && resolvedSku !== wmsItem.sku) updates.sku = resolvedSku;
         if (omsLine.title && omsLine.title !== wmsItem.name)
           updates.name = omsLine.title;
         if (
@@ -2145,7 +2154,7 @@ export class WmsSyncService {
       if (wmsItem.status === "pending" || wmsItem.pickedQuantity === 0) {
         // Not yet picked — safe to update
         const updates: Record<string, any> = { quantity: omsQty };
-        if (omsLine.sku && omsLine.sku !== wmsItem.sku) updates.sku = omsLine.sku;
+        if (resolvedSku !== "UNKNOWN" && resolvedSku !== wmsItem.sku) updates.sku = resolvedSku;
         if (omsLine.title && omsLine.title !== wmsItem.name)
           updates.name = omsLine.title;
         if (

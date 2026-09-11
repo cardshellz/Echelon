@@ -17,7 +17,7 @@ import type { Request, Response, Express } from "express";
 import * as crypto from "crypto";
 import { sql, eq, and, ilike } from "drizzle-orm";
 import type { OmsService, OrderData, LineItemData } from "./oms.service";
-import { omsOrders, omsOrderLines, omsOrderEvents, productVariants, channelConnections } from "@shared/schema";
+import { omsOrders, omsOrderLines, omsOrderEvents, channelConnections } from "@shared/schema";
 import { db } from "../../db";
 import { pushToMissionControl } from "./mc-push";
 import { enrichOrderWithMemberTier } from "./member-tier-enrichment";
@@ -34,6 +34,7 @@ import {
   __test__ as refundCascadeTest,
 } from "./shopify-refund-cascade.service";
 import { normalizeShopifyLineItems } from "./shopify-line-item-normalizer";
+import { resolveOrderLineCatalogIdentity, recordOrderLineCatalogIdentity } from "./order-line-catalog-identity.service";
 import {
   processShopifyFulfillmentIngress,
 } from "./shopify-fulfillment-ingress.adapter";
@@ -549,6 +550,7 @@ function mapShopifyOrderToOrderData(shopifyOrder: any): OrderData {
   const lineItems: LineItemData[] = normalizedItems.map((item) => ({
     externalLineItemId: item.externalLineItemId,
     externalProductId: item.externalProductId,
+    externalVariantId: item.externalVariantId,
     sku: item.sku,
     title: item.title,
     name: item.name,
@@ -1303,17 +1305,6 @@ export function registerOmsWebhooks(
           const existingLine = existingLineMap.get(lineId);
           const normalizedLine = normalizedLineMap.get(lineId);
 
-          // Resolve variant
-          let productVariantId: number | null = null;
-          if (item.sku) {
-            const [variant] = await db
-              .select({ id: productVariants.id })
-              .from(productVariants)
-              .where(eq(productVariants.sku, item.sku.toUpperCase()))
-              .limit(1);
-            if (variant) productVariantId = variant.id;
-          }
-
           if (existingLine) {
             const fulfillmentStatus = mapShopifyLineFulfillmentStatus(
               item,
@@ -1355,6 +1346,13 @@ export function registerOmsWebhooks(
                 .for("update")
                 .limit(1);
               const previousAuthority = lockedLine ?? existingLine;
+              const identity = await resolveOrderLineCatalogIdentity(tx, {
+                channelId: existing.channelId, sku: item.sku,
+                previousVariantId: previousAuthority.productVariantId,
+                externalVariantId: normalizedLine?.externalVariantId,
+                externalProductId: normalizedLine?.externalProductId,
+              });
+              const productVariantId = identity?.id ?? null;
 
               const authority = deriveOmsLineAuthority({
                 sourceTopic: "orders/updated",
@@ -1371,7 +1369,7 @@ export function registerOmsWebhooks(
               await tx
                 .update(omsOrderLines)
                 .set({
-                  sku: item.sku || existingLine.sku,
+                  sku: item.sku || previousAuthority.sku,
                   title: preservedTitle,
                   name: preservedName,
                   variantTitle: (normalizedLine?.variantTitle ?? item.variant_title) || existingLine.variantTitle,
@@ -1388,10 +1386,15 @@ export function registerOmsWebhooks(
                   totalDiscountCents: normalizedLine?.discountCents ?? (item.total_discount ? dollarsToCents(item.total_discount) : 0),
                   planDiscountCents: normalizedLine?.planDiscountCents ?? existingLine.planDiscountCents,
                   couponDiscountCents: normalizedLine?.couponDiscountCents ?? existingLine.couponDiscountCents,
-                  productVariantId: productVariantId || existingLine.productVariantId,
+                  productVariantId: productVariantId ?? previousAuthority.productVariantId,
                 })
                 .where(eq(omsOrderLines.id, existingLine.id));
 
+              await recordOrderLineCatalogIdentity(tx, { orderId: existing.id, orderLineId: existingLine.id,
+                channelId: existing.channelId, previousVariantId: previousAuthority.productVariantId, identity,
+                source: { channelId: existing.channelId, sku: item.sku,
+                  externalVariantId: normalizedLine?.externalVariantId, externalProductId: normalizedLine?.externalProductId },
+                sourceEventId: `webhook_inbox:${inbox.receipt.id}` });
               await recordOmsLineAuthorityEvent({
                 db: tx,
                 orderId: existing.id,
@@ -1424,6 +1427,12 @@ export function registerOmsWebhooks(
             });
             // Insert new line and authority ledger atomically.
             await db.transaction(async (tx: any) => {
+              const identity = await resolveOrderLineCatalogIdentity(tx, {
+                channelId: existing.channelId, sku: item.sku,
+                externalVariantId: normalizedLine?.externalVariantId,
+                externalProductId: normalizedLine?.externalProductId,
+              });
+              const productVariantId = identity?.id ?? null;
               const [insertedLine] = await tx.insert(omsOrderLines).values({
                 orderId: existing.id,
                 productVariantId,
@@ -1450,6 +1459,11 @@ export function registerOmsWebhooks(
               }).onConflictDoNothing().returning({ id: omsOrderLines.id });
 
               if (insertedLine) {
+                await recordOrderLineCatalogIdentity(tx, { orderId: existing.id, orderLineId: insertedLine.id,
+                  channelId: existing.channelId, previousVariantId: null, identity,
+                  source: { channelId: existing.channelId, sku: item.sku,
+                    externalVariantId: normalizedLine?.externalVariantId, externalProductId: normalizedLine?.externalProductId },
+                  sourceEventId: `webhook_inbox:${inbox.receipt.id}` });
                 await recordOmsLineAuthorityEvent({
                   db: tx,
                   orderId: existing.id,
