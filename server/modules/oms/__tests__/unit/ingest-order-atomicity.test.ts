@@ -29,7 +29,7 @@ describe("ingestOrder atomicity — order + lines + event in one transaction", (
       OMS_SERVICE_SRC.indexOf("db.transaction(async (tx"),
       OMS_SERVICE_SRC.indexOf("return inserted;"),
     );
-    expect(txBlock).toMatch(/await tx\s*\n\s*\.select\(/);
+    expect(txBlock).toContain("await resolveOrderLineCatalogIdentity(tx,");
   });
 
   it("line items and event are inserted BEFORE the transaction commits (ordering)", () => {

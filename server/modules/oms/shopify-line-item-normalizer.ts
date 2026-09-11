@@ -7,6 +7,7 @@
  */
 
 import { buildChannelLineDisplayName } from "./line-display-name";
+import { normalizeShopifyLineVariantId } from "./domain/order-line-catalog-identity";
 
 // Rewards redemption detection constants
 const REWARDS_REDEMPTION_LABEL = process.env.REWARDS_REDEMPTION_LABEL || "Shellz Rewards Redemption";
@@ -14,6 +15,7 @@ const REWARDS_REDEMPTION_LABEL = process.env.REWARDS_REDEMPTION_LABEL || "Shellz
 export interface NormalizedLineItem {
   externalLineItemId: string;
   externalProductId: string | null;
+  externalVariantId: string | null;
   sku: string | null;
   title: string;
   variantTitle: string | null;
@@ -141,6 +143,7 @@ function buildNormalizedLineItem(
   return {
     externalLineItemId: item.id?.toString() || "",
     externalProductId: item.product_id?.toString() || null,
+    externalVariantId: normalizeShopifyLineVariantId(item.variant_id),
     sku: item.sku || null,
     title: buildChannelLineDisplayName({
       name: item.name,
