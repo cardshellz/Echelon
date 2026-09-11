@@ -592,7 +592,8 @@ test("box measurements round trip in inches while inside, outside and fill stay 
   await page.getByRole("button", { name: "Edit WHITE box" }).click();
   await page.getByLabel("Outer length", { exact: true }).fill("7.9");
   await page.getByRole("button", { name: "Save Changes" }).click();
-  await expect(page.getByText("Enter all three outer dimensions, each at least as large as its inner dimension.")).toBeVisible();
+  // Match the visible description, not Radix's longer live-region announcement.
+  await expect(page.getByText("Enter all three outer dimensions, each at least as large as its inner dimension.", { exact: true })).toBeVisible();
   expect(state.writes).toHaveLength(2);
   expect(state.errors).toEqual([]);
 });
