@@ -1,7 +1,7 @@
 import type { PoolClient } from "pg";
 import { captureInventoryCutoverEncumbranceAfterAdmission } from "./inventory-cutover-encumbrance.repository";
 import type { CutoverReconstructionEvidence } from "@shared/types/inventory-cutover-reconstruction";
-import { aggregateCutoverJournalEvidence, MAX_CUTOVER_JOURNAL_ROWS } from "../domain/inventory-cutover-journal-evidence";
+import { CutoverJournalAccumulator, MAX_CUTOVER_JOURNAL_ROWS } from "../domain/inventory-cutover-journal-evidence";
 
 const MAX_EVIDENCE_ROWS = 50_000;
 export async function readInventoryCutoverReconstruction(client: PoolClient): Promise<Pick<CutoverReconstructionEvidence,
@@ -27,7 +27,10 @@ export async function readInventoryCutoverReconstruction(client: PoolClient): Pr
   // commit's READ COMMITTED transaction. Do not keyset-page this census.
   // Only compact facts and database-computed digests cross the connection. The
   // inventory domain completes exact NULL IDs and retains every unknown cause.
-  const rawJournals = (await client.query(`SELECT journal.id, journal.order_id AS "orderId", journal.order_item_id AS "orderItemId",
+  // A non-holdable PostgreSQL cursor keeps ONE statement snapshot, even in
+  // admitted READ COMMITTED transactions. FETCH bounds transport memory without
+  // issuing independent keyset SELECTs against changing inventory.
+  await client.query(`DECLARE inventory_opening_journals NO SCROLL CURSOR FOR SELECT journal.id, journal.order_id AS "orderId", journal.order_item_id AS "orderItemId",
     journal.product_variant_id AS "productVariantId", journal.from_location_id AS "fromLocationId", journal.to_location_id AS "toLocationId",
     journal.transaction_type AS "transactionType", journal.variant_qty_delta AS "variantQtyDelta",
     journal.reserved_qty_delta AS "reservedQtyDelta", journal.source_state AS "sourceState",
@@ -59,8 +62,17 @@ export async function readInventoryCutoverReconstruction(client: PoolClient): Pr
     LEFT JOIN warehouse.warehouse_locations to_location ON to_location.id=journal.to_location_id
     WHERE journal.voided_at IS NULL AND journal.transaction_type IN ('reserve','unreserve','pick','unpick','ship','reserve_move')
       AND COALESCE(journal.reference_type,'') NOT LIKE 'availability_claim%'
-    ORDER BY journal.id LIMIT $1`, [MAX_CUTOVER_JOURNAL_ROWS + 1])).rows;
-  const journals = aggregateCutoverJournalEvidence(rawJournals);
+    ORDER BY journal.id LIMIT $1`, [MAX_CUTOVER_JOURNAL_ROWS + 1]);
+  const accumulator = new CutoverJournalAccumulator();
+  for (;;) {
+    const batch = (await client.query("FETCH FORWARD 500 FROM inventory_opening_journals")).rows;
+    for (const row of batch) accumulator.add(row);
+    if (batch.length < 500) break;
+  }
+  // On error, the caller rolls back the owning transaction and its non-holdable
+  // cursor together. On success, CLOSE failures propagate rather than disappear.
+  await client.query("CLOSE inventory_opening_journals");
+  const journals = accumulator.finish();
   const claims = (await client.query(`SELECT count(*)::text AS count,
     encode(sha256(convert_to(COALESCE(string_agg(to_jsonb(claim)::text,',' ORDER BY id),''),'UTF8')),'hex') AS digest
     FROM inventory.availability_claims claim`)).rows[0];

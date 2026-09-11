@@ -5,6 +5,9 @@ import { sealClaimSupplySnapshot } from "../../domain/inventory-availability-pla
 import { emptyBinPromiseEvidence, reconstructionEvidence, reconstructionSupply } from "../fixtures/inventory-cutover-reconstruction.fixture";
 import { standaloneBuildReservation } from "../fixtures/inventory-cutover-preflight.fixture";
 import type { CutoverReconstructionEvidence } from "@shared/types/inventory-cutover-reconstruction";
+import { cutoverReconstructionEvidenceSchema } from "@shared/types/inventory-cutover-reconstruction";
+import { canonicalJson } from "@shared/utils/canonical-json";
+import { createHash } from "node:crypto";
 
 function ordinarySourceItem(): CutoverReconstructionEvidence["sourceItems"][number] {
   return { id:91, shipmentId:90, headerOrderId:1, orderItemId:11, replacementForOrderItemId:null,
@@ -13,6 +16,15 @@ function ordinarySourceItem(): CutoverReconstructionEvidence["sourceItems"][numb
 }
 
 describe("exact legacy cutover reconstruction", () => {
+  it("streamed collection hashing preserves prior immutable evidence bytes", () => {
+    const raw = reconstructionEvidence();
+    const parsed = cutoverReconstructionEvidenceSchema.parse(raw);
+    const sorted = Object.fromEntries(Object.entries(parsed).map(([key,value])=>[key,Array.isArray(value)
+      ? value.map(row=>({row,key:canonicalJson(row)})).sort((a,b)=>a.key<b.key?-1:a.key>b.key?1:0).map(entry=>entry.row):value]));
+    const prior = createHash("sha256").update(canonicalJson(sorted)).digest("hex");
+    expect(reconstructionEvidenceHash(raw)).toBe(prior);
+    expect(raw).toEqual(reconstructionEvidence());
+  });
   it("groups acknowledgment evidence without clearing inventory or original-cost review", () => {
     const evidence = reconstructionEvidence();
     evidence.shipmentReviewEvidence.push({ id: "package:7", kind: "channel_fulfillment_acknowledgment", status: "ignored", evidenceHash: "f".repeat(64) });
