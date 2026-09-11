@@ -35,6 +35,36 @@ const reviewRepository = readFileSync(
 );
 
 describe("canonical claim picker-observation contract", () => {
+  it("accepts a bounded short reason only on canonical short progress", () => {
+    const command = {
+      claimId: "9",
+      orderItemId: 71,
+      warehouseLocationId: 3,
+      quantity: "2",
+      locationStrategy: "strict" as const,
+      idempotencyKey: "pick:9:71:short:1",
+      actor: "picker-1",
+      reason: "two physical units were picked before the shortage",
+      wmsProgress: {
+        expectedStatus: "pending" as const,
+        expectedPickedQuantity: 0,
+        targetStatus: "short" as const,
+        targetPickedQuantity: 2,
+        targetShortReason: "partial",
+      },
+    };
+
+    expect(canonicalAvailabilityClaimPickCommandSchema.safeParse(command).success).toBe(true);
+    expect(canonicalAvailabilityClaimPickCommandSchema.safeParse({
+      ...command,
+      wmsProgress: { ...command.wmsProgress, targetStatus: "in_progress" },
+    }).success).toBe(false);
+    expect(canonicalAvailabilityClaimPickCommandSchema.safeParse({
+      ...command,
+      wmsProgress: { ...command.wmsProgress, targetShortReason: "x".repeat(1001) },
+    }).success).toBe(false);
+  });
+
   it("requires explicit observation evidence that covers the pick", () => {
     const base = {
       claimId: "9",

@@ -64,6 +64,7 @@ type InventoryCore = {
     qty: number;
     orderId: number;
     orderItemId?: number;
+    expectedPriorPickedQuantity?: number;
     userId?: string;
   }) => Promise<boolean>;
   unpickItem?: (params: {
@@ -75,6 +76,11 @@ type InventoryCore = {
     userId?: string;
     reason?: string;
   }) => Promise<boolean>;
+  getOrderItemPickedCostQuantity: (params: {
+    orderId: number;
+    orderItemId: number;
+    productVariantId: number;
+  }) => Promise<number>;
   withTx?: (tx: any) => InventoryCore;
 };
 
@@ -249,10 +255,10 @@ type DeductInventoryResult =
       systemQtyAfter: 0;
     };
 
-type CompletedPickAtomicResult = {
+type PickProgressAtomicResult = {
   item: OrderItem;
   deductResult: DeductInventoryResult | null;
-  alreadyCompleted: boolean;
+  idempotentReplay: boolean;
 };
 
 type CanonicalPickTarget = {
@@ -382,6 +388,29 @@ function structuredErrorCode(error: unknown): string | null {
   if (typeof error !== "object" || error === null || !("code" in error)) return null;
   const code = (error as { code?: unknown }).code;
   return typeof code === "string" ? code : null;
+}
+
+function projectLockedPickProgress(beforeItem: OrderItem, row: Record<string, unknown>): OrderItem {
+  const status = row.status;
+  const pickedQuantity = Number(row.picked_quantity);
+  if (!itemStatusEnum.includes(status as ItemStatus)
+    || !Number.isSafeInteger(pickedQuantity)
+    || pickedQuantity < 0) {
+    throw new IntegrityError("Locked WMS pick progress is invalid", {
+      reason: "locked_pick_progress_invalid",
+      orderId: beforeItem.orderId,
+      orderItemId: beforeItem.id,
+      status,
+      pickedQuantity: row.picked_quantity,
+    });
+  }
+  return {
+    ...beforeItem,
+    status: status as ItemStatus,
+    pickedQuantity,
+    shortReason: typeof row.short_reason === "string" ? row.short_reason : null,
+    pickedAt: row.picked_at instanceof Date ? row.picked_at : null,
+  } as OrderItem;
 }
 
 // ---------------------------------------------------------------------------
@@ -1059,7 +1088,7 @@ export class PickingUseCases {
     };
   }
 
-  private async completeLegacyPickTransaction(
+  private async applyLegacyPickProgressTransaction(
     tx: any,
     input: {
       itemId: number;
@@ -1073,7 +1102,7 @@ export class PickingUseCases {
       pickMethod?: string;
       inventoryCore: InventoryCore;
     },
-  ): Promise<CompletedPickAtomicResult> {
+  ): Promise<PickProgressAtomicResult> {
     const lockedOrder = await tx.execute(sql`
       SELECT warehouse_status, on_hold
       FROM wms.orders
@@ -1097,26 +1126,68 @@ export class PickingUseCases {
     }
 
     const locked = await tx.execute(sql`
-      SELECT status, picked_quantity, quantity
+      SELECT status, picked_quantity, quantity, short_reason, picked_at
       FROM wms.order_items
       WHERE id = ${input.itemId}
       FOR UPDATE
     `);
     if (!locked.rows?.length) throw new IntegrityError(`Item ${input.itemId} not found`);
+    const lockedStatus = locked.rows[0].status as ItemStatus;
     const lockedPickedQuantity = Number(locked.rows[0].picked_quantity ?? 0);
     const lockedQuantity = Number(locked.rows[0].quantity ?? 0);
-    if (locked.rows[0].status === "completed"
-      || (lockedQuantity > 0 && lockedPickedQuantity >= lockedQuantity)) {
-      return { item: input.beforeItem, deductResult: null, alreadyCompleted: true };
+    const targetShortReason = input.status === "short"
+      ? input.shortReason ?? input.beforeItem.shortReason ?? null
+      : null;
+    if (lockedQuantity !== Number(input.beforeItem.quantity)) {
+      throw new IntegrityError(`Item ${input.itemId} quantity changed while waiting for its inventory lock`, {
+        reason: "pick_quantity_conflict",
+        orderId: input.beforeItem.orderId,
+        orderItemId: input.itemId,
+        expectedQuantity: input.beforeItem.quantity,
+        actualQuantity: lockedQuantity,
+      });
+    }
+    if (lockedStatus === input.status
+      && lockedPickedQuantity === input.effectivePickedQuantity
+      && locked.rows[0].short_reason === targetShortReason) {
+      return {
+        item: projectLockedPickProgress(input.beforeItem, locked.rows[0]),
+        deductResult: null,
+        idempotentReplay: true,
+      };
+    }
+    const expectedPickedQuantity = Number(input.beforeItem.pickedQuantity ?? 0);
+    if (lockedStatus !== input.beforeItem.status || lockedPickedQuantity !== expectedPickedQuantity) {
+      throw new IntegrityError(`Item ${input.itemId} pick progress changed while waiting for its inventory lock`, {
+        reason: "pick_progress_conflict",
+        orderId: input.beforeItem.orderId,
+        orderItemId: input.itemId,
+        expectedStatus: input.beforeItem.status,
+        actualStatus: lockedStatus,
+        expectedPickedQuantity,
+        actualPickedQuantity: lockedPickedQuantity,
+      });
+    }
+    const movementQuantity = input.effectivePickedQuantity - lockedPickedQuantity;
+    if (!Number.isSafeInteger(movementQuantity) || movementQuantity <= 0) {
+      throw new IntegrityError(`Item ${input.itemId} inventory pick requires a positive progress delta`, {
+        reason: "pick_progress_delta_invalid",
+        orderId: input.beforeItem.orderId,
+        orderItemId: input.itemId,
+        currentPickedQuantity: lockedPickedQuantity,
+        targetPickedQuantity: input.effectivePickedQuantity,
+      });
     }
 
     const provisionalItem = {
       ...input.beforeItem,
-      status: "completed",
+      status: input.status,
       pickedQuantity: input.effectivePickedQuantity,
-      shortReason: input.shortReason ?? input.beforeItem.shortReason,
+      shortReason: targetShortReason,
     } as OrderItem;
     const deductResult = await this._deductInventory(provisionalItem, input.beforeItem, {
+      quantity: movementQuantity,
+      expectedPriorPickedQuantity: lockedPickedQuantity,
       warehouseLocationId: input.warehouseLocationId,
       warehouseId: input.warehouseId,
       userId: input.userId,
@@ -1135,19 +1206,20 @@ export class PickingUseCases {
       itemId: input.itemId,
       status: deductResult.success ? input.status : input.beforeItem.status as ItemStatus,
       pickedQuantity: deductResult.success ? input.effectivePickedQuantity : undefined,
-      shortReason: deductResult.success && input.shortReason !== undefined ? input.shortReason : undefined,
+      shortReason: deductResult.success ? targetShortReason : undefined,
       pickedAt: deductResult.success ? new Date() : input.beforeItem.pickedAt,
     });
     if (!updatedItem) throw new IntegrityError(`Item ${input.itemId} not found`);
-    return { item: updatedItem as OrderItem, deductResult, alreadyCompleted: false };
+    return { item: updatedItem as OrderItem, deductResult, idempotentReplay: false };
   }
 
-  private async persistNonInventoryPickProgress(input: {
+  private async persistWmsOnlyPickProgress(input: {
     itemId: number;
     beforeItem: OrderItem;
     effectivePickedQuantity: number;
     shortReason?: string;
-  }): Promise<CompletedPickAtomicResult> {
+    status: ItemStatus;
+  }): Promise<PickProgressAtomicResult> {
     return this.db.transaction(async (tx: any) => {
       const lockedOrder = await tx.execute(sql`
         SELECT warehouse_status, on_hold
@@ -1172,21 +1244,54 @@ export class PickingUseCases {
       }
 
       const locked = await tx.execute(sql`
-        SELECT status
+        SELECT status, picked_quantity, quantity, short_reason, picked_at
         FROM wms.order_items
         WHERE id = ${input.itemId}
         FOR UPDATE
       `);
       if (!locked.rows?.length) throw new IntegrityError(`Item ${input.itemId} not found`);
-      if (locked.rows[0].status === "completed") {
-        return { item: input.beforeItem, deductResult: null, alreadyCompleted: true };
+      const lockedStatus = locked.rows[0].status as ItemStatus;
+      const lockedPickedQuantity = Number(locked.rows[0].picked_quantity ?? 0);
+      const lockedQuantity = Number(locked.rows[0].quantity ?? 0);
+      const expectedPickedQuantity = Number(input.beforeItem.pickedQuantity ?? 0);
+      const targetShortReason = input.status === "short"
+        ? input.shortReason ?? input.beforeItem.shortReason ?? null
+        : null;
+      if (lockedQuantity !== Number(input.beforeItem.quantity)) {
+        throw new IntegrityError(`Item ${input.itemId} quantity changed while waiting for its lock`, {
+          reason: "pick_quantity_conflict",
+          orderId: input.beforeItem.orderId,
+          orderItemId: input.itemId,
+          expectedQuantity: input.beforeItem.quantity,
+          actualQuantity: lockedQuantity,
+        });
+      }
+      if (lockedStatus === input.status
+        && lockedPickedQuantity === input.effectivePickedQuantity
+        && locked.rows[0].short_reason === targetShortReason) {
+        return {
+          item: projectLockedPickProgress(input.beforeItem, locked.rows[0]),
+          deductResult: null,
+          idempotentReplay: true,
+        };
+      }
+      if (lockedStatus !== input.beforeItem.status || lockedPickedQuantity !== expectedPickedQuantity) {
+        throw new IntegrityError(`Item ${input.itemId} pick progress changed while waiting for its lock`, {
+          reason: "pick_progress_conflict",
+          orderId: input.beforeItem.orderId,
+          orderItemId: input.itemId,
+          expectedStatus: input.beforeItem.status,
+          actualStatus: lockedStatus,
+          expectedPickedQuantity,
+          actualPickedQuantity: lockedPickedQuantity,
+        });
       }
       const updatedItem = await persistWmsOrderItemPickProgress(tx, {
         itemId: input.itemId,
-        status: "completed",
+        status: input.status,
         pickedQuantity: input.effectivePickedQuantity,
-        shortReason: input.shortReason,
-        pickedAt: new Date(),
+        shortReason: targetShortReason,
+        pickedAt: input.status === "pending" ? null : input.beforeItem.pickedAt ?? new Date(),
       });
       if (!updatedItem) throw new IntegrityError(`Item ${input.itemId} not found`);
       return {
@@ -1199,7 +1304,7 @@ export class PickingUseCases {
           locationCode: null,
           systemQtyAfter: 0,
         },
-        alreadyCompleted: false,
+        idempotentReplay: false,
       };
     });
   }
@@ -1291,7 +1396,7 @@ export class PickingUseCases {
     };
   }
 
-  private async completeCanonicalPick(
+  private async applyCanonicalPickProgress(
     context: InventoryAvailabilityRuntimeClaimContext,
     input: {
       itemId: number;
@@ -1304,8 +1409,9 @@ export class PickingUseCases {
       deviceType?: string;
       sessionId?: string;
       pickMethod?: string;
+      status: ItemStatus;
     },
-  ): Promise<CompletedPickAtomicResult> {
+  ): Promise<PickProgressAtomicResult> {
     const alreadyPickedQuantity = Number(input.beforeItem.pickedQuantity ?? 0);
     const remainingPickQuantity = input.effectivePickedQuantity - alreadyPickedQuantity;
     const resolved = await this.resolveCanonicalPickTarget(
@@ -1314,11 +1420,11 @@ export class PickingUseCases {
       { warehouseLocationId: input.warehouseLocationId, warehouseId: input.warehouseId },
     );
     if (resolved.nonInventory) {
-      return this.persistNonInventoryPickProgress(input);
+      return this.persistWmsOnlyPickProgress(input);
     }
     if (!Number.isSafeInteger(alreadyPickedQuantity) || alreadyPickedQuantity < 0
       || !Number.isSafeInteger(remainingPickQuantity) || remainingPickQuantity <= 0) {
-      throw new IntegrityError("Canonical completion requires a positive remaining pick quantity", {
+      throw new IntegrityError("Canonical pick progress requires a positive remaining quantity", {
         reason: "canonical_pick_delta_invalid", orderId: input.beforeItem.orderId, orderItemId: input.itemId,
         alreadyPickedQuantity, targetPickedQuantity: input.effectivePickedQuantity,
       });
@@ -1342,12 +1448,15 @@ export class PickingUseCases {
     const pickMovementCursor = await context.getClaimLinePickMovementCursor(claim.claimId, input.itemId);
 
     const actor = canonicalPickerActor(input.userId);
-    const reason = `Picker completed order item ${input.itemId} from ${target.locationCode}`;
+    const reason = `Picker advanced order item ${input.itemId} to ${input.effectivePickedQuantity} from ${target.locationCode}`;
     const wmsProgress = {
       expectedStatus: input.beforeItem.status as "pending" | "in_progress" | "short",
       expectedPickedQuantity: alreadyPickedQuantity,
-      targetStatus: "completed" as const,
+      targetStatus: input.status,
       targetPickedQuantity: input.effectivePickedQuantity,
+      targetShortReason: input.status === "short"
+        ? input.shortReason ?? input.beforeItem.shortReason ?? null
+        : null,
     };
     const baseEvidence = {
       claimId: claim.claimId,
@@ -1404,12 +1513,15 @@ export class PickingUseCases {
     }
 
     const item = await this.storage.getOrderItemById(input.itemId);
-    if (!item || item.status !== "completed" || item.pickedQuantity !== input.effectivePickedQuantity) {
+    if (!item || item.status !== input.status || item.pickedQuantity !== input.effectivePickedQuantity) {
       throw new IntegrityError("Canonical pick committed but its WMS progress projection could not be verified", {
         reason: "canonical_wms_pick_readback_failed",
         orderId: input.beforeItem.orderId,
         orderItemId: input.itemId,
       });
+    }
+    if (canonicalResult.idempotentReplay === true) {
+      return { item, deductResult: null, idempotentReplay: true };
     }
     const updatedLevel = await this.inventoryCore.getLevel(target.productVariantId, target.locationId);
     const systemQtyAfter = Number(updatedLevel?.variantQty ?? 0);
@@ -1418,7 +1530,7 @@ export class PickingUseCases {
       : 0;
     return {
       item,
-      alreadyCompleted: false,
+      idempotentReplay: false,
       deductResult: {
         success: true,
         productVariantId: target.productVariantId,
@@ -1442,7 +1554,7 @@ export class PickingUseCases {
     };
   }
 
-  private async completeInventoryPick(
+  private async applyInventoryPickProgress(
     input: {
       itemId: number;
       beforeItem: OrderItem;
@@ -1456,9 +1568,9 @@ export class PickingUseCases {
       sessionId?: string;
       pickMethod?: string;
     },
-  ): Promise<CompletedPickAtomicResult> {
+  ): Promise<PickProgressAtomicResult> {
     if (!this.runtimeClaimExecutor) {
-      return this.db.transaction((tx: any) => this.completeLegacyPickTransaction(tx, {
+      return this.db.transaction((tx: any) => this.applyLegacyPickProgressTransaction(tx, {
         ...input,
         inventoryCore: typeof this.inventoryCore.withTx === "function"
           ? this.inventoryCore.withTx(tx)
@@ -1466,7 +1578,7 @@ export class PickingUseCases {
       }));
     }
     return this.runtimeClaimExecutor.execute((context) => {
-      if (context.authority === "canonical") return this.completeCanonicalPick(context, input);
+      if (context.authority === "canonical") return this.applyCanonicalPickProgress(context, input);
       if (!context.legacyDb) {
         throw new IntegrityError("Legacy picker authority transaction is unavailable", {
           reason: "legacy_picker_transaction_missing",
@@ -1474,7 +1586,7 @@ export class PickingUseCases {
           orderItemId: input.itemId,
         });
       }
-      return this.completeLegacyPickTransaction(context.legacyDb, {
+      return this.applyLegacyPickProgressTransaction(context.legacyDb, {
         ...input,
         inventoryCore: typeof this.inventoryCore.withTx === "function"
           ? this.inventoryCore.withTx(context.legacyDb)
@@ -1497,11 +1609,31 @@ export class PickingUseCases {
     deviceType?: string;
     sessionId?: string;
   }): Promise<PickItemResult> {
-    const { status, pickedQuantity, shortReason, pickMethod, warehouseLocationId, userId, deviceType, sessionId } = params;
+    const {
+      status,
+      pickedQuantity,
+      shortReason: rawShortReason,
+      pickMethod,
+      warehouseLocationId,
+      userId,
+      deviceType,
+      sessionId,
+    } = params;
+
+    if (rawShortReason !== undefined && rawShortReason !== null && typeof rawShortReason !== "string") {
+      throw new ValidationError("shortReason must be a string when provided");
+    }
+    const shortReason = rawShortReason == null ? undefined : rawShortReason.trim();
+    if (shortReason !== undefined && (shortReason.length === 0 || shortReason.length > 1000)) {
+      throw new ValidationError("shortReason must contain between 1 and 1000 characters");
+    }
 
     // Validate status enum
     if (!itemStatusEnum.includes(status as any)) {
       throw new ValidationError(`Status must be one of: ${itemStatusEnum.join(", ")}`);
+    }
+    if (shortReason !== undefined && status !== "short") {
+      throw new ValidationError("shortReason may only be provided for short pick progress");
     }
 
     // Load item before update
@@ -1557,18 +1689,6 @@ export class PickingUseCases {
 
     const currentPickedQuantity = beforeItem.pickedQuantity || 0;
 
-    // A completed status is an idempotent terminal state under both authorities.
-    // A stale active row with a full picked quantity is resolved under the
-    // selected authority below: legacy preserves its deployed no-op, while
-    // canonical requires the claim ledger to prove whether physical stock moved.
-    if (status === "completed" && (
-      beforeItem.status === "completed"
-      || (!this.runtimeClaimExecutor && currentPickedQuantity >= beforeItem.quantity)
-    )) {
-      console.log(`[Pick] Item ${itemId} is already fully picked - returning success (idempotent)`);
-      return { success: true, item: beforeItem as any, inventory: emptyPickInventoryContext(beforeItem.sku) };
-    }
-
     let requestedPickedQuantity: number | undefined;
 
     // Validate pickedQuantity bounds
@@ -1602,7 +1722,33 @@ export class PickingUseCases {
       };
     }
 
-    if (status === "in_progress" && requestedPickedQuantity === 0) {
+    const effectivePickedQuantity = status === "completed"
+      ? beforeItem.quantity
+      : requestedPickedQuantity ?? currentPickedQuantity;
+
+    if (status === "pending" && effectivePickedQuantity !== 0) {
+      const message = "Pending picks must have zero picked quantity; use the inventory-aware unpick action to reduce progress";
+      await this.logRejectedPickCommand({
+        beforeItem,
+        order: orderForPick,
+        status,
+        pickedQuantity: requestedPickedQuantity,
+        shortReason,
+        pickMethod,
+        userId,
+        deviceType,
+        sessionId,
+        rejectionCode: "pending_requires_zero_quantity",
+        message,
+      });
+      return {
+        success: false,
+        error: "pending_requires_zero_quantity",
+        message,
+      };
+    }
+
+    if (status === "in_progress" && effectivePickedQuantity === 0) {
       const message = "In-progress picks must have a positive pickedQuantity";
       await this.logRejectedPickCommand({
         beforeItem,
@@ -1624,16 +1770,98 @@ export class PickingUseCases {
       };
     }
 
-    const effectivePickedQuantity = status === "completed"
-      ? beforeItem.quantity
-      : requestedPickedQuantity ?? currentPickedQuantity;
-    const effectiveShortReason = shortReason !== undefined ? shortReason : beforeItem.shortReason;
+    if (["in_progress", "short"].includes(status) && effectivePickedQuantity >= beforeItem.quantity) {
+      const message = `In-progress and short picks must remain below the full item quantity (${beforeItem.quantity}); use completed for a full pick`;
+      await this.logRejectedPickCommand({
+        beforeItem,
+        order: orderForPick,
+        status,
+        pickedQuantity: requestedPickedQuantity,
+        shortReason,
+        pickMethod,
+        userId,
+        deviceType,
+        sessionId,
+        rejectionCode: "active_pick_requires_partial_quantity",
+        message,
+      });
+      return {
+        success: false,
+        error: "active_pick_requires_partial_quantity",
+        message,
+      };
+    }
+
+    // A completed row is terminal and idempotent only when its persisted
+    // counter already proves a full pick. Do not bless a malformed terminal row.
+    if (status === "completed" && beforeItem.status === "completed"
+      && currentPickedQuantity === beforeItem.quantity) {
+      console.log(`[Pick] Item ${itemId} is already fully picked - returning success (idempotent)`);
+      return { success: true, item: beforeItem as any, inventory: emptyPickInventoryContext(beforeItem.sku) };
+    }
+
+    // Legacy code could advance the WMS counter without inventory/lot custody.
+    // A zero-delta completion cannot distinguish that historical state from a
+    // backed pick, so require the operator to unpick and rescan rather than
+    // silently certifying custody that this command did not create.
+    if (status === "completed" && beforeItem.status !== "completed"
+      && beforeItem.quantity > 0
+      && currentPickedQuantity === beforeItem.quantity) {
+      const message = "This line already has a full picked counter without completed custody; unpick it and rescan the physical units";
+      await this.logRejectedPickCommand({
+        beforeItem,
+        order: orderForPick,
+        status,
+        pickedQuantity: requestedPickedQuantity,
+        shortReason,
+        pickMethod,
+        userId,
+        deviceType,
+        sessionId,
+        rejectionCode: "pick_custody_reconfirmation_required",
+        message,
+      });
+      return {
+        success: false,
+        error: "pick_custody_reconfirmation_required",
+        message,
+      };
+    }
+
+    const effectiveShortReason = status === "short"
+      ? shortReason ?? beforeItem.shortReason ?? null
+      : null;
+    if (effectivePickedQuantity < currentPickedQuantity) {
+      const message = "Picked quantity decreases must use the inventory-aware unpick action";
+      await this.logRejectedPickCommand({
+        beforeItem,
+        order: orderForPick,
+        status,
+        pickedQuantity: requestedPickedQuantity,
+        shortReason,
+        pickMethod,
+        userId,
+        deviceType,
+        sessionId,
+        rejectionCode: "pick_quantity_decrease_requires_unpick",
+        message,
+      });
+      return {
+        success: false,
+        error: "pick_quantity_decrease_requires_unpick",
+        message,
+      };
+    }
 
     if (
       status === beforeItem.status &&
       effectivePickedQuantity === currentPickedQuantity &&
       effectiveShortReason === beforeItem.shortReason
     ) {
+      if (currentPickedQuantity > 0 && ["in_progress", "short"].includes(status)) {
+        console.log(`[Pick] Item ${itemId} already has the requested progress - returning success (idempotent)`);
+        return { success: true, item: beforeItem as any, inventory: emptyPickInventoryContext(beforeItem.sku) };
+      }
       const message = `Pick request did not change item ${itemId}`;
       await this.logRejectedPickCommand({
         beforeItem,
@@ -1655,15 +1883,16 @@ export class PickingUseCases {
       };
     }
 
-    let completedDeductResult:
+    const pickedQuantityDelta = effectivePickedQuantity - currentPickedQuantity;
+    let pickDeductResult:
       | Awaited<ReturnType<PickingUseCases["_deductInventory"]>>
       | null = null;
 
     let item: OrderItem | null = null;
     let forcePostPickStatus: string | null = null;
 
-    if (status === "completed" && beforeItem.status !== "completed") {
-      const atomicResult = await this.completeInventoryPick({
+    if (pickedQuantityDelta > 0) {
+      const atomicResult = await this.applyInventoryPickProgress({
         itemId,
         beforeItem,
         status: status as ItemStatus,
@@ -1677,23 +1906,33 @@ export class PickingUseCases {
         pickMethod,
       });
 
-      if (atomicResult.alreadyCompleted) {
-        console.log(`[Pick] Item ${itemId} completed while waiting for lock - returning success (idempotent)`);
+      if (atomicResult.idempotentReplay) {
+        console.log(`[Pick] Item ${itemId} reached the requested progress while waiting for its lock - returning success (idempotent)`);
         return { success: true, item: atomicResult.item as any, inventory: emptyPickInventoryContext(beforeItem.sku) };
       }
 
       item = atomicResult.item;
-      completedDeductResult = atomicResult.deductResult;
+      pickDeductResult = atomicResult.deductResult;
     } else {
-      // Atomic status update with WHERE guard on expectedCurrentStatus
-      item = await this.storage.updateOrderItemStatus(
-        itemId, status as ItemStatus, requestedPickedQuantity, shortReason, beforeItem.status as ItemStatus,
-      );
+      // Status/reason-only progress still locks and verifies the exact WMS
+      // snapshot. A status guard alone can overwrite a concurrent quantity
+      // increment when both requests started from the same status.
+      const atomicResult = await this.persistWmsOnlyPickProgress({
+        itemId,
+        beforeItem,
+        status: status as ItemStatus,
+        effectivePickedQuantity,
+        shortReason,
+      });
+      if (atomicResult.idempotentReplay) {
+        console.log(`[Pick] Item ${itemId} reached the requested status while waiting for its lock - returning success (idempotent)`);
+        return { success: true, item: atomicResult.item as any, inventory: emptyPickInventoryContext(beforeItem.sku) };
+      }
+      item = atomicResult.item;
     }
 
     if (!item) {
-      // With no status guard on completed transitions, this should only happen
-      // for non-completed status updates. Log and return error.
+      // A guarded status-only update lost its optimistic race.
       console.error(`[Pick] status_conflict on item ${itemId}: status='${beforeItem.status}', requested='${status}', pickedQty=${requestedPickedQuantity}`);
       return { success: false, error: "status_conflict", message: `Item ${itemId} status conflict` };
     }
@@ -1703,38 +1942,43 @@ export class PickingUseCases {
     const pickerId = order?.assignedPickerId;
     const picker = pickerId ? await this.storage.getUser(pickerId) : null;
 
-    let actionType = "item_picked";
-    if (status === "completed") actionType = "item_picked";
-    else if (status === "short") actionType = "item_shorted";
-    else if (requestedPickedQuantity !== undefined && currentPickedQuantity !== requestedPickedQuantity) actionType = "item_quantity_adjusted";
+    const actualPickedQuantityDelta = item.pickedQuantity - currentPickedQuantity;
+    const actualProgressChanged = actualPickedQuantityDelta !== 0
+      || item.status !== beforeItem.status
+      || item.shortReason !== beforeItem.shortReason;
+    if (actualProgressChanged) {
+      let actionType = "item_quantity_adjusted";
+      if (item.status === "completed") actionType = "item_picked";
+      else if (item.status === "short" && beforeItem.status !== "short") actionType = "item_shorted";
 
-    await this.storage.createPickingLog({
-      actionType,
-      pickerId: pickerId || undefined,
-      pickerName: picker?.displayName || picker?.username || pickerId || undefined,
-      pickerRole: picker?.role,
-      orderId: item.orderId,
-      orderNumber: order?.orderNumber,
-      orderItemId: item.id,
-      sku: item.sku,
-      itemName: item.name,
-      locationCode: item.location,
-      qtyRequested: item.quantity,
-      qtyBefore: beforeItem.pickedQuantity || 0,
-      qtyAfter: item.pickedQuantity,
-      qtyDelta: item.pickedQuantity - (beforeItem.pickedQuantity || 0),
-      reason: shortReason,
-      itemStatusBefore: beforeItem.status,
-      itemStatusAfter: item.status,
-      deviceType: deviceType || "desktop",
-      sessionId,
-      pickMethod: pickMethod || "manual",
-    });
+      await this.storage.createPickingLog({
+        actionType,
+        pickerId: pickerId || undefined,
+        pickerName: picker?.displayName || picker?.username || pickerId || undefined,
+        pickerRole: picker?.role,
+        orderId: item.orderId,
+        orderNumber: order?.orderNumber,
+        orderItemId: item.id,
+        sku: item.sku,
+        itemName: item.name,
+        locationCode: item.location,
+        qtyRequested: item.quantity,
+        qtyBefore: currentPickedQuantity,
+        qtyAfter: item.pickedQuantity,
+        qtyDelta: actualPickedQuantityDelta,
+        reason: shortReason,
+        itemStatusBefore: beforeItem.status,
+        itemStatusAfter: item.status,
+        deviceType: deviceType || "desktop",
+        sessionId,
+        pickMethod: pickMethod || "manual",
+      });
+    }
 
     // Build inventory context for picker UI
     const inventoryCtx: PickInventoryContext = emptyPickInventoryContext(item.sku);
 
-    if (status === "short" && beforeItem.status !== "short") {
+    if (item.status === "short" && beforeItem.status !== "short") {
       try {
         const queued = await this.queueShortPickReplen({
           item,
@@ -1786,14 +2030,10 @@ export class PickingUseCases {
       }
     }
 
-    // If item was just completed, deduct inventory
-    if (status === "completed" && beforeItem.status !== "completed") {
-      const deductResult = completedDeductResult ?? await this._deductInventory(item, beforeItem, {
-        warehouseLocationId,
-        warehouseId: order?.warehouseId ?? null,
-        userId,
-        pickMethod,
-      });
+    // Every positive picker delta was committed with its inventory movement.
+    // Build the same operator feedback for partial and final increments.
+    if (pickDeductResult) {
+      const deductResult = pickDeductResult;
 
       if (deductResult.success && !deductResult.noVariant) {
         // Deduction succeeded — check replen
@@ -1801,6 +2041,16 @@ export class PickingUseCases {
         inventoryCtx.systemQtyAfter = deductResult.systemQtyAfter;
         inventoryCtx.locationId = deductResult.locationId;
         inventoryCtx.locationCode = deductResult.locationCode;
+
+        // The authority-specific inventory/WMS transaction has returned and
+        // committed at this point. Queue publication only from this shared
+        // post-commit path so neither a rollback nor authority selection can
+        // expose inventory progress that was not durably recorded.
+        if (this.channelSync) {
+          this.channelSync.queueSyncAfterInventoryChange(deductResult.productVariantId).catch((err: any) =>
+            console.warn(`[ChannelSync] Post-pick sync failed for variant ${deductResult.productVariantId}:`, err),
+          );
+        }
 
         if (deductResult.autoResolved) {
           inventoryCtx.resolution = {
@@ -1915,8 +2165,9 @@ export class PickingUseCases {
         // When replen triggers, the UI shows the simple replen-confirm toggle instead.
 
       } else if (!deductResult.success) {
-        // Deduction FAILED — system inventory is wrong.
-        // DO NOT revert the pick. Item stays completed.
+        // The inventory movement failed, so the guarded legacy transaction kept
+        // WMS progress at its prior state. Surface the shipment block without
+        // logging a pick/short transition that did not commit.
         inventoryCtx.deducted = false;
         inventoryCtx.systemQtyAfter = deductResult.systemQty;
         inventoryCtx.locationId = deductResult.locationId;
@@ -1939,7 +2190,7 @@ export class PickingUseCases {
             locationId: deductResult.locationId,
             locationCode: deductResult.locationCode,
             systemQty: deductResult.systemQty,
-            requestedQty: item.pickedQuantity || item.quantity,
+            requestedQty: pickedQuantityDelta,
             error: deductResult.error,
             message: deductResult.message,
             userId,
@@ -1984,7 +2235,7 @@ export class PickingUseCases {
           sku: item.sku,
           itemName: item.name,
           locationCode: inventoryCtx.locationCode || item.location,
-          qtyRequested: item.pickedQuantity || item.quantity,
+          qtyRequested: pickedQuantityDelta,
           qtyBefore: deductResult.systemQty,
           qtyAfter: deductResult.systemQty,
           reason: deductResult.message,
@@ -2242,9 +2493,25 @@ export class PickingUseCases {
   private async _deductInventory(
     item: OrderItem,
     beforeItem: OrderItem,
-    opts: { warehouseLocationId?: number; warehouseId?: number | null; userId?: string; inventoryCore?: InventoryCore; pickMethod?: string },
+    opts: {
+      quantity?: number;
+      expectedPriorPickedQuantity?: number;
+      warehouseLocationId?: number;
+      warehouseId?: number | null;
+      userId?: string;
+      inventoryCore?: InventoryCore;
+      pickMethod?: string;
+    },
   ): Promise<DeductInventoryResult> {
-    const pickedQty = item.pickedQuantity || item.quantity;
+    const pickedQty = opts.quantity ?? (item.pickedQuantity || item.quantity);
+    if (!Number.isSafeInteger(pickedQty) || pickedQty <= 0) {
+      throw new IntegrityError("Inventory pick quantity must be a positive safe integer", {
+        reason: "inventory_pick_quantity_invalid",
+        orderId: item.orderId,
+        orderItemId: item.id,
+        pickedQty,
+      });
+    }
     const productVariant = await this.storage.getProductVariantBySku(item.sku);
     if (!productVariant) {
       // No variant mapping — can't deduct, but this is non-fatal for non-inventory items
@@ -2449,6 +2716,8 @@ export class PickingUseCases {
       qty: pickedQty,
       orderId: item.orderId,
       orderItemId: item.id,
+      expectedPriorPickedQuantity:
+        opts.expectedPriorPickedQuantity ?? Number(beforeItem.pickedQuantity ?? 0),
       userId: opts.userId,
     });
 
@@ -2474,13 +2743,6 @@ export class PickingUseCases {
 
     console.log(`[Inventory] Picked: ${pickedQty} variant units of ${productVariant.id} from location ${pickLocationId}`);
     
-    // Trigger channel sync for this variant (fire-and-forget)
-    if (this.channelSync) {
-      this.channelSync.queueSyncAfterInventoryChange(productVariant.id).catch((err: any) =>
-        console.warn(`[ChannelSync] Post-pick sync failed for variant ${productVariant.id}:`, err),
-      );
-    }
-
     return {
       success: true,
       productVariantId: productVariant.id,
@@ -2583,6 +2845,7 @@ export class PickingUseCases {
     qtyBefore: number;
     qtyAfter: number;
     qtyDelta: number;
+    idempotentReplay: boolean;
   }> {
     if (!context.getClaimLinePickMovementCursor) {
       throw new IntegrityError("Canonical claim pick-movement cursor lookup is not configured", {
@@ -2601,7 +2864,7 @@ export class PickingUseCases {
     const actor = canonicalPickerActor(input.userId);
     const reason = input.reason?.trim() || "Picker unpick";
     const wmsProgress = {
-      expectedStatus: input.beforeItem.status as "completed" | "in_progress",
+      expectedStatus: input.beforeItem.status as "completed" | "in_progress" | "short",
       expectedPickedQuantity: qtyBefore,
       targetStatus: qtyAfter === 0 ? "pending" as const : "in_progress" as const,
       targetPickedQuantity: qtyAfter,
@@ -2632,6 +2895,16 @@ export class PickingUseCases {
         orderItemId: input.beforeItem.id,
       });
     }
+    if (canonicalResult.idempotentReplay === true) {
+      return {
+        item,
+        inventory: emptyPickInventoryContext(input.beforeItem.sku),
+        qtyBefore: item.pickedQuantity,
+        qtyAfter: item.pickedQuantity,
+        qtyDelta: 0,
+        idempotentReplay: true,
+      };
+    }
     const locations = await this.storage.getAllWarehouseLocations();
     const restoredLocationIds = new Set(canonicalResult.warehouseLocationIds);
     const assignedLocationCode = input.beforeItem.location?.trim().toUpperCase() ?? "";
@@ -2649,7 +2922,7 @@ export class PickingUseCases {
       inventory.resolution.code = "unpick_reversed";
       inventory.resolution.message = "Canonical picked inventory was returned through exact claim lineage";
     }
-    return { item, inventory, qtyBefore, qtyAfter, qtyDelta: -quantity };
+    return { item, inventory, qtyBefore, qtyAfter, qtyDelta: -quantity, idempotentReplay: false };
   }
 
   async unpickItem(itemId: number, params: {
@@ -2699,19 +2972,11 @@ export class PickingUseCases {
     let location: WarehouseLocation | undefined;
     let inventoryTracked = false;
 
-    if (["completed", "in_progress"].includes(beforeItem.status)) {
+    if (["completed", "in_progress", "short"].includes(beforeItem.status)) {
       variant = await this.storage.getProductVariantBySku(beforeItem.sku);
       inventoryTracked = beforeItem.requiresShipping === 1
         && variant?.requiresShipping !== false
         && variant?.trackInventory !== false;
-      if (inventoryTracked && variant?.id && beforeItem.status === "completed") {
-        const locations = await this.storage.getAllWarehouseLocations();
-        const locationCode = (beforeItem.location || "").trim().toUpperCase();
-        location = locations.find(loc => loc.code.toUpperCase() === locationCode);
-        if (!location) {
-          throw new ValidationError(`Pick bin ${beforeItem.location || "(blank)"} was not found`);
-        }
-      }
     }
 
     const executeLegacyUnpick = async (tx: any) => {
@@ -2741,7 +3006,7 @@ export class PickingUseCases {
       }
 
       const lockedItem = await tx.execute(sql`
-        SELECT id, status, picked_quantity, quantity
+        SELECT id, status, picked_quantity, quantity, short_reason, picked_at
         FROM wms.order_items
         WHERE id = ${itemId}
         FOR UPDATE
@@ -2752,20 +3017,39 @@ export class PickingUseCases {
       }
 
       const itemState = lockedItem.rows[0];
-      const lockedPickedQty = Number(itemState.picked_quantity || 0);
+      const lockedProjection = projectLockedPickProgress(beforeItem, itemState);
+      const lockedPickedQty = lockedProjection.pickedQuantity;
       if (lockedPickedQty <= 0) {
         return {
-          item: beforeItem,
+          item: lockedProjection,
           inventory: emptyPickInventoryContext(beforeItem.sku),
-          qtyBefore: beforePickedQty,
-          qtyAfter: beforePickedQty,
+          qtyBefore: 0,
+          qtyAfter: 0,
           qtyDelta: 0,
+          idempotentReplay: true,
         };
+      }
+      const lockedQuantity = Number(itemState.quantity);
+      if (lockedProjection.status !== beforeItem.status
+        || lockedPickedQty !== beforePickedQty
+        || lockedQuantity !== Number(beforeItem.quantity)) {
+        throw new IntegrityError(`Item ${itemId} pick progress changed while waiting for its unpick lock`, {
+          reason: "unpick_progress_conflict",
+          orderId: beforeItem.orderId,
+          orderItemId: itemId,
+          expectedStatus: beforeItem.status,
+          actualStatus: lockedProjection.status,
+          expectedPickedQuantity: beforePickedQty,
+          actualPickedQuantity: lockedPickedQty,
+          expectedQuantity: beforeItem.quantity,
+          actualQuantity: lockedQuantity,
+        });
       }
 
       const lockedActualUnpickQty = Math.min(requestedQty, lockedPickedQty);
+      const newPickedQty = lockedPickedQty - lockedActualUnpickQty;
 
-      if (itemState.status === "completed" && inventoryTracked) {
+      if (inventoryTracked) {
         if (!variant?.id) {
           throw new IntegrityError(`Tracked picker SKU ${beforeItem.sku} has no active catalog variant`, {
             reason: "legacy_picker_variant_missing",
@@ -2783,25 +3067,56 @@ export class PickingUseCases {
           throw new IntegrityError("Inventory unpick service is not configured");
         }
 
-        const reversed = await txInventoryCore.unpickItem({
-          productVariantId: variant!.id,
-          warehouseLocationId: location!.id,
-          qty: lockedActualUnpickQty,
+        if (typeof txInventoryCore.getOrderItemPickedCostQuantity !== "function") {
+          throw new IntegrityError("Inventory lot-cost custody lookup is not configured", {
+            reason: "picked_cost_custody_lookup_unavailable",
+            orderId: beforeItem.orderId,
+            orderItemId: itemId,
+          });
+        }
+        const backedPickedQuantity = await txInventoryCore.getOrderItemPickedCostQuantity({
           orderId: beforeItem.orderId,
           orderItemId: beforeItem.id,
-          userId: params.userId,
-          reason: params.reason || "Picker unpick",
+          productVariantId: variant.id,
         });
+        if (!Number.isSafeInteger(backedPickedQuantity)
+          || backedPickedQuantity < 0
+          || backedPickedQuantity > lockedPickedQty) {
+          throw new IntegrityError(`Cannot unpick item ${itemId}: lot-cost custody does not match WMS progress`, {
+            reason: "picked_cost_custody_mismatch",
+            orderId: beforeItem.orderId,
+            orderItemId: itemId,
+            wmsPickedQuantity: lockedPickedQty,
+            costCustodyQuantity: backedPickedQuantity,
+          });
+        }
+        const physicalUnpickQuantity = Math.max(0, backedPickedQuantity - newPickedQty);
+        if (physicalUnpickQuantity > 0) {
+          const locations = await this.storage.getAllWarehouseLocations();
+          const locationCode = (beforeItem.location || "").trim().toUpperCase();
+          location = locations.find(loc => loc.code.toUpperCase() === locationCode);
+          if (!location) {
+            throw new ValidationError(`Pick bin ${beforeItem.location || "(blank)"} was not found`);
+          }
+          const reversed = await txInventoryCore.unpickItem({
+            productVariantId: variant.id,
+            warehouseLocationId: location.id,
+            qty: physicalUnpickQuantity,
+            orderId: beforeItem.orderId,
+            orderItemId: beforeItem.id,
+            userId: params.userId,
+            reason: params.reason || "Picker unpick",
+          });
 
-        if (!reversed) {
-          throw new IntegrityError(
-            `Cannot unpick item ${itemId}: picked inventory was not available to reverse`,
-            { reason: "picked_inventory_unavailable", orderId: beforeItem.orderId, orderItemId: itemId },
-          );
+          if (!reversed) {
+            throw new IntegrityError(
+              `Cannot unpick item ${itemId}: picked inventory was not available to reverse`,
+              { reason: "picked_inventory_unavailable", orderId: beforeItem.orderId, orderItemId: itemId },
+            );
+          }
         }
       }
 
-      const newPickedQty = lockedPickedQty - lockedActualUnpickQty;
       const newStatus: ItemStatus = newPickedQty <= 0 ? "pending" : "in_progress";
       const itemUpdates: Record<string, any> = {
         status: newStatus,
@@ -2815,6 +3130,7 @@ export class PickingUseCases {
         itemId,
         status: itemUpdates.status as ItemStatus,
         pickedQuantity: itemUpdates.pickedQuantity,
+        shortReason: itemState.status === "short" ? null : undefined,
         pickedAt: itemUpdates.pickedAt,
       });
 
@@ -2861,10 +3177,11 @@ export class PickingUseCases {
         qtyBefore: lockedPickedQty,
         qtyAfter: newPickedQty,
         qtyDelta: -lockedActualUnpickQty,
+        idempotentReplay: false,
       };
     };
 
-    const result = ["completed", "in_progress"].includes(beforeItem.status) && this.runtimeClaimExecutor
+    const result = ["completed", "in_progress", "short"].includes(beforeItem.status) && this.runtimeClaimExecutor
       ? await this.runtimeClaimExecutor.execute(async (context) => {
           if (context.authority === "canonical" && inventoryTracked) {
             if (!context.getClaimOwningPickedLine) {
@@ -2876,7 +3193,7 @@ export class PickingUseCases {
             }
             const claim = await context.getClaimOwningPickedLine(beforeItem.orderId, beforeItem.id);
             if (!claim) {
-              if (beforeItem.status === "in_progress") {
+              if (["in_progress", "short"].includes(beforeItem.status)) {
                 return this.db.transaction(executeLegacyUnpick);
               }
               throw new IntegrityError("The completed WMS item has no canonical picked claim line to reverse", {
@@ -2907,6 +3224,10 @@ export class PickingUseCases {
           return executeLegacyUnpick(context.legacyDb);
         })
       : await this.db.transaction(executeLegacyUnpick);
+
+    if (result.idempotentReplay) {
+      return { success: true, item: result.item, inventory: result.inventory };
+    }
 
     const actorId = params.userId || orderBefore.assignedPickerId || undefined;
     const actor = actorId ? await this.storage.getUser(actorId) : null;

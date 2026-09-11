@@ -5107,7 +5107,7 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
             || quantity !== BigInt(command.wmsProgress.targetPickedQuantity) - expectedPicked) {
             throw new InventoryAvailabilityClaimRepositoryError(
               "CLAIM_WMS_PICK_CUSTODY_MISMATCH",
-              "WMS completion must add only its remaining delta to exact existing claim-owned picked custody.",
+              "WMS pick progress must add only its next delta to exact existing claim-owned picked custody.",
               { claimLineId: line.id.toString(), expectedPickedQty: expectedPicked.toString(),
                 actualPickedQty: line.pickedTargetQty.toString(), quantity: quantity.toString() },
             );

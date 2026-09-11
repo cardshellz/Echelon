@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   applyRefundAuthorityToWmsOrderItem,
   insertWmsOrderItems,
+  persistCanonicalWmsPickProgress,
   persistWmsOrderItemPickProgress,
   reconcileWmsOrderItemAuthority,
   replaceUnstartedWmsOrderItemsForRepair,
@@ -235,5 +236,85 @@ describe("WMS order-item command boundary", () => {
       }),
     ).rejects.toMatchObject({ code: "INVALID_INPUT" });
     expect(update).not.toHaveBeenCalled();
+  });
+
+  it("writes a canonical partial-short reason in the same guarded progress update", async () => {
+    const query = vi.fn()
+      .mockResolvedValueOnce({ rows: [{ id: 77 }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 });
+
+    await persistCanonicalWmsPickProgress({ query }, {
+      movementType: "pick",
+      movementQuantity: 2,
+      orderId: 42,
+      orderItemId: 77,
+      targetVariantId: 105,
+      warehouseLocationId: 9,
+      occurredAt: new Date("2026-09-11T12:00:00Z"),
+      progress: {
+        expectedStatus: "pending",
+        expectedPickedQuantity: 0,
+        targetStatus: "short",
+        targetPickedQuantity: 2,
+        targetShortReason: "partial",
+      },
+    });
+
+    expect(query.mock.calls[0]?.[0]).toContain("short_reason = CASE WHEN $8::boolean THEN $9::text");
+    expect(query.mock.calls[0]?.[1]).toEqual([
+      "short",
+      2,
+      new Date("2026-09-11T12:00:00Z"),
+      77,
+      42,
+      "pending",
+      0,
+      true,
+      "partial",
+    ]);
+  });
+
+  it("rejects a short reason attached to non-short canonical progress", async () => {
+    const query = vi.fn();
+
+    await expect(persistCanonicalWmsPickProgress({ query }, {
+      movementType: "pick",
+      movementQuantity: 1,
+      orderId: 42,
+      orderItemId: 77,
+      targetVariantId: 105,
+      warehouseLocationId: 9,
+      occurredAt: new Date("2026-09-11T12:00:00Z"),
+      progress: {
+        expectedStatus: "pending",
+        expectedPickedQuantity: 0,
+        targetStatus: "in_progress",
+        targetPickedQuantity: 1,
+        targetShortReason: "partial",
+      },
+    })).rejects.toMatchObject({ code: "INVALID_WMS_PICK_PROGRESS" });
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it("reverses canonical short progress and clears the obsolete short reason", async () => {
+    const query = vi.fn().mockResolvedValueOnce({ rows: [{ id: 77 }], rowCount: 1 });
+
+    await persistCanonicalWmsPickProgress({ query }, {
+      movementType: "unpick",
+      movementQuantity: 1,
+      orderId: 42,
+      orderItemId: 77,
+      occurredAt: new Date("2026-09-11T12:00:00Z"),
+      progress: {
+        expectedStatus: "short",
+        expectedPickedQuantity: 2,
+        targetStatus: "in_progress",
+        targetPickedQuantity: 1,
+      },
+    });
+
+    expect(query).toHaveBeenCalledTimes(2);
+    expect(query.mock.calls[0]?.[0]).toContain("short_reason = CASE WHEN $5 = 'short' THEN NULL");
+    expect(query.mock.calls[0]?.[1]).toEqual(["in_progress", 1, 77, 42, "short", 2]);
   });
 });

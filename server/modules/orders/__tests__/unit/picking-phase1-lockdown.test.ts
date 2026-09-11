@@ -130,6 +130,7 @@ describe("picking phase 1 mutation lockdown", () => {
     };
     const inventoryCore: any = {
       withTx: vi.fn(() => inventoryCore),
+      getOrderItemPickedCostQuantity: vi.fn(async () => 2),
       unpickItem: vi.fn(async () => true),
     };
     const storage = {
@@ -165,6 +166,11 @@ describe("picking phase 1 mutation lockdown", () => {
       orderId: beforeItem.orderId,
       orderItemId: beforeItem.id,
     }));
+    expect(inventoryCore.getOrderItemPickedCostQuantity).toHaveBeenCalledWith({
+      orderId: beforeItem.orderId,
+      orderItemId: beforeItem.id,
+      productVariantId: 100,
+    });
     expect(updateCalls).toEqual(expect.arrayContaining([
       expect.objectContaining({ pickedQuantity: 1, status: "in_progress" }),
       expect.objectContaining({ pickedCount: 1, warehouseStatus: "in_progress", completedAt: null }),

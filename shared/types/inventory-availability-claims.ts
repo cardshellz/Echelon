@@ -19,7 +19,16 @@ const canonicalWmsPickProgressSchema = z.object({
   expectedPickedQuantity: nonnegativePostgresInteger,
   targetStatus: z.enum(["pending", "in_progress", "completed", "short"]),
   targetPickedQuantity: nonnegativePostgresInteger,
-}).strict();
+  targetShortReason: nonblank(1000).nullable().optional(),
+}).strict().superRefine((progress, context) => {
+  if (progress.targetShortReason != null && progress.targetStatus !== "short") {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["targetShortReason"],
+      message: "targetShortReason is valid only for short progress",
+    });
+  }
+});
 
 export const canonicalAvailabilityClaimCommandSchema = z.object({
   orderId: positiveInteger,

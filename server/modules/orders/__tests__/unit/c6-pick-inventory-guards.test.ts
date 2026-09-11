@@ -29,8 +29,8 @@ const INVENTORY_SRC = readFileSync(
 );
 
 const LEGACY_PICK_TRANSACTION = PICKING_SRC.substring(
-  PICKING_SRC.indexOf("private async completeLegacyPickTransaction"),
-  PICKING_SRC.indexOf("private async persistNonInventoryPickProgress"),
+  PICKING_SRC.indexOf("private async applyLegacyPickProgressTransaction"),
+  PICKING_SRC.indexOf("private async persistWmsOnlyPickProgress"),
 );
 
 // ─── D-PICKGUARD structural checks ─────────────────────────────────
