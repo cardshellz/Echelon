@@ -34,7 +34,7 @@ BEGIN
       RAISE NOTICE 'Box dimension correction skipped id %: nonpositive named size', original.id;
       CONTINUE;
     END IF;
-    correction_id := md5('245_correct_legacy_box_dimensions:' || original.id)::uuid;
+    correction_id := md5('246_correct_legacy_box_dimensions:' || original.id)::uuid;
     IF EXISTS (SELECT 1 FROM shipping.configuration_commands WHERE command_id = correction_id) THEN
       CONTINUE;
     END IF;
@@ -66,7 +66,7 @@ BEGIN
       correction_id,
       encode(sha256(convert_to(jsonb_build_object('id', original.id,
         'lengthMm', target_length, 'widthMm', target_width, 'heightMm', target_height)::text, 'UTF8')), 'hex'),
-      'migration:245_correct_legacy_box_dimensions', 'box:' || original.id,
+      'migration:246_correct_legacy_box_dimensions', 'box:' || original.id,
       to_jsonb(original), jsonb_build_object('box', to_jsonb(corrected),
         'reason', 'Owner-confirmed box name defines inner inch dimensions'), transaction_timestamp()
     );

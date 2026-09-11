@@ -164,7 +164,7 @@ describe.skipIf(!enabled)("warehouse-owned packaging commands", () => {
 
   it("corrects confirmed named inch sizes once, preserving other settings and conflicting measurements", async () => {
     const client = await db.connect();
-    const migration = readFileSync(resolve("migrations/245_correct_legacy_box_dimensions.sql"), "utf8");
+    const migration = readFileSync(resolve("migrations/246_correct_legacy_box_dimensions.sql"), "utf8");
     const sizes = [[10, 8, 4], [10, 8, 6], [10, 8, 8], [12, 10, 6],
       [13, 10, 9], [15, 12, 7], [16, 7, 8], [16, 8, 11], [8.125, 6, 4]];
     try {
@@ -219,7 +219,7 @@ describe.skipIf(!enabled)("warehouse-owned packaging commands", () => {
           configuration_revision: 5, updated_at: expect.any(Date) });
       }
       const audit = (await client.query(`SELECT * FROM shipping.configuration_commands
-        WHERE actor_id='migration:245_correct_legacy_box_dimensions' ORDER BY resource_key`)).rows;
+        WHERE actor_id='migration:246_correct_legacy_box_dimensions' ORDER BY resource_key`)).rows;
       expect(audit).toHaveLength(sizes.length);
       for (const event of audit) {
         const previous = before.find((row) => row.id === event.before_state.id);
@@ -230,7 +230,7 @@ describe.skipIf(!enabled)("warehouse-owned packaging commands", () => {
       await client.query(migration);
       expect((await client.query("SELECT * FROM shipping.box_catalog ORDER BY id")).rows).toEqual(after);
       expect((await client.query(`SELECT * FROM shipping.configuration_commands
-        WHERE actor_id='migration:245_correct_legacy_box_dimensions' ORDER BY resource_key`)).rows).toEqual(audit);
+        WHERE actor_id='migration:246_correct_legacy_box_dimensions' ORDER BY resource_key`)).rows).toEqual(audit);
       expect((await client.query("SELECT * FROM shipping.pack_plan_parcels ORDER BY id")).rows).toEqual(parcels);
       expect((await client.query("SELECT * FROM shipping.box_warehouse_stock ORDER BY box_id,warehouse_id")).rows).toEqual(stocks);
       expect((await client.query("SELECT * FROM shipping.box_suite_members ORDER BY suite_id,revision,box_id")).rows).toEqual(suites);
@@ -257,7 +257,7 @@ describe.skipIf(!enabled)("warehouse-owned packaging commands", () => {
         CREATE TRIGGER reject_dimension_audit_test BEFORE INSERT ON shipping.configuration_commands
         FOR EACH ROW EXECUTE FUNCTION shipping.reject_dimension_audit_test()`);
       await client.query("SAVEPOINT before_correction");
-      await expect(client.query(readFileSync(resolve("migrations/245_correct_legacy_box_dimensions.sql"), "utf8")))
+      await expect(client.query(readFileSync(resolve("migrations/246_correct_legacy_box_dimensions.sql"), "utf8")))
         .rejects.toThrow("test audit failure");
       await client.query("ROLLBACK TO SAVEPOINT before_correction");
       expect((await client.query("SELECT width_mm,height_mm,configuration_revision FROM shipping.box_catalog WHERE code='BOX-10x8x4'")).rows)
