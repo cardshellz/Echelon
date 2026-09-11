@@ -73,7 +73,7 @@ dbDescribe.sequential("verified opening persistence with real PostgreSQL admissi
   afterAll(async () => { await database?.close(); });
 
   it("captures real opening evidence through the queue without creating verification or changing stock", async () => {
-    await pool.query(readFileSync(resolve("migrations/244_inventory_opening_capture_jobs.sql"),"utf8"));
+    await pool.query(readFileSync(resolve("migrations/245_inventory_opening_capture_jobs.sql"),"utf8"));
     const jobs = new PostgresInventoryOpeningCaptureRepository(pool);
     await jobs.heartbeat();
     const before = (await pool.query("SELECT * FROM inventory.inventory_levels ORDER BY id")).rows;

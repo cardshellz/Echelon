@@ -15,7 +15,7 @@ dbDescribe.sequential("durable inventory opening capture jobs",()=>{
   let store:PostgresInventoryOpeningCaptureRepository;
   beforeEach(async()=>{
     database=await createInventoryCutoverTestDatabase(url,disposable,"CREATE SCHEMA inventory");
-    await database.pool.query(readFileSync(resolve("migrations/244_inventory_opening_capture_jobs.sql"),"utf8"));
+    await database.pool.query(readFileSync(resolve("migrations/245_inventory_opening_capture_jobs.sql"),"utf8"));
     store=new PostgresInventoryOpeningCaptureRepository(database.pool);
   });
   afterEach(async()=>{await database?.close();});

@@ -21,7 +21,7 @@ The full validated evidence and compact journal groups still reside in worker me
 
 ## Deployment and rollback
 
-1. Verify the PR's actual head/merge SHA and migration prefix against current main. This change adds `244_inventory_opening_capture_jobs.sql`; do not reuse a number occupied by a concurrent PR.
+1. Verify the PR's actual head/merge SHA and migration prefix against current main. This change adds `245_inventory_opening_capture_jobs.sql`; do not reuse a number occupied by a concurrent PR.
 2. Deploy through the normal release migration/build path. The build emits `dist/inventory-opening-capture.cjs` in addition to the existing web bundle.
 3. With explicit operational/billing approval, provision **one** `inventory-capture` process from the Procfile. Its command is `node --max-old-space-size=384 dist/inventory-opening-capture.cjs`. Do not change the web dyno size as part of this rollout. The UI reports worker-offline until the process has a heartbeat.
 4. Capture from the existing inventory panel. Confirm enqueue returns promptly, named progress advances, all chunks download, and the complete worksheet opens. Record stage timings/RSS and compare the capture's displayed totals with read-only database evidence. Do not treat the worksheet as independent count approval.
