@@ -748,6 +748,9 @@
   "oms.fulfillment_routing_rules": [
     "modules/warehouse"
   ],
+  "oms.historical_order_line_identity_repair_commands": [
+    "modules/oms"
+  ],
   "oms.oms_order_events": [
     "modules/dropship",
     "modules/oms",

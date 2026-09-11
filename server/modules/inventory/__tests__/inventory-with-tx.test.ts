@@ -91,7 +91,12 @@ describe("InventoryUseCases.withTx", () => {
       select: vi.fn(() => unfrozenSelectChain),
       update: vi.fn(),
       insert: vi.fn(),
-      execute: vi.fn(),
+      // The quantity cutover admission read now precedes legacy adjustment
+      // planning. This fixture represents an admitted database whose opening
+      // has not been recorded, so the operation correctly remains legacy.
+      execute: vi.fn()
+        .mockResolvedValueOnce({ rows: [{ epoch: 1 }] })
+        .mockResolvedValueOnce({ rows: [] }),
     };
     const rootDb = {
       select: vi.fn(() => unfrozenSelectChain),
@@ -163,7 +168,9 @@ describe("InventoryUseCases.withTx", () => {
       warehouseLocationId: 20,
       qtyDelta: -5,
       reservedQtyDelta: -3,
+      unitCostCents: undefined,
       notes: "cycle count correction",
+      quantityPosting: null,
     });
     expect(storage.createInventoryTransaction).toHaveBeenCalledWith(
       expect.objectContaining({
