@@ -12,7 +12,7 @@ ALTER TABLE warehouse.warehouse_locations ADD COLUMN is_active integer NOT NULL 
 ALTER TABLE catalog.product_variants ADD COLUMN sku text DEFAULT 'SKU-A';
 ALTER TABLE wms.order_items ADD COLUMN sku text DEFAULT 'SKU-A', ADD COLUMN oms_order_line_id bigint,
  ADD COLUMN quantity integer NOT NULL DEFAULT 5, ADD COLUMN picked_quantity integer NOT NULL DEFAULT 5,
- ADD COLUMN picked_at timestamp;
+ ADD COLUMN picked_at timestamp, ADD COLUMN short_reason text;
 ALTER TABLE wms.orders ADD COLUMN oms_fulfillment_order_id text, ADD COLUMN sort_rank integer,
  ADD COLUMN shipping_name text, ADD COLUMN shipping_company text, ADD COLUMN shipping_address text,
  ADD COLUMN shipping_address2 text, ADD COLUMN shipping_city text, ADD COLUMN shipping_state text,
