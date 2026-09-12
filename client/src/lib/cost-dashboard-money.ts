@@ -7,6 +7,9 @@ const Money = Decimal.clone({ precision: 100, rounding: Decimal.ROUND_HALF_UP })
 const CENTS_PER_DOLLAR = 100;
 const MILLS_PER_DOLLAR = 10000;
 const MAX_DECIMAL_INPUT_LENGTH = 64;
+const DOLLARS_PER_THOUSAND = 1000;
+const COMPACT_DOLLAR_THRESHOLD = 10000;
+const WHOLE_THOUSANDS_DOLLAR_THRESHOLD = 100000;
 
 type Amount = { state: "known"; value: Decimal } | { state: "missing" | "invalid" };
 
@@ -42,6 +45,18 @@ function formatAmount(amount: Amount): string {
 
 export function formatDashboardCents(input: unknown): string {
   return formatAmount(scaleAmount(input, CENTS_PER_DOLLAR));
+}
+
+export function formatDashboardCentsCompact(input: unknown): string {
+  const amount = scaleAmount(input, CENTS_PER_DOLLAR);
+  if (amount.state !== "known" || amount.value.abs().lt(COMPACT_DOLLAR_THRESHOLD)) {
+    return formatAmount(amount);
+  }
+  const places = amount.value.abs().gte(WHOLE_THOUSANDS_DOLLAR_THRESHOLD) ? 0 : 1;
+  // Scale cents to dollars first, then dollars to thousands. Use the isolated
+  // decimal context so rounding is exact and independent of other consumers.
+  const thousands = amount.value.abs().div(DOLLARS_PER_THOUSAND).toFixed(places);
+  return `${amount.value.isNegative() ? "-" : ""}$${thousands}k`;
 }
 
 export function formatDashboardMills(input: unknown): string {

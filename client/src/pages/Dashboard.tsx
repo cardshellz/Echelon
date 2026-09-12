@@ -1,4 +1,5 @@
 import React from "react";
+import { formatDashboardCentsCompact as formatCentsCompact } from "@/lib/cost-dashboard-money";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { format } from "date-fns";
 import {
@@ -262,13 +263,6 @@ interface FinanceOrderDetail {
 
 function formatCents(cents: number): string {
   return `$${(cents / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-}
-
-function formatCentsCompact(cents: number): string {
-  const abs = Math.abs(cents);
-  if (abs >= 100_000_00) return `$${(cents / 100_00).toFixed(0)}k`;
-  if (abs >= 10_000_00) return `$${(cents / 100_00).toFixed(1)}k`;
-  return formatCents(cents);
 }
 
 function formatNumber(n: number): string {
