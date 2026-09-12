@@ -76,15 +76,222 @@ describe("PickingUseCases canonical authority routing", () => {
     };
     const service = new PickingUseCases({} as any, { getLevel: vi.fn(async () => ({ variantQty: 0 })) } as any,
       {} as any, storage as any);
-    await (service as any).completeCanonicalPick(context, { itemId: 500, beforeItem,
-      effectivePickedQuantity: 6, warehouseId: 1, userId: "picker", pickMethod: "scan" });
+    await (service as any).applyCanonicalPickProgress(context, { itemId: 500, beforeItem,
+      status: "completed", effectivePickedQuantity: 6, warehouseId: 1, userId: "picker", pickMethod: "scan" });
     expect(pickClaimLine).toHaveBeenLastCalledWith(expect.objectContaining({
       quantity: "4", locationStrategy: strategy,
       wmsProgress: { expectedStatus: "in_progress", expectedPickedQuantity: 2,
-        targetStatus: "completed", targetPickedQuantity: 6 },
+        targetStatus: "completed", targetPickedQuantity: 6, targetShortReason: null },
       ...(strategy === "reconcile_picker_observation" ? { observation: expect.objectContaining({ observedPhysicalQty: "4" }) } : {}),
     }));
     expect(pickClaimLine.mock.calls.every(([command]) => command.quantity === "4")).toBe(true);
+  });
+
+  it("commits a positive partial-short delta with its reason in canonical WMS progress", async () => {
+    const beforeItem = item({ quantity: 6, pickedQuantity: 2, status: "in_progress" });
+    const shortItem = item({ quantity: 6, pickedQuantity: 4, status: "short", shortReason: "partial" });
+    const pickClaimLine = vi.fn(async () => ({ outcome: "picked", warehouseLocationIds: [1] }));
+    const context = canonicalContext({ pickClaimLine });
+    const storage = {
+      getProductVariantBySku: vi.fn(async () => ({ id: 105, sku: "P5", requiresShipping: true, trackInventory: true })),
+      getInventoryLevelsByProductVariantId: vi.fn(async () => [{ warehouseLocationId: 1, variantQty: 4 }]),
+      getAllWarehouseLocations: vi.fn(async () => [{ id: 1, code: "A-01", warehouseId: 1,
+        isPickable: 1, isActive: 1, cycleCountFreezeId: null, locationType: "pick" }]),
+      getOrderItemById: vi.fn(async () => shortItem),
+    };
+    const service = new PickingUseCases({} as any, { getLevel: vi.fn(async () => ({ variantQty: 2 })) } as any,
+      {} as any, storage as any);
+
+    await (service as any).applyCanonicalPickProgress(context, {
+      itemId: 500,
+      beforeItem,
+      status: "short",
+      effectivePickedQuantity: 4,
+      shortReason: "partial",
+      warehouseId: 1,
+      userId: "picker",
+      pickMethod: "short",
+    });
+
+    expect(pickClaimLine).toHaveBeenCalledWith(expect.objectContaining({
+      quantity: "2",
+      wmsProgress: {
+        expectedStatus: "in_progress",
+        expectedPickedQuantity: 2,
+        targetStatus: "short",
+        targetPickedQuantity: 4,
+        targetShortReason: "partial",
+      },
+    }));
+  });
+
+  it("posts an in-progress picker increment through canonical claim custody", async () => {
+    const beforeItem = item({ quantity: 3, pickedQuantity: 0, status: "pending" });
+    const updatedItem = item({ quantity: 3, pickedQuantity: 1, status: "in_progress", pickedAt: new Date() });
+    const canonical = {
+      pickClaimLine: vi.fn(async () => ({ outcome: "picked", warehouseLocationIds: [1] })),
+      unpickClaimLine: vi.fn(),
+    };
+    const runtimeExecutor = executor(canonicalContext(canonical));
+    const db = { transaction: vi.fn(), insert: vi.fn() };
+    const inventoryCore = { getLevel: vi.fn(async () => ({ variantQty: 4 })) };
+    const replenishment = { createAndExecuteReplen: vi.fn(async () => null) };
+    const channelSync = { queueSyncAfterInventoryChange: vi.fn(async () => undefined) };
+    const storage = {
+      getOrderItemById: vi.fn()
+        .mockResolvedValueOnce(beforeItem)
+        .mockResolvedValueOnce(updatedItem),
+      getOrderById: vi.fn(async () => ({
+        id: 900,
+        orderNumber: "#900",
+        warehouseId: 1,
+        warehouseStatus: "ready",
+        assignedPickerId: "picker-1",
+        onHold: 0,
+      })),
+      getProductVariantBySku: vi.fn(async () => ({
+        id: 105,
+        sku: "P5",
+        productId: 10,
+        requiresShipping: true,
+        trackInventory: true,
+      })),
+      getInventoryLevelsByProductVariantId: vi.fn(async () => [{ warehouseLocationId: 1, variantQty: 5 }]),
+      getAllWarehouseLocations: vi.fn(async () => [{
+        id: 1,
+        code: "A-01",
+        warehouseId: 1,
+        isPickable: 1,
+        isActive: 1,
+        cycleCountFreezeId: null,
+        locationType: "pick",
+      }]),
+      getUser: vi.fn(async () => ({ id: "picker-1", username: "picker", role: "picker" })),
+      createPickingLog: vi.fn(async () => ({})),
+      getAllWarehouseSettings: vi.fn(async () => [{
+        warehouseId: 1,
+        postPickStatus: "in_progress",
+        pickMode: "single_order",
+        requireScanConfirm: 0,
+      }]),
+      updateOrderProgress: vi.fn(async () => ({ id: 900, warehouseStatus: "in_progress" })),
+    };
+    const service = new PickingUseCases(
+      db as any,
+      inventoryCore as any,
+      replenishment as any,
+      storage as any,
+      channelSync,
+      undefined,
+      false,
+      runtimeExecutor as any,
+    );
+
+    await expect(service.pickItem(500, {
+      status: "in_progress",
+      pickedQuantity: 1,
+      pickMethod: "scan",
+      userId: "picker-1",
+    })).resolves.toMatchObject({
+      success: true,
+      item: { status: "in_progress", pickedQuantity: 1 },
+      inventory: { deducted: true, locationId: 1 },
+    });
+    expect(canonical.pickClaimLine).toHaveBeenCalledWith(expect.objectContaining({
+      quantity: "1",
+      wmsProgress: {
+        expectedStatus: "pending",
+        expectedPickedQuantity: 0,
+        targetStatus: "in_progress",
+        targetPickedQuantity: 1,
+        targetShortReason: null,
+      },
+    }));
+    expect(replenishment.createAndExecuteReplen).toHaveBeenCalledOnce();
+    expect(channelSync.queueSyncAfterInventoryChange).toHaveBeenCalledWith(105);
+    expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  it("suppresses duplicate picker side effects when canonical custody reports an idempotent replay", async () => {
+    const beforeItem = item({ quantity: 3, pickedQuantity: 0, status: "pending" });
+    const committedItem = item({
+      quantity: 3,
+      pickedQuantity: 1,
+      status: "in_progress",
+      pickedAt: new Date("2026-09-11T12:00:00.000Z"),
+    });
+    const canonical = {
+      pickClaimLine: vi.fn(async () => ({
+        outcome: "picked",
+        warehouseLocationIds: [1],
+        idempotentReplay: true,
+      })),
+      unpickClaimLine: vi.fn(),
+    };
+    const runtimeExecutor = executor(canonicalContext(canonical));
+    const inventoryCore = { getLevel: vi.fn() };
+    const replenishment = { createAndExecuteReplen: vi.fn() };
+    const channelSync = { queueSyncAfterInventoryChange: vi.fn() };
+    const storage = {
+      getOrderItemById: vi.fn()
+        .mockResolvedValueOnce(beforeItem)
+        .mockResolvedValueOnce(committedItem),
+      getOrderById: vi.fn(async () => ({
+        id: 900,
+        orderNumber: "#900",
+        warehouseId: 1,
+        warehouseStatus: "ready",
+        assignedPickerId: "picker-1",
+        onHold: 0,
+      })),
+      getProductVariantBySku: vi.fn(async () => ({
+        id: 105,
+        sku: "P5",
+        productId: 10,
+        requiresShipping: true,
+        trackInventory: true,
+      })),
+      getInventoryLevelsByProductVariantId: vi.fn(async () => [{ warehouseLocationId: 1, variantQty: 5 }]),
+      getAllWarehouseLocations: vi.fn(async () => [{
+        id: 1,
+        code: "A-01",
+        warehouseId: 1,
+        isPickable: 1,
+        isActive: 1,
+        cycleCountFreezeId: null,
+        locationType: "pick",
+      }]),
+      createPickingLog: vi.fn(),
+      getAllWarehouseSettings: vi.fn(),
+      updateOrderProgress: vi.fn(),
+    };
+    const service = new PickingUseCases(
+      { transaction: vi.fn() } as any,
+      inventoryCore as any,
+      replenishment as any,
+      storage as any,
+      channelSync as any,
+      undefined,
+      false,
+      runtimeExecutor as any,
+    );
+
+    await expect(service.pickItem(500, {
+      status: "in_progress",
+      pickedQuantity: 1,
+      pickMethod: "scan",
+      userId: "picker-1",
+    })).resolves.toMatchObject({
+      success: true,
+      item: { status: "in_progress", pickedQuantity: 1 },
+    });
+
+    expect(inventoryCore.getLevel).not.toHaveBeenCalled();
+    expect(replenishment.createAndExecuteReplen).not.toHaveBeenCalled();
+    expect(channelSync.queueSyncAfterInventoryChange).not.toHaveBeenCalled();
+    expect(storage.createPickingLog).not.toHaveBeenCalled();
+    expect(storage.getAllWarehouseSettings).not.toHaveBeenCalled();
+    expect(storage.updateOrderProgress).not.toHaveBeenCalled();
   });
 
   it("routes a completed pick through strict, recorded-stock, and observed canonical reconciliation", async () => {
@@ -205,6 +412,7 @@ describe("PickingUseCases canonical authority routing", () => {
         expectedPickedQuantity: 0,
         targetStatus: "completed",
         targetPickedQuantity: 1,
+        targetShortReason: null,
       },
       idempotencyKey: expect.stringMatching(/^inventory-picker-runtime:pick-reconcile_picker_observation:[a-f0-9]{64}$/),
     }));
@@ -298,14 +506,15 @@ describe("PickingUseCases canonical authority routing", () => {
     const command = {
       itemId: 500,
       beforeItem,
+      status: "completed",
       effectivePickedQuantity: 1,
       warehouseId: 1,
       userId: "picker-1",
       pickMethod: "scan",
     };
 
-    await (service as any).completeCanonicalPick(context, command);
-    await (service as any).completeCanonicalPick(context, command);
+    await (service as any).applyCanonicalPickProgress(context, command);
+    await (service as any).applyCanonicalPickProgress(context, command);
 
     const firstKey = canonical.pickClaimLine.mock.calls[0]?.[0]?.idempotencyKey;
     const secondKey = canonical.pickClaimLine.mock.calls[1]?.[0]?.idempotencyKey;
@@ -314,13 +523,10 @@ describe("PickingUseCases canonical authority routing", () => {
     expect(secondKey).not.toBe(firstKey);
   });
 
-  it("preserves the deployed full-quantity no-op inside the pinned legacy transaction", async () => {
+  it("rejects a stale full-quantity active row instead of certifying unproven custody", async () => {
     const beforeItem = item({ pickedQuantity: 1, status: "pending" });
-    const legacyDb = {
-      execute: vi.fn()
-        .mockResolvedValueOnce({ rows: [{ warehouse_status: "ready", on_hold: 0 }] })
-        .mockResolvedValueOnce({ rows: [{ status: "pending", picked_quantity: 1, quantity: 1 }] }),
-    };
+    const completedItem = item({ pickedQuantity: 1, status: "completed", pickedAt: new Date() });
+    const legacyDb = { execute: vi.fn() };
     const context = {
       ...canonicalContext({ pickClaimLine: vi.fn(), unpickClaimLine: vi.fn() }),
       authority: "legacy" as const,
@@ -328,10 +534,11 @@ describe("PickingUseCases canonical authority routing", () => {
       legacyDb,
     };
     const runtimeExecutor = executor(context);
-    const db = { transaction: vi.fn() };
+    const db = { transaction: vi.fn(), execute: vi.fn(async () => ({ rows: [] })) };
     const inventoryCore = { withTx: vi.fn(), pickItem: vi.fn() };
     const storage = {
       getOrderItemById: vi.fn(async () => beforeItem),
+      updateOrderItemStatus: vi.fn(async () => completedItem),
       getOrderById: vi.fn(async () => ({
         id: 900,
         orderNumber: "#900",
@@ -339,6 +546,11 @@ describe("PickingUseCases canonical authority routing", () => {
         warehouseStatus: "ready",
         onHold: 0,
       })),
+      getUser: vi.fn(async () => null),
+      createPickingLog: vi.fn(async () => ({})),
+      getAllWarehouseSettings: vi.fn(async () => []),
+      getOrderItems: vi.fn(async () => [completedItem]),
+      updateOrderProgress: vi.fn(async () => ({ id: 900, warehouseStatus: "ready_to_ship" })),
     };
     const service = new PickingUseCases(
       db as any,
@@ -354,10 +566,14 @@ describe("PickingUseCases canonical authority routing", () => {
     await expect(service.pickItem(500, {
       status: "completed",
       pickedQuantity: 1,
-    })).resolves.toMatchObject({ success: true, item: { status: "pending", pickedQuantity: 1 } });
+    })).resolves.toMatchObject({
+      success: false,
+      error: "pick_custody_reconfirmation_required",
+    });
 
-    expect(runtimeExecutor.execute).toHaveBeenCalledOnce();
-    expect(legacyDb.execute).toHaveBeenCalledTimes(2);
+    expect(storage.updateOrderItemStatus).not.toHaveBeenCalled();
+    expect(runtimeExecutor.execute).not.toHaveBeenCalled();
+    expect(legacyDb.execute).not.toHaveBeenCalled();
     expect(inventoryCore.pickItem).not.toHaveBeenCalled();
     expect(db.transaction).not.toHaveBeenCalled();
   });
@@ -399,9 +615,10 @@ describe("PickingUseCases canonical authority routing", () => {
       storage as any,
     );
 
-    await expect((service as any).completeCanonicalPick(context, {
+    await expect((service as any).applyCanonicalPickProgress(context, {
       itemId: 500,
       beforeItem,
+      status: "completed",
       effectivePickedQuantity: 1,
       warehouseId: 1,
       pickMethod: "scan",
@@ -414,9 +631,15 @@ describe("PickingUseCases canonical authority routing", () => {
     expect(inventoryCore.pickItem).not.toHaveBeenCalled();
   });
 
-  it("routes a completed inventory unpick through exact canonical pick lineage", async () => {
-    const beforeItem = item({ status: "completed", quantity: 2, pickedQuantity: 2 });
-    const updatedItem = item({ status: "in_progress", quantity: 2, pickedQuantity: 1 });
+  it.each([
+    { sourceStatus: "completed", quantity: 2 },
+    { sourceStatus: "short", quantity: 3 },
+  ] as const)("routes a $sourceStatus inventory unpick through exact canonical pick lineage", async ({
+    sourceStatus,
+    quantity,
+  }) => {
+    const beforeItem = item({ status: sourceStatus, quantity, pickedQuantity: 2 });
+    const updatedItem = item({ status: "in_progress", quantity, pickedQuantity: 1 });
     const canonical = {
       pickClaimLine: vi.fn(),
       unpickClaimLine: vi.fn(async () => ({
@@ -483,7 +706,7 @@ describe("PickingUseCases canonical authority routing", () => {
       orderItemId: 500,
       quantity: "1",
       wmsProgress: {
-        expectedStatus: "completed",
+        expectedStatus: sourceStatus,
         expectedPickedQuantity: 2,
         targetStatus: "in_progress",
         targetPickedQuantity: 1,
@@ -492,6 +715,66 @@ describe("PickingUseCases canonical authority routing", () => {
     }));
     expect(inventoryCore.unpickItem).not.toHaveBeenCalled();
     expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  it("suppresses duplicate unpick logging when canonical custody reports a replay", async () => {
+    const beforeItem = item({ status: "completed", quantity: 2, pickedQuantity: 2 });
+    const committedItem = item({ status: "in_progress", quantity: 2, pickedQuantity: 1 });
+    const canonical = {
+      pickClaimLine: vi.fn(),
+      unpickClaimLine: vi.fn(async () => ({
+        outcome: "unpicked",
+        warehouseLocationIds: [1],
+        idempotentReplay: true,
+      })),
+    };
+    const context = canonicalContext(canonical);
+    const runtimeExecutor = executor(context);
+    const inventoryCore = { unpickItem: vi.fn(), getLevel: vi.fn() };
+    const storage = {
+      getOrderItemById: vi.fn()
+        .mockResolvedValueOnce(beforeItem)
+        .mockResolvedValueOnce(committedItem),
+      getOrderById: vi.fn(async () => ({
+        id: 900,
+        orderNumber: "#900",
+        warehouseStatus: "in_progress",
+        assignedPickerId: "picker-1",
+        onHold: 0,
+      })),
+      getProductVariantBySku: vi.fn(async () => ({
+        id: 105,
+        requiresShipping: true,
+        trackInventory: true,
+      })),
+      getAllWarehouseLocations: vi.fn(),
+      getUser: vi.fn(),
+      createPickingLog: vi.fn(),
+    };
+    const service = new PickingUseCases(
+      { transaction: vi.fn() } as any,
+      inventoryCore as any,
+      {} as any,
+      storage as any,
+      undefined,
+      undefined,
+      false,
+      runtimeExecutor as any,
+    );
+
+    await expect(service.unpickItem(500, {
+      qty: 1,
+      userId: "picker-1",
+      reason: "correct scan",
+    })).resolves.toMatchObject({
+      success: true,
+      item: { status: "in_progress", pickedQuantity: 1 },
+    });
+
+    expect(canonical.unpickClaimLine).toHaveBeenCalledOnce();
+    expect(storage.getAllWarehouseLocations).not.toHaveBeenCalled();
+    expect(inventoryCore.getLevel).not.toHaveBeenCalled();
+    expect(storage.createPickingLog).not.toHaveBeenCalled();
   });
 
   it("keeps reversing canonical inventory after a partial unpick even if the catalog mapping disappears", async () => {
@@ -563,6 +846,180 @@ describe("PickingUseCases canonical authority routing", () => {
     expect(inventoryCore.unpickItem).not.toHaveBeenCalled();
     expect(inventoryCore.getLevel).not.toHaveBeenCalled();
     expect(db.transaction).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { name: "backed progress", status: "in_progress", costQuantity: 2, expectedPhysicalUnpick: 1 },
+    { name: "backed short progress", status: "short", costQuantity: 2, expectedPhysicalUnpick: 1 },
+    { name: "one legacy unbacked unit", status: "in_progress", costQuantity: 1, expectedPhysicalUnpick: 0 },
+  ])("decrements $name without manufacturing on-hand inventory", async ({
+    status,
+    costQuantity,
+    expectedPhysicalUnpick,
+  }) => {
+    const beforeItem = item({ status, quantity: 3, pickedQuantity: 2 });
+    const updatedItem = item({ status: "in_progress", quantity: 3, pickedQuantity: 1 });
+    const set = vi.fn(() => ({
+      where: vi.fn(() => ({ returning: vi.fn(async () => [updatedItem]) })),
+    }));
+    const update = vi.fn(() => ({
+      set,
+    }));
+    const legacyDb = {
+      execute: vi.fn()
+        .mockResolvedValueOnce({ rows: [{ warehouse_status: "in_progress", on_hold: 0 }] })
+        .mockResolvedValueOnce({ rows: [{ id: 500, status, picked_quantity: 2, quantity: 3 }] }),
+      update,
+      select: vi.fn(() => ({
+        from: vi.fn(() => ({
+          where: vi.fn(async () => [updatedItem]),
+        })),
+      })),
+    };
+    const context = {
+      ...canonicalContext({ pickClaimLine: vi.fn(), unpickClaimLine: vi.fn() }),
+      authority: "legacy" as const,
+      activationRunId: null,
+      legacyDb,
+    };
+    const runtimeExecutor = executor(context);
+    const txInventoryCore = {
+      getOrderItemPickedCostQuantity: vi.fn(async () => costQuantity),
+      unpickItem: vi.fn(async () => true),
+    };
+    const inventoryCore = {
+      withTx: vi.fn(() => txInventoryCore),
+    };
+    const storage = {
+      getOrderItemById: vi.fn(async () => beforeItem),
+      getOrderById: vi.fn(async () => ({
+        id: 900,
+        orderNumber: "#900",
+        warehouseStatus: "in_progress",
+        assignedPickerId: "picker-1",
+        onHold: 0,
+      })),
+      getProductVariantBySku: vi.fn(async () => ({
+        id: 105,
+        requiresShipping: true,
+        trackInventory: true,
+      })),
+      getAllWarehouseLocations: vi.fn(async () => [{ id: 1, code: "A-01" }]),
+      getUser: vi.fn(async () => ({ id: "picker-1", username: "picker", role: "picker" })),
+      createPickingLog: vi.fn(async () => ({})),
+    };
+    const service = new PickingUseCases(
+      { transaction: vi.fn() } as any,
+      inventoryCore as any,
+      {} as any,
+      storage as any,
+      undefined,
+      undefined,
+      false,
+      runtimeExecutor as any,
+    );
+
+    await expect(service.unpickItem(500, {
+      qty: 1,
+      userId: "picker-1",
+      reason: "correct picked quantity",
+    })).resolves.toMatchObject({
+      success: true,
+      item: { status: "in_progress", pickedQuantity: 1 },
+    });
+
+    expect(txInventoryCore.getOrderItemPickedCostQuantity).toHaveBeenCalledWith({
+      orderId: 900,
+      orderItemId: 500,
+      productVariantId: 105,
+    });
+    if (expectedPhysicalUnpick > 0) {
+      expect(txInventoryCore.unpickItem).toHaveBeenCalledWith(expect.objectContaining({
+        qty: expectedPhysicalUnpick,
+        orderId: 900,
+        orderItemId: 500,
+        productVariantId: 105,
+        warehouseLocationId: 1,
+      }));
+      expect(storage.getAllWarehouseLocations).toHaveBeenCalledOnce();
+    } else {
+      expect(txInventoryCore.unpickItem).not.toHaveBeenCalled();
+      expect(storage.getAllWarehouseLocations).not.toHaveBeenCalled();
+    }
+    if (status === "short") {
+      expect(set).toHaveBeenCalledWith(expect.objectContaining({ shortReason: null }));
+    }
+  });
+
+  it("rejects a legacy unpick when another request changed progress before the row lock", async () => {
+    const beforeItem = item({ status: "in_progress", quantity: 3, pickedQuantity: 2 });
+    const legacyDb = {
+      execute: vi.fn()
+        .mockResolvedValueOnce({ rows: [{ warehouse_status: "in_progress", on_hold: 0 }] })
+        .mockResolvedValueOnce({ rows: [{
+          id: 500,
+          status: "in_progress",
+          picked_quantity: 1,
+          quantity: 3,
+          short_reason: null,
+          picked_at: new Date("2026-09-11T12:00:00.000Z"),
+        }] }),
+      update: vi.fn(),
+    };
+    const context = {
+      ...canonicalContext({ pickClaimLine: vi.fn(), unpickClaimLine: vi.fn() }),
+      authority: "legacy" as const,
+      activationRunId: null,
+      legacyDb,
+    };
+    const runtimeExecutor = executor(context);
+    const txInventoryCore = {
+      getOrderItemPickedCostQuantity: vi.fn(),
+      unpickItem: vi.fn(),
+    };
+    const storage = {
+      getOrderItemById: vi.fn(async () => beforeItem),
+      getOrderById: vi.fn(async () => ({
+        id: 900,
+        orderNumber: "#900",
+        warehouseStatus: "in_progress",
+        assignedPickerId: "picker-1",
+        onHold: 0,
+      })),
+      getProductVariantBySku: vi.fn(async () => ({
+        id: 105,
+        requiresShipping: true,
+        trackInventory: true,
+      })),
+      createPickingLog: vi.fn(),
+    };
+    const service = new PickingUseCases(
+      { transaction: vi.fn() } as any,
+      { withTx: vi.fn(() => txInventoryCore) } as any,
+      {} as any,
+      storage as any,
+      undefined,
+      undefined,
+      false,
+      runtimeExecutor as any,
+    );
+
+    await expect(service.unpickItem(500, {
+      qty: 1,
+      userId: "picker-1",
+    })).rejects.toMatchObject({
+      code: "DATA_INTEGRITY_VIOLATION",
+      context: expect.objectContaining({
+        reason: "unpick_progress_conflict",
+        expectedPickedQuantity: 2,
+        actualPickedQuantity: 1,
+      }),
+    });
+
+    expect(txInventoryCore.getOrderItemPickedCostQuantity).not.toHaveBeenCalled();
+    expect(txInventoryCore.unpickItem).not.toHaveBeenCalled();
+    expect(legacyDb.update).not.toHaveBeenCalled();
+    expect(storage.createPickingLog).not.toHaveBeenCalled();
   });
 
   it("unpicks a digital item as WMS progress without invoking canonical or legacy inventory", async () => {
