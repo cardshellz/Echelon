@@ -295,6 +295,86 @@ describe("evaluateShopifyProductMappingRepair", () => {
     });
   });
 
+  it("accepts a SKU-less Shopify variant by its exact persisted variant ID", () => {
+    const original = source().variants[0];
+    const summary = buildShopifyProductMappingSummary(source({
+      catalogProductId: "7626813735071",
+      variants: [{
+        ...original,
+        sku: "SHOPIFY-42926954709151",
+        feedId: null,
+        feedIsActive: null,
+        feedProductId: null,
+        feedVariantId: null,
+        feedInventoryItemId: null,
+        listingId: null,
+        listingProductId: null,
+        listingVariantId: null,
+      }],
+    }));
+
+    expect(evaluateShopifyProductMappingRepair({
+      summary,
+      requestedProductId: "7626813735071",
+      verifiedRemoteVariants: [{
+        id: "42926954709151",
+        sku: null,
+        inventoryItemId: "45068358877343",
+      }],
+    })).toEqual({
+      ok: true,
+      targetProductId: "7626813735071",
+      mappedVariantIds: ["42926954709151"],
+      variantMappings: [{
+        variantId: 59,
+        sku: "SHOPIFY-42926954709151",
+        remoteSku: null,
+        remoteBarcode: null,
+        remoteVariantId: "42926954709151",
+        remoteInventoryItemId: "45068358877343",
+        matchedBy: "existing_id",
+        replacedVariantIds: [],
+      }],
+    });
+  });
+
+  it("rejects a blank remote SKU unless the local fallback embeds the exact linked variant ID", () => {
+    const original = source().variants[0];
+    const summary = buildShopifyProductMappingSummary(source({
+      catalogProductId: "7626813735071",
+      variants: [{
+        ...original,
+        sku: "SHOPIFY-999",
+      }],
+    }));
+
+    const result = evaluateShopifyProductMappingRepair({
+      summary,
+      requestedProductId: "7626813735071",
+      verifiedRemoteVariants: [{
+        id: "42926954709151",
+        sku: null,
+        inventoryItemId: "45068358877343",
+      }],
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result).toMatchObject({
+        code: "SHOPIFY_ACTIVE_VARIANTS_UNRESOLVED",
+        context: {
+          issues: [{
+            code: "ID_SKU_MISMATCH",
+            variantId: 59,
+            sku: "SHOPIFY-999",
+            mappedVariantId: "42926954709151",
+            liveSku: null,
+          }],
+        },
+      });
+    }
+  });
+
   it("maps an active unmapped variant by one exact Shopify SKU and ignores archived IDs", () => {
     const original = source();
     const summary = buildShopifyProductMappingSummary(source({

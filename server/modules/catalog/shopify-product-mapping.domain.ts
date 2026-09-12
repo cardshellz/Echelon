@@ -127,6 +127,20 @@ function normalizeSku(value: string | null | undefined): string | null {
   return normalized || null;
 }
 
+function skuMatchesVerifiedVariant(
+  normalizedLocalSku: string,
+  verifiedVariant: { id: string; normalizedSku: string | null },
+): boolean {
+  if (verifiedVariant.normalizedSku === normalizedLocalSku) return true;
+
+  // Shopify permits a variant without a SKU. Catalog import gives those
+  // variants a deterministic local identity so downstream systems never have
+  // to key inventory on a blank value. That fallback is equivalent to a blank
+  // remote SKU only when it embeds this exact verified Shopify variant ID.
+  return verifiedVariant.normalizedSku === null
+    && normalizedLocalSku === `SHOPIFY-${verifiedVariant.id}`;
+}
+
 function variantMappingIds(variant: ShopifyProductMappingVariantEvidence): string[] {
   return uniqueSortedIds([
     variant.catalogVariantId,
@@ -394,11 +408,9 @@ export function evaluateShopifyProductMappingRepair(input: {
         });
         continue;
       }
-      const syntheticSku = `SHOPIFY-${importedRemoteId}`;
       if (
         normalizedSku
-        && importedRemoteVariant.normalizedSku !== normalizedSku
-        && !(importedRemoteVariant.normalizedSku === null && normalizedSku === syntheticSku)
+        && !skuMatchesVerifiedVariant(normalizedSku, importedRemoteVariant)
       ) {
         issues.push({
           code: "IMPORT_BINDING_SKU_MISMATCH",
@@ -429,7 +441,12 @@ export function evaluateShopifyProductMappingRepair(input: {
       });
       continue;
     }
-    if (!importedRemoteId && selected && normalizedSku && selected.normalizedSku !== normalizedSku) {
+    if (
+      !importedRemoteId
+      && selected
+      && normalizedSku
+      && !skuMatchesVerifiedVariant(normalizedSku, selected)
+    ) {
       issues.push({
         code: "ID_SKU_MISMATCH",
         variantId: variant.variantId,
