@@ -70,14 +70,13 @@ export class PostgresCatalogExportRepository implements CatalogExportRepository 
     for (const mapping of mappings) {
       const provider = mapping.provider.trim().toLowerCase();
       const scope = mapping.shopDomain?.trim().toLowerCase() || `channel:${mapping.channelId}`;
-      const candidates: CatalogExternalIdentifier[] = [
-        {
+      const candidates: CatalogExternalIdentifier[] = [];
+      if (mapping.externalVariantId?.trim()) candidates.push({
           provider,
           scope,
           identifierType: "variant_id",
           value: mapping.externalVariantId.trim(),
-        },
-      ];
+      });
       if (mapping.externalProductId?.trim()) candidates.push({
         provider,
         scope,

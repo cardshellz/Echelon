@@ -107,6 +107,9 @@
   "channels.partner_profiles": [
     "modules/channels"
   ],
+  "channels.shopify_ownership_repair_commands": [
+    "modules/catalog"
+  ],
   "channels.source_lock_config": [
     "modules/channels"
   ],

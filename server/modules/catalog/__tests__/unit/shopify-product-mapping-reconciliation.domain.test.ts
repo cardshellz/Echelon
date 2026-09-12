@@ -7,6 +7,9 @@ import {
   evaluateDeadMappingRetirement,
   normalizeShopifyAdminDomain,
   normalizeShopifyProductReference,
+  shopifyOwnershipRepairApplySchema,
+  shopifyOwnershipRepairPreviewHash,
+  shopifyOwnershipRepairRequestHash,
   type ShopifyMappingLocalProduct,
   type ShopifyRemoteProductSnapshot,
 } from "../../shopify-product-mapping-reconciliation.domain";
@@ -65,6 +68,7 @@ function localProduct(
     evidenceProductIds: ["9001"],
     activeVariantCount: 2,
     activeVariantIssueIds: [],
+    hasCanonicalChannelProductEvidence: true,
     ...input,
   };
 }
@@ -358,6 +362,24 @@ describe("Shopify duplicate ownership review", () => {
     });
   });
 
+  it("requires manual review when matching channel evidence is malformed", () => {
+    const result = ownershipReview({
+      products: [
+        localProduct({ hasCanonicalChannelProductEvidence: false }),
+        localProduct({
+          productId: 11,
+          activeVariantCount: 0,
+          mappingFingerprint: "fingerprint-11",
+        }),
+      ],
+    });
+
+    expect(result.items[0]).toMatchObject({
+      decision: "manual_review",
+      reason: "active_owner_missing_channel_evidence",
+    });
+  });
+
   it("requires manual review when owner shipping groups conflict", () => {
     const result = ownershipReview({
       products: [
@@ -463,8 +485,85 @@ describe("Shopify duplicate ownership review", () => {
     })).toThrow("from 1 through 10000");
     expect(() => ownershipReview({
       products: [],
-      pageSize: 51,
-    })).toThrow("from 1 through 50");
+      pageSize: 101,
+    })).toThrow("from 1 through 100");
+  });
+
+  it("binds repair previews to sorted targets and exact ownership evidence", () => {
+    const first = ownershipReview({
+      products: [
+        localProduct(),
+        localProduct({
+          productId: 11,
+          activeVariantCount: 0,
+          mappingFingerprint: "fingerprint-11",
+        }),
+      ],
+    }).items[0];
+    const changed = ownershipReview({
+      products: [
+        localProduct(),
+        localProduct({
+          productId: 11,
+          activeVariantCount: 0,
+          mappingFingerprint: "fingerprint-11-changed",
+        }),
+      ],
+    }).items[0];
+
+    expect(first.previewHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(changed.previewHash).not.toBe(first.previewHash);
+    const recommendations = [
+      {
+        shopifyProductId: "9002",
+        expectedPreviewHash: "d".repeat(64),
+      },
+      {
+        shopifyProductId: first.shopifyProductId,
+        expectedPreviewHash: first.previewHash,
+      },
+    ];
+    expect(shopifyOwnershipRepairPreviewHash({
+      channelId: 36,
+      shopDomain: "cardshellz.myshopify.com",
+      recommendations,
+    })).toBe(shopifyOwnershipRepairPreviewHash({
+      channelId: 36,
+      shopDomain: "cardshellz.myshopify.com",
+      recommendations: [...recommendations].reverse(),
+    }));
+    expect(shopifyOwnershipRepairRequestHash({
+      channelId: 36,
+      shopDomain: "cardshellz.myshopify.com",
+      recommendations,
+      operator: "user:42",
+      reason: "Reviewed cleanup",
+    })).not.toBe(shopifyOwnershipRepairRequestHash({
+      channelId: 36,
+      shopDomain: "cardshellz.myshopify.com",
+      recommendations,
+      operator: "user:42",
+      reason: "Different reason",
+    }));
+  });
+
+  it("rejects duplicate targets and unsafe audit text in repair commands", () => {
+    const recommendation = {
+      shopifyProductId: "9001",
+      expectedPreviewHash: "a".repeat(64),
+    };
+    expect(shopifyOwnershipRepairApplySchema.safeParse({
+      expectedShopDomain: "cardshellz.myshopify.com",
+      recommendations: [recommendation, recommendation],
+      idempotencyKey: "123e4567-e89b-42d3-a456-426614174000",
+      reason: "Reviewed cleanup",
+    }).success).toBe(false);
+    expect(shopifyOwnershipRepairApplySchema.safeParse({
+      expectedShopDomain: "cardshellz.myshopify.com",
+      recommendations: [recommendation],
+      idempotencyKey: "123e4567-e89b-42d3-a456-426614174000",
+      reason: "Reviewed\u0000cleanup",
+    }).success).toBe(false);
   });
 });
 

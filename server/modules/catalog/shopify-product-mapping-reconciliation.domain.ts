@@ -1,6 +1,55 @@
+import { createHash } from "node:crypto";
+import { z } from "zod";
+
+import { canonicalJson } from "@shared/utils/canonical-json";
 import type {
   ShopifyProductMappingStatus,
 } from "./shopify-product-mapping.domain";
+
+const sha256Schema = z.string().regex(/^[0-9a-f]{64}$/);
+const safeText = (maximum: number) => z.string().trim().min(1).max(maximum)
+  .regex(/^[^\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]*$/);
+
+export const SHOPIFY_OWNERSHIP_REPAIR_MAX_GROUPS = 100;
+
+export const shopifyOwnershipRepairRecommendationSchema = z.object({
+  shopifyProductId: z.string().regex(/^\d+$/),
+  expectedPreviewHash: sha256Schema,
+}).strict();
+
+export const shopifyOwnershipRepairRecommendationsSchema = z.array(
+  shopifyOwnershipRepairRecommendationSchema,
+)
+  .min(1)
+  .max(SHOPIFY_OWNERSHIP_REPAIR_MAX_GROUPS)
+  .superRefine((recommendations, context) => {
+    const seen = new Set<string>();
+    recommendations.forEach((recommendation, index) => {
+      if (seen.has(recommendation.shopifyProductId)) {
+        context.addIssue({
+          code: "custom",
+          path: [index, "shopifyProductId"],
+          message: "Each Shopify product may appear only once",
+        });
+      }
+      seen.add(recommendation.shopifyProductId);
+    });
+  });
+
+export const shopifyOwnershipRepairApplySchema = z.object({
+  expectedShopDomain: z.string().trim().min(1).max(255),
+  recommendations: shopifyOwnershipRepairRecommendationsSchema,
+  idempotencyKey: z.string().uuid(),
+  reason: safeText(500),
+}).strict();
+
+export type ShopifyOwnershipRepairApplyInput = z.infer<
+  typeof shopifyOwnershipRepairApplySchema
+>;
+
+export type ShopifyOwnershipRepairRecommendation = z.infer<
+  typeof shopifyOwnershipRepairRecommendationSchema
+>;
 
 export const SHOPIFY_MAPPING_ISSUE_CODES = [
   "catalog_product_id_missing",
@@ -51,6 +100,7 @@ export interface ShopifyMappingLocalProduct {
   evidenceProductIds: string[];
   activeVariantCount: number;
   activeVariantIssueIds: number[];
+  hasCanonicalChannelProductEvidence: boolean;
 }
 
 export interface ShopifyRemoteProductSnapshot {
@@ -79,15 +129,19 @@ export interface ShopifyDuplicateOwnershipOwner {
   shopifyProductId: string | null;
   shippingGroupCode: string | null;
   mappingStatus: ShopifyProductMappingStatus;
+  mappingFingerprint: string;
   activeVariantCount: number;
   activeVariantIssueCount: number;
   hasChannelEvidence: boolean;
+  hasCanonicalChannelProductEvidence: boolean;
 }
 
 export interface ShopifyDuplicateOwnershipGroup {
   shopifyProductId: string;
+  remoteExists: boolean;
   remoteTitle: string | null;
   remoteStatus: string | null;
+  remoteShippingGroupCode: string | null;
   shippingGroupCode: string | null;
   ownerProductIds: number[];
   owners: ShopifyDuplicateOwnershipOwner[];
@@ -95,7 +149,87 @@ export interface ShopifyDuplicateOwnershipGroup {
   reason: ShopifyOwnershipDecisionReason;
   recommendedProductId: number | null;
   nonCanonicalProductIds: number[];
+  previewHash: string;
 }
+
+export interface ShopifyOwnershipRepairResult {
+  readonly contractVersion: 1;
+  readonly channelId: number;
+  readonly shopDomain: string;
+  readonly previewHash: string;
+  readonly resolvedGroupCount: number;
+  readonly recommendedProductIds: readonly number[];
+  readonly detachedProductIds: readonly number[];
+  readonly clearedCatalogProductCount: number;
+  readonly clearedCatalogVariantCount: number;
+  readonly detachedFeedCount: number;
+  readonly resetListingCount: number;
+  readonly completedAt: string;
+}
+
+export interface ShopifyOwnershipRepairCommandRecord {
+  readonly id: number;
+  readonly channelId: number;
+  readonly idempotencyKey: string;
+  readonly requestHash: string;
+  readonly previewHash: string;
+  readonly operator: string;
+  readonly reason: string;
+  readonly recommendations: readonly ShopifyOwnershipRepairRecommendation[];
+  readonly result: ShopifyOwnershipRepairResult;
+}
+
+export interface ShopifyOwnershipRepairExecutionResult
+  extends ShopifyOwnershipRepairResult {
+  readonly commandId: number;
+  readonly idempotentReplay: boolean;
+}
+
+export const shopifyOwnershipRepairResultSchema:
+z.ZodType<ShopifyOwnershipRepairResult> = z.object({
+  contractVersion: z.literal(1),
+  channelId: z.number().int().positive(),
+  shopDomain: z.string().min(1).max(255),
+  previewHash: sha256Schema,
+  resolvedGroupCount: z.number().int().positive(),
+  recommendedProductIds: z.array(z.number().int().positive()),
+  detachedProductIds: z.array(z.number().int().positive()),
+  clearedCatalogProductCount: z.number().int().nonnegative(),
+  clearedCatalogVariantCount: z.number().int().nonnegative(),
+  detachedFeedCount: z.number().int().nonnegative(),
+  resetListingCount: z.number().int().nonnegative(),
+  completedAt: z.string().datetime(),
+}).strict().superRefine((value, context) => {
+  const recommended = [...value.recommendedProductIds];
+  const detached = [...value.detachedProductIds];
+  const recommendedSorted = [...new Set(recommended)].sort(
+    (left, right) => left - right,
+  );
+  const detachedSorted = [...new Set(detached)].sort(
+    (left, right) => left - right,
+  );
+  if (
+    recommended.length !== value.resolvedGroupCount
+    || JSON.stringify(recommended) !== JSON.stringify(recommendedSorted)
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["recommendedProductIds"],
+      message: "Recommended product IDs must be unique, sorted, and match the resolved group count",
+    });
+  }
+  if (
+    detached.length !== value.resolvedGroupCount
+    || JSON.stringify(detached) !== JSON.stringify(detachedSorted)
+    || value.clearedCatalogProductCount !== detached.length
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["detachedProductIds"],
+      message: "Detached product IDs and cleared product count must match the resolved groups",
+    });
+  }
+});
 
 export interface ShopifyOwnershipReviewPage {
   generatedAt: string;
@@ -139,6 +273,51 @@ export interface ShopifyMappingReconciliationReport {
 
 function distinctValues<T>(values: T[]): T[] {
   return [...new Set(values)];
+}
+
+function sha256(value: unknown): string {
+  return createHash("sha256").update(canonicalJson(value)).digest("hex");
+}
+
+function orderedRepairRecommendations(
+  recommendations: readonly ShopifyOwnershipRepairRecommendation[],
+): ShopifyOwnershipRepairRecommendation[] {
+  return [...recommendations].sort((left, right) =>
+    left.shopifyProductId.localeCompare(
+      right.shopifyProductId,
+      "en",
+      { numeric: true },
+    ));
+}
+
+export function shopifyOwnershipRepairPreviewHash(input: {
+  channelId: number;
+  shopDomain: string;
+  recommendations: readonly ShopifyOwnershipRepairRecommendation[];
+}): string {
+  return sha256({
+    contractVersion: 1,
+    channelId: input.channelId,
+    shopDomain: input.shopDomain,
+    recommendations: orderedRepairRecommendations(input.recommendations),
+  });
+}
+
+export function shopifyOwnershipRepairRequestHash(input: {
+  channelId: number;
+  shopDomain: string;
+  recommendations: readonly ShopifyOwnershipRepairRecommendation[];
+  operator: string;
+  reason: string;
+}): string {
+  return sha256({
+    contractVersion: 1,
+    channelId: input.channelId,
+    shopDomain: input.shopDomain,
+    recommendations: orderedRepairRecommendations(input.recommendations),
+    operator: input.operator,
+    reason: input.reason,
+  });
 }
 
 function compareNullableStrings(
@@ -198,6 +377,7 @@ function buildDuplicateOwnershipGroup(input: {
   shopifyProductId: string;
   owners: ShopifyMappingLocalProduct[];
   remote: ShopifyRemoteProductSnapshot | undefined;
+  channel: ShopifyMappingReconciliationReport["channel"];
 }): ShopifyDuplicateOwnershipGroup {
   const owners = uniqueOwners(input.owners);
   const activeOwners = owners.filter((owner) => owner.activeVariantCount > 0);
@@ -227,6 +407,7 @@ function buildDuplicateOwnershipGroup(input: {
     reason = "active_owner_catalog_id_mismatch";
   } else if (
     !activeOwners[0].evidenceProductIds.includes(input.shopifyProductId)
+    || !activeOwners[0].hasCanonicalChannelProductEvidence
   ) {
     reason = "active_owner_missing_channel_evidence";
   } else {
@@ -236,27 +417,33 @@ function buildDuplicateOwnershipGroup(input: {
   }
 
   const ownerProductIds = owners.map((owner) => owner.productId);
-  return {
+  const ownerEvidence: ShopifyDuplicateOwnershipOwner[] = owners.map((owner) => ({
+    productId: owner.productId,
+    productName: owner.productName,
+    productSku: owner.productSku,
+    shopifyProductId: owner.shopifyProductId,
+    shippingGroupCode: owner.shippingGroupCode,
+    mappingStatus: owner.mappingStatus,
+    mappingFingerprint: owner.mappingFingerprint,
+    activeVariantCount: owner.activeVariantCount,
+    activeVariantIssueCount: owner.activeVariantIssueIds.length,
+    hasChannelEvidence: owner.evidenceProductIds.includes(
+      input.shopifyProductId,
+    ),
+    hasCanonicalChannelProductEvidence:
+      owner.hasCanonicalChannelProductEvidence,
+  }));
+  const groupWithoutHash = {
     shopifyProductId: input.shopifyProductId,
+    remoteExists: input.remote?.exists === true,
     remoteTitle: input.remote?.title ?? null,
     remoteStatus: input.remote?.status ?? null,
+    remoteShippingGroupCode: input.remote?.shippingGroupCode ?? null,
     shippingGroupCode: shippingGroups.length === 1
       ? shippingGroups[0]
       : null,
     ownerProductIds,
-    owners: owners.map((owner) => ({
-      productId: owner.productId,
-      productName: owner.productName,
-      productSku: owner.productSku,
-      shopifyProductId: owner.shopifyProductId,
-      shippingGroupCode: owner.shippingGroupCode,
-      mappingStatus: owner.mappingStatus,
-      activeVariantCount: owner.activeVariantCount,
-      activeVariantIssueCount: owner.activeVariantIssueIds.length,
-      hasChannelEvidence: owner.evidenceProductIds.includes(
-        input.shopifyProductId,
-      ),
-    })),
+    owners: ownerEvidence,
     decision,
     reason,
     recommendedProductId,
@@ -266,6 +453,74 @@ function buildDuplicateOwnershipGroup(input: {
         (productId) => productId !== recommendedProductId,
       ),
   };
+  return {
+    ...groupWithoutHash,
+    previewHash: sha256({
+      contractVersion: 1,
+      channel: {
+        id: input.channel.id,
+        shopDomain: input.channel.shopDomain,
+      },
+      group: {
+        shopifyProductId: groupWithoutHash.shopifyProductId,
+        remoteExists: groupWithoutHash.remoteExists,
+        remoteStatus: groupWithoutHash.remoteStatus,
+        remoteShippingGroupCode: groupWithoutHash.remoteShippingGroupCode,
+        shippingGroupCode: groupWithoutHash.shippingGroupCode,
+        ownerProductIds: groupWithoutHash.ownerProductIds,
+        owners: groupWithoutHash.owners.map((owner) => ({
+          productId: owner.productId,
+          shopifyProductId: owner.shopifyProductId,
+          shippingGroupCode: owner.shippingGroupCode,
+          mappingStatus: owner.mappingStatus,
+          mappingFingerprint: owner.mappingFingerprint,
+          activeVariantCount: owner.activeVariantCount,
+          activeVariantIssueCount: owner.activeVariantIssueCount,
+          hasChannelEvidence: owner.hasChannelEvidence,
+          hasCanonicalChannelProductEvidence:
+            owner.hasCanonicalChannelProductEvidence,
+        })),
+        decision: groupWithoutHash.decision,
+        reason: groupWithoutHash.reason,
+        recommendedProductId: groupWithoutHash.recommendedProductId,
+        nonCanonicalProductIds: groupWithoutHash.nonCanonicalProductIds,
+      },
+    }),
+  };
+}
+
+export function buildShopifyOwnershipGroups(input: {
+  channel: ShopifyMappingReconciliationReport["channel"];
+  localProducts: ShopifyMappingLocalProduct[];
+  remoteProducts: Map<string, ShopifyRemoteProductSnapshot>;
+}): ShopifyDuplicateOwnershipGroup[] {
+  const ownersByShopifyProductId = indexOwnersByShopifyProductId(
+    input.localProducts,
+  );
+  return [...ownersByShopifyProductId.entries()]
+    .filter(([, owners]) => uniqueOwners(owners).length > 1)
+    .map(([shopifyProductId, owners]) => buildDuplicateOwnershipGroup({
+      shopifyProductId,
+      owners,
+      remote: input.remoteProducts.get(shopifyProductId),
+      channel: input.channel,
+    }))
+    .sort((left, right) => {
+      const decisionOrder = Number(
+        left.decision === "canonical_owner_recommended",
+      ) - Number(right.decision === "canonical_owner_recommended");
+      if (decisionOrder !== 0) return decisionOrder;
+      const titleOrder = (left.remoteTitle ?? "").localeCompare(
+        right.remoteTitle ?? "",
+      );
+      return titleOrder !== 0
+        ? titleOrder
+        : left.shopifyProductId.localeCompare(
+          right.shopifyProductId,
+          "en",
+          { numeric: true },
+        );
+    });
 }
 
 export function buildShopifyOwnershipReview(input: {
@@ -293,40 +548,14 @@ export function buildShopifyOwnershipReview(input: {
   if (
     !Number.isInteger(input.pageSize)
     || input.pageSize < 1
-    || input.pageSize > 50
+    || input.pageSize > SHOPIFY_OWNERSHIP_REPAIR_MAX_GROUPS
   ) {
     throw new RangeError(
-      "Ownership review page size must be an integer from 1 through 50",
+      `Ownership review page size must be an integer from 1 through ${SHOPIFY_OWNERSHIP_REPAIR_MAX_GROUPS}`,
     );
   }
 
-  const ownersByShopifyProductId = indexOwnersByShopifyProductId(
-    input.localProducts,
-  );
-
-  const ownershipGroups = [...ownersByShopifyProductId.entries()]
-    .filter(([, owners]) => uniqueOwners(owners).length > 1)
-    .map(([shopifyProductId, owners]) => buildDuplicateOwnershipGroup({
-      shopifyProductId,
-      owners,
-      remote: input.remoteProducts.get(shopifyProductId),
-    }))
-    .sort((left, right) => {
-      const decisionOrder = Number(
-        left.decision === "canonical_owner_recommended",
-      ) - Number(right.decision === "canonical_owner_recommended");
-      if (decisionOrder !== 0) return decisionOrder;
-      const titleOrder = (left.remoteTitle ?? "").localeCompare(
-        right.remoteTitle ?? "",
-      );
-      return titleOrder !== 0
-        ? titleOrder
-        : left.shopifyProductId.localeCompare(
-          right.shopifyProductId,
-          "en",
-          { numeric: true },
-        );
-    });
+  const ownershipGroups = buildShopifyOwnershipGroups(input);
   const filteredGroups = input.filter === "all"
     ? ownershipGroups
     : ownershipGroups.filter((group) => group.decision === input.filter);

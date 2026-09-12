@@ -24,6 +24,21 @@ function database(queue: unknown[][]) {
 const input = { channelId: 2, productVariantId: 1, sku: "SKU", actor: "test-operator" };
 
 describe("verified feed creation", () => {
+  it("classifies an active feed without a remote variant identity as corrupt", async () => {
+    const db = database([[
+      {
+        productVariantId: 1,
+        externalVariantId: null,
+        externalProductId: null,
+        externalInventoryItemId: null,
+        externalSku: "SKU",
+      },
+    ]]);
+
+    await expect(new ChannelIdentityService(db as never).inventoryIdentities(2))
+      .rejects.toMatchObject({ code: "CHANNEL_IDENTITY_CORRUPT" });
+  });
+
   it("creates a provider-verified mapping and persists its audit through the same transaction", async () => {
     const db = database([[account], [listing], [], [{ id: 2 }], [account], [listing], []]);
     const reader = new ShopifyIdentityReader();

@@ -646,6 +646,10 @@ export default function ShopifyChannelPage() {
           {mappingView === "ownership" && shopifyChannel ? (
             <ShopifyOwnershipReview
               channelId={shopifyChannel.id}
+              canRepair={canSyncShopifyCatalog}
+              onRepairApplied={() => {
+                void mappingReconciliationQuery.refetch();
+              }}
               onOpenProduct={(productId) =>
                 navigate(`/products/${productId}?tab=channels`)}
             />
