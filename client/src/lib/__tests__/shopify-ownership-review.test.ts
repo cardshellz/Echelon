@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  applyShopifyOwnershipRepair,
   fetchShopifyOwnershipReview,
 } from "../shopify-ownership-review";
 
@@ -32,8 +33,10 @@ describe("Shopify ownership review API", () => {
       },
       items: [{
         shopifyProductId: "9001",
+        remoteExists: true,
         remoteTitle: "100PT Toploader",
         remoteStatus: "ACTIVE",
+        remoteShippingGroupCode: "protection",
         shippingGroupCode: "protection",
         ownerProductIds: [10, 11],
         owners: [
@@ -44,9 +47,11 @@ describe("Shopify ownership review API", () => {
             shopifyProductId: "9001",
             shippingGroupCode: "protection",
             mappingStatus: "consistent",
+            mappingFingerprint: "fingerprint-10",
             activeVariantCount: 2,
             activeVariantIssueCount: 0,
             hasChannelEvidence: true,
+            hasCanonicalChannelProductEvidence: true,
           },
           {
             productId: 11,
@@ -55,15 +60,18 @@ describe("Shopify ownership review API", () => {
             shopifyProductId: null,
             shippingGroupCode: "protection",
             mappingStatus: "channel_only",
+            mappingFingerprint: "fingerprint-11",
             activeVariantCount: 0,
             activeVariantIssueCount: 0,
             hasChannelEvidence: true,
+            hasCanonicalChannelProductEvidence: true,
           },
         ],
         decision: "canonical_owner_recommended",
         reason: "single_active_owner_with_matching_evidence",
         recommendedProductId: 10,
         nonCanonicalProductIds: [11],
+        previewHash: "a".repeat(64),
       }],
     }));
     vi.stubGlobal("fetch", fetchMock);
@@ -111,6 +119,76 @@ describe("Shopify ownership review API", () => {
     })).rejects.toThrow(
       "Shopify mapping verification remained rate limited",
     );
+  });
+
+  it("submits and validates an idempotent ownership repair command", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse({
+      contractVersion: 1,
+      commandId: 71,
+      channelId: 36,
+      shopDomain: "cardshellz.myshopify.com",
+      previewHash: "b".repeat(64),
+      resolvedGroupCount: 1,
+      recommendedProductIds: [10],
+      detachedProductIds: [11],
+      clearedCatalogProductCount: 1,
+      clearedCatalogVariantCount: 2,
+      detachedFeedCount: 2,
+      resetListingCount: 2,
+      completedAt: "2026-07-26T12:00:00.000Z",
+      idempotentReplay: false,
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const request = {
+      expectedShopDomain: "cardshellz.myshopify.com",
+      recommendations: [{
+        shopifyProductId: "9001",
+        expectedPreviewHash: "a".repeat(64),
+      }],
+      idempotencyKey: "123e4567-e89b-42d3-a456-426614174000",
+      reason: "Detach reviewed inactive duplicates",
+    };
+
+    await expect(applyShopifyOwnershipRepair({
+      channelId: 36,
+      request,
+    })).resolves.toMatchObject({
+      commandId: 71,
+      detachedProductIds: [11],
+      idempotentReplay: false,
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/channels/36/shopify-mapping-reconciliation/ownership-review/apply",
+      {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(request),
+      },
+    );
+  });
+
+  it("preserves the classified repair error code for recovery decisions", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({
+      error: "Shopify ownership evidence changed after review.",
+      code: "SHOPIFY_OWNERSHIP_REPAIR_PREVIEW_STALE",
+    }, 409)));
+
+    await expect(applyShopifyOwnershipRepair({
+      channelId: 36,
+      request: {
+        expectedShopDomain: "cardshellz.myshopify.com",
+        recommendations: [{
+          shopifyProductId: "9001",
+          expectedPreviewHash: "a".repeat(64),
+        }],
+        idempotencyKey: "123e4567-e89b-42d3-a456-426614174000",
+        reason: "Detach reviewed inactive duplicates",
+      },
+    })).rejects.toMatchObject({
+      status: 409,
+      code: "SHOPIFY_OWNERSHIP_REPAIR_PREVIEW_STALE",
+    });
   });
 });
 

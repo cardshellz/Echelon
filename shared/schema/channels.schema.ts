@@ -1,4 +1,4 @@
-import { pgTable, pgSchema, text, varchar, integer, bigint, timestamp, jsonb, uniqueIndex, boolean, index, numeric } from "drizzle-orm/pg-core";
+import { pgTable, pgSchema, text, varchar, integer, bigint, timestamp, jsonb, uniqueIndex, boolean, index, numeric, uuid, check } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
@@ -120,7 +120,9 @@ export const channelFeeds = channelsSchema.table("channel_feeds", {
   channelId: integer("channel_id").references(() => channels.id),
   productVariantId: integer("product_variant_id").notNull().references(() => productVariants.id),
   channelType: varchar("channel_type", { length: 30 }).notNull().default("shopify"),
-  channelVariantId: varchar("channel_variant_id", { length: 100 }).notNull(), // Shopify variant ID
+  // Null means the feed row is retained as an inactive projection without an
+  // external identity (for example, after an audited ownership detach).
+  channelVariantId: varchar("channel_variant_id", { length: 100 }), // Shopify variant ID
   channelProductId: varchar("channel_product_id", { length: 100 }), // Shopify product ID
   channelSku: varchar("channel_sku", { length: 100 }), // SKU as it appears in channel
   channelInventoryItemId: varchar("channel_inventory_item_id", { length: 100 }), // Per-channel inventory item ID (multi-store)
@@ -138,12 +140,27 @@ export const channelFeeds = channelsSchema.table("channel_feeds", {
 }, (table) => [
   uniqueIndex("channel_feeds_channel_pv_idx").on(table.channelId, table.productVariantId),
   index("channel_feeds_product_variant_active_idx").on(table.productVariantId, table.isActive),
+  check(
+    "channel_feeds_active_identity_chk",
+    sql`${table.isActive} = 0 OR NULLIF(btrim(${table.channelVariantId}), '') IS NOT NULL`,
+  ),
 ]);
 
 export const insertChannelFeedSchema = createInsertSchema(channelFeeds).omit({
   id: true,
   createdAt: true,
   updatedAt: true,
+}).superRefine((value, context) => {
+  if (
+    (value.isActive ?? 1) === 1
+    && !value.channelVariantId?.trim()
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["channelVariantId"],
+      message: "An active channel feed requires an external variant ID",
+    });
+  }
 });
 
 export type InsertChannelFeed = z.infer<typeof insertChannelFeedSchema>;
@@ -315,6 +332,53 @@ export const insertChannelListingSchema = createInsertSchema(channelListings).om
 
 export type InsertChannelListing = z.infer<typeof insertChannelListingSchema>;
 export type ChannelListing = typeof channelListings.$inferSelect;
+
+// Immutable command receipts for explicit duplicate Shopify ownership repair.
+// Deployment creates only the empty control table; no mapping is changed until
+// an authorized operator applies a fresh, evidence-bound review.
+export const shopifyOwnershipRepairCommands = channelsSchema.table(
+  "shopify_ownership_repair_commands",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    channelId: integer("channel_id").notNull()
+      .references(() => channels.id, { onDelete: "restrict" }),
+    idempotencyKey: uuid("idempotency_key").notNull(),
+    requestHash: varchar("request_hash", { length: 64 }).notNull(),
+    previewHash: varchar("preview_hash", { length: 64 }).notNull(),
+    operator: varchar("operator", { length: 120 }).notNull(),
+    reason: varchar("reason", { length: 500 }).notNull(),
+    recommendations: jsonb("recommendations")
+      .$type<Array<{
+        shopifyProductId: string;
+        expectedPreviewHash: string;
+      }>>()
+      .notNull(),
+    result: jsonb("result").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    completedAt: timestamp("completed_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    uniqueIndex("shopify_ownership_repair_commands_idempotency_uidx")
+      .on(table.idempotencyKey),
+    index("shopify_ownership_repair_commands_channel_created_idx")
+      .on(table.channelId, table.createdAt),
+    check(
+      "shopify_ownership_repair_commands_request_hash_chk",
+      sql`${table.requestHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+    check(
+      "shopify_ownership_repair_commands_preview_hash_chk",
+      sql`${table.previewHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+    check(
+      "shopify_ownership_repair_commands_recommendations_chk",
+      sql`jsonb_typeof(${table.recommendations}) = 'array' AND jsonb_array_length(${table.recommendations}) > 0`,
+    ),
+  ],
+);
+
+export type ShopifyOwnershipRepairCommand =
+  typeof shopifyOwnershipRepairCommands.$inferSelect;
 
 // Channel variant overrides - per-channel variant-level customization
 export const channelVariantOverrides = channelsSchema.table("channel_variant_overrides", {
