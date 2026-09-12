@@ -54,6 +54,11 @@ export interface VerifiedShopifyVariantIdentity {
   barcode?: string | null;
 }
 
+export interface ImportedShopifyVariantBinding {
+  readonly variantId: number;
+  readonly remoteVariantId: string | number | null | undefined;
+}
+
 export interface ShopifyVariantMappingResolution {
   variantId: number;
   sku: string;
@@ -61,7 +66,7 @@ export interface ShopifyVariantMappingResolution {
   remoteBarcode: string | null;
   remoteVariantId: string;
   remoteInventoryItemId: string;
-  matchedBy: "existing_id" | "exact_sku";
+  matchedBy: "existing_id" | "exact_sku" | "import_binding";
   replacedVariantIds: string[];
 }
 
@@ -239,7 +244,9 @@ export function collectMappedShopifyVariantIds(summary: ShopifyProductMappingSum
 export function evaluateShopifyProductMappingRepair(input: {
   summary: ShopifyProductMappingSummary;
   requestedProductId: string | number | null | undefined;
-  verifiedRemoteVariants: VerifiedShopifyVariantIdentity[];
+  verifiedRemoteVariants: readonly VerifiedShopifyVariantIdentity[];
+  allowUnmappedAdoption?: boolean;
+  importedVariantBindings?: readonly ImportedShopifyVariantBinding[];
   expectedVariant?: {
     variantId: number;
     remoteVariantId: string | number | null | undefined;
@@ -258,8 +265,13 @@ export function evaluateShopifyProductMappingRepair(input: {
     && input.summary.catalogProductId === targetProductId
     && input.summary.evidenceProductIds.length === 1
     && input.summary.evidenceProductIds[0] === targetProductId;
+  const allowUnmappedAdoption = input.allowUnmappedAdoption === true
+    && input.summary.status === "unmapped"
+    && input.summary.catalogProductId === null
+    && input.summary.evidenceProductIds.length === 0;
   if (
     !alreadyConsistent
+    && !allowUnmappedAdoption
     && (!input.summary.repairable || input.summary.recommendedProductId !== targetProductId)
   ) {
     return {
@@ -299,9 +311,57 @@ export function evaluateShopifyProductMappingRepair(input: {
   }
 
   const issues: Array<Record<string, unknown>> = [];
+  const importedRemoteIdByVariantId = new Map<number, string>();
+  const importedVariantIdByRemoteId = new Map<string, number>();
+  for (const [index, binding] of (input.importedVariantBindings ?? []).entries()) {
+    const variantId = binding?.variantId;
+    const remoteVariantId = normalizeShopifyId(binding?.remoteVariantId);
+    if (!Number.isInteger(variantId) || variantId <= 0 || !remoteVariantId) {
+      issues.push({
+        code: "IMPORT_BINDING_INVALID",
+        index,
+        variantId: Number.isInteger(variantId) ? variantId : null,
+        remoteVariantId,
+      });
+      continue;
+    }
+    const existingRemoteId = importedRemoteIdByVariantId.get(variantId);
+    if (existingRemoteId && existingRemoteId !== remoteVariantId) {
+      issues.push({
+        code: "IMPORT_BINDING_LOCAL_VARIANT_DUPLICATED",
+        variantId,
+        remoteVariantIds: [existingRemoteId, remoteVariantId].sort(),
+      });
+      continue;
+    }
+    const existingVariantId = importedVariantIdByRemoteId.get(remoteVariantId);
+    if (existingVariantId !== undefined && existingVariantId !== variantId) {
+      issues.push({
+        code: "IMPORT_BINDING_REMOTE_VARIANT_DUPLICATED",
+        remoteVariantId,
+        variantIds: [existingVariantId, variantId].sort((left, right) => left - right),
+      });
+      continue;
+    }
+    importedRemoteIdByVariantId.set(variantId, remoteVariantId);
+    importedVariantIdByRemoteId.set(remoteVariantId, variantId);
+  }
+
   const variantMappings: ShopifyVariantMappingResolution[] = [];
   const assignedRemoteIds = new Map<string, number>();
-  for (const variant of input.summary.variants.filter((candidate) => candidate.isActive)) {
+  const activeVariants = input.summary.variants.filter((candidate) => candidate.isActive);
+  const activeVariantIds = new Set(activeVariants.map((variant) => variant.variantId));
+  for (const [variantId, remoteVariantId] of importedRemoteIdByVariantId) {
+    if (!activeVariantIds.has(variantId)) {
+      issues.push({
+        code: "IMPORT_BINDING_LOCAL_VARIANT_NOT_ACTIVE",
+        variantId,
+        remoteVariantId,
+      });
+    }
+  }
+
+  for (const variant of activeVariants) {
     const existingIds = variantMappingIds(variant);
     const verifiedIdMatches = existingIds
       .map((variantId) => remoteById.get(variantId))
@@ -309,8 +369,57 @@ export function evaluateShopifyProductMappingRepair(input: {
     const normalizedSku = normalizeSku(variant.sku);
     const skuMatches = normalizedSku ? remoteBySku.get(normalizedSku) ?? [] : [];
 
-    let selected = verifiedIdMatches.length === 1 ? verifiedIdMatches[0] : null;
+    const importedRemoteId = importedRemoteIdByVariantId.get(variant.variantId);
+    const importedRemoteVariant = importedRemoteId ? remoteById.get(importedRemoteId) : null;
+    let selected = importedRemoteVariant ?? (verifiedIdMatches.length === 1 ? verifiedIdMatches[0] : null);
     let matchedBy: ShopifyVariantMappingResolution["matchedBy"] = "existing_id";
+    if (importedRemoteId) {
+      matchedBy = "import_binding";
+      if (!importedRemoteVariant) {
+        issues.push({
+          code: "IMPORT_BINDING_REMOTE_VARIANT_NOT_FOUND",
+          variantId: variant.variantId,
+          sku: variant.sku,
+          remoteVariantId: importedRemoteId,
+        });
+        continue;
+      }
+      if (verifiedIdMatches.some((candidate) => candidate.id !== importedRemoteId)) {
+        issues.push({
+          code: "IMPORT_BINDING_ID_CONFLICT",
+          variantId: variant.variantId,
+          sku: variant.sku,
+          remoteVariantId: importedRemoteId,
+          liveMappedVariantIds: verifiedIdMatches.map((candidate) => candidate.id),
+        });
+        continue;
+      }
+      const syntheticSku = `SHOPIFY-${importedRemoteId}`;
+      if (
+        normalizedSku
+        && importedRemoteVariant.normalizedSku !== normalizedSku
+        && !(importedRemoteVariant.normalizedSku === null && normalizedSku === syntheticSku)
+      ) {
+        issues.push({
+          code: "IMPORT_BINDING_SKU_MISMATCH",
+          variantId: variant.variantId,
+          sku: variant.sku,
+          remoteVariantId: importedRemoteId,
+          remoteSku: importedRemoteVariant.sku,
+        });
+        continue;
+      }
+      if (skuMatches.length === 1 && skuMatches[0].id !== importedRemoteId) {
+        issues.push({
+          code: "IMPORT_BINDING_SKU_CONFLICT",
+          variantId: variant.variantId,
+          sku: variant.sku,
+          remoteVariantId: importedRemoteId,
+          skuMatchedVariantId: skuMatches[0].id,
+        });
+        continue;
+      }
+    }
     if (verifiedIdMatches.length > 1) {
       issues.push({
         code: "MULTIPLE_LIVE_IDS",
@@ -320,7 +429,7 @@ export function evaluateShopifyProductMappingRepair(input: {
       });
       continue;
     }
-    if (selected && normalizedSku && selected.normalizedSku !== normalizedSku) {
+    if (!importedRemoteId && selected && normalizedSku && selected.normalizedSku !== normalizedSku) {
       issues.push({
         code: "ID_SKU_MISMATCH",
         variantId: variant.variantId,
@@ -330,7 +439,7 @@ export function evaluateShopifyProductMappingRepair(input: {
       });
       continue;
     }
-    if (selected && skuMatches.length === 1 && skuMatches[0].id !== selected.id) {
+    if (!importedRemoteId && selected && skuMatches.length === 1 && skuMatches[0].id !== selected.id) {
       issues.push({
         code: "ID_SKU_CONFLICT",
         variantId: variant.variantId,

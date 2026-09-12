@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   createProductVariant: vi.fn(),
   updateProductVariant: vi.fn(),
   fetchShopifyCatalogProducts: vi.fn(),
+  repairShopifyProductMapping: vi.fn(),
 }));
 
 vi.mock("../..", () => ({
@@ -63,7 +64,9 @@ describe("Shopify product import sales eligibility", () => {
   });
 
   it("reports and skips an internal-only SKU before writing a Shopify mapping", async () => {
-    const result = await createProductImportService().syncProductsWithMultiUOM();
+    const result = await createProductImportService({
+      mappingOwner: { repair: mocks.repairShopifyProductMapping },
+    }).syncProductsWithMultiUOM();
 
     expect(result.mappingConflicts).toEqual([
       expect.objectContaining({
@@ -77,5 +80,6 @@ describe("Shopify product import sales eligibility", () => {
     expect(mocks.updateProduct).not.toHaveBeenCalled();
     expect(mocks.createProductVariant).not.toHaveBeenCalled();
     expect(mocks.updateProductVariant).not.toHaveBeenCalled();
+    expect(mocks.repairShopifyProductMapping).not.toHaveBeenCalled();
   });
 });

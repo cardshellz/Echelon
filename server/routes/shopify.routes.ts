@@ -1,4 +1,4 @@
-import { requireAuth } from "./middleware";
+import { requireAuth, requirePermission } from "./middleware";
 import type { Express, Request, Response } from "express";
 import { ordersStorage } from "../modules/orders";
 import { channelsStorage } from "../modules/channels";
@@ -215,7 +215,7 @@ export function registerShopifyRoutes(app: Express) {
     productImport,
   } = app.locals.services;
 
-  app.post("/api/shopify/sync", requireAuth, async (req, res) => {
+  app.post("/api/shopify/sync", requirePermission("inventory", "edit"), async (req, res) => {
     try {
       const result = await productImport.syncContentAndAssets();
       res.json(result);
@@ -230,21 +230,9 @@ export function registerShopifyRoutes(app: Express) {
 
   // Sync Shopify variants to products/product_variants tables
   // Parses SKU pattern: BASE-SKU-P50, BASE-SKU-C700 etc.
-  app.post("/api/shopify/sync-products", requireAuth, async (req, res) => {
+  app.post("/api/shopify/sync-products", requirePermission("inventory", "edit"), async (req, res) => {
     try {
-      const result = await productImport.syncProductsWithMultiUOM();
-      // Also sync content + images now that products exist
-      const contentResult = await productImport.syncContentAndAssets();
-      res.json({
-        ...result,
-        contentSync: {
-          productsUpdated: contentResult.productsUpdated,
-          assets: contentResult.assets,
-          skuMatched: contentResult.skuMatched,
-          skuNotFound: contentResult.skuNotFound,
-          mappingConflicts: contentResult.mappingConflicts,
-        },
-      });
+      res.json(await productImport.syncProductsAndContent());
     } catch (error: any) {
       console.error("Shopify product sync error:", error);
       res.status(500).json({

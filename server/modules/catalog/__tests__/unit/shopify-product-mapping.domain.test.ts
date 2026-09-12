@@ -422,6 +422,121 @@ describe("evaluateShopifyProductMappingRepair", () => {
       });
     }
   });
+
+  it("allows the importer to adopt a fully unmapped SKU-less product through an exact binding", () => {
+    const original = source().variants[0];
+    const summary = buildShopifyProductMappingSummary(source({
+      catalogProductId: null,
+      variants: [{
+        ...original,
+        sku: "SHOPIFY-42926954709151",
+        catalogVariantId: null,
+        catalogInventoryItemId: null,
+        feedId: null,
+        feedIsActive: null,
+        feedProductId: null,
+        feedVariantId: null,
+        feedInventoryItemId: null,
+        listingId: null,
+        listingProductId: null,
+        listingVariantId: null,
+      }],
+    }));
+
+    const result = evaluateShopifyProductMappingRepair({
+      summary,
+      requestedProductId: "7626813735071",
+      allowUnmappedAdoption: true,
+      importedVariantBindings: [{
+        variantId: 59,
+        remoteVariantId: "42926954709151",
+      }],
+      verifiedRemoteVariants: [{
+        id: "42926954709151",
+        sku: null,
+        inventoryItemId: "45068358877343",
+      }],
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.variantMappings).toEqual([expect.objectContaining({
+      variantId: 59,
+      remoteVariantId: "42926954709151",
+      remoteInventoryItemId: "45068358877343",
+      matchedBy: "import_binding",
+    })]);
+  });
+
+  it("keeps fully unmapped adoption closed without the importer authority flag", () => {
+    const original = source().variants[0];
+    const summary = buildShopifyProductMappingSummary(source({
+      catalogProductId: null,
+      variants: [{
+        ...original,
+        catalogVariantId: null,
+        catalogInventoryItemId: null,
+        feedId: null,
+        feedIsActive: null,
+        feedProductId: null,
+        feedVariantId: null,
+        feedInventoryItemId: null,
+        listingId: null,
+        listingProductId: null,
+        listingVariantId: null,
+      }],
+    }));
+
+    const result = evaluateShopifyProductMappingRepair({
+      summary,
+      requestedProductId: "7626813735071",
+      importedVariantBindings: [{ variantId: 59, remoteVariantId: "42926954709151" }],
+      verifiedRemoteVariants: [{
+        id: "42926954709151",
+        sku: "SHLZ-MAG-STND-P5",
+        inventoryItemId: "45068358877343",
+      }],
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.code).toBe("SHOPIFY_MAPPING_NOT_REPAIRABLE");
+  });
+
+  it("rejects an importer binding that contradicts an existing live identity", () => {
+    const summary = buildShopifyProductMappingSummary(source({
+      catalogProductId: "7626813735071",
+    }));
+    const result = evaluateShopifyProductMappingRepair({
+      summary,
+      requestedProductId: "7626813735071",
+      allowUnmappedAdoption: true,
+      importedVariantBindings: [{ variantId: 59, remoteVariantId: "999" }],
+      verifiedRemoteVariants: [
+        {
+          id: "42926954709151",
+          sku: "SHLZ-MAG-STND-P5",
+          inventoryItemId: "45068358877343",
+        },
+        {
+          id: "999",
+          sku: "OTHER-SKU",
+          inventoryItemId: "1000",
+        },
+      ],
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.code).toBe("SHOPIFY_ACTIVE_VARIANTS_UNRESOLVED");
+      expect(result.context).toMatchObject({
+        issues: [{
+          code: "IMPORT_BINDING_ID_CONFLICT",
+          variantId: 59,
+          remoteVariantId: "999",
+        }],
+      });
+    }
+  });
 });
 
 describe("resolveImportedVariantSku", () => {
