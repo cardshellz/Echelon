@@ -10,6 +10,16 @@
 import { sql } from "drizzle-orm";
 import { db } from "../../db";
 import { millsToCents } from "@shared/utils/money";
+import { wmsOmsOrderIdSql } from "./oms-wms-order-link.sql";
+
+// Provider ids share this legacy text column with internal OMS references.
+// Reuse the same source-aware, guarded resolution as the operations monitor;
+// never cast provider GIDs or match them to coincidentally equal internal ids.
+const WMS_OMS_ORDER_ID = wmsOmsOrderIdSql({
+  source: sql`wo.source`,
+  omsFulfillmentOrderId: sql`wo.oms_fulfillment_order_id`,
+  legacySourceTableId: sql`wo.source_table_id`,
+});
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -119,7 +129,7 @@ async function aggregateCogs(from: Date, to: Date): Promise<number> {
     FROM oms.order_item_costs oic
     JOIN wms.order_items wi ON wi.id = oic.order_item_id
     JOIN wms.orders wo ON wo.id = wi.order_id
-    JOIN oms.oms_orders oo ON oo.id = wo.oms_fulfillment_order_id::bigint
+    JOIN oms.oms_orders oo ON oo.id = ${WMS_OMS_ORDER_ID}
     WHERE oo.ordered_at >= ${from}
       AND oo.ordered_at < ${to}
       AND oo.cancelled_at IS NULL
@@ -157,7 +167,7 @@ async function channelBreakdown(from: Date, to: Date): Promise<ChannelBreakdown[
     FROM oms.order_item_costs oic
     JOIN wms.order_items wi ON wi.id = oic.order_item_id
     JOIN wms.orders wo ON wo.id = wi.order_id
-    JOIN oms.oms_orders oo ON oo.id = wo.oms_fulfillment_order_id::bigint
+    JOIN oms.oms_orders oo ON oo.id = ${WMS_OMS_ORDER_ID}
     WHERE oo.ordered_at >= ${from}
       AND oo.ordered_at < ${to}
       AND oo.cancelled_at IS NULL
@@ -203,11 +213,13 @@ function computePriorRange(from: Date, to: Date): { priorFrom: Date; priorTo: Da
 export async function getFinanceSummary(from: Date, to: Date): Promise<FinanceSummary> {
   const { priorFrom, priorTo } = computePriorRange(from, to);
 
+  // A failed COGS read is unknown, not zero. Propagate it to the route's logged
+  // error response instead of publishing an overstated gross margin.
   const [current, prior, currentCogs, priorCogs, channels] = await Promise.all([
     aggregateRange(from, to),
     aggregateRange(priorFrom, priorTo),
-    safeCogs(() => aggregateCogs(from, to)),
-    safeCogs(() => aggregateCogs(priorFrom, priorTo)),
+    aggregateCogs(from, to),
+    aggregateCogs(priorFrom, priorTo),
     channelBreakdown(from, to),
   ]);
 
@@ -244,16 +256,6 @@ export async function getFinanceSummary(from: Date, to: Date): Promise<FinanceSu
     dateRange: { from: from.toISOString(), to: to.toISOString() },
     priorRange: { from: priorFrom.toISOString(), to: priorTo.toISOString() },
   };
-}
-
-// COGS tables may not exist yet or may be empty — don't let it break the whole summary
-async function safeCogs(fn: () => Promise<number>): Promise<number> {
-  try {
-    return await fn();
-  } catch (err: any) {
-    console.error("[FinanceAnalytics] COGS query failed (table may not exist):", err?.message);
-    return 0;
-  }
 }
 
 // ─── Order List (drill-down) ──────────────────────────────────────
@@ -322,7 +324,7 @@ export async function getFinanceOrders(opts: {
         FROM oms.order_item_costs oic
         JOIN wms.order_items wi ON wi.id = oic.order_item_id
         JOIN wms.orders wo ON wo.id = wi.order_id
-        WHERE wo.oms_fulfillment_order_id = o.id::text
+        WHERE ${WMS_OMS_ORDER_ID} = o.id
       ) cogs ON true
       WHERE o.ordered_at >= ${from}
         AND o.ordered_at < ${to}
@@ -475,7 +477,7 @@ export async function getFinanceOrderDetail(orderId: number): Promise<FinanceOrd
       JOIN wms.order_items wi ON wi.id = oic.order_item_id
       JOIN wms.orders wo ON wo.id = wi.order_id
       LEFT JOIN product_variants pv ON pv.id = oic.product_variant_id
-      WHERE wo.oms_fulfillment_order_id = ${String(orderId)}
+      WHERE ${WMS_OMS_ORDER_ID} = ${orderId}
       ORDER BY oic.id
     `),
   ]);
