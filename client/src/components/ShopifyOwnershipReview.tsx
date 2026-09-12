@@ -54,6 +54,8 @@ const decisionReasonLabels = {
     "One active owner has matching catalog and channel evidence",
   remote_product_missing: "The Shopify product no longer exists",
   owner_count_exceeds_two: "More than two local products claim this product",
+  owner_count_exceeds_safe_limit:
+    "More than 100 local products claim this product",
   shipping_group_conflict: "The local owners use different shipping groups",
   owner_mapping_conflict: "At least one owner has conflicting mapping evidence",
   multiple_active_owners: "More than one local owner has active variants",
@@ -335,7 +337,11 @@ export function ShopifyOwnershipReview({
                         {group.shopifyProductId}
                       </code>
                       <div className="mt-1 text-xs text-muted-foreground">
-                        {group.shippingGroupCode ?? "Conflicting shipping groups"}
+                        {new Set(group.owners.map(
+                          (owner) => owner.shippingGroupCode,
+                        )).size > 1
+                          ? "Conflicting shipping groups"
+                          : group.shippingGroupCode ?? "No shipping group"}
                       </div>
                     </TableCell>
                     <TableCell>

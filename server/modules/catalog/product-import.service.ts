@@ -590,6 +590,8 @@ export function createProductImportService(
     const standaloneVariants: Array<{
       sku: string;
       name: string;
+      productTitle: string;
+      sourceSkuMissing: boolean;
       shopifyProductId: number;
       shopifyVariantId: number;
       shopifyInventoryItemId: number | null;
@@ -687,6 +689,8 @@ export function createProductImportService(
         const entry: FallbackVariant = {
           sku: importSku,
           name: variant.title,
+          productTitle: variant.productTitle || variant.title,
+          sourceSkuMissing: !variant.sku?.trim(),
           shopifyProductId: variant.shopifyProductId,
           shopifyVariantId: variant.variantId,
           shopifyInventoryItemId: variant.inventoryItemId,
@@ -754,6 +758,32 @@ export function createProductImportService(
         owners.set(candidate.productId, candidate);
       }
       projectionOwnersByShopifyProductId.set(targetProductId, owners);
+    };
+    const recordSkuSplitConflict = (input: {
+      incomingShopifyProductId: number;
+      echelonSku: string | null;
+      matchedEchelonProductIds: number[];
+      reason?: string;
+    }): void => {
+      const matchedEchelonProductIds = [...new Set(input.matchedEchelonProductIds)]
+        .sort((left, right) => left - right);
+      mappingConflicts.push({
+        code: "SHOPIFY_PRODUCT_SKUS_SPLIT",
+        source: "multi_uom_sync",
+        echelonProductId: null,
+        echelonSku: input.echelonSku,
+        existingShopifyProductId: null,
+        incomingShopifyProductId: String(input.incomingShopifyProductId),
+        matchedEchelonProductIds,
+      });
+      console.warn(JSON.stringify({
+        event: "shopify_import_mapping_conflict",
+        code: "SHOPIFY_PRODUCT_SKUS_SPLIT",
+        source: "multi_uom_sync",
+        incomingShopifyProductId: String(input.incomingShopifyProductId),
+        matchedEchelonProductIds,
+        ...(input.reason ? { reason: input.reason } : {}),
+      }));
     };
 
     // Process base SKUs with variants
@@ -910,9 +940,13 @@ export function createProductImportService(
 
     // Process standalone variants (no -P/-B/-C suffix)
     for (const sv of standaloneVariants) {
+      const incomingVariants = [sv, ...(sv.siblingVariants ?? [])];
+      type ExistingVariant = NonNullable<Awaited<ReturnType<typeof storage.getProductVariantBySku>>>;
+      const existingVariantsBySku = new Map<string, ExistingVariant>();
       const internalOnlyMatches: Array<{ productId: number; sku: string }> = [];
-      for (const incomingVariant of [sv, ...(sv.siblingVariants ?? [])]) {
+      for (const incomingVariant of incomingVariants) {
         const catalogVariant = await storage.getProductVariantBySku(incomingVariant.sku);
+        if (catalogVariant) existingVariantsBySku.set(incomingVariant.sku, catalogVariant);
         if (catalogVariant?.salesEligibility === "internal_only") {
           internalOnlyMatches.push({
             productId: catalogVariant.productId,
@@ -941,8 +975,60 @@ export function createProductImportService(
         continue;
       }
 
-      const existingVariant = await storage.getProductVariantBySku(sv.sku);
+      const existingOwnerIds = [...new Set(
+        [...existingVariantsBySku.values()].map((variant) => variant.productId),
+      )].sort((left, right) => left - right);
+      if (existingOwnerIds.length > 1) {
+        recordSkuSplitConflict({
+          incomingShopifyProductId: sv.shopifyProductId,
+          echelonSku: sv.sku,
+          matchedEchelonProductIds: existingOwnerIds,
+        });
+        continue;
+      }
+
+      const existingVariant = existingVariantsBySku.get(sv.sku) ?? null;
       let product = await storage.getProductBySku(sv.sku);
+      const existingVariantOwner = existingOwnerIds.length === 1
+        ? await storage.getProductById(existingOwnerIds[0])
+        : null;
+
+      if (existingOwnerIds.length === 1 && !existingVariantOwner) {
+        recordSkuSplitConflict({
+          incomingShopifyProductId: sv.shopifyProductId,
+          echelonSku: sv.sku,
+          matchedEchelonProductIds: existingOwnerIds,
+          reason: "variant_owner_product_missing",
+        });
+        continue;
+      }
+
+      if (
+        sv.sourceSkuMissing
+        && product
+        && existingVariantOwner
+        && product.id !== existingVariantOwner.id
+      ) {
+        const ownerMappingDecision = decideImportedShopifyProductMapping(
+          existingVariantOwner.shopifyProductId,
+          sv.shopifyProductId,
+        );
+        if (ownerMappingDecision.action !== "retain") {
+          const matchedEchelonProductIds = [product.id, existingVariantOwner.id]
+            .sort((left, right) => left - right);
+          recordSkuSplitConflict({
+            incomingShopifyProductId: sv.shopifyProductId,
+            echelonSku: sv.sku,
+            matchedEchelonProductIds,
+            reason: "sku_less_variant_owner_is_not_canonical",
+          });
+          continue;
+        }
+        product = existingVariantOwner;
+      } else if (!product && existingVariantOwner) {
+        product = existingVariantOwner;
+      }
+
       const productCategory = await resolveImportedProductCategory(sv.productType);
 
       if (product) {
@@ -971,7 +1057,7 @@ export function createProductImportService(
           continue;
         }
         await storage.updateProduct(product.id, {
-          name: sv.name,
+          name: sv.sourceSkuMissing ? sv.productTitle : sv.name,
           categoryId: productCategory.categoryId,
           category: productCategory.category,
           brand: sv.vendor,
@@ -981,7 +1067,7 @@ export function createProductImportService(
       } else {
         product = await storage.createProduct({
           sku: sv.sku,
-          name: sv.name,
+          name: sv.sourceSkuMissing ? sv.productTitle : sv.name,
           categoryId: productCategory.categoryId,
           category: productCategory.category,
           brand: sv.vendor,
@@ -993,7 +1079,7 @@ export function createProductImportService(
 
       let projectionBlocked = false;
       const importedVariantBindings: ImportedShopifyVariantBinding[] = [];
-      let variant = await storage.getProductVariantBySku(sv.sku);
+      let variant = existingVariant;
 
       if (variant) {
         if (variant.productId !== product.id) {
@@ -1041,7 +1127,7 @@ export function createProductImportService(
       // Remaining SKU-less variants of the same Shopify product ride along as
       // variants instead of becoming duplicate products mapped to one Shopify id.
       for (const sibling of sv.siblingVariants ?? []) {
-        const existingSibling = await storage.getProductVariantBySku(sibling.sku);
+        const existingSibling = existingVariantsBySku.get(sibling.sku) ?? null;
         if (existingSibling) {
           if (existingSibling.productId !== product.id) {
             console.warn(`[PRODUCT IMPORT] SKU conflict: ${sibling.sku} exists on product_id=${existingSibling.productId} but import wants product_id=${product.id} — skipping update`);
