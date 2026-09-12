@@ -35,8 +35,9 @@ import { registerOmsRoutes } from "../../../../routes/oms.routes";
 import { HistoricalIdentityRepairError } from "../../domain/historical-order-line-identity-repair";
 
 type Handler = (request: Request, response: Response) => Promise<void>;
+const USER_ID = "2f6e5308-dc3b-4c41-80e5-6f35bca2a731";
 
-function harness(userId: unknown = 7) {
+function harness(userId: unknown = USER_ID) {
   const app = { get: vi.fn(), post: vi.fn(), put: vi.fn(), patch: vi.fn(), delete: vi.fn() };
   registerOmsRoutes(app as unknown as Express);
   const getRegistration = app.get.mock.calls.find((args) =>
@@ -89,13 +90,23 @@ describe("historical order-line identity repair routes", () => {
     mocks.apply.mockResolvedValue({ commandId: 91, status: "succeeded" });
     await h.postHandler(h.request, h.response);
     expect(mocks.apply).toHaveBeenCalledWith(77, h.request.body, {
-      operator: "user:7",
-      userId: "7",
+      operator: `user:${USER_ID}`,
+      userId: USER_ID,
     });
     expect(h.response.json).toHaveBeenCalledWith({ commandId: 91, status: "succeeded" });
   });
 
-  it.each([0, null, "7", Number.NaN])("rejects an invalid audit actor: %j", async (userId) => {
+  it("preserves a valid legacy numeric session actor", async () => {
+    const h = harness(7);
+    mocks.apply.mockResolvedValue({ commandId: 91, status: "succeeded" });
+    await h.postHandler(h.request, h.response);
+    expect(mocks.apply).toHaveBeenCalledWith(77, h.request.body, {
+      operator: "user:7",
+      userId: "7",
+    });
+  });
+
+  it.each([0, null, "", "   ", "invalid\u0000actor", "x".repeat(116), Number.NaN])("rejects an invalid audit actor: %j", async (userId) => {
     const h = harness(userId);
     await h.postHandler(h.request, h.response);
     expect(mocks.apply).not.toHaveBeenCalled();

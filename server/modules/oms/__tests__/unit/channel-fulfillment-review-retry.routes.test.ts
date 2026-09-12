@@ -26,7 +26,9 @@ import { registerOmsRoutes } from "../../../../routes/oms.routes";
 import { CHANNEL_FULFILLMENT_REVIEW_RETRY, ChannelFulfillmentReviewRetryError } from "../../channel-fulfillment-review-retry.domain";
 
 type Handler = (request: Request, response: Response) => Promise<void>;
-function harness(userId: unknown = 7) {
+const USER_ID = "2f6e5308-dc3b-4c41-80e5-6f35bca2a731";
+
+function harness(userId: unknown = USER_ID) {
   const post = vi.fn();
   const app = { get: vi.fn(), post, put: vi.fn(), patch: vi.fn(), delete: vi.fn() };
   registerOmsRoutes(app as unknown as Express);
@@ -54,7 +56,7 @@ describe("reviewed fulfillment recovery through existing Ops route", () => {
     expect(mocks.permission).toHaveBeenCalledWith("operations", "triage");
     expect(mocks.remediate).toHaveBeenCalledWith({}, expect.objectContaining({
       code: CHANNEL_FULFILLMENT_REVIEW_RETRY, commandId: 3024, omsOrderId: 901,
-      previewOnly: undefined, operator: "user:7",
+      previewOnly: undefined, operator: `user:${USER_ID}`,
     }), expect.objectContaining({ reviewRetry: h.reviewRetry }));
     expect(h.response.json).toHaveBeenCalledWith({ changed: false, reviewRetry: { mode: "preview" } });
   });
@@ -67,12 +69,12 @@ describe("reviewed fulfillment recovery through existing Ops route", () => {
     };
     await h.handler(h.request, h.response as unknown as Response);
     expect(mocks.remediate).toHaveBeenCalledWith({}, expect.objectContaining({
-      operator: "user:7", previewOnly: false, expectedStateFingerprint: "a".repeat(64),
+      operator: `user:${USER_ID}`, previewOnly: false, expectedStateFingerprint: "a".repeat(64),
       reason: "Reviewed corrected adapter",
     }), expect.anything());
   });
 
-  it.each([0, null, "7", NaN])("does not fall back to an unknown or unchecked actor: %j", async (userId) => {
+  it.each([0, null, "", "   ", "invalid\u0000actor", NaN])("does not fall back to an unknown or unchecked actor: %j", async (userId) => {
     const h = harness(userId);
     await h.handler(h.request, h.response as unknown as Response);
     expect(mocks.remediate).not.toHaveBeenCalled();

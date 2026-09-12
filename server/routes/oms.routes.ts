@@ -38,6 +38,20 @@ import {
   HistoricalIdentityRepairError,
 } from "../modules/oms/domain/historical-order-line-identity-repair";
 
+const AUDIT_USER_OPERATOR_PREFIX = "user:";
+const MAX_AUDIT_OPERATOR_LENGTH = 120;
+const MAX_AUDIT_USER_ID_LENGTH = MAX_AUDIT_OPERATOR_LENGTH - AUDIT_USER_OPERATOR_PREFIX.length;
+
+function stableAuditUserId(rawUserId: unknown): string | null {
+  if (typeof rawUserId === "number") {
+    return Number.isSafeInteger(rawUserId) && rawUserId > 0 ? String(rawUserId) : null;
+  }
+  if (typeof rawUserId !== "string") return null;
+  const userId = rawUserId.trim();
+  if (userId.length === 0 || userId.length > MAX_AUDIT_USER_ID_LENGTH) return null;
+  return /^[^\u0000-\u001f\u007f]+$/.test(userId) ? userId : null;
+}
+
 export function registerOmsRoutes(app: Express) {
   const getOms = (req: Request): OmsService => (req.app.locals.services as any).oms;
   const getShipStation = (req: Request): ShipStationService | null =>
@@ -126,8 +140,8 @@ export function registerOmsRoutes(app: Express) {
     requirePermission("operations", "triage"),
     async (req: Request, res: Response) => {
       try {
-        const userId = req.session.user?.id;
-        if (!Number.isSafeInteger(userId) || Number(userId) <= 0) {
+        const userId = stableAuditUserId(req.session.user?.id);
+        if (!userId) {
           throw new HistoricalIdentityRepairError(
             "REPAIR_OPERATOR_REQUIRED",
             "An authenticated operator is required",
@@ -138,7 +152,7 @@ export function registerOmsRoutes(app: Express) {
         res.json(await getHistoricalIdentityRepair(req).apply(
           Number(req.params.omsOrderId),
           req.body,
-          { operator: `user:${Number(userId)}`, userId: String(Number(userId)) },
+          { operator: `${AUDIT_USER_OPERATOR_PREFIX}${userId}`, userId },
         ));
       } catch (error) {
         console.error("[OMS Routes] Historical line identity repair apply failed", error);
@@ -454,18 +468,20 @@ export function registerOmsRoutes(app: Express) {
     async (req: Request, res: Response) => {
       try {
         const code = String(req.body?.code || "");
-        const userId = req.session.user?.id;
+        const userId = stableAuditUserId(req.session.user?.id);
         if (code === CHANNEL_FULFILLMENT_REVIEW_RETRY
-          && (!Number.isSafeInteger(userId) || Number(userId) <= 0)) {
+          && !userId) {
           throw new ChannelFulfillmentReviewRetryError(
             "REVIEW_RETRY_ACTOR_REQUIRED", "An authenticated operator is required for reviewed recovery", 403,
           );
         }
-        const operator = code === CHANNEL_FULFILLMENT_REVIEW_RETRY ? `user:${userId}` : (
-          req.session.user?.username ||
-          req.session.user?.displayName ||
-          String(req.session.user?.id || "unknown")
-        );
+        const operator = code === CHANNEL_FULFILLMENT_REVIEW_RETRY
+          ? `${AUDIT_USER_OPERATOR_PREFIX}${userId}`
+          : (
+            req.session.user?.username ||
+            req.session.user?.displayName ||
+            String(req.session.user?.id || "unknown")
+          );
         const result = await remediateOmsFlowIssue(db, {
           code,
           omsOrderId: req.body?.omsOrderId,
