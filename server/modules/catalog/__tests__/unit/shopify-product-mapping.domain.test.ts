@@ -6,6 +6,7 @@ import {
   resolveImportedVariantSku,
   evaluateShopifyProductMappingRepair,
   normalizeShopifyId,
+  resolveShopifyInventoryFeedPolicy,
   type ShopifyProductMappingSource,
 } from "../../shopify-product-mapping.domain";
 
@@ -20,6 +21,7 @@ function source(input: Partial<ShopifyProductMappingSource> = {}): ShopifyProduc
       variantId: 59,
       sku: "SHLZ-MAG-STND-P5",
       isActive: true,
+      trackInventory: true,
       catalogBarcode: null,
       catalogVariantId: "gid://shopify/ProductVariant/42926954709151",
       catalogInventoryItemId: "45068358877343",
@@ -46,6 +48,26 @@ describe("normalizeShopifyId", () => {
   it("rejects empty and non-numeric references", () => {
     expect(normalizeShopifyId(null)).toBeNull();
     expect(normalizeShopifyId("not-an-id")).toBeNull();
+  });
+});
+
+describe("resolveShopifyInventoryFeedPolicy", () => {
+  it("creates and activates inventory feeds only for tracked variants", () => {
+    expect(resolveShopifyInventoryFeedPolicy(true)).toEqual({
+      createWhenMissing: true,
+      isActive: 1,
+      clearLastSyncedQuantity: false,
+    });
+    expect(resolveShopifyInventoryFeedPolicy(null)).toEqual({
+      createWhenMissing: true,
+      isActive: 1,
+      clearLastSyncedQuantity: false,
+    });
+    expect(resolveShopifyInventoryFeedPolicy(false)).toEqual({
+      createWhenMissing: false,
+      isActive: 0,
+      clearLastSyncedQuantity: true,
+    });
   });
 });
 
@@ -182,6 +204,52 @@ describe("buildShopifyProductMappingSummary", () => {
     expect(summary.repairable).toBe(true);
   });
 
+  it("treats an untracked digital variant as complete without an inventory feed", () => {
+    const original = source().variants[0];
+    const summary = buildShopifyProductMappingSummary(source({
+      catalogProductId: "7626813735071",
+      variants: [{
+        ...original,
+        trackInventory: false,
+        catalogInventoryItemId: null,
+        feedId: null,
+        feedIsActive: null,
+        feedProductId: null,
+        feedVariantId: null,
+        feedInventoryItemId: null,
+      }],
+    }));
+
+    expect(summary.status).toBe("consistent");
+    expect(summary.activeVariantIssueIds).toEqual([]);
+    expect(summary.repairable).toBe(false);
+  });
+
+  it("accepts an inactive legacy feed but rejects an active feed for an untracked variant", () => {
+    const original = source().variants[0];
+    const inactive = buildShopifyProductMappingSummary(source({
+      catalogProductId: "7626813735071",
+      variants: [{
+        ...original,
+        trackInventory: false,
+        feedIsActive: false,
+      }],
+    }));
+    const active = buildShopifyProductMappingSummary(source({
+      catalogProductId: "7626813735071",
+      variants: [{
+        ...original,
+        trackInventory: false,
+        feedIsActive: true,
+      }],
+    }));
+
+    expect(inactive.status).toBe("consistent");
+    expect(inactive.activeVariantIssueIds).toEqual([]);
+    expect(active.status).toBe("incomplete");
+    expect(active.activeVariantIssueIds).toEqual([59]);
+  });
+
   it("changes the optimistic-lock fingerprint when matching inputs change", () => {
     const baseline = buildShopifyProductMappingSummary(source());
     const skuChanged = buildShopifyProductMappingSummary(source({
@@ -190,9 +258,13 @@ describe("buildShopifyProductMappingSummary", () => {
     const activationChanged = buildShopifyProductMappingSummary(source({
       variants: [{ ...source().variants[0], isActive: false }],
     }));
+    const inventoryTrackingChanged = buildShopifyProductMappingSummary(source({
+      variants: [{ ...source().variants[0], trackInventory: false, feedIsActive: false }],
+    }));
 
     expect(skuChanged.fingerprint).not.toBe(baseline.fingerprint);
     expect(activationChanged.fingerprint).not.toBe(baseline.fingerprint);
+    expect(inventoryTrackingChanged.fingerprint).not.toBe(baseline.fingerprint);
   });
 
   it("does not offer automatic repair when no active variants remain", () => {

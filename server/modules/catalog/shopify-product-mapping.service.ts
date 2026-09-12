@@ -14,6 +14,7 @@ import {
   buildShopifyProductMappingSummary,
   evaluateShopifyProductMappingRepair,
   normalizeShopifyId,
+  resolveShopifyInventoryFeedPolicy,
   type ImportedShopifyVariantBinding,
   type ShopifyProductMappingSource,
   type ShopifyProductMappingSummary,
@@ -137,6 +138,7 @@ async function loadMapping(
       variantId: productVariants.id,
       sku: productVariants.sku,
       isActive: productVariants.isActive,
+      trackInventory: productVariants.trackInventory,
       catalogBarcode: productVariants.barcode,
       catalogVariantId: productVariants.shopifyVariantId,
       catalogInventoryItemId: productVariants.shopifyInventoryItemId,
@@ -181,6 +183,7 @@ async function loadMapping(
       variantId: row.variantId,
       sku: row.sku,
       isActive: row.isActive,
+      trackInventory: row.trackInventory,
       catalogBarcode: row.catalogBarcode,
       catalogVariantId: row.catalogVariantId,
       catalogInventoryItemId: row.catalogInventoryItemId,
@@ -458,18 +461,27 @@ function mappingRequiresWrite(
   const variantsById = new Map(summary.variants.map((variant) => [variant.variantId, variant]));
   return variantMappings.some((mapping) => {
     const variant = variantsById.get(mapping.variantId);
-    return !variant
+    if (!variant
       || variant.catalogVariantId !== mapping.remoteVariantId
       || variant.catalogInventoryItemId !== mapping.remoteInventoryItemId
       || (!variant.catalogBarcode && Boolean(mapping.remoteBarcode))
-      || !variant.feedId
-      || variant.feedIsActive !== true
-      || variant.feedProductId !== targetProductId
-      || variant.feedVariantId !== mapping.remoteVariantId
-      || variant.feedInventoryItemId !== mapping.remoteInventoryItemId
       || !variant.listingId
       || variant.listingProductId !== targetProductId
-      || variant.listingVariantId !== mapping.remoteVariantId;
+      || variant.listingVariantId !== mapping.remoteVariantId) {
+      return true;
+    }
+    if (variant.trackInventory !== false) {
+      return !variant.feedId
+        || variant.feedIsActive !== true
+        || variant.feedProductId !== targetProductId
+        || variant.feedVariantId !== mapping.remoteVariantId
+        || variant.feedInventoryItemId !== mapping.remoteInventoryItemId;
+    }
+    if (!variant.feedId) return false;
+    return variant.feedIsActive !== false
+      || variant.feedProductId !== targetProductId
+      || variant.feedVariantId !== mapping.remoteVariantId
+      || variant.feedInventoryItemId !== mapping.remoteInventoryItemId;
   });
 }
 
@@ -479,6 +491,7 @@ function activeVariantAuditSnapshot(summary: ShopifyProductMappingSummary) {
     .map((variant) => ({
       variantId: variant.variantId,
       sku: variant.sku,
+      trackInventory: variant.trackInventory,
       barcode: variant.catalogBarcode,
       catalogVariantId: variant.catalogVariantId,
       catalogInventoryItemId: variant.catalogInventoryItemId,
@@ -736,6 +749,17 @@ export function createShopifyProductMappingService() {
         const currentVariant = current.summary.variants.find(
           (variant) => variant.variantId === mapping.variantId,
         );
+        if (!currentVariant) {
+          throw new ShopifyProductMappingError(
+            "ACTIVE_VARIANT_CHANGED",
+            "An active variant changed while the Shopify mapping was being repaired",
+            409,
+            { variantId: mapping.variantId },
+          );
+        }
+        const inventoryFeedPolicy = resolveShopifyInventoryFeedPolicy(
+          currentVariant.trackInventory,
+        );
         const catalogVariantUpdates: Partial<typeof productVariants.$inferInsert> = {
           shopifyVariantId: mapping.remoteVariantId,
           shopifyInventoryItemId: mapping.remoteInventoryItemId,
@@ -770,7 +794,10 @@ export function createShopifyProductMappingService() {
             channelVariantId: mapping.remoteVariantId,
             channelInventoryItemId: mapping.remoteInventoryItemId,
             channelSku: mapping.remoteSku || mapping.sku || null,
-            isActive: 1,
+            isActive: inventoryFeedPolicy.isActive,
+            ...(inventoryFeedPolicy.clearLastSyncedQuantity
+              ? { lastSyncedQty: null }
+              : {}),
             consecutivePushFailures: 0,
             quarantinedAt: null,
             quarantineReason: null,
@@ -784,7 +811,7 @@ export function createShopifyProductMappingService() {
           .returning({ id: channelFeeds.id });
         if (updatedFeeds.length > 0) {
           updatedFeedCount += updatedFeeds.length;
-        } else {
+        } else if (inventoryFeedPolicy.createWhenMissing) {
           await tx.insert(channelFeeds).values({
             channelId: before.channel.id,
             productVariantId: mapping.variantId,

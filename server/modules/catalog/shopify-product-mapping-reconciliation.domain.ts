@@ -11,6 +11,7 @@ const safeText = (maximum: number) => z.string().trim().min(1).max(maximum)
   .regex(/^[^\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]*$/);
 
 export const SHOPIFY_OWNERSHIP_REPAIR_MAX_GROUPS = 100;
+export const SHOPIFY_OWNERSHIP_REPAIR_MAX_OWNERS_PER_GROUP = 100;
 
 export const shopifyOwnershipRepairRecommendationSchema = z.object({
   shopifyProductId: z.string().regex(/^\d+$/),
@@ -68,6 +69,7 @@ export const SHOPIFY_OWNERSHIP_DECISION_REASONS = [
   "single_active_owner_with_matching_evidence",
   "remote_product_missing",
   "owner_count_exceeds_two",
+  "owner_count_exceeds_safe_limit",
   "shipping_group_conflict",
   "owner_mapping_conflict",
   "multiple_active_owners",
@@ -160,6 +162,11 @@ export interface ShopifyOwnershipRepairResult {
   readonly resolvedGroupCount: number;
   readonly recommendedProductIds: readonly number[];
   readonly detachedProductIds: readonly number[];
+  readonly resolvedGroups?: readonly {
+    readonly shopifyProductId: string;
+    readonly recommendedProductId: number;
+    readonly detachedProductIds: readonly number[];
+  }[];
   readonly clearedCatalogProductCount: number;
   readonly clearedCatalogVariantCount: number;
   readonly detachedFeedCount: number;
@@ -194,6 +201,11 @@ z.ZodType<ShopifyOwnershipRepairResult> = z.object({
   resolvedGroupCount: z.number().int().positive(),
   recommendedProductIds: z.array(z.number().int().positive()),
   detachedProductIds: z.array(z.number().int().positive()),
+  resolvedGroups: z.array(z.object({
+    shopifyProductId: z.string().regex(/^\d+$/),
+    recommendedProductId: z.number().int().positive(),
+    detachedProductIds: z.array(z.number().int().positive()).min(1),
+  }).strict()).optional(),
   clearedCatalogProductCount: z.number().int().nonnegative(),
   clearedCatalogVariantCount: z.number().int().nonnegative(),
   detachedFeedCount: z.number().int().nonnegative(),
@@ -219,14 +231,61 @@ z.ZodType<ShopifyOwnershipRepairResult> = z.object({
     });
   }
   if (
-    detached.length !== value.resolvedGroupCount
-    || JSON.stringify(detached) !== JSON.stringify(detachedSorted)
+    JSON.stringify(detached) !== JSON.stringify(detachedSorted)
     || value.clearedCatalogProductCount !== detached.length
+    || detached.some((productId) => recommended.includes(productId))
   ) {
     context.addIssue({
       code: "custom",
       path: ["detachedProductIds"],
-      message: "Detached product IDs and cleared product count must match the resolved groups",
+      message: "Detached product IDs must be unique, sorted, disjoint from canonical owners, and match the cleared product count",
+    });
+  }
+
+  if (!value.resolvedGroups) {
+    // Backward-compatible validation for receipts written before a group-level
+    // detach manifest existed. Those commands detached exactly one owner from
+    // each resolved group.
+    if (detached.length !== value.resolvedGroupCount) {
+      context.addIssue({
+        code: "custom",
+        path: ["detachedProductIds"],
+        message: "Legacy detached product IDs must match the resolved group count",
+      });
+    }
+    return;
+  }
+
+  const groups = [...value.resolvedGroups];
+  const groupProductIds = groups.map((group) => group.shopifyProductId);
+  const sortedGroupProductIds = [...new Set(groupProductIds)].sort(
+    (left, right) => left.localeCompare(right, "en", { numeric: true }),
+  );
+  const groupRecommendedProductIds = groups
+    .map((group) => group.recommendedProductId)
+    .sort((left, right) => left - right);
+  const groupDetachedProductIds = groups
+    .flatMap((group) => group.detachedProductIds)
+    .sort((left, right) => left - right);
+  const everyGroupIsExact = groups.every((group) => {
+    const groupDetached = [...group.detachedProductIds];
+    const groupDetachedSorted = [...new Set(groupDetached)].sort(
+      (left, right) => left - right,
+    );
+    return JSON.stringify(groupDetached) === JSON.stringify(groupDetachedSorted)
+      && !groupDetached.includes(group.recommendedProductId);
+  });
+  if (
+    groups.length !== value.resolvedGroupCount
+    || JSON.stringify(groupProductIds) !== JSON.stringify(sortedGroupProductIds)
+    || JSON.stringify(groupRecommendedProductIds) !== JSON.stringify(recommended)
+    || JSON.stringify(groupDetachedProductIds) !== JSON.stringify(detached)
+    || !everyGroupIsExact
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["resolvedGroups"],
+      message: "Resolved-group manifests must exactly account for every canonical and detached product",
     });
   }
 });
@@ -391,8 +450,8 @@ function buildDuplicateOwnershipGroup(input: {
 
   if (!input.remote?.exists) {
     reason = "remote_product_missing";
-  } else if (owners.length > 2) {
-    reason = "owner_count_exceeds_two";
+  } else if (owners.length > SHOPIFY_OWNERSHIP_REPAIR_MAX_OWNERS_PER_GROUP) {
+    reason = "owner_count_exceeds_safe_limit";
   } else if (shippingGroups.length > 1) {
     reason = "shipping_group_conflict";
   } else if (owners.some((owner) => owner.mappingStatus === "conflict")) {

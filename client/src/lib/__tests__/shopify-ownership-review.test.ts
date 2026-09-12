@@ -130,8 +130,13 @@ describe("Shopify ownership review API", () => {
       previewHash: "b".repeat(64),
       resolvedGroupCount: 1,
       recommendedProductIds: [10],
-      detachedProductIds: [11],
-      clearedCatalogProductCount: 1,
+      detachedProductIds: [11, 12],
+      resolvedGroups: [{
+        shopifyProductId: "9001",
+        recommendedProductId: 10,
+        detachedProductIds: [11, 12],
+      }],
+      clearedCatalogProductCount: 2,
       clearedCatalogVariantCount: 2,
       detachedFeedCount: 2,
       resetListingCount: 2,
@@ -154,7 +159,7 @@ describe("Shopify ownership review API", () => {
       request,
     })).resolves.toMatchObject({
       commandId: 71,
-      detachedProductIds: [11],
+      detachedProductIds: [11, 12],
       idempotentReplay: false,
     });
     expect(fetchMock).toHaveBeenCalledWith(
@@ -166,6 +171,43 @@ describe("Shopify ownership review API", () => {
         body: JSON.stringify(request),
       },
     );
+  });
+
+  it("rejects a repair receipt whose group manifest omits a detached owner", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(jsonResponse({
+      contractVersion: 1,
+      commandId: 71,
+      channelId: 36,
+      shopDomain: "cardshellz.myshopify.com",
+      previewHash: "b".repeat(64),
+      resolvedGroupCount: 1,
+      recommendedProductIds: [10],
+      detachedProductIds: [11, 12],
+      resolvedGroups: [{
+        shopifyProductId: "9001",
+        recommendedProductId: 10,
+        detachedProductIds: [11],
+      }],
+      clearedCatalogProductCount: 2,
+      clearedCatalogVariantCount: 0,
+      detachedFeedCount: 0,
+      resetListingCount: 0,
+      completedAt: "2026-07-26T12:00:00.000Z",
+      idempotentReplay: false,
+    })));
+
+    await expect(applyShopifyOwnershipRepair({
+      channelId: 36,
+      request: {
+        expectedShopDomain: "cardshellz.myshopify.com",
+        recommendations: [{
+          shopifyProductId: "9001",
+          expectedPreviewHash: "a".repeat(64),
+        }],
+        idempotencyKey: "123e4567-e89b-42d3-a456-426614174009",
+        reason: "Detach reviewed inactive duplicates",
+      },
+    })).rejects.toThrow("Ownership repair returned an invalid response");
   });
 
   it("preserves the classified repair error code for recovery decisions", async () => {
