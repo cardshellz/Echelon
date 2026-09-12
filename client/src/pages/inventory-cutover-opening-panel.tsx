@@ -9,6 +9,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { CutoverHttpError, postInventoryPlanningCommand } from "./inventory-cutover-http";
 import { createOpeningWorksheet, OPENING_DOCUMENT_LIMIT_BYTES, parseOpeningDocument, prepareOpeningSave,
   type OpeningAssessment, type OpeningSource, type OpeningVerification } from "./inventory-cutover-opening-document";
+import { createOpeningSpreadsheets, OPENING_SPREADSHEET_LIMIT_BYTES, parseOpeningSpreadsheets,
+  type OpeningSpreadsheetKind } from "./inventory-cutover-opening-spreadsheet";
 import { evidencePage } from "./inventory-cutover-preflight-panel";
 import { fetchBackgroundOpeningSource } from "./inventory-opening-capture";
 
@@ -36,12 +38,15 @@ export function InventoryCutoverOpeningPanel(props: Props) {
   const [confirmed, setConfirmed] = useState(false);
   const [currentReservationBasis, setCurrentReservationBasis] = useState(false);
   const [reason, setReason] = useState("");
+  const [verificationReference, setVerificationReference] = useState("");
+  const [verifiedAt, setVerifiedAt] = useState("");
   const [inputError, setInputError] = useState<Error | null>(null);
   const [importing, setImporting] = useState(false);
   const [saved, setSaved] = useState<z.infer<typeof openingSavedSchema> | null>(null);
   const [captureProgress, setCaptureProgress] = useState("");
   const captureKey = useRef<string | null>(null);
   const attempt = useRef<z.infer<typeof saveOpeningRequestSchema> | null>(null);
+  const spreadsheetCache = useRef<{ evidenceHash: string; sheets: ReturnType<typeof createOpeningSpreadsheets> } | null>(null);
   const enabled = props.canActivate && props.actorId !== null;
   const source = useQuery({ queryKey: [SOURCE_URL, props.actorId], enabled: false, retry: false, gcTime: 0,
     refetchOnMount: false, refetchOnWindowFocus: false, refetchOnReconnect: false,
@@ -75,7 +80,7 @@ export function InventoryCutoverOpeningPanel(props: Props) {
   const retained = attempt.current !== null;
   const displayedSaved = saved ?? source.data?.latestVerification;
   const error = inputError ?? save.error ?? preview.error ?? source.error;
-  async function importFile(file: File | undefined) {
+  async function importLegacyFile(file: File | undefined) {
     if (!file || !usable || !source.data || busy || retained) return;
     setVerification(null); setAssessment(null); setConfirmed(false); setSaved(null); setInputError(null);
     if (file.size > OPENING_DOCUMENT_LIMIT_BYTES) { setInputError(new Error("The verification file exceeds 10MB. No partial document was imported.")); return; }
@@ -84,13 +89,54 @@ export function InventoryCutoverOpeningPanel(props: Props) {
     catch (error) { setInputError(error instanceof Error ? error : new Error("The verification document could not be read.")); }
     finally { setImporting(false); }
   }
-  function downloadWorksheet() {
+  async function importSpreadsheetFiles(files: FileList | null) {
+    if (!files || !usable || !source.data || busy || retained) return;
+    setVerification(null); setAssessment(null); setConfirmed(false); setSaved(null); setInputError(null);
+    const selected = Array.from(files);
+    const tooLarge = selected.find((file) => file.size > OPENING_SPREADSHEET_LIMIT_BYTES);
+    if (tooLarge) {
+      setInputError(new Error(`${tooLarge.name} exceeds 10MB. No spreadsheet data was imported.`));
+      return;
+    }
+    setImporting(true);
+    try {
+      const documents = await Promise.all(selected.map(async (file) => ({ name: file.name, text: await file.text() })));
+      setVerification(await parseOpeningSpreadsheets(documents, source.data, {
+        verificationReference,
+        verifiedAt,
+        ...(currentReservationBasis ? { reservationBasis: "verified_current_lot_custody" as const } : {}),
+      }));
+    } catch (error) {
+      setInputError(error instanceof Error ? error : new Error("The completed spreadsheets could not be imported."));
+    } finally {
+      setImporting(false);
+    }
+  }
+  function downloadLegacyWorksheet() {
     if (!usable || !source.data || busy || retained) return;
     const blob = new Blob([createOpeningWorksheet(source.data, currentReservationBasis ? "verified_current_lot_custody" : undefined)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
     link.href = url; link.download = `inventory-opening-${source.data.evidenceHash.slice(0, 12)}.json`;
     try { link.click(); } finally { URL.revokeObjectURL(url); }
+  }
+  function downloadSpreadsheet(kind: OpeningSpreadsheetKind) {
+    if (!usable || !source.data || busy || retained) return;
+    try {
+      setInputError(null);
+      if (spreadsheetCache.current?.evidenceHash !== source.data.evidenceHash) {
+        spreadsheetCache.current = { evidenceHash: source.data.evidenceHash, sheets: createOpeningSpreadsheets(source.data) };
+      }
+      const sheets = spreadsheetCache.current.sheets;
+      const blob = new Blob([sheets[kind]], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      const suffix = kind === "stock" ? "stock-and-lots" : kind === "orders" ? "open-orders" : "lot-ownership";
+      link.href = url; link.download = `inventory-opening-${suffix}-${source.data.evidenceHash.slice(0, 12)}.csv`;
+      try { link.click(); } finally { URL.revokeObjectURL(url); }
+    } catch (error) {
+      setInputError(error instanceof Error ? error : new Error("The verification spreadsheet could not be created."));
+    }
   }
   if (!enabled) return null;
   return <Card aria-label="Verified current inventory opening">
@@ -100,12 +146,13 @@ export function InventoryCutoverOpeningPanel(props: Props) {
     </CardHeader>
     <CardContent className="space-y-4">
       <Button variant="outline" disabled={busy || retained} onClick={() => {
-        setVerification(null); setAssessment(null); setConfirmed(false); setSaved(null); setInputError(null); void source.refetch();
+        setVerification(null); setAssessment(null); setConfirmed(false); setSaved(null); setInputError(null);
+        setVerificationReference(""); setVerifiedAt(""); spreadsheetCache.current = null; void source.refetch();
       }}>{source.isFetching ? "Capturing recorded data…" : "Capture current recorded data"}</Button>
       {captureProgress && <p role="status" className="text-sm">{captureProgress}</p>}
       {source.isError && <Button variant="outline" disabled={busy} onClick={() => {
         captureKey.current = null; setCaptureProgress(""); setVerification(null); setAssessment(null);
-        setConfirmed(false); setSaved(null); setInputError(null); void source.refetch();
+        setConfirmed(false); setSaved(null); setInputError(null); setVerificationReference(""); setVerifiedAt(""); spreadsheetCache.current = null; void source.refetch();
       }}>Start a new capture after failure</Button>}
       {error && <p role="alert" className="text-sm text-destructive">{error.message}{source.isError && source.data ? " Previous source records below may be stale; they cannot authorize a new save." : ""}</p>}
       {source.data && <>
@@ -113,21 +160,54 @@ export function InventoryCutoverOpeningPanel(props: Props) {
           These are database records, not proof of a physical count.</p>
         {source.data.runtimeAuthority !== "legacy" && <p role="note">Inventory authority has already changed. Opening verification is unavailable.</p>}
         <OpeningRecordedEvidence source={source.data} />
-        <Label htmlFor="opening-current-custody-policy" className="flex items-start gap-2"><input id="opening-current-custody-policy" type="checkbox" checked={currentReservationBasis} disabled={!usable || busy || retained}
+        <Label htmlFor="opening-current-custody-policy" className="flex items-start gap-2"><input id="opening-current-custody-policy" type="checkbox" checked={currentReservationBasis} disabled={!usable || busy || retained || verification !== null}
           onChange={event => setCurrentReservationBasis(event.target.checked)} />
           Use independently verified current lot custody for the reservation handoff, including bins that still contain stock.
           This permits a reviewed final translation of excess legacy counters; it does not approve this worksheet or change stock.</Label>
-        <Button variant="outline" disabled={!usable || busy || retained} onClick={downloadWorksheet}>Download blank verification worksheet</Button>
-        <p className="text-sm">Count each lot once and verify its current order owners. Lot and owner quantities start blank, including explicit zero counts.
-          SKU/bin totals are calculated from those lot observations; do not count or edit a second balance. Preserve the original cost layers and record exact reserved/picked lot allocations.
-          Recorded reference values and labels are not imported as verification. Saving is review-only; the approved cutover posts the new opening.</p>
+        <section className="space-y-3 rounded border p-3" aria-label="Spreadsheet inventory verification workflow">
+          <h4 className="font-medium">1. Download the three inventory verification spreadsheets</h4>
+          <div className="flex flex-wrap gap-2">
+            <Button variant="outline" disabled={!usable || busy || retained} onClick={() => downloadSpreadsheet("stock")}>Download stock and lot counts CSV</Button>
+            <Button variant="outline" disabled={!usable || busy || retained} onClick={() => downloadSpreadsheet("orders")}>Download open-order review CSV</Button>
+            <Button variant="outline" disabled={!usable || busy || retained} onClick={() => downloadSpreadsheet("allocations")}>Download lot ownership CSV</Button>
+          </div>
+          <p className="text-sm">The sheets identify stock by SKU, warehouse, bin and lot, and order commitments by order number, external order ID, SKU and line.
+            Enter only the columns beginning with <strong>enter_</strong>. Internal IDs are retained only so the import can prove the rows were not switched. Recorded lot costs are shown for review and carried forward unchanged;
+            correct a wrong cost through its owning workflow before cutover.</p>
+          <p className="text-sm">Lot and owner quantities start blank, including explicit zero counts. Count each lot once; SKU/bin totals are calculated from those lot observations rather than counted a second time.
+            Enter every order's remaining quantity and its physical reserved/picked custody. In the ownership sheet, fill only rows that physically hold units;
+            leave unused candidate rows blank. If custody belongs to an unlisted lot, use the blank row for that order and copy the lot ID from the stock sheet into <strong>enter_unlisted_lot_id</strong>.
+            For picked units, enter listed cost IDs or ALL after checking that the listed rows exactly cover those units.</p>
+          <h4 className="font-medium">2. Identify the completed review</h4>
+          <Label htmlFor="opening-spreadsheet-reference">Count or review reference</Label>
+          <Input id="opening-spreadsheet-reference" value={verificationReference} maxLength={1000} disabled={!usable || busy || retained || verification !== null}
+            placeholder="Example: Warehouse count 2026-09-12, reviewed by J. Smith"
+            onChange={event => setVerificationReference(event.target.value)} />
+          <Label htmlFor="opening-spreadsheet-verified-at">Review completed at</Label>
+          <Input id="opening-spreadsheet-verified-at" type="datetime-local" value={verifiedAt} disabled={!usable || busy || retained || verification !== null}
+            onChange={event => setVerifiedAt(event.target.value)} />
+          <h4 className="font-medium">3. Import all three completed CSV files together</h4>
+          <Label htmlFor="opening-spreadsheet-files">Completed inventory verification spreadsheets</Label>
+          <Input id="opening-spreadsheet-files" type="file" multiple accept=".csv,text/csv" disabled={!usable || busy || retained}
+            onChange={event => { const files = event.target.files; event.target.value = ""; void importSpreadsheetFiles(files); }} />
+          <p className="text-sm">The app validates complete lot and order coverage, unchanged row identities, whole-number quantities and exact cost references.
+            It creates and hashes the audited verification document for you; no JSON editing is required.</p>
+          {verification && <Button variant="outline" disabled={busy || retained} onClick={() => {
+            setVerification(null); setAssessment(null); setConfirmed(false); setSaved(null); setInputError(null);
+          }}>Clear imported spreadsheets</Button>}
+        </section>
         <p className="text-sm">Recorded reservation counters may include a promise against an empty bin. Those raw counters stay in the recorded reference; the new physical totals come from lot observations.
           An order owner's reserved and picked quantities describe physical holds only. For a proven unpicked promise with no physical hold, independently verify both owner quantities as zero with no lot allocations,
           while keeping the full remaining order demand. Without the current-custody option, the server must prove the complete empty-bin promise from history.
           With that option, independently verified physical lot holds and every current order replace missing historical ownership as the opening basis; unexplained physical custody still blocks.</p>
-        <Label htmlFor="opening-verification-file">Import completed verification JSON</Label>
-        <Input id="opening-verification-file" type="file" accept=".json,application/json" disabled={!usable || busy || retained}
-          onChange={event => { const file = event.target.files?.[0]; event.target.value = ""; void importFile(file); }} />
+        <details><summary className="cursor-pointer text-sm">Legacy system-to-system JSON compatibility (not for manual editing)</summary>
+          <div className="mt-2 space-y-2">
+            <Button variant="outline" disabled={!usable || busy || retained} onClick={downloadLegacyWorksheet}>Download legacy JSON document</Button>
+            <Label htmlFor="opening-verification-file">Import completed legacy JSON document</Label>
+            <Input id="opening-verification-file" type="file" accept=".json,application/json" disabled={!usable || busy || retained}
+              onChange={event => { const file = event.target.files?.[0]; event.target.value = ""; void importLegacyFile(file); }} />
+          </div>
+        </details>
       </>}
       {verification && <section className="space-y-3 rounded border p-3">
         <p className="text-sm">Imported {verification.levels.length} positions, {verification.lots.length} lots and {verification.owners.length} order lines.</p>
@@ -136,7 +216,7 @@ export function InventoryCutoverOpeningPanel(props: Props) {
         {source.data && <OpeningVerifiedEvidence source={source.data} verification={verification} />}
         <Label htmlFor="opening-independent-confirmation" className="flex items-start gap-2"><input id="opening-independent-confirmation" type="checkbox" checked={confirmed} disabled={busy || retained}
           onChange={event => { setConfirmed(event.target.checked); setAssessment(null); }} />
-          I independently verified these quantities, order commitments and lot/cost allocations against the referenced evidence. I am not treating the recorded database values as a physical count.</Label>
+          I independently verified these quantities, preserved lot cost layers, order commitments and exact lot/cost allocations against the referenced evidence. I am not treating the recorded database values as a physical count.</Label>
         <Button variant="outline" disabled={!usable || busy || retained || !confirmed} onClick={() => preview.mutate()}>
           {preview.isPending ? "Checking complete verification…" : "Preview verified opening"}</Button>
       </section>}
