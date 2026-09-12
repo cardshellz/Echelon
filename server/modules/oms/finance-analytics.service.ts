@@ -152,7 +152,7 @@ async function channelBreakdown(from: Date, to: Date): Promise<ChannelBreakdown[
       COALESCE(SUM(o.refund_amount_cents) FILTER (WHERE o.cancelled_at IS NULL), 0)::bigint AS refund_cents,
       COALESCE(SUM(o.total_cents - o.refund_amount_cents) FILTER (WHERE o.cancelled_at IS NULL), 0)::bigint AS net_revenue_cents
     FROM oms.oms_orders o
-    JOIN channels c ON c.id = o.channel_id
+    JOIN channels.channels c ON c.id = o.channel_id
     WHERE o.ordered_at >= ${from}
       AND o.ordered_at < ${to}
     GROUP BY c.id, c.name, c.provider
@@ -318,7 +318,7 @@ export async function getFinanceOrders(opts: {
         o.customer_name,
         COALESCE(cogs.total_cogs, 0)::bigint AS cogs_mills
       FROM oms.oms_orders o
-      JOIN channels c ON c.id = o.channel_id
+      JOIN channels.channels c ON c.id = o.channel_id
       LEFT JOIN LATERAL (
         SELECT SUM(COALESCE(NULLIF(oic.total_cost_mills, 0), oic.total_cost_cents * 100, 0)) AS total_cogs
         FROM oms.order_item_costs oic
@@ -442,7 +442,7 @@ export async function getFinanceOrderDetail(orderId: number): Promise<FinanceOrd
     db.execute(sql`
       SELECT o.*, c.name AS channel_name, c.provider
       FROM oms.oms_orders o
-      JOIN channels c ON c.id = o.channel_id
+      JOIN channels.channels c ON c.id = o.channel_id
       WHERE o.id = ${orderId}
     `),
     db.execute(sql`
@@ -476,7 +476,7 @@ export async function getFinanceOrderDetail(orderId: number): Promise<FinanceOrd
       FROM oms.order_item_costs oic
       JOIN wms.order_items wi ON wi.id = oic.order_item_id
       JOIN wms.orders wo ON wo.id = wi.order_id
-      LEFT JOIN product_variants pv ON pv.id = oic.product_variant_id
+      LEFT JOIN catalog.product_variants pv ON pv.id = oic.product_variant_id
       WHERE ${WMS_OMS_ORDER_ID} = ${orderId}
       ORDER BY oic.id
     `),

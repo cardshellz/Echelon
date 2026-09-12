@@ -19,6 +19,7 @@ suite.sequential("COGS read queries against the canonical PostgreSQL schema", ()
   let pool: pg.Pool;
   let service: COGSService;
   const ownedSchemas: string[] = [];
+  let ownsLegacyChannels = false;
 
   beforeAll(async () => {
     if (!["127.0.0.1", "localhost", "[::1]"].includes(new URL(url!).hostname)
@@ -26,7 +27,7 @@ suite.sequential("COGS read queries against the canonical PostgreSQL schema", ()
       throw new Error("Cost read tests require a separate explicitly disposable local PostgreSQL database.");
     }
     pool = new pg.Pool({ connectionString: url, ssl: false, max: 2, statement_timeout: 15_000,
-      options: "-c search_path=channels,catalog,public" });
+      options: "-c search_path=public" });
     // CREATE without IF NOT EXISTS prevents adopting or deleting existing data.
     for (const name of ["catalog", "inventory", "procurement", "warehouse", "wms", "oms", "channels"]) {
       await pool.query(`CREATE SCHEMA ${name}`);
@@ -38,6 +39,12 @@ suite.sequential("COGS read queries against the canonical PostgreSQL schema", ()
       schema.omsOrders, schema.omsOrderLines, schema.omsOrderLineAdjustments, schema.omsOrderEvents]) {
       await pool.query(fixtureTable(table));
     }
+    // Production resolves unqualified channels to an unrelated legacy table.
+    // Keep that collision, and keep catalog absent from search_path, so a
+    // canonical-schema regression cannot pass through fixture-only aliases.
+    await pool.query("CREATE TABLE public.channels (id integer PRIMARY KEY, name text, provider text)");
+    ownsLegacyChannels = true;
+    await pool.query("INSERT INTO public.channels VALUES (1, 'Wrong legacy channel', 'legacy')");
     service = new COGSService(drizzle(pool, { schema }));
   });
 
@@ -51,6 +58,7 @@ suite.sequential("COGS read queries against the canonical PostgreSQL schema", ()
   afterAll(async () => {
     if (!pool) return;
     try {
+      if (ownsLegacyChannels) await pool.query("DROP TABLE public.channels");
       for (const name of ownedSchemas.reverse()) await pool.query(`DROP SCHEMA ${name} CASCADE`);
     } finally {
       await pool.end();
@@ -97,12 +105,15 @@ suite.sequential("COGS read queries against the canonical PostgreSQL schema", ()
     const summary = await getFinanceSummary(from, to);
     expect(summary.waterfall.cogsCents).toMatchObject({ value: 350, priorValue: 0 });
     expect(summary.waterfall.grossMarginCents.value).toBe(29650);
-    expect(summary.channels).toMatchObject([{ channelId: 1, cogsCents: 350 }]);
+    expect(summary.channels).toMatchObject([{ channelId: 1, channelName: 'Synthetic channel', provider: 'shopify', cogsCents: 350 }]);
     const list = await getFinanceOrders({ from, to });
     expect(list.orders.find(order => order.id === 101)?.cogsCents).toBe(300);
+    expect(list.orders.find(order => order.id === 101)?.channelName).toBe('Synthetic channel');
     expect(list.orders.find(order => order.id === 102)?.cogsCents).toBe(50);
     const detail = await getFinanceOrderDetail(101);
     expect(detail?.cogsTotalCents).toBe(300);
+    expect(detail?.channelName).toBe('Synthetic channel');
+    expect(detail?.costs.map(cost => cost.sku)).toEqual(['PACK-A', 'PACK-A']);
     expect(detail?.costs.map(cost => cost.totalCostCents)).toEqual([100, 200]);
   });
 
