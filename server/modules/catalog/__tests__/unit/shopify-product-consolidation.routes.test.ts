@@ -5,7 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { registerShopifyProductConsolidationRoutes } from "../../shopify-product-consolidation.routes";
 
-const { createServiceMock, previewMock, requirePermissionMock } = vi.hoisted(() => ({
+const { applyMock, createServiceMock, previewMock, requirePermissionMock } = vi.hoisted(() => ({
+  applyMock: vi.fn(),
   createServiceMock: vi.fn(),
   previewMock: vi.fn(),
   requirePermissionMock: vi.fn(
@@ -30,7 +31,11 @@ describe("Shopify product consolidation routes", () => {
 
   beforeEach(async () => {
     previewMock.mockReset();
-    createServiceMock.mockReset().mockReturnValue({ preview: previewMock });
+    applyMock.mockReset();
+    createServiceMock.mockReset().mockReturnValue({
+      preview: previewMock,
+      apply: applyMock,
+    });
     requirePermissionMock.mockClear();
     server = await startServer();
   });
@@ -69,11 +74,43 @@ describe("Shopify product consolidation routes", () => {
     });
     expect(previewMock).not.toHaveBeenCalled();
   });
+
+  it("permission-gates and forwards an authenticated, evidence-bound apply", async () => {
+    applyMock.mockResolvedValue({ commandId: 88, idempotentReplay: false });
+    const body = {
+      shopifyProductId: "9001",
+      canonicalProductId: 10,
+      expectedShopDomain: "cardshellz.myshopify.com",
+      expectedPreviewHash: "a".repeat(64),
+      idempotencyKey: "123e4567-e89b-42d3-a456-426614174000",
+      reason: "Consolidate the reviewed product family",
+    };
+
+    const result = await jsonRequest(
+      `${server.url}/api/channels/36/shopify-mapping-reconciliation/ownership-review/consolidation/apply`,
+      body,
+    );
+
+    expect(result.status).toBe(200);
+    expect(result.body).toMatchObject({ commandId: 88 });
+    expect(requirePermissionMock).toHaveBeenCalledWith("inventory", "edit");
+    expect(applyMock).toHaveBeenCalledWith({
+      channelId: 36,
+      request: body,
+      actor: "user:test-operator",
+    });
+  });
 });
 
 async function startServer(): Promise<{ url: string; close: () => Promise<void> }> {
   const app = express();
   app.use(express.json());
+  app.use((req, _res, next) => {
+    (req as typeof req & { session: { user: { id: string } } }).session = {
+      user: { id: "test-operator" },
+    };
+    next();
+  });
   registerShopifyProductConsolidationRoutes(app);
   const server = http.createServer(app);
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));

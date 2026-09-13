@@ -380,6 +380,53 @@ export const shopifyOwnershipRepairCommands = channelsSchema.table(
 export type ShopifyOwnershipRepairCommand =
   typeof shopifyOwnershipRepairCommands.$inferSelect;
 
+// Immutable receipt for an explicitly reviewed product-family consolidation.
+// The command stores the complete before-evidence and deterministic plan; it
+// does not represent or authorize a remote Shopify mutation.
+export const shopifyProductConsolidationCommands = channelsSchema.table(
+  "shopify_product_consolidation_commands",
+  {
+    id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+    channelId: integer("channel_id").notNull()
+      .references(() => channels.id, { onDelete: "restrict" }),
+    shopifyProductId: varchar("shopify_product_id", { length: 100 }).notNull(),
+    canonicalProductId: integer("canonical_product_id").notNull()
+      .references(() => products.id, { onDelete: "restrict" }),
+    sourceProductIds: jsonb("source_product_ids").$type<number[]>().notNull(),
+    idempotencyKey: uuid("idempotency_key").notNull(),
+    requestHash: varchar("request_hash", { length: 64 }).notNull(),
+    previewHash: varchar("preview_hash", { length: 64 }).notNull(),
+    operator: varchar("operator", { length: 120 }).notNull(),
+    reason: varchar("reason", { length: 500 }).notNull(),
+    evidence: jsonb("evidence").notNull(),
+    plan: jsonb("plan").notNull(),
+    result: jsonb("result").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+    completedAt: timestamp("completed_at", { withTimezone: true }).notNull(),
+  },
+  (table) => [
+    uniqueIndex("shopify_product_consolidation_commands_idempotency_uidx")
+      .on(table.idempotencyKey),
+    index("shopify_product_consolidation_commands_scope_idx")
+      .on(table.channelId, table.shopifyProductId, table.createdAt),
+    check(
+      "shopify_product_consolidation_shopify_id_chk",
+      sql`${table.shopifyProductId} ~ '^[0-9]+$'`,
+    ),
+    check(
+      "shopify_product_consolidation_source_products_chk",
+      sql`jsonb_typeof(${table.sourceProductIds}) = 'array' AND jsonb_array_length(${table.sourceProductIds}) > 0`,
+    ),
+    check(
+      "shopify_product_consolidation_hashes_chk",
+      sql`${table.requestHash} ~ '^[0-9a-f]{64}$' AND ${table.previewHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+  ],
+);
+
+export type ShopifyProductConsolidationCommand =
+  typeof shopifyProductConsolidationCommands.$inferSelect;
+
 // Channel variant overrides - per-channel variant-level customization
 export const channelVariantOverrides = channelsSchema.table("channel_variant_overrides", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
