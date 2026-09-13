@@ -13,6 +13,7 @@ import {
   ChannelFulfillmentIngressError,
   type NormalizedChannelFulfillmentIngress,
 } from "./channel-fulfillment-ingress";
+import { decideChannelFulfillmentInventoryPosting } from "./domain/channel-fulfillment-inventory-policy";
 
 export interface IngressInventoryItem {
   readonly legacyWmsShipmentId: number;
@@ -167,12 +168,17 @@ interface ResolvedLineRow {
   max_paid_quantity: number;
   product_variant_id: number | null;
   sku: string | null;
+  oms_requires_shipping: boolean | null;
+  catalog_variant_id: number | null;
+  catalog_requires_shipping: boolean | null;
+  catalog_track_inventory: boolean | null;
   wms_order_id: number | null;
   wms_order_status: string | null;
   wms_order_item_id: number | null;
   wms_item_quantity: number | null;
   wms_item_picked_quantity: number | null;
   wms_item_status: string | null;
+  wms_requires_shipping: number;
   warehouse_location_id: number | null;
 }
 
@@ -191,6 +197,7 @@ interface ResolvedLine {
   wmsItemQuantity: number;
   wmsItemPickedQuantity: number;
   wmsItemStatus: string;
+  requiresInventoryPosting: boolean;
   warehouseLocationId: number | null;
   quantity: number;
   sourceFulfillmentLineId: string | null;
@@ -489,12 +496,17 @@ async function resolveExactLines(
       COALESCE(authority.max_paid_quantity, 0)::int AS max_paid_quantity,
       ol.product_variant_id,
       ol.sku,
+      ol.requires_shipping AS oms_requires_shipping,
+      variant.id AS catalog_variant_id,
+      variant.requires_shipping AS catalog_requires_shipping,
+      variant.track_inventory AS catalog_track_inventory,
       w.id AS wms_order_id,
       w.warehouse_status AS wms_order_status,
       oi.id AS wms_order_item_id,
       oi.quantity::int AS wms_item_quantity,
       oi.picked_quantity::int AS wms_item_picked_quantity,
       oi.status AS wms_item_status,
+      oi.requires_shipping::int AS wms_requires_shipping,
       COALESCE(
         (
           SELECT inventory_tx.from_location_id
@@ -532,6 +544,7 @@ async function resolveExactLines(
     FROM oms.oms_orders oo
     JOIN channels.channels channel ON channel.id = oo.channel_id
     JOIN oms.oms_order_lines ol ON ol.order_id = oo.id
+    LEFT JOIN catalog.product_variants variant ON variant.id = ol.product_variant_id
     LEFT JOIN LATERAL (
       SELECT MAX(event.paid_quantity)::int AS max_paid_quantity
       FROM oms.oms_order_line_authority_events event
@@ -614,6 +627,29 @@ async function resolveExactLines(
         { omsOrderId, omsOrderLineId: Number(row.oms_order_line_id) },
       );
     }
+    const productVariantId = positiveInteger(row.product_variant_id);
+    const inventoryDecision = decideChannelFulfillmentInventoryPosting({
+      omsRequiresShipping: row.oms_requires_shipping,
+      wmsRequiresShipping: Number(row.wms_requires_shipping),
+      productVariantId,
+      catalogVariantId: positiveInteger(row.catalog_variant_id),
+      catalogRequiresShipping: row.catalog_requires_shipping,
+      catalogTrackInventory: row.catalog_track_inventory,
+    });
+    if (inventoryDecision.status === "conflict") {
+      throw new ChannelFulfillmentIngressError(
+        "INVENTORY_CONFIGURATION_CONFLICT",
+        `OMS, WMS, and catalog inventory configuration conflicts for channel line ${inputLine.channelOrderLineId}`,
+        {
+          omsOrderId,
+          omsOrderLineId: Number(row.oms_order_line_id),
+          wmsOrderId: Number(row.wms_order_id),
+          wmsOrderItemId: Number(row.wms_order_item_id),
+          channelOrderLineId: inputLine.channelOrderLineId,
+          reasons: inventoryDecision.reasons,
+        },
+      );
+    }
     resolved.push({
       omsOrderId,
       omsOrderLineId: Number(row.oms_order_line_id),
@@ -621,7 +657,7 @@ async function resolveExactLines(
       sourceChannelId: Number(row.source_channel_id),
       channelProvider: row.channel_provider,
       maxAuthorizedQuantity,
-      productVariantId: positiveInteger(row.product_variant_id),
+      productVariantId,
       sku,
       wmsOrderId: Number(row.wms_order_id),
       wmsOrderItemId: Number(row.wms_order_item_id),
@@ -629,6 +665,7 @@ async function resolveExactLines(
       wmsItemQuantity: Number(row.wms_item_quantity),
       wmsItemPickedQuantity: Number(row.wms_item_picked_quantity),
       wmsItemStatus: String(row.wms_item_status),
+      requiresInventoryPosting: inventoryDecision.requiresInventoryPosting,
       warehouseLocationId: positiveInteger(row.warehouse_location_id),
       quantity: inputLine.quantity,
       sourceFulfillmentLineId: inputLine.sourceFulfillmentLineId,
@@ -700,8 +737,14 @@ async function loadCanonicalEchoInventoryItems(
   for (const link of links) {
     const sourceId = link.sourceShipmentItemId;
     const line = lineByChannelId.get(link.channelOrderLineId);
+    if (!line) {
+      throw new ChannelFulfillmentIngressError("ECHO_COMMAND_CONFLICT",
+        "Canonical echo contains a package item outside the resolved provider fulfillment",
+        { channelOrderLineId: link.channelOrderLineId });
+    }
+    if (!line.requiresInventoryPosting) continue;
     if (sourceId === null || !Number.isSafeInteger(sourceId) || sourceId <= 0
-      || sourceId > 2_147_483_647 || !line || sourceToLine.has(sourceId)) {
+      || sourceId > 2_147_483_647 || sourceToLine.has(sourceId)) {
       throw new ChannelFulfillmentIngressError("ECHO_COMMAND_CONFLICT",
         "Canonical echo must link every package item to one exact existing shipment source",
         { sourceShipmentItemId: sourceId, channelOrderLineId: link.channelOrderLineId });
@@ -709,7 +752,7 @@ async function loadCanonicalEchoInventoryItems(
     sourceToLine.set(sourceId, line);
   }
   if (sourceToLine.size === 0) {
-    throw new ChannelFulfillmentIngressError("ECHO_COMMAND_CONFLICT", "Canonical echo has no exact inventory source lineage");
+    return Object.freeze([]);
   }
   const sourceIds = [...sourceToLine.keys()].sort((left, right) => left - right);
   const rows = rowsOf<{
@@ -747,7 +790,8 @@ async function loadCanonicalEchoInventoryItems(
       quantity: row.qty, deductFromOnHandOnly: false,
     });
   });
-  assertExactAllocation(new Map(lines.map(line => [line.channelOrderLineId, line.quantity])),
+  assertExactAllocation(new Map(lines.filter(line => line.requiresInventoryPosting)
+    .map(line => [line.channelOrderLineId, line.quantity])),
     allocations, "ECHO_COMMAND_CONFLICT", { sourceShipmentItemIds: sourceIds });
   return Object.freeze(items);
 }
@@ -1090,8 +1134,10 @@ async function findOrCreateLegacyPackage(
           ${input.sourceOrderId},
           ${input.sourceFulfillmentId},
           ${input.sourceProvider === "shopify" ? input.sourceFulfillmentId : null},
-          ${orderLines.some((line) => !line.productVariantId || (inventoryAuthority === "legacy" && !line.warehouseLocationId))},
-          ${orderLines.some((line) => !line.productVariantId || (inventoryAuthority === "legacy" && !line.warehouseLocationId))
+          ${orderLines.some((line) => !line.productVariantId
+            || (line.requiresInventoryPosting && inventoryAuthority === "legacy" && !line.warehouseLocationId))},
+          ${orderLines.some((line) => !line.productVariantId
+            || (line.requiresInventoryPosting && inventoryAuthority === "legacy" && !line.warehouseLocationId))
             ? "external_fulfillment_inventory_lineage_missing"
             : null},
           NOW(),
@@ -1150,7 +1196,7 @@ async function findOrCreateLegacyPackage(
             'customer_fulfillment',
             ${line.productVariantId},
             ${line.quantity},
-            ${inventoryAuthority === "canonical" ? null : line.warehouseLocationId},
+            ${!line.requiresInventoryPosting || inventoryAuthority === "canonical" ? null : line.warehouseLocationId},
             ${input.trackingNumber},
             NOW()
           )
@@ -1171,16 +1217,18 @@ async function findOrCreateLegacyPackage(
         legacyWmsShipmentItemId,
         physicalShipmentItemId: null,
       });
-      inventoryItems.push(Object.freeze({
-        legacyWmsShipmentId,
-        legacyWmsShipmentItemId,
-        wmsOrderId,
-        wmsOrderItemId: line.wmsOrderItemId,
-        productVariantId: line.productVariantId,
-        warehouseLocationId: line.warehouseLocationId,
-        quantity: line.quantity,
-        deductFromOnHandOnly: line.wmsItemPickedQuantity <= 0,
-      }));
+      if (line.requiresInventoryPosting) {
+        inventoryItems.push(Object.freeze({
+          legacyWmsShipmentId,
+          legacyWmsShipmentItemId,
+          wmsOrderId,
+          wmsOrderItemId: line.wmsOrderItemId,
+          productVariantId: line.productVariantId,
+          warehouseLocationId: line.warehouseLocationId,
+          quantity: line.quantity,
+          deductFromOnHandOnly: line.wmsItemPickedQuantity <= 0,
+        }));
+      }
     }
   }
   return { legacyShipmentIds, inventoryItems, lineRows };
@@ -1736,7 +1784,8 @@ export function createChannelFulfillmentIngressRepository(
             })))]
           : packageRows
           .filter((row) =>
-            positiveInteger(row.legacyWmsShipmentItemId)
+            row.line.requiresInventoryPosting
+            && positiveInteger(row.legacyWmsShipmentItemId)
             && positiveInteger(row.legacyWmsShipmentId))
           .map((row) => Object.freeze({
             legacyWmsShipmentId: Number(row.legacyWmsShipmentId),
@@ -2014,6 +2063,23 @@ export function createChannelFulfillmentIngressRepository(
         input.processingStatus,
         input.completedAt,
       );
+      if (input.processingStatus !== "review") {
+        await tx.execute(sql`
+          UPDATE wms.reconciliation_exceptions
+          SET classification = 'safe_auto_repair',
+              status = 'resolved',
+              severity = 'info',
+              resolved_at = ${input.completedAt},
+              resolved_by = 'channel_fulfillment_ingress',
+              resolution = 'Receipt replay completed after its prior review condition was corrected',
+              updated_at = ${input.completedAt}
+          WHERE LEFT(
+                  idempotency_key,
+                  LENGTH(${`channel_fulfillment_ingress:${input.receiptId}:`})
+                ) = ${`channel_fulfillment_ingress:${input.receiptId}:`}
+            AND status IN ('open', 'acknowledged')
+        `);
+      }
     });
   }
 
