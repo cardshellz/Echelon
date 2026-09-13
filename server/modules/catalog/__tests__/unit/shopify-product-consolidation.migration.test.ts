@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const migration = readFileSync(
-  resolve(process.cwd(), "migrations/0666_shopify_product_consolidation_commands.sql"),
+  resolve(process.cwd(), "migrations/0667_shopify_product_consolidation_commands.sql"),
   "utf8",
 );
 const schema = readFileSync(

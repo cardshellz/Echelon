@@ -22,7 +22,7 @@ const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
 const describeDatabase = databaseUrl && disposable ? describe : describe.skip;
 const commandMigration = readFileSync(
-  resolve(process.cwd(), "migrations/0666_shopify_product_consolidation_commands.sql"),
+  resolve(process.cwd(), "migrations/0667_shopify_product_consolidation_commands.sql"),
   "utf8",
 );
 
