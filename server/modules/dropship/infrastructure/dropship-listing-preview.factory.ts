@@ -1,5 +1,6 @@
-import { pool } from "../../../db";
+import { db, pool } from "../../../db";
 import { PgCatalogVariantMediaReader } from "../../catalog/catalog-media.reader";
+import { createAllocationEngine } from "../../channels/allocation-engine.service";
 import { resolveDropshipPublicationPreview } from "./dropship-listing-publication-preview.provider";
 import { createAuthorityAwareInventoryAtpService } from "../../inventory-planning/infrastructure/inventory-availability-runtime-atp.repository";
 import {
@@ -7,7 +8,8 @@ import {
   makeDropshipListingPreviewLogger,
   systemDropshipListingPreviewClock,
 } from "../application/dropship-listing-preview-service";
-import { InventoryServiceDropshipAtpProvider } from "./dropship-atp.provider";
+import { ChannelAllocationDropshipAtpProvider } from "./dropship-atp.provider";
+import { resolveDropshipOmsChannelIdWithClient } from "./dropship-order-intake.repository";
 import { ConfigDrivenDropshipMarketplaceListingProvider } from "./dropship-config-driven-marketplace-listing.provider";
 import { PgDropshipListingPreviewRepository } from "./dropship-listing-preview.repository";
 import { PgShellzClubProductCostAdapter } from "./shellz-club-product-cost.adapter";
@@ -29,7 +31,12 @@ export function createDropshipListingPreviewServiceFromEnv(): DropshipListingPre
       resolvePublication: resolveDropshipPublicationPreview,
       logger,
     },
-    atp: new InventoryServiceDropshipAtpProvider(createAuthorityAwareInventoryAtpService(pool)),
+    // Dropship quantity is the Dropship OMS channel's Channel Allocation result
+    // (handoff Option B), computed over the authority-aware ATP reader.
+    atp: new ChannelAllocationDropshipAtpProvider({
+      allocationEngine: createAllocationEngine(db, createAuthorityAwareInventoryAtpService(pool)),
+      resolveDropshipOmsChannelId: () => resolveDropshipOmsChannelIdWithClient(pool),
+    }),
     marketplaceListing: new ConfigDrivenDropshipMarketplaceListingProvider(),
     ebayFulfillmentPolicyGuard: createDropshipEbayFulfillmentPolicyGuardFromEnv(),
     clock: systemDropshipListingPreviewClock,
