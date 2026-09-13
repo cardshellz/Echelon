@@ -55,7 +55,14 @@ export type { SourceLockService } from "./source-lock.service";
 
 // Allocation Engine (Phase 1)
 export { createAllocationEngine } from "./allocation-engine.service";
-export type { AllocationEngine, ProductAllocationResult, VariantChannelAllocation } from "./allocation-engine.service";
+export type { AllocationEngine, AllocationVelocity, ProductAllocationResult, VariantChannelAllocation } from "./allocation-engine.service";
+export {
+  ALLOCATION_ERROR_CODES,
+  AllocationEngineError,
+  describeAllocationFailure,
+  isAllocationEngineError,
+} from "./allocation-engine.errors";
+export type { AllocationEngineErrorClassification, AllocationErrorCode } from "./allocation-engine.errors";
 
 // Shopify Adapter (Phase 1)
 export { ShopifyAdapter, createShopifyAdapter } from "./adapters/shopify.adapter";

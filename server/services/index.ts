@@ -119,6 +119,8 @@ import { channelsStorage } from "../modules/channels";
 import { procurementStorage } from "../modules/procurement";
 import { identityStorage } from "../modules/identity";
 import { createAllocationEngine } from "../modules/channels/allocation-engine.service";
+import { describeAllocationFailure } from "../modules/channels/allocation-engine.errors";
+import { logger as platformLogger } from "../platform/observability/logger";
 import { createSourceLockService } from "../modules/channels/source-lock.service";
 import { createShopifyAdapter } from "../modules/channels/adapters/shopify.adapter";
 import { createEbayAdapter } from "../modules/channels/adapters/ebay.adapter";
@@ -419,8 +421,19 @@ export function createServices(
           { dryRun: false },
           `inventory_change:${triggeredBy}`,
         );
-      } catch (err: any) {
-        console.warn(`[InventorySync] Auto-sync failed for product ${productId}: ${err.message}`);
+      } catch (err: unknown) {
+        // Nothing was published for this product; the next inventory change or the
+        // scheduled sweep retries. Transient failures (velocity read) are anomalies;
+        // permanent ones (invalid rule or input) need a human.
+        const failure = describeAllocationFailure(err);
+        platformLogger[failure.error_class === "transient" ? "warn" : "error"]("inventory_sync_product", {
+          outcome: "skipped",
+          product_id: productId,
+          triggered_by: `inventory_change:${triggeredBy}`,
+          error_code: failure.error_code,
+          error_class: failure.error_class,
+          error: failure.message,
+        });
       }
       try {
         // Unblock and re-evaluate dependent replen tasks for this product across the warehouse
