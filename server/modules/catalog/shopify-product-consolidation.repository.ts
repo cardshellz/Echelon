@@ -1,12 +1,24 @@
+import { createHash } from "node:crypto";
 import { sql } from "drizzle-orm";
 
+import { canonicalJson } from "@shared/utils/canonical-json";
 import { db } from "../../db";
+import { persistAuditEvent } from "../../infrastructure/auditLogger";
 import { sqlIntegerArray } from "../../infrastructure/postgres-array";
 import { normalizeShopifyId } from "./shopify-product-mapping.domain";
+import { normalizeShopifyAdminDomain } from "./shopify-product-mapping-reconciliation.domain";
 import {
+  buildShopifyProductConsolidationPlan,
   shopifyProductConsolidationEvidenceSchema,
+  shopifyProductConsolidationPlanSchema,
+  shopifyProductConsolidationRequestHash,
+  shopifyProductConsolidationResultSchema,
+  type ShopifyProductConsolidationApplyRequest,
+  type ShopifyProductConsolidationCommandRecord,
   type ShopifyProductConsolidationEvidence,
+  type ShopifyProductConsolidationPlan,
   type ShopifyProductConsolidationProductEvidence,
+  type ShopifyProductConsolidationResult,
   type ShopifyProductConsolidationVariantEvidence,
 } from "./shopify-product-consolidation.domain";
 import { ShopifyMappingReconciliationError } from "./shopify-product-mapping-reconciliation.repository";
@@ -14,6 +26,8 @@ import { ShopifyMappingReconciliationError } from "./shopify-product-mapping-rec
 const MAX_CONSOLIDATION_PRODUCTS = 100;
 
 type QueryDatabase = Pick<typeof db, "execute">;
+type TransactionCallback = Parameters<typeof db.transaction>[0];
+type TransactionClient = Parameters<TransactionCallback>[0];
 
 export interface ShopifyProductConsolidationLocalEvidence extends Omit<
   ShopifyProductConsolidationEvidence,
@@ -31,6 +45,23 @@ export interface ShopifyProductConsolidationRepository {
     shopifyProductId: string;
     canonicalProductId: number;
   }): Promise<ShopifyProductConsolidationLocalEvidence>;
+  findCommand(
+    idempotencyKey: string,
+  ): Promise<ShopifyProductConsolidationCommandRecord | null>;
+  applyConsolidation(input: {
+    channelId: number;
+    shopDomain: string;
+    request: ShopifyProductConsolidationApplyRequest;
+    requestHash: string;
+    actor: string;
+    now: Date;
+    remoteProductExists: boolean;
+    remoteProductTitle: string | null;
+    remoteVariantProductIds: ReadonlyMap<string, string | null>;
+  }): Promise<{
+    command: ShopifyProductConsolidationCommandRecord;
+    idempotentReplay: boolean;
+  }>;
 }
 
 function rows(result: unknown): Record<string, unknown>[] {
@@ -222,7 +253,46 @@ async function loadProductRows(
         SELECT COUNT(*)::integer
         FROM marketplace.listing_scopes AS scope
         WHERE scope.product_id = product.id
-      ) AS active_marketplace_listing_scope_count
+      ) AS active_marketplace_listing_scope_count,
+      (
+        SELECT COUNT(DISTINCT order_item.id)::integer
+        FROM wms.order_items AS order_item
+        JOIN wms.orders AS orders ON orders.id = order_item.order_id
+        WHERE order_item.product_id = product.id
+          AND orders.warehouse_status NOT IN ('shipped', 'completed', 'cancelled')
+          AND order_item.status <> 'cancelled'
+          AND order_item.fulfilled_quantity < order_item.quantity
+      ) AS open_wms_work_reference_count,
+      (
+        (SELECT COUNT(*) FROM dropship.dropship_catalog_rules AS rule
+          WHERE rule.scope_type = 'product'
+            AND rule.product_id = product.id
+            AND rule.is_active = true)
+        + (SELECT COUNT(*) FROM dropship.dropship_vendor_selection_rules AS rule
+          WHERE rule.scope_type = 'product'
+            AND rule.product_id = product.id
+            AND rule.is_active = true)
+        + (SELECT COUNT(*) FROM dropship.dropship_pricing_policies AS policy
+          WHERE policy.scope_type = 'product'
+            AND policy.product_id = product.id
+            AND policy.is_active = true)
+      )::integer AS active_dropship_configuration_count,
+      (
+        SELECT COUNT(*)::integer
+        FROM channels.channel_pricing_rules AS rule
+        WHERE rule.scope = 'product' AND rule.scope_id = product.id::text
+      ) AS channel_pricing_rule_count,
+      (
+        SELECT COUNT(*)::integer
+        FROM ebay.ebay_product_aspect_overrides AS override
+        WHERE override.product_id = product.id
+      ) AS ebay_aspect_override_count,
+      (
+        SELECT COUNT(*)::integer
+        FROM procurement.vendor_products AS vendor_product
+        WHERE vendor_product.product_id = product.id
+          AND vendor_product.product_variant_id IS NULL
+      ) AS product_level_procurement_mapping_count
     FROM catalog.products AS product
     LEFT JOIN catalog.shipping_groups AS shipping_group
       ON shipping_group.id = product.shipping_group_id
@@ -253,6 +323,8 @@ async function loadVariantRows(
       variant.requires_shipping,
       COALESCE(variant.track_inventory, true) AS track_inventory,
       variant.sales_eligibility,
+      COALESCE(variant.inventory_policy, 'deny') AS inventory_policy,
+      COALESCE(variant.dropship_eligible, false) AS dropship_eligible,
       variant.is_active,
       variant.shopify_variant_id,
       COALESCE(inventory.on_hand_qty, 0)::text AS on_hand_qty,
@@ -316,12 +388,119 @@ async function loadVariantRows(
           WHERE work.state NOT IN ('completed', 'cancelled')
             AND (operation.destination_variant_id = variant.id
               OR input.source_variant_id = variant.id))
+        + (SELECT COUNT(*)
+          FROM oms.oms_order_lines AS order_line
+          JOIN oms.oms_orders AS orders ON orders.id = order_line.order_id
+          WHERE order_line.product_variant_id = variant.id
+            AND orders.status NOT IN ('shipped', 'delivered', 'cancelled', 'refunded'))
+        + (SELECT COUNT(DISTINCT order_item.id)
+          FROM wms.order_items AS order_item
+          JOIN wms.orders AS orders ON orders.id = order_item.order_id
+          JOIN oms.oms_order_lines AS order_line
+            ON order_line.id = order_item.oms_order_line_id
+          WHERE order_line.product_variant_id = variant.id
+            AND orders.warehouse_status NOT IN ('shipped', 'completed', 'cancelled')
+            AND order_item.status <> 'cancelled'
+            AND order_item.fulfilled_quantity < order_item.quantity)
+        + (SELECT COUNT(DISTINCT shipment_item.id)
+          FROM wms.outbound_shipment_items AS shipment_item
+          JOIN wms.outbound_shipments AS shipment
+            ON shipment.id = shipment_item.shipment_id
+          WHERE shipment_item.product_variant_id = variant.id
+            AND shipment.status NOT IN ('shipped', 'voided', 'cancelled', 'returned', 'lost'))
+        + (SELECT COUNT(*)
+          FROM inventory.inventory_publication_outbox AS publication
+          WHERE publication.product_variant_id = variant.id
+            AND publication.state NOT IN ('verified', 'dead_letter', 'superseded', 'cancelled'))
+        + (SELECT COUNT(*)
+          FROM channels.channel_variant_availability_sync AS availability
+          WHERE availability.product_variant_id = variant.id
+            AND availability.status <> 'synced')
       )::integer AS open_work_reference_count,
       (
         SELECT COUNT(*)::integer
         FROM channels.channel_feeds AS feed
         WHERE feed.product_variant_id = variant.id AND feed.is_active = 1
       ) AS active_channel_feed_count,
+      (SELECT COUNT(*)::integer FROM channels.channel_reservations AS reservation
+        WHERE reservation.product_variant_id = variant.id)
+        AS channel_reservation_count,
+      (SELECT COUNT(*)::integer FROM channels.channel_variant_overrides AS override
+        WHERE override.product_variant_id = variant.id)
+        AS channel_variant_override_count,
+      (SELECT COUNT(*)::integer FROM channels.channel_allocation_rules AS rule
+        WHERE rule.product_variant_id = variant.id)
+        AS channel_allocation_rule_count,
+      (SELECT COUNT(*)::integer FROM channels.channel_pricing AS price
+        WHERE price.product_variant_id = variant.id)
+        AS channel_pricing_count,
+      (SELECT COUNT(*)::integer FROM channels.channel_pricing_rules AS rule
+        WHERE rule.scope = 'variant' AND rule.scope_id = variant.id::text)
+        AS channel_pricing_rule_count,
+      (SELECT COUNT(*)::integer FROM channels.channel_feeds AS feed
+        WHERE feed.product_variant_id = variant.id
+          AND (feed.channel_id IS DISTINCT FROM ${channelId}
+            OR feed.channel_type <> 'shopify'))
+        AS other_channel_feed_count,
+      (SELECT COUNT(*)::integer FROM channels.channel_listings AS listing
+        WHERE listing.product_variant_id = variant.id
+          AND listing.channel_id <> ${channelId})
+        AS other_channel_listing_count,
+      (SELECT COUNT(*)::integer FROM channels.channel_variant_availability_sync AS availability
+        WHERE availability.product_variant_id = variant.id)
+        AS channel_variant_availability_sync_count,
+      (SELECT COUNT(*)::integer FROM dropship.dropship_catalog_rules AS rule
+        WHERE rule.scope_type = 'variant'
+          AND rule.product_variant_id = variant.id AND rule.is_active = true)
+        AS dropship_catalog_rule_count,
+      (SELECT COUNT(*)::integer FROM dropship.dropship_vendor_selection_rules AS rule
+        WHERE rule.scope_type = 'variant'
+          AND rule.product_variant_id = variant.id AND rule.is_active = true)
+        AS dropship_vendor_selection_rule_count,
+      (SELECT COUNT(*)::integer FROM dropship.dropship_vendor_variant_overrides AS override
+        WHERE override.product_variant_id = variant.id)
+        AS dropship_vendor_variant_override_count,
+      (SELECT COUNT(*)::integer FROM dropship.dropship_pricing_policies AS policy
+        WHERE policy.scope_type = 'variant'
+          AND policy.product_variant_id = variant.id AND policy.is_active = true)
+        AS dropship_pricing_policy_count,
+      (SELECT COUNT(*)::integer FROM dropship.dropship_ebay_store_category_assignments AS assignment
+        WHERE assignment.product_variant_id = variant.id)
+        AS dropship_ebay_store_category_assignment_count,
+      (SELECT COUNT(*)::integer FROM dropship.dropship_ebay_listing_policy_overrides AS override
+        WHERE override.product_variant_id = variant.id)
+        AS dropship_ebay_listing_policy_override_count,
+      (SELECT COUNT(*)::integer FROM dropship.dropship_listing_price_settings AS setting
+        WHERE setting.product_variant_id = variant.id)
+        AS dropship_listing_price_setting_count,
+      (SELECT COUNT(*)::integer FROM dropship.dropship_vendor_listings AS listing
+        WHERE listing.product_variant_id = variant.id)
+        AS dropship_vendor_listing_count,
+      (SELECT COUNT(*)::integer FROM dropship.dropship_listing_push_job_items AS item
+        WHERE item.product_variant_id = variant.id
+          AND item.status NOT IN ('completed', 'failed', 'cancelled'))
+        AS dropship_open_listing_job_item_count,
+      (SELECT COUNT(*)::integer FROM dropship.dropship_package_profiles AS profile
+        WHERE profile.product_variant_id = variant.id AND profile.is_active = true)
+        AS dropship_package_profile_count,
+      (SELECT COUNT(*)::integer FROM shipping.variant_shipping_attrs AS attribute
+        WHERE attribute.product_variant_id = variant.id)
+        AS shipping_variant_attr_count,
+      (SELECT COUNT(*)::integer FROM shipping.product_set_members AS member
+        WHERE member.product_variant_id = variant.id)
+        AS shipping_product_set_member_count,
+      (SELECT COUNT(*)::integer FROM shipping.rate_rule_members AS member
+        WHERE member.product_variant_id = variant.id)
+        AS shipping_rate_rule_member_count,
+      (SELECT COUNT(*)::integer FROM shipping.channel_packing_preferences AS preference
+        WHERE preference.product_variant_id = variant.id)
+        AS shipping_channel_packing_preference_count,
+      (SELECT COUNT(*)::integer FROM warehouse.product_locations AS location
+        WHERE location.product_variant_id = variant.id)
+        AS warehouse_product_location_count,
+      (SELECT COUNT(*)::integer FROM procurement.vendor_products AS vendor_product
+        WHERE vendor_product.product_variant_id = variant.id)
+        AS procurement_vendor_product_count,
       (
         (SELECT COUNT(*) FROM inventory.build_recipes AS recipe
           WHERE recipe.output_variant_id = variant.id)
@@ -390,6 +569,8 @@ function mapVariant(row: Record<string, unknown>): ShopifyProductConsolidationVa
     requiresShipping: boolean(row.requires_shipping, `variant ${id} shipping flag`),
     trackInventory: boolean(row.track_inventory, `variant ${id} inventory flag`),
     salesEligibility: text(row.sales_eligibility, `variant ${id} sales eligibility`),
+    inventoryPolicy: text(row.inventory_policy, `variant ${id} inventory policy`),
+    dropshipEligible: boolean(row.dropship_eligible, `variant ${id} dropship eligibility`),
     isActive: boolean(row.is_active, `variant ${id} active flag`),
     shopifyVariantId: normalizeShopifyId(nullableText(row.shopify_variant_id)),
     feedVariantIds: stringArray(row.feed_variant_ids, `variant ${id} feed ids`),
@@ -402,6 +583,35 @@ function mapVariant(row: Record<string, unknown>): ShopifyProductConsolidationVa
     activeClaimCount: nonnegativeInteger(row.active_claim_count, `variant ${id} active claim count`),
     openWorkReferenceCount: nonnegativeInteger(row.open_work_reference_count, `variant ${id} open work count`),
     activeChannelFeedCount: nonnegativeInteger(row.active_channel_feed_count, `variant ${id} active feed count`),
+    runtimeConfigurationReferences: {
+      channel_reservations: nonnegativeInteger(row.channel_reservation_count, `variant ${id} channel reservation count`),
+      channel_variant_overrides: nonnegativeInteger(row.channel_variant_override_count, `variant ${id} channel override count`),
+      channel_allocation_rules: nonnegativeInteger(row.channel_allocation_rule_count, `variant ${id} allocation rule count`),
+      channel_pricing: nonnegativeInteger(row.channel_pricing_count, `variant ${id} channel pricing count`),
+      channel_pricing_rules: nonnegativeInteger(row.channel_pricing_rule_count, `variant ${id} channel pricing rule count`),
+      other_channel_feeds: nonnegativeInteger(row.other_channel_feed_count, `variant ${id} other channel feed count`),
+      other_channel_listings: nonnegativeInteger(row.other_channel_listing_count, `variant ${id} other channel listing count`),
+      channel_variant_availability_sync: nonnegativeInteger(row.channel_variant_availability_sync_count, `variant ${id} channel availability sync count`),
+      dropship_catalog_rules: nonnegativeInteger(row.dropship_catalog_rule_count, `variant ${id} dropship catalog rule count`),
+      dropship_vendor_selection_rules: nonnegativeInteger(row.dropship_vendor_selection_rule_count, `variant ${id} dropship vendor rule count`),
+      dropship_vendor_variant_overrides: nonnegativeInteger(row.dropship_vendor_variant_override_count, `variant ${id} dropship vendor override count`),
+      dropship_pricing_policies: nonnegativeInteger(row.dropship_pricing_policy_count, `variant ${id} dropship pricing policy count`),
+      dropship_ebay_store_category_assignments: nonnegativeInteger(row.dropship_ebay_store_category_assignment_count, `variant ${id} dropship eBay category assignment count`),
+      dropship_ebay_listing_policy_overrides: nonnegativeInteger(row.dropship_ebay_listing_policy_override_count, `variant ${id} dropship eBay policy override count`),
+      dropship_listing_price_settings: nonnegativeInteger(row.dropship_listing_price_setting_count, `variant ${id} dropship price setting count`),
+      dropship_vendor_listings: nonnegativeInteger(row.dropship_vendor_listing_count, `variant ${id} dropship listing count`),
+      dropship_open_listing_job_items: nonnegativeInteger(row.dropship_open_listing_job_item_count, `variant ${id} dropship open listing job count`),
+      dropship_package_profiles: nonnegativeInteger(row.dropship_package_profile_count, `variant ${id} dropship package profile count`),
+      shipping_variant_attrs: nonnegativeInteger(row.shipping_variant_attr_count, `variant ${id} shipping attribute count`),
+      shipping_product_set_members: nonnegativeInteger(row.shipping_product_set_member_count, `variant ${id} shipping product-set count`),
+      shipping_rate_rule_members: nonnegativeInteger(row.shipping_rate_rule_member_count, `variant ${id} shipping rate-rule count`),
+      shipping_channel_packing_preferences: nonnegativeInteger(row.shipping_channel_packing_preference_count, `variant ${id} channel packing preference count`),
+      warehouse_product_locations: nonnegativeInteger(row.warehouse_product_location_count, `variant ${id} warehouse product-location count`),
+    },
+    procurementVendorProductCount: nonnegativeInteger(
+      row.procurement_vendor_product_count,
+      `variant ${id} procurement vendor-product count`,
+    ),
     buildRecipeReferenceCount: nonnegativeInteger(row.build_recipe_reference_count, `variant ${id} build recipe count`),
     nonDraftTransformationReferenceCount: nonnegativeInteger(
       row.non_draft_transformation_reference_count,
@@ -453,6 +663,26 @@ function mapProduct(
     activeMarketplaceListingScopeCount: nonnegativeInteger(
       row.active_marketplace_listing_scope_count,
       `product ${id} marketplace scope count`,
+    ),
+    openWmsWorkReferenceCount: nonnegativeInteger(
+      row.open_wms_work_reference_count,
+      `product ${id} open WMS work count`,
+    ),
+    activeDropshipConfigurationCount: nonnegativeInteger(
+      row.active_dropship_configuration_count,
+      `product ${id} active dropship configuration count`,
+    ),
+    channelPricingRuleCount: nonnegativeInteger(
+      row.channel_pricing_rule_count,
+      `product ${id} channel pricing rule count`,
+    ),
+    ebayAspectOverrideCount: nonnegativeInteger(
+      row.ebay_aspect_override_count,
+      `product ${id} eBay aspect override count`,
+    ),
+    productLevelProcurementMappingCount: nonnegativeInteger(
+      row.product_level_procurement_mapping_count,
+      `product ${id} product-level procurement mapping count`,
     ),
     variants: variants.filter((variant) => variant.productId === id),
   };
@@ -542,6 +772,925 @@ async function loadLocalEvidence(
   return { ...local, externalVariantIds };
 }
 
+function sha256Json(value: unknown): string {
+  return createHash("sha256").update(canonicalJson(value)).digest("hex");
+}
+
+function timestamp(value: unknown, field: string): Date {
+  const parsed = value instanceof Date ? value : new Date(String(value));
+  if (Number.isNaN(parsed.getTime())) {
+    throw new ShopifyMappingReconciliationError(
+      "SHOPIFY_PRODUCT_CONSOLIDATION_RECEIPT_INVALID",
+      `Stored product-consolidation command has an invalid ${field}`,
+      500,
+    );
+  }
+  return parsed;
+}
+
+function positiveIntegerArray(value: unknown, field: string): number[] {
+  if (!Array.isArray(value)) {
+    throw new ShopifyMappingReconciliationError(
+      "SHOPIFY_PRODUCT_CONSOLIDATION_RECEIPT_INVALID",
+      `Stored product-consolidation command has an invalid ${field}`,
+      500,
+    );
+  }
+  return value.map((item) => positiveInteger(item, field));
+}
+
+function parseCommand(
+  row: Record<string, unknown>,
+): ShopifyProductConsolidationCommandRecord {
+  const id = positiveInteger(row.id, "command id");
+  const channelId = positiveInteger(row.channel_id, "command channel id");
+  const shopifyProductId = text(
+    row.shopify_product_id,
+    "command Shopify product id",
+  );
+  const canonicalProductId = positiveInteger(
+    row.canonical_product_id,
+    "command canonical product id",
+  );
+  const idempotencyKey = text(row.idempotency_key, "command idempotency key");
+  const requestHash = text(row.request_hash, "command request hash");
+  const previewHash = text(row.preview_hash, "command preview hash");
+  const operator = text(row.operator, "command operator");
+  const reason = text(row.reason, "command reason");
+  const sourceProductIds = positiveIntegerArray(
+    row.source_product_ids,
+    "source product ids",
+  );
+  const evidence = shopifyProductConsolidationEvidenceSchema.safeParse(
+    row.evidence,
+  );
+  const storedPlan = shopifyProductConsolidationPlanSchema.safeParse(row.plan);
+  const result = shopifyProductConsolidationResultSchema.safeParse(row.result);
+  const completedAt = timestamp(row.completed_at, "completion timestamp");
+  if (!evidence.success || !storedPlan.success || !result.success) {
+    throw new ShopifyMappingReconciliationError(
+      "SHOPIFY_PRODUCT_CONSOLIDATION_RECEIPT_INVALID",
+      "Stored product-consolidation command failed contract validation",
+      500,
+      {
+        commandId: id,
+        evidenceIssues: evidence.success ? [] : evidence.error.issues,
+        planIssues: storedPlan.success ? [] : storedPlan.error.issues,
+        resultIssues: result.success ? [] : result.error.issues,
+      },
+    );
+  }
+  const regeneratedPlan = buildShopifyProductConsolidationPlan(evidence.data);
+  const reconstructedRequest: ShopifyProductConsolidationApplyRequest = {
+    shopifyProductId,
+    canonicalProductId,
+    expectedShopDomain: evidence.data.shopDomain,
+    expectedPreviewHash: previewHash,
+    idempotencyKey,
+    reason,
+  };
+  if (
+    !/^[0-9a-f]{64}$/.test(requestHash)
+    || !/^[0-9a-f]{64}$/.test(previewHash)
+    || storedPlan.data.previewHash !== previewHash
+    || regeneratedPlan.previewHash !== previewHash
+    || canonicalJson(storedPlan.data) !== canonicalJson(regeneratedPlan)
+    || canonicalJson(sourceProductIds) !== canonicalJson(storedPlan.data.sourceProductIds)
+    || result.data.channelId !== channelId
+    || result.data.shopDomain !== evidence.data.shopDomain
+    || result.data.shopifyProductId !== shopifyProductId
+    || result.data.canonicalProductId !== canonicalProductId
+    || result.data.previewHash !== previewHash
+    || canonicalJson(result.data.sourceProductIds) !== canonicalJson(sourceProductIds)
+    || result.data.completedAt !== completedAt.toISOString()
+    || shopifyProductConsolidationRequestHash({
+      actor: operator,
+      request: reconstructedRequest,
+    }) !== requestHash
+  ) {
+    throw new ShopifyMappingReconciliationError(
+      "SHOPIFY_PRODUCT_CONSOLIDATION_RECEIPT_INVALID",
+      "Stored product-consolidation command is internally inconsistent",
+      500,
+      { commandId: id },
+    );
+  }
+  return Object.freeze({
+    id,
+    channelId,
+    shopifyProductId,
+    canonicalProductId,
+    idempotencyKey,
+    requestHash,
+    previewHash,
+    operator,
+    reason,
+    result: Object.freeze(result.data),
+  });
+}
+
+export function assertShopifyProductConsolidationCommandMatches(
+  command: ShopifyProductConsolidationCommandRecord,
+  input: { channelId: number; requestHash: string },
+): void {
+  if (
+    command.channelId !== input.channelId
+    || command.requestHash !== input.requestHash
+  ) {
+    throw new ShopifyMappingReconciliationError(
+      "SHOPIFY_PRODUCT_CONSOLIDATION_IDEMPOTENCY_KEY_REUSED",
+      "Idempotency key was already used for a different product consolidation",
+      409,
+      { commandId: command.id },
+    );
+  }
+}
+
+async function findCommand(
+  database: QueryDatabase,
+  idempotencyKey: string,
+): Promise<ShopifyProductConsolidationCommandRecord | null> {
+  const commandRows = rows(await database.execute(sql`
+    SELECT *
+    FROM channels.shopify_product_consolidation_commands
+    WHERE idempotency_key = ${idempotencyKey}::uuid
+    LIMIT 1
+  `));
+  return commandRows[0] ? parseCommand(commandRows[0]) : null;
+}
+
+function buildEvidence(input: {
+  local: ShopifyProductConsolidationLocalEvidence;
+  remoteProductExists: boolean;
+  remoteProductTitle: string | null;
+  remoteVariantProductIds: ReadonlyMap<string, string | null>;
+}): ShopifyProductConsolidationEvidence {
+  const missingVariantIds = input.local.externalVariantIds.filter(
+    (variantId) => !input.remoteVariantProductIds.has(variantId),
+  );
+  if (missingVariantIds.length > 0) {
+    throw new ShopifyMappingReconciliationError(
+      "SHOPIFY_PRODUCT_CONSOLIDATION_PREVIEW_STALE",
+      "Local Shopify variant mappings changed after remote verification. Refresh and try again.",
+      409,
+      { variantIds: missingVariantIds },
+    );
+  }
+  const parsed = shopifyProductConsolidationEvidenceSchema.safeParse({
+    channelId: input.local.channelId,
+    shopDomain: input.local.shopDomain,
+    shopifyProductId: input.local.shopifyProductId,
+    remoteProductExists: input.remoteProductExists,
+    remoteProductTitle: input.remoteProductTitle,
+    ownerProductIds: input.local.ownerProductIds,
+    canonicalProductId: input.local.canonicalProductId,
+    activeCutoverFreezeId: input.local.activeCutoverFreezeId,
+    products: input.local.products,
+    remoteVariantProductIds: Object.fromEntries(
+      [...input.remoteVariantProductIds.entries()].sort(([left], [right]) =>
+        left.localeCompare(right, "en", { numeric: true })),
+    ),
+  });
+  if (!parsed.success) {
+    throw new ShopifyMappingReconciliationError(
+      "SHOPIFY_PRODUCT_CONSOLIDATION_EVIDENCE_INVALID",
+      "Fresh product-consolidation evidence failed contract validation",
+      500,
+      { issues: parsed.error.issues },
+    );
+  }
+  return parsed.data;
+}
+
+async function loadQuantitySnapshot(
+  database: QueryDatabase,
+  variantIds: readonly number[],
+): Promise<readonly Record<string, unknown>[]> {
+  if (variantIds.length === 0) return [];
+  return rows(await database.execute(sql`
+    SELECT
+      level.id,
+      level.product_variant_id,
+      level.warehouse_location_id,
+      level.variant_qty::text AS variant_qty,
+      level.reserved_qty::text AS reserved_qty,
+      level.picked_qty::text AS picked_qty,
+      level.packed_qty::text AS packed_qty,
+      level.backorder_qty::text AS backorder_qty
+    FROM inventory.inventory_levels AS level
+    WHERE level.product_variant_id = ANY(${sqlIntegerArray(variantIds)})
+    ORDER BY level.warehouse_location_id, level.product_variant_id, level.id
+  `));
+}
+
+interface InvalidatedDrafts {
+  invalidatedModelIds: number[];
+  replacementModelIds: number[];
+}
+
+async function invalidateCurrentDrafts(
+  tx: TransactionClient,
+  input: {
+    products: readonly ShopifyProductConsolidationProductEvidence[];
+    shopifyProductId: string;
+    canonicalProductId: number;
+    requestHash: string;
+    idempotencyKey: string;
+    actor: string;
+    reason: string;
+    now: Date;
+  },
+): Promise<InvalidatedDrafts> {
+  const productsWithDrafts = input.products
+    .filter((product) => product.draftTransformationModelId !== null)
+    .sort((left, right) => left.id - right.id);
+  const invalidatedModelIds: number[] = [];
+  const replacementModelIds: number[] = [];
+  for (const product of productsWithDrafts) {
+    const draftModelId = product.draftTransformationModelId!;
+    const supersessionReason = `Product family consolidated into catalog product ${input.canonicalProductId}. ${input.reason}`;
+    const updatedRows = rows(await tx.execute(sql`
+      UPDATE inventory.transformation_model_versions
+      SET lifecycle_status = 'superseded',
+          superseded_by = ${input.actor},
+          superseded_at = ${input.now},
+          supersession_reason = ${supersessionReason},
+          updated_at = ${input.now}
+      WHERE id = ${draftModelId}
+        AND product_id = ${product.id}
+        AND lifecycle_status = 'draft'
+      RETURNING id, version
+    `));
+    if (updatedRows.length !== 1) {
+      throw new ShopifyMappingReconciliationError(
+        "SHOPIFY_PRODUCT_CONSOLIDATION_PREVIEW_STALE",
+        "A transformation draft changed after review. Refresh and try again.",
+        409,
+        { productId: product.id, expectedDraftModelId: draftModelId },
+      );
+    }
+    const priorVersion = positiveInteger(
+      updatedRows[0].version,
+      `product ${product.id} transformation model version`,
+    );
+    const validationErrors = [{
+      code: "PRODUCT_FAMILY_CONSOLIDATED",
+      message: "Rebuild and review this transformation model against the canonical product family before activation.",
+      context: {
+        shopifyProductId: input.shopifyProductId,
+        canonicalProductId: input.canonicalProductId,
+        priorProductId: product.id,
+        priorModelId: draftModelId,
+      },
+    }];
+    const definitionHash = sha256Json({
+      contractVersion: 1,
+      productId: product.id,
+      buildToPromiseEnabled: false,
+      paths: [],
+      validationErrors,
+    });
+    const modelRequestHash = sha256Json({
+      commandRequestHash: input.requestHash,
+      productId: product.id,
+      priorModelId: draftModelId,
+      definitionHash,
+    });
+    const operatorInputHash = sha256Json({
+      shopifyProductId: input.shopifyProductId,
+      canonicalProductId: input.canonicalProductId,
+      sourceProductId: product.id,
+      priorModelId: draftModelId,
+    });
+    const insertedRows = rows(await tx.execute(sql`
+      INSERT INTO inventory.transformation_model_versions (
+        product_id,
+        version,
+        lifecycle_status,
+        build_to_promise_enabled,
+        definition_hash,
+        validation_state,
+        validation_errors,
+        supersedes_model_id,
+        change_reason,
+        idempotency_key,
+        request_hash,
+        origin,
+        operator_input_hash,
+        created_by,
+        created_at,
+        updated_at
+      ) VALUES (
+        ${product.id},
+        ${priorVersion + 1},
+        'draft',
+        false,
+        ${definitionHash},
+        'invalid',
+        ${JSON.stringify(validationErrors)}::jsonb,
+        ${draftModelId},
+        ${supersessionReason},
+        ${`shopify-consolidation:${input.idempotencyKey}:${product.id}`},
+        ${modelRequestHash},
+        'operator',
+        ${operatorInputHash},
+        ${input.actor},
+        ${input.now},
+        ${input.now}
+      )
+      RETURNING id
+    `));
+    if (insertedRows.length !== 1) {
+      throw new ShopifyMappingReconciliationError(
+        "SHOPIFY_PRODUCT_CONSOLIDATION_DRAFT_NOT_REPLACED",
+        "The invalid replacement transformation draft could not be recorded",
+        500,
+        { productId: product.id, priorModelId: draftModelId },
+      );
+    }
+    const replacementModelId = positiveInteger(
+      insertedRows[0].id,
+      `product ${product.id} replacement transformation model id`,
+    );
+    const headRows = rows(await tx.execute(sql`
+      UPDATE inventory.transformation_model_heads
+      SET draft_model_id = ${replacementModelId},
+          revision = revision + 1,
+          updated_by = ${input.actor},
+          update_reason = ${supersessionReason},
+          updated_at = ${input.now}
+      WHERE product_id = ${product.id}
+        AND draft_model_id = ${draftModelId}
+        AND active_model_id IS NULL
+      RETURNING product_id
+    `));
+    if (headRows.length !== 1) {
+      throw new ShopifyMappingReconciliationError(
+        "SHOPIFY_PRODUCT_CONSOLIDATION_PREVIEW_STALE",
+        "A transformation model head changed after review. Refresh and try again.",
+        409,
+        { productId: product.id, expectedDraftModelId: draftModelId },
+      );
+    }
+    invalidatedModelIds.push(draftModelId);
+    replacementModelIds.push(replacementModelId);
+  }
+  return { invalidatedModelIds, replacementModelIds };
+}
+
+type ConsolidationApplyInput = Parameters<
+  ShopifyProductConsolidationRepository["applyConsolidation"]
+>[0];
+
+async function applyConsolidationInTransaction(
+  tx: TransactionClient,
+  input: ConsolidationApplyInput,
+): Promise<{
+  command: ShopifyProductConsolidationCommandRecord;
+  idempotentReplay: boolean;
+}> {
+  await tx.execute(sql`SET TRANSACTION ISOLATION LEVEL SERIALIZABLE`);
+  await tx.execute(sql`SET LOCAL lock_timeout = '10s'`);
+  await tx.execute(sql`
+    SELECT pg_advisory_xact_lock(
+      hashtextextended(
+        ${`shopify-product-consolidation-command:${input.request.idempotencyKey}`},
+        0::bigint
+      )
+    )
+  `);
+
+  const prior = await findCommand(tx, input.request.idempotencyKey);
+  if (prior) {
+    assertShopifyProductConsolidationCommandMatches(prior, {
+      channelId: input.channelId,
+      requestHash: input.requestHash,
+    });
+    return { command: prior, idempotentReplay: true };
+  }
+
+  await tx.execute(sql`
+    SELECT pg_advisory_xact_lock(
+      hashtextextended(
+        ${`shopify-product-mapping:${input.channelId}:${input.request.shopifyProductId}`},
+        0::bigint
+      )
+    )
+  `);
+
+  const preliminaryProductIds = [...new Set([
+    ...(await loadOwnerProductIds(
+      tx,
+      input.channelId,
+      input.request.shopifyProductId,
+    )),
+    input.request.canonicalProductId,
+  ])].sort((left, right) => left - right);
+  for (const productId of preliminaryProductIds) {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(918422, ${productId})`);
+  }
+  const preliminaryVariantRows = preliminaryProductIds.length === 0
+    ? []
+    : rows(await tx.execute(sql`
+      SELECT id
+      FROM catalog.product_variants
+      WHERE product_id = ANY(${sqlIntegerArray(preliminaryProductIds)})
+      ORDER BY id
+    `));
+  const preliminaryVariantIds = preliminaryVariantRows.map((row) =>
+    positiveInteger(row.id, "variant lock id"));
+  for (const variantId of preliminaryVariantIds) {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(918424, ${variantId})`);
+  }
+
+  // This is a rare, operator-authorized identity command. The explicit fences
+  // prevent a legacy writer from inserting a new owner, quantity, promise,
+  // work item, or immutable product/variant pair after the evidence read.
+  await tx.execute(sql`
+    LOCK TABLE
+      channels.channels,
+      channels.channel_connections,
+      catalog.products,
+      catalog.product_variants,
+      catalog.shipping_groups,
+      catalog.product_assets,
+      warehouse.product_locations,
+      channels.channel_feeds,
+      channels.channel_listings,
+      channels.channel_reservations,
+      channels.channel_variant_overrides,
+      channels.channel_pricing,
+      channels.channel_pricing_rules,
+      channels.channel_product_allocation,
+      channels.channel_product_overrides,
+      channels.channel_allocation_rules,
+      inventory.inventory_levels,
+      inventory.replen_rules,
+      inventory.replen_tasks,
+      inventory.build_orders,
+      inventory.build_order_components,
+      inventory.build_recipes,
+      inventory.build_recipe_components,
+      inventory.transformation_model_heads,
+      inventory.transformation_model_versions,
+      inventory.transformation_model_paths,
+      inventory.transformation_recipe_bindings,
+      inventory.transformation_recipe_component_snapshots,
+      inventory.availability_activation_freezes,
+      inventory.availability_claims,
+      inventory.availability_claim_lines,
+      inventory.availability_claim_resources,
+      inventory.availability_claim_operations,
+      inventory.availability_claim_operation_inputs,
+      inventory.channel_exposure_policy_heads,
+      inventory.channel_exposure_policy_versions,
+      inventory.inventory_publication_outbox,
+      channels.channel_variant_availability_sync,
+      warehouse.work_items,
+      oms.oms_orders,
+      oms.oms_order_lines,
+      wms.orders,
+      wms.order_items,
+      wms.outbound_shipments,
+      wms.outbound_shipment_items,
+      dropship.dropship_catalog_rules,
+      dropship.dropship_vendor_selection_rules,
+      dropship.dropship_vendor_variant_overrides,
+      dropship.dropship_pricing_policies,
+      dropship.dropship_ebay_store_category_assignments,
+      dropship.dropship_ebay_listing_policy_overrides,
+      dropship.dropship_listing_price_settings,
+      dropship.dropship_vendor_listings,
+      dropship.dropship_listing_push_job_items,
+      dropship.dropship_package_profiles,
+      shipping.variant_shipping_attrs,
+      shipping.product_set_members,
+      shipping.rate_rule_members,
+      shipping.channel_packing_preferences,
+      ebay.ebay_product_aspect_overrides,
+      marketplace.listing_scopes,
+      marketplace.listing_publication_members,
+      marketplace.listing_verification_members,
+      procurement.demand_event_lines,
+      procurement.purchase_forecast_observations,
+      procurement.vendor_products
+    IN SHARE ROW EXCLUSIVE MODE
+  `);
+
+  const channelRows = rows(await tx.execute(sql`
+    SELECT
+      channel_row.id,
+      channel_row.provider,
+      channel_row.is_default,
+      (
+        SELECT connection.shop_domain
+        FROM channels.channel_connections AS connection
+        WHERE connection.channel_id = channel_row.id
+        ORDER BY connection.updated_at DESC, connection.id DESC
+        LIMIT 1
+      ) AS shop_domain
+    FROM channels.channels AS channel_row
+    WHERE channel_row.id = ${input.channelId}
+    LIMIT 1
+  `));
+  const channelRow = channelRows[0];
+  const storedShopDomainValue = nullableText(channelRow?.shop_domain);
+  const storedShopDomain = storedShopDomainValue === null
+    ? null
+    : normalizeShopifyAdminDomain(storedShopDomainValue);
+  if (
+    !channelRow
+    || String(channelRow.provider).toLowerCase() !== "shopify"
+    || nonnegativeInteger(channelRow.is_default, "channel default flag") !== 1
+    || (storedShopDomain !== null && storedShopDomain !== input.shopDomain)
+  ) {
+    throw new ShopifyMappingReconciliationError(
+      "SHOPIFY_MAPPING_STORE_CHANGED",
+      "The Shopify channel or store connection changed after review. Refresh and try again.",
+      409,
+      {
+        expectedShopDomain: input.shopDomain,
+        currentShopDomain: storedShopDomain,
+      },
+    );
+  }
+
+  const local = await loadLocalEvidence(tx, {
+    channelId: input.channelId,
+    shopDomain: input.shopDomain,
+    shopifyProductId: input.request.shopifyProductId,
+    canonicalProductId: input.request.canonicalProductId,
+  });
+  const lockedProductIds = [...new Set([
+    ...local.ownerProductIds,
+    input.request.canonicalProductId,
+  ])].sort((left, right) => left - right);
+  const lockedVariantIds = local.products.flatMap((product) =>
+    product.variants.map((variant) => variant.id))
+    .sort((left, right) => left - right);
+  if (
+    canonicalJson(lockedProductIds) !== canonicalJson(preliminaryProductIds)
+    || canonicalJson(lockedVariantIds) !== canonicalJson(preliminaryVariantIds)
+  ) {
+    throw new ShopifyMappingReconciliationError(
+      "SHOPIFY_PRODUCT_CONSOLIDATION_PREVIEW_STALE",
+      "Product ownership or package membership changed while consolidation locks were acquired. Refresh and try again.",
+      409,
+      {
+        preliminaryProductIds,
+        lockedProductIds,
+        preliminaryVariantIds,
+        lockedVariantIds,
+      },
+    );
+  }
+  const evidence = buildEvidence({
+    local,
+    remoteProductExists: input.remoteProductExists,
+    remoteProductTitle: input.remoteProductTitle,
+    remoteVariantProductIds: input.remoteVariantProductIds,
+  });
+  const plan = buildShopifyProductConsolidationPlan(evidence);
+  if (plan.previewHash !== input.request.expectedPreviewHash) {
+    throw new ShopifyMappingReconciliationError(
+      "SHOPIFY_PRODUCT_CONSOLIDATION_PREVIEW_STALE",
+      "Product, inventory, dependency, or Shopify evidence changed after review. Refresh and try again.",
+      409,
+      {
+        expectedPreviewHash: input.request.expectedPreviewHash,
+        currentPreviewHash: plan.previewHash,
+      },
+    );
+  }
+  if (!plan.canApply) {
+    throw new ShopifyMappingReconciliationError(
+      "SHOPIFY_PRODUCT_CONSOLIDATION_BLOCKED",
+      "The reviewed product family still has blocking dependencies.",
+      409,
+      { blockers: plan.blockers },
+    );
+  }
+
+  const variants = new Map(evidence.products.flatMap((product) =>
+    product.variants.map((variant) => [variant.id, variant] as const)));
+  const affectedVariantIds = [...variants.keys()].sort((left, right) => left - right);
+  const beforeQuantities = await loadQuantitySnapshot(tx, affectedVariantIds);
+  const drafts = await invalidateCurrentDrafts(tx, {
+    products: evidence.products,
+    shopifyProductId: input.request.shopifyProductId,
+    canonicalProductId: input.request.canonicalProductId,
+    requestHash: input.requestHash,
+    idempotencyKey: input.request.idempotencyKey,
+    actor: input.actor,
+    reason: input.request.reason,
+    now: input.now,
+  });
+
+  const moves = plan.actions.filter((action) => action.action === "move");
+  const retired = plan.actions.filter(
+    (action) => action.action === "retire_duplicate",
+  );
+  const archived = plan.actions.filter(
+    (action) => action.action === "archive_inactive",
+  );
+  const replacements = new Map(retired.map((action) => [
+    action.sourceVariantId,
+    action.targetVariantId,
+  ]));
+
+  for (const action of moves) {
+    const movedRows = rows(await tx.execute(sql`
+      UPDATE catalog.product_variants
+      SET product_id = ${plan.canonicalProductId}, updated_at = ${input.now}
+      WHERE id = ${action.sourceVariantId}
+        AND product_id = ${action.sourceProductId}
+        AND is_active = true
+      RETURNING id
+    `));
+    if (movedRows.length !== 1) {
+      throw new ShopifyMappingReconciliationError(
+        "SHOPIFY_PRODUCT_CONSOLIDATION_PREVIEW_STALE",
+        "A retained source variant changed after review. Refresh and try again.",
+        409,
+        { variantId: action.sourceVariantId },
+      );
+    }
+  }
+
+  const movedVariantIds = moves.map((action) => action.sourceVariantId)
+    .sort((left, right) => left - right);
+  const reparentedLocationRows = movedVariantIds.length === 0
+    ? []
+    : rows(await tx.execute(sql`
+      UPDATE warehouse.product_locations
+      SET product_id = ${plan.canonicalProductId}, updated_at = ${input.now}
+      WHERE product_variant_id = ANY(${sqlIntegerArray(movedVariantIds)})
+      RETURNING id
+    `));
+  const reparentedAssetRows = movedVariantIds.length === 0
+    ? []
+    : rows(await tx.execute(sql`
+      UPDATE catalog.product_assets
+      SET product_id = ${plan.canonicalProductId}
+      WHERE product_variant_id = ANY(${sqlIntegerArray(movedVariantIds)})
+      RETURNING id
+    `));
+
+  const updatedParentVariantIds: number[] = [];
+  for (const action of plan.actions.filter((candidate) =>
+    candidate.action === "retain" || candidate.action === "move")) {
+    const variant = variants.get(action.sourceVariantId);
+    if (!variant || variant.parentVariantId === null) continue;
+    const targetParentVariantId = replacements.get(variant.parentVariantId)
+      ?? variant.parentVariantId;
+    if (targetParentVariantId === variant.parentVariantId) continue;
+    const parentRows = rows(await tx.execute(sql`
+      UPDATE catalog.product_variants
+      SET parent_variant_id = ${targetParentVariantId}, updated_at = ${input.now}
+      WHERE id = ${variant.id}
+        AND parent_variant_id IS NOT DISTINCT FROM ${variant.parentVariantId}
+      RETURNING id
+    `));
+    if (parentRows.length !== 1) {
+      throw new ShopifyMappingReconciliationError(
+        "SHOPIFY_PRODUCT_CONSOLIDATION_PREVIEW_STALE",
+        "A retained variant hierarchy changed after review. Refresh and try again.",
+        409,
+        { variantId: variant.id },
+      );
+    }
+    updatedParentVariantIds.push(variant.id);
+  }
+
+  for (const action of [...retired, ...archived].sort(
+    (left, right) => left.sourceVariantId - right.sourceVariantId,
+  )) {
+    const retiredRows = rows(await tx.execute(sql`
+      UPDATE catalog.product_variants
+      SET is_active = false,
+          shopify_variant_id = NULL,
+          shopify_inventory_item_id = NULL,
+          updated_at = ${input.now}
+      WHERE id = ${action.sourceVariantId}
+        AND product_id = ${action.sourceProductId}
+      RETURNING id
+    `));
+    if (retiredRows.length !== 1) {
+      throw new ShopifyMappingReconciliationError(
+        "SHOPIFY_PRODUCT_CONSOLIDATION_PREVIEW_STALE",
+        "A duplicate source variant changed after review. Refresh and try again.",
+        409,
+        { variantId: action.sourceVariantId },
+      );
+    }
+  }
+
+  const detachedVariantIds = [...retired, ...archived]
+    .map((action) => action.sourceVariantId)
+    .sort((left, right) => left - right);
+  const detachedFeedRows = detachedVariantIds.length === 0
+    ? []
+    : rows(await tx.execute(sql`
+      UPDATE channels.channel_feeds
+      SET channel_product_id = NULL,
+          channel_variant_id = NULL,
+          channel_inventory_item_id = NULL,
+          is_active = 0,
+          last_synced_qty = NULL,
+          consecutive_push_failures = 0,
+          quarantined_at = NULL,
+          quarantine_reason = NULL,
+          updated_at = ${input.now}
+      WHERE channel_id = ${input.channelId}
+        AND channel_type = 'shopify'
+        AND product_variant_id = ANY(${sqlIntegerArray(detachedVariantIds)})
+      RETURNING id
+    `));
+  const resetListingRows = detachedVariantIds.length === 0
+    ? []
+    : rows(await tx.execute(sql`
+      UPDATE channels.channel_listings
+      SET external_product_id = NULL,
+          external_variant_id = NULL,
+          external_url = NULL,
+          sync_status = 'error',
+          sync_error = 'Shopify identity retired by an audited local product-family consolidation.',
+          updated_at = ${input.now}
+      WHERE channel_id = ${input.channelId}
+        AND product_variant_id = ANY(${sqlIntegerArray(detachedVariantIds)})
+      RETURNING id
+    `));
+
+  const archivedProductRows = plan.sourceProductIds.length === 0
+    ? []
+    : rows(await tx.execute(sql`
+      UPDATE catalog.products
+      SET shopify_product_id = NULL,
+          is_active = false,
+          status = 'archived',
+          updated_at = ${input.now}
+      WHERE id = ANY(${sqlIntegerArray(plan.sourceProductIds)})
+        AND id <> ${plan.canonicalProductId}
+      RETURNING id
+    `));
+  const archivedProductIds = archivedProductRows
+    .map((row) => positiveInteger(row.id, "archived product id"))
+    .sort((left, right) => left - right);
+  if (canonicalJson(archivedProductIds) !== canonicalJson(plan.sourceProductIds)) {
+    throw new ShopifyMappingReconciliationError(
+      "SHOPIFY_PRODUCT_CONSOLIDATION_PREVIEW_STALE",
+      "The source product set changed during consolidation.",
+      409,
+      { expectedProductIds: plan.sourceProductIds, archivedProductIds },
+    );
+  }
+
+  const afterQuantities = await loadQuantitySnapshot(tx, affectedVariantIds);
+  if (canonicalJson(beforeQuantities) !== canonicalJson(afterQuantities)) {
+    throw new ShopifyMappingReconciliationError(
+      "SHOPIFY_PRODUCT_CONSOLIDATION_QUANTITY_INVARIANT_FAILED",
+      "Inventory quantities changed during metadata-only product consolidation.",
+      500,
+      { variantIds: affectedVariantIds },
+    );
+  }
+
+  const remainingOwners = await loadOwnerProductIds(
+    tx,
+    input.channelId,
+    input.request.shopifyProductId,
+  );
+  const invalidSourceVariants = plan.sourceProductIds.length === 0
+    ? []
+    : rows(await tx.execute(sql`
+      SELECT id
+      FROM catalog.product_variants
+      WHERE product_id = ANY(${sqlIntegerArray(plan.sourceProductIds)})
+        AND is_active = true
+      ORDER BY id
+    `));
+  const misplacedMovedVariants = movedVariantIds.length === 0
+    ? []
+    : rows(await tx.execute(sql`
+      SELECT id
+      FROM catalog.product_variants
+      WHERE id = ANY(${sqlIntegerArray(movedVariantIds)})
+        AND product_id <> ${plan.canonicalProductId}
+      ORDER BY id
+    `));
+  if (
+    canonicalJson(remainingOwners) !== canonicalJson([plan.canonicalProductId])
+    || invalidSourceVariants.length > 0
+    || misplacedMovedVariants.length > 0
+  ) {
+    throw new ShopifyMappingReconciliationError(
+      "SHOPIFY_PRODUCT_CONSOLIDATION_INVARIANT_FAILED",
+      "The local product family did not converge to one canonical owner.",
+      500,
+      {
+        remainingOwnerProductIds: remainingOwners,
+        activeSourceVariantIds: invalidSourceVariants.map((row) => row.id),
+        misplacedMovedVariantIds: misplacedMovedVariants.map((row) => row.id),
+      },
+    );
+  }
+
+  const result = shopifyProductConsolidationResultSchema.parse({
+    contractVersion: 1,
+    channelId: input.channelId,
+    shopDomain: input.shopDomain,
+    shopifyProductId: input.request.shopifyProductId,
+    previewHash: plan.previewHash,
+    canonicalProductId: plan.canonicalProductId,
+    sourceProductIds: [...plan.sourceProductIds],
+    movedVariantIds,
+    retiredVariantIds: retired.map((action) => action.sourceVariantId)
+      .sort((left, right) => left - right),
+    archivedVariantIds: archived.map((action) => action.sourceVariantId)
+      .sort((left, right) => left - right),
+    updatedParentVariantIds: updatedParentVariantIds.sort(
+      (left, right) => left - right,
+    ),
+    archivedProductIds,
+    invalidatedDraftModelIds: drafts.invalidatedModelIds,
+    replacementDraftModelIds: drafts.replacementModelIds,
+    reparentedLocationCount: reparentedLocationRows.length,
+    reparentedAssetCount: reparentedAssetRows.length,
+    detachedFeedCount: detachedFeedRows.length,
+    resetListingCount: resetListingRows.length,
+    completedAt: input.now.toISOString(),
+  } satisfies ShopifyProductConsolidationResult);
+  const insertedRows = rows(await tx.execute(sql`
+    INSERT INTO channels.shopify_product_consolidation_commands (
+      channel_id,
+      shopify_product_id,
+      canonical_product_id,
+      source_product_ids,
+      idempotency_key,
+      request_hash,
+      preview_hash,
+      operator,
+      reason,
+      evidence,
+      plan,
+      result,
+      created_at,
+      completed_at
+    ) VALUES (
+      ${input.channelId},
+      ${input.request.shopifyProductId},
+      ${plan.canonicalProductId},
+      ${JSON.stringify(plan.sourceProductIds)}::jsonb,
+      ${input.request.idempotencyKey}::uuid,
+      ${input.requestHash},
+      ${plan.previewHash},
+      ${input.actor},
+      ${input.request.reason},
+      ${JSON.stringify(evidence)}::jsonb,
+      ${JSON.stringify(plan)}::jsonb,
+      ${JSON.stringify(result)}::jsonb,
+      ${input.now},
+      ${input.now}
+    )
+    RETURNING *
+  `));
+  if (insertedRows.length !== 1) {
+    throw new ShopifyMappingReconciliationError(
+      "SHOPIFY_PRODUCT_CONSOLIDATION_COMMAND_NOT_RECORDED",
+      "The product-consolidation command could not be recorded",
+      500,
+    );
+  }
+  const command = parseCommand(insertedRows[0]);
+  await persistAuditEvent(tx, {
+    actor: input.actor,
+    action: "catalog.shopify_product_family_consolidated",
+    target: `shopify.product:${input.request.shopifyProductId}`,
+    changes: {
+      before: evidence,
+      after: result,
+    },
+    context: {
+      commandId: command.id,
+      channelId: input.channelId,
+      idempotencyKey: input.request.idempotencyKey,
+      requestHash: input.requestHash,
+      previewHash: plan.previewHash,
+      reason: input.request.reason,
+      remoteMutationPerformed: false,
+      inventoryQuantityMutationPerformed: false,
+    },
+  }, { timestamp: input.now, emitStructuredLog: false });
+  return { command, idempotentReplay: false };
+}
+
+function isTransactionContention(error: unknown): boolean {
+  if (typeof error !== "object" || error === null || !("code" in error)) {
+    return false;
+  }
+  return ["40001", "40P01", "55P03"].includes(String(error.code));
+}
+
 export function createShopifyProductConsolidationRepository(
   database: typeof db = db,
 ): ShopifyProductConsolidationRepository {
@@ -550,5 +1699,22 @@ export function createShopifyProductConsolidationRepository(
       await tx.execute(sql`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY`);
       return loadLocalEvidence(tx, input);
     }),
+    findCommand: (idempotencyKey) => findCommand(database, idempotencyKey),
+    async applyConsolidation(input) {
+      try {
+        return await database.transaction((tx) =>
+          applyConsolidationInTransaction(tx, input));
+      } catch (error: unknown) {
+        if (error instanceof ShopifyMappingReconciliationError) throw error;
+        if (isTransactionContention(error)) {
+          throw new ShopifyMappingReconciliationError(
+            "SHOPIFY_PRODUCT_CONSOLIDATION_BUSY",
+            "Inventory or catalog state was busy. No consolidation was applied; refresh and retry.",
+            409,
+          );
+        }
+        throw error;
+      }
+    },
   };
 }

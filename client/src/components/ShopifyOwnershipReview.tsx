@@ -49,7 +49,10 @@ import {
   type ShopifyDuplicateOwnershipGroup,
 } from "@/lib/shopify-ownership-review";
 import {
+  applyShopifyProductConsolidation,
   fetchShopifyProductConsolidationPreview,
+  ShopifyProductConsolidationApiError,
+  type ShopifyProductConsolidationApplyRequest,
   type ShopifyProductConsolidationPreview,
 } from "@/lib/shopify-product-consolidation";
 
@@ -101,7 +104,12 @@ export function ShopifyOwnershipReview({
   const [consolidationDraft, setConsolidationDraft] = useState<{
     group: ShopifyDuplicateOwnershipGroup;
     canonicalProductId: number | null;
+    idempotencyKey: string;
   } | null>(null);
+  const [consolidationReason, setConsolidationReason] = useState("");
+  const pendingConsolidationRequest = useRef<
+    ShopifyProductConsolidationApplyRequest | null
+  >(null);
   const reviewQuery = useQuery({
     queryKey: [
       "/api/channels",
@@ -202,6 +210,45 @@ export function ShopifyOwnershipReview({
       ...request,
     }),
   });
+  const applyConsolidationMutation = useMutation({
+    mutationFn: async () => {
+      const preview = consolidationPreviewMutation.data;
+      if (!consolidationDraft || !preview?.plan.canApply) {
+        throw new Error("A current, unblocked consolidation preview is required");
+      }
+      const request = pendingConsolidationRequest.current ?? {
+        shopifyProductId: preview.plan.shopifyProductId,
+        canonicalProductId: preview.plan.canonicalProductId,
+        expectedShopDomain: preview.plan.shopDomain,
+        expectedPreviewHash: preview.plan.previewHash,
+        idempotencyKey: consolidationDraft.idempotencyKey,
+        reason: consolidationReason,
+      };
+      pendingConsolidationRequest.current = request;
+      return applyShopifyProductConsolidation({ channelId, request });
+    },
+    onSuccess: (result) => {
+      pendingConsolidationRequest.current = null;
+      setConsolidationReason("");
+      setConsolidationDraft(null);
+      setShowConsolidationDialog(false);
+      setPage(1);
+      void queryClient.invalidateQueries({
+        queryKey: [
+          "/api/channels",
+          channelId,
+          "shopify-mapping-reconciliation",
+        ],
+      });
+      onRepairApplied?.();
+      toast({
+        title: "Product family consolidated",
+        description:
+          `${result.movedVariantIds.length} inventory identities moved to product `
+          + `${result.canonicalProductId}; ${result.archivedProductIds.length} duplicate products were archived.`,
+      });
+    },
+  });
 
   const openRepairReview = () => {
     if (repairDraft) {
@@ -229,11 +276,38 @@ export function ShopifyOwnershipReview({
   };
   const openConsolidationReview = (group: ShopifyDuplicateOwnershipGroup) => {
     consolidationPreviewMutation.reset();
+    applyConsolidationMutation.reset();
+    pendingConsolidationRequest.current = null;
+    setConsolidationReason("");
     setConsolidationDraft({
       group,
       canonicalProductId: group.recommendedProductId,
+      idempotencyKey: crypto.randomUUID(),
     });
     setShowConsolidationDialog(true);
+  };
+  const canRefreshRejectedConsolidation = applyConsolidationMutation.error
+    instanceof ShopifyProductConsolidationApiError
+    && [
+      "SHOPIFY_PRODUCT_CONSOLIDATION_PREVIEW_STALE",
+      "SHOPIFY_PRODUCT_CONSOLIDATION_BLOCKED",
+      "SHOPIFY_PRODUCT_CONSOLIDATION_BUSY",
+      "SHOPIFY_MAPPING_STORE_CHANGED",
+    ].includes(applyConsolidationMutation.error.code ?? "");
+  const refreshRejectedConsolidation = () => {
+    if (!consolidationDraft?.canonicalProductId) return;
+    const request = {
+      shopifyProductId: consolidationDraft.group.shopifyProductId,
+      canonicalProductId: consolidationDraft.canonicalProductId,
+    };
+    pendingConsolidationRequest.current = null;
+    setConsolidationDraft({
+      ...consolidationDraft,
+      idempotencyKey: crypto.randomUUID(),
+    });
+    applyConsolidationMutation.reset();
+    consolidationPreviewMutation.reset();
+    consolidationPreviewMutation.mutate(request);
   };
 
   return (
@@ -586,7 +660,10 @@ export function ShopifyOwnershipReview({
       <Dialog
         open={showConsolidationDialog}
         onOpenChange={(open) => {
-          if (!consolidationPreviewMutation.isPending) {
+          if (
+            !consolidationPreviewMutation.isPending
+            && !applyConsolidationMutation.isPending
+          ) {
             setShowConsolidationDialog(open);
           }
         }}
@@ -612,9 +689,12 @@ export function ShopifyOwnershipReview({
                     value={consolidationDraft.canonicalProductId?.toString() ?? ""}
                     onValueChange={(value) => {
                       consolidationPreviewMutation.reset();
+                      applyConsolidationMutation.reset();
+                      pendingConsolidationRequest.current = null;
                       setConsolidationDraft((current) => current ? {
                         ...current,
                         canonicalProductId: Number(value),
+                        idempotencyKey: crypto.randomUUID(),
                       } : current);
                     }}
                   >
@@ -640,6 +720,12 @@ export function ShopifyOwnershipReview({
                   }
                   onClick={() => {
                     if (consolidationDraft.canonicalProductId === null) return;
+                    pendingConsolidationRequest.current = null;
+                    applyConsolidationMutation.reset();
+                    setConsolidationDraft({
+                      ...consolidationDraft,
+                      idempotencyKey: crypto.randomUUID(),
+                    });
                     consolidationPreviewMutation.mutate({
                       shopifyProductId:
                         consolidationDraft.group.shopifyProductId,
@@ -662,9 +748,59 @@ export function ShopifyOwnershipReview({
               )}
 
               {consolidationPreviewMutation.data && (
-                <ConsolidationPreview
-                  preview={consolidationPreviewMutation.data}
-                />
+                <>
+                  <ConsolidationPreview
+                    preview={consolidationPreviewMutation.data}
+                  />
+                  {consolidationPreviewMutation.data.plan.canApply && (
+                    <div className="space-y-3 border border-red-200 bg-red-50 p-3">
+                      <div className="text-sm text-red-900">
+                        Apply moves the retained variant IDs under the selected
+                        product, retires only zero-quantity duplicates, archives
+                        the duplicate products, and invalidates current drafts
+                        for fresh review. It does not alter any inventory
+                        quantity and does not call Shopify.
+                      </div>
+                      {pendingConsolidationRequest.current && (
+                        <div className="text-sm font-medium text-amber-900">
+                          The prior result was uncertain. Retry sends the exact
+                          same command and idempotency key.
+                        </div>
+                      )}
+                      <div className="space-y-2">
+                        <Label htmlFor="shopify-product-consolidation-reason">
+                          Audit reason
+                        </Label>
+                        <Textarea
+                          id="shopify-product-consolidation-reason"
+                          value={pendingConsolidationRequest.current?.reason
+                            ?? consolidationReason}
+                          onChange={(event) =>
+                            setConsolidationReason(event.target.value)}
+                          disabled={Boolean(pendingConsolidationRequest.current)}
+                          maxLength={500}
+                          rows={3}
+                          placeholder="Why should these products become one canonical family?"
+                        />
+                      </div>
+                    </div>
+                  )}
+                  {applyConsolidationMutation.error && (
+                    <div role="alert" className="border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                      {applyConsolidationMutation.error.message}
+                      {canRefreshRejectedConsolidation && (
+                        <Button
+                          variant="link"
+                          size="sm"
+                          className="ml-2 h-auto p-0 text-red-700 underline"
+                          onClick={refreshRejectedConsolidation}
+                        >
+                          Refresh evidence
+                        </Button>
+                      )}
+                    </div>
+                  )}
+                </>
               )}
             </div>
           )}
@@ -672,16 +808,61 @@ export function ShopifyOwnershipReview({
           <DialogFooter>
             <Button
               variant="outline"
-              disabled={consolidationPreviewMutation.isPending}
+              disabled={
+                consolidationPreviewMutation.isPending
+                || applyConsolidationMutation.isPending
+              }
               onClick={() => setShowConsolidationDialog(false)}
             >
               Close
             </Button>
+            {consolidationPreviewMutation.data?.plan.canApply && (
+              <Button
+                variant="destructive"
+                disabled={
+                  applyConsolidationMutation.isPending
+                  || (!pendingConsolidationRequest.current
+                    && !consolidationReason.trim())
+                }
+                onClick={() => applyConsolidationMutation.mutate()}
+              >
+                {applyConsolidationMutation.isPending && (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                )}
+                {pendingConsolidationRequest.current
+                  ? "Retry same consolidation"
+                  : "Apply product consolidation"}
+              </Button>
+            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>
   );
+}
+
+function readableEvidenceLabel(value: string): string {
+  return value.replaceAll("_", " ");
+}
+
+function describeEvidenceValue(value: unknown): string {
+  if (Array.isArray(value)) return value.map(describeEvidenceValue).join(", ");
+  if (value && typeof value === "object") {
+    return Object.entries(value as Record<string, unknown>)
+      .map(([key, nested]) =>
+        `${readableEvidenceLabel(key)}: ${describeEvidenceValue(nested)}`)
+      .join(", ");
+  }
+  if (value === null || value === undefined) return "none";
+  return String(value);
+}
+
+function consolidationBlockerDetails(
+  context: Readonly<Record<string, unknown>>,
+): string | null {
+  const details = Object.entries(context).map(([key, value]) =>
+    `${readableEvidenceLabel(key)}: ${describeEvidenceValue(value)}`);
+  return details.length > 0 ? details.join(" · ") : null;
 }
 
 function ConsolidationPreview({
@@ -699,7 +880,7 @@ function ConsolidationPreview({
         : "border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900"}
       >
         {preview.plan.canApply
-          ? "No blocking dependency was found in this snapshot. This screen remains preview-only."
+          ? "No blocking dependency was found in this snapshot. Apply will revalidate the complete snapshot inside one transaction."
           : `${preview.plan.blockers.length} blocking dependencies must be resolved before consolidation.`}
         <div className="mt-1 font-mono text-[11px] opacity-75">
           Evidence {preview.plan.previewHash.slice(0, 12)} · {new Date(preview.generatedAt).toLocaleString()}
@@ -709,19 +890,27 @@ function ConsolidationPreview({
       {preview.plan.blockers.length > 0 && (
         <div className="space-y-2">
           <div className="text-sm font-medium">Blocking dependencies</div>
-          {preview.plan.blockers.map((item, index) => (
-            <div
-              key={`${item.code}-${item.productId}-${item.variantId}-${index}`}
-              className="border border-amber-200 bg-amber-50 p-3 text-sm"
-            >
-              <div className="font-medium">{item.message}</div>
-              <code className="text-xs text-muted-foreground">
-                {item.code}
-                {item.productId ? ` · product ${item.productId}` : ""}
-                {item.variantId ? ` · variant ${item.variantId}` : ""}
-              </code>
-            </div>
-          ))}
+          {preview.plan.blockers.map((item, index) => {
+            const details = consolidationBlockerDetails(item.context);
+            return (
+              <div
+                key={`${item.code}-${item.productId}-${item.variantId}-${index}`}
+                className="border border-amber-200 bg-amber-50 p-3 text-sm"
+              >
+                <div className="font-medium">{item.message}</div>
+                <code className="text-xs text-muted-foreground">
+                  {item.code}
+                  {item.productId ? ` · product ${item.productId}` : ""}
+                  {item.variantId ? ` · variant ${item.variantId}` : ""}
+                </code>
+                {details && (
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    {details}
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
 

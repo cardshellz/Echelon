@@ -47,16 +47,19 @@ export const SHOPIFY_PRODUCT_CONSOLIDATION_BLOCKER_CODES = [
   "ambiguous_package_variant",
   "survivor_remote_mapping_missing",
   "survivor_remote_mapping_conflict",
+  "variant_remote_mapping_outside_consolidation",
   "variant_definition_mismatch",
   "duplicate_variant_has_inventory",
   "duplicate_variant_has_encumbrance",
   "duplicate_variant_has_active_claim",
   "duplicate_variant_has_open_work",
   "duplicate_variant_has_active_channel_feed",
+  "duplicate_variant_has_runtime_configuration",
   "variant_quantity_invalid",
   "variant_has_immutable_product_history",
   "variant_has_immutable_transformation_history",
   "variant_has_build_recipe_reference",
+  "variant_has_procurement_mapping",
   "variant_parent_outside_consolidation",
 ] as const;
 
@@ -76,6 +79,35 @@ export const PRODUCT_VARIANT_IMMUTABLE_REFERENCE_KINDS = [
 export type ProductVariantImmutableReferenceKind =
   (typeof PRODUCT_VARIANT_IMMUTABLE_REFERENCE_KINDS)[number];
 
+export const PRODUCT_VARIANT_RUNTIME_REFERENCE_KINDS = [
+  "channel_reservations",
+  "channel_variant_overrides",
+  "channel_allocation_rules",
+  "channel_pricing",
+  "channel_pricing_rules",
+  "other_channel_feeds",
+  "other_channel_listings",
+  "channel_variant_availability_sync",
+  "dropship_catalog_rules",
+  "dropship_vendor_selection_rules",
+  "dropship_vendor_variant_overrides",
+  "dropship_pricing_policies",
+  "dropship_ebay_store_category_assignments",
+  "dropship_ebay_listing_policy_overrides",
+  "dropship_listing_price_settings",
+  "dropship_vendor_listings",
+  "dropship_open_listing_job_items",
+  "dropship_package_profiles",
+  "shipping_variant_attrs",
+  "shipping_product_set_members",
+  "shipping_rate_rule_members",
+  "shipping_channel_packing_preferences",
+  "warehouse_product_locations",
+] as const;
+
+export type ProductVariantRuntimeReferenceKind =
+  (typeof PRODUCT_VARIANT_RUNTIME_REFERENCE_KINDS)[number];
+
 export interface ShopifyProductConsolidationVariantEvidence {
   readonly id: number;
   readonly productId: number;
@@ -89,6 +121,8 @@ export interface ShopifyProductConsolidationVariantEvidence {
   readonly requiresShipping: boolean;
   readonly trackInventory: boolean;
   readonly salesEligibility: string;
+  readonly inventoryPolicy: string;
+  readonly dropshipEligible: boolean;
   readonly isActive: boolean;
   readonly shopifyVariantId: string | null;
   readonly feedVariantIds: readonly string[];
@@ -101,6 +135,11 @@ export interface ShopifyProductConsolidationVariantEvidence {
   readonly activeClaimCount: number;
   readonly openWorkReferenceCount: number;
   readonly activeChannelFeedCount: number;
+  readonly runtimeConfigurationReferences: Readonly<Record<
+    ProductVariantRuntimeReferenceKind,
+    number
+  >>;
+  readonly procurementVendorProductCount: number;
   readonly buildRecipeReferenceCount: number;
   readonly nonDraftTransformationReferenceCount: number;
   readonly immutableProductReferences: Readonly<Record<
@@ -127,6 +166,11 @@ export interface ShopifyProductConsolidationProductEvidence {
   readonly legacyChannelConfigurationCount: number;
   readonly activeChannelExposurePolicyCount: number;
   readonly activeMarketplaceListingScopeCount: number;
+  readonly openWmsWorkReferenceCount: number;
+  readonly activeDropshipConfigurationCount: number;
+  readonly channelPricingRuleCount: number;
+  readonly ebayAspectOverrideCount: number;
+  readonly productLevelProcurementMappingCount: number;
   readonly variants: readonly ShopifyProductConsolidationVariantEvidence[];
 }
 
@@ -153,6 +197,32 @@ const immutableProductReferencesSchema = z.object({
   transformation_recipe_component_snapshots: nonnegativeCount,
 }).strict();
 
+const runtimeConfigurationReferencesSchema = z.object({
+  channel_reservations: nonnegativeCount,
+  channel_variant_overrides: nonnegativeCount,
+  channel_allocation_rules: nonnegativeCount,
+  channel_pricing: nonnegativeCount,
+  channel_pricing_rules: nonnegativeCount,
+  other_channel_feeds: nonnegativeCount,
+  other_channel_listings: nonnegativeCount,
+  channel_variant_availability_sync: nonnegativeCount,
+  dropship_catalog_rules: nonnegativeCount,
+  dropship_vendor_selection_rules: nonnegativeCount,
+  dropship_vendor_variant_overrides: nonnegativeCount,
+  dropship_pricing_policies: nonnegativeCount,
+  dropship_ebay_store_category_assignments: nonnegativeCount,
+  dropship_ebay_listing_policy_overrides: nonnegativeCount,
+  dropship_listing_price_settings: nonnegativeCount,
+  dropship_vendor_listings: nonnegativeCount,
+  dropship_open_listing_job_items: nonnegativeCount,
+  dropship_package_profiles: nonnegativeCount,
+  shipping_variant_attrs: nonnegativeCount,
+  shipping_product_set_members: nonnegativeCount,
+  shipping_rate_rule_members: nonnegativeCount,
+  shipping_channel_packing_preferences: nonnegativeCount,
+  warehouse_product_locations: nonnegativeCount,
+}).strict();
+
 export const shopifyProductConsolidationVariantEvidenceSchema = z.object({
   id: positiveId,
   productId: positiveId,
@@ -166,6 +236,8 @@ export const shopifyProductConsolidationVariantEvidenceSchema = z.object({
   requiresShipping: z.boolean(),
   trackInventory: z.boolean(),
   salesEligibility: z.string().min(1),
+  inventoryPolicy: z.string().min(1),
+  dropshipEligible: z.boolean(),
   isActive: z.boolean(),
   shopifyVariantId: z.string().nullable(),
   feedVariantIds: z.array(z.string()),
@@ -178,6 +250,8 @@ export const shopifyProductConsolidationVariantEvidenceSchema = z.object({
   activeClaimCount: nonnegativeCount,
   openWorkReferenceCount: nonnegativeCount,
   activeChannelFeedCount: nonnegativeCount,
+  runtimeConfigurationReferences: runtimeConfigurationReferencesSchema,
+  procurementVendorProductCount: nonnegativeCount,
   buildRecipeReferenceCount: nonnegativeCount,
   nonDraftTransformationReferenceCount: nonnegativeCount,
   immutableProductReferences: immutableProductReferencesSchema,
@@ -201,6 +275,11 @@ export const shopifyProductConsolidationProductEvidenceSchema = z.object({
   legacyChannelConfigurationCount: nonnegativeCount,
   activeChannelExposurePolicyCount: nonnegativeCount,
   activeMarketplaceListingScopeCount: nonnegativeCount,
+  openWmsWorkReferenceCount: nonnegativeCount,
+  activeDropshipConfigurationCount: nonnegativeCount,
+  channelPricingRuleCount: nonnegativeCount,
+  ebayAspectOverrideCount: nonnegativeCount,
+  productLevelProcurementMappingCount: nonnegativeCount,
   variants: z.array(shopifyProductConsolidationVariantEvidenceSchema),
 }).strict();
 
@@ -254,6 +333,78 @@ export interface ShopifyProductConsolidationPlan {
   readonly blockers: readonly ShopifyProductConsolidationBlocker[];
   readonly canApply: boolean;
   readonly previewHash: string;
+}
+
+const shopifyProductConsolidationActionSchema = z.object({
+  action: z.enum(["retain", "move", "retire_duplicate", "archive_inactive"]),
+  sourceProductId: positiveId,
+  sourceVariantId: positiveId,
+  targetVariantId: positiveId,
+  sku: z.string().nullable(),
+  uomType: z.string().min(1),
+  unitsPerVariant: positiveId,
+  remoteVariantId: z.string().nullable(),
+}).strict();
+
+const shopifyProductConsolidationBlockerSchema = z.object({
+  code: z.enum(SHOPIFY_PRODUCT_CONSOLIDATION_BLOCKER_CODES),
+  message: z.string().min(1),
+  productId: positiveId.nullable(),
+  variantId: positiveId.nullable(),
+  context: z.record(z.string(), z.unknown()),
+}).strict();
+
+export const shopifyProductConsolidationPlanSchema = z.object({
+  contractVersion: z.literal(1),
+  channelId: positiveId,
+  shopDomain: z.string().trim().min(1).max(255),
+  shopifyProductId: z.string().regex(/^\d+$/),
+  remoteProductTitle: z.string().nullable(),
+  canonicalProductId: positiveId,
+  sourceProductIds: z.array(positiveId),
+  actions: z.array(shopifyProductConsolidationActionSchema),
+  blockers: z.array(shopifyProductConsolidationBlockerSchema),
+  canApply: z.boolean(),
+  previewHash: sha256,
+}).strict();
+
+export const shopifyProductConsolidationResultSchema = z.object({
+  contractVersion: z.literal(1),
+  channelId: positiveId,
+  shopDomain: z.string().trim().min(1).max(255),
+  shopifyProductId: z.string().regex(/^\d+$/),
+  previewHash: sha256,
+  canonicalProductId: positiveId,
+  sourceProductIds: z.array(positiveId),
+  movedVariantIds: z.array(positiveId),
+  retiredVariantIds: z.array(positiveId),
+  archivedVariantIds: z.array(positiveId),
+  updatedParentVariantIds: z.array(positiveId),
+  archivedProductIds: z.array(positiveId),
+  invalidatedDraftModelIds: z.array(positiveId),
+  replacementDraftModelIds: z.array(positiveId),
+  reparentedLocationCount: nonnegativeCount,
+  reparentedAssetCount: nonnegativeCount,
+  detachedFeedCount: nonnegativeCount,
+  resetListingCount: nonnegativeCount,
+  completedAt: z.string().datetime(),
+}).strict();
+
+export type ShopifyProductConsolidationResult = z.infer<
+  typeof shopifyProductConsolidationResultSchema
+>;
+
+export interface ShopifyProductConsolidationCommandRecord {
+  readonly id: number;
+  readonly channelId: number;
+  readonly shopifyProductId: string;
+  readonly canonicalProductId: number;
+  readonly idempotencyKey: string;
+  readonly requestHash: string;
+  readonly previewHash: string;
+  readonly operator: string;
+  readonly reason: string;
+  readonly result: ShopifyProductConsolidationResult;
 }
 
 function quantity(value: string): bigint {
@@ -346,6 +497,79 @@ function remoteVariantIdsForProduct(
   );
 }
 
+function remoteMappingsOutsideProduct(
+  variant: ShopifyProductConsolidationVariantEvidence,
+  evidence: ShopifyProductConsolidationEvidence,
+): Readonly<Record<string, string>> {
+  return Object.fromEntries(externalVariantIds(variant)
+    .map((id) => [id, evidence.remoteVariantProductIds[id]] as const)
+    .filter((entry): entry is readonly [string, string] =>
+      entry[1] !== null
+      && entry[1] !== undefined
+      && entry[1] !== evidence.shopifyProductId));
+}
+
+function runtimeConfigurationReferences(
+  variant: ShopifyProductConsolidationVariantEvidence,
+): Readonly<Record<string, number>> {
+  return Object.fromEntries(Object.entries(variant.runtimeConfigurationReferences)
+    .filter(([, count]) => count > 0));
+}
+
+function addRemoteMappingBlocker(
+  variant: ShopifyProductConsolidationVariantEvidence,
+  evidence: ShopifyProductConsolidationEvidence,
+  blockers: ShopifyProductConsolidationBlocker[],
+): void {
+  const outsideMappings = remoteMappingsOutsideProduct(variant, evidence);
+  if (Object.keys(outsideMappings).length === 0) return;
+  blockers.push(blocker(
+    "variant_remote_mapping_outside_consolidation",
+    "A local variant identity belongs to a different live Shopify product and cannot be detached by this command.",
+    {
+      productId: variant.productId,
+      variantId: variant.id,
+      context: {
+        reviewedShopifyProductId: evidence.shopifyProductId,
+        remoteMappings: outsideMappings,
+      },
+    },
+  ));
+}
+
+function addRetirementDependencyBlockers(
+  variant: ShopifyProductConsolidationVariantEvidence,
+  blockers: ShopifyProductConsolidationBlocker[],
+  messagePrefix: string,
+): void {
+  const runtimeReferences = runtimeConfigurationReferences(variant);
+  if (Object.keys(runtimeReferences).length > 0) {
+    blockers.push(blocker(
+      "duplicate_variant_has_runtime_configuration",
+      `${messagePrefix} still owns active channel, dropship, or shipping configuration.`,
+      {
+        productId: variant.productId,
+        variantId: variant.id,
+        context: { references: runtimeReferences },
+      },
+    ));
+  }
+  if (variant.procurementVendorProductCount > 0) {
+    blockers.push(blocker(
+      "variant_has_procurement_mapping",
+      `${messagePrefix} is referenced by procurement vendor-product configuration.`,
+      {
+        productId: variant.productId,
+        variantId: variant.id,
+        context: {
+          procurementVendorProductCount:
+            variant.procurementVendorProductCount,
+        },
+      },
+    ));
+  }
+}
+
 function blocker(
   code: ShopifyProductConsolidationBlockerCode,
   message: string,
@@ -372,7 +596,11 @@ function variantsCompatible(
     && source.unitsPerVariant === target.unitsPerVariant
     && source.requiresShipping === target.requiresShipping
     && source.trackInventory === target.trackInventory
-    && source.salesEligibility === target.salesEligibility;
+    && source.salesEligibility === target.salesEligibility
+    && source.inventoryPolicy === target.inventoryPolicy
+    && source.dropshipEligible === target.dropshipEligible
+    && source.hierarchyLevel === target.hierarchyLevel
+    && source.isBaseUnit === target.isBaseUnit;
 }
 
 function addProductBlockers(
@@ -457,27 +685,34 @@ function addProductBlockers(
         },
       ));
     }
-    const runtimeConfigurationCount = product.activeReplenRuleCount
-      + product.activeReplenTaskCount
-      + product.legacyChannelConfigurationCount
-      + product.activeChannelExposurePolicyCount
-      + product.activeMarketplaceListingScopeCount;
+    const runtimeConfiguration = {
+      active_replen_rules: product.activeReplenRuleCount,
+      active_replen_tasks: product.activeReplenTaskCount,
+      legacy_channel_configuration: product.legacyChannelConfigurationCount,
+      active_channel_exposure_policies:
+        product.activeChannelExposurePolicyCount,
+      active_marketplace_listing_scopes:
+        product.activeMarketplaceListingScopeCount,
+      open_wms_work: product.openWmsWorkReferenceCount,
+      active_dropship_configuration:
+        product.activeDropshipConfigurationCount,
+      channel_pricing_rules: product.channelPricingRuleCount,
+      ebay_aspect_overrides: product.ebayAspectOverrideCount,
+      product_level_procurement_mappings:
+        product.productLevelProcurementMappingCount,
+    };
+    const activeRuntimeConfiguration = Object.fromEntries(
+      Object.entries(runtimeConfiguration).filter(([, count]) => count > 0),
+    );
+    const runtimeConfigurationCount = Object.values(runtimeConfiguration)
+      .reduce((total, count) => total + count, 0);
     if (runtimeConfigurationCount > 0) {
       blockers.push(blocker(
         "source_runtime_configuration",
-        "The source product still owns active product-level runtime configuration.",
+        "The source product still owns open work or product-level runtime configuration.",
         {
           productId: product.id,
-          context: {
-            activeReplenRuleCount: product.activeReplenRuleCount,
-            activeReplenTaskCount: product.activeReplenTaskCount,
-            legacyChannelConfigurationCount:
-              product.legacyChannelConfigurationCount,
-            activeChannelExposurePolicyCount:
-              product.activeChannelExposurePolicyCount,
-            activeMarketplaceListingScopeCount:
-              product.activeMarketplaceListingScopeCount,
-          },
+          context: { references: activeRuntimeConfiguration },
         },
       ));
     }
@@ -551,6 +786,20 @@ function addSurvivorBlockers(
           productId: variant.productId,
           variantId: variant.id,
           context: { referenceCount: variant.buildRecipeReferenceCount },
+        },
+      ));
+    }
+    if (variant.procurementVendorProductCount > 0) {
+      blockers.push(blocker(
+        "variant_has_procurement_mapping",
+        "The retained variant is referenced by procurement vendor-product configuration tied to its current product.",
+        {
+          productId: variant.productId,
+          variantId: variant.id,
+          context: {
+            procurementVendorProductCount:
+              variant.procurementVendorProductCount,
+          },
         },
       ));
     }
@@ -639,6 +888,7 @@ function addDuplicateBlockers(
       },
     ));
   }
+  addRetirementDependencyBlockers(source, blockers, "A duplicate variant");
 }
 
 function addInactiveRetirementBlockers(
@@ -689,6 +939,7 @@ function addInactiveRetirementBlockers(
       { productId: source.productId, variantId: source.id },
     ));
   }
+  addRetirementDependencyBlockers(source, blockers, "An inactive source variant");
 }
 
 export function buildShopifyProductConsolidationPlan(
@@ -706,6 +957,7 @@ export function buildShopifyProductConsolidationPlan(
   addProductBlockers(evidence, canonical, blockers);
   for (const variant of products.flatMap((product) => product.variants)) {
     addQuantityBlockers(variant, blockers);
+    addRemoteMappingBlocker(variant, evidence, blockers);
   }
 
   const activeVariants = products.flatMap((product) => product.variants)
