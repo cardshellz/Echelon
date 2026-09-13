@@ -3,11 +3,14 @@ import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
 import { DROPSHIP_DEFAULT_PAYMENT_HOLD_TIMEOUT_MINUTES } from "../../../../shared/schema/dropship.schema";
 import { DropshipError } from "../domain/errors";
+import { resolveAcceptanceUnitCost } from "../domain/order-acceptance-cost";
 import { isDropshipStoreConnectionLaunchReady } from "../domain/store-connection";
 import type { NormalizedDropshipOrderPayload } from "../application/dropship-order-intake-service";
+import type { DropshipProductCostReader } from "../application/dropship-product-cost";
+import { PgShellzClubProductCostAdapter } from "./shellz-club-product-cost.adapter";
 import {
   buildDropshipOrderAcceptancePlan,
-  calculateDiscountedWholesaleUnitCostCents,
+  DROPSHIP_PRICING_SNAPSHOT_VERSION,
   type DropshipAcceptanceIntakeRecord,
   type DropshipAcceptanceInventoryAvailability,
   type DropshipAcceptanceLineContext,
@@ -51,7 +54,6 @@ interface VendorContextRow {
   setup_status: string;
   access_token_ref: string | null;
   refresh_token_ref: string | null;
-  channel_discount_percent: number | null;
 }
 
 interface QuoteRow {
@@ -148,14 +150,31 @@ interface OmsLineRow {
   quantity: number;
 }
 
+export interface PgDropshipOrderAcceptanceRepositoryDependencies {
+  /**
+   * Builds the `.ops` product-cost reader bound to the acceptance transaction's
+   * client, so the cost is read in the same transaction that debits the wallet.
+   * Defaults to the Shellz Club adapter's SAVEPOINT variant.
+   */
+  productCostReaderForTransaction?: (client: Pick<PoolClient, "query">) => DropshipProductCostReader;
+}
+
 export class PgDropshipOrderAcceptanceRepository implements DropshipOrderAcceptanceRepository {
-  constructor(private readonly dbPool: Pool = defaultPool) {}
+  private readonly productCostReaderForTransaction: (client: Pick<PoolClient, "query">) => DropshipProductCostReader;
+
+  constructor(
+    private readonly dbPool: Pool = defaultPool,
+    deps: PgDropshipOrderAcceptanceRepositoryDependencies = {},
+  ) {
+    this.productCostReaderForTransaction = deps.productCostReaderForTransaction
+      ?? ((client) => PgShellzClubProductCostAdapter.forTransaction(client));
+  }
 
   async acceptOrder(input: DropshipOrderAcceptanceInput): Promise<DropshipOrderAcceptanceResult> {
     const client = await this.dbPool.connect();
     try {
       await client.query("BEGIN");
-      const result = await acceptOrderWithClient(client, input);
+      const result = await acceptOrderWithClient(client, input, this.productCostReaderForTransaction(client));
       await client.query("COMMIT");
       return result;
     } catch (error) {
@@ -170,6 +189,7 @@ export class PgDropshipOrderAcceptanceRepository implements DropshipOrderAccepta
 async function acceptOrderWithClient(
   client: PoolClient,
   input: DropshipOrderAcceptanceInput,
+  productCosts: DropshipProductCostReader,
 ): Promise<DropshipOrderAcceptanceResult> {
   const intake = await loadIntakeForUpdate(client, input);
   if (!intake) {
@@ -191,7 +211,6 @@ async function acceptOrderWithClient(
   const vendor = await loadVendorContextForUpdate(client, {
     vendorId: input.vendorId,
     storeConnectionId: input.storeConnectionId,
-    channelId: intake.channelId,
   });
   if (!vendor) {
     throw new DropshipError(
@@ -207,6 +226,7 @@ async function acceptOrderWithClient(
     vendor,
     storeConnectionId: input.storeConnectionId,
     rawLines,
+    productCosts,
   });
   const productVariantIds = uniquePositiveIntegers(lines.map((line) => line.productVariantId));
   const [pricingPolicies, inventoryLevels, wallet, paymentHoldTimeoutMinutes] = await Promise.all([
@@ -397,9 +417,10 @@ async function loadVendorContextForUpdate(
   input: {
     vendorId: number;
     storeConnectionId: number;
-    channelId: number;
   },
 ): Promise<DropshipAcceptanceVendorContext | null> {
+  // No partner-profile discount here: the wholesale basis is the `.ops` product
+  // cost read inside this transaction (see resolveAcceptanceLinesWithClient).
   const result = await client.query<VendorContextRow>(
     `SELECT
        v.id AS vendor_id,
@@ -414,17 +435,15 @@ async function loadVendorContextForUpdate(
         sc.status AS store_status,
         sc.setup_status,
         sc.access_token_ref,
-        sc.refresh_token_ref,
-        pp.discount_percent AS channel_discount_percent
+        sc.refresh_token_ref
      FROM dropship.dropship_vendors v
      INNER JOIN dropship.dropship_store_connections sc ON sc.vendor_id = v.id
      LEFT JOIN membership.plans p ON p.id = v.current_plan_id
-     LEFT JOIN channels.partner_profiles pp ON pp.channel_id = $3
      WHERE v.id = $1
        AND sc.id = $2
      LIMIT 1
      FOR UPDATE OF v, sc`,
-    [input.vendorId, input.storeConnectionId, input.channelId],
+    [input.vendorId, input.storeConnectionId],
   );
   const row = result.rows[0];
   if (!row) return null;
@@ -445,7 +464,6 @@ async function loadVendorContextForUpdate(
       hasAccessToken: row.access_token_ref !== null,
       hasRefreshToken: row.refresh_token_ref !== null,
     }),
-    channelDiscountPercent: normalizeDiscountPercent(row.channel_discount_percent),
   };
 }
 
@@ -497,6 +515,7 @@ async function resolveAcceptanceLinesWithClient(
     vendor: DropshipAcceptanceVendorContext;
     storeConnectionId: number;
     rawLines: NormalizedDropshipOrderPayload["lines"];
+    productCosts: DropshipProductCostReader;
   },
 ): Promise<DropshipAcceptanceLineContext[]> {
   if (input.rawLines.length === 0) {
@@ -571,8 +590,8 @@ async function resolveAcceptanceLinesWithClient(
       skus,
     ],
   );
-  const candidates = result.rows.map((row) => mapListingCandidateRow(row, input.vendor.channelDiscountPercent));
-  return input.rawLines.map((line, index) => {
+  const candidates = result.rows.map((row) => mapListingCandidateRow(row));
+  const matchedLines = input.rawLines.map((line, index) => {
     const candidate = findCandidateForOrderLine(candidates, line);
     if (!candidate) {
       throw new DropshipError(
@@ -588,6 +607,30 @@ async function resolveAcceptanceLinesWithClient(
       );
     }
     assertListingCandidateCanAccept(candidate, index);
+    return { line, index, candidate };
+  });
+
+  // The wholesale basis is the vendor's `.ops` plan cost, read inside this
+  // transaction so the debit and its evidence share one snapshot. It is the same
+  // authority the vendor saw in preview; nothing else may price a live order.
+  const costs = await input.productCosts.loadProductCosts({
+    vendorId: input.vendor.vendorId,
+    productVariantIds: uniquePositiveIntegers(matchedLines.map(({ candidate }) => candidate.productVariantId)),
+  });
+
+  return matchedLines.map(({ line, index, candidate }) => {
+    const resolution = resolveAcceptanceUnitCost(costs.get(candidate.productVariantId));
+    if (!resolution.ok) {
+      throw new DropshipError(resolution.code, resolution.message, {
+        lineIndex: index,
+        productId: candidate.productId,
+        productVariantId: candidate.productVariantId,
+        issue: resolution.issue,
+        planId: input.vendor.currentPlanId,
+        // Only a failed source read is worth retrying; everything else needs a human.
+        retryable: resolution.retryable,
+      });
+    }
     const observedRetailUnitPriceCents = line.unitRetailPriceCents
       ?? candidate.observedRetailUnitPriceCents;
     return {
@@ -598,6 +641,8 @@ async function resolveAcceptanceLinesWithClient(
         observedRetailUnitPriceCents,
         "observed_retail_unit_price_cents",
       ),
+      wholesaleUnitCostCents: resolution.unitCostCents,
+      productCostEvidence: resolution.evidence,
       externalLineItemId: line.externalLineItemId ?? null,
       title: line.title?.trim() || candidate.title,
     };
@@ -785,6 +830,12 @@ async function createOmsOrderWithClient(
           vendorId: plan.vendorId,
           storeConnectionId: plan.storeConnectionId,
           externalOrderId: intake.externalOrderId,
+          // The service the buyer paid the marketplace for. Kept on the OMS
+          // order (not only inside the marketplace blob) so fulfillment and
+          // reconciliation can read it without parsing platform-specific
+          // payloads. oms_orders has no migrated column for it, so raw_payload
+          // is the durable home until a dedicated column ships.
+          buyerShippingServiceCode: intake.normalizedPayload.buyerShippingServiceCode ?? null,
         },
         marketplace: intake.rawPayload,
       }),
@@ -963,6 +1014,11 @@ async function debitWalletWithClient(
         wholesaleSubtotalCents: input.plan.wholesaleSubtotalCents,
         shippingCents: input.plan.shippingCents,
         feesCents: input.plan.feesCents,
+        // A single ledger row must explain its amount: the cost authority and the
+        // content hash of the .ops inputs that produced it.
+        pricingSnapshotVersion: DROPSHIP_PRICING_SNAPSHOT_VERSION,
+        costAuthority: "shellz_club_ops_product_cost",
+        costEvidenceHash: input.plan.costEvidenceHash,
       }),
       input.input.acceptedAt,
     ],
@@ -1146,8 +1202,10 @@ function mapIntakeRow(row: IntakeRow): DropshipAcceptanceIntakeRecord {
 
 function mapListingCandidateRow(
   row: ListingCandidateRow,
-  discountPercent: number,
-): Omit<DropshipAcceptanceLineContext, "lineIndex" | "quantity" | "externalLineItemId"> & {
+): Omit<
+  DropshipAcceptanceLineContext,
+  "lineIndex" | "quantity" | "externalLineItemId" | "wholesaleUnitCostCents" | "productCostEvidence"
+> & {
   externalListingId: string | null;
   externalOfferId: string | null;
   listingStatus: string;
@@ -1160,9 +1218,10 @@ function mapListingCandidateRow(
     ? null
     : toSafeInteger(row.catalog_retail_price_cents, "catalog_retail_price_cents");
   if (catalogRetailPriceCents === null) {
+    // Retail is evidence and the pricing-policy basis, not the debit basis.
     throw new DropshipError(
-      "DROPSHIP_ORDER_WHOLESALE_PRICE_REQUIRED",
-      "Dropship order acceptance requires catalog retail price to calculate wholesale cost.",
+      "DROPSHIP_ORDER_CATALOG_RETAIL_REQUIRED",
+      "Dropship order acceptance requires a catalog retail price for retail evidence and pricing-policy checks.",
       { productVariantId: row.product_variant_id },
     );
   }
@@ -1179,10 +1238,6 @@ function mapListingCandidateRow(
     category: row.category,
     catalogRetailPriceCents,
     observedRetailUnitPriceCents,
-    wholesaleUnitCostCents: calculateDiscountedWholesaleUnitCostCents(
-      catalogRetailPriceCents,
-      discountPercent,
-    ),
     externalListingId: row.external_listing_id,
     externalOfferId: row.external_offer_id,
     listingStatus: row.listing_status,
@@ -1280,18 +1335,6 @@ function aggregatePlanQuantityByVariant(
     result.set(line.productVariantId, (result.get(line.productVariantId) ?? 0) + line.quantity);
   }
   return result;
-}
-
-function normalizeDiscountPercent(value: number | null): number {
-  if (value === null) return 0;
-  if (!Number.isInteger(value) || value < 0 || value > 100) {
-    throw new DropshipError(
-      "DROPSHIP_WHOLESALE_DISCOUNT_INVALID",
-      "Dropship OMS channel discount percent must be an integer from 0 to 100.",
-      { discountPercent: value },
-    );
-  }
-  return value;
 }
 
 function buildWalletLedgerIdempotencyKey(intakeId: number, submittedIdempotencyKey: string): string {

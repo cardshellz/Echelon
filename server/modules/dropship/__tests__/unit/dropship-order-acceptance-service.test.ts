@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 import { DropshipError } from "../../domain/errors";
 import {
   DropshipOrderAcceptanceService,
+  DROPSHIP_PRICING_SNAPSHOT_VERSION,
   buildDropshipOrderAcceptancePlan,
-  calculateDiscountedWholesaleUnitCostCents,
   hashDropshipOrderAcceptanceRequest,
   type DropshipNotificationSenderInput,
   type DropshipAcceptancePlanningInput,
@@ -266,15 +266,73 @@ describe("buildDropshipOrderAcceptancePlan", () => {
     })), "DROPSHIP_ORDER_PRICING_POLICY_BLOCKED");
   });
 
-  it("calculates wholesale with integer math", () => {
-    expect(calculateDiscountedWholesaleUnitCostCents(999, 15)).toBe(850);
+  it("freezes the .ops cost authority, provenance, and evidence hash in pricing snapshot v2", () => {
+    const plan = buildDropshipOrderAcceptancePlan(makePlanningInput());
+
+    expect(plan.wholesaleSubtotalCents).toBe(1600);
+    expect(plan.totalDebitCents).toBe(2722);
+    expect(plan.costEvidenceHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(plan.pricingSnapshot).toMatchObject({
+      version: DROPSHIP_PRICING_SNAPSHOT_VERSION,
+      wholesale: {
+        authority: "shellz_club_ops_product_cost",
+        costResolvedAt: now.toISOString(),
+        costEvidenceHash: plan.costEvidenceHash,
+        lines: [{
+          productVariantId: 101,
+          quantity: 2,
+          wholesaleUnitCostCents: 800,
+          wholesaleLineTotalCents: 1600,
+          costSource: "variant_fixed_price",
+          costPlanId: "ops",
+          costOverrideId: "override-1",
+        }],
+      },
+    });
+    expect(JSON.stringify(plan.pricingSnapshot)).not.toContain("channelDiscountPercent");
+  });
+
+  it("produces the same evidence hash for the same cost inputs regardless of line order", () => {
+    const second = {
+      lineIndex: 1,
+      listingId: 502,
+      productId: 202,
+      productVariantId: 102,
+      productLineIds: [301],
+      sku: "SKU-102",
+      title: "Sleeve",
+      category: "cards",
+      quantity: 1,
+      catalogRetailPriceCents: 500,
+      observedRetailUnitPriceCents: 500,
+      wholesaleUnitCostCents: 400,
+      productCostEvidence: { source: "plan_percent" as const, planId: "ops", overrideId: null },
+      externalLineItemId: "line-2",
+    };
+    const quote = baseQuote();
+    quote.quotePayload = {
+      ...quote.quotePayload,
+      items: [{ productVariantId: 101, quantity: 2 }, { productVariantId: 102, quantity: 1 }],
+    };
+    const first = makePlanningInput().lines[0];
+    const inventory = [{ productVariantId: 101, availableQty: 2 }, { productVariantId: 102, availableQty: 1 }];
+
+    const forward = buildDropshipOrderAcceptancePlan(makePlanningInput({ quote, inventory, lines: [first, second] }));
+    const reversed = buildDropshipOrderAcceptancePlan(makePlanningInput({ quote, inventory, lines: [second, first] }));
+
+    expect(forward.costEvidenceHash).toBe(reversed.costEvidenceHash);
+    expect(forward.wholesaleSubtotalCents).toBe(2000);
+  });
+
+  it("refuses a line whose wholesale cost is not positive integer cents", () => {
+    const line = makePlanningInput().lines[0];
     expectDropshipError(
-      () => calculateDiscountedWholesaleUnitCostCents(999.5, 15),
+      () => buildDropshipOrderAcceptancePlan(makePlanningInput({ lines: [{ ...line, wholesaleUnitCostCents: 0 }] })),
       "DROPSHIP_ORDER_MONEY_INVALID",
     );
     expectDropshipError(
-      () => calculateDiscountedWholesaleUnitCostCents(999, 101),
-      "DROPSHIP_WHOLESALE_DISCOUNT_INVALID",
+      () => buildDropshipOrderAcceptancePlan(makePlanningInput({ lines: [{ ...line, wholesaleUnitCostCents: 8.09 }] })),
+      "DROPSHIP_ORDER_MONEY_INVALID",
     );
   });
 });
@@ -370,7 +428,6 @@ function makePlanningInput(
       storeConnectionId: 22,
       storeStatus: "connected",
       storeLaunchReady: true,
-      channelDiscountPercent: 20,
     },
     quote: baseQuote(),
     lines: [{
@@ -386,6 +443,7 @@ function makePlanningInput(
       catalogRetailPriceCents: 1000,
       observedRetailUnitPriceCents: 1000,
       wholesaleUnitCostCents: 800,
+      productCostEvidence: { source: "variant_fixed_price", planId: "ops", overrideId: "override-1" },
       externalLineItemId: "line-1",
     }],
     pricingPolicies: [],
