@@ -32,7 +32,10 @@ export class PostgresInventoryCutoverPreflightRepository implements InventoryCut
       const authority = authorities[0] ?? null;
       const demand = await readWmsCutoverDemand(client);
       const encumbrance = await captureInventoryCutoverEncumbranceInsideTransaction(client);
-      const skus = [...new Set(demand.items.filter((item) => item.requiresShipping !== 0).map((item) => item.sku.toUpperCase()))].sort();
+      // Non-shipping lines normally need no catalog identity, but exact provider
+      // fulfillment evidence can be excluded from inventory custody only after
+      // its non-shipping and non-tracked catalog configuration is proven.
+      const skus = [...new Set(demand.items.map((item) => item.sku.toUpperCase()))].sort();
       const variantRows = skus.length === 0 ? [] : (await client.query(
         `SELECT id, product_id AS "productId", sku, is_active AS "isActive",
                 requires_shipping AS "requiresShipping", COALESCE(track_inventory, true) AS "trackInventory",

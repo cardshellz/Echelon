@@ -3,17 +3,20 @@
 // mocked; this is not a historical migration or physical materializer fixture.
 export const channelShipmentRuntimeFixtureSql = `
   CREATE SCHEMA inventory; CREATE SCHEMA oms; CREATE SCHEMA wms;
-  CREATE SCHEMA warehouse; CREATE SCHEMA channels;
+  CREATE SCHEMA warehouse; CREATE SCHEMA channels; CREATE SCHEMA catalog;
   CREATE TABLE inventory.availability_runtime_authority
     (singleton_key boolean PRIMARY KEY, authority text, revision bigint, activation_run_id bigint);
   CREATE TABLE channels.channels (id integer PRIMARY KEY, provider text);
+  CREATE TABLE catalog.product_variants (id integer PRIMARY KEY, requires_shipping boolean NOT NULL,
+    track_inventory boolean);
   CREATE TABLE oms.oms_orders (id bigint PRIMARY KEY, channel_id integer, external_order_id text);
   CREATE TABLE oms.oms_order_lines (id bigint PRIMARY KEY, order_id bigint, external_line_item_id text,
-    paid_quantity integer, authority_fulfillable_quantity integer, product_variant_id integer, sku text);
+    paid_quantity integer, authority_fulfillable_quantity integer, product_variant_id integer, sku text,
+    requires_shipping boolean);
   CREATE TABLE oms.oms_order_line_authority_events (order_line_id bigint, paid_quantity integer);
   CREATE TABLE wms.orders (id integer PRIMARY KEY, warehouse_status text);
   CREATE TABLE wms.order_items (id integer PRIMARY KEY, order_id integer, oms_order_line_id bigint,
-    quantity integer, picked_quantity integer, status text);
+    quantity integer, picked_quantity integer, status text, requires_shipping integer);
   CREATE TABLE inventory.inventory_transactions (id integer PRIMARY KEY, order_item_id integer,
     product_variant_id integer, transaction_type text, from_location_id integer, created_at timestamp);
   CREATE TABLE inventory.inventory_levels (warehouse_location_id integer, product_variant_id integer, variant_qty integer);
@@ -24,7 +27,11 @@ export const channelShipmentRuntimeFixtureSql = `
     physical_shipment_id integer, oms_order_id bigint, source_channel_id integer, updated_at timestamp,
     attempt_count integer, lease_token text, lease_expires_at timestamp, last_attempt_at timestamp,
     retry_failure_count integer, next_retry_at timestamp, source_provider text, source_order_id text,
-    source_fulfillment_id text, source_event_id text, event_kind text, raw_payload jsonb);
+    source_fulfillment_id text, source_event_id text, event_kind text, raw_payload jsonb,
+    error_code text, error_message text, processed_at timestamp);
+  CREATE TABLE oms.channel_fulfillment_receipt_attempts (receipt_id integer, attempt_number integer,
+    lease_token text, outcome text, started_at timestamp, completed_at timestamp, error_code text,
+    error_message text, metadata jsonb, created_at timestamp);
   CREATE TABLE oms.channel_fulfillment_receipt_items (receipt_id integer, source_fulfillment_line_id text,
     channel_order_line_id text, quantity integer, oms_order_line_id bigint, wms_order_item_id integer,
     legacy_wms_shipment_item_id integer, physical_shipment_item_id integer, created_at timestamp,
@@ -33,6 +40,8 @@ export const channelShipmentRuntimeFixtureSql = `
     channel_provider text, oms_order_id bigint, channel_fulfillment_id text, push_status text);
   CREATE TABLE oms.channel_fulfillment_push_items (id integer PRIMARY KEY, channel_fulfillment_push_id integer,
     channel_order_line_id text, quantity_pushed integer, physical_shipment_item_id integer);
+  CREATE TABLE oms.webhook_retry_queue (provider text, topic text, payload jsonb, status text,
+    last_error text, updated_at timestamp);
   CREATE TABLE wms.physical_shipments (id integer PRIMARY KEY, provider text,
     provider_physical_shipment_id text, status text, tracking_number text);
   CREATE TABLE wms.physical_shipment_items (id integer PRIMARY KEY, physical_shipment_id integer,
@@ -48,22 +57,28 @@ export const channelShipmentRuntimeFixtureSql = `
   CREATE TABLE wms.outbound_shipment_items (id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     shipment_id integer, order_item_id integer, shipment_item_purpose text,
     product_variant_id integer, qty integer, from_location_id integer, tracking_id text, created_at timestamp);
+  CREATE TABLE wms.reconciliation_exceptions (id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    classification text, status text, severity text, idempotency_key text, resolved_at timestamp,
+    resolved_by text, resolution text, updated_at timestamp);
 `;
 
 export const channelShipmentRuntimeSeedSql = `
       TRUNCATE inventory.availability_runtime_authority, channels.channels, oms.oms_orders,
         oms.oms_order_lines, oms.oms_order_line_authority_events, wms.orders, wms.order_items,
+        catalog.product_variants,
         inventory.inventory_transactions, inventory.inventory_levels, warehouse.warehouse_locations,
-        warehouse.product_locations, oms.channel_fulfillment_receipts, oms.channel_fulfillment_receipt_items,
+        warehouse.product_locations, oms.channel_fulfillment_receipt_attempts,
+        oms.channel_fulfillment_receipts, oms.channel_fulfillment_receipt_items, oms.webhook_retry_queue,
         wms.outbound_shipment_items, wms.outbound_shipments, wms.physical_shipment_items,
         wms.physical_shipments, wms.fulfillment_plan_lines, oms.channel_fulfillment_push_items,
-        oms.channel_fulfillment_pushes RESTART IDENTITY;
+        oms.channel_fulfillment_pushes, wms.reconciliation_exceptions RESTART IDENTITY;
       INSERT INTO inventory.availability_runtime_authority VALUES (true,'legacy',1,NULL);
       INSERT INTO channels.channels VALUES (36,'shopify');
+      INSERT INTO catalog.product_variants VALUES (30,true,true);
       INSERT INTO oms.oms_orders VALUES (11,36,'101');
-      INSERT INTO oms.oms_order_lines VALUES (12,11,'line-1',2,2,30,'SKU-30');
+      INSERT INTO oms.oms_order_lines VALUES (12,11,'line-1',2,2,30,'SKU-30',true);
       INSERT INTO wms.orders VALUES (40,'shipped');
-      INSERT INTO wms.order_items VALUES (50,40,12,2,2,'picked');
+      INSERT INTO wms.order_items VALUES (50,40,12,2,2,'picked',1);
       INSERT INTO warehouse.warehouse_locations VALUES (20,NULL),(25,NULL);
       INSERT INTO warehouse.product_locations VALUES (1,25,30,'active',1);
       INSERT INTO inventory.inventory_transactions VALUES (1,50,30,'pick',20,'2026-09-07T19:00:00Z');
