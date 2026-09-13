@@ -25,6 +25,8 @@ import {
 import { resolvePackagingAssignment } from "../domain/packaging-assignment";
 import type { CartonizeBox } from "../../cartonization/domain/cartonize";
 import type { SharedShippingConfigurationStore } from "../application/shared-configuration.port";
+import { isPackagingPolicyRequired } from "../application/packaging-policy-requirement";
+import { logger } from "../../../platform/observability/logger";
 
 import { ShippingConfigurationError } from "../domain/configuration-error";
 export { ShippingConfigurationError } from "../domain/configuration-error";
@@ -275,6 +277,36 @@ export class SharedShippingConfigurationRepository
         this.dbPool,
       ).resolve(channelId, warehouseId);
       if (canonical) return canonical;
+      // No saved policy for this channel. The legacy assignment table has no
+      // branding requirement and weaker availability semantics, so this is an
+      // authority downgrade that must be visible and, once every channel has a
+      // policy, refused outright.
+      if (isPackagingPolicyRequired()) {
+        throw new ShippingConfigurationError(
+          "SHIPPING_PACKAGING_POLICY_REQUIRED",
+          `Channel ${channelId} has no saved packaging policy and the legacy packaging fallback is disabled.`,
+        );
+      }
+      logger.warn("packaging_resolution", {
+        outcome: "legacy_fallback",
+        reason: "no_channel_packaging_policy",
+        source: "legacy_packaging_assignments",
+        fulfillment_channel: channel,
+        channel_id: channelId,
+        warehouse_id: warehouseId,
+      });
+    } else {
+      // Expected structural case (for example a WMS order with no channel), so it
+      // is detail, not an anomaly; still recorded so the legacy dependency report
+      // can be corroborated from logs.
+      logger.debug("packaging_resolution", {
+        outcome: "legacy_fallback",
+        reason: "channel_id_unavailable",
+        source: "legacy_packaging_assignments",
+        fulfillment_channel: channel,
+        channel_id: null,
+        warehouse_id: warehouseId,
+      });
     }
     // One MVCC statement: membership, current revision, and stock cannot come
     // from different admin edits during a quote.
