@@ -135,6 +135,7 @@ function dependencies() {
       remoteProductExists: false,
       liveVariantIds: [],
     }),
+    lookupVariantProductIds: vi.fn().mockResolvedValue(new Map()),
   };
   const service = createShopifyProductMappingReconciliationService({
     repository,
