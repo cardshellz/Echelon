@@ -1,4 +1,5 @@
-import { pool } from "../../../db";
+import { db, pool } from "../../../db";
+import { createAllocationEngine } from "../../channels/allocation-engine.service";
 import type {
   MarketplaceListingProviderAccountClaimer,
   MarketplaceListingRegistrationObserver,
@@ -18,8 +19,9 @@ import {
   DropshipMarketplaceRegistrationOwnerReader,
   type DropshipMarketplaceRegistrationOwnerRepository,
 } from "../application/dropship-marketplace-registration-owner-reader";
-import { InventoryServiceDropshipAtpProvider } from "./dropship-atp.provider";
+import { ChannelAllocationDropshipAtpProvider } from "./dropship-atp.provider";
 import { DropshipEbayRegistrationCredentialAdapter } from "./dropship-ebay-registration-credential-adapter";
+import { resolveDropshipOmsChannelIdWithClient } from "./dropship-order-intake.repository";
 import {
   createDropshipEbayRegistrationCredentialProviderFromEnv,
   type DropshipEbayRegistrationCredentialProvider,
@@ -83,9 +85,12 @@ export interface CreateDropshipMarketplaceRegistrationOwnerAdaptersFromEnvOption
 export function createDropshipMarketplaceRegistrationOwnerAdaptersFromEnv(
   options: CreateDropshipMarketplaceRegistrationOwnerAdaptersFromEnvOptions = {},
 ): DropshipMarketplaceRegistrationOwnerAdapters {
-  const atp = new InventoryServiceDropshipAtpProvider(
-    createAuthorityAwareInventoryAtpService(pool),
-  );
+  // Dropship quantity is the Dropship OMS channel's Channel Allocation result
+  // (handoff Option B), computed over the authority-aware ATP reader.
+  const atp = new ChannelAllocationDropshipAtpProvider({
+    allocationEngine: createAllocationEngine(db, createAuthorityAwareInventoryAtpService(pool)),
+    resolveDropshipOmsChannelId: () => resolveDropshipOmsChannelIdWithClient(pool),
+  });
   const ownerRepository = new PgDropshipMarketplaceRegistrationOwnerRepository(
     atp,
   );

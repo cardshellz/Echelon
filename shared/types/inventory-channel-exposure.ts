@@ -1,4 +1,8 @@
 import { z } from "zod";
+import {
+  inventoryRuntimeAuthorityRevisionSchema,
+  inventoryRuntimeAuthoritySchema,
+} from "./inventory-runtime-authority";
 
 import {
   plannerNonnegativeQuantitySchema,
@@ -195,7 +199,10 @@ export const inventoryChannelExposureAdminViewSchema = z.object({
   sourceBindingHeads: z.array(publicationSourceBindingHeadSchema),
   variantMappingHeads: z.array(publicationVariantMappingHeadSchema),
   legacyMappingCandidates: z.array(legacyPublicationMappingCandidateSchema),
-  runtimeAuthority: z.literal("legacy_channel_allocation_rules"),
+  // Read from the inventory.availability_runtime_authority singleton at view
+  // time, never asserted: after cutover the exposure dials are what publishes.
+  runtimeAuthority: inventoryRuntimeAuthoritySchema,
+  runtimeAuthorityRevision: inventoryRuntimeAuthorityRevisionSchema,
   providerWriteEnabled: z.literal(false),
 }).strict();
 

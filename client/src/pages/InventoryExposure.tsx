@@ -34,6 +34,7 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/lib/auth";
+import { InventoryRuntimeAuthorityBadge } from "@/components/inventory/InventoryRuntimeAuthorityBadge";
 import { WarehouseInventorySourceSetup } from "@/components/inventory/WarehouseInventorySourceSetup";
 
 type PolicyScopeType = ChannelExposurePolicyScope["scopeType"];
@@ -365,7 +366,7 @@ export default function InventoryExposure() {
         </div>
         <div className="flex gap-2">
           <Badge variant="outline"><ShieldCheck className="mr-1 h-3.5 w-3.5" />Draft / preview only</Badge>
-          <Badge variant="secondary">Legacy runtime retained</Badge>
+          <InventoryRuntimeAuthorityBadge />
         </div>
       </div>
 

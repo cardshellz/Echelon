@@ -50,6 +50,11 @@ import {
   resolveChannelExposurePolicy,
   type ChannelExposurePolicyCandidate,
 } from "../domain/inventory-channel-exposure";
+import {
+  inventoryRuntimeAuthorityRevisionSchema,
+  inventoryRuntimeAuthoritySchema,
+  type InventoryRuntimeAuthority,
+} from "@shared/types/inventory-runtime-authority";
 import { InventoryAvailabilityMasterDataError } from "../domain/inventory-availability-master-data.contracts";
 import {
   PostgresInventoryAvailabilityShadowRepository,
@@ -76,6 +81,11 @@ implements InventoryChannelExposureAdminStore {
   ) {}
 
   async getAdminView(productId: number | null): Promise<InventoryChannelExposureAdminView> {
+    const runtimeAuthority = readRuntimeAuthority(rows(await this.database.execute(sql`
+      SELECT authority, revision::text AS revision
+      FROM inventory.availability_runtime_authority
+      WHERE singleton_key = true
+    `)));
     const productRows = rows(await this.database.execute(sql`
       SELECT product.id, product.sku, product.name
       FROM catalog.products AS product
@@ -278,7 +288,8 @@ implements InventoryChannelExposureAdminStore {
         externalInventoryItemId: nullableText(row.channel_inventory_item_id),
         externalSku: nullableText(row.external_sku),
       })),
-      runtimeAuthority: "legacy_channel_allocation_rules",
+      runtimeAuthority: runtimeAuthority.authority,
+      runtimeAuthorityRevision: runtimeAuthority.revision,
       providerWriteEnabled: false,
     });
   }
@@ -1665,6 +1676,27 @@ function groupBy<T, K>(values: readonly T[], key: (value: T) => K): Map<K, T[]> 
   const result = new Map<K, T[]>();
   for (const value of values) result.set(key(value), [...(result.get(key(value)) ?? []), value]);
   return result;
+}
+
+/**
+ * The view reports which allocator is live instead of asserting legacy. Anything
+ * other than one contract-valid singleton row is refused: a wrong answer here
+ * misleads operators about whether the exposure dials are in effect.
+ */
+function readRuntimeAuthority(
+  authorityRows: readonly Record<string, unknown>[],
+): { authority: InventoryRuntimeAuthority; revision: string } {
+  const row = authorityRows.length === 1 ? authorityRows[0] : null;
+  const authority = inventoryRuntimeAuthoritySchema.safeParse(row?.authority);
+  const revision = inventoryRuntimeAuthorityRevisionSchema.safeParse(row?.revision);
+  if (!row || !authority.success || !revision.success) {
+    throw new InventoryAvailabilityMasterDataError(
+      503,
+      "INVENTORY_RUNTIME_AUTHORITY_UNAVAILABLE",
+      "The inventory runtime authority singleton is missing or invalid.",
+    );
+  }
+  return { authority: authority.data, revision: revision.data };
 }
 
 function rows(result: unknown): Record<string, any>[] {

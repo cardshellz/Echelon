@@ -31,6 +31,9 @@ export function buildEbayDropshipOrderIntakeInput(input: {
       totals: buildEbayTotals(input.order),
       orderedAt: readEbayOrderedAt(input.order),
       marketplaceStatus: `${input.order.orderPaymentStatus}:${input.order.orderFulfillmentStatus}`,
+      // The service the buyer paid for. Retained verbatim so fulfillment can honor
+      // or reconcile it later; it does not change execution behavior yet.
+      buyerShippingServiceCode: readBuyerShippingServiceCode(input.order),
     },
     idempotencyKey: `dropship:ebay:intake:${input.store.storeConnectionId}:${externalOrderId}`,
   };
@@ -134,6 +137,11 @@ function buildEbayShipTo(
     phone: readOptionalString(shipTo?.primaryPhone?.phoneNumber) ?? undefined,
     email: readOptionalString(shipTo?.email) ?? undefined,
   };
+}
+
+function readBuyerShippingServiceCode(order: EbayOrder): string | undefined {
+  const shippingStep = order.fulfillmentStartInstructions?.[0]?.shippingStep;
+  return readOptionalString(shippingStep?.shippingServiceCode) ?? undefined;
 }
 
 function buildEbayTotals(

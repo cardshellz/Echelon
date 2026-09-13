@@ -15,7 +15,8 @@
  */
 
 import { eq, and, or, isNull, isNotNull, sql, inArray } from "drizzle-orm";
-import { clearVelocityCache } from "./allocation-engine.service";
+import { describeAllocationFailure } from "./allocation-engine.errors";
+import { logger } from "../../platform/observability/logger";
 import {
   products,
   productVariants,
@@ -370,9 +371,6 @@ class EchelonSyncOrchestrator {
     );
     console.log(`[SyncOrchestrator] Syncing inventory for ${productIds.length} products`);
 
-    // Clear velocity cache at start of full sync cycle — each product will query fresh
-    clearVelocityCache();
-
     for (const productId of productIds) {
       try {
         const results = await this.syncInventoryForProduct(productId, config, triggeredBy);
@@ -392,8 +390,21 @@ class EchelonSyncOrchestrator {
             allResults.push(result);
           }
         }
-      } catch (err: any) {
-        console.error(`[SyncOrchestrator] Failed to sync inventory for product ${productId}: ${err.message}`);
+      } catch (err: unknown) {
+        // Nothing was published for this product on this run: the sweep keeps the
+        // channel's last quantity and retries on the next cycle. A transient failure
+        // (for example the velocity read) is an auto-recovered anomaly; a permanent
+        // one (invalid rule or input) needs a human and is logged as an error.
+        const failure = describeAllocationFailure(err);
+        const level = failure.error_class === "transient" ? "warn" : "error";
+        logger[level]("inventory_sync_product", {
+          outcome: "skipped",
+          product_id: productId,
+          triggered_by: triggeredBy ?? "orchestrator",
+          error_code: failure.error_code,
+          error_class: failure.error_class,
+          error: failure.message,
+        });
       }
 
       // Rate limiting between products

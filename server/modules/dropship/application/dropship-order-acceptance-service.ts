@@ -6,6 +6,11 @@ import {
 import { DROPSHIP_DEFAULT_PAYMENT_HOLD_TIMEOUT_MINUTES } from "../../../../shared/schema/dropship.schema";
 import { DropshipError } from "../domain/errors";
 import {
+  ACCEPTANCE_COST_AUTHORITY,
+  buildAcceptanceCostEvidenceHash,
+  type DropshipAcceptanceProductCostEvidence,
+} from "../domain/order-acceptance-cost";
+import {
   formatNotificationCurrency,
   sendDropshipNotificationSafely,
 } from "./dropship-notification-dispatch";
@@ -69,7 +74,6 @@ export interface DropshipAcceptanceVendorContext {
   storeConnectionId: number;
   storeStatus: string;
   storeLaunchReady: boolean;
-  channelDiscountPercent: number;
 }
 
 export interface DropshipAcceptanceQuoteSnapshot {
@@ -98,7 +102,10 @@ export interface DropshipAcceptanceLineContext {
   quantity: number;
   catalogRetailPriceCents: number;
   observedRetailUnitPriceCents: number;
+  /** The `.ops` plan cost for one sellable pack; the only basis for the wallet debit. */
   wholesaleUnitCostCents: number;
+  /** Where wholesaleUnitCostCents came from; frozen into the economics snapshot. */
+  productCostEvidence: DropshipAcceptanceProductCostEvidence;
   externalLineItemId: string | null;
 }
 
@@ -164,8 +171,13 @@ export interface DropshipOrderAcceptancePlan {
   feesCents: number;
   totalDebitCents: number;
   paymentHoldExpiresAt: Date | null;
+  /** Content hash of the cost inputs that produced the debit (see order-acceptance-cost). */
+  costEvidenceHash: string;
   pricingSnapshot: Record<string, unknown>;
 }
+
+/** Bumped when the shape of pricingSnapshot changes; readers branch on it. */
+export const DROPSHIP_PRICING_SNAPSHOT_VERSION = 2;
 
 export class DropshipOrderAcceptanceService {
   constructor(
@@ -269,8 +281,14 @@ export function buildDropshipOrderAcceptancePlan(
   const lines = input.lines.map((line) => ({
     ...line,
     retailLineTotalCents: multiplyCents(line.observedRetailUnitPriceCents, line.quantity),
-    wholesaleLineTotalCents: multiplyCents(line.wholesaleUnitCostCents, line.quantity),
+    // The debit basis must be a positive .ops cost; a zero or negative cost never
+    // reaches the plan (resolveAcceptanceUnitCost refuses it upstream too).
+    wholesaleLineTotalCents: multiplyCents(
+      requirePositiveCents(line.wholesaleUnitCostCents, "wholesaleUnitCostCents"),
+      line.quantity,
+    ),
   }));
+  const costEvidenceHash = buildAcceptanceCostEvidenceHash({ vendorId: input.vendor.vendorId, lines });
   const retailSubtotalCents = sumCents(lines.map((line) => line.retailLineTotalCents));
   const wholesaleSubtotalCents = sumCents(lines.map((line) => line.wholesaleLineTotalCents));
   const shippingCents = requireCents(input.quote.totalShippingCents, "quote.totalShippingCents");
@@ -312,8 +330,9 @@ export function buildDropshipOrderAcceptancePlan(
     feesCents,
     totalDebitCents,
     paymentHoldExpiresAt,
+    costEvidenceHash,
     pricingSnapshot: {
-      version: 1,
+      version: DROPSHIP_PRICING_SNAPSHOT_VERSION,
       requestHash: input.requestHash,
       idempotencyKey: input.idempotencyKey,
       membership: {
@@ -322,7 +341,9 @@ export function buildDropshipOrderAcceptancePlan(
         tier: input.vendor.membershipPlanTier,
       },
       wholesale: {
-        channelDiscountPercent: input.vendor.channelDiscountPercent,
+        authority: ACCEPTANCE_COST_AUTHORITY,
+        costResolvedAt: input.acceptedAt.toISOString(),
+        costEvidenceHash,
         lines: lines.map((line) => ({
           productVariantId: line.productVariantId,
           quantity: line.quantity,
@@ -330,6 +351,9 @@ export function buildDropshipOrderAcceptancePlan(
           observedRetailUnitPriceCents: line.observedRetailUnitPriceCents,
           wholesaleUnitCostCents: line.wholesaleUnitCostCents,
           wholesaleLineTotalCents: line.wholesaleLineTotalCents,
+          costSource: line.productCostEvidence.source,
+          costPlanId: line.productCostEvidence.planId,
+          costOverrideId: line.productCostEvidence.overrideId,
         })),
       },
       shipping: {
@@ -346,21 +370,6 @@ export function buildDropshipOrderAcceptancePlan(
       },
     },
   };
-}
-
-export function calculateDiscountedWholesaleUnitCostCents(
-  catalogRetailPriceCents: number,
-  discountPercent: number,
-): number {
-  const retail = requirePositiveCents(catalogRetailPriceCents, "catalogRetailPriceCents");
-  if (!Number.isInteger(discountPercent) || discountPercent < 0 || discountPercent > 100) {
-    throw new DropshipError(
-      "DROPSHIP_WHOLESALE_DISCOUNT_INVALID",
-      "Dropship wholesale discount percent must be an integer from 0 to 100.",
-      { discountPercent },
-    );
-  }
-  return retail - Math.floor((retail * discountPercent) / 100);
 }
 
 export function hashDropshipOrderAcceptanceRequest(input: AcceptDropshipOrderInput): string {

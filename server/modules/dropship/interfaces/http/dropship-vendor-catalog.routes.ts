@@ -1,12 +1,14 @@
 import type { Express, Request, Response } from "express";
-import { pool } from "../../../../db";
+import { db, pool } from "../../../../db";
+import { createAllocationEngine } from "../../../channels/allocation-engine.service";
 import { createAuthorityAwareInventoryAtpService } from "../../../inventory-planning/infrastructure/inventory-availability-runtime-atp.repository";
 import {
   DropshipSelectionAtpService,
   makeDropshipSelectionAtpLogger,
   systemDropshipSelectionAtpClock,
 } from "../../application/dropship-selection-atp-service";
-import { InventoryServiceDropshipAtpProvider } from "../../infrastructure/dropship-atp.provider";
+import { ChannelAllocationDropshipAtpProvider } from "../../infrastructure/dropship-atp.provider";
+import { resolveDropshipOmsChannelIdWithClient } from "../../infrastructure/dropship-order-intake.repository";
 import { PgDropshipSelectionAtpRepository } from "../../infrastructure/dropship-selection-atp.repository";
 import { DropshipError } from "../../domain/errors";
 import { requireDropshipAuth } from "./dropship-auth.routes";
@@ -76,7 +78,12 @@ function createDropshipSelectionAtpServiceFromEnv(): DropshipSelectionAtpService
     clock: systemDropshipSelectionAtpClock,
     logger: makeDropshipSelectionAtpLogger(),
     repository: new PgDropshipSelectionAtpRepository(),
-    atp: new InventoryServiceDropshipAtpProvider(createAuthorityAwareInventoryAtpService(pool)),
+    // Dropship quantity is the Dropship OMS channel's Channel Allocation result
+    // (handoff Option B), computed over the authority-aware ATP reader.
+    atp: new ChannelAllocationDropshipAtpProvider({
+      allocationEngine: createAllocationEngine(db, createAuthorityAwareInventoryAtpService(pool)),
+      resolveDropshipOmsChannelId: () => resolveDropshipOmsChannelIdWithClient(pool),
+    }),
   });
 }
 
@@ -192,6 +199,19 @@ function statusForDropshipVendorCatalogError(code: string): number {
   }
   if (code === "DROPSHIP_STEP_UP_REQUIRED" || code === "DROPSHIP_STEP_UP_METHOD_REQUIRED") {
     return 403;
+  }
+  // Program configuration is incomplete (no enabled warehouse for Dropship OMS, or
+  // the channel itself is missing); the vendor cannot fix it, so it is a conflict.
+  if (
+    code === "DROPSHIP_ALLOCATION_WAREHOUSE_SCOPE_REQUIRED"
+    || code === "DROPSHIP_OMS_CHANNEL_CONFIG_REQUIRED"
+    || code === "DROPSHIP_OMS_CHANNEL_CONFIG_AMBIGUOUS"
+  ) {
+    return 409;
+  }
+  // Allocation could not be computed on this request; the read is retryable.
+  if (code === "DROPSHIP_ALLOCATION_UNAVAILABLE") {
+    return 503;
   }
   return 400;
 }

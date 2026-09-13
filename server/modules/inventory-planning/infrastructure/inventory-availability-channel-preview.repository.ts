@@ -12,8 +12,8 @@ import {
 import type { PlannerShadowRunDto } from "@shared/types/inventory-availability-planner";
 
 import { db } from "../../../db";
+import { isAllocationEngineError } from "../../channels/allocation-engine.errors";
 import {
-  clearVelocityCache,
   createAllocationEngine,
   type ProductAllocationResult,
   type VariantChannelAllocation,
@@ -297,7 +297,6 @@ implements InventoryAvailabilityChannelPreviewStore {
           ));
           return blockerOnlyPreview(run, blockers);
         }
-        clearVelocityCache();
         const legacy = await createAllocationEngine(tx, shadowAtpAdapter(run, "legacy"))
           .previewProduct(productId);
         const proposed = await createAllocationEngine(tx, shadowAtpAdapter(run, "proposed"))
@@ -307,6 +306,22 @@ implements InventoryAvailabilityChannelPreviewStore {
         return compareAllocations(run, legacy, proposed, blockers);
       });
     } catch (error) {
+      if (isAllocationEngineError(error)) {
+        // The legacy engine failed closed (for example the sales-velocity read).
+        // A read-only preview reports that as a blocker rather than a 500.
+        blockers.push(issue(
+          "CHANNEL_PREVIEW_ALLOCATION_FAILED",
+          "blocking",
+          error.message,
+          {
+            shadowRunId: run.runId,
+            errorCode: error.code,
+            classification: error.classification,
+            ...error.context,
+          },
+        ));
+        return blockerOnlyPreview(run, blockers);
+      }
       if (!(error instanceof RangeError)) throw error;
       blockers.push(issue(
         "CHANNEL_PREVIEW_QUANTITY_UNSAFE",

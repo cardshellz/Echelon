@@ -16,10 +16,14 @@
  *     Each channel computes its ATP independently — no drawdown.
  *     Channels see independent parallel views of inventory.
  *
- * All operations are idempotent and audit-logged.
+ * Failure contract: the engine never returns a partially computed allocation.
+ * A failed or invalid input raises a classified AllocationEngineError and the
+ * caller must not publish anything for that product on this run. Audit logging
+ * is deliberately best-effort (see logAllocation); the allocation itself is a
+ * pure read.
  */
 
-import { eq, and, sql, inArray, isNull } from "drizzle-orm";
+import { eq, and, sql, inArray } from "drizzle-orm";
 import {
   channels,
   channelWarehouseAssignments,
@@ -27,7 +31,6 @@ import {
   channelProductLines,
   channelProductOverrides,
   channelVariantOverrides,
-  productVariants,
   productLineProducts,
   allocationAuditLog,
   warehouses,
@@ -38,29 +41,42 @@ import {
   isCustomerSellableVariant,
   type VariantSalesEligibility,
 } from "@shared/catalog/variant-sales-eligibility";
+import { logger } from "../../platform/observability/logger";
+import { ALLOCATION_ERROR_CODES, AllocationEngineError } from "./allocation-engine.errors";
 
 // ---------------------------------------------------------------------------
-// Velocity Cache — per product avg daily usage, cleared each sync cycle
+// Sales velocity — read at most once per allocation run
 // ---------------------------------------------------------------------------
 
-const VELOCITY_LOOKBACK_DAYS = 90;
+/** Window over which outbound demand is averaged for days-of-cover floors. */
+export const VELOCITY_LOOKBACK_DAYS = 90;
 
-/** Cache of avgDailyUsage per product ID, scoped to a single sync cycle */
-const velocityCache = new Map<number, number>();
-let velocityCacheGeneration = 0;
+/** Highest share percentage a rule may request; shares are whole percents. */
+const MAX_SHARE_PERCENT = 100;
 
-/** Clear the velocity cache (call at start of each sync cycle) */
-export function clearVelocityCache(): void {
-  velocityCache.clear();
-  velocityCacheGeneration++;
-}
+/**
+ * Velocity provenance carried on every allocation row and audit entry so a
+ * days-of-cover decision can be explained after the fact. A row never carries a
+ * fabricated reading: when the query fails the whole run fails (see
+ * queryAvgDailyUsage), so "read" always means a real successful read.
+ */
+export type AllocationVelocity =
+  | { status: "read"; avgDailyUsage: number; lookbackDays: number }
+  | { status: "not_required" };
 
-/** Query avg daily usage in base units for a product (90-day window) */
-async function queryAvgDailyUsage(db: DrizzleDb, productId: number): Promise<number> {
-  if (velocityCache.has(productId)) {
-    return velocityCache.get(productId)!;
-  }
+const VELOCITY_NOT_REQUIRED: AllocationVelocity = { status: "not_required" };
 
+/**
+ * Query average daily outbound usage in base units for a product over the
+ * lookback window.
+ *
+ * Fail-closed by design: any query failure raises a transient
+ * AllocationEngineError instead of returning 0. Returning 0 here used to make a
+ * days-of-cover floor evaluate to zero units and publish inventory the rule was
+ * meant to hold back, and the poisoned zero was cached process-wide.
+ */
+async function queryAvgDailyUsage(db: DrizzleDb, productId: number): Promise<AllocationVelocity> {
+  let rows: unknown;
   try {
     const result: any = await (db as any).execute(sql`
       SELECT COALESCE(SUM(oi.quantity * pv.units_per_variant), 0)::numeric AS total_outbound
@@ -73,17 +89,36 @@ async function queryAvgDailyUsage(db: DrizzleDb, productId: number): Promise<num
         AND oi.status != 'cancelled'
         AND o.order_placed_at > NOW() - MAKE_INTERVAL(days => ${VELOCITY_LOOKBACK_DAYS})
     `);
-
-    const totalOutbound = Number(result.rows?.[0]?.total_outbound ?? result[0]?.total_outbound ?? 0);
-    const avgDaily = VELOCITY_LOOKBACK_DAYS > 0 ? totalOutbound / VELOCITY_LOOKBACK_DAYS : 0;
-
-    velocityCache.set(productId, avgDaily);
-    return avgDaily;
-  } catch (err: any) {
-    console.warn(`[AllocationEngine] Failed to query velocity for product ${productId}: ${err.message}`);
-    velocityCache.set(productId, 0);
-    return 0;
+    rows = result?.rows ?? result;
+  } catch (err: unknown) {
+    throw new AllocationEngineError(
+      ALLOCATION_ERROR_CODES.VELOCITY_UNAVAILABLE,
+      "transient",
+      "Sales velocity could not be read; days-of-cover floors cannot be evaluated for this product on this run.",
+      { productId, lookbackDays: VELOCITY_LOOKBACK_DAYS, cause: err instanceof Error ? err.message : String(err) },
+    );
   }
+
+  // The aggregate has no GROUP BY, so a successful read is exactly one row with
+  // a numeric total (COALESCE makes "no orders" a 0, never a NULL). Anything else
+  // is a malformed result and is refused rather than read as zero demand.
+  const firstRow = Array.isArray(rows) ? rows[0] : undefined;
+  const rawTotal = (firstRow as { total_outbound?: unknown } | undefined)?.total_outbound;
+  const totalOutbound = rawTotal === null || rawTotal === undefined ? Number.NaN : Number(rawTotal);
+  if (!Number.isFinite(totalOutbound) || totalOutbound < 0) {
+    throw new AllocationEngineError(
+      ALLOCATION_ERROR_CODES.VELOCITY_INVALID,
+      "permanent",
+      "Sales velocity query returned no row or a value that is not a finite non-negative number.",
+      { productId, totalOutbound: rawTotal ?? null },
+    );
+  }
+
+  return {
+    status: "read",
+    avgDailyUsage: totalOutbound / VELOCITY_LOOKBACK_DAYS,
+    lookbackDays: VELOCITY_LOOKBACK_DAYS,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -98,26 +133,20 @@ type DrizzleDb = {
   transaction: <T>(fn: (tx: any) => Promise<T>) => Promise<T>;
 };
 
+type AtpVariantRow = {
+  productVariantId: number;
+  sku: string;
+  name: string;
+  unitsPerVariant: number;
+  salesEligibility?: VariantSalesEligibility | null;
+  atpUnits: number;
+  atpBase: number;
+};
+
 type AtpService = {
   getAtpBase(productId: number): Promise<number>;
-  getAtpPerVariant(productId: number): Promise<Array<{
-    productVariantId: number;
-    sku: string;
-    name: string;
-    unitsPerVariant: number;
-    salesEligibility?: VariantSalesEligibility | null;
-    atpUnits: number;
-    atpBase: number;
-  }>>;
-  getAtpPerVariantByWarehouse(productId: number, warehouseId: number): Promise<Array<{
-    productVariantId: number;
-    sku: string;
-    name: string;
-    unitsPerVariant: number;
-    salesEligibility?: VariantSalesEligibility | null;
-    atpUnits: number;
-    atpBase: number;
-  }>>;
+  getAtpPerVariant(productId: number): Promise<AtpVariantRow[]>;
+  getAtpPerVariantByWarehouse(productId: number, warehouseId: number): Promise<AtpVariantRow[]>;
   getAtpBaseByWarehouse?(productId: number, warehouseId: number): Promise<number>;
 };
 
@@ -140,6 +169,8 @@ export interface VariantChannelAllocation {
   reason: string;
   /** Whether warehouse scope is configured or inherited from the legacy fallback. */
   warehouseScopeSource: "explicit" | "legacy_all_active_fallback";
+  /** Sales-velocity provenance for days-of-cover evaluation on this row. */
+  velocity: AllocationVelocity;
   /** Disaggregated sub-quantities per target warehouse */
   warehouseBreakdown: Array<{ warehouseId: number; qty: number }>;
 }
@@ -177,6 +208,89 @@ const DEFAULT_RULE: ResolvedRule = {
   scope: "channel",
 };
 
+const ALLOCATION_MODES = new Set<ResolvedRule["mode"]>(["mirror", "share", "fixed"]);
+
+// ---------------------------------------------------------------------------
+// Input validation — fail closed on anything that cannot be a real quantity
+// ---------------------------------------------------------------------------
+
+function assertSafeNonNegativeInteger(
+  value: unknown,
+  field: string,
+  context: Readonly<Record<string, unknown>>,
+): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new AllocationEngineError(
+      ALLOCATION_ERROR_CODES.INPUT_INVALID,
+      "permanent",
+      `${field} must be a safe non-negative integer.`,
+      { ...context, field, value },
+    );
+  }
+  return value;
+}
+
+function assertVariantInputs(variant: AtpVariantRow, productId: number): void {
+  const context = { productId, productVariantId: variant.productVariantId, sku: variant.sku };
+  const unitsPerVariant = assertSafeNonNegativeInteger(variant.unitsPerVariant, "unitsPerVariant", context);
+  if (unitsPerVariant < 1) {
+    throw new AllocationEngineError(
+      ALLOCATION_ERROR_CODES.INPUT_INVALID,
+      "permanent",
+      "unitsPerVariant must be at least 1; a zero pack size cannot be allocated.",
+      { ...context, field: "unitsPerVariant", value: unitsPerVariant },
+    );
+  }
+  assertSafeNonNegativeInteger(variant.atpBase, "atpBase", context);
+}
+
+function optionalSafeNonNegativeInteger(
+  value: unknown,
+  field: string,
+  context: Readonly<Record<string, unknown>>,
+): number | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new AllocationEngineError(
+      ALLOCATION_ERROR_CODES.RULE_INVALID,
+      "permanent",
+      `Allocation rule ${field} must be a safe non-negative integer when set.`,
+      { ...context, field, value },
+    );
+  }
+  return value;
+}
+
+/**
+ * Validate a stored rule before it can influence a published quantity. The
+ * schema has no CHECK constraints on these columns, so an out-of-range share or
+ * a negative cap would otherwise silently over- or under-allocate.
+ */
+function validateRule(rule: ChannelAllocationRule, channelId: number): ResolvedRule["mode"] {
+  const context = { ruleId: rule.id, channelId, productId: rule.productId, productVariantId: rule.productVariantId };
+  if (!ALLOCATION_MODES.has(rule.mode as ResolvedRule["mode"])) {
+    throw new AllocationEngineError(
+      ALLOCATION_ERROR_CODES.RULE_INVALID,
+      "permanent",
+      "Allocation rule mode must be mirror, share, or fixed.",
+      { ...context, field: "mode", value: rule.mode },
+    );
+  }
+  const sharePct = optionalSafeNonNegativeInteger(rule.sharePct, "sharePct", context);
+  if (sharePct !== null && sharePct > MAX_SHARE_PERCENT) {
+    throw new AllocationEngineError(
+      ALLOCATION_ERROR_CODES.RULE_INVALID,
+      "permanent",
+      `Allocation rule sharePct must not exceed ${MAX_SHARE_PERCENT}.`,
+      { ...context, field: "sharePct", value: sharePct },
+    );
+  }
+  optionalSafeNonNegativeInteger(rule.fixedQty, "fixedQty", context);
+  optionalSafeNonNegativeInteger(rule.ceilingQty, "ceilingQty", context);
+  optionalSafeNonNegativeInteger(rule.floorAtp, "floorAtp", context);
+  return rule.mode as ResolvedRule["mode"];
+}
+
 // ---------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------
@@ -201,7 +315,11 @@ class AllocationEngine {
    *    b. Sum ATP across assigned warehouses → base_atp
    *    c. Load allocation rules (channel default, product override, variant override)
    *    d. For each variant, resolve most-specific rule and compute channel ATP
-   * 3. Audit log all decisions
+   * 3. Audit log all decisions (best-effort)
+   *
+   * @throws AllocationEngineError (transient) when sales velocity cannot be read
+   *   and a days-of-cover rule needs it; nothing is returned for the product.
+   * @throws AllocationEngineError (permanent) when an input or rule is invalid.
    */
   async allocateProduct(
     productId: number,
@@ -214,8 +332,7 @@ class AllocationEngine {
 
   /**
    * Calculate the exact legacy channel allocation without persisting allocation
-   * audit rows or invoking a provider adapter. Phase 3 uses this only inside a
-   * read-only transaction to compare two immutable ATP inputs.
+   * audit rows or invoking a provider adapter. Safe to call from read paths.
    */
   async previewProduct(productId: number): Promise<ProductAllocationResult> {
     return this.calculateProduct(productId);
@@ -229,12 +346,23 @@ class AllocationEngine {
       blocked: [],
     };
 
+    // Sales velocity is read lazily, at most once per run, and only when some
+    // channel carries a days-of-cover rule for this product.
+    let velocityReading: AllocationVelocity | null = null;
+    const readVelocity = async (): Promise<AllocationVelocity> => {
+      if (velocityReading === null) {
+        velocityReading = await queryAvgDailyUsage(this.db, productId);
+      }
+      return velocityReading;
+    };
+
     // 1. Get global ATP (for the result summary)
     const authoritativeVariantAtp = await this.atpService.getAtpPerVariant(productId);
     // Keep internal-only inventory inside the authoritative ATP calculation as
     // build/component supply, but never emit it as a channel allocation target.
     const globalVariantAtp = authoritativeVariantAtp.filter(isCustomerSellableVariant);
     if (globalVariantAtp.length === 0) return result;
+    for (const variant of globalVariantAtp) assertVariantInputs(variant, productId);
 
     result.totalAtpBase = globalVariantAtp[0].atpBase;
 
@@ -396,21 +524,13 @@ class AllocationEngine {
           reason: "Product is explicitly unlisted for this channel (via overrides)",
         });
         for (const variant of globalVariantAtp) {
-          result.allocations.push({
-            channelId: channel.id,
-            channelName: channel.name,
-            channelProvider: channel.provider,
-            channelPriority: channel.priority,
-            productVariantId: variant.productVariantId,
-            sku: variant.sku,
-            unitsPerVariant: variant.unitsPerVariant,
-            allocatedUnits: 0,
-            allocatedBase: 0,
-            method: "zero",
-            reason: "Product is explicitly unlisted for this channel (via overrides)",
+          result.allocations.push(zeroAllocation(
+            channel,
+            variant,
+            "Product is explicitly unlisted for this channel (via overrides)",
             warehouseScopeSource,
-            warehouseBreakdown: [],
-          });
+            VELOCITY_NOT_REQUIRED,
+          ));
         }
         continue;
       }
@@ -436,7 +556,11 @@ class AllocationEngine {
           whVariants.map((variant) => [variant.productVariantId, variant.atpBase]),
         );
         for (const variant of globalVariantAtp) {
-          const variantAtpBase = warehouseAtpByVariant.get(variant.productVariantId) ?? 0;
+          const variantAtpBase = assertSafeNonNegativeInteger(
+            warehouseAtpByVariant.get(variant.productVariantId) ?? 0,
+            "warehouseAtpBase",
+            { productId, productVariantId: variant.productVariantId, warehouseId: whId },
+          );
           channelBaseAtpByVariant.set(
             variant.productVariantId,
             (channelBaseAtpByVariant.get(variant.productVariantId) ?? 0) + variantAtpBase,
@@ -462,19 +586,16 @@ class AllocationEngine {
         (r) => r.productId === productId && r.productVariantId === null,
       );
 
-      // Check if any rule for this channel uses floor_type = 'days'
-      // If so, we need to look up the product's avg daily usage
+      // A days-of-cover rule anywhere in this channel's rule set needs the
+      // product's velocity. The read happens once per run and fails closed.
       const allChannelAndGlobalRules = [...channelRules, ...globalRules];
       const needsVelocity = allChannelAndGlobalRules.some(
-        (r) => (r as any).floorType === "days" && (r.floorAtp ?? 0) > 0,
+        (r) => r.floorType === "days" && (r.floorAtp ?? 0) > 0,
       );
-      let avgDailyUsage = 0;
-      if (needsVelocity) {
-        avgDailyUsage = await queryAvgDailyUsage(this.db, productId);
-      }
+      const velocity: AllocationVelocity = needsVelocity ? await readVelocity() : VELOCITY_NOT_REQUIRED;
 
       // Check product-level eligibility first
-      const productResolvedRule = this.resolveRule(channelDefaultRule, productRule, undefined);
+      const productResolvedRule = this.resolveRule(channel.id, channelDefaultRule, productRule, undefined);
       if (!productResolvedRule.eligible) {
         result.blocked.push({
           channelId: channel.id,
@@ -482,21 +603,13 @@ class AllocationEngine {
         });
         // Push zero allocations for all variants
         for (const variant of globalVariantAtp) {
-          result.allocations.push({
-            channelId: channel.id,
-            channelName: channel.name,
-            channelProvider: channel.provider,
-            channelPriority: channel.priority,
-            productVariantId: variant.productVariantId,
-            sku: variant.sku,
-            unitsPerVariant: variant.unitsPerVariant,
-            allocatedUnits: 0,
-            allocatedBase: 0,
-            method: "zero",
-            reason: "Product ineligible for this channel",
+          result.allocations.push(zeroAllocation(
+            channel,
+            variant,
+            "Product ineligible for this channel",
             warehouseScopeSource,
-            warehouseBreakdown: [],
-          });
+            velocity,
+          ));
         }
         continue;
       }
@@ -506,21 +619,13 @@ class AllocationEngine {
         // Consult channel variant override
         const isListed = listedOverridesByChannelVariant.get(`${channel.id}:${variant.productVariantId}`);
         if (isListed === false) {
-          result.allocations.push({
-            channelId: channel.id,
-            channelName: channel.name,
-            channelProvider: channel.provider,
-            channelPriority: channel.priority,
-            productVariantId: variant.productVariantId,
-            sku: variant.sku,
-            unitsPerVariant: variant.unitsPerVariant,
-            allocatedUnits: 0,
-            allocatedBase: 0,
-            method: "zero",
-            reason: "Variant is explicitly unlisted for this channel (via overrides)",
+          result.allocations.push(zeroAllocation(
+            channel,
+            variant,
+            "Variant is explicitly unlisted for this channel (via overrides)",
             warehouseScopeSource,
-            warehouseBreakdown: [],
-          });
+            velocity,
+          ));
           continue;
         }
 
@@ -531,7 +636,7 @@ class AllocationEngine {
           (r) => r.productVariantId === variant.productVariantId,
         );
 
-        const resolved = this.resolveRule(channelDefaultRule, productRule, variantRule);
+        const resolved = this.resolveRule(channel.id, channelDefaultRule, productRule, variantRule);
         const channelBaseAtp = channelBaseAtpByVariant.get(variant.productVariantId) ?? 0;
         const warehouseRawAtp = warehouseRawAtpByVariant.get(variant.productVariantId) ?? new Map();
         const allocation = this.computeAllocation(
@@ -541,7 +646,7 @@ class AllocationEngine {
           resolved,
           channel,
           assignedWarehouseIds,
-          avgDailyUsage,
+          velocity,
           warehouseScopeSource,
         );
 
@@ -559,8 +664,10 @@ class AllocationEngine {
   /**
    * Resolve the most specific rule. Variant > Product > Channel default.
    * If no rules exist at all, returns the DEFAULT_RULE (mirror, 100%).
+   * The winning rule is validated before it can influence a quantity.
    */
   private resolveRule(
+    channelId: number,
     channelDefault?: ChannelAllocationRule | null,
     productOverride?: ChannelAllocationRule | null,
     variantOverride?: ChannelAllocationRule | null,
@@ -573,12 +680,14 @@ class AllocationEngine {
       : productOverride ? "product"
       : "channel";
 
+    const mode = validateRule(rule, channelId);
+
     return {
-      mode: rule.mode as "mirror" | "share" | "fixed",
+      mode,
       sharePct: rule.sharePct,
       fixedQty: rule.fixedQty,
       floorAtp: rule.floorAtp ?? 0,
-      floorType: (rule as any).floorType === "days" ? "days" : "units",
+      floorType: rule.floorType === "days" ? "days" : "units",
       ceilingQty: rule.ceilingQty,
       eligible: rule.eligible,
       scope,
@@ -596,7 +705,7 @@ class AllocationEngine {
     rule: ResolvedRule,
     channel: Channel,
     assignedWarehouseIds: number[],
-    avgDailyUsage: number = 0,
+    velocity: AllocationVelocity,
     warehouseScopeSource: VariantChannelAllocation["warehouseScopeSource"],
   ): VariantChannelAllocation {
     const base = {
@@ -608,6 +717,7 @@ class AllocationEngine {
       sku: variant.sku,
       unitsPerVariant: variant.unitsPerVariant,
       warehouseScopeSource,
+      velocity,
     };
 
     // Step 1: Eligibility check
@@ -628,8 +738,19 @@ class AllocationEngine {
       let floorReason: string;
 
       if (rule.floorType === "days") {
-        effectiveFloor = Math.ceil(rule.floorAtp * avgDailyUsage);
-        floorReason = `Floor triggered (days-of-cover): ATP ${channelBaseAtp} < floor ${effectiveFloor} (${rule.floorAtp} days × ${Math.round(avgDailyUsage * 100) / 100}/day)`;
+        if (velocity.status !== "read") {
+          // Engine invariant: needsVelocity covers every days rule in scope. Reaching
+          // here means a days floor would be evaluated against no reading, which is
+          // exactly the fail-open this engine must never do.
+          throw new AllocationEngineError(
+            ALLOCATION_ERROR_CODES.VELOCITY_REQUIRED,
+            "permanent",
+            "A days-of-cover floor was evaluated without a sales-velocity reading.",
+            { channelId: channel.id, productVariantId: variant.productVariantId, floorDays: rule.floorAtp },
+          );
+        }
+        effectiveFloor = Math.ceil(rule.floorAtp * velocity.avgDailyUsage);
+        floorReason = `Floor triggered (days-of-cover): ATP ${channelBaseAtp} < floor ${effectiveFloor} (${rule.floorAtp} days × ${Math.round(velocity.avgDailyUsage * 100) / 100}/day)`;
       } else {
         effectiveFloor = rule.floorAtp;
         floorReason = `Floor triggered: ATP ${channelBaseAtp} < floor ${rule.floorAtp}`;
@@ -672,8 +793,8 @@ class AllocationEngine {
       let locationBaseToUse = whBaseAtp;
 
       if (rule.mode === "share") {
-        const pct = rule.sharePct ?? 100;
-        locationBaseToUse = Math.floor(whBaseAtp * pct / 100);
+        const pct = rule.sharePct ?? MAX_SHARE_PERCENT;
+        locationBaseToUse = Math.floor(whBaseAtp * pct / MAX_SHARE_PERCENT);
       } else if (rule.mode === "mirror" || rule.mode === "fixed") {
         locationBaseToUse = whBaseAtp;
       }
@@ -696,6 +817,16 @@ class AllocationEngine {
       totalAllocatedUnits += variantQty;
     }
 
+    const allocatedBase = totalAllocatedUnits * variant.unitsPerVariant;
+    if (!Number.isSafeInteger(totalAllocatedUnits) || !Number.isSafeInteger(allocatedBase)) {
+      throw new AllocationEngineError(
+        ALLOCATION_ERROR_CODES.RESULT_UNSAFE,
+        "permanent",
+        "Computed allocation left the safe integer range.",
+        { channelId: channel.id, productVariantId: variant.productVariantId, totalAllocatedUnits, allocatedBase },
+      );
+    }
+
     let method = rule.mode;
     let reason = "Multi-warehouse breakdown.";
     if (limitReason) reason += ` Applied ${limitReason}.`;
@@ -703,7 +834,7 @@ class AllocationEngine {
     return {
       ...base,
       allocatedUnits: totalAllocatedUnits,
-      allocatedBase: totalAllocatedUnits * variant.unitsPerVariant,
+      allocatedBase,
       method,
       reason,
       warehouseBreakdown,
@@ -777,6 +908,12 @@ class AllocationEngine {
   // PRIVATE: Audit Logging
   // -------------------------------------------------------------------------
 
+  /**
+   * Best-effort audit trail. This is a deliberate side-channel: the allocation
+   * result is already computed and returned to the caller, and a failed audit
+   * insert must not block publication. The failure is logged with a structured
+   * code so it is visible, never silently swallowed.
+   */
   private async logAllocation(
     result: ProductAllocationResult,
     triggeredBy?: string,
@@ -797,6 +934,9 @@ class AllocationEngine {
           channelPriority: a.channelPriority,
           unitsPerVariant: a.unitsPerVariant,
           allocatedBase: a.allocatedBase,
+          warehouseScopeSource: a.warehouseScopeSource,
+          warehouseBreakdown: a.warehouseBreakdown,
+          velocity: a.velocity,
         },
         triggeredBy: triggeredBy ?? null,
       }));
@@ -805,10 +945,41 @@ class AllocationEngine {
         const chunk = entries.slice(i, i + 100);
         await this.db.insert(allocationAuditLog).values(chunk);
       }
-    } catch (err: any) {
-      console.warn(`[AllocationEngine] Failed to log allocation audit: ${err.message}`);
+    } catch (err: unknown) {
+      logger.warn("allocation_audit_write", {
+        outcome: "failed",
+        error_code: "ALLOCATION_AUDIT_WRITE_FAILED",
+        product_id: result.productId,
+        triggered_by: triggeredBy ?? null,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
+}
+
+function zeroAllocation(
+  channel: Channel,
+  variant: AtpVariantRow,
+  reason: string,
+  warehouseScopeSource: VariantChannelAllocation["warehouseScopeSource"],
+  velocity: AllocationVelocity,
+): VariantChannelAllocation {
+  return {
+    channelId: channel.id,
+    channelName: channel.name,
+    channelProvider: channel.provider,
+    channelPriority: channel.priority,
+    productVariantId: variant.productVariantId,
+    sku: variant.sku,
+    unitsPerVariant: variant.unitsPerVariant,
+    allocatedUnits: 0,
+    allocatedBase: 0,
+    method: "zero",
+    reason,
+    warehouseScopeSource,
+    velocity,
+    warehouseBreakdown: [],
+  };
 }
 
 // ---------------------------------------------------------------------------

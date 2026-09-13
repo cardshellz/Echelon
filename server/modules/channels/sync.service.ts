@@ -28,6 +28,8 @@ import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eli
 import { isCustomerSellableVariant } from "@shared/catalog/variant-sales-eligibility";
 import { ChannelIdentityService } from "./channel-identity.service";
 import { ChannelIdentityError } from "./channel-identity.domain";
+import { describeAllocationFailure } from "./allocation-engine.errors";
+import { logger } from "../../platform/observability/logger";
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -179,16 +181,27 @@ class ChannelSyncService {
           }
         }
         return result;
-      } catch (err: any) {
+      } catch (err: unknown) {
         // Do NOT fall back to legacy allocation — the orchestrator is the
         // single source of truth. Falling back to legacy logic (which uses
         // channel.allocationPct / allocationFixedQty instead of
-        // channel_allocation_rules) could produce wrong quantities.
-        console.error(
-          `[ChannelSync] Orchestrator delegation failed for product ${productId} — ` +
-            `NOT falling back to legacy allocation: ${err.message}`,
-        );
-        return { productId, synced: 0, errors: [`Orchestrator failed: ${err.message}`], variants: [] };
+        // channel_allocation_rules) could produce wrong quantities. Nothing is
+        // published for this product on this run; the next trigger retries.
+        const failure = describeAllocationFailure(err);
+        logger[failure.error_class === "transient" ? "warn" : "error"]("inventory_sync_product", {
+          outcome: "skipped",
+          product_id: productId,
+          triggered_by: triggeredBy ?? "channel_sync",
+          error_code: failure.error_code,
+          error_class: failure.error_class,
+          error: failure.message,
+        });
+        return {
+          productId,
+          synced: 0,
+          errors: [`Orchestrator failed (${failure.error_code}): ${failure.message}`],
+          variants: [],
+        };
       }
     }
 

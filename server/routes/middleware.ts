@@ -39,6 +39,39 @@ export function requirePermission(resource: string, action: string) {
   };
 }
 
+export type PermissionGrant = readonly [resource: string, action: string];
+
+/**
+ * Allows the request when the session user holds ANY of the listed grants.
+ * Grants are checked in order and evaluation stops at the first allow, so list
+ * the most common grant first. Intended for read-only views that two operator
+ * roles legitimately share (for example the live inventory runtime authority
+ * shown on both Channel Allocation and Inventory Exposure). A permission-owner
+ * failure is forwarded to the error handler instead of being treated as a deny
+ * or an allow.
+ */
+export function requireAnyPermission(...grants: PermissionGrant[]) {
+  if (grants.length === 0) {
+    throw new Error("requireAnyPermission requires at least one grant");
+  }
+  return async (req: Request, res: Response, next: NextFunction) => {
+    if (!req.session.user) {
+      return res.status(401).json({ error: "Authentication required" });
+    }
+    try {
+      for (const [resource, action] of grants) {
+        if (await hasPermission(req.session.user.id, resource, action)) {
+          return next();
+        }
+      }
+    } catch (error) {
+      return next(error);
+    }
+    const denied = grants.map(([resource, action]) => `${resource}:${action}`).join(" or ");
+    return res.status(403).json({ error: `Permission denied: ${denied}` });
+  };
+}
+
 export function requireAuth(req: Request, res: Response, next: NextFunction) {
   if (!req.session.user) {
     return res.status(401).json({ error: "Authentication required" });
