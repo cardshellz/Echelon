@@ -10,7 +10,9 @@ import {
   ShopifyMappingVerificationError,
 } from "./shopify-product-mapping-verifier";
 import {
+  SHOPIFY_OWNERSHIP_REPAIR_MAX_GROUPS,
   SHOPIFY_OWNERSHIP_REVIEW_FILTERS,
+  shopifyOwnershipRepairApplySchema,
 } from "./shopify-product-mapping-reconciliation.domain";
 
 const reconciliationParamsSchema = z.object({
@@ -19,7 +21,9 @@ const reconciliationParamsSchema = z.object({
 const ownershipReviewQuerySchema = z.object({
   filter: z.enum(SHOPIFY_OWNERSHIP_REVIEW_FILTERS).default("all"),
   page: z.coerce.number().int().min(1).max(10_000).default(1),
-  pageSize: z.coerce.number().int().min(1).max(50).default(20),
+  pageSize: z.coerce.number().int().min(1)
+    .max(SHOPIFY_OWNERSHIP_REPAIR_MAX_GROUPS)
+    .default(20),
 }).strict();
 const retireParamsSchema = reconciliationParamsSchema.extend({
   productId: z.coerce.number().int().positive(),
@@ -134,6 +138,28 @@ export function registerShopifyProductMappingReconciliationRoutes(
           res,
           error,
           "review duplicate Shopify product ownership",
+        );
+      }
+    },
+  );
+
+  app.post(
+    "/api/channels/:channelId/shopify-mapping-reconciliation/ownership-review/apply",
+    requirePermission("inventory", "edit"),
+    async (req, res) => {
+      try {
+        const params = reconciliationParamsSchema.parse(req.params);
+        const body = shopifyOwnershipRepairApplySchema.parse(req.body);
+        return res.json(await service.applyOwnershipRepair({
+          channelId: params.channelId,
+          request: body,
+          actor: authenticatedActor(req),
+        }));
+      } catch (error: unknown) {
+        return sendMappingError(
+          res,
+          error,
+          "apply Shopify ownership repair",
         );
       }
     },

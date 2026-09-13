@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useRef, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertCircle,
   CheckCircle2,
@@ -11,6 +11,15 @@ import {
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Label } from "@/components/ui/label";
 import {
   Select,
   SelectContent,
@@ -26,9 +35,15 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { Textarea } from "@/components/ui/textarea";
+import { useToast } from "@/hooks/use-toast";
 import {
+  applyShopifyOwnershipRepair,
   fetchShopifyOwnershipReview,
+  SHOPIFY_OWNERSHIP_REPAIR_MAX_GROUPS,
+  ShopifyOwnershipRepairApiError,
   shopifyOwnershipReviewFilterSchema,
+  type ShopifyOwnershipRepairRequest,
   type ShopifyOwnershipReviewFilter,
 } from "@/lib/shopify-ownership-review";
 
@@ -52,12 +67,28 @@ const decisionReasonLabels = {
 export function ShopifyOwnershipReview({
   channelId,
   onOpenProduct,
+  canRepair = false,
+  onRepairApplied,
 }: {
   channelId: number;
   onOpenProduct: (productId: number) => void;
+  canRepair?: boolean;
+  onRepairApplied?: () => void;
 }) {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
   const [filter, setFilter] = useState<ShopifyOwnershipReviewFilter>("all");
   const [page, setPage] = useState(1);
+  const [showRepairDialog, setShowRepairDialog] = useState(false);
+  const [repairReason, setRepairReason] = useState("");
+  const [repairDraft, setRepairDraft] = useState<{
+    expectedShopDomain: string;
+    recommendations: ShopifyOwnershipRepairRequest["recommendations"];
+    detachedProductCount: number;
+    totalAvailableRecommendationCount: number;
+    idempotencyKey: string;
+  } | null>(null);
+  const pendingRequest = useRef<ShopifyOwnershipRepairRequest | null>(null);
   const reviewQuery = useQuery({
     queryKey: [
       "/api/channels",
@@ -79,6 +110,100 @@ export function ShopifyOwnershipReview({
   });
   const review = reviewQuery.data;
   const totalPages = review?.pagination.totalPages ?? 0;
+  const prepareRepairMutation = useMutation({
+    mutationFn: () => fetchShopifyOwnershipReview({
+      channelId,
+      filter: "canonical_owner_recommended",
+      page: 1,
+      pageSize: SHOPIFY_OWNERSHIP_REPAIR_MAX_GROUPS,
+    }),
+    onSuccess: (latestReview) => {
+      if (latestReview.items.length === 0) {
+        toast({
+          title: "No clear recommendations remain",
+          description: "The ownership review is already current.",
+        });
+        void reviewQuery.refetch();
+        return;
+      }
+      pendingRequest.current = null;
+      setRepairReason("");
+      setRepairDraft({
+        expectedShopDomain: latestReview.channel.shopDomain,
+        recommendations: latestReview.items.map((group) => ({
+          shopifyProductId: group.shopifyProductId,
+          expectedPreviewHash: group.previewHash,
+        })),
+        detachedProductCount: latestReview.items.reduce(
+          (count, group) => count + group.nonCanonicalProductIds.length,
+          0,
+        ),
+        totalAvailableRecommendationCount:
+          latestReview.pagination.totalItems,
+        idempotencyKey: crypto.randomUUID(),
+      });
+      setShowRepairDialog(true);
+    },
+  });
+  const applyRepairMutation = useMutation({
+    mutationFn: async () => {
+      if (!repairDraft) throw new Error("Repair review is not loaded");
+      const request = pendingRequest.current ?? {
+        expectedShopDomain: repairDraft.expectedShopDomain,
+        recommendations: repairDraft.recommendations,
+        idempotencyKey: repairDraft.idempotencyKey,
+        reason: repairReason,
+      };
+      pendingRequest.current = request;
+      return applyShopifyOwnershipRepair({ channelId, request });
+    },
+    onSuccess: (result) => {
+      pendingRequest.current = null;
+      setRepairDraft(null);
+      setRepairReason("");
+      setShowRepairDialog(false);
+      setPage(1);
+      void queryClient.invalidateQueries({
+        queryKey: [
+          "/api/channels",
+          channelId,
+          "shopify-mapping-reconciliation",
+        ],
+      });
+      onRepairApplied?.();
+      toast({
+        title: "Duplicate ownership resolved",
+        description:
+          `${result.resolvedGroupCount} Shopify products kept one canonical owner; `
+          + `${result.detachedProductIds.length} inactive owners were detached.`,
+      });
+    },
+  });
+
+  const openRepairReview = () => {
+    if (repairDraft) {
+      setShowRepairDialog(true);
+      return;
+    }
+    prepareRepairMutation.mutate();
+  };
+  const canRefreshRejectedRepair = applyRepairMutation.error
+    instanceof ShopifyOwnershipRepairApiError
+    && [
+      "SHOPIFY_OWNERSHIP_REPAIR_PREVIEW_STALE",
+      "SHOPIFY_OWNERSHIP_REPAIR_REVIEW_REQUIRED",
+      "SHOPIFY_OWNERSHIP_REPAIR_ACTIVE_VARIANT",
+      "SHOPIFY_OWNERSHIP_REPAIR_SCOPE_OVERLAP",
+      "SHOPIFY_MAPPING_STORE_CHANGED",
+    ].includes(applyRepairMutation.error.code ?? "");
+  const refreshRejectedRepair = () => {
+    pendingRequest.current = null;
+    setRepairDraft(null);
+    setRepairReason("");
+    setShowRepairDialog(false);
+    applyRepairMutation.reset();
+    prepareRepairMutation.mutate();
+  };
 
   return (
     <div className="space-y-4">
@@ -86,10 +211,26 @@ export function ShopifyOwnershipReview({
         <div className="flex min-w-0 flex-1 items-start gap-2 text-sm text-blue-900">
           <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
           <span>
-            Read-only evidence. No product or Shopify mapping is changed here.
+            Review evidence is read-only. Mappings change only after an
+            authorized explicit apply.
           </span>
         </div>
         <div className="flex items-center gap-2">
+          {canRepair && (review?.summary.canonicalOwnerRecommendationCount ?? 0) > 0 && (
+            <Button
+              size="sm"
+              disabled={
+                prepareRepairMutation.isPending
+                || applyRepairMutation.isPending
+              }
+              onClick={openRepairReview}
+            >
+              {prepareRepairMutation.isPending && (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              )}
+              {repairDraft ? "Resume reviewed repair" : "Resolve clear recommendations"}
+            </Button>
+          )}
           <Select
             value={filter}
             onValueChange={(value) => {
@@ -123,6 +264,12 @@ export function ShopifyOwnershipReview({
           </Button>
         </div>
       </div>
+
+      {prepareRepairMutation.error && (
+        <div role="alert" className="border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+          {prepareRepairMutation.error.message}
+        </div>
+      )}
 
       {reviewQuery.isLoading ? (
         <div className="flex min-h-32 items-center justify-center gap-2 text-sm text-muted-foreground">
@@ -291,6 +438,104 @@ export function ShopifyOwnershipReview({
           )}
         </>
       ) : null}
+
+      <Dialog
+        open={showRepairDialog}
+        onOpenChange={(open) => {
+          if (!applyRepairMutation.isPending) setShowRepairDialog(open);
+        }}
+      >
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Apply reviewed Shopify ownership repair?</DialogTitle>
+            <DialogDescription>
+              This keeps the one active, evidence-matched Echelon product as
+              owner and detaches only inactive duplicate owners. Products,
+              variants, and history are retained. Changed or ambiguous evidence
+              is rejected by the server.
+            </DialogDescription>
+          </DialogHeader>
+          {repairDraft && (
+            <div className="space-y-4">
+              <div className="border bg-muted/30 p-3 text-sm">
+                <div>
+                  <strong>{repairDraft.recommendations.length}</strong>
+                  {" "}Shopify ownership conflicts in this batch
+                </div>
+                <div>
+                  <strong>{repairDraft.detachedProductCount}</strong>
+                  {" "}inactive local owners will be detached
+                </div>
+                {repairDraft.totalAvailableRecommendationCount
+                  > repairDraft.recommendations.length && (
+                  <div className="mt-2 text-amber-700">
+                    {repairDraft.totalAvailableRecommendationCount
+                      - repairDraft.recommendations.length}
+                    {" "}additional clear recommendations require another batch.
+                  </div>
+                )}
+              </div>
+              {pendingRequest.current && (
+                <div className="border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">
+                  The prior result was uncertain. Retry sends the exact same
+                  command and idempotency key; its scope and reason are locked.
+                </div>
+              )}
+              <div className="space-y-2">
+                <Label htmlFor="shopify-ownership-repair-reason">
+                  Audit reason
+                </Label>
+                <Textarea
+                  id="shopify-ownership-repair-reason"
+                  value={pendingRequest.current?.reason ?? repairReason}
+                  onChange={(event) => setRepairReason(event.target.value)}
+                  disabled={Boolean(pendingRequest.current)}
+                  maxLength={500}
+                  rows={3}
+                  placeholder="Why are these reviewed duplicate owners being detached?"
+                />
+              </div>
+              {applyRepairMutation.error && (
+                <div role="alert" className="border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                  {applyRepairMutation.error.message}
+                  {canRefreshRejectedRepair && (
+                    <Button
+                      variant="link"
+                      size="sm"
+                      className="ml-2 h-auto p-0 text-red-700 underline"
+                      onClick={refreshRejectedRepair}
+                    >
+                      Refresh evidence
+                    </Button>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+          <DialogFooter>
+            <Button
+              variant="outline"
+              disabled={applyRepairMutation.isPending}
+              onClick={() => setShowRepairDialog(false)}
+            >
+              Close
+            </Button>
+            <Button
+              disabled={
+                applyRepairMutation.isPending
+                || !repairDraft
+                || (!pendingRequest.current && !repairReason.trim())
+              }
+              onClick={() => applyRepairMutation.mutate()}
+            >
+              {applyRepairMutation.isPending && (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              )}
+              {pendingRequest.current ? "Retry same repair" : "Apply reviewed repair"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

@@ -150,4 +150,49 @@ describeWithDisposableDb("catalog export PostgreSQL repository", () => {
       },
     ]);
   });
+
+  it("does not export a relinquished remote identity from a retained inactive feed", async () => {
+    const [product] = await db.insert(products).values({
+      sku: "ARCHIVED-FAMILY",
+      name: "Archived duplicate",
+      inventoryType: "inventory",
+      status: "archived",
+      isActive: false,
+    }).returning();
+    const [variant] = await db.insert(productVariants).values({
+      productId: product.id,
+      sku: "ARCHIVED-SKU",
+      name: "Archived duplicate pack",
+      isActive: false,
+    }).returning();
+    const [channel] = await db.insert(channels).values({
+      name: "Card Shellz Shopify",
+      type: "internal",
+      provider: "shopify",
+      status: "active",
+    }).returning();
+    await db.insert(channelConnections).values({
+      channelId: channel.id,
+      shopDomain: "cardshellz.myshopify.com",
+    });
+    await db.insert(channelFeeds).values({
+      channelId: channel.id,
+      productVariantId: variant.id,
+      channelType: "shopify",
+      channelVariantId: null,
+      channelProductId: null,
+      channelSku: "ARCHIVED-SKU",
+      isActive: 0,
+    });
+
+    const rows = await new PostgresCatalogExportRepository(db)
+      .listVariantSnapshots({ afterVariantId: null, limit: 10 });
+
+    expect(rows[0].externalIdentifiers).toEqual([{
+      provider: "shopify",
+      scope: "cardshellz.myshopify.com",
+      identifierType: "sku",
+      value: "ARCHIVED-SKU",
+    }]);
+  });
 });

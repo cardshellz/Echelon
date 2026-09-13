@@ -22,6 +22,8 @@ that ambiguity. Canonical publication targets retain explicit connection/locatio
 3. Existing-data repair: bounded read-only preview, explicit apply, compare-and-set
    protection, immutable audit, replay protection, and safe recovery. No automatic
    product creation, inventory adjustment, or publication activation during repair.
+   The Shopify duplicate-product implementation and operator sequence are recorded
+   in `docs/SHOPIFY-OWNERSHIP-REPAIR-RUNBOOK-2026-09-12.md`.
 4. Validate the full stack, including two stores sharing an internal variant,
    multiple warehouses, missing/duplicate identities, pagination, partial failures,
    retries, stale previews, and rollback. Split commits into ordered PR branches.

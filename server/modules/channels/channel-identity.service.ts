@@ -37,9 +37,22 @@ export class ChannelIdentityService {
       productVariantId: channelFeeds.productVariantId, externalVariantId: channelFeeds.channelVariantId,
       externalProductId: channelFeeds.channelProductId, externalInventoryItemId: channelFeeds.channelInventoryItemId,
       externalSku: channelFeeds.channelSku,
-    }).from(channelFeeds).where(and(eq(channelFeeds.channelId, channelId), eq(channelFeeds.isActive, 1), isNull(channelFeeds.quarantinedAt)));
-    indexInventoryIdentities(rows);
-    return rows;
+    }).from(channelFeeds).where(and(
+      eq(channelFeeds.channelId, channelId),
+      eq(channelFeeds.isActive, 1),
+      isNull(channelFeeds.quarantinedAt),
+    ));
+    const identities: ChannelItemIdentity[] = rows.map((row) => {
+      if (!row.externalVariantId) {
+        throw new ChannelIdentityError(
+          "CHANNEL_IDENTITY_CORRUPT",
+          "An active channel feed is missing its external variant identity",
+        );
+      }
+      return { ...row, externalVariantId: row.externalVariantId };
+    });
+    indexInventoryIdentities(identities);
+    return identities;
   }
 
   async listingIdentities(channelId: number, variantIds: readonly number[]) {

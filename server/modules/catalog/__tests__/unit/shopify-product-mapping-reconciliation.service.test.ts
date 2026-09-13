@@ -5,6 +5,11 @@ import {
   type ShopifyProductMappingSource,
 } from "../../shopify-product-mapping.domain";
 import {
+  buildShopifyOwnershipReview,
+  shopifyOwnershipRepairRequestHash,
+  type ShopifyOwnershipRepairResult,
+} from "../../shopify-product-mapping-reconciliation.domain";
+import {
   createShopifyProductMappingReconciliationService,
 } from "../../shopify-product-mapping-reconciliation.service";
 import {
@@ -92,6 +97,7 @@ function loadedProduct(): LoadedLocalProduct {
       evidenceProductIds: summary.evidenceProductIds,
       activeVariantCount: summary.activeVariantCount,
       activeVariantIssueIds: summary.activeVariantIssueIds,
+      hasCanonicalChannelProductEvidence: true,
     },
   };
 }
@@ -102,6 +108,8 @@ function dependencies() {
     loadChannelContext: vi.fn().mockResolvedValue(context),
     listMappedProducts: vi.fn().mockResolvedValue([loaded]),
     loadMappedProduct: vi.fn().mockResolvedValue(loaded),
+    findOwnershipRepairCommand: vi.fn().mockResolvedValue(null),
+    applyOwnershipRecommendations: vi.fn(),
     retireStaleMapping: vi.fn().mockResolvedValue({
       productId: 10,
       retiredShopifyProductId: "9001",
@@ -130,6 +138,37 @@ function dependencies() {
     repository,
     verifier,
     clock: () => fixedNow,
+  });
+  const repairResult: ShopifyOwnershipRepairResult = {
+    contractVersion: 1,
+    channelId: 36,
+    shopDomain: "cardshellz.myshopify.com",
+    previewHash: "b".repeat(64),
+    resolvedGroupCount: 1,
+    recommendedProductIds: [10],
+    detachedProductIds: [11],
+    clearedCatalogProductCount: 1,
+    clearedCatalogVariantCount: 1,
+    detachedFeedCount: 1,
+    resetListingCount: 1,
+    completedAt: fixedNow.toISOString(),
+  };
+  vi.mocked(repository.applyOwnershipRecommendations).mockResolvedValue({
+    command: {
+      id: 71,
+      channelId: 36,
+      idempotencyKey: "123e4567-e89b-42d3-a456-426614174000",
+      requestHash: "a".repeat(64),
+      previewHash: repairResult.previewHash,
+      operator: "user:42",
+      reason: "Detach reviewed inactive duplicates",
+      recommendations: [{
+        shopifyProductId: "9001",
+        expectedPreviewHash: "c".repeat(64),
+      }],
+      result: repairResult,
+    },
+    idempotentReplay: false,
   });
   return { loaded, repository, verifier, service };
 }
@@ -227,6 +266,231 @@ describe("Shopify product mapping reconciliation service", () => {
       recommendedProductId: 10,
       nonCanonicalProductIds: [11],
     });
+  });
+
+  it("applies only a fresh, evidence-bound ownership recommendation", async () => {
+    const { loaded, repository, verifier, service } = dependencies();
+    const duplicate: LoadedLocalProduct = {
+      summary: {
+        ...loaded.summary,
+        productId: 11,
+        productName: "Archived duplicate",
+        fingerprint: "fingerprint-11",
+        activeVariantCount: 0,
+      },
+      local: {
+        ...loaded.local,
+        productId: 11,
+        productName: "Archived duplicate",
+        mappingFingerprint: "fingerprint-11",
+        activeVariantCount: 0,
+      },
+    };
+    vi.mocked(repository.listMappedProducts).mockResolvedValue([
+      loaded,
+      duplicate,
+    ]);
+    const ownershipReview = buildShopifyOwnershipReview({
+      generatedAt: fixedNow.toISOString(),
+      channel: context.channel,
+      localProducts: [loaded.local, duplicate.local],
+      remoteProducts: new Map([[
+        "9001",
+        {
+          productId: "9001",
+          exists: true,
+          title: "100PT Toploader",
+          status: "ACTIVE",
+          shippingGroupCode: "protection",
+        },
+      ]]),
+      filter: "canonical_owner_recommended",
+      page: 1,
+      pageSize: 100,
+    });
+    const recommendation = {
+      shopifyProductId: "9001",
+      expectedPreviewHash: ownershipReview.items[0].previewHash,
+    };
+    const request = {
+      expectedShopDomain: "cardshellz.myshopify.com",
+      recommendations: [recommendation],
+      idempotencyKey: "123e4567-e89b-42d3-a456-426614174000",
+      reason: "Detach reviewed inactive duplicates",
+    };
+    const requestHash = shopifyOwnershipRepairRequestHash({
+      channelId: 36,
+      shopDomain: request.expectedShopDomain,
+      recommendations: request.recommendations,
+      operator: "user:42",
+      reason: request.reason,
+    });
+    vi.mocked(repository.applyOwnershipRecommendations).mockImplementation(
+      async (input) => ({
+        command: {
+          id: 71,
+          channelId: 36,
+          idempotencyKey: request.idempotencyKey,
+          requestHash: input.requestHash,
+          previewHash: "b".repeat(64),
+          operator: "user:42",
+          reason: request.reason,
+          recommendations: request.recommendations,
+          result: {
+            contractVersion: 1,
+            channelId: 36,
+            shopDomain: request.expectedShopDomain,
+            previewHash: "b".repeat(64),
+            resolvedGroupCount: 1,
+            recommendedProductIds: [10],
+            detachedProductIds: [11],
+            clearedCatalogProductCount: 1,
+            clearedCatalogVariantCount: 2,
+            detachedFeedCount: 2,
+            resetListingCount: 2,
+            completedAt: fixedNow.toISOString(),
+          },
+        },
+        idempotentReplay: false,
+      }),
+    );
+
+    const result = await service.applyOwnershipRepair({
+      channelId: 36,
+      request,
+      actor: "user:42",
+    });
+
+    expect(repository.findOwnershipRepairCommand).toHaveBeenCalledWith(
+      request.idempotencyKey,
+    );
+    expect(verifier.lookupProducts).toHaveBeenCalledWith(
+      context.credentials,
+      ["9001"],
+    );
+    expect(repository.applyOwnershipRecommendations).toHaveBeenCalledWith({
+      channel: context.channel,
+      recommendations: [recommendation],
+      remoteProducts: expect.any(Map),
+      idempotencyKey: request.idempotencyKey,
+      requestHash,
+      operator: "user:42",
+      reason: request.reason,
+      now: fixedNow,
+    });
+    expect(result).toMatchObject({
+      contractVersion: 1,
+      commandId: 71,
+      resolvedGroupCount: 1,
+      detachedProductIds: [11],
+      idempotentReplay: false,
+    });
+  });
+
+  it("replays a completed ownership command without reading Shopify", async () => {
+    const { repository, verifier, service } = dependencies();
+    const request = {
+      expectedShopDomain: "cardshellz.myshopify.com",
+      recommendations: [{
+        shopifyProductId: "9001",
+        expectedPreviewHash: "c".repeat(64),
+      }],
+      idempotencyKey: "123e4567-e89b-42d3-a456-426614174001",
+      reason: "Detach reviewed inactive duplicates",
+    };
+    const requestHash = shopifyOwnershipRepairRequestHash({
+      channelId: 36,
+      shopDomain: request.expectedShopDomain,
+      recommendations: request.recommendations,
+      operator: "user:42",
+      reason: request.reason,
+    });
+    vi.mocked(repository.findOwnershipRepairCommand).mockResolvedValue({
+      id: 72,
+      channelId: 36,
+      idempotencyKey: request.idempotencyKey,
+      requestHash,
+      previewHash: "d".repeat(64),
+      operator: "user:42",
+      reason: request.reason,
+      recommendations: request.recommendations,
+      result: {
+        contractVersion: 1,
+        channelId: 36,
+        shopDomain: request.expectedShopDomain,
+        previewHash: "d".repeat(64),
+        resolvedGroupCount: 1,
+        recommendedProductIds: [10],
+        detachedProductIds: [11],
+        clearedCatalogProductCount: 1,
+        clearedCatalogVariantCount: 2,
+        detachedFeedCount: 2,
+        resetListingCount: 2,
+        completedAt: fixedNow.toISOString(),
+      },
+    });
+
+    await expect(service.applyOwnershipRepair({
+      channelId: 36,
+      request,
+      actor: "user:42",
+    })).resolves.toMatchObject({
+      commandId: 72,
+      idempotentReplay: true,
+    });
+    expect(repository.loadChannelContext).not.toHaveBeenCalled();
+    expect(verifier.lookupProducts).not.toHaveBeenCalled();
+    expect(repository.applyOwnershipRecommendations).not.toHaveBeenCalled();
+  });
+
+  it("rejects ownership repair when an idempotency key changes scope", async () => {
+    const { repository, verifier, service } = dependencies();
+    vi.mocked(repository.findOwnershipRepairCommand).mockResolvedValue({
+      id: 73,
+      channelId: 36,
+      idempotencyKey: "123e4567-e89b-42d3-a456-426614174002",
+      requestHash: "f".repeat(64),
+      previewHash: "d".repeat(64),
+      operator: "user:42",
+      reason: "Original reason",
+      recommendations: [{
+        shopifyProductId: "9001",
+        expectedPreviewHash: "c".repeat(64),
+      }],
+      result: {
+        contractVersion: 1,
+        channelId: 36,
+        shopDomain: "cardshellz.myshopify.com",
+        previewHash: "d".repeat(64),
+        resolvedGroupCount: 1,
+        recommendedProductIds: [10],
+        detachedProductIds: [11],
+        clearedCatalogProductCount: 1,
+        clearedCatalogVariantCount: 2,
+        detachedFeedCount: 2,
+        resetListingCount: 2,
+        completedAt: fixedNow.toISOString(),
+      },
+    });
+
+    await expect(service.applyOwnershipRepair({
+      channelId: 36,
+      request: {
+        expectedShopDomain: "cardshellz.myshopify.com",
+        recommendations: [{
+          shopifyProductId: "9001",
+          expectedPreviewHash: "c".repeat(64),
+        }],
+        idempotencyKey: "123e4567-e89b-42d3-a456-426614174002",
+        reason: "Changed reason",
+      },
+      actor: "user:42",
+    })).rejects.toMatchObject({
+      code: "SHOPIFY_OWNERSHIP_REPAIR_IDEMPOTENCY_KEY_REUSED",
+      statusCode: 409,
+    });
+    expect(verifier.lookupProducts).not.toHaveBeenCalled();
+    expect(repository.applyOwnershipRecommendations).not.toHaveBeenCalled();
   });
 
   it("rejects a stale optimistic-lock fingerprint before calling Shopify", async () => {

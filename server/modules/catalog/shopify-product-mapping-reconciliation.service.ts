@@ -5,11 +5,15 @@ import {
   evaluateDeadMappingRetirement,
   normalizeShopifyAdminDomain,
   normalizeShopifyProductReference,
+  shopifyOwnershipRepairApplySchema,
+  shopifyOwnershipRepairRequestHash,
   type ShopifyMappingReconciliationReport,
+  type ShopifyOwnershipRepairExecutionResult,
   type ShopifyOwnershipReviewFilter,
   type ShopifyOwnershipReviewPage,
 } from "./shopify-product-mapping-reconciliation.domain";
 import {
+  assertOwnershipRepairCommandMatches,
   collectAllMappedShopifyVariantIds,
   createShopifyProductMappingReconciliationRepository,
   ShopifyMappingReconciliationError,
@@ -216,7 +220,121 @@ export function createShopifyProductMappingReconciliationService(input: {
     });
   }
 
-  return { scan, reviewOwnership, retireStaleMapping };
+  async function applyOwnershipRepair(inputToApply: {
+    channelId: number;
+    request: unknown;
+    actor: string;
+  }): Promise<ShopifyOwnershipRepairExecutionResult> {
+    if (!Number.isInteger(inputToApply.channelId) || inputToApply.channelId <= 0) {
+      throw new ShopifyMappingReconciliationError(
+        "INVALID_SHOPIFY_CHANNEL_ID",
+        "A valid Shopify channel ID is required",
+        400,
+      );
+    }
+    const parsedRequest = shopifyOwnershipRepairApplySchema.safeParse(
+      inputToApply.request,
+    );
+    if (!parsedRequest.success) {
+      throw new ShopifyMappingReconciliationError(
+        "INVALID_SHOPIFY_OWNERSHIP_REPAIR_REQUEST",
+        "Shopify ownership repair request is invalid",
+        400,
+        { issues: parsedRequest.error.issues },
+      );
+    }
+    const actor = inputToApply.actor.trim();
+    if (
+      !actor
+      || actor.length > 120
+      || /[\u0000-\u001f\u007f]/.test(actor)
+    ) {
+      throw new ShopifyMappingReconciliationError(
+        "AUTHENTICATED_ACTOR_REQUIRED",
+        "A valid authenticated user identity is required",
+        401,
+      );
+    }
+    const request = parsedRequest.data;
+    const expectedShopDomain = normalizeShopifyAdminDomain(
+      request.expectedShopDomain,
+    );
+    if (!expectedShopDomain) {
+      throw new ShopifyMappingReconciliationError(
+        "SHOPIFY_SHOP_DOMAIN_INVALID",
+        "A valid myshopify.com domain from the ownership review is required",
+        400,
+      );
+    }
+    const requestHash = shopifyOwnershipRepairRequestHash({
+      channelId: inputToApply.channelId,
+      shopDomain: expectedShopDomain,
+      recommendations: request.recommendations,
+      operator: actor,
+      reason: request.reason,
+    });
+
+    const prior = await repository.findOwnershipRepairCommand(
+      request.idempotencyKey,
+    );
+    if (prior) {
+      assertOwnershipRepairCommandMatches(prior, {
+        channelId: inputToApply.channelId,
+        requestHash,
+      });
+      return Object.freeze({
+        ...prior.result,
+        commandId: prior.id,
+        idempotentReplay: true,
+      });
+    }
+
+    const context = await repository.loadChannelContext(inputToApply.channelId);
+    if (context.channel.shopDomain !== expectedShopDomain) {
+      throw new ShopifyMappingReconciliationError(
+        "SHOPIFY_MAPPING_STORE_CHANGED",
+        "The Shopify store connection changed after the ownership review. Refresh and try again.",
+        409,
+        {
+          expectedShopDomain,
+          currentShopDomain: context.channel.shopDomain,
+        },
+      );
+    }
+    const targetShopifyProductIds = request.recommendations
+      .map((recommendation) => recommendation.shopifyProductId)
+      .sort((left, right) => left.localeCompare(
+        right,
+        "en",
+        { numeric: true },
+      ));
+    const remoteProducts = await verifier.lookupProducts(
+      context.credentials,
+      targetShopifyProductIds,
+    );
+    const applied = await repository.applyOwnershipRecommendations({
+      channel: context.channel,
+      recommendations: request.recommendations,
+      remoteProducts,
+      idempotencyKey: request.idempotencyKey,
+      requestHash,
+      operator: actor,
+      reason: request.reason,
+      now: clock(),
+    });
+    return Object.freeze({
+      ...applied.command.result,
+      commandId: applied.command.id,
+      idempotentReplay: applied.idempotentReplay,
+    });
+  }
+
+  return {
+    scan,
+    reviewOwnership,
+    retireStaleMapping,
+    applyOwnershipRepair,
+  };
 }
 
 export type ShopifyProductMappingReconciliationService = ReturnType<

@@ -18,6 +18,7 @@ const { requirePermissionMock, serviceMocks, createServiceMock } = vi.hoisted(
     const serviceMocks = {
       scan: vi.fn(),
       reviewOwnership: vi.fn(),
+      applyOwnershipRepair: vi.fn(),
       retireStaleMapping: vi.fn(),
     };
     return {
@@ -56,6 +57,7 @@ describe("Shopify product mapping reconciliation routes", () => {
     createServiceMock.mockClear();
     serviceMocks.scan.mockReset();
     serviceMocks.reviewOwnership.mockReset();
+    serviceMocks.applyOwnershipRepair.mockReset();
     serviceMocks.retireStaleMapping.mockReset();
     server = await startServer(buildApp());
   });
@@ -141,7 +143,7 @@ describe("Shopify product mapping reconciliation routes", () => {
 
   it("rejects oversized ownership-review pages before scanning Shopify", async () => {
     const result = await jsonRequest(
-      `${server.url}/api/channels/36/shopify-mapping-reconciliation/ownership-review?pageSize=51`,
+      `${server.url}/api/channels/36/shopify-mapping-reconciliation/ownership-review?pageSize=101`,
     );
 
     expect(result.status).toBe(400);
@@ -149,6 +151,104 @@ describe("Shopify product mapping reconciliation routes", () => {
       code: "INVALID_SHOPIFY_MAPPING_RECONCILIATION_REQUEST",
     });
     expect(serviceMocks.reviewOwnership).not.toHaveBeenCalled();
+  });
+
+  it("permission-gates and forwards an audited ownership repair", async () => {
+    serviceMocks.applyOwnershipRepair.mockResolvedValue({
+      contractVersion: 1,
+      commandId: 71,
+      channelId: 36,
+      shopDomain: "cardshellz.myshopify.com",
+      previewHash: "b".repeat(64),
+      resolvedGroupCount: 1,
+      recommendedProductIds: [10],
+      detachedProductIds: [11],
+      clearedCatalogProductCount: 1,
+      clearedCatalogVariantCount: 2,
+      detachedFeedCount: 2,
+      resetListingCount: 2,
+      completedAt: "2026-07-24T12:00:00.000Z",
+      idempotentReplay: false,
+    });
+    const body = {
+      expectedShopDomain: "cardshellz.myshopify.com",
+      recommendations: [{
+        shopifyProductId: "9001",
+        expectedPreviewHash: "a".repeat(64),
+      }],
+      idempotencyKey: "123e4567-e89b-42d3-a456-426614174000",
+      reason: "Detach reviewed inactive duplicates",
+    };
+
+    const result = await jsonRequest(
+      `${server.url}/api/channels/36/shopify-mapping-reconciliation/ownership-review/apply`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    );
+
+    expect(result.status).toBe(200);
+    expect(result.body).toMatchObject({
+      commandId: 71,
+      resolvedGroupCount: 1,
+      detachedProductIds: [11],
+    });
+    expect(requirePermissionMock).toHaveBeenCalledWith("inventory", "edit");
+    expect(serviceMocks.applyOwnershipRepair).toHaveBeenCalledWith({
+      channelId: 36,
+      request: body,
+      actor: "user:operator-1",
+    });
+  });
+
+  it("rejects duplicate ownership-repair targets before calling the service", async () => {
+    const recommendation = {
+      shopifyProductId: "9001",
+      expectedPreviewHash: "a".repeat(64),
+    };
+    const result = await jsonRequest(
+      `${server.url}/api/channels/36/shopify-mapping-reconciliation/ownership-review/apply`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          expectedShopDomain: "cardshellz.myshopify.com",
+          recommendations: [recommendation, recommendation],
+          idempotencyKey: "123e4567-e89b-42d3-a456-426614174000",
+          reason: "Detach reviewed inactive duplicates",
+        }),
+      },
+    );
+
+    expect(result.status).toBe(400);
+    expect(serviceMocks.applyOwnershipRepair).not.toHaveBeenCalled();
+  });
+
+  it("requires a traceable authenticated actor for ownership repair", async () => {
+    const result = await jsonRequest(
+      `${server.url}/api/channels/36/shopify-mapping-reconciliation/ownership-review/apply`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Test-No-Actor": "true",
+        },
+        body: JSON.stringify({
+          expectedShopDomain: "cardshellz.myshopify.com",
+          recommendations: [{
+            shopifyProductId: "9001",
+            expectedPreviewHash: "a".repeat(64),
+          }],
+          idempotencyKey: "123e4567-e89b-42d3-a456-426614174000",
+          reason: "Detach reviewed inactive duplicates",
+        }),
+      },
+    );
+
+    expect(result.status).toBe(401);
+    expect(serviceMocks.applyOwnershipRepair).not.toHaveBeenCalled();
   });
 
   it("validates and forwards an audited stale-mapping retirement", async () => {

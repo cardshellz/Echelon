@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { insertChannelFeedSchema } from "@shared/schema";
 import { indexInventoryIdentities } from "../../channel-identity.domain";
 import { ShopifyIdentityReader, type ShopifyIdentityConnection } from "../../adapters/shopify-identity.reader";
 
@@ -11,6 +12,23 @@ const item = (variantId: number, itemId: string) => ({ productVariantId: variant
 const response = (body: unknown, headers?: HeadersInit) => new Response(JSON.stringify(body), { headers });
 
 describe("channel-scoped identity boundary", () => {
+  it("permits a null identity only for an inactive retained feed", () => {
+    const base = {
+      channelId: 2,
+      productVariantId: 1,
+      channelType: "shopify",
+      channelVariantId: null,
+    };
+    expect(insertChannelFeedSchema.safeParse({
+      ...base,
+      isActive: 0,
+    }).success).toBe(true);
+    expect(insertChannelFeedSchema.safeParse({
+      ...base,
+      isActive: 1,
+    }).success).toBe(false);
+  });
+
   it("uses internal IDs, not shared SKU text, for reverse mapping", () => {
     expect([...indexInventoryIdentities([item(1, "101"), item(2, "102")])]).toEqual([["101", 1], ["102", 2]]);
   });

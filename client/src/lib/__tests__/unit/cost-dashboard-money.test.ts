@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import Decimal from "decimal.js";
 import {
   formatDashboardCents,
+  formatDashboardCentsCompact,
   formatDashboardMills,
   formatDashboardLotCost,
   formatDashboardLotValue,
@@ -9,6 +10,21 @@ import {
 } from "../../cost-dashboard-money";
 
 describe("cost dashboard display units", () => {
+  it.each([
+    [0, "$0.00"], [1, "$0.01"], [999999, "$9,999.99"],
+    [1000000, "$10.0k"], [1234500, "$12.3k"],
+    [1234999, "$12.3k"], [1235000, "$12.4k"],
+    [9999999, "$100.0k"], [10000000, "$100k"],
+    [10049999, "$100k"], [10050000, "$101k"], [100000000, "$1000k"],
+    [-999999, "-$9,999.99"], [-1000000, "-$10.0k"], [-10000000, "-$100k"],
+    [Number.MAX_SAFE_INTEGER, "$90071992547k"],
+    [null, "Not recorded"], [undefined, "Not recorded"],
+    [NaN, "Unavailable"], [Infinity, "Unavailable"],
+    [Number.MAX_SAFE_INTEGER + 1, "Unavailable"],
+  ])("formats compact %s cents as %s", (value, expected) => {
+    expect(formatDashboardCentsCompact(value)).toBe(expected);
+  });
+
   it.each([
     [450000, "$4,500.00"], [23000, "$230.00"], [230, "$2.30"],
     [0, "$0.00"], [-0, "$0.00"], [1, "$0.01"], [-10, "-$0.10"],
@@ -41,6 +57,7 @@ describe("cost dashboard display units", () => {
     const previous = { precision: Decimal.precision, rounding: Decimal.rounding };
     try {
       Decimal.set({ precision: 3, rounding: Decimal.ROUND_DOWN });
+      expect(formatDashboardCentsCompact(1235000)).toBe("$12.4k");
       expect(formatDashboardCents("9223372036854775807")).toBe("$92,233,720,368,547,758.07");
     } finally {
       Decimal.set(previous);
