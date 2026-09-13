@@ -528,7 +528,8 @@ function exposureView(): InventoryChannelExposureAdminView {
     sourceBindingHeads: [],
     variantMappingHeads: [],
     legacyMappingCandidates: [],
-    runtimeAuthority: "legacy_channel_allocation_rules",
+    runtimeAuthority: "legacy",
+    runtimeAuthorityRevision: "1",
     providerWriteEnabled: false,
   };
 }

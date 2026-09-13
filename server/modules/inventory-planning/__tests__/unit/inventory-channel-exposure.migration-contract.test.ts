@@ -89,7 +89,9 @@ describe("inventory channel exposure inactive foundation", () => {
     expect(routes).not.toMatch(/state:\s*["']live["']/i);
     expect(registry).toContain("registerInventoryChannelExposureRoutes(app)");
     expect(page).toContain("Draft / preview only");
-    expect(page).toContain("Legacy runtime retained");
+    // The live allocator is read from the runtime-authority singleton, never asserted.
+    expect(page).toContain("<InventoryRuntimeAuthorityBadge />");
+    expect(page).not.toContain("Legacy runtime retained");
     expect(page).toContain("Include in readiness preview");
     expect(page).not.toMatch(/publish now/i);
   });

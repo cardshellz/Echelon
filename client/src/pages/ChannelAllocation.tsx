@@ -56,6 +56,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
+import { InventoryRuntimeAuthorityBadge } from "@/components/inventory/InventoryRuntimeAuthorityBadge";
 
 // ============================================
 // Types
@@ -1207,11 +1208,15 @@ function AllocationRulesSection() {
 export default function ChannelAllocation() {
   return (
     <div className="space-y-4 p-2 md:p-6">
-      <div>
-        <h1 className="text-2xl md:text-3xl font-bold tracking-tight">Channel Allocation</h1>
-        <p className="text-sm text-muted-foreground mt-1">
-          Configure warehouse assignments and allocation rules for the parallel inventory model.
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl md:text-3xl font-bold tracking-tight">Channel Allocation</h1>
+          <p className="text-sm text-muted-foreground mt-1">
+            Configure warehouse assignments and allocation rules for the parallel inventory model.
+            These rules publish channel quantities only while the live allocator is Channel Allocation rules.
+          </p>
+        </div>
+        <InventoryRuntimeAuthorityBadge />
       </div>
 
       <Tabs defaultValue="warehouses" className="w-full">

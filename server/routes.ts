@@ -98,6 +98,7 @@ import { registerInventoryAvailabilityShadowRoutes } from "./modules/inventory-p
 import { registerInventoryAvailabilityBackfillRoutes } from "./modules/inventory-planning/interfaces/http/inventory-availability-backfill.routes";
 import { registerInventoryAvailabilityPhase4Routes } from "./modules/inventory-planning/interfaces/http/inventory-availability-phase4.routes";
 import { registerInventoryCutoverPreflightRoutes } from "./modules/inventory-planning/interfaces/http/inventory-cutover-preflight.routes";
+import { registerInventoryRuntimeAuthorityRoutes } from "./modules/inventory-planning/interfaces/http/inventory-runtime-authority.routes";
 import { registerInventoryCutoverCommitRoutes } from "./modules/inventory-planning/interfaces/http/inventory-cutover-commit.routes";
 import { registerInventoryCutoverCompletionRoutes } from "./modules/inventory-planning/interfaces/http/inventory-cutover-completion.routes";
 import { registerInventoryCutoverOpeningRoutes } from "./modules/inventory-planning/interfaces/http/inventory-cutover-opening.routes";
@@ -154,6 +155,7 @@ export async function registerRoutes(
   registerInventoryAvailabilityBackfillRoutes(app);
   registerInventoryAvailabilityPhase4Routes(app);
   registerInventoryCutoverPreflightRoutes(app);
+  registerInventoryRuntimeAuthorityRoutes(app);
   registerInventoryCutoverCommitRoutes(app);
   registerInventoryCutoverCompletionRoutes(app);
   registerInventoryCutoverOpeningRoutes(app);

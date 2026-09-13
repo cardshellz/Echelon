@@ -35,7 +35,7 @@ describe("inventory channel exposure routes", () => {
         products: [], selectedProduct: null, channels: [], dropshipStores: [], publicationTargets: [],
         fulfillmentNodes: [], policyHeads: [], sourceBindingHeads: [],
         variantMappingHeads: [], legacyMappingCandidates: [],
-        runtimeAuthority: "legacy_channel_allocation_rules", providerWriteEnabled: false,
+        runtimeAuthority: "legacy", runtimeAuthorityRevision: "1", providerWriteEnabled: false,
       })),
       preview: vi.fn(),
       savePolicyDraft: vi.fn(async () => saveResult()),
