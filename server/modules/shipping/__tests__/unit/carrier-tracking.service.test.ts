@@ -804,6 +804,14 @@ describe("CarrierTrackingService", () => {
       startedAt: new Date(now),
       leaseOwner: "dispatch-worker",
       leaseExpiresAt: new Date("2026-07-20T12:10:00.000Z"),
+      reviewedRepair: {
+        requeueId: 901,
+        repairCohort: "confirmed_historical_inventory_gap",
+        operator: "owner@cardshellz.com",
+        reason: "Order #62401 shipped one confirmed unit before inventory history was complete",
+        idempotencyKey: "repair-command-701",
+        requeuedAt: new Date("2026-07-20T11:55:00.000Z"),
+      },
     }]);
     const confirmDispatch = vi.fn().mockResolvedValue({
       processed: true,
@@ -832,6 +840,10 @@ describe("CarrierTrackingService", () => {
       providerLabelId: "442000001",
       carrierTrackingEventId: 101,
       dispatchOccurredAt: new Date("2026-07-20T11:30:00.000Z"),
+      reviewedRepair: expect.objectContaining({
+        requeueId: 901,
+        repairCohort: "confirmed_historical_inventory_gap",
+      }),
     }));
     expect(repository.finalizeDispatchAttempt).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -841,6 +853,12 @@ describe("CarrierTrackingService", () => {
         outcome: "succeeded",
         errorCode: null,
         nextAttemptAt: null,
+        requestEvidence: expect.objectContaining({
+          reviewedRepair: expect.objectContaining({
+            requeueId: 901,
+            requeuedAt: "2026-07-20T11:55:00.000Z",
+          }),
+        }),
       }),
     );
   });

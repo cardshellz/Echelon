@@ -320,6 +320,8 @@ export async function persistWmsOrderItemPickProgress(
 export interface CanonicalWmsPickProgress {
   expectedStatus: ItemStatus;
   expectedPickedQuantity: number;
+  /** Fulfilled units are a non-reversible floor within cumulative picked progress. */
+  expectedFulfilledQuantity?: number;
   targetStatus: ItemStatus;
   targetPickedQuantity: number;
   targetShortReason?: string | null;
@@ -358,6 +360,8 @@ export async function persistCanonicalWmsPickProgress(
   assertPositiveInteger(input.orderId, "orderId");
   assertPositiveInteger(input.orderItemId, "orderItemId");
   assertNonNegativeInteger(progress.expectedPickedQuantity, "expectedPickedQuantity");
+  const expectedFulfilledQuantity = progress.expectedFulfilledQuantity ?? 0;
+  assertNonNegativeInteger(expectedFulfilledQuantity, "expectedFulfilledQuantity");
   assertNonNegativeInteger(progress.targetPickedQuantity, "targetPickedQuantity");
   const targetShortReason = typeof progress.targetShortReason === "string"
     ? progress.targetShortReason.trim()
@@ -372,6 +376,14 @@ export async function persistCanonicalWmsPickProgress(
         { orderItemId: input.orderItemId, targetStatus: progress.targetStatus },
       );
     }
+  }
+  if (expectedFulfilledQuantity > progress.expectedPickedQuantity
+    || expectedFulfilledQuantity > progress.targetPickedQuantity) {
+    throw new WmsOrderItemCommandError(
+      "INVALID_WMS_PICK_PROGRESS",
+      "Canonical WMS pick progress cannot move cumulative picked custody below fulfilled custody.",
+      { orderItemId: input.orderItemId, progress },
+    );
   }
 
   if (input.movementType === "pick") {
@@ -400,11 +412,12 @@ export async function persistCanonicalWmsPickProgress(
        SET status = $1,
            picked_quantity = $2,
            picked_at = COALESCE(picked_at, $3),
-           short_reason = CASE WHEN $8::boolean THEN $9::text ELSE short_reason END
+           short_reason = CASE WHEN $9::boolean THEN $10::text ELSE short_reason END
        WHERE id = $4
          AND order_id = $5
          AND status = $6
          AND picked_quantity = $7
+         AND COALESCE(fulfilled_quantity, 0) = $8
          AND $2 BETWEEN 1 AND quantity
          AND (($1 = 'completed' AND $2 = quantity)
            OR ($1 IN ('in_progress', 'short') AND $2 < quantity))
@@ -417,6 +430,7 @@ export async function persistCanonicalWmsPickProgress(
         input.orderId,
         progress.expectedStatus,
         progress.expectedPickedQuantity,
+        expectedFulfilledQuantity,
         progress.targetShortReason !== undefined,
         targetShortReason ?? null,
       ],
@@ -444,6 +458,7 @@ export async function persistCanonicalWmsPickProgress(
   }
 
   const expectedTargetQuantity = progress.expectedPickedQuantity - input.movementQuantity;
+  const fullyUnpickedCanonicalCustody = expectedTargetQuantity === expectedFulfilledQuantity;
   const expectedTargetStatus = expectedTargetQuantity === 0 ? "pending" : "in_progress";
   if (!["completed", "in_progress", "short"].includes(progress.expectedStatus)
     || progress.targetPickedQuantity !== expectedTargetQuantity
@@ -455,12 +470,12 @@ export async function persistCanonicalWmsPickProgress(
     );
   }
 
-  if (expectedTargetQuantity === 0) {
+  if (fullyUnpickedCanonicalCustody) {
     if (input.targetVariantId == null || !input.unpickedWarehouseLocationIds?.length
       || input.unpickedWarehouseLocationIds.length > 1000) {
       throw new WmsOrderItemCommandError(
         "INVALID_WMS_UNPICK_PROGRESS",
-        "A full canonical unpick requires its exact variant and bounded released source locations.",
+        "A full canonical-custody unpick requires its exact variant and bounded released source locations.",
         { orderItemId: input.orderItemId },
       );
     }
@@ -479,6 +494,7 @@ export async function persistCanonicalWmsPickProgress(
        AND order_id = $4
        AND status = $5
        AND picked_quantity = $6
+       AND COALESCE(fulfilled_quantity, 0) = $7
        AND $2 BETWEEN 0 AND quantity
      RETURNING id`,
     [
@@ -488,6 +504,7 @@ export async function persistCanonicalWmsPickProgress(
       input.orderId,
       progress.expectedStatus,
       progress.expectedPickedQuantity,
+      expectedFulfilledQuantity,
     ],
   );
   if (Number(updated.rowCount ?? updated.rows?.length ?? 0) !== 1) {
@@ -497,7 +514,7 @@ export async function persistCanonicalWmsPickProgress(
       { orderId: input.orderId, orderItemId: input.orderItemId, progress },
     );
   }
-  if (expectedTargetQuantity === 0) {
+  if (fullyUnpickedCanonicalCustody) {
     // A planned source bin is a pick projection, not immutable shipment evidence.
     // Clear only the custody just fully returned so a later pick can stamp its
     // actual bin. Once any shipment/physical evidence exists, never rewrite it.

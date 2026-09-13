@@ -40,6 +40,63 @@ describe("inventory cutover preflight", () => {
     expect(buildInventoryCutoverPreflight(facts).lines[0]).toMatchObject({ candidateDemandQty: "0", disposition: "no_inventory_demand" });
   });
 
+  it.each(["source", "physical"])("allows %s shipment evidence for a shippable, nontracked item", (kind) => {
+    const facts = cutoverPreflightFacts();
+    facts.variants[0]!.trackInventory = false;
+    if (kind === "source") {
+      facts.demand.sourceItems.push({
+        id: 1, shipmentId: 2, headerOrderId: 1, orderItemId: 11,
+        replacementForOrderItemId: null, correctionForShipmentItemId: null,
+        productVariantId: 101, quantity: 4, purpose: "customer_fulfillment",
+        fromLocationId: null, shipmentStatus: "queued", shipmentHeld: false,
+      });
+    } else {
+      facts.demand.physicalItems.push({
+        id: "1", physicalShipmentId: "2", orderItemId: 11,
+        replacementForOrderItemId: null, legacySourceShipmentItemId: null,
+        packageAllocationEntryId: null, productVariantId: 101, sku: "P5",
+        originalQuantity: 4, adjustmentQuantity: 0, effectiveQuantity: "4",
+        purpose: "customer_fulfillment", packageStatus: "not_confirmed",
+      });
+    }
+
+    expect(buildInventoryCutoverPreflight(facts).lines[0]).toMatchObject({
+      candidateDemandQty: "0",
+      disposition: "no_inventory_demand",
+      findingCodes: [],
+    });
+  });
+
+  it("still reviews canonical inventory ownership for a shippable, nontracked item", () => {
+    const facts = cutoverPreflightFacts();
+    facts.variants[0]!.trackInventory = false;
+    facts.encumbrance.canonicalResources = [canonicalResource()];
+
+    expect(buildInventoryCutoverPreflight(facts).lines[0]).toMatchObject({
+      candidateDemandQty: null,
+      disposition: "review_required",
+      findingCodes: ["NONINVENTORY_OWNER_EVIDENCE"],
+    });
+  });
+
+  it("still reviews shipment evidence for a non-shipping item", () => {
+    const facts = cutoverPreflightFacts();
+    facts.demand.items[0]!.requiresShipping = 0;
+    facts.variants = [];
+    facts.demand.sourceItems.push({
+      id: 1, shipmentId: 2, headerOrderId: 1, orderItemId: 11,
+      replacementForOrderItemId: null, correctionForShipmentItemId: null,
+      productVariantId: null, quantity: 4, purpose: "customer_fulfillment",
+      fromLocationId: null, shipmentStatus: "queued", shipmentHeld: false,
+    });
+
+    expect(buildInventoryCutoverPreflight(facts).lines[0]).toMatchObject({
+      candidateDemandQty: null,
+      disposition: "review_required",
+      findingCodes: ["NONINVENTORY_OWNER_EVIDENCE"],
+    });
+  });
+
   it.each(["cancelled", "zero"])("creates no new demand for %s work", (kind) => {
     const facts = cutoverPreflightFacts();
     if (kind === "zero") facts.demand.items[0]!.quantity = 0; else facts.demand.items[0]!.status = "cancelled";

@@ -73,6 +73,34 @@ export class ReplacementInventoryUnavailableError extends IntegrityError {
   }
 }
 
+/**
+ * Exact shipment custody exists, but the selected inventory level cannot fund
+ * the debit. The stable reason distinguishes this condition from unrelated
+ * integrity failures without weakening the shared DATA_INTEGRITY_VIOLATION
+ * contract.
+ */
+export class ShipmentInventoryUnavailableError extends IntegrityError {
+  constructor(context: {
+    productVariantId: number;
+    warehouseLocationId: number;
+    requestedQuantity: number;
+    pickedQuantityAvailable: number;
+    pickedQuantityApplied: number;
+    onHandQuantity: number;
+    requiredFromOnHand: number;
+  }) {
+    super(
+      `Negative Inventory Guard: Cannot record shipment of ${context.requestedQuantity}. ` +
+        `Picked: ${context.pickedQuantityApplied}, On-hand: ${context.onHandQuantity}, ` +
+        `Required from on-hand: ${context.requiredFromOnHand}.`,
+      {
+        reason: "shipment_inventory_unavailable",
+        ...context,
+      },
+    );
+  }
+}
+
 export class ReplenishmentInventoryConflictError extends AppError {
   constructor(
     code: "REPLENISHMENT_RESERVED_STOCK_PROTECTED" | "REPLENISHMENT_LOT_SERVICE_UNAVAILABLE",
@@ -883,9 +911,15 @@ export class InventoryUseCases {
       ? 0 : Math.min(level.reservedQty, fromOnHand);
 
     if (fromOnHand > level.variantQty) {
-      throw new IntegrityError(
-        `Negative Inventory Guard: Cannot record shipment of ${params.qty}. Picked: ${fromPicked}, On-hand: ${level.variantQty}, Required from on-hand: ${fromOnHand}.`
-      );
+      throw new ShipmentInventoryUnavailableError({
+        productVariantId: params.productVariantId,
+        warehouseLocationId: params.warehouseLocationId,
+        requestedQuantity: params.qty,
+        pickedQuantityAvailable: level.pickedQty,
+        pickedQuantityApplied: fromPicked,
+        onHandQuantity: level.variantQty,
+        requiredFromOnHand: fromOnHand,
+      });
     }
     if (
       params.releaseReservation === false

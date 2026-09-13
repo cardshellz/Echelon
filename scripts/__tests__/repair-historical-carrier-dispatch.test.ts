@@ -22,6 +22,7 @@ describe("historical carrier-dispatch repair", () => {
       mode: "dry-run",
       limit: 100,
       cohort: null,
+      commandId: null,
       confirmCount: null,
       operator: null,
       reason: null,
@@ -35,6 +36,16 @@ describe("historical carrier-dispatch repair", () => {
     expect(
       parseFlags(["--cohort=active_combined_package_resolution"]).cohort,
     ).toBe("active_combined_package_resolution");
+    expect(() => parseFlags([
+      "--cohort=confirmed_historical_inventory_gap",
+    ])).toThrow(/--command-id is required/);
+    expect(parseFlags([
+      "--cohort=confirmed_historical_inventory_gap",
+      "--command-id=986762",
+    ])).toMatchObject({
+      cohort: "confirmed_historical_inventory_gap",
+      commandId: 986762,
+    });
   });
 
   it("requires exact confirmation and audit fields in execute mode", () => {
@@ -59,7 +70,7 @@ describe("historical carrier-dispatch repair", () => {
       preview,
       result: null,
     });
-    expect(previewReviewedCarrierDispatchCommands).toHaveBeenCalledWith(100, null);
+    expect(previewReviewedCarrierDispatchCommands).toHaveBeenCalledWith(100, null, null);
     expect(requeueReviewedCarrierDispatchCommands).not.toHaveBeenCalled();
   });
 
@@ -92,6 +103,7 @@ describe("historical carrier-dispatch repair", () => {
       "--execute",
       "--limit=25",
       "--cohort=aggregate_package_identity_conflict",
+      "--command-id=986762",
       "--confirm-count=2",
       "--operator=owner@cardshellz.com",
       "--reason=post-authority-repair",
@@ -109,6 +121,7 @@ describe("historical carrier-dispatch repair", () => {
       limit: 25,
       expectedCount: 2,
       cohort: "aggregate_package_identity_conflict",
+      commandId: 986762,
       operator: "owner@cardshellz.com",
       reason: "post-authority-repair",
       idempotencyKey: "carrier-dispatch-repair-batch-1",

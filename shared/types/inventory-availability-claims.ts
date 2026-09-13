@@ -17,10 +17,30 @@ const nonnegativePostgresInteger = z.number().int().nonnegative().max(2_147_483_
 const canonicalWmsPickProgressSchema = z.object({
   expectedStatus: z.enum(["pending", "in_progress", "completed", "short"]),
   expectedPickedQuantity: nonnegativePostgresInteger,
+  /**
+   * Immutable fulfilled portion of cumulative WMS picked progress. Older
+   * commands omit this field and therefore retain the pre-cutover zero floor.
+   */
+  expectedFulfilledQuantity: nonnegativePostgresInteger.optional(),
   targetStatus: z.enum(["pending", "in_progress", "completed", "short"]),
   targetPickedQuantity: nonnegativePostgresInteger,
   targetShortReason: nonblank(1000).nullable().optional(),
 }).strict().superRefine((progress, context) => {
+  const fulfilledQuantity = progress.expectedFulfilledQuantity ?? 0;
+  if (fulfilledQuantity > progress.expectedPickedQuantity) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["expectedFulfilledQuantity"],
+      message: "expectedFulfilledQuantity cannot exceed expectedPickedQuantity",
+    });
+  }
+  if (fulfilledQuantity > progress.targetPickedQuantity) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["targetPickedQuantity"],
+      message: "targetPickedQuantity cannot move below fulfilled custody",
+    });
+  }
   if (progress.targetShortReason != null && progress.targetStatus !== "short") {
     context.addIssue({
       code: z.ZodIssueCode.custom,

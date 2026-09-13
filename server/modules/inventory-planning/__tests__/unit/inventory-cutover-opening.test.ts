@@ -138,13 +138,15 @@ describe("independently verified current inventory opening", () => {
     const evidence=reconstructionEvidence(); evidence.canonicalClaimCount="1";
     expect(codes(evidence)).toContain("EXISTING_CANONICAL_LINEAGE_REQUIRES_REVIEW");
   });
-  it("rejects a partial fulfillment opening that the cumulative WMS picker cannot operate", () => {
+  it("adopts only current custody from a partly fulfilled cumulative WMS line", () => {
     const evidence=reconstructionEvidence(); evidence.items[0].quantity=8; evidence.items[0].pickedQuantity=4; evidence.items[0].fulfilledQuantity=2;
     evidence.journals[0].shippedQty="2";
     evidence.costs.push({ ...evidence.costs[0],id:10 });
     const input=verification(evidence), result=evaluateCutoverOpening(evidence,input);
-    expect(result.ready).toBe(false); expect(result.plan.orders).toEqual([]);
-    expect(result.blockers.map(row=>row.code)).toContain("OPENING_PARTIAL_FULFILLMENT_RUNTIME_UNSUPPORTED");
+    expect(result.ready).toBe(true); expect(result.blockers).toEqual([]);
+    expect(result.plan.orders).toMatchObject([{ orderId:1, lines:[{
+      orderItemId:11, requestedQty:"6", reservedQty:"3", pickedQty:"2", freshDemandQty:"1",
+    }] }]);
     expect(evidence.items[0]).toMatchObject({ quantity:8,pickedQuantity:4,fulfilledQuantity:2 });
     expect(evidence.costs).toHaveLength(2);
   });

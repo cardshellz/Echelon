@@ -153,6 +153,7 @@ function classifyDemandLines(
     const matches = (variantsBySku.get(item.sku.toUpperCase()) ?? []).filter((variant) => variant.isActive);
     const variant = matches.length === 1 ? matches[0]! : null;
     const hasPackageEvidence = physicalItemIds.has(item.id) || sourceItemIds.has(item.id);
+    const hasCanonicalInventoryEvidence = claimedItemIds.has(item.id);
     let disposition: InventoryCutoverLine["disposition"] = "review_required";
     let candidateDemandQty: string | null = null;
 
@@ -162,8 +163,13 @@ function classifyDemandLines(
     const notInventoryTracked = item.requiresShipping === 0
       || (variant !== null && (!variant.requiresShipping || !variant.trackInventory));
     if (notInventoryTracked) {
-      if (hasPackageEvidence || claimedItemIds.has(item.id)) {
-        issue("NONINVENTORY_OWNER_EVIDENCE", "A non-inventory item has package or canonical resource evidence; verify its ownership history.");
+      const packageEvidenceConflictsWithShippingConfiguration = hasPackageEvidence
+        && (item.requiresShipping === 0 || variant?.requiresShipping === false);
+      if (packageEvidenceConflictsWithShippingConfiguration || hasCanonicalInventoryEvidence) {
+        issue(
+          "NONINVENTORY_OWNER_EVIDENCE",
+          "A line excluded from inventory demand has canonical inventory ownership or shipment evidence that conflicts with its non-shipping configuration; verify its ownership history.",
+        );
       }
       if (lineFindings.length === 0) { disposition = "no_inventory_demand"; candidateDemandQty = "0"; }
     } else {

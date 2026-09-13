@@ -117,6 +117,12 @@ function makeDb(executeResponses: Array<{ rows: any[] }>) {
     ) {
       return { rows: [] };
     }
+    if (
+      text.includes("INSERT INTO wms.reconciliation_exceptions")
+      && text.includes("'carrier_tracking_confirmed_dispatch', 'historical_ignore'")
+    ) {
+      return { rows: [] };
+    }
     if (text.includes("AS has_positive_item_authority")) {
       return { rows: [{ has_positive_item_authority: true }] };
     }
@@ -1767,6 +1773,120 @@ describe("processShipNotify V2 :: canonical channel fulfillment handoff", () => 
         isReturnLabel: false,
       }),
     );
+  });
+
+  it("materializes one reviewed historical customer unit without inventing a current inventory debit", async () => {
+    const rows = happyPathRows();
+    rows.splice(5, 0, {
+      rows: [{
+        id: 10001,
+        order_item_id: 30001,
+        inventory_order_item_id: 30001,
+        product_variant_id: 40001,
+        qty: 1,
+        pick_location_id: 50001,
+        reserved_location_id: 50001,
+        from_location_id: 50001,
+        warehouse_id: 1,
+        shipment_purpose: "customer_fulfillment",
+        shipment_item_purpose: "customer_fulfillment",
+        shipment_source: "oms",
+        shipment_tracking_number: "1Z12345",
+        external_fulfillment_id: "shipstation_shipment:77777",
+        historical_customer_inventory_deferred: false,
+      }],
+    }, { rows: [] });
+    const mock = makeDb(rows);
+    const inventoryError = Object.assign(
+      new Error(
+        "Negative Inventory Guard: Cannot record shipment of 1. " +
+          "Picked: 0, On-hand: 0, Required from on-hand: 1.",
+      ),
+      {
+        code: "DATA_INTEGRITY_VIOLATION",
+        context: { reason: "shipment_inventory_unavailable" },
+      },
+    );
+    const inventoryCore = {
+      recordShipment: vi.fn().mockRejectedValue(inventoryError),
+    };
+    globalThis.fetch = mockFetchOnceOk({ shipments: [makeExactShipmentPayload()] }) as any;
+
+    const result = await createTestShipStationService(mock, inventoryCore).confirmDispatch(
+      makeDispatchInput({
+        reviewedRepair: {
+          requeueId: 901,
+          repairCohort: "confirmed_historical_inventory_gap",
+          operator: "owner@cardshellz.com",
+          reason: "Order #62401 shipped one unit; two units remained short",
+          idempotencyKey: "repair-command-701",
+          requeuedAt: new Date("2026-09-12T12:00:00.000Z"),
+        },
+      }),
+    );
+
+    expect(result).toMatchObject({
+      processed: true,
+      evidence: {
+        carrierDispatchCommandId: 701,
+        reviewedRepair: {
+          requeueId: 901,
+          repairCohort: "confirmed_historical_inventory_gap",
+          operator: "owner@cardshellz.com",
+        },
+      },
+    });
+    expect(inventoryCore.recordShipment).toHaveBeenCalledOnce();
+    expect(mock.fulfillmentAuthority.recordPhysicalPackage).toHaveBeenCalledOnce();
+    const exceptionSql = mock.calls
+      .map((call) => call.sqlText)
+      .find((text) =>
+        text.includes("INSERT INTO wms.reconciliation_exceptions")
+        && text.includes("'carrier_tracking_confirmed_dispatch', 'historical_ignore'")
+      );
+    expect(exceptionSql).toMatch(/'historical_ignore'/);
+    expect(exceptionSql).toMatch(/'acknowledged', 'info'/);
+  });
+
+  it("does not bypass an unavailable inventory debit without exact reviewed repair authority", async () => {
+    const rows = happyPathRows();
+    rows.splice(5, 0, {
+      rows: [{
+        id: 10001,
+        order_item_id: 30001,
+        inventory_order_item_id: 30001,
+        product_variant_id: 40001,
+        qty: 1,
+        pick_location_id: 50001,
+        reserved_location_id: 50001,
+        from_location_id: 50001,
+        warehouse_id: 1,
+        shipment_purpose: "customer_fulfillment",
+        shipment_item_purpose: "customer_fulfillment",
+        historical_customer_inventory_deferred: false,
+      }],
+    }, { rows: [] });
+    const mock = makeDb(rows);
+    const inventoryCore = {
+      recordShipment: vi.fn().mockRejectedValue(Object.assign(
+        new Error("inventory is unavailable"),
+        {
+          code: "DATA_INTEGRITY_VIOLATION",
+          context: { reason: "shipment_inventory_unavailable" },
+        },
+      )),
+    };
+    globalThis.fetch = mockFetchOnceOk({ shipments: [makeExactShipmentPayload()] }) as any;
+
+    await expect(
+      createTestShipStationService(mock, inventoryCore).confirmDispatch(makeDispatchInput()),
+    ).rejects.toMatchObject({
+      code: "CARRIER_DISPATCH_APPLICATION_FAILED",
+      context: { sourceCode: "DATA_INTEGRITY_VIOLATION" },
+    });
+    expect(mock.fulfillmentAuthority.recordPhysicalPackage).not.toHaveBeenCalled();
+    expect(mock.calls.map((call) => call.sqlText).join("\n"))
+      .not.toMatch(/'historical_ignore'/);
   });
 
   it.each([

@@ -167,7 +167,7 @@ export class AssemblyExecutionService {
     return this.claims.pickClaimLine({ claimId: task.claimId, orderItemId: task.orderItemId,
       warehouseLocationId: locationId, quantity: String(input.quantity), actor: actorId, reason: input.reason,
       idempotencyKey: `assembly-output:${input.commandId}`, locationStrategy: "strict", assemblyWork: input.fence,
-      wmsProgress: { expectedStatus: input.expectedItemStatus, expectedPickedQuantity: 0,
+      wmsProgress: { expectedStatus: input.expectedItemStatus, expectedPickedQuantity: 0, expectedFulfilledQuantity: 0,
         targetStatus: "completed", targetPickedQuantity: input.quantity } });
   }
 

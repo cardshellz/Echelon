@@ -18,6 +18,7 @@ export interface Flags {
   mode: Mode;
   limit: number;
   cohort: HistoricalCarrierDispatchRepairCohort | null;
+  commandId: number | null;
   confirmCount: number | null;
   operator: string | null;
   reason: string | null;
@@ -36,6 +37,7 @@ export function usage(): string {
     "  --execute                 Requeue the exact guarded selection.",
     "  --limit=N                 Max rows selected in this batch. Default 100, max 500.",
     "  --cohort=NAME             Restrict repair to one proven failure cohort.",
+    "  --command-id=N            Restrict preview and execution to one exact command.",
     "  --confirm-count=N         Required in execute mode; must match the selected dry-run count.",
     "  --operator=TEXT           Required in execute mode.",
     "  --reason=TEXT             Required in execute mode.",
@@ -44,7 +46,9 @@ export function usage(): string {
     "",
     "Supported cohorts: active_combined_package_resolution,",
     "aggregate_package_identity_conflict, immutable_command_request_conflict,",
-    "legacy_outbound_shipment_identity_conflict.",
+    "legacy_outbound_shipment_identity_conflict,",
+    "confirmed_historical_inventory_gap.",
+    "Historical inventory-gap repair always requires --command-id.",
     "Unresolved package-resolution reviews are intentionally excluded.",
     "",
     "Only known historical carrier-dispatch failures with confirmed carrier",
@@ -56,7 +60,7 @@ export function usage(): string {
 export function parseFlags(argv: string[]): Flags {
   for (const arg of argv) {
     if (["--help", "-h", "--dry-run", "--execute", "--json"].includes(arg)) continue;
-    if (/^--(limit|cohort|confirm-count|operator|reason|idempotency-key)=/.test(arg)) continue;
+    if (/^--(limit|cohort|command-id|confirm-count|operator|reason|idempotency-key)=/.test(arg)) continue;
     throw new Error(`Unknown flag: ${arg}`);
   }
   if (argv.includes("--dry-run") && argv.includes("--execute")) {
@@ -69,12 +73,26 @@ export function parseFlags(argv: string[]): Flags {
     mode,
     limit: integerFlag(argv, "--limit=", DEFAULT_LIMIT, 1, MAX_LIMIT),
     cohort: cohortFlag(argv),
+    commandId: optionalIntegerFlag(
+      argv,
+      "--command-id=",
+      1,
+      Number.MAX_SAFE_INTEGER,
+    ),
     confirmCount: optionalIntegerFlag(argv, "--confirm-count=", 1, MAX_LIMIT),
     operator: textFlag(argv, "--operator="),
     reason: textFlag(argv, "--reason="),
     idempotencyKey: textFlag(argv, "--idempotency-key="),
     json: argv.includes("--json"),
   };
+  if (
+    flags.cohort === "confirmed_historical_inventory_gap"
+    && flags.commandId === null
+  ) {
+    throw new Error(
+      "--command-id is required for confirmed_historical_inventory_gap repair",
+    );
+  }
   if (mode === "execute") {
     for (const [name, value] of [
       ["--confirm-count", flags.confirmCount],
@@ -105,6 +123,7 @@ export async function runHistoricalCarrierDispatchRepair(
   const preview = await dependencies.repository.previewReviewedCarrierDispatchCommands(
     flags.limit,
     flags.cohort,
+    flags.commandId,
   );
   if (flags.mode === "dry-run") return { mode: flags.mode, preview, result: null };
   if (flags.confirmCount !== preview.selectedCount) {
@@ -116,6 +135,7 @@ export async function runHistoricalCarrierDispatchRepair(
     limit: flags.limit,
     expectedCount: flags.confirmCount,
     cohort: flags.cohort,
+    commandId: flags.commandId,
     operator: flags.operator!,
     reason: flags.reason!,
     idempotencyKey: flags.idempotencyKey!,
@@ -137,6 +157,7 @@ const REPAIR_COHORTS = new Set<HistoricalCarrierDispatchRepairCohort>([
   "aggregate_package_identity_conflict",
   "immutable_command_request_conflict",
   "legacy_outbound_shipment_identity_conflict",
+  "confirmed_historical_inventory_gap",
 ]);
 
 function cohortFlag(argv: string[]): HistoricalCarrierDispatchRepairCohort | null {

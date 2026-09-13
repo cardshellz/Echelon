@@ -822,14 +822,25 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
       expect(writer.pickResources).toHaveBeenLastCalledWith(expect.objectContaining({
         resources: [expect.objectContaining({ pickQty: BigInt(2) })],
       }));
-      const calls = writer.pickResources.mock.calls.length;
+      const callsBeforeFulfilledPick = writer.pickResources.mock.calls.length;
       await expect(repository.pickClaimLine({ ...partialCommand, idempotencyKey: "pick:wrong-custody",
         wmsProgress: { ...partialCommand.wmsProgress, expectedPickedQuantity: 0 } }))
+        .rejects.toMatchObject({ code: "CLAIM_WMS_PICK_CUSTODY_MISMATCH" });
+      expect(writer.pickResources).toHaveBeenCalledTimes(callsBeforeFulfilledPick);
+      const partialFulfilledCommand = { ...partialCommand, idempotencyKey: "pick:partial-fulfilled",
+        wmsProgress: { ...partialCommand.wmsProgress, expectedPickedQuantity: 2,
+          expectedFulfilledQuantity: 1, targetPickedQuantity: 4 } };
+      await expect(repository.pickClaimLine(partialFulfilledCommand)).resolves.toMatchObject({
+        quantity: "2", totalCostMills: "250",
+      });
+      const callsAfterFulfilledPick = writer.pickResources.mock.calls.length;
+      await expect(repository.pickClaimLine({ ...partialFulfilledCommand, idempotencyKey: "pick:wrong-fulfilled-floor",
+        wmsProgress: { ...partialFulfilledCommand.wmsProgress, expectedFulfilledQuantity: 0 } }))
         .rejects.toMatchObject({ code: "CLAIM_WMS_PICK_CUSTODY_MISMATCH" });
       existingPickedLocation = 3;
       await expect(repository.pickClaimLine({ ...partialCommand, idempotencyKey: "pick:wrong-bin" }))
         .rejects.toMatchObject({ code: "CLAIM_PICK_PARTIAL_LOCATION_CONFLICT" });
-      expect(writer.pickResources).toHaveBeenCalledTimes(calls);
+      expect(writer.pickResources).toHaveBeenCalledTimes(callsAfterFulfilledPick);
     }
 
   });
@@ -846,6 +857,7 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
       wmsProgress: {
         expectedStatus: "in_progress" as const,
         expectedPickedQuantity: 3,
+        expectedFulfilledQuantity: latestShipped ? 1 : 0,
         targetStatus: "in_progress" as const,
         targetPickedQuantity: 1,
       },
@@ -956,6 +968,9 @@ describe("PostgresInventoryAvailabilityClaimRepository", () => {
       }
       if (text.startsWith("UPDATE wms.order_items")) {
         return { rows: [{ id: 71 }], rowCount: 1 };
+      }
+      if (text.startsWith("UPDATE wms.outbound_shipment_items")) {
+        return { rows: [], rowCount: 0 };
       }
       if (text.startsWith("UPDATE wms.orders AS order_header")) {
         return { rows: [], rowCount: 1 };
