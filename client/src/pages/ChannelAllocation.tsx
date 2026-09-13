@@ -243,7 +243,7 @@ function WarehouseAssignmentsSection() {
 
   const createMutation = useMutation({
     mutationFn: (data: { channelId: number; warehouseId: number }) =>
-      apiPost("/api/channel-warehouse-assignments", { ...data, priority: 0, enabled: true }),
+      apiPost("/api/channel-warehouse-assignments", { ...data, enabled: true }),
     onSuccess: () => { invalidate(); toast({ title: "Assignment created" }); },
     onError: (err: Error) => toast({ title: err.message, variant: "destructive" }),
   });
@@ -251,13 +251,6 @@ function WarehouseAssignmentsSection() {
   const deleteMutation = useMutation({
     mutationFn: (id: number) => apiDelete(`/api/channel-warehouse-assignments/${id}`),
     onSuccess: () => { invalidate(); toast({ title: "Assignment removed" }); },
-    onError: (err: Error) => toast({ title: err.message, variant: "destructive" }),
-  });
-
-  const updateMutation = useMutation({
-    mutationFn: ({ id, ...data }: { id: number; priority?: number; enabled?: boolean }) =>
-      apiPut(`/api/channel-warehouse-assignments/${id}`, data),
-    onSuccess: () => { invalidate(); },
     onError: (err: Error) => toast({ title: err.message, variant: "destructive" }),
   });
 
@@ -269,10 +262,6 @@ function WarehouseAssignmentsSection() {
     } else {
       createMutation.mutate({ channelId, warehouseId });
     }
-  };
-
-  const handlePriorityChange = (assignmentId: number, priority: number) => {
-    updateMutation.mutate({ id: assignmentId, priority });
   };
 
   if (isLoading) {
@@ -322,21 +311,12 @@ function WarehouseAssignmentsSection() {
                   const assignment = assignmentMap.get(key);
                   return (
                     <TableCell key={ch.id} className="text-center">
-                      <div className="flex flex-col items-center gap-1.5">
+                      <div className="flex flex-col items-center">
                         <Checkbox
                           checked={!!assignment}
                           onCheckedChange={() => handleToggle(ch.id, wh.id)}
+                          aria-label={`${wh.code} feeds ${ch.name}`}
                         />
-                        {assignment && (
-                          <Input
-                            type="number"
-                            min={0}
-                            className="h-7 w-16 text-xs text-center"
-                            value={assignment.priority}
-                            onChange={(e) => handlePriorityChange(assignment.id, parseInt(e.target.value) || 0)}
-                            title="Priority (higher = preferred)"
-                          />
-                        )}
                       </div>
                     </TableCell>
                   );
@@ -1236,7 +1216,7 @@ export default function ChannelAllocation() {
             <CardHeader>
               <CardTitle>Warehouse → Channel Assignments</CardTitle>
               <CardDescription>
-                Controls which warehouses feed inventory to each sales channel. A channel only sees stock from its assigned warehouses. If no warehouses are assigned, all fulfillment warehouses are used as a fallback.
+                Controls which warehouses feed inventory to each sales channel. A channel only sees stock from its assigned warehouses. If no warehouses are assigned, all fulfillment warehouses are used as a fallback. Dropship OMS is the exception: Dropship quantities fail closed until it has an explicit assignment.
               </CardDescription>
             </CardHeader>
             <CardContent>
