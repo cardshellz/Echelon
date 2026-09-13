@@ -66,6 +66,8 @@ export const recordDropshipOrderIntakeInputSchema = z.object({
     totals: normalizedTotalsSchema.optional(),
     orderedAt: z.string().trim().datetime().optional(),
     marketplaceStatus: z.string().trim().min(1).max(120).optional(),
+    /** Marketplace shipping service the buyer selected, verbatim (for example an eBay shippingServiceCode). */
+    buyerShippingServiceCode: z.string().trim().min(1).max(120).optional(),
   }).strict(),
   idempotencyKey: idempotencyKeySchema,
 }).strict();

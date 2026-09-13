@@ -29,6 +29,21 @@ import { DropshipError } from "../../domain/errors";
 import type { EbayOrder } from "../../../channels/adapters/ebay/ebay-types";
 
 describe("eBay dropship order intake mapper", () => {
+  it("keeps the buyer-selected shipping service code on the normalized payload", () => {
+    const withService = buildEbayDropshipOrderIntakeInput({
+      store: { vendorId: 10, storeConnectionId: 22 },
+      order: makeEbayOrder(),
+    });
+    expect(withService.normalizedPayload.buyerShippingServiceCode).toBe("USPS_FIRST_CLASS");
+    expect(recordDropshipOrderIntakeInputSchema.safeParse(withService).success).toBe(true);
+
+    const order = makeEbayOrder();
+    delete order.fulfillmentStartInstructions![0].shippingStep!.shippingServiceCode;
+    const withoutService = buildEbayDropshipOrderIntakeInput({ store: { vendorId: 10, storeConnectionId: 22 }, order });
+    expect(withoutService.normalizedPayload.buyerShippingServiceCode).toBeUndefined();
+    expect(recordDropshipOrderIntakeInputSchema.safeParse(withoutService).success).toBe(true);
+  });
+
   it("maps a paid eBay fulfillment order into validated dropship intake input", () => {
     const input = buildEbayDropshipOrderIntakeInput({
       store: { vendorId: 10, storeConnectionId: 22 },
