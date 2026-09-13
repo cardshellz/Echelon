@@ -5100,16 +5100,21 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
         let line = await loadFulfillmentClaimLine(client, claim.id, command.orderItemId);
         if (command.wmsProgress) {
           const expectedPicked = BigInt(command.wmsProgress.expectedPickedQuantity);
+          const expectedFulfilled = BigInt(command.wmsProgress.expectedFulfilledQuantity ?? 0);
+          const expectedClaimPicked = expectedPicked - expectedFulfilled;
           const resourcePicked = line.resources.reduce((sum, resource) => sum + resource.pickedQty, BigInt(0));
           const lotsMatchResources = line.resources.every((resource) =>
             resource.lots.reduce((sum, lot) => sum + lot.pickedQty, BigInt(0)) === resource.pickedQty);
-          if (line.pickedTargetQty !== expectedPicked || resourcePicked !== expectedPicked || !lotsMatchResources
+          if (expectedClaimPicked < BigInt(0)
+            || line.pickedTargetQty !== expectedClaimPicked
+            || resourcePicked !== expectedClaimPicked || !lotsMatchResources
             || quantity !== BigInt(command.wmsProgress.targetPickedQuantity) - expectedPicked) {
             throw new InventoryAvailabilityClaimRepositoryError(
               "CLAIM_WMS_PICK_CUSTODY_MISMATCH",
-              "WMS pick progress must add only its next delta to exact existing claim-owned picked custody.",
+              "WMS pick progress must add only its next delta above fulfilled custody to exact existing claim-owned picked custody.",
               { claimLineId: line.id.toString(), expectedPickedQty: expectedPicked.toString(),
-                actualPickedQty: line.pickedTargetQty.toString(), quantity: quantity.toString() },
+                expectedFulfilledQty: expectedFulfilled.toString(), expectedClaimPickedQty: expectedClaimPicked.toString(),
+                actualClaimPickedQty: line.pickedTargetQty.toString(), quantity: quantity.toString() },
             );
           }
           if (line.resources.some((resource) =>
@@ -5398,6 +5403,27 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
           );
         }
         const line = await loadFulfillmentClaimLine(client, claim.id, command.orderItemId);
+        if (command.wmsProgress) {
+          const expectedPicked = BigInt(command.wmsProgress.expectedPickedQuantity);
+          const expectedFulfilled = BigInt(command.wmsProgress.expectedFulfilledQuantity ?? 0);
+          const expectedClaimPicked = expectedPicked - expectedFulfilled;
+          const resourcePicked = line.resources.reduce((sum, resource) => sum + resource.pickedQty, BigInt(0));
+          const lotsMatchResources = line.resources.every((resource) =>
+            resource.lots.reduce((sum, lot) => sum + lot.pickedQty, BigInt(0)) === resource.pickedQty);
+          if (expectedClaimPicked < BigInt(0)
+            || line.pickedTargetQty !== expectedClaimPicked
+            || resourcePicked !== expectedClaimPicked
+            || !lotsMatchResources
+            || quantity !== expectedPicked - BigInt(command.wmsProgress.targetPickedQuantity)) {
+            throw new InventoryAvailabilityClaimRepositoryError(
+              "CLAIM_WMS_UNPICK_CUSTODY_MISMATCH",
+              "WMS unpick progress must reverse only exact claim-owned picked custody above fulfilled custody.",
+              { claimLineId: line.id.toString(), expectedPickedQty: expectedPicked.toString(),
+                expectedFulfilledQty: expectedFulfilled.toString(), expectedClaimPickedQty: expectedClaimPicked.toString(),
+                actualClaimPickedQty: line.pickedTargetQty.toString(), quantity: quantity.toString() },
+            );
+          }
+        }
         if (line.pickedTargetQty < quantity) {
           throw new InventoryAvailabilityClaimRepositoryError(
             "CLAIM_LINE_UNPICK_OVERAGE",

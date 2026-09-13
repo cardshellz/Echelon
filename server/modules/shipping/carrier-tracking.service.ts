@@ -555,6 +555,12 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
     summary.dispatchCommandsClaimed = commands.length;
 
     for (const command of commands) {
+      const reviewedRepair = command.reviewedRepair
+        ? {
+            ...command.reviewedRepair,
+            requeuedAt: command.reviewedRepair.requeuedAt.toISOString(),
+          }
+        : null;
       const requestEvidence = {
         commandId: command.id,
         shippingProviderLabelId: command.shippingProviderLabelId,
@@ -565,6 +571,7 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
         providerOrderKey: command.providerOrderKey,
         trackingSuffix: trackingSuffix(command.normalizedTrackingNumber),
         dispatchOccurredAt: command.dispatchOccurredAt.toISOString(),
+        reviewedRepair,
       };
 
       let requestedOutcome: StoredCarrierDispatchAttempt["outcome"];
@@ -587,6 +594,7 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
           carrier: command.carrier,
           serviceCode: command.serviceCode,
           dispatchOccurredAt: command.dispatchOccurredAt,
+          reviewedRepair: command.reviewedRepair ?? null,
         });
         if (!result.processed) {
           throw new CarrierDispatchAuthorityError(

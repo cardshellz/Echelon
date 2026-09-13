@@ -32,6 +32,12 @@ import {
   VerifiedCarrierWebhookReceipt,
 } from "./carrier-tracking.domain";
 import type { ShipStationTrackingHydrationRequest } from "./shipstation-tracking-events.client";
+import type {
+  HistoricalCarrierDispatchRepairCohort,
+  ReviewedCarrierDispatchRepairAuthorization,
+} from "./carrier-dispatch-authority";
+
+export type { HistoricalCarrierDispatchRepairCohort } from "./carrier-dispatch-authority";
 
 export interface StoredCarrierTrackingEvent {
   id: number;
@@ -68,6 +74,7 @@ export interface ClaimedCarrierDispatchCommand {
   startedAt: Date;
   leaseOwner: string;
   leaseExpiresAt: Date;
+  reviewedRepair?: ReviewedCarrierDispatchRepairAuthorization | null;
 }
 
 export interface FinalizeCarrierDispatchAttemptInput {
@@ -223,6 +230,7 @@ export interface RequeueReviewedCarrierDispatchCommandsInput {
   limit: number;
   expectedCount: number;
   cohort: HistoricalCarrierDispatchRepairCohort | null;
+  commandId?: number | null;
   operator: string;
   reason: string;
   idempotencyKey: string;
@@ -234,13 +242,6 @@ export interface RequeueReviewedCarrierDispatchCommandsResult {
   requeued: number;
   byCohort: Readonly<Record<string, number>>;
 }
-
-export type HistoricalCarrierDispatchRepairCohort =
-  | "active_combined_package_resolution"
-  | "aggregate_package_identity_conflict"
-  | "immutable_command_request_conflict"
-  | "package_resolution_retry"
-  | "legacy_outbound_shipment_identity_conflict";
 
 export interface HistoricalCarrierDispatchRepairCandidate {
   commandId: number;
@@ -405,6 +406,7 @@ export interface CarrierTrackingRepository {
   previewReviewedCarrierDispatchCommands(
     limit: number,
     cohort?: HistoricalCarrierDispatchRepairCohort | null,
+    commandId?: number | null,
   ): Promise<HistoricalCarrierDispatchRepairPreview>;
   requeueReviewedCarrierDispatchCommands(
     input: RequeueReviewedCarrierDispatchCommandsInput,
@@ -520,6 +522,7 @@ const HISTORICAL_CARRIER_DISPATCH_REPAIR_COHORTS = [
   "immutable_command_request_conflict",
   "package_resolution_retry",
   "legacy_outbound_shipment_identity_conflict",
+  "confirmed_historical_inventory_gap",
 ] as const satisfies readonly HistoricalCarrierDispatchRepairCohort[];
 
 function historicalCarrierDispatchRepairCohort(
@@ -560,6 +563,12 @@ function historicalCarrierDispatchRepairCohortSql() {
         AND NULLIF(BTRIM(command.result_evidence ->> 'sourceMessage'), '')
           ILIKE '%uq_outbound_shipments_active_%'
         THEN 'legacy_outbound_shipment_identity_conflict'
+      WHEN command.last_error_code = 'CARRIER_DISPATCH_APPLICATION_FAILED'
+        AND NULLIF(BTRIM(command.result_evidence ->> 'sourceCode'), '') =
+          'DATA_INTEGRITY_VIOLATION'
+        AND NULLIF(BTRIM(command.result_evidence ->> 'sourceMessage'), '') ~
+          '^Negative Inventory Guard: Cannot record shipment of [0-9]+[.] Picked: [0-9]+, On-hand: [0-9]+, Required from on-hand: [0-9]+[.]$'
+        THEN 'confirmed_historical_inventory_gap'
       ELSE NULL
     END
   `;
@@ -567,6 +576,7 @@ function historicalCarrierDispatchRepairCohortSql() {
 
 function historicalCarrierDispatchRepairEligibilitySql(
   cohort: HistoricalCarrierDispatchRepairCohort | null = null,
+  commandId: number | null = null,
 ) {
   const repairCohort = historicalCarrierDispatchRepairCohortSql();
   return sql`
@@ -580,13 +590,20 @@ function historicalCarrierDispatchRepairEligibilitySql(
       FROM wms.shipping_provider_label_links AS link
       WHERE link.shipping_provider_label_id = label.id
     )
-    AND ${repairCohort} IN (
-      'active_combined_package_resolution',
-      'aggregate_package_identity_conflict',
-      'immutable_command_request_conflict',
-      'legacy_outbound_shipment_identity_conflict'
+    AND (
+      ${repairCohort} IN (
+        'active_combined_package_resolution',
+        'aggregate_package_identity_conflict',
+        'immutable_command_request_conflict',
+        'legacy_outbound_shipment_identity_conflict'
+      )
+      OR (
+        ${commandId}::bigint IS NOT NULL
+        AND ${repairCohort} = 'confirmed_historical_inventory_gap'
+      )
     )
     AND (${cohort}::text IS NULL OR ${repairCohort} = ${cohort})
+    AND (${commandId}::bigint IS NULL OR command.id = ${commandId})
   `;
 }
 
@@ -611,6 +628,19 @@ function historicalCarrierDispatchRepairCandidateFromRow(
 function claimedDispatchCommandFromRow(
   row: Record<string, unknown>,
 ): ClaimedCarrierDispatchCommand {
+  const reviewedRepair = row.repair_requeue_id == null
+    ? null
+    : Object.freeze({
+        requeueId: requiredId(row.repair_requeue_id, "carrier_dispatch_requeue_id"),
+        repairCohort: historicalCarrierDispatchRepairCohort(row.repair_cohort),
+        operator: requiredString(row.repair_operator, "carrier_dispatch_repair_operator"),
+        reason: requiredString(row.repair_reason, "carrier_dispatch_repair_reason"),
+        idempotencyKey: requiredString(
+          row.repair_idempotency_key,
+          "carrier_dispatch_repair_idempotency_key",
+        ),
+        requeuedAt: requiredDate(row.repair_requeued_at, "carrier_dispatch_repair_requeued_at"),
+      });
   return {
     id: requiredId(row.id, "carrier_dispatch_command_id"),
     shippingProviderLabelId: requiredId(
@@ -644,6 +674,7 @@ function claimedDispatchCommandFromRow(
     startedAt: requiredDate(row.started_at, "started_at"),
     leaseOwner: requiredString(row.lease_owner, "lease_owner"),
     leaseExpiresAt: requiredDate(row.lease_expires_at, "lease_expires_at"),
+    reviewedRepair,
   };
 }
 
@@ -2556,12 +2587,15 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
       });
     },
 
-    async previewReviewedCarrierDispatchCommands(limit, cohort = null) {
+    async previewReviewedCarrierDispatchCommands(limit, cohort = null, commandId = null) {
       if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 500) {
         throw new Error("Carrier-dispatch repair preview limit must be an integer between 1 and 500");
       }
+      if (commandId !== null && (!Number.isSafeInteger(commandId) || commandId <= 0)) {
+        throw new Error("Carrier-dispatch repair commandId must be a positive safe integer");
+      }
       const repairCohort = historicalCarrierDispatchRepairCohortSql();
-      const eligibility = historicalCarrierDispatchRepairEligibilitySql(cohort);
+      const eligibility = historicalCarrierDispatchRepairEligibilitySql(cohort, commandId);
       const countResult = await db.execute(sql`
         SELECT
           ${repairCohort} AS repair_cohort,
@@ -2618,6 +2652,7 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
       const operator = input.operator.trim();
       const reason = input.reason.trim();
       const idempotencyKey = input.idempotencyKey.trim();
+      const commandId = input.commandId ?? null;
       if (!Number.isSafeInteger(input.limit) || input.limit <= 0 || input.limit > 500) {
         throw new Error("Carrier-dispatch repair limit must be an integer between 1 and 500");
       }
@@ -2625,6 +2660,14 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
           || input.expectedCount <= 0
           || input.expectedCount > input.limit) {
         throw new Error("Carrier-dispatch repair expectedCount must be between 1 and limit");
+      }
+      if (commandId !== null && (!Number.isSafeInteger(commandId) || commandId <= 0)) {
+        throw new Error("Carrier-dispatch repair commandId must be a positive safe integer");
+      }
+      if (input.cohort === "confirmed_historical_inventory_gap" && commandId === null) {
+        throw new Error(
+          "Confirmed historical inventory-gap repair requires one exact carrier-dispatch commandId",
+        );
       }
       if (!operator || operator.length > 200) {
         throw new Error("Carrier-dispatch repair operator must contain 1 through 200 characters");
@@ -2641,7 +2684,7 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
 
       return db.transaction(async (databaseTx: any) => {
         const repairCohort = historicalCarrierDispatchRepairCohortSql();
-        const eligibility = historicalCarrierDispatchRepairEligibilitySql(input.cohort);
+        const eligibility = historicalCarrierDispatchRepairEligibilitySql(input.cohort, commandId);
         const candidateResult = await databaseTx.execute(sql`
           SELECT
             command.id,
@@ -2838,10 +2881,23 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
           label.normalized_tracking_number,
           label.carrier,
           label.service_code,
+          repair.id AS repair_requeue_id,
+          repair.repair_cohort,
+          repair.operator AS repair_operator,
+          repair.reason AS repair_reason,
+          repair.idempotency_key AS repair_idempotency_key,
+          repair.created_at AS repair_requeued_at,
           ${asOf}::timestamptz AS started_at
         FROM claimed
         JOIN wms.shipping_provider_labels AS label
           ON label.id = claimed.shipping_provider_label_id
+        LEFT JOIN LATERAL (
+          SELECT requeue.*
+          FROM wms.carrier_dispatch_command_requeues AS requeue
+          WHERE requeue.carrier_dispatch_command_id = claimed.id
+          ORDER BY requeue.created_at DESC, requeue.id DESC
+          LIMIT 1
+        ) AS repair ON TRUE
         ORDER BY claimed.id
       `);
       return resultRows(result).map(claimedDispatchCommandFromRow);

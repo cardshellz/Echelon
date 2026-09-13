@@ -145,13 +145,9 @@ export function evaluateCutoverOpening(rawEvidence: unknown, input: OpeningVerif
     // WMS progress is cumulative. Independent current picked observations must
     // agree with the unfulfilled portion; they never recreate dispatched units.
     const recordedCurrentPicked = BigInt(item.pickedQuantity)-BigInt(item.fulfilledQuantity);
-    // The canonical picker compares owned picked custody to cumulative WMS
-    // progress. It has no historical-fulfillment baseline contract; accepting
-    // only the remaining units here would pass adoption but fail the next pick.
-    if (item.fulfilledQuantity > 0 && remaining > BigInt(0)) {
-      block("OPENING_PARTIAL_FULFILLMENT_RUNTIME_UNSUPPORTED", subject,
-        "This line is partly fulfilled. Its remaining custody requires an explicit runtime handoff before cutover; opening verification cannot reset cumulative WMS progress.");
-    }
+    // The runtime pick contract carries fulfilledQuantity as the immutable
+    // floor beneath cumulative WMS picked progress. The opening claim therefore
+    // owns only the currently unfulfilled picked portion recorded here.
     if (owner.orderId !== item.orderId || !order || remaining < BigInt(0)
       || item.quantity < 0 || item.pickedQuantity < 0 || item.fulfilledQuantity < 0 || item.pickedQuantity > item.quantity
       || recordedCurrentPicked < BigInt(0)

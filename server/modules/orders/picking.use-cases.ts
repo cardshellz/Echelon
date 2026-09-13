@@ -1413,7 +1413,25 @@ export class PickingUseCases {
     },
   ): Promise<PickProgressAtomicResult> {
     const alreadyPickedQuantity = Number(input.beforeItem.pickedQuantity ?? 0);
+    const alreadyFulfilledQuantity = Number(input.beforeItem.fulfilledQuantity ?? 0);
     const remainingPickQuantity = input.effectivePickedQuantity - alreadyPickedQuantity;
+    if (!Number.isSafeInteger(alreadyPickedQuantity) || alreadyPickedQuantity < 0
+      || !Number.isSafeInteger(remainingPickQuantity) || remainingPickQuantity <= 0) {
+      throw new IntegrityError("Canonical pick progress requires a positive remaining quantity", {
+        reason: "canonical_pick_delta_invalid", orderId: input.beforeItem.orderId, orderItemId: input.itemId,
+        alreadyPickedQuantity, targetPickedQuantity: input.effectivePickedQuantity,
+      });
+    }
+    if (!Number.isSafeInteger(alreadyFulfilledQuantity) || alreadyFulfilledQuantity < 0
+      || alreadyFulfilledQuantity > alreadyPickedQuantity) {
+      throw new IntegrityError("Canonical pick progress has invalid fulfilled custody", {
+        reason: "canonical_fulfilled_custody_invalid",
+        orderId: input.beforeItem.orderId,
+        orderItemId: input.itemId,
+        pickedQuantity: alreadyPickedQuantity,
+        fulfilledQuantity: alreadyFulfilledQuantity,
+      });
+    }
     const resolved = await this.resolveCanonicalPickTarget(
       input.beforeItem,
       remainingPickQuantity,
@@ -1421,13 +1439,6 @@ export class PickingUseCases {
     );
     if (resolved.nonInventory) {
       return this.persistWmsOnlyPickProgress(input);
-    }
-    if (!Number.isSafeInteger(alreadyPickedQuantity) || alreadyPickedQuantity < 0
-      || !Number.isSafeInteger(remainingPickQuantity) || remainingPickQuantity <= 0) {
-      throw new IntegrityError("Canonical pick progress requires a positive remaining quantity", {
-        reason: "canonical_pick_delta_invalid", orderId: input.beforeItem.orderId, orderItemId: input.itemId,
-        alreadyPickedQuantity, targetPickedQuantity: input.effectivePickedQuantity,
-      });
     }
     const target = resolved.target!;
     const claim = await context.getLatestClaim(input.beforeItem.orderId);
@@ -1452,6 +1463,7 @@ export class PickingUseCases {
     const wmsProgress = {
       expectedStatus: input.beforeItem.status as "pending" | "in_progress" | "short",
       expectedPickedQuantity: alreadyPickedQuantity,
+      expectedFulfilledQuantity: alreadyFulfilledQuantity,
       targetStatus: input.status,
       targetPickedQuantity: input.effectivePickedQuantity,
       targetShortReason: input.status === "short"
@@ -2859,13 +2871,24 @@ export class PickingUseCases {
       input.beforeItem.id,
     );
     const qtyBefore = Number(input.beforeItem.pickedQuantity ?? 0);
-    const quantity = Math.min(input.requestedQty, qtyBefore);
+    const fulfilledQuantity = Number(input.beforeItem.fulfilledQuantity ?? 0);
+    if (!Number.isSafeInteger(fulfilledQuantity) || fulfilledQuantity < 0 || fulfilledQuantity > qtyBefore) {
+      throw new IntegrityError("Canonical unpick progress has invalid fulfilled custody", {
+        reason: "canonical_fulfilled_custody_invalid",
+        orderId: input.beforeItem.orderId,
+        orderItemId: input.beforeItem.id,
+        pickedQuantity: qtyBefore,
+        fulfilledQuantity,
+      });
+    }
+    const quantity = Math.min(input.requestedQty, qtyBefore - fulfilledQuantity);
     const qtyAfter = qtyBefore - quantity;
     const actor = canonicalPickerActor(input.userId);
     const reason = input.reason?.trim() || "Picker unpick";
     const wmsProgress = {
       expectedStatus: input.beforeItem.status as "completed" | "in_progress" | "short",
       expectedPickedQuantity: qtyBefore,
+      expectedFulfilledQuantity: fulfilledQuantity,
       targetStatus: qtyAfter === 0 ? "pending" as const : "in_progress" as const,
       targetPickedQuantity: qtyAfter,
     };
@@ -2964,7 +2987,19 @@ export class PickingUseCases {
     }
 
     const beforePickedQty = beforeItem.pickedQuantity || 0;
-    if (beforePickedQty <= 0) {
+    const beforeFulfilledQty = beforeItem.fulfilledQuantity || 0;
+    if (!Number.isSafeInteger(beforePickedQty) || beforePickedQty < 0
+      || !Number.isSafeInteger(beforeFulfilledQty) || beforeFulfilledQty < 0
+      || beforeFulfilledQty > beforePickedQty) {
+      throw new IntegrityError(`Cannot unpick item ${itemId}: fulfilled custody is invalid`, {
+        reason: "fulfilled_custody_invalid",
+        orderId: beforeItem.orderId,
+        orderItemId: beforeItem.id,
+        pickedQuantity: beforePickedQty,
+        fulfilledQuantity: beforeFulfilledQty,
+      });
+    }
+    if (beforePickedQty - beforeFulfilledQty <= 0) {
       return { success: true, item: beforeItem, inventory: emptyPickInventoryContext(beforeItem.sku) };
     }
 
@@ -3006,7 +3041,8 @@ export class PickingUseCases {
       }
 
       const lockedItem = await tx.execute(sql`
-        SELECT id, status, picked_quantity, quantity, short_reason, picked_at
+        SELECT id, status, picked_quantity, COALESCE(fulfilled_quantity, 0) AS fulfilled_quantity,
+          quantity, short_reason, picked_at
         FROM wms.order_items
         WHERE id = ${itemId}
         FOR UPDATE
@@ -3019,12 +3055,24 @@ export class PickingUseCases {
       const itemState = lockedItem.rows[0];
       const lockedProjection = projectLockedPickProgress(beforeItem, itemState);
       const lockedPickedQty = lockedProjection.pickedQuantity;
-      if (lockedPickedQty <= 0) {
+      const lockedFulfilledQty = Number(itemState.fulfilled_quantity);
+      if (!Number.isSafeInteger(lockedFulfilledQty) || lockedFulfilledQty < 0
+        || lockedFulfilledQty > lockedPickedQty) {
+        throw new IntegrityError(`Cannot unpick item ${itemId}: locked fulfilled custody is invalid`, {
+          reason: "locked_fulfilled_custody_invalid",
+          orderId: beforeItem.orderId,
+          orderItemId: itemId,
+          pickedQuantity: lockedPickedQty,
+          fulfilledQuantity: itemState.fulfilled_quantity,
+        });
+      }
+      const lockedReversibleQty = lockedPickedQty - lockedFulfilledQty;
+      if (lockedReversibleQty <= 0) {
         return {
-          item: lockedProjection,
+          item: { ...lockedProjection, fulfilledQuantity: lockedFulfilledQty },
           inventory: emptyPickInventoryContext(beforeItem.sku),
-          qtyBefore: 0,
-          qtyAfter: 0,
+          qtyBefore: lockedPickedQty,
+          qtyAfter: lockedPickedQty,
           qtyDelta: 0,
           idempotentReplay: true,
         };
@@ -3032,6 +3080,7 @@ export class PickingUseCases {
       const lockedQuantity = Number(itemState.quantity);
       if (lockedProjection.status !== beforeItem.status
         || lockedPickedQty !== beforePickedQty
+        || lockedFulfilledQty !== beforeFulfilledQty
         || lockedQuantity !== Number(beforeItem.quantity)) {
         throw new IntegrityError(`Item ${itemId} pick progress changed while waiting for its unpick lock`, {
           reason: "unpick_progress_conflict",
@@ -3041,12 +3090,14 @@ export class PickingUseCases {
           actualStatus: lockedProjection.status,
           expectedPickedQuantity: beforePickedQty,
           actualPickedQuantity: lockedPickedQty,
+          expectedFulfilledQuantity: beforeFulfilledQty,
+          actualFulfilledQuantity: lockedFulfilledQty,
           expectedQuantity: beforeItem.quantity,
           actualQuantity: lockedQuantity,
         });
       }
 
-      const lockedActualUnpickQty = Math.min(requestedQty, lockedPickedQty);
+      const lockedActualUnpickQty = Math.min(requestedQty, lockedReversibleQty);
       const newPickedQty = lockedPickedQty - lockedActualUnpickQty;
 
       if (inventoryTracked) {

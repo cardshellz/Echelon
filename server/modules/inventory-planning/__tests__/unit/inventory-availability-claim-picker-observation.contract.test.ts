@@ -63,6 +63,15 @@ describe("canonical claim picker-observation contract", () => {
       ...command,
       wmsProgress: { ...command.wmsProgress, targetShortReason: "x".repeat(1001) },
     }).success).toBe(false);
+    expect(canonicalAvailabilityClaimPickCommandSchema.safeParse({
+      ...command,
+      wmsProgress: { ...command.wmsProgress, expectedPickedQuantity: 1,
+        expectedFulfilledQuantity: 1, targetPickedQuantity: 3 },
+    }).success).toBe(true);
+    expect(canonicalAvailabilityClaimPickCommandSchema.safeParse({
+      ...command,
+      wmsProgress: { ...command.wmsProgress, expectedFulfilledQuantity: 1 },
+    }).success).toBe(false);
   });
 
   it("requires explicit observation evidence that covers the pick", () => {

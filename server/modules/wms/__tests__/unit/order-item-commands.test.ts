@@ -260,7 +260,8 @@ describe("WMS order-item command boundary", () => {
       },
     });
 
-    expect(query.mock.calls[0]?.[0]).toContain("short_reason = CASE WHEN $8::boolean THEN $9::text");
+    expect(query.mock.calls[0]?.[0]).toContain("short_reason = CASE WHEN $9::boolean THEN $10::text");
+    expect(query.mock.calls[0]?.[0]).toContain("COALESCE(fulfilled_quantity, 0) = $8");
     expect(query.mock.calls[0]?.[1]).toEqual([
       "short",
       2,
@@ -268,6 +269,7 @@ describe("WMS order-item command boundary", () => {
       77,
       42,
       "pending",
+      0,
       0,
       true,
       "partial",
@@ -315,6 +317,86 @@ describe("WMS order-item command boundary", () => {
 
     expect(query).toHaveBeenCalledTimes(2);
     expect(query.mock.calls[0]?.[0]).toContain("short_reason = CASE WHEN $5 = 'short' THEN NULL");
-    expect(query.mock.calls[0]?.[1]).toEqual(["in_progress", 1, 77, 42, "short", 2]);
+    expect(query.mock.calls[0]?.[1]).toEqual(["in_progress", 1, 77, 42, "short", 2, 0]);
+  });
+
+  it("preserves fulfilled custody as the atomic floor for canonical pick progress", async () => {
+    const query = vi.fn().mockResolvedValueOnce({ rows: [{ id: 77 }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 });
+
+    await persistCanonicalWmsPickProgress({ query }, {
+      movementType: "pick",
+      movementQuantity: 2,
+      orderId: 42,
+      orderItemId: 77,
+      targetVariantId: 105,
+      warehouseLocationId: 9,
+      occurredAt: new Date("2026-09-11T12:00:00Z"),
+      progress: {
+        expectedStatus: "short",
+        expectedPickedQuantity: 1,
+        expectedFulfilledQuantity: 1,
+        targetStatus: "completed",
+        targetPickedQuantity: 3,
+      },
+    });
+
+    expect(query.mock.calls[0]?.[1]?.[7]).toBe(1);
+    await expect(persistCanonicalWmsPickProgress({ query: vi.fn() }, {
+      movementType: "unpick",
+      movementQuantity: 1,
+      orderId: 42,
+      orderItemId: 77,
+      occurredAt: new Date("2026-09-11T12:00:00Z"),
+      progress: {
+        expectedStatus: "in_progress",
+        expectedPickedQuantity: 1,
+        expectedFulfilledQuantity: 1,
+        targetStatus: "pending",
+        targetPickedQuantity: 0,
+      },
+    })).rejects.toMatchObject({ code: "INVALID_WMS_PICK_PROGRESS" });
+  });
+
+  it("fully returns only unfulfilled canonical custody above a shipped floor", async () => {
+    const query = vi.fn().mockResolvedValueOnce({ rows: [{ id: 77 }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 });
+
+    await persistCanonicalWmsPickProgress({ query }, {
+      movementType: "unpick",
+      movementQuantity: 1,
+      orderId: 42,
+      orderItemId: 77,
+      targetVariantId: 105,
+      unpickedWarehouseLocationIds: [9],
+      occurredAt: new Date("2026-09-11T12:00:00Z"),
+      progress: {
+        expectedStatus: "in_progress",
+        expectedPickedQuantity: 2,
+        expectedFulfilledQuantity: 1,
+        targetStatus: "in_progress",
+        targetPickedQuantity: 1,
+      },
+    });
+
+    expect(query).toHaveBeenCalledTimes(3);
+    expect(query.mock.calls[0]?.[0]).toContain("COALESCE(fulfilled_quantity, 0) = $7");
+    expect(query.mock.calls[0]?.[1]).toEqual(["in_progress", 1, 77, 42, "in_progress", 2, 1]);
+    expect(query.mock.calls[1]?.[0]).toContain("shipment.status IN ('planned', 'queued')");
+
+    await expect(persistCanonicalWmsPickProgress({ query: vi.fn() }, {
+      movementType: "unpick",
+      movementQuantity: 1,
+      orderId: 42,
+      orderItemId: 77,
+      occurredAt: new Date("2026-09-11T12:00:00Z"),
+      progress: {
+        expectedStatus: "in_progress",
+        expectedPickedQuantity: 2,
+        expectedFulfilledQuantity: 1,
+        targetStatus: "in_progress",
+        targetPickedQuantity: 1,
+      },
+    })).rejects.toMatchObject({ code: "INVALID_WMS_UNPICK_PROGRESS" });
   });
 });

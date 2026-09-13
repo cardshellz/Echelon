@@ -151,6 +151,54 @@ describe("InventoryUseCases.recordShipment — deductFromOnHandOnly", () => {
     expect(storage.adjustInventoryLevel).not.toHaveBeenCalled();
   });
 
+  it("classifies an unfunded shipment debit with stable structured evidence", async () => {
+    const { rootDb, storage, lotService } = harness();
+    storage.lockInventoryLevel.mockResolvedValue({
+      id: 10,
+      warehouseLocationId: 20,
+      productVariantId: 30,
+      variantQty: 0,
+      reservedQty: 0,
+      pickedQty: 0,
+      packedQty: 0,
+      backorderQty: 0,
+      updatedAt: new Date(),
+    });
+    const { InventoryUseCases } = await import("../../application/inventory.use-cases");
+    const inventory = new InventoryUseCases(
+      rootDb as any,
+      storage,
+      lotService as any,
+      null as any,
+    );
+
+    await expect(inventory.recordShipment({
+      productVariantId: 30,
+      warehouseLocationId: 20,
+      qty: 1,
+      orderId: 40,
+      orderItemId: 50,
+      shipmentId: "SHIP-HISTORICAL-GAP",
+      shipmentItemId: 60,
+      userId: "tester",
+    })).rejects.toMatchObject({
+      code: "DATA_INTEGRITY_VIOLATION",
+      context: {
+        reason: "shipment_inventory_unavailable",
+        productVariantId: 30,
+        warehouseLocationId: 20,
+        requestedQuantity: 1,
+        pickedQuantityAvailable: 0,
+        pickedQuantityApplied: 0,
+        onHandQuantity: 0,
+        requiredFromOnHand: 1,
+      },
+    });
+
+    expect(storage.adjustInventoryLevel).not.toHaveBeenCalled();
+    expect(storage.createInventoryTransaction).not.toHaveBeenCalled();
+  });
+
   it("uses the physical shipment item as the concession replay key", async () => {
     const { rootDb, storage, lotService, tx } = harness();
     tx.execute.mockImplementation(async (query: any) => {

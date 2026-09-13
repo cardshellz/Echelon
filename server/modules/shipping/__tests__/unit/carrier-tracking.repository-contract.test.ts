@@ -299,6 +299,13 @@ describe("carrier tracking repository concurrency contract", () => {
     expect(repositorySource).toContain(
       "does not have [0-9]+ units available for physical split",
     );
+    expect(repositorySource).toContain("confirmed_historical_inventory_gap");
+    expect(repositorySource).toContain(
+      "Confirmed historical inventory-gap repair requires one exact carrier-dispatch commandId",
+    );
+    expect(repositorySource).toContain(
+      "AND (${commandId}::bigint IS NULL OR command.id = ${commandId})",
+    );
     expect(auditInsert).toBeGreaterThan(-1);
     expect(projectionUpdate).toBeGreaterThan(auditInsert);
     expect(historicalRepairMigrationSource).toContain(
@@ -424,6 +431,9 @@ describe("carrier tracking repository concurrency contract", () => {
     expect(claimSource).toContain("normalizedLeaseOwner.length > 150");
     expect(claimSource).toContain("txid_current()::text");
     expect(claimSource).toContain("|| ':' || command.id::text");
+    expect(claimSource).toContain("LEFT JOIN LATERAL");
+    expect(claimSource).toContain("wms.carrier_dispatch_command_requeues");
+    expect(claimSource).toContain("repair.id AS repair_requeue_id");
   });
 
   it("appends a dispatch attempt before projection finalization and replays its persisted outcome", () => {

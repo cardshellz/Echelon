@@ -59,7 +59,7 @@ function canonicalContext(canonical: Record<string, unknown>): InventoryAvailabi
 describe("PickingUseCases canonical authority routing", () => {
 
   it.each(["strict", "reconcile_picker_observation"] as const)("completes existing partial custody with only the remaining delta (%s)", async (strategy) => {
-    const beforeItem = item({ quantity: 6, pickedQuantity: 2, status: "in_progress", location: "UNASSIGNED" });
+    const beforeItem = item({ quantity: 6, pickedQuantity: 2, fulfilledQuantity: 1, status: "in_progress", location: "UNASSIGNED" });
     const pickClaimLine = vi.fn();
     if (strategy === "reconcile_picker_observation") {
       pickClaimLine.mockRejectedValueOnce(codedError("CLAIM_PICK_LOCATION_SHORTFALL"))
@@ -80,7 +80,7 @@ describe("PickingUseCases canonical authority routing", () => {
       status: "completed", effectivePickedQuantity: 6, warehouseId: 1, userId: "picker", pickMethod: "scan" });
     expect(pickClaimLine).toHaveBeenLastCalledWith(expect.objectContaining({
       quantity: "4", locationStrategy: strategy,
-      wmsProgress: { expectedStatus: "in_progress", expectedPickedQuantity: 2,
+      wmsProgress: { expectedStatus: "in_progress", expectedPickedQuantity: 2, expectedFulfilledQuantity: 1,
         targetStatus: "completed", targetPickedQuantity: 6, targetShortReason: null },
       ...(strategy === "reconcile_picker_observation" ? { observation: expect.objectContaining({ observedPhysicalQty: "4" }) } : {}),
     }));
@@ -118,6 +118,7 @@ describe("PickingUseCases canonical authority routing", () => {
       wmsProgress: {
         expectedStatus: "in_progress",
         expectedPickedQuantity: 2,
+        expectedFulfilledQuantity: 0,
         targetStatus: "short",
         targetPickedQuantity: 4,
         targetShortReason: "partial",
@@ -202,6 +203,7 @@ describe("PickingUseCases canonical authority routing", () => {
       wmsProgress: {
         expectedStatus: "pending",
         expectedPickedQuantity: 0,
+        expectedFulfilledQuantity: 0,
         targetStatus: "in_progress",
         targetPickedQuantity: 1,
         targetShortReason: null,
@@ -410,6 +412,7 @@ describe("PickingUseCases canonical authority routing", () => {
       wmsProgress: {
         expectedStatus: "pending",
         expectedPickedQuantity: 0,
+        expectedFulfilledQuantity: 0,
         targetStatus: "completed",
         targetPickedQuantity: 1,
         targetShortReason: null,
@@ -632,14 +635,16 @@ describe("PickingUseCases canonical authority routing", () => {
   });
 
   it.each([
-    { sourceStatus: "completed", quantity: 2 },
-    { sourceStatus: "short", quantity: 3 },
+    { sourceStatus: "completed", quantity: 2, fulfilledQuantity: 0 },
+    { sourceStatus: "short", quantity: 3, fulfilledQuantity: 0 },
+    { sourceStatus: "in_progress", quantity: 3, fulfilledQuantity: 1 },
   ] as const)("routes a $sourceStatus inventory unpick through exact canonical pick lineage", async ({
     sourceStatus,
     quantity,
+    fulfilledQuantity,
   }) => {
-    const beforeItem = item({ status: sourceStatus, quantity, pickedQuantity: 2 });
-    const updatedItem = item({ status: "in_progress", quantity, pickedQuantity: 1 });
+    const beforeItem = item({ status: sourceStatus, quantity, pickedQuantity: 2, fulfilledQuantity });
+    const updatedItem = item({ status: "in_progress", quantity, pickedQuantity: 1, fulfilledQuantity });
     const canonical = {
       pickClaimLine: vi.fn(),
       unpickClaimLine: vi.fn(async () => ({
@@ -708,6 +713,7 @@ describe("PickingUseCases canonical authority routing", () => {
       wmsProgress: {
         expectedStatus: sourceStatus,
         expectedPickedQuantity: 2,
+        expectedFulfilledQuantity: fulfilledQuantity,
         targetStatus: "in_progress",
         targetPickedQuantity: 1,
       },
@@ -838,6 +844,7 @@ describe("PickingUseCases canonical authority routing", () => {
       wmsProgress: {
         expectedStatus: "in_progress",
         expectedPickedQuantity: 1,
+        expectedFulfilledQuantity: 0,
         targetStatus: "pending",
         targetPickedQuantity: 0,
       },
@@ -849,16 +856,19 @@ describe("PickingUseCases canonical authority routing", () => {
   });
 
   it.each([
-    { name: "backed progress", status: "in_progress", costQuantity: 2, expectedPhysicalUnpick: 1 },
-    { name: "backed short progress", status: "short", costQuantity: 2, expectedPhysicalUnpick: 1 },
-    { name: "one legacy unbacked unit", status: "in_progress", costQuantity: 1, expectedPhysicalUnpick: 0 },
+    { name: "backed progress", status: "in_progress", fulfilledQuantity: 0, requestedQuantity: 1, costQuantity: 2, expectedPhysicalUnpick: 1 },
+    { name: "backed short progress", status: "short", fulfilledQuantity: 0, requestedQuantity: 1, costQuantity: 2, expectedPhysicalUnpick: 1 },
+    { name: "one legacy unbacked unit", status: "in_progress", fulfilledQuantity: 0, requestedQuantity: 1, costQuantity: 1, expectedPhysicalUnpick: 0 },
+    { name: "partly fulfilled progress", status: "in_progress", fulfilledQuantity: 1, requestedQuantity: 2, costQuantity: 2, expectedPhysicalUnpick: 1 },
   ])("decrements $name without manufacturing on-hand inventory", async ({
     status,
+    fulfilledQuantity,
+    requestedQuantity,
     costQuantity,
     expectedPhysicalUnpick,
   }) => {
-    const beforeItem = item({ status, quantity: 3, pickedQuantity: 2 });
-    const updatedItem = item({ status: "in_progress", quantity: 3, pickedQuantity: 1 });
+    const beforeItem = item({ status, quantity: 3, pickedQuantity: 2, fulfilledQuantity });
+    const updatedItem = item({ status: "in_progress", quantity: 3, pickedQuantity: 1, fulfilledQuantity });
     const set = vi.fn(() => ({
       where: vi.fn(() => ({ returning: vi.fn(async () => [updatedItem]) })),
     }));
@@ -868,7 +878,7 @@ describe("PickingUseCases canonical authority routing", () => {
     const legacyDb = {
       execute: vi.fn()
         .mockResolvedValueOnce({ rows: [{ warehouse_status: "in_progress", on_hold: 0 }] })
-        .mockResolvedValueOnce({ rows: [{ id: 500, status, picked_quantity: 2, quantity: 3 }] }),
+        .mockResolvedValueOnce({ rows: [{ id: 500, status, picked_quantity: 2, fulfilled_quantity: fulfilledQuantity, quantity: 3 }] }),
       update,
       select: vi.fn(() => ({
         from: vi.fn(() => ({
@@ -920,7 +930,7 @@ describe("PickingUseCases canonical authority routing", () => {
     );
 
     await expect(service.unpickItem(500, {
-      qty: 1,
+      qty: requestedQuantity,
       userId: "picker-1",
       reason: "correct picked quantity",
     })).resolves.toMatchObject({
@@ -960,6 +970,7 @@ describe("PickingUseCases canonical authority routing", () => {
           id: 500,
           status: "in_progress",
           picked_quantity: 1,
+          fulfilled_quantity: 0,
           quantity: 3,
           short_reason: null,
           picked_at: new Date("2026-09-11T12:00:00.000Z"),
@@ -1041,7 +1052,7 @@ describe("PickingUseCases canonical authority routing", () => {
     const tx = {
       execute: vi.fn()
         .mockResolvedValueOnce({ rows: [{ warehouse_status: "in_progress", on_hold: 0 }] })
-        .mockResolvedValueOnce({ rows: [{ id: 500, status: "completed", picked_quantity: 1, quantity: 1 }] }),
+        .mockResolvedValueOnce({ rows: [{ id: 500, status: "completed", picked_quantity: 1, fulfilled_quantity: 0, quantity: 1 }] }),
       update: vi.fn(() => ({
         set: vi.fn((updates: Record<string, unknown>) => {
           updateCalls.push(updates);

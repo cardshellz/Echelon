@@ -43,13 +43,18 @@ import {
   CarrierDispatchAuthorityError,
   type ConfirmCarrierDispatchInput,
   type ConfirmCarrierDispatchResult,
+  type ReviewedCarrierDispatchRepairAuthorization,
 } from "../shipping/carrier-dispatch-authority";
 import {
   adoptProvenShipStationOrder,
   proveShipStationOrderAdoption,
   resolveShipStationHandoffCommands,
 } from "./shipstation-order-adoption";
-import { ReplacementInventoryUnavailableError, type InventoryUseCases } from "../inventory/application/inventory.use-cases";
+import {
+  ReplacementInventoryUnavailableError,
+  ShipmentInventoryUnavailableError,
+  type InventoryUseCases,
+} from "../inventory/application/inventory.use-cases";
 import type { InventoryShipmentRuntimeInput } from "../inventory-planning/application/inventory-availability-runtime-shipment.service";
 import {
   type ExactWmsShipmentItem,
@@ -88,6 +93,8 @@ const SHIPSTATION_SPLIT_SOURCE = "shipstation_split";
 const SHIPSTATION_COMBINED_CHILD_SOURCE = "shipstation_combined_child";
 const SHIPSTATION_CARRIER_COST_SOURCE = "shipstation_ship_notify";
 const HISTORICAL_REPLACEMENT_INVENTORY_RULE = "historical_replacement_inventory_unproven";
+const HISTORICAL_CUSTOMER_FULFILLMENT_INVENTORY_RULE =
+  "historical_customer_fulfillment_inventory_debit_deferred";
 const SENSITIVE_URL_QUERY_PARAMS = new Set(["secret", "token", "signature", "key"]);
 
 class ShipStationWebhookProcessingError extends Error {
@@ -129,6 +136,9 @@ interface ShipmentAuthorityContext {
   dispatchOccurredAt: Date | null;
   carrierTrackingEventId: number | null;
   carrierDispatchCommandId: number | null;
+  shippingProviderLabelId: number | null;
+  providerLabelId: string | null;
+  reviewedRepair: ReviewedCarrierDispatchRepairAuthorization | null;
   actor: string;
   reason: string;
   contentsAuthority: ShipmentContentsAuthority | null;
@@ -2311,6 +2321,13 @@ export function createShipStationService(
             ${HISTORICAL_REPLACEMENT_INVENTORY_RULE} || ':shipment-item:' || osi.id::text
             AND deferred.status IN ('open', 'acknowledged')
         ) AS historical_inventory_deferred,
+        EXISTS (
+          SELECT 1
+          FROM wms.reconciliation_exceptions deferred_customer_inventory
+          WHERE deferred_customer_inventory.idempotency_key =
+            ${HISTORICAL_CUSTOMER_FULFILLMENT_INVENTORY_RULE}
+              || ':shipment-item:' || osi.id::text
+        ) AS historical_customer_inventory_deferred,
         target_order.warehouse_id,
         -- Pick-derived source bin: the shipment item's own bin, or the pick
         -- ledger backstop for legacy planned rows created before source-bin
@@ -2505,10 +2522,143 @@ export function createShipStationService(
     }));
   }
 
+  function historicalCustomerFulfillmentInventoryKey(shipmentItemId: number): string {
+    return `${HISTORICAL_CUSTOMER_FULFILLMENT_INVENTORY_RULE}:shipment-item:${shipmentItemId}`;
+  }
+
+  function isShipmentInventoryUnavailable(error: unknown): boolean {
+    if (error instanceof ShipmentInventoryUnavailableError) return true;
+    if (error === null || typeof error !== "object") return false;
+    const candidate = error as {
+      code?: unknown;
+      context?: { reason?: unknown };
+    };
+    return candidate.code === "DATA_INTEGRITY_VIOLATION"
+      && candidate.context?.reason === "shipment_inventory_unavailable";
+  }
+
+  function mayDeferHistoricalCustomerFulfillmentInventory(
+    item: any,
+    inventoryItemCount: number,
+    authorityContext: ShipmentAuthorityContext,
+    error: unknown,
+  ): boolean {
+    return inventoryItemCount === 1
+      && item.shipment_purpose === "customer_fulfillment"
+      && item.shipment_item_purpose === "customer_fulfillment"
+      && authorityContext.source === "carrier_tracking_confirmed_dispatch"
+      && authorityContext.carrierTrackingEventId !== null
+      && authorityContext.carrierDispatchCommandId !== null
+      && authorityContext.shippingProviderLabelId !== null
+      && authorityContext.providerLabelId !== null
+      && authorityContext.dispatchOccurredAt !== null
+      && authorityContext.reviewedRepair?.repairCohort ===
+        "confirmed_historical_inventory_gap"
+      && isShipmentInventoryUnavailable(error);
+  }
+
+  async function deferHistoricalCustomerFulfillmentInventory(
+    shipmentId: number,
+    wmsOrderId: number,
+    item: any,
+    authorityContext: ShipmentAuthorityContext,
+    error: unknown,
+  ): Promise<void> {
+    const reviewedRepair = authorityContext.reviewedRepair;
+    if (!reviewedRepair) {
+      throw new Error("Historical customer-fulfillment repair authorization is missing");
+    }
+    const errorRecord = error && typeof error === "object"
+      ? error as { code?: unknown; message?: unknown; context?: unknown }
+      : {};
+    const errorMessage = error instanceof Error
+      ? error.message
+      : typeof errorRecord.message === "string"
+        ? errorRecord.message
+        : String(error);
+    const idempotencyKey = historicalCustomerFulfillmentInventoryKey(Number(item.id));
+    const details = {
+      wmsOrderId,
+      wmsShipmentId: shipmentId,
+      wmsShipmentItemId: Number(item.id),
+      wmsOrderItemId: item.inventory_order_item_id == null
+        ? null
+        : Number(item.inventory_order_item_id),
+      productVariantId: Number(item.product_variant_id),
+      quantity: Number(item.qty),
+      warehouseId: item.warehouse_id == null ? null : Number(item.warehouse_id),
+      warehouseLocationId: item.from_location_id == null
+        ? null
+        : Number(item.from_location_id),
+      trackingNumber: item.shipment_tracking_number ?? null,
+      externalFulfillmentId: item.external_fulfillment_id ?? null,
+      carrierTrackingEventId: authorityContext.carrierTrackingEventId,
+      carrierDispatchCommandId: authorityContext.carrierDispatchCommandId,
+      shippingProviderLabelId: authorityContext.shippingProviderLabelId,
+      providerLabelId: authorityContext.providerLabelId,
+      dispatchOccurredAt: authorityContext.dispatchOccurredAt?.toISOString() ?? null,
+      reviewedRepair: {
+        requeueId: reviewedRepair.requeueId,
+        repairCohort: reviewedRepair.repairCohort,
+        operator: reviewedRepair.operator,
+        reason: reviewedRepair.reason,
+        idempotencyKey: reviewedRepair.idempotencyKey,
+        requeuedAt: reviewedRepair.requeuedAt.toISOString(),
+      },
+      inventoryError: {
+        code: typeof errorRecord.code === "string" ? errorRecord.code : null,
+        message: errorMessage,
+        context: errorRecord.context ?? null,
+      },
+      requiredAction:
+        "Preserve the confirmed historical fulfillment without debiting current inventory. " +
+        "Do not invent a negative balance or consume stock received after the shipment.",
+    };
+    await db.execute(sql`
+      INSERT INTO wms.reconciliation_exceptions (
+        source, classification, rule, status, severity,
+        wms_order_id, wms_shipment_id,
+        external_system, external_shipment_ref,
+        idempotency_key, summary, details
+      )
+      VALUES (
+        'carrier_tracking_confirmed_dispatch', 'historical_ignore',
+        ${HISTORICAL_CUSTOMER_FULFILLMENT_INVENTORY_RULE},
+        'acknowledged', 'info',
+        ${wmsOrderId}, ${shipmentId},
+        'shipstation', ${authorityContext.providerLabelId},
+        ${idempotencyKey},
+        ${`Reviewed carrier-confirmed historical fulfillment was accepted without a current inventory debit for variant ${item.product_variant_id}.`},
+        ${JSON.stringify(details)}::jsonb
+      )
+      ON CONFLICT (idempotency_key)
+        WHERE status IN ('open', 'acknowledged')
+      DO UPDATE SET
+        last_seen_at = NOW(),
+        updated_at = NOW(),
+        occurrence_count = wms.reconciliation_exceptions.occurrence_count + 1,
+        details = wms.reconciliation_exceptions.details || EXCLUDED.details
+    `);
+    console.warn(JSON.stringify({
+      level: "warn",
+      component: "shipstation",
+      code: "HISTORICAL_CUSTOMER_FULFILLMENT_INVENTORY_DEFERRED",
+      wmsShipmentId: shipmentId,
+      wmsShipmentItemId: Number(item.id),
+      wmsOrderId,
+      productVariantId: Number(item.product_variant_id),
+      quantity: Number(item.qty),
+      carrierDispatchCommandId: authorityContext.carrierDispatchCommandId,
+      repairRequeueId: reviewedRepair.requeueId,
+      message: errorMessage,
+    }));
+  }
+
   async function recordInventoryForShipment(
     shipmentId: number,
     wmsOrderId: number,
     items: any[],
+    authorityContext: ShipmentAuthorityContext,
   ): Promise<void> {
     if (!inventoryCore || items.length === 0) {
       return;
@@ -2558,21 +2708,43 @@ export function createShipStationService(
           }
           continue;
         }
-        await inventoryCore.recordShipment({
-          productVariantId: item.product_variant_id,
-          // Legacy hints are not canonical source authority. An absent bin is
-          // resolved (or explicitly rejected) by the authority-aware recorder.
-          warehouseLocationId: item.from_location_id ?? null,
-          qty: item.qty,
-          orderId: wmsOrderId,
-          orderItemId: item.inventory_order_item_id ?? item.order_item_id,
-          shipmentId: String(shipmentId),
-          shipmentItemId: item.id,
-          userId: "system:shipstation:v2",
-          // SHIP-BEFORE-PICK FALLBACK: never-picked items have no picked pool.
-          deductFromOnHandOnly: item.ship_before_pick === true,
-          releaseReservation: item.shipment_item_purpose !== "concession",
-        });
+        if (item.historical_customer_inventory_deferred === true) continue;
+        try {
+          await inventoryCore.recordShipment({
+            productVariantId: item.product_variant_id,
+            // Legacy hints are not canonical source authority. An absent bin is
+            // resolved (or explicitly rejected) by the authority-aware recorder.
+            warehouseLocationId: item.from_location_id ?? null,
+            qty: item.qty,
+            orderId: wmsOrderId,
+            orderItemId: item.inventory_order_item_id ?? item.order_item_id,
+            shipmentId: String(shipmentId),
+            shipmentItemId: item.id,
+            userId: "system:shipstation:v2",
+            // SHIP-BEFORE-PICK FALLBACK: never-picked items have no picked pool.
+            deductFromOnHandOnly: item.ship_before_pick === true,
+            releaseReservation: item.shipment_item_purpose !== "concession",
+          });
+        } catch (error) {
+          if (
+            mayDeferHistoricalCustomerFulfillmentInventory(
+              item,
+              items.length,
+              authorityContext,
+              error,
+            )
+          ) {
+            await deferHistoricalCustomerFulfillmentInventory(
+              shipmentId,
+              wmsOrderId,
+              item,
+              authorityContext,
+              error,
+            );
+            continue;
+          }
+          throw error;
+        }
         console.log(`[ShipStation Webhook V2] Recorded shipment for variant ${item.product_variant_id} qty ${item.qty} (wmsOrder ${wmsOrderId})`);
       }
     } catch (invErr: any) {
@@ -3237,6 +3409,7 @@ export function createShipStationService(
           wmsShipmentRow.id,
           wmsOrderId,
           inventoryItemsToRecord,
+          authorityContext,
         );
       }
       console.log(
@@ -3264,7 +3437,12 @@ export function createShipStationService(
       // posted. Exact WMS source identity is sufficient for the inventory owner
       // to authorize or reject this command; do not silently skip it here.
       if (event.kind === "shipped" && inventoryCore) {
-        await recordInventoryForShipment(wmsShipmentRow.id, wmsOrderId, inventoryItemsToRecord);
+        await recordInventoryForShipment(
+          wmsShipmentRow.id,
+          wmsOrderId,
+          inventoryItemsToRecord,
+          authorityContext,
+        );
       }
       return {
         processed: true,
@@ -3301,6 +3479,7 @@ export function createShipStationService(
         wmsShipmentRow.id,
         wmsOrderId,
         inventoryItemsToRecord,
+        authorityContext,
       );
     }
 
@@ -4013,6 +4192,9 @@ export function createShipStationService(
       dispatchOccurredAt: null,
       carrierTrackingEventId: null,
       carrierDispatchCommandId: null,
+      shippingProviderLabelId: null,
+      providerLabelId: null,
+      reviewedRepair: null,
       actor: operator,
       reason,
       contentsAuthority,
@@ -4287,6 +4469,9 @@ export function createShipStationService(
         dispatchOccurredAt: input.dispatchOccurredAt,
         carrierTrackingEventId: input.carrierTrackingEventId,
         carrierDispatchCommandId: input.commandId,
+        shippingProviderLabelId: input.shippingProviderLabelId,
+        providerLabelId: input.providerLabelId,
+        reviewedRepair: input.reviewedRepair ?? null,
         actor: "system:carrier_tracking",
         reason: "carrier_possession_confirmed",
         contentsAuthority: normalizeProviderExactShipmentContentsAuthority(
@@ -4343,6 +4528,12 @@ export function createShipStationService(
         carrierTrackingEventId: input.carrierTrackingEventId,
         carrierDispatchCommandId: input.commandId,
         dispatchOccurredAt: input.dispatchOccurredAt.toISOString(),
+        reviewedRepair: input.reviewedRepair
+          ? {
+              ...input.reviewedRepair,
+              requeuedAt: input.reviewedRepair.requeuedAt.toISOString(),
+            }
+          : null,
       }),
     };
   }

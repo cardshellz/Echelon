@@ -89,7 +89,7 @@ describe("assembly execution read/command composition", () => {
       fence: { taskId: "1", expectedVersion: 3, confirmPhysicalOutput: true } };
     await h.service.pickOutput("assembler", "1", input); await h.service.pickOutput("assembler", "1", input);
     expect(h.claims.pickClaimLine.mock.calls[0]).toEqual(h.claims.pickClaimLine.mock.calls[1]);
-    expect(h.claims.pickClaimLine).toHaveBeenCalledWith(expect.objectContaining({ locationStrategy: "strict", quantity: "2", actor: "assembler", wmsProgress: { expectedStatus: "pending", expectedPickedQuantity: 0, targetStatus: "completed", targetPickedQuantity: 2 } }));
+    expect(h.claims.pickClaimLine).toHaveBeenCalledWith(expect.objectContaining({ locationStrategy: "strict", quantity: "2", actor: "assembler", wmsProgress: { expectedStatus: "pending", expectedPickedQuantity: 0, expectedFulfilledQuantity: 0, targetStatus: "completed", targetPickedQuantity: 2 } }));
     expect(readAssemblyOrder).not.toHaveBeenCalled();
   });
   it("rejects forged job IDs and malformed quantities before canonical posting", async () => {

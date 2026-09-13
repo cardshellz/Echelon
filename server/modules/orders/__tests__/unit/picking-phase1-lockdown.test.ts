@@ -108,7 +108,7 @@ describe("picking phase 1 mutation lockdown", () => {
     const tx = {
       execute: vi.fn()
         .mockResolvedValueOnce({ rows: [{ warehouse_status: "in_progress", on_hold: 0 }] })
-        .mockResolvedValueOnce({ rows: [{ id: beforeItem.id, status: "completed", picked_quantity: 2, quantity: 2 }] }),
+        .mockResolvedValueOnce({ rows: [{ id: beforeItem.id, status: "completed", picked_quantity: 2, fulfilled_quantity: 0, quantity: 2 }] }),
       update: vi.fn(() => ({
         set: vi.fn((updates: Record<string, any>) => {
           updateCalls.push(updates);

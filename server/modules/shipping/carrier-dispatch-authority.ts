@@ -1,3 +1,20 @@
+export type HistoricalCarrierDispatchRepairCohort =
+  | "active_combined_package_resolution"
+  | "aggregate_package_identity_conflict"
+  | "immutable_command_request_conflict"
+  | "package_resolution_retry"
+  | "legacy_outbound_shipment_identity_conflict"
+  | "confirmed_historical_inventory_gap";
+
+export interface ReviewedCarrierDispatchRepairAuthorization {
+  requeueId: number;
+  repairCohort: HistoricalCarrierDispatchRepairCohort;
+  operator: string;
+  reason: string;
+  idempotencyKey: string;
+  requeuedAt: Date;
+}
+
 export interface ConfirmCarrierDispatchInput {
   commandId: number;
   shippingProviderLabelId: number;
@@ -11,6 +28,7 @@ export interface ConfirmCarrierDispatchInput {
   carrier: string | null;
   serviceCode: string | null;
   dispatchOccurredAt: Date;
+  reviewedRepair?: ReviewedCarrierDispatchRepairAuthorization | null;
 }
 
 export interface ConfirmCarrierDispatchResult {

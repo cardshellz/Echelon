@@ -459,7 +459,7 @@ dbDescribe.sequential("verified opening persistence with real PostgreSQL admissi
     expect((await pool.query("SELECT count(*)::integer AS count FROM inventory.availability_cutover_opening_snapshots")).rows[0].count).toBe(0);
   });
 
-  it("does not persist a partly fulfilled line that the current picker cannot safely adopt", async () => {
+  it("persists a partly fulfilled line as remaining demand plus current unfulfilled pick custody", async () => {
     await pool.query(`UPDATE wms.order_items SET picked_quantity=4,fulfilled_quantity=2 WHERE id=11;
       UPDATE inventory.inventory_levels SET reserved_qty=2 WHERE id=10;
       UPDATE inventory.inventory_lots SET qty_reserved=2 WHERE id=4`);
@@ -468,11 +468,14 @@ dbDescribe.sequential("verified opening persistence with real PostgreSQL admissi
       allocations: [{ inventoryLevelId: 10, lots: [{ inventoryLotId: 4, reservedQty: "2", pickedQty: "2", originalCostIds: [9] }] }] };
     const before = await immutableBusinessState();
     const assessment = await service.preview(input.verification, "operator");
-    expect(assessment).toMatchObject({ ready: false, plan: { orders: [] } });
-    expect(assessment.blockers).toContainEqual(expect.objectContaining({ code: "OPENING_PARTIAL_FULFILLMENT_RUNTIME_UNSUPPORTED" }));
-    await expect(service.save(input, "operator")).rejects.toMatchObject({ code: "CUTOVER_OPENING_BLOCKED" });
+    expect(assessment).toMatchObject({ ready: true, blockers: [], plan: { orders: [{ orderId:1, lines:[{
+      orderItemId:11, requestedQty:"4", reservedQty:"2", pickedQty:"2", freshDemandQty:"0",
+    }] }] } });
+    await expect(service.save(input, "operator")).resolves.toMatchObject({
+      alreadyApplied:false, stockChanged:false, authorityChanged:false,
+    });
     expect(await immutableBusinessState()).toEqual(before);
-    expect((await pool.query("SELECT count(*)::integer AS count FROM inventory.availability_cutover_opening_snapshots")).rows[0].count).toBe(0);
+    expect((await pool.query("SELECT count(*)::integer AS count FROM inventory.availability_cutover_opening_snapshots")).rows[0].count).toBe(1);
   });
 
   it("does not hide an unshipped source by verifying its order line has zero remaining demand", async () => {
