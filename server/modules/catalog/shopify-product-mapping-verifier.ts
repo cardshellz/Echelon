@@ -92,6 +92,10 @@ export interface ShopifyProductMappingVerifier {
     remoteProductExists: boolean;
     liveVariantIds: string[];
   }>;
+  lookupVariantProductIds(
+    credentials: ShopifyMappingCredentials,
+    variantIds: string[],
+  ): Promise<Map<string, string | null>>;
 }
 
 type FetchLike = (
@@ -386,5 +390,48 @@ export function createShopifyProductMappingVerifier(input: {
     return { remoteProductExists, liveVariantIds };
   }
 
-  return { lookupProducts, verifyProductAndVariants };
+  async function lookupVariantProductIds(
+    credentials: ShopifyMappingCredentials,
+    variantIds: string[],
+  ): Promise<Map<string, string | null>> {
+    const uniqueVariantIds = [...new Set(variantIds)].sort((left, right) =>
+      left.localeCompare(right, "en", { numeric: true }));
+    const result = new Map<string, string | null>();
+
+    for (let index = 0; index < uniqueVariantIds.length; index += GRAPHQL_BATCH_SIZE) {
+      const batch = uniqueVariantIds.slice(index, index + GRAPHQL_BATCH_SIZE);
+      const nodes = await requestNodes(credentials, batch.map(variantGid));
+      nodes.forEach((node, nodeIndex) => {
+        const requestedVariantId = batch[nodeIndex];
+        if (node === null) {
+          result.set(requestedVariantId, null);
+          return;
+        }
+        const returnedVariantId = normalizeShopifyId(node.id);
+        const returnedProductId = normalizeShopifyId(node.product?.id);
+        if (
+          node.__typename !== "ProductVariant"
+          || returnedVariantId !== requestedVariantId
+          || returnedProductId === null
+        ) {
+          throw new ShopifyMappingVerificationError(
+            "SHOPIFY_MAPPING_RESPONSE_INVALID",
+            "Shopify returned an unexpected node for a variant-parent lookup",
+            502,
+            {
+              requestedVariantId,
+              returnedType: node.__typename ?? null,
+              returnedVariantId,
+              returnedProductId,
+            },
+          );
+        }
+        result.set(requestedVariantId, returnedProductId);
+      });
+    }
+
+    return result;
+  }
+
+  return { lookupProducts, verifyProductAndVariants, lookupVariantProductIds };
 }
