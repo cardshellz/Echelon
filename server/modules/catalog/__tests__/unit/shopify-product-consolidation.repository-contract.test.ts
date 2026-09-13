@@ -14,9 +14,11 @@ describe("Shopify product consolidation repository contract", () => {
   it("orders command, mapping, product, and variant locks before evidence", () => {
     const commandLock = source.indexOf("shopify-product-consolidation-command:");
     const mappingLock = source.indexOf("shopify-product-mapping:");
-    const productLock = source.indexOf("pg_advisory_xact_lock(918422");
+    const productLock = source.indexOf("await inventoryPlanning.lockProducts");
     const variantLock = source.indexOf("pg_advisory_xact_lock(918424");
-    const tableFence = source.indexOf("LOCK TABLE");
+    const tableFenceBeforePlanning = source.indexOf("LOCK TABLE");
+    const planningFence = source.indexOf("await inventoryPlanning.fenceDependencies");
+    const tableFenceAfterPlanning = source.indexOf("LOCK TABLE", planningFence);
     const lockedEvidence = source.indexOf("const local = await loadLocalEvidence");
 
     expect(source).toContain("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE");
@@ -24,17 +26,25 @@ describe("Shopify product consolidation repository contract", () => {
     expect(mappingLock).toBeGreaterThan(commandLock);
     expect(productLock).toBeGreaterThan(mappingLock);
     expect(variantLock).toBeGreaterThan(productLock);
-    expect(tableFence).toBeGreaterThan(variantLock);
-    expect(lockedEvidence).toBeGreaterThan(tableFence);
+    expect(tableFenceBeforePlanning).toBeGreaterThan(variantLock);
+    expect(planningFence).toBeGreaterThan(tableFenceBeforePlanning);
+    expect(tableFenceAfterPlanning).toBeGreaterThan(planningFence);
+    expect(lockedEvidence).toBeGreaterThan(tableFenceAfterPlanning);
   });
 
   it("fences every runtime dependency used by the locked evidence query", () => {
-    const tableFenceStart = source.indexOf("LOCK TABLE");
-    const tableFenceEnd = source.indexOf("IN SHARE ROW EXCLUSIVE MODE", tableFenceStart);
-    const tableFence = source.slice(tableFenceStart, tableFenceEnd);
+    const firstFenceStart = source.indexOf("LOCK TABLE");
+    const firstFenceEnd = source.indexOf("IN SHARE ROW EXCLUSIVE MODE", firstFenceStart);
+    const planningFence = source.indexOf("await inventoryPlanning.fenceDependencies");
+    const secondFenceStart = source.indexOf("LOCK TABLE", planningFence);
+    const secondFenceEnd = source.indexOf("IN SHARE ROW EXCLUSIVE MODE", secondFenceStart);
+    const tableFence = source.slice(firstFenceStart, firstFenceEnd)
+      + source.slice(secondFenceStart, secondFenceEnd);
 
-    expect(tableFenceStart).toBeGreaterThan(-1);
-    expect(tableFenceEnd).toBeGreaterThan(tableFenceStart);
+    expect(firstFenceStart).toBeGreaterThan(-1);
+    expect(firstFenceEnd).toBeGreaterThan(firstFenceStart);
+    expect(secondFenceStart).toBeGreaterThan(planningFence);
+    expect(secondFenceEnd).toBeGreaterThan(secondFenceStart);
     for (const table of [
       "channels.channel_pricing",
       "channels.channel_pricing_rules",
@@ -82,5 +92,24 @@ describe("Shopify product consolidation repository contract", () => {
     expect(source).toContain("SHOPIFY_PRODUCT_CONSOLIDATION_QUANTITY_INVARIANT_FAILED");
     expect(source).toContain("remoteMutationPerformed: false");
     expect(source).toContain("inventoryQuantityMutationPerformed: false");
+  });
+
+  it("uses the inventory-planning owner instead of reading or writing its tables", () => {
+    for (const table of [
+      "inventory.transformation_model_heads",
+      "inventory.transformation_model_versions",
+      "inventory.transformation_model_paths",
+      "inventory.transformation_recipe_bindings",
+      "inventory.transformation_recipe_component_snapshots",
+      "inventory.availability_activation_freezes",
+      "inventory.availability_claims",
+      "inventory.channel_exposure_policy_heads",
+      "inventory.channel_exposure_policy_versions",
+      "inventory.inventory_publication_outbox",
+    ]) {
+      expect(source).not.toContain(table);
+    }
+    expect(source).toContain("inventoryPlanning.loadEvidence");
+    expect(source).toContain("inventoryPlanning.invalidateDrafts");
   });
 });

@@ -1,10 +1,19 @@
-import { createHash } from "node:crypto";
 import { sql } from "drizzle-orm";
 
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { db } from "../../db";
 import { persistAuditEvent } from "../../infrastructure/auditLogger";
 import { sqlIntegerArray } from "../../infrastructure/postgres-array";
+import {
+  CatalogConsolidationInventoryPlanningError,
+  type CatalogConsolidationInventoryPlanningEvidence,
+  type CatalogConsolidationInventoryPlanningPort,
+  type CatalogConsolidationProductPlanningEvidence,
+  type CatalogConsolidationVariantPlanningEvidence,
+} from "../inventory-planning/application/catalog-consolidation-inventory-planning.port";
+import {
+  PostgresCatalogConsolidationInventoryPlanningRepository,
+} from "../inventory-planning/infrastructure/catalog-consolidation-inventory-planning.repository";
 import { normalizeShopifyId } from "./shopify-product-mapping.domain";
 import { normalizeShopifyAdminDomain } from "./shopify-product-mapping-reconciliation.domain";
 import {
@@ -221,8 +230,6 @@ async function loadProductRows(
       product.inventory_strategy,
       product.base_unit,
       product.inventory_type,
-      model_head.active_model_id,
-      model_head.draft_model_id,
       (
         SELECT COUNT(*)::integer
         FROM inventory.replen_rules AS rule
@@ -242,13 +249,6 @@ async function loadProductRows(
         + (SELECT COUNT(*) FROM channels.channel_allocation_rules AS rule
           WHERE rule.product_id = product.id)
       )::integer AS legacy_channel_configuration_count,
-      (
-        SELECT COUNT(*)::integer
-        FROM inventory.channel_exposure_policy_heads AS head
-        JOIN inventory.channel_exposure_policy_versions AS policy
-          ON policy.id = head.active_policy_id
-        WHERE policy.product_id = product.id
-      ) AS active_channel_exposure_policy_count,
       (
         SELECT COUNT(*)::integer
         FROM marketplace.listing_scopes AS scope
@@ -296,8 +296,6 @@ async function loadProductRows(
     FROM catalog.products AS product
     LEFT JOIN catalog.shipping_groups AS shipping_group
       ON shipping_group.id = product.shipping_group_id
-    LEFT JOIN inventory.transformation_model_heads AS model_head
-      ON model_head.product_id = product.id
     WHERE product.id = ANY(${sqlIntegerArray(productIds)})
     ORDER BY product.id
   `));
@@ -350,24 +348,6 @@ async function loadVariantRows(
         ORDER BY listing.external_variant_id
       ) AS listing_variant_ids,
       (
-        SELECT COUNT(DISTINCT claim.id)::integer
-        FROM inventory.availability_claims AS claim
-        WHERE claim.status = 'active'
-          AND (
-            EXISTS (SELECT 1 FROM inventory.availability_claim_lines AS line
-              WHERE line.claim_id = claim.id AND line.target_variant_id = variant.id)
-            OR EXISTS (SELECT 1 FROM inventory.availability_claim_resources AS resource
-              WHERE resource.claim_id = claim.id AND resource.source_variant_id = variant.id)
-            OR EXISTS (SELECT 1 FROM inventory.availability_claim_operations AS operation
-              WHERE operation.claim_id = claim.id AND operation.destination_variant_id = variant.id)
-            OR EXISTS (
-              SELECT 1
-              FROM inventory.availability_claim_operation_inputs AS input
-              WHERE input.claim_id = claim.id AND input.source_variant_id = variant.id
-            )
-          )
-      ) AS active_claim_count,
-      (
         (SELECT COUNT(DISTINCT build_order.id)
           FROM inventory.build_orders AS build_order
           LEFT JOIN inventory.build_order_components AS component
@@ -379,15 +359,6 @@ async function loadVariantRows(
           WHERE task.status NOT IN ('completed', 'cancelled')
             AND (task.source_product_variant_id = variant.id
               OR task.pick_product_variant_id = variant.id))
-        + (SELECT COUNT(DISTINCT work.id)
-          FROM warehouse.work_items AS work
-          JOIN inventory.availability_claim_operations AS operation
-            ON operation.id = work.claim_operation_id
-          LEFT JOIN inventory.availability_claim_operation_inputs AS input
-            ON input.claim_operation_id = operation.id
-          WHERE work.state NOT IN ('completed', 'cancelled')
-            AND (operation.destination_variant_id = variant.id
-              OR input.source_variant_id = variant.id))
         + (SELECT COUNT(*)
           FROM oms.oms_order_lines AS order_line
           JOIN oms.oms_orders AS orders ON orders.id = order_line.order_id
@@ -408,10 +379,6 @@ async function loadVariantRows(
             ON shipment.id = shipment_item.shipment_id
           WHERE shipment_item.product_variant_id = variant.id
             AND shipment.status NOT IN ('shipped', 'voided', 'cancelled', 'returned', 'lost'))
-        + (SELECT COUNT(*)
-          FROM inventory.inventory_publication_outbox AS publication
-          WHERE publication.product_variant_id = variant.id
-            AND publication.state NOT IN ('verified', 'dead_letter', 'superseded', 'cancelled'))
         + (SELECT COUNT(*)
           FROM channels.channel_variant_availability_sync AS availability
           WHERE availability.product_variant_id = variant.id
@@ -507,13 +474,6 @@ async function loadVariantRows(
         + (SELECT COUNT(*) FROM inventory.build_recipe_components AS component
           WHERE component.component_variant_id = variant.id)
       )::integer AS build_recipe_reference_count,
-      (
-        SELECT COUNT(DISTINCT model.id)::integer
-        FROM inventory.transformation_model_versions AS model
-        JOIN inventory.transformation_model_paths AS path ON path.model_id = model.id
-        WHERE model.lifecycle_status <> 'draft'
-          AND (path.source_variant_id = variant.id OR path.destination_variant_id = variant.id)
-      ) AS non_draft_transformation_reference_count,
       (SELECT COUNT(*)::integer FROM procurement.demand_event_lines AS line
         WHERE line.product_variant_id = variant.id AND line.product_id = variant.product_id)
         AS demand_event_line_count,
@@ -526,18 +486,7 @@ async function loadVariantRows(
         AS listing_publication_member_count,
       (SELECT COUNT(*)::integer FROM marketplace.listing_verification_members AS member
         WHERE member.product_variant_id = variant.id AND member.product_id = variant.product_id)
-        AS listing_verification_member_count,
-      (SELECT COUNT(*)::integer FROM inventory.channel_exposure_policy_versions AS policy
-        WHERE policy.product_variant_id = variant.id AND policy.product_id = variant.product_id)
-        AS channel_exposure_policy_version_count,
-      (SELECT COUNT(*)::integer FROM inventory.transformation_recipe_bindings AS binding
-        WHERE binding.output_variant_id_snapshot = variant.id
-          AND binding.output_product_id_snapshot = variant.product_id)
-        AS transformation_recipe_binding_count,
-      (SELECT COUNT(*)::integer FROM inventory.transformation_recipe_component_snapshots AS component
-        WHERE component.component_variant_id = variant.id
-          AND component.component_product_id = variant.product_id)
-        AS transformation_recipe_component_snapshot_count
+        AS listing_verification_member_count
     FROM catalog.product_variants AS variant
     LEFT JOIN LATERAL (
       SELECT
@@ -554,8 +503,19 @@ async function loadVariantRows(
   `));
 }
 
-function mapVariant(row: Record<string, unknown>): ShopifyProductConsolidationVariantEvidence {
+function mapVariant(
+  row: Record<string, unknown>,
+  planning: CatalogConsolidationVariantPlanningEvidence,
+): ShopifyProductConsolidationVariantEvidence {
   const id = positiveInteger(row.id, "variant id");
+  if (planning.variantId !== id) {
+    throw new ShopifyMappingReconciliationError(
+      "SHOPIFY_PRODUCT_CONSOLIDATION_EVIDENCE_INVALID",
+      "Inventory-planning evidence was associated with the wrong variant.",
+      500,
+      { variantId: id, planningVariantId: planning.variantId },
+    );
+  }
   return {
     id,
     productId: positiveInteger(row.product_id, `variant ${id} product id`),
@@ -580,8 +540,11 @@ function mapVariant(row: Record<string, unknown>): ShopifyProductConsolidationVa
     pickedQty: integerQuantity(row.picked_qty, `variant ${id} picked quantity`),
     packedQty: integerQuantity(row.packed_qty, `variant ${id} packed quantity`),
     backorderQty: integerQuantity(row.backorder_qty, `variant ${id} backorder quantity`),
-    activeClaimCount: nonnegativeInteger(row.active_claim_count, `variant ${id} active claim count`),
-    openWorkReferenceCount: nonnegativeInteger(row.open_work_reference_count, `variant ${id} open work count`),
+    activeClaimCount: planning.activeClaimCount,
+    openWorkReferenceCount: nonnegativeInteger(
+      row.open_work_reference_count,
+      `variant ${id} open work count`,
+    ) + planning.openPlanningWorkReferenceCount,
     activeChannelFeedCount: nonnegativeInteger(row.active_channel_feed_count, `variant ${id} active feed count`),
     runtimeConfigurationReferences: {
       channel_reservations: nonnegativeInteger(row.channel_reservation_count, `variant ${id} channel reservation count`),
@@ -613,21 +576,19 @@ function mapVariant(row: Record<string, unknown>): ShopifyProductConsolidationVa
       `variant ${id} procurement vendor-product count`,
     ),
     buildRecipeReferenceCount: nonnegativeInteger(row.build_recipe_reference_count, `variant ${id} build recipe count`),
-    nonDraftTransformationReferenceCount: nonnegativeInteger(
-      row.non_draft_transformation_reference_count,
-      `variant ${id} transformation history count`,
-    ),
+    nonDraftTransformationReferenceCount:
+      planning.nonDraftTransformationReferenceCount,
     immutableProductReferences: {
       demand_event_lines: nonnegativeInteger(row.demand_event_line_count, `variant ${id} demand history count`),
       purchase_forecast_observations: nonnegativeInteger(row.purchase_forecast_observation_count, `variant ${id} forecast history count`),
       listing_publication_members: nonnegativeInteger(row.listing_publication_member_count, `variant ${id} listing publication count`),
       listing_verification_members: nonnegativeInteger(row.listing_verification_member_count, `variant ${id} listing verification count`),
-      channel_exposure_policy_versions: nonnegativeInteger(row.channel_exposure_policy_version_count, `variant ${id} exposure policy count`),
-      transformation_recipe_bindings: nonnegativeInteger(row.transformation_recipe_binding_count, `variant ${id} recipe binding count`),
-      transformation_recipe_component_snapshots: nonnegativeInteger(
-        row.transformation_recipe_component_snapshot_count,
-        `variant ${id} recipe component snapshot count`,
-      ),
+      channel_exposure_policy_versions:
+        planning.channelExposurePolicyVersionCount,
+      transformation_recipe_bindings:
+        planning.transformationRecipeBindingCount,
+      transformation_recipe_component_snapshots:
+        planning.transformationRecipeComponentSnapshotCount,
     },
   };
 }
@@ -635,8 +596,17 @@ function mapVariant(row: Record<string, unknown>): ShopifyProductConsolidationVa
 function mapProduct(
   row: Record<string, unknown>,
   variants: readonly ShopifyProductConsolidationVariantEvidence[],
+  planning: CatalogConsolidationProductPlanningEvidence,
 ): ShopifyProductConsolidationProductEvidence {
   const id = positiveInteger(row.id, "product id");
+  if (planning.productId !== id) {
+    throw new ShopifyMappingReconciliationError(
+      "SHOPIFY_PRODUCT_CONSOLIDATION_EVIDENCE_INVALID",
+      "Inventory-planning evidence was associated with the wrong product.",
+      500,
+      { productId: id, planningProductId: planning.productId },
+    );
+  }
   return {
     id,
     sku: nullableText(row.sku),
@@ -648,18 +618,16 @@ function mapProduct(
     inventoryStrategy: text(row.inventory_strategy, `product ${id} inventory strategy`),
     baseUnit: text(row.base_unit, `product ${id} base unit`),
     inventoryType: text(row.inventory_type, `product ${id} inventory type`),
-    activeTransformationModelId: nullablePositiveInteger(row.active_model_id, `product ${id} active model id`),
-    draftTransformationModelId: nullablePositiveInteger(row.draft_model_id, `product ${id} draft model id`),
+    activeTransformationModelId: planning.activeTransformationModelId,
+    draftTransformationModelId: planning.draftTransformationModelId,
     activeReplenRuleCount: nonnegativeInteger(row.active_replen_rule_count, `product ${id} replen rule count`),
     activeReplenTaskCount: nonnegativeInteger(row.active_replen_task_count, `product ${id} replen task count`),
     legacyChannelConfigurationCount: nonnegativeInteger(
       row.legacy_channel_configuration_count,
       `product ${id} legacy channel configuration count`,
     ),
-    activeChannelExposurePolicyCount: nonnegativeInteger(
-      row.active_channel_exposure_policy_count,
-      `product ${id} exposure policy count`,
-    ),
+    activeChannelExposurePolicyCount:
+      planning.activeChannelExposurePolicyCount,
     activeMarketplaceListingScopeCount: nonnegativeInteger(
       row.active_marketplace_listing_scope_count,
       `product ${id} marketplace scope count`,
@@ -690,6 +658,7 @@ function mapProduct(
 
 async function loadLocalEvidence(
   database: QueryDatabase,
+  inventoryPlanning: CatalogConsolidationInventoryPlanningPort,
   input: {
     channelId: number;
     shopDomain: string;
@@ -708,22 +677,47 @@ async function loadLocalEvidence(
   ])].sort((left, right) => left - right);
   const productRows = await loadProductRows(database, productIds);
   const variantRows = await loadVariantRows(database, productIds, input.channelId);
-  const freezeRows = rows(await database.execute(sql`
-    SELECT activation_run_id::text AS activation_run_id
-    FROM inventory.availability_activation_freezes
-    WHERE released_at IS NULL
-    ORDER BY activation_run_id
-    LIMIT 2
-  `));
-  if (freezeRows.length > 1) {
-    throw new ShopifyMappingReconciliationError(
-      "SHOPIFY_PRODUCT_CONSOLIDATION_EVIDENCE_INVALID",
-      "More than one inventory cutover freeze is active",
-      500,
-    );
-  }
-  const variants = variantRows.map(mapVariant);
-  const products = productRows.map((row) => mapProduct(row, variants));
+  const planningEvidence = await loadInventoryPlanningEvidence(
+    inventoryPlanning,
+    database,
+    productIds,
+    variantRows.map((row) => ({
+      variantId: positiveInteger(row.id, "planning evidence variant id"),
+      productId: positiveInteger(row.product_id, "planning evidence variant product id"),
+    })),
+  );
+  const planningVariants = new Map(
+    planningEvidence.variants.map((variant) => [variant.variantId, variant] as const),
+  );
+  const variants = variantRows.map((row) => {
+    const variantId = positiveInteger(row.id, "variant id");
+    const planning = planningVariants.get(variantId);
+    if (!planning) {
+      throw new ShopifyMappingReconciliationError(
+        "SHOPIFY_PRODUCT_CONSOLIDATION_EVIDENCE_INVALID",
+        "Inventory-planning evidence is missing a requested variant.",
+        500,
+        { variantId },
+      );
+    }
+    return mapVariant(row, planning);
+  });
+  const planningProducts = new Map(
+    planningEvidence.products.map((product) => [product.productId, product] as const),
+  );
+  const products = productRows.map((row) => {
+    const productId = positiveInteger(row.id, "product id");
+    const planning = planningProducts.get(productId);
+    if (!planning) {
+      throw new ShopifyMappingReconciliationError(
+        "SHOPIFY_PRODUCT_CONSOLIDATION_EVIDENCE_INVALID",
+        "Inventory-planning evidence is missing a requested product.",
+        500,
+        { productId },
+      );
+    }
+    return mapProduct(row, variants, planning);
+  });
   const loadedProductIds = new Set(products.map((product) => product.id));
   const missingProductIds = productIds.filter(
     (productId) => !loadedProductIds.has(productId),
@@ -751,7 +745,7 @@ async function loadLocalEvidence(
     remoteProductTitle: null,
     ownerProductIds,
     canonicalProductId: input.canonicalProductId,
-    activeCutoverFreezeId: nullableText(freezeRows[0]?.activation_run_id),
+    activeCutoverFreezeId: planningEvidence.activeCutoverFreezeId,
     products,
     remoteVariantProductIds: {},
   });
@@ -772,8 +766,56 @@ async function loadLocalEvidence(
   return { ...local, externalVariantIds };
 }
 
-function sha256Json(value: unknown): string {
-  return createHash("sha256").update(canonicalJson(value)).digest("hex");
+async function loadInventoryPlanningEvidence(
+  inventoryPlanning: CatalogConsolidationInventoryPlanningPort,
+  client: QueryDatabase,
+  productIds: readonly number[],
+  variants: readonly { variantId: number; productId: number }[],
+): Promise<CatalogConsolidationInventoryPlanningEvidence> {
+  try {
+    return await inventoryPlanning.loadEvidence({ client, productIds, variants });
+  } catch (error: unknown) {
+    rethrowInventoryPlanningError(error);
+  }
+}
+
+async function invalidateInventoryPlanningDrafts(
+  inventoryPlanning: CatalogConsolidationInventoryPlanningPort,
+  input: Parameters<CatalogConsolidationInventoryPlanningPort["invalidateDrafts"]>[0],
+) {
+  try {
+    return await inventoryPlanning.invalidateDrafts(input);
+  } catch (error: unknown) {
+    rethrowInventoryPlanningError(error);
+  }
+}
+
+function rethrowInventoryPlanningError(error: unknown): never {
+  if (!(error instanceof CatalogConsolidationInventoryPlanningError)) throw error;
+  const mapped = {
+    INVENTORY_PLANNING_CONSOLIDATION_EVIDENCE_INVALID: {
+      code: "SHOPIFY_PRODUCT_CONSOLIDATION_EVIDENCE_INVALID",
+      statusCode: 500,
+    },
+    INVENTORY_PLANNING_CONSOLIDATION_DRAFT_STALE: {
+      code: "SHOPIFY_PRODUCT_CONSOLIDATION_PREVIEW_STALE",
+      statusCode: 409,
+    },
+    INVENTORY_PLANNING_CONSOLIDATION_DRAFT_VERSION_EXHAUSTED: {
+      code: "SHOPIFY_PRODUCT_CONSOLIDATION_DRAFT_VERSION_EXHAUSTED",
+      statusCode: 409,
+    },
+    INVENTORY_PLANNING_CONSOLIDATION_DRAFT_NOT_REPLACED: {
+      code: "SHOPIFY_PRODUCT_CONSOLIDATION_DRAFT_NOT_REPLACED",
+      statusCode: 500,
+    },
+  }[error.code];
+  throw new ShopifyMappingReconciliationError(
+    mapped.code,
+    error.message,
+    mapped.statusCode,
+    { inventoryPlanningCode: error.code, ...error.context },
+  );
 }
 
 function timestamp(value: unknown, field: string): Date {
@@ -983,161 +1025,6 @@ async function loadQuantitySnapshot(
   `));
 }
 
-interface InvalidatedDrafts {
-  invalidatedModelIds: number[];
-  replacementModelIds: number[];
-}
-
-async function invalidateCurrentDrafts(
-  tx: TransactionClient,
-  input: {
-    products: readonly ShopifyProductConsolidationProductEvidence[];
-    shopifyProductId: string;
-    canonicalProductId: number;
-    requestHash: string;
-    idempotencyKey: string;
-    actor: string;
-    reason: string;
-    now: Date;
-  },
-): Promise<InvalidatedDrafts> {
-  const productsWithDrafts = input.products
-    .filter((product) => product.draftTransformationModelId !== null)
-    .sort((left, right) => left.id - right.id);
-  const invalidatedModelIds: number[] = [];
-  const replacementModelIds: number[] = [];
-  for (const product of productsWithDrafts) {
-    const draftModelId = product.draftTransformationModelId!;
-    const supersessionReason = `Product family consolidated into catalog product ${input.canonicalProductId}. ${input.reason}`;
-    const updatedRows = rows(await tx.execute(sql`
-      UPDATE inventory.transformation_model_versions
-      SET lifecycle_status = 'superseded',
-          superseded_by = ${input.actor},
-          superseded_at = ${input.now},
-          supersession_reason = ${supersessionReason},
-          updated_at = ${input.now}
-      WHERE id = ${draftModelId}
-        AND product_id = ${product.id}
-        AND lifecycle_status = 'draft'
-      RETURNING id, version
-    `));
-    if (updatedRows.length !== 1) {
-      throw new ShopifyMappingReconciliationError(
-        "SHOPIFY_PRODUCT_CONSOLIDATION_PREVIEW_STALE",
-        "A transformation draft changed after review. Refresh and try again.",
-        409,
-        { productId: product.id, expectedDraftModelId: draftModelId },
-      );
-    }
-    const priorVersion = positiveInteger(
-      updatedRows[0].version,
-      `product ${product.id} transformation model version`,
-    );
-    const validationErrors = [{
-      code: "PRODUCT_FAMILY_CONSOLIDATED",
-      message: "Rebuild and review this transformation model against the canonical product family before activation.",
-      context: {
-        shopifyProductId: input.shopifyProductId,
-        canonicalProductId: input.canonicalProductId,
-        priorProductId: product.id,
-        priorModelId: draftModelId,
-      },
-    }];
-    const definitionHash = sha256Json({
-      contractVersion: 1,
-      productId: product.id,
-      buildToPromiseEnabled: false,
-      paths: [],
-      validationErrors,
-    });
-    const modelRequestHash = sha256Json({
-      commandRequestHash: input.requestHash,
-      productId: product.id,
-      priorModelId: draftModelId,
-      definitionHash,
-    });
-    const operatorInputHash = sha256Json({
-      shopifyProductId: input.shopifyProductId,
-      canonicalProductId: input.canonicalProductId,
-      sourceProductId: product.id,
-      priorModelId: draftModelId,
-    });
-    const insertedRows = rows(await tx.execute(sql`
-      INSERT INTO inventory.transformation_model_versions (
-        product_id,
-        version,
-        lifecycle_status,
-        build_to_promise_enabled,
-        definition_hash,
-        validation_state,
-        validation_errors,
-        supersedes_model_id,
-        change_reason,
-        idempotency_key,
-        request_hash,
-        origin,
-        operator_input_hash,
-        created_by,
-        created_at,
-        updated_at
-      ) VALUES (
-        ${product.id},
-        ${priorVersion + 1},
-        'draft',
-        false,
-        ${definitionHash},
-        'invalid',
-        ${JSON.stringify(validationErrors)}::jsonb,
-        ${draftModelId},
-        ${supersessionReason},
-        ${`shopify-consolidation:${input.idempotencyKey}:${product.id}`},
-        ${modelRequestHash},
-        'operator',
-        ${operatorInputHash},
-        ${input.actor},
-        ${input.now},
-        ${input.now}
-      )
-      RETURNING id
-    `));
-    if (insertedRows.length !== 1) {
-      throw new ShopifyMappingReconciliationError(
-        "SHOPIFY_PRODUCT_CONSOLIDATION_DRAFT_NOT_REPLACED",
-        "The invalid replacement transformation draft could not be recorded",
-        500,
-        { productId: product.id, priorModelId: draftModelId },
-      );
-    }
-    const replacementModelId = positiveInteger(
-      insertedRows[0].id,
-      `product ${product.id} replacement transformation model id`,
-    );
-    const headRows = rows(await tx.execute(sql`
-      UPDATE inventory.transformation_model_heads
-      SET draft_model_id = ${replacementModelId},
-          revision = revision + 1,
-          updated_by = ${input.actor},
-          update_reason = ${supersessionReason},
-          updated_at = ${input.now}
-      WHERE product_id = ${product.id}
-        AND draft_model_id = ${draftModelId}
-        AND active_model_id IS NULL
-      RETURNING product_id
-    `));
-    if (headRows.length !== 1) {
-      throw new ShopifyMappingReconciliationError(
-        "SHOPIFY_PRODUCT_CONSOLIDATION_PREVIEW_STALE",
-        "A transformation model head changed after review. Refresh and try again.",
-        409,
-        { productId: product.id, expectedDraftModelId: draftModelId },
-      );
-    }
-    invalidatedModelIds.push(draftModelId);
-    replacementModelIds.push(replacementModelId);
-  }
-  return { invalidatedModelIds, replacementModelIds };
-}
-
 type ConsolidationApplyInput = Parameters<
   ShopifyProductConsolidationRepository["applyConsolidation"]
 >[0];
@@ -1145,6 +1032,7 @@ type ConsolidationApplyInput = Parameters<
 async function applyConsolidationInTransaction(
   tx: TransactionClient,
   input: ConsolidationApplyInput,
+  inventoryPlanning: CatalogConsolidationInventoryPlanningPort,
 ): Promise<{
   command: ShopifyProductConsolidationCommandRecord;
   idempotentReplay: boolean;
@@ -1186,9 +1074,10 @@ async function applyConsolidationInTransaction(
     )),
     input.request.canonicalProductId,
   ])].sort((left, right) => left - right);
-  for (const productId of preliminaryProductIds) {
-    await tx.execute(sql`SELECT pg_advisory_xact_lock(918422, ${productId})`);
-  }
+  await inventoryPlanning.lockProducts({
+    client: tx,
+    productIds: preliminaryProductIds,
+  });
   const preliminaryVariantRows = preliminaryProductIds.length === 0
     ? []
     : rows(await tx.execute(sql`
@@ -1205,7 +1094,9 @@ async function applyConsolidationInTransaction(
 
   // This is a rare, operator-authorized identity command. The explicit fences
   // prevent a legacy writer from inserting a new owner, quantity, promise,
-  // work item, or immutable product/variant pair after the evidence read.
+  // work item, or immutable product/variant pair after the evidence read. Keep
+  // the planning-owned fence between these two groups so extracting its table
+  // knowledge does not change the established global lock-acquisition order.
   await tx.execute(sql`
     LOCK TABLE
       channels.channels,
@@ -1230,21 +1121,12 @@ async function applyConsolidationInTransaction(
       inventory.build_orders,
       inventory.build_order_components,
       inventory.build_recipes,
-      inventory.build_recipe_components,
-      inventory.transformation_model_heads,
-      inventory.transformation_model_versions,
-      inventory.transformation_model_paths,
-      inventory.transformation_recipe_bindings,
-      inventory.transformation_recipe_component_snapshots,
-      inventory.availability_activation_freezes,
-      inventory.availability_claims,
-      inventory.availability_claim_lines,
-      inventory.availability_claim_resources,
-      inventory.availability_claim_operations,
-      inventory.availability_claim_operation_inputs,
-      inventory.channel_exposure_policy_heads,
-      inventory.channel_exposure_policy_versions,
-      inventory.inventory_publication_outbox,
+      inventory.build_recipe_components
+    IN SHARE ROW EXCLUSIVE MODE
+  `);
+  await inventoryPlanning.fenceDependencies({ client: tx });
+  await tx.execute(sql`
+    LOCK TABLE
       channels.channel_variant_availability_sync,
       warehouse.work_items,
       oms.oms_orders,
@@ -1315,7 +1197,7 @@ async function applyConsolidationInTransaction(
     );
   }
 
-  const local = await loadLocalEvidence(tx, {
+  const local = await loadLocalEvidence(tx, inventoryPlanning, {
     channelId: input.channelId,
     shopDomain: input.shopDomain,
     shopifyProductId: input.request.shopifyProductId,
@@ -1375,15 +1257,19 @@ async function applyConsolidationInTransaction(
     product.variants.map((variant) => [variant.id, variant] as const)));
   const affectedVariantIds = [...variants.keys()].sort((left, right) => left - right);
   const beforeQuantities = await loadQuantitySnapshot(tx, affectedVariantIds);
-  const drafts = await invalidateCurrentDrafts(tx, {
-    products: evidence.products,
-    shopifyProductId: input.request.shopifyProductId,
+  const drafts = await invalidateInventoryPlanningDrafts(inventoryPlanning, {
+    client: tx,
+    expectedDrafts: evidence.products.flatMap((product) =>
+      product.draftTransformationModelId === null
+        ? []
+        : [{ productId: product.id, draftModelId: product.draftTransformationModelId }]),
+    externalProductId: input.request.shopifyProductId,
     canonicalProductId: input.request.canonicalProductId,
     requestHash: input.requestHash,
     idempotencyKey: input.request.idempotencyKey,
     actor: input.actor,
     reason: input.request.reason,
-    now: input.now,
+    occurredAt: input.now,
   });
 
   const moves = plan.actions.filter((action) => action.action === "move");
@@ -1612,8 +1498,8 @@ async function applyConsolidationInTransaction(
       (left, right) => left - right,
     ),
     archivedProductIds,
-    invalidatedDraftModelIds: drafts.invalidatedModelIds,
-    replacementDraftModelIds: drafts.replacementModelIds,
+    invalidatedDraftModelIds: [...drafts.invalidatedModelIds],
+    replacementDraftModelIds: [...drafts.replacementModelIds],
     reparentedLocationCount: reparentedLocationRows.length,
     reparentedAssetCount: reparentedAssetRows.length,
     detachedFeedCount: detachedFeedRows.length,
@@ -1693,17 +1579,19 @@ function isTransactionContention(error: unknown): boolean {
 
 export function createShopifyProductConsolidationRepository(
   database: typeof db = db,
+  inventoryPlanning: CatalogConsolidationInventoryPlanningPort =
+    new PostgresCatalogConsolidationInventoryPlanningRepository(),
 ): ShopifyProductConsolidationRepository {
   return {
     loadLocalEvidence: (input) => database.transaction(async (tx) => {
       await tx.execute(sql`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY`);
-      return loadLocalEvidence(tx, input);
+      return loadLocalEvidence(tx, inventoryPlanning, input);
     }),
     findCommand: (idempotencyKey) => findCommand(database, idempotencyKey),
     async applyConsolidation(input) {
       try {
         return await database.transaction((tx) =>
-          applyConsolidationInTransaction(tx, input));
+          applyConsolidationInTransaction(tx, input, inventoryPlanning));
       } catch (error: unknown) {
         if (error instanceof ShopifyMappingReconciliationError) throw error;
         if (isTransactionContention(error)) {
