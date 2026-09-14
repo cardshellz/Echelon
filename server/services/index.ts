@@ -140,6 +140,7 @@ import { InventoryPublicationReadbackService } from "../modules/inventory-planni
 import { PostgresInventoryPublicationReadbackRepository } from "../modules/inventory-planning/infrastructure/inventory-publication-readback.repository";
 import { InventoryPublicationTransportRegistry } from "../modules/inventory-planning/application/inventory-publication-transport";
 import { createEbayDropshipInventoryPublicationTransportAdapterFromEnv } from "../modules/dropship/infrastructure/dropship-ebay-inventory-publication.adapter";
+import { createDropshipOmsChannelResolver } from "../modules/dropship/infrastructure/dropship-oms-warehouse-assignments.reader";
 import { InventoryAvailabilityClaimService } from "../modules/inventory-planning/application/inventory-availability-claim.service";
 import { PostgresInventoryAvailabilityClaimRepository } from "../modules/inventory-planning/infrastructure/inventory-availability-claim.repository";
 import { AssemblyWorkOwner } from "../modules/warehouse/work/application/assembly-work-owner";
@@ -598,6 +599,8 @@ export function createServices(
     inventoryCore: inventoryCore as any,
     reservation,
     fulfillmentRouter,
+    // Dropship orders ship from the warehouse acceptance pinned, never the router.
+    dropshipOmsChannel: createDropshipOmsChannelResolver(databasePool),
     shippingEngine,
     shipStation,
     omsService: oms,
