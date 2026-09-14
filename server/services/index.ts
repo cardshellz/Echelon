@@ -72,6 +72,8 @@ import { createFulfillmentPushService } from "../modules/oms/fulfillment-push.se
 import { createChannelFulfillmentAuthorityRepository } from "../modules/oms/channel-fulfillment-authority.repository";
 import { createChannelFulfillmentReviewRetryRepository } from "../modules/oms/channel-fulfillment-review-retry.repository";
 import { createChannelFulfillmentReviewRetryService } from "../modules/oms/channel-fulfillment-review-retry.service";
+import { createChannelFulfillmentReceiptRetryRepository } from "../modules/oms/channel-fulfillment-receipt-retry.repository";
+import { createChannelFulfillmentReceiptRetryService } from "../modules/oms/channel-fulfillment-receipt-retry.service";
 import { createChannelFulfillmentProjector } from "../modules/oms/channel-fulfillment-projection.repository";
 import {
   createChannelFulfillmentAuthorityService,
@@ -511,6 +513,10 @@ export function createServices(
     repository: createChannelFulfillmentReviewRetryRepository(db),
     clock: { now: () => new Date() },
   });
+  const channelFulfillmentReceiptRetry = createChannelFulfillmentReceiptRetryService({
+    repository: createChannelFulfillmentReceiptRetryRepository(db),
+    clock: { now: () => new Date() },
+  });
 
   // ShipStation — order push + webhook integration
   const carrierTrackingLogger = makeCarrierTrackingLogger();
@@ -656,6 +662,7 @@ export function createServices(
     fulfillmentPush,
     channelFulfillmentAuthority,
     channelFulfillmentReviewRetry,
+    channelFulfillmentReceiptRetry,
     channelFulfillmentIngress,
     shipStation,
     shipStationPhysicalRecovery,

@@ -70,7 +70,7 @@ describe("exact legacy cutover reconstruction", () => {
     evidence.orders.push({ ...evidence.orders[0], id:2, status });
     evidence.items.push({ ...evidence.items[0], id:12, orderId:2, quantity:1, pickedQuantity:1, fulfilledQuantity:1 });
     evidence.physicalItems = [{ id:"100", physicalShipmentId:"99", orderItemId:12, replacementForOrderItemId:null,
-      legacySourceShipmentItemId:null, packageAllocationEntryId:null, productVariantId:101, sku:"P5",
+      correctionForPhysicalShipmentItemId:null, legacySourceShipmentItemId:null, packageAllocationEntryId:null, productVariantId:101, sku:"P5",
       originalQuantity:1, adjustmentQuantity:0, effectiveQuantity:"1", purpose:"customer_fulfillment", packageStatus:"review" }];
     expect(planCutoverReconstruction(evidence).blockers).toContainEqual(expect.objectContaining({
       code:"PHYSICAL_SHIPMENT_REQUIRES_REVIEW", subject:"physical:100",
@@ -238,7 +238,8 @@ describe("bounded empty-bin promise handoff", () => {
     ["wrong variant", (e) => { e.journals[0].productVariantId = 102; }],
     ["existing outbound intention", (e) => { e.sourceItems.push(ordinarySourceItem()); }],
     ["existing physical allocation", (e) => { e.physicalItems.push({ id: "100", physicalShipmentId: "99", orderItemId: 11,
-      replacementForOrderItemId: null, legacySourceShipmentItemId: null, packageAllocationEntryId: "300", productVariantId: 101, sku: "P5",
+      replacementForOrderItemId: null, correctionForPhysicalShipmentItemId: null,
+      legacySourceShipmentItemId: null, packageAllocationEntryId: "300", productVariantId: 101, sku: "P5",
       originalQuantity: 6, adjustmentQuantity: 0, effectiveQuantity: "6", purpose: "customer_fulfillment", packageStatus: "shipped" }); }],
     ["original cost evidence", (e) => { e.costs = reconstructionEvidence().costs; }],
     ["duplicate owner group", (e) => { e.journals.push({ ...e.journals[0] }); }],
@@ -261,7 +262,8 @@ describe("bounded empty-bin promise handoff", () => {
     Object.assign(evidence.items[0], { quantity, pickedQuantity: quantity, fulfilledQuantity: quantity, status: "completed" });
     evidence.levels[0].reservedQty = String(quantity); evidence.journals[0].reservedQty = String(quantity);
     evidence.physicalItems.push({ id: "100", physicalShipmentId: "99", orderItemId: 11,
-      replacementForOrderItemId: null, legacySourceShipmentItemId: null, packageAllocationEntryId: "300", productVariantId: 101, sku: "P5",
+      replacementForOrderItemId: null, correctionForPhysicalShipmentItemId: null,
+      legacySourceShipmentItemId: null, packageAllocationEntryId: "300", productVariantId: 101, sku: "P5",
       originalQuantity: quantity, adjustmentQuantity: 0, effectiveQuantity: String(quantity), purpose: "customer_fulfillment", packageStatus: "shipped" });
     evidence.sourceItems.push({ ...ordinarySourceItem(), quantity, shipmentStatus: quantity === 3 ? "shipped" : "queued" });
     evidence.shipmentReviewEvidence.push({ id: "package:99", kind: "channel_fulfillment_acknowledgment", status: "ignored", evidenceHash: "f".repeat(64) });

@@ -14,7 +14,8 @@ function fixture() {
     correctionForShipmentItemId: null, productVariantId: 105, quantity: 4, purpose: "customer_fulfillment",
     fromLocationId: 50, shipmentStatus: "queued", shipmentHeld: false }];
   const physicalItems = [{ id: "9007199254740994", physicalShipmentId: "9007199254740995", orderItemId: 71,
-    replacementForOrderItemId: null, legacySourceShipmentItemId: 101, packageAllocationEntryId: null, productVariantId: 105,
+    replacementForOrderItemId: null, correctionForPhysicalShipmentItemId: null,
+    legacySourceShipmentItemId: 101, packageAllocationEntryId: null, productVariantId: 105,
     sku: "P5", originalQuantity: 2, adjustmentQuantity: -1, effectiveQuantity: "1", purpose: "customer_fulfillment", packageStatus: "shipped" }];
   const allRows: unknown[][] = [[meta], orders, items, sourceItems, physicalItems];
   let index = 0;

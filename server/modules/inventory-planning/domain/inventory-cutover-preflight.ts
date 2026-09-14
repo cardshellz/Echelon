@@ -196,6 +196,7 @@ function isExactNonInventoryFulfillmentEvidence(
     linkedSourceIds.add(source.id);
     return physical.orderItemId === item.id
       && physical.replacementForOrderItemId === null
+      && physical.correctionForPhysicalShipmentItemId === null
       && physical.packageAllocationEntryId === null
       && physical.productVariantId === variant.id
       && physical.sku.toUpperCase() === item.sku.toUpperCase()
@@ -237,15 +238,19 @@ function classifyDemandLines(
     const ordered = BigInt(item.quantity);
     const picked = BigInt(item.pickedQuantity);
     const fulfilled = BigInt(item.fulfilledQuantity);
-    const matches = (variantsBySku.get(item.sku.toUpperCase()) ?? []).filter((variant) => variant.isActive);
+    const skuVariants = variantsBySku.get(item.sku.toUpperCase()) ?? [];
+    const matches = skuVariants.filter((variant) => variant.isActive);
     const variant = matches.length === 1 ? matches[0]! : null;
     const hasPackageEvidence = physicalItemIds.has(item.id) || sourceItemIds.has(item.id);
     const hasCanonicalInventoryEvidence = claimedItemIds.has(item.id);
-    const hasExactNonInventoryFulfillment = isExactNonInventoryFulfillmentEvidence(
-      sources,
-      item,
-      variant,
-    );
+    // Current activity controls new inventory demand, but it is not historical
+    // truth. A retired variant remains valid evidence for an already-completed
+    // non-stock fulfillment only when its exact ID is repeated across the WMS
+    // source and canonical physical package. Requiring exactly one matching
+    // candidate keeps duplicate/ambiguous SKU history fail-closed.
+    const exactNonInventoryVariants = skuVariants.filter((candidate) =>
+      isExactNonInventoryFulfillmentEvidence(sources, item, candidate));
+    const hasExactNonInventoryFulfillment = exactNonInventoryVariants.length === 1;
     let disposition: InventoryCutoverLine["disposition"] = "review_required";
     let candidateDemandQty: string | null = null;
 

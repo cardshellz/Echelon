@@ -25,6 +25,10 @@ import {
   ChannelFulfillmentReviewRetryError,
 } from "../modules/oms/channel-fulfillment-review-retry.domain";
 import {
+  CHANNEL_FULFILLMENT_RECEIPT_RETRY,
+  ChannelFulfillmentReceiptRetryError,
+} from "../modules/oms/channel-fulfillment-receipt-retry.domain";
+import {
   adoptShipStationUnmappedPhysicalAsReship,
   getShipStationUnmappedPhysicalPreview,
   resolveShipStationUnmappedPhysicalAsProviderEcho,
@@ -67,6 +71,7 @@ export function registerOmsRoutes(app: Express) {
       reservation: services.reservation ?? null,
       fulfillmentAuthority: services.channelFulfillmentAuthority,
       reviewRetry: services.channelFulfillmentReviewRetry,
+      receiptRetry: services.channelFulfillmentReceiptRetry,
     };
   };
   const getHistoricalIdentityRepair = (req: Request) => {
@@ -469,13 +474,20 @@ export function registerOmsRoutes(app: Express) {
       try {
         const code = String(req.body?.code || "");
         const userId = stableAuditUserId(req.session.user?.id);
-        if (code === CHANNEL_FULFILLMENT_REVIEW_RETRY
-          && !userId) {
-          throw new ChannelFulfillmentReviewRetryError(
-            "REVIEW_RETRY_ACTOR_REQUIRED", "An authenticated operator is required for reviewed recovery", 403,
-          );
+        if (!userId) {
+          if (code === CHANNEL_FULFILLMENT_REVIEW_RETRY) {
+            throw new ChannelFulfillmentReviewRetryError(
+              "REVIEW_RETRY_ACTOR_REQUIRED", "An authenticated operator is required for reviewed recovery", 403,
+            );
+          }
+          if (code === CHANNEL_FULFILLMENT_RECEIPT_RETRY) {
+            throw new ChannelFulfillmentReceiptRetryError(
+              "RECEIPT_RETRY_ACTOR_REQUIRED", "An authenticated operator is required for reviewed recovery", 403,
+            );
+          }
         }
         const operator = code === CHANNEL_FULFILLMENT_REVIEW_RETRY
+          || code === CHANNEL_FULFILLMENT_RECEIPT_RETRY
           ? `${AUDIT_USER_OPERATOR_PREFIX}${userId}`
           : (
             req.session.user?.username ||
@@ -488,6 +500,7 @@ export function registerOmsRoutes(app: Express) {
           wmsOrderId: req.body?.wmsOrderId,
           shipmentId: req.body?.shipmentId,
           commandId: req.body?.commandId,
+          receiptId: req.body?.receiptId,
           previewOnly: req.body?.previewOnly,
           expectedStateFingerprint: req.body?.expectedStateFingerprint,
           reason: req.body?.reason,
@@ -497,6 +510,10 @@ export function registerOmsRoutes(app: Express) {
       } catch (err: any) {
         console.error("[OMS Routes] Reconciliation remediation error:", err);
         if (err instanceof ChannelFulfillmentReviewRetryError) {
+          res.status(err.status).json({ error: err.message, code: err.code, context: err.context });
+          return;
+        }
+        if (err instanceof ChannelFulfillmentReceiptRetryError) {
           res.status(err.status).json({ error: err.message, code: err.code, context: err.context });
           return;
         }
