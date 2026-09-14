@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { Pool } from "pg";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
-import { cutoverCompositionBaseSql, cutoverCompositionSeedSql, installCutoverCompositionMigrations } from "../fixtures/inventory-cutover-composition-database.fixture";
+import { cutoverCompositionBaseSql, cutoverCompositionLegacyChannelSeedSql, cutoverCompositionSeedSql,
+  installCutoverCompositionMigrations } from "../fixtures/inventory-cutover-composition-database.fixture";
 import { PostgresQuantityPublicationAdmission } from "../../infrastructure/quantity-publication-admission.repository";
 import type { QuantityPublicationScope } from "../../domain/quantity-publication-admission";
 import { EbayApiClient } from "../../../channels/adapters/ebay/ebay-api.client";
@@ -19,6 +20,7 @@ dbDescribe.sequential("durable eBay terminal evidence with actual migration0663"
     database = await createInventoryCutoverTestDatabase(databaseUrl,disposable,cutoverCompositionBaseSql);
     await installCutoverCompositionMigrations(database.pool);
     await database.pool.query(cutoverCompositionSeedSql);
+    await database.pool.query(cutoverCompositionLegacyChannelSeedSql);
   });
   afterAll(async () => { await database?.close(); });
   function setup(request: typeof fetch, pool: Pick<Pool,"connect"> = database.pool) {

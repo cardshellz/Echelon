@@ -14,7 +14,11 @@ import { cutoverReceiptSchemaFixtureSql } from "./inventory-cutover-receipt-sche
 export const cutoverCompositionBaseSql = `
 CREATE SCHEMA inventory; CREATE SCHEMA wms; CREATE SCHEMA oms; CREATE SCHEMA warehouse; CREATE SCHEMA catalog;
 CREATE SCHEMA channels; CREATE SCHEMA dropship;
-CREATE TABLE channels.channels(id integer PRIMARY KEY,name text NOT NULL,provider text NOT NULL);
+CREATE TABLE channels.channels(
+ id integer PRIMARY KEY,name text NOT NULL,provider text NOT NULL,
+ status text NOT NULL DEFAULT 'pending_setup',sync_enabled boolean DEFAULT false,
+ sync_mode text DEFAULT 'dry_run'
+);
 CREATE TABLE channels.channel_connections(id integer PRIMARY KEY,channel_id integer NOT NULL REFERENCES channels.channels(id));
 CREATE TABLE channels.sync_settings(
  id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -96,6 +100,13 @@ INSERT INTO inventory.promise_safety_policy_versions(scope_key,scope_type,versio
  VALUES('business','business',1,'off',repeat('d',64),'Test safety off','composition-safety',repeat('d',64),'operator');
 INSERT INTO inventory.promise_safety_policy_heads(scope_key,draft_policy_id,revision,updated_by,update_reason)
  SELECT 'business',id,0,'operator','Test reviewed safety' FROM inventory.promise_safety_policy_versions;
+`;
+
+/** Exact enabled legacy destination used only by provider-admission suites. */
+export const cutoverCompositionLegacyChannelSeedSql = `
+INSERT INTO channels.channels(id,name,provider,status,sync_enabled,sync_mode)
+ VALUES(1,'Legacy eBay','ebay','active',true,'live');
+INSERT INTO channels.channel_connections(id,channel_id) VALUES(1,1);
 `;
 
 /** Supplies historical reviewed evidence from the real captured graph; the cutover
