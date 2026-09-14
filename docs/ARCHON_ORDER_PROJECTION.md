@@ -13,7 +13,7 @@ new Shopify, eBay or TikTok authorization is introduced here.
   and fees. Partner retail line revenue and shipping-recipient marketing identity
   are not exported as Card Shellz customer sales.
 
-Migration 0670 creates an OMS-owned durable projection outbox. Order/line changes
+Migration 0672 creates an OMS-owned durable projection outbox. Order/line changes
 queue revisions in the same transaction. A worker claims leased rows, reads a
 consistent order snapshot, validates the versioned outbound contract, and requires
 an explicit snapshot acknowledgement from Archon. Concurrent revisions cannot be
@@ -30,7 +30,7 @@ The worker respects the global scheduler switch and its dedicated
 ARCHON_ORDER_DELIVERY_DISABLED switch, independently of billing.
 
 Deploy Archon's snapshot receiver and migration 0049 first, then Echelon migration
-0670 and this worker. An older receiver's unsupported-event response is retried,
+0672 and this worker. An older receiver's unsupported-event response is retried,
 not acknowledged. Historical orders are NOT automatically queued by the migration.
 
 Preview historical replay (UTC dates, exclusive end, maximum 10,000 orders):

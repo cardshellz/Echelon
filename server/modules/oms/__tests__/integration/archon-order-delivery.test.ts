@@ -44,7 +44,7 @@ test(
    INSERT INTO oms.oms_orders(channel_id,external_order_id,raw_payload) VALUES(36,'historic','{"source_name":"tiktok"}');`);
       const migration = await readFile(
         new URL(
-          "../../../../../migrations/0670_archon_order_projection.sql",
+          "../../../../../migrations/0672_archon_order_projection.sql",
           import.meta.url,
         ),
         "utf8",

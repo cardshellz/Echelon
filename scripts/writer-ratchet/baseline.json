@@ -734,6 +734,9 @@
   "membership.subscription_events": [
     "modules/subscriptions"
   ],
+  "oms.archon_order_outbox": [
+    "modules/oms"
+  ],
   "oms.channel_fulfillment_push_attempts": [
     "modules/oms"
   ],
