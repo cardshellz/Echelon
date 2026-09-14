@@ -8,6 +8,7 @@ import {
   normalizeShopifyAdminDomain,
   normalizeShopifyProductReference,
   shopifyOwnershipRepairApplySchema,
+  shopifyOwnershipRepairResultSchema,
   shopifyOwnershipRepairPreviewHash,
   shopifyOwnershipRepairRequestHash,
   type ShopifyMappingLocalProduct,
@@ -342,6 +343,55 @@ describe("Shopify duplicate ownership review", () => {
     });
   });
 
+  it("recommends one canonical owner when several other owners are inert", () => {
+    const inertOwners = [11, 12, 13, 14].map((productId) => localProduct({
+      productId,
+      productName: `Legacy digital shell ${productId}`,
+      productSku: `SHOPIFY-${productId}`,
+      mappingStatus: "catalog_only",
+      mappingFingerprint: `fingerprint-${productId}`,
+      evidenceProductIds: [],
+      activeVariantCount: 0,
+      hasCanonicalChannelProductEvidence: false,
+    }));
+    const result = ownershipReview({
+      products: [localProduct(), ...inertOwners],
+    });
+
+    expect(result.items[0]).toMatchObject({
+      decision: "canonical_owner_recommended",
+      reason: "single_active_owner_with_matching_evidence",
+      recommendedProductId: 10,
+      nonCanonicalProductIds: [11, 12, 13, 14],
+    });
+  });
+
+  it("keeps an abnormally large ownership group in manual review", () => {
+    const inertOwners = Array.from({ length: 100 }, (_, index) => {
+      const productId = index + 11;
+      return localProduct({
+        productId,
+        productName: `Legacy shell ${productId}`,
+        productSku: `SHOPIFY-${productId}`,
+        mappingStatus: "catalog_only",
+        mappingFingerprint: `fingerprint-${productId}`,
+        evidenceProductIds: [],
+        activeVariantCount: 0,
+        hasCanonicalChannelProductEvidence: false,
+      });
+    });
+    const result = ownershipReview({
+      products: [localProduct(), ...inertOwners],
+    });
+
+    expect(result.items[0]).toMatchObject({
+      decision: "manual_review",
+      reason: "owner_count_exceeds_safe_limit",
+      recommendedProductId: null,
+      nonCanonicalProductIds: [],
+    });
+  });
+
   it("requires manual review when multiple owners remain active", () => {
     const result = ownershipReview({
       products: [
@@ -563,6 +613,50 @@ describe("Shopify duplicate ownership review", () => {
       recommendations: [recommendation],
       idempotencyKey: "123e4567-e89b-42d3-a456-426614174000",
       reason: "Reviewed\u0000cleanup",
+    }).success).toBe(false);
+  });
+
+  it("validates a group-level receipt with several detached owners", () => {
+    expect(shopifyOwnershipRepairResultSchema.safeParse({
+      contractVersion: 1,
+      channelId: 36,
+      shopDomain: "cardshellz.myshopify.com",
+      previewHash: "b".repeat(64),
+      resolvedGroupCount: 1,
+      recommendedProductIds: [10],
+      detachedProductIds: [11, 12, 13, 14],
+      resolvedGroups: [{
+        shopifyProductId: "9001",
+        recommendedProductId: 10,
+        detachedProductIds: [11, 12, 13, 14],
+      }],
+      clearedCatalogProductCount: 4,
+      clearedCatalogVariantCount: 0,
+      detachedFeedCount: 0,
+      resetListingCount: 0,
+      completedAt: "2026-07-24T12:00:00.000Z",
+    }).success).toBe(true);
+  });
+
+  it("rejects a group-level receipt that does not account for every detached owner", () => {
+    expect(shopifyOwnershipRepairResultSchema.safeParse({
+      contractVersion: 1,
+      channelId: 36,
+      shopDomain: "cardshellz.myshopify.com",
+      previewHash: "b".repeat(64),
+      resolvedGroupCount: 1,
+      recommendedProductIds: [10],
+      detachedProductIds: [11, 12],
+      resolvedGroups: [{
+        shopifyProductId: "9001",
+        recommendedProductId: 10,
+        detachedProductIds: [11],
+      }],
+      clearedCatalogProductCount: 2,
+      clearedCatalogVariantCount: 0,
+      detachedFeedCount: 0,
+      resetListingCount: 0,
+      completedAt: "2026-07-24T12:00:00.000Z",
     }).success).toBe(false);
   });
 });

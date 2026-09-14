@@ -110,6 +110,9 @@
   "channels.shopify_ownership_repair_commands": [
     "modules/catalog"
   ],
+  "channels.shopify_product_consolidation_commands": [
+    "modules/catalog"
+  ],
   "channels.source_lock_config": [
     "modules/channels"
   ],

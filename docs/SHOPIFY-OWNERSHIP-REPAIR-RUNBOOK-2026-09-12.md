@@ -29,7 +29,7 @@ idempotency key, the reviewed store domain, and one to 100 product/hash pairs.
 Automatic repair is allowed only when the fresh locked evidence still proves:
 
 1. the remote Shopify product exists;
-2. no more than two local products claim it;
+2. no more than 100 local products claim it (the explicit bounded request limit);
 3. both local products use the same shipping group;
 4. neither owner has conflicting mapping evidence;
 5. exactly one owner has active sellable variants;
@@ -58,6 +58,58 @@ For only the proven inactive noncanonical owners, it:
 The canonical owner is not rewritten. Inventory levels, ATP, reservations,
 recipes, builds, orders, warehouses, channel allocation, and remote Shopify
 quantities are not readjusted or published by this command.
+
+## Product-family consolidation contract
+
+Duplicate ownership repair only detaches proven inactive aliases. When two
+active local products split the variants for one Shopify product, use the
+separate product-family consolidation review:
+
+- `POST /api/channels/:channelId/shopify-mapping-reconciliation/ownership-review/consolidation/preview`
+  is read-only and requires `inventory:view`;
+- `POST /api/channels/:channelId/shopify-mapping-reconciliation/ownership-review/consolidation/apply`
+  requires `inventory:edit`, the exact preview hash and store, a UUID
+  idempotency key, and an audit reason.
+
+The preview chooses one existing variant ID for each exact UOM/package size.
+Apply may reparent that retained ID to the selected canonical product and may
+archive only a zero-quantity duplicate. It never transfers, combines, or
+recalculates inventory. The transaction snapshots every affected inventory
+level before and after and rolls back unless every quantity column and row
+identity is byte-for-byte equivalent.
+
+Apply is blocked when evidence includes any of the following:
+
+- active transformation models or an inventory cutover freeze;
+- incompatible product or variant fulfillment/inventory semantics;
+- quantity, reservation, pick, pack, backorder, availability claim, open
+  order/shipment/build/publication work, or active channel feed on a variant
+  that would be retired;
+- immutable product/variant history, recipes, or procurement mappings whose
+  product identity would become inconsistent after a reparent;
+- product- or variant-scoped channel, dropship, eBay, shipping, replenishment,
+  marketplace, warehouse-slot, or procurement configuration that would be
+  stranded;
+- any local Shopify variant identity that Shopify reports as belonging to a
+  different live product. This command never detaches such an identity and
+  never performs a remote Shopify mutation.
+
+Draft transformation models are not silently carried forward. Apply
+supersedes each current draft and creates an empty, invalid replacement draft
+that must be rebuilt and reviewed against the canonical family before
+activation. The immutable command receipt records the locked evidence, exact
+plan, result, actor, reason, request hash, preview hash, and completion time.
+Variant-scoped assets and warehouse slots follow a retained variant when its
+product ID changes. A slot on a variant that would be retired is a blocker and
+must be resolved through slotting first. Product-level assets stay on the
+archived source product; the command does not guess which images should become
+canonical.
+
+Before any production apply, run the PostgreSQL contract test against a
+disposable database with both `ECHELON_TEST_DATABASE_URL` and
+`ECHELON_TEST_DATABASE_DISPOSABLE=true`. A skipped database test is not apply
+readiness. Then run preview again against the intended store and resolve every
+blocker through its owning workflow; there is no force option.
 
 The migration permits `channel_variant_id = NULL` only so an inactive retained
 feed can relinquish a wrong remote identity. A new `NOT VALID` check immediately

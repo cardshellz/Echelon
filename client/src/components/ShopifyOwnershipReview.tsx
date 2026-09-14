@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  GitMerge,
   Loader2,
   RefreshCw,
 } from "lucide-react";
@@ -45,7 +46,15 @@ import {
   shopifyOwnershipReviewFilterSchema,
   type ShopifyOwnershipRepairRequest,
   type ShopifyOwnershipReviewFilter,
+  type ShopifyDuplicateOwnershipGroup,
 } from "@/lib/shopify-ownership-review";
+import {
+  applyShopifyProductConsolidation,
+  fetchShopifyProductConsolidationPreview,
+  ShopifyProductConsolidationApiError,
+  type ShopifyProductConsolidationApplyRequest,
+  type ShopifyProductConsolidationPreview,
+} from "@/lib/shopify-product-consolidation";
 
 const PAGE_SIZE = 20;
 
@@ -54,6 +63,8 @@ const decisionReasonLabels = {
     "One active owner has matching catalog and channel evidence",
   remote_product_missing: "The Shopify product no longer exists",
   owner_count_exceeds_two: "More than two local products claim this product",
+  owner_count_exceeds_safe_limit:
+    "More than 100 local products claim this product",
   shipping_group_conflict: "The local owners use different shipping groups",
   owner_mapping_conflict: "At least one owner has conflicting mapping evidence",
   multiple_active_owners: "More than one local owner has active variants",
@@ -89,6 +100,16 @@ export function ShopifyOwnershipReview({
     idempotencyKey: string;
   } | null>(null);
   const pendingRequest = useRef<ShopifyOwnershipRepairRequest | null>(null);
+  const [showConsolidationDialog, setShowConsolidationDialog] = useState(false);
+  const [consolidationDraft, setConsolidationDraft] = useState<{
+    group: ShopifyDuplicateOwnershipGroup;
+    canonicalProductId: number | null;
+    idempotencyKey: string;
+  } | null>(null);
+  const [consolidationReason, setConsolidationReason] = useState("");
+  const pendingConsolidationRequest = useRef<
+    ShopifyProductConsolidationApplyRequest | null
+  >(null);
   const reviewQuery = useQuery({
     queryKey: [
       "/api/channels",
@@ -179,6 +200,55 @@ export function ShopifyOwnershipReview({
       });
     },
   });
+  const consolidationPreviewMutation = useMutation<
+    ShopifyProductConsolidationPreview,
+    Error,
+    { shopifyProductId: string; canonicalProductId: number }
+  >({
+    mutationFn: (request) => fetchShopifyProductConsolidationPreview({
+      channelId,
+      ...request,
+    }),
+  });
+  const applyConsolidationMutation = useMutation({
+    mutationFn: async () => {
+      const preview = consolidationPreviewMutation.data;
+      if (!consolidationDraft || !preview?.plan.canApply) {
+        throw new Error("A current, unblocked consolidation preview is required");
+      }
+      const request = pendingConsolidationRequest.current ?? {
+        shopifyProductId: preview.plan.shopifyProductId,
+        canonicalProductId: preview.plan.canonicalProductId,
+        expectedShopDomain: preview.plan.shopDomain,
+        expectedPreviewHash: preview.plan.previewHash,
+        idempotencyKey: consolidationDraft.idempotencyKey,
+        reason: consolidationReason,
+      };
+      pendingConsolidationRequest.current = request;
+      return applyShopifyProductConsolidation({ channelId, request });
+    },
+    onSuccess: (result) => {
+      pendingConsolidationRequest.current = null;
+      setConsolidationReason("");
+      setConsolidationDraft(null);
+      setShowConsolidationDialog(false);
+      setPage(1);
+      void queryClient.invalidateQueries({
+        queryKey: [
+          "/api/channels",
+          channelId,
+          "shopify-mapping-reconciliation",
+        ],
+      });
+      onRepairApplied?.();
+      toast({
+        title: "Product family consolidated",
+        description:
+          `${result.movedVariantIds.length} inventory identities moved to product `
+          + `${result.canonicalProductId}; ${result.archivedProductIds.length} duplicate products were archived.`,
+      });
+    },
+  });
 
   const openRepairReview = () => {
     if (repairDraft) {
@@ -203,6 +273,41 @@ export function ShopifyOwnershipReview({
     setShowRepairDialog(false);
     applyRepairMutation.reset();
     prepareRepairMutation.mutate();
+  };
+  const openConsolidationReview = (group: ShopifyDuplicateOwnershipGroup) => {
+    consolidationPreviewMutation.reset();
+    applyConsolidationMutation.reset();
+    pendingConsolidationRequest.current = null;
+    setConsolidationReason("");
+    setConsolidationDraft({
+      group,
+      canonicalProductId: group.recommendedProductId,
+      idempotencyKey: crypto.randomUUID(),
+    });
+    setShowConsolidationDialog(true);
+  };
+  const canRefreshRejectedConsolidation = applyConsolidationMutation.error
+    instanceof ShopifyProductConsolidationApiError
+    && [
+      "SHOPIFY_PRODUCT_CONSOLIDATION_PREVIEW_STALE",
+      "SHOPIFY_PRODUCT_CONSOLIDATION_BLOCKED",
+      "SHOPIFY_PRODUCT_CONSOLIDATION_BUSY",
+      "SHOPIFY_MAPPING_STORE_CHANGED",
+    ].includes(applyConsolidationMutation.error.code ?? "");
+  const refreshRejectedConsolidation = () => {
+    if (!consolidationDraft?.canonicalProductId) return;
+    const request = {
+      shopifyProductId: consolidationDraft.group.shopifyProductId,
+      canonicalProductId: consolidationDraft.canonicalProductId,
+    };
+    pendingConsolidationRequest.current = null;
+    setConsolidationDraft({
+      ...consolidationDraft,
+      idempotencyKey: crypto.randomUUID(),
+    });
+    applyConsolidationMutation.reset();
+    consolidationPreviewMutation.reset();
+    consolidationPreviewMutation.mutate(request);
   };
 
   return (
@@ -335,7 +440,11 @@ export function ShopifyOwnershipReview({
                         {group.shopifyProductId}
                       </code>
                       <div className="mt-1 text-xs text-muted-foreground">
-                        {group.shippingGroupCode ?? "Conflicting shipping groups"}
+                        {new Set(group.owners.map(
+                          (owner) => owner.shippingGroupCode,
+                        )).size > 1
+                          ? "Conflicting shipping groups"
+                          : group.shippingGroupCode ?? "No shipping group"}
                       </div>
                     </TableCell>
                     <TableCell>
@@ -390,6 +499,17 @@ export function ShopifyOwnershipReview({
                       <div className="mt-2 text-xs text-muted-foreground">
                         {decisionReasonLabels[group.reason]}
                       </div>
+                      {canRepair && group.decision === "manual_review" && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="mt-3"
+                          onClick={() => openConsolidationReview(group)}
+                        >
+                          <GitMerge className="mr-2 h-4 w-4" />
+                          Review product consolidation
+                        </Button>
+                      )}
                     </TableCell>
                   </TableRow>
                 ))}
@@ -536,6 +656,328 @@ export function ShopifyOwnershipReview({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <Dialog
+        open={showConsolidationDialog}
+        onOpenChange={(open) => {
+          if (
+            !consolidationPreviewMutation.isPending
+            && !applyConsolidationMutation.isPending
+          ) {
+            setShowConsolidationDialog(open);
+          }
+        }}
+      >
+        <DialogContent className="max-h-[90vh] max-w-4xl overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Review one canonical Echelon product</DialogTitle>
+            <DialogDescription>
+              This preview traces inventory and operational dependencies before
+              any product or variant identity can be consolidated. Previewing
+              never changes Echelon or Shopify.
+            </DialogDescription>
+          </DialogHeader>
+
+          {consolidationDraft && (
+            <div className="space-y-4">
+              <div className="grid gap-3 sm:grid-cols-[1fr_auto] sm:items-end">
+                <div className="space-y-2">
+                  <Label htmlFor="canonical-product-owner">
+                    Product to keep as the canonical owner
+                  </Label>
+                  <Select
+                    value={consolidationDraft.canonicalProductId?.toString() ?? ""}
+                    onValueChange={(value) => {
+                      consolidationPreviewMutation.reset();
+                      applyConsolidationMutation.reset();
+                      pendingConsolidationRequest.current = null;
+                      setConsolidationDraft((current) => current ? {
+                        ...current,
+                        canonicalProductId: Number(value),
+                        idempotencyKey: crypto.randomUUID(),
+                      } : current);
+                    }}
+                  >
+                    <SelectTrigger id="canonical-product-owner">
+                      <SelectValue placeholder="Choose the product to keep" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {consolidationDraft.group.owners.map((owner) => (
+                        <SelectItem
+                          key={owner.productId}
+                          value={owner.productId.toString()}
+                        >
+                          {owner.productName} ({owner.productSku ?? `#${owner.productId}`})
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <Button
+                  disabled={
+                    consolidationDraft.canonicalProductId === null
+                    || consolidationPreviewMutation.isPending
+                  }
+                  onClick={() => {
+                    if (consolidationDraft.canonicalProductId === null) return;
+                    pendingConsolidationRequest.current = null;
+                    applyConsolidationMutation.reset();
+                    setConsolidationDraft({
+                      ...consolidationDraft,
+                      idempotencyKey: crypto.randomUUID(),
+                    });
+                    consolidationPreviewMutation.mutate({
+                      shopifyProductId:
+                        consolidationDraft.group.shopifyProductId,
+                      canonicalProductId:
+                        consolidationDraft.canonicalProductId,
+                    });
+                  }}
+                >
+                  {consolidationPreviewMutation.isPending && (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  )}
+                  Load current evidence
+                </Button>
+              </div>
+
+              {consolidationPreviewMutation.error && (
+                <div role="alert" className="border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                  {consolidationPreviewMutation.error.message}
+                </div>
+              )}
+
+              {consolidationPreviewMutation.data && (
+                <>
+                  <ConsolidationPreview
+                    preview={consolidationPreviewMutation.data}
+                  />
+                  {consolidationPreviewMutation.data.plan.canApply && (
+                    <div className="space-y-3 border border-red-200 bg-red-50 p-3">
+                      <div className="text-sm text-red-900">
+                        Apply moves the retained variant IDs under the selected
+                        product, retires only zero-quantity duplicates, archives
+                        the duplicate products, and invalidates current drafts
+                        for fresh review. It does not alter any inventory
+                        quantity and does not call Shopify.
+                      </div>
+                      {pendingConsolidationRequest.current && (
+                        <div className="text-sm font-medium text-amber-900">
+                          The prior result was uncertain. Retry sends the exact
+                          same command and idempotency key.
+                        </div>
+                      )}
+                      <div className="space-y-2">
+                        <Label htmlFor="shopify-product-consolidation-reason">
+                          Audit reason
+                        </Label>
+                        <Textarea
+                          id="shopify-product-consolidation-reason"
+                          value={pendingConsolidationRequest.current?.reason
+                            ?? consolidationReason}
+                          onChange={(event) =>
+                            setConsolidationReason(event.target.value)}
+                          disabled={Boolean(pendingConsolidationRequest.current)}
+                          maxLength={500}
+                          rows={3}
+                          placeholder="Why should these products become one canonical family?"
+                        />
+                      </div>
+                    </div>
+                  )}
+                  {applyConsolidationMutation.error && (
+                    <div role="alert" className="border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+                      {applyConsolidationMutation.error.message}
+                      {canRefreshRejectedConsolidation && (
+                        <Button
+                          variant="link"
+                          size="sm"
+                          className="ml-2 h-auto p-0 text-red-700 underline"
+                          onClick={refreshRejectedConsolidation}
+                        >
+                          Refresh evidence
+                        </Button>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+
+          <DialogFooter>
+            <Button
+              variant="outline"
+              disabled={
+                consolidationPreviewMutation.isPending
+                || applyConsolidationMutation.isPending
+              }
+              onClick={() => setShowConsolidationDialog(false)}
+            >
+              Close
+            </Button>
+            {consolidationPreviewMutation.data?.plan.canApply && (
+              <Button
+                variant="destructive"
+                disabled={
+                  applyConsolidationMutation.isPending
+                  || (!pendingConsolidationRequest.current
+                    && !consolidationReason.trim())
+                }
+                onClick={() => applyConsolidationMutation.mutate()}
+              >
+                {applyConsolidationMutation.isPending && (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                )}
+                {pendingConsolidationRequest.current
+                  ? "Retry same consolidation"
+                  : "Apply product consolidation"}
+              </Button>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+function readableEvidenceLabel(value: string): string {
+  return value.replaceAll("_", " ");
+}
+
+function describeEvidenceValue(value: unknown): string {
+  if (Array.isArray(value)) return value.map(describeEvidenceValue).join(", ");
+  if (value && typeof value === "object") {
+    return Object.entries(value as Record<string, unknown>)
+      .map(([key, nested]) =>
+        `${readableEvidenceLabel(key)}: ${describeEvidenceValue(nested)}`)
+      .join(", ");
+  }
+  if (value === null || value === undefined) return "none";
+  return String(value);
+}
+
+function consolidationBlockerDetails(
+  context: Readonly<Record<string, unknown>>,
+): string | null {
+  const details = Object.entries(context).map(([key, value]) =>
+    `${readableEvidenceLabel(key)}: ${describeEvidenceValue(value)}`);
+  return details.length > 0 ? details.join(" · ") : null;
+}
+
+function ConsolidationPreview({
+  preview,
+}: {
+  preview: ShopifyProductConsolidationPreview;
+}) {
+  const actionsByVariant = new Map(
+    preview.plan.actions.map((action) => [action.sourceVariantId, action]),
+  );
+  return (
+    <div className="space-y-4">
+      <div className={preview.plan.canApply
+        ? "border border-green-200 bg-green-50 p-3 text-sm text-green-800"
+        : "border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900"}
+      >
+        {preview.plan.canApply
+          ? "No blocking dependency was found in this snapshot. Apply will revalidate the complete snapshot inside one transaction."
+          : `${preview.plan.blockers.length} blocking dependencies must be resolved before consolidation.`}
+        <div className="mt-1 font-mono text-[11px] opacity-75">
+          Evidence {preview.plan.previewHash.slice(0, 12)} · {new Date(preview.generatedAt).toLocaleString()}
+        </div>
+      </div>
+
+      {preview.plan.blockers.length > 0 && (
+        <div className="space-y-2">
+          <div className="text-sm font-medium">Blocking dependencies</div>
+          {preview.plan.blockers.map((item, index) => {
+            const details = consolidationBlockerDetails(item.context);
+            return (
+              <div
+                key={`${item.code}-${item.productId}-${item.variantId}-${index}`}
+                className="border border-amber-200 bg-amber-50 p-3 text-sm"
+              >
+                <div className="font-medium">{item.message}</div>
+                <code className="text-xs text-muted-foreground">
+                  {item.code}
+                  {item.productId ? ` · product ${item.productId}` : ""}
+                  {item.variantId ? ` · variant ${item.variantId}` : ""}
+                </code>
+                {details && (
+                  <div className="mt-1 text-xs text-muted-foreground">
+                    {details}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      <div className="space-y-3">
+        {preview.evidence.products.map((product) => (
+          <div key={product.id} className="border p-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="font-medium">{product.name}</div>
+              <Badge variant="outline">Product {product.id}</Badge>
+              {product.id === preview.plan.canonicalProductId && (
+                <Badge className="bg-blue-600">Canonical</Badge>
+              )}
+            </div>
+            <div className="mt-1 text-xs text-muted-foreground">
+              {product.sku ?? "No product SKU"} · {product.inventoryStrategy}
+              {product.draftTransformationModelId
+                ? ` · draft model ${product.draftTransformationModelId}`
+                : ""}
+            </div>
+            <div className="mt-3 overflow-x-auto">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Variant</TableHead>
+                    <TableHead>Package</TableHead>
+                    <TableHead>Physical / committed</TableHead>
+                    <TableHead>Plan</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {product.variants.map((variant) => {
+                    const action = actionsByVariant.get(variant.id);
+                    return (
+                      <TableRow key={variant.id}>
+                        <TableCell>
+                          <div className="font-medium">{variant.sku ?? variant.name}</div>
+                          <div className="text-xs text-muted-foreground">
+                            Variant {variant.id}{variant.isActive ? "" : " · inactive"}
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          {variant.unitsPerVariant} {variant.uomType}
+                        </TableCell>
+                        <TableCell className="whitespace-nowrap text-xs">
+                          {variant.onHandQty} on hand · {variant.reservedQty} reserved
+                          <br />
+                          {variant.pickedQty} picked · {variant.packedQty} packed
+                        </TableCell>
+                        <TableCell>
+                          <Badge variant="outline">
+                            {action?.action.replaceAll("_", " ") ?? "blocked"}
+                          </Badge>
+                          {action?.action === "retire_duplicate" && (
+                            <div className="mt-1 text-xs text-muted-foreground">
+                              Replaced by variant {action.targetVariantId}
+                            </div>
+                          )}
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
