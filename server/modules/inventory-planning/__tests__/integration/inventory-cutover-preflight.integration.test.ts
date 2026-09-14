@@ -164,6 +164,34 @@ describeDatabase.sequential("inventory cutover connected preflight PostgreSQL", 
     expect(result.inventoryLevels[0]).toMatchObject({ physicalQty: "12", pickedQty: "0" });
   });
 
+  it("classifies exact provider receipt lineage for a non-inventory line without changing history", async () => {
+    await pool.query(`
+      UPDATE catalog.product_variants
+      SET requires_shipping=false,track_inventory=false
+      WHERE id=30;
+      UPDATE wms.order_items
+      SET quantity=5,picked_quantity=5,fulfilled_quantity=5,status='completed',requires_shipping=0
+      WHERE id=7;
+      INSERT INTO wms.outbound_shipments VALUES (40,6,'shipped',false);
+      INSERT INTO wms.outbound_shipment_items VALUES
+        (41,40,7,NULL,NULL,30,5,'customer_fulfillment',NULL);
+      INSERT INTO wms.physical_shipments VALUES (50,'shipped');
+      INSERT INTO wms.physical_shipment_items VALUES
+        (51,50,7,NULL,41,NULL,30,'TEST-P5',5,'customer_fulfillment');
+    `);
+    const before = await snapshotAllFixtureRows();
+
+    const result = await connectedService().service.preview("reviewer");
+
+    expect(result.lines[0]).toMatchObject({
+      disposition: "no_inventory_demand",
+      candidateDemandQty: "0",
+      findingCodes: [],
+    });
+    expect(result.findings).toEqual([]);
+    expect(await snapshotAllFixtureRows()).toEqual(before);
+  });
+
   it("preserves independent build holds and exposes remaining anonymous reservations", async () => {
     await pool.query("UPDATE inventory.inventory_levels SET reserved_qty=7 WHERE id=10");
     const result = await connectedService().service.preview("reviewer");

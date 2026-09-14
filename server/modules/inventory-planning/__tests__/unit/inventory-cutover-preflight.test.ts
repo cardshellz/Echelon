@@ -4,6 +4,35 @@ import { InventoryCutoverPreflightService } from "../../application/inventory-cu
 import { inventoryCutoverPreflightSchema } from "@shared/types/inventory-cutover-preflight";
 import { cutoverPreflightFacts, standaloneBuildReservation, canonicalResource } from "../fixtures/inventory-cutover-preflight.fixture";
 
+function exactNonInventoryFulfillmentFacts() {
+  const facts = cutoverPreflightFacts();
+  Object.assign(facts.demand.items[0]!, {
+    quantity: 4,
+    pickedQuantity: 4,
+    fulfilledQuantity: 4,
+    status: "completed",
+    requiresShipping: 0,
+  });
+  Object.assign(facts.variants[0]!, {
+    requiresShipping: false,
+    trackInventory: false,
+  });
+  facts.demand.sourceItems.push({
+    id: 1, shipmentId: 2, headerOrderId: 1, orderItemId: 11,
+    replacementForOrderItemId: null, correctionForShipmentItemId: null,
+    productVariantId: 101, quantity: 4, purpose: "customer_fulfillment",
+    fromLocationId: null, shipmentStatus: "shipped", shipmentHeld: false,
+  });
+  facts.demand.physicalItems.push({
+    id: "3", physicalShipmentId: "4", orderItemId: 11,
+    replacementForOrderItemId: null, legacySourceShipmentItemId: 1,
+    packageAllocationEntryId: null, productVariantId: 101, sku: "P5",
+    originalQuantity: 4, adjustmentQuantity: 0, effectiveQuantity: "4",
+    purpose: "customer_fulfillment", packageStatus: "shipped",
+  });
+  return facts;
+}
+
 describe("inventory cutover preflight", () => {
   it("captures untouched demand without claiming activation readiness or changing input", () => {
     const facts = cutoverPreflightFacts(); const before = structuredClone(facts);
@@ -89,6 +118,54 @@ describe("inventory cutover preflight", () => {
       productVariantId: null, quantity: 4, purpose: "customer_fulfillment",
       fromLocationId: null, shipmentStatus: "queued", shipmentHeld: false,
     });
+
+    expect(buildInventoryCutoverPreflight(facts).lines[0]).toMatchObject({
+      candidateDemandQty: null,
+      disposition: "review_required",
+      findingCodes: ["NONINVENTORY_OWNER_EVIDENCE"],
+    });
+  });
+
+  it("recognizes an exact provider fulfillment receipt as fulfillment-only evidence", () => {
+    const report = buildInventoryCutoverPreflight(exactNonInventoryFulfillmentFacts());
+
+    expect(report.lines[0]).toMatchObject({
+      candidateDemandQty: "0",
+      disposition: "no_inventory_demand",
+      findingCodes: [],
+    });
+    expect(report.findings).toEqual([]);
+  });
+
+  it.each([
+    ["source bin", (facts: ReturnType<typeof exactNonInventoryFulfillmentFacts>) => { facts.demand.sourceItems[0]!.fromLocationId = 100; }],
+    ["unshipped source", (facts: ReturnType<typeof exactNonInventoryFulfillmentFacts>) => { facts.demand.sourceItems[0]!.shipmentStatus = "labeled"; }],
+    ["source correction", (facts: ReturnType<typeof exactNonInventoryFulfillmentFacts>) => { facts.demand.sourceItems[0]!.correctionForShipmentItemId = 9; }],
+    ["physical adjustment", (facts: ReturnType<typeof exactNonInventoryFulfillmentFacts>) => {
+      facts.demand.physicalItems[0]!.adjustmentQuantity = -1;
+      facts.demand.physicalItems[0]!.effectiveQuantity = "3";
+    }],
+    ["package allocation", (facts: ReturnType<typeof exactNonInventoryFulfillmentFacts>) => { facts.demand.physicalItems[0]!.packageAllocationEntryId = "9"; }],
+    ["quantity mismatch", (facts: ReturnType<typeof exactNonInventoryFulfillmentFacts>) => { facts.demand.sourceItems[0]!.quantity = 3; }],
+    ["missing canonical package", (facts: ReturnType<typeof exactNonInventoryFulfillmentFacts>) => { facts.demand.physicalItems = []; }],
+    ["replacement lineage", (facts: ReturnType<typeof exactNonInventoryFulfillmentFacts>) => {
+      facts.demand.physicalItems[0]!.orderItemId = null;
+      facts.demand.physicalItems[0]!.replacementForOrderItemId = 11;
+    }],
+  ])("keeps ambiguous non-inventory fulfillment in review for %s", (_kind, mutate) => {
+    const facts = exactNonInventoryFulfillmentFacts();
+    mutate(facts);
+
+    expect(buildInventoryCutoverPreflight(facts).lines[0]).toMatchObject({
+      candidateDemandQty: null,
+      disposition: "review_required",
+      findingCodes: ["NONINVENTORY_OWNER_EVIDENCE"],
+    });
+  });
+
+  it("still reviews canonical inventory ownership when fulfillment-only package lineage is exact", () => {
+    const facts = exactNonInventoryFulfillmentFacts();
+    facts.encumbrance.canonicalResources = [canonicalResource()];
 
     expect(buildInventoryCutoverPreflight(facts).lines[0]).toMatchObject({
       candidateDemandQty: null,

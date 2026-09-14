@@ -45,6 +45,13 @@ describeDatabase.sequential("channel shipment runtime exact preparation PostgreS
   async function canonical() {
     await pool.query("UPDATE inventory.availability_runtime_authority SET authority='canonical',activation_run_id=4");
   }
+  async function configureNonInventoryLine() {
+    await pool.query(`
+      UPDATE oms.oms_order_lines SET requires_shipping=false WHERE id=12;
+      UPDATE wms.order_items SET requires_shipping=0,status='completed' WHERE id=50;
+      UPDATE catalog.product_variants SET requires_shipping=false,track_inventory=false WHERE id=30;
+    `);
+  }
 
   it.each(["last pick", "primary location"])("canonical preparation leaves the new source bin NULL despite a %s hint", async (hint) => {
     await canonical();
@@ -73,6 +80,126 @@ describeDatabase.sequential("channel shipment runtime exact preparation PostgreS
     expect(result.inventoryItems[0].warehouseLocationId).toBeNull();
     expect((await pool.query("SELECT requires_review,review_reason FROM wms.outbound_shipments")).rows)
       .toEqual([{ requires_review: false, review_reason: null }]);
+  });
+
+  it.each(["legacy", "canonical"])("records %s provider fulfillment for a non-inventory line without posting inventory", async (authority) => {
+    if (authority === "canonical") await canonical();
+    await configureNonInventoryLine();
+
+    const result = await prepare();
+
+    expect(result.inventoryItems).toEqual([]);
+    expect((await pool.query(`SELECT item.order_item_id,item.product_variant_id,item.qty,item.from_location_id,
+      shipment.requires_review,shipment.review_reason
+      FROM wms.outbound_shipment_items item
+      JOIN wms.outbound_shipments shipment ON shipment.id=item.shipment_id`)).rows).toEqual([{
+      order_item_id: 50,
+      product_variant_id: 30,
+      qty: 2,
+      from_location_id: null,
+      requires_review: false,
+      review_reason: null,
+    }]);
+    expect((await pool.query("SELECT channel_order_line_id,wms_order_item_id FROM oms.channel_fulfillment_receipt_items")).rows)
+      .toEqual([{ channel_order_line_id: "line-1", wms_order_item_id: 50 }]);
+  });
+
+  it("accepts a canonical non-inventory package without inventing inventory source lineage", async () => {
+    await canonical();
+    await configureNonInventoryLine();
+    await pool.query(`
+      INSERT INTO wms.physical_shipments (id,provider,provider_physical_shipment_id,status)
+        VALUES (701,'shopify','201','shipped');
+      INSERT INTO wms.fulfillment_plan_lines VALUES (801,12);
+      INSERT INTO wms.physical_shipment_items
+        (id,physical_shipment_id,legacy_wms_shipment_item_id,fulfillment_plan_line_id,quantity_shipped,shipment_item_purpose)
+        VALUES (901,701,NULL,801,2,'customer_fulfillment');
+    `);
+
+    const result = await prepare();
+
+    expect(result).toMatchObject({ physicalShipmentId: 701, inventoryItems: [] });
+    expect((await pool.query("SELECT * FROM wms.outbound_shipment_items")).rows).toEqual([]);
+    expect((await pool.query("SELECT physical_shipment_item_id FROM oms.channel_fulfillment_receipt_items")).rows)
+      .toEqual([{ physical_shipment_item_id: 901 }]);
+  });
+
+  it("fails closed before package writes when OMS, WMS, and catalog shipping facts conflict", async () => {
+    await pool.query("UPDATE oms.oms_order_lines SET requires_shipping=false WHERE id=12");
+
+    await expect(prepare()).rejects.toMatchObject({
+      code: "INVENTORY_CONFIGURATION_CONFLICT",
+      context: { reasons: ["wms_requires_shipping_true", "oms_requires_shipping_false", "catalog_requires_shipping_true"] },
+    });
+    expect((await pool.query("SELECT * FROM wms.outbound_shipments")).rows).toEqual([]);
+    expect((await pool.query("SELECT * FROM wms.outbound_shipment_items")).rows).toEqual([]);
+    expect((await pool.query("SELECT * FROM oms.channel_fulfillment_receipt_items")).rows).toEqual([]);
+  });
+
+  it("closes only receipt-owned review exceptions when a replay completes successfully", async () => {
+    await pool.query(`
+      INSERT INTO wms.reconciliation_exceptions
+        (classification,status,severity,idempotency_key,updated_at)
+      VALUES
+        ('manual_review','open','review','channel_fulfillment_ingress:91:inventory_record_failed:1',NOW()),
+        ('manual_review','open','review','channel_fulfillment_ingress:92:inventory_record_failed:1',NOW());
+    `);
+
+    await repository.completeReceipt({
+      receiptId: 91,
+      leaseToken: "lease-1",
+      processingStatus: "processed",
+      completedAt: now,
+    });
+
+    expect((await pool.query(`SELECT idempotency_key,classification,status,severity,resolved_by,resolution
+      FROM wms.reconciliation_exceptions ORDER BY id`)).rows).toEqual([
+      {
+        idempotency_key: "channel_fulfillment_ingress:91:inventory_record_failed:1",
+        classification: "safe_auto_repair",
+        status: "resolved",
+        severity: "info",
+        resolved_by: "channel_fulfillment_ingress",
+        resolution: "Receipt replay completed after its prior review condition was corrected",
+      },
+      {
+        idempotency_key: "channel_fulfillment_ingress:92:inventory_record_failed:1",
+        classification: "manual_review",
+        status: "open",
+        severity: "review",
+        resolved_by: null,
+        resolution: null,
+      },
+    ]);
+    expect((await pool.query("SELECT processing_status,error_code,error_message FROM oms.channel_fulfillment_receipts")).rows)
+      .toEqual([{ processing_status: "processed", error_code: null, error_message: null }]);
+    expect((await pool.query("SELECT attempt_number,outcome FROM oms.channel_fulfillment_receipt_attempts")).rows)
+      .toEqual([{ attempt_number: 1, outcome: "processed" }]);
+  });
+
+  it("leaves receipt-owned exceptions open when the current attempt still requires review", async () => {
+    await pool.query(`INSERT INTO wms.reconciliation_exceptions
+      (classification,status,severity,idempotency_key,updated_at)
+      VALUES ('manual_review','open','review','channel_fulfillment_ingress:91:inventory_record_failed:1',NOW())`);
+
+    await repository.completeReceipt({
+      receiptId: 91,
+      leaseToken: "lease-1",
+      processingStatus: "review",
+      errorCode: "INVENTORY_RECORD_FAILED",
+      errorMessage: "Inventory is still unresolved",
+      completedAt: now,
+    });
+
+    expect((await pool.query(`SELECT classification,status,severity,resolved_at,resolved_by,resolution
+      FROM wms.reconciliation_exceptions`)).rows).toEqual([{
+      classification: "manual_review",
+      status: "open",
+      severity: "review",
+      resolved_at: null,
+      resolved_by: null,
+      resolution: null,
+    }]);
   });
 
   it("reuses source identifiers on preparation replay and never overwrites a persisted source bin", async () => {
