@@ -57,6 +57,7 @@ function makeDependencies() {
         getActiveInsurancePoolPolicy: vi.fn<DropshipListingShippingEstimateDependencies["calculation"]["repository"]["getActiveInsurancePoolPolicy"]>(async () => ({ id: 8, source: "config", feeBps: 200, minFeeCents: null, maxFeeCents: null })),
       },
     },
+    catalogFacts: { loadByVariantIds: vi.fn(async () => new Map([[101, { sku: "PACK", weightGrams: 100 }]])) },
     clock: { now: () => at },
     logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
   } satisfies DropshipListingShippingEstimateDependencies;
@@ -160,7 +161,7 @@ describe("read-only listing shipping estimate", () => {
     deps.calculation.pricingProvider.quote.mockResolvedValue({
       source: "shared", decision: { source: "shared", mode: "live", reasonCode: "LIVE_ENABLED" }, baseRateCents: 800, currency: "USD", rateTableId: 44,
       quote: { status: "quoted", baseRateCents: 800, currency: "USD", serviceLevelCode: "standard", rateBookId: 12, rateBookCode: "dropship", rateTableId: 44, resolvedZone: "1", ratedWeightGrams: 200, rateProvider: { name: "local_rate_table", version: "1" }, warnings: ["Shipping region inferred from postal code."], routing: {},
-        selectedRate: { serviceLevelId: 4, serviceLevelCode: "standard", displayName: "Standard Shipping", description: null, fulfillmentMode: "parcel", pricingBasis: "shipment_weight", totalCents: 800, currency: "USD", promiseMinBusinessDays: null, promiseMaxBusinessDays: null, ratedMeasure: 200, maxShipmentWeightGrams: null, chargeModel: "fixed_band", perStartedPoundCents: null, billablePounds: null, rateTableId: 44, productPolicyApplied: false, calculationTrace: [] },
+        selectedRate: { rateRowId: 9, serviceLevelId: 4, serviceLevelCode: "standard", displayName: "Standard Shipping", description: null, fulfillmentMode: "parcel", pricingBasis: "shipment_weight", totalCents: 800, currency: "USD", promiseMinBusinessDays: null, promiseMaxBusinessDays: null, ratedMeasure: 200, maxShipmentWeightGrams: null, chargeModel: "fixed_band", perStartedPoundCents: null, billablePounds: null, rateTableId: 44, productPolicyApplied: false, calculationTrace: [] },
       },
     });
     const result = await service.estimateForMember("member-1", input);
@@ -170,6 +171,38 @@ describe("read-only listing shipping estimate", () => {
       code: "DROPSHIP_LISTING_SHIPPING_ESTIMATE_WARNINGS",
       context: expect.objectContaining({ rateWarnings: ["Shipping region inferred from postal code."] }),
     }));
+  });
+  it("never attaches calculation detail unless asked, and never reads catalog facts for a vendor estimate", async () => {
+    const result = await service.estimateForMember("member-1", input);
+    expect(result).not.toHaveProperty("calculation");
+    expect(await service.estimateForMember("member-1", input, {})).not.toHaveProperty("calculation");
+    expect(await service.estimateForMember("member-1", input, { includeCalculation: false })).not.toHaveProperty("calculation");
+    expect(deps.catalogFacts.loadByVariantIds).not.toHaveBeenCalled();
+  });
+  it("attaches staff calculation detail with the submitted weights, cartons, rate evidence and fee arithmetic", async () => {
+    const result = await service.estimateForMember("member-1", input, { includeCalculation: true });
+    expect(result).toMatchObject({ status: "estimated", totalShippingCents: 1170, calculation: {
+      pricingSource: "legacy", cutoverMode: "legacy", cutoverReasonCode: "LEGACY_MODE", originWarehouseId: 3,
+      items: [{ productVariantId: 101, sku: "PACK", quantity: 2, unitWeightGrams: 100, lineWeightGrams: 200 }],
+      packages: [{ packageSequence: 1, boxCode: null, weightGrams: 200, items: [{ productVariantId: 101, quantity: 2 }] }],
+      rate: { source: "legacy_rate_table", zone: "1", zoneRuleId: 5, packages: [{ packageSequence: 1, rateTableId: 33, carrier: "USPS", service: "Ground", rateCents: 999 }] },
+      // 10% of 999 floors to 99, plus 50 fixed; 2% of 1148 floors to 22; 999 + 149 + 22 = 1170.
+      charges: { baseCents: 999, markupCents: 149, insuranceCents: 22, dunnageCents: 0, totalCents: 1170 },
+      warnings: [],
+    } });
+    expect(deps.catalogFacts.loadByVariantIds).toHaveBeenCalledWith([101]);
+  });
+  it("exposes the shared engine program, table, row and zone only in staff calculation detail", async () => {
+    deps.calculation.pricingProvider.quote.mockResolvedValue({
+      source: "shared", decision: { source: "shared", mode: "live", reasonCode: "LIVE_ENABLED" }, baseRateCents: 800, currency: "USD", rateTableId: 44,
+      quote: { status: "quoted", baseRateCents: 800, currency: "USD", serviceLevelCode: "standard", rateBookId: 12, rateBookCode: "dropship", rateTableId: 44, resolvedZone: "1", ratedWeightGrams: 200, rateProvider: { name: "local_rate_table", version: "1" }, warnings: [], routing: {},
+        selectedRate: { rateRowId: 9, serviceLevelId: 4, serviceLevelCode: "standard", displayName: "Standard Shipping", description: null, fulfillmentMode: "parcel", pricingBasis: "shipment_weight", totalCents: 800, currency: "USD", promiseMinBusinessDays: null, promiseMaxBusinessDays: null, ratedMeasure: 200, maxShipmentWeightGrams: null, chargeModel: "fixed_band", perStartedPoundCents: null, billablePounds: null, rateTableId: 44, productPolicyApplied: false, calculationTrace: [] },
+      },
+    });
+    const withDetail = await service.estimateForMember("member-1", input, { includeCalculation: true });
+    expect(withDetail).toMatchObject({ calculation: { pricingSource: "shared", rate: { source: "shared_engine", rateBookId: 12, rateBookCode: "dropship", rateTableId: 44, rateRowId: 9, zone: "1", ratedWeightGrams: 200, serviceLevelName: "Standard Shipping" } } });
+    const withoutDetail = await service.estimateForMember("member-1", input);
+    expect(JSON.stringify(withoutDetail)).not.toMatch(/rateBook|rateTable|rateRow|zone/);
   });
   it("replaces internal packaging warnings with a customer-safe advisory", async () => {
     const cartonization = await deps.calculation.cartonization.cartonize({ vendorId: 10, storeConnectionId: 22, warehouseId: 3, items: [{ productVariantId: 101, quantity: 2 }], destination: { country: "US", region: "PA", postalCode: "17046" }, quotedAt: at });

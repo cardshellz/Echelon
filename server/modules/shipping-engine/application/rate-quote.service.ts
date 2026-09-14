@@ -90,6 +90,8 @@ export interface RateQuoteOptions {
 export interface RateQuoteLine {
   /** Internal evidence; adapters must project only the final charge to buyers. */
   programCharges?: ProgramChargeEvidence;
+  /** Internal evidence: the rate_table_rows.id that produced the charge. */
+  rateRowId?: number | null;
   serviceLevelId: number;
   serviceLevelCode: string;
   displayName: string;
@@ -292,6 +294,7 @@ export async function quoteShipmentRates(
     const programCharges = applyProgramCharges(totalCents, chargePolicy.charges, chargePolicy.revision);
     quotes.push({
       programCharges,
+      rateRowId: quote.rateRowId ?? null,
       serviceLevelId: quote.serviceLevelId,
       serviceLevelCode: quote.serviceLevelCode,
       displayName: quote.displayName,
@@ -430,6 +433,7 @@ async function loadCandidateRows(
 ): Promise<RateCandidateRow[]> {
   const rows = await db
     .select({
+      rateRowId: shippingRateTableRows.id,
       rateTableId: shippingRateTableRows.rateTableId,
       serviceLevelId: shippingServiceLevels.id,
       serviceLevelCode: shippingServiceLevels.code,

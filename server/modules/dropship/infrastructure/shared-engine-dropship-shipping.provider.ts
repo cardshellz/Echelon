@@ -164,6 +164,7 @@ implements DropshipSharedShippingQuoteProvider {
       ),
       rateProvider: this.deps.rateProvider.provider,
       selectedRate: {
+        rateRowId: standardRate.rateRowId ?? null,
         serviceLevelId: standardRate.serviceLevelId,
         serviceLevelCode: standardRate.serviceLevelCode,
         displayName: standardRate.displayName,

@@ -1,9 +1,10 @@
-import type { Express } from "express";
+import type { Express, Request } from "express";
 import rateLimit from "express-rate-limit";
 import { ZodError } from "zod";
 import type { DropshipListingShippingEstimateService } from "../../application/dropship-listing-shipping-estimate-service";
 import { DropshipError } from "../../domain/errors";
 import { createDropshipListingShippingEstimateServiceFromEnv } from "../../infrastructure/dropship-listing-shipping-estimate.factory";
+import { hasPermission } from "../../../identity";
 import { requireDropshipAuth } from "./dropship-auth.routes";
 import { listingShippingEstimateResponseSchema } from "../../../../../shared/dropship/listing-shipping-estimate";
 
@@ -11,9 +12,36 @@ import { listingShippingEstimateResponseSchema } from "../../../../../shared/dro
 // independently of order placement and wallet rate limits.
 export const LISTING_SHIPPING_ESTIMATE_REQUESTS_PER_MINUTE = 30;
 
+/**
+ * Calculation detail (item weights, cartons, rate book / table / row, fee
+ * arithmetic) is Card Shellz pricing evidence. It is released only to a
+ * request that also carries a staff session holding this permission; the
+ * vendor session alone never unlocks it.
+ */
+export const LISTING_SHIPPING_CALCULATION_PERMISSION = { resource: "dropship", action: "manage_operations" } as const;
+
+export type ListingShippingCalculationViewer = (req: Request) => Promise<boolean>;
+
+export function createStaffCalculationViewer(
+  checkPermission: (userId: string, resource: string, action: string) => Promise<boolean> = hasPermission,
+): ListingShippingCalculationViewer {
+  return async (req) => {
+    const staff = req.session.user;
+    if (!staff) return false;
+    try {
+      return await checkPermission(staff.id, LISTING_SHIPPING_CALCULATION_PERMISSION.resource, LISTING_SHIPPING_CALCULATION_PERMISSION.action);
+    } catch (error) {
+      // Fail closed: the vendor-safe estimate still answers, without evidence.
+      console.warn(JSON.stringify({ code: "DROPSHIP_LISTING_SHIPPING_CALCULATION_GATE_FAILED", message: "Staff calculation permission check failed; responding without calculation detail.", error: error instanceof Error ? error.message : String(error) }));
+      return false;
+    }
+  };
+}
+
 export function registerDropshipListingShippingEstimateRoutes(
   app: Express,
   service: Pick<DropshipListingShippingEstimateService, "estimateForMember"> = createDropshipListingShippingEstimateServiceFromEnv(),
+  canViewCalculation: ListingShippingCalculationViewer = createStaffCalculationViewer(),
 ): void {
   const limiter = rateLimit({
     windowMs: 60_000,
@@ -26,7 +54,8 @@ export function registerDropshipListingShippingEstimateRoutes(
   app.post("/api/dropship/listings/shipping-estimate", requireDropshipAuth, limiter, async (req, res) => {
     res.setHeader("Cache-Control", "no-store");
     try {
-      const estimate = await service.estimateForMember(req.session.dropship!.memberId, req.body);
+      const includeCalculation = await canViewCalculation(req);
+      const estimate = await service.estimateForMember(req.session.dropship!.memberId, req.body, { includeCalculation });
       const response = listingShippingEstimateResponseSchema.safeParse({ estimate });
       if (!response.success) {
         throw new DropshipError("DROPSHIP_LISTING_SHIPPING_ESTIMATE_INVALID", "Shipping estimate response failed its public contract.");

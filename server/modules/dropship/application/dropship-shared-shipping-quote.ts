@@ -42,6 +42,8 @@ export interface DropshipSharedShippingQuoteRequest {
 }
 
 export interface DropshipSharedShippingSelectedRate {
+  /** Rate table row that produced the charge; null when the engine has no id. */
+  rateRowId?: number | null;
   serviceLevelId: number;
   serviceLevelCode: string;
   displayName: string;

@@ -6,7 +6,8 @@ import { listingShippingEstimateInputSchema, LISTING_SHIPPING_ESTIMATE_UNAVAILAB
   LISTING_SHIPPING_ESTIMATE_UNAVAILABLE_MESSAGE, type ListingShippingEstimateResult } from "../../../../../shared/dropship/listing-shipping-estimate";
 import { DropshipError } from "../../domain/errors";
 vi.mock("../../../../db", () => ({ pool: {}, db: {} }));
-import { registerDropshipListingShippingEstimateRoutes, LISTING_SHIPPING_ESTIMATE_REQUESTS_PER_MINUTE } from "../../interfaces/http/dropship-listing-shipping-estimate.routes";
+import { registerDropshipListingShippingEstimateRoutes, LISTING_SHIPPING_ESTIMATE_REQUESTS_PER_MINUTE,
+  createStaffCalculationViewer, LISTING_SHIPPING_CALCULATION_PERMISSION } from "../../interfaces/http/dropship-listing-shipping-estimate.routes";
 
 const input = { storeConnectionId: 22, productVariantId: 101, quantity: 1, destination: { country: "US", region: "PA", postalCode: "17046" } };
 const unavailable: ListingShippingEstimateResult = { status: "unavailable", storeConnectionId: 22, productVariantId: 101, quantity: 1, destination: { country: "US", region: "PA", postalCode: "17046" }, estimatedAt: "2026-09-06T12:00:00.000Z", warnings: [], code: LISTING_SHIPPING_ESTIMATE_UNAVAILABLE_CODE, message: LISTING_SHIPPING_ESTIMATE_UNAVAILABLE_MESSAGE };
@@ -16,10 +17,11 @@ const estimated: ListingShippingEstimateResult = { status: "estimated", storeCon
 describe("listing shipping estimate endpoint", () => {
   let server: http.Server;
   let url: string;
-  const estimateForMember = vi.fn(async (_member: string, body: unknown): Promise<ListingShippingEstimateResult> => {
+  const estimateForMember = vi.fn(async (_member: string, body: unknown, _options?: { includeCalculation?: boolean }): Promise<ListingShippingEstimateResult> => {
     listingShippingEstimateInputSchema.parse(body);
     return unavailable;
   });
+  const canViewCalculation = vi.fn(async (req: Request) => req.header("X-Test-Staff") === "yes");
   beforeEach(async () => {
     estimateForMember.mockClear();
     const app = express();
@@ -29,16 +31,23 @@ describe("listing shipping estimate endpoint", () => {
       req.session = { ...(memberId ? { dropship: { memberId } } : {}) } as Request["session"];
       next();
     });
-    registerDropshipListingShippingEstimateRoutes(app, { estimateForMember });
+    canViewCalculation.mockClear();
+    registerDropshipListingShippingEstimateRoutes(app, { estimateForMember }, canViewCalculation);
     server = http.createServer(app);
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
     url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api/dropship/listings/shipping-estimate`;
   });
   afterEach(async () => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())));
 
-  async function request(memberId: string | null = "member-1", body: unknown = input) {
-    return fetch(url, { method: "POST", headers: { "Content-Type": "application/json", ...(memberId ? { "X-Test-Member": memberId } : {}) }, body: JSON.stringify(body) });
+  async function request(memberId: string | null = "member-1", body: unknown = input, staff = false) {
+    return fetch(url, { method: "POST", headers: { "Content-Type": "application/json", ...(memberId ? { "X-Test-Member": memberId } : {}), ...(staff ? { "X-Test-Staff": "yes" } : {}) }, body: JSON.stringify(body) });
   }
+  const calculation = { pricingSource: "shared", cutoverMode: "live", cutoverReasonCode: "LIVE_ENABLED", originWarehouseId: 1,
+    items: [{ productVariantId: 101, sku: "PACK", quantity: 1, unitWeightGrams: 635, lineWeightGrams: 635 }],
+    packages: [{ packageSequence: 1, boxCode: "BOX", weightGrams: 635, lengthMm: null, widthMm: null, heightMm: null, items: [{ productVariantId: 101, quantity: 1 }] }],
+    rate: { source: "shared_engine", rateBookId: 34, rateBookCode: "dropship", rateTableId: 5, rateRowId: 9, serviceLevelCode: "standard", serviceLevelName: "Standard", zone: "2",
+      ratedWeightGrams: 635, chargeModel: "fixed_band", rowMaxShipmentWeightGrams: null, perStartedPoundCents: null, billablePounds: null, productPolicyApplied: false, policySteps: [] },
+    charges: { baseCents: 600, markupCents: 100, insuranceCents: 19, dunnageCents: 0, totalCents: 719 }, warnings: [] } as const;
 
   it("requires real dropship session auth before calling the service", async () => {
     const response = await request(null);
@@ -51,7 +60,19 @@ describe("listing shipping estimate endpoint", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ estimate: unavailable });
     expect(response.headers.get("cache-control")).toBe("no-store");
-    expect(estimateForMember).toHaveBeenCalledWith("member-1", input);
+    expect(estimateForMember).toHaveBeenCalledWith("member-1", input, { includeCalculation: false });
+  });
+  it("asks the service for calculation detail only when the staff gate allows it, and serializes it", async () => {
+    estimateForMember.mockResolvedValueOnce({ ...estimated, calculation } as ListingShippingEstimateResult);
+    const response = await request("member-1", input, true);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ estimate: { ...estimated, calculation } });
+    expect(estimateForMember).toHaveBeenCalledWith("member-1", input, { includeCalculation: true });
+    expect(canViewCalculation).toHaveBeenCalledOnce();
+  });
+  it("does not consult the staff gate before dropship auth succeeds", async () => {
+    await request(null, input, true);
+    expect(canViewCalculation).not.toHaveBeenCalled();
   });
   it("rejects unknown warehouse authority inputs", async () => {
     const response = await request("member-1", { ...input, warehouseId: 999 });
@@ -100,11 +121,42 @@ describe("listing shipping estimate endpoint", () => {
     estimateForMember.mockRejectedValueOnce(new DropshipError(code, "Controlled failure."));
     expect((await request()).status).toBe(status);
   });
+  it("still rejects unknown private fields even for a staff response", async () => {
+    estimateForMember.mockResolvedValueOnce({ ...estimated, calculation, breakdown: { markupCents: 8 } } as ListingShippingEstimateResult);
+    expect((await request("member-1", input, true)).status).toBe(500);
+  });
   it("bounds estimate requests per member while allowing a different member", async () => {
     for (let i = 0; i < LISTING_SHIPPING_ESTIMATE_REQUESTS_PER_MINUTE; i++) expect((await request()).status).toBe(200);
     const response = await request();
     expect(response.status).toBe(429);
     expect(await response.json()).toMatchObject({ error: { code: "DROPSHIP_LISTING_SHIPPING_RATE_LIMITED" } });
     expect((await request("member-2")).status).toBe(200);
+  });
+});
+
+describe("staff calculation viewer", () => {
+  function requestWithUser(user: { id: string } | undefined): Request {
+    return { session: { ...(user ? { user } : {}) } } as unknown as Request;
+  }
+  it("denies without a staff session and never calls the permission check", async () => {
+    const check = vi.fn(async () => true);
+    expect(await createStaffCalculationViewer(check)(requestWithUser(undefined))).toBe(false);
+    expect(check).not.toHaveBeenCalled();
+  });
+  it("grants only when the staff user holds the dropship operations permission", async () => {
+    const check = vi.fn(async (_userId: string, resource: string, action: string) => resource === "dropship" && action === "manage_operations");
+    expect(await createStaffCalculationViewer(check)(requestWithUser({ id: "staff-1" }))).toBe(true);
+    expect(check).toHaveBeenCalledWith("staff-1", LISTING_SHIPPING_CALCULATION_PERMISSION.resource, LISTING_SHIPPING_CALCULATION_PERMISSION.action);
+    expect(await createStaffCalculationViewer(async () => false)(requestWithUser({ id: "staff-1" }))).toBe(false);
+  });
+  it("fails closed when the permission check throws", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(await createStaffCalculationViewer(async () => { throw new Error("identity offline"); })(requestWithUser({ id: "staff-1" }))).toBe(false);
+      expect(warn).toHaveBeenCalledOnce();
+      expect(String(warn.mock.calls[0][0])).toContain("DROPSHIP_LISTING_SHIPPING_CALCULATION_GATE_FAILED");
+    } finally {
+      warn.mockRestore();
+    }
   });
 });

@@ -5,6 +5,7 @@ import { PgDropshipListingPreviewRepository } from "./dropship-listing-preview.r
 import { PgListingShippingEstimateContextReader } from "./dropship-listing-shipping-estimate.repository";
 import { createDropshipShippingPricingProviderFromEnv } from "./dropship-shipping-quote.factory";
 import { PgDropshipShippingQuoteRepository } from "./dropship-shipping-quote.repository";
+import { loadCatalogShippingFactsByVariantIds } from "../../shipping-engine/infrastructure/catalog-weight.repository";
 
 export function createDropshipListingShippingEstimateServiceFromEnv(): DropshipListingShippingEstimateService {
   const logger = makeDropshipShippingQuoteLogger();
@@ -21,6 +22,8 @@ export function createDropshipListingShippingEstimateServiceFromEnv(): DropshipL
         getActiveInsurancePoolPolicy: (at) => policies.getActiveInsurancePoolPolicy(at),
       },
     },
+    // Same canonical weight facts the shared engine rates from.
+    catalogFacts: { loadByVariantIds: loadCatalogShippingFactsByVariantIds },
     clock: systemDropshipShippingQuoteClock,
     logger,
   });

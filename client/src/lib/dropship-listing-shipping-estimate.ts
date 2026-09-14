@@ -24,7 +24,8 @@ export function readListingShippingEstimateResponse(value: unknown, request: Lis
     || (request.destination.region && normalized(estimate.destination.region ?? "") !== normalized(request.destination.region))) {
     throw new Error("The estimate did not match this listing and destination. Please try again.");
   }
-  // The server validates integer-cent arithmetic. Customers receive the final
-  // charge, not internal inputs with which to reconstruct our pricing rules.
+  // The server validates integer-cent arithmetic. Vendors receive the final
+  // charge only; the optional calculation block arrives solely for a staff
+  // session and is validated by the shared schema like everything else.
   return estimate;
 }
