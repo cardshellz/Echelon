@@ -1,3 +1,4 @@
+import { startArchonOrderDelivery } from "./modules/oms/archon-order-delivery.worker";
 import express, { type Request, Response, NextFunction } from "express";
 import session from "express-session";
 import connectPgSimple from "connect-pg-simple";
@@ -774,6 +775,13 @@ function startEchelonSyncScheduler(
         startShopifyBridgeListener(db, services.oms);
       } else {
         logSchedulerDisabled("scheduler", "Shopify bridge listener", "SHOPIFY_BRIDGE_LISTENER_DISABLED");
+      }
+
+      if (!schedulersDisabled("ARCHON_ORDER_DELIVERY_DISABLED")) {
+        const stopArchonDelivery = startArchonOrderDelivery();
+        if (stopArchonDelivery) httpServer.once("close", stopArchonDelivery);
+      } else {
+        logSchedulerDisabled("scheduler", "Archon order delivery", "ARCHON_ORDER_DELIVERY_DISABLED");
       }
 
       if (!schedulersDisabled("BILLING_SCHEDULER_DISABLED")) {

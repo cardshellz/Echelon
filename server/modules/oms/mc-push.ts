@@ -177,3 +177,8 @@ export async function pushToMissionControl(orderId: number, eventType: string): 
     // Never throw — fire-and-forget
   }
 }
+
+/** Shared by the durable projection worker and the existing webhook sender. */
+export function missionControlConnection() {
+  return { url: MC_URL, secret: MC_WEBHOOK_SECRET };
+}
