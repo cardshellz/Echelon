@@ -291,6 +291,34 @@ function validateRule(rule: ChannelAllocationRule, channelId: number): ResolvedR
   return rule.mode as ResolvedRule["mode"];
 }
 
+/**
+ * Fixed and ceiling caps are drawn down warehouse by warehouse (see
+ * computeAllocation), so the walk order decides which warehouse's stock is
+ * published. Higher priority first, then lower warehouse id, so the same inputs
+ * always produce the same per-warehouse breakdown regardless of the order rows
+ * come back from the database. Never mutates its input.
+ */
+export function orderWarehouseAssignments<T extends { warehouseId: number; priority?: number | null }>(
+  assignments: readonly T[],
+): T[] {
+  // A missing priority is the column default (0); anything else that is not a
+  // safe integer would make the sort unpredictable, so it is refused.
+  const priorityOf = (assignment: T): number => assignment.priority ?? 0;
+  for (const assignment of assignments) {
+    if (!Number.isSafeInteger(priorityOf(assignment)) || !Number.isSafeInteger(assignment.warehouseId)) {
+      throw new AllocationEngineError(
+        ALLOCATION_ERROR_CODES.INPUT_INVALID,
+        "permanent",
+        "Warehouse assignment priority and warehouse id must be safe integers.",
+        { warehouseId: assignment.warehouseId, priority: assignment.priority ?? null },
+      );
+    }
+  }
+  return [...assignments].sort(
+    (left, right) => priorityOf(right) - priorityOf(left) || left.warehouseId - right.warehouseId,
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------
@@ -408,19 +436,22 @@ class AllocationEngine {
     }
 
     // 4. Load warehouse assignments for all channels
-    const warehouseAssignments = await this.db
-      .select()
-      .from(channelWarehouseAssignments)
-      .where(
-        and(
-          inArray(channelWarehouseAssignments.channelId, channelIds),
-          eq(channelWarehouseAssignments.enabled, true),
-        ),
-      );
+    const warehouseAssignments: Array<{ channelId: number; warehouseId: number; priority: number }> =
+      await this.db
+        .select()
+        .from(channelWarehouseAssignments)
+        .where(
+          and(
+            inArray(channelWarehouseAssignments.channelId, channelIds),
+            eq(channelWarehouseAssignments.enabled, true),
+          ),
+        );
 
-    // Group warehouse IDs by channel
+    // Group warehouse IDs by channel in a fixed order: caps are drawn down
+    // warehouse by warehouse, so database row order must never decide which
+    // warehouse's stock gets published.
     const warehousesByChannel = new Map<number, number[]>();
-    for (const wa of warehouseAssignments) {
+    for (const wa of orderWarehouseAssignments(warehouseAssignments)) {
       const list = warehousesByChannel.get(wa.channelId) ?? [];
       list.push(wa.warehouseId);
       warehousesByChannel.set(wa.channelId, list);
@@ -441,7 +472,10 @@ class AllocationEngine {
             inArray(warehouses.warehouseType, ["operations", "3pl"]),
           ),
         );
-      allFulfillmentWarehouseIds = fulfillmentWarehouses.map((w: any) => w.id);
+      // Same determinism for the fallback: lowest warehouse id first.
+      allFulfillmentWarehouseIds = fulfillmentWarehouses
+        .map((w: any) => w.id)
+        .sort((left: number, right: number) => left - right);
     }
 
     // 6. Load allocation rules for all channels + global rules (channelId IS NULL)
