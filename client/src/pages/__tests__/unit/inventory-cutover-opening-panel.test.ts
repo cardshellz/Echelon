@@ -47,12 +47,18 @@ describe("existing-page opening verification panel", () => {
     expect(html).toContain("An order owner&#x27;s reserved and picked quantities describe physical holds only");
     expect(html).toContain("unexplained physical custody still blocks");
     expect(html).toContain("Use independently verified current lot custody");
+    expect(html).toContain("Download stock and lot counts CSV");
+    expect(html).toContain("Download open-order review CSV");
+    expect(html).toContain("Download lot ownership CSV");
+    expect(html).toContain("order number, external order ID, SKU and line");
+    expect(html).toContain("no JSON editing is required");
+    expect(html).toContain("Legacy system-to-system JSON compatibility (not for manual editing)");
     expect(html).not.toContain("Switch to canonical authority");
   });
   it("does not allow import or template export from stale source after refresh failure", () => {
     state.source = openingSource(); state.error = new Error("Refresh failed"); const html = render();
     expect(html).toContain("Previous source records below may be stale");
-    expect(html).toMatch(/<button[^>]*disabled[^>]*>Download blank verification worksheet/);
+    expect(html).toMatch(/<button[^>]*disabled[^>]*>Download stock and lot counts CSV/);
     expect(html).toMatch(/<input[^>]*disabled/);
   });
   it("keeps saved evidence separate from activation or stock correction", () => {
