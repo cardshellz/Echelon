@@ -72,7 +72,8 @@ export function DropshipListingShippingEstimate({ storeConnectionId, productVari
           {usDestination
             ? <Select value={fields.region} onValueChange={(value) => update("region", value)} disabled={pending}>
                 <SelectTrigger id={`${fieldId}-region`} aria-label="State"><SelectValue placeholder="Select a state" /></SelectTrigger>
-                <SelectContent>{US_POSTAL_REGIONS.map(([code, name]) =>
+                {/* 59 regions: cap the list so it scrolls instead of running off the viewport. */}
+                <SelectContent className="max-h-72">{US_POSTAL_REGIONS.map(([code, name]) =>
                   <SelectItem key={code} value={code}>{name} ({code})</SelectItem>)}</SelectContent>
               </Select>
             : <Input id={`${fieldId}-region`} maxLength={2} minLength={2} pattern="[A-Za-z]{2}" required placeholder="ON" autoComplete="address-level1" disabled={pending}

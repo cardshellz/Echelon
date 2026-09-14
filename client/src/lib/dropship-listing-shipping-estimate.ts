@@ -5,7 +5,7 @@ export type ListingShippingScenarioFields = { quantity: string; country: string;
 
 export function buildListingShippingEstimateRequest(storeConnectionId: number, productVariantId: number, fields: ListingShippingScenarioFields): ListingShippingEstimateInput {
   if (!/^\d+$/.test(fields.quantity)) throw new Error("Enter a whole-number purchase quantity.");
-  if (!/^[A-Za-z]{2}$/.test(fields.region.trim())) throw new Error("Enter a two-letter state or region code, such as PA.");
+  if (!/^[A-Za-z]{2}$/.test(fields.region.trim())) throw new Error("Choose a state, or enter a two-letter state or region code such as PA.");
   const parsed = listingShippingEstimateInputSchema.safeParse({ storeConnectionId, productVariantId,
     quantity: Number(fields.quantity), destination: { country: fields.country.trim().toUpperCase(),
       postalCode: fields.postalCode.trim(), region: fields.region.trim().toUpperCase() } });
