@@ -329,6 +329,7 @@ describe("PgPackageAllocationLedgerRepository authority evidence", () => {
     expect(evidence).toEqual([
       {
         evidenceKey: "shipping-provider-label:42",
+        splitContinuation: null,
         persistedEvidence: {
           shippingProviderLabelId: 42,
           provider: "shipstation",

@@ -345,10 +345,14 @@ export function resolvePackageAllocationAuthorityEvidence(input: {
     contractVersion: 1,
     authorityMode: "shadow_only",
     sourceFacts: [...sourceFacts],
-    packages: [...packages],
+    packages: packages.map((pkg) => ({
+      evidenceKey: pkg.evidenceKey,
+      persistedEvidence: pkg.persistedEvidence,
+    })),
   });
   const adaptedPackages = packages.map((pkg) => ({
     evidenceKey: pkg.evidenceKey,
+    splitContinuation: pkg.splitContinuation ?? null,
     adapted: adaptPersistedDeclaredPackageLifecycleEvidence(
       pkg.persistedEvidence,
     ),
@@ -362,6 +366,12 @@ export function resolvePackageAllocationAuthorityEvidence(input: {
             providerPhysicalShipmentId: pkg.adapted.input.providerPhysicalShipmentId,
             events: [...pkg.adapted.input.events],
           },
+          splitContinuation: pkg.splitContinuation === null
+            ? null
+            : {
+                ...pkg.splitContinuation,
+                lines: pkg.splitContinuation.lines.map((line) => ({ ...line })),
+              },
         }]
       : [],
   );

@@ -1707,7 +1707,7 @@ export function createShipStationService(
 
       for (const item of parsedShipStationItems ?? []) {
         const sourceResult: any = await tx.execute(sql`
-          SELECT id, qty
+          SELECT id, qty, split_root_shipment_item_id
           FROM wms.outbound_shipment_items
           WHERE id = ${item.sourceShipmentItemId}
             AND shipment_id = ${parent.id}
@@ -1736,7 +1736,11 @@ export function createShipStationService(
           const moved: any = await tx.execute(sql`
             UPDATE wms.outbound_shipment_items
             SET shipment_id = ${row.id},
-                tracking_id = ${String(shipment.shipmentId)}
+                tracking_id = ${String(shipment.shipmentId)},
+                split_root_shipment_item_id = COALESCE(
+                  split_root_shipment_item_id,
+                  id
+                )
             WHERE id = ${item.sourceShipmentItemId}
               AND shipment_id = ${parent.id}
               AND qty = ${item.qty}
@@ -1751,13 +1755,27 @@ export function createShipStationService(
           continue;
         }
 
+        const rootSourceShipmentItemId = Number(
+          source.split_root_shipment_item_id ?? item.sourceShipmentItemId,
+        );
+        if (
+          !Number.isInteger(rootSourceShipmentItemId)
+          || rootSourceShipmentItemId <= 0
+        ) {
+          throw new Error(
+            `WMS shipment item ${item.sourceShipmentItemId} has invalid split lineage`,
+          );
+        }
+
         const insertedItem: any = await tx.execute(sql`
           INSERT INTO wms.outbound_shipment_items
             (shipment_id, order_item_id, replacement_for_order_item_id,
+             correction_for_shipment_item_id, split_root_shipment_item_id,
              shipment_item_purpose, product_variant_id, qty,
              from_location_id, box_id, weight_oz, tracking_id, created_at)
           SELECT
             ${row.id}, order_item_id, replacement_for_order_item_id,
+            correction_for_shipment_item_id, ${rootSourceShipmentItemId},
             shipment_item_purpose, product_variant_id, ${item.qty},
             from_location_id, box_id, weight_oz,
             ${String(shipment.shipmentId)}, NOW()
@@ -1813,7 +1831,8 @@ export function createShipStationService(
       SELECT osi.id, osi.order_item_id, osi.replacement_for_order_item_id,
              COALESCE(oi.sku, catalog_variant.sku) AS sku,
              osi.qty, target_shipment.shipment_purpose,
-             osi.provider_membership_state
+             osi.provider_membership_state,
+             osi.split_root_shipment_item_id
       FROM wms.outbound_shipment_items osi
       JOIN wms.outbound_shipments target_shipment
         ON target_shipment.id = osi.shipment_id
@@ -1864,6 +1883,9 @@ export function createShipStationService(
         SELECT
           osi.id,
           osi.order_item_id,
+          osi.correction_for_shipment_item_id,
+          osi.shipment_item_purpose,
+          osi.split_root_shipment_item_id,
           osi.product_variant_id,
           -- Planned shipment items may predate picking, so older rows can
           -- legitimately have no source bin. The pick ledger is the source of
@@ -1908,6 +1930,24 @@ export function createShipStationService(
         touchedOriginalIds.push(item.sourceShipmentItemId);
       } else {
         const orderItemId = Number(sourceRow.order_item_id);
+        const splitRootShipmentItemId = targetIsReplacement
+          ? null
+          : Number(
+              sourceRow.split_root_shipment_item_id
+              ?? item.sourceShipmentItemId,
+            );
+        if (
+          !targetIsReplacement
+          && (
+            !Number.isInteger(splitRootShipmentItemId)
+            || Number(splitRootShipmentItemId) <= 0
+          )
+        ) {
+          throw new ShipStationUnmappedItemsError(
+            `shipstation_split_source_lineage_invalid: WMS shipment item ` +
+              `${item.sourceShipmentItemId} has no valid split root`,
+          );
+        }
         const existingChild = Number.isInteger(orderItemId) && orderItemId > 0
           ? childItemsByOrderItemId.get(orderItemId)
           : null;
@@ -1921,6 +1961,10 @@ export function createShipStationService(
                 box_id = ${sourceRow.box_id},
                 weight_oz = ${sourceRow.weight_oz},
                 tracking_id = ${String(shipment.shipmentId)},
+                split_root_shipment_item_id = COALESCE(
+                  split_root_shipment_item_id,
+                  ${splitRootShipmentItemId}
+                ),
                 provider_membership_state = 'authoritative'
             WHERE id = ${existingChild.id}
           `);
@@ -1932,11 +1976,15 @@ export function createShipStationService(
           const inserted: any = await executor.execute(sql`
             INSERT INTO wms.outbound_shipment_items
               (shipment_id, order_item_id, replacement_for_order_item_id,
-               product_variant_id, qty,
+               correction_for_shipment_item_id, split_root_shipment_item_id,
+               shipment_item_purpose, product_variant_id, qty,
                from_location_id, box_id, weight_oz, tracking_id)
             VALUES
               (${targetShipmentId}, ${targetIsReplacement ? null : sourceRow.order_item_id},
                ${targetIsReplacement ? sourceRow.order_item_id : null},
+               ${targetIsReplacement ? null : sourceRow.correction_for_shipment_item_id},
+               ${splitRootShipmentItemId},
+               ${targetIsReplacement ? "replacement" : sourceRow.shipment_item_purpose},
                ${sourceRow.product_variant_id},
                ${item.qty}, ${sourceRow.from_location_id}, ${sourceRow.box_id},
                ${sourceRow.weight_oz}, ${String(shipment.shipmentId)})

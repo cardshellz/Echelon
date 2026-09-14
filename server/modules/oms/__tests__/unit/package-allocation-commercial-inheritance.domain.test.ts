@@ -32,6 +32,8 @@ function fixture() {
         payload,
         executable: false,
         sourceLineId: "7",
+        packageBindingId: null,
+        packageKey: null,
         sourceWmsShipmentItemId: 12,
         sourceQuantity: 2,
         quantity: 2,
@@ -48,6 +50,57 @@ describe("inherited commercial authority", () => {
       validateInheritedCommercialIntents(value.state, 2, value.rows),
     ).toEqual(value.rows);
     expect(value).toEqual(before);
+  });
+  it("accepts one legacy effect plus exact package-scoped continuation up to source quantity", () => {
+    const value = fixture();
+    const continuationPayload = {
+      effectType: "commercial_fulfillment" as const,
+      subjectKey: "commercial:12:package:package-b",
+      wmsShipmentItemId: 12,
+      packageKey: "package-b",
+      quantity: 1,
+    };
+    const continuationHash = createHash("sha256")
+      .update(canonicalJson(continuationPayload))
+      .digest("hex");
+    value.state.desiredEffectIntents[0].quantity = 1;
+    const legacyHash = createHash("sha256")
+      .update(canonicalJson({
+        effectType: "commercial_fulfillment",
+        subjectKey: "commercial:12",
+        wmsShipmentItemId: 12,
+        packageKey: null,
+        quantity: 1,
+      }))
+      .digest("hex");
+    value.state.desiredEffectIntents[0].payloadHash = legacyHash;
+    value.state.effectIntentEvidence[0].payloadHash = legacyHash;
+    value.rows[0].payloadHash = legacyHash;
+    value.rows[0].payload.quantity = 1;
+    value.rows[0].quantity = 1;
+    value.state.desiredEffectIntents.push({
+      ...continuationPayload,
+      intentKey: "allocation:group:commercial:12:package:package-b",
+      payloadHash: continuationHash,
+      executable: false,
+    });
+    value.state.effectIntentEvidence.push({
+      intentKey: "allocation:group:commercial:12:package:package-b",
+      payloadHash: continuationHash,
+    });
+    value.rows.push({
+      ...value.rows[0],
+      intentId: "10",
+      originPlanId: "9",
+      intentKey: "allocation:group:commercial:12:package:package-b",
+      payloadHash: continuationHash,
+      payload: continuationPayload,
+      packageBindingId: "11",
+      packageKey: "package-b",
+      quantity: 1,
+    });
+
+    expect(validateInheritedCommercialIntents(value.state, 3, value.rows)).toEqual(value.rows);
   });
   it.each([
     [

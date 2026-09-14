@@ -539,6 +539,12 @@ export const outboundShipmentItems = wmsSchema.table("outbound_shipment_items", 
   // prevents the corrective package from moving either authority twice.
   correctionForShipmentItemId: integer("correction_for_shipment_item_id")
     .references((): AnyPgColumn => outboundShipmentItems.id, { onDelete: "restrict" }),
+  // A ShipStation physical split keeps the provider's original wms-item
+  // identity while moving part of that quantity onto a child shipment row.
+  // Persist the exact root item so later packages can prove that they consume
+  // another part of the same ordered quantity rather than a reshipment.
+  splitRootShipmentItemId: integer("split_root_shipment_item_id")
+    .references((): AnyPgColumn => outboundShipmentItems.id, { onDelete: "restrict" }),
   // Physical lines can fulfill an order, replace an ordered line, or record a
   // different/free concession SKU that was never part of the customer order.
   shipmentItemPurpose: varchar("shipment_item_purpose", { length: 30 }).notNull().default("customer_fulfillment"),

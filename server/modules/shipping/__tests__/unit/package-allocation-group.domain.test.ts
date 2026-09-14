@@ -1,3 +1,6 @@
+import { createHash } from "node:crypto";
+
+import { canonicalJson } from "@shared/utils/canonical-json";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -183,6 +186,162 @@ describe("planPackageAllocationGroup", () => {
       "notification_candidate",
     ]);
     expect(result.state.desiredEffectIntents.every((intent) => intent.executable === false)).toBe(true);
+  });
+
+  it("preserves the v1 state hash shape when split-continuation evidence is absent", () => {
+    const result = planPackageAllocationGroup(plannerInput([
+      packageInput("A", "44001", 2, "primary"),
+    ]));
+    const legacyOperationalProjection = {
+      sourceLines: result.state.sourceLines,
+      packageSnapshots: result.state.packageSnapshots.map((snapshot) => {
+        const {
+          lifecycleEvidenceHash: _lifecycle,
+          membershipEvidenceKey: _membership,
+          splitContinuationEvidenceKey: _splitKey,
+          splitContinuationEvidenceHash: _splitHash,
+          ...legacySnapshot
+        } = snapshot;
+        return legacySnapshot;
+      }),
+      allocations: result.state.allocations,
+      desiredEffectIntents: result.state.desiredEffectIntents,
+      appliedActionKeys: result.state.appliedActionKeys,
+      reviews: result.state.reviews,
+      actionEvidence: result.state.actionEvidence,
+      packageEvidence: result.state.packageEvidence.map(
+        ({ lifecycleEventEvidence: _events, ...identity }) => identity,
+      ),
+      sourceEvidence: result.state.sourceEvidence,
+      effectIntentEvidence: result.state.effectIntentEvidence,
+    };
+    const legacyStateHash = createHash("sha256")
+      .update(canonicalJson(legacyOperationalProjection))
+      .digest("hex");
+
+    expect(result.stateHash).toBe(legacyStateHash);
+  });
+
+  it("allocates a proven split continuation commercially without a second inventory intent", () => {
+    const result = planPackageAllocationGroup(plannerInput([
+      packageInput("A", "44001", 1, "primary"),
+      {
+        ...packageInput("B", "44002", 1, "additional_dispatch"),
+        splitContinuation: {
+          evidenceKey: "shipstation-split-continuation:v1:44002:9001",
+          legacyWmsShipmentId: 9001,
+          lines: [{
+            sourceWmsShipmentItemId: 7001,
+            splitWmsShipmentItemId: 7002,
+            quantity: 1,
+          }],
+        },
+      },
+    ]));
+
+    expect(result.outcome).toBe("proposed");
+    expect(result.state.reviews).toEqual([]);
+    expect(allocationsFor(result)).toEqual([
+      {
+        allocationKey: `package-allocation:v1:${groupKey}:primary:7001`,
+        allocationKind: "primary_transfer",
+        targetKind: "package",
+        packageKey: "A",
+        quantity: 1,
+      },
+      {
+        allocationKey: `package-allocation:v1:${groupKey}:primary:7001`,
+        allocationKind: "primary_transfer",
+        targetKind: "package",
+        packageKey: "B",
+        quantity: 1,
+      },
+    ]);
+    expect(result.state.desiredEffectIntents.filter(
+      (intent) => intent.effectType === "commercial_fulfillment",
+    ).map((intent) => ({ packageKey: intent.packageKey, quantity: intent.quantity }))).toEqual([
+      { packageKey: null, quantity: 1 },
+      { packageKey: "B", quantity: 1 },
+    ]);
+    expect(result.state.desiredEffectIntents.filter(
+      (intent) => intent.effectType === "inventory_consumption",
+    ).map((intent) => intent.quantity)).toEqual([1]);
+    expect(result.state.packageSnapshots.find(
+      (pkg) => pkg.packageKey === "B",
+    )).toMatchObject({
+      allocationRole: "additional_dispatch",
+      splitContinuationEvidenceKey: "shipstation-split-continuation:v1:44002:9001",
+      splitContinuationEvidenceHash: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+  });
+
+  it("keeps a later-attested ordinary primary package on the source-scoped commercial intent", () => {
+    const packageA = packageInput("A", "44001", 2, "primary");
+    const omittedEvent = {
+      ...packageA.lifecycle.events[0],
+      contentsEvidence: { status: "omitted" as const },
+    };
+    const before = planPackageAllocationGroup(plannerInput([{
+      ...packageA,
+      lifecycle: {
+        ...packageA.lifecycle,
+        events: [omittedEvent],
+      },
+    }]));
+    expect(before.state.desiredEffectIntents.filter(
+      (intent) => intent.effectType === "commercial_fulfillment",
+    )).toEqual([]);
+
+    const after = planPackageAllocationGroup(plannerInput([{
+      ...packageA,
+      lifecycle: {
+        ...packageA.lifecycle,
+        events: [
+          omittedEvent,
+          {
+            kind: "package_contents_attested",
+            eventKey: "shipping-provider-label-event:44001:contents-recovered",
+            observedAt: "2026-08-21T14:20:00.000Z",
+            authorization: "system_recovered",
+            actor: "historical-shipstation-contents-system-recovery",
+            reason: "Deterministic split-lineage test recovery",
+            resolvesEventKeys: [omittedEvent.eventKey],
+            contents: [{ wmsShipmentItemId: 7001, quantity: 2 }],
+          },
+        ],
+      },
+    }], [], {
+      expectedGroupVersion: before.proposedGroupVersion,
+      previousPlan: previousPlanFrom(before),
+    }));
+
+    expect(after.state.desiredEffectIntents.filter(
+      (intent) => intent.effectType === "commercial_fulfillment",
+    ).map((intent) => ({ packageKey: intent.packageKey, quantity: intent.quantity }))).toEqual([
+      { packageKey: null, quantity: 2 },
+    ]);
+  });
+
+  it("rejects caller-asserted split continuation that does not match package contents", () => {
+    const packageB = packageInput("B", "44002", 1, "additional_dispatch");
+    expect(() => planPackageAllocationGroup(plannerInput([
+      packageInput("A", "44001", 1, "primary"),
+      {
+        ...packageB,
+        splitContinuation: {
+          evidenceKey: "shipstation-split-continuation:v1:44002:9001",
+          legacyWmsShipmentId: 9001,
+          lines: [{
+            sourceWmsShipmentItemId: 7001,
+            splitWmsShipmentItemId: 7002,
+            quantity: 2,
+          }],
+        },
+      },
+    ]))).toThrowError(expect.objectContaining<Partial<PackageAllocationGroupError>>({
+      code: "INVALID_PACKAGE_GROUP",
+      context: expect.objectContaining({ reason: "split_continuation_quantity_mismatch" }),
+    }));
   });
 
   it("moves a pre-possession void to awaiting relabel without reversing commercial or inventory intent", () => {

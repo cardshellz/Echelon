@@ -442,6 +442,13 @@ export class PackageAllocationBootstrapPersistenceService {
         packages: resolution.plannerInput.packages.map((pkg) => ({
           ...pkg,
           membership: { ...pkg.membership },
+          splitContinuation: pkg.splitContinuation == null
+            ? null
+            : {
+                evidenceKey: pkg.splitContinuation.evidenceKey,
+                legacyWmsShipmentId: pkg.splitContinuation.legacyWmsShipmentId,
+                lines: pkg.splitContinuation.lines.map((line) => ({ ...line })),
+              },
           lifecycle: {
             ...pkg.lifecycle,
             events: pkg.lifecycle.events.map((event) => ({ ...event })),

@@ -154,7 +154,10 @@ export class PackageAllocationAuthorityReadinessService {
         contractVersion: 1,
         authorityMode: "shadow_only",
         sourceFacts: [...sourceFacts],
-        packages: [...packages],
+        packages: packages.map((pkg) => ({
+          evidenceKey: pkg.evidenceKey,
+          persistedEvidence: pkg.persistedEvidence,
+        })),
       });
     });
   }
