@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-const migrationPath = "migrations/0672_shipstation_split_lineage.sql";
+const migrationPath = "migrations/0673_shipstation_split_lineage.sql";
 const migration = readFileSync(resolve(process.cwd(), migrationPath), "utf8");
 const schema = readFileSync(
   resolve(process.cwd(), "shared/schema/orders.schema.ts"),

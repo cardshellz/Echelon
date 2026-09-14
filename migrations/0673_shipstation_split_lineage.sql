@@ -1,4 +1,4 @@
--- Preserve exact source-line identity when one ordered WMS line is shipped in
+-- Migration 0673 preserves exact source-line identity when one ordered WMS line is shipped in
 -- multiple ShipStation packages. This is fulfillment evidence only: the
 -- migration does not change inventory, picked quantities, or order quantities.
 
