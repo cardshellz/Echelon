@@ -37,6 +37,8 @@ export const inventoryLevels = inventorySchema.table("inventory_levels", {
   backorderQty: integer("backorder_qty").notNull().default(0), // Backorder demand (variant units)
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => ({
+  exactVariantLocationIdentity: uniqueIndex("idx_inventory_levels_variant_location")
+    .on(table.productVariantId, table.warehouseLocationId),
   checkReservedLteOnHand: check("check_reserved_lte_on_hand", sql`${table.reservedQty} <= ${table.variantQty}`)
 }));
 

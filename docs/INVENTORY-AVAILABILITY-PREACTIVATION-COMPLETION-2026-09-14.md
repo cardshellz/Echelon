@@ -4,7 +4,7 @@
 
 This record closes the repository implementation work that can be completed before a production cutover. It does not claim that production authority has changed, that provider quantities have been updated, or that post-cutover stabilization and legacy retirement have occurred.
 
-- Refreshed PR base: `origin/main` at `0ceca1fef573067fdeb503692e1160b4745b019a`.
+- Refreshed PR base: `origin/main` at `fc37b77a6cc50833a256509bc21922fb991f2b66`.
 - Pre-activation foundation snapshot: `105cc9f3025678307c0878e8e84ba55d6596bc8f`.
 - Final WMS authority-fence snapshot: `0c14d8cff5fd4967234b8ca0b1538f84a82a5dda`.
 - PR #1262 merge commit: `7cc2b35d0d22448f03390791a3fa5812d5020d8d`; it remains an ancestor of the refreshed base.
@@ -134,6 +134,7 @@ The implemented schema follows the approved design:
 - Exact publication targets and provider identities, absolute desired revisions, activation runs, freezes, outbox deliveries, attempts, acknowledgements, readbacks, drift, target stops, and append-only resume reviews.
 - Additive Dropship acceptance stages and claim-attempt evidence.
 - Build orders pin transformation authority, activation run, model/version/hash, recipe binding/hash, actor, and time.
+- The exact inventory-level identity `(product_variant_id, warehouse_location_id)` is enforced by versioned migration `0671_inventory_quantity_level_identity.sql` and the aligned Drizzle schema. The migration fails closed on duplicates and does not rewrite inventory.
 
 The concrete planner DTO boundary is `SupplySnapshotDto`, `ClaimSupplySnapshotDto`, `AtpProjectionRequestDto`, `AtpProjectionDto`, `ClaimPlanRequestDto`, and `ClaimPlanDto` in `shared/types/inventory-availability-planner.ts:512-523`. Channel planning uses `ResolvedChannelExposurePolicy` and `InventoryChannelExposureRuntimePlan` in `shared/types/inventory-channel-exposure.ts:575-612`. Final provider delivery uses `AbsoluteInventoryPublicationRequest`, `AbsoluteInventoryReadRequest`, and `InventoryPublicationTransportAdapter` in `server/modules/inventory-planning/application/inventory-publication-transport.ts:1-65`.
 
@@ -215,7 +216,7 @@ Recommended document correction: the old plan's generic rollback language must n
 - Digital or inventory-untracked variants are not admitted for quantity publication.
 - Internal ready-to-pick WMS orders cannot create shipment/provider-outbox work until a positive warehouse is pinned and the authority-aware reservation call resolves. Pending physical, external 3PL, and digital-only orders do not enter that local shipment path.
 - Legacy configuration surfaces remain available before cutover but their writes fail closed after canonical authority is active.
-- Deployment of this branch is additive and inactive. None of migrations 0667-0670 switches runtime authority or invokes a provider.
+- Deployment of this branch is additive and inactive. None of migrations 0667-0671 switches runtime authority or invokes a provider.
 - `0669` preserves the existing global enable value when its singleton exists and creates a disabled row only if none exists.
 
 ## Hypotheses
@@ -251,6 +252,7 @@ Recommended document correction: the old plan's generic rollback language must n
 - Focused final WMS prerequisite batch: 10 files and 102 tests passed.
 - Final disposable PostgreSQL batch: 8 integration files, 104 tests passed. It covered Dropship canonical acceptance, global publication control, target resume happy/rollback behavior, transformation execution authority, build-order authority, admission fencing, cutover opening, and cutover composition.
 - Final focused unit batch: 10 files, 114 tests passed. It covered migration-prefix collision, writer ratchet, browser selection, PostgreSQL manifest, target resume, outbox, scheduler, sync effective state, and WMS gating.
+- Exact inventory-level identity hardening: the migration/schema contract and migration-prefix guard passed (2 files, 3 tests), and `npm.cmd run check` passed on the refreshed combined tree.
 - `git diff --cached --check`: passed before the implementation snapshot commit.
 
 These are repository and disposable-database results. They are not production activation or provider-readback evidence.
