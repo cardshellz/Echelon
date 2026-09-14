@@ -155,7 +155,13 @@ describe("WmsSyncService required dropship acceptance claim", () => {
     expect(source).toContain("expectedWarehouseId");
     expect(implementation).toContain("pinnedDropshipWarehouseId");
     expect(implementation).toMatch(
-      /if \(isDropshipAcceptanceClaim\)[\s\S]*pinnedWarehouses = await db[\s\S]*\.from\(warehouses\)[\s\S]*else \{[\s\S]*fulfillmentRouter\.routeOrder/,
+      /routing:[\s\S]*await this\.resolvePinnedDropshipWarehouse\(omsOrder\)/,
+    );
+    expect(implementation).toMatch(
+      /if \(isDropshipAcceptanceClaim\)[\s\S]*routing\.warehouseId !== pinnedDropshipWarehouseId/,
+    );
+    expect(implementation).toMatch(
+      /if \(!routing\)[\s\S]*fulfillmentRouter\.routeOrder/,
     );
     expect(implementation).toContain("assertPinnedDropshipWarehouse");
     expect(implementation).toContain("assertDropshipAcceptanceReplayIsNonOperational");

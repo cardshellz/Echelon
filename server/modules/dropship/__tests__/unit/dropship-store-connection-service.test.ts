@@ -345,6 +345,7 @@ describe("DropshipStoreConnectionService", () => {
   let shopifyOAuthProvider: FakeOAuthProvider;
   let logs: DropshipLogEvent[];
   let service: DropshipStoreConnectionService;
+  let dropshipOmsWarehouses: { enabledWarehouseIds: number[]; listEnabledWarehouseIds: ReturnType<typeof vi.fn> };
 
   beforeEach(() => {
     repository = new FakeStoreConnectionRepository();
@@ -355,9 +356,11 @@ describe("DropshipStoreConnectionService", () => {
     ebayOAuthProvider = new FakeOAuthProvider("ebay");
     shopifyOAuthProvider = new FakeOAuthProvider("shopify");
     logs = [];
+    dropshipOmsWarehouses = { enabledWarehouseIds: [3], listEnabledWarehouseIds: vi.fn(async () => dropshipOmsWarehouses.enabledWarehouseIds) };
     service = new DropshipStoreConnectionService({
       vendorProvisioning: vendorProvisioning as unknown as DropshipVendorProvisioningService,
       repository,
+      dropshipOmsWarehouses,
       oauthProviders: {
         ebay: ebayOAuthProvider,
         shopify: shopifyOAuthProvider,
@@ -1287,6 +1290,50 @@ describe("DropshipStoreConnectionService", () => {
     expect(logs[0]).toMatchObject({
       code: "DROPSHIP_STORE_ORDER_PROCESSING_CONFIG_UPDATED",
     });
+  });
+
+  it("refuses a default warehouse that Dropship OMS does not allocate from, before any write", async () => {
+    repository.connections = [makeConnection({ storeConnectionId: 21 })];
+    dropshipOmsWarehouses.enabledWarehouseIds = [1];
+
+    await expect(service.updateOrderProcessingConfig({
+      storeConnectionId: 21,
+      defaultWarehouseId: 35,
+      idempotencyKey: "warehouse-config-2",
+      actor: { actorType: "admin", actorId: "admin-1" },
+    })).rejects.toMatchObject({
+      code: "DROPSHIP_STORE_DEFAULT_WAREHOUSE_NOT_ALLOCATED",
+      context: { storeConnectionId: 21, defaultWarehouseId: 35, enabledWarehouseIds: [1], retryable: false },
+    });
+    expect(repository.lastOrderProcessingConfigInput).toBeNull();
+    expect(logs).toEqual([]);
+  });
+
+  it("allows clearing the default warehouse without consulting the allocation", async () => {
+    repository.connections = [makeConnection({ storeConnectionId: 21 })];
+
+    const result = await service.updateOrderProcessingConfig({
+      storeConnectionId: 21,
+      defaultWarehouseId: null,
+      idempotencyKey: "warehouse-config-3",
+      actor: { actorType: "admin", actorId: "admin-1" },
+    });
+
+    expect(result.orderProcessingConfig.defaultWarehouseId).toBeNull();
+    expect(dropshipOmsWarehouses.listEnabledWarehouseIds).not.toHaveBeenCalled();
+  });
+
+  it("does not let an unreadable allocation pass as an allowed warehouse", async () => {
+    repository.connections = [makeConnection({ storeConnectionId: 21 })];
+    dropshipOmsWarehouses.listEnabledWarehouseIds.mockRejectedValueOnce(new Error("channels unavailable"));
+
+    await expect(service.updateOrderProcessingConfig({
+      storeConnectionId: 21,
+      defaultWarehouseId: 3,
+      idempotencyKey: "warehouse-config-4",
+      actor: { actorType: "admin", actorId: "admin-1" },
+    })).rejects.toThrow("channels unavailable");
+    expect(repository.lastOrderProcessingConfigInput).toBeNull();
   });
 
   it("lists store connections for admin review with parsed filters", async () => {

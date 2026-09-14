@@ -1,8 +1,9 @@
 import type { Express } from "express";
-import { db } from "../db";
+import { db, pool } from "../db";
 import { sql } from "drizzle-orm";
 import { backfillMemberTiers } from "../modules/oms/member-tier-enrichment";
 import { WmsSyncService } from "../modules/oms/wms-sync.service";
+import { createDropshipOmsChannelResolver } from "../modules/dropship/infrastructure/dropship-oms-warehouse-assignments.reader";
 import { deleteDuplicateShopifyWmsOrderItems } from "../modules/wms/order-item-commands";
 
 import { requireAuth, requireInternalApiKey } from "./middleware";
@@ -186,6 +187,7 @@ export function registerDiagnosticsRoutes(app: Express) {
         inventoryCore: services.inventoryCore,
         reservation: services.reservation,
         fulfillmentRouter: services.fulfillmentRouter,
+        dropshipOmsChannel: createDropshipOmsChannelResolver(pool),
       });
       const result = await wmsSyncSvc.repairBrokenOrders(true); // dry run
       res.json({ ...result, dryRun: true });
@@ -202,6 +204,7 @@ export function registerDiagnosticsRoutes(app: Express) {
         inventoryCore: services.inventoryCore,
         reservation: services.reservation,
         fulfillmentRouter: services.fulfillmentRouter,
+        dropshipOmsChannel: createDropshipOmsChannelResolver(pool),
       });
       const result = await wmsSyncSvc.repairBrokenOrders(false); // actually fix
       res.json({ ...result, dryRun: false });
@@ -219,6 +222,7 @@ export function registerDiagnosticsRoutes(app: Express) {
         inventoryCore: services.inventoryCore,
         reservation: services.reservation,
         fulfillmentRouter: services.fulfillmentRouter,
+        dropshipOmsChannel: createDropshipOmsChannelResolver(pool),
       });
       const result = await wmsSyncSvc.resyncOrderItems(wmsOrderId);
       res.json(result);

@@ -8,6 +8,7 @@ import { isDropshipStoreConnectionLaunchReady } from "../domain/store-connection
 import type { NormalizedDropshipOrderPayload } from "../application/dropship-order-intake-service";
 import type { DropshipProductCostReader } from "../application/dropship-product-cost";
 import { PgShellzClubProductCostAdapter } from "./shellz-club-product-cost.adapter";
+import { isWarehouseEnabledForChannelWithClient } from "./dropship-oms-warehouse-assignments.reader";
 import {
   buildDropshipOrderAcceptancePlan,
   DROPSHIP_PRICING_SNAPSHOT_VERSION,
@@ -1355,6 +1356,26 @@ async function planAcceptanceWithClient(
     );
   }
   const quote = await loadQuoteSnapshotWithClient(client, input);
+  // The quote's warehouse is the store's default warehouse. It must remain an
+  // enabled source for the exact Dropship OMS channel through the acceptance
+  // transaction. This applies to both legacy exact-SKU validation and the
+  // canonical whole-order claim preparation path.
+  const warehouseAllocated = await isWarehouseEnabledForChannelWithClient(client, {
+    channelId: intake.channelId,
+    warehouseId: quote.warehouseId,
+  });
+  if (!warehouseAllocated) {
+    throw new DropshipError(
+      "DROPSHIP_ORDER_WAREHOUSE_NOT_ALLOCATED",
+      "Dropship order acceptance requires the store's default warehouse to be enabled for the Dropship OMS channel in Channel Allocation.",
+      {
+        intakeId: intake.intakeId,
+        channelId: intake.channelId,
+        warehouseId: quote.warehouseId,
+        retryable: false,
+      },
+    );
+  }
   const lines = await resolveAcceptanceLinesWithClient(client, {
     vendor,
     storeConnectionId: input.storeConnectionId,

@@ -145,6 +145,10 @@ function baseHandlers(overrides: Partial<Record<string, RowHandler>> = {}): RowH
         quote_payload: { items: [{ productVariantId: VARIANT_ID, quantity: 2 }] },
       }],
     },
+    warehouseAllocation: {
+      match: "FROM channels.channel_warehouse_assignments",
+      rows: (params) => (params[0] === 103 && params[1] === 1 ? [{ warehouse_id: 1 }] : []),
+    },
     listings: {
       match: "FROM dropship.dropship_vendor_listings dl",
       rows: [{
@@ -348,6 +352,50 @@ describe("PgDropshipOrderAcceptanceRepository (transaction)", () => {
     ]) {
       expect(db.statements(fragment), fragment).toHaveLength(0);
     }
+  });
+
+  it("refuses acceptance when the store's default warehouse is not allocated to Dropship OMS, before any financial write", async () => {
+    const db = createFakeDb(baseHandlers({
+      warehouseAllocation: { match: "FROM channels.channel_warehouse_assignments", rows: [] },
+    }));
+    const { repository, loadProductCosts } = createRepository(db, availableCost());
+
+    await expect(repository.acceptOrder(acceptanceInput())).rejects.toMatchObject({
+      code: "DROPSHIP_ORDER_WAREHOUSE_NOT_ALLOCATED",
+      context: { intakeId: 1, channelId: 103, warehouseId: 1, retryable: false },
+    });
+
+    expect(loadProductCosts).not.toHaveBeenCalled();
+    expect(db.calls.some((call) => call.sql === "ROLLBACK")).toBe(true);
+    expect(db.calls.some((call) => call.sql === "COMMIT")).toBe(false);
+    for (const fragment of [
+      "UPDATE dropship.dropship_wallet_accounts",
+      "INSERT INTO dropship.dropship_wallet_ledger",
+      "INSERT INTO oms.oms_orders",
+      "UPDATE dropship.dropship_order_intake",
+    ]) {
+      expect(db.statements(fragment), fragment).toHaveLength(0);
+    }
+  });
+
+  it("refuses canonical preparation when the frozen quote warehouse is not allocated", async () => {
+    const db = createFakeDb(baseHandlers({
+      warehouseAllocation: { match: "FROM channels.channel_warehouse_assignments", rows: [] },
+    }));
+    const { repository, loadProductCosts } = createRepository(db, availableCost());
+
+    await expect(repository.prepareCanonicalOrder(acceptanceInput())).rejects.toMatchObject({
+      code: "DROPSHIP_ORDER_WAREHOUSE_NOT_ALLOCATED",
+      context: { intakeId: 1, channelId: 103, warehouseId: 1, retryable: false },
+    });
+
+    expect(loadProductCosts).not.toHaveBeenCalled();
+    expect(db.calls.some((call) => call.sql === "ROLLBACK")).toBe(true);
+    expect(db.calls.some((call) => call.sql === "COMMIT")).toBe(false);
+    expect(db.statements("INSERT INTO oms.oms_orders")).toHaveLength(0);
+    expect(db.statements("INSERT INTO dropship.dropship_order_acceptance_stages")).toHaveLength(0);
+    expect(db.statements("UPDATE dropship.dropship_wallet_accounts")).toHaveLength(0);
+    expect(db.statements("INSERT INTO dropship.dropship_wallet_ledger")).toHaveLength(0);
   });
 
   it("marks a failed cost source read as retryable and refuses a zero cost outright", async () => {

@@ -13,6 +13,7 @@ import { db } from "../../db";
 import { sql, eq, and, notInArray } from "drizzle-orm";
 import { omsOrders, omsOrderLines } from "@shared/schema/oms.schema";
 import {
+  channelWarehouseAssignments,
   outboundShipments,
   productLocations,
   productVariants,
@@ -21,6 +22,12 @@ import {
   wmsOrders,
   wmsOrderItems,
 } from "@shared/schema";
+import { logger } from "../../platform/observability/logger";
+import {
+  decideDropshipOrderWarehouse,
+  hasDropshipAcceptanceStamp,
+  isDropshipOmsOrder,
+} from "./dropship-order-warehouse";
 import type { InsertWmsOrder, InsertWmsOrderItem } from "@shared/schema";
 import { omsOrderEvents } from "@shared/schema/oms.schema";
 import type { ServiceRegistry } from "../../services";
@@ -416,6 +423,8 @@ interface WmsSyncServices {
   inventoryCore: any;
   reservation: any;
   fulfillmentRouter: any;
+  /** Resolves the static internal Dropship OMS channel; Dropship orders bypass the router. */
+  dropshipOmsChannel: { resolveChannelId(): Promise<number> };
   slaMonitor?: any;
   shippingEngine?: import("../shipping/engine").ShippingEngine;
   shipStation?: any;
@@ -904,29 +913,24 @@ export class WmsSyncService {
       // cannot enter WMS or provider shipment processing without an explicit
       // warehouse. A digital-only order has no physical custody to route, so a
       // routing miss remains a valid null assignment for that path.
-      let routing: { warehouseId: number; warehouseType: string } | null = null;
+      // Dropship acceptance already selected and persisted a warehouse. Resolve
+      // and revalidate that exact assignment before considering the generic
+      // router, then verify the canonical claim's frozen quote agrees with it.
+      let routing: { warehouseId: number; warehouseType: string } | null =
+        await this.resolvePinnedDropshipWarehouse(omsOrder);
       if (isDropshipAcceptanceClaim) {
-        const pinnedWarehouses = await db
-          .select({
-            warehouseId: warehouses.id,
-            warehouseType: warehouses.warehouseType,
-            isActive: warehouses.isActive,
-          })
-          .from(warehouses)
-          .where(eq(warehouses.id, pinnedDropshipWarehouseId!))
-          .limit(1);
-        const pinnedWarehouse = pinnedWarehouses[0];
-        if (!pinnedWarehouse || Number(pinnedWarehouse.isActive) !== 1) {
+        if (!routing || routing.warehouseId !== pinnedDropshipWarehouseId) {
           throw new WmsRequiredInventoryClaimError(
-            "The frozen dropship quote warehouse is missing or inactive.",
-            { omsOrderId, expectedWarehouseId: pinnedDropshipWarehouseId },
+            "The Dropship OMS warehouse does not match the frozen quote warehouse required by the canonical claim.",
+            {
+              omsOrderId,
+              expectedWarehouseId: pinnedDropshipWarehouseId,
+              actualWarehouseId: routing?.warehouseId ?? null,
+            },
           );
         }
-        routing = {
-          warehouseId: pinnedWarehouse.warehouseId,
-          warehouseType: pinnedWarehouse.warehouseType,
-        };
-      } else {
+      }
+      if (!routing) {
         try {
           routing = await this.services.fulfillmentRouter.routeOrder({
             channelId: omsOrder.channelId,
@@ -1305,6 +1309,88 @@ export class WmsSyncService {
       // before Echelon's WMS existed).
       console.error(`[WMS Sync] Failed to sync OMS order ${omsOrderId} to WMS: ${err.message}`);
       throw err;
+    }
+  }
+
+  /**
+   * Dropship orders never go through the generic router: acceptance already
+   * chose the warehouse and locked inventory there. Returns null for every
+   * other order so the router decides as before.
+   *
+   * @throws WmsDropshipWarehouseError (permanent) when a Dropship order's
+   *   warehouse is missing, inactive, or not an enabled Dropship OMS assignment.
+   *   The sync fails loudly rather than shipping from a warehouse the vendor
+   *   was never shown quantities for.
+   */
+  private async resolvePinnedDropshipWarehouse(
+    omsOrder: typeof omsOrders.$inferSelect,
+  ): Promise<{ warehouseId: number; warehouseType: string } | null> {
+    const identity = {
+      omsOrderChannelId: omsOrder.channelId ?? null,
+      dropshipOmsChannelId: await this.resolveDropshipOmsChannelId(),
+      hasDropshipAcceptanceStamp: hasDropshipAcceptanceStamp(omsOrder.rawPayload),
+    };
+    if (!isDropshipOmsOrder(identity)) return null;
+
+    const warehouseId = omsOrder.warehouseId ?? null;
+    const [warehouse] = warehouseId
+      ? await db
+          .select({
+            id: warehouses.id,
+            isActive: warehouses.isActive,
+            warehouseType: warehouses.warehouseType,
+          })
+          .from(warehouses)
+          .where(eq(warehouses.id, warehouseId))
+          .limit(1)
+      : [];
+    const [assignment] = warehouseId && omsOrder.channelId
+      ? await db
+          .select({ id: channelWarehouseAssignments.id })
+          .from(channelWarehouseAssignments)
+          .where(
+            and(
+              eq(channelWarehouseAssignments.channelId, omsOrder.channelId),
+              eq(channelWarehouseAssignments.warehouseId, warehouseId),
+              eq(channelWarehouseAssignments.enabled, true),
+            ),
+          )
+          .limit(1)
+      : [];
+    const decision = decideDropshipOrderWarehouse({
+      ...identity,
+      omsOrderId: omsOrder.id,
+      omsOrderWarehouseId: warehouseId,
+      warehouse: warehouse ?? null,
+      enabledForChannel: assignment !== undefined,
+    });
+    if (decision.kind !== "pinned") return null;
+    logger.info("wms_sync_dropship_warehouse", {
+      outcome: "pinned",
+      oms_order_id: omsOrder.id,
+      channel_id: omsOrder.channelId,
+      warehouse_id: decision.warehouseId,
+      warehouse_type: decision.warehouseType,
+    });
+    return { warehouseId: decision.warehouseId, warehouseType: decision.warehouseType };
+  }
+
+  /**
+   * Null when the Dropship OMS channel cannot be resolved. That must not stop
+   * every other channel's sync, and Dropship orders are still recognized by the
+   * acceptance stamp on their payload.
+   */
+  private async resolveDropshipOmsChannelId(): Promise<number | null> {
+    try {
+      return await this.services.dropshipOmsChannel.resolveChannelId();
+    } catch (err: unknown) {
+      const code = err && typeof err === "object" && "code" in err ? String((err as { code: unknown }).code) : null;
+      logger.warn("wms_sync_dropship_channel_resolve", {
+        outcome: "unresolved",
+        error_code: code ?? "DROPSHIP_OMS_CHANNEL_UNRESOLVED",
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
     }
   }
 
