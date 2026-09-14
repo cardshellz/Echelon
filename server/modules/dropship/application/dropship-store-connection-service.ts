@@ -303,9 +303,19 @@ export interface DropshipStoreConnectionRepository {
   listSetupChecks(vendorId: number): Promise<Record<number, DropshipStoreConnectionSetupCheck[]>>;
 }
 
+/**
+ * Which warehouses the Dropship program may ship from: the enabled warehouse
+ * assignments of the Dropship OMS channel in Channel Allocation. The same set
+ * the allocation engine computes Dropship quantities over.
+ */
+export interface DropshipOmsWarehouseAssignmentReader {
+  listEnabledWarehouseIds(): Promise<number[]>;
+}
+
 export interface DropshipStoreConnectionServiceDependencies {
   vendorProvisioning: DropshipVendorProvisioningService;
   repository: DropshipStoreConnectionRepository;
+  dropshipOmsWarehouses: DropshipOmsWarehouseAssignmentReader;
   oauthProviders: Record<DropshipSupportedStorePlatform, DropshipMarketplaceOAuthProvider>;
   stateSigner: DropshipOAuthStateSigner;
   tokenCipher: DropshipStoreTokenCipher;
@@ -730,9 +740,11 @@ export class DropshipStoreConnectionService {
       actorId?: string;
     };
   }): Promise<DropshipStoreConnectionProfile> {
+    const defaultWarehouseId = normalizeDefaultWarehouseId(input.defaultWarehouseId);
+    await this.assertWarehouseAllocatedToDropshipOms(input.storeConnectionId, defaultWarehouseId);
     const connection = await this.deps.repository.updateOrderProcessingConfig({
       storeConnectionId: input.storeConnectionId,
-      defaultWarehouseId: normalizeDefaultWarehouseId(input.defaultWarehouseId),
+      defaultWarehouseId,
       idempotencyKey: input.idempotencyKey,
       actor: input.actor,
       updatedAt: this.deps.clock.now(),
@@ -750,6 +762,28 @@ export class DropshipStoreConnectionService {
     });
 
     return connection;
+  }
+
+  /**
+   * The store default warehouse is the single authority for where a Dropship
+   * order ships: the quote, the acceptance inventory lock, the OMS order and
+   * WMS routing all read it. It must therefore be a warehouse the Dropship OMS
+   * channel allocates from, or vendors would be shown quantities for stock
+   * that never ships from here.
+   */
+  private async assertWarehouseAllocatedToDropshipOms(
+    storeConnectionId: number,
+    defaultWarehouseId: number | null,
+  ): Promise<void> {
+    if (defaultWarehouseId === null) return;
+    const enabledWarehouseIds = await this.deps.dropshipOmsWarehouses.listEnabledWarehouseIds();
+    if (!enabledWarehouseIds.includes(defaultWarehouseId)) {
+      throw new DropshipError(
+        "DROPSHIP_STORE_DEFAULT_WAREHOUSE_NOT_ALLOCATED",
+        "The default warehouse must be enabled for the Dropship OMS channel in Channel Allocation before a store can ship from it.",
+        { storeConnectionId, defaultWarehouseId, enabledWarehouseIds, retryable: false },
+      );
+    }
   }
 
   private async assertCanStartOAuth(input: {

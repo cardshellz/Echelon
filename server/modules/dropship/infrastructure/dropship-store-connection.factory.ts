@@ -11,6 +11,7 @@ import type { DropshipSupportedStorePlatform } from "../domain/store-connection"
 import { DropshipError } from "../domain/errors";
 import { createDropshipVendorProvisioningServiceFromEnv } from "./dropship-vendor-provisioning.factory";
 import { PgDropshipStoreConnectionRepository } from "./dropship-store-connection.repository";
+import { PgDropshipOmsWarehouseAssignmentReader } from "./dropship-oms-warehouse-assignments.reader";
 import { HmacDropshipOAuthStateSigner } from "./dropship-oauth-state-signer";
 import {
   EbayDropshipOAuthProvider,
@@ -26,6 +27,7 @@ export function createDropshipStoreConnectionServiceFromEnv(): DropshipStoreConn
   return new DropshipStoreConnectionService({
     vendorProvisioning: createDropshipVendorProvisioningServiceFromEnv(),
     repository: new PgDropshipStoreConnectionRepository(),
+    dropshipOmsWarehouses: new PgDropshipOmsWarehouseAssignmentReader(),
     oauthProviders: {
       ebay: createProvider("ebay"),
       shopify: createProvider("shopify"),

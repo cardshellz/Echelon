@@ -8,6 +8,7 @@ import { isDropshipStoreConnectionLaunchReady } from "../domain/store-connection
 import type { NormalizedDropshipOrderPayload } from "../application/dropship-order-intake-service";
 import type { DropshipProductCostReader } from "../application/dropship-product-cost";
 import { PgShellzClubProductCostAdapter } from "./shellz-club-product-cost.adapter";
+import { isWarehouseEnabledForChannelWithClient } from "./dropship-oms-warehouse-assignments.reader";
 import {
   buildDropshipOrderAcceptancePlan,
   DROPSHIP_PRICING_SNAPSHOT_VERSION,
@@ -221,6 +222,27 @@ async function acceptOrderWithClient(
   }
 
   const quote = await loadQuoteSnapshotWithClient(client, input);
+  // The quote's warehouse is the store's default warehouse. It must be one the
+  // Dropship OMS channel allocates from, or the vendor was shown quantities for
+  // stock that will not ship from here. Checked inside the transaction so an
+  // assignment removed mid-flight cannot slip through.
+  const warehouseAllocated = await isWarehouseEnabledForChannelWithClient(client, {
+    channelId: intake.channelId,
+    warehouseId: quote.warehouseId,
+  });
+  if (!warehouseAllocated) {
+    throw new DropshipError(
+      "DROPSHIP_ORDER_WAREHOUSE_NOT_ALLOCATED",
+      "Dropship order acceptance requires the store's default warehouse to be enabled for the Dropship OMS channel in Channel Allocation.",
+      {
+        intakeId: intake.intakeId,
+        channelId: intake.channelId,
+        warehouseId: quote.warehouseId,
+        // Needs an operator to enable the warehouse; retrying cannot fix it.
+        retryable: false,
+      },
+    );
+  }
   const rawLines = intake.normalizedPayload.lines;
   const lines = await resolveAcceptanceLinesWithClient(client, {
     vendor,
