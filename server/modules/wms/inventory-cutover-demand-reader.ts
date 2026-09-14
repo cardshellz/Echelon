@@ -102,6 +102,7 @@ export async function readWmsCutoverDemand(
   // fully adjusted rows. Preserve original/delta/effective facts separately.
   const physicalRows = await client.query(`SELECT item.id::text AS id, item.physical_shipment_id::text AS "physicalShipmentId",
     item.wms_order_item_id AS "orderItemId", item.replacement_for_order_item_id AS "replacementForOrderItemId",
+    item.correction_for_physical_shipment_item_id::text AS "correctionForPhysicalShipmentItemId",
     item.legacy_wms_shipment_item_id AS "legacySourceShipmentItemId", item.package_allocation_entry_id::text AS "packageAllocationEntryId",
     item.product_variant_id AS "productVariantId", item.sku, item.quantity_shipped AS "originalQuantity",
     COALESCE(adjustment.quantity_delta,0) AS "adjustmentQuantity",

@@ -25,7 +25,8 @@ export const wmsCutoverSourceItemSchema = z.object({
 }).strict();
 export const wmsCutoverPhysicalItemSchema = z.object({
   id: bigintId, physicalShipmentId: bigintId, orderItemId: id.nullable(),
-  replacementForOrderItemId: id.nullable(), legacySourceShipmentItemId: id.nullable(),
+  replacementForOrderItemId: id.nullable(), correctionForPhysicalShipmentItemId: bigintId.nullable(),
+  legacySourceShipmentItemId: id.nullable(),
   packageAllocationEntryId: bigintId.nullable(), productVariantId: id.nullable(), sku: z.string(),
   originalQuantity: integer, adjustmentQuantity: integer,
   effectiveQuantity: z.string().regex(/^-?(0|[1-9][0-9]*)$/),

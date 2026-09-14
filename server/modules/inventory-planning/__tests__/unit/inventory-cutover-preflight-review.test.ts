@@ -136,7 +136,8 @@ function sourceItem(): WmsCutoverSourceItem {
 
 function physicalItem(): WmsCutoverPhysicalItem {
   return { id: "1", physicalShipmentId: "2", orderItemId: 11, replacementForOrderItemId: null,
-    legacySourceShipmentItemId: 1, packageAllocationEntryId: null, productVariantId: 101, sku: "P5",
+    correctionForPhysicalShipmentItemId: null, legacySourceShipmentItemId: 1,
+    packageAllocationEntryId: null, productVariantId: 101, sku: "P5",
     originalQuantity: 4, adjustmentQuantity: 0, effectiveQuantity: "4", purpose: "customer_fulfillment", packageStatus: "not_confirmed" };
 }
 

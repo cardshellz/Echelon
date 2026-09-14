@@ -26,7 +26,8 @@ CREATE TABLE wms.physical_shipments(
 );
 CREATE TABLE wms.physical_shipment_items(
   id bigint PRIMARY KEY, physical_shipment_id bigint, wms_order_item_id integer, replacement_for_order_item_id integer,
-  legacy_wms_shipment_item_id integer, package_allocation_entry_id bigint, product_variant_id integer, sku text,
+  correction_for_physical_shipment_item_id bigint, legacy_wms_shipment_item_id integer,
+  package_allocation_entry_id bigint, product_variant_id integer, sku text,
   quantity_shipped integer, shipment_item_purpose varchar(30) NOT NULL DEFAULT 'customer_fulfillment',
   CONSTRAINT physical_shipment_items_purpose_chk CHECK (
     shipment_item_purpose IN ('customer_fulfillment', 'replacement', 'concession', 'omission_correction')

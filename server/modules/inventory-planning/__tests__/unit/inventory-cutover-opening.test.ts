@@ -113,7 +113,7 @@ describe("independently verified current inventory opening", () => {
   });
   it.each(["review","delivered","future_state"])("does not archive unsupported/current physical lifecycle %s", packageStatus => {
     const evidence=reconstructionEvidence(); evidence.physicalItems=[{ id:"100",physicalShipmentId:"99",orderItemId:11,
-      replacementForOrderItemId:null,legacySourceShipmentItemId:null,packageAllocationEntryId:null,productVariantId:101,sku:"P5",
+      replacementForOrderItemId:null,correctionForPhysicalShipmentItemId:null,legacySourceShipmentItemId:null,packageAllocationEntryId:null,productVariantId:101,sku:"P5",
       originalQuantity:1,adjustmentQuantity:0,effectiveQuantity:"1",purpose:"customer_fulfillment",packageStatus }];
     expect(codes(evidence)).toContain("PHYSICAL_SHIPMENT_REQUIRES_REVIEW");
   });
@@ -159,7 +159,7 @@ describe("independently verified current inventory opening", () => {
     if (kind==="source") evidence.sourceItems=[{ id:100,shipmentId:99,headerOrderId:1,orderItemId:11,productVariantId:101,
       quantity:2,purpose:"customer_fulfillment",fromLocationId:null,replacementForOrderItemId:null,correctionForShipmentItemId:null,shipmentStatus:"labeled",shipmentHeld:false }];
     else evidence.physicalItems=[{ id:"100",physicalShipmentId:"99",orderItemId:11,replacementForOrderItemId:null,
-      legacySourceShipmentItemId:null,packageAllocationEntryId:null,productVariantId:101,sku:"P5",
+      correctionForPhysicalShipmentItemId:null,legacySourceShipmentItemId:null,packageAllocationEntryId:null,productVariantId:101,sku:"P5",
       originalQuantity:2,adjustmentQuantity:0,effectiveQuantity:"2",purpose:"customer_fulfillment",packageStatus:"review" }];
     input.expectedEvidenceHash=reconstructionEvidenceHash(evidence);
     const result=evaluateCutoverOpening(evidence,input);
