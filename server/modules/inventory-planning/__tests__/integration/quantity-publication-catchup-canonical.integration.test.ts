@@ -14,6 +14,7 @@ dbDescribe.sequential("canonical catch-up completion uses exact current outbox l
   let database: InventoryCutoverTestDatabase;
   let admission: PostgresQuantityPublicationAdmission;
   let runId: string;
+  let publicationTargetRevision: string;
   let sequence = 0;
   const clock = () => new Date("2026-09-08T15:00:00.000Z");
   beforeAll(async () => {
@@ -32,6 +33,8 @@ dbDescribe.sequential("canonical catch-up completion uses exact current outbox l
         captured_catalog_input_hash,captured_catalog_result_hash,evidence_payload,'catchup-canonical-fixture',
         'Test current canonical proof','operator',started_at,id FROM inventory.availability_activation_runs WHERE id=$1
       RETURNING id::text`, [dryRun.activationRunId])).rows[0].id;
+    publicationTargetRevision = (await database.pool.query<{ revision: string }>(`UPDATE inventory.inventory_publication_targets
+      SET state='live',revision=revision+1 WHERE id=1 RETURNING revision::text`)).rows[0].revision;
     await database.pool.query(`UPDATE inventory.availability_runtime_authority SET authority='canonical',activation_run_id=$1,
       revision=revision+1,changed_by='operator',change_reason='Test canonical proof' WHERE singleton_key=true`, [runId]);
     await database.pool.query(`UPDATE inventory.availability_activation_runs SET state='active',runtime_authority_changed=true WHERE id=$1`, [runId]);
@@ -52,9 +55,9 @@ dbDescribe.sequential("canonical catch-up completion uses exact current outbox l
       (activation_run_id,publication_target_id,product_variant_id,desired_revision,desired_quantity,channel_connection_id_snapshot,
        external_scope_id_snapshot,external_inventory_item_id_snapshot,state,idempotency_key,payload_hash,available_at,
        publication_phase,channel_id_snapshot,provider_key_snapshot,provider_scope_type_snapshot,publication_target_revision_snapshot)
-      VALUES($1,1,$2,$3,$4,7,'test-location',$5,'queued',$6,repeat('a',64),$7,'full',36,'shopify','location',2) RETURNING id::text`,
+      VALUES($1,1,$2,$3,$4,7,'test-location',$5,'queued',$6,repeat('a',64),$7,'full',36,'shopify','location',$8) RETURNING id::text`,
     [runId,target.productVariantId,desiredRevision,quantity,target.externalInventoryItemId,
-      `canonical-proof:${target.productVariantId}:${desiredRevision}`,clock()])).rows[0];
+      `canonical-proof:${target.productVariantId}:${desiredRevision}`,clock(),publicationTargetRevision])).rows[0];
     return { outboxId: row.id, quantity };
   }
   async function pending(target: QuantityPublicationScope) {

@@ -12,11 +12,30 @@ export function shipmentPublicationIntent(quantity = "6"): CanonicalInventoryPub
 
 /** Real-query prerequisites, not a substitute for publication migration proof. */
 export const shipmentPublicationFixtureSql = `
+  CREATE SCHEMA channels;
+  CREATE TABLE channels.sync_settings (
+    id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    singleton_key boolean NOT NULL UNIQUE CHECK (singleton_key),
+    global_enabled boolean NOT NULL
+  );
+  INSERT INTO channels.sync_settings(singleton_key,global_enabled) VALUES(true,true);
   CREATE TABLE inventory.availability_activation_runs (
     id bigint PRIMARY KEY, mode text NOT NULL, state text NOT NULL,
     outbox_enqueued boolean NOT NULL DEFAULT false,
     provider_write_attempted boolean NOT NULL DEFAULT false, reason text NOT NULL DEFAULT 'test'
   );
+  CREATE TABLE inventory.inventory_publication_targets (
+    id integer PRIMARY KEY, revision bigint NOT NULL,
+    destination_kind text NOT NULL, channel_id integer NOT NULL,
+    channel_connection_id integer, dropship_store_connection_id integer,
+    provider_scope_type text NOT NULL, external_scope_id text NOT NULL,
+    publication_authority text NOT NULL, state text NOT NULL
+  );
+  INSERT INTO inventory.inventory_publication_targets(
+    id,revision,destination_kind,channel_id,channel_connection_id,
+    dropship_store_connection_id,provider_scope_type,external_scope_id,
+    publication_authority,state
+  ) VALUES(5,2,'channel_connection',3,33,NULL,'location','location-1','echelon','live');
   CREATE TABLE inventory.inventory_publication_outbox (
     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     activation_run_id bigint NOT NULL REFERENCES inventory.availability_activation_runs,
