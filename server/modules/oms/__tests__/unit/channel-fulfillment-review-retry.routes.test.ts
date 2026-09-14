@@ -24,6 +24,7 @@ vi.mock("../../shipstation-unmapped-remediation.service", () => ({
 
 import { registerOmsRoutes } from "../../../../routes/oms.routes";
 import { CHANNEL_FULFILLMENT_REVIEW_RETRY, ChannelFulfillmentReviewRetryError } from "../../channel-fulfillment-review-retry.domain";
+import { CHANNEL_FULFILLMENT_RECEIPT_RETRY, ChannelFulfillmentReceiptRetryError } from "../../channel-fulfillment-receipt-retry.domain";
 
 type Handler = (request: Request, response: Response) => Promise<void>;
 const USER_ID = "2f6e5308-dc3b-4c41-80e5-6f35bca2a731";
@@ -36,14 +37,19 @@ function harness(userId: unknown = USER_ID) {
   if (!registered) throw new Error("OMS reconciliation route was not registered");
   const handler = registered[registered.length - 1] as Handler;
   const reviewRetry = { review: vi.fn() };
+  const receiptRetry = { review: vi.fn() };
   const request = {
     body: { code: CHANNEL_FULFILLMENT_REVIEW_RETRY, commandId: 3024, omsOrderId: 901 },
     session: { user: { id: userId, username: "Display name is not an audit identity" } },
-    app: { locals: { services: { channelFulfillmentAuthority: {}, channelFulfillmentReviewRetry: reviewRetry } } },
+    app: { locals: { services: {
+      channelFulfillmentAuthority: {},
+      channelFulfillmentReviewRetry: reviewRetry,
+      channelFulfillmentReceiptRetry: receiptRetry,
+    } } },
   } as unknown as Request;
   const response = { status: vi.fn(), json: vi.fn() };
   response.status.mockReturnValue(response);
-  return { handler, request, response, reviewRetry };
+  return { handler, request, response, reviewRetry, receiptRetry };
 }
 
 describe("reviewed fulfillment recovery through existing Ops route", () => {
@@ -91,6 +97,57 @@ describe("reviewed fulfillment recovery through existing Ops route", () => {
     expect(h.response.status).toHaveBeenCalledWith(status);
     expect(h.response.json).toHaveBeenCalledWith({
       error: "A reviewed retry failed", code: "TEST_REVIEW_RETRY_ERROR", context: { commandId: 3024 },
+    });
+  });
+});
+
+describe("reviewed inbound receipt recovery through existing Ops route", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("passes one receipt and the stable authenticated actor to the owner service", async () => {
+    const h = harness();
+    h.request.body = {
+      code: CHANNEL_FULFILLMENT_RECEIPT_RETRY,
+      receiptId: 1917105,
+      previewOnly: true,
+      operator: "client-value-must-not-be-used",
+    };
+    mocks.remediate.mockResolvedValue({ changed: false, receiptRetry: { mode: "preview" } });
+
+    await h.handler(h.request, h.response as unknown as Response);
+
+    expect(mocks.remediate).toHaveBeenCalledWith({}, expect.objectContaining({
+      code: CHANNEL_FULFILLMENT_RECEIPT_RETRY,
+      receiptId: 1917105,
+      previewOnly: true,
+      operator: `user:${USER_ID}`,
+    }), expect.objectContaining({ receiptRetry: h.receiptRetry }));
+    expect(h.response.json).toHaveBeenCalledWith({ changed: false, receiptRetry: { mode: "preview" } });
+  });
+
+  it("requires a stable actor and returns structured receipt-owner errors", async () => {
+    const missingActor = harness(null);
+    missingActor.request.body = { code: CHANNEL_FULFILLMENT_RECEIPT_RETRY, receiptId: 1917105 };
+    await missingActor.handler(missingActor.request, missingActor.response as unknown as Response);
+    expect(missingActor.response.status).toHaveBeenCalledWith(403);
+    expect(missingActor.response.json).toHaveBeenCalledWith(expect.objectContaining({
+      code: "RECEIPT_RETRY_ACTOR_REQUIRED",
+    }));
+
+    const ownerFailure = harness();
+    ownerFailure.request.body = { code: CHANNEL_FULFILLMENT_RECEIPT_RETRY, receiptId: 1917105 };
+    mocks.remediate.mockRejectedValue(new ChannelFulfillmentReceiptRetryError(
+      "RECEIPT_RETRY_STATE_CHANGED",
+      "Preview again",
+      409,
+      { receiptId: 1917105 },
+    ));
+    await ownerFailure.handler(ownerFailure.request, ownerFailure.response as unknown as Response);
+    expect(ownerFailure.response.status).toHaveBeenCalledWith(409);
+    expect(ownerFailure.response.json).toHaveBeenCalledWith({
+      error: "Preview again",
+      code: "RECEIPT_RETRY_STATE_CHANGED",
+      context: { receiptId: 1917105 },
     });
   });
 });

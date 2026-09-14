@@ -21,6 +21,12 @@ import {
 } from "./channel-fulfillment-review-retry.domain";
 import type { ChannelFulfillmentReviewRetryService } from "./channel-fulfillment-review-retry.service";
 import {
+  CHANNEL_FULFILLMENT_RECEIPT_RETRY,
+  ChannelFulfillmentReceiptRetryError,
+  type ChannelFulfillmentReceiptRetryResult,
+} from "./channel-fulfillment-receipt-retry.domain";
+import type { ChannelFulfillmentReceiptRetryService } from "./channel-fulfillment-receipt-retry.service";
+import {
   recordRunCompleted,
   runBootCatchUpIfBehind,
 } from "../../infrastructure/scheduler-run-registry";
@@ -40,6 +46,7 @@ const REMEDIABLE_CODES = new Set([
   "WMS_SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED",
   "SHIPPED_TRACKING_NOT_CONFIRMED_PUSHED",
   CHANNEL_FULFILLMENT_REVIEW_RETRY,
+  CHANNEL_FULFILLMENT_RECEIPT_RETRY,
 ]);
 const AUTO_TRACKING_RETRY_LIMIT = 10;
 const AUTO_CHANNEL_WRITEBACK_RETRY_LIMIT = 100;
@@ -69,6 +76,7 @@ export interface OmsFlowReconciliationDependencies {
   reservation: FlowReconciliationReservation | null;
   fulfillmentAuthority: ChannelFulfillmentAuthorityService;
   reviewRetry?: ChannelFulfillmentReviewRetryService;
+  receiptRetry?: ChannelFulfillmentReceiptRetryService;
 }
 
 function requireFlowFulfillmentAuthority(
@@ -115,6 +123,7 @@ export interface OmsFlowRemediationInput {
   shipmentId?: number;
   operator: string;
   commandId?: unknown;
+  receiptId?: unknown;
   previewOnly?: unknown;
   expectedStateFingerprint?: unknown;
   reason?: unknown;
@@ -132,6 +141,7 @@ export interface OmsFlowRemediationResult {
   provider?: string | null;
   topic?: string | null;
   reviewRetry?: ChannelFulfillmentReviewRetryResult;
+  receiptRetry?: ChannelFulfillmentReceiptRetryResult;
 }
 
 function getDefaultDb(): any {
@@ -1263,6 +1273,31 @@ export async function remediateOmsFlowIssue(
 ): Promise<OmsFlowRemediationResult> {
   if (!REMEDIABLE_CODES.has(input.code)) {
     throw new Error(`Unsupported OMS flow remediation code: ${input.code}`);
+  }
+
+  if (input.code === CHANNEL_FULFILLMENT_RECEIPT_RETRY) {
+    if (!dependencies.receiptRetry) {
+      throw new ChannelFulfillmentReceiptRetryError(
+        "RECEIPT_RETRY_UNAVAILABLE", "Reviewed receipt recovery is unavailable", 503,
+      );
+    }
+    const receiptRetry = await dependencies.receiptRetry.review({
+      receiptId: input.receiptId,
+      previewOnly: input.previewOnly,
+      expectedStateFingerprint: input.expectedStateFingerprint,
+      reason: input.reason,
+    }, input.operator);
+    return {
+      code: input.code,
+      action: receiptRetry.mode === "preview"
+        ? "previewed_channel_receipt_retry"
+        : "reviewed_channel_receipt_retry",
+      changed: receiptRetry.requeued,
+      omsOrderId: receiptRetry.snapshot.omsOrderId,
+      wmsOrderId: null,
+      shipmentId: null,
+      receiptRetry,
+    };
   }
 
   if (input.code === CHANNEL_FULFILLMENT_REVIEW_RETRY) {

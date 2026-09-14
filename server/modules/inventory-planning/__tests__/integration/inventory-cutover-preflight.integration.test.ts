@@ -66,7 +66,8 @@ describeDatabase.sequential("inventory cutover connected preflight PostgreSQL", 
       CREATE TABLE wms.physical_shipments (id bigint PRIMARY KEY, status varchar(30));
       CREATE TABLE wms.physical_shipment_items (
         id bigint PRIMARY KEY, physical_shipment_id bigint NOT NULL, wms_order_item_id integer,
-        replacement_for_order_item_id integer, legacy_wms_shipment_item_id integer,
+        replacement_for_order_item_id integer, correction_for_physical_shipment_item_id bigint,
+        legacy_wms_shipment_item_id integer,
         package_allocation_entry_id bigint, product_variant_id integer, sku varchar(100) NOT NULL,
         quantity_shipped integer NOT NULL, shipment_item_purpose varchar(30)
       );
@@ -167,7 +168,7 @@ describeDatabase.sequential("inventory cutover connected preflight PostgreSQL", 
   it("classifies exact provider receipt lineage for a non-inventory line without changing history", async () => {
     await pool.query(`
       UPDATE catalog.product_variants
-      SET requires_shipping=false,track_inventory=false
+      SET is_active=false,requires_shipping=false,track_inventory=false
       WHERE id=30;
       UPDATE wms.order_items
       SET quantity=5,picked_quantity=5,fulfilled_quantity=5,status='completed',requires_shipping=0
@@ -177,7 +178,7 @@ describeDatabase.sequential("inventory cutover connected preflight PostgreSQL", 
         (41,40,7,NULL,NULL,30,5,'customer_fulfillment',NULL);
       INSERT INTO wms.physical_shipments VALUES (50,'shipped');
       INSERT INTO wms.physical_shipment_items VALUES
-        (51,50,7,NULL,41,NULL,30,'TEST-P5',5,'customer_fulfillment');
+        (51,50,7,NULL,NULL,41,NULL,30,'TEST-P5',5,'customer_fulfillment');
     `);
     const before = await snapshotAllFixtureRows();
 
@@ -217,7 +218,7 @@ describeDatabase.sequential("inventory cutover connected preflight PostgreSQL", 
       INSERT INTO wms.outbound_shipments VALUES (40,6,'shipped',false);
       INSERT INTO wms.outbound_shipment_items VALUES (41,40,7,NULL,NULL,30,2,'sale',20);
       INSERT INTO wms.physical_shipments VALUES (50,'delivered');
-      INSERT INTO wms.physical_shipment_items VALUES (51,50,7,NULL,41,NULL,30,'TEST-P5',2,'sale');
+      INSERT INTO wms.physical_shipment_items VALUES (51,50,7,NULL,NULL,41,NULL,30,'TEST-P5',2,'sale');
       INSERT INTO wms.physical_shipment_item_quantity_adjustments VALUES (51,-2);
     `);
     const result = await connectedService().service.preview("reviewer");

@@ -25,7 +25,8 @@ function exactNonInventoryFulfillmentFacts() {
   });
   facts.demand.physicalItems.push({
     id: "3", physicalShipmentId: "4", orderItemId: 11,
-    replacementForOrderItemId: null, legacySourceShipmentItemId: 1,
+    replacementForOrderItemId: null, correctionForPhysicalShipmentItemId: null,
+    legacySourceShipmentItemId: 1,
     packageAllocationEntryId: null, productVariantId: 101, sku: "P5",
     originalQuantity: 4, adjustmentQuantity: 0, effectiveQuantity: "4",
     purpose: "customer_fulfillment", packageStatus: "shipped",
@@ -82,7 +83,8 @@ describe("inventory cutover preflight", () => {
     } else {
       facts.demand.physicalItems.push({
         id: "1", physicalShipmentId: "2", orderItemId: 11,
-        replacementForOrderItemId: null, legacySourceShipmentItemId: null,
+        replacementForOrderItemId: null, correctionForPhysicalShipmentItemId: null,
+        legacySourceShipmentItemId: null,
         packageAllocationEntryId: null, productVariantId: 101, sku: "P5",
         originalQuantity: 4, adjustmentQuantity: 0, effectiveQuantity: "4",
         purpose: "customer_fulfillment", packageStatus: "not_confirmed",
@@ -137,10 +139,49 @@ describe("inventory cutover preflight", () => {
     expect(report.findings).toEqual([]);
   });
 
+  it("uses a retired exact variant as historical non-inventory evidence without reactivating it", () => {
+    const facts = exactNonInventoryFulfillmentFacts();
+    facts.variants[0]!.isActive = false;
+
+    const report = buildInventoryCutoverPreflight(facts);
+
+    expect(facts.variants[0]!.isActive).toBe(false);
+    expect(report.lines[0]).toMatchObject({
+      candidateDemandQty: "0",
+      disposition: "no_inventory_demand",
+      findingCodes: [],
+    });
+  });
+
+  it("selects the exact retired identity when another retired row shares its historical SKU", () => {
+    const facts = exactNonInventoryFulfillmentFacts();
+    facts.variants[0]!.isActive = false;
+    facts.variants.push({ ...facts.variants[0]!, id: 102, productId: 21 });
+
+    expect(buildInventoryCutoverPreflight(facts).lines[0]).toMatchObject({
+      candidateDemandQty: "0",
+      disposition: "no_inventory_demand",
+      findingCodes: [],
+    });
+  });
+
+  it("does not use a retired variant to authorize new tracked demand", () => {
+    const facts = cutoverPreflightFacts();
+    facts.variants[0]!.isActive = false;
+
+    expect(buildInventoryCutoverPreflight(facts).lines[0]).toMatchObject({
+      candidateDemandQty: null,
+      disposition: "review_required",
+      findingCodes: ["VARIANT_IDENTITY_UNRESOLVED"],
+    });
+  });
+
   it.each([
     ["source bin", (facts: ReturnType<typeof exactNonInventoryFulfillmentFacts>) => { facts.demand.sourceItems[0]!.fromLocationId = 100; }],
     ["unshipped source", (facts: ReturnType<typeof exactNonInventoryFulfillmentFacts>) => { facts.demand.sourceItems[0]!.shipmentStatus = "labeled"; }],
     ["source correction", (facts: ReturnType<typeof exactNonInventoryFulfillmentFacts>) => { facts.demand.sourceItems[0]!.correctionForShipmentItemId = 9; }],
+    ["source variant conflict", (facts: ReturnType<typeof exactNonInventoryFulfillmentFacts>) => { facts.demand.sourceItems[0]!.productVariantId = 102; }],
+    ["physical correction", (facts: ReturnType<typeof exactNonInventoryFulfillmentFacts>) => { facts.demand.physicalItems[0]!.correctionForPhysicalShipmentItemId = "9"; }],
     ["physical adjustment", (facts: ReturnType<typeof exactNonInventoryFulfillmentFacts>) => {
       facts.demand.physicalItems[0]!.adjustmentQuantity = -1;
       facts.demand.physicalItems[0]!.effectiveQuantity = "3";
