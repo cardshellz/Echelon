@@ -864,7 +864,9 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     }));
     const sqlText = mock.calls.map((c) => c.sqlText).join("\n");
     expect(sqlText).toMatch(/shipstation_split/);
-    expect(sqlText).toMatch(/INSERT INTO wms\.outbound_shipment_items[\s\S]*shipment_item_purpose/);
+    expect(sqlText).toMatch(
+      /INSERT INTO wms\.outbound_shipment_items[\s\S]*correction_for_shipment_item_id, split_root_shipment_item_id,[\s\S]*shipment_item_purpose/,
+    );
     expect(sqlText).toMatch(/SET qty = qty -/);
     expect(sqlText).not.toMatch(/SET shipment_id/);
     // Split creation and physical item synchronization are separate atomic
@@ -984,6 +986,9 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
     }));
     const sqlText = mock.calls.map((call) => call.sqlText).join("\n");
     expect(sqlText).toMatch(/SET shipment_id =/);
+    expect(sqlText).toMatch(
+      /SET shipment_id =[\s\S]*split_root_shipment_item_id = COALESCE\([\s\S]*split_root_shipment_item_id,[\s\S]*id/,
+    );
     expect(sqlText).not.toMatch(/SET qty = qty -/);
     expect(sqlText).not.toMatch(/SET qty = 0/);
     expect(sqlText).not.toMatch(/INSERT INTO wms\.outbound_shipment_items/);
@@ -2359,7 +2364,12 @@ describe("processShipNotify V2 :: SHIP_NOTIFY never creates shipments", () => {
     expect(fnBlock).toContain("pg_advisory_xact_lock(918406");
     expect(fnBlock).toContain("external_fulfillment_id = ${externalFulfillmentId}");
     expect(fnBlock).toContain("SET qty = qty - ${item.qty}");
-    expect(fnBlock).toContain("shipment_item_purpose, product_variant_id, ${item.qty}");
+    expect(fnBlock).toContain(
+      "correction_for_shipment_item_id, split_root_shipment_item_id",
+    );
+    expect(fnBlock).toContain(
+      "source.split_root_shipment_item_id ?? item.sourceShipmentItemId",
+    );
     expect(fnBlock).toContain("db.transaction(createSplit)");
   });
 

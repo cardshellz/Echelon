@@ -12,6 +12,7 @@ import {
 import {
   packageAllocationGroupActionSchema,
   packageAllocationGroupPreviousPlanSchema,
+  packageAllocationSplitContinuationEvidenceSchema,
   planPackageAllocationGroup,
   type PackageAllocationGroupAction,
   type PackageAllocationGroupPackageInput,
@@ -41,6 +42,9 @@ const resolutionSourceSchema = z.object({
 const observedPackageSchema = z.object({
   evidenceKey: boundedIdentifier("packages.evidenceKey", 300),
   lifecycle: declaredPackageLifecycleInputSchema,
+  splitContinuation: packageAllocationSplitContinuationEvidenceSchema
+    .nullable()
+    .default(null),
 }).strict();
 
 export const packageAllocationAuthorityResolutionInputSchema = z.object({
@@ -108,6 +112,9 @@ interface ProjectedObservedPackage {
   readonly packageKey: string;
   readonly lifecycle: DeclaredPackageLifecycleInput;
   readonly projection: DeclaredPackageLifecycleProjection;
+  readonly splitContinuation: z.infer<
+    typeof packageAllocationSplitContinuationEvidenceSchema
+  > | null;
 }
 
 function compareText(left: string, right: string): number {
@@ -206,6 +213,7 @@ function projectedPackages(
       ),
       lifecycle: pkg.lifecycle,
       projection,
+      splitContinuation: pkg.splitContinuation,
     });
   }).sort((left, right) => compareText(left.packageKey, right.packageKey));
   const duplicatePackageKey = duplicateText(projected.map((pkg) => pkg.packageKey));
@@ -252,6 +260,7 @@ function scopeHash(
       evidenceKey: pkg.evidenceKey,
       packageKey: pkg.packageKey,
       lifecycleEvidenceHash: pkg.projection.evidenceHash,
+      splitContinuation: pkg.splitContinuation,
     })),
   }));
 }
@@ -264,7 +273,35 @@ function membershipEvidenceKey(
     scopeHash: observedScopeHash,
     packageKey: pkg.packageKey,
     lifecycleEvidenceHash: pkg.projection.evidenceHash,
+    splitContinuation: pkg.splitContinuation,
   }))}`;
+}
+
+function isExactSplitContinuation(
+  pkg: ProjectedObservedPackage,
+  sourceIds: ReadonlySet<number>,
+): boolean {
+  const proof = pkg.splitContinuation;
+  const contents = pkg.projection.authoritativeContents;
+  if (proof === null || contents === null || proof.lines.length !== contents.length) {
+    return false;
+  }
+  const proofBySource = new Map<number, number>();
+  const splitItemIds = new Set<number>();
+  for (const line of proof.lines) {
+    if (
+      !sourceIds.has(line.sourceWmsShipmentItemId)
+      || proofBySource.has(line.sourceWmsShipmentItemId)
+      || splitItemIds.has(line.splitWmsShipmentItemId)
+    ) {
+      return false;
+    }
+    proofBySource.set(line.sourceWmsShipmentItemId, line.quantity);
+    splitItemIds.add(line.splitWmsShipmentItemId);
+  }
+  return contents.every((line) =>
+    proofBySource.get(line.wmsShipmentItemId) === line.quantity
+  );
 }
 
 function authorityFor(
@@ -331,6 +368,10 @@ export function resolvePackageAllocationAuthority(
   const input = parsed.data;
   const packages = projectedPackages(input.packages);
   const observedScopeHash = scopeHash(input.groupKey, input.sourceLines, packages);
+  const sourceQuantityById = new Map(
+    input.sourceLines.map((source) => [source.wmsShipmentItemId, source.sourceQuantity]),
+  );
+  const sourceIds = new Set(sourceQuantityById.keys());
   const roles = new Map<string, PackageAllocationGroupPackageInput["allocationRole"]>();
   for (const prior of input.previousPlan?.packageEvidence ?? []) {
     roles.set(prior.packageKey, prior.allocationRole);
@@ -365,10 +406,20 @@ export function resolvePackageAllocationAuthority(
   const primaryPackages = (): readonly ProjectedObservedPackage[] => packages.filter(
     (pkg) => roles.get(pkg.packageKey) === "primary",
   );
+  const packagesInObservationOrder = [...packages].sort((left, right) => {
+    const leftObservedAt = observationTime(left);
+    const rightObservedAt = observationTime(right);
+    if (leftObservedAt === null && rightObservedAt !== null) return 1;
+    if (leftObservedAt !== null && rightObservedAt === null) return -1;
+    return compareText(leftObservedAt ?? "", rightObservedAt ?? "")
+      || compareText(left.packageKey, right.packageKey);
+  });
   for (const pkg of packages) {
     if (pkg.projection.authoritativeContents === null) {
       reviews.push(resolverReview("package_contents_unavailable", [pkg.packageKey]));
     }
+  }
+  for (const pkg of packagesInObservationOrder) {
     if (roles.has(pkg.packageKey)) continue;
     if (transferTargets.has(pkg.packageKey)) {
       roles.set(pkg.packageKey, "replacement_candidate");
@@ -390,12 +441,66 @@ export function resolvePackageAllocationAuthority(
         ...replaceableSources.map((primary) => primary.packageKey),
         pkg.packageKey,
       ]));
-    } else {
-      roles.set(pkg.packageKey, "additional_dispatch");
     }
   }
 
-  const sourceIds = new Set(input.sourceLines.map((line) => line.wmsShipmentItemId));
+  const continuationCandidates = packagesInObservationOrder.filter((pkg) => {
+    const role = roles.get(pkg.packageKey);
+    return (role === undefined || role === "additional_dispatch")
+      && isExactSplitContinuation(pkg, sourceIds);
+  });
+  const acceptedContinuationPackageKeys = new Set<string>();
+  const primaryAndContinuationQuantityBySource = new Map<number, number>();
+  for (const pkg of primaryPackages()) {
+    for (const line of pkg.projection.authoritativeContents ?? []) {
+      if (!sourceIds.has(line.wmsShipmentItemId)) continue;
+      primaryAndContinuationQuantityBySource.set(
+        line.wmsShipmentItemId,
+        checkedAdd(
+          primaryAndContinuationQuantityBySource.get(line.wmsShipmentItemId) ?? 0,
+          line.quantity,
+          {
+            packageKey: pkg.packageKey,
+            wmsShipmentItemId: line.wmsShipmentItemId,
+            evidence: "split_continuation",
+          },
+        ),
+      );
+    }
+  }
+  for (const pkg of continuationCandidates) {
+    const proposedTotals = new Map(primaryAndContinuationQuantityBySource);
+    let fits = true;
+    for (const line of pkg.projection.authoritativeContents ?? []) {
+      if (!sourceIds.has(line.wmsShipmentItemId)) {
+        fits = false;
+        break;
+      }
+      const proposed = checkedAdd(
+        proposedTotals.get(line.wmsShipmentItemId) ?? 0,
+        line.quantity,
+        {
+          packageKey: pkg.packageKey,
+          wmsShipmentItemId: line.wmsShipmentItemId,
+          evidence: "split_continuation",
+        },
+      );
+      if (proposed > (sourceQuantityById.get(line.wmsShipmentItemId) ?? 0)) {
+        fits = false;
+        break;
+      }
+      proposedTotals.set(line.wmsShipmentItemId, proposed);
+    }
+    if (!fits) continue;
+    acceptedContinuationPackageKeys.add(pkg.packageKey);
+    for (const [sourceId, quantity] of proposedTotals) {
+      primaryAndContinuationQuantityBySource.set(sourceId, quantity);
+    }
+  }
+  for (const pkg of packages) {
+    if (!roles.has(pkg.packageKey)) roles.set(pkg.packageKey, "additional_dispatch");
+  }
+
   const plannerPackages: readonly PackageAllocationGroupPackageInput[] = Object.freeze(
     packages.map((pkg) => {
       const contents = pkg.projection.authoritativeContents;
@@ -411,6 +516,9 @@ export function resolvePackageAllocationAuthority(
             }
           : { status: "unproven" as const, evidenceKey: null },
         lifecycle: pkg.lifecycle,
+        splitContinuation: acceptedContinuationPackageKeys.has(pkg.packageKey)
+          ? pkg.splitContinuation
+          : null,
       });
     }).sort((left, right) => compareText(left.packageKey, right.packageKey)),
   );
@@ -455,7 +563,10 @@ export function resolvePackageAllocationAuthority(
 
   const primaryDeclaredBySource = new Map<number, number>();
   for (const pkg of packages) {
-    if (roles.get(pkg.packageKey) !== "primary") continue;
+    if (
+      roles.get(pkg.packageKey) !== "primary"
+      && !acceptedContinuationPackageKeys.has(pkg.packageKey)
+    ) continue;
     const membership = plannerPackages.find(
       (candidate) => candidate.packageKey === pkg.packageKey,
     )?.membership;
@@ -466,7 +577,11 @@ export function resolvePackageAllocationAuthority(
         checkedAdd(
           primaryDeclaredBySource.get(line.wmsShipmentItemId) ?? 0,
           line.quantity,
-          { wmsShipmentItemId: line.wmsShipmentItemId, allocationRole: "primary" },
+          {
+            wmsShipmentItemId: line.wmsShipmentItemId,
+            allocationRole: roles.get(pkg.packageKey),
+            splitContinuation: acceptedContinuationPackageKeys.has(pkg.packageKey),
+          },
         ),
       );
     }

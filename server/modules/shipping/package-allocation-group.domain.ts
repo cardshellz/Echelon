@@ -70,11 +70,34 @@ const packageMembershipSchema = z.discriminatedUnion("status", [
   }).strict(),
 ]);
 
+export const packageAllocationSplitContinuationEvidenceSchema = z.object({
+  evidenceKey: boundedIdentifier("splitContinuation.evidenceKey", 300),
+  legacyWmsShipmentId: positivePostgresInteger,
+  lines: z.array(z.object({
+    sourceWmsShipmentItemId: positivePostgresInteger,
+    splitWmsShipmentItemId: positivePostgresInteger,
+    quantity: positivePostgresInteger,
+  }).strict()).min(1).max(MAX_PACKAGE_CONTENT_LINES),
+}).strict();
+
+export interface PackageAllocationSplitContinuationEvidenceV1 {
+  readonly evidenceKey: string;
+  readonly legacyWmsShipmentId: number;
+  readonly lines: readonly Readonly<{
+    sourceWmsShipmentItemId: number;
+    splitWmsShipmentItemId: number;
+    quantity: number;
+  }>[];
+}
+
 const packageSchema = z.object({
   packageKey: boundedIdentifier("packageKey", 180),
   allocationRole: z.enum(["primary", "replacement_candidate", "additional_dispatch"]),
   membership: packageMembershipSchema,
   lifecycle: declaredPackageLifecycleInputSchema,
+  splitContinuation: packageAllocationSplitContinuationEvidenceSchema
+    .nullable()
+    .default(null),
 }).strict();
 const packageLifecycleEventEvidenceSchema = z.object({
   eventKey: boundedIdentifier("previousPlan.packageEvidence.lifecycleEventEvidence.eventKey", 240),
@@ -207,6 +230,12 @@ export interface PackageAllocationGroupPackageInput {
     | { readonly status: "proven"; readonly evidenceKey: string }
     | { readonly status: "unproven"; readonly evidenceKey: string | null };
   readonly lifecycle: DeclaredPackageLifecycleInput;
+  /**
+   * Exact persisted evidence that this otherwise-additional package carries a
+   * different portion of the original ordered quantity. It grants commercial
+   * fulfillment allocation only; the legacy split already posted inventory.
+   */
+  readonly splitContinuation?: PackageAllocationSplitContinuationEvidenceV1 | null;
 }
 
 export interface PackageAllocationGroupPlannerInput {
@@ -298,6 +327,8 @@ export interface PackageAllocationPackageSnapshotV1 {
   readonly provider: string;
   readonly providerPhysicalShipmentId: string;
   readonly membershipEvidenceKey: string | null;
+  readonly splitContinuationEvidenceKey: string | null;
+  readonly splitContinuationEvidenceHash: string | null;
   readonly lifecycleStateHash: string;
   readonly lifecycleEvidenceHash: string;
   readonly labelStatus: DeclaredPackageLifecycleProjection["labelStatus"];
@@ -370,6 +401,7 @@ interface ProjectedPackage {
   readonly packageKey: string;
   readonly allocationRole: PackageAllocationGroupPackageInput["allocationRole"];
   readonly membership: PackageAllocationGroupPackageInput["membership"];
+  readonly splitContinuation: PackageAllocationSplitContinuationEvidenceV1 | null;
   readonly projection: DeclaredPackageLifecycleProjection;
   readonly lifecycleEventEvidence: readonly PackageAllocationGroupLifecycleEventEvidenceV1[];
 }
@@ -591,6 +623,54 @@ function authoritativeLineMap(
   return result;
 }
 
+function validateSplitContinuation(
+  pkg: ProjectedPackage,
+  contents: ReadonlyMap<number, number> | null,
+  sourceIds: ReadonlySet<number>,
+): boolean {
+  const evidence = pkg.splitContinuation;
+  if (evidence === null) return false;
+
+  const fail = (reason: string): never => {
+    throw new PackageAllocationGroupError(
+      "INVALID_PACKAGE_GROUP",
+      "Split-continuation evidence does not exactly match the package allocation",
+      { packageKey: pkg.packageKey, evidenceKey: evidence.evidenceKey, reason },
+    );
+  };
+  if (pkg.allocationRole !== "additional_dispatch") {
+    return fail("split_continuation_requires_additional_dispatch_role");
+  }
+  if (pkg.membership.status !== "proven" || contents === null) {
+    return fail("split_continuation_requires_proven_package_contents");
+  }
+  if (evidence.lines.length !== contents.size) {
+    return fail("split_continuation_line_count_mismatch");
+  }
+
+  const quantitiesBySource = new Map<number, number>();
+  const splitItemIds = new Set<number>();
+  for (const line of evidence.lines) {
+    if (!sourceIds.has(line.sourceWmsShipmentItemId)) {
+      return fail("split_continuation_source_outside_group");
+    }
+    if (
+      quantitiesBySource.has(line.sourceWmsShipmentItemId)
+      || splitItemIds.has(line.splitWmsShipmentItemId)
+    ) {
+      return fail("split_continuation_identity_reused");
+    }
+    quantitiesBySource.set(line.sourceWmsShipmentItemId, line.quantity);
+    splitItemIds.add(line.splitWmsShipmentItemId);
+  }
+  for (const [sourceId, quantity] of contents) {
+    if (quantitiesBySource.get(sourceId) !== quantity) {
+      return fail("split_continuation_quantity_mismatch");
+    }
+  }
+  return true;
+}
+
 function aggregateEntries(entries: readonly PackageAllocationEntryV1[]): readonly PackageAllocationEntryV1[] {
   const totals = new Map<string, PackageAllocationEntryV1>();
   for (const entry of entries) {
@@ -764,6 +844,12 @@ export function planPackageAllocationGroup(
         packageKey: pkg.packageKey,
         allocationRole: pkg.allocationRole,
         membership: deepFreeze({ ...pkg.membership }),
+        splitContinuation: pkg.splitContinuation === null
+          ? null
+          : deepFreeze({
+              ...pkg.splitContinuation,
+              lines: pkg.splitContinuation.lines.map((line) => ({ ...line })),
+            }),
         projection,
         lifecycleEventEvidence: buildLifecycleEventEvidence(pkg.lifecycle.events),
       };
@@ -931,6 +1017,18 @@ export function planPackageAllocationGroup(
   for (const pkg of projectedPackages) {
     lineMaps.set(pkg.packageKey, authoritativeLineMap(pkg, sourceIds, reviews));
   }
+  const splitContinuationPackageKeys = new Set(
+    projectedPackages
+      .filter((pkg) => validateSplitContinuation(
+        pkg,
+        lineMaps.get(pkg.packageKey) ?? null,
+        sourceIds,
+      ))
+      .map((pkg) => pkg.packageKey),
+  );
+  const fulfillsOrderedQuantity = (pkg: ProjectedPackage): boolean =>
+    pkg.allocationRole === "primary"
+    || splitContinuationPackageKeys.has(pkg.packageKey);
   const priorTransferSourceKeys = new Set(
     actions
       .filter((action) => (
@@ -950,14 +1048,16 @@ export function planPackageAllocationGroup(
 
   const primarySegments = new Map<number, MutablePrimarySegment[]>();
   const declaredPrimaryQuantity = new Map<number, number>();
-  const primaryCommercialEligibleQuantity = new Map<number, number>();
+  const primaryCommercialEligibleQuantityByPackage = new Map<
+    string,
+    Map<number, number>
+  >();
   const primaryInventoryEligibleQuantity = new Map<number, number>();
   for (const source of sourceLines) {
     const contributions: MutablePrimarySegment[] = [];
     let declared = 0;
-    let commercialEligible = 0;
     let inventoryEligible = 0;
-    for (const pkg of projectedPackages.filter((candidate) => candidate.allocationRole === "primary")) {
+    for (const pkg of projectedPackages.filter(fulfillsOrderedQuantity)) {
       const quantity = lineMaps.get(pkg.packageKey)?.get(source.wmsShipmentItemId) ?? 0;
       if (quantity === 0) continue;
       declared = checkedAdd(declared, quantity, {
@@ -967,13 +1067,30 @@ export function planPackageAllocationGroup(
       const carrierLocked = pkg.projection.carrierStatus === "possession_confirmed";
       const targetPackage = carrierLocked || pkg.projection.labelStatus === "active";
       if (pkg.projection.commercialFulfillmentPostingEligible) {
-        commercialEligible = checkedAdd(commercialEligible, quantity, {
-          packageKey: pkg.packageKey,
-          wmsShipmentItemId: source.wmsShipmentItemId,
-          effectType: "commercial_fulfillment",
-        });
+        const commercialBySource =
+          primaryCommercialEligibleQuantityByPackage.get(pkg.packageKey)
+          ?? new Map<number, number>();
+        commercialBySource.set(
+          source.wmsShipmentItemId,
+          checkedAdd(
+            commercialBySource.get(source.wmsShipmentItemId) ?? 0,
+            quantity,
+            {
+              packageKey: pkg.packageKey,
+              wmsShipmentItemId: source.wmsShipmentItemId,
+              effectType: "commercial_fulfillment",
+            },
+          ),
+        );
+        primaryCommercialEligibleQuantityByPackage.set(
+          pkg.packageKey,
+          commercialBySource,
+        );
       }
-      if (pkg.projection.inventoryPostingEligible) {
+      if (
+        pkg.allocationRole === "primary"
+        && pkg.projection.inventoryPostingEligible
+      ) {
         inventoryEligible = checkedAdd(inventoryEligible, quantity, {
           packageKey: pkg.packageKey,
           wmsShipmentItemId: source.wmsShipmentItemId,
@@ -991,10 +1108,9 @@ export function planPackageAllocationGroup(
     if (declared > source.sourceQuantity) {
       reviews.push(review(
         "primary_allocation_exceeds_source",
-        projectedPackages.filter((pkg) => pkg.allocationRole === "primary").map((pkg) => pkg.packageKey),
+        projectedPackages.filter(fulfillsOrderedQuantity).map((pkg) => pkg.packageKey),
         [source.wmsShipmentItemId],
       ));
-      primaryCommercialEligibleQuantity.set(source.wmsShipmentItemId, 0);
       primaryInventoryEligibleQuantity.set(source.wmsShipmentItemId, 0);
       primarySegments.set(source.wmsShipmentItemId, [{
         originPackageKey: null,
@@ -1013,7 +1129,6 @@ export function planPackageAllocationGroup(
       });
     }
     primarySegments.set(source.wmsShipmentItemId, contributions);
-    primaryCommercialEligibleQuantity.set(source.wmsShipmentItemId, commercialEligible);
     primaryInventoryEligibleQuantity.set(source.wmsShipmentItemId, inventoryEligible);
   }
 
@@ -1408,7 +1523,10 @@ export function planPackageAllocationGroup(
       }));
     }
   }
-  for (const pkg of projectedPackages.filter((candidate) => candidate.allocationRole === "additional_dispatch")) {
+  for (const pkg of projectedPackages.filter((candidate) => (
+    candidate.allocationRole === "additional_dispatch"
+    && !splitContinuationPackageKeys.has(candidate.packageKey)
+  ))) {
     const contents = lineMaps.get(pkg.packageKey);
     if (!contents || pkg.projection.businessStatus !== "shipped") continue;
     if (pkg.projection.labelStatus !== "active" && pkg.projection.carrierStatus !== "possession_confirmed") {
@@ -1439,23 +1557,74 @@ export function planPackageAllocationGroup(
 
   const allocations = aggregateEntries(rawEntries);
   const desiredIntents: PackageAllocationEffectIntentV1[] = [];
+  const commercialPrimaryPackages = projectedPackages
+    .filter(fulfillsOrderedQuantity)
+    .sort((left, right) => {
+      const leftObservedAt = left.projection.labelFirstObservedAt ?? "";
+      const rightObservedAt = right.projection.labelFirstObservedAt ?? "";
+      return compareText(leftObservedAt, rightObservedAt)
+        || compareText(left.packageKey, right.packageKey);
+    });
   for (const source of sourceLines) {
     const primaryDeclared = Math.min(
       declaredPrimaryQuantity.get(source.wmsShipmentItemId) ?? 0,
       source.sourceQuantity,
     );
-    const primaryCommercialEligible = Math.min(
-      primaryCommercialEligibleQuantity.get(source.wmsShipmentItemId) ?? 0,
-      source.sourceQuantity,
+    const commercialPostingAllowed =
+      (declaredPrimaryQuantity.get(source.wmsShipmentItemId) ?? 0)
+      <= source.sourceQuantity;
+    const legacyCommercialIntentKey =
+      `package-allocation:v1:${input.groupKey}:commercial:${source.wmsShipmentItemId}`;
+    const packageCommercialIntentKey = (packageKey: string): string =>
+      `${legacyCommercialIntentKey}:package:${packageKey}`;
+    // The ordinary primary package keeps the source-scoped v1 intent. Only a
+    // proven split continuation needs a package-scoped intent. Besides keeping
+    // old plan identity stable, this ensures a primary package that becomes
+    // eligible after a later attestation never needs split-lineage evidence.
+    const legacyCoveredPackageKeys = new Set(
+      commercialPrimaryPackages
+        .filter((pkg) => pkg.allocationRole === "primary")
+        .map((pkg) => pkg.packageKey),
     );
-    if (primaryCommercialEligible > 0) {
+    let legacyCommercialQuantity = 0;
+    for (const packageKey of legacyCoveredPackageKeys) {
+      legacyCommercialQuantity = checkedAdd(
+        legacyCommercialQuantity,
+        primaryCommercialEligibleQuantityByPackage
+          .get(packageKey)?.get(source.wmsShipmentItemId) ?? 0,
+        {
+          packageKey,
+          wmsShipmentItemId: source.wmsShipmentItemId,
+          effectType: "commercial_fulfillment",
+        },
+      );
+    }
+    if (commercialPostingAllowed && legacyCommercialQuantity > 0) {
       desiredIntents.push(effectIntent({
-        intentKey: `package-allocation:v1:${input.groupKey}:commercial:${source.wmsShipmentItemId}`,
+        intentKey: legacyCommercialIntentKey,
         effectType: "commercial_fulfillment",
         subjectKey: `commercial:${source.wmsShipmentItemId}`,
         wmsShipmentItemId: source.wmsShipmentItemId,
         packageKey: null,
-        quantity: primaryCommercialEligible,
+        quantity: Math.min(legacyCommercialQuantity, source.sourceQuantity),
+      }));
+    }
+    for (const pkg of commercialPrimaryPackages) {
+      if (!commercialPostingAllowed) break;
+      if (!splitContinuationPackageKeys.has(pkg.packageKey)) continue;
+      const quantity = Math.min(
+        primaryCommercialEligibleQuantityByPackage
+          .get(pkg.packageKey)?.get(source.wmsShipmentItemId) ?? 0,
+        source.sourceQuantity,
+      );
+      if (quantity === 0) continue;
+      desiredIntents.push(effectIntent({
+        intentKey: packageCommercialIntentKey(pkg.packageKey),
+        effectType: "commercial_fulfillment",
+        subjectKey: `commercial:${source.wmsShipmentItemId}:package:${pkg.packageKey}`,
+        wmsShipmentItemId: source.wmsShipmentItemId,
+        packageKey: pkg.packageKey,
+        quantity,
       }));
     }
     const totalPhysical = checkedAdd(
@@ -1576,6 +1745,10 @@ export function planPackageAllocationGroup(
     provider: pkg.projection.provider,
     providerPhysicalShipmentId: pkg.projection.providerPhysicalShipmentId,
     membershipEvidenceKey: pkg.membership.evidenceKey,
+    splitContinuationEvidenceKey: pkg.splitContinuation?.evidenceKey ?? null,
+    splitContinuationEvidenceHash: pkg.splitContinuation === null
+      ? null
+      : sha256(canonicalJson(pkg.splitContinuation)),
     lifecycleStateHash: pkg.projection.stateHash,
     lifecycleEvidenceHash: pkg.projection.evidenceHash,
     labelStatus: pkg.projection.labelStatus,
@@ -1596,9 +1769,28 @@ export function planPackageAllocationGroup(
     effectIntentEvidence,
   });
 
+  const operationalPackageSnapshots = packageSnapshots.map((snapshot) => {
+    const {
+      lifecycleEvidenceHash: _lifecycle,
+      membershipEvidenceKey: _membership,
+      splitContinuationEvidenceKey,
+      splitContinuationEvidenceHash,
+      ...identity
+    } = snapshot;
+    // Preserve the v1 state hash for every unaffected package. Adding null
+    // fields here would revise all historical groups even though their
+    // operational allocation did not change.
+    return splitContinuationEvidenceKey === null
+      ? identity
+      : {
+          ...identity,
+          splitContinuationEvidenceKey,
+          splitContinuationEvidenceHash,
+        };
+  });
   const operationalProjection = {
     sourceLines,
-    packageSnapshots: packageSnapshots.map(({ lifecycleEvidenceHash: _lifecycle, membershipEvidenceKey: _membership, ...snapshot }) => snapshot),
+    packageSnapshots: operationalPackageSnapshots,
     allocations,
     desiredEffectIntents: normalizedIntents,
     appliedActionKeys: state.appliedActionKeys,

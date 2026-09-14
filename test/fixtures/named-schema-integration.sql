@@ -260,7 +260,9 @@ CREATE TABLE wms.outbound_shipment_items (
   shipment_item_purpose varchar(30) NOT NULL DEFAULT 'customer_fulfillment',
   product_variant_id integer REFERENCES catalog.product_variants(id),
   qty integer NOT NULL DEFAULT 1,
-  from_location_id integer REFERENCES warehouse.warehouse_locations(id)
+  from_location_id integer REFERENCES warehouse.warehouse_locations(id),
+  tracking_id varchar(200),
+  provider_membership_state varchar(30) NOT NULL DEFAULT 'authoritative'
 );
 
 CREATE TABLE wms.shipment_requests (
@@ -376,7 +378,8 @@ CREATE TABLE wms.shipping_provider_label_links (
   physical_shipment_id bigint
     REFERENCES wms.physical_shipments(id) ON DELETE RESTRICT,
   legacy_wms_shipment_id integer
-    REFERENCES wms.outbound_shipments(id) ON DELETE RESTRICT
+    REFERENCES wms.outbound_shipments(id) ON DELETE RESTRICT,
+  source varchar(50) NOT NULL DEFAULT 'integration_fixture'
 );
 
 CREATE TABLE inventory.inventory_transactions (

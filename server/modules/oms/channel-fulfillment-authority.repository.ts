@@ -21,7 +21,10 @@ import {
   type ChannelFulfillmentWritebackPolicyDecision,
 } from "./channel-fulfillment-authority.policy";
 import { resolveProviderOrderId } from "./shipping-engine-order-identity";
-import { validateInheritedCommercialIntents } from "./package-allocation-commercial-inheritance.domain";
+import {
+  MAX_INHERITED_COMMERCIAL_INTENTS,
+  validateInheritedCommercialIntents,
+} from "./package-allocation-commercial-inheritance.domain";
 
 const positiveIntegerSchema = z.number().int().positive();
 const positiveBigintTextSchema = z.string().regex(/^[1-9]\d*$/).refine(
@@ -304,6 +307,7 @@ interface MaterializedCustomerItem extends CanonicalCustomerItem {
 interface PackageAllocationCommercialIntent {
   readonly id: string;
   readonly packageAllocationSourceLineId: string;
+  readonly packageAllocationPackageBindingId: string | null;
   readonly sourceWmsShipmentItemId: number;
   readonly quantity: number;
 }
@@ -773,6 +777,7 @@ async function loadPackageAllocationCommercialIntents(
     SELECT
       intent.id::text AS id,
       intent.package_allocation_source_line_id::text AS package_allocation_source_line_id,
+      intent.package_allocation_package_binding_id::text AS package_allocation_package_binding_id,
       source.source_wms_shipment_item_id,
       intent.quantity
     FROM wms.package_allocation_effect_intents AS intent
@@ -787,6 +792,9 @@ async function loadPackageAllocationCommercialIntents(
   return Object.freeze(rows.map((row) => {
     const id = bigintTextOrNull(row.id);
     const sourceId = bigintTextOrNull(row.package_allocation_source_line_id);
+    const packageBindingId = bigintTextOrNull(
+      row.package_allocation_package_binding_id,
+    );
     const sourceWmsShipmentItemId = asPositiveInteger(row.source_wms_shipment_item_id);
     const quantity = asPositiveInteger(row.quantity);
     if (!id || !sourceId || !sourceWmsShipmentItemId || !quantity) {
@@ -799,6 +807,7 @@ async function loadPackageAllocationCommercialIntents(
     return Object.freeze({
       id,
       packageAllocationSourceLineId: sourceId,
+      packageAllocationPackageBindingId: packageBindingId,
       sourceWmsShipmentItemId,
       quantity,
     });
@@ -808,7 +817,7 @@ async function loadPackageAllocationCommercialIntents(
 async function loadPackageAllocationCommercialCustomerItems(
   tx: any,
   packageAllocationPlanId: string,
-  expectedIntentCount: number,
+  expectedSourceCount: number,
 ): Promise<ReadonlyMap<number, CanonicalCustomerItem>> {
   const rows = rowsOf<LegacyPackageRow>(await tx.execute(sql`
     SELECT
@@ -865,9 +874,15 @@ async function loadPackageAllocationCommercialCustomerItems(
         COALESCE(oms_line.paid_quantity, 0),
         COALESCE(authority.max_paid_quantity, 0)
       )::int AS max_authorized_quantity
-    FROM wms.package_allocation_effect_intents AS intent
+    FROM (
+      SELECT DISTINCT intent.package_allocation_source_line_id
+      FROM wms.package_allocation_effect_intents AS intent
+      WHERE intent.package_allocation_plan_id = ${packageAllocationPlanId}::bigint
+        AND intent.effect_type = 'commercial_fulfillment'
+        AND intent.executable = FALSE
+    ) AS commercial_source
     JOIN wms.package_allocation_source_lines AS source
-      ON source.id = intent.package_allocation_source_line_id
+      ON source.id = commercial_source.package_allocation_source_line_id
     JOIN wms.outbound_shipment_items AS shipment_item
       ON shipment_item.id = source.source_wms_shipment_item_id
     JOIN wms.outbound_shipments AS shipment
@@ -887,27 +902,24 @@ async function loadPackageAllocationCommercialCustomerItems(
       FROM oms.oms_order_line_authority_events AS event
       WHERE event.order_line_id = oms_line.id
     ) AS authority ON TRUE
-    WHERE intent.package_allocation_plan_id = ${packageAllocationPlanId}::bigint
-      AND intent.effect_type = 'commercial_fulfillment'
-      AND intent.executable = FALSE
     ORDER BY source.source_wms_shipment_item_id
     FOR UPDATE OF shipment
   `));
-  if (rows.length !== expectedIntentCount) {
+  if (rows.length !== expectedSourceCount) {
     throw new FulfillmentAuthorityError(
       "OMS_LINEAGE_MISSING",
       "One or more commercial intents lack exact outbound-shipment lineage",
-      { packageAllocationPlanId, expectedIntentCount, actualSourceCount: rows.length },
+      { packageAllocationPlanId, expectedSourceCount, actualSourceCount: rows.length },
     );
   }
   const normalized = normalizeCustomerItems(rows);
-  if (normalized.nonCustomerRows.length > 0 || normalized.customerItems.length !== expectedIntentCount) {
+  if (normalized.nonCustomerRows.length > 0 || normalized.customerItems.length !== expectedSourceCount) {
     throw new FulfillmentAuthorityError(
       "PACKAGE_ALLOCATION_EFFECT_CONFLICT",
       "Commercial fulfillment intents may materialize only customer-fulfillment source lines",
       {
         packageAllocationPlanId,
-        commercialIntentCount: expectedIntentCount,
+        commercialSourceCount: expectedSourceCount,
         customerSourceCount: normalized.customerItems.length,
         nonCustomerSourceCount: normalized.nonCustomerRows.length,
       },
@@ -921,13 +933,14 @@ async function loadPackageAllocationCommercialEntries(
   packageAllocationPlanId: string,
   intents: readonly PackageAllocationCommercialIntent[],
 ): Promise<readonly PackageAllocationCommercialEntry[]> {
-  const intentBySource = new Map(intents.map((intent) => [intent.packageAllocationSourceLineId, intent]));
+  const intentById = new Map(intents.map((intent) => [intent.id, intent]));
   const rows = rowsOf<Record<string, unknown>>(await tx.execute(sql`
     SELECT
       entry.id::text AS id,
       entry.package_allocation_source_line_id::text AS package_allocation_source_line_id,
       source.source_wms_shipment_item_id,
       entry.package_allocation_package_binding_id::text AS package_allocation_package_binding_id,
+      commercial_intent.id::text AS package_allocation_effect_intent_id,
       binding.provider,
       binding.provider_physical_shipment_id,
       label.provider_order_id,
@@ -943,6 +956,33 @@ async function loadPackageAllocationCommercialEntries(
     JOIN wms.package_allocation_package_bindings AS binding
       ON binding.id = entry.package_allocation_package_binding_id
      AND binding.package_allocation_group_id = entry.package_allocation_group_id
+    JOIN wms.package_allocation_effect_intents AS commercial_intent
+      ON commercial_intent.package_allocation_plan_id = entry.package_allocation_plan_id
+     AND commercial_intent.package_allocation_group_id = entry.package_allocation_group_id
+     AND commercial_intent.package_allocation_source_line_id =
+       entry.package_allocation_source_line_id
+     AND commercial_intent.effect_type = 'commercial_fulfillment'
+     AND commercial_intent.executable = FALSE
+     AND (
+       commercial_intent.package_allocation_package_binding_id =
+         entry.package_allocation_package_binding_id
+       OR (
+         commercial_intent.package_allocation_package_binding_id IS NULL
+         AND NOT EXISTS (
+           SELECT 1
+           FROM wms.package_allocation_effect_intents AS package_intent
+           WHERE package_intent.package_allocation_plan_id =
+             entry.package_allocation_plan_id
+             AND package_intent.package_allocation_group_id =
+               entry.package_allocation_group_id
+             AND package_intent.package_allocation_source_line_id =
+               entry.package_allocation_source_line_id
+             AND package_intent.effect_type = 'commercial_fulfillment'
+             AND package_intent.package_allocation_package_binding_id =
+               entry.package_allocation_package_binding_id
+         )
+       )
+     )
     JOIN wms.shipping_provider_labels AS label
       ON LOWER(BTRIM(label.provider)) = LOWER(BTRIM(binding.provider))
      AND BTRIM(label.provider_label_id) = BTRIM(binding.provider_physical_shipment_id)
@@ -951,12 +991,6 @@ async function loadPackageAllocationCommercialEntries(
     WHERE entry.package_allocation_plan_id = ${packageAllocationPlanId}::bigint
       AND entry.allocation_kind = 'primary_transfer'
       AND entry.target_kind = 'package'
-      AND entry.package_allocation_source_line_id IN (
-        SELECT commercial_intent.package_allocation_source_line_id
-        FROM wms.package_allocation_effect_intents AS commercial_intent
-        WHERE commercial_intent.package_allocation_plan_id = entry.package_allocation_plan_id
-          AND commercial_intent.effect_type = 'commercial_fulfillment'
-      )
       AND EXISTS (
         SELECT 1
         FROM wms.package_allocation_effect_intents AS package_intent
@@ -978,6 +1012,7 @@ async function loadPackageAllocationCommercialEntries(
     const id = bigintTextOrNull(row.id);
     const sourceId = bigintTextOrNull(row.package_allocation_source_line_id);
     const bindingId = bigintTextOrNull(row.package_allocation_package_binding_id);
+    const intentId = bigintTextOrNull(row.package_allocation_effect_intent_id);
     const sourceWmsShipmentItemId = asPositiveInteger(row.source_wms_shipment_item_id);
     const quantity = asPositiveInteger(row.quantity);
     const provider = normalizedNullable(row.provider)?.toLowerCase() ?? null;
@@ -985,11 +1020,17 @@ async function loadPackageAllocationCommercialEntries(
     const trackingNumber = normalizedNullable(row.tracking_number);
     const carrier = normalizedNullable(row.carrier);
     const recognizedAt = toDateOrNull(row.business_shipment_recognized_at);
-    const intent = sourceId ? intentBySource.get(sourceId) : undefined;
+    const intent = intentId ? intentById.get(intentId) : undefined;
     if (
-      !id || !sourceId || !bindingId || !sourceWmsShipmentItemId || !quantity
+      !id || !sourceId || !bindingId || !intentId
+      || !sourceWmsShipmentItemId || !quantity
       || !provider || !providerPhysicalShipmentId || !trackingNumber || !carrier
       || !recognizedAt || !intent
+      || intent.packageAllocationSourceLineId !== sourceId
+      || (
+        intent.packageAllocationPackageBindingId !== null
+        && intent.packageAllocationPackageBindingId !== bindingId
+      )
     ) {
       throw new FulfillmentAuthorityError(
         "PACKAGE_ALLOCATION_EFFECT_CONFLICT",
@@ -997,10 +1038,10 @@ async function loadPackageAllocationCommercialEntries(
         { packageAllocationPlanId, allocationEntryId: row.id },
       );
     }
-    totals.set(sourceId, (totals.get(sourceId) ?? 0) + quantity);
+    totals.set(intentId, (totals.get(intentId) ?? 0) + quantity);
     return Object.freeze({
       id,
-      packageAllocationEffectIntentId: intent.id,
+      packageAllocationEffectIntentId: intentId,
       packageAllocationSourceLineId: sourceId,
       sourceWmsShipmentItemId,
       packageAllocationPackageBindingId: bindingId,
@@ -1016,7 +1057,7 @@ async function loadPackageAllocationCommercialEntries(
     });
   });
   for (const intent of intents) {
-    const allocatedQuantity = totals.get(intent.packageAllocationSourceLineId) ?? 0;
+    const allocatedQuantity = totals.get(intent.id) ?? 0;
     if (allocatedQuantity !== intent.quantity) {
       throw new FulfillmentAuthorityError(
         "PACKAGE_ALLOCATION_EFFECT_CONFLICT",
@@ -2562,14 +2603,22 @@ async function loadInheritedActivatedCommercialMaterialization(
     await tx.execute(sql`SELECT intent.id::text AS intent_id,
       origin.id::text AS origin_plan_id, origin.plan_version AS origin_plan_version, intent.intent_key,
       intent.payload_hash, intent.payload, intent.executable, intent.quantity,
-      source.id::text AS source_line_id, source.source_wms_shipment_item_id, source.source_quantity
+      source.id::text AS source_line_id,
+      intent.package_allocation_package_binding_id::text AS package_binding_id,
+      binding.package_key,
+      source.source_wms_shipment_item_id, source.source_quantity
     FROM wms.package_allocation_effect_intents intent
     JOIN wms.package_allocation_plans origin ON origin.id = intent.package_allocation_plan_id
     JOIN wms.package_allocation_source_lines source ON source.id = intent.package_allocation_source_line_id
     JOIN wms.package_allocation_group_source_lines membership ON membership.package_allocation_source_line_id = source.id
       AND membership.package_allocation_group_id = origin.package_allocation_group_id
+    LEFT JOIN wms.package_allocation_package_bindings binding
+      ON binding.id = intent.package_allocation_package_binding_id
+     AND binding.package_allocation_group_id = origin.package_allocation_group_id
     WHERE origin.package_allocation_group_id = ${String(plan.group_id)}::bigint AND intent.effect_type = 'commercial_fulfillment'
-    ORDER BY intent.id LIMIT 501 FOR UPDATE OF intent`),
+    ORDER BY intent.id
+    LIMIT ${MAX_INHERITED_COMMERCIAL_INTENTS + 1}
+    FOR UPDATE OF intent`),
   );
   let inherited: ReturnType<typeof validateInheritedCommercialIntents>;
   try {
@@ -2586,6 +2635,8 @@ async function loadInheritedActivatedCommercialMaterialization(
         executable: row.executable,
         quantity: Number(row.quantity),
         sourceLineId: row.source_line_id,
+        packageBindingId: row.package_binding_id,
+        packageKey: row.package_key,
         sourceWmsShipmentItemId: Number(row.source_wms_shipment_item_id),
         sourceQuantity: Number(row.source_quantity),
       })),
@@ -2672,6 +2723,9 @@ async function loadInheritedActivatedCommercialMaterialization(
     LEFT JOIN oms.oms_order_lines oms_line ON oms_line.id = order_item.oms_order_line_id
     WHERE intent.id IN (${intentIds}) AND (entry.package_allocation_source_line_id IS DISTINCT FROM source.id
       OR entry.package_allocation_plan_id IS DISTINCT FROM intent.package_allocation_plan_id
+      OR (intent.package_allocation_package_binding_id IS NOT NULL
+        AND entry.package_allocation_package_binding_id IS DISTINCT FROM
+          intent.package_allocation_package_binding_id)
       OR entry.target_kind IS DISTINCT FROM 'package' OR physical_item.quantity_shipped IS DISTINCT FROM item.quantity_pushed
       OR physical_item.physical_shipment_id IS DISTINCT FROM command.physical_shipment_id
       OR item.oms_order_line_id IS DISTINCT FROM order_item.oms_order_line_id
@@ -2700,6 +2754,7 @@ async function loadInheritedActivatedCommercialMaterialization(
       .map((intent) => ({
         id: intent.intentId,
         packageAllocationSourceLineId: intent.sourceLineId,
+        packageAllocationPackageBindingId: intent.packageBindingId,
         sourceWmsShipmentItemId: intent.sourceWmsShipmentItemId,
         quantity: intent.quantity,
       }));
@@ -2707,7 +2762,7 @@ async function loadInheritedActivatedCommercialMaterialization(
     await loadPackageAllocationCommercialCustomerItems(
       tx,
       origin,
-      intents.length,
+      new Set(intents.map((intent) => intent.packageAllocationSourceLineId)).size,
     );
     const completed =
       await loadCompletedPackageAllocationCommercialMaterialization(
@@ -3220,7 +3275,7 @@ export function createChannelFulfillmentAuthorityRepository(
       const customerItems = await loadPackageAllocationCommercialCustomerItems(
         tx,
         input.packageAllocationPlanId,
-        intents.length,
+        new Set(intents.map((intent) => intent.packageAllocationSourceLineId)).size,
       );
       const entries = await loadPackageAllocationCommercialEntries(
         tx,

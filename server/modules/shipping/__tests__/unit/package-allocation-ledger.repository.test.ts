@@ -131,6 +131,15 @@ describe("PgPackageAllocationLedgerRepository", () => {
   it("uses one bounded repeatable read-only snapshot without writer locks", async () => {
     const client = new FakeClient();
     client.handler = ({ text }) => {
+      if (text.includes("WITH candidate_splits AS MATERIALIZED")) {
+        return [{
+          shipping_provider_label_id: "42",
+          legacy_wms_shipment_id: 8002,
+          split_wms_shipment_item_id: 7002,
+          source_wms_shipment_item_id: 7001,
+          quantity: 1,
+        }];
+      }
       if (text.includes("FROM wms.package_allocation_groups")) {
         return [{ id: "1", group_key: groupKey, current_version: 0 }];
       }
@@ -179,6 +188,15 @@ describe("PgPackageAllocationLedgerRepository", () => {
     expect(evidence.group).toEqual({ id: "1", groupKey, currentVersion: 0 });
     expect(evidence.sourceFacts.map((fact) => fact.sourceWmsShipmentItemId)).toEqual([7001]);
     expect(evidence.packages.map((pkg) => pkg.evidenceKey)).toEqual(["shipping-provider-label:42"]);
+    expect(evidence.packages[0].splitContinuation).toEqual({
+      evidenceKey: "shipstation-split-continuation:v1:42:8002",
+      legacyWmsShipmentId: 8002,
+      lines: [{
+        sourceWmsShipmentItemId: 7001,
+        splitWmsShipmentItemId: 7002,
+        quantity: 1,
+      }],
+    });
     expect(client.queries[0].text).toBe(
       "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
     );
@@ -186,6 +204,18 @@ describe("PgPackageAllocationLedgerRepository", () => {
     expect(client.queries.at(-1)?.text).toBe("ROLLBACK");
     const queryText = client.queries.map((query) => query.text).join("\n");
     expect(queryText).not.toMatch(/pg_advisory_xact_lock|FOR\s+(?:UPDATE|KEY SHARE)/i);
+    const splitQuery = client.queries.find((query) =>
+      query.text.includes("WITH candidate_splits AS MATERIALIZED")
+    );
+    expect(splitQuery?.text).toContain(
+      "child.split_root_shipment_item_id IS NOT NULL",
+    );
+    expect(splitQuery?.text).toContain(
+      "source_item.order_item_id IS NOT DISTINCT FROM child.order_item_id",
+    );
+    expect(splitQuery?.text).not.toContain(
+      "COALESCE(child.split_root_shipment_item_id, child.id)",
+    );
     expect(client.queries.map((query) => query.text)).not.toContain("COMMIT");
     expect(client.released).toBe(true);
   });
@@ -614,7 +644,7 @@ describe("PgPackageAllocationLedgerRepository", () => {
       packageKey: "umlaut",
       allocationRole: "additional_dispatch" as const,
       provider: "shipstation",
-      providerPhysicalShipmentId: "ä",
+      providerPhysicalShipmentId: "Ã¤",
       identityHash: "a".repeat(64),
       lifecycleEventEvidence: [{
         eventKey: "shipstation:umlaut:observed",
@@ -657,7 +687,7 @@ describe("PgPackageAllocationLedgerRepository", () => {
       .map((query) => query.values[0]);
     expect(packageLocks).toEqual([
       "package-allocation-package:shipstation:z",
-      "package-allocation-package:shipstation:ä",
+      "package-allocation-package:shipstation:Ã¤",
     ]);
   });
 
@@ -665,7 +695,7 @@ describe("PgPackageAllocationLedgerRepository", () => {
     const client = new FakeClient();
     client.handler = ({ text }) => {
       if (text.includes("FROM wms.package_allocation_entries")) {
-        return ["ä", "z"].map((key) => ({
+        return ["Ã¤", "z"].map((key) => ({
           entry_key: key,
           allocation_key: `allocation:${key}`,
           source_wms_shipment_item_id: 7001,
@@ -677,7 +707,7 @@ describe("PgPackageAllocationLedgerRepository", () => {
         }));
       }
       if (text.includes("FROM wms.package_allocation_effect_intents")) {
-        return ["ä", "z"].map((key) => ({
+        return ["Ã¤", "z"].map((key) => ({
           intent_key: key,
           effect_type: "active_label_tracking",
           payload_hash: "a".repeat(64),
@@ -698,8 +728,8 @@ describe("PgPackageAllocationLedgerRepository", () => {
       intents: await transaction.loadPlanIntents("101"),
     }));
 
-    expect(result.entries.map((entry) => entry.entryKey)).toEqual(["z", "ä"]);
-    expect(result.intents.map((intent) => intent.intentKey)).toEqual(["z", "ä"]);
+    expect(result.entries.map((entry) => entry.entryKey)).toEqual(["z", "Ã¤"]);
+    expect(result.intents.map((intent) => intent.intentKey)).toEqual(["z", "Ã¤"]);
   });
 
   it.each([
