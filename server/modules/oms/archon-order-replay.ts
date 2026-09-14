@@ -23,8 +23,8 @@ export async function queueHistoricalArchonOrders(pool: Pool, input: unknown) {
       `SELECT channel_id,count(*)::text AS orders FROM oms.oms_orders WHERE ordered_at >= $1::date AND ordered_at < $2::date GROUP BY channel_id ORDER BY channel_id`,
       [options.from, options.to],
     );
-    const count = rows.rows.reduce((n, r) => n + BigInt(r.orders), 0n);
-    if (count > 10000n)
+    const count = rows.rows.reduce((n, r) => n + BigInt(r.orders), BigInt(0));
+    if (count > BigInt(10000))
       throw new Error("REPLAY_LIMIT_EXCEEDED_USE_SHORTER_RANGE");
     if (options.apply)
       await db.query(
