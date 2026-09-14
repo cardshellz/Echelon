@@ -147,10 +147,10 @@ export interface IReplenishmentStorage {
   getPendingReplenTasksForLocation(toLocationId: number): Promise<ReplenTask[]>;
   getAllWarehouseSettings(): Promise<WarehouseSettings[]>;
   getWarehouseSettingsByCode(code: string): Promise<WarehouseSettings | undefined>;
-  getWarehouseSettingsById(id: number): Promise<WarehouseSettings | undefined>;
+  getWarehouseSettingsById(id: number, executor?: any): Promise<WarehouseSettings | undefined>;
   getDefaultWarehouseSettings(): Promise<WarehouseSettings | undefined>;
-  createWarehouseSettings(data: InsertWarehouseSettings): Promise<WarehouseSettings>;
-  updateWarehouseSettings(id: number, updates: Partial<InsertWarehouseSettings>): Promise<WarehouseSettings | null>;
+  createWarehouseSettings(data: InsertWarehouseSettings, executor?: any): Promise<WarehouseSettings>;
+  updateWarehouseSettings(id: number, updates: Partial<InsertWarehouseSettings>, executor?: any): Promise<WarehouseSettings | null>;
   deleteWarehouseSettings(id: number): Promise<boolean>;
   getVelocityLookbackDays(warehouseId?: number | null): Promise<number>;
   updateVelocityLookbackDays(days: number, warehouseId?: number | null): Promise<void>;
@@ -357,8 +357,8 @@ export const replenishmentMethods: IReplenishmentStorage = {
     return result[0];
   },
 
-  async getWarehouseSettingsById(id: number): Promise<WarehouseSettings | undefined> {
-    const result = await db.select().from(warehouseSettings)
+  async getWarehouseSettingsById(id: number, executor: any = db): Promise<WarehouseSettings | undefined> {
+    const result = await executor.select().from(warehouseSettings)
       .where(eq(warehouseSettings.id, id)).limit(1);
     return result[0];
   },
@@ -369,13 +369,13 @@ export const replenishmentMethods: IReplenishmentStorage = {
     return result[0];
   },
 
-  async createWarehouseSettings(data: InsertWarehouseSettings): Promise<WarehouseSettings> {
-    const result = await db.insert(warehouseSettings).values(data).returning();
+  async createWarehouseSettings(data: InsertWarehouseSettings, executor: any = db): Promise<WarehouseSettings> {
+    const result = await executor.insert(warehouseSettings).values(data).returning();
     return result[0];
   },
 
-  async updateWarehouseSettings(id: number, updates: Partial<InsertWarehouseSettings>): Promise<WarehouseSettings | null> {
-    const result = await db.update(warehouseSettings)
+  async updateWarehouseSettings(id: number, updates: Partial<InsertWarehouseSettings>, executor: any = db): Promise<WarehouseSettings | null> {
+    const result = await executor.update(warehouseSettings)
       .set({ ...updates, updatedAt: new Date() })
       .where(eq(warehouseSettings.id, id))
       .returning();

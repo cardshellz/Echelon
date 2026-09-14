@@ -132,11 +132,21 @@ export class AuthorityAwareInventoryPublicationService {
     if (channelId != null) positiveInteger(channelId, "channelId");
   }
 
-  async listProductIds(legacyReader: () => Promise<number[]>): Promise<number[]> {
+  async readAuthority(): Promise<InventoryAvailabilityRuntimeAuthority> {
+    return this.executor.execute(async (context) => context.authority);
+  }
+
+  async listProductIds(
+    legacyReader: () => Promise<number[]>,
+    channelId?: number,
+  ): Promise<number[]> {
+    const selectedChannelId = channelId == null
+      ? this.channelId
+      : positiveInteger(channelId, "channelId");
     return this.executor.execute(async (context) => {
       if (context.authority === "legacy") return uniquePositiveIntegers(await legacyReader(), "productId");
       return uniquePositiveIntegers(
-        await context.listActivePublicationProductIds(this.channelId),
+        await context.listActivePublicationProductIds(selectedChannelId),
         "productId",
       );
     });
@@ -145,18 +155,28 @@ export class AuthorityAwareInventoryPublicationService {
   async publishProduct<T>(input: {
     productId: number;
     dryRun: boolean;
+    channelId?: number;
+    publicationTargetId?: number;
     triggeredBy?: string;
   }, legacyPublisher: () => Promise<T>): Promise<InventoryPublicationRouteResult<T>> {
     const productId = positiveInteger(input.productId, "productId");
     const dryRun = boolean(input.dryRun, "dryRun");
+    const channelId = input.channelId == null
+      ? this.channelId
+      : positiveInteger(input.channelId, "channelId");
+    const publicationTargetId = input.publicationTargetId == null
+      ? undefined
+      : positiveInteger(input.publicationTargetId, "publicationTargetId");
     const triggeredBy = nonblank(input.triggeredBy ?? "inventory_publication", "triggeredBy", 200);
     return this.executor.execute(async (context) => {
       if (context.authority === "legacy") {
         return { authority: "legacy", legacyResult: await legacyPublisher() };
       }
       const publication = await this.planAndPublishCanonical(context, {
-        productId,
-        dryRun,
+         productId,
+         channelId,
+         publicationTargetId,
+         dryRun,
         triggeredBy,
       });
       return { authority: "canonical", publication };
@@ -207,6 +227,7 @@ export class AuthorityAwareInventoryPublicationService {
       productId: number;
       productVariantId?: number;
       channelId?: number;
+      publicationTargetId?: number;
       dryRun: boolean;
       triggeredBy: string;
     },
@@ -216,7 +237,12 @@ export class AuthorityAwareInventoryPublicationService {
       input.productId,
       input.channelId ?? this.channelId,
     );
-    const rows = publicationIntentsFromPlan(plan, context, input.productVariantId);
+    const rows = publicationIntentsFromPlan(
+      plan,
+      context,
+      input.productVariantId,
+      input.publicationTargetId,
+    );
     for (const row of rows.filter((candidate) => candidate.blockerCodes.length > 0)) {
       this.logger.warn({
         event: "canonical_inventory_publication_projection_blocked",
@@ -251,6 +277,7 @@ export class AuthorityAwareInventoryPublicationService {
       productId: input.productId,
       productVariantId: input.productVariantId ?? null,
       channelId: input.channelId ?? this.channelId ?? null,
+      publicationTargetId: input.publicationTargetId ?? null,
       dryRun: input.dryRun,
       triggeredBy: input.triggeredBy,
       plannedRows: rows.length,
@@ -324,6 +351,7 @@ function publicationIntentsFromPlan(
   plan: InventoryChannelExposureRuntimePlan,
   context: InventoryAvailabilityRuntimePublicationContext,
   productVariantId?: number,
+  publicationTargetId?: number,
 ): CanonicalInventoryPublicationIntent[] {
   if (plan.authority !== "canonical"
     || plan.activationRunId !== context.activationRunId
@@ -342,6 +370,7 @@ function publicationIntentsFromPlan(
 
   const rows: CanonicalInventoryPublicationIntent[] = [];
   for (const target of plan.targets) {
+    if (publicationTargetId != null && target.publicationTargetId !== publicationTargetId) continue;
     if (!target.publishable || !target.sourceBinding) {
       const blockerCodes = uniqueStrings([
         ...target.blockers.map((blocker) => blocker.code),
@@ -360,7 +389,6 @@ function publicationIntentsFromPlan(
     }
     for (const row of target.rows) {
       if (productVariantId != null && row.productVariantId !== productVariantId) continue;
-      if (!row.policy?.eligible) continue;
       if (!row.mapping || row.blockers.length > 0) {
         throw publicationError(
           "CANONICAL_PUBLICATION_ROW_BLOCKED",

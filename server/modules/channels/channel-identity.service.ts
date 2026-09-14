@@ -4,7 +4,12 @@ import { persistAuditEvent } from "../../infrastructure/auditLogger";
 import { ChannelIdentityError, internalIdentitySchema, indexInventoryIdentities, type ChannelItemIdentity } from "./channel-identity.domain";
 import { ShopifyIdentityReader, type ShopifyIdentityConnection } from "./adapters/shopify-identity.reader";
 
-type IdentityDb = Pick<typeof import("../../db").db, "select" | "transaction">;
+type IdentityTransaction = Pick<
+  typeof import("../../db").db,
+  "select" | "insert" | "update" | "execute"
+>;
+type IdentityDb = Pick<typeof import("../../db").db, "select"> &
+  Partial<Pick<typeof import("../../db").db, "transaction">>;
 
 /** Channels owns account resolution, external identities, and provider reads. */
 export class ChannelIdentityService {
@@ -84,7 +89,10 @@ export class ChannelIdentityService {
   }
 
   /** Explicit enable/discovery only. A catalog ID is never a provider identity. */
-  async ensureShopifyFeed(input: { channelId: number; productVariantId: number; sku: string | null; actor: string }) {
+  async ensureShopifyFeed(
+    input: { channelId: number; productVariantId: number; sku: string | null; actor: string },
+    transaction?: IdentityTransaction,
+  ) {
     internalIdentitySchema.parse(input.productVariantId);
     if (!input.actor.trim()) throw new ChannelIdentityError("CHANNEL_IDENTITY_ACTOR_REQUIRED", "An actor is required for mapping changes");
     const connection = await this.shopifyConnection(input.channelId);
@@ -105,7 +113,7 @@ export class ChannelIdentityService {
     }
     if (before?.quarantinedAt) throw new ChannelIdentityError("CHANNEL_IDENTITY_QUARANTINED", "Quarantined mappings require explicit audited repair, not reactivation");
     const timestamp = this.clock();
-    return this.db.transaction(async (tx) => {
+    const persist = async (tx: IdentityTransaction) => {
       // Serialize the owning channel, including first creation when no feed row exists.
       await tx.select({ id: channels.id }).from(channels).where(eq(channels.id, input.channelId)).for("update");
       const currentConnections = await tx.select().from(channelConnections).where(eq(channelConnections.channelId, input.channelId)).limit(2).for("share");
@@ -141,6 +149,14 @@ export class ChannelIdentityService {
         context: { channelId: input.channelId, connectionId: connection.id, externalVariantId: evidence.id },
       }, { timestamp });
       return saved;
-    });
+    };
+    if (transaction) return persist(transaction);
+    if (!this.db.transaction) {
+      throw new ChannelIdentityError(
+        "CHANNEL_IDENTITY_TRANSACTION_REQUIRED",
+        "A transaction owner is required to persist a verified channel identity",
+      );
+    }
+    return this.db.transaction(persist);
   }
 }

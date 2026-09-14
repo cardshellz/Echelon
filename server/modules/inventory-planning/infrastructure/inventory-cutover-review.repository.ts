@@ -10,7 +10,9 @@ import { captureQuantityPublicationDrainInsideTransaction } from "./quantity-pub
 import { validateCutoverDrainReadbacks } from "../domain/inventory-cutover-drain-readback-proof";
 
 const MAX_READBACK_AGE_MS = 15 * 60 * 1000;
+const MAX_OPEN_BUILD_ORDERS = 1_000;
 type Blocker = InventoryCutoverReview["blockers"][number];
+type OpenBuildOrderEvidence = Readonly<{ id: number; status: "released" | "in_progress" | "failed" }>;
 
 /** All reads use one caller-owned snapshot; no persisted draft, stock or provider changes. */
 export async function captureInventoryCutoverReviewInsideTransaction(
@@ -39,6 +41,8 @@ export async function captureInventoryCutoverReviewInsideTransaction(
   // exact latest admitted outbox attempts preceding every provider readback.
   if (run.state !== "publication_verified") blockers.push({ code: "CUTOVER_CONSERVATIVE_PUBLICATION_PENDING", subject: "activation", message: "Conservative publication has not been verified." });
   await checkWholeCatalogCoverage(client, manifest, blockers);
+  const openBuilds = await captureOpenBuildCutoverEvidence(client);
+  blockers.push(...openBuilds.blockers);
   const projection = await projectInventoryCutoverStateInsideTransaction(client, manifest, activationRunId, run.authority_revision);
   const { reconstruction, impactHash, publicationRows, stockFingerprints, configurationEvidence } = projection;
   blockers.push(...projection.blockers);
@@ -53,7 +57,8 @@ export async function captureInventoryCutoverReviewInsideTransaction(
     ...(reconstruction.openingBalance ? { openingBalance: reconstruction.openingBalance } : {}),
     legacyPromiseReleases: reconstruction.legacyPromiseReleases,
     ...(reconstruction.openingReservationRebases?.length ? { openingReservationRebases: reconstruction.openingReservationRebases } : {}),
-    stockFingerprints, configurationEvidence, providerEvidence, publicationDrain, publicationRows, blockers: sortedBlockers,
+    stockFingerprints, configurationEvidence, providerEvidence, publicationDrain, publicationRows,
+    openBuildOrders: openBuilds.orders, blockers: sortedBlockers,
   };
   return inventoryCutoverReviewSchema.parse({
     contractVersion: "inventory_cutover_review_v1", activationRunId, authorityRevision: run.authority_revision,
@@ -68,6 +73,56 @@ export async function captureInventoryCutoverReviewInsideTransaction(
         orderLines: reconstruction.legacyPromiseReleases.reduce((total, release) => total + release.owners.length, 0) } },
     publicationRows, blockers: sortedBlockers, operationalWriteAttempted: false, providerWriteAttempted: false,
   });
+}
+
+/**
+ * A build already released under legacy authority cannot be assigned a new
+ * transformation binding implicitly during cutover. The operational admission
+ * fence keeps this bounded census stable through the eventual authority switch.
+ */
+export async function captureOpenBuildCutoverEvidence(
+  client: Pick<PoolClient, "query">,
+): Promise<{ orders: OpenBuildOrderEvidence[]; blockers: Blocker[] }> {
+  const rawRows = (await client.query(
+    `SELECT id, status
+     FROM inventory.build_orders
+     WHERE status IN ('released', 'in_progress', 'failed')
+     ORDER BY id
+     LIMIT $1`,
+    [MAX_OPEN_BUILD_ORDERS + 1],
+  )).rows;
+  if (rawRows.length > MAX_OPEN_BUILD_ORDERS) {
+    return {
+      orders: [],
+      blockers: [{
+        code: "CUTOVER_OPEN_BUILD_CENSUS_LIMIT_EXCEEDED",
+        subject: "build-orders",
+        message: `More than ${MAX_OPEN_BUILD_ORDERS} executable legacy build orders exist; resolve or explicitly migrate the complete set before cutover.`,
+      }],
+    };
+  }
+  const orders = rawRows.map((row): OpenBuildOrderEvidence => {
+    const id = Number(row.id);
+    const status = String(row.status);
+    if (!Number.isSafeInteger(id) || id <= 0
+      || (status !== "released" && status !== "in_progress" && status !== "failed")) {
+      throw new InventoryCutoverCommitError(
+        "CUTOVER_OPEN_BUILD_EVIDENCE_INVALID",
+        "The open-build cutover census returned invalid build identity or lifecycle evidence.",
+        500,
+        { id: row.id ?? null, status: row.status ?? null },
+      );
+    }
+    return { id, status };
+  });
+  return {
+    orders,
+    blockers: orders.map((order) => ({
+      code: "CUTOVER_OPEN_BUILD_REQUIRES_RESOLUTION",
+      subject: `build-order:${order.id}`,
+      message: `Build order ${order.id} is ${order.status} under legacy authority; cancel/finish it or use an explicit reviewed migration before canonical cutover.`,
+    })),
+  };
 }
 
 async function checkWholeCatalogCoverage(client: PoolClient, manifest: InventoryCutoverManifest, blockers: Blocker[]): Promise<void> {

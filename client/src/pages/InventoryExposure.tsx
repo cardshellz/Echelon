@@ -10,10 +10,18 @@ import {
   savePublicationSourceBindingDraftRequestSchema,
   savePublicationVariantMappingDraftRequestSchema,
   setInventoryPublicationTargetPreviewStateRequestSchema,
+  stopInventoryPublicationTargetRequestSchema,
   type ChannelExposurePolicyScope,
   type ChannelExposurePolicyValue,
   type InventoryChannelExposureAdminView,
 } from "@shared/types/inventory-channel-exposure";
+import {
+  inventoryPublicationTargetResumeResultSchema,
+  inventoryPublicationTargetResumeReviewSchema,
+  resumeInventoryPublicationTargetRequestSchema,
+  reviewInventoryPublicationTargetResumeRequestSchema,
+  type InventoryPublicationTargetResumeReview,
+} from "@shared/types/inventory-publication-target-resume";
 import type { z } from "zod";
 import { GitBranch, ShieldCheck } from "lucide-react";
 
@@ -36,6 +44,7 @@ import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/lib/auth";
 import { InventoryRuntimeAuthorityBadge } from "@/components/inventory/InventoryRuntimeAuthorityBadge";
 import { WarehouseInventorySourceSetup } from "@/components/inventory/WarehouseInventorySourceSetup";
+import SyncControlPanel from "@/components/SyncControlPanel";
 
 type PolicyScopeType = ChannelExposurePolicyScope["scopeType"];
 type PolicyForm = {
@@ -68,6 +77,8 @@ export default function InventoryExposure() {
   const sourceIdempotencyKey = useRef<string | null>(null);
   const targetIdempotencyKey = useRef<string | null>(null);
   const targetStateIdempotencyKey = useRef<string | null>(null);
+  const targetResumeReviewIdempotencyKey = useRef<string | null>(null);
+  const targetResumeIdempotencyKey = useRef<string | null>(null);
   const [productId, setProductId] = useState<number | null>(null);
   const [publicationTargetId, setPublicationTargetId] = useState<number | null>(null);
   const [scopeType, setScopeType] = useState<PolicyScopeType>("channel");
@@ -89,6 +100,8 @@ export default function InventoryExposure() {
   const [newTargetAuthority, setNewTargetAuthority] = useState<"echelon" | "external_provider" | "manual">("echelon");
   const [newTargetReason, setNewTargetReason] = useState("");
   const [targetStateReason, setTargetStateReason] = useState("");
+  const [targetResumeReview, setTargetResumeReview] =
+    useState<InventoryPublicationTargetResumeReview | null>(null);
 
   const viewQuery = useQuery<InventoryChannelExposureAdminView>({
     queryKey: ["/api/inventory-planning/admin/channel-exposure", productId],
@@ -169,7 +182,10 @@ export default function InventoryExposure() {
 
   useEffect(() => {
     setTargetStateReason("");
+    setTargetResumeReview(null);
     targetStateIdempotencyKey.current = null;
+    targetResumeReviewIdempotencyKey.current = null;
+    targetResumeIdempotencyKey.current = null;
   }, [publicationTargetId, target?.revision]);
 
   const previewQuery = useQuery({
@@ -338,6 +354,119 @@ export default function InventoryExposure() {
     }),
   });
 
+  const stopLiveTarget = useMutation({
+    mutationFn: async () => {
+      if (!target || target.state !== "live") throw new Error("Select a live publication target.");
+      const idempotencyKey = targetStateIdempotencyKey.current ?? crypto.randomUUID();
+      targetStateIdempotencyKey.current = idempotencyKey;
+      const request = stopInventoryPublicationTargetRequestSchema.parse({
+        publicationTargetId: target.id,
+        expectedRevision: target.revision,
+        changeReason: targetStateReason,
+        idempotencyKey,
+      });
+      return requestJson(
+        "/api/inventory-planning/admin/channel-exposure/publication-target-stop",
+        inventoryPublicationTargetCommandResultSchema,
+        jsonRequest("PUT", request),
+      );
+    },
+    onSuccess: async () => {
+      targetStateIdempotencyKey.current = null;
+      setTargetStateReason("");
+      await refreshExposure(queryClient);
+      toast({
+        title: "Live publication target stopped",
+        description: "Pending work was superseded. No provider quantity was changed by the stop command.",
+      });
+    },
+    onError: (error: Error) => toast({
+      title: "Publication target was not stopped",
+      description: error.message,
+      variant: "destructive",
+    }),
+  });
+
+  const reviewTargetResume = useMutation({
+    mutationFn: async () => {
+      if (!target || target.state !== "preview") {
+        throw new Error("Put the previously stopped target into preview before reviewing resume readiness.");
+      }
+      if (view?.runtimeAuthority !== "canonical" || target.publicationAuthority !== "echelon") {
+        throw new Error("Only a canonical, Echelon-owned publication target can resume.");
+      }
+      const idempotencyKey = targetResumeReviewIdempotencyKey.current ?? crypto.randomUUID();
+      targetResumeReviewIdempotencyKey.current = idempotencyKey;
+      const request = reviewInventoryPublicationTargetResumeRequestSchema.parse({
+        publicationTargetId: target.id,
+        expectedRevision: target.revision,
+        idempotencyKey,
+        reason: targetStateReason,
+      });
+      return requestJson(
+        "/api/inventory-planning/admin/channel-exposure/publication-target-resume-review",
+        inventoryPublicationTargetResumeReviewSchema,
+        jsonRequest("POST", request),
+      );
+    },
+    onSuccess: (result) => {
+      targetResumeReviewIdempotencyKey.current = null;
+      targetResumeIdempotencyKey.current = null;
+      setTargetResumeReview(result);
+      toast({
+        title: result.state === "ready" ? "Target is ready to resume" : "Target remains blocked",
+        description: result.state === "ready"
+          ? `Reviewed ${result.products.length} product configuration(s) against fresh exact-target readbacks.`
+          : `${result.blockers.length} readiness blocker(s) must be resolved before publication can resume.`,
+        variant: result.state === "ready" ? "default" : "destructive",
+      });
+    },
+    onError: (error: Error) => toast({
+      title: "Resume readiness was not captured",
+      description: error.message,
+      variant: "destructive",
+    }),
+  });
+
+  const resumeTarget = useMutation({
+    mutationFn: async () => {
+      if (!target || target.state !== "preview" || !targetResumeReview
+        || targetResumeReview.state !== "ready") {
+        throw new Error("Capture a ready review for this exact preview target before resuming it.");
+      }
+      const idempotencyKey = targetResumeIdempotencyKey.current ?? crypto.randomUUID();
+      targetResumeIdempotencyKey.current = idempotencyKey;
+      const request = resumeInventoryPublicationTargetRequestSchema.parse({
+        publicationTargetId: target.id,
+        expectedRevision: target.revision,
+        resumeReviewId: targetResumeReview.resumeReviewId,
+        expectedEvidenceHash: targetResumeReview.evidenceHash,
+        idempotencyKey,
+        reason: targetStateReason,
+      });
+      return requestJson(
+        "/api/inventory-planning/admin/channel-exposure/publication-target-resume",
+        inventoryPublicationTargetResumeResultSchema,
+        jsonRequest("POST", request),
+      );
+    },
+    onSuccess: async (result) => {
+      targetResumeIdempotencyKey.current = null;
+      setTargetResumeReview(null);
+      setTargetStateReason("");
+      await refreshExposure(queryClient);
+      toast({
+        title: "Publication target resumed",
+        description: `${result.publicationRows} absolute desired quantity row(s) were committed to the canonical outbox.`,
+      });
+    },
+    onError: (error: Error) => toast({
+      title: "Publication target was not resumed",
+      description: error.message,
+      variant: "destructive",
+    }),
+  });
+
   const updatePolicy = (patch: Partial<PolicyForm>) => {
     setPolicyForm((current) => ({ ...current, ...patch }));
     policyIdempotencyKey.current = null;
@@ -365,10 +494,12 @@ export default function InventoryExposure() {
           </p>
         </div>
         <div className="flex gap-2">
-          <Badge variant="outline"><ShieldCheck className="mr-1 h-3.5 w-3.5" />Draft / preview only</Badge>
+          <Badge variant="outline"><ShieldCheck className="mr-1 h-3.5 w-3.5" />Controlled publication lifecycle</Badge>
           <InventoryRuntimeAuthorityBadge />
         </div>
       </div>
+
+      <SyncControlPanel mode="canonical" allowChanges={canActivate} />
 
       <WarehouseInventorySourceSetup canEdit={canEdit} />
 
@@ -513,20 +644,62 @@ export default function InventoryExposure() {
               revision {target.revision}. The legacy single-node field is #{target.legacyFulfillmentNodeId};
               only the versioned source set below feeds the new preview.
             </div>
-            {target.state !== "live" && <div className="grid items-end gap-3 md:grid-cols-[1fr_auto]">
-              <Field label="Reason for changing readiness inclusion">
+            <div className="grid items-end gap-3 md:grid-cols-[1fr_auto]">
+              <Field label={target.state === "live"
+                ? "Reason for stopping this live publication target"
+                : "Reason for changing readiness inclusion"}>
                 <Input value={targetStateReason} disabled={!canActivate}
                   onChange={(event) => {
                     setTargetStateReason(event.target.value);
                     targetStateIdempotencyKey.current = null;
+                    targetResumeReviewIdempotencyKey.current = null;
+                    targetResumeIdempotencyKey.current = null;
+                    setTargetResumeReview(null);
                   }} />
               </Field>
-              <Button variant={target.state === "preview" ? "outline" : "default"}
+              <Button variant={target.state === "live"
+                ? "destructive" : target.state === "preview" ? "outline" : "default"}
                 disabled={!canActivate || targetStateReason.trim().length === 0
-                  || setTargetPreviewState.isPending}
-                onClick={() => setTargetPreviewState.mutate()}>
-                {target.state === "preview" ? "Remove from readiness preview" : "Include in readiness preview"}
+                  || setTargetPreviewState.isPending || stopLiveTarget.isPending}
+                onClick={() => target.state === "live"
+                  ? stopLiveTarget.mutate() : setTargetPreviewState.mutate()}>
+                {target.state === "live"
+                  ? "Stop live publication"
+                  : target.state === "preview" ? "Remove from readiness preview" : "Include in readiness preview"}
               </Button>
+            </div>
+            {target.state === "preview" && target.publicationAuthority === "echelon"
+              && view.runtimeAuthority === "canonical" && <div className="space-y-3 rounded-md border p-3">
+              <div className="text-muted-foreground">
+                For a previously stopped target, first capture fresh provider readbacks, then review
+                the exact active mappings, source scope, channel dials, canonical authority revision,
+                and target revision. Resume recomputes all quantities and atomically queues one full
+                absolute snapshot; this screen never writes directly to the provider.
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button variant="outline"
+                  disabled={!canActivate || targetStateReason.trim().length === 0
+                    || reviewTargetResume.isPending || resumeTarget.isPending}
+                  onClick={() => reviewTargetResume.mutate()}>
+                  Review resume readiness
+                </Button>
+                {targetResumeReview?.state === "ready" && <Button
+                  disabled={!canActivate || resumeTarget.isPending || reviewTargetResume.isPending}
+                  onClick={() => resumeTarget.mutate()}>
+                  Resume live publication
+                </Button>}
+              </div>
+              {targetResumeReview && <div className="space-y-2">
+                <div>
+                  Review #{targetResumeReview.resumeReviewId} is <strong>{targetResumeReview.state}</strong>;
+                  captured {new Date(targetResumeReview.capturedAt).toLocaleString()} for target revision {targetResumeReview.publicationTargetRevision}.
+                </div>
+                {targetResumeReview.blockers.map((blocker) => <div
+                  key={`${blocker.code}:${JSON.stringify(blocker.context)}`}
+                  className="rounded-md border border-amber-400/50 bg-amber-50 p-2 dark:bg-amber-950/20">
+                  <strong>{blocker.code}</strong>: {blocker.message}
+                </div>)}
+              </div>}
             </div>}
           </div>}
         </CardContent>

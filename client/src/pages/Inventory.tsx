@@ -71,7 +71,6 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
-import { calculateLegacyFungibleAvailability } from "@/lib/inventory-availability";
 
 interface VariantAvailability {
   variantId: number;
@@ -156,7 +155,8 @@ interface VariantLevel {
   variantQty: number;
   reservedQty: number;
   pickedQty: number;
-  available: number;     // fungible ATP: all variants pooled, in this variant's units
+  unreservedQty: number;
+  atpUnits: number;
   locationCount: number;
   pickableQty: number;
   isDuplicate: boolean;
@@ -175,6 +175,7 @@ interface VariantLocationLevel {
   variantQty: number;
   reservedQty: number;
   pickedQty: number;
+  unreservedQty: number;
   isAssigned: boolean;
   location: {
     id: number;
@@ -195,7 +196,7 @@ interface BinInventoryItem {
   variantQty: number;
   reservedQty: number;
   pickedQty: number;
-  available: number;
+  unreservedQty: number;
   isAssigned: boolean;
 }
 
@@ -211,7 +212,7 @@ interface BinInventory {
   items: BinInventoryItem[];
   totalQty: number;
   totalReserved: number;
-  totalAvailable: number;
+  totalUnreservedQty: number;
   skuCount: number;
   hasUnassigned: boolean;
 }
@@ -280,7 +281,6 @@ function VariantLocationRows({ variantId, sku, warehouses, canEdit, onTransfer, 
     <>
       {locationLevels.map((locLevel) => {
         const isPickable = locLevel.location?.isPickable === 1;
-        const available = locLevel.variantQty - locLevel.reservedQty;
         const locType = locLevel.location?.locationType || "";
         return (
           <TableRow key={locLevel.id} className={`text-sm ${locLevel.isAssigned || !isPickable ? "bg-muted/20" : "bg-amber-50/50 dark:bg-amber-900/10"}`}>
@@ -309,7 +309,10 @@ function VariantLocationRows({ variantId, sku, warehouses, canEdit, onTransfer, 
             </TableCell>
             <TableCell className="text-right font-mono text-xs">{locLevel.variantQty}</TableCell>
             <TableCell className="text-right font-mono text-xs">{locLevel.reservedQty || 0}</TableCell>
-            <TableCell className="text-right font-mono text-xs">{available}</TableCell>
+            <TableCell className="text-right font-mono text-xs">
+              <span className="mr-1 text-[10px] text-muted-foreground">Unreserved</span>
+              {locLevel.unreservedQty}
+            </TableCell>
             {canEdit && (
               <TableCell className="text-right">
                 <div className="flex items-center justify-end gap-1">
@@ -398,22 +401,41 @@ function VariantLocationRows({ variantId, sku, warehouses, canEdit, onTransfer, 
   );
 }
 
-// Per-bin breakdown for a single descendant variant in the fungible pool
-function FungibleLocationRows({ variantId, sku, sourceSku, parentUnitsPerVariant, childUnitsPerVariant, canEdit, warehouses, warehouseId, onCaseBreak }: {
-  variantId: number;
-  sku: string;
+// Legacy execution control retained until canonical transformation execution is active.
+// Quantities shown here are physical bin evidence only; ATP comes from the server projection above.
+function LegacyCaseBreakLocationRows({
+  sourceVariantId,
+  sourceSku,
+  targetVariantId,
+  targetSku,
+  sourceUnitsPerVariant,
+  targetUnitsPerVariant,
+  canEdit,
+  warehouseId,
+  onCaseBreak,
+}: {
+  sourceVariantId: number;
   sourceSku: string;
-  parentUnitsPerVariant: number;
-  childUnitsPerVariant: number;
+  targetVariantId: number;
+  targetSku: string;
+  sourceUnitsPerVariant: number;
+  targetUnitsPerVariant: number;
   canEdit: boolean;
-  warehouses: Warehouse[];
   warehouseId?: number | null;
-  onCaseBreak?: (fromLocationId: number, fromLocationCode: string, sourceVariantId: number, sourceSku: string, pickVariantId: number, pickSku: string, conversionRatio: number) => void;
+  onCaseBreak: (input: {
+    fromLocationId: number;
+    fromLocationCode: string;
+    sourceVariantId: number;
+    sourceSku: string;
+    targetVariantId: number;
+    targetSku: string;
+    conversionRatio: number;
+  }) => void;
 }) {
   const locationUrl = warehouseId
-    ? `/api/inventory/variants/${variantId}/locations?warehouseId=${warehouseId}`
-    : `/api/inventory/variants/${variantId}/locations`;
-  const { data: locationLevels = [], isLoading } = useQuery<VariantLocationLevel[]>({
+    ? `/api/inventory/variants/${sourceVariantId}/locations?warehouseId=${warehouseId}`
+    : `/api/inventory/variants/${sourceVariantId}/locations`;
+  const { data: locationLevels = [], isLoading, isError } = useQuery<VariantLocationLevel[]>({
     queryKey: [locationUrl],
   });
 
@@ -421,19 +443,43 @@ function FungibleLocationRows({ variantId, sku, sourceSku, parentUnitsPerVariant
     return (
       <TableRow className="bg-blue-50/20 dark:bg-blue-900/5">
         <TableCell colSpan={canEdit ? 6 : 5} className="py-1 pl-16 text-xs text-muted-foreground">
-          <RefreshCw className="h-3 w-3 animate-spin inline mr-1" /> Loading...
+          <RefreshCw className="h-3 w-3 animate-spin inline mr-1" /> Loading source locations...
         </TableCell>
       </TableRow>
     );
   }
 
-  const ratio = childUnitsPerVariant / parentUnitsPerVariant;
+  if (isError) {
+    return (
+      <TableRow className="bg-red-50/30 dark:bg-red-900/10">
+        <TableCell colSpan={canEdit ? 6 : 5} className="py-1 pl-16 text-xs text-red-600">
+          <AlertTriangle className="h-3 w-3 inline mr-1" /> Failed to load case-break source locations
+        </TableCell>
+      </TableRow>
+    );
+  }
+
+  const conversionRatio = sourceUnitsPerVariant / targetUnitsPerVariant;
+  const hasValidConversionRatio = Number.isSafeInteger(sourceUnitsPerVariant)
+    && Number.isSafeInteger(targetUnitsPerVariant)
+    && sourceUnitsPerVariant > 0
+    && targetUnitsPerVariant > 0
+    && Number.isSafeInteger(conversionRatio)
+    && conversionRatio > 0;
+
+  if (locationLevels.length === 0) {
+    return (
+      <TableRow className="bg-blue-50/20 dark:bg-blue-900/5">
+        <TableCell colSpan={canEdit ? 6 : 5} className="py-1 pl-16 text-xs text-muted-foreground">
+          No physical source stock in this warehouse
+        </TableCell>
+      </TableRow>
+    );
+  }
+
   return (
     <>
       {locationLevels.map((locLevel) => {
-        const locAvail = locLevel.variantQty - locLevel.reservedQty;
-        const converted = Math.floor(locAvail * ratio);
-        const isNegative = converted < 0;
         const locType = locLevel.location?.locationType || "";
         return (
           <TableRow key={locLevel.id} className="bg-blue-50/20 dark:bg-blue-900/5 text-xs">
@@ -447,10 +493,15 @@ function FungibleLocationRows({ variantId, sku, sourceSku, parentUnitsPerVariant
               </div>
             </TableCell>
             <TableCell className="text-xs text-muted-foreground"></TableCell>
-            <TableCell className={`text-right font-mono ${locLevel.variantQty < 0 ? "text-red-500" : "text-muted-foreground"}`}>{locLevel.variantQty}</TableCell>
-            <TableCell className="text-right font-mono text-muted-foreground">{locLevel.reservedQty || 0}</TableCell>
-            <TableCell className={`text-right font-mono ${isNegative ? "text-red-500" : "text-blue-600"}`}>
-              {converted.toLocaleString()} <span className="text-[10px] opacity-60">{sku.match(/[A-Z]\d+$/)?.[0] || ''} eq</span>
+            <TableCell className={`text-right font-mono ${locLevel.variantQty < 0 ? "text-red-500" : "text-muted-foreground"}`}>
+              {locLevel.variantQty.toLocaleString()}
+            </TableCell>
+            <TableCell className="text-right font-mono text-muted-foreground">
+              {locLevel.reservedQty.toLocaleString()}
+            </TableCell>
+            <TableCell className={`text-right font-mono ${locLevel.unreservedQty < 0 ? "text-red-500" : "text-blue-600"}`}>
+              {locLevel.unreservedQty.toLocaleString()}
+              <span className="ml-1 text-[10px] opacity-60">unreserved</span>
             </TableCell>
             {canEdit && (
               <TableCell className="text-right">
@@ -458,20 +509,20 @@ function FungibleLocationRows({ variantId, sku, sourceSku, parentUnitsPerVariant
                   variant="outline"
                   size="sm"
                   className="h-6 text-xs px-2 border-blue-200 hover:bg-blue-50 text-blue-700 dark:border-blue-800 dark:text-blue-400 dark:hover:bg-blue-900/20"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    if (onCaseBreak && locLevel.location?.id) {
-                      // pass source (case) and pick (pack) info
-                      onCaseBreak(
-                        locLevel.location.id,
-                        locLevel.location.code,
-                        variantId,
-                        sourceSku,   // The specific case SKU string
-                        0,           // pickVariantId (filled by Inventory container map later using 'sku')
-                        sku,         // The Pack/Child SKU string
-                        ratio
-                      );
-                    }
+                  disabled={!hasValidConversionRatio || !locLevel.location?.id}
+                  title={hasValidConversionRatio ? undefined : "Invalid package conversion ratio"}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    if (!hasValidConversionRatio || !locLevel.location?.id) return;
+                    onCaseBreak({
+                      fromLocationId: locLevel.location.id,
+                      fromLocationCode: locLevel.location.code,
+                      sourceVariantId,
+                      sourceSku,
+                      targetVariantId,
+                      targetSku,
+                      conversionRatio,
+                    });
                   }}
                 >
                   <Boxes className="h-3 w-3 mr-1" />
@@ -513,11 +564,10 @@ export default function Inventory() {
     fromLocationCode?: string;
     sourceVariantId?: number;
     sourceSku?: string;
-    pickVariantId?: number;
-    pickSku?: string;
+    targetVariantId?: number;
+    targetSku?: string;
     conversionRatio?: number;
   }>({ open: false });
-
   const [exporting, setExporting] = useState(false);
 
   const locationTypeOptions = [
@@ -554,7 +604,7 @@ export default function Inventory() {
       const data = await response.json();
       
       // Convert to CSV
-      const headers = ["SKU", "Variant Name", "Base SKU", "Item Name", "Location", "Zone", "Location Type", "Bin Type", "Pickable", "Variant Qty", "Reserved", "Picked", "Available"];
+      const headers = ["SKU", "Variant Name", "Base SKU", "Item Name", "Location", "Zone", "Location Type", "Bin Type", "Pickable", "Variant Qty", "Reserved", "Picked", "Unreserved"];
       const csvRows = [headers.join(",")];
       
       for (const row of data) {
@@ -571,7 +621,7 @@ export default function Inventory() {
           row.variantQty,
           row.reservedQty,
           row.pickedQty,
-          row.availableQty,
+          row.unreservedQty,
         ].join(","));
       }
       
@@ -653,12 +703,29 @@ export default function Inventory() {
     staleTime: 30_000,
   });
 
-  // Compute lookup for Variant ID by SKU to back-fill pickVariantId (the pack) inside Fungible pool rows
-  const skuMap = useMemo(() => {
-    const map = new Map<string, number>();
-    variantLevels.forEach((v) => map.set(v.sku, v.variantId));
-    return map;
+  // Hierarchy data is retained only to expose the existing case-break execution control.
+  // It does not participate in ATP calculation or display.
+  const childrenByTargetVariantId = useMemo(() => {
+    const children = new Map<number, VariantLevel[]>();
+    for (const variant of variantLevels) {
+      if (variant.parentVariantId == null) continue;
+      const existing = children.get(variant.parentVariantId) ?? [];
+      existing.push(variant);
+      children.set(variant.parentVariantId, existing);
+    }
+    return children;
   }, [variantLevels]);
+
+  const targetsWithCaseBreakSources = useMemo(() => {
+    const result = new Set<number>();
+    for (const variant of variantLevels) {
+      const directSources = childrenByTargetVariantId.get(variant.variantId) ?? [];
+      if (directSources.some((source) => source.locationCount > 0 || source.variantQty !== 0)) {
+        result.add(variant.variantId);
+      }
+    }
+    return result;
+  }, [childrenByTargetVariantId, variantLevels]);
 
   // Bin-centric inventory view
   const { data: binInventory = [], isLoading: loadingBinInventory } = useQuery<BinInventory[]>({
@@ -807,47 +874,6 @@ export default function Inventory() {
     },
   });
 
-  // Build variantId→VariantLevel map + parentId→children map for fungible pool
-  const variantMap = useMemo(() => {
-    const m = new Map<number, VariantLevel>();
-    for (const v of variantLevels) m.set(v.variantId, v);
-    return m;
-  }, [variantLevels]);
-
-  const childrenMap = useMemo(() => {
-    const m = new Map<number, VariantLevel[]>();
-    for (const v of variantLevels) {
-      if (v.parentVariantId) {
-        const arr = m.get(v.parentVariantId) || [];
-        arr.push(v);
-        m.set(v.parentVariantId, arr);
-      }
-    }
-    return m;
-  }, [variantLevels]);
-
-  // Variants that have descendants with stock (larger variants that can break down into this one)
-  const hasFungibleDescendants = useMemo(() => {
-    const result = new Set<number>();
-    for (const v of variantLevels) {
-      const queue = childrenMap.get(v.variantId) || [];
-      for (const child of queue) {
-        if (child.locationCount > 0 || child.variantQty !== 0) {
-          result.add(v.variantId);
-          break;
-        }
-      }
-    }
-    return result;
-  }, [variantLevels, childrenMap]);
-
-  // Fungible available: own available + sum of descendant available (converted to this variant's units)
-  // This is the number shown in the Available column — math adds up to bin-level rows
-  const fungibleAvailable = useMemo(
-    () => calculateLegacyFungibleAvailability(variantLevels),
-    [variantLevels],
-  );
-
   // Summary bar stats — product-level counts from purchasing reorder analysis
   const orderNowCount = reorderData?.summary?.belowReorderPoint ?? 0;
   const orderSoonCount = reorderData?.summary?.orderSoon ?? 0;
@@ -898,7 +924,7 @@ export default function Inventory() {
         case "name": aVal = a.name || ""; bVal = b.name || ""; break;
         case "qty": aVal = a.variantQty; bVal = b.variantQty; break;
         case "reserved": aVal = a.reservedQty; bVal = b.reservedQty; break;
-        case "available": aVal = fungibleAvailable.get(a.variantId) ?? a.available; bVal = fungibleAvailable.get(b.variantId) ?? b.available; break;
+        case "atp": aVal = a.atpUnits; bVal = b.atpUnits; break;
         default: aVal = a.sku || ""; bVal = b.sku || "";
       }
       if (typeof aVal === "string") {
@@ -936,7 +962,7 @@ export default function Inventory() {
         case "sku": aVal = a.items[0]?.sku || ""; bVal = b.items[0]?.sku || ""; break;
         case "qty": aVal = a.totalQty; bVal = b.totalQty; break;
         case "reserved": aVal = a.totalReserved; bVal = b.totalReserved; break;
-        case "available": aVal = a.totalAvailable; bVal = b.totalAvailable; break;
+        case "unreserved": aVal = a.totalUnreservedQty; bVal = b.totalUnreservedQty; break;
         case "skuCount": aVal = a.skuCount; bVal = b.skuCount; break;
         default: aVal = a.locationCode || ""; bVal = b.locationCode || "";
       }
@@ -952,7 +978,7 @@ export default function Inventory() {
 
     // When a specific warehouse is selected, group by zone only
     // When "All Warehouses", group by warehouse+zone
-    const groups = new Map<string, { label: string, bins: BinInventory[], totalQty: number, totalReserved: number, totalAvailable: number }>();
+    const groups = new Map<string, { label: string, bins: BinInventory[], totalQty: number, totalReserved: number, totalUnreservedQty: number }>();
     for (const bin of sortedBinInventory) {
       const zone = bin.zone || "__none__";
       const groupKey = selectedWarehouseId
@@ -964,13 +990,13 @@ export default function Inventory() {
           : (zone === "__none__"
               ? (bin.warehouseCode ? `${bin.warehouseCode} — No Zone` : "No Zone")
               : (bin.warehouseCode ? `${bin.warehouseCode} — ${zone}` : zone));
-        groups.set(groupKey, { label, bins: [], totalQty: 0, totalReserved: 0, totalAvailable: 0 });
+        groups.set(groupKey, { label, bins: [], totalQty: 0, totalReserved: 0, totalUnreservedQty: 0 });
       }
       const g = groups.get(groupKey)!;
       g.bins.push(bin);
       g.totalQty += bin.totalQty;
       g.totalReserved += bin.totalReserved;
-      g.totalAvailable += bin.totalAvailable;
+      g.totalUnreservedQty += bin.totalUnreservedQty;
     }
     return Array.from(groups.entries()).sort((a, b) => {
       if (a[0] === "__none__" || a[0].endsWith("::__none__")) return 1;
@@ -1367,7 +1393,7 @@ export default function Inventory() {
                 {/* Mobile card layout */}
                 <div className="md:hidden space-y-3 flex-1 overflow-auto">
                   {sortedVariantLevels.map((level) => (
-                    <div key={level.variantId} className="rounded-md border bg-card p-4">
+                    <div key={level.variantId} data-testid={`card-variant-${level.variantId}`} className="rounded-md border bg-card p-4">
                       <div className="flex items-start justify-between mb-2">
                         <div>
                           <div className="font-mono font-medium text-primary text-sm flex items-center gap-1 flex-wrap">
@@ -1434,8 +1460,8 @@ export default function Inventory() {
                           <div className="font-mono font-bold text-muted-foreground">{level.reservedQty.toLocaleString()}</div>
                         </div>
                         <div className="bg-muted/30 p-2 rounded">
-                          <div className="text-muted-foreground">Available</div>
-                          <div className="font-mono font-bold text-green-600">{(fungibleAvailable.get(level.variantId) ?? level.available).toLocaleString()}</div>
+                          <div className="text-muted-foreground">ATP</div>
+                          <div className="font-mono font-bold text-green-600">{level.atpUnits.toLocaleString()}</div>
                         </div>
                       </div>
                     </div>
@@ -1471,10 +1497,10 @@ export default function Inventory() {
                             {sortField === "reserved" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
                           </div>
                         </TableHead>
-                        <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("available")}>
+                        <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleSort("atp")}>
                           <div className="flex items-center justify-end gap-1">
-                            Available
-                            {sortField === "available" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
+                            ATP
+                            {sortField === "atp" ? (sortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
                           </div>
                         </TableHead>
                         {canEdit && <TableHead className="w-[80px]"></TableHead>}
@@ -1484,7 +1510,7 @@ export default function Inventory() {
                       {sortedVariantLevels.map((level) => (
                         <React.Fragment key={level.variantId}>
                           {(() => {
-                            const canExpand = level.locationCount > 0 || hasFungibleDescendants.has(level.variantId);
+                            const canExpand = level.locationCount > 0 || targetsWithCaseBreakSources.has(level.variantId);
                             return (
                           <>
                           <TableRow
@@ -1566,7 +1592,7 @@ export default function Inventory() {
                             </TableCell>
                             <TableCell className="text-right font-mono font-bold">{level.variantQty.toLocaleString()}</TableCell>
                             <TableCell className="text-right font-mono text-muted-foreground">{level.reservedQty.toLocaleString()}</TableCell>
-                            <TableCell className="text-right font-mono font-medium text-green-600">{(fungibleAvailable.get(level.variantId) ?? level.available).toLocaleString()}</TableCell>
+                            <TableCell className="text-right font-mono font-medium text-green-600">{level.atpUnits.toLocaleString()}</TableCell>
                             {canEdit && <TableCell></TableCell>}
                           </TableRow>
                           {expandedVariants.has(level.variantId) && (
@@ -1587,56 +1613,57 @@ export default function Inventory() {
                                   });
                                 }}
                               />
-                              {/* Descendant variants in the fungible pool (larger variants that can break down into this one) */}
                               {(() => {
-                                // Collect descendants (children, grandchildren) with any inventory records
                                 const descendants: VariantLevel[] = [];
-                                const queue = [...(childrenMap.get(level.variantId) || [])];
+                                const pending = [...(childrenByTargetVariantId.get(level.variantId) ?? [])];
                                 const visited = new Set<number>();
-                                while (queue.length > 0) {
-                                  const child = queue.shift()!;
-                                  if (visited.has(child.variantId)) continue;
-                                  visited.add(child.variantId);
-                                  if (child.locationCount > 0 || child.variantQty !== 0) descendants.push(child);
-                                  const grandchildren = childrenMap.get(child.variantId) || [];
-                                  queue.push(...grandchildren);
+                                while (pending.length > 0) {
+                                  const source = pending.shift()!;
+                                  if (visited.has(source.variantId)) continue;
+                                  visited.add(source.variantId);
+                                  if (source.locationCount > 0 || source.variantQty !== 0) {
+                                    descendants.push(source);
+                                  }
+                                  pending.push(...(childrenByTargetVariantId.get(source.variantId) ?? []));
                                 }
+
                                 if (descendants.length === 0) return null;
                                 return (
                                   <>
                                     <TableRow className="bg-blue-50/50 dark:bg-blue-900/10">
                                       <TableCell colSpan={canEdit ? 6 : 5} className="py-1.5 pl-8 text-xs text-muted-foreground">
                                         <Boxes className="h-3 w-3 inline mr-1.5" />
-                                        Fungible pool — convertible via case break
+                                        Legacy case-break controls — physical stock only; ATP above is server-calculated
                                       </TableCell>
                                     </TableRow>
-                                    {descendants.map(desc => (
-                                      <React.Fragment key={desc.variantId}>
+                                    {descendants.map((source) => (
+                                      <React.Fragment key={source.variantId}>
                                         <TableRow className="bg-blue-50/30 dark:bg-blue-900/5">
                                           <TableCell colSpan={canEdit ? 6 : 5} className="pl-10 font-mono text-xs font-medium text-blue-700 dark:text-blue-400 py-1">
-                                            {desc.sku} <span className="font-normal text-muted-foreground ml-1">{desc.name}</span>
+                                            {source.sku}
+                                            <span className="font-normal text-muted-foreground ml-1">{source.name}</span>
                                           </TableCell>
                                         </TableRow>
-                                        <FungibleLocationRows
-                                          variantId={desc.variantId}
-                                          sku={level.sku}
-                                          sourceSku={desc.sku}
-                                          parentUnitsPerVariant={level.unitsPerVariant}
-                                          childUnitsPerVariant={desc.unitsPerVariant}
+                                        <LegacyCaseBreakLocationRows
+                                          sourceVariantId={source.variantId}
+                                          sourceSku={source.sku}
+                                          targetVariantId={level.variantId}
+                                          targetSku={level.sku}
+                                          sourceUnitsPerVariant={source.unitsPerVariant}
+                                          targetUnitsPerVariant={level.unitsPerVariant}
                                           canEdit={canEdit}
-                                          warehouses={warehouses}
                                           warehouseId={selectedWarehouseId}
-                                          onCaseBreak={(fromLocId, fromLocCode, srcVarId, srcSku, pickVarId, pickSku, ratio) => {
-                                             setCaseBreakDialog({
-                                               open: true,
-                                               fromLocationId: fromLocId,
-                                               fromLocationCode: fromLocCode,
-                                               sourceVariantId: srcVarId,
-                                               sourceSku: srcSku,
-                                               pickVariantId: pickVarId || skuMap.get(pickSku) || 0,
-                                               pickSku: pickSku,
-                                               conversionRatio: ratio,
-                                             });
+                                          onCaseBreak={(input) => {
+                                            setCaseBreakDialog({
+                                              open: true,
+                                              fromLocationId: input.fromLocationId,
+                                              fromLocationCode: input.fromLocationCode,
+                                              sourceVariantId: input.sourceVariantId,
+                                              sourceSku: input.sourceSku,
+                                              targetVariantId: input.targetVariantId,
+                                              targetSku: input.targetSku,
+                                              conversionRatio: input.conversionRatio,
+                                            });
                                           }}
                                         />
                                       </React.Fragment>
@@ -1698,7 +1725,9 @@ export default function Inventory() {
                           <div className="flex items-center gap-3 text-xs font-mono">
                             <span className="font-bold">{group.totalQty.toLocaleString()}</span>
                             <span className="text-muted-foreground">{group.totalReserved.toLocaleString()}</span>
-                            <span className="text-green-600">{group.totalAvailable.toLocaleString()}</span>
+                            <span className="text-green-600" aria-label={`Unreserved ${group.totalUnreservedQty.toLocaleString()}`}>
+                              {group.totalUnreservedQty.toLocaleString()}
+                            </span>
                           </div>
                         </div>
                         {/* Bin cards within zone */}
@@ -1751,7 +1780,9 @@ export default function Inventory() {
                                       <div className="flex items-center gap-3 shrink-0 font-mono">
                                         <span>{item.variantQty}</span>
                                         <span className="text-muted-foreground">{item.reservedQty}</span>
-                                        <span className="text-green-600">{item.available}</span>
+                                        <span className="text-green-600" aria-label={`Unreserved ${item.unreservedQty.toLocaleString()}`}>
+                                          {item.unreservedQty.toLocaleString()}
+                                        </span>
                                       </div>
                                     </div>
                                   ))}
@@ -1811,7 +1842,9 @@ export default function Inventory() {
                               <div className="flex items-center gap-3 shrink-0 font-mono">
                                 <span>{item.variantQty}</span>
                                 <span className="text-muted-foreground">{item.reservedQty}</span>
-                                <span className="text-green-600">{item.available}</span>
+                                <span className="text-green-600" aria-label={`Unreserved ${item.unreservedQty.toLocaleString()}`}>
+                                  {item.unreservedQty.toLocaleString()}
+                                </span>
                               </div>
                             </div>
                           ))}
@@ -1850,10 +1883,10 @@ export default function Inventory() {
                             {binSortField === "reserved" ? (binSortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
                           </div>
                         </TableHead>
-                        <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleBinSort("available")}>
+                        <TableHead className="text-right w-[100px] cursor-pointer hover:bg-muted/60" onClick={() => handleBinSort("unreserved")}>
                           <div className="flex items-center justify-end gap-1">
-                            Available
-                            {binSortField === "available" ? (binSortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
+                            Unreserved
+                            {binSortField === "unreserved" ? (binSortDirection === "asc" ? <ArrowUp className="h-3 w-3" /> : <ArrowDown className="h-3 w-3" />) : <ArrowUpDown className="h-3 w-3 text-muted-foreground" />}
                           </div>
                         </TableHead>
                       </TableRow>
@@ -1885,7 +1918,7 @@ export default function Inventory() {
                               </TableCell>
                               <TableCell className="text-right font-mono font-bold">{group.totalQty.toLocaleString()}</TableCell>
                               <TableCell className="text-right font-mono text-muted-foreground">{group.totalReserved.toLocaleString()}</TableCell>
-                              <TableCell className="text-right font-mono font-medium text-green-600">{group.totalAvailable.toLocaleString()}</TableCell>
+                              <TableCell className="text-right font-mono font-medium text-green-600">{group.totalUnreservedQty.toLocaleString()}</TableCell>
                             </TableRow>
                             {/* Bin rows within zone */}
                             {expandedZones.has(zone) && group.bins.map((bin) => (
@@ -1934,7 +1967,7 @@ export default function Inventory() {
                                     </TableCell>
                                     <TableCell className="text-right font-mono font-bold">{bin.totalQty.toLocaleString()}</TableCell>
                                     <TableCell className="text-right font-mono text-muted-foreground">{bin.totalReserved.toLocaleString()}</TableCell>
-                                    <TableCell className="text-right font-mono font-medium text-green-600">{bin.totalAvailable.toLocaleString()}</TableCell>
+                                    <TableCell className="text-right font-mono font-medium text-green-600">{bin.totalUnreservedQty.toLocaleString()}</TableCell>
                                   </TableRow>
                                 ) : (
                                   <>
@@ -1985,7 +2018,7 @@ export default function Inventory() {
                                       </TableCell>
                                       <TableCell className="text-right font-mono font-bold">{bin.totalQty.toLocaleString()}</TableCell>
                                       <TableCell className="text-right font-mono text-muted-foreground">{bin.totalReserved.toLocaleString()}</TableCell>
-                                      <TableCell className="text-right font-mono font-medium text-green-600">{bin.totalAvailable.toLocaleString()}</TableCell>
+                                      <TableCell className="text-right font-mono font-medium text-green-600">{bin.totalUnreservedQty.toLocaleString()}</TableCell>
                                     </TableRow>
                                     {expandedBins.has(bin.locationId) && bin.items.map((item) => (
                                       <TableRow key={item.inventoryLevelId} className={`text-sm ${item.isAssigned ? "bg-muted/20" : "bg-amber-50/50 dark:bg-amber-900/10"}`}>
@@ -2005,7 +2038,7 @@ export default function Inventory() {
                                         </TableCell>
                                         <TableCell className="text-right font-mono text-xs">{item.variantQty.toLocaleString()}</TableCell>
                                         <TableCell className="text-right font-mono text-xs text-muted-foreground">{item.reservedQty.toLocaleString()}</TableCell>
-                                        <TableCell className="text-right font-mono text-xs text-green-600">{item.available.toLocaleString()}</TableCell>
+                                        <TableCell className="text-right font-mono text-xs text-green-600">{item.unreservedQty.toLocaleString()}</TableCell>
                                       </TableRow>
                                     ))}
                                   </>
@@ -2064,7 +2097,7 @@ export default function Inventory() {
                                 </TableCell>
                                 <TableCell className="text-right font-mono font-bold">{bin.totalQty.toLocaleString()}</TableCell>
                                 <TableCell className="text-right font-mono text-muted-foreground">{bin.totalReserved.toLocaleString()}</TableCell>
-                                <TableCell className="text-right font-mono font-medium text-green-600">{bin.totalAvailable.toLocaleString()}</TableCell>
+                                <TableCell className="text-right font-mono font-medium text-green-600">{bin.totalUnreservedQty.toLocaleString()}</TableCell>
                               </TableRow>
                             ) : (
                               <>
@@ -2116,7 +2149,7 @@ export default function Inventory() {
                                   </TableCell>
                                   <TableCell className="text-right font-mono font-bold">{bin.totalQty.toLocaleString()}</TableCell>
                                   <TableCell className="text-right font-mono text-muted-foreground">{bin.totalReserved.toLocaleString()}</TableCell>
-                                  <TableCell className="text-right font-mono font-medium text-green-600">{bin.totalAvailable.toLocaleString()}</TableCell>
+                                  <TableCell className="text-right font-mono font-medium text-green-600">{bin.totalUnreservedQty.toLocaleString()}</TableCell>
                                 </TableRow>
                                 {expandedBins.has(bin.locationId) && bin.items.map((item) => (
                                   <TableRow key={item.inventoryLevelId} className={`text-sm ${item.isAssigned ? "bg-muted/20" : "bg-amber-50/50 dark:bg-amber-900/10"}`}>
@@ -2136,7 +2169,7 @@ export default function Inventory() {
                                     </TableCell>
                                     <TableCell className="text-right font-mono text-xs">{item.variantQty.toLocaleString()}</TableCell>
                                     <TableCell className="text-right font-mono text-xs text-muted-foreground">{item.reservedQty.toLocaleString()}</TableCell>
-                                    <TableCell className="text-right font-mono text-xs text-green-600">{item.available.toLocaleString()}</TableCell>
+                                    <TableCell className="text-right font-mono text-xs text-green-600">{item.unreservedQty.toLocaleString()}</TableCell>
                                   </TableRow>
                                 ))}
                               </>
@@ -2653,15 +2686,16 @@ export default function Inventory() {
 
       <InlineCaseBreakDialog
         open={caseBreakDialog.open}
-        onOpenChange={(open) => setCaseBreakDialog((prev) => ({ ...prev, open }))}
+        onOpenChange={(open) => setCaseBreakDialog((previous) => ({ ...previous, open }))}
         defaultFromLocationId={caseBreakDialog.fromLocationId}
         defaultFromLocationCode={caseBreakDialog.fromLocationCode}
         sourceVariantId={caseBreakDialog.sourceVariantId}
         sourceSku={caseBreakDialog.sourceSku}
-        pickVariantId={caseBreakDialog.pickVariantId}
-        pickSku={caseBreakDialog.pickSku}
+        pickVariantId={caseBreakDialog.targetVariantId}
+        pickSku={caseBreakDialog.targetSku}
         conversionRatio={caseBreakDialog.conversionRatio}
       />
+
     </div>
   );
 }

@@ -1,7 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { InventoryPublicationOutboxService } from "../../application/inventory-publication-outbox.service";
+import type {
+  QuantityPublicationAdmission,
+  QuantityPublicationOutboxClaim,
+} from "../../application/quantity-publication-admission.port";
 import { InventoryPublicationTransportConfigurationError } from "../../application/inventory-publication-transport";
+import { QuantityPublicationAdmissionError } from "../../domain/quantity-publication-admission";
 import type { ClaimedInventoryPublication } from "../../infrastructure/inventory-publication-outbox.repository";
 
 const NOW = new Date("2026-09-01T18:00:00.000Z");
@@ -13,6 +18,8 @@ describe("InventoryPublicationOutboxService", () => {
     recordVerified: ReturnType<typeof vi.fn>;
     recordFailure: ReturnType<typeof vi.fn>;
   };
+  let admittedClaims: QuantityPublicationOutboxClaim[];
+  let quantityAdmission: Pick<QuantityPublicationAdmission, "runOutbox">;
 
   beforeEach(() => {
     store = {
@@ -20,6 +27,16 @@ describe("InventoryPublicationOutboxService", () => {
       runIfCurrent: vi.fn(async (_claim, work) => ({ status: "current" as const, value: await work() })),
       recordVerified: vi.fn(async () => "verified" as const),
       recordFailure: vi.fn(async () => true),
+    };
+    admittedClaims = [];
+    quantityAdmission = {
+      runOutbox: async <T>(
+        admittedClaim: QuantityPublicationOutboxClaim,
+        work: () => Promise<T>,
+      ): Promise<T> => {
+        admittedClaims.push(admittedClaim);
+        return work();
+      },
     };
   });
 
@@ -34,11 +51,13 @@ describe("InventoryPublicationOutboxService", () => {
       { get: vi.fn(() => adapter as any) },
       { now: () => NOW },
       () => "lease-1",
+      quantityAdmission,
     );
 
     await expect(service.processDue()).resolves.toEqual({
       claimed: 1, verified: 1, failed: 0, superseded: 0,
     });
+    expect(admittedClaims).toEqual([expect.objectContaining({ outboxId: "41" })]);
     expect(adapter.publishAbsolute).toHaveBeenCalledWith({
       destination: {
         kind: "channel_connection",
@@ -72,6 +91,7 @@ describe("InventoryPublicationOutboxService", () => {
       { get: () => adapter as any },
       { now: () => NOW },
       () => "lease-1",
+      quantityAdmission,
     );
 
     await expect(service.processDue()).resolves.toEqual({
@@ -86,6 +106,7 @@ describe("InventoryPublicationOutboxService", () => {
       { get: () => undefined },
       { now: () => NOW },
       () => "lease-1",
+      quantityAdmission,
     );
 
     await expect(service.processDue()).resolves.toEqual({
@@ -111,6 +132,7 @@ describe("InventoryPublicationOutboxService", () => {
       { get: () => adapter as any },
       { now: () => NOW },
       () => "lease-1",
+      quantityAdmission,
     );
 
     await expect(service.processDue()).resolves.toEqual({
@@ -139,6 +161,7 @@ describe("InventoryPublicationOutboxService", () => {
       { get: () => adapter as any },
       { now: () => NOW },
       () => "lease-1",
+      quantityAdmission,
     );
 
     await expect(service.processDue()).resolves.toEqual({
@@ -172,6 +195,7 @@ describe("InventoryPublicationOutboxService", () => {
       { get },
       { now: () => NOW },
       () => "lease-1",
+      quantityAdmission,
     );
 
     await expect(service.processDue()).resolves.toEqual({
@@ -203,6 +227,7 @@ describe("InventoryPublicationOutboxService", () => {
       { get: () => adapter as any },
       { now: () => NOW },
       () => "lease-1",
+      quantityAdmission,
     );
 
     await expect(service.processDue()).resolves.toEqual({
@@ -230,6 +255,7 @@ describe("InventoryPublicationOutboxService", () => {
       { get: () => adapter as any },
       { now: () => NOW },
       () => "lease-1",
+      quantityAdmission,
     );
 
     await expect(service.processDue()).resolves.toEqual({
@@ -237,6 +263,41 @@ describe("InventoryPublicationOutboxService", () => {
     });
     expect(adapter.publishAbsolute).not.toHaveBeenCalled();
     expect(store.recordFailure).not.toHaveBeenCalled();
+  });
+
+  it("does not call the provider when the global stop is enabled after lease claim", async () => {
+    const adapter = {
+      supportedScopeTypes: ["location"] as const,
+      publishAbsolute: vi.fn(),
+      readAbsolute: vi.fn(),
+    };
+    const runOutbox = vi.fn(async () => {
+      throw new QuantityPublicationAdmissionError(
+        "PUBLICATION_GLOBAL_STOP_ACTIVE",
+        "Global publication stopped before provider I/O.",
+      );
+    });
+    const service = new InventoryPublicationOutboxService(
+      store,
+      { get: () => adapter as any },
+      { now: () => NOW },
+      () => "lease-1",
+      { runOutbox } as never,
+    );
+
+    await expect(service.processDue()).resolves.toEqual({
+      claimed: 1, verified: 0, failed: 1, superseded: 0,
+    });
+    expect(runOutbox).toHaveBeenCalledOnce();
+    expect(adapter.publishAbsolute).not.toHaveBeenCalled();
+    expect(adapter.readAbsolute).not.toHaveBeenCalled();
+    expect(store.recordFailure).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        errorClass: "PUBLICATION_GLOBAL_STOP_ACTIVE",
+        retryable: true,
+      }),
+    );
   });
 });
 

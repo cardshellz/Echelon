@@ -103,6 +103,8 @@ type AtpService = {
 export interface SyncOrchestratorConfig {
   /** If true, log what would happen without making external API calls */
   dryRun: boolean;
+  /** Legacy sweeps must be narrowed to the channel whose effective state was resolved. */
+  channelId?: number;
   /** Durable catch-up must send current quantities even when an old feed watermark matches. */
   forceInventoryPublication?: boolean;
 }
@@ -268,9 +270,28 @@ class EchelonSyncOrchestrator {
     config: SyncOrchestratorConfig,
     triggeredBy?: string,
   ): Promise<InventorySyncResult[]> {
+    return this.syncInventoryForProductScoped(productId, config, triggeredBy);
+  }
+
+  /** Manual and recovery callers use this boundary so one channel action cannot fan out to another channel. */
+  async syncInventoryForChannelProduct(
+    channelId: number,
+    productId: number,
+    config: SyncOrchestratorConfig,
+    triggeredBy?: string,
+  ): Promise<InventorySyncResult[]> {
+    return this.syncInventoryForProductScoped(productId, config, triggeredBy, channelId);
+  }
+
+  private async syncInventoryForProductScoped(
+    productId: number,
+    config: SyncOrchestratorConfig,
+    triggeredBy?: string,
+    channelId?: number,
+  ): Promise<InventorySyncResult[]> {
     const routed = await this.inventoryPublication.publishProduct(
-      { productId, dryRun: config.dryRun, triggeredBy },
-      () => this.syncInventoryForProductLegacy(productId, config, triggeredBy),
+      { productId, dryRun: config.dryRun, channelId, triggeredBy },
+      () => this.syncInventoryForProductLegacy(productId, config, triggeredBy, channelId),
     );
     return routed.authority === "legacy"
       ? routed.legacyResult
@@ -281,6 +302,7 @@ class EchelonSyncOrchestrator {
     productId: number,
     config: SyncOrchestratorConfig,
     triggeredBy?: string,
+    channelId?: number,
   ): Promise<InventorySyncResult[]> {
     const results: InventorySyncResult[] = [];
 
@@ -288,6 +310,7 @@ class EchelonSyncOrchestrator {
     const allocation = await this.allocationEngine.allocateProduct(
       productId,
       triggeredBy ?? "orchestrator",
+      channelId == null ? undefined : [channelId],
     );
 
     if (allocation.allocations.length === 0) {
@@ -302,6 +325,7 @@ class EchelonSyncOrchestrator {
     }>();
 
     for (const a of allocation.allocations) {
+      if (channelId != null && a.channelId !== channelId) continue;
       if (!byChannel.has(a.channelId)) {
         byChannel.set(a.channelId, {
           channel: { id: a.channelId, name: a.channelName, provider: a.channelProvider },
@@ -337,9 +361,14 @@ class EchelonSyncOrchestrator {
       || (scope.productVariantId !== null && scope.productVariantId !== target.productVariantId)) {
       throw new QuantityPublicationAdmissionError("PUBLICATION_CATCHUP_SCOPE_MISMATCH", "Resolved channel publication identity is inconsistent.");
     }
-    // Allocation must still see all channels/variants to preserve shared-stock
-    // and channel-dial semantics. Only the external publication is narrowed.
-    const allocation = await this.allocationEngine.allocateProduct(target.productId, "quantity_publication_catchup");
+    // Recovery recalculates only the owning channel so one target cannot fan out
+    // to another channel. All product variants remain in that channel plan; the
+    // external publication below is then narrowed to the exact item and location.
+    const allocation = await this.allocationEngine.allocateProduct(
+      target.productId,
+      "quantity_publication_catchup",
+      [target.channelId],
+    );
     const rows = allocation.allocations.filter(row => row.channelId === target.channelId
       && row.productVariantId === target.productVariantId);
     if (allocation.productId !== target.productId || rows.length !== 1 || rows[0].channelProvider !== scope.providerKey) {
@@ -363,17 +392,24 @@ class EchelonSyncOrchestrator {
   async syncInventoryForAllProducts(
     config: SyncOrchestratorConfig,
     triggeredBy?: string,
+    channelId?: number,
   ): Promise<InventorySyncResult[]> {
     const allResults: InventorySyncResult[] = [];
 
     const productIds = await this.inventoryPublication.listProductIds(
       () => this.getInventorySyncProductIds(),
+      channelId,
     );
     console.log(`[SyncOrchestrator] Syncing inventory for ${productIds.length} products`);
 
     for (const productId of productIds) {
       try {
-        const results = await this.syncInventoryForProduct(productId, config, triggeredBy);
+        const results = await this.syncInventoryForProductScoped(
+          productId,
+          config,
+          triggeredBy,
+          channelId,
+        );
         // Merge results by channel
         for (const result of results) {
           const existing = allResults.find((r) => r.channelId === result.channelId);
@@ -1473,21 +1509,13 @@ class EchelonSyncOrchestrator {
 
     console.log(`[SyncOrchestrator] Starting ${config.dryRun ? "DRY RUN" : "LIVE"} full sync`);
 
-    // Get all active channels
-    const activeChannels = await this.db
-      .select()
-      .from(channels)
-      .where(eq(channels.status, "active"));
-
-    if (activeChannels.length === 0) {
-      console.log("[SyncOrchestrator] No active channels");
-      result.completedAt = new Date();
-      return result;
-    }
-
     // 1. Inventory sync (runs allocation for all products, pushes to all channels)
     try {
-      const inventoryResults = await this.syncInventoryForAllProducts(config, "scheduled_sync");
+      const inventoryResults = await this.syncInventoryForAllProducts(
+        config,
+        "scheduled_sync",
+        config.channelId,
+      );
       result.inventory = inventoryResults;
     } catch (err: any) {
       result.errors.push(`Inventory sync failed: ${err.message}`);

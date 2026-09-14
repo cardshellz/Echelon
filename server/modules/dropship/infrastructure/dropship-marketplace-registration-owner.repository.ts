@@ -154,10 +154,11 @@ export class PgDropshipMarketplaceRegistrationOwnerRepository
     }
 
     if (rows.length === 0) return [];
-    const atpByVariantId = await this.atp.getVariantAtp(rows.map((row) => ({
+    const atp = await this.atp.getVariantAtp(rows.map((row) => ({
       productId: input.productId,
       productVariantId: row.id,
-    })));
+    })), { storeConnectionId: input.storeConnectionId });
+    const atpByVariantId = atp.quantities;
     return rows.map((row) => ({
       id: row.id,
       productId: row.product_id,

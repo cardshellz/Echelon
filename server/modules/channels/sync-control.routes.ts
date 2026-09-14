@@ -5,11 +5,25 @@
  */
 
 import type { Express } from "express";
-import { requirePermission } from "../../routes/middleware";
+import { requireAnyPermission, requirePermission } from "../../routes/middleware";
 import { createManualSyncRunner } from "./manual-sync-runner";
+import { INVENTORY_LEGACY_ADMIN_CONTROLS } from "../inventory-planning/application/inventory-legacy-admin-control.service";
+import { createInventoryLegacyAdminControlService } from "../inventory-planning/infrastructure/inventory-legacy-admin-control.repository";
+import { sendInventoryLegacyAdminControlError } from "../inventory-planning/interfaces/http/inventory-legacy-admin-control.error";
+import { createSyncSettingsService } from "./sync-settings.service";
+import { InventoryPublicationGlobalControlService } from "../inventory-planning/application/inventory-publication-global-control.service";
+import { InventoryAvailabilityMasterDataError } from "../inventory-planning/domain/inventory-availability-master-data.contracts";
+import {
+  applyInventoryPublicationGlobalControlInsideTransaction,
+  PostgresInventoryPublicationGlobalControlStore,
+} from "../inventory-planning/infrastructure/inventory-publication-global-control.repository";
 
 export function registerSyncControlRoutes(app: Express) {
   const manualSync = createManualSyncRunner();
+  const inventoryLegacyAdminControl = createInventoryLegacyAdminControlService();
+  const publicationGlobalControl = new InventoryPublicationGlobalControlService(
+    new PostgresInventoryPublicationGlobalControlStore(),
+  );
   // ============================================
   // GLOBAL SYNC SETTINGS
   // ============================================
@@ -29,17 +43,35 @@ export function registerSyncControlRoutes(app: Express) {
   // Update global sync settings
   app.put("/api/sync/settings", requirePermission("channels", "edit"), async (req, res) => {
     try {
-      const { syncSettings } = req.app.locals.services;
-      const { globalEnabled, sweepIntervalMinutes } = req.body;
-
-      const updates: any = {};
-      if (globalEnabled !== undefined) updates.globalEnabled = globalEnabled;
-      if (sweepIntervalMinutes !== undefined) updates.sweepIntervalMinutes = sweepIntervalMinutes;
-
-      const updated = await syncSettings.updateGlobalSettings(updates);
-      res.json(updated);
+      const actor = req.session.user?.id;
+      if (!actor) {
+        throw new InventoryAvailabilityMasterDataError(
+          401,
+          "INVENTORY_PUBLICATION_GLOBAL_CONTROL_ACTOR_REQUIRED",
+          "An authenticated operator is required.",
+        );
+      }
+      const updated = await inventoryLegacyAdminControl.executeLegacyWrite(
+        INVENTORY_LEGACY_ADMIN_CONTROLS.channelSync,
+        (transaction) => publicationGlobalControl.change(req.body, actor, {
+          change: (command) => applyInventoryPublicationGlobalControlInsideTransaction(
+            transaction,
+            command,
+          ),
+        }),
+      );
+      // The committed control change wakes the supervisor immediately, but a
+      // potentially long publication sweep must not hold the HTTP command open.
+      void req.app.locals.inventoryPublicationSweepScheduler?.refresh?.();
+      return res.json(updated);
     } catch (error: any) {
       console.error("Error updating sync settings:", error);
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
+      if (error instanceof InventoryAvailabilityMasterDataError) {
+        return res.status(error.status).json({
+          error: { code: error.code, message: error.message, details: error.details },
+        });
+      }
       res.status(500).json({ error: error.message || "Failed to update sync settings" });
     }
   });
@@ -76,12 +108,17 @@ export function registerSyncControlRoutes(app: Express) {
       if (syncMode !== undefined) updates.syncMode = syncMode;
       if (sweepIntervalMinutes !== undefined) updates.sweepIntervalMinutes = sweepIntervalMinutes;
 
-      await syncSettings.updateChannelSyncConfig(channelId, updates);
+      await inventoryLegacyAdminControl.executeLegacyWrite(
+        INVENTORY_LEGACY_ADMIN_CONTROLS.channelSync,
+        (transaction) => createSyncSettingsService(transaction)
+          .updateChannelSyncConfig(channelId, updates),
+      );
 
       const updated = await syncSettings.getChannelSyncConfig(channelId);
       res.json(updated);
     } catch (error: any) {
       console.error("Error updating channel sync config:", error);
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: error.message || "Failed to update channel sync config" });
     }
   });
@@ -101,10 +138,15 @@ export function registerSyncControlRoutes(app: Express) {
         return res.status(400).json({ error: "feedEnabled is required" });
       }
 
-      await syncSettings.updateWarehouseFeedEnabled(warehouseId, feedEnabled);
+      await inventoryLegacyAdminControl.executeLegacyWrite(
+        INVENTORY_LEGACY_ADMIN_CONTROLS.channelWarehouseAssignment,
+        (transaction) => createSyncSettingsService(transaction)
+          .updateWarehouseFeedEnabled(warehouseId, feedEnabled),
+      );
       res.json({ warehouseId, feedEnabled });
     } catch (error: any) {
       console.error("Error updating warehouse feed toggle:", error);
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: error.message || "Failed to update warehouse feed toggle" });
     }
   });
@@ -153,7 +195,10 @@ export function registerSyncControlRoutes(app: Express) {
   // SYNC STATUS (combines global + channels)
   // ============================================
 
-  app.get("/api/sync/status", requirePermission("channels", "view"), async (req, res) => {
+  app.get(
+    "/api/sync/status",
+    requireAnyPermission(["channels", "view"], ["inventory_planning", "view"]),
+    async (req, res) => {
     try {
       const { syncSettings: syncSettingsSvc } = req.app.locals.services;
       const global = await syncSettingsSvc.getGlobalSettings();
@@ -194,7 +239,8 @@ export function registerSyncControlRoutes(app: Express) {
       console.error("Error fetching sync status:", error);
       res.status(500).json({ error: error.message || "Failed to fetch sync status" });
     }
-  });
+    },
+  );
 
   // ============================================
   // MANUAL SYNC TRIGGER
@@ -212,7 +258,11 @@ export function registerSyncControlRoutes(app: Express) {
         return res.status(400).json({ error: "Global sync is disabled" });
       }
 
-      const outcome = manualSync.trigger(req.app.locals.services);
+      const trigger = await inventoryLegacyAdminControl.executeLegacyWrite(
+        INVENTORY_LEGACY_ADMIN_CONTROLS.channelSync,
+        async () => () => manualSync.trigger(req.app.locals.services),
+      );
+      const outcome = trigger();
       if (outcome === "already_running") {
         return res.status(409).json({
           error: "A manual sync is already running",
@@ -226,6 +276,7 @@ export function registerSyncControlRoutes(app: Express) {
       });
     } catch (error: any) {
       console.error("Error triggering sync:", error);
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: error.message || "Failed to trigger sync" });
     }
   });

@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { PoolClient } from "pg";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
-import { cutoverCompositionBaseSql, cutoverCompositionSeedSql, installCutoverCompositionMigrations, seedCompositionReviewedDryRun } from "../fixtures/inventory-cutover-composition-database.fixture";
+import { cutoverCompositionBaseSql, cutoverCompositionLegacyChannelSeedSql, cutoverCompositionSeedSql,
+  installCutoverCompositionMigrations, seedCompositionReviewedDryRun } from "../fixtures/inventory-cutover-composition-database.fixture";
 import { PostgresQuantityPublicationAdmission, suppressQuantityPublicationInsideTransaction,
   captureQuantityPublicationDrainInsideTransaction, releaseQuantityPublicationSuppressionInsideTransaction,
   attestQuantityPublicationAttemptInsideTransaction } from "../../infrastructure/quantity-publication-admission.repository";
@@ -27,6 +28,7 @@ dbDescribe.sequential("durable external quantity admission with actual migration
     database = await createInventoryCutoverTestDatabase(databaseUrl, disposable, cutoverCompositionBaseSql);
     await installCutoverCompositionMigrations(database.pool);
     await database.pool.query(cutoverCompositionSeedSql);
+    await database.pool.query(cutoverCompositionLegacyChannelSeedSql);
     runId = (await seedCompositionReviewedDryRun(database.pool)).activationRunId;
     admission = new PostgresQuantityPublicationAdmission(database.pool, clock);
   }, 30000);

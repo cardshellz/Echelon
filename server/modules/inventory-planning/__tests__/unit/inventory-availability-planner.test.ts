@@ -775,4 +775,93 @@ describe("inventory availability canonical planner", () => {
       scope: { kind: "network" },
     })).toThrow(expect.objectContaining({ code: "SUPPLY_SNAPSHOT_REFERENCE_INVALID" }));
   });
+
+  it("rejects canonical path unit snapshots that drift from the captured variants", () => {
+    const base = content();
+    const snapshot = sealSupplySnapshot({
+      ...base,
+      transformationModels: [{
+        ...base.transformationModels[0]!,
+        paths: [{
+          ...path({
+            id: 901,
+            source: 125,
+            destination: 105,
+            inputQty: 1,
+            outputQty: 5,
+            sourceUnits: 25,
+            destinationUnits: 5,
+          }),
+          sourceUnitsPerVariant: 20,
+        }],
+      }],
+    });
+
+    expect(() => projectCanonicalAtp(snapshot, {
+      targetVariantId: 105,
+      scope: { kind: "network" },
+    })).toThrow(expect.objectContaining({
+      code: "SUPPLY_SNAPSHOT_REFERENCE_INVALID",
+      context: expect.objectContaining({ field: "transformationPaths.sourceUnitsPerVariant" }),
+    }));
+  });
+
+  it("rejects canonical binding output and component unit snapshots that drift from captured variants", () => {
+    const base = content();
+    const binding = {
+      bindingId: 701,
+      recipeId: 77,
+      relationshipRole: "component_build" as const,
+      warehouseId: null,
+      recipeCodeSnapshot: "BUILD-EA",
+      recipeVersionSnapshot: 1,
+      recipeDefinitionHash: HASH,
+      outputProductId: 10,
+      outputVariantId: 101,
+      outputUnitsPerVariant: 1,
+      outputQty: "1",
+      validationState: "valid" as const,
+      validationErrors: [],
+      components: [{
+        componentVariantId: 105,
+        componentProductId: 10,
+        componentUnitsPerVariant: 5,
+        componentQty: "1",
+      }],
+    };
+    const model = base.transformationModels[0]!;
+
+    const outputDrift = sealSupplySnapshot({
+      ...base,
+      transformationModels: [{
+        ...model,
+        recipeBindings: [{ ...binding, outputUnitsPerVariant: 2 }],
+      }],
+    });
+    expect(() => projectCanonicalAtp(outputDrift, {
+      targetVariantId: 101,
+      scope: { kind: "network" },
+    })).toThrow(expect.objectContaining({
+      code: "SUPPLY_SNAPSHOT_REFERENCE_INVALID",
+      context: expect.objectContaining({ field: "recipeBindings.outputUnitsPerVariant" }),
+    }));
+
+    const componentDrift = sealSupplySnapshot({
+      ...base,
+      transformationModels: [{
+        ...model,
+        recipeBindings: [{
+          ...binding,
+          components: [{ ...binding.components[0]!, componentUnitsPerVariant: 4 }],
+        }],
+      }],
+    });
+    expect(() => projectCanonicalAtp(componentDrift, {
+      targetVariantId: 101,
+      scope: { kind: "network" },
+    })).toThrow(expect.objectContaining({
+      code: "SUPPLY_SNAPSHOT_REFERENCE_INVALID",
+      context: expect.objectContaining({ field: "recipeBindings.components.componentUnitsPerVariant" }),
+    }));
+  });
 });

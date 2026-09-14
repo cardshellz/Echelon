@@ -1,6 +1,12 @@
 import type { Express, Request, Response } from "express";
 
 import {
+  inventoryPublicationTargetResumeResultSchema,
+  inventoryPublicationTargetResumeReviewSchema,
+  resumeInventoryPublicationTargetRequestSchema,
+  reviewInventoryPublicationTargetResumeRequestSchema,
+} from "@shared/types/inventory-publication-target-resume";
+import {
   channelExposureDraftSaveResultSchema,
   createInventoryPublicationTargetRequestSchema,
   inventoryChannelExposureAdminViewSchema,
@@ -10,6 +16,7 @@ import {
   savePublicationSourceBindingDraftRequestSchema,
   savePublicationVariantMappingDraftRequestSchema,
   setInventoryPublicationTargetPreviewStateRequestSchema,
+  stopInventoryPublicationTargetRequestSchema,
 } from "@shared/types/inventory-channel-exposure";
 import { z } from "zod";
 
@@ -20,6 +27,10 @@ import {
 } from "../../application/inventory-channel-exposure-admin.service";
 import { InventoryAvailabilityMasterDataError } from "../../domain/inventory-availability-master-data.contracts";
 import { PostgresInventoryChannelExposureAdminStore } from "../../infrastructure/inventory-channel-exposure-admin.repository";
+import { InventoryPublicationTargetStopService } from "../../application/inventory-publication-target-stop.service";
+import { PostgresInventoryPublicationTargetStopStore } from "../../infrastructure/inventory-publication-target-stop.repository";
+import { InventoryPublicationTargetResumeService } from "../../application/inventory-publication-target-resume.service";
+import { PostgresInventoryPublicationTargetResumeStore } from "../../infrastructure/inventory-publication-target-resume.repository";
 
 const positiveId = z.coerce.number().int().positive().max(2_147_483_647);
 type ChannelExposureService = Pick<
@@ -31,6 +42,8 @@ type ChannelExposureService = Pick<
 export interface InventoryChannelExposureRouteDependencies {
   service?: ChannelExposureService;
   store?: InventoryChannelExposureAdminStore;
+  targetStopService?: Pick<InventoryPublicationTargetStopService, "stop">;
+  targetResumeService?: Pick<InventoryPublicationTargetResumeService, "review" | "resume">;
 }
 
 export function registerInventoryChannelExposureRoutes(
@@ -40,6 +53,10 @@ export function registerInventoryChannelExposureRoutes(
   const service = dependencies.service ?? new InventoryChannelExposureAdminService(
     dependencies.store ?? new PostgresInventoryChannelExposureAdminStore(),
   );
+  const targetStopService = dependencies.targetStopService
+    ?? new InventoryPublicationTargetStopService(new PostgresInventoryPublicationTargetStopStore());
+  const targetResumeService = dependencies.targetResumeService
+    ?? new InventoryPublicationTargetResumeService(new PostgresInventoryPublicationTargetResumeStore());
 
   app.get(
     "/api/inventory-planning/admin/channel-exposure",
@@ -83,6 +100,58 @@ export function registerInventoryChannelExposureRoutes(
         return res.status(result.alreadyApplied ? 200 : 201).json(result);
       } catch (error) {
         return sendError(res, error, "save a channel-exposure policy draft");
+      }
+    },
+  );
+
+  app.post(
+    "/api/inventory-planning/admin/channel-exposure/publication-target-resume-review",
+    requirePermission("inventory_planning", "activate"),
+    async (req, res) => {
+      try {
+        const result = inventoryPublicationTargetResumeReviewSchema.parse(
+          await targetResumeService.review(
+            parseBody(reviewInventoryPublicationTargetResumeRequestSchema, req.body),
+            auditActor(req),
+          ),
+        );
+        return res.status(result.alreadyApplied ? 200 : 201).json(result);
+      } catch (error) {
+        return sendError(res, error, "review a stopped publication target for resume");
+      }
+    },
+  );
+
+  app.post(
+    "/api/inventory-planning/admin/channel-exposure/publication-target-resume",
+    requirePermission("inventory_planning", "activate"),
+    async (req, res) => {
+      try {
+        return res.json(inventoryPublicationTargetResumeResultSchema.parse(
+          await targetResumeService.resume(
+            parseBody(resumeInventoryPublicationTargetRequestSchema, req.body),
+            auditActor(req),
+          ),
+        ));
+      } catch (error) {
+        return sendError(res, error, "resume a stopped publication target");
+      }
+    },
+  );
+
+  app.put(
+    "/api/inventory-planning/admin/channel-exposure/publication-target-stop",
+    requirePermission("inventory_planning", "activate"),
+    async (req, res) => {
+      try {
+        return res.json(inventoryPublicationTargetCommandResultSchema.parse(
+          await targetStopService.stop(
+            parseBody(stopInventoryPublicationTargetRequestSchema, req.body),
+            auditActor(req),
+          ),
+        ));
+      } catch (error) {
+        return sendError(res, error, "stop a live publication target");
       }
     },
   );

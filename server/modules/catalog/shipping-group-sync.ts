@@ -30,9 +30,7 @@ interface SqlExecutor {
   execute(query: SQL): PromiseLike<unknown>;
 }
 
-type TransactionCallback = Parameters<typeof db.transaction>[0];
-type TransactionClient = Parameters<TransactionCallback>[0];
-export type ShippingGroupSyncClient = typeof db | TransactionClient;
+export type ShippingGroupSyncClient = Pick<typeof db, "select" | "execute">;
 
 export interface ShippingGroupMetafieldWrite {
   shopifyProductId: string;

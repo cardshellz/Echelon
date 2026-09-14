@@ -1,4 +1,6 @@
-import { requireAuth } from "./middleware";
+import { z } from "zod";
+
+import { requireAuth, requirePermission } from "./middleware";
 /**
  * eBay Settings Routes
  *
@@ -38,12 +40,16 @@ import {
   createEbayListingBuilder,
 } from "../modules/channels/adapters/ebay/ebay-listing-builder";
 import { resolveEbayCategoryMapping } from "../modules/channels/adapters/ebay/ebay-category-map";
+import { atpService as ebayChannelQuantityReader } from "./ebay/ebay-utils";
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
 const EBAY_CHANNEL_ID = 67;
+const testListingRequestSchema = z.object({
+  productId: z.number().int().positive().max(2_147_483_647),
+}).strict();
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -458,7 +464,10 @@ export function registerEbaySettingsRoutes(app: Express): void {
   // -----------------------------------------------------------------------
   // POST /api/ebay/listings/test — Create a single test listing on eBay
   // -----------------------------------------------------------------------
-  app.post("/api/ebay/listings/test", requireAuth, async (req: Request, res: Response) => {
+  app.post(
+    "/api/ebay/listings/test",
+    requirePermission("channels", "edit"),
+    async (req: Request, res: Response) => {
     try {
       const authService = getAuthService();
       if (!authService) {
@@ -466,11 +475,15 @@ export function registerEbaySettingsRoutes(app: Express): void {
         return;
       }
 
-      const { productId } = req.body;
-      if (!productId) {
-        res.status(400).json({ error: "productId is required" });
+      const request = testListingRequestSchema.safeParse(req.body);
+      if (!request.success) {
+        res.status(400).json({
+          error: "A positive integer productId is required.",
+          details: request.error.issues.map((issue) => `${issue.path.join(".") || "request"}: ${issue.message}`),
+        });
         return;
       }
+      const { productId } = request.data;
 
       // Get config
       const conn = await getChannelConnection();
@@ -521,6 +534,9 @@ export function registerEbaySettingsRoutes(app: Express): void {
         .slice(0, 12);
 
       const builder = createEbayListingBuilder();
+      // The factory installs the shared authority-aware global/exact-scope
+      // admission boundary in the low-level client for every quantity-bearing
+      // inventory-item, offer and publish request.
       const apiClient = getApiClient(authService);
 
       const listingConfig = {
@@ -587,8 +603,10 @@ export function registerEbaySettingsRoutes(app: Express): void {
       }
 
       const offer = offers[0];
-      // Set a test quantity
-      offer.payload.availableQuantity = 1;
+      const variantQuantities = await ebayChannelQuantityReader.getAtpPerVariant(product.id);
+      offer.payload.availableQuantity = variantQuantities.find(
+        (row) => row.productVariantId === testVariant.id,
+      )?.atpUnits ?? 0;
       const offerId = await apiClient.createOffer(offer.payload);
 
       // Publish the offer
@@ -623,7 +641,8 @@ export function registerEbaySettingsRoutes(app: Express): void {
       console.error("[eBay Settings] Error creating test listing:", err.message);
       res.status(500).json({ error: err.message });
     }
-  });
+    },
+  );
 
   // -----------------------------------------------------------------------
   // GET /api/ebay/stats — Channel stats (orders, listings, last sync)

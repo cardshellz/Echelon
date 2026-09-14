@@ -68,7 +68,7 @@ describe("inventory availability Phase 1 runtime isolation", () => {
       "server/routes/shopify.routes.ts",
       "server/modules/catalog/catalog.routes.ts",
       "server/services/index.ts",
-      "client/src/lib/inventory-availability.ts",
+      "client/src/components/inventory/InventoryRuntimeAuthorityBadge.tsx",
       "client/src/pages/ProductDetail.tsx",
       "client/src/pages/Reserves.tsx",
       "client/src/pages/ChannelAllocation.tsx",
@@ -87,6 +87,13 @@ describe("inventory availability Phase 1 runtime isolation", () => {
       "transformationModelVersions",
       "transformationRecipeBindings",
     ];
+
+    const runtimeAuthorityBoundary = source(
+      "client/src/components/inventory/InventoryRuntimeAuthorityBadge.tsx",
+    );
+    expect(runtimeAuthorityBoundary).toContain("@shared/types/inventory-runtime-authority");
+    expect(runtimeAuthorityBoundary).toContain("INVENTORY_RUNTIME_AUTHORITY_READOUT_PATH");
+    expect(runtimeAuthorityBoundary).not.toMatch(/default(?:s|ing)? to ["']legacy["']/i);
 
     for (const runtimeConsumer of runtimeConsumers) {
       const runtimeSource = source(runtimeConsumer);

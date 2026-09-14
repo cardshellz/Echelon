@@ -45,6 +45,35 @@ export interface DropshipOmsFulfillmentSync {
   syncOmsOrderToWms(omsOrderId: number): Promise<number | null>;
 }
 
+export type DropshipInventoryRuntimeAuthority = "legacy" | "canonical";
+
+/**
+ * Pins the inventory runtime authority while a dropship acceptance chooses its
+ * execution path. The inventory cutover owns the lock semantics; dropship only
+ * consumes the selected authority.
+ */
+export interface DropshipInventoryRuntimeAuthorityGate {
+  execute<T>(
+    work: (authority: DropshipInventoryRuntimeAuthority) => Promise<T>,
+  ): Promise<T>;
+}
+
+/**
+ * Canonical acceptance materializes an unpaid OMS order into a non-pickable WMS
+ * order and obtains one authority-aware whole-order claim before money moves.
+ */
+export interface DropshipCanonicalAcceptanceFulfillment {
+  stageOmsOrderAndClaimInventory(input: {
+    omsOrderId: number;
+    expectedWarehouseId: number;
+  }): Promise<{ wmsOrderId: number; warehouseId: number; inventoryClaimId: string | null }>;
+  releaseStagedInventoryClaim(input: {
+    wmsOrderId: number;
+    inventoryClaimId: string | null;
+    reason: string;
+  }): Promise<void>;
+}
+
 export interface DropshipOmsFulfillmentSyncRetryQueue {
   enqueueOmsWmsSyncRetry(input: {
     omsOrderId: number;

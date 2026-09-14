@@ -1,6 +1,13 @@
 import { DropshipError } from "../domain/errors";
-import type { DropshipAtpProvider } from "../application/dropship-selection-atp-service";
+import type {
+  DropshipAtpProvider,
+  DropshipAtpSnapshot,
+} from "../application/dropship-selection-atp-service";
 import { isAllocationEngineError } from "../../channels/allocation-engine.errors";
+import {
+  InventoryChannelQuantityRuntimeError,
+  type InventoryChannelQuantityRuntimeService,
+} from "../../inventory-planning/application/inventory-channel-quantity-runtime.service";
 
 /**
  * The slice of a Channel Allocation result the Dropship program consumes.
@@ -23,6 +30,7 @@ export interface DropshipChannelAllocationEngine {
 
 export interface ChannelAllocationDropshipAtpProviderDependencies {
   allocationEngine: DropshipChannelAllocationEngine;
+  runtimeQuantity: InventoryChannelQuantityRuntimeService;
   /** Resolves the static internal `Dropship OMS` channel; throws when it is not configured. */
   resolveDropshipOmsChannelId: () => Promise<number>;
 }
@@ -34,10 +42,11 @@ export interface ChannelAllocationDropshipAtpProviderDependencies {
 const MAX_CONCURRENT_ALLOCATION_PREVIEWS = 4;
 
 /**
- * Dropship quantity authority (handoff Option B): the internal `Dropship OMS`
- * channel's Channel Allocation result is the program-level quantity; vendor
- * selection and caps refine it downstream. The engine's `previewProduct` is a
- * pure read, so this provider is safe on GET paths.
+ * Dropship quantity authority. Under legacy authority, the internal `Dropship
+ * OMS` channel's Allocation Engine preview remains the compatibility result.
+ * Under canonical authority, the exact store publication target is the only
+ * quantity source; legacy vendor caps are not applied a second time. Both paths
+ * are read-only and provider-safe.
  *
  * Fail-closed rules:
  *   - The channel must have an explicit enabled warehouse assignment. The engine's
@@ -53,8 +62,9 @@ export class ChannelAllocationDropshipAtpProvider implements DropshipAtpProvider
 
   async getVariantAtp(
     targets: readonly { productId: number; productVariantId: number }[],
-  ): Promise<Map<number, number>> {
-    if (targets.length === 0) return new Map();
+    scope: { storeConnectionId?: number } = {},
+  ): Promise<DropshipAtpSnapshot> {
+    if (targets.length === 0) return { authority: "legacy", quantities: new Map() };
     const productIdByVariantId = indexTargetsByVariant(targets);
     const channelId = await this.deps.resolveDropshipOmsChannelId();
     const productIds = [...new Set(productIdByVariantId.values())].sort((left, right) => left - right);
@@ -66,20 +76,21 @@ export class ChannelAllocationDropshipAtpProvider implements DropshipAtpProvider
     const allocations = await mapWithConcurrency(
       productIds,
       MAX_CONCURRENT_ALLOCATION_PREVIEWS,
-      (productId) => this.previewProduct(productId, channelId),
+      (productId) => this.previewProduct(productId, channelId, scope.storeConnectionId),
     );
+    const authorities = [...new Set(allocations.map((allocation) => allocation.authority))];
+    if (authorities.length !== 1) {
+      throw providerError(
+        "DROPSHIP_ATP_AUTHORITY_CHANGED",
+        "Inventory authority changed while the Dropship quantity snapshot was being read; retry the complete read.",
+        { channelId, authorities, retryable: true },
+      );
+    }
 
     for (const { productId, rows } of allocations) {
       for (const row of rows) {
         if (row.channelId !== channelId) continue;
         if (productIdByVariantId.get(row.productVariantId) !== productId) continue;
-        if (row.warehouseScopeSource === "legacy_all_active_fallback") {
-          throw providerError(
-            "DROPSHIP_ALLOCATION_WAREHOUSE_SCOPE_REQUIRED",
-            "The Dropship OMS channel has no enabled warehouse assignment. Dropship quantities fail closed until at least one warehouse is enabled for it in Channel Allocation.",
-            { channelId, productId, productVariantId: row.productVariantId, retryable: false },
-          );
-        }
         if (!Number.isSafeInteger(row.allocatedUnits) || row.allocatedUnits < 0) {
           throw providerError(
             "DROPSHIP_ATP_QUANTITY_INVALID",
@@ -90,16 +101,42 @@ export class ChannelAllocationDropshipAtpProvider implements DropshipAtpProvider
         result.set(row.productVariantId, row.allocatedUnits);
       }
     }
-    return result;
+    return { authority: authorities[0]!, quantities: result };
   }
 
   private async previewProduct(
     productId: number,
     channelId: number,
-  ): Promise<{ productId: number; rows: readonly DropshipChannelAllocationRow[] }> {
-    let allocation: Awaited<ReturnType<DropshipChannelAllocationEngine["previewProduct"]>>;
+    storeConnectionId?: number,
+  ): Promise<{
+    authority: "legacy" | "canonical";
+    productId: number;
+    rows: readonly DropshipChannelAllocationRow[];
+  }> {
     try {
-      allocation = await this.deps.allocationEngine.previewProduct(productId);
+      const result = await this.deps.runtimeQuantity.readProduct({
+        productId,
+        channelId,
+        target: {
+          destinationKind: "dropship_store_connection",
+          ...(storeConnectionId == null ? {} : { connectionId: storeConnectionId }),
+          providerKey: "ebay",
+        },
+        allowEquivalentDestinationRows: storeConnectionId == null,
+        triggeredBy: storeConnectionId == null
+          ? "dropship_catalog_channel_quantity_read"
+          : "dropship_store_channel_quantity_read",
+      }, async () => this.previewLegacyProduct(productId, channelId));
+      return {
+        authority: result.authority,
+        productId,
+        rows: result.rows.map((row) => ({
+          channelId,
+          productVariantId: row.productVariantId,
+          allocatedUnits: row.quantity,
+          warehouseScopeSource: "explicit",
+        })),
+      };
     } catch (error: unknown) {
       if (isAllocationEngineError(error)) {
         throw providerError(
@@ -117,8 +154,29 @@ export class ChannelAllocationDropshipAtpProvider implements DropshipAtpProvider
           },
         );
       }
+      if (error instanceof InventoryChannelQuantityRuntimeError
+        || (error instanceof Error && error.name === "InventoryAvailabilityRuntimePublicationError")) {
+        throw providerError(
+          "DROPSHIP_CHANNEL_QUANTITY_UNAVAILABLE",
+          `The canonical Dropship channel quantity could not be resolved for product ${productId}: ${error.message}`,
+          {
+            channelId,
+            productId,
+            storeConnectionId: storeConnectionId ?? null,
+            quantityErrorCode: "code" in error ? String(error.code) : error.name,
+            retryable: false,
+          },
+        );
+      }
       throw error;
     }
+  }
+
+  private async previewLegacyProduct(
+    productId: number,
+    channelId: number,
+  ): Promise<readonly { productVariantId: number; quantity: number }[]> {
+    const allocation = await this.deps.allocationEngine.previewProduct(productId);
     if (allocation.productId !== productId) {
       throw providerError(
         "DROPSHIP_ALLOCATION_RESULT_MISMATCH",
@@ -126,7 +184,26 @@ export class ChannelAllocationDropshipAtpProvider implements DropshipAtpProvider
         { channelId, requestedProductId: productId, returnedProductId: allocation.productId, retryable: false },
       );
     }
-    return { productId, rows: allocation.allocations };
+    return allocation.allocations
+      .filter((row) => row.channelId === channelId)
+      .map((row) => {
+        if (row.warehouseScopeSource === "legacy_all_active_fallback") {
+          throw providerError(
+            "DROPSHIP_ALLOCATION_WAREHOUSE_SCOPE_REQUIRED",
+            "The Dropship OMS channel has no enabled warehouse assignment. Dropship quantities fail closed until at least one warehouse is enabled for it in Channel Allocation.",
+            { channelId, productId, productVariantId: row.productVariantId, retryable: false },
+          );
+        }
+        if (!Number.isSafeInteger(row.allocatedUnits) || row.allocatedUnits < 0) {
+          throw providerError(
+            "DROPSHIP_ATP_QUANTITY_INVALID",
+            "Channel Allocation returned an invalid allocated quantity.",
+            { channelId, productId, productVariantId: row.productVariantId,
+              allocatedUnits: row.allocatedUnits, retryable: false },
+          );
+        }
+        return { productVariantId: row.productVariantId, quantity: row.allocatedUnits };
+      });
   }
 }
 

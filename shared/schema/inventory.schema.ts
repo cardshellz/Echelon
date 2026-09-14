@@ -37,6 +37,8 @@ export const inventoryLevels = inventorySchema.table("inventory_levels", {
   backorderQty: integer("backorder_qty").notNull().default(0), // Backorder demand (variant units)
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
 }, (table) => ({
+  exactVariantLocationIdentity: uniqueIndex("idx_inventory_levels_variant_location")
+    .on(table.productVariantId, table.warehouseLocationId),
   checkReservedLteOnHand: check("check_reserved_lte_on_hand", sql`${table.reservedQty} <= ${table.variantQty}`)
 }));
 
@@ -244,6 +246,20 @@ export const buildOrders = inventorySchema.table("build_orders", {
   outputLocationId: integer("output_location_id").notNull().references(() => warehouseLocations.id),
   status: varchar("status", { length: 20 }).notNull().default("draft"),
   idempotencyKey: varchar("idempotency_key", { length: 100 }).notNull().unique(),
+  // Filled atomically when a draft build is released under canonical inventory
+  // authority. These immutable values identify the exact transformation model
+  // and recipe binding that authorized execution; null preserves legacy orders.
+  transformationAuthority: varchar("transformation_authority", { length: 20 }),
+  transformationAuthorityRevision: bigint("transformation_authority_revision", { mode: "bigint" }),
+  transformationActivationRunId: bigint("transformation_activation_run_id", { mode: "bigint" }),
+  transformationModelHeadRevision: bigint("transformation_model_head_revision", { mode: "bigint" }),
+  transformationModelId: integer("transformation_model_id"),
+  transformationModelVersion: integer("transformation_model_version"),
+  transformationModelDefinitionHash: varchar("transformation_model_definition_hash", { length: 64 }),
+  transformationRecipeBindingId: integer("transformation_recipe_binding_id"),
+  transformationRecipeDefinitionHash: varchar("transformation_recipe_definition_hash", { length: 64 }),
+  transformationAuthorizedAt: timestamp("transformation_authorized_at", { withTimezone: true }),
+  transformationAuthorizedBy: varchar("transformation_authorized_by", { length: 100 }),
   totalComponentCostMills: bigint("total_component_cost_mills", { mode: "bigint" }),
   failureCode: varchar("failure_code", { length: 50 }),
   failureMessage: text("failure_message"),
@@ -292,6 +308,32 @@ export const buildOrders = inventorySchema.table("build_orders", {
   snapshotValid: check(
     "build_orders_snapshot_chk",
     sql`${table.outputProductId} > 0 AND ${table.outputUnitsPerVariant} > 0`,
+  ),
+  transformationAuthorityValid: check(
+    "build_orders_transformation_authority_chk",
+    sql`(${table.transformationAuthority} IS NULL
+          AND ${table.transformationAuthorityRevision} IS NULL
+          AND ${table.transformationActivationRunId} IS NULL
+          AND ${table.transformationModelHeadRevision} IS NULL
+          AND ${table.transformationModelId} IS NULL
+          AND ${table.transformationModelVersion} IS NULL
+          AND ${table.transformationModelDefinitionHash} IS NULL
+          AND ${table.transformationRecipeBindingId} IS NULL
+          AND ${table.transformationRecipeDefinitionHash} IS NULL
+          AND ${table.transformationAuthorizedAt} IS NULL
+          AND ${table.transformationAuthorizedBy} IS NULL)
+      OR (${table.transformationAuthority} = 'canonical'
+          AND ${table.transformationAuthorityRevision} > 0
+          AND ${table.transformationActivationRunId} > 0
+          AND (${table.transformationModelHeadRevision} IS NULL
+            OR ${table.transformationModelHeadRevision} >= 0)
+          AND ${table.transformationModelId} > 0
+          AND ${table.transformationModelVersion} > 0
+          AND ${table.transformationModelDefinitionHash} ~ '^[0-9a-f]{64}$'
+          AND ${table.transformationRecipeBindingId} > 0
+          AND ${table.transformationRecipeDefinitionHash} ~ '^[0-9a-f]{64}$'
+          AND ${table.transformationAuthorizedAt} IS NOT NULL
+          AND btrim(${table.transformationAuthorizedBy}) <> '')`,
   ),
 }));
 

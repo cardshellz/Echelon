@@ -20,18 +20,28 @@ function row(overrides: Partial<DropshipChannelAllocationRow> & { productVariant
 
 function createProvider(
   allocationsByProduct: Record<number, readonly DropshipChannelAllocationRow[]>,
-  options: { resolveChannel?: () => Promise<number>; previewProduct?: (productId: number) => Promise<any> } = {},
+  options: {
+    resolveChannel?: () => Promise<number>;
+    previewProduct?: (productId: number) => Promise<any>;
+    readProduct?: (input: any, legacyReader: () => Promise<any>) => Promise<any>;
+  } = {},
 ) {
   const previewProduct = vi.fn(options.previewProduct ?? (async (productId: number) => ({
     productId,
     allocations: allocationsByProduct[productId] ?? [],
   })));
   const resolveDropshipOmsChannelId = vi.fn(options.resolveChannel ?? (async () => DROPSHIP_OMS_CHANNEL_ID));
+  const readProduct = vi.fn(options.readProduct ?? (async (input, legacyReader) => ({
+    authority: "legacy",
+    productId: input.productId,
+    rows: (await legacyReader()).map((legacy: any) => ({ ...legacy, publicationTargetIds: [] })),
+  })));
   const provider = new ChannelAllocationDropshipAtpProvider({
     allocationEngine: { previewProduct },
+    runtimeQuantity: { readProduct } as never,
     resolveDropshipOmsChannelId,
   });
-  return { provider, previewProduct, resolveDropshipOmsChannelId };
+  return { provider, previewProduct, readProduct, resolveDropshipOmsChannelId };
 }
 
 describe("ChannelAllocationDropshipAtpProvider", () => {
@@ -49,11 +59,14 @@ describe("ChannelAllocationDropshipAtpProvider", () => {
       { productId: 20, productVariantId: 201 },
       { productId: 10, productVariantId: 102 },
       { productId: 10, productVariantId: 999 },
-    ])).resolves.toEqual(new Map([
-      [201, 3],
-      [102, 7],
-      [999, 0],
-    ]));
+    ])).resolves.toEqual({
+      authority: "legacy",
+      quantities: new Map([
+        [201, 3],
+        [102, 7],
+        [999, 0],
+      ]),
+    });
     expect(previewProduct).toHaveBeenCalledTimes(2);
     expect(previewProduct).toHaveBeenCalledWith(10);
     expect(previewProduct).toHaveBeenCalledWith(20);
@@ -63,7 +76,7 @@ describe("ChannelAllocationDropshipAtpProvider", () => {
     const { provider } = createProvider({ 10: [] });
 
     await expect(provider.getVariantAtp([{ productId: 10, productVariantId: 101 }]))
-      .resolves.toEqual(new Map([[101, 0]]));
+      .resolves.toEqual({ authority: "legacy", quantities: new Map([[101, 0]]) });
   });
 
   it("fails closed when the Dropship OMS channel relies on the all-warehouses fallback", async () => {
@@ -136,7 +149,72 @@ describe("ChannelAllocationDropshipAtpProvider", () => {
   it("returns an empty map without resolving the channel when there are no targets", async () => {
     const { provider, resolveDropshipOmsChannelId } = createProvider({});
 
-    await expect(provider.getVariantAtp([])).resolves.toEqual(new Map());
+    await expect(provider.getVariantAtp([])).resolves.toEqual({
+      authority: "legacy",
+      quantities: new Map(),
+    });
     expect(resolveDropshipOmsChannelId).not.toHaveBeenCalled();
+  });
+
+  it("uses the exact canonical Dropship store target and never invokes legacy Channel Allocation", async () => {
+    const { provider, previewProduct, readProduct } = createProvider({}, {
+      readProduct: async (input) => ({
+        authority: "canonical",
+        productId: input.productId,
+        rows: [{ productVariantId: 101, quantity: 6, publicationTargetIds: [41] }],
+      }),
+    });
+
+    await expect(provider.getVariantAtp(
+      [{ productId: 10, productVariantId: 101 }],
+      { storeConnectionId: 91 },
+    )).resolves.toEqual({ authority: "canonical", quantities: new Map([[101, 6]]) });
+    expect(previewProduct).not.toHaveBeenCalled();
+    expect(readProduct).toHaveBeenCalledWith({
+      productId: 10,
+      channelId: DROPSHIP_OMS_CHANNEL_ID,
+      target: {
+        destinationKind: "dropship_store_connection",
+        connectionId: 91,
+        providerKey: "ebay",
+      },
+      allowEquivalentDestinationRows: false,
+      triggeredBy: "dropship_store_channel_quantity_read",
+    }, expect.any(Function));
+  });
+
+  it("allows a channel catalog read only when canonical destination quantities are equivalent", async () => {
+    const { provider, readProduct } = createProvider({}, {
+      readProduct: async (input) => ({
+        authority: "canonical",
+        productId: input.productId,
+        rows: [{ productVariantId: 101, quantity: 6, publicationTargetIds: [41, 42] }],
+      }),
+    });
+
+    await expect(provider.getVariantAtp([{ productId: 10, productVariantId: 101 }]))
+      .resolves.toEqual({ authority: "canonical", quantities: new Map([[101, 6]]) });
+    expect(readProduct).toHaveBeenCalledWith(expect.objectContaining({
+      allowEquivalentDestinationRows: true,
+      triggeredBy: "dropship_catalog_channel_quantity_read",
+    }), expect.any(Function));
+  });
+
+  it("fails the complete snapshot if inventory authority changes between products", async () => {
+    const { provider } = createProvider({}, {
+      readProduct: async (input) => ({
+        authority: input.productId === 10 ? "legacy" : "canonical",
+        productId: input.productId,
+        rows: [{ productVariantId: input.productId * 10 + 1, quantity: 1, publicationTargetIds: [] }],
+      }),
+    });
+
+    await expect(provider.getVariantAtp([
+      { productId: 10, productVariantId: 101 },
+      { productId: 20, productVariantId: 201 },
+    ])).rejects.toMatchObject({
+      code: "DROPSHIP_ATP_AUTHORITY_CHANGED",
+      context: { retryable: true },
+    });
   });
 });

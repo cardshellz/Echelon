@@ -146,7 +146,13 @@ describe("browser CI impact selection", () => {
   });
 
   it("preserves the current real application startup graph for packaging-only changes", () => {
-    const files = new Set(execFileSync("git", ["ls-files", "-z"], { encoding: "utf8" }).split("\0").filter(Boolean));
+    // Validate the current working-tree graph before commit as well as in CI;
+    // newly added, non-ignored dependencies must be resolvable by this test.
+    const files = new Set(execFileSync(
+      "git",
+      ["ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+      { encoding: "utf8" },
+    ).split("\0").filter(Boolean));
     const result = selectBrowserSuite({ suite: "procurement", changes: [{ status: "M", paths: ["client/src/components/shipping/BoxSuitesPanel.tsx"] }],
       files, readSource: (file: string) => readFileSync(file, "utf8") });
     expect(result).toEqual({ run: true, reason: "Transitive suite dependency: client/src/components/shipping/BoxSuitesPanel.tsx" });

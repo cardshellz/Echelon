@@ -11,8 +11,6 @@ describe("inventory availability runtime ATP routing contract", () => {
   it("constructs the authority-aware reader at every production ATP composition seam", () => {
     const compositionFiles = [
       "server/services/index.ts",
-      "server/routes/ebay/ebay-utils.ts",
-      "server/modules/channels/adapters/ebay/ebay-marketplace-registration-owner.pg-repository.ts",
       "server/modules/dropship/infrastructure/dropship-listing-preview.factory.ts",
       "server/modules/dropship/infrastructure/dropship-marketplace-registration.factory.ts",
       "server/modules/dropship/interfaces/http/dropship-vendor-catalog.routes.ts",
@@ -28,6 +26,22 @@ describe("inventory availability runtime ATP routing contract", () => {
       expect(contents, file).toContain("createAuthorityAwareInventoryAtpService");
       expect(contents, file).not.toContain("createLegacyInventoryAtpService(");
     }
+
+    const ebayCompositionFiles = [
+      "server/routes/ebay/ebay-utils.ts",
+      "server/modules/channels/adapters/ebay/ebay-marketplace-registration-owner.pg-repository.ts",
+    ];
+    for (const file of ebayCompositionFiles) {
+      const contents = source(file);
+      expect(contents, file).toContain("createEbayChannelQuantityReader");
+      expect(contents, file).not.toContain("createLegacyInventoryAtpService(");
+    }
+
+    const ebayReader = source(
+      "server/modules/channels/adapters/ebay/ebay-channel-quantity.reader.ts",
+    );
+    expect(ebayReader).toContain("createAuthorityAwareInventoryAtpService");
+    expect(ebayReader).not.toContain("createLegacyInventoryAtpService(");
   });
 
   it("removes product-base division from dropship and eBay registration quantity readers", () => {
@@ -168,6 +182,25 @@ describe("inventory availability runtime publication routing contract", () => {
     expect(indexesOf(outbox, ".publishAbsolute(")).toHaveLength(1);
     expect(indexesOf(outbox, ".pushInventory(")).toHaveLength(0);
     expect(indexesOf(channelTransport, ".pushInventory(")).toHaveLength(1);
+  });
+
+  it("keeps the eBay settings test-listing lifecycle behind low-level exact quantity admission", () => {
+    const settingsRoute = source("server/routes/ebay-settings.routes.ts");
+    const ebayApiClient = source("server/modules/channels/adapters/ebay/ebay-api.client.ts");
+    const handlerStart = settingsRoute.indexOf('app.post(\n    "/api/ebay/listings/test"');
+    const handlerEnd = settingsRoute.indexOf("// GET /api/ebay/stats", handlerStart);
+    const handler = settingsRoute.slice(handlerStart, handlerEnd);
+
+    expect(handlerStart).toBeGreaterThan(-1);
+    expect(handlerEnd).toBeGreaterThan(handlerStart);
+    expect(handler).toContain('requirePermission("channels", "edit")');
+    expect(handler).toContain("getApiClient(authService)");
+    expect(handler).toContain("apiClient.createOrReplaceInventoryItem(");
+    expect(handler).toContain("apiClient.createOffer(");
+    expect(handler).toContain("apiClient.publishOffer(");
+    expect(ebayApiClient).toContain("if (!this.options.quantityAdmission)");
+    expect(ebayApiClient).toContain("executeAdmittedEbayQuantityRequest<T>(");
+    expect(ebayApiClient).toContain("createChannelEbayQuantityRequestAdmission");
   });
 
   it("pins publication authority without activating or reverting it", () => {

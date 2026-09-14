@@ -75,6 +75,71 @@ describe("AuthorityAwareInventoryPublicationService", () => {
     expect(context.enqueueFullPublications).not.toHaveBeenCalled();
   });
 
+  it("plans the whole channel but enqueues only the exact target selected by a scoped resume", async () => {
+    const context = runtimeContext("canonical");
+    context.planProduct = vi.fn(async () => runtimePlan([
+      target(),
+      { ...target(), publicationTargetId: 6, channelConnectionId: 34, externalScopeId: "location-2" },
+    ]));
+    const service = new AuthorityAwareInventoryPublicationService(executor(context));
+
+    const routed = await service.publishProduct({
+      productId: 10,
+      channelId: 3,
+      publicationTargetId: 6,
+      dryRun: false,
+      triggeredBy: "publication_target_resume",
+    }, vi.fn());
+
+    expect(context.planProduct).toHaveBeenCalledWith(10, 3);
+    expect(routed).toMatchObject({
+      authority: "canonical",
+      publication: {
+        rows: [{ publicationTargetId: 6, productVariantId: 101, desiredQuantity: "4" }],
+        enqueuedRows: 1,
+      },
+    });
+    expect(context.enqueueFullPublications).toHaveBeenCalledWith(
+      "44",
+      [expect.objectContaining({ publicationTargetId: 6, productVariantId: 101 })],
+    );
+  });
+
+  it("enqueues an absolute zero when an exact mapped SKU is made ineligible", async () => {
+    const context = runtimeContext("canonical");
+    const plan = runtimePlan([target()]);
+    context.planProduct = vi.fn(async () => ({
+      ...plan,
+      targets: plan.targets.map((plannedTarget) => ({
+        ...plannedTarget,
+        rows: plannedTarget.rows.map((row) => ({
+          ...row,
+          sharedUnits: "0",
+          afterHoldbackUnits: "0",
+          cappedUnits: "0",
+          publishedUnits: "0",
+          policy: row.policy ? { ...row.policy, eligible: false } : null,
+        })),
+      })),
+    }));
+    const service = new AuthorityAwareInventoryPublicationService(executor(context));
+
+    const routed = await service.publishProduct({
+      productId: 10,
+      dryRun: false,
+      triggeredBy: "channel_policy_changed",
+    }, vi.fn());
+
+    expect(routed).toMatchObject({
+      authority: "canonical",
+      publication: { rows: [{ productVariantId: 101, desiredQuantity: "0" }], enqueuedRows: 1 },
+    });
+    expect(context.enqueueFullPublications).toHaveBeenCalledWith(
+      "44",
+      [expect.objectContaining({ productVariantId: 101, desiredQuantity: "0" })],
+    );
+  });
+
   it("enqueues a Dropship-owned target from the same canonical exposure result", async () => {
     const context = runtimeContext("canonical");
     const plan = runtimePlan([target()]);

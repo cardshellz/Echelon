@@ -104,6 +104,7 @@ import { registerInventoryCutoverCompletionRoutes } from "./modules/inventory-pl
 import { registerInventoryCutoverOpeningRoutes } from "./modules/inventory-planning/interfaces/http/inventory-cutover-opening.routes";
 import { registerQuantityPublicationRecoveryRoutes } from "./modules/inventory-planning/interfaces/http/quantity-publication-recovery.routes";
 import { registerInventoryChannelExposureRoutes } from "./modules/inventory-planning/interfaces/http/inventory-channel-exposure.routes";
+import { registerInventoryPublicationGlobalControlRoutes } from "./modules/inventory-planning/interfaces/http/inventory-publication-global-control.routes";
 import { registerShippingDestinationNormalizationRoutes } from "./modules/shipping-engine/interfaces/http/shipping-destination-normalization.routes";
 import { registerFulfillmentRoutingAdminRoutes } from "./modules/shipping-engine/interfaces/http/fulfillment-routing-admin.routes";
 import { registerFulfillmentProviderConnectionAdminRoutes } from "./modules/shipping-engine/interfaces/http/fulfillment-provider-connections-admin.routes";
@@ -160,6 +161,7 @@ export async function registerRoutes(
   registerInventoryCutoverCompletionRoutes(app);
   registerInventoryCutoverOpeningRoutes(app);
   registerQuantityPublicationRecoveryRoutes(app);
+  registerInventoryPublicationGlobalControlRoutes(app);
   registerInventoryChannelExposureRoutes(app);
   registerShippingDestinationNormalizationRoutes(app);
   registerOutboundShipmentRoutes(app);

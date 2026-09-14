@@ -307,11 +307,31 @@ function assertSnapshotReferences(snapshot: PlannerSupplySnapshot): void {
     for (const path of model.paths) {
       const source = variants.get(path.sourceVariantId);
       const destination = variants.get(path.destinationVariantId);
-      if (!source || source.productId !== model.productId) {
+      if (!source) {
         invalid("transformationPaths.sourceVariantId", path.sourceVariantId, "A path source is outside its model product.");
       }
-      if (!destination || destination.productId !== model.productId) {
+      if (source!.productId !== model.productId) {
+        invalid("transformationPaths.sourceVariantId", path.sourceVariantId, "A path source is outside its model product.");
+      }
+      if (source!.unitsPerVariant !== path.sourceUnitsPerVariant) {
+        invalid(
+          "transformationPaths.sourceUnitsPerVariant",
+          path.sourceUnitsPerVariant,
+          "A path source unit snapshot does not match its captured variant.",
+        );
+      }
+      if (!destination) {
         invalid("transformationPaths.destinationVariantId", path.destinationVariantId, "A path destination is outside its model product.");
+      }
+      if (destination!.productId !== model.productId) {
+        invalid("transformationPaths.destinationVariantId", path.destinationVariantId, "A path destination is outside its model product.");
+      }
+      if (destination!.unitsPerVariant !== path.destinationUnitsPerVariant) {
+        invalid(
+          "transformationPaths.destinationUnitsPerVariant",
+          path.destinationUnitsPerVariant,
+          "A path destination unit snapshot does not match its captured variant.",
+        );
       }
       if (path.transformationRecipeBindingId !== null
         && !bindingIds.has(path.transformationRecipeBindingId)) {
@@ -328,19 +348,43 @@ function assertSnapshotReferences(snapshot: PlannerSupplySnapshot): void {
         `transformationModels.${model.modelId}.bindings.${binding.bindingId}.componentVariantId`,
       );
       const output = variants.get(binding.outputVariantId);
-      if (!output || output.productId !== binding.outputProductId) {
+      if (!output) {
         invalid("recipeBindings.outputVariantId", binding.outputVariantId, "A recipe binding output snapshot is inconsistent.");
+      }
+      if (output!.productId !== binding.outputProductId) {
+        invalid("recipeBindings.outputVariantId", binding.outputVariantId, "A recipe binding output snapshot is inconsistent.");
+      }
+      if (output!.unitsPerVariant !== binding.outputUnitsPerVariant) {
+        invalid(
+          "recipeBindings.outputUnitsPerVariant",
+          binding.outputUnitsPerVariant,
+          "A recipe binding output unit snapshot does not match its captured variant.",
+        );
       }
       if (binding.warehouseId !== null && !warehouses.has(binding.warehouseId)) {
         invalid("recipeBindings.warehouseId", binding.warehouseId, "A recipe binding references an unknown warehouse.");
       }
       for (const component of binding.components) {
         const variant = variants.get(component.componentVariantId);
-        if (!variant || variant.productId !== component.componentProductId) {
+        if (!variant) {
           invalid(
             "recipeBindings.components.componentVariantId",
             component.componentVariantId,
             "A recipe component snapshot is inconsistent.",
+          );
+        }
+        if (variant!.productId !== component.componentProductId) {
+          invalid(
+            "recipeBindings.components.componentVariantId",
+            component.componentVariantId,
+            "A recipe component snapshot is inconsistent.",
+          );
+        }
+        if (variant!.unitsPerVariant !== component.componentUnitsPerVariant) {
+          invalid(
+            "recipeBindings.components.componentUnitsPerVariant",
+            component.componentUnitsPerVariant,
+            "A recipe component unit snapshot does not match its captured variant.",
           );
         }
       }

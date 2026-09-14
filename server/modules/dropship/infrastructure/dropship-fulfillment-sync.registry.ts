@@ -1,11 +1,33 @@
-import type { DropshipOmsFulfillmentSync } from "../application/dropship-ports";
+import type {
+  DropshipCanonicalAcceptanceFulfillment,
+  DropshipInventoryRuntimeAuthorityGate,
+  DropshipOmsFulfillmentSync,
+} from "../application/dropship-ports";
 
-let fulfillmentSync: DropshipOmsFulfillmentSync | null = null;
+type RegisteredDropshipFulfillmentSync = DropshipOmsFulfillmentSync
+  & DropshipCanonicalAcceptanceFulfillment;
 
-export function setDropshipFulfillmentSync(sync: DropshipOmsFulfillmentSync): void {
+let fulfillmentSync: RegisteredDropshipFulfillmentSync | null = null;
+let inventoryRuntimeAuthority: DropshipInventoryRuntimeAuthorityGate | null = null;
+
+export function setDropshipFulfillmentSync(sync: RegisteredDropshipFulfillmentSync): void {
   fulfillmentSync = sync;
 }
 
 export function getDropshipFulfillmentSync(): DropshipOmsFulfillmentSync | undefined {
   return fulfillmentSync ?? undefined;
+}
+
+export function getDropshipCanonicalAcceptanceFulfillment(): DropshipCanonicalAcceptanceFulfillment | undefined {
+  return fulfillmentSync ?? undefined;
+}
+
+export function setDropshipInventoryRuntimeAuthorityGate(
+  gate: DropshipInventoryRuntimeAuthorityGate,
+): void {
+  inventoryRuntimeAuthority = gate;
+}
+
+export function getDropshipInventoryRuntimeAuthorityGate(): DropshipInventoryRuntimeAuthorityGate | undefined {
+  return inventoryRuntimeAuthority ?? undefined;
 }

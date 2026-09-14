@@ -26,7 +26,7 @@ function transactionHistoryRow(row: InventoryTransaction & { rawShipmentQuantity
 }
 
 export interface IInventoryStorage {
-  getAllInventoryLevels(): Promise<InventoryLevel[]>;
+  getAllInventoryLevels(tx?: any): Promise<InventoryLevel[]>;
   getInventoryLevelsByProductVariantId(productVariantId: number): Promise<InventoryLevel[]>;
   getInventoryLevelByLocationAndVariant(warehouseLocationId: number, productVariantId: number, tx?: any): Promise<InventoryLevel | undefined>;
   lockInventoryLevel(warehouseLocationId: number, productVariantId: number, tx: any): Promise<InventoryLevel | undefined>;
@@ -110,8 +110,8 @@ export function createInventoryMethods(
   db: typeof defaultDb = defaultDb,
 ): IInventoryStorage {
   return {
-  async getAllInventoryLevels(): Promise<InventoryLevel[]> {
-    return await db.select().from(inventoryLevels);
+  async getAllInventoryLevels(tx?: any): Promise<InventoryLevel[]> {
+    return await (tx || db).select().from(inventoryLevels);
   },
 
   async getInventoryLevelsByProductVariantId(productVariantId: number): Promise<InventoryLevel[]> {

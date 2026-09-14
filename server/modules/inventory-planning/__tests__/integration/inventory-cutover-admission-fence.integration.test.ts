@@ -1,11 +1,17 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import type { PoolClient } from "pg";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { sql } from "drizzle-orm";
+import { Pool, type PoolClient } from "pg";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
 import { installCutoverAdmissionFixturePrerequisites } from "../fixtures/inventory-cutover-admission.fixture";
 import { acquireInventoryCutoverFenceInsideTransaction, assertInventoryCutoverFenceHeldInsideTransaction } from "../../infrastructure/inventory-cutover-admission-fence.repository";
 import { INVENTORY_CUTOVER_CONFIGURATION_TABLES, INVENTORY_CUTOVER_OPERATIONAL_TABLES } from "../../domain/inventory-cutover-admission-fence";
+import {
+  INVENTORY_LEGACY_ADMIN_CONTROLS,
+  InventoryLegacyAdminControlService,
+} from "../../application/inventory-legacy-admin-control.service";
+import { PostgresInventoryAvailabilityRuntimeAtpExecutor } from "../../infrastructure/inventory-availability-runtime-atp.repository";
 
 const URL = process.env.ECHELON_TEST_DATABASE_URL;
 const DISPOSABLE = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
@@ -47,6 +53,23 @@ databaseDescribe("actual migration236 cutover admission fence", () => {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     throw new Error(`Connection ${pid} did not reach its expected database lock wait`);
+  }
+
+  async function createFixturePool(max: number): Promise<Pool> {
+    if (!URL) throw new Error("Disposable database URL is required");
+    const currentDatabase = (await database.pool.query(
+      "SELECT current_database() AS database_name",
+    )).rows[0]?.database_name;
+    if (typeof currentDatabase !== "string" || currentDatabase.length === 0) {
+      throw new Error("Disposable fixture database name is unavailable");
+    }
+    const connectionUrl = new globalThis.URL(URL);
+    connectionUrl.pathname = `/${currentDatabase}`;
+    return new Pool({
+      connectionString: connectionUrl.toString(),
+      max,
+      connectionTimeoutMillis: 500,
+    });
   }
 
   beforeAll(async () => {
@@ -102,6 +125,175 @@ databaseDescribe("actual migration236 cutover admission fence", () => {
     await database.pool.query("UPDATE inventory.inventory_levels SET variant_qty=11 WHERE id=1");
     for (const table of ALL_TABLES) await database.pool.query(`DELETE FROM ${table} WHERE false`);
     expect((await database.pool.query("SELECT variant_qty FROM inventory.inventory_levels WHERE id=1")).rows[0].variant_qty).toBe(11);
+  });
+
+  it("runs a legacy admin writer through the real pinned PostgreSQL authority boundary", async () => {
+    const service = new InventoryLegacyAdminControlService(
+      new PostgresInventoryAvailabilityRuntimeAtpExecutor(database.pool),
+    );
+
+    await service.executeLegacyWrite(
+      INVENTORY_LEGACY_ADMIN_CONTROLS.inventoryStrategy,
+      (transaction) => transaction.execute(sql`
+        UPDATE catalog.products
+        SET inventory_strategy = 'recipe_managed'
+        WHERE id = 1
+      `),
+    );
+
+    expect((await database.pool.query(
+      "SELECT inventory_strategy FROM catalog.products WHERE id=1",
+    )).rows[0].inventory_strategy).toBe("recipe_managed");
+  });
+
+  it("completes concurrent legacy writers without acquiring a second connection per command", async () => {
+    await database.pool.query(
+      "INSERT INTO catalog.products(id,sku,name,inventory_strategy,is_active) VALUES(2,'P5','Five pack','physical_only',true)",
+    );
+    const smallPool = await createFixturePool(2);
+    const service = new InventoryLegacyAdminControlService(
+      new PostgresInventoryAvailabilityRuntimeAtpExecutor(smallPool),
+    );
+    let waiting = 0;
+    let releaseBarrier!: () => void;
+    const barrier = new Promise<void>((resolveBarrier) => {
+      releaseBarrier = resolveBarrier;
+    });
+    const write = (id: number, strategy: "recipe_managed" | "physical_only") =>
+      service.executeLegacyWrite(
+        INVENTORY_LEGACY_ADMIN_CONTROLS.inventoryStrategy,
+        async (transaction) => {
+          waiting += 1;
+          if (waiting === 2) releaseBarrier();
+          await barrier;
+          await transaction.execute(sql`
+            UPDATE catalog.products
+            SET inventory_strategy = ${strategy}
+            WHERE id = ${id}
+          `);
+        },
+      );
+
+    try {
+      await Promise.all([
+        write(1, "recipe_managed"),
+        write(2, "recipe_managed"),
+      ]);
+      expect((await database.pool.query(
+        "SELECT id,inventory_strategy FROM catalog.products WHERE id IN (1,2) ORDER BY id",
+      )).rows).toEqual([
+        { id: 1, inventory_strategy: "recipe_managed" },
+        { id: 2, inventory_strategy: "recipe_managed" },
+      ]);
+    } finally {
+      releaseBarrier();
+      await smallPool.end();
+    }
+  });
+
+  it("keeps a max-one-connection legacy read on one authority revision while cutover waits", async () => {
+    const smallPool = await createFixturePool(1);
+    const service = new InventoryLegacyAdminControlService(
+      new PostgresInventoryAvailabilityRuntimeAtpExecutor(smallPool),
+    );
+    let releaseRead!: () => void;
+    const continueRead = new Promise<void>((resolveRead) => {
+      releaseRead = resolveRead;
+    });
+    let reportStarted!: () => void;
+    const readStarted = new Promise<void>((resolveStarted) => {
+      reportStarted = resolveStarted;
+    });
+    const read = service.executeAuthorityAwareRead({
+      legacy: async (transaction, context) => {
+        const before = await transaction.execute(sql`
+          SELECT inventory_strategy
+          FROM catalog.products
+          WHERE id = 1
+        `);
+        reportStarted();
+        await continueRead;
+        const after = await transaction.execute(sql`
+          SELECT inventory_strategy
+          FROM catalog.products
+          WHERE id = 1
+        `);
+        return {
+          authority: context.authority,
+          authorityRevision: context.authorityRevision,
+          before: before.rows[0]?.inventory_strategy,
+          after: after.rows[0]?.inventory_strategy,
+        };
+      },
+      canonical: async () => {
+        throw new Error("canonical handler must not run for the pinned legacy revision");
+      },
+    });
+
+    const owner = await connect();
+    try {
+      await Promise.race([
+        readStarted,
+        read.then(
+          () => Promise.reject(new Error("Authority-aware read completed before reporting its pinned snapshot")),
+          (error) => Promise.reject(error),
+        ),
+      ]);
+      await begin(owner);
+      const pid = (await owner.query("SELECT pg_backend_pid() AS pid")).rows[0].pid;
+      const admission = acquire(owner);
+      await waitForLock(pid);
+      releaseRead();
+      await expect(read).resolves.toEqual({
+        authority: "legacy",
+        authorityRevision: "1",
+        before: "physical_only",
+        after: "physical_only",
+      });
+      await admission;
+      await owner.query(`UPDATE inventory.availability_runtime_authority
+        SET authority='canonical', activation_run_id=7, revision=2
+        WHERE singleton_key=true`);
+      await owner.query("COMMIT");
+      owner.release();
+      connections.delete(owner);
+    } finally {
+      releaseRead();
+      await smallPool.end();
+    }
+  });
+
+  it("rejects a canonical-era legacy admin writer before the real database callback runs", async () => {
+    const owner = await connect();
+    await begin(owner);
+    await acquire(owner);
+    await owner.query(`UPDATE inventory.availability_runtime_authority
+      SET authority='canonical', activation_run_id=7, revision=2
+      WHERE singleton_key=true`);
+    await owner.query("COMMIT");
+
+    const service = new InventoryLegacyAdminControlService(
+      new PostgresInventoryAvailabilityRuntimeAtpExecutor(database.pool),
+    );
+    const write = vi.fn(() => database.pool.query(
+      "UPDATE catalog.products SET inventory_strategy='recipe_managed' WHERE id=1",
+    ));
+
+    await expect(service.executeLegacyWrite(
+      INVENTORY_LEGACY_ADMIN_CONTROLS.inventoryStrategy,
+      write,
+    )).rejects.toMatchObject({
+      code: "INVENTORY_LEGACY_CONTROL_NOT_AUTHORITATIVE",
+      context: expect.objectContaining({
+        authority: "canonical",
+        authorityRevision: "2",
+        activationRunId: "7",
+      }),
+    });
+    expect(write).not.toHaveBeenCalled();
+    expect((await database.pool.query(
+      "SELECT inventory_strategy FROM catalog.products WHERE id=1",
+    )).rows[0].inventory_strategy).toBe("physical_only");
   });
 
   it("blocks every scoped statement NOWAIT while the exclusive owner holds admission", async () => {

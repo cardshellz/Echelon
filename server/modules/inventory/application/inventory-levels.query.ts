@@ -24,6 +24,11 @@ export interface InventoryLevelProjection {
   variantQty: number;
   reservedQty: number;
   pickedQty: number;
+  /** Physical variant units not currently reserved. This is not ATP. */
+  unreservedQty: number;
+  /** Authority-aware sellable quantity returned by the operational ATP boundary. */
+  atpUnits: number;
+  /** @deprecated Compatibility alias for atpUnits. */
   available: number;
   locationCount: number;
   pickableQty: number;
@@ -78,7 +83,9 @@ export async function projectInventoryLevels(input: {
       variantQty,
       reservedQty,
       pickedQty: integer(row.total_picked_qty),
-      available: variantQty - reservedQty,
+      unreservedQty: variantQty - reservedQty,
+      atpUnits: 0,
+      available: 0,
       locationCount: integer(row.location_count),
       pickableQty: integer(row.pickable_variant_qty),
       binCount,
@@ -92,24 +99,23 @@ export async function projectInventoryLevels(input: {
     };
   });
 
-  const recipeProductIds = [...new Set(levels
-    .filter((level) => level.inventoryStrategy === "recipe_managed" && level.productId != null)
+  const productIds = [...new Set(levels
+    .filter((level) => level.productId != null)
     .map((level) => level.productId as number))];
-  const recipeAtpRows = await Promise.all(recipeProductIds.map((productId) => (
+  const atpRows = await Promise.all(productIds.map((productId) => (
     input.warehouseId == null
       ? input.atp.getAtpPerVariant(productId)
       : input.atp.getAtpPerVariantByWarehouse(productId, input.warehouseId)
   )));
-  const recipeAtpByVariant = new Map<number, number>();
-  for (const row of recipeAtpRows.flat()) {
-    recipeAtpByVariant.set(row.productVariantId, row.atpUnits);
+  const atpByVariant = new Map<number, number>();
+  for (const row of atpRows.flat()) {
+    atpByVariant.set(row.productVariantId, row.atpUnits);
   }
 
   const skuCounts = new Map<string, number>();
   for (const level of levels) {
-    if (level.inventoryStrategy === "recipe_managed") {
-      level.available = recipeAtpByVariant.get(level.variantId) ?? 0;
-    }
+    level.atpUnits = atpByVariant.get(level.variantId) ?? 0;
+    level.available = level.atpUnits;
     if (level.sku) {
       const normalizedSku = level.sku.toUpperCase();
       skuCounts.set(normalizedSku, (skuCounts.get(normalizedSku) ?? 0) + 1);

@@ -11,12 +11,22 @@ import { requirePermission, requireAuth, upload } from "../../routes/middleware"
 import { insertWarehouseLocationSchema, insertProductSchema, insertProductVariantSchema } from "@shared/schema";
 import Papa from "papaparse";
 import { projectInventoryLevels } from "./application/inventory-levels.query";
+import { projectWarehouseInventorySummary } from "./application/warehouse-inventory-summary.query";
 import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
 import { requireLegacyQuantityImport, sendInventoryQuantityError, validateInventoryCommandKey } from "./interfaces/quantity-command.middleware";
 import { readInventoryQuantityCapabilities } from "./infrastructure/quantity-authority.query";
 import { OrderCOGSCurrencyError } from "./domain/order-cogs-read";
+import { INVENTORY_LEGACY_ADMIN_CONTROLS } from "../inventory-planning/application/inventory-legacy-admin-control.service";
+import { createInventoryLegacyAdminControlService } from "../inventory-planning/infrastructure/inventory-legacy-admin-control.repository";
+import { sendInventoryLegacyAdminControlError } from "../inventory-planning/interfaces/http/inventory-legacy-admin-control.error";
+import { projectCanonicalVariantsInsideRuntimeTransaction } from "../inventory-planning/application/inventory-availability-runtime-atp.service";
+import type { InventoryAvailabilityRuntimeAtpContext } from "../inventory-planning/application/inventory-availability-runtime-atp.service";
+import { createChannelSyncService } from "../channels/sync.service";
+
+type InventoryRouteTransaction = Pick<typeof db, "select" | "insert" | "update" | "delete" | "execute">;
 
 export function registerInventoryRoutes(app: Express) {
+  const inventoryLegacyAdminControl = createInventoryLegacyAdminControlService();
   app.get("/api/inventory/quantity-capabilities", requireAuth, async (_req, res, next) => {
     try { res.json(await readInventoryQuantityCapabilities()); }
     catch (error) { next(error); }
@@ -604,6 +614,11 @@ export function registerInventoryRoutes(app: Express) {
       if (isNaN(variantId) || variantId <= 0) {
         return res.status(400).json({ error: "Invalid variant ID" });
       }
+      const warehouseIdRaw = req.query.warehouseId;
+      const warehouseId = warehouseIdRaw == null ? null : Number(warehouseIdRaw);
+      if (warehouseId != null && (!Number.isInteger(warehouseId) || warehouseId <= 0)) {
+        return res.status(400).json({ error: "Invalid warehouse ID" });
+      }
       
       // Verify variant exists
       const variant = await storage.getProductVariantById(variantId);
@@ -621,11 +636,20 @@ export function registerInventoryRoutes(app: Express) {
       const assignedLocationIdsList = await storage.getAssignedLocationIdsForVariant(variantId);
       const assignedLocationIds = new Set(assignedLocationIdsList);
 
-      const result = levels.map(level => ({
-        ...level,
-        isAssigned: assignedLocationIds.has(level.warehouseLocationId),
-        location: locationMap.get(level.warehouseLocationId)
-      }));
+      const result = levels
+        .filter((level) => warehouseId == null
+          || locationMap.get(level.warehouseLocationId)?.warehouseId === warehouseId)
+        .map((level) => {
+          const unreservedQty = level.variantQty - level.reservedQty;
+          return {
+            ...level,
+            unreservedQty,
+            // Backward-compatible physical alias; this is not ATP.
+            available: unreservedQty,
+            isAssigned: assignedLocationIds.has(level.warehouseLocationId),
+            location: locationMap.get(level.warehouseLocationId),
+          };
+        });
 
       res.json(result);
     } catch (error) {
@@ -666,24 +690,39 @@ export function registerInventoryRoutes(app: Express) {
   app.get("/api/inventory/backorder-status/:itemId", requireAuth, async (req, res) => {
     try {
       const itemId = parseInt(req.params.itemId);
-      const { atp: atpSvc } = req.app.locals.services;
-      const variant = await storage.getProductVariantById(itemId);
-      let status;
-      if (!variant) {
-        status = { isBackordered: false, backorderQty: 0, atp: 0 };
-      } else if (!isInventoryManagedVariant(variant)) {
-        status = { isBackordered: false, backorderQty: 0, atp: 0 };
-      } else {
-        const atpBase = await atpSvc.getAtpBase(variant.productId);
-        status = {
-          isBackordered: atpBase < 0,
-          backorderQty: atpBase < 0 ? Math.abs(atpBase) : 0,
-          atp: atpBase,
-        };
-      }
+      const readBackorderStatus = async (
+        authority: "legacy" | "canonical",
+        transaction: InventoryRouteTransaction,
+        context: InventoryAvailabilityRuntimeAtpContext,
+      ) => {
+        const variant = await storage.getProductVariantById(itemId, transaction);
+        if (!variant || !isInventoryManagedVariant(variant)) {
+          return { isBackordered: false, backorderQty: 0, atp: 0 };
+        }
+        if (authority === "legacy") {
+          const atpBase = await context.legacy.getAtpBase(variant.productId);
+          return {
+            isBackordered: atpBase < 0,
+            backorderQty: atpBase < 0 ? Math.abs(atpBase) : 0,
+            atp: atpBase,
+          };
+        }
+        const rows = await projectCanonicalVariantsInsideRuntimeTransaction(
+          context,
+          variant.productId,
+          { kind: "network" },
+        );
+        const atpUnits = rows.find((row) => row.productVariantId === variant.id)?.atpUnits ?? 0;
+        return { isBackordered: false, backorderQty: 0, atp: atpUnits };
+      };
+      const status = await inventoryLegacyAdminControl.executeAuthorityAwareRead({
+        legacy: (transaction, context) => readBackorderStatus("legacy", transaction, context),
+        canonical: (transaction, context) => readBackorderStatus("canonical", transaction, context),
+      });
       res.json(status);
     } catch (error) {
       console.error("Error checking backorder status:", error);
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: "Failed to check backorder status" });
     }
   });
@@ -705,103 +744,53 @@ export function registerInventoryRoutes(app: Express) {
   // Optional query params: warehouseId (filter by warehouse)
   app.get("/api/inventory/summary", requireAuth, async (req, res) => {
     try {
-      const warehouseId = req.query.warehouseId ? parseInt(req.query.warehouseId as string) : null;
+      const warehouseIdRaw = req.query.warehouseId;
+      const warehouseId = warehouseIdRaw == null ? null : Number(warehouseIdRaw);
+      if (warehouseId != null && (!Number.isInteger(warehouseId) || warehouseId <= 0)) {
+        return res.status(400).json({
+          error: "INVALID_WAREHOUSE_ID",
+          message: "warehouseId must be a positive integer",
+        });
+      }
       
       if (warehouseId) {
-        // Warehouse-specific summary: filter inventory levels by locations in this warehouse
-        const allLocations = await storage.getAllWarehouseLocations();
-        const warehouseLocationIds = new Set(
-          allLocations.filter(loc => loc.warehouseId === warehouseId).map(loc => loc.id)
-        );
-        
-        const allLevels = await storage.getAllInventoryLevels();
-        const filteredLevels = allLevels.filter(level => warehouseLocationIds.has(level.warehouseLocationId));
-        
-        // Group levels by variantId to calculate totals
-        const levelsByVariant = new Map<number, typeof filteredLevels>();
-        for (const level of filteredLevels) {
-          if (!level.productVariantId) continue;
-          const existing = levelsByVariant.get(level.productVariantId) || [];
-          existing.push(level);
-          levelsByVariant.set(level.productVariantId, existing);
-        }
-        
-        // Get all variants and products to build summaries
-        const allVariants = await storage.getAllProductVariants();
-        const allProducts = await storage.getAllProducts();
-        const variantToProduct = new Map<number, number>();
-        for (const v of allVariants) {
-          variantToProduct.set(v.id, v.productId);
-        }
-
-        // Build summary by product
-        const summaryByProduct = new Map<number, {
-          productId: number;
-          baseSku: string;
-          name: string;
-          totalOnHandPieces: number;
-          totalReservedPieces: number;
-          totalAtpPieces: number;
-          variants: Array<{
-            variantId: number;
-            sku: string;
-            name: string;
-            unitsPerVariant: number;
-            available: number;
-            variantQty: number;
-            reservedQty: number;
-            pickedQty: number;
-            atpPieces: number;
-          }>;
-        }>();
-
-        for (const [variantId, levels] of levelsByVariant) {
-          const variant = allVariants.find(v => v.id === variantId);
-          if (!variant || !isInventoryManagedVariant(variant)) continue;
-          const productId = variant.productId;
-          const product = allProducts.find(p => p.id === productId);
-          if (!product) continue;
-
-          const upv = variant.unitsPerVariant || 1;
-          const variantQty = levels.reduce((sum: number, l: any) => sum + (l.variantQty || 0), 0);
-          const reservedQty = levels.reduce((sum: number, l: any) => sum + (l.reservedQty || 0), 0);
-          const pickedQty = levels.reduce((sum: number, l: any) => sum + (l.pickedQty || 0), 0);
-          const onHandPieces = variantQty * upv;
-          const reservedPieces = reservedQty * upv;
-          const pickedPieces = pickedQty * upv;
-          const atpPieces = onHandPieces - reservedPieces - pickedPieces;
-
-          let summary = summaryByProduct.get(productId);
-          if (!summary) {
-            summary = {
-              productId,
-              baseSku: product.sku || '',
-              name: product.name,
-              totalOnHandPieces: 0,
-              totalReservedPieces: 0,
-              totalAtpPieces: 0,
-              variants: [],
-            };
-            summaryByProduct.set(productId, summary);
-          }
-
-          summary.totalOnHandPieces += onHandPieces;
-          summary.totalReservedPieces += reservedPieces;
-          summary.totalAtpPieces += atpPieces;
-          summary.variants.push({
-            variantId: variant.id,
-            sku: variant.sku || '',
-            name: variant.name,
-            unitsPerVariant: variant.unitsPerVariant,
-            available: Math.floor(atpPieces / upv),
-            variantQty,
-            reservedQty,
-            pickedQty,
-            atpPieces,
+        const readWarehouseSummary = async (
+          authority: "legacy" | "canonical",
+          transaction: InventoryRouteTransaction,
+          context: InventoryAvailabilityRuntimeAtpContext,
+        ) => {
+          const [allLocations, allLevels, allVariants, allProducts] = await Promise.all([
+            storage.getAllWarehouseLocations(transaction),
+            storage.getAllInventoryLevels(transaction),
+            storage.getAllProductVariants(false, transaction),
+            storage.getAllProducts(false, transaction),
+          ]);
+          const warehouseLocationIds = new Set(
+            allLocations.filter((location) => location.warehouseId === warehouseId).map((location) => location.id),
+          );
+          return projectWarehouseInventorySummary({
+            warehouseId,
+            authority,
+            levels: allLevels.filter((level) => warehouseLocationIds.has(level.warehouseLocationId)),
+            variants: allVariants.filter(isInventoryManagedVariant),
+            products: allProducts,
+            atp: authority === "legacy"
+              ? context.legacy
+              : {
+                  getAtpPerVariantByWarehouse: (productId: number, selectedWarehouseId: number) =>
+                    projectCanonicalVariantsInsideRuntimeTransaction(
+                      context,
+                      productId,
+                      { kind: "warehouse", warehouseId: selectedWarehouseId },
+                    ),
+                },
           });
-        }
-
-        res.json(Array.from(summaryByProduct.values()));
+        };
+        const summaries = await inventoryLegacyAdminControl.executeAuthorityAwareRead({
+          legacy: (transaction, context) => readWarehouseSummary("legacy", transaction, context),
+          canonical: (transaction, context) => readWarehouseSummary("canonical", transaction, context),
+        });
+        res.json(summaries);
       } else {
         // Original behavior: full summary across all warehouses
         const products = await storage.getAllProducts();
@@ -812,33 +801,45 @@ export function registerInventoryRoutes(app: Express) {
       }
     } catch (error) {
       console.error("Error fetching inventory summary:", error);
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: "Failed to fetch summary" });
     }
   });
 
   // Sync inventory to all active channels via channel-sync service.
   // Supports single-product sync (productId in body) or full sync.
-  app.post("/api/inventory/sync-shopify", requireAuth, async (req, res) => {
+  app.post("/api/inventory/sync-shopify", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const { channelSync } = req.app.locals.services;
+      const { inventoryPublicationWork } = req.app.locals.services;
       const { productId } = req.body;
 
       if (productId) {
-        const result = await channelSync.syncProduct(Number(productId));
+        const work = await inventoryPublicationWork.syncProduct(
+          Number(productId),
+          "legacy_sync_shopify_product_route",
+        );
         return res.json({
           message: "Channel inventory sync completed",
-          synced: result.synced,
-          errors: result.errors,
-          variants: result.variants,
+          authority: work.authority,
+          skippedReason: work.skippedReason,
+          synced: work.inventory.reduce((total, item) => total + item.variantsPushed, 0),
+          errors: work.inventory.flatMap((item) => item.details
+            .filter((detail) => detail.status === "error" && detail.error)
+            .map((detail) => `${detail.sku}: ${detail.error}`)),
+          variants: work.inventory.flatMap((item) => item.details),
         });
       }
 
-      const result = await channelSync.syncAllProducts();
+      const work = await inventoryPublicationWork.syncAllProducts("legacy_sync_shopify_all_route");
       res.json({
         message: "Channel inventory sync completed",
-        synced: result.synced,
-        errors: result.errors,
-        total: result.total,
+        authority: work.authority,
+        skippedReason: work.skippedReason,
+        synced: work.inventory.reduce((total, item) => total + item.variantsPushed, 0),
+        errors: work.inventory.flatMap((item) => item.details
+          .filter((detail) => detail.status === "error" && detail.error)
+          .map((detail) => `${detail.sku}: ${detail.error}`)),
+        total: work.inventory.reduce((total, item) => total + item.products, 0),
       });
     } catch (error) {
       console.error("Error syncing inventory to channels:", error);
@@ -1119,17 +1120,18 @@ export function registerInventoryRoutes(app: Express) {
 
   app.post("/api/channel-sync/product/:productId", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const { channelSync } = req.app.locals.services;
+      const { inventoryPublicationWork } = req.app.locals.services;
       const productId = parseInt(req.params.productId);
 
       if (isNaN(productId)) {
         return res.status(400).json({ error: "Invalid product ID" });
       }
 
-      const result = await channelSync.syncProduct(productId);
+      const result = await inventoryPublicationWork.syncProduct(productId, "manual_product_sync");
       res.json(result);
     } catch (error: any) {
       console.error("Error syncing product:", error);
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: error.message || "Failed to sync product" });
     }
   });
@@ -1140,33 +1142,60 @@ export function registerInventoryRoutes(app: Express) {
       const channelId = parseInt(req.params.id);
       const { allocationPct, allocationFixedQty } = req.body;
 
-      const updated = await storage.updateChannelAllocation(channelId, allocationPct ?? null, allocationFixedQty ?? null);
+      const updated = await inventoryLegacyAdminControl.executeLegacyWrite(
+        INVENTORY_LEGACY_ADMIN_CONTROLS.channelAllocation,
+        (transaction) => storage.updateChannelAllocation(
+          channelId,
+          allocationPct ?? null,
+          allocationFixedQty ?? null,
+          transaction,
+        ),
+      );
       if (!updated) return res.status(404).json({ error: "Channel not found" });
 
       res.json(updated);
     } catch (error: any) {
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: error.message || "Failed to update channel allocation" });
     }
   });
 
   app.post("/api/channel-sync/all", requirePermission("inventory", "adjust"), async (req, res) => {
     try {
-      const { channelSync } = req.app.locals.services;
-      const channelId = req.body.channelId ? parseInt(req.body.channelId) : undefined;
-
+      const { inventoryPublicationWork } = req.app.locals.services;
+      const channelId = Number(req.body?.channelId);
+      if (!Number.isSafeInteger(channelId) || channelId <= 0) {
+        return res.status(400).json({
+          error: "A positive channelId is required; manual inventory publication cannot fan out across channels.",
+        });
+      }
       // Fire-and-forget: respond immediately to avoid Heroku 30s timeout
-      res.json({ status: "started", message: "Inventory sync started in background" });
+      res.status(202).json({
+        status: "started",
+        channelId,
+        message: "Authority-aware channel-scoped inventory publication started in background",
+      });
 
       // Run sync in background
-      channelSync.syncAllProducts(channelId)
-        .then((result: any) => {
-          console.log(`[ChannelSync] Background sync complete: ${result.synced}/${result.total} synced, ${result.errors.length} errors`);
+      inventoryPublicationWork.syncChannelProducts(channelId, "manual_channel_sync")
+        .then((result) => {
+          console.log(JSON.stringify({
+            event: "manual_channel_inventory_publication_completed",
+            authority: result.authority,
+            channelId,
+            result,
+          }));
         })
         .catch((err: any) => {
-          console.error("[ChannelSync] Background sync failed:", err);
+          console.error(JSON.stringify({
+            event: "manual_channel_inventory_publication_failed",
+            channelId,
+            error: err instanceof Error ? err.message : String(err),
+          }));
         });
     } catch (error: any) {
       console.error("Error starting channel sync:", error);
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: error.message || "Failed to start sync" });
     }
   });
@@ -1202,10 +1231,17 @@ export function registerInventoryRoutes(app: Express) {
 
   app.get("/api/channel-sync/divergence", requirePermission("channels", "view"), async (req, res) => {
     try {
-      const { channelSync } = req.app.locals.services;
-      const divergence = await channelSync.getDivergence();
+      // channel_feeds.lastSyncedQty is legacy evidence. Once canonical
+      // authority is active, callers must use exact target/outbox/readback
+      // evidence rather than comparing canonical ATP to this retired table.
+      const divergence = await inventoryLegacyAdminControl.executeLegacyRead(
+        INVENTORY_LEGACY_ADMIN_CONTROLS.channelFeedRead,
+        (transaction, context) => createChannelSyncService(transaction, context.legacy)
+          .getDivergence(),
+      );
       res.json(divergence);
     } catch (error: any) {
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: error.message || "Failed to get divergence" });
     }
   });
@@ -1732,9 +1768,16 @@ export function registerInventoryRoutes(app: Express) {
   app.post("/api/catalog/products", requirePermission("inventory", "create"), async (req, res) => {
     try {
       const validatedData = insertProductSchema.parse(req.body);
-      const product = await storage.createProduct(validatedData);
+      const createProduct = (executor: InventoryRouteTransaction = db) => storage.createProduct(validatedData, executor);
+      const product = hasExplicitLegacyInventoryStrategy(req.body)
+        ? await inventoryLegacyAdminControl.executeLegacyWrite(
+            INVENTORY_LEGACY_ADMIN_CONTROLS.inventoryStrategy,
+             createProduct,
+          )
+        : await createProduct();
       res.json(product);
     } catch (error: any) {
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
       if (error.name === "ZodError") {
         return res.status(400).json({ error: "Invalid product data", details: error.errors });
       }
@@ -1747,12 +1790,45 @@ export function registerInventoryRoutes(app: Express) {
     try {
       const id = parseInt(req.params.id);
       const validatedData = insertProductSchema.partial().parse(req.body);
-      const product = await storage.updateProduct(id, validatedData);
+      const requestedLegacyInventoryStrategy = hasExplicitLegacyInventoryStrategy(req.body);
+      const updateProduct = (
+        assertLegacyInventoryStrategyMutation: () => void = () => undefined,
+        transaction?: InventoryRouteTransaction,
+      ) => {
+        const run = async (tx: InventoryRouteTransaction) => {
+        await tx.execute(sql`
+          SELECT id
+          FROM catalog.products
+          WHERE id = ${id}
+          FOR UPDATE
+        `);
+        const currentProduct = await storage.getProductById(id, tx);
+        if (!currentProduct) return null;
+        const persistedData = { ...validatedData };
+        if (
+          requestedLegacyInventoryStrategy
+          && currentProduct.inventoryStrategy !== validatedData.inventoryStrategy
+        ) {
+          assertLegacyInventoryStrategyMutation();
+        } else if (requestedLegacyInventoryStrategy) {
+          delete persistedData.inventoryStrategy;
+        }
+          return storage.updateProduct(id, persistedData, tx);
+        };
+        return transaction ? run(transaction) : db.transaction(run);
+      };
+      const product = requestedLegacyInventoryStrategy
+        ? await inventoryLegacyAdminControl.executeGuardedLegacyWrite(
+            INVENTORY_LEGACY_ADMIN_CONTROLS.inventoryStrategy,
+            (guard, transaction) => updateProduct(guard.assertLegacyMutation, transaction),
+          )
+        : await updateProduct();
       if (!product) {
         return res.status(404).json({ error: "Product not found" });
       }
       res.json(product);
     } catch (error: any) {
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
       if (error.name === "ZodError") {
         return res.status(400).json({ error: "Invalid product data", details: error.errors });
       }
@@ -1816,10 +1892,17 @@ export function registerInventoryRoutes(app: Express) {
       if (!parsed.success) {
         return res.status(400).json({ error: "Invalid product data", details: parsed.error });
       }
-      const item = await storage.createProduct(parsed.data);
+      const createProduct = (executor: InventoryRouteTransaction = db) => storage.createProduct(parsed.data, executor);
+      const item = hasExplicitLegacyInventoryStrategy(req.body)
+        ? await inventoryLegacyAdminControl.executeLegacyWrite(
+            INVENTORY_LEGACY_ADMIN_CONTROLS.inventoryStrategy,
+            createProduct,
+          )
+        : await createProduct();
       res.status(201).json(item);
     } catch (error) {
       console.error("Error creating product:", error);
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: "Failed to create product" });
     }
   });
@@ -2201,11 +2284,15 @@ export function registerInventoryRoutes(app: Express) {
           variantQty: number;
           reservedQty: number;
           pickedQty: number;
+          unreservedQty: number;
+          /** @deprecated Physical compatibility alias for unreservedQty. */
           available: number;
           isAssigned: boolean;
         }>;
         totalQty: number;
         totalReserved: number;
+        totalUnreservedQty: number;
+        /** @deprecated Physical compatibility alias for totalUnreservedQty. */
         totalAvailable: number;
         skuCount: number;
         hasUnassigned: boolean;
@@ -2226,13 +2313,14 @@ export function registerInventoryRoutes(app: Express) {
             items: [],
             totalQty: 0,
             totalReserved: 0,
+            totalUnreservedQty: 0,
             totalAvailable: 0,
             skuCount: 0,
             hasUnassigned: false,
           });
         }
         const bin = binMap.get(locId)!;
-        const available = row.variant_qty - row.reserved_qty;
+        const unreservedQty = row.variant_qty - row.reserved_qty;
         const isAssigned = row.is_assigned === 1;
         bin.items.push({
           inventoryLevelId: row.inventory_level_id,
@@ -2243,12 +2331,14 @@ export function registerInventoryRoutes(app: Express) {
           variantQty: row.variant_qty,
           reservedQty: row.reserved_qty,
           pickedQty: row.picked_qty,
-          available,
+          unreservedQty,
+          available: unreservedQty,
           isAssigned,
         });
         bin.totalQty += row.variant_qty;
         bin.totalReserved += row.reserved_qty;
-        bin.totalAvailable += available;
+        bin.totalUnreservedQty += unreservedQty;
+        bin.totalAvailable = bin.totalUnreservedQty;
         bin.skuCount++;
         if (!isAssigned) bin.hasUnassigned = true;
       }
@@ -2275,6 +2365,8 @@ export function registerInventoryRoutes(app: Express) {
         variantQty: row.variant_qty,
         reservedQty: row.reserved_qty,
         pickedQty: row.picked_qty,
+        unreservedQty: row.variant_qty - row.reserved_qty,
+        // Backward-compatible physical alias; this is not ATP.
         available: row.variant_qty - row.reserved_qty,
       }));
       
@@ -2316,6 +2408,8 @@ export function registerInventoryRoutes(app: Express) {
         variantQty: row.variant_qty,
         reservedQty: row.reserved_qty,
         pickedQty: row.picked_qty,
+        unreservedQty: row.available_qty,
+        // Backward-compatible physical alias; this is not ATP.
         availableQty: row.available_qty,
       }));
       
@@ -2837,4 +2931,13 @@ export function registerInventoryRoutes(app: Express) {
       res.status(500).json({ error: "Failed to get affected orders" });
     }
   });
+}
+
+function hasExplicitLegacyInventoryStrategy(value: unknown): boolean {
+  return Boolean(
+    value
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && Object.prototype.hasOwnProperty.call(value, "inventoryStrategy"),
+  );
 }

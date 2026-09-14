@@ -22,9 +22,12 @@ export interface InventoryAvailabilityRuntimeAtpContext {
   getProductIdsByVariantIds(variantIds: readonly number[]): Promise<Map<number, number>>;
 }
 
-export interface InventoryAvailabilityRuntimeAtpExecutor {
+export interface InventoryAvailabilityRuntimeAtpExecutor<Transaction = unknown> {
   execute<T>(
-    work: (context: InventoryAvailabilityRuntimeAtpContext) => Promise<T>,
+    work: (
+      context: InventoryAvailabilityRuntimeAtpContext,
+      transaction: Transaction,
+    ) => Promise<T>,
   ): Promise<T>;
 }
 
@@ -256,38 +259,57 @@ export class AuthorityAwareInventoryAtpService implements InventoryAtpServiceCon
     productId: number,
     scope: AtpProjectionRequestDto["scope"],
   ): Promise<VariantAtp[]> {
-    const snapshot = await context.captureActiveSupplySnapshot(productId);
-    const targetVariants = snapshot.variants
-      .filter((variant) => variant.productId === productId && variant.isActive)
-      .filter(isCustomerSellableVariant)
-      .sort((left, right) => left.id - right.id);
-    return targetVariants.map((variant) => {
-      const projection = projectCanonicalAtp(snapshot, {
-        targetVariantId: variant.id,
-        scope,
-      });
-      if (projection.blockers.length > 0) {
-        this.logger.warn({
-          event: "canonical_atp_projection_blocked",
-          productId,
-          productVariantId: variant.id,
-          scope,
-          authorityRevision: context.authorityRevision,
-          activationRunId: context.activationRunId,
-          blockerCodes: projection.blockers.map((blocker) => blocker.code),
-        });
-      }
-      return {
-        productVariantId: variant.id,
-        sku: variant.sku ?? "",
-        name: variant.name,
-        unitsPerVariant: variant.unitsPerVariant,
-        salesEligibility: "sellable",
-        atpUnits: safeNonnegativeQuantity(projection.atpUnits, "projection.atpUnits", variant.id),
-        atpBase: safeNonnegativeQuantity(projection.atpBaseUnits, "projection.atpBaseUnits", variant.id),
-      };
-    });
+    return projectCanonicalVariantsInsideRuntimeTransaction(
+      context,
+      productId,
+      scope,
+      this.logger,
+    );
   }
+}
+
+/**
+ * Reuses the canonical ATP projection inside an authority transaction that is
+ * already pinned by the caller. This prevents compatibility views from opening
+ * a second pool transaction and observing a different authority revision.
+ */
+export async function projectCanonicalVariantsInsideRuntimeTransaction(
+  context: InventoryAvailabilityRuntimeAtpContext,
+  productId: number,
+  scope: AtpProjectionRequestDto["scope"],
+  logger: InventoryAvailabilityRuntimeAtpLogger = defaultLogger,
+): Promise<VariantAtp[]> {
+  const snapshot = await context.captureActiveSupplySnapshot(productId);
+  const targetVariants = snapshot.variants
+    .filter((variant) => variant.productId === productId && variant.isActive)
+    .filter(isCustomerSellableVariant)
+    .sort((left, right) => left.id - right.id);
+  return targetVariants.map((variant) => {
+    const projection = projectCanonicalAtp(snapshot, {
+      targetVariantId: variant.id,
+      scope,
+    });
+    if (projection.blockers.length > 0) {
+      logger.warn({
+        event: "canonical_atp_projection_blocked",
+        productId,
+        productVariantId: variant.id,
+        scope,
+        authorityRevision: context.authorityRevision,
+        activationRunId: context.activationRunId,
+        blockerCodes: projection.blockers.map((blocker) => blocker.code),
+      });
+    }
+    return {
+      productVariantId: variant.id,
+      sku: variant.sku ?? "",
+      name: variant.name,
+      unitsPerVariant: variant.unitsPerVariant,
+      salesEligibility: "sellable",
+      atpUnits: safeNonnegativeQuantity(projection.atpUnits, "projection.atpUnits", variant.id),
+      atpBase: safeNonnegativeQuantity(projection.atpBaseUnits, "projection.atpBaseUnits", variant.id),
+    };
+  });
 }
 
 function positiveInteger(value: unknown, field: string): number {

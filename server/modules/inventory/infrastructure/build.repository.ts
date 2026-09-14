@@ -19,6 +19,13 @@ import {
   type ExecuteBuildRunInput,
   type ReverseBuildRunInput,
 } from "./build-execution.repository";
+import type { TransformationExecutionAuthorityPort } from "../application/transformation-execution-authority.port";
+import { legacyTransformationExecutionAuthority } from "../application/transformation-execution-authority.port";
+import {
+  TransformationExecutionAuthorityError,
+  type BuildAuthorization,
+  type BuildAuthorizationRequest,
+} from "../domain/transformation-execution-authority";
 
 export type {
   BuildCancellationResult,
@@ -80,6 +87,37 @@ export type CreateBuildOrderInput = {
   idempotencyKey: string;
   actorId?: string;
 };
+
+function rethrowBuildAuthorityError(error: unknown): never {
+  if (error instanceof TransformationExecutionAuthorityError) {
+    throw new BuildDomainError(error.code, error.message, error.context);
+  }
+  throw error;
+}
+
+function buildAuthorizationRequest(
+  recipe: any,
+  components: readonly any[],
+  warehouseId: number,
+): BuildAuthorizationRequest {
+  return {
+    recipeId: Number(recipe.id),
+    recipeCode: String(recipe.code),
+    recipeVersion: Number(recipe.version),
+    recipeType: recipe.recipe_type,
+    warehouseId,
+    outputProductId: Number(recipe.output_product_id),
+    outputVariantId: Number(recipe.output_variant_id),
+    outputUnitsPerVariant: Number(recipe.output_units_per_variant),
+    outputQty: Number(recipe.output_qty),
+    components: components.map((component) => ({
+      componentVariantId: Number(component.component_variant_id),
+      componentProductId: Number(component.component_product_id),
+      componentUnitsPerVariant: Number(component.component_units_per_variant),
+      componentQty: Number(component.qty),
+    })),
+  };
+}
 
 
 function toBigInt(value: unknown, field: string): bigint {
@@ -265,15 +303,22 @@ export class BuildRepository {
 
   constructor(
     private readonly db: Db,
-    options: { onBuildOrderCompleted?: (tx: Db, context: BuildOrderCompletedContext) => Promise<void> } = {},
+    options: {
+      onBuildOrderCompleted?: (tx: Db, context: BuildOrderCompletedContext) => Promise<void>;
+      transformationAuthority?: TransformationExecutionAuthorityPort;
+    } = {},
   ) {
     this.execution = new BuildExecutionRepository(db, {
       loadActiveBuildVariantFacts,
       normalizeBuildLotCosts,
       buildMillsToRoundedCents,
       onBuildOrderCompleted: options.onBuildOrderCompleted,
+      transformationAuthority: options.transformationAuthority ?? legacyTransformationExecutionAuthority,
     });
+    this.transformationAuthority = options.transformationAuthority ?? legacyTransformationExecutionAuthority;
   }
+
+  private readonly transformationAuthority: TransformationExecutionAuthorityPort;
   private async findIdempotentOrder(
     tx: Db,
     input: CreateBuildOrderInput,
@@ -653,6 +698,17 @@ export class BuildRepository {
       const existing = await this.findIdempotentOrder(tx, input, sourceLocationMap);
       if (existing) return existing;
 
+      let authorization: BuildAuthorization;
+      try {
+        authorization = await this.transformationAuthority.pinBuildRecipe(
+          tx,
+          input.recipeId,
+          input.warehouseId,
+        );
+      } catch (error) {
+        rethrowBuildAuthorityError(error);
+      }
+
       const recipeResult = await tx.execute(sql`
         SELECT * FROM inventory.build_recipes
         WHERE id = ${input.recipeId}
@@ -696,6 +752,16 @@ export class BuildRepository {
         unitsPerVariant: Number(row.component_units_per_variant),
         qtyPerBuild: Number(row.qty),
       }));
+      if (authorization.runtime.authority === "canonical") {
+        try {
+          this.transformationAuthority.assertBuildSnapshot(
+            authorization,
+            buildAuthorizationRequest(recipe, componentResult.rows, input.warehouseId),
+          );
+        } catch (error) {
+          rethrowBuildAuthorityError(error);
+        }
+      }
       assertBuildVariantSnapshotsCurrent({
         snapshots: [outputSnapshot, ...componentDefinitions],
         currentVariants: variantFacts,
@@ -828,7 +894,10 @@ export class BuildRepository {
 
 export function createBuildRepository(
   db: Db,
-  options: { onBuildOrderCompleted?: (tx: Db, context: BuildOrderCompletedContext) => Promise<void> } = {},
+  options: {
+    onBuildOrderCompleted?: (tx: Db, context: BuildOrderCompletedContext) => Promise<void>;
+    transformationAuthority?: TransformationExecutionAuthorityPort;
+  } = {},
 ): BuildRepository {
   return new BuildRepository(db, options);
 }

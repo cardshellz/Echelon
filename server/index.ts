@@ -20,7 +20,10 @@ import { startDropshipOrderProcessingWorker } from "./modules/dropship/infrastru
 import { startDropshipEbayOrderIntakeWorker } from "./modules/dropship/infrastructure/dropship-ebay-order-intake-runner";
 import { startDropshipReturnsMaintenanceWorker } from "./modules/dropship/infrastructure/dropship-returns-maintenance-runner";
 import { startDropshipReturnIntakeWorker } from "./modules/dropship/infrastructure/dropship-return-intake-runner";
-import { setDropshipFulfillmentSync } from "./modules/dropship/infrastructure/dropship-fulfillment-sync.registry";
+import {
+  setDropshipFulfillmentSync,
+  setDropshipInventoryRuntimeAuthorityGate,
+} from "./modules/dropship/infrastructure/dropship-fulfillment-sync.registry";
 import { startFulfillmentSweeper } from "./modules/oms/fulfillment-sweeper.scheduler";
 import { startChannelFulfillmentCommandWorker } from "./modules/oms/channel-fulfillment-command.worker";
 import { startCycleCountFreezeGuard } from "./modules/inventory/cycle-count-freeze-guard.scheduler";
@@ -33,6 +36,10 @@ import { createReceiptCostRecoveryRepository } from "./modules/procurement/recei
 import { startInboundTrackingScheduler } from "./modules/procurement/inbound-tracking.runtime";
 import { startCostReportingWorker } from "./modules/procurement/cost-reporting.service";
 import { startVariantAvailabilitySyncWorker } from "./modules/channels/variant-availability-sync.worker";
+import {
+  startInventoryPublicationSweepScheduler,
+  type InventoryPublicationSweepSchedulerHandle,
+} from "./modules/channels/inventory-publication-sweep.scheduler";
 import { startInventoryPublicationOutboxWorker } from "./modules/inventory-planning/application/inventory-publication-outbox.worker";
 import { startQuantityPublicationCatchupWorker } from "./modules/inventory-planning/application/quantity-publication-catchup.worker";
 import { startFinancialCommandRetentionWorker } from "./platform/commands/financial-command-retention.worker";
@@ -60,7 +67,11 @@ import { createCarrierTrackingProjectionReader } from "./modules/shipping/carrie
 import { registerCarrierTrackingProjectionRoutes } from "./modules/shipping/carrier-tracking-projection.routes";
 import { deriveReconcileEvent } from "./modules/shipping/reconcile-derive";
 import type { SafeUser } from "@shared/schema";
-import { channels as channelsTable, syncLog as syncLogTable } from "@shared/schema";
+import {
+  channels as channelsTable,
+  inventoryAvailabilityRuntimeAuthority,
+  syncLog as syncLogTable,
+} from "@shared/schema";
 import { pool as dbPool } from "./db";
 import * as http from "http";
 import { createEbayAuthConfig, EbayAuthService } from "./modules/channels/adapters/ebay/ebay-auth.service";
@@ -309,12 +320,12 @@ app.use((req, res, next) => {
  *
  * Replaces the old channelSync.syncAllProducts() scheduled interval.
  */
-function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, dbInstance: any) {
+function startEchelonSyncScheduler(
+  services: ReturnType<typeof createServices>,
+): InventoryPublicationSweepSchedulerHandle | null {
   if (logSchedulerDisabled("echelon-sync", "Echelon sync scheduler", "ECHELON_SYNC_SCHEDULER_DISABLED")) {
-    return;
+    return null;
   }
-
-  let intervalHandle: ReturnType<typeof setInterval> | null = null;
 
   async function runSweep() {
     const startTime = Date.now();
@@ -325,29 +336,18 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
         return; // Silently skip — global sync is off
       }
 
-      // 2. Get all active channels with sync enabled
-      const activeChannels = await dbInstance
-        .select()
-        .from(channelsTable)
-        .where(and(
-          eq(channelsTable.status, "active"),
-          eq(channelsTable.syncEnabled, true),
-        ));
-
-      if (activeChannels.length === 0) {
-        await services.syncSettings.updateLastSweep(Date.now() - startTime);
-        return;
-      }
-
-      log(`[Echelon Sync] Starting sweep for ${activeChannels.length} enabled channel(s)`, "echelon-sync");
-
-      // 3. Run the Echelon orchestrator for all enabled channels
+      // The coordinator is the sole work-creation resolver for both runtime
+      // authorities. Provider admission independently rechecks every live I/O.
       try {
-        // Determine if ALL channels are dry_run or if any are live
-        const hasDryRunOnly = activeChannels.every((c: any) => c.syncMode === "dry_run");
-        const dryRun = hasDryRunOnly;
-
-        const result = await services.echelonOrchestrator.runFullSync({ dryRun });
+        const result = await services.inventoryPublicationWork.syncAllProducts("scheduled_sync");
+        if (result.skippedReason) {
+          log(`[Echelon Sync] Sweep skipped: ${result.skippedReason}`, "echelon-sync");
+          await services.syncSettings.updateLastSweep(Date.now() - startTime);
+          return;
+        }
+        log(result.authority === "canonical"
+          ? "[Echelon Sync] Completed canonical live-target planning"
+          : "[Echelon Sync] Completed exact legacy channel planning", "echelon-sync");
 
         // Log results to sync_log
         for (const inv of result.inventory) {
@@ -393,33 +393,14 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
     }
   }
 
-  async function setupInterval() {
-    try {
-      const globalSettings = await services.syncSettings.getGlobalSettings();
-
-      if (!globalSettings.globalEnabled) {
-        log("[Echelon Sync] Disabled (global_enabled = false)", "echelon-sync");
-        return;
-      }
-
-      const intervalMinutes = globalSettings.sweepIntervalMinutes || 15;
-      if (intervalMinutes <= 0) {
-        log("[Echelon Sync] Disabled (interval = 0)", "echelon-sync");
-        return;
-      }
-
-      log(`[Echelon Sync] Starting with ${intervalMinutes}-minute sweep interval`, "echelon-sync");
-
-      // Run first sweep immediately on boot
-      runSweep();
-
-      intervalHandle = setInterval(() => runSweep(), intervalMinutes * 60 * 1000);
-    } catch (err: any) {
-      console.warn("[Echelon Sync] Failed to start scheduler:", err?.message);
-    }
-  }
-
-  setupInterval();
+  return startInventoryPublicationSweepScheduler({
+    readControl: () => services.syncSettings.getGlobalSettings(),
+    runSweep,
+    logger: {
+      info: (message) => log(`[Echelon Sync] ${message}`, "echelon-sync"),
+      error: (message) => console.warn(`[Echelon Sync] ${message}`),
+    },
+  });
 }
 
 (async () => {
@@ -442,7 +423,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
   // initOrderSyncServices(services);
 
   // Start Echelon sync scheduler (replaces old channelSync scheduler)
-  startEchelonSyncScheduler(services, db);
+  app.locals.inventoryPublicationSweepScheduler = startEchelonSyncScheduler(services);
 
   // Authenticated ShipStation V2 carrier-status observations. This public
   // endpoint is registered before session-protected application routes and
@@ -520,6 +501,7 @@ function startEchelonSyncScheduler(services: ReturnType<typeof createServices>, 
     slaMonitor: services.slaMonitor,
   });
   setDropshipFulfillmentSync(services.wmsSync);
+  setDropshipInventoryRuntimeAuthorityGate(services.dropshipInventoryRuntimeAuthority);
 
   // Start eBay Order Polling (5-min safety net — NON-NEGOTIABLE)
   try {

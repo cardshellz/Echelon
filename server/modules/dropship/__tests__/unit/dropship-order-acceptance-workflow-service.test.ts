@@ -1,8 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+  DropshipOrderAcceptanceService,
   DropshipOrderAcceptanceWorkflowService,
   deriveShippingQuoteIdempotencyKey,
+  type DropshipCanonicalAcceptanceFulfillment,
+  type DropshipInventoryRuntimeAuthorityGate,
   type DropshipLogEvent,
+  type DropshipOrderAcceptanceInput,
+  type DropshipOrderAcceptanceRepository,
   type DropshipOrderAcceptanceResult,
   type DropshipOrderAcceptanceWorkflowContext,
   type DropshipOrderAcceptanceWorkflowRepository,
@@ -98,6 +103,41 @@ describe("DropshipOrderAcceptanceWorkflowService", () => {
         }),
       }),
     ]));
+  });
+
+  it("runs prepare -> canonical claim -> finalize before normal WMS operational promotion", async () => {
+    const events: string[] = [];
+    const acceptanceRepository = new SequencedCanonicalAcceptanceRepository(events);
+    const fulfillment = new SequencedCanonicalFulfillment(events);
+    const acceptanceService = new DropshipOrderAcceptanceService({
+      repository: acceptanceRepository,
+      inventoryAuthority: new CanonicalInventoryAuthority(),
+      canonicalFulfillment: fulfillment,
+      clock: { now: () => now },
+      logger: noopLogger,
+    });
+    const service = new DropshipOrderAcceptanceWorkflowService({
+      vendorProvisioning: new FakeVendorProvisioningService() as unknown as DropshipVendorProvisioningService,
+      repository: new FakeWorkflowRepository(),
+      shippingQuoteService: new FakeShippingQuoteService(),
+      acceptanceService,
+      fulfillmentSync: fulfillment,
+      logger: noopLogger,
+    });
+
+    const result = await service.acceptOrderForMember("member-1", {
+      intakeId: 7,
+      idempotencyKey: "accept-order-007",
+    });
+
+    expect(result.acceptance.outcome).toBe("accepted");
+    expect(events).toEqual([
+      "prepare:7",
+      "canonical_claim:9001:3",
+      "claim_recorded:9001:9901",
+      "finalize:7",
+      "normal_wms_sync:9001",
+    ]);
   });
 
   it("requires a default warehouse before quote or acceptance side effects", async () => {
@@ -275,6 +315,87 @@ class FakeFulfillmentSync implements DropshipOmsFulfillmentSync {
   async syncOmsOrderToWms(omsOrderId: number): Promise<number | null> {
     this.calls.push(omsOrderId);
     return this.result;
+  }
+}
+
+class CanonicalInventoryAuthority implements DropshipInventoryRuntimeAuthorityGate {
+  async execute<T>(work: (authority: "legacy" | "canonical") => Promise<T>): Promise<T> {
+    return work("canonical");
+  }
+}
+
+class SequencedCanonicalAcceptanceRepository implements DropshipOrderAcceptanceRepository {
+  constructor(private readonly events: string[]) {}
+
+  async acceptOrder(): Promise<DropshipOrderAcceptanceResult> {
+    throw new Error("legacy acceptance must not run under canonical authority");
+  }
+
+  async prepareCanonicalOrder(input: DropshipOrderAcceptanceInput) {
+    this.events.push(`prepare:${input.intakeId}`);
+    return {
+      outcome: "prepared" as const,
+      intakeId: input.intakeId,
+      vendorId: input.vendorId,
+      storeConnectionId: input.storeConnectionId,
+      shippingQuoteSnapshotId: input.shippingQuoteSnapshotId,
+      warehouseId: 3,
+      omsOrderId: 9001,
+      idempotentReplay: false,
+    };
+  }
+
+  async markCanonicalInventoryClaimed(input: {
+    acceptance: DropshipOrderAcceptanceInput;
+    omsOrderId: number;
+    wmsOrderId: number;
+    inventoryClaimId: string | null;
+  }): Promise<void> {
+    this.events.push(`claim_recorded:${input.omsOrderId}:${input.wmsOrderId}`);
+  }
+
+  async finalizeCanonicalOrder(input: DropshipOrderAcceptanceInput): Promise<DropshipOrderAcceptanceResult> {
+    this.events.push(`finalize:${input.intakeId}`);
+    return {
+      outcome: "accepted",
+      intakeId: input.intakeId,
+      vendorId: input.vendorId,
+      storeConnectionId: input.storeConnectionId,
+      shippingQuoteSnapshotId: input.shippingQuoteSnapshotId,
+      omsOrderId: 9001,
+      walletLedgerEntryId: 3001,
+      economicsSnapshotId: 7001,
+      totalDebitCents: 2722,
+      currency: "USD",
+      paymentHoldExpiresAt: null,
+      idempotentReplay: false,
+    };
+  }
+
+  async markCanonicalInventoryClaimReleased(): Promise<void> {
+    throw new Error("successful canonical acceptance must not release its claim");
+  }
+}
+
+class SequencedCanonicalFulfillment
+implements DropshipCanonicalAcceptanceFulfillment, DropshipOmsFulfillmentSync {
+  constructor(private readonly events: string[]) {}
+
+  async stageOmsOrderAndClaimInventory(input: {
+    omsOrderId: number;
+    expectedWarehouseId: number;
+  }): Promise<{ wmsOrderId: number; warehouseId: number; inventoryClaimId: string | null }> {
+    this.events.push(`canonical_claim:${input.omsOrderId}:${input.expectedWarehouseId}`);
+    return { wmsOrderId: 9901, warehouseId: input.expectedWarehouseId, inventoryClaimId: "7001" };
+  }
+
+  async releaseStagedInventoryClaim(): Promise<void> {
+    throw new Error("successful canonical acceptance must not release its claim");
+  }
+
+  async syncOmsOrderToWms(omsOrderId: number): Promise<number> {
+    this.events.push(`normal_wms_sync:${omsOrderId}`);
+    return 9901;
   }
 }
 

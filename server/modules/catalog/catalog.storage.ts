@@ -34,22 +34,22 @@ import type {
 } from "../../storage/base";
 
 export interface IProductStorage {
-  getAllProducts(includeInactive?: boolean): Promise<Product[]>;
+  getAllProducts(includeInactive?: boolean, executor?: any): Promise<Product[]>;
   getProductById(id: number, executor?: any): Promise<Product | undefined>;
   getProductBySku(sku: string): Promise<Product | undefined>;
   getProductByShopifyProductId(shopifyProductId: string): Promise<Product | undefined>;
-  createProduct(product: InsertProduct): Promise<Product>;
+  createProduct(product: InsertProduct, executor?: any): Promise<Product>;
   updateProduct(id: number, updates: Partial<InsertProduct>, executor?: any): Promise<Product | null>;
   deleteProduct(id: number): Promise<boolean>;
 
-  getAllProductVariants(includeInactive?: boolean): Promise<ProductVariant[]>;
+  getAllProductVariants(includeInactive?: boolean, executor?: any): Promise<ProductVariant[]>;
   getProductVariantById(id: number, executor?: any): Promise<ProductVariant | undefined>;
   getProductVariantBySku(sku: string): Promise<ProductVariant | undefined>;
   getActiveVariantBySku(sku: string, excludeId?: number): Promise<ProductVariant | undefined>;
   getProductVariantsByProductId(productId: number, executor?: any): Promise<ProductVariant[]>;
-  getProductVariantsByIds(ids: number[]): Promise<ProductVariant[]>;
-  getProductsByIds(ids: number[]): Promise<Product[]>;
-  createProductVariant(variant: InsertProductVariant): Promise<ProductVariant>;
+  getProductVariantsByIds(ids: number[], executor?: any): Promise<ProductVariant[]>;
+  getProductsByIds(ids: number[], executor?: any): Promise<Product[]>;
+  createProductVariant(variant: InsertProductVariant, executor?: any): Promise<ProductVariant>;
   updateProductVariant(id: number, updates: Partial<InsertProductVariant>, executor?: any): Promise<ProductVariant | null>;
   deleteProductVariant(id: number): Promise<boolean>;
 
@@ -126,11 +126,11 @@ export interface IProductStorage {
 }
 
 export const productMethods: IProductStorage = {
-  async getAllProducts(includeInactive = false): Promise<Product[]> {
+  async getAllProducts(includeInactive = false, executor: any = db): Promise<Product[]> {
     if (includeInactive) {
-      return await db.select().from(products).orderBy(asc(products.name));
+      return await executor.select().from(products).orderBy(asc(products.name));
     }
-    return await db.select().from(products).where(eq(products.isActive, true)).orderBy(asc(products.name));
+    return await executor.select().from(products).where(eq(products.isActive, true)).orderBy(asc(products.name));
   },
 
   async getProductById(id: number, executor: any = db): Promise<Product | undefined> {
@@ -149,8 +149,8 @@ export const productMethods: IProductStorage = {
     return result[0];
   },
 
-  async createProduct(product: InsertProduct): Promise<Product> {
-    const result = await db.insert(products).values(product).returning();
+  async createProduct(product: InsertProduct, executor: any = db): Promise<Product> {
+    const result = await executor.insert(products).values(product).returning();
     return result[0];
   },
 
@@ -167,11 +167,11 @@ export const productMethods: IProductStorage = {
     return result.length > 0;
   },
 
-  async getAllProductVariants(includeInactive = false): Promise<ProductVariant[]> {
+  async getAllProductVariants(includeInactive = false, executor: any = db): Promise<ProductVariant[]> {
     if (includeInactive) {
-      return await db.select().from(productVariants).orderBy(asc(productVariants.sku));
+      return await executor.select().from(productVariants).orderBy(asc(productVariants.sku));
     }
-    return await db.select().from(productVariants).where(eq(productVariants.isActive, true)).orderBy(asc(productVariants.sku));
+    return await executor.select().from(productVariants).where(eq(productVariants.isActive, true)).orderBy(asc(productVariants.sku));
   },
 
   async getProductVariantById(id: number, executor: any = db): Promise<ProductVariant | undefined> {
@@ -198,18 +198,18 @@ export const productMethods: IProductStorage = {
       .orderBy(asc(productVariants.hierarchyLevel));
   },
 
-  async getProductVariantsByIds(ids: number[]): Promise<ProductVariant[]> {
+  async getProductVariantsByIds(ids: number[], executor: any = db): Promise<ProductVariant[]> {
     if (ids.length === 0) return [];
-    return db.select().from(productVariants).where(inArray(productVariants.id, ids));
+    return executor.select().from(productVariants).where(inArray(productVariants.id, ids));
   },
 
-  async getProductsByIds(ids: number[]): Promise<Product[]> {
+  async getProductsByIds(ids: number[], executor: any = db): Promise<Product[]> {
     if (ids.length === 0) return [];
-    return db.select().from(products).where(inArray(products.id, ids));
+    return executor.select().from(products).where(inArray(products.id, ids));
   },
 
-  async createProductVariant(variant: InsertProductVariant): Promise<ProductVariant> {
-    const result = await db.insert(productVariants).values(variant).returning();
+  async createProductVariant(variant: InsertProductVariant, executor: any = db): Promise<ProductVariant> {
+    const result = await executor.insert(productVariants).values(variant).returning();
     return result[0];
   },
 

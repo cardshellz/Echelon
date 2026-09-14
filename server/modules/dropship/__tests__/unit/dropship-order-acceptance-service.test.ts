@@ -6,7 +6,10 @@ import {
   buildDropshipOrderAcceptancePlan,
   hashDropshipOrderAcceptanceRequest,
   type DropshipNotificationSenderInput,
+  type DropshipCanonicalAcceptanceFulfillment,
   type DropshipAcceptancePlanningInput,
+  type DropshipInventoryRuntimeAuthority,
+  type DropshipInventoryRuntimeAuthorityGate,
   type DropshipLogEvent,
   type DropshipOrderAcceptanceInput,
   type DropshipOrderAcceptanceRepository,
@@ -22,6 +25,8 @@ describe("DropshipOrderAcceptanceService", () => {
     const logs: DropshipLogEvent[] = [];
     const service = new DropshipOrderAcceptanceService({
       repository,
+      inventoryAuthority: new FakeInventoryAuthority("legacy"),
+      canonicalFulfillment: new FakeCanonicalFulfillment(),
       notificationSender,
       clock: { now: () => now },
       logger: {
@@ -68,6 +73,8 @@ describe("DropshipOrderAcceptanceService", () => {
     const repository = new FakeAcceptanceRepository();
     const service = new DropshipOrderAcceptanceService({
       repository,
+      inventoryAuthority: new FakeInventoryAuthority("legacy"),
+      canonicalFulfillment: new FakeCanonicalFulfillment(),
       clock: { now: () => now },
       logger: noopLogger,
     });
@@ -94,6 +101,8 @@ describe("DropshipOrderAcceptanceService", () => {
     const notificationSender = new FakeNotificationSender();
     const service = new DropshipOrderAcceptanceService({
       repository,
+      inventoryAuthority: new FakeInventoryAuthority("legacy"),
+      canonicalFulfillment: new FakeCanonicalFulfillment(),
       notificationSender,
       clock: { now: () => now },
       logger: noopLogger,
@@ -114,6 +123,183 @@ describe("DropshipOrderAcceptanceService", () => {
       critical: true,
       idempotencyKey: "order-acceptance:1:payment_hold",
     });
+  });
+
+  it("finalizes canonical acceptance only after the WMS whole-order claim succeeds", async () => {
+    const repository = new FakeAcceptanceRepository();
+    const fulfillment = new FakeCanonicalFulfillment();
+    const service = makeAcceptanceService(repository, fulfillment, "canonical");
+
+    const result = await service.acceptOrder(validAcceptanceInput());
+
+    expect(result.outcome).toBe("accepted");
+    expect(repository.events).toEqual([
+      "prepare",
+      "mark_inventory_claimed:1001:9001",
+      "finalize",
+    ]);
+    expect(fulfillment.events).toEqual(["claim:1001:3"]);
+    expect(repository.legacyCalls).toBe(0);
+  });
+
+  it.each([
+    ["canonical safety-stock shortfall", "CANONICAL_CLAIM_SHORTFALL"],
+    ["canonical claim execution failure", "CANONICAL_CLAIM_FAILED"],
+    ["WMS staging failure", "WMS_STAGE_FAILED"],
+  ])("does not finalize or debit after %s", async (_label, code) => {
+    const repository = new FakeAcceptanceRepository();
+    const fulfillment = new FakeCanonicalFulfillment(Object.assign(new Error(code), { code }));
+    const service = makeAcceptanceService(repository, fulfillment, "canonical");
+
+    await expect(service.acceptOrder(validAcceptanceInput())).rejects.toMatchObject({ code });
+    expect(repository.events).toEqual(["prepare"]);
+    expect(repository.legacyCalls).toBe(0);
+  });
+
+  it("releases a successful claim if the wallet changes before finalization", async () => {
+    const repository = new FakeAcceptanceRepository({
+      outcome: "payment_hold",
+      paymentHoldExpiresAt: new Date("2026-05-02T18:00:00.000Z"),
+    });
+    const fulfillment = new FakeCanonicalFulfillment();
+    const service = makeAcceptanceService(repository, fulfillment, "canonical");
+
+    const result = await service.acceptOrder(validAcceptanceInput());
+
+    expect(result.outcome).toBe("payment_hold");
+    expect(fulfillment.events).toEqual(["claim:1001:3", "release:9001"]);
+    expect(fulfillment.releasedClaimIds).toEqual(["7001"]);
+    expect(repository.events).toEqual([
+      "prepare",
+      "mark_inventory_claimed:1001:9001",
+      "finalize",
+      "mark_inventory_released:1001:9001",
+    ]);
+  });
+
+  it("creates a second claim attempt and finalizes exactly once after a released hold is funded", async () => {
+    const repository = new FakeAcceptanceRepository({
+      outcome: "payment_hold",
+      paymentHoldExpiresAt: new Date("2026-05-02T18:00:00.000Z"),
+    });
+    const fulfillment = new FakeCanonicalFulfillment();
+    const service = makeAcceptanceService(repository, fulfillment, "canonical");
+
+    const held = await service.acceptOrder(validAcceptanceInput());
+    repository.fundWalletForRetry();
+    const accepted = await service.acceptOrder(validAcceptanceInput());
+
+    expect(held.outcome).toBe("payment_hold");
+    expect(accepted.outcome).toBe("accepted");
+    expect(repository.claimAttempts).toBe(2);
+    expect(repository.acceptedFinalizations).toBe(1);
+    expect(repository.events.filter((event) => event === "finalize")).toHaveLength(2);
+    expect(fulfillment.events).toEqual([
+      "claim:1001:3",
+      "release:9001",
+      "claim:1001:3",
+    ]);
+    expect(fulfillment.releasedClaimIds).toEqual(["7001"]);
+  });
+
+  it("releases an orphaned canonical claim before rejecting an expired payment hold", async () => {
+    const repository = new FakeAcceptanceRepository({
+      outcome: "payment_hold",
+      paymentHoldExpiresAt: new Date("2026-05-01T17:59:59.000Z"),
+    });
+    const fulfillment = new FakeCanonicalFulfillment();
+    const service = makeAcceptanceService(repository, fulfillment, "canonical");
+
+    await expect(service.acceptOrder(validAcceptanceInput())).rejects.toMatchObject({
+      code: "DROPSHIP_ORDER_PAYMENT_HOLD_EXPIRED",
+    });
+
+    expect(fulfillment.events).toEqual(["claim:1001:3", "release:9001"]);
+    expect(repository.events).toEqual([
+      "prepare",
+      "mark_inventory_claimed:1001:9001",
+      "finalize",
+      "mark_inventory_released:1001:9001",
+    ]);
+  });
+
+  it("retries an expired payment-hold release without re-claiming inventory or finalizing", async () => {
+    const repository = new FakeAcceptanceRepository({
+      outcome: "payment_hold",
+      paymentHoldExpiresAt: new Date("2026-05-01T17:59:59.000Z"),
+    });
+    const fulfillment = new FakeCanonicalFulfillment();
+    const service = makeAcceptanceService(repository, fulfillment, "canonical");
+
+    await expect(service.acceptOrder(validAcceptanceInput())).rejects.toMatchObject({
+      code: "DROPSHIP_ORDER_PAYMENT_HOLD_EXPIRED",
+    });
+    await expect(service.acceptOrder(validAcceptanceInput())).rejects.toMatchObject({
+      code: "DROPSHIP_ORDER_PAYMENT_HOLD_EXPIRED",
+    });
+
+    expect(repository.events.filter((event) => event === "finalize")).toHaveLength(1);
+    expect(fulfillment.events).toEqual(["claim:1001:3", "release:9001", "release:9001"]);
+  });
+
+  it("replays a prepared canonical stage without creating a second financial acceptance", async () => {
+    const repository = new FakeAcceptanceRepository({}, true);
+    const fulfillment = new FakeCanonicalFulfillment();
+    const service = makeAcceptanceService(repository, fulfillment, "canonical");
+
+    await service.acceptOrder(validAcceptanceInput());
+
+    expect(repository.preparationReplayObserved).toBe(true);
+    expect(repository.events.filter((event) => event === "finalize")).toHaveLength(1);
+    expect(fulfillment.events).toEqual(["claim:1001:3"]);
+  });
+
+  it("fails closed when WMS staging reports a warehouse other than the frozen quote warehouse", async () => {
+    const repository = new FakeAcceptanceRepository();
+    const fulfillment = new FakeCanonicalFulfillment(undefined, 4);
+    const service = makeAcceptanceService(repository, fulfillment, "canonical");
+
+    await expect(service.acceptOrder(validAcceptanceInput())).rejects.toMatchObject({
+      code: "DROPSHIP_CANONICAL_WAREHOUSE_MISMATCH",
+      context: { expectedWarehouseId: 3, stagedWarehouseId: 4 },
+    });
+    expect(repository.events).toEqual(["prepare"]);
+    expect(fulfillment.events).toEqual(["claim:1001:3"]);
+  });
+
+  it("resumes durable compensation when release fails after the payment-hold intent commits", async () => {
+    const repository = new FakeAcceptanceRepository({
+      outcome: "payment_hold",
+      paymentHoldExpiresAt: new Date("2026-05-02T18:00:00.000Z"),
+    });
+    const releaseFailure = Object.assign(new Error("release unavailable"), { code: "RELEASE_UNAVAILABLE" });
+    const fulfillment = new FakeCanonicalFulfillment(undefined, 3, [releaseFailure]);
+    const service = makeAcceptanceService(repository, fulfillment, "canonical");
+
+    await expect(service.acceptOrder(validAcceptanceInput())).rejects.toBe(releaseFailure);
+    const retry = await service.acceptOrder(validAcceptanceInput());
+
+    expect(retry.outcome).toBe("payment_hold");
+    expect(repository.events.filter((event) => event === "finalize")).toHaveLength(1);
+    expect(repository.events.filter((event) => event.startsWith("mark_inventory_released"))).toHaveLength(1);
+    expect(fulfillment.events).toEqual(["claim:1001:3", "release:9001", "release:9001"]);
+  });
+
+  it("repeats the idempotent physical release when durable completion fails after release", async () => {
+    const repository = new FakeAcceptanceRepository({
+      outcome: "payment_hold",
+      paymentHoldExpiresAt: new Date("2026-05-02T18:00:00.000Z"),
+    }, false, 1);
+    const fulfillment = new FakeCanonicalFulfillment();
+    const service = makeAcceptanceService(repository, fulfillment, "canonical");
+
+    await expect(service.acceptOrder(validAcceptanceInput())).rejects.toThrow("release marker unavailable");
+    const retry = await service.acceptOrder(validAcceptanceInput());
+
+    expect(retry.outcome).toBe("payment_hold");
+    expect(repository.events.filter((event) => event === "finalize")).toHaveLength(1);
+    expect(repository.events.filter((event) => event.startsWith("mark_inventory_released"))).toHaveLength(2);
+    expect(fulfillment.events).toEqual(["claim:1001:3", "release:9001", "release:9001"]);
   });
 });
 
@@ -350,12 +536,111 @@ function expectDropshipError(fn: () => unknown, code: string): void {
 
 class FakeAcceptanceRepository implements DropshipOrderAcceptanceRepository {
   lastInput: DropshipOrderAcceptanceInput | null = null;
+  legacyCalls = 0;
+  events: string[] = [];
+  preparationReplayObserved = false;
+  claimAttempts = 0;
+  acceptedFinalizations = 0;
 
-  constructor(private readonly resultOverrides: Partial<DropshipOrderAcceptanceResult> = {}) {}
+  constructor(
+    private readonly resultOverrides: Partial<DropshipOrderAcceptanceResult> = {},
+    private readonly preparationReplay = false,
+    private releaseMarkerFailuresRemaining = 0,
+  ) {}
+
+  private compensationState: "none" | "pending" | "released" = "none";
+  private fundedRetry = false;
+  private currentInventoryClaimId: string | null = null;
+
+  fundWalletForRetry(): void {
+    this.fundedRetry = true;
+  }
 
   async acceptOrder(input: DropshipOrderAcceptanceInput): Promise<DropshipOrderAcceptanceResult> {
     this.lastInput = input;
+    this.legacyCalls += 1;
+    return this.result(input);
+  }
+
+  async prepareCanonicalOrder(input: DropshipOrderAcceptanceInput) {
+    this.lastInput = input;
+    this.events.push("prepare");
+    this.preparationReplayObserved = this.preparationReplay;
+    if (this.compensationState === "pending") {
+      return {
+        outcome: "compensation_required" as const,
+        result: { ...this.result(input), idempotentReplay: true },
+        omsOrderId: 1001,
+        wmsOrderId: 9001,
+        warehouseId: 3,
+        inventoryClaimId: this.currentInventoryClaimId,
+      };
+    }
+    if (this.compensationState === "released") {
+      const held = this.result(input);
+      if (held.paymentHoldExpiresAt && held.paymentHoldExpiresAt <= input.acceptedAt) {
+        return {
+          outcome: "compensation_required" as const,
+          result: { ...held, idempotentReplay: true },
+          omsOrderId: 1001,
+          wmsOrderId: 9001,
+          warehouseId: 3,
+          inventoryClaimId: this.currentInventoryClaimId,
+        };
+      }
+      if (!this.fundedRetry) {
+        return { ...held, idempotentReplay: true };
+      }
+      this.compensationState = "none";
+    }
     return {
+      outcome: "prepared" as const,
+      intakeId: input.intakeId,
+      vendorId: input.vendorId,
+      storeConnectionId: input.storeConnectionId,
+      shippingQuoteSnapshotId: input.shippingQuoteSnapshotId,
+      warehouseId: 3,
+      omsOrderId: 1001,
+      idempotentReplay: this.preparationReplay,
+    };
+  }
+
+  async markCanonicalInventoryClaimed(input: {
+    acceptance: DropshipOrderAcceptanceInput;
+    omsOrderId: number;
+    wmsOrderId: number;
+    inventoryClaimId: string | null;
+  }): Promise<void> {
+    this.events.push(`mark_inventory_claimed:${input.omsOrderId}:${input.wmsOrderId}`);
+    this.claimAttempts += 1;
+    this.currentInventoryClaimId = input.inventoryClaimId;
+  }
+
+  async finalizeCanonicalOrder(input: DropshipOrderAcceptanceInput): Promise<DropshipOrderAcceptanceResult> {
+    this.events.push("finalize");
+    const result = this.result(input);
+    this.compensationState = result.outcome === "payment_hold" ? "pending" : "none";
+    if (result.outcome === "accepted") this.acceptedFinalizations += 1;
+    return result;
+  }
+
+  async markCanonicalInventoryClaimReleased(input: {
+    acceptance: DropshipOrderAcceptanceInput;
+    omsOrderId: number;
+    wmsOrderId: number;
+    inventoryClaimId: string | null;
+    reason: string;
+  }): Promise<void> {
+    this.events.push(`mark_inventory_released:${input.omsOrderId}:${input.wmsOrderId}`);
+    if (this.releaseMarkerFailuresRemaining > 0) {
+      this.releaseMarkerFailuresRemaining -= 1;
+      throw new Error("release marker unavailable");
+    }
+    this.compensationState = "released";
+  }
+
+  private result(input: DropshipOrderAcceptanceInput): DropshipOrderAcceptanceResult {
+    const result: DropshipOrderAcceptanceResult = {
       outcome: "accepted",
       intakeId: input.intakeId,
       vendorId: input.vendorId,
@@ -370,7 +655,85 @@ class FakeAcceptanceRepository implements DropshipOrderAcceptanceRepository {
       idempotentReplay: false,
       ...this.resultOverrides,
     };
+    if (this.fundedRetry && result.outcome === "payment_hold") {
+      return {
+        ...result,
+        outcome: "accepted",
+        paymentHoldExpiresAt: null,
+      };
+    }
+    return result;
   }
+}
+
+class FakeInventoryAuthority implements DropshipInventoryRuntimeAuthorityGate {
+  constructor(private readonly authority: DropshipInventoryRuntimeAuthority) {}
+
+  async execute<T>(work: (authority: DropshipInventoryRuntimeAuthority) => Promise<T>): Promise<T> {
+    return work(this.authority);
+  }
+}
+
+class FakeCanonicalFulfillment implements DropshipCanonicalAcceptanceFulfillment {
+  events: string[] = [];
+  releasedClaimIds: Array<string | null> = [];
+  private claimCount = 0;
+
+  constructor(
+    private readonly failure?: Error & { code?: string },
+    private readonly stagedWarehouseId = 3,
+    private readonly releaseFailures: Error[] = [],
+  ) {}
+
+  async stageOmsOrderAndClaimInventory(input: {
+    omsOrderId: number;
+    expectedWarehouseId: number;
+  }): Promise<{ wmsOrderId: number; warehouseId: number; inventoryClaimId: string | null }> {
+    this.events.push(`claim:${input.omsOrderId}:${input.expectedWarehouseId}`);
+    if (this.failure) throw this.failure;
+    this.claimCount += 1;
+    return {
+      wmsOrderId: 9001,
+      warehouseId: this.stagedWarehouseId,
+      inventoryClaimId: String(7000 + this.claimCount),
+    };
+  }
+
+  async releaseStagedInventoryClaim(input: {
+    wmsOrderId: number;
+    inventoryClaimId: string | null;
+    reason: string;
+  }): Promise<void> {
+    this.events.push(`release:${input.wmsOrderId}`);
+    this.releasedClaimIds.push(input.inventoryClaimId);
+    const failure = this.releaseFailures.shift();
+    if (failure) throw failure;
+  }
+}
+
+function makeAcceptanceService(
+  repository: FakeAcceptanceRepository,
+  canonicalFulfillment: FakeCanonicalFulfillment,
+  authority: DropshipInventoryRuntimeAuthority,
+): DropshipOrderAcceptanceService {
+  return new DropshipOrderAcceptanceService({
+    repository,
+    inventoryAuthority: new FakeInventoryAuthority(authority),
+    canonicalFulfillment,
+    clock: { now: () => now },
+    logger: noopLogger,
+  });
+}
+
+function validAcceptanceInput() {
+  return {
+    intakeId: 1,
+    vendorId: 10,
+    storeConnectionId: 22,
+    shippingQuoteSnapshotId: 33,
+    idempotencyKey: "accept-001",
+    actor: { actorType: "system" as const },
+  };
 }
 
 class FakeNotificationSender {
@@ -458,6 +821,7 @@ function makePlanningInput(
     requestHash: "request-hash",
     idempotencyKey: "accept-001",
     acceptedAt: now,
+    inventoryValidation: "legacy_exact_sku",
     ...overrides,
   };
 }

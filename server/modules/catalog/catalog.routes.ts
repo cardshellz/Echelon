@@ -52,6 +52,11 @@ import {
   VARIANT_SALES_ELIGIBILITY_LOCK_NAMESPACE,
   VariantSalesEligibilityError,
 } from "./variant-sales-eligibility-policy";
+import { INVENTORY_LEGACY_ADMIN_CONTROLS } from "../inventory-planning/application/inventory-legacy-admin-control.service";
+import { createInventoryLegacyAdminControlService } from "../inventory-planning/infrastructure/inventory-legacy-admin-control.repository";
+import { sendInventoryLegacyAdminControlError } from "../inventory-planning/interfaces/http/inventory-legacy-admin-control.error";
+
+type CatalogRouteTransaction = Pick<typeof db, "select" | "insert" | "update" | "delete" | "execute">;
 
 // Physical packing facts beyond weight/dims. Canonical on the variant since
 // migration 185; validated here because the variant PUT spreads req.body.
@@ -364,6 +369,7 @@ async function resolveProductCategory(input: { categoryId?: number | string | nu
 
 export async function registerProductRoutes(app: Express) {
   const shopifyProductMapping = createShopifyProductMappingService();
+  const inventoryLegacyAdminControl = createInventoryLegacyAdminControlService();
   registerShopifyProductMappingReconciliationRoutes(app);
   // ============================================================================
   // Products API (Master Catalog)
@@ -948,27 +954,41 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
   app.post("/api/products", requirePermission("inventory", "create"), async (req, res) => {
     try {
       const { variants, ...productData } = req.body;
+      const requestedLegacyInventoryStrategy = Object.prototype.hasOwnProperty.call(
+        productData,
+        "inventoryStrategy",
+      );
       const inventoryStrategy = parseProductInventoryStrategy(productData.inventoryStrategy, { useDefaultWhenMissing: true });
       const category = await resolveProductCategory(productData);
-      const product = await storage.createProduct({
-        ...productData,
-        ...category,
-        inventoryStrategy,
-      });
-      
-      // Create variants if provided
-      if (variants && Array.isArray(variants)) {
-        for (const variant of variants) {
-          await storage.createProductVariant({
-            ...variant,
-            productId: product.id,
-          });
+      const createProduct = async (executor: CatalogRouteTransaction = db) => {
+        const product = await storage.createProduct({
+          ...productData,
+          ...category,
+          inventoryStrategy,
+        }, executor);
+
+        // Create variants if provided
+        if (variants && Array.isArray(variants)) {
+          for (const variant of variants) {
+            await storage.createProductVariant({
+              ...variant,
+              productId: product.id,
+            }, executor);
+          }
         }
-      }
-      
-      const createdVariants = await storage.getProductVariantsByProductId(product.id);
-      res.json({ ...product, variants: createdVariants });
+
+        const createdVariants = await storage.getProductVariantsByProductId(product.id, executor);
+        return { ...product, variants: createdVariants };
+      };
+      const created = requestedLegacyInventoryStrategy
+        ? await inventoryLegacyAdminControl.executeLegacyWrite(
+            INVENTORY_LEGACY_ADMIN_CONTROLS.inventoryStrategy,
+            createProduct,
+          )
+        : await createProduct();
+      res.json(created);
     } catch (error: any) {
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
       if (error instanceof ProductInventoryStrategyError) {
         return res.status(error.statusCode).json({
           error: error.message,
@@ -1006,6 +1026,10 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
     try {
       const id = parseInt(req.params.id);
       const { variants, ...updates } = req.body;
+      const requestedLegacyInventoryStrategy = Object.prototype.hasOwnProperty.call(
+        updates,
+        "inventoryStrategy",
+      );
       const requestedInventoryStrategy = parseProductInventoryStrategy(
         updates.inventoryStrategy,
         { useDefaultWhenMissing: false },
@@ -1077,7 +1101,11 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       }
 
       const actor = authenticatedActor(req);
-      const updateResult = await db.transaction(async (tx) => {
+      const updateProduct = (
+        assertLegacyInventoryStrategyMutation: () => void = () => undefined,
+        transaction?: CatalogRouteTransaction,
+      ) => {
+        const run = async (tx: CatalogRouteTransaction) => {
         await tx.execute(sql`
           SELECT id
           FROM catalog.products
@@ -1096,30 +1124,35 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
           return { product: null, renamedVariants: 0, renamedFrom: null as string | null };
         }
 
-        if (
-          requestedInventoryStrategy !== undefined
-          && currentProduct.inventoryStrategy !== requestedInventoryStrategy
-        ) {
-          let hasBuildRecipes = false;
-          if (
-            currentProduct.inventoryStrategy === "recipe_managed"
-            && requestedInventoryStrategy !== "recipe_managed"
-          ) {
-            const recipeResult = await tx.execute(sql`
-              SELECT id
-              FROM inventory.build_recipes
-              WHERE output_product_id = ${id}
-              LIMIT 1
-              FOR SHARE
-            `);
-            hasBuildRecipes = recipeResult.rows.length > 0;
+        const persistedUpdates = { ...normalizedUpdates };
+        if (requestedInventoryStrategy !== undefined) {
+          if (currentProduct.inventoryStrategy === requestedInventoryStrategy) {
+            // A compatibility client may repeat the historical value. Do not
+            // write that retired control when the effective value is unchanged.
+            delete persistedUpdates.inventoryStrategy;
+          } else {
+            assertLegacyInventoryStrategyMutation();
+            let hasBuildRecipes = false;
+            if (
+              currentProduct.inventoryStrategy === "recipe_managed"
+              && requestedInventoryStrategy !== "recipe_managed"
+            ) {
+              const recipeResult = await tx.execute(sql`
+                SELECT id
+                FROM inventory.build_recipes
+                WHERE output_product_id = ${id}
+                LIMIT 1
+                FOR SHARE
+              `);
+              hasBuildRecipes = recipeResult.rows.length > 0;
+            }
+            assertProductInventoryStrategyTransition({
+              productId: id,
+              current: currentProduct.inventoryStrategy,
+              requested: requestedInventoryStrategy,
+              hasBuildRecipes,
+            });
           }
-          assertProductInventoryStrategyTransition({
-            productId: id,
-            current: currentProduct.inventoryStrategy,
-            requested: requestedInventoryStrategy,
-            hasBuildRecipes,
-          });
         }
 
         if (
@@ -1148,7 +1181,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
           }
         }
 
-        const product = await storage.updateProduct(id, normalizedUpdates, tx);
+        const product = await storage.updateProduct(id, persistedUpdates, tx);
         if (!product) {
           return { product: null, renamedVariants: 0, renamedFrom: null as string | null };
         }
@@ -1229,8 +1262,16 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
           });
         }
 
-        return { product, renamedVariants, renamedFrom: lockedOldSku };
-      });
+          return { product, renamedVariants, renamedFrom: lockedOldSku };
+        };
+        return transaction ? run(transaction) : db.transaction(run);
+      };
+      const updateResult = requestedLegacyInventoryStrategy
+        ? await inventoryLegacyAdminControl.executeGuardedLegacyWrite(
+            INVENTORY_LEGACY_ADMIN_CONTROLS.inventoryStrategy,
+            (guard, transaction) => updateProduct(guard.assertLegacyMutation, transaction),
+          )
+        : await updateProduct();
 
       if (!updateResult.product) {
         return res.status(404).json({ error: "Product not found" });
@@ -1246,6 +1287,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       const existingVariants = await storage.getProductVariantsByProductId(id);
       res.json({ ...updateResult.product, variants: existingVariants });
     } catch (error: any) {
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
       if (error?.code === "23505" || error?.cause?.code === "23505") {
         return res.status(409).json({ error: "SKU already exists" });
       }

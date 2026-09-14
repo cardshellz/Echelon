@@ -36,7 +36,7 @@ function row(input: {
 }
 
 describe("projectInventoryLevels", () => {
-  it("uses centralized recipe ATP without changing physical quantities", async () => {
+  it("uses centralized ATP for every strategy without changing physical quantities", async () => {
     const atp = {
       getAtpPerVariant: vi.fn(async () => [
         { productVariantId: 100, atpUnits: 4_310 },
@@ -55,17 +55,19 @@ describe("projectInventoryLevels", () => {
       atp,
     });
 
-    expect(result.map(({ sku, variantQty, reservedQty, available }) => ({ sku, variantQty, reservedQty, available }))).toEqual([
-      { sku: "QUAD-BOX-TOP-EA", variantQty: 0, reservedQty: 0, available: 4_310 },
-      { sku: "QUAD-BOX-TOP-P5", variantQty: 5, reservedQty: 3, available: 862 },
-      { sku: "QUAD-BOX-TOP-C25", variantQty: 87, reservedQty: 3, available: 172 },
+    expect(result.map(({ sku, variantQty, reservedQty, unreservedQty, atpUnits, available }) => (
+      { sku, variantQty, reservedQty, unreservedQty, atpUnits, available }
+    ))).toEqual([
+      { sku: "QUAD-BOX-TOP-EA", variantQty: 0, reservedQty: 0, unreservedQty: 0, atpUnits: 4_310, available: 4_310 },
+      { sku: "QUAD-BOX-TOP-P5", variantQty: 5, reservedQty: 3, unreservedQty: 2, atpUnits: 862, available: 862 },
+      { sku: "QUAD-BOX-TOP-C25", variantQty: 87, reservedQty: 3, unreservedQty: 84, atpUnits: 172, available: 172 },
     ]);
     expect(atp.getAtpPerVariant).toHaveBeenCalledOnce();
     expect(atp.getAtpPerVariant).toHaveBeenCalledWith(10);
     expect(atp.getAtpPerVariantByWarehouse).not.toHaveBeenCalled();
   });
 
-  it("uses warehouse-scoped recipe ATP when a warehouse filter is present", async () => {
+  it("uses warehouse-scoped ATP when a warehouse filter is present", async () => {
     const atp = {
       getAtpPerVariant: vi.fn(),
       getAtpPerVariantByWarehouse: vi.fn(async () => [
@@ -79,14 +81,16 @@ describe("projectInventoryLevels", () => {
       warehouseId: 7,
     });
 
-    expect(result[0].available).toBe(900);
+    expect(result[0]).toMatchObject({ atpUnits: 900, available: 900, unreservedQty: 0 });
     expect(atp.getAtpPerVariantByWarehouse).toHaveBeenCalledWith(10, 7);
     expect(atp.getAtpPerVariant).not.toHaveBeenCalled();
   });
 
-  it("preserves direct availability for non-recipe products", async () => {
+  it("does not recompute non-recipe ATP from physical quantities", async () => {
     const atp = {
-      getAtpPerVariant: vi.fn(),
+      getAtpPerVariant: vi.fn(async () => [
+        { productVariantId: 200, atpUnits: 88 },
+      ]),
       getAtpPerVariantByWarehouse: vi.fn(),
     };
 
@@ -95,8 +99,41 @@ describe("projectInventoryLevels", () => {
       atp,
     });
 
-    expect(result[0].available).toBe(2);
-    expect(atp.getAtpPerVariant).not.toHaveBeenCalled();
+    expect(result[0]).toMatchObject({
+      variantQty: 5,
+      reservedQty: 3,
+      unreservedQty: 2,
+      atpUnits: 88,
+      available: 88,
+    });
+    expect(atp.getAtpPerVariant).toHaveBeenCalledOnce();
+    expect(atp.getAtpPerVariant).toHaveBeenCalledWith(10);
     expect(atp.getAtpPerVariantByWarehouse).not.toHaveBeenCalled();
+  });
+
+  it("queries each product once and fails closed when ATP has no sellable row", async () => {
+    const atp = {
+      getAtpPerVariant: vi.fn(async (productId: number) => productId === 10
+        ? [{ productVariantId: 100, atpUnits: 7 }]
+        : []),
+      getAtpPerVariantByWarehouse: vi.fn(),
+    };
+
+    const result = await projectInventoryLevels({
+      rows: [
+        row({ variantId: 100, sku: "A-P5", unitsPerVariant: 5, variantQty: 5, reservedQty: 1, inventoryStrategy: "physical_fungible", productId: 10 }),
+        row({ variantId: 101, sku: "A-C25", unitsPerVariant: 25, variantQty: 2, reservedQty: 0, inventoryStrategy: "physical_fungible", productId: 10 }),
+        row({ variantId: 200, sku: "B-P5", unitsPerVariant: 5, variantQty: 3, reservedQty: 0, inventoryStrategy: "physical_only", productId: 20 }),
+      ],
+      atp,
+    });
+
+    expect(result.map(({ variantId, atpUnits, available }) => ({ variantId, atpUnits, available }))).toEqual([
+      { variantId: 100, atpUnits: 7, available: 7 },
+      { variantId: 101, atpUnits: 0, available: 0 },
+      { variantId: 200, atpUnits: 0, available: 0 },
+    ]);
+    expect(atp.getAtpPerVariant).toHaveBeenCalledTimes(2);
+    expect(atp.getAtpPerVariant.mock.calls.map(([productId]) => productId).sort()).toEqual([10, 20]);
   });
 });

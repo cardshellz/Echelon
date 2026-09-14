@@ -16,8 +16,11 @@
 import type { SyncLogWriteParams } from "./sync-settings.service";
 
 export interface ManualSyncServices {
-  echelonOrchestrator: {
-    runFullSync(config: { dryRun: boolean }): Promise<{ inventory: any[] }>;
+  inventoryPublicationWork: {
+    syncAllProducts(triggeredBy: string): Promise<{
+      inventory: any[];
+      skippedReason: string | null;
+    }>;
   };
   syncSettings: {
     writeSyncLog(entry: SyncLogWriteParams): Promise<unknown>;
@@ -59,9 +62,10 @@ export function createManualSyncRunner(clock: () => number = Date.now): ManualSy
   async function runSweep(services: ManualSyncServices): Promise<void> {
     const startTime = clock();
     try {
-      const result = await services.echelonOrchestrator.runFullSync({ dryRun: false });
+      const result = await services.inventoryPublicationWork.syncAllProducts("manual_sync");
+      const inventory = result.inventory;
 
-      for (const inv of result.inventory) {
+      for (const inv of inventory) {
         for (const detail of inv.details || []) {
           await services.syncSettings.writeSyncLog({
             channelId: inv.channelId,
@@ -83,9 +87,9 @@ export function createManualSyncRunner(clock: () => number = Date.now): ManualSy
       await services.syncSettings.updateLastSweep(durationMs);
 
       status.lastResult = {
-        channels: result.inventory.length,
-        pushed: result.inventory.reduce((s: number, i: any) => s + i.variantsPushed, 0),
-        errors: result.inventory.reduce((s: number, i: any) => s + i.variantsErrored, 0),
+        channels: inventory.length,
+        pushed: inventory.reduce((s: number, i: any) => s + i.variantsPushed, 0),
+        errors: inventory.reduce((s: number, i: any) => s + i.variantsErrored, 0),
         durationMs,
       };
       status.lastError = null;

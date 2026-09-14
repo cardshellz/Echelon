@@ -55,13 +55,24 @@ export interface EvaluateDropshipVendorCatalogSelectionInput {
   rules: readonly DropshipVendorSelectionRule[];
   rawAtpUnits: number;
   override?: DropshipVendorVariantOverride | null;
+  /**
+   * Legacy-only quantity authority. Canonical quantities already include the
+   * exact target/SKU policy, so applying this cap again would create a second
+   * formula that provider admission can overwrite.
+   */
+  applyMarketplaceQuantityCap?: boolean;
 }
 
 export function evaluateDropshipVendorCatalogSelection(
   input: EvaluateDropshipVendorCatalogSelectionInput,
 ): DropshipVendorCatalogSelectionDecision {
-  const marketplaceQuantity = computeDropshipMarketplaceQuantity(input.rawAtpUnits, input.override);
+  const marketplaceQuantity = computeDropshipMarketplaceQuantity(
+    input.rawAtpUnits,
+    input.applyMarketplaceQuantityCap === false ? null : input.override,
+  );
   const quantityCapApplied =
+    input.applyMarketplaceQuantityCap !== false
+    &&
     typeof input.override?.marketplaceQuantityCap === "number"
     && marketplaceQuantity < normalizeAtpUnits(input.rawAtpUnits);
 

@@ -2,6 +2,7 @@ import type { Express, Request, Response } from "express";
 import { db, pool } from "../../../../db";
 import { createAllocationEngine } from "../../../channels/allocation-engine.service";
 import { createAuthorityAwareInventoryAtpService } from "../../../inventory-planning/infrastructure/inventory-availability-runtime-atp.repository";
+import { createInventoryChannelQuantityRuntimeService } from "../../../inventory-planning/infrastructure/inventory-availability-runtime-publication.repository";
 import {
   DropshipSelectionAtpService,
   makeDropshipSelectionAtpLogger,
@@ -82,6 +83,7 @@ function createDropshipSelectionAtpServiceFromEnv(): DropshipSelectionAtpService
     // (handoff Option B), computed over the authority-aware ATP reader.
     atp: new ChannelAllocationDropshipAtpProvider({
       allocationEngine: createAllocationEngine(db, createAuthorityAwareInventoryAtpService(pool)),
+      runtimeQuantity: createInventoryChannelQuantityRuntimeService(pool),
       resolveDropshipOmsChannelId: () => resolveDropshipOmsChannelIdWithClient(pool),
     }),
   });

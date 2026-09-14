@@ -95,7 +95,7 @@ describe("P0.1c — cancels release, shortfalls log, detector re-reserves", () =
     // the engine and unreservable lines surface as pick shorts. The order-level
     // auto-hold froze whole orders over one unreservable (preorder/oversold)
     // line and nothing ever released or pushed them.
-    expect(WMS_SYNC_SRC).toContain("reserveBestEffort");
+    expect(WMS_SYNC_SRC).toContain("reserveBeforeShipmentProcessing");
     expect(WMS_SYNC_SRC).not.toContain("reserveWithShortfallGuard");
     expect(WMS_SYNC_SRC).not.toContain("SET on_hold = 1");
     expect(FLOW_RECON_SRC).not.toContain("SET on_hold = 1");

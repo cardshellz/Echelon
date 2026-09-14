@@ -352,8 +352,9 @@ class AllocationEngine {
   async allocateProduct(
     productId: number,
     triggeredBy?: string,
+    scopedChannelIds?: readonly number[],
   ): Promise<ProductAllocationResult> {
-    const result = await this.calculateProduct(productId);
+    const result = await this.calculateProduct(productId, scopedChannelIds);
     await this.logAllocation(result, triggeredBy);
     return result;
   }
@@ -366,7 +367,10 @@ class AllocationEngine {
     return this.calculateProduct(productId);
   }
 
-  private async calculateProduct(productId: number): Promise<ProductAllocationResult> {
+  private async calculateProduct(
+    productId: number,
+    scopedChannelIds?: readonly number[],
+  ): Promise<ProductAllocationResult> {
     const result: ProductAllocationResult = {
       productId,
       totalAtpBase: 0,
@@ -395,10 +399,25 @@ class AllocationEngine {
     result.totalAtpBase = globalVariantAtp[0].atpBase;
 
     // 2. Load active channels
+    if (scopedChannelIds) {
+      for (const channelId of scopedChannelIds) {
+        if (!Number.isSafeInteger(channelId) || channelId <= 0 || channelId > 2_147_483_647) {
+          throw new AllocationEngineError(
+            ALLOCATION_ERROR_CODES.INPUT_INVALID,
+            "permanent",
+            "Scoped channel identifiers must be positive PostgreSQL integers.",
+            { channelId },
+          );
+        }
+      }
+      if (scopedChannelIds.length === 0) return result;
+    }
     const activeChannels: Channel[] = await this.db
       .select()
       .from(channels)
-      .where(eq(channels.status, "active"))
+      .where(scopedChannelIds
+        ? and(eq(channels.status, "active"), inArray(channels.id, [...new Set(scopedChannelIds)]))
+        : eq(channels.status, "active"))
       .orderBy(sql`${channels.priority} DESC`);
 
     if (activeChannels.length === 0) return result;

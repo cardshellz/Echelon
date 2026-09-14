@@ -1910,6 +1910,66 @@ export const inventoryPublicationTargets = inventoryPlanningSchema.table(
   }),
 );
 
+export const inventoryPublicationTargetResumeReviews = inventoryPlanningSchema.table(
+  "inventory_publication_target_resume_reviews",
+  {
+    id: bigint("id", { mode: "bigint" }).primaryKey().generatedAlwaysAsIdentity(),
+    publicationTargetId: integer("publication_target_id").notNull()
+      .references(() => inventoryPublicationTargets.id, { onDelete: "restrict" }),
+    publicationTargetRevision: bigint("publication_target_revision", { mode: "bigint" }).notNull(),
+    authorityRevision: bigint("authority_revision", { mode: "bigint" }).notNull(),
+    activationRunId: bigint("activation_run_id", { mode: "bigint" }).notNull()
+      .references(() => inventoryAvailabilityActivationRuns.id, { onDelete: "restrict" }),
+    state: varchar("state", { length: 20 }).notNull(),
+    configurationHash: varchar("configuration_hash", { length: 64 }).notNull(),
+    readinessHash: varchar("readiness_hash", { length: 64 }).notNull(),
+    evidenceHash: varchar("evidence_hash", { length: 64 }).notNull(),
+    evidencePayload: jsonb("evidence_payload").notNull(),
+    idempotencyKey: varchar("idempotency_key", { length: 120 }).notNull(),
+    requestHash: varchar("request_hash", { length: 64 }).notNull(),
+    requestedBy: varchar("requested_by", { length: 100 }).notNull(),
+    reason: varchar("reason", { length: 1000 }).notNull(),
+    capturedAt: timestamp("captured_at", { withTimezone: true }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    idempotencyUnique: uniqueIndex("inventory_publication_target_resume_reviews_idempotency_uq")
+      .on(table.idempotencyKey),
+    targetIndex: index("inventory_publication_target_resume_reviews_target_idx")
+      .on(table.publicationTargetId, table.publicationTargetRevision, table.capturedAt, table.id),
+    stateValid: check(
+      "inventory_publication_target_resume_reviews_state_chk",
+      sql`${table.state} IN ('blocked', 'ready')`,
+    ),
+    revisionValid: check(
+      "inventory_publication_target_resume_reviews_revision_chk",
+      sql`${table.publicationTargetRevision} > 0 AND ${table.authorityRevision} > 0`,
+    ),
+    hashValid: check(
+      "inventory_publication_target_resume_reviews_hash_chk",
+      sql`${table.configurationHash} ~ '^[0-9a-f]{64}$'
+        AND ${table.readinessHash} ~ '^[0-9a-f]{64}$'
+        AND ${table.evidenceHash} ~ '^[0-9a-f]{64}$'
+        AND ${table.requestHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+    payloadValid: check(
+      "inventory_publication_target_resume_reviews_payload_chk",
+      sql`jsonb_typeof(${table.evidencePayload}) = 'object'`,
+    ),
+    idempotencyValid: check(
+      "inventory_publication_target_resume_reviews_idempotency_chk",
+      sql`${table.idempotencyKey} = btrim(${table.idempotencyKey}) AND ${table.idempotencyKey} <> ''`,
+    ),
+    actorValid: check(
+      "inventory_publication_target_resume_reviews_actor_chk",
+      sql`${table.requestedBy} = btrim(${table.requestedBy})
+        AND char_length(${table.requestedBy}) BETWEEN 1 AND 100
+        AND ${table.reason} = btrim(${table.reason})
+        AND char_length(${table.reason}) BETWEEN 1 AND 1000`,
+    ),
+  }),
+);
+
 export const channelExposurePolicyVersions = inventoryPlanningSchema.table(
   "channel_exposure_policy_versions",
   {
@@ -2685,6 +2745,9 @@ export const insertInventoryAvailabilityActivationProductEvidenceSchema = create
 ).omit({ id: true, createdAt: true });
 export const insertInventoryPublicationTargetSchema = createInsertSchema(inventoryPublicationTargets)
   .omit(generatedFields);
+export const insertInventoryPublicationTargetResumeReviewSchema = createInsertSchema(
+  inventoryPublicationTargetResumeReviews,
+).omit({ id: true, createdAt: true });
 export const insertChannelExposurePolicyVersionSchema = createInsertSchema(channelExposurePolicyVersions)
   .omit(generatedFields);
 export const insertPublicationSourceBindingVersionSchema = createInsertSchema(
@@ -2747,6 +2810,8 @@ export type InventoryAvailabilityActivationFreeze = typeof inventoryAvailability
 export type InventoryAvailabilityActivationProductEvidence =
   typeof inventoryAvailabilityActivationProductEvidence.$inferSelect;
 export type InventoryPublicationTarget = typeof inventoryPublicationTargets.$inferSelect;
+export type InventoryPublicationTargetResumeReview =
+  typeof inventoryPublicationTargetResumeReviews.$inferSelect;
 export type ChannelExposurePolicyVersion = typeof channelExposurePolicyVersions.$inferSelect;
 export type ChannelExposurePolicyHead = typeof channelExposurePolicyHeads.$inferSelect;
 export type PublicationSourceBindingVersion = typeof publicationSourceBindingVersions.$inferSelect;
@@ -2822,6 +2887,9 @@ export type InsertInventoryAvailabilityActivationProductEvidence = z.infer<
   typeof insertInventoryAvailabilityActivationProductEvidenceSchema
 >;
 export type InsertInventoryPublicationTarget = z.infer<typeof insertInventoryPublicationTargetSchema>;
+export type InsertInventoryPublicationTargetResumeReview = z.infer<
+  typeof insertInventoryPublicationTargetResumeReviewSchema
+>;
 export type InsertChannelExposurePolicyVersion = z.infer<
   typeof insertChannelExposurePolicyVersionSchema
 >;
