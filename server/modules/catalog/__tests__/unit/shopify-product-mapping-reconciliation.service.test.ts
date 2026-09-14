@@ -48,6 +48,7 @@ function source(
         variantId: 101,
         sku: "SHLZ-TOP-100PT-P20",
         isActive: true,
+        trackInventory: true,
         catalogBarcode: null,
         catalogVariantId: "2001",
         catalogInventoryItemId: "3001",
@@ -64,6 +65,7 @@ function source(
         variantId: 102,
         sku: "SHLZ-TOP-100PT-ARCHIVED",
         isActive: false,
+        trackInventory: true,
         catalogBarcode: null,
         catalogVariantId: "2002",
         catalogInventoryItemId: "3002",
@@ -133,6 +135,7 @@ function dependencies() {
       remoteProductExists: false,
       liveVariantIds: [],
     }),
+    lookupVariantProductIds: vi.fn().mockResolvedValue(new Map()),
   };
   const service = createShopifyProductMappingReconciliationService({
     repository,

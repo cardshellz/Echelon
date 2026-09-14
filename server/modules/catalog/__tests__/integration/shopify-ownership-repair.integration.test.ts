@@ -46,6 +46,7 @@ const fixtureSql = `
     name text NOT NULL,
     sku varchar(100),
     is_active boolean NOT NULL DEFAULT true,
+    track_inventory boolean NOT NULL DEFAULT true,
     sales_eligibility varchar(20) NOT NULL DEFAULT 'sellable',
     barcode varchar(100),
     shopify_variant_id varchar(100),
@@ -286,6 +287,49 @@ describeDatabase.sequential("Shopify ownership repair PostgreSQL contract", () =
         UPDATE channels.shopify_ownership_repair_commands
         SET reason = 'tampered'
       `)).rejects.toMatchObject({ code: "55000" });
+    } finally {
+      log.mockRestore();
+    }
+  });
+
+  it("atomically detaches every inert owner in one ownership group", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      await database.pool.query(`
+        INSERT INTO catalog.products(
+          id, name, sku, shopify_product_id, shipping_group_id
+        ) VALUES (12, 'Second inert shell', 'SHOPIFY-2003', '9001', 1)
+      `);
+
+      const result = await repository.applyOwnershipRecommendations(
+        await commandInput("123e4567-e89b-42d3-a456-426614174010"),
+      );
+
+      expect(result).toMatchObject({
+        idempotentReplay: false,
+        command: {
+          result: {
+            resolvedGroupCount: 1,
+            recommendedProductIds: [10],
+            detachedProductIds: [11, 12],
+            resolvedGroups: [{
+              shopifyProductId: "9001",
+              recommendedProductId: 10,
+              detachedProductIds: [11, 12],
+            }],
+            clearedCatalogProductCount: 2,
+          },
+        },
+      });
+      expect((await database.pool.query(`
+        SELECT id, shopify_product_id
+        FROM catalog.products
+        ORDER BY id
+      `)).rows).toEqual([
+        { id: 10, shopify_product_id: "9001" },
+        { id: 11, shopify_product_id: null },
+        { id: 12, shopify_product_id: null },
+      ]);
     } finally {
       log.mockRestore();
     }

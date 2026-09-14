@@ -112,6 +112,32 @@ describe("Shopify product mapping verifier", () => {
     });
   });
 
+  it("returns the live Shopify parent for every referenced variant", async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(response({
+      data: {
+        nodes: [
+          {
+            __typename: "ProductVariant",
+            id: "gid://shopify/ProductVariant/2001",
+            product: { id: "gid://shopify/Product/9001" },
+          },
+          null,
+        ],
+      },
+    }));
+    const verifier = createShopifyProductMappingVerifier({ fetchImpl });
+
+    const result = await verifier.lookupVariantProductIds(
+      credentials,
+      ["2002", "2001", "2001"],
+    );
+
+    expect([...result.entries()]).toEqual([
+      ["2001", "9001"],
+      ["2002", null],
+    ]);
+  });
+
   it("rejects a node whose type or identity does not match the request", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(response({
       data: {

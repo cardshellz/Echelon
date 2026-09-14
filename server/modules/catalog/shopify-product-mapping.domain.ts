@@ -11,6 +11,7 @@ export interface ShopifyProductMappingVariantEvidence {
   variantId: number;
   sku: string | null;
   isActive: boolean;
+  trackInventory: boolean | null;
   catalogBarcode: string | null;
   catalogVariantId: string | null;
   catalogInventoryItemId: string | null;
@@ -149,6 +150,51 @@ function variantMappingIds(variant: ShopifyProductMappingVariantEvidence): strin
   ]);
 }
 
+export interface ShopifyInventoryFeedPolicy {
+  readonly createWhenMissing: boolean;
+  readonly isActive: 0 | 1;
+  readonly clearLastSyncedQuantity: boolean;
+}
+
+export function resolveShopifyInventoryFeedPolicy(
+  trackInventory: boolean | null,
+): ShopifyInventoryFeedPolicy {
+  return trackInventory !== false
+    ? Object.freeze({
+        createWhenMissing: true,
+        isActive: 1,
+        clearLastSyncedQuantity: false,
+      })
+    : Object.freeze({
+        createWhenMissing: false,
+        isActive: 0,
+        clearLastSyncedQuantity: true,
+      });
+}
+
+function activeVariantHasMappingIssue(
+  variant: ShopifyProductMappingVariantEvidence,
+): boolean {
+  const catalogOrListingIncomplete = !variant.catalogVariantId
+    || !variant.listingId
+    || !variant.listingVariantId
+    || variantMappingIds(variant).length !== 1;
+  if (catalogOrListingIncomplete) return true;
+
+  if (variant.trackInventory !== false) {
+    return !variant.catalogInventoryItemId
+      || !variant.feedId
+      || variant.feedIsActive !== true
+      || !variant.feedVariantId
+      || !variant.feedInventoryItemId;
+  }
+
+  // An untracked Shopify variant must never have an active inventory feed.
+  // An existing inactive feed may retain matching identity evidence, while a
+  // variant that never had a feed remains complete without creating one.
+  return variant.feedId !== null && variant.feedIsActive !== false;
+}
+
 export function buildShopifyProductMappingSummary(
   source: ShopifyProductMappingSource,
 ): ShopifyProductMappingSummary {
@@ -170,17 +216,7 @@ export function buildShopifyProductMappingSummary(
     activeVariants.flatMap((variant) => [variant.feedProductId, variant.listingProductId]),
   );
   const activeVariantIssueIds = activeVariants
-    .filter((variant) => (
-      !variant.catalogVariantId
-      || !variant.catalogInventoryItemId
-      || !variant.feedId
-      || variant.feedIsActive !== true
-      || !variant.feedVariantId
-      || !variant.feedInventoryItemId
-      || !variant.listingId
-      || !variant.listingVariantId
-      || variantMappingIds(variant).length !== 1
-    ))
+    .filter(activeVariantHasMappingIssue)
     .map((variant) => variant.variantId);
 
   let status: ShopifyProductMappingStatus;
@@ -216,6 +252,7 @@ export function buildShopifyProductMappingSummary(
       variantId: variant.variantId,
       sku: variant.sku,
       isActive: variant.isActive,
+      trackInventory: variant.trackInventory,
       catalogBarcode: variant.catalogBarcode,
       catalogVariantId: variant.catalogVariantId,
       catalogInventoryItemId: variant.catalogInventoryItemId,

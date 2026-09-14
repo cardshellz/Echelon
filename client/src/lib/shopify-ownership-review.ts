@@ -13,6 +13,7 @@ const ownershipDecisionReasonSchema = z.enum([
   "single_active_owner_with_matching_evidence",
   "remote_product_missing",
   "owner_count_exceeds_two",
+  "owner_count_exceeds_safe_limit",
   "shipping_group_conflict",
   "owner_mapping_conflict",
   "multiple_active_owners",
@@ -119,6 +120,11 @@ const ownershipRepairResponseSchema = z.object({
   resolvedGroupCount: z.number().int().positive(),
   recommendedProductIds: z.array(z.number().int().positive()),
   detachedProductIds: z.array(z.number().int().positive()),
+  resolvedGroups: z.array(z.object({
+    shopifyProductId: z.string().regex(/^\d+$/),
+    recommendedProductId: z.number().int().positive(),
+    detachedProductIds: z.array(z.number().int().positive()).min(1),
+  }).strict()).optional(),
   clearedCatalogProductCount: z.number().int().nonnegative(),
   clearedCatalogVariantCount: z.number().int().nonnegative(),
   detachedFeedCount: z.number().int().nonnegative(),
@@ -145,14 +151,58 @@ const ownershipRepairResponseSchema = z.object({
     });
   }
   if (
-    detached.length !== value.resolvedGroupCount
-    || JSON.stringify(detached) !== JSON.stringify(detachedSorted)
+    JSON.stringify(detached) !== JSON.stringify(detachedSorted)
     || value.clearedCatalogProductCount !== detached.length
+    || detached.some((productId) => recommended.includes(productId))
   ) {
     context.addIssue({
       code: "custom",
       path: ["detachedProductIds"],
       message: "Invalid detached owner receipt",
+    });
+  }
+
+  if (!value.resolvedGroups) {
+    if (detached.length !== value.resolvedGroupCount) {
+      context.addIssue({
+        code: "custom",
+        path: ["detachedProductIds"],
+        message: "Invalid legacy detached owner receipt",
+      });
+    }
+    return;
+  }
+
+  const groups = [...value.resolvedGroups];
+  const groupProductIds = groups.map((group) => group.shopifyProductId);
+  const sortedGroupProductIds = [...new Set(groupProductIds)].sort(
+    (left, right) => left.localeCompare(right, "en", { numeric: true }),
+  );
+  const groupRecommendedProductIds = groups
+    .map((group) => group.recommendedProductId)
+    .sort((left, right) => left - right);
+  const groupDetachedProductIds = groups
+    .flatMap((group) => group.detachedProductIds)
+    .sort((left, right) => left - right);
+  const everyGroupIsExact = groups.every((group) => {
+    const groupDetached = [...group.detachedProductIds];
+    const groupDetachedSorted = [...new Set(groupDetached)].sort(
+      (left, right) => left - right,
+    );
+    return JSON.stringify(groupDetached) === JSON.stringify(groupDetachedSorted)
+      && !groupDetached.includes(group.recommendedProductId);
+  });
+  if (
+    groups.length !== value.resolvedGroupCount
+    || JSON.stringify(groupProductIds) !== JSON.stringify(sortedGroupProductIds)
+    || JSON.stringify(groupRecommendedProductIds) !== JSON.stringify(recommended)
+    || JSON.stringify(groupDetachedProductIds) !== JSON.stringify(detached)
+    || !everyGroupIsExact
+  ) {
+    context.addIssue({
+      code: "custom",
+      path: ["resolvedGroups"],
+      message: "Invalid resolved ownership-group receipt",
     });
   }
 });

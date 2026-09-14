@@ -343,6 +343,96 @@ describe("Shopify import — SKU-less variant grouping", () => {
       skuNotFound: 1,
     }));
   });
+
+  it("keeps a SKU-less listing on the parent that already owns all remote variants", async () => {
+    const remoteProductId = 9090381643935;
+    const canonicalProduct = {
+      id: 195,
+      sku: "DIGITAL-GIFT-CARD",
+      shopifyProductId: String(remoteProductId),
+    };
+    const fallbackShell = {
+      id: 295,
+      sku: "SHOPIFY-410",
+      shopifyProductId: null,
+    };
+    const variants = [
+      { id: 410, productId: 195, sku: "SHOPIFY-410", salesEligibility: "sellable" },
+      { id: 411, productId: 195, sku: "SHOPIFY-411", salesEligibility: "sellable" },
+    ];
+    mocks.fetchShopifyCatalogProducts.mockResolvedValue([
+      skuLessVariant(remoteProductId, 410, "$10.00"),
+      skuLessVariant(remoteProductId, 411, "$25.00"),
+    ]);
+    mocks.getProductVariantBySku.mockImplementation(async (sku) => (
+      variants.find((variant) => variant.sku === sku) ?? null
+    ));
+    mocks.getProductBySku.mockResolvedValue(fallbackShell);
+    mocks.getProductById.mockImplementation(async (productId) => (
+      productId === canonicalProduct.id ? canonicalProduct : null
+    ));
+
+    const result = await createProductImportService({
+      mappingOwner: { repair: mocks.repairShopifyProductMapping },
+    }).syncProductsWithMultiUOM();
+
+    expect(mocks.updateProduct).toHaveBeenCalledWith(195, expect.objectContaining({
+      name: "2023 Topps Now Elly De La Cruz Call-Up RC PSA 10",
+    }));
+    expect(mocks.updateProduct).not.toHaveBeenCalledWith(295, expect.anything());
+    expect(mocks.createProduct).not.toHaveBeenCalled();
+    expect(mocks.createProductVariant).not.toHaveBeenCalled();
+    expect(mocks.updateProductVariant).toHaveBeenCalledTimes(2);
+    expect(mocks.repairShopifyProductMapping).toHaveBeenCalledWith(expect.objectContaining({
+      productId: 195,
+      targetProductId: String(remoteProductId),
+      importedVariantBindings: [
+        { variantId: 410, remoteVariantId: 410 },
+        { variantId: 411, remoteVariantId: 411 },
+      ],
+    }));
+    expect(result.success).toBe(true);
+    expect(result.mappingConflicts).toEqual([]);
+  });
+
+  it("fails closed when a SKU-less fallback shell and variant owner lack canonical proof", async () => {
+    const remoteProductId = 9090381643935;
+    mocks.fetchShopifyCatalogProducts.mockResolvedValue([
+      skuLessVariant(remoteProductId, 410, "$10.00"),
+    ]);
+    mocks.getProductVariantBySku.mockResolvedValue({
+      id: 410,
+      productId: 195,
+      sku: "SHOPIFY-410",
+      salesEligibility: "sellable",
+    });
+    mocks.getProductBySku.mockResolvedValue({
+      id: 295,
+      sku: "SHOPIFY-410",
+      shopifyProductId: null,
+    });
+    mocks.getProductById.mockResolvedValue({
+      id: 195,
+      sku: "DIGITAL-GIFT-CARD",
+      shopifyProductId: null,
+    });
+
+    const result = await createProductImportService({
+      mappingOwner: { repair: mocks.repairShopifyProductMapping },
+    }).syncProductsWithMultiUOM();
+
+    expect(mocks.updateProduct).not.toHaveBeenCalled();
+    expect(mocks.createProduct).not.toHaveBeenCalled();
+    expect(mocks.updateProductVariant).not.toHaveBeenCalled();
+    expect(mocks.createProductVariant).not.toHaveBeenCalled();
+    expect(mocks.repairShopifyProductMapping).not.toHaveBeenCalled();
+    expect(result.success).toBe(false);
+    expect(result.mappingConflicts).toContainEqual(expect.objectContaining({
+      code: "SHOPIFY_PRODUCT_SKUS_SPLIT",
+      incomingShopifyProductId: String(remoteProductId),
+      matchedEchelonProductIds: [195, 295],
+    }));
+  });
 });
 
 describe("Shopify import — requires_shipping", () => {

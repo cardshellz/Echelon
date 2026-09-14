@@ -395,6 +395,7 @@ async function loadMappedProducts(
       variantId: productVariants.id,
       sku: productVariants.sku,
       isActive: productVariants.isActive,
+      trackInventory: productVariants.trackInventory,
       catalogBarcode: productVariants.barcode,
       catalogVariantId: productVariants.shopifyVariantId,
       catalogInventoryItemId: productVariants.shopifyInventoryItemId,
@@ -439,6 +440,7 @@ async function loadMappedProducts(
       variantId: row.variantId,
       sku: row.sku,
       isActive: row.isActive,
+      trackInventory: row.trackInventory,
       catalogBarcode: row.catalogBarcode,
       catalogVariantId: row.catalogVariantId,
       catalogInventoryItemId: row.catalogInventoryItemId,
@@ -1101,6 +1103,11 @@ export function createShopifyProductMappingReconciliationRepository(
         const recommendedProductIds = selectedGroups
           .map((group) => group.recommendedProductId!)
           .sort((left, right) => left - right);
+        const resolvedGroups = selectedGroups.map((group) => Object.freeze({
+          shopifyProductId: group.shopifyProductId,
+          recommendedProductId: group.recommendedProductId!,
+          detachedProductIds: Object.freeze([...group.nonCanonicalProductIds]),
+        }));
         const result: ShopifyOwnershipRepairResult = Object.freeze({
           contractVersion: 1,
           channelId: input.channel.id,
@@ -1109,6 +1116,7 @@ export function createShopifyProductMappingReconciliationRepository(
           resolvedGroupCount: selectedGroups.length,
           recommendedProductIds: Object.freeze(recommendedProductIds),
           detachedProductIds: Object.freeze(detachedProductIds),
+          resolvedGroups: Object.freeze(resolvedGroups),
           clearedCatalogProductCount: clearedProducts.length,
           clearedCatalogVariantCount: clearedVariants.length,
           detachedFeedCount: disabledFeeds.length,
