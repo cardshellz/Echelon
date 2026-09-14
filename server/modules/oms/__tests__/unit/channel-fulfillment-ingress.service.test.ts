@@ -227,6 +227,27 @@ describe("channel fulfillment ingress", () => {
     });
   });
 
+  it("materializes and projects fulfillment-only lines without calling the inventory writer", async () => {
+    const repository = repositoryMock(prepared({
+      inventoryItems: Object.freeze([]),
+      cancellationCandidates: Object.freeze([]),
+    }));
+    const deps = dependencies(repository);
+    const service = createChannelFulfillmentIngressService(deps);
+
+    const result = await service.process(input());
+
+    expect(deps.authority.recordPhysicalPackage).toHaveBeenCalledTimes(1);
+    expect(deps.authority.projectPhysicalPackage).toHaveBeenCalledWith(701);
+    expect(deps.inventory.recordShipment).not.toHaveBeenCalled();
+    expect(repository.recordReviewException).not.toHaveBeenCalled();
+    expect(repository.completeReceipt).toHaveBeenCalledWith(expect.objectContaining({
+      processingStatus: "processed",
+      physicalShipmentId: 701,
+    }));
+    expect(result).toMatchObject({ processingStatus: "processed", inventoryFailures: 0 });
+  });
+
   it("classifies a callback for our own provider command as an echo without reposting inventory", async () => {
     const repository = repositoryMock(prepared({
       sourceEcho: true,

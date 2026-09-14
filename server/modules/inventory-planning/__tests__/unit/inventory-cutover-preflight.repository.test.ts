@@ -129,12 +129,13 @@ describe("cutover preflight repository transaction ownership", () => {
     expect(await repository.capture()).toMatchObject({ runtimeAuthority: null, authorityRevision: null });
   });
 
-  it("skips catalog lookup for a digital-only WMS cohort", async () => {
+  it("loads catalog evidence for a WMS cohort marked non-shipping", async () => {
     const facts = cutoverPreflightFacts(); facts.demand.items[0]!.requiresShipping = 0;
     vi.mocked(readWmsCutoverDemand).mockResolvedValue(facts.demand);
     const { repository, query } = fixture();
-    expect((await repository.capture()).variants).toEqual([]);
-    expect(query.mock.calls.some(([sql]) => sql.includes("catalog.product_variants"))).toBe(false);
+    expect((await repository.capture()).variants).toEqual(facts.variants);
+    const catalogCall = query.mock.calls.find(([sql]) => sql.includes("FROM catalog.product_variants"));
+    expect(catalogCall?.[1]).toEqual([["P5"], 50_001]);
   });
 });
 

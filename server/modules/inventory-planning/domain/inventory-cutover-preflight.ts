@@ -36,6 +36,8 @@ type DemandIndexes = {
 type SourceReview = {
   physicalItemIds: ReadonlySet<number>;
   sourceItemIds: ReadonlySet<number>;
+  physicalItemsByOrderItemId: ReadonlyMap<number, readonly WmsCutoverDemandCapture["physicalItems"][number][]>;
+  sourceItemsByOrderItemId: ReadonlyMap<number, readonly WmsCutoverDemandCapture["sourceItems"][number][]>;
 };
 
 /** Read-only evidence classification. This never turns counters into claims or repairs inventory. */
@@ -95,10 +97,27 @@ function indexDemandFacts(facts: InventoryCutoverPreflightFacts): DemandIndexes 
 
 function reviewShipmentSources(demand: WmsCutoverDemandCapture, indexes: DemandIndexes, add: AddFinding): SourceReview {
   const { orders, itemsById, variantsBySku } = indexes;
-  const physicalItemIds = new Set(demand.physicalItems.flatMap((item) => [item.orderItemId, item.replacementForOrderItemId].filter((id): id is number => id !== null)));
+  const physicalItemIds = new Set<number>();
   const sourceItemIds = new Set<number>();
+  const physicalItemsByOrderItemId = new Map<number, WmsCutoverDemandCapture["physicalItems"][number][]>();
+  const sourceItemsByOrderItemId = new Map<number, WmsCutoverDemandCapture["sourceItems"][number][]>();
   const intendedSourceQty = new Map<number, bigint>();
+  for (const physical of demand.physicalItems) {
+    for (const itemId of new Set([physical.orderItemId, physical.replacementForOrderItemId])) {
+      if (itemId === null) continue;
+      physicalItemIds.add(itemId);
+      const related = physicalItemsByOrderItemId.get(itemId);
+      if (related) related.push(physical);
+      else physicalItemsByOrderItemId.set(itemId, [physical]);
+    }
+  }
   for (const source of demand.sourceItems) {
+    for (const itemId of new Set([source.orderItemId, source.replacementForOrderItemId])) {
+      if (itemId === null) continue;
+      const related = sourceItemsByOrderItemId.get(itemId);
+      if (related) related.push(source);
+      else sourceItemsByOrderItemId.set(itemId, [source]);
+    }
     const item = source.orderItemId === null ? null : itemsById.get(source.orderItemId);
     if (source.orderItemId !== null && (!item || source.headerOrderId !== item.orderId)) {
       add("SHIPMENT_SOURCE_ORDER_MEMBERSHIP_CONFLICT", "A shipment source points to a missing or different order item; its package contents cannot establish this order's demand.", {
@@ -127,7 +146,75 @@ function reviewShipmentSources(demand: WmsCutoverDemandCapture, indexes: DemandI
   if (demand.sourceItems.some((item) => item.orderItemId === null && item.replacementForOrderItemId === null)) {
     add("UNATTRIBUTED_SHIPMENT_SOURCE", "A shipment source has no exact order-item identity; review its contents separately.");
   }
-  return { physicalItemIds, sourceItemIds };
+  return { physicalItemIds, sourceItemIds, physicalItemsByOrderItemId, sourceItemsByOrderItemId };
+}
+
+/**
+ * A provider fulfillment receipt can close a non-stock line without transferring
+ * warehouse inventory. Accept only the complete one-to-one compatibility and
+ * canonical package lineage emitted by the fulfillment ingress. Any correction,
+ * replacement, source bin, allocation, quantity disagreement, or partial history
+ * remains review evidence.
+ */
+function isExactNonInventoryFulfillmentEvidence(
+  sources: SourceReview,
+  item: WmsCutoverDemandCapture["items"][number],
+  variant: InventoryCutoverVariant | null,
+): boolean {
+  if (!variant || item.requiresShipping !== 0 || variant.requiresShipping
+    || variant.trackInventory || item.status !== "completed" || item.onHold
+    || item.quantity <= 0 || item.pickedQuantity !== item.quantity
+    || item.fulfilledQuantity !== item.quantity
+    || (item.productId !== null && item.productId !== variant.id && item.productId !== variant.productId)) {
+    return false;
+  }
+
+  const sourceItems = sources.sourceItemsByOrderItemId.get(item.id) ?? [];
+  const physicalItems = sources.physicalItemsByOrderItemId.get(item.id) ?? [];
+  if (sourceItems.length === 0 || physicalItems.length === 0 || sourceItems.length !== physicalItems.length) return false;
+
+  const sourceById = new Map(sourceItems.map((source) => [source.id, source]));
+  const exactSources = sourceItems.every((source) =>
+    source.headerOrderId === item.orderId
+    && source.orderItemId === item.id
+    && source.replacementForOrderItemId === null
+    && source.correctionForShipmentItemId === null
+    && source.productVariantId === variant.id
+    && source.quantity > 0
+    && source.purpose === "customer_fulfillment"
+    && source.fromLocationId === null
+    && source.shipmentStatus === "shipped"
+    && source.shipmentHeld === false);
+  if (!exactSources) return false;
+
+  const linkedSourceIds = new Set<number>();
+  const exactPhysicalItems = physicalItems.every((physical) => {
+    const source = physical.legacySourceShipmentItemId === null
+      ? null
+      : sourceById.get(physical.legacySourceShipmentItemId) ?? null;
+    if (!source || linkedSourceIds.has(source.id)) return false;
+    linkedSourceIds.add(source.id);
+    return physical.orderItemId === item.id
+      && physical.replacementForOrderItemId === null
+      && physical.packageAllocationEntryId === null
+      && physical.productVariantId === variant.id
+      && physical.sku.toUpperCase() === item.sku.toUpperCase()
+      && physical.originalQuantity > 0
+      && physical.adjustmentQuantity === 0
+      && BigInt(physical.effectiveQuantity) === BigInt(physical.originalQuantity)
+      && BigInt(physical.effectiveQuantity) === BigInt(source.quantity)
+      && physical.purpose === "customer_fulfillment"
+      && physical.packageStatus === "shipped";
+  });
+  if (!exactPhysicalItems || linkedSourceIds.size !== sourceById.size) return false;
+
+  const fulfilled = BigInt(item.fulfilledQuantity);
+  const sourceTotal = sourceItems.reduce((total, source) => total + BigInt(source.quantity), BigInt(0));
+  const physicalTotal = physicalItems.reduce(
+    (total, physical) => total + BigInt(physical.effectiveQuantity),
+    BigInt(0),
+  );
+  return sourceTotal === fulfilled && physicalTotal === fulfilled;
 }
 
 function classifyDemandLines(
@@ -154,6 +241,11 @@ function classifyDemandLines(
     const variant = matches.length === 1 ? matches[0]! : null;
     const hasPackageEvidence = physicalItemIds.has(item.id) || sourceItemIds.has(item.id);
     const hasCanonicalInventoryEvidence = claimedItemIds.has(item.id);
+    const hasExactNonInventoryFulfillment = isExactNonInventoryFulfillmentEvidence(
+      sources,
+      item,
+      variant,
+    );
     let disposition: InventoryCutoverLine["disposition"] = "review_required";
     let candidateDemandQty: string | null = null;
 
@@ -164,7 +256,8 @@ function classifyDemandLines(
       || (variant !== null && (!variant.requiresShipping || !variant.trackInventory));
     if (notInventoryTracked) {
       const packageEvidenceConflictsWithShippingConfiguration = hasPackageEvidence
-        && (item.requiresShipping === 0 || variant?.requiresShipping === false);
+        && (item.requiresShipping === 0 || variant?.requiresShipping === false)
+        && !hasExactNonInventoryFulfillment;
       if (packageEvidenceConflictsWithShippingConfiguration || hasCanonicalInventoryEvidence) {
         issue(
           "NONINVENTORY_OWNER_EVIDENCE",
