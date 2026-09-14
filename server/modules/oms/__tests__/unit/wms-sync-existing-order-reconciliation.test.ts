@@ -35,18 +35,28 @@ describe("wms-sync existing order reconciliation", () => {
     const nextMethodStart = WMS_SYNC_SRC.indexOf("\n  private async ", reconciliationStart + 1);
     const reconciliationBody = WMS_SYNC_SRC.slice(reconciliationStart, nextMethodStart);
     const noShipmentBranch = reconciliationBody.indexOf("if (activeShipments.length === 0)");
-    const shipmentCreate = reconciliationBody.indexOf("createShipmentForOrder", noShipmentBranch);
-    const providerOutbox = reconciliationBody.indexOf("enqueueShipStationShipmentPushRetry", shipmentCreate);
-    const branchReturn = reconciliationBody.indexOf("return { insertedItems:", providerOutbox);
+    const shipmentCreate = reconciliationBody.indexOf(
+      "persistInitialProviderShipmentAfterInventoryAuthority",
+      noShipmentBranch,
+    );
+    const branchReturn = reconciliationBody.indexOf("return { insertedItems:", shipmentCreate);
 
     expect(noShipmentBranch).toBeGreaterThan(-1);
     expect(shipmentCreate).toBeGreaterThan(noShipmentBranch);
-    expect(providerOutbox).toBeGreaterThan(shipmentCreate);
-    expect(branchReturn).toBeGreaterThan(providerOutbox);
-    expect(reconciliationBody.slice(noShipmentBranch, branchReturn).match(/createShipmentForOrder/g))
+    expect(branchReturn).toBeGreaterThan(shipmentCreate);
+    expect(reconciliationBody.slice(noShipmentBranch, branchReturn).match(/persistInitialProviderShipmentAfterInventoryAuthority/g))
       .toHaveLength(1);
-    expect(reconciliationBody.slice(noShipmentBranch, branchReturn).match(/enqueueShipStationShipmentPushRetry/g))
-      .toHaveLength(1);
+
+    const persistenceStart = WMS_SYNC_SRC.indexOf(
+      "private async persistInitialProviderShipmentAfterInventoryAuthority",
+    );
+    const persistenceEnd = WMS_SYNC_SRC.indexOf(
+      "private async reserveBeforeShipmentProcessing",
+      persistenceStart,
+    );
+    const persistenceBody = WMS_SYNC_SRC.slice(persistenceStart, persistenceEnd);
+    expect(persistenceBody.match(/await createShipmentForOrder/g)).toHaveLength(1);
+    expect(persistenceBody.match(/await enqueueShipStationShipmentPushRetry/g)).toHaveLength(1);
   });
 
   it("routes reconciled lines by package editability without guessing", () => {
@@ -70,12 +80,21 @@ describe("wms-sync existing order reconciliation", () => {
   });
 
   it("keeps coverage, queueing, and audit writes in the same transaction", () => {
-    expect(WMS_SYNC_SRC).toMatch(/const created = await db\.transaction/);
-    expect(WMS_SYNC_SRC).toMatch(/createShipmentForOrder\([\s\S]*\{ useXactLock: true \}/);
+    const persistenceStart = WMS_SYNC_SRC.indexOf(
+      "private async persistInitialProviderShipmentAfterInventoryAuthority",
+    );
+    const persistenceEnd = WMS_SYNC_SRC.indexOf(
+      "private async reserveBeforeShipmentProcessing",
+      persistenceStart,
+    );
+    const persistenceBody = WMS_SYNC_SRC.slice(persistenceStart, persistenceEnd);
+    expect(persistenceBody).toMatch(/return db\.transaction\(async \(tx: any\)/);
+    expect(persistenceBody).toMatch(/createShipmentForOrder\([\s\S]*\{ useXactLock: true \}/);
+    expect(persistenceBody).toMatch(/appendUncoveredItemsToShipment\([\s\S]*useXactLock: true/);
+    expect(persistenceBody).toMatch(/await enqueueShipStationShipmentPushRetry\(\s*tx/);
+    expect(persistenceBody).toMatch(/await this\.recordWmsReconciliationAuditEvent\(\s*tx/);
     expect(WMS_SYNC_SRC).toMatch(/const coverage = await db\.transaction/);
-    expect(WMS_SYNC_SRC).toMatch(/appendUncoveredItemsToShipment\([\s\S]*useXactLock: true/);
     expect(WMS_SYNC_SRC).toMatch(/await enqueueShippingEngineShipmentAmendRetry\(\s*tx/);
-    expect(WMS_SYNC_SRC).toMatch(/await this\.recordWmsReconciliationAuditEvent\(\s*tx/);
   });
 
   it("does not reconcile cancelled or refunded OMS orders back into WMS work", () => {

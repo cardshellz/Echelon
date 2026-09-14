@@ -41,6 +41,7 @@ import {
   linkChildToParentShipment,
   ChildWithoutParentShipmentError,
 } from "../wms/create-shipment";
+import { WMS_ORDER_SHIPMENT_LOCK_NAMESPACE } from "../wms/shipment-lock-namespaces";
 import {
   appendUncoveredItemsToShipment,
   createLateEditResidualShipment,
@@ -101,8 +102,53 @@ type WmsSyncMode =
 export function shouldCreateInitialWmsShipment(input: {
   hasShippableItems: boolean;
   isDropshipAcceptanceClaim: boolean;
+  warehouseStatus: string;
 }): boolean {
-  return input.hasShippableItems && !input.isDropshipAcceptanceClaim;
+  return input.hasShippableItems
+    && !input.isDropshipAcceptanceClaim
+    && input.warehouseStatus === "ready";
+}
+
+/**
+ * The provider-work admission boundary for a newly materialized WMS order.
+ *
+ * WMS order/item rows must commit before inventory authority runs because a
+ * failed inventory transaction can poison its PostgreSQL transaction. Provider
+ * shipment/outbox writes happen only after the authority callback resolves.
+ * An explicit business shortfall is represented by a resolved callback; thrown
+ * authority/infrastructure failures fail closed before provider work exists.
+ */
+export async function admitInitialProviderShipmentAfterInventoryAuthority<T>(
+  input: {
+    hasShippableItems: boolean;
+    isDropshipAcceptanceClaim: boolean;
+    warehouseStatus: string;
+  },
+  dependencies: {
+    assertInventoryAuthority: () => Promise<void>;
+    persistProviderShipment: () => Promise<T>;
+  },
+): Promise<T | null> {
+  if (!shouldCreateInitialWmsShipment(input)) return null;
+  await dependencies.assertInventoryAuthority();
+  return dependencies.persistProviderShipment();
+}
+
+export function requireRoutedWarehouseId(input: {
+  omsOrderId: number;
+  hasShippableItems: boolean;
+  routedWarehouseId: unknown;
+}): number | null {
+  const warehouseId = Number(input.routedWarehouseId);
+  if (Number.isSafeInteger(warehouseId) && warehouseId > 0) return warehouseId;
+  if (!input.hasShippableItems) return null;
+  throw new WmsShipmentPrerequisiteError(
+    "A shippable OMS order requires an explicit fulfillment warehouse before WMS materialization.",
+    {
+      omsOrderId: input.omsOrderId,
+      routedWarehouseId: input.routedWarehouseId ?? null,
+    },
+  );
 }
 
 export class WmsRequiredInventoryClaimError extends Error {
@@ -115,6 +161,19 @@ export class WmsRequiredInventoryClaimError extends Error {
   ) {
     super(message, options);
     this.name = "WmsRequiredInventoryClaimError";
+  }
+}
+
+export class WmsShipmentPrerequisiteError extends Error {
+  readonly code = "WMS_SHIPMENT_PREREQUISITE_FAILED";
+
+  constructor(
+    message: string,
+    readonly context: Readonly<Record<string, unknown>>,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = "WmsShipmentPrerequisiteError";
   }
 }
 
@@ -747,10 +806,6 @@ export class WmsSyncService {
             `headerRefreshed=${headerRefresh.updated}; promoted=${headerRefresh.promoted}; reconciled ${reconciled.insertedItems} missing item(s)`,
         );
 
-        if (headerRefresh.promoted) {
-          await this.reserveBestEffort(wmsOrderId, omsOrderId, "post_promotion");
-        }
-
         return wmsOrderId;
       }
 
@@ -845,9 +900,10 @@ export class WmsSyncService {
 
       // 3b. Route to a fulfillment warehouse UP FRONT, so the order carries its
       // warehouse through picking and its SLA cutoff is bucketed in that
-      // warehouse's clock (not just the default fallback). No routing rules
-      // configured today → the default fulfillment warehouse. Routing never
-      // blocks the sync.
+      // warehouse's clock (not just the default fallback). A shippable order
+      // cannot enter WMS or provider shipment processing without an explicit
+      // warehouse. A digital-only order has no physical custody to route, so a
+      // routing miss remains a valid null assignment for that path.
       let routing: { warehouseId: number; warehouseType: string } | null = null;
       if (isDropshipAcceptanceClaim) {
         const pinnedWarehouses = await db
@@ -878,10 +934,21 @@ export class WmsSyncService {
             skus: materializableOmsLines.map((l: any) => l.sku).filter(Boolean),
           });
         } catch (err: any) {
+          if (hasShippableItems) {
+            throw new WmsShipmentPrerequisiteError(
+              "Warehouse routing failed for a shippable OMS order; WMS materialization was not started.",
+              { omsOrderId, causeCode: err?.code ?? null },
+              { cause: err },
+            );
+          }
           console.warn(`[WMS Sync] Warehouse routing failed for OMS order ${omsOrderId}: ${err?.message ?? err}`);
         }
       }
-      const routedWarehouseId = routing?.warehouseId ?? null;
+      const routedWarehouseId = requireRoutedWarehouseId({
+        omsOrderId,
+        hasShippableItems,
+        routedWarehouseId: routing?.warehouseId,
+      });
 
       // 4. Map OMS → WMS order fields
       const warehouseStatus = !hasShippableItems
@@ -948,13 +1015,11 @@ export class WmsSyncService {
         ...orderFinancialSnapshot,
       };
 
-      // ── C2 Atomic pipeline: steps 5 + 5b + 6 run in one transaction ──
-      // Order creation, shipment creation, and inventory reservation are
-      // wrapped in a single DB transaction so a crash mid-pipeline never
-      // leaves the order in a partially-written state (e.g. order created
-      // but no shipment, or shipment created but inventory not reserved).
-      // External calls (routing, ShipStation push) happen AFTER the tx
-      // commits — they are idempotent and retried by the reconcile sweep.
+      // Phase one commits only WMS order/item materialization. Inventory
+      // authority cannot run inside this transaction: a PostgreSQL inventory
+      // constraint error aborts the whole transaction even when JavaScript
+      // catches it. Provider shipment/outbox work is intentionally deferred to
+      // phase two, after the authority boundary resolves.
       const { ordersStorage } = await import("../orders");
 
       const txResult = await db.transaction(async (tx: any) => {
@@ -1098,169 +1163,12 @@ export class WmsSyncService {
 
         console.log(`[WMS Sync] Synced OMS order ${omsOrderId} → WMS order ${newWmsOrder.id} (${omsOrder.externalOrderNumber})`);
 
-        // 5b. Create a planned wms.outbound_shipments row with per-item
-        // rows. Failure is non-fatal so a broken shipment insert never
-        // blocks order sync (the hourly reconcile sweep will retry).
-        let shipmentIdForPush: number | null = null;
-        if (shouldCreateInitialWmsShipment({
+        return {
+          newWmsOrder,
+          warehouseStatus: txWarehouseStatus,
           hasShippableItems: txHasShippableItems,
-          isDropshipAcceptanceClaim,
-        })) {
-          // §6 Commit 14: routing by combined_role.
-          const combinedRole =
-            (newWmsOrder as any).combinedRole ?? null;
-          const combinedGroupId =
-            (newWmsOrder as any).combinedGroupId ?? null;
-
-          if (combinedRole === "child" && combinedGroupId != null) {
-            // ── Combined child: link to parent's shipment ─────────────
-            try {
-              const parentResult = await tx.execute(sql`
-                SELECT id
-                  FROM wms.orders
-                 WHERE combined_group_id = ${combinedGroupId}
-                   AND combined_role = 'parent'
-                 LIMIT 1
-              `);
-              const parentWmsOrderId = parentResult.rows?.[0]?.id
-                ? Number(parentResult.rows[0].id)
-                : null;
-
-              if (!parentWmsOrderId) {
-                console.warn(
-                  `[WMS Sync] Combined child order ${newWmsOrder.id} (group ${combinedGroupId}) has no parent WMS order yet — skipping shipment link (reconcile will retry)`,
-                );
-              } else {
-                const childItems = (await tx
-                  .select({
-                    id: wmsOrderItems.id,
-                    quantity: wmsOrderItems.quantity,
-                    productVariantId: wmsOrderItems.productId,
-                    requiresShipping: wmsOrderItems.requiresShipping,
-                  })
-                  .from(wmsOrderItems)
-                  .where(eq(wmsOrderItems.orderId, newWmsOrder.id)))
-                  .filter((i: any) => i.requiresShipping !== 0);
-
-                const { shipmentId, created } =
-                  await linkChildToParentShipment(
-                    tx as any,
-                    newWmsOrder.id,
-                    parentWmsOrderId,
-                    omsOrder.channelId ?? null,
-                    childItems.map((i: any) => ({
-                      id: i.id,
-                      quantity: i.quantity ?? 0,
-                      productVariantId: i.productVariantId ?? null,
-                    })),
-                  );
-                console.log(
-                  `[WMS Sync] Linked combined-child order ${newWmsOrder.id} to parent ${parentWmsOrderId}'s shipment ${shipmentId} (created=${created}); parent owns the SS push`,
-                );
-              }
-            } catch (err: any) {
-              if (err instanceof ChildWithoutParentShipmentError) {
-                console.warn(
-                  `[WMS Sync] Combined child order ${newWmsOrder.id} parent (${err.parentWmsOrderId}) has no shipment yet — reconcile will retry: ${err.message}`,
-                );
-              } else {
-                console.error(
-                  `[WMS Sync] Failed to link combined-child order ${newWmsOrder.id} to parent shipment: ${err.message}`,
-                );
-              }
-            }
-            shipmentIdForPush = null;
-          } else {
-            // ── Parent or standalone: create own shipment (C8 path) ──
-            try {
-              const insertedItems = await tx
-                .select({
-                  id: wmsOrderItems.id,
-                  omsOrderLineId: wmsOrderItems.omsOrderLineId,
-                  productVariantId: wmsOrderItems.productId,
-                })
-                .from(wmsOrderItems)
-                .where(eq(wmsOrderItems.orderId, newWmsOrder.id));
-
-              const itemsByOmsLineId = new Map<number, { id: number; productVariantId: number | null }>();
-              for (const row of insertedItems) {
-                if (row.omsOrderLineId != null) {
-                  itemsByOmsLineId.set(row.omsOrderLineId, {
-                    id: row.id,
-                    productVariantId: row.productVariantId ?? null,
-                  });
-                }
-              }
-
-              const shipmentItemInputs = remainingOmsLines
-                .filter((line) => line.requiresShipping !== false)
-                .map((line) => {
-                  const item = itemsByOmsLineId.get(line.id);
-                  return item != null
-                    ? {
-                        id: item.id,
-                        quantity: getOmsLineRemainingMaterializableQuantity(line),
-                        productVariantId: item.productVariantId,
-                      }
-                    : null;
-                })
-                .filter((x): x is { id: number; quantity: number; productVariantId: number | null } => x !== null);
-
-              const { shipmentId, created } = await createShipmentForOrder(
-                tx as any,
-                newWmsOrder.id,
-                omsOrder.channelId,
-                shipmentItemInputs,
-                { useXactLock: true },
-              );
-              shipmentIdForPush = shipmentId;
-              console.log(
-                `[WMS Sync] ${created ? "Created" : "Reused"} shipment ${shipmentId} for WMS order ${newWmsOrder.id}`,
-              );
-            } catch (err: any) {
-              console.error(
-                `[WMS Sync] Failed to create shipment for WMS order ${newWmsOrder.id}: ${err.message}`,
-              );
-              if (isTerminalResidualRecovery) {
-                throw err;
-              }
-            }
-
-            if (shipmentIdForPush !== null) {
-              // Transactional outbox: the provider handoff command commits with
-              // the shipment. A process restart after ShipStation accepts the
-              // order can no longer leave a planned shipment with no retryable
-              // command. Failure to persist this command aborts the WMS create.
-              await enqueueShipStationShipmentPushRetry(
-                tx,
-                shipmentIdForPush,
-                "initial shipping-engine handoff",
-              );
-            }
-          }
-        }
-
-        return { newWmsOrder, shipmentIdForPush, warehouseStatus: txWarehouseStatus };
+        };
       });
-
-      // 6. Reserve inventory — OUTSIDE the transaction.
-      // A check-constraint violation (chk_reserved_lte_onhand) puts the
-      // Postgres transaction into an aborted state. Even though JS catches
-      // the error, every subsequent SQL on that tx fails with "current
-      // transaction is aborted", and COMMIT silently becomes ROLLBACK —
-      // rolling back the WMS order and shipment we just created. Running
-      // reservation after the tx commits isolates that blast radius.
-      if (isDropshipAcceptanceClaim && !(txResult as any).racedExistingWmsOrderId) {
-        const wmsOrderId = (txResult as any).newWmsOrder?.id;
-        if (wmsOrderId) {
-          await this.reserveRequired(wmsOrderId, omsOrderId, "dropship_acceptance_prepare");
-        }
-      } else if ((txResult as any).warehouseStatus === "ready" && !(txResult as any).racedExistingWmsOrderId) {
-        const wmsOrderId = (txResult as any).newWmsOrder?.id;
-        if (wmsOrderId) {
-          await this.reserveBestEffort(wmsOrderId, omsOrderId, "post_create");
-        }
-      }
 
       // Concurrency guard tripped: another sync of this same OMS order
       // won the race and already created the WMS order. Reconcile any
@@ -1281,6 +1189,7 @@ export class WmsSyncService {
           }
           await this.refreshOmsLineMaterializedQuantities(omsOrderId);
         } catch (err: any) {
+          if (err instanceof WmsShipmentPrerequisiteError) throw err;
           console.error(
             `[WMS Sync] Reconcile after race for OMS order ${omsOrderId} (WMS ${racedId}) failed: ${err.message}`,
           );
@@ -1293,11 +1202,45 @@ export class WmsSyncService {
       }
 
       // Past the race guard: txResult is the create-path variant.
-      const { newWmsOrder, shipmentIdForPush } = txResult as {
+      const { newWmsOrder, warehouseStatus: createdWarehouseStatus, hasShippableItems: createdHasShippableItems } = txResult as {
         newWmsOrder: { id: number };
-        shipmentIdForPush: number | null;
         warehouseStatus: string;
+        hasShippableItems: boolean;
       };
+
+      // Inventory authority runs only after WMS order/items commit. For an
+      // operational physical order, phase two creates the shipment and its
+      // provider outbox command in a separate idempotent transaction only
+      // after the authority callback resolves. A returned shortfall resolves
+      // and remains eligible for discrepancy picking; a thrown error admits no
+      // provider work. Pending, 3PL, digital, and acceptance-staging orders do
+      // not enter the internal shipping-provider path here.
+      let shipmentIdForPush: number | null = null;
+      if (isDropshipAcceptanceClaim) {
+        await this.reserveRequired(newWmsOrder.id, omsOrderId, "dropship_acceptance_prepare");
+      } else {
+        const persisted = await admitInitialProviderShipmentAfterInventoryAuthority(
+          {
+            hasShippableItems: createdHasShippableItems,
+            isDropshipAcceptanceClaim,
+            warehouseStatus: createdWarehouseStatus,
+          },
+          {
+            assertInventoryAuthority: () => this.reserveBeforeShipmentProcessing(
+              newWmsOrder.id,
+              omsOrderId,
+              "post_create",
+            ),
+            persistProviderShipment: () => this.persistInitialProviderShipmentAfterInventoryAuthority({
+              omsOrderId,
+              wmsOrderId: newWmsOrder.id,
+              expectedWarehouseId: routedWarehouseId,
+              recordReconciliationAudit: false,
+            }),
+          },
+        );
+        shipmentIdForPush = persisted?.shipmentIdForPush ?? null;
+      }
 
       // (Warehouse routing now happens BEFORE order creation — see step 3b —
       // so the row is inserted with its warehouse_id and a warehouse-correct
@@ -1313,8 +1256,7 @@ export class WmsSyncService {
       // Recheck OMS status: a cancellation webhook may have arrived
       // between step 5 (WMS order creation) and now.
       const engine = this.services.shippingEngine ?? this.services.shipStation;
-      if (engine?.isConfigured?.()) {
-        if (shipmentIdForPush !== null) {
+      if (engine?.isConfigured?.() && shipmentIdForPush !== null) {
           const [recheckOms] = await db.select().from(omsOrders).where(eq(omsOrders.id, omsOrderId)).limit(1);
           if (recheckOms && this.isFinalOrCancelledOmsOrder(recheckOms)) {
             console.warn(`[WMS Sync] OMS order ${omsOrderId} cancelled/refunded after WMS creation — skipping engine push, cancelling WMS`);
@@ -1350,11 +1292,6 @@ export class WmsSyncService {
               );
             }
           }
-        } else {
-          console.error(
-            `[WMS Sync] No shipment available for OMS order ${omsOrderId} — expected a shipment row to exist for WMS push`,
-          );
-        }
       }
 
       return newWmsOrder.id;
@@ -1477,7 +1414,248 @@ export class WmsSyncService {
   }
 
   /**
-   * Reserve a WMS order's inventory, best-effort (P0.1c, revised 2026-07-06).
+   * Persist initial provider shipment work after inventory authority has
+   * resolved. The caller owns the authority call; this method owns only the
+   * second, idempotent shipment/outbox transaction.
+   */
+  private async persistInitialProviderShipmentAfterInventoryAuthority(input: {
+    omsOrderId: number;
+    wmsOrderId: number;
+    expectedWarehouseId: number | null;
+    recordReconciliationAudit: boolean;
+  }): Promise<{ shipmentIdForPush: number | null; changedItems: number }> {
+    return db.transaction(async (tx: any) => {
+      // Serialize all OMS->WMS materialization for this source order before
+      // locking the WMS order. Shipment helpers take their narrower order-id
+      // advisory lock after this lock.
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(918407, ${input.omsOrderId})`);
+
+      const orderStateResult = await tx.execute(sql`
+        SELECT
+          warehouse_status,
+          warehouse_id,
+          channel_id,
+          combined_role,
+          combined_group_id
+        FROM wms.orders
+        WHERE id = ${input.wmsOrderId}
+        FOR UPDATE
+      `);
+      const orderState = orderStateResult.rows?.[0] as {
+        warehouse_status: string;
+        warehouse_id: number | null;
+        channel_id: number | null;
+        combined_role: string | null;
+        combined_group_id: number | null;
+      } | undefined;
+      if (!orderState) {
+        throw new WmsShipmentPrerequisiteError(
+          "The WMS order disappeared before provider shipment admission.",
+          { omsOrderId: input.omsOrderId, wmsOrderId: input.wmsOrderId },
+        );
+      }
+      if (orderState.warehouse_status !== "ready") {
+        return { shipmentIdForPush: null, changedItems: 0 };
+      }
+
+      const actualWarehouseId = requireRoutedWarehouseId({
+        omsOrderId: input.omsOrderId,
+        hasShippableItems: true,
+        routedWarehouseId: orderState.warehouse_id,
+      });
+      if (actualWarehouseId !== input.expectedWarehouseId) {
+        throw new WmsShipmentPrerequisiteError(
+          "The WMS fulfillment warehouse changed after inventory authority resolved.",
+          {
+            omsOrderId: input.omsOrderId,
+            wmsOrderId: input.wmsOrderId,
+            expectedWarehouseId: input.expectedWarehouseId,
+            actualWarehouseId,
+          },
+        );
+      }
+
+      const shippableItems: Array<{
+        id: number;
+        quantity: number;
+        productVariantId: number | null;
+      }> = (await tx
+        .select({
+          id: wmsOrderItems.id,
+          quantity: wmsOrderItems.quantity,
+          productVariantId: wmsOrderItems.productId,
+          requiresShipping: wmsOrderItems.requiresShipping,
+        })
+        .from(wmsOrderItems)
+        .where(eq(wmsOrderItems.orderId, input.wmsOrderId)))
+        .filter((item: any) => item.requiresShipping !== 0 && Number(item.quantity ?? 0) > 0)
+        .map((item: any) => ({
+          id: Number(item.id),
+          quantity: Number(item.quantity ?? 0),
+          productVariantId: item.productVariantId == null
+            ? null
+            : Number(item.productVariantId),
+        }));
+      if (shippableItems.length === 0) {
+        return { shipmentIdForPush: null, changedItems: 0 };
+      }
+
+      const orderItemIds = shippableItems.map((item) => item.id);
+      const combinedRole = orderState.combined_role;
+      const combinedGroupId = orderState.combined_group_id == null
+        ? null
+        : Number(orderState.combined_group_id);
+
+      if (combinedRole === "child") {
+        if (!Number.isSafeInteger(combinedGroupId) || Number(combinedGroupId) <= 0) {
+          throw new WmsShipmentPrerequisiteError(
+            "A combined child order requires a valid combined fulfillment group.",
+            {
+              omsOrderId: input.omsOrderId,
+              wmsOrderId: input.wmsOrderId,
+              combinedGroupId,
+            },
+          );
+        }
+
+        // linkChildToParentShipment has an idempotency probe but no internal
+        // advisory lock. Take the same shipment namespace used by
+        // createShipmentForOrder so concurrent sync/reconcile calls cannot
+        // create two child shipment rows.
+        await tx.execute(sql`
+          SELECT pg_advisory_xact_lock(
+            ${WMS_ORDER_SHIPMENT_LOCK_NAMESPACE},
+            ${input.wmsOrderId}
+          )
+        `);
+        const parentResult = await tx.execute(sql`
+          SELECT id
+          FROM wms.orders
+          WHERE combined_group_id = ${combinedGroupId}
+            AND combined_role = 'parent'
+          ORDER BY id
+          LIMIT 1
+        `);
+        const parentWmsOrderId = Number(
+          (parentResult.rows?.[0] as { id?: unknown } | undefined)?.id ?? 0,
+        );
+        if (!Number.isSafeInteger(parentWmsOrderId) || parentWmsOrderId <= 0) {
+          throw new WmsShipmentPrerequisiteError(
+            "The combined parent WMS order is not materialized yet.",
+            {
+              omsOrderId: input.omsOrderId,
+              wmsOrderId: input.wmsOrderId,
+              combinedGroupId,
+            },
+          );
+        }
+
+        let linked: { shipmentId: number; created: boolean };
+        try {
+          linked = await linkChildToParentShipment(
+            tx,
+            input.wmsOrderId,
+            parentWmsOrderId,
+            orderState.channel_id,
+            shippableItems,
+          );
+        } catch (error) {
+          if (error instanceof ChildWithoutParentShipmentError) {
+            throw new WmsShipmentPrerequisiteError(
+              "The combined parent shipment is not provider-ready yet.",
+              {
+                omsOrderId: input.omsOrderId,
+                wmsOrderId: input.wmsOrderId,
+                parentWmsOrderId,
+              },
+              { cause: error },
+            );
+          }
+          throw error;
+        }
+
+        const coverage = await appendUncoveredItemsToShipment(
+          tx,
+          input.wmsOrderId,
+          linked.shipmentId,
+          orderItemIds,
+          {
+            providerMembershipState: PROVIDER_MEMBERSHIP_AUTHORITATIVE,
+            useXactLock: true,
+          },
+        );
+        const changedItems = linked.created
+          ? shippableItems.length
+          : coverage.shipmentItemIds.length;
+        if (input.recordReconciliationAudit && changedItems > 0) {
+          await this.recordWmsReconciliationAuditEvent(
+            tx,
+            input.omsOrderId,
+            "create_missing_initial_shipment",
+            {
+              wmsOrderId: input.wmsOrderId,
+              wmsShipmentId: linked.shipmentId,
+              parentWmsOrderId,
+              orderItemIds,
+              outboundShipmentItemIds: coverage.shipmentItemIds,
+            },
+          );
+        }
+        console.log(
+          `[WMS Sync] Linked combined-child order ${input.wmsOrderId} to parent ${parentWmsOrderId}'s shipment ${linked.shipmentId} (created=${linked.created}); parent owns the provider push`,
+        );
+        return { shipmentIdForPush: null, changedItems };
+      }
+
+      const shipment = await createShipmentForOrder(
+        tx,
+        input.wmsOrderId,
+        orderState.channel_id,
+        shippableItems,
+        { useXactLock: true },
+      );
+      const coverage = await appendUncoveredItemsToShipment(
+        tx,
+        input.wmsOrderId,
+        shipment.shipmentId,
+        orderItemIds,
+        {
+          providerMembershipState: PROVIDER_MEMBERSHIP_AUTHORITATIVE,
+          useXactLock: true,
+        },
+      );
+      await enqueueShipStationShipmentPushRetry(
+        tx,
+        shipment.shipmentId,
+        "initial shipping-engine handoff after inventory authority",
+      );
+
+      const changedItems = shipment.created
+        ? shippableItems.length
+        : coverage.shipmentItemIds.length;
+      if (input.recordReconciliationAudit && changedItems > 0) {
+        await this.recordWmsReconciliationAuditEvent(
+          tx,
+          input.omsOrderId,
+          "create_missing_initial_shipment",
+          {
+            wmsOrderId: input.wmsOrderId,
+            wmsShipmentId: shipment.shipmentId,
+            orderItemIds,
+            outboundShipmentItemIds: coverage.shipmentItemIds,
+          },
+        );
+      }
+      console.log(
+        `[WMS Sync] ${shipment.created ? "Created" : "Reused"} shipment ${shipment.shipmentId} for WMS order ${input.wmsOrderId} after inventory authority resolved`,
+      );
+      return { shipmentIdForPush: shipment.shipmentId, changedItems };
+    });
+  }
+
+  /**
+   * Run the authority-aware reservation boundary before provider shipment
+   * processing (P0.1c, revised 2026-09-14).
    *
    * A shortfall (a line with no reservable stock — oversell, stale channel
    * mapping, or a not-yet-modeled preorder) is logged and recorded as an OMS
@@ -1485,51 +1663,57 @@ export class WmsSyncService {
    * order-level auto-hold froze every order containing one unreservable line,
    * never released it when stock arrived, and kept the order off ShipStation
    * entirely; until preorder is modeled, the intended flow is that pickers
-   * short the unreservable line. Reservation errors are logged and left for
-   * the ready-but-unreserved reconciler detector — reserveOrder is idempotent
-   * per item, so re-running is always safe.
+   * short the unreservable line. A thrown infrastructure or authority error is
+   * different from an explicit shortfall: it leaves claim state unknown, so
+   * this sync fails and retries instead of continuing toward the provider.
    */
-  private async reserveBestEffort(
+  private async reserveBeforeShipmentProcessing(
     wmsOrderId: number,
     omsOrderId: number | null,
     context: string,
   ): Promise<void> {
+    let reserveResult: ReservationResult;
     try {
-      const reserveResult = await this.services.reservation.reserveOrder(wmsOrderId);
-      if (reserveResult.failed.length === 0) {
-        return;
-      }
-
-      const detail = reserveResult.failed
-        .map((f: { sku: string; reason: string }) => `${f.sku}: ${f.reason}`)
-        .join(", ");
-      console.warn(
-        `[WMS Sync] Reservation shortfall for WMS order ${wmsOrderId} (${context}): ${detail} — proceeding without hold; unreservable lines surface as pick shorts`,
-      );
-      if (omsOrderId) {
-        try {
-          await db.insert(omsOrderEvents).values({
-            orderId: omsOrderId,
-            eventType: "reservation_shortfall",
-            details: {
-              wmsOrderId,
-              context,
-              failed: reserveResult.failed,
-            },
-          });
-        } catch (evtErr: any) {
-          console.error(
-            `[WMS Sync] Failed to record shortfall event for OMS order ${omsOrderId}: ${evtErr?.message}`,
-          );
-        }
-      }
+      reserveResult = await this.services.reservation.reserveOrder(wmsOrderId);
     } catch (err: any) {
-      // Reservation errored outright (not a shortfall). The order stays
-      // unheld; the ready-but-unreserved detector re-reserves it — that is
-      // the retry path (reserveOrder is idempotent).
       console.error(
-        `[WMS Sync] Reservation error for WMS order ${wmsOrderId} (${context}): ${err.message} — detector will retry`,
+        `[WMS Sync] Reservation authority failed for WMS order ${wmsOrderId} (${context}): ${err?.message ?? String(err)} — aborting shipment processing so the sync can retry`,
       );
+      throw new WmsShipmentPrerequisiteError(
+        "Authority-aware inventory reservation failed before shipment processing.",
+        { wmsOrderId, omsOrderId, context, causeCode: err?.code ?? null },
+        { cause: err },
+      );
+    }
+    if (reserveResult.failed.length === 0) return;
+
+    const detail = reserveResult.failed
+      .map((failure: { sku: string; reason: string }) => `${failure.sku}: ${failure.reason}`)
+      .join(", ");
+    console.warn(
+      `[WMS Sync] Reservation shortfall for WMS order ${wmsOrderId} (${context}): ${detail} — proceeding without hold; unreservable lines surface as pick shorts`,
+    );
+    if (omsOrderId) {
+      try {
+        await db.insert(omsOrderEvents).values({
+          orderId: omsOrderId,
+          eventType: "reservation_shortfall",
+          details: {
+            wmsOrderId,
+            context,
+            failed: reserveResult.failed,
+          },
+        });
+      } catch (err: any) {
+        console.error(
+          `[WMS Sync] Failed to record reservation shortfall for OMS order ${omsOrderId}: ${err?.message ?? String(err)} — aborting shipment processing`,
+        );
+        throw new WmsShipmentPrerequisiteError(
+          "The reservation shortfall was not durably recorded before shipment processing.",
+          { wmsOrderId, omsOrderId, context, causeCode: err?.code ?? null },
+          { cause: err },
+        );
+      }
     }
   }
 
@@ -1982,7 +2166,8 @@ export class WmsSyncService {
     await db.execute(sql`
       UPDATE wms.orders w
          SET warehouse_status = CASE
-               WHEN w.warehouse_status = 'cancelled' THEN w.warehouse_status
+               WHEN w.warehouse_status IN ('cancelled', 'pending', 'awaiting_3pl')
+                 THEN w.warehouse_status
                WHEN EXISTS (
                  SELECT 1
                  FROM wms.order_items pending_items
@@ -2027,19 +2212,42 @@ export class WmsSyncService {
 
     await this.refreshOmsLineMaterializedQuantities(omsOrderId);
 
-    if (shippableShipmentItems.length === 0) {
-      return { insertedItems: insertedItems.length, updatedShipments: 0 };
-    }
-
-    // Re-check: never create or push shipments for terminal orders.
+    // Re-check the post-reconciliation status. Ready orders must cross the
+    // authority-aware reservation boundary after every newly materialized line
+    // is present but before shipment creation, attachment, or provider outbox
+    // writes. Explicit shortfalls remain valid; thrown/unknown claim failures
+    // abort here.
     const [freshWmsState] = await db
-      .select({ warehouseStatus: wmsOrders.warehouseStatus })
+      .select({
+        warehouseStatus: wmsOrders.warehouseStatus,
+        warehouseId: wmsOrders.warehouseId,
+      })
       .from(wmsOrders)
       .where(eq(wmsOrders.id, wmsOrderId))
       .limit(1);
     if (freshWmsState?.warehouseStatus === "cancelled") {
       return { insertedItems: insertedItems.length, updatedShipments: 0 };
     }
+    if (shippableShipmentItems.length === 0) {
+      return { insertedItems: insertedItems.length, updatedShipments: 0 };
+    }
+    // Unpaid pending work and external 3PL custody do not enter the local
+    // claim/provider path. A paid sync promotes pending -> ready before this
+    // point. All provider mutation below therefore has an explicit warehouse
+    // and a successfully resolved authority boundary.
+    if (freshWmsState?.warehouseStatus !== "ready") {
+      return { insertedItems: insertedItems.length, updatedShipments: 0 };
+    }
+    const reconciledWarehouseId = requireRoutedWarehouseId({
+      omsOrderId,
+      hasShippableItems: true,
+      routedWarehouseId: freshWmsState.warehouseId,
+    });
+    await this.reserveBeforeShipmentProcessing(
+      wmsOrderId,
+      omsOrderId,
+      "existing_order_reconciliation",
+    );
 
     // Shipment reconciliation is driven by provider editability, not by an
     // assumption that every late order edit needs a second package.
@@ -2088,53 +2296,13 @@ export class WmsSyncService {
     };
 
     if (activeShipments.length === 0) {
-      const created = await db.transaction(async (tx: any) => {
-        const result = await createShipmentForOrder(
-          tx,
-          wmsOrderId,
-          wmsOrderState?.channelId ?? null,
-          shippableShipmentItems.map((item) => ({
-            id: item.id,
-            quantity: item.quantity,
-            productVariantId: item.productId,
-          })),
-          { useXactLock: true },
-        );
-        const coverage = await appendUncoveredItemsToShipment(
-          tx,
-          wmsOrderId,
-          result.shipmentId,
-          orderItemIds,
-          {
-            providerMembershipState: PROVIDER_MEMBERSHIP_AUTHORITATIVE,
-            useXactLock: true,
-          },
-        );
-        await enqueueShipStationShipmentPushRetry(
-          tx,
-          result.shipmentId,
-          "WMS line reconciliation created missing initial shipment",
-        );
-        if (result.created || coverage.shipmentItemIds.length > 0) {
-          await this.recordWmsReconciliationAuditEvent(
-            tx,
-            omsOrderId,
-            "create_missing_initial_shipment",
-            {
-              wmsOrderId,
-              wmsShipmentId: result.shipmentId,
-              orderItemIds,
-              outboundShipmentItemIds: coverage.shipmentItemIds,
-            },
-          );
-        }
-        return {
-          changed: result.created
-            ? shippableShipmentItems.length
-            : coverage.shipmentItemIds.length,
-        };
+      const created = await this.persistInitialProviderShipmentAfterInventoryAuthority({
+        omsOrderId,
+        wmsOrderId,
+        expectedWarehouseId: reconciledWarehouseId,
+        recordReconciliationAudit: true,
       });
-      updatedShipments += created.changed;
+      updatedShipments += created.changedItems;
       return { insertedItems: insertedItems.length, updatedShipments };
     }
 

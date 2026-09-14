@@ -69,10 +69,19 @@ describe("wms-sync duplicate WMS order / ShipStation push guard", () => {
     expect(existingPartitionBlock).not.toContain("reconcileExistingWmsOrderLines");
   });
 
-  it("rolls back residual recovery if its shipment cannot be created", () => {
-    expect(WMS_SYNC_SRC).toMatch(
-      /Failed to create shipment for WMS order[\s\S]*if \(isTerminalResidualRecovery\) \{\s*throw err;/,
+  it("keeps residual shipment and outbox creation atomic after authority resolves", () => {
+    const methodStart = WMS_SYNC_SRC.indexOf(
+      "private async persistInitialProviderShipmentAfterInventoryAuthority",
     );
+    const methodEnd = WMS_SYNC_SRC.indexOf("\n  /**", methodStart + 1);
+    const method = WMS_SYNC_SRC.slice(methodStart, methodEnd);
+    const transaction = method.indexOf("return db.transaction(async (tx: any)");
+    const shipment = method.indexOf("const shipment = await createShipmentForOrder(");
+    const outbox = method.indexOf("await enqueueShipStationShipmentPushRetry(", shipment);
+
+    expect(transaction).toBeGreaterThan(0);
+    expect(shipment).toBeGreaterThan(transaction);
+    expect(outbox).toBeGreaterThan(shipment);
   });
 
   it("refuses to consume authority when storage returns the wrong partition", () => {

@@ -5,7 +5,8 @@
  * 1. createShipmentForOrder uses pg_advisory_xact_lock when useXactLock is set
  * 2. ReservationService.reserveOrder/reserveForOrder thread dbOverride
  * 3. ordersStorage.createOrderWithItems uses txOverride when provided
- * 4. The sync pipeline passes a transaction handle through all three steps
+ * 4. WMS materialization commits before authority, then shipment + outbox
+ *    commit atomically in a second transaction
  */
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
@@ -47,8 +48,9 @@ const ORDERS_STORAGE_SRC = readFileSync(
 // ─── Structural: source-level contract verification ─────────────────
 
 describe("C2 Phase 2: tx-aware pipeline structural checks", () => {
-  it("syncOmsOrderToWms wraps steps 5-6 in db.transaction()", () => {
+  it("syncOmsOrderToWms uses transactions for WMS materialization and post-authority shipment work", () => {
     expect(WMS_SYNC_SRC).toContain("db.transaction(async (tx");
+    expect(WMS_SYNC_SRC).toContain("persistInitialProviderShipmentAfterInventoryAuthority");
   });
 
   it("syncOmsOrderToWms passes tx to createOrderWithItems", () => {
@@ -58,14 +60,19 @@ describe("C2 Phase 2: tx-aware pipeline structural checks", () => {
   });
 
   it("syncOmsOrderToWms passes tx to createShipmentForOrder with useXactLock", () => {
-    expect(WMS_SYNC_SRC).toContain("tx as any,");
+    const postAuthorityMethod = WMS_SYNC_SRC.slice(
+      WMS_SYNC_SRC.indexOf("private async persistInitialProviderShipmentAfterInventoryAuthority"),
+      WMS_SYNC_SRC.indexOf("private async reserveBeforeShipmentProcessing"),
+    );
+    expect(postAuthorityMethod).toMatch(/createShipmentForOrder\(\s*tx,/);
     expect(WMS_SYNC_SRC).toContain("{ useXactLock: true }");
   });
 
   it("syncOmsOrderToWms runs reservation OUTSIDE the create transaction to avoid poisoning it", () => {
     // A check-constraint violation (chk_reserved_lte_onhand) inside a PG
     // transaction puts it into an aborted state, silently rolling back the
-    // WMS order + shipment on COMMIT. Reservation must run after tx commits.
+    // WMS order/item materialization on COMMIT. Reservation must run after
+    // that transaction commits and before the separate shipment transaction.
     expect(WMS_SYNC_SRC).toContain(
       "this.services.reservation.reserveOrder(wmsOrderId)",
     );
