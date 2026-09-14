@@ -34,6 +34,7 @@ export interface EbayMarketplaceRegistrationOwnerRepository {
   loadProduct(productId: number): Promise<EbayRegistrationProductRecord | null>;
   loadAllProductVariants(
     productId: number,
+    channelId: number,
   ): Promise<readonly EbayRegistrationVariantRecord[]>;
 }
 
@@ -52,7 +53,7 @@ export class EbayMarketplaceRegistrationOwnerReader
     const [channel, product, variants] = await Promise.all([
       this.repository.loadChannel(owner.channelId),
       this.repository.loadProduct(owner.productId),
-      this.repository.loadAllProductVariants(owner.productId),
+      this.repository.loadAllProductVariants(owner.productId, owner.channelId),
     ]);
     if (!channel || channel.id !== owner.channelId) {
       throw ownerReadError(

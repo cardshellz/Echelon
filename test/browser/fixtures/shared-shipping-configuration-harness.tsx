@@ -12,9 +12,12 @@ import { PackagingAssignmentsPanel } from "../../../client/src/components/shippi
 import { ProgramChargesPanel } from "../../../client/src/components/shipping/pricing-programs/ProgramChargesPanel";
 import { WarehousePackagingPanel } from "../../../client/src/components/shipping/WarehousePackagingPanel";
 import { Toaster } from "../../../client/src/components/ui/toaster";
+import { InventoryCutoverOpeningPanel } from "../../../client/src/pages/inventory-cutover-opening-panel";
 import "../../../client/src/index.css";
 
 const mode = new URLSearchParams(location.search).get("mode");
+const browserState = window as unknown as { __inventoryOpeningChanged?: number };
+browserState.__inventoryOpeningChanged = 0;
 function CatalogHarness() {
   const query = useQuery({
     queryKey: ["/api/shipping/admin/config"],
@@ -41,6 +44,9 @@ createRoot(document.getElementById("root")!).render(
       <PackagingAssignmentsPanel />
     ) : mode === "charges" ? (
       <ProgramChargesPanel bookId={1} />
+    ) : mode === "inventory-opening" ? (
+      <InventoryCutoverOpeningPanel actorId="operator-1" canActivate
+        onStateChanged={() => { browserState.__inventoryOpeningChanged = (browserState.__inventoryOpeningChanged ?? 0) + 1; }} />
     ) : (
       <DropshipSharedShippingPanel />
     )}

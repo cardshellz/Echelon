@@ -1,10 +1,11 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { Card, CardContent } from "@/components/ui/card";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
   Select,
   SelectContent,
@@ -20,6 +21,9 @@ interface SyncSettings {
   id: number;
   globalEnabled: boolean;
   sweepIntervalMinutes: number;
+  revision: string;
+  changedBy: string;
+  changeReason: string;
   lastSweepAt: string | null;
   lastSweepDurationMs: number | null;
   updatedAt: string;
@@ -43,9 +47,17 @@ interface SyncStatus {
   };
 }
 
-export default function SyncControlPanel() {
+export default function SyncControlPanel({
+  mode = "legacy",
+  allowChanges = true,
+}: {
+  mode?: "legacy" | "canonical";
+  allowChanges?: boolean;
+}) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const [changeReason, setChangeReason] = useState("");
+  const retainedCommand = useRef<{ fingerprint: string; idempotencyKey: string } | null>(null);
 
   const { data: status, isLoading } = useQuery<SyncStatus>({
     queryKey: ["/api/sync/status"],
@@ -53,31 +65,37 @@ export default function SyncControlPanel() {
     refetchInterval: 30000,
   });
 
-  const toggleGlobalMutation = useMutation({
-    mutationFn: async (enabled: boolean) => {
-      const res = await apiRequest("PUT", "/api/sync/settings", {
-        globalEnabled: enabled,
+  const changeControlMutation = useMutation({
+    mutationFn: async (change: { globalEnabled?: boolean; sweepIntervalMinutes?: number }) => {
+      if (!status) throw new Error("Publication-control status has not loaded.");
+      const reason = changeReason.trim();
+      if (!reason) throw new Error("Enter a change reason before changing publication controls.");
+      const fingerprint = JSON.stringify({ change, reason, revision: status.global.revision });
+      if (!retainedCommand.current || retainedCommand.current.fingerprint !== fingerprint) {
+        retainedCommand.current = { fingerprint, idempotencyKey: crypto.randomUUID() };
+      }
+      const path = mode === "canonical"
+        ? "/api/inventory-planning/admin/publication-global-control"
+        : "/api/sync/settings";
+      const res = await apiRequest("PUT", path, {
+        ...change,
+        expectedRevision: status.global.revision,
+        idempotencyKey: retainedCommand.current.idempotencyKey,
+        changeReason: reason,
       });
       return res.json();
     },
     onSuccess: (data) => {
+      retainedCommand.current = null;
+      setChangeReason("");
       queryClient.invalidateQueries({ queryKey: ["/api/sync/status"] });
       toast({
-        title: data.globalEnabled ? "Sync Engine enabled" : "Sync Engine disabled",
+        title: data.globalEnabled ? "Inventory publication enabled" : "Inventory publication disabled",
+        description: `Control revision ${data.revision}`,
       });
     },
-  });
-
-  const updateIntervalMutation = useMutation({
-    mutationFn: async (minutes: number) => {
-      const res = await apiRequest("PUT", "/api/sync/settings", {
-        sweepIntervalMinutes: minutes,
-      });
-      return res.json();
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/sync/status"] });
-      toast({ title: "Sweep interval updated" });
+    onError: (error: Error) => {
+      toast({ title: "Publication control unchanged", description: error.message, variant: "destructive" });
     },
   });
 
@@ -134,12 +152,14 @@ export default function SyncControlPanel() {
                     : "text-muted-foreground"
                 }
               />
-              <span className="font-semibold text-lg">Sync Engine</span>
+              <span className="font-semibold text-lg">
+                {mode === "canonical" ? "Inventory Publication" : "Sync Engine"}
+              </span>
             </div>
             <Switch
               checked={globalSettings.globalEnabled}
-              onCheckedChange={(checked) => toggleGlobalMutation.mutate(checked)}
-              disabled={toggleGlobalMutation.isPending}
+              onCheckedChange={(checked) => changeControlMutation.mutate({ globalEnabled: checked })}
+              disabled={!allowChanges || changeControlMutation.isPending}
             />
             <Badge
               variant={globalSettings.globalEnabled ? "default" : "secondary"}
@@ -159,7 +179,8 @@ export default function SyncControlPanel() {
               <span className="text-sm text-muted-foreground">Sweep every</span>
               <Select
                 value={String(globalSettings.sweepIntervalMinutes)}
-                onValueChange={(v) => updateIntervalMutation.mutate(parseInt(v))}
+                onValueChange={(v) => changeControlMutation.mutate({ sweepIntervalMinutes: parseInt(v, 10) })}
+                disabled={!allowChanges || changeControlMutation.isPending}
               >
                 <SelectTrigger className="w-24 h-8">
                   <SelectValue />
@@ -185,7 +206,7 @@ export default function SyncControlPanel() {
           )}
 
           {/* Manual trigger */}
-          {globalSettings.globalEnabled && (
+          {mode === "legacy" && globalSettings.globalEnabled && (
             <Button
               variant="outline"
               size="sm"
@@ -202,6 +223,27 @@ export default function SyncControlPanel() {
             </Button>
           )}
         </div>
+
+        {allowChanges && (
+          <div className="mt-3 pt-3 border-t flex flex-col md:flex-row md:items-center gap-2">
+            <label htmlFor={`publication-control-reason-${mode}`} className="text-sm font-medium">
+              Change reason
+            </label>
+            <Input
+              id={`publication-control-reason-${mode}`}
+              value={changeReason}
+              onChange={(event) => {
+                setChangeReason(event.target.value);
+                retainedCommand.current = null;
+              }}
+              maxLength={1000}
+              placeholder="Required for the immutable audit record"
+              disabled={changeControlMutation.isPending}
+              className="md:max-w-xl"
+            />
+            <span className="text-xs text-muted-foreground">Revision {globalSettings.revision}</span>
+          </div>
+        )}
 
         {/* Summary badges */}
         {globalSettings.globalEnabled && summary && (

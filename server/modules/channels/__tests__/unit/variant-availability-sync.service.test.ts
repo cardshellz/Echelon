@@ -167,6 +167,7 @@ describe("variant availability sync service", () => {
     expect(allocationEngine.allocateProduct).toHaveBeenCalledWith(
       10,
       "variant_availability_reactivation",
+      [67],
     );
     expect(pushInventory).toHaveBeenCalledWith(
       67,

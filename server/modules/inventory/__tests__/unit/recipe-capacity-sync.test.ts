@@ -23,5 +23,10 @@ describe("recipe-derived ATP invalidation", () => {
 
     expect(source).toContain("recipeCapacity.getAffectedOutputProductIds(productVariantId)");
     expect(source).toContain("queueProductInventorySync(productId, triggeredBy)");
+    expect(source).toContain("channelSync.setInventoryChangePublisher(queueVariantInventorySync)");
+    expect(source).toContain("inventoryCore.onInventoryChange(queueVariantInventorySync)");
+    expect(source.match(/inventoryPublicationWork\.syncProduct\(/g)).toHaveLength(1);
+    expect(source).toContain("builds.onInventoryChange((variantId, trigger) => {");
+    expect(source).toContain("inventoryCore.triggerNotifyChange(variantId, trigger)");
   });
 });

@@ -27,6 +27,7 @@ import {
   createBuildQueryRepository,
   type BuildQueryRepository,
 } from "../infrastructure/build-query.repository";
+import type { TransformationExecutionAuthorityPort } from "./transformation-execution-authority.port";
 
 type BuildDb = ConstructorParameters<typeof BuildRepository>[0];
 export type BuildInventoryChangeTrigger =
@@ -365,7 +366,10 @@ export class BuildUseCases {
 
 export function createBuildUseCases(
   db: BuildDb,
-  options: { onBuildOrderCompleted?: (tx: BuildDb, context: BuildOrderCompletedContext) => Promise<void> } = {},
+  options: {
+    onBuildOrderCompleted?: (tx: BuildDb, context: BuildOrderCompletedContext) => Promise<void>;
+    transformationAuthority?: TransformationExecutionAuthorityPort;
+  } = {},
 ): BuildUseCases {
   return new BuildUseCases(
     createBuildRepository(db, options),

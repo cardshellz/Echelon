@@ -19,6 +19,7 @@ import {
   type DropshipAcceptanceQuoteSnapshot,
   type DropshipAcceptanceVendorContext,
   type DropshipAcceptanceWalletState,
+  type DropshipCanonicalOrderAcceptancePreparation,
   type DropshipOrderAcceptanceInput,
   type DropshipOrderAcceptancePlan,
   type DropshipOrderAcceptanceRepository,
@@ -150,6 +151,87 @@ interface OmsLineRow {
   quantity: number;
 }
 
+interface CanonicalAcceptanceStageRow {
+  intake_id: number;
+  oms_order_id: string | number;
+  vendor_id: number;
+  store_connection_id: number;
+  shipping_quote_snapshot_id: number;
+  warehouse_id: number;
+  wallet_account_id: number;
+  state:
+    | "prepared"
+    | "inventory_claimed"
+    | "compensation_pending"
+    | "inventory_released"
+    | "expired"
+    | "finalized";
+  claim_attempt_number: number | null;
+  wms_order_id: string | number | null;
+  request_hash: string;
+  submitted_idempotency_key: string;
+  actor_type: DropshipOrderAcceptanceInput["actor"]["actorType"];
+  actor_id: string | null;
+  member_id: string;
+  membership_plan_id: string | null;
+  currency: string;
+  retail_subtotal_cents: string | number;
+  wholesale_subtotal_cents: string | number;
+  shipping_cents: string | number;
+  insurance_pool_cents: string | number;
+  fees_cents: string | number;
+  total_debit_cents: string | number;
+  cost_evidence_hash: string;
+  pricing_snapshot: Record<string, unknown>;
+  prepared_at: Date;
+  inventory_claimed_at: Date | null;
+  inventory_release_requested_at: Date | null;
+  inventory_released_at: Date | null;
+  inventory_release_reason: string | null;
+  expired_at: Date | null;
+  finalized_at: Date | null;
+}
+
+interface CanonicalClaimAttemptRow {
+  intake_id: number;
+  attempt_number: number;
+  oms_order_id: string | number;
+  wms_order_id: string | number;
+  warehouse_id: number;
+  claim_authority: "canonical";
+  claim_owner: "dropship_acceptance";
+  claim_outcome: "claimed" | "no_claim_required";
+  availability_claim_id: string | number | null;
+  state: "claimed" | "compensation_pending" | "released" | "expired" | "finalized";
+  claimed_at: Date;
+  release_requested_at: Date | null;
+  released_at: Date | null;
+  release_reason: string | null;
+  expired_at: Date | null;
+  finalized_at: Date | null;
+}
+
+type AcceptanceFinancialPlan = Pick<
+  DropshipOrderAcceptancePlan,
+  | "outcome"
+  | "intakeId"
+  | "vendorId"
+  | "storeConnectionId"
+  | "shippingQuoteSnapshotId"
+  | "warehouseId"
+  | "acceptedAt"
+  | "currency"
+  | "retailSubtotalCents"
+  | "wholesaleSubtotalCents"
+  | "shippingCents"
+  | "insurancePoolCents"
+  | "feesCents"
+  | "totalDebitCents"
+  | "paymentHoldExpiresAt"
+  | "costEvidenceHash"
+  | "pricingSnapshot"
+>;
+
 export interface PgDropshipOrderAcceptanceRepositoryDependencies {
   /**
    * Builds the `.ops` product-cost reader bound to the acceptance transaction's
@@ -184,6 +266,56 @@ export class PgDropshipOrderAcceptanceRepository implements DropshipOrderAccepta
       client.release();
     }
   }
+
+  async prepareCanonicalOrder(
+    input: DropshipOrderAcceptanceInput,
+  ): Promise<DropshipCanonicalOrderAcceptancePreparation> {
+    return this.inTransaction((client) => prepareCanonicalOrderWithClient(
+      client,
+      input,
+      this.productCostReaderForTransaction(client),
+    ));
+  }
+
+  async markCanonicalInventoryClaimed(input: {
+    acceptance: DropshipOrderAcceptanceInput;
+    omsOrderId: number;
+    wmsOrderId: number;
+    inventoryClaimId: string | null;
+  }): Promise<void> {
+    await this.inTransaction((client) => markCanonicalInventoryClaimedWithClient(client, input));
+  }
+
+  async finalizeCanonicalOrder(
+    input: DropshipOrderAcceptanceInput,
+  ): Promise<DropshipOrderAcceptanceResult> {
+    return this.inTransaction((client) => finalizeCanonicalOrderWithClient(client, input));
+  }
+
+  async markCanonicalInventoryClaimReleased(input: {
+    acceptance: DropshipOrderAcceptanceInput;
+    omsOrderId: number;
+    wmsOrderId: number;
+    inventoryClaimId: string | null;
+    reason: string;
+  }): Promise<void> {
+    await this.inTransaction((client) => markCanonicalInventoryClaimReleasedWithClient(client, input));
+  }
+
+  private async inTransaction<T>(work: (client: PoolClient) => Promise<T>): Promise<T> {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await work(client);
+      await client.query("COMMIT");
+      return result;
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
 }
 
 async function acceptOrderWithClient(
@@ -208,54 +340,13 @@ async function acceptOrderWithClient(
     return replayAcceptedOrderWithClient(client, input, intake);
   }
 
-  const vendor = await loadVendorContextForUpdate(client, {
-    vendorId: input.vendorId,
-    storeConnectionId: input.storeConnectionId,
-  });
-  if (!vendor) {
-    throw new DropshipError(
-      "DROPSHIP_ORDER_VENDOR_CONTEXT_REQUIRED",
-      "Dropship vendor/store context was not found for order acceptance.",
-      { vendorId: input.vendorId, storeConnectionId: input.storeConnectionId },
-    );
-  }
-
-  const quote = await loadQuoteSnapshotWithClient(client, input);
-  const rawLines = intake.normalizedPayload.lines;
-  const lines = await resolveAcceptanceLinesWithClient(client, {
-    vendor,
-    storeConnectionId: input.storeConnectionId,
-    rawLines,
-    productCosts,
-  });
-  const productVariantIds = uniquePositiveIntegers(lines.map((line) => line.productVariantId));
-  const [pricingPolicies, inventoryLevels, wallet, paymentHoldTimeoutMinutes] = await Promise.all([
-    loadPricingPoliciesWithClient(client),
-    lockInventoryLevelsWithClient(client, {
-      productVariantIds,
-      warehouseId: quote.warehouseId,
-    }),
-    getOrCreateWalletForUpdate(client, {
-      vendorId: input.vendorId,
-      currency: quote.currency,
-      now: input.acceptedAt,
-    }),
-    loadPaymentHoldTimeoutWithClient(client, input.vendorId),
-  ]);
-
-  const plan = buildDropshipOrderAcceptancePlan({
+  const { plan, vendor, wallet, inventoryLevels } = await planAcceptanceWithClient(
+    client,
+    input,
     intake,
-    vendor,
-    quote,
-    lines,
-    pricingPolicies,
-    inventory: summarizeInventoryAvailability(inventoryLevels),
-    wallet,
-    paymentHoldTimeoutMinutes,
-    requestHash: input.requestHash,
-    idempotencyKey: input.idempotencyKey,
-    acceptedAt: input.acceptedAt,
-  });
+    productCosts,
+    "legacy_exact_sku",
+  );
 
   if (plan.outcome === "payment_hold") {
     await markIntakePaymentHoldWithClient(client, {
@@ -339,6 +430,965 @@ async function acceptOrderWithClient(
     paymentHoldExpiresAt: null,
     idempotentReplay: false,
   };
+}
+
+async function prepareCanonicalOrderWithClient(
+  client: PoolClient,
+  input: DropshipOrderAcceptanceInput,
+  productCosts: DropshipProductCostReader,
+): Promise<DropshipCanonicalOrderAcceptancePreparation> {
+  const intake = await loadIntakeForUpdate(client, input);
+  if (!intake) {
+    throw acceptanceIntakeNotFound(input);
+  }
+  if (intake.status === "accepted") {
+    return replayAcceptedOrderWithClient(client, input, intake);
+  }
+
+  const existingStage = await loadCanonicalAcceptanceStageForUpdate(client, input.intakeId);
+  if (existingStage) {
+    assertCanonicalStageIntakeCanResume(intake, input.acceptedAt, existingStage.state);
+    assertCanonicalStageMatches(existingStage, input, intake);
+    if (existingStage.state === "finalized") {
+      throw new DropshipError(
+        "DROPSHIP_CANONICAL_ACCEPTANCE_STATE_INVALID",
+        "Canonical acceptance stage is finalized but its intake is not accepted.",
+        { intakeId: input.intakeId, omsOrderId: Number(existingStage.oms_order_id) },
+      );
+    }
+    if (existingStage.state === "expired") {
+      throw canonicalPaymentHoldExpired(intake);
+    }
+    if (existingStage.state === "compensation_pending") {
+      const claimAttempt = await requireCanonicalClaimAttemptWithClient(
+        client,
+        existingStage,
+        ["compensation_pending"],
+      );
+      return canonicalCompensationFromStage(existingStage, claimAttempt, intake, input.acceptedAt);
+    }
+    if (existingStage.state === "inventory_released") {
+      const releasedAttempt = await requireCanonicalClaimAttemptWithClient(
+        client,
+        existingStage,
+        ["released"],
+      );
+      if (intake.paymentHoldExpiresAt == null) {
+        throw canonicalPaymentHoldExpired(intake);
+      }
+      if (intake.paymentHoldExpiresAt <= input.acceptedAt) {
+        return canonicalCompensationFromStage(existingStage, releasedAttempt, intake, input.acceptedAt);
+      }
+      const wallet = await getOrCreateWalletForUpdate(client, {
+        vendorId: existingStage.vendor_id,
+        currency: existingStage.currency,
+        now: input.acceptedAt,
+      });
+      if (wallet.walletAccountId !== existingStage.wallet_account_id) {
+        throw canonicalStageConflict(input.intakeId, {
+          stagedWalletAccountId: existingStage.wallet_account_id,
+          currentWalletAccountId: wallet.walletAccountId,
+        });
+      }
+      const plan = financialPlanFromCanonicalStage(existingStage, input.acceptedAt);
+      if (wallet.availableBalanceCents < plan.totalDebitCents) {
+        return {
+          ...paymentHoldResult({
+            ...plan,
+            outcome: "payment_hold",
+            paymentHoldExpiresAt: intake.paymentHoldExpiresAt,
+          }),
+          idempotentReplay: true,
+        };
+      }
+      const reopenedStage = await reopenCanonicalStageForClaimWithClient(
+        client,
+        existingStage,
+        input,
+      );
+      await markIntakeCanonicalAcceptanceProcessingWithClient(client, {
+        intakeId: input.intakeId,
+        omsOrderId: Number(existingStage.oms_order_id),
+        updatedAt: input.acceptedAt,
+      });
+      return canonicalPreparationFromStage(reopenedStage, true);
+    }
+    const paymentHoldExpired = intake.paymentHoldExpiresAt != null
+      && intake.paymentHoldExpiresAt <= input.acceptedAt;
+    if (existingStage.state === "inventory_claimed"
+      && (intake.status === "payment_hold" || paymentHoldExpired)) {
+      const compensation = await markCanonicalCompensationPendingWithClient(
+        client,
+        existingStage,
+        input.acceptedAt,
+        paymentHoldExpired
+          ? "payment_hold_expired_before_finalization"
+          : "wallet_balance_changed_before_finalization",
+      );
+      return canonicalCompensationFromStage(
+        compensation.stage,
+        compensation.claimAttempt,
+        intake,
+        input.acceptedAt,
+      );
+    }
+    await markIntakeCanonicalAcceptanceProcessingWithClient(client, {
+      intakeId: input.intakeId,
+      omsOrderId: Number(existingStage.oms_order_id),
+      updatedAt: input.acceptedAt,
+    });
+    return canonicalPreparationFromStage(existingStage, true);
+  }
+
+  const { plan, vendor, wallet } = await planAcceptanceWithClient(
+    client,
+    input,
+    intake,
+    productCosts,
+    "canonical_claim",
+  );
+  if (plan.outcome === "payment_hold") {
+    await markIntakePaymentHoldWithClient(client, { plan, input, wallet });
+    return paymentHoldResult(plan);
+  }
+
+  const omsOrderId = await createOmsOrderWithClient(client, plan, intake, {
+    stagedForCanonicalAcceptance: true,
+  });
+  await createOmsOrderLinesWithClient(client, { omsOrderId, plan });
+  await insertCanonicalAcceptanceStageWithClient(client, {
+    plan,
+    vendor,
+    wallet,
+    input,
+    omsOrderId,
+  });
+  await markIntakeCanonicalAcceptanceProcessingWithClient(client, {
+    intakeId: plan.intakeId,
+    omsOrderId,
+    updatedAt: input.acceptedAt,
+  });
+  await recordAcceptanceAuditEventWithClient(client, {
+    plan,
+    input,
+    eventType: "order_acceptance_prepared",
+    severity: "info",
+    payload: {
+      omsOrderId,
+      inventoryAuthority: "canonical",
+      requestHash: input.requestHash,
+    },
+  });
+  return {
+    outcome: "prepared",
+    intakeId: plan.intakeId,
+    vendorId: plan.vendorId,
+    storeConnectionId: plan.storeConnectionId,
+    shippingQuoteSnapshotId: plan.shippingQuoteSnapshotId,
+    warehouseId: plan.warehouseId,
+    omsOrderId,
+    idempotentReplay: false,
+  };
+}
+
+async function markCanonicalInventoryClaimedWithClient(
+  client: PoolClient,
+  input: {
+    acceptance: DropshipOrderAcceptanceInput;
+    omsOrderId: number;
+    wmsOrderId: number;
+    inventoryClaimId: string | null;
+  },
+): Promise<void> {
+  const intake = await loadIntakeForUpdate(client, input.acceptance);
+  if (!intake) throw acceptanceIntakeNotFound(input.acceptance);
+  const stage = await requireCanonicalAcceptanceStageForUpdate(
+    client,
+    input.acceptance,
+    input.omsOrderId,
+  );
+  if (stage.state === "finalized") return;
+  if (stage.state === "inventory_claimed") {
+    if (Number(stage.wms_order_id) !== input.wmsOrderId) {
+      throw canonicalStageConflict(input.acceptance.intakeId, {
+        stagedWmsOrderId: stage.wms_order_id,
+        claimedWmsOrderId: input.wmsOrderId,
+      });
+    }
+    await assertCanonicalClaimWarehouseWithClient(client, {
+      stage,
+      omsOrderId: input.omsOrderId,
+      wmsOrderId: input.wmsOrderId,
+    });
+    const claimAttempt = await requireCanonicalClaimAttemptWithClient(client, stage, ["claimed"]);
+    assertCanonicalClaimIdMatchesInput(stage.intake_id, claimAttempt, input.inventoryClaimId);
+    await assertCanonicalAvailabilityClaimWithClient(
+      client,
+      stage,
+      input.wmsOrderId,
+      input.inventoryClaimId,
+    );
+    return;
+  }
+  if (stage.state !== "prepared") {
+    throw canonicalStageConflict(input.acceptance.intakeId, {
+      stageState: stage.state,
+      expectedState: "prepared",
+    });
+  }
+  await assertCanonicalClaimWarehouseWithClient(client, {
+    stage,
+    omsOrderId: input.omsOrderId,
+    wmsOrderId: input.wmsOrderId,
+  });
+  await assertCanonicalAvailabilityClaimWithClient(
+    client,
+    stage,
+    input.wmsOrderId,
+    input.inventoryClaimId,
+  );
+  const claimAttemptNumber = await insertCanonicalClaimAttemptWithClient(client, {
+    stage,
+    wmsOrderId: input.wmsOrderId,
+    inventoryClaimId: input.inventoryClaimId,
+    claimedAt: input.acceptance.acceptedAt,
+  });
+  await client.query(
+    `UPDATE dropship.dropship_order_acceptance_stages
+     SET state = 'inventory_claimed',
+         wms_order_id = $2,
+         inventory_claimed_at = $3,
+         claim_attempt_number = $4,
+         updated_at = $3
+     WHERE intake_id = $1`,
+    [input.acceptance.intakeId, input.wmsOrderId, input.acceptance.acceptedAt, claimAttemptNumber],
+  );
+  await recordCanonicalStageAuditEventWithClient(client, stage, input.acceptance, {
+    eventType: "order_acceptance_inventory_claimed",
+    payload: {
+      omsOrderId: input.omsOrderId,
+      wmsOrderId: input.wmsOrderId,
+      claimAttemptNumber,
+    },
+  });
+}
+
+async function finalizeCanonicalOrderWithClient(
+  client: PoolClient,
+  input: DropshipOrderAcceptanceInput,
+): Promise<DropshipOrderAcceptanceResult> {
+  const intake = await loadIntakeForUpdate(client, input);
+  if (!intake) throw acceptanceIntakeNotFound(input);
+  if (intake.status === "accepted") {
+    return replayAcceptedOrderWithClient(client, input, intake);
+  }
+
+  const stage = await requireCanonicalAcceptanceStageForUpdate(client, input, intake.omsOrderId);
+  if (stage.state !== "inventory_claimed" || stage.wms_order_id == null) {
+    throw new DropshipError(
+      "DROPSHIP_CANONICAL_INVENTORY_CLAIM_REQUIRED",
+      "Canonical dropship acceptance cannot finalize before its whole-order inventory claim succeeds.",
+      { intakeId: input.intakeId, stageState: stage.state },
+    );
+  }
+  const claimAttempt = await requireCanonicalClaimAttemptWithClient(client, stage, ["claimed"]);
+  const inventoryClaimId = normalizeNullableClaimId(claimAttempt.availability_claim_id);
+  await assertCanonicalAvailabilityClaimWithClient(
+    client,
+    stage,
+    toSafeInteger(stage.wms_order_id, "stage.wms_order_id"),
+    inventoryClaimId,
+  );
+
+  const vendor = await loadVendorContextForUpdate(client, {
+    vendorId: input.vendorId,
+    storeConnectionId: input.storeConnectionId,
+  });
+  if (!vendor) {
+    throw new DropshipError(
+      "DROPSHIP_ORDER_VENDOR_CONTEXT_REQUIRED",
+      "Dropship vendor/store context was not found for order acceptance finalization.",
+      { vendorId: input.vendorId, storeConnectionId: input.storeConnectionId },
+    );
+  }
+  assertVendorContextCanFinalize(vendor);
+
+  const wallet = await getOrCreateWalletForUpdate(client, {
+    vendorId: input.vendorId,
+    currency: stage.currency,
+    now: input.acceptedAt,
+  });
+  if (wallet.walletAccountId !== stage.wallet_account_id) {
+    throw canonicalStageConflict(input.intakeId, {
+      stagedWalletAccountId: stage.wallet_account_id,
+      currentWalletAccountId: wallet.walletAccountId,
+    });
+  }
+
+  const plan = financialPlanFromCanonicalStage(stage, input.acceptedAt);
+  const stagedInput = frozenAcceptanceInput(stage, input.acceptedAt);
+  const paymentHoldExpired = intake.paymentHoldExpiresAt != null
+    && intake.paymentHoldExpiresAt <= input.acceptedAt;
+  if (paymentHoldExpired || wallet.availableBalanceCents < plan.totalDebitCents) {
+    const timeoutMinutes = await loadPaymentHoldTimeoutWithClient(client, input.vendorId);
+    const paymentHoldPlan: AcceptanceFinancialPlan = {
+      ...plan,
+      outcome: "payment_hold",
+      paymentHoldExpiresAt: intake.paymentHoldExpiresAt
+        ?? new Date(input.acceptedAt.getTime() + normalizePositiveMinutes(timeoutMinutes) * 60_000),
+    };
+    await markIntakePaymentHoldWithClient(client, { plan: paymentHoldPlan, input: stagedInput, wallet });
+    await markCanonicalCompensationPendingWithClient(
+      client,
+      stage,
+      input.acceptedAt,
+      paymentHoldExpired
+        ? "payment_hold_expired_before_finalization"
+        : "wallet_balance_changed_before_finalization",
+    );
+    await recordCanonicalStageAuditEventWithClient(client, stage, stagedInput, {
+      eventType: paymentHoldExpired
+        ? "order_acceptance_payment_hold_expired_after_inventory_claim"
+        : "order_acceptance_wallet_changed_after_inventory_claim",
+      severity: "warning",
+      payload: {
+        wmsOrderId: Number(stage.wms_order_id),
+        availableBalanceCents: wallet.availableBalanceCents,
+        requiredCents: plan.totalDebitCents,
+      },
+    });
+    return paymentHoldResult(paymentHoldPlan);
+  }
+
+  const walletLedgerEntryId = await debitWalletWithClient(client, { plan, wallet, input: stagedInput });
+  const economicsSnapshotId = await createEconomicsSnapshotWithClient(client, {
+    plan,
+    vendor: {
+      memberId: stage.member_id,
+      membershipPlanId: stage.membership_plan_id,
+      currentPlanId: stage.membership_plan_id,
+    },
+    omsOrderId: Number(stage.oms_order_id),
+  });
+  await markOmsOrderAcceptedWithClient(client, Number(stage.oms_order_id), input.acceptedAt);
+  await markIntakeAcceptedWithClient(client, {
+    intakeId: plan.intakeId,
+    omsOrderId: Number(stage.oms_order_id),
+    acceptedAt: input.acceptedAt,
+  });
+  await client.query(
+    `UPDATE dropship.dropship_order_acceptance_claim_attempts
+     SET state = 'finalized', finalized_at = $3, updated_at = $3
+     WHERE intake_id = $1 AND attempt_number = $2`,
+    [stage.intake_id, claimAttempt.attempt_number, input.acceptedAt],
+  );
+  await client.query(
+    `UPDATE dropship.dropship_order_acceptance_stages
+     SET state = 'finalized', finalized_at = $2, updated_at = $2
+     WHERE intake_id = $1`,
+    [input.intakeId, input.acceptedAt],
+  );
+  await recordAcceptanceAuditEventWithClient(client, {
+    plan,
+    input: stagedInput,
+    eventType: "order_accepted",
+    severity: "info",
+    payload: {
+      omsOrderId: Number(stage.oms_order_id),
+      wmsOrderId: Number(stage.wms_order_id),
+      walletLedgerEntryId,
+      economicsSnapshotId,
+      totalDebitCents: plan.totalDebitCents,
+      requestHash: input.requestHash,
+      inventoryAuthority: "canonical",
+    },
+  });
+  return {
+    outcome: "accepted",
+    intakeId: plan.intakeId,
+    vendorId: plan.vendorId,
+    storeConnectionId: plan.storeConnectionId,
+    shippingQuoteSnapshotId: plan.shippingQuoteSnapshotId,
+    omsOrderId: Number(stage.oms_order_id),
+    walletLedgerEntryId,
+    economicsSnapshotId,
+    totalDebitCents: plan.totalDebitCents,
+    currency: plan.currency,
+    paymentHoldExpiresAt: null,
+    idempotentReplay: false,
+  };
+}
+
+async function markCanonicalInventoryClaimReleasedWithClient(
+  client: PoolClient,
+  input: {
+    acceptance: DropshipOrderAcceptanceInput;
+    omsOrderId: number;
+    wmsOrderId: number;
+    inventoryClaimId: string | null;
+    reason: string;
+  },
+): Promise<void> {
+  const intake = await loadIntakeForUpdate(client, input.acceptance);
+  if (!intake) throw acceptanceIntakeNotFound(input.acceptance);
+  const stage = await requireCanonicalAcceptanceStageForUpdate(client, input.acceptance, input.omsOrderId);
+  if (stage.state === "finalized") {
+    throw new DropshipError(
+      "DROPSHIP_CANONICAL_ACCEPTANCE_ALREADY_FINALIZED",
+      "A finalized dropship acceptance claim cannot be released by pre-acceptance compensation.",
+      { intakeId: input.acceptance.intakeId, omsOrderId: input.omsOrderId },
+    );
+  }
+  if (stage.state === "inventory_released" || stage.state === "expired") {
+    if (Number(stage.wms_order_id) !== input.wmsOrderId) {
+      throw canonicalStageConflict(input.acceptance.intakeId, {
+        stagedWmsOrderId: stage.wms_order_id,
+        releasedWmsOrderId: input.wmsOrderId,
+      });
+    }
+    const claimAttempt = await requireCanonicalClaimAttemptWithClient(
+      client,
+      stage,
+      [stage.state === "expired" ? "expired" : "released"],
+    );
+    assertCanonicalClaimIdMatchesInput(stage.intake_id, claimAttempt, input.inventoryClaimId);
+    if (stage.state === "expired"
+      || intake.paymentHoldExpiresAt == null
+      || intake.paymentHoldExpiresAt > input.acceptance.acceptedAt) {
+      return;
+    }
+    await client.query(
+      `UPDATE dropship.dropship_order_acceptance_claim_attempts
+       SET state = 'expired', expired_at = $3, updated_at = $3
+       WHERE intake_id = $1 AND attempt_number = $2`,
+      [stage.intake_id, claimAttempt.attempt_number, input.acceptance.acceptedAt],
+    );
+    await client.query(
+      `UPDATE dropship.dropship_order_acceptance_stages
+       SET state = 'expired', expired_at = $2, updated_at = $2
+       WHERE intake_id = $1`,
+      [input.acceptance.intakeId, input.acceptance.acceptedAt],
+    );
+    await recordCanonicalStageAuditEventWithClient(client, stage, input.acceptance, {
+      eventType: "order_acceptance_payment_hold_expired_after_inventory_release",
+      severity: "warning",
+      payload: {
+        omsOrderId: input.omsOrderId,
+        wmsOrderId: input.wmsOrderId,
+        paymentHoldExpiresAt: intake.paymentHoldExpiresAt.toISOString(),
+      },
+    });
+    return;
+  }
+  if (stage.state !== "compensation_pending") {
+    throw canonicalStageConflict(input.acceptance.intakeId, {
+      stageState: stage.state,
+      expectedState: "compensation_pending",
+    });
+  }
+  if (Number(stage.wms_order_id) !== input.wmsOrderId) {
+    throw canonicalStageConflict(input.acceptance.intakeId, {
+      stagedWmsOrderId: stage.wms_order_id,
+      releasedWmsOrderId: input.wmsOrderId,
+    });
+  }
+  const claimAttempt = await requireCanonicalClaimAttemptWithClient(
+    client,
+    stage,
+    ["compensation_pending"],
+  );
+  assertCanonicalClaimIdMatchesInput(stage.intake_id, claimAttempt, input.inventoryClaimId);
+  const expired = intake.paymentHoldExpiresAt == null
+    ? false
+    : intake.paymentHoldExpiresAt <= input.acceptance.acceptedAt;
+  await client.query(
+    `UPDATE dropship.dropship_order_acceptance_claim_attempts
+     SET state = $3,
+         released_at = $4,
+         expired_at = CASE WHEN $3 = 'expired' THEN $4 ELSE NULL END,
+         updated_at = $4
+     WHERE intake_id = $1 AND attempt_number = $2`,
+    [
+      stage.intake_id,
+      claimAttempt.attempt_number,
+      expired ? "expired" : "released",
+      input.acceptance.acceptedAt,
+    ],
+  );
+  await client.query(
+    `UPDATE dropship.dropship_order_acceptance_stages
+     SET state = $2,
+         inventory_released_at = $3,
+         expired_at = CASE WHEN $2 = 'expired' THEN $3 ELSE NULL END,
+         updated_at = $3
+     WHERE intake_id = $1`,
+    [input.acceptance.intakeId, expired ? "expired" : "inventory_released", input.acceptance.acceptedAt],
+  );
+  await recordCanonicalStageAuditEventWithClient(client, stage, input.acceptance, {
+    eventType: "order_acceptance_inventory_claim_released",
+    severity: "warning",
+    payload: {
+      omsOrderId: input.omsOrderId,
+      wmsOrderId: input.wmsOrderId,
+      claimAttemptNumber: claimAttempt.attempt_number,
+      reason: stage.inventory_release_reason,
+    },
+  });
+}
+
+async function markCanonicalCompensationPendingWithClient(
+  client: PoolClient,
+  stage: CanonicalAcceptanceStageRow,
+  requestedAt: Date,
+  reason: string,
+): Promise<{ stage: CanonicalAcceptanceStageRow; claimAttempt: CanonicalClaimAttemptRow }> {
+  if (stage.state === "compensation_pending") {
+    const claimAttempt = await requireCanonicalClaimAttemptWithClient(
+      client,
+      stage,
+      ["compensation_pending"],
+    );
+    return { stage, claimAttempt };
+  }
+  if (stage.state !== "inventory_claimed" || stage.wms_order_id == null) {
+    throw canonicalStageConflict(stage.intake_id, {
+      stageState: stage.state,
+      expectedState: "inventory_claimed",
+    });
+  }
+  const normalizedReason = reason.trim();
+  if (normalizedReason.length === 0) {
+    throw new DropshipError(
+      "DROPSHIP_CANONICAL_COMPENSATION_REASON_REQUIRED",
+      "Canonical inventory-claim compensation requires a durable reason.",
+      { intakeId: stage.intake_id },
+    );
+  }
+  const claimAttempt = await requireCanonicalClaimAttemptWithClient(client, stage, ["claimed"]);
+  await client.query(
+    `UPDATE dropship.dropship_order_acceptance_claim_attempts
+     SET state = 'compensation_pending',
+         release_requested_at = $3,
+         release_reason = $4,
+         updated_at = $3
+     WHERE intake_id = $1 AND attempt_number = $2`,
+    [stage.intake_id, claimAttempt.attempt_number, requestedAt, normalizedReason],
+  );
+  await client.query(
+    `UPDATE dropship.dropship_order_acceptance_stages
+     SET state = 'compensation_pending',
+         inventory_release_requested_at = $2,
+         inventory_release_reason = $3,
+         updated_at = $2
+     WHERE intake_id = $1`,
+    [stage.intake_id, requestedAt, normalizedReason],
+  );
+  const transitioned: CanonicalAcceptanceStageRow = {
+    ...stage,
+    state: "compensation_pending",
+    inventory_release_requested_at: requestedAt,
+    inventory_release_reason: normalizedReason,
+  };
+  await recordCanonicalStageAuditEventWithClient(
+    client,
+    transitioned,
+    frozenAcceptanceInput(stage, requestedAt),
+    {
+      eventType: "order_acceptance_inventory_claim_release_requested",
+      severity: "warning",
+      payload: {
+        omsOrderId: Number(stage.oms_order_id),
+        wmsOrderId: Number(stage.wms_order_id),
+        claimAttemptNumber: claimAttempt.attempt_number,
+        reason: normalizedReason,
+      },
+    },
+  );
+  return {
+    stage: transitioned,
+    claimAttempt: {
+      ...claimAttempt,
+      state: "compensation_pending",
+      release_requested_at: requestedAt,
+      release_reason: normalizedReason,
+    },
+  };
+}
+
+async function assertCanonicalClaimWarehouseWithClient(
+  client: PoolClient,
+  input: {
+    stage: CanonicalAcceptanceStageRow;
+    omsOrderId: number;
+    wmsOrderId: number;
+  },
+): Promise<void> {
+  const result = await client.query<{
+    id: string | number;
+    warehouse_id: string | number | null;
+    source: string | null;
+    oms_fulfillment_order_id: string | null;
+    fulfillment_partition_key: string | null;
+  }>(
+    `SELECT id, warehouse_id, source, oms_fulfillment_order_id, fulfillment_partition_key
+     FROM wms.orders
+     WHERE id = $1
+     LIMIT 1
+     FOR SHARE`,
+    [input.wmsOrderId],
+  );
+  const row = result.rows[0];
+  const actualWarehouseId = row?.warehouse_id == null ? null : Number(row.warehouse_id);
+  if (
+    result.rows.length !== 1
+    || actualWarehouseId !== input.stage.warehouse_id
+    || row?.source !== "oms"
+    || String(row?.oms_fulfillment_order_id ?? "") !== String(input.omsOrderId)
+    || String(row?.fulfillment_partition_key ?? "default") !== "default"
+  ) {
+    throw new DropshipError(
+      "DROPSHIP_CANONICAL_WAREHOUSE_MISMATCH",
+      "Canonical dropship acceptance claim does not match the frozen quote warehouse and OMS order.",
+      {
+        intakeId: input.stage.intake_id,
+        omsOrderId: input.omsOrderId,
+        wmsOrderId: input.wmsOrderId,
+        expectedWarehouseId: input.stage.warehouse_id,
+        actualWarehouseId,
+        wmsSource: row?.source ?? null,
+        wmsOmsOrderId: row?.oms_fulfillment_order_id ?? null,
+        fulfillmentPartitionKey: row?.fulfillment_partition_key ?? null,
+      },
+    );
+  }
+}
+
+async function assertCanonicalAvailabilityClaimWithClient(
+  client: PoolClient,
+  stage: CanonicalAcceptanceStageRow,
+  wmsOrderId: number,
+  inventoryClaimId: string | null,
+): Promise<void> {
+  const result = inventoryClaimId === null
+    ? await client.query<{ id: string | number; order_id: number; status: string }>(
+      `SELECT id, order_id, status
+       FROM inventory.availability_claims
+       WHERE order_id = $1 AND status = 'active'
+       ORDER BY revision DESC, id DESC
+       LIMIT 1
+       FOR SHARE`,
+      [wmsOrderId],
+    )
+    : await client.query<{ id: string | number; order_id: number; status: string }>(
+      `SELECT id, order_id, status
+       FROM inventory.availability_claims
+       WHERE id = $1
+       LIMIT 1
+       FOR SHARE`,
+      [inventoryClaimId],
+    );
+  const row = result.rows[0];
+  const valid = inventoryClaimId === null
+    ? row == null
+    : row != null
+      && String(row.id) === inventoryClaimId
+      && Number(row.order_id) === wmsOrderId
+      && row.status === "active";
+  if (!valid) {
+    throw new DropshipError(
+      "DROPSHIP_CANONICAL_CLAIM_ID_MISMATCH",
+      "Canonical dropship acceptance inventory claim no longer matches its exact WMS claim attempt.",
+      {
+        intakeId: stage.intake_id,
+        wmsOrderId,
+        expectedInventoryClaimId: inventoryClaimId,
+        actualInventoryClaimId: row == null ? null : String(row.id),
+        actualInventoryClaimOrderId: row?.order_id ?? null,
+        actualInventoryClaimStatus: row?.status ?? null,
+      },
+    );
+  }
+}
+
+async function insertCanonicalClaimAttemptWithClient(
+  client: PoolClient,
+  input: {
+    stage: CanonicalAcceptanceStageRow;
+    wmsOrderId: number;
+    inventoryClaimId: string | null;
+    claimedAt: Date;
+  },
+): Promise<number> {
+  const nextResult = await client.query<{ attempt_number: string | number }>(
+    `SELECT COALESCE(MAX(attempt_number), 0) + 1 AS attempt_number
+     FROM dropship.dropship_order_acceptance_claim_attempts
+     WHERE intake_id = $1`,
+    [input.stage.intake_id],
+  );
+  const attemptNumber = toSafeInteger(
+    requiredRow(nextResult.rows[0], "Canonical claim attempt sequence did not return a row.").attempt_number,
+    "claim_attempt_number",
+  );
+  if (attemptNumber <= 0) {
+    throw canonicalStageConflict(input.stage.intake_id, { claimAttemptNumber: attemptNumber });
+  }
+  await client.query(
+    `INSERT INTO dropship.dropship_order_acceptance_claim_attempts
+      (intake_id, attempt_number, oms_order_id, wms_order_id, warehouse_id,
+       claim_authority, claim_owner, claim_outcome, availability_claim_id,
+       state, claimed_at, updated_at)
+     VALUES ($1, $2, $3, $4, $5,
+             'canonical', 'dropship_acceptance', $6, $7,
+             'claimed', $8, $8)`,
+    [
+      input.stage.intake_id,
+      attemptNumber,
+      Number(input.stage.oms_order_id),
+      input.wmsOrderId,
+      input.stage.warehouse_id,
+      input.inventoryClaimId === null ? "no_claim_required" : "claimed",
+      input.inventoryClaimId,
+      input.claimedAt,
+    ],
+  );
+  return attemptNumber;
+}
+
+async function requireCanonicalClaimAttemptWithClient(
+  client: PoolClient,
+  stage: CanonicalAcceptanceStageRow,
+  expectedStates: readonly CanonicalClaimAttemptRow["state"][],
+): Promise<CanonicalClaimAttemptRow> {
+  if (stage.claim_attempt_number == null || stage.wms_order_id == null) {
+    throw canonicalStageConflict(stage.intake_id, {
+      stageState: stage.state,
+      claimAttemptNumber: stage.claim_attempt_number,
+      wmsOrderId: stage.wms_order_id,
+    });
+  }
+  const result = await client.query<CanonicalClaimAttemptRow>(
+    `SELECT intake_id, attempt_number, oms_order_id, wms_order_id, warehouse_id,
+            claim_authority, claim_owner, claim_outcome, availability_claim_id,
+            state, claimed_at,
+            release_requested_at, released_at, release_reason, expired_at, finalized_at
+     FROM dropship.dropship_order_acceptance_claim_attempts
+     WHERE intake_id = $1 AND attempt_number = $2
+     LIMIT 1
+     FOR UPDATE`,
+    [stage.intake_id, stage.claim_attempt_number],
+  );
+  const attempt = result.rows[0];
+  if (!attempt) {
+    throw canonicalStageConflict(stage.intake_id, {
+      claimAttemptNumber: stage.claim_attempt_number,
+      claimAttempt: "missing",
+    });
+  }
+  const mismatches: Record<string, unknown> = {};
+  if (Number(attempt.oms_order_id) !== Number(stage.oms_order_id)) {
+    mismatches.omsOrderId = { stage: stage.oms_order_id, attempt: attempt.oms_order_id };
+  }
+  if (Number(attempt.wms_order_id) !== Number(stage.wms_order_id)) {
+    mismatches.wmsOrderId = { stage: stage.wms_order_id, attempt: attempt.wms_order_id };
+  }
+  if (attempt.warehouse_id !== stage.warehouse_id) {
+    mismatches.warehouseId = { stage: stage.warehouse_id, attempt: attempt.warehouse_id };
+  }
+  if (attempt.claim_authority !== "canonical" || attempt.claim_owner !== "dropship_acceptance") {
+    mismatches.claimIdentity = {
+      authority: attempt.claim_authority,
+      owner: attempt.claim_owner,
+    };
+  }
+  const availabilityClaimId = normalizeNullableClaimId(attempt.availability_claim_id);
+  if ((attempt.claim_outcome === "claimed" && availabilityClaimId === null)
+    || (attempt.claim_outcome === "no_claim_required" && availabilityClaimId !== null)) {
+    mismatches.availabilityClaim = {
+      outcome: attempt.claim_outcome,
+      claimId: availabilityClaimId,
+    };
+  }
+  if (!expectedStates.includes(attempt.state)) {
+    mismatches.claimState = { expected: expectedStates, actual: attempt.state };
+  }
+  assertCanonicalClaimAttemptTimestamps(stage, attempt, mismatches);
+  if (Object.keys(mismatches).length > 0) {
+    throw canonicalStageConflict(stage.intake_id, mismatches);
+  }
+  return attempt;
+}
+
+function assertCanonicalClaimIdMatchesInput(
+  intakeId: number,
+  attempt: CanonicalClaimAttemptRow,
+  inventoryClaimId: string | null,
+): void {
+  const persistedClaimId = normalizeNullableClaimId(attempt.availability_claim_id);
+  if (persistedClaimId !== inventoryClaimId) {
+    throw canonicalStageConflict(intakeId, {
+      inventoryClaimId: { persisted: persistedClaimId, requested: inventoryClaimId },
+    });
+  }
+}
+
+function normalizeNullableClaimId(value: string | number | null): string | null {
+  if (value === null) return null;
+  const normalized = String(value);
+  if (!/^[1-9][0-9]*$/.test(normalized)) {
+    throw new DropshipError(
+      "DROPSHIP_CANONICAL_CLAIM_ID_INVALID",
+      "Canonical dropship claim evidence contains an invalid inventory claim identity.",
+      { inventoryClaimId: normalized },
+    );
+  }
+  return normalized;
+}
+
+function assertCanonicalClaimAttemptTimestamps(
+  stage: CanonicalAcceptanceStageRow,
+  attempt: CanonicalClaimAttemptRow,
+  mismatches: Record<string, unknown>,
+): void {
+  const comparisons: ReadonlyArray<[
+    string,
+    Date | null,
+    Date | null,
+  ]> = [
+    ["claimedAt", stage.inventory_claimed_at, attempt.claimed_at],
+    ["releaseRequestedAt", stage.inventory_release_requested_at, attempt.release_requested_at],
+    ["releasedAt", stage.inventory_released_at, attempt.released_at],
+    ["expiredAt", stage.expired_at, attempt.expired_at],
+    ["finalizedAt", stage.finalized_at, attempt.finalized_at],
+  ];
+  for (const [field, staged, attempted] of comparisons) {
+    if (!sameInstant(staged, attempted)) {
+      mismatches[field] = {
+        stage: staged?.toISOString() ?? null,
+        attempt: attempted?.toISOString() ?? null,
+      };
+    }
+  }
+  if (stage.inventory_release_reason !== attempt.release_reason) {
+    mismatches.releaseReason = {
+      stage: stage.inventory_release_reason,
+      attempt: attempt.release_reason,
+    };
+  }
+}
+
+function sameInstant(left: Date | null, right: Date | null): boolean {
+  if (left === null || right === null) return left === right;
+  return left.getTime() === right.getTime();
+}
+
+async function reopenCanonicalStageForClaimWithClient(
+  client: PoolClient,
+  stage: CanonicalAcceptanceStageRow,
+  input: DropshipOrderAcceptanceInput,
+): Promise<CanonicalAcceptanceStageRow> {
+  if (stage.state !== "inventory_released") {
+    throw canonicalStageConflict(stage.intake_id, {
+      stageState: stage.state,
+      expectedState: "inventory_released",
+    });
+  }
+  const releasedAttempt = await requireCanonicalClaimAttemptWithClient(client, stage, ["released"]);
+  await client.query(
+    `UPDATE dropship.dropship_order_acceptance_stages
+     SET state = 'prepared',
+         claim_attempt_number = NULL,
+         wms_order_id = NULL,
+         inventory_claimed_at = NULL,
+         inventory_release_requested_at = NULL,
+         inventory_released_at = NULL,
+         inventory_release_reason = NULL,
+         expired_at = NULL,
+         finalized_at = NULL,
+         updated_at = $2
+     WHERE intake_id = $1`,
+    [stage.intake_id, input.acceptedAt],
+  );
+  await recordCanonicalStageAuditEventWithClient(client, stage, input, {
+    eventType: "order_acceptance_reopened_after_inventory_release",
+    severity: "info",
+    payload: {
+      omsOrderId: Number(stage.oms_order_id),
+      releasedWmsOrderId: Number(stage.wms_order_id),
+      releasedClaimAttemptNumber: releasedAttempt.attempt_number,
+    },
+  });
+  return {
+    ...stage,
+    state: "prepared",
+    claim_attempt_number: null,
+    wms_order_id: null,
+    inventory_claimed_at: null,
+    inventory_release_requested_at: null,
+    inventory_released_at: null,
+    inventory_release_reason: null,
+    expired_at: null,
+    finalized_at: null,
+  };
+}
+
+async function planAcceptanceWithClient(
+  client: PoolClient,
+  input: DropshipOrderAcceptanceInput,
+  intake: DropshipAcceptanceIntakeRecord,
+  productCosts: DropshipProductCostReader,
+  inventoryValidation: "legacy_exact_sku" | "canonical_claim",
+): Promise<{
+  plan: DropshipOrderAcceptancePlan;
+  vendor: DropshipAcceptanceVendorContext;
+  wallet: DropshipAcceptanceWalletState;
+  inventoryLevels: InventoryLevelRow[];
+}> {
+  const vendor = await loadVendorContextForUpdate(client, {
+    vendorId: input.vendorId,
+    storeConnectionId: input.storeConnectionId,
+  });
+  if (!vendor) {
+    throw new DropshipError(
+      "DROPSHIP_ORDER_VENDOR_CONTEXT_REQUIRED",
+      "Dropship vendor/store context was not found for order acceptance.",
+      { vendorId: input.vendorId, storeConnectionId: input.storeConnectionId },
+    );
+  }
+  const quote = await loadQuoteSnapshotWithClient(client, input);
+  const lines = await resolveAcceptanceLinesWithClient(client, {
+    vendor,
+    storeConnectionId: input.storeConnectionId,
+    rawLines: intake.normalizedPayload.lines,
+    productCosts,
+  });
+  const productVariantIds = uniquePositiveIntegers(lines.map((line) => line.productVariantId));
+  const [pricingPolicies, inventoryLevels, wallet, paymentHoldTimeoutMinutes] = await Promise.all([
+    loadPricingPoliciesWithClient(client),
+    inventoryValidation === "legacy_exact_sku"
+      ? lockInventoryLevelsWithClient(client, { productVariantIds, warehouseId: quote.warehouseId })
+      : Promise.resolve([] as InventoryLevelRow[]),
+    getOrCreateWalletForUpdate(client, {
+      vendorId: input.vendorId,
+      currency: quote.currency,
+      now: input.acceptedAt,
+    }),
+    loadPaymentHoldTimeoutWithClient(client, input.vendorId),
+  ]);
+  const plan = buildDropshipOrderAcceptancePlan({
+    intake,
+    vendor,
+    quote,
+    lines,
+    pricingPolicies,
+    inventory: summarizeInventoryAvailability(inventoryLevels),
+    wallet,
+    paymentHoldTimeoutMinutes,
+    requestHash: input.requestHash,
+    idempotencyKey: input.idempotencyKey,
+    acceptedAt: input.acceptedAt,
+    inventoryValidation,
+  });
+  return { plan, vendor, wallet, inventoryLevels };
 }
 
 async function loadIntakeForUpdate(
@@ -751,7 +1801,7 @@ async function loadPaymentHoldTimeoutWithClient(client: PoolClient, vendorId: nu
 async function markIntakePaymentHoldWithClient(
   client: PoolClient,
   input: {
-    plan: DropshipOrderAcceptancePlan;
+    plan: AcceptanceFinancialPlan;
     input: DropshipOrderAcceptanceInput;
     wallet: DropshipAcceptanceWalletState;
   },
@@ -788,7 +1838,11 @@ async function createOmsOrderWithClient(
   client: PoolClient,
   plan: DropshipOrderAcceptancePlan,
   intake: DropshipAcceptanceIntakeRecord,
+  options: { stagedForCanonicalAcceptance?: boolean } = {},
 ): Promise<number> {
+  const omsState = options.stagedForCanonicalAcceptance
+    ? "'pending', 'pending'"
+    : "'confirmed', 'paid'";
   const result = await client.query<OmsOrderRow>(
     `INSERT INTO oms.oms_orders
       (channel_id, external_order_id, external_order_number, status,
@@ -797,8 +1851,8 @@ async function createOmsOrderWithClient(
        ship_to_city, ship_to_state, ship_to_zip, ship_to_country,
        subtotal_cents, shipping_cents, tax_cents, discount_cents, total_cents,
        currency, warehouse_id, raw_payload, notes, tags, ordered_at, created_at, updated_at)
-     VALUES ($1, $2, $3, 'confirmed',
-       'paid', 'unfulfilled', $4, $5,
+     VALUES ($1, $2, $3, ${omsState},
+       'unfulfilled', $4, $5,
        $6, $7, $8, $9,
        $10, $11, $12, $13,
        $14, $15, 0, 0, $16,
@@ -830,6 +1884,9 @@ async function createOmsOrderWithClient(
           vendorId: plan.vendorId,
           storeConnectionId: plan.storeConnectionId,
           externalOrderId: intake.externalOrderId,
+          ...(options.stagedForCanonicalAcceptance
+            ? { acceptanceState: "inventory_claim_required" }
+            : {}),
           // The service the buyer paid the marketplace for. Kept on the OMS
           // order (not only inside the marketplace blob) so fulfillment and
           // reconciliation can read it without parsing platform-specific
@@ -958,7 +2015,7 @@ function validateInventoryAvailability(
 async function debitWalletWithClient(
   client: PoolClient,
   input: {
-    plan: DropshipOrderAcceptancePlan;
+    plan: AcceptanceFinancialPlan;
     wallet: DropshipAcceptanceWalletState;
     input: DropshipOrderAcceptanceInput;
   },
@@ -1048,8 +2105,8 @@ async function debitWalletWithClient(
 async function createEconomicsSnapshotWithClient(
   client: PoolClient,
   input: {
-    plan: DropshipOrderAcceptancePlan;
-    vendor: DropshipAcceptanceVendorContext;
+    plan: AcceptanceFinancialPlan;
+    vendor: Pick<DropshipAcceptanceVendorContext, "memberId" | "membershipPlanId" | "currentPlanId">;
     omsOrderId: number;
   },
 ): Promise<number> {
@@ -1113,7 +2170,7 @@ async function markIntakeAcceptedWithClient(
 async function recordAcceptanceAuditEventWithClient(
   client: PoolClient,
   input: {
-    plan: DropshipOrderAcceptancePlan;
+    plan: AcceptanceFinancialPlan;
     input: DropshipOrderAcceptanceInput;
     eventType: string;
     severity: "info" | "warning" | "error";
@@ -1303,6 +2360,431 @@ function assertListingCandidateCanAccept(
       },
     );
   }
+}
+
+async function loadCanonicalAcceptanceStageForUpdate(
+  client: PoolClient,
+  intakeId: number,
+): Promise<CanonicalAcceptanceStageRow | null> {
+  const result = await client.query<CanonicalAcceptanceStageRow>(
+    `SELECT intake_id, oms_order_id, vendor_id, store_connection_id,
+            shipping_quote_snapshot_id, warehouse_id, wallet_account_id,
+            state, claim_attempt_number, wms_order_id, request_hash, submitted_idempotency_key,
+            actor_type, actor_id, member_id, membership_plan_id, currency,
+            retail_subtotal_cents, wholesale_subtotal_cents, shipping_cents,
+            insurance_pool_cents, fees_cents, total_debit_cents,
+            cost_evidence_hash, pricing_snapshot, prepared_at,
+            inventory_claimed_at, inventory_release_requested_at,
+            inventory_released_at, inventory_release_reason, expired_at,
+            finalized_at
+     FROM dropship.dropship_order_acceptance_stages
+     WHERE intake_id = $1
+     LIMIT 1
+     FOR UPDATE`,
+    [intakeId],
+  );
+  return result.rows[0] ?? null;
+}
+
+async function requireCanonicalAcceptanceStageForUpdate(
+  client: PoolClient,
+  input: DropshipOrderAcceptanceInput,
+  expectedOmsOrderId: number | null,
+): Promise<CanonicalAcceptanceStageRow> {
+  const stage = await loadCanonicalAcceptanceStageForUpdate(client, input.intakeId);
+  if (!stage) {
+    throw new DropshipError(
+      "DROPSHIP_CANONICAL_ACCEPTANCE_STAGE_REQUIRED",
+      "Canonical dropship acceptance has no durable preparation stage.",
+      { intakeId: input.intakeId },
+    );
+  }
+  assertCanonicalStageMatches(stage, input, {
+    intakeId: input.intakeId,
+    vendorId: input.vendorId,
+    storeConnectionId: input.storeConnectionId,
+    omsOrderId: expectedOmsOrderId,
+  });
+  return stage;
+}
+
+function assertCanonicalStageMatches(
+  stage: CanonicalAcceptanceStageRow,
+  input: DropshipOrderAcceptanceInput,
+  intake: Pick<DropshipAcceptanceIntakeRecord, "intakeId" | "vendorId" | "storeConnectionId" | "omsOrderId">,
+): void {
+  const stageOmsOrderId = toSafeInteger(stage.oms_order_id, "stage.oms_order_id");
+  const mismatches: Record<string, unknown> = {};
+  if (stage.vendor_id !== input.vendorId || intake.vendorId !== input.vendorId) {
+    mismatches.vendorId = { staged: stage.vendor_id, intake: intake.vendorId, requested: input.vendorId };
+  }
+  if (stage.store_connection_id !== input.storeConnectionId || intake.storeConnectionId !== input.storeConnectionId) {
+    mismatches.storeConnectionId = {
+      staged: stage.store_connection_id,
+      intake: intake.storeConnectionId,
+      requested: input.storeConnectionId,
+    };
+  }
+  if (stage.shipping_quote_snapshot_id !== input.shippingQuoteSnapshotId) {
+    mismatches.shippingQuoteSnapshotId = {
+      staged: stage.shipping_quote_snapshot_id,
+      requested: input.shippingQuoteSnapshotId,
+    };
+  }
+  if (stage.request_hash !== input.requestHash) {
+    mismatches.requestHash = "changed";
+  }
+  if (intake.omsOrderId != null && intake.omsOrderId !== stageOmsOrderId) {
+    mismatches.omsOrderId = { staged: stageOmsOrderId, intake: intake.omsOrderId };
+  }
+  if (Object.keys(mismatches).length > 0) {
+    throw canonicalStageConflict(input.intakeId, mismatches);
+  }
+}
+
+function assertCanonicalStageIntakeCanResume(
+  intake: DropshipAcceptanceIntakeRecord,
+  acceptedAt: Date,
+  stageState: CanonicalAcceptanceStageRow["state"],
+): void {
+  if (!["received", "retrying", "failed", "payment_hold", "processing"].includes(intake.status)) {
+    throw new DropshipError(
+      "DROPSHIP_ORDER_INTAKE_NOT_ACCEPTABLE",
+      "Dropship order intake is not in a status that can resume canonical acceptance.",
+      { intakeId: intake.intakeId, status: intake.status },
+    );
+  }
+  if (!intake.paymentHoldExpiresAt) {
+    if (intake.status === "payment_hold" && stageState === "prepared") {
+      throw new DropshipError(
+        "DROPSHIP_ORDER_PAYMENT_HOLD_EXPIRY_REQUIRED",
+        "Dropship payment hold intake is missing its expiration timestamp.",
+        { intakeId: intake.intakeId },
+      );
+    }
+    return;
+  }
+  if (intake.paymentHoldExpiresAt <= acceptedAt && stageState === "prepared") {
+    throw new DropshipError(
+      "DROPSHIP_ORDER_PAYMENT_HOLD_EXPIRED",
+      "Dropship payment hold expired before canonical acceptance could resume.",
+      {
+        intakeId: intake.intakeId,
+        paymentHoldExpiresAt: intake.paymentHoldExpiresAt.toISOString(),
+      },
+    );
+  }
+}
+
+function canonicalStageConflict(
+  intakeId: number,
+  mismatches: Record<string, unknown>,
+): DropshipError {
+  return new DropshipError(
+    "DROPSHIP_ORDER_ACCEPTANCE_IDEMPOTENCY_CONFLICT",
+    "Canonical dropship acceptance was replayed with state that does not match its durable stage.",
+    { intakeId, mismatches },
+  );
+}
+
+function canonicalPaymentHoldExpired(intake: DropshipAcceptanceIntakeRecord): DropshipError {
+  if (!intake.paymentHoldExpiresAt) {
+    return new DropshipError(
+      "DROPSHIP_ORDER_PAYMENT_HOLD_EXPIRY_REQUIRED",
+      "Dropship payment hold intake is missing its expiration timestamp.",
+      { intakeId: intake.intakeId },
+    );
+  }
+  return new DropshipError(
+    "DROPSHIP_ORDER_PAYMENT_HOLD_EXPIRED",
+    "Dropship payment hold expired before canonical acceptance could resume.",
+    {
+      intakeId: intake.intakeId,
+      paymentHoldExpiresAt: intake.paymentHoldExpiresAt.toISOString(),
+    },
+  );
+}
+
+function canonicalCompensationFromStage(
+  stage: CanonicalAcceptanceStageRow,
+  claimAttempt: CanonicalClaimAttemptRow,
+  intake: DropshipAcceptanceIntakeRecord,
+  acceptedAt: Date,
+): Extract<DropshipCanonicalOrderAcceptancePreparation, { outcome: "compensation_required" }> {
+  if (stage.wms_order_id == null) {
+    throw canonicalStageConflict(stage.intake_id, {
+      stageState: stage.state,
+      wmsOrderId: "missing",
+    });
+  }
+  const plan: AcceptanceFinancialPlan = {
+    ...financialPlanFromCanonicalStage(stage, acceptedAt),
+    outcome: "payment_hold",
+    paymentHoldExpiresAt: intake.paymentHoldExpiresAt,
+  };
+  return {
+    outcome: "compensation_required",
+    result: {
+      ...paymentHoldResult(plan),
+      idempotentReplay: true,
+    },
+    omsOrderId: toSafeInteger(stage.oms_order_id, "stage.oms_order_id"),
+    wmsOrderId: toSafeInteger(stage.wms_order_id, "stage.wms_order_id"),
+    warehouseId: stage.warehouse_id,
+    inventoryClaimId: normalizeNullableClaimId(claimAttempt.availability_claim_id),
+  };
+}
+
+function canonicalPreparationFromStage(
+  stage: CanonicalAcceptanceStageRow,
+  idempotentReplay: boolean,
+): DropshipCanonicalOrderAcceptancePreparation {
+  return {
+    outcome: "prepared",
+    intakeId: stage.intake_id,
+    vendorId: stage.vendor_id,
+    storeConnectionId: stage.store_connection_id,
+    shippingQuoteSnapshotId: stage.shipping_quote_snapshot_id,
+    warehouseId: stage.warehouse_id,
+    omsOrderId: toSafeInteger(stage.oms_order_id, "stage.oms_order_id"),
+    idempotentReplay,
+  };
+}
+
+async function insertCanonicalAcceptanceStageWithClient(
+  client: PoolClient,
+  input: {
+    plan: DropshipOrderAcceptancePlan;
+    vendor: DropshipAcceptanceVendorContext;
+    wallet: DropshipAcceptanceWalletState;
+    input: DropshipOrderAcceptanceInput;
+    omsOrderId: number;
+  },
+): Promise<void> {
+  await client.query(
+    `INSERT INTO dropship.dropship_order_acceptance_stages
+      (intake_id, oms_order_id, vendor_id, store_connection_id,
+       shipping_quote_snapshot_id, warehouse_id, wallet_account_id, state,
+       request_hash, submitted_idempotency_key, actor_type, actor_id,
+       member_id, membership_plan_id, currency, retail_subtotal_cents,
+       wholesale_subtotal_cents, shipping_cents, insurance_pool_cents,
+       fees_cents, total_debit_cents, cost_evidence_hash, pricing_snapshot,
+       prepared_at, updated_at)
+     VALUES ($1, $2, $3, $4,
+       $5, $6, $7, 'prepared',
+       $8, $9, $10, $11,
+       $12, $13, $14, $15,
+       $16, $17, $18,
+       $19, $20, $21, $22::jsonb,
+       $23, $23)`,
+    [
+      input.plan.intakeId,
+      input.omsOrderId,
+      input.plan.vendorId,
+      input.plan.storeConnectionId,
+      input.plan.shippingQuoteSnapshotId,
+      input.plan.warehouseId,
+      input.wallet.walletAccountId,
+      input.input.requestHash,
+      input.input.idempotencyKey,
+      input.input.actor.actorType,
+      input.input.actor.actorId ?? null,
+      input.vendor.memberId,
+      input.vendor.membershipPlanId ?? input.vendor.currentPlanId,
+      input.plan.currency,
+      input.plan.retailSubtotalCents,
+      input.plan.wholesaleSubtotalCents,
+      input.plan.shippingCents,
+      input.plan.insurancePoolCents,
+      input.plan.feesCents,
+      input.plan.totalDebitCents,
+      input.plan.costEvidenceHash,
+      JSON.stringify(input.plan.pricingSnapshot),
+      input.input.acceptedAt,
+    ],
+  );
+}
+
+async function markIntakeCanonicalAcceptanceProcessingWithClient(
+  client: PoolClient,
+  input: { intakeId: number; omsOrderId: number; updatedAt: Date },
+): Promise<void> {
+  await client.query(
+    `UPDATE dropship.dropship_order_intake
+     SET status = 'processing',
+         oms_order_id = $2,
+         rejection_reason = NULL,
+         updated_at = $3
+     WHERE id = $1`,
+    [input.intakeId, input.omsOrderId, input.updatedAt],
+  );
+}
+
+async function markOmsOrderAcceptedWithClient(
+  client: PoolClient,
+  omsOrderId: number,
+  acceptedAt: Date,
+): Promise<void> {
+  const result = await client.query<{ id: string | number }>(
+    `UPDATE oms.oms_orders
+     SET status = 'confirmed',
+         financial_status = 'paid',
+         updated_at = $2
+     WHERE id = $1
+       AND status = 'pending'
+       AND financial_status = 'pending'
+     RETURNING id`,
+    [omsOrderId, acceptedAt],
+  );
+  if (result.rows.length !== 1) {
+    throw new DropshipError(
+      "DROPSHIP_CANONICAL_OMS_STAGE_INVALID",
+      "Canonical dropship acceptance could not promote its staged OMS order.",
+      { omsOrderId },
+    );
+  }
+}
+
+function financialPlanFromCanonicalStage(
+  stage: CanonicalAcceptanceStageRow,
+  acceptedAt: Date,
+): AcceptanceFinancialPlan {
+  if (!/^[0-9a-f]{64}$/.test(stage.cost_evidence_hash)) {
+    throw canonicalStageConflict(stage.intake_id, { costEvidenceHash: "invalid" });
+  }
+  if (!stage.pricing_snapshot || typeof stage.pricing_snapshot !== "object" || Array.isArray(stage.pricing_snapshot)) {
+    throw canonicalStageConflict(stage.intake_id, { pricingSnapshot: "invalid" });
+  }
+  return {
+    outcome: "accepted",
+    intakeId: stage.intake_id,
+    vendorId: stage.vendor_id,
+    storeConnectionId: stage.store_connection_id,
+    shippingQuoteSnapshotId: stage.shipping_quote_snapshot_id,
+    warehouseId: stage.warehouse_id,
+    acceptedAt,
+    currency: stage.currency,
+    retailSubtotalCents: toSafeInteger(stage.retail_subtotal_cents, "stage.retail_subtotal_cents"),
+    wholesaleSubtotalCents: toSafeInteger(stage.wholesale_subtotal_cents, "stage.wholesale_subtotal_cents"),
+    shippingCents: toSafeInteger(stage.shipping_cents, "stage.shipping_cents"),
+    insurancePoolCents: toSafeInteger(stage.insurance_pool_cents, "stage.insurance_pool_cents"),
+    feesCents: toSafeInteger(stage.fees_cents, "stage.fees_cents"),
+    totalDebitCents: toSafeInteger(stage.total_debit_cents, "stage.total_debit_cents"),
+    paymentHoldExpiresAt: null,
+    costEvidenceHash: stage.cost_evidence_hash,
+    pricingSnapshot: stage.pricing_snapshot,
+  };
+}
+
+function frozenAcceptanceInput(
+  stage: CanonicalAcceptanceStageRow,
+  acceptedAt: Date,
+): DropshipOrderAcceptanceInput {
+  return {
+    intakeId: stage.intake_id,
+    vendorId: stage.vendor_id,
+    storeConnectionId: stage.store_connection_id,
+    shippingQuoteSnapshotId: stage.shipping_quote_snapshot_id,
+    idempotencyKey: stage.submitted_idempotency_key,
+    requestHash: stage.request_hash,
+    acceptedAt,
+    actor: {
+      actorType: stage.actor_type,
+      ...(stage.actor_id ? { actorId: stage.actor_id } : {}),
+    },
+  };
+}
+
+function paymentHoldResult(plan: AcceptanceFinancialPlan): DropshipOrderAcceptanceResult {
+  return {
+    outcome: "payment_hold",
+    intakeId: plan.intakeId,
+    vendorId: plan.vendorId,
+    storeConnectionId: plan.storeConnectionId,
+    shippingQuoteSnapshotId: plan.shippingQuoteSnapshotId,
+    omsOrderId: null,
+    walletLedgerEntryId: null,
+    economicsSnapshotId: null,
+    totalDebitCents: plan.totalDebitCents,
+    currency: plan.currency,
+    paymentHoldExpiresAt: plan.paymentHoldExpiresAt,
+    idempotentReplay: false,
+  };
+}
+
+function assertVendorContextCanFinalize(vendor: DropshipAcceptanceVendorContext): void {
+  if (
+    vendor.vendorStatus !== "active"
+    || vendor.entitlementStatus !== "active"
+    || vendor.storeStatus !== "connected"
+    || !vendor.storeLaunchReady
+  ) {
+    throw new DropshipError(
+      "DROPSHIP_ORDER_VENDOR_CONTEXT_CHANGED",
+      "Dropship vendor/store eligibility changed before acceptance finalization.",
+      {
+        vendorId: vendor.vendorId,
+        storeConnectionId: vendor.storeConnectionId,
+        vendorStatus: vendor.vendorStatus,
+        entitlementStatus: vendor.entitlementStatus,
+        storeStatus: vendor.storeStatus,
+        storeLaunchReady: vendor.storeLaunchReady,
+      },
+    );
+  }
+}
+
+async function recordCanonicalStageAuditEventWithClient(
+  client: PoolClient,
+  stage: CanonicalAcceptanceStageRow,
+  currentInput: DropshipOrderAcceptanceInput,
+  event: {
+    eventType: string;
+    severity?: "info" | "warning" | "error";
+    payload: Record<string, unknown>;
+  },
+): Promise<void> {
+  const actor = frozenAcceptanceInput(stage, currentInput.acceptedAt).actor;
+  await client.query(
+    `INSERT INTO dropship.dropship_audit_events
+      (vendor_id, store_connection_id, entity_type, entity_id, event_type,
+       actor_type, actor_id, severity, payload, created_at)
+     VALUES ($1, $2, 'dropship_order_intake', $3, $4,
+             $5, $6, $7, $8::jsonb, $9)`,
+    [
+      stage.vendor_id,
+      stage.store_connection_id,
+      String(stage.intake_id),
+      event.eventType,
+      actor.actorType,
+      actor.actorId ?? null,
+      event.severity ?? "info",
+      JSON.stringify({
+        idempotencyKey: stage.submitted_idempotency_key,
+        shippingQuoteSnapshotId: stage.shipping_quote_snapshot_id,
+        ...event.payload,
+      }),
+      currentInput.acceptedAt,
+    ],
+  );
+}
+
+function acceptanceIntakeNotFound(input: DropshipOrderAcceptanceInput): DropshipError {
+  return new DropshipError(
+    "DROPSHIP_ORDER_INTAKE_NOT_FOUND",
+    "Dropship order intake was not found for acceptance.",
+    {
+      intakeId: input.intakeId,
+      vendorId: input.vendorId,
+      storeConnectionId: input.storeConnectionId,
+    },
+  );
+}
+
+function normalizePositiveMinutes(value: number): number {
+  return Number.isInteger(value) && value > 0
+    ? value
+    : DROPSHIP_DEFAULT_PAYMENT_HOLD_TIMEOUT_MINUTES;
 }
 
 function summarizeInventoryAvailability(

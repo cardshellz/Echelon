@@ -56,7 +56,10 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import { InventoryRuntimeAuthorityBadge } from "@/components/inventory/InventoryRuntimeAuthorityBadge";
+import {
+  InventoryRuntimeAuthorityBadge,
+  useInventoryRuntimeAuthority,
+} from "@/components/inventory/InventoryRuntimeAuthorityBadge";
 
 // ============================================
 // Types
@@ -1186,8 +1189,11 @@ function AllocationRulesSection() {
 // ============================================
 
 export default function ChannelAllocation() {
+  const inventoryRuntimeAuthorityQuery = useInventoryRuntimeAuthority();
+  const legacyAuthority = inventoryRuntimeAuthorityQuery.data?.authority === "legacy";
+
   return (
-    <div className="space-y-4 p-2 md:p-6">
+    <div className="space-y-4 p-2 md:p-6" data-testid="page-channel-allocation">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h1 className="text-2xl md:text-3xl font-bold tracking-tight">Channel Allocation</h1>
@@ -1199,36 +1205,58 @@ export default function ChannelAllocation() {
         <InventoryRuntimeAuthorityBadge />
       </div>
 
-      <Tabs defaultValue="warehouses" className="w-full">
-        <TabsList>
-          <TabsTrigger value="warehouses" className="gap-2">
-            <Warehouse className="h-4 w-4" />
-            Warehouse Assignments
-          </TabsTrigger>
-          <TabsTrigger value="rules" className="gap-2">
-            <Layers className="h-4 w-4" />
-            Allocation Rules
-          </TabsTrigger>
-        </TabsList>
+      {!legacyAuthority ? (
+        <Card data-testid="legacy-channel-allocation-unavailable">
+          <CardHeader>
+            <CardTitle>
+              {inventoryRuntimeAuthorityQuery.data?.authority === "canonical"
+                ? "Legacy Channel Allocation is retired"
+                : "Channel Allocation controls are unavailable"}
+            </CardTitle>
+            <CardDescription>
+              {inventoryRuntimeAuthorityQuery.data?.authority === "canonical"
+                ? "Inventory Exposure is the live channel quantity authority. Legacy warehouse assignments and allocation rules are preserved as historical configuration but cannot be read or changed here."
+                : "The live inventory authority could not be confirmed. Legacy controls stay disabled so this page cannot write against the wrong allocator."}
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Button asChild>
+              <a href="/channels/inventory-exposure">Open Inventory Exposure</a>
+            </Button>
+          </CardContent>
+        </Card>
+      ) : (
+        <Tabs defaultValue="warehouses" className="w-full">
+          <TabsList>
+            <TabsTrigger value="warehouses" className="gap-2">
+              <Warehouse className="h-4 w-4" />
+              Warehouse Assignments
+            </TabsTrigger>
+            <TabsTrigger value="rules" className="gap-2">
+              <Layers className="h-4 w-4" />
+              Allocation Rules
+            </TabsTrigger>
+          </TabsList>
 
-        <TabsContent value="warehouses" className="mt-4">
-          <Card>
-            <CardHeader>
-              <CardTitle>Warehouse → Channel Assignments</CardTitle>
-              <CardDescription>
-                Controls which warehouses feed inventory to each sales channel. A channel only sees stock from its assigned warehouses. If no warehouses are assigned, all fulfillment warehouses are used as a fallback. Dropship OMS is the exception: Dropship quantities fail closed until it has an explicit assignment.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <WarehouseAssignmentsSection />
-            </CardContent>
-          </Card>
-        </TabsContent>
+          <TabsContent value="warehouses" className="mt-4">
+            <Card>
+              <CardHeader>
+                <CardTitle>Warehouse → Channel Assignments</CardTitle>
+                <CardDescription>
+                  Controls which warehouses feed inventory to each sales channel. A channel only sees stock from its assigned warehouses. If no warehouses are assigned, all fulfillment warehouses are used as a fallback. Dropship OMS is the exception: Dropship quantities fail closed until it has an explicit assignment.
+                </CardDescription>
+              </CardHeader>
+              <CardContent>
+                <WarehouseAssignmentsSection />
+              </CardContent>
+            </Card>
+          </TabsContent>
 
-        <TabsContent value="rules" className="mt-4">
-          <AllocationRulesSection />
-        </TabsContent>
-      </Tabs>
+          <TabsContent value="rules" className="mt-4">
+            <AllocationRulesSection />
+          </TabsContent>
+        </Tabs>
+      )}
     </div>
   );
 }

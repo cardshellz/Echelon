@@ -14,6 +14,10 @@ import { useToast } from "@/hooks/use-toast";
 import { Plus, Trash2, Edit, Building2, Check, X, Warehouse, Package, Truck, Settings as SettingsIcon, FileText } from "lucide-react";
 import { Link } from "wouter";
 import { Switch } from "@/components/ui/switch";
+import {
+  InventoryRuntimeAuthorityBadge,
+  useInventoryRuntimeAuthority,
+} from "@/components/inventory/InventoryRuntimeAuthorityBadge";
 
 interface WarehouseRecord {
   id: number;
@@ -67,8 +71,18 @@ const inventorySourceLabels: Record<string, string> = {
   manual: "Manual",
 };
 
-/** Per-warehouse feed toggle — controls whether warehouse inventory feeds into channel sync */
-function FeedToggle({ warehouseId, feedEnabled, canEdit }: { warehouseId: number; feedEnabled: boolean; canEdit: boolean }) {
+/** Legacy-only feed control. Canonical publication uses explicit exposure targets instead. */
+function FeedToggle({
+  warehouseId,
+  feedEnabled,
+  canEdit,
+  runtimeAuthority,
+}: {
+  warehouseId: number;
+  feedEnabled: boolean;
+  canEdit: boolean;
+  runtimeAuthority: "legacy" | "canonical" | undefined;
+}) {
   const queryClient = useQueryClient();
   const { toast } = useToast();
 
@@ -84,6 +98,20 @@ function FeedToggle({ warehouseId, feedEnabled, canEdit }: { warehouseId: number
       });
     },
   });
+
+  if (runtimeAuthority !== "legacy") {
+    return (
+      <Badge
+        variant="outline"
+        className="text-xs"
+        title={runtimeAuthority === "canonical"
+          ? "Warehouse exposure is controlled by Inventory Exposure targets."
+          : "Legacy feed controls stay unavailable until runtime authority is confirmed."}
+      >
+        {runtimeAuthority === "canonical" ? "Inventory Exposure" : "Authority unknown"}
+      </Badge>
+    );
+  }
 
   if (!canEdit) {
     return feedEnabled ? (
@@ -107,6 +135,8 @@ export default function Warehouses() {
   const { hasPermission } = useAuth();
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const inventoryRuntimeAuthorityQuery = useInventoryRuntimeAuthority();
+  const runtimeAuthority = inventoryRuntimeAuthorityQuery.data?.authority;
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [editingWarehouse, setEditingWarehouse] = useState<WarehouseRecord | null>(null);
   const [formData, setFormData] = useState({
@@ -350,6 +380,7 @@ export default function Warehouses() {
             Warehouses
           </h1>
           <p className="text-sm text-muted-foreground mt-1">Manage your physical warehouse locations</p>
+          <InventoryRuntimeAuthorityBadge className="mt-2" />
         </div>
         {canCreate && (
           <Button onClick={() => setIsCreateOpen(true)} className="min-h-[44px]" data-testid="btn-add-warehouse">
@@ -472,7 +503,12 @@ export default function Warehouses() {
                             )}
                             <div className="flex items-center gap-1">
                               <span className="text-[10px] text-muted-foreground">Feed:</span>
-                              <FeedToggle warehouseId={warehouse.id} feedEnabled={warehouse.feedEnabled ?? true} canEdit={canEdit} />
+                              <FeedToggle
+                                warehouseId={warehouse.id}
+                                feedEnabled={warehouse.feedEnabled ?? true}
+                                canEdit={canEdit}
+                                runtimeAuthority={runtimeAuthority}
+                              />
                             </div>
                           </div>
                         </div>
@@ -542,7 +578,12 @@ export default function Warehouses() {
                           )}
                         </TableCell>
                         <TableCell>
-                          <FeedToggle warehouseId={warehouse.id} feedEnabled={warehouse.feedEnabled ?? true} canEdit={canEdit} />
+                          <FeedToggle
+                            warehouseId={warehouse.id}
+                            feedEnabled={warehouse.feedEnabled ?? true}
+                            canEdit={canEdit}
+                            runtimeAuthority={runtimeAuthority}
+                          />
                         </TableCell>
                         <TableCell>
                           {warehouse.isDefault === 1 ? (

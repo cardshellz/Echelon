@@ -182,10 +182,13 @@ describe("PgDropshipMarketplaceRegistrationOwnerRepository", () => {
       connect: vi.fn(async () => ({ query, release })),
     } as unknown as Pool;
     const atp = {
-      getVariantAtp: vi.fn(async () => new Map([
-        [701, 4],
-        [702, 3],
-      ])),
+      getVariantAtp: vi.fn(async () => ({
+        authority: "canonical" as const,
+        quantities: new Map([
+          [701, 4],
+          [702, 3],
+        ]),
+      })),
     };
     const repository = new PgDropshipMarketplaceRegistrationOwnerRepository(
       atp,
@@ -220,7 +223,7 @@ describe("PgDropshipMarketplaceRegistrationOwnerRepository", () => {
       { productId: 70, productVariantId: 701 },
       { productId: 70, productVariantId: 702 },
       { productId: 70, productVariantId: 703 },
-    ]);
+    ], { storeConnectionId: 21 });
     const accessQuery = queries.find((entry) => entry.sql.includes("AS can_list"));
     expect(accessQuery?.params).toEqual([10, 21, 70]);
     expect(accessQuery?.sql).not.toContain("dvl.status");

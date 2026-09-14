@@ -26,6 +26,7 @@ import {
 } from "./inventory-channel-exposure-runtime.repository";
 import { captureActiveSupplySnapshotInsideTransaction } from "./inventory-availability-shadow.repository";
 import { assertInventoryCutoverFenceHeldInsideTransaction } from "./inventory-cutover-admission-fence.repository";
+import { InventoryChannelQuantityRuntimeService } from "../application/inventory-channel-quantity-runtime.service";
 
 type ClientPool = Pick<Pool, "connect"> & { options?: { max?: number } };
 
@@ -155,6 +156,28 @@ export function createAuthorityAwareInventoryPublicationService(
     options.channelId,
     options.logger,
   );
+}
+
+/**
+ * Shares one authority-aware publication router per channel so query-only
+ * listing/registration reads use the same exact-target calculation as the
+ * canonical outbox without creating provider side effects.
+ */
+export function createInventoryChannelQuantityRuntimeService(
+  connectionPool: ClientPool = defaultPool,
+  logger?: InventoryAvailabilityRuntimePublicationLogger,
+): InventoryChannelQuantityRuntimeService {
+  const routers = new Map<number, AuthorityAwareInventoryPublicationService>();
+  return new InventoryChannelQuantityRuntimeService((channelId) => {
+    const existing = routers.get(channelId);
+    if (existing) return existing;
+    const created = createAuthorityAwareInventoryPublicationService(connectionPool, {
+      channelId,
+      logger,
+    });
+    routers.set(channelId, created);
+    return created;
+  });
 }
 
 /**

@@ -571,12 +571,29 @@ export type AllocationAuditLogEntry = typeof allocationAuditLog.$inferSelect;
 
 export const syncSettings = channelsSchema.table("sync_settings", {
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  singletonKey: boolean("singleton_key").notNull().default(true),
   globalEnabled: boolean("global_enabled").notNull().default(false),
   sweepIntervalMinutes: integer("sweep_interval_minutes").notNull().default(15),
+  revision: bigint("revision", { mode: "bigint" }).notNull().default(BigInt(1)),
+  changedBy: varchar("changed_by", { length: 100 }).notNull().default("system:uninitialized"),
+  changeReason: varchar("change_reason", { length: 1000 }).notNull()
+    .default("Created disabled pending an explicit operator command."),
   lastSweepAt: timestamp("last_sweep_at"),
   lastSweepDurationMs: integer("last_sweep_duration_ms"),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
-});
+}, (table) => ({
+  singletonValid: check("sync_settings_singleton_key_chk", sql`${table.singletonKey} = true`),
+  singletonUnique: uniqueIndex("sync_settings_singleton_key_uq").on(table.singletonKey),
+  revisionValid: check("sync_settings_revision_chk", sql`${table.revision} > 0`),
+  actorValid: check(
+    "sync_settings_changed_by_chk",
+    sql`${table.changedBy} = btrim(${table.changedBy}) AND ${table.changedBy} <> ''`,
+  ),
+  reasonValid: check(
+    "sync_settings_change_reason_chk",
+    sql`${table.changeReason} = btrim(${table.changeReason}) AND ${table.changeReason} <> ''`,
+  ),
+}));
 
 export type SyncSettings = typeof syncSettings.$inferSelect;
 

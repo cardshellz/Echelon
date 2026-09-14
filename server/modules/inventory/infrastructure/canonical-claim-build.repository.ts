@@ -61,6 +61,18 @@ function requireText(value: unknown, field: string): string {
   return parsed;
 }
 
+function requireSha256(value: unknown, field: string): string {
+  const parsed = requireText(value, field);
+  if (!/^[0-9a-f]{64}$/.test(parsed)) {
+    throw new BuildDomainError(
+      "INVALID_CLAIM_BUILD_EVIDENCE",
+      `${field} must be a SHA-256 hash`,
+      { field },
+    );
+  }
+  return parsed;
+}
+
 function assertCostSnapshot(
   allocation: CanonicalClaimInventoryExecutionResource["lotAllocations"][number],
   lot: any,
@@ -98,19 +110,26 @@ export class PostgresCanonicalClaimBuildRepository implements CanonicalClaimBuil
     const plannedBuilds = asPostgresInteger(input.plannedBuilds, "plannedBuilds");
     asPostgresInteger(input.outputQty, "outputQty");
     const bindingRows = rows(await input.client.query(
-      `SELECT binding.id, binding.recipe_id, binding.relationship_role, binding.warehouse_id,
+      `SELECT binding.id, binding.model_id, binding.recipe_id, binding.relationship_role, binding.warehouse_id,
               binding.recipe_code_snapshot, binding.recipe_version_snapshot,
+              binding.recipe_definition_hash,
               binding.output_product_id_snapshot, binding.output_variant_id_snapshot,
               binding.output_units_per_variant_snapshot, binding.output_qty_snapshot,
-              binding.validation_state,
-              recipe.status AS recipe_status, recipe.recipe_type,
+              binding.validation_state, binding.validation_errors,
+              model.product_id AS model_product_id, model.version AS model_version,
+              model.lifecycle_status AS model_lifecycle_status,
+              model.validation_state AS model_validation_state,
+              model.validation_errors AS model_validation_errors,
+              model.definition_hash AS model_definition_hash,
+              recipe.recipe_type,
               recipe.code AS recipe_code, recipe.version AS recipe_version,
               recipe.output_product_id, recipe.output_variant_id,
               recipe.output_units_per_variant, recipe.output_qty
        FROM inventory.transformation_recipe_bindings AS binding
+       JOIN inventory.transformation_model_versions AS model ON model.id = binding.model_id
        JOIN inventory.build_recipes AS recipe ON recipe.id = binding.recipe_id
        WHERE binding.id = $1
-       FOR SHARE OF binding, recipe`,
+       FOR SHARE OF binding, model, recipe`,
       [input.transformationRecipeBindingId],
     ));
     const binding = bindingRows[0];
@@ -119,17 +138,25 @@ export class PostgresCanonicalClaimBuildRepository implements CanonicalClaimBuil
         transformationRecipeBindingId: input.transformationRecipeBindingId,
       });
     }
-    if (binding.relationship_role !== "component_build" || binding.validation_state !== "valid") {
-      throw new BuildDomainError("CLAIM_BUILD_BINDING_INVALID", "The claimed binding is not a valid component build", {
+    const expectedRelationshipRole = binding.recipe_type === "assembly"
+      ? "component_build"
+      : "directional_conversion";
+    if (binding.relationship_role !== expectedRelationshipRole
+      || binding.validation_state !== "valid"
+      || !Array.isArray(binding.validation_errors)
+      || binding.validation_errors.length !== 0
+      || !["sealed", "retired"].includes(String(binding.model_lifecycle_status))
+      || binding.model_validation_state !== "valid"
+      || !Array.isArray(binding.model_validation_errors)
+      || binding.model_validation_errors.length !== 0
+      || positiveInteger(binding.model_product_id, "model.productId")
+        !== positiveInteger(binding.output_product_id_snapshot, "binding.outputProductIdSnapshot")) {
+      throw new BuildDomainError("CLAIM_BUILD_BINDING_INVALID", "The claimed binding is not a valid executable recipe binding", {
         transformationRecipeBindingId: input.transformationRecipeBindingId,
         relationshipRole: binding.relationship_role,
         validationState: binding.validation_state,
-      });
-    }
-    if (binding.recipe_status !== "active") {
-      throw new BuildDomainError("CLAIM_BUILD_RECIPE_NOT_ACTIVE", "The claimed build recipe is no longer active", {
-        recipeId: Number(binding.recipe_id),
-        status: binding.recipe_status,
+        modelLifecycleStatus: binding.model_lifecycle_status,
+        modelValidationState: binding.model_validation_state,
       });
     }
     const bindingWarehouseId = binding.warehouse_id == null ? null : positiveInteger(binding.warehouse_id, "binding.warehouseId");
@@ -217,6 +244,46 @@ export class PostgresCanonicalClaimBuildRepository implements CanonicalClaimBuil
         });
       }
     }
+    if (binding.recipe_type === "conversion") {
+      const paths = rows(await input.client.query(
+        `SELECT model_id, transformation_recipe_binding_id, source_variant_id,
+                destination_variant_id, input_qty, output_qty,
+                source_units_per_variant, destination_units_per_variant,
+                operation_type, authority_state, validation_state, validation_errors
+         FROM inventory.transformation_model_paths
+         WHERE model_id = $1 AND transformation_recipe_binding_id = $2
+         ORDER BY id
+         FOR SHARE`,
+        [binding.model_id, binding.id],
+      ));
+      const path = paths[0];
+      const source = componentRows[0];
+      const validPath = paths.length === 1
+        && componentRows.length === 1
+        && path
+        && positiveInteger(path.model_id, "path.modelId") === positiveInteger(binding.model_id, "binding.modelId")
+        && positiveInteger(path.transformation_recipe_binding_id, "path.bindingId") === positiveInteger(binding.id, "binding.id")
+        && positiveInteger(path.source_variant_id, "path.sourceVariantId") === positiveInteger(source.component_variant_id, "component.variantId")
+        && positiveInteger(path.destination_variant_id, "path.destinationVariantId") === input.destinationVariantId
+        && positiveInteger(path.input_qty, "path.inputQty") === positiveInteger(source.component_qty, "component.qty")
+        && positiveInteger(path.output_qty, "path.outputQty") === positiveInteger(binding.output_qty_snapshot, "binding.outputQty")
+        && positiveInteger(path.source_units_per_variant, "path.sourceUnitsPerVariant")
+          === positiveInteger(source.component_units_per_variant, "component.unitsPerVariant")
+        && positiveInteger(path.destination_units_per_variant, "path.destinationUnitsPerVariant")
+          === positiveInteger(binding.output_units_per_variant_snapshot, "binding.outputUnitsPerVariant")
+        && path.operation_type === "directed_conversion"
+        && path.authority_state === "allowed"
+        && path.validation_state === "valid"
+        && Array.isArray(path.validation_errors)
+        && path.validation_errors.length === 0;
+      if (!validPath) {
+        throw new BuildDomainError(
+          "CLAIM_BUILD_DIRECTED_PATH_INVALID",
+          "A conversion claim build requires the exact allowed directed path linked to its immutable binding.",
+          { transformationRecipeBindingId: input.transformationRecipeBindingId },
+        );
+      }
+    }
 
     const resourcesByVariant = new Map<number, CanonicalClaimInventoryExecutionResource[]>();
     const claimAllocationIds = new Set<string>();
@@ -268,6 +335,29 @@ export class PostgresCanonicalClaimBuildRepository implements CanonicalClaimBuil
     }
     if ([...resourcesByVariant.keys()].some((variantId) => !expectedInputs.has(variantId))) {
       throw new BuildDomainError("CLAIM_BUILD_RESOURCE_VARIANT_MISMATCH", "Claim-owned resources include a variant outside the build input contract");
+    }
+
+    const authority = rows(await input.client.query(
+      `SELECT claim.activation_run_id, claim.runtime_authority_revision,
+              runtime.authority, runtime.activation_run_id AS current_activation_run_id,
+              runtime.revision AS current_authority_revision
+       FROM inventory.availability_claims AS claim
+       CROSS JOIN inventory.availability_runtime_authority AS runtime
+       WHERE claim.id = $1 AND runtime.singleton_key = true
+       FOR SHARE OF claim, runtime`,
+      [input.claimId.toString()],
+    ))[0];
+    if (!authority
+      || authority.authority !== "canonical"
+      || positiveBigInt(authority.activation_run_id, "claim.activationRunId")
+        !== positiveBigInt(authority.current_activation_run_id, "runtime.activationRunId")
+      || positiveBigInt(authority.runtime_authority_revision, "claim.runtimeAuthorityRevision")
+        !== positiveBigInt(authority.current_authority_revision, "runtime.revision")) {
+      throw new BuildDomainError(
+        "CLAIM_BUILD_AUTHORITY_DRIFT",
+        "The canonical claim no longer matches the committed inventory runtime authority.",
+        { claimId: input.claimId.toString() },
+      );
     }
 
     const levelIds = [...new Set(input.resources.map((resource) => resource.inventoryLevelId))].sort((a, b) => a - b);
@@ -339,13 +429,20 @@ export class PostgresCanonicalClaimBuildRepository implements CanonicalClaimBuil
 
     const buildIdempotencyKey = `claim-build:${input.claimId}:${input.claimOperationId}`;
     const insertedOrder = rows(await input.client.query(
-      `INSERT INTO inventory.build_orders (
-         recipe_id, recipe_code, recipe_version, recipe_type,
-         output_variant_id, output_product_id, output_units_per_variant, output_qty_per_build,
-         planned_builds, warehouse_id, output_location_id, status, idempotency_key,
-         created_by, released_by, released_at
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
-                 'released', $12, $13, $13, $14)
+       `INSERT INTO inventory.build_orders (
+          recipe_id, recipe_code, recipe_version, recipe_type,
+          output_variant_id, output_product_id, output_units_per_variant, output_qty_per_build,
+          planned_builds, warehouse_id, output_location_id, status, idempotency_key,
+          created_by, released_by, released_at,
+          transformation_authority, transformation_authority_revision,
+          transformation_activation_run_id, transformation_model_head_revision,
+          transformation_model_id, transformation_model_version,
+          transformation_model_definition_hash, transformation_recipe_binding_id,
+          transformation_recipe_definition_hash, transformation_authorized_at,
+          transformation_authorized_by
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+                  'released', $12, $13, $13, $14,
+                  'canonical', $15, $16, NULL, $17, $18, $19, $20, $21, $14, $13)
        ON CONFLICT (idempotency_key) DO NOTHING
        RETURNING id, system_number`,
       [
@@ -363,6 +460,13 @@ export class PostgresCanonicalClaimBuildRepository implements CanonicalClaimBuil
         buildIdempotencyKey,
         input.actor,
         input.occurredAt,
+        positiveBigInt(authority.runtime_authority_revision, "claim.runtimeAuthorityRevision").toString(),
+        positiveBigInt(authority.activation_run_id, "claim.activationRunId").toString(),
+        positiveInteger(binding.model_id, "binding.modelId"),
+        positiveInteger(binding.model_version, "model.version"),
+        requireSha256(binding.model_definition_hash, "model.definitionHash"),
+        positiveInteger(binding.id, "binding.id"),
+        requireSha256(binding.recipe_definition_hash, "binding.recipeDefinitionHash"),
       ],
     ));
     if (insertedOrder.length === 0) {
@@ -435,9 +539,16 @@ export class PostgresCanonicalClaimBuildRepository implements CanonicalClaimBuil
     asPostgresInteger(input.committedOutputQty, "committedOutputQty");
 
     const order = rows(await input.client.query(
-      `SELECT id, system_number, recipe_id, output_variant_id, output_qty_per_build,
-              planned_builds, completed_builds, warehouse_id, output_location_id,
-              status, total_component_cost_mills
+      `SELECT id, system_number, recipe_id, recipe_code, recipe_version, recipe_type,
+              output_product_id, output_variant_id, output_units_per_variant,
+              output_qty_per_build, planned_builds, completed_builds,
+              warehouse_id, output_location_id, status, total_component_cost_mills,
+              transformation_authority, transformation_authority_revision,
+              transformation_activation_run_id, transformation_model_head_revision,
+              transformation_model_id, transformation_model_version,
+              transformation_model_definition_hash, transformation_recipe_binding_id,
+              transformation_recipe_definition_hash, transformation_authorized_at,
+              transformation_authorized_by
        FROM inventory.build_orders
        WHERE id = $1
        FOR UPDATE`,
@@ -447,6 +558,99 @@ export class PostgresCanonicalClaimBuildRepository implements CanonicalClaimBuil
       throw new BuildDomainError("CLAIM_BUILD_ORDER_NOT_FOUND", "The handed-off build order no longer exists", {
         buildOrderId,
       });
+    }
+    const authorization = rows(await input.client.query(
+      `SELECT handoff.claim_id, handoff.claim_operation_id,
+              operation.authority_id AS operation_binding_id,
+              claim.activation_run_id, claim.runtime_authority_revision,
+              runtime.authority AS runtime_authority,
+              runtime.activation_run_id AS current_activation_run_id,
+              runtime.revision AS current_authority_revision,
+              binding.model_id AS binding_model_id,
+              binding.recipe_id AS binding_recipe_id,
+              binding.relationship_role AS binding_relationship_role,
+              binding.warehouse_id AS binding_warehouse_id,
+              binding.recipe_code_snapshot, binding.recipe_version_snapshot,
+              binding.recipe_definition_hash, binding.output_product_id_snapshot,
+              binding.output_variant_id_snapshot, binding.output_units_per_variant_snapshot,
+              binding.output_qty_snapshot, binding.validation_state AS binding_validation_state,
+              binding.validation_errors AS binding_validation_errors,
+              model.product_id AS model_product_id, model.version AS model_version,
+              model.definition_hash AS model_definition_hash,
+              model.lifecycle_status AS model_lifecycle_status,
+              model.validation_state AS model_validation_state,
+              model.validation_errors AS model_validation_errors
+       FROM inventory.availability_claim_build_handoffs AS handoff
+       JOIN inventory.availability_claim_operations AS operation
+         ON operation.id = handoff.claim_operation_id AND operation.claim_id = handoff.claim_id
+       JOIN inventory.availability_claims AS claim ON claim.id = handoff.claim_id
+       JOIN inventory.transformation_recipe_bindings AS binding ON binding.id = operation.authority_id
+       JOIN inventory.transformation_model_versions AS model ON model.id = binding.model_id
+       CROSS JOIN inventory.availability_runtime_authority AS runtime
+       WHERE handoff.build_order_id = $1 AND runtime.singleton_key = true
+       FOR SHARE OF handoff, operation, claim, binding, model, runtime`,
+      [buildOrderId],
+    ))[0];
+    const authorizationMatches = authorization
+      && positiveBigInt(authorization.claim_id, "handoff.claimId") === input.claimId
+      && positiveBigInt(authorization.claim_operation_id, "handoff.claimOperationId") === input.claimOperationId
+      && String(authorization.runtime_authority) === "canonical"
+      && positiveBigInt(authorization.activation_run_id, "claim.activationRunId")
+        === positiveBigInt(authorization.current_activation_run_id, "runtime.activationRunId")
+      && positiveBigInt(authorization.runtime_authority_revision, "claim.runtimeAuthorityRevision")
+        === positiveBigInt(authorization.current_authority_revision, "runtime.revision")
+      && String(order.transformation_authority) === "canonical"
+      && positiveBigInt(order.transformation_authority_revision, "buildOrder.authorityRevision")
+        === positiveBigInt(authorization.runtime_authority_revision, "claim.runtimeAuthorityRevision")
+      && positiveBigInt(order.transformation_activation_run_id, "buildOrder.activationRunId")
+        === positiveBigInt(authorization.activation_run_id, "claim.activationRunId")
+      && positiveInteger(order.transformation_recipe_binding_id, "buildOrder.bindingId")
+        === positiveInteger(authorization.operation_binding_id, "operation.bindingId")
+      && positiveInteger(order.transformation_model_id, "buildOrder.modelId")
+        === positiveInteger(authorization.binding_model_id, "binding.modelId")
+      && positiveInteger(order.transformation_model_version, "buildOrder.modelVersion")
+        === positiveInteger(authorization.model_version, "model.version")
+      && requireSha256(order.transformation_model_definition_hash, "buildOrder.modelDefinitionHash")
+        === requireSha256(authorization.model_definition_hash, "model.definitionHash")
+      && requireSha256(order.transformation_recipe_definition_hash, "buildOrder.recipeDefinitionHash")
+        === requireSha256(authorization.recipe_definition_hash, "binding.recipeDefinitionHash")
+      && positiveInteger(authorization.model_product_id, "model.productId")
+        === positiveInteger(order.output_product_id, "buildOrder.outputProductId")
+      && positiveInteger(authorization.binding_recipe_id, "binding.recipeId")
+        === positiveInteger(order.recipe_id, "buildOrder.recipeId")
+      && requireText(authorization.recipe_code_snapshot, "binding.recipeCodeSnapshot")
+        === requireText(order.recipe_code, "buildOrder.recipeCode")
+      && positiveInteger(authorization.recipe_version_snapshot, "binding.recipeVersionSnapshot")
+        === positiveInteger(order.recipe_version, "buildOrder.recipeVersion")
+      && positiveInteger(authorization.output_product_id_snapshot, "binding.outputProductId")
+        === positiveInteger(order.output_product_id, "buildOrder.outputProductId")
+      && positiveInteger(authorization.output_variant_id_snapshot, "binding.outputVariantId")
+        === positiveInteger(order.output_variant_id, "buildOrder.outputVariantId")
+      && positiveInteger(authorization.output_units_per_variant_snapshot, "binding.outputUnitsPerVariant")
+        === positiveInteger(order.output_units_per_variant, "buildOrder.outputUnitsPerVariant")
+      && positiveInteger(authorization.output_qty_snapshot, "binding.outputQty")
+        === positiveInteger(order.output_qty_per_build, "buildOrder.outputQty")
+      && (order.recipe_type === "assembly" || order.recipe_type === "conversion")
+      && authorization.binding_relationship_role === (order.recipe_type === "assembly"
+        ? "component_build" : "directional_conversion")
+      && (authorization.binding_warehouse_id == null
+        || positiveInteger(authorization.binding_warehouse_id, "binding.warehouseId")
+          === positiveInteger(order.warehouse_id, "buildOrder.warehouseId"))
+      && authorization.binding_validation_state === "valid"
+      && Array.isArray(authorization.binding_validation_errors)
+      && authorization.binding_validation_errors.length === 0
+      && ["sealed", "retired"].includes(String(authorization.model_lifecycle_status))
+      && authorization.model_validation_state === "valid"
+      && Array.isArray(authorization.model_validation_errors)
+      && authorization.model_validation_errors.length === 0
+      && order.transformation_authorized_at != null
+      && requireText(order.transformation_authorized_by, "buildOrder.authorizedBy").length > 0;
+    if (!authorizationMatches) {
+      throw new BuildDomainError(
+        "CLAIM_BUILD_AUTHORIZATION_DRIFT",
+        "The handed-off build no longer matches its durable claim and transformation authority evidence.",
+        { buildOrderId, claimId: input.claimId.toString(), claimOperationId: input.claimOperationId.toString() },
+      );
     }
     const buildSystemNumber = requireText(order.system_number, "buildOrder.systemNumber");
     const orderMatchesOperation =
@@ -466,12 +670,21 @@ export class PostgresCanonicalClaimBuildRepository implements CanonicalClaimBuil
     }
 
     const componentRows = rows(await input.client.query(
-      `SELECT id, component_variant_id, qty_per_build, planned_qty, consumed_qty
-       FROM inventory.build_order_components
-       WHERE build_order_id = $1
-       ORDER BY component_variant_id, id
-       FOR UPDATE`,
-      [buildOrderId],
+      `SELECT component.id, component.component_variant_id,
+              component.component_product_id, component.component_units_per_variant,
+              component.qty_per_build, component.planned_qty, component.consumed_qty,
+              snapshot.component_product_id AS authorized_component_product_id,
+              snapshot.component_units_per_variant AS authorized_component_units_per_variant,
+              snapshot.component_qty AS authorized_component_qty
+       FROM inventory.build_order_components AS component
+       LEFT JOIN inventory.transformation_recipe_component_snapshots AS snapshot
+         ON snapshot.transformation_recipe_binding_id = $2
+        AND snapshot.model_id = $3
+        AND snapshot.component_variant_id = component.component_variant_id
+       WHERE component.build_order_id = $1
+       ORDER BY component.component_variant_id, component.id
+       FOR UPDATE OF component`,
+      [buildOrderId, authorization.operation_binding_id, authorization.binding_model_id],
     ));
     const expectedInputs = new Map(input.inputs.map((entry) => [entry.sourceVariantId, entry.requiredQty]));
     if (expectedInputs.size !== input.inputs.length || componentRows.length !== expectedInputs.size) {
@@ -487,6 +700,12 @@ export class PostgresCanonicalClaimBuildRepository implements CanonicalClaimBuil
       const componentId = positiveInteger(component.id, "buildComponent.id");
       const requiredQty = expectedInputs.get(sourceVariantId);
       if (requiredQty == null
+        || positiveInteger(component.component_product_id, "buildComponent.productId")
+          !== positiveInteger(component.authorized_component_product_id, "authorizedComponent.productId")
+        || positiveInteger(component.component_units_per_variant, "buildComponent.unitsPerVariant")
+          !== positiveInteger(component.authorized_component_units_per_variant, "authorizedComponent.unitsPerVariant")
+        || positiveInteger(component.qty_per_build, "buildComponent.qtyPerBuild")
+          !== positiveInteger(component.authorized_component_qty, "authorizedComponent.qtyPerBuild")
         || BigInt(String(component.planned_qty)) !== requiredQty
         || BigInt(String(component.qty_per_build)) * input.plannedBuilds !== requiredQty
         || Number(component.consumed_qty) !== 0) {

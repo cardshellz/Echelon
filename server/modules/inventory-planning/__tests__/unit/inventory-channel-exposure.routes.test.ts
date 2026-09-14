@@ -27,6 +27,11 @@ describe("inventory channel exposure routes", () => {
     setPublicationTargetPreviewState: ReturnType<typeof vi.fn>;
     saveVariantMappingDraft: ReturnType<typeof vi.fn>;
   };
+  let targetStopService: { stop: ReturnType<typeof vi.fn> };
+  let targetResumeService: {
+    review: ReturnType<typeof vi.fn>;
+    resume: ReturnType<typeof vi.fn>;
+  };
 
   beforeEach(async () => {
     requirePermissionMock.mockClear();
@@ -44,13 +49,18 @@ describe("inventory channel exposure routes", () => {
       setPublicationTargetPreviewState: vi.fn(async () => targetResult("preview", "2")),
       saveVariantMappingDraft: vi.fn(async () => saveResult()),
     };
+    targetStopService = { stop: vi.fn(async () => targetResult("disabled", "4")) };
+    targetResumeService = {
+      review: vi.fn(async (request, actorId) => blockedResumeReview(request, actorId)),
+      resume: vi.fn(async (request) => resumeResult(request)),
+    };
     const app = express();
     app.use(express.json());
     app.use((req, _res, next) => {
       Object.defineProperty(req, "session", { value: { user: { id: "operator-1" } } });
       next();
     });
-    registerInventoryChannelExposureRoutes(app, { service });
+    registerInventoryChannelExposureRoutes(app, { service, targetStopService, targetResumeService });
     server = await startServer(app);
   });
 
@@ -147,6 +157,46 @@ describe("inventory channel exposure routes", () => {
     expect(service.setPublicationTargetPreviewState).toHaveBeenCalledTimes(1);
   });
 
+  it("role-gates target resume review and the exact evidence-bound resume command", async () => {
+    const reviewRequest = {
+      publicationTargetId: 5,
+      expectedRevision: "3",
+      idempotencyKey: "route-resume-review-1",
+      reason: "Revalidate the stopped target before resuming publication",
+    };
+    const reviewResponse = await jsonRequest(
+      `${server.url}/api/inventory-planning/admin/channel-exposure/publication-target-resume-review`,
+      { method: "POST", body: reviewRequest },
+    );
+    expect(reviewResponse.status).toBe(201);
+    expect(requirePermissionMock).toHaveBeenCalledWith("inventory_planning", "activate");
+    expect(targetResumeService.review).toHaveBeenCalledWith(reviewRequest, "operator-1");
+    expect(reviewResponse.body).toMatchObject({ state: "blocked", providerWriteAttempted: false });
+
+    const resumeRequest = {
+      publicationTargetId: 5,
+      expectedRevision: "3",
+      resumeReviewId: "71",
+      expectedEvidenceHash: HASH,
+      idempotencyKey: "route-resume-1",
+      reason: "Restore the reviewed target after resolving the incident",
+    };
+    const resumeResponse = await jsonRequest(
+      `${server.url}/api/inventory-planning/admin/channel-exposure/publication-target-resume`,
+      { method: "POST", body: resumeRequest },
+    );
+    expect(resumeResponse.status).toBe(200);
+    expect(targetResumeService.resume).toHaveBeenCalledWith(resumeRequest, "operator-1");
+    expect(resumeResponse.body).toMatchObject({ state: "live", outboxEnqueued: true });
+
+    const malformed = await jsonRequest(
+      `${server.url}/api/inventory-planning/admin/channel-exposure/publication-target-resume`,
+      { method: "POST", body: { ...resumeRequest, expectedEvidenceHash: "bad" } },
+    );
+    expect(malformed.status).toBe(400);
+    expect(targetResumeService.resume).toHaveBeenCalledTimes(1);
+  });
+
   it("validates exact target/SKU mapping drafts before persistence", async () => {
     const request = {
       publicationTargetId: 5,
@@ -197,6 +247,54 @@ function targetResult(state: "disabled" | "preview" = "disabled", revision = "1"
     runtimeAuthorityChanged: false as const,
     providerWriteAttempted: false as const,
     outboxEnqueued: false as const,
+  };
+}
+
+function blockedResumeReview(
+  request: { publicationTargetId: number; expectedRevision: string; reason: string },
+  actorId: string,
+) {
+  return {
+    resumeReviewId: "71",
+    publicationTargetId: request.publicationTargetId,
+    publicationTargetRevision: request.expectedRevision,
+    authorityRevision: "9",
+    activationRunId: "44",
+    state: "blocked" as const,
+    configurationHash: HASH,
+    readinessHash: HASH,
+    evidenceHash: HASH,
+    requestedBy: actorId,
+    reason: request.reason,
+    capturedAt: "2026-09-14T12:00:00.000Z",
+    identityCensus: [],
+    products: [],
+    blockers: [{ code: "MAPPING_MISSING", message: "A mapping is missing.", context: {} }],
+    runtimeAuthorityChanged: false as const,
+    providerWriteAttempted: false as const,
+    outboxEnqueued: false as const,
+    alreadyApplied: false,
+  };
+}
+
+function resumeResult(request: {
+  publicationTargetId: number;
+  resumeReviewId: string;
+  expectedEvidenceHash: string;
+}) {
+  return {
+    publicationTargetId: request.publicationTargetId,
+    revision: "4",
+    state: "live" as const,
+    activationRunId: "44",
+    authorityRevision: "9",
+    resumeReviewId: request.resumeReviewId,
+    evidenceHash: request.expectedEvidenceHash,
+    publicationRows: 1,
+    alreadyApplied: false,
+    runtimeAuthorityChanged: false as const,
+    providerWriteAttempted: false as const,
+    outboxEnqueued: true as const,
   };
 }
 

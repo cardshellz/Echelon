@@ -83,6 +83,10 @@ import {
   type ProductInventoryStrategy,
 } from "@shared/catalog/inventory-strategy";
 import type { VariantSalesEligibility } from "@shared/catalog/variant-sales-eligibility";
+import {
+  InventoryRuntimeAuthorityBadge,
+  useInventoryRuntimeAuthority,
+} from "@/components/inventory/InventoryRuntimeAuthorityBadge";
 
 function getVariantUomType(variant: Pick<ProductVariantRow, "uomType" | "hierarchyLevel" | "unitsPerVariant" | "isBaseUnit" | "parentVariantId">): VariantUomType {
   return variant.uomType ?? inferLegacyVariantUomType(variant);
@@ -1482,6 +1486,7 @@ function VariantShippingBehavior({
 
 export default function ProductDetail() {
   const inventoryCommand = useInventoryCommand();
+  const inventoryRuntimeAuthorityQuery = useInventoryRuntimeAuthority();
   const [, params] = useRoute("/products/:id");
   const [, setLocation] = useLocation();
   const searchStr = useSearch();
@@ -1649,29 +1654,34 @@ export default function ProductDetail() {
         ? contentForm.tags.split(",").map((s) => s.trim()).filter(Boolean)
         : null;
 
+      const productUpdate: Record<string, unknown> = {
+        name: editForm.name,
+        sku: editForm.sku,
+        baseUnit: editForm.baseUnit,
+        leadTimeDays: editForm.leadTimeDays,
+        safetyStockDays: editForm.safetyStockDays,
+        title: contentForm.title || null,
+        description: contentForm.description || null,
+        bulletPoints,
+        categoryId: contentForm.categoryId ? Number(contentForm.categoryId) : null,
+        shippingGroupId: contentForm.shippingGroupId ? Number(contentForm.shippingGroupId) : null,
+        subcategory: contentForm.subcategory || null,
+        brand: contentForm.brand || null,
+        manufacturer: contentForm.manufacturer || null,
+        tags,
+        seoTitle: contentForm.seoTitle || null,
+        seoDescription: contentForm.seoDescription || null,
+        status: contentForm.status || "active",
+      };
+      const persistedInventoryStrategy = product?.inventoryStrategy ?? DEFAULT_PRODUCT_INVENTORY_STRATEGY;
+      if (editForm.inventoryStrategy !== persistedInventoryStrategy) {
+        productUpdate.inventoryStrategy = editForm.inventoryStrategy;
+      }
+
       const res = await fetch(`/api/products/${product?.productId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          name: editForm.name,
-          sku: editForm.sku,
-          baseUnit: editForm.baseUnit,
-          inventoryStrategy: editForm.inventoryStrategy,
-          leadTimeDays: editForm.leadTimeDays,
-          safetyStockDays: editForm.safetyStockDays,
-          title: contentForm.title || null,
-          description: contentForm.description || null,
-          bulletPoints,
-          categoryId: contentForm.categoryId ? Number(contentForm.categoryId) : null,
-          shippingGroupId: contentForm.shippingGroupId ? Number(contentForm.shippingGroupId) : null,
-          subcategory: contentForm.subcategory || null,
-          brand: contentForm.brand || null,
-          manufacturer: contentForm.manufacturer || null,
-          tags,
-          seoTitle: contentForm.seoTitle || null,
-          seoDescription: contentForm.seoDescription || null,
-          status: contentForm.status || "active",
-        }),
+        body: JSON.stringify(productUpdate),
       });
       if (!res.ok) {
         const body = await res.json().catch(() => null);
@@ -1985,7 +1995,9 @@ export default function ProductDetail() {
       if (!res.ok) throw new Error("Failed to fetch allocation");
       return res.json();
     },
-    enabled: !!product?.productId && activeTab === "channels",
+    enabled: !!product?.productId
+      && activeTab === "channels"
+      && inventoryRuntimeAuthorityQuery.data?.authority === "legacy",
   });
 
   const syncInventoryMutation = useMutation({
@@ -2813,46 +2825,65 @@ export default function ProductDetail() {
                       />
                     </div>
                   </div>
-                  <div className="space-y-2 border-t pt-4">
+                  <div className="space-y-2 border-t pt-4" data-testid="inventory-behavior-control">
                     <div>
-                      <Label className="text-xs md:text-sm">Inventory behavior</Label>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Label className="text-xs md:text-sm">Inventory behavior</Label>
+                        <InventoryRuntimeAuthorityBadge />
+                      </div>
                       <p className="text-xs text-muted-foreground">
                         Controls how variants share availability and which inventory transformations are permitted.
                       </p>
                     </div>
-                    <div
-                      className="grid grid-cols-1 gap-2 lg:grid-cols-3"
-                      role="radiogroup"
-                      aria-label="Inventory behavior"
-                    >
-                      {PRODUCT_INVENTORY_STRATEGY_DEFINITIONS.map((definition) => {
-                        const selected = editForm.inventoryStrategy === definition.strategy;
-                        return (
-                          <button
-                            key={definition.strategy}
-                            type="button"
-                            role="radio"
-                            aria-checked={selected}
-                            className={cn(
-                              "min-h-[76px] border px-3 py-2 text-left transition-colors",
-                              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
-                              selected
-                                ? "border-primary bg-primary/10 text-foreground ring-1 ring-primary"
-                                : "border-border bg-background text-foreground hover:bg-muted/50",
-                            )}
-                            onClick={() => updateField("inventoryStrategy", definition.strategy)}
-                          >
-                            <span className="flex items-center justify-between gap-2 text-sm font-semibold">
-                              {definition.label}
-                              {selected ? <Check className="h-4 w-4 text-primary" aria-hidden="true" /> : null}
-                            </span>
-                            <span className="mt-1 block text-xs leading-4 text-muted-foreground">
-                              {definition.description}
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </div>
+                    {inventoryRuntimeAuthorityQuery.data?.authority === "legacy" ? (
+                      <div
+                        className="grid grid-cols-1 gap-2 lg:grid-cols-3"
+                        role="radiogroup"
+                        aria-label="Inventory behavior"
+                      >
+                        {PRODUCT_INVENTORY_STRATEGY_DEFINITIONS.map((definition) => {
+                          const selected = editForm.inventoryStrategy === definition.strategy;
+                          return (
+                            <button
+                              key={definition.strategy}
+                              type="button"
+                              role="radio"
+                              aria-checked={selected}
+                              className={cn(
+                                "min-h-[76px] border px-3 py-2 text-left transition-colors",
+                                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
+                                selected
+                                  ? "border-primary bg-primary/10 text-foreground ring-1 ring-primary"
+                                  : "border-border bg-background text-foreground hover:bg-muted/50",
+                              )}
+                              onClick={() => updateField("inventoryStrategy", definition.strategy)}
+                            >
+                              <span className="flex items-center justify-between gap-2 text-sm font-semibold">
+                                {definition.label}
+                                {selected ? <Check className="h-4 w-4 text-primary" aria-hidden="true" /> : null}
+                              </span>
+                              <span className="mt-1 block text-xs leading-4 text-muted-foreground">
+                                {definition.description}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <div className="rounded-md border bg-muted/30 p-3 text-sm" data-testid="inventory-behavior-read-only">
+                        <p className="font-medium">
+                          {inventoryRuntimeAuthorityQuery.data?.authority === "canonical"
+                            ? "Legacy inventory behavior is retired for live planning."
+                            : "Inventory behavior cannot be edited until live authority is confirmed."}
+                        </p>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          Recorded legacy value: {editForm.inventoryStrategy}. Configure directed package paths and build bindings in Supply Transformations.
+                        </p>
+                        <Button asChild variant="outline" size="sm" className="mt-3">
+                          <Link href="/inventory/supply-transformations">Open Supply Transformations</Link>
+                        </Button>
+                      </div>
+                    )}
                   </div>
                 </CardContent>
               </Card>
@@ -3245,23 +3276,29 @@ export default function ProductDetail() {
               {/* Action buttons row */}
               <div className="flex items-center justify-between">
                 <div className="text-sm text-muted-foreground">
-                  Product ATP: <span className="font-medium text-foreground">{allocationData?.atpBase?.toLocaleString() ?? "—"}</span> base units
+                  {inventoryRuntimeAuthorityQuery.data?.authority === "legacy" ? (
+                    <>Product ATP: <span className="font-medium text-foreground">{allocationData?.atpBase?.toLocaleString() ?? "—"}</span> base units</>
+                  ) : (
+                    <InventoryRuntimeAuthorityBadge />
+                  )}
                 </div>
                 <div className="flex items-center gap-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => syncInventoryMutation.mutate()}
-                    disabled={syncInventoryMutation.isPending}
-                    className="min-h-[44px]"
-                  >
-                    {syncInventoryMutation.isPending ? (
-                      <Loader2 className="h-4 w-4 mr-1 animate-spin" />
-                    ) : (
-                      <RefreshCw className="h-4 w-4 mr-1" />
-                    )}
-                    Sync Inventory
-                  </Button>
+                  {inventoryRuntimeAuthorityQuery.data?.authority === "legacy" && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => syncInventoryMutation.mutate()}
+                      disabled={syncInventoryMutation.isPending}
+                      className="min-h-[44px]"
+                    >
+                      {syncInventoryMutation.isPending ? (
+                        <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+                      ) : (
+                        <RefreshCw className="h-4 w-4 mr-1" />
+                      )}
+                      Sync Inventory
+                    </Button>
+                  )}
                   {/* Image sync buttons */}
                   <Button
                     variant="outline"
@@ -3296,7 +3333,27 @@ export default function ProductDetail() {
                 </div>
               </div>
 
-              {allocationLoading ? (
+              {inventoryRuntimeAuthorityQuery.data?.authority !== "legacy" ? (
+                <Card data-testid="product-legacy-channel-allocation-unavailable">
+                  <CardHeader className="p-3 md:p-6">
+                    <CardTitle className="text-base md:text-lg">
+                      {inventoryRuntimeAuthorityQuery.data?.authority === "canonical"
+                        ? "Legacy product allocation is retired"
+                        : "Product allocation controls are unavailable"}
+                    </CardTitle>
+                    <CardDescription className="text-xs md:text-sm">
+                      {inventoryRuntimeAuthorityQuery.data?.authority === "canonical"
+                        ? "Per-SKU channel eligibility, holdback, share, and publish limits now live in Inventory Exposure."
+                        : "The live inventory authority could not be confirmed, so legacy allocation reads and writes remain disabled."}
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent className="p-3 md:p-6 pt-0 md:pt-0">
+                    <Button asChild variant="outline">
+                      <Link href="/channels/inventory-exposure">Open Inventory Exposure</Link>
+                    </Button>
+                  </CardContent>
+                </Card>
+              ) : allocationLoading ? (
                 <div className="text-center py-8 text-muted-foreground">
                   <Loader2 className="h-8 w-8 mx-auto mb-2 animate-spin opacity-50" />
                   <p className="text-sm">Loading channels...</p>

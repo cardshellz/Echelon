@@ -127,6 +127,21 @@ describe("dropship vendor selection domain", () => {
     expect(disabled.marketplaceQuantity).toBe(0);
   });
 
+  it("does not apply the retired vendor cap to a canonical target quantity", () => {
+    const selected = evaluateDropshipVendorCatalogSelection({
+      candidate,
+      adminExposureDecision: exposedDecision,
+      rules: [{ id: 13, scopeType: "catalog", action: "include" }],
+      rawAtpUnits: 9,
+      override: { productVariantId: 20, marketplaceQuantityCap: 4 },
+      applyMarketplaceQuantityCap: false,
+    });
+
+    expect(selected.selected).toBe(true);
+    expect(selected.marketplaceQuantity).toBe(9);
+    expect(selected.quantityCapApplied).toBe(false);
+  });
+
   it("normalizes invalid or negative ATP to zero", () => {
     expect(computeDropshipMarketplaceQuantity(-5)).toBe(0);
     expect(computeDropshipMarketplaceQuantity(Number.NaN)).toBe(0);
@@ -206,6 +221,31 @@ describe("DropshipSelectionAtpService", () => {
     expect(result.rows[0].selectionDecision.marketplaceQuantity).toBe(2);
     expect(result.rows[0].selectionDecision.quantityCapApplied).toBe(true);
     expect(result.rows[0]).not.toHaveProperty("rawAtpUnits");
+  });
+
+  it("uses the canonical target quantity without reapplying the legacy vendor cap", async () => {
+    const repository = new FakeDropshipSelectionAtpRepository();
+    repository.catalogRules = [{ id: 1, scopeType: "catalog", action: "include" }];
+    repository.selectionRules = [makeSelectionRuleRecord({ id: 2, scopeType: "catalog", action: "include" })];
+    repository.candidates = [candidate];
+    repository.overrides = [{
+      id: 1,
+      vendorId: 1,
+      productVariantId: 20,
+      enabledOverride: null,
+      marketplaceQuantityCap: 2,
+      notes: null,
+      createdAt: now,
+      updatedAt: now,
+    }];
+    const atp = new FakeAtpProvider();
+    atp.authority = "canonical";
+    atp.variantAtpByVariantId.set(20, 3);
+
+    const result = await makeService(repository, atp).previewCatalog({ vendorId: 1 });
+
+    expect(result.rows[0].selectionDecision.marketplaceQuantity).toBe(3);
+    expect(result.rows[0].selectionDecision.quantityCapApplied).toBe(false);
   });
 
   it("returns only exposed catalog rows and builds de-duped exposed facets", async () => {
@@ -307,14 +347,18 @@ class FakeDropshipSelectionAtpRepository implements DropshipSelectionAtpReposito
 
 class FakeAtpProvider implements DropshipAtpProvider {
   variantAtpByVariantId = new Map<number, number>();
+  authority: "legacy" | "canonical" = "legacy";
 
   async getVariantAtp(
     targets: readonly { productId: number; productVariantId: number }[],
-  ): Promise<Map<number, number>> {
-    return new Map(targets.map((target) => [
-      target.productVariantId,
-      this.variantAtpByVariantId.get(target.productVariantId) ?? 0,
-    ]));
+  ) {
+    return Promise.resolve({
+      authority: this.authority,
+      quantities: new Map(targets.map((target) => [
+        target.productVariantId,
+        this.variantAtpByVariantId.get(target.productVariantId) ?? 0,
+      ])),
+    });
   }
 }
 

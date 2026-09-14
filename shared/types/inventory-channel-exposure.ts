@@ -271,6 +271,13 @@ export const setInventoryPublicationTargetPreviewStateRequestSchema = z.object({
   idempotencyKey: nonblank(120),
 }).strict();
 
+export const stopInventoryPublicationTargetRequestSchema = z.object({
+  publicationTargetId: positiveInteger,
+  expectedRevision: postgresBigintString,
+  changeReason: nonblank(1000),
+  idempotencyKey: nonblank(120),
+}).strict();
+
 export const savePublicationVariantMappingDraftRequestSchema = z.object({
   publicationTargetId: positiveInteger,
   productVariantId: positiveInteger,
@@ -485,7 +492,7 @@ const inventoryChannelExposureRuntimeRowSchema = z.object({
   }
 });
 
-const inventoryChannelExposureRuntimeTargetSchema = z.object({
+export const inventoryChannelExposureRuntimeTargetSchema = z.object({
   publicationTargetId: positiveInteger,
   publicationTargetRevision: plannerPositiveQuantitySchema,
   destinationKind: z.enum(["channel_connection", "dropship_store_connection"]),
@@ -574,6 +581,9 @@ export type PublicationSourceBindingHead = z.infer<typeof publicationSourceBindi
 export type PublicationVariantMappingVersion = z.infer<typeof publicationVariantMappingVersionSchema>;
 export type PublicationVariantMappingHead = z.infer<typeof publicationVariantMappingHeadSchema>;
 export type InventoryPublicationTargetAdmin = z.infer<typeof inventoryPublicationTargetAdminSchema>;
+export type StopInventoryPublicationTargetRequest = z.infer<
+  typeof stopInventoryPublicationTargetRequestSchema
+>;
 export type LegacyPublicationMappingCandidate = z.infer<typeof legacyPublicationMappingCandidateSchema>;
 export type InventoryChannelExposureAdminView = z.infer<typeof inventoryChannelExposureAdminViewSchema>;
 export type SaveChannelExposurePolicyDraftRequest = z.infer<

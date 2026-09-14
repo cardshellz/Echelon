@@ -1,7 +1,6 @@
 import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "@/lib/auth";
-import { apiRequest } from "@/lib/queryClient";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription, CardFooter } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -21,6 +20,10 @@ import {
 import { useLocation as useWouterLocation } from "wouter";
 import SyncControlPanel from "@/components/SyncControlPanel";
 import ChannelSyncControls from "@/components/ChannelSyncControls";
+import {
+  InventoryRuntimeAuthorityBadge,
+  useInventoryRuntimeAuthority,
+} from "@/components/inventory/InventoryRuntimeAuthorityBadge";
 
 interface ChannelConnection {
   id: number;
@@ -144,6 +147,8 @@ export default function Channels() {
   const canCreate = hasPermission("channels", "create");
   const canEdit = hasPermission("channels", "edit");
   const canDelete = hasPermission("channels", "delete");
+  const inventoryRuntimeAuthorityQuery = useInventoryRuntimeAuthority();
+  const legacyInventoryAuthority = inventoryRuntimeAuthorityQuery.data?.authority === "legacy";
 
   const { data: channels = [], isLoading } = useQuery<Channel[]>({
     queryKey: ["/api/channels"],
@@ -152,7 +157,7 @@ export default function Channels() {
       if (!res.ok) throw new Error("Failed to fetch channels");
       return res.json();
     },
-    enabled: canView,
+    enabled: canView && legacyInventoryAuthority,
   });
 
   const createMutation = useMutation({
@@ -296,37 +301,6 @@ export default function Channels() {
   });
 
   const channelSyncEnabled = warehouseSettings?.channelSyncEnabled === 1;
-
-  const toggleChannelSyncMutation = useMutation({
-    mutationFn: async (enabled: boolean) => {
-      if (!warehouseSettings?.id) throw new Error("No warehouse settings found");
-      const res = await fetch(`/api/warehouse-settings/${warehouseSettings.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ channelSyncEnabled: enabled ? 1 : 0 }),
-      });
-      if (!res.ok) throw new Error("Failed to update settings");
-      // Refresh the cached kill switch in the service
-      await fetch("/api/channel-sync/refresh-enabled", {
-        method: "POST",
-        credentials: "include",
-      });
-      return res.json();
-    },
-    onSuccess: (_data, enabled) => {
-      queryClient.invalidateQueries({ queryKey: ["/api/warehouse-settings/default"] });
-      toast({
-        title: enabled ? "Channel sync enabled" : "Channel sync disabled",
-        description: enabled
-          ? "Inventory will now push to connected sales channels."
-          : "All inventory pushes to sales channels are paused.",
-      });
-    },
-    onError: (err: Error) => {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
-    },
-  });
 
   const syncInventoryMutation = useMutation({
     mutationFn: async (channelId: number) => {
@@ -496,8 +470,30 @@ export default function Channels() {
         </Card>
       ) : (
         <>
-        {/* Sync Control Panel */}
-        <SyncControlPanel />
+        {legacyInventoryAuthority ? (
+          <SyncControlPanel />
+        ) : (
+          <Card data-testid="canonical-channel-publication-controls">
+            <CardHeader>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <CardTitle>Channel inventory publication</CardTitle>
+                  <CardDescription>
+                    {inventoryRuntimeAuthorityQuery.data?.authority === "canonical"
+                      ? "Publication targets, source warehouses, SKU policies, and preview state are controlled in Inventory Exposure."
+                      : "The live inventory authority could not be confirmed, so legacy sync controls remain unavailable."}
+                  </CardDescription>
+                </div>
+                <InventoryRuntimeAuthorityBadge />
+              </div>
+            </CardHeader>
+            <CardContent>
+              <Button variant="outline" onClick={() => navigate("/channels/inventory-exposure")}>
+                Open Inventory Exposure
+              </Button>
+            </CardContent>
+          </Card>
+        )}
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {channels.map(channel => (
@@ -550,9 +546,11 @@ export default function Channels() {
                 )}
               </CardContent>
               {/* Per-channel sync controls */}
-              <div className="px-6 pb-3" onClick={(e) => e.stopPropagation()}>
-                <ChannelSyncControls channelId={channel.id} channelName={channel.name} />
-              </div>
+              {legacyInventoryAuthority && (
+                <div className="px-6 pb-3" onClick={(e) => e.stopPropagation()}>
+                  <ChannelSyncControls channelId={channel.id} channelName={channel.name} />
+                </div>
+              )}
               <CardFooter className="pt-0 flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <Badge variant={STATUS_BADGES[channel.status]?.variant || 'outline'}>
@@ -698,16 +696,26 @@ export default function Channels() {
                         )}
                       </div>
 
-                      <Button
-                        variant="outline"
-                        className="w-full min-h-[44px]"
-                        onClick={() => syncInventoryMutation.mutate(selectedChannel.id)}
-                        disabled={syncInventoryMutation.isPending || !channelSyncEnabled}
-                        title={!channelSyncEnabled ? "Channel sync is disabled — enable it above" : undefined}
-                      >
-                        <Upload className={`h-4 w-4 mr-2 ${syncInventoryMutation.isPending ? 'animate-spin' : ''}`} />
-                        {syncInventoryMutation.isPending ? "Pushing inventory..." : "Push Inventory to Shopify"}
-                      </Button>
+                      {legacyInventoryAuthority ? (
+                        <Button
+                          variant="outline"
+                          className="w-full min-h-[44px]"
+                          onClick={() => syncInventoryMutation.mutate(selectedChannel.id)}
+                          disabled={syncInventoryMutation.isPending || !channelSyncEnabled}
+                          title={!channelSyncEnabled ? "Channel sync is disabled — enable it above" : undefined}
+                        >
+                          <Upload className={`h-4 w-4 mr-2 ${syncInventoryMutation.isPending ? 'animate-spin' : ''}`} />
+                          {syncInventoryMutation.isPending ? "Publishing inventory..." : `Publish inventory to ${selectedChannel.name}`}
+                        </Button>
+                      ) : (
+                        <Button
+                          variant="outline"
+                          className="w-full min-h-[44px]"
+                          onClick={() => navigate("/channels/inventory-exposure")}
+                        >
+                          Open Inventory Exposure
+                        </Button>
+                      )}
 
                       {selectedChannel.connection.syncError && (
                         <div className="p-3 bg-destructive/10 text-destructive rounded-lg">

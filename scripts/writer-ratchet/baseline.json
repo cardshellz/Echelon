@@ -118,6 +118,7 @@
   ],
   "channels.sync_settings": [
     "modules/channels",
+    "modules/inventory-planning",
     "server/db.ts"
   ],
   "dropship.dropship_admin_config_commands": [
@@ -211,6 +212,12 @@
     "modules/dropship"
   ],
   "dropship.dropship_notification_preferences": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_order_acceptance_claim_attempts": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_order_acceptance_stages": [
     "modules/dropship"
   ],
   "dropship.dropship_order_economics_snapshots": [
@@ -518,6 +525,9 @@
     "modules/inventory-planning"
   ],
   "inventory.inventory_publication_readbacks": [
+    "modules/inventory-planning"
+  ],
+  "inventory.inventory_publication_target_resume_reviews": [
     "modules/inventory-planning"
   ],
   "inventory.inventory_publication_targets": [
@@ -982,6 +992,7 @@
     "modules/procurement"
   ],
   "public.audit_events": [
+    "modules/inventory-planning",
     "modules/procurement",
     "server/infrastructure/auditLogger.ts"
   ],

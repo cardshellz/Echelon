@@ -202,21 +202,56 @@ export async function loadProposedPublicationTargetsForCutover(
   return loadSelectedPublicationTargets(client, productId, productVariantIds, undefined, true);
 }
 
+/**
+ * Projects one stopped target's prior sealed configuration while it is in
+ * preview. Pending drafts are deliberately ignored: resuming an emergency
+ * stop must not also activate unrelated configuration changes.
+ */
+export async function loadPreviewPublicationTargetForResume(
+  client: InventoryAvailabilityTransactionQueryClient,
+  productId: number,
+  productVariantIds: readonly number[],
+  publicationTargetId: number,
+): Promise<ActiveInventoryPublicationTargetSnapshot[]> {
+  return loadSelectedPublicationTargets(
+    client,
+    productId,
+    productVariantIds,
+    undefined,
+    true,
+    positiveInteger(publicationTargetId, "publicationTargetId"),
+    true,
+  );
+}
+
 async function loadSelectedPublicationTargets(
   client: InventoryAvailabilityTransactionQueryClient,
   productId: number,
   productVariantIds: readonly number[],
   channelId: number | undefined,
   proposed: boolean,
+  selectedTargetId?: number,
+  activeDefinitionsOnly = false,
 ): Promise<ActiveInventoryPublicationTargetSnapshot[]> {
   const targetState = proposed ? "preview" : "live";
-  const bindingPointer = proposed ? "COALESCE(head.draft_binding_id, head.active_binding_id)" : "head.active_binding_id";
-  const policyPointer = proposed ? "COALESCE(head.draft_policy_id, head.active_policy_id)" : "head.active_policy_id";
-  const mappingPointer = proposed ? "COALESCE(head.draft_mapping_id, head.active_mapping_id)" : "head.active_mapping_id";
-  const definitionStates = proposed ? "('draft', 'sealed')" : "('sealed')";
+  const useProposedDefinitions = proposed && !activeDefinitionsOnly;
+  const bindingPointer = useProposedDefinitions
+    ? "COALESCE(head.draft_binding_id, head.active_binding_id)"
+    : "head.active_binding_id";
+  const policyPointer = useProposedDefinitions
+    ? "COALESCE(head.draft_policy_id, head.active_policy_id)"
+    : "head.active_policy_id";
+  const mappingPointer = useProposedDefinitions
+    ? "COALESCE(head.draft_mapping_id, head.active_mapping_id)"
+    : "head.active_mapping_id";
+  const definitionStates = useProposedDefinitions ? "('draft', 'sealed')" : "('sealed')";
   const targetValues: unknown[] = [];
   const channelFilter = channelId == null ? "" : "AND target.channel_id = $1";
   if (channelId != null) targetValues.push(positiveInteger(channelId, "channelId"));
+  if (selectedTargetId != null) targetValues.push(positiveInteger(selectedTargetId, "publicationTargetId"));
+  const selectedTargetFilter = selectedTargetId == null
+    ? ""
+    : `AND target.id = $${targetValues.length}`;
   const targetResult = await client.query<PublicationTargetRow>(
     `SELECT target.id AS publication_target_id,
             target.revision::text AS publication_target_revision,
@@ -237,10 +272,11 @@ async function loadSelectedPublicationTargets(
      JOIN channels.channels AS policy_channel ON policy_channel.id = target.channel_id
      LEFT JOIN dropship.dropship_store_connections AS dropship_connection
        ON dropship_connection.id = target.dropship_store_connection_id
-     WHERE target.state = '${targetState}'
-       AND target.publication_authority = 'echelon'
-       ${channelFilter}
-     ORDER BY target.id`,
+      WHERE target.state = '${targetState}'
+        AND target.publication_authority = 'echelon'
+        ${channelFilter}
+        ${selectedTargetFilter}
+      ORDER BY target.id`,
     targetValues,
   );
   if (targetResult.rows.length === 0) return [];

@@ -53,7 +53,7 @@ function runnerFixture() {
 }
 
 describe("PostgreSQL CI coverage and isolation", () => {
-  it("preserves all 70 prior files plus two read regressions and three controlled procurement suites plus background capture and OMS identity", () => {
+  it("preserves all 70 prior files and explicitly adds twelve reviewed hardening suites", () => {
     const addedSuites = [
       "server/modules/oms/__tests__/integration/order-line-catalog-identity.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/inventory-opening-capture.integration.test.ts",
@@ -62,12 +62,17 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/procurement/__tests__/integration/procurement-rfq-controlled-acceptance.integration.test.ts",
       "server/modules/procurement/__tests__/integration/procurement-flow-cost-controlled-acceptance.integration.test.ts",
       "server/modules/procurement/__tests__/integration/procurement-payment-controlled-acceptance.integration.test.ts",
+      "server/modules/dropship/__tests__/integration/dropship-canonical-acceptance-stage.integration.test.ts",
+      "server/modules/inventory-planning/__tests__/integration/inventory-publication-global-control.integration.test.ts",
+      "server/modules/inventory-planning/__tests__/integration/inventory-publication-target-resume.integration.test.ts",
+      "server/modules/inventory-planning/__tests__/integration/transformation-execution-authority.integration.test.ts",
+      "server/modules/inventory/__tests__/integration/build-order-transformation-authority.integration.test.ts",
     ];
-    expect(POSTGRES_TEST_FILES).toHaveLength(77);
-    expect(new Set(POSTGRES_TEST_FILES).size).toBe(77);
+    expect(POSTGRES_TEST_FILES).toHaveLength(82);
+    expect(new Set(POSTGRES_TEST_FILES).size).toBe(82);
     expect(POSTGRES_TEST_FILES).toEqual(expect.arrayContaining(addedSuites));
-    // Preserve the original inventory digest as well as the seven additions;
-    // adding procurement coverage must not silently remove an older suite.
+    // Preserve the original inventory digest as well as the explicit additions;
+    // adding hardening coverage must not silently remove an older suite.
     const priorFiles = POSTGRES_TEST_FILES.filter((file) => !addedSuites.includes(file));
     expect(priorFiles).toHaveLength(70);
     const digest = createHash("sha256").update([...priorFiles].sort().join("\n")).digest("hex");
@@ -77,7 +82,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
 
   it("assigns every file exactly once across 8 deterministic balanced shards", () => {
     const shards = Array.from({ length: POSTGRES_SHARD_COUNT }, (_, index) => selectPostgresShardFiles({ index: index + 1, count: 8 }));
-    expect(shards.map((files) => files.length)).toEqual([10, 10, 10, 10, 10, 9, 9, 9]);
+    expect(shards.map((files) => files.length)).toEqual([11, 11, 10, 10, 10, 10, 10, 10]);
     expect(shards.flat().sort()).toEqual([...POSTGRES_TEST_FILES].sort());
     expect(new Set(shards.flat()).size).toBe(POSTGRES_TEST_FILES.length);
     expect(selectPostgresShardFiles({ index: 1, count: 8 })).toEqual(shards[0]);
@@ -106,7 +111,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
         reports.push(args.at(-1)!);
       }
     }
-    expect(new Set(reports).size).toBe(77);
+    expect(new Set(reports).size).toBe(82);
     expect(() => buildPostgresVitestArgs({ index: 1, count: 8 }, POSTGRES_TEST_FILES[1])).toThrow();
     const source = readFileSync(resolve(POSTGRES_REPOSITORY_ROOT, "scripts/ci/postgres-tests.ts"), "utf8");
     expect(source).toContain("spawnSync(process.execPath, [...args]");
@@ -164,8 +169,8 @@ describe("PostgreSQL CI coverage and isolation", () => {
     };
     const originalEnv = { ...environment };
     expect(await runPostgresShard(["1/8"], environment, fixture.dependencies)).toBe(0);
-    expect(fixture.connections).toHaveLength(10);
-    expect(fixture.dependencies.runTest).toHaveBeenCalledTimes(10);
+    expect(fixture.connections).toHaveLength(11);
+    expect(fixture.dependencies.runTest).toHaveBeenCalledTimes(11);
     expect(fixture.dependencies.error).not.toHaveBeenCalled();
     expect(environment).toEqual(originalEnv);
     const databaseNames: string[] = [];
@@ -189,7 +194,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
       databaseNames.push(childUrl.pathname);
       expect(fixture.events.slice(index * 5, index * 5 + 5)).toEqual(["connect", calls[0], "run", calls[1], "end"]);
     }
-    expect(new Set(databaseNames).size).toBe(10);
+    expect(new Set(databaseNames).size).toBe(11);
   });
 
   it("never drops a database when CREATE fails or collides, and continues the remaining files", async () => {
@@ -204,8 +209,8 @@ describe("PostgreSQL CI coverage and isolation", () => {
     expect(fixture.connections[0].query.mock.calls).toHaveLength(1);
     expect(fixture.connections[0].query.mock.calls[0][0]).toMatch(/^CREATE DATABASE /);
     expect(fixture.connections[0].end).toHaveBeenCalledOnce();
-    expect(fixture.dependencies.runTest).toHaveBeenCalledTimes(9);
-    expect(fixture.connections).toHaveLength(10);
+    expect(fixture.dependencies.runTest).toHaveBeenCalledTimes(10);
+    expect(fixture.connections).toHaveLength(11);
     const failure = JSON.parse(vi.mocked(fixture.dependencies.error).mock.calls[0][0]);
     expect(failure).toMatchObject({ phase: "database create", detail: "42P04" });
     expect(failure.database).toMatch(/^echelon_ci_s1_/);
@@ -223,7 +228,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
     expect(await runPostgresShard(["1/8"], disposableEnvironment, fixture.dependencies)).toBe(1);
     expect(fixture.connections[0].query.mock.calls[1][0]).toMatch(/^DROP DATABASE "echelon_ci_s1_/);
     expect(fixture.connections[0].end).toHaveBeenCalledOnce();
-    expect(fixture.dependencies.runTest).toHaveBeenCalledTimes(10);
+    expect(fixture.dependencies.runTest).toHaveBeenCalledTimes(11);
     expect(vi.mocked(fixture.dependencies.error).mock.calls.flat().join(" ")).not.toContain("secret");
   });
 
@@ -232,7 +237,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
     vi.mocked(fixture.dependencies.runTest).mockImplementationOnce(() => { throw new Error("secret"); });
     expect(await runPostgresShard(["1/8"], disposableEnvironment, fixture.dependencies)).toBe(1);
     expect(fixture.connections[0].query.mock.calls[1][0]).toMatch(/^DROP DATABASE /);
-    expect(fixture.dependencies.runTest).toHaveBeenCalledTimes(10);
+    expect(fixture.dependencies.runTest).toHaveBeenCalledTimes(11);
   });
 
   it("reports cleanup and connection-close failures without hiding passing child status", async () => {
@@ -245,7 +250,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
       return connection;
     });
     expect(await runPostgresShard(["1/8"], disposableEnvironment, fixture.dependencies)).toBe(1);
-    expect(fixture.dependencies.runTest).toHaveBeenCalledTimes(10);
+    expect(fixture.dependencies.runTest).toHaveBeenCalledTimes(11);
     const failures = vi.mocked(fixture.dependencies.error).mock.calls.map(([event]) => JSON.parse(event));
     expect(failures.map((event) => event.phase)).toEqual(["database cleanup", "admin connection close"]);
     expect(failures[0].database).toMatch(/^echelon_ci_s1_/);
@@ -262,7 +267,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
     expect(await runPostgresShard(["1/8"], disposableEnvironment, fixture.dependencies)).toBe(1);
     expect(fixture.connections[0].query).not.toHaveBeenCalled();
     expect(fixture.connections[0].end).toHaveBeenCalledOnce();
-    expect(fixture.dependencies.runTest).toHaveBeenCalledTimes(9);
+    expect(fixture.dependencies.runTest).toHaveBeenCalledTimes(10);
   });
 
   it("does not connect without safe configuration or a valid generated DB name", async () => {

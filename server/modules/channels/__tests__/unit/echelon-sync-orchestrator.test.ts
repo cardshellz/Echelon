@@ -244,10 +244,14 @@ describe("EchelonSyncOrchestrator", () => {
       vi.mocked(mockAdapter.pushInventory).mockResolvedValue([{ variantId: 100, pushedQty: 7, status: "success" }]);
     }
 
-    it("recalculates all allocations but publishes only one item/location and invalidates the aggregate watermark", async () => {
+    it("requests target-channel allocation but publishes only one item/location and invalidates the aggregate watermark", async () => {
       queueScopedShopify();
       await orchestrator.syncInventoryForPublicationTarget(target);
-      expect(allocationEngine.allocateProduct).toHaveBeenCalledWith(1, "quantity_publication_catchup");
+      expect(allocationEngine.allocateProduct).toHaveBeenCalledWith(
+        1,
+        "quantity_publication_catchup",
+        [1],
+      );
       expect(mockAdapter.pushInventory).toHaveBeenCalledExactlyOnceWith(1, [expect.objectContaining({
         variantId: 100, allocatedQty: 7, externalInventoryItemId: "123",
         warehouseBreakdown: [{ warehouseId: 1, externalLocationId: "11", qty: 7 }],
@@ -446,7 +450,7 @@ describe("EchelonSyncOrchestrator", () => {
 
       const results = await orchestrator.syncInventoryForProduct(1, { dryRun: false }, "test");
 
-      expect(allocationEngine.allocateProduct).toHaveBeenCalledWith(1, "test");
+      expect(allocationEngine.allocateProduct).toHaveBeenCalledWith(1, "test", undefined);
       expect(results.length).toBeGreaterThan(0);
       expect(results[0].channelName).toBe("Shopify DTC");
     });
@@ -858,7 +862,7 @@ describe("EchelonSyncOrchestrator", () => {
 
       await orchestrator.onInventoryChange(100, "receiving");
 
-      expect(allocationEngine.allocateProduct).toHaveBeenCalledWith(1, "receiving");
+      expect(allocationEngine.allocateProduct).toHaveBeenCalledWith(1, "receiving", undefined);
     });
 
     it("should handle unknown variant gracefully", async () => {
@@ -910,7 +914,7 @@ describe("EchelonSyncOrchestrator", () => {
 
       const results = await orchestrator.syncInventoryForAllProducts({ dryRun: false }, "manual");
 
-      expect(inventoryPublication.listProductIds).toHaveBeenCalledWith(expect.any(Function));
+      expect(inventoryPublication.listProductIds).toHaveBeenCalledWith(expect.any(Function), undefined);
       expect(inventoryPublication.publishProduct).toHaveBeenCalledWith(
         { productId: 91, dryRun: false, triggeredBy: "manual" },
         expect.any(Function),
@@ -934,7 +938,7 @@ describe("EchelonSyncOrchestrator", () => {
 
       await orchestrator.syncInventoryForAllProducts({ dryRun: true }, "test");
 
-      expect(allocationEngine.allocateProduct).toHaveBeenCalledWith(33, "test");
+      expect(allocationEngine.allocateProduct).toHaveBeenCalledWith(33, "test", undefined);
     });
   });
 });

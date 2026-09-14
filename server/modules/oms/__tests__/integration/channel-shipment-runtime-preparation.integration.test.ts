@@ -1,9 +1,15 @@
 import { drizzle } from "drizzle-orm/node-postgres";
 import type { Pool } from "pg";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { normalizeChannelFulfillmentIngress } from "../../channel-fulfillment-ingress";
 import type { ChannelFulfillmentIngressRepository } from "../../channel-fulfillment-ingress.repository";
 import { createInventoryCutoverTestDatabase, type InventoryCutoverTestDatabase } from "../../../inventory/__tests__/fixtures/inventory-cutover-database";
+import { InventoryCutoverPreflightService } from "../../../inventory-planning/application/inventory-cutover-preflight.service";
+import { PostgresInventoryCutoverPreflightRepository } from "../../../inventory-planning/infrastructure/inventory-cutover-preflight.repository";
+
+// Both repositories below receive the suite's dedicated PostgreSQL pool. Never
+// import or connect an ambient application database from this acceptance test.
+vi.mock("../../../../db", () => ({ pool: { connect: vi.fn() } }));
 
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
@@ -17,6 +23,103 @@ const input = normalizeChannelFulfillmentIngress({
 });
 
 import { channelShipmentRuntimeFixtureSql as fixtureSql, channelShipmentRuntimeSeedSql } from "../fixtures/channel-shipment-runtime";
+
+const providerNonInventoryCutoverFixtureSql = `${fixtureSql}
+  ${channelShipmentRuntimeSeedSql}
+
+  ALTER TABLE catalog.product_variants
+    ADD COLUMN product_id integer,
+    ADD COLUMN sku varchar(100),
+    ADD COLUMN is_active boolean,
+    ADD COLUMN sales_eligibility varchar(30);
+  ALTER TABLE wms.orders
+    ADD COLUMN warehouse_id integer,
+    ADD COLUMN on_hold integer,
+    ADD COLUMN channel_id integer,
+    ADD COLUMN source varchar(50),
+    ADD COLUMN external_order_id varchar(100),
+    ADD COLUMN oms_fulfillment_order_id varchar(100),
+    ADD COLUMN fulfillment_partition_key varchar(100);
+  ALTER TABLE wms.order_items
+    ADD COLUMN source_item_id varchar(100),
+    ADD COLUMN sku varchar(100),
+    ADD COLUMN product_id integer,
+    ADD COLUMN fulfilled_quantity integer,
+    ADD COLUMN on_hold boolean,
+    ADD COLUMN location varchar(100),
+    ADD COLUMN short_reason varchar(100);
+  ALTER TABLE wms.outbound_shipments
+    ADD COLUMN held boolean NOT NULL DEFAULT false;
+  ALTER TABLE wms.outbound_shipment_items
+    ADD COLUMN replacement_for_order_item_id integer,
+    ADD COLUMN correction_for_shipment_item_id integer;
+  ALTER TABLE wms.physical_shipment_items
+    ADD COLUMN wms_order_item_id integer,
+    ADD COLUMN replacement_for_order_item_id integer,
+    ADD COLUMN package_allocation_entry_id bigint,
+    ADD COLUMN product_variant_id integer,
+    ADD COLUMN sku varchar(100);
+  ALTER TABLE inventory.inventory_levels
+    ADD COLUMN id integer,
+    ADD COLUMN reserved_qty integer NOT NULL DEFAULT 0,
+    ADD COLUMN picked_qty integer NOT NULL DEFAULT 0,
+    ADD COLUMN packed_qty integer NOT NULL DEFAULT 0;
+
+  CREATE TABLE inventory.build_orders (
+    id integer PRIMARY KEY, status varchar(20) NOT NULL, warehouse_id integer NOT NULL
+  );
+  CREATE TABLE inventory.build_order_components (
+    id integer PRIMARY KEY, build_order_id integer NOT NULL,
+    component_variant_id integer NOT NULL, source_location_id integer
+  );
+  CREATE TABLE inventory.inventory_lots (
+    id integer PRIMARY KEY, product_variant_id integer NOT NULL,
+    warehouse_location_id integer NOT NULL, qty_reserved integer NOT NULL
+  );
+  CREATE TABLE inventory.build_component_reservations (
+    id integer PRIMARY KEY, build_order_component_id integer NOT NULL,
+    inventory_lot_id integer NOT NULL, reserved_qty integer NOT NULL,
+    consumed_qty integer NOT NULL, released_qty integer NOT NULL,
+    reservation_owner varchar(30) NOT NULL,
+    availability_claim_id bigint, availability_claim_lot_allocation_id bigint
+  );
+  CREATE TABLE inventory.availability_claims (
+    id bigint PRIMARY KEY, status varchar(30) NOT NULL, order_id integer NOT NULL
+  );
+  CREATE TABLE inventory.availability_claim_lines (
+    id bigint PRIMARY KEY, claim_id bigint NOT NULL,
+    order_item_id integer NOT NULL, target_variant_id integer NOT NULL
+  );
+  CREATE TABLE inventory.availability_claim_resources (
+    id bigint PRIMARY KEY, claim_id bigint NOT NULL, claim_line_id bigint NOT NULL,
+    warehouse_id integer NOT NULL, warehouse_location_id integer NOT NULL,
+    inventory_level_id integer NOT NULL, source_variant_id integer NOT NULL,
+    claimed_qty bigint NOT NULL, released_qty bigint NOT NULL,
+    consumed_qty bigint NOT NULL, picked_qty bigint NOT NULL
+  );
+  CREATE TABLE inventory.availability_claim_lot_allocations (
+    id bigint PRIMARY KEY, claim_id bigint NOT NULL, claim_resource_id bigint NOT NULL,
+    inventory_lot_id integer NOT NULL, claimed_qty bigint NOT NULL,
+    released_qty bigint NOT NULL, consumed_qty bigint NOT NULL, picked_qty bigint NOT NULL
+  );
+  CREATE TABLE wms.physical_shipment_item_quantity_adjustments (
+    physical_shipment_item_id bigint PRIMARY KEY, quantity_delta integer NOT NULL
+  );
+
+  UPDATE catalog.product_variants
+  SET product_id=300,sku='SKU-30',is_active=true,sales_eligibility='sellable',
+      requires_shipping=false,track_inventory=false
+  WHERE id=30;
+  UPDATE oms.oms_order_lines SET requires_shipping=false WHERE id=12;
+  UPDATE wms.orders
+  SET warehouse_id=4,warehouse_status='ready',on_hold=0,channel_id=36,
+      source='shopify',external_order_id='101'
+  WHERE id=40;
+  UPDATE wms.order_items
+  SET source_item_id='line-1',sku='SKU-30',product_id=30,
+      fulfilled_quantity=2,on_hold=false,status='completed',requires_shipping=0
+  WHERE id=50;
+`;
 
 describeDatabase.sequential("channel shipment runtime exact preparation PostgreSQL", () => {
   let database: InventoryCutoverTestDatabase;
@@ -263,5 +366,158 @@ describeDatabase.sequential("channel shipment runtime exact preparation PostgreS
       blocker.release(); activation.release();
       await preparation?.catch(() => undefined);
     }
+  });
+});
+
+describeDatabase.sequential("provider non-inventory fulfillment cutover acceptance PostgreSQL", () => {
+  let database: InventoryCutoverTestDatabase;
+  let pool: Pool;
+  let repository: ChannelFulfillmentIngressRepository;
+
+  const inventoryWriterTables = [
+    "inventory.inventory_transactions",
+    "inventory.inventory_levels",
+    "inventory.build_orders",
+    "inventory.build_order_components",
+    "inventory.inventory_lots",
+    "inventory.build_component_reservations",
+    "inventory.availability_claims",
+    "inventory.availability_claim_lines",
+    "inventory.availability_claim_resources",
+    "inventory.availability_claim_lot_allocations",
+  ] as const;
+  const preflightObservedTables = [
+    ...inventoryWriterTables,
+    "inventory.availability_runtime_authority",
+    "catalog.product_variants",
+    "wms.orders",
+    "wms.order_items",
+    "wms.outbound_shipments",
+    "wms.outbound_shipment_items",
+    "wms.physical_shipments",
+    "wms.physical_shipment_items",
+    "wms.physical_shipment_item_quantity_adjustments",
+  ] as const;
+
+  beforeAll(async () => {
+    process.env.DATABASE_URL ||= "postgres://user:pass@localhost:5432/test";
+    database = await createInventoryCutoverTestDatabase(
+      databaseUrl,
+      disposable,
+      providerNonInventoryCutoverFixtureSql,
+    );
+    pool = database.pool;
+    const { createChannelFulfillmentIngressRepository } = await import("../../channel-fulfillment-ingress.repository");
+    repository = createChannelFulfillmentIngressRepository(drizzle(pool));
+  });
+
+  afterAll(async () => { await database?.close(); });
+
+  async function snapshot(tables: readonly string[]) {
+    const result: Record<string, unknown> = {};
+    for (const table of tables) {
+      result[table] = (await pool.query(
+        `SELECT to_jsonb(row) AS row FROM ${table} row ORDER BY to_jsonb(row)::text`,
+      )).rows;
+    }
+    return result;
+  }
+
+  function connectedPreflight() {
+    const trace: string[] = [];
+    let releaseCount = 0;
+    const tracedPool = {
+      connect: async () => {
+        const client = await pool.connect();
+        return {
+          query: async (sql: string, values?: unknown[]) => {
+            trace.push(sql);
+            return client.query(sql, values);
+          },
+          release: (error?: Error) => {
+            releaseCount += 1;
+            client.release(error);
+          },
+        };
+      },
+    } as unknown as Pick<Pool, "connect">;
+    return {
+      service: new InventoryCutoverPreflightService(
+        new PostgresInventoryCutoverPreflightRepository(tracedPool),
+      ),
+      trace,
+      releaseCount: () => releaseCount,
+    };
+  }
+
+  async function materializeProviderPackage(sourceShipmentItemId: number) {
+    const client = await pool.connect();
+    let began = false;
+    try {
+      await client.query("BEGIN");
+      began = true;
+      await client.query(`INSERT INTO wms.physical_shipments
+        (id,provider,provider_physical_shipment_id,status,tracking_number)
+        VALUES (701,'shopify','201','shipped',NULL)`);
+      await client.query(`INSERT INTO wms.fulfillment_plan_lines (id,oms_order_line_id)
+        VALUES (801,12)`);
+      await client.query(`INSERT INTO wms.physical_shipment_items
+        (id,physical_shipment_id,legacy_wms_shipment_item_id,fulfillment_plan_line_id,
+         quantity_shipped,shipment_item_purpose,wms_order_item_id,
+         replacement_for_order_item_id,package_allocation_entry_id,product_variant_id,sku)
+        VALUES (901,701,$1,801,2,'customer_fulfillment',50,NULL,NULL,30,'SKU-30')`,
+      [sourceShipmentItemId]);
+      await client.query("COMMIT");
+      began = false;
+    } catch (error) {
+      if (began) await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  it("carries actual non-inventory ingress evidence into read-only no-inventory-demand preflight", async () => {
+    const inventoryBeforeIngress = await snapshot(inventoryWriterTables);
+
+    const prepared = await repository.prepareReceipt(91, input, "lease-1", now);
+
+    expect(prepared.inventoryItems).toEqual([]);
+    expect(await snapshot(inventoryWriterTables)).toEqual(inventoryBeforeIngress);
+    const sourceRows = (await pool.query<{
+      id: number;
+      order_item_id: number;
+      product_variant_id: number;
+      qty: number;
+      from_location_id: number | null;
+    }>(`SELECT id,order_item_id,product_variant_id,qty,from_location_id
+        FROM wms.outbound_shipment_items ORDER BY id`)).rows;
+    expect(sourceRows).toEqual([expect.objectContaining({
+      order_item_id: 50,
+      product_variant_id: 30,
+      qty: 2,
+      from_location_id: null,
+    })]);
+    await materializeProviderPackage(sourceRows[0]!.id);
+
+    const beforePreflight = await snapshot(preflightObservedTables);
+    const { service, trace, releaseCount } = connectedPreflight();
+    const report = await service.preview("acceptance-test");
+
+    expect(report.lines).toEqual([expect.objectContaining({
+      orderId: 40,
+      orderItemId: 50,
+      sku: "SKU-30",
+      disposition: "no_inventory_demand",
+      candidateDemandQty: "0",
+      findingCodes: [],
+    })]);
+    expect(report.summary.noInventoryDemandLines).toBe(1);
+    expect(report.findings).toEqual([]);
+    expect(await snapshot(preflightObservedTables)).toEqual(beforePreflight);
+    expect(trace[0]).toBe("BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY");
+    expect(trace.at(-1)).toBe("COMMIT");
+    expect(trace.some((sql) => /\b(?:INSERT|UPDATE|DELETE|TRUNCATE|pg_advisory)\b/i.test(sql))).toBe(false);
+    expect(releaseCount()).toBe(1);
   });
 });

@@ -40,9 +40,9 @@ import {
 
 export interface IChannelStorage {
   getAllChannels(): Promise<Channel[]>;
-  getChannelById(id: number): Promise<Channel | undefined>;
-  createChannel(channel: InsertChannel): Promise<Channel>;
-  updateChannel(id: number, updates: Partial<InsertChannel>): Promise<Channel | null>;
+  getChannelById(id: number, executor?: any): Promise<Channel | undefined>;
+  createChannel(channel: InsertChannel, executor?: any): Promise<Channel>;
+  updateChannel(id: number, updates: Partial<InsertChannel>, executor?: any): Promise<Channel | null>;
   deleteChannel(id: number): Promise<boolean>;
   getChannelConnection(channelId: number): Promise<ChannelConnection | undefined>;
   upsertChannelConnection(connection: InsertChannelConnection): Promise<ChannelConnection>;
@@ -50,36 +50,36 @@ export interface IChannelStorage {
   getPartnerProfile(channelId: number): Promise<PartnerProfile | undefined>;
   upsertPartnerProfile(profile: InsertPartnerProfile): Promise<PartnerProfile>;
   getChannelReservations(channelId?: number): Promise<(ChannelReservation & { channel?: Channel; productVariant?: ProductVariant })[]>;
-  getChannelReservationByChannelAndProductVariant(channelId: number, productVariantId: number): Promise<ChannelReservation | undefined>;
-  upsertChannelReservation(reservation: InsertChannelReservation): Promise<ChannelReservation>;
-  deleteChannelReservation(id: number): Promise<boolean>;
+  getChannelReservationByChannelAndProductVariant(channelId: number, productVariantId: number, executor?: any): Promise<ChannelReservation | undefined>;
+  upsertChannelReservation(reservation: InsertChannelReservation, executor?: any): Promise<ChannelReservation>;
+  deleteChannelReservation(id: number, executor?: any): Promise<boolean>;
   getChannelConnectionByShopDomain(shopDomain: string): Promise<{ channelId: number; webhookSecret: string | null } | undefined>;
   getChannelNameById(id: number): Promise<string | null>;
 
   // Channel feed queries (channelId-based, complementing inventory module's channelType-based methods)
-  getChannelFeedByChannelAndVariant(channelId: number, productVariantId: number): Promise<ChannelFeed | undefined>;
-  reactivateChannelFeed(feedId: number): Promise<void>;
+  getChannelFeedByChannelAndVariant(channelId: number, productVariantId: number, executor?: any): Promise<ChannelFeed | undefined>;
+  reactivateChannelFeed(feedId: number, executor?: any): Promise<void>;
   setChannelFeedActive(feedId: number, isActive: boolean): Promise<void>;
-  createChannelFeedDirect(data: InsertChannelFeed): Promise<ChannelFeed>;
-  getActiveChannelFeeds(): Promise<{ feedId: number; channelId: number | null; productVariantId: number; lastSyncedQty: number | null; lastSyncedAt: Date | null }[]>;
-  getChannelFeedsByVariantIds(variantIds: number[]): Promise<{ id: number; channelId: number | null; productVariantId: number; lastSyncedQty: number | null; lastSyncedAt: Date | null; isActive: number | null }[]>;
+  createChannelFeedDirect(data: InsertChannelFeed, executor?: any): Promise<ChannelFeed>;
+  getActiveChannelFeeds(executor?: any): Promise<{ feedId: number; channelId: number | null; productVariantId: number; lastSyncedQty: number | null; lastSyncedAt: Date | null }[]>;
+  getChannelFeedsByVariantIds(variantIds: number[], executor?: any): Promise<{ id: number; channelId: number | null; productVariantId: number; lastSyncedQty: number | null; lastSyncedAt: Date | null; isActive: number | null }[]>;
 
   // Product line / product gate queries
-  getProductLineIdsByProduct(productId: number): Promise<number[]>;
-  getActiveChannelProductLineIds(channelId: number): Promise<number[]>;
+  getProductLineIdsByProduct(productId: number, executor?: any): Promise<number[]>;
+  getActiveChannelProductLineIds(channelId: number, executor?: any): Promise<number[]>;
 
   // Channel product allocation
-  getAllChannelProductAllocations(): Promise<ChannelProductAllocation[]>;
-  getChannelProductAllocation(channelId: number, productId: number): Promise<ChannelProductAllocation | undefined>;
-  upsertChannelProductAllocation(data: { channelId: number; productId: number; minAtpBase?: number | null; maxAtpBase?: number | null; isListed?: number; notes?: string | null }): Promise<ChannelProductAllocation>;
-  deleteChannelProductAllocation(id: number): Promise<void>;
-  getChannelProductAllocationsByProduct(productId: number): Promise<ChannelProductAllocation[]>;
+  getAllChannelProductAllocations(executor?: any): Promise<ChannelProductAllocation[]>;
+  getChannelProductAllocation(channelId: number, productId: number, executor?: any): Promise<ChannelProductAllocation | undefined>;
+  upsertChannelProductAllocation(data: { channelId: number; productId: number; minAtpBase?: number | null; maxAtpBase?: number | null; isListed?: number; notes?: string | null }, executor?: any): Promise<ChannelProductAllocation>;
+  deleteChannelProductAllocation(id: number, executor?: any): Promise<void>;
+  getChannelProductAllocationsByProduct(productId: number, executor?: any): Promise<ChannelProductAllocation[]>;
 
   // Active channels
-  getActiveChannels(): Promise<Channel[]>;
+  getActiveChannels(executor?: any): Promise<Channel[]>;
 
   // Channel reservations by variant IDs
-  getChannelReservationsByVariantIds(variantIds: number[]): Promise<ChannelReservation[]>;
+  getChannelReservationsByVariantIds(variantIds: number[], executor?: any): Promise<ChannelReservation[]>;
 
   // Product lines CRUD
   getProductLinesWithCounts(scope?: ProductScope): Promise<(ProductLine & { productCount: number; channelCount: number })[]>;
@@ -94,7 +94,7 @@ export interface IChannelStorage {
   removeProductsFromLine(lineId: number, productIds: number[]): Promise<number>;
   removeProductsFromAllLines(productIds: number[]): Promise<number>;
   removeProductFromProductLine(lineId: number, productId: number): Promise<void>;
-  getProductLineProductIds(lineId: number): Promise<number[]>;
+  getProductLineProductIds(lineId: number, executor?: any): Promise<number[]>;
   listProductsForLineView(opts: {
     filter: "all" | "unassigned" | { lineId: number };
     search?: string;
@@ -124,14 +124,14 @@ export interface IChannelStorage {
   }>;
 
   // Grid/allocation helper queries
-  getActiveProductLinesForDropdown(): Promise<{ id: number; code: string; name: string }[]>;
-  getVariantIdsWithInventory(): Promise<number[]>;
-  getVariantIdsByProductIds(productIds: number[]): Promise<number[]>;
-  getProductLineProductMap(): Promise<Map<number, Set<number>>>;
-  getChannelProductLineMap(): Promise<Map<number, Set<number>>>;
-  getChannelSyncErrorCount(channelId: number, since: Date): Promise<number>;
-  getLastChannelSyncError(channelId: number): Promise<string | null>;
-  getChannelConnectionStatus(channelId: number): Promise<string | null>;
+  getActiveProductLinesForDropdown(executor?: any): Promise<{ id: number; code: string; name: string }[]>;
+  getVariantIdsWithInventory(executor?: any): Promise<number[]>;
+  getVariantIdsByProductIds(productIds: number[], executor?: any): Promise<number[]>;
+  getProductLineProductMap(executor?: any): Promise<Map<number, Set<number>>>;
+  getChannelProductLineMap(executor?: any): Promise<Map<number, Set<number>>>;
+  getChannelSyncErrorCount(channelId: number, since: Date, executor?: any): Promise<number>;
+  getLastChannelSyncError(channelId: number, executor?: any): Promise<string | null>;
+  getChannelConnectionStatus(channelId: number, executor?: any): Promise<string | null>;
 
   // Cross-module utility queries
   getShopifyOrderFinancials(sourceTableId: string): Promise<{
@@ -144,7 +144,7 @@ export interface IChannelStorage {
   } | null>;
   getMemberPlanByEmail(email: string): Promise<string | null>;
   searchVariantsWithInventory(query: string): Promise<{ variantId: number; productId: number; sku: string | null; variantName: string | null; productName: string | null }[]>;
-  updateChannelAllocation(channelId: number, allocationPct: number | null, allocationFixedQty: number | null): Promise<Channel | null>;
+  updateChannelAllocation(channelId: number, allocationPct: number | null, allocationFixedQty: number | null, executor?: any): Promise<Channel | null>;
 }
 
 export const channelMethods: IChannelStorage = {
@@ -152,18 +152,18 @@ export const channelMethods: IChannelStorage = {
     return db.select().from(channels).orderBy(asc(channels.priority), asc(channels.name));
   },
 
-  async getChannelById(id: number): Promise<Channel | undefined> {
-    const result = await db.select().from(channels).where(eq(channels.id, id));
+  async getChannelById(id: number, executor: any = db): Promise<Channel | undefined> {
+    const result = await executor.select().from(channels).where(eq(channels.id, id));
     return result[0];
   },
 
-  async createChannel(channel: InsertChannel): Promise<Channel> {
-    const result = await db.insert(channels).values(channel).returning();
+  async createChannel(channel: InsertChannel, executor: any = db): Promise<Channel> {
+    const result = await executor.insert(channels).values(channel).returning();
     return result[0];
   },
 
-  async updateChannel(id: number, updates: Partial<InsertChannel>): Promise<Channel | null> {
-    const result = await db.update(channels)
+  async updateChannel(id: number, updates: Partial<InsertChannel>, executor: any = db): Promise<Channel | null> {
+    const result = await executor.update(channels)
       .set({ ...updates, updatedAt: new Date() })
       .where(eq(channels.id, id))
       .returning();
@@ -244,8 +244,8 @@ export const channelMethods: IChannelStorage = {
     }));
   },
 
-  async getChannelReservationByChannelAndProductVariant(channelId: number, productVariantId: number): Promise<ChannelReservation | undefined> {
-    const result = await db.select().from(channelReservations)
+  async getChannelReservationByChannelAndProductVariant(channelId: number, productVariantId: number, executor: any = db): Promise<ChannelReservation | undefined> {
+    const result = await executor.select().from(channelReservations)
       .where(and(
         eq(channelReservations.channelId, channelId),
         eq(channelReservations.productVariantId, productVariantId)
@@ -253,21 +253,21 @@ export const channelMethods: IChannelStorage = {
     return result[0];
   },
 
-  async upsertChannelReservation(reservation: InsertChannelReservation): Promise<ChannelReservation> {
-    const existing = await this.getChannelReservationByChannelAndProductVariant(reservation.channelId, reservation.productVariantId!);
+  async upsertChannelReservation(reservation: InsertChannelReservation, executor: any = db): Promise<ChannelReservation> {
+    const existing = await this.getChannelReservationByChannelAndProductVariant(reservation.channelId, reservation.productVariantId!, executor);
     if (existing) {
-      const result = await db.update(channelReservations)
+      const result = await executor.update(channelReservations)
         .set({ ...reservation, updatedAt: new Date() })
         .where(eq(channelReservations.id, existing.id))
         .returning();
       return result[0];
     }
-    const result = await db.insert(channelReservations).values(reservation).returning();
+    const result = await executor.insert(channelReservations).values(reservation).returning();
     return result[0];
   },
 
-  async deleteChannelReservation(id: number): Promise<boolean> {
-    const result = await db.delete(channelReservations).where(eq(channelReservations.id, id)).returning();
+  async deleteChannelReservation(id: number, executor: any = db): Promise<boolean> {
+    const result = await executor.delete(channelReservations).where(eq(channelReservations.id, id)).returning();
     return result.length > 0;
   },
 
@@ -289,15 +289,15 @@ export const channelMethods: IChannelStorage = {
 
   // --- Channel feed queries ---
 
-  async getChannelFeedByChannelAndVariant(channelId: number, productVariantId: number): Promise<ChannelFeed | undefined> {
-    const [existing] = await db.select().from(channelFeeds)
+  async getChannelFeedByChannelAndVariant(channelId: number, productVariantId: number, executor: any = db): Promise<ChannelFeed | undefined> {
+    const [existing] = await executor.select().from(channelFeeds)
       .where(and(eq(channelFeeds.channelId, channelId), eq(channelFeeds.productVariantId, productVariantId)))
       .limit(1);
     return existing;
   },
 
-  async reactivateChannelFeed(feedId: number): Promise<void> {
-    await db.update(channelFeeds).set({ isActive: 1, updatedAt: new Date() }).where(eq(channelFeeds.id, feedId));
+  async reactivateChannelFeed(feedId: number, executor: any = db): Promise<void> {
+    await executor.update(channelFeeds).set({ isActive: 1, updatedAt: new Date() }).where(eq(channelFeeds.id, feedId));
   },
 
   async setChannelFeedActive(feedId: number, isActive: boolean): Promise<void> {
@@ -306,13 +306,13 @@ export const channelMethods: IChannelStorage = {
       .where(eq(channelFeeds.id, feedId));
   },
 
-  async createChannelFeedDirect(data: InsertChannelFeed): Promise<ChannelFeed> {
-    const [feed] = await db.insert(channelFeeds).values(data).returning();
+  async createChannelFeedDirect(data: InsertChannelFeed, executor: any = db): Promise<ChannelFeed> {
+    const [feed] = await executor.insert(channelFeeds).values(data).returning();
     return feed;
   },
 
-  async getActiveChannelFeeds(): Promise<{ feedId: number; channelId: number | null; productVariantId: number; lastSyncedQty: number | null; lastSyncedAt: Date | null }[]> {
-    return db.select({
+  async getActiveChannelFeeds(executor: any = db): Promise<{ feedId: number; channelId: number | null; productVariantId: number; lastSyncedQty: number | null; lastSyncedAt: Date | null }[]> {
+    return executor.select({
       feedId: channelFeeds.id,
       channelId: channelFeeds.channelId,
       productVariantId: channelFeeds.productVariantId,
@@ -321,9 +321,9 @@ export const channelMethods: IChannelStorage = {
     }).from(channelFeeds).where(eq(channelFeeds.isActive, 1));
   },
 
-  async getChannelFeedsByVariantIds(variantIds: number[]): Promise<{ id: number; channelId: number | null; productVariantId: number; lastSyncedQty: number | null; lastSyncedAt: Date | null; isActive: number | null }[]> {
+  async getChannelFeedsByVariantIds(variantIds: number[], executor: any = db): Promise<{ id: number; channelId: number | null; productVariantId: number; lastSyncedQty: number | null; lastSyncedAt: Date | null; isActive: number | null }[]> {
     if (variantIds.length === 0) return [];
-    return db.select({
+    return executor.select({
       id: channelFeeds.id,
       channelId: channelFeeds.channelId,
       productVariantId: channelFeeds.productVariantId,
@@ -335,35 +335,35 @@ export const channelMethods: IChannelStorage = {
 
   // --- Product line / product gate queries ---
 
-  async getProductLineIdsByProduct(productId: number): Promise<number[]> {
-    const rows = await db.select({ plId: productLineProducts.productLineId }).from(productLineProducts)
+  async getProductLineIdsByProduct(productId: number, executor: any = db): Promise<number[]> {
+    const rows = await executor.select({ plId: productLineProducts.productLineId }).from(productLineProducts)
       .where(eq(productLineProducts.productId, productId));
     return rows.map((r: any) => r.plId);
   },
 
-  async getActiveChannelProductLineIds(channelId: number): Promise<number[]> {
-    const rows = await db.select({ plId: channelProductLines.productLineId }).from(channelProductLines)
+  async getActiveChannelProductLineIds(channelId: number, executor: any = db): Promise<number[]> {
+    const rows = await executor.select({ plId: channelProductLines.productLineId }).from(channelProductLines)
       .where(and(eq(channelProductLines.channelId, channelId), eq(channelProductLines.isActive, true)));
     return rows.map((r: any) => r.plId);
   },
 
   // --- Channel product allocation ---
 
-  async getAllChannelProductAllocations(): Promise<ChannelProductAllocation[]> {
-    return db.select().from(channelProductAllocation);
+  async getAllChannelProductAllocations(executor: any = db): Promise<ChannelProductAllocation[]> {
+    return executor.select().from(channelProductAllocation);
   },
 
-  async getChannelProductAllocation(channelId: number, productId: number): Promise<ChannelProductAllocation | undefined> {
-    const [row] = await db.select().from(channelProductAllocation).where(
+  async getChannelProductAllocation(channelId: number, productId: number, executor: any = db): Promise<ChannelProductAllocation | undefined> {
+    const [row] = await executor.select().from(channelProductAllocation).where(
       and(eq(channelProductAllocation.channelId, channelId), eq(channelProductAllocation.productId, productId))
     ).limit(1);
     return row;
   },
 
-  async upsertChannelProductAllocation(data: { channelId: number; productId: number; minAtpBase?: number | null; maxAtpBase?: number | null; isListed?: number; notes?: string | null }): Promise<ChannelProductAllocation> {
-    const existing = await this.getChannelProductAllocation(data.channelId, data.productId);
+  async upsertChannelProductAllocation(data: { channelId: number; productId: number; minAtpBase?: number | null; maxAtpBase?: number | null; isListed?: number; notes?: string | null }, executor: any = db): Promise<ChannelProductAllocation> {
+    const existing = await this.getChannelProductAllocation(data.channelId, data.productId, executor);
     if (existing) {
-      const [updated] = await db.update(channelProductAllocation).set({
+      const [updated] = await executor.update(channelProductAllocation).set({
         minAtpBase: data.minAtpBase ?? null,
         maxAtpBase: data.maxAtpBase ?? null,
         isListed: data.isListed ?? 1,
@@ -372,7 +372,7 @@ export const channelMethods: IChannelStorage = {
       }).where(eq(channelProductAllocation.id, existing.id)).returning();
       return updated;
     }
-    const [created] = await db.insert(channelProductAllocation).values({
+    const [created] = await executor.insert(channelProductAllocation).values({
       channelId: data.channelId,
       productId: data.productId,
       minAtpBase: data.minAtpBase ?? null,
@@ -383,25 +383,25 @@ export const channelMethods: IChannelStorage = {
     return created;
   },
 
-  async deleteChannelProductAllocation(id: number): Promise<void> {
-    await db.delete(channelProductAllocation).where(eq(channelProductAllocation.id, id));
+  async deleteChannelProductAllocation(id: number, executor: any = db): Promise<void> {
+    await executor.delete(channelProductAllocation).where(eq(channelProductAllocation.id, id));
   },
 
-  async getChannelProductAllocationsByProduct(productId: number): Promise<ChannelProductAllocation[]> {
-    return db.select().from(channelProductAllocation).where(eq(channelProductAllocation.productId, productId));
+  async getChannelProductAllocationsByProduct(productId: number, executor: any = db): Promise<ChannelProductAllocation[]> {
+    return executor.select().from(channelProductAllocation).where(eq(channelProductAllocation.productId, productId));
   },
 
   // --- Active channels ---
 
-  async getActiveChannels(): Promise<Channel[]> {
-    return db.select().from(channels).where(eq(channels.status, "active"));
+  async getActiveChannels(executor: any = db): Promise<Channel[]> {
+    return executor.select().from(channels).where(eq(channels.status, "active"));
   },
 
   // --- Channel reservations by variant IDs ---
 
-  async getChannelReservationsByVariantIds(variantIds: number[]): Promise<ChannelReservation[]> {
+  async getChannelReservationsByVariantIds(variantIds: number[], executor: any = db): Promise<ChannelReservation[]> {
     if (variantIds.length === 0) return [];
-    return db.select().from(channelReservations).where(inArray(channelReservations.productVariantId, variantIds));
+    return executor.select().from(channelReservations).where(inArray(channelReservations.productVariantId, variantIds));
   },
 
   // --- Product lines CRUD ---
@@ -531,8 +531,8 @@ export const channelMethods: IChannelStorage = {
     return result.length;
   },
 
-  async getProductLineProductIds(lineId: number): Promise<number[]> {
-    const rows = await db
+  async getProductLineProductIds(lineId: number, executor: any = db): Promise<number[]> {
+    const rows = await executor
       .select({ productId: productLineProducts.productId })
       .from(productLineProducts)
       .where(eq(productLineProducts.productLineId, lineId));
@@ -781,13 +781,13 @@ export const channelMethods: IChannelStorage = {
 
   // --- Grid/allocation helper queries ---
 
-  async getActiveProductLinesForDropdown(): Promise<{ id: number; code: string; name: string }[]> {
-    return db.select({ id: productLines.id, code: productLines.code, name: productLines.name })
+  async getActiveProductLinesForDropdown(executor: any = db): Promise<{ id: number; code: string; name: string }[]> {
+    return executor.select({ id: productLines.id, code: productLines.code, name: productLines.name })
       .from(productLines).where(eq(productLines.isActive, true)).orderBy(productLines.sortOrder, productLines.name);
   },
 
-  async getVariantIdsWithInventory(): Promise<number[]> {
-    const rows = await db
+  async getVariantIdsWithInventory(executor: any = db): Promise<number[]> {
+    const rows = await executor
       .selectDistinct({ id: productVariants.id })
       .from(productVariants)
       .innerJoin(inventoryLevels, eq(inventoryLevels.productVariantId, productVariants.id))
@@ -801,9 +801,9 @@ export const channelMethods: IChannelStorage = {
     return rows.map((v: any) => v.id);
   },
 
-  async getVariantIdsByProductIds(productIds: number[]): Promise<number[]> {
+  async getVariantIdsByProductIds(productIds: number[], executor: any = db): Promise<number[]> {
     if (productIds.length === 0) return [];
-    const rows = await db.select({ id: productVariants.id }).from(productVariants)
+    const rows = await executor.select({ id: productVariants.id }).from(productVariants)
       .where(and(
         inArray(productVariants.productId, productIds),
         eq(productVariants.requiresShipping, true),
@@ -813,8 +813,8 @@ export const channelMethods: IChannelStorage = {
     return rows.map((v: any) => v.id);
   },
 
-  async getProductLineProductMap(): Promise<Map<number, Set<number>>> {
-    const rows = await db.select({ productId: productLineProducts.productId, productLineId: productLineProducts.productLineId }).from(productLineProducts);
+  async getProductLineProductMap(executor: any = db): Promise<Map<number, Set<number>>> {
+    const rows = await executor.select({ productId: productLineProducts.productId, productLineId: productLineProducts.productLineId }).from(productLineProducts);
     const map = new Map<number, Set<number>>();
     for (const r of rows) {
       if (!map.has(r.productId)) map.set(r.productId, new Set());
@@ -823,8 +823,8 @@ export const channelMethods: IChannelStorage = {
     return map;
   },
 
-  async getChannelProductLineMap(): Promise<Map<number, Set<number>>> {
-    const rows = await db.select({ channelId: channelProductLines.channelId, productLineId: channelProductLines.productLineId }).from(channelProductLines);
+  async getChannelProductLineMap(executor: any = db): Promise<Map<number, Set<number>>> {
+    const rows = await executor.select({ channelId: channelProductLines.channelId, productLineId: channelProductLines.productLineId }).from(channelProductLines);
     const map = new Map<number, Set<number>>();
     for (const r of rows) {
       if (!map.has(r.channelId)) map.set(r.channelId, new Set());
@@ -833,21 +833,21 @@ export const channelMethods: IChannelStorage = {
     return map;
   },
 
-  async getChannelSyncErrorCount(channelId: number, since: Date): Promise<number> {
-    const [row] = await db.select({ cnt: sql`COUNT(*)::int` }).from(channelSyncLog)
+  async getChannelSyncErrorCount(channelId: number, since: Date, executor: any = db): Promise<number> {
+    const [row] = await executor.select({ cnt: sql`COUNT(*)::int` }).from(channelSyncLog)
       .where(and(eq(channelSyncLog.channelId, channelId), eq(channelSyncLog.status, "error"), gt(channelSyncLog.createdAt, since)));
     return (row as any)?.cnt ?? 0;
   },
 
-  async getLastChannelSyncError(channelId: number): Promise<string | null> {
-    const [row] = await db.select({ errorMessage: channelSyncLog.errorMessage }).from(channelSyncLog)
+  async getLastChannelSyncError(channelId: number, executor: any = db): Promise<string | null> {
+    const [row] = await executor.select({ errorMessage: channelSyncLog.errorMessage }).from(channelSyncLog)
       .where(and(eq(channelSyncLog.channelId, channelId), eq(channelSyncLog.status, "error")))
       .orderBy(desc(channelSyncLog.createdAt)).limit(1);
     return (row as any)?.errorMessage ?? null;
   },
 
-  async getChannelConnectionStatus(channelId: number): Promise<string | null> {
-    const [conn] = await db.select({ syncStatus: channelConnections.syncStatus }).from(channelConnections)
+  async getChannelConnectionStatus(channelId: number, executor: any = db): Promise<string | null> {
+    const [conn] = await executor.select({ syncStatus: channelConnections.syncStatus }).from(channelConnections)
       .where(eq(channelConnections.channelId, channelId)).limit(1);
     return (conn as any)?.syncStatus ?? null;
   },
@@ -931,11 +931,11 @@ export const channelMethods: IChannelStorage = {
       .limit(15);
   },
 
-  async updateChannelAllocation(channelId: number, allocationPct: number | null, allocationFixedQty: number | null): Promise<Channel | null> {
-    const [channel] = await db.select().from(channels).where(eq(channels.id, channelId)).limit(1);
+  async updateChannelAllocation(channelId: number, allocationPct: number | null, allocationFixedQty: number | null, executor: any = db): Promise<Channel | null> {
+    const [channel] = await executor.select().from(channels).where(eq(channels.id, channelId)).limit(1);
     if (!channel) return null;
 
-    const [updated] = await db.update(channels).set({
+    const [updated] = await executor.update(channels).set({
       allocationPct: allocationPct != null ? Math.max(0, Math.min(100, allocationPct)) : null,
       allocationFixedQty: allocationFixedQty != null ? Math.max(0, allocationFixedQty) : null,
       updatedAt: new Date(),

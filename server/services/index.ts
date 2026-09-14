@@ -57,6 +57,7 @@ import { createReceiveValidationService } from "../modules/procurement/receive-v
 import { createProductImportService } from "../modules/catalog/product-import.service";
 import { createChannelProductPushService } from "../modules/channels/product-push.service";
 import { createSyncSettingsService } from "../modules/channels/sync-settings.service";
+import { InventoryPublicationWorkCoordinator } from "../modules/inventory-planning/application/inventory-publication-work-coordinator.service";
 import { createBinAssignmentService } from "../modules/warehouse/bin-assignment.service";
 import { createPurchasingService } from "../modules/procurement/purchasing.service";
 import { CostReportingRepository } from "../modules/procurement/cost-reporting.repository";
@@ -159,6 +160,7 @@ import { publishCanonicalDispatchInsideTransaction, publishOperationalShipmentIn
 import { PostgresOperationalShipmentDispatchRepository } from "../modules/inventory/infrastructure/operational-shipment-dispatch.repository";
 import { WmsOperationalShipmentSourceOwner } from "../modules/wms/operational-shipment-source";
 import { createAuthorityAwareInventoryPublicationService } from "../modules/inventory-planning/infrastructure/inventory-availability-runtime-publication.repository";
+import { createTransformationExecutionAuthorityRepository } from "../modules/inventory-planning/infrastructure/transformation-execution-authority.repository";
 import { productVariants as pvTable } from "@shared/schema";
 import { eq as eqOp } from "drizzle-orm";
 
@@ -174,6 +176,7 @@ export function createServices(
   const inventoryCore = new InventoryUseCases(db, inventoryStorage, inventoryLots, cogs); // Temporary mapping
   const inventoryUseCases = inventoryCore;
   const recipeCapacity = createRecipeCapacityService(db);
+  const transformationExecutionAuthority = createTransformationExecutionAuthorityRepository(db);
   const atp = createAuthorityAwareInventoryAtpService(databasePool);
   const canonicalClaimInventory = new PostgresCanonicalClaimInventoryRepository();
   const dispatchSourceOwner = new WmsCanonicalClaimDispatchSourceOwner();
@@ -219,6 +222,7 @@ export function createServices(
   let recipeBuildPromise: RecipeBuildPromiseService;
   const builds = createBuildUseCases(db, {
     onBuildOrderCompleted: (tx, context) => recipeBuildPromise.reconcileBuildCompletion(tx, context),
+    transformationAuthority: transformationExecutionAuthority,
   });
   recipeBuildPromise = createRecipeBuildPromiseService(
     db,
@@ -228,7 +232,7 @@ export function createServices(
   );
 
   // Depends on inventoryCore (+ channelSync for reservation).
-  const breakAssembly = createBreakAssemblyService(db, inventoryCore);
+  const breakAssembly = createBreakAssemblyService(db, inventoryCore, transformationExecutionAuthority);
   const reservationRuntime = createAuthorityAwareReservationRuntime({
     db,
     inventoryCore: inventoryCore as any,
@@ -237,7 +241,16 @@ export function createServices(
     canonical: inventoryAvailabilityClaims,
   }, databasePool);
   const reservation = reservationRuntime.reservation;
-  const replenishment = createReplenishmentService(db, inventoryCore);
+  const dropshipInventoryRuntimeAuthority = {
+    execute: <T>(work: (authority: "legacy" | "canonical") => Promise<T>): Promise<T> =>
+      reservationRuntime.executor.execute((context) => work(context.authority)),
+  };
+  const replenishment = createReplenishmentService(
+    db,
+    inventoryCore,
+    systemCanonicalClaimClock,
+    transformationExecutionAuthority,
+  );
   const returns = createReturnsService(db, inventoryCore as any);
 
   // Depends on inventoryCore + replenishment + multi-module storage
@@ -377,6 +390,11 @@ export function createServices(
     atp,
     inventoryPublicationRuntime,
   );
+  const inventoryPublicationWork = new InventoryPublicationWorkCoordinator(
+    inventoryPublicationRuntime,
+    syncSettings,
+    echelonOrchestrator,
+  );
   const variantAvailabilitySync = createVariantAvailabilitySyncService({
     allocationEngine,
     adapterRegistry,
@@ -400,9 +418,8 @@ export function createServices(
     new PostgresInventoryPublicationReadbackRepository(),
     inventoryPublicationTransports,
   );
-  // Wire orchestrator into legacy channelSync so event-driven syncs
-  // respect channel_allocation_rules (fixed/share/mirror modes).
-  // This breaks the chicken-and-egg dependency between channelSync and orchestrator.
+  // Retain the orchestrator only for legacy ChannelSyncService compatibility
+  // methods. Inventory-change work uses inventoryPublicationWork below.
   channelSync.setOrchestrator(echelonOrchestrator);
 
   // Wire inventory change → immediate channel sync
@@ -416,11 +433,18 @@ export function createServices(
     setTimeout(async () => {
       pendingSyncs.delete(productId);
       try {
-        await echelonOrchestrator.syncInventoryForProduct(
+        const result = await inventoryPublicationWork.syncProduct(
           productId,
-          { dryRun: false },
           `inventory_change:${triggeredBy}`,
         );
+        if (result.skippedReason) {
+          platformLogger.info("inventory_sync_product", {
+            outcome: "skipped",
+            product_id: productId,
+            triggered_by: `inventory_change:${triggeredBy}`,
+            error_code: result.skippedReason,
+          });
+        }
       } catch (err: unknown) {
         // Nothing was published for this product; the next inventory change or the
         // scheduled sweep retries. Transient failures (velocity read) are anomalies;
@@ -445,7 +469,10 @@ export function createServices(
     }, 2000); // 2s debounce
   };
 
-  inventoryCore.onInventoryChange(async (productVariantId: number, triggeredBy: string) => {
+  const queueVariantInventorySync = async (
+    productVariantId: number,
+    triggeredBy: string,
+  ): Promise<void> => {
     try {
       const [variant] = await db
         .select({ productId: pvTable.productId })
@@ -464,7 +491,9 @@ export function createServices(
     } catch (err: any) {
       console.warn(`[InventorySync] Failed to resolve dependencies for variant ${productVariantId}: ${err.message}`);
     }
-  });
+  };
+  channelSync.setInventoryChangePublisher(queueVariantInventorySync);
+  inventoryCore.onInventoryChange(queueVariantInventorySync);
   // Wire break/assembly inventory changes into the same sync mechanism as core
   // This ensures case breaks from replen, UI, or any other caller trigger channel sync
   breakAssembly.onInventoryChange((variantId: number, trigger: string) => {
@@ -475,9 +504,6 @@ export function createServices(
 
   builds.onInventoryChange((variantId, trigger) => {
     inventoryCore.triggerNotifyChange(variantId, trigger);
-    channelSync.queueSyncAfterInventoryChange(variantId).catch((err: any) =>
-      console.warn(`[Build] Post-${trigger} sync failed for variant ${variantId}:`, err),
-    );
   });
 
   // Bin assignment (depends on catalog + warehouse storage)
@@ -615,6 +641,7 @@ export function createServices(
     breakAssembly,
     builds,
     reservation,
+    dropshipInventoryRuntimeAuthority,
     replenishment,
     picking,
     channelSync,
@@ -640,6 +667,7 @@ export function createServices(
     syncSettings,
     channelShippingCapabilities,
     echelonOrchestrator,
+    inventoryPublicationWork,
     variantAvailabilitySync,
     inventoryPublicationOutbox,
     quantityPublicationCatchup,

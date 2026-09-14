@@ -232,6 +232,7 @@ type ReplenSourceDecision = {
   sourceLocation: WarehouseLocation | null;
   resolvedSourceVariantId: number | null;
   resolvedReplenMethod: string;
+  conversionAuthorization: PackageConversionAuthorization | null;
 };
 
 const ACTIVE_REPLEN_TASK_STATUSES = ["pending", "assigned", "in_progress", "blocked"];
@@ -293,6 +294,17 @@ type InventoryCore = {
 };
 
 import { InventoryUseCases } from "./inventory.use-cases";
+import {
+  legacyTransformationExecutionAuthority,
+  type TransformationExecutionAuthorityPort,
+} from "./transformation-execution-authority.port";
+import {
+  assertAuthorizedPackageConversionQuantity,
+  TransformationExecutionAuthorityError,
+  type PackageConversionAuthorization,
+  type PackageConversionAuthorizationRequest,
+  type TransformationRuntimeEvidence,
+} from "../domain/transformation-execution-authority";
 
 /**
  * Replenishment use cases for the Echelon WMS.
@@ -307,6 +319,7 @@ export class ReplenishmentUseCases {
     private readonly db: DrizzleDb,
     private readonly inventoryUseCases: InventoryUseCases,
     private readonly clock: () => Date = () => new Date(),
+    private readonly transformationAuthority: TransformationExecutionAuthorityPort = legacyTransformationExecutionAuthority,
   ) {}
 
   private async withPickBinTaskLock<T>(
@@ -808,20 +821,58 @@ export class ReplenishmentUseCases {
     configuredSourceVariantId: number | null;
     replenMethod: string;
   }): Promise<ReplenSourceDecision> {
+    const runtime = await this.transformationAuthority.readRuntime();
     let resolvedSourceVariantId = args.configuredSourceVariantId;
     let resolvedReplenMethod = args.replenMethod;
     let sourceResolutionIssue: SourceResolutionIssue | null = null;
-    let sourceLocation = resolvedSourceVariantId != null
-      ? await this.findSourceLocation(
+    let sourceLocation: WarehouseLocation | null = null;
+    let conversionAuthorization: PackageConversionAuthorization | null = null;
+
+    if (resolvedSourceVariantId != null && runtime.authority === "canonical") {
+      const [configuredSource] = await this.db
+        .select()
+        .from(productVariants)
+        .where(eq(productVariants.id, resolvedSourceVariantId))
+        .limit(1);
+      if (!configuredSource) {
+        sourceResolutionIssue = {
+          reason: "no_source_variant",
+          note: `Configured source variant #${resolvedSourceVariantId} does not exist`,
+        };
+      } else if (configuredSource.id !== args.pickVariantId
+        && !await this.isCanonicalCaseBreakAuthorized(configuredSource, args.pickVariant, runtime)) {
+        sourceResolutionIssue = {
+          reason: "no_source_variant",
+          note: `Configured source variant ${configuredSource.sku ?? `#${resolvedSourceVariantId}`} has no exact allowed active break path to ${args.pickVariant.sku ?? `#${args.pickVariantId}`}`,
+        };
+      } else {
+        if (configuredSource.id !== args.pickVariantId) {
+          resolvedReplenMethod = "case_break";
+        }
+        sourceLocation = await this.findSourceLocation(
           resolvedSourceVariantId,
           args.warehouseId,
           args.sourceLocationType,
           args.parentLocationId,
           args.sourcePriority,
-        )
-      : null;
+        );
+      }
+    }
 
-    if (!sourceLocation && resolvedSourceVariantId != null) {
+    // The legacy branch intentionally retains the pre-cutover configured-source
+    // behavior: strategy/direct-parent rules remain the authority and a missing
+    // variant is reported through the existing no-stock path below.
+    if (resolvedSourceVariantId != null && runtime.authority === "legacy") {
+      sourceLocation = await this.findSourceLocation(
+        resolvedSourceVariantId,
+        args.warehouseId,
+        args.sourceLocationType,
+        args.parentLocationId,
+        args.sourcePriority,
+      );
+    }
+
+    if (!sourceLocation && resolvedSourceVariantId != null && !sourceResolutionIssue) {
       const [configuredSource] = await this.db
         .select()
         .from(productVariants)
@@ -843,6 +894,7 @@ export class ReplenishmentUseCases {
         sourcePriority: args.sourcePriority,
         sourceHierarchyLevel: args.sourceHierarchyLevel,
         qtyNeeded: args.qtyNeeded,
+        runtime,
       });
 
       if (sourceResolution.status === "found") {
@@ -860,11 +912,39 @@ export class ReplenishmentUseCases {
       }
     }
 
+    if (runtime.authority === "canonical" && sourceLocation && resolvedSourceVariantId != null) {
+      resolvedReplenMethod = resolvedSourceVariantId === args.pickVariantId ? "full_case" : "case_break";
+      if (resolvedSourceVariantId !== args.pickVariantId) {
+        const [sourceVariant] = await this.db
+          .select()
+          .from(productVariants)
+          .where(eq(productVariants.id, resolvedSourceVariantId))
+          .limit(1);
+        if (!sourceVariant) {
+          return {
+            sourceResolutionIssue: {
+              reason: "no_source_variant",
+              note: `Resolved source variant #${resolvedSourceVariantId} no longer exists`,
+            },
+            sourceLocation: null,
+            resolvedSourceVariantId,
+            resolvedReplenMethod,
+            conversionAuthorization: null,
+          };
+        }
+        conversionAuthorization = await this.transformationAuthority.authorizePackageConversion(
+          this.caseBreakAuthorizationRequest(sourceVariant, args.pickVariant),
+          runtime,
+        );
+      }
+    }
+
     return {
       sourceResolutionIssue,
       sourceLocation: sourceLocation as WarehouseLocation | null,
       resolvedSourceVariantId,
       resolvedReplenMethod,
+      conversionAuthorization,
     };
   }
 
@@ -929,6 +1009,7 @@ export class ReplenishmentUseCases {
       sourceLocation,
       resolvedSourceVariantId: sourceVariantId,
       resolvedReplenMethod: sourceReplenMethod,
+      conversionAuthorization,
     } = sourceDecision;
     resolvedSourceVariantId = sourceVariantId;
     resolvedReplenMethod = sourceReplenMethod;
@@ -956,8 +1037,19 @@ export class ReplenishmentUseCases {
       };
     }
 
-    const qtySourceUnits = Math.max(1, Math.ceil(qtyNeeded / sourceVariant.unitsPerVariant));
+    const initiallyRequiredSourceUnits = Math.max(1, Math.ceil(qtyNeeded / sourceVariant.unitsPerVariant));
+    const pathInputQty = conversionAuthorization?.runtime.authority === "canonical"
+      ? Number(conversionAuthorization.inputQty)
+      : 1;
+    const qtySourceUnits = Math.ceil(initiallyRequiredSourceUnits / pathInputQty) * pathInputQty;
     const qtyTargetUnits = qtySourceUnits * sourceVariant.unitsPerVariant;
+    if (conversionAuthorization) {
+      assertAuthorizedPackageConversionQuantity(
+        conversionAuthorization,
+        qtySourceUnits,
+        qtyTargetUnits / this.variantUnits(variant as ProductVariant),
+      );
+    }
 
     const { shouldAutoExecute, executionMode } = this.resolveAutoExecute(
       autoReplen === 1 ? 1 : autoReplen === 2 ? 2 : null, null, whSettings, qtyTargetUnits, resolvedReplenMethod,
@@ -1109,6 +1201,103 @@ export class ReplenishmentUseCases {
   // 2. EXECUTE TASK -- move stock from bulk to pick location
   // ---------------------------------------------------------------------------
 
+  private async resolveTaskExecutionMethod(owner: DrizzleDb, task: ReplenTask): Promise<string> {
+    let replenMethod = task.replenMethod || "full_case";
+    if (replenMethod === "full_case" && task.replenRuleId) {
+      const [rule] = await owner
+        .select()
+        .from(replenRules)
+        .where(eq(replenRules.id, task.replenRuleId))
+        .limit(1);
+      if (rule?.replenMethod) replenMethod = rule.replenMethod;
+    }
+    return replenMethod;
+  }
+
+  private async planCanonicalTaskExecution(
+    task: ReplenTask,
+    runtime: TransformationRuntimeEvidence,
+  ): Promise<{
+    replenMethod: string;
+    request: PackageConversionAuthorizationRequest | null;
+    authorization: PackageConversionAuthorization | null;
+  }> {
+    const replenMethod = await this.resolveTaskExecutionMethod(this.db, task);
+    const sourceVariantId = task.sourceProductVariantId;
+    const pickVariantId = task.pickProductVariantId;
+    if (!sourceVariantId || !pickVariantId) {
+      throw new TransformationExecutionAuthorityError(
+        "CANONICAL_REPLENISHMENT_TASK_INVALID",
+        "Canonical replenishment requires exact source and destination variant identities.",
+        { taskId: task.id, sourceVariantId, pickVariantId },
+      );
+    }
+
+    if (sourceVariantId === pickVariantId) {
+      if (replenMethod === "case_break") {
+        throw new TransformationExecutionAuthorityError(
+          "CANONICAL_REPLENISHMENT_TASK_INVALID",
+          "A same-variant canonical replenishment cannot execute as a case break.",
+          { taskId: task.id, productVariantId: sourceVariantId },
+        );
+      }
+      return { replenMethod, request: null, authorization: null };
+    }
+    if (replenMethod !== "case_break") {
+      throw new TransformationExecutionAuthorityError(
+        "CANONICAL_REPLENISHMENT_TASK_INVALID",
+        "A cross-variant canonical replenishment requires an exact case-break path.",
+        { taskId: task.id, replenMethod, sourceVariantId, pickVariantId },
+      );
+    }
+
+    const [sourceRows, pickRows] = await Promise.all([
+      this.db.select().from(productVariants).where(eq(productVariants.id, sourceVariantId)).limit(1),
+      this.db.select().from(productVariants).where(eq(productVariants.id, pickVariantId)).limit(1),
+    ]);
+    const sourceVariant = sourceRows[0] as ProductVariant | undefined;
+    const pickVariant = pickRows[0] as ProductVariant | undefined;
+    if (!sourceVariant || !pickVariant) {
+      throw new TransformationExecutionAuthorityError(
+        "CANONICAL_REPLENISHMENT_TASK_INVALID",
+        "Canonical replenishment variant snapshots are unavailable.",
+        { taskId: task.id, sourceVariantId, pickVariantId },
+      );
+    }
+
+    const request = this.caseBreakAuthorizationRequest(sourceVariant, pickVariant);
+    const authorization = await this.transformationAuthority.authorizePackageConversion(request, runtime);
+    const destinationQty = Number(task.qtyTargetUnits) / this.variantUnits(pickVariant);
+    assertAuthorizedPackageConversionQuantity(authorization, Number(task.qtySourceUnits), destinationQty);
+    return { replenMethod, request, authorization };
+  }
+
+  private assertCanonicalTaskSnapshotUnchanged(
+    planned: ReplenTask,
+    current: ReplenTask,
+    plannedMethod: string,
+    currentMethod: string,
+  ): void {
+    const fields: Array<keyof ReplenTask> = [
+      "sourceProductVariantId",
+      "pickProductVariantId",
+      "fromLocationId",
+      "toLocationId",
+      "qtySourceUnits",
+      "qtyTargetUnits",
+      "warehouseId",
+    ];
+    const changedFields = fields.filter((field) => current[field] !== planned[field]);
+    if (currentMethod !== plannedMethod) changedFields.push("replenMethod");
+    if (changedFields.length > 0) {
+      throw new TransformationExecutionAuthorityError(
+        "CANONICAL_REPLENISHMENT_TASK_CHANGED",
+        "The locked replenishment task no longer matches the canonical conversion that was authorized.",
+        { taskId: current.id, changedFields, plannedMethod, currentMethod },
+      );
+    }
+  }
+
   /**
    * Execute a pending replen task by moving inventory from the source (bulk)
    * location to the destination (pick) location.
@@ -1149,10 +1338,28 @@ export class ReplenishmentUseCases {
       );
     }
 
-    await this.reResolveTaskSourceBeforeExecute(task as ReplenTask, userId);
+    const resolvedTask = await this.reResolveTaskSourceBeforeExecute(task as ReplenTask, userId);
+    const plannedRuntime = await this.transformationAuthority.readRuntime();
+    const canonicalPlan = plannedRuntime.authority === "canonical"
+      ? await this.planCanonicalTaskExecution(resolvedTask, plannedRuntime)
+      : null;
 
     const postCommitEffects: Array<() => Promise<void>> = [];
     const movedBaseUnits = await this.db.transaction(async (tx: any) => {
+      // Canonical ordering is authority -> active head/model/path -> catalog
+      // variant snapshots -> operational task -> inventory/cost/lot rows.
+      // Legacy pins only the runtime singleton and otherwise keeps its existing
+      // task/rule execution behavior.
+      if (canonicalPlan?.request && canonicalPlan.authorization) {
+        await this.transformationAuthority.pinPackageConversion(
+          tx,
+          canonicalPlan.request,
+          canonicalPlan.authorization,
+        );
+      } else {
+        await this.transformationAuthority.pinRuntime(tx, plannedRuntime);
+      }
+
       const lockedTaskResult = await tx.execute(sql`
         SELECT *
         FROM inventory.replen_tasks
@@ -1178,6 +1385,16 @@ export class ReplenishmentUseCases {
         .limit(1);
       if (!currentTask) throw new Error(`Replen task ${taskId} not found after lock acquisition`);
 
+      const replenMethod = await this.resolveTaskExecutionMethod(tx, currentTask as ReplenTask);
+      if (canonicalPlan) {
+        this.assertCanonicalTaskSnapshotUnchanged(
+          resolvedTask,
+          currentTask as ReplenTask,
+          canonicalPlan.replenMethod,
+          replenMethod,
+        );
+      }
+
       const [sourceVariant] = currentTask.sourceProductVariantId
         ? await tx
             .select()
@@ -1192,18 +1409,6 @@ export class ReplenishmentUseCases {
             .where(eq(productVariants.id, currentTask.pickProductVariantId))
             .limit(1)
         : [null];
-
-      // Read the immutable execution method from the locked task. Legacy rows
-      // that predate the method column retain the linked-rule fallback.
-      let replenMethod = currentTask.replenMethod || "full_case";
-      if (replenMethod === "full_case" && currentTask.replenRuleId) {
-        const [rule] = await tx
-          .select()
-          .from(replenRules)
-          .where(eq(replenRules.id, currentTask.replenRuleId))
-          .limit(1);
-        if (rule?.replenMethod) replenMethod = rule.replenMethod;
-      }
 
       let moved = 0;
       const invTx = this.inventoryUseCases.withTx(tx);
@@ -3167,6 +3372,39 @@ export class ReplenishmentUseCases {
 
     const grandparentVariantId = grandparentVariant.id;
 
+    // A cascade represents two distinct conversions. Under canonical runtime,
+    // both directed edges must exist explicitly; one allowed edge never grants
+    // its reverse or an inferred transitive edge.
+    const runtime = await this.transformationAuthority.readRuntime();
+    let upstreamAuthorization: PackageConversionAuthorization | null = null;
+    let downstreamAuthorization: PackageConversionAuthorization | null = null;
+    let canonicalPickVariant: ProductVariant | null = null;
+    if (runtime.authority === "canonical") {
+      const [pickVariant] = await this.db
+        .select()
+        .from(productVariants)
+        .where(eq(productVariants.id, opts.pickVariantId))
+        .limit(1);
+      if (!pickVariant) {
+        return null;
+      }
+      canonicalPickVariant = pickVariant as ProductVariant;
+      try {
+        upstreamAuthorization = await this.transformationAuthority.authorizePackageConversion(
+          this.caseBreakAuthorizationRequest(grandparentVariant, intermediateVariant),
+          runtime,
+        );
+        downstreamAuthorization = await this.transformationAuthority.authorizePackageConversion(
+          this.caseBreakAuthorizationRequest(intermediateVariant, pickVariant),
+          runtime,
+        );
+      } catch (error) {
+        if (error instanceof TransformationExecutionAuthorityError
+          && error.code === "PACKAGE_CONVERSION_PATH_NOT_ALLOWED") return null;
+        throw error;
+      }
+    }
+
     // Find stock at the grandparent level using the CASCADE tier default's source location type
     const cascadeSourceLocationType = cascadeTierDefault.sourceLocationType;
     const cascadeSourceLocation = await this.findSourceLocation(
@@ -3179,20 +3417,44 @@ export class ReplenishmentUseCases {
     if (!cascadeSourceLocation) return null; // No stock at grandparent either
 
     // Resolve cascade replen settings from the intermediate variant's tier default
-    const cascadeReplenMethod = cascadeTierDefault.replenMethod ?? "case_break";
+    const cascadeReplenMethod = runtime.authority === "canonical"
+      ? "case_break"
+      : cascadeTierDefault.replenMethod ?? "case_break";
     const cascadeAutoReplen = cascadeTierDefault.autoReplen ?? 0;
     const cascadePriority = cascadeTierDefault.priority ?? opts.priority;
 
     // Calculate upstream qty: 1 grandparent unit → N intermediate units
-    const cascadeQtySource = 1;
-    const cascadeQtyTarget = grandparentVariant.unitsPerVariant;
+    const upstreamPathInput = upstreamAuthorization ? Number(upstreamAuthorization.inputQty) : 1;
+    const upstreamPathOutput = upstreamAuthorization ? Number(upstreamAuthorization.outputQty) : 1;
+    const downstreamPathInput = downstreamAuthorization ? Number(downstreamAuthorization.inputQty) : 1;
+    const cascadeQtySource = upstreamAuthorization
+      ? upstreamPathInput * Math.ceil(downstreamPathInput / upstreamPathOutput)
+      : 1;
+    const normalizedCascadeQtyTarget = cascadeQtySource * grandparentVariant.unitsPerVariant;
+    if (upstreamAuthorization) {
+      assertAuthorizedPackageConversionQuantity(
+        upstreamAuthorization,
+        cascadeQtySource,
+        normalizedCascadeQtyTarget / this.variantUnits(intermediateVariant),
+      );
+    }
+    const downstreamQtySource = downstreamAuthorization ? downstreamPathInput : 1;
+    const downstreamQtyTarget = downstreamQtySource * intermediateVariant.unitsPerVariant;
+    if (downstreamAuthorization && canonicalPickVariant) {
+      assertAuthorizedPackageConversionQuantity(
+        downstreamAuthorization,
+        downstreamQtySource,
+        downstreamQtyTarget / this.variantUnits(canonicalPickVariant),
+      );
+    }
+    const downstreamReplenMethod = runtime.authority === "canonical" ? "case_break" : opts.replenMethod;
 
     // Resolve auto-execute for the upstream cascade task
     const cascadeExec = this.resolveAutoExecute(
       null,
       cascadeAutoReplen,
       opts.whSettings,
-      cascadeQtyTarget,
+      normalizedCascadeQtyTarget,
       cascadeReplenMethod,
     );
 
@@ -3207,7 +3469,7 @@ export class ReplenishmentUseCases {
         sourceProductVariantId: grandparentVariantId,
         pickProductVariantId: opts.sourceVariantId, // intermediate variant
         qtySourceUnits: cascadeQtySource,
-        qtyTargetUnits: cascadeQtyTarget,
+        qtyTargetUnits: normalizedCascadeQtyTarget,
         qtyCompleted: 0,
         status: "pending",
         priority: cascadePriority,
@@ -3225,10 +3487,6 @@ export class ReplenishmentUseCases {
       .returning();
 
     // --- Create Task B: downstream (intermediate → pick) blocked until Task A completes ---
-    const downstreamQtySource = 1;
-    const downstreamQtyTarget = intermediateVariant.unitsPerVariant;
-    const downstreamReplenMethod = opts.replenMethod;
-
     const downstreamExec = this.resolveAutoExecute(
       opts.autoReplen === 1 ? 1 : opts.autoReplen === 2 ? 2 : null,
       null,
@@ -3295,6 +3553,51 @@ export class ReplenishmentUseCases {
     return sourceUnits > pickUnits && sourceUnits % pickUnits === 0;
   }
 
+  private caseBreakAuthorizationRequest(
+    sourceVariant: ProductVariant,
+    pickVariant: ProductVariant,
+  ): PackageConversionAuthorizationRequest {
+    if (!sourceVariant.productId || !pickVariant.productId) {
+      throw new TransformationExecutionAuthorityError(
+        "PACKAGE_CONVERSION_INPUT_INVALID",
+        "Case-break source and pick variants must both belong to a product.",
+        { sourceVariantId: sourceVariant.id, pickVariantId: pickVariant.id },
+      );
+    }
+    return {
+      productId: sourceVariant.productId,
+      operation: "break_pack",
+      source: {
+        variantId: sourceVariant.id,
+        productId: sourceVariant.productId,
+        unitsPerVariant: this.variantUnits(sourceVariant),
+      },
+      destination: {
+        variantId: pickVariant.id,
+        productId: pickVariant.productId,
+        unitsPerVariant: this.variantUnits(pickVariant),
+      },
+    };
+  }
+
+  private async isCanonicalCaseBreakAuthorized(
+    sourceVariant: ProductVariant,
+    pickVariant: ProductVariant,
+    runtime: TransformationRuntimeEvidence,
+  ): Promise<boolean> {
+    try {
+      await this.transformationAuthority.authorizePackageConversion(
+        this.caseBreakAuthorizationRequest(sourceVariant, pickVariant),
+        runtime,
+      );
+      return true;
+    } catch (error) {
+      if (error instanceof TransformationExecutionAuthorityError
+        && error.code === "PACKAGE_CONVERSION_PATH_NOT_ALLOWED") return false;
+      throw error;
+    }
+  }
+
   private async getSourceSlotRank(sourceVariantId: number, sourceLocationId: number): Promise<number> {
     const [slot] = await this.db
       .select({
@@ -3323,6 +3626,7 @@ export class ReplenishmentUseCases {
     sourcePriority: string;
     sourceHierarchyLevel: number | null;
     qtyNeeded: number;
+    runtime: TransformationRuntimeEvidence;
   }): Promise<SourceCandidateResolution> {
     const {
       pickVariant,
@@ -3333,6 +3637,7 @@ export class ReplenishmentUseCases {
       sourcePriority,
       sourceHierarchyLevel,
       qtyNeeded,
+      runtime,
     } = params;
 
     if (sourceHierarchyLevel == null || sourceHierarchyLevel === pickVariant.hierarchyLevel) {
@@ -3379,12 +3684,12 @@ export class ReplenishmentUseCases {
         eq(productVariants.isActive, true),
       ));
 
-    const sourceVariants = (siblings as ProductVariant[])
+    const structurallyEligible = (siblings as ProductVariant[])
       .filter((variant) =>
         variant.id !== pickVariantId &&
         variant.hierarchyLevel === sourceHierarchyLevel &&
         this.isActiveVariant(variant) &&
-        this.isValidCaseBreakSource(variant, pickVariant)
+        (runtime.authority === "canonical" || this.isValidCaseBreakSource(variant, pickVariant))
       )
       .sort((a, b) => {
         const aParent = a.id === pickVariant.parentVariantId ? 0 : 1;
@@ -3396,6 +3701,13 @@ export class ReplenishmentUseCases {
           a.id - b.id
         );
       });
+    const sourceVariants: ProductVariant[] = [];
+    for (const sourceVariant of structurallyEligible) {
+      if (runtime.authority === "legacy"
+        || await this.isCanonicalCaseBreakAuthorized(sourceVariant, pickVariant, runtime)) {
+        sourceVariants.push(sourceVariant);
+      }
+    }
 
     if (sourceVariants.length === 0) {
       const activeAtLevel = (siblings as ProductVariant[])
@@ -3672,6 +3984,7 @@ export function createReplenishmentService(
   db: any,
   inventoryUseCases: any,
   clock: () => Date = () => new Date(),
+  transformationAuthority: TransformationExecutionAuthorityPort = legacyTransformationExecutionAuthority,
 ) {
-  return new ReplenishmentUseCases(db, inventoryUseCases, clock);
+  return new ReplenishmentUseCases(db, inventoryUseCases, clock, transformationAuthority);
 }

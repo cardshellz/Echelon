@@ -105,6 +105,43 @@ describe("PostgresInventoryPublicationOutboxRepository full publication phase", 
     const claimSql = client.queries.find(({ sql }) => sql.includes("RETURNING outbox.*"))?.sql;
     expect(claimSql).toContain("outbox.publication_phase = 'conservative' AND run.state = 'publishing'");
     expect(claimSql).toContain("outbox.publication_phase = 'full' AND run.state = 'active'");
+    expect(claimSql).toContain("global_control.singleton_key = TRUE");
+    expect(claimSql).toContain("global_control.global_enabled = TRUE");
+    expect(claimSql).toContain("target.revision = outbox.publication_target_revision_snapshot");
+    expect(claimSql).toContain("target.destination_kind = outbox.destination_kind_snapshot");
+    expect(claimSql).toContain("target.channel_connection_id IS NOT DISTINCT FROM outbox.channel_connection_id_snapshot");
+    expect(claimSql).toContain("target.dropship_store_connection_id IS NOT DISTINCT FROM outbox.dropship_store_connection_id_snapshot");
+    expect(claimSql).toContain("target.external_scope_id = outbox.external_scope_id_snapshot");
+    expect(claimSql).toContain("target.state = 'live'");
+  });
+
+  it("requeues a leased row without consuming an attempt when the global stop wins admission", async () => {
+    const client = fakeClient((sql) => {
+      if (sql.includes("SELECT * FROM inventory.inventory_publication_outbox")) {
+        return { rows: [{ id: "41" }] };
+      }
+      return { rows: [], rowCount: 1 };
+    });
+    const repository = new PostgresInventoryPublicationOutboxRepository(fakePool(client));
+
+    await expect(repository.recordFailure(claim(), {
+      errorClass: "PUBLICATION_GLOBAL_STOP_ACTIVE",
+      errorMessage: "Global publication stopped before provider I/O.",
+      retryable: true,
+      completedAt: NOW,
+    })).resolves.toBe(true);
+
+    const requeue = client.queries.find(({ sql }) =>
+      sql.includes("attempt_count = GREATEST(attempt_count - 1, 0)"));
+    expect(requeue?.values).toEqual([
+      "41",
+      "lease-runtime",
+      "PUBLICATION_GLOBAL_STOP_ACTIVE",
+      "Global publication stopped before provider I/O.",
+      NOW.toISOString(),
+    ]);
+    expect(client.queries.some(({ sql }) =>
+      sql.includes("INSERT INTO inventory.inventory_publication_attempts"))).toBe(false);
   });
 
   it("retries a failed full publication while its activation run remains active", async () => {
@@ -118,6 +155,7 @@ describe("PostgresInventoryPublicationOutboxRepository full publication phase", 
       if (sql.includes("SELECT state, reason FROM inventory.availability_activation_runs")) {
         return { rows: [{ state: "active", reason: "Activated after verification" }] };
       }
+      if (sql.includes("SELECT TRUE AS valid")) return { rows: [{ valid: true }] };
       return { rows: [] };
     });
     const repository = new PostgresInventoryPublicationOutboxRepository(fakePool(client));
@@ -184,6 +222,7 @@ describe("PostgresInventoryPublicationOutboxRepository full publication phase", 
       if (sql.includes("SELECT state, reason FROM inventory.availability_activation_runs")) {
         return { rows: [{ state: "active", reason: "Activated after verification" }] };
       }
+      if (sql.includes("SELECT TRUE AS valid")) return { rows: [{ valid: true }] };
       return { rows: [] };
     });
     const repository = new PostgresInventoryPublicationOutboxRepository(fakePool(client));
@@ -209,6 +248,7 @@ describe("PostgresInventoryPublicationOutboxRepository full publication phase", 
       if (sql.includes("SELECT state FROM inventory.availability_activation_runs")) {
         return { rows: [{ state: "active" }] };
       }
+      if (sql.includes("SELECT TRUE AS valid")) return { rows: [{ valid: true }] };
       return { rows: [] };
     });
     const repository = new PostgresInventoryPublicationOutboxRepository(fakePool(client));

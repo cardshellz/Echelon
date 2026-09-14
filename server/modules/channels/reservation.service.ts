@@ -74,6 +74,8 @@ export interface RecipeBuildPromise {
 
 export interface ReservationResult {
   orderId: number;
+  /** Exact canonical claim identity when canonical authority owns this reservation. */
+  canonicalClaimId?: string | null;
   /** Count of line items backed by physical finished-goods reservations. */
   reserved: number;
   /** Count of line items promised through auditable recipe build orders. */
@@ -106,6 +108,14 @@ export interface ReleaseOrderItemReservationResult {
 export interface ReleaseOrderReservationOptions {
   /** Canonical lifecycle outcome. Legacy reservation counters use the same release mechanics. */
   disposition?: "release" | "cancel";
+  /**
+   * Prevents a delayed caller from releasing a newer canonical claim for the
+   * same WMS order. An explicit null means the caller captured a canonical
+   * no-claim outcome and requires that no active claim now exists. Omission
+   * retains the generic order-scoped release behavior. Legacy authority
+   * rejects this canonical-only fence.
+   */
+  expectedCanonicalClaimId?: string | null;
   /** Internal transaction propagation used by the authority-aware runtime adapter. */
   dbOverride?: any;
 }

@@ -14,6 +14,10 @@ import { useToast } from "@/hooks/use-toast";
 import { 
   Package, Plus, Trash2, Lock, RefreshCw, AlertTriangle, Store
 } from "lucide-react";
+import {
+  InventoryRuntimeAuthorityBadge,
+  useInventoryRuntimeAuthority,
+} from "@/components/inventory/InventoryRuntimeAuthorityBadge";
 
 interface Channel {
   id: number;
@@ -43,6 +47,7 @@ interface ChannelReservation {
 
 export default function Reserves() {
   const { hasPermission } = useAuth();
+  const inventoryRuntimeAuthorityQuery = useInventoryRuntimeAuthority();
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [isCreateOpen, setIsCreateOpen] = useState(false);
@@ -58,6 +63,7 @@ export default function Reserves() {
 
   const canView = hasPermission("channels", "view");
   const canEdit = hasPermission("channels", "edit");
+  const legacyAuthority = inventoryRuntimeAuthorityQuery.data?.authority === "legacy";
 
   const { data: channels = [] } = useQuery<Channel[]>({
     queryKey: ["/api/channels"],
@@ -66,7 +72,7 @@ export default function Reserves() {
       if (!res.ok) throw new Error("Failed to fetch channels");
       return res.json();
     },
-    enabled: canView,
+    enabled: canView && legacyAuthority,
   });
 
   const { data: productVariants = [] } = useQuery<ProductVariant[]>({
@@ -76,7 +82,7 @@ export default function Reserves() {
       if (!res.ok) throw new Error("Failed to fetch product variants");
       return res.json();
     },
-    enabled: canView,
+    enabled: canView && legacyAuthority,
   });
 
   const { data: reservations = [], isLoading } = useQuery<ChannelReservation[]>({
@@ -89,7 +95,7 @@ export default function Reserves() {
       if (!res.ok) throw new Error("Failed to fetch reservations");
       return res.json();
     },
-    enabled: canView,
+    enabled: canView && legacyAuthority,
   });
 
   const createMutation = useMutation({
@@ -154,6 +160,42 @@ export default function Reserves() {
           <Lock className="w-12 h-12 mx-auto text-muted-foreground mb-4" />
           <h2 className="text-xl font-semibold">Access Denied</h2>
           <p className="text-muted-foreground mt-2">You don't have permission to view reserves.</p>
+        </Card>
+      </div>
+    );
+  }
+
+  if (!legacyAuthority) {
+    return (
+      <div className="space-y-4 md:space-y-6 p-2 md:p-6" data-testid="page-reserves-retired">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h1 className="text-2xl md:text-3xl font-bold tracking-tight flex items-center gap-2">
+              <Package className="h-6 w-6 md:h-8 md:w-8 text-primary" />
+              Channel Reserves
+            </h1>
+            <p className="text-sm md:text-base text-muted-foreground">Legacy reserve configuration</p>
+          </div>
+          <InventoryRuntimeAuthorityBadge />
+        </div>
+        <Card data-testid="legacy-channel-reserves-unavailable">
+          <CardHeader>
+            <CardTitle>
+              {inventoryRuntimeAuthorityQuery.data?.authority === "canonical"
+                ? "Legacy channel reserves are retired"
+                : "Channel reserve controls are unavailable"}
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <p className="text-sm text-muted-foreground">
+              {inventoryRuntimeAuthorityQuery.data?.authority === "canonical"
+                ? "Inventory Exposure now owns per-SKU channel holdbacks and publish limits. Existing reserve rows remain historical and cannot be changed here."
+                : "The live inventory authority could not be confirmed. Legacy reserve reads and writes stay disabled so this page cannot act against the wrong allocator."}
+            </p>
+            <Button asChild>
+              <a href="/channels/inventory-exposure">Open Inventory Exposure</a>
+            </Button>
+          </CardContent>
         </Card>
       </div>
     );

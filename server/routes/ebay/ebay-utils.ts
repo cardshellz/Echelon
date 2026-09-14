@@ -1,11 +1,10 @@
 import { eq } from "drizzle-orm";
-import { createAuthorityAwareInventoryAtpService } from "../../modules/inventory-planning/infrastructure/inventory-availability-runtime-atp.repository";
 import https from "https";
 import { createProviderRequestDeadline, boundedProviderRetryAfterSeconds } from "../../modules/channels/provider-request-limits";
 import { executeEbayQuantityHttp } from "../../modules/channels/adapters/ebay/ebay-quantity-http";
 import { ebayQuantityMutationIdentity } from "../../modules/channels/quantity-publication-request";
 import { db, pool } from "../../db";
-export const atpService = createAuthorityAwareInventoryAtpService(pool);
+import { createEbayChannelQuantityReader } from "../../modules/channels/adapters/ebay/ebay-channel-quantity.reader";
 import { channelConnections } from "@shared/schema";
 import { EbayAuthService, createEbayAuthConfig } from "../../modules/channels/adapters/ebay/ebay-auth.service";
 
@@ -15,6 +14,17 @@ import { EbayAuthService, createEbayAuthConfig } from "../../modules/channels/ad
 
 export const EBAY_CHANNEL_ID = 67;
 export const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+const ebayChannelQuantityReader = createEbayChannelQuantityReader(pool);
+
+/**
+ * Compatibility shape used by the existing route builders. The implementation
+ * is channel-aware: canonical mode returns the exact eBay publication quantity,
+ * while legacy mode keeps the deployed ATP behavior.
+ */
+export const atpService = {
+  getAtpPerVariant: (productId: number) =>
+    ebayChannelQuantityReader.getAtpPerVariant(productId, EBAY_CHANNEL_ID),
+};
 
 // ---------------------------------------------------------------------------
 // Category tree cache (module-level, 1-hour TTL)

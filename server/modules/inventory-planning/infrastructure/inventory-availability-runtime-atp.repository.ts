@@ -1,4 +1,4 @@
-import { drizzle } from "drizzle-orm/node-postgres";
+import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import type { Pool, PoolClient } from "pg";
 import type { InventoryAvailabilityTransactionQueryClient } from "../application/inventory-availability-transaction-query.port";
 
@@ -16,6 +16,10 @@ import {
 import { captureActiveSupplySnapshotInsideTransaction } from "./inventory-availability-shadow.repository";
 
 type ClientPool = Pick<Pool, "connect">;
+export type PostgresInventoryAvailabilityRuntimeTransaction = Pick<
+  NodePgDatabase<typeof schema>,
+  "select" | "insert" | "update" | "delete" | "execute"
+>;
 
 interface RuntimeAuthorityRow {
   authority: string;
@@ -29,11 +33,14 @@ interface RuntimeAuthorityRow {
  * canonical while an already-authorized legacy read is still in flight.
  */
 export class PostgresInventoryAvailabilityRuntimeAtpExecutor
-implements InventoryAvailabilityRuntimeAtpExecutor {
+implements InventoryAvailabilityRuntimeAtpExecutor<PostgresInventoryAvailabilityRuntimeTransaction> {
   constructor(private readonly connectionPool: ClientPool = defaultPool) {}
 
   async execute<T>(
-    work: (context: InventoryAvailabilityRuntimeAtpContext) => Promise<T>,
+    work: (
+      context: InventoryAvailabilityRuntimeAtpContext,
+      transaction: PostgresInventoryAvailabilityRuntimeTransaction,
+    ) => Promise<T>,
   ): Promise<T> {
     const client = await this.connectionPool.connect();
     let began = false;
@@ -52,7 +59,7 @@ implements InventoryAvailabilityRuntimeAtpExecutor {
           captureActiveSupplySnapshotInsideTransaction(client, productId),
         getProductIdsByVariantIds: (variantIds) =>
           getProductIdsByVariantIds(client, variantIds),
-      });
+      }, transactionDb);
       await client.query("COMMIT");
       began = false;
       return result;

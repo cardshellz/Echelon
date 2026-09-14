@@ -3,8 +3,8 @@ import { createManualSyncRunner, type ManualSyncServices } from "../../manual-sy
 
 function makeServices(overrides: Partial<Record<string, any>> = {}): ManualSyncServices {
   return {
-    echelonOrchestrator: {
-      runFullSync: vi.fn().mockResolvedValue({
+    inventoryPublicationWork: {
+      syncAllProducts: vi.fn().mockResolvedValue({
         inventory: [
           {
             channelId: 1,
@@ -17,8 +17,9 @@ function makeServices(overrides: Partial<Record<string, any>> = {}): ManualSyncS
             ],
           },
         ],
+        skippedReason: null,
       }),
-      ...overrides.echelonOrchestrator,
+      ...overrides.inventoryPublicationWork,
     },
     syncSettings: {
       writeSyncLog: vi.fn().mockResolvedValue(undefined),
@@ -62,10 +63,10 @@ describe("manual sync runner", () => {
     const runner = createManualSyncRunner(() => 0);
     let release!: () => void;
     const services = makeServices({
-      echelonOrchestrator: {
-        runFullSync: vi.fn().mockReturnValue(
+      inventoryPublicationWork: {
+        syncAllProducts: vi.fn().mockReturnValue(
           new Promise((resolve) => {
-            release = () => resolve({ inventory: [] });
+            release = () => resolve({ inventory: [], skippedReason: null });
           }),
         ),
       },
@@ -82,8 +83,8 @@ describe("manual sync runner", () => {
   it("surfaces a background failure via status instead of swallowing it", async () => {
     const runner = createManualSyncRunner(() => 0);
     const services = makeServices({
-      echelonOrchestrator: {
-        runFullSync: vi.fn().mockRejectedValue(new Error("orchestrator exploded")),
+      inventoryPublicationWork: {
+        syncAllProducts: vi.fn().mockRejectedValue(new Error("orchestrator exploded")),
       },
     });
 
@@ -99,7 +100,7 @@ describe("manual sync runner", () => {
   it("a failed sweep does not wedge the runner", async () => {
     const runner = createManualSyncRunner(() => 0);
     const failing = makeServices({
-      echelonOrchestrator: { runFullSync: vi.fn().mockRejectedValue(new Error("nope")) },
+      inventoryPublicationWork: { syncAllProducts: vi.fn().mockRejectedValue(new Error("nope")) },
     });
     runner.trigger(failing);
     await runner.whenIdle();

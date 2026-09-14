@@ -260,6 +260,9 @@ dbDescribe.sequential("cutover abort, concurrent provider and external-owned des
     await database.pool.query(cutoverCompositionChannelSeedSql);
     await database.pool.query(cutoverCompositionObserveOnlySeedSql);
     await installCutoverAdmissionFixturePrerequisites(database.pool);
+    await database.pool.query(`UPDATE channels.channels
+      SET status='active', sync_enabled=true, sync_mode='live'
+      WHERE id=36`);
     await database.pool.query(readFileSync(resolve(process.cwd(),"migrations/236_inventory_cutover_admission.sql"),"utf8"));
     await database.pool.query(readFileSync(resolve(process.cwd(),"migrations/240_inventory_cutover_verified_opening.sql"),"utf8"));
     await installQuantityCutoverFixture(database.pool);

@@ -29,6 +29,7 @@ interface AllocationEngineLike {
   allocateProduct(
     productId: number,
     triggeredBy?: string,
+    channelIds?: readonly number[],
   ): Promise<{
     allocations: Array<{
       channelId: number;
@@ -246,6 +247,7 @@ async function publishLegacyAvailability(
     const allocation = await dependencies.allocationEngine.allocateProduct(
       context.productId,
       "variant_availability_reactivation",
+      [context.channelId],
     );
     const matchingAllocation = allocation.allocations.find(
       (candidate) => candidate.channelId === context.channelId

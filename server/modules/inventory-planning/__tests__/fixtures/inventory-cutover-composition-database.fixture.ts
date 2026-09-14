@@ -16,6 +16,12 @@ CREATE SCHEMA inventory; CREATE SCHEMA wms; CREATE SCHEMA oms; CREATE SCHEMA war
 CREATE SCHEMA channels; CREATE SCHEMA dropship;
 CREATE TABLE channels.channels(id integer PRIMARY KEY,name text NOT NULL,provider text NOT NULL);
 CREATE TABLE channels.channel_connections(id integer PRIMARY KEY,channel_id integer NOT NULL REFERENCES channels.channels(id));
+CREATE TABLE channels.sync_settings(
+ id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+ singleton_key boolean NOT NULL DEFAULT true UNIQUE CHECK(singleton_key),
+ global_enabled boolean NOT NULL
+);
+INSERT INTO channels.sync_settings(singleton_key,global_enabled) VALUES(true,true);
 CREATE TABLE dropship.dropship_vendors(id integer PRIMARY KEY,business_name text NOT NULL);
 CREATE TABLE dropship.dropship_store_connections(id integer PRIMARY KEY,vendor_id integer REFERENCES dropship.dropship_vendors(id),platform text DEFAULT 'ebay',status text DEFAULT 'disconnected',external_display_name text,external_account_id text,shop_domain text);
 CREATE TABLE catalog.products(id integer PRIMARY KEY,sku text,name text NOT NULL DEFAULT 'Pack',inventory_strategy text NOT NULL DEFAULT 'physical_only',is_active boolean NOT NULL DEFAULT true);

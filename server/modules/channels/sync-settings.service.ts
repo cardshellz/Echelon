@@ -51,6 +51,17 @@ export interface SyncLogSummary {
   skipped: number;
 }
 
+export type GlobalSyncSettingsView = Omit<SyncSettings, "revision"> & { revision: string };
+
+export interface EffectiveChannelSyncState {
+  channelId: number;
+  channelName: string;
+  provider: string;
+  shouldSync: boolean;
+  dryRun: boolean;
+  reason: string;
+}
+
 class SyncSettingsService {
   constructor(private readonly db: DrizzleDb) {}
 
@@ -58,40 +69,17 @@ class SyncSettingsService {
   // GLOBAL SETTINGS
   // =========================================================================
 
-  async getGlobalSettings(): Promise<SyncSettings> {
-    const [settings] = await this.db
+  async getGlobalSettings(): Promise<GlobalSyncSettingsView> {
+    const settingsRows = await this.db
       .select()
       .from(syncSettings)
-      .limit(1);
+      .where(eq(syncSettings.singletonKey, true))
+      .limit(2);
 
-    if (!settings) {
-      // Create default row
-      const [created] = await this.db
-        .insert(syncSettings)
-        .values({ globalEnabled: true, sweepIntervalMinutes: 15 })
-        .returning();
-      return created;
+    if (settingsRows.length !== 1) {
+      throw new Error("Exactly one global sync-settings row is required");
     }
-
-    return settings;
-  }
-
-  async updateGlobalSettings(updates: {
-    globalEnabled?: boolean;
-    sweepIntervalMinutes?: number;
-  }): Promise<SyncSettings> {
-    const settings = await this.getGlobalSettings();
-
-    const [updated] = await this.db
-      .update(syncSettings)
-      .set({
-        ...updates,
-        updatedAt: new Date(),
-      })
-      .where(eq(syncSettings.id, settings.id))
-      .returning();
-
-    return updated;
+    return serializeGlobalSettings(settingsRows[0]!);
   }
 
   async updateLastSweep(durationMs: number): Promise<void> {
@@ -285,26 +273,55 @@ class SyncSettingsService {
     dryRun: boolean;
     reason: string;
   }> {
-    const globalSettings = await this.getGlobalSettings();
-    if (!globalSettings.globalEnabled) {
-      return { shouldSync: false, dryRun: false, reason: "Global sync disabled" };
-    }
-
-    const channelConfig = await this.getChannelSyncConfig(channelId);
-    if (!channelConfig) {
+    const states = await this.listEffectiveSyncStates();
+    const state = states.find((candidate) => candidate.channelId === channelId);
+    if (!state) {
       return { shouldSync: false, dryRun: false, reason: "Channel not found" };
     }
-
-    if (!channelConfig.syncEnabled) {
-      return { shouldSync: false, dryRun: false, reason: "Channel sync disabled" };
-    }
-
-    const dryRun = channelConfig.syncMode === "dry_run";
     return {
-      shouldSync: true,
-      dryRun,
-      reason: dryRun ? "Channel in dry-run mode" : "Live sync active",
+      shouldSync: state.shouldSync,
+      dryRun: state.dryRun,
+      reason: state.reason,
     };
+  }
+
+  /**
+   * Sole legacy work-creation resolver. Scheduled, event-driven, and manual
+   * inventory sync callers consume this same snapshot before creating work;
+   * provider admission independently rechecks the exact channel at I/O time.
+   */
+  async listEffectiveSyncStates(): Promise<EffectiveChannelSyncState[]> {
+    const globalSettings = await this.getGlobalSettings();
+    const channelRows = await this.db
+      .select({
+        id: channels.id,
+        name: channels.name,
+        provider: channels.provider,
+        syncEnabled: channels.syncEnabled,
+        syncMode: channels.syncMode,
+      })
+      .from(channels)
+      .where(eq(channels.status, "active"));
+    return channelRows.map((channel: any) => {
+      const identity = {
+        channelId: channel.id,
+        channelName: channel.name,
+        provider: channel.provider,
+      };
+      if (!globalSettings.globalEnabled) {
+        return { ...identity, shouldSync: false, dryRun: false, reason: "Global sync disabled" };
+      }
+      if (channel.syncEnabled !== true) {
+        return { ...identity, shouldSync: false, dryRun: false, reason: "Channel sync disabled" };
+      }
+      if (channel.syncMode === "dry_run") {
+        return { ...identity, shouldSync: true, dryRun: true, reason: "Channel in dry-run mode" };
+      }
+      if (channel.syncMode === "live") {
+        return { ...identity, shouldSync: true, dryRun: false, reason: "Live sync active" };
+      }
+      return { ...identity, shouldSync: false, dryRun: false, reason: "Channel sync mode invalid" };
+    });
   }
 
   /**
@@ -326,6 +343,10 @@ class SyncSettingsService {
 
 export function createSyncSettingsService(db: any) {
   return new SyncSettingsService(db);
+}
+
+function serializeGlobalSettings(settings: SyncSettings): GlobalSyncSettingsView {
+  return { ...settings, revision: settings.revision.toString() };
 }
 
 export type { SyncSettingsService };

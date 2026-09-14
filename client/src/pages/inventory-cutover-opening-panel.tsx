@@ -89,7 +89,7 @@ export function InventoryCutoverOpeningPanel(props: Props) {
     catch (error) { setInputError(error instanceof Error ? error : new Error("The verification document could not be read.")); }
     finally { setImporting(false); }
   }
-  async function importSpreadsheetFiles(files: FileList | null) {
+  async function importSpreadsheetFiles(files: readonly File[] | null) {
     if (!files || !usable || !source.data || busy || retained) return;
     setVerification(null); setAssessment(null); setConfirmed(false); setSaved(null); setInputError(null);
     const selected = Array.from(files);
@@ -189,7 +189,7 @@ export function InventoryCutoverOpeningPanel(props: Props) {
           <h4 className="font-medium">3. Import all three completed CSV files together</h4>
           <Label htmlFor="opening-spreadsheet-files">Completed inventory verification spreadsheets</Label>
           <Input id="opening-spreadsheet-files" type="file" multiple accept=".csv,text/csv" disabled={!usable || busy || retained}
-            onChange={event => { const files = event.target.files; event.target.value = ""; void importSpreadsheetFiles(files); }} />
+            onChange={event => { const files = Array.from(event.target.files ?? []); event.target.value = ""; void importSpreadsheetFiles(files); }} />
           <p className="text-sm">The app validates complete lot and order coverage, unchanged row identities, whole-number quantities and exact cost references.
             It creates and hashes the audited verification document for you; no JSON editing is required.</p>
           {verification && <Button variant="outline" disabled={busy || retained} onClick={() => {

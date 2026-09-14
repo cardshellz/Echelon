@@ -72,11 +72,24 @@ export class PostgresInventoryPublicationOutboxRepository {
            FROM inventory.inventory_publication_outbox AS outbox
            JOIN inventory.availability_activation_runs AS run
              ON run.id = outbox.activation_run_id
+           JOIN inventory.inventory_publication_targets AS target
+             ON target.id = outbox.publication_target_id
+            AND target.publication_authority = 'echelon'
+            AND target.revision = outbox.publication_target_revision_snapshot
+            AND target.destination_kind = outbox.destination_kind_snapshot
+            AND target.channel_id = outbox.channel_id_snapshot
+            AND target.channel_connection_id IS NOT DISTINCT FROM outbox.channel_connection_id_snapshot
+            AND target.dropship_store_connection_id IS NOT DISTINCT FROM outbox.dropship_store_connection_id_snapshot
+            AND target.provider_scope_type = outbox.provider_scope_type_snapshot
+            AND target.external_scope_id = outbox.external_scope_id_snapshot
+           JOIN channels.sync_settings AS global_control
+             ON global_control.singleton_key = TRUE
+            AND global_control.global_enabled = TRUE
            WHERE outbox.state = 'queued' AND outbox.available_at <= $1
              AND (
-               (outbox.publication_phase = 'conservative' AND run.state = 'publishing')
+               (outbox.publication_phase = 'conservative' AND run.state = 'publishing' AND target.state = 'preview')
                OR
-               (outbox.publication_phase = 'full' AND run.state = 'active')
+               (outbox.publication_phase = 'full' AND run.state = 'active' AND target.state = 'live')
              )
            ORDER BY outbox.available_at, outbox.id
            FOR UPDATE SKIP LOCKED
@@ -288,6 +301,19 @@ export class PostgresInventoryPublicationOutboxRepository {
       await lockActivationRun(client, claim.activationRunId);
       const current = await lockClaim(client, claim);
       if (!current) return false;
+      if (["PUBLICATION_GLOBAL_STOP_ACTIVE", "PUBLICATION_GLOBAL_CONTROL_INVALID"].includes(input.errorClass)) {
+        await client.query(
+          `UPDATE inventory.inventory_publication_outbox
+           SET state = 'queued', lease_token = NULL, lease_expires_at = NULL,
+               attempt_count = GREATEST(attempt_count - 1, 0),
+               last_error_class = $3, last_error_message = $4,
+               available_at = $5
+           WHERE id = $1 AND lease_token = $2 AND state = 'leased'`,
+          [claim.outboxId, claim.leaseToken, input.errorClass.slice(0, 60),
+            input.errorMessage.slice(0, 2000), input.completedAt.toISOString()],
+        );
+        return true;
+      }
       const cancelled = !await publicationCanProceed(client, claim);
       const retryable = !cancelled && input.retryable && claim.attemptNumber < 10;
       const outcome = cancelled ? "cancelled" : retryable ? "retryable" : "dead_letter";
@@ -508,10 +534,25 @@ async function activationHasDeadLetter(client: PoolClient, activationRunId: stri
 
 async function publicationCanProceed(
   client: PoolClient,
-  claim: Pick<ClaimedInventoryPublication, "activationRunId" | "publicationPhase">,
+  claim: ClaimedInventoryPublication,
   knownRunState?: string,
 ): Promise<boolean> {
   const runState = knownRunState ?? await activationRunState(client, claim.activationRunId);
+  const target = (await client.query<{ valid: boolean }>(
+    `SELECT TRUE AS valid
+     FROM inventory.inventory_publication_targets
+     WHERE id=$1 AND publication_authority='echelon' AND revision=$2
+       AND destination_kind=$3 AND channel_id=$4
+       AND channel_connection_id IS NOT DISTINCT FROM $5::integer
+       AND dropship_store_connection_id IS NOT DISTINCT FROM $6::integer
+       AND provider_scope_type=$7 AND external_scope_id=$8
+       AND (($9='conservative' AND state='preview') OR ($9='full' AND state='live'))
+     FOR SHARE`,
+    [claim.publicationTargetId, claim.publicationTargetRevision, claim.destinationKind,
+      claim.channelId, claim.channelConnectionId, claim.dropshipStoreConnectionId,
+      claim.providerScopeType, claim.externalScopeId, claim.publicationPhase],
+  )).rows[0];
+  if (target?.valid !== true) return false;
   // Conservative rows are one coordinated pre-cutover batch: any permanent
   // failure stops that activation. Full rows are independent desired-state
   // updates after irreversible cutover, so an older dead letter must not block

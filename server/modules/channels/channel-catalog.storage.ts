@@ -52,7 +52,7 @@ export interface IChannelCatalogStorage {
   deleteChannelAssetOverride(channelId: number, productAssetId: number): Promise<boolean>;
 
   // Channel product lines (which product lines feed into which channels)
-  replaceChannelProductLines(channelId: number, productLineIds: number[]): Promise<void>;
+  replaceChannelProductLines(channelId: number, productLineIds: number[], executor?: any): Promise<void>;
   getChannelProductLinesForChannel(channelId: number): Promise<{ id: number; code: string; name: string; isActive: boolean | null }[]>;
 }
 
@@ -288,10 +288,10 @@ export const channelCatalogMethods: IChannelCatalogStorage = {
     return db.select().from(channelListings).where(eq(channelListings.channelId, channelId));
   },
 
-  async replaceChannelProductLines(channelId: number, productLineIds: number[]): Promise<void> {
-    await db.delete(channelProductLines).where(eq(channelProductLines.channelId, channelId));
+  async replaceChannelProductLines(channelId: number, productLineIds: number[], executor: any = db): Promise<void> {
+    await executor.delete(channelProductLines).where(eq(channelProductLines.channelId, channelId));
     if (productLineIds.length > 0) {
-      await db.insert(channelProductLines).values(
+      await executor.insert(channelProductLines).values(
         productLineIds.map((plId: number) => ({ channelId, productLineId: plId }))
       ).onConflictDoNothing();
     }

@@ -16,10 +16,30 @@ const session = new AsyncLocalStorage<{ scope: QuantityPublicationScope; externa
 // representing a provider request. Resolver failures must not create uncertainty.
 const legacyCatchupScope = new AsyncLocalStorage<QuantityPublicationScope>();
 const hash = (value: unknown): string => createHash("sha256").update(canonicalJson(value)).digest("hex");
-const key = (scope: QuantityPublicationScope): string => hash({ ...scope, productId: null, productVariantId: null });
+export const quantityPublicationScopeLockKey = (scope: QuantityPublicationScope): string =>
+  hash({ ...scope, productId: null, productVariantId: null });
+const key = quantityPublicationScopeLockKey;
 const fail = (code: string, message: string, context: Record<string, unknown> = {}): never => {
   throw new QuantityPublicationAdmissionError(code, message, context);
 };
+
+async function readGlobalPublicationEnabled(client: Client): Promise<boolean> {
+  const rows = (await client.query<{ global_enabled: boolean }>(
+    `SELECT global_enabled
+     FROM channels.sync_settings
+     ORDER BY id
+     LIMIT 2
+     FOR SHARE`,
+  )).rows;
+  if (rows.length !== 1) {
+    fail(
+      "PUBLICATION_GLOBAL_CONTROL_INVALID",
+      "Quantity publication requires exactly one global sync-control row.",
+      { rowCount: rows.length },
+    );
+  }
+  return rows[0].global_enabled === true;
+}
 function id(value: string): string {
   if (!/^[1-9][0-9]{0,18}$/.test(value) || BigInt(value) > BigInt("9223372036854775807")) fail("PUBLICATION_ID_INVALID", "Expected a positive database identifier.");
   return value;
@@ -282,6 +302,15 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
         "SELECT epoch::text,activation_run_id::text FROM inventory.quantity_publication_gate WHERE singleton FOR SHARE",
       )).rows[0];
       if (!gate) fail("PUBLICATION_GATE_MISSING", "Quantity publication admission migration is missing.");
+      const globalPublicationEnabled = await readGlobalPublicationEnabled(client);
+      if (!globalPublicationEnabled) {
+        if (!claim) await retainWork(client, gate.activation_run_id, "global_publication_disabled");
+        await client.query("COMMIT"); inTransaction = false;
+        fail(
+          "PUBLICATION_GLOBAL_STOP_ACTIVE",
+          "Global inventory publication is disabled; no provider quantity request was sent.",
+        );
+      }
       if (claim) await this.validateOutbox(client, claim, gate.activation_run_id);
       if (!claim && gate.activation_run_id !== null) {
         await retainWork(client, gate.activation_run_id, "suppressed_quantity_write");
@@ -297,6 +326,40 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
         if (!authority) fail("PUBLICATION_AUTHORITY_MISSING", "Runtime publication authority is missing.");
         if (expectedScope && authority.authority !== "legacy") {
           fail("PUBLICATION_AUTHORITY_CHANGED", "Legacy catch-up authority changed before actual provider admission; replan using the current owner.");
+        }
+        if (authority.authority === "legacy" && scope.destinationKind === "channel_connection") {
+          const legacyChannelRows = (await client.query<{
+            channel_id: number;
+            status: string;
+            sync_enabled: boolean;
+            sync_mode: string;
+          }>(
+            `SELECT channel_row.id AS channel_id,channel_row.status,channel_row.sync_enabled,channel_row.sync_mode
+             FROM channels.channel_connections connection_row
+             JOIN channels.channels channel_row ON channel_row.id=connection_row.channel_id
+             WHERE connection_row.id=$1
+             ORDER BY channel_row.id
+             LIMIT 2
+             FOR SHARE OF connection_row,channel_row`,
+            [scope.connectionId],
+          )).rows;
+          const legacyChannel = legacyChannelRows[0];
+          if (legacyChannelRows.length !== 1 || legacyChannel.status !== "active"
+            || legacyChannel.sync_enabled !== true || legacyChannel.sync_mode !== "live") {
+            await retainWork(client, null, "legacy_channel_publication_disabled");
+            await client.query("COMMIT"); inTransaction = false;
+            fail(
+              "PUBLICATION_LEGACY_CHANNEL_NOT_LIVE",
+              "The exact legacy channel is not active, enabled, and live; no provider quantity request was sent.",
+              {
+                connectionId: scope.connectionId,
+                channelId: legacyChannel?.channel_id ?? null,
+                status: legacyChannel?.status ?? null,
+                syncEnabled: legacyChannel?.sync_enabled ?? null,
+                syncMode: legacyChannel?.sync_mode ?? null,
+              },
+            );
+          }
         }
         if (authority.authority === "canonical") {
           if (!resolveCurrentPlan) {
@@ -314,6 +377,9 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
             FROM inventory.inventory_publication_outbox o
             JOIN inventory.availability_runtime_authority a ON a.activation_run_id=o.activation_run_id AND a.authority='canonical'
             JOIN inventory.availability_activation_runs r ON r.id=o.activation_run_id AND r.state='active'
+            JOIN inventory.inventory_publication_targets t ON t.id=o.publication_target_id
+              AND t.state='live' AND t.publication_authority='echelon'
+              AND t.revision=o.publication_target_revision_snapshot
             WHERE o.id=$1 AND o.publication_phase='full' AND o.destination_kind_snapshot=$2
             AND COALESCE(o.channel_connection_id_snapshot,o.dropship_store_connection_id_snapshot)=$3
             AND o.provider_key_snapshot=$4 AND o.provider_scope_type_snapshot=$5 AND o.external_scope_id_snapshot=$6
@@ -414,15 +480,24 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
   }
 
   private async validateOutbox(client: Client, claim: QuantityPublicationOutboxClaim, suppressedRunId: string | null): Promise<void> {
-    const row = (await client.query<Record<string, unknown>>(`SELECT outbox.*,run.state AS run_state
-      FROM inventory.inventory_publication_outbox outbox JOIN inventory.availability_activation_runs run ON run.id=outbox.activation_run_id
+    const row = (await client.query<Record<string, unknown>>(`SELECT outbox.*,run.state AS run_state,
+        target.state AS target_state,target.revision::text AS target_revision,
+        target.publication_authority AS target_publication_authority,
+        target.destination_kind AS target_destination_kind,
+        target.channel_connection_id AS target_channel_connection_id,
+        target.dropship_store_connection_id AS target_dropship_store_connection_id,
+        target.provider_scope_type AS target_provider_scope_type,
+        target.external_scope_id AS target_external_scope_id
+      FROM inventory.inventory_publication_outbox outbox
+      JOIN inventory.availability_activation_runs run ON run.id=outbox.activation_run_id
+      JOIN inventory.inventory_publication_targets target ON target.id=outbox.publication_target_id
       WHERE outbox.id=$1 AND outbox.lease_expires_at>$2
       AND (outbox.publication_phase<>'full' OR EXISTS (SELECT 1 FROM inventory.availability_runtime_authority authority
         WHERE authority.singleton_key=true AND authority.authority='canonical' AND authority.activation_run_id=outbox.activation_run_id))
       AND NOT EXISTS (SELECT 1 FROM inventory.inventory_publication_outbox newer
         WHERE newer.publication_target_id=outbox.publication_target_id AND newer.product_variant_id=outbox.product_variant_id
         AND newer.desired_revision>outbox.desired_revision)
-      FOR SHARE OF outbox,run`, [id(claim.outboxId),now(this.clock())])).rows[0];
+      FOR SHARE OF outbox,run,target`, [id(claim.outboxId),now(this.clock())])).rows[0];
     const values: Array<[string, unknown]> = [["activation_run_id",claim.activationRunId],["publication_target_id",claim.publicationTargetId],
       ["product_variant_id",claim.productVariantId],["lease_token",claim.leaseToken],["desired_revision",claim.desiredRevision],
       ["desired_quantity",claim.desiredQuantity],["destination_kind_snapshot",claim.destinationKind],
@@ -433,15 +508,28 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
       expected === null ? row[field] !== null : String(row[field]) !== String(expected))) {
       fail("PUBLICATION_OUTBOX_AUTHORIZATION_INVALID", "Provider admission does not match a persisted current outbox lease.");
     }
+    const targetIdentityMatches = row.target_publication_authority === "echelon"
+      && String(row.target_revision) === String(row.publication_target_revision_snapshot)
+      && row.target_destination_kind === row.destination_kind_snapshot
+      && String(row.target_channel_connection_id ?? "") === String(row.channel_connection_id_snapshot ?? "")
+      && String(row.target_dropship_store_connection_id ?? "") === String(row.dropship_store_connection_id_snapshot ?? "")
+      && row.target_provider_scope_type === row.provider_scope_type_snapshot
+      && row.target_external_scope_id === row.external_scope_id_snapshot;
+    if (!targetIdentityMatches) {
+      fail(
+        "PUBLICATION_TARGET_STATE_CHANGED",
+        "The publication target identity, authority, or revision changed after this quantity was planned.",
+      );
+    }
     if (row.publication_phase === "conservative") {
-      if (suppressedRunId !== claim.activationRunId || row.run_state !== "publishing") {
+      if (suppressedRunId !== claim.activationRunId || row.run_state !== "publishing" || row.target_state !== "preview") {
         fail("PUBLICATION_CONSERVATIVE_GATE_INVALID", "Conservative publication requires its durable suppressed run.");
       }
       if ((await client.query(`SELECT id FROM inventory.quantity_publication_attempts
         WHERE owner_kind='legacy' AND state IN ('running','uncertain') LIMIT 1`)).rows.length) {
         fail("PUBLICATION_LEGACY_DRAIN_UNRESOLVED", "Conservative publication waits for definitive prior legacy outcomes.");
       }
-    } else if (row.publication_phase !== "full" || row.run_state !== "active") {
+    } else if (row.publication_phase !== "full" || row.run_state !== "active" || row.target_state !== "live") {
       fail("PUBLICATION_OUTBOX_PHASE_INVALID", "Only a current active full publication may run.");
     }
   }

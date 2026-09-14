@@ -42,6 +42,10 @@ import {
   type ShopifyProductSyncResult,
 } from "@/lib/shopify-product-sync-result";
 import { useAuth } from "@/lib/auth";
+import {
+  InventoryRuntimeAuthorityBadge,
+  useInventoryRuntimeAuthority,
+} from "@/components/inventory/InventoryRuntimeAuthorityBadge";
 
 interface Channel {
   id: number;
@@ -135,6 +139,9 @@ export default function ShopifyChannelPage() {
   const { toast } = useToast();
   const { hasPermission } = useAuth();
   const canSyncShopifyCatalog = hasPermission("inventory", "edit");
+  const inventoryRuntimeAuthorityQuery = useInventoryRuntimeAuthority();
+  const isConfirmedLegacyInventoryAuthority =
+    inventoryRuntimeAuthorityQuery.data?.authority === "legacy";
   const queryClient = useQueryClient();
   const [feedFilter, setFeedFilter] = useState<FeedStatus>("all");
   const [feedSearch, setFeedSearch] = useState("");
@@ -287,7 +294,13 @@ export default function ShopifyChannelPage() {
   // --- Sync Inventory to Shopify ---
   const syncInventoryMutation = useMutation({
     mutationFn: async () => {
-      const res = await fetch("/api/channel-sync/all", { method: "POST", credentials: "include" });
+      if (!shopifyChannel) throw new Error("No Shopify channel");
+      const res = await fetch("/api/channel-sync/all", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ channelId: shopifyChannel.id }),
+      });
       if (!res.ok) {
         const body = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
         throw new Error(body?.error || `HTTP ${res.status}`);
@@ -297,8 +310,8 @@ export default function ShopifyChannelPage() {
     onSuccess: (data) => {
       queryClient.invalidateQueries({ queryKey: ["/api/channels", shopifyChannel?.id, "listings"] });
       toast({
-        title: "Inventory Synced",
-        description: `${data.synced ?? 0} variant${(data.synced ?? 0) !== 1 ? "s" : ""} synced to Shopify`,
+        title: "Inventory Publication Started",
+        description: data.message ?? "Shopify inventory publication is running in the background.",
       });
     },
     onError: (err: Error) => {
@@ -864,21 +877,35 @@ export default function ShopifyChannelPage() {
                 )}
                 Sync from Shopify
               </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                className="min-h-[44px] sm:min-h-0"
-                disabled={syncInventoryMutation.isPending || !shopifyChannel}
-                onClick={() => syncInventoryMutation.mutate()}
-                title="Push current inventory levels to Shopify now"
-              >
-                {syncInventoryMutation.isPending ? (
-                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                ) : (
-                  <RefreshCw className="h-4 w-4 mr-2" />
-                )}
-                Sync Inventory
-              </Button>
+              {isConfirmedLegacyInventoryAuthority ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="min-h-[44px] sm:min-h-0"
+                  disabled={syncInventoryMutation.isPending || !shopifyChannel}
+                  onClick={() => syncInventoryMutation.mutate()}
+                  title="Push this Shopify channel's current inventory levels now"
+                >
+                  {syncInventoryMutation.isPending ? (
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  ) : (
+                    <RefreshCw className="h-4 w-4 mr-2" />
+                  )}
+                  Sync Inventory
+                </Button>
+              ) : (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="min-h-[44px] sm:min-h-0"
+                  onClick={() => navigate("/channels/inventory-exposure")}
+                  title="Canonical inventory publication is controlled from Inventory Exposure"
+                >
+                  <ShieldCheck className="h-4 w-4 mr-2" />
+                  Inventory Exposure
+                </Button>
+              )}
+              <InventoryRuntimeAuthorityBadge />
               <Button
                 variant="outline"
                 size="sm"

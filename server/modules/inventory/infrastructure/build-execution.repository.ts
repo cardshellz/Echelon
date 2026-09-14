@@ -12,6 +12,15 @@ import {
   type BuildCostTotals,
   type BuildVariantFacts,
 } from "../domain/build.domain";
+import {
+  legacyTransformationExecutionAuthority,
+  type TransformationExecutionAuthorityPort,
+} from "../application/transformation-execution-authority.port";
+import {
+  TransformationExecutionAuthorityError,
+  type BuildAuthorization,
+  type BuildAuthorizationRequest,
+} from "../domain/transformation-execution-authority";
 
 type Db = {
   execute: (query: unknown) => Promise<{ rows: any[] }>;
@@ -37,6 +46,7 @@ export type BuildExecutionDependencies = {
   normalizeBuildLotCosts: (lot: any) => NormalizedLotCosts;
   buildMillsToRoundedCents: (value: bigint) => bigint;
   onBuildOrderCompleted?: (tx: Db, context: BuildOrderCompletedContext) => Promise<void>;
+  transformationAuthority?: TransformationExecutionAuthorityPort;
 };
 
 export type ExecuteBuildRunInput = {
@@ -144,6 +154,110 @@ function errorMessage(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).slice(0, 2000);
 }
 
+function rethrowBuildAuthorityError(error: unknown): never {
+  if (error instanceof TransformationExecutionAuthorityError) {
+    throw new BuildDomainError(error.code, error.message, error.context);
+  }
+  throw error;
+}
+
+function optionalBigintText(value: unknown): string | null {
+  return value == null ? null : BigInt(String(value)).toString();
+}
+
+function buildAuthorizationRequest(order: any, components: readonly any[]): BuildAuthorizationRequest {
+  return {
+    recipeId: Number(order.recipe_id),
+    recipeCode: String(order.recipe_code),
+    recipeVersion: Number(order.recipe_version),
+    recipeType: order.recipe_type,
+    warehouseId: Number(order.warehouse_id),
+    outputProductId: Number(order.output_product_id),
+    outputVariantId: Number(order.output_variant_id),
+    outputUnitsPerVariant: Number(order.output_units_per_variant),
+    outputQty: Number(order.output_qty_per_build),
+    components: components.map((component) => ({
+      componentVariantId: Number(component.component_variant_id),
+      componentProductId: Number(component.component_product_id),
+      componentUnitsPerVariant: Number(component.component_units_per_variant),
+      componentQty: Number(component.qty_per_build),
+    })),
+  };
+}
+
+function canonicalActor(actorId: string | undefined): string {
+  const actor = actorId?.trim();
+  if (!actor || actor.length > 100) {
+    throw new BuildDomainError(
+      "BUILD_CANONICAL_ACTOR_REQUIRED",
+      "Canonical build release requires an authenticated actor identifier.",
+      { actorId: actorId ?? null },
+    );
+  }
+  return actor;
+}
+
+function assertCanonicalReleaseAuthorization(authorization: BuildAuthorization): void {
+  const valid = authorization.runtime.authority === "canonical"
+    && /^[1-9][0-9]*$/.test(authorization.runtime.revision)
+    && authorization.runtime.activationRunId !== null
+    && /^[1-9][0-9]*$/.test(authorization.runtime.activationRunId)
+    && authorization.headRevision !== null
+    && /^(0|[1-9][0-9]*)$/.test(authorization.headRevision)
+    && authorization.modelId !== null
+    && Number.isSafeInteger(authorization.modelId)
+    && authorization.modelId > 0
+    && authorization.modelVersion !== null
+    && Number.isSafeInteger(authorization.modelVersion)
+    && authorization.modelVersion > 0
+    && authorization.modelDefinitionHash !== null
+    && /^[0-9a-f]{64}$/.test(authorization.modelDefinitionHash)
+    && authorization.bindingId !== null
+    && Number.isSafeInteger(authorization.bindingId)
+    && authorization.bindingId > 0
+    && authorization.bindingDefinitionHash !== null
+    && /^[0-9a-f]{64}$/.test(authorization.bindingDefinitionHash);
+  if (!valid) {
+    throw new BuildDomainError(
+      "BUILD_AUTHORIZATION_STATE_INVALID",
+      "Canonical build release did not produce complete transformation authority evidence.",
+      { recipeId: authorization.request.recipeId, warehouseId: authorization.request.warehouseId },
+    );
+  }
+}
+
+function assertPersistedAuthorizationMatches(order: any, authorization: BuildAuthorization): void {
+  if (authorization.runtime.authority === "legacy") {
+    if (order.transformation_authority != null) {
+      throw new BuildDomainError(
+        "BUILD_AUTHORIZATION_STATE_INVALID",
+        "A legacy build cannot carry canonical transformation authority evidence.",
+        { buildOrderId: Number(order.id), transformationAuthority: order.transformation_authority },
+      );
+    }
+    return;
+  }
+  const matches = order.transformation_authority === "canonical"
+    && optionalBigintText(order.transformation_authority_revision) === authorization.runtime.revision
+    && optionalBigintText(order.transformation_activation_run_id) === authorization.runtime.activationRunId
+    && optionalBigintText(order.transformation_model_head_revision) === authorization.headRevision
+    && Number(order.transformation_model_id) === authorization.modelId
+    && Number(order.transformation_model_version) === authorization.modelVersion
+    && order.transformation_model_definition_hash === authorization.modelDefinitionHash
+    && Number(order.transformation_recipe_binding_id) === authorization.bindingId
+    && order.transformation_recipe_definition_hash === authorization.bindingDefinitionHash
+    && typeof order.transformation_authorized_by === "string"
+    && order.transformation_authorized_by.trim().length > 0
+    && order.transformation_authorized_at != null;
+  if (!matches) {
+    throw new BuildDomainError(
+      "BUILD_AUTHORIZATION_EVIDENCE_DRIFT",
+      "The build order no longer matches its frozen transformation authorization.",
+      { buildOrderId: Number(order.id) },
+    );
+  }
+}
+
 const NON_EXECUTION_FAILURE_CODES = new Set([
   "BUILD_ORDER_NOT_FOUND",
   "BUILD_RUN_EXCEEDS_REMAINING",
@@ -153,13 +267,22 @@ const NON_EXECUTION_FAILURE_CODES = new Set([
   "INVALID_BUILD_INPUT",
   "INVALID_BUILD_PROGRESS",
   "INVALID_BUILD_STATUS",
+  "BUILD_CANONICAL_ACTOR_REQUIRED",
+  "BUILD_CANONICAL_AUTHORIZATION_MISSING",
+  "BUILD_AUTHORIZATION_EVIDENCE_DRIFT",
+  "BUILD_AUTHORIZATION_STATE_INVALID",
 ]);
 
 export class BuildExecutionRepository {
+  private readonly transformationAuthority: TransformationExecutionAuthorityPort;
+
   constructor(
     private readonly db: Db,
     private readonly dependencies: BuildExecutionDependencies,
-  ) {}
+  ) {
+    this.transformationAuthority = dependencies.transformationAuthority
+      ?? legacyTransformationExecutionAuthority;
+  }
 
   private async lockOrder(tx: Db, buildOrderId: number): Promise<any> {
     const result = await tx.execute(sql`
@@ -301,6 +424,85 @@ export class BuildExecutionRepository {
         handoffStatus,
       },
     );
+  }
+
+  /**
+   * Pin transformation authority before taking the build-order lock. Drafts
+   * are checked against the exact current active binding. Released orders use
+   * their immutable authorization so a later model supersession cannot strand
+   * already-reserved work.
+   */
+  private async prepareReleaseAuthorization(
+    tx: Db,
+    buildOrderId: number,
+  ): Promise<BuildAuthorization | null> {
+    const preliminary = (await tx.execute(sql`
+      SELECT id, status, transformation_authority
+      FROM inventory.build_orders
+      WHERE id = ${buildOrderId}
+    `)).rows[0];
+    if (!preliminary) {
+      throw new BuildDomainError("BUILD_ORDER_NOT_FOUND", `Build order ${buildOrderId} was not found`);
+    }
+    if (preliminary.status === "completed") return null;
+    try {
+      if (preliminary.transformation_authority === "canonical") {
+        return await this.transformationAuthority.validatePinnedBuildOrder(tx, buildOrderId);
+      }
+      if (preliminary.transformation_authority != null) {
+        throw new BuildDomainError(
+          "BUILD_AUTHORIZATION_STATE_INVALID",
+          "The build order has an unsupported transformation authority value.",
+          { buildOrderId, transformationAuthority: preliminary.transformation_authority },
+        );
+      }
+      const authorization = await this.transformationAuthority.pinBuildOrder(tx, buildOrderId);
+      if (authorization.runtime.authority === "canonical" && preliminary.status !== "draft") {
+        throw new BuildDomainError(
+          "BUILD_CANONICAL_AUTHORIZATION_MISSING",
+          "A build released before canonical cutover cannot execute until its ownership is explicitly resolved.",
+          { buildOrderId, status: preliminary.status },
+        );
+      }
+      return authorization;
+    } catch (error) {
+      if (error instanceof BuildDomainError) throw error;
+      rethrowBuildAuthorityError(error);
+    }
+  }
+
+  private async validateExecutionAuthorization(
+    tx: Db,
+    buildOrderId: number,
+  ): Promise<BuildAuthorization> {
+    try {
+      return await this.transformationAuthority.validatePinnedBuildOrder(tx, buildOrderId);
+    } catch (error) {
+      rethrowBuildAuthorityError(error);
+    }
+  }
+
+  private async validateRetainedAuthorizationIfPresent(
+    tx: Db,
+    buildOrderId: number,
+  ): Promise<BuildAuthorization | null> {
+    const row = (await tx.execute(sql`
+      SELECT transformation_authority
+      FROM inventory.build_orders
+      WHERE id = ${buildOrderId}
+    `)).rows[0];
+    if (!row) {
+      throw new BuildDomainError("BUILD_ORDER_NOT_FOUND", `Build order ${buildOrderId} was not found`);
+    }
+    if (row.transformation_authority == null) return null;
+    if (row.transformation_authority !== "canonical") {
+      throw new BuildDomainError(
+        "BUILD_AUTHORIZATION_STATE_INVALID",
+        "The build order has an unsupported transformation authority value.",
+        { buildOrderId, transformationAuthority: row.transformation_authority },
+      );
+    }
+    return this.validateExecutionAuthorization(tx, buildOrderId);
   }
 
   private async reserveOutstandingComponents(
@@ -474,6 +676,7 @@ export class BuildExecutionRepository {
     const work = async (tx: Db) => {
       const quantityPosting = await openOperationalQuantityPosting(tx);
       await this.assertClaimBuildActionAvailable(tx, buildOrderId, "release");
+      const authorization = await this.prepareReleaseAuthorization(tx, buildOrderId);
       const order = await this.lockOrder(tx, buildOrderId);
       if (quantityPosting) await this.lockQuantityInventory(tx, order);
       if (order.status === "completed") return order;
@@ -486,20 +689,82 @@ export class BuildExecutionRepository {
       }
       const components = await this.lockComponents(tx, buildOrderId);
       await this.assertConfigurationCurrent(tx, order, components);
+      if (!authorization) {
+        throw new BuildDomainError(
+          "BUILD_AUTHORIZATION_STATE_INVALID",
+          "A mutable build release requires pinned transformation authority.",
+          { buildOrderId, status: order.status },
+        );
+      }
+      const canonicalReleaseActor = authorization.runtime.authority === "canonical"
+        ? canonicalActor(actorId)
+        : null;
+      if (authorization.runtime.authority === "canonical") {
+        assertCanonicalReleaseAuthorization(authorization);
+        try {
+          this.transformationAuthority.assertBuildSnapshot(
+            authorization,
+            buildAuthorizationRequest(order, components),
+          );
+        } catch (error) {
+          rethrowBuildAuthorityError(error);
+        }
+        if (order.transformation_authority === "canonical") {
+          assertPersistedAuthorizationMatches(order, authorization);
+        } else if (order.status !== "draft" || order.transformation_authority != null) {
+          throw new BuildDomainError(
+            "BUILD_CANONICAL_AUTHORIZATION_MISSING",
+            "Only a draft build may acquire canonical transformation authorization during release.",
+            { buildOrderId, status: order.status },
+          );
+        }
+      } else {
+        assertPersistedAuthorizationMatches(order, authorization);
+      }
       await this.reserveOutstandingComponents(tx, order, components, actorId);
       if (order.status === "released") return order;
 
-      const updated = await tx.execute(sql`
-        UPDATE inventory.build_orders
-        SET status = 'released',
-            released_by = ${actorId ?? null},
-            released_at = now(),
-            failure_code = NULL,
-            failure_message = NULL,
-            updated_at = now()
-        WHERE id = ${buildOrderId}
-        RETURNING *
-      `);
+      const updated = authorization.runtime.authority === "canonical"
+        ? await tx.execute(sql`
+            UPDATE inventory.build_orders
+            SET status = 'released',
+                released_by = ${canonicalReleaseActor},
+                released_at = now(),
+                transformation_authority = 'canonical',
+                transformation_authority_revision = ${authorization.runtime.revision}::bigint,
+                transformation_activation_run_id = ${authorization.runtime.activationRunId}::bigint,
+                transformation_model_head_revision = ${authorization.headRevision}::bigint,
+                transformation_model_id = ${authorization.modelId},
+                transformation_model_version = ${authorization.modelVersion},
+                transformation_model_definition_hash = ${authorization.modelDefinitionHash},
+                transformation_recipe_binding_id = ${authorization.bindingId},
+                transformation_recipe_definition_hash = ${authorization.bindingDefinitionHash},
+                transformation_authorized_at = now(),
+                transformation_authorized_by = ${canonicalReleaseActor},
+                failure_code = NULL,
+                failure_message = NULL,
+                updated_at = now()
+            WHERE id = ${buildOrderId} AND status = 'draft'
+            RETURNING *
+          `)
+        : await tx.execute(sql`
+            UPDATE inventory.build_orders
+            SET status = 'released',
+                released_by = ${actorId ?? null},
+                released_at = now(),
+                failure_code = NULL,
+                failure_message = NULL,
+                updated_at = now()
+            WHERE id = ${buildOrderId} AND status = 'draft'
+            RETURNING *
+          `);
+      if (updated.rows.length !== 1) {
+        throw new BuildDomainError(
+          "BUILD_RELEASE_STATE_CHANGED",
+          "The build order changed while its release was being recorded.",
+          { buildOrderId },
+        );
+      }
       return updated.rows[0];
     };
     return txOverride ? work(txOverride) : this.db.transaction(work);
@@ -518,8 +783,9 @@ export class BuildExecutionRepository {
     const quantityPosting = await openOperationalQuantityPosting(tx);
     await lockInventoryCostGraph(tx);
     await this.assertClaimBuildActionAvailable(tx, input.buildOrderId, "execute");
-    const order = await this.lockOrder(tx, input.buildOrderId);
-    if (quantityPosting) await this.lockQuantityInventory(tx, order);
+    // A terminal receipt is already-posted evidence, not a new transformation.
+    // Preserve exact retries across cutover without granting an unbound legacy
+    // order permission to execute again.
     const existingResult = await tx.execute(sql`
       SELECT *
       FROM inventory.build_runs
@@ -544,8 +810,13 @@ export class BuildExecutionRepository {
           { buildRunId: Number(existingRun.id) },
         );
       }
-      return this.executionResult(order, existingRun, true);
+      const replayOrder = await this.lockOrder(tx, input.buildOrderId);
+      return this.executionResult(replayOrder, existingRun, true);
     }
+    const authorization = await this.validateExecutionAuthorization(tx, input.buildOrderId);
+    const order = await this.lockOrder(tx, input.buildOrderId);
+    assertPersistedAuthorizationMatches(order, authorization);
+    if (quantityPosting) await this.lockQuantityInventory(tx, order);
 
     if (!["released", "in_progress", "failed"].includes(String(order.status))) {
       throw new BuildDomainError(
@@ -555,6 +826,14 @@ export class BuildExecutionRepository {
       );
     }
     const components = await this.lockComponents(tx, input.buildOrderId);
+    try {
+      this.transformationAuthority.assertBuildSnapshot(
+        authorization,
+        buildAuthorizationRequest(order, components),
+      );
+    } catch (error) {
+      rethrowBuildAuthorityError(error);
+    }
     await this.assertConfigurationCurrent(tx, order, components);
     const quantities = calculateBuildRunQuantities({
       plannedBuilds: Number(order.planned_builds),
@@ -1086,7 +1365,9 @@ export class BuildExecutionRepository {
       const quantityPosting = await openOperationalQuantityPosting(tx);
       if (quantityPosting) await lockInventoryCostGraph(tx);
       await this.assertClaimBuildActionAvailable(tx, input.buildOrderId, "reverse");
+      const authorization = await this.validateRetainedAuthorizationIfPresent(tx, input.buildOrderId);
       const order = await this.lockOrder(tx, input.buildOrderId);
+      if (authorization) assertPersistedAuthorizationMatches(order, authorization);
       if (quantityPosting) await this.lockQuantityInventory(tx, order);
       if (order.status === "cancelled") {
         throw new BuildDomainError(

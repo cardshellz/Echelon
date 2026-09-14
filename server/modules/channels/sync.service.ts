@@ -30,6 +30,7 @@ import { ChannelIdentityService } from "./channel-identity.service";
 import { ChannelIdentityError } from "./channel-identity.domain";
 import { describeAllocationFailure } from "./allocation-engine.errors";
 import { logger } from "../../platform/observability/logger";
+import type { InventorySyncResult } from "./echelon-sync-orchestrator.service";
 
 type DrizzleDb = {
   select: (...args: any[]) => any;
@@ -85,36 +86,30 @@ export interface SyncResult {
  * update channel_feeds without calling external APIs.
  */
 class ChannelSyncService {
-  /** Debounce map: productId → timeout handle */
-  private pendingSyncs = new Map<number, ReturnType<typeof setTimeout>>();
-  private readonly DEBOUNCE_MS = 2000;
   private readonly MAX_RETRIES = 3;
 
   /** Cached kill switch — loaded once, refreshed on demand */
   private _syncEnabled: boolean | null = null;
 
-  /**
-   * Optional reference to the Echelon sync orchestrator.
-   * When set, event-driven syncs (queueSyncAfterInventoryChange) will
-   * delegate to the orchestrator which respects channel_allocation_rules.
-   * Set via setOrchestrator() after construction to break circular deps.
-   */
+  /** Optional orchestrator retained for legacy direct sync compatibility. */
   private orchestrator: any | null = null;
+  private inventoryChangePublisher: ((productVariantId: number, triggeredBy: string) => Promise<void>) | null = null;
 
   constructor(
     private readonly db: DrizzleDb,
     private readonly atpService: InventoryAtpService,
   ) {}
 
-  /**
-   * Wire the Echelon sync orchestrator into this service.
-   * Must be called after the orchestrator is created (breaks circular dependency).
-   * Once set, all event-driven syncs route through the orchestrator which
-   * uses the Allocation Engine (channel_allocation_rules).
-   */
+  /** Wire the compatibility orchestrator after construction. */
   setOrchestrator(orchestrator: any): void {
     this.orchestrator = orchestrator;
     console.log("[ChannelSync] Orchestrator wired — event-driven syncs will use Allocation Engine");
+  }
+
+  setInventoryChangePublisher(
+    publisher: (productVariantId: number, triggeredBy: string) => Promise<void>,
+  ): void {
+    this.inventoryChangePublisher = publisher;
   }
 
   /** Check if channel sync is enabled (cached, lazy-loaded) */
@@ -282,7 +277,14 @@ class ChannelSyncService {
     aggregated.total = productIds.length;
 
     for (const productId of productIds) {
-      const syncResult = await this.syncProduct(productId, "manual");
+      const syncResult = channelId != null && this.orchestrator
+        ? legacyResultFromOrchestrator(productId, await this.orchestrator.syncInventoryForChannelProduct(
+            channelId,
+            productId,
+            { dryRun: false },
+            "manual_channel_sync",
+          ))
+        : await this.syncProduct(productId, "manual");
       aggregated.synced += syncResult.synced;
       aggregated.errors.push(...syncResult.errors);
       await this.delay(300);
@@ -300,142 +302,24 @@ class ChannelSyncService {
    * Collapses rapid changes to the same product into a single sync
    * after a 2-second quiet window.
    *
-   * Now respects the Echelon sync control hierarchy:
-   * 1. Check sync_settings.global_enabled
-   * 2. Check per-channel sync_enabled
-   * 3. Respect sync_mode (live vs dry_run)
-   * 4. Log to sync_log
+   * The injected publication coordinator resolves runtime authority and every
+   * effective publication control; this compatibility method never decides
+   * those settings itself.
    */
   async queueSyncAfterInventoryChange(
     productVariantId: number,
     triggeredBy?: string,
   ): Promise<void> {
-    // Check new sync control hierarchy first
-    try {
-      const { syncSettings: syncSettingsTable } = await import("@shared/schema");
-      const [globalSettings] = await this.db
-        .select()
-        .from(syncSettingsTable)
-        .limit(1);
-
-      if (globalSettings && !globalSettings.globalEnabled) {
-        return; // Global sync disabled
-      }
-    } catch {
-      // Fallback to old kill switch if sync_settings table doesn't exist yet
-      if (!(await this.isSyncEnabled())) return;
+    if (!Number.isSafeInteger(productVariantId) || productVariantId <= 0) {
+      throw new Error("productVariantId must be a positive safe integer");
     }
-
-    const [variant] = await this.db
-      .select()
-      .from(productVariants)
-      .where(eq(productVariants.id, productVariantId))
-      .limit(1);
-
-    if (!variant) {
-      console.warn(`[ChannelSync] Cannot queue sync: variant ${productVariantId} not found`);
-      return;
+    if (!this.inventoryChangePublisher) {
+      throw new Error("Authority-aware inventory change publisher is not wired");
     }
-    if (!isCustomerSellableVariant(variant)) {
-      console.warn(`[ChannelSync] Cannot queue sync: variant ${productVariantId} is internal-only`);
-      return;
-    }
-
-    // Check if this variant has any active feeds
-    const [feed] = await this.db
-      .select()
-      .from(channelFeeds)
-      .where(and(
-        eq(channelFeeds.productVariantId, productVariantId),
-        eq(channelFeeds.isActive, 1),
-      ))
-      .limit(1);
-
-    if (!feed) return; // No active feeds — nothing to sync
-
-    const productId = variant.productId;
-
-    // Clear existing debounce timer for this product
-    const existing = this.pendingSyncs.get(productId);
-    if (existing) clearTimeout(existing);
-
-    // Set new debounce timer
-    const timeout = setTimeout(async () => {
-      this.pendingSyncs.delete(productId);
-      try {
-        // Check per-channel sync settings before syncing
-        const feedChannelIds = await this.db
-          .select({ channelId: channelFeeds.channelId })
-          .from(channelFeeds)
-          .where(and(
-            eq(channelFeeds.productVariantId, productVariantId),
-            eq(channelFeeds.isActive, 1),
-          ));
-
-        const uniqueChannelIds = [...new Set(feedChannelIds.map((f: any) => f.channelId).filter(Boolean))];
-
-        // Check which channels have sync enabled
-        if (uniqueChannelIds.length > 0) {
-          const channelRows = await this.db
-            .select()
-            .from(channels)
-            .where(inArray(channels.id, uniqueChannelIds as number[]));
-
-          const hasAnyEnabled = channelRows.some((c: any) => c.syncEnabled === true);
-          if (!hasAnyEnabled) {
-            return; // No channels have sync enabled
-          }
-
-          // Check if any channels are in dry-run mode — log but still sync (live channels proceed normally)
-          for (const ch of channelRows) {
-            if ((ch as any).syncEnabled && (ch as any).syncMode === "dry_run") {
-              // Log dry-run event
-              try {
-                const { syncLog: syncLogTable } = await import("@shared/schema");
-                await this.db.insert(syncLogTable).values({
-                  channelId: ch.id,
-                  channelName: ch.name,
-                  action: "inventory_push",
-                  productVariantId: productVariantId,
-                  status: "dry_run",
-                  source: "event",
-                });
-              } catch {
-                // Don't let logging failures block sync
-              }
-            }
-          }
-        }
-
-        await this.syncProduct(productId, triggeredBy ?? "inventory_change");
-
-        // Log event-driven sync to sync_log
-        try {
-          const { syncLog: syncLogTable } = await import("@shared/schema");
-          for (const chId of uniqueChannelIds) {
-            const ch = (await this.db.select().from(channels).where(eq(channels.id, chId as number)).limit(1))[0];
-            if (ch && (ch as any).syncEnabled && (ch as any).syncMode === "live") {
-              await this.db.insert(syncLogTable).values({
-                channelId: ch.id,
-                channelName: ch.name,
-                action: "inventory_push",
-                productVariantId: productVariantId,
-                status: "pushed",
-                source: "event",
-              });
-            }
-          }
-        } catch {
-          // Don't let logging failures block
-        }
-      } catch (err: any) {
-        console.error(
-          `[ChannelSync] Debounced sync failed for product ${productId}: ${err.message}`,
-        );
-      }
-    }, this.DEBOUNCE_MS);
-
-    this.pendingSyncs.set(productId, timeout);
+    await this.inventoryChangePublisher(
+      productVariantId,
+      triggeredBy?.trim() || "inventory_change",
+    );
   }
 
   // ---------------------------------------------------------------------------
@@ -828,6 +712,24 @@ class ChannelSyncService {
   private delay(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
+}
+
+function legacyResultFromOrchestrator(productId: number, rows: readonly InventorySyncResult[]): SyncResult {
+  const result: SyncResult = { productId, synced: 0, errors: [], variants: [] };
+  for (const row of rows) {
+    result.synced += row.variantsPushed ?? 0;
+    for (const detail of row.details ?? []) {
+      if (detail.status === "error" && detail.error) result.errors.push(`${detail.sku}: ${detail.error}`);
+      result.variants.push({
+        productVariantId: detail.variantId,
+        channelVariantId: "",
+        pushedQty: detail.allocatedQty,
+        atpBase: 0,
+        status: detail.status,
+      });
+    }
+  }
+  return result;
 }
 
 // ---------------------------------------------------------------------------

@@ -14,8 +14,13 @@ import { requirePermission } from "../../routes/middleware";
 import { coerceTimeZone, parseCutoffMinutes } from "../orders/sort-rank";
 import { getWarehouseById } from "./infrastructure/warehouse.repository";
 import { getSlaCutoffConfig } from "./settings.resolver";
+import { INVENTORY_LEGACY_ADMIN_CONTROLS } from "../inventory-planning/application/inventory-legacy-admin-control.service";
+import { createInventoryLegacyAdminControlService } from "../inventory-planning/infrastructure/inventory-legacy-admin-control.repository";
+import { sendInventoryLegacyAdminControlError } from "../inventory-planning/interfaces/http/inventory-legacy-admin-control.error";
 
 import { insertWarehouseSchema, insertWarehouseLocationSchema, insertWarehouseZoneSchema, insertFulfillmentRoutingRuleSchema, routingMatchTypeEnum } from "@shared/schema";
+
+type WarehouseRouteTransaction = Pick<typeof db, "select" | "insert" | "update" | "delete" | "execute">;
 
 /**
  * Validate the SLA cutoff fields on a warehouse-settings write. Returns an
@@ -65,6 +70,7 @@ function getLocationDeleteConflictMessage(error: any) {
 export function registerWarehouseRoutes(app: Express) {
   registerWarehouseInventorySourceRoutes(app);
   const binAssignments = createBinAssignmentService(db, storage);
+  const inventoryLegacyAdminControl = createInventoryLegacyAdminControlService();
 
   // ============================================
   // INVENTORY MANAGEMENT (WMS) API
@@ -335,7 +341,7 @@ export function registerWarehouseRoutes(app: Express) {
   app.post("/api/warehouse-settings", requirePermission("warehouse", "manage"), async (req, res) => {
     try {
       const data = req.body;
-      const settings = await storage.createWarehouseSettings({
+      const createSettings = (executor: WarehouseRouteTransaction = db) => storage.createWarehouseSettings({
         warehouseId: data.warehouseId || null,
         warehouseCode: data.warehouseCode || "DEFAULT",
         warehouseName: data.warehouseName || "Main Warehouse",
@@ -367,10 +373,19 @@ export function registerWarehouseRoutes(app: Express) {
         replenQaIncludePickBins: data.replenQaIncludePickBins ?? 1,
         replenQaIncludePalletLocations: data.replenQaIncludePalletLocations ?? 1,
         isActive: data.isActive ?? 1,
-      });
+      }, executor);
+      const writesLegacyChannelSyncControl = Object.prototype.hasOwnProperty.call(data, "channelSyncEnabled")
+        || Object.prototype.hasOwnProperty.call(data, "channelSyncIntervalMinutes");
+      const settings = writesLegacyChannelSyncControl
+        ? await inventoryLegacyAdminControl.executeLegacyWrite(
+            INVENTORY_LEGACY_ADMIN_CONTROLS.channelSync,
+            createSettings,
+          )
+        : await createSettings();
       res.status(201).json(settings);
     } catch (error) {
       console.error("Error creating warehouse settings:", error);
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: "Failed to create warehouse settings" });
     }
   });
@@ -378,13 +393,26 @@ export function registerWarehouseRoutes(app: Express) {
   app.patch("/api/warehouse-settings/:id", requirePermission("warehouse", "manage"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
-      const settings = await storage.updateWarehouseSettings(id, req.body);
+      const settings = await inventoryLegacyAdminControl.executeGuardedLegacyWrite(
+        INVENTORY_LEGACY_ADMIN_CONTROLS.channelSync,
+        async (guard, transaction) => {
+          const current = await storage.getWarehouseSettingsById(id, transaction);
+          if (!current) return undefined;
+          const changesEnabled = Object.prototype.hasOwnProperty.call(req.body, "channelSyncEnabled")
+            && Number(req.body.channelSyncEnabled) !== current.channelSyncEnabled;
+          const changesInterval = Object.prototype.hasOwnProperty.call(req.body, "channelSyncIntervalMinutes")
+            && Number(req.body.channelSyncIntervalMinutes) !== current.channelSyncIntervalMinutes;
+          if (changesEnabled || changesInterval) guard.assertLegacyMutation();
+          return storage.updateWarehouseSettings(id, req.body, transaction);
+        },
+      );
       if (!settings) {
         return res.status(404).json({ error: "Warehouse settings not found" });
       }
       res.json(settings);
     } catch (error) {
       console.error("Error updating warehouse settings:", error);
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: "Failed to update warehouse settings" });
     }
   });

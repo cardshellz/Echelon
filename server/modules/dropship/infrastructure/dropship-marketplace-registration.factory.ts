@@ -14,6 +14,7 @@ import {
   type EbayRegistrationReadTransport,
 } from "../../marketplace-listings/infrastructure/providers/ebay/ebay-registration-contracts";
 import { createAuthorityAwareInventoryAtpService } from "../../inventory-planning/infrastructure/inventory-availability-runtime-atp.repository";
+import { createInventoryChannelQuantityRuntimeService } from "../../inventory-planning/infrastructure/inventory-availability-runtime-publication.repository";
 import { DropshipMarketplaceRegistrationAccountClaimer } from "../application/dropship-marketplace-registration-account-claimer";
 import {
   DropshipMarketplaceRegistrationOwnerReader,
@@ -89,6 +90,7 @@ export function createDropshipMarketplaceRegistrationOwnerAdaptersFromEnv(
   // (handoff Option B), computed over the authority-aware ATP reader.
   const atp = new ChannelAllocationDropshipAtpProvider({
     allocationEngine: createAllocationEngine(db, createAuthorityAwareInventoryAtpService(pool)),
+    runtimeQuantity: createInventoryChannelQuantityRuntimeService(pool),
     resolveDropshipOmsChannelId: () => resolveDropshipOmsChannelIdWithClient(pool),
   });
   const ownerRepository = new PgDropshipMarketplaceRegistrationOwnerRepository(

@@ -223,13 +223,7 @@ dbDescribe.sequential("verified opening persistence with real PostgreSQL admissi
       INSERT INTO inventory.inventory_transactions(order_id,order_item_id,product_variant_id,to_location_id,transaction_type,
         variant_qty_delta,variant_qty_before,variant_qty_after,reserved_qty_delta,source_state,target_state)
         VALUES(2,22,101,200,'reserve',0,0,0,20,'on_hand','committed');
-      UPDATE inventory.inventory_levels SET reserved_qty=4 WHERE id=10;
-      UPDATE inventory.inventory_lots SET qty_reserved=4 WHERE id=4;
-      INSERT INTO inventory.build_orders(id,status,warehouse_id) VALUES(7,'released',1);
-      INSERT INTO inventory.build_order_components(id,build_order_id,component_variant_id,source_location_id) VALUES(8,7,101,100);
-      INSERT INTO inventory.build_component_reservations(id,build_order_component_id,inventory_lot_id,reserved_qty,
-        consumed_qty,released_qty,reservation_owner,availability_claim_id,availability_claim_lot_allocation_id)
-        VALUES(9,8,4,1,0,0,'build_order',NULL,NULL)`);
+    `);
   }
 
   async function promiseOpeningRequest(contractVersion: OpeningVerification["contractVersion"] = "inventory_cutover_opening_v1") {
@@ -264,7 +258,7 @@ dbDescribe.sequential("verified opening persistence with real PostgreSQL admissi
     const cutover = new InventoryCutoverCommitService(new PostgresInventoryCutoverCommitRepository(pool), clock);
     const review = await cutover.preview({ activationRunId: prepared.activationRunId }, "operator");
     expect(review).toMatchObject({ ready: true, blockers: [], summary: {
-      orders: 2, lines: 2, retainedIndependentBuildHolds: 1, legacyPromiseReplanning: { positions: 1, orderLines: 1 } } });
+      orders: 2, lines: 2, retainedIndependentBuildHolds: 0, legacyPromiseReplanning: { positions: 1, orderLines: 1 } } });
     return { cutover, review, command: { activationRunId: prepared.activationRunId, expectedAuthorityRevision: review.authorityRevision,
       expectedReviewHash: review.reviewHash, idempotencyKey: "promise-opening-cutover", reason: "Atomically replace the exact promise with fully retained demand" } };
   }
@@ -344,7 +338,7 @@ dbDescribe.sequential("verified opening persistence with real PostgreSQL admissi
     const beforeOpening = await immutableBusinessState();
     const assessment = await service.preview(input.verification, "operator");
     expect(assessment).toMatchObject({ ready: true, blockers: [], plan: {
-      retainedIndependentBuildReservationIds: [9], legacyPromiseReleases: strict.legacyPromiseReleases,
+      retainedIndependentBuildReservationIds: [], legacyPromiseReleases: strict.legacyPromiseReleases,
       orders: [{ orderId: 1, lines: [{ orderItemId: 11, requestedQty: "6", reservedQty: "3", pickedQty: "2", freshDemandQty: "1" }] },
         { orderId: 2, lines: [{ orderItemId: 22, requestedQty: "20", reservedQty: "0", pickedQty: "0", freshDemandQty: "20", allocations: [] }] }] } });
     expect(assessment.historicalExceptions).toContainEqual(expect.objectContaining({ code: "JOURNAL_CUSTODY_UNKNOWN" }));
@@ -390,7 +384,9 @@ dbDescribe.sequential("verified opening persistence with real PostgreSQL admissi
       .toEqual([{ qty_on_hand: 20, qty_reserved: 20, qty_picked: 2, total_unit_cost_mills: "9007199254740995" }]);
     expect((await pool.query("SELECT order_item_id,requested_qty::text,planned_qty::text,shortfall_qty::text FROM inventory.availability_claim_lines ORDER BY order_item_id")).rows)
       .toEqual([{ order_item_id: 11, requested_qty: "6", planned_qty: "6", shortfall_qty: "0" },
-        { order_item_id: 22, requested_qty: "20", planned_qty: "15", shortfall_qty: "5" }]);
+        // Order 11 needs only one fresh unit. Its two picked units already left
+        // variant_qty, so subtracting them again would understate order 22 ATP.
+        { order_item_id: 22, requested_qty: "20", planned_qty: "16", shortfall_qty: "4" }]);
     expect((await pool.query("SELECT order_id,order_item_id,reserved_qty_delta,variant_qty_delta,from_location_id FROM inventory.inventory_transactions WHERE reference_type='inventory_cutover_promise'")).rows)
       .toEqual([{ order_id: 2, order_item_id: 22, reserved_qty_delta: -20, variant_qty_delta: 0, from_location_id: 200 }]);
     expect((await pool.query("SELECT result_payload->'legacyPromiseReleases' AS releases,jsonb_array_length(result_payload->'legacyPromiseReleaseTransactionIds') AS audits FROM inventory.availability_cutover_reconstruction_receipts")).rows)
@@ -551,7 +547,7 @@ dbDescribe.sequential("verified opening persistence with real PostgreSQL admissi
     expect((await pool.query("SELECT count(*)::integer AS count FROM inventory.availability_claims")).rows[0].count).toBe(0);
   });
 
-  it("preserves customer and independent-build holds through full cutover, rolls back late failure, and adopts only existing costs", async () => {
+  it("blocks canonical cutover while an independently released legacy build remains open", async () => {
     await pool.query(`UPDATE inventory.inventory_levels SET reserved_qty=4 WHERE id=10;
       UPDATE inventory.inventory_lots SET qty_reserved=4 WHERE id=4;
       INSERT INTO inventory.build_orders(id,status,warehouse_id) VALUES(7,'released',1);
@@ -562,8 +558,7 @@ dbDescribe.sequential("verified opening persistence with real PostgreSQL admissi
     const input = await request();
     const assessment = await service.preview(input.verification, "operator");
     expect(assessment).toMatchObject({ ready: true, plan: { retainedIndependentBuildReservationIds: [9], legacyPromiseReleases: [] } });
-    const saved = await service.save(input, "operator");
-    const openingBefore = await loadLatestCutoverOpening(pool);
+    await service.save(input, "operator");
     const dryRun = await seedCompositionReviewedDryRun(pool);
     const clock = { now: () => new Date(dryRun.completedAt) };
     const activation = new InventoryAvailabilityActivationService(new PostgresInventoryAvailabilityActivationRepository(pool), clock);
@@ -572,52 +567,23 @@ dbDescribe.sequential("verified opening persistence with real PostgreSQL admissi
     expect(prepared).toMatchObject({ state: "publication_verified", runtimeAuthority: "legacy" });
     const cutover = new InventoryCutoverCommitService(new PostgresInventoryCutoverCommitRepository(pool), clock);
     const review = await cutover.preview({ activationRunId: prepared.activationRunId }, "operator");
-    expect(review).toMatchObject({ ready: true, blockers: [], summary: { retainedIndependentBuildHolds: 1,
-      openingBalance: { snapshotId: saved.id, historicalExceptionCount: saved.historicalExceptionCount } } });
+    expect(review).toMatchObject({
+      ready: false,
+      summary: { retainedIndependentBuildHolds: 1 },
+      blockers: [expect.objectContaining({
+        code: "CUTOVER_OPEN_BUILD_REQUIRES_RESOLUTION",
+        subject: "build-order:7",
+      })],
+    });
     const command = { activationRunId: prepared.activationRunId, expectedAuthorityRevision: review.authorityRevision,
-      expectedReviewHash: review.reviewHash, idempotencyKey: "opening-cutover-commit", reason: "Adopt reviewed current custody without repairing history" };
-    const beforeFailure = await immutableBusinessState();
-    await pool.query(`CREATE FUNCTION public.fail_opening_final_receipt() RETURNS trigger LANGUAGE plpgsql AS $$
-      BEGIN RAISE EXCEPTION 'test opening final receipt failure'; END $$;
-      CREATE TRIGGER zz_opening_final_receipt_failure BEFORE INSERT ON inventory.availability_cutover_commits
-        FOR EACH ROW EXECUTE FUNCTION public.fail_opening_final_receipt()`);
-    const capture = PostgresInventoryCutoverReconstructionRepository.prototype.capture;
-    const guardedCapture = vi.spyOn(PostgresInventoryCutoverReconstructionRepository.prototype, "capture")
-      .mockImplementation(async function (this: PostgresInventoryCutoverReconstructionRepository, client: PoolClient) {
-        const evidence = await capture.call(this, client);
-        await expectSupplementalCensusWritersBlocked();
-        return evidence;
-      });
-    try {
-      await expect(cutover.commit(command, "operator")).rejects.toThrow("test opening final receipt failure");
-      expect(guardedCapture).toHaveBeenCalledTimes(2); // final review and adopted-claim recapture
-    } finally {
-      guardedCapture.mockRestore();
-      await pool.query("DROP TRIGGER zz_opening_final_receipt_failure ON inventory.availability_cutover_commits; DROP FUNCTION public.fail_opening_final_receipt()");
-    }
-    expect(await immutableBusinessState()).toEqual(beforeFailure);
-    expect((await pool.query("SELECT count(*)::integer AS count FROM inventory.availability_claim_pick_movements")).rows[0].count).toBe(0);
-    expect((await pool.query("SELECT count(*)::integer AS count FROM inventory.availability_cutover_reconstruction_receipts")).rows[0].count).toBe(0);
+      expectedReviewHash: review.reviewHash, idempotencyKey: "opening-cutover-commit", reason: "Do not adopt unbound legacy build authority" };
+    await expect(cutover.commit(command, "operator")).rejects.toMatchObject({
+      code: "CUTOVER_REVIEW_BLOCKED",
+      context: { blockers: [expect.objectContaining({ code: "CUTOVER_OPEN_BUILD_REQUIRES_RESOLUTION" })] },
+    });
+    expect((await pool.query("SELECT authority FROM inventory.availability_runtime_authority")).rows)
+      .toEqual([{ authority: "legacy" }]);
     expect((await pool.query("SELECT count(*)::integer AS count FROM inventory.availability_cutover_commits")).rows[0].count).toBe(0);
-    expect(await loadLatestCutoverOpening(pool)).toEqual(openingBefore);
-    expect((await pool.query("SELECT lifecycle_status FROM inventory.transformation_model_versions")).rows).toEqual([{ lifecycle_status: "draft" }]);
-    const outcomes = await Promise.all([cutover.commit(command, "operator"), cutover.commit(command, "operator")]);
-    expect(outcomes.map(row => row.alreadyApplied).sort()).toEqual([false, true]);
-    expect((await pool.query("SELECT variant_qty,reserved_qty,picked_qty FROM inventory.inventory_levels WHERE id=10")).rows)
-      .toEqual([{ variant_qty: 20, reserved_qty: 5, picked_qty: 2 }]);
-    expect((await pool.query("SELECT qty_on_hand,qty_reserved,qty_picked,total_unit_cost_mills::text FROM inventory.inventory_lots WHERE id=4")).rows)
-      .toEqual([{ qty_on_hand: 20, qty_reserved: 5, qty_picked: 2, total_unit_cost_mills: "9007199254740995" }]);
-    expect((await pool.query("SELECT reserved_qty,consumed_qty,released_qty FROM inventory.build_component_reservations WHERE id=9")).rows)
-      .toEqual([{ reserved_qty: 1, consumed_qty: 0, released_qty: 0 }]);
-    expect((await pool.query("SELECT quantity::text,total_cost_mills::text,order_item_cost_id FROM inventory.availability_claim_pick_movements")).rows)
-      .toEqual([{ quantity: "2", total_cost_mills: "18014398509481990", order_item_cost_id: 9 }]);
-    const after = await immutableBusinessState();
-    for (const field of ["costs", "orders", "items", "build_reservations", "build_demands", "receipts", "receipt_attempts"] as const) expect(after[field]).toEqual(beforeFailure[field]);
-    expect((await pool.query("SELECT jsonb_agg(to_jsonb(row) ORDER BY id)::text AS journals FROM inventory.inventory_transactions row WHERE id IN (1,2)")).rows[0].journals)
-      .toBe(beforeFailure.journals);
-    expect((await pool.query("SELECT result_payload->'openingBalance' AS opening FROM inventory.availability_cutover_reconstruction_receipts")).rows)
-      .toEqual([{ opening: expect.objectContaining({ snapshotId: saved.id, sourceEvidenceHash: saved.sourceEvidenceHash }) }]);
-    expect(await loadLatestCutoverOpening(pool)).toEqual(openingBefore);
   }, 30_000);
 
   it("replays the exact command after later census changes, while preserving the original verified facts", async () => {

@@ -7,6 +7,10 @@ const destinationOwnerMigration = readFileSync(
   "migrations/0652_inventory_publication_destination_owners.sql",
   "utf8",
 );
+const targetResumeMigration = readFileSync(
+  "migrations/0670_inventory_publication_target_resume.sql",
+  "utf8",
+);
 const schema = readFileSync("shared/schema/inventory-planning.schema.ts", "utf8");
 const routes = readFileSync(
   "server/modules/inventory-planning/interfaces/http/inventory-channel-exposure.routes.ts",
@@ -81,18 +85,39 @@ describe("inventory channel exposure inactive foundation", () => {
     expect(destinationOwnerMigration).not.toMatch(/INSERT\s+INTO/i);
   });
 
-  it("gates disabled configuration and preview admission but exposes no live publication command", () => {
+  it("gates configuration, preview, stop, and evidence-bound resume with the intended roles", () => {
     expect(routes.match(/requirePermission\("inventory_planning", "view"\)/g)).toHaveLength(2);
     expect(routes.match(/requirePermission\("inventory_planning", "edit"\)/g)).toHaveLength(4);
-    expect(routes.match(/requirePermission\("inventory_planning", "activate"\)/g)).toHaveLength(1);
-    expect(routes).not.toMatch(/outbox|provider.*write/i);
-    expect(routes).not.toMatch(/state:\s*["']live["']/i);
+    expect(routes.match(/requirePermission\("inventory_planning", "activate"\)/g)).toHaveLength(4);
+    expect(routes).toContain("publication-target-resume-review");
+    expect(routes).toContain("publication-target-resume");
+    expect(routes).toContain("publication-target-stop");
     expect(registry).toContain("registerInventoryChannelExposureRoutes(app)");
-    expect(page).toContain("Draft / preview only");
     // The live allocator is read from the runtime-authority singleton, never asserted.
     expect(page).toContain("<InventoryRuntimeAuthorityBadge />");
     expect(page).not.toContain("Legacy runtime retained");
     expect(page).toContain("Include in readiness preview");
     expect(page).not.toMatch(/publish now/i);
+  });
+
+  it("adds append-only exact-revision readiness evidence without seeding or activating targets", () => {
+    expect(targetResumeMigration).toContain(
+      "CREATE TABLE inventory.inventory_publication_target_resume_reviews",
+    );
+    expect(targetResumeMigration).toContain(
+      "inventory_publication_target_resume_reviews_append_only_guard",
+    );
+    expect(targetResumeMigration).toContain(
+      "REFERENCES inventory.inventory_publication_targets(id) ON DELETE RESTRICT",
+    );
+    expect(targetResumeMigration).toContain(
+      "REFERENCES inventory.availability_activation_runs(id) ON DELETE RESTRICT",
+    );
+    expect(targetResumeMigration).toContain("jsonb_typeof(evidence_payload) = 'object'");
+    expect(targetResumeMigration).toContain("readiness_hash VARCHAR(64) NOT NULL");
+    expect(targetResumeMigration).not.toMatch(/UPDATE\s+inventory\.inventory_publication_targets/i);
+    expect(targetResumeMigration).not.toMatch(/INSERT\s+INTO/i);
+    expect(schema).toContain('"inventory_publication_target_resume_reviews"');
+    expect(schema).toContain("inventoryPublicationTargetResumeReviews");
   });
 });

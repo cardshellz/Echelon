@@ -17,6 +17,38 @@ describe("wms-sync existing order reconciliation", () => {
     expect(WMS_SYNC_SRC).toMatch(/const missingLines = omsLines\.filter/);
   });
 
+  it("promotes a finalized staged order and creates exactly one missing initial shipment outbox command", () => {
+    const existingOrderStart = WMS_SYNC_SRC.indexOf("if (existingWmsOrder.length > 0)");
+    const createPathStart = WMS_SYNC_SRC.indexOf("// Defense-in-depth", existingOrderStart);
+    const existingOrderPath = WMS_SYNC_SRC.slice(existingOrderStart, createPathStart);
+    const headerRefresh = existingOrderPath.indexOf("refreshExistingWmsOrderHeaderFromOms");
+    const reconciliation = existingOrderPath.indexOf("reconcileExistingWmsOrderLines");
+    const pathReturn = existingOrderPath.lastIndexOf("return wmsOrderId");
+
+    expect(existingOrderStart).toBeGreaterThan(-1);
+    expect(createPathStart).toBeGreaterThan(existingOrderStart);
+    expect(headerRefresh).toBeGreaterThan(-1);
+    expect(reconciliation).toBeGreaterThan(headerRefresh);
+    expect(pathReturn).toBeGreaterThan(reconciliation);
+
+    const reconciliationStart = WMS_SYNC_SRC.indexOf("private async reconcileExistingWmsOrderLines");
+    const nextMethodStart = WMS_SYNC_SRC.indexOf("\n  private async ", reconciliationStart + 1);
+    const reconciliationBody = WMS_SYNC_SRC.slice(reconciliationStart, nextMethodStart);
+    const noShipmentBranch = reconciliationBody.indexOf("if (activeShipments.length === 0)");
+    const shipmentCreate = reconciliationBody.indexOf("createShipmentForOrder", noShipmentBranch);
+    const providerOutbox = reconciliationBody.indexOf("enqueueShipStationShipmentPushRetry", shipmentCreate);
+    const branchReturn = reconciliationBody.indexOf("return { insertedItems:", providerOutbox);
+
+    expect(noShipmentBranch).toBeGreaterThan(-1);
+    expect(shipmentCreate).toBeGreaterThan(noShipmentBranch);
+    expect(providerOutbox).toBeGreaterThan(shipmentCreate);
+    expect(branchReturn).toBeGreaterThan(providerOutbox);
+    expect(reconciliationBody.slice(noShipmentBranch, branchReturn).match(/createShipmentForOrder/g))
+      .toHaveLength(1);
+    expect(reconciliationBody.slice(noShipmentBranch, branchReturn).match(/enqueueShipStationShipmentPushRetry/g))
+      .toHaveLength(1);
+  });
+
   it("routes reconciled lines by package editability without guessing", () => {
     expect(WMS_SYNC_SRC).toMatch(/selectLateOrderShipmentTarget\(activeShipments\)/);
     expect(WMS_SYNC_SRC).toMatch(/target\.status === "planned"/);

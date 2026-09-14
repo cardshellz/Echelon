@@ -371,10 +371,11 @@ export class DropshipListingPreviewService {
         })
       : new Map<string, DropshipEbayFulfillmentPolicyPreflight>();
 
-    const atpByVariantId = await this.deps.atp.getVariantAtp(candidates.map((candidate) => ({
+    const atp = await this.deps.atp.getVariantAtp(candidates.map((candidate) => ({
       productId: candidate.productId,
       productVariantId: candidate.productVariantId,
-    })));
+    })), { storeConnectionId: parsed.storeConnectionId });
+    const atpByVariantId = atp.quantities;
     const candidatesByVariantId = new Map(candidates.map((candidate) => [candidate.productVariantId, candidate]));
     const overridesByVariantId = new Map(overrides.map((override) => [override.productVariantId, override]));
     const listingsByVariantId = new Map(existingListings.map((listing) => [listing.productVariantId, listing]));
@@ -404,6 +405,7 @@ export class DropshipListingPreviewService {
         rules: selectionRules,
         rawAtpUnits,
         override: overridesByVariantId.get(productVariantId) ?? null,
+        applyMarketplaceQuantityCap: atp.authority === "legacy",
       });
       const existingListing = listingsByVariantId.get(productVariantId) ?? null;
       const listingPolicyOverride = listingPolicyOverridesByVariantId.get(productVariantId) ?? null;

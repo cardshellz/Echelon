@@ -2,9 +2,9 @@ import { and, asc, eq } from "drizzle-orm";
 
 import { channelConnections, channels, products, productVariants } from "@shared/schema";
 import { db as defaultDb, pool as defaultPool } from "../../../../db";
-import { createAuthorityAwareInventoryAtpService } from "../../../inventory-planning/infrastructure/inventory-availability-runtime-atp.repository";
 import { MarketplaceListingRegistrationError } from "../../../marketplace-listings/domain/registration-errors";
 import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
+import { createEbayChannelQuantityReader } from "./ebay-channel-quantity.reader";
 import type {
   EbayMarketplaceRegistrationOwnerRepository,
   EbayRegistrationChannelRecord,
@@ -15,7 +15,7 @@ import type {
 type EbayMarketplaceRegistrationReadDb = Pick<typeof defaultDb, "select">;
 
 export interface EbayRegistrationAtpReader {
-  getAtpPerVariant(productId: number): Promise<readonly {
+  getAtpPerVariant(productId: number, channelId: number): Promise<readonly {
     productVariantId: number;
     atpUnits: number;
   }[]>;
@@ -33,7 +33,7 @@ export class PgEbayMarketplaceRegistrationOwnerRepository
   constructor(
     private readonly db: EbayMarketplaceRegistrationReadDb = defaultDb,
     private readonly atp: EbayRegistrationAtpReader =
-      createAuthorityAwareInventoryAtpService(defaultPool),
+      createEbayChannelQuantityReader(defaultPool),
   ) {}
 
   async loadChannel(
@@ -86,6 +86,7 @@ export class PgEbayMarketplaceRegistrationOwnerRepository
 
   async loadAllProductVariants(
     productId: number,
+    channelId: number,
   ): Promise<readonly EbayRegistrationVariantRecord[]> {
     const [rows, variantAtp] = await Promise.all([
       this.db
@@ -103,7 +104,7 @@ export class PgEbayMarketplaceRegistrationOwnerRepository
           eq(productVariants.salesEligibility, "sellable"),
         ))
         .orderBy(asc(productVariants.id)),
-      this.atp.getAtpPerVariant(productId),
+      this.atp.getAtpPerVariant(productId, channelId),
     ]);
     const atpByVariantId = new Map(variantAtp.map((variant) => [
       variant.productVariantId,

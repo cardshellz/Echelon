@@ -85,7 +85,7 @@ describe("PgEbayMarketplaceRegistrationOwnerRepository", () => {
       marketplaceId: "EBAY_US",
     });
     await expect(repository.loadProduct(501)).resolves.toEqual({ id: 501 });
-    await expect(repository.loadAllProductVariants(501)).resolves.toEqual([
+    await expect(repository.loadAllProductVariants(501, 67)).resolves.toEqual([
       {
         id: 700,
         productId: 501,
@@ -108,7 +108,7 @@ describe("PgEbayMarketplaceRegistrationOwnerRepository", () => {
         availableQuantity: 0,
       },
     ]);
-    expect(atp.getAtpPerVariant).toHaveBeenCalledWith(501);
+    expect(atp.getAtpPerVariant).toHaveBeenCalledWith(501, 67);
   });
 
   it("uses the connector default marketplace only when metadata omits it", async () => {
@@ -161,7 +161,7 @@ describe("PgEbayMarketplaceRegistrationOwnerRepository", () => {
       { getAtpPerVariant: vi.fn().mockResolvedValue([]) },
     );
 
-    await expect(repository.loadAllProductVariants(501)).resolves.toEqual([{
+    await expect(repository.loadAllProductVariants(501, 67)).resolves.toEqual([{
       id: 700,
       productId: 501,
       sku: "ARM-ENV-SGL-C700",
@@ -187,7 +187,7 @@ describe("PgEbayMarketplaceRegistrationOwnerRepository", () => {
       ]) },
     );
 
-    await expect(repository.loadAllProductVariants(501)).rejects.toMatchObject({
+    await expect(repository.loadAllProductVariants(501, 67)).rejects.toMatchObject({
       code: "CHANNEL_MARKETPLACE_REGISTRATION_ATP_INVALID",
     });
   });

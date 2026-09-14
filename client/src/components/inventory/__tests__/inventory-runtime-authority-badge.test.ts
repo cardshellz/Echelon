@@ -36,12 +36,39 @@ describe("InventoryRuntimeAuthorityBadge contract", () => {
     expect(source).not.toMatch(/Legacy runtime retained/);
   });
 
-  it("is the only runtime-authority signal on both operator pages", () => {
+  it("gates legacy allocation and reserve controls with the same runtime readout", () => {
     const exposure = readFileSync("client/src/pages/InventoryExposure.tsx", "utf8");
     const allocation = readFileSync("client/src/pages/ChannelAllocation.tsx", "utf8");
+    const reserves = readFileSync("client/src/pages/Reserves.tsx", "utf8");
     expect(exposure).toContain("<InventoryRuntimeAuthorityBadge />");
     expect(exposure).not.toContain("Legacy runtime retained");
     expect(allocation).toContain("<InventoryRuntimeAuthorityBadge />");
+    expect(allocation).toContain("useInventoryRuntimeAuthority()");
+    expect(allocation).toContain("Legacy Channel Allocation is retired");
+    expect(allocation).toContain('href="/channels/inventory-exposure"');
     expect(allocation).toContain("only while the live allocator is Channel Allocation rules");
+    expect(reserves).toContain("useInventoryRuntimeAuthority()");
+    expect(reserves).toContain("Legacy channel reserves are retired");
+    expect(reserves).toContain("enabled: canView && legacyAuthority");
+    expect(reserves).toContain('href="/channels/inventory-exposure"');
+  });
+
+  it("retires legacy publication controls on every operator page and keeps the canonical global stop", () => {
+    const channels = readFileSync("client/src/pages/Channels.tsx", "utf8");
+    const warehouse = readFileSync("client/src/pages/WarehouseSettingsPage.tsx", "utf8");
+    const product = readFileSync("client/src/pages/ProductDetail.tsx", "utf8");
+    const shopify = readFileSync("client/src/pages/ShopifyChannelPage.tsx", "utf8");
+    const warehouses = readFileSync("client/src/pages/Warehouses.tsx", "utf8");
+    const exposure = readFileSync("client/src/pages/InventoryExposure.tsx", "utf8");
+    for (const source of [channels, warehouse, product, shopify, warehouses]) {
+      expect(source).toContain("useInventoryRuntimeAuthority()");
+      expect(source).toContain("InventoryRuntimeAuthorityBadge");
+    }
+    expect(shopify).toContain("isConfirmedLegacyInventoryAuthority");
+    expect(shopify).toContain("JSON.stringify({ channelId: shopifyChannel.id })");
+    expect(warehouses).toContain('runtimeAuthority !== "legacy"');
+    expect(warehouses).toContain("Inventory Exposure");
+    expect(warehouses).toContain("Authority unknown");
+    expect(exposure).toContain('<SyncControlPanel mode="canonical" allowChanges={canActivate} />');
   });
 });

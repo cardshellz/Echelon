@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { QuantityPublicationAdmission } from "./quantity-publication-admission.port";
+import { QuantityPublicationAdmissionError } from "../domain/quantity-publication-admission";
 
 import type {
   ClaimedInventoryPublication,
@@ -54,7 +55,7 @@ export class InventoryPublicationOutboxService {
     private readonly adapters: Pick<InventoryPublicationTransportRegistry, "get">,
     private readonly clock: InventoryPublicationClock = systemClock,
     private readonly leaseTokenFactory: () => string = randomUUID,
-    private readonly quantityAdmission?: QuantityPublicationAdmission,
+    private readonly quantityAdmission: Pick<QuantityPublicationAdmission, "runOutbox">,
   ) {}
 
   async processDue(input: { batchSize?: number; leaseSeconds?: number } = {}): Promise<InventoryPublicationBatchResult> {
@@ -116,7 +117,7 @@ export class InventoryPublicationOutboxService {
     const operation = await this.store.runIfCurrent(claim, async () => {
       try {
         const publish = () => adapter.publishAbsolute({ ...request, desiredQuantity });
-        const push = this.quantityAdmission ? await this.quantityAdmission.runOutbox(claim, publish) : await publish();
+        const push = await this.quantityAdmission.runOutbox(claim, publish);
         if (push.publishedQuantity !== desiredQuantity) {
           throw retryable(
             "PROVIDER_RESPONSE_INVALID",
@@ -171,6 +172,14 @@ function classifyFailure(error: unknown): PublicationAttemptFailure {
   }
   if (error instanceof InventoryPublicationTransportError) {
     return { errorClass: error.code, errorMessage: error.message, retryable: error.retryable };
+  }
+  if (error instanceof QuantityPublicationAdmissionError) {
+    const terminal = [
+      "PUBLICATION_TARGET_STATE_CHANGED",
+      "PUBLICATION_OUTBOX_PHASE_INVALID",
+      "PUBLICATION_OUTBOX_AUTHORIZATION_INVALID",
+    ].includes(error.code);
+    return { errorClass: error.code, errorMessage: error.message, retryable: !terminal };
   }
   return {
     errorClass: "PROVIDER_PUBLICATION_ERROR",

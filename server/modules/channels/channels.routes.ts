@@ -45,8 +45,14 @@ import {
   parsePositiveInteger,
   parseWmsOrderBucket,
 } from "./wms-order-listing";
+import { INVENTORY_LEGACY_ADMIN_CONTROLS } from "../inventory-planning/application/inventory-legacy-admin-control.service";
+import { createInventoryLegacyAdminControlService } from "../inventory-planning/infrastructure/inventory-legacy-admin-control.repository";
+import { sendInventoryLegacyAdminControlError } from "../inventory-planning/interfaces/http/inventory-legacy-admin-control.error";
+
+type ChannelRouteTransaction = Pick<typeof db, "select" | "insert" | "update" | "delete" | "execute">;
 
 export function registerChannelRoutes(app: Express) {
+  const inventoryLegacyAdminControl = createInventoryLegacyAdminControlService(pool);
 
   // ============================================
   // CHANNEL FEEDS (from inventory section)
@@ -84,44 +90,48 @@ export function registerChannelRoutes(app: Express) {
         });
       }
 
-      const destination = await storage.getChannelById(channelId);
+      return await inventoryLegacyAdminControl.executeLegacyWrite(
+        INVENTORY_LEGACY_ADMIN_CONTROLS.channelFeed,
+        async (transaction) => {
+
+      const destination = await storage.getChannelById(channelId, transaction);
       if (!destination) return res.status(404).json({ error: "Channel not found" });
       if (destination.provider === "shopify") {
-        const productLines = await storage.getProductLineIdsByProduct(variant.productId);
-        const channelLines = await storage.getActiveChannelProductLineIds(channelId);
+        const productLines = await storage.getProductLineIdsByProduct(variant.productId, transaction);
+        const channelLines = await storage.getActiveChannelProductLineIds(channelId, transaction);
         if (productLines.length > 0 && !productLines.some((lineId: number) => channelLines.includes(lineId))) {
           return res.status(403).json({ error: "This product's product line is not assigned to this channel" });
         }
-        const feed = await new ChannelIdentityService(db).ensureShopifyFeed({
+        const feed = await new ChannelIdentityService(transaction).ensureShopifyFeed({
           channelId, productVariantId, sku: variant.sku, actor: String((req as any).user?.id ?? "channel-feed-enable"),
-        });
+        }, transaction);
         return res.json(feed);
       }
 
       // Check if feed already exists
-      const existing = await storage.getChannelFeedByChannelAndVariant(channelId, productVariantId);
+      const existing = await storage.getChannelFeedByChannelAndVariant(channelId, productVariantId, transaction);
       if (existing) {
         // Reactivate if disabled
         if (existing.isActive !== 1) {
-          await storage.reactivateChannelFeed(existing.id);
+          await storage.reactivateChannelFeed(existing.id, transaction);
         }
         return res.json(existing);
       }
 
       // Look up channel and variant
-      const channel = await storage.getChannelById(channelId);
+      const channel = await storage.getChannelById(channelId, transaction);
       if (!channel) return res.status(404).json({ error: "Channel not found" });
 
       // Shopify already returned through the verified identity owner above.
       const channelVariantId = variant.sku || String(variant.id);
 
-      const product = await storage.getProductById(variant.productId);
+      const product = await storage.getProductById(variant.productId, transaction);
 
       // Product line gate: check if this product's lines match the channel's lines
       if (product) {
-        const prodLines = await storage.getProductLineIdsByProduct(product.id);
+        const prodLines = await storage.getProductLineIdsByProduct(product.id, transaction);
         if (prodLines.length > 0) {
-          const chLines = await storage.getActiveChannelProductLineIds(channelId);
+          const chLines = await storage.getActiveChannelProductLineIds(channelId, transaction);
           const overlap = prodLines.some((pl: number) => chLines.includes(pl));
           if (!overlap) {
             return res.status(403).json({ error: "This product's product line is not assigned to this channel" });
@@ -139,11 +149,14 @@ export function registerChannelRoutes(app: Express) {
         channelProductId,
         channelSku: variant.sku || null,
         isActive: 1,
-      });
+      }, transaction);
 
       res.json(feed);
+        },
+      );
     } catch (error: any) {
       console.error("Error enabling channel feed:", error);
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
       if (error instanceof ChannelIdentityError) return res.status(error.status).json({ code: error.code, error: error.message });
       res.status(500).json({ error: error.message || "Failed to enable feed" });
     }
@@ -640,10 +653,17 @@ export function registerChannelRoutes(app: Express) {
         return res.status(400).json({ error: "Invalid channel data", details: parseResult.error.errors });
       }
 
-      const channel = await storage.createChannel(parseResult.data);
+      const createChannel = (executor: ChannelRouteTransaction = db) => storage.createChannel(parseResult.data, executor);
+      const channel = hasLegacyInventoryChannelConfiguration(req.body)
+        ? await inventoryLegacyAdminControl.executeLegacyWrite(
+            legacyInventoryChannelControlFor(req.body),
+            createChannel,
+          )
+        : await createChannel();
       res.status(201).json(channel);
     } catch (error) {
       console.error("Error creating channel:", error);
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: "Failed to create channel" });
     }
   });
@@ -652,7 +672,13 @@ export function registerChannelRoutes(app: Express) {
   app.put("/api/channels/:id", requirePermission("channels", "edit"), async (req, res) => {
     try {
       const channelId = parseInt(req.params.id);
-      const channel = await storage.updateChannel(channelId, req.body);
+      const updateChannel = (executor: ChannelRouteTransaction = db) => storage.updateChannel(channelId, req.body, executor);
+      const channel = hasLegacyInventoryChannelConfiguration(req.body)
+        ? await inventoryLegacyAdminControl.executeLegacyWrite(
+            legacyInventoryChannelControlFor(req.body),
+            updateChannel,
+          )
+        : await updateChannel();
 
       if (!channel) {
         return res.status(404).json({ error: "Channel not found" });
@@ -661,6 +687,7 @@ export function registerChannelRoutes(app: Express) {
       res.json(channel);
     } catch (error) {
       console.error("Error updating channel:", error);
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: "Failed to update channel" });
     }
   });
@@ -1482,10 +1509,14 @@ export function registerChannelRoutes(app: Express) {
         }
       }
 
-      const reservation = await storage.upsertChannelReservation(parseResult.data);
+      const reservation = await inventoryLegacyAdminControl.executeLegacyWrite(
+        INVENTORY_LEGACY_ADMIN_CONTROLS.channelReserve,
+        (transaction) => storage.upsertChannelReservation(parseResult.data, transaction),
+      );
       res.json(reservation);
     } catch (error) {
       console.error("Error creating reservation:", error);
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: "Failed to create reservation" });
     }
   });
@@ -1494,7 +1525,10 @@ export function registerChannelRoutes(app: Express) {
   app.delete("/api/channel-reservations/:id", requirePermission("channels", "edit"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
-      const deleted = await storage.deleteChannelReservation(id);
+      const deleted = await inventoryLegacyAdminControl.executeLegacyWrite(
+        INVENTORY_LEGACY_ADMIN_CONTROLS.channelReserve,
+        (transaction) => storage.deleteChannelReservation(id, transaction),
+      );
 
       if (!deleted) {
         return res.status(404).json({ error: "Reservation not found" });
@@ -1503,6 +1537,7 @@ export function registerChannelRoutes(app: Express) {
       res.json({ success: true });
     } catch (error) {
       console.error("Error deleting reservation:", error);
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: "Failed to delete reservation" });
     }
   });
@@ -1537,16 +1572,20 @@ export function registerChannelRoutes(app: Express) {
         return res.status(400).json({ error: "channelId and productId are required" });
       }
 
-      const result = await storage.upsertChannelProductAllocation({
-        channelId,
-        productId,
-        minAtpBase: minAtpBase ?? null,
-        maxAtpBase: maxAtpBase ?? null,
-        isListed: isListed ?? 1,
-        notes: notes ?? null,
-      });
+      const result = await inventoryLegacyAdminControl.executeLegacyWrite(
+        INVENTORY_LEGACY_ADMIN_CONTROLS.channelAllocation,
+        (transaction) => storage.upsertChannelProductAllocation({
+          channelId,
+          productId,
+          minAtpBase: minAtpBase ?? null,
+          maxAtpBase: maxAtpBase ?? null,
+          isListed: isListed ?? 1,
+          notes: notes ?? null,
+        }, transaction),
+      );
       res.json(result);
     } catch (error: any) {
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: error.message || "Failed to save allocation" });
     }
   });
@@ -1554,9 +1593,13 @@ export function registerChannelRoutes(app: Express) {
   app.delete("/api/channel-product-allocation/:id", requirePermission("channels", "edit"), async (req, res) => {
     try {
       const id = parseInt(req.params.id);
-      await storage.deleteChannelProductAllocation(id);
+      await inventoryLegacyAdminControl.executeLegacyWrite(
+        INVENTORY_LEGACY_ADMIN_CONTROLS.channelAllocation,
+        (transaction) => storage.deleteChannelProductAllocation(id, transaction),
+      );
       res.json({ success: true });
     } catch (error: any) {
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: error.message || "Failed to delete allocation" });
     }
   });
@@ -1568,24 +1611,27 @@ export function registerChannelRoutes(app: Express) {
       const productId = parseInt(req.params.productId);
       if (isNaN(productId)) return res.status(400).json({ error: "Invalid product ID" });
 
-      const activeChannels = await storage.getActiveChannels();
-      const variants = (await storage.getProductVariantsByProductId(productId))
+      return await inventoryLegacyAdminControl.executeLegacyRead(
+        INVENTORY_LEGACY_ADMIN_CONTROLS.channelAllocationRead,
+        async (transaction, context) => {
+
+      const activeChannels = await storage.getActiveChannels(transaction);
+      const variants = (await storage.getProductVariantsByProductId(productId, transaction))
         .filter(isInventoryManagedVariant);
       const variantIds = variants.map((v: any) => v.id);
 
       // Product-level allocation rules per channel
-      const productAllocs = await storage.getChannelProductAllocationsByProduct(productId);
+      const productAllocs = await storage.getChannelProductAllocationsByProduct(productId, transaction);
 
       // Variant-level reservations for this product's variants
-      const variantReservations = await storage.getChannelReservationsByVariantIds(variantIds);
+      const variantReservations = await storage.getChannelReservationsByVariantIds(variantIds, transaction);
 
       // Feed data for this product's variants
-      const feeds = await storage.getChannelFeedsByVariantIds(variantIds);
+      const feeds = await storage.getChannelFeedsByVariantIds(variantIds, transaction);
 
       // ATP data
-      const { atp: inventoryAtp } = req.app.locals.services;
-      const atpBase = await inventoryAtp.getAtpBase(productId);
-      const variantAtp = await inventoryAtp.getAtpPerVariant(productId);
+      const atpBase = await context.legacy.getAtpBase(productId);
+      const variantAtp = await context.legacy.getAtpPerVariant(productId);
 
       res.json({
         channels: activeChannels,
@@ -1601,8 +1647,11 @@ export function registerChannelRoutes(app: Express) {
         variantReservations,
         feeds,
       });
+        },
+      );
     } catch (error: any) {
       console.error("Error fetching product allocation:", error);
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: error.message || "Failed to fetch product allocation" });
     }
   });
@@ -1879,10 +1928,14 @@ export function registerChannelRoutes(app: Express) {
       const { productLineIds } = req.body as { productLineIds: number[] };
       if (!Array.isArray(productLineIds)) return res.status(400).json({ error: "productLineIds array required" });
 
-      await storage.replaceChannelProductLines(channelId, productLineIds);
+      await inventoryLegacyAdminControl.executeLegacyWrite(
+        INVENTORY_LEGACY_ADMIN_CONTROLS.channelAllocation,
+        (transaction) => storage.replaceChannelProductLines(channelId, productLineIds, transaction),
+      );
 
       res.json({ channelId, productLineCount: productLineIds.length });
     } catch (error: any) {
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: error.message });
     }
   });
@@ -1902,7 +1955,9 @@ export function registerChannelRoutes(app: Express) {
 
   app.get("/api/channel-allocation/grid", requirePermission("channels", "view"), async (req, res) => {
     try {
-      const { atp: inventoryAtp } = req.app.locals.services;
+      return await inventoryLegacyAdminControl.executeLegacyRead(
+        INVENTORY_LEGACY_ADMIN_CONTROLS.channelAllocationRead,
+        async (transaction, context) => {
 
       const search = ((req.query.search as string) || "").trim().toLowerCase();
       const page = Math.max(1, parseInt(req.query.page as string) || 1);
@@ -1912,20 +1967,20 @@ export function registerChannelRoutes(app: Express) {
       const productLineId = req.query.productLineId ? parseInt(req.query.productLineId as string) : null;
 
       // Load available product lines for the dropdown
-      const allProductLines = await storage.getActiveProductLinesForDropdown();
+      const allProductLines = await storage.getActiveProductLinesForDropdown(transaction);
 
       // Get all active channels
-      const activeChannels = await storage.getActiveChannels();
+      const activeChannels = await storage.getActiveChannels(transaction);
 
       // Get ALL variants that have inventory (not just ones with feeds)
-      let allVariantIds = await storage.getVariantIdsWithInventory();
+      let allVariantIds = await storage.getVariantIdsWithInventory(transaction);
 
       // Product line filter: restrict to products in the selected line
       if (productLineId) {
-        const lineProductIds = await storage.getProductLineProductIds(productLineId);
+        const lineProductIds = await storage.getProductLineProductIds(productLineId, transaction);
 
         if (lineProductIds.length > 0) {
-          const lineVariantIds = new Set(await storage.getVariantIdsByProductIds(lineProductIds));
+          const lineVariantIds = new Set(await storage.getVariantIdsByProductIds(lineProductIds, transaction));
           allVariantIds = allVariantIds.filter((id: number) => lineVariantIds.has(id));
         } else {
           allVariantIds = [];
@@ -1940,17 +1995,17 @@ export function registerChannelRoutes(app: Express) {
       }
 
       // Load all variants and products
-      const allVariants = await storage.getProductVariantsByIds(allVariantIds);
+      const allVariants = await storage.getProductVariantsByIds(allVariantIds, transaction);
       const productIds = Array.from(new Set(allVariants.map((v: any) => v.productId)));
-      const prods = await storage.getProductsByIds(productIds);
+      const prods = await storage.getProductsByIds(productIds, transaction);
       const prodMap = new Map(prods.map((pr: any) => [pr.id, pr]));
 
       // Load active feeds (for hasFeed display per cell)
-      const feeds = await storage.getActiveChannelFeeds();
+      const feeds = await storage.getActiveChannelFeeds(transaction);
 
       // Load all allocation rules + reservations (needed for stats and filtering)
-      const productAllocs = await storage.getAllChannelProductAllocations();
-      const allReservations = await storage.getChannelReservationsByVariantIds(allVariantIds);
+      const productAllocs = await storage.getAllChannelProductAllocations(transaction);
+      const allReservations = await storage.getChannelReservationsByVariantIds(allVariantIds, transaction);
 
       // Build feed lookup: channelId -> Set of variantIds
       const feedsByChannel = new Map<number, Set<number>>();
@@ -1975,8 +2030,8 @@ export function registerChannelRoutes(app: Express) {
       }
 
       // Build product line eligibility maps: product -> lines, channel -> lines
-      const productLineMap = await storage.getProductLineProductMap();
-      const channelLineMap = await storage.getChannelProductLineMap();
+      const productLineMap = await storage.getProductLineProductMap(transaction);
+      const channelLineMap = await storage.getChannelProductLineMap(transaction);
 
       // Compute global stats (across ALL variants, not filtered)
       const channelStats: Record<number, { fed: number; unfed: number; blocked: number; overrides: number }> = {};
@@ -2012,18 +2067,18 @@ export function registerChannelRoutes(app: Express) {
 
         // Recent errors (last 24h)
         const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
-        const recentErrors = await storage.getChannelSyncErrorCount(c.id, oneDayAgo);
+        const recentErrors = await storage.getChannelSyncErrorCount(c.id, oneDayAgo, transaction);
 
         // Last error message
         let lastError: string | null = null;
         if (recentErrors > 0) {
-          lastError = await storage.getLastChannelSyncError(c.id);
+          lastError = await storage.getLastChannelSyncError(c.id, transaction);
           // Truncate long HTML errors
           if (lastError && lastError.length > 200) lastError = lastError.substring(0, 200) + "...";
         }
 
         // Connection status
-        const syncStatus = await storage.getChannelConnectionStatus(c.id);
+        const syncStatus = await storage.getChannelConnectionStatus(c.id, transaction);
 
         syncStatsPerChannel[c.id] = {
           lastSyncAt,
@@ -2065,11 +2120,11 @@ export function registerChannelRoutes(app: Express) {
 
       // Batch ATP
       const paginatedProductIds = Array.from(new Set(paginatedVariants.map((v: any) => v.productId)));
-      const atpMap = await inventoryAtp.getBulkAtp(paginatedProductIds);
+      const atpMap = await context.legacy.getBulkAtp(paginatedProductIds);
 
       const variantAtpMap = new Map<number, any>();
       for (const pid of paginatedProductIds) {
-        const variantAtp = await inventoryAtp.getAtpPerVariant(pid);
+        const variantAtp = await context.legacy.getAtpPerVariant(pid);
         for (const v of variantAtp) {
           variantAtpMap.set(v.productVariantId, v);
         }
@@ -2222,8 +2277,11 @@ export function registerChannelRoutes(app: Express) {
           sync: syncStatsPerChannel,
         },
       });
+        },
+      );
     } catch (error: any) {
       console.error("Error building allocation grid:", error);
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: error.message || "Failed to build allocation grid" });
     }
   });
@@ -2276,9 +2334,13 @@ export function registerChannelRoutes(app: Express) {
         return res.status(400).json({ error: "Invalid data", details: parsed.error.errors });
       }
 
-      const [created] = await db.insert(channelWarehouseAssignments).values(parsed.data).returning();
+      const [created] = await inventoryLegacyAdminControl.executeLegacyWrite(
+        INVENTORY_LEGACY_ADMIN_CONTROLS.channelWarehouseAssignment,
+        (transaction) => transaction.insert(channelWarehouseAssignments).values(parsed.data).returning(),
+      );
       res.status(201).json(created);
     } catch (error: any) {
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
       if (error.code === "23505") {
         return res.status(409).json({ error: "This warehouse is already assigned to this channel" });
       }
@@ -2304,16 +2366,20 @@ export function registerChannelRoutes(app: Express) {
       }
 
       const updates: any = { ...parsed.data, updatedAt: new Date() };
-      const [updated] = await db
-        .update(channelWarehouseAssignments)
-        .set(updates)
-        .where(eq(channelWarehouseAssignments.id, id))
-        .returning();
+      const [updated] = await inventoryLegacyAdminControl.executeLegacyWrite(
+        INVENTORY_LEGACY_ADMIN_CONTROLS.channelWarehouseAssignment,
+        (transaction) => transaction
+          .update(channelWarehouseAssignments)
+          .set(updates)
+          .where(eq(channelWarehouseAssignments.id, id))
+          .returning(),
+      );
 
       if (!updated) return res.status(404).json({ error: "Assignment not found" });
       res.json(updated);
     } catch (error: any) {
       console.error("Error updating warehouse assignment:", error);
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: error.message || "Failed to update warehouse assignment" });
     }
   });
@@ -2324,15 +2390,19 @@ export function registerChannelRoutes(app: Express) {
       const id = parseInt(req.params.id);
       if (isNaN(id)) return res.status(400).json({ error: "Invalid ID" });
 
-      const [deleted] = await db
-        .delete(channelWarehouseAssignments)
-        .where(eq(channelWarehouseAssignments.id, id))
-        .returning();
+      const [deleted] = await inventoryLegacyAdminControl.executeLegacyWrite(
+        INVENTORY_LEGACY_ADMIN_CONTROLS.channelWarehouseAssignment,
+        (transaction) => transaction
+          .delete(channelWarehouseAssignments)
+          .where(eq(channelWarehouseAssignments.id, id))
+          .returning(),
+      );
 
       if (!deleted) return res.status(404).json({ error: "Assignment not found" });
       res.json({ success: true });
     } catch (error: any) {
       console.error("Error deleting warehouse assignment:", error);
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: error.message || "Failed to delete warehouse assignment" });
     }
   });
@@ -2483,19 +2553,23 @@ export function registerChannelRoutes(app: Express) {
         }
       }
 
-      const [created] = await db.insert(channelAllocationRules).values(data).returning();
+      const [created] = await inventoryLegacyAdminControl.executeLegacyWrite(
+        INVENTORY_LEGACY_ADMIN_CONTROLS.channelAllocation,
+        (transaction) => transaction.insert(channelAllocationRules).values(data).returning(),
+      );
 
       // Trigger immediate sync for the affected product
       if (created.productId) {
-        const { echelonOrchestrator } = req.app.locals.services;
-        if (echelonOrchestrator) {
-          echelonOrchestrator.syncInventoryForProduct(created.productId, { dryRun: false }, "allocation_rule_created")
+        const { inventoryPublicationWork } = req.app.locals.services;
+        if (inventoryPublicationWork) {
+          inventoryPublicationWork.syncProduct(created.productId, "allocation_rule_created")
             .catch((err: any) => console.warn(`[AllocationRule] Post-create sync failed: ${err.message}`));
         }
       }
 
       res.status(201).json(created);
     } catch (error: any) {
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
       if (error.code === "23505") {
         return res.status(409).json({ error: "A rule already exists for this channel/product/variant combination" });
       }
@@ -2534,19 +2608,22 @@ export function registerChannelRoutes(app: Express) {
         if (updates.mode !== "fixed") updates.fixedQty = null;
       }
 
-      const [updated] = await db
-        .update(channelAllocationRules)
-        .set(updates)
-        .where(eq(channelAllocationRules.id, id))
-        .returning();
+      const [updated] = await inventoryLegacyAdminControl.executeLegacyWrite(
+        INVENTORY_LEGACY_ADMIN_CONTROLS.channelAllocation,
+        (transaction) => transaction
+          .update(channelAllocationRules)
+          .set(updates)
+          .where(eq(channelAllocationRules.id, id))
+          .returning(),
+      );
 
       if (!updated) return res.status(404).json({ error: "Rule not found" });
 
       // Trigger immediate sync for the affected product
       if (updated.productId) {
-        const { echelonOrchestrator } = req.app.locals.services;
-        if (echelonOrchestrator) {
-          echelonOrchestrator.syncInventoryForProduct(updated.productId, { dryRun: false }, "allocation_rule_updated")
+        const { inventoryPublicationWork } = req.app.locals.services;
+        if (inventoryPublicationWork) {
+          inventoryPublicationWork.syncProduct(updated.productId, "allocation_rule_updated")
             .catch((err: any) => console.warn(`[AllocationRule] Post-update sync failed: ${err.message}`));
         }
       }
@@ -2554,6 +2631,7 @@ export function registerChannelRoutes(app: Express) {
       res.json(updated);
     } catch (error: any) {
       console.error("Error updating allocation rule:", error);
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: error.message || "Failed to update allocation rule" });
     }
   });
@@ -2564,15 +2642,19 @@ export function registerChannelRoutes(app: Express) {
       const id = parseInt(req.params.id);
       if (isNaN(id)) return res.status(400).json({ error: "Invalid ID" });
 
-      const [deleted] = await db
-        .delete(channelAllocationRules)
-        .where(eq(channelAllocationRules.id, id))
-        .returning();
+      const [deleted] = await inventoryLegacyAdminControl.executeLegacyWrite(
+        INVENTORY_LEGACY_ADMIN_CONTROLS.channelAllocation,
+        (transaction) => transaction
+          .delete(channelAllocationRules)
+          .where(eq(channelAllocationRules.id, id))
+          .returning(),
+      );
 
       if (!deleted) return res.status(404).json({ error: "Rule not found" });
       res.json({ success: true });
     } catch (error: any) {
       console.error("Error deleting allocation rule:", error);
+      if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: error.message || "Failed to delete allocation rule" });
     }
   });
@@ -2650,4 +2732,31 @@ export function registerChannelRoutes(app: Express) {
 function firstQueryValue(value: unknown): string | undefined {
   if (Array.isArray(value)) return value.length > 0 ? String(value[0]) : undefined;
   return typeof value === "string" ? value : undefined;
+}
+
+const LEGACY_INVENTORY_CHANNEL_CONFIGURATION_FIELDS = Object.freeze([
+  "allocationPct",
+  "allocationFixedQty",
+  "syncEnabled",
+  "syncMode",
+  "sweepIntervalMinutes",
+] as const);
+
+function hasLegacyInventoryChannelConfiguration(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  return LEGACY_INVENTORY_CHANNEL_CONFIGURATION_FIELDS.some((field) =>
+    Object.prototype.hasOwnProperty.call(value, field));
+}
+
+function legacyInventoryChannelControlFor(value: unknown) {
+  if (
+    value
+    && typeof value === "object"
+    && !Array.isArray(value)
+    && (["allocationPct", "allocationFixedQty"] as const).some((field) =>
+      Object.prototype.hasOwnProperty.call(value, field))
+  ) {
+    return INVENTORY_LEGACY_ADMIN_CONTROLS.channelAllocation;
+  }
+  return INVENTORY_LEGACY_ADMIN_CONTROLS.channelSync;
 }

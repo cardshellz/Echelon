@@ -127,6 +127,7 @@ describe("AuthorityAwareReservationService", () => {
 
     await expect(service.reserveOrder(42, "user:7")).resolves.toEqual({
       orderId: 42,
+      canonicalClaimId: "70",
       reserved: 1,
       promised: 1,
       failed: [{
@@ -180,6 +181,93 @@ describe("AuthorityAwareReservationService", () => {
       actor: "system:inventory-reservation-runtime",
       idempotencyKey: expect.stringMatching(/^inventory-runtime:release-order-claim:[0-9a-f]{64}$/),
     }));
+  });
+
+  it("refuses a delayed release when a newer canonical claim now owns the order", async () => {
+    const plan = canonicalPlan();
+    const canonical = {
+      claimOrder: vi.fn(),
+      replaceOrderClaim: vi.fn(),
+      releaseOrderClaim: vi.fn(),
+    };
+    const service = new AuthorityAwareReservationService(executor({
+      authority: "canonical",
+      canonical,
+      getLatestClaim: vi.fn(async () => ({
+        claimId: "71",
+        revision: 4,
+        status: "active",
+        plan,
+      })),
+    }));
+
+    await expect(service.releaseOrderReservation(
+      42,
+      "delayed payment-hold compensation",
+      "dropship_acceptance",
+      { expectedCanonicalClaimId: "70" },
+    )).rejects.toMatchObject({
+      code: "CANONICAL_CLAIM_RELEASE_IDENTITY_STALE",
+      context: {
+        expectedCanonicalClaimId: "70",
+        latestCanonicalClaimId: "71",
+      },
+    });
+    expect(canonical.releaseOrderClaim).not.toHaveBeenCalled();
+  });
+
+  it("treats an explicitly captured canonical no-claim outcome as a no-op", async () => {
+    const canonical = {
+      claimOrder: vi.fn(),
+      replaceOrderClaim: vi.fn(),
+      releaseOrderClaim: vi.fn(),
+    };
+    const service = new AuthorityAwareReservationService(executor({
+      authority: "canonical",
+      canonical,
+      getLatestClaim: vi.fn(async () => null),
+    }));
+
+    await expect(service.releaseOrderReservation(
+      42,
+      "digital payment-hold compensation",
+      "dropship_acceptance",
+      { expectedCanonicalClaimId: null },
+    )).resolves.toEqual({ released: 0, failed: [] });
+    expect(canonical.releaseOrderClaim).not.toHaveBeenCalled();
+  });
+
+  it("refuses delayed no-claim compensation when a newer canonical claim now owns the order", async () => {
+    const plan = canonicalPlan();
+    const canonical = {
+      claimOrder: vi.fn(),
+      replaceOrderClaim: vi.fn(),
+      releaseOrderClaim: vi.fn(),
+    };
+    const service = new AuthorityAwareReservationService(executor({
+      authority: "canonical",
+      canonical,
+      getLatestClaim: vi.fn(async () => ({
+        claimId: "71",
+        revision: 4,
+        status: "active",
+        plan,
+      })),
+    }));
+
+    await expect(service.releaseOrderReservation(
+      42,
+      "delayed digital payment-hold compensation",
+      "dropship_acceptance",
+      { expectedCanonicalClaimId: null },
+    )).rejects.toMatchObject({
+      code: "CANONICAL_CLAIM_RELEASE_IDENTITY_STALE",
+      context: {
+        expectedCanonicalClaimId: null,
+        latestCanonicalClaimId: "71",
+      },
+    });
+    expect(canonical.releaseOrderClaim).not.toHaveBeenCalled();
   });
 
   it("fails closed for every legacy mutation that lacks a canonical whole-order equivalent", async () => {

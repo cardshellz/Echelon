@@ -18,6 +18,17 @@ import {
   allowsDirectPackageConversion,
   type ProductInventoryStrategy,
 } from "@shared/catalog/inventory-strategy";
+import {
+  legacyTransformationExecutionAuthority,
+  type TransformationExecutionAuthorityPort,
+} from "./transformation-execution-authority.port";
+import {
+  assertAuthorizedPackageConversionQuantity,
+  TransformationExecutionAuthorityError,
+  type PackageConversionAuthorization,
+  type PackageConversionAuthorizationRequest,
+  type TransformationRuntimeEvidence,
+} from "../domain/transformation-execution-authority";
 
 type PackageConversionTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -92,6 +103,7 @@ export class BreakAssemblyUseCases {
     private db: any,
     private inventoryUseCases: InventoryUseCases,
     private readonly clock: () => Date = () => new Date(),
+    private readonly transformationAuthority: TransformationExecutionAuthorityPort = legacyTransformationExecutionAuthority,
   ) { }
 
   /** Register a callback to fire after break/assembly changes inventory */
@@ -141,7 +153,11 @@ export class BreakAssemblyUseCases {
       ]);
 
       this.validateSameProduct(sourceVariant, targetVariant);
-      await this.assertDirectConversionAllowed(sourceVariant.productId);
+      const authorizationRequest = this.conversionAuthorizationRequest("break_pack", sourceVariant, targetVariant);
+      const authorization = await this.transformationAuthority.authorizePackageConversion(authorizationRequest);
+      if (authorization.runtime.authority === "legacy") {
+        await this.assertDirectConversionAllowed(sourceVariant.productId);
+      }
 
       if (sourceVariant.unitsPerVariant <= targetVariant.unitsPerVariant) {
         throw new Error(
@@ -151,7 +167,7 @@ export class BreakAssemblyUseCases {
       }
 
       // Enforce direct parent-child: target's parentVariantId must point to source
-      if (sourceVariant.parentVariantId !== targetVariant.id) {
+      if (authorization.runtime.authority === "legacy" && sourceVariant.parentVariantId !== targetVariant.id) {
         throw new Error(
           `Cannot break: "${sourceVariant.sku ?? sourceVariant.name}" does not break directly into ` +
           `"${targetVariant.sku ?? targetVariant.name}". Only direct parent→child breaks are allowed.`
@@ -163,6 +179,7 @@ export class BreakAssemblyUseCases {
         sourceVariant.unitsPerVariant,
         targetVariant.unitsPerVariant
       );
+      assertAuthorizedPackageConversionQuantity(authorization, sourceQty, targetQty);
 
       // Resolve destination: explicit > bin assignment > fall back to source
       let resolvedTargetLocationId: number = params.targetLocationId ?? warehouseLocationId;
@@ -186,8 +203,14 @@ export class BreakAssemblyUseCases {
       // ----- Execute inside a transaction -----
       const batchId = this.generateBatchId("break", params.commandKey);
 
+      // Runtime authority and canonical model/path rows are pinned before cost,
+      // lot, or inventory locks. A cutover or definition change therefore
+      // fails before any physical quantity can move.
+      await this.transformationAuthority.pinPackageConversion(tx, authorizationRequest, authorization);
+      if (authorization.runtime.authority === "legacy") {
+        await this.assertConversionSnapshot(tx, sourceVariant, targetVariant);
+      }
       await lockInventoryCostGraph(tx);
-      await this.assertConversionSnapshot(tx, sourceVariant, targetVariant);
 
       if (quantityPosting) await this.lockConversionLevels(tx, sourceVariantId, warehouseLocationId,
         targetVariantId, resolvedTargetLocationId);
@@ -269,7 +292,11 @@ export class BreakAssemblyUseCases {
       ]);
 
       this.validateSameProduct(sourceVariant, targetVariant);
-      await this.assertDirectConversionAllowed(sourceVariant.productId);
+      const authorizationRequest = this.conversionAuthorizationRequest("assemble_pack", sourceVariant, targetVariant);
+      const authorization = await this.transformationAuthority.authorizePackageConversion(authorizationRequest);
+      if (authorization.runtime.authority === "legacy") {
+        await this.assertDirectConversionAllowed(sourceVariant.productId);
+      }
 
       if (sourceVariant.unitsPerVariant >= targetVariant.unitsPerVariant) {
         throw new Error(
@@ -279,7 +306,7 @@ export class BreakAssemblyUseCases {
       }
 
       // Enforce direct parent-child: source's parentVariantId must point to target
-      if (sourceVariant.parentVariantId !== targetVariant.id) {
+      if (authorization.runtime.authority === "legacy" && sourceVariant.parentVariantId !== targetVariant.id) {
         throw new Error(
           `Cannot assemble: "${sourceVariant.sku ?? sourceVariant.name}" is not a direct child of ` +
           `"${targetVariant.sku ?? targetVariant.name}". Only direct child→parent assembly is allowed.`
@@ -298,12 +325,16 @@ export class BreakAssemblyUseCases {
           `${sourceVariant.sku ?? sourceVariant.name}'s ${sourceVariant.unitsPerVariant} units per variant.`
         );
       }
+      assertAuthorizedPackageConversionQuantity(authorization, sourceQtyNeeded, targetQty);
 
       // ----- Execute inside a transaction -----
       const batchId = this.generateBatchId("assemble", params.commandKey);
 
+      await this.transformationAuthority.pinPackageConversion(tx, authorizationRequest, authorization);
+      if (authorization.runtime.authority === "legacy") {
+        await this.assertConversionSnapshot(tx, sourceVariant, targetVariant);
+      }
       await lockInventoryCostGraph(tx);
-      await this.assertConversionSnapshot(tx, sourceVariant, targetVariant);
 
       if (quantityPosting) await this.lockConversionLevels(tx, sourceVariantId, warehouseLocationId,
         targetVariantId, warehouseLocationId);
@@ -393,9 +424,23 @@ export class BreakAssemblyUseCases {
       };
     }
 
+    let runtime: TransformationRuntimeEvidence;
+    let authorization: PackageConversionAuthorization | null = null;
     try {
       this.validateSameProduct(sourceVariant, targetVariant);
-      await this.assertDirectConversionAllowed(sourceVariant.productId);
+      runtime = await this.transformationAuthority.readRuntime();
+      if (runtime.authority === "legacy") {
+        await this.assertDirectConversionAllowed(sourceVariant.productId);
+      } else {
+        authorization = await this.transformationAuthority.authorizePackageConversion(
+          this.conversionAuthorizationRequest(
+            direction === "break" ? "break_pack" : "assemble_pack",
+            sourceVariant,
+            targetVariant,
+          ),
+          runtime,
+        );
+      }
     } catch (err: any) {
       return {
         sourceVariantSku: sourceVariant.sku ?? sourceVariant.name,
@@ -424,7 +469,7 @@ export class BreakAssemblyUseCases {
       }
 
       // Enforce direct parent-child relationship
-      if (targetVariant.parentVariantId !== sourceVariant.id) {
+      if (runtime.authority === "legacy" && targetVariant.parentVariantId !== sourceVariant.id) {
         return {
           sourceVariantSku: baseSku(sourceVariant),
           targetVariantSku: baseSku(targetVariant),
@@ -451,6 +496,22 @@ export class BreakAssemblyUseCases {
         };
       }
 
+      if (authorization) {
+        try {
+          assertAuthorizedPackageConversionQuantity(authorization, qty, targetQty);
+        } catch (error: any) {
+          return {
+            sourceVariantSku: baseSku(sourceVariant),
+            targetVariantSku: baseSku(targetVariant),
+            sourceQtyToRemove: qty,
+            targetQtyToAdd: targetQty,
+            baseUnitsInvolved: baseUnits,
+            isValid: false,
+            validationError: error.message,
+          };
+        }
+      }
+
       return {
         sourceVariantSku: baseSku(sourceVariant),
         targetVariantSku: baseSku(targetVariant),
@@ -474,7 +535,7 @@ export class BreakAssemblyUseCases {
       }
 
       // Enforce direct parent-child relationship
-      if (sourceVariant.parentVariantId !== targetVariant.id) {
+      if (runtime.authority === "legacy" && sourceVariant.parentVariantId !== targetVariant.id) {
         return {
           sourceVariantSku: baseSku(sourceVariant),
           targetVariantSku: baseSku(targetVariant),
@@ -501,6 +562,22 @@ export class BreakAssemblyUseCases {
         };
       }
 
+      if (authorization) {
+        try {
+          assertAuthorizedPackageConversionQuantity(authorization, sourceQtyNeeded, qty);
+        } catch (error: any) {
+          return {
+            sourceVariantSku: baseSku(sourceVariant),
+            targetVariantSku: baseSku(targetVariant),
+            sourceQtyToRemove: sourceQtyNeeded,
+            targetQtyToAdd: qty,
+            baseUnitsInvolved: baseUnits,
+            isValid: false,
+            validationError: error.message,
+          };
+        }
+      }
+
       return {
         sourceVariantSku: baseSku(sourceVariant),
         targetVariantSku: baseSku(targetVariant),
@@ -520,11 +597,14 @@ export class BreakAssemblyUseCases {
     productId: number,
     warehouseLocationId: number
   ): Promise<BreakableVariantInfo[]> {
-    try {
-      await this.assertDirectConversionAllowed(productId);
-    } catch (error) {
-      if (error instanceof InventoryConversionStrategyError) return [];
-      throw error;
+    const runtime = await this.transformationAuthority.readRuntime();
+    if (runtime.authority === "legacy") {
+      try {
+        await this.assertDirectConversionAllowed(productId);
+      } catch (error) {
+        if (error instanceof InventoryConversionStrategyError) return [];
+        throw error;
+      }
     }
     // Get all variants for this product
     const allVariants: ProductVariant[] = await this.db
@@ -556,14 +636,33 @@ export class BreakAssemblyUseCases {
       const canBreakInto: BreakableVariantInfo["canBreakInto"] = [];
       for (const target of allVariants) {
         if (target.id === variant.id) continue;
-        if (target.parentVariantId !== variant.id) continue;
+        if (runtime.authority === "legacy" && target.parentVariantId !== variant.id) continue;
 
         const ratio = variant.unitsPerVariant / target.unitsPerVariant;
         if (!Number.isInteger(ratio) || ratio <= 0) continue;
 
+        let canonicalAuthorization: PackageConversionAuthorization | null = null;
+        if (runtime.authority === "canonical") {
+          try {
+            canonicalAuthorization = await this.transformationAuthority.authorizePackageConversion(
+              this.conversionAuthorizationRequest("break_pack", variant, target),
+              runtime,
+            );
+          } catch (error) {
+            if (error instanceof TransformationExecutionAuthorityError
+              && error.code === "PACKAGE_CONVERSION_PATH_NOT_ALLOWED") continue;
+            throw error;
+          }
+        }
+
+        const resultQty = canonicalAuthorization
+          ? Math.floor(currentQty / canonicalAuthorization.inputQty!) * canonicalAuthorization.outputQty!
+          : currentQty * ratio;
+        if (resultQty <= 0) continue;
+
         canBreakInto.push({
           targetVariant: target,
-          resultQty: currentQty * ratio,
+          resultQty,
         });
       }
 
@@ -612,6 +711,27 @@ export class BreakAssemblyUseCases {
   private generateBatchId(prefix: string, commandKey?: string): string {
     if (commandKey) return `${prefix}_${createHash("sha256").update(`${prefix}:${commandKey}`).digest("hex").slice(0, 40)}`;
     return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  private conversionAuthorizationRequest(
+    operation: "break_pack" | "assemble_pack",
+    source: ProductVariant,
+    destination: ProductVariant,
+  ): PackageConversionAuthorizationRequest {
+    return {
+      productId: source.productId,
+      operation,
+      source: {
+        variantId: source.id,
+        productId: source.productId,
+        unitsPerVariant: source.unitsPerVariant,
+      },
+      destination: {
+        variantId: destination.id,
+        productId: destination.productId,
+        unitsPerVariant: destination.unitsPerVariant,
+      },
+    };
   }
 
   /** Acquire the complete existing cell set before either FIFO owner locks lots. */
@@ -712,6 +832,10 @@ const packageConversionResultSchema = z.object({
 // Factory
 // ============================================================================
 
-export function createBreakAssemblyService(db: any, inventoryUseCases: any) {
-  return new BreakAssemblyUseCases(db, inventoryUseCases);
+export function createBreakAssemblyService(
+  db: any,
+  inventoryUseCases: any,
+  transformationAuthority: TransformationExecutionAuthorityPort = legacyTransformationExecutionAuthority,
+) {
+  return new BreakAssemblyUseCases(db, inventoryUseCases, () => new Date(), transformationAuthority);
 }

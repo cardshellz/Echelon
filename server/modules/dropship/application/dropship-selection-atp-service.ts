@@ -122,7 +122,13 @@ export interface DropshipSelectionAtpRepository {
 export interface DropshipAtpProvider {
   getVariantAtp(
     targets: readonly { productId: number; productVariantId: number }[],
-  ): Promise<Map<number, number>>;
+    scope?: { storeConnectionId?: number },
+  ): Promise<DropshipAtpSnapshot>;
+}
+
+export interface DropshipAtpSnapshot {
+  authority: "legacy" | "canonical";
+  quantities: ReadonlyMap<number, number>;
 }
 
 export interface DropshipSelectionAtpServiceDependencies {
@@ -233,7 +239,7 @@ export class DropshipSelectionAtpService {
     const facets = buildCatalogFacets(exposedFacetCandidates);
 
     const productVariantIds = uniqueNumbers(candidates.map((candidate) => candidate.productVariantId));
-    const [atpByVariantId, overrideRows] = await Promise.all([
+    const [atp, overrideRows] = await Promise.all([
       this.deps.atp.getVariantAtp(candidates.map((candidate) => ({
         productId: candidate.productId,
         productVariantId: candidate.productVariantId,
@@ -243,6 +249,7 @@ export class DropshipSelectionAtpService {
         productVariantIds,
       }),
     ]);
+    const atpByVariantId = atp.quantities;
 
     const overridesByVariantId = new Map(
       overrideRows.map((override) => [override.productVariantId, override]),
@@ -256,6 +263,7 @@ export class DropshipSelectionAtpService {
         rules: selectionRules,
         rawAtpUnits,
         override: overridesByVariantId.get(candidate.productVariantId) ?? null,
+        applyMarketplaceQuantityCap: atp.authority === "legacy",
       });
 
       return {

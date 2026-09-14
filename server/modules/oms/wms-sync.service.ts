@@ -16,6 +16,7 @@ import {
   outboundShipments,
   productLocations,
   productVariants,
+  warehouses,
   warehouseLocations,
   wmsOrders,
   wmsOrderItems,
@@ -67,6 +68,7 @@ import {
 import { refreshOmsLineMaterializedQuantities } from "./oms-line-materialization.repository";
 import { selectWmsCatalogSku } from "./domain/order-line-catalog-identity";
 import { createOrderLineCatalogIdentityRepository } from "./infrastructure/order-line-catalog-identity.repository";
+import type { ReservationResult } from "../channels/reservation.service";
 
 type WmsBinLocation = { location: string; zone: string };
 type DbLike = typeof db | any;
@@ -91,7 +93,64 @@ const DEFAULT_FULFILLMENT_PARTITION_KEY = "default";
 const UNAUTHORIZED_PAID_LINE_RECOVERY_PARTITION_KEY =
   "recovery:unauthorized-paid-lines:v1";
 
-type WmsSyncMode = "standard" | "terminal_residual_recovery";
+type WmsSyncMode =
+  | "standard"
+  | "terminal_residual_recovery"
+  | "dropship_acceptance_claim";
+
+export function shouldCreateInitialWmsShipment(input: {
+  hasShippableItems: boolean;
+  isDropshipAcceptanceClaim: boolean;
+}): boolean {
+  return input.hasShippableItems && !input.isDropshipAcceptanceClaim;
+}
+
+export class WmsRequiredInventoryClaimError extends Error {
+  readonly code = "WMS_REQUIRED_INVENTORY_CLAIM_FAILED";
+
+  constructor(
+    message: string,
+    readonly context: Readonly<Record<string, unknown>>,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = "WmsRequiredInventoryClaimError";
+  }
+}
+
+function requirePositiveWarehouseId(value: unknown): number {
+  const warehouseId = Number(value);
+  if (!Number.isSafeInteger(warehouseId) || warehouseId <= 0) {
+    throw new WmsRequiredInventoryClaimError(
+      "Dropship acceptance requires a positive frozen quote warehouse ID.",
+      { expectedWarehouseId: value ?? null },
+    );
+  }
+  return warehouseId;
+}
+
+function assertPinnedDropshipWarehouse(input: {
+  omsOrderId: number;
+  wmsOrderId: number;
+  expectedWarehouseId: number | null;
+  actualWarehouseId: number | null;
+}): void {
+  const expectedWarehouseId = requirePositiveWarehouseId(input.expectedWarehouseId);
+  const actualWarehouseId = input.actualWarehouseId == null
+    ? null
+    : Number(input.actualWarehouseId);
+  if (actualWarehouseId !== expectedWarehouseId) {
+    throw new WmsRequiredInventoryClaimError(
+      "Dropship acceptance WMS order does not match the frozen quote warehouse.",
+      {
+        omsOrderId: input.omsOrderId,
+        wmsOrderId: input.wmsOrderId,
+        expectedWarehouseId,
+        actualWarehouseId,
+      },
+    );
+  }
+}
 
 function normalizeFulfillmentPartitionKey(value: string | null | undefined): string {
   const normalized = String(value ?? "").trim();
@@ -511,6 +570,62 @@ export class WmsSyncService {
   }
 
   /**
+   * Materialize an unpaid dropship acceptance as non-pickable WMS demand and
+   * require one complete authority-aware reservation/claim. This path creates
+   * no shipment, provider outbox command, or external ShipStation request.
+   */
+  async stageOmsOrderAndClaimInventory(input: {
+    omsOrderId: number;
+    expectedWarehouseId: number;
+  }): Promise<{ wmsOrderId: number; warehouseId: number; inventoryClaimId: string | null }> {
+    const expectedWarehouseId = requirePositiveWarehouseId(input.expectedWarehouseId);
+    const wmsOrderId = await this.syncOmsOrderToWmsInternal(
+      input.omsOrderId,
+      "dropship_acceptance_claim",
+      expectedWarehouseId,
+    );
+    if (wmsOrderId == null) {
+      throw new WmsRequiredInventoryClaimError(
+        "Dropship acceptance staging did not materialize a WMS order.",
+        { omsOrderId: input.omsOrderId, expectedWarehouseId },
+      );
+    }
+    const reservationStatus = await this.services.reservation.getOrderReservationStatus(wmsOrderId);
+    if (Array.isArray(reservationStatus)
+      || reservationStatus.authority !== "canonical"
+      || reservationStatus.orderId !== wmsOrderId) {
+      throw new WmsRequiredInventoryClaimError(
+        "Dropship acceptance could not prove canonical inventory-claim identity.",
+        { omsOrderId: input.omsOrderId, wmsOrderId },
+      );
+    }
+    return {
+      wmsOrderId,
+      warehouseId: expectedWarehouseId,
+      inventoryClaimId: reservationStatus.claim?.claimId ?? null,
+    };
+  }
+
+  async releaseStagedInventoryClaim(input: {
+    wmsOrderId: number;
+    inventoryClaimId: string | null;
+    reason: string;
+  }): Promise<void> {
+    const release = await this.services.reservation.releaseOrderReservation(
+      input.wmsOrderId,
+      input.reason,
+      "dropship_acceptance",
+      { expectedCanonicalClaimId: input.inventoryClaimId },
+    );
+    if (release.failed.length > 0) {
+      throw new WmsRequiredInventoryClaimError(
+        "Dropship acceptance inventory-claim compensation was incomplete.",
+        { wmsOrderId: input.wmsOrderId, failed: release.failed },
+      );
+    }
+  }
+
+  /**
    * Materialize quantity missed by the historical paid/updated authority race
    * into a separate WMS partition after the original partition shipped.
    *
@@ -530,6 +645,7 @@ export class WmsSyncService {
   private async syncOmsOrderToWmsInternal(
     omsOrderId: number,
     mode: WmsSyncMode,
+    expectedDropshipWarehouseId?: number,
   ): Promise<number | null> {
     try {
       const omsOrderResult = await db
@@ -545,6 +661,25 @@ export class WmsSyncService {
 
       const omsOrder = omsOrderResult[0];
       const isTerminalResidualRecovery = mode === "terminal_residual_recovery";
+      const isDropshipAcceptanceClaim = mode === "dropship_acceptance_claim";
+      const pinnedDropshipWarehouseId = isDropshipAcceptanceClaim
+        ? requirePositiveWarehouseId(expectedDropshipWarehouseId)
+        : null;
+      const isUnfinalizedDropshipAcceptance =
+        (omsOrder as any).rawPayload?.dropship?.acceptanceState === "inventory_claim_required"
+        && String(omsOrder.financialStatus ?? "").toLowerCase() !== "paid";
+      if (isDropshipAcceptanceClaim && !isUnfinalizedDropshipAcceptance) {
+        throw new WmsRequiredInventoryClaimError(
+          "Dropship acceptance claim staging requires an unpaid canonical acceptance OMS order.",
+          { omsOrderId, financialStatus: omsOrder.financialStatus },
+        );
+      }
+      if (mode === "standard" && isUnfinalizedDropshipAcceptance) {
+        console.warn(
+          `[WMS Sync] OMS order ${omsOrderId} is awaiting canonical dropship acceptance finalization; skipped operational dispatch`,
+        );
+        return null;
+      }
       const fulfillmentPartitionKey = resolveOmsFulfillmentPartitionKey(mode);
 
       if (this.isFinalOrCancelledOmsOrder(omsOrder)) {
@@ -567,6 +702,7 @@ export class WmsSyncService {
         .select({
           id: wmsOrders.id,
           warehouseStatus: wmsOrders.warehouseStatus,
+          warehouseId: wmsOrders.warehouseId,
         })
         .from(wmsOrders)
         .where(buildOmsWmsOrderScope(omsOrderId, fulfillmentPartitionKey))
@@ -587,6 +723,21 @@ export class WmsSyncService {
           console.log(
             `[WMS Sync] Residual recovery partition already exists for OMS order ${omsOrderId} (WMS ${wmsOrderId}); reused without mutating the shipped original partition`,
           );
+          return wmsOrderId;
+        }
+        if (isDropshipAcceptanceClaim) {
+          assertPinnedDropshipWarehouse({
+            omsOrderId,
+            wmsOrderId,
+            expectedWarehouseId: pinnedDropshipWarehouseId,
+            actualWarehouseId: existingWmsOrder[0].warehouseId,
+          });
+          await this.assertDropshipAcceptanceReplayIsNonOperational(
+            omsOrderId,
+            wmsOrderId,
+            existingWmsOrder[0].warehouseStatus,
+          );
+          await this.reserveRequired(wmsOrderId, omsOrderId, "dropship_acceptance_replay");
           return wmsOrderId;
         }
         const headerRefresh = await this.refreshExistingWmsOrderHeaderFromOms(omsOrder, wmsOrderId);
@@ -698,14 +849,37 @@ export class WmsSyncService {
       // configured today → the default fulfillment warehouse. Routing never
       // blocks the sync.
       let routing: { warehouseId: number; warehouseType: string } | null = null;
-      try {
-        routing = await this.services.fulfillmentRouter.routeOrder({
-          channelId: omsOrder.channelId,
-          country: (omsOrder as any).shipToCountry ?? null,
-          skus: materializableOmsLines.map((l: any) => l.sku).filter(Boolean),
-        });
-      } catch (err: any) {
-        console.warn(`[WMS Sync] Warehouse routing failed for OMS order ${omsOrderId}: ${err?.message ?? err}`);
+      if (isDropshipAcceptanceClaim) {
+        const pinnedWarehouses = await db
+          .select({
+            warehouseId: warehouses.id,
+            warehouseType: warehouses.warehouseType,
+            isActive: warehouses.isActive,
+          })
+          .from(warehouses)
+          .where(eq(warehouses.id, pinnedDropshipWarehouseId!))
+          .limit(1);
+        const pinnedWarehouse = pinnedWarehouses[0];
+        if (!pinnedWarehouse || Number(pinnedWarehouse.isActive) !== 1) {
+          throw new WmsRequiredInventoryClaimError(
+            "The frozen dropship quote warehouse is missing or inactive.",
+            { omsOrderId, expectedWarehouseId: pinnedDropshipWarehouseId },
+          );
+        }
+        routing = {
+          warehouseId: pinnedWarehouse.warehouseId,
+          warehouseType: pinnedWarehouse.warehouseType,
+        };
+      } else {
+        try {
+          routing = await this.services.fulfillmentRouter.routeOrder({
+            channelId: omsOrder.channelId,
+            country: (omsOrder as any).shipToCountry ?? null,
+            skus: materializableOmsLines.map((l: any) => l.sku).filter(Boolean),
+          });
+        } catch (err: any) {
+          console.warn(`[WMS Sync] Warehouse routing failed for OMS order ${omsOrderId}: ${err?.message ?? err}`);
+        }
       }
       const routedWarehouseId = routing?.warehouseId ?? null;
 
@@ -805,7 +979,7 @@ export class WmsSyncService {
         // step-1 fast-path query; this is the one that actually prevents
         // the duplicate when two syncs race.
         const racedWmsOrder = await tx
-          .select({ id: wmsOrders.id })
+          .select({ id: wmsOrders.id, warehouseId: wmsOrders.warehouseId })
           .from(wmsOrders)
           .where(buildOmsWmsOrderScope(omsOrderId, fulfillmentPartitionKey))
           .orderBy(sql`
@@ -818,6 +992,14 @@ export class WmsSyncService {
           `)
           .limit(1);
         if (racedWmsOrder.length > 0) {
+          if (isDropshipAcceptanceClaim) {
+            assertPinnedDropshipWarehouse({
+              omsOrderId,
+              wmsOrderId: Number(racedWmsOrder[0].id),
+              expectedWarehouseId: pinnedDropshipWarehouseId,
+              actualWarehouseId: racedWmsOrder[0].warehouseId,
+            });
+          }
           return { racedExistingWmsOrderId: Number(racedWmsOrder[0].id) };
         }
 
@@ -920,7 +1102,10 @@ export class WmsSyncService {
         // rows. Failure is non-fatal so a broken shipment insert never
         // blocks order sync (the hourly reconcile sweep will retry).
         let shipmentIdForPush: number | null = null;
-        if (txHasShippableItems) {
+        if (shouldCreateInitialWmsShipment({
+          hasShippableItems: txHasShippableItems,
+          isDropshipAcceptanceClaim,
+        })) {
           // §6 Commit 14: routing by combined_role.
           const combinedRole =
             (newWmsOrder as any).combinedRole ?? null;
@@ -1065,7 +1250,12 @@ export class WmsSyncService {
       // transaction is aborted", and COMMIT silently becomes ROLLBACK —
       // rolling back the WMS order and shipment we just created. Running
       // reservation after the tx commits isolates that blast radius.
-      if ((txResult as any).warehouseStatus === "ready" && !(txResult as any).racedExistingWmsOrderId) {
+      if (isDropshipAcceptanceClaim && !(txResult as any).racedExistingWmsOrderId) {
+        const wmsOrderId = (txResult as any).newWmsOrder?.id;
+        if (wmsOrderId) {
+          await this.reserveRequired(wmsOrderId, omsOrderId, "dropship_acceptance_prepare");
+        }
+      } else if ((txResult as any).warehouseStatus === "ready" && !(txResult as any).racedExistingWmsOrderId) {
         const wmsOrderId = (txResult as any).newWmsOrder?.id;
         if (wmsOrderId) {
           await this.reserveBestEffort(wmsOrderId, omsOrderId, "post_create");
@@ -1081,6 +1271,10 @@ export class WmsSyncService {
         console.warn(
           `[WMS Sync] Concurrent sync race for OMS order ${omsOrderId} — WMS order ${racedId} already created by a parallel sync; reconciling instead of creating a duplicate`,
         );
+        if (isDropshipAcceptanceClaim) {
+          await this.reserveRequired(racedId, omsOrderId, "dropship_acceptance_race_replay");
+          return racedId;
+        }
         try {
           if (!isTerminalResidualRecovery) {
             await this.reconcileExistingWmsOrderLines(omsOrderId, racedId);
@@ -1109,6 +1303,10 @@ export class WmsSyncService {
       // so the row is inserted with its warehouse_id and a warehouse-correct
       // SLA, instead of being patched afterward.)
       await this.refreshOmsLineMaterializedQuantities(omsOrderId);
+
+      if (isDropshipAcceptanceClaim) {
+        return newWmsOrder.id;
+      }
 
       // 8. Push to ShipStation via WMS-owned pushShipment path.
       // Push failures never block the sync — reconcile retries.
@@ -1331,6 +1529,106 @@ export class WmsSyncService {
       // the retry path (reserveOrder is idempotent).
       console.error(
         `[WMS Sync] Reservation error for WMS order ${wmsOrderId} (${context}): ${err.message} — detector will retry`,
+      );
+    }
+  }
+
+  private async reserveRequired(
+    wmsOrderId: number,
+    omsOrderId: number,
+    context: string,
+  ): Promise<void> {
+    let reserveResult: ReservationResult;
+    try {
+      reserveResult = await this.services.reservation.reserveOrder(
+        wmsOrderId,
+        "dropship_acceptance",
+      );
+    } catch (error) {
+      await this.compensateFailedRequiredReservation(
+        wmsOrderId,
+        omsOrderId,
+        context,
+        null,
+        error,
+      );
+      throw error;
+    }
+    if (reserveResult.failed.length === 0) return;
+
+    const error = new WmsRequiredInventoryClaimError(
+      "Dropship acceptance requires a complete whole-order inventory claim.",
+      {
+        wmsOrderId,
+        omsOrderId,
+        context,
+        failed: reserveResult.failed,
+        reserved: reserveResult.reserved,
+        promised: reserveResult.promised,
+      },
+    );
+    await this.compensateFailedRequiredReservation(
+      wmsOrderId,
+      omsOrderId,
+      context,
+      reserveResult.canonicalClaimId ?? null,
+      error,
+    );
+    throw error;
+  }
+
+  private async assertDropshipAcceptanceReplayIsNonOperational(
+    omsOrderId: number,
+    wmsOrderId: number,
+    warehouseStatus: string | null,
+  ): Promise<void> {
+    if (warehouseStatus === "pending") return;
+
+    if (warehouseStatus === "completed") {
+      const shippableItems = await db
+        .select({ id: wmsOrderItems.id })
+        .from(wmsOrderItems)
+        .where(and(
+          eq(wmsOrderItems.orderId, wmsOrderId),
+          sql`COALESCE(${wmsOrderItems.requiresShipping}, 1) <> 0`,
+        ))
+        .limit(1);
+      if (shippableItems.length === 0) return;
+    }
+
+    if (warehouseStatus === "awaiting_3pl") {
+      const [assignment] = await db
+        .select({ warehouseType: warehouses.warehouseType })
+        .from(wmsOrders)
+        .leftJoin(warehouses, eq(warehouses.id, wmsOrders.warehouseId))
+        .where(eq(wmsOrders.id, wmsOrderId))
+        .limit(1);
+      if (assignment?.warehouseType === "3pl") return;
+    }
+
+    throw new WmsRequiredInventoryClaimError(
+      "Dropship acceptance staging found a WMS order that is already operationally visible.",
+      { omsOrderId, wmsOrderId, warehouseStatus },
+    );
+  }
+
+  private async compensateFailedRequiredReservation(
+    wmsOrderId: number,
+    omsOrderId: number,
+    context: string,
+    inventoryClaimId: string | null,
+    cause: unknown,
+  ): Promise<void> {
+    try {
+      await this.releaseStagedInventoryClaim({
+        wmsOrderId,
+        inventoryClaimId,
+        reason: `Required dropship acceptance inventory claim failed (${context})`,
+      });
+    } catch (compensationError) {
+      throw new AggregateError(
+        [cause, compensationError],
+        `Dropship acceptance inventory claim and compensation both failed for OMS order ${omsOrderId}.`,
       );
     }
   }

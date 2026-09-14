@@ -3,6 +3,7 @@ import { PgCatalogVariantMediaReader } from "../../catalog/catalog-media.reader"
 import { createAllocationEngine } from "../../channels/allocation-engine.service";
 import { resolveDropshipPublicationPreview } from "./dropship-listing-publication-preview.provider";
 import { createAuthorityAwareInventoryAtpService } from "../../inventory-planning/infrastructure/inventory-availability-runtime-atp.repository";
+import { createInventoryChannelQuantityRuntimeService } from "../../inventory-planning/infrastructure/inventory-availability-runtime-publication.repository";
 import {
   DropshipListingPreviewService,
   makeDropshipListingPreviewLogger,
@@ -35,6 +36,7 @@ export function createDropshipListingPreviewServiceFromEnv(): DropshipListingPre
     // (handoff Option B), computed over the authority-aware ATP reader.
     atp: new ChannelAllocationDropshipAtpProvider({
       allocationEngine: createAllocationEngine(db, createAuthorityAwareInventoryAtpService(pool)),
+      runtimeQuantity: createInventoryChannelQuantityRuntimeService(pool),
       resolveDropshipOmsChannelId: () => resolveDropshipOmsChannelIdWithClient(pool),
     }),
     marketplaceListing: new ConfigDrivenDropshipMarketplaceListingProvider(),

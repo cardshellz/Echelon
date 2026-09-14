@@ -168,8 +168,23 @@ export class AuthorityAwareReservationService implements ReservationServiceContr
     if (disposition !== "release" && disposition !== "cancel") {
       throw invalidInput("disposition", disposition);
     }
+    const hasExpectedCanonicalClaimIdentity = Object.prototype.hasOwnProperty.call(
+      options,
+      "expectedCanonicalClaimId",
+    );
+    const expectedCanonicalClaimId = options.expectedCanonicalClaimId == null
+      ? null
+      : positiveBigintString(options.expectedCanonicalClaimId, "expectedCanonicalClaimId");
     return this.executor.execute(async (context) => {
       if (context.authority === "legacy") {
+        if (hasExpectedCanonicalClaimIdentity) {
+          throw unsupportedCanonicalMutation(
+            "CANONICAL_EXPECTED_CLAIM_UNAVAILABLE_UNDER_LEGACY",
+            "An exact canonical claim release fence cannot execute while legacy reservation authority is active.",
+            context,
+            { orderId: validatedOrderId, expectedCanonicalClaimId },
+          );
+        }
         const legacyOptions: ReleaseOrderReservationOptions = { disposition };
         if (options.dbOverride != null) legacyOptions.dbOverride = options.dbOverride;
         return context.legacy.releaseOrderReservation(
@@ -190,9 +205,30 @@ export class AuthorityAwareReservationService implements ReservationServiceContr
 
       const actor = canonicalActor(userId);
       const cursor = await context.getLatestClaim(validatedOrderId);
+      const exactClaimIdentityMismatch = hasExpectedCanonicalClaimIdentity
+        && (expectedCanonicalClaimId === null
+          ? cursor?.status === "active"
+          : cursor?.claimId !== expectedCanonicalClaimId);
+      if (exactClaimIdentityMismatch) {
+        throw new InventoryAvailabilityRuntimeClaimError(
+          "CANONICAL_CLAIM_RELEASE_IDENTITY_STALE",
+          "The requested canonical claim is no longer the latest claim for this order; refusing to release newer inventory ownership.",
+          {
+            orderId: validatedOrderId,
+            expectedCanonicalClaimId,
+            latestCanonicalClaimId: cursor?.claimId ?? null,
+            latestCanonicalClaimStatus: cursor?.status ?? null,
+          },
+        );
+      }
+      if (hasExpectedCanonicalClaimIdentity && expectedCanonicalClaimId === null) {
+        return { released: 0, failed: [] };
+      }
+      const releaseClaimId = expectedCanonicalClaimId
+        ?? (cursor?.status === "active" ? cursor.claimId : null);
       const idempotencyKey = commandKey("release-order-claim", {
         orderId: validatedOrderId,
-        claimId: cursor?.claimId ?? "none",
+        claimId: releaseClaimId ?? cursor?.claimId ?? "none",
         disposition,
         actor,
         reason: validatedReason,
@@ -200,7 +236,7 @@ export class AuthorityAwareReservationService implements ReservationServiceContr
       const result = await context.canonical.releaseOrderClaim({
         orderId: validatedOrderId,
         disposition,
-        ...(cursor?.status === "active" ? { expectedClaimId: cursor.claimId } : {}),
+        ...(releaseClaimId !== null ? { expectedClaimId: releaseClaimId } : {}),
         idempotencyKey,
         actor,
         reason: validatedReason,
@@ -466,7 +502,10 @@ async function claimCanonicalOrder(
   if (result.outcome !== "claimed") {
     throw invalidCanonicalResult("claim_order", result, context);
   }
-  return mapCanonicalPlanToReservationResult(context, orderId, result.plan);
+  return {
+    ...await mapCanonicalPlanToReservationResult(context, orderId, result.plan),
+    canonicalClaimId: result.claimId,
+  };
 }
 
 async function reconcileCanonicalOrderDemand(
@@ -778,6 +817,14 @@ function positiveInteger(value: unknown, field: string): number {
     throw invalidInput(field, value);
   }
   return parsed;
+}
+
+function positiveBigintString(value: unknown, field: string): string {
+  const normalized = String(value ?? "").trim();
+  if (!/^[1-9][0-9]*$/.test(normalized)) {
+    throw invalidInput(field, value);
+  }
+  return normalized;
 }
 
 function nonblank(value: unknown, field: string, maximum: number): string {

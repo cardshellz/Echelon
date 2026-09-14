@@ -14,7 +14,13 @@ import {
   formatNotificationCurrency,
   sendDropshipNotificationSafely,
 } from "./dropship-notification-dispatch";
-import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship-ports";
+import type {
+  DropshipCanonicalAcceptanceFulfillment,
+  DropshipClock,
+  DropshipInventoryRuntimeAuthorityGate,
+  DropshipLogEvent,
+  DropshipLogger,
+} from "./dropship-ports";
 import type { DropshipNotificationSender } from "./dropship-ports";
 import type { NormalizedDropshipOrderPayload } from "./dropship-order-intake-service";
 import {
@@ -46,7 +52,51 @@ export interface DropshipOrderAcceptanceResult {
 
 export interface DropshipOrderAcceptanceRepository {
   acceptOrder(input: DropshipOrderAcceptanceInput): Promise<DropshipOrderAcceptanceResult>;
+  prepareCanonicalOrder(
+    input: DropshipOrderAcceptanceInput,
+  ): Promise<DropshipCanonicalOrderAcceptancePreparation>;
+  markCanonicalInventoryClaimed(input: {
+    acceptance: DropshipOrderAcceptanceInput;
+    omsOrderId: number;
+    wmsOrderId: number;
+    inventoryClaimId: string | null;
+  }): Promise<void>;
+  finalizeCanonicalOrder(
+    input: DropshipOrderAcceptanceInput,
+  ): Promise<DropshipOrderAcceptanceResult>;
+  markCanonicalInventoryClaimReleased(input: {
+    acceptance: DropshipOrderAcceptanceInput;
+    omsOrderId: number;
+    wmsOrderId: number;
+    inventoryClaimId: string | null;
+    reason: string;
+  }): Promise<void>;
 }
+
+export interface DropshipCanonicalOrderAcceptancePrepared {
+  outcome: "prepared";
+  intakeId: number;
+  vendorId: number;
+  storeConnectionId: number;
+  shippingQuoteSnapshotId: number;
+  warehouseId: number;
+  omsOrderId: number;
+  idempotentReplay: boolean;
+}
+
+export interface DropshipCanonicalOrderAcceptanceCompensationRequired {
+  outcome: "compensation_required";
+  result: DropshipOrderAcceptanceResult;
+  omsOrderId: number;
+  wmsOrderId: number;
+  warehouseId: number;
+  inventoryClaimId: string | null;
+}
+
+export type DropshipCanonicalOrderAcceptancePreparation =
+  | DropshipCanonicalOrderAcceptancePrepared
+  | DropshipCanonicalOrderAcceptanceCompensationRequired
+  | DropshipOrderAcceptanceResult;
 
 export interface DropshipAcceptanceIntakeRecord {
   intakeId: number;
@@ -145,6 +195,7 @@ export interface DropshipAcceptancePlanningInput {
   requestHash: string;
   idempotencyKey: string;
   acceptedAt: Date;
+  inventoryValidation: "legacy_exact_sku" | "canonical_claim";
 }
 
 export interface DropshipOrderAcceptancePlan {
@@ -183,6 +234,8 @@ export class DropshipOrderAcceptanceService {
   constructor(
     private readonly deps: {
       repository: DropshipOrderAcceptanceRepository;
+      inventoryAuthority: DropshipInventoryRuntimeAuthorityGate;
+      canonicalFulfillment: DropshipCanonicalAcceptanceFulfillment;
       notificationSender?: DropshipNotificationSender;
       clock: DropshipClock;
       logger: DropshipLogger;
@@ -193,11 +246,16 @@ export class DropshipOrderAcceptanceService {
     const parsed = parseOrderAcceptanceInput(input);
     const acceptedAt = this.deps.clock.now();
     const requestHash = hashDropshipOrderAcceptanceRequest(parsed);
-    const result = await this.deps.repository.acceptOrder({
+    const acceptanceInput: DropshipOrderAcceptanceInput = {
       ...parsed,
       acceptedAt,
       requestHash,
-    });
+    };
+    const result = await this.deps.inventoryAuthority.execute((authority) =>
+      authority === "legacy"
+        ? this.deps.repository.acceptOrder(acceptanceInput)
+        : this.acceptCanonicalOrder(acceptanceInput),
+    );
 
     this.deps.logger.info({
       code: result.outcome === "accepted"
@@ -221,6 +279,92 @@ export class DropshipOrderAcceptanceService {
 
     await this.notifyOrderAcceptanceResult(result);
     return result;
+  }
+
+  private async acceptCanonicalOrder(
+    input: DropshipOrderAcceptanceInput,
+  ): Promise<DropshipOrderAcceptanceResult> {
+    const preparation = await this.deps.repository.prepareCanonicalOrder(input);
+    if (preparation.outcome === "compensation_required") {
+      return this.completeCanonicalPaymentHoldCompensation(input, preparation);
+    }
+    if (preparation.outcome !== "prepared") {
+      return preparation;
+    }
+
+    const { wmsOrderId, warehouseId, inventoryClaimId } = await this.deps.canonicalFulfillment
+      .stageOmsOrderAndClaimInventory({
+        omsOrderId: preparation.omsOrderId,
+        expectedWarehouseId: preparation.warehouseId,
+      });
+    if (warehouseId !== preparation.warehouseId) {
+      throw new DropshipError(
+        "DROPSHIP_CANONICAL_WAREHOUSE_MISMATCH",
+        "Canonical dropship acceptance staged inventory in a warehouse other than the frozen quote warehouse.",
+        {
+          intakeId: preparation.intakeId,
+          omsOrderId: preparation.omsOrderId,
+          expectedWarehouseId: preparation.warehouseId,
+          stagedWarehouseId: warehouseId,
+        },
+      );
+    }
+    await this.deps.repository.markCanonicalInventoryClaimed({
+      acceptance: input,
+      omsOrderId: preparation.omsOrderId,
+      wmsOrderId,
+      inventoryClaimId,
+    });
+
+    const result = await this.deps.repository.finalizeCanonicalOrder(input);
+    if (result.outcome !== "payment_hold") {
+      return result;
+    }
+
+    return this.completeCanonicalPaymentHoldCompensation(input, {
+      outcome: "compensation_required",
+      result,
+      omsOrderId: preparation.omsOrderId,
+      wmsOrderId,
+      warehouseId: preparation.warehouseId,
+      inventoryClaimId,
+    });
+  }
+
+  private async completeCanonicalPaymentHoldCompensation(
+    input: DropshipOrderAcceptanceInput,
+    preparation: DropshipCanonicalOrderAcceptanceCompensationRequired,
+  ): Promise<DropshipOrderAcceptanceResult> {
+    await this.deps.canonicalFulfillment.releaseStagedInventoryClaim({
+      wmsOrderId: preparation.wmsOrderId,
+      inventoryClaimId: preparation.inventoryClaimId,
+      reason: `Dropship intake ${preparation.result.intakeId} entered payment hold before acceptance finalization`,
+    });
+    await this.deps.repository.markCanonicalInventoryClaimReleased({
+      acceptance: input,
+      omsOrderId: preparation.omsOrderId,
+      wmsOrderId: preparation.wmsOrderId,
+      inventoryClaimId: preparation.inventoryClaimId,
+      reason: "wallet_balance_changed_before_finalization",
+    });
+    if (!preparation.result.paymentHoldExpiresAt) {
+      throw new DropshipError(
+        "DROPSHIP_ORDER_PAYMENT_HOLD_EXPIRY_REQUIRED",
+        "Dropship payment hold intake is missing its expiration timestamp.",
+        { intakeId: preparation.result.intakeId },
+      );
+    }
+    if (preparation.result.paymentHoldExpiresAt <= input.acceptedAt) {
+      throw new DropshipError(
+        "DROPSHIP_ORDER_PAYMENT_HOLD_EXPIRED",
+        "Dropship payment hold expired before canonical acceptance could resume.",
+        {
+          intakeId: preparation.result.intakeId,
+          paymentHoldExpiresAt: preparation.result.paymentHoldExpiresAt.toISOString(),
+        },
+      );
+    }
+    return preparation.result;
   }
 
   private async notifyOrderAcceptanceResult(result: DropshipOrderAcceptanceResult): Promise<void> {
@@ -275,7 +419,9 @@ export function buildDropshipOrderAcceptancePlan(
   assertQuoteDestinationMatchesShipTo(input.quote, shipTo);
   assertQuoteItemsMatchOrder(input.quote, input.lines);
   assertPricingPoliciesAllowAcceptance(input.lines, input.pricingPolicies);
-  assertInventoryCanReserve(input.lines, input.inventory);
+  if (input.inventoryValidation === "legacy_exact_sku") {
+    assertInventoryCanReserve(input.lines, input.inventory);
+  }
   assertWalletCurrencyMatchesQuote(input.wallet, input.quote);
 
   const lines = input.lines.map((line) => ({

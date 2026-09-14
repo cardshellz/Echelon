@@ -1,10 +1,14 @@
 import { useState, useEffect } from "react";
 import { useAuth } from "@/lib/auth";
-import { useParams, Link, useLocation } from "wouter";
+import { useParams, Link } from "wouter";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { WarehousePackagingPanel } from "@/components/shipping/WarehousePackagingPanel";
+import {
+  InventoryRuntimeAuthorityBadge,
+  useInventoryRuntimeAuthority,
+} from "@/components/inventory/InventoryRuntimeAuthorityBadge";
 
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -113,8 +117,9 @@ export default function WarehouseSettingsPage() {
   const params = useParams<{ id: string }>();
   const routeId = params.id;
   const isDefault = routeId === IS_DEFAULT_ID;
-  const [, navigate] = useLocation();
   const { toast } = useToast();
+  const inventoryRuntimeAuthorityQuery = useInventoryRuntimeAuthority();
+  const legacyInventoryAuthority = inventoryRuntimeAuthorityQuery.data?.authority === "legacy";
 
   // Load the right row: DEFAULT looks up by code, warehouse looks up by warehouseId
   const { data: rows, isLoading } = useQuery<WarehouseSettings[]>({
@@ -171,16 +176,24 @@ export default function WarehouseSettingsPage() {
       // that try to set id/createdAt, and they're meaningless on insert too.
       const { id: _id, createdAt: _createdAt, updatedAt: _updatedAt, ...payload } =
         form as any;
+      const {
+        channelSyncEnabled: _legacyChannelSyncEnabled,
+        channelSyncIntervalMinutes: _legacyChannelSyncIntervalMinutes,
+        ...canonicalSafePayload
+      } = payload;
+      // Once canonical authority is active (or cannot be proven), this broad
+      // settings form must not echo obsolete channel-publication controls.
+      const submittedPayload = legacyInventoryAuthority ? payload : canonicalSafePayload;
       if (current?.id) {
         const res = await apiRequest(
           "PATCH",
           `/api/warehouse-settings/${current.id}`,
-          payload,
+          submittedPayload,
         );
         return res.json();
       } else {
         // First-time create for a warehouse; inherits DEFAULT's values from seed above.
-        const res = await apiRequest("POST", `/api/warehouse-settings`, payload);
+        const res = await apiRequest("POST", `/api/warehouse-settings`, submittedPayload);
         return res.json();
       }
     },
@@ -664,7 +677,7 @@ export default function WarehouseSettingsPage() {
 
         {/* ================ CHANNEL SYNC ================ */}
         <TabsContent value="sync">
-          <Card>
+          {legacyInventoryAuthority ? <Card>
             <CardHeader>
               <CardTitle>Channel Sync</CardTitle>
               <CardDescription>Inventory push to connected sales channels (Shopify, eBay, etc).</CardDescription>
@@ -706,7 +719,32 @@ export default function WarehouseSettingsPage() {
                 </p>
               </div>
             </CardContent>
-          </Card>
+          </Card> : (
+            <Card data-testid="warehouse-legacy-channel-sync-unavailable">
+              <CardHeader>
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <CardTitle>
+                      {inventoryRuntimeAuthorityQuery.data?.authority === "canonical"
+                        ? "Warehouse channel sync settings are retired"
+                        : "Warehouse channel sync settings are unavailable"}
+                    </CardTitle>
+                    <CardDescription>
+                      {inventoryRuntimeAuthorityQuery.data?.authority === "canonical"
+                        ? "Fulfillment-node source bindings and publication-target state now control where channel inventory is published."
+                        : "The live inventory authority could not be confirmed, so legacy publication controls remain read-only."}
+                    </CardDescription>
+                  </div>
+                  <InventoryRuntimeAuthorityBadge />
+                </div>
+              </CardHeader>
+              <CardContent>
+                <Button variant="outline" asChild>
+                  <Link href="/channels/inventory-exposure">Open Inventory Exposure</Link>
+                </Button>
+              </CardContent>
+            </Card>
+          )}
         </TabsContent>
 
         {/* ================ VELOCITY ================ */}
