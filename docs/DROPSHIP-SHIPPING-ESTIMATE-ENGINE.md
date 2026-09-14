@@ -64,3 +64,19 @@ No production configuration, rate table, credential, listing, order, quote snaps
 4. Confirm the UI has only the estimated total/scenario and the HTTP response contains no breakdown, rate-book/table identity, or internal diagnostics.
 5. Test a no-coverage scenario: unavailable, no stale amount, safe retry. Inspect private logs for the reason.
 6. Separately verify an authorized new order's quote before enabling live purchases; this work did not place or debit an order.
+
+## Staff calculation view (2026-09-14)
+
+The vendor contract above is unchanged: a vendor session still receives only the final charge, the requested scenario, and allowlisted messages.
+
+A request that also carries an Echelon staff session holding `dropship:manage_operations` receives an additional `calculation` block on an `estimated` result (`listingShippingEstimateCalculationSchema` in `shared/dropship/listing-shipping-estimate.ts`). The route decides this per request in `createStaffCalculationViewer` (`server/modules/dropship/interfaces/http/dropship-listing-shipping-estimate.routes.ts`); a failed permission check fails closed to the vendor response. The block is assembled by `buildListingShippingEstimateCalculation` (`server/modules/dropship/application/listing-shipping-estimate-calculation.ts`) from the same calculation the total came from, so it cannot drift from the number shown:
+
+- items submitted with the catalog SKU, unit weight and line weight;
+- cartons rated (box, weight, dimensions, contents);
+- pricing source and cutover decision, origin warehouse;
+- shared engine: pricing program (rate book), rate table, `rate_table_rows.id` of the row that priced the shipment (new `rateRowId` evidence carried from `selectServiceLevelRates`), service level, zone, rated weight, charge model, band ceiling, per-started-pound terms, product-policy trace steps;
+- legacy provider: zone rule and per-package rate matches;
+- fee arithmetic (base, markup, insurance, dunnage, total) in integer cents, plus raw engine warnings.
+
+The estimate form now offers US states from `US_POSTAL_REGIONS` (the same region codes the rate tables are keyed by) instead of free text; a two-letter region input remains only for non-US destinations.
+

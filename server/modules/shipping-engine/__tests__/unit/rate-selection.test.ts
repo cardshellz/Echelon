@@ -48,6 +48,7 @@ describe("selectServiceLevelRates", () => {
 
   it("returns the matching statewide service level", () => {
     expect(selectServiceLevelRates([row()], INPUT)).toEqual([{
+      rateRowId: null,
       serviceLevelId: 1,
       serviceLevelCode: "standard",
       displayName: "Standard Shipping",
@@ -218,3 +219,19 @@ describe("startedPoundsFromGrams", () => {
     expect(startedPoundsFromGrams(grams)).toBe(pounds);
   });
 });
+
+describe("rate row identity evidence", () => {
+  it("carries the database row id through selection and reports null for rows without one", () => {
+    const [withId] = selectServiceLevelRates([row({ rateRowId: 4242 })], INPUT);
+    expect(withId.rateRowId).toBe(4242);
+    const [withoutId] = selectServiceLevelRates([row()], INPUT);
+    expect(withoutId.rateRowId).toBeNull();
+  });
+  it("does not let the row id influence which row wins", () => {
+    const cheaper = row({ rateRowId: 9, rateCents: 500 });
+    const pricier = row({ rateRowId: 1, rateCents: 900 });
+    expect(selectServiceLevelRates([pricier, cheaper], INPUT)).toEqual(selectServiceLevelRates([cheaper, pricier], INPUT));
+    expect(selectServiceLevelRates([pricier, cheaper], INPUT)[0]).toMatchObject({ rateRowId: 9, rateCents: 500 });
+  });
+});
+

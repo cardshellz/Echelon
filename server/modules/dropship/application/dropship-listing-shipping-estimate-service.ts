@@ -16,6 +16,10 @@ import {
   calculateDropshipShippingQuote,
   type DropshipShippingCalculationDependencies,
 } from "./dropship-shipping-quote-service";
+import {
+  buildListingShippingEstimateCalculation,
+  type ListingShippingEstimateCalculationFact,
+} from "./listing-shipping-estimate-calculation";
 
 export interface ListingShippingEstimateContext {
   vendorId: number;
@@ -31,13 +35,29 @@ export interface ListingShippingEstimateContextReader {
   loadForMember(memberId: string, storeConnectionId: number): Promise<ListingShippingEstimateContext | null>;
 }
 
+export interface ListingShippingEstimateCatalogFactReader {
+  loadByVariantIds(
+    productVariantIds: readonly number[],
+  ): Promise<ReadonlyMap<number, ListingShippingEstimateCalculationFact>>;
+}
+
 export interface DropshipListingShippingEstimateDependencies {
   contexts: ListingShippingEstimateContextReader;
   catalog: Pick<DropshipListingPreviewRepository,
     "listCatalogCandidates" | "listCatalogExposureRules" | "listSelectionRules" | "listVariantOverrides">;
   calculation: DropshipShippingCalculationDependencies;
+  /** Read only when a staff caller asks for calculation detail. */
+  catalogFacts: ListingShippingEstimateCatalogFactReader;
   clock: DropshipClock;
   logger: DropshipLogger;
+}
+
+export interface ListingShippingEstimateOptions {
+  /**
+   * Attach the staff-only calculation block. The route grants this from the
+   * Dropship operations permission; vendor sessions never set it.
+   */
+  includeCalculation?: boolean;
 }
 
 const UNAVAILABLE_CODES = new Set([
@@ -56,7 +76,11 @@ const UNAVAILABLE_CODES = new Set([
 export class DropshipListingShippingEstimateService {
   constructor(private readonly deps: DropshipListingShippingEstimateDependencies) {}
 
-  async estimateForMember(memberId: string, input: unknown): Promise<ListingShippingEstimateResult> {
+  async estimateForMember(
+    memberId: string,
+    input: unknown,
+    options: ListingShippingEstimateOptions = {},
+  ): Promise<ListingShippingEstimateResult> {
     const parsed = listingShippingEstimateInputSchema.parse(input);
     if (!memberId.trim()) {
       throw new DropshipError("DROPSHIP_AUTH_REQUIRED", "Dropship authentication is required.");
@@ -82,14 +106,16 @@ export class DropshipListingShippingEstimateService {
         context.warehouseConfigError?.message ?? "Listing shipping origin is not configured.",
       ));
     }
+    const originWarehouseId = context.defaultWarehouseId;
+    const items = [{ productVariantId: parsed.productVariantId, quantity: parsed.quantity }];
     try {
       const result = await calculateDropshipShippingQuote(this.deps.calculation, {
         vendorId: context.vendorId,
         storeConnectionId: context.storeConnectionId,
-        warehouseId: context.defaultWarehouseId,
+        warehouseId: originWarehouseId,
         destination: scenario.destination,
         // Quantity is the number of sellable variants, exactly as in order quotes.
-        items: [{ productVariantId: parsed.productVariantId, quantity: parsed.quantity }],
+        items,
         quotedAt,
       });
       const pricing = result.pricing;
@@ -108,12 +134,21 @@ export class DropshipListingShippingEstimateService {
           },
         });
       }
+      const calculation = options.includeCalculation === true
+        ? buildListingShippingEstimateCalculation({
+            result,
+            originWarehouseId,
+            items,
+            facts: await this.deps.catalogFacts.loadByVariantIds(items.map((item) => item.productVariantId)),
+          })
+        : undefined;
       return validateResult({
         ...scenario,
         status: "estimated",
         totalShippingCents: result.totalShippingCents,
         currency: result.currency,
         warnings: hasWarnings ? [LISTING_SHIPPING_ESTIMATE_WARNING] : [],
+        ...(calculation ? { calculation } : {}),
       });
     } catch (error) {
       if (!(error instanceof DropshipError) || !UNAVAILABLE_CODES.has(error.code)) throw error;

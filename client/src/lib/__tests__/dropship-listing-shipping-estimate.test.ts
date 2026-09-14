@@ -43,6 +43,17 @@ describe("shipping scenario boundary", () => {
   ])("rejects private diagnostics in the public response: %j", (privateFields) => {
     expect(() => readListingShippingEstimateResponse({ estimate: { ...response().estimate, ...privateFields } }, request)).toThrow();
   });
+  it("passes a well-formed staff calculation through and rejects a malformed one", () => {
+    const calculation = { pricingSource: "shared", cutoverMode: "live", cutoverReasonCode: "LIVE_ENABLED", originWarehouseId: 1,
+      items: [{ productVariantId: 2, sku: "PACK", quantity: 1, unitWeightGrams: 635, lineWeightGrams: 635 }],
+      packages: [{ packageSequence: 1, boxCode: "BOX", weightGrams: 635, lengthMm: 254, widthMm: 203, heightMm: 102, items: [{ productVariantId: 2, quantity: 1 }] }],
+      rate: { source: "shared_engine", rateBookId: 34, rateBookCode: "dropship", rateTableId: 5, rateRowId: 9, serviceLevelCode: "standard", serviceLevelName: "Standard", zone: "2",
+        ratedWeightGrams: 635, chargeModel: "fixed_band", rowMaxShipmentWeightGrams: null, perStartedPoundCents: null, billablePounds: null, productPolicyApplied: false, policySteps: [] },
+      charges: { baseCents: 500, markupCents: 100, insuranceCents: 15, dunnageCents: 0, totalCents: 615 }, warnings: [] };
+    expect(readListingShippingEstimateResponse({ estimate: { ...response().estimate, calculation } }, request)).toMatchObject({ calculation: { rate: { rateRowId: 9 } } });
+    expect(() => readListingShippingEstimateResponse({ estimate: { ...response().estimate, calculation: { ...calculation, charges: { ...calculation.charges, totalCents: -1 } } } }, request)).toThrow();
+    expect(() => readListingShippingEstimateResponse({ estimate: { ...response().estimate, calculation: { ...calculation, secret: true } } }, request)).toThrow();
+  });
   it("rejects a different row, destination, quantity or malformed response", () => {
     for (const change of [{ productVariantId: 3 }, { storeConnectionId: 3 }, { quantity: 2 },
       { destination: { country: "US", region: "PA", postalCode: "90210" } },

@@ -9,6 +9,8 @@ const GRAMS_PER_POUND_DENOMINATOR = 100_000;
 const ROUNDING_HALF_DENOMINATOR = GRAMS_PER_POUND_DENOMINATOR / 2;
 
 export interface RateCandidateRow {
+  /** shipping.rate_table_rows.id when loaded from the database; evidence only. */
+  rateRowId?: number;
   rateTableId: number;
   serviceLevelId: number;
   serviceLevelCode: string;
@@ -48,6 +50,8 @@ export interface RateSelectionInput {
 }
 
 export interface SelectedServiceLevelRate {
+  /** Row that produced the rate, when known; null for rows without an id. */
+  rateRowId?: number | null;
   serviceLevelId: number;
   serviceLevelCode: string;
   displayName: string;
@@ -122,6 +126,7 @@ export function selectServiceLevelRates(
 
   return [...bestByLevel.values()]
     .map(({ row, calculatedRateCents, billablePounds }) => ({
+      rateRowId: row.rateRowId ?? null,
       serviceLevelId: row.serviceLevelId,
       serviceLevelCode: row.serviceLevelCode,
       displayName: row.displayName,
