@@ -56,6 +56,7 @@ const providerNonInventoryCutoverFixtureSql = `${fixtureSql}
   ALTER TABLE wms.physical_shipment_items
     ADD COLUMN wms_order_item_id integer,
     ADD COLUMN replacement_for_order_item_id integer,
+    ADD COLUMN correction_for_physical_shipment_item_id bigint,
     ADD COLUMN package_allocation_entry_id bigint,
     ADD COLUMN product_variant_id integer,
     ADD COLUMN sku varchar(100);
