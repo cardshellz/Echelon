@@ -8,6 +8,8 @@ import { db } from "../../db";
 import { omsOrders, omsOrderLines } from "@shared/schema";
 import { channels } from "@shared/schema";
 import { extractMarketingConsent } from "./marketing-consent";
+import { readStorefrontAcquisition } from "./archon-acquisition-contract";
+import { logger } from "../../platform/observability/logger";
 
 const MC_URL = process.env.MC_WEBHOOK_URL || "https://archon-os-20aa790cd70d.herokuapp.com";
 const MC_WEBHOOK_SECRET = process.env.MC_WEBHOOK_SECRET || "echelon-to-mc-sync-2026";
@@ -104,6 +106,19 @@ export async function pushToMissionControl(orderId: number, eventType: string): 
     // purchaser is mailable; without it every buyer lands in the CRM as an
     // unmailable profile. Pass-through only: we extract, MC decides.
     const marketingConsent = extractMarketingConsent(order.rawPayload);
+    // Attribution is optional evidence, not a prerequisite for delivering financial orders.
+    // Preserve original interaction timestamps; Archon owns classification and deduplication.
+    const acquisition = readStorefrontAcquisition(order.rawPayload ?? {});
+    if (acquisition.status === "invalid") {
+      logger.error("oms.archon_acquisition.forward", {
+        outcome: "tracking_requires_review",
+        error_code: acquisition.code,
+        error_class: "permanent",
+        oms_order_id: orderId,
+        before: null,
+        after: { forwarded_interactions: 0 },
+      });
+    }
 
     // 4. Build payload
     const payload = {
@@ -121,6 +136,7 @@ export async function pushToMissionControl(orderId: number, eventType: string): 
         // resolves to one profile.
         external_customer_id: order.externalCustomerId || null,
         marketing_consent: marketingConsent,
+        marketing_attribution: acquisition.touches,
         total_cents: order.totalCents,
         subtotal_cents: order.subtotalCents,
         shipping_cents: order.shippingCents,
