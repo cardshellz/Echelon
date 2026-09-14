@@ -3,7 +3,9 @@ import { z } from "zod";
 import { canonicalJson } from "@shared/utils/canonical-json";
 
 const MAX_COMMERCIAL_SOURCES = 500;
-const MAX_EFFECT_HISTORY = 102_000; // Matches the bounded allocation planner history.
+// Matches the bounded package-allocation planner effect history. The repository
+// uses the same limit so it cannot silently truncate package-scoped intents.
+export const MAX_INHERITED_COMMERCIAL_INTENTS = 102_000;
 const positiveId = z.number().int().positive().max(2_147_483_647);
 const bigintId = z
   .string()
@@ -17,7 +19,7 @@ const desiredIntent = z
     effectType: z.literal("commercial_fulfillment"),
     subjectKey: z.string().min(1).max(600),
     wmsShipmentItemId: positiveId,
-    packageKey: z.null(),
+    packageKey: z.string().min(1).max(180).nullable(),
     quantity: positiveId,
     executable: z.literal(false),
   })
@@ -32,6 +34,8 @@ const inheritedRow = z
     payload: z.unknown(),
     executable: z.literal(false),
     sourceLineId: bigintId,
+    packageBindingId: bigintId.nullable(),
+    packageKey: z.string().min(1).max(180).nullable(),
     sourceWmsShipmentItemId: positiveId,
     sourceQuantity: positiveId,
     quantity: positiveId,
@@ -49,10 +53,11 @@ export function validateInheritedCommercialIntents(
   positiveId.min(2).parse(currentVersion);
   const state = z
     .object({
-      desiredEffectIntents: z.array(z.unknown()).max(MAX_EFFECT_HISTORY),
+      desiredEffectIntents: z.array(z.unknown())
+        .max(MAX_INHERITED_COMMERCIAL_INTENTS),
       effectIntentEvidence: z
         .array(z.object({ intentKey: z.string(), payloadHash: hash }).strict())
-        .max(MAX_EFFECT_HISTORY),
+        .max(MAX_INHERITED_COMMERCIAL_INTENTS),
       sourceLines: z
         .array(
           z
@@ -80,7 +85,7 @@ export function validateInheritedCommercialIntents(
   const persisted = z
     .array(inheritedRow)
     .min(1)
-    .max(MAX_COMMERCIAL_SOURCES)
+    .max(MAX_INHERITED_COMMERCIAL_INTENTS)
     .parse(rows);
   const desiredByKey = new Map(
     desired.map((intent) => [intent.intentKey, intent]),
@@ -103,14 +108,13 @@ export function validateInheritedCommercialIntents(
     evidenceByKey.size !== state.effectIntentEvidence.length ||
     sources.size !== state.sourceLines.length ||
     new Set(persisted.map((intent) => intent.intentKey)).size !==
-      persisted.length ||
-    new Set(persisted.map((intent) => intent.sourceWmsShipmentItemId)).size !==
       persisted.length
   ) {
     throw new Error(
       "Current commercial authority is not one exact inherited source/effect set",
     );
   }
+  const inheritedQuantityBySource = new Map<number, number>();
   for (const intent of persisted) {
     const current = desiredByKey.get(intent.intentKey);
     if (!current) {
@@ -131,8 +135,9 @@ export function validateInheritedCommercialIntents(
     if (
       intent.originPlanVersion >= currentVersion ||
       current.wmsShipmentItemId !== intent.sourceWmsShipmentItemId ||
+      current.packageKey !== intent.packageKey ||
+      (intent.packageBindingId === null) !== (intent.packageKey === null) ||
       current.quantity !== intent.quantity ||
-      intent.quantity > intent.sourceQuantity ||
       sources.get(intent.sourceWmsShipmentItemId) !== intent.sourceQuantity ||
       current.payloadHash !== payloadHash ||
       intent.payloadHash !== payloadHash ||
@@ -143,6 +148,21 @@ export function validateInheritedCommercialIntents(
         "Inherited commercial effect identity, quantity, or immutable payload differs from the current plan",
       );
     }
+    const inheritedQuantity =
+      (inheritedQuantityBySource.get(intent.sourceWmsShipmentItemId) ?? 0)
+      + intent.quantity;
+    if (
+      !Number.isSafeInteger(inheritedQuantity)
+      || inheritedQuantity > intent.sourceQuantity
+    ) {
+      throw new Error(
+        "Inherited commercial effects exceed immutable source quantity",
+      );
+    }
+    inheritedQuantityBySource.set(
+      intent.sourceWmsShipmentItemId,
+      inheritedQuantity,
+    );
   }
   return Object.freeze(persisted.map((intent) => Object.freeze(intent)));
 }

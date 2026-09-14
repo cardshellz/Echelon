@@ -44,6 +44,7 @@ ALTER TABLE wms.order_items
 ALTER TABLE wms.outbound_shipments
   ADD COLUMN status VARCHAR(30) NOT NULL DEFAULT 'pending',
   ADD COLUMN shipment_purpose VARCHAR(30) NOT NULL DEFAULT 'customer_fulfillment',
+  ADD COLUMN source VARCHAR(30) NOT NULL DEFAULT 'integration_fixture',
   ADD COLUMN shipping_engine VARCHAR(40),
   ADD COLUMN shipstation_order_id INTEGER,
   ADD COLUMN engine_order_ref VARCHAR(200),

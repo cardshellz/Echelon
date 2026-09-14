@@ -19,6 +19,7 @@ interface ObservedPackageOptions {
   readonly observedAt: string;
   readonly quantity?: number;
   readonly contentsStatus?: "authoritative" | "empty" | "omitted";
+  readonly splitChildItemId?: number;
   readonly voided?: boolean;
   readonly reverseEvents?: boolean;
 }
@@ -54,6 +55,17 @@ function observedPackage(
   if (options.reverseEvents) events.reverse();
   return {
     evidenceKey: `shipping-provider-label:${providerPhysicalShipmentId}`,
+    splitContinuation: options.splitChildItemId
+      ? {
+          evidenceKey: `shipstation-split-continuation:v1:${providerPhysicalShipmentId}:9001`,
+          legacyWmsShipmentId: 9001,
+          lines: [{
+            sourceWmsShipmentItemId: sourceId,
+            splitWmsShipmentItemId: options.splitChildItemId,
+            quantity: options.quantity ?? 2,
+          }],
+        }
+      : null,
     lifecycle: {
       provider: "shipstation",
       providerPhysicalShipmentId,
@@ -123,6 +135,113 @@ function transferAction(
 }
 
 describe("resolvePackageAllocationAuthority", () => {
+  it("fulfills two normal split packages without treating the second as duplicate inventory", () => {
+    const packageA = observedPackage("44001", {
+      observedAt: "2026-08-21T14:00:00.000Z",
+      quantity: 1,
+    });
+    const packageB = observedPackage("44002", {
+      observedAt: "2026-08-21T14:01:00.000Z",
+      quantity: 1,
+      splitChildItemId: 7002,
+    });
+    const packageBKey = packageAllocationPackageKey("shipstation", "44002");
+
+    const result = resolvePackageAllocationAuthority(command([packageB, packageA]));
+
+    expect(result).toMatchObject({ authority: "shadow_only", outcome: "proposed", reviews: [] });
+    expect(result.plannerInput.sourceLines).toEqual([{
+      wmsShipmentItemId: sourceId,
+      sourceQuantity: 2,
+      physicalConsumptionAuthorityQuantity: 2,
+      authorityVersion: 1,
+    }]);
+    expect(result.plannerInput.packages.find(
+      (pkg) => pkg.packageKey === packageBKey,
+    )).toMatchObject({
+      allocationRole: "additional_dispatch",
+      membership: { status: "proven" },
+      splitContinuation: {
+        legacyWmsShipmentId: 9001,
+        lines: [{
+          sourceWmsShipmentItemId: sourceId,
+          splitWmsShipmentItemId: 7002,
+          quantity: 1,
+        }],
+      },
+    });
+    expect(allocationShapes(result.plannerResult)).toEqual([
+      {
+        allocationKind: "primary_transfer",
+        targetKind: "package",
+        packageKey: packageBKey,
+        quantity: 1,
+      },
+      {
+        allocationKind: "primary_transfer",
+        targetKind: "package",
+        packageKey: packageAllocationPackageKey("shipstation", "44001"),
+        quantity: 1,
+      },
+    ].sort((left, right) => String(left.packageKey).localeCompare(String(right.packageKey))));
+    const commercial = result.plannerResult.state.desiredEffectIntents.filter(
+      (intent) => intent.effectType === "commercial_fulfillment",
+    );
+    expect(commercial).toHaveLength(2);
+    expect(commercial.map((intent) => [intent.packageKey, intent.quantity])).toEqual([
+      [packageBKey, 1],
+      [null, 1],
+    ].sort((left, right) => String(left[0]).localeCompare(String(right[0]))));
+    expect(result.plannerResult.state.desiredEffectIntents.filter(
+      (intent) => intent.effectType === "inventory_consumption",
+    ).map((intent) => intent.quantity)).toEqual([1]);
+    expect(result.plannerResult.state.reviews).toEqual([]);
+
+    const replay = resolvePackageAllocationAuthority(command([packageA, packageB], [], {
+      expectedGroupVersion: result.plannerResult.proposedGroupVersion,
+      previousPlan: previousPlanFrom(result.plannerResult),
+    }));
+    expect(replay.plannerResult).toMatchObject({
+      outcome: "unchanged",
+      proposedGroupVersion: result.plannerResult.proposedGroupVersion,
+      stateHash: result.plannerResult.stateHash,
+    });
+    expect(replay.plannerResult.effectIntentsToAppend).toEqual([]);
+  });
+
+  it("does not grant split continuation when persisted lineage quantity differs", () => {
+    const packageA = observedPackage("44001", {
+      observedAt: "2026-08-21T14:00:00.000Z",
+      quantity: 1,
+    });
+    const packageB = {
+      ...observedPackage("44002", {
+        observedAt: "2026-08-21T14:01:00.000Z",
+        quantity: 1,
+        splitChildItemId: 7002,
+      }),
+      splitContinuation: {
+        evidenceKey: "shipstation-split-continuation:v1:44002:9001",
+        legacyWmsShipmentId: 9001,
+        lines: [{
+          sourceWmsShipmentItemId: sourceId,
+          splitWmsShipmentItemId: 7002,
+          quantity: 2,
+        }],
+      },
+    };
+
+    const result = resolvePackageAllocationAuthority(command([packageA, packageB]));
+
+    expect(result.outcome).toBe("review");
+    expect(result.plannerInput.packages.find(
+      (pkg) => pkg.packageKey === packageAllocationPackageKey("shipstation", "44002"),
+    )?.splitContinuation).toBeNull();
+    expect(result.plannerResult.state.reviews.map((review) => review.code)).toEqual([
+      "unclassified_additional_dispatch",
+    ]);
+  });
+
   it("treats active A+B with exact contents as two physical consumptions without double fulfillment", () => {
     const packageA = observedPackage("44001", {
       observedAt: "2026-08-21T14:00:00.000Z",

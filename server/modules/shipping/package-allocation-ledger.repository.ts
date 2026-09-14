@@ -6,6 +6,7 @@ import type {
   PackageAllocationEntryV1,
   PackageAllocationGroupPackageEvidenceV1,
   PackageAllocationGroupStateV1,
+  PackageAllocationSplitContinuationEvidenceV1,
 } from "./package-allocation-group.domain";
 import {
   derivePackageAllocationSourceRegistration,
@@ -33,6 +34,7 @@ const MAX_AUTHORITY_TOTAL_EVENTS = 10_000;
 const MAX_AUTHORITY_CURRENT_CARRIER_EVENTS = 5_000;
 const MAX_AUTHORITY_EVENT_PAYLOAD_BYTES = 4 * 1_024 * 1_024;
 const MAX_AUTHORITY_TOTAL_PAYLOAD_BYTES = 8 * 1_024 * 1_024;
+const MAX_AUTHORITY_SPLIT_CONTINUATION_LINES = MAX_AUTHORITY_PACKAGES * 500;
 
 const AUTHORITY_DISCOVERY_RELATIONSHIP_TYPE_SET = new Set<string>(
   PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_RELATIONSHIP_TYPES,
@@ -46,6 +48,7 @@ readonly string[] = Object.freeze([...new Set([
   "wms.carrier_tracking_events",
   "wms.carrier_tracking_reconciliation_state",
   "wms.order_items",
+  "wms.outbound_shipments",
   "wms.package_allocation_groups",
   "wms.shipping_provider_label_events",
 ])].sort());
@@ -161,6 +164,7 @@ export interface PersistedPackageAllocationEffectOutboxEntry {
 export interface LockedPackageAllocationAuthorityEvidence {
   readonly evidenceKey: string;
   readonly persistedEvidence: PersistedDeclaredPackageEvidence;
+  readonly splitContinuation?: PackageAllocationSplitContinuationEvidenceV1 | null;
 }
 
 export interface PackageAllocationAuthorityDiscoveredPackageEvidence {
@@ -695,7 +699,15 @@ class PgPackageAllocationLedgerTransaction
       `SELECT
          shipment_item.id AS source_wms_shipment_item_id,
          request_item.id::text AS shipment_request_item_id,
-         shipment_item.qty AS source_quantity,
+         (
+           shipment_item.qty::bigint
+           + COALESCE((
+             SELECT SUM(split_item.qty)::bigint
+             FROM wms.outbound_shipment_items AS split_item
+             WHERE split_item.split_root_shipment_item_id = shipment_item.id
+               AND split_item.id <> shipment_item.id
+           ), 0::bigint)
+         ) AS source_quantity,
          shipment_item.shipment_item_purpose,
          shipment_item.order_item_id,
          shipment_item.replacement_for_order_item_id,
@@ -1085,6 +1097,116 @@ class PgPackageAllocationLedgerTransaction
       );
     }
 
+    const splitContinuationResult = await this.client.query(
+      `WITH candidate_splits AS MATERIALIZED (
+         SELECT DISTINCT
+           label.id AS shipping_provider_label_id,
+           split_shipment.id AS legacy_wms_shipment_id
+         FROM wms.shipping_provider_labels AS label
+         JOIN wms.shipping_provider_label_links AS link
+           ON link.shipping_provider_label_id = label.id
+          AND link.legacy_wms_shipment_id IS NOT NULL
+          AND link.source = 'legacy_provider_physical_identity'
+         JOIN wms.outbound_shipments AS split_shipment
+           ON split_shipment.id = link.legacy_wms_shipment_id
+         WHERE label.id = ANY($1::bigint[])
+           AND label.provider = 'shipstation'
+           AND label.label_direction = 'outbound'
+           AND split_shipment.source = 'shipstation_split'
+           AND split_shipment.status = 'shipped'
+           AND split_shipment.external_fulfillment_id =
+             'shipstation_shipment:' || label.provider_label_id
+           AND BTRIM(COALESCE(split_shipment.tracking_number, '')) =
+             BTRIM(label.tracking_number)
+       ),
+       candidate_lines AS MATERIALIZED (
+         SELECT
+           candidate.shipping_provider_label_id,
+           candidate.legacy_wms_shipment_id,
+           child.id AS split_wms_shipment_item_id,
+           source_item.id AS source_wms_shipment_item_id,
+           child.qty AS quantity,
+           (
+             child.qty > 0
+             AND child.provider_membership_state = 'authoritative'
+             AND child.tracking_id = label.provider_label_id
+             AND child.split_root_shipment_item_id IS NOT NULL
+             AND COALESCE(
+               child.shipment_item_purpose,
+               'customer_fulfillment'
+             ) = 'customer_fulfillment'
+             AND source_item.id IS NOT NULL
+             AND (
+               source_item.split_root_shipment_item_id IS NULL
+               OR source_item.split_root_shipment_item_id = source_item.id
+             )
+             AND (
+               child.id <> source_item.id
+               OR EXISTS (
+                 SELECT 1
+                 FROM wms.outbound_shipment_items AS sibling
+                 WHERE sibling.split_root_shipment_item_id = source_item.id
+                   AND sibling.id <> source_item.id
+               )
+             )
+             AND source_shipment.order_id = split_shipment.order_id
+             AND source_item.order_item_id IS NOT DISTINCT FROM child.order_item_id
+             AND source_item.replacement_for_order_item_id IS NOT DISTINCT FROM
+               child.replacement_for_order_item_id
+             AND source_item.correction_for_shipment_item_id IS NOT DISTINCT FROM
+               child.correction_for_shipment_item_id
+             AND source_item.shipment_item_purpose IS NOT DISTINCT FROM
+               child.shipment_item_purpose
+             AND source_item.product_variant_id IS NOT DISTINCT FROM
+               child.product_variant_id
+           ) AS lineage_valid
+         FROM candidate_splits AS candidate
+         JOIN wms.shipping_provider_labels AS label
+           ON label.id = candidate.shipping_provider_label_id
+         JOIN wms.outbound_shipments AS split_shipment
+           ON split_shipment.id = candidate.legacy_wms_shipment_id
+         LEFT JOIN wms.outbound_shipment_items AS child
+           ON child.shipment_id = split_shipment.id
+         LEFT JOIN wms.outbound_shipment_items AS source_item
+           ON source_item.id = child.split_root_shipment_item_id
+         LEFT JOIN wms.outbound_shipments AS source_shipment
+           ON source_shipment.id = source_item.shipment_id
+       )
+       SELECT
+         line.shipping_provider_label_id::text AS shipping_provider_label_id,
+         line.legacy_wms_shipment_id,
+         line.split_wms_shipment_item_id,
+         line.source_wms_shipment_item_id,
+         line.quantity
+       FROM candidate_lines AS line
+       WHERE NOT EXISTS (
+         SELECT 1
+         FROM candidate_lines AS invalid
+         WHERE invalid.shipping_provider_label_id = line.shipping_provider_label_id
+           AND invalid.legacy_wms_shipment_id = line.legacy_wms_shipment_id
+           AND invalid.lineage_valid IS DISTINCT FROM TRUE
+       )
+       ORDER BY line.shipping_provider_label_id,
+         line.legacy_wms_shipment_id,
+         line.source_wms_shipment_item_id,
+         line.split_wms_shipment_item_id
+       LIMIT $2`,
+      [sortedIds, MAX_AUTHORITY_SPLIT_CONTINUATION_LINES + 1],
+    );
+    if (
+      splitContinuationResult.rows.length
+      > MAX_AUTHORITY_SPLIT_CONTINUATION_LINES
+    ) {
+      throw new PackageAllocationLedgerRepositoryError(
+        "INVALID_DATABASE_EVIDENCE",
+        "Split-continuation evidence exceeds its aggregate safety bound",
+        {
+          observedLineCount: splitContinuationResult.rows.length,
+          maxLineCount: MAX_AUTHORITY_SPLIT_CONTINUATION_LINES,
+        },
+      );
+    }
+
     const selectedIds = new Set(sortedIds);
     const eventsByLabelId = new Map<
       number,
@@ -1174,6 +1296,66 @@ class PgPackageAllocationLedgerTransaction
       carrierByLabelId.set(labelId, events);
     }
 
+    const splitContinuationRowsByLabelId = new Map<
+      number,
+      Array<{
+        legacyWmsShipmentId: number;
+        sourceWmsShipmentItemId: number;
+        splitWmsShipmentItemId: number;
+        quantity: number;
+      }>
+    >();
+    for (const raw of splitContinuationResult.rows) {
+      const row = raw as Record<string, unknown>;
+      const labelId = positiveSafeInteger(
+        row.shipping_provider_label_id,
+        "shipping_provider_label_id",
+      );
+      if (!selectedIds.has(labelId)) {
+        throw new PackageAllocationLedgerRepositoryError(
+          "INVALID_DATABASE_EVIDENCE",
+          "Split-continuation evidence is outside the locked package set",
+        );
+      }
+      const lines = splitContinuationRowsByLabelId.get(labelId) ?? [];
+      lines.push({
+        legacyWmsShipmentId: positiveInteger(
+          row.legacy_wms_shipment_id,
+          "legacy_wms_shipment_id",
+        ),
+        sourceWmsShipmentItemId: positiveInteger(
+          row.source_wms_shipment_item_id,
+          "source_wms_shipment_item_id",
+        ),
+        splitWmsShipmentItemId: positiveInteger(
+          row.split_wms_shipment_item_id,
+          "split_wms_shipment_item_id",
+        ),
+        quantity: positiveInteger(row.quantity, "split_quantity"),
+      });
+      splitContinuationRowsByLabelId.set(labelId, lines);
+    }
+    const splitContinuationsByLabelId = new Map<
+      number,
+      PackageAllocationSplitContinuationEvidenceV1
+    >();
+    for (const [labelId, rows] of splitContinuationRowsByLabelId) {
+      const legacyShipmentIds = new Set(
+        rows.map((row) => row.legacyWmsShipmentId),
+      );
+      if (legacyShipmentIds.size !== 1) continue;
+      const legacyWmsShipmentId = rows[0].legacyWmsShipmentId;
+      splitContinuationsByLabelId.set(labelId, Object.freeze({
+        evidenceKey: `shipstation-split-continuation:v1:${labelId}:${legacyWmsShipmentId}`,
+        legacyWmsShipmentId,
+        lines: Object.freeze(rows.map((row) => Object.freeze({
+          sourceWmsShipmentItemId: row.sourceWmsShipmentItemId,
+          splitWmsShipmentItemId: row.splitWmsShipmentItemId,
+          quantity: row.quantity,
+        }))),
+      }));
+    }
+
     return Object.freeze(
       labelResult.rows.map((raw) => {
         const row = raw as Record<string, unknown>;
@@ -1230,6 +1412,7 @@ class PgPackageAllocationLedgerTransaction
         return Object.freeze({
           evidenceKey: `shipping-provider-label:${labelId}`,
           persistedEvidence,
+          splitContinuation: splitContinuationsByLabelId.get(labelId) ?? null,
         });
       }),
     );
