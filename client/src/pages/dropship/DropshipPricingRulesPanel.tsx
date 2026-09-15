@@ -115,10 +115,16 @@ function PricingRulesSession({ storeConnectionId, storeName, onConfigurationChan
         <RecipeFields value={draft.defaultRecipe} onChange={(value) => edit({ ...draft, defaultRecipe: value })} />
         <p className="text-xs text-zinc-500">Basis × (1 + markup %) + flat markup. Per sellable pack. Markup is not profit margin; shipping and marketplace fees are separate.</p>
         <div className="flex items-center justify-between gap-3"><h3 className="font-medium">Group rules ({draft.groups.length})</h3>
-          <Button type="button" size="sm" variant="outline" disabled={draft.groups.length >= 100} onClick={() => edit({ ...draft,
-            groups: [...draft.groups, { id: createDropshipIdempotencyKey("group").replace(/[^A-Za-z0-9_-]/g, "_"), name: "New group",
-              priority: String((draft.groups.length + 1) * 10), scope: { type: "category", category: "" }, recipe: { ...draft.defaultRecipe } }],
-          })}>Add group rule</Button></div>
+          <Button type="button" size="sm" variant="outline" disabled={draft.groups.length >= 100} onClick={() => {
+            const id = createDropshipIdempotencyKey("group").replace(/[^A-Za-z0-9_-]/g, "_");
+            // Record the new group as open right away. Until the browser's
+            // asynchronous <details> toggle event lands, the open state would
+            // otherwise depend on the placeholder name, so renaming the group
+            // quickly collapsed it and unmounted the scope picker.
+            setOpenGroups((current) => ({ ...current, [id]: true }));
+            edit({ ...draft, groups: [...draft.groups, { id, name: "New group",
+              priority: String((draft.groups.length + 1) * 10), scope: { type: "category", category: "" }, recipe: { ...draft.defaultRecipe } }] });
+          }}>Add group rule</Button></div>
         <p className="text-xs text-zinc-500">Lowest priority number wins. Matching groups never stack; tied priorities block the affected prices.</p>
         <div className="max-h-[28rem] space-y-2 overflow-y-auto overscroll-contain">
           {draft.groups.map((group, index) => <details key={group.id} className="rounded border p-3"
