@@ -2,7 +2,7 @@
 
 ## Scope and behavior
 
-Use `--silent` for the requested historical Shopify backfill. This suppresses
+Use `--silent` for the requested manual historical Shopify backfill. This suppresses
 Shopify's fulfillment-creation customer notification; it does not suppress logs,
 audit records, or failures. Normal shipment notifications remain unchanged.
 No production backfill was executed as part of implementing this option.
@@ -14,10 +14,36 @@ sends `notifyCustomer: false` to Shopify. Successful attempt metadata records th
 setting. An ordinary webhook or sweep replay cannot change it; supplemental
 commands retain the saved silent setting.
 
+Catch-up commands from the outbound sweeper, missing-Shopify-writeback job,
+Shopify reconciler, shipped-package repair, default legacy reconciliation, and
+Operations repair actions are also silent. The shared notification policy uses
+their durable source identifiers, not a guessed shipment-age cutoff. These
+identifiers are centralized in `CHANNEL_FULFILLMENT_REPAIR_SOURCES` and
+`CHANNEL_FULFILLMENT_OPERATOR_REPAIR_PREFIX` in
+`server/modules/oms/channel-fulfillment-notification.policy.ts`.
+
+New catch-up entry points must use this registry and add notification-policy
+coverage. Unregistered sources retain the legacy live-shipping default; do not
+infer repair intent from a date, tracking number, or missing source alone.
+
+The planner applies that policy only to Shopify groups; a mixed Shopify/eBay
+package does not disable eBay tracking or require unsupported notification
+suppression. Source is passed through initial and supplemental planning, and the
+resulting boolean is saved in the existing metadata and request hash.
+
 An explicit attempt to change an existing command's notification setting fails
 closed. Malformed settings and silent requests to unsupported providers also
-fail closed. Commands predating this option, which omit the setting, retain
-their previous notifying behavior. No database migration is required.
+fail closed. Existing live-shipping commands retain their saved notifying
+behavior, including retries; legacy shipping-event retry paths are not classified
+as catch-up jobs. A repair observing such a live command does not rewrite it, and
+any newly discovered repair remainder is silent.
+
+Older catch-up commands with notifications enabled (or missing the setting) are
+held by the executor before any Shopify request, with error code
+`SILENT_REPAIR_NOTIFICATION_REVIEW_REQUIRED`. Their request hashes and saved
+settings are not changed, and the failed attempt is audited. Already-completed
+commands are not re-executed. These held commands require supported review, not
+a direct metadata edit. No database migration is required.
 
 Implementation: `runBackfill` in `scripts/backfill-channel-fulfillment-authority.ts`,
 `planChannelFulfillmentCommands` in `server/modules/oms/channel-fulfillment-command.ts`,
@@ -25,13 +51,19 @@ Implementation: `runBackfill` in `scripts/backfill-channel-fulfillment-authority
 `server/modules/oms/channel-fulfillment-command-reconciliation.ts`, and
 `createCompatibilityChannelFulfillmentProviderExecutor` in
 `server/modules/oms/channel-fulfillment-authority.service.ts`.
+New and stored requests use separate policy functions:
+`resolveNewChannelFulfillmentNotifyCustomer` selects the creation default;
+`resolvePersistedChannelFulfillmentNotifyCustomer` validates immutable intent
+without replacing it when a worker claims a request.
 The actual mutation is built by `pushSingleShipmentFulfillment` in
 `server/modules/oms/fulfillment-push.service.ts`.
 
 ## Production sequence
 
-1. Verify that every fulfillment dispatcher is running the deployed build with
-   this option. Older workers ignore the new metadata and can send notifications.
+1. Verify that every fulfillment dispatcher and repair scheduler is running the
+   deployed build with the automatic-repair policy. Older workers can still send
+   notification-enabled repair commands; the original manual-only silent build
+   does not close the automatic-repair gap.
 2. Refresh the read-only Shopify/package assessment for the intended cohort.
    Exclude held records and packages already fulfilled exactly. Prior preview
    totals are not permission to expand the scope or force conflicting commands.
@@ -55,11 +87,12 @@ The actual mutation is built by `pushSingleShipmentFulfillment` in
 
 ## Rollback and limits
 
-Do not roll a dispatcher back to a version that ignores notification metadata
-while silent commands remain dispatchable or eligible for later requeue. Pause
-dispatch through the supported operational controls and resolve that queue before
-such a rollback. This is a rollout dependency, not a new global notification
-setting.
+Do not roll a dispatcher or scheduler back to a version without this policy
+while repair work remains dispatchable or eligible for later requeue. An older
+scheduler may create notifying repairs, and an older worker may send them. Pause
+affected work only with explicit operational approval and resolve that queue
+before such a rollback. This is a rollout dependency, not a new global
+notification setting.
 
 This option does not change ordinary re-label/tracking-update behavior. It does
 not establish what third-party Shopify apps or workflows do in response to a
@@ -68,15 +101,21 @@ fulfillment event. Shopify documents the native notification field in
 
 ## Validation
 
-- 216 focused regression tests: CLI dry-run/execute behavior, immutable intent,
-  legacy defaults, original request-hash compatibility, exact Shopify mutation
-  payloads, originating store, and fail-closed malformed/unsupported requests.
-- 68 disposable PostgreSQL integration tests: persisted settings, concurrent
-  materialization, rejected setting changes with rollback, retries after worker
-  restart, attempt auditing, and existing shipment compatibility. New tests
-  verify inventory transactions and WMS order-item quantities remain unchanged.
-- Full CI unit command: 13,035 passed, 39 skipped, zero failures.
-- TypeScript check and production build passed; `git diff --check` clean.
+- Unit coverage: repair-source policy, CLI dry-run/execute behavior, immutable
+  intent, original request-hash compatibility, mixed-provider packages, actual
+  Shopify mutation payloads, originating store, existing scheduler/reconciler
+  callers, normal shipping retries, and malformed/unsupported requests.
+- Disposable PostgreSQL coverage: each repair source through the real authority
+  handoff, concurrent materialization, normal replay, worker restart/retry,
+  pre-deployment notifying-command holds, attempt auditing, and unchanged
+  inventory transactions/WMS order-item quantities.
+- PostgreSQL results: 62 shipping ledger tests and 14 shipment omission/
+  materialization compatibility tests passed. The old-command fixtures insert
+  the pre-deployment shape directly with all immutability triggers enabled.
+- Additional manual-backfill and actual Shopify request regression run:
+  154 tests passed.
+- Full CI unit command: 13,093 passed, 39 skipped, zero failures.
+- TypeScript check, production build, and final `git diff --check` passed.
 
 The Windows full-unit run temporarily normalized three unchanged fixture-sensitive
 source files to Linux-style line endings, then restored their original bytes.
