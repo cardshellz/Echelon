@@ -5,8 +5,10 @@ import { PackageAllocationPersistenceError } from "../../package-allocation-plan
 import { PackageAllocationLedgerRepositoryError } from "../../package-allocation-ledger.repository";
 import { PackageAllocationAuthorityResolutionError } from "../../package-allocation-authority-resolution.domain";
 import { PackageAllocationGroupError } from "../../package-allocation-group.domain";
+import { FulfillmentAuthorityError } from "../../../oms/channel-fulfillment-authority.repository";
 import {
   PackageAllocationLabelCommercialFulfillmentService,
+  type PackageAllocationLabelCommercialWorkflow,
 } from "../../package-allocation-label-commercial-fulfillment.service";
 
 function fixture(enabled = true) {
@@ -50,15 +52,18 @@ function fixture(enabled = true) {
   };
   const reviewRepository = { record: vi.fn().mockResolvedValue(undefined) };
   const logger = { info: vi.fn(), warn: vi.fn() };
+  const workflow: PackageAllocationLabelCommercialWorkflow = {
+    run: async (work) => work({ bootstrap: bootstrap as any, fulfillmentAuthority: fulfillmentAuthority as any }),
+  };
+  const runWorkflow = vi.spyOn(workflow, "run");
   const service = new PackageAllocationLabelCommercialFulfillmentService({
     enabled,
     labelLinker,
-    bootstrap: bootstrap as any,
-    fulfillmentAuthority: fulfillmentAuthority as any,
+    workflow,
     reviewRepository,
     logger,
   });
-  return { service, labelLinker, bootstrap, fulfillmentAuthority, reviewRepository, logger };
+  return { service, labelLinker, bootstrap, fulfillmentAuthority, reviewRepository, logger, runWorkflow };
 }
 
 const observation = {
@@ -82,6 +87,44 @@ function shipment(overrides: Record<string, unknown> = {}) {
 }
 
 describe("PackageAllocationLabelCommercialFulfillmentService", () => {
+  it("delegates plan persistence and activation to one atomic workflow", async () => {
+    const f = fixture();
+    await expect(f.service.process(shipment(), observation)).resolves.toMatchObject({
+      outcome: "activated", planId: "501", commandIds: [301],
+    });
+    expect(f.runWorkflow).toHaveBeenCalledTimes(1);
+    expect(f.bootstrap.persistDiscovered).toHaveBeenCalledTimes(1);
+    expect(f.fulfillmentAuthority.materializeAndActivatePackageAllocationCommercialFulfillment.mock.calls
+      .map(([command]) => command.packageAllocationPlanId)).toEqual(["501"]);
+    expect(f.reviewRepository.record).not.toHaveBeenCalled();
+  });
+
+  it("reviews an unexpected stale-plan contract failure without retrying individual steps", async () => {
+    const f = fixture();
+    f.fulfillmentAuthority.materializeAndActivatePackageAllocationCommercialFulfillment
+      .mockRejectedValue(new FulfillmentAuthorityError(
+        "PACKAGE_ALLOCATION_PLAN_STALE", "The saved plan is not current",
+      ));
+    await expect(f.service.process(shipment(), observation)).resolves.toEqual({
+      outcome: "review", reason: "PACKAGE_ALLOCATION_PLAN_STALE",
+    });
+    expect(f.bootstrap.persistDiscovered).toHaveBeenCalledTimes(1);
+    expect(f.reviewRepository.record).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry a permanent fulfillment authority conflict", async () => {
+    const f = fixture();
+    f.fulfillmentAuthority.materializeAndActivatePackageAllocationCommercialFulfillment
+      .mockRejectedValue(new FulfillmentAuthorityError(
+        "FULFILLMENT_AUTHORITY_EXCEEDED", "The ordered quantity is already fulfilled",
+      ));
+    await expect(f.service.process(shipment(), observation)).resolves.toEqual({
+      outcome: "review", reason: "FULFILLMENT_AUTHORITY_EXCEEDED",
+    });
+    expect(f.bootstrap.persistDiscovered).toHaveBeenCalledTimes(1);
+    expect(f.reviewRepository.record).toHaveBeenCalledTimes(1);
+  });
+
   it("reconciles label lineage, persists an exact plan, and activates its commands", async () => {
     const f = fixture();
 

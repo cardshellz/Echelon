@@ -10,6 +10,7 @@ import {
 } from "vitest";
 
 import { canonicalJson } from "@shared/utils/canonical-json";
+import { createPackageAllocationLabelCommercialWorkflow } from "../../../../services/package-allocation-label-commercial-workflow";
 
 import {
   closeTestDb,
@@ -26,6 +27,9 @@ import {
   createCompatibilityChannelFulfillmentProviderExecutor,
 } from "../../../oms/channel-fulfillment-authority.service";
 import { createFulfillmentPushService } from "../../../oms/fulfillment-push.service";
+import { createShipStationService } from "../../../oms/shipstation.service";
+import { CarrierTrackingService } from "../../carrier-tracking.service";
+import { createDrizzleCarrierTrackingRepository } from "../../carrier-tracking.repository";
 import { EbayApiClient } from "../../../channels/adapters/ebay/ebay-api.client";
 import type { ShopifyAdminGraphQLClient } from "../../../shopify/admin-gql-client";
 import { PackageAllocationLabelCommercialFulfillmentService } from "../../package-allocation-label-commercial-fulfillment.service";
@@ -103,19 +107,51 @@ async function installProviderExecutionTestRelations(pool: Pool): Promise<void> 
     ALTER TABLE oms.oms_orders
       ADD COLUMN external_order_number VARCHAR(50),
       ADD COLUMN ordered_at TIMESTAMP NOT NULL,
-      ADD COLUMN created_at TIMESTAMP NOT NULL DEFAULT now();
+      ADD COLUMN created_at TIMESTAMP NOT NULL DEFAULT now(),
+      ADD COLUMN updated_at TIMESTAMP,
+      ADD COLUMN fulfillment_status VARCHAR(30) DEFAULT 'unfulfilled',
+      ADD COLUMN tracking_number VARCHAR(100),
+      ADD COLUMN tracking_carrier VARCHAR(50),
+      ADD COLUMN shipped_at TIMESTAMP;
     ALTER TABLE oms.oms_order_lines
       ADD COLUMN sku VARCHAR(100),
       ADD COLUMN shopify_fulfillment_order_id VARCHAR(100),
       ADD COLUMN shopify_fulfillment_order_line_item_id VARCHAR(100),
       ADD COLUMN provider_fulfillment_order_id VARCHAR(200),
-      ADD COLUMN provider_fulfillment_order_line_item_id VARCHAR(200);
+      ADD COLUMN provider_fulfillment_order_line_item_id VARCHAR(200),
+      ADD COLUMN requires_shipping BOOLEAN DEFAULT true,
+      ADD COLUMN fulfillment_status VARCHAR(30) DEFAULT 'unfulfilled',
+      ADD COLUMN updated_at TIMESTAMP;
     ALTER TABLE wms.orders
       ADD COLUMN channel_id INTEGER REFERENCES channels.channels(id) ON DELETE SET NULL,
       ADD COLUMN source VARCHAR(20) NOT NULL DEFAULT 'shopify',
       ADD COLUMN external_order_id VARCHAR(100),
       ADD COLUMN combined_group_id INTEGER,
-      ADD COLUMN combined_role VARCHAR(20);
+      ADD COLUMN combined_role VARCHAR(20),
+      ADD COLUMN picked_count INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN updated_at TIMESTAMP;
+    ALTER TABLE wms.order_items
+      ADD COLUMN picked_quantity INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN fulfilled_quantity INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN picked_at TIMESTAMP,
+      ADD COLUMN requires_shipping INTEGER NOT NULL DEFAULT 1;
+    -- Tracking amendments are read by the real OMS projection. No amendment
+    -- is synthesized by label activation in these tests.
+    CREATE TABLE wms.physical_shipment_tracking_amendments (
+      id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      physical_shipment_id BIGINT NOT NULL REFERENCES wms.physical_shipments(id) ON DELETE RESTRICT,
+      provider VARCHAR(40) NOT NULL,
+      provider_event_id VARCHAR(200),
+      request_hash VARCHAR(64) NOT NULL,
+      tracking_number VARCHAR(200),
+      carrier VARCHAR(100),
+      tracking_url TEXT,
+      occurred_at TIMESTAMPTZ NOT NULL,
+      source VARCHAR(80) NOT NULL,
+      raw_payload JSONB NOT NULL DEFAULT '{}',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+      UNIQUE (physical_shipment_id, request_hash)
+    );
     ALTER TABLE wms.outbound_shipments
       ADD COLUMN channel_id INTEGER REFERENCES channels.channels(id),
       ADD COLUMN shopify_fulfillment_id VARCHAR(100);
@@ -3434,6 +3470,275 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     });
   });
 
+  it.each(["missing_contents", "wrong_quantity", "wrong_source"] as const)(
+    "rejects unproven provider label portions at the database boundary: %s",
+    async (invalidEvidence) => {
+      const sourceId = await seedCommercialFulfillmentAuthoritySource(pool, "SKU-LABEL-GUARD", 2);
+      await seedAuthorityReadinessLabel(pool, sourceId, {
+        providerLabelId: "44010", providerOrderId: "99001", trackingNumber: "1Z0000000000044010",
+        contentsLines: [{ lineItemKey: `wms-item-${sourceId}`, quantity: 1 }],
+      });
+      await seedAuthorityReadinessLabel(pool, sourceId, {
+        providerLabelId: "44011", providerOrderId: "99001", trackingNumber: "1Z0000000000044011",
+        contentsStatus: invalidEvidence === "missing_contents" ? "empty" : "authoritative",
+        contentsLines: [{
+          lineItemKey: `wms-item-${invalidEvidence === "wrong_source" ? sourceId + 1 : sourceId}`,
+          quantity: invalidEvidence === "wrong_quantity" ? 2 : 1,
+        }],
+      });
+      await pool.query("UPDATE wms.shipping_provider_labels SET carrier = 'ups', service_code = 'ups_ground'");
+      const command = commandFor(sourceId);
+      const packages = [44010, 44011].map((providerId, index) => {
+        const pkg = commandFor(sourceId, {
+          packageKey: `package-${index}`, providerPhysicalShipmentId: String(providerId),
+          trackingNumber: `1Z00000000000${providerId}`,
+        }).packages[0];
+        return {
+          ...pkg,
+          allocationRole: index === 0 ? "primary" as const : "additional_dispatch" as const,
+          splitContinuation: index === 0 ? null : {
+            source: "provider_label_contents" as const,
+            evidenceKey: `shipstation-label-portion:v1:${"a".repeat(64)}`,
+            lines: [{ sourceWmsShipmentItemId: sourceId, quantity: 1 }],
+          },
+          lifecycle: { ...pkg.lifecycle, events: pkg.lifecycle.events.map((event) => (
+            event.kind === "outbound_label_observed"
+              ? { ...event, contentsEvidence: { status: "authoritative" as const, lines: [{ wmsShipmentItemId: sourceId, quantity: 1 }] } }
+              : event
+          )) },
+        };
+      });
+      // An internally valid plan alone cannot manufacture provider evidence.
+      const persisted = await new PackageAllocationPlanningService(new PgPackageAllocationLedgerRepository(pool))
+        .persist({ ...command, packages });
+      const fulfillment = createChannelFulfillmentAuthorityRepository(getTestDb());
+      await expect(fulfillment.materializePackageAllocationCommercialFulfillment({
+        packageAllocationPlanId: persisted.planId!, source: "invalid-label-portion-proof",
+      })).rejects.toMatchObject({ code: "23514" });
+      expect((await pool.query("SELECT COUNT(*)::int AS count FROM oms.channel_fulfillment_pushes")).rows)
+        .toEqual([{ count: 0 }]);
+      expect((await pool.query("SELECT COUNT(*)::int AS count FROM wms.physical_shipment_items")).rows)
+        .toEqual([{ count: 0 }]);
+    },
+  );
+
+  it.each([
+    { orderedQuantity: 2, arrival: "sequential", labelIds: [44010, 44011] },
+    { orderedQuantity: 4, arrival: "sequential", labelIds: [44010, 44011] },
+    { orderedQuantity: 2, arrival: "reversed", labelIds: [44011, 44010] },
+    { orderedQuantity: 2, arrival: "concurrent", labelIds: [44010, 44011] },
+    { orderedQuantity: 2, arrival: "retry_after_rollback", labelIds: [44010, 44011] },
+  ])("sends raw ShipStation labels to Shopify before carrier pickup ($arrival, $orderedQuantity ordered units)", async ({ orderedQuantity, arrival, labelIds }) => {
+    // Fill in the production label-link contract missing from the minimal
+    // fixture so the real observer and linker can run without database mocks.
+    await pool.query(`
+      ALTER TABLE wms.shipping_provider_labels
+        ADD COLUMN IF NOT EXISTS last_link_reconciled_at TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS next_link_reconcile_at TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS link_reconcile_attempts INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE wms.shipping_provider_label_links
+        ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}',
+        ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_test_label_link_legacy
+        ON wms.shipping_provider_label_links(shipping_provider_label_id, legacy_wms_shipment_id)
+        WHERE legacy_wms_shipment_id IS NOT NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_test_label_link_request
+        ON wms.shipping_provider_label_links(shipping_provider_label_id, shipment_request_id)
+        WHERE shipment_request_id IS NOT NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_test_label_link_physical
+        ON wms.shipping_provider_label_links(shipping_provider_label_id, physical_shipment_id)
+        WHERE physical_shipment_id IS NOT NULL;
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_test_label_link_engine
+        ON wms.shipping_provider_label_links(shipping_provider_label_id, shipping_engine_order_id)
+        WHERE shipping_engine_order_id IS NOT NULL;
+    `);
+    const sourceId = await seedCommercialFulfillmentAuthoritySource(pool, "SKU-LABEL-PORTION", orderedQuantity);
+    const source = (await pool.query<{ shipment_id: number; order_id: number; channel_id: number }>(`
+      SELECT item.shipment_id, order_item.order_id, oms_order.channel_id
+      FROM wms.outbound_shipment_items item
+      JOIN wms.order_items order_item ON order_item.id = item.order_item_id
+      JOIN oms.oms_order_lines line ON line.id = order_item.oms_order_line_id
+      JOIN oms.oms_orders oms_order ON oms_order.id = line.order_id
+      WHERE item.id = $1`, [sourceId])).rows[0];
+    const warehouse = (await pool.query<{ id: number }>(`
+      INSERT INTO warehouse.warehouses (code, name, shopify_location_id)
+      VALUES ('LABEL-PORTIONS', 'Label portions integration', '640010')
+      RETURNING id`)).rows[0];
+    await pool.query(`UPDATE wms.orders SET channel_id = $2,
+      external_order_id = 'gid://shopify/Order/640001', warehouse_id = $3
+      WHERE id = $1`, [source.order_id, source.channel_id, warehouse.id]);
+    await pool.query(`UPDATE wms.outbound_shipments SET channel_id = $2,
+      external_fulfillment_id = NULL, tracking_number = NULL WHERE id = $1`, [source.shipment_id, source.channel_id]);
+
+    const created: Array<{ id: string; trackingNumber: string; quantity: number }> = [];
+    const providerRequest = vi.fn(async (query: string, variables?: Record<string, unknown>): Promise<unknown> => {
+      if (query.includes("exactFulfillmentPackageForOrder")) return { order: {
+        fulfillmentsCount: { count: created.length },
+        fulfillments: created.map((pkg) => ({
+          id: pkg.id, status: "SUCCESS", trackingInfo: [{ number: pkg.trackingNumber }],
+          fulfillmentLineItems: { nodes: [{ quantity: pkg.quantity, lineItem: { id: "gid://shopify/LineItem/640002" } }], pageInfo: { hasNextPage: false } },
+        })),
+      } };
+      if (query.includes("fulfillmentOrders(first:")) return { order: { fulfillmentOrders: { edges: [{ node: {
+        id: "gid://shopify/FulfillmentOrder/640020", status: "OPEN",
+        assignedLocation: { location: { id: "gid://shopify/Location/640010" } },
+        lineItems: { edges: [{ node: {
+          id: "gid://shopify/FulfillmentOrderLineItem/640021", sku: "SKU-LABEL-PORTION",
+          lineItem: { id: "gid://shopify/LineItem/640002" }, remainingQuantity: orderedQuantity - created.length,
+        } }] },
+      } }] } } };
+      if (query.includes("fulfillmentCreateV2")) {
+        const fulfillment = recordValue(variables?.fulfillment, "Shopify fulfillment");
+        expect(fulfillment.lineItemsByFulfillmentOrder).toEqual([{
+          fulfillmentOrderId: "gid://shopify/FulfillmentOrder/640020",
+          fulfillmentOrderLineItems: [{ id: "gid://shopify/FulfillmentOrderLineItem/640021", quantity: 1 }],
+        }]);
+        const tracking = recordValue(fulfillment.trackingInfo, "Shopify tracking");
+        const pkg = { id: `gid://shopify/Fulfillment/${640030 + created.length}`, trackingNumber: String(tracking.number), quantity: 1 };
+        created.push(pkg);
+        return { fulfillmentCreateV2: { fulfillment: { id: pkg.id }, userErrors: [] } };
+      }
+      throw new Error(`Unexpected Shopify request: ${query.slice(0, 120)}`);
+    });
+    const client: ShopifyAdminGraphQLClient = {
+      request: async <T>(query: string, variables?: Record<string, unknown>): Promise<T> => await providerRequest(query, variables) as T,
+    };
+    const providerExecutor = createCompatibilityChannelFulfillmentProviderExecutor(createFulfillmentPushService(getTestDb(), null, {
+      providerClients: {
+        shopify: async (channelId) => {
+          expect(channelId).toBe(source.channel_id);
+          return { channelId, connectionId: 640040, externalAccountId: "label-portions.myshopify.com", client };
+        },
+        ebay: async () => { throw new Error("Unexpected eBay connection"); },
+      },
+    }));
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    let now = new Date("2026-08-23T14:00:00Z");
+    const clock = { now: () => now };
+    const observer = new CarrierTrackingService({ repository: createDrizzleCarrierTrackingRepository(getTestDb()), clock, logger });
+    const fulfillment = createChannelFulfillmentAuthorityService({
+      repository: createChannelFulfillmentAuthorityRepository(getTestDb()),
+      projector: { projectPhysicalShipment: vi.fn().mockResolvedValue(undefined) },
+      providerExecutor, logger, clock,
+    });
+    const recordReview = vi.fn();
+    const workflow = createPackageAllocationLabelCommercialWorkflow({
+      pool, clock, logger,
+    });
+    let failBeforeCommit = arrival === "retry_after_rollback";
+    const labelHandler = new PackageAllocationLabelCommercialFulfillmentService({
+      enabled: true,
+      workflow: {
+        run: (work) => workflow.run(async (context) => {
+          const result = await work(context);
+          if (failBeforeCommit) {
+            failBeforeCommit = false;
+            throw new Error("Injected failure after activation before commit");
+          }
+          return result;
+        }),
+      },
+      labelLinker: observer, reviewRepository: { record: recordReview }, logger,
+    });
+    const recordShipment = vi.fn().mockRejectedValue(new Error("Carrier pickup has not occurred"));
+    const recordReplacementShipmentFromAvailableInventory = vi.fn().mockRejectedValue(new Error("No replacement was authorized"));
+    vi.stubEnv("SHIPSTATION_API_KEY", "label-test-key");
+    vi.stubEnv("SHIPSTATION_API_SECRET", "label-test-secret");
+    vi.stubEnv("SHOPIFY_FULFILLMENT_PUSH_ENABLED", "true");
+    const fetchLabel = vi.fn(async (url: string | URL | Request) => {
+      expect(String(url)).toContain("includeShipmentItems=true");
+      const currentLabel = Number(new URL(String(url)).searchParams.get("labelId"));
+      expect([44010, 44011, 44012]).toContain(currentLabel);
+      return new Response(JSON.stringify({ shipments: [{
+        shipmentId: currentLabel, orderId: 99001, orderKey: `wms-${source.shipment_id}`,
+        trackingNumber: `1Z00000000000${currentLabel}`, carrierCode: "ups", serviceCode: "ups_ground",
+        createDate: "2026-08-23T10:00:00.000", shipDate: "2026-08-23", isReturnLabel: false,
+        shipmentItems: [{ lineItemKey: `wms-item-${sourceId}`, quantity: 1 }],
+      }] }), { status: 200, headers: { "Content-Type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", fetchLabel);
+    try {
+      const shipstation = createShipStationService(getTestDb(), { recordShipment, recordReplacementShipmentFromAvailableInventory }, {
+        providerLabelObserver: observer, labelCommercialFulfillment: labelHandler,
+      });
+      const receiveLabel = async (labelId: number) => {
+        await expect(shipstation.processShipNotify(`/shipments?labelId=${labelId}`)).resolves.toBe(1);
+      };
+      if (failBeforeCommit) {
+        await expect(shipstation.processShipNotify("/shipments?labelId=44010"))
+          .rejects.toThrow("Injected failure after activation before commit");
+        for (const table of [
+          "wms.package_allocation_groups", "wms.package_allocation_plans",
+          "wms.physical_shipments", "oms.channel_fulfillment_pushes",
+          "oms.package_allocation_commercial_fulfillment_activations",
+        ]) {
+          expect((await pool.query(`SELECT COUNT(*)::int AS count FROM ${table}`)).rows)
+            .toEqual([{ count: 0 }]);
+        }
+        expect(created).toEqual([]);
+        expect(await fulfillment.runDueBatch({ limit: 10 })).toMatchObject({ claimed: 0 });
+      }
+      const dispatchCommands = async (expectedCount: number) => {
+        expect(recordReview.mock.calls, JSON.stringify(recordReview.mock.calls)).toEqual([]);
+        const batch = await fulfillment.runDueBatch({ limit: 10 });
+        const commands = await pool.query("SELECT id, push_status, last_error_code, last_error FROM oms.channel_fulfillment_pushes ORDER BY id");
+        expect(batch, JSON.stringify({ commands: commands.rows, errors: logger.error.mock.calls })).toMatchObject({ claimed: expectedCount, succeeded: expectedCount });
+      };
+      if (arrival === "concurrent") {
+        // Drain both callbacks even if one fails so test cleanup cannot race
+        // a still-running transaction from the other label.
+        const outcomes = await Promise.allSettled(labelIds.map(receiveLabel));
+        expect(outcomes).toEqual(labelIds.map(() => ({ status: "fulfilled", value: undefined })));
+        await dispatchCommands(2);
+      } else {
+        for (const labelId of labelIds) {
+          now = new Date(now.getTime() + 60_000);
+          await receiveLabel(labelId);
+          await dispatchCommands(1);
+        }
+      }
+      expect(created.map((pkg) => [pkg.trackingNumber, pkg.quantity]).sort()).toEqual([
+        ["1Z0000000000044010", 1], ["1Z0000000000044011", 1],
+      ]);
+      for (const labelId of [44010, 44011, 44011]) {
+        await receiveLabel(labelId);
+      }
+      expect(recordReview.mock.calls, JSON.stringify(recordReview.mock.calls)).toEqual([]);
+      expect(await fulfillment.runDueBatch({ limit: 10 })).toMatchObject({ claimed: 0 });
+      expect(created).toHaveLength(2);
+      expect(recordShipment).not.toHaveBeenCalled();
+      expect(recordReplacementShipmentFromAvailableInventory).not.toHaveBeenCalled();
+      expect((await pool.query("SELECT id FROM wms.carrier_tracking_events")).rowCount).toBe(0);
+      expect((await pool.query("SELECT id FROM inventory.inventory_transactions")).rowCount).toBe(0);
+      expect((await pool.query("SELECT qty, split_root_shipment_item_id FROM wms.outbound_shipment_items WHERE id = $1", [sourceId])).rows)
+        .toEqual([{ qty: orderedQuantity, split_root_shipment_item_id: null }]);
+      expect((await pool.query("SELECT COUNT(*)::int AS count FROM wms.outbound_shipments")).rows).toEqual([{ count: 1 }]);
+      expect((await pool.query(`
+        SELECT order_item.fulfilled_quantity, order_item.picked_quantity,
+          line.fulfillment_status AS line_status, oms_order.fulfillment_status AS order_status
+        FROM wms.order_items order_item
+        JOIN oms.oms_order_lines line ON line.id = order_item.oms_order_line_id
+        JOIN oms.oms_orders oms_order ON oms_order.id = line.order_id
+        WHERE order_item.order_id = $1`, [source.order_id])).rows).toEqual([{
+        fulfilled_quantity: 2,
+        picked_quantity: 2,
+        line_status: orderedQuantity === 2 ? "fulfilled" : "partial",
+        order_status: orderedQuantity === 2 ? "fulfilled" : "partial",
+      }]);
+      if (orderedQuantity === 2) {
+        // An extra label is not permission to fulfill a third ordered unit.
+        await receiveLabel(44012);
+        expect(recordReview).toHaveBeenCalledTimes(1);
+        expect(await fulfillment.runDueBatch({ limit: 10 })).toMatchObject({ claimed: 0 });
+        expect(created).toHaveLength(2);
+      }
+    } finally {
+      vi.unstubAllGlobals();
+      vi.unstubAllEnvs();
+    }
+  });
+
   it.each([false, true])("executes exact B/C split quantities and replays without duplicates (stored Shopify mapping: %s)", async (storedShopifyMapping) => {
     const sourceId = await seedCommercialFulfillmentAuthoritySource(
       pool,
@@ -3980,7 +4285,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       });
       const label = new PackageAllocationLabelCommercialFulfillmentService({
         enabled: true,
-        bootstrap,
+        workflow: { run: async (work) => work({ bootstrap, fulfillmentAuthority: fulfillment }) },
         labelLinker: {
           reconcileShipStationLabel: async () => ({
             shippingProviderLabelId: labelId,
@@ -3988,7 +4293,6 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
             totalLinks: 1,
           }),
         },
-        fulfillmentAuthority: fulfillment,
         reviewRepository: { record: recordReview },
         logger,
       });
