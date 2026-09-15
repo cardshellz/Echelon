@@ -3201,6 +3201,126 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     ]);
   });
 
+  async function seedHistoricalSplitBackfill(orderedQuantity = 2) {
+    const sourceId = await seedCommercialFulfillmentAuthoritySource(pool, "SKU-BACKFILL-SPLIT", orderedQuantity);
+    const source = (await pool.query<{
+      shipment_id: number; order_id: number; order_item_id: number;
+      product_variant_id: number; oms_order_line_id: string;
+    }>(`SELECT item.shipment_id, shipment.order_id, item.order_item_id,
+         item.product_variant_id, order_item.oms_order_line_id::text
+       FROM wms.outbound_shipment_items item
+       JOIN wms.outbound_shipments shipment ON shipment.id = item.shipment_id
+       JOIN wms.order_items order_item ON order_item.id = item.order_item_id
+       WHERE item.id = $1`, [sourceId])).rows[0];
+    await pool.query("UPDATE wms.outbound_shipment_items SET qty = 1 WHERE id = $1", [sourceId]);
+    await pool.query("UPDATE wms.outbound_shipments SET status = 'shipped' WHERE id = $1", [source.shipment_id]);
+    const split = (await pool.query<{ id: number }>(
+      `INSERT INTO wms.outbound_shipments (
+         order_id, status, shipping_engine, engine_order_ref, shipstation_order_key,
+         external_fulfillment_id, tracking_number, carrier
+       ) VALUES ($1, 'shipped', 'shipstation', '99001', 'provider-order-key-99001',
+         'shipstation_shipment:44011', '1Z0000000000044011', 'ups') RETURNING id`,
+      [source.order_id],
+    )).rows[0];
+    await pool.query(`INSERT INTO wms.outbound_shipment_items (
+       shipment_id, order_item_id, split_root_shipment_item_id, shipment_item_purpose,
+       product_variant_id, qty
+     ) VALUES ($1, $2, $3, 'customer_fulfillment', $4, 1)`,
+    [split.id, source.order_item_id, sourceId, source.product_variant_id]);
+    // Historical dispatch already updated WMS. Backfill must not do it again.
+    await pool.query("UPDATE wms.order_items SET fulfilled_quantity = 2 WHERE id = $1", [source.order_item_id]);
+    const repository = createChannelFulfillmentAuthorityRepository(getTestDb());
+    const firstInput = { ...await repository.resolveLegacyPhysicalPackage(source.shipment_id), source: "historical-backfill-test" };
+    const secondInput = { ...await repository.resolveLegacyPhysicalPackage(split.id), source: "historical-backfill-test" };
+    return { source, split, repository, firstInput, secondInput };
+  }
+
+  it.each([2, 4])("backfills a second case after Shopify records the first, preserving %i ordered units and replay safety", async (orderedQuantity) => {
+    const { source, split, repository, firstInput, secondInput } = await seedHistoricalSplitBackfill(orderedQuantity);
+    const first = await repository.materializePhysicalPackage(firstInput);
+    expect(first.channelCommands).toHaveLength(1);
+    const claimTime = (await pool.query<{ next_attempt_at: Date }>(
+      "SELECT next_attempt_at FROM oms.channel_fulfillment_pushes WHERE id = $1",
+      [first.channelCommands[0].id],
+    )).rows[0].next_attempt_at;
+    const claimed = await repository.claimCommands({
+      // pg timestamps retain microseconds whereas JavaScript Dates do not.
+      commandIds: [first.channelCommands[0].id], limit: 1, now: new Date(claimTime.getTime() + 1_000),
+      leaseDurationMs: 60_000, leaseToken: "backfill-first-package",
+    });
+    expect(claimed).toHaveLength(1);
+    await repository.completeAttempt({
+      commandId: first.channelCommands[0].id, leaseToken: "backfill-first-package",
+      outcome: "success", providerResponseId: "gid://shopify/Fulfillment/640003",
+      startedAt: claimTime, completedAt: claimTime,
+    });
+    await pool.query("UPDATE oms.oms_order_lines SET authority_fulfillable_quantity = $1 WHERE id = $2",
+      [orderedQuantity - 1, source.oms_order_line_id]);
+    // Reproduce the previous defect's derived cancellation and review without
+    // changing the original paid/cancellation/refund facts.
+    await pool.query("UPDATE wms.fulfillment_plan_lines SET quantity_cancelled = 1");
+    await pool.query(`UPDATE wms.outbound_shipments SET requires_review = true,
+      review_reason = 'physical_shipment_exceeds_current_line_authority' WHERE id = $1`, [split.id]);
+    const inventoryBefore = (await pool.query("SELECT * FROM inventory.inventory_transactions ORDER BY id")).rows;
+    const wmsBefore = (await pool.query("SELECT * FROM wms.order_items ORDER BY id")).rows;
+    const results = await Promise.all([
+      repository.materializePhysicalPackage(secondInput),
+      repository.materializePhysicalPackage(secondInput),
+    ]);
+    expect(results.map((result) => result.channelCommands.length)).toEqual([1, 1]);
+    expect(results.map((result) => result.channelCommands[0].replayed).sort()).toEqual([false, true]);
+    expect((await pool.query(`SELECT quantity_planned, quantity_cancelled, quantity_shipped, authority_snapshot
+      FROM wms.fulfillment_plan_lines`)).rows).toEqual([expect.objectContaining({
+      quantity_planned: orderedQuantity, quantity_cancelled: 0, quantity_shipped: 2,
+      authority_snapshot: expect.objectContaining({ contractVersion: 2, quantityAuthority: expect.objectContaining({
+        paidQuantity: orderedQuantity, channelRemainingQuantity: orderedQuantity - 1,
+        commercialAuthorizedQuantity: orderedQuantity,
+      }) }),
+    })]);
+    expect((await pool.query(`SELECT physical.provider_physical_shipment_id, item.quantity_pushed
+      FROM oms.channel_fulfillment_push_items item
+      JOIN wms.physical_shipment_items physical_item ON physical_item.id = item.physical_shipment_item_id
+      JOIN wms.physical_shipments physical ON physical.id = physical_item.physical_shipment_id
+      ORDER BY physical.provider_physical_shipment_id`)).rows).toEqual([
+      { provider_physical_shipment_id: "44010", quantity_pushed: 1 },
+      { provider_physical_shipment_id: "44011", quantity_pushed: 1 },
+    ]);
+    expect((await pool.query("SELECT * FROM inventory.inventory_transactions ORDER BY id")).rows).toEqual(inventoryBefore);
+    expect((await pool.query("SELECT * FROM wms.order_items ORDER BY id")).rows).toEqual(wmsBefore);
+    expect((await pool.query("SELECT requires_review, review_reason FROM wms.outbound_shipments WHERE id = $1", [split.id])).rows)
+      .toEqual([{ requires_review: true, review_reason: "physical_shipment_exceeds_current_line_authority" }]);
+  });
+
+  it.each(["cancel", "refund", "cancel_refund"] as const)("keeps historical backfill blocked by a real %s disposition", async (kind) => {
+    const { source, repository, firstInput, secondInput } = await seedHistoricalSplitBackfill();
+    await repository.materializePhysicalPackage(firstInput);
+    await pool.query(`UPDATE oms.oms_order_lines SET authority_fulfillable_quantity = 1,
+      cancelled_quantity = $1, refunded_quantity = $2 WHERE id = $3`,
+    [kind === "refund" ? 0 : 1, kind === "cancel" ? 0 : 1, source.oms_order_line_id]);
+    if (kind !== "cancel") {
+      await pool.query(`INSERT INTO oms.order_line_adjustments (order_id, order_line_id, adjustment_type, restock_policy, quantity)
+        SELECT order_id, id, 'refund', $1, 1 FROM oms.oms_order_lines WHERE id = $2`,
+      [kind === "cancel_refund" ? "cancel" : "no_restock", source.oms_order_line_id]);
+    }
+    const result = await repository.materializePhysicalPackage(secondInput);
+    expect(result.channelCommands).toEqual([]);
+    expect((await pool.query("SELECT quantity_cancelled, quantity_shipped FROM wms.fulfillment_plan_lines")).rows)
+      .toEqual([{ quantity_cancelled: 1, quantity_shipped: 2 }]);
+    expect((await pool.query("SELECT id FROM oms.channel_fulfillment_pushes")).rows).toHaveLength(1);
+  });
+
+  it("rolls back a backfill with incomplete refund evidence", async () => {
+    const { source, repository, firstInput } = await seedHistoricalSplitBackfill();
+    await pool.query("UPDATE oms.oms_order_lines SET refunded_quantity = 1 WHERE id = $1", [source.oms_order_line_id]);
+    await expect(repository.materializePhysicalPackage(firstInput)).rejects.toMatchObject({
+      code: "CANONICAL_STATE_CONFLICT",
+      context: { quantityAuthorityError: "INVALID_CHANNEL_FULFILLMENT_QUANTITY_AUTHORITY" },
+    });
+    expect((await pool.query("SELECT id FROM wms.physical_shipments")).rows).toEqual([]);
+    expect((await pool.query("SELECT id FROM wms.fulfillment_plans")).rows).toEqual([]);
+    expect((await pool.query("SELECT id FROM oms.channel_fulfillment_pushes")).rows).toEqual([]);
+  });
+
   it("materializes a normal two-package split as two fulfillments without a second inventory intent", async () => {
     const sourceId = await seedCommercialFulfillmentAuthoritySource(
       pool,
@@ -3420,6 +3540,9 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     ]);
 
     const fulfillment = createChannelFulfillmentAuthorityRepository(getTestDb());
+    // The first package's Shopify update must not revoke cumulative authority
+    // for the second exact package in the label-time path either.
+    await pool.query("UPDATE oms.oms_order_lines SET authority_fulfillable_quantity = 1");
     const materialized = await fulfillment.materializePackageAllocationCommercialFulfillment({
       packageAllocationPlanId: persisted.planId!,
       source: "normal-split-integration",
