@@ -71,6 +71,11 @@ const POLICY_RECEIPT_PREFIX = "inventory-channel-exposure-policy:";
 const SOURCE_RECEIPT_PREFIX = "inventory-publication-source-binding:";
 const TARGET_RECEIPT_PREFIX = "inventory-publication-target:";
 const VARIANT_MAPPING_RECEIPT_PREFIX = "inventory-publication-variant-mapping:";
+// Identity scheme under which eBay (channel and Dropship) credentials persist the
+// provider-verified account id. Mirrors EBAY_PROVIDER_ACCOUNT_IDENTITY_SCHEME in
+// server/modules/channels/adapters/ebay/ebay-auth.service.ts and the Dropship
+// transport check; account-scoped destinations must name exactly this id.
+const PROVIDER_USER_ID_IDENTITY_SCHEME = "provider_user_id";
 
 export class PostgresInventoryChannelExposureAdminStore
 implements InventoryChannelExposureAdminStore {
@@ -121,13 +126,28 @@ implements InventoryChannelExposureAdminStore {
       ORDER BY name, id
     `));
     const connectionRows = rows(await this.database.execute(sql`
-      SELECT id, channel_id, shop_domain
-      FROM channels.channel_connections
-      ORDER BY channel_id, id
+      SELECT connection.id, connection.channel_id, connection.shop_domain,
+             connection.shopify_location_id,
+             COALESCE(connection.metadata->>'environment', 'production') AS environment
+      FROM channels.channel_connections AS connection
+      ORDER BY connection.channel_id, connection.id
+    `));
+    // Read-only projection of the provider-verified eBay seller identity behind
+    // each credential, so destination setup can offer the exact account id the
+    // adapter will later enforce instead of asking operators to type it.
+    const ebayAccountRows = rows(await this.database.execute(sql`
+      SELECT channel_id, environment, external_account_id, external_account_display_name,
+             external_account_verified_at
+      FROM ebay.ebay_oauth_tokens
+      WHERE external_account_identity_scheme = ${PROVIDER_USER_ID_IDENTITY_SCHEME}
+        AND external_account_id IS NOT NULL
+        AND btrim(external_account_id) <> ''
+        AND external_account_verified_at IS NOT NULL
     `));
     const dropshipStoreRows = rows(await this.database.execute(sql`
       SELECT connection.id, connection.vendor_id, vendor.business_name AS vendor_name,
              connection.platform, connection.status,
+             connection.external_account_id, connection.external_account_identity_scheme,
              COALESCE(connection.external_display_name, connection.external_account_id,
                connection.shop_domain) AS external_account_label
       FROM dropship.dropship_store_connections AS connection
@@ -164,9 +184,21 @@ implements InventoryChannelExposureAdminStore {
         VALUES ('active', head.active_policy_id), ('draft', head.draft_policy_id)
       ) AS pointer(pointer_type, policy_id)
       JOIN inventory.channel_exposure_policy_versions AS policy ON policy.id = pointer.policy_id
-      WHERE policy.scope_type = 'channel'
-         OR (${productId}::integer IS NOT NULL AND policy.product_id = ${productId})
       ORDER BY head.scope_key, pointer.pointer_type
+    `));
+    // Every product/SKU rule carries a catalog label so operators can see which
+    // items have exceptions on a channel without first selecting the product.
+    const policySubjectRows = rows(await this.database.execute(sql`
+      SELECT head.scope_key, product.id AS product_id, product.sku AS product_sku,
+             product.name AS product_name, variant.id AS variant_id, variant.sku AS variant_sku,
+             variant.name AS variant_name, variant.units_per_variant
+      FROM inventory.channel_exposure_policy_heads AS head
+      JOIN inventory.channel_exposure_policy_versions AS policy
+        ON policy.id = COALESCE(head.draft_policy_id, head.active_policy_id)
+      JOIN catalog.products AS product ON product.id = policy.product_id
+      LEFT JOIN catalog.product_variants AS variant ON variant.id = policy.product_variant_id
+      WHERE policy.scope_type <> 'channel'
+      ORDER BY product.name, product.id, variant.units_per_variant, variant.id
     `));
     const bindingRows = rows(await this.database.execute(sql`
       SELECT head.publication_target_id, head.revision, pointer.pointer_type,
@@ -210,6 +242,14 @@ implements InventoryChannelExposureAdminStore {
       ORDER BY feed.channel_id, feed.product_variant_id, feed.id
     `));
     const connectionsByChannel = groupBy(connectionRows, (row) => positiveInteger(row.channel_id, "connection.channelId"));
+    const ebayAccountsByChannelEnvironment = new Map(ebayAccountRows.map((row) => [
+      `${positiveInteger(row.channel_id, "ebayAccount.channelId")}:${String(row.environment)}`,
+      {
+        externalAccountId: String(row.external_account_id).trim(),
+        displayName: nullableText(row.external_account_display_name),
+        verifiedAt: iso(row.external_account_verified_at, "ebayAccount.verifiedAt"),
+      },
+    ]));
 
     return inventoryChannelExposureAdminViewSchema.parse({
       products: productRows.map((row) => ({
@@ -240,6 +280,13 @@ implements InventoryChannelExposureAdminStore {
           connections: (connectionsByChannel.get(channelId) ?? []).map((connection) => ({
             id: positiveInteger(connection.id, "connection.id"),
             externalAccountLabel: nullableText(connection.shop_domain),
+            shopifyLocationId: String(row.provider) === "shopify"
+              ? nullableText(connection.shopify_location_id)
+              : null,
+            providerAccount: String(row.provider) === "ebay"
+              ? ebayAccountsByChannelEnvironment.get(`${channelId}:${String(connection.environment)}`)
+                ?? null
+              : null,
           })),
         };
       }),
@@ -250,6 +297,10 @@ implements InventoryChannelExposureAdminStore {
         platform: String(row.platform),
         status: String(row.status),
         externalAccountLabel: nullableText(row.external_account_label),
+        verifiedExternalAccountId:
+          String(row.external_account_identity_scheme ?? "") === PROVIDER_USER_ID_IDENTITY_SCHEME
+            ? nullableText(row.external_account_id)
+            : null,
       })),
       publicationTargets: targetRows.map((row) => ({
         id: positiveInteger(row.id, "target.id"),
@@ -277,6 +328,18 @@ implements InventoryChannelExposureAdminStore {
         lifecycleStatus: String(row.lifecycle_status),
       })),
       policyHeads: mapPolicyHeads(policyRows),
+      policySubjects: policySubjectRows.map((row) => ({
+        scopeKey: String(row.scope_key),
+        productId: positiveInteger(row.product_id, "policySubject.productId"),
+        productSku: nullableText(row.product_sku),
+        productName: String(row.product_name),
+        productVariantId: nullablePositiveInteger(row.variant_id, "policySubject.variantId"),
+        variantSku: nullableText(row.variant_sku),
+        variantName: row.variant_name == null ? null : String(row.variant_name),
+        unitsPerVariant: row.units_per_variant == null
+          ? null
+          : positiveInteger(row.units_per_variant, "policySubject.unitsPerVariant"),
+      })),
       sourceBindingHeads: mapBindingHeads(bindingRows),
       variantMappingHeads: mapVariantMappingHeads(mappingRows),
       legacyMappingCandidates: legacyMappingRows.map((row) => ({
@@ -385,8 +448,9 @@ implements InventoryChannelExposureAdminStore {
           publicationAuthority: command.publicationAuthority,
           state: "disabled",
         } },
-        context: { idempotencyKey: command.idempotencyKey, requestHash: command.requestHash,
-          runtimeAuthorityChanged: false, providerWriteAttempted: false, outboxEnqueued: false },
+        context: { note: command.changeReason, idempotencyKey: command.idempotencyKey,
+          requestHash: command.requestHash, runtimeAuthorityChanged: false,
+          providerWriteAttempted: false, outboxEnqueued: false },
       }, { timestamp: command.occurredAt, emitStructuredLog: false });
       await completeTargetReceipt(tx, receiptKey, "inventory_publication_target_create", result);
       return result;
@@ -520,6 +584,7 @@ implements InventoryChannelExposureAdminStore {
       });
       let definitionId: number;
       let version: number;
+      let before: VariantMappingAuditSnapshot | null = null;
       if (head?.draft_mapping_id != null) {
         definitionId = positiveInteger(head.draft_mapping_id, "variantMappingHead.draftMappingId");
         const draftRows = rows(await tx.execute(sql`
@@ -533,6 +598,7 @@ implements InventoryChannelExposureAdminStore {
           throw staleVariantMapping();
         }
         version = positiveInteger(draft.version, "variantMapping.version");
+        before = await loadVariantMappingAuditSnapshot(tx, definitionId, "draft");
         await tx.update(publicationVariantMappingVersions).set({
           externalInventoryItemId: command.externalInventoryItemId,
           externalSku: command.externalSku,
@@ -544,6 +610,9 @@ implements InventoryChannelExposureAdminStore {
         const predecessorId = head?.active_mapping_id == null
           ? null
           : positiveInteger(head.active_mapping_id, "variantMappingHead.activeMappingId");
+        before = predecessorId === null
+          ? null
+          : await loadVariantMappingAuditSnapshot(tx, predecessorId, "active");
         const versionRows = rows(await tx.execute(sql`
           SELECT COALESCE(max(version), 0) + 1 AS next_version
           FROM inventory.publication_variant_mapping_versions
@@ -612,15 +681,20 @@ implements InventoryChannelExposureAdminStore {
         actor: command.actorId,
         action: "inventory_availability.publication_variant_mapping.draft_saved",
         target: `inventory.publication_variant_mapping:${definitionId}`,
-        changes: { before: null, after: {
-          publicationTargetId: command.publicationTargetId,
-          productVariantId: command.productVariantId,
-          externalInventoryItemId: command.externalInventoryItemId,
-          externalSku: command.externalSku,
-          definitionHash,
-        } },
-        context: { idempotencyKey: command.idempotencyKey, requestHash: command.requestHash,
-          runtimeAuthorityChanged: false, providerWriteAttempted: false },
+        changes: {
+          before,
+          after: {
+            authority: "draft",
+            publicationTargetId: command.publicationTargetId,
+            productVariantId: command.productVariantId,
+            externalInventoryItemId: command.externalInventoryItemId,
+            externalSku: command.externalSku,
+            definitionHash,
+          },
+        },
+        context: { note: command.changeReason, idempotencyKey: command.idempotencyKey,
+          requestHash: command.requestHash, runtimeAuthorityChanged: false,
+          providerWriteAttempted: false },
       }, { timestamp: command.occurredAt, emitStructuredLog: false });
       await completeReceipt(tx, receiptKey, "publication_variant_mapping_draft_save", result);
       return result;
@@ -654,6 +728,7 @@ implements InventoryChannelExposureAdminStore {
       });
       let definitionId: number;
       let version: number;
+      let before: PolicyAuditSnapshot | null = null;
       if (head?.draft_policy_id != null) {
         definitionId = positiveInteger(head.draft_policy_id, "policyHead.draftPolicyId");
         const draftRows = rows(await tx.execute(sql`
@@ -667,6 +742,7 @@ implements InventoryChannelExposureAdminStore {
           throw stalePolicy();
         }
         version = positiveInteger(draft.version, "policy.version");
+        before = await loadPolicyAuditSnapshot(tx, definitionId, "draft");
         await tx.update(channelExposurePolicyVersions).set({
           ...policyColumns(command.value),
           definitionHash,
@@ -677,6 +753,9 @@ implements InventoryChannelExposureAdminStore {
         const predecessorId = head?.active_policy_id == null
           ? null
           : positiveInteger(head.active_policy_id, "policyHead.activePolicyId");
+        before = predecessorId === null
+          ? null
+          : await loadPolicyAuditSnapshot(tx, predecessorId, "active");
         const versionRows = rows(await tx.execute(sql`
           SELECT COALESCE(max(version), 0) + 1 AS next_version
           FROM inventory.channel_exposure_policy_versions
@@ -744,9 +823,13 @@ implements InventoryChannelExposureAdminStore {
         actor: command.actorId,
         action: "inventory_availability.channel_exposure_policy.draft_saved",
         target: `inventory.channel_exposure_policy:${definitionId}`,
-        changes: { before: null, after: { scope: command.scope, value: command.value, definitionHash } },
-        context: { idempotencyKey: command.idempotencyKey, requestHash: command.requestHash,
-          runtimeAuthorityChanged: false, providerWriteAttempted: false },
+        changes: {
+          before,
+          after: { authority: "draft", scope: command.scope, value: command.value, definitionHash },
+        },
+        context: { note: command.changeReason, idempotencyKey: command.idempotencyKey,
+          requestHash: command.requestHash, runtimeAuthorityChanged: false,
+          providerWriteAttempted: false },
       }, { timestamp: command.occurredAt, emitStructuredLog: false });
       await completeReceipt(tx, receiptKey, "channel_exposure_policy_draft_save", result);
       return result;
@@ -780,6 +863,7 @@ implements InventoryChannelExposureAdminStore {
       });
       let definitionId: number;
       let version: number;
+      let before: SourceBindingAuditSnapshot | null = null;
       if (head?.draft_binding_id != null) {
         definitionId = positiveInteger(head.draft_binding_id, "sourceHead.draftBindingId");
         const draftRows = rows(await tx.execute(sql`
@@ -793,6 +877,7 @@ implements InventoryChannelExposureAdminStore {
           throw staleSourceBinding();
         }
         version = positiveInteger(draft.version, "sourceBinding.version");
+        before = await loadSourceBindingAuditSnapshot(tx, definitionId, "draft");
         await tx.delete(publicationSourceBindingMembers)
           .where(eq(publicationSourceBindingMembers.bindingId, definitionId));
         await tx.update(publicationSourceBindingVersions).set({
@@ -804,6 +889,9 @@ implements InventoryChannelExposureAdminStore {
         const predecessorId = head?.active_binding_id == null
           ? null
           : positiveInteger(head.active_binding_id, "sourceHead.activeBindingId");
+        before = predecessorId === null
+          ? null
+          : await loadSourceBindingAuditSnapshot(tx, predecessorId, "active");
         const versionRows = rows(await tx.execute(sql`
           SELECT COALESCE(max(version), 0) + 1 AS next_version
           FROM inventory.publication_source_binding_versions
@@ -874,10 +962,14 @@ implements InventoryChannelExposureAdminStore {
         actor: command.actorId,
         action: "inventory_availability.publication_source_binding.draft_saved",
         target: `inventory.publication_source_binding:${definitionId}`,
-        changes: { before: null, after: { publicationTargetId: command.publicationTargetId,
-          fulfillmentNodeIds: command.fulfillmentNodeIds, definitionHash } },
-        context: { idempotencyKey: command.idempotencyKey, requestHash: command.requestHash,
-          runtimeAuthorityChanged: false, providerWriteAttempted: false },
+        changes: {
+          before,
+          after: { authority: "draft", publicationTargetId: command.publicationTargetId,
+            fulfillmentNodeIds: command.fulfillmentNodeIds, definitionHash },
+        },
+        context: { note: command.changeReason, idempotencyKey: command.idempotencyKey,
+          requestHash: command.requestHash, runtimeAuthorityChanged: false,
+          providerWriteAttempted: false },
       }, { timestamp: command.occurredAt, emitStructuredLog: false });
       await completeReceipt(tx, receiptKey, "publication_source_binding_draft_save", result);
       return result;
@@ -1170,6 +1262,92 @@ implements InventoryChannelExposureAdminStore {
       });
     });
   }
+}
+
+type DefinitionAuthority = "draft" | "active";
+
+/**
+ * Audit "before" images. A routine save carries no written reason, so the
+ * audit row must show the exact prior definition it replaced: the head's
+ * existing draft when one was edited in place, otherwise the sealed active
+ * definition the new draft will supersede, otherwise nothing existed.
+ */
+interface PolicyAuditSnapshot {
+  authority: DefinitionAuthority;
+  definitionHash: string;
+  value: ChannelExposurePolicyValue;
+}
+
+interface SourceBindingAuditSnapshot {
+  authority: DefinitionAuthority;
+  definitionHash: string;
+  fulfillmentNodeIds: number[];
+}
+
+interface VariantMappingAuditSnapshot {
+  authority: DefinitionAuthority;
+  definitionHash: string;
+  externalInventoryItemId: string;
+  externalSku: string | null;
+}
+
+async function loadPolicyAuditSnapshot(
+  tx: Transaction,
+  policyId: number,
+  authority: DefinitionAuthority,
+): Promise<PolicyAuditSnapshot> {
+  const row = rows(await tx.execute(sql`
+    SELECT definition_hash, allocation_semantics, eligible, share_bps, holdback_sellable_units,
+           max_publish_mode, max_publish_sellable_units, min_publish_sellable_units
+    FROM inventory.channel_exposure_policy_versions
+    WHERE id = ${policyId}
+  `))[0];
+  if (!row) throw invalidDatabaseValue("policy.auditSnapshot");
+  return { authority, definitionHash: String(row.definition_hash), value: policyValue(row) };
+}
+
+async function loadSourceBindingAuditSnapshot(
+  tx: Transaction,
+  bindingId: number,
+  authority: DefinitionAuthority,
+): Promise<SourceBindingAuditSnapshot> {
+  const versionRow = rows(await tx.execute(sql`
+    SELECT definition_hash
+    FROM inventory.publication_source_binding_versions
+    WHERE id = ${bindingId}
+  `))[0];
+  if (!versionRow) throw invalidDatabaseValue("sourceBinding.auditSnapshot");
+  const memberRows = rows(await tx.execute(sql`
+    SELECT fulfillment_node_id
+    FROM inventory.publication_source_binding_members
+    WHERE binding_id = ${bindingId}
+    ORDER BY priority
+  `));
+  return {
+    authority,
+    definitionHash: String(versionRow.definition_hash),
+    fulfillmentNodeIds: memberRows.map((row) =>
+      positiveInteger(row.fulfillment_node_id, "sourceBinding.auditNodeId")),
+  };
+}
+
+async function loadVariantMappingAuditSnapshot(
+  tx: Transaction,
+  mappingId: number,
+  authority: DefinitionAuthority,
+): Promise<VariantMappingAuditSnapshot> {
+  const row = rows(await tx.execute(sql`
+    SELECT definition_hash, external_inventory_item_id, external_sku
+    FROM inventory.publication_variant_mapping_versions
+    WHERE id = ${mappingId}
+  `))[0];
+  if (!row) throw invalidDatabaseValue("variantMapping.auditSnapshot");
+  return {
+    authority,
+    definitionHash: String(row.definition_hash),
+    externalInventoryItemId: String(row.external_inventory_item_id),
+    externalSku: nullableText(row.external_sku),
+  };
 }
 
 function policyColumns(value: ChannelExposurePolicyValue) {
@@ -1506,7 +1684,7 @@ function mapPolicy(row: Record<string, any>): ChannelExposurePolicyVersion {
     scope,
     value: policyValue(row),
     definitionHash: String(row.definition_hash),
-    changeReason: String(row.change_reason),
+    changeReason: nullableText(row.change_reason),
     createdBy: String(row.created_by),
     createdAt: iso(row.created_at, "policy.createdAt"),
     updatedAt: iso(row.updated_at, "policy.updatedAt"),
@@ -1551,7 +1729,7 @@ function mapBindingHeads(bindingRows: Record<string, any>[]): PublicationSourceB
         lifecycleStatus: String(row.lifecycle_status) as PublicationSourceBindingVersion["lifecycleStatus"],
         definitionHash: String(row.definition_hash),
         fulfillmentNodeIds: [],
-        changeReason: String(row.change_reason),
+        changeReason: nullableText(row.change_reason),
         createdBy: String(row.created_by),
         createdAt: iso(row.created_at, "sourceBinding.createdAt"),
         updatedAt: iso(row.updated_at, "sourceBinding.updatedAt"),
@@ -1607,7 +1785,7 @@ function mapVariantMapping(row: Record<string, any>): PublicationVariantMappingV
     externalInventoryItemId: String(row.external_inventory_item_id),
     externalSku: nullableText(row.external_sku),
     definitionHash: String(row.definition_hash),
-    changeReason: String(row.change_reason),
+    changeReason: nullableText(row.change_reason),
     createdBy: String(row.created_by),
     createdAt: iso(row.created_at, "variantMapping.createdAt"),
     updatedAt: iso(row.updated_at, "variantMapping.updatedAt"),

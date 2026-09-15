@@ -898,11 +898,11 @@ export default function ShopifyChannelPage() {
                   variant="outline"
                   size="sm"
                   className="min-h-[44px] sm:min-h-0"
-                  onClick={() => navigate("/channels/inventory-exposure")}
-                  title="Canonical inventory publication is controlled from Inventory Exposure"
+                  onClick={() => navigate("/channels/inventory")}
+                  title="Canonical inventory publication is controlled from Channel Inventory"
                 >
                   <ShieldCheck className="h-4 w-4 mr-2" />
-                  Inventory Exposure
+                  Channel Inventory
                 </Button>
               )}
               <InventoryRuntimeAuthorityBadge />

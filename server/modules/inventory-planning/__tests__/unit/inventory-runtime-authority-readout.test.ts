@@ -46,7 +46,7 @@ function failure(records: readonly InventoryRuntimeAuthorityRecord[]): Inventory
 }
 
 describe("liveAllocatorForAuthority", () => {
-  it("maps legacy to Channel Allocation rules and canonical to Inventory Exposure", () => {
+  it("maps legacy to Channel Allocation rules and canonical to Channel Inventory", () => {
     expect(liveAllocatorForAuthority("legacy")).toBe("channel_allocation_rules");
     expect(liveAllocatorForAuthority("canonical")).toBe("inventory_exposure");
   });
@@ -66,7 +66,7 @@ describe("buildInventoryRuntimeAuthorityReadout", () => {
     });
   });
 
-  it("reports the canonical authority as Inventory Exposure being live with its activation lineage", () => {
+  it("reports the canonical authority as Channel Inventory being live with its activation lineage", () => {
     expect(buildInventoryRuntimeAuthorityReadout([canonicalRecord()])).toMatchObject({
       authority: "canonical",
       liveAllocator: "inventory_exposure",

@@ -16,7 +16,7 @@ export interface InventoryRuntimeAuthorityDescription {
 
 const ALLOCATOR_LABELS: Record<InventoryRuntimeAuthorityReadout["liveAllocator"], string> = {
   channel_allocation_rules: "Channel Allocation rules",
-  inventory_exposure: "Inventory Exposure",
+  inventory_exposure: "Channel Inventory",
 };
 
 /** Pure presentation rule shared by both operator pages; it never infers a state the server did not report. */

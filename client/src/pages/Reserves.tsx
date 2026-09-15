@@ -189,11 +189,11 @@ export default function Reserves() {
           <CardContent className="space-y-3">
             <p className="text-sm text-muted-foreground">
               {inventoryRuntimeAuthorityQuery.data?.authority === "canonical"
-                ? "Inventory Exposure now owns per-SKU channel holdbacks and publish limits. Existing reserve rows remain historical and cannot be changed here."
+                ? "Channel Inventory now owns per-SKU channel holdbacks and publish limits. Existing reserve rows remain historical and cannot be changed here."
                 : "The live inventory authority could not be confirmed. Legacy reserve reads and writes stay disabled so this page cannot act against the wrong allocator."}
             </p>
             <Button asChild>
-              <a href="/channels/inventory-exposure">Open Inventory Exposure</a>
+              <a href="/channels/inventory">Open Channel Inventory</a>
             </Button>
           </CardContent>
         </Card>

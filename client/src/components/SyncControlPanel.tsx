@@ -47,11 +47,10 @@ interface SyncStatus {
   };
 }
 
+/** Legacy sync engine controls. The canonical global publishing switch lives in Channel Inventory. */
 export default function SyncControlPanel({
-  mode = "legacy",
   allowChanges = true,
 }: {
-  mode?: "legacy" | "canonical";
   allowChanges?: boolean;
 }) {
   const { toast } = useToast();
@@ -74,10 +73,7 @@ export default function SyncControlPanel({
       if (!retainedCommand.current || retainedCommand.current.fingerprint !== fingerprint) {
         retainedCommand.current = { fingerprint, idempotencyKey: crypto.randomUUID() };
       }
-      const path = mode === "canonical"
-        ? "/api/inventory-planning/admin/publication-global-control"
-        : "/api/sync/settings";
-      const res = await apiRequest("PUT", path, {
+      const res = await apiRequest("PUT", "/api/sync/settings", {
         ...change,
         expectedRevision: status.global.revision,
         idempotencyKey: retainedCommand.current.idempotencyKey,
@@ -152,9 +148,7 @@ export default function SyncControlPanel({
                     : "text-muted-foreground"
                 }
               />
-              <span className="font-semibold text-lg">
-                {mode === "canonical" ? "Inventory Publication" : "Sync Engine"}
-              </span>
+              <span className="font-semibold text-lg">Sync Engine</span>
             </div>
             <Switch
               checked={globalSettings.globalEnabled}
@@ -206,7 +200,7 @@ export default function SyncControlPanel({
           )}
 
           {/* Manual trigger */}
-          {mode === "legacy" && globalSettings.globalEnabled && (
+          {globalSettings.globalEnabled && (
             <Button
               variant="outline"
               size="sm"
@@ -226,11 +220,11 @@ export default function SyncControlPanel({
 
         {allowChanges && (
           <div className="mt-3 pt-3 border-t flex flex-col md:flex-row md:items-center gap-2">
-            <label htmlFor={`publication-control-reason-${mode}`} className="text-sm font-medium">
+            <label htmlFor="publication-control-reason" className="text-sm font-medium">
               Change reason
             </label>
             <Input
-              id={`publication-control-reason-${mode}`}
+              id="publication-control-reason"
               value={changeReason}
               onChange={(event) => {
                 setChangeReason(event.target.value);

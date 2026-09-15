@@ -1215,13 +1215,13 @@ export default function ChannelAllocation() {
             </CardTitle>
             <CardDescription>
               {inventoryRuntimeAuthorityQuery.data?.authority === "canonical"
-                ? "Inventory Exposure is the live channel quantity authority. Legacy warehouse assignments and allocation rules are preserved as historical configuration but cannot be read or changed here."
+                ? "Channel Inventory is the live channel quantity authority. Legacy warehouse assignments and allocation rules are preserved as historical configuration but cannot be read or changed here."
                 : "The live inventory authority could not be confirmed. Legacy controls stay disabled so this page cannot write against the wrong allocator."}
             </CardDescription>
           </CardHeader>
           <CardContent>
             <Button asChild>
-              <a href="/channels/inventory-exposure">Open Inventory Exposure</a>
+              <a href="/channels/inventory">Open Channel Inventory</a>
             </Button>
           </CardContent>
         </Card>

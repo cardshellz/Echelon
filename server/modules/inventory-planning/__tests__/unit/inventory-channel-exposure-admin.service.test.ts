@@ -126,6 +126,79 @@ describe("InventoryChannelExposureAdminService", () => {
     });
   });
 
+  it("treats the routine draft note as optional and never fabricates one", async () => {
+    const store = fakeStore();
+    store.savePolicyDraft.mockResolvedValue(saveResult());
+    store.saveVariantMappingDraft.mockResolvedValue(saveResult());
+    store.createPublicationTarget.mockResolvedValue(targetResult());
+    const service = new InventoryChannelExposureAdminService(store, { now: () => NOW });
+
+    await service.savePolicyDraft({
+      scope: { scopeType: "channel", channelId: 3 },
+      value: {
+        allocationSemantics: "exposure",
+        eligible: true,
+        shareBps: 5_000,
+        holdbackSellableUnits: "0",
+        maxPublish: { mode: "unlimited" },
+        minPublishSellableUnits: "0",
+      },
+      expectedHeadRevision: "0",
+      expectedDraftPolicyId: null,
+      expectedDraftDefinitionHash: null,
+      idempotencyKey: "channel-policy-no-note",
+    }, "operator-1");
+    expect(store.savePolicyDraft).toHaveBeenCalledWith(expect.objectContaining({
+      changeReason: null,
+      actorId: "operator-1",
+      occurredAt: NOW,
+    }));
+
+    await service.saveVariantMappingDraft({
+      publicationTargetId: 5,
+      productVariantId: 101,
+      externalInventoryItemId: "inventory-item-1",
+      externalSku: null,
+      expectedHeadRevision: "0",
+      expectedDraftMappingId: null,
+      expectedDraftDefinitionHash: null,
+      changeReason: "  \n ",
+      idempotencyKey: "mapping-blank-note",
+    }, "operator-1");
+    expect(store.saveVariantMappingDraft).toHaveBeenCalledWith(expect.objectContaining({
+      changeReason: null,
+    }));
+
+    await service.createPublicationTarget({
+      channelId: 36,
+      channelConnectionId: 44,
+      legacyFulfillmentNodeId: 1,
+      providerScopeType: "location",
+      externalScopeId: "location-1",
+      publicationAuthority: "echelon",
+      idempotencyKey: "target-no-note",
+    }, "operator-1");
+    expect(store.createPublicationTarget).toHaveBeenCalledWith(expect.objectContaining({
+      changeReason: null,
+      destinationKind: "channel_connection",
+    }));
+  });
+
+  it("keeps the required reason on the sensitive readiness-preview command", async () => {
+    const store = fakeStore();
+    const service = new InventoryChannelExposureAdminService(store, { now: () => NOW });
+    await expect(service.setPublicationTargetPreviewState({
+      publicationTargetId: 5,
+      expectedRevision: "1",
+      state: "preview",
+      changeReason: "",
+      idempotencyKey: "target-state-blank",
+    }, "operator-1")).rejects.toMatchObject({
+      code: "INVENTORY_CHANNEL_EXPOSURE_INVALID_TARGET_PREVIEW_STATE",
+    });
+    expect(store.setPublicationTargetPreviewState).not.toHaveBeenCalled();
+  });
+
   it("rejects empty policies and duplicate source nodes before persistence", async () => {
     const store = fakeStore();
     const service = new InventoryChannelExposureAdminService(store, { now: () => NOW });

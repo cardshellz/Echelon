@@ -9,7 +9,7 @@ import { z } from "zod";
  * (server/modules/inventory-planning/infrastructure/quantity-publication-runtime.ts,
  * createQuantityPublicationCatchupService): `legacy` refreshes channel quantities
  * through the legacy channel adapters that are fed by Channel Allocation rules,
- * `canonical` plans quantities from Inventory Exposure, and any other value is
+ * `canonical` plans quantities from Channel Inventory, and any other value is
  * refused with PUBLICATION_AUTHORITY_MISSING. This contract refuses it too rather
  * than guessing which allocator is live.
  */

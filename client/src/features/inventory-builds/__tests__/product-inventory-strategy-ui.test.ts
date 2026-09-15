@@ -40,6 +40,6 @@ describe("product inventory strategy UI contract", () => {
     expect(productDetailSource).toContain('inventoryRuntimeAuthorityQuery.data?.authority === "legacy"');
     expect(productDetailSource).toContain("Legacy product allocation is retired");
     expect(productDetailSource).toContain("legacy allocation reads and writes remain disabled");
-    expect(productDetailSource).toContain('href="/channels/inventory-exposure"');
+    expect(productDetailSource).toContain('href="/channels/inventory"');
   });
 });
