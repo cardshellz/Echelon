@@ -94,8 +94,7 @@ import {
   makeCarrierTrackingLogger,
   systemCarrierTrackingClock,
 } from "../modules/shipping/carrier-tracking.service";
-import { PgPackageAllocationLedgerRepository } from "../modules/shipping/package-allocation-ledger.repository";
-import { PackageAllocationBootstrapPersistenceService } from "../modules/shipping/package-allocation-bootstrap.service";
+import { createPackageAllocationLabelCommercialWorkflow } from "./package-allocation-label-commercial-workflow";
 import {
   PackageAllocationLabelCommercialFulfillmentService,
 } from "../modules/shipping/package-allocation-label-commercial-fulfillment.service";
@@ -573,13 +572,19 @@ export function createServices(
     trackingEventsClient: createShipStationTrackingEventsClient(),
     dispatchAuthority: dispatchAuthorityProxy,
   });
-  const packageAllocationLedger = new PgPackageAllocationLedgerRepository(databasePool);
   const labelCommercialFulfillment =
     new PackageAllocationLabelCommercialFulfillmentService({
       enabled: !envFlagEnabled("PACKAGE_ALLOCATION_COMMERCIAL_FULFILLMENT_DISABLED"),
       labelLinker: carrierTracking,
-      bootstrap: new PackageAllocationBootstrapPersistenceService(packageAllocationLedger),
-      fulfillmentAuthority: channelFulfillmentAuthority,
+      workflow: createPackageAllocationLabelCommercialWorkflow({
+        pool: databasePool,
+        clock: systemCarrierTrackingClock,
+        logger: {
+          info: (event) => console.log(JSON.stringify(event)),
+          warn: (event) => console.warn(JSON.stringify(event)),
+          error: (event) => console.error(JSON.stringify(event)),
+        },
+      }),
       reviewRepository: createPackageAllocationLabelCommercialReviewRepository(db),
     });
   const shipStation = createShipStationService(db, {

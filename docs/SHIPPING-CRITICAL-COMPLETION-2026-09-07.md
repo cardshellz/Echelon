@@ -1,5 +1,9 @@
 # Shipping-critical completion
 
+Current checkpoint: [label-time split fulfillment and broader verification,
+September 14](SHIPPING-LABEL-TIME-COMPLETION-2026-09-14.md). The historical slices
+below are not proof that the complete production backlog is resolved.
+
 ## Scope and preserved work
 
 User priority: defer the separate Dropship acceptance issue and continue the

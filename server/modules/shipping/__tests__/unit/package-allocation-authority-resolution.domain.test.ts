@@ -135,6 +135,66 @@ function transferAction(
 }
 
 describe("resolvePackageAllocationAuthority", () => {
+  it.each([2, 3, 7])("allocates successive labels against %i ordered units before any carrier split exists", (orderedQuantity) => {
+    const packageA = observedPackage("44001", {
+      observedAt: "2026-08-21T14:00:00.000Z", quantity: 1,
+    });
+    const packageB = observedPackage("44002", {
+      observedAt: "2026-08-21T14:01:00.000Z", quantity: 1,
+    });
+    const sourceLines = [{ wmsShipmentItemId: sourceId, sourceQuantity: orderedQuantity }];
+    const first = resolvePackageAllocationAuthority(command([packageA], [], { sourceLines }));
+    const second = resolvePackageAllocationAuthority(command([packageB, packageA], [], {
+      sourceLines,
+      expectedGroupVersion: first.plannerResult.proposedGroupVersion,
+      previousPlan: previousPlanFrom(first.plannerResult),
+    }));
+    expect(second.outcome).toBe("proposed");
+    expect(second.plannerResult.state.reviews).toEqual([]);
+    expect(second.plannerInput.packages.find((pkg) => pkg.packageKey === packageAllocationPackageKey("shipstation", "44002")))
+      .toMatchObject({ splitContinuation: {
+        source: "provider_label_contents",
+        lines: [{ sourceWmsShipmentItemId: sourceId, quantity: 1 }],
+      } });
+    expect(second.plannerResult.effectIntentsToAppend.filter((intent) => intent.effectType === "commercial_fulfillment"))
+      .toEqual([expect.objectContaining({ packageKey: packageAllocationPackageKey("shipstation", "44002"), quantity: 1 })]);
+    expect(second.plannerResult.state.allocations.filter((entry) => entry.targetKind === "awaiting_relabel")
+      .reduce((sum, entry) => sum + entry.quantity, 0)).toBe(orderedQuantity - 2);
+    const replay = resolvePackageAllocationAuthority(command([packageA, packageB], [], {
+      sourceLines,
+      expectedGroupVersion: second.plannerResult.proposedGroupVersion,
+      previousPlan: previousPlanFrom(second.plannerResult),
+    }));
+    expect(replay.plannerResult.effectIntentsToAppend).toEqual([]);
+    expect(replay.outcome).toBe("unchanged");
+  });
+
+  it("accepts a complete two-label split observed at the same instant", () => {
+    const packages = ["44001", "44002"].map((id) => observedPackage(id, {
+      observedAt: "2026-08-21T14:00:00.000Z", quantity: 1,
+    }));
+    const forward = resolvePackageAllocationAuthority(command(packages));
+    const reverse = resolvePackageAllocationAuthority(command([...packages].reverse()));
+    expect(forward.outcome).toBe("proposed");
+    expect(forward.plannerResult.stateHash).toBe(reverse.plannerResult.stateHash);
+    expect(forward.plannerResult.state.desiredEffectIntents.filter((intent) => intent.effectType === "commercial_fulfillment")
+      .map((intent) => intent.quantity)).toEqual([1, 1]);
+  });
+
+  it("keeps an excess third label in review after two units were allocated", () => {
+    const packages = ["44001", "44002", "44003"].map((id, index) => observedPackage(id, {
+      observedAt: `2026-08-21T14:0${index}:00.000Z`, quantity: 1,
+    }));
+    const firstTwo = resolvePackageAllocationAuthority(command(packages.slice(0, 2)));
+    const third = resolvePackageAllocationAuthority(command(packages, [], {
+      expectedGroupVersion: firstTwo.plannerResult.proposedGroupVersion,
+      previousPlan: previousPlanFrom(firstTwo.plannerResult),
+    }));
+    expect(third.outcome).toBe("review");
+    expect(third.plannerInput.packages.find((pkg) => pkg.packageKey === packageAllocationPackageKey("shipstation", "44003"))?.splitContinuation).toBeNull();
+    expect(third.plannerResult.effectIntentsToAppend.filter((intent) => intent.effectType === "commercial_fulfillment")).toEqual([]);
+  });
+
   it("fulfills two normal split packages without treating the second as duplicate inventory", () => {
     const packageA = observedPackage("44001", {
       observedAt: "2026-08-21T14:00:00.000Z",
