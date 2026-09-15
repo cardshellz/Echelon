@@ -86,6 +86,43 @@ function shopifyAccount(channelId: number, settings: { existing?: boolean; exist
 }
 
 describe("canonical fulfillment originating account", () => {
+  it.each([undefined, true, false].flatMap(notifyCustomer => [false, true].map(storedPathA => ({ notifyCustomer, storedPathA }))))(
+    "uses only the command's notification intent in the actual Shopify payload: %j", async ({ notifyCustomer, storedPathA }) => {
+      const account = shopifyAccount(11);
+      const db = database({ storedPathA });
+      const service = createFulfillmentPushService(db, null, { providerClients: { shopify: async () => account, ebay: vi.fn() } });
+      const input = { ...command(), notifyCustomer };
+      const original = structuredClone(input);
+      await expect(service.pushShopifyFulfillmentForCommand(input)).resolves.toMatchObject({ writebackComplete: true });
+      const mutations = account.client.request.mock.calls.filter(([query]) => query.includes("fulfillmentCreateV2"));
+      expect(mutations).toHaveLength(1);
+      expect(mutations[0][1]).toMatchObject({ fulfillment: {
+        notifyCustomer: notifyCustomer ?? true,
+        trackingInfo: { number: "TRACK1" },
+        lineItemsByFulfillmentOrder: [{ fulfillmentOrderLineItems: [{ quantity: 2 }] }],
+      } });
+      expect(input).toEqual(original);
+    },
+  );
+
+  it.each([null, "false", 0])("rejects invalid notification intent before database or provider I/O: %j", async notifyCustomer => {
+    const db = database();
+    const shopify = vi.fn();
+    const service = createFulfillmentPushService(db, null, { providerClients: { shopify, ebay: vi.fn() } });
+    await expect(service.pushShopifyFulfillmentForCommand({ ...command(), notifyCustomer: notifyCustomer as never }))
+      .rejects.toMatchObject({ code: "INVALID_CHANNEL_FULFILLMENT_NOTIFICATION_POLICY" });
+    expect(db.execute).not.toHaveBeenCalled();
+    expect(shopify).not.toHaveBeenCalled();
+  });
+
+  it("does not send a mutation or notification when a silent package already matches Shopify", async () => {
+    const account = shopifyAccount(11, { existing: true });
+    const service = createFulfillmentPushService(database(), null, { providerClients: { shopify: async () => account, ebay: vi.fn() } });
+    await expect(service.pushShopifyFulfillmentForCommand({ ...command(), notifyCustomer: false }))
+      .resolves.toMatchObject({ alreadyPushed: true, writebackComplete: true });
+    expect(account.client.request.mock.calls.every(([query]) => !query.includes("mutation"))).toBe(true);
+  });
+
   it.each([false, true])("pushes only the proven one-unit package from an unchanged two-unit source (stored FO=%s)", async (storedPathA) => {
     const account = shopifyAccount(11);
     const db = database({ allocation: true, storedPathA });

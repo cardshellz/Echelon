@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
+import type { MaterializePhysicalPackageInput } from "../../server/modules/oms/channel-fulfillment-authority.repository";
 
 import {
   buildCandidateQuery,
@@ -50,6 +51,7 @@ describe("backfill-channel-fulfillment-authority", () => {
       orderNumber: null,
       wmsShipmentId: null,
       json: false,
+      silent: false,
     });
     expect(parseFlags([
       "--execute",
@@ -68,6 +70,8 @@ describe("backfill-channel-fulfillment-authority", () => {
     expect(() => parseFlags(["--limit=0"])).toThrow(/positive integer/);
     expect(() => parseFlags(["--order-number="])).toThrow(/cannot be blank/);
     expect(() => parseFlags(["--unknown"])).toThrow(/Unknown flag/);
+    expect(parseFlags(["--silent"])).toMatchObject({ mode: "dry-run", silent: true });
+    expect(() => parseFlags(["--silent=false"])).toThrow(/Unknown flag/);
   });
 
   it("builds a parameterized read-only package and command coverage query", () => {
@@ -89,7 +93,7 @@ describe("backfill-channel-fulfillment-authority", () => {
       resolveLegacyPhysicalPackage: vi.fn(async () => resolvedPackage),
       materializePhysicalPackage: vi.fn(),
     };
-    const summary = await runBackfill(parseFlags([]), {
+    const summary = await runBackfill(parseFlags(["--silent"]), {
       loadCandidates: vi.fn(async () => [candidate]),
       repository: repository as any,
       log: vi.fn(),
@@ -97,6 +101,7 @@ describe("backfill-channel-fulfillment-authority", () => {
 
     expect(summary).toMatchObject({
       candidates: 1,
+      silent: true,
       lineageValidated: 1,
       materialized: 0,
       commandsCreated: 0,
@@ -134,10 +139,10 @@ describe("backfill-channel-fulfillment-authority", () => {
     expect(repository.materializePhysicalPackage).not.toHaveBeenCalled();
   });
 
-  it("materializes canonical rows without dispatching a provider call", async () => {
+  it.each([false, true])("persists the requested silent=%s intent without dispatching a provider call", async (silent) => {
     const repository = {
       resolveLegacyPhysicalPackage: vi.fn(async () => resolvedPackage),
-      materializePhysicalPackage: vi.fn(async () => ({
+      materializePhysicalPackage: vi.fn(async (_input: MaterializePhysicalPackageInput) => ({
         fulfillmentPlanIds: Object.freeze([1]),
         shipmentRequestIds: Object.freeze([2]),
         shippingEngineOrderId: 3,
@@ -147,7 +152,7 @@ describe("backfill-channel-fulfillment-authority", () => {
         ]),
       })),
     };
-    const summary = await runBackfill(parseFlags(["--execute"]), {
+    const summary = await runBackfill(parseFlags(["--execute", ...(silent ? ["--silent"] : [])]), {
       loadCandidates: vi.fn(async () => [candidate]),
       repository: repository as any,
       log: vi.fn(),
@@ -161,11 +166,15 @@ describe("backfill-channel-fulfillment-authority", () => {
       }),
     );
     expect(summary).toMatchObject({
+      silent,
       lineageValidated: 1,
       materialized: 1,
       commandsCreated: 1,
       commandsReplayed: 0,
       reviewRequired: 0,
     });
+    const input = vi.mocked(repository.materializePhysicalPackage).mock.calls[0]?.[0];
+    if (silent) expect(input).toHaveProperty("notifyCustomer", false);
+    else expect(input).not.toHaveProperty("notifyCustomer");
   });
 });

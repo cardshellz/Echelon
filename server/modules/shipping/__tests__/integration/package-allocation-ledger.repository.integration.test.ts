@@ -3235,6 +3235,56 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     return { source, split, repository, firstInput, secondInput };
   }
 
+  it.each([false, true])("persists notifyCustomer=%s across concurrent replay, lease retry and worker restart", async notifyCustomer => {
+    const { repository, firstInput } = await seedHistoricalSplitBackfill();
+    const input = { ...firstInput, notifyCustomer };
+    const inventoryBefore = (await pool.query("SELECT * FROM inventory.inventory_transactions ORDER BY id")).rows;
+    const wmsBefore = (await pool.query("SELECT * FROM wms.order_items ORDER BY id")).rows;
+    const results = await Promise.all([
+      repository.materializePhysicalPackage(input), repository.materializePhysicalPackage(input),
+    ]);
+    expect(results.map(result => result.channelCommands[0].replayed).sort()).toEqual([false, true]);
+    const commandId = results[0].channelCommands[0].id;
+    const persisted = (await pool.query<{ metadata: Record<string, unknown>; request_hash: string; next_attempt_at: Date }>(
+      "SELECT metadata, request_hash, next_attempt_at FROM oms.channel_fulfillment_pushes WHERE id=$1", [commandId],
+    )).rows[0];
+    expect(persisted.metadata).toMatchObject({ notifyCustomer, source: "historical-backfill-test" });
+    // Ordinary webhook/sweeper replay must not turn a prior silent request into an email.
+    await expect(repository.materializePhysicalPackage(firstInput)).resolves.toMatchObject({
+      channelCommands: [{ id: commandId, replayed: true }],
+    });
+    await expect(repository.materializePhysicalPackage({ ...input, notifyCustomer: !notifyCustomer }))
+      .rejects.toMatchObject({ code: "COMMAND_REQUEST_CONFLICT", context: { reason: "immutable_customer_notification_changed" } });
+    const claimAt = new Date(persisted.next_attempt_at.getTime() + 1000);
+    const [firstClaim] = await repository.claimCommands({ commandIds: [commandId], limit: 1,
+      now: claimAt, leaseDurationMs: 60000, leaseToken: "notification-first" });
+    expect(firstClaim.metadata.notifyCustomer).toBe(notifyCustomer);
+    const retryAt = new Date(claimAt.getTime() + 1000);
+    await repository.completeAttempt({ commandId, leaseToken: firstClaim.leaseToken,
+      outcome: "retry_scheduled", startedAt: claimAt, completedAt: claimAt,
+      nextAttemptAt: retryAt, errorCode: "SIMULATED_PROVIDER_TIMEOUT" });
+    const restartedRepository = createChannelFulfillmentAuthorityRepository(getTestDb());
+    const [retry] = await restartedRepository.claimCommands({ commandIds: [commandId], limit: 1,
+      now: retryAt, leaseDurationMs: 60000, leaseToken: "notification-retry" });
+    expect(retry).toMatchObject({ attemptNumber: 2, requestHash: persisted.request_hash, metadata: { notifyCustomer } });
+    const pushShopifyFulfillmentForCommand = vi.fn().mockResolvedValue({
+      writebackComplete: true, shopifyFulfillmentId: "gid://shopify/Fulfillment/650001",
+    });
+    const execution = await createCompatibilityChannelFulfillmentProviderExecutor({ pushShopifyFulfillmentForCommand }).execute(retry);
+    expect(pushShopifyFulfillmentForCommand).toHaveBeenCalledWith(expect.objectContaining({ notifyCustomer }));
+    await restartedRepository.completeAttempt({ commandId, leaseToken: retry.leaseToken,
+      startedAt: retryAt, completedAt: retryAt, ...execution });
+    expect((await pool.query(`SELECT attempt_number, outcome, metadata FROM oms.channel_fulfillment_push_attempts
+      WHERE channel_fulfillment_push_id=$1 ORDER BY attempt_number`, [commandId])).rows).toEqual([
+      expect.objectContaining({ attempt_number: 1, outcome: "retry_scheduled" }),
+      expect.objectContaining({ attempt_number: 2, outcome: "success", metadata: expect.objectContaining({ notifyCustomer }) }),
+    ]);
+    expect((await pool.query("SELECT metadata, request_hash FROM oms.channel_fulfillment_pushes WHERE id=$1", [commandId])).rows)
+      .toEqual([{ metadata: persisted.metadata, request_hash: persisted.request_hash }]);
+    expect((await pool.query("SELECT * FROM inventory.inventory_transactions ORDER BY id")).rows).toEqual(inventoryBefore);
+    expect((await pool.query("SELECT * FROM wms.order_items ORDER BY id")).rows).toEqual(wmsBefore);
+  });
+
   it.each([2, 4])("backfills a second case after Shopify records the first, preserving %i ordered units and replay safety", async (orderedQuantity) => {
     const { source, split, repository, firstInput, secondInput } = await seedHistoricalSplitBackfill(orderedQuantity);
     const first = await repository.materializePhysicalPackage(firstInput);
