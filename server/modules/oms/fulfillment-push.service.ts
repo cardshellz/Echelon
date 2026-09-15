@@ -25,6 +25,7 @@ import {
 import type { EbayApiClient } from "../channels/adapters/ebay/ebay-api.client";
 import type { ChannelFulfillmentProviderClients, ShopifyFulfillmentAccount } from "../channels/channel-fulfillment-provider-clients.service";
 import { ChannelFulfillmentProviderError } from "../channels/channel-fulfillment-provider.error";
+import { resolveChannelFulfillmentNotifyCustomer } from "./channel-fulfillment-notification.policy";
 import type { EbayShippingFulfillmentRequest } from "../channels/adapters/ebay/ebay-types";
 import type {
   ShopifyAdminGraphQLClient,
@@ -208,6 +209,8 @@ export interface ChannelFulfillmentProviderCommandInput {
   readonly carrier: string;
   readonly trackingUrl: string | null;
   readonly shippedAt: Date | null;
+  /** Persisted per command; legacy callers retain their original notifying behavior. */
+  readonly notifyCustomer?: boolean;
   readonly items: readonly ChannelFulfillmentProviderCommandItem[];
 }
 
@@ -532,6 +535,7 @@ function normalizeChannelCommandInput(
 
   return Object.freeze({
     ...input,
+    notifyCustomer: resolveChannelFulfillmentNotifyCustomer(input.notifyCustomer),
     legacyWmsShipmentIds: Object.freeze(legacyWmsShipmentIds),
     trackingNumber,
     carrier,
@@ -2557,7 +2561,7 @@ export function createFulfillmentPushService(
       fulfillment: {
         lineItemsByFulfillmentOrder,
         trackingInfo,
-        notifyCustomer: true,
+        notifyCustomer: command?.notifyCustomer ?? true,
       },
     };
 

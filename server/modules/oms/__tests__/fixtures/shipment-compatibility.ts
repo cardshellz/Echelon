@@ -39,7 +39,10 @@ CREATE TABLE channels.channels(id integer PRIMARY KEY, provider text);
 CREATE TABLE oms.oms_orders(id bigint PRIMARY KEY, channel_id integer, external_order_id text,
  status text, financial_status text);
 CREATE TABLE oms.oms_order_lines(id bigint PRIMARY KEY, order_id bigint, fulfillment_provider text,
- external_line_item_id text, paid_quantity integer, authority_fulfillable_quantity integer);
+ external_line_item_id text, paid_quantity integer, authority_fulfillable_quantity integer,
+ cancelled_quantity integer NOT NULL DEFAULT 0, refunded_quantity integer NOT NULL DEFAULT 0);
+CREATE TABLE oms.order_line_adjustments(order_id bigint, order_line_id bigint,
+ adjustment_type text, restock_policy text, quantity integer);
 CREATE TABLE oms.oms_order_line_authority_events(id bigint PRIMARY KEY, order_line_id bigint, paid_quantity integer);
 CREATE TABLE wms.shipping_engine_orders(id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
  shipment_request_id bigint, provider text, command_key text, provider_order_id text, provider_order_key text,

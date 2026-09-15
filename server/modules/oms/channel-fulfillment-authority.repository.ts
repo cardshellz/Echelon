@@ -21,6 +21,11 @@ import {
   type ChannelFulfillmentWritebackPolicyDecision,
 } from "./channel-fulfillment-authority.policy";
 import { resolveProviderOrderId } from "./shipping-engine-order-identity";
+import { resolveChannelFulfillmentNotifyCustomer } from "./channel-fulfillment-notification.policy";
+import {
+  ChannelFulfillmentQuantityAuthorityError,
+  deriveChannelFulfillmentQuantityAuthority,
+} from "./channel-fulfillment-quantity-authority";
 import {
   MAX_INHERITED_COMMERCIAL_INTENTS,
   validateInheritedCommercialIntents,
@@ -49,6 +54,8 @@ const materializeInputSchema = z.object({
   correlationId: optionalIdentifier(100),
   causationId: optionalIdentifier(100),
   suppressChannelWriteback: z.boolean().optional().default(false),
+  // Omission preserves existing command intent; explicit values cannot rewrite it.
+  notifyCustomer: z.boolean().optional(),
   suppressChannelProviders: z.array(
     z.string().trim().min(1).max(40).transform((value) => value.toLowerCase()),
   ).max(20).optional(),
@@ -269,6 +276,10 @@ interface LegacyPackageRow {
   oms_financial_status: string | null;
   paid_quantity: number | null;
   authority_fulfillable_quantity: number | null;
+  cancelled_quantity: number | null;
+  refunded_quantity: number | null;
+  refund_cancel_quantity: number | null;
+  refund_other_quantity: number | null;
   max_authorized_quantity: number | null;
 }
 
@@ -285,7 +296,8 @@ interface CanonicalCustomerItem {
   sku: string;
   quantityShipped: number;
   quantityPlanned: number;
-  currentAuthorizedQuantity: number;
+  commercialAuthorizedQuantity: number;
+  quantityAuthority: ReturnType<typeof deriveChannelFulfillmentQuantityAuthority>;
   warehouseId: number | null;
   priorityRank: string | null;
   shipToSnapshot: Record<string, unknown>;
@@ -603,7 +615,6 @@ function normalizeCustomerItems(rows: readonly LegacyPackageRow[]): {
     const omsOrderLineId = asPositiveInteger(row.oms_order_line_id);
     const quantityShipped = asPositiveInteger(row.quantity_shipped);
     const quantityPlanned = asPositiveInteger(row.max_authorized_quantity);
-    const currentAuthorizedQuantity = Number(row.authority_fulfillable_quantity ?? 0);
     const channelProvider = normalizedNullable(row.channel_provider)?.toLowerCase() ?? null;
     const channelOrderLineId = normalizedNullable(row.channel_order_line_id);
     const lineFulfillmentProvider = (
@@ -651,20 +662,25 @@ function normalizeCustomerItems(rows: readonly LegacyPackageRow[]): {
         },
       );
     }
-    if (
-      !Number.isInteger(currentAuthorizedQuantity)
-      || currentAuthorizedQuantity < 0
-      || (quantityPlanned !== null && currentAuthorizedQuantity > quantityPlanned)
-    ) {
-      throw new FulfillmentAuthorityError(
-        "CANONICAL_STATE_CONFLICT",
-        `OMS line ${omsOrderLineId} has invalid current fulfillment authority`,
-        {
-          omsOrderLineId,
-          authorityFulfillableQuantity: row.authority_fulfillable_quantity,
-          lifetimeAuthorizedQuantity: quantityPlanned,
-        },
-      );
+    let quantityAuthority: CanonicalCustomerItem["quantityAuthority"];
+    try {
+      quantityAuthority = deriveChannelFulfillmentQuantityAuthority({
+        lifetimePaidQuantity: quantityPlanned,
+        paidQuantity: row.paid_quantity,
+        channelRemainingQuantity: row.authority_fulfillable_quantity,
+        cancelledQuantity: row.cancelled_quantity,
+        refundedQuantity: row.refunded_quantity,
+        refundCancelQuantity: row.refund_cancel_quantity,
+        refundOtherQuantity: row.refund_other_quantity,
+      });
+    } catch (error) {
+      if (!(error instanceof ChannelFulfillmentQuantityAuthorityError)) throw error;
+      // Preserve the repository's existing reviewable-error contract, with the
+      // exact line and package plus validation issues for the operations audit.
+      throw new FulfillmentAuthorityError("CANONICAL_STATE_CONFLICT", error.message, {
+        omsOrderLineId, legacyWmsShipmentItemId,
+        quantityAuthorityError: error.code, ...error.context,
+      });
     }
     const wmsOmsOrderRef = normalizedNullable(row.wms_oms_order_ref);
     const omsExternalOrderId = normalizedNullable(row.oms_external_order_id);
@@ -710,7 +726,8 @@ function normalizeCustomerItems(rows: readonly LegacyPackageRow[]): {
       sku,
       quantityShipped,
       quantityPlanned,
-      currentAuthorizedQuantity,
+      commercialAuthorizedQuantity: quantityAuthority.commercialAuthorizedQuantity,
+      quantityAuthority,
       warehouseId: asPositiveInteger(row.warehouse_id),
       priorityRank: normalizedNullable(row.priority_rank),
       shipToSnapshot: row.ship_to_snapshot ?? {},
@@ -870,6 +887,10 @@ async function loadPackageAllocationCommercialCustomerItems(
       oms_order.financial_status AS oms_financial_status,
       oms_line.paid_quantity::int AS paid_quantity,
       oms_line.authority_fulfillable_quantity::int AS authority_fulfillable_quantity,
+      oms_line.cancelled_quantity::int AS cancelled_quantity,
+      oms_line.refunded_quantity::int AS refunded_quantity,
+      refund.refund_cancel_quantity,
+      refund.refund_other_quantity,
       GREATEST(
         COALESCE(oms_line.paid_quantity, 0),
         COALESCE(authority.max_paid_quantity, 0)
@@ -902,6 +923,15 @@ async function loadPackageAllocationCommercialCustomerItems(
       FROM oms.oms_order_line_authority_events AS event
       WHERE event.order_line_id = oms_line.id
     ) AS authority ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT
+        COALESCE(SUM(adjustment.quantity) FILTER (WHERE adjustment.restock_policy = 'cancel'), 0)::int AS refund_cancel_quantity,
+        COALESCE(SUM(adjustment.quantity) FILTER (WHERE adjustment.restock_policy IS DISTINCT FROM 'cancel'), 0)::int AS refund_other_quantity
+      FROM oms.order_line_adjustments AS adjustment
+      WHERE adjustment.order_line_id = oms_line.id
+        AND adjustment.order_id = oms_order.id
+        AND adjustment.adjustment_type = 'refund'
+    ) AS refund ON TRUE
     ORDER BY source.source_wms_shipment_item_id
     FOR UPDATE OF shipment
   `));
@@ -1195,8 +1225,9 @@ async function findOrCreatePlanLine(
     quantity_planned: number;
     quantity_cancelled: number;
     quantity_shipped: number;
+    authority_snapshot: { contractVersion?: number; quantityAuthority?: Partial<CanonicalCustomerItem["quantityAuthority"]> } | null;
   }>(await tx.execute(sql`
-    SELECT id, wms_order_item_id, quantity_planned, quantity_cancelled, quantity_shipped
+    SELECT id, wms_order_item_id, quantity_planned, quantity_cancelled, quantity_shipped, authority_snapshot
     FROM wms.fulfillment_plan_lines
     WHERE fulfillment_plan_id = ${fulfillmentPlanId}
       AND oms_order_line_id = ${item.omsOrderLineId}
@@ -1230,19 +1261,24 @@ async function findOrCreatePlanLine(
       );
     }
 
-    const quantityCancelled = item.quantityPlanned - item.currentAuthorizedQuantity;
+    const quantityCancelled = item.quantityAuthority.quantityCancelled;
     if (
       persistedPlanned !== item.quantityPlanned
       || Number(existing.quantity_cancelled) !== quantityCancelled
+      || existing.authority_snapshot?.contractVersion !== 2
+      || Object.entries(item.quantityAuthority).some(([key, value]) => (
+        existing.authority_snapshot?.quantityAuthority?.[key as keyof CanonicalCustomerItem["quantityAuthority"]] !== value
+      ))
     ) {
       await tx.execute(sql`
         UPDATE wms.fulfillment_plan_lines
         SET quantity_planned = ${item.quantityPlanned},
             quantity_cancelled = ${quantityCancelled},
             authority_snapshot = ${JSON.stringify({
-              contractVersion: 1,
+              contractVersion: 2,
               lifetimeAuthorizedQuantity: item.quantityPlanned,
-              currentAuthorizedQuantity: item.currentAuthorizedQuantity,
+              currentAuthorizedQuantity: item.commercialAuthorizedQuantity,
+              quantityAuthority: item.quantityAuthority,
               channelOrderLineId: item.channelOrderLineId,
             })}::jsonb,
             updated_at = NOW()
@@ -1252,7 +1288,7 @@ async function findOrCreatePlanLine(
     return Number(existing.id);
   }
 
-  const quantityCancelled = item.quantityPlanned - item.currentAuthorizedQuantity;
+  const quantityCancelled = item.quantityAuthority.quantityCancelled;
 
   const inserted = firstRow<{ id: number }>(await tx.execute(sql`
     INSERT INTO wms.fulfillment_plan_lines (
@@ -1279,9 +1315,10 @@ async function findOrCreatePlanLine(
       0,
       'planned',
       ${JSON.stringify({
-        contractVersion: 1,
+        contractVersion: 2,
         lifetimeAuthorizedQuantity: item.quantityPlanned,
-        currentAuthorizedQuantity: item.currentAuthorizedQuantity,
+        currentAuthorizedQuantity: item.commercialAuthorizedQuantity,
+        quantityAuthority: item.quantityAuthority,
         channelOrderLineId: item.channelOrderLineId,
       })}::jsonb,
       NOW(),
@@ -2101,7 +2138,7 @@ async function findLineWritebackDecisions(
       omsFinancialStatus: item.omsFinancialStatus,
       requiresReview: item.requiresReview,
       reviewReason: item.reviewReason,
-      currentAuthorizedQuantity: item.currentAuthorizedQuantity,
+      commercialAuthorizedQuantity: item.commercialAuthorizedQuantity,
       cumulativePhysicalQuantity: shippedQuantity,
     });
     decisions.set(fulfillmentPlanLineId, decision);
@@ -2189,6 +2226,7 @@ async function insertChannelCommand(
   const metadata = {
     contractVersion: 1,
     source: input.source,
+    notifyCustomer: command.notifyCustomer,
     shippingProvider: input.shippingProvider,
     providerPhysicalShipmentId: input.providerPhysicalShipmentId,
     providerOrderId: input.providerOrderId,
@@ -2370,6 +2408,7 @@ async function insertPackageAllocationShadowChannelCommand(
   const metadata = {
     contractVersion: 1,
     materializationContract: "package-allocation-commercial-shadow-v1",
+    notifyCustomer: command.notifyCustomer,
     packageAllocationPlanId: input.packageAllocationPlanId,
     source: input.source,
     shippingProvider: pkg.provider,
@@ -2842,6 +2881,7 @@ async function loadExistingChannelCommandSnapshots(
     carrier: string | null;
     shippingProvider: string | null;
     providerPhysicalShipmentId: string | null;
+    notifyCustomer: boolean;
     items: ChannelFulfillmentCommand["items"][number][];
   }>();
   for (const row of rows) {
@@ -2859,6 +2899,7 @@ async function loadExistingChannelCommandSnapshots(
       carrier: normalizedNullable(row.carrier),
       shippingProvider: normalizedNullable(metadata.shippingProvider)?.toLowerCase() ?? null,
       providerPhysicalShipmentId: normalizedNullable(metadata.providerPhysicalShipmentId),
+      notifyCustomer: resolveChannelFulfillmentNotifyCustomer(metadata.notifyCustomer),
       items: [],
     };
     const physicalShipmentItemId = asPositiveInteger(row.physical_shipment_item_id);
@@ -2962,6 +3003,7 @@ async function persistChannelCommandSet(
     incomingCommand: command,
     shippingProvider: input.shippingProvider,
     providerPhysicalShipmentId: input.providerPhysicalShipmentId,
+    requestedNotifyCustomer: input.notifyCustomer,
   });
   if (reconciliation.kind === "conflict") {
     const activeIds = existing
@@ -3028,6 +3070,7 @@ async function persistChannelCommandSet(
     carrier: command.carrier,
     trackingUrl: command.trackingUrl,
     shippedAt: command.shippedAt,
+    notifyCustomer: reconciliation.notifyCustomer,
     items: reconciliation.missingItems.map((item) => ({
       physicalShipmentItemId: item.physicalShipmentItemId,
       shipmentRequestItemId: item.shipmentRequestItemId,
@@ -3876,6 +3919,10 @@ export function createChannelFulfillmentAuthorityRepository(
           oms_order.financial_status AS oms_financial_status,
           oms_line.paid_quantity::int AS paid_quantity,
           oms_line.authority_fulfillable_quantity::int AS authority_fulfillable_quantity,
+          oms_line.cancelled_quantity::int AS cancelled_quantity,
+          oms_line.refunded_quantity::int AS refunded_quantity,
+          refund.refund_cancel_quantity,
+          refund.refund_other_quantity,
           GREATEST(
             COALESCE(oms_line.paid_quantity, 0),
             COALESCE(authority.max_paid_quantity, 0)
@@ -3896,6 +3943,15 @@ export function createChannelFulfillmentAuthorityRepository(
           FROM oms.oms_order_line_authority_events AS event
           WHERE event.order_line_id = oms_line.id
         ) AS authority ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT
+            COALESCE(SUM(adjustment.quantity) FILTER (WHERE adjustment.restock_policy = 'cancel'), 0)::int AS refund_cancel_quantity,
+            COALESCE(SUM(adjustment.quantity) FILTER (WHERE adjustment.restock_policy IS DISTINCT FROM 'cancel'), 0)::int AS refund_other_quantity
+          FROM oms.order_line_adjustments AS adjustment
+          WHERE adjustment.order_line_id = oms_line.id
+            AND adjustment.order_id = oms_order.id
+            AND adjustment.adjustment_type = 'refund'
+        ) AS refund ON TRUE
         WHERE shipment.id IN (${idList})
         ORDER BY shipment.id, shipment_item.id
         FOR UPDATE OF shipment
@@ -4008,6 +4064,7 @@ export function createChannelFulfillmentAuthorityRepository(
           carrier: input.carrier!,
           trackingUrl: input.trackingUrl,
           shippedAt: input.shippedAt?.toISOString() ?? null,
+          notifyCustomer: input.notifyCustomer,
           items: channelEligibleCustomerItems.map((item) => ({
             physicalShipmentItemId: item.physicalShipmentItemId,
             shipmentRequestItemId: item.shipmentRequestItemId,

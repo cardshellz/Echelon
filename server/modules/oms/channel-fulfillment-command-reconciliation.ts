@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { carrierIdentity } from "@shared/utils/carrier-identity";
+import { resolveChannelFulfillmentNotifyCustomer } from "./channel-fulfillment-notification.policy";
 
 import type {
   ChannelFulfillmentCommand,
@@ -16,6 +17,7 @@ export interface ExistingChannelFulfillmentCommandSnapshot {
   readonly carrier: string | null;
   readonly shippingProvider: string | null;
   readonly providerPhysicalShipmentId: string | null;
+  readonly notifyCustomer?: boolean;
   readonly items: readonly ChannelFulfillmentCommandItem[];
 }
 
@@ -25,6 +27,7 @@ export type ChannelCommandSetReconciliation =
       readonly coveredItems: readonly ChannelFulfillmentCommandItem[];
       readonly missingItems: readonly ChannelFulfillmentCommandItem[];
       readonly requeueCommandIds: readonly number[];
+      readonly notifyCustomer: boolean;
     }
   | {
       readonly kind: "conflict";
@@ -70,14 +73,33 @@ export function reconcileChannelFulfillmentCommandSet(input: {
   readonly incomingCommand: ChannelFulfillmentCommand;
   readonly shippingProvider: string;
   readonly providerPhysicalShipmentId: string;
+  /** Omitted on ordinary observations: replay must preserve prior silent intent. */
+  readonly requestedNotifyCustomer?: boolean;
 }): ChannelCommandSetReconciliation {
   const incomingByPhysicalItem = new Map(
     input.incomingCommand.items.map((item) => [item.physicalShipmentItemId, item]),
   );
   const coveredByPhysicalItem = new Map<number, ChannelFulfillmentCommandItem>();
   const requeueCommandIds: number[] = [];
+  const requestedNotifyCustomer = input.requestedNotifyCustomer === undefined
+    ? undefined
+    : resolveChannelFulfillmentNotifyCustomer(input.requestedNotifyCustomer);
+  let existingSilentCommand = false;
 
   for (const existing of input.existingCommands) {
+    const existingNotifyCustomer = resolveChannelFulfillmentNotifyCustomer(existing.notifyCustomer);
+    existingSilentCommand ||= !existingNotifyCustomer;
+    if (requestedNotifyCustomer !== undefined && requestedNotifyCustomer !== existingNotifyCustomer) {
+      return {
+        kind: "conflict",
+        reason: "immutable_customer_notification_changed",
+        evidence: Object.freeze({
+          commandId: existing.id,
+          existingNotifyCustomer,
+          requestedNotifyCustomer,
+        }),
+      };
+    }
     const existingTracking = normalizedText(existing.trackingNumber);
     const incomingTracking = normalizedText(input.incomingCommand.trackingNumber);
     const existingProvider = normalizedText(existing.shippingProvider)?.toLowerCase() ?? null;
@@ -177,6 +199,10 @@ export function reconcileChannelFulfillmentCommandSet(input: {
       ),
     ),
     requeueCommandIds: Object.freeze(requeueCommandIds.sort((left, right) => left - right)),
+    // A later ordinary observation must not make a silent package's remainder noisy.
+    notifyCustomer: requestedNotifyCustomer ?? (input.existingCommands.length === 0
+      ? input.incomingCommand.notifyCustomer
+      : !existingSilentCommand),
   };
 }
 

@@ -58,6 +58,50 @@ function repositoryMock(
 }
 
 describe("channel fulfillment authority service", () => {
+  it.each([undefined, true, false])("carries saved notification intent %s through the worker and attempt audit", async notifyCustomer => {
+    const claimed = command({ metadata: Object.freeze({ legacyWmsShipmentIds: [501], notifyCustomer }) });
+    const repository = repositoryMock([claimed]);
+    const pushShopifyFulfillmentForCommand = vi.fn().mockResolvedValue({
+      writebackComplete: true, shopifyFulfillmentId: "gid://shopify/Fulfillment/55",
+    });
+    const service = createChannelFulfillmentAuthorityService({ repository,
+      projector: { projectPhysicalShipment: vi.fn() },
+      providerExecutor: createCompatibilityChannelFulfillmentProviderExecutor({ pushShopifyFulfillmentForCommand }),
+      clock: { now: () => new Date("2026-09-15T12:00:00Z") },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    });
+    await expect(service.runDueBatch()).resolves.toMatchObject({ succeeded: 1, reviewRequired: 0 });
+    expect(pushShopifyFulfillmentForCommand).toHaveBeenCalledWith(expect.objectContaining({ notifyCustomer: notifyCustomer ?? true }));
+    expect(repository.completeAttempt).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: "success", metadata: expect.objectContaining({ notifyCustomer: notifyCustomer ?? true }),
+    }));
+  });
+
+  it.each([null, "false", 0])("holds malformed saved notification intent %j without provider execution", async notifyCustomer => {
+    const repository = repositoryMock([command({ metadata: { legacyWmsShipmentIds: [501], notifyCustomer } })]);
+    const pushShopifyFulfillmentForCommand = vi.fn();
+    const service = createChannelFulfillmentAuthorityService({ repository,
+      projector: { projectPhysicalShipment: vi.fn() },
+      providerExecutor: createCompatibilityChannelFulfillmentProviderExecutor({ pushShopifyFulfillmentForCommand }),
+      clock: { now: () => new Date("2026-09-15T12:00:00Z") },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    });
+    await expect(service.runDueBatch()).resolves.toMatchObject({ reviewRequired: 1, retryScheduled: 0 });
+    expect(pushShopifyFulfillmentForCommand).not.toHaveBeenCalled();
+    expect(repository.completeAttempt).toHaveBeenCalledWith(expect.objectContaining({
+      outcome: "review_required", errorCode: "INVALID_CHANNEL_FULFILLMENT_NOTIFICATION_POLICY",
+    }));
+  });
+
+  it("does not pretend an unsupported provider can execute silently", async () => {
+    const pushTrackingForShipmentCommand = vi.fn();
+    const executor = createCompatibilityChannelFulfillmentProviderExecutor({ pushTrackingForShipmentCommand });
+    await expect(executor.execute(command({ channelProvider: "ebay", metadata: {
+      legacyWmsShipmentIds: [501], notifyCustomer: false,
+    } }))).rejects.toMatchObject({ code: "UNSUPPORTED_SILENT_FULFILLMENT", failureClass: "permanent" });
+    expect(pushTrackingForShipmentCommand).not.toHaveBeenCalled();
+  });
+
   it.each(["permanent", "transient"] as const)("classifies an account-bound provider %s failure without losing its code", async (failureClass) => {
     const repository = repositoryMock([command()]);
     const service = createChannelFulfillmentAuthorityService({ repository,

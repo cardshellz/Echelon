@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { resolveChannelFulfillmentNotifyCustomer } from "../../channel-fulfillment-notification.policy";
 
 import {
   ChannelFulfillmentPlanningError,
@@ -34,6 +35,40 @@ function packageInput(
 }
 
 describe("planChannelFulfillmentCommands", () => {
+  it("keeps normal hashes stable and binds silent intent without creating another command key", () => {
+    const [normal] = planChannelFulfillmentCommands(packageInput());
+    const [explicit] = planChannelFulfillmentCommands(packageInput({ notifyCustomer: true }));
+    const [silent] = planChannelFulfillmentCommands(packageInput({ notifyCustomer: false }));
+    expect(normal.notifyCustomer).toBe(true);
+    expect(silent.notifyCustomer).toBe(false);
+    // Fixture's original v1 hash, before notification policy was introduced.
+    expect(normal.requestHash).toBe("b1714068380923ae3b3c4adf277b962e880436f599ba533f1a7a56e2af2d3ca7");
+    expect(normal.requestHash).toBe(explicit.requestHash);
+    expect(silent.requestHash).not.toBe(normal.requestHash);
+    expect(silent.commandKey).toBe(normal.commandKey);
+    expect(planChannelFulfillmentCommands(packageInput({ notifyCustomer: false }))).toEqual([silent]);
+  });
+
+  it.each([null, "false", 0, {}, []])("rejects malformed notification intent %j", (notifyCustomer) => {
+    expect(() => planChannelFulfillmentCommands(packageInput({ notifyCustomer: notifyCustomer as never })))
+      .toThrowError(expect.objectContaining({ code: "INVALID_PHYSICAL_SHIPMENT" }));
+    expect(() => resolveChannelFulfillmentNotifyCustomer(notifyCustomer))
+      .toThrowError(expect.objectContaining({ code: "INVALID_CHANNEL_FULFILLMENT_NOTIFICATION_POLICY" }));
+  });
+
+  it("defaults only missing legacy notification intent, not malformed values", () => {
+    expect(resolveChannelFulfillmentNotifyCustomer(undefined)).toBe(true);
+    expect(resolveChannelFulfillmentNotifyCustomer(true)).toBe(true);
+    expect(resolveChannelFulfillmentNotifyCustomer(false)).toBe(false);
+  });
+
+  it("rejects silent intent for a provider without suppression support", () => {
+    const input = packageInput();
+    expect(() => planChannelFulfillmentCommands({ ...input, notifyCustomer: false,
+      items: input.items.map(item => ({ ...item, channelProvider: "ebay" })) }))
+      .toThrowError(expect.objectContaining({ code: "UNSUPPORTED_SILENT_FULFILLMENT" }));
+  });
+
   it("creates one deterministic command for a single-order package", () => {
     const input = packageInput();
 

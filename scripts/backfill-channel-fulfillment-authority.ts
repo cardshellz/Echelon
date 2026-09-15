@@ -11,6 +11,7 @@
  *   npx tsx scripts/backfill-channel-fulfillment-authority.ts --execute --limit=all
  *   npx tsx scripts/backfill-channel-fulfillment-authority.ts --order-number=#59564
  *   npx tsx scripts/backfill-channel-fulfillment-authority.ts --wms-shipment-id=4842
+ *   npx tsx scripts/backfill-channel-fulfillment-authority.ts --dry-run --silent --wms-shipment-id=4842
  */
 
 import path from "node:path";
@@ -30,6 +31,7 @@ export interface BackfillFlags {
   readonly orderNumber: string | null;
   readonly wmsShipmentId: number | null;
   readonly json: boolean;
+  readonly silent: boolean;
 }
 
 export interface BackfillCandidate {
@@ -45,6 +47,7 @@ export interface BackfillCandidate {
 
 export interface BackfillSummary {
   readonly mode: Mode;
+  readonly silent: boolean;
   readonly candidates: number;
   readonly lineageValidated: number;
   readonly materialized: number;
@@ -87,6 +90,7 @@ export function parseFlags(argv: readonly string[]): BackfillFlags {
       || arg === "--execute"
       || arg === "--dry-run"
       || arg === "--json"
+      || arg === "--silent"
       || arg.startsWith("--limit=")
       || arg.startsWith("--order-number=")
       || arg.startsWith("--wms-shipment-id=")
@@ -116,6 +120,7 @@ export function parseFlags(argv: readonly string[]): BackfillFlags {
     orderNumber,
     wmsShipmentId,
     json: argv.includes("--json"),
+    silent: argv.includes("--silent"),
   });
 }
 
@@ -128,6 +133,7 @@ export function usage(): string {
     "Flags:",
     "  --dry-run               Resolve and validate missing canonical coverage without writes. Default.",
     "  --execute               Materialize canonical rows and pending commands.",
+    "  --silent                Persist no customer notifications for Shopify backfill commands, including retries.",
     "  --limit=N|all           Maximum physical packages. Default 100.",
     "  --order-number=TEXT     Restrict to one channel-facing order number.",
     "  --wms-shipment-id=N     Restrict to a legacy WMS shipment row.",
@@ -314,6 +320,7 @@ export async function runBackfill(
   dependencies: BackfillDependencies,
 ): Promise<BackfillSummary> {
   const log = dependencies.log ?? console.log;
+  if (typeof flags.silent !== "boolean") throw new Error("Backfill silent flag must be a boolean");
   const candidates = await dependencies.loadCandidates(flags);
   let lineageValidated = 0;
   let materialized = 0;
@@ -324,7 +331,7 @@ export async function runBackfill(
 
   if (!flags.json) {
     log(
-      `[Channel fulfillment authority backfill] mode=${flags.mode} candidates=${candidates.length} limit=${flags.limit ?? "all"}`,
+      `[Channel fulfillment authority backfill] mode=${flags.mode} silent=${flags.silent} candidates=${candidates.length} limit=${flags.limit ?? "all"}`,
     );
   }
 
@@ -357,6 +364,8 @@ export async function runBackfill(
         ...resolved,
         legacyWmsShipmentIds: [...resolved.legacyWmsShipmentIds],
         source: BACKFILL_SOURCE,
+        // Omit on ordinary replays so an existing silent command stays silent.
+        ...(flags.silent ? { notifyCustomer: false } : {}),
       });
       const counts = commandCounts(result);
       materialized += 1;
@@ -377,6 +386,7 @@ export async function runBackfill(
 
   return Object.freeze({
     mode: flags.mode,
+    silent: flags.silent,
     candidates: candidates.length,
     lineageValidated,
     materialized,
