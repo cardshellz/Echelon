@@ -21,6 +21,7 @@ import {
   type ChannelFulfillmentWritebackPolicyDecision,
 } from "./channel-fulfillment-authority.policy";
 import { resolveProviderOrderId } from "./shipping-engine-order-identity";
+import { resolveChannelFulfillmentNotifyCustomer } from "./channel-fulfillment-notification.policy";
 import {
   ChannelFulfillmentQuantityAuthorityError,
   deriveChannelFulfillmentQuantityAuthority,
@@ -53,6 +54,8 @@ const materializeInputSchema = z.object({
   correlationId: optionalIdentifier(100),
   causationId: optionalIdentifier(100),
   suppressChannelWriteback: z.boolean().optional().default(false),
+  // Omission preserves existing command intent; explicit values cannot rewrite it.
+  notifyCustomer: z.boolean().optional(),
   suppressChannelProviders: z.array(
     z.string().trim().min(1).max(40).transform((value) => value.toLowerCase()),
   ).max(20).optional(),
@@ -2223,6 +2226,7 @@ async function insertChannelCommand(
   const metadata = {
     contractVersion: 1,
     source: input.source,
+    notifyCustomer: command.notifyCustomer,
     shippingProvider: input.shippingProvider,
     providerPhysicalShipmentId: input.providerPhysicalShipmentId,
     providerOrderId: input.providerOrderId,
@@ -2404,6 +2408,7 @@ async function insertPackageAllocationShadowChannelCommand(
   const metadata = {
     contractVersion: 1,
     materializationContract: "package-allocation-commercial-shadow-v1",
+    notifyCustomer: command.notifyCustomer,
     packageAllocationPlanId: input.packageAllocationPlanId,
     source: input.source,
     shippingProvider: pkg.provider,
@@ -2876,6 +2881,7 @@ async function loadExistingChannelCommandSnapshots(
     carrier: string | null;
     shippingProvider: string | null;
     providerPhysicalShipmentId: string | null;
+    notifyCustomer: boolean;
     items: ChannelFulfillmentCommand["items"][number][];
   }>();
   for (const row of rows) {
@@ -2893,6 +2899,7 @@ async function loadExistingChannelCommandSnapshots(
       carrier: normalizedNullable(row.carrier),
       shippingProvider: normalizedNullable(metadata.shippingProvider)?.toLowerCase() ?? null,
       providerPhysicalShipmentId: normalizedNullable(metadata.providerPhysicalShipmentId),
+      notifyCustomer: resolveChannelFulfillmentNotifyCustomer(metadata.notifyCustomer),
       items: [],
     };
     const physicalShipmentItemId = asPositiveInteger(row.physical_shipment_item_id);
@@ -2996,6 +3003,7 @@ async function persistChannelCommandSet(
     incomingCommand: command,
     shippingProvider: input.shippingProvider,
     providerPhysicalShipmentId: input.providerPhysicalShipmentId,
+    requestedNotifyCustomer: input.notifyCustomer,
   });
   if (reconciliation.kind === "conflict") {
     const activeIds = existing
@@ -3062,6 +3070,7 @@ async function persistChannelCommandSet(
     carrier: command.carrier,
     trackingUrl: command.trackingUrl,
     shippedAt: command.shippedAt,
+    notifyCustomer: reconciliation.notifyCustomer,
     items: reconciliation.missingItems.map((item) => ({
       physicalShipmentItemId: item.physicalShipmentItemId,
       shipmentRequestItemId: item.shipmentRequestItemId,
@@ -4055,6 +4064,7 @@ export function createChannelFulfillmentAuthorityRepository(
           carrier: input.carrier!,
           trackingUrl: input.trackingUrl,
           shippedAt: input.shippedAt?.toISOString() ?? null,
+          notifyCustomer: input.notifyCustomer,
           items: channelEligibleCustomerItems.map((item) => ({
             physicalShipmentItemId: item.physicalShipmentItemId,
             shipmentRequestItemId: item.shipmentRequestItemId,
