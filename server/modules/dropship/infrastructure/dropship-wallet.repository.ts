@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from "pg";
+import type { DropshipVendorStatus } from "../../../../shared/schema/dropship.schema";
 import { pool as defaultPool } from "../../../db";
 import { DropshipError } from "../domain/errors";
 import type {
@@ -651,6 +652,14 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository {
     } finally {
       client.release();
     }
+  }
+
+  async getVendorLifecycleStatus(vendorId: number): Promise<DropshipVendorStatus | null> {
+    const result = await this.dbPool.query<{ status: DropshipVendorStatus }>(
+      `SELECT status FROM dropship.dropship_vendors WHERE id = $1`,
+      [vendorId],
+    );
+    return result.rows[0]?.status ?? null;
   }
 
   async getReusableFundingProviderCustomerId(input: {

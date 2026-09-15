@@ -294,14 +294,17 @@ export interface DropshipOnboardingState {
     pendingBalanceCents: number;
     activeFundingMethodCount: number;
     activeStripeFundingMethodCount: number;
+    activeStripeCardFundingMethodCount: number;
     activeUsdcBaseFundingMethodCount: number;
     autoReloadEnabled: boolean;
     autoReloadFundingMethodId: number | null;
     autoReloadFundingMethodActive: boolean;
     autoReloadFundingMethodReady: boolean;
+    autoReloadFundingMethodIsCard: boolean;
     hasActiveFundingMethod: boolean;
     hasStripeReadyFundingMethod: boolean;
     hasUsdcBaseFundingMethod: boolean;
+    hasCardBackstop: boolean;
     autoReloadConfigured: boolean;
     hasSpendableBalance: boolean;
     walletReady: boolean;

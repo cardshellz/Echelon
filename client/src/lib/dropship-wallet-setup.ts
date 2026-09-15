@@ -19,8 +19,13 @@ import {
 export type DropshipWalletOverview = DropshipWalletResponse["wallet"];
 export type DropshipWalletFundingMethod = DropshipWalletOverview["fundingMethods"][number];
 
-/** The launch gate accepts card or ACH rails only; USDC never funds auto-reload. */
-export const STRIPE_FUNDING_RAILS = ["stripe_card", "stripe_ach"] as const;
+/**
+ * The emergency backstop is a card, and only a card. ACH settles in days and
+ * USDC cannot be pulled from a self-custody wallet at all, so neither can
+ * rescue an order already sitting in payment hold. Both remain primary funding
+ * rails — they just cannot satisfy the launch gate.
+ */
+export const CARD_FUNDING_RAIL = "stripe_card" as const;
 
 /**
  * Defaults offered on the setup step. They match what the previous form
@@ -34,7 +39,10 @@ export const AUTO_RELOAD_DEFAULTS = {
 } as const;
 
 /** Choices shown as plain buttons instead of free-text money fields. */
-export const AUTO_RELOAD_MINIMUM_PRESETS_CENTS = [2_500, 5_000, 10_000, 25_000] as const;
+// Lowest option matches the server trigger floor (DROPSHIP_AUTO_RELOAD_MIN_TRIGGER_CENTS):
+// the UI must never offer a threshold the service will reject.
+export const AUTO_RELOAD_MINIMUM_PRESETS_CENTS = [5_000, 10_000, 25_000, 50_000] as const;
+// Lowest option matches the server amount floor (DROPSHIP_AUTO_RELOAD_MIN_AMOUNT_CENTS).
 export const AUTO_RELOAD_AMOUNT_PRESETS_CENTS = [10_000, 25_000, 50_000, 100_000] as const;
 export const FUND_WALLET_PRESETS_CENTS = [2_500, 5_000, 10_000, 25_000] as const;
 
@@ -57,7 +65,7 @@ export const CARD_CONFIRMATION_POLL_INTERVAL_MS = 3_000;
 export const CARD_CONFIRMATION_POLL_TIMEOUT_MS = 90_000;
 
 export type WalletSetupStage =
-  /** No usable card or bank account yet. */
+  /** No usable card yet. */
   | "add_card"
   /** Stripe accepted the card; waiting for the webhook to activate it. */
   | "confirm_card"
@@ -68,46 +76,47 @@ export type WalletSetupStage =
 
 export interface WalletSetupState {
   stage: WalletSetupStage;
-  /** The card or bank account auto-reload uses, or the best candidate for it. */
+  /** The card auto-reload charges, or the best candidate for it. */
   primaryMethod: DropshipWalletFundingMethod | null;
-  /** Every active card or bank account, primary first. */
-  stripeMethods: DropshipWalletFundingMethod[];
-  /** A Stripe method exists but is not active yet (webhook pending). */
-  hasPendingStripeMethod: boolean;
+  /** Every active card, primary first. */
+  cardMethods: DropshipWalletFundingMethod[];
+  /** A card exists but is not active yet (webhook pending). */
+  hasPendingCardMethod: boolean;
   autoReloadOn: boolean;
-  /** Auto-reload is on and bound to an active card or bank account. */
+  /** Auto-reload is on and bound to an active card. */
   autoReloadReady: boolean;
   availableBalanceCents: number;
   pendingBalanceCents: number;
 }
 
-export function isStripeFundingMethod(method: DropshipWalletFundingMethod): boolean {
-  return (STRIPE_FUNDING_RAILS as readonly string[]).includes(method.rail);
+export function isCardFundingMethod(method: DropshipWalletFundingMethod): boolean {
+  return method.rail === CARD_FUNDING_RAIL;
 }
 
 /**
  * Derive the single next step from the wallet overview. Mirrors the server's
- * launch-gate rule (`buildOnboardingState`): an active Stripe method plus
- * auto-reload bound to it. A spendable balance alone does not finish setup,
- * because acceptance still needs a reload source once the balance runs out.
+ * launch-gate rule (`buildOnboardingState`): an active card plus auto-reload
+ * bound to that card. A spendable balance alone does not finish setup, because
+ * the balance runs out and the backstop is what stops the next order being
+ * cancelled on the marketplace.
  */
 export function deriveWalletSetupState(wallet: DropshipWalletOverview): WalletSetupState {
-  const stripeMethods = wallet.fundingMethods.filter(
-    (method) => isStripeFundingMethod(method) && method.status === "active",
+  const cardMethods = wallet.fundingMethods.filter(
+    (method) => isCardFundingMethod(method) && method.status === "active",
   );
-  const hasPendingStripeMethod = wallet.fundingMethods.some(
-    (method) => isStripeFundingMethod(method) && method.status !== "active",
+  const hasPendingCardMethod = wallet.fundingMethods.some(
+    (method) => isCardFundingMethod(method) && method.status !== "active",
   );
   const configuredId = wallet.autoReload?.fundingMethodId ?? null;
   const configuredMethod = configuredId === null
     ? null
-    : stripeMethods.find((method) => method.fundingMethodId === configuredId) ?? null;
+    : cardMethods.find((method) => method.fundingMethodId === configuredId) ?? null;
   const primaryMethod = configuredMethod
-    ?? stripeMethods.find((method) => method.isDefault)
-    ?? stripeMethods[0]
+    ?? cardMethods.find((method) => method.isDefault)
+    ?? cardMethods[0]
     ?? null;
   const orderedMethods = primaryMethod
-    ? [primaryMethod, ...stripeMethods.filter((method) => method !== primaryMethod)]
+    ? [primaryMethod, ...cardMethods.filter((method) => method !== primaryMethod)]
     : [];
   const autoReloadOn = wallet.autoReload?.enabled === true;
   const autoReloadReady = autoReloadOn && configuredMethod !== null;
@@ -115,14 +124,14 @@ export function deriveWalletSetupState(wallet: DropshipWalletOverview): WalletSe
   let stage: WalletSetupStage;
   if (autoReloadReady) stage = "ready";
   else if (primaryMethod) stage = "auto_reload";
-  else if (hasPendingStripeMethod) stage = "confirm_card";
+  else if (hasPendingCardMethod) stage = "confirm_card";
   else stage = "add_card";
 
   return {
     stage,
     primaryMethod,
-    stripeMethods: orderedMethods,
-    hasPendingStripeMethod,
+    cardMethods: orderedMethods,
+    hasPendingCardMethod,
     autoReloadOn,
     autoReloadReady,
     availableBalanceCents: wallet.account.availableBalanceCents,

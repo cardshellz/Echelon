@@ -68,11 +68,15 @@ export interface DropshipWalletSetupSummary {
   pendingBalanceCents: number;
   activeFundingMethodCount: number;
   activeStripeFundingMethodCount: number;
+  /** Active Stripe CARD methods only: the mandatory emergency backstop. */
+  activeStripeCardFundingMethodCount: number;
   activeUsdcBaseFundingMethodCount: number;
   autoReloadEnabled: boolean;
   autoReloadFundingMethodId: number | null;
   autoReloadFundingMethodActive: boolean;
   autoReloadFundingMethodReady: boolean;
+  /** True when the configured auto-reload method is a Stripe card. */
+  autoReloadFundingMethodIsCard: boolean;
 }
 
 export interface DropshipVendorProvisioningRepository {
@@ -111,8 +115,14 @@ export interface DropshipOnboardingState {
   };
   wallet: DropshipWalletSetupSummary & {
     hasActiveFundingMethod: boolean;
+    /**
+     * Any active Stripe rail (card or ACH). Reported for operators; it no
+     * longer decides the launch gate, which needs a card specifically.
+     */
     hasStripeReadyFundingMethod: boolean;
     hasUsdcBaseFundingMethod: boolean;
+    /** An active Stripe card is on file: the mandatory emergency backstop. */
+    hasCardBackstop: boolean;
     autoReloadConfigured: boolean;
     hasSpendableBalance: boolean;
     walletReady: boolean;
@@ -296,12 +306,19 @@ export function buildOnboardingState(input: {
   const hasActiveFundingMethod = input.wallet.activeFundingMethodCount > 0;
   const hasStripeReadyFundingMethod = input.wallet.activeStripeFundingMethodCount > 0;
   const hasUsdcBaseFundingMethod = input.wallet.activeUsdcBaseFundingMethodCount > 0;
+  const hasCardBackstop = input.wallet.activeStripeCardFundingMethodCount > 0;
   const autoReloadConfigured = input.wallet.autoReloadEnabled
     && input.wallet.autoReloadFundingMethodId !== null
-    && input.wallet.autoReloadFundingMethodReady;
+    && input.wallet.autoReloadFundingMethodReady
+    && input.wallet.autoReloadFundingMethodIsCard;
   const hasSpendableBalance = input.wallet.availableBalanceCents > 0;
-  const walletReady = (hasSpendableBalance || hasStripeReadyFundingMethod)
-    && autoReloadConfigured;
+  // Every live vendor carries a card as the emergency backstop, whatever their
+  // balance is and whichever rail they normally fund with. ACH and USDC are the
+  // primary rails but neither can settle fast enough to rescue an order already
+  // in payment hold, so neither can satisfy this gate. A funded balance does not
+  // substitute either: it runs out, and the backstop is what stops the next
+  // order cancelling on the marketplace.
+  const walletReady = hasCardBackstop && autoReloadConfigured;
 
   return {
     vendor: input.vendor,
@@ -321,6 +338,7 @@ export function buildOnboardingState(input: {
       hasActiveFundingMethod,
       hasStripeReadyFundingMethod,
       hasUsdcBaseFundingMethod,
+      hasCardBackstop,
       autoReloadConfigured,
       hasSpendableBalance,
       walletReady,

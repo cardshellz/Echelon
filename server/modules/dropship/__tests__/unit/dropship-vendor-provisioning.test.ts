@@ -107,11 +107,13 @@ describe("PgDropshipVendorProvisioningRepository", () => {
         pending_balance_cents: "2500",
         active_funding_method_count: "2",
         active_stripe_funding_method_count: "1",
+        active_stripe_card_funding_method_count: "1",
         active_usdc_base_funding_method_count: "1",
         auto_reload_enabled: true,
         auto_reload_funding_method_id: 8,
         auto_reload_funding_method_active: true,
         auto_reload_funding_method_ready: true,
+        auto_reload_funding_method_is_card: true,
       }],
     }));
     const connect = vi.fn(async () => ({ query, release }));
@@ -122,17 +124,22 @@ describe("PgDropshipVendorProvisioningRepository", () => {
     expect(String(query.mock.calls[0]?.[0])).toContain("active_stripe_funding_method_count");
     expect(String(query.mock.calls[0]?.[0])).toContain("active_usdc_base_funding_method_count");
     expect(String(query.mock.calls[0]?.[0])).toContain("auto_reload_funding_method_ready");
+    // The launch gate reads card-only columns: ACH must not be able to satisfy it.
+    expect(String(query.mock.calls[0]?.[0])).toContain("active_stripe_card_funding_method_count");
+    expect(String(query.mock.calls[0]?.[0])).toContain("auto_reload_funding_method_is_card");
     expect(query.mock.calls[0]?.[1]).toEqual([10]);
     expect(result).toMatchObject({
       availableBalanceCents: 0,
       pendingBalanceCents: 2500,
       activeFundingMethodCount: 2,
       activeStripeFundingMethodCount: 1,
+      activeStripeCardFundingMethodCount: 1,
       activeUsdcBaseFundingMethodCount: 1,
       autoReloadEnabled: true,
       autoReloadFundingMethodId: 8,
       autoReloadFundingMethodActive: true,
       autoReloadFundingMethodReady: true,
+      autoReloadFundingMethodIsCard: true,
     });
     expect(release).toHaveBeenCalledTimes(1);
   });
@@ -322,11 +329,13 @@ describe("DropshipVendorProvisioningService", () => {
       pendingBalanceCents: 2500,
       activeFundingMethodCount: 1,
       activeStripeFundingMethodCount: 0,
+      activeStripeCardFundingMethodCount: 0,
       activeUsdcBaseFundingMethodCount: 0,
       autoReloadEnabled: true,
       autoReloadFundingMethodId: 8,
       autoReloadFundingMethodActive: true,
       autoReloadFundingMethodReady: false,
+      autoReloadFundingMethodIsCard: false,
     };
 
     const state = await service.getOnboardingState("member-1");
@@ -337,6 +346,7 @@ describe("DropshipVendorProvisioningService", () => {
     expect(state.wallet).toMatchObject({
       activeFundingMethodCount: 1,
       activeStripeFundingMethodCount: 0,
+      activeStripeCardFundingMethodCount: 0,
       activeUsdcBaseFundingMethodCount: 0,
       hasUsdcBaseFundingMethod: false,
       hasStripeReadyFundingMethod: false,
@@ -353,6 +363,39 @@ describe("DropshipVendorProvisioningService", () => {
     ]);
   });
 
+  it("keeps the wallet gate incomplete when only a bank account backs auto-reload", async () => {
+    repository.vendor = makeVendorProfile({ status: "onboarding" });
+    repository.walletSetupSummary = {
+      availableBalanceCents: 50_000,
+      pendingBalanceCents: 0,
+      activeFundingMethodCount: 1,
+      // An active Stripe method exists, but it is ACH: no card is on file.
+      activeStripeFundingMethodCount: 1,
+      activeStripeCardFundingMethodCount: 0,
+      activeUsdcBaseFundingMethodCount: 0,
+      autoReloadEnabled: true,
+      autoReloadFundingMethodId: 8,
+      autoReloadFundingMethodActive: true,
+      autoReloadFundingMethodReady: true,
+      autoReloadFundingMethodIsCard: false,
+    };
+
+    const state = await service.getOnboardingState("member-1");
+
+    // A funded balance does not substitute for the backstop: it runs out, and
+    // ACH cannot settle fast enough to rescue the order that follows.
+    expect(state.wallet).toMatchObject({
+      hasSpendableBalance: true,
+      hasStripeReadyFundingMethod: true,
+      hasCardBackstop: false,
+      autoReloadConfigured: false,
+      walletReady: false,
+    });
+    expect(state.steps.find((step) => step.key === "wallet_payment")).toMatchObject({
+      status: "incomplete",
+    });
+  });
+
   it("marks wallet onboarding complete with Stripe-ready auto-reload and no USDC funding method", async () => {
     repository.vendor = makeVendorProfile({
       status: "active",
@@ -362,11 +405,13 @@ describe("DropshipVendorProvisioningService", () => {
       pendingBalanceCents: 0,
       activeFundingMethodCount: 1,
       activeStripeFundingMethodCount: 1,
+      activeStripeCardFundingMethodCount: 1,
       activeUsdcBaseFundingMethodCount: 0,
       autoReloadEnabled: true,
       autoReloadFundingMethodId: 8,
       autoReloadFundingMethodActive: true,
       autoReloadFundingMethodReady: true,
+      autoReloadFundingMethodIsCard: true,
     };
 
     const state = await service.getOnboardingState("member-1");
@@ -393,11 +438,13 @@ describe("DropshipVendorProvisioningService", () => {
       pendingBalanceCents: 0,
       activeFundingMethodCount: 1,
       activeStripeFundingMethodCount: 0,
+      activeStripeCardFundingMethodCount: 0,
       activeUsdcBaseFundingMethodCount: 1,
       autoReloadEnabled: true,
       autoReloadFundingMethodId: 8,
       autoReloadFundingMethodActive: true,
       autoReloadFundingMethodReady: false,
+      autoReloadFundingMethodIsCard: false,
     };
 
     const state = await service.getOnboardingState("member-1");
@@ -423,11 +470,13 @@ describe("DropshipVendorProvisioningService", () => {
       pendingBalanceCents: 0,
       activeFundingMethodCount: 1,
       activeStripeFundingMethodCount: 1,
+      activeStripeCardFundingMethodCount: 1,
       activeUsdcBaseFundingMethodCount: 0,
       autoReloadEnabled: false,
       autoReloadFundingMethodId: null,
       autoReloadFundingMethodActive: false,
       autoReloadFundingMethodReady: false,
+      autoReloadFundingMethodIsCard: false,
     };
 
     const state = await service.getOnboardingState("member-1");
@@ -486,11 +535,13 @@ describe("DropshipVendorProvisioningService", () => {
       pendingBalanceCents: 0,
       activeFundingMethodCount: 1,
       activeStripeFundingMethodCount: 1,
+      activeStripeCardFundingMethodCount: 1,
       activeUsdcBaseFundingMethodCount: 1,
       autoReloadEnabled: true,
       autoReloadFundingMethodId: 8,
       autoReloadFundingMethodActive: true,
       autoReloadFundingMethodReady: true,
+      autoReloadFundingMethodIsCard: true,
     };
 
     const state = await service.getOnboardingState("member-1");
@@ -533,11 +584,13 @@ describe("DropshipVendorProvisioningService", () => {
       pendingBalanceCents: 0,
       activeFundingMethodCount: 1,
       activeStripeFundingMethodCount: 1,
+      activeStripeCardFundingMethodCount: 1,
       activeUsdcBaseFundingMethodCount: 1,
       autoReloadEnabled: true,
       autoReloadFundingMethodId: 8,
       autoReloadFundingMethodActive: true,
       autoReloadFundingMethodReady: true,
+      autoReloadFundingMethodIsCard: true,
     };
 
     const state = await service.activateOnboardingForMember("member-1");
@@ -621,11 +674,13 @@ class FakeVendorProvisioningRepository implements DropshipVendorProvisioningRepo
     pendingBalanceCents: 0,
     activeFundingMethodCount: 0,
     activeStripeFundingMethodCount: 0,
+    activeStripeCardFundingMethodCount: 0,
     activeUsdcBaseFundingMethodCount: 0,
     autoReloadEnabled: true,
     autoReloadFundingMethodId: null,
     autoReloadFundingMethodActive: false,
     autoReloadFundingMethodReady: false,
+    autoReloadFundingMethodIsCard: false,
   };
   lastProvisionInput: DropshipProvisionVendorRepositoryInput | null = null;
   lastActivationInput: DropshipActivateVendorRepositoryInput | null = null;

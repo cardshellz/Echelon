@@ -997,10 +997,10 @@ function walletGateDetail(onboarding: DropshipOnboardingState): string {
       ? "Your wallet has a balance and auto-reload is on."
       : "Auto-reload is on. Orders will be funded from your card as needed.";
   }
-  if (!onboarding.wallet.hasStripeReadyFundingMethod) {
+  if (!onboarding.wallet.hasCardBackstop) {
     return onboarding.wallet.hasActiveFundingMethod
       ? "Your card is still being confirmed. Open Wallet to check."
-      : "Add a card in Wallet. Nothing is charged until you accept an order.";
+      : "Add a card in Wallet. It is only charged if an order arrives and your balance is short.";
   }
   if (!onboarding.wallet.autoReloadConfigured) {
     return "Turn on auto-reload in Wallet so orders never wait for a payment.";

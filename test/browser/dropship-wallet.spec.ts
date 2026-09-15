@@ -124,15 +124,15 @@ test("walks a new vendor from an empty wallet to a launch-ready one with one ema
   await expect(page.getByText("Charged to")).toContainText("Visa ending in 4242");
 
   // No second code: the proof from the first one is still live after the return.
-  await page.getByRole("radiogroup", { name: "Reload when my balance drops below" }).getByRole("radio", { name: "$25", exact: true }).click();
+  await page.getByRole("radiogroup", { name: "Reload when my balance drops below" }).getByRole("radio", { name: "$50", exact: true }).click();
   await page.getByRole("radiogroup", { name: "Add this much each time" }).getByRole("radio", { name: "$100", exact: true }).click();
   await page.getByRole("button", { name: "Turn on auto-reload" }).click();
   await expect(page.getByTestId("wallet-balance")).toBeVisible();
-  expect(state.autoReloadWrites).toEqual([{ enabled: true, fundingMethodId: 10, minimumBalanceCents: 2500, maxSingleReloadCents: 10_000, paymentHoldTimeoutMinutes: 2880 }]);
+  expect(state.autoReloadWrites).toEqual([{ enabled: true, fundingMethodId: 10, minimumBalanceCents: 5000, maxSingleReloadCents: 10_000, paymentHoldTimeoutMinutes: 2880 }]);
   expect(state.codesSent).toEqual(["add_funding_method"]);
 
   await expect(page.getByTestId("wallet-available")).toHaveText("$0.00");
-  await expect(page.getByTestId("wallet-auto-reload-summary")).toHaveText("Below $25.00, add $100.00 from Visa ending in 4242.");
+  await expect(page.getByTestId("wallet-auto-reload-summary")).toHaveText("Below $50.00, add $100.00 from Visa ending in 4242.");
   await expect(page.getByRole("button", { name: "Back to onboarding" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Payment hold timeout" })).toHaveCount(0);
   await page.getByRole("button", { name: /Advanced/ }).click();

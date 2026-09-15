@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import type { DropshipVendorStatus } from "../../../../../shared/schema/dropship.schema";
 import { DropshipError } from "../../domain/errors";
 import type {
   DropshipLogEvent,
@@ -11,6 +12,7 @@ import type {
 } from "../../application/dropship-vendor-provisioning-service";
 import {
   DropshipWalletService,
+  resolveDropshipAutoReloadFloors,
   type ConfigureDropshipAutoReloadRepositoryInput,
   type CreateDropshipConfirmedUsdcFundingRepositoryInput,
   type CreateDropshipWalletFundingLedgerInput,
@@ -474,6 +476,9 @@ describe("DropshipWalletService", () => {
   });
 
   it("rejects enabled auto-reload thresholds that cannot safely reload", async () => {
+    // A trigger below the floor leaves the balance sitting above the trigger
+    // while still failing to cover a single order: auto-reload would be on and
+    // the order would still go to payment hold.
     await expect(service.configureAutoReload({
       vendorId: 10,
       fundingMethodId: 99,
@@ -481,16 +486,97 @@ describe("DropshipWalletService", () => {
       minimumBalanceCents: 0,
       maxSingleReloadCents: 25000,
       paymentHoldTimeoutMinutes: 2880,
-    })).rejects.toMatchObject({ code: "DROPSHIP_AUTO_RELOAD_INVALID_LIMITS" });
+    })).rejects.toMatchObject({
+      code: "DROPSHIP_AUTO_RELOAD_TRIGGER_BELOW_MINIMUM",
+      context: expect.objectContaining({ floorCents: 5000 }),
+    });
 
     await expect(service.configureAutoReload({
       vendorId: 10,
       fundingMethodId: 99,
       enabled: true,
-      minimumBalanceCents: 10000,
+      minimumBalanceCents: 2500,
+      maxSingleReloadCents: 25000,
+      paymentHoldTimeoutMinutes: 2880,
+    })).rejects.toMatchObject({ code: "DROPSHIP_AUTO_RELOAD_TRIGGER_BELOW_MINIMUM" });
+
+    await expect(service.configureAutoReload({
+      vendorId: 10,
+      fundingMethodId: 99,
+      enabled: true,
+      minimumBalanceCents: 5000,
       maxSingleReloadCents: 5000,
       paymentHoldTimeoutMinutes: 2880,
+    })).rejects.toMatchObject({
+      code: "DROPSHIP_AUTO_RELOAD_AMOUNT_BELOW_MINIMUM",
+      context: expect.objectContaining({ floorCents: 10000 }),
+    });
+
+    // A standing card mandate is always bounded: an unbounded reload is refused.
+    await expect(service.configureAutoReload({
+      vendorId: 10,
+      fundingMethodId: 99,
+      enabled: true,
+      minimumBalanceCents: 5000,
+      maxSingleReloadCents: null,
+      paymentHoldTimeoutMinutes: 2880,
+    })).rejects.toMatchObject({ code: "DROPSHIP_AUTO_RELOAD_AMOUNT_REQUIRED" });
+
+    await expect(service.configureAutoReload({
+      vendorId: 10,
+      fundingMethodId: 99,
+      enabled: true,
+      minimumBalanceCents: 20000,
+      maxSingleReloadCents: 10000,
+      paymentHoldTimeoutMinutes: 2880,
     })).rejects.toMatchObject({ code: "DROPSHIP_AUTO_RELOAD_INVALID_LIMITS" });
+  });
+
+  it("refuses a bank account as the auto-reload backstop", async () => {
+    // Funding method 100 is the ACH method in the fixture. ACH funds the wallet
+    // ahead of time but cannot rescue an order already in payment hold.
+    await expect(service.configureAutoReload({
+      vendorId: 10,
+      fundingMethodId: 100,
+      enabled: true,
+      minimumBalanceCents: 5000,
+      maxSingleReloadCents: 25000,
+      paymentHoldTimeoutMinutes: 2880,
+    })).rejects.toMatchObject({
+      code: "DROPSHIP_AUTO_RELOAD_FUNDING_METHOD_RAIL_UNSUPPORTED",
+      context: expect.objectContaining({ rail: "stripe_ach" }),
+    });
+  });
+
+  it("refuses to disable auto-reload while the vendor account is active", async () => {
+    repository.vendorStatus = "active";
+
+    await expect(service.configureAutoReload({
+      vendorId: 10,
+      fundingMethodId: 99,
+      enabled: false,
+      minimumBalanceCents: 5000,
+      maxSingleReloadCents: 25000,
+      paymentHoldTimeoutMinutes: 2880,
+    })).rejects.toMatchObject({
+      code: "DROPSHIP_AUTO_RELOAD_REQUIRED_WHILE_ACTIVE",
+      context: expect.objectContaining({ vendorId: 10, vendorStatus: "active" }),
+    });
+  });
+
+  it("allows a vendor that is not live to disable auto-reload", async () => {
+    for (const status of ["onboarding", "paused", "closed"] as const) {
+      repository.vendorStatus = status;
+      const setting = await service.configureAutoReload({
+        vendorId: 10,
+        fundingMethodId: 99,
+        enabled: false,
+        minimumBalanceCents: 5000,
+        maxSingleReloadCents: 25000,
+        paymentHoldTimeoutMinutes: 2880,
+      });
+      expect(setting.enabled).toBe(false);
+    }
   });
 
   it("configures auto-reload with an active funding method", async () => {
@@ -584,7 +670,7 @@ describe("DropshipWalletService", () => {
     });
   });
 
-  it("records ACH auto-reload as pending until Stripe settlement", async () => {
+  it("skips auto-reload bound to a bank account: ACH cannot settle in time to rescue the order", async () => {
     repository.autoReload = makeAutoReloadSetting({
       fundingMethodId: 100,
       minimumBalanceCents: 5000,
@@ -598,17 +684,14 @@ describe("DropshipWalletService", () => {
     });
 
     expect(result).toMatchObject({
-      outcome: "funding_created",
-      amountCents: 5000,
-      fundingStatus: "pending",
-      providerPaymentIntentId: "pi_auto_5000",
+      outcome: "skipped",
+      skipReason: "funding_method_rail_unsupported",
+      fundingMethodId: 100,
     });
+    // No charge is attempted and the balances are untouched.
     expect(repository.account.availableBalanceCents).toBe(0);
-    expect(repository.account.pendingBalanceCents).toBe(5000);
-    expect(repository.ledger[0]).toMatchObject({
-      status: "pending",
-      amountCents: 5000,
-    });
+    expect(repository.account.pendingBalanceCents).toBe(0);
+    expect(repository.ledger).toHaveLength(0);
   });
 
   it("skips payment-hold auto-reload when the needed amount exceeds the configured max", async () => {
@@ -815,8 +898,35 @@ class FakeVendorProvisioningService {
   }
 }
 
+describe("resolveDropshipAutoReloadFloors", () => {
+  it("defaults to a trigger that clears one order and an amount that is not fee-dominated", () => {
+    expect(resolveDropshipAutoReloadFloors({})).toEqual({
+      minTriggerCents: 5_000,
+      minAmountCents: 10_000,
+    });
+  });
+
+  it("honours env overrides", () => {
+    expect(resolveDropshipAutoReloadFloors({
+      DROPSHIP_AUTO_RELOAD_MIN_TRIGGER_CENTS: "7500",
+      DROPSHIP_AUTO_RELOAD_MIN_AMOUNT_CENTS: "20000",
+    })).toEqual({ minTriggerCents: 7_500, minAmountCents: 20_000 });
+  });
+
+  it("falls back to the defaults for values that are not positive integers", () => {
+    for (const bad of ["0", "-100", "abc", "12.5", "", "   "]) {
+      expect(resolveDropshipAutoReloadFloors({
+        DROPSHIP_AUTO_RELOAD_MIN_TRIGGER_CENTS: bad,
+        DROPSHIP_AUTO_RELOAD_MIN_AMOUNT_CENTS: bad,
+      })).toEqual({ minTriggerCents: 5_000, minAmountCents: 10_000 });
+    }
+  });
+});
+
 class FakeWalletRepository implements DropshipWalletRepository {
   account: DropshipWalletAccountRecord = makeAccount();
+  /** Drives the guard that keeps a live vendor from removing the card backstop. */
+  vendorStatus: DropshipVendorStatus | null = "onboarding";
   fundingMethods: DropshipFundingMethodRecord[] = [
     makeFundingMethod(),
     makeFundingMethod({
@@ -1048,6 +1158,10 @@ class FakeWalletRepository implements DropshipWalletRepository {
       updatedAt: input.updatedAt,
     };
     return this.autoReload;
+  }
+
+  async getVendorLifecycleStatus(): Promise<DropshipVendorStatus | null> {
+    return this.vendorStatus;
   }
 
   async getReusableFundingProviderCustomerId(): Promise<string | null> {

@@ -50,14 +50,14 @@ describe("deriveWalletSetupState", () => {
     const state = deriveWalletSetupState(wallet());
     expect(state.stage).toBe("add_card");
     expect(state.primaryMethod).toBeNull();
-    expect(state.stripeMethods).toEqual([]);
+    expect(state.cardMethods).toEqual([]);
     expect(state.autoReloadReady).toBe(false);
   });
 
   it("waits on confirm_card while the only Stripe method is still pending", () => {
     const state = deriveWalletSetupState(wallet({ fundingMethods: [method({ fundingMethodId: 10, status: "pending" })] }));
     expect(state.stage).toBe("confirm_card");
-    expect(state.hasPendingStripeMethod).toBe(true);
+    expect(state.hasPendingCardMethod).toBe(true);
     expect(state.primaryMethod).toBeNull();
   });
 
@@ -88,16 +88,28 @@ describe("deriveWalletSetupState", () => {
     expect(boundToInactive.autoReloadReady).toBe(false);
   });
 
+  it("does not accept a bank account as the backstop: ACH cannot rescue a held order", () => {
+    const state = deriveWalletSetupState(wallet({
+      fundingMethods: [method({ fundingMethodId: 30, rail: "stripe_ach", displayLabel: "Chase ending in 2222" })],
+      autoReload: autoReload({ fundingMethodId: 30 }),
+    }));
+    expect(state.stage).toBe("add_card");
+    expect(state.cardMethods).toEqual([]);
+    expect(state.autoReloadReady).toBe(false);
+    // An ACH method pending activation must not read as a card awaiting its webhook.
+    expect(state.hasPendingCardMethod).toBe(false);
+  });
+
   it("never treats USDC as a card: it cannot satisfy the gate", () => {
     const state = deriveWalletSetupState(wallet({
       fundingMethods: [method({ fundingMethodId: 20, rail: "usdc_base", displayLabel: null, usdcWalletAddress: "0x1234567890abcdef1234567890abcdef12345678" })],
       autoReload: autoReload({ fundingMethodId: 20 }),
     }));
     expect(state.stage).toBe("add_card");
-    expect(state.stripeMethods).toEqual([]);
+    expect(state.cardMethods).toEqual([]);
   });
 
-  it("orders methods with the configured auto-reload card first, then the default", () => {
+  it("orders cards with the configured auto-reload card first, then the default, and leaves ACH out", () => {
     const state = deriveWalletSetupState(wallet({
       fundingMethods: [
         method({ fundingMethodId: 1, isDefault: true, displayLabel: "Visa ending in 1111" }),
@@ -106,7 +118,8 @@ describe("deriveWalletSetupState", () => {
       ],
       autoReload: autoReload({ fundingMethodId: 3 }),
     }));
-    expect(state.stripeMethods.map((entry) => entry.fundingMethodId)).toEqual([3, 1, 2]);
+    // ACH funds the wallet but cannot be the backstop, so it never appears here.
+    expect(state.cardMethods.map((entry) => entry.fundingMethodId)).toEqual([3, 1]);
 
     const noConfig = deriveWalletSetupState(wallet({
       fundingMethods: [method({ fundingMethodId: 1 }), method({ fundingMethodId: 2, isDefault: true })],

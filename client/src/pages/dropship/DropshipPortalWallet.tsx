@@ -52,7 +52,7 @@ import {
   centsToDollarInput,
   deriveWalletSetupState,
   describeFundingMethod,
-  isStripeFundingMethod,
+  isCardFundingMethod,
   parseStripeReturn,
   stripStripeReturn,
   type DropshipWalletFundingMethod,
@@ -343,7 +343,6 @@ export default function DropshipPortalWallet() {
                 confirmationTimedOut={confirmationTimedOut}
                 {...sectionProps("setup")}
                 onAddCard={() => startStripeSetup("setup", "stripe_card")}
-                onAddBankAccount={() => startStripeSetup("setup", "stripe_ach")}
                 onCheckAgain={() => { setConfirmationTimedOut(false); void walletQuery.refetch(); }}
                 onTurnOn={(input) => turnOnAutoReload("setup", input)}
               />
@@ -457,13 +456,12 @@ const SETUP_STEPS = [
 ] as const;
 
 function SetupSection({
-  setup, awaitingCard, confirmationTimedOut, busy, notice, verification, onAddCard, onAddBankAccount, onCheckAgain, onTurnOn,
+  setup, awaitingCard, confirmationTimedOut, busy, notice, verification, onAddCard, onCheckAgain, onTurnOn,
 }: SectionFeedbackProps & {
   setup: WalletSetupState;
   awaitingCard: boolean;
   confirmationTimedOut: boolean;
   onAddCard: () => void;
-  onAddBankAccount: () => void;
   onCheckAgain: () => void;
   onTurnOn: (input: { fundingMethodId: number; minimumBalanceCents: number; maxSingleReloadCents: number }) => void;
 }) {
@@ -506,19 +504,21 @@ function SetupSection({
             <p className="mt-1 text-sm text-zinc-600">
               You will be sent to Stripe to enter it. Card Shellz never sees your card number.
             </p>
+            <p className="mt-2 text-sm text-zinc-500">
+              The card is your backstop, not your main way to pay. It is only charged when an
+              order arrives and your balance cannot cover it. Fund by bank transfer or USDC and
+              it may never be used at all.
+            </p>
             <div className="mt-4 flex flex-wrap items-center gap-3">
               <Button type="button" className="h-10 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" disabled={busy} onClick={onAddCard}>
                 <CreditCard className="h-4 w-4" />
                 {busy ? "One moment" : "Add a card"}
               </Button>
-              <Button type="button" variant="link" className="h-10 px-0 text-zinc-600" disabled={busy} onClick={onAddBankAccount}>
-                Use a bank account instead
-              </Button>
             </div>
           </div>
         ) : (
           <AutoReloadChooser
-            methods={setup.stripeMethods}
+            methods={setup.cardMethods}
             primaryMethod={setup.primaryMethod!}
             initialMinimumCents={AUTO_RELOAD_DEFAULTS.minimumBalanceCents}
             initialAmountCents={AUTO_RELOAD_DEFAULTS.maxSingleReloadCents}
@@ -801,7 +801,7 @@ function AutoReloadSection({
       {editing && method && (
         <div className="mt-5 border-t border-zinc-200 pt-5">
           <AutoReloadChooser
-            methods={setup.stripeMethods}
+            methods={setup.cardMethods}
             primaryMethod={method}
             initialMinimumCents={autoReload?.minimumBalanceCents ?? AUTO_RELOAD_DEFAULTS.minimumBalanceCents}
             initialAmountCents={autoReload?.maxSingleReloadCents ?? AUTO_RELOAD_DEFAULTS.maxSingleReloadCents}
@@ -901,7 +901,7 @@ function AdvancedSection({
                   <li key={method.fundingMethodId} className="flex items-center justify-between rounded-md border border-zinc-200 p-3 text-sm">
                     <span>
                       <span className="font-medium">{describeFundingMethod(method)}</span>
-                      <span className="ml-2 text-zinc-500">{isStripeFundingMethod(method) ? (method.rail === "stripe_card" ? "Card" : "Bank account") : formatStatus(method.rail)}</span>
+                      <span className="ml-2 text-zinc-500">{method.rail === "stripe_card" ? "Card" : method.rail === "stripe_ach" ? "Bank account" : formatStatus(method.rail)}</span>
                     </span>
                     <Badge variant="outline">{method.isDefault ? "Default" : formatStatus(method.status)}</Badge>
                   </li>
