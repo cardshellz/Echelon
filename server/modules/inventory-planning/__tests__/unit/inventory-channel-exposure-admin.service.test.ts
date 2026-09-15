@@ -234,6 +234,51 @@ describe("InventoryChannelExposureAdminService", () => {
     expect(store.savePolicyDraft).not.toHaveBeenCalled();
     expect(store.saveSourceBindingDraft).not.toHaveBeenCalled();
   });
+
+  describe("internal dropship channel on the view", () => {
+    /** Minimal store view: every collection empty so the composed field is the only variable. */
+    function emptyStoreView() {
+      return {
+        products: [], selectedProduct: null, channels: [], dropshipStores: [], publicationTargets: [],
+        fulfillmentNodes: [], policyHeads: [], policySubjects: [], sourceBindingHeads: [],
+        variantMappingHeads: [], legacyMappingCandidates: [],
+        runtimeAuthority: "legacy" as const, runtimeAuthorityRevision: "1",
+        providerWriteEnabled: false as const,
+      };
+    }
+
+    it("reports the channel the dropship module resolves", async () => {
+      const store = fakeStore();
+      store.getAdminView.mockResolvedValue(emptyStoreView());
+      const service = new InventoryChannelExposureAdminService(store, { now: () => NOW }, {
+        resolveChannelId: async () => 7,
+      });
+
+      await expect(service.getView(null)).resolves.toMatchObject({ dropshipDestinationChannelId: 7 });
+    });
+
+    // A missing or ambiguous dropship channel must not take down setup for every
+    // other channel; it is reported as absent so no storefront can be registered.
+    it("degrades to null when the dropship channel cannot be resolved", async () => {
+      const store = fakeStore();
+      store.getAdminView.mockResolvedValue(emptyStoreView());
+      const service = new InventoryChannelExposureAdminService(store, { now: () => NOW }, {
+        resolveChannelId: async () => {
+          throw Object.assign(new Error("ambiguous"), { code: "DROPSHIP_OMS_CHANNEL_CONFIG_AMBIGUOUS" });
+        },
+      });
+
+      await expect(service.getView(null)).resolves.toMatchObject({ dropshipDestinationChannelId: null });
+    });
+
+    it("reports null when no resolver is wired at all", async () => {
+      const store = fakeStore();
+      store.getAdminView.mockResolvedValue(emptyStoreView());
+      const service = new InventoryChannelExposureAdminService(store, { now: () => NOW });
+
+      await expect(service.getView(null)).resolves.toMatchObject({ dropshipDestinationChannelId: null });
+    });
+  });
 });
 
 function saveResult() {

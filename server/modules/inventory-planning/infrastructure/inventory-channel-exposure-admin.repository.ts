@@ -13,7 +13,7 @@ import {
 } from "@shared/schema";
 import {
   channelExposureDraftSaveResultSchema,
-  inventoryChannelExposureAdminViewSchema,
+  inventoryChannelExposureAdminStoreViewSchema,
   inventoryChannelExposurePreviewSchema,
   inventoryPublicationTargetCommandResultSchema,
   type ChannelExposureDraftSaveResult,
@@ -21,7 +21,6 @@ import {
   type ChannelExposurePolicyScope,
   type ChannelExposurePolicyValue,
   type ChannelExposurePolicyVersion,
-  type InventoryChannelExposureAdminView,
   type InventoryChannelExposurePreview,
   type InventoryPublicationTargetCommandResult,
   type PublicationSourceBindingHead,
@@ -55,6 +54,7 @@ import {
   inventoryRuntimeAuthoritySchema,
   type InventoryRuntimeAuthority,
 } from "@shared/types/inventory-runtime-authority";
+import type { InventoryChannelExposureAdminStoreView } from "../application/inventory-channel-exposure-admin.service";
 import { InventoryAvailabilityMasterDataError } from "../domain/inventory-availability-master-data.contracts";
 import {
   PostgresInventoryAvailabilityShadowRepository,
@@ -85,7 +85,7 @@ implements InventoryChannelExposureAdminStore {
       new PostgresInventoryAvailabilityShadowRepository(),
   ) {}
 
-  async getAdminView(productId: number | null): Promise<InventoryChannelExposureAdminView> {
+  async getAdminView(productId: number | null): Promise<InventoryChannelExposureAdminStoreView> {
     const runtimeAuthority = readRuntimeAuthority(rows(await this.database.execute(sql`
       SELECT authority, revision::text AS revision
       FROM inventory.availability_runtime_authority
@@ -251,7 +251,7 @@ implements InventoryChannelExposureAdminStore {
       },
     ]));
 
-    return inventoryChannelExposureAdminViewSchema.parse({
+    return inventoryChannelExposureAdminStoreViewSchema.parse({
       products: productRows.map((row) => ({
         id: positiveInteger(row.id, "product.id"),
         sku: nullableText(row.sku),
@@ -293,7 +293,10 @@ implements InventoryChannelExposureAdminStore {
       dropshipStores: dropshipStoreRows.map((row) => ({
         id: positiveInteger(row.id, "dropshipStore.id"),
         vendorId: positiveInteger(row.vendor_id, "dropshipStore.vendorId"),
-        vendorName: String(row.vendor_name),
+        // Never String(...) a nullable column: String(null) is the literal
+        // "null", which satisfies a non-blank check and then renders to the
+        // operator as though the vendor were named "null".
+        vendorName: nullableText(row.vendor_name),
         platform: String(row.platform),
         status: String(row.status),
         externalAccountLabel: nullableText(row.external_account_label),

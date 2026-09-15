@@ -23,7 +23,17 @@ import {
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { z } from "zod";
 
+import { logger } from "../../../platform/observability/logger";
 import { InventoryAvailabilityMasterDataError } from "../domain/inventory-availability-master-data.contracts";
+
+/**
+ * Narrow port onto the dropship module's own resolution of its single internal
+ * channel. This page must not re-derive that rule from channel name/type, which
+ * would drift from the owning module; it asks dropship instead.
+ */
+export interface DropshipDestinationChannelResolver {
+  resolveChannelId(): Promise<number>;
+}
 
 const positiveDatabaseInteger = z.number().int().positive().max(2_147_483_647);
 const actorSchema = z.string().trim().min(1).max(100);
@@ -63,8 +73,16 @@ extends SavePublicationVariantMappingDraftRequest {
   occurredAt: Date;
 }
 
+/**
+ * The exposure store owns everything in the `inventory` schema, but the
+ * internal dropship channel is resolved by the dropship module, so the store
+ * does not claim that field. The service composes the two.
+ */
+export type InventoryChannelExposureAdminStoreView =
+  Omit<InventoryChannelExposureAdminView, "dropshipDestinationChannelId">;
+
 export interface InventoryChannelExposureAdminStore {
-  getAdminView(productId: number | null): Promise<InventoryChannelExposureAdminView>;
+  getAdminView(productId: number | null): Promise<InventoryChannelExposureAdminStoreView>;
   savePolicyDraft(
     command: SaveChannelExposurePolicyDraftCommand,
   ): Promise<ChannelExposureDraftSaveResult>;
@@ -91,11 +109,36 @@ export class InventoryChannelExposureAdminService {
   constructor(
     private readonly store: InventoryChannelExposureAdminStore,
     private readonly clock: InventoryChannelExposureClock = systemClock,
+    private readonly dropshipChannel: DropshipDestinationChannelResolver | null = null,
   ) {}
 
   async getView(productInput?: number | null): Promise<InventoryChannelExposureAdminView> {
     const productId = productInput == null ? null : parseId(productInput, "product");
-    return inventoryChannelExposureAdminViewSchema.parse(await this.store.getAdminView(productId));
+    const [view, dropshipDestinationChannelId] = await Promise.all([
+      this.store.getAdminView(productId),
+      this.resolveDropshipDestinationChannelId(),
+    ]);
+    return inventoryChannelExposureAdminViewSchema.parse({ ...view, dropshipDestinationChannelId });
+  }
+
+  /**
+   * A missing or ambiguous dropship channel is a configuration state, not a
+   * failure of this page: every other channel still needs to be editable. It is
+   * reported as null and logged with the owning module's structured code so the
+   * condition stays visible, rather than failing the whole read.
+   */
+  private async resolveDropshipDestinationChannelId(): Promise<number | null> {
+    if (!this.dropshipChannel) return null;
+    try {
+      return await this.dropshipChannel.resolveChannelId();
+    } catch (error) {
+      logger.warn("inventory_channel_exposure.dropship_channel_unresolved", {
+        outcome: "degraded",
+        error_code: error instanceof Error && "code" in error ? String(error.code) : "UNKNOWN",
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    }
   }
 
   async savePolicyDraft(

@@ -201,10 +201,22 @@ export const inventoryChannelExposureAdminViewSchema = z.object({
       }).strict().nullable(),
     }).strict()),
   }).strict()),
+  // The single internal channel that hosts every dropship storefront
+  // (migrations/0106_dropship_internal_channel_seed.sql seeds exactly one, and
+  // the dropship resolver refuses to run when more than one exists). Dropship
+  // stores are destinations of THAT channel only, never of a marketplace
+  // channel, so setup must not offer them anywhere else. Null when the channel
+  // is not configured, in which case no dropship destination can be registered.
+  dropshipDestinationChannelId: positiveInteger.nullable(),
   dropshipStores: z.array(z.object({
     id: positiveInteger,
     vendorId: positiveInteger,
-    vendorName: nonblank(255),
+    // dropship.dropship_vendors.business_name is nullable, so a vendor may
+    // genuinely have no trading name. The contract carries that honestly rather
+    // than letting a String(null) coercion launder it into the text "null",
+    // which reads as a real name to an operator. Callers label such a store
+    // from its account or id instead of inventing a name for it.
+    vendorName: z.string().trim().max(255).nullable(),
     platform: z.enum(["ebay", "shopify", "tiktok", "instagram", "bigcommerce"]),
     status: nonblank(30),
     externalAccountLabel: z.string().max(255).nullable(),
@@ -245,6 +257,14 @@ export const inventoryChannelExposureAdminViewSchema = z.object({
   runtimeAuthorityRevision: inventoryRuntimeAuthorityRevisionSchema,
   providerWriteEnabled: z.literal(false),
 }).strict();
+
+/**
+ * What the `inventory`-schema store alone can answer. The internal dropship
+ * channel is resolved by the dropship module, so the store validates against
+ * this shape and the application layer adds that field to build the full view.
+ */
+export const inventoryChannelExposureAdminStoreViewSchema =
+  inventoryChannelExposureAdminViewSchema.omit({ dropshipDestinationChannelId: true });
 
 export const saveChannelExposurePolicyDraftRequestSchema = z.object({
   scope: channelExposurePolicyScopeSchema,

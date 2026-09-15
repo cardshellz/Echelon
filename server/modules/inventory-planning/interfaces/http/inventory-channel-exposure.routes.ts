@@ -23,10 +23,13 @@ import { z } from "zod";
 import { requirePermission } from "../../../../routes/middleware";
 import {
   InventoryChannelExposureAdminService,
+  type DropshipDestinationChannelResolver,
   type InventoryChannelExposureAdminStore,
 } from "../../application/inventory-channel-exposure-admin.service";
 import { InventoryAvailabilityMasterDataError } from "../../domain/inventory-availability-master-data.contracts";
 import { PostgresInventoryChannelExposureAdminStore } from "../../infrastructure/inventory-channel-exposure-admin.repository";
+import { pool } from "../../../../db";
+import { createDropshipOmsChannelResolver } from "../../../dropship/infrastructure/dropship-oms-warehouse-assignments.reader";
 import { InventoryPublicationTargetStopService } from "../../application/inventory-publication-target-stop.service";
 import { PostgresInventoryPublicationTargetStopStore } from "../../infrastructure/inventory-publication-target-stop.repository";
 import { InventoryPublicationTargetResumeService } from "../../application/inventory-publication-target-resume.service";
@@ -44,6 +47,7 @@ export interface InventoryChannelExposureRouteDependencies {
   store?: InventoryChannelExposureAdminStore;
   targetStopService?: Pick<InventoryPublicationTargetStopService, "stop">;
   targetResumeService?: Pick<InventoryPublicationTargetResumeService, "review" | "resume">;
+  dropshipChannel?: DropshipDestinationChannelResolver;
 }
 
 export function registerInventoryChannelExposureRoutes(
@@ -52,6 +56,10 @@ export function registerInventoryChannelExposureRoutes(
 ): void {
   const service = dependencies.service ?? new InventoryChannelExposureAdminService(
     dependencies.store ?? new PostgresInventoryChannelExposureAdminStore(),
+    undefined,
+    // Dropship owns the definition of its single internal channel; this page
+    // reads it through that module's resolver instead of re-deriving the rule.
+    dependencies.dropshipChannel ?? createDropshipOmsChannelResolver(pool),
   );
   const targetStopService = dependencies.targetStopService
     ?? new InventoryPublicationTargetStopService(new PostgresInventoryPublicationTargetStopStore());

@@ -65,6 +65,19 @@ export function providerLabel(provider: string): string {
   return PROVIDER_LABELS[provider] ?? provider.replace(/_/g, " ");
 }
 
+/**
+ * Operator-facing label for a dropship vendor store.
+ *
+ * The vendor trading name is optional in the catalog, so the label falls back
+ * through identifiers that are always present instead of rendering a blank or
+ * a fabricated name. The store id is the last resort because it is the only
+ * value guaranteed to exist and to be unique.
+ */
+export function describeDropshipStore(store: DropshipStore): string {
+  const account = store.externalAccountLabel ?? `store #${store.id}`;
+  return store.vendorName ? `${store.vendorName} · ${account}` : account;
+}
+
 export type PublisherKey = Target["publicationAuthority"];
 
 export const PUBLISHER_LABELS: Record<PublisherKey, { label: string; description: string }> = {
@@ -116,7 +129,7 @@ export function describeDestination(target: Target, view: View): DestinationIden
   return {
     id: target.id,
     title: store
-      ? `${store.vendorName} · ${store.externalAccountLabel ?? `store #${store.id}`}`
+      ? describeDropshipStore(store)
       : `Dropship store #${target.dropshipStoreConnectionId}`,
     scope: describeScope(target, provider),
     provider,
@@ -804,10 +817,16 @@ export function destinationOptionsFor(channel: Channel, view: View): Destination
       supported: adapter !== null,
     };
   });
-  const stores: DestinationOption[] = view.dropshipStores.map((store) => ({
+  // Dropship storefronts belong to the one internal dropship channel, never to
+  // a marketplace channel. Offering them under Shopify or eBay would invite a
+  // target whose channel_id contradicts how dropship quantities are actually
+  // planned and published.
+  const hostsDropshipStores = view.dropshipDestinationChannelId !== null
+    && channel.id === view.dropshipDestinationChannelId;
+  const stores: DestinationOption[] = (hostsDropshipStores ? view.dropshipStores : []).map((store) => ({
     kind: "dropship_store_connection",
     id: store.id,
-    label: `${store.vendorName} · ${providerLabel(store.platform)} · ${store.externalAccountLabel ?? `store #${store.id}`}`,
+    label: `${describeDropshipStore(store)} · ${providerLabel(store.platform)}`,
     provider: store.platform,
     scopeType: "account",
     verifiedAccountId: store.verifiedExternalAccountId,
