@@ -15,6 +15,10 @@ import {
 } from "./channel-fulfillment-authority.handoff";
 import type { ChannelFulfillmentAuthorityService } from "./channel-fulfillment-authority.service";
 import {
+  CHANNEL_FULFILLMENT_OPERATOR_REPAIR_PREFIX,
+  CHANNEL_FULFILLMENT_REPAIR_SOURCES,
+} from "./channel-fulfillment-notification.policy";
+import {
   CHANNEL_FULFILLMENT_REVIEW_RETRY,
   ChannelFulfillmentReviewRetryError,
   type ChannelFulfillmentReviewRetryResult,
@@ -1256,7 +1260,7 @@ async function autoQueueMissingShopifyFulfillmentRetries(
 
     await handoffLegacyShipmentToChannelFulfillment(requireFlowFulfillmentAuthority(dependencies), shipmentId, {
       executeImmediately: false,
-      source: "oms_flow_missing_shopify_writeback",
+      source: CHANNEL_FULFILLMENT_REPAIR_SOURCES.missingShopifyWriteback,
     });
     handedOff++;
   }
@@ -1855,7 +1859,7 @@ export async function remediateOmsFlowIssue(
         shipmentId,
         {
         executeImmediately: true,
-        source: "oms_flow_reconcile_shipped_package",
+        source: CHANNEL_FULFILLMENT_REPAIR_SOURCES.shippedPackageRepair,
         },
       );
       await db.execute(sql`
@@ -1931,7 +1935,7 @@ export async function remediateOmsFlowIssue(
   if (shipmentId !== undefined) {
     await handoffLegacyShipmentToChannelFulfillment(requireFlowFulfillmentAuthority(dependencies), shipmentId, {
       executeImmediately: false,
-      source: `oms_flow_operator_remediation:${input.code}`,
+      source: `${CHANNEL_FULFILLMENT_OPERATOR_REPAIR_PREFIX}${input.code}`,
     });
   } else {
     await handoffOmsOrderShipmentsToChannelFulfillment(
@@ -1940,7 +1944,7 @@ export async function remediateOmsFlowIssue(
       omsOrderId,
       {
       executeImmediately: false,
-      source: `oms_flow_operator_remediation:${input.code}`,
+      source: `${CHANNEL_FULFILLMENT_OPERATOR_REPAIR_PREFIX}${input.code}`,
       },
     );
   }

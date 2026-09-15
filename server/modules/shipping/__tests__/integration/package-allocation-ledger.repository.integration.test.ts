@@ -21,6 +21,8 @@ import {
   truncateTestData,
 } from "../../../../../test/setup-integration";
 import { createChannelFulfillmentAuthorityRepository } from "../../../oms/channel-fulfillment-authority.repository";
+import { CHANNEL_FULFILLMENT_REPAIR_SOURCES } from "../../../oms/channel-fulfillment-notification.policy";
+import { planChannelFulfillmentCommands } from "../../../oms/channel-fulfillment-command";
 import { createChannelFulfillmentReviewRetryRepository } from "../../../oms/channel-fulfillment-review-retry.repository";
 import {
   createChannelFulfillmentAuthorityService,
@@ -3283,6 +3285,118 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       .toEqual([{ metadata: persisted.metadata, request_hash: persisted.request_hash }]);
     expect((await pool.query("SELECT * FROM inventory.inventory_transactions ORDER BY id")).rows).toEqual(inventoryBefore);
     expect((await pool.query("SELECT * FROM wms.order_items ORDER BY id")).rows).toEqual(wmsBefore);
+  });
+
+  it.each(Object.values(CHANNEL_FULFILLMENT_REPAIR_SOURCES))(
+    "silences the real %s handoff across concurrent materialization and a worker restart",
+    async (source) => {
+      const { repository, firstInput } = await seedHistoricalSplitBackfill();
+      const inventoryBefore = (await pool.query("SELECT * FROM inventory.inventory_transactions ORDER BY id")).rows;
+      const wmsBefore = (await pool.query("SELECT * FROM wms.order_items ORDER BY id")).rows;
+      let workerNow = new Date("2026-09-15T12:00:00Z");
+      const pushShopifyFulfillmentForCommand = vi.fn()
+        .mockRejectedValueOnce(Object.assign(new Error("Simulated provider timeout"), { code: "PROVIDER_TIMEOUT" }))
+        .mockResolvedValue({ writebackComplete: true, shopifyFulfillmentId: "gid://shopify/Fulfillment/650002" });
+      const makeService = () => createChannelFulfillmentAuthorityService({
+        repository: createChannelFulfillmentAuthorityRepository(getTestDb()),
+        projector: { projectPhysicalShipment: vi.fn() },
+        providerExecutor: createCompatibilityChannelFulfillmentProviderExecutor({ pushShopifyFulfillmentForCommand }),
+        clock: { now: () => workerNow },
+        logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      });
+      const service = makeService();
+      const results = await Promise.all([0, 1].map(() => service.ensureLegacyShipment(
+        firstInput.legacyWmsShipmentIds[0], { source, executeImmediately: false },
+      )));
+      expect(results.map(result => result.materialized.channelCommands[0].replayed).sort()).toEqual([false, true]);
+      const commandId = results[0].materialized.channelCommands[0].id;
+      const readCommand = async () => (await pool.query<{
+        metadata: Record<string, unknown>; request_hash: string; next_attempt_at: Date; push_status: string;
+      }>("SELECT metadata, request_hash, next_attempt_at, push_status FROM oms.channel_fulfillment_pushes WHERE id=$1", [commandId])).rows[0];
+      const before = await readCommand();
+      expect(before.metadata).toMatchObject({ source, notifyCustomer: false });
+      await expect(repository.materializePhysicalPackage(firstInput)).resolves.toMatchObject({
+        channelCommands: [{ id: commandId, replayed: true }],
+      });
+      workerNow = new Date(before.next_attempt_at.getTime() + 1000);
+      await expect(service.runDueBatch({ commandIds: [commandId] })).resolves.toMatchObject({ retryScheduled: 1, succeeded: 0 });
+      workerNow = new Date((await readCommand()).next_attempt_at.getTime() + 1000);
+      await expect(makeService().runDueBatch({ commandIds: [commandId] })).resolves.toMatchObject({ succeeded: 1, reviewRequired: 0 });
+      expect(pushShopifyFulfillmentForCommand).toHaveBeenCalledTimes(2);
+      for (const [input] of pushShopifyFulfillmentForCommand.mock.calls) expect(input.notifyCustomer).toBe(false);
+      expect(await readCommand()).toMatchObject({ metadata: before.metadata, request_hash: before.request_hash, push_status: "success" });
+      expect((await pool.query("SELECT outcome, metadata FROM oms.channel_fulfillment_push_attempts WHERE channel_fulfillment_push_id=$1 ORDER BY attempt_number", [commandId])).rows).toEqual([
+        expect.objectContaining({ outcome: "retry_scheduled" }),
+        expect.objectContaining({ outcome: "success", metadata: expect.objectContaining({ notifyCustomer: false }) }),
+      ]);
+      expect((await pool.query("SELECT * FROM inventory.inventory_transactions ORDER BY id")).rows).toEqual(inventoryBefore);
+      expect((await pool.query("SELECT * FROM wms.order_items ORDER BY id")).rows).toEqual(wmsBefore);
+    },
+  );
+
+  it("preserves a normal notifying shipment command when the sweeper observes it", async () => {
+    const { repository, firstInput } = await seedHistoricalSplitBackfill();
+    const result = await repository.materializePhysicalPackage({ ...firstInput, source: "live_shipping_event", notifyCustomer: true });
+    const commandId = result.channelCommands[0].id;
+    const before = (await pool.query("SELECT metadata, request_hash, next_attempt_at FROM oms.channel_fulfillment_pushes WHERE id=$1", [commandId])).rows[0];
+    await expect(repository.materializePhysicalPackage({ ...firstInput, source: CHANNEL_FULFILLMENT_REPAIR_SOURCES.outboundSweep }))
+      .resolves.toMatchObject({ channelCommands: [{ id: commandId, replayed: true }] });
+    const [claim] = await repository.claimCommands({ commandIds: [commandId], limit: 1,
+      now: new Date(before.next_attempt_at.getTime() + 1000), leaseDurationMs: 60000, leaseToken: "live-replay" });
+    const pushShopifyFulfillmentForCommand = vi.fn().mockResolvedValue({ writebackComplete: true });
+    await createCompatibilityChannelFulfillmentProviderExecutor({ pushShopifyFulfillmentForCommand }).execute(claim);
+    expect(pushShopifyFulfillmentForCommand).toHaveBeenCalledWith(expect.objectContaining({ notifyCustomer: true }));
+    expect(claim).toMatchObject({ metadata: before.metadata, requestHash: before.request_hash });
+  });
+
+  it.each([true, undefined])("holds pre-deployment repair metadata notifyCustomer=%s without a provider call or rewrite", async notifyCustomer => {
+    const { repository, firstInput } = await seedHistoricalSplitBackfill();
+    const result = await repository.materializePhysicalPackage({ ...firstInput, suppressChannelWriteback: true });
+    const items = (await pool.query(`SELECT physical.id::int AS "physicalShipmentItemId",
+      physical.shipment_request_item_id::int AS "shipmentRequestItemId", line.order_id::int AS "omsOrderId",
+      line.id::int AS "omsOrderLineId", line.external_line_item_id AS "channelOrderLineId",
+      'shopify' AS "channelProvider", 'order' AS "channelFulfillmentScopeKey", physical.quantity_shipped AS "quantityShipped"
+      FROM wms.physical_shipment_items physical JOIN wms.fulfillment_plan_lines plan_line ON plan_line.id=physical.fulfillment_plan_line_id
+      JOIN oms.oms_order_lines line ON line.id=plan_line.oms_order_line_id WHERE physical.physical_shipment_id=$1`, [result.physicalShipmentId])).rows;
+    // Build the original notifying payload without the new repair-source policy,
+    // then INSERT that pre-deployment shape. Keep all immutability triggers on.
+    const [legacy] = planChannelFulfillmentCommands({ physicalShipmentId: result.physicalShipmentId,
+      shippingProvider: firstInput.shippingProvider, providerPhysicalShipmentId: firstInput.providerPhysicalShipmentId,
+      trackingNumber: firstInput.trackingNumber!, carrier: firstInput.carrier!, trackingUrl: firstInput.trackingUrl,
+      shippedAt: firstInput.shippedAt?.toISOString() ?? null, items });
+    expect(legacy.items).toHaveLength(1);
+    const [item] = legacy.items;
+    const commandId = (await pool.query<{ id: number }>(`WITH command AS (
+      INSERT INTO oms.channel_fulfillment_pushes (oms_order_id, physical_shipment_id, channel_provider,
+        channel_fulfillment_scope_key, command_key, request_hash, tracking_number, carrier, tracking_url,
+        shipped_at, push_status, attempt_count, max_attempts, next_attempt_at, metadata)
+      VALUES ($1,$2,'shopify','order',$3,$4,$5,$6,$7,$8,'retry',0,12,NOW(),$9::jsonb) RETURNING id
+    ), item AS (
+      INSERT INTO oms.channel_fulfillment_push_items (channel_fulfillment_push_id, physical_shipment_item_id,
+        oms_order_line_id, channel_order_line_id, quantity_pushed, metadata)
+      SELECT command.id,$10,$11,$12,$13,$14::jsonb FROM command RETURNING channel_fulfillment_push_id
+    ) SELECT channel_fulfillment_push_id::int AS id FROM item`, [legacy.omsOrderId, legacy.physicalShipmentId,
+      legacy.commandKey, legacy.requestHash, legacy.trackingNumber, legacy.carrier, legacy.trackingUrl, legacy.shippedAt,
+      JSON.stringify({ contractVersion: 1, source: CHANNEL_FULFILLMENT_REPAIR_SOURCES.outboundSweep, notifyCustomer,
+        legacyWmsShipmentIds: firstInput.legacyWmsShipmentIds, shippingProvider: firstInput.shippingProvider,
+        providerPhysicalShipmentId: firstInput.providerPhysicalShipmentId }),
+      item.physicalShipmentItemId, item.omsOrderLineId, item.channelOrderLineId, item.quantity,
+      JSON.stringify({ contractVersion: 1, shipmentRequestItemId: item.shipmentRequestItemId }),
+    ])).rows[0].id;
+    const before = (await pool.query("SELECT metadata, request_hash, next_attempt_at FROM oms.channel_fulfillment_pushes WHERE id=$1", [commandId])).rows[0];
+    const pushShopifyFulfillmentForCommand = vi.fn();
+    const service = createChannelFulfillmentAuthorityService({ repository,
+      projector: { projectPhysicalShipment: vi.fn() },
+      providerExecutor: createCompatibilityChannelFulfillmentProviderExecutor({ pushShopifyFulfillmentForCommand }),
+      clock: { now: () => new Date(before.next_attempt_at.getTime() + 1000) },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    });
+    await expect(service.runDueBatch({ commandIds: [commandId] })).resolves.toMatchObject({ reviewRequired: 1, succeeded: 0 });
+    expect(pushShopifyFulfillmentForCommand).not.toHaveBeenCalled();
+    expect((await pool.query("SELECT metadata, request_hash, push_status, last_error_code FROM oms.channel_fulfillment_pushes WHERE id=$1", [commandId])).rows[0])
+      .toMatchObject({ metadata: before.metadata, request_hash: before.request_hash, push_status: "review", last_error_code: "SILENT_REPAIR_NOTIFICATION_REVIEW_REQUIRED" });
+    expect((await pool.query("SELECT outcome, error_code FROM oms.channel_fulfillment_push_attempts WHERE channel_fulfillment_push_id=$1", [commandId])).rows)
+      .toEqual([{ outcome: "review_required", error_code: "SILENT_REPAIR_NOTIFICATION_REVIEW_REQUIRED" }]);
   });
 
   it.each([2, 4])("backfills a second case after Shopify records the first, preserving %i ordered units and replay safety", async (orderedQuantity) => {

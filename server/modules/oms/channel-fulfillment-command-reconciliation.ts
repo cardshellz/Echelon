@@ -199,10 +199,10 @@ export function reconcileChannelFulfillmentCommandSet(input: {
       ),
     ),
     requeueCommandIds: Object.freeze(requeueCommandIds.sort((left, right) => left - right)),
-    // A later ordinary observation must not make a silent package's remainder noisy.
-    notifyCustomer: requestedNotifyCustomer ?? (input.existingCommands.length === 0
-      ? input.incomingCommand.notifyCustomer
-      : !existingSilentCommand),
+    // Preserve existing commands. Their uncovered remainder follows the new
+    // operation's policy, but an ordinary replay can never make it noisier.
+    notifyCustomer: requestedNotifyCustomer
+      ?? (!existingSilentCommand && input.incomingCommand.notifyCustomer),
   };
 }
 

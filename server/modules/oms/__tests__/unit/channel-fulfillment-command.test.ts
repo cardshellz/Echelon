@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { resolveChannelFulfillmentNotifyCustomer } from "../../channel-fulfillment-notification.policy";
+import {
+  CHANNEL_FULFILLMENT_REPAIR_SOURCES,
+  resolveChannelFulfillmentNotifyCustomer,
+} from "../../channel-fulfillment-notification.policy";
 
 import {
   ChannelFulfillmentPlanningError,
@@ -35,6 +38,28 @@ function packageInput(
 }
 
 describe("planChannelFulfillmentCommands", () => {
+  it.each(Object.values(CHANNEL_FULFILLMENT_REPAIR_SOURCES))("binds silent repair provenance %s into the request hash", source => {
+    const [repair] = planChannelFulfillmentCommands(packageInput({ source }));
+    const [silent] = planChannelFulfillmentCommands(packageInput({ notifyCustomer: false }));
+    const [normal] = planChannelFulfillmentCommands(packageInput());
+    expect(repair).toEqual(silent);
+    expect(repair.commandKey).toBe(normal.commandKey);
+    expect(repair.requestHash).not.toBe(normal.requestHash);
+    expect(() => planChannelFulfillmentCommands(packageInput({ source, notifyCustomer: true })))
+      .toThrowError(expect.objectContaining({ code: "SILENT_REPAIR_NOTIFICATION_REVIEW_REQUIRED" }));
+  });
+
+  it("silences only Shopify in a combined multi-channel repair", () => {
+    const input = packageInput({ source: CHANNEL_FULFILLMENT_REPAIR_SOURCES.outboundSweep });
+    const commands = planChannelFulfillmentCommands({ ...input, items: [...input.items, {
+      ...input.items[0], physicalShipmentItemId: 8002, shipmentRequestItemId: 9002,
+      omsOrderId: 1002, omsOrderLineId: 1102, channelProvider: "ebay", channelOrderLineId: "ebay-line-2",
+    }] });
+    expect(commands.map(({ channelProvider, notifyCustomer }) => ({ channelProvider, notifyCustomer }))).toEqual([
+      { channelProvider: "ebay", notifyCustomer: true }, { channelProvider: "shopify", notifyCustomer: false },
+    ]);
+  });
+
   it("keeps normal hashes stable and binds silent intent without creating another command key", () => {
     const [normal] = planChannelFulfillmentCommands(packageInput());
     const [explicit] = planChannelFulfillmentCommands(packageInput({ notifyCustomer: true }));
