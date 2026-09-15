@@ -16,6 +16,8 @@ import {
   savePublicationSourceBindingDraftRequestSchema,
   savePublicationVariantMappingDraftRequestSchema,
   setInventoryPublicationTargetPreviewStateRequestSchema,
+  setUpChannelDestinationsRequestSchema,
+  setUpChannelDestinationsResultSchema,
   stopInventoryPublicationTargetRequestSchema,
 } from "@shared/types/inventory-channel-exposure";
 import { z } from "zod";
@@ -40,6 +42,7 @@ type ChannelExposureService = Pick<
   InventoryChannelExposureAdminService,
   "getView" | "savePolicyDraft" | "saveSourceBindingDraft" | "preview"
   | "createPublicationTarget" | "setPublicationTargetPreviewState" | "saveVariantMappingDraft"
+  | "setUpChannelDestinations"
 >;
 
 export interface InventoryChannelExposureRouteDependencies {
@@ -160,6 +163,26 @@ export function registerInventoryChannelExposureRoutes(
         ));
       } catch (error) {
         return sendError(res, error, "stop a live publication target");
+      }
+    },
+  );
+
+  app.post(
+    "/api/inventory-planning/admin/channel-exposure/channel-destinations",
+    // Setup, not activation: every target is created disabled, so this carries
+    // the same edit permission as registering one destination by hand.
+    requirePermission("inventory_planning", "edit"),
+    async (req, res) => {
+      try {
+        const result = setUpChannelDestinationsResultSchema.parse(
+          await service.setUpChannelDestinations(
+            parseBody(setUpChannelDestinationsRequestSchema, req.body),
+            auditActor(req),
+          ),
+        );
+        return res.status(result.alreadyApplied ? 200 : 201).json(result);
+      } catch (error) {
+        return sendError(res, error, "set up channel destinations");
       }
     },
   );

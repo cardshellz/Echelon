@@ -10,6 +10,8 @@ import {
   savePublicationSourceBindingDraftRequestSchema,
   savePublicationVariantMappingDraftRequestSchema,
   setInventoryPublicationTargetPreviewStateRequestSchema,
+  setUpChannelDestinationsRequestSchema,
+  setUpChannelDestinationsResultSchema,
   type ChannelExposureDraftSaveResult,
   type CreateInventoryPublicationTargetRequest,
   type InventoryChannelExposureAdminView,
@@ -19,6 +21,8 @@ import {
   type SavePublicationSourceBindingDraftRequest,
   type SavePublicationVariantMappingDraftRequest,
   type SetInventoryPublicationTargetPreviewStateRequest,
+  type SetUpChannelDestinationsRequest,
+  type SetUpChannelDestinationsResult,
 } from "@shared/types/inventory-channel-exposure";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { z } from "zod";
@@ -59,6 +63,18 @@ extends CreateInventoryPublicationTargetRequest {
   occurredAt: Date;
 }
 
+/**
+ * Whether dropship storefronts are in scope is decided by the application layer
+ * from the resolved internal dropship channel, never re-derived in SQL, so the
+ * rule lives in exactly one place.
+ */
+export interface SetUpChannelDestinationsCommand extends SetUpChannelDestinationsRequest {
+  includeDropshipStores: boolean;
+  actorId: string;
+  requestHash: string;
+  occurredAt: Date;
+}
+
 export interface SetInventoryPublicationTargetPreviewStateCommand
 extends SetInventoryPublicationTargetPreviewStateRequest {
   actorId: string;
@@ -92,6 +108,9 @@ export interface InventoryChannelExposureAdminStore {
   createPublicationTarget(
     command: CreateInventoryPublicationTargetCommand,
   ): Promise<InventoryPublicationTargetCommandResult>;
+  setUpChannelDestinations(
+    command: SetUpChannelDestinationsCommand,
+  ): Promise<SetUpChannelDestinationsResult>;
   setPublicationTargetPreviewState(
     command: SetInventoryPublicationTargetPreviewStateCommand,
   ): Promise<InventoryPublicationTargetCommandResult>;
@@ -139,6 +158,38 @@ export class InventoryChannelExposureAdminService {
       });
       return null;
     }
+  }
+
+  /**
+   * Registers every destination the channel's existing connections already
+   * imply. Dropship storefronts are only in scope for the resolved internal
+   * dropship channel; for any other channel they are excluded here rather than
+   * filtered downstream, so a marketplace channel can never acquire one.
+   */
+  async setUpChannelDestinations(
+    input: SetUpChannelDestinationsRequest,
+    actorInput: string,
+  ): Promise<SetUpChannelDestinationsResult> {
+    const request = parseRequest(
+      setUpChannelDestinationsRequestSchema,
+      input,
+      "INVENTORY_CHANNEL_EXPOSURE_INVALID_DESTINATION_SETUP",
+    );
+    const actorId = parseActor(actorInput);
+    const dropshipChannelId = await this.resolveDropshipDestinationChannelId();
+    const includeDropshipStores = dropshipChannelId !== null
+      && dropshipChannelId === request.channelId;
+    const requestHash = requestHashFor("channel_destinations_setup", actorId, {
+      ...request,
+      includeDropshipStores,
+    });
+    return setUpChannelDestinationsResultSchema.parse(await this.store.setUpChannelDestinations({
+      ...request,
+      includeDropshipStores,
+      actorId,
+      requestHash,
+      occurredAt: validNow(this.clock),
+    }));
   }
 
   async savePolicyDraft(
