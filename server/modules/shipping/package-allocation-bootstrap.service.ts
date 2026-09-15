@@ -22,7 +22,10 @@ import {
   type PersistPackageAllocationPlanResult,
 } from "./package-allocation-planning.service";
 import { packageAllocationPackageKey } from "./package-allocation-authority-resolution.domain";
-import { packageAllocationGroupPreviousPlanSchema } from "./package-allocation-group.domain";
+import {
+  packageAllocationGroupPreviousPlanSchema,
+  packageAllocationSplitContinuationEvidenceSchema,
+} from "./package-allocation-group.domain";
 
 const POSTGRES_INTEGER_MAX = 2_147_483_647;
 const MAX_SOURCE_LINES = 500;
@@ -444,11 +447,7 @@ export class PackageAllocationBootstrapPersistenceService {
           membership: { ...pkg.membership },
           splitContinuation: pkg.splitContinuation == null
             ? null
-            : {
-                evidenceKey: pkg.splitContinuation.evidenceKey,
-                legacyWmsShipmentId: pkg.splitContinuation.legacyWmsShipmentId,
-                lines: pkg.splitContinuation.lines.map((line) => ({ ...line })),
-              },
+            : packageAllocationSplitContinuationEvidenceSchema.parse(pkg.splitContinuation),
           lifecycle: {
             ...pkg.lifecycle,
             events: pkg.lifecycle.events.map((event) => ({ ...event })),

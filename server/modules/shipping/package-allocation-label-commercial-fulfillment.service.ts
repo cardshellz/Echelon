@@ -45,6 +45,19 @@ export interface PackageAllocationLabelLinker {
   reconcileShipStationLabel(providerLabelId: string): Promise<ShippingProviderLabelLinkResult>;
 }
 
+export interface PackageAllocationLabelCommercialWorkflowContext {
+  readonly bootstrap: Pick<PackageAllocationBootstrapPersistenceService, "persistDiscovered">;
+  readonly fulfillmentAuthority: Pick<
+    ChannelFulfillmentAuthorityService,
+    "materializeAndActivatePackageAllocationCommercialFulfillment"
+  >;
+}
+
+export interface PackageAllocationLabelCommercialWorkflow {
+  /** Persist the allocation plan, projections, and command activation atomically. */
+  run<T>(work: (context: PackageAllocationLabelCommercialWorkflowContext) => Promise<T>): Promise<T>;
+}
+
 export type PackageAllocationLabelCommercialFulfillmentResult =
   | Readonly<{ outcome: "disabled" | "skipped"; reason: string }>
   | Readonly<{ outcome: "review"; reason: string }>
@@ -158,11 +171,7 @@ export class PackageAllocationLabelCommercialFulfillmentService {
     private readonly dependencies: {
       readonly enabled: boolean;
       readonly labelLinker: PackageAllocationLabelLinker;
-      readonly bootstrap: Pick<PackageAllocationBootstrapPersistenceService, "persistDiscovered">;
-      readonly fulfillmentAuthority: Pick<
-        ChannelFulfillmentAuthorityService,
-        "materializeAndActivatePackageAllocationCommercialFulfillment"
-      >;
+      readonly workflow: PackageAllocationLabelCommercialWorkflow;
       readonly reviewRepository: PackageAllocationLabelCommercialReviewRepository;
       readonly logger?: PackageAllocationLabelCommercialFulfillmentLogger;
     },
@@ -210,20 +219,32 @@ export class PackageAllocationLabelCommercialFulfillmentService {
     }
 
     try {
-      const links = await this.dependencies.labelLinker.reconcileShipStationLabel(
-        providerShipmentId,
-      );
-      const bootstrap = await this.dependencies.bootstrap.persistDiscovered({
-        contractVersion: 1,
-        authorityMode: "shadow_only",
-        bootstrapMode: "relationship_discovery",
-        sourceWmsShipmentItemIds,
-        writeContext: {
-          createdBy: ACTIVATION_ACTOR,
-          reason: ACTIVATION_REASON,
-        },
+      const links = await this.dependencies.labelLinker.reconcileShipStationLabel(providerShipmentId);
+      const result = await this.dependencies.workflow.run(async (context) => {
+        const bootstrap = await context.bootstrap.persistDiscovered({
+          contractVersion: 1,
+          authorityMode: "shadow_only",
+          bootstrapMode: "relationship_discovery",
+          sourceWmsShipmentItemIds,
+          writeContext: { createdBy: ACTIVATION_ACTOR, reason: ACTIVATION_REASON },
+        });
+        const planId = bootstrap.persistence?.planId;
+        if (bootstrap.outcome === "review" || !planId) {
+          return { bootstrap, activated: null };
+        }
+        const activated: MaterializeAndActivatePackageAllocationCommercialFulfillmentResult =
+          await context.fulfillmentAuthority.materializeAndActivatePackageAllocationCommercialFulfillment({
+            packageAllocationPlanId: planId,
+            source: "shipstation_label_observed",
+            correlationId: `shipping-provider-label:${labelObservation.shippingProviderLabelId}`,
+            causationId: `shipstation-shipment:${providerShipmentId}`,
+            activatedBy: ACTIVATION_ACTOR,
+            activationReason: ACTIVATION_REASON,
+          });
+        return { bootstrap, activated };
       });
-      if (bootstrap.outcome === "review" || !bootstrap.persistence?.planId) {
+      const { bootstrap, activated } = result;
+      if (activated === null) {
         const reason = bootstrapReviewReason(bootstrap);
         await this.recordReview(shipment, labelObservation, reason, sourceWmsShipmentItemIds, {
           labelLinksInserted: links.linksInserted,
@@ -234,31 +255,18 @@ export class PackageAllocationLabelCommercialFulfillmentService {
         });
         return Object.freeze({ outcome: "review", reason });
       }
-
-      const activated: MaterializeAndActivatePackageAllocationCommercialFulfillmentResult =
-        await this.dependencies.fulfillmentAuthority
-          .materializeAndActivatePackageAllocationCommercialFulfillment({
-            packageAllocationPlanId: bootstrap.persistence.planId,
-            source: "shipstation_label_observed",
-            correlationId: `shipping-provider-label:${labelObservation.shippingProviderLabelId}`,
-            causationId: `shipstation-shipment:${providerShipmentId}`,
-            activatedBy: ACTIVATION_ACTOR,
-            activationReason: ACTIVATION_REASON,
-          });
+      const planId = activated.activation.packageAllocationPlanId;
       const commandIds = activated.activation.commandIds;
       this.logger.info({
         code: "PACKAGE_ALLOCATION_LABEL_COMMERCIAL_FULFILLMENT_ACTIVATED",
         providerShipmentId,
         shippingProviderLabelId: labelObservation.shippingProviderLabelId,
-        packageAllocationPlanId: bootstrap.persistence.planId,
+        packageAllocationPlanId: planId,
         commandIds,
         replayed: activated.activation.replayed,
       });
       return Object.freeze({
-        outcome: "activated",
-        planId: bootstrap.persistence.planId,
-        commandIds,
-        replayed: activated.activation.replayed,
+        outcome: "activated", planId, commandIds, replayed: activated.activation.replayed,
       });
     } catch (error) {
       const review = reviewableError(error);
