@@ -18,6 +18,7 @@ import {
   type PackageAllocationGroupPackageInput,
   type PackageAllocationGroupPlannerInput,
   type PackageAllocationGroupPlannerResultV1,
+  type PackageAllocationSplitContinuationEvidenceV1,
 } from "./package-allocation-group.domain";
 
 const POSTGRES_INTEGER_MAX = 2_147_483_647;
@@ -292,16 +293,62 @@ function isExactSplitContinuation(
     if (
       !sourceIds.has(line.sourceWmsShipmentItemId)
       || proofBySource.has(line.sourceWmsShipmentItemId)
-      || splitItemIds.has(line.splitWmsShipmentItemId)
+      || ("splitWmsShipmentItemId" in line
+        && splitItemIds.has(line.splitWmsShipmentItemId))
     ) {
       return false;
     }
     proofBySource.set(line.sourceWmsShipmentItemId, line.quantity);
-    splitItemIds.add(line.splitWmsShipmentItemId);
+    if ("splitWmsShipmentItemId" in line) splitItemIds.add(line.splitWmsShipmentItemId);
   }
   return contents.every((line) =>
     proofBySource.get(line.wmsShipmentItemId) === line.quantity
   );
+}
+
+function labelSplitContinuation(
+  pkg: ProjectedObservedPackage,
+  sourceIds: ReadonlySet<number>,
+): PackageAllocationSplitContinuationEvidenceV1 | null {
+  const contents = pkg.projection.authoritativeContents;
+  if (
+    pkg.projection.provider !== "shipstation"
+    || !pkg.projection.commercialFulfillmentPostingEligible
+    || contents === null
+    || !contents.every((line) => sourceIds.has(line.wmsShipmentItemId))
+  ) return null;
+  const lines = contents.map((line) => ({
+    sourceWmsShipmentItemId: line.wmsShipmentItemId,
+    quantity: line.quantity,
+  })).sort((left, right) => left.sourceWmsShipmentItemId - right.sourceWmsShipmentItemId);
+  return deepFreeze({
+    source: "provider_label_contents" as const,
+    evidenceKey: `shipstation-label-portion:v1:${sha256(canonicalJson({
+      providerPhysicalShipmentId: pkg.projection.providerPhysicalShipmentId,
+      lines,
+    }))}`,
+    lines,
+  });
+}
+
+function completeLabelQuantitiesFit(
+  packages: readonly ProjectedObservedPackage[],
+  sourceQuantityById: ReadonlyMap<number, number>,
+): boolean {
+  const totals = new Map<number, number>();
+  for (const pkg of packages) {
+    const contents = pkg.projection.authoritativeContents;
+    if (contents === null || !pkg.projection.commercialFulfillmentPostingEligible) return false;
+    for (const line of contents) {
+      const total = checkedAdd(totals.get(line.wmsShipmentItemId) ?? 0, line.quantity, {
+        packageKey: pkg.packageKey,
+        wmsShipmentItemId: line.wmsShipmentItemId,
+      });
+      if (total > (sourceQuantityById.get(line.wmsShipmentItemId) ?? 0)) return false;
+      totals.set(line.wmsShipmentItemId, total);
+    }
+  }
+  return true;
 }
 
 function authorityFor(
@@ -392,13 +439,15 @@ export function resolvePackageAllocationAuthority(
     }
     const earliestTime = observed.map((pkg) => observationTime(pkg) as string).sort(compareText)[0];
     const earliest = observed.filter((pkg) => observationTime(pkg) === earliestTime);
-    if (earliest.length !== 1) {
+    if (earliest.length !== 1 && !completeLabelQuantitiesFit(observed, sourceQuantityById)) {
       throw new PackageAllocationAuthorityResolutionError(
         "AMBIGUOUS_PRIMARY_PACKAGE",
         "Multiple packages share the earliest observed label time",
         { packageKeys: earliest.map((pkg) => pkg.packageKey).sort(compareText) },
       );
     }
+    // Equal timestamps are normal for labels received together. Exact portions
+    // that fit the source quantity do not require a human to pick a first box.
     roles.set(earliest[0].packageKey, "primary");
   }
 
@@ -444,10 +493,18 @@ export function resolvePackageAllocationAuthority(
     }
   }
 
+  const continuationProofByPackage = new Map<string, PackageAllocationSplitContinuationEvidenceV1>();
   const continuationCandidates = packagesInObservationOrder.filter((pkg) => {
     const role = roles.get(pkg.packageKey);
-    return (role === undefined || role === "additional_dispatch")
-      && isExactSplitContinuation(pkg, sourceIds);
+    if (role !== undefined && role !== "additional_dispatch") return false;
+    // Contradictory persisted lineage remains a conflict; do not replace it
+    // with a weaker proof. Fresh labels need no carrier-created child record.
+    const proof = pkg.splitContinuation !== null
+      ? isExactSplitContinuation(pkg, sourceIds) ? pkg.splitContinuation : null
+      : labelSplitContinuation(pkg, sourceIds);
+    if (proof === null) return false;
+    continuationProofByPackage.set(pkg.packageKey, proof);
+    return true;
   });
   const acceptedContinuationPackageKeys = new Set<string>();
   const primaryAndContinuationQuantityBySource = new Map<number, number>();
@@ -517,7 +574,7 @@ export function resolvePackageAllocationAuthority(
           : { status: "unproven" as const, evidenceKey: null },
         lifecycle: pkg.lifecycle,
         splitContinuation: acceptedContinuationPackageKeys.has(pkg.packageKey)
-          ? pkg.splitContinuation
+          ? continuationProofByPackage.get(pkg.packageKey)!
           : null,
       });
     }).sort((left, right) => compareText(left.packageKey, right.packageKey)),

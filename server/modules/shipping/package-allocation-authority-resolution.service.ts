@@ -19,6 +19,7 @@ import type {
   PackageAllocationAuthorityPreviewRepository,
 } from "./package-allocation-ledger.repository";
 import type { PackageAllocationSourceFacts } from "./package-allocation-source-identity.domain";
+import { packageAllocationSplitContinuationEvidenceSchema } from "./package-allocation-group.domain";
 
 const POSTGRES_INTEGER_MAX = 2_147_483_647;
 const MAX_SOURCE_LINES = 500;
@@ -368,10 +369,7 @@ export function resolvePackageAllocationAuthorityEvidence(input: {
           },
           splitContinuation: pkg.splitContinuation === null
             ? null
-            : {
-                ...pkg.splitContinuation,
-                lines: pkg.splitContinuation.lines.map((line) => ({ ...line })),
-              },
+            : packageAllocationSplitContinuationEvidenceSchema.parse(pkg.splitContinuation),
         }]
       : [],
   );

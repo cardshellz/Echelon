@@ -70,7 +70,7 @@ const packageMembershipSchema = z.discriminatedUnion("status", [
   }).strict(),
 ]);
 
-export const packageAllocationSplitContinuationEvidenceSchema = z.object({
+const legacySplitContinuationEvidenceSchema = z.object({
   evidenceKey: boundedIdentifier("splitContinuation.evidenceKey", 300),
   legacyWmsShipmentId: positivePostgresInteger,
   lines: z.array(z.object({
@@ -80,7 +80,21 @@ export const packageAllocationSplitContinuationEvidenceSchema = z.object({
   }).strict()).min(1).max(MAX_PACKAGE_CONTENT_LINES),
 }).strict();
 
-export interface PackageAllocationSplitContinuationEvidenceV1 {
+const labelSplitContinuationEvidenceSchema = z.object({
+  evidenceKey: boundedIdentifier("splitContinuation.evidenceKey", 300),
+  source: z.literal("provider_label_contents"),
+  lines: z.array(z.object({
+    sourceWmsShipmentItemId: positivePostgresInteger,
+    quantity: positivePostgresInteger,
+  }).strict()).min(1).max(MAX_PACKAGE_CONTENT_LINES),
+}).strict();
+
+export const packageAllocationSplitContinuationEvidenceSchema = z.union([
+  legacySplitContinuationEvidenceSchema,
+  labelSplitContinuationEvidenceSchema,
+]);
+
+export interface PackageAllocationLegacySplitContinuationEvidenceV1 {
   readonly evidenceKey: string;
   readonly legacyWmsShipmentId: number;
   readonly lines: readonly Readonly<{
@@ -89,6 +103,19 @@ export interface PackageAllocationSplitContinuationEvidenceV1 {
     quantity: number;
   }>[];
 }
+
+export interface PackageAllocationLabelSplitContinuationEvidenceV1 {
+  readonly evidenceKey: string;
+  readonly source: "provider_label_contents";
+  readonly lines: readonly Readonly<{
+    sourceWmsShipmentItemId: number;
+    quantity: number;
+  }>[];
+}
+
+export type PackageAllocationSplitContinuationEvidenceV1 =
+  | PackageAllocationLegacySplitContinuationEvidenceV1
+  | PackageAllocationLabelSplitContinuationEvidenceV1;
 
 const packageSchema = z.object({
   packageKey: boundedIdentifier("packageKey", 180),
@@ -231,9 +258,10 @@ export interface PackageAllocationGroupPackageInput {
     | { readonly status: "unproven"; readonly evidenceKey: string | null };
   readonly lifecycle: DeclaredPackageLifecycleInput;
   /**
-   * Exact persisted evidence that this otherwise-additional package carries a
-   * different portion of the original ordered quantity. It grants commercial
-   * fulfillment allocation only; the legacy split already posted inventory.
+   * Exact evidence that this package carries another portion of the original
+   * ordered quantity. Provider label contents establish commercial allocation
+   * before the carrier creates legacy split rows. Inventory execution remains
+   * owned by the carrier dispatch path.
    */
   readonly splitContinuation?: PackageAllocationSplitContinuationEvidenceV1 | null;
 }
@@ -647,6 +675,13 @@ function validateSplitContinuation(
   if (evidence.lines.length !== contents.size) {
     return fail("split_continuation_line_count_mismatch");
   }
+  if (
+    "source" in evidence
+    && (pkg.projection.provider !== "shipstation"
+      || !pkg.projection.commercialFulfillmentPostingEligible)
+  ) {
+    return fail("label_continuation_requires_eligible_shipstation_label");
+  }
 
   const quantitiesBySource = new Map<number, number>();
   const splitItemIds = new Set<number>();
@@ -656,12 +691,13 @@ function validateSplitContinuation(
     }
     if (
       quantitiesBySource.has(line.sourceWmsShipmentItemId)
-      || splitItemIds.has(line.splitWmsShipmentItemId)
+      || ("splitWmsShipmentItemId" in line
+        && splitItemIds.has(line.splitWmsShipmentItemId))
     ) {
       return fail("split_continuation_identity_reused");
     }
     quantitiesBySource.set(line.sourceWmsShipmentItemId, line.quantity);
-    splitItemIds.add(line.splitWmsShipmentItemId);
+    if ("splitWmsShipmentItemId" in line) splitItemIds.add(line.splitWmsShipmentItemId);
   }
   for (const [sourceId, quantity] of contents) {
     if (quantitiesBySource.get(sourceId) !== quantity) {
@@ -846,10 +882,7 @@ export function planPackageAllocationGroup(
         membership: deepFreeze({ ...pkg.membership }),
         splitContinuation: pkg.splitContinuation === null
           ? null
-          : deepFreeze({
-              ...pkg.splitContinuation,
-              lines: pkg.splitContinuation.lines.map((line) => ({ ...line })),
-            }),
+          : deepFreeze(packageAllocationSplitContinuationEvidenceSchema.parse(pkg.splitContinuation)),
         projection,
         lifecycleEventEvidence: buildLifecycleEventEvidence(pkg.lifecycle.events),
       };
