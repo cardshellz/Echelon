@@ -1,5 +1,6 @@
 import Stripe from "stripe";
 import { DropshipError } from "../domain/errors";
+import { toDropshipStripeError } from "./dropship-stripe-error";
 import type {
   CreditDropshipWalletFundingInput,
   DropshipStripeAutoReloadPaymentIntent,
@@ -80,7 +81,7 @@ export class StripeDropshipFundingProvider implements DropshipWalletFundingProvi
       requested_rail: input.rail,
       requested_at: input.now.toISOString(),
     };
-    const session = await stripe.checkout.sessions.create({
+    const session = await this.callStripe("createStripeSetupSession", () => stripe.checkout.sessions.create({
       mode: "setup",
       customer: customerId,
       payment_method_types: paymentMethodTypesForRail(input.rail),
@@ -90,7 +91,7 @@ export class StripeDropshipFundingProvider implements DropshipWalletFundingProvi
       setup_intent_data: {
         metadata,
       },
-    });
+    }));
 
     if (!session.url) {
       throw new DropshipError(
@@ -140,7 +141,7 @@ export class StripeDropshipFundingProvider implements DropshipWalletFundingProvi
       requested_provider_payment_method_id: input.providerPaymentMethodId ?? "",
       requested_at: input.now.toISOString(),
     };
-    const session = await stripe.checkout.sessions.create({
+    const session = await this.callStripe("createStripeWalletFundingSession", () => stripe.checkout.sessions.create({
       mode: "payment",
       customer: customerId,
       payment_method_types: paymentMethodTypesForRail(input.rail),
@@ -163,7 +164,7 @@ export class StripeDropshipFundingProvider implements DropshipWalletFundingProvi
         setup_future_usage: "off_session",
         metadata,
       },
-    });
+    }));
 
     if (!session.url) {
       throw new DropshipError(
@@ -210,7 +211,7 @@ export class StripeDropshipFundingProvider implements DropshipWalletFundingProvi
       required_balance_cents: input.requiredBalanceCents ? String(input.requiredBalanceCents) : "",
       requested_at: input.now.toISOString(),
     };
-    const paymentIntent = await stripe.paymentIntents.create({
+    const paymentIntent = await this.callStripe("createStripeAutoReloadPaymentIntent", () => stripe.paymentIntents.create({
       amount: input.amountCents,
       currency: input.currency.toLowerCase(),
       customer: input.providerCustomerId,
@@ -221,7 +222,7 @@ export class StripeDropshipFundingProvider implements DropshipWalletFundingProvi
       metadata,
     }, {
       idempotencyKey: input.idempotencyKey,
-    });
+    }));
     const status = walletFundingStatusForPaymentIntent(paymentIntent);
     if (!status) {
       throw new DropshipError(
@@ -273,7 +274,7 @@ export class StripeDropshipFundingProvider implements DropshipWalletFundingProvi
       collection: "true",
       requested_at: input.now.toISOString(),
     };
-    const paymentIntent = await stripe.paymentIntents.create({
+    const paymentIntent = await this.callStripe("createStripeCollectionCharge", () => stripe.paymentIntents.create({
       amount: input.amountCents,
       currency: input.currency.toLowerCase(),
       customer: input.providerCustomerId,
@@ -284,7 +285,7 @@ export class StripeDropshipFundingProvider implements DropshipWalletFundingProvi
       metadata,
     }, {
       idempotencyKey: input.idempotencyKey,
-    });
+    }));
     const status = walletFundingStatusForPaymentIntent(paymentIntent);
     if (!status) {
       throw new DropshipError(
@@ -405,7 +406,7 @@ export class StripeDropshipFundingProvider implements DropshipWalletFundingProvi
       );
     }
 
-    const setupIntent = await this.getStripe().setupIntents.retrieve(setupIntentId);
+    const setupIntent = await this.callStripe("setupIntents.retrieve", () => this.getStripe().setupIntents.retrieve(setupIntentId));
     return this.buildFundingMethodEvent({
       event,
       setupIntent,
@@ -456,7 +457,7 @@ export class StripeDropshipFundingProvider implements DropshipWalletFundingProvi
       );
     }
 
-    const paymentMethod = await this.getStripe().paymentMethods.retrieve(paymentMethodId);
+    const paymentMethod = await this.callStripe("paymentMethods.retrieve", () => this.getStripe().paymentMethods.retrieve(paymentMethodId));
     const rail = railFromStripePaymentMethod(paymentMethod);
     if (!rail) {
       return {
@@ -514,7 +515,7 @@ export class StripeDropshipFundingProvider implements DropshipWalletFundingProvi
       );
     }
 
-    const paymentMethod = await this.getStripe().paymentMethods.retrieve(paymentMethodId);
+    const paymentMethod = await this.callStripe("paymentMethods.retrieve", () => this.getStripe().paymentMethods.retrieve(paymentMethodId));
     const rail = railFromStripePaymentMethod(paymentMethod);
     if (!rail) {
       return {
@@ -579,15 +580,34 @@ export class StripeDropshipFundingProvider implements DropshipWalletFundingProvi
     vendorId: number;
     memberId: string;
   }): Promise<string> {
-    const customer = await this.getStripe().customers.create({
+    const customer = await this.callStripe("customers.create", () => this.getStripe().customers.create({
       email: input.email ?? undefined,
       name: input.name,
       metadata: {
         dropship_vendor_id: String(input.vendorId),
         member_id: input.memberId,
       },
-    });
+    }));
     return customer.id;
+  }
+
+  /**
+   * Single entry point for every Stripe SDK call.
+   *
+   * A Stripe failure that escapes unwrapped reaches the HTTP layer as an
+   * unrecognized error, which the wallet routes can only report as an opaque
+   * 500 with no code — the vendor learns nothing and the log carries no
+   * classification. Routing calls through here guarantees the failure arrives
+   * as a classified DropshipError. Errors that are not from Stripe pass
+   * through untouched so a bug in our own code is not misreported as a
+   * payment-provider fault.
+   */
+  private async callStripe<T>(operation: string, run: () => Promise<T>): Promise<T> {
+    try {
+      return await run();
+    } catch (error) {
+      throw toDropshipStripeError(operation, error);
+    }
   }
 
   private getStripe(): Stripe {

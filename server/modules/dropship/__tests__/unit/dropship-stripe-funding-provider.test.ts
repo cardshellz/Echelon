@@ -1,5 +1,6 @@
-import type Stripe from "stripe";
+import Stripe from "stripe";
 import { describe, expect, it, vi } from "vitest";
+import { DropshipError } from "../../domain/errors";
 import { StripeDropshipFundingProvider } from "../../infrastructure/dropship-stripe-funding.provider";
 
 describe("StripeDropshipFundingProvider", () => {
@@ -423,6 +424,107 @@ describe("StripeDropshipFundingProvider", () => {
         intakeId: 456,
         idempotencyKey: "stripe-funding-failed:pi_failed",
       },
+    });
+  });
+});
+
+describe("StripeDropshipFundingProvider Stripe failures", () => {
+  it("classifies a Stripe failure raised while creating the checkout session", async () => {
+    const stripe = makeStripeDouble();
+    stripe.checkout.sessions.create.mockRejectedValueOnce(new Stripe.errors.StripeInvalidRequestError({
+      type: "invalid_request_error",
+      message: "The payment method type 'us_bank_account' is not activated for this account.",
+      code: "payment_method_unactivated",
+      param: "payment_method_types",
+      statusCode: 400,
+      requestId: "req_setup",
+    }));
+    const provider = new StripeDropshipFundingProvider({ stripeClient: stripe, webhookSecret: "whsec_test" });
+
+    await expect(provider.createStripeSetupSession({
+      vendorId: 10,
+      memberId: "member-1",
+      rail: "stripe_ach",
+      customerEmail: "vendor@cardshellz.test",
+      customerName: "Vendor",
+      existingProviderCustomerId: "cus_existing",
+      successUrl: "https://cardshellz.io/wallet?funding_setup=success",
+      cancelUrl: "https://cardshellz.io/wallet?funding_setup=cancelled",
+      now: new Date("2026-05-03T12:00:00.000Z"),
+    })).rejects.toMatchObject({
+      code: "DROPSHIP_STRIPE_REQUEST_REJECTED",
+      context: expect.objectContaining({
+        operation: "createStripeSetupSession",
+        classification: "permanent",
+        stripeRequestId: "req_setup",
+      }),
+    });
+  });
+
+  it("classifies a Stripe failure raised while creating the customer", async () => {
+    const stripe = makeStripeDouble();
+    stripe.customers.create.mockRejectedValueOnce(new Stripe.errors.StripeAuthenticationError({
+      type: "authentication_error",
+      message: "Invalid API Key provided: sk_live_***",
+      statusCode: 401,
+      requestId: "req_customer",
+    }));
+    const provider = new StripeDropshipFundingProvider({ stripeClient: stripe, webhookSecret: "whsec_test" });
+
+    const failure = await provider.createStripeSetupSession({
+      vendorId: 10,
+      memberId: "member-1",
+      rail: "stripe_card",
+      customerEmail: "vendor@cardshellz.test",
+      customerName: "Vendor",
+      existingProviderCustomerId: null,
+      successUrl: "https://cardshellz.io/wallet?funding_setup=success",
+      cancelUrl: "https://cardshellz.io/wallet?funding_setup=cancelled",
+      now: new Date("2026-05-03T12:00:00.000Z"),
+    }).catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(DropshipError);
+    expect(failure).toMatchObject({
+      code: "DROPSHIP_STRIPE_CREDENTIALS_REJECTED",
+      context: expect.objectContaining({ operation: "customers.create", classification: "fatal" }),
+    });
+    expect((failure as DropshipError).message).not.toContain("sk_live");
+    expect(stripe.checkout.sessions.create).not.toHaveBeenCalled();
+  });
+
+  it("classifies a declined card raised while charging an auto-reload", async () => {
+    const stripe = makeStripeDouble();
+    stripe.paymentIntents.create.mockRejectedValueOnce(new Stripe.errors.StripeCardError({
+      type: "card_error",
+      message: "Your card was declined.",
+      code: "card_declined",
+      decline_code: "insufficient_funds",
+      statusCode: 402,
+      requestId: "req_reload",
+    }));
+    const provider = new StripeDropshipFundingProvider({ stripeClient: stripe, webhookSecret: "whsec_test" });
+
+    await expect(provider.createStripeAutoReloadPaymentIntent({
+      vendorId: 10,
+      fundingMethodId: 99,
+      rail: "stripe_card",
+      amountCents: 6500,
+      currency: "USD",
+      providerCustomerId: "cus_existing",
+      providerPaymentMethodId: "pm_1",
+      reason: "balance_below_minimum",
+      intakeId: null,
+      requiredBalanceCents: null,
+      idempotencyKey: "auto-reload:10:1",
+      now: new Date("2026-05-03T12:00:00.000Z"),
+    })).rejects.toMatchObject({
+      code: "DROPSHIP_STRIPE_CARD_DECLINED",
+      message: "Your card was declined.",
+      context: expect.objectContaining({
+        operation: "createStripeAutoReloadPaymentIntent",
+        classification: "permanent",
+        stripeDeclineCode: "insufficient_funds",
+      }),
     });
   });
 });

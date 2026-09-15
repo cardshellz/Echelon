@@ -1,13 +1,20 @@
 import type { Express, Request, Response } from "express";
 import { requirePermission } from "../../../../routes/middleware";
 import { DropshipError } from "../../domain/errors";
-import type { DropshipWalletService } from "../../application/dropship-wallet-service";
+import { makeDropshipWalletLogger, type DropshipWalletService } from "../../application/dropship-wallet-service";
+import { httpStatusForDropshipStripeErrorCode } from "../../infrastructure/dropship-stripe-error";
 import { createDropshipWalletServiceFromEnv } from "../../infrastructure/dropship-wallet.factory";
 import {
   createStripeDropshipFundingProviderFromEnv,
   type StripeDropshipFundingProvider,
 } from "../../infrastructure/dropship-stripe-funding.provider";
 import { requireDropshipAuth, requireDropshipSensitiveActionProof } from "./dropship-auth.routes";
+
+/**
+ * Wallet route failures are logged here rather than at each call site so every
+ * response the vendor sees has a matching structured line in the server log.
+ */
+const walletRouteLogger = makeDropshipWalletLogger();
 
 export function registerDropshipWalletRoutes(
   app: Express,
@@ -375,7 +382,21 @@ function parsePortalBaseUrl(req: Request): string {
 
 function sendDropshipWalletError(res: Response, error: unknown) {
   if (error instanceof DropshipError) {
-    return res.status(statusForDropshipWalletError(error.code)).json({
+    const status = statusForDropshipWalletError(error.code);
+    // 5xx needs a human or a retry; 4xx is the caller's own input. Both are
+    // recorded: wallet routes are vendor-initiated and low volume, and an
+    // unexplained funding failure has to be traceable after the fact.
+    const event = {
+      code: error.code,
+      message: error.message,
+      context: { ...error.context, httpStatus: status },
+    };
+    if (status >= 500) {
+      walletRouteLogger.error(event);
+    } else {
+      walletRouteLogger.warn(event);
+    }
+    return res.status(status).json({
       error: {
         code: error.code,
         message: error.message,
@@ -384,7 +405,19 @@ function sendDropshipWalletError(res: Response, error: unknown) {
     });
   }
 
-  console.error("[DropshipWalletRoutes] Unexpected wallet error:", error);
+  // Unrecognized failure: the response cannot say anything useful, so the log
+  // has to carry everything needed to identify it.
+  walletRouteLogger.error({
+    code: "DROPSHIP_WALLET_INTERNAL_ERROR",
+    message: "Dropship wallet request failed with an unrecognized error.",
+    context: {
+      httpStatus: 500,
+      classification: "permanent",
+      errorName: error instanceof Error ? error.name : typeof error,
+      errorMessage: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack ?? null : null,
+    },
+  });
   return res.status(500).json({
     error: {
       code: "DROPSHIP_WALLET_INTERNAL_ERROR",
@@ -415,6 +448,12 @@ function adminActor(req: Request): { actorType: "admin"; actorId?: string } {
 }
 
 function statusForDropshipWalletError(code: string): number {
+  // Stripe-derived failures own their own status so the classification and the
+  // status stay in one place: 5xx means retryable, 4xx means terminal.
+  const stripeStatus = httpStatusForDropshipStripeErrorCode(code);
+  if (stripeStatus !== null) {
+    return stripeStatus;
+  }
   if (code === "DROPSHIP_WALLET_IDEMPOTENCY_CONFLICT") {
     return 409;
   }
