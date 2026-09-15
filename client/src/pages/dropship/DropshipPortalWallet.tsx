@@ -1,23 +1,19 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, CheckCircle2, CircleDollarSign, CreditCard, Fingerprint, History, Landmark, Mail, Save, Wallet } from "lucide-react";
+import { useLocation } from "wouter";
+import {
+  AlertCircle, ArrowRight, CheckCircle2, ChevronDown, CreditCard, History, Info, Landmark, Loader2, RefreshCw, Wallet,
+} from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
 import { InputOTP, InputOTPGroup, InputOTPSlot } from "@/components/ui/input-otp";
 import { Label } from "@/components/ui/label";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
+import { Switch } from "@/components/ui/switch";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import {
   buildAutoReloadConfigInput,
   buildStripeFundingSetupSessionInput,
@@ -27,6 +23,7 @@ import {
   formatCents,
   formatDateTime,
   formatStatus,
+  parseDollarInputToCents,
   postJson,
   putJson,
   queryErrorMessage,
@@ -43,102 +40,165 @@ import {
   useDropshipAuth,
   type DropshipSensitiveAction,
 } from "@/lib/dropship-auth";
+import {
+  AUTO_RELOAD_AMOUNT_PRESETS_CENTS,
+  AUTO_RELOAD_DEFAULTS,
+  AUTO_RELOAD_MINIMUM_PRESETS_CENTS,
+  CARD_CONFIRMATION_POLL_INTERVAL_MS,
+  CARD_CONFIRMATION_POLL_TIMEOUT_MS,
+  FUND_WALLET_PRESETS_CENTS,
+  buildAutoReloadDisableInput,
+  buildAutoReloadSetupInput,
+  centsToDollarInput,
+  deriveWalletSetupState,
+  describeFundingMethod,
+  isStripeFundingMethod,
+  parseStripeReturn,
+  stripStripeReturn,
+  type DropshipWalletFundingMethod,
+  type DropshipWalletOverview,
+  type StripeReturn,
+  type WalletSetupState,
+} from "@/lib/dropship-wallet-setup";
 import { DropshipPortalShell } from "./DropshipPortalShell";
 
-type PendingWalletAction = "send-code" | "verify-code" | "passkey-proof" | "save" | "stripe-card" | "stripe-ach" | "usdc-base" | "fund-wallet" | null;
+/**
+ * Vendor wallet.
+ *
+ * One question at a time: add a card, confirm it, turn on auto-reload, done.
+ * Everything a vendor does not need for launch (bank accounts, USDC, the
+ * payment-hold timeout, the raw method list) lives under "Advanced". Every
+ * message and verification prompt renders next to the button that caused it.
+ */
+
+const WALLET_QUERY_KEY = ["/api/dropship/wallet?limit=50"] as const;
+const ONBOARDING_QUERY_KEY = ["/api/dropship/onboarding/state"] as const;
+const SETTINGS_QUERY_KEY = ["/api/dropship/settings"] as const;
+
 type WalletSensitiveAction = Extract<DropshipSensitiveAction, "add_funding_method" | "wallet_funding_high_value">;
-type DropshipWalletState = DropshipWalletResponse["wallet"];
-type DropshipWalletFundingMethod = DropshipWalletState["fundingMethods"][number];
+/** Which part of the page an action, its notice and its code prompt belong to. */
+type WalletScope = "setup" | "funds" | "auto_reload" | "advanced";
+
+interface WalletNotice {
+  scope: WalletScope;
+  tone: "error" | "success" | "info";
+  text: string;
+}
+
+interface PendingVerification {
+  scope: WalletScope;
+  action: WalletSensitiveAction;
+  /** The request to run once the emailed code is accepted. */
+  intent: () => Promise<void>;
+}
 
 export default function DropshipPortalWallet() {
   const queryClient = useQueryClient();
-  const {
-    principal,
-    sensitiveProofs,
-    startEmailStepUp,
-    verifyEmailStepUp,
-    verifyPasskeyStepUp,
-  } = useDropshipAuth();
-  const [autoReloadEnabled, setAutoReloadEnabled] = useState(true);
-  const [fundingMethodId, setFundingMethodId] = useState("");
-  const [minimumBalance, setMinimumBalance] = useState("50.00");
-  const [maxSingleReload, setMaxSingleReload] = useState("250.00");
-  const [paymentHoldTimeoutMinutes, setPaymentHoldTimeoutMinutes] = useState("2880");
-  const [fundingLoadMethodId, setFundingLoadMethodId] = useState("");
-  const [fundingAmount, setFundingAmount] = useState("250.00");
-  const [usdcWalletAddress, setUsdcWalletAddress] = useState("");
-  const [usdcDisplayLabel, setUsdcDisplayLabel] = useState("USDC on Base");
-  const [emailStepUpAction, setEmailStepUpAction] = useState<WalletSensitiveAction | null>(null);
-  const [verificationCode, setVerificationCode] = useState("");
-  const [pendingWalletAction, setPendingWalletAction] = useState<PendingWalletAction>(null);
-  const [message, setMessage] = useState("");
-  const [error, setError] = useState("");
-  const walletQuery = useQuery<DropshipWalletResponse>({
-    queryKey: ["/api/dropship/wallet?limit=50"],
-    queryFn: () => fetchJson<DropshipWalletResponse>("/api/dropship/wallet?limit=50"),
-  });
-  const wallet = walletQuery.data?.wallet;
-  const activeFundingMethods = wallet?.fundingMethods.filter((method) => method.status === "active") ?? [];
-  const stripeFundingMethods = activeFundingMethods.filter(isStripeFundingMethod);
-  const hasActiveProof = (action: DropshipSensitiveAction) => {
-    return isDropshipSensitiveProofActive({
-      principal,
-      action,
-      proof: sensitiveProofs[action],
-    });
-  };
+  const [, setLocation] = useLocation();
+  const { principal, sensitiveProofs, startEmailStepUp, verifyEmailStepUp, verifyPasskeyStepUp } = useDropshipAuth();
 
+  // Stripe returns to this page with a status marker; read it once and clear it
+  // from the address bar so a reload does not replay the banner.
+  const [stripeReturn, setStripeReturn] = useState<StripeReturn | null>(() => parseStripeReturn(window.location.search));
   useEffect(() => {
-    if (!wallet) return;
-    const configuredAutoReloadMethodId = wallet.autoReload?.fundingMethodId ?? null;
-    const usableAutoReloadMethodId = configuredAutoReloadMethodId && stripeFundingMethods.some((method) =>
-      method.fundingMethodId === configuredAutoReloadMethodId
-    )
-      ? configuredAutoReloadMethodId
-      : null;
-    const defaultFundingMethodId = usableAutoReloadMethodId
-      ?? stripeFundingMethods.find((method) => method.isDefault)?.fundingMethodId
-      ?? stripeFundingMethods[0]?.fundingMethodId
-      ?? null;
-    setAutoReloadEnabled(wallet.autoReload?.enabled ?? true);
-    setFundingMethodId(defaultFundingMethodId ? String(defaultFundingMethodId) : "");
-    setFundingLoadMethodId(defaultFundingMethodId ? String(defaultFundingMethodId) : "");
-    setMinimumBalance(centsToDollarInput(wallet.autoReload?.minimumBalanceCents ?? 5000));
-    setMaxSingleReload(wallet.autoReload?.maxSingleReloadCents === null || wallet.autoReload?.maxSingleReloadCents === undefined
-      ? "250.00"
-      : centsToDollarInput(wallet.autoReload.maxSingleReloadCents));
-    setPaymentHoldTimeoutMinutes(String(wallet.autoReload?.paymentHoldTimeoutMinutes ?? 2880));
-  }, [wallet?.autoReload, wallet?.fundingMethods]);
+    if (!parseStripeReturn(window.location.search)) return;
+    window.history.replaceState(null, "", `${window.location.pathname}${stripStripeReturn(window.location.search)}`);
+  }, []);
 
-  async function saveAutoReload() {
-    if (!await ensureWalletSensitiveProof("add_funding_method")) return;
+  const [confirmationTimedOut, setConfirmationTimedOut] = useState(false);
+  const [busyScope, setBusyScope] = useState<WalletScope | null>(null);
+  const [notice, setNotice] = useState<WalletNotice | null>(null);
+  const [verification, setVerification] = useState<PendingVerification | null>(null);
+  const [verificationCode, setVerificationCode] = useState("");
 
-    await runWalletAction("save", async () => {
-      const input = buildAutoReloadConfigInput({
-        enabled: autoReloadEnabled,
-        fundingMethodId,
-        minimumBalance,
-        maxSingleReload,
-        paymentHoldTimeoutMinutes,
-      });
-      await putJson<DropshipAutoReloadConfigResponse>("/api/dropship/wallet/auto-reload", input);
-      await Promise.all([
-        walletQuery.refetch(),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/settings"] }),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/onboarding/state"] }),
-      ]);
-      setEmailStepUpAction(null);
-      setVerificationCode("");
-      setMessage("Auto-reload settings saved.");
-    });
+  const walletQuery = useQuery<DropshipWalletResponse>({
+    queryKey: WALLET_QUERY_KEY,
+    queryFn: () => fetchJson<DropshipWalletResponse>(WALLET_QUERY_KEY[0]),
+  });
+  const wallet = walletQuery.data?.wallet ?? null;
+  const setup = useMemo(() => (wallet ? deriveWalletSetupState(wallet) : null), [wallet]);
+
+  // After a successful card setup, keep asking the server until Stripe's
+  // webhook activates the card, bounded so a broken webhook cannot poll forever.
+  const awaitingCard = stripeReturn?.kind === "funding_setup" && stripeReturn.status === "success"
+    && setup !== null && (setup.stage === "add_card" || setup.stage === "confirm_card") && !confirmationTimedOut;
+  useEffect(() => {
+    if (!awaitingCard) return;
+    const timer = window.setTimeout(() => setConfirmationTimedOut(true), CARD_CONFIRMATION_POLL_TIMEOUT_MS);
+    const interval = window.setInterval(() => { void walletQuery.refetch(); }, CARD_CONFIRMATION_POLL_INTERVAL_MS);
+    return () => { window.clearTimeout(timer); window.clearInterval(interval); };
+    // walletQuery.refetch is stable for the query key; re-arming on it would restart the timeout.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [awaitingCard]);
+
+  async function refreshAfterWalletChange() {
+    await Promise.all([
+      walletQuery.refetch(),
+      queryClient.invalidateQueries({ queryKey: [...ONBOARDING_QUERY_KEY] }),
+      queryClient.invalidateQueries({ queryKey: [...SETTINGS_QUERY_KEY] }),
+    ]);
   }
 
-  async function startStripeFundingSetup(rail: DropshipStripeFundingRail) {
-    if (!await ensureWalletSensitiveProof("add_funding_method")) return;
+  async function run(scope: WalletScope, task: () => Promise<void>): Promise<boolean> {
+    setBusyScope(scope);
+    setNotice(null);
+    try {
+      await task();
+      return true;
+    } catch (caught) {
+      setNotice({ scope, tone: "error", text: caught instanceof Error ? caught.message : "Wallet request failed." });
+      return false;
+    } finally {
+      setBusyScope(null);
+    }
+  }
 
-    await runWalletAction(rail === "stripe_card" ? "stripe-card" : "stripe-ach", async () => {
-      const returnTo = `${window.location.pathname}${window.location.search}` || dropshipPortalPath("/wallet");
-      const input = buildStripeFundingSetupSessionInput({ rail, returnTo });
+  /**
+   * Run a request that needs a recent verification. A proof from the last ten
+   * minutes is reused, a passkey is prompted immediately, and the email path
+   * parks the request until the code is entered next to the same button.
+   */
+  async function withVerification(scope: WalletScope, action: WalletSensitiveAction, intent: () => Promise<void>) {
+    const proofActive = isDropshipSensitiveProofActive({ principal, action, proof: sensitiveProofs[action] });
+    if (proofActive) {
+      await run(scope, intent);
+      return;
+    }
+    if (principal?.hasPasskey) {
+      const verified = await run(scope, () => verifyPasskeyStepUp(action).then(() => undefined));
+      if (verified) await run(scope, intent);
+      return;
+    }
+    const sent = await run(scope, () => startEmailStepUp(action));
+    if (!sent) return;
+    setVerification({ scope, action, intent });
+    setVerificationCode("");
+    setNotice({ scope, tone: "info", text: "We emailed you a 6-digit code. Enter it below to continue." });
+  }
+
+  async function submitVerificationCode() {
+    if (!verification || verificationCode.length !== 6) return;
+    const { scope, action, intent } = verification;
+    const verified = await run(scope, () => verifyEmailStepUp({ action, verificationCode }).then(() => undefined));
+    if (!verified) return;
+    setVerification(null);
+    setVerificationCode("");
+    await run(scope, intent);
+  }
+
+  function cancelVerification() {
+    setVerification(null);
+    setVerificationCode("");
+    setNotice(null);
+  }
+
+  function returnPath(): string {
+    return `${window.location.pathname}${stripStripeReturn(window.location.search)}` || dropshipPortalPath("/wallet");
+  }
+
+  function startStripeSetup(scope: WalletScope, rail: DropshipStripeFundingRail) {
+    return withVerification(scope, "add_funding_method", async () => {
+      const input = buildStripeFundingSetupSessionInput({ rail, returnTo: returnPath() });
       const response = await postJson<DropshipStripeFundingSetupSessionResponse>(
         "/api/dropship/wallet/funding-methods/stripe/setup-session",
         input,
@@ -147,773 +207,772 @@ export default function DropshipPortalWallet() {
     });
   }
 
-  async function saveUsdcFundingMethod() {
-    if (!await ensureWalletSensitiveProof("add_funding_method")) return;
-
-    await runWalletAction("usdc-base", async () => {
-      const input = buildUsdcBaseFundingMethodInput({
-        walletAddress: usdcWalletAddress,
-        displayLabel: usdcDisplayLabel,
-        isDefault: activeFundingMethods.length === 0,
-      });
-      await postJson<DropshipUsdcBaseFundingMethodResponse>(
-        "/api/dropship/wallet/funding-methods/usdc-base",
-        input,
+  function turnOnAutoReload(scope: WalletScope, input: { fundingMethodId: number; minimumBalanceCents: number; maxSingleReloadCents: number }) {
+    if (!wallet) return Promise.resolve();
+    return withVerification(scope, "add_funding_method", async () => {
+      await putJson<DropshipAutoReloadConfigResponse>(
+        "/api/dropship/wallet/auto-reload",
+        buildAutoReloadSetupInput({ ...input, existing: wallet.autoReload }),
       );
-      await Promise.all([
-        walletQuery.refetch(),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/settings"] }),
-        queryClient.invalidateQueries({ queryKey: ["/api/dropship/onboarding/state"] }),
-      ]);
-      setUsdcWalletAddress("");
-      setUsdcDisplayLabel("USDC on Base");
-      setEmailStepUpAction(null);
-      setVerificationCode("");
-      setMessage("USDC funding method saved.");
+      await refreshAfterWalletChange();
+      setStripeReturn(null);
+      setNotice({ scope, tone: "success", text: "Auto-reload is on." });
     });
   }
 
-  async function startWalletFunding() {
-    if (!await ensureWalletSensitiveProof("wallet_funding_high_value")) return;
+  function turnOffAutoReload(scope: WalletScope) {
+    if (!wallet) return Promise.resolve();
+    return withVerification(scope, "add_funding_method", async () => {
+      await putJson<DropshipAutoReloadConfigResponse>("/api/dropship/wallet/auto-reload", buildAutoReloadDisableInput(wallet.autoReload));
+      await refreshAfterWalletChange();
+      setNotice({ scope, tone: "success", text: "Auto-reload is off. Orders will wait for a manual payment until it is turned back on." });
+    });
+  }
 
-    await runWalletAction("fund-wallet", async () => {
-      const returnTo = `${window.location.pathname}${window.location.search}` || dropshipPortalPath("/wallet");
-      const input = buildStripeWalletFundingSessionInput({
-        fundingMethodId: fundingLoadMethodId,
-        amount: fundingAmount,
-        returnTo,
+  function saveHoldTimeout(minutes: string) {
+    if (!wallet) return Promise.resolve();
+    return withVerification("advanced", "add_funding_method", async () => {
+      const existing = wallet.autoReload;
+      await putJson<DropshipAutoReloadConfigResponse>(
+        "/api/dropship/wallet/auto-reload",
+        buildAutoReloadConfigInput({
+          enabled: existing?.enabled ?? false,
+          fundingMethodId: existing?.fundingMethodId ? String(existing.fundingMethodId) : "",
+          minimumBalance: centsToDollarInput(existing?.minimumBalanceCents ?? AUTO_RELOAD_DEFAULTS.minimumBalanceCents),
+          maxSingleReload: existing?.maxSingleReloadCents === null || existing?.maxSingleReloadCents === undefined
+            ? "" : centsToDollarInput(existing.maxSingleReloadCents),
+          paymentHoldTimeoutMinutes: minutes,
+        }),
+      );
+      await refreshAfterWalletChange();
+      setNotice({ scope: "advanced", tone: "success", text: "Payment hold timeout saved." });
+    });
+  }
+
+  function addFunds(input: { fundingMethodId: number; amountCents: number }) {
+    return withVerification("funds", "wallet_funding_high_value", async () => {
+      const request = buildStripeWalletFundingSessionInput({
+        fundingMethodId: String(input.fundingMethodId),
+        amount: centsToDollarInput(input.amountCents),
+        returnTo: returnPath(),
       });
       const response = await postJson<DropshipStripeWalletFundingSessionResponse>(
         "/api/dropship/wallet/funding/stripe/checkout-session",
-        input,
+        request,
       );
       window.location.assign(response.fundingSession.checkoutUrl);
     });
   }
 
-  async function ensureWalletSensitiveProof(action: WalletSensitiveAction): Promise<boolean> {
-    if (hasActiveProof(action)) return true;
-    if (principal?.hasPasskey) {
-      return runWalletAction("passkey-proof", async () => {
-        await verifyPasskeyStepUp(action);
-      });
-    }
-    if (emailStepUpAction !== action) {
-      await runWalletAction("send-code", async () => {
-        await startEmailStepUp(action);
-        setEmailStepUpAction(action);
-        setVerificationCode("");
-        setMessage("Verification code sent. Enter it below, then retry the wallet action.");
-      });
-      return false;
-    }
-    if (verificationCode.length !== 6) {
-      setError("Enter the 6-digit verification code before continuing.");
-      return false;
-    }
-
-    const verified = await runWalletAction("verify-code", async () => {
-      await verifyEmailStepUp({
-        action,
-        verificationCode,
-      });
+  function saveUsdcMethod(input: { walletAddress: string; displayLabel: string }) {
+    return withVerification("advanced", "add_funding_method", async () => {
+      await postJson<DropshipUsdcBaseFundingMethodResponse>(
+        "/api/dropship/wallet/funding-methods/usdc-base",
+        buildUsdcBaseFundingMethodInput({ ...input, isDefault: false }),
+      );
+      await refreshAfterWalletChange();
+      setNotice({ scope: "advanced", tone: "success", text: "USDC address saved." });
     });
-    if (verified) {
-      setEmailStepUpAction(null);
-      setVerificationCode("");
-    }
-    return verified;
   }
 
-  async function runWalletAction(action: PendingWalletAction, task: () => Promise<void>): Promise<boolean> {
-    setPendingWalletAction(action);
-    setError("");
-    setMessage("");
-    try {
-      await task();
-      return true;
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Wallet request failed.");
-      return false;
-    } finally {
-      setPendingWalletAction(null);
-    }
-  }
+  const sectionProps = (scope: WalletScope): SectionFeedbackProps => ({
+    busy: busyScope === scope,
+    notice: notice?.scope === scope ? notice : null,
+    verification: verification?.scope === scope
+      ? { code: verificationCode, onCodeChange: setVerificationCode, onSubmit: submitVerificationCode, onCancel: cancelVerification }
+      : null,
+  });
 
   return (
     <DropshipPortalShell>
-      <div className="mx-auto w-full max-w-7xl px-4 py-6 sm:px-6">
+      <div className="mx-auto w-full max-w-4xl px-4 py-6 sm:px-6">
         <div>
           <h1 className="flex items-center gap-2 text-2xl font-semibold">
             <Wallet className="h-6 w-6 text-[#C060E0]" />
             Wallet
           </h1>
-          <p className="mt-1 text-sm text-zinc-500">Balance, auto-reload configuration, funding methods, and ledger history.</p>
+          <p className="mt-1 text-sm text-zinc-500">
+            Card Shellz charges this wallet for each order you accept: the product cost plus shipping.
+          </p>
         </div>
 
         {walletQuery.error && (
           <Alert variant="destructive" className="mt-5">
             <AlertCircle className="h-4 w-4" />
-            <AlertDescription>
-              {queryErrorMessage(walletQuery.error, "Unable to load dropship wallet.")}
-            </AlertDescription>
+            <AlertDescription>{queryErrorMessage(walletQuery.error, "Unable to load your wallet.")}</AlertDescription>
           </Alert>
         )}
 
-        {walletQuery.isLoading ? (
-          <div className="mt-5 grid gap-4 lg:grid-cols-3">
-            <Skeleton className="h-28 w-full" />
-            <Skeleton className="h-28 w-full" />
-            <Skeleton className="h-28 w-full" />
+        {walletQuery.isLoading || !wallet || !setup ? (
+          <div className="mt-5 space-y-4">
+            <Skeleton className="h-32 w-full" />
+            <Skeleton className="h-48 w-full" />
           </div>
-        ) : wallet ? (
+        ) : (
           <>
-            <section className="mt-5 grid gap-4 lg:grid-cols-3">
-              <Metric title="Available" value={formatCents(wallet.account.availableBalanceCents)} />
-              <Metric title="Pending" value={formatCents(wallet.account.pendingBalanceCents)} />
-              <Metric
-                title="Auto-reload"
-                value={autoReloadMetricValue(wallet, stripeFundingMethods)}
-                detail={autoReloadMetricDetail(wallet, stripeFundingMethods)}
-              />
-            </section>
-
-            {error && (
-              <Alert variant="destructive" className="mt-5">
-                <AlertCircle className="h-4 w-4" />
-                <AlertDescription>{error}</AlertDescription>
+            {stripeReturn?.kind === "wallet_funding" && (
+              <WalletFundingReturnBanner status={stripeReturn.status} onDismiss={() => setStripeReturn(null)} />
+            )}
+            {stripeReturn?.kind === "funding_setup" && stripeReturn.status === "cancelled" && (
+              <Alert className="mt-5">
+                <Info className="h-4 w-4" />
+                <AlertDescription>Card setup was cancelled. Nothing was saved.</AlertDescription>
               </Alert>
             )}
-            {message && (
+
+            {setup.stage === "ready" ? (
+              <>
+                <BalanceSection
+                  setup={setup}
+                  {...sectionProps("funds")}
+                  onAddFunds={addFunds}
+                />
+                <AutoReloadSection
+                  wallet={wallet}
+                  setup={setup}
+                  {...sectionProps("auto_reload")}
+                  onTurnOn={(input) => turnOnAutoReload("auto_reload", input)}
+                  onTurnOff={() => turnOffAutoReload("auto_reload")}
+                  onAddCard={() => startStripeSetup("auto_reload", "stripe_card")}
+                />
+              </>
+            ) : (
+              <SetupSection
+                setup={setup}
+                awaitingCard={awaitingCard}
+                confirmationTimedOut={confirmationTimedOut}
+                {...sectionProps("setup")}
+                onAddCard={() => startStripeSetup("setup", "stripe_card")}
+                onAddBankAccount={() => startStripeSetup("setup", "stripe_ach")}
+                onCheckAgain={() => { setConfirmationTimedOut(false); void walletQuery.refetch(); }}
+                onTurnOn={(input) => turnOnAutoReload("setup", input)}
+              />
+            )}
+
+            {setup.stage === "ready" && stripeReturn?.kind === "funding_setup" && stripeReturn.status === "success" && (
               <Alert className="mt-5 border-emerald-200 bg-emerald-50 text-emerald-900">
                 <CheckCircle2 className="h-4 w-4" />
-                <AlertDescription>{message}</AlertDescription>
+                <AlertDescription>Your card was added.</AlertDescription>
               </Alert>
             )}
 
-            {emailStepUpAction && (
-              <SensitiveActionVerificationPanel
-                emailStepUpAction={emailStepUpAction}
-                pendingWalletAction={pendingWalletAction}
-                verificationCode={verificationCode}
-                onVerificationCodeChange={setVerificationCode}
-              />
+            {setup.stage === "ready" && (
+              <div className="mt-5 flex justify-end">
+                <Button type="button" variant="outline" className="gap-2" onClick={() => setLocation(dropshipPortalPath("/onboarding"))}>
+                  Back to onboarding
+                  <ArrowRight className="h-4 w-4" />
+                </Button>
+              </div>
             )}
 
-            <AutoReloadPanel
-              activeFundingMethods={stripeFundingMethods}
-              autoReloadEnabled={autoReloadEnabled}
-              emailStepUpAction={emailStepUpAction}
-              fundingMethodId={fundingMethodId}
-              maxSingleReload={maxSingleReload}
-              minimumBalance={minimumBalance}
-              paymentHoldTimeoutMinutes={paymentHoldTimeoutMinutes}
-              pendingWalletAction={pendingWalletAction}
-              verificationCode={verificationCode}
-              onAutoReloadEnabledChange={setAutoReloadEnabled}
-              onFundingMethodIdChange={setFundingMethodId}
-              onMaxSingleReloadChange={setMaxSingleReload}
-              onMinimumBalanceChange={setMinimumBalance}
-              onPaymentHoldTimeoutMinutesChange={setPaymentHoldTimeoutMinutes}
-              onSave={saveAutoReload}
+            <AdvancedSection
+              wallet={wallet}
+              {...sectionProps("advanced")}
+              onAddBankAccount={() => startStripeSetup("advanced", "stripe_ach")}
+              onSaveHoldTimeout={saveHoldTimeout}
+              onSaveUsdc={saveUsdcMethod}
             />
 
-            <FundWalletPanel
-              activeFundingMethods={stripeFundingMethods}
-              emailStepUpAction={emailStepUpAction}
-              fundingAmount={fundingAmount}
-              fundingLoadMethodId={fundingLoadMethodId}
-              pendingWalletAction={pendingWalletAction}
-              verificationCode={verificationCode}
-              onFundingAmountChange={setFundingAmount}
-              onFundingLoadMethodIdChange={setFundingLoadMethodId}
-              onFund={startWalletFunding}
-            />
-
-            <UsdcFundingMethodPanel
-              emailStepUpAction={emailStepUpAction}
-              pendingWalletAction={pendingWalletAction}
-              usdcDisplayLabel={usdcDisplayLabel}
-              usdcWalletAddress={usdcWalletAddress}
-              verificationCode={verificationCode}
-              onDisplayLabelChange={setUsdcDisplayLabel}
-              onSave={saveUsdcFundingMethod}
-              onWalletAddressChange={setUsdcWalletAddress}
-            />
-
-            <section className="mt-5 grid gap-5 xl:grid-cols-[0.8fr_1.2fr]">
-              <div className="rounded-md border border-zinc-200 bg-white p-4">
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                  <div>
-                    <h2 className="text-lg font-semibold">Funding methods</h2>
-                    <p className="text-sm text-zinc-500">Configured rails</p>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      className="h-9 gap-2"
-                      disabled={pendingWalletAction !== null || walletEmailStepUpRequiresCode(emailStepUpAction, "add_funding_method", verificationCode)}
-                      onClick={() => startStripeFundingSetup("stripe_card")}
-                    >
-                      <CreditCard className="h-4 w-4" />
-                      {fundingMethodButtonLabel({
-                        pendingWalletAction,
-                        emailStepUpAction,
-                        action: "add_funding_method",
-                        activeLabel: "Starting card",
-                        defaultLabel: "Add card",
-                        verifyLabel: "Verify and add card",
-                        pendingAction: "stripe-card",
-                      })}
-                    </Button>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      className="h-9 gap-2"
-                      disabled={pendingWalletAction !== null || walletEmailStepUpRequiresCode(emailStepUpAction, "add_funding_method", verificationCode)}
-                      onClick={() => startStripeFundingSetup("stripe_ach")}
-                    >
-                      <Landmark className="h-4 w-4" />
-                      {fundingMethodButtonLabel({
-                        pendingWalletAction,
-                        emailStepUpAction,
-                        action: "add_funding_method",
-                        activeLabel: "Starting ACH",
-                        defaultLabel: "Add ACH",
-                        verifyLabel: "Verify and add ACH",
-                        pendingAction: "stripe-ach",
-                      })}
-                    </Button>
-                  </div>
-                </div>
-                {wallet.fundingMethods.length ? (
-                  <div className="mt-4 space-y-3">
-                    {wallet.fundingMethods.map((method) => (
-                      <div key={method.fundingMethodId} className="rounded-md border border-zinc-200 p-3">
-                        <div className="flex items-center justify-between gap-3">
-                          <div>
-                            <div className="font-medium">{method.displayLabel || formatStatus(method.rail)}</div>
-                            <div className="text-sm text-zinc-500">
-                              {method.rail === "usdc_base" && method.usdcWalletAddress
-                                ? maskAddress(method.usdcWalletAddress)
-                                : formatStatus(method.rail)}
-                            </div>
-                          </div>
-                          <Badge variant="outline">{method.isDefault ? "Default" : formatStatus(method.status)}</Badge>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <Empty className="mt-4 rounded-md border border-dashed p-6">
-                    <EmptyMedia variant="icon"><CreditCard /></EmptyMedia>
-                    <EmptyHeader>
-                      <EmptyTitle>No funding methods</EmptyTitle>
-                      <EmptyDescription>Funding methods are not configured yet.</EmptyDescription>
-                    </EmptyHeader>
-                  </Empty>
-                )}
-              </div>
-
-              <div className="rounded-md border border-zinc-200 bg-white p-4">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h2 className="text-lg font-semibold">Ledger</h2>
-                    <p className="text-sm text-zinc-500">Recent wallet transactions</p>
-                  </div>
-                  <History className="h-5 w-5 text-zinc-400" />
-                </div>
-                {wallet.recentLedger.length ? (
-                  <div className="mt-4 rounded-md border border-zinc-200">
-                    <Table>
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead>Type</TableHead>
-                          <TableHead>Status</TableHead>
-                          <TableHead>Amount</TableHead>
-                          <TableHead>Created</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {wallet.recentLedger.map((entry) => (
-                          <TableRow key={entry.ledgerEntryId}>
-                            <TableCell>{formatStatus(entry.type)}</TableCell>
-                            <TableCell><Badge variant="outline">{formatStatus(entry.status)}</Badge></TableCell>
-                            <TableCell className="font-mono">{formatCents(entry.amountCents)}</TableCell>
-                            <TableCell className="whitespace-nowrap text-sm text-zinc-500">{formatDateTime(entry.createdAt)}</TableCell>
-                          </TableRow>
-                        ))}
-                      </TableBody>
-                    </Table>
-                  </div>
-                ) : (
-                  <Empty className="mt-4 rounded-md border border-dashed p-6">
-                    <EmptyMedia variant="icon"><History /></EmptyMedia>
-                    <EmptyHeader>
-                      <EmptyTitle>No ledger entries</EmptyTitle>
-                      <EmptyDescription>No wallet ledger activity has been recorded.</EmptyDescription>
-                    </EmptyHeader>
-                  </Empty>
-                )}
-              </div>
-            </section>
+            <ActivitySection wallet={wallet} />
           </>
-        ) : (
-          <Empty className="mt-5 rounded-md border border-dashed p-8">
-            <EmptyMedia variant="icon"><Wallet /></EmptyMedia>
-            <EmptyHeader>
-              <EmptyTitle>{walletQuery.error ? "Wallet unavailable" : "No wallet"}</EmptyTitle>
-              <EmptyDescription>
-                {walletQuery.error ? "The wallet API request failed." : "Dropship wallet state could not be loaded."}
-              </EmptyDescription>
-            </EmptyHeader>
-          </Empty>
         )}
       </div>
     </DropshipPortalShell>
   );
 }
 
-function AutoReloadPanel({
-  activeFundingMethods,
-  autoReloadEnabled,
-  emailStepUpAction,
-  fundingMethodId,
-  maxSingleReload,
-  minimumBalance,
-  onAutoReloadEnabledChange,
-  onFundingMethodIdChange,
-  onMaxSingleReloadChange,
-  onMinimumBalanceChange,
-  onPaymentHoldTimeoutMinutesChange,
-  onSave,
-  paymentHoldTimeoutMinutes,
-  pendingWalletAction,
-  verificationCode,
-}: {
-  activeFundingMethods: DropshipWalletResponse["wallet"]["fundingMethods"];
-  autoReloadEnabled: boolean;
-  emailStepUpAction: WalletSensitiveAction | null;
-  fundingMethodId: string;
-  maxSingleReload: string;
-  minimumBalance: string;
-  onAutoReloadEnabledChange: (value: boolean) => void;
-  onFundingMethodIdChange: (value: string) => void;
-  onMaxSingleReloadChange: (value: string) => void;
-  onMinimumBalanceChange: (value: string) => void;
-  onPaymentHoldTimeoutMinutesChange: (value: string) => void;
-  onSave: () => void;
-  paymentHoldTimeoutMinutes: string;
-  pendingWalletAction: PendingWalletAction;
-  verificationCode: string;
-}) {
-  const saveDisabled = pendingWalletAction !== null
-    || (autoReloadEnabled && activeFundingMethods.length === 0)
-    || walletEmailStepUpRequiresCode(emailStepUpAction, "add_funding_method", verificationCode);
+// ---------------------------------------------------------------------------
+// Shared feedback: notices and the emailed-code prompt render inside the section
+// whose button asked for them, never at the top of the page.
+// ---------------------------------------------------------------------------
 
-  return (
-    <section className="mt-5 rounded-md border border-zinc-200 bg-white p-4">
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-        <div>
-          <h2 className="text-lg font-semibold">Auto-reload</h2>
-          <p className="mt-1 text-sm text-zinc-500">Required before order processing can run without manual payment holds.</p>
-        </div>
-        <Select value={autoReloadEnabled ? "enabled" : "disabled"} onValueChange={(value) => onAutoReloadEnabledChange(value === "enabled")}>
-          <SelectTrigger className="h-10 sm:w-40">
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="enabled">Enabled</SelectItem>
-            <SelectItem value="disabled">Disabled</SelectItem>
-          </SelectContent>
-        </Select>
-      </div>
-
-      <div className="mt-4 grid gap-4 lg:grid-cols-4">
-        <div className="space-y-2 lg:col-span-2">
-          <Label>Funding method</Label>
-          <Select
-            value={fundingMethodId}
-            onValueChange={onFundingMethodIdChange}
-            disabled={activeFundingMethods.length === 0}
-          >
-            <SelectTrigger className="h-10">
-              <SelectValue placeholder="Select active Stripe method" />
-            </SelectTrigger>
-            <SelectContent>
-              {activeFundingMethods.map((method) => (
-                <SelectItem key={method.fundingMethodId} value={String(method.fundingMethodId)}>
-                  {method.displayLabel || formatStatus(method.rail)}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="auto-reload-minimum">Minimum balance</Label>
-          <Input id="auto-reload-minimum" value={minimumBalance} onChange={(event) => onMinimumBalanceChange(event.target.value)} className="h-10" />
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="auto-reload-max">Max reload</Label>
-          <Input id="auto-reload-max" value={maxSingleReload} onChange={(event) => onMaxSingleReloadChange(event.target.value)} className="h-10" />
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="payment-hold-timeout">Payment hold minutes</Label>
-          <Input
-            id="payment-hold-timeout"
-            value={paymentHoldTimeoutMinutes}
-            onChange={(event) => onPaymentHoldTimeoutMinutesChange(event.target.value)}
-            className="h-10"
-          />
-        </div>
-      </div>
-
-      {activeFundingMethods.length === 0 && (
-        <div className="mt-4 rounded-md border border-dashed border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
-          Add an active card or ACH funding method before enabling auto-reload.
-        </div>
-      )}
-
-      <Button
-        type="button"
-        className="mt-4 h-10 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
-        disabled={saveDisabled}
-        onClick={onSave}
-      >
-        {walletButtonIcon(pendingWalletAction, emailStepUpAction, "add_funding_method")}
-        {walletButtonLabel(pendingWalletAction, emailStepUpAction, "add_funding_method")}
-      </Button>
-    </section>
-  );
+interface SectionFeedbackProps {
+  busy: boolean;
+  notice: WalletNotice | null;
+  verification: {
+    code: string;
+    onCodeChange: (value: string) => void;
+    onSubmit: () => void;
+    onCancel: () => void;
+  } | null;
 }
 
-function SensitiveActionVerificationPanel({
-  emailStepUpAction,
-  onVerificationCodeChange,
-  pendingWalletAction,
-  verificationCode,
-}: {
-  emailStepUpAction: WalletSensitiveAction;
-  onVerificationCodeChange: (value: string) => void;
-  pendingWalletAction: PendingWalletAction;
-  verificationCode: string;
-}) {
+function SectionFeedback({ busy, notice, verification }: SectionFeedbackProps) {
   return (
-    <section className="mt-5 rounded-md border border-zinc-200 bg-white p-4">
-      <div className="max-w-sm space-y-2">
-        <Label>{walletSensitiveActionLabel(emailStepUpAction)}</Label>
-        <InputOTP
-          maxLength={6}
-          value={verificationCode}
-          onChange={onVerificationCodeChange}
-          containerClassName="justify-between"
-          disabled={pendingWalletAction !== null}
+    <>
+      {notice && (
+        <Alert
+          role={notice.tone === "error" ? "alert" : "status"}
+          variant={notice.tone === "error" ? "destructive" : "default"}
+          className={notice.tone === "success" ? "mt-4 border-emerald-200 bg-emerald-50 text-emerald-900" : "mt-4"}
         >
-          <InputOTPGroup>
-            {Array.from({ length: 6 }).map((_, index) => (
-              <InputOTPSlot key={index} index={index} className="h-10 w-10 text-sm" />
-            ))}
-          </InputOTPGroup>
-        </InputOTP>
-      </div>
-    </section>
-  );
-}
-
-function FundWalletPanel({
-  activeFundingMethods,
-  emailStepUpAction,
-  fundingAmount,
-  fundingLoadMethodId,
-  onFund,
-  onFundingAmountChange,
-  onFundingLoadMethodIdChange,
-  pendingWalletAction,
-  verificationCode,
-}: {
-  activeFundingMethods: DropshipWalletResponse["wallet"]["fundingMethods"];
-  emailStepUpAction: WalletSensitiveAction | null;
-  fundingAmount: string;
-  fundingLoadMethodId: string;
-  onFund: () => void;
-  onFundingAmountChange: (value: string) => void;
-  onFundingLoadMethodIdChange: (value: string) => void;
-  pendingWalletAction: PendingWalletAction;
-  verificationCode: string;
-}) {
-  const fundDisabled = pendingWalletAction !== null
-    || activeFundingMethods.length === 0
-    || walletEmailStepUpRequiresCode(emailStepUpAction, "wallet_funding_high_value", verificationCode);
-
-  return (
-    <section className="mt-5 rounded-md border border-zinc-200 bg-white p-4">
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-        <div>
-          <h2 className="text-lg font-semibold">Load wallet</h2>
-          <p className="mt-1 text-sm text-zinc-500">Add funds from an active card or ACH funding method.</p>
-        </div>
-        <Button
-          type="button"
-          className="h-10 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
-          disabled={fundDisabled}
-          onClick={onFund}
-        >
-          {fundWalletButtonIcon(pendingWalletAction, emailStepUpAction)}
-          {fundWalletButtonLabel(pendingWalletAction, emailStepUpAction)}
-        </Button>
-      </div>
-
-      <div className="mt-4 grid gap-4 lg:grid-cols-[2fr_1fr]">
-        <div className="space-y-2">
-          <Label>Funding method</Label>
-          <Select
-            value={fundingLoadMethodId}
-            onValueChange={onFundingLoadMethodIdChange}
-            disabled={activeFundingMethods.length === 0}
-          >
-            <SelectTrigger className="h-10">
-              <SelectValue placeholder="Select active Stripe method" />
-            </SelectTrigger>
-            <SelectContent>
-              {activeFundingMethods.map((method) => (
-                <SelectItem key={method.fundingMethodId} value={String(method.fundingMethodId)}>
-                  {method.displayLabel || formatStatus(method.rail)}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="wallet-funding-amount">Amount</Label>
-          <Input
-            id="wallet-funding-amount"
-            value={fundingAmount}
-            onChange={(event) => onFundingAmountChange(event.target.value)}
-            className="h-10"
-          />
-        </div>
-      </div>
-
-      {activeFundingMethods.length === 0 && (
-        <div className="mt-4 rounded-md border border-dashed border-amber-300 bg-amber-50 p-4 text-sm text-amber-900">
-          Add an active card or ACH funding method before loading the wallet.
-        </div>
+          {notice.tone === "error" ? <AlertCircle className="h-4 w-4" /> : notice.tone === "success" ? <CheckCircle2 className="h-4 w-4" /> : <Info className="h-4 w-4" />}
+          <AlertDescription>{notice.text}</AlertDescription>
+        </Alert>
       )}
-    </section>
-  );
-}
-
-function UsdcFundingMethodPanel({
-  emailStepUpAction,
-  onDisplayLabelChange,
-  onSave,
-  onWalletAddressChange,
-  pendingWalletAction,
-  usdcDisplayLabel,
-  usdcWalletAddress,
-  verificationCode,
-}: {
-  emailStepUpAction: WalletSensitiveAction | null;
-  onDisplayLabelChange: (value: string) => void;
-  onSave: () => void;
-  onWalletAddressChange: (value: string) => void;
-  pendingWalletAction: PendingWalletAction;
-  usdcDisplayLabel: string;
-  usdcWalletAddress: string;
-  verificationCode: string;
-}) {
-  const saveDisabled = pendingWalletAction !== null
-    || !usdcWalletAddress.trim()
-    || walletEmailStepUpRequiresCode(emailStepUpAction, "add_funding_method", verificationCode);
-
-  return (
-    <section className="mt-5 rounded-md border border-zinc-200 bg-white p-4">
-      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-        <div>
-          <div className="flex flex-wrap items-center gap-2">
-            <h2 className="text-lg font-semibold">USDC on Base</h2>
-            <Badge variant="outline">Optional</Badge>
+      {verification && (
+        <div className="mt-4 max-w-sm space-y-3 rounded-md border border-violet-200 bg-violet-50 p-4" data-testid="wallet-verification">
+          <Label htmlFor="wallet-verification-code">Verification code</Label>
+          <InputOTP
+            id="wallet-verification-code"
+            maxLength={6}
+            value={verification.code}
+            onChange={verification.onCodeChange}
+            containerClassName="justify-between"
+            disabled={busy}
+          >
+            <InputOTPGroup>
+              {Array.from({ length: 6 }).map((_, index) => (
+                <InputOTPSlot key={index} index={index} className="h-10 w-10 text-sm" />
+              ))}
+            </InputOTPGroup>
+          </InputOTP>
+          <div className="flex gap-2">
+            <Button
+              type="button"
+              className="h-9 bg-[#C060E0] hover:bg-[#a94bc9]"
+              disabled={busy || verification.code.length !== 6}
+              onClick={verification.onSubmit}
+            >
+              {busy ? "Checking code" : "Continue"}
+            </Button>
+            <Button type="button" variant="ghost" className="h-9" disabled={busy} onClick={verification.onCancel}>
+              Cancel
+            </Button>
           </div>
-          <p className="mt-1 text-sm text-zinc-500">Register a wallet address for optional confirmed-transfer funding. USDC is not used for auto-reload and is not required for launch.</p>
         </div>
-        <Button
-          type="button"
-          variant="outline"
-          className="h-10 gap-2"
-          disabled={saveDisabled}
-          onClick={onSave}
-        >
-          <CircleDollarSign className="h-4 w-4" />
-          {pendingWalletAction === "usdc-base"
-            ? "Saving USDC"
-            : emailStepUpAction === "add_funding_method"
-              ? "Verify and save USDC"
-              : "Save USDC"}
-        </Button>
-      </div>
+      )}
+    </>
+  );
+}
 
-      <div className="mt-4 grid gap-4 lg:grid-cols-[2fr_1fr]">
-        <div className="space-y-2">
-          <Label htmlFor="usdc-wallet-address">Wallet address</Label>
-          <Input
-            id="usdc-wallet-address"
-            value={usdcWalletAddress}
-            onChange={(event) => onWalletAddressChange(event.target.value)}
-            placeholder="0x..."
-            className="h-10 font-mono text-sm"
+// ---------------------------------------------------------------------------
+// Setup: one step at a time until the launch gate is satisfied.
+// ---------------------------------------------------------------------------
+
+const SETUP_STEPS = [
+  { key: "card", title: "Add a card" },
+  { key: "reload", title: "Keep it funded automatically" },
+  { key: "done", title: "Start selling" },
+] as const;
+
+function SetupSection({
+  setup, awaitingCard, confirmationTimedOut, busy, notice, verification, onAddCard, onAddBankAccount, onCheckAgain, onTurnOn,
+}: SectionFeedbackProps & {
+  setup: WalletSetupState;
+  awaitingCard: boolean;
+  confirmationTimedOut: boolean;
+  onAddCard: () => void;
+  onAddBankAccount: () => void;
+  onCheckAgain: () => void;
+  onTurnOn: (input: { fundingMethodId: number; minimumBalanceCents: number; maxSingleReloadCents: number }) => void;
+}) {
+  const cardDone = setup.primaryMethod !== null;
+  const currentIndex = cardDone ? 1 : 0;
+
+  return (
+    <section className="mt-5 rounded-md border border-zinc-200 bg-white p-5" data-testid="wallet-setup">
+      <h2 className="text-lg font-semibold">Set up your wallet</h2>
+      <p className="mt-1 text-sm text-zinc-500">Two short steps. Nothing is charged until you accept an order.</p>
+
+      <ol className="mt-4 space-y-2">
+        {SETUP_STEPS.map((step, index) => {
+          const state = index < currentIndex ? "done" : index === currentIndex ? "current" : "later";
+          return (
+            <li key={step.key} className="flex items-center gap-3 text-sm">
+              <span
+                className={state === "done"
+                  ? "flex h-6 w-6 items-center justify-center rounded-full bg-emerald-600 text-white"
+                  : state === "current"
+                    ? "flex h-6 w-6 items-center justify-center rounded-full bg-[#C060E0] text-white"
+                    : "flex h-6 w-6 items-center justify-center rounded-full border border-zinc-300 text-zinc-500"}
+                aria-hidden="true"
+              >
+                {state === "done" ? <CheckCircle2 className="h-4 w-4" /> : index + 1}
+              </span>
+              <span className={state === "later" ? "text-zinc-500" : "font-medium"}>{step.title}</span>
+              {state === "current" && <Badge variant="outline">Now</Badge>}
+            </li>
+          );
+        })}
+      </ol>
+
+      <div className="mt-5 border-t border-zinc-200 pt-5">
+        {!cardDone && (setup.stage === "confirm_card" || awaitingCard) ? (
+          <CardConfirmation timedOut={confirmationTimedOut && !awaitingCard} onCheckAgain={onCheckAgain} />
+        ) : !cardDone ? (
+          <div>
+            <h3 className="font-medium">Add a card</h3>
+            <p className="mt-1 text-sm text-zinc-600">
+              You will be sent to Stripe to enter it. Card Shellz never sees your card number.
+            </p>
+            <div className="mt-4 flex flex-wrap items-center gap-3">
+              <Button type="button" className="h-10 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" disabled={busy} onClick={onAddCard}>
+                <CreditCard className="h-4 w-4" />
+                {busy ? "One moment" : "Add a card"}
+              </Button>
+              <Button type="button" variant="link" className="h-10 px-0 text-zinc-600" disabled={busy} onClick={onAddBankAccount}>
+                Use a bank account instead
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <AutoReloadChooser
+            methods={setup.stripeMethods}
+            primaryMethod={setup.primaryMethod!}
+            initialMinimumCents={AUTO_RELOAD_DEFAULTS.minimumBalanceCents}
+            initialAmountCents={AUTO_RELOAD_DEFAULTS.maxSingleReloadCents}
+            busy={busy}
+            submitLabel="Turn on auto-reload"
+            onSubmit={onTurnOn}
           />
-        </div>
-        <div className="space-y-2">
-          <Label htmlFor="usdc-display-label">Label</Label>
-          <Input
-            id="usdc-display-label"
-            value={usdcDisplayLabel}
-            onChange={(event) => onDisplayLabelChange(event.target.value)}
-            className="h-10"
-          />
-        </div>
+        )}
+        <SectionFeedback busy={busy} notice={notice} verification={verification} />
       </div>
     </section>
   );
 }
 
-function Metric({ detail, title, value }: { detail?: string; title: string; value: string }) {
+function CardConfirmation({ timedOut, onCheckAgain }: { timedOut: boolean; onCheckAgain: () => void }) {
+  if (timedOut) {
+    return (
+      <div role="status">
+        <h3 className="font-medium">Still confirming your card</h3>
+        <p className="mt-1 text-sm text-zinc-600">
+          Stripe accepted the card but has not confirmed it to Card Shellz yet. This is taking longer than usual.
+          Refresh in a minute. If the card still is not here, contact Card Shellz support.
+        </p>
+        <Button type="button" variant="outline" className="mt-4 h-10 gap-2" onClick={onCheckAgain}>
+          <RefreshCw className="h-4 w-4" />
+          Check again
+        </Button>
+      </div>
+    );
+  }
   return (
-    <div className="rounded-md border border-zinc-200 bg-white p-4">
-      <div className="text-sm text-zinc-500">{title}</div>
-      <div className="mt-2 text-2xl font-semibold">{value}</div>
-      {detail && <div className="mt-1 text-sm text-zinc-500">{detail}</div>}
+    <div role="status" className="flex items-start gap-3">
+      <Loader2 className="mt-0.5 h-5 w-5 animate-spin text-[#C060E0]" aria-hidden="true" />
+      <div>
+        <h3 className="font-medium">Confirming your card</h3>
+        <p className="mt-1 text-sm text-zinc-600">Stripe is confirming the card. This usually takes a few seconds.</p>
+      </div>
     </div>
   );
 }
 
-function isStripeFundingMethod(method: DropshipWalletFundingMethod): boolean {
-  return method.rail === "stripe_card" || method.rail === "stripe_ach";
+/**
+ * The auto-reload choice as one sentence with preset amounts. Free-text money
+ * fields are gone: every choice is a whole-dollar preset the server accepts.
+ */
+function AutoReloadChooser({
+  methods, primaryMethod, initialMinimumCents, initialAmountCents, busy, submitLabel, onSubmit,
+}: {
+  methods: readonly DropshipWalletFundingMethod[];
+  primaryMethod: DropshipWalletFundingMethod;
+  initialMinimumCents: number;
+  initialAmountCents: number;
+  busy: boolean;
+  submitLabel: string;
+  onSubmit: (input: { fundingMethodId: number; minimumBalanceCents: number; maxSingleReloadCents: number }) => void;
+}) {
+  const [minimumCents, setMinimumCents] = useState(initialMinimumCents);
+  const [amountCents, setAmountCents] = useState(initialAmountCents);
+  const [methodId, setMethodId] = useState(primaryMethod.fundingMethodId);
+  const invalid = amountCents < minimumCents;
+
+  return (
+    <div>
+      <h3 className="font-medium">Keep it funded automatically</h3>
+      <p className="mt-1 text-sm text-zinc-600">
+        When an order needs more than your balance, we top the wallet up from your card. Nothing is charged until then.
+      </p>
+      <div className="mt-4 space-y-4">
+        <PresetPicker
+          label="Reload when my balance drops below"
+          options={AUTO_RELOAD_MINIMUM_PRESETS_CENTS}
+          value={minimumCents}
+          onChange={setMinimumCents}
+          disabled={busy}
+        />
+        <PresetPicker
+          label="Add this much each time"
+          options={AUTO_RELOAD_AMOUNT_PRESETS_CENTS}
+          value={amountCents}
+          onChange={setAmountCents}
+          disabled={busy}
+        />
+        {methods.length > 1 ? (
+          <div className="space-y-2">
+            <Label htmlFor="auto-reload-method">Charge</Label>
+            <select
+              id="auto-reload-method"
+              className="h-10 w-full max-w-sm rounded-md border border-zinc-300 bg-white px-3 text-sm"
+              value={methodId}
+              disabled={busy}
+              onChange={(event) => setMethodId(Number(event.target.value))}
+            >
+              {methods.map((method) => (
+                <option key={method.fundingMethodId} value={method.fundingMethodId}>{describeFundingMethod(method)}</option>
+              ))}
+            </select>
+          </div>
+        ) : (
+          <p className="text-sm text-zinc-600">Charged to <span className="font-medium text-zinc-900">{describeFundingMethod(primaryMethod)}</span>.</p>
+        )}
+        {invalid && (
+          <p role="alert" className="text-sm text-red-700">The reload amount must be at least the minimum balance.</p>
+        )}
+      </div>
+      <Button
+        type="button"
+        className="mt-5 h-10 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+        disabled={busy || invalid}
+        onClick={() => onSubmit({ fundingMethodId: methodId, minimumBalanceCents: minimumCents, maxSingleReloadCents: amountCents })}
+      >
+        {busy ? "Saving" : submitLabel}
+      </Button>
+    </div>
+  );
 }
 
-function autoReloadMetricValue(
-  wallet: DropshipWalletState,
-  stripeFundingMethods: readonly DropshipWalletFundingMethod[],
-): string {
-  if (!wallet.autoReload) return "Needs setup";
-  if (!wallet.autoReload.enabled) return "Disabled";
-  return findConfiguredAutoReloadFundingMethod(wallet, stripeFundingMethods) ? "Ready" : "Funding method needed";
+function PresetPicker({
+  label, options, value, onChange, disabled,
+}: {
+  label: string;
+  options: readonly number[];
+  value: number;
+  onChange: (cents: number) => void;
+  disabled: boolean;
+}) {
+  return (
+    <div role="radiogroup" aria-label={label} className="space-y-2">
+      <div className="text-sm font-medium">{label}</div>
+      <div className="flex flex-wrap gap-2">
+        {options.map((cents) => {
+          const selected = cents === value;
+          return (
+            <button
+              key={cents}
+              type="button"
+              role="radio"
+              aria-checked={selected}
+              disabled={disabled}
+              onClick={() => onChange(cents)}
+              className={selected
+                ? "h-10 rounded-md border border-[#C060E0] bg-[#C060E0]/10 px-4 text-sm font-medium text-[#8c35aa]"
+                : "h-10 rounded-md border border-zinc-300 bg-white px-4 text-sm hover:bg-zinc-50 disabled:opacity-50"}
+            >
+              {formatWholeDollars(cents)}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
-function autoReloadMetricDetail(
-  wallet: DropshipWalletState,
-  stripeFundingMethods: readonly DropshipWalletFundingMethod[],
-): string {
-  if (!wallet.autoReload) return "No auto-reload configuration";
-  if (!wallet.autoReload.enabled) return "Enable with a Stripe card or ACH method before launch.";
+// ---------------------------------------------------------------------------
+// After setup: the balance, adding money, and the auto-reload summary.
+// ---------------------------------------------------------------------------
 
-  const fundingMethod = findConfiguredAutoReloadFundingMethod(wallet, stripeFundingMethods);
-  if (!fundingMethod) return "Select an active Stripe card or ACH method.";
+function BalanceSection({
+  setup, busy, notice, verification, onAddFunds,
+}: SectionFeedbackProps & {
+  setup: WalletSetupState;
+  onAddFunds: (input: { fundingMethodId: number; amountCents: number }) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [presetCents, setPresetCents] = useState<number>(FUND_WALLET_PRESETS_CENTS[1]);
+  const [customAmount, setCustomAmount] = useState("");
+  const [customError, setCustomError] = useState("");
+  const method = setup.primaryMethod;
 
-  const label = fundingMethod.displayLabel || formatStatus(fundingMethod.rail);
-  return `Minimum ${formatCents(wallet.autoReload.minimumBalanceCents)} with ${label}`;
+  function submit() {
+    if (!method) return;
+    let amountCents = presetCents;
+    if (customAmount.trim()) {
+      try {
+        amountCents = parseDollarInputToCents(customAmount, "Amount");
+      } catch (caught) {
+        setCustomError(caught instanceof Error ? caught.message : "Enter a dollar amount.");
+        return;
+      }
+    }
+    setCustomError("");
+    onAddFunds({ fundingMethodId: method.fundingMethodId, amountCents });
+  }
+
+  return (
+    <section className="mt-5 rounded-md border border-zinc-200 bg-white p-5" data-testid="wallet-balance">
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+        <div>
+          <div className="text-sm text-zinc-500">Available balance</div>
+          <div className="mt-1 text-4xl font-semibold" data-testid="wallet-available">{formatCents(setup.availableBalanceCents)}</div>
+          {setup.pendingBalanceCents > 0 && (
+            <div className="mt-1 text-sm text-zinc-500">{formatCents(setup.pendingBalanceCents)} on the way</div>
+          )}
+        </div>
+        <Button type="button" variant={open ? "outline" : "default"} className={open ? "h-10" : "h-10 bg-[#C060E0] hover:bg-[#a94bc9]"} onClick={() => setOpen((value) => !value)}>
+          {open ? "Close" : "Add funds"}
+        </Button>
+      </div>
+
+      {open && method && (
+        <div className="mt-5 border-t border-zinc-200 pt-5">
+          <p className="text-sm text-zinc-600">
+            Optional. Adding money now means your first orders do not wait for a reload. Charged to {describeFundingMethod(method)}.
+          </p>
+          <div className="mt-4 space-y-4">
+            <PresetPicker label="Amount" options={FUND_WALLET_PRESETS_CENTS} value={customAmount.trim() ? -1 : presetCents} onChange={(cents) => { setPresetCents(cents); setCustomAmount(""); setCustomError(""); }} disabled={busy} />
+            <div className="max-w-xs space-y-2">
+              <Label htmlFor="wallet-custom-amount">Or another amount</Label>
+              <Input
+                id="wallet-custom-amount"
+                inputMode="decimal"
+                placeholder="75.00"
+                value={customAmount}
+                disabled={busy}
+                onChange={(event) => { setCustomAmount(event.target.value); setCustomError(""); }}
+                className="h-10"
+              />
+              {customError && <p role="alert" className="text-sm text-red-700">{customError}</p>}
+            </div>
+          </div>
+          <Button type="button" className="mt-5 h-10 bg-[#C060E0] hover:bg-[#a94bc9]" disabled={busy} onClick={submit}>
+            {busy ? "One moment" : "Continue to payment"}
+          </Button>
+        </div>
+      )}
+      <SectionFeedback busy={busy} notice={notice} verification={verification} />
+    </section>
+  );
 }
 
-function findConfiguredAutoReloadFundingMethod(
-  wallet: DropshipWalletState,
-  stripeFundingMethods: readonly DropshipWalletFundingMethod[],
-): DropshipWalletFundingMethod | null {
-  const fundingMethodId = wallet.autoReload?.fundingMethodId;
-  if (!fundingMethodId) return null;
-  return stripeFundingMethods.find((method) => method.fundingMethodId === fundingMethodId) ?? null;
+function AutoReloadSection({
+  wallet, setup, busy, notice, verification, onTurnOn, onTurnOff, onAddCard,
+}: SectionFeedbackProps & {
+  wallet: DropshipWalletOverview;
+  setup: WalletSetupState;
+  onTurnOn: (input: { fundingMethodId: number; minimumBalanceCents: number; maxSingleReloadCents: number }) => void;
+  onTurnOff: () => void;
+  onAddCard: () => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const autoReload = wallet.autoReload;
+  const method = setup.primaryMethod;
+
+  return (
+    <section className="mt-5 rounded-md border border-zinc-200 bg-white p-5" data-testid="wallet-auto-reload">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h2 className="text-lg font-semibold">Auto-reload</h2>
+          {autoReload && setup.autoReloadReady && method ? (
+            <p className="mt-1 text-sm text-zinc-600" data-testid="wallet-auto-reload-summary">
+              Below {formatCents(autoReload.minimumBalanceCents)}, add {formatCents(autoReload.maxSingleReloadCents ?? autoReload.minimumBalanceCents)} from {describeFundingMethod(method)}.
+            </p>
+          ) : (
+            <p className="mt-1 text-sm text-zinc-600">Off. Orders wait for a manual payment.</p>
+          )}
+        </div>
+        <div className="flex items-center gap-2">
+          <Label htmlFor="wallet-auto-reload-switch" className="text-sm">{setup.autoReloadReady ? "On" : "Off"}</Label>
+          <Switch
+            id="wallet-auto-reload-switch"
+            checked={setup.autoReloadReady}
+            disabled={busy}
+            onCheckedChange={(checked) => {
+              if (checked) setEditing(true);
+              else onTurnOff();
+            }}
+          />
+        </div>
+      </div>
+      <div className="mt-3 flex flex-wrap gap-2">
+        {setup.autoReloadReady && method && (
+          <Button type="button" variant="outline" size="sm" className="h-9" disabled={busy} onClick={() => setEditing((value) => !value)}>
+            {editing ? "Cancel" : "Change amounts"}
+          </Button>
+        )}
+        <Button type="button" variant="outline" size="sm" className="h-9 gap-2" disabled={busy} onClick={onAddCard}>
+          <CreditCard className="h-4 w-4" />
+          {method ? "Add another card" : "Add a card"}
+        </Button>
+      </div>
+      {editing && method && (
+        <div className="mt-5 border-t border-zinc-200 pt-5">
+          <AutoReloadChooser
+            methods={setup.stripeMethods}
+            primaryMethod={method}
+            initialMinimumCents={autoReload?.minimumBalanceCents ?? AUTO_RELOAD_DEFAULTS.minimumBalanceCents}
+            initialAmountCents={autoReload?.maxSingleReloadCents ?? AUTO_RELOAD_DEFAULTS.maxSingleReloadCents}
+            busy={busy}
+            submitLabel="Save"
+            onSubmit={(input) => { setEditing(false); onTurnOn(input); }}
+          />
+        </div>
+      )}
+      <SectionFeedback busy={busy} notice={notice} verification={verification} />
+    </section>
+  );
 }
 
-function centsToDollarInput(cents: number): string {
-  if (!Number.isSafeInteger(cents) || cents < 0) return "0.00";
-  const dollars = Math.trunc(cents / 100);
-  const remainder = cents % 100;
-  return `${dollars}.${String(remainder).padStart(2, "0")}`;
+// ---------------------------------------------------------------------------
+// Advanced: everything a vendor does not need for launch, collapsed by default.
+// ---------------------------------------------------------------------------
+
+function AdvancedSection({
+  wallet, busy, notice, verification, onAddBankAccount, onSaveHoldTimeout, onSaveUsdc,
+}: SectionFeedbackProps & {
+  wallet: DropshipWalletOverview;
+  onAddBankAccount: () => void;
+  onSaveHoldTimeout: (minutes: string) => void;
+  onSaveUsdc: (input: { walletAddress: string; displayLabel: string }) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [holdMinutes, setHoldMinutes] = useState(String(wallet.autoReload?.paymentHoldTimeoutMinutes ?? AUTO_RELOAD_DEFAULTS.paymentHoldTimeoutMinutes));
+  const [usdcAddress, setUsdcAddress] = useState("");
+  const [usdcLabel, setUsdcLabel] = useState("USDC on Base");
+
+  useEffect(() => {
+    setHoldMinutes(String(wallet.autoReload?.paymentHoldTimeoutMinutes ?? AUTO_RELOAD_DEFAULTS.paymentHoldTimeoutMinutes));
+  }, [wallet.autoReload?.paymentHoldTimeoutMinutes]);
+
+  return (
+    <Collapsible open={open} onOpenChange={setOpen} className="mt-5 rounded-md border border-zinc-200 bg-white" data-testid="wallet-advanced">
+      <CollapsibleTrigger asChild>
+        <button type="button" className="flex w-full items-center justify-between p-5 text-left">
+          <span>
+            <span className="block text-lg font-semibold">Advanced</span>
+            <span className="block text-sm text-zinc-500">Bank accounts, USDC, payment hold timeout, and every saved method.</span>
+          </span>
+          <ChevronDown className={open ? "h-5 w-5 rotate-180 transition-transform" : "h-5 w-5 transition-transform"} aria-hidden="true" />
+        </button>
+      </CollapsibleTrigger>
+      <CollapsibleContent>
+        <div className="space-y-6 border-t border-zinc-200 p-5">
+          <div>
+            <h3 className="font-medium">Bank account (ACH)</h3>
+            <p className="mt-1 text-sm text-zinc-600">Lower fees than a card, but reloads take a few days to settle.</p>
+            <Button type="button" variant="outline" className="mt-3 h-10 gap-2" disabled={busy} onClick={onAddBankAccount}>
+              <Landmark className="h-4 w-4" />
+              Add a bank account
+            </Button>
+          </div>
+
+          <div>
+            <h3 className="font-medium">Payment hold timeout</h3>
+            <p className="mt-1 text-sm text-zinc-600">
+              If a reload fails, an order waits this long for a manual payment before it is cancelled.
+            </p>
+            <div className="mt-3 flex max-w-sm items-end gap-2">
+              <div className="flex-1 space-y-2">
+                <Label htmlFor="wallet-hold-minutes">Minutes</Label>
+                <Input id="wallet-hold-minutes" inputMode="numeric" value={holdMinutes} disabled={busy} onChange={(event) => setHoldMinutes(event.target.value)} className="h-10" />
+              </div>
+              <Button type="button" variant="outline" className="h-10" disabled={busy} onClick={() => onSaveHoldTimeout(holdMinutes)}>
+                Save
+              </Button>
+            </div>
+          </div>
+
+          <div>
+            <h3 className="font-medium">USDC on Base</h3>
+            <p className="mt-1 text-sm text-zinc-600">Optional. Register a wallet address to fund by confirmed transfer. Not used for auto-reload.</p>
+            <div className="mt-3 grid gap-3 sm:grid-cols-[2fr_1fr]">
+              <div className="space-y-2">
+                <Label htmlFor="wallet-usdc-address">Wallet address</Label>
+                <Input id="wallet-usdc-address" placeholder="0x..." value={usdcAddress} disabled={busy} onChange={(event) => setUsdcAddress(event.target.value)} className="h-10 font-mono text-sm" />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="wallet-usdc-label">Label</Label>
+                <Input id="wallet-usdc-label" value={usdcLabel} disabled={busy} onChange={(event) => setUsdcLabel(event.target.value)} className="h-10" />
+              </div>
+            </div>
+            <Button type="button" variant="outline" className="mt-3 h-10" disabled={busy || !usdcAddress.trim()} onClick={() => onSaveUsdc({ walletAddress: usdcAddress, displayLabel: usdcLabel })}>
+              Save USDC address
+            </Button>
+          </div>
+
+          <div>
+            <h3 className="font-medium">Saved methods</h3>
+            {wallet.fundingMethods.length ? (
+              <ul className="mt-3 space-y-2">
+                {wallet.fundingMethods.map((method) => (
+                  <li key={method.fundingMethodId} className="flex items-center justify-between rounded-md border border-zinc-200 p-3 text-sm">
+                    <span>
+                      <span className="font-medium">{describeFundingMethod(method)}</span>
+                      <span className="ml-2 text-zinc-500">{isStripeFundingMethod(method) ? (method.rail === "stripe_card" ? "Card" : "Bank account") : formatStatus(method.rail)}</span>
+                    </span>
+                    <Badge variant="outline">{method.isDefault ? "Default" : formatStatus(method.status)}</Badge>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p className="mt-2 text-sm text-zinc-500">None yet.</p>
+            )}
+          </div>
+
+          <SectionFeedback busy={busy} notice={notice} verification={verification} />
+        </div>
+      </CollapsibleContent>
+    </Collapsible>
+  );
 }
 
-function maskAddress(address: string): string {
-  const trimmed = address.trim();
-  if (trimmed.length <= 12) return trimmed;
-  return `${trimmed.slice(0, 6)}...${trimmed.slice(-4)}`;
+function ActivitySection({ wallet }: { wallet: DropshipWalletOverview }) {
+  return (
+    <section className="mt-5 rounded-md border border-zinc-200 bg-white p-5">
+      <div className="flex items-center justify-between">
+        <h2 className="text-lg font-semibold">Activity</h2>
+        <History className="h-5 w-5 text-zinc-400" aria-hidden="true" />
+      </div>
+      {wallet.recentLedger.length ? (
+        <div className="mt-4 overflow-x-auto rounded-md border border-zinc-200">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>What</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead>Amount</TableHead>
+                <TableHead>When</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {wallet.recentLedger.map((entry) => (
+                <TableRow key={entry.ledgerEntryId}>
+                  <TableCell>{formatStatus(entry.type)}</TableCell>
+                  <TableCell><Badge variant="outline">{formatStatus(entry.status)}</Badge></TableCell>
+                  <TableCell className="font-mono">{formatCents(entry.amountCents)}</TableCell>
+                  <TableCell className="whitespace-nowrap text-sm text-zinc-500">{formatDateTime(entry.createdAt)}</TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      ) : (
+        <p className="mt-2 text-sm text-zinc-500">No activity yet. Charges and reloads will show here.</p>
+      )}
+    </section>
+  );
 }
 
-function walletButtonLabel(
-  pendingWalletAction: PendingWalletAction,
-  emailStepUpAction: WalletSensitiveAction | null,
-  action: WalletSensitiveAction,
-): string {
-  if (pendingWalletAction === "send-code") return "Sending code";
-  if (pendingWalletAction === "verify-code") return "Verifying code";
-  if (pendingWalletAction === "passkey-proof") return "Waiting for passkey";
-  if (pendingWalletAction === "stripe-card") return "Starting card setup";
-  if (pendingWalletAction === "stripe-ach") return "Starting ACH setup";
-  if (pendingWalletAction === "usdc-base") return "Saving USDC";
-  if (pendingWalletAction === "fund-wallet") return "Starting wallet funding";
-  if (pendingWalletAction === "save") return "Saving";
-  if (emailStepUpAction === action) return "Verify and save";
-  return "Save auto-reload";
+function WalletFundingReturnBanner({ status, onDismiss }: { status: "success" | "cancelled"; onDismiss: () => void }) {
+  const success = status === "success";
+  return (
+    <Alert className={success ? "mt-5 border-emerald-200 bg-emerald-50 text-emerald-900" : "mt-5"}>
+      {success ? <CheckCircle2 className="h-4 w-4" /> : <Info className="h-4 w-4" />}
+      <AlertDescription className="flex items-center justify-between gap-3">
+        <span>
+          {success
+            ? "Payment received. Your balance updates as soon as Stripe confirms it."
+            : "Payment cancelled. Nothing was charged."}
+        </span>
+        <Button type="button" variant="ghost" size="sm" className="h-8" onClick={onDismiss}>Dismiss</Button>
+      </AlertDescription>
+    </Alert>
+  );
 }
 
-function walletButtonIcon(
-  pendingWalletAction: PendingWalletAction,
-  emailStepUpAction: WalletSensitiveAction | null,
-  action: WalletSensitiveAction,
-) {
-  if (pendingWalletAction === "passkey-proof") return <Fingerprint className="h-4 w-4" />;
-  if (pendingWalletAction === "stripe-ach") return <Landmark className="h-4 w-4" />;
-  if (pendingWalletAction === "stripe-card") return <CreditCard className="h-4 w-4" />;
-  if (pendingWalletAction === "usdc-base") return <CircleDollarSign className="h-4 w-4" />;
-  if (pendingWalletAction === "fund-wallet") return <Wallet className="h-4 w-4" />;
-  if (pendingWalletAction === "send-code" || (emailStepUpAction === action && pendingWalletAction !== "save")) return <Mail className="h-4 w-4" />;
-  return <Save className="h-4 w-4" />;
-}
-
-function fundWalletButtonLabel(
-  pendingWalletAction: PendingWalletAction,
-  emailStepUpAction: WalletSensitiveAction | null,
-): string {
-  if (pendingWalletAction === "send-code") return "Sending code";
-  if (pendingWalletAction === "verify-code") return "Verifying code";
-  if (pendingWalletAction === "passkey-proof") return "Waiting for passkey";
-  if (pendingWalletAction === "fund-wallet") return "Starting funding";
-  if (emailStepUpAction === "wallet_funding_high_value") return "Verify and fund";
-  return "Fund wallet";
-}
-
-function fundWalletButtonIcon(
-  pendingWalletAction: PendingWalletAction,
-  emailStepUpAction: WalletSensitiveAction | null,
-) {
-  if (pendingWalletAction === "passkey-proof") return <Fingerprint className="h-4 w-4" />;
-  if (pendingWalletAction === "send-code" || pendingWalletAction === "verify-code" || emailStepUpAction === "wallet_funding_high_value") return <Mail className="h-4 w-4" />;
-  return <Wallet className="h-4 w-4" />;
-}
-
-function walletEmailStepUpRequiresCode(
-  currentAction: WalletSensitiveAction | null,
-  targetAction: WalletSensitiveAction,
-  verificationCode: string,
-): boolean {
-  return currentAction === targetAction && verificationCode.length !== 6;
-}
-
-function walletSensitiveActionLabel(action: WalletSensitiveAction): string {
-  if (action === "wallet_funding_high_value") return "Wallet funding verification code";
-  return "Funding method verification code";
-}
-
-function fundingMethodButtonLabel(input: {
-  pendingWalletAction: PendingWalletAction;
-  emailStepUpAction: WalletSensitiveAction | null;
-  action: WalletSensitiveAction;
-  activeLabel: string;
-  defaultLabel: string;
-  verifyLabel: string;
-  pendingAction: PendingWalletAction;
-}): string {
-  if (input.pendingWalletAction === input.pendingAction) return input.activeLabel;
-  if (input.emailStepUpAction === input.action) return input.verifyLabel;
-  return input.defaultLabel;
+function formatWholeDollars(cents: number): string {
+  return cents % 100 === 0 ? `$${(cents / 100).toLocaleString("en-US")}` : formatCents(cents);
 }

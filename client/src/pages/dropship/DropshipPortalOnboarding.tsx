@@ -820,7 +820,7 @@ function stepDescription(step: DropshipOnboardingStep): string {
   if (step.key === "vendor_profile") return "Card Shellz .ops entitlement and vendor profile are available.";
   if (step.key === "store_connection") return "One marketplace store must be connected with launch-ready credentials before launch.";
   if (step.key === "catalog_available") return "Card Shellz ops controls the catalog available for vendor selection.";
-  if (step.key === "wallet_payment") return "Stripe card or ACH funding and auto-reload are required before launch; USDC on Base is optional.";
+  if (step.key === "wallet_payment") return "Add a card and turn on auto-reload in Wallet. That is all the launch needs.";
   return "Selected products define what can be pushed to connected marketplace stores.";
 }
 
@@ -994,20 +994,18 @@ function ActivationPanel({
 function walletGateDetail(onboarding: DropshipOnboardingState): string {
   if (onboarding.wallet.walletReady) {
     return onboarding.wallet.hasSpendableBalance
-      ? "Spendable wallet balance and auto-reload are ready."
-      : "Stripe-ready auto-reload is configured; the wallet can fund accepted orders.";
+      ? "Your wallet has a balance and auto-reload is on."
+      : "Auto-reload is on. Orders will be funded from your card as needed.";
   }
   if (!onboarding.wallet.hasStripeReadyFundingMethod) {
     return onboarding.wallet.hasActiveFundingMethod
-      ? "Active funding method exists, but Stripe card or ACH setup is not ready."
-      : "Add a Stripe card or ACH funding method before accepting live dropship orders.";
+      ? "Your card is still being confirmed. Open Wallet to check."
+      : "Add a card in Wallet. Nothing is charged until you accept an order.";
   }
   if (!onboarding.wallet.autoReloadConfigured) {
-    return onboarding.wallet.autoReloadEnabled
-      ? "Select a usable Stripe card or ACH method for auto-reload."
-      : "Configure auto-reload before launch.";
+    return "Turn on auto-reload in Wallet so orders never wait for a payment.";
   }
-  return "Wallet setup needs attention.";
+  return "Open Wallet to finish setup.";
 }
 
 function stepIconTone(status: DropshipOnboardingStep["status"]): string {
