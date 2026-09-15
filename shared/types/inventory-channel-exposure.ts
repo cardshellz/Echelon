@@ -16,6 +16,20 @@ const nonblank = (max: number) => z.string().trim().min(1).max(max);
 const sha256Hex = z.string().regex(/^[0-9a-f]{64}$/);
 const postgresBigintString = z.string().regex(/^(0|[1-9]\d*)$/);
 
+/**
+ * Routine draft saves (channel rules, supply scope, SKU identities, and
+ * destination registration) are audited automatically from the authenticated
+ * actor, time, scope, request identity, and before/after values. A written
+ * note is optional context for the audit trail, never a gate on the save.
+ * Blank or whitespace-only notes normalize to null so no fabricated reason is
+ * ever persisted on the operator's behalf.
+ *
+ * Sensitive publication commands (readiness inclusion, stop, resume, global
+ * control, cutover) keep their required reasons in their own contracts.
+ */
+const optionalChangeNote = z.string().trim().max(1000).nullable().optional()
+  .transform((value) => (value ? value : null));
+
 export const channelExposurePolicyScopeSchema = z.discriminatedUnion("scopeType", [
   z.object({
     scopeType: z.literal("channel"),
@@ -60,7 +74,7 @@ export const channelExposurePolicyVersionSchema = z.object({
   scope: channelExposurePolicyScopeSchema,
   value: channelExposurePolicyValueSchema,
   definitionHash: sha256Hex,
-  changeReason: nonblank(1000),
+  changeReason: nonblank(1000).nullable(),
   createdBy: nonblank(100),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
@@ -81,7 +95,7 @@ export const publicationSourceBindingVersionSchema = z.object({
   lifecycleStatus: z.enum(["draft", "sealed", "retired"]),
   definitionHash: sha256Hex,
   fulfillmentNodeIds: z.array(positiveInteger).min(1).max(100),
-  changeReason: nonblank(1000),
+  changeReason: nonblank(1000).nullable(),
   createdBy: nonblank(100),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
@@ -111,7 +125,7 @@ export const publicationVariantMappingVersionSchema = z.object({
   externalInventoryItemId: nonblank(240),
   externalSku: z.string().trim().min(1).max(100).nullable(),
   definitionHash: sha256Hex,
-  changeReason: nonblank(1000),
+  changeReason: nonblank(1000).nullable(),
   createdBy: nonblank(100),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
@@ -175,6 +189,16 @@ export const inventoryChannelExposureAdminViewSchema = z.object({
     connections: z.array(z.object({
       id: positiveInteger,
       externalAccountLabel: z.string().max(255).nullable(),
+      // Shopify only: the primary inventory location saved on the connection.
+      // A suggestion for destination setup, never an implicit target scope.
+      shopifyLocationId: z.string().trim().min(1).max(50).nullable(),
+      // eBay only: the provider-verified seller account behind the OAuth
+      // credential. Account-scoped destinations must name exactly this id.
+      providerAccount: z.object({
+        externalAccountId: nonblank(255),
+        displayName: z.string().max(255).nullable(),
+        verifiedAt: z.string().datetime(),
+      }).strict().nullable(),
     }).strict()),
   }).strict()),
   dropshipStores: z.array(z.object({
@@ -184,6 +208,22 @@ export const inventoryChannelExposureAdminViewSchema = z.object({
     platform: z.enum(["ebay", "shopify", "tiktok", "instagram", "bigcommerce"]),
     status: nonblank(30),
     externalAccountLabel: z.string().max(255).nullable(),
+    // The verified provider account id when the store credential carries one
+    // under the provider_user_id scheme; otherwise null (setup must not guess).
+    verifiedExternalAccountId: z.string().trim().min(1).max(255).nullable(),
+  }).strict()),
+  // Catalog labels for every product/SKU that carries a saved rule on any
+  // channel, keyed by the rule's scope key, so the exceptions list can be
+  // rendered without a product being selected.
+  policySubjects: z.array(z.object({
+    scopeKey: nonblank(200),
+    productId: positiveInteger,
+    productSku: z.string().max(100).nullable(),
+    productName: z.string(),
+    productVariantId: positiveInteger.nullable(),
+    variantSku: z.string().max(100).nullable(),
+    variantName: z.string().nullable(),
+    unitsPerVariant: positiveInteger.nullable(),
   }).strict()),
   publicationTargets: z.array(inventoryPublicationTargetAdminSchema),
   fulfillmentNodes: z.array(z.object({
@@ -212,7 +252,7 @@ export const saveChannelExposurePolicyDraftRequestSchema = z.object({
   expectedHeadRevision: postgresBigintString,
   expectedDraftPolicyId: positiveInteger.nullable(),
   expectedDraftDefinitionHash: sha256Hex.nullable(),
-  changeReason: nonblank(1000),
+  changeReason: optionalChangeNote,
   idempotencyKey: nonblank(120),
 }).strict().superRefine((request, context) => {
   if ((request.expectedDraftPolicyId === null) !== (request.expectedDraftDefinitionHash === null)) {
@@ -230,7 +270,7 @@ export const savePublicationSourceBindingDraftRequestSchema = z.object({
   expectedHeadRevision: postgresBigintString,
   expectedDraftBindingId: positiveInteger.nullable(),
   expectedDraftDefinitionHash: sha256Hex.nullable(),
-  changeReason: nonblank(1000),
+  changeReason: optionalChangeNote,
   idempotencyKey: nonblank(120),
 }).strict().superRefine((request, context) => {
   if (new Set(request.fulfillmentNodeIds).size !== request.fulfillmentNodeIds.length) {
@@ -259,7 +299,7 @@ export const createInventoryPublicationTargetRequestSchema = z.object({
   providerScopeType: z.enum(["account", "location"]),
   externalScopeId: nonblank(240),
   publicationAuthority: z.enum(["echelon", "external_provider", "manual"]),
-  changeReason: nonblank(1000),
+  changeReason: optionalChangeNote,
   idempotencyKey: nonblank(120),
 }).strict().superRefine(validatePublicationDestination);
 
@@ -286,7 +326,7 @@ export const savePublicationVariantMappingDraftRequestSchema = z.object({
   expectedHeadRevision: postgresBigintString,
   expectedDraftMappingId: positiveInteger.nullable(),
   expectedDraftDefinitionHash: sha256Hex.nullable(),
-  changeReason: nonblank(1000),
+  changeReason: optionalChangeNote,
   idempotencyKey: nonblank(120),
 }).strict().superRefine((request, context) => {
   if ((request.expectedDraftMappingId === null) !== (request.expectedDraftDefinitionHash === null)) {

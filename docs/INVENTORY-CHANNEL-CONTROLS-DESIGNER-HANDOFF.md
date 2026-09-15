@@ -546,3 +546,73 @@ This is a documentation-only handoff informed by three bounded read-only reviews
 The earlier local prototype and its browser tests describe a rejected illustration, not production behavior or a design mandate. Do not use their successful browser checks to argue that the UI is acceptable.
 
 No application code, production data, inventory, recipes, ATP, reservations, Shopify/eBay/TikTok quantities, channel settings, or publication authority changed. This brief does not authorize a PR, deployment, cutover, or provider action. The next step is human design review, followed by explicit agreement on implementation.
+
+## Appendix C. Implementation record — Channel Inventory rebuild (2026-09-15)
+
+Status: **implemented on branch `claude/zealous-wright-mfwqu6`, pending owner review.** The
+owner asked for the UI to be rebuilt around the architecture in this brief rather than
+waiting for a separate design pass. This appendix records what was built, which contract
+changes it required, and which gaps remain open (and are shown as gaps in the UI rather
+than hidden behind non-functional controls).
+
+### What replaced the Inventory Exposure page
+
+`client/src/features/channel-inventory/` (route `/channels/inventory`, nav label
+**Channel Inventory**; `/channels/inventory-exposure` redirects). The page is organized
+around the accepted business hierarchy:
+
+| Operator question | Where it lives |
+| --- | --- |
+| Which channel am I working on? | Channel rail (left) with per-channel destination status dots |
+| Which warehouses can supply this channel? | **Supply** tab per destination; warehouse checklist; active vs saved-draft summary; explicit "no supply configured" failure state (no all-warehouse fallback) |
+| How much should this channel offer by default? | **Selling rules** tab → channel default: six controls in human units (percent, whole SKU units, "No limit" as an explicit choice) |
+| Which products/SKUs need different settings? | **Selling rules** tab → exceptions list (grouped by product) and an editor that shows, per field, the inherited value and its source next to the option to override it |
+| What quantity results and why? | **Quantities** tab: server preview rows only; snapshot age, rule provenance, warehouse contributions, per-row calculation chain, blockers; "Proposed" is labelled as not the marketplace's current quantity |
+| What is saved, active, and who publishes? | Destination strip pills (Publishing / Calculating only / Not publishing / Externally managed / Manual) and the **Publishing** tab: publisher, pending drafts, activation boundary, and the sensitive commands behind reason dialogs |
+
+Design rules honoured from this brief: no universal store/location picker (Shopify
+locations appear only for Shopify connections, fetched live; eBay and Dropship eBay use the
+provider-verified account id); no written reason on routine saves (optional collapsed note
+only); reasons remain required for readiness inclusion, stop, resume, and the global
+switch; the UI computes no availability or channel quantity of its own; percentages are
+never shown as basis points; pack units are stated per SKU; saved drafts are visibly
+"pending activation" and Resume is never labelled Apply.
+
+### Contract and persistence changes
+
+- `shared/types/inventory-channel-exposure.ts`: `changeReason` is optional/nullable on the
+  three routine draft saves (policy, source binding, SKU mapping) and on disabled
+  destination registration; blank notes normalize to `null`. Version DTOs carry
+  `changeReason: string | null`. The admin view adds `connections[].shopifyLocationId`,
+  `connections[].providerAccount` (verified eBay identity), `dropshipStores[].verifiedExternalAccountId`,
+  and `policySubjects` (catalog labels for every product/SKU rule); `policyHeads` is no
+  longer filtered to the selected product so exceptions can be listed per channel.
+- `migrations/247_inventory_channel_controls_optional_change_note.sql`: `change_reason` /
+  `update_reason` become nullable with null-aware check constraints on the versioned
+  definition tables, their heads, and `inventory_publication_targets`. No rows rewritten.
+- `inventory-channel-exposure-admin.repository.ts`: every routine draft save now records an
+  audit **before** image (the replaced draft, or the active definition it supersedes) and the
+  optional note under `context.note`; nothing fabricates a reason.
+- Sensitive contracts (`setInventoryPublicationTargetPreviewStateRequestSchema`,
+  stop, resume review/resume, global control, cutover) are unchanged and still require a reason.
+
+### Gaps still open (surfaced in the UI as such)
+
+| Gap | How the UI treats it today |
+| --- | --- |
+| Product/SKU-scoped warehouse supply | Supply tab states supply is per destination; no per-item control is offered |
+| Removing an entire product/SKU rule | Editor requires at least one explicit field and says removal is not available yet |
+| Routine post-cutover "apply saved drafts" | Publishing tab lists pending drafts and states activation is the reviewed cutover; Resume is documented as using the active configuration only |
+| Per-SKU desired/acknowledged/observed status | Quantities tab labels "Proposed" and points to the sync log; no read endpoint exists yet |
+| Location promise-eligibility editor | Not part of this page (inventory policy, Supply & Transformations) |
+| Providers without an adapter (e.g. Amazon, TikTok direct) | Listed, but destination registration is disabled with an explanation |
+
+### Verification
+
+- Unit: `client/src/features/channel-inventory/__tests__/*` (view-model, formatting, request
+  builders, page contract), updated server tests for optional notes and required sensitive
+  reasons, updated cross-link tests.
+- Browser (Playwright, mocked API): `test/browser/inventory-publication-target-resume.spec.ts`
+  rewritten for the Publishing tab flow; `inventory-authority-gates.spec.ts` updated for the
+  new name and path.
+- Not verified here: production data, provider accounts, or any live publication.

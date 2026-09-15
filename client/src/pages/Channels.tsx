@@ -480,7 +480,7 @@ export default function Channels() {
                   <CardTitle>Channel inventory publication</CardTitle>
                   <CardDescription>
                     {inventoryRuntimeAuthorityQuery.data?.authority === "canonical"
-                      ? "Publication targets, source warehouses, SKU policies, and preview state are controlled in Inventory Exposure."
+                      ? "Publication targets, source warehouses, SKU policies, and preview state are controlled in Channel Inventory."
                       : "The live inventory authority could not be confirmed, so legacy sync controls remain unavailable."}
                   </CardDescription>
                 </div>
@@ -488,8 +488,8 @@ export default function Channels() {
               </div>
             </CardHeader>
             <CardContent>
-              <Button variant="outline" onClick={() => navigate("/channels/inventory-exposure")}>
-                Open Inventory Exposure
+              <Button variant="outline" onClick={() => navigate("/channels/inventory")}>
+                Open Channel Inventory
               </Button>
             </CardContent>
           </Card>
@@ -711,9 +711,9 @@ export default function Channels() {
                         <Button
                           variant="outline"
                           className="w-full min-h-[44px]"
-                          onClick={() => navigate("/channels/inventory-exposure")}
+                          onClick={() => navigate("/channels/inventory")}
                         >
-                          Open Inventory Exposure
+                          Open Channel Inventory
                         </Button>
                       )}
 

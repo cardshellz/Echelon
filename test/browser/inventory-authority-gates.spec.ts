@@ -84,7 +84,7 @@ test.describe("inventory runtime authority gates", () => {
         mode === "allocation" ? "Legacy Channel Allocation is retired" : "Legacy channel reserves are retired",
         { exact: true },
       )).toBeVisible();
-      await expect(page.getByRole("link", { name: "Open Inventory Exposure", exact: true })).toBeVisible();
+      await expect(page.getByRole("link", { name: "Open Channel Inventory", exact: true })).toBeVisible();
       expect(state.unexpected).toEqual([]);
       expect(state.errors).toEqual([]);
     });
@@ -109,7 +109,7 @@ test.describe("inventory runtime authority gates", () => {
 
   test("warehouses replaces the obsolete feed switch under canonical authority", async ({ page }) => {
     const state = await setup(page, "warehouses", "canonical");
-    await expect(page.getByText("Inventory Exposure", { exact: true }).filter({ visible: true })).toBeVisible();
+    await expect(page.getByText("Channel Inventory", { exact: true }).filter({ visible: true })).toBeVisible();
     await expect(page.getByRole("switch")).toHaveCount(0);
     expect(state.unexpected).toEqual([]);
     expect(state.errors).toEqual([]);

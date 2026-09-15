@@ -507,7 +507,9 @@ function exposureView(): InventoryChannelExposureAdminView {
       name: "Shopify",
       provider: "shopify",
       status: "active",
-      connections: [{ id: 10, externalAccountLabel: "store.myshopify.com" }],
+      connections: [{
+        id: 10, externalAccountLabel: "store.myshopify.com", shopifyLocationId: null, providerAccount: null,
+      }],
     }],
     dropshipStores: [],
     publicationTargets: [{
@@ -525,6 +527,7 @@ function exposureView(): InventoryChannelExposureAdminView {
     }],
     fulfillmentNodes: [],
     policyHeads: [],
+    policySubjects: [],
     sourceBindingHeads: [],
     variantMappingHeads: [],
     legacyMappingCandidates: [],
