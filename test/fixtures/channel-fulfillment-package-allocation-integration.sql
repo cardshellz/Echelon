@@ -16,7 +16,18 @@ CREATE TABLE oms.oms_order_lines (
   external_line_item_id VARCHAR(200) NOT NULL,
   fulfillment_provider VARCHAR(40),
   paid_quantity INTEGER NOT NULL,
-  authority_fulfillable_quantity INTEGER NOT NULL
+  authority_fulfillable_quantity INTEGER NOT NULL,
+  cancelled_quantity INTEGER NOT NULL DEFAULT 0,
+  refunded_quantity INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE oms.order_line_adjustments (
+  id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  order_id BIGINT NOT NULL REFERENCES oms.oms_orders(id) ON DELETE CASCADE,
+  order_line_id BIGINT NOT NULL REFERENCES oms.oms_order_lines(id) ON DELETE CASCADE,
+  adjustment_type TEXT NOT NULL,
+  restock_policy TEXT,
+  quantity INTEGER NOT NULL CHECK (quantity > 0)
 );
 
 CREATE TABLE oms.oms_order_line_authority_events (

@@ -3,7 +3,8 @@ export type ChannelFulfillmentWritebackBlockReason =
   | "fulfillment_provider_mismatch"
   | "terminal_commercial_order"
   | "terminal_financial_order"
-  | "physical_quantity_exceeds_current_authority";
+  | "physical_quantity_exceeds_current_authority"
+  | "invalid_quantity_authority";
 
 export interface ChannelFulfillmentWritebackPolicyInput {
   readonly channelProvider: string;
@@ -12,7 +13,8 @@ export interface ChannelFulfillmentWritebackPolicyInput {
   readonly omsFinancialStatus: string | null;
   readonly requiresReview: boolean;
   readonly reviewReason: string | null;
-  readonly currentAuthorizedQuantity: number;
+  /** Cumulative paid authority net of explicit cancellation/refund dispositions. */
+  readonly commercialAuthorizedQuantity: number;
   readonly cumulativePhysicalQuantity: number;
 }
 
@@ -24,7 +26,6 @@ export interface ChannelFulfillmentWritebackPolicyDecision {
 const CHANNEL_WRITEBACK_BLOCKING_REVIEW_REASONS = new Set([
   "shipstation_shipped_after_cancel",
   "shipstation_shipped_after_refund",
-  "physical_shipment_exceeds_current_line_authority",
 ]);
 
 const TERMINAL_COMMERCIAL_ORDER_STATUSES = new Set(["cancelled", "refunded"]);
@@ -64,7 +65,15 @@ export function evaluateChannelFulfillmentWritebackPolicy(
   if (TERMINAL_FINANCIAL_STATUSES.has(financialStatus)) {
     reasons.push("terminal_financial_order");
   }
-  if (input.cumulativePhysicalQuantity > input.currentAuthorizedQuantity) {
+  // A previous computed quantity review is reevaluated below using fresh facts.
+  // It is not an independent veto; cancel/refund reviews above remain blocking.
+  // Do not clear the stored review or treat zero remaining as proof of delivery.
+  if (!Number.isSafeInteger(input.commercialAuthorizedQuantity)
+    || input.commercialAuthorizedQuantity < 0
+    || !Number.isSafeInteger(input.cumulativePhysicalQuantity)
+    || input.cumulativePhysicalQuantity < 0) {
+    reasons.push("invalid_quantity_authority");
+  } else if (input.cumulativePhysicalQuantity > input.commercialAuthorizedQuantity) {
     reasons.push("physical_quantity_exceeds_current_authority");
   }
 
