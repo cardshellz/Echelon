@@ -105,7 +105,10 @@ export function view(overrides: Partial<View> = {}): View {
         }],
       },
       { id: 6, name: "Amazon", provider: "amazon", status: "active", connections: [{ id: 66, externalAccountLabel: "amz", shopifyLocationId: null, providerAccount: null }] },
+      // The single internal channel that hosts dropship storefronts.
+      { id: 7, name: "Dropship OMS", provider: "manual", status: "active", connections: [] },
     ],
+    dropshipDestinationChannelId: 7,
     dropshipStores: [
       { id: 90, vendorId: 1, vendorName: "Vendor Co", platform: "ebay", status: "connected", externalAccountLabel: "vendor-ebay", verifiedExternalAccountId: "vendor-user-1" },
       { id: 91, vendorId: 2, vendorName: "Tok Vendor", platform: "tiktok", status: "connected", externalAccountLabel: "tok", verifiedExternalAccountId: null },

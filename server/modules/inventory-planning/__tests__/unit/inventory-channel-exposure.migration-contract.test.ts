@@ -91,8 +91,17 @@ describe("inventory channel exposure inactive foundation", () => {
 
   it("gates configuration, preview, stop, and evidence-bound resume with the intended roles", () => {
     expect(routes.match(/requirePermission\("inventory_planning", "view"\)/g)).toHaveLength(2);
-    expect(routes.match(/requirePermission\("inventory_planning", "edit"\)/g)).toHaveLength(4);
+    // Setup routes (three drafts, single destination registration, and bulk
+    // channel destination setup) are edit-gated; everything that can move a
+    // target toward publishing stays activate-gated.
+    expect(routes.match(/requirePermission\("inventory_planning", "edit"\)/g)).toHaveLength(5);
     expect(routes.match(/requirePermission\("inventory_planning", "activate"\)/g)).toHaveLength(4);
+    // Bulk setup creates disabled targets only, so it must never be activate-gated
+    // nor slip into the activation surface.
+    expect(routes).toContain("channel-destinations");
+    expect(routes).toMatch(
+      /channel-destinations"[\s\S]{0,400}?requirePermission\("inventory_planning", "edit"\)/,
+    );
     expect(routes).toContain("publication-target-resume-review");
     expect(routes).toContain("publication-target-resume");
     expect(routes).toContain("publication-target-stop");

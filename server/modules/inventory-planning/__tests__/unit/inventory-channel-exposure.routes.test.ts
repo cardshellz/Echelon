@@ -37,7 +37,8 @@ describe("inventory channel exposure routes", () => {
     requirePermissionMock.mockClear();
     service = {
       getView: vi.fn(async () => ({
-        products: [], selectedProduct: null, channels: [], dropshipStores: [], publicationTargets: [],
+        products: [], selectedProduct: null, channels: [],
+        dropshipDestinationChannelId: null, dropshipStores: [], publicationTargets: [],
         fulfillmentNodes: [], policyHeads: [], policySubjects: [], sourceBindingHeads: [],
         variantMappingHeads: [], legacyMappingCandidates: [],
         runtimeAuthority: "legacy", runtimeAuthorityRevision: "1", providerWriteEnabled: false,

@@ -13,7 +13,9 @@ import {
 } from "@shared/schema";
 import {
   channelExposureDraftSaveResultSchema,
-  inventoryChannelExposureAdminViewSchema,
+  inventoryChannelExposureAdminStoreViewSchema,
+  setUpChannelDestinationsResultSchema,
+  type SetUpChannelDestinationsResult,
   inventoryChannelExposurePreviewSchema,
   inventoryPublicationTargetCommandResultSchema,
   type ChannelExposureDraftSaveResult,
@@ -21,7 +23,6 @@ import {
   type ChannelExposurePolicyScope,
   type ChannelExposurePolicyValue,
   type ChannelExposurePolicyVersion,
-  type InventoryChannelExposureAdminView,
   type InventoryChannelExposurePreview,
   type InventoryPublicationTargetCommandResult,
   type PublicationSourceBindingHead,
@@ -55,7 +56,18 @@ import {
   inventoryRuntimeAuthoritySchema,
   type InventoryRuntimeAuthority,
 } from "@shared/types/inventory-runtime-authority";
+import type {
+  InventoryChannelExposureAdminStoreView,
+  SetUpChannelDestinationsCommand,
+} from "../application/inventory-channel-exposure-admin.service";
 import { InventoryAvailabilityMasterDataError } from "../domain/inventory-availability-master-data.contracts";
+import {
+  deriveChannelDestinations,
+  type DerivableChannelConnection,
+  type DerivableDropshipStore,
+  type DerivedDestination,
+  type RegisteredDestinationIdentity,
+} from "../domain/inventory-channel-exposure";
 import {
   PostgresInventoryAvailabilityShadowRepository,
   type InventoryAvailabilityShadowStore,
@@ -70,6 +82,7 @@ const VARIANT_MAPPING_LOCK_NAMESPACE = 918428;
 const POLICY_RECEIPT_PREFIX = "inventory-channel-exposure-policy:";
 const SOURCE_RECEIPT_PREFIX = "inventory-publication-source-binding:";
 const TARGET_RECEIPT_PREFIX = "inventory-publication-target:";
+const CHANNEL_DESTINATIONS_RECEIPT_PREFIX = "inventory-channel-destinations:";
 const VARIANT_MAPPING_RECEIPT_PREFIX = "inventory-publication-variant-mapping:";
 // Identity scheme under which eBay (channel and Dropship) credentials persist the
 // provider-verified account id. Mirrors EBAY_PROVIDER_ACCOUNT_IDENTITY_SCHEME in
@@ -85,7 +98,7 @@ implements InventoryChannelExposureAdminStore {
       new PostgresInventoryAvailabilityShadowRepository(),
   ) {}
 
-  async getAdminView(productId: number | null): Promise<InventoryChannelExposureAdminView> {
+  async getAdminView(productId: number | null): Promise<InventoryChannelExposureAdminStoreView> {
     const runtimeAuthority = readRuntimeAuthority(rows(await this.database.execute(sql`
       SELECT authority, revision::text AS revision
       FROM inventory.availability_runtime_authority
@@ -251,7 +264,7 @@ implements InventoryChannelExposureAdminStore {
       },
     ]));
 
-    return inventoryChannelExposureAdminViewSchema.parse({
+    return inventoryChannelExposureAdminStoreViewSchema.parse({
       products: productRows.map((row) => ({
         id: positiveInteger(row.id, "product.id"),
         sku: nullableText(row.sku),
@@ -293,7 +306,10 @@ implements InventoryChannelExposureAdminStore {
       dropshipStores: dropshipStoreRows.map((row) => ({
         id: positiveInteger(row.id, "dropshipStore.id"),
         vendorId: positiveInteger(row.vendor_id, "dropshipStore.vendorId"),
-        vendorName: String(row.vendor_name),
+        // Never String(...) a nullable column: String(null) is the literal
+        // "null", which satisfies a non-blank check and then renders to the
+        // operator as though the vendor were named "null".
+        vendorName: nullableText(row.vendor_name),
         platform: String(row.platform),
         status: String(row.status),
         externalAccountLabel: nullableText(row.external_account_label),
@@ -535,6 +551,70 @@ implements InventoryChannelExposureAdminStore {
     });
   }
 
+
+  /**
+   * Creates every publication target a channel's existing connections imply.
+   *
+   * One transaction for the whole channel: either every derived destination and
+   * its supply binding lands, or none does. Partial setup would leave targets
+   * whose immutable fulfillment node was chosen under a decision the operator
+   * never saw completed.
+   *
+   * The caller supplies the supply set and the publisher; everything about
+   * WHICH destination is derived here from the connections themselves, so a
+   * tampered request cannot introduce a destination that does not exist.
+   */
+  async setUpChannelDestinations(
+    command: SetUpChannelDestinationsCommand,
+  ): Promise<SetUpChannelDestinationsResult> {
+    return this.database.transaction(async (tx) => {
+      const receiptKey = `${CHANNEL_DESTINATIONS_RECEIPT_PREFIX}${command.idempotencyKey}`;
+      await lockIdempotency(tx, command.idempotencyKey);
+      const replay = await loadChannelDestinationsReplay(tx, receiptKey, command.requestHash);
+      if (replay) return replay;
+      await insertReceipt(tx, receiptKey, command.requestHash, command.occurredAt);
+      // Serialize setup per channel so two operators cannot each derive the same
+      // destination and race the unique index into a confusing constraint error.
+      await tx.execute(sql`
+        SELECT pg_advisory_xact_lock(${PUBLICATION_TARGET_LOCK_NAMESPACE}, ${command.channelId})
+      `);
+      await assertFulfillmentNodesUsable(tx, command.supplyFulfillmentNodeIds);
+
+      const derivation = deriveChannelDestinations({
+        connections: await loadDerivableConnections(tx, command.channelId),
+        dropshipStores: command.includeDropshipStores
+          ? await loadDerivableDropshipStores(tx)
+          : [],
+        registered: await loadRegisteredDestinationIdentities(tx, command.channelId),
+      });
+
+      const created: SetUpChannelDestinationsResult["created"] = [];
+      for (const destination of derivation.create) {
+        const publicationTargetId = await insertDerivedTarget(tx, command, destination);
+        await insertInitialSourceBinding(tx, command, publicationTargetId);
+        created.push({
+          publicationTargetId,
+          destinationKind: destination.destinationKind,
+          channelConnectionId: destination.channelConnectionId,
+          dropshipStoreConnectionId: destination.dropshipStoreConnectionId,
+          providerScopeType: destination.providerScopeType,
+          externalScopeId: destination.externalScopeId,
+        });
+      }
+
+      const result = setUpChannelDestinationsResultSchema.parse({
+        channelId: command.channelId,
+        created,
+        skipped: derivation.skipped,
+        alreadyApplied: false,
+        runtimeAuthorityChanged: false,
+        providerWriteAttempted: false,
+        outboxEnqueued: false,
+      });
+      await completeChannelDestinationsReceipt(tx, receiptKey, result);
+      return result;
+    });
+  }
   async saveVariantMappingDraft(
     command: SavePublicationVariantMappingDraftCommand,
   ): Promise<ChannelExposureDraftSaveResult> {
@@ -1646,6 +1726,17 @@ async function completeReceipt(
     .where(eq(idempotencyKeys.key, key));
 }
 
+/** Receipt writer for bulk setup; kept separate so each result stays typed. */
+async function completeChannelDestinationsReceipt(
+  tx: Transaction,
+  key: string,
+  result: SetUpChannelDestinationsResult,
+): Promise<void> {
+  await tx.update(idempotencyKeys)
+    .set({ responseBody: { commandType: "inventory_channel_destinations_setup", result } })
+    .where(eq(idempotencyKeys.key, key));
+}
+
 async function completeTargetReceipt(
   tx: Transaction,
   key: string,
@@ -1937,4 +2028,262 @@ function invalidDatabaseValue(field: string): InventoryAvailabilityMasterDataErr
     "INVENTORY_CHANNEL_EXPOSURE_INVALID_DATABASE_VALUE",
     `Inventory channel-exposure ${field} is invalid.`,
   );
+}
+
+// ---------------------------------------------------------------------------
+// Bulk channel destination setup
+// ---------------------------------------------------------------------------
+
+/** Replays a completed bulk setup so a retried request never double-creates. */
+async function loadChannelDestinationsReplay(
+  tx: Transaction,
+  receiptKey: string,
+  requestHash: string,
+): Promise<SetUpChannelDestinationsResult | null> {
+  const [receipt] = await tx.select({
+    requestHash: idempotencyKeys.requestHash,
+    responseBody: idempotencyKeys.responseBody,
+  }).from(idempotencyKeys).where(eq(idempotencyKeys.key, receiptKey)).limit(1);
+  if (!receipt) return null;
+  if (receipt.requestHash !== requestHash) {
+    throw new InventoryAvailabilityMasterDataError(
+      409,
+      "INVENTORY_CHANNEL_EXPOSURE_IDEMPOTENCY_CONFLICT",
+      "The idempotency key was already used with different inputs.",
+    );
+  }
+  const body = receipt.responseBody as Record<string, unknown> | null;
+  const parsed = setUpChannelDestinationsResultSchema.safeParse(body?.result);
+  if (!parsed.success) {
+    throw new InventoryAvailabilityMasterDataError(
+      500,
+      "INVENTORY_CHANNEL_DESTINATIONS_IDEMPOTENCY_RECEIPT_INVALID",
+      "The prior channel destination setup has an incomplete receipt.",
+    );
+  }
+  return { ...parsed.data, alreadyApplied: true };
+}
+
+/**
+ * Every supply warehouse must exist and be usable before any target is created:
+ * the node is immutable once written, so a bad id cannot be corrected later.
+ */
+async function assertFulfillmentNodesUsable(
+  tx: Transaction,
+  fulfillmentNodeIds: readonly number[],
+): Promise<void> {
+  const nodeRows = rows(await tx.execute(sql`
+    SELECT id FROM warehouse.fulfillment_nodes
+    WHERE id = ANY(${sqlIntegerArray([...fulfillmentNodeIds])})
+      AND lifecycle_status <> 'retired'
+  `));
+  if (nodeRows.length !== fulfillmentNodeIds.length) {
+    throw new InventoryAvailabilityMasterDataError(
+      409,
+      "INVENTORY_CHANNEL_EXPOSURE_SUPPLY_NODE_UNAVAILABLE",
+      "Every supply warehouse must exist and not be retired.",
+    );
+  }
+}
+
+/** Channel connections with the exact scope id each provider already records. */
+async function loadDerivableConnections(
+  tx: Transaction,
+  channelId: number,
+): Promise<DerivableChannelConnection[]> {
+  const connectionRows = rows(await tx.execute(sql`
+    SELECT connection.id, connection.shopify_location_id,
+           COALESCE(connection.shop_domain, 'connection ' || connection.id::text) AS label,
+           channel.provider,
+           COALESCE(connection.metadata->>'environment', 'production') AS environment
+    FROM channels.channel_connections AS connection
+    JOIN channels.channels AS channel ON channel.id = connection.channel_id
+    WHERE connection.channel_id = ${channelId}
+    ORDER BY connection.id
+  `));
+  const ebayAccountRows = rows(await tx.execute(sql`
+    SELECT environment, external_account_id
+    FROM ebay.ebay_oauth_tokens
+    WHERE channel_id = ${channelId}
+      AND external_account_identity_scheme = ${PROVIDER_USER_ID_IDENTITY_SCHEME}
+      AND external_account_id IS NOT NULL
+      AND btrim(external_account_id) <> ''
+      AND external_account_verified_at IS NOT NULL
+  `));
+  const verifiedByEnvironment = new Map(ebayAccountRows.map((row) =>
+    [String(row.environment), String(row.external_account_id)] as const));
+  return connectionRows.map((row) => ({
+    id: positiveInteger(row.id, "connection.id"),
+    provider: String(row.provider),
+    shopifyLocationId: nullableText(row.shopify_location_id),
+    verifiedAccountId: verifiedByEnvironment.get(String(row.environment)) ?? null,
+    label: String(row.label),
+  }));
+}
+
+/** Dropship storefronts, loaded only for the one internal dropship channel. */
+async function loadDerivableDropshipStores(tx: Transaction): Promise<DerivableDropshipStore[]> {
+  const storeRows = rows(await tx.execute(sql`
+    SELECT connection.id, connection.platform,
+           connection.external_account_id, connection.external_account_identity_scheme,
+           COALESCE(vendor.business_name, connection.external_display_name,
+             connection.shop_domain, 'store ' || connection.id::text) AS label
+    FROM dropship.dropship_store_connections AS connection
+    JOIN dropship.dropship_vendors AS vendor ON vendor.id = connection.vendor_id
+    ORDER BY connection.id
+  `));
+  return storeRows.map((row) => ({
+    id: positiveInteger(row.id, "dropshipStore.id"),
+    platform: String(row.platform),
+    verifiedExternalAccountId:
+      String(row.external_account_identity_scheme ?? "") === PROVIDER_USER_ID_IDENTITY_SCHEME
+        ? nullableText(row.external_account_id)
+        : null,
+    label: String(row.label),
+  }));
+}
+
+/** Exact destinations already registered anywhere, so derivation stays idempotent. */
+async function loadRegisteredDestinationIdentities(
+  tx: Transaction,
+  channelId: number,
+): Promise<RegisteredDestinationIdentity[]> {
+  const targetRows = rows(await tx.execute(sql`
+    SELECT destination_kind, channel_connection_id, dropship_store_connection_id,
+           provider_scope_type, external_scope_id
+    FROM inventory.inventory_publication_targets
+    WHERE channel_id = ${channelId}
+    FOR SHARE
+  `));
+  return targetRows.map((row) => ({
+    destinationKind: String(row.destination_kind) === "dropship_store_connection"
+      ? "dropship_store_connection" as const
+      : "channel_connection" as const,
+    connectionId: positiveInteger(
+      row.channel_connection_id ?? row.dropship_store_connection_id,
+      "registeredTarget.connectionId",
+    ),
+    providerScopeType: String(row.provider_scope_type) === "location"
+      ? "location" as const
+      : "account" as const,
+    externalScopeId: String(row.external_scope_id),
+  }));
+}
+
+/** Inserts one derived target, disabled, with its audit row. */
+async function insertDerivedTarget(
+  tx: Transaction,
+  command: SetUpChannelDestinationsCommand,
+  destination: DerivedDestination,
+): Promise<number> {
+  const inserted = await tx.insert(inventoryPublicationTargets).values({
+    destinationKind: destination.destinationKind,
+    channelId: command.channelId,
+    channelConnectionId: destination.channelConnectionId,
+    dropshipStoreConnectionId: destination.dropshipStoreConnectionId,
+    // Legacy single-node shadow column. The planner reads the source binding
+    // members below; this keeps the pre-binding identity constraint satisfied.
+    fulfillmentNodeId: command.supplyFulfillmentNodeIds[0]!,
+    providerScopeType: destination.providerScopeType,
+    externalScopeId: destination.externalScopeId,
+    publicationAuthority: command.publicationAuthority,
+    state: "disabled",
+    changeReason: command.changeReason,
+    createdBy: command.actorId,
+    activatedBy: null,
+    activatedAt: null,
+    revision: BigInt(1),
+    createdAt: command.occurredAt,
+    updatedAt: command.occurredAt,
+  }).returning({ id: inventoryPublicationTargets.id });
+  const publicationTargetId = inserted[0]!.id;
+  await persistAuditEvent(tx, {
+    actor: command.actorId,
+    action: "inventory_availability.publication_target.created_disabled",
+    target: `inventory.inventory_publication_target:${publicationTargetId}`,
+    changes: { before: null, after: {
+      destinationKind: destination.destinationKind,
+      channelId: command.channelId,
+      channelConnectionId: destination.channelConnectionId,
+      dropshipStoreConnectionId: destination.dropshipStoreConnectionId,
+      legacyFulfillmentNodeId: command.supplyFulfillmentNodeIds[0]!,
+      providerScopeType: destination.providerScopeType,
+      externalScopeId: destination.externalScopeId,
+      publicationAuthority: command.publicationAuthority,
+      state: "disabled",
+    } },
+    context: {
+      note: command.changeReason,
+      derivedFrom: "channel_connections",
+      idempotencyKey: command.idempotencyKey,
+      requestHash: command.requestHash,
+      runtimeAuthorityChanged: false,
+      providerWriteAttempted: false,
+      outboxEnqueued: false,
+    },
+  }, { timestamp: command.occurredAt, emitStructuredLog: false });
+  return publicationTargetId;
+}
+
+/**
+ * Writes version 1 of the supply binding for a target that has just been
+ * created, so it has no head and no predecessor to reconcile.
+ */
+async function insertInitialSourceBinding(
+  tx: Transaction,
+  command: SetUpChannelDestinationsCommand,
+  publicationTargetId: number,
+): Promise<void> {
+  const fulfillmentNodeIds = [...command.supplyFulfillmentNodeIds];
+  const definitionHash = calculatePublicationSourceBindingDefinitionHash({
+    publicationTargetId,
+    fulfillmentNodeIds,
+  });
+  const inserted = await tx.insert(publicationSourceBindingVersions).values({
+    publicationTargetId,
+    version: 1,
+    lifecycleStatus: "draft",
+    definitionHash,
+    supersedesBindingId: null,
+    changeReason: command.changeReason,
+    // Derived per target, so a channel-wide retry replays instead of colliding.
+    idempotencyKey: `${command.idempotencyKey}:binding:${publicationTargetId}`,
+    requestHash: command.requestHash,
+    createdBy: command.actorId,
+    createdAt: command.occurredAt,
+    updatedAt: command.occurredAt,
+  }).returning({ id: publicationSourceBindingVersions.id });
+  const bindingId = inserted[0]!.id;
+  await tx.insert(publicationSourceBindingHeads).values({
+    publicationTargetId,
+    activeBindingId: null,
+    draftBindingId: bindingId,
+    revision: BigInt(1),
+    updatedBy: command.actorId,
+    updateReason: command.changeReason,
+    updatedAt: command.occurredAt,
+  });
+  await tx.insert(publicationSourceBindingMembers).values(
+    fulfillmentNodeIds.map((fulfillmentNodeId, index) => ({
+      bindingId,
+      publicationTargetId,
+      fulfillmentNodeId,
+      priority: index + 1,
+      createdAt: command.occurredAt,
+    })),
+  );
+  await persistAuditEvent(tx, {
+    actor: command.actorId,
+    action: "inventory_availability.publication_source_binding.draft_saved",
+    target: `inventory.publication_source_binding:${bindingId}`,
+    changes: { before: null, after: { publicationTargetId, version: 1, definitionHash, fulfillmentNodeIds } },
+    context: {
+      note: command.changeReason,
+      derivedFrom: "channel_destination_setup",
+      idempotencyKey: command.idempotencyKey,
+      requestHash: command.requestHash,
+      runtimeAuthorityChanged: false,
+      providerWriteAttempted: false,
+    },
+  }, { timestamp: command.occurredAt, emitStructuredLog: false });
 }

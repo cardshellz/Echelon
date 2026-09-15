@@ -54,10 +54,22 @@ describe("Channel Inventory page contract", () => {
     expect(all).not.toMatch(/10_000\s*\)/);
   });
 
-  it("does not expose Shopify locations to non-Shopify providers", () => {
-    const dialog = readFileSync(join(FEATURE_DIR, "components", "AddDestinationDialog.tsx"), "utf8");
-    expect(dialog).toContain('option.provider === "shopify" ? channel.id : null');
-    expect(dialog).toContain('option.scopeType === "location"');
+  // Destination identity is derived server-side from the connection, so setup
+  // must not ask an operator to pick a location or type an account id at all.
+  it("never asks the operator for a destination identity", () => {
+    const dialog = readFileSync(join(FEATURE_DIR, "components", "SetUpDestinationsDialog.tsx"), "utf8");
+    expect(dialog).toContain("Warehouses that supply them");
+    expect(dialog).toContain("Who publishes the quantity");
+    expect(dialog).not.toMatch(/Where quantities go/);
+    expect(dialog).not.toMatch(/externalScopeId/);
+    expect(dialog).not.toMatch(/useShopifyLocations/);
+    expect(dialog).not.toMatch(/shopifyLocationId/);
+  });
+
+  it("sends only the decisions the server cannot make for itself", () => {
+    const api = readFileSync(join(FEATURE_DIR, "api.ts"), "utf8");
+    expect(api).toContain("setUpChannelDestinations");
+    expect(api).toContain("channel-destinations");
   });
 
   it("is wired as the only route and nav entry, with the old path redirected", () => {

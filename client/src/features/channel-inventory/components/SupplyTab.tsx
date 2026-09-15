@@ -44,7 +44,7 @@ export function NoDestinationYet({ canEdit, onAdd }: { canEdit: boolean; onAdd()
   return (
     <Callout
       title="This channel has no destination yet"
-      action={canEdit ? <Button type="button" size="sm" onClick={onAdd}>Add destination</Button> : undefined}
+      action={canEdit ? <Button type="button" size="sm" onClick={onAdd}>Set up destinations</Button> : undefined}
     >
       A destination is the exact store location or seller account that receives quantities.
       Add one to choose its supplying warehouses and calculate quantities.

@@ -9,7 +9,7 @@ import { useIsMobile } from "@/hooks/use-mobile";
 import { useAuth } from "@/lib/auth";
 
 import { describeError } from "./api";
-import { AddDestinationDialog } from "./components/AddDestinationDialog";
+import { SetUpDestinationsDialog } from "./components/SetUpDestinationsDialog";
 import { ChannelRail, ChannelSelect, ProviderGlyph } from "./components/ChannelRail";
 import { DestinationStrip } from "./components/DestinationStrip";
 import { GlobalPublishingControl } from "./components/GlobalPublishingControl";
@@ -244,12 +244,14 @@ export default function ChannelInventoryPage() {
       )}
 
       {channel && addingDestination && (
-        <AddDestinationDialog
+        <SetUpDestinationsDialog
           open={addingDestination}
           onOpenChange={setAddingDestination}
           view={view}
           channel={channel}
-          onCreated={(id) => setSelection((current) => ({ ...current, targetId: id, tab: "supply" }))}
+          // The refreshed view reconciles the selection onto the first new
+          // destination, so no id is threaded back through the dialog.
+          onCompleted={() => setSelection((current) => ({ ...current, tab: "supply" }))}
         />
       )}
     </div>

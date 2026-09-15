@@ -234,6 +234,156 @@ describe("InventoryChannelExposureAdminService", () => {
     expect(store.savePolicyDraft).not.toHaveBeenCalled();
     expect(store.saveSourceBindingDraft).not.toHaveBeenCalled();
   });
+
+  describe("channel destination setup", () => {
+    function setupResult(overrides: Record<string, unknown> = {}) {
+      return {
+        channelId: 7,
+        created: [],
+        skipped: [],
+        alreadyApplied: false,
+        runtimeAuthorityChanged: false as const,
+        providerWriteAttempted: false as const,
+        outboxEnqueued: false as const,
+        ...overrides,
+      };
+    }
+
+    const request = {
+      channelId: 7,
+      supplyFulfillmentNodeIds: [7, 8],
+      publicationAuthority: "echelon" as const,
+      changeReason: null,
+      idempotencyKey: "setup-1",
+    };
+
+    it("includes dropship storefronts only for the resolved internal dropship channel", async () => {
+      const store = fakeStore();
+      store.setUpChannelDestinations.mockResolvedValue(setupResult());
+      const service = new InventoryChannelExposureAdminService(store, { now: () => NOW }, {
+        resolveChannelId: async () => 7,
+      });
+
+      await service.setUpChannelDestinations(request, "operator-1");
+
+      expect(store.setUpChannelDestinations).toHaveBeenCalledWith(
+        expect.objectContaining({ includeDropshipStores: true, actorId: "operator-1", occurredAt: NOW }),
+      );
+    });
+
+    // A storefront registered against a marketplace channel would carry a
+    // channel_id that contradicts how dropship quantities are planned.
+    it("excludes dropship storefronts for any other channel", async () => {
+      const store = fakeStore();
+      store.setUpChannelDestinations.mockResolvedValue(setupResult({ channelId: 3 }));
+      const service = new InventoryChannelExposureAdminService(store, { now: () => NOW }, {
+        resolveChannelId: async () => 7,
+      });
+
+      await service.setUpChannelDestinations({ ...request, channelId: 3 }, "operator-1");
+
+      expect(store.setUpChannelDestinations).toHaveBeenCalledWith(
+        expect.objectContaining({ includeDropshipStores: false }),
+      );
+    });
+
+    it("excludes dropship storefronts when the dropship channel cannot be resolved", async () => {
+      const store = fakeStore();
+      store.setUpChannelDestinations.mockResolvedValue(setupResult());
+      const service = new InventoryChannelExposureAdminService(store, { now: () => NOW }, {
+        resolveChannelId: async () => { throw new Error("unconfigured"); },
+      });
+
+      await service.setUpChannelDestinations(request, "operator-1");
+
+      expect(store.setUpChannelDestinations).toHaveBeenCalledWith(
+        expect.objectContaining({ includeDropshipStores: false }),
+      );
+    });
+
+    // The hash must separate two otherwise identical requests that differ only
+    // in dropship scope, so one cannot replay the other's receipt.
+    it("binds the dropship scope into the request hash", async () => {
+      const hashes: string[] = [];
+      for (const dropshipChannelId of [7, 3]) {
+        const store = fakeStore();
+        store.setUpChannelDestinations.mockResolvedValue(setupResult());
+        const service = new InventoryChannelExposureAdminService(store, { now: () => NOW }, {
+          resolveChannelId: async () => dropshipChannelId,
+        });
+        await service.setUpChannelDestinations(request, "operator-1");
+        hashes.push(store.setUpChannelDestinations.mock.calls[0]![0].requestHash);
+      }
+      expect(hashes[0]).not.toBe(hashes[1]);
+    });
+
+    it("refuses duplicate supply warehouses instead of creating a skewed binding", async () => {
+      const store = fakeStore();
+      const service = new InventoryChannelExposureAdminService(store, { now: () => NOW });
+
+      await expect(service.setUpChannelDestinations(
+        { ...request, supplyFulfillmentNodeIds: [7, 7] },
+        "operator-1",
+      )).rejects.toMatchObject({ code: "INVENTORY_CHANNEL_EXPOSURE_INVALID_DESTINATION_SETUP" });
+      expect(store.setUpChannelDestinations).not.toHaveBeenCalled();
+    });
+
+    it("refuses setup with no supply warehouse at all", async () => {
+      const store = fakeStore();
+      const service = new InventoryChannelExposureAdminService(store, { now: () => NOW });
+
+      await expect(service.setUpChannelDestinations(
+        { ...request, supplyFulfillmentNodeIds: [] },
+        "operator-1",
+      )).rejects.toMatchObject({ code: "INVENTORY_CHANNEL_EXPOSURE_INVALID_DESTINATION_SETUP" });
+      expect(store.setUpChannelDestinations).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("internal dropship channel on the view", () => {
+    /** Minimal store view: every collection empty so the composed field is the only variable. */
+    function emptyStoreView() {
+      return {
+        products: [], selectedProduct: null, channels: [], dropshipStores: [], publicationTargets: [],
+        fulfillmentNodes: [], policyHeads: [], policySubjects: [], sourceBindingHeads: [],
+        variantMappingHeads: [], legacyMappingCandidates: [],
+        runtimeAuthority: "legacy" as const, runtimeAuthorityRevision: "1",
+        providerWriteEnabled: false as const,
+      };
+    }
+
+    it("reports the channel the dropship module resolves", async () => {
+      const store = fakeStore();
+      store.getAdminView.mockResolvedValue(emptyStoreView());
+      const service = new InventoryChannelExposureAdminService(store, { now: () => NOW }, {
+        resolveChannelId: async () => 7,
+      });
+
+      await expect(service.getView(null)).resolves.toMatchObject({ dropshipDestinationChannelId: 7 });
+    });
+
+    // A missing or ambiguous dropship channel must not take down setup for every
+    // other channel; it is reported as absent so no storefront can be registered.
+    it("degrades to null when the dropship channel cannot be resolved", async () => {
+      const store = fakeStore();
+      store.getAdminView.mockResolvedValue(emptyStoreView());
+      const service = new InventoryChannelExposureAdminService(store, { now: () => NOW }, {
+        resolveChannelId: async () => {
+          throw Object.assign(new Error("ambiguous"), { code: "DROPSHIP_OMS_CHANNEL_CONFIG_AMBIGUOUS" });
+        },
+      });
+
+      await expect(service.getView(null)).resolves.toMatchObject({ dropshipDestinationChannelId: null });
+    });
+
+    it("reports null when no resolver is wired at all", async () => {
+      const store = fakeStore();
+      store.getAdminView.mockResolvedValue(emptyStoreView());
+      const service = new InventoryChannelExposureAdminService(store, { now: () => NOW });
+
+      await expect(service.getView(null)).resolves.toMatchObject({ dropshipDestinationChannelId: null });
+    });
+  });
 });
 
 function saveResult() {
@@ -269,6 +419,7 @@ function fakeStore() {
     setPublicationTargetPreviewState:
       vi.fn<InventoryChannelExposureAdminStore["setPublicationTargetPreviewState"]>(),
     saveVariantMappingDraft: vi.fn<InventoryChannelExposureAdminStore["saveVariantMappingDraft"]>(),
+    setUpChannelDestinations: vi.fn<InventoryChannelExposureAdminStore["setUpChannelDestinations"]>(),
     preview: vi.fn<InventoryChannelExposureAdminStore["preview"]>(),
   };
 }

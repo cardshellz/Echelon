@@ -201,10 +201,22 @@ export const inventoryChannelExposureAdminViewSchema = z.object({
       }).strict().nullable(),
     }).strict()),
   }).strict()),
+  // The single internal channel that hosts every dropship storefront
+  // (migrations/0106_dropship_internal_channel_seed.sql seeds exactly one, and
+  // the dropship resolver refuses to run when more than one exists). Dropship
+  // stores are destinations of THAT channel only, never of a marketplace
+  // channel, so setup must not offer them anywhere else. Null when the channel
+  // is not configured, in which case no dropship destination can be registered.
+  dropshipDestinationChannelId: positiveInteger.nullable(),
   dropshipStores: z.array(z.object({
     id: positiveInteger,
     vendorId: positiveInteger,
-    vendorName: nonblank(255),
+    // dropship.dropship_vendors.business_name is nullable, so a vendor may
+    // genuinely have no trading name. The contract carries that honestly rather
+    // than letting a String(null) coercion launder it into the text "null",
+    // which reads as a real name to an operator. Callers label such a store
+    // from its account or id instead of inventing a name for it.
+    vendorName: z.string().trim().max(255).nullable(),
     platform: z.enum(["ebay", "shopify", "tiktok", "instagram", "bigcommerce"]),
     status: nonblank(30),
     externalAccountLabel: z.string().max(255).nullable(),
@@ -245,6 +257,14 @@ export const inventoryChannelExposureAdminViewSchema = z.object({
   runtimeAuthorityRevision: inventoryRuntimeAuthorityRevisionSchema,
   providerWriteEnabled: z.literal(false),
 }).strict();
+
+/**
+ * What the `inventory`-schema store alone can answer. The internal dropship
+ * channel is resolved by the dropship module, so the store validates against
+ * this shape and the application layer adds that field to build the full view.
+ */
+export const inventoryChannelExposureAdminStoreViewSchema =
+  inventoryChannelExposureAdminViewSchema.omit({ dropshipDestinationChannelId: true });
 
 export const saveChannelExposurePolicyDraftRequestSchema = z.object({
   scope: channelExposurePolicyScopeSchema,
@@ -302,6 +322,104 @@ export const createInventoryPublicationTargetRequestSchema = z.object({
   changeReason: optionalChangeNote,
   idempotencyKey: nonblank(120),
 }).strict().superRefine(validatePublicationDestination);
+
+/**
+ * Provider to the scope a quantity write must name.
+ *
+ * Shopify has no store-level inventory write: `inventory_levels/set.json`
+ * requires a location. eBay's Sell Inventory API writes against the seller
+ * account. Shared so the server's destination derivation and the page's setup
+ * can never disagree about which of the two a provider needs.
+ */
+export const PUBLICATION_PROVIDER_SCOPE_TYPES = {
+  shopify: "location",
+  ebay: "account",
+} as const satisfies Record<string, "account" | "location">;
+export type PublicationAdapterProvider = keyof typeof PUBLICATION_PROVIDER_SCOPE_TYPES;
+
+export function publicationScopeTypeFor(
+  provider: string,
+): "account" | "location" | null {
+  return Object.prototype.hasOwnProperty.call(PUBLICATION_PROVIDER_SCOPE_TYPES, provider)
+    ? PUBLICATION_PROVIDER_SCOPE_TYPES[provider as PublicationAdapterProvider]
+    : null;
+}
+
+/**
+ * Register every destination a channel's existing connections already imply, in
+ * one reviewed step.
+ *
+ * Registering destinations one at a time does not scale: a tenant with a
+ * hundred dropship vendors would need a hundred passes through a dialog whose
+ * only genuinely free choices are the same every time. The identity half of a
+ * destination is never a choice at all — an eBay connection has exactly one
+ * verified seller account, a Shopify connection already stores the location it
+ * writes inventory to, and a dropship storefront is described entirely by its
+ * vendor record — so the server derives it rather than asking.
+ *
+ * What is NOT derivable, and so is asked once here for the whole channel:
+ *   - the warehouses that supply these destinations. A target's
+ *     `fulfillment_node_id` is NOT NULL, part of its unique identity, and
+ *     immutable by database trigger, so this cannot be chosen later or guessed.
+ *   - who publishes the quantity.
+ *
+ * The command never derives from a caller-supplied candidate list: the server
+ * re-reads the connections itself, so a tampered request cannot invent a
+ * destination. Every target is created `disabled`, exactly as single
+ * registration does; nothing here publishes or changes runtime authority.
+ */
+export const setUpChannelDestinationsRequestSchema = z.object({
+  channelId: positiveInteger,
+  // Ordered: the first is written to the legacy single-node shadow column, and
+  // the whole set becomes the versioned source binding the planner reads.
+  supplyFulfillmentNodeIds: z.array(positiveInteger).min(1).max(50)
+    .refine((ids) => new Set(ids).size === ids.length, "Supply warehouses must be distinct"),
+  publicationAuthority: z.enum(["echelon", "external_provider", "manual"]),
+  changeReason: optionalChangeNote,
+  idempotencyKey: nonblank(120),
+}).strict();
+export type SetUpChannelDestinationsRequest =
+  z.infer<typeof setUpChannelDestinationsRequestSchema>;
+
+/** Why a derivable-looking destination was left alone, in operator language. */
+export const CHANNEL_DESTINATION_SKIP_REASONS = [
+  "already_registered",
+  "no_publishing_adapter",
+  "no_verified_account",
+  "no_shopify_location",
+] as const;
+export const channelDestinationSkipReasonSchema = z.enum(CHANNEL_DESTINATION_SKIP_REASONS);
+export type ChannelDestinationSkipReason = z.infer<typeof channelDestinationSkipReasonSchema>;
+
+const channelDestinationOutcomeSchema = z.object({
+  destinationKind: z.enum(["channel_connection", "dropship_store_connection"]),
+  channelConnectionId: positiveInteger.nullable(),
+  dropshipStoreConnectionId: positiveInteger.nullable(),
+  providerScopeType: z.enum(["account", "location"]),
+  externalScopeId: nonblank(240),
+}).strict();
+
+export const setUpChannelDestinationsResultSchema = z.object({
+  channelId: positiveInteger,
+  created: z.array(channelDestinationOutcomeSchema.extend({
+    publicationTargetId: positiveInteger,
+  }).strict()),
+  // Reported rather than silently dropped: an operator who expected a storefront
+  // to appear must be able to see exactly why it did not.
+  skipped: z.array(channelDestinationOutcomeSchema.partial({
+    providerScopeType: true,
+    externalScopeId: true,
+  }).extend({
+    reason: channelDestinationSkipReasonSchema,
+    label: nonblank(300),
+  }).strict()),
+  alreadyApplied: z.boolean(),
+  runtimeAuthorityChanged: z.literal(false),
+  providerWriteAttempted: z.literal(false),
+  outboxEnqueued: z.literal(false),
+}).strict();
+export type SetUpChannelDestinationsResult =
+  z.infer<typeof setUpChannelDestinationsResultSchema>;
 
 export const setInventoryPublicationTargetPreviewStateRequestSchema = z.object({
   publicationTargetId: positiveInteger,
