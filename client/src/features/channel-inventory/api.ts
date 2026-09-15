@@ -11,6 +11,8 @@ import {
   savePublicationSourceBindingDraftRequestSchema,
   savePublicationVariantMappingDraftRequestSchema,
   setInventoryPublicationTargetPreviewStateRequestSchema,
+  setUpChannelDestinationsRequestSchema,
+  setUpChannelDestinationsResultSchema,
   stopInventoryPublicationTargetRequestSchema,
   type ChannelExposureDraftSaveResult,
   type ChannelExposurePolicyHead,
@@ -21,6 +23,7 @@ import {
   type InventoryPublicationTargetCommandResult,
   type PublicationSourceBindingHead,
   type PublicationVariantMappingHead,
+  type SetUpChannelDestinationsResult,
 } from "@shared/types/inventory-channel-exposure";
 import {
   inventoryPublicationGlobalControlResultSchema,
@@ -51,6 +54,7 @@ export const ENDPOINTS = {
   sourceBindingDraft: `${ADMIN_BASE}/source-binding-draft`,
   variantMappingDraft: `${ADMIN_BASE}/variant-mapping-draft`,
   target: `${ADMIN_BASE}/publication-target`,
+  channelDestinations: `${ADMIN_BASE}/channel-destinations`,
   targetPreviewState: `${ADMIN_BASE}/publication-target-preview-state`,
   targetStop: `${ADMIN_BASE}/publication-target-stop`,
   targetResumeReview: `${ADMIN_BASE}/publication-target-resume-review`,
@@ -315,11 +319,22 @@ export function saveIdentityDraft(
   return requestJson(ENDPOINTS.variantMappingDraft, channelExposureDraftSaveResultSchema, jsonInit("PUT", request));
 }
 
-export function registerDestination(
-  request: z.input<typeof createInventoryPublicationTargetRequestSchema>,
-): Promise<InventoryPublicationTargetCommandResult> {
-  const parsed = createInventoryPublicationTargetRequestSchema.parse(request);
-  return requestJson(ENDPOINTS.target, inventoryPublicationTargetCommandResultSchema, jsonInit("POST", parsed));
+/**
+ * Registers every destination the channel's connections already imply.
+ *
+ * The caller sends only the two decisions the system cannot make for itself:
+ * which warehouses supply the channel and who publishes. The server derives
+ * which destinations exist, so no identity is sent from the browser.
+ */
+export function setUpChannelDestinations(
+  request: z.input<typeof setUpChannelDestinationsRequestSchema>,
+): Promise<SetUpChannelDestinationsResult> {
+  const parsed = setUpChannelDestinationsRequestSchema.parse(request);
+  return requestJson(
+    ENDPOINTS.channelDestinations,
+    setUpChannelDestinationsResultSchema,
+    jsonInit("POST", parsed),
+  );
 }
 
 export function setReadinessInclusion(

@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import {
   EMPTY_POLICY_FORM,
   buildChannelRail,
-  buildDestinationRequest,
   describeDestination,
   describeDropshipStore,
   describeIdentity,
@@ -333,22 +332,4 @@ describe("destination setup", () => {
     expect(destinationOptionsFor(ebay, registered).some((option) => option.kind === "channel_connection")).toBe(false);
   });
 
-  it("builds the registration with the first supply warehouse as the compatibility node", () => {
-    const [option] = destinationOptionsFor(shopify, data);
-    const result = buildDestinationRequest(3, { option: option!, externalScopeId: "gid://shopify/Location/2", supplyNodeIds: [8, 7], publisher: "echelon" });
-    expect(result).toEqual({ ok: true, request: {
-      destinationKind: "channel_connection", channelId: 3, channelConnectionId: 33, dropshipStoreConnectionId: null,
-      legacyFulfillmentNodeId: 7, providerScopeType: "location", externalScopeId: "gid://shopify/Location/2", publicationAuthority: "echelon",
-    } });
-  });
-
-  it("refuses incomplete or mismatched setup with a specific message", () => {
-    const [shopifyOption] = destinationOptionsFor(shopify, data);
-    const [ebayOption] = destinationOptionsFor(ebay, data);
-    expect(buildDestinationRequest(3, { option: null, externalScopeId: "", supplyNodeIds: [7], publisher: "echelon" })).toMatchObject({ ok: false });
-    expect(buildDestinationRequest(3, { option: shopifyOption!, externalScopeId: "  ", supplyNodeIds: [7], publisher: "echelon" })).toMatchObject({ ok: false, message: /Shopify location/ });
-    expect(buildDestinationRequest(3, { option: shopifyOption!, externalScopeId: "loc", supplyNodeIds: [], publisher: "echelon" })).toMatchObject({ ok: false, message: /at least one warehouse/ });
-    expect(buildDestinationRequest(4, { option: ebayOption!, externalScopeId: "someone-else", supplyNodeIds: [7], publisher: "echelon" })).toMatchObject({ ok: false, message: /verified account/ });
-    expect(buildDestinationRequest(6, { option: destinationOptionsFor(amazon, data)[0]!, externalScopeId: "x", supplyNodeIds: [7], publisher: "echelon" })).toMatchObject({ ok: false, message: /no inventory publishing adapter/ });
-  });
 });
