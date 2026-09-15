@@ -240,6 +240,19 @@ export const inventoryActivationDryRunSchema = z.object({
     readyProducts: nonnegativeInteger,
     blockedProducts: nonnegativeInteger,
     publicationRows: nonnegativeInteger,
+    // How the canonical configuration compares with what legacy publishes
+    // today. Reported, never a blocker: different numbers are the point of the
+    // new planner, and only an operator can say which differences are intended.
+    // Without this, a rule entered with the wrong unit basis, or a legacy
+    // days-of-cover floor that has no canonical equivalent, produces a wrong
+    // but under-ATP quantity that nothing else in readiness refuses.
+    divergence: z.object({
+      rowsMatchingLegacy: nonnegativeInteger,
+      rowsAboveLegacy: nonnegativeInteger,
+      rowsBelowLegacy: nonnegativeInteger,
+      largestIncreaseUnits: plannerNonnegativeQuantitySchema,
+      largestDecreaseUnits: plannerNonnegativeQuantitySchema,
+    }).strict(),
   }).strict(),
   products: z.array(activationDryRunProductSchema).max(10_000),
   blockers: z.array(activationDryRunBlockerSchema),
