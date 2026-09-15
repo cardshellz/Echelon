@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { z } from "zod";
+import { resolveNewChannelFulfillmentNotifyCustomer } from "./channel-fulfillment-notification.policy";
 
 const canonicalIdentifier = (field: string, maxLength: number) =>
   z.string({ required_error: `${field} is required` })
@@ -32,7 +33,8 @@ export const physicalShipmentForChannelFulfillmentSchema = z.object({
   carrier: canonicalIdentifier("carrier", 100),
   trackingUrl: z.string().trim().url().max(2_000).nullable().default(null),
   shippedAt: z.string().datetime({ offset: true }).nullable().default(null),
-  notifyCustomer: z.boolean().default(true),
+  source: canonicalIdentifier("source", 80).optional(),
+  notifyCustomer: z.boolean().optional(),
   items: z.array(authorizedPhysicalShipmentItemSchema).min(1),
 }).strict();
 
@@ -213,7 +215,10 @@ export function planChannelFulfillmentCommands(
       || left.omsOrderId - right.omsOrderId
       || left.channelFulfillmentScopeKey.localeCompare(right.channelFulfillmentScopeKey))
     .map((group): ChannelFulfillmentCommand => {
-      if (!shipment.notifyCustomer && group.channelProvider !== "shopify") {
+      const notifyCustomer = resolveNewChannelFulfillmentNotifyCustomer(
+        group.channelProvider, shipment.source, shipment.notifyCustomer,
+      );
+      if (!notifyCustomer && group.channelProvider !== "shopify") {
         throw new ChannelFulfillmentPlanningError(
           "UNSUPPORTED_SILENT_FULFILLMENT",
           "Silent fulfillment is supported only by the Shopify adapter",
@@ -236,7 +241,7 @@ export function planChannelFulfillmentCommands(
         items,
         // Keep existing notifying command hashes stable. Silent intent is a
         // distinct immutable request, but never a new package/idempotency key.
-        ...(shipment.notifyCustomer ? {} : { notifyCustomer: false }),
+        ...(notifyCustomer ? {} : { notifyCustomer: false }),
       }));
 
       return Object.freeze({
@@ -255,7 +260,7 @@ export function planChannelFulfillmentCommands(
         carrier: shipment.carrier,
         trackingUrl: shipment.trackingUrl,
         shippedAt: shipment.shippedAt,
-        notifyCustomer: shipment.notifyCustomer,
+        notifyCustomer,
         items: Object.freeze(items.map((item) => Object.freeze(item))),
       });
     });

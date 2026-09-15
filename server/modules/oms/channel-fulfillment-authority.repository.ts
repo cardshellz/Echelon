@@ -3063,6 +3063,7 @@ async function persistChannelCommandSet(
     reconciliation.missingItems,
   );
   const supplemental = planChannelFulfillmentCommands({
+    source: input.source,
     physicalShipmentId: command.physicalShipmentId,
     shippingProvider: input.shippingProvider,
     providerPhysicalShipmentId: input.providerPhysicalShipmentId,
@@ -3493,6 +3494,7 @@ export function createChannelFulfillmentAuthorityRepository(
       const persistedCommands: MaterializedChannelCommand[] = [];
       for (const materializedPackage of materializedPackages) {
         const commands = planChannelFulfillmentCommands({
+          source: input.source,
           physicalShipmentId: materializedPackage.physicalShipmentId,
           shippingProvider: materializedPackage.pkg.provider,
           providerPhysicalShipmentId: materializedPackage.pkg.providerPhysicalShipmentId,
@@ -4057,6 +4059,7 @@ export function createChannelFulfillmentAuthorityRepository(
       const commands = channelEligibleCustomerItems.length === 0
         ? []
         : planChannelFulfillmentCommands({
+          source: input.source,
           physicalShipmentId,
           shippingProvider: input.shippingProvider,
           providerPhysicalShipmentId: input.providerPhysicalShipmentId,

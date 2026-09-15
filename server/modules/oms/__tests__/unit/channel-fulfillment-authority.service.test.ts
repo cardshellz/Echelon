@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { ChannelFulfillmentProviderError } from "../../../channels/channel-fulfillment-provider.error";
+import { CHANNEL_FULFILLMENT_REPAIR_SOURCES } from "../../channel-fulfillment-notification.policy";
 
 import type {
   ChannelFulfillmentAuthorityRepository,
@@ -58,6 +59,33 @@ function repositoryMock(
 }
 
 describe("channel fulfillment authority service", () => {
+  it.each(Object.values(CHANNEL_FULFILLMENT_REPAIR_SOURCES))("holds old notifying repairs from %s before provider I/O", async source => {
+    for (const notifyCustomer of [undefined, true]) {
+      const claimed = command({ metadata: { legacyWmsShipmentIds: [501], source, notifyCustomer } });
+      const before = structuredClone(claimed);
+      const repository = repositoryMock([claimed]);
+      const pushShopifyFulfillmentForCommand = vi.fn();
+      const service = createChannelFulfillmentAuthorityService({ repository,
+        projector: { projectPhysicalShipment: vi.fn() },
+        providerExecutor: createCompatibilityChannelFulfillmentProviderExecutor({ pushShopifyFulfillmentForCommand }),
+        logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      });
+      await expect(service.runDueBatch()).resolves.toMatchObject({ succeeded: 0, reviewRequired: 1, retryScheduled: 0 });
+      expect(pushShopifyFulfillmentForCommand).not.toHaveBeenCalled();
+      expect(repository.completeAttempt).toHaveBeenCalledWith(expect.objectContaining({
+        outcome: "review_required", errorCode: "SILENT_REPAIR_NOTIFICATION_REVIEW_REQUIRED",
+      }));
+      expect(claimed).toEqual(before);
+    }
+  });
+
+  it.each(["legacy_shopify_fulfillment_retry", "legacy_delayed_tracking_retry"])("keeps normal shipping retries notifying: %s", async source => {
+    const pushShopifyFulfillmentForCommand = vi.fn().mockResolvedValue({ writebackComplete: true });
+    await createCompatibilityChannelFulfillmentProviderExecutor({ pushShopifyFulfillmentForCommand })
+      .execute(command({ metadata: { legacyWmsShipmentIds: [501], source, notifyCustomer: true } }));
+    expect(pushShopifyFulfillmentForCommand).toHaveBeenCalledWith(expect.objectContaining({ notifyCustomer: true }));
+  });
+
   it.each([undefined, true, false])("carries saved notification intent %s through the worker and attempt audit", async notifyCustomer => {
     const claimed = command({ metadata: Object.freeze({ legacyWmsShipmentIds: [501], notifyCustomer }) });
     const repository = repositoryMock([claimed]);
