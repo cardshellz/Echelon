@@ -31,7 +31,7 @@ import Dashboard from "@/pages/Dashboard";
 import Inventory from "@/pages/Inventory";
 import Builds from "@/pages/Builds";
 import SupplyTransformations from "@/pages/SupplyTransformations";
-import InventoryExposure from "@/pages/InventoryExposure";
+import ChannelInventory from "@/pages/ChannelInventory";
 import BuildRecipeCreate from "@/pages/BuildRecipeCreate";
 import Orders from "@/pages/Orders";
 import Dropship from "@/pages/Dropship";
@@ -408,11 +408,15 @@ function Router() {
         <Route path="/channels/ebay">
           <ProtectedRoute component={EbayChannelPage} allowedRoles={["admin", "lead"]} />
         </Route>
-        <Route path="/channels/inventory-exposure">
+        <Route path="/channels/inventory">
           <ProtectedRoute
-            component={InventoryExposure}
+            component={ChannelInventory}
             requiredPermission={{ resource: "inventory_planning", action: "view" }}
           />
+        </Route>
+        {/* Bookmark compatibility: the page formerly named Inventory Exposure. */}
+        <Route path="/channels/inventory-exposure">
+          <Redirect to="/channels/inventory" replace />
         </Route>
         <Route path="/channels">
           <ProtectedRoute component={ChannelsPage} allowedRoles={["admin", "lead"]} />

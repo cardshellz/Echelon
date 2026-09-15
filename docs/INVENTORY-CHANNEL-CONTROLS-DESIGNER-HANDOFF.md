@@ -546,3 +546,111 @@ This is a documentation-only handoff informed by three bounded read-only reviews
 The earlier local prototype and its browser tests describe a rejected illustration, not production behavior or a design mandate. Do not use their successful browser checks to argue that the UI is acceptable.
 
 No application code, production data, inventory, recipes, ATP, reservations, Shopify/eBay/TikTok quantities, channel settings, or publication authority changed. This brief does not authorize a PR, deployment, cutover, or provider action. The next step is human design review, followed by explicit agreement on implementation.
+
+## Appendix C. Implementation record — Channel Inventory rebuild (2026-09-15)
+
+Status: **implemented on branch `claude/zealous-wright-mfwqu6`, pending owner review.** The
+owner asked for the UI to be rebuilt around the architecture in this brief rather than
+waiting for a separate design pass. This appendix records what was built, which contract
+changes it required, and which gaps remain open (and are shown as gaps in the UI rather
+than hidden behind non-functional controls).
+
+### What replaced the Inventory Exposure page
+
+`client/src/features/channel-inventory/` (route `/channels/inventory`, nav label
+**Channel Inventory**; `/channels/inventory-exposure` redirects). The page is organized
+around the accepted business hierarchy:
+
+| Operator question | Where it lives |
+| --- | --- |
+| Which channel am I working on? | Channel rail (left) with per-channel destination status dots |
+| Which warehouses can supply this channel? | **Supply** tab per destination; warehouse checklist; active vs saved-draft summary; explicit "no supply configured" failure state (no all-warehouse fallback) |
+| How much should this channel offer by default? | **Selling rules** tab → channel default: six controls in human units (percent, whole SKU units, "No limit" as an explicit choice) |
+| Which products/SKUs need different settings? | **Selling rules** tab → exceptions list (grouped by product) and an editor that shows, per field, the inherited value and its source next to the option to override it |
+| What quantity results and why? | **Quantities** tab: server preview rows only; snapshot age, rule provenance, warehouse contributions, per-row calculation chain, blockers; "Proposed" is labelled as not the marketplace's current quantity |
+| What is saved, active, and who publishes? | Destination strip pills (Publishing / Calculating only / Not publishing / Externally managed / Manual) and the **Publishing** tab: publisher, pending drafts, activation boundary, and the sensitive commands behind reason dialogs |
+
+Design rules honoured from this brief: no universal store/location picker (Shopify
+locations appear only for Shopify connections, fetched live; eBay and Dropship eBay use the
+provider-verified account id); no written reason on routine saves (optional collapsed note
+only); reasons remain required for readiness inclusion, stop, resume, and the global
+switch; the UI computes no availability or channel quantity of its own; percentages are
+never shown as basis points; pack units are stated per SKU; saved drafts are visibly
+"pending activation" and Resume is never labelled Apply.
+
+### Contract and persistence changes
+
+- `shared/types/inventory-channel-exposure.ts`: `changeReason` is optional/nullable on the
+  three routine draft saves (policy, source binding, SKU mapping) and on disabled
+  destination registration; blank notes normalize to `null`. Version DTOs carry
+  `changeReason: string | null`. The admin view adds `connections[].shopifyLocationId`,
+  `connections[].providerAccount` (verified eBay identity), `dropshipStores[].verifiedExternalAccountId`,
+  and `policySubjects` (catalog labels for every product/SKU rule); `policyHeads` is no
+  longer filtered to the selected product so exceptions can be listed per channel.
+- `migrations/247_inventory_channel_controls_optional_change_note.sql`: `change_reason` /
+  `update_reason` become nullable with null-aware check constraints on the versioned
+  definition tables, their heads, and `inventory_publication_targets`. No rows rewritten.
+- `inventory-channel-exposure-admin.repository.ts`: every routine draft save now records an
+  audit **before** image (the replaced draft, or the active definition it supersedes) and the
+  optional note under `context.note`; nothing fabricates a reason.
+- Sensitive contracts (`setInventoryPublicationTargetPreviewStateRequestSchema`,
+  stop, resume review/resume, global control, cutover) are unchanged and still require a reason.
+
+### Gaps still open (surfaced in the UI as such)
+
+| Gap | How the UI treats it today |
+| --- | --- |
+| Product/SKU-scoped warehouse supply | Supply tab states supply is per destination; no per-item control is offered |
+| Removing an entire product/SKU rule | Editor requires at least one explicit field and says removal is not available yet |
+| Routine post-cutover "apply saved drafts" | Publishing tab lists pending drafts and states activation is the reviewed cutover; Resume is documented as using the active configuration only |
+| Per-SKU desired/acknowledged/observed status | Quantities tab labels "Proposed" and points to the sync log; no read endpoint exists yet |
+| Location promise-eligibility editor | Not part of this page (inventory policy, Supply & Transformations) |
+| Providers without an adapter (e.g. Amazon, TikTok direct) | Listed, but destination registration is disabled with an explanation |
+
+### Legacy rule translation (Channel Allocation -> Channel Inventory)
+
+There is no importer, and the two allocators read disjoint storage. `channels.channel_allocation_rules`
+is consumed by the legacy sync path (`server/modules/channels/sync.service.ts`) and by the readiness
+preview; the canonical runtime (`inventory-channel-exposure-runtime.repository.ts`) selects only from
+`inventory_publication_targets`, `publication_source_binding_members`, `channel_exposure_policy_*` and
+the variant mapping tables. Every live rule is therefore re-entered by hand before cutover, and the
+mapping is not one to one.
+
+| Legacy field (`channel_allocation_rules`) | Canonical equivalent | Note |
+| --- | --- | --- |
+| `mode = 'mirror'` | `shareBps = 10000` | Mirror is share at 100 percent, not a separate concept |
+| `mode = 'share'` + `share_pct` (1-100) | `shareBps = share_pct x 100` | Exact; both integer, no rounding |
+| `mode = 'fixed'` + `fixed_qty` | `maxPublishSellableUnits` | `fixed` is a cap, not a fixed publish (`allocation-engine.service.ts`, `remainingFixedOrCeiling`). Unit basis differs |
+| `ceiling_qty` | `maxPublishSellableUnits` | Same cap; legacy applies `min(ceiling, fixed)` |
+| `floor_atp` with `floor_type = 'units'` | `minPublishSellableUnits` | Semantics differ (see hazard 2) |
+| `floor_atp` with `floor_type = 'days'` | none | No canonical equivalent (see hazard 3) |
+| `eligible` | `eligible` | Direct |
+| none | `holdbackSellableUnits` | New capability with no legacy counterpart |
+
+Hazards to settle before anyone re-enters rules:
+
+1. **Unit basis.** `fixed_qty`, `ceiling_qty` and `floor_atp` are base pieces; the legacy engine
+   divides by `unitsPerVariant` to reach sellable units. `maxPublishSellableUnits` and
+   `minPublishSellableUnits` are already whole sellable units. Copying a number across unchanged is
+   wrong for any multi-piece pack.
+2. **Floor comparison point.** The legacy floor tests base ATP *before* the share is applied and
+   zeroes the whole row. Canonical `minPublishSellableUnits` tests the *capped result* after share,
+   holdback and cap. The same number can produce a different outcome on the same stock.
+3. **Days-of-cover floors.** `floor_type = 'days'` multiplies the floor by a sales-velocity reading
+   and refuses to fail open without one (`VELOCITY_REQUIRED` in `allocation-engine.service.ts`). The
+   canonical policy contract has no velocity input at all. Any live days rule must either be
+   converted to a static unit floor, with the behaviour change accepted, or the capability has to be
+   added to the exposure policy before cutover.
+
+Open question, not answerable from this repository: how many live rules use `floor_type = 'days'`.
+The development database is empty, so this needs a production count before cutover planning.
+
+### Verification
+
+- Unit: `client/src/features/channel-inventory/__tests__/*` (view-model, formatting, request
+  builders, page contract), updated server tests for optional notes and required sensitive
+  reasons, updated cross-link tests.
+- Browser (Playwright, mocked API): `test/browser/inventory-publication-target-resume.spec.ts`
+  rewritten for the Publishing tab flow; `inventory-authority-gates.spec.ts` updated for the
+  new name and path.
+- Not verified here: production data, provider accounts, or any live publication.

@@ -109,19 +109,26 @@ async function setup(page: Page) {
       <body><main id="root"></main><script type="module" src="/@fs/${resolve(process.cwd(), "test/browser/fixtures/inventory-publication-target-resume-harness.tsx").replaceAll("\\", "/")}"></script></body></html>`,
   }));
   await page.goto("/__inventory-publication-target-resume-test");
-  await expect(page.getByRole("heading", { name: "Inventory Exposure", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Channel Inventory", exact: true })).toBeVisible();
   return state;
 }
 
-test("reviews immutable readiness evidence before resuming one exact target", async ({ page }) => {
-  const state = await setup(page);
-  await page.getByText("Reason for changing readiness inclusion", { exact: true })
-    .locator("..").getByRole("textbox")
-    .fill("Restore after exact provider readback and incident resolution");
-  await page.getByRole("button", { name: "Review resume readiness", exact: true }).click();
+const REASON = "Restore after exact provider readback and incident resolution";
+const REASON_LABEL = "Reason (required for this publishing command)";
 
-  await expect(page.getByText("Review #71 is ready", { exact: false })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Resume live publication", exact: true })).toBeEnabled();
+test("reviews immutable readiness evidence before resuming one exact destination", async ({ page }) => {
+  const state = await setup(page);
+  await page.getByRole("tab", { name: "Publishing", exact: true }).click();
+  await expect(page.getByText("Calculating only", { exact: true }).first()).toBeVisible();
+
+  // Routine tabs never ask for a reason; the sensitive publishing command does, at the moment of the action.
+  await page.getByRole("button", { name: "Check readiness to resume", exact: true }).click();
+  const reviewDialog = page.getByRole("alertdialog");
+  await reviewDialog.getByLabel(REASON_LABEL).fill(REASON);
+  await reviewDialog.getByRole("button", { name: "Run readiness check", exact: true }).click();
+
+  await expect(page.getByText("Readiness check #71", { exact: false })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Resume publishing", exact: true })).toBeEnabled();
   expect(state.writes).toHaveLength(1);
   expect(state.writes[0]).toMatchObject({
     method: "POST",
@@ -129,12 +136,15 @@ test("reviews immutable readiness evidence before resuming one exact target", as
     body: {
       publicationTargetId: 5,
       expectedRevision: "3",
-      reason: "Restore after exact provider readback and incident resolution",
+      reason: REASON,
     },
   });
 
-  await page.getByRole("button", { name: "Resume live publication", exact: true }).click();
-  await expect(page.getByRole("button", { name: "Stop live publication", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Resume publishing", exact: true }).click();
+  const resumeDialog = page.getByRole("alertdialog");
+  await resumeDialog.getByLabel(REASON_LABEL).fill(REASON);
+  await resumeDialog.getByRole("button", { name: "Resume publishing", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Stop publishing", exact: true })).toBeVisible();
   expect(state.writes).toHaveLength(2);
   expect(state.writes[1]).toMatchObject({
     method: "POST",
@@ -144,7 +154,7 @@ test("reviews immutable readiness evidence before resuming one exact target", as
       expectedRevision: "3",
       resumeReviewId: "71",
       expectedEvidenceHash: HASH_B,
-      reason: "Restore after exact provider readback and incident resolution",
+      reason: REASON,
     },
   });
   expect(state.writes.every((write) => write.path.includes("channel-exposure"))).toBe(true);
@@ -173,7 +183,12 @@ function adminView(state: "preview" | "live", revision: string) {
       name: "Shopify US",
       provider: "shopify",
       status: "active",
-      connections: [{ id: 33, externalAccountLabel: "US store" }],
+      connections: [{
+        id: 33,
+        externalAccountLabel: "US store",
+        shopifyLocationId: "gid://shopify/Location/1",
+        providerAccount: null,
+      }],
     }],
     dropshipStores: [],
     publicationTargets: [{
@@ -199,6 +214,7 @@ function adminView(state: "preview" | "live", revision: string) {
       lifecycleStatus: "active",
     }],
     policyHeads: [],
+    policySubjects: [],
     sourceBindingHeads: [],
     variantMappingHeads: [],
     legacyMappingCandidates: [],

@@ -1847,7 +1847,7 @@ export const inventoryPublicationTargets = inventoryPlanningSchema.table(
     externalScopeId: varchar("external_scope_id", { length: 240 }).notNull(),
     publicationAuthority: varchar("publication_authority", { length: 30 }).notNull(),
     state: varchar("state", { length: 20 }).notNull().default("disabled"),
-    changeReason: varchar("change_reason", { length: 1000 }).notNull(),
+    changeReason: varchar("change_reason", { length: 1000 }),
     createdBy: varchar("created_by", { length: 100 }).notNull(),
     activatedBy: varchar("activated_by", { length: 100 }),
     activatedAt: timestamp("activated_at", { withTimezone: true }),
@@ -1897,7 +1897,8 @@ export const inventoryPublicationTargets = inventoryPlanningSchema.table(
     ),
     actorValid: check(
       "inventory_publication_targets_actor_chk",
-      sql`btrim(${table.createdBy}) <> '' AND btrim(${table.changeReason}) <> ''`,
+      sql`btrim(${table.createdBy}) <> ''
+        AND (${table.changeReason} IS NULL OR btrim(${table.changeReason}) <> '')`,
     ),
     activationValid: check(
       "inventory_publication_targets_activation_chk",
@@ -1991,7 +1992,7 @@ export const channelExposurePolicyVersions = inventoryPlanningSchema.table(
     definitionHash: varchar("definition_hash", { length: 64 }).notNull(),
     supersedesPolicyId: integer("supersedes_policy_id")
       .references((): AnyPgColumn => channelExposurePolicyVersions.id, { onDelete: "restrict" }),
-    changeReason: varchar("change_reason", { length: 1000 }).notNull(),
+    changeReason: varchar("change_reason", { length: 1000 }),
     idempotencyKey: varchar("idempotency_key", { length: 120 }).notNull(),
     requestHash: varchar("request_hash", { length: 64 }).notNull(),
     createdBy: varchar("created_by", { length: 100 }).notNull(),
@@ -2068,7 +2069,8 @@ export const channelExposurePolicyVersions = inventoryPlanningSchema.table(
     actorValid: check(
       "channel_exposure_policy_versions_actor_chk",
       sql`char_length(btrim(${table.createdBy})) BETWEEN 1 AND 100
-        AND char_length(btrim(${table.changeReason})) BETWEEN 1 AND 1000`,
+        AND (${table.changeReason} IS NULL
+          OR char_length(btrim(${table.changeReason})) BETWEEN 1 AND 1000)`,
     ),
     predecessorValid: check(
       "channel_exposure_policy_versions_predecessor_chk",
@@ -2102,7 +2104,7 @@ export const channelExposurePolicyHeads = inventoryPlanningSchema.table(
     draftPolicyId: integer("draft_policy_id"),
     revision: bigint("revision", { mode: "bigint" }).notNull().default(BigInt(1)),
     updatedBy: varchar("updated_by", { length: 100 }).notNull(),
-    updateReason: varchar("update_reason", { length: 1000 }).notNull(),
+    updateReason: varchar("update_reason", { length: 1000 }),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
@@ -2125,7 +2127,8 @@ export const channelExposurePolicyHeads = inventoryPlanningSchema.table(
     actorValid: check(
       "channel_exposure_policy_heads_actor_chk",
       sql`char_length(btrim(${table.updatedBy})) BETWEEN 1 AND 100
-        AND char_length(btrim(${table.updateReason})) BETWEEN 1 AND 1000`,
+        AND (${table.updateReason} IS NULL
+          OR char_length(btrim(${table.updateReason})) BETWEEN 1 AND 1000)`,
     ),
   }),
 );
@@ -2141,7 +2144,7 @@ export const publicationSourceBindingVersions = inventoryPlanningSchema.table(
     definitionHash: varchar("definition_hash", { length: 64 }).notNull(),
     supersedesBindingId: integer("supersedes_binding_id")
       .references((): AnyPgColumn => publicationSourceBindingVersions.id, { onDelete: "restrict" }),
-    changeReason: varchar("change_reason", { length: 1000 }).notNull(),
+    changeReason: varchar("change_reason", { length: 1000 }),
     idempotencyKey: varchar("idempotency_key", { length: 120 }).notNull(),
     requestHash: varchar("request_hash", { length: 64 }).notNull(),
     createdBy: varchar("created_by", { length: 100 }).notNull(),
@@ -2175,7 +2178,8 @@ export const publicationSourceBindingVersions = inventoryPlanningSchema.table(
     actorValid: check(
       "publication_source_binding_versions_actor_chk",
       sql`char_length(btrim(${table.createdBy})) BETWEEN 1 AND 100
-        AND char_length(btrim(${table.changeReason})) BETWEEN 1 AND 1000`,
+        AND (${table.changeReason} IS NULL
+          OR char_length(btrim(${table.changeReason})) BETWEEN 1 AND 1000)`,
     ),
     predecessorValid: check(
       "publication_source_binding_versions_predecessor_chk",
@@ -2234,7 +2238,7 @@ export const publicationSourceBindingHeads = inventoryPlanningSchema.table(
     draftBindingId: integer("draft_binding_id"),
     revision: bigint("revision", { mode: "bigint" }).notNull().default(BigInt(1)),
     updatedBy: varchar("updated_by", { length: 100 }).notNull(),
-    updateReason: varchar("update_reason", { length: 1000 }).notNull(),
+    updateReason: varchar("update_reason", { length: 1000 }),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
@@ -2257,7 +2261,8 @@ export const publicationSourceBindingHeads = inventoryPlanningSchema.table(
     actorValid: check(
       "publication_source_binding_heads_actor_chk",
       sql`char_length(btrim(${table.updatedBy})) BETWEEN 1 AND 100
-        AND char_length(btrim(${table.updateReason})) BETWEEN 1 AND 1000`,
+        AND (${table.updateReason} IS NULL
+          OR char_length(btrim(${table.updateReason})) BETWEEN 1 AND 1000)`,
     ),
   }),
 );
@@ -2277,7 +2282,7 @@ export const publicationVariantMappingVersions = inventoryPlanningSchema.table(
     definitionHash: varchar("definition_hash", { length: 64 }).notNull(),
     supersedesMappingId: integer("supersedes_mapping_id")
       .references((): AnyPgColumn => publicationVariantMappingVersions.id, { onDelete: "restrict" }),
-    changeReason: varchar("change_reason", { length: 1000 }).notNull(),
+    changeReason: varchar("change_reason", { length: 1000 }),
     idempotencyKey: varchar("idempotency_key", { length: 120 }).notNull(),
     requestHash: varchar("request_hash", { length: 64 }).notNull(),
     createdBy: varchar("created_by", { length: 100 }).notNull(),
@@ -2320,7 +2325,8 @@ export const publicationVariantMappingVersions = inventoryPlanningSchema.table(
     actorValid: check(
       "publication_variant_mapping_versions_actor_chk",
       sql`char_length(btrim(${table.createdBy})) BETWEEN 1 AND 100
-        AND char_length(btrim(${table.changeReason})) BETWEEN 1 AND 1000`,
+        AND (${table.changeReason} IS NULL
+          OR char_length(btrim(${table.changeReason})) BETWEEN 1 AND 1000)`,
     ),
     predecessorValid: check(
       "publication_variant_mapping_versions_predecessor_chk",
@@ -2356,7 +2362,7 @@ export const publicationVariantMappingHeads = inventoryPlanningSchema.table(
     draftMappingId: integer("draft_mapping_id"),
     revision: bigint("revision", { mode: "bigint" }).notNull().default(BigInt(1)),
     updatedBy: varchar("updated_by", { length: 100 }).notNull(),
-    updateReason: varchar("update_reason", { length: 1000 }).notNull(),
+    updateReason: varchar("update_reason", { length: 1000 }),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => ({
@@ -2388,7 +2394,8 @@ export const publicationVariantMappingHeads = inventoryPlanningSchema.table(
     actorValid: check(
       "publication_variant_mapping_heads_actor_chk",
       sql`char_length(btrim(${table.updatedBy})) BETWEEN 1 AND 100
-        AND char_length(btrim(${table.updateReason})) BETWEEN 1 AND 1000`,
+        AND (${table.updateReason} IS NULL
+          OR char_length(btrim(${table.updateReason})) BETWEEN 1 AND 1000)`,
     ),
   }),
 );

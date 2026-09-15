@@ -38,7 +38,7 @@ describe("inventory channel exposure routes", () => {
     service = {
       getView: vi.fn(async () => ({
         products: [], selectedProduct: null, channels: [], dropshipStores: [], publicationTargets: [],
-        fulfillmentNodes: [], policyHeads: [], sourceBindingHeads: [],
+        fulfillmentNodes: [], policyHeads: [], policySubjects: [], sourceBindingHeads: [],
         variantMappingHeads: [], legacyMappingCandidates: [],
         runtimeAuthority: "legacy", runtimeAuthorityRevision: "1", providerWriteEnabled: false,
       })),
@@ -74,19 +74,7 @@ describe("inventory channel exposure routes", () => {
   });
 
   it("gates draft saves with edit permission and forwards the authenticated actor", async () => {
-    const request = {
-      scope: { scopeType: "channel", channelId: 3 },
-      value: {
-        allocationSemantics: "exposure", eligible: true, shareBps: 10000,
-        holdbackSellableUnits: "0", maxPublish: { mode: "unlimited" },
-        minPublishSellableUnits: "0",
-      },
-      expectedHeadRevision: "0",
-      expectedDraftPolicyId: null,
-      expectedDraftDefinitionHash: null,
-      changeReason: "Initial reviewed channel default",
-      idempotencyKey: "route-policy-1",
-    };
+    const request = policyDraftRequest("route-policy-1");
     const response = await jsonRequest(
       `${server.url}/api/inventory-planning/admin/channel-exposure/policy-draft`,
       { method: "PUT", body: request },
@@ -94,6 +82,62 @@ describe("inventory channel exposure routes", () => {
     expect(response.status).toBe(201);
     expect(requirePermissionMock).toHaveBeenCalledWith("inventory_planning", "edit");
     expect(service.savePolicyDraft).toHaveBeenCalledWith(request, "operator-1");
+  });
+
+  it("accepts routine draft saves without a written reason and normalizes blank notes to null", async () => {
+    const { changeReason: _omitted, ...withoutReason } = policyDraftRequest("route-policy-2");
+    const omitted = await jsonRequest(
+      `${server.url}/api/inventory-planning/admin/channel-exposure/policy-draft`,
+      { method: "PUT", body: withoutReason },
+    );
+    expect(omitted.status).toBe(201);
+    expect(service.savePolicyDraft).toHaveBeenLastCalledWith(
+      { ...withoutReason, changeReason: null },
+      "operator-1",
+    );
+
+    const blank = await jsonRequest(
+      `${server.url}/api/inventory-planning/admin/channel-exposure/source-binding-draft`,
+      { method: "PUT", body: {
+        publicationTargetId: 12,
+        fulfillmentNodeIds: [4, 8],
+        expectedHeadRevision: "0",
+        expectedDraftBindingId: null,
+        expectedDraftDefinitionHash: null,
+        changeReason: "   ",
+        idempotencyKey: "route-source-2",
+      } },
+    );
+    expect(blank.status).toBe(201);
+    expect(service.saveSourceBindingDraft).toHaveBeenCalledWith(
+      expect.objectContaining({ publicationTargetId: 12, changeReason: null }),
+      "operator-1",
+    );
+  });
+
+  it("still requires a written reason for readiness, stop, and resume commands", async () => {
+    const previewState = await jsonRequest(
+      `${server.url}/api/inventory-planning/admin/channel-exposure/publication-target-preview-state`,
+      { method: "PUT", body: {
+        publicationTargetId: 5, expectedRevision: "1", state: "preview", idempotencyKey: "no-reason-1",
+      } },
+    );
+    expect(previewState.status).toBe(400);
+    const stop = await jsonRequest(
+      `${server.url}/api/inventory-planning/admin/channel-exposure/publication-target-stop`,
+      { method: "PUT", body: {
+        publicationTargetId: 5, expectedRevision: "1", changeReason: "", idempotencyKey: "no-reason-2",
+      } },
+    );
+    expect(stop.status).toBe(400);
+    const review = await jsonRequest(
+      `${server.url}/api/inventory-planning/admin/channel-exposure/publication-target-resume-review`,
+      { method: "POST", body: { publicationTargetId: 5, expectedRevision: "3", idempotencyKey: "no-reason-3" } },
+    );
+    expect(review.status).toBe(400);
+    expect(service.setPublicationTargetPreviewState).not.toHaveBeenCalled();
+    expect(targetStopService.stop).not.toHaveBeenCalled();
+    expect(targetResumeService.review).not.toHaveBeenCalled();
   });
 
   it("rejects malformed source-binding inputs before the service", async () => {
@@ -225,6 +269,22 @@ describe("inventory channel exposure routes", () => {
     expect(service.saveVariantMappingDraft).toHaveBeenCalledTimes(1);
   });
 });
+
+function policyDraftRequest(idempotencyKey: string) {
+  return {
+    scope: { scopeType: "channel", channelId: 3 },
+    value: {
+      allocationSemantics: "exposure", eligible: true, shareBps: 10000,
+      holdbackSellableUnits: "0", maxPublish: { mode: "unlimited" },
+      minPublishSellableUnits: "0",
+    },
+    expectedHeadRevision: "0",
+    expectedDraftPolicyId: null,
+    expectedDraftDefinitionHash: null,
+    changeReason: "Initial reviewed channel default",
+    idempotencyKey,
+  };
+}
 
 function saveResult() {
   return {

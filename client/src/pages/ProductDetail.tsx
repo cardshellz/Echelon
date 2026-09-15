@@ -3343,13 +3343,13 @@ export default function ProductDetail() {
                     </CardTitle>
                     <CardDescription className="text-xs md:text-sm">
                       {inventoryRuntimeAuthorityQuery.data?.authority === "canonical"
-                        ? "Per-SKU channel eligibility, holdback, share, and publish limits now live in Inventory Exposure."
+                        ? "Per-SKU channel eligibility, holdback, share, and publish limits now live in Channel Inventory."
                         : "The live inventory authority could not be confirmed, so legacy allocation reads and writes remain disabled."}
                     </CardDescription>
                   </CardHeader>
                   <CardContent className="p-3 md:p-6 pt-0 md:pt-0">
                     <Button asChild variant="outline">
-                      <Link href="/channels/inventory-exposure">Open Inventory Exposure</Link>
+                      <Link href="/channels/inventory">Open Channel Inventory</Link>
                     </Button>
                   </CardContent>
                 </Card>

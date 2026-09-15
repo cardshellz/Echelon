@@ -11,7 +11,7 @@ import { PostgresInventoryRuntimeAuthorityReadoutRepository } from "../../infras
 
 /**
  * Both operator screens that depend on the live allocator may read it:
- * Channel Allocation is gated by channels:view and Inventory Exposure by
+ * Channel Allocation is gated by channels:view and Channel Inventory by
  * inventory_planning:view. Either grant is sufficient; nothing here mutates.
  */
 export const INVENTORY_RUNTIME_AUTHORITY_GRANTS: readonly PermissionGrant[] = [

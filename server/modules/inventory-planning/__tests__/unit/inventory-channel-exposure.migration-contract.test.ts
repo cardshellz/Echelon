@@ -17,7 +17,11 @@ const routes = readFileSync(
   "utf8",
 );
 const registry = readFileSync("server/routes.ts", "utf8");
-const page = readFileSync("client/src/pages/InventoryExposure.tsx", "utf8");
+const page = readFileSync("client/src/features/channel-inventory/ChannelInventoryPage.tsx", "utf8");
+const publishingTab = readFileSync(
+  "client/src/features/channel-inventory/components/PublishingTab.tsx",
+  "utf8",
+);
 
 describe("inventory channel exposure inactive foundation", () => {
   it("creates versioned policy and source-binding heads without seeding authority", () => {
@@ -96,8 +100,11 @@ describe("inventory channel exposure inactive foundation", () => {
     // The live allocator is read from the runtime-authority singleton, never asserted.
     expect(page).toContain("<InventoryRuntimeAuthorityBadge />");
     expect(page).not.toContain("Legacy runtime retained");
-    expect(page).toContain("Include in readiness preview");
+    // Readiness inclusion stays a reviewed, reason-gated step; nothing publishes on demand.
+    expect(publishingTab).toContain("Include in readiness review");
+    expect(publishingTab).toContain("setReadinessInclusion");
     expect(page).not.toMatch(/publish now/i);
+    expect(publishingTab).not.toMatch(/publish now/i);
   });
 
   it("adds append-only exact-revision readiness evidence without seeding or activating targets", () => {

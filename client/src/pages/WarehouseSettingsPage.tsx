@@ -740,7 +740,7 @@ export default function WarehouseSettingsPage() {
               </CardHeader>
               <CardContent>
                 <Button variant="outline" asChild>
-                  <Link href="/channels/inventory-exposure">Open Inventory Exposure</Link>
+                  <Link href="/channels/inventory">Open Channel Inventory</Link>
                 </Button>
               </CardContent>
             </Card>

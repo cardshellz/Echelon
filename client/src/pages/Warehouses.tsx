@@ -105,10 +105,10 @@ function FeedToggle({
         variant="outline"
         className="text-xs"
         title={runtimeAuthority === "canonical"
-          ? "Warehouse exposure is controlled by Inventory Exposure targets."
+          ? "Warehouse supply is chosen per destination in Channel Inventory."
           : "Legacy feed controls stay unavailable until runtime authority is confirmed."}
       >
-        {runtimeAuthority === "canonical" ? "Inventory Exposure" : "Authority unknown"}
+        {runtimeAuthority === "canonical" ? "Channel Inventory" : "Authority unknown"}
       </Badge>
     );
   }
