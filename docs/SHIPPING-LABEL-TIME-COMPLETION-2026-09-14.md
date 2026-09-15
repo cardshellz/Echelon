@@ -111,6 +111,12 @@ missing-fulfillment counts on their own.
 
 ## Remaining acceptance and recovery
 
+The user explicitly requested the backfill alongside PR publication on September
+15. Recovering verified missing historical Shopify updates is required to close
+this effort; deploying the forward fix alone is not completion. The backfill must
+run after the corrected code and migration are verified live, not as a migration
+side effect while the application is deploying.
+
 1. Publish this one coherent patch, pass CI, merge/deploy, and verify the deployed
    commit and migration. No PR number or deployed SHA has been assigned here.
 2. Observe real ordinary split labels before carrier pickup. Verify exact store,
@@ -130,3 +136,28 @@ retroactively authorize them or blindly requeue terminal reviews. Production
 credentials, API timing, real backlog completion and cancellation behavior are
 not proven by the local mocks. Those are acceptance checks, not another unrelated
 system to build or a reason to detour into inventory/Dropship work.
+
+### Backfill execution boundaries
+
+- Read back each candidate package in its originating Shopify account using
+  order-line identity, quantity and tracking. An existing exact fulfillment is a
+  reconciliation case, not permission to send another fulfillment.
+- Separate missing commands from existing failed/review commands. Replaying label
+  evidence, creating missing canonical authority and retrying a reviewed command
+  are different owner operations; do not substitute one for another blindly.
+- `scripts/backfill-channel-fulfillment-authority.ts` defaults to a bounded
+  dry-run but only discovers already-shipped legacy WMS packages. Its
+  `buildCandidateQuery` does not cover every label-only candidate, and its
+  `runBackfill` does not perform live Shopify readback. Do not treat this legacy
+  script's output as a complete or provider-validated backfill preview.
+- `previewChannelFulfillmentReviewRetry` in
+  `server/modules/oms/channel-fulfillment-review-retry.domain.ts` explicitly
+  reports `providerValidation: "not_performed"`. It supports only named review
+  reasons. Unsupported cases remain classified for separate exact resolution;
+  do not force their status to pending with SQL.
+- Present the grouped preview in ordinary order/shipment/tracking terms, with
+  exact item quantities and resulting changes. The user is not expected to read
+  JSON or manually inspect every inventory lot.
+- Apply approved missing channel effects through their audited owner operations
+  in bounded batches, then read Shopify again. Preserve unshipped/backordered
+  units, inventory balances and already-counted WMS fulfilled quantities.
