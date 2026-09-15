@@ -285,7 +285,7 @@ function activationRun() {
     reason: "Full catalog review",
     startedAt: "2026-08-28T17:00:00.000Z",
     completedAt: "2026-08-28T17:00:01.000Z",
-    summary: { totalProducts: 0, readyProducts: 0, blockedProducts: 0, publicationRows: 0 },
+    summary: { totalProducts: 0, readyProducts: 0, blockedProducts: 0, publicationRows: 0, divergence: { rowsMatchingLegacy: 0, rowsAboveLegacy: 0, rowsBelowLegacy: 0, largestIncreaseUnits: "0", largestDecreaseUnits: "0" } },
     products: [],
     blockers: [],
     runtimeAuthorityChanged: false as const,

@@ -182,7 +182,7 @@ function activationInput(): PersistActivationDryRunInput {
     startedAt: STARTED_AT,
     completedAt: COMPLETED_AT,
     state: "blocked",
-    summary: { totalProducts: 1, readyProducts: 0, blockedProducts: 1, publicationRows: 0 },
+    summary: { totalProducts: 1, readyProducts: 0, blockedProducts: 1, publicationRows: 0, divergence: { rowsMatchingLegacy: 0, rowsAboveLegacy: 0, rowsBelowLegacy: 0, largestIncreaseUnits: "0", largestDecreaseUnits: "0" } },
     products: [{
       productId: 10,
       queueState: "approved",
