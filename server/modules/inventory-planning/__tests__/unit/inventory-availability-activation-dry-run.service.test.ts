@@ -48,7 +48,16 @@ describe("inventory availability activation dry-run service", () => {
       runtimeAuthorityChanged: false,
       providerWriteAttempted: false,
       outboxEnqueued: false,
-      summary: { totalProducts: 1, readyProducts: 1, blockedProducts: 0, publicationRows: 1 },
+      // The fixture's legacy allocator publishes 7 where the canonical
+      // configuration would publish 8, so the run reports one row above
+      // legacy. The run is still ready: divergence is evidence, not a blocker.
+      summary: {
+        totalProducts: 1, readyProducts: 1, blockedProducts: 0, publicationRows: 1,
+        divergence: {
+          rowsMatchingLegacy: 0, rowsAboveLegacy: 1, rowsBelowLegacy: 0,
+          largestIncreaseUnits: "1", largestDecreaseUnits: "0",
+        },
+      },
     });
     expect(result.products[0]?.proposedPublications[0]).toMatchObject({
       disposition: "publish",

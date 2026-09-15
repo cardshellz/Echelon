@@ -7,6 +7,7 @@ import { PostgresInventoryAvailabilityActivationDryRunRepository } from "../../i
 import { inventoryCutoverEvidenceHash } from "../../domain/inventory-cutover-manifest";
 import { loadProposedPublicationTargetsForCutover } from "../../infrastructure/inventory-channel-exposure-runtime.repository";
 import { planInventoryChannelExposureProduct } from "../../application/inventory-channel-exposure-runtime.service";
+import { summarizeCutoverDivergence } from "../../domain/inventory-channel-exposure";
 import { cutoverShipmentSchemaFixtureSql } from "./inventory-cutover-shipment-schema.fixture";
 import { cutoverReceiptSchemaFixtureSql } from "./inventory-cutover-receipt-schema.fixture";
 
@@ -152,7 +153,8 @@ export async function seedCompositionReviewedDryRun(pool: Pool) {
         policySelections:target.selectedPolicies.map((policy) => ({ ...policy,authority:"draft" as const })),
       }))),publicationEvidence:[],blockers:[],
     };
-    const summary = { totalProducts:1,readyProducts:1,blockedProducts:0,publicationRows:product.proposedPublications.length };
+    const summary = { totalProducts:1,readyProducts:1,blockedProducts:0,publicationRows:product.proposedPublications.length,
+      divergence: summarizeCutoverDivergence(product.proposedPublications) };
     // Observe-only destinations are included in the reviewed target census, but
     // carry no Echelon quantity promise, source binding or publication command.
     product.proposedPublications.push(...observedTargets.map(target => ({ publicationTargetId:target.id,productVariantId:101,
