@@ -352,3 +352,76 @@ export function deriveChannelDestinations(input: {
   }
   return { create, skipped };
 }
+
+// ---------------------------------------------------------------------------
+// Cutover divergence
+// ---------------------------------------------------------------------------
+
+/** One readiness row's legacy and canonical quantities, as whole sellable units. */
+export interface PublicationQuantityComparison {
+  legacyCalculatedUnits: string;
+  desiredUnits: string;
+}
+
+export interface CutoverDivergenceSummary {
+  /** Rows where canonical would publish exactly what legacy publishes today. */
+  rowsMatchingLegacy: number;
+  rowsAboveLegacy: number;
+  rowsBelowLegacy: number;
+  /** Largest single increase and decrease, as non-negative unit counts. */
+  largestIncreaseUnits: string;
+  largestDecreaseUnits: string;
+}
+
+/**
+ * Compares, row by row, what the canonical configuration would publish against
+ * what the legacy allocator publishes today.
+ *
+ * This exists because readiness otherwise only refuses a quantity that exceeds
+ * canonical ATP. A rule entered with the wrong unit basis — the legacy caps and
+ * floors are base pieces while the canonical fields are whole sellable units —
+ * produces a number that is wrong but still under ATP, so nothing refuses it.
+ * The same is true of a legacy days-of-cover floor, which has no canonical
+ * equivalent at all and simply stops being applied.
+ *
+ * Divergence is reported, never treated as a failure: publishing different
+ * numbers is the point of the new planner, and only an operator can say which
+ * differences are intended. What this removes is the need to read every row of
+ * a full-catalog report by hand to notice that some are not.
+ */
+export function summarizeCutoverDivergence(
+  rows: readonly PublicationQuantityComparison[],
+): CutoverDivergenceSummary {
+  let rowsMatchingLegacy = 0;
+  let rowsAboveLegacy = 0;
+  let rowsBelowLegacy = 0;
+  const zero = BigInt(0);
+  let largestIncrease = zero;
+  let largestDecrease = zero;
+
+  for (const row of rows) {
+    // BigInt throughout: these are Postgres bigints carried as strings, and a
+    // Number conversion would silently lose precision on a large catalog.
+    const difference = BigInt(row.desiredUnits) - BigInt(row.legacyCalculatedUnits);
+    if (difference === zero) {
+      rowsMatchingLegacy += 1;
+      continue;
+    }
+    if (difference > zero) {
+      rowsAboveLegacy += 1;
+      if (difference > largestIncrease) largestIncrease = difference;
+      continue;
+    }
+    rowsBelowLegacy += 1;
+    const magnitude = difference * BigInt(-1);
+    if (magnitude > largestDecrease) largestDecrease = magnitude;
+  }
+
+  return {
+    rowsMatchingLegacy,
+    rowsAboveLegacy,
+    rowsBelowLegacy,
+    largestIncreaseUnits: largestIncrease.toString(),
+    largestDecreaseUnits: largestDecrease.toString(),
+  };
+}
