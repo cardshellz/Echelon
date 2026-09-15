@@ -46,7 +46,7 @@ export type PermissionGrant = readonly [resource: string, action: string];
  * Grants are checked in order and evaluation stops at the first allow, so list
  * the most common grant first. Intended for read-only views that two operator
  * roles legitimately share (for example the live inventory runtime authority
- * shown on both Channel Allocation and Inventory Exposure). A permission-owner
+ * shown on both Channel Allocation and Channel Inventory). A permission-owner
  * failure is forwarded to the error handler instead of being treated as a deny
  * or an allow.
  */
