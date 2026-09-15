@@ -607,6 +607,44 @@ never shown as basis points; pack units are stated per SKU; saved drafts are vis
 | Location promise-eligibility editor | Not part of this page (inventory policy, Supply & Transformations) |
 | Providers without an adapter (e.g. Amazon, TikTok direct) | Listed, but destination registration is disabled with an explanation |
 
+### Legacy rule translation (Channel Allocation -> Channel Inventory)
+
+There is no importer, and the two allocators read disjoint storage. `channels.channel_allocation_rules`
+is consumed by the legacy sync path (`server/modules/channels/sync.service.ts`) and by the readiness
+preview; the canonical runtime (`inventory-channel-exposure-runtime.repository.ts`) selects only from
+`inventory_publication_targets`, `publication_source_binding_members`, `channel_exposure_policy_*` and
+the variant mapping tables. Every live rule is therefore re-entered by hand before cutover, and the
+mapping is not one to one.
+
+| Legacy field (`channel_allocation_rules`) | Canonical equivalent | Note |
+| --- | --- | --- |
+| `mode = 'mirror'` | `shareBps = 10000` | Mirror is share at 100 percent, not a separate concept |
+| `mode = 'share'` + `share_pct` (1-100) | `shareBps = share_pct x 100` | Exact; both integer, no rounding |
+| `mode = 'fixed'` + `fixed_qty` | `maxPublishSellableUnits` | `fixed` is a cap, not a fixed publish (`allocation-engine.service.ts`, `remainingFixedOrCeiling`). Unit basis differs |
+| `ceiling_qty` | `maxPublishSellableUnits` | Same cap; legacy applies `min(ceiling, fixed)` |
+| `floor_atp` with `floor_type = 'units'` | `minPublishSellableUnits` | Semantics differ (see hazard 2) |
+| `floor_atp` with `floor_type = 'days'` | none | No canonical equivalent (see hazard 3) |
+| `eligible` | `eligible` | Direct |
+| none | `holdbackSellableUnits` | New capability with no legacy counterpart |
+
+Hazards to settle before anyone re-enters rules:
+
+1. **Unit basis.** `fixed_qty`, `ceiling_qty` and `floor_atp` are base pieces; the legacy engine
+   divides by `unitsPerVariant` to reach sellable units. `maxPublishSellableUnits` and
+   `minPublishSellableUnits` are already whole sellable units. Copying a number across unchanged is
+   wrong for any multi-piece pack.
+2. **Floor comparison point.** The legacy floor tests base ATP *before* the share is applied and
+   zeroes the whole row. Canonical `minPublishSellableUnits` tests the *capped result* after share,
+   holdback and cap. The same number can produce a different outcome on the same stock.
+3. **Days-of-cover floors.** `floor_type = 'days'` multiplies the floor by a sales-velocity reading
+   and refuses to fail open without one (`VELOCITY_REQUIRED` in `allocation-engine.service.ts`). The
+   canonical policy contract has no velocity input at all. Any live days rule must either be
+   converted to a static unit floor, with the behaviour change accepted, or the capability has to be
+   added to the exposure policy before cutover.
+
+Open question, not answerable from this repository: how many live rules use `floor_type = 'days'`.
+The development database is empty, so this needs a production count before cutover planning.
+
 ### Verification
 
 - Unit: `client/src/features/channel-inventory/__tests__/*` (view-model, formatting, request
