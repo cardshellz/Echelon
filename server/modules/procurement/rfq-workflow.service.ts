@@ -147,11 +147,26 @@ export function createRfqWorkflowService(database: RfqWorkflowDatabase, purchasi
       });
       const warehouses = new Set(selected.map(({ line }) => line.warehouseId));
       if (warehouses.size !== 1) throw new RfqWorkflowError("RFQ_WAREHOUSE_REVIEW_REQUIRED", "Select lines for one warehouse per purchase order");
+      // The purchase order line records how the goods are expected to arrive
+      // and be counted. The quote request already names the exact SKU it was
+      // raised against, so that identity carries through; a request line that
+      // never named one cannot answer the question here, and the conversion
+      // stops rather than creating a line with it left open.
+      const unconfigured = selected.filter(({ line }) => line.productVariantId == null);
+      if (unconfigured.length > 0) {
+        throw new RfqWorkflowError(
+          "RFQ_RECEIVE_CONFIGURATION_REQUIRED",
+          "A selected quote line does not name the configuration its goods arrive in. Set it on the quote request before creating a purchase order.",
+          409,
+          { rfqLineIds: unconfigured.map(({ line }) => line.id) },
+        );
+      }
       const created = await purchasing.createPurchaseOrderWithLines({
         vendorId: workflow.vendorId, warehouseId: selected[0].line.warehouseId,
         internalNotes: `Created from ${workflow.rfqNumber}; exact supplier quote revisions remain linked.`,
         lines: selected.map(({ line, quote }) => ({
-          productId: line.productId, productVariantId: line.productVariantId, vendorProductId: line.vendorProductId,
+          productId: line.productId, productVariantId: line.productVariantId,
+          expectedReceiveVariantId: line.productVariantId, vendorProductId: line.vendorProductId,
           orderQty: quote.quotedPieces, pricing: quote.quote.pricing, pricingSource: "manual",
           packagingCostCents: quote.quote.packagingCostCents!, quoteReference: quote.quote.quoteReference,
           quotedAt: new Date(quote.quote.quotedAt), quoteValidUntil: quote.quote.quoteValidUntil,
