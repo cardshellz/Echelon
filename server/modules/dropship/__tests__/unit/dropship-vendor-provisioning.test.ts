@@ -363,13 +363,41 @@ describe("DropshipVendorProvisioningService", () => {
     ]);
   });
 
-  it("keeps the wallet gate incomplete when only a bank account backs auto-reload", async () => {
+  it("completes the wallet gate with ACH auto-reload as long as a card is on file", async () => {
+    repository.vendor = makeVendorProfile({ status: "onboarding" });
+    repository.walletSetupSummary = {
+      availableBalanceCents: 0,
+      pendingBalanceCents: 0,
+      activeFundingMethodCount: 2,
+      // Auto-reload runs on ACH (routine top-up); a separate card is on file
+      // to cover an order the balance cannot.
+      activeStripeFundingMethodCount: 2,
+      activeStripeCardFundingMethodCount: 1,
+      activeUsdcBaseFundingMethodCount: 0,
+      autoReloadEnabled: true,
+      autoReloadFundingMethodId: 8,
+      autoReloadFundingMethodActive: true,
+      autoReloadFundingMethodReady: true,
+      autoReloadFundingMethodIsCard: false,
+    };
+
+    const state = await service.getOnboardingState("member-1");
+
+    expect(state.wallet).toMatchObject({
+      hasCardBackstop: true,
+      autoReloadConfigured: true,
+      walletReady: true,
+    });
+    expect(state.steps.find((step) => step.key === "wallet_payment")).toMatchObject({ status: "complete" });
+  });
+
+  it("keeps the wallet gate incomplete when auto-reload is set up but no card is on file", async () => {
     repository.vendor = makeVendorProfile({ status: "onboarding" });
     repository.walletSetupSummary = {
       availableBalanceCents: 50_000,
       pendingBalanceCents: 0,
       activeFundingMethodCount: 1,
-      // An active Stripe method exists, but it is ACH: no card is on file.
+      // ACH only: auto-reload is configured, but nothing can cover a held order.
       activeStripeFundingMethodCount: 1,
       activeStripeCardFundingMethodCount: 0,
       activeUsdcBaseFundingMethodCount: 0,
@@ -382,18 +410,15 @@ describe("DropshipVendorProvisioningService", () => {
 
     const state = await service.getOnboardingState("member-1");
 
-    // A funded balance does not substitute for the backstop: it runs out, and
-    // ACH cannot settle fast enough to rescue the order that follows.
+    // A funded balance does not substitute for the card: it runs out, and ACH
+    // cannot settle fast enough to cover the order that follows.
     expect(state.wallet).toMatchObject({
       hasSpendableBalance: true,
-      hasStripeReadyFundingMethod: true,
       hasCardBackstop: false,
-      autoReloadConfigured: false,
+      autoReloadConfigured: true,
       walletReady: false,
     });
-    expect(state.steps.find((step) => step.key === "wallet_payment")).toMatchObject({
-      status: "incomplete",
-    });
+    expect(state.steps.find((step) => step.key === "wallet_payment")).toMatchObject({ status: "incomplete" });
   });
 
   it("marks wallet onboarding complete with Stripe-ready auto-reload and no USDC funding method", async () => {

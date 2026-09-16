@@ -841,13 +841,23 @@ export class DropshipWalletService {
     if (fundingMethod.status !== "active") {
       return this.skipAutoReload(parsed, "funding_method_not_active", wallet.account.currency, fundingMethod.fundingMethodId);
     }
-    // Card only, for the same reason as the configure-time guard: an ACH pull
-    // cannot settle fast enough to save the order that triggered this reload.
-    if (fundingMethod.rail !== "stripe_card") {
-      return this.skipAutoReload(parsed, "funding_method_rail_unsupported", wallet.account.currency, fundingMethod.fundingMethodId);
+    // A held order cannot wait days for ACH to settle, so the shortfall is
+    // always charged to a card; the configured method serves only the routine
+    // top-up. Routine reloads charge whatever the vendor configured.
+    const chargeMethod = parsed.reason === "payment_hold"
+      ? selectPaymentHoldCard(wallet.fundingMethods, fundingMethod)
+      : fundingMethod;
+    if (!chargeMethod) {
+      return this.skipAutoReload(parsed, "card_backstop_unavailable", wallet.account.currency, fundingMethod.fundingMethodId);
     }
-    if (!fundingMethod.providerCustomerId || !fundingMethod.providerPaymentMethodId) {
-      return this.skipAutoReload(parsed, "funding_method_provider_identity_required", wallet.account.currency, fundingMethod.fundingMethodId);
+    // The rail check sits on the method being charged, not the configured one:
+    // a routine reload on USDC is refused here, and this is also where the
+    // type narrows to the two Stripe rails the provider accepts.
+    if (chargeMethod.rail !== "stripe_card" && chargeMethod.rail !== "stripe_ach") {
+      return this.skipAutoReload(parsed, "funding_method_rail_unsupported", wallet.account.currency, chargeMethod.fundingMethodId);
+    }
+    if (!chargeMethod.providerCustomerId || !chargeMethod.providerPaymentMethodId) {
+      return this.skipAutoReload(parsed, "funding_method_provider_identity_required", wallet.account.currency, chargeMethod.fundingMethodId);
     }
 
     const amount = calculateAutoReloadAmount({
@@ -858,17 +868,17 @@ export class DropshipWalletService {
       reason: parsed.reason,
     });
     if (amount.outcome === "skipped") {
-      return this.skipAutoReload(parsed, amount.skipReason, wallet.account.currency, fundingMethod.fundingMethodId);
+      return this.skipAutoReload(parsed, amount.skipReason, wallet.account.currency, chargeMethod.fundingMethodId);
     }
 
     const paymentIntent = await provider.createStripeAutoReloadPaymentIntent({
       vendorId: parsed.vendorId,
-      fundingMethodId: fundingMethod.fundingMethodId,
-      rail: fundingMethod.rail,
+      fundingMethodId: chargeMethod.fundingMethodId,
+      rail: chargeMethod.rail,
       amountCents: amount.amountCents,
       currency: wallet.account.currency,
-      providerCustomerId: fundingMethod.providerCustomerId,
-      providerPaymentMethodId: fundingMethod.providerPaymentMethodId,
+      providerCustomerId: chargeMethod.providerCustomerId,
+      providerPaymentMethodId: chargeMethod.providerPaymentMethodId,
       reason: parsed.reason,
       intakeId: parsed.intakeId ?? null,
       requiredBalanceCents: parsed.requiredBalanceCents ?? null,
@@ -877,8 +887,8 @@ export class DropshipWalletService {
     });
     const funding = await this.creditFunding({
       vendorId: parsed.vendorId,
-      fundingMethodId: fundingMethod.fundingMethodId,
-      rail: fundingMethod.rail,
+      fundingMethodId: chargeMethod.fundingMethodId,
+      rail: chargeMethod.rail,
       status: paymentIntent.status,
       amountCents: paymentIntent.amountCents,
       currency: paymentIntent.currency,
@@ -900,7 +910,7 @@ export class DropshipWalletService {
       message: "Dropship wallet auto-reload funding was created.",
       context: {
         vendorId: parsed.vendorId,
-        fundingMethodId: fundingMethod.fundingMethodId,
+        fundingMethodId: chargeMethod.fundingMethodId,
         amountCents: paymentIntent.amountCents,
         status: paymentIntent.status,
         reason: parsed.reason,
@@ -914,7 +924,7 @@ export class DropshipWalletService {
     return {
       outcome: "funding_created",
       vendorId: parsed.vendorId,
-      fundingMethodId: fundingMethod.fundingMethodId,
+      fundingMethodId: chargeMethod.fundingMethodId,
       amountCents: paymentIntent.amountCents,
       currency: paymentIntent.currency,
       providerPaymentIntentId: paymentIntent.providerPaymentIntentId,
@@ -1086,14 +1096,16 @@ export class DropshipWalletService {
         },
       );
     }
-    // Card only. ACH settles in days, so it cannot rescue an order that is
-    // already sitting in payment hold — the order would cancel on the
-    // marketplace before the funds arrived. ACH and USDC fund the wallet ahead
-    // of time; the card exists solely as the immediate backstop.
-    if (fundingMethod.rail !== "stripe_card") {
+    // Card or ACH. Auto-reload's routine job (minimum_balance) is topping the
+    // wallet up for FUTURE orders once the balance dips under the trigger, and
+    // ACH is fine for that as long as the trigger leaves enough runway for it
+    // to settle. The one case ACH cannot serve — an order already waiting on a
+    // short balance — is charged to the card on file instead (see
+    // selectPaymentHoldCard), so the routine method is free to be ACH.
+    if (fundingMethod.rail !== "stripe_card" && fundingMethod.rail !== "stripe_ach") {
       throw new DropshipError(
         "DROPSHIP_AUTO_RELOAD_FUNDING_METHOD_RAIL_UNSUPPORTED",
-        "Auto-reload requires a Stripe card funding method.",
+        "Auto-reload requires a Stripe card or ACH funding method.",
         {
           vendorId: input.vendorId,
           fundingMethodId: input.fundingMethodId,
@@ -1158,12 +1170,39 @@ function calculateAutoReloadAmount(input: {
  */
 const AUTO_RELOAD_SKIPS_NEEDING_ATTENTION: ReadonlySet<string> = new Set([
   "funding_provider_not_configured",
+  "card_backstop_unavailable",
   "funding_method_required",
   "funding_method_missing",
   "funding_method_not_active",
   "funding_method_rail_unsupported",
   "funding_method_provider_identity_required",
 ]);
+
+function isChargeableCard(method: DropshipFundingMethodRecord): boolean {
+  return method.rail === "stripe_card"
+    && method.status === "active"
+    && method.providerCustomerId !== null
+    && method.providerPaymentMethodId !== null;
+}
+
+/**
+ * The card charged when an order is held on a short balance.
+ *
+ * The configured auto-reload method serves routine top-ups and may be ACH,
+ * which settles in days. An order that is already waiting cannot wait that
+ * long, so the shortfall goes to a card: the configured method when it is one,
+ * otherwise the default card, otherwise any chargeable card. Null means there
+ * is no card to fall back to — the launch gate requires one, but a card can be
+ * detached or expire after activation.
+ */
+function selectPaymentHoldCard(
+  fundingMethods: readonly DropshipFundingMethodRecord[],
+  configured: DropshipFundingMethodRecord,
+): DropshipFundingMethodRecord | null {
+  if (isChargeableCard(configured)) return configured;
+  const cards = fundingMethods.filter(isChargeableCard);
+  return cards.find((method) => method.isDefault) ?? cards[0] ?? null;
+}
 
 function skippedAutoReload(
   input: HandleDropshipAutoReloadInput,

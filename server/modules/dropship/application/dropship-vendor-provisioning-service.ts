@@ -309,15 +309,13 @@ export function buildOnboardingState(input: {
   const hasCardBackstop = input.wallet.activeStripeCardFundingMethodCount > 0;
   const autoReloadConfigured = input.wallet.autoReloadEnabled
     && input.wallet.autoReloadFundingMethodId !== null
-    && input.wallet.autoReloadFundingMethodReady
-    && input.wallet.autoReloadFundingMethodIsCard;
+    && input.wallet.autoReloadFundingMethodReady;
   const hasSpendableBalance = input.wallet.availableBalanceCents > 0;
-  // Every live vendor carries a card as the emergency backstop, whatever their
-  // balance is and whichever rail they normally fund with. ACH and USDC are the
-  // primary rails but neither can settle fast enough to rescue an order already
-  // in payment hold, so neither can satisfy this gate. A funded balance does not
-  // substitute either: it runs out, and the backstop is what stops the next
-  // order cancelling on the marketplace.
+  // Two separate requirements. Auto-reload is the routine top-up and may run on
+  // a card or ACH — the vendor's choice. The card on file is the backstop that
+  // covers an order the balance cannot, which ACH is too slow for, so it is
+  // required regardless of which rail auto-reload uses. A funded balance does
+  // not substitute for either: it runs out.
   const walletReady = hasCardBackstop && autoReloadConfigured;
 
   return {

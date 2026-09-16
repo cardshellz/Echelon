@@ -518,7 +518,7 @@ function SetupSection({
           </div>
         ) : (
           <AutoReloadChooser
-            methods={setup.cardMethods}
+            methods={setup.reloadMethods}
             primaryMethod={setup.primaryMethod!}
             initialMinimumCents={AUTO_RELOAD_DEFAULTS.minimumBalanceCents}
             initialAmountCents={AUTO_RELOAD_DEFAULTS.maxSingleReloadCents}
@@ -801,7 +801,7 @@ function AutoReloadSection({
       {editing && method && (
         <div className="mt-5 border-t border-zinc-200 pt-5">
           <AutoReloadChooser
-            methods={setup.cardMethods}
+            methods={setup.reloadMethods}
             primaryMethod={method}
             initialMinimumCents={autoReload?.minimumBalanceCents ?? AUTO_RELOAD_DEFAULTS.minimumBalanceCents}
             initialAmountCents={autoReload?.maxSingleReloadCents ?? AUTO_RELOAD_DEFAULTS.maxSingleReloadCents}

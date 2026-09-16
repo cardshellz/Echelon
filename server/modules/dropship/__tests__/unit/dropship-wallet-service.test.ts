@@ -532,19 +532,33 @@ describe("DropshipWalletService", () => {
     })).rejects.toMatchObject({ code: "DROPSHIP_AUTO_RELOAD_INVALID_LIMITS" });
   });
 
-  it("refuses a bank account as the auto-reload backstop", async () => {
-    // Funding method 100 is the ACH method in the fixture. ACH funds the wallet
-    // ahead of time but cannot rescue an order already in payment hold.
-    await expect(service.configureAutoReload({
+  it("accepts a bank account as the routine auto-reload method", async () => {
+    // Funding method 100 is the ACH method in the fixture. Routine top-ups may
+    // run on ACH; a held order is charged to the card on file instead.
+    const setting = await service.configureAutoReload({
       vendorId: 10,
       fundingMethodId: 100,
+      enabled: true,
+      minimumBalanceCents: 50_000,
+      maxSingleReloadCents: 100_000,
+      paymentHoldTimeoutMinutes: 2880,
+    });
+    expect(setting).toMatchObject({ enabled: true, fundingMethodId: 100 });
+
+    // USDC is push-only and can never be pulled from, so it is still refused.
+    repository.fundingMethods.push(makeFundingMethod({
+      fundingMethodId: 200, rail: "usdc_base", providerCustomerId: null, providerPaymentMethodId: null, isDefault: false,
+    }));
+    await expect(service.configureAutoReload({
+      vendorId: 10,
+      fundingMethodId: 200,
       enabled: true,
       minimumBalanceCents: 5000,
       maxSingleReloadCents: 25000,
       paymentHoldTimeoutMinutes: 2880,
     })).rejects.toMatchObject({
       code: "DROPSHIP_AUTO_RELOAD_FUNDING_METHOD_RAIL_UNSUPPORTED",
-      context: expect.objectContaining({ rail: "stripe_ach" }),
+      context: expect.objectContaining({ rail: "usdc_base" }),
     });
   });
 
@@ -671,16 +685,21 @@ describe("DropshipWalletService", () => {
   });
 
   it("warns when the backstop cannot fire, and stays at info for a correct no-op", async () => {
-    // Backstop broken: auto-reload points at a rail that cannot be charged.
+    // Backstop broken: an order is held, auto-reload runs on ACH, and the card
+    // that should cover the shortfall is gone.
+    repository.fundingMethods = repository.fundingMethods.filter((method) => method.rail !== "stripe_card");
     repository.autoReload = makeAutoReloadSetting({ fundingMethodId: 100 });
-    await service.handleAutoReload({ vendorId: 10, reason: "minimum_balance", idempotencyKey: "skip-warn-1" });
+    await service.handleAutoReload({
+      vendorId: 10, reason: "payment_hold", requiredBalanceCents: 7500, intakeId: 456, idempotencyKey: "skip-warn-1",
+    });
     expect(logs.at(-1)).toMatchObject({
       level: "warn",
       code: "DROPSHIP_AUTO_RELOAD_SKIPPED",
       context: expect.objectContaining({
         vendorId: 10,
         fundingMethodId: 100,
-        skipReason: "funding_method_rail_unsupported",
+        intakeId: 456,
+        skipReason: "card_backstop_unavailable",
       }),
     });
 
@@ -694,7 +713,7 @@ describe("DropshipWalletService", () => {
     });
   });
 
-  it("skips auto-reload bound to a bank account: ACH cannot settle in time to rescue the order", async () => {
+  it("records a routine ACH auto-reload as pending until Stripe settlement", async () => {
     repository.autoReload = makeAutoReloadSetting({
       fundingMethodId: 100,
       minimumBalanceCents: 5000,
@@ -707,15 +726,50 @@ describe("DropshipWalletService", () => {
       idempotencyKey: "auto-reload-minimum-1",
     });
 
+    // The vendor chose ACH for routine top-ups: it is charged, and the funds
+    // stay pending — not spendable — until Stripe settles them.
     expect(result).toMatchObject({
-      outcome: "skipped",
-      skipReason: "funding_method_rail_unsupported",
+      outcome: "funding_created",
       fundingMethodId: 100,
+      amountCents: 5000,
+      fundingStatus: "pending",
+      providerPaymentIntentId: "pi_auto_5000",
     });
-    // No charge is attempted and the balances are untouched.
     expect(repository.account.availableBalanceCents).toBe(0);
+    expect(repository.account.pendingBalanceCents).toBe(5000);
+    expect(repository.ledger[0]).toMatchObject({ status: "pending", amountCents: 5000, fundingMethodId: 100 });
+  });
+
+  it("charges the card on file for a held order even when auto-reload runs on ACH", async () => {
+    repository.autoReload = makeAutoReloadSetting({
+      fundingMethodId: 100,
+      minimumBalanceCents: 5000,
+      maxSingleReloadCents: 25000,
+    });
+
+    const result = await service.handleAutoReload({
+      vendorId: 10,
+      reason: "payment_hold",
+      requiredBalanceCents: 6500,
+      intakeId: 456,
+      idempotencyKey: "auto-reload-intake-456",
+    });
+
+    // An order already waiting cannot wait days for ACH: the shortfall goes to
+    // the card (fixture method 99), and lands settled so the order can proceed.
+    expect(result).toMatchObject({
+      outcome: "funding_created",
+      fundingMethodId: 99,
+      amountCents: 6500,
+      fundingStatus: "settled",
+    });
+    expect(repository.account.availableBalanceCents).toBe(6500);
     expect(repository.account.pendingBalanceCents).toBe(0);
-    expect(repository.ledger).toHaveLength(0);
+    expect(repository.ledger[0]).toMatchObject({ status: "settled", amountCents: 6500, fundingMethodId: 99 });
+    expect(logs.at(-1)).toMatchObject({
+      code: "DROPSHIP_AUTO_RELOAD_FUNDING_CREATED",
+      context: expect.objectContaining({ reason: "payment_hold", intakeId: 456, amountCents: 6500 }),
+    });
   });
 
   it("skips payment-hold auto-reload when the needed amount exceeds the configured max", async () => {

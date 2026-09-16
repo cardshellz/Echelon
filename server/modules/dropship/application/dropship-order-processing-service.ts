@@ -187,18 +187,25 @@ export class DropshipOrderProcessingService {
         },
       });
 
-      await this.tryHandleAutoReload({
+      const reload = await this.tryHandleAutoReload({
         parsed,
         claim,
         acceptance,
       });
-      await syncDropshipAcceptedOrderToWmsSafely(this.deps, {
+      const finalAcceptance = await this.retryAcceptanceAfterReload({
+        parsed,
+        claim,
+        quote,
         acceptance,
+        reload,
+      });
+      await syncDropshipAcceptedOrderToWmsSafely(this.deps, {
+        acceptance: finalAcceptance,
         source: "order_processing",
       });
 
-      this.logProcessed(parsed, claim, quote, acceptance);
-      return mapAcceptanceResult(acceptance);
+      this.logProcessed(parsed, claim, quote, finalAcceptance);
+      return mapAcceptanceResult(finalAcceptance);
     } catch (error) {
       const classified = classifyOrderProcessingError(error);
       if (classified.code === "DROPSHIP_ORDER_PAYMENT_HOLD_EXPIRED") {
@@ -296,6 +303,76 @@ export class DropshipOrderProcessingService {
         workerId: parsed.workerId,
       },
     });
+  }
+
+  /**
+   * Second acceptance attempt, in the same pass, once a held order's shortfall
+   * has been charged.
+   *
+   * Without this, the card is charged and the order stays parked until the
+   * next worker pass happens to pick it up — a visible hold the vendor did
+   * nothing to deserve, with the marketplace's cancellation clock running the
+   * whole time. Only a SETTLED credit qualifies: a pending one (ACH) is not
+   * spendable yet and acceptance would hold again.
+   *
+   * A failure here is logged and the original hold is returned rather than
+   * thrown. The vendor's card was charged and the wallet holds the credit, so
+   * there is nothing to unwind; the intake stays in payment_hold, which is a
+   * re-acceptable status, and the next pass retries with money in place.
+   * Throwing would route the intake through the failure path instead.
+   */
+  private async retryAcceptanceAfterReload(input: {
+    parsed: ProcessDropshipOrderIntakeInput;
+    claim: DropshipOrderProcessingClaim;
+    quote: DropshipShippingQuoteResult;
+    acceptance: DropshipOrderAcceptanceResult;
+    reload: DropshipAutoReloadResult | null;
+  }): Promise<DropshipOrderAcceptanceResult> {
+    if (input.acceptance.outcome !== "payment_hold") {
+      return input.acceptance;
+    }
+    const settled = input.reload?.outcome === "funding_created" && input.reload.fundingStatus === "settled";
+    if (!settled) {
+      return input.acceptance;
+    }
+
+    const context = {
+      intakeId: input.claim.intake.intakeId,
+      vendorId: input.claim.intake.vendorId,
+      storeConnectionId: input.claim.intake.storeConnectionId,
+      reloadLedgerEntryId: input.reload?.fundingLedgerEntryId ?? null,
+      reloadAmountCents: input.reload?.amountCents ?? null,
+    };
+    try {
+      const retried = await this.deps.orderAcceptance.acceptOrder({
+        intakeId: input.claim.intake.intakeId,
+        vendorId: input.claim.intake.vendorId,
+        storeConnectionId: input.claim.intake.storeConnectionId,
+        shippingQuoteSnapshotId: input.quote.quoteSnapshotId,
+        idempotencyKey: deriveOrderProcessingIdempotencyKey("accept-after-reload", input.parsed),
+        actor: {
+          actorType: "job",
+          actorId: input.parsed.workerId,
+        },
+      });
+      this.deps.logger.info({
+        code: retried.outcome === "accepted"
+          ? "DROPSHIP_ORDER_ACCEPTED_AFTER_RELOAD"
+          : "DROPSHIP_ORDER_STILL_HELD_AFTER_RELOAD",
+        message: retried.outcome === "accepted"
+          ? "Dropship order was accepted in the same pass after its shortfall was charged."
+          : "Dropship order remains on payment hold after the reload credit.",
+        context: { ...context, outcome: retried.outcome, totalDebitCents: retried.totalDebitCents },
+      });
+      return retried;
+    } catch (error) {
+      this.deps.logger.warn({
+        code: "DROPSHIP_ORDER_REACCEPTANCE_AFTER_RELOAD_FAILED",
+        message: "Dropship order could not be re-accepted after its shortfall was charged; the credit stays in the wallet and the hold stands for the next pass.",
+        context: { ...context, error: error instanceof Error ? error.message : String(error) },
+      });
+      return input.acceptance;
+    }
   }
 
   private async tryHandleAutoReload(input: {
@@ -550,7 +627,7 @@ export function aggregateQuoteItems(
 }
 
 export function deriveOrderProcessingIdempotencyKey(
-  stage: "quote" | "accept" | "auto-reload-payment-hold" | "auto-reload-minimum",
+  stage: "quote" | "accept" | "accept-after-reload" | "auto-reload-payment-hold" | "auto-reload-minimum",
   input: ProcessDropshipOrderIntakeInput,
 ): string {
   const digest = createHash("sha256").update(input.idempotencyKey).digest("hex").slice(0, 32);

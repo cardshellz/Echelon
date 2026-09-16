@@ -20,12 +20,18 @@ export type DropshipWalletOverview = DropshipWalletResponse["wallet"];
 export type DropshipWalletFundingMethod = DropshipWalletOverview["fundingMethods"][number];
 
 /**
- * The emergency backstop is a card, and only a card. ACH settles in days and
- * USDC cannot be pulled from a self-custody wallet at all, so neither can
- * rescue an order already sitting in payment hold. Both remain primary funding
- * rails — they just cannot satisfy the launch gate.
+ * Two separate roles, two rail sets.
+ *
+ * The backstop — what covers an order the balance cannot — is a card, and only
+ * a card: ACH settles in days and USDC cannot be pulled from a self-custody
+ * wallet at all, so neither can help an order that is already waiting.
+ *
+ * Auto-reload — the routine top-up once the balance dips under the trigger —
+ * may run on a card OR ACH. It is topping up for future orders, so ACH's
+ * settlement time is fine as long as the trigger leaves runway for it.
  */
 export const CARD_FUNDING_RAIL = "stripe_card" as const;
+export const AUTO_RELOAD_RAILS = ["stripe_card", "stripe_ach"] as const;
 
 /**
  * Defaults offered on the setup step. They match what the previous form
@@ -76,14 +82,16 @@ export type WalletSetupStage =
 
 export interface WalletSetupState {
   stage: WalletSetupStage;
-  /** The card auto-reload charges, or the best candidate for it. */
+  /** The method auto-reload charges (card or ACH), or the best candidate for it. */
   primaryMethod: DropshipWalletFundingMethod | null;
-  /** Every active card, primary first. */
+  /** Every active card: the backstop. */
   cardMethods: DropshipWalletFundingMethod[];
+  /** Every active card or bank account auto-reload may be bound to, primary first. */
+  reloadMethods: DropshipWalletFundingMethod[];
   /** A card exists but is not active yet (webhook pending). */
   hasPendingCardMethod: boolean;
   autoReloadOn: boolean;
-  /** Auto-reload is on and bound to an active card. */
+  /** Auto-reload is on and bound to an active card or bank account. */
   autoReloadReady: boolean;
   availableBalanceCents: number;
   pendingBalanceCents: number;
@@ -93,16 +101,23 @@ export function isCardFundingMethod(method: DropshipWalletFundingMethod): boolea
   return method.rail === CARD_FUNDING_RAIL;
 }
 
+export function isAutoReloadFundingMethod(method: DropshipWalletFundingMethod): boolean {
+  return (AUTO_RELOAD_RAILS as readonly string[]).includes(method.rail);
+}
+
 /**
  * Derive the single next step from the wallet overview. Mirrors the server's
- * launch-gate rule (`buildOnboardingState`): an active card plus auto-reload
- * bound to that card. A spendable balance alone does not finish setup, because
- * the balance runs out and the backstop is what stops the next order being
- * cancelled on the marketplace.
+ * launch-gate rule (`buildOnboardingState`): an active card on file, plus
+ * auto-reload bound to an active card or bank account. A spendable balance
+ * alone does not finish setup, because the balance runs out and the card is
+ * what covers the order that follows.
  */
 export function deriveWalletSetupState(wallet: DropshipWalletOverview): WalletSetupState {
   const cardMethods = wallet.fundingMethods.filter(
     (method) => isCardFundingMethod(method) && method.status === "active",
+  );
+  const reloadCandidates = wallet.fundingMethods.filter(
+    (method) => isAutoReloadFundingMethod(method) && method.status === "active",
   );
   const hasPendingCardMethod = wallet.fundingMethods.some(
     (method) => isCardFundingMethod(method) && method.status !== "active",
@@ -110,27 +125,31 @@ export function deriveWalletSetupState(wallet: DropshipWalletOverview): WalletSe
   const configuredId = wallet.autoReload?.fundingMethodId ?? null;
   const configuredMethod = configuredId === null
     ? null
-    : cardMethods.find((method) => method.fundingMethodId === configuredId) ?? null;
+    : reloadCandidates.find((method) => method.fundingMethodId === configuredId) ?? null;
+  // The chooser defaults to a card: it is the rail the vendor just proved
+  // works, and the cheapest path to a finished setup.
   const primaryMethod = configuredMethod
     ?? cardMethods.find((method) => method.isDefault)
     ?? cardMethods[0]
     ?? null;
-  const orderedMethods = primaryMethod
-    ? [primaryMethod, ...cardMethods.filter((method) => method !== primaryMethod)]
+  const reloadMethods = primaryMethod
+    ? [primaryMethod, ...reloadCandidates.filter((method) => method !== primaryMethod)]
     : [];
+  const hasCardBackstop = cardMethods.length > 0;
   const autoReloadOn = wallet.autoReload?.enabled === true;
   const autoReloadReady = autoReloadOn && configuredMethod !== null;
 
   let stage: WalletSetupStage;
-  if (autoReloadReady) stage = "ready";
-  else if (primaryMethod) stage = "auto_reload";
+  if (hasCardBackstop && autoReloadReady) stage = "ready";
+  else if (hasCardBackstop) stage = "auto_reload";
   else if (hasPendingCardMethod) stage = "confirm_card";
   else stage = "add_card";
 
   return {
     stage,
     primaryMethod,
-    cardMethods: orderedMethods,
+    cardMethods,
+    reloadMethods,
     hasPendingCardMethod,
     autoReloadOn,
     autoReloadReady,
