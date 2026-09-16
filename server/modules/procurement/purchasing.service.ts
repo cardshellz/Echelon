@@ -30,6 +30,10 @@ import { readClosedShipmentReceivedBaseQtyByLine, ShipmentReceiptCoverageError }
 import { ReceivingUnitSnapshotError } from "./receiving-unit-snapshot";
 import { shipmentReceiptSourceVersion } from "./shipment-receipt-source-version";
 import { planReceiptUnits, ReceivingUnitError, type ReceiptUnitPlan, type ReceiptVariant } from "./receiving-unit-contract";
+import {
+  checkReceiveConfigurationReadyToLeaveDraft,
+  checkReceiveVariantChosen,
+} from "./receive-configuration-policy";
 import { eq, and, sql, inArray, ne, lte, desc, getTableColumns } from "drizzle-orm";
 import {
   inboundShipmentLines,
@@ -1190,10 +1194,37 @@ export function createPurchasingService(
     });
   }
 
-  async function assertLifecycleQuotesReadyTx(
+  /**
+   * A purchase order may not leave draft while any open product line still has
+   * no receive configuration. That configuration decides whether an eventual
+   * shipment is counted as packs or as loose pieces, so the question has to be
+   * answered before the order reaches a vendor — including on orders drafted
+   * before the choice was mandatory.
+   *
+   * Lines are already locked by lockLifecycleEconomics, so this snapshot cannot
+   * race a concurrent line edit.
+   */
+  function assertReceiveConfigurationReady(economics: LockedLifecycleEconomics): void {
+    const violation = checkReceiveConfigurationReadyToLeaveDraft(economics.lines as any[]);
+    if (!violation) return;
+    throw new PurchasingError(violation.message, violation.status, {
+      code: violation.code,
+      ...violation.context,
+    });
+  }
+
+  /**
+   * The single readiness gate every transition out of draft passes through
+   * (submit, approve, send). Both the quote basis and the receive
+   * configuration must be settled before a purchase order can advance, so
+   * they are asserted together here rather than at each call site, where a
+   * future transition could forget one.
+   */
+  async function assertLifecycleReadyToAdvanceTx(
     tx: any,
     economics: LockedLifecycleEconomics,
   ): Promise<void> {
+    assertReceiveConfigurationReady(economics);
     const unreviewedLegacyProduct = economics.lines.find((line: any) =>
       (line.lineType ?? "product") === "product" &&
       (line.pricingBasis ?? "legacy_unknown") === "legacy_unknown",
@@ -2152,10 +2183,23 @@ export function createPurchasingService(
     }
 
     // Cache product info. The PO buys product pieces; the variant is the
-    // expected receive configuration used by receiving/AP downstream.
-    const receiveVariantId = data.expectedReceiveVariantId ?? data.productVariantId ?? null;
-    const variant = receiveVariantId ? await storage.getProductVariantById(receiveVariantId) : null;
-    if (receiveVariantId && !variant) throw new PurchasingError("Expected receive variant not found", 404);
+    // expected receive configuration used by receiving/AP downstream. It is an
+    // explicit choice — there is no fallback to the legacy product_variant_id.
+    const unchosenReceiveVariant = checkReceiveVariantChosen({
+      lineType: "product",
+      expectedReceiveVariantId: data.expectedReceiveVariantId ?? null,
+      productId: data.productId,
+    });
+    if (unchosenReceiveVariant) {
+      throw new PurchasingError(
+        unchosenReceiveVariant.message,
+        unchosenReceiveVariant.status,
+        { code: unchosenReceiveVariant.code, ...unchosenReceiveVariant.context },
+      );
+    }
+    const receiveVariantId = data.expectedReceiveVariantId as number;
+    const variant = await storage.getProductVariantById(receiveVariantId);
+    if (!variant) throw new PurchasingError("Expected receive variant not found", 404);
     const product = await storage.getProductById(data.productId);
     if (!product) throw new PurchasingError("Product not found", 404);
 
@@ -2237,9 +2281,21 @@ export function createPurchasingService(
 
     const lineData: any[] = [];
     for (const line of lines) {
-      const receiveVariantId = line.expectedReceiveVariantId ?? line.productVariantId ?? null;
-      const variant = receiveVariantId ? await storage.getProductVariantById(receiveVariantId) : null;
-      if (receiveVariantId && !variant) throw new PurchasingError("Expected receive variant not found", 404);
+      const unchosenReceiveVariant = checkReceiveVariantChosen({
+        lineType: "product",
+        expectedReceiveVariantId: line.expectedReceiveVariantId ?? null,
+        productId: line.productId,
+      });
+      if (unchosenReceiveVariant) {
+        throw new PurchasingError(
+          unchosenReceiveVariant.message,
+          unchosenReceiveVariant.status,
+          { code: unchosenReceiveVariant.code, ...unchosenReceiveVariant.context },
+        );
+      }
+      const receiveVariantId = line.expectedReceiveVariantId as number;
+      const variant = await storage.getProductVariantById(receiveVariantId);
+      if (!variant) throw new PurchasingError("Expected receive variant not found", 404);
       const product = await storage.getProductById(line.productId);
       if (!product) continue;
 
@@ -2304,10 +2360,10 @@ export function createPurchasingService(
     }
 
     const normalizedUpdates = { ...updates };
-    const receiveVariantId =
-      normalizedUpdates.expectedReceiveVariantId ??
-      normalizedUpdates.productVariantId ??
-      null;
+    // Only an explicitly submitted receive configuration is applied. An update
+    // that does not mention it leaves the stored choice alone, and the legacy
+    // product_variant_id is never read as a substitute for it.
+    const receiveVariantId = normalizedUpdates.expectedReceiveVariantId ?? null;
 
     if (
       normalizedUpdates.expectedReceiveUnitsPerVariant !== undefined &&
@@ -2519,7 +2575,7 @@ export function createPurchasingService(
         );
       }
 
-      await assertLifecycleQuotesReadyTx(tx, economics);
+      await assertLifecycleReadyToAdvanceTx(tx, economics);
 
       let requireApproval = false;
       if (options.soloModeOnly) {
@@ -2623,7 +2679,7 @@ export function createPurchasingService(
     return db.transaction(async (tx: any) => {
       await lockInventoryCostGraph(tx);
       const economics = await lockLifecycleEconomics(tx, id, expectation);
-      await assertLifecycleQuotesReadyTx(tx, economics);
+      await assertLifecycleReadyToAdvanceTx(tx, economics);
       const tier = await getMatchingApprovalTierTx(tx, economics.totalCents);
       if (tier) {
         return moveLockedPoToPendingApproval(tx, economics, tier, userId);
@@ -2715,7 +2771,7 @@ export function createPurchasingService(
       await lockInventoryCostGraph(tx);
       const actor = assertPurchaseApprovalPermission(await readApprovalActor(tx, userId));
       const economics = await lockLifecycleEconomics(tx, id, expectation);
-      await assertLifecycleQuotesReadyTx(tx, economics);
+      await assertLifecycleReadyToAdvanceTx(tx, economics);
       const settings = await getProcurementSettingsTx(tx);
       const currentTier = settings.requireApproval ? await getMatchingApprovalTierTx(tx, economics.totalCents) : null;
       const approvalAuthority = buildPurchaseApprovalSnapshot({
@@ -4811,6 +4867,21 @@ export function createPurchasingService(
             400,
           );
         }
+        // Which package the goods arrive in is an explicit decision on every
+        // product line; there is no legacy-variant fallback and no default.
+        const unchosenReceiveVariant = checkReceiveVariantChosen({
+          lineType,
+          expectedReceiveVariantId: line.expectedReceiveVariantId ?? null,
+          productId: line.productId ?? null,
+          label,
+        });
+        if (unchosenReceiveVariant) {
+          throw new PurchasingError(
+            unchosenReceiveVariant.message,
+            unchosenReceiveVariant.status,
+            { code: unchosenReceiveVariant.code, ...unchosenReceiveVariant.context },
+          );
+        }
       } else {
         if (
           line.productId !== undefined &&
@@ -5231,8 +5302,9 @@ export function createPurchasingService(
               productId: line.productId,
             });
           }
-          const expectedReceiveVariantId =
-            line.expectedReceiveVariantId ?? line.productVariantId ?? null;
+          // validateCreateWithLinesInput has already refused any product line
+          // without an explicit choice, so there is nothing to fall back to.
+          const expectedReceiveVariantId = line.expectedReceiveVariantId ?? null;
           if (expectedReceiveVariantId) {
             variant = await storage.getProductVariantById(expectedReceiveVariantId);
             if (!variant) {

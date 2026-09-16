@@ -2,7 +2,7 @@ import { PgDialect } from "drizzle-orm/pg-core";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { products } from "@shared/schema/catalog.schema";
+import { productVariants, products } from "@shared/schema/catalog.schema";
 import {
   purchaseOrderLines,
   purchaseOrders,
@@ -473,8 +473,8 @@ describe("vendor catalog pricing provenance", () => {
       lineType: "product",
       status: "open",
       productId: 101,
-      expectedReceiveVariantId: null,
-      expectedReceiveUnitsPerVariant: null,
+      expectedReceiveVariantId: 202,
+      expectedReceiveUnitsPerVariant: 25,
       vendorProductId: 501,
       orderQty: 10,
       receivedQty: 0,
@@ -506,6 +506,16 @@ describe("vendor catalog pricing provenance", () => {
       }
       if (table === purchasingRecommendationPoHandoffs) return [];
       if (table === products) return [{ id: 101, name: "Widget", isActive: true }];
+      if (table === productVariants) {
+        return [{
+          id: 202,
+          productId: 101,
+          isActive: true,
+          unitsPerVariant: 25,
+          sku: "WIDGET-P25",
+          name: "Pack of 25",
+        }];
+      }
       if (table === vendorProducts) {
         return [{
           id: 502,
@@ -758,13 +768,18 @@ describe("purchase-order line command transaction invariants", () => {
     }
   });
 
-  it("normalizes an inactive receive configuration instead of blocking piece purchasing", () => {
+  it("refuses rather than silently clears an archived receive configuration", () => {
     const resolverSource = section("async function resolveLineContext(", "function lineValues(");
     const lineValuesSource = section("function lineValues(", "async function lockHeader(");
-    expect(resolverSource).toContain("receiveVariant = null");
-    expect(resolverSource).not.toContain("PO_LINE_RECEIVE_VARIANT_INACTIVE");
+    // The configuration is never quietly dropped: dropping it would leave the
+    // line with no answer at all, which the lifecycle gate would then reject
+    // far away from the edit that caused it.
+    expect(resolverSource).not.toContain("receiveVariant = null");
+    expect(resolverSource).toContain("PO_RECEIVE_VARIANT_ARCHIVED");
+    expect(resolverSource).toContain("checkReceiveVariantChosen");
     expect(lineValuesSource).toContain("context.receiveVariant?.id ?? null");
     expect(updateLineSource).toContain("const effectiveReceiveVariantId = context.receiveVariant?.id ?? null");
     expect(updateLineSource).toContain("expectedReceiveVariantId: effectiveReceiveVariantId");
+    expect(updateLineSource).toContain("checkReceiveVariantNotCleared");
   });
 });

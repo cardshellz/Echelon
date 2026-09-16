@@ -18,6 +18,7 @@
     "procurement:automatic-purchasing-pilot": "tsx scripts/run-automatic-purchasing-pilot.ts",
     "procurement:backfill-historical-supplier-evidence": "tsx scripts/backfill-historical-po-supplier-evidence.ts",
     "procurement:remediate-legacy-po-receive-config": "tsx scripts/remediate-legacy-po-receive-config.ts",
+    "catalog:backfill-piece-variants": "tsx scripts/backfill-piece-variants.ts",
     "qa:daily-replen-counts": "tsx scripts/create-daily-replen-qa-counts.ts --json",
     "recover:allocation-exceptions": "tsx scripts/recover-allocation-exceptions.ts --json",
     "recover:replen-health": "tsx scripts/recover-replen-health.ts --json",

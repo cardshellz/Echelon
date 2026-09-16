@@ -152,9 +152,10 @@ databaseTests.sequential("purchase approval authority PostgreSQL owner and HTTP 
         approval_tier_id,subtotal_cents,total_cents,discount_cents,tax_cents,shipping_cost_cents,updated_at)
       VALUES (1,'APPROVAL-001',1,'pending_approval','draft','unbilled','USD',1,10000,10000,0,0,0,'2026-09-01T12:00:00');
       INSERT INTO procurement.purchase_order_lines(id,purchase_order_id,line_number,line_type,product_id,sku,product_name,status,
+        expected_receive_variant_id,expected_receive_units_per_variant,
         order_qty,unit_cost_cents,unit_cost_mills,quoted_unit_cost_mills,total_product_cost_cents,packaging_cost_cents,
         discount_cents,tax_cents,line_total_cents,pricing_basis,pricing_source,pricing_remainder_mills,updated_at)
-      VALUES (11,1,1,'product',1,'A','Product A','open',1,10000,1000000,1000000,10000,0,0,0,10000,'per_piece','manual',0,'2026-09-01T12:00:00');
+      VALUES (11,1,1,'product',1,'A','Product A','open',202,1,1,10000,1000000,1000000,10000,0,0,0,10000,'per_piece','manual',0,'2026-09-01T12:00:00');
       INSERT INTO procurement.po_approval_tiers(id,tier_name,threshold_cents,approver_role,active) VALUES (1,'Admin approval',1000,'admin',1);
       INSERT INTO inventory.warehouse_settings(id,warehouse_code,require_approval,auto_send_on_approve,require_acknowledge_before_receive,
         hide_incoterms_domestic,enable_shipment_tracking,auto_putaway_location,auto_close_on_reconcile,one_click_receive_start,use_new_po_editor,use_new_reorder_cockpit)
