@@ -20,7 +20,7 @@ import {
   evaluateChannelFulfillmentWritebackPolicy,
   type ChannelFulfillmentWritebackPolicyDecision,
 } from "./channel-fulfillment-authority.policy";
-import { resolveProviderOrderId } from "./shipping-engine-order-identity";
+import { PROVIDER_ORDER_IDENTITY_POLICIES, resolveProviderOrderId } from "./shipping-engine-order-identity";
 import { resolveChannelFulfillmentNotifyCustomer } from "./channel-fulfillment-notification.policy";
 import {
   ChannelFulfillmentQuantityAuthorityError,
@@ -60,6 +60,8 @@ const materializeInputSchema = z.object({
     z.string().trim().min(1).max(40).transform((value) => value.toLowerCase()),
   ).max(20).optional(),
   legacyHeaderPolicy: z.enum(["strict", "aggregate_projection"]).optional().default("strict"),
+  // A proven parent-order alias must not relax exact package/header checks.
+  providerOrderIdentityPolicy: z.enum(PROVIDER_ORDER_IDENTITY_POLICIES).optional().default("strict"),
 }).strict();
 
 export type MaterializePhysicalPackageInput = z.input<typeof materializeInputSchema>;
@@ -230,6 +232,7 @@ export interface ClaimChannelFulfillmentCommandsInput {
 
 export interface ChannelFulfillmentAuthorityRepository {
   resolveLegacyPhysicalPackage(legacyWmsShipmentId: number): Promise<ResolvedLegacyPhysicalPackage>;
+  validatePhysicalPackageIdentity(input: MaterializePhysicalPackageInput): Promise<void>;
   materializePhysicalPackage(input: MaterializePhysicalPackageInput): Promise<MaterializePhysicalPackageResult>;
   materializePackageAllocationCommercialFulfillment(
     input: MaterializePackageAllocationCommercialFulfillmentInput,
@@ -1476,21 +1479,24 @@ async function findOrCreateRequestItem(
   return Number(inserted.id);
 }
 
-async function findOrCreateShippingEngineOrder(
+interface ExistingShippingEngineOrderRow {
+  id: number;
+  provider_order_id: string | null;
+  provider_order_key: string | null;
+  incoming_provider_order_id_already_aliased: boolean;
+}
+
+async function loadExistingShippingEngineOrders(
   tx: any,
   input: ReturnType<typeof canonicalizeInput>,
-): Promise<number> {
+  lockForUpdate: boolean,
+): Promise<ExistingShippingEngineOrderRow[]> {
   const commandKey = buildShippingEngineCommandKey({
     provider: input.shippingProvider,
     providerOrderId: input.providerOrderId,
     providerOrderKey: input.providerOrderKey,
   });
-  const existingRows = rowsOf<{
-    id: number;
-    provider_order_id: string | null;
-    provider_order_key: string | null;
-    incoming_provider_order_id_already_aliased: boolean;
-  }>(await tx.execute(sql`
+  return rowsOf<ExistingShippingEngineOrderRow>(await tx.execute(sql`
     SELECT
       engine.id,
       engine.provider_order_id,
@@ -1516,8 +1522,14 @@ async function findOrCreateShippingEngineOrder(
             AND provider_ref.provider_order_id = ${input.providerOrderId}
         )
       )
-    FOR UPDATE OF engine
+    ${lockForUpdate ? sql`FOR UPDATE OF engine` : sql``}
   `));
+}
+
+function validateShippingEngineOrderIdentity(
+  existingRows: readonly ExistingShippingEngineOrderRow[],
+  input: ReturnType<typeof canonicalizeInput>,
+): { existing: ExistingShippingEngineOrderRow | null; resolution: ReturnType<typeof resolveProviderOrderId> } {
   if (existingRows.length > 1) {
     throw new FulfillmentAuthorityError(
       "CANONICAL_STATE_CONFLICT",
@@ -1525,31 +1537,42 @@ async function findOrCreateShippingEngineOrder(
       { provider: input.shippingProvider, providerOrderId: input.providerOrderId, providerOrderKey: input.providerOrderKey },
     );
   }
-  const existing = existingRows[0];
+  const existing = existingRows[0] ?? null;
+  if (!existing) return { existing: null, resolution: "compatible" };
+  assertCompatibleIdentity("providerOrderKey", existing.provider_order_key, input.providerOrderKey, input.legacyWmsShipmentIds[0]);
+  const providerOrderIdResolution = resolveProviderOrderId({
+    legacyHeaderPolicy: input.legacyHeaderPolicy,
+    providerOrderIdentityPolicy: input.providerOrderIdentityPolicy,
+    persistedProviderOrderId: normalizedNullable(existing.provider_order_id),
+    persistedProviderOrderKey: normalizedNullable(existing.provider_order_key),
+    incomingProviderOrderId: input.providerOrderId,
+    incomingProviderOrderKey: input.providerOrderKey,
+    incomingProviderOrderIdAlreadyAliased:
+      existing.incoming_provider_order_id_already_aliased === true,
+  });
+  if (providerOrderIdResolution === "conflict") {
+    assertCompatibleIdentity(
+      "providerOrderId",
+      existing.provider_order_id,
+      input.providerOrderId,
+      input.legacyWmsShipmentIds[0],
+    );
+  }
+  return { existing, resolution: providerOrderIdResolution };
+}
+
+async function findOrCreateShippingEngineOrder(
+  tx: any,
+  input: ReturnType<typeof canonicalizeInput>,
+): Promise<number> {
+  const existingRows = await loadExistingShippingEngineOrders(tx, input, true);
+  const { existing, resolution } = validateShippingEngineOrderIdentity(existingRows, input);
   if (existing) {
-    assertCompatibleIdentity("providerOrderKey", existing.provider_order_key, input.providerOrderKey, input.legacyWmsShipmentIds[0]);
-    const providerOrderIdResolution = resolveProviderOrderId({
-      legacyHeaderPolicy: input.legacyHeaderPolicy,
-      persistedProviderOrderId: normalizedNullable(existing.provider_order_id),
-      persistedProviderOrderKey: normalizedNullable(existing.provider_order_key),
-      incomingProviderOrderId: input.providerOrderId,
-      incomingProviderOrderKey: input.providerOrderKey,
-      incomingProviderOrderIdAlreadyAliased:
-        existing.incoming_provider_order_id_already_aliased === true,
-    });
-    if (providerOrderIdResolution === "conflict") {
-      assertCompatibleIdentity(
-        "providerOrderId",
-        existing.provider_order_id,
-        input.providerOrderId,
-        input.legacyWmsShipmentIds[0],
-      );
-    }
     await recordShippingEngineOrderProviderRef(
       tx,
       Number(existing.id),
       input,
-      providerOrderIdResolution,
+      resolution,
     );
     await tx.execute(sql`
       UPDATE wms.shipping_engine_orders
@@ -1559,6 +1582,11 @@ async function findOrCreateShippingEngineOrder(
     return Number(existing.id);
   }
 
+  const commandKey = buildShippingEngineCommandKey({
+    provider: input.shippingProvider,
+    providerOrderId: input.providerOrderId,
+    providerOrderKey: input.providerOrderKey,
+  });
   const inserted = firstRow<{ id: number }>(await tx.execute(sql`
     INSERT INTO wms.shipping_engine_orders (
       shipment_request_id,
@@ -3099,8 +3127,26 @@ async function persistChannelCommandSet(
   return materialized;
 }
 
+type LegacyPackageHeaderRow = Pick<LegacyPackageRow,
+  | "legacy_shipment_id" | "shipment_status" | "persisted_shipping_provider"
+  | "persisted_provider_order_id" | "persisted_provider_order_key"
+  | "persisted_physical_identity" | "persisted_tracking_number" | "persisted_carrier"
+>;
+
+function requireProviderOrderIdentity(input: ReturnType<typeof canonicalizeInput>): string {
+  const identity = input.providerOrderId ?? input.providerOrderKey;
+  if (!identity) {
+    throw new FulfillmentAuthorityError(
+      "PROVIDER_ORDER_IDENTITY_MISSING",
+      "A provider order id or provider order key is required",
+      { shippingProvider: input.shippingProvider, providerPhysicalShipmentId: input.providerPhysicalShipmentId },
+    );
+  }
+  return identity;
+}
+
 function validateLegacyHeaders(
-  rows: readonly LegacyPackageRow[],
+  rows: readonly LegacyPackageHeaderRow[],
   input: ReturnType<typeof canonicalizeInput>,
 ): void {
   const foundIds = new Set(rows.map((row) => Number(row.legacy_shipment_id)));
@@ -3175,6 +3221,33 @@ function terminalStatusForOutcome(outcome: ChannelFulfillmentAttemptOutcome): st
 export function createChannelFulfillmentAuthorityRepository(
   db: any,
 ): ChannelFulfillmentAuthorityRepository {
+  async function validatePhysicalPackageIdentity(rawInput: MaterializePhysicalPackageInput): Promise<void> {
+    const input = canonicalizeInput(rawInput);
+    requireProviderOrderIdentity(input);
+    if (typeof db?.transaction !== "function") {
+      throw new FulfillmentAuthorityError("INVALID_INPUT", "Identity preview requires transactional database support");
+    }
+    // This is deliberately read-only, not a write-and-rollback simulation.
+    // Materialization repeats both gates with row locks because a preview can age.
+    await db.transaction(async (tx: any) => {
+      const rows = rowsOf<LegacyPackageHeaderRow>(await tx.execute(sql`
+        SELECT shipment.id AS legacy_shipment_id, shipment.status::text AS shipment_status,
+          COALESCE(NULLIF(BTRIM(shipment.shipping_engine), ''),
+            CASE WHEN shipment.shipstation_order_id IS NOT NULL THEN 'shipstation' END) AS persisted_shipping_provider,
+          COALESCE(NULLIF(BTRIM(shipment.engine_order_ref), ''), shipment.shipstation_order_id::text) AS persisted_provider_order_id,
+          NULLIF(BTRIM(shipment.shipstation_order_key), '') AS persisted_provider_order_key,
+          shipment.external_fulfillment_id AS persisted_physical_identity,
+          shipment.tracking_number AS persisted_tracking_number,
+          shipment.carrier AS persisted_carrier
+        FROM wms.outbound_shipments AS shipment
+        WHERE shipment.id IN (${buildIdList(input.legacyWmsShipmentIds)})
+        ORDER BY shipment.id
+      `));
+      validateLegacyHeaders(rows, input);
+      validateShippingEngineOrderIdentity(await loadExistingShippingEngineOrders(tx, input, false), input);
+    }, { isolationLevel: "repeatable read", accessMode: "read only" });
+  }
+
   async function resolveLegacyPhysicalPackage(
     legacyWmsShipmentId: number,
   ): Promise<ResolvedLegacyPhysicalPackage> {
@@ -3850,14 +3923,7 @@ export function createChannelFulfillmentAuthorityRepository(
     rawInput: MaterializePhysicalPackageInput,
   ): Promise<MaterializePhysicalPackageResult> {
     const input = canonicalizeInput(rawInput);
-    const providerOrderIdentity = input.providerOrderId ?? input.providerOrderKey;
-    if (!providerOrderIdentity) {
-      throw new FulfillmentAuthorityError(
-        "PROVIDER_ORDER_IDENTITY_MISSING",
-        "A provider order id or provider order key is required",
-        { shippingProvider: input.shippingProvider, providerPhysicalShipmentId: input.providerPhysicalShipmentId },
-      );
-    }
+    const providerOrderIdentity = requireProviderOrderIdentity(input);
     if (typeof db?.transaction !== "function") {
       throw new FulfillmentAuthorityError(
         "INVALID_INPUT",
@@ -4418,6 +4484,7 @@ export function createChannelFulfillmentAuthorityRepository(
 
   return {
     resolveLegacyPhysicalPackage,
+    validatePhysicalPackageIdentity,
     materializePhysicalPackage,
     materializePackageAllocationCommercialFulfillment,
     activatePackageAllocationCommercialFulfillment,

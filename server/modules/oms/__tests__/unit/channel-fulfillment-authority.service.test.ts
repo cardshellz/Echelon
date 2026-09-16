@@ -50,6 +50,7 @@ function repositoryMock(
 ): ChannelFulfillmentAuthorityRepository {
   return {
     resolveLegacyPhysicalPackage: vi.fn(),
+    validatePhysicalPackageIdentity: vi.fn(),
     materializePhysicalPackage: vi.fn(),
     materializePackageAllocationCommercialFulfillment: vi.fn(),
     activatePackageAllocationCommercialFulfillment: vi.fn(),

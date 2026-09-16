@@ -10,6 +10,7 @@ import {
 } from "vitest";
 
 import { canonicalJson } from "@shared/utils/canonical-json";
+import { parseFlags, runBackfill, type BackfillCandidate } from "../../../../../scripts/backfill-channel-fulfillment-authority";
 import { createPackageAllocationLabelCommercialWorkflow } from "../../../../services/package-allocation-label-commercial-workflow";
 
 import {
@@ -3203,7 +3204,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     ]);
   });
 
-  async function seedHistoricalSplitBackfill(orderedQuantity = 2) {
+  async function seedHistoricalSplitBackfill(orderedQuantity = 2, splitProviderOrderId = "99001") {
     const sourceId = await seedCommercialFulfillmentAuthoritySource(pool, "SKU-BACKFILL-SPLIT", orderedQuantity);
     const source = (await pool.query<{
       shipment_id: number; order_id: number; order_item_id: number;
@@ -3220,9 +3221,9 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       `INSERT INTO wms.outbound_shipments (
          order_id, status, shipping_engine, engine_order_ref, shipstation_order_key,
          external_fulfillment_id, tracking_number, carrier
-       ) VALUES ($1, 'shipped', 'shipstation', '99001', 'provider-order-key-99001',
+       ) VALUES ($1, 'shipped', 'shipstation', $2, 'provider-order-key-99001',
          'shipstation_shipment:44011', '1Z0000000000044011', 'ups') RETURNING id`,
-      [source.order_id],
+      [source.order_id, splitProviderOrderId],
     )).rows[0];
     await pool.query(`INSERT INTO wms.outbound_shipment_items (
        shipment_id, order_item_id, split_root_shipment_item_id, shipment_item_purpose,
@@ -3236,6 +3237,116 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     const secondInput = { ...await repository.resolveLegacyPhysicalPackage(split.id), source: "historical-backfill-test" };
     return { source, split, repository, firstInput, secondInput };
   }
+
+  async function snapshotAliasBackfillState() {
+    const tables = ["wms.shipping_engine_orders", "wms.shipping_engine_order_provider_refs",
+      "wms.shipping_engine_order_requests", "wms.physical_shipments", "wms.physical_shipment_items",
+      "wms.fulfillment_plans", "wms.fulfillment_plan_lines", "wms.shipment_requests", "wms.shipment_request_items",
+      "oms.channel_fulfillment_pushes", "oms.channel_fulfillment_push_items", "wms.order_items", "inventory.inventory_transactions"];
+    const result: Record<string, unknown> = {};
+    for (const table of tables) {
+      result[table] = (await pool.query(`SELECT to_jsonb(record) AS data FROM ${table} record ORDER BY to_jsonb(record)::text`)).rows;
+    }
+    return result;
+  }
+
+  it("silently backfills a split provider-order alias with a read-only preview, concurrent replay and durable attempt audit", async () => {
+    const { repository, firstInput, secondInput, split } = await seedHistoricalSplitBackfill(2, "99002");
+    const first = await repository.materializePhysicalPackage(firstInput);
+    // This is the deployed failure shape: the parent still has the original ID,
+    // while the exact second package has a new ID under the same stable key.
+    await expect(repository.validatePhysicalPackageIdentity(secondInput))
+      .rejects.toMatchObject({ code: "PACKAGE_IDENTITY_CONFLICT", context: { field: "providerOrderId" } });
+    const candidate: BackfillCandidate = { representativeShipmentId: split.id, shippingProvider: "shipstation",
+      providerPhysicalShipmentId: secondInput.providerPhysicalShipmentId, legacyShipmentIds: [split.id],
+      orderNumbers: ["PACKAGE-COMMERCIAL-640001"], trackingNumber: secondInput.trackingNumber!,
+      missingPhysicalShipment: true, missingCommandItemCount: 1 };
+    const dependencies = { repository, loadCandidates: async () => [candidate], log: vi.fn() };
+    const before = await snapshotAliasBackfillState();
+    await expect(runBackfill(parseFlags(["--dry-run", "--silent"]), dependencies))
+      .resolves.toMatchObject({ lineageValidated: 1, materialized: 0, reviewRequired: 0 });
+    expect(await snapshotAliasBackfillState()).toEqual(before);
+
+    const results = await Promise.all([
+      runBackfill(parseFlags(["--execute", "--silent"]), dependencies),
+      runBackfill(parseFlags(["--execute", "--silent"]), dependencies),
+    ]);
+    expect(results.map(r => r.reviewRequired)).toEqual([0, 0]);
+    expect(results.map(r => r.commandsCreated).sort()).toEqual([0, 1]);
+    expect(results.map(r => r.commandsReplayed).sort()).toEqual([0, 1]);
+    expect((await pool.query("SELECT id,provider_order_id,provider_order_key FROM wms.shipping_engine_orders")).rows)
+      .toEqual([{ id: String(first.shippingEngineOrderId), provider_order_id: "99001", provider_order_key: "provider-order-key-99001" }]);
+    const aliases = (await pool.query("SELECT provider_order_id,metadata FROM wms.shipping_engine_order_provider_refs ORDER BY provider_order_id")).rows;
+    expect(aliases).toHaveLength(2);
+    expect(aliases[1]).toMatchObject({ provider_order_id: "99002", metadata: {
+      resolution: "stable_key_alias", inputSource: "script:backfill-channel-fulfillment-authority" } });
+    const command = (await pool.query(`SELECT push.id,push.metadata,push.request_hash,push.next_attempt_at,item.quantity_pushed
+      FROM oms.channel_fulfillment_pushes push JOIN wms.physical_shipments physical ON physical.id=push.physical_shipment_id
+      JOIN oms.channel_fulfillment_push_items item ON item.channel_fulfillment_push_id=push.id
+      WHERE physical.provider_physical_shipment_id='44011'`)).rows[0];
+    expect(command).toMatchObject({ quantity_pushed: 1, metadata: { notifyCustomer: false } });
+    const pushShopifyFulfillmentForCommand = vi.fn(async () => ({
+      writebackComplete: true, shopifyFulfillmentId: "gid://shopify/Fulfillment/640004", alreadySatisfied: false,
+    }));
+    const service = createChannelFulfillmentAuthorityService({ repository,
+      projector: { projectPhysicalShipment: vi.fn() },
+      providerExecutor: createCompatibilityChannelFulfillmentProviderExecutor({ pushShopifyFulfillmentForCommand }),
+      clock: { now: () => new Date(command.next_attempt_at.getTime() + 1_000) },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    });
+    await expect(service.runDueBatch({ commandIds: [Number(command.id)] })).resolves.toMatchObject({ succeeded: 1 });
+    expect(pushShopifyFulfillmentForCommand).toHaveBeenCalledWith(expect.objectContaining({ notifyCustomer: false,
+      items: [expect.objectContaining({ quantity: 1 })] }));
+    expect((await pool.query("SELECT outcome,metadata FROM oms.channel_fulfillment_push_attempts WHERE channel_fulfillment_push_id=$1", [command.id])).rows)
+      .toEqual([expect.objectContaining({ outcome: "success", metadata: expect.objectContaining({ notifyCustomer: false }) })]);
+    await expect(runBackfill(parseFlags(["--execute", "--silent"]), dependencies))
+      .resolves.toMatchObject({ commandsCreated: 0, commandsReplayed: 1, reviewRequired: 0 });
+    expect((await pool.query("SELECT metadata,request_hash FROM oms.channel_fulfillment_pushes WHERE id=$1", [command.id])).rows[0])
+      .toEqual({ metadata: command.metadata, request_hash: command.request_hash });
+    const after = await snapshotAliasBackfillState();
+    expect(after["wms.order_items"]).toEqual(before["wms.order_items"]);
+    expect(after["inventory.inventory_transactions"]).toEqual(before["inventory.inventory_transactions"]);
+  });
+
+  it.each([
+    { field: "trackingNumber", value: "OTHER-TRACKING" },
+    { field: "carrier", value: "FEDEX" },
+    { field: "providerPhysicalShipmentId", value: "OTHER-PACKAGE" },
+    { field: "providerOrderId", value: "WRONG-HEADER-ORDER" },
+    { field: "providerOrderKey", value: "WRONG-HEADER-KEY" },
+  ] as const)("keeps exact package $field checks strict when parent aliases are allowed", async ({ field, value }) => {
+    const { repository, firstInput, secondInput } = await seedHistoricalSplitBackfill(2, "99002");
+    await repository.materializePhysicalPackage(firstInput);
+    const input = { ...secondInput, providerOrderIdentityPolicy: "stable_key_alias" as const, [field]: value };
+    const before = await snapshotAliasBackfillState();
+    await expect(repository.validatePhysicalPackageIdentity(input)).rejects.toMatchObject({ code: "PACKAGE_IDENTITY_CONFLICT" });
+    await expect(repository.materializePhysicalPackage(input)).rejects.toMatchObject({ code: "PACKAGE_IDENTITY_CONFLICT" });
+    expect(await snapshotAliasBackfillState()).toEqual(before);
+  });
+
+  it("rechecks package identity at write time after a successful alias preview", async () => {
+    const { repository, firstInput, secondInput, split } = await seedHistoricalSplitBackfill(2, "99002");
+    await repository.materializePhysicalPackage(firstInput);
+    const input = { ...secondInput, providerOrderIdentityPolicy: "stable_key_alias" as const };
+    await repository.validatePhysicalPackageIdentity(input);
+    await pool.query("UPDATE wms.outbound_shipments SET tracking_number='CHANGED-AFTER-PREVIEW' WHERE id=$1", [split.id]);
+    const before = await snapshotAliasBackfillState();
+    await expect(repository.materializePhysicalPackage(input)).rejects.toMatchObject({ code: "PACKAGE_IDENTITY_CONFLICT" });
+    expect(await snapshotAliasBackfillState()).toEqual(before);
+  });
+
+  it("rejects a provider order id that also resolves to another canonical parent without inserting an alias", async () => {
+    const { repository, firstInput, secondInput } = await seedHistoricalSplitBackfill(2, "99002");
+    await repository.materializePhysicalPackage(firstInput);
+    await pool.query(`INSERT INTO wms.shipping_engine_orders
+      (provider,provider_order_id,provider_order_key,command_key,provider_status)
+      VALUES ('shipstation','99002','different-key','shipping-order:v1:shipstation:id:99002','shipped')`);
+    const input = { ...secondInput, providerOrderIdentityPolicy: "stable_key_alias" as const };
+    const before = await snapshotAliasBackfillState();
+    await expect(repository.validatePhysicalPackageIdentity(input)).rejects.toMatchObject({ code: "CANONICAL_STATE_CONFLICT" });
+    await expect(repository.materializePhysicalPackage(input)).rejects.toMatchObject({ code: "CANONICAL_STATE_CONFLICT" });
+    expect(await snapshotAliasBackfillState()).toEqual(before);
+  });
 
   it.each([false, true])("persists notifyCustomer=%s across concurrent replay, lease retry and worker restart", async notifyCustomer => {
     const { repository, firstInput } = await seedHistoricalSplitBackfill();

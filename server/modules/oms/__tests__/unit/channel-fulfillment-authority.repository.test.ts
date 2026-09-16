@@ -3,15 +3,89 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   createChannelFulfillmentAuthorityRepository,
+  type MaterializePhysicalPackageInput,
 } from "../../channel-fulfillment-authority.repository";
 
 const dialect = new PgDialect();
+
+const previewInput: MaterializePhysicalPackageInput = {
+  legacyWmsShipmentIds: [501], shippingProvider: "shipstation", providerPhysicalShipmentId: "9001",
+  providerOrderId: "new-order", providerOrderKey: "stable-work", trackingNumber: "1ZTEST", carrier: "UPS",
+  source: "script:backfill-channel-fulfillment-authority", legacyHeaderPolicy: "strict",
+  providerOrderIdentityPolicy: "stable_key_alias", notifyCustomer: false,
+};
+const previewHeader = {
+  legacy_shipment_id: 501, shipment_status: "shipped", persisted_shipping_provider: "shipstation",
+  persisted_provider_order_id: "new-order", persisted_provider_order_key: "stable-work",
+  persisted_physical_identity: "shipstation_shipment:9001", persisted_tracking_number: "1ZTEST", persisted_carrier: "ups",
+};
+const previewEngine = { id: 10, provider_order_id: "old-order", provider_order_key: "stable-work",
+  incoming_provider_order_id_already_aliased: false };
+
+function identityPreviewFixture(headers = [previewHeader], engines = [previewEngine]) {
+  const execute = vi.fn(async (query: unknown) => {
+    const text = render(query);
+    if (text.includes("FROM wms.outbound_shipments AS shipment")) return { rows: headers };
+    if (text.includes("FROM wms.shipping_engine_orders AS engine")) return { rows: engines };
+    throw new Error(`Unexpected identity preview query: ${text}`);
+  });
+  const tx = { execute };
+  const transaction = vi.fn(async (callback: (executor: typeof tx) => Promise<void>, _options: unknown) => callback(tx));
+  return { execute, transaction, repository: createChannelFulfillmentAuthorityRepository({ transaction }) };
+}
 
 function render(query: unknown): string {
   return dialect.sqlToQuery(query as any).sql.replace(/\s+/g, " ").trim();
 }
 
 describe("channel fulfillment authority repository", () => {
+  it("previews strict package headers and stable parent aliases using only read-only queries", async () => {
+    const { repository, execute, transaction } = identityPreviewFixture();
+    await expect(repository.validatePhysicalPackageIdentity(previewInput)).resolves.toBeUndefined();
+    expect(transaction).toHaveBeenCalledWith(expect.any(Function), { isolationLevel: "repeatable read", accessMode: "read only" });
+    expect(execute).toHaveBeenCalledTimes(2);
+    for (const [query] of execute.mock.calls) expect(render(query)).not.toMatch(/\b(?:INSERT|UPDATE|DELETE|TRUNCATE)\b/i);
+  });
+
+  it("keeps the default engine policy strict", async () => {
+    const { repository } = identityPreviewFixture();
+    await expect(repository.validatePhysicalPackageIdentity({ ...previewInput, providerOrderIdentityPolicy: undefined }))
+      .rejects.toMatchObject({ code: "PACKAGE_IDENTITY_CONFLICT", context: { field: "providerOrderId" } });
+  });
+
+  it("rejects wrong tracking before looking up the parent order", async () => {
+    const { repository, execute } = identityPreviewFixture();
+    await expect(repository.validatePhysicalPackageIdentity({ ...previewInput, trackingNumber: "OTHER" }))
+      .rejects.toMatchObject({ code: "PACKAGE_IDENTITY_CONFLICT", context: { field: "trackingNumber" } });
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects missing shipment rows and ambiguous parent orders", async () => {
+    await expect(identityPreviewFixture([]).repository.validatePhysicalPackageIdentity(previewInput))
+      .rejects.toMatchObject({ code: "LEGACY_SHIPMENT_NOT_FOUND" });
+    await expect(identityPreviewFixture([previewHeader], [previewEngine, { ...previewEngine, id: 11 }])
+      .repository.validatePhysicalPackageIdentity(previewInput)).rejects.toMatchObject({ code: "CANONICAL_STATE_CONFLICT" });
+  });
+
+  it("rejects a contradictory canonical order key even when the order ID is a saved alias", async () => {
+    const { repository } = identityPreviewFixture([previewHeader], [{
+      ...previewEngine,
+      provider_order_key: "another-stable-work-key",
+      incoming_provider_order_id_already_aliased: true,
+    }]);
+    await expect(repository.validatePhysicalPackageIdentity(previewInput))
+      .rejects.toMatchObject({ code: "PACKAGE_IDENTITY_CONFLICT", context: { field: "providerOrderKey" } });
+  });
+
+  it("validates identity inputs before opening a transaction", async () => {
+    const { repository, transaction } = identityPreviewFixture();
+    await expect(repository.validatePhysicalPackageIdentity({ ...previewInput, providerOrderIdentityPolicy: "skip" as never }))
+      .rejects.toMatchObject({ code: "INVALID_INPUT" });
+    await expect(repository.validatePhysicalPackageIdentity({ ...previewInput, providerOrderId: null, providerOrderKey: null }))
+      .rejects.toMatchObject({ code: "PROVIDER_ORDER_IDENTITY_MISSING" });
+    expect(transaction).not.toHaveBeenCalled();
+  });
+
   it("types the terminal completion timestamp explicitly", async () => {
     const queries: unknown[] = [];
     const tx = {
