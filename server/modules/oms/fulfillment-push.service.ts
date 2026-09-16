@@ -977,8 +977,9 @@ export function createFulfillmentPushService(
   ): Promise<T[]> {
     const allocationItems = command.items.filter((item) => item.packageAllocationEntryId != null);
 
-    // The legacy line is a frozen source, not the quantity in every replacement
-    // package. Read the already-materialized, activated command's exact grant;
+    // The allocation source is frozen; the compatibility WMS row can shrink
+    // when ShipStation splits its units into separate shipment rows. Read the
+    // already-materialized, activated command's exact grant;
     // never infer a partial grant from `command.quantity <= shipment.qty`.
     const result = await db.execute(sql`
       SELECT push.id AS command_id, push.oms_order_id, push.physical_shipment_id,
@@ -1054,7 +1055,11 @@ export function createFulfillmentPushService(
         || Number(proof.source_order_item_id) !== Number(source.order_item_id)
         || proof.shipment_item_purpose !== "customer_fulfillment"
         || !Number.isSafeInteger(Number(proof.source_quantity)) || Number(proof.source_quantity) <= 0
-        || Number(proof.source_quantity) !== Number(source.qty)
+        // A later split may reduce the compatibility row without revoking an
+        // already activated package grant. Identity and grant quantities below
+        // remain exact; an invalid or enlarged live source still fails closed.
+        || !Number.isSafeInteger(source.qty) || Number(source.qty) < 0
+        || Number(source.qty) > Number(proof.source_quantity)
         || Number(proof.quantity_pushed) !== item.quantity
         || Number(proof.quantity_shipped) !== item.quantity
         || Number(proof.allocation_quantity) !== item.quantity

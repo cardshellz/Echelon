@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import type { Pool, PoolClient } from "pg";
 import {
   afterAll,
@@ -999,6 +1001,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     // this legacy package fixture has no canonical receipts to read.
     await pool.query(shipmentQuantityEvidenceFixtureSql);
     await installProviderExecutionTestRelations(pool);
+    await pool.query(readFileSync(resolve(process.cwd(), "migrations/0675_channel_fulfillment_silent_review_retry.sql"), "utf8"));
     await installAuthorityReadinessTestRelations(pool);
     await installExecutionAuditRole(pool);
   }, 30_000);
@@ -2522,6 +2525,28 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       (intent) => intent.executable === false,
     )).toBe(true);
     expect(await loadLedgerCounts(pool)).toEqual(countsBefore);
+  });
+
+  it("discovers a full order but grants only the exact disjoint package group", async () => {
+    const sourceId = await seedCustomerFulfillmentSource(pool, "SKU-SELECTED", 2);
+    const otherId = await seedCustomerFulfillmentSource(pool, "SKU-OTHER", 2);
+    const providerOrderId = "disjoint-order";
+    const selectedLabel = await seedAuthorityReadinessLabel(pool, sourceId, { providerOrderId });
+    const otherLabel = await seedAuthorityReadinessLabel(pool, otherId, { providerOrderId,
+      providerLabelId: "44002", trackingNumber: "TRACK-OTHER", receivedAt: "2026-08-23T13:00:00.000Z" });
+    await seedAuthorityDiscoveryRelations(pool, sourceId, selectedLabel, providerOrderId);
+    const service = new PackageAllocationBootstrapPersistenceService(new PgPackageAllocationLedgerRepository(pool));
+    const input = { contractVersion: 1 as const, authorityMode: "shadow_only" as const,
+      bootstrapMode: "relationship_discovery" as const, sourceWmsShipmentItemIds: [sourceId],
+      writeContext: { createdBy: "integration:order-package-scope", reason: "Disjoint order lines do not compete for source quantity" } };
+    const result = await service.persistDiscovered(input);
+    expect(result.outcome).toBe("persisted");
+    expect(result.selectedShippingProviderLabelIds).toEqual([selectedLabel, otherLabel]);
+    expect(result.resolution?.plannerInput.packages).toHaveLength(1);
+    const plan = await pool.query("SELECT authority_snapshot FROM wms.package_allocation_plans WHERE id=$1", [result.persistence!.planId]);
+    expect(plan.rows[0].authority_snapshot).toMatchObject({ excludedUnrelatedEvidenceKeys: [`shipping-provider-label:${otherLabel}`] });
+    expect((await loadLedgerCounts(pool)).packageBindings).toBe(1);
+    await expect(service.persistDiscovered(input)).resolves.toMatchObject({ persistence: { kind: "unchanged" } });
   });
 
   it("persists and exact-replays one relationship-discovered inert bootstrap plan", async () => {
@@ -4769,6 +4794,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       }
       if (query.includes("fulfillmentCreateV2")) {
         const fulfillment = recordValue(variables?.fulfillment, "Shopify fulfillment mutation");
+        expect(fulfillment.notifyCustomer).toBe(false);
         expect(fulfillment.lineItemsByFulfillmentOrder).toEqual([{
           fulfillmentOrderId: "gid://shopify/FulfillmentOrder/640020",
           fulfillmentOrderLineItems: [{ id: "gid://shopify/FulfillmentOrderLineItem/640021", quantity: 1 }],
@@ -4825,6 +4851,9 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     const provider = createCompatibilityChannelFulfillmentProviderExecutor(
       createFulfillmentPushService(getTestDb(), null, { providerClients: { shopify, ebay } }),
     );
+    // A later split shrinks the compatibility source row, not the frozen grant.
+    // Both immutable quantity-one packages remain valid against original two.
+    await pool.query("UPDATE wms.outbound_shipment_items SET qty=1 WHERE id=$1", [sourceId]);
     for (const command of claimable) {
       expect(command.items).toHaveLength(1);
       expect(command.items[0]).toMatchObject({ legacyWmsShipmentItemId: sourceId, quantity: 1 });
@@ -4840,13 +4869,25 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       const scope = { commandId: command.id, omsOrderId: command.omsOrderId };
       const preview = await recovery.preview(scope);
       expect(preview.eligibleForRecheck).toBe(true);
-      await recovery.requeue({ ...scope, expectedStateFingerprint: preview.stateFingerprint,
-        actor: "integration:shopify-reviewer", reason: "Recheck exact allocated quantity after provider fix", requeuedAt: activatedAt });
+      const retryInput = { ...scope, expectedStateFingerprint: preview.stateFingerprint, notifyCustomer: false as const,
+        actor: "integration:shopify-reviewer", reason: "Recheck exact allocated quantity after provider fix", requeuedAt: activatedAt };
+      const retries = await Promise.all([recovery.requeue(retryInput), recovery.requeue(retryInput)]);
+      expect(retries.filter(result => result.requeued)).toHaveLength(1);
+      expect(retries.filter(result => result.replayed)).toHaveLength(1);
+      // An old/rolled-back worker cannot claim this retry and send an email by
+      // ignoring the separately persisted suppression. The failed claim rolls back.
+      await expect(pool.query(`UPDATE oms.channel_fulfillment_pushes SET push_status='processing',
+        attempt_count=attempt_count+1, lease_token='old-worker', lease_expires_at=NOW()+INTERVAL '1 minute'
+        WHERE id=$1`, [command.id])).rejects.toMatchObject({ code: "23514" });
       const [reclaimed] = await fulfillmentRepository.claimCommands({
         now: activatedAt, leaseToken: `shopify-reviewed-recovery:${command.id}`,
         leaseDurationMs: 60000, limit: 1, commandIds: [command.id],
       });
       expect(reclaimed.attemptNumber).toBe(2);
+      expect(reclaimed.requestHash).toBe(command.requestHash);
+      expect(reclaimed.metadata).toEqual(command.metadata);
+      expect(reclaimed.notificationSuppression).toMatchObject({ requestHash: command.requestHash,
+        notifyCustomer: false, operator: retryInput.actor });
       const executed = await provider.execute(reclaimed);
       expect(executed.outcome).toBe("success");
       await fulfillmentRepository.completeAttempt({
@@ -4900,13 +4941,14 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
   it.each([
     { preexistingRequest: false, conflict: null },
     { preexistingRequest: true, conflict: null },
+    { preexistingRequest: false, conflict: null, splitAfterActivation: true },
     { preexistingRequest: false, conflict: "request_quantity" },
     { preexistingRequest: false, conflict: "request_relink" },
     { preexistingRequest: false, conflict: "source_sku" },
     { preexistingRequest: false, conflict: "removed_relationship" },
   ] as const)(
     "follows persisted group history through the public label handler without issuing commercial quantity twice (preexisting request: $preexistingRequest, conflict: $conflict)",
-    async ({ preexistingRequest, conflict }) => {
+    async ({ preexistingRequest, conflict, ...scenario }) => {
       const sourceId = await seedCommercialFulfillmentAuthoritySource(
         pool,
         "SKU-PUBLIC-LABEL-CONTINUITY",
@@ -4995,6 +5037,16 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
         [sourceId],
       );
       expect(requestBefore.rows).toHaveLength(1);
+      if ("splitAfterActivation" in scenario && scenario.splitAfterActivation) {
+        const childShipment = await pool.query(`INSERT INTO wms.outbound_shipments (order_id)
+          SELECT shipment.order_id FROM wms.outbound_shipments shipment
+          JOIN wms.outbound_shipment_items item ON item.shipment_id=shipment.id WHERE item.id=$1 RETURNING id`, [sourceId]);
+        await pool.query(`INSERT INTO wms.outbound_shipment_items (
+          shipment_id, order_item_id, shipment_item_purpose, product_variant_id, qty, split_root_shipment_item_id)
+          SELECT $2, order_item_id, shipment_item_purpose, product_variant_id, 1, id
+          FROM wms.outbound_shipment_items WHERE id=$1`, [sourceId, childShipment.rows[0].id]);
+        await pool.query("UPDATE wms.outbound_shipment_items SET qty=1 WHERE id=$1", [sourceId]);
+      }
       const planBefore = await pool.query(
         "SELECT * FROM wms.package_allocation_plans WHERE id = $1",
         [first.planId],

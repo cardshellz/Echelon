@@ -10,6 +10,7 @@ import {
 } from "./package-allocation-authority-readiness.domain";
 import {
   resolvePackageAllocationAuthority,
+  packageAllocationPackageKey,
   type PackageAllocationAuthorityResolutionResultV1,
 } from "./package-allocation-authority-resolution.domain";
 import { adaptPersistedDeclaredPackageLifecycleEvidence } from "./declared-package-lifecycle-shadow.domain";
@@ -315,6 +316,7 @@ function sortPackages(
 }
 
 export interface PackageAllocationAuthorityEvidenceResolutionV1 {
+  readonly excludedUnrelatedEvidenceKeys: readonly string[];
   readonly sourceFacts: readonly PackageAllocationSourceFacts[];
   readonly packages: readonly LockedPackageAllocationAuthorityEvidence[];
   readonly readiness: PackageAllocationAuthorityReadinessResultV1;
@@ -358,7 +360,35 @@ export function resolvePackageAllocationAuthorityEvidence(input: {
       pkg.persistedEvidence,
     ),
   }));
-  const resolvedPackages = adaptedPackages.flatMap((pkg) =>
+  const sourceIds = new Set(sourceFacts.map((source) => source.sourceWmsShipmentItemId));
+  const previousPackageKeys = new Set(input.previousPlan?.packageEvidence.map((pkg) => pkg.packageKey) ?? []);
+  const assessmentByKey = new Map(readiness.packageAssessments.map((assessment) => [assessment.evidenceKey, assessment]));
+  // Provider order relationships discover candidates; they do not make every
+  // package in the order part of this source group. Keep unknown/mixed history,
+  // any overlap, and every previously bound package. Only complete, disjoint
+  // package histories can be excluded from planning, never from the audit.
+  const excludedUnrelatedEvidenceKeys: string[] = [];
+  const relevantPackages = adaptedPackages.filter((pkg) => {
+    if (pkg.adapted.outcome !== "adapted") return true;
+    const lifecycle = pkg.adapted.input;
+    if (previousPackageKeys.has(packageAllocationPackageKey(lifecycle.provider, lifecycle.providerPhysicalShipmentId))) return true;
+    const assessment = assessmentByKey.get(pkg.evidenceKey);
+    if (!assessment || assessment.lifecycleStatus !== "projected" || assessment.evidenceCoverage !== "current_flow"
+      || assessment.authoritativeContents.length === 0
+      || assessment.authoritativeContents.some((line) => sourceIds.has(line.wmsShipmentItemId))
+      || assessment.reviewCodes.some((code) => !["package_line_outside_candidate_sources",
+        "package_membership_policy_unresolved", "allocation_role_policy_unresolved"].includes(code))) return true;
+    const contentsEvents = lifecycle.events.filter((event) =>
+      event.kind === "outbound_label_observed" || event.kind === "package_contents_attested");
+    if (contentsEvents.some((event) => {
+      if (event.kind === "package_contents_attested") return event.contents.some((line) => sourceIds.has(line.wmsShipmentItemId));
+      return event.contentsEvidence.status !== "authoritative"
+        || event.contentsEvidence.lines.some((line) => sourceIds.has(line.wmsShipmentItemId));
+    })) return true;
+    excludedUnrelatedEvidenceKeys.push(pkg.evidenceKey);
+    return false;
+  });
+  const resolvedPackages = relevantPackages.flatMap((pkg) =>
     pkg.adapted.outcome === "adapted"
       ? [{
           evidenceKey: pkg.evidenceKey,
@@ -373,7 +403,7 @@ export function resolvePackageAllocationAuthorityEvidence(input: {
         }]
       : [],
   );
-  const resolution = resolvedPackages.length === packages.length
+  const resolution = resolvedPackages.length > 0 && resolvedPackages.length === relevantPackages.length
     ? resolvePackageAllocationAuthority({
         contractVersion: 1,
         authorityMode: "shadow_only",
@@ -389,7 +419,7 @@ export function resolvePackageAllocationAuthorityEvidence(input: {
       })
     : null;
 
-  return deepFreeze({ sourceFacts, packages, readiness, resolution });
+  return deepFreeze({ sourceFacts, packages, readiness, resolution, excludedUnrelatedEvidenceKeys });
 }
 
 /**

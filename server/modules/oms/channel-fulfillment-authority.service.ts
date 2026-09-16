@@ -6,7 +6,7 @@ import {
   ChannelFulfillmentNotificationPolicyError,
   ChannelFulfillmentRepairNotificationError,
   CHANNEL_FULFILLMENT_REPAIR_SOURCES,
-  resolvePersistedChannelFulfillmentNotifyCustomer,
+  resolveReviewedChannelFulfillmentNotifyCustomer,
 } from "./channel-fulfillment-notification.policy";
 
 import { EBAY_FULFILLMENT_IDEMPOTENCY_CONFLICT } from "../channels/adapters/ebay/ebay-api.client";
@@ -178,7 +178,18 @@ function legacyShipmentIdsFromCommand(
 function providerCommandInput(
   command: ClaimedChannelFulfillmentCommand,
 ): ChannelFulfillmentProviderCommandInput {
-  const packageShipmentIds = new Set(legacyShipmentIdsFromCommand(command));
+  const savedShipmentIds = legacyShipmentIdsFromCommand(command);
+  // Allocation grants identify immutable source items, not their mutable WMS
+  // parent headers. A split may move those same items after this command was
+  // saved. The provider adapter revalidates the complete persisted grant and
+  // exact OMS/channel lineage before it can send any quantities.
+  const hasCompleteAllocationLineage = command.items.length > 0 && command.items.every((item) =>
+    Number.isSafeInteger(item.packageAllocationEntryId) && Number(item.packageAllocationEntryId) > 0
+    && Number.isSafeInteger(item.packageAllocationEffectIntentId) && Number(item.packageAllocationEffectIntentId) > 0,
+  );
+  const packageShipmentIds = new Set(hasCompleteAllocationLineage
+    ? legacyShipmentIdsSchema.parse(command.items.map((item) => item.legacyWmsShipmentId))
+    : savedShipmentIds);
   for (const item of command.items) {
     if (!packageShipmentIds.has(item.legacyWmsShipmentId)) {
       throw new ChannelFulfillmentProviderInputError(
@@ -209,9 +220,11 @@ function providerCommandInput(
     carrier: command.carrier,
     trackingUrl: command.trackingUrl,
     shippedAt: command.shippedAt,
-    notifyCustomer: resolvePersistedChannelFulfillmentNotifyCustomer(
-      command.channelProvider, command.metadata.source, command.metadata.notifyCustomer,
-    ),
+    notifyCustomer: resolveReviewedChannelFulfillmentNotifyCustomer({
+      provider: command.channelProvider, source: command.metadata.source,
+      notifyCustomer: command.metadata.notifyCustomer, requestHash: command.requestHash,
+      suppression: command.notificationSuppression,
+    }),
     items: Object.freeze(command.items
       .slice()
       .sort((left, right) => left.legacyWmsShipmentItemId - right.legacyWmsShipmentItemId)
@@ -273,6 +286,7 @@ export function createCompatibilityChannelFulfillmentProviderExecutor(
             fulfillmentIds: Object.freeze([...new Set(fulfillmentIds)]),
             alreadySatisfied,
             notifyCustomer: providerInput.notifyCustomer,
+            ...(command.notificationSuppression ? { notificationSuppression: command.notificationSuppression } : {}),
           }),
         };
       }
@@ -353,6 +367,9 @@ export function createChannelFulfillmentAuthorityService(dependencies: {
 
     for (const command of claimed) {
       const startedAt = clock.now();
+      const notificationAudit = command.notificationSuppression
+        ? { notificationSuppression: command.notificationSuppression, notifyCustomer: false }
+        : undefined;
       try {
         const providerResult = await dependencies.providerExecutor.execute(command);
         const completedAt = clock.now();
@@ -363,7 +380,7 @@ export function createChannelFulfillmentAuthorityService(dependencies: {
           providerResponseId: providerResult.providerResponseId,
           startedAt,
           completedAt,
-          metadata: providerResult.metadata,
+          metadata: notificationAudit ? { ...providerResult.metadata, ...notificationAudit } : providerResult.metadata,
         });
         if (providerResult.outcome === "success") result.succeeded += 1;
         else result.ignored += 1;
@@ -384,6 +401,7 @@ export function createChannelFulfillmentAuthorityService(dependencies: {
             commandId: command.id,
             leaseToken: command.leaseToken,
             outcome: "review_required",
+            ...(notificationAudit ? { metadata: notificationAudit } : {}),
             startedAt,
             completedAt,
             errorCode: code,
@@ -406,6 +424,7 @@ export function createChannelFulfillmentAuthorityService(dependencies: {
           commandId: command.id,
           leaseToken: command.leaseToken,
           outcome: exhausted ? "dead_lettered" : "retry_scheduled",
+          ...(notificationAudit ? { metadata: notificationAudit } : {}),
           startedAt,
           completedAt,
           nextAttemptAt: exhausted

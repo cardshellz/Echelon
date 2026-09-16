@@ -48,6 +48,7 @@ function fixture(initial = snapshot(), failUpdate = false) {
         previous_status: params[4], previous_attempt_count: params[5],
         previous_error_code: params[6], previous_error_message: params[7],
         previous_request_hash: params[8], created_at: params[9],
+        notify_customer_override: params[10],
       };
       return { rows: [{ id: 1 }] };
     }
@@ -86,6 +87,37 @@ function execution(current = snapshot()) {
 }
 
 describe("reviewed channel fulfillment retry", () => {
+  it("audits silent retry separately and never rewrites the original notifying intent", async () => {
+    const f = fixture(snapshot({ metadata: { notifyCustomer: true }, lastErrorCode: "shopify_push_package_state_conflict" }));
+    const before = structuredClone(f.current());
+    const input = { ...execution(before), notifyCustomer: false as const };
+    expect(reviewRetryIdempotencyKey(input)).not.toBe(reviewRetryIdempotencyKey(execution(before)));
+    await expect(f.repository.requeue(input)).resolves.toMatchObject({ requeued: true });
+    expect(f.audit()).toMatchObject({ notify_customer_override: false, previous_request_hash: before.requestHash });
+    expect(f.current().metadata).toEqual(before.metadata);
+    expect(f.current().requestHash).toBe(before.requestHash);
+    await expect(f.repository.requeue(input)).resolves.toMatchObject({ replayed: true, requeued: false });
+    f.corruptAudit({ notify_customer_override: null });
+    await expect(f.repository.requeue(input)).rejects.toMatchObject({ code: "REVIEW_RETRY_IDEMPOTENCY_CONFLICT" });
+  });
+
+  it("rejects enabling notifications and suppression on a different provider", async () => {
+    const f = fixture();
+    await expect(f.service.review({ commandId: 3024, omsOrderId: 901, notifyCustomer: true }, "user:7"))
+      .rejects.toMatchObject({ code: "INVALID_REVIEW_RETRY_INPUT" });
+    const ebay = fixture(snapshot({ provider: "ebay", lastErrorCode: "ebay_fulfillment_idempotency_conflict" }));
+    await expect(ebay.repository.requeue({ ...execution(ebay.current()), notifyCustomer: false }))
+      .rejects.toMatchObject({ code: "REVIEW_RETRY_NOTIFICATION_UNSUPPORTED" });
+    expect(ebay.audit()).toBeNull();
+  });
+
+  it("passes explicit suppression from the service to the audit owner", async () => {
+    const f = fixture();
+    await f.service.review({ commandId: 3024, omsOrderId: 901, previewOnly: false,
+      expectedStateFingerprint: execution().expectedStateFingerprint, reason: execution().reason, notifyCustomer: false }, "user:7");
+    expect(f.audit()).toMatchObject({ notify_customer_override: false });
+  });
+
   it("defaults to read-only preview with exact human and immutable package evidence", async () => {
     const f = fixture();
     const result = await f.service.review({ commandId: 3024, omsOrderId: 901 }, "user:7");

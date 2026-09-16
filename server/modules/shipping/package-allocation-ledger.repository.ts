@@ -1661,7 +1661,29 @@ class PgPackageAllocationLedgerTransaction
        JOIN wms.outbound_shipment_items shipment_item
          ON shipment_item.id = source.source_wms_shipment_item_id
         AND shipment_item.order_item_id = source.order_item_id
-        AND shipment_item.qty = source.source_quantity
+        -- The compatibility root shrinks when exact split children are added.
+        -- Reconstruct the same source quantity as loadSourceFacts; the immutable
+        -- request, allocation entry and physical-item proofs below still apply.
+        AND shipment_item.qty::bigint + COALESCE((
+          SELECT SUM(split_item.qty)::bigint FROM wms.outbound_shipment_items split_item
+          WHERE split_item.split_root_shipment_item_id = shipment_item.id
+            AND split_item.id <> shipment_item.id
+        ), 0::bigint) = source.source_quantity
+        AND NOT EXISTS (
+          SELECT 1 FROM wms.outbound_shipment_items split_item
+          LEFT JOIN wms.outbound_shipments split_shipment ON split_shipment.id = split_item.shipment_id
+          WHERE split_item.split_root_shipment_item_id = shipment_item.id
+            AND split_item.id <> shipment_item.id
+            AND (split_shipment.id IS NULL OR split_item.qty < 0
+              OR split_item.order_item_id IS DISTINCT FROM shipment_item.order_item_id
+              OR split_item.replacement_for_order_item_id IS DISTINCT FROM shipment_item.replacement_for_order_item_id
+              OR split_item.correction_for_shipment_item_id IS DISTINCT FROM shipment_item.correction_for_shipment_item_id
+              OR split_item.shipment_item_purpose IS DISTINCT FROM shipment_item.shipment_item_purpose
+              OR split_item.product_variant_id IS DISTINCT FROM shipment_item.product_variant_id
+              OR split_shipment.order_id IS DISTINCT FROM (
+                SELECT parent.order_id FROM wms.outbound_shipments parent WHERE parent.id = shipment_item.shipment_id
+              ))
+        )
         AND shipment_item.shipment_item_purpose = source.shipment_item_purpose
         AND shipment_item.product_variant_id IS NOT DISTINCT FROM source.product_variant_id
        JOIN wms.order_items order_item ON order_item.id = source.order_item_id
