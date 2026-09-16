@@ -132,7 +132,7 @@ export function usage(): string {
     "  npx tsx scripts/backfill-channel-fulfillment-authority.ts --execute --limit=all",
     "",
     "Flags:",
-    "  --dry-run               Validate package/header and shipping-order identity without writes. Default.",
+    "  --dry-run               Validate package identity and order-line/request quantities without writes. Default.",
     "  --execute               Materialize canonical rows and pending commands.",
     "  --silent                Persist no customer notifications for Shopify backfill commands, including retries.",
     "  --limit=N|all           Maximum physical packages. Default 100.",
