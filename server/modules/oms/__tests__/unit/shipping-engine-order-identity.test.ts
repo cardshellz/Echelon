@@ -30,6 +30,24 @@ describe("shipping-engine provider order identity", () => {
     })).toBe("conflict");
   });
 
+  it("allows explicit stable-key alias recognition independently of strict package headers", () => {
+    const input = { ...base, legacyHeaderPolicy: "strict" as const,
+      providerOrderIdentityPolicy: "stable_key_alias" as const };
+    const before = structuredClone(input);
+    expect(resolveProviderOrderId(input)).toBe("stable_key_alias");
+    expect(input).toEqual(before);
+  });
+
+  it.each([null, "", "different-stable-key"])("does not infer an alias from missing or conflicting key %s", incomingProviderOrderKey => {
+    expect(resolveProviderOrderId({ ...base, legacyHeaderPolicy: "strict", providerOrderIdentityPolicy: "stable_key_alias",
+      incomingProviderOrderKey })).toBe("conflict");
+  });
+
+  it("requires a nonblank saved stable key for new aliases", () => {
+    expect(resolveProviderOrderId({ ...base, legacyHeaderPolicy: "strict", providerOrderIdentityPolicy: "stable_key_alias",
+      persistedProviderOrderKey: " " })).toBe("conflict");
+  });
+
   it("accepts an alias already bound to the canonical shipping-engine order", () => {
     expect(resolveProviderOrderId({
       ...base,

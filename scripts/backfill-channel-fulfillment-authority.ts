@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 import type {
   ChannelFulfillmentAuthorityRepository,
   MaterializePhysicalPackageResult,
+  MaterializePhysicalPackageInput,
 } from "../server/modules/oms/channel-fulfillment-authority.repository";
 
 type Mode = "dry-run" | "execute";
@@ -61,7 +62,7 @@ export interface BackfillDependencies {
   readonly loadCandidates: (flags: BackfillFlags) => Promise<readonly BackfillCandidate[]>;
   readonly repository: Pick<
     ChannelFulfillmentAuthorityRepository,
-    "resolveLegacyPhysicalPackage" | "materializePhysicalPackage"
+    "resolveLegacyPhysicalPackage" | "validatePhysicalPackageIdentity" | "materializePhysicalPackage"
   >;
   readonly log?: (message: string) => void;
 }
@@ -131,7 +132,7 @@ export function usage(): string {
     "  npx tsx scripts/backfill-channel-fulfillment-authority.ts --execute --limit=all",
     "",
     "Flags:",
-    "  --dry-run               Resolve and validate missing canonical coverage without writes. Default.",
+    "  --dry-run               Validate package/header and shipping-order identity without writes. Default.",
     "  --execute               Materialize canonical rows and pending commands.",
     "  --silent                Persist no customer notifications for Shopify backfill commands, including retries.",
     "  --limit=N|all           Maximum physical packages. Default 100.",
@@ -349,6 +350,16 @@ export async function runBackfill(
       const resolved = await dependencies.repository.resolveLegacyPhysicalPackage(
         candidate.representativeShipmentId,
       );
+      const materializationInput: MaterializePhysicalPackageInput = {
+        ...resolved,
+        legacyWmsShipmentIds: [...resolved.legacyWmsShipmentIds],
+        source: BACKFILL_SOURCE,
+        legacyHeaderPolicy: "strict",
+        providerOrderIdentityPolicy: "stable_key_alias",
+        // Omit on ordinary replays so an existing silent command stays silent.
+        ...(flags.silent ? { notifyCustomer: false } : {}),
+      };
+      await dependencies.repository.validatePhysicalPackageIdentity(materializationInput);
       lineageValidated += 1;
       if (!flags.json && flags.mode === "dry-run") {
         log(
@@ -360,13 +371,7 @@ export async function runBackfill(
       }
       if (flags.mode === "dry-run") continue;
 
-      const result = await dependencies.repository.materializePhysicalPackage({
-        ...resolved,
-        legacyWmsShipmentIds: [...resolved.legacyWmsShipmentIds],
-        source: BACKFILL_SOURCE,
-        // Omit on ordinary replays so an existing silent command stays silent.
-        ...(flags.silent ? { notifyCustomer: false } : {}),
-      });
+      const result = await dependencies.repository.materializePhysicalPackage(materializationInput);
       const counts = commandCounts(result);
       materialized += 1;
       commandsCreated += counts.created;

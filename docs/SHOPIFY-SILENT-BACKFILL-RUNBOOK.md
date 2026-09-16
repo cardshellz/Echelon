@@ -58,6 +58,35 @@ without replacing it when a worker claims a request.
 The actual mutation is built by `pushSingleShipmentFulfillment` in
 `server/modules/oms/fulfillment-push.service.ts`.
 
+## Split-package provider order aliases
+
+ShipStation can assign a different provider order ID to another physical package
+while retaining the same stable shipping order key. The manual backfill uses
+`providerOrderIdentityPolicy: "stable_key_alias"` independently of
+`legacyHeaderPolicy: "strict"`. This permits the new ID only when the existing
+canonical parent is unambiguous and its nonempty stable key equals the incoming
+key (or that ID is already a recorded alias). It does not infer identity from
+SKU, customer order number, or tracking alone.
+
+The original canonical parent ID and provider order ID are preserved. Successful
+materialization records the alternate ID, resolution, and source in the existing
+`wms.shipping_engine_order_provider_refs` table within the same transaction as
+the package and command. No new table or migration is needed. Other callers keep
+their existing defaults; the established aggregate-projection behavior is
+unchanged.
+
+The legacy package's own provider order ID, order key, physical package identity,
+tracking, and carrier still undergo the existing strict checks. Conflicting
+headers or multiple matching canonical parents fail closed. Missing or different
+stable keys cannot establish a new alias for a conflicting parent order ID.
+
+`validatePhysicalPackageIdentity` uses a read-only, repeatable-read transaction
+and the same parent-identity validation as `findOrCreateShippingEngineOrder` in
+`server/modules/oms/channel-fulfillment-authority.repository.ts`. It never inserts
+an alias. Materialization repeats the identity checks with locks; an earlier
+preview does not override changes made before execution. Quantity/cancellation
+checks, saved notification intent, and command idempotency are unchanged.
+
 ## Production sequence
 
 1. Verify that every fulfillment dispatcher and repair scheduler is running the
@@ -74,8 +103,11 @@ The actual mutation is built by `pushSingleShipmentFulfillment` in
    npx tsx scripts/backfill-channel-fulfillment-authority.ts --dry-run --silent --wms-shipment-id=<approved-id> --json
    ```
 
-   This script validates lineage only. It does not materialize commands, invoke
-   Shopify, or prove that subsequent writes and provider calls will succeed.
+   This script resolves lineage and validates the strict package headers and
+   canonical shipping-order identity, including the alias gate. It does not
+   materialize commands, invoke Shopify, or prove that all subsequent quantity
+   checks, writes, and provider calls will succeed. After deploying this fix,
+   refresh the preview; do not execute unmerged local code against production.
 4. Before execution, explain the exact packages and quantities, records changed
    and untouched, inventory impact, and audit trail; obtain explicit approval of
    that scope. Use `--execute --silent` only for those approved package IDs. Do
@@ -109,12 +141,17 @@ fulfillment event. Shopify documents the native notification field in
   handoff, concurrent materialization, normal replay, worker restart/retry,
   pre-deployment notifying-command holds, attempt auditing, and unchanged
   inventory transactions/WMS order-item quantities.
-- PostgreSQL results: 62 shipping ledger tests and 14 shipment omission/
+- Alias regression coverage: a different provider order ID under the same stable
+  parent key, read-only dry-run with unchanged rows, concurrent CLI execution,
+  silent dispatch and attempt audit, replay without command/hash changes, strict
+  package-header conflicts, changed-after-preview tracking, and ambiguous parents.
+- PostgreSQL results: 70 shipping ledger tests and 14 shipment omission/
   materialization compatibility tests passed. The old-command fixtures insert
   the pre-deployment shape directly with all immutability triggers enabled.
-- Additional manual-backfill and actual Shopify request regression run:
-  154 tests passed.
-- Full CI unit command: 13,093 passed, 39 skipped, zero failures.
+- Focused backfill CLI, parent identity, repository, and service regression run:
+  59 tests passed. Actual Shopify request regressions are included in the full
+  unit suite; provider calls in the PostgreSQL suite are mocked.
+- Full CI unit command: 13,111 passed, 39 skipped, zero failures.
 - TypeScript check, production build, and final `git diff --check` passed.
 
 The Windows full-unit run temporarily normalized three unchanged fixture-sensitive

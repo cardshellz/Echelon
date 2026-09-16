@@ -91,6 +91,7 @@ describe("backfill-channel-fulfillment-authority", () => {
   it("validates lineage without materializing in dry-run mode", async () => {
     const repository = {
       resolveLegacyPhysicalPackage: vi.fn(async () => resolvedPackage),
+      validatePhysicalPackageIdentity: vi.fn(async () => {}),
       materializePhysicalPackage: vi.fn(),
     };
     const summary = await runBackfill(parseFlags(["--silent"]), {
@@ -108,6 +109,9 @@ describe("backfill-channel-fulfillment-authority", () => {
       reviewRequired: 0,
     });
     expect(repository.resolveLegacyPhysicalPackage).toHaveBeenCalledWith(4842);
+    expect(repository.validatePhysicalPackageIdentity).toHaveBeenCalledWith(expect.objectContaining({
+      legacyHeaderPolicy: "strict", providerOrderIdentityPolicy: "stable_key_alias", notifyCustomer: false,
+    }));
     expect(repository.materializePhysicalPackage).not.toHaveBeenCalled();
   });
 
@@ -117,6 +121,7 @@ describe("backfill-channel-fulfillment-authority", () => {
     });
     const repository = {
       resolveLegacyPhysicalPackage: vi.fn(async () => { throw error; }),
+      validatePhysicalPackageIdentity: vi.fn(async () => {}),
       materializePhysicalPackage: vi.fn(),
     };
     const summary = await runBackfill(parseFlags([]), {
@@ -142,6 +147,7 @@ describe("backfill-channel-fulfillment-authority", () => {
   it.each([false, true])("persists the requested silent=%s intent without dispatching a provider call", async (silent) => {
     const repository = {
       resolveLegacyPhysicalPackage: vi.fn(async () => resolvedPackage),
+      validatePhysicalPackageIdentity: vi.fn(async () => {}),
       materializePhysicalPackage: vi.fn(async (_input: MaterializePhysicalPackageInput) => ({
         fulfillmentPlanIds: Object.freeze([1]),
         shipmentRequestIds: Object.freeze([2]),
@@ -163,6 +169,8 @@ describe("backfill-channel-fulfillment-authority", () => {
       expect.objectContaining({
         legacyWmsShipmentIds: [4842, 6001],
         source: "script:backfill-channel-fulfillment-authority",
+        legacyHeaderPolicy: "strict",
+        providerOrderIdentityPolicy: "stable_key_alias",
       }),
     );
     expect(summary).toMatchObject({
@@ -174,7 +182,24 @@ describe("backfill-channel-fulfillment-authority", () => {
       reviewRequired: 0,
     });
     const input = vi.mocked(repository.materializePhysicalPackage).mock.calls[0]?.[0];
+    expect(repository.validatePhysicalPackageIdentity).toHaveBeenCalledWith(input);
     if (silent) expect(input).toHaveProperty("notifyCustomer", false);
     else expect(input).not.toHaveProperty("notifyCustomer");
+  });
+
+  it.each(["--dry-run", "--execute"])("reports shipping-engine identity conflicts in %s before any write", async mode => {
+    const repository = {
+      resolveLegacyPhysicalPackage: vi.fn(async () => resolvedPackage),
+      validatePhysicalPackageIdentity: vi.fn(async () => {
+        throw Object.assign(new Error("Provider order key does not match"), { code: "PACKAGE_IDENTITY_CONFLICT" });
+      }),
+      materializePhysicalPackage: vi.fn(),
+    };
+    const summary = await runBackfill(parseFlags([mode, "--silent"]), {
+      loadCandidates: async () => [candidate], repository, log: vi.fn(),
+    });
+    expect(summary).toMatchObject({ lineageValidated: 0, materialized: 0, reviewRequired: 1,
+      failures: [expect.objectContaining({ code: "PACKAGE_IDENTITY_CONFLICT" })] });
+    expect(repository.materializePhysicalPackage).not.toHaveBeenCalled();
   });
 });
