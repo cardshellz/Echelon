@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   PIECE_SKU_SUFFIX,
+  PIECE_VARIANT_AUDIT_ACTION,
   PIECE_VARIANT_NAME,
   applyPieceVariantBackfill,
   buildProposedPieceVariant,
@@ -232,6 +233,10 @@ describe("piece variant backfill preview", () => {
 
 type RecordedCall = { sql: string; values?: unknown[] };
 
+// Drizzle, wrapped over the pinned client for the audit writer, calls
+// client.query with a query-config object; raw statements arrive as strings.
+const AUDIT_INSERT = 'insert into "audit_events"';
+
 function stubbedApplyClient(options: {
   candidateRows: unknown[];
   insertRowCount?: number;
@@ -240,7 +245,8 @@ function stubbedApplyClient(options: {
   const calls: RecordedCall[] = [];
   let nextVariantId = 1000;
   const client = {
-    query: vi.fn(async (sql: string, values?: unknown[]) => {
+    query: vi.fn(async (statement: string | { text: string }, values?: unknown[]) => {
+      const sql = typeof statement === "string" ? statement : statement.text;
       calls.push({ sql, values });
       if (sql.includes("SELECT id FROM public.users")) {
         const rowCount = options.actorRows ?? 1;
@@ -268,8 +274,8 @@ function stubbedApplyClient(options: {
           rowCount,
         };
       }
-      if (sql.includes("INSERT INTO public.audit_events")) {
-        return { rows: [], rowCount: 1 };
+      if (sql.includes(AUDIT_INSERT)) {
+        return { rows: [], rowCount: 1, command: "INSERT", fields: [] };
       }
       return { rows: [], rowCount: null };
     }),
@@ -334,16 +340,21 @@ describe("piece variant backfill apply", () => {
     ]);
     expect(inserts[0].sql).toContain("WHERE NOT EXISTS");
 
-    const audits = calls.filter((call) => call.sql.includes("INSERT INTO public.audit_events"));
+    // The audit rows travel through persistAuditEvent on the same stubbed
+    // client, which is what keeps them inside this transaction.
+    const audits = calls.filter((call) => call.sql.includes(AUDIT_INSERT));
     expect(audits).toHaveLength(2);
-    expect(audits[0].values?.[0]).toEqual(FIXED_CLOCK());
-    expect(audits[0].values?.[1]).toBe("user:user-1");
-    expect(audits[0].values?.[2]).toBe("product_variant:1001");
-    expect(JSON.parse(audits[0].values?.[3] as string)).toEqual({
+    // Drizzle serializes timestamptz parameters as ISO strings.
+    expect(audits[0].values?.[0]).toBe(FIXED_CLOCK().toISOString());
+    expect(audits[0].values?.[1]).toBe("AUDIT");
+    expect(audits[0].values?.[2]).toBe("user:user-1");
+    expect(audits[0].values?.[3]).toBe(PIECE_VARIANT_AUDIT_ACTION);
+    expect(audits[0].values?.[4]).toBe("product_variant:1001");
+    expect(JSON.parse(audits[0].values?.[5] as string)).toEqual({
       before: null,
       after: { id: 1001, product_id: 1, sku: "SHLZ-TOP-35PT-BLU-PC1", uom_type: "piece" },
     });
-    expect(JSON.parse(audits[0].values?.[4] as string)).toMatchObject({
+    expect(JSON.parse(audits[0].values?.[6] as string)).toMatchObject({
       contractVersion: 1,
       source: "piece_variant_backfill",
       reason: "receiving_piece_variant_required",
@@ -353,7 +364,7 @@ describe("piece variant backfill apply", () => {
       existingVariantIds: [11, 12],
       warnings: [],
     });
-    expect(JSON.parse(audits[1].values?.[4] as string)).toMatchObject({
+    expect(JSON.parse(audits[1].values?.[6] as string)).toMatchObject({
       productId: 11,
       warnings: ["recipe_managed_product", "product_status_not_active"],
     });
@@ -372,7 +383,7 @@ describe("piece variant backfill apply", () => {
       clock: FIXED_CLOCK,
     })).rejects.toThrow("Catalog changed after preview");
 
-    expect(calls.some((call) => call.sql.includes("INSERT INTO"))).toBe(false);
+    expect(calls.some((call) => /insert into/i.test(call.sql))).toBe(false);
     expect(calls.at(-1)?.sql).toBe("ROLLBACK");
     expect(client.release).toHaveBeenCalledOnce();
   });
@@ -388,7 +399,7 @@ describe("piece variant backfill apply", () => {
       clock: FIXED_CLOCK,
     })).rejects.toThrow("changed during backfill");
 
-    expect(calls.some((call) => call.sql.includes("INSERT INTO public.audit_events"))).toBe(false);
+    expect(calls.some((call) => call.sql.includes(AUDIT_INSERT))).toBe(false);
     expect(calls.at(-1)?.sql).toBe("ROLLBACK");
   });
 
@@ -418,7 +429,7 @@ describe("piece variant backfill apply", () => {
     });
 
     expect(result).toMatchObject({ createdVariants: [], blockedProducts: 2, auditedVariants: 0 });
-    expect(calls.some((call) => call.sql.includes("INSERT INTO"))).toBe(false);
+    expect(calls.some((call) => /insert into/i.test(call.sql))).toBe(false);
     expect(calls.at(-1)?.sql).toBe("COMMIT");
   });
 });

@@ -237,6 +237,26 @@ describeDatabase.sequential("piece variant backfill PostgreSQL guarantees", () =
     expect(await countAudits()).toBe(0);
   });
 
+  it("rolls the variant back when its audit row cannot be written", async () => {
+    const preview = await previewPieceVariantBackfill(database.pool, { clock: FIXED_CLOCK });
+    const variantsBefore = await countVariants();
+    await database.pool.query("ALTER TABLE public.audit_events RENAME TO audit_events_offline");
+    try {
+      await expect(applyPieceVariantBackfill({
+        pool: database.pool,
+        actorId: "operator-1",
+        expectedPreviewHash: preview.previewHash,
+        clock: FIXED_CLOCK,
+      })).rejects.toMatchObject({ code: "42P01" });
+    } finally {
+      await database.pool.query("ALTER TABLE public.audit_events_offline RENAME TO audit_events");
+    }
+    // The first piece was inserted before its audit insert failed; the
+    // rollback must have taken it with it.
+    expect(await countVariants()).toBe(variantsBefore);
+    expect(await countAudits()).toBe(0);
+  });
+
   it("creates one audited internal-only piece per safe product and leaves blocked products untouched", async () => {
     const preview = await previewPieceVariantBackfill(database.pool, { clock: FIXED_CLOCK });
     const variantsBefore = await countVariants();

@@ -1,10 +1,12 @@
 import { createHash } from "node:crypto";
+import { drizzle } from "drizzle-orm/node-postgres";
 import type { Pool, PoolClient, QueryResult } from "pg";
 
 import { getVariantUomDefinition } from "@shared/catalog/variant-uom";
 import { insertProductVariantSchema } from "@shared/schema/catalog.schema";
 import { canonicalJson } from "@shared/utils/canonical-json";
 
+import { persistAuditEvent } from "../../infrastructure/auditLogger";
 import { assertVariantSalesIdentityCompatible } from "./variant-sales-eligibility-policy";
 import { validateVariantUomWrite } from "./variant-uom";
 
@@ -23,10 +25,13 @@ import { validateVariantUomWrite } from "./variant-uom";
  * preview is read-only and fingerprints every candidate (safe and blocked);
  * apply re-derives the same preview inside one transaction under row locks and
  * refuses to write unless the fingerprint still matches what the operator
- * reviewed. Blocked products are reported, never guessed at.
+ * reviewed. Blocked products are reported, never guessed at. Audit rows go
+ * through the audit table owner's API (persistAuditEvent) on the same pinned
+ * connection, so they commit or roll back with the variants they describe.
  */
 
 export const PIECE_VARIANT_BACKFILL_CONTRACT_VERSION = 1;
+export const PIECE_VARIANT_AUDIT_ACTION = "product_variant.piece_unit_backfilled";
 
 // Single-key advisory lock owned by this backfill so two operators cannot run
 // apply concurrently. Distinct from every other remediation lock in the repo.
@@ -269,14 +274,6 @@ const INSERT_PIECE_VARIANT_QUERY = `
   RETURNING to_jsonb(pv) AS row
 `;
 
-const INSERT_AUDIT_EVENT_QUERY = `
-  INSERT INTO public.audit_events (
-    timestamp, level, actor, action, target, changes, context
-  ) VALUES (
-    $1, 'AUDIT', $2, 'product_variant.piece_unit_backfilled', $3, $4::jsonb, $5::jsonb
-  )
-`;
-
 function asSafeInteger(value: unknown, field: string): number {
   const parsed = Number(value);
   if (!Number.isSafeInteger(parsed)) {
@@ -515,6 +512,10 @@ export async function applyPieceVariantBackfill(input: {
     // SERIALIZABLE turns a concurrent variant insert that slips past the row
     // locks into a serialization failure rather than a silent second piece.
     await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
+    // Drizzle over the pinned client: every statement it issues runs on this
+    // connection, inside this transaction, so the audit writer's inserts share
+    // the variants' commit or rollback.
+    const auditWriter = drizzle(client);
     await client.query("SELECT pg_advisory_xact_lock($1)", [
       PIECE_VARIANT_BACKFILL_ADVISORY_LOCK,
     ]);
@@ -565,12 +566,12 @@ export async function applyPieceVariantBackfill(input: {
       const afterRow = inserted.rows[0].row as Record<string, unknown>;
       const variantId = asSafeInteger(afterRow.id, "created_variant_id");
 
-      await client.query(INSERT_AUDIT_EVENT_QUERY, [
-        clock(),
-        `user:${actorId}`,
-        `product_variant:${variantId}`,
-        JSON.stringify({ before: null, after: afterRow }),
-        JSON.stringify({
+      await persistAuditEvent(auditWriter, {
+        actor: `user:${actorId}`,
+        action: PIECE_VARIANT_AUDIT_ACTION,
+        target: `product_variant:${variantId}`,
+        changes: { before: null, after: afterRow },
+        context: {
           contractVersion: PIECE_VARIANT_BACKFILL_CONTRACT_VERSION,
           source: "piece_variant_backfill",
           reason: "receiving_piece_variant_required",
@@ -580,8 +581,13 @@ export async function applyPieceVariantBackfill(input: {
           inventoryStrategy: target.inventoryStrategy,
           existingVariantIds: target.existingVariants.map((variant) => variant.id),
           warnings: target.warnings,
-        }),
-      ]);
+        },
+      }, {
+        timestamp: clock(),
+        // The CLI's stdout is its machine-readable result document; the
+        // audit_events row is the durable record, so no console line here.
+        emitStructuredLog: false,
+      });
       auditedVariants++;
       createdVariants.push({
         productId: target.productId,
