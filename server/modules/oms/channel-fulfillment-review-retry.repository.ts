@@ -130,8 +130,14 @@ export function createChannelFulfillmentReviewRetryRepository(
       try {
         return await db.transaction(async (transaction) => {
           const current = await loadSnapshot(transaction, input, true);
+          if (input.notifyCustomer === false && current.snapshot.provider !== "shopify") {
+            throw new ChannelFulfillmentReviewRetryError(
+              "REVIEW_RETRY_NOTIFICATION_UNSUPPORTED", "Silent reviewed retry is supported only for Shopify", 409,
+            );
+          }
           const prior = resultRows(await transaction.execute(sql`
-            SELECT operator, reason, previous_request_hash, previous_status, previous_attempt_count
+            SELECT operator, reason, previous_request_hash, previous_status, previous_attempt_count,
+                   notify_customer_override
             FROM oms.channel_fulfillment_push_requeues
             WHERE channel_fulfillment_push_id = ${input.commandId}
               AND idempotency_key = ${idempotencyKey}
@@ -144,6 +150,7 @@ export function createChannelFulfillmentReviewRetryRepository(
               || prior[0].reason !== input.reason
               || prior[0].previous_request_hash !== current.snapshot.requestHash
               || prior[0].previous_status !== "review"
+              || (prior[0].notify_customer_override ?? null) !== (input.notifyCustomer ?? null)
               || !Number.isSafeInteger(Number(prior[0].previous_attempt_count))
               || Number(prior[0].previous_attempt_count) > current.snapshot.attemptCount) {
               throw new ChannelFulfillmentReviewRetryError(
@@ -168,11 +175,12 @@ export function createChannelFulfillmentReviewRetryRepository(
             INSERT INTO oms.channel_fulfillment_push_requeues (
               channel_fulfillment_push_id, idempotency_key, operator, reason,
               previous_status, previous_attempt_count, previous_error_code,
-              previous_error_message, previous_request_hash, created_at
+              previous_error_message, previous_request_hash, created_at, notify_customer_override
             ) VALUES (
               ${input.commandId}, ${idempotencyKey}, ${input.actor}, ${input.reason},
               ${current.snapshot.status}, ${current.snapshot.attemptCount}, ${current.snapshot.lastErrorCode},
-              ${current.snapshot.lastError}, ${current.snapshot.requestHash}, ${input.requeuedAt}
+              ${current.snapshot.lastError}, ${current.snapshot.requestHash}, ${input.requeuedAt},
+              ${input.notifyCustomer ?? null}::boolean
             ) RETURNING id
           `));
           if (audit.length !== 1) throw new Error("Reviewed retry audit was not persisted");

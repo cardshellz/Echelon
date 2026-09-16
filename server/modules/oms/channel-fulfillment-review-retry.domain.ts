@@ -26,6 +26,8 @@ export const reviewRetryScopeSchema = z.object({
 
 export const reviewRetryInputSchema = reviewRetryScopeSchema.extend({
   previewOnly: z.boolean().default(true),
+  // Suppression is an audited retry action, never an edit to the original command.
+  notifyCustomer: z.literal(false).optional(),
   expectedStateFingerprint: fingerprintSchema.optional(),
   reason: z.string().trim().min(1).max(2_000).optional(),
 }).strict().superRefine((input, context) => {
@@ -88,6 +90,7 @@ export interface ChannelFulfillmentReviewRetryResult extends ChannelFulfillmentR
 }
 
 export interface ChannelFulfillmentReviewRetryExecution extends ChannelFulfillmentReviewRetryScope {
+  readonly notifyCustomer?: false;
   readonly expectedStateFingerprint: string;
   readonly actor: string;
   readonly reason: string;
@@ -95,6 +98,7 @@ export interface ChannelFulfillmentReviewRetryExecution extends ChannelFulfillme
 }
 
 export const reviewRetryExecutionSchema = reviewRetryScopeSchema.extend({
+  notifyCustomer: z.literal(false).optional(),
   expectedStateFingerprint: fingerprintSchema,
   actor: z.string().trim().min(1).max(200).refine((value) => value !== "unknown"),
   reason: z.string().trim().min(1).max(2_000),
@@ -112,7 +116,8 @@ export function previewChannelFulfillmentReviewRetry(
   if (snapshot.attemptCount >= snapshot.maxAttempts) blockers.push("ATTEMPTS_EXHAUSTED");
   const supportedFailure = (
     snapshot.provider === "shopify"
-    && snapshot.lastErrorCode === "channel_fulfillment_lineage_mismatch"
+    && ["channel_fulfillment_lineage_mismatch", "shopify_push_package_state_conflict",
+      "SILENT_REPAIR_NOTIFICATION_REVIEW_REQUIRED"].includes(snapshot.lastErrorCode ?? "")
   ) || (
     snapshot.provider === "ebay"
     && snapshot.lastErrorCode === "ebay_fulfillment_idempotency_conflict"
@@ -144,6 +149,7 @@ export function reviewRetryIdempotencyKey(input: ChannelFulfillmentReviewRetryEx
     expectedStateFingerprint: input.expectedStateFingerprint,
     actor: input.actor,
     reason: input.reason,
+    ...(input.notifyCustomer === false ? { notifyCustomer: false } : {}),
   })).digest("hex");
   return `reviewed-provider-retry:v1:${hash}`;
 }

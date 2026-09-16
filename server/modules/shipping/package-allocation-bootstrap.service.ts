@@ -469,6 +469,7 @@ export class PackageAllocationBootstrapPersistenceService {
           selectionAuthority: "database_relationship_closure" as const,
           selectionCompleteness:
             "unproven_outside_persisted_relationships" as const,
+          excludedUnrelatedEvidenceKeys: [...evidenceResolution.excludedUnrelatedEvidenceKeys],
           relationshipSelectionEvidence: {
             contractVersion: relationshipSelectionEvidence.contractVersion,
             evidenceType: relationshipSelectionEvidence.evidenceType,

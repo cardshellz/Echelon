@@ -6,7 +6,7 @@ function readSource(relativePath: string): string {
   return readFileSync(
     fileURLToPath(new URL(relativePath, import.meta.url)),
     "utf8",
-  );
+  ).replace(/\r\n/g, "\n");
 }
 
 function sourceBlock(source: string, startMarker: string, endMarker?: string): string {

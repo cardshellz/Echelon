@@ -503,6 +503,7 @@ export function registerOmsRoutes(app: Express) {
           receiptId: req.body?.receiptId,
           previewOnly: req.body?.previewOnly,
           expectedStateFingerprint: req.body?.expectedStateFingerprint,
+          notifyCustomer: req.body?.notifyCustomer,
           reason: req.body?.reason,
           operator,
         }, getFlowReconciliationDependencies(req));
