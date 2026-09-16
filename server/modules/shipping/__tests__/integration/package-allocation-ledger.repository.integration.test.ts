@@ -3250,6 +3250,272 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     return result;
   }
 
+  async function seedReservedSplitPackages(orderedQuantity: number, ordinal = 0, warehouseId: number | null = null) {
+    const sourceId = await seedCommercialFulfillmentAuthoritySource(pool, `RESERVED-SPLIT-${ordinal}`, orderedQuantity);
+    const source = (await pool.query<{
+      shipment_id: number; order_id: number; order_item_id: number; product_variant_id: number;
+      oms_order_id: string; oms_order_line_id: string; channel_id: number;
+    }>(`SELECT item.shipment_id, shipment.order_id, item.order_item_id, item.product_variant_id,
+        line.order_id::text AS oms_order_id, line.id::text AS oms_order_line_id, oms_order.channel_id
+      FROM wms.outbound_shipment_items item JOIN wms.outbound_shipments shipment ON shipment.id=item.shipment_id
+      JOIN wms.order_items order_item ON order_item.id=item.order_item_id
+      JOIN oms.oms_order_lines line ON line.id=order_item.oms_order_line_id
+      JOIN oms.oms_orders oms_order ON oms_order.id=line.order_id WHERE item.id=$1`, [sourceId])).rows[0];
+    const providerOrderId = String(900000 + ordinal * 100);
+    const orderKey = `reserved-split-order-${ordinal}`;
+    const firstPackageId = String(800000 + ordinal * 100);
+    const firstTracking = `1ZRESERVED${firstPackageId}`;
+    const externalOrderId = `gid://shopify/Order/${700000 + ordinal * 100}`;
+    const externalLineId = `gid://shopify/LineItem/${700001 + ordinal * 100}`;
+    await pool.query("UPDATE oms.oms_orders SET external_order_id=$2 WHERE id=$1", [source.oms_order_id, externalOrderId]);
+    await pool.query("UPDATE oms.oms_order_lines SET external_line_item_id=$2 WHERE id=$1", [source.oms_order_line_id, externalLineId]);
+    await pool.query(`UPDATE wms.orders SET order_number=$2, channel_id=$3, external_order_id=$4, warehouse_id=$5 WHERE id=$1`,
+      [source.order_id, `RESERVED-SPLIT-${ordinal}`, source.channel_id, externalOrderId, warehouseId]);
+    await pool.query(`UPDATE wms.outbound_shipments SET engine_order_ref=$2, shipstation_order_key=$3,
+      external_fulfillment_id=$4, tracking_number=$5, channel_id=$6 WHERE id=$1`,
+    [source.shipment_id, providerOrderId, orderKey, `shipstation_shipment:${firstPackageId}`, firstTracking, source.channel_id]);
+    // Use the real label/allocation materializer: the request is for the whole
+    // ordered line, but the initial physical item has immutable ledger provenance
+    // for just ONE unit. A smaller request fixture does not reproduce the bug.
+    const labelId = await seedAuthorityReadinessLabel(pool, sourceId, {
+      providerLabelId: firstPackageId, providerOrderId, trackingNumber: firstTracking,
+      contentsLines: [{ lineItemKey: `wms-item-${sourceId}`, quantity: 1 }],
+    });
+    await pool.query("UPDATE wms.shipping_provider_labels SET carrier='ups',provider_order_key=$2 WHERE id=$1", [labelId, orderKey]);
+    await pool.query(`INSERT INTO wms.shipping_provider_label_links (shipping_provider_label_id,legacy_wms_shipment_id)
+      VALUES ($1,$2)`, [labelId, source.shipment_id]);
+    const bootstrap = await new PackageAllocationBootstrapPersistenceService(new PgPackageAllocationLedgerRepository(pool))
+      .persistDiscovered({ contractVersion: 1, authorityMode: "shadow_only", bootstrapMode: "relationship_discovery",
+        sourceWmsShipmentItemIds: [sourceId], writeContext: { createdBy: "integration", reason: "Reserved split fixture" } });
+    expect(bootstrap, JSON.stringify(bootstrap)).toMatchObject({ outcome: "persisted" });
+    if (!bootstrap.persistence?.planId) throw new Error("Split fixture did not create a plan");
+    const repository = createChannelFulfillmentAuthorityRepository(getTestDb());
+    const initial = await repository.materializePackageAllocationCommercialFulfillment({
+      packageAllocationPlanId: bootstrap.persistence.planId, source: "shipstation_label_observed",
+    });
+    expect(initial.customerFulfillmentItemCount).toBe(1);
+    const request = (await pool.query<{ id: string; shipment_request_id: string; quantity_requested: number }>(
+      "SELECT id,shipment_request_id,quantity_requested FROM wms.shipment_request_items WHERE legacy_wms_shipment_item_id=$1", [sourceId])).rows[0];
+    expect(request.quantity_requested).toBe(orderedQuantity);
+    // Historical carrier splitting reduced the legacy source row, not the paid
+    // request or its original allocation evidence. Most rows lack a root pointer.
+    await pool.query("UPDATE wms.outbound_shipment_items SET qty=1 WHERE id=$1", [sourceId]);
+    await pool.query("UPDATE wms.outbound_shipments SET status='shipped' WHERE id=$1", [source.shipment_id]);
+    const candidates: BackfillCandidate[] = [];
+    for (let index = 1; index < orderedQuantity; index++) {
+      const packageId = String(Number(firstPackageId) + index);
+      const tracking = `1ZRESERVED${packageId}`;
+      const shipmentId = (await pool.query<{ id: number }>(`INSERT INTO wms.outbound_shipments (
+        order_id,status,source,shipping_engine,engine_order_ref,shipstation_order_key,
+        external_fulfillment_id,tracking_number,carrier,channel_id)
+        VALUES ($1,'shipped','shipstation_split','shipstation',$2,$3,$4,$5,'ups',$6) RETURNING id`,
+      [source.order_id, String(Number(providerOrderId) + index), orderKey, `shipstation_shipment:${packageId}`, tracking, source.channel_id])).rows[0].id;
+      await pool.query(`INSERT INTO wms.outbound_shipment_items (shipment_id,order_item_id,product_variant_id,qty,
+        tracking_id,provider_membership_state,split_root_shipment_item_id)
+        VALUES ($1,$2,$3,1,$4,'authoritative',$5)`,
+      [shipmentId, source.order_item_id, source.product_variant_id, packageId, ordinal >= 15 ? sourceId : null]);
+      candidates.push({ representativeShipmentId: shipmentId, shippingProvider: "shipstation", providerPhysicalShipmentId: packageId,
+        legacyShipmentIds: [shipmentId], orderNumbers: [`RESERVED-SPLIT-${ordinal}`], trackingNumber: tracking,
+        missingPhysicalShipment: true, missingCommandItemCount: 1 });
+    }
+    await pool.query("UPDATE wms.order_items SET fulfilled_quantity=$2 WHERE id=$1", [source.order_item_id, orderedQuantity]);
+    return { sourceId, source, request, repository, candidates, externalOrderId, externalLineId, firstTracking, orderedQuantity };
+  }
+
+  it("reuses a full original request for historical packages and serializes competing consumption of its last unit", async () => {
+    const fixture = await seedReservedSplitPackages(2);
+    const input = { ...await fixture.repository.resolveLegacyPhysicalPackage(fixture.candidates[0].representativeShipmentId),
+      source: "script:backfill-channel-fulfillment-authority", providerOrderIdentityPolicy: "stable_key_alias" as const, notifyCustomer: false };
+    const before = await snapshotAliasBackfillState();
+    await fixture.repository.validatePhysicalPackageIdentity(input);
+    expect(await snapshotAliasBackfillState()).toEqual(before);
+    const duplicate = (await pool.query<{ id: number }>(`INSERT INTO wms.outbound_shipments
+      (order_id,status,shipping_engine,engine_order_ref,shipstation_order_key,external_fulfillment_id,tracking_number,carrier)
+      SELECT order_id,status,shipping_engine,'900099',shipstation_order_key,'shipstation_shipment:800099','1ZRESERVED800099',carrier
+      FROM wms.outbound_shipments WHERE id=$1 RETURNING id`, [input.legacyWmsShipmentIds[0]])).rows[0];
+    await pool.query(`INSERT INTO wms.outbound_shipment_items (shipment_id,order_item_id,product_variant_id,qty)
+      VALUES ($1,$2,$3,1)`, [duplicate.id, fixture.source.order_item_id, fixture.source.product_variant_id]);
+    const other = { ...await fixture.repository.resolveLegacyPhysicalPackage(duplicate.id), source: input.source,
+      providerOrderIdentityPolicy: "stable_key_alias" as const, notifyCustomer: false };
+    const results = await Promise.allSettled([fixture.repository.materializePhysicalPackage(input), fixture.repository.materializePhysicalPackage(other)]);
+    expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.find(result => result.status === "rejected")).toMatchObject({
+      status: "rejected", reason: { code: "FULFILLMENT_AUTHORITY_EXCEEDED" },
+    });
+    expect((await pool.query("SELECT id,quantity_requested FROM wms.shipment_request_items")).rows)
+      .toEqual([{ id: fixture.request.id, quantity_requested: 2 }]);
+    expect((await pool.query("SELECT COUNT(*)::int AS count FROM wms.physical_shipments")).rows).toEqual([{ count: 2 }]);
+  });
+
+  it("rolls back split request reuse if command creation fails and succeeds on a clean retry", async () => {
+    const fixture = await seedReservedSplitPackages(4);
+    const input = { ...await fixture.repository.resolveLegacyPhysicalPackage(fixture.candidates[0].representativeShipmentId),
+      source: "script:backfill-channel-fulfillment-authority", providerOrderIdentityPolicy: "stable_key_alias" as const, notifyCustomer: false };
+    const before = await snapshotAliasBackfillState();
+    await pool.query(`CREATE FUNCTION oms.reject_test_split_command() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'Injected split command failure'; END $$;
+      CREATE TRIGGER reject_test_split_command BEFORE INSERT ON oms.channel_fulfillment_push_items
+      FOR EACH ROW EXECUTE FUNCTION oms.reject_test_split_command();`);
+    try {
+      await expect(fixture.repository.materializePhysicalPackage(input)).rejects.toThrow("Injected split command failure");
+    } finally {
+      await pool.query(`DROP TRIGGER reject_test_split_command ON oms.channel_fulfillment_push_items;
+        DROP FUNCTION oms.reject_test_split_command();`);
+    }
+    expect(await snapshotAliasBackfillState()).toEqual(before);
+    const first = await fixture.repository.materializePhysicalPackage(input);
+    const replay = await fixture.repository.materializePhysicalPackage(input);
+    expect(replay.channelCommands).toEqual(first.channelCommands.map(command => ({ ...command, replayed: true })));
+    expect((await pool.query("SELECT id,quantity_requested FROM wms.shipment_request_items")).rows)
+      .toEqual([{ id: fixture.request.id, quantity_requested: 4 }]);
+  });
+
+  it.each(["warehouse", "shipping_order", "quantity"])("rechecks changed %s allocation authority after preview", async change => {
+    const fixture = await seedReservedSplitPackages(4);
+    const input = { ...await fixture.repository.resolveLegacyPhysicalPackage(fixture.candidates[0].representativeShipmentId),
+      source: "script:backfill-channel-fulfillment-authority", providerOrderIdentityPolicy: "stable_key_alias" as const, notifyCustomer: false };
+    await fixture.repository.validatePhysicalPackageIdentity(input);
+    if (change === "warehouse") {
+      const warehouse = (await pool.query<{ id: number }>("INSERT INTO warehouse.warehouses (code,name) VALUES ('OTHER','Other warehouse') RETURNING id")).rows[0];
+      await pool.query("UPDATE wms.shipment_requests SET warehouse_id=$2 WHERE id=$1", [fixture.request.shipment_request_id, warehouse.id]);
+    } else if (change === "shipping_order") {
+      await pool.query("DELETE FROM wms.shipping_engine_order_requests WHERE shipment_request_id=$1", [fixture.request.shipment_request_id]);
+      await pool.query("UPDATE wms.shipping_engine_orders SET shipment_request_id=NULL WHERE shipment_request_id=$1", [fixture.request.shipment_request_id]);
+    } else {
+      await pool.query("UPDATE wms.shipment_request_items SET quantity_cancelled=3 WHERE id=$1", [fixture.request.id]);
+    }
+    const before = await snapshotAliasBackfillState();
+    if (change === "quantity") {
+      // The original request is fully consumed, but three explicitly cancelled
+      // request units are unrequested again. Current paid/order authority still
+      // applies, so a new, exact request is legitimate rather than forced reuse.
+      const result = await fixture.repository.materializePhysicalPackage(input);
+      expect(result.channelCommands).toHaveLength(1);
+      expect((await pool.query("SELECT COUNT(*)::int AS count FROM wms.shipment_request_items")).rows).toEqual([{ count: 2 }]);
+    } else {
+      await expect(fixture.repository.validatePhysicalPackageIdentity(input)).rejects.toMatchObject({ code: "FULFILLMENT_AUTHORITY_EXCEEDED" });
+      await expect(fixture.repository.materializePhysicalPackage(input)).rejects.toMatchObject({ code: "FULFILLMENT_AUTHORITY_EXCEEDED" });
+      expect(await snapshotAliasBackfillState()).toEqual(before);
+    }
+  });
+
+  it("silently backfills the 44-package, 18-order, 19-line failure shape through real Shopify command execution", async () => {
+    const warehouseId = (await pool.query<{ id: number }>(`INSERT INTO warehouse.warehouses (code,name,shopify_location_id)
+      VALUES ('SPLIT-COHORT','Split cohort','640010') RETURNING id`)).rows[0].id;
+    // Production-shaped counts, not production identifiers or SKU-specific logic.
+    const quantities = [4, 2, 2, 2, 2, 2, 2, 2, 2, 2, 4, 2, 3, 20, 4, 2, 2, 3];
+    const fixtures: Array<Awaited<ReturnType<typeof seedReservedSplitPackages>>> = [];
+    for (const [index, quantity] of quantities.entries()) fixtures.push(await seedReservedSplitPackages(quantity, index, warehouseId));
+    const mixed = fixtures[1];
+    const extraLineId = "gid://shopify/LineItem/700199";
+    const extraLine = (await pool.query<{ id: string }>(`INSERT INTO oms.oms_order_lines (
+      order_id,external_line_item_id,fulfillment_provider,paid_quantity,authority_fulfillable_quantity)
+      VALUES ($1,$2,'shopify',2,2) RETURNING id`, [mixed.source.oms_order_id, extraLineId])).rows[0];
+    const extraItem = (await pool.query<{ id: number }>(`INSERT INTO wms.order_items
+      (order_id,oms_order_line_id,sku,quantity,fulfilled_quantity) VALUES ($1,$2,'EXTRA-MIXED-LINE',2,2) RETURNING id`,
+    [mixed.source.order_id, extraLine.id])).rows[0];
+    const extraProduct = (await pool.query<{ id: number }>(`INSERT INTO catalog.products (sku,name)
+      VALUES ('EXTRA-MIXED-LINE','Extra mixed line product') RETURNING id`)).rows[0];
+    const extraVariant = (await pool.query<{ id: number }>(`INSERT INTO catalog.product_variants (product_id,sku,name)
+      VALUES ($1,'EXTRA-MIXED-LINE','Extra mixed line variant') RETURNING id`, [extraProduct.id])).rows[0];
+    await pool.query(`INSERT INTO wms.outbound_shipment_items (shipment_id,order_item_id,product_variant_id,qty)
+      VALUES ($1,$2,$3,2)`, [mixed.candidates[0].representativeShipmentId, extraItem.id, extraVariant.id]);
+    const candidates = fixtures.flatMap(fixture => fixture.candidates);
+    expect(candidates).toHaveLength(44);
+    const repository = fixtures[0].repository;
+    const dependencies = { repository, loadCandidates: async () => candidates, log: vi.fn() };
+    const before = await snapshotAliasBackfillState();
+    const ledgerBefore = await loadLedgerCounts(pool);
+    await expect(runBackfill(parseFlags(["--dry-run", "--silent"]), dependencies))
+      .resolves.toMatchObject({ lineageValidated: 44, materialized: 0, reviewRequired: 0 });
+    expect(await snapshotAliasBackfillState()).toEqual(before);
+    const results = await Promise.all([0, 1].map(() => runBackfill(parseFlags(["--execute", "--silent"]), dependencies)));
+    for (const result of results) expect(result, JSON.stringify(result.failures)).toMatchObject({ materialized: 44, reviewRequired: 0 });
+    expect(results.reduce((total, result) => total + result.commandsCreated, 0)).toBe(44);
+    expect(results.reduce((total, result) => total + result.commandsReplayed, 0)).toBe(44);
+    expect((await pool.query("SELECT COUNT(*)::int AS count,SUM(quantity_requested)::int AS quantity FROM wms.shipment_request_items")).rows)
+      .toEqual([{ count: 19, quantity: 64 }]);
+    const commandRows = (await pool.query<{ id: string; next_attempt_at: Date; metadata: Record<string, unknown> }>(
+      "SELECT id,next_attempt_at,metadata FROM oms.channel_fulfillment_pushes WHERE push_status='pending' ORDER BY id")).rows;
+    expect(commandRows).toHaveLength(44);
+    expect(commandRows.every(command => command.metadata.notifyCustomer === false)).toBe(true);
+    const now = new Date(Math.max(...commandRows.map(command => command.next_attempt_at.getTime())) + 1000);
+    const commands = await repository.claimCommands({ commandIds: commandRows.map(command => Number(command.id)),
+      now, limit: 100, leaseDurationMs: 60000, leaseToken: "split-cohort" });
+    expect(commands).toHaveLength(44);
+    expect(commands.reduce((sum, command) => sum + command.items.reduce((n, item) => n + item.quantity, 0), 0)).toBe(46);
+
+    const created: Array<{ orderId: string; tracking: string; items: Array<{ lineId: string; quantity: number }>; id: string }> = [];
+    const clients = new Map(fixtures.map(fixture => {
+      const lines = [{ id: fixture.externalLineId, quantity: fixture.orderedQuantity, alreadyShipped: 1 },
+        ...(fixture === mixed ? [{ id: extraLineId, quantity: 2, alreadyShipped: 0 }] : [])];
+      const client: ShopifyAdminGraphQLClient = { request: async <T>(query: string, variables?: Record<string, unknown>): Promise<T> => {
+        const packages = created.filter(pkg => pkg.orderId === fixture.externalOrderId);
+        if (query.includes("exactFulfillmentPackageForOrder")) return { order: {
+          fulfillmentsCount: { count: packages.length + 1 }, fulfillments: [
+            { id: `gid://shopify/Fulfillment/original-${fixture.sourceId}`, status: "SUCCESS",
+              trackingInfo: [{ number: fixture.firstTracking }], fulfillmentLineItems: {
+                nodes: [{ quantity: 1, lineItem: { id: fixture.externalLineId } }], pageInfo: { hasNextPage: false } } },
+            ...packages.map(pkg => ({ id: pkg.id, status: "SUCCESS", trackingInfo: [{ number: pkg.tracking }],
+              fulfillmentLineItems: { nodes: pkg.items.map(item => ({ quantity: item.quantity, lineItem: { id: item.lineId } })),
+                pageInfo: { hasNextPage: false } } })),
+          ],
+        } } as T;
+        if (query.includes("fulfillmentOrders(first:")) return { order: { fulfillmentOrders: { edges: [{ node: {
+          id: `gid://shopify/FulfillmentOrder/${fixture.sourceId}`, status: "OPEN",
+          assignedLocation: { location: { id: "gid://shopify/Location/640010" } },
+          lineItems: { edges: lines.map(line => ({ node: {
+            id: line.id.replace("/LineItem/", "/FulfillmentOrderLineItem/"), lineItem: { id: line.id },
+            remainingQuantity: line.quantity - line.alreadyShipped - packages.flatMap(pkg => pkg.items)
+              .filter(item => item.lineId === line.id).reduce((sum, item) => sum + item.quantity, 0),
+          } })) },
+        } }] } } } as T;
+        if (query.includes("fulfillmentCreateV2")) {
+          const fulfillment = variables?.fulfillment as { notifyCustomer: boolean; trackingInfo: { number: string };
+            lineItemsByFulfillmentOrder: Array<{ fulfillmentOrderId: string; fulfillmentOrderLineItems: Array<{ id: string; quantity: number }> }> };
+          expect(fulfillment.notifyCustomer).toBe(false);
+          expect(fulfillment.lineItemsByFulfillmentOrder).toHaveLength(1);
+          expect(fulfillment.lineItemsByFulfillmentOrder[0].fulfillmentOrderId).toBe(`gid://shopify/FulfillmentOrder/${fixture.sourceId}`);
+          const items = fulfillment.lineItemsByFulfillmentOrder[0].fulfillmentOrderLineItems
+            .map(item => ({ lineId: item.id.replace("/FulfillmentOrderLineItem/", "/LineItem/"), quantity: item.quantity }));
+          const expected = commands.find(command => command.trackingNumber === fulfillment.trackingInfo.number);
+          expect(expected).toBeDefined();
+          expect(items).toEqual(expected!.items.map(item => ({ lineId: item.channelOrderLineId, quantity: item.quantity })));
+          const id = `gid://shopify/Fulfillment/${990000 + created.length}`;
+          created.push({ orderId: fixture.externalOrderId, tracking: fulfillment.trackingInfo.number, items, id });
+          return { fulfillmentCreateV2: { fulfillment: { id }, userErrors: [] } } as T;
+        }
+        throw new Error(`Unexpected Shopify operation: ${query.slice(0, 100)}`);
+      } };
+      return [fixture.source.channel_id, { fixture, client }] as const;
+    }));
+    vi.stubEnv("SHOPIFY_FULFILLMENT_PUSH_ENABLED", "true");
+    try {
+      const executor = createCompatibilityChannelFulfillmentProviderExecutor(createFulfillmentPushService(getTestDb(), null, {
+        providerClients: { shopify: async channelId => {
+          const scoped = clients.get(channelId);
+          if (!scoped) throw new Error(`Unexpected channel ${channelId}`);
+          return { channelId, connectionId: channelId, externalAccountId: `fixture-${channelId}.myshopify.com`, client: scoped.client };
+        }, ebay: async () => { throw new Error("Unexpected eBay connection"); } },
+      }));
+      for (const command of commands) {
+        const result = await executor.execute(command);
+        expect(result.outcome).toBe("success");
+        await repository.completeAttempt({ commandId: command.id, leaseToken: command.leaseToken, startedAt: now, completedAt: now, ...result });
+      }
+      // A response lost after Shopify creation is recovered by exact tracking +
+      // line quantities; even provider-boundary replay cannot send another email.
+      await executor.execute(commands[0]);
+      expect(created).toHaveLength(44);
+    } finally { vi.unstubAllEnvs(); }
+    expect((await pool.query("SELECT COUNT(*)::int AS count FROM oms.channel_fulfillment_push_attempts WHERE outcome='success'")).rows)
+      .toEqual([{ count: 44 }]);
+    const after = await snapshotAliasBackfillState();
+    expect(after["wms.order_items"]).toEqual(before["wms.order_items"]);
+    expect(after["inventory.inventory_transactions"]).toEqual(before["inventory.inventory_transactions"]);
+    expect(await loadLedgerCounts(pool)).toEqual(ledgerBefore);
+  }, 60_000);
+
   it("silently backfills a split provider-order alias with a read-only preview, concurrent replay and durable attempt audit", async () => {
     const { repository, firstInput, secondInput, split } = await seedHistoricalSplitBackfill(2, "99002");
     const first = await repository.materializePhysicalPackage(firstInput);

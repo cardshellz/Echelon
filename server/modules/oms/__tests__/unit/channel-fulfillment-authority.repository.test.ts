@@ -18,6 +18,11 @@ const previewHeader = {
   legacy_shipment_id: 501, shipment_status: "shipped", persisted_shipping_provider: "shipstation",
   persisted_provider_order_id: "new-order", persisted_provider_order_key: "stable-work",
   persisted_physical_identity: "shipstation_shipment:9001", persisted_tracking_number: "1ZTEST", persisted_carrier: "ups",
+  wms_order_id: 20, shipment_purpose: "customer_fulfillment", legacy_shipment_item_id: 502,
+  shipment_item_purpose: "customer_fulfillment", order_item_id: 21, oms_order_id: 30, oms_order_line_id: 31,
+  sku: "TEST", channel_provider: "shopify", channel_order_line_id: "channel-line", quantity_shipped: 1,
+  max_authorized_quantity: 4, paid_quantity: 4, authority_fulfillable_quantity: 4,
+  cancelled_quantity: 0, refunded_quantity: 0, refund_cancel_quantity: 0, refund_other_quantity: 0,
 };
 const previewEngine = { id: 10, provider_order_id: "old-order", provider_order_key: "stable-work",
   incoming_provider_order_id_already_aliased: false };
@@ -26,6 +31,9 @@ function identityPreviewFixture(headers = [previewHeader], engines = [previewEng
   const execute = vi.fn(async (query: unknown) => {
     const text = render(query);
     if (text.includes("FROM wms.outbound_shipments AS shipment")) return { rows: headers };
+    if (text.includes("FROM wms.fulfillment_plans AS plan")
+      || text.includes("FROM wms.shipment_request_items AS item")
+      || text.includes("FROM wms.physical_shipment_items AS item")) return { rows: [] };
     if (text.includes("FROM wms.shipping_engine_orders AS engine")) return { rows: engines };
     throw new Error(`Unexpected identity preview query: ${text}`);
   });
@@ -43,7 +51,7 @@ describe("channel fulfillment authority repository", () => {
     const { repository, execute, transaction } = identityPreviewFixture();
     await expect(repository.validatePhysicalPackageIdentity(previewInput)).resolves.toBeUndefined();
     expect(transaction).toHaveBeenCalledWith(expect.any(Function), { isolationLevel: "repeatable read", accessMode: "read only" });
-    expect(execute).toHaveBeenCalledTimes(2);
+    expect(execute).toHaveBeenCalledTimes(5);
     for (const [query] of execute.mock.calls) expect(render(query)).not.toMatch(/\b(?:INSERT|UPDATE|DELETE|TRUNCATE)\b/i);
   });
 

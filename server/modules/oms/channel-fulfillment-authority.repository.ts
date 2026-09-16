@@ -22,6 +22,8 @@ import {
 } from "./channel-fulfillment-authority.policy";
 import { PROVIDER_ORDER_IDENTITY_POLICIES, resolveProviderOrderId } from "./shipping-engine-order-identity";
 import { resolveChannelFulfillmentNotifyCustomer } from "./channel-fulfillment-notification.policy";
+import { FulfillmentRequestAllocationError, type FulfillmentRequestAllocationDecision } from "./fulfillment-request-allocation.domain";
+import { readFulfillmentRequestAllocation } from "./fulfillment-request-allocation.repository";
 import {
   ChannelFulfillmentQuantityAuthorityError,
   deriveChannelFulfillmentQuantityAuthority,
@@ -1165,6 +1167,120 @@ async function acquireIdentityLocks(
   ].sort();
   for (const key of keys) {
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))`);
+  }
+}
+
+async function loadLegacyPackageRows(
+  tx: any,
+  input: ReturnType<typeof canonicalizeInput>,
+  lockForUpdate: boolean,
+): Promise<LegacyPackageRow[]> {
+  const idList = buildIdList(input.legacyWmsShipmentIds);
+  const contextRows = rowsOf<LegacyPackageRow>(await tx.execute(sql`
+    SELECT
+      shipment.id AS legacy_shipment_id,
+      shipment.order_id AS wms_order_id,
+      shipment.status::text AS shipment_status,
+      shipment.shipment_purpose,
+      COALESCE(NULLIF(BTRIM(shipment.shipping_engine), ''),
+        CASE WHEN shipment.shipstation_order_id IS NOT NULL THEN 'shipstation' END
+      ) AS persisted_shipping_provider,
+      COALESCE(NULLIF(BTRIM(shipment.engine_order_ref), ''), shipment.shipstation_order_id::text) AS persisted_provider_order_id,
+      NULLIF(BTRIM(shipment.shipstation_order_key), '') AS persisted_provider_order_key,
+      shipment.external_fulfillment_id AS persisted_physical_identity,
+      shipment.tracking_number AS persisted_tracking_number,
+      shipment.carrier AS persisted_carrier,
+      shipment.requires_review,
+      shipment.review_reason,
+      NULLIF(BTRIM(wms_order.oms_fulfillment_order_id), '') AS wms_oms_order_ref,
+      oms_order.id AS oms_order_id,
+      oms_order.external_order_id AS oms_external_order_id,
+      wms_order.warehouse_id,
+      wms_order.sort_rank AS priority_rank,
+      jsonb_build_object(
+        'name', wms_order.shipping_name,
+        'company', wms_order.shipping_company,
+        'address1', wms_order.shipping_address,
+        'address2', wms_order.shipping_address2,
+        'city', wms_order.shipping_city,
+        'state', wms_order.shipping_state,
+        'postalCode', wms_order.shipping_postal_code,
+        'country', wms_order.shipping_country
+      ) AS ship_to_snapshot,
+      shipment_item.id AS legacy_shipment_item_id,
+      shipment_item.shipment_item_purpose,
+      shipment_item.order_item_id,
+      shipment_item.replacement_for_order_item_id,
+      shipment_item.correction_for_shipment_item_id,
+      shipment_item.product_variant_id,
+      COALESCE(order_item.sku, replacement_item.sku, variant.sku) AS sku,
+      shipment_item.qty::int AS quantity_shipped,
+      order_item.oms_order_line_id,
+      channel.provider AS channel_provider,
+      oms_line.fulfillment_provider AS line_fulfillment_provider,
+      oms_line.external_line_item_id AS channel_order_line_id,
+      oms_order.status AS oms_order_status,
+      oms_order.financial_status AS oms_financial_status,
+      oms_line.paid_quantity::int AS paid_quantity,
+      oms_line.authority_fulfillable_quantity::int AS authority_fulfillable_quantity,
+      oms_line.cancelled_quantity::int AS cancelled_quantity,
+      oms_line.refunded_quantity::int AS refunded_quantity,
+      refund.refund_cancel_quantity,
+      refund.refund_other_quantity,
+      GREATEST(
+        COALESCE(oms_line.paid_quantity, 0),
+        COALESCE(authority.max_paid_quantity, 0)
+      )::int AS max_authorized_quantity
+    FROM wms.outbound_shipments AS shipment
+    JOIN wms.orders AS wms_order ON wms_order.id = shipment.order_id
+    LEFT JOIN wms.outbound_shipment_items AS shipment_item
+      ON shipment_item.shipment_id = shipment.id
+    LEFT JOIN wms.order_items AS order_item ON order_item.id = shipment_item.order_item_id
+    LEFT JOIN wms.order_items AS replacement_item
+      ON replacement_item.id = shipment_item.replacement_for_order_item_id
+    LEFT JOIN catalog.product_variants AS variant ON variant.id = shipment_item.product_variant_id
+    LEFT JOIN oms.oms_order_lines AS oms_line ON oms_line.id = order_item.oms_order_line_id
+    LEFT JOIN oms.oms_orders AS oms_order ON oms_order.id = oms_line.order_id
+    LEFT JOIN channels.channels AS channel ON channel.id = oms_order.channel_id
+    LEFT JOIN LATERAL (
+      SELECT MAX(event.paid_quantity)::int AS max_paid_quantity
+      FROM oms.oms_order_line_authority_events AS event
+      WHERE event.order_line_id = oms_line.id
+    ) AS authority ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT
+        COALESCE(SUM(adjustment.quantity) FILTER (WHERE adjustment.restock_policy = 'cancel'), 0)::int AS refund_cancel_quantity,
+        COALESCE(SUM(adjustment.quantity) FILTER (WHERE adjustment.restock_policy IS DISTINCT FROM 'cancel'), 0)::int AS refund_other_quantity
+      FROM oms.order_line_adjustments AS adjustment
+      WHERE adjustment.order_line_id = oms_line.id
+        AND adjustment.order_id = oms_order.id
+        AND adjustment.adjustment_type = 'refund'
+    ) AS refund ON TRUE
+    WHERE shipment.id IN (${idList})
+    ORDER BY shipment.id, shipment_item.id
+    ${lockForUpdate ? sql`FOR UPDATE OF shipment` : sql``}
+  `));
+  return contextRows;
+}
+
+async function resolvePhysicalPackageRequest(
+  tx: any,
+  item: CanonicalCustomerItem,
+  input: ReturnType<typeof canonicalizeInput>,
+  shippingEngineOrderId: number | null,
+  lockForUpdate: boolean,
+): Promise<FulfillmentRequestAllocationDecision> {
+  try {
+    return await readFulfillmentRequestAllocation(tx, {
+      wmsOrderId: item.wmsOrderId, wmsOrderItemId: item.wmsOrderItemId,
+      omsOrderId: item.omsOrderId, omsOrderLineId: item.omsOrderLineId,
+      warehouseId: item.warehouseId, legacyWmsShipmentItemId: item.legacyWmsShipmentItemId,
+      shippingProvider: input.shippingProvider, providerPhysicalShipmentId: input.providerPhysicalShipmentId,
+      quantityShipped: item.quantityShipped, quantityPlanned: item.quantityPlanned,
+    }, shippingEngineOrderId, lockForUpdate);
+  } catch (error) {
+    if (!(error instanceof FulfillmentRequestAllocationError)) throw error;
+    throw new FulfillmentAuthorityError(error.code, error.message, { ...error.context });
   }
 }
 
@@ -3228,23 +3344,19 @@ export function createChannelFulfillmentAuthorityRepository(
       throw new FulfillmentAuthorityError("INVALID_INPUT", "Identity preview requires transactional database support");
     }
     // This is deliberately read-only, not a write-and-rollback simulation.
-    // Materialization repeats both gates with row locks because a preview can age.
+    // Materialization repeats identity AND request-allocation decisions with row
+    // locks. A header-only preview missed already-reserved split quantities.
     await db.transaction(async (tx: any) => {
-      const rows = rowsOf<LegacyPackageHeaderRow>(await tx.execute(sql`
-        SELECT shipment.id AS legacy_shipment_id, shipment.status::text AS shipment_status,
-          COALESCE(NULLIF(BTRIM(shipment.shipping_engine), ''),
-            CASE WHEN shipment.shipstation_order_id IS NOT NULL THEN 'shipstation' END) AS persisted_shipping_provider,
-          COALESCE(NULLIF(BTRIM(shipment.engine_order_ref), ''), shipment.shipstation_order_id::text) AS persisted_provider_order_id,
-          NULLIF(BTRIM(shipment.shipstation_order_key), '') AS persisted_provider_order_key,
-          shipment.external_fulfillment_id AS persisted_physical_identity,
-          shipment.tracking_number AS persisted_tracking_number,
-          shipment.carrier AS persisted_carrier
-        FROM wms.outbound_shipments AS shipment
-        WHERE shipment.id IN (${buildIdList(input.legacyWmsShipmentIds)})
-        ORDER BY shipment.id
-      `));
-      validateLegacyHeaders(rows, input);
-      validateShippingEngineOrderIdentity(await loadExistingShippingEngineOrders(tx, input, false), input);
+      const contextRows = await loadLegacyPackageRows(tx, input, false);
+      validateLegacyHeaders(contextRows, input);
+      const { existing } = validateShippingEngineOrderIdentity(await loadExistingShippingEngineOrders(tx, input, false), input);
+      const { customerItems, nonCustomerRows } = normalizeCustomerItems(contextRows);
+      if (customerItems.length === 0 && nonCustomerRows.length === 0) {
+        throw new FulfillmentAuthorityError("OMS_LINEAGE_MISSING", "Physical package has no item allocations");
+      }
+      for (const item of customerItems) {
+        await resolvePhysicalPackageRequest(tx, item, input, existing ? Number(existing.id) : null, false);
+      }
     }, { isolationLevel: "repeatable read", accessMode: "read only" });
   }
 
@@ -3939,91 +4051,7 @@ export function createChannelFulfillmentAuthorityRepository(
         input.providerPhysicalShipmentId,
       );
 
-      const idList = buildIdList(input.legacyWmsShipmentIds);
-      const contextRows = rowsOf<LegacyPackageRow>(await tx.execute(sql`
-        SELECT
-          shipment.id AS legacy_shipment_id,
-          shipment.order_id AS wms_order_id,
-          shipment.status::text AS shipment_status,
-          shipment.shipment_purpose,
-          COALESCE(NULLIF(BTRIM(shipment.shipping_engine), ''),
-            CASE WHEN shipment.shipstation_order_id IS NOT NULL THEN 'shipstation' END
-          ) AS persisted_shipping_provider,
-          COALESCE(NULLIF(BTRIM(shipment.engine_order_ref), ''), shipment.shipstation_order_id::text) AS persisted_provider_order_id,
-          NULLIF(BTRIM(shipment.shipstation_order_key), '') AS persisted_provider_order_key,
-          shipment.external_fulfillment_id AS persisted_physical_identity,
-          shipment.tracking_number AS persisted_tracking_number,
-          shipment.carrier AS persisted_carrier,
-          shipment.requires_review,
-          shipment.review_reason,
-          NULLIF(BTRIM(wms_order.oms_fulfillment_order_id), '') AS wms_oms_order_ref,
-          oms_order.id AS oms_order_id,
-          oms_order.external_order_id AS oms_external_order_id,
-          wms_order.warehouse_id,
-          wms_order.sort_rank AS priority_rank,
-          jsonb_build_object(
-            'name', wms_order.shipping_name,
-            'company', wms_order.shipping_company,
-            'address1', wms_order.shipping_address,
-            'address2', wms_order.shipping_address2,
-            'city', wms_order.shipping_city,
-            'state', wms_order.shipping_state,
-            'postalCode', wms_order.shipping_postal_code,
-            'country', wms_order.shipping_country
-          ) AS ship_to_snapshot,
-          shipment_item.id AS legacy_shipment_item_id,
-          shipment_item.shipment_item_purpose,
-          shipment_item.order_item_id,
-          shipment_item.replacement_for_order_item_id,
-          shipment_item.correction_for_shipment_item_id,
-          shipment_item.product_variant_id,
-          COALESCE(order_item.sku, replacement_item.sku, variant.sku) AS sku,
-          shipment_item.qty::int AS quantity_shipped,
-          order_item.oms_order_line_id,
-          channel.provider AS channel_provider,
-          oms_line.fulfillment_provider AS line_fulfillment_provider,
-          oms_line.external_line_item_id AS channel_order_line_id,
-          oms_order.status AS oms_order_status,
-          oms_order.financial_status AS oms_financial_status,
-          oms_line.paid_quantity::int AS paid_quantity,
-          oms_line.authority_fulfillable_quantity::int AS authority_fulfillable_quantity,
-          oms_line.cancelled_quantity::int AS cancelled_quantity,
-          oms_line.refunded_quantity::int AS refunded_quantity,
-          refund.refund_cancel_quantity,
-          refund.refund_other_quantity,
-          GREATEST(
-            COALESCE(oms_line.paid_quantity, 0),
-            COALESCE(authority.max_paid_quantity, 0)
-          )::int AS max_authorized_quantity
-        FROM wms.outbound_shipments AS shipment
-        JOIN wms.orders AS wms_order ON wms_order.id = shipment.order_id
-        LEFT JOIN wms.outbound_shipment_items AS shipment_item
-          ON shipment_item.shipment_id = shipment.id
-        LEFT JOIN wms.order_items AS order_item ON order_item.id = shipment_item.order_item_id
-        LEFT JOIN wms.order_items AS replacement_item
-          ON replacement_item.id = shipment_item.replacement_for_order_item_id
-        LEFT JOIN catalog.product_variants AS variant ON variant.id = shipment_item.product_variant_id
-        LEFT JOIN oms.oms_order_lines AS oms_line ON oms_line.id = order_item.oms_order_line_id
-        LEFT JOIN oms.oms_orders AS oms_order ON oms_order.id = oms_line.order_id
-        LEFT JOIN channels.channels AS channel ON channel.id = oms_order.channel_id
-        LEFT JOIN LATERAL (
-          SELECT MAX(event.paid_quantity)::int AS max_paid_quantity
-          FROM oms.oms_order_line_authority_events AS event
-          WHERE event.order_line_id = oms_line.id
-        ) AS authority ON TRUE
-        LEFT JOIN LATERAL (
-          SELECT
-            COALESCE(SUM(adjustment.quantity) FILTER (WHERE adjustment.restock_policy = 'cancel'), 0)::int AS refund_cancel_quantity,
-            COALESCE(SUM(adjustment.quantity) FILTER (WHERE adjustment.restock_policy IS DISTINCT FROM 'cancel'), 0)::int AS refund_other_quantity
-          FROM oms.order_line_adjustments AS adjustment
-          WHERE adjustment.order_line_id = oms_line.id
-            AND adjustment.order_id = oms_order.id
-            AND adjustment.adjustment_type = 'refund'
-        ) AS refund ON TRUE
-        WHERE shipment.id IN (${idList})
-        ORDER BY shipment.id, shipment_item.id
-        FOR UPDATE OF shipment
-      `));
+      const contextRows = await loadLegacyPackageRows(tx, input, true);
 
       validateLegacyHeaders(contextRows, input);
       const { customerItems, nonCustomerRows } = normalizeCustomerItems(contextRows);
@@ -4036,51 +4064,44 @@ export function createChannelFulfillmentAuthorityRepository(
       }
 
       const shippingEngineOrderId = await findOrCreateShippingEngineOrder(tx, input);
-      const stagedCustomerItems: Array<Omit<MaterializedCustomerItem, "physicalShipmentItemId">> = [];
-      for (const item of customerItems) {
+      const physicalShipmentId = await findOrCreatePhysicalShipment(tx, input, shippingEngineOrderId);
+      const materializedCustomerItems: MaterializedCustomerItem[] = [];
+      // A stable lock order also covers combined packages. The plan/line locks
+      // remain held through allocation, command insertion and commit.
+      const orderedItems = [...customerItems].sort((left, right) => left.wmsOrderId - right.wmsOrderId
+        || left.omsOrderLineId - right.omsOrderLineId || left.legacyWmsShipmentItemId - right.legacyWmsShipmentItemId);
+      for (const item of orderedItems) {
         const fulfillmentPlanId = await findOrCreatePlan(tx, item, input.source);
         const fulfillmentPlanLineId = await findOrCreatePlanLine(tx, item, fulfillmentPlanId);
-        const shipmentRequestId = await findOrCreateShipmentRequest(
+        const allocation = await resolvePhysicalPackageRequest(tx, item, input, shippingEngineOrderId, true);
+        const shipmentRequestId = allocation.kind === "reuse" ? allocation.shipmentRequestId : await findOrCreateShipmentRequest(
           tx,
           item,
           fulfillmentPlanId,
           input.source,
         );
-        const shipmentRequestItemId = await findOrCreateRequestItem(
+        const shipmentRequestItemId = allocation.kind === "reuse" ? allocation.shipmentRequestItemId : await findOrCreateRequestItem(
           tx,
           item,
           shipmentRequestId,
           fulfillmentPlanLineId,
         );
-        stagedCustomerItems.push({
+        const stagedItem = {
           ...item,
           fulfillmentPlanId,
           fulfillmentPlanLineId,
           shipmentRequestId,
           shipmentRequestItemId,
-        });
+        };
+        const physicalShipmentItemId = await findOrCreatePhysicalCustomerItem(tx, stagedItem, physicalShipmentId);
+        materializedCustomerItems.push({ ...stagedItem, physicalShipmentItemId });
       }
 
       await linkShippingEngineRequests(
         tx,
         shippingEngineOrderId,
-        stagedCustomerItems.map((item) => item.shipmentRequestId),
+        materializedCustomerItems.map((item) => item.shipmentRequestId),
       );
-      const physicalShipmentId = await findOrCreatePhysicalShipment(
-        tx,
-        input,
-        shippingEngineOrderId,
-      );
-
-      const materializedCustomerItems: MaterializedCustomerItem[] = [];
-      for (const item of stagedCustomerItems) {
-        const physicalShipmentItemId = await findOrCreatePhysicalCustomerItem(
-          tx,
-          item,
-          physicalShipmentId,
-        );
-        materializedCustomerItems.push({ ...item, physicalShipmentItemId });
-      }
       const nonCustomerItemCount = await materializeNonCustomerItems(
         tx,
         nonCustomerRows,
