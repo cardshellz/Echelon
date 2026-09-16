@@ -110,6 +110,8 @@ export const packageAllocationPlanAuthoritySnapshotSchema = z.discriminatedUnion
       authorityMode: z.literal("shadow_only"),
       selectionAuthority: z.literal("database_relationship_closure"),
       selectionCompleteness: z.literal("unproven_outside_persisted_relationships"),
+      excludedUnrelatedEvidenceKeys: z.array(z.string().regex(/^shipping-provider-label:[1-9]\d*$/))
+        .max(MAX_AUTHORITY_PACKAGES).optional(),
       relationshipSelectionEvidence:
         packageAllocationRelationshipSelectionEvidenceSnapshotSchema,
     }).strict(),

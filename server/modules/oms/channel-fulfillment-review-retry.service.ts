@@ -37,6 +37,7 @@ export function createChannelFulfillmentReviewRetryService(dependencies: {
         expectedStateFingerprint: input.expectedStateFingerprint!,
         reason: input.reason!,
         actor,
+        ...(input.notifyCustomer === false ? { notifyCustomer: false as const } : {}),
         requeuedAt: dependencies.clock.now(),
       });
     },

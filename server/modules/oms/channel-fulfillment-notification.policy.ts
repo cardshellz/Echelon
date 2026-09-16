@@ -1,3 +1,33 @@
+import { z } from "zod";
+
+export const channelFulfillmentNotificationSuppressionSchema = z.object({
+  requeueId: z.number().int().positive().safe(),
+  requestHash: z.string().regex(/^[0-9a-f]{64}$/),
+  operator: z.string().trim().min(1).max(200),
+  reason: z.string().trim().min(1).max(2_000),
+  notifyCustomer: z.literal(false),
+}).strict();
+export type ChannelFulfillmentNotificationSuppression = z.infer<typeof channelFulfillmentNotificationSuppressionSchema>;
+
+export function resolveReviewedChannelFulfillmentNotifyCustomer(input: {
+  readonly provider: string;
+  readonly source: unknown;
+  readonly notifyCustomer: unknown;
+  readonly requestHash: string;
+  readonly suppression?: ChannelFulfillmentNotificationSuppression;
+}): boolean {
+  if (input.suppression === undefined) {
+    return resolvePersistedChannelFulfillmentNotifyCustomer(input.provider, input.source, input.notifyCustomer);
+  }
+  const parsed = channelFulfillmentNotificationSuppressionSchema.safeParse(input.suppression);
+  if (!parsed.success || input.provider !== "shopify" || parsed.data.requestHash !== input.requestHash) {
+    throw new ChannelFulfillmentNotificationPolicyError();
+  }
+  // The command stays immutable; the attempt records the separately authorized
+  // suppression. Even an old notifying repair may now be retried without email.
+  return false;
+}
+
 export class ChannelFulfillmentNotificationPolicyError extends Error {
   readonly code = "INVALID_CHANNEL_FULFILLMENT_NOTIFICATION_POLICY";
   readonly context = Object.freeze({ field: "notifyCustomer" });

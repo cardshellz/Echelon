@@ -130,6 +130,7 @@ export interface OmsFlowRemediationInput {
   receiptId?: unknown;
   previewOnly?: unknown;
   expectedStateFingerprint?: unknown;
+  notifyCustomer?: unknown;
   reason?: unknown;
 }
 
@@ -1316,6 +1317,7 @@ export async function remediateOmsFlowIssue(
       previewOnly: input.previewOnly,
       expectedStateFingerprint: input.expectedStateFingerprint,
       reason: input.reason,
+      notifyCustomer: input.notifyCustomer,
     }, input.operator);
     return {
       code: input.code,

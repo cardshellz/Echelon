@@ -72,11 +72,13 @@ describe("reviewed fulfillment recovery through existing Ops route", () => {
     h.request.body = {
       ...h.request.body, previewOnly: false, expectedStateFingerprint: "a".repeat(64),
       reason: "Reviewed corrected adapter", operator: "user:1", actor: "user:1",
+      notifyCustomer: false,
     };
     await h.handler(h.request, h.response as unknown as Response);
     expect(mocks.remediate).toHaveBeenCalledWith({}, expect.objectContaining({
       operator: `user:${USER_ID}`, previewOnly: false, expectedStateFingerprint: "a".repeat(64),
       reason: "Reviewed corrected adapter",
+      notifyCustomer: false,
     }), expect.anything());
   });
 
