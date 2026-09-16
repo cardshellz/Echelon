@@ -774,11 +774,50 @@ export class DropshipWalletService {
     return session;
   }
 
+/**
+   * Records every auto-reload that does not charge.
+   *
+   * A skip is how the backstop fails, and it used to be invisible: the result
+   * carried a reason but nothing was written down, so a vendor whose card had
+   * expired — or whose auto-reload pointed at a rail that cannot be charged —
+   * simply stopped reloading, and the first anyone knew of it was the order
+   * cancelling on the marketplace.
+   *
+   * WARN for the reasons that mean the backstop cannot fire when it is needed:
+   * those want a human. INFO for the ones that are a correct no-op.
+   */
+  private skipAutoReload(
+    input: HandleDropshipAutoReloadInput,
+    skipReason: string,
+    currency: string,
+    fundingMethodId: number | null = null,
+  ): DropshipAutoReloadResult {
+    const event = {
+      code: "DROPSHIP_AUTO_RELOAD_SKIPPED",
+      message: "Dropship auto-reload did not charge.",
+      context: {
+        vendorId: input.vendorId,
+        fundingMethodId,
+        reason: input.reason,
+        intakeId: input.intakeId ?? null,
+        requiredBalanceCents: input.requiredBalanceCents ?? null,
+        skipReason,
+        currency,
+      },
+    };
+    if (AUTO_RELOAD_SKIPS_NEEDING_ATTENTION.has(skipReason)) {
+      this.deps.logger.warn(event);
+    } else {
+      this.deps.logger.info(event);
+    }
+    return skippedAutoReload(input, skipReason, currency, fundingMethodId);
+  }
+
   async handleAutoReload(input: unknown): Promise<DropshipAutoReloadResult> {
     const parsed = parseWalletInput(handleDropshipAutoReloadInputSchema, input);
     const provider = this.deps.fundingProvider;
     if (!provider) {
-      return skippedAutoReload(parsed, "funding_provider_not_configured", "USD");
+      return this.skipAutoReload(parsed, "funding_provider_not_configured", "USD");
     }
 
     const now = this.deps.clock.now();
@@ -789,26 +828,26 @@ export class DropshipWalletService {
     });
     const setting = wallet.autoReload;
     if (!setting?.enabled) {
-      return skippedAutoReload(parsed, "auto_reload_disabled", wallet.account.currency);
+      return this.skipAutoReload(parsed, "auto_reload_disabled", wallet.account.currency);
     }
     if (!setting.fundingMethodId) {
-      return skippedAutoReload(parsed, "funding_method_required", wallet.account.currency);
+      return this.skipAutoReload(parsed, "funding_method_required", wallet.account.currency);
     }
 
     const fundingMethod = wallet.fundingMethods.find((method) => method.fundingMethodId === setting.fundingMethodId);
     if (!fundingMethod) {
-      return skippedAutoReload(parsed, "funding_method_missing", wallet.account.currency, setting.fundingMethodId);
+      return this.skipAutoReload(parsed, "funding_method_missing", wallet.account.currency, setting.fundingMethodId);
     }
     if (fundingMethod.status !== "active") {
-      return skippedAutoReload(parsed, "funding_method_not_active", wallet.account.currency, fundingMethod.fundingMethodId);
+      return this.skipAutoReload(parsed, "funding_method_not_active", wallet.account.currency, fundingMethod.fundingMethodId);
     }
     // Card only, for the same reason as the configure-time guard: an ACH pull
     // cannot settle fast enough to save the order that triggered this reload.
     if (fundingMethod.rail !== "stripe_card") {
-      return skippedAutoReload(parsed, "funding_method_rail_unsupported", wallet.account.currency, fundingMethod.fundingMethodId);
+      return this.skipAutoReload(parsed, "funding_method_rail_unsupported", wallet.account.currency, fundingMethod.fundingMethodId);
     }
     if (!fundingMethod.providerCustomerId || !fundingMethod.providerPaymentMethodId) {
-      return skippedAutoReload(parsed, "funding_method_provider_identity_required", wallet.account.currency, fundingMethod.fundingMethodId);
+      return this.skipAutoReload(parsed, "funding_method_provider_identity_required", wallet.account.currency, fundingMethod.fundingMethodId);
     }
 
     const amount = calculateAutoReloadAmount({
@@ -819,7 +858,7 @@ export class DropshipWalletService {
       reason: parsed.reason,
     });
     if (amount.outcome === "skipped") {
-      return skippedAutoReload(parsed, amount.skipReason, wallet.account.currency, fundingMethod.fundingMethodId);
+      return this.skipAutoReload(parsed, amount.skipReason, wallet.account.currency, fundingMethod.fundingMethodId);
     }
 
     const paymentIntent = await provider.createStripeAutoReloadPaymentIntent({
@@ -1109,6 +1148,22 @@ function calculateAutoReloadAmount(input: {
   }
   return { outcome: "funding_created", amountCents: amountNeededCents };
 }
+
+/**
+ * Skip reasons that mean the wallet has no usable backstop. Each one leaves the
+ * next order that outruns the balance in payment hold, so they are anomalies a
+ * human should see, not routine outcomes. `auto_reload_disabled`,
+ * `balance_already_sufficient` and `amount_exceeds_max_single_reload` are
+ * deliberately absent: those are the policy working as configured.
+ */
+const AUTO_RELOAD_SKIPS_NEEDING_ATTENTION: ReadonlySet<string> = new Set([
+  "funding_provider_not_configured",
+  "funding_method_required",
+  "funding_method_missing",
+  "funding_method_not_active",
+  "funding_method_rail_unsupported",
+  "funding_method_provider_identity_required",
+]);
 
 function skippedAutoReload(
   input: HandleDropshipAutoReloadInput,

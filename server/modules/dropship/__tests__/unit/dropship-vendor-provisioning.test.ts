@@ -68,7 +68,7 @@ describe("dropship vendor provisioning status policy", () => {
 describe("PgDropshipVendorProvisioningRepository", () => {
   it("maps launch-ready store connection credential counts", async () => {
     const release = vi.fn();
-    const query = vi.fn(async () => ({
+    const query = vi.fn(async (_sql: string, _params?: unknown[]) => ({
       rows: [{
         active_count: "2",
         connected_count: "2",
@@ -101,7 +101,7 @@ describe("PgDropshipVendorProvisioningRepository", () => {
 
   it("maps Stripe-ready wallet funding and auto-reload readiness", async () => {
     const release = vi.fn();
-    const query = vi.fn(async () => ({
+    const query = vi.fn(async (_sql: string, _params?: unknown[]) => ({
       rows: [{
         available_balance_cents: "0",
         pending_balance_cents: "2500",
@@ -146,7 +146,7 @@ describe("PgDropshipVendorProvisioningRepository", () => {
 
   it("counts only currently active include catalog rules for onboarding gates", async () => {
     const release = vi.fn();
-    const query = vi.fn(async () => ({
+    const query = vi.fn(async (_sql: string, _params?: unknown[]) => ({
       rows: [{
         admin_exposure_rule_count: "1",
         vendor_selection_rule_count: "1",

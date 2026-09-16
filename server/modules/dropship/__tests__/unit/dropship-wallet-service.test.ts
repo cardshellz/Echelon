@@ -40,7 +40,7 @@ const now = new Date("2026-05-01T20:00:00.000Z");
 describe("DropshipWalletService", () => {
   let repository: FakeWalletRepository;
   let notificationSender: FakeNotificationSender;
-  let logs: DropshipLogEvent[];
+  let logs: Array<DropshipLogEvent & { level: "info" | "warn" | "error" }>;
   let service: DropshipWalletService;
 
   beforeEach(() => {
@@ -54,9 +54,9 @@ describe("DropshipWalletService", () => {
       notificationSender,
       clock: { now: () => now },
       logger: {
-        info: (event) => logs.push(event),
-        warn: (event) => logs.push(event),
-        error: (event) => logs.push(event),
+        info: (event) => logs.push({ ...event, level: "info" }),
+        warn: (event) => logs.push({ ...event, level: "warn" }),
+        error: (event) => logs.push({ ...event, level: "error" }),
       },
     });
   });
@@ -667,6 +667,30 @@ describe("DropshipWalletService", () => {
         intakeId: 456,
         amountCents: 6500,
       }),
+    });
+  });
+
+  it("warns when the backstop cannot fire, and stays at info for a correct no-op", async () => {
+    // Backstop broken: auto-reload points at a rail that cannot be charged.
+    repository.autoReload = makeAutoReloadSetting({ fundingMethodId: 100 });
+    await service.handleAutoReload({ vendorId: 10, reason: "minimum_balance", idempotencyKey: "skip-warn-1" });
+    expect(logs.at(-1)).toMatchObject({
+      level: "warn",
+      code: "DROPSHIP_AUTO_RELOAD_SKIPPED",
+      context: expect.objectContaining({
+        vendorId: 10,
+        fundingMethodId: 100,
+        skipReason: "funding_method_rail_unsupported",
+      }),
+    });
+
+    // Switched off on purpose: the policy working as configured, not an anomaly.
+    repository.autoReload = makeAutoReloadSetting({ fundingMethodId: 99, enabled: false });
+    await service.handleAutoReload({ vendorId: 10, reason: "minimum_balance", idempotencyKey: "skip-info-1" });
+    expect(logs.at(-1)).toMatchObject({
+      level: "info",
+      code: "DROPSHIP_AUTO_RELOAD_SKIPPED",
+      context: expect.objectContaining({ skipReason: "auto_reload_disabled" }),
     });
   });
 
