@@ -512,7 +512,7 @@ describe("StripeDropshipFundingProvider Stripe failures", () => {
       currency: "USD",
       providerCustomerId: "cus_existing",
       providerPaymentMethodId: "pm_1",
-      reason: "balance_below_minimum",
+      reason: "minimum_balance",
       intakeId: null,
       requiredBalanceCents: null,
       idempotencyKey: "auto-reload:10:1",

@@ -396,6 +396,104 @@ describe("DropshipOrderProcessingService", () => {
     expect(repository.failure).toBeNull();
   });
 
+  it("accepts a held order in the same pass once its shortfall is charged to the card", async () => {
+    const repository = new FakeProcessingRepository(makeClaim());
+    const quoteService = new FakeShippingQuoteService();
+    const acceptanceService = new ScriptedAcceptanceService([heldAcceptance(), acceptedAfterHold()]);
+    const walletAutoReload = new FakeWalletAutoReloadService(); // settled card credit
+    const fulfillmentSync = new FakeFulfillmentSync(6001);
+    const logs: DropshipLogEvent[] = [];
+    const service = new DropshipOrderProcessingService({
+      repository,
+      shippingQuote: quoteService,
+      orderAcceptance: acceptanceService,
+      walletAutoReload,
+      fulfillmentSync,
+      clock: { now: () => now },
+      logger: captureLogger(logs),
+    });
+    const input = { intakeId: 1, workerId: "worker-1", idempotencyKey: "process-intake-1" };
+
+    const result = await service.processIntake(input);
+
+    // Charged, re-accepted, shipped: no parked order for the next pass to find.
+    expect(result).toMatchObject({ outcome: "accepted", intakeId: 1, omsOrderId: 1001 });
+    expect(acceptanceService.inputs).toHaveLength(2);
+    expect(acceptanceService.inputs[1]).toMatchObject({
+      intakeId: 1,
+      idempotencyKey: deriveOrderProcessingIdempotencyKey("accept-after-reload", input),
+    });
+    // The two attempts must not share an idempotency key, or the second would replay the hold.
+    expect((acceptanceService.inputs[1] as { idempotencyKey: string }).idempotencyKey)
+      .not.toBe((acceptanceService.inputs[0] as { idempotencyKey: string }).idempotencyKey);
+    expect(fulfillmentSync.calls).toEqual([1001]);
+    expect(logs.some((entry) => entry.code === "DROPSHIP_ORDER_ACCEPTED_AFTER_RELOAD")).toBe(true);
+  });
+
+  it("leaves a held order held when the reload is only pending (ACH), since pending funds are not spendable", async () => {
+    const repository = new FakeProcessingRepository(makeClaim());
+    const acceptanceService = new ScriptedAcceptanceService([heldAcceptance()]);
+    const walletAutoReload = new FakeWalletAutoReloadService({
+      outcome: "funding_created",
+      vendorId: 10,
+      fundingMethodId: 100,
+      amountCents: 7500,
+      currency: "USD",
+      providerPaymentIntentId: "pi_ach_1",
+      fundingLedgerEntryId: 502,
+      fundingStatus: "pending",
+      skipReason: null,
+      idempotentReplay: false,
+    });
+    const fulfillmentSync = new FakeFulfillmentSync(6001);
+    const service = new DropshipOrderProcessingService({
+      repository,
+      shippingQuote: new FakeShippingQuoteService(),
+      orderAcceptance: acceptanceService,
+      walletAutoReload,
+      fulfillmentSync,
+      clock: { now: () => now },
+      logger: captureLogger([]),
+    });
+
+    const result = await service.processIntake({ intakeId: 1, workerId: "worker-1", idempotencyKey: "process-intake-1" });
+
+    expect(result.outcome).toBe("payment_hold");
+    expect(acceptanceService.inputs).toHaveLength(1);
+    expect(fulfillmentSync.calls).toEqual([]);
+  });
+
+  it("keeps the hold, and the credit, when re-acceptance fails after the card was charged", async () => {
+    const repository = new FakeProcessingRepository(makeClaim());
+    const acceptanceService = new ScriptedAcceptanceService([
+      heldAcceptance(),
+      new Error("inventory changed under us"),
+    ]);
+    const walletAutoReload = new FakeWalletAutoReloadService();
+    const fulfillmentSync = new FakeFulfillmentSync(6001);
+    const logs: DropshipLogEvent[] = [];
+    const service = new DropshipOrderProcessingService({
+      repository,
+      shippingQuote: new FakeShippingQuoteService(),
+      orderAcceptance: acceptanceService,
+      walletAutoReload,
+      fulfillmentSync,
+      clock: { now: () => now },
+      logger: captureLogger(logs),
+    });
+
+    const result = await service.processIntake({ intakeId: 1, workerId: "worker-1", idempotencyKey: "process-intake-1" });
+
+    // Not a processing failure: the wallet holds the credit and the intake
+    // stays re-acceptable, so the next pass finishes the job with money in place.
+    expect(result.outcome).toBe("payment_hold");
+    expect(repository.failure).toBeNull();
+    expect(fulfillmentSync.calls).toEqual([]);
+    expect(logs.find((entry) => entry.code === "DROPSHIP_ORDER_REACCEPTANCE_AFTER_RELOAD_FAILED")).toMatchObject({
+      context: expect.objectContaining({ intakeId: 1, reloadLedgerEntryId: 501, error: "inventory changed under us" }),
+    });
+  });
+
   it("does not fail payment-hold processing when auto-reload fails", async () => {
     const repository = new FakeProcessingRepository(makeClaim());
     const quoteService = new FakeShippingQuoteService();
@@ -723,6 +821,55 @@ class FakeAcceptanceService {
       idempotentReplay: false,
     };
   }
+}
+
+/** Answers acceptOrder calls in order, so a hold followed by an acceptance can be scripted. */
+class ScriptedAcceptanceService {
+  inputs: unknown[] = [];
+
+  constructor(private readonly script: Array<DropshipOrderAcceptanceResult | Error>) {}
+
+  async acceptOrder(input: unknown): Promise<DropshipOrderAcceptanceResult> {
+    this.inputs.push(input);
+    const next = this.script[this.inputs.length - 1];
+    if (!next) throw new Error(`acceptOrder called ${this.inputs.length} times; only ${this.script.length} scripted`);
+    if (next instanceof Error) throw next;
+    return next;
+  }
+}
+
+function heldAcceptance(): DropshipOrderAcceptanceResult {
+  return {
+    outcome: "payment_hold",
+    intakeId: 1,
+    vendorId: 10,
+    storeConnectionId: 22,
+    shippingQuoteSnapshotId: 33,
+    omsOrderId: null,
+    walletLedgerEntryId: null,
+    economicsSnapshotId: null,
+    totalDebitCents: 7500,
+    currency: "USD",
+    paymentHoldExpiresAt: new Date("2026-05-03T12:00:00.000Z"),
+    idempotentReplay: false,
+  };
+}
+
+function acceptedAfterHold(): DropshipOrderAcceptanceResult {
+  return {
+    outcome: "accepted",
+    intakeId: 1,
+    vendorId: 10,
+    storeConnectionId: 22,
+    shippingQuoteSnapshotId: 33,
+    omsOrderId: 1001,
+    walletLedgerEntryId: 2002,
+    economicsSnapshotId: 3001,
+    totalDebitCents: 7500,
+    currency: "USD",
+    paymentHoldExpiresAt: null,
+    idempotentReplay: false,
+  };
 }
 
 class FakeWalletAutoReloadService {

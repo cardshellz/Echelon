@@ -468,6 +468,8 @@ function statusForDropshipWalletError(code: string): number {
     || code === "DROPSHIP_FUNDING_METHOD_NOT_ACTIVE"
     || code === "DROPSHIP_AUTO_RELOAD_FUNDING_METHOD_REQUIRED"
     || code === "DROPSHIP_AUTO_RELOAD_FUNDING_METHOD_RAIL_UNSUPPORTED"
+    // Refusing to disable the backstop is a state conflict, not bad input.
+    || code === "DROPSHIP_AUTO_RELOAD_REQUIRED_WHILE_ACTIVE"
     || code === "DROPSHIP_FUNDING_METHOD_RAIL_MISMATCH"
     || code === "DROPSHIP_USDC_TRANSACTION_CONFLICT"
   ) {

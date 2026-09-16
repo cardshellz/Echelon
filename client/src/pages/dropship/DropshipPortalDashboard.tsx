@@ -763,8 +763,9 @@ function walletGateDetail(onboarding: DropshipOnboardingState): string {
   if (onboarding.wallet.walletReady) return "Wallet funding and auto-reload are ready.";
   if (!onboarding.wallet.autoReloadEnabled) return "Auto-reload is not enabled.";
   if (!onboarding.wallet.autoReloadFundingMethodReady) return "Auto-reload needs a ready funding method.";
-  if (!onboarding.wallet.hasStripeReadyFundingMethod && !onboarding.wallet.hasSpendableBalance) {
-    return "Add a Stripe card or ACH funding method.";
+  // A balance does not satisfy the gate: only a card can back auto-reload.
+  if (!onboarding.wallet.hasCardBackstop) {
+    return "Add a card as the backstop for auto-reload.";
   }
   return "Wallet setup needs attention.";
 }

@@ -30,6 +30,8 @@ jobs:
       - run: npm ci
       - name: Typecheck (tsc)
         run: npm run check
+      - name: Typecheck test files (ratchet)
+        run: npm run check:tests
       - name: Unit tests
         run: npm run test:unit
       - name: Procurement planning client contracts

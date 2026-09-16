@@ -5,6 +5,7 @@ import {
   CurrencyCodeSchema,
   PositiveCentsSchema,
 } from "../../../../shared/validation/currency";
+import type { DropshipVendorStatus } from "../../../../shared/schema/dropship.schema";
 import { DropshipError } from "../domain/errors";
 import {
   formatNotificationCurrency,
@@ -431,6 +432,8 @@ export interface DropshipWalletRepository {
     vendorId: number;
     provider: "stripe";
   }): Promise<string | null>;
+  /** Lifecycle status of the vendor, or null when the vendor does not exist. */
+  getVendorLifecycleStatus(vendorId: number): Promise<DropshipVendorStatus | null>;
   upsertFundingMethod(input: UpsertDropshipFundingMethodRepositoryInput): Promise<DropshipFundingMethodMutationResult>;
   creditConfirmedUsdcFunding(input: CreateDropshipConfirmedUsdcFundingRepositoryInput): Promise<DropshipConfirmedUsdcFundingResult>;
 }
@@ -554,6 +557,7 @@ export class DropshipWalletService {
   async configureAutoReload(input: unknown): Promise<DropshipAutoReloadSettingRecord> {
     const parsed = parseWalletInput(configureDropshipAutoReloadInputSchema, input);
     assertAutoReloadConfigIsUsable(parsed);
+    await this.assertAutoReloadMayBeDisabled(parsed);
     const updatedAt = this.deps.clock.now();
     await this.assertAutoReloadFundingMethodIsUsable(parsed, updatedAt);
     const setting = await this.deps.repository.configureAutoReload({
@@ -770,11 +774,50 @@ export class DropshipWalletService {
     return session;
   }
 
+/**
+   * Records every auto-reload that does not charge.
+   *
+   * A skip is how the backstop fails, and it used to be invisible: the result
+   * carried a reason but nothing was written down, so a vendor whose card had
+   * expired — or whose auto-reload pointed at a rail that cannot be charged —
+   * simply stopped reloading, and the first anyone knew of it was the order
+   * cancelling on the marketplace.
+   *
+   * WARN for the reasons that mean the backstop cannot fire when it is needed:
+   * those want a human. INFO for the ones that are a correct no-op.
+   */
+  private skipAutoReload(
+    input: HandleDropshipAutoReloadInput,
+    skipReason: string,
+    currency: string,
+    fundingMethodId: number | null = null,
+  ): DropshipAutoReloadResult {
+    const event = {
+      code: "DROPSHIP_AUTO_RELOAD_SKIPPED",
+      message: "Dropship auto-reload did not charge.",
+      context: {
+        vendorId: input.vendorId,
+        fundingMethodId,
+        reason: input.reason,
+        intakeId: input.intakeId ?? null,
+        requiredBalanceCents: input.requiredBalanceCents ?? null,
+        skipReason,
+        currency,
+      },
+    };
+    if (AUTO_RELOAD_SKIPS_NEEDING_ATTENTION.has(skipReason)) {
+      this.deps.logger.warn(event);
+    } else {
+      this.deps.logger.info(event);
+    }
+    return skippedAutoReload(input, skipReason, currency, fundingMethodId);
+  }
+
   async handleAutoReload(input: unknown): Promise<DropshipAutoReloadResult> {
     const parsed = parseWalletInput(handleDropshipAutoReloadInputSchema, input);
     const provider = this.deps.fundingProvider;
     if (!provider) {
-      return skippedAutoReload(parsed, "funding_provider_not_configured", "USD");
+      return this.skipAutoReload(parsed, "funding_provider_not_configured", "USD");
     }
 
     const now = this.deps.clock.now();
@@ -785,24 +828,36 @@ export class DropshipWalletService {
     });
     const setting = wallet.autoReload;
     if (!setting?.enabled) {
-      return skippedAutoReload(parsed, "auto_reload_disabled", wallet.account.currency);
+      return this.skipAutoReload(parsed, "auto_reload_disabled", wallet.account.currency);
     }
     if (!setting.fundingMethodId) {
-      return skippedAutoReload(parsed, "funding_method_required", wallet.account.currency);
+      return this.skipAutoReload(parsed, "funding_method_required", wallet.account.currency);
     }
 
     const fundingMethod = wallet.fundingMethods.find((method) => method.fundingMethodId === setting.fundingMethodId);
     if (!fundingMethod) {
-      return skippedAutoReload(parsed, "funding_method_missing", wallet.account.currency, setting.fundingMethodId);
+      return this.skipAutoReload(parsed, "funding_method_missing", wallet.account.currency, setting.fundingMethodId);
     }
     if (fundingMethod.status !== "active") {
-      return skippedAutoReload(parsed, "funding_method_not_active", wallet.account.currency, fundingMethod.fundingMethodId);
+      return this.skipAutoReload(parsed, "funding_method_not_active", wallet.account.currency, fundingMethod.fundingMethodId);
     }
-    if (fundingMethod.rail !== "stripe_card" && fundingMethod.rail !== "stripe_ach") {
-      return skippedAutoReload(parsed, "funding_method_rail_unsupported", wallet.account.currency, fundingMethod.fundingMethodId);
+    // A held order cannot wait days for ACH to settle, so the shortfall is
+    // always charged to a card; the configured method serves only the routine
+    // top-up. Routine reloads charge whatever the vendor configured.
+    const chargeMethod = parsed.reason === "payment_hold"
+      ? selectPaymentHoldCard(wallet.fundingMethods, fundingMethod)
+      : fundingMethod;
+    if (!chargeMethod) {
+      return this.skipAutoReload(parsed, "card_backstop_unavailable", wallet.account.currency, fundingMethod.fundingMethodId);
     }
-    if (!fundingMethod.providerCustomerId || !fundingMethod.providerPaymentMethodId) {
-      return skippedAutoReload(parsed, "funding_method_provider_identity_required", wallet.account.currency, fundingMethod.fundingMethodId);
+    // The rail check sits on the method being charged, not the configured one:
+    // a routine reload on USDC is refused here, and this is also where the
+    // type narrows to the two Stripe rails the provider accepts.
+    if (chargeMethod.rail !== "stripe_card" && chargeMethod.rail !== "stripe_ach") {
+      return this.skipAutoReload(parsed, "funding_method_rail_unsupported", wallet.account.currency, chargeMethod.fundingMethodId);
+    }
+    if (!chargeMethod.providerCustomerId || !chargeMethod.providerPaymentMethodId) {
+      return this.skipAutoReload(parsed, "funding_method_provider_identity_required", wallet.account.currency, chargeMethod.fundingMethodId);
     }
 
     const amount = calculateAutoReloadAmount({
@@ -813,17 +868,17 @@ export class DropshipWalletService {
       reason: parsed.reason,
     });
     if (amount.outcome === "skipped") {
-      return skippedAutoReload(parsed, amount.skipReason, wallet.account.currency, fundingMethod.fundingMethodId);
+      return this.skipAutoReload(parsed, amount.skipReason, wallet.account.currency, chargeMethod.fundingMethodId);
     }
 
     const paymentIntent = await provider.createStripeAutoReloadPaymentIntent({
       vendorId: parsed.vendorId,
-      fundingMethodId: fundingMethod.fundingMethodId,
-      rail: fundingMethod.rail,
+      fundingMethodId: chargeMethod.fundingMethodId,
+      rail: chargeMethod.rail,
       amountCents: amount.amountCents,
       currency: wallet.account.currency,
-      providerCustomerId: fundingMethod.providerCustomerId,
-      providerPaymentMethodId: fundingMethod.providerPaymentMethodId,
+      providerCustomerId: chargeMethod.providerCustomerId,
+      providerPaymentMethodId: chargeMethod.providerPaymentMethodId,
       reason: parsed.reason,
       intakeId: parsed.intakeId ?? null,
       requiredBalanceCents: parsed.requiredBalanceCents ?? null,
@@ -832,8 +887,8 @@ export class DropshipWalletService {
     });
     const funding = await this.creditFunding({
       vendorId: parsed.vendorId,
-      fundingMethodId: fundingMethod.fundingMethodId,
-      rail: fundingMethod.rail,
+      fundingMethodId: chargeMethod.fundingMethodId,
+      rail: chargeMethod.rail,
       status: paymentIntent.status,
       amountCents: paymentIntent.amountCents,
       currency: paymentIntent.currency,
@@ -855,7 +910,7 @@ export class DropshipWalletService {
       message: "Dropship wallet auto-reload funding was created.",
       context: {
         vendorId: parsed.vendorId,
-        fundingMethodId: fundingMethod.fundingMethodId,
+        fundingMethodId: chargeMethod.fundingMethodId,
         amountCents: paymentIntent.amountCents,
         status: paymentIntent.status,
         reason: parsed.reason,
@@ -869,7 +924,7 @@ export class DropshipWalletService {
     return {
       outcome: "funding_created",
       vendorId: parsed.vendorId,
-      fundingMethodId: fundingMethod.fundingMethodId,
+      fundingMethodId: chargeMethod.fundingMethodId,
       amountCents: paymentIntent.amountCents,
       currency: paymentIntent.currency,
       providerPaymentIntentId: paymentIntent.providerPaymentIntentId,
@@ -985,6 +1040,29 @@ export class DropshipWalletService {
     return this.deps.vendorProvisioning.provisionForMember(memberId);
   }
 
+  /**
+   * The card backstop is a launch requirement, so it cannot be withdrawn while
+   * the vendor is live. An active vendor with auto-reload off accumulates
+   * payment holds that cancel on the marketplace, which damages their seller
+   * standing before anyone notices. Vendors who are not live may configure
+   * freely.
+   */
+  private async assertAutoReloadMayBeDisabled(
+    input: ConfigureDropshipAutoReloadInput,
+  ): Promise<void> {
+    if (input.enabled) {
+      return;
+    }
+    const vendorStatus = await this.deps.repository.getVendorLifecycleStatus(input.vendorId);
+    if (vendorStatus === "active") {
+      throw new DropshipError(
+        "DROPSHIP_AUTO_RELOAD_REQUIRED_WHILE_ACTIVE",
+        "Auto-reload cannot be turned off while the vendor account is active.",
+        { vendorId: input.vendorId, vendorStatus },
+      );
+    }
+  }
+
   private async assertAutoReloadFundingMethodIsUsable(
     input: ConfigureDropshipAutoReloadInput,
     now: Date,
@@ -1018,6 +1096,12 @@ export class DropshipWalletService {
         },
       );
     }
+    // Card or ACH. Auto-reload's routine job (minimum_balance) is topping the
+    // wallet up for FUTURE orders once the balance dips under the trigger, and
+    // ACH is fine for that as long as the trigger leaves enough runway for it
+    // to settle. The one case ACH cannot serve — an order already waiting on a
+    // short balance — is charged to the card on file instead (see
+    // selectPaymentHoldCard), so the routine method is free to be ACH.
     if (fundingMethod.rail !== "stripe_card" && fundingMethod.rail !== "stripe_ach") {
       throw new DropshipError(
         "DROPSHIP_AUTO_RELOAD_FUNDING_METHOD_RAIL_UNSUPPORTED",
@@ -1077,6 +1161,49 @@ function calculateAutoReloadAmount(input: {
   return { outcome: "funding_created", amountCents: amountNeededCents };
 }
 
+/**
+ * Skip reasons that mean the wallet has no usable backstop. Each one leaves the
+ * next order that outruns the balance in payment hold, so they are anomalies a
+ * human should see, not routine outcomes. `auto_reload_disabled`,
+ * `balance_already_sufficient` and `amount_exceeds_max_single_reload` are
+ * deliberately absent: those are the policy working as configured.
+ */
+const AUTO_RELOAD_SKIPS_NEEDING_ATTENTION: ReadonlySet<string> = new Set([
+  "funding_provider_not_configured",
+  "card_backstop_unavailable",
+  "funding_method_required",
+  "funding_method_missing",
+  "funding_method_not_active",
+  "funding_method_rail_unsupported",
+  "funding_method_provider_identity_required",
+]);
+
+function isChargeableCard(method: DropshipFundingMethodRecord): boolean {
+  return method.rail === "stripe_card"
+    && method.status === "active"
+    && method.providerCustomerId !== null
+    && method.providerPaymentMethodId !== null;
+}
+
+/**
+ * The card charged when an order is held on a short balance.
+ *
+ * The configured auto-reload method serves routine top-ups and may be ACH,
+ * which settles in days. An order that is already waiting cannot wait that
+ * long, so the shortfall goes to a card: the configured method when it is one,
+ * otherwise the default card, otherwise any chargeable card. Null means there
+ * is no card to fall back to — the launch gate requires one, but a card can be
+ * detached or expire after activation.
+ */
+function selectPaymentHoldCard(
+  fundingMethods: readonly DropshipFundingMethodRecord[],
+  configured: DropshipFundingMethodRecord,
+): DropshipFundingMethodRecord | null {
+  if (isChargeableCard(configured)) return configured;
+  const cards = fundingMethods.filter(isChargeableCard);
+  return cards.find((method) => method.isDefault) ?? cards[0] ?? null;
+}
+
 function skippedAutoReload(
   input: HandleDropshipAutoReloadInput,
   skipReason: string,
@@ -1096,6 +1223,24 @@ function skippedAutoReload(
     idempotentReplay: false,
   };
 }
+
+/**
+ * Auto-reload floors.
+ *
+ * The TRIGGER floor is the one that matters operationally: auto-reload fires
+ * when the balance drops BELOW the trigger, so a trigger smaller than a single
+ * order's debit (product cost + shipping) leaves the balance sitting happily
+ * above the trigger while still failing to cover the next order. Auto-reload
+ * would be switched on and the order would still land in payment hold.
+ *
+ * The AMOUNT floor keeps Stripe's fixed per-charge fee from dominating: at
+ * 2.9% + $0.30, a $25 reload costs ~4.1% against ~3.0% at $250.
+ *
+ * Both are env-tunable so they can be adjusted without a deploy, matching the
+ * manual funding limits below.
+ */
+const DEFAULT_AUTO_RELOAD_MIN_TRIGGER_CENTS = 5_000;
+const DEFAULT_AUTO_RELOAD_MIN_AMOUNT_CENTS = 10_000;
 
 const DEFAULT_STRIPE_MIN_WALLET_FUNDING_CENTS = 1000;
 const DEFAULT_STRIPE_MAX_WALLET_FUNDING_CENTS = 500000;
@@ -1125,6 +1270,25 @@ function assertStripeWalletFundingAmount(amountCents: number): void {
   }
 }
 
+/**
+ * Resolves the auto-reload floors. `env` is injectable so the limits are
+ * deterministic under test rather than depending on ambient process state.
+ */
+export function resolveDropshipAutoReloadFloors(
+  env: NodeJS.ProcessEnv = process.env,
+): { minTriggerCents: number; minAmountCents: number } {
+  return {
+    minTriggerCents: parsePositiveEnvInteger(
+      env.DROPSHIP_AUTO_RELOAD_MIN_TRIGGER_CENTS,
+      DEFAULT_AUTO_RELOAD_MIN_TRIGGER_CENTS,
+    ),
+    minAmountCents: parsePositiveEnvInteger(
+      env.DROPSHIP_AUTO_RELOAD_MIN_AMOUNT_CENTS,
+      DEFAULT_AUTO_RELOAD_MIN_AMOUNT_CENTS,
+    ),
+  };
+}
+
 function parsePositiveEnvInteger(value: string | undefined, fallback: number): number {
   if (!value?.trim()) return fallback;
   const parsed = Number(value);
@@ -1144,19 +1308,40 @@ function assertAutoReloadConfigIsUsable(input: ConfigureDropshipAutoReloadInput)
     );
   }
 
-  if (input.minimumBalanceCents <= 0) {
+  const floors = resolveDropshipAutoReloadFloors();
+
+  if (input.minimumBalanceCents < floors.minTriggerCents) {
     throw new DropshipError(
-      "DROPSHIP_AUTO_RELOAD_INVALID_LIMITS",
-      "Auto-reload minimum balance must be greater than zero when enabled.",
-      { vendorId: input.vendorId, minimumBalanceCents: input.minimumBalanceCents },
+      "DROPSHIP_AUTO_RELOAD_TRIGGER_BELOW_MINIMUM",
+      "Auto-reload trigger balance is below the minimum allowed.",
+      {
+        vendorId: input.vendorId,
+        minimumBalanceCents: input.minimumBalanceCents,
+        floorCents: floors.minTriggerCents,
+      },
     );
   }
 
-  if (input.maxSingleReloadCents !== null && input.maxSingleReloadCents <= 0) {
+  // The card mandate is a standing authorization to charge without the vendor
+  // present, so the per-charge amount is always bounded. An unbounded reload is
+  // refused rather than defaulted.
+  if (input.maxSingleReloadCents === null) {
     throw new DropshipError(
-      "DROPSHIP_AUTO_RELOAD_INVALID_LIMITS",
-      "Auto-reload maximum single reload must be greater than zero when provided.",
-      { vendorId: input.vendorId, maxSingleReloadCents: input.maxSingleReloadCents },
+      "DROPSHIP_AUTO_RELOAD_AMOUNT_REQUIRED",
+      "Auto-reload requires a maximum single reload amount when enabled.",
+      { vendorId: input.vendorId },
+    );
+  }
+
+  if (input.maxSingleReloadCents < floors.minAmountCents) {
+    throw new DropshipError(
+      "DROPSHIP_AUTO_RELOAD_AMOUNT_BELOW_MINIMUM",
+      "Auto-reload amount is below the minimum allowed.",
+      {
+        vendorId: input.vendorId,
+        maxSingleReloadCents: input.maxSingleReloadCents,
+        floorCents: floors.minAmountCents,
+      },
     );
   }
 

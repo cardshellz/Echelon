@@ -17,9 +17,10 @@ vi.mock("../../../../routes/middleware", () => ({
 
 vi.mock("../../interfaces/http/dropship-auth.routes", () => ({
   requireDropshipAuth: (req: Request, _res: Response, next: NextFunction) => {
-    (req as Request & { session: { dropship: { memberId: string } } }).session = {
-      dropship: { memberId: "member-1" },
-    };
+    // These routes read only `session.dropship.memberId`. The rest of the real
+    // principal is irrelevant here, so the stub asserts the narrow shape rather
+    // than fabricating auth fields the assertions never look at.
+    req.session = { dropship: { memberId: "member-1" } } as unknown as Request["session"];
     next();
   },
   requireDropshipSensitiveActionProof: () => (_req: Request, _res: Response, next: NextFunction) => next(),
