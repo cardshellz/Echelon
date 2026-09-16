@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { drizzle } from "drizzle-orm/node-postgres";
 import type { Pool, PoolClient, QueryResult } from "pg";
 
+import * as schema from "@shared/schema";
 import { getVariantUomDefinition } from "@shared/catalog/variant-uom";
 import { insertProductVariantSchema } from "@shared/schema/catalog.schema";
 import { canonicalJson } from "@shared/utils/canonical-json";
@@ -514,8 +515,9 @@ export async function applyPieceVariantBackfill(input: {
     await client.query("BEGIN ISOLATION LEVEL SERIALIZABLE");
     // Drizzle over the pinned client: every statement it issues runs on this
     // connection, inside this transaction, so the audit writer's inserts share
-    // the variants' commit or rollback.
-    const auditWriter = drizzle(client);
+    // the variants' commit or rollback. Bound to the app schema so its type is
+    // exactly the one the audit owner's API is declared against.
+    const auditWriter = drizzle(client, { schema });
     await client.query("SELECT pg_advisory_xact_lock($1)", [
       PIECE_VARIANT_BACKFILL_ADVISORY_LOCK,
     ]);
