@@ -212,9 +212,7 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository {
             fundingMethodId: input.fundingMethodId ?? null,
             externalTransactionId: input.externalTransactionId ?? null,
             metadata: {
-              ...(input.metadata ?? {}),
-              rail: input.rail,
-              requestHash: input.requestHash,
+              ...fundingLedgerMetadata(input),
               settledFromPending: true,
             },
             settledAt: input.occurredAt,
@@ -278,11 +276,7 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository {
         idempotencyKey: input.idempotencyKey,
         fundingMethodId: input.fundingMethodId ?? null,
         externalTransactionId: input.externalTransactionId ?? null,
-        metadata: {
-          ...(input.metadata ?? {}),
-          rail: input.rail,
-          requestHash: input.requestHash,
-        },
+        metadata: fundingLedgerMetadata(input),
         createdAt: input.occurredAt,
         settledAt: input.status === "settled" ? input.occurredAt : null,
       });
@@ -641,6 +635,10 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository {
           minimumBalanceCents: setting.minimumBalanceCents,
           maxSingleReloadCents: setting.maxSingleReloadCents,
           paymentHoldTimeoutMinutes: setting.paymentHoldTimeoutMinutes,
+          // The fee rate the vendor agreed to is part of the mandate: it is
+          // recorded with the configuration, not looked up later.
+          cardFundingFeeBps: input.cardFundingFeeBps,
+          acknowledgedCardFeeBps: input.acknowledgedCardFeeBps ?? null,
         },
         createdAt: input.updatedAt,
       });
@@ -1613,6 +1611,26 @@ async function recordWalletAuditEvent(
       input.createdAt,
     ],
   );
+}
+
+/**
+ * Ledger metadata for a funding credit. The card fee breakdown rides along
+ * when present: the entry's amount is the net wallet credit, and the charge
+ * the vendor's card actually saw is reconstructable from the entry alone.
+ */
+function fundingLedgerMetadata(input: CreateDropshipWalletFundingLedgerInput): Record<string, unknown> {
+  return {
+    ...(input.metadata ?? {}),
+    rail: input.rail,
+    requestHash: input.requestHash,
+    ...(input.cardFee
+      ? {
+        cardFeeCents: input.cardFee.feeCents,
+        cardFeeBps: input.cardFee.feeBps,
+        chargedCents: input.cardFee.chargedCents,
+      }
+      : {}),
+  };
 }
 
 function assertLedgerReplayMatches(

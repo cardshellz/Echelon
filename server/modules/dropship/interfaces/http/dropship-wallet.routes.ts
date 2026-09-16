@@ -166,6 +166,7 @@ export function registerDropshipWalletRoutes(
           minimumBalanceCents: req.body?.minimumBalanceCents,
           maxSingleReloadCents: req.body?.maxSingleReloadCents ?? null,
           paymentHoldTimeoutMinutes: req.body?.paymentHoldTimeoutMinutes,
+          acknowledgedCardFeeBps: req.body?.acknowledgedCardFeeBps,
         });
         return res.json({ autoReload: setting });
       } catch (error) {
@@ -247,6 +248,8 @@ export function registerDropshipWalletRoutes(
             checkoutUrl: session.checkoutUrl,
             providerSessionId: session.providerSessionId,
             amountCents: session.amountCents,
+            cardFeeCents: session.cardFeeCents,
+            chargedCents: session.chargedCents,
             currency: session.currency,
             expiresAt: session.expiresAt,
           },
@@ -284,6 +287,7 @@ function serializeWalletOverview(wallet: Awaited<ReturnType<DropshipWalletServic
     autoReload: wallet.autoReload,
     fundingMethods: wallet.fundingMethods.map(serializeFundingMethod),
     recentLedger: wallet.recentLedger,
+    cardFundingFeeBps: wallet.cardFundingFeeBps,
   };
 }
 
@@ -470,6 +474,8 @@ function statusForDropshipWalletError(code: string): number {
     || code === "DROPSHIP_AUTO_RELOAD_FUNDING_METHOD_RAIL_UNSUPPORTED"
     // Refusing to disable the backstop is a state conflict, not bad input.
     || code === "DROPSHIP_AUTO_RELOAD_REQUIRED_WHILE_ACTIVE"
+    // The fee on screen is out of date: the vendor re-reads, then retries.
+    || code === "DROPSHIP_CARD_FUNDING_FEE_ACKNOWLEDGEMENT_STALE"
     || code === "DROPSHIP_FUNDING_METHOD_RAIL_MISMATCH"
     || code === "DROPSHIP_USDC_TRANSACTION_CONFLICT"
   ) {
@@ -479,6 +485,7 @@ function statusForDropshipWalletError(code: string): number {
     code === "DROPSHIP_FUNDING_PROVIDER_NOT_CONFIGURED"
     || code === "DROPSHIP_STRIPE_SECRET_NOT_CONFIGURED"
     || code === "DROPSHIP_STRIPE_WEBHOOK_SECRET_NOT_CONFIGURED"
+    || code === "DROPSHIP_CARD_FUNDING_FEE_MISCONFIGURED"
   ) {
     return 503;
   }

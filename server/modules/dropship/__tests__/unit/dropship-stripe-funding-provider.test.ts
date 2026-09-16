@@ -55,6 +55,7 @@ describe("StripeDropshipFundingProvider", () => {
       fundingMethodId: 99,
       rail: "stripe_card",
       amountCents: 25000,
+      cardFee: null,
       currency: "USD",
       customerEmail: "vendor@cardshellz.test",
       customerName: "Vendor",
@@ -112,6 +113,7 @@ describe("StripeDropshipFundingProvider", () => {
       fundingMethodId: 99,
       rail: "stripe_card",
       amountCents: 6500,
+      cardFee: null,
       currency: "USD",
       providerCustomerId: "cus_existing",
       providerPaymentMethodId: "pm_4242",
@@ -509,6 +511,7 @@ describe("StripeDropshipFundingProvider Stripe failures", () => {
       fundingMethodId: 99,
       rail: "stripe_card",
       amountCents: 6500,
+      cardFee: null,
       currency: "USD",
       providerCustomerId: "cus_existing",
       providerPaymentMethodId: "pm_1",
@@ -527,7 +530,180 @@ describe("StripeDropshipFundingProvider Stripe failures", () => {
       }),
     });
   });
+
+  it("puts the card fee on a manual top-up as its own line and records the breakdown on the payment intent", async () => {
+    const stripe = makeStripeDouble();
+    const provider = new StripeDropshipFundingProvider({ stripeClient: stripe, webhookSecret: "whsec_test" });
+
+    const session = await provider.createStripeWalletFundingSession({
+      vendorId: 10,
+      memberId: "member-1",
+      fundingMethodId: 99,
+      rail: "stripe_card",
+      amountCents: 10_000,
+      cardFee: { feeCents: 300, feeBps: 300 },
+      currency: "USD",
+      customerEmail: "vendor@cardshellz.test",
+      customerName: "Vendor",
+      existingProviderCustomerId: "cus_existing",
+      providerPaymentMethodId: "pm_4242",
+      successUrl: "https://cardshellz.io/wallet?wallet_funding=success",
+      cancelUrl: "https://cardshellz.io/wallet?wallet_funding=cancelled",
+      now: new Date("2026-05-03T12:00:00.000Z"),
+    });
+
+    expect(session).toMatchObject({ amountCents: 10_000, cardFeeCents: 300, chargedCents: 10_300 });
+    expect(stripe.checkout.sessions.create).toHaveBeenCalledWith(expect.objectContaining({
+      line_items: [
+        expect.objectContaining({ price_data: expect.objectContaining({ unit_amount: 10_000 }), quantity: 1 }),
+        expect.objectContaining({
+          price_data: expect.objectContaining({ unit_amount: 300, product_data: { name: "Card processing fee (3%)" } }),
+          quantity: 1,
+        }),
+      ],
+      payment_intent_data: expect.objectContaining({
+        metadata: expect.objectContaining({ wallet_credit_cents: "10000", card_fee_cents: "300", card_fee_bps: "300" }),
+      }),
+    }));
+  });
+
+  it("charges an auto-reload card the credit plus the fee and records the breakdown", async () => {
+    const stripe = makeStripeDouble();
+    stripe.paymentIntents.create.mockResolvedValueOnce({
+      id: "pi_auto_2",
+      status: "succeeded",
+      amount: 6695,
+      amount_received: 6695,
+      currency: "usd",
+      latest_charge: "ch_auto_2",
+      last_payment_error: null,
+    });
+    const provider = new StripeDropshipFundingProvider({ stripeClient: stripe, webhookSecret: "whsec_test" });
+
+    const payment = await provider.createStripeAutoReloadPaymentIntent({
+      vendorId: 10,
+      fundingMethodId: 99,
+      rail: "stripe_card",
+      amountCents: 6500,
+      cardFee: { feeCents: 195, feeBps: 300 },
+      currency: "USD",
+      providerCustomerId: "cus_existing",
+      providerPaymentMethodId: "pm_4242",
+      reason: "payment_hold",
+      intakeId: 456,
+      requiredBalanceCents: 7500,
+      idempotencyKey: "dropship-auto-reload:key-2",
+      now: new Date("2026-05-03T12:00:00.000Z"),
+    });
+
+    expect(payment).toMatchObject({ providerPaymentIntentId: "pi_auto_2", amountCents: 6695, status: "settled" });
+    expect(stripe.paymentIntents.create).toHaveBeenCalledWith(expect.objectContaining({
+      amount: 6695,
+      metadata: expect.objectContaining({ wallet_credit_cents: "6500", card_fee_cents: "195", card_fee_bps: "300" }),
+    }), { idempotencyKey: "dropship-auto-reload:key-2" });
+  });
+
+  it("credits the wallet net of the fee when a card funding webhook carries the breakdown", async () => {
+    const stripe = makeStripeDouble();
+    const provider = new StripeDropshipFundingProvider({ stripeClient: stripe, webhookSecret: "whsec_test" });
+    stripe.webhooks.constructEvent.mockReturnValueOnce(walletFundingSucceededEvent({
+      amount: 10_300,
+      metadata: { wallet_credit_cents: "10000", card_fee_cents: "300", card_fee_bps: "300" },
+    }));
+    stripe.paymentMethods.retrieve.mockResolvedValueOnce(visaPaymentMethod());
+
+    const event = await provider.parseWebhookEvent({ rawBody: Buffer.from("{}"), signature: "stripe-signature" });
+
+    expect(event).toMatchObject({
+      kind: "wallet_funding_recorded",
+      fundingCredit: {
+        rail: "stripe_card",
+        status: "settled",
+        amountCents: 10_000,
+        cardFee: { feeCents: 300, feeBps: 300, chargedCents: 10_300 },
+        referenceId: "pi_fee_1",
+        idempotencyKey: "stripe-funding:pi_fee_1",
+      },
+    });
+  });
+
+  it("credits the full charged amount for a card intent created before the fee existed", async () => {
+    const stripe = makeStripeDouble();
+    const provider = new StripeDropshipFundingProvider({ stripeClient: stripe, webhookSecret: "whsec_test" });
+    stripe.webhooks.constructEvent.mockReturnValueOnce(walletFundingSucceededEvent({ amount: 10_000, metadata: {} }));
+    stripe.paymentMethods.retrieve.mockResolvedValueOnce(visaPaymentMethod());
+
+    const event = await provider.parseWebhookEvent({ rawBody: Buffer.from("{}"), signature: "stripe-signature" });
+
+    expect(event).toMatchObject({ kind: "wallet_funding_recorded", fundingCredit: { amountCents: 10_000 } });
+    expect((event as { fundingCredit: { cardFee?: unknown } }).fundingCredit.cardFee).toBeUndefined();
+  });
+
+  it("refuses a fee breakdown that does not reconcile with the charged amount", async () => {
+    const stripe = makeStripeDouble();
+    const provider = new StripeDropshipFundingProvider({ stripeClient: stripe, webhookSecret: "whsec_test" });
+    stripe.webhooks.constructEvent.mockReturnValueOnce(walletFundingSucceededEvent({
+      amount: 10_300,
+      metadata: { wallet_credit_cents: "10000", card_fee_cents: "200", card_fee_bps: "300" },
+    }));
+    stripe.paymentMethods.retrieve.mockResolvedValueOnce(visaPaymentMethod());
+
+    await expect(provider.parseWebhookEvent({ rawBody: Buffer.from("{}"), signature: "stripe-signature" })).rejects.toMatchObject({
+      code: "DROPSHIP_STRIPE_WEBHOOK_METADATA_INVALID",
+      context: expect.objectContaining({ providerPaymentIntentId: "pi_fee_1", creditCents: 10_000, feeCents: 200, chargedCents: 10_300 }),
+    });
+  });
+
+  it("refuses a partial fee breakdown rather than guessing the missing part", async () => {
+    const stripe = makeStripeDouble();
+    const provider = new StripeDropshipFundingProvider({ stripeClient: stripe, webhookSecret: "whsec_test" });
+    stripe.webhooks.constructEvent.mockReturnValueOnce(walletFundingSucceededEvent({
+      amount: 10_300,
+      metadata: { wallet_credit_cents: "10000" },
+    }));
+    stripe.paymentMethods.retrieve.mockResolvedValueOnce(visaPaymentMethod());
+
+    await expect(provider.parseWebhookEvent({ rawBody: Buffer.from("{}"), signature: "stripe-signature" })).rejects.toMatchObject({
+      code: "DROPSHIP_STRIPE_WEBHOOK_METADATA_INVALID",
+      context: { field: "card_fee_cents" },
+    });
+  });
 });
+
+/** A succeeded card funding PaymentIntent event with the given amount and extra metadata. */
+function walletFundingSucceededEvent(input: { amount: number; metadata: Record<string, string> }) {
+  return {
+    id: "evt_fee_1",
+    type: "payment_intent.succeeded",
+    data: {
+      object: {
+        id: "pi_fee_1",
+        amount: input.amount,
+        amount_received: input.amount,
+        currency: "usd",
+        status: "succeeded",
+        customer: "cus_1",
+        payment_method: "pm_1",
+        latest_charge: "ch_fee_1",
+        metadata: {
+          type: "dropship_wallet_funding",
+          dropship_vendor_id: "10",
+          funding_method_id: "99",
+          requested_rail: "stripe_card",
+          ...input.metadata,
+        },
+      },
+    },
+  };
+}
+
+function visaPaymentMethod() {
+  return {
+    id: "pm_1",
+    type: "card",
+    card: { brand: "visa", last4: "4242", exp_month: 12, exp_year: 2030 },
+  };
+}
 
 function makeStripeDouble() {
   return {
