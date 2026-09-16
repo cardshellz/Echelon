@@ -32,10 +32,18 @@ import {
   type DropshipOnboardingStep,
   type DropshipOrderListItem,
   type DropshipOrderListResponse,
+  type DropshipPaymentHoldSummaryResponse,
   type DropshipSettingsResponse,
   type DropshipStoreConnectionSummary,
   type DropshipWalletResponse,
 } from "@/lib/dropship-ops-surface";
+import {
+  PAYMENT_HOLD_STATUS,
+  PAYMENT_HOLD_SUMMARY_PATH,
+  describeHeldOrder,
+  describePaymentHoldSummary,
+  type PaymentHoldNotice,
+} from "@/lib/dropship-payment-holds";
 import { DropshipPortalShell } from "./DropshipPortalShell";
 
 type DropshipWalletLedgerEntry = DropshipWalletResponse["wallet"]["recentLedger"][number];
@@ -80,6 +88,17 @@ export default function DropshipPortalDashboard() {
     queryFn: () => fetchJson<DropshipWalletResponse>(walletUrl),
     enabled: !!principal,
   });
+  const holdSummaryQuery = useQuery<DropshipPaymentHoldSummaryResponse>({
+    queryKey: [PAYMENT_HOLD_SUMMARY_PATH],
+    queryFn: () => fetchJson<DropshipPaymentHoldSummaryResponse>(PAYMENT_HOLD_SUMMARY_PATH),
+    enabled: !!principal,
+  });
+  // One clock reading per data load so every countdown on the page agrees.
+  const now = useMemo(() => new Date(), [holdSummaryQuery.data, ordersQuery.data]);
+  const holdNotice = holdSummaryQuery.data
+    ? describePaymentHoldSummary(holdSummaryQuery.data.summary, now)
+    : null;
+  const heldCount = holdSummaryQuery.data?.summary.heldCount ?? 0;
 
   const settings = settingsQuery.data?.settings;
   const onboarding = onboardingQuery.data;
@@ -109,9 +128,27 @@ export default function DropshipPortalDashboard() {
           </Alert>
         )}
 
+        {holdSummaryQuery.error && (
+          <Alert variant="destructive" className="mb-4" data-testid="dashboard-payment-hold-error">
+            <AlertCircle className="h-4 w-4" />
+            <AlertDescription>
+              {queryErrorMessage(holdSummaryQuery.error, "Unable to check for orders waiting on payment.")}
+            </AlertDescription>
+          </Alert>
+        )}
+
+        {holdNotice && (
+          <PaymentHoldPanel
+            notice={holdNotice}
+            onAddFunds={() => setLocation(dropshipPortalPath("/wallet"))}
+            onViewOrders={() => setLocation(`${dropshipPortalPath("/orders")}?status=${PAYMENT_HOLD_STATUS}`)}
+          />
+        )}
+
         <section className="grid gap-4 xl:grid-cols-[1.35fr_0.85fr]">
           <LaunchOverviewPanel
             completedStepCount={completedStepCount}
+            heldCount={heldCount}
             isLoading={loadingOverview}
             onboarding={onboarding}
             orderTotal={ordersQuery.data?.total ?? 0}
@@ -148,6 +185,7 @@ export default function DropshipPortalDashboard() {
           <RecentOrdersPanel
             error={ordersQuery.error}
             isLoading={ordersQuery.isLoading}
+            now={now}
             orders={ordersQuery.data?.items ?? []}
             total={ordersQuery.data?.total ?? 0}
             onViewAll={() => setLocation(dropshipPortalPath("/orders"))}
@@ -168,6 +206,7 @@ export default function DropshipPortalDashboard() {
 
 function LaunchOverviewPanel({
   completedStepCount,
+  heldCount,
   isLoading,
   launchReadyStoreConnections,
   onboarding,
@@ -178,6 +217,7 @@ function LaunchOverviewPanel({
   totalStepCount,
 }: {
   completedStepCount: number;
+  heldCount: number;
   isLoading: boolean;
   launchReadyStoreConnections: DropshipStoreConnectionSummary[];
   onboarding: DropshipOnboardingState | undefined;
@@ -242,8 +282,55 @@ function LaunchOverviewPanel({
           icon={<ClipboardList className="h-4 w-4" />}
           label="Orders"
           value={String(orderTotal)}
-          detail={orderTotal === 0 ? "No marketplace orders yet" : "Marketplace intake recorded"}
+          detail={heldCount > 0
+            ? `${heldCount} waiting on payment`
+            : orderTotal === 0 ? "No marketplace orders yet" : "Marketplace intake recorded"}
         />
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Held orders outrank every other card: money is the only thing between the
+ * vendor and a sale, and the marketplace clock is running.
+ */
+function PaymentHoldPanel({
+  notice,
+  onAddFunds,
+  onViewOrders,
+}: {
+  notice: PaymentHoldNotice;
+  onAddFunds: () => void;
+  onViewOrders: () => void;
+}) {
+  return (
+    <div
+      className={notice.needsFunds
+        ? "mb-4 rounded-md border border-amber-300 bg-amber-50 p-5 text-amber-950 shadow-sm"
+        : "mb-4 rounded-md border border-emerald-200 bg-emerald-50 p-5 text-emerald-900 shadow-sm"}
+      data-testid="dashboard-payment-hold-panel"
+    >
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+        <div className="min-w-0">
+          <h2 className="flex items-center gap-2 text-lg font-semibold" data-testid="dashboard-payment-hold-title">
+            <Wallet className="h-5 w-5" />
+            {notice.title}
+          </h2>
+          <p className="mt-1 text-sm" data-testid="dashboard-payment-hold-detail">{notice.needs} {notice.action}</p>
+          {notice.deadline && <p className="mt-1 text-sm">{notice.deadline}</p>}
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {notice.needsFunds && (
+            <Button type="button" className="h-9 bg-[#C060E0] hover:bg-[#a94bc9]" onClick={onAddFunds}>
+              Add funds
+            </Button>
+          )}
+          <Button type="button" variant="outline" className="h-9 gap-2" onClick={onViewOrders}>
+            View waiting orders
+            <ArrowRight className="h-4 w-4" />
+          </Button>
+        </div>
       </div>
     </div>
   );
@@ -441,12 +528,14 @@ function StoreHealthPanel({
 function RecentOrdersPanel({
   error,
   isLoading,
+  now,
   onViewAll,
   orders,
   total,
 }: {
   error: unknown;
   isLoading: boolean;
+  now: Date;
   onViewAll: () => void;
   orders: DropshipOrderListItem[];
   total: number;
@@ -483,7 +572,7 @@ function RecentOrdersPanel({
       ) : orders.length ? (
         <div className="mt-5 divide-y divide-zinc-200 rounded-md border border-zinc-200">
           {orders.map((order) => (
-            <RecentOrderRow key={order.intakeId} order={order} />
+            <RecentOrderRow key={order.intakeId} order={order} now={now} />
           ))}
         </div>
       ) : (
@@ -495,7 +584,8 @@ function RecentOrdersPanel({
   );
 }
 
-function RecentOrderRow({ order }: { order: DropshipOrderListItem }) {
+function RecentOrderRow({ order, now }: { order: DropshipOrderListItem; now: Date }) {
+  const heldDetail = describeHeldOrder(order, now);
   return (
     <div className="grid gap-3 p-4 sm:grid-cols-[1fr_auto] sm:items-center">
       <div className="min-w-0">
@@ -504,6 +594,7 @@ function RecentOrderRow({ order }: { order: DropshipOrderListItem }) {
           <Badge variant="outline" className={statusTone(order.status)}>
             {formatStatus(order.status)}
           </Badge>
+          {heldDetail && <span className="text-xs font-medium text-amber-800" data-testid="recent-order-hold-detail">{heldDetail}</span>}
         </div>
         <div className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-sm text-zinc-500">
           <span>{formatStatus(order.platform)} intake {order.intakeId}</span>

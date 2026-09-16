@@ -47,6 +47,21 @@ export function registerDropshipOrderRoutes(
     }
   });
 
+  // Registered ahead of "/api/dropship/orders/:intakeId": Express matches in
+  // registration order, and the parameter route would otherwise swallow this
+  // path and reject "payment-hold-summary" as a malformed intake id.
+  app.get("/api/dropship/orders/payment-hold-summary", requireDropshipAuth, async (req, res) => {
+    try {
+      const provisioned = await vendorProvisioningService.provisionForMember(req.session.dropship!.memberId);
+      const summary = await orderOpsService.getPaymentHoldSummary({
+        vendorId: provisioned.vendor.vendorId,
+      });
+      return res.json({ summary: serializePaymentHoldSummary(summary) });
+    } catch (error) {
+      return sendDropshipOrderError(res, error);
+    }
+  });
+
   app.get("/api/dropship/orders/:intakeId", requireDropshipAuth, async (req, res) => {
     try {
       const provisioned = await vendorProvisioningService.provisionForMember(req.session.dropship!.memberId);
@@ -137,6 +152,19 @@ function serializeOrderAcceptanceWorkflowResult(
   };
 }
 
+function serializePaymentHoldSummary(
+  summary: Awaited<ReturnType<DropshipOrderOpsService["getPaymentHoldSummary"]>>,
+) {
+  return {
+    heldCount: summary.heldCount,
+    totalDebitCents: summary.totalDebitCents,
+    availableBalanceCents: summary.availableBalanceCents,
+    shortfallCents: summary.shortfallCents,
+    earliestExpiresAt: summary.earliestExpiresAt?.toISOString() ?? null,
+    currency: summary.currency,
+  };
+}
+
 function serializeOrderRejectionResult(
   result: Awaited<ReturnType<DropshipOrderRejectionService["rejectOrder"]>>,
 ) {
@@ -189,6 +217,7 @@ function statusForDropshipOrderError(code: string): number {
   switch (code) {
     case "DROPSHIP_ORDER_OPS_LIST_INVALID_INPUT":
     case "DROPSHIP_ORDER_OPS_DETAIL_INVALID_INPUT":
+    case "DROPSHIP_ORDER_OPS_PAYMENT_HOLD_SUMMARY_INVALID_INPUT":
     case "DROPSHIP_ORDER_INVALID_REQUEST":
     case "DROPSHIP_ORDER_ACCEPTANCE_WORKFLOW_INVALID_INPUT":
     case "DROPSHIP_ORDER_REJECTION_INVALID_INPUT":

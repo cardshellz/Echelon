@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useLocation } from "wouter";
 import {
   AlertCircle,
   CheckCircle2,
@@ -64,12 +65,21 @@ import {
   type DropshipOrderListResponse,
   type DropshipOrderRejectResponse,
   type DropshipOrderTrackingLineItemSummary,
+  type DropshipPaymentHoldSummaryResponse,
 } from "@/lib/dropship-ops-surface";
 import {
+  dropshipPortalPath,
   isDropshipSensitiveProofActive,
   useDropshipAuth,
   type DropshipSensitiveAction,
 } from "@/lib/dropship-auth";
+import {
+  PAYMENT_HOLD_STATUS,
+  PAYMENT_HOLD_SUMMARY_PATH,
+  describeHeldOrder,
+  describePaymentHoldSummary,
+  ordersStatusFilterFromSearch,
+} from "@/lib/dropship-payment-holds";
 import { DropshipPortalShell } from "./DropshipPortalShell";
 
 type PendingOrderAction =
@@ -91,6 +101,7 @@ const rejectionStatuses = new Set(["received", "retrying", "failed", "payment_ho
 
 export default function DropshipPortalOrders() {
   const queryClient = useQueryClient();
+  const [, setLocation] = useLocation();
   const {
     principal,
     sensitiveProofs,
@@ -99,8 +110,13 @@ export default function DropshipPortalOrders() {
     verifyPasskeyStepUp,
   } = useDropshipAuth();
   const [search, setSearch] = useState("");
-  const [status, setStatus] = useState("all");
-  const [applied, setApplied] = useState({ search: "", status: "all" });
+  // A link from the dashboard can open the page already filtered to the
+  // orders that are waiting on payment.
+  const [status, setStatus] = useState(() => ordersStatusFilterFromSearch(window.location.search, statusOptions));
+  const [applied, setApplied] = useState(() => ({
+    search: "",
+    status: ordersStatusFilterFromSearch(window.location.search, statusOptions),
+  }));
   const [emailCodeSent, setEmailCodeSent] = useState(false);
   const [verificationCode, setVerificationCode] = useState("");
   const [pendingOrderAction, setPendingOrderAction] = useState<PendingOrderAction>(null);
@@ -125,6 +141,16 @@ export default function DropshipPortalOrders() {
     queryFn: () => fetchJson<DropshipOrderDetailResponse>(`/api/dropship/orders/${selectedIntakeId}`),
     enabled: selectedIntakeId !== null,
   });
+  const holdSummaryQuery = useQuery<DropshipPaymentHoldSummaryResponse>({
+    queryKey: [PAYMENT_HOLD_SUMMARY_PATH],
+    queryFn: () => fetchJson<DropshipPaymentHoldSummaryResponse>(PAYMENT_HOLD_SUMMARY_PATH),
+  });
+  // Countdowns are worked out against one clock reading per data load, so a
+  // render never shows two orders measured against different "now"s.
+  const now = useMemo(() => new Date(), [holdSummaryQuery.data, ordersQuery.data]);
+  const holdNotice = holdSummaryQuery.data
+    ? describePaymentHoldSummary(holdSummaryQuery.data.summary, now)
+    : null;
   const hasActiveProof = (action: DropshipSensitiveAction) => {
     return isDropshipSensitiveProofActive({
       principal,
@@ -156,6 +182,8 @@ export default function DropshipPortalOrders() {
         queryClient.invalidateQueries({ queryKey: ["/api/dropship/wallet?limit=50"] }),
         queryClient.invalidateQueries({ queryKey: ["/api/dropship/settings"] }),
         queryClient.invalidateQueries({ queryKey: ["/api/dropship/onboarding/state"] }),
+        // Accepting or rejecting a held order changes what the rest still need.
+        queryClient.invalidateQueries({ queryKey: [PAYMENT_HOLD_SUMMARY_PATH] }),
       ]);
       setEmailCodeSent(false);
       setVerificationCode("");
@@ -188,6 +216,8 @@ export default function DropshipPortalOrders() {
         queryClient.invalidateQueries({ queryKey: ["dropship-order-detail", order.intakeId] }),
         queryClient.invalidateQueries({ queryKey: ["/api/dropship/settings"] }),
         queryClient.invalidateQueries({ queryKey: ["/api/dropship/onboarding/state"] }),
+        // Accepting or rejecting a held order changes what the rest still need.
+        queryClient.invalidateQueries({ queryKey: [PAYMENT_HOLD_SUMMARY_PATH] }),
       ]);
       setEmailCodeSent(false);
       setVerificationCode("");
@@ -295,6 +325,57 @@ export default function DropshipPortalOrders() {
           </div>
         </div>
 
+        {holdNotice && (
+          <Alert
+            className={holdNotice.needsFunds
+              ? "mt-5 border-amber-300 bg-amber-50 text-amber-950"
+              : "mt-5 border-emerald-200 bg-emerald-50 text-emerald-900"}
+            data-testid="orders-payment-hold-banner"
+          >
+            <Wallet className="h-4 w-4" />
+            <AlertDescription>
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <div className="font-semibold" data-testid="orders-payment-hold-title">{holdNotice.title}</div>
+                  <div className="mt-1 text-sm" data-testid="orders-payment-hold-detail">
+                    {holdNotice.needs} {holdNotice.action}{holdNotice.deadline ? ` ${holdNotice.deadline}` : ""}
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {holdNotice.needsFunds && (
+                    <Button type="button" size="sm" className="h-9 bg-[#C060E0] hover:bg-[#a94bc9]" onClick={() => setLocation(dropshipPortalPath("/wallet"))}>
+                      Add funds
+                    </Button>
+                  )}
+                  {applied.status !== PAYMENT_HOLD_STATUS && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      className="h-9"
+                      onClick={() => {
+                        setStatus(PAYMENT_HOLD_STATUS);
+                        setApplied({ search, status: PAYMENT_HOLD_STATUS });
+                      }}
+                    >
+                      Show waiting orders
+                    </Button>
+                  )}
+                </div>
+              </div>
+            </AlertDescription>
+          </Alert>
+        )}
+
+        {holdSummaryQuery.error && (
+          <Alert variant="destructive" className="mt-5" data-testid="orders-payment-hold-error">
+            <AlertCircle className="h-4 w-4" />
+            <AlertDescription>
+              {queryErrorMessage(holdSummaryQuery.error, "Unable to check for orders waiting on payment.")}
+            </AlertDescription>
+          </Alert>
+        )}
+
         {ordersQuery.error && (
           <Alert variant="destructive" className="mt-5">
             <AlertCircle className="h-4 w-4" />
@@ -343,6 +424,7 @@ export default function DropshipPortalOrders() {
             <OrdersTable
               actingIntakeId={actingIntakeId}
               emailCodeSent={emailCodeSent}
+              now={now}
               orders={ordersQuery.data.items}
               pendingOrderAction={pendingOrderAction}
               total={ordersQuery.data.total}
@@ -442,6 +524,9 @@ function OrderDetailSheet({
               <DetailField label="Accepted" value={formatDateTime(order.acceptedAt)} />
               <DetailField label="Marketplace status" value={order.marketplaceStatus || "Not recorded"} />
               <DetailField label="Payment hold" value={formatDateTime(order.paymentHoldExpiresAt)} />
+              {order.paymentHold && (
+                <DetailField label="Amount needed" value={formatCents(order.paymentHold.totalDebitCents)} />
+              )}
             </section>
 
             <Separator />
@@ -632,6 +717,7 @@ function OrderDetailSheet({
 function OrdersTable({
   actingIntakeId,
   emailCodeSent,
+  now,
   onAccept,
   onReject,
   onView,
@@ -642,6 +728,7 @@ function OrdersTable({
 }: {
   actingIntakeId: number | null;
   emailCodeSent: boolean;
+  now: Date;
   onAccept: (order: DropshipOrderListItem) => void;
   onReject: (order: DropshipOrderListItem) => void;
   onView: (order: DropshipOrderListItem) => void;
@@ -671,6 +758,7 @@ function OrdersTable({
           {orders.map((order) => {
             const canAccept = canAcceptOrder(order);
             const canReject = canRejectOrder(order);
+            const heldDetail = describeHeldOrder(order, now);
             const actionDisabled = pendingOrderAction !== null
               || (emailCodeSent && verificationCode.length !== 6);
             return (
@@ -688,6 +776,7 @@ function OrdersTable({
                 </TableCell>
                 <TableCell>
                   <Badge variant="outline" className={statusTone(order.status)}>{formatStatus(order.status)}</Badge>
+                  {heldDetail && <div className="mt-1 text-xs font-medium text-amber-800" data-testid="order-hold-detail">{heldDetail}</div>}
                   {order.rejectionReason && <div className="mt-1 max-w-60 truncate text-xs text-zinc-500">{order.rejectionReason}</div>}
                 </TableCell>
                 <TableCell>{shipToLabel(order)}</TableCell>

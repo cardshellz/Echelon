@@ -1891,6 +1891,12 @@ export interface DropshipOrderListItem {
   externalOrderNumber: string | null;
   status: string;
   paymentHoldExpiresAt: string | null;
+  /** What the order is waiting for; present only while it is held. */
+  paymentHold: {
+    totalDebitCents: number;
+    currency: string;
+    expiresAt: string | null;
+  } | null;
   rejectionReason: string | null;
   cancellationStatus: string | null;
   omsOrderId: number | null;
@@ -2047,6 +2053,19 @@ export interface DropshipOrderListResponse {
 
 export interface DropshipOrderDetailResponse {
   order: DropshipOrderDetail;
+}
+
+/** GET /api/dropship/orders/payment-hold-summary */
+export interface DropshipPaymentHoldSummaryResponse {
+  summary: {
+    heldCount: number;
+    totalDebitCents: number;
+    availableBalanceCents: number;
+    /** The least the vendor must add so every held order can be accepted. */
+    shortfallCents: number;
+    earliestExpiresAt: string | null;
+    currency: string;
+  };
 }
 
 export interface DropshipOrderAcceptInput {

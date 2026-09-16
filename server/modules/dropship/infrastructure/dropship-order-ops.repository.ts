@@ -17,6 +17,8 @@ import type {
   DropshipOrderOpsShippingQuoteSnapshot,
   DropshipOrderOpsStatusSummary,
   DropshipOrderOpsTrackingLineItemSummary,
+  DropshipOrderOpsPaymentHold,
+  DropshipOrderOpsPaymentHoldAggregate,
   DropshipOrderOpsTrackingPushSummary,
   DropshipOrderOpsWalletLedgerEntry,
   DropshipOrderOpsWmsSyncActionTarget,
@@ -55,7 +57,21 @@ interface OpsIntakeRow {
   latest_event_severity: string | null;
   latest_event_created_at: Date | null;
   latest_event_payload: Record<string, unknown> | null;
+  /** What the latest payment hold on this intake needs; null unless the intake is held. */
+  hold_total_debit_cents: string | number | null;
+  wallet_currency: string | null;
   total_count: string | number;
+}
+
+interface PaymentHoldAggregateRow {
+  held_count: string | number;
+  total_debit_cents: string | number;
+  earliest_expires_at: Date | null;
+}
+
+interface WalletBalanceRow {
+  available_balance_cents: string | number;
+  currency: string;
 }
 
 interface StatusCountRow {
@@ -172,6 +188,8 @@ const MARKETPLACE_CANCELLATION_FAILED_STATUS = "marketplace_cancellation_failed"
 const MARKETPLACE_CANCELLATION_RETRYING_STATUS = "marketplace_cancellation_retrying";
 const MARKETPLACE_CANCELLATION_FAILURE_REASON_PREFIX = "Marketplace cancellation failed:";
 const PAYMENT_HOLD_EXPIRED_REASON = "Payment hold expired before wallet funds were available.";
+/** Wallet accounts default to USD (dropship_wallet_accounts.currency); a vendor without an account reads the same. */
+const DEFAULT_WALLET_CURRENCY = "USD";
 const ORDER_INTAKE_REJECTED_CANCELLATION_REASON = "Order intake was rejected before marketplace cancellation completed.";
 const EXCEPTION_ACTIONABLE_STATUSES = new Set<DropshipOrderIntakeStatus>([
   "received",
@@ -233,6 +251,44 @@ export class PgDropshipOrderOpsRepository implements DropshipOrderOpsRepository 
         statuses: input.statuses,
         summary: summary.rows.map(mapStatusCountRow),
         cancellationSummary: cancellationSummary.rows.map(mapCancellationStatusCountRow),
+      };
+    } finally {
+      client.release();
+    }
+  }
+
+  async getPaymentHoldSummary(
+    input: Parameters<DropshipOrderOpsRepository["getPaymentHoldSummary"]>[0],
+  ): Promise<DropshipOrderOpsPaymentHoldAggregate> {
+    const client = await this.dbPool.connect();
+    try {
+      const holds = await client.query<PaymentHoldAggregateRow>(
+        `SELECT
+           COUNT(oi.id) AS held_count,
+           COALESCE(SUM(hold.total_debit_cents), 0) AS total_debit_cents,
+           MIN(oi.payment_hold_expires_at) AS earliest_expires_at
+         FROM dropship.dropship_order_intake oi
+         ${opsIntakePaymentHoldLateralSql()}
+         WHERE oi.vendor_id = $1
+           AND oi.status = 'payment_hold'`,
+        [input.vendorId],
+      );
+      const wallet = await client.query<WalletBalanceRow>(
+        `SELECT available_balance_cents, currency
+         FROM dropship.dropship_wallet_accounts
+         WHERE vendor_id = $1`,
+        [input.vendorId],
+      );
+      const holdRow = holds.rows[0];
+      const walletRow = wallet.rows[0];
+      return {
+        heldCount: holdRow ? toSafeInteger(holdRow.held_count, "held_count") : 0,
+        totalDebitCents: holdRow ? toSafeInteger(holdRow.total_debit_cents, "total_debit_cents") : 0,
+        earliestExpiresAt: holdRow?.earliest_expires_at ?? null,
+        availableBalanceCents: walletRow
+          ? toSafeInteger(walletRow.available_balance_cents, "available_balance_cents")
+          : 0,
+        currency: walletRow?.currency ?? DEFAULT_WALLET_CURRENCY,
       };
     } finally {
       client.release();
@@ -672,8 +728,10 @@ function opsIntakeListSelectSql(): string {
       latest.severity AS latest_event_severity,
       latest.created_at AS latest_event_created_at,
       latest.payload AS latest_event_payload,
+      hold.total_debit_cents AS hold_total_debit_cents,
+      wa.currency AS wallet_currency,
       COUNT(*) OVER() AS total_count
-  ` + opsIntakeBaseFromSql();
+  ` + opsIntakeBaseFromSql() + opsIntakePaymentHoldJoinSql();
 }
 
 function opsIntakeDetailSelectSql(): string {
@@ -711,6 +769,8 @@ function opsIntakeDetailSelectSql(): string {
       latest.severity AS latest_event_severity,
       latest.created_at AS latest_event_created_at,
       latest.payload AS latest_event_payload,
+      hold.total_debit_cents AS hold_total_debit_cents,
+      wa.currency AS wallet_currency,
       1 AS total_count,
       econ.id AS economics_snapshot_id,
       econ.shipping_quote_snapshot_id AS economics_shipping_quote_snapshot_id,
@@ -747,6 +807,7 @@ function opsIntakeDetailSelectSql(): string {
       ledger.created_at AS wallet_ledger_created_at,
       ledger.settled_at AS wallet_ledger_settled_at
     ${opsIntakeBaseFromSql()}
+    ${opsIntakePaymentHoldJoinSql()}
     LEFT JOIN dropship.dropship_order_economics_snapshots econ
       ON econ.intake_id = oi.id
     LEFT JOIN LATERAL (
@@ -792,6 +853,39 @@ function opsIntakeBaseFromSql(): string {
       ORDER BY ae.created_at DESC, ae.id DESC
       LIMIT 1
     ) latest ON true
+  `;
+}
+
+/**
+ * What a held intake is waiting for. The amount is recorded on the hold's
+ * audit event by every path that places a hold (`markIntakePaymentHoldWithClient`),
+ * so it is read from the latest such event; the wallet join supplies the
+ * currency. Scoped to held intakes so the lateral costs nothing elsewhere.
+ */
+function opsIntakePaymentHoldLateralSql(): string {
+  return `
+    LEFT JOIN LATERAL (
+      SELECT
+        CASE
+          WHEN ae.payload->>'totalDebitCents' ~ '^[0-9]+$'
+          THEN (ae.payload->>'totalDebitCents')::bigint
+          ELSE NULL
+        END AS total_debit_cents
+      FROM dropship.dropship_audit_events ae
+      WHERE oi.status = 'payment_hold'
+        AND ae.entity_type = 'dropship_order_intake'
+        AND ae.entity_id = oi.id::text
+        AND ae.event_type = 'order_acceptance_payment_hold'
+      ORDER BY ae.created_at DESC, ae.id DESC
+      LIMIT 1
+    ) hold ON true
+  `;
+}
+
+function opsIntakePaymentHoldJoinSql(): string {
+  return `
+    LEFT JOIN dropship.dropship_wallet_accounts wa ON wa.vendor_id = oi.vendor_id
+    ${opsIntakePaymentHoldLateralSql()}
   `;
 }
 
@@ -973,6 +1067,7 @@ function mapOpsIntakeRow(row: OpsIntakeRow): DropshipOrderOpsIntakeListItem {
     externalOrderNumber: row.external_order_number,
     status: row.status,
     paymentHoldExpiresAt: row.payment_hold_expires_at,
+    paymentHold: mapPaymentHold(row),
     rejectionReason: row.rejection_reason,
     cancellationStatus: row.cancellation_status,
     omsOrderId: row.oms_order_id === null ? null : toSafeInteger(row.oms_order_id, "oms_order_id"),
@@ -990,6 +1085,22 @@ function mapOpsIntakeRow(row: OpsIntakeRow): DropshipOrderOpsIntakeListItem {
         payload: row.latest_event_payload ?? {},
       }
       : null,
+  };
+}
+
+/**
+ * Null unless the intake is held right now. A held intake whose hold event is
+ * missing its amount (never written by current code) stays visible as held,
+ * just without the figure.
+ */
+function mapPaymentHold(row: OpsIntakeRow): DropshipOrderOpsPaymentHold | null {
+  if (row.status !== "payment_hold") return null;
+  const totalDebitCents = row.hold_total_debit_cents ?? null;
+  if (totalDebitCents === null) return null;
+  return {
+    totalDebitCents: toSafeInteger(totalDebitCents, "hold_total_debit_cents"),
+    currency: row.wallet_currency ?? DEFAULT_WALLET_CURRENCY,
+    expiresAt: row.payment_hold_expires_at,
   };
 }
 
