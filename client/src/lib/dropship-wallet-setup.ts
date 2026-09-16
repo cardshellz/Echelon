@@ -11,6 +11,11 @@
  */
 
 import {
+  isValidCardFundingFeeBps,
+  quoteWalletFunding,
+  type WalletFundingQuote,
+} from "@shared/dropship/wallet-funding-fee";
+import {
   buildAutoReloadConfigInput,
   type DropshipAutoReloadConfigInput,
   type DropshipWalletResponse,
@@ -164,24 +169,49 @@ export function deriveWalletSetupState(wallet: DropshipWalletOverview): WalletSe
  * because it is an operational detail the setup step does not expose.
  * Validation (positive minimum, reload at least the minimum, method required)
  * is delegated to the shared builder so the rules cannot drift.
+ *
+ * The card fee rate the vendor was shown travels with the request: turning
+ * auto-reload on is agreeing to it, and the server refuses a rate that is no
+ * longer the one in force.
  */
 export function buildAutoReloadSetupInput(input: {
   fundingMethodId: number;
   minimumBalanceCents: number;
   maxSingleReloadCents: number;
+  cardFundingFeeBps: number;
   existing: DropshipWalletOverview["autoReload"];
 }): DropshipAutoReloadConfigInput {
   assertCents(input.minimumBalanceCents, "minimumBalanceCents");
   assertCents(input.maxSingleReloadCents, "maxSingleReloadCents");
+  if (!isValidCardFundingFeeBps(input.cardFundingFeeBps)) {
+    throw new Error("The card fee rate is missing or invalid. Reload the page and try again.");
+  }
   const holdMinutes = input.existing?.paymentHoldTimeoutMinutes
     ?? AUTO_RELOAD_DEFAULTS.paymentHoldTimeoutMinutes;
-  return buildAutoReloadConfigInput({
-    enabled: true,
-    fundingMethodId: String(input.fundingMethodId),
-    minimumBalance: centsToDollarInput(input.minimumBalanceCents),
-    maxSingleReload: centsToDollarInput(input.maxSingleReloadCents),
-    paymentHoldTimeoutMinutes: String(holdMinutes),
-  });
+  return {
+    ...buildAutoReloadConfigInput({
+      enabled: true,
+      fundingMethodId: String(input.fundingMethodId),
+      minimumBalance: centsToDollarInput(input.minimumBalanceCents),
+      maxSingleReload: centsToDollarInput(input.maxSingleReloadCents),
+      paymentHoldTimeoutMinutes: String(holdMinutes),
+    }),
+    acknowledgedCardFeeBps: input.cardFundingFeeBps,
+  };
+}
+
+/**
+ * What putting `creditCents` into the wallet through `method` costs. A card
+ * carries the fee on top; a bank account or USDC is charged exactly the
+ * credit. Same calculation the server charges with, so the number shown before
+ * confirming is the number charged.
+ */
+export function quoteFundingForMethod(
+  method: DropshipWalletFundingMethod,
+  creditCents: number,
+  cardFundingFeeBps: number,
+): WalletFundingQuote {
+  return quoteWalletFunding({ rail: method.rail, creditCents, cardFeeBps: cardFundingFeeBps });
 }
 
 /** Turn auto-reload off while keeping the saved amounts, so it can be re-enabled unchanged. */

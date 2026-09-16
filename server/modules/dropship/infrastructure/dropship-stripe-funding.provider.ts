@@ -1,4 +1,5 @@
 import Stripe from "stripe";
+import { formatFeeRate } from "../../../../shared/dropship/wallet-funding-fee";
 import { DropshipError } from "../domain/errors";
 import { toDropshipStripeError } from "./dropship-stripe-error";
 import type {
@@ -6,6 +7,8 @@ import type {
   DropshipStripeAutoReloadPaymentIntent,
   DropshipStripeFundingSetupRail,
   DropshipStripeWalletFundingSession,
+  DropshipWalletFundingCardFee,
+  DropshipWalletFundingCardFeeRate,
   DropshipWalletFundingProvider,
   HandleDropshipAutoReloadInput,
   NotifyDropshipWalletFundingFailedInput,
@@ -16,6 +19,14 @@ const STRIPE_API_VERSION = "2024-12-18.acacia";
 const STRIPE_FUNDING_SETUP_TYPE = "dropship_funding_setup";
 const STRIPE_WALLET_FUNDING_TYPE = "dropship_wallet_funding";
 const STRIPE_COLLECTION_CHARGE_TYPE = "dropship_collection_charge";
+/**
+ * Fee breakdown carried on every card PaymentIntent. The webhook re-derives
+ * the wallet credit from these rather than from the charged amount, so the
+ * fee never lands in the wallet.
+ */
+const METADATA_WALLET_CREDIT_CENTS = "wallet_credit_cents";
+const METADATA_CARD_FEE_CENTS = "card_fee_cents";
+const METADATA_CARD_FEE_BPS = "card_fee_bps";
 
 export type DropshipStripeFundingWebhookEvent =
   | {
@@ -115,6 +126,7 @@ export class StripeDropshipFundingProvider implements DropshipWalletFundingProvi
     fundingMethodId: number;
     rail: DropshipStripeFundingSetupRail;
     amountCents: number;
+    cardFee: DropshipWalletFundingCardFeeRate | null;
     currency: string;
     customerEmail: string | null;
     customerName: string;
@@ -140,23 +152,40 @@ export class StripeDropshipFundingProvider implements DropshipWalletFundingProvi
       requested_rail: input.rail,
       requested_provider_payment_method_id: input.providerPaymentMethodId ?? "",
       requested_at: input.now.toISOString(),
+      ...cardFeeMetadata(input.amountCents, input.cardFee),
     };
+    const currency = input.currency.toLowerCase();
+    const lineItems: Stripe.Checkout.SessionCreateParams.LineItem[] = [
+      {
+        price_data: {
+          currency,
+          product_data: {
+            name: "Card Shellz dropship wallet funding",
+          },
+          unit_amount: input.amountCents,
+        },
+        quantity: 1,
+      },
+    ];
+    // The fee is its own line so the hosted page and the receipt show it
+    // apart from the amount that lands in the wallet.
+    if (input.cardFee && input.cardFee.feeCents > 0) {
+      lineItems.push({
+        price_data: {
+          currency,
+          product_data: {
+            name: `Card processing fee (${formatFeeRate(input.cardFee.feeBps)})`,
+          },
+          unit_amount: input.cardFee.feeCents,
+        },
+        quantity: 1,
+      });
+    }
     const session = await this.callStripe("createStripeWalletFundingSession", () => stripe.checkout.sessions.create({
       mode: "payment",
       customer: customerId,
       payment_method_types: paymentMethodTypesForRail(input.rail),
-      line_items: [
-        {
-          price_data: {
-            currency: input.currency.toLowerCase(),
-            product_data: {
-              name: "Card Shellz dropship wallet funding",
-            },
-            unit_amount: input.amountCents,
-          },
-          quantity: 1,
-        },
-      ],
+      line_items: lineItems,
       success_url: input.successUrl,
       cancel_url: input.cancelUrl,
       metadata,
@@ -174,11 +203,14 @@ export class StripeDropshipFundingProvider implements DropshipWalletFundingProvi
       );
     }
 
+    const cardFeeCents = input.cardFee?.feeCents ?? 0;
     return {
       checkoutUrl: session.url,
       providerSessionId: session.id,
       providerCustomerId: customerId,
       amountCents: input.amountCents,
+      cardFeeCents,
+      chargedCents: input.amountCents + cardFeeCents,
       currency: input.currency,
       expiresAt: typeof session.expires_at === "number" ? new Date(session.expires_at * 1000) : null,
     };
@@ -189,6 +221,7 @@ export class StripeDropshipFundingProvider implements DropshipWalletFundingProvi
     fundingMethodId: number;
     rail: DropshipStripeFundingSetupRail;
     amountCents: number;
+    cardFee: DropshipWalletFundingCardFeeRate | null;
     currency: string;
     providerCustomerId: string;
     providerPaymentMethodId: string;
@@ -210,9 +243,10 @@ export class StripeDropshipFundingProvider implements DropshipWalletFundingProvi
       intake_id: input.intakeId ? String(input.intakeId) : "",
       required_balance_cents: input.requiredBalanceCents ? String(input.requiredBalanceCents) : "",
       requested_at: input.now.toISOString(),
+      ...cardFeeMetadata(input.amountCents, input.cardFee),
     };
     const paymentIntent = await this.callStripe("createStripeAutoReloadPaymentIntent", () => stripe.paymentIntents.create({
-      amount: input.amountCents,
+      amount: input.amountCents + (input.cardFee?.feeCents ?? 0),
       currency: input.currency.toLowerCase(),
       customer: input.providerCustomerId,
       payment_method: input.providerPaymentMethodId,
@@ -527,7 +561,9 @@ export class StripeDropshipFundingProvider implements DropshipWalletFundingProvi
     }
 
     const status = event.type === "payment_intent.succeeded" ? "settled" : "pending";
-    const amountCents = amountForPaymentIntent(paymentIntent, status);
+    const chargedCents = amountForPaymentIntent(paymentIntent, status);
+    const cardFee = cardFeeFromMetadata({ metadata, rail, paymentIntentId: paymentIntent.id, chargedCents });
+    const amountCents = cardFee ? chargedCents - cardFee.feeCents : chargedCents;
     const currency = paymentIntent.currency.toUpperCase();
     const fundingMethod: RegisterDropshipFundingMethodInput = {
       vendorId,
@@ -557,6 +593,7 @@ export class StripeDropshipFundingProvider implements DropshipWalletFundingProvi
         rail,
         status,
         amountCents,
+        cardFee: cardFee ?? undefined,
         currency,
         referenceType: "stripe_payment_intent",
         referenceId: paymentIntent.id,
@@ -703,6 +740,55 @@ function amountCentsForPaymentIntentFailure(paymentIntent: Stripe.PaymentIntent)
   );
 }
 
+function cardFeeMetadata(
+  creditCents: number,
+  cardFee: DropshipWalletFundingCardFeeRate | null,
+): Record<string, string> {
+  if (!cardFee) return {};
+  return {
+    [METADATA_WALLET_CREDIT_CENTS]: String(creditCents),
+    [METADATA_CARD_FEE_CENTS]: String(cardFee.feeCents),
+    [METADATA_CARD_FEE_BPS]: String(cardFee.feeBps),
+  };
+}
+
+/**
+ * The fee breakdown a PaymentIntent was created with, or null when it carries
+ * none: an ACH charge, or a card charge from before the fee existed, which
+ * credits the full amount as it always did. A breakdown that does not
+ * reconcile with the charged amount is refused rather than guessed at — the
+ * credit would be wrong either way, and a human has to look.
+ */
+function cardFeeFromMetadata(input: {
+  metadata: Record<string, string | undefined>;
+  rail: RegisterDropshipFundingMethodInput["rail"];
+  paymentIntentId: string;
+  chargedCents: number;
+}): DropshipWalletFundingCardFee | null {
+  const keys = [METADATA_WALLET_CREDIT_CENTS, METADATA_CARD_FEE_CENTS, METADATA_CARD_FEE_BPS];
+  if (keys.every((key) => input.metadata[key] === undefined || input.metadata[key] === "")) {
+    return null;
+  }
+  const creditCents = parseNonNegativeInteger(input.metadata[METADATA_WALLET_CREDIT_CENTS], METADATA_WALLET_CREDIT_CENTS);
+  const feeCents = parseNonNegativeInteger(input.metadata[METADATA_CARD_FEE_CENTS], METADATA_CARD_FEE_CENTS);
+  const feeBps = parseNonNegativeInteger(input.metadata[METADATA_CARD_FEE_BPS], METADATA_CARD_FEE_BPS);
+  if (input.rail !== "stripe_card" || creditCents + feeCents !== input.chargedCents) {
+    throw new DropshipError(
+      "DROPSHIP_STRIPE_WEBHOOK_METADATA_INVALID",
+      "Stripe wallet funding fee breakdown does not reconcile with the charged amount.",
+      {
+        providerPaymentIntentId: input.paymentIntentId,
+        rail: input.rail,
+        creditCents,
+        feeCents,
+        feeBps,
+        chargedCents: input.chargedCents,
+      },
+    );
+  }
+  return { feeCents, feeBps, chargedCents: input.chargedCents };
+}
+
 function railFromMetadata(value: unknown): RegisterDropshipFundingMethodInput["rail"] | null {
   if (value === "stripe_card" || value === "stripe_ach" || value === "usdc_base") {
     return value;
@@ -763,6 +849,25 @@ function idFromExpandable(value: string | { id?: string } | null | undefined): s
 function parseOptionalPositiveInteger(value: unknown, field: string): number | null {
   if (value === undefined || value === null || value === "") return null;
   return parsePositiveInteger(value, field);
+}
+
+function parseNonNegativeInteger(value: unknown, field: string): number {
+  if (typeof value !== "string" || !/^\d+$/.test(value)) {
+    throw new DropshipError(
+      "DROPSHIP_STRIPE_WEBHOOK_METADATA_INVALID",
+      "Stripe webhook metadata is missing a required amount.",
+      { field },
+    );
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new DropshipError(
+      "DROPSHIP_STRIPE_WEBHOOK_METADATA_INVALID",
+      "Stripe webhook metadata contains an invalid amount.",
+      { field, value },
+    );
+  }
+  return parsed;
 }
 
 function parsePositiveInteger(value: unknown, field: string): number {

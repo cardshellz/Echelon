@@ -7,6 +7,7 @@ import {
   deriveWalletSetupState,
   describeFundingMethod,
   parseStripeReturn,
+  quoteFundingForMethod,
   stripStripeReturn,
   type DropshipWalletFundingMethod,
   type DropshipWalletOverview,
@@ -34,6 +35,7 @@ function wallet(overrides: Partial<DropshipWalletOverview> = {}): DropshipWallet
     autoReload: null,
     fundingMethods: [],
     recentLedger: [],
+    cardFundingFeeBps: 300,
     ...overrides,
   };
 }
@@ -144,21 +146,42 @@ describe("deriveWalletSetupState", () => {
 });
 
 describe("buildAutoReloadSetupInput", () => {
-  it("enables auto-reload with the chosen presets and keeps the saved hold timeout", () => {
+  it("enables auto-reload with the chosen presets, keeps the saved hold timeout, and carries the fee rate agreed to", () => {
     expect(buildAutoReloadSetupInput({
-      fundingMethodId: 10, minimumBalanceCents: 2500, maxSingleReloadCents: 10_000, existing: autoReload({ paymentHoldTimeoutMinutes: 720 }),
-    })).toEqual({ enabled: true, fundingMethodId: 10, minimumBalanceCents: 2500, maxSingleReloadCents: 10_000, paymentHoldTimeoutMinutes: 720 });
+      fundingMethodId: 10, minimumBalanceCents: 2500, maxSingleReloadCents: 10_000, cardFundingFeeBps: 300, existing: autoReload({ paymentHoldTimeoutMinutes: 720 }),
+    })).toEqual({
+      enabled: true, fundingMethodId: 10, minimumBalanceCents: 2500, maxSingleReloadCents: 10_000, paymentHoldTimeoutMinutes: 720, acknowledgedCardFeeBps: 300,
+    });
   });
 
   it("falls back to the default hold timeout when nothing was saved before", () => {
-    expect(buildAutoReloadSetupInput({ fundingMethodId: 10, minimumBalanceCents: 5000, maxSingleReloadCents: 25_000, existing: null }).paymentHoldTimeoutMinutes)
+    expect(buildAutoReloadSetupInput({ fundingMethodId: 10, minimumBalanceCents: 5000, maxSingleReloadCents: 25_000, cardFundingFeeBps: 300, existing: null }).paymentHoldTimeoutMinutes)
       .toBe(AUTO_RELOAD_DEFAULTS.paymentHoldTimeoutMinutes);
   });
 
   it("refuses a reload smaller than the minimum, a zero minimum, or fractional cents", () => {
-    expect(() => buildAutoReloadSetupInput({ fundingMethodId: 10, minimumBalanceCents: 5000, maxSingleReloadCents: 2500, existing: null })).toThrow();
-    expect(() => buildAutoReloadSetupInput({ fundingMethodId: 10, minimumBalanceCents: 0, maxSingleReloadCents: 2500, existing: null })).toThrow();
-    expect(() => buildAutoReloadSetupInput({ fundingMethodId: 10, minimumBalanceCents: 12.5, maxSingleReloadCents: 2500, existing: null })).toThrow();
+    expect(() => buildAutoReloadSetupInput({ fundingMethodId: 10, minimumBalanceCents: 5000, maxSingleReloadCents: 2500, cardFundingFeeBps: 300, existing: null })).toThrow();
+    expect(() => buildAutoReloadSetupInput({ fundingMethodId: 10, minimumBalanceCents: 0, maxSingleReloadCents: 2500, cardFundingFeeBps: 300, existing: null })).toThrow();
+    expect(() => buildAutoReloadSetupInput({ fundingMethodId: 10, minimumBalanceCents: 12.5, maxSingleReloadCents: 2500, cardFundingFeeBps: 300, existing: null })).toThrow();
+  });
+
+  it("refuses to enrol without a valid fee rate, so the mandate can never omit the fee", () => {
+    for (const cardFundingFeeBps of [Number.NaN, -1, 2.5, 1_001]) {
+      expect(() => buildAutoReloadSetupInput({ fundingMethodId: 10, minimumBalanceCents: 5000, maxSingleReloadCents: 25_000, cardFundingFeeBps, existing: null }))
+        .toThrow("card fee rate");
+    }
+    expect(buildAutoReloadSetupInput({ fundingMethodId: 10, minimumBalanceCents: 5000, maxSingleReloadCents: 25_000, cardFundingFeeBps: 0, existing: null }).acknowledgedCardFeeBps).toBe(0);
+  });
+});
+
+describe("quoteFundingForMethod", () => {
+  it("adds the fee on top for a card and nothing for a bank account", () => {
+    expect(quoteFundingForMethod(method({ fundingMethodId: 10 }), 10_000, 300)).toEqual({
+      rail: "stripe_card", creditCents: 10_000, feeCents: 300, feeBps: 300, chargedCents: 10_300,
+    });
+    expect(quoteFundingForMethod(method({ fundingMethodId: 11, rail: "stripe_ach", displayLabel: "Chase ending in 6789" }), 10_000, 300)).toEqual({
+      rail: "stripe_ach", creditCents: 10_000, feeCents: 0, feeBps: 0, chargedCents: 10_000,
+    });
   });
 });
 

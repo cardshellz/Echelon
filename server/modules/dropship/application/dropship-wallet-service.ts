@@ -5,6 +5,13 @@ import {
   CurrencyCodeSchema,
   PositiveCentsSchema,
 } from "../../../../shared/validation/currency";
+import {
+  DEFAULT_CARD_FUNDING_FEE_BPS,
+  MAX_CARD_FUNDING_FEE_BPS,
+  isValidCardFundingFeeBps,
+  quoteWalletFunding,
+  type WalletFundingQuote,
+} from "../../../../shared/dropship/wallet-funding-fee";
 import type { DropshipVendorStatus } from "../../../../shared/schema/dropship.schema";
 import { DropshipError } from "../domain/errors";
 import {
@@ -73,6 +80,18 @@ export const dropshipWalletLedgerTypeSchema = z.enum([
 ]);
 export type DropshipWalletLedgerType = z.infer<typeof dropshipWalletLedgerTypeSchema>;
 
+/**
+ * The card fee charged on top of a wallet credit. `chargedCents` is what the
+ * card was charged; `amountCents` on the credit is what the wallet receives.
+ * Present only for card rails: ACH and USDC carry no fee.
+ */
+export const dropshipWalletFundingCardFeeSchema = z.object({
+  feeCents: CentsSchema,
+  feeBps: z.number().int().min(0).max(MAX_CARD_FUNDING_FEE_BPS),
+  chargedCents: PositiveCentsSchema,
+}).strict();
+export type DropshipWalletFundingCardFee = z.infer<typeof dropshipWalletFundingCardFeeSchema>;
+
 export const creditDropshipWalletFundingInputSchema = z.object({
   vendorId: positiveIdSchema,
   walletAccountId: positiveIdSchema.optional(),
@@ -85,8 +104,25 @@ export const creditDropshipWalletFundingInputSchema = z.object({
   referenceId: z.string().trim().min(1).max(255),
   externalTransactionId: z.string().trim().min(1).max(255).optional(),
   metadata: jsonObjectSchema.optional(),
+  cardFee: dropshipWalletFundingCardFeeSchema.optional(),
   idempotencyKey: idempotencyKeySchema,
-}).strict();
+}).strict().superRefine((input, context) => {
+  if (!input.cardFee) return;
+  if (input.rail !== "stripe_card") {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["cardFee"],
+      message: "A card fee can only accompany a card funding credit.",
+    });
+  }
+  if (input.cardFee.chargedCents !== input.amountCents + input.cardFee.feeCents) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["cardFee", "chargedCents"],
+      message: "The charged amount must equal the wallet credit plus the card fee.",
+    });
+  }
+});
 
 export const debitDropshipWalletForOrderInputSchema = z.object({
   vendorId: positiveIdSchema,
@@ -105,6 +141,12 @@ export const configureDropshipAutoReloadInputSchema = z.object({
   minimumBalanceCents: CentsSchema,
   maxSingleReloadCents: CentsSchema.nullable(),
   paymentHoldTimeoutMinutes: z.number().int().positive().max(60 * 24 * 30),
+  /**
+   * The card fee rate the vendor was shown when they agreed to auto-reload.
+   * Optional for older clients; when present it must match the rate in force,
+   * so a stale screen cannot enrol a vendor under a rate they never saw.
+   */
+  acknowledgedCardFeeBps: z.number().int().min(0).max(MAX_CARD_FUNDING_FEE_BPS).optional(),
 }).strict();
 
 export const createDropshipStripeFundingSetupSessionInputSchema = z.object({
@@ -317,6 +359,12 @@ export interface DropshipWalletOverview {
   recentLedger: DropshipWalletLedgerRecord[];
 }
 
+/** The overview as served to a vendor or admin: stored state plus the fee policy in force. */
+export interface DropshipWalletView extends DropshipWalletOverview {
+  /** Fee rate on card charges, in basis points. ACH and USDC carry none. */
+  cardFundingFeeBps: number;
+}
+
 export interface DropshipWalletMutationResult {
   account: DropshipWalletAccountRecord;
   ledgerEntry: DropshipWalletLedgerRecord;
@@ -343,7 +391,12 @@ export interface DropshipStripeWalletFundingSession {
   checkoutUrl: string;
   providerSessionId: string;
   providerCustomerId: string;
+  /** What the wallet will receive. */
   amountCents: number;
+  /** The card fee on top; zero for ACH. */
+  cardFeeCents: number;
+  /** What the payment method is charged: amount plus fee. */
+  chargedCents: number;
   currency: string;
   expiresAt: Date | null;
 }
@@ -360,7 +413,12 @@ export interface DropshipAutoReloadResult {
   outcome: "funding_created" | "skipped";
   vendorId: number;
   fundingMethodId: number | null;
+  /** What the wallet was credited. */
   amountCents: number;
+  /** The card fee on top; zero for ACH and for a skip. */
+  cardFeeCents: number;
+  /** What the payment method was charged: amount plus fee; zero for a skip. */
+  chargedCents: number;
   currency: string;
   providerPaymentIntentId: string | null;
   fundingLedgerEntryId: number | null;
@@ -386,7 +444,10 @@ export interface DropshipWalletFundingProvider {
     memberId: string;
     fundingMethodId: number;
     rail: DropshipStripeFundingSetupRail;
+    /** What the wallet will receive. */
     amountCents: number;
+    /** The fee charged on top of `amountCents`; null when the rail carries none. */
+    cardFee: DropshipWalletFundingCardFeeRate | null;
     currency: string;
     customerEmail: string | null;
     customerName: string;
@@ -400,7 +461,10 @@ export interface DropshipWalletFundingProvider {
     vendorId: number;
     fundingMethodId: number;
     rail: DropshipStripeFundingSetupRail;
+    /** What the wallet will receive. */
     amountCents: number;
+    /** The fee charged on top of `amountCents`; null when the rail carries none. */
+    cardFee: DropshipWalletFundingCardFeeRate | null;
     currency: string;
     providerCustomerId: string;
     providerPaymentMethodId: string;
@@ -451,6 +515,8 @@ export type CreateDropshipWalletOrderDebitInput = Omit<DebitDropshipWalletForOrd
 };
 
 export interface ConfigureDropshipAutoReloadRepositoryInput extends ConfigureDropshipAutoReloadInput {
+  /** The card fee rate in force when the vendor agreed, recorded in the audit trail. */
+  cardFundingFeeBps: number;
   updatedAt: Date;
 }
 
@@ -475,30 +541,29 @@ export class DropshipWalletService {
       notificationSender?: DropshipNotificationSender;
       clock: DropshipClock;
       logger: DropshipLogger;
+      /** Card fee rate override; the environment's rate when absent. Injected so tests are deterministic. */
+      cardFundingFeeBps?: number;
     },
   ) {}
 
   async getWalletForMember(
     memberId: string,
     input: { ledgerLimit?: number } = {},
-  ): Promise<DropshipWalletOverview> {
+  ): Promise<DropshipWalletView> {
     const vendor = await this.provisionVendor(memberId);
-    return this.deps.repository.getOverview({
-      vendorId: vendor.vendor.vendorId,
-      ledgerLimit: clampLedgerLimit(input.ledgerLimit),
-      now: this.deps.clock.now(),
-    });
+    return this.getWalletForVendor(vendor.vendor.vendorId, input);
   }
 
   async getWalletForVendor(
     vendorId: number,
     input: { ledgerLimit?: number } = {},
-  ): Promise<DropshipWalletOverview> {
-    return this.deps.repository.getOverview({
+  ): Promise<DropshipWalletView> {
+    const overview = await this.deps.repository.getOverview({
       vendorId,
       ledgerLimit: clampLedgerLimit(input.ledgerLimit),
       now: this.deps.clock.now(),
     });
+    return { ...overview, cardFundingFeeBps: this.cardFundingFeeBps() };
   }
 
   async creditFunding(input: unknown): Promise<DropshipWalletMutationResult> {
@@ -557,11 +622,14 @@ export class DropshipWalletService {
   async configureAutoReload(input: unknown): Promise<DropshipAutoReloadSettingRecord> {
     const parsed = parseWalletInput(configureDropshipAutoReloadInputSchema, input);
     assertAutoReloadConfigIsUsable(parsed);
+    const cardFundingFeeBps = this.cardFundingFeeBps();
+    assertCardFeeAcknowledgementIsCurrent(parsed, cardFundingFeeBps);
     await this.assertAutoReloadMayBeDisabled(parsed);
     const updatedAt = this.deps.clock.now();
     await this.assertAutoReloadFundingMethodIsUsable(parsed, updatedAt);
     const setting = await this.deps.repository.configureAutoReload({
       ...parsed,
+      cardFundingFeeBps,
       updatedAt,
     });
     this.deps.logger.info({
@@ -573,6 +641,8 @@ export class DropshipWalletService {
         fundingMethodId: parsed.fundingMethodId,
         minimumBalanceCents: parsed.minimumBalanceCents,
         maxSingleReloadCents: parsed.maxSingleReloadCents,
+        cardFundingFeeBps,
+        acknowledgedCardFeeBps: parsed.acknowledgedCardFeeBps ?? null,
       },
     });
     return setting;
@@ -744,13 +814,15 @@ export class DropshipWalletService {
       );
     }
 
+    const quote = this.quoteFunding(fundingMethod.rail, parsed.amountCents);
     const now = this.deps.clock.now();
     const session = await provider.createStripeWalletFundingSession({
       vendorId: vendor.vendorId,
       memberId,
       fundingMethodId: fundingMethod.fundingMethodId,
       rail: fundingMethod.rail,
-      amountCents: parsed.amountCents,
+      amountCents: quote.creditCents,
+      cardFee: cardFeeForProvider(quote),
       currency: wallet.account.currency,
       customerEmail: vendor.email,
       customerName: vendor.businessName ?? vendor.contactName ?? vendor.email ?? `Dropship vendor ${vendor.vendorId}`,
@@ -766,7 +838,10 @@ export class DropshipWalletService {
       context: {
         vendorId: vendor.vendorId,
         fundingMethodId: fundingMethod.fundingMethodId,
-        amountCents: parsed.amountCents,
+        amountCents: quote.creditCents,
+        cardFeeCents: quote.feeCents,
+        cardFeeBps: quote.feeBps,
+        chargedCents: quote.chargedCents,
         rail: fundingMethod.rail,
         providerSessionId: session.providerSessionId,
       },
@@ -871,11 +946,17 @@ export class DropshipWalletService {
       return this.skipAutoReload(parsed, amount.skipReason, wallet.account.currency, chargeMethod.fundingMethodId);
     }
 
+    // The reload amount is what the wallet receives; a card is charged that
+    // plus the fee. The wallet is credited from the quote, never from what
+    // Stripe echoes back, and the two are cross-checked so a charge that does
+    // not match the quote is refused rather than booked.
+    const quote = this.quoteFunding(chargeMethod.rail, amount.amountCents);
     const paymentIntent = await provider.createStripeAutoReloadPaymentIntent({
       vendorId: parsed.vendorId,
       fundingMethodId: chargeMethod.fundingMethodId,
       rail: chargeMethod.rail,
-      amountCents: amount.amountCents,
+      amountCents: quote.creditCents,
+      cardFee: cardFeeForProvider(quote),
       currency: wallet.account.currency,
       providerCustomerId: chargeMethod.providerCustomerId,
       providerPaymentMethodId: chargeMethod.providerPaymentMethodId,
@@ -885,12 +966,28 @@ export class DropshipWalletService {
       idempotencyKey: `dropship-auto-reload:${parsed.idempotencyKey}`,
       now,
     });
+    if (paymentIntent.amountCents !== quote.chargedCents) {
+      throw new DropshipError(
+        "DROPSHIP_STRIPE_AUTO_RELOAD_AMOUNT_MISMATCH",
+        "Stripe charged an amount that does not match the auto-reload quote.",
+        {
+          vendorId: parsed.vendorId,
+          fundingMethodId: chargeMethod.fundingMethodId,
+          providerPaymentIntentId: paymentIntent.providerPaymentIntentId,
+          chargedCents: paymentIntent.amountCents,
+          expectedChargedCents: quote.chargedCents,
+          creditCents: quote.creditCents,
+          cardFeeCents: quote.feeCents,
+        },
+      );
+    }
     const funding = await this.creditFunding({
       vendorId: parsed.vendorId,
       fundingMethodId: chargeMethod.fundingMethodId,
       rail: chargeMethod.rail,
       status: paymentIntent.status,
-      amountCents: paymentIntent.amountCents,
+      amountCents: quote.creditCents,
+      cardFee: cardFeeForCredit(quote),
       currency: paymentIntent.currency,
       referenceType: "stripe_payment_intent",
       referenceId: paymentIntent.providerPaymentIntentId,
@@ -911,7 +1008,10 @@ export class DropshipWalletService {
       context: {
         vendorId: parsed.vendorId,
         fundingMethodId: chargeMethod.fundingMethodId,
-        amountCents: paymentIntent.amountCents,
+        amountCents: quote.creditCents,
+        cardFeeCents: quote.feeCents,
+        cardFeeBps: quote.feeBps,
+        chargedCents: quote.chargedCents,
         status: paymentIntent.status,
         reason: parsed.reason,
         intakeId: parsed.intakeId ?? null,
@@ -925,7 +1025,9 @@ export class DropshipWalletService {
       outcome: "funding_created",
       vendorId: parsed.vendorId,
       fundingMethodId: chargeMethod.fundingMethodId,
-      amountCents: paymentIntent.amountCents,
+      amountCents: quote.creditCents,
+      cardFeeCents: quote.feeCents,
+      chargedCents: quote.chargedCents,
       currency: paymentIntent.currency,
       providerPaymentIntentId: paymentIntent.providerPaymentIntentId,
       fundingLedgerEntryId: funding.ledgerEntry.ledgerEntryId,
@@ -1034,6 +1136,14 @@ export class DropshipWalletService {
         registeredByMemberId: memberId,
       },
     });
+  }
+
+  private cardFundingFeeBps(): number {
+    return this.deps.cardFundingFeeBps ?? resolveDropshipCardFundingFeeBps();
+  }
+
+  private quoteFunding(rail: DropshipStripeFundingSetupRail, creditCents: number): WalletFundingQuote {
+    return quoteWalletFunding({ rail, creditCents, cardFeeBps: this.cardFundingFeeBps() });
   }
 
   private async provisionVendor(memberId: string): Promise<DropshipProvisionVendorRepositoryResult> {
@@ -1215,6 +1325,8 @@ function skippedAutoReload(
     vendorId: input.vendorId,
     fundingMethodId,
     amountCents: 0,
+    cardFeeCents: 0,
+    chargedCents: 0,
     currency,
     providerPaymentIntentId: null,
     fundingLedgerEntryId: null,
@@ -1222,6 +1334,62 @@ function skippedAutoReload(
     skipReason,
     idempotentReplay: false,
   };
+}
+
+/** What the provider needs to charge the fee: the rate and the amount, or nothing for a fee-free rail. */
+export type DropshipWalletFundingCardFeeRate = Pick<DropshipWalletFundingCardFee, "feeCents" | "feeBps">;
+
+function cardFeeForProvider(quote: WalletFundingQuote): DropshipWalletFundingCardFeeRate | null {
+  return quote.rail === "stripe_card" ? { feeCents: quote.feeCents, feeBps: quote.feeBps } : null;
+}
+
+/**
+ * The fee breakdown recorded with a card credit. Recorded even at a zero rate
+ * so the ledger shows the policy was applied, and absent for every other rail.
+ */
+function cardFeeForCredit(quote: WalletFundingQuote): DropshipWalletFundingCardFee | undefined {
+  return quote.rail === "stripe_card"
+    ? { feeCents: quote.feeCents, feeBps: quote.feeBps, chargedCents: quote.chargedCents }
+    : undefined;
+}
+
+/**
+ * The card fee rate in force. Unlike the auto-reload floors, a bad value here
+ * is refused rather than defaulted: a typo would otherwise be charged to
+ * vendors' cards silently. Undefined or blank means the launch default.
+ */
+export function resolveDropshipCardFundingFeeBps(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.DROPSHIP_CARD_FUNDING_FEE_BPS;
+  if (raw === undefined || !raw.trim()) return DEFAULT_CARD_FUNDING_FEE_BPS;
+  const parsed = /^\d+$/.test(raw.trim()) ? Number(raw.trim()) : Number.NaN;
+  if (!isValidCardFundingFeeBps(parsed)) {
+    throw new DropshipError(
+      "DROPSHIP_CARD_FUNDING_FEE_MISCONFIGURED",
+      "Dropship card funding fee is misconfigured.",
+      { env: "DROPSHIP_CARD_FUNDING_FEE_BPS", value: raw, maxBps: MAX_CARD_FUNDING_FEE_BPS },
+    );
+  }
+  return parsed;
+}
+
+/**
+ * A vendor who enables auto-reload agrees to the card fee rate on screen. A
+ * client that sends the rate it displayed is refused when that rate is no
+ * longer the one in force — the screen was stale — so the vendor re-reads
+ * before agreeing. Older clients send nothing and are not gated.
+ */
+function assertCardFeeAcknowledgementIsCurrent(
+  input: ConfigureDropshipAutoReloadInput,
+  cardFundingFeeBps: number,
+): void {
+  if (!input.enabled || input.acknowledgedCardFeeBps === undefined) return;
+  if (input.acknowledgedCardFeeBps !== cardFundingFeeBps) {
+    throw new DropshipError(
+      "DROPSHIP_CARD_FUNDING_FEE_ACKNOWLEDGEMENT_STALE",
+      "The card fee shown has changed. Reload the page and review it before turning on auto-reload.",
+      { vendorId: input.vendorId, acknowledgedCardFeeBps: input.acknowledgedCardFeeBps, cardFundingFeeBps },
+    );
+  }
 }
 
 /**
@@ -1371,6 +1539,11 @@ export function hashWalletFundingCreditRequest(input: CreditDropshipWalletFundin
     currency: input.currency,
     referenceType: input.referenceType,
     referenceId: input.referenceId,
+    // Only when present: credits recorded before the fee existed must keep
+    // replaying under the hash they were stored with.
+    ...(input.cardFee
+      ? { cardFee: { feeCents: input.cardFee.feeCents, feeBps: input.cardFee.feeBps, chargedCents: input.cardFee.chargedCents } }
+      : {}),
   });
 }
 

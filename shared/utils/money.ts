@@ -42,7 +42,7 @@ export function dollarsToCents(dollars: string | number): number {
  * integer, ties going away from zero (half-up). Pure integer math.
  * Throws on non-integer / negative inputs.
  */
-function roundHalfUp(numerator: number, denominator: number): number {
+export function roundHalfUp(numerator: number, denominator: number): number {
   if (!Number.isInteger(numerator) || !Number.isInteger(denominator)) {
     throw new RangeError("roundHalfUp requires integer inputs");
   }

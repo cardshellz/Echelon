@@ -30,7 +30,7 @@ function walletJson(state: StubState) {
   return { wallet: {
     account: { walletAccountId: 1, vendorId: 1, availableBalanceCents: state.balanceCents, pendingBalanceCents: 0, currency: "USD",
       status: "active", createdAt: "2026-09-15T00:00:00.000Z", updatedAt: "2026-09-15T00:00:00.000Z" },
-    autoReload: state.autoReload, fundingMethods, recentLedger: [] } };
+    autoReload: state.autoReload, fundingMethods, recentLedger: [], cardFundingFeeBps: 300 } };
 }
 
 async function setup(page: Page, initial: Partial<StubState> = {}, path = HARNESS_PATH) {
@@ -78,7 +78,10 @@ async function setup(page: Page, initial: Partial<StubState> = {}, path = HARNES
     if (url.pathname === "/api/dropship/wallet/funding/stripe/checkout-session" && method === "POST") {
       const body = route.request().postDataJSON() as Record<string, unknown>;
       state.fundingSessions.push(body);
-      return route.fulfill({ json: { fundingSession: { checkoutUrl: `${path}?wallet_funding=success`, providerSessionId: "cs_2", amountCents: body.amountCents, currency: "USD", expiresAt: null } } });
+      const amountCents = Number(body.amountCents);
+      const cardFeeCents = Math.floor((amountCents * 300 + 5_000) / 10_000);
+      return route.fulfill({ json: { fundingSession: { checkoutUrl: `${path}?wallet_funding=success`, providerSessionId: "cs_2", amountCents,
+        cardFeeCents, chargedCents: amountCents + cardFeeCents, currency: "USD", expiresAt: null } } });
     }
     state.unexpected.push(`${method} ${url.pathname}`);
     return route.fulfill({ status: 500, json: { error: { message: "Unexpected request" } } });
@@ -103,6 +106,8 @@ test("walks a new vendor from an empty wallet to a launch-ready one with one ema
   const setupCard = page.getByTestId("wallet-setup");
   await expect(setupCard).toContainText("Set up your wallet");
   await expect(setupCard.getByRole("button", { name: "Add a card" })).toBeVisible();
+  // The fee policy is stated before the card is ever added.
+  await expect(setupCard.getByTestId("wallet-card-fee-note")).toHaveText("Card charges carry a 3% fee on top of the amount added. Bank transfers and USDC carry no fee.");
   // The launch-only settings are not on the setup step at all.
   await expect(page.getByRole("heading", { name: "Payment hold timeout" })).toHaveCount(0);
   await expect(page.getByTestId("wallet-balance")).toHaveCount(0);
@@ -122,17 +127,24 @@ test("walks a new vendor from an empty wallet to a launch-ready one with one ema
   expect(new URL(page.url()).search).toBe("");
   await expect(page.getByRole("heading", { name: "Keep it funded automatically" })).toBeVisible();
   await expect(page.getByText("Charged to")).toContainText("Visa ending in 4242");
+  // The fee is worked out on the amount in front of the vendor, and the mandate names it.
+  await expect(page.getByTestId("wallet-auto-reload-fee")).toHaveText("Card reloads carry a 3% fee: a $250.00 reload charges $257.50.");
 
   // No second code: the proof from the first one is still live after the return.
   await page.getByRole("radiogroup", { name: "Reload when my balance drops below" }).getByRole("radio", { name: "$50", exact: true }).click();
   await page.getByRole("radiogroup", { name: "Add this much each time" }).getByRole("radio", { name: "$100", exact: true }).click();
+  await expect(page.getByTestId("wallet-auto-reload-fee")).toHaveText("Card reloads carry a 3% fee: a $100.00 reload charges $103.00.");
+  await expect(page.getByTestId("wallet-auto-reload-mandate")).toHaveText(
+    "By turning this on, you authorize Card Shellz to charge Visa ending in 4242 up to $100.00 plus the 3% card fee per reload, whenever your balance drops below $50.00 or an order needs more than your balance.",
+  );
   await page.getByRole("button", { name: "Turn on auto-reload" }).click();
   await expect(page.getByTestId("wallet-balance")).toBeVisible();
-  expect(state.autoReloadWrites).toEqual([{ enabled: true, fundingMethodId: 10, minimumBalanceCents: 5000, maxSingleReloadCents: 10_000, paymentHoldTimeoutMinutes: 2880 }]);
+  expect(state.autoReloadWrites).toEqual([{ enabled: true, fundingMethodId: 10, minimumBalanceCents: 5000, maxSingleReloadCents: 10_000, paymentHoldTimeoutMinutes: 2880,
+    acknowledgedCardFeeBps: 300 }]);
   expect(state.codesSent).toEqual(["add_funding_method"]);
 
   await expect(page.getByTestId("wallet-available")).toHaveText("$0.00");
-  await expect(page.getByTestId("wallet-auto-reload-summary")).toHaveText("Below $50.00, add $100.00 from Visa ending in 4242.");
+  await expect(page.getByTestId("wallet-auto-reload-summary")).toHaveText("Below $50.00, add $100.00 from Visa ending in 4242, plus the 3% card fee.");
   await expect(page.getByRole("button", { name: "Back to onboarding" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Payment hold timeout" })).toHaveCount(0);
   await page.getByRole("button", { name: /Advanced/ }).click();
@@ -167,10 +179,12 @@ test("a ready wallet leads with the balance and adds funds from a preset after o
     autoReload: { autoReloadSettingId: 5, enabled: true, minimumBalanceCents: 5000, maxSingleReloadCents: 25_000, paymentHoldTimeoutMinutes: 2880, fundingMethodId: 10, updatedAt: "2026-09-15T00:00:00.000Z" } });
   await expect(page.getByTestId("wallet-setup")).toHaveCount(0);
   await expect(page.getByTestId("wallet-available")).toHaveText("$42.50");
-  await expect(page.getByTestId("wallet-auto-reload-summary")).toHaveText("Below $50.00, add $250.00 from Visa ending in 4242.");
+  await expect(page.getByTestId("wallet-auto-reload-summary")).toHaveText("Below $50.00, add $250.00 from Visa ending in 4242, plus the 3% card fee.");
 
   await page.getByRole("button", { name: "Add funds" }).click();
   await page.getByRole("radiogroup", { name: "Amount" }).getByRole("radio", { name: "$100", exact: true }).click();
+  // The fee and the total are on screen before the vendor is sent to pay.
+  await expect(page.getByTestId("wallet-funding-quote")).toHaveText("Card fee (3%): $3.00. Your card is charged $103.00 and $100.00 goes into your wallet.");
   await page.getByRole("button", { name: "Continue to payment" }).click();
   const balance = page.getByTestId("wallet-balance");
   await expect(balance.getByTestId("wallet-verification")).toBeVisible();
