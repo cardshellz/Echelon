@@ -14,6 +14,7 @@ import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { formatFeeRate } from "@shared/dropship/wallet-funding-fee";
 import {
   buildAutoReloadConfigInput,
   buildStripeFundingSetupSessionInput,
@@ -52,8 +53,9 @@ import {
   centsToDollarInput,
   deriveWalletSetupState,
   describeFundingMethod,
-  isStripeFundingMethod,
+  isCardFundingMethod,
   parseStripeReturn,
+  quoteFundingForMethod,
   stripStripeReturn,
   type DropshipWalletFundingMethod,
   type DropshipWalletOverview,
@@ -212,7 +214,7 @@ export default function DropshipPortalWallet() {
     return withVerification(scope, "add_funding_method", async () => {
       await putJson<DropshipAutoReloadConfigResponse>(
         "/api/dropship/wallet/auto-reload",
-        buildAutoReloadSetupInput({ ...input, existing: wallet.autoReload }),
+        buildAutoReloadSetupInput({ ...input, cardFundingFeeBps: wallet.cardFundingFeeBps, existing: wallet.autoReload }),
       );
       await refreshAfterWalletChange();
       setStripeReturn(null);
@@ -324,12 +326,14 @@ export default function DropshipPortalWallet() {
               <>
                 <BalanceSection
                   setup={setup}
+                  cardFundingFeeBps={wallet.cardFundingFeeBps}
                   {...sectionProps("funds")}
                   onAddFunds={addFunds}
                 />
                 <AutoReloadSection
                   wallet={wallet}
                   setup={setup}
+                  cardFundingFeeBps={wallet.cardFundingFeeBps}
                   {...sectionProps("auto_reload")}
                   onTurnOn={(input) => turnOnAutoReload("auto_reload", input)}
                   onTurnOff={() => turnOffAutoReload("auto_reload")}
@@ -339,11 +343,11 @@ export default function DropshipPortalWallet() {
             ) : (
               <SetupSection
                 setup={setup}
+                cardFundingFeeBps={wallet.cardFundingFeeBps}
                 awaitingCard={awaitingCard}
                 confirmationTimedOut={confirmationTimedOut}
                 {...sectionProps("setup")}
                 onAddCard={() => startStripeSetup("setup", "stripe_card")}
-                onAddBankAccount={() => startStripeSetup("setup", "stripe_ach")}
                 onCheckAgain={() => { setConfirmationTimedOut(false); void walletQuery.refetch(); }}
                 onTurnOn={(input) => turnOnAutoReload("setup", input)}
               />
@@ -457,13 +461,13 @@ const SETUP_STEPS = [
 ] as const;
 
 function SetupSection({
-  setup, awaitingCard, confirmationTimedOut, busy, notice, verification, onAddCard, onAddBankAccount, onCheckAgain, onTurnOn,
+  setup, cardFundingFeeBps, awaitingCard, confirmationTimedOut, busy, notice, verification, onAddCard, onCheckAgain, onTurnOn,
 }: SectionFeedbackProps & {
   setup: WalletSetupState;
+  cardFundingFeeBps: number;
   awaitingCard: boolean;
   confirmationTimedOut: boolean;
   onAddCard: () => void;
-  onAddBankAccount: () => void;
   onCheckAgain: () => void;
   onTurnOn: (input: { fundingMethodId: number; minimumBalanceCents: number; maxSingleReloadCents: number }) => void;
 }) {
@@ -506,20 +510,26 @@ function SetupSection({
             <p className="mt-1 text-sm text-zinc-600">
               You will be sent to Stripe to enter it. Card Shellz never sees your card number.
             </p>
+            <p className="mt-2 text-sm text-zinc-500">
+              The card is your backstop, not your main way to pay. It is only charged when an
+              order arrives and your balance cannot cover it. Fund by bank transfer or USDC and
+              it may never be used at all.
+            </p>
+            <p className="mt-2 text-sm text-zinc-500" data-testid="wallet-card-fee-note">
+              Card charges carry a {formatFeeRate(cardFundingFeeBps)} fee on top of the amount added. Bank transfers and USDC carry no fee.
+            </p>
             <div className="mt-4 flex flex-wrap items-center gap-3">
               <Button type="button" className="h-10 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" disabled={busy} onClick={onAddCard}>
                 <CreditCard className="h-4 w-4" />
                 {busy ? "One moment" : "Add a card"}
               </Button>
-              <Button type="button" variant="link" className="h-10 px-0 text-zinc-600" disabled={busy} onClick={onAddBankAccount}>
-                Use a bank account instead
-              </Button>
             </div>
           </div>
         ) : (
           <AutoReloadChooser
-            methods={setup.stripeMethods}
+            methods={setup.reloadMethods}
             primaryMethod={setup.primaryMethod!}
+            cardFundingFeeBps={cardFundingFeeBps}
             initialMinimumCents={AUTO_RELOAD_DEFAULTS.minimumBalanceCents}
             initialAmountCents={AUTO_RELOAD_DEFAULTS.maxSingleReloadCents}
             busy={busy}
@@ -565,10 +575,11 @@ function CardConfirmation({ timedOut, onCheckAgain }: { timedOut: boolean; onChe
  * fields are gone: every choice is a whole-dollar preset the server accepts.
  */
 function AutoReloadChooser({
-  methods, primaryMethod, initialMinimumCents, initialAmountCents, busy, submitLabel, onSubmit,
+  methods, primaryMethod, cardFundingFeeBps, initialMinimumCents, initialAmountCents, busy, submitLabel, onSubmit,
 }: {
   methods: readonly DropshipWalletFundingMethod[];
   primaryMethod: DropshipWalletFundingMethod;
+  cardFundingFeeBps: number;
   initialMinimumCents: number;
   initialAmountCents: number;
   busy: boolean;
@@ -579,12 +590,17 @@ function AutoReloadChooser({
   const [amountCents, setAmountCents] = useState(initialAmountCents);
   const [methodId, setMethodId] = useState(primaryMethod.fundingMethodId);
   const invalid = amountCents < minimumCents;
+  const selected = methods.find((method) => method.fundingMethodId === methodId) ?? primaryMethod;
+  const selectedIsCard = isCardFundingMethod(selected);
+  const quote = quoteFundingForMethod(selected, amountCents, cardFundingFeeBps);
+  const feeRate = formatFeeRate(cardFundingFeeBps);
 
   return (
     <div>
       <h3 className="font-medium">Keep it funded automatically</h3>
       <p className="mt-1 text-sm text-zinc-600">
-        When an order needs more than your balance, we top the wallet up from your card. Nothing is charged until then.
+        When your balance drops below the trigger, we add funds from the method you choose. If an order
+        ever needs more than your balance, we charge the shortfall to your card and accept the order.
       </p>
       <div className="mt-4 space-y-4">
         <PresetPicker
@@ -622,6 +638,16 @@ function AutoReloadChooser({
         {invalid && (
           <p role="alert" className="text-sm text-red-700">The reload amount must be at least the minimum balance.</p>
         )}
+        <p className="text-sm text-zinc-600" data-testid="wallet-auto-reload-fee">
+          {selectedIsCard
+            ? `Card reloads carry a ${feeRate} fee: a ${formatCents(amountCents)} reload charges ${formatCents(quote.chargedCents)}.`
+            : `Bank reloads carry no fee but take a few days to settle. If an order cannot wait, the shortfall goes to your card plus the ${feeRate} card fee.`}
+        </p>
+        <p className="text-sm text-zinc-500" data-testid="wallet-auto-reload-mandate">
+          {selectedIsCard
+            ? `By turning this on, you authorize Card Shellz to charge ${describeFundingMethod(selected)} up to ${formatCents(amountCents)} plus the ${feeRate} card fee per reload, whenever your balance drops below ${formatCents(minimumCents)} or an order needs more than your balance.`
+            : `By turning this on, you authorize Card Shellz to charge ${describeFundingMethod(selected)} up to ${formatCents(amountCents)} per reload whenever your balance drops below ${formatCents(minimumCents)}, and to charge your card on file plus the ${feeRate} card fee for any order your balance cannot cover.`}
+        </p>
       </div>
       <Button
         type="button"
@@ -676,9 +702,10 @@ function PresetPicker({
 // ---------------------------------------------------------------------------
 
 function BalanceSection({
-  setup, busy, notice, verification, onAddFunds,
+  setup, cardFundingFeeBps, busy, notice, verification, onAddFunds,
 }: SectionFeedbackProps & {
   setup: WalletSetupState;
+  cardFundingFeeBps: number;
   onAddFunds: (input: { fundingMethodId: number; amountCents: number }) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -686,6 +713,13 @@ function BalanceSection({
   const [customAmount, setCustomAmount] = useState("");
   const [customError, setCustomError] = useState("");
   const method = setup.primaryMethod;
+  // The quote follows whatever amount is currently chosen, so the fee and the
+  // total are on screen before the vendor is sent to pay. An unparsable custom
+  // amount simply shows no quote; submit reports the parse error.
+  const chosenCents = customAmount.trim() ? tryParseDollarInputToCents(customAmount) : presetCents;
+  const quote = method && chosenCents !== null && chosenCents > 0
+    ? quoteFundingForMethod(method, chosenCents, cardFundingFeeBps)
+    : null;
 
   function submit() {
     if (!method) return;
@@ -737,6 +771,15 @@ function BalanceSection({
               />
               {customError && <p role="alert" className="text-sm text-red-700">{customError}</p>}
             </div>
+            {quote && (
+              <p className="text-sm text-zinc-600" data-testid="wallet-funding-quote">
+                {quote.feeCents > 0
+                  ? `Card fee (${formatFeeRate(quote.feeBps)}): ${formatCents(quote.feeCents)}. Your card is charged ${formatCents(quote.chargedCents)} and ${formatCents(quote.creditCents)} goes into your wallet.`
+                  : isCardFundingMethod(method)
+                    ? `No fee. ${formatCents(quote.creditCents)} goes into your wallet.`
+                    : `No fee. ${formatCents(quote.creditCents)} goes into your wallet once the bank transfer settles, usually within a few days.`}
+              </p>
+            )}
           </div>
           <Button type="button" className="mt-5 h-10 bg-[#C060E0] hover:bg-[#a94bc9]" disabled={busy} onClick={submit}>
             {busy ? "One moment" : "Continue to payment"}
@@ -749,10 +792,11 @@ function BalanceSection({
 }
 
 function AutoReloadSection({
-  wallet, setup, busy, notice, verification, onTurnOn, onTurnOff, onAddCard,
+  wallet, setup, cardFundingFeeBps, busy, notice, verification, onTurnOn, onTurnOff, onAddCard,
 }: SectionFeedbackProps & {
   wallet: DropshipWalletOverview;
   setup: WalletSetupState;
+  cardFundingFeeBps: number;
   onTurnOn: (input: { fundingMethodId: number; minimumBalanceCents: number; maxSingleReloadCents: number }) => void;
   onTurnOff: () => void;
   onAddCard: () => void;
@@ -760,6 +804,7 @@ function AutoReloadSection({
   const [editing, setEditing] = useState(false);
   const autoReload = wallet.autoReload;
   const method = setup.primaryMethod;
+  const feeRate = formatFeeRate(cardFundingFeeBps);
 
   return (
     <section className="mt-5 rounded-md border border-zinc-200 bg-white p-5" data-testid="wallet-auto-reload">
@@ -768,7 +813,8 @@ function AutoReloadSection({
           <h2 className="text-lg font-semibold">Auto-reload</h2>
           {autoReload && setup.autoReloadReady && method ? (
             <p className="mt-1 text-sm text-zinc-600" data-testid="wallet-auto-reload-summary">
-              Below {formatCents(autoReload.minimumBalanceCents)}, add {formatCents(autoReload.maxSingleReloadCents ?? autoReload.minimumBalanceCents)} from {describeFundingMethod(method)}.
+              Below {formatCents(autoReload.minimumBalanceCents)}, add {formatCents(autoReload.maxSingleReloadCents ?? autoReload.minimumBalanceCents)} from {describeFundingMethod(method)}
+              {isCardFundingMethod(method) ? `, plus the ${feeRate} card fee.` : `. Bank reloads carry no fee; your card covers any order that cannot wait, plus the ${feeRate} card fee.`}
             </p>
           ) : (
             <p className="mt-1 text-sm text-zinc-600">Off. Orders wait for a manual payment.</p>
@@ -801,8 +847,9 @@ function AutoReloadSection({
       {editing && method && (
         <div className="mt-5 border-t border-zinc-200 pt-5">
           <AutoReloadChooser
-            methods={setup.stripeMethods}
+            methods={setup.reloadMethods}
             primaryMethod={method}
+            cardFundingFeeBps={cardFundingFeeBps}
             initialMinimumCents={autoReload?.minimumBalanceCents ?? AUTO_RELOAD_DEFAULTS.minimumBalanceCents}
             initialAmountCents={autoReload?.maxSingleReloadCents ?? AUTO_RELOAD_DEFAULTS.maxSingleReloadCents}
             busy={busy}
@@ -901,7 +948,7 @@ function AdvancedSection({
                   <li key={method.fundingMethodId} className="flex items-center justify-between rounded-md border border-zinc-200 p-3 text-sm">
                     <span>
                       <span className="font-medium">{describeFundingMethod(method)}</span>
-                      <span className="ml-2 text-zinc-500">{isStripeFundingMethod(method) ? (method.rail === "stripe_card" ? "Card" : "Bank account") : formatStatus(method.rail)}</span>
+                      <span className="ml-2 text-zinc-500">{method.rail === "stripe_card" ? "Card" : method.rail === "stripe_ach" ? "Bank account" : formatStatus(method.rail)}</span>
                     </span>
                     <Badge variant="outline">{method.isDefault ? "Default" : formatStatus(method.status)}</Badge>
                   </li>
@@ -971,6 +1018,15 @@ function WalletFundingReturnBanner({ status, onDismiss }: { status: "success" | 
       </AlertDescription>
     </Alert>
   );
+}
+
+/** The typed amount as cents, or null while it is not a valid dollar amount yet. */
+function tryParseDollarInputToCents(value: string): number | null {
+  try {
+    return parseDollarInputToCents(value, "Amount");
+  } catch {
+    return null;
+  }
 }
 
 function formatWholeDollars(cents: number): string {

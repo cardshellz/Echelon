@@ -17,9 +17,10 @@ vi.mock("../../../../routes/middleware", () => ({
 
 vi.mock("../../interfaces/http/dropship-auth.routes", () => ({
   requireDropshipAuth: (req: Request, _res: Response, next: NextFunction) => {
-    (req as Request & { session: { dropship: { memberId: string } } }).session = {
-      dropship: { memberId: "member-1" },
-    };
+    // These routes read only `session.dropship.memberId`. The rest of the real
+    // principal is irrelevant here, so the stub asserts the narrow shape rather
+    // than fabricating auth fields the assertions never look at.
+    req.session = { dropship: { memberId: "member-1" } } as unknown as Request["session"];
     next();
   },
   requireDropshipSensitiveActionProof: () => (_req: Request, _res: Response, next: NextFunction) => next(),
@@ -122,6 +123,112 @@ describe("dropship wallet routes error responses", () => {
       errorName: "TypeError",
       errorMessage: "relation \"dropship.dropship_funding_methods\" does not exist",
     });
+  });
+});
+
+describe("dropship wallet routes card fee exposure", () => {
+  const now = "2026-09-16T12:00:00.000Z";
+  let server: { url: string; close: () => Promise<void> };
+  let configureInputs: unknown[];
+  let configureError: unknown;
+  let walletError: unknown;
+
+  beforeEach(async () => {
+    configureInputs = [];
+    configureError = null;
+    walletError = null;
+    for (const level of ["error", "warn", "info"] as const) {
+      vi.spyOn(console, level).mockImplementation(() => {});
+    }
+    const service = {
+      getWalletForMember: async () => {
+        if (walletError) throw walletError;
+        return {
+          account: { walletAccountId: 1, vendorId: 10, availableBalanceCents: 0, pendingBalanceCents: 0, currency: "USD", status: "active", createdAt: now, updatedAt: now },
+          autoReload: null,
+          fundingMethods: [],
+          recentLedger: [],
+          cardFundingFeeBps: 300,
+        };
+      },
+      configureAutoReload: async (input: unknown) => {
+        configureInputs.push(input);
+        if (configureError) throw configureError;
+        return {
+          autoReloadSettingId: 1, vendorId: 10, fundingMethodId: 10, enabled: true, minimumBalanceCents: 5000,
+          maxSingleReloadCents: 25_000, paymentHoldTimeoutMinutes: 2880, createdAt: now, updatedAt: now,
+        };
+      },
+      createStripeWalletFundingSessionForMember: async () => ({
+        checkoutUrl: "https://checkout.stripe.test/cs_2", providerSessionId: "cs_2", providerCustomerId: "cus_1",
+        amountCents: 10_000, cardFeeCents: 300, chargedCents: 10_300, currency: "USD", expiresAt: null,
+      }),
+    } as unknown as DropshipWalletService;
+    server = await startServer(buildApp(service));
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await server.close();
+  });
+
+  it("exposes the card fee rate on the wallet so the page can quote before anything is charged", async () => {
+    const response = await jsonRequest(`${server.url}/api/dropship/wallet`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.wallet.cardFundingFeeBps).toBe(300);
+  });
+
+  it("returns the fee and the total alongside the checkout session", async () => {
+    const response = await jsonRequest(`${server.url}/api/dropship/wallet/funding/stripe/checkout-session`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ fundingMethodId: 10, amountCents: 10_000 }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body.fundingSession).toMatchObject({ amountCents: 10_000, cardFeeCents: 300, chargedCents: 10_300 });
+  });
+
+  it("passes the acknowledged fee rate through to the service", async () => {
+    const response = await jsonRequest(`${server.url}/api/dropship/wallet/auto-reload`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabled: true, fundingMethodId: 10, minimumBalanceCents: 5000, maxSingleReloadCents: 25_000, paymentHoldTimeoutMinutes: 2880, acknowledgedCardFeeBps: 300 }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(configureInputs).toEqual([expect.objectContaining({ vendorId: 10, acknowledgedCardFeeBps: 300 })]);
+  });
+
+  it("reports a stale fee acknowledgement as a conflict the vendor resolves by re-reading, not as bad input", async () => {
+    configureError = new DropshipError(
+      "DROPSHIP_CARD_FUNDING_FEE_ACKNOWLEDGEMENT_STALE",
+      "The card fee shown has changed.",
+      { acknowledgedCardFeeBps: 250, cardFundingFeeBps: 300 },
+    );
+
+    const response = await jsonRequest(`${server.url}/api/dropship/wallet/auto-reload`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabled: true, fundingMethodId: 10, minimumBalanceCents: 5000, maxSingleReloadCents: 25_000, paymentHoldTimeoutMinutes: 2880, acknowledgedCardFeeBps: 250 }),
+    });
+
+    expect(response.status).toBe(409);
+    expect(response.body.error.code).toBe("DROPSHIP_CARD_FUNDING_FEE_ACKNOWLEDGEMENT_STALE");
+  });
+
+  it("reports a misconfigured fee rate as unavailable so nothing is charged at a rate nobody set", async () => {
+    walletError = new DropshipError(
+      "DROPSHIP_CARD_FUNDING_FEE_MISCONFIGURED",
+      "Dropship card funding fee is misconfigured.",
+      { env: "DROPSHIP_CARD_FUNDING_FEE_BPS", value: "abc" },
+    );
+
+    const response = await jsonRequest(`${server.url}/api/dropship/wallet`);
+
+    expect(response.status).toBe(503);
+    expect(response.body.error.code).toBe("DROPSHIP_CARD_FUNDING_FEE_MISCONFIGURED");
   });
 });
 

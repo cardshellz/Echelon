@@ -60,6 +60,56 @@ function repositoryMock(
 }
 
 describe("channel fulfillment authority service", () => {
+  it("uses a request-bound audited suppression and retains its provenance in the attempt", async () => {
+    const notificationSuppression = { requeueId: 11, requestHash: command().requestHash,
+      operator: "user:7", reason: "Silent historical recovery", notifyCustomer: false as const };
+    const claimed = command({ metadata: { legacyWmsShipmentIds: [501], notifyCustomer: true,
+      source: CHANNEL_FULFILLMENT_REPAIR_SOURCES.missingShopifyWriteback }, notificationSuppression });
+    const before = structuredClone(claimed);
+    const pushShopifyFulfillmentForCommand = vi.fn().mockResolvedValue({ writebackComplete: true });
+    const result = await createCompatibilityChannelFulfillmentProviderExecutor({ pushShopifyFulfillmentForCommand }).execute(claimed);
+    expect(pushShopifyFulfillmentForCommand).toHaveBeenCalledWith(expect.objectContaining({ notifyCustomer: false }));
+    expect(result.metadata).toMatchObject({ notifyCustomer: false, notificationSuppression });
+    expect(claimed).toEqual(before);
+  });
+
+  it.each([{ requestHash: "b".repeat(64) }, { notifyCustomer: true }, { requeueId: 0 }])(
+    "rejects invalid notification overrides before provider I/O: %j", async corruption => {
+      const notificationSuppression = { requeueId: 11, requestHash: command().requestHash,
+        operator: "user:7", reason: "Silent historical recovery", notifyCustomer: false, ...corruption };
+      const pushShopifyFulfillmentForCommand = vi.fn();
+      await expect(createCompatibilityChannelFulfillmentProviderExecutor({ pushShopifyFulfillmentForCommand })
+        .execute(command({ notificationSuppression: notificationSuppression as never })))
+        .rejects.toMatchObject({ code: "INVALID_CHANNEL_FULFILLMENT_NOTIFICATION_POLICY" });
+      expect(pushShopifyFulfillmentForCommand).not.toHaveBeenCalled();
+    },
+  );
+
+  it("resolves moved allocation source items without rewriting their saved parent headers", async () => {
+    const original = command();
+    const claimed = command({ items: [{ ...original.items[0], legacyWmsShipmentId: 777,
+      packageAllocationEntryId: 901, packageAllocationEffectIntentId: 902 }] });
+    const before = structuredClone(claimed);
+    const pushShopifyFulfillmentForCommand = vi.fn().mockResolvedValue({ writebackComplete: true });
+    await createCompatibilityChannelFulfillmentProviderExecutor({ pushShopifyFulfillmentForCommand }).execute(claimed);
+    expect(pushShopifyFulfillmentForCommand).toHaveBeenCalledWith(expect.objectContaining({
+      legacyWmsShipmentIds: [777], items: [expect.objectContaining({ legacyWmsShipmentId: 777,
+        packageAllocationEntryId: 901, packageAllocationEffectIntentId: 902, quantity: 2 })],
+    }));
+    expect(claimed).toEqual(before);
+  });
+
+  it.each([{}, { packageAllocationEntryId: 901 }, { packageAllocationEffectIntentId: 902 }])(
+    "does not broaden a moved source without complete allocation provenance: %j", async (proof) => {
+      const original = command();
+      const claimed = command({ items: [{ ...original.items[0], legacyWmsShipmentId: 777, ...proof }] });
+      const pushShopifyFulfillmentForCommand = vi.fn();
+      await expect(createCompatibilityChannelFulfillmentProviderExecutor({ pushShopifyFulfillmentForCommand }).execute(claimed))
+        .rejects.toMatchObject({ code: "channel_fulfillment_lineage_mismatch" });
+      expect(pushShopifyFulfillmentForCommand).not.toHaveBeenCalled();
+    },
+  );
+
   it.each(Object.values(CHANNEL_FULFILLMENT_REPAIR_SOURCES))("holds old notifying repairs from %s before provider I/O", async source => {
     for (const notifyCustomer of [undefined, true]) {
       const claimed = command({ metadata: { legacyWmsShipmentIds: [501], source, notifyCustomer } });

@@ -294,14 +294,17 @@ export interface DropshipOnboardingState {
     pendingBalanceCents: number;
     activeFundingMethodCount: number;
     activeStripeFundingMethodCount: number;
+    activeStripeCardFundingMethodCount: number;
     activeUsdcBaseFundingMethodCount: number;
     autoReloadEnabled: boolean;
     autoReloadFundingMethodId: number | null;
     autoReloadFundingMethodActive: boolean;
     autoReloadFundingMethodReady: boolean;
+    autoReloadFundingMethodIsCard: boolean;
     hasActiveFundingMethod: boolean;
     hasStripeReadyFundingMethod: boolean;
     hasUsdcBaseFundingMethod: boolean;
+    hasCardBackstop: boolean;
     autoReloadConfigured: boolean;
     hasSpendableBalance: boolean;
     walletReady: boolean;
@@ -2141,6 +2144,8 @@ export interface DropshipWalletResponse {
       createdAt: string;
       settledAt: string | null;
     }>;
+    /** Fee rate on card charges, in basis points. ACH and USDC carry none. */
+    cardFundingFeeBps: number;
   };
 }
 
@@ -2153,6 +2158,8 @@ export interface DropshipAutoReloadConfigInput {
   minimumBalanceCents: number;
   maxSingleReloadCents: number | null;
   paymentHoldTimeoutMinutes: number;
+  /** The card fee rate the vendor was shown when agreeing; the server refuses a stale one. */
+  acknowledgedCardFeeBps?: number;
 }
 
 export interface DropshipAutoReloadConfigResponse {
@@ -2184,7 +2191,12 @@ export interface DropshipStripeWalletFundingSessionResponse {
   fundingSession: {
     checkoutUrl: string;
     providerSessionId: string;
+    /** What the wallet will receive. */
     amountCents: number;
+    /** The card fee on top; zero for ACH. */
+    cardFeeCents: number;
+    /** What the payment method is charged. */
+    chargedCents: number;
     currency: string;
     expiresAt: string | null;
   };

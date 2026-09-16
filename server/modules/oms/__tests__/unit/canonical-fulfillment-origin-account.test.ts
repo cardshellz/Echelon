@@ -147,6 +147,28 @@ describe("canonical fulfillment originating account", () => {
     expect(account.client.request).toHaveBeenCalledTimes(1);
   });
 
+  it.each([0, 1])("uses the immutable one-unit allocation after a split reduces the compatibility quantity to %s", async (sourceQuantity) => {
+    const account = shopifyAccount(11);
+    const db = database({ allocation: true, sourceQuantity });
+    const input = { ...allocationCommand(), notifyCustomer: false };
+    const before = structuredClone(input);
+    const service = createFulfillmentPushService(db, null, { providerClients: { shopify: async () => account, ebay: vi.fn() } });
+    await expect(service.pushShopifyFulfillmentForCommand(input)).resolves.toMatchObject({ writebackComplete: true });
+    const mutations = account.client.request.mock.calls.filter(([query]) => query.includes("fulfillmentCreateV2"));
+    expect(mutations).toHaveLength(1);
+    expect(mutations[0][1]).toMatchObject({ fulfillment: { notifyCustomer: false,
+      lineItemsByFulfillmentOrder: [{ fulfillmentOrderLineItems: [{ quantity: 1 }] }] } });
+    expect(input).toEqual(before);
+  });
+
+  it.each([-1, 1.5, 3])("still rejects invalid or enlarged compatibility quantity %s", async (sourceQuantity) => {
+    const account = shopifyAccount(11);
+    const service = createFulfillmentPushService(database({ allocation: true, sourceQuantity }), null,
+      { providerClients: { shopify: async () => account, ebay: vi.fn() } });
+    await expect(service.pushShopifyFulfillmentForCommand(allocationCommand())).rejects.toMatchObject({ code: "channel_fulfillment_lineage_mismatch" });
+    expect(account.client.request).not.toHaveBeenCalled();
+  });
+
   it("does not inherit a sibling package's fulfillment ID from the shared legacy source shipment", async () => {
     const siblingId = "gid://shopify/Fulfillment/999";
     const account = shopifyAccount(11, { existing: true, existingQuantity: 1,
@@ -180,7 +202,7 @@ describe("canonical fulfillment originating account", () => {
     { package_allocation_effect_intent_id: 999 }, { matched_intent_id: null },
     { matched_binding_id: null }, { matched_activation_id: null },
     { source_wms_shipment_item_id: 999 }, { source_order_item_id: 999 },
-    { source_quantity: 3 }, { quantity_pushed: 2 }, { quantity_shipped: 2 },
+    { source_quantity: 0 }, { source_quantity: 1 }, { quantity_pushed: 2 }, { quantity_shipped: 2 },
     { allocation_quantity: 2 }, { intent_quantity: 0 }, { target_kind: "awaiting_relabel" },
     { effect_type: "inventory_consumption" }, { shipment_item_purpose: "replacement" },
   ])("rejects mismatched persisted allocation proof before provider I/O: %j", async (proofOverrides) => {
@@ -192,14 +214,8 @@ describe("canonical fulfillment originating account", () => {
     expect(db.events).toEqual([]);
   });
 
-  it.each([1, 3])("rejects source quantity changes even when live quantity equals the package quantity (%s)", async (sourceQuantity) => {
-    const account = shopifyAccount(11);
-    const service = createFulfillmentPushService(database({ allocation: true, sourceQuantity }), null, { providerClients: { shopify: async () => account, ebay: vi.fn() } });
-    await expect(service.pushShopifyFulfillmentForCommand(allocationCommand())).rejects.toMatchObject({ code: "channel_fulfillment_lineage_mismatch" });
-    expect(account.client.request).not.toHaveBeenCalled();
-  });
-
-  it.each([{ oms_order_line_id: 999 }, { external_line_item_id: "FOREIGN" }, { fulfillment_provider: "ebay" }])("retains exact current order-line and provider identity checks: %j", async (lineOverrides) => {
+  it.each([{ oms_order_line_id: 999 }, { external_line_item_id: "FOREIGN" }, { fulfillment_provider: "ebay" },
+    { qty: null }, { qty: "1" }, { qty: undefined }])("retains exact current order-line and provider identity checks: %j", async (lineOverrides) => {
     const account = shopifyAccount(11);
     const service = createFulfillmentPushService(database({ allocation: true, lineOverrides }), null, { providerClients: { shopify: async () => account, ebay: vi.fn() } });
     await expect(service.pushShopifyFulfillmentForCommand(allocationCommand())).rejects.toMatchObject({ code: "channel_fulfillment_lineage_mismatch" });

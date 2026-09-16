@@ -4,12 +4,14 @@ import { describe, expect, it } from "vitest";
 import { canonicalJson } from "@shared/utils/canonical-json";
 
 import { SHIPSTATION_LABEL_OBSERVATION_SOURCE } from "../../carrier-tracking.domain";
-import type { PersistedDeclaredPackageEvidence } from "../../declared-package-lifecycle-shadow.domain";
+import { adaptPersistedDeclaredPackageLifecycleEvidence, type PersistedDeclaredPackageEvidence } from "../../declared-package-lifecycle-shadow.domain";
 import {
   packageAllocationPackageKey,
+  resolvePackageAllocationAuthority,
 } from "../../package-allocation-authority-resolution.domain";
 import {
   PackageAllocationAuthorityResolutionPreviewService,
+  resolvePackageAllocationAuthorityEvidence,
   PackageAllocationAuthorityResolutionPreviewServiceError,
   type PackageAllocationAuthorityResolutionPreviewCommand,
 } from "../../package-allocation-authority-resolution.service";
@@ -20,6 +22,7 @@ import type {
   PackageAllocationAuthorityPreviewTransaction,
 } from "../../package-allocation-ledger.repository";
 import type { PackageAllocationSourceFacts } from "../../package-allocation-source-identity.domain";
+import { packageAllocationGroupPreviousPlanSchema } from "../../package-allocation-group.domain";
 
 const groupKey = "86e1be0d-c7d8-4c91-919f-04f5eb547f79";
 const sourceId = 7_001;
@@ -47,6 +50,7 @@ function sourceFacts(id = sourceId): PackageAllocationSourceFacts {
 type ContentsStatus = "authoritative" | "empty" | "omitted";
 
 interface PersistedPackageOptions {
+  readonly sourceItemId?: number;
   readonly shippingProviderLabelId: number;
   readonly providerPhysicalShipmentId: string;
   readonly observedAt: string;
@@ -88,7 +92,8 @@ function persistedPackage(
     shipDate: null,
     voidDate: null,
     isReturnLabel: false,
-    declaredContentsEvidence: declaredContentsEvidence(status),
+    declaredContentsEvidence: { ...declaredContentsEvidence(status),
+      lines: status === "authoritative" ? [{ lineItemKey: `wms-item-${options.sourceItemId ?? sourceId}`, quantity: 2 }] : [] },
   };
   const provider = options.provider ?? "shipstation";
   return Object.freeze({
@@ -230,6 +235,58 @@ function activePackageB(
 }
 
 describe("PackageAllocationAuthorityResolutionPreviewService", () => {
+  it("keeps unrelated order packages in discovery evidence, not in a source's allocation group", () => {
+    const other = lockedPackage({ shippingProviderLabelId: 44, providerPhysicalShipmentId: "44003",
+      observedAt: "2026-08-23T11:00:00.000Z", sourceItemId: sourceId + 1 });
+    const input = { groupKey, expectedGroupVersion: 0, previousPlan: null,
+      sourceFacts: [sourceFacts()], packages: [other, activePackageA()], actions: [] };
+    const before = structuredClone(input);
+    const result = resolvePackageAllocationAuthorityEvidence(input);
+    expect(result.excludedUnrelatedEvidenceKeys).toEqual([other.evidenceKey]);
+    expect(result.packages).toHaveLength(2);
+    expect(result.readiness.packageAssessments).toHaveLength(2);
+    expect(result.resolution?.plannerInput.packages).toHaveLength(1);
+    expect(result.resolution?.outcome).not.toBe("review");
+    expect(input).toEqual(before);
+  });
+
+  it.each(["empty", "omitted"] as const)("retains %s related packages instead of assuming no overlap", contentsStatus => {
+    const result = resolvePackageAllocationAuthorityEvidence({ groupKey, expectedGroupVersion: 0, previousPlan: null,
+      sourceFacts: [sourceFacts()], packages: [activePackageA(), activePackageB(contentsStatus)], actions: [] });
+    expect(result.excludedUnrelatedEvidenceKeys).toEqual([]);
+    expect(result.resolution?.outcome).toBe("review");
+  });
+
+  it("never drops a previously bound package even if its contents are disjoint", () => {
+    const other = lockedPackage({ shippingProviderLabelId: 44, providerPhysicalShipmentId: "44003",
+      observedAt: "2026-08-23T12:01:00.000Z", sourceItemId: sourceId + 1 });
+    const packages = [activePackageA(), other];
+    const prior = resolvePackageAllocationAuthority({ contractVersion: 1, authorityMode: "shadow_only",
+      groupKey, expectedGroupVersion: 0, previousPlan: null,
+      sourceLines: [{ wmsShipmentItemId: sourceId, sourceQuantity: 2 }], actions: [],
+      packages: packages.map(pkg => {
+        const adapted = adaptPersistedDeclaredPackageLifecycleEvidence(pkg.persistedEvidence);
+        if (adapted.outcome !== "adapted") throw new Error("Fixture lifecycle failed");
+        return { evidenceKey: pkg.evidenceKey, lifecycle: { ...adapted.input, events: [...adapted.input.events] } };
+      }),
+    });
+    const state = prior.plannerResult.state;
+    const result = resolvePackageAllocationAuthorityEvidence({ groupKey, expectedGroupVersion: 1,
+      sourceFacts: [sourceFacts()], packages, actions: [], previousPlan: packageAllocationGroupPreviousPlanSchema.parse({
+        groupKey, groupVersion: 1, stateHash: prior.plannerResult.stateHash,
+        sourceEvidence: state.sourceEvidence.map(s => ({ ...s })),
+        packageEvidence: state.packageEvidence.map(p => ({ ...p })),
+        effectIntentEvidence: state.effectIntentEvidence.map(e => ({ ...e })),
+        actionEvidence: [], appliedActionKeys: [],
+      }) });
+    expect(result.excludedUnrelatedEvidenceKeys).toEqual([]);
+    expect(result.resolution?.plannerInput.packages).toHaveLength(2);
+    expect(result.resolution?.outcome).toBe("unchanged");
+    expect(result.resolution?.plannerResult.state.allocations.some(
+      entry => entry.packageKey === packageAllocationPackageKey("shipstation", "44003"),
+    )).toBe(false);
+  });
+
   it("discovers related package labels between source and package locks", async () => {
     const fixture = repositoryFixture([activePackageB(), activePackageA()]);
     const input = discoveryCommand();

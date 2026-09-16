@@ -7,6 +7,7 @@ import {
   deriveWalletSetupState,
   describeFundingMethod,
   parseStripeReturn,
+  quoteFundingForMethod,
   stripStripeReturn,
   type DropshipWalletFundingMethod,
   type DropshipWalletOverview,
@@ -34,6 +35,7 @@ function wallet(overrides: Partial<DropshipWalletOverview> = {}): DropshipWallet
     autoReload: null,
     fundingMethods: [],
     recentLedger: [],
+    cardFundingFeeBps: 300,
     ...overrides,
   };
 }
@@ -50,14 +52,14 @@ describe("deriveWalletSetupState", () => {
     const state = deriveWalletSetupState(wallet());
     expect(state.stage).toBe("add_card");
     expect(state.primaryMethod).toBeNull();
-    expect(state.stripeMethods).toEqual([]);
+    expect(state.cardMethods).toEqual([]);
     expect(state.autoReloadReady).toBe(false);
   });
 
   it("waits on confirm_card while the only Stripe method is still pending", () => {
     const state = deriveWalletSetupState(wallet({ fundingMethods: [method({ fundingMethodId: 10, status: "pending" })] }));
     expect(state.stage).toBe("confirm_card");
-    expect(state.hasPendingStripeMethod).toBe(true);
+    expect(state.hasPendingCardMethod).toBe(true);
     expect(state.primaryMethod).toBeNull();
   });
 
@@ -88,16 +90,42 @@ describe("deriveWalletSetupState", () => {
     expect(boundToInactive.autoReloadReady).toBe(false);
   });
 
+  it("still needs a card when auto-reload runs on a bank account alone: ACH cannot cover a held order", () => {
+    const state = deriveWalletSetupState(wallet({
+      fundingMethods: [method({ fundingMethodId: 30, rail: "stripe_ach", displayLabel: "Chase ending in 2222" })],
+      autoReload: autoReload({ fundingMethodId: 30 }),
+    }));
+    // Auto-reload itself is correctly bound; the missing piece is the backstop.
+    expect(state.autoReloadReady).toBe(true);
+    expect(state.cardMethods).toEqual([]);
+    expect(state.stage).toBe("add_card");
+    // An ACH method pending activation must not read as a card awaiting its webhook.
+    expect(state.hasPendingCardMethod).toBe(false);
+  });
+
+  it("is ready with auto-reload on a bank account as long as a card is on file", () => {
+    const state = deriveWalletSetupState(wallet({
+      fundingMethods: [
+        method({ fundingMethodId: 10, displayLabel: "Visa ending in 4242" }),
+        method({ fundingMethodId: 30, rail: "stripe_ach", displayLabel: "Chase ending in 2222" }),
+      ],
+      autoReload: autoReload({ fundingMethodId: 30 }),
+    }));
+    expect(state.stage).toBe("ready");
+    expect(state.primaryMethod?.fundingMethodId).toBe(30);
+    expect(state.cardMethods.map((entry) => entry.fundingMethodId)).toEqual([10]);
+  });
+
   it("never treats USDC as a card: it cannot satisfy the gate", () => {
     const state = deriveWalletSetupState(wallet({
       fundingMethods: [method({ fundingMethodId: 20, rail: "usdc_base", displayLabel: null, usdcWalletAddress: "0x1234567890abcdef1234567890abcdef12345678" })],
       autoReload: autoReload({ fundingMethodId: 20 }),
     }));
     expect(state.stage).toBe("add_card");
-    expect(state.stripeMethods).toEqual([]);
+    expect(state.cardMethods).toEqual([]);
   });
 
-  it("orders methods with the configured auto-reload card first, then the default", () => {
+  it("offers cards and bank accounts for auto-reload, configured first, and keeps the backstop list to cards", () => {
     const state = deriveWalletSetupState(wallet({
       fundingMethods: [
         method({ fundingMethodId: 1, isDefault: true, displayLabel: "Visa ending in 1111" }),
@@ -106,7 +134,9 @@ describe("deriveWalletSetupState", () => {
       ],
       autoReload: autoReload({ fundingMethodId: 3 }),
     }));
-    expect(state.stripeMethods.map((entry) => entry.fundingMethodId)).toEqual([3, 1, 2]);
+    expect(state.reloadMethods.map((entry) => entry.fundingMethodId)).toEqual([3, 1, 2]);
+    // The backstop is cards only: ACH cannot cover an order already waiting.
+    expect(state.cardMethods.map((entry) => entry.fundingMethodId).sort()).toEqual([1, 3]);
 
     const noConfig = deriveWalletSetupState(wallet({
       fundingMethods: [method({ fundingMethodId: 1 }), method({ fundingMethodId: 2, isDefault: true })],
@@ -116,21 +146,42 @@ describe("deriveWalletSetupState", () => {
 });
 
 describe("buildAutoReloadSetupInput", () => {
-  it("enables auto-reload with the chosen presets and keeps the saved hold timeout", () => {
+  it("enables auto-reload with the chosen presets, keeps the saved hold timeout, and carries the fee rate agreed to", () => {
     expect(buildAutoReloadSetupInput({
-      fundingMethodId: 10, minimumBalanceCents: 2500, maxSingleReloadCents: 10_000, existing: autoReload({ paymentHoldTimeoutMinutes: 720 }),
-    })).toEqual({ enabled: true, fundingMethodId: 10, minimumBalanceCents: 2500, maxSingleReloadCents: 10_000, paymentHoldTimeoutMinutes: 720 });
+      fundingMethodId: 10, minimumBalanceCents: 2500, maxSingleReloadCents: 10_000, cardFundingFeeBps: 300, existing: autoReload({ paymentHoldTimeoutMinutes: 720 }),
+    })).toEqual({
+      enabled: true, fundingMethodId: 10, minimumBalanceCents: 2500, maxSingleReloadCents: 10_000, paymentHoldTimeoutMinutes: 720, acknowledgedCardFeeBps: 300,
+    });
   });
 
   it("falls back to the default hold timeout when nothing was saved before", () => {
-    expect(buildAutoReloadSetupInput({ fundingMethodId: 10, minimumBalanceCents: 5000, maxSingleReloadCents: 25_000, existing: null }).paymentHoldTimeoutMinutes)
+    expect(buildAutoReloadSetupInput({ fundingMethodId: 10, minimumBalanceCents: 5000, maxSingleReloadCents: 25_000, cardFundingFeeBps: 300, existing: null }).paymentHoldTimeoutMinutes)
       .toBe(AUTO_RELOAD_DEFAULTS.paymentHoldTimeoutMinutes);
   });
 
   it("refuses a reload smaller than the minimum, a zero minimum, or fractional cents", () => {
-    expect(() => buildAutoReloadSetupInput({ fundingMethodId: 10, minimumBalanceCents: 5000, maxSingleReloadCents: 2500, existing: null })).toThrow();
-    expect(() => buildAutoReloadSetupInput({ fundingMethodId: 10, minimumBalanceCents: 0, maxSingleReloadCents: 2500, existing: null })).toThrow();
-    expect(() => buildAutoReloadSetupInput({ fundingMethodId: 10, minimumBalanceCents: 12.5, maxSingleReloadCents: 2500, existing: null })).toThrow();
+    expect(() => buildAutoReloadSetupInput({ fundingMethodId: 10, minimumBalanceCents: 5000, maxSingleReloadCents: 2500, cardFundingFeeBps: 300, existing: null })).toThrow();
+    expect(() => buildAutoReloadSetupInput({ fundingMethodId: 10, minimumBalanceCents: 0, maxSingleReloadCents: 2500, cardFundingFeeBps: 300, existing: null })).toThrow();
+    expect(() => buildAutoReloadSetupInput({ fundingMethodId: 10, minimumBalanceCents: 12.5, maxSingleReloadCents: 2500, cardFundingFeeBps: 300, existing: null })).toThrow();
+  });
+
+  it("refuses to enrol without a valid fee rate, so the mandate can never omit the fee", () => {
+    for (const cardFundingFeeBps of [Number.NaN, -1, 2.5, 1_001]) {
+      expect(() => buildAutoReloadSetupInput({ fundingMethodId: 10, minimumBalanceCents: 5000, maxSingleReloadCents: 25_000, cardFundingFeeBps, existing: null }))
+        .toThrow("card fee rate");
+    }
+    expect(buildAutoReloadSetupInput({ fundingMethodId: 10, minimumBalanceCents: 5000, maxSingleReloadCents: 25_000, cardFundingFeeBps: 0, existing: null }).acknowledgedCardFeeBps).toBe(0);
+  });
+});
+
+describe("quoteFundingForMethod", () => {
+  it("adds the fee on top for a card and nothing for a bank account", () => {
+    expect(quoteFundingForMethod(method({ fundingMethodId: 10 }), 10_000, 300)).toEqual({
+      rail: "stripe_card", creditCents: 10_000, feeCents: 300, feeBps: 300, chargedCents: 10_300,
+    });
+    expect(quoteFundingForMethod(method({ fundingMethodId: 11, rail: "stripe_ach", displayLabel: "Chase ending in 6789" }), 10_000, 300)).toEqual({
+      rail: "stripe_ach", creditCents: 10_000, feeCents: 0, feeBps: 0, chargedCents: 10_000,
+    });
   });
 });
 

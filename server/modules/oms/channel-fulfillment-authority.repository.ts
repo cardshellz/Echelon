@@ -21,7 +21,8 @@ import {
   type ChannelFulfillmentWritebackPolicyDecision,
 } from "./channel-fulfillment-authority.policy";
 import { PROVIDER_ORDER_IDENTITY_POLICIES, resolveProviderOrderId } from "./shipping-engine-order-identity";
-import { resolveChannelFulfillmentNotifyCustomer } from "./channel-fulfillment-notification.policy";
+import { resolveChannelFulfillmentNotifyCustomer, channelFulfillmentNotificationSuppressionSchema,
+  type ChannelFulfillmentNotificationSuppression } from "./channel-fulfillment-notification.policy";
 import { FulfillmentRequestAllocationError, type FulfillmentRequestAllocationDecision } from "./fulfillment-request-allocation.domain";
 import { readFulfillmentRequestAllocation } from "./fulfillment-request-allocation.repository";
 import {
@@ -184,6 +185,7 @@ export interface ClaimedChannelFulfillmentCommandItem {
 }
 
 export interface ClaimedChannelFulfillmentCommand {
+  readonly notificationSuppression?: ChannelFulfillmentNotificationSuppression;
   readonly id: number;
   readonly commandKey: string;
   readonly requestHash: string;
@@ -4229,6 +4231,7 @@ export function createChannelFulfillmentAuthorityRepository(
         FROM oms.channel_fulfillment_pushes
         WHERE push_status = 'processing'
           AND lease_expires_at <= ${input.now}
+          ${commandIds.length > 0 ? sql`AND id IN (${buildIdList(commandIds)})` : sql``}
         FOR UPDATE SKIP LOCKED
       `));
       for (const row of expired) {
@@ -4298,15 +4301,27 @@ export function createChannelFulfillmentAuthorityRepository(
 
       const dueIds = dueRows.map((row) => Number(row.id));
       const claimedRows = rowsOf<any>(await tx.execute(sql`
-        UPDATE oms.channel_fulfillment_pushes
+        UPDATE oms.channel_fulfillment_pushes AS command
         SET push_status = 'processing',
             attempt_count = attempt_count + 1,
+            notification_policy_attempt = attempt_count + 1,
             lease_token = ${input.leaseToken},
             lease_expires_at = ${leaseExpiresAt},
             last_attempt_at = ${input.now},
             updated_at = ${input.now}
         WHERE id IN (${buildIdList(dueIds)})
-        RETURNING *
+        RETURNING command.*, (
+          SELECT jsonb_build_object(
+            'requeueId', audit.id, 'requestHash', audit.previous_request_hash,
+            'operator', audit.operator, 'reason', audit.reason, 'notifyCustomer', FALSE
+          )
+          FROM oms.channel_fulfillment_push_requeues AS audit
+          WHERE audit.channel_fulfillment_push_id = command.id
+            AND audit.previous_request_hash = command.request_hash
+            AND audit.notify_customer_override = FALSE
+            AND audit.previous_attempt_count < command.attempt_count
+          ORDER BY audit.id DESC LIMIT 1
+        ) AS notification_suppression
       `));
       const itemRows = rowsOf<any>(await tx.execute(sql`
         SELECT
@@ -4403,6 +4418,9 @@ export function createChannelFulfillmentAuthorityRepository(
           maxAttempts: Number(row.max_attempts),
           leaseToken: String(row.lease_token),
           metadata: Object.freeze({ ...(row.metadata ?? {}) }),
+          ...(row.notification_suppression == null ? {} : {
+            notificationSuppression: Object.freeze(channelFulfillmentNotificationSuppressionSchema.parse(row.notification_suppression)),
+          }),
           items: Object.freeze(itemsByCommand.get(Number(row.id)) ?? []),
         })));
     });

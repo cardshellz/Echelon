@@ -1423,6 +1423,7 @@ export const channelFulfillmentPushes = omsSchema.table("channel_fulfillment_pus
   channelFulfillmentId: varchar("channel_fulfillment_id", { length: 200 }),
   pushStatus: varchar("push_status", { length: 30 }).notNull().default("pending"),
   attemptCount: integer("attempt_count").notNull().default(0),
+  notificationPolicyAttempt: integer("notification_policy_attempt"),
   maxAttempts: integer("max_attempts").notNull().default(12),
   nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }).defaultNow().notNull(),
   leaseToken: varchar("lease_token", { length: 100 }),
@@ -1509,6 +1510,7 @@ export const channelFulfillmentPushRequeues = omsSchema.table("channel_fulfillme
   previousErrorCode: varchar("previous_error_code", { length: 100 }),
   previousErrorMessage: text("previous_error_message"),
   previousRequestHash: varchar("previous_request_hash", { length: 64 }),
+  notifyCustomerOverride: boolean("notify_customer_override"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 }, (table) => [
   uniqueIndex("uq_channel_fulfillment_push_requeues_idempotency")
