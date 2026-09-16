@@ -1,0 +1,8 @@
+// Server half of the test typecheck. See tsconfig.tests.json for the contract.
+{
+  "extends": "./tsconfig.tests.json",
+  "include": [
+    "server/**/*",
+    "shared/**/*"
+  ]
+}

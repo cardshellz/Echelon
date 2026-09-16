@@ -11,12 +11,21 @@
 // make a new failure go away, because every file not listed here is protected
 // and adding to the list gives that protection up.
 //
-// Run with: npm run check:tests
+// Nothing runs this config directly. Sources plus every test file is a large
+// enough program to exhaust Node's default heap on a CI runner, so the check is
+// split across tsconfig.tests.server.json and tsconfig.tests.client.json, which
+// inherit this exclusion list and each compile one half. `npm run check:tests`
+// runs both.
+//
+// `incremental` is off deliberately: the base config points tsBuildInfoFile at a
+// single path in node_modules, and sharing it would let these runs and `npm run
+// check` overwrite each other's build info and return results that depend on
+// which ran last.
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "noEmit": true,
-    "tsBuildInfoFile": "./node_modules/typescript/tsbuildinfo.tests"
+    "incremental": false
   },
   "exclude": [
     "node_modules",
