@@ -10,6 +10,8 @@ import {
   savePublicationSourceBindingDraftRequestSchema,
   savePublicationVariantMappingDraftRequestSchema,
   setInventoryPublicationTargetPreviewStateRequestSchema,
+  setUpChannelDestinationsRequestSchema,
+  setUpChannelDestinationsResultSchema,
   type ChannelExposureDraftSaveResult,
   type CreateInventoryPublicationTargetRequest,
   type InventoryChannelExposureAdminView,
@@ -19,11 +21,23 @@ import {
   type SavePublicationSourceBindingDraftRequest,
   type SavePublicationVariantMappingDraftRequest,
   type SetInventoryPublicationTargetPreviewStateRequest,
+  type SetUpChannelDestinationsRequest,
+  type SetUpChannelDestinationsResult,
 } from "@shared/types/inventory-channel-exposure";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { z } from "zod";
 
+import { logger } from "../../../platform/observability/logger";
 import { InventoryAvailabilityMasterDataError } from "../domain/inventory-availability-master-data.contracts";
+
+/**
+ * Narrow port onto the dropship module's own resolution of its single internal
+ * channel. This page must not re-derive that rule from channel name/type, which
+ * would drift from the owning module; it asks dropship instead.
+ */
+export interface DropshipDestinationChannelResolver {
+  resolveChannelId(): Promise<number>;
+}
 
 const positiveDatabaseInteger = z.number().int().positive().max(2_147_483_647);
 const actorSchema = z.string().trim().min(1).max(100);
@@ -49,6 +63,18 @@ extends CreateInventoryPublicationTargetRequest {
   occurredAt: Date;
 }
 
+/**
+ * Whether dropship storefronts are in scope is decided by the application layer
+ * from the resolved internal dropship channel, never re-derived in SQL, so the
+ * rule lives in exactly one place.
+ */
+export interface SetUpChannelDestinationsCommand extends SetUpChannelDestinationsRequest {
+  includeDropshipStores: boolean;
+  actorId: string;
+  requestHash: string;
+  occurredAt: Date;
+}
+
 export interface SetInventoryPublicationTargetPreviewStateCommand
 extends SetInventoryPublicationTargetPreviewStateRequest {
   actorId: string;
@@ -63,8 +89,16 @@ extends SavePublicationVariantMappingDraftRequest {
   occurredAt: Date;
 }
 
+/**
+ * The exposure store owns everything in the `inventory` schema, but the
+ * internal dropship channel is resolved by the dropship module, so the store
+ * does not claim that field. The service composes the two.
+ */
+export type InventoryChannelExposureAdminStoreView =
+  Omit<InventoryChannelExposureAdminView, "dropshipDestinationChannelId">;
+
 export interface InventoryChannelExposureAdminStore {
-  getAdminView(productId: number | null): Promise<InventoryChannelExposureAdminView>;
+  getAdminView(productId: number | null): Promise<InventoryChannelExposureAdminStoreView>;
   savePolicyDraft(
     command: SaveChannelExposurePolicyDraftCommand,
   ): Promise<ChannelExposureDraftSaveResult>;
@@ -74,6 +108,9 @@ export interface InventoryChannelExposureAdminStore {
   createPublicationTarget(
     command: CreateInventoryPublicationTargetCommand,
   ): Promise<InventoryPublicationTargetCommandResult>;
+  setUpChannelDestinations(
+    command: SetUpChannelDestinationsCommand,
+  ): Promise<SetUpChannelDestinationsResult>;
   setPublicationTargetPreviewState(
     command: SetInventoryPublicationTargetPreviewStateCommand,
   ): Promise<InventoryPublicationTargetCommandResult>;
@@ -91,11 +128,68 @@ export class InventoryChannelExposureAdminService {
   constructor(
     private readonly store: InventoryChannelExposureAdminStore,
     private readonly clock: InventoryChannelExposureClock = systemClock,
+    private readonly dropshipChannel: DropshipDestinationChannelResolver | null = null,
   ) {}
 
   async getView(productInput?: number | null): Promise<InventoryChannelExposureAdminView> {
     const productId = productInput == null ? null : parseId(productInput, "product");
-    return inventoryChannelExposureAdminViewSchema.parse(await this.store.getAdminView(productId));
+    const [view, dropshipDestinationChannelId] = await Promise.all([
+      this.store.getAdminView(productId),
+      this.resolveDropshipDestinationChannelId(),
+    ]);
+    return inventoryChannelExposureAdminViewSchema.parse({ ...view, dropshipDestinationChannelId });
+  }
+
+  /**
+   * A missing or ambiguous dropship channel is a configuration state, not a
+   * failure of this page: every other channel still needs to be editable. It is
+   * reported as null and logged with the owning module's structured code so the
+   * condition stays visible, rather than failing the whole read.
+   */
+  private async resolveDropshipDestinationChannelId(): Promise<number | null> {
+    if (!this.dropshipChannel) return null;
+    try {
+      return await this.dropshipChannel.resolveChannelId();
+    } catch (error) {
+      logger.warn("inventory_channel_exposure.dropship_channel_unresolved", {
+        outcome: "degraded",
+        error_code: error instanceof Error && "code" in error ? String(error.code) : "UNKNOWN",
+        message: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    }
+  }
+
+  /**
+   * Registers every destination the channel's existing connections already
+   * imply. Dropship storefronts are only in scope for the resolved internal
+   * dropship channel; for any other channel they are excluded here rather than
+   * filtered downstream, so a marketplace channel can never acquire one.
+   */
+  async setUpChannelDestinations(
+    input: SetUpChannelDestinationsRequest,
+    actorInput: string,
+  ): Promise<SetUpChannelDestinationsResult> {
+    const request = parseRequest(
+      setUpChannelDestinationsRequestSchema,
+      input,
+      "INVENTORY_CHANNEL_EXPOSURE_INVALID_DESTINATION_SETUP",
+    );
+    const actorId = parseActor(actorInput);
+    const dropshipChannelId = await this.resolveDropshipDestinationChannelId();
+    const includeDropshipStores = dropshipChannelId !== null
+      && dropshipChannelId === request.channelId;
+    const requestHash = requestHashFor("channel_destinations_setup", actorId, {
+      ...request,
+      includeDropshipStores,
+    });
+    return setUpChannelDestinationsResultSchema.parse(await this.store.setUpChannelDestinations({
+      ...request,
+      includeDropshipStores,
+      actorId,
+      requestHash,
+      occurredAt: validNow(this.clock),
+    }));
   }
 
   async savePolicyDraft(

@@ -1,5 +1,8 @@
 export type LegacyHeaderPolicy = "strict" | "aggregate_projection";
 
+export const PROVIDER_ORDER_IDENTITY_POLICIES = ["strict", "stable_key_alias"] as const;
+export type ProviderOrderIdentityPolicy = typeof PROVIDER_ORDER_IDENTITY_POLICIES[number];
+
 export type ProviderOrderIdResolution =
   | "compatible"
   | "known_alias"
@@ -8,6 +11,7 @@ export type ProviderOrderIdResolution =
 
 export interface ResolveProviderOrderIdInput {
   readonly legacyHeaderPolicy: LegacyHeaderPolicy;
+  readonly providerOrderIdentityPolicy?: ProviderOrderIdentityPolicy;
   readonly persistedProviderOrderId: string | null;
   readonly persistedProviderOrderKey: string | null;
   readonly incomingProviderOrderId: string | null;
@@ -23,8 +27,9 @@ function normalize(value: string | null): string | null {
 /**
  * A provider order key identifies stable logical shipping work. A provider may
  * create multiple order records for that work while splitting or recreating
- * physical packages, so provider order ids are aliases once the stable key is
- * proven equal. Physical package identity remains independently enforced.
+ * physical packages. An alias-enabled caller may recognize a new order id once
+ * the stable key is proven equal. Callers must reject contradictory order keys
+ * even for saved aliases and enforce physical package identity independently.
  */
 export function resolveProviderOrderId(
   input: ResolveProviderOrderIdInput,
@@ -41,7 +46,8 @@ export function resolveProviderOrderId(
   const persistedKey = normalize(input.persistedProviderOrderKey);
   const incomingKey = normalize(input.incomingProviderOrderKey);
   if (
-    input.legacyHeaderPolicy === "aggregate_projection"
+    (input.legacyHeaderPolicy === "aggregate_projection"
+      || input.providerOrderIdentityPolicy === "stable_key_alias")
     && persistedKey
     && incomingKey
     && persistedKey === incomingKey

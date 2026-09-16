@@ -12,6 +12,7 @@ import {
 import type { ChannelFulfillmentIngressService } from "../channel-fulfillment-ingress.service";
 import { processShopifyFulfillmentIngress } from "../shopify-fulfillment-ingress.adapter";
 import type { ChannelFulfillmentAuthorityService } from "../channel-fulfillment-authority.service";
+import { CHANNEL_FULFILLMENT_REPAIR_SOURCES } from "../channel-fulfillment-notification.policy";
 
 interface ShopifyFulfillmentStatusResponse {
   order?: {
@@ -151,7 +152,7 @@ export class ShopifyFulfillmentReconciler implements FulfillmentReconciler {
             shipmentId,
             {
               executeImmediately: true,
-              source: "shopify_fulfillment_reconciler",
+              source: CHANNEL_FULFILLMENT_REPAIR_SOURCES.shopifyReconciler,
             },
           );
           if (!isChannelFulfillmentHandoffComplete(result)) {

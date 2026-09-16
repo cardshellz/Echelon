@@ -24,7 +24,10 @@ import {
   InventoryAvailabilityBackfillService,
 } from "./inventory-availability-backfill.service";
 import { InventoryAvailabilityMasterDataError } from "../domain/inventory-availability-master-data.contracts";
-import { findPartitionedShareOverages } from "../domain/inventory-channel-exposure";
+import {
+  findPartitionedShareOverages,
+  summarizeCutoverDivergence,
+} from "../domain/inventory-channel-exposure";
 
 const actorSchema = z.string().trim().min(1).max(100);
 const ACTIVATION_DRY_RUN_CONTRACT_VERSION = "authority_scoped_publication_readiness_v4";
@@ -425,6 +428,9 @@ export class InventoryAvailabilityActivationDryRunService {
       readyProducts: products.length - blockedProducts,
       blockedProducts,
       publicationRows,
+      divergence: summarizeCutoverDivergence(
+        products.flatMap((product) => product.proposedPublications),
+      ),
     };
     const state = blockedProducts > 0
       || globalBlockers.some((entry) => entry.severity === "blocking")

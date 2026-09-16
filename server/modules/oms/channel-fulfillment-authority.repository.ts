@@ -20,7 +20,12 @@ import {
   evaluateChannelFulfillmentWritebackPolicy,
   type ChannelFulfillmentWritebackPolicyDecision,
 } from "./channel-fulfillment-authority.policy";
-import { resolveProviderOrderId } from "./shipping-engine-order-identity";
+import { PROVIDER_ORDER_IDENTITY_POLICIES, resolveProviderOrderId } from "./shipping-engine-order-identity";
+import { resolveChannelFulfillmentNotifyCustomer } from "./channel-fulfillment-notification.policy";
+import {
+  ChannelFulfillmentQuantityAuthorityError,
+  deriveChannelFulfillmentQuantityAuthority,
+} from "./channel-fulfillment-quantity-authority";
 import {
   MAX_INHERITED_COMMERCIAL_INTENTS,
   validateInheritedCommercialIntents,
@@ -49,10 +54,14 @@ const materializeInputSchema = z.object({
   correlationId: optionalIdentifier(100),
   causationId: optionalIdentifier(100),
   suppressChannelWriteback: z.boolean().optional().default(false),
+  // Omission preserves existing command intent; explicit values cannot rewrite it.
+  notifyCustomer: z.boolean().optional(),
   suppressChannelProviders: z.array(
     z.string().trim().min(1).max(40).transform((value) => value.toLowerCase()),
   ).max(20).optional(),
   legacyHeaderPolicy: z.enum(["strict", "aggregate_projection"]).optional().default("strict"),
+  // A proven parent-order alias must not relax exact package/header checks.
+  providerOrderIdentityPolicy: z.enum(PROVIDER_ORDER_IDENTITY_POLICIES).optional().default("strict"),
 }).strict();
 
 export type MaterializePhysicalPackageInput = z.input<typeof materializeInputSchema>;
@@ -223,6 +232,7 @@ export interface ClaimChannelFulfillmentCommandsInput {
 
 export interface ChannelFulfillmentAuthorityRepository {
   resolveLegacyPhysicalPackage(legacyWmsShipmentId: number): Promise<ResolvedLegacyPhysicalPackage>;
+  validatePhysicalPackageIdentity(input: MaterializePhysicalPackageInput): Promise<void>;
   materializePhysicalPackage(input: MaterializePhysicalPackageInput): Promise<MaterializePhysicalPackageResult>;
   materializePackageAllocationCommercialFulfillment(
     input: MaterializePackageAllocationCommercialFulfillmentInput,
@@ -269,6 +279,10 @@ interface LegacyPackageRow {
   oms_financial_status: string | null;
   paid_quantity: number | null;
   authority_fulfillable_quantity: number | null;
+  cancelled_quantity: number | null;
+  refunded_quantity: number | null;
+  refund_cancel_quantity: number | null;
+  refund_other_quantity: number | null;
   max_authorized_quantity: number | null;
 }
 
@@ -285,7 +299,8 @@ interface CanonicalCustomerItem {
   sku: string;
   quantityShipped: number;
   quantityPlanned: number;
-  currentAuthorizedQuantity: number;
+  commercialAuthorizedQuantity: number;
+  quantityAuthority: ReturnType<typeof deriveChannelFulfillmentQuantityAuthority>;
   warehouseId: number | null;
   priorityRank: string | null;
   shipToSnapshot: Record<string, unknown>;
@@ -603,7 +618,6 @@ function normalizeCustomerItems(rows: readonly LegacyPackageRow[]): {
     const omsOrderLineId = asPositiveInteger(row.oms_order_line_id);
     const quantityShipped = asPositiveInteger(row.quantity_shipped);
     const quantityPlanned = asPositiveInteger(row.max_authorized_quantity);
-    const currentAuthorizedQuantity = Number(row.authority_fulfillable_quantity ?? 0);
     const channelProvider = normalizedNullable(row.channel_provider)?.toLowerCase() ?? null;
     const channelOrderLineId = normalizedNullable(row.channel_order_line_id);
     const lineFulfillmentProvider = (
@@ -651,20 +665,25 @@ function normalizeCustomerItems(rows: readonly LegacyPackageRow[]): {
         },
       );
     }
-    if (
-      !Number.isInteger(currentAuthorizedQuantity)
-      || currentAuthorizedQuantity < 0
-      || (quantityPlanned !== null && currentAuthorizedQuantity > quantityPlanned)
-    ) {
-      throw new FulfillmentAuthorityError(
-        "CANONICAL_STATE_CONFLICT",
-        `OMS line ${omsOrderLineId} has invalid current fulfillment authority`,
-        {
-          omsOrderLineId,
-          authorityFulfillableQuantity: row.authority_fulfillable_quantity,
-          lifetimeAuthorizedQuantity: quantityPlanned,
-        },
-      );
+    let quantityAuthority: CanonicalCustomerItem["quantityAuthority"];
+    try {
+      quantityAuthority = deriveChannelFulfillmentQuantityAuthority({
+        lifetimePaidQuantity: quantityPlanned,
+        paidQuantity: row.paid_quantity,
+        channelRemainingQuantity: row.authority_fulfillable_quantity,
+        cancelledQuantity: row.cancelled_quantity,
+        refundedQuantity: row.refunded_quantity,
+        refundCancelQuantity: row.refund_cancel_quantity,
+        refundOtherQuantity: row.refund_other_quantity,
+      });
+    } catch (error) {
+      if (!(error instanceof ChannelFulfillmentQuantityAuthorityError)) throw error;
+      // Preserve the repository's existing reviewable-error contract, with the
+      // exact line and package plus validation issues for the operations audit.
+      throw new FulfillmentAuthorityError("CANONICAL_STATE_CONFLICT", error.message, {
+        omsOrderLineId, legacyWmsShipmentItemId,
+        quantityAuthorityError: error.code, ...error.context,
+      });
     }
     const wmsOmsOrderRef = normalizedNullable(row.wms_oms_order_ref);
     const omsExternalOrderId = normalizedNullable(row.oms_external_order_id);
@@ -710,7 +729,8 @@ function normalizeCustomerItems(rows: readonly LegacyPackageRow[]): {
       sku,
       quantityShipped,
       quantityPlanned,
-      currentAuthorizedQuantity,
+      commercialAuthorizedQuantity: quantityAuthority.commercialAuthorizedQuantity,
+      quantityAuthority,
       warehouseId: asPositiveInteger(row.warehouse_id),
       priorityRank: normalizedNullable(row.priority_rank),
       shipToSnapshot: row.ship_to_snapshot ?? {},
@@ -870,6 +890,10 @@ async function loadPackageAllocationCommercialCustomerItems(
       oms_order.financial_status AS oms_financial_status,
       oms_line.paid_quantity::int AS paid_quantity,
       oms_line.authority_fulfillable_quantity::int AS authority_fulfillable_quantity,
+      oms_line.cancelled_quantity::int AS cancelled_quantity,
+      oms_line.refunded_quantity::int AS refunded_quantity,
+      refund.refund_cancel_quantity,
+      refund.refund_other_quantity,
       GREATEST(
         COALESCE(oms_line.paid_quantity, 0),
         COALESCE(authority.max_paid_quantity, 0)
@@ -902,6 +926,15 @@ async function loadPackageAllocationCommercialCustomerItems(
       FROM oms.oms_order_line_authority_events AS event
       WHERE event.order_line_id = oms_line.id
     ) AS authority ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT
+        COALESCE(SUM(adjustment.quantity) FILTER (WHERE adjustment.restock_policy = 'cancel'), 0)::int AS refund_cancel_quantity,
+        COALESCE(SUM(adjustment.quantity) FILTER (WHERE adjustment.restock_policy IS DISTINCT FROM 'cancel'), 0)::int AS refund_other_quantity
+      FROM oms.order_line_adjustments AS adjustment
+      WHERE adjustment.order_line_id = oms_line.id
+        AND adjustment.order_id = oms_order.id
+        AND adjustment.adjustment_type = 'refund'
+    ) AS refund ON TRUE
     ORDER BY source.source_wms_shipment_item_id
     FOR UPDATE OF shipment
   `));
@@ -1195,8 +1228,9 @@ async function findOrCreatePlanLine(
     quantity_planned: number;
     quantity_cancelled: number;
     quantity_shipped: number;
+    authority_snapshot: { contractVersion?: number; quantityAuthority?: Partial<CanonicalCustomerItem["quantityAuthority"]> } | null;
   }>(await tx.execute(sql`
-    SELECT id, wms_order_item_id, quantity_planned, quantity_cancelled, quantity_shipped
+    SELECT id, wms_order_item_id, quantity_planned, quantity_cancelled, quantity_shipped, authority_snapshot
     FROM wms.fulfillment_plan_lines
     WHERE fulfillment_plan_id = ${fulfillmentPlanId}
       AND oms_order_line_id = ${item.omsOrderLineId}
@@ -1230,19 +1264,24 @@ async function findOrCreatePlanLine(
       );
     }
 
-    const quantityCancelled = item.quantityPlanned - item.currentAuthorizedQuantity;
+    const quantityCancelled = item.quantityAuthority.quantityCancelled;
     if (
       persistedPlanned !== item.quantityPlanned
       || Number(existing.quantity_cancelled) !== quantityCancelled
+      || existing.authority_snapshot?.contractVersion !== 2
+      || Object.entries(item.quantityAuthority).some(([key, value]) => (
+        existing.authority_snapshot?.quantityAuthority?.[key as keyof CanonicalCustomerItem["quantityAuthority"]] !== value
+      ))
     ) {
       await tx.execute(sql`
         UPDATE wms.fulfillment_plan_lines
         SET quantity_planned = ${item.quantityPlanned},
             quantity_cancelled = ${quantityCancelled},
             authority_snapshot = ${JSON.stringify({
-              contractVersion: 1,
+              contractVersion: 2,
               lifetimeAuthorizedQuantity: item.quantityPlanned,
-              currentAuthorizedQuantity: item.currentAuthorizedQuantity,
+              currentAuthorizedQuantity: item.commercialAuthorizedQuantity,
+              quantityAuthority: item.quantityAuthority,
               channelOrderLineId: item.channelOrderLineId,
             })}::jsonb,
             updated_at = NOW()
@@ -1252,7 +1291,7 @@ async function findOrCreatePlanLine(
     return Number(existing.id);
   }
 
-  const quantityCancelled = item.quantityPlanned - item.currentAuthorizedQuantity;
+  const quantityCancelled = item.quantityAuthority.quantityCancelled;
 
   const inserted = firstRow<{ id: number }>(await tx.execute(sql`
     INSERT INTO wms.fulfillment_plan_lines (
@@ -1279,9 +1318,10 @@ async function findOrCreatePlanLine(
       0,
       'planned',
       ${JSON.stringify({
-        contractVersion: 1,
+        contractVersion: 2,
         lifetimeAuthorizedQuantity: item.quantityPlanned,
-        currentAuthorizedQuantity: item.currentAuthorizedQuantity,
+        currentAuthorizedQuantity: item.commercialAuthorizedQuantity,
+        quantityAuthority: item.quantityAuthority,
         channelOrderLineId: item.channelOrderLineId,
       })}::jsonb,
       NOW(),
@@ -1439,21 +1479,24 @@ async function findOrCreateRequestItem(
   return Number(inserted.id);
 }
 
-async function findOrCreateShippingEngineOrder(
+interface ExistingShippingEngineOrderRow {
+  id: number;
+  provider_order_id: string | null;
+  provider_order_key: string | null;
+  incoming_provider_order_id_already_aliased: boolean;
+}
+
+async function loadExistingShippingEngineOrders(
   tx: any,
   input: ReturnType<typeof canonicalizeInput>,
-): Promise<number> {
+  lockForUpdate: boolean,
+): Promise<ExistingShippingEngineOrderRow[]> {
   const commandKey = buildShippingEngineCommandKey({
     provider: input.shippingProvider,
     providerOrderId: input.providerOrderId,
     providerOrderKey: input.providerOrderKey,
   });
-  const existingRows = rowsOf<{
-    id: number;
-    provider_order_id: string | null;
-    provider_order_key: string | null;
-    incoming_provider_order_id_already_aliased: boolean;
-  }>(await tx.execute(sql`
+  return rowsOf<ExistingShippingEngineOrderRow>(await tx.execute(sql`
     SELECT
       engine.id,
       engine.provider_order_id,
@@ -1479,8 +1522,14 @@ async function findOrCreateShippingEngineOrder(
             AND provider_ref.provider_order_id = ${input.providerOrderId}
         )
       )
-    FOR UPDATE OF engine
+    ${lockForUpdate ? sql`FOR UPDATE OF engine` : sql``}
   `));
+}
+
+function validateShippingEngineOrderIdentity(
+  existingRows: readonly ExistingShippingEngineOrderRow[],
+  input: ReturnType<typeof canonicalizeInput>,
+): { existing: ExistingShippingEngineOrderRow | null; resolution: ReturnType<typeof resolveProviderOrderId> } {
   if (existingRows.length > 1) {
     throw new FulfillmentAuthorityError(
       "CANONICAL_STATE_CONFLICT",
@@ -1488,31 +1537,42 @@ async function findOrCreateShippingEngineOrder(
       { provider: input.shippingProvider, providerOrderId: input.providerOrderId, providerOrderKey: input.providerOrderKey },
     );
   }
-  const existing = existingRows[0];
+  const existing = existingRows[0] ?? null;
+  if (!existing) return { existing: null, resolution: "compatible" };
+  assertCompatibleIdentity("providerOrderKey", existing.provider_order_key, input.providerOrderKey, input.legacyWmsShipmentIds[0]);
+  const providerOrderIdResolution = resolveProviderOrderId({
+    legacyHeaderPolicy: input.legacyHeaderPolicy,
+    providerOrderIdentityPolicy: input.providerOrderIdentityPolicy,
+    persistedProviderOrderId: normalizedNullable(existing.provider_order_id),
+    persistedProviderOrderKey: normalizedNullable(existing.provider_order_key),
+    incomingProviderOrderId: input.providerOrderId,
+    incomingProviderOrderKey: input.providerOrderKey,
+    incomingProviderOrderIdAlreadyAliased:
+      existing.incoming_provider_order_id_already_aliased === true,
+  });
+  if (providerOrderIdResolution === "conflict") {
+    assertCompatibleIdentity(
+      "providerOrderId",
+      existing.provider_order_id,
+      input.providerOrderId,
+      input.legacyWmsShipmentIds[0],
+    );
+  }
+  return { existing, resolution: providerOrderIdResolution };
+}
+
+async function findOrCreateShippingEngineOrder(
+  tx: any,
+  input: ReturnType<typeof canonicalizeInput>,
+): Promise<number> {
+  const existingRows = await loadExistingShippingEngineOrders(tx, input, true);
+  const { existing, resolution } = validateShippingEngineOrderIdentity(existingRows, input);
   if (existing) {
-    assertCompatibleIdentity("providerOrderKey", existing.provider_order_key, input.providerOrderKey, input.legacyWmsShipmentIds[0]);
-    const providerOrderIdResolution = resolveProviderOrderId({
-      legacyHeaderPolicy: input.legacyHeaderPolicy,
-      persistedProviderOrderId: normalizedNullable(existing.provider_order_id),
-      persistedProviderOrderKey: normalizedNullable(existing.provider_order_key),
-      incomingProviderOrderId: input.providerOrderId,
-      incomingProviderOrderKey: input.providerOrderKey,
-      incomingProviderOrderIdAlreadyAliased:
-        existing.incoming_provider_order_id_already_aliased === true,
-    });
-    if (providerOrderIdResolution === "conflict") {
-      assertCompatibleIdentity(
-        "providerOrderId",
-        existing.provider_order_id,
-        input.providerOrderId,
-        input.legacyWmsShipmentIds[0],
-      );
-    }
     await recordShippingEngineOrderProviderRef(
       tx,
       Number(existing.id),
       input,
-      providerOrderIdResolution,
+      resolution,
     );
     await tx.execute(sql`
       UPDATE wms.shipping_engine_orders
@@ -1522,6 +1582,11 @@ async function findOrCreateShippingEngineOrder(
     return Number(existing.id);
   }
 
+  const commandKey = buildShippingEngineCommandKey({
+    provider: input.shippingProvider,
+    providerOrderId: input.providerOrderId,
+    providerOrderKey: input.providerOrderKey,
+  });
   const inserted = firstRow<{ id: number }>(await tx.execute(sql`
     INSERT INTO wms.shipping_engine_orders (
       shipment_request_id,
@@ -2101,7 +2166,7 @@ async function findLineWritebackDecisions(
       omsFinancialStatus: item.omsFinancialStatus,
       requiresReview: item.requiresReview,
       reviewReason: item.reviewReason,
-      currentAuthorizedQuantity: item.currentAuthorizedQuantity,
+      commercialAuthorizedQuantity: item.commercialAuthorizedQuantity,
       cumulativePhysicalQuantity: shippedQuantity,
     });
     decisions.set(fulfillmentPlanLineId, decision);
@@ -2189,6 +2254,7 @@ async function insertChannelCommand(
   const metadata = {
     contractVersion: 1,
     source: input.source,
+    notifyCustomer: command.notifyCustomer,
     shippingProvider: input.shippingProvider,
     providerPhysicalShipmentId: input.providerPhysicalShipmentId,
     providerOrderId: input.providerOrderId,
@@ -2370,6 +2436,7 @@ async function insertPackageAllocationShadowChannelCommand(
   const metadata = {
     contractVersion: 1,
     materializationContract: "package-allocation-commercial-shadow-v1",
+    notifyCustomer: command.notifyCustomer,
     packageAllocationPlanId: input.packageAllocationPlanId,
     source: input.source,
     shippingProvider: pkg.provider,
@@ -2842,6 +2909,7 @@ async function loadExistingChannelCommandSnapshots(
     carrier: string | null;
     shippingProvider: string | null;
     providerPhysicalShipmentId: string | null;
+    notifyCustomer: boolean;
     items: ChannelFulfillmentCommand["items"][number][];
   }>();
   for (const row of rows) {
@@ -2859,6 +2927,7 @@ async function loadExistingChannelCommandSnapshots(
       carrier: normalizedNullable(row.carrier),
       shippingProvider: normalizedNullable(metadata.shippingProvider)?.toLowerCase() ?? null,
       providerPhysicalShipmentId: normalizedNullable(metadata.providerPhysicalShipmentId),
+      notifyCustomer: resolveChannelFulfillmentNotifyCustomer(metadata.notifyCustomer),
       items: [],
     };
     const physicalShipmentItemId = asPositiveInteger(row.physical_shipment_item_id);
@@ -2962,6 +3031,7 @@ async function persistChannelCommandSet(
     incomingCommand: command,
     shippingProvider: input.shippingProvider,
     providerPhysicalShipmentId: input.providerPhysicalShipmentId,
+    requestedNotifyCustomer: input.notifyCustomer,
   });
   if (reconciliation.kind === "conflict") {
     const activeIds = existing
@@ -3021,6 +3091,7 @@ async function persistChannelCommandSet(
     reconciliation.missingItems,
   );
   const supplemental = planChannelFulfillmentCommands({
+    source: input.source,
     physicalShipmentId: command.physicalShipmentId,
     shippingProvider: input.shippingProvider,
     providerPhysicalShipmentId: input.providerPhysicalShipmentId,
@@ -3028,6 +3099,7 @@ async function persistChannelCommandSet(
     carrier: command.carrier,
     trackingUrl: command.trackingUrl,
     shippedAt: command.shippedAt,
+    notifyCustomer: reconciliation.notifyCustomer,
     items: reconciliation.missingItems.map((item) => ({
       physicalShipmentItemId: item.physicalShipmentItemId,
       shipmentRequestItemId: item.shipmentRequestItemId,
@@ -3055,8 +3127,26 @@ async function persistChannelCommandSet(
   return materialized;
 }
 
+type LegacyPackageHeaderRow = Pick<LegacyPackageRow,
+  | "legacy_shipment_id" | "shipment_status" | "persisted_shipping_provider"
+  | "persisted_provider_order_id" | "persisted_provider_order_key"
+  | "persisted_physical_identity" | "persisted_tracking_number" | "persisted_carrier"
+>;
+
+function requireProviderOrderIdentity(input: ReturnType<typeof canonicalizeInput>): string {
+  const identity = input.providerOrderId ?? input.providerOrderKey;
+  if (!identity) {
+    throw new FulfillmentAuthorityError(
+      "PROVIDER_ORDER_IDENTITY_MISSING",
+      "A provider order id or provider order key is required",
+      { shippingProvider: input.shippingProvider, providerPhysicalShipmentId: input.providerPhysicalShipmentId },
+    );
+  }
+  return identity;
+}
+
 function validateLegacyHeaders(
-  rows: readonly LegacyPackageRow[],
+  rows: readonly LegacyPackageHeaderRow[],
   input: ReturnType<typeof canonicalizeInput>,
 ): void {
   const foundIds = new Set(rows.map((row) => Number(row.legacy_shipment_id)));
@@ -3131,6 +3221,33 @@ function terminalStatusForOutcome(outcome: ChannelFulfillmentAttemptOutcome): st
 export function createChannelFulfillmentAuthorityRepository(
   db: any,
 ): ChannelFulfillmentAuthorityRepository {
+  async function validatePhysicalPackageIdentity(rawInput: MaterializePhysicalPackageInput): Promise<void> {
+    const input = canonicalizeInput(rawInput);
+    requireProviderOrderIdentity(input);
+    if (typeof db?.transaction !== "function") {
+      throw new FulfillmentAuthorityError("INVALID_INPUT", "Identity preview requires transactional database support");
+    }
+    // This is deliberately read-only, not a write-and-rollback simulation.
+    // Materialization repeats both gates with row locks because a preview can age.
+    await db.transaction(async (tx: any) => {
+      const rows = rowsOf<LegacyPackageHeaderRow>(await tx.execute(sql`
+        SELECT shipment.id AS legacy_shipment_id, shipment.status::text AS shipment_status,
+          COALESCE(NULLIF(BTRIM(shipment.shipping_engine), ''),
+            CASE WHEN shipment.shipstation_order_id IS NOT NULL THEN 'shipstation' END) AS persisted_shipping_provider,
+          COALESCE(NULLIF(BTRIM(shipment.engine_order_ref), ''), shipment.shipstation_order_id::text) AS persisted_provider_order_id,
+          NULLIF(BTRIM(shipment.shipstation_order_key), '') AS persisted_provider_order_key,
+          shipment.external_fulfillment_id AS persisted_physical_identity,
+          shipment.tracking_number AS persisted_tracking_number,
+          shipment.carrier AS persisted_carrier
+        FROM wms.outbound_shipments AS shipment
+        WHERE shipment.id IN (${buildIdList(input.legacyWmsShipmentIds)})
+        ORDER BY shipment.id
+      `));
+      validateLegacyHeaders(rows, input);
+      validateShippingEngineOrderIdentity(await loadExistingShippingEngineOrders(tx, input, false), input);
+    }, { isolationLevel: "repeatable read", accessMode: "read only" });
+  }
+
   async function resolveLegacyPhysicalPackage(
     legacyWmsShipmentId: number,
   ): Promise<ResolvedLegacyPhysicalPackage> {
@@ -3450,6 +3567,7 @@ export function createChannelFulfillmentAuthorityRepository(
       const persistedCommands: MaterializedChannelCommand[] = [];
       for (const materializedPackage of materializedPackages) {
         const commands = planChannelFulfillmentCommands({
+          source: input.source,
           physicalShipmentId: materializedPackage.physicalShipmentId,
           shippingProvider: materializedPackage.pkg.provider,
           providerPhysicalShipmentId: materializedPackage.pkg.providerPhysicalShipmentId,
@@ -3805,14 +3923,7 @@ export function createChannelFulfillmentAuthorityRepository(
     rawInput: MaterializePhysicalPackageInput,
   ): Promise<MaterializePhysicalPackageResult> {
     const input = canonicalizeInput(rawInput);
-    const providerOrderIdentity = input.providerOrderId ?? input.providerOrderKey;
-    if (!providerOrderIdentity) {
-      throw new FulfillmentAuthorityError(
-        "PROVIDER_ORDER_IDENTITY_MISSING",
-        "A provider order id or provider order key is required",
-        { shippingProvider: input.shippingProvider, providerPhysicalShipmentId: input.providerPhysicalShipmentId },
-      );
-    }
+    const providerOrderIdentity = requireProviderOrderIdentity(input);
     if (typeof db?.transaction !== "function") {
       throw new FulfillmentAuthorityError(
         "INVALID_INPUT",
@@ -3876,6 +3987,10 @@ export function createChannelFulfillmentAuthorityRepository(
           oms_order.financial_status AS oms_financial_status,
           oms_line.paid_quantity::int AS paid_quantity,
           oms_line.authority_fulfillable_quantity::int AS authority_fulfillable_quantity,
+          oms_line.cancelled_quantity::int AS cancelled_quantity,
+          oms_line.refunded_quantity::int AS refunded_quantity,
+          refund.refund_cancel_quantity,
+          refund.refund_other_quantity,
           GREATEST(
             COALESCE(oms_line.paid_quantity, 0),
             COALESCE(authority.max_paid_quantity, 0)
@@ -3896,6 +4011,15 @@ export function createChannelFulfillmentAuthorityRepository(
           FROM oms.oms_order_line_authority_events AS event
           WHERE event.order_line_id = oms_line.id
         ) AS authority ON TRUE
+        LEFT JOIN LATERAL (
+          SELECT
+            COALESCE(SUM(adjustment.quantity) FILTER (WHERE adjustment.restock_policy = 'cancel'), 0)::int AS refund_cancel_quantity,
+            COALESCE(SUM(adjustment.quantity) FILTER (WHERE adjustment.restock_policy IS DISTINCT FROM 'cancel'), 0)::int AS refund_other_quantity
+          FROM oms.order_line_adjustments AS adjustment
+          WHERE adjustment.order_line_id = oms_line.id
+            AND adjustment.order_id = oms_order.id
+            AND adjustment.adjustment_type = 'refund'
+        ) AS refund ON TRUE
         WHERE shipment.id IN (${idList})
         ORDER BY shipment.id, shipment_item.id
         FOR UPDATE OF shipment
@@ -4001,6 +4125,7 @@ export function createChannelFulfillmentAuthorityRepository(
       const commands = channelEligibleCustomerItems.length === 0
         ? []
         : planChannelFulfillmentCommands({
+          source: input.source,
           physicalShipmentId,
           shippingProvider: input.shippingProvider,
           providerPhysicalShipmentId: input.providerPhysicalShipmentId,
@@ -4008,6 +4133,7 @@ export function createChannelFulfillmentAuthorityRepository(
           carrier: input.carrier!,
           trackingUrl: input.trackingUrl,
           shippedAt: input.shippedAt?.toISOString() ?? null,
+          notifyCustomer: input.notifyCustomer,
           items: channelEligibleCustomerItems.map((item) => ({
             physicalShipmentItemId: item.physicalShipmentItemId,
             shipmentRequestItemId: item.shipmentRequestItemId,
@@ -4358,6 +4484,7 @@ export function createChannelFulfillmentAuthorityRepository(
 
   return {
     resolveLegacyPhysicalPackage,
+    validatePhysicalPackageIdentity,
     materializePhysicalPackage,
     materializePackageAllocationCommercialFulfillment,
     activatePackageAllocationCommercialFulfillment,

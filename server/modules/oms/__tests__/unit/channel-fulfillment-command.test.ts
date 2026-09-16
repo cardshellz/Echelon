@@ -1,4 +1,8 @@
 import { describe, expect, it } from "vitest";
+import {
+  CHANNEL_FULFILLMENT_REPAIR_SOURCES,
+  resolveChannelFulfillmentNotifyCustomer,
+} from "../../channel-fulfillment-notification.policy";
 
 import {
   ChannelFulfillmentPlanningError,
@@ -34,6 +38,62 @@ function packageInput(
 }
 
 describe("planChannelFulfillmentCommands", () => {
+  it.each(Object.values(CHANNEL_FULFILLMENT_REPAIR_SOURCES))("binds silent repair provenance %s into the request hash", source => {
+    const [repair] = planChannelFulfillmentCommands(packageInput({ source }));
+    const [silent] = planChannelFulfillmentCommands(packageInput({ notifyCustomer: false }));
+    const [normal] = planChannelFulfillmentCommands(packageInput());
+    expect(repair).toEqual(silent);
+    expect(repair.commandKey).toBe(normal.commandKey);
+    expect(repair.requestHash).not.toBe(normal.requestHash);
+    expect(() => planChannelFulfillmentCommands(packageInput({ source, notifyCustomer: true })))
+      .toThrowError(expect.objectContaining({ code: "SILENT_REPAIR_NOTIFICATION_REVIEW_REQUIRED" }));
+  });
+
+  it("silences only Shopify in a combined multi-channel repair", () => {
+    const input = packageInput({ source: CHANNEL_FULFILLMENT_REPAIR_SOURCES.outboundSweep });
+    const commands = planChannelFulfillmentCommands({ ...input, items: [...input.items, {
+      ...input.items[0], physicalShipmentItemId: 8002, shipmentRequestItemId: 9002,
+      omsOrderId: 1002, omsOrderLineId: 1102, channelProvider: "ebay", channelOrderLineId: "ebay-line-2",
+    }] });
+    expect(commands.map(({ channelProvider, notifyCustomer }) => ({ channelProvider, notifyCustomer }))).toEqual([
+      { channelProvider: "ebay", notifyCustomer: true }, { channelProvider: "shopify", notifyCustomer: false },
+    ]);
+  });
+
+  it("keeps normal hashes stable and binds silent intent without creating another command key", () => {
+    const [normal] = planChannelFulfillmentCommands(packageInput());
+    const [explicit] = planChannelFulfillmentCommands(packageInput({ notifyCustomer: true }));
+    const [silent] = planChannelFulfillmentCommands(packageInput({ notifyCustomer: false }));
+    expect(normal.notifyCustomer).toBe(true);
+    expect(silent.notifyCustomer).toBe(false);
+    // Fixture's original v1 hash, before notification policy was introduced.
+    expect(normal.requestHash).toBe("b1714068380923ae3b3c4adf277b962e880436f599ba533f1a7a56e2af2d3ca7");
+    expect(normal.requestHash).toBe(explicit.requestHash);
+    expect(silent.requestHash).not.toBe(normal.requestHash);
+    expect(silent.commandKey).toBe(normal.commandKey);
+    expect(planChannelFulfillmentCommands(packageInput({ notifyCustomer: false }))).toEqual([silent]);
+  });
+
+  it.each([null, "false", 0, {}, []])("rejects malformed notification intent %j", (notifyCustomer) => {
+    expect(() => planChannelFulfillmentCommands(packageInput({ notifyCustomer: notifyCustomer as never })))
+      .toThrowError(expect.objectContaining({ code: "INVALID_PHYSICAL_SHIPMENT" }));
+    expect(() => resolveChannelFulfillmentNotifyCustomer(notifyCustomer))
+      .toThrowError(expect.objectContaining({ code: "INVALID_CHANNEL_FULFILLMENT_NOTIFICATION_POLICY" }));
+  });
+
+  it("defaults only missing legacy notification intent, not malformed values", () => {
+    expect(resolveChannelFulfillmentNotifyCustomer(undefined)).toBe(true);
+    expect(resolveChannelFulfillmentNotifyCustomer(true)).toBe(true);
+    expect(resolveChannelFulfillmentNotifyCustomer(false)).toBe(false);
+  });
+
+  it("rejects silent intent for a provider without suppression support", () => {
+    const input = packageInput();
+    expect(() => planChannelFulfillmentCommands({ ...input, notifyCustomer: false,
+      items: input.items.map(item => ({ ...item, channelProvider: "ebay" })) }))
+      .toThrowError(expect.objectContaining({ code: "UNSUPPORTED_SILENT_FULFILLMENT" }));
+  });
+
   it("creates one deterministic command for a single-order package", () => {
     const input = packageInput();
 

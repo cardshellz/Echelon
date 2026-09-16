@@ -190,6 +190,7 @@ function adminView(state: "preview" | "live", revision: string) {
         providerAccount: null,
       }],
     }],
+    dropshipDestinationChannelId: null,
     dropshipStores: [],
     publicationTargets: [{
       id: 5,

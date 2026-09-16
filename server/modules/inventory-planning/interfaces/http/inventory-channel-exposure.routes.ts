@@ -16,6 +16,8 @@ import {
   savePublicationSourceBindingDraftRequestSchema,
   savePublicationVariantMappingDraftRequestSchema,
   setInventoryPublicationTargetPreviewStateRequestSchema,
+  setUpChannelDestinationsRequestSchema,
+  setUpChannelDestinationsResultSchema,
   stopInventoryPublicationTargetRequestSchema,
 } from "@shared/types/inventory-channel-exposure";
 import { z } from "zod";
@@ -23,10 +25,13 @@ import { z } from "zod";
 import { requirePermission } from "../../../../routes/middleware";
 import {
   InventoryChannelExposureAdminService,
+  type DropshipDestinationChannelResolver,
   type InventoryChannelExposureAdminStore,
 } from "../../application/inventory-channel-exposure-admin.service";
 import { InventoryAvailabilityMasterDataError } from "../../domain/inventory-availability-master-data.contracts";
 import { PostgresInventoryChannelExposureAdminStore } from "../../infrastructure/inventory-channel-exposure-admin.repository";
+import { pool } from "../../../../db";
+import { createDropshipOmsChannelResolver } from "../../../dropship/infrastructure/dropship-oms-warehouse-assignments.reader";
 import { InventoryPublicationTargetStopService } from "../../application/inventory-publication-target-stop.service";
 import { PostgresInventoryPublicationTargetStopStore } from "../../infrastructure/inventory-publication-target-stop.repository";
 import { InventoryPublicationTargetResumeService } from "../../application/inventory-publication-target-resume.service";
@@ -37,6 +42,7 @@ type ChannelExposureService = Pick<
   InventoryChannelExposureAdminService,
   "getView" | "savePolicyDraft" | "saveSourceBindingDraft" | "preview"
   | "createPublicationTarget" | "setPublicationTargetPreviewState" | "saveVariantMappingDraft"
+  | "setUpChannelDestinations"
 >;
 
 export interface InventoryChannelExposureRouteDependencies {
@@ -44,6 +50,7 @@ export interface InventoryChannelExposureRouteDependencies {
   store?: InventoryChannelExposureAdminStore;
   targetStopService?: Pick<InventoryPublicationTargetStopService, "stop">;
   targetResumeService?: Pick<InventoryPublicationTargetResumeService, "review" | "resume">;
+  dropshipChannel?: DropshipDestinationChannelResolver;
 }
 
 export function registerInventoryChannelExposureRoutes(
@@ -52,6 +59,10 @@ export function registerInventoryChannelExposureRoutes(
 ): void {
   const service = dependencies.service ?? new InventoryChannelExposureAdminService(
     dependencies.store ?? new PostgresInventoryChannelExposureAdminStore(),
+    undefined,
+    // Dropship owns the definition of its single internal channel; this page
+    // reads it through that module's resolver instead of re-deriving the rule.
+    dependencies.dropshipChannel ?? createDropshipOmsChannelResolver(pool),
   );
   const targetStopService = dependencies.targetStopService
     ?? new InventoryPublicationTargetStopService(new PostgresInventoryPublicationTargetStopStore());
@@ -152,6 +163,26 @@ export function registerInventoryChannelExposureRoutes(
         ));
       } catch (error) {
         return sendError(res, error, "stop a live publication target");
+      }
+    },
+  );
+
+  app.post(
+    "/api/inventory-planning/admin/channel-exposure/channel-destinations",
+    // Setup, not activation: every target is created disabled, so this carries
+    // the same edit permission as registering one destination by hand.
+    requirePermission("inventory_planning", "edit"),
+    async (req, res) => {
+      try {
+        const result = setUpChannelDestinationsResultSchema.parse(
+          await service.setUpChannelDestinations(
+            parseBody(setUpChannelDestinationsRequestSchema, req.body),
+            auditActor(req),
+          ),
+        );
+        return res.status(result.alreadyApplied ? 200 : 201).json(result);
+      } catch (error) {
+        return sendError(res, error, "set up channel destinations");
       }
     },
   );

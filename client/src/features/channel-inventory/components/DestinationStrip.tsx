@@ -49,7 +49,7 @@ export function DestinationStrip({ view, targets, selectedId, onSelect, canEdit,
       {canEdit && (
         <Button type="button" variant="outline" className="h-auto min-h-[3.25rem] border-dashed" onClick={onAdd}>
           <Plus className="mr-1 h-4 w-4" aria-hidden="true" />
-          Add destination
+          Set up destinations
         </Button>
       )}
     </div>

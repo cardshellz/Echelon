@@ -15,7 +15,7 @@ function input(
     omsFinancialStatus: "paid",
     requiresReview: false,
     reviewReason: null,
-    currentAuthorizedQuantity: 2,
+    commercialAuthorizedQuantity: 2,
     cumulativePhysicalQuantity: 2,
     ...overrides,
   };
@@ -31,7 +31,7 @@ describe("channel fulfillment writeback authority policy", () => {
 
   it("blocks a package that exceeds authority reduced by cancellation or refund", () => {
     expect(evaluateChannelFulfillmentWritebackPolicy(input({
-      currentAuthorizedQuantity: 1,
+      commercialAuthorizedQuantity: 1,
       cumulativePhysicalQuantity: 2,
     }))).toEqual({
       allowed: false,
@@ -68,7 +68,7 @@ describe("channel fulfillment writeback authority policy", () => {
   it("blocks a classified shipment review without treating unrelated review as authority loss", () => {
     expect(evaluateChannelFulfillmentWritebackPolicy(input({
       requiresReview: true,
-      reviewReason: "physical_shipment_exceeds_current_line_authority",
+      reviewReason: "shipstation_shipped_after_cancel",
     })).reasons).toContain("blocking_review");
 
     expect(evaluateChannelFulfillmentWritebackPolicy(input({
@@ -83,4 +83,26 @@ describe("channel fulfillment writeback authority policy", () => {
     expect(Object.isFrozen(decision)).toBe(true);
     expect(Object.isFrozen(decision.reasons)).toBe(true);
   });
+
+  it("reevaluates a stale computed quantity review but does not bypass a real excess", () => {
+    const reviewed = input({
+      requiresReview: true,
+      reviewReason: "physical_shipment_exceeds_current_line_authority",
+    });
+    expect(evaluateChannelFulfillmentWritebackPolicy(reviewed).allowed).toBe(true);
+    expect(evaluateChannelFulfillmentWritebackPolicy({
+      ...reviewed, cumulativePhysicalQuantity: 3,
+    })).toEqual({ allowed: false, reasons: ["physical_quantity_exceeds_current_authority"] });
+  });
+
+  it.each([NaN, Infinity, -1, 0.5, Number.MAX_SAFE_INTEGER + 1])(
+    "fails closed on invalid quantity %s", (value) => {
+      expect(evaluateChannelFulfillmentWritebackPolicy(input({
+        commercialAuthorizedQuantity: value,
+      })).reasons).toContain("invalid_quantity_authority");
+      expect(evaluateChannelFulfillmentWritebackPolicy(input({
+        cumulativePhysicalQuantity: value,
+      })).reasons).toContain("invalid_quantity_authority");
+    },
+  );
 });

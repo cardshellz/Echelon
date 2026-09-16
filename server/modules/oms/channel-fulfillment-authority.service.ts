@@ -2,6 +2,12 @@ import { randomUUID } from "node:crypto";
 
 import { z } from "zod";
 import { ChannelFulfillmentProviderError } from "../channels/channel-fulfillment-provider.error";
+import {
+  ChannelFulfillmentNotificationPolicyError,
+  ChannelFulfillmentRepairNotificationError,
+  CHANNEL_FULFILLMENT_REPAIR_SOURCES,
+  resolvePersistedChannelFulfillmentNotifyCustomer,
+} from "./channel-fulfillment-notification.policy";
 
 import { EBAY_FULFILLMENT_IDEMPOTENCY_CONFLICT } from "../channels/adapters/ebay/ebay-api.client";
 import { isEbayTrackingConflictError } from "./channel-fulfillment-conflict";
@@ -138,6 +144,8 @@ function isReviewRequired(error: unknown): boolean {
   return (error instanceof ChannelFulfillmentProviderError && error.failureClass === "permanent")
     || error instanceof UnsupportedChannelProviderError
     || error instanceof FulfillmentAuthorityError
+    || error instanceof ChannelFulfillmentNotificationPolicyError
+    || error instanceof ChannelFulfillmentRepairNotificationError
     || error instanceof ChannelFulfillmentProviderInputError
     || errorCode(error) === SHOPIFY_PUSH_INVALID_INPUT
     || errorCode(error) === SHOPIFY_PUSH_PACKAGE_STATE_CONFLICT
@@ -201,6 +209,9 @@ function providerCommandInput(
     carrier: command.carrier,
     trackingUrl: command.trackingUrl,
     shippedAt: command.shippedAt,
+    notifyCustomer: resolvePersistedChannelFulfillmentNotifyCustomer(
+      command.channelProvider, command.metadata.source, command.metadata.notifyCustomer,
+    ),
     items: Object.freeze(command.items
       .slice()
       .sort((left, right) => left.legacyWmsShipmentItemId - right.legacyWmsShipmentItemId)
@@ -228,6 +239,13 @@ export function createCompatibilityChannelFulfillmentProviderExecutor(
     async execute(command) {
       const providerInput = providerCommandInput(command);
       const shipmentIds = providerInput.legacyWmsShipmentIds;
+      if (providerInput.notifyCustomer === false && command.channelProvider !== "shopify") {
+        throw new ChannelFulfillmentProviderError(
+          "UNSUPPORTED_SILENT_FULFILLMENT",
+          "Silent fulfillment is supported only by the Shopify adapter",
+          "permanent",
+        );
+      }
 
       if (command.channelProvider === "shopify") {
         if (typeof fulfillmentPush?.pushShopifyFulfillmentForCommand !== "function") {
@@ -254,6 +272,7 @@ export function createCompatibilityChannelFulfillmentProviderExecutor(
             legacyWmsShipmentIds: shipmentIds,
             fulfillmentIds: Object.freeze([...new Set(fulfillmentIds)]),
             alreadySatisfied,
+            notifyCustomer: providerInput.notifyCustomer,
           }),
         };
       }
@@ -476,7 +495,7 @@ export function createChannelFulfillmentAuthorityService(dependencies: {
     return recordPhysicalPackage({
       ...resolved,
       legacyWmsShipmentIds: [...resolved.legacyWmsShipmentIds],
-      source: options.source ?? "legacy_fulfillment_reconciliation",
+      source: options.source ?? CHANNEL_FULFILLMENT_REPAIR_SOURCES.legacyReconciliation,
       suppressChannelWriteback: options.suppressChannelWriteback ?? false,
       suppressChannelProviders: options.suppressChannelProviders == null
         ? undefined

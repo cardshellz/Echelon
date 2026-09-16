@@ -3,8 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
   EMPTY_POLICY_FORM,
   buildChannelRail,
-  buildDestinationRequest,
   describeDestination,
+  describeDropshipStore,
   describeIdentity,
   describePublishing,
   describeSupply,
@@ -128,6 +128,41 @@ describe("inheritance readout (display only)", () => {
   it("never lets a channel default inherit from anything", () => {
     const sources = resolveSavedFields(heads, { scopeType: "channel", channelId: 3 });
     expect(Object.values(sources).every((source) => source.kind === "unset")).toBe(true);
+  });
+});
+
+describe("dropship store labels", () => {
+  const store = (overrides: Partial<ReturnType<typeof baseStore>> = {}) => ({ ...baseStore(), ...overrides });
+  function baseStore() {
+    return {
+      id: 90,
+      vendorId: 1,
+      vendorName: "Vendor Co" as string | null,
+      platform: "ebay" as const,
+      status: "connected",
+      externalAccountLabel: "vendor-ebay" as string | null,
+      verifiedExternalAccountId: "vendor-user-1" as string | null,
+    };
+  }
+
+  it("uses the vendor name with the account when both are present", () => {
+    expect(describeDropshipStore(store())).toBe("Vendor Co · vendor-ebay");
+  });
+
+  // Regression: dropship.dropship_vendors.business_name is nullable, and a
+  // String(null) coercion used to render the literal word "null" as a name.
+  it("falls back to the account label when the vendor has no trading name", () => {
+    expect(describeDropshipStore(store({ vendorName: null }))).toBe("vendor-ebay");
+  });
+
+  it("falls back to the store id when neither name nor account label exists", () => {
+    expect(describeDropshipStore(store({ vendorName: null, externalAccountLabel: null })))
+      .toBe("store #90");
+  });
+
+  it("never renders the text null for a nameless vendor", () => {
+    const label = describeDropshipStore(store({ vendorName: null, externalAccountLabel: null }));
+    expect(label).not.toContain("null");
   });
 });
 
@@ -270,9 +305,26 @@ describe("destination setup", () => {
     expect(destinationOptionsFor(amazon, data)[0]).toMatchObject({ supported: false });
   });
 
-  it("offers dropship stores under any channel's rules but only where an adapter exists", () => {
-    const options = destinationOptionsFor(shopify, data).filter((option) => option.kind === "dropship_store_connection");
+  it("offers dropship stores only under the internal dropship channel, and only where an adapter exists", () => {
+    const dropshipChannel = data.channels.find((channel) => channel.id === data.dropshipDestinationChannelId)!;
+    const options = destinationOptionsFor(dropshipChannel, data).filter((option) => option.kind === "dropship_store_connection");
     expect(options.map((option) => [option.id, option.supported])).toEqual([[90, true], [91, false]]);
+  });
+
+  // Dropship quantities are planned and published against the one internal
+  // dropship channel, so a storefront must never be registerable under Shopify
+  // or eBay, where its channel_id would contradict the runtime.
+  it("never offers dropship stores under a marketplace channel", () => {
+    for (const channel of [shopify, ebay, amazon]) {
+      expect(destinationOptionsFor(channel, data).some((option) => option.kind === "dropship_store_connection")).toBe(false);
+    }
+  });
+
+  it("offers no dropship store at all when the internal dropship channel is not configured", () => {
+    const unconfigured = view({ dropshipDestinationChannelId: null });
+    const dropshipChannel = data.channels.find((channel) => channel.id === 7)!;
+    expect(destinationOptionsFor(dropshipChannel, unconfigured)
+      .some((option) => option.kind === "dropship_store_connection")).toBe(false);
   });
 
   it("does not offer an account-scoped destination that is already registered", () => {
@@ -280,22 +332,4 @@ describe("destination setup", () => {
     expect(destinationOptionsFor(ebay, registered).some((option) => option.kind === "channel_connection")).toBe(false);
   });
 
-  it("builds the registration with the first supply warehouse as the compatibility node", () => {
-    const [option] = destinationOptionsFor(shopify, data);
-    const result = buildDestinationRequest(3, { option: option!, externalScopeId: "gid://shopify/Location/2", supplyNodeIds: [8, 7], publisher: "echelon" });
-    expect(result).toEqual({ ok: true, request: {
-      destinationKind: "channel_connection", channelId: 3, channelConnectionId: 33, dropshipStoreConnectionId: null,
-      legacyFulfillmentNodeId: 7, providerScopeType: "location", externalScopeId: "gid://shopify/Location/2", publicationAuthority: "echelon",
-    } });
-  });
-
-  it("refuses incomplete or mismatched setup with a specific message", () => {
-    const [shopifyOption] = destinationOptionsFor(shopify, data);
-    const [ebayOption] = destinationOptionsFor(ebay, data);
-    expect(buildDestinationRequest(3, { option: null, externalScopeId: "", supplyNodeIds: [7], publisher: "echelon" })).toMatchObject({ ok: false });
-    expect(buildDestinationRequest(3, { option: shopifyOption!, externalScopeId: "  ", supplyNodeIds: [7], publisher: "echelon" })).toMatchObject({ ok: false, message: /Shopify location/ });
-    expect(buildDestinationRequest(3, { option: shopifyOption!, externalScopeId: "loc", supplyNodeIds: [], publisher: "echelon" })).toMatchObject({ ok: false, message: /at least one warehouse/ });
-    expect(buildDestinationRequest(4, { option: ebayOption!, externalScopeId: "someone-else", supplyNodeIds: [7], publisher: "echelon" })).toMatchObject({ ok: false, message: /verified account/ });
-    expect(buildDestinationRequest(6, { option: destinationOptionsFor(amazon, data)[0]!, externalScopeId: "x", supplyNodeIds: [7], publisher: "echelon" })).toMatchObject({ ok: false, message: /no inventory publishing adapter/ });
-  });
 });

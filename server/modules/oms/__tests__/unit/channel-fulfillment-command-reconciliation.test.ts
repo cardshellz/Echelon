@@ -39,6 +39,7 @@ function command(
     carrier: "UPS",
     trackingUrl: null,
     shippedAt: "2026-07-24T12:00:00.000Z",
+    notifyCustomer: true,
     items,
   };
 }
@@ -62,6 +63,35 @@ function snapshot(
 }
 
 describe("channel fulfillment command-set reconciliation", () => {
+  it("creates a silent repair remainder without changing an earlier notifying command", () => {
+    const existing = snapshot({ notifyCustomer: true });
+    const before = structuredClone(existing);
+    const result = reconcileChannelFulfillmentCommandSet({
+      existingCommands: [existing], incomingCommand: { ...command(), notifyCustomer: false },
+      shippingProvider: "shipstation", providerPhysicalShipmentId: "9001",
+    });
+    expect(result).toMatchObject({ kind: "compatible", notifyCustomer: false, missingItems: [secondItem] });
+    expect(existing).toEqual(before);
+  });
+
+  it.each(["pending", "retry", "success", "review"])("keeps silent intent on an ordinary %s replay and supplemental command", (pushStatus) => {
+    const result = reconcileChannelFulfillmentCommandSet({
+      existingCommands: [snapshot({ notifyCustomer: false, pushStatus, lastErrorCode: "COMMAND_REQUEST_CONFLICT" })],
+      incomingCommand: command(), shippingProvider: "shipstation", providerPhysicalShipmentId: "9001",
+    });
+    expect(result).toMatchObject({ kind: "compatible", notifyCustomer: false, missingItems: [secondItem] });
+  });
+
+  it.each([true, false])("rejects an explicit change to immutable notifyCustomer=%s", (notifyCustomer) => {
+    const result = reconcileChannelFulfillmentCommandSet({
+      existingCommands: [snapshot({ notifyCustomer, pushStatus: "pending" })],
+      incomingCommand: { ...command(), notifyCustomer: !notifyCustomer },
+      requestedNotifyCustomer: !notifyCustomer,
+      shippingProvider: "shipstation", providerPhysicalShipmentId: "9001",
+    });
+    expect(result).toMatchObject({ kind: "conflict", reason: "immutable_customer_notification_changed" });
+  });
+
   it("keeps an immutable exact subset and returns only uncovered physical items", () => {
     expect(reconcileChannelFulfillmentCommandSet({
       existingCommands: [snapshot()],
@@ -73,6 +103,7 @@ describe("channel fulfillment command-set reconciliation", () => {
       coveredItems: [firstItem],
       missingItems: [secondItem],
       requeueCommandIds: [],
+      notifyCustomer: true,
     });
   });
 

@@ -8,6 +8,7 @@ import {
 } from "../../infrastructure/scheduler-run-registry";
 import { EbayFulfillmentReconciler } from "./reconcilers/ebay.reconciler";
 import { ShopifyFulfillmentReconciler } from "./reconcilers/shopify.reconciler";
+import { CHANNEL_FULFILLMENT_REPAIR_SOURCES } from "./channel-fulfillment-notification.policy";
 import type { FulfillmentReconciler } from "./reconcilers/reconciler.interface";
 import type { ChannelFulfillmentIngressService } from "./channel-fulfillment-ingress.service";
 import type { ChannelFulfillmentAuthorityService } from "./channel-fulfillment-authority.service";
@@ -517,7 +518,7 @@ export async function runFulfillmentSweep(
       try {
         const result = await fulfillmentAuthority.ensureLegacyShipment(
           row.shipment_id,
-          { executeImmediately: true, source: "fulfillment_sweeper" },
+          { executeImmediately: true, source: CHANNEL_FULFILLMENT_REPAIR_SOURCES.outboundSweep },
         );
         const commands = result.materialized.channelCommands;
         const terminalBeforeDispatch = commands.filter((command: any) =>

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { z } from "zod";
+import { resolveNewChannelFulfillmentNotifyCustomer } from "./channel-fulfillment-notification.policy";
 
 const canonicalIdentifier = (field: string, maxLength: number) =>
   z.string({ required_error: `${field} is required` })
@@ -32,6 +33,8 @@ export const physicalShipmentForChannelFulfillmentSchema = z.object({
   carrier: canonicalIdentifier("carrier", 100),
   trackingUrl: z.string().trim().url().max(2_000).nullable().default(null),
   shippedAt: z.string().datetime({ offset: true }).nullable().default(null),
+  source: canonicalIdentifier("source", 80).optional(),
+  notifyCustomer: z.boolean().optional(),
   items: z.array(authorizedPhysicalShipmentItemSchema).min(1),
 }).strict();
 
@@ -57,6 +60,7 @@ export interface ChannelFulfillmentCommand {
   readonly carrier: string;
   readonly trackingUrl: string | null;
   readonly shippedAt: string | null;
+  readonly notifyCustomer: boolean;
   readonly items: readonly ChannelFulfillmentCommandItem[];
 }
 
@@ -64,6 +68,7 @@ export type ChannelFulfillmentPlanningErrorCode =
   | "INVALID_PHYSICAL_SHIPMENT"
   | "DUPLICATE_PHYSICAL_SHIPMENT_ITEM"
   | "CONFLICTING_CHANNEL_PROVIDER"
+  | "UNSUPPORTED_SILENT_FULFILLMENT"
   | "CONFLICTING_CHANNEL_ORDER_LINE";
 
 export class ChannelFulfillmentPlanningError extends Error {
@@ -210,6 +215,16 @@ export function planChannelFulfillmentCommands(
       || left.omsOrderId - right.omsOrderId
       || left.channelFulfillmentScopeKey.localeCompare(right.channelFulfillmentScopeKey))
     .map((group): ChannelFulfillmentCommand => {
+      const notifyCustomer = resolveNewChannelFulfillmentNotifyCustomer(
+        group.channelProvider, shipment.source, shipment.notifyCustomer,
+      );
+      if (!notifyCustomer && group.channelProvider !== "shopify") {
+        throw new ChannelFulfillmentPlanningError(
+          "UNSUPPORTED_SILENT_FULFILLMENT",
+          "Silent fulfillment is supported only by the Shopify adapter",
+          { channelProvider: group.channelProvider, omsOrderId: group.omsOrderId },
+        );
+      }
       const items = group.items.slice().sort(compareCommandItems);
       const requestHash = sha256(JSON.stringify({
         contractVersion: 1,
@@ -224,6 +239,9 @@ export function planChannelFulfillmentCommands(
         omsOrderId: group.omsOrderId,
         channelFulfillmentScopeKey: group.channelFulfillmentScopeKey,
         items,
+        // Keep existing notifying command hashes stable. Silent intent is a
+        // distinct immutable request, but never a new package/idempotency key.
+        ...(notifyCustomer ? {} : { notifyCustomer: false }),
       }));
 
       return Object.freeze({
@@ -242,6 +260,7 @@ export function planChannelFulfillmentCommands(
         carrier: shipment.carrier,
         trackingUrl: shipment.trackingUrl,
         shippedAt: shipment.shippedAt,
+        notifyCustomer,
         items: Object.freeze(items.map((item) => Object.freeze(item))),
       });
     });

@@ -36,7 +36,8 @@ function dryRun(products: ActivationDryRunProduct[]): InventoryActivationDryRun 
     requestHash: HASH, resultHash: HASH, catalogInputHash: HASH, catalogResultHash: HASH, requestedBy: "operator-1",
     reason: "Review all managed physical products", startedAt: NOW, completedAt: NOW,
     summary: { totalProducts: products.length, readyProducts: products.length, blockedProducts: 0,
-      publicationRows: products.reduce((count, row) => count + row.proposedPublications.length, 0) },
+      publicationRows: products.reduce((count, row) => count + row.proposedPublications.length, 0),
+      divergence: { rowsMatchingLegacy: 0, rowsAboveLegacy: 0, rowsBelowLegacy: 0, largestIncreaseUnits: "0", largestDecreaseUnits: "0" } },
     products, blockers: [], runtimeAuthorityChanged: false, providerWriteAttempted: false, outboxEnqueued: false, alreadyApplied: false };
 }
 function publication(targetId = 3, variantId = 4): ActivationDryRunProduct["proposedPublications"][number] {

@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
 
-import type {
-  ChannelExposurePolicyScope,
-  ChannelExposurePolicyValue,
-  ResolvedChannelExposurePolicy,
+import {
+  publicationScopeTypeFor,
+  type ChannelDestinationSkipReason,
+  type ChannelExposurePolicyScope,
+  type ChannelExposurePolicyValue,
+  type ResolvedChannelExposurePolicy,
 } from "@shared/types/inventory-channel-exposure";
 import { canonicalJson } from "@shared/utils/canonical-json";
 
@@ -203,4 +205,223 @@ function parseNonnegativeQuantity(value: string, field: string): bigint {
   } catch {
     throw new RangeError(`${field} must be a nonnegative integer quantity`);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Destination derivation
+// ---------------------------------------------------------------------------
+
+/**
+ * A channel connection as the derivation needs to see it. Deliberately plain
+ * data so the rule is testable without a database or an HTTP client.
+ */
+export interface DerivableChannelConnection {
+  id: number;
+  provider: string;
+  /** Primary location this connection already writes inventory to, if stored. */
+  shopifyLocationId: string | null;
+  /** Provider-verified account id; null when the credential does not carry one. */
+  verifiedAccountId: string | null;
+  label: string;
+}
+
+/** A dropship storefront as the derivation needs to see it. */
+export interface DerivableDropshipStore {
+  id: number;
+  platform: string;
+  verifiedExternalAccountId: string | null;
+  label: string;
+}
+
+/** An exact destination that already has a publication target. */
+export interface RegisteredDestinationIdentity {
+  destinationKind: "channel_connection" | "dropship_store_connection";
+  connectionId: number;
+  providerScopeType: "account" | "location";
+  externalScopeId: string;
+}
+
+export interface DerivedDestination {
+  destinationKind: "channel_connection" | "dropship_store_connection";
+  channelConnectionId: number | null;
+  dropshipStoreConnectionId: number | null;
+  providerScopeType: "account" | "location";
+  externalScopeId: string;
+  label: string;
+}
+
+export interface SkippedDestination {
+  destinationKind: "channel_connection" | "dropship_store_connection";
+  channelConnectionId: number | null;
+  dropshipStoreConnectionId: number | null;
+  providerScopeType?: "account" | "location";
+  externalScopeId?: string;
+  reason: ChannelDestinationSkipReason;
+  label: string;
+}
+
+export interface DestinationDerivation {
+  create: DerivedDestination[];
+  skipped: SkippedDestination[];
+}
+
+function identityKey(identity: RegisteredDestinationIdentity): string {
+  return [
+    identity.destinationKind,
+    identity.connectionId,
+    identity.providerScopeType,
+    identity.externalScopeId,
+  ].join(":");
+}
+
+/**
+ * Works out which destinations a channel's existing connections already imply.
+ *
+ * The rule is intentionally conservative: a destination is only derived when
+ * the provider has a publishing adapter AND the exact scope id is already
+ * recorded against the connection. Nothing is guessed. A Shopify connection
+ * with no stored location and an eBay credential with no verified account are
+ * both reported as skipped, never defaulted, because writing a quantity to the
+ * wrong location or account is a financial error.
+ *
+ * Dropship storefronts are passed in only for the one internal dropship
+ * channel; callers must not offer them for a marketplace channel.
+ */
+export function deriveChannelDestinations(input: {
+  connections: readonly DerivableChannelConnection[];
+  dropshipStores: readonly DerivableDropshipStore[];
+  registered: readonly RegisteredDestinationIdentity[];
+}): DestinationDerivation {
+  const taken = new Set(input.registered.map(identityKey));
+  const create: DerivedDestination[] = [];
+  const skipped: SkippedDestination[] = [];
+
+  const consider = (
+    destinationKind: DerivedDestination["destinationKind"],
+    connectionId: number,
+    provider: string,
+    scopeId: string | null,
+    label: string,
+  ): void => {
+    const base = {
+      destinationKind,
+      channelConnectionId: destinationKind === "channel_connection" ? connectionId : null,
+      dropshipStoreConnectionId: destinationKind === "dropship_store_connection" ? connectionId : null,
+      label,
+    };
+    const providerScopeType = publicationScopeTypeFor(provider);
+    if (providerScopeType === null) {
+      skipped.push({ ...base, reason: "no_publishing_adapter" });
+      return;
+    }
+    if (scopeId === null || scopeId.trim().length === 0) {
+      skipped.push({
+        ...base,
+        providerScopeType,
+        reason: providerScopeType === "location" ? "no_shopify_location" : "no_verified_account",
+      });
+      return;
+    }
+    const externalScopeId = scopeId.trim();
+    const entry = { ...base, providerScopeType, externalScopeId };
+    if (taken.has(identityKey({ destinationKind, connectionId, providerScopeType, externalScopeId }))) {
+      skipped.push({ ...entry, reason: "already_registered" });
+      return;
+    }
+    create.push(entry);
+  };
+
+  for (const connection of input.connections) {
+    const scopeType = publicationScopeTypeFor(connection.provider);
+    consider(
+      "channel_connection",
+      connection.id,
+      connection.provider,
+      scopeType === "location" ? connection.shopifyLocationId : connection.verifiedAccountId,
+      connection.label,
+    );
+  }
+  for (const store of input.dropshipStores) {
+    consider(
+      "dropship_store_connection",
+      store.id,
+      store.platform,
+      store.verifiedExternalAccountId,
+      store.label,
+    );
+  }
+  return { create, skipped };
+}
+
+// ---------------------------------------------------------------------------
+// Cutover divergence
+// ---------------------------------------------------------------------------
+
+/** One readiness row's legacy and canonical quantities, as whole sellable units. */
+export interface PublicationQuantityComparison {
+  legacyCalculatedUnits: string;
+  desiredUnits: string;
+}
+
+export interface CutoverDivergenceSummary {
+  /** Rows where canonical would publish exactly what legacy publishes today. */
+  rowsMatchingLegacy: number;
+  rowsAboveLegacy: number;
+  rowsBelowLegacy: number;
+  /** Largest single increase and decrease, as non-negative unit counts. */
+  largestIncreaseUnits: string;
+  largestDecreaseUnits: string;
+}
+
+/**
+ * Compares, row by row, what the canonical configuration would publish against
+ * what the legacy allocator publishes today.
+ *
+ * This exists because readiness otherwise only refuses a quantity that exceeds
+ * canonical ATP. A rule entered with the wrong unit basis — the legacy caps and
+ * floors are base pieces while the canonical fields are whole sellable units —
+ * produces a number that is wrong but still under ATP, so nothing refuses it.
+ * The same is true of a legacy days-of-cover floor, which has no canonical
+ * equivalent at all and simply stops being applied.
+ *
+ * Divergence is reported, never treated as a failure: publishing different
+ * numbers is the point of the new planner, and only an operator can say which
+ * differences are intended. What this removes is the need to read every row of
+ * a full-catalog report by hand to notice that some are not.
+ */
+export function summarizeCutoverDivergence(
+  rows: readonly PublicationQuantityComparison[],
+): CutoverDivergenceSummary {
+  let rowsMatchingLegacy = 0;
+  let rowsAboveLegacy = 0;
+  let rowsBelowLegacy = 0;
+  const zero = BigInt(0);
+  let largestIncrease = zero;
+  let largestDecrease = zero;
+
+  for (const row of rows) {
+    // BigInt throughout: these are Postgres bigints carried as strings, and a
+    // Number conversion would silently lose precision on a large catalog.
+    const difference = BigInt(row.desiredUnits) - BigInt(row.legacyCalculatedUnits);
+    if (difference === zero) {
+      rowsMatchingLegacy += 1;
+      continue;
+    }
+    if (difference > zero) {
+      rowsAboveLegacy += 1;
+      if (difference > largestIncrease) largestIncrease = difference;
+      continue;
+    }
+    rowsBelowLegacy += 1;
+    const magnitude = difference * BigInt(-1);
+    if (magnitude > largestDecrease) largestDecrease = magnitude;
+  }
+
+  return {
+    rowsMatchingLegacy,
+    rowsAboveLegacy,
+    rowsBelowLegacy,
+    largestIncreaseUnits: largestIncrease.toString(),
+    largestDecreaseUnits: largestDecrease.toString(),
+  };
 }

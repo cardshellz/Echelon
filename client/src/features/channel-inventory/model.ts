@@ -65,6 +65,19 @@ export function providerLabel(provider: string): string {
   return PROVIDER_LABELS[provider] ?? provider.replace(/_/g, " ");
 }
 
+/**
+ * Operator-facing label for a dropship vendor store.
+ *
+ * The vendor trading name is optional in the catalog, so the label falls back
+ * through identifiers that are always present instead of rendering a blank or
+ * a fabricated name. The store id is the last resort because it is the only
+ * value guaranteed to exist and to be unique.
+ */
+export function describeDropshipStore(store: DropshipStore): string {
+  const account = store.externalAccountLabel ?? `store #${store.id}`;
+  return store.vendorName ? `${store.vendorName} · ${account}` : account;
+}
+
 export type PublisherKey = Target["publicationAuthority"];
 
 export const PUBLISHER_LABELS: Record<PublisherKey, { label: string; description: string }> = {
@@ -116,7 +129,7 @@ export function describeDestination(target: Target, view: View): DestinationIden
   return {
     id: target.id,
     title: store
-      ? `${store.vendorName} · ${store.externalAccountLabel ?? `store #${store.id}`}`
+      ? describeDropshipStore(store)
       : `Dropship store #${target.dropshipStoreConnectionId}`,
     scope: describeScope(target, provider),
     provider,
@@ -804,10 +817,16 @@ export function destinationOptionsFor(channel: Channel, view: View): Destination
       supported: adapter !== null,
     };
   });
-  const stores: DestinationOption[] = view.dropshipStores.map((store) => ({
+  // Dropship storefronts belong to the one internal dropship channel, never to
+  // a marketplace channel. Offering them under Shopify or eBay would invite a
+  // target whose channel_id contradicts how dropship quantities are actually
+  // planned and published.
+  const hostsDropshipStores = view.dropshipDestinationChannelId !== null
+    && channel.id === view.dropshipDestinationChannelId;
+  const stores: DestinationOption[] = (hostsDropshipStores ? view.dropshipStores : []).map((store) => ({
     kind: "dropship_store_connection",
     id: store.id,
-    label: `${store.vendorName} · ${providerLabel(store.platform)} · ${store.externalAccountLabel ?? `store #${store.id}`}`,
+    label: `${describeDropshipStore(store)} · ${providerLabel(store.platform)}`,
     provider: store.platform,
     scopeType: "account",
     verifiedAccountId: store.verifiedExternalAccountId,
@@ -825,63 +844,3 @@ export function destinationOptionsFor(channel: Channel, view: View): Destination
       && existing.has(`${option.kind}:${option.id}:account:${option.verifiedAccountId}`)));
 }
 
-export interface DestinationDraft {
-  option: DestinationOption | null;
-  externalScopeId: string;
-  supplyNodeIds: number[];
-  publisher: PublisherKey;
-}
-
-export type DestinationDraftResult =
-  | { ok: true; request: {
-    destinationKind: Target["destinationKind"];
-    channelId: number;
-    channelConnectionId: number | null;
-    dropshipStoreConnectionId: number | null;
-    legacyFulfillmentNodeId: number;
-    providerScopeType: "location" | "account";
-    externalScopeId: string;
-    publicationAuthority: PublisherKey;
-  } }
-  | { ok: false; message: string };
-
-/**
- * Builds the registration request. The legacy single-node column is a
- * compatibility shadow the server still requires; it is filled with the first
- * chosen supply warehouse and the full set is saved as the supply binding
- * immediately after registration. Only the versioned binding feeds planning.
- */
-export function buildDestinationRequest(channelId: number, draft: DestinationDraft): DestinationDraftResult {
-  if (!draft.option) return { ok: false, message: "Choose where the quantities should go." };
-  if (!draft.option.supported) {
-    return { ok: false, message: `${providerLabel(draft.option.provider)} has no inventory publishing adapter yet.` };
-  }
-  const externalScopeId = draft.externalScopeId.trim();
-  if (externalScopeId.length === 0) {
-    return {
-      ok: false,
-      message: draft.option.scopeType === "location"
-        ? "Choose the Shopify location that should receive quantities."
-        : "The verified seller account id is required.",
-    };
-  }
-  if (draft.option.scopeType === "account" && draft.option.verifiedAccountId !== null
-    && externalScopeId !== draft.option.verifiedAccountId) {
-    return { ok: false, message: "The account id must match the provider-verified account for this connection." };
-  }
-  const [firstNode] = [...draft.supplyNodeIds].sort((a, b) => a - b);
-  if (firstNode === undefined) return { ok: false, message: "Choose at least one warehouse that can supply this destination." };
-  return {
-    ok: true,
-    request: {
-      destinationKind: draft.option.kind,
-      channelId,
-      channelConnectionId: draft.option.kind === "channel_connection" ? draft.option.id : null,
-      dropshipStoreConnectionId: draft.option.kind === "dropship_store_connection" ? draft.option.id : null,
-      legacyFulfillmentNodeId: firstNode,
-      providerScopeType: draft.option.scopeType,
-      externalScopeId,
-      publicationAuthority: draft.publisher,
-    },
-  };
-}
