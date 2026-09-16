@@ -1078,7 +1078,7 @@ export default function PurchaseOrderEdit() {
             description: "",
             parentClientId: null,
             productVariantId: l.productVariantId,
-            expectedReceiveVariantId: l.expectedReceiveVariantId ?? l.productVariantId ?? null,
+            expectedReceiveVariantId: l.expectedReceiveVariantId ?? null,
             expectedReceiveUnitsPerVariant: l.expectedReceiveUnitsPerVariant ?? 1,
             productId: l.productId,
             productName: l.productName,
@@ -1194,7 +1194,10 @@ export default function PurchaseOrderEdit() {
             ? null
             : clientIdByServerLineId.get(Number(l.parentLineId)) ?? null,
         productVariantId: l.productVariantId ?? null,
-        expectedReceiveVariantId: l.expectedReceiveVariantId ?? l.productVariantId ?? null,
+        // Deliberately not falling back to productVariantId: a line saved
+        // before the receive configuration was mandatory must be answered, not
+        // back-filled from the legacy column.
+        expectedReceiveVariantId: l.expectedReceiveVariantId ?? null,
         expectedReceiveUnitsPerVariant:
           l.expectedReceiveUnitsPerVariant ?? l.unitsPerUom ?? 1,
         productId: l.productId ?? null,
@@ -1528,6 +1531,13 @@ export default function PurchaseOrderEdit() {
           };
 
           if (l.lineType === "product") {
+            if (!l.expectedReceiveVariantId) {
+              throw new Error(
+                `Line ${index + 1}: choose how it is received. The receive `
+                + `configuration decides whether a shipment counts as packs or `
+                + `as loose pieces, so it is never assumed.`,
+              );
+            }
             const productIdentity = {
               product_id: l.productId,
               expected_receive_variant_id: l.expectedReceiveVariantId,

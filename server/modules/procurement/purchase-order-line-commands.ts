@@ -15,6 +15,12 @@ import {
   type NormalizedPoLinePricing,
   type PoLinePricingInput,
 } from "@shared/utils/po-line-pricing";
+import {
+  PO_RECEIVE_VARIANT_ARCHIVED,
+  checkReceiveVariantChosen,
+  checkReceiveVariantNotCleared,
+  type ReceiveConfigurationViolation,
+} from "./receive-configuration-policy";
 import { createDrizzleFinancialCommandRepository } from "../../platform/commands/command-results.repository";
 import {
   runTransactionalFinancialCommand,
@@ -257,6 +263,20 @@ export class PurchaseOrderLineCommandError extends Error {
     super(message);
     this.name = "PurchaseOrderLineCommandError";
   }
+}
+
+/**
+ * Raise a receive-configuration policy decision as this module's error type.
+ * The policy module stays free of any host error class so the same decision can
+ * be raised identically from the legacy purchasing service.
+ */
+function receiveConfigurationError(
+  violation: ReceiveConfigurationViolation,
+): PurchaseOrderLineCommandError {
+  return new PurchaseOrderLineCommandError(violation.message, violation.status, {
+    code: violation.code,
+    ...violation.context,
+  });
 }
 
 function classifyLineCommandFailure(error: unknown): FinancialCommandFailureDisposition {
@@ -673,50 +693,62 @@ async function resolveLineContext(tx: any, header: any, input: LineContextInput)
     });
   }
 
-  const receiveVariantId = input.expectedReceiveVariantId ?? null;
-  let receiveVariant: any = null;
-  if (receiveVariantId !== null) {
-    const rows = await tx
-      .select()
-      .from(productVariants)
-      .where(and(
-        eq(productVariants.id, receiveVariantId),
-        eq(productVariants.productId, input.productId),
-      ))
-      .limit(1)
-      .for("share");
-    receiveVariant = rows[0];
-    if (!receiveVariant) {
-      throw new PurchaseOrderLineCommandError("Receive configuration does not belong to the product", 409, {
-        code: "PO_LINE_RECEIVE_VARIANT_MISMATCH",
+  // How the goods arrive is an operator decision, never an inference: a line
+  // with no chosen receive configuration is refused rather than silently
+  // falling back to the legacy product_variant_id or to a lone variant.
+  const unchosenReceiveVariant = checkReceiveVariantChosen({
+    lineType: "product",
+    expectedReceiveVariantId: input.expectedReceiveVariantId ?? null,
+    productId: input.productId,
+  });
+  if (unchosenReceiveVariant) throw receiveConfigurationError(unchosenReceiveVariant);
+  const receiveVariantId = input.expectedReceiveVariantId as number;
+
+  const receiveVariantRows = await tx
+    .select()
+    .from(productVariants)
+    .where(and(
+      eq(productVariants.id, receiveVariantId),
+      eq(productVariants.productId, input.productId),
+    ))
+    .limit(1)
+    .for("share");
+  const receiveVariant = receiveVariantRows[0];
+  if (!receiveVariant) {
+    throw new PurchaseOrderLineCommandError("Receive configuration does not belong to the product", 409, {
+      code: "PO_LINE_RECEIVE_VARIANT_MISMATCH",
+      productId: input.productId,
+      expectedReceiveVariantId: receiveVariantId,
+    });
+  }
+  if (receiveVariant.isActive === false) {
+    // Previously the archived configuration was silently dropped, leaving the
+    // line with no receive configuration at all. Refuse instead: an archived
+    // package cannot be an inventory destination, and which package replaces
+    // it is the operator's call.
+    throw receiveConfigurationError({
+      code: PO_RECEIVE_VARIANT_ARCHIVED,
+      message: "That receive configuration is archived. Choose an active configuration for this line.",
+      status: 409,
+      context: {
         productId: input.productId,
         expectedReceiveVariantId: receiveVariantId,
-      });
-    }
-    if (receiveVariant.isActive === false) {
-      // Ordering remains product + piece quantity. An archived package
-      // configuration is cleared so it cannot become an inventory destination.
-      receiveVariant = null;
-    } else if (
-      input.expectedReceiveUnitsPerVariant != null &&
-      Number(receiveVariant.unitsPerVariant) !== input.expectedReceiveUnitsPerVariant
-    ) {
-      throw new PurchaseOrderLineCommandError(
-        "Receive configuration quantity no longer matches the selected variant",
-        409,
-        {
-          code: "PO_LINE_RECEIVE_UNITS_MISMATCH",
-          expectedReceiveVariantId: receiveVariantId,
-          submittedUnits: input.expectedReceiveUnitsPerVariant,
-          actualUnits: receiveVariant.unitsPerVariant,
-        },
-      );
-    }
-  } else if (input.expectedReceiveUnitsPerVariant != null) {
+      },
+    });
+  }
+  if (
+    input.expectedReceiveUnitsPerVariant != null &&
+    Number(receiveVariant.unitsPerVariant) !== input.expectedReceiveUnitsPerVariant
+  ) {
     throw new PurchaseOrderLineCommandError(
-      "expectedReceiveUnitsPerVariant requires expectedReceiveVariantId",
-      400,
-      { code: "PO_LINE_RECEIVE_UNITS_WITHOUT_VARIANT" },
+      "Receive configuration quantity no longer matches the selected variant",
+      409,
+      {
+        code: "PO_LINE_RECEIVE_UNITS_MISMATCH",
+        expectedReceiveVariantId: receiveVariantId,
+        submittedUnits: input.expectedReceiveUnitsPerVariant,
+        actualUnits: receiveVariant.unitsPerVariant,
+      },
     );
   }
 
@@ -1090,6 +1122,15 @@ export function createPurchaseOrderLineCommands(
       assertExpectedVersion("purchase_order_line", line.updatedAt, input.expectedLineUpdatedAt);
       assertEditableLine(line);
       await assertNoDownstreamLinks(tx, lineId);
+
+      // An edit may change which configuration the goods arrive in, but it may
+      // never take the answer away again.
+      const clearedReceiveVariant = checkReceiveVariantNotCleared({
+        lineType: line.lineType,
+        submittedExpectedReceiveVariantId: input.expectedReceiveVariantId,
+        lineId,
+      });
+      if (clearedReceiveVariant) throw receiveConfigurationError(clearedReceiveVariant);
 
       const resolvedReceiveVariantId = input.expectedReceiveVariantId === undefined
         ? line.expectedReceiveVariantId

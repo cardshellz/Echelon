@@ -141,7 +141,7 @@ describe("Spec A — createPurchaseOrderWithLines validation", () => {
     await expect(
       svc.createPurchaseOrderWithLines({
         vendorId: 0,
-        lines: [{ productId: 1, productVariantId: 1, orderQty: 1, unitCostCents: 100 }],
+        lines: [{ productId: 1, productVariantId: 1, expectedReceiveVariantId: 1, orderQty: 1, unitCostCents: 100 }],
       } as any),
     ).rejects.toThrow(/vendor_id is required/);
   });
@@ -156,7 +156,7 @@ describe("Spec A — createPurchaseOrderWithLines validation", () => {
     await expect(
       svc.createPurchaseOrderWithLines({
         vendorId: 1,
-        lines: [{ productId: 1, productVariantId: 1, orderQty: -5, unitCostCents: 100 }],
+        lines: [{ productId: 1, productVariantId: 1, expectedReceiveVariantId: 1, orderQty: -5, unitCostCents: 100 }],
       } as any),
     ).rejects.toThrow(/must be > 0/);
   });
@@ -165,7 +165,7 @@ describe("Spec A — createPurchaseOrderWithLines validation", () => {
     await expect(
       svc.createPurchaseOrderWithLines({
         vendorId: 1,
-        lines: [{ productId: 1, productVariantId: 1, orderQty: 1, unitCostCents: 10.5 }],
+        lines: [{ productId: 1, productVariantId: 1, expectedReceiveVariantId: 1, orderQty: 1, unitCostCents: 10.5 }],
       } as any),
     ).rejects.toThrow(/must be an integer/);
   });
@@ -179,6 +179,7 @@ describe("Spec A — createPurchaseOrderWithLines validation", () => {
             lineId: 10,
             productId: 1,
             productVariantId: 1,
+            expectedReceiveVariantId: 1,
             orderQty: 1,
             unitCostCents: 100,
           },
@@ -192,7 +193,7 @@ describe("Spec A — createPurchaseOrderWithLines validation", () => {
     await expect(
       svc.createPurchaseOrderWithLines({
         vendorId: 999,
-        lines: [{ productId: 1, productVariantId: 1, orderQty: 1, unitCostCents: 100 }],
+        lines: [{ productId: 1, productVariantId: 1, expectedReceiveVariantId: 1, orderQty: 1, unitCostCents: 100 }],
       } as any),
     ).rejects.toThrow(/Vendor not found/);
   });
@@ -246,6 +247,9 @@ describe("Spec A — sendPurchaseOrder status gate", () => {
     const line = {
       id: 10,
       status: "open",
+      // A product line only reaches the send gate with its receive
+      // configuration already chosen.
+      expectedReceiveVariantId: 202,
       pricingBasis: "per_piece",
       orderQty: 1,
       unitCostCents: 100,
@@ -317,7 +321,7 @@ describe("Spec A — duplicatePurchaseOrder", () => {
       priority: "normal",
     });
     storage.getPurchaseOrderLines.mockResolvedValue([
-      { status: "cancelled", productVariantId: 1, productId: 1, orderQty: 5, unitCostCents: 100 },
+      { status: "cancelled", productVariantId: 1, expectedReceiveVariantId: 1, productId: 1, orderQty: 5, unitCostCents: 100 },
     ]);
     await expect(svc.duplicatePurchaseOrder(1, undefined, "u1")).rejects.toThrow(
       /no active lines to duplicate/,

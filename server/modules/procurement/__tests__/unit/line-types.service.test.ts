@@ -168,6 +168,7 @@ describe("Typed PO lines — per-type validation", () => {
       lines: [{
         productId: 101,
         productVariantId: 101,
+        expectedReceiveVariantId: 101,
         orderQty: 1,
         unitCostMills: 1000,
       }],
@@ -197,7 +198,7 @@ describe("Typed PO lines — per-type validation", () => {
     await expect(
       svc.createPurchaseOrderWithLines({
         vendorId: 1,
-        lines: [{ productId: 101, productVariantId: 101, orderQty: 1, unitCostMills: -1000 }],
+        lines: [{ productId: 101, productVariantId: 101, expectedReceiveVariantId: 101, orderQty: 1, unitCostMills: -1000 }],
       } as any),
     ).rejects.toThrow(/non-negative cost/);
   });
@@ -207,7 +208,7 @@ describe("Typed PO lines — per-type validation", () => {
     await expect(
       svc.createPurchaseOrderWithLines({
         vendorId: 1,
-        lines: [{ productId: 101, productVariantId: 101, orderQty: 0, unitCostMills: 1000 }],
+        lines: [{ productId: 101, productVariantId: 101, expectedReceiveVariantId: 101, orderQty: 0, unitCostMills: 1000 }],
       } as any),
     ).rejects.toThrow(/must be > 0/);
   });
@@ -305,6 +306,7 @@ describe("Typed PO lines — per-type validation", () => {
           {
             productId: 101,
             productVariantId: 101,
+            expectedReceiveVariantId: 101,
             orderQty: 1,
             unitCostMills: 1000,
           },
@@ -347,6 +349,7 @@ describe("Typed PO lines — per-type validation", () => {
           {
             productId: 101,
             productVariantId: 101,
+            expectedReceiveVariantId: 101,
             orderQty: 1,
             unitCostMills: 1000,
           },
@@ -370,6 +373,7 @@ describe("Typed PO lines — per-type validation", () => {
           {
             productId: 101,
             productVariantId: 101,
+            expectedReceiveVariantId: 101,
             orderQty: 1,
             unitCostMills: 1000,
           },
@@ -416,6 +420,7 @@ describe("Typed PO lines — parentClientId", () => {
             clientId: "a",
             productId: 101,
             productVariantId: 101,
+            expectedReceiveVariantId: 101,
             orderQty: 1,
             unitCostMills: 1000,
           },
@@ -486,6 +491,7 @@ describe("Typed PO lines — parentClientId", () => {
             clientId: "p1",
             productId: 101,
             productVariantId: 101,
+            expectedReceiveVariantId: 101,
             orderQty: 1,
             unitCostMills: 1000,
           },
@@ -494,6 +500,7 @@ describe("Typed PO lines — parentClientId", () => {
             parentClientId: "p1",
             productId: 101,
             productVariantId: 101,
+            expectedReceiveVariantId: 101,
             orderQty: 1,
             unitCostMills: 1000,
           },
@@ -512,6 +519,7 @@ describe("Typed PO lines — parentClientId", () => {
             clientId: "same",
             productId: 101,
             productVariantId: 101,
+            expectedReceiveVariantId: 101,
             orderQty: 1,
             unitCostMills: 1000,
           },
@@ -519,6 +527,7 @@ describe("Typed PO lines — parentClientId", () => {
             clientId: "same",
             productId: 101,
             productVariantId: 101,
+            expectedReceiveVariantId: 101,
             orderQty: 1,
             unitCostMills: 1000,
           },
@@ -537,6 +546,7 @@ describe("Typed PO lines — parentClientId", () => {
             clientId: "prod1",
             productId: 101,
             productVariantId: 101,
+            expectedReceiveVariantId: 101,
             orderQty: 1,
             unitCostMills: 1000,
           },

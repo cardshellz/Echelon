@@ -166,7 +166,7 @@ describe("mills — validateCreateWithLinesInput", () => {
     );
     const created = await svc.createPurchaseOrderWithLines({
       vendorId: 1,
-      lines: [{ productId: 1, productVariantId: 11, orderQty: 100, unitCostMills: 375 } as any],
+      lines: [{ productId: 1, productVariantId: 11, expectedReceiveVariantId: 11, orderQty: 100, unitCostMills: 375 } as any],
     });
     expect(created).toEqual({ id: 42 });
   });
@@ -179,7 +179,7 @@ describe("mills — validateCreateWithLinesInput", () => {
     );
     await svc.createPurchaseOrderWithLines({
       vendorId: 1,
-      lines: [{ productId: 1, productVariantId: 11, orderQty: 5, unitCostCents: 1299 }],
+      lines: [{ productId: 1, productVariantId: 11, expectedReceiveVariantId: 11, orderQty: 5, unitCostCents: 1299 }],
     });
     // Lines row should carry BOTH fields populated.
     const linesInsert = captureInserts.find(
@@ -204,6 +204,7 @@ describe("mills — validateCreateWithLinesInput", () => {
         {
           productId: 1,
           productVariantId: 11,
+          expectedReceiveVariantId: 11,
           orderQty: 100,
           unitCostMills: 375,
           unitCostCents: 4,
@@ -225,6 +226,7 @@ describe("mills — validateCreateWithLinesInput", () => {
           {
             productId: 1,
             productVariantId: 11,
+            expectedReceiveVariantId: 11,
             orderQty: 1,
             unitCostMills: 375, // → 4 cents
             unitCostCents: 5,   // disagrees
@@ -238,7 +240,7 @@ describe("mills — validateCreateWithLinesInput", () => {
     await expect(
       svc.createPurchaseOrderWithLines({
         vendorId: 1,
-        lines: [{ productId: 1, productVariantId: 11, orderQty: 1 } as any],
+        lines: [{ productId: 1, productVariantId: 11, expectedReceiveVariantId: 11, orderQty: 1 } as any],
       }),
     ).rejects.toMatchObject({ statusCode: 400 });
   });
@@ -248,7 +250,7 @@ describe("mills — validateCreateWithLinesInput", () => {
       svc.createPurchaseOrderWithLines({
         vendorId: 1,
         lines: [
-          { productId: 1, productVariantId: 11, orderQty: 1, unitCostMills: 12.5 } as any,
+          { productId: 1, productVariantId: 11, expectedReceiveVariantId: 11, orderQty: 1, unitCostMills: 12.5 } as any,
         ],
       }),
     ).rejects.toMatchObject({ statusCode: 400 });
@@ -259,7 +261,7 @@ describe("mills — validateCreateWithLinesInput", () => {
       svc.createPurchaseOrderWithLines({
         vendorId: 1,
         lines: [
-          { productId: 1, productVariantId: 11, orderQty: 1, unitCostMills: -1 } as any,
+          { productId: 1, productVariantId: 11, expectedReceiveVariantId: 11, orderQty: 1, unitCostMills: -1 } as any,
         ],
       }),
     ).rejects.toMatchObject({ statusCode: 400 });
@@ -278,7 +280,7 @@ describe("mills — createPurchaseOrderWithLines stores both columns", () => {
     await svc.createPurchaseOrderWithLines({
       vendorId: 1,
       lines: [
-        { productId: 1, productVariantId: 11, orderQty: 10, unitCostMills: 12345 } as any,
+        { productId: 1, productVariantId: 11, expectedReceiveVariantId: 11, orderQty: 10, unitCostMills: 12345 } as any,
       ],
     });
 
@@ -307,6 +309,7 @@ describe("mills — bulkUpsertVendorCatalog", () => {
           {
             productId: 1,
             productVariantId: 11,
+            expectedReceiveVariantId: 11,
             unitCostMills: 375,
             unitCostCents: 5, // disagrees
           } as any,
@@ -340,6 +343,7 @@ describe("mills — getNewPoPreload", () => {
         vendorId: 1,
         productId: 1,
         productVariantId: 11,
+        expectedReceiveVariantId: 11,
         unitCostMills: 375,
         unitCostCents: 4, // would-be rounded value
       }),
@@ -363,6 +367,7 @@ describe("mills — getNewPoPreload", () => {
         vendorId: 1,
         productId: 1,
         productVariantId: 11,
+        expectedReceiveVariantId: 11,
         unitCostMills: null,
         unitCostCents: 1299,
       }),
@@ -440,6 +445,7 @@ describe("mills — getNewPoPreload", () => {
         vendorId: 1,
         productId: 1,
         productVariantId: 11,
+        expectedReceiveVariantId: 11,
         unitCostMills: 604,
         unitCostCents: 7,
       }),

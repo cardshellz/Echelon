@@ -63,6 +63,9 @@ function exactLine(overrides: Record<string, unknown> = {}) {
     id: 10,
     purchaseOrderId: 1,
     status: "open",
+    // Every product line reaching a lifecycle transition carries the receive
+    // configuration its operator chose; the gate rejects any that does not.
+    expectedReceiveVariantId: 202,
     pricingBasis: "per_piece",
     orderQty: 100,
     lineTotalCents: 150_000,
@@ -326,6 +329,53 @@ describe("purchase-order lifecycle concurrency", () => {
     expect(result.status).toBe("approved");
     expect(db.updatePatches.find((entry: any) => entry.table === purchaseOrders)?.patch)
       .toMatchObject({ status: "approved" });
+  });
+
+  it("blocks leaving draft while a product line never says how it is received", async () => {
+    // The purchase order is otherwise ready: an explicit per-piece quote, a
+    // non-product fee alongside it. What holds it in draft is the unanswered
+    // receive configuration, including on orders drafted before the choice was
+    // mandatory — the answer decides whether a receipt books packs or pieces.
+    const lockedPo = po();
+    const db = lifecycleDb({
+      lockedPo,
+      lines: [
+        exactLine({ lineNumber: 1, lineType: "product" }),
+        exactLine({
+          id: 11,
+          lineNumber: 2,
+          lineType: "product",
+          expectedReceiveVariantId: null,
+          sku: "WIDGET",
+          productName: "Widget",
+        }),
+        exactLine({
+          id: 12,
+          lineNumber: 3,
+          lineType: "fee",
+          expectedReceiveVariantId: null,
+          pricingBasis: "not_applicable",
+          orderQty: 1,
+          lineTotalCents: 500,
+        }),
+      ],
+    });
+    const service = createPurchasingService(db, baseStorage({
+      getPurchaseOrderById: vi.fn().mockResolvedValue(lockedPo),
+    }));
+
+    await expect(service.submit(1, "buyer-review")).rejects.toMatchObject({
+      statusCode: 409,
+      details: expect.objectContaining({
+        code: "PO_RECEIVE_CONFIGURATION_REQUIRED",
+        missingLineCount: 1,
+        missingLines: [
+          { lineId: 11, lineNumber: 2, sku: "WIDGET", productName: "Widget" },
+        ],
+      }),
+    });
+    // Nothing transitions and no audit is written: the whole attempt rolls back.
+    expect(db.updatePatches.filter((entry: any) => entry.table === purchaseOrders)).toHaveLength(0);
   });
 
   it("blocks an unreviewed legacy product line but not a non-product adjustment", async () => {
