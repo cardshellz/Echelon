@@ -65,6 +65,7 @@ import { Sheet, SheetContent, SheetTrigger, SheetTitle } from "@/components/ui/s
 import { useAuth } from "@/lib/auth";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
 import { NotificationBell } from "@/components/NotificationBell";
+import { PageDataHealth } from "@/components/page-data-health";
 
 // --- Navigation types ---
 
@@ -677,6 +678,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
           className="min-h-0 flex-1 overflow-auto bg-muted/20"
           data-app-scroll-container
         >
+          <PageDataHealth />
           {children}
         </main>
       </div>

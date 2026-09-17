@@ -72,10 +72,9 @@ export const orderHistoryMethods: IOrderHistoryStorage = {
     }
     if (filters.sku) {
       const skuFilter = filters.sku.toUpperCase();
-      const ordersWithSku = await db.select({ orderId: omsOrderLines.orderId }).from(omsOrderLines).where(like(omsOrderLines.sku, `%${skuFilter}%`));
-      const matchingOrderIds = [...new Set(ordersWithSku.map(i => i.orderId))];
-      if (matchingOrderIds.length === 0) return [];
-      conditions.push(inArray(omsOrders.id, matchingOrderIds));
+      conditions.push(sql`exists (select 1 from ${omsOrderLines}
+        where ${omsOrderLines.orderId} = ${omsOrders.id}
+          and ${like(omsOrderLines.sku, `%${skuFilter}%`)})`);
     }
 
     let query = db.select({
@@ -88,7 +87,7 @@ export const orderHistoryMethods: IOrderHistoryStorage = {
       query = query.where(and(...conditions));
     }
     
-    query = query.orderBy(desc(omsOrders.orderedAt));
+    query = query.orderBy(desc(omsOrders.orderedAt), desc(omsOrders.id));
     const limit = filters.limit || 50;
     query = query.limit(limit);
     if (filters.offset) query = query.offset(filters.offset);
@@ -142,10 +141,9 @@ export const orderHistoryMethods: IOrderHistoryStorage = {
     }
     if (filters.sku) {
       const skuFilter = filters.sku.toUpperCase();
-      const ordersWithSku = await db.select({ orderId: omsOrderLines.orderId }).from(omsOrderLines).where(like(omsOrderLines.sku, `%${skuFilter}%`));
-      const matchingOrderIds = [...new Set(ordersWithSku.map(i => i.orderId))];
-      if (matchingOrderIds.length === 0) return 0;
-      conditions.push(inArray(omsOrders.id, matchingOrderIds));
+      conditions.push(sql`exists (select 1 from ${omsOrderLines}
+        where ${omsOrderLines.orderId} = ${omsOrders.id}
+          and ${like(omsOrderLines.sku, `%${skuFilter}%`)})`);
     }
     
     let query = db.select({ count: sql<number>`count(*)` }).from(omsOrders) as any;

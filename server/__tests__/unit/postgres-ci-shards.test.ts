@@ -53,8 +53,9 @@ function runnerFixture() {
 }
 
 describe("PostgreSQL CI coverage and isolation", () => {
-  it("preserves all 70 prior files and explicitly adds twelve reviewed hardening suites", () => {
+  it("preserves all 70 prior files and explicitly adds reviewed hardening suites", () => {
     const addedSuites = [
+      "server/modules/orders/__tests__/integration/order-list.integration.test.ts",
       "server/modules/oms/__tests__/integration/archon-order-delivery.test.ts",
       "server/modules/oms/__tests__/integration/order-line-catalog-identity.integration.test.ts",
       "server/modules/inventory-planning/__tests__/integration/inventory-opening-capture.integration.test.ts",
@@ -70,8 +71,8 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/inventory/__tests__/integration/build-order-transformation-authority.integration.test.ts",
       "server/modules/catalog/__tests__/integration/piece-variant-backfill.integration.test.ts",
     ];
-    expect(POSTGRES_TEST_FILES).toHaveLength(84);
-    expect(new Set(POSTGRES_TEST_FILES).size).toBe(84);
+    expect(POSTGRES_TEST_FILES).toHaveLength(85);
+    expect(new Set(POSTGRES_TEST_FILES).size).toBe(85);
     expect(POSTGRES_TEST_FILES).toEqual(expect.arrayContaining(addedSuites));
     // Preserve the original inventory digest as well as the explicit additions;
     // adding hardening coverage must not silently remove an older suite.
@@ -84,7 +85,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
 
   it("assigns every file exactly once across 8 deterministic balanced shards", () => {
     const shards = Array.from({ length: POSTGRES_SHARD_COUNT }, (_, index) => selectPostgresShardFiles({ index: index + 1, count: 8 }));
-    expect(shards.map((files) => files.length)).toEqual([11, 11, 11, 11, 10, 10, 10, 10]);
+    expect(shards.map((files) => files.length)).toEqual([11, 11, 11, 11, 11, 10, 10, 10]);
     expect(shards.flat().sort()).toEqual([...POSTGRES_TEST_FILES].sort());
     expect(new Set(shards.flat()).size).toBe(POSTGRES_TEST_FILES.length);
     expect(selectPostgresShardFiles({ index: 1, count: 8 })).toEqual(shards[0]);
@@ -113,7 +114,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
         reports.push(args.at(-1)!);
       }
     }
-    expect(new Set(reports).size).toBe(84);
+    expect(new Set(reports).size).toBe(85);
     expect(() => buildPostgresVitestArgs({ index: 1, count: 8 }, POSTGRES_TEST_FILES[1])).toThrow();
     const source = readFileSync(resolve(POSTGRES_REPOSITORY_ROOT, "scripts/ci/postgres-tests.ts"), "utf8");
     expect(source).toContain("spawnSync(process.execPath, [...args]");

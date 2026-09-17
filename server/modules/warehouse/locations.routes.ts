@@ -387,45 +387,41 @@ export function registerLocationRoutes(app: Express) {
   // Sync product locations to pick queue (update pending order items)
   app.post("/api/locations/sync-to-queue", requireAuth, async (req, res) => {
     try {
-      // Get all active orders (not shipped/cancelled) with their items
-      const allOrders = await storage.getOrdersWithItems();
-      const activeOrders = allOrders.filter(o => 
-        o.warehouseStatus !== "shipped" && 
-        o.warehouseStatus !== "cancelled" &&
-        o.warehouseStatus !== "completed"
-      );
-      
       let updated = 0;
       let checked = 0;
+      let ordersChecked = 0;
       
-      for (const order of activeOrders) {
-        for (const item of order.items) {
-          checked++;
+      for await (const batch of storage.scanOrderBatches({ excludedStatuses: ["shipped", "cancelled", "completed"] })) {
+        for (const order of batch) {
+          ordersChecked++;
+          for (const item of order.items) {
+            checked++;
           
-          // Only update items that haven't been picked yet
-          if (item.status !== "pending") continue;
+            // Only update items that haven't been picked yet
+            if (item.status !== "pending") continue;
           
-          // Look up current location from inventory_levels (where stock actually is)
-          const binLocation = await storage.getBinLocationFromInventoryBySku(item.sku || '');
+            // Look up current location from inventory_levels (where stock actually is)
+            const binLocation = await storage.getBinLocationFromInventoryBySku(item.sku || '');
           
-          if (!binLocation) continue;
+            if (!binLocation) continue;
           
-          // Check if location/zone needs updating
-          const needsUpdate = 
-            item.location !== binLocation.location ||
-            item.zone !== binLocation.zone ||
-            item.barcode !== binLocation.barcode ||
-            item.imageUrl !== binLocation.imageUrl;
+            // Check if location/zone needs updating
+            const needsUpdate =
+              item.location !== binLocation.location ||
+              item.zone !== binLocation.zone ||
+              item.barcode !== binLocation.barcode ||
+              item.imageUrl !== binLocation.imageUrl;
           
-          if (needsUpdate) {
-            await storage.updateOrderItemLocation(
-              item.id, 
-              binLocation.location, 
-              binLocation.zone,
-              binLocation.barcode || null,
-              binLocation.imageUrl || null
-            );
-            updated++;
+            if (needsUpdate) {
+              await storage.updateOrderItemLocation(
+                item.id,
+                binLocation.location,
+                binLocation.zone,
+                binLocation.barcode || null,
+                binLocation.imageUrl || null
+              );
+              updated++;
+            }
           }
         }
       }
@@ -438,7 +434,7 @@ export function registerLocationRoutes(app: Express) {
         success: true, 
         updated, 
         checked,
-        message: `Updated ${updated} items across ${activeOrders.length} active orders`
+        message: `Updated ${updated} items across ${ordersChecked} active orders`
       });
     } catch (error) {
       console.error("Error syncing locations to queue:", error);

@@ -1,7 +1,8 @@
 import type { Express } from "express";
 import { z } from "zod";
+import { awaitPageReads, limitPageRead } from "../../platform/http/page-read-limit";
 import { channelsStorage } from "../channels";
-import { ordersStorage } from "../orders";
+import { ordersStorage, orderPageQuerySchema } from "../orders";
 import { catalogStorage } from "../catalog";
 import { warehouseStorage } from "../warehouse";
 import { inventoryStorage } from "../inventory";
@@ -35,12 +36,8 @@ import { randomBytes } from "crypto";
 import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
 import { isCustomerSellableVariant } from "@shared/catalog/variant-sales-eligibility";
 import {
-  buildWmsOrderBucketCounts,
-  compareWmsOrdersNewestFirst,
   isWmsOrderBucket,
   normalizeSearchTerm,
-  orderMatchesBucket,
-  orderMatchesScope,
   parsePagination,
   parsePositiveInteger,
   parseWmsOrderBucket,
@@ -168,7 +165,7 @@ export function registerChannelRoutes(app: Express) {
 
   // Get WMS orders with channel info. Filtering happens before pagination so
   // exact searches and operational bucket counts cannot be hidden by page size.
-  app.get("/api/wms/orders", requirePermission("orders", "view"), async (req, res) => {
+  app.get("/api/wms/orders", requirePermission("orders", "view"), limitPageRead(async (req, res) => {
     try {
       const {
         bucket: bucketQuery,
@@ -198,8 +195,8 @@ export function registerChannelRoutes(app: Express) {
         return res.status(400).json({ error: "warehouseId must be a positive integer" });
       }
 
-      const limitNum = parsePagination(firstQueryValue(limit), 100, 250);
-      const offsetNum = parsePagination(firstQueryValue(offset), 0, 100_000);
+      const limitNum = Math.max(1, parsePagination(firstQueryValue(limit), 100, 250));
+      const offsetNum = parsePagination(firstQueryValue(offset), 0, 2_147_483_647);
       const sourceValue = firstQueryValue(source);
       const normalizedSearch = normalizeSearchTerm(firstQueryValue(search));
       const bucket = parseWmsOrderBucket(bucketValue);
@@ -207,50 +204,29 @@ export function registerChannelRoutes(app: Express) {
         ? (Array.isArray(status) ? status : [status]).map(String).filter(Boolean)
         : [];
 
-      // Get all orders with items
-      const allOrders = await storage.getOrdersWithItems();
-
-      // Get all channels for enrichment
-      const allChannels = await storage.getAllChannels();
-      const channelMap = new Map(allChannels.map(c => [c.id, c]));
-
-      // Enrich orders with channel info and apply filters
-      let enrichedOrders = allOrders.map(order => ({
-        ...order,
-        channel: order.channelId ? channelMap.get(order.channelId) : null
-      }));
-
-      enrichedOrders = enrichedOrders.filter(order => orderMatchesScope(order, {
+      const parsed = orderPageQuerySchema.safeParse({
         channelId: parsedChannelId,
         warehouseId: parsedWarehouseId,
         source: sourceValue,
         search: normalizedSearch,
-      }));
-
-      const buckets = buildWmsOrderBucketCounts(enrichedOrders);
-
-      const filteredOrders = legacyStatusFilter.length > 0 && !bucketValue
-        ? enrichedOrders.filter(order => legacyStatusFilter.includes(String(order.warehouseStatus)))
-        : enrichedOrders.filter(order => orderMatchesBucket(order, bucket));
-
-      // Sort by creation date descending (newest first)
-      filteredOrders.sort(compareWmsOrdersNewestFirst);
-
-      // Apply pagination
-      const paginatedOrders = filteredOrders.slice(offsetNum, offsetNum + limitNum);
-
-      res.json({
-        orders: paginatedOrders,
-        total: filteredOrders.length,
+        bucket,
+        statuses: !bucketValue ? legacyStatusFilter : undefined,
         limit: limitNum,
         offset: offsetNum,
-        buckets,
       });
+      if (!parsed.success) return res.status(400).json({ error: "Invalid order filters", issues: parsed.error.issues });
+      const page = await storage.getOrderPage(parsed.data);
+      const channelIds = [...new Set(page.orders.flatMap(order => order.channelId ? [order.channelId] : []))];
+      const channels = await awaitPageReads(channelIds.map(id => storage.getChannelById(id)));
+      const channelMap = new Map(channels.flatMap(channel => channel ? [[channel.id, channel] as const] : []));
+      res.json({ ...page, orders: page.orders.map(order => ({
+        ...order, channel: order.channelId ? channelMap.get(order.channelId) ?? null : null,
+      })) });
     } catch (error) {
       console.error("Error fetching OMS orders:", error);
       res.status(500).json({ error: "Failed to fetch orders" });
     }
-  });
+  }));
 
   // Create a manual order.
   //
@@ -1953,7 +1929,7 @@ export function registerChannelRoutes(app: Express) {
 
   // --- Channel Allocation View (grid data for UI) ---
 
-  app.get("/api/channel-allocation/grid", requirePermission("channels", "view"), async (req, res) => {
+  app.get("/api/channel-allocation/grid", requirePermission("channels", "view"), limitPageRead(async (req, res) => {
     try {
       return await inventoryLegacyAdminControl.executeLegacyRead(
         INVENTORY_LEGACY_ADMIN_CONTROLS.channelAllocationRead,
@@ -2284,7 +2260,7 @@ export function registerChannelRoutes(app: Express) {
       if (sendInventoryLegacyAdminControlError(res, error)) return;
       res.status(500).json({ error: error.message || "Failed to build allocation grid" });
     }
-  });
+  }));
 
   // ============================================
   // CHANNEL WAREHOUSE ASSIGNMENTS API (new parallel model)

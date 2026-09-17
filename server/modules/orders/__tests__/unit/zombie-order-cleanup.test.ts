@@ -17,7 +17,7 @@ describe("Zombie order prevention", () => {
   describe("pick queue EXISTS guard", () => {
     const existsSection = STORAGE_SRC.slice(
       STORAGE_SRC.indexOf("Exclude orders with zero shippable items"),
-      STORAGE_SRC.indexOf("Completed orders: show for 24 hours"),
+      STORAGE_SRC.indexOf("Historical orders are read separately"),
     );
 
     it("filters by quantity > 0 so zero-quantity items don't keep orders visible", () => {

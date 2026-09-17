@@ -8,6 +8,7 @@
 
 // Storage
 export { type IOrderStorage, orderMethods } from "./orders.storage";
+export { orderPageQuerySchema } from "./order-list.repository";
 export { type IPickingLogStorage, pickingLogMethods } from "./picking-logs.storage";
 export { type IOrderHistoryStorage, orderHistoryMethods } from "./order-history.storage";
 
