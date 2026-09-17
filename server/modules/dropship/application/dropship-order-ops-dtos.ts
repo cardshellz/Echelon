@@ -45,6 +45,10 @@ export const getDropshipOrderOpsIntakeDetailInputSchema = z.object({
   storeConnectionId: positiveIdSchema.optional(),
 }).strict();
 
+export const getDropshipOrderOpsPaymentHoldSummaryInputSchema = z.object({
+  vendorId: positiveIdSchema,
+}).strict();
+
 export const retryDropshipOrderOpsIntakeInputSchema = z.object({
   intakeId: positiveIdSchema,
   reason: z.string().trim().max(1000).optional(),
@@ -83,6 +87,7 @@ export const retryDropshipOrderOpsWmsSyncInputSchema = z.object({
 export type DropshipOrderOpsCancellationStatus = z.infer<typeof dropshipOpsOrderCancellationStatusSchema>;
 export type ListDropshipOrderOpsIntakesInput = z.infer<typeof listDropshipOrderOpsIntakesInputSchema>;
 export type GetDropshipOrderOpsIntakeDetailInput = z.infer<typeof getDropshipOrderOpsIntakeDetailInputSchema>;
+export type GetDropshipOrderOpsPaymentHoldSummaryInput = z.infer<typeof getDropshipOrderOpsPaymentHoldSummaryInputSchema>;
 export type RetryDropshipOrderOpsIntakeInput = z.infer<typeof retryDropshipOrderOpsIntakeInputSchema>;
 export type RetryDropshipOrderOpsCancellationInput = z.infer<typeof retryDropshipOrderOpsCancellationInputSchema>;
 export type MarkDropshipOrderOpsExceptionInput = z.infer<typeof markDropshipOrderOpsExceptionInputSchema>;

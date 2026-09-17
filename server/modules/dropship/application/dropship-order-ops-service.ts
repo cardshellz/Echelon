@@ -1,8 +1,14 @@
 import { DropshipError } from "../domain/errors";
+import {
+  summarizePaymentHolds,
+  type PaymentHoldAggregate,
+  type PaymentHoldSummary,
+} from "../domain/payment-hold-summary";
 import type { DropshipOrderIntakeStatus, NormalizedDropshipOrderPayload } from "./dropship-order-intake-service";
 import type { DropshipTrackingPushStatus } from "./dropship-tracking-push-ops-dtos";
 import {
   getDropshipOrderOpsIntakeDetailInputSchema,
+  getDropshipOrderOpsPaymentHoldSummaryInputSchema,
   listDropshipOrderOpsIntakesInputSchema,
   markDropshipOrderOpsExceptionInputSchema,
   processDropshipOrderOpsIntakeInputSchema,
@@ -10,6 +16,7 @@ import {
   retryDropshipOrderOpsCancellationInputSchema,
   retryDropshipOrderOpsIntakeInputSchema,
   type GetDropshipOrderOpsIntakeDetailInput,
+  type GetDropshipOrderOpsPaymentHoldSummaryInput,
   type ListDropshipOrderOpsIntakesInput,
   type MarkDropshipOrderOpsExceptionInput,
   type DropshipOrderOpsCancellationStatus,
@@ -79,6 +86,16 @@ export interface DropshipOrderOpsAuditSummary {
   payload: Record<string, unknown>;
 }
 
+/** What a held intake is waiting for: the debit acceptance will make, and the deadline. */
+export interface DropshipOrderOpsPaymentHold {
+  totalDebitCents: number;
+  currency: string;
+  expiresAt: Date | null;
+}
+
+export type DropshipOrderOpsPaymentHoldAggregate = PaymentHoldAggregate;
+export type DropshipOrderOpsPaymentHoldSummary = PaymentHoldSummary;
+
 export interface DropshipOrderOpsIntakeListItem {
   intakeId: number;
   vendor: DropshipOrderOpsVendorSummary;
@@ -88,6 +105,8 @@ export interface DropshipOrderOpsIntakeListItem {
   externalOrderNumber: string | null;
   status: DropshipOrderIntakeStatus;
   paymentHoldExpiresAt: Date | null;
+  /** Present only while the intake is held. */
+  paymentHold: DropshipOrderOpsPaymentHold | null;
   rejectionReason: string | null;
   cancellationStatus: string | null;
   omsOrderId: number | null;
@@ -272,6 +291,9 @@ export interface DropshipOrderOpsRepository {
 
   getIntakeDetail(input: GetDropshipOrderOpsIntakeDetailInput): Promise<DropshipOrderOpsIntakeDetail | null>;
 
+  /** Count, total and earliest deadline of a vendor's held intakes, with the wallet balance they are measured against. */
+  getPaymentHoldSummary(input: GetDropshipOrderOpsPaymentHoldSummaryInput): Promise<DropshipOrderOpsPaymentHoldAggregate>;
+
   getWmsSyncActionTarget(input: {
     intakeId: number;
   }): Promise<DropshipOrderOpsWmsSyncActionTarget | null>;
@@ -324,6 +346,16 @@ export class DropshipOrderOpsService {
       ...parsed,
       statuses: parsed.statuses ?? DROPSHIP_OPS_DEFAULT_INTAKE_STATUSES,
     });
+  }
+
+  /**
+   * What a vendor's held orders need. The repository counts and sums; the
+   * shortfall is a domain rule so the pages never do money arithmetic.
+   */
+  async getPaymentHoldSummary(input: unknown): Promise<DropshipOrderOpsPaymentHoldSummary> {
+    const parsed = parsePaymentHoldSummaryInput(input);
+    const aggregate = await this.deps.repository.getPaymentHoldSummary(parsed);
+    return summarizePaymentHolds(aggregate);
   }
 
   async getIntakeDetail(input: unknown): Promise<DropshipOrderOpsIntakeDetail> {
@@ -588,6 +620,14 @@ function parseListInput(input: unknown): ListDropshipOrderOpsIntakesInput {
   const result = listDropshipOrderOpsIntakesInputSchema.safeParse(input);
   if (!result.success) {
     throw validationError("DROPSHIP_ORDER_OPS_LIST_INVALID_INPUT", result.error.issues);
+  }
+  return result.data;
+}
+
+function parsePaymentHoldSummaryInput(input: unknown): GetDropshipOrderOpsPaymentHoldSummaryInput {
+  const result = getDropshipOrderOpsPaymentHoldSummaryInputSchema.safeParse(input);
+  if (!result.success) {
+    throw validationError("DROPSHIP_ORDER_OPS_PAYMENT_HOLD_SUMMARY_INVALID_INPUT", result.error.issues);
   }
   return result.data;
 }

@@ -41,6 +41,50 @@ describe("DropshipOrderOpsService", () => {
     });
   });
 
+  it("sums a vendor's held orders and turns them into one shortfall figure", async () => {
+    const repository = new FakeOrderOpsRepository();
+    repository.paymentHoldAggregate = {
+      heldCount: 2,
+      totalDebitCents: 19_000,
+      availableBalanceCents: 4_000,
+      earliestExpiresAt: now,
+      currency: "USD",
+    };
+    const service = new DropshipOrderOpsService({
+      repository,
+      clock: { now: () => now },
+      logger: noopLogger,
+    });
+
+    const summary = await service.getPaymentHoldSummary({ vendorId: 10 });
+
+    expect(summary).toEqual({
+      heldCount: 2,
+      totalDebitCents: 19_000,
+      availableBalanceCents: 4_000,
+      earliestExpiresAt: now,
+      currency: "USD",
+      shortfallCents: 15_000,
+    });
+    expect(repository.lastPaymentHoldSummaryInput).toEqual({ vendorId: 10 });
+  });
+
+  it("rejects a payment hold summary request without a valid vendor before touching the repository", async () => {
+    const repository = new FakeOrderOpsRepository();
+    const service = new DropshipOrderOpsService({
+      repository,
+      clock: { now: () => now },
+      logger: noopLogger,
+    });
+
+    for (const input of [{}, { vendorId: 0 }, { vendorId: "10" }, { vendorId: 10, extra: true }]) {
+      await expect(service.getPaymentHoldSummary(input)).rejects.toMatchObject({
+        code: "DROPSHIP_ORDER_OPS_PAYMENT_HOLD_SUMMARY_INVALID_INPUT",
+      });
+    }
+    expect(repository.lastPaymentHoldSummaryInput).toBeNull();
+  });
+
   it("preserves explicit statuses for vendor order history reads", async () => {
     const repository = new FakeOrderOpsRepository();
     const service = new DropshipOrderOpsService({
@@ -416,7 +460,22 @@ class FakeOrderOpsRepository implements DropshipOrderOpsRepository {
   lastCancellationRetryInput: Parameters<DropshipOrderOpsRepository["retryMarketplaceCancellation"]>[0] | null = null;
   lastExceptionInput: Parameters<DropshipOrderOpsRepository["markException"]>[0] | null = null;
   lastWmsSyncAuditInput: Parameters<DropshipOrderOpsRepository["recordWmsSyncAction"]>[0] | null = null;
+  lastPaymentHoldSummaryInput: Parameters<DropshipOrderOpsRepository["getPaymentHoldSummary"]>[0] | null = null;
+  paymentHoldAggregate: Awaited<ReturnType<DropshipOrderOpsRepository["getPaymentHoldSummary"]>> = {
+    heldCount: 0,
+    totalDebitCents: 0,
+    availableBalanceCents: 0,
+    earliestExpiresAt: null,
+    currency: "USD",
+  };
   wmsSyncTarget: DropshipOrderOpsWmsSyncActionTarget | null = makeWmsSyncTarget();
+
+  async getPaymentHoldSummary(
+    input: Parameters<DropshipOrderOpsRepository["getPaymentHoldSummary"]>[0],
+  ): Promise<Awaited<ReturnType<DropshipOrderOpsRepository["getPaymentHoldSummary"]>>> {
+    this.lastPaymentHoldSummaryInput = input;
+    return this.paymentHoldAggregate;
+  }
 
   async listIntakes(
     input: Parameters<DropshipOrderOpsRepository["listIntakes"]>[0],
@@ -608,6 +667,7 @@ function makeListItem(): DropshipOrderOpsIntakeListResult["items"][number] {
     externalOrderNumber: "1001",
     status: "failed",
     paymentHoldExpiresAt: null,
+    paymentHold: null,
     rejectionReason: "Missing rate",
     cancellationStatus: null,
     omsOrderId: null,

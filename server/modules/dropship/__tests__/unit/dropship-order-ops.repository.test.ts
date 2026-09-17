@@ -65,6 +65,77 @@ describe("PgDropshipOrderOpsRepository", () => {
     ]);
   });
 
+  it("puts the hold amount on held intakes only, read from the latest hold event", async () => {
+    const query = vi.fn(async (sql: string) => {
+      const sqlText = String(sql);
+      if (sqlText.includes("COUNT(*) OVER()")) {
+        expect(sqlText).toContain("hold.total_debit_cents AS hold_total_debit_cents");
+        expect(sqlText).toContain("ae.event_type = 'order_acceptance_payment_hold'");
+        expect(sqlText).toContain("LEFT JOIN dropship.dropship_wallet_accounts wa ON wa.vendor_id = oi.vendor_id");
+        return { rows: [
+          makeListRow({ id: 1, status: "payment_hold", payment_hold_expires_at: now, hold_total_debit_cents: "9500", wallet_currency: "USD", total_count: "3" }),
+          // A hold whose event carried no amount stays visibly held, without the figure.
+          makeListRow({ id: 2, status: "payment_hold", payment_hold_expires_at: now, hold_total_debit_cents: null, wallet_currency: "USD", total_count: "3" }),
+          // An accepted intake never reports a hold even if an old hold event exists.
+          makeListRow({ id: 3, status: "accepted", hold_total_debit_cents: "9500", wallet_currency: "USD", total_count: "3" }),
+        ] };
+      }
+      if (sqlText.includes("SELECT oi.status, COUNT(*) AS count")) return { rows: [] };
+      if (sqlText.includes("SELECT oi.cancellation_status, COUNT(*) AS count")) return { rows: [] };
+      throw new Error(`Unexpected SQL in test: ${sqlText}`);
+    });
+    const repository = new PgDropshipOrderOpsRepository(makePool(makeClient(query)));
+
+    const result = await repository.listIntakes({ vendorId: 10, statuses: ["payment_hold", "accepted"], page: 1, limit: 25 });
+
+    expect(result.items.map((item) => item.paymentHold)).toEqual([
+      { totalDebitCents: 9500, currency: "USD", expiresAt: now },
+      null,
+      null,
+    ]);
+  });
+
+  it("aggregates a vendor's holds against the wallet balance, and reads an empty wallet as zero", async () => {
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      const sqlText = String(sql);
+      if (sqlText.includes("COUNT(oi.id) AS held_count")) {
+        expect(sqlText).toContain("oi.status = 'payment_hold'");
+        expect(sqlText).toContain("ae.event_type = 'order_acceptance_payment_hold'");
+        expect(params).toEqual([10]);
+        return { rows: [{ held_count: "2", total_debit_cents: "19000", earliest_expires_at: now }] };
+      }
+      if (sqlText.includes("FROM dropship.dropship_wallet_accounts")) {
+        expect(params).toEqual([10]);
+        return { rows: [{ available_balance_cents: "4000", currency: "USD" }] };
+      }
+      throw new Error(`Unexpected SQL in test: ${sqlText}`);
+    });
+    const repository = new PgDropshipOrderOpsRepository(makePool(makeClient(query)));
+
+    expect(await repository.getPaymentHoldSummary({ vendorId: 10 })).toEqual({
+      heldCount: 2,
+      totalDebitCents: 19_000,
+      earliestExpiresAt: now,
+      availableBalanceCents: 4_000,
+      currency: "USD",
+    });
+
+    const emptyQuery = vi.fn(async (sql: string) => {
+      const sqlText = String(sql);
+      if (sqlText.includes("COUNT(oi.id) AS held_count")) {
+        return { rows: [{ held_count: "0", total_debit_cents: "0", earliest_expires_at: null }] };
+      }
+      return { rows: [] };
+    });
+    expect(await new PgDropshipOrderOpsRepository(makePool(makeClient(emptyQuery))).getPaymentHoldSummary({ vendorId: 11 })).toEqual({
+      heldCount: 0,
+      totalDebitCents: 0,
+      earliestExpiresAt: null,
+      availableBalanceCents: 0,
+      currency: "USD",
+    });
+  });
+
   it("loads shipment line items with marketplace tracking pushes for order detail", async () => {
     const query = vi.fn(async (sql: string, params?: unknown[]) => {
       const sqlText = String(sql);
@@ -528,6 +599,8 @@ function makeListRow(overrides: Record<string, unknown> = {}) {
     latest_event_severity: "error",
     latest_event_created_at: now,
     latest_event_payload: { errorCode: "CONFIG_MISSING" },
+    hold_total_debit_cents: null,
+    wallet_currency: "USD",
     total_count: "1",
     ...overrides,
   };
