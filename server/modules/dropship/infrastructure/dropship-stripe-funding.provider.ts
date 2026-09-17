@@ -11,14 +11,13 @@ import type {
   DropshipWalletFundingCardFeeRate,
   DropshipWalletFundingProvider,
   HandleDropshipAutoReloadInput,
-  NotifyDropshipWalletFundingFailedInput,
+  RecordDropshipWalletFundingFailureInput,
   RegisterDropshipFundingMethodInput,
 } from "../application/dropship-wallet-service";
 
 const STRIPE_API_VERSION = "2024-12-18.acacia";
 const STRIPE_FUNDING_SETUP_TYPE = "dropship_funding_setup";
 const STRIPE_WALLET_FUNDING_TYPE = "dropship_wallet_funding";
-const STRIPE_COLLECTION_CHARGE_TYPE = "dropship_collection_charge";
 /**
  * Fee breakdown carried on every card PaymentIntent. The webhook re-derives
  * the wallet credit from these rather than from the charged amount, so the
@@ -46,7 +45,7 @@ export type DropshipStripeFundingWebhookEvent =
       kind: "wallet_funding_failed";
       providerEventId: string;
       eventType: string;
-      failure: NotifyDropshipWalletFundingFailedInput;
+      failure: RecordDropshipWalletFundingFailureInput;
     }
   | {
       kind: "ignored";
@@ -262,69 +261,6 @@ export class StripeDropshipFundingProvider implements DropshipWalletFundingProvi
       throw new DropshipError(
         "DROPSHIP_STRIPE_AUTO_RELOAD_PAYMENT_FAILED",
         "Stripe auto-reload payment did not enter a fundable state.",
-        {
-          vendorId: input.vendorId,
-          fundingMethodId: input.fundingMethodId,
-          providerPaymentIntentId: paymentIntent.id,
-          paymentIntentStatus: paymentIntent.status,
-          lastPaymentErrorCode: paymentIntent.last_payment_error?.code ?? null,
-        },
-      );
-    }
-    return {
-      providerPaymentIntentId: paymentIntent.id,
-      status,
-      amountCents: amountForPaymentIntent(paymentIntent, status),
-      currency: paymentIntent.currency.toUpperCase(),
-      externalTransactionId: idFromExpandable(paymentIntent.latest_charge),
-    };
-  }
-
-  /**
-   * Collection sweep charge (design spec D5): charge a vendor's saved
-   * funding method for an outstanding negative wallet balance. Off-session,
-   * confirmed immediately, idempotent via the Stripe idempotency key.
-   * Distinct from auto-reload: collection charges an arbitrary past-due
-   * amount, not a top-up-to-minimum.
-   */
-  async createStripeCollectionCharge(input: {
-    vendorId: number;
-    fundingMethodId: number;
-    rail: DropshipStripeFundingSetupRail;
-    amountCents: number;
-    currency: string;
-    providerCustomerId: string;
-    providerPaymentMethodId: string;
-    idempotencyKey: string;
-    now: Date;
-  }): Promise<DropshipStripeAutoReloadPaymentIntent> {
-    const stripe = this.getStripe();
-    const metadata = {
-      type: STRIPE_COLLECTION_CHARGE_TYPE,
-      dropship_vendor_id: String(input.vendorId),
-      funding_method_id: String(input.fundingMethodId),
-      requested_rail: input.rail,
-      requested_provider_payment_method_id: input.providerPaymentMethodId,
-      collection: "true",
-      requested_at: input.now.toISOString(),
-    };
-    const paymentIntent = await this.callStripe("createStripeCollectionCharge", () => stripe.paymentIntents.create({
-      amount: input.amountCents,
-      currency: input.currency.toLowerCase(),
-      customer: input.providerCustomerId,
-      payment_method: input.providerPaymentMethodId,
-      payment_method_types: paymentMethodTypesForRail(input.rail),
-      confirm: true,
-      off_session: true,
-      metadata,
-    }, {
-      idempotencyKey: input.idempotencyKey,
-    }));
-    const status = walletFundingStatusForPaymentIntent(paymentIntent);
-    if (!status) {
-      throw new DropshipError(
-        "DROPSHIP_STRIPE_COLLECTION_CHARGE_FAILED",
-        "Stripe collection charge did not enter a fundable state.",
         {
           vendorId: input.vendorId,
           fundingMethodId: input.fundingMethodId,

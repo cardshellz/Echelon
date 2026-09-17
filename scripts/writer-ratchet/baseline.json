@@ -154,9 +154,6 @@
   "dropship.dropship_channel_connection_branding_revisions": [
     "modules/dropship"
   ],
-  "dropship.dropship_collection_attempts": [
-    "modules/dropship"
-  ],
   "dropship.dropship_content_profile_revisions": [
     "modules/dropship"
   ],
@@ -320,6 +317,9 @@
     "modules/dropship"
   ],
   "dropship.dropship_wallet_ledger": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_wallet_maintenance_runs": [
     "modules/dropship"
   ],
   "dropship.dropship_zone_rules": [

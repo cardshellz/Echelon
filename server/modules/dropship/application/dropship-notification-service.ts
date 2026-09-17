@@ -25,7 +25,6 @@ export interface DropshipLaunchNotificationPreferenceDefinition {
 
 export const DROPSHIP_LAUNCH_NOTIFICATION_PREFERENCES: DropshipLaunchNotificationPreferenceDefinition[] = [
   { eventType: DROPSHIP_NOTIFICATION_EVENTS.AUTO_RELOAD_FAILED, critical: true },
-  { eventType: DROPSHIP_NOTIFICATION_EVENTS.COLLECTION_ACCOUNT_REVIEW, critical: true },
   { eventType: DROPSHIP_NOTIFICATION_EVENTS.ENTITLEMENT_BLOCKED, critical: true },
   { eventType: DROPSHIP_NOTIFICATION_EVENTS.LISTING_PUSH_FAILED, critical: true },
   { eventType: DROPSHIP_NOTIFICATION_EVENTS.ORDER_ACCEPTED, critical: false },

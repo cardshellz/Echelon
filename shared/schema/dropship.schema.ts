@@ -3,6 +3,7 @@ import {
   bigint,
   boolean,
   check,
+  date,
   foreignKey,
   index,
   integer,
@@ -2559,6 +2560,9 @@ export const dropshipReturnIntakeExceptions = dropshipSchema.table(
   ],
 );
 
+// RETIRED (migration 0676): the collection sweep was replaced by the daily
+// wallet maintenance job below. Nothing reads or writes these two tables any
+// more; they stay for their history and are dropped post-soak.
 // Collection sweep config (migration 188; design spec D5 + D-governing).
 // Versioned, immutable money knobs; exactly one active global row.
 export const dropshipCollectionConfig = dropshipSchema.table(
@@ -2676,6 +2680,87 @@ export const dropshipCollectionAttempts = dropshipSchema.table(
     check(
       "dropship_collection_attempts_failures_chk",
       sql`${table.consecutiveFailures} >= 0`,
+    ),
+  ],
+);
+
+// Wallet maintenance runs (migration 0676). One row per (vendor, UTC day) is
+// the daily top-up's idempotency backbone: a repeated or crashed tick replays
+// the row instead of charging again. See
+// server/modules/dropship/application/dropship-wallet-maintenance-service.ts.
+export const dropshipWalletMaintenanceRuns = dropshipSchema.table(
+  "dropship_wallet_maintenance_runs",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+    vendorId: integer("vendor_id")
+      .notNull()
+      .references(() => dropshipVendors.id, { onDelete: "cascade" }),
+    runDate: date("run_date").notNull(),
+    status: varchar("status", { length: 30 }).notNull().default("pending"),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    // Wallet credit (net of any card fee), the fee, and the total charged.
+    amountCents: bigint("amount_cents", { mode: "number" }),
+    cardFeeCents: bigint("card_fee_cents", { mode: "number" }),
+    chargedCents: bigint("charged_cents", { mode: "number" }),
+    currency: varchar("currency", { length: 3 }).notNull().default("USD"),
+    fundingMethodId: integer("funding_method_id").references(
+      () => dropshipFundingMethods.id,
+      { onDelete: "set null" },
+    ),
+    fundingStatus: varchar("funding_status", { length: 20 }),
+    walletLedgerEntryId: integer("wallet_ledger_entry_id").references(
+      () => dropshipWalletLedger.id,
+      { onDelete: "set null" },
+    ),
+    providerPaymentIntentId: varchar("provider_payment_intent_id", {
+      length: 255,
+    }),
+    outcomeCode: varchar("outcome_code", { length: 120 }),
+    outcomeMessage: text("outcome_message"),
+    lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true }),
+    idempotencyKey: varchar("idempotency_key", { length: 200 }).notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [
+    uniqueIndex("dropship_wallet_maintenance_runs_vendor_date_idx").on(
+      table.vendorId,
+      table.runDate,
+    ),
+    uniqueIndex("dropship_wallet_maintenance_runs_idem_idx").on(
+      table.idempotencyKey,
+    ),
+    index("dropship_wallet_maintenance_runs_status_idx").on(
+      table.status,
+      table.runDate,
+    ),
+    check(
+      "dropship_wallet_maintenance_runs_status_chk",
+      sql`${table.status} IN ('pending','retry_pending','reloaded','not_needed','attention','declined','failed')`,
+    ),
+    check(
+      "dropship_wallet_maintenance_runs_attempts_chk",
+      sql`${table.attemptCount} >= 0`,
+    ),
+    check(
+      "dropship_wallet_maintenance_runs_amount_chk",
+      sql`${table.amountCents} IS NULL OR ${table.amountCents} >= 0`,
+    ),
+    check(
+      "dropship_wallet_maintenance_runs_fee_chk",
+      sql`${table.cardFeeCents} IS NULL OR ${table.cardFeeCents} >= 0`,
+    ),
+    check(
+      "dropship_wallet_maintenance_runs_charged_chk",
+      sql`${table.chargedCents} IS NULL OR ${table.chargedCents} >= 0`,
+    ),
+    check(
+      "dropship_wallet_maintenance_runs_funding_status_chk",
+      sql`${table.fundingStatus} IS NULL OR ${table.fundingStatus} IN ('pending','settled')`,
     ),
   ],
 );

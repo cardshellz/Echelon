@@ -17,6 +17,7 @@ import type {
   DropshipWalletMutationResult,
   DropshipWalletOverview,
   DropshipWalletRepository,
+  FailDropshipPendingFundingRepositoryInput,
   UpsertDropshipFundingMethodRepositoryInput,
 } from "../application/dropship-wallet-service";
 
@@ -652,6 +653,114 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository {
     }
   }
 
+  async failPendingFunding(input: FailDropshipPendingFundingRepositoryInput): Promise<DropshipWalletMutationResult | null> {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      const ledgerEntry = await findFundingLedgerByReferenceWithClient(client, input);
+      if (!ledgerEntry) {
+        // Nothing was recorded for this payment (a card declined at charge
+        // time never reaches the ledger): nothing to void.
+        await client.query("COMMIT");
+        return null;
+      }
+      if (ledgerEntry.walletAccountId === null) {
+        throw new DropshipError(
+          "DROPSHIP_WALLET_LEDGER_ACCOUNT_MISSING",
+          "Dropship wallet funding ledger entry is not attached to a wallet account.",
+          { vendorId: input.vendorId, ledgerEntryId: ledgerEntry.ledgerEntryId, retryable: false },
+        );
+      }
+      if (ledgerEntry.status !== "pending") {
+        // Already settled, failed or voided: a replayed webhook. Report the
+        // entry as it stands and move no money.
+        const account = await loadWalletAccountByIdWithClient(client, {
+          vendorId: input.vendorId,
+          walletAccountId: ledgerEntry.walletAccountId,
+        });
+        await client.query("COMMIT");
+        return {
+          account: requiredRow(account ?? undefined, "Dropship wallet account for a funding ledger entry was not found."),
+          ledgerEntry,
+          idempotentReplay: true,
+        };
+      }
+
+      const account = await loadWalletAccountByIdWithClient(client, {
+        vendorId: input.vendorId,
+        walletAccountId: ledgerEntry.walletAccountId,
+        forUpdate: true,
+      });
+      if (!account) {
+        throw new DropshipError(
+          "DROPSHIP_WALLET_ACCOUNT_NOT_FOUND",
+          "Dropship wallet account was not found.",
+          { vendorId: input.vendorId, walletAccountId: ledgerEntry.walletAccountId, retryable: false },
+        );
+      }
+      const nextPending = account.pendingBalanceCents - ledgerEntry.amountCents;
+      if (nextPending < 0) {
+        // The pending balance no longer contains this credit. That is a
+        // bookkeeping fault, not something to paper over with a clamp: fail
+        // closed so the webhook is retried and a human sees the code.
+        throw new DropshipError(
+          "DROPSHIP_WALLET_PENDING_BALANCE_INCONSISTENT",
+          "Dropship wallet pending balance is smaller than the pending credit being voided.",
+          {
+            vendorId: input.vendorId,
+            walletAccountId: account.walletAccountId,
+            ledgerEntryId: ledgerEntry.ledgerEntryId,
+            pendingBalanceCents: account.pendingBalanceCents,
+            amountCents: ledgerEntry.amountCents,
+            retryable: false,
+          },
+        );
+      }
+      const updatedAccount = await updateWalletBalancesWithClient(client, {
+        walletAccountId: account.walletAccountId,
+        vendorId: input.vendorId,
+        availableBalanceCents: account.availableBalanceCents,
+        pendingBalanceCents: nextPending,
+        updatedAt: input.occurredAt,
+      });
+      const failedEntry = await updateLedgerFailureWithClient(client, {
+        ledgerEntryId: ledgerEntry.ledgerEntryId,
+        vendorId: input.vendorId,
+        availableBalanceAfterCents: account.availableBalanceCents,
+        pendingBalanceAfterCents: nextPending,
+        metadata: {
+          ...ledgerEntry.metadata,
+          failure: {
+            code: input.failureCode,
+            message: input.failureMessage,
+            providerStatus: input.providerStatus,
+            providerEventId: input.providerEventId,
+            failedAt: input.occurredAt.toISOString(),
+          },
+        },
+      });
+      await recordWalletAuditEvent(client, {
+        vendorId: input.vendorId,
+        entityType: "dropship_wallet_ledger",
+        entityId: String(failedEntry.ledgerEntryId),
+        eventType: "wallet_funding_failed",
+        payload: serializeLedgerForAudit(failedEntry),
+        createdAt: input.occurredAt,
+      });
+      await client.query("COMMIT");
+      return {
+        account: updatedAccount,
+        ledgerEntry: failedEntry,
+        idempotentReplay: false,
+      };
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async getVendorLifecycleStatus(vendorId: number): Promise<DropshipVendorStatus | null> {
     const result = await this.dbPool.query<{ status: DropshipVendorStatus }>(
       `SELECT status FROM dropship.dropship_vendors WHERE id = $1`,
@@ -1176,6 +1285,68 @@ async function updateLedgerSettlementWithClient(
     ],
   );
   return mapLedgerRow(requiredRow(result.rows[0], "Dropship wallet pending funding settlement did not return a row."));
+}
+
+/** The funding entry a provider payment reference points at, locked for the transaction. */
+async function findFundingLedgerByReferenceWithClient(
+  client: PoolClient,
+  input: {
+    vendorId: number;
+    referenceType: string;
+    referenceId: string;
+  },
+): Promise<DropshipWalletLedgerRecord | null> {
+  const result = await client.query<WalletLedgerRow>(
+    `SELECT id, wallet_account_id, vendor_id, type, status, amount_cents, currency,
+            available_balance_after_cents, pending_balance_after_cents,
+            reference_type, reference_id, idempotency_key, funding_method_id,
+            external_transaction_id, metadata, created_at, settled_at
+     FROM dropship.dropship_wallet_ledger
+     WHERE vendor_id = $1
+       AND type = 'funding'
+       AND reference_type = $2
+       AND reference_id = $3
+     ORDER BY id ASC
+     LIMIT 1
+     FOR UPDATE`,
+    [input.vendorId, input.referenceType, input.referenceId],
+  );
+  return result.rows[0] ? mapLedgerRow(result.rows[0]) : null;
+}
+
+async function updateLedgerFailureWithClient(
+  client: PoolClient,
+  input: {
+    ledgerEntryId: number;
+    vendorId: number;
+    availableBalanceAfterCents: number;
+    pendingBalanceAfterCents: number;
+    metadata: Record<string, unknown>;
+  },
+): Promise<DropshipWalletLedgerRecord> {
+  const result = await client.query<WalletLedgerRow>(
+    `UPDATE dropship.dropship_wallet_ledger
+     SET status = 'failed',
+         available_balance_after_cents = $3,
+         pending_balance_after_cents = $4,
+         metadata = $5::jsonb
+     WHERE id = $1
+       AND vendor_id = $2
+       AND type = 'funding'
+       AND status = 'pending'
+     RETURNING id, wallet_account_id, vendor_id, type, status, amount_cents, currency,
+               available_balance_after_cents, pending_balance_after_cents,
+               reference_type, reference_id, idempotency_key, funding_method_id,
+               external_transaction_id, metadata, created_at, settled_at`,
+    [
+      input.ledgerEntryId,
+      input.vendorId,
+      input.availableBalanceAfterCents,
+      input.pendingBalanceAfterCents,
+      JSON.stringify(input.metadata),
+    ],
+  );
+  return mapLedgerRow(requiredRow(result.rows[0], "Dropship wallet pending funding failure did not return a row."));
 }
 
 async function loadWalletAccountForMutation(

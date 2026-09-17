@@ -33,6 +33,7 @@ import {
   type DropshipWalletMutationResult,
   type DropshipWalletOverview,
   type DropshipWalletRepository,
+  type FailDropshipPendingFundingRepositoryInput,
   type UpsertDropshipFundingMethodRepositoryInput,
 } from "../../application/dropship-wallet-service";
 
@@ -104,7 +105,7 @@ describe("DropshipWalletService", () => {
   });
 
   it("notifies vendors when Stripe wallet funding fails", async () => {
-    await service.notifyWalletFundingFailed({
+    await service.recordWalletFundingFailure({
       vendorId: 10,
       fundingMethodId: 99,
       rail: "stripe_card",
@@ -159,7 +160,7 @@ describe("DropshipWalletService", () => {
   it("does not fail funding failure handling when notification delivery fails", async () => {
     notificationSender.error = new Error("email unavailable");
 
-    await service.notifyWalletFundingFailed({
+    await service.recordWalletFundingFailure({
       vendorId: 10,
       fundingMethodId: 99,
       rail: "stripe_card",
@@ -687,6 +688,70 @@ describe("DropshipWalletService", () => {
         amountCents: 6500,
       }),
     });
+  });
+
+  it("counts credits still settling toward a routine top-up, so an ACH reload in flight is not stacked", async () => {
+    repository.autoReload = makeAutoReloadSetting({ fundingMethodId: 100, minimumBalanceCents: 5000 });
+    repository.account = { ...repository.account, availableBalanceCents: 1000, pendingBalanceCents: 4000 };
+
+    const covered = await service.handleAutoReload({ vendorId: 10, reason: "minimum_balance", idempotencyKey: "routine-pending-1" });
+    expect(covered).toMatchObject({ outcome: "skipped", skipReason: "balance_already_sufficient" });
+    expect(fundingProvider.paymentIntentInputs).toHaveLength(0);
+
+    repository.account = { ...repository.account, pendingBalanceCents: 2500 };
+    const topped = await service.handleAutoReload({ vendorId: 10, reason: "minimum_balance", idempotencyKey: "routine-pending-2" });
+    expect(topped).toMatchObject({ outcome: "funding_created", amountCents: 1500, fundingStatus: "pending" });
+  });
+
+  it("charges the card for a held order's whole gap even while an ACH credit is pending", async () => {
+    repository.autoReload = makeAutoReloadSetting({ fundingMethodId: 99, minimumBalanceCents: 5000 });
+    repository.account = { ...repository.account, availableBalanceCents: 1000, pendingBalanceCents: 9000 };
+
+    const result = await service.handleAutoReload({
+      vendorId: 10, reason: "payment_hold", requiredBalanceCents: 7500, intakeId: 456, idempotencyKey: "hold-pending-1",
+    });
+
+    expect(result).toMatchObject({ outcome: "funding_created", amountCents: 6500, fundingStatus: "settled" });
+  });
+
+  it("voids a pending ACH credit when Stripe reports the payment failed, then tells the vendor", async () => {
+    await service.creditFunding({
+      vendorId: 10, fundingMethodId: 100, rail: "stripe_ach", status: "pending", amountCents: 4000, currency: "USD",
+      referenceType: "stripe_payment_intent", referenceId: "pi_ach_1", idempotencyKey: "funding-pi-ach-1",
+    });
+    expect(repository.account.pendingBalanceCents).toBe(4000);
+
+    const failure = {
+      vendorId: 10, fundingMethodId: 100, rail: "stripe_ach" as const, amountCents: 4000, currency: "USD", provider: "stripe",
+      providerEventId: "evt_ach_failed_1", providerPaymentIntentId: "pi_ach_1", providerStatus: "requires_payment_method",
+      failureCode: "payment_intent_payment_attempt_failed", failureMessage: "The bank returned the debit.",
+      autoReload: true, autoReloadReason: "minimum_balance" as const, idempotencyKey: "stripe-funding-failed:pi_ach_1",
+    };
+    const result = await service.recordWalletFundingFailure(failure);
+
+    expect(result).toEqual({ pendingCreditVoided: true, ledgerEntryId: 1 });
+    expect(repository.account.pendingBalanceCents).toBe(0);
+    expect(repository.account.availableBalanceCents).toBe(0);
+    expect(repository.ledger[0]).toMatchObject({ status: "failed", amountCents: 4000, pendingBalanceAfterCents: 0 });
+    expect(repository.ledger[0].metadata).toMatchObject({
+      failure: expect.objectContaining({ code: "payment_intent_payment_attempt_failed", providerEventId: "evt_ach_failed_1" }),
+    });
+    expect(logs.at(-1)).toMatchObject({
+      level: "warn",
+      code: "DROPSHIP_WALLET_FUNDING_FAILED",
+      context: expect.objectContaining({ pendingCreditVoided: true, ledgerEntryId: 1, pendingBalanceAfterCents: 0 }),
+    });
+    expect(notificationSender.sent.at(-1)).toMatchObject({
+      eventType: "dropship_wallet_funding_failed",
+      payload: expect.objectContaining({ pendingCreditVoided: true, ledgerEntryId: 1 }),
+    });
+    expect(notificationSender.sent.at(-1)?.message).toContain("The pending credit has been removed from your balance.");
+
+    // A replayed webhook finds the entry already failed and moves nothing.
+    const replay = await service.recordWalletFundingFailure(failure);
+    expect(replay).toEqual({ pendingCreditVoided: false, ledgerEntryId: 1 });
+    expect(repository.account.pendingBalanceCents).toBe(0);
+    expect(notificationSender.sent.at(-1)?.message).not.toContain("removed from your balance");
   });
 
   it("warns when the backstop cannot fire, and stays at info for a correct no-op", async () => {
@@ -1317,6 +1382,38 @@ class FakeWalletRepository implements DropshipWalletRepository {
       settledAt: input.status === "settled" ? input.occurredAt : null,
     });
     return { account: this.account, ledgerEntry, idempotentReplay: false };
+  }
+
+  async failPendingFunding(input: FailDropshipPendingFundingRepositoryInput): Promise<DropshipWalletMutationResult | null> {
+    const entry = this.ledger.find((candidate) =>
+      candidate.type === "funding"
+      && candidate.referenceType === input.referenceType
+      && candidate.referenceId === input.referenceId
+    );
+    if (!entry) return null;
+    if (entry.status !== "pending") {
+      return { account: this.account, ledgerEntry: entry, idempotentReplay: true };
+    }
+    const pendingBalanceCents = this.account.pendingBalanceCents - entry.amountCents;
+    this.account = { ...this.account, pendingBalanceCents, updatedAt: input.occurredAt };
+    const failed: DropshipWalletLedgerRecord = {
+      ...entry,
+      status: "failed",
+      availableBalanceAfterCents: this.account.availableBalanceCents,
+      pendingBalanceAfterCents: pendingBalanceCents,
+      metadata: {
+        ...entry.metadata,
+        failure: {
+          code: input.failureCode,
+          message: input.failureMessage,
+          providerStatus: input.providerStatus,
+          providerEventId: input.providerEventId,
+          failedAt: input.occurredAt.toISOString(),
+        },
+      },
+    };
+    this.ledger = this.ledger.map((candidate) => (candidate === entry ? failed : candidate));
+    return { account: this.account, ledgerEntry: failed, idempotentReplay: false };
   }
 
   async creditConfirmedUsdcFunding(

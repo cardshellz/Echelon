@@ -216,7 +216,7 @@ export const handleDropshipAutoReloadInputSchema = z.object({
   }
 });
 
-export const notifyDropshipWalletFundingFailedInputSchema = z.object({
+export const recordDropshipWalletFundingFailureInputSchema = z.object({
   vendorId: positiveIdSchema,
   fundingMethodId: positiveIdSchema.nullable().optional(),
   rail: dropshipWalletFundingRailSchema.nullable().optional(),
@@ -275,7 +275,7 @@ export type CreateDropshipStripeWalletFundingSessionInput = z.infer<typeof creat
 export type CreditDropshipWalletManualFundingInput = z.infer<typeof creditDropshipWalletManualFundingInputSchema>;
 export type CreditDropshipWalletConfirmedUsdcFundingInput = z.infer<typeof creditDropshipWalletConfirmedUsdcFundingInputSchema>;
 export type HandleDropshipAutoReloadInput = z.infer<typeof handleDropshipAutoReloadInputSchema>;
-export type NotifyDropshipWalletFundingFailedInput = z.infer<typeof notifyDropshipWalletFundingFailedInputSchema>;
+export type RecordDropshipWalletFundingFailureInput = z.infer<typeof recordDropshipWalletFundingFailureInputSchema>;
 export type RegisterDropshipFundingMethodInput = z.infer<typeof registerDropshipFundingMethodInputSchema>;
 export type RegisterDropshipUsdcBaseFundingMethodForMemberInput = z.infer<typeof registerDropshipUsdcBaseFundingMethodForMemberInputSchema>;
 
@@ -369,6 +369,23 @@ export interface DropshipWalletMutationResult {
   account: DropshipWalletAccountRecord;
   ledgerEntry: DropshipWalletLedgerRecord;
   idempotentReplay: boolean;
+}
+
+export interface FailDropshipPendingFundingRepositoryInput {
+  vendorId: number;
+  referenceType: string;
+  referenceId: string;
+  failureCode: string | null;
+  failureMessage: string | null;
+  providerStatus: string | null;
+  providerEventId: string;
+  occurredAt: Date;
+}
+
+export interface DropshipWalletFundingFailureResult {
+  /** True when this call voided a pending credit; false on a replay or when nothing was recorded for the payment. */
+  pendingCreditVoided: boolean;
+  ledgerEntryId: number | null;
 }
 
 export interface DropshipConfirmedUsdcFundingResult extends DropshipWalletMutationResult {
@@ -498,6 +515,13 @@ export interface DropshipWalletRepository {
   }): Promise<string | null>;
   /** Lifecycle status of the vendor, or null when the vendor does not exist. */
   getVendorLifecycleStatus(vendorId: number): Promise<DropshipVendorStatus | null>;
+  /**
+   * Void a pending funding credit whose payment failed: the ledger entry moves
+   * to `failed` and the pending balance drops by its amount, in one
+   * transaction with the audit row. Null when no funding entry matches the
+   * reference; a replay (entry no longer pending) returns it unchanged.
+   */
+  failPendingFunding(input: FailDropshipPendingFundingRepositoryInput): Promise<DropshipWalletMutationResult | null>;
   upsertFundingMethod(input: UpsertDropshipFundingMethodRepositoryInput): Promise<DropshipFundingMethodMutationResult>;
   creditConfirmedUsdcFunding(input: CreateDropshipConfirmedUsdcFundingRepositoryInput): Promise<DropshipConfirmedUsdcFundingResult>;
 }
@@ -937,6 +961,7 @@ export class DropshipWalletService {
 
     const amount = calculateAutoReloadAmount({
       availableBalanceCents: wallet.account.availableBalanceCents,
+      pendingBalanceCents: wallet.account.pendingBalanceCents,
       minimumBalanceCents: setting.minimumBalanceCents,
       maxSingleReloadCents: setting.maxSingleReloadCents,
       requiredBalanceCents: parsed.requiredBalanceCents ?? null,
@@ -1037,8 +1062,30 @@ export class DropshipWalletService {
     };
   }
 
-  async notifyWalletFundingFailed(input: unknown): Promise<void> {
-    const parsed = parseWalletInput(notifyDropshipWalletFundingFailedInputSchema, input);
+  /**
+   * A Stripe payment that failed after the wallet recorded it. For an ACH
+   * debit that is the bank returning it, days after the credit showed as
+   * pending: the pending credit is voided first, so the balance stops counting
+   * money that is not coming, and only then is the vendor told. A failure for
+   * a payment the wallet never recorded (a card declined at charge time) has
+   * nothing to void and only notifies. A replayed webhook finds the entry
+   * already failed and changes nothing.
+   */
+  async recordWalletFundingFailure(input: unknown): Promise<DropshipWalletFundingFailureResult> {
+    const parsed = parseWalletInput(recordDropshipWalletFundingFailureInputSchema, input);
+    const voided = await this.deps.repository.failPendingFunding({
+      vendorId: parsed.vendorId,
+      referenceType: "stripe_payment_intent",
+      referenceId: parsed.providerPaymentIntentId,
+      failureCode: parsed.failureCode ?? null,
+      failureMessage: parsed.failureMessage ?? null,
+      providerStatus: parsed.providerStatus ?? null,
+      providerEventId: parsed.providerEventId,
+      occurredAt: this.deps.clock.now(),
+    });
+    const pendingCreditVoided = voided !== null && !voided.idempotentReplay;
+    const ledgerEntryId = voided?.ledgerEntry.ledgerEntryId ?? null;
+
     this.deps.logger.warn({
       code: "DROPSHIP_WALLET_FUNDING_FAILED",
       message: "Dropship wallet funding failed.",
@@ -1055,6 +1102,9 @@ export class DropshipWalletService {
         failureCode: parsed.failureCode ?? null,
         autoReload: parsed.autoReload,
         intakeId: parsed.intakeId ?? null,
+        pendingCreditVoided,
+        ledgerEntryId,
+        pendingBalanceAfterCents: voided?.account.pendingBalanceCents ?? null,
       },
     });
 
@@ -1064,7 +1114,7 @@ export class DropshipWalletService {
       critical: true,
       channels: ["email", "in_app"],
       title: "Dropship wallet funding failed",
-      message: `Wallet funding for ${formatNotificationCurrency(parsed.amountCents, parsed.currency)} failed${parsed.failureMessage ? `: ${parsed.failureMessage}` : "."}`,
+      message: `Wallet funding for ${formatNotificationCurrency(parsed.amountCents, parsed.currency)} failed${parsed.failureMessage ? `: ${parsed.failureMessage}` : "."}${pendingCreditVoided ? " The pending credit has been removed from your balance." : ""}`,
       payload: {
         vendorId: parsed.vendorId,
         fundingMethodId: parsed.fundingMethodId ?? null,
@@ -1080,6 +1130,8 @@ export class DropshipWalletService {
         autoReload: parsed.autoReload,
         autoReloadReason: parsed.autoReloadReason ?? null,
         intakeId: parsed.intakeId ?? null,
+        pendingCreditVoided,
+        ledgerEntryId,
       },
       idempotencyKey: parsed.idempotencyKey,
     }, {
@@ -1090,8 +1142,12 @@ export class DropshipWalletService {
         fundingMethodId: parsed.fundingMethodId ?? null,
         provider: parsed.provider,
         providerPaymentIntentId: parsed.providerPaymentIntentId,
+        pendingCreditVoided,
+        ledgerEntryId,
       },
     });
+
+    return { pendingCreditVoided, ledgerEntryId };
   }
 
   async registerFundingMethod(input: unknown): Promise<DropshipFundingMethodMutationResult> {
@@ -1251,8 +1307,18 @@ function normalizeConfirmedUsdcFundingInput(
   };
 }
 
+/**
+ * How much to credit so the wallet reaches its target.
+ *
+ * A routine top-up counts credits that are still settling: an ACH reload takes
+ * days to land, and charging again on every run until it does would stack
+ * reloads on top of money that is already on its way. A held order cannot
+ * spend pending money, so the backstop measures against the available balance
+ * alone and charges the card for the whole gap.
+ */
 function calculateAutoReloadAmount(input: {
   availableBalanceCents: number;
+  pendingBalanceCents: number;
   minimumBalanceCents: number;
   maxSingleReloadCents: number | null;
   requiredBalanceCents: number | null;
@@ -1261,7 +1327,10 @@ function calculateAutoReloadAmount(input: {
   const targetBalanceCents = input.reason === "payment_hold"
     ? Math.max(input.minimumBalanceCents, input.requiredBalanceCents ?? 0)
     : input.minimumBalanceCents;
-  const amountNeededCents = targetBalanceCents - input.availableBalanceCents;
+  const countedBalanceCents = input.reason === "payment_hold"
+    ? input.availableBalanceCents
+    : input.availableBalanceCents + input.pendingBalanceCents;
+  const amountNeededCents = targetBalanceCents - countedBalanceCents;
   if (amountNeededCents <= 0) {
     return { outcome: "skipped", skipReason: "balance_already_sufficient" };
   }
