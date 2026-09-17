@@ -16,6 +16,7 @@ import {
   type DropshipOmsFulfillmentSync,
   type DropshipShippingQuoteResult,
   type DropshipAutoReloadResult,
+  type DropshipVendorStandingChange,
 } from "../../application";
 
 const now = new Date("2026-05-01T18:00:00.000Z");
@@ -494,6 +495,92 @@ describe("DropshipOrderProcessingService", () => {
     expect(logs.find((entry) => entry.code === "DROPSHIP_ORDER_REACCEPTANCE_AFTER_RELOAD_FAILED")).toMatchObject({
       context: expect.objectContaining({ intakeId: 1, reloadLedgerEntryId: 501, error: "inventory changed under us" }),
     });
+  });
+
+  it("pauses the vendor when the backstop card is declined outright, and lets the pause notice replace the auto-reload notice", async () => {
+    const repository = new FakeProcessingRepository(makeClaim());
+    const pauses: unknown[] = [];
+    const notificationSender = new FakeNotificationSender();
+    const logs: DropshipLogEvent[] = [];
+    const service = new DropshipOrderProcessingService({
+      repository,
+      shippingQuote: new FakeShippingQuoteService(),
+      orderAcceptance: new FakeAcceptanceService(null, heldAcceptance()),
+      walletAutoReload: new FakeWalletAutoReloadService(new DropshipError("DROPSHIP_STRIPE_CARD_DECLINED", "Your card was declined.", {
+        classification: "permanent",
+        stripeCode: "card_declined",
+        stripeDeclineCode: "insufficient_funds",
+      })),
+      vendorStanding: {
+        pauseForFundingFailure: async (input) => {
+          pauses.push(input);
+          return { outcome: "paused", standing: null, shortfallCents: null, listingHold: null } satisfies DropshipVendorStandingChange;
+        },
+      },
+      notificationSender,
+      clock: { now: () => now },
+      logger: captureLogger(logs),
+    });
+
+    const result = await service.processIntake({ intakeId: 1, workerId: "worker-1", idempotencyKey: "process-intake-1" });
+
+    expect(result.outcome).toBe("payment_hold");
+    expect(pauses).toEqual([{
+      vendorId: 10,
+      reason: "card_declined",
+      evidence: {
+        source: "order_backstop",
+        intakeId: 1,
+        autoReloadReason: "payment_hold",
+        failureCode: "DROPSHIP_STRIPE_CARD_DECLINED",
+        stripeCode: "card_declined",
+        stripeDeclineCode: "insufficient_funds",
+      },
+    }]);
+    expect(notificationSender.sent.filter((sent) => sent.eventType === "dropship_auto_reload_failed")).toEqual([]);
+    expect(logs.some((event) => event.code === "DROPSHIP_ORDER_PAYMENT_HOLD_AUTO_RELOAD_FAILED")).toBe(true);
+  });
+
+  it("keeps the auto-reload notice when the decline does not pause anyone, and never pauses for a non-decline error", async () => {
+    const pauses: unknown[] = [];
+    const build = (error: Error, pauseOutcome: () => Promise<DropshipVendorStandingChange>) => {
+      const notificationSender = new FakeNotificationSender();
+      const logs: DropshipLogEvent[] = [];
+      const service = new DropshipOrderProcessingService({
+        repository: new FakeProcessingRepository(makeClaim()),
+        shippingQuote: new FakeShippingQuoteService(),
+        orderAcceptance: new FakeAcceptanceService(null, heldAcceptance()),
+        walletAutoReload: new FakeWalletAutoReloadService(error),
+        vendorStanding: { pauseForFundingFailure: async (input) => { pauses.push(input); return pauseOutcome(); } },
+        notificationSender,
+        clock: { now: () => now },
+        logger: captureLogger(logs),
+      });
+      return { service, notificationSender, logs };
+    };
+    const unchanged = { outcome: "unchanged", standing: null, shortfallCents: null, listingHold: null } satisfies DropshipVendorStandingChange;
+
+    // Already paused: the vendor still hears that this order's reload failed.
+    const alreadyPaused = build(new DropshipError("DROPSHIP_STRIPE_CARD_DECLINED", "Declined.", { classification: "permanent" }), async () => unchanged);
+    await alreadyPaused.service.processIntake({ intakeId: 1, workerId: "worker-1", idempotencyKey: "process-intake-1" });
+    expect(pauses).toHaveLength(1);
+    expect(alreadyPaused.notificationSender.sent.map((sent) => sent.eventType)).toEqual(["dropship_auto_reload_failed"]);
+
+    // Standing failed: logged for a human, the order pass is unaffected.
+    const standingDown = build(new DropshipError("DROPSHIP_STRIPE_CARD_DECLINED", "Declined.", { classification: "permanent" }), async () => { throw new Error("standing db down"); });
+    const result = await standingDown.service.processIntake({ intakeId: 1, workerId: "worker-1", idempotencyKey: "process-intake-1" });
+    expect(result.outcome).toBe("payment_hold");
+    expect(pauses).toHaveLength(2);
+    expect(standingDown.logs.find((event) => event.code === "DROPSHIP_ORDER_VENDOR_PAUSE_FAILED")).toMatchObject({
+      context: expect.objectContaining({ intakeId: 1, vendorId: 10, error: "standing db down" }),
+    });
+    expect(standingDown.notificationSender.sent.map((sent) => sent.eventType)).toEqual(["dropship_auto_reload_failed"]);
+
+    // A rate limit or outage is not a decline: nobody is paused for it.
+    const transient = build(new DropshipError("DROPSHIP_STRIPE_RATE_LIMITED", "Slow down.", { classification: "transient" }), async () => unchanged);
+    await transient.service.processIntake({ intakeId: 1, workerId: "worker-1", idempotencyKey: "process-intake-1" });
+    expect(pauses).toHaveLength(2);
+    expect(transient.notificationSender.sent.map((sent) => sent.eventType)).toEqual(["dropship_auto_reload_failed"]);
   });
 
   it("does not fail payment-hold processing when auto-reload fails", async () => {

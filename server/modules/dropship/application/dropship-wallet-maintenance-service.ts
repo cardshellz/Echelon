@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { DropshipError } from "../domain/errors";
+import { DROPSHIP_FUNDING_DECLINED_ERROR_CODE } from "../domain/vendor-standing";
 import { sendDropshipNotificationSafely } from "./dropship-notification-dispatch";
 import { DROPSHIP_NOTIFICATION_EVENTS } from "./dropship-notification-events";
 import type {
@@ -8,6 +9,10 @@ import type {
   DropshipLogger,
   DropshipNotificationSender,
 } from "./dropship-ports";
+import type {
+  DropshipVendorStandingChange,
+  DropshipVendorStandingService,
+} from "./dropship-vendor-standing-service";
 import type { DropshipAutoReloadResult } from "./dropship-wallet-service";
 
 /**
@@ -83,12 +88,11 @@ const NOT_NEEDED_SKIP_REASONS: ReadonlySet<string> = new Set(["balance_already_s
 const OUR_SIDE_SKIP_REASONS: ReadonlySet<string> = new Set(["funding_provider_not_configured"]);
 /**
  * The one permanent provider failure that is the vendor's to fix: the bank
- * refused the charge (`dropship-stripe-error.ts` maps Stripe card errors to
- * it). Other permanent failures (a rejected request, an idempotency
- * conflict) are ours, and telling the vendor their card was declined would
- * be both wrong and alarming.
+ * refused the charge. Other permanent failures (a rejected request, an
+ * idempotency conflict) are ours, and telling the vendor their card was
+ * declined would be both wrong and alarming.
  */
-const CARD_DECLINED_ERROR_CODE = "DROPSHIP_STRIPE_CARD_DECLINED";
+const CARD_DECLINED_ERROR_CODE = DROPSHIP_FUNDING_DECLINED_ERROR_CODE;
 
 export const runDropshipWalletMaintenanceInputSchema = z.object({
   workerId: z.string().trim().min(1).max(120),
@@ -221,6 +225,8 @@ export class DropshipWalletMaintenanceService {
       repository: DropshipWalletMaintenanceRepository;
       reloader: DropshipWalletMaintenanceReloader;
       notificationSender?: DropshipNotificationSender;
+      /** Pauses the vendor on a decline: no orders, listings held at zero, until funded. */
+      vendorStanding?: Pick<DropshipVendorStandingService, "pauseForFundingFailure">;
       clock: DropshipClock;
       logger: DropshipLogger;
       maxAttemptsPerDay?: number;
@@ -506,16 +512,22 @@ export class DropshipWalletMaintenanceService {
           stripeDeclineCode: errorContext.stripeDeclineCode ?? null,
         },
       });
-      await this.notifyVendor({
-        run: declined,
-        title: "Dropship wallet top-up declined",
-        message: declineMessageFor(errorContext),
-        payload: {
-          failureCode: errorCode,
-          stripeCode: errorContext.stripeCode ?? null,
-          stripeDeclineCode: errorContext.stripeDeclineCode ?? null,
-        },
-      });
+      // The first decline pauses the vendor; the pause notice says what was
+      // declined and what to do, so the daily decline notice is only sent
+      // when no pause went out (already paused, or standing not wired).
+      const pause = await this.pauseVendorSafely(declined, errorCode, errorContext);
+      if (pause?.outcome !== "paused") {
+        await this.notifyVendor({
+          run: declined,
+          title: "Dropship wallet top-up declined",
+          message: declineMessageFor(errorContext),
+          payload: {
+            failureCode: errorCode,
+            stripeCode: errorContext.stripeCode ?? null,
+            stripeDeclineCode: errorContext.stripeDeclineCode ?? null,
+          },
+        });
+      }
       return toRunOutcome(declined, "declined");
     }
 
@@ -536,6 +548,47 @@ export class DropshipWalletMaintenanceService {
       context: baseContext,
     });
     return toRunOutcome(failed, "failed");
+  }
+
+  /**
+   * Standing has its own retry (tomorrow's run declines again and pauses
+   * then), so a failure here is logged for a human and never fails the run
+   * that was already recorded.
+   */
+  private async pauseVendorSafely(
+    run: DropshipWalletMaintenanceRunRecord,
+    errorCode: string,
+    errorContext: Record<string, unknown>,
+  ): Promise<DropshipVendorStandingChange | null> {
+    if (!this.deps.vendorStanding) {
+      return null;
+    }
+    try {
+      return await this.deps.vendorStanding.pauseForFundingFailure({
+        vendorId: run.vendorId,
+        reason: "card_declined",
+        evidence: {
+          source: "wallet_maintenance",
+          runId: run.runId,
+          runDate: run.runDate,
+          failureCode: errorCode,
+          stripeCode: errorContext.stripeCode ?? null,
+          stripeDeclineCode: errorContext.stripeDeclineCode ?? null,
+        },
+      });
+    } catch (error) {
+      this.deps.logger.error({
+        code: "DROPSHIP_WALLET_MAINTENANCE_VENDOR_PAUSE_FAILED",
+        message: "Dropship vendor could not be paused after a declined top-up; tomorrow's run retries the decline.",
+        context: {
+          vendorId: run.vendorId,
+          runId: run.runId,
+          runDate: run.runDate,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      });
+      return null;
+    }
   }
 
   private async notifyVendor(input: {

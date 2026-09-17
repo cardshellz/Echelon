@@ -12,8 +12,9 @@ import {
   quoteWalletFunding,
   type WalletFundingQuote,
 } from "../../../../shared/dropship/wallet-funding-fee";
-import type { DropshipVendorStatus } from "../../../../shared/schema/dropship.schema";
+import type { DropshipVendorStandingReason, DropshipVendorStatus } from "../../../../shared/schema/dropship.schema";
 import { DropshipError } from "../domain/errors";
+import { standingReasonForFailedFunding } from "../domain/vendor-standing";
 import {
   formatNotificationCurrency,
   sendDropshipNotificationSafely,
@@ -25,6 +26,10 @@ import type {
   DropshipLogger,
   DropshipNotificationSender,
 } from "./dropship-ports";
+import type {
+  DropshipVendorStandingRecord,
+  DropshipVendorStandingService,
+} from "./dropship-vendor-standing-service";
 import type {
   DropshipProvisionVendorRepositoryResult,
   DropshipVendorProvisioningService,
@@ -380,12 +385,27 @@ export interface FailDropshipPendingFundingRepositoryInput {
   providerStatus: string | null;
   providerEventId: string;
   occurredAt: Date;
+  /**
+   * Pause the vendor in the same transaction as the void. Null keeps the
+   * vendor's standing untouched (only tests and non-standing callers).
+   */
+  pauseVendor: {
+    reason: DropshipVendorStandingReason;
+    evidence: Record<string, unknown>;
+  } | null;
+}
+
+export interface DropshipWalletFundingFailureRepositoryResult extends DropshipWalletMutationResult {
+  /** The vendor's standing after this call paused it; null when nothing changed (replay, or already paused). */
+  vendorPaused: DropshipVendorStandingRecord | null;
 }
 
 export interface DropshipWalletFundingFailureResult {
   /** True when this call voided a pending credit; false on a replay or when nothing was recorded for the payment. */
   pendingCreditVoided: boolean;
   ledgerEntryId: number | null;
+  /** True when the voided credit paused the vendor in the same transaction. */
+  vendorPaused: boolean;
 }
 
 export interface DropshipConfirmedUsdcFundingResult extends DropshipWalletMutationResult {
@@ -521,7 +541,7 @@ export interface DropshipWalletRepository {
    * transaction with the audit row. Null when no funding entry matches the
    * reference; a replay (entry no longer pending) returns it unchanged.
    */
-  failPendingFunding(input: FailDropshipPendingFundingRepositoryInput): Promise<DropshipWalletMutationResult | null>;
+  failPendingFunding(input: FailDropshipPendingFundingRepositoryInput): Promise<DropshipWalletFundingFailureRepositoryResult | null>;
   upsertFundingMethod(input: UpsertDropshipFundingMethodRepositoryInput): Promise<DropshipFundingMethodMutationResult>;
   creditConfirmedUsdcFunding(input: CreateDropshipConfirmedUsdcFundingRepositoryInput): Promise<DropshipConfirmedUsdcFundingResult>;
 }
@@ -563,6 +583,11 @@ export class DropshipWalletService {
       repository: DropshipWalletRepository;
       fundingProvider?: DropshipWalletFundingProvider;
       notificationSender?: DropshipNotificationSender;
+      /**
+       * Vendor standing: announces the pause a voided credit caused and
+       * resumes a paused vendor once a settled credit funds the wallet.
+       */
+      vendorStanding?: Pick<DropshipVendorStandingService, "announcePause" | "restoreIfFunded">;
       clock: DropshipClock;
       logger: DropshipLogger;
       /** Card fee rate override; the environment's rate when absent. Injected so tests are deterministic. */
@@ -613,6 +638,15 @@ export class DropshipWalletService {
           rail: parsed.rail,
         },
       });
+      if (parsed.status === "settled") {
+        await this.restoreVendorStandingIfFunded(parsed.vendorId, {
+          source: "wallet_funding_credit",
+          ledgerEntryId: result.ledgerEntry.ledgerEntryId,
+          rail: parsed.rail,
+          amountCents: parsed.amountCents,
+          currency: parsed.currency,
+        });
+      }
     }
     return result;
   }
@@ -737,6 +771,13 @@ export class DropshipWalletService {
           actorType: parsed.actor.actorType,
           actorId: parsed.actor.actorId ?? null,
         },
+      });
+      await this.restoreVendorStandingIfFunded(parsed.vendorId, {
+        source: "wallet_usdc_funding_credit",
+        ledgerEntryId: result.ledgerEntry.ledgerEntryId,
+        rail: "usdc_base",
+        amountCents: parsed.amountCents,
+        currency: parsed.currency,
       });
     }
     return result;
@@ -1073,6 +1114,20 @@ export class DropshipWalletService {
    */
   async recordWalletFundingFailure(input: unknown): Promise<DropshipWalletFundingFailureResult> {
     const parsed = parseWalletInput(recordDropshipWalletFundingFailureInputSchema, input);
+    const pauseReason = standingReasonForFailedFunding(parsed.rail ?? null);
+    const pauseEvidence = {
+      source: "funding_webhook",
+      provider: parsed.provider,
+      providerEventId: parsed.providerEventId,
+      providerPaymentIntentId: parsed.providerPaymentIntentId,
+      failureCode: parsed.failureCode ?? null,
+      failureMessage: parsed.failureMessage ?? null,
+      rail: parsed.rail ?? null,
+      amountCents: parsed.amountCents,
+      currency: parsed.currency,
+      autoReload: parsed.autoReload,
+      intakeId: parsed.intakeId ?? null,
+    };
     const voided = await this.deps.repository.failPendingFunding({
       vendorId: parsed.vendorId,
       referenceType: "stripe_payment_intent",
@@ -1082,9 +1137,14 @@ export class DropshipWalletService {
       providerStatus: parsed.providerStatus ?? null,
       providerEventId: parsed.providerEventId,
       occurredAt: this.deps.clock.now(),
+      // A credit the wallet counted on and the bank refused is the first hard
+      // decline: the vendor is paused in the same transaction as the void, so
+      // the two facts are never recorded apart.
+      pauseVendor: { reason: pauseReason, evidence: pauseEvidence },
     });
     const pendingCreditVoided = voided !== null && !voided.idempotentReplay;
     const ledgerEntryId = voided?.ledgerEntry.ledgerEntryId ?? null;
+    const vendorPaused = voided?.vendorPaused ?? null;
 
     this.deps.logger.warn({
       code: "DROPSHIP_WALLET_FUNDING_FAILED",
@@ -1105,8 +1165,18 @@ export class DropshipWalletService {
         pendingCreditVoided,
         ledgerEntryId,
         pendingBalanceAfterCents: voided?.account.pendingBalanceCents ?? null,
+        vendorPaused: vendorPaused !== null,
+        standingRevision: vendorPaused?.standingRevision ?? null,
       },
     });
+
+    // The pause notice tells the vendor what failed and what to do, so the
+    // generic funding-failed notice is only sent when no pause went out.
+    const pauseAnnounced = vendorPaused !== null
+      && await this.announceVendorPauseSafely(parsed.vendorId, { ...pauseEvidence, ledgerEntryId });
+    if (pauseAnnounced) {
+      return { pendingCreditVoided, ledgerEntryId, vendorPaused: true };
+    }
 
     await sendDropshipNotificationSafely(this.deps, {
       vendorId: parsed.vendorId,
@@ -1147,7 +1217,55 @@ export class DropshipWalletService {
       },
     });
 
-    return { pendingCreditVoided, ledgerEntryId };
+    return { pendingCreditVoided, ledgerEntryId, vendorPaused: vendorPaused !== null };
+  }
+
+  /**
+   * The pause is already committed; announcing it (vendor notice, listing
+   * hold) must not fail the webhook, which would only replay a void that no
+   * longer changes anything. A failure is logged for a human; the hourly
+   * standing reconcile still lands the listing hold.
+   */
+  private async announceVendorPauseSafely(vendorId: number, evidence: Record<string, unknown>): Promise<boolean> {
+    if (!this.deps.vendorStanding) {
+      this.deps.logger.warn({
+        code: "DROPSHIP_VENDOR_PAUSE_UNANNOUNCED",
+        message: "Dropship vendor was paused by a voided funding credit but no standing service is configured to announce it.",
+        context: { vendorId },
+      });
+      return false;
+    }
+    try {
+      const change = await this.deps.vendorStanding.announcePause({ vendorId, evidence });
+      return change.outcome === "paused";
+    } catch (error) {
+      this.deps.logger.error({
+        code: "DROPSHIP_VENDOR_PAUSE_ANNOUNCE_FAILED",
+        message: "Dropship vendor pause was recorded but could not be announced; the vendor gets the funding-failed notice instead.",
+        context: { vendorId, error: error instanceof Error ? error.message : String(error) },
+      });
+      return false;
+    }
+  }
+
+  /**
+   * A settled credit may be what a paused vendor was waiting for. The check
+   * is best-effort here: the hourly standing reconcile repeats it, so a
+   * failure is logged and never fails the credit that was just recorded.
+   */
+  private async restoreVendorStandingIfFunded(vendorId: number, evidence: Record<string, unknown>): Promise<void> {
+    if (!this.deps.vendorStanding) {
+      return;
+    }
+    try {
+      await this.deps.vendorStanding.restoreIfFunded({ vendorId, evidence });
+    } catch (error) {
+      this.deps.logger.error({
+        code: "DROPSHIP_VENDOR_RESTORE_FAILED",
+        message: "Dropship vendor standing could not be checked after a settled credit; the hourly reconcile retries.",
+        context: { vendorId, error: error instanceof Error ? error.message : String(error) },
+      });
+    }
   }
 
   async registerFundingMethod(input: unknown): Promise<DropshipFundingMethodMutationResult> {

@@ -1,6 +1,7 @@
 import { createHash } from "crypto";
 import { z } from "zod";
 import { DropshipError } from "../domain/errors";
+import { isDropshipFundingDeclineError } from "../domain/vendor-standing";
 import { syncDropshipAcceptedOrderToWmsSafely } from "./dropship-fulfillment-sync-dispatch";
 import { sendDropshipNotificationSafely } from "./dropship-notification-dispatch";
 import { DROPSHIP_NOTIFICATION_EVENTS } from "./dropship-notification-events";
@@ -24,6 +25,10 @@ import type {
   DropshipShippingQuoteResult,
   DropshipShippingQuoteService,
 } from "./dropship-shipping-quote-service";
+import type {
+  DropshipVendorStandingChange,
+  DropshipVendorStandingService,
+} from "./dropship-vendor-standing-service";
 import type {
   DropshipAutoReloadResult,
   DropshipWalletService,
@@ -124,6 +129,8 @@ export interface DropshipOrderProcessingServiceDependencies {
   shippingQuote: Pick<DropshipShippingQuoteService, "quote">;
   orderAcceptance: Pick<DropshipOrderAcceptanceService, "acceptOrder">;
   walletAutoReload?: Pick<DropshipWalletService, "handleAutoReload">;
+  /** Pauses the vendor when the backstop card charge is declined outright. */
+  vendorStanding?: Pick<DropshipVendorStandingService, "pauseForFundingFailure">;
   notificationSender?: DropshipNotificationSender;
   fulfillmentSync?: DropshipOmsFulfillmentSync;
   fulfillmentSyncRetryQueue?: DropshipOmsFulfillmentSyncRetryQueue;
@@ -442,12 +449,60 @@ export class DropshipOrderProcessingService {
           error: errorMessage,
         },
       });
-      await this.notifyAutoReloadIssue({
-        claim: input.claim,
-        reason: autoReloadInput.reason,
-        issueType: "failed",
-        issueCode: "auto_reload_provider_error",
-        issueMessage: errorMessage,
+      // A decline is the bank refusing the vendor's card: the vendor is paused
+      // on the first one. The pause notice already tells them what happened,
+      // so the generic auto-reload notice is only sent when no pause went out.
+      const pause = isDropshipFundingDeclineError(error)
+        ? await this.pauseVendorForDeclineSafely(input.claim, autoReloadInput.reason, error)
+        : null;
+      if (pause?.outcome !== "paused") {
+        await this.notifyAutoReloadIssue({
+          claim: input.claim,
+          reason: autoReloadInput.reason,
+          issueType: "failed",
+          issueCode: "auto_reload_provider_error",
+          issueMessage: errorMessage,
+        });
+      }
+      return null;
+    }
+  }
+
+  /**
+   * Standing is a separate concern with its own retry (the daily wallet
+   * maintenance run declines again and pauses then), so a failure here is
+   * logged for a human and must not fail the order pass.
+   */
+  private async pauseVendorForDeclineSafely(
+    claim: DropshipOrderProcessingClaim,
+    reason: "minimum_balance" | "payment_hold",
+    error: DropshipError,
+  ): Promise<DropshipVendorStandingChange | null> {
+    if (!this.deps.vendorStanding) {
+      return null;
+    }
+    try {
+      return await this.deps.vendorStanding.pauseForFundingFailure({
+        vendorId: claim.intake.vendorId,
+        reason: "card_declined",
+        evidence: {
+          source: "order_backstop",
+          intakeId: claim.intake.intakeId,
+          autoReloadReason: reason,
+          failureCode: error.code,
+          stripeCode: error.context?.stripeCode ?? null,
+          stripeDeclineCode: error.context?.stripeDeclineCode ?? null,
+        },
+      });
+    } catch (pauseError) {
+      this.deps.logger.error({
+        code: "DROPSHIP_ORDER_VENDOR_PAUSE_FAILED",
+        message: "Dropship vendor could not be paused after a declined backstop charge; the daily wallet run retries the decline.",
+        context: {
+          intakeId: claim.intake.intakeId,
+          vendorId: claim.intake.vendorId,
+          error: pauseError instanceof Error ? pauseError.message : String(pauseError),
+        },
       });
       return null;
     }

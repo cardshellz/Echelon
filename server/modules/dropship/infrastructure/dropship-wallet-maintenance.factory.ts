@@ -5,6 +5,7 @@ import {
   systemDropshipWalletMaintenanceClock,
 } from "../application/dropship-wallet-maintenance-service";
 import { createDropshipNotificationServiceFromEnv } from "./dropship-notification.factory";
+import { createDropshipVendorStandingServiceFromEnv } from "./dropship-vendor-standing.factory";
 import { PgDropshipWalletMaintenanceRepository } from "./dropship-wallet-maintenance.repository";
 import { createDropshipWalletServiceFromEnv } from "./dropship-wallet.factory";
 
@@ -20,6 +21,7 @@ export function createDropshipWalletMaintenanceServiceFromEnv(): DropshipWalletM
     repository: new PgDropshipWalletMaintenanceRepository(),
     reloader: createDropshipWalletServiceFromEnv(),
     notificationSender: createDropshipNotificationServiceFromEnv(),
+    vendorStanding: createDropshipVendorStandingServiceFromEnv(),
     clock: systemDropshipWalletMaintenanceClock,
     logger: makeDropshipWalletMaintenanceLogger(),
     maxAttemptsPerDay: envPositiveInteger(MAX_ATTEMPTS_ENV, DEFAULT_WALLET_MAINTENANCE_MAX_ATTEMPTS_PER_DAY),

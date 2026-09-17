@@ -44,6 +44,11 @@ import {
   describePaymentHoldSummary,
   type PaymentHoldNotice,
 } from "@/lib/dropship-payment-holds";
+import {
+  describeVendorStanding,
+  isPausedForFunding,
+  type VendorStandingNotice,
+} from "@/lib/dropship-vendor-standing";
 import { DropshipPortalShell } from "./DropshipPortalShell";
 
 type DropshipWalletLedgerEntry = DropshipWalletResponse["wallet"]["recentLedger"][number];
@@ -102,6 +107,7 @@ export default function DropshipPortalDashboard() {
 
   const settings = settingsQuery.data?.settings;
   const onboarding = onboardingQuery.data;
+  const standingNotice = onboarding ? describeVendorStanding(onboarding.vendor) : null;
   const storeConnections = settings?.storeConnections ?? [];
   const launchReadyStoreConnections = useMemo(
     () => listLaunchReadyStoreConnections(storeConnections),
@@ -135,6 +141,13 @@ export default function DropshipPortalDashboard() {
               {queryErrorMessage(holdSummaryQuery.error, "Unable to check for orders waiting on payment.")}
             </AlertDescription>
           </Alert>
+        )}
+
+        {standingNotice && (
+          <VendorStandingPanel
+            notice={standingNotice}
+            onAddFunds={() => setLocation(dropshipPortalPath("/wallet"))}
+          />
         )}
 
         {holdNotice && (
@@ -295,6 +308,37 @@ function LaunchOverviewPanel({
  * Held orders outrank every other card: money is the only thing between the
  * vendor and a sale, and the marketplace clock is running.
  */
+function VendorStandingPanel({
+  notice,
+  onAddFunds,
+}: {
+  notice: VendorStandingNotice;
+  onAddFunds: () => void;
+}) {
+  return (
+    <div
+      className="mb-4 rounded-md border border-red-300 bg-red-50 p-5 text-red-950 shadow-sm"
+      data-testid="dashboard-vendor-standing-panel"
+    >
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+        <div className="min-w-0">
+          <h2 className="flex items-center gap-2 text-lg font-semibold" data-testid="dashboard-vendor-standing-title">
+            <AlertCircle className="h-5 w-5" />
+            {notice.title}
+          </h2>
+          <p className="mt-1 text-sm" data-testid="dashboard-vendor-standing-detail">{notice.reason} {notice.action}</p>
+          {notice.since && <p className="mt-1 text-sm">{notice.since}</p>}
+        </div>
+        {notice.needsFunds && (
+          <Button type="button" className="h-9 bg-[#C060E0] hover:bg-[#a94bc9]" onClick={onAddFunds}>
+            Add funds
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function PaymentHoldPanel({
   notice,
   onAddFunds,
@@ -727,6 +771,17 @@ function dashboardNextAction(onboarding: DropshipOnboardingState | undefined): D
       message: "Launch readiness is loading. If this stays blank, reload the page or open onboarding.",
       path: null,
       title: "Loading launch status",
+    };
+  }
+
+  // A funding pause outranks the checklist: nothing else the vendor does
+  // matters until the wallet is funded and selling resumes.
+  if (isPausedForFunding(onboarding.vendor)) {
+    return {
+      actionLabel: "Open wallet",
+      message: "Selling is paused because your wallet funding failed. Add funds or update your card; selling resumes on its own once your balance is back to the minimum.",
+      path: "/wallet",
+      title: "Fund your wallet to resume selling",
     };
   }
 

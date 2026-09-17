@@ -9,6 +9,7 @@ import { createDropshipNotificationServiceFromEnv } from "./dropship-notificatio
 import { createDropshipOrderAcceptanceServiceFromEnv } from "./dropship-order-acceptance.factory";
 import { PgDropshipOrderProcessingRepository } from "./dropship-order-processing.repository";
 import { createDropshipShippingQuoteServiceFromEnv } from "./dropship-shipping-quote.factory";
+import { createDropshipVendorStandingServiceFromEnv } from "./dropship-vendor-standing.factory";
 import { createDropshipWalletServiceFromEnv } from "./dropship-wallet.factory";
 
 export function createDropshipOrderProcessingServiceFromEnv(): DropshipOrderProcessingService {
@@ -17,6 +18,7 @@ export function createDropshipOrderProcessingServiceFromEnv(): DropshipOrderProc
     shippingQuote: createDropshipShippingQuoteServiceFromEnv(),
     orderAcceptance: createDropshipOrderAcceptanceServiceFromEnv(),
     walletAutoReload: createDropshipWalletServiceFromEnv(),
+    vendorStanding: createDropshipVendorStandingServiceFromEnv(),
     notificationSender: createDropshipNotificationServiceFromEnv(),
     fulfillmentSync: getDropshipFulfillmentSync(),
     fulfillmentSyncRetryQueue: createDropshipFulfillmentSyncRetryQueueFromEnv(),

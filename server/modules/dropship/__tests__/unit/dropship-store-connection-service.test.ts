@@ -1737,6 +1737,8 @@ function makeVendor(overrides: Partial<DropshipProvisionedVendorProfile> = {}): 
     entitlementCheckedAt: now,
     membershipGraceEndsAt: null,
     includedStoreConnections: 1,
+    standingReason: null,
+    pausedAt: null,
     createdAt: now,
     updatedAt: now,
     ...overrides,

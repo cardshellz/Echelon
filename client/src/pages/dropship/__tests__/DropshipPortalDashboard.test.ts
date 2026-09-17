@@ -23,6 +23,21 @@ describe("DropshipPortalDashboard contract", () => {
     expect(panel).toContain("notice.needsFunds && (");
   });
 
+  it("puts a paused vendor's standing above the held-order panel and points the next action at the wallet", () => {
+    expect(source).toContain("const standingNotice = onboarding ? describeVendorStanding(onboarding.vendor) : null;");
+    const standingUse = source.indexOf("<VendorStandingPanel");
+    const holdUse = source.indexOf("<PaymentHoldPanel");
+    expect(standingUse).toBeGreaterThan(0);
+    expect(standingUse).toBeLessThan(holdUse);
+    const panel = source.slice(source.indexOf("function VendorStandingPanel"), source.indexOf("function PaymentHoldPanel"));
+    expect(panel).toContain('data-testid="dashboard-vendor-standing-panel"');
+    expect(panel).toContain("notice.needsFunds && (");
+    expect(panel).toContain("Add funds");
+    const nextAction = source.slice(source.indexOf("function dashboardNextAction"), source.indexOf("function launchStepDetail"));
+    expect(nextAction.indexOf("isPausedForFunding(onboarding.vendor)")).toBeLessThan(nextAction.indexOf("onboarding.steps.find"));
+    expect(nextAction).toContain('title: "Fund your wallet to resume selling"');
+  });
+
   it("marks held orders in the recent list and counts them on the Orders metric", () => {
     expect(source).toContain("const heldDetail = describeHeldOrder(order, now);");
     expect(source).toContain('data-testid="recent-order-hold-detail"');

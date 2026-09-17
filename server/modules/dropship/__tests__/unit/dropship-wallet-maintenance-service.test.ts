@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { DropshipError } from "../../domain/errors";
 import type { DropshipLogEvent, DropshipNotificationSenderInput } from "../../application/dropship-ports";
+import type { DropshipVendorStandingChange } from "../../application/dropship-vendor-standing-service";
 import type { DropshipAutoReloadResult } from "../../application/dropship-wallet-service";
 import {
   DropshipWalletMaintenanceService,
@@ -41,11 +42,15 @@ describe("DropshipWalletMaintenanceService", () => {
     service = buildService();
   });
 
-  function buildService(maxAttemptsPerDay?: number): DropshipWalletMaintenanceService {
+  function buildService(
+    maxAttemptsPerDay?: number,
+    vendorStanding?: { pauseForFundingFailure: (input: unknown) => Promise<DropshipVendorStandingChange> },
+  ): DropshipWalletMaintenanceService {
     return new DropshipWalletMaintenanceService({
       repository,
       reloader,
       notificationSender,
+      vendorStanding,
       clock: { now: () => now },
       logger: {
         info: (event) => logs.push({ ...event, level: "info" }),
@@ -190,6 +195,74 @@ describe("DropshipWalletMaintenanceService", () => {
     expect(result).toMatchObject({ retryPendingCount: 1 });
     expect(repository.runs[0]).toMatchObject({ status: "retry_pending", outcomeCode: "DROPSHIP_WALLET_MAINTENANCE_UNEXPECTED_ERROR", outcomeMessage: "connection reset" });
     expect(notificationSender.sent).toHaveLength(0);
+  });
+
+  it("pauses the vendor on the first decline and lets the pause notice replace the decline notice", async () => {
+    const pauses: unknown[] = [];
+    service = buildService(undefined, {
+      pauseForFundingFailure: async (input) => {
+        pauses.push(input);
+        return { outcome: "paused", standing: null, shortfallCents: null, listingHold: null };
+      },
+    });
+    repository.due = [10];
+    reloader.respond = async () => {
+      throw new DropshipError("DROPSHIP_STRIPE_CARD_DECLINED", "Your card was declined.", {
+        classification: "permanent",
+        stripeCode: "card_declined",
+        stripeDeclineCode: "insufficient_funds",
+      });
+    };
+
+    const result = await run();
+
+    expect(result).toMatchObject({ declinedCount: 1 });
+    expect(repository.runs[0]).toMatchObject({ status: "declined" });
+    expect(pauses).toEqual([{
+      vendorId: 10,
+      reason: "card_declined",
+      evidence: {
+        source: "wallet_maintenance",
+        runId: repository.runs[0].runId,
+        runDate: RUN_DATE,
+        failureCode: "DROPSHIP_STRIPE_CARD_DECLINED",
+        stripeCode: "card_declined",
+        stripeDeclineCode: "insufficient_funds",
+      },
+    }]);
+    // The standing service sends the pause notice; no second email from here.
+    expect(notificationSender.sent).toHaveLength(0);
+    expect(logs.filter((entry) => entry.level === "error")).toHaveLength(0);
+  });
+
+  it("keeps the daily decline notice when the vendor is already paused, and survives a standing failure", async () => {
+    let attempt = 0;
+    service = buildService(undefined, {
+      pauseForFundingFailure: async () => {
+        attempt += 1;
+        if (attempt === 1) {
+          return { outcome: "unchanged", standing: null, shortfallCents: null, listingHold: null };
+        }
+        throw new Error("standing db down");
+      },
+    });
+    repository.due = [10];
+    reloader.respond = async () => {
+      throw new DropshipError("DROPSHIP_STRIPE_CARD_DECLINED", "Your card was declined.", { classification: "permanent" });
+    };
+
+    expect(await run()).toMatchObject({ declinedCount: 1 });
+    expect(notificationSender.sent).toHaveLength(1);
+    expect(notificationSender.sent[0]).toMatchObject({ title: "Dropship wallet top-up declined" });
+
+    repository.runs = [];
+    repository.due = [10];
+    expect(await run()).toMatchObject({ declinedCount: 1 });
+    expect(notificationSender.sent).toHaveLength(2);
+    expect(logs.find((entry) => entry.code === "DROPSHIP_WALLET_MAINTENANCE_VENDOR_PAUSE_FAILED")).toMatchObject({
+      level: "error",
+      context: expect.objectContaining({ vendorId: 10, error: "standing db down" }),
+    });
   });
 
   it("ends the day on a decline, tells the vendor once, and stays quiet on replay", async () => {

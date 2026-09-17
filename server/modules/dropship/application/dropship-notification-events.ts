@@ -21,6 +21,8 @@ export const DROPSHIP_NOTIFICATION_EVENTS = {
   STORE_NEEDS_REAUTH: "dropship_store_needs_reauth",
   TRACKING_PUSH_FAILED: "dropship_tracking_push_failed",
   TRACKING_PUSHED: "dropship_tracking_pushed",
+  VENDOR_PAUSED: "dropship_vendor_paused",
+  VENDOR_RESUMED: "dropship_vendor_resumed",
   WALLET_FUNDING_FAILED: "dropship_wallet_funding_failed",
 } as const;
 

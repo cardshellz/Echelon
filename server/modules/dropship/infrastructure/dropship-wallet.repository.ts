@@ -2,6 +2,7 @@ import type { Pool, PoolClient } from "pg";
 import type { DropshipVendorStatus } from "../../../../shared/schema/dropship.schema";
 import { pool as defaultPool } from "../../../db";
 import { DropshipError } from "../domain/errors";
+import { pauseDropshipVendorWithClient } from "./dropship-vendor-standing.repository";
 import type {
   ConfigureDropshipAutoReloadRepositoryInput,
   CreateDropshipConfirmedUsdcFundingRepositoryInput,
@@ -14,6 +15,7 @@ import type {
   DropshipUsdcLedgerEntryRecord,
   DropshipWalletAccountRecord,
   DropshipWalletLedgerRecord,
+  DropshipWalletFundingFailureRepositoryResult,
   DropshipWalletMutationResult,
   DropshipWalletOverview,
   DropshipWalletRepository,
@@ -653,7 +655,7 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository {
     }
   }
 
-  async failPendingFunding(input: FailDropshipPendingFundingRepositoryInput): Promise<DropshipWalletMutationResult | null> {
+  async failPendingFunding(input: FailDropshipPendingFundingRepositoryInput): Promise<DropshipWalletFundingFailureRepositoryResult | null> {
     const client = await this.dbPool.connect();
     try {
       await client.query("BEGIN");
@@ -683,6 +685,7 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository {
           account: requiredRow(account ?? undefined, "Dropship wallet account for a funding ledger entry was not found."),
           ledgerEntry,
           idempotentReplay: true,
+          vendorPaused: null,
         };
       }
 
@@ -747,11 +750,22 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository {
         payload: serializeLedgerForAudit(failedEntry),
         createdAt: input.occurredAt,
       });
+      // Same transaction as the void: the vendor is paused because this
+      // credit failed, and the two facts commit or roll back together.
+      const pause = input.pauseVendor
+        ? await pauseDropshipVendorWithClient(client, {
+            vendorId: input.vendorId,
+            reason: input.pauseVendor.reason,
+            evidence: { ...input.pauseVendor.evidence, ledgerEntryId: failedEntry.ledgerEntryId },
+            now: input.occurredAt,
+          })
+        : null;
       await client.query("COMMIT");
       return {
         account: updatedAccount,
         ledgerEntry: failedEntry,
         idempotentReplay: false,
+        vendorPaused: pause?.changed ? pause.standing : null,
       };
     } catch (error) {
       await rollbackQuietly(client);

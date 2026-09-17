@@ -33,6 +33,7 @@ export * from "./dropship-order-ops-service";
 export * from "./dropship-order-processing-service";
 export * from "./dropship-order-rejection-service";
 export * from "./dropship-payment-hold-expiration-service";
+export * from "./dropship-vendor-standing-service";
 export * from "./dropship-wallet-maintenance-service";
 export * from "./dropship-no-inspection-watcher-service";
 export * from "./dropship-no-inspection-review-service";

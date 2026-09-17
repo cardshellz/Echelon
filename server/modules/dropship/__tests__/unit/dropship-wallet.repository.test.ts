@@ -17,6 +17,7 @@ const failure = {
   providerStatus: "requires_payment_method",
   providerEventId: "evt_ach_failed_1",
   occurredAt,
+  pauseVendor: null,
 };
 
 describe("PgDropshipWalletRepository.failPendingFunding", () => {
@@ -99,8 +100,104 @@ describe("PgDropshipWalletRepository.failPendingFunding", () => {
 
     const result = await new PgDropshipWalletRepository(makePool(query)).failPendingFunding(failure);
 
-    expect(result).toMatchObject({ idempotentReplay: true, ledgerEntry: { status: "failed" } });
+    expect(result).toMatchObject({ idempotentReplay: true, vendorPaused: null, ledgerEntry: { status: "failed" } });
     expect(statements).toEqual(["BEGIN", "SELECT id,", "SELECT id,", "COMMIT"]);
+  });
+
+  it("pauses the vendor in the same transaction as the void, with the ledger entry in the pause evidence", async () => {
+    const statements: string[] = [];
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      const sqlText = String(sql);
+      statements.push(sqlText.trim().split(/\s+/).slice(0, 2).join(" "));
+      if (sqlText.includes("FROM dropship.dropship_wallet_ledger")) return { rows: [makeLedgerRow()] };
+      if (sqlText.includes("FROM dropship.dropship_wallet_accounts")) {
+        return { rows: [makeAccountRow({ available_balance_cents: "1000", pending_balance_cents: "4000" })] };
+      }
+      if (sqlText.startsWith("UPDATE dropship.dropship_wallet_accounts")) {
+        return { rows: [makeAccountRow({ available_balance_cents: "1000", pending_balance_cents: "0" })] };
+      }
+      if (sqlText.startsWith("UPDATE dropship.dropship_wallet_ledger")) {
+        return { rows: [makeLedgerRow({ status: "failed", available_balance_after_cents: "1000", pending_balance_after_cents: "0" })] };
+      }
+      if (sqlText.startsWith("UPDATE dropship.dropship_vendors")) {
+        expect(sqlText).toContain("SET status = 'paused'");
+        expect(sqlText).toContain("AND status = 'active'");
+        expect(params).toEqual([10, "funding_returned", occurredAt]);
+        return { rows: [makeStandingRow({ status: "paused", standing_reason: "funding_returned", paused_at: occurredAt, standing_revision: 1 })] };
+      }
+      if (sqlText.includes("INSERT INTO dropship.dropship_audit_events") && sqlText.includes("'dropship_vendor'")) {
+        expect(params?.slice(0, 3)).toEqual([10, "10", "vendor_paused"]);
+        expect(JSON.parse(String(params?.[3]))).toMatchObject({
+          reason: "funding_returned",
+          evidence: { source: "funding_webhook", providerEventId: "evt_ach_failed_1", ledgerEntryId: 1 },
+        });
+        return { rows: [] };
+      }
+      return { rows: [] };
+    });
+
+    const result = await new PgDropshipWalletRepository(makePool(query)).failPendingFunding({
+      ...failure,
+      pauseVendor: { reason: "funding_returned", evidence: { source: "funding_webhook", providerEventId: "evt_ach_failed_1" } },
+    });
+
+    expect(result).toMatchObject({
+      idempotentReplay: false,
+      ledgerEntry: { status: "failed" },
+      vendorPaused: { vendorId: 10, status: "paused", standingReason: "funding_returned", pausedAt: occurredAt, standingRevision: 1 },
+    });
+    expect(statements).toEqual([
+      "BEGIN",
+      "SELECT id,",
+      "SELECT id,",
+      "UPDATE dropship.dropship_wallet_accounts",
+      "UPDATE dropship.dropship_wallet_ledger",
+      "INSERT INTO",
+      "UPDATE dropship.dropship_vendors",
+      "INSERT INTO",
+      "COMMIT",
+    ]);
+  });
+
+  it("voids the credit but leaves standing alone when the vendor is not active", async () => {
+    const statements: string[] = [];
+    const query = vi.fn(async (sql: string) => {
+      const sqlText = String(sql);
+      statements.push(sqlText.trim().split(/\s+/).slice(0, 2).join(" "));
+      if (sqlText.includes("FROM dropship.dropship_wallet_ledger")) return { rows: [makeLedgerRow()] };
+      if (sqlText.includes("FROM dropship.dropship_wallet_accounts")) {
+        return { rows: [makeAccountRow({ available_balance_cents: "1000", pending_balance_cents: "4000" })] };
+      }
+      if (sqlText.startsWith("UPDATE dropship.dropship_wallet_accounts")) {
+        return { rows: [makeAccountRow({ available_balance_cents: "1000", pending_balance_cents: "0" })] };
+      }
+      if (sqlText.startsWith("UPDATE dropship.dropship_wallet_ledger")) {
+        return { rows: [makeLedgerRow({ status: "failed", available_balance_after_cents: "1000", pending_balance_after_cents: "0" })] };
+      }
+      if (sqlText.startsWith("UPDATE dropship.dropship_vendors")) return { rows: [] };
+      if (sqlText.includes("FROM dropship.dropship_vendors")) {
+        return { rows: [makeStandingRow({ status: "paused", standing_reason: "card_declined", paused_at: occurredAt, standing_revision: 1 })] };
+      }
+      return { rows: [] };
+    });
+
+    const result = await new PgDropshipWalletRepository(makePool(query)).failPendingFunding({
+      ...failure,
+      pauseVendor: { reason: "funding_returned", evidence: {} },
+    });
+
+    expect(result).toMatchObject({ idempotentReplay: false, vendorPaused: null, ledgerEntry: { status: "failed" } });
+    expect(statements).toEqual([
+      "BEGIN",
+      "SELECT id,",
+      "SELECT id,",
+      "UPDATE dropship.dropship_wallet_accounts",
+      "UPDATE dropship.dropship_wallet_ledger",
+      "INSERT INTO",
+      "UPDATE dropship.dropship_vendors",
+      "SELECT id,",
+      "COMMIT",
+    ]);
   });
 
   it("returns null when nothing was recorded for the payment", async () => {
@@ -145,6 +242,20 @@ function makeLedgerRow(overrides: Record<string, unknown> = {}) {
     metadata: { rail: "stripe_ach", provider: "stripe" },
     created_at: occurredAt,
     settled_at: null,
+    ...overrides,
+  };
+}
+
+function makeStandingRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 10,
+    status: "active",
+    standing_reason: null,
+    paused_at: null,
+    standing_revision: 0,
+    listing_hold_state: "released",
+    listing_hold_reconciled_at: null,
+    listing_hold_detail: null,
     ...overrides,
   };
 }

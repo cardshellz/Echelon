@@ -42,6 +42,21 @@ export const dropshipVendorStatusEnum = [
 ] as const;
 export type DropshipVendorStatus = (typeof dropshipVendorStatusEnum)[number];
 
+/**
+ * Why a vendor is paused. The two funding reasons clear on their own when a
+ * settled credit restores the balance; an operator pause needs an operator.
+ */
+export const dropshipVendorStandingReasonEnum = [
+  "card_declined",
+  "funding_returned",
+  "operator",
+] as const;
+export type DropshipVendorStandingReason = (typeof dropshipVendorStandingReasonEnum)[number];
+
+/** Whether inventory planning currently holds the vendor's store connections at zero. */
+export const dropshipListingHoldStateEnum = ["released", "held"] as const;
+export type DropshipListingHoldState = (typeof dropshipListingHoldStateEnum)[number];
+
 export const dropshipSourcePlatformEnum = [
   "ebay",
   "shopify",
@@ -250,6 +265,16 @@ export const dropshipVendors = dropshipSchema.table(
     includedStoreConnections: integer("included_store_connections")
       .notNull()
       .default(1),
+    // Vendor standing (migration 0678): why and when the vendor was paused,
+    // and whether inventory planning currently holds their stores at zero.
+    standingReason: varchar("standing_reason", { length: 60 }),
+    pausedAt: timestamp("paused_at", { withTimezone: true }),
+    standingRevision: integer("standing_revision").notNull().default(0),
+    listingHoldState: varchar("listing_hold_state", { length: 20 })
+      .notNull()
+      .default("released"),
+    listingHoldReconciledAt: timestamp("listing_hold_reconciled_at", { withTimezone: true }),
+    listingHoldDetail: text("listing_hold_detail"),
     metadata: jsonb("metadata"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .defaultNow()
@@ -268,6 +293,24 @@ export const dropshipVendors = dropshipSchema.table(
     check(
       "dropship_vendors_store_count_chk",
       sql`${table.includedStoreConnections} >= 1`,
+    ),
+    index("dropship_vendors_listing_hold_mismatch_idx").on(table.status, table.listingHoldState),
+    check(
+      "dropship_vendors_standing_chk",
+      sql`(${table.status} <> 'paused' AND ${table.standingReason} IS NULL AND ${table.pausedAt} IS NULL)
+        OR (${table.status} = 'paused' AND ${table.standingReason} IS NOT NULL AND ${table.pausedAt} IS NOT NULL)`,
+    ),
+    check(
+      "dropship_vendors_standing_reason_chk",
+      sql`${table.standingReason} IS NULL OR ${table.standingReason} IN ('card_declined', 'funding_returned', 'operator')`,
+    ),
+    check(
+      "dropship_vendors_standing_revision_chk",
+      sql`${table.standingRevision} >= 0`,
+    ),
+    check(
+      "dropship_vendors_listing_hold_state_chk",
+      sql`${table.listingHoldState} IN ('released', 'held')`,
     ),
   ],
 );

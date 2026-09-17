@@ -18,6 +18,15 @@ describe("DropshipPortalWallet contract", () => {
     expect(source).toContain("<AutoReloadSection");
   });
 
+  it("shows a paused vendor why selling stopped, from the same onboarding state the shell refreshes after wallet changes", () => {
+    expect(source).toContain("useQuery<DropshipOnboardingState>({");
+    expect(source).toContain("queryKey: [...ONBOARDING_QUERY_KEY],");
+    expect(source).toContain("const standingNotice = onboardingQuery.data ? describeVendorStanding(onboardingQuery.data.vendor) : null;");
+    const notice = source.indexOf('data-testid="wallet-vendor-standing-notice"');
+    expect(notice).toBeGreaterThan(0);
+    expect(notice).toBeLessThan(source.indexOf("{walletQuery.error && ("));
+  });
+
   it("keeps bank accounts, USDC and the hold timeout behind a collapsed Advanced section", () => {
     const advancedStart = source.indexOf("function AdvancedSection");
     expect(advancedStart).toBeGreaterThan(0);

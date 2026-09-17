@@ -1,3 +1,4 @@
+import type { DropshipVendorStandingReason } from "../../../../shared/schema/dropship.schema";
 import { DropshipError } from "../domain/errors";
 import {
   resolveDropshipVendorProvisioningStatus,
@@ -28,6 +29,9 @@ export interface DropshipProvisionedVendorProfile {
   entitlementCheckedAt: Date | null;
   membershipGraceEndsAt: Date | null;
   includedStoreConnections: number;
+  /** Why the vendor is paused; null unless status is `paused`. */
+  standingReason: DropshipVendorStandingReason | null;
+  pausedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }

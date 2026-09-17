@@ -262,6 +262,9 @@ export interface DropshipOnboardingState {
     entitlementStatus: string;
     membershipGraceEndsAt: string | null;
     includedStoreConnections: number;
+    /** Why the vendor is paused (`card_declined`, `funding_returned`, `operator`); null unless status is `paused`. */
+    standingReason: string | null;
+    pausedAt: string | null;
   };
   entitlement: {
     memberId: string;

@@ -28,6 +28,7 @@ import {
   type DropshipStripeWalletFundingSession,
   type DropshipUsdcLedgerEntryRecord,
   type DropshipWalletAccountRecord,
+  type DropshipWalletFundingFailureRepositoryResult,
   type DropshipWalletFundingProvider,
   type DropshipWalletLedgerRecord,
   type DropshipWalletMutationResult,
@@ -51,11 +52,16 @@ describe("DropshipWalletService", () => {
     fundingProvider = new FakeFundingProvider();
     notificationSender = new FakeNotificationSender();
     logs = [];
-    service = new DropshipWalletService({
+    service = buildService();
+  });
+
+  function buildService(overrides: { vendorStanding?: FakeVendorStandingService } = {}): DropshipWalletService {
+    return new DropshipWalletService({
       vendorProvisioning: new FakeVendorProvisioningService() as unknown as DropshipVendorProvisioningService,
       repository,
       fundingProvider,
       notificationSender,
+      vendorStanding: overrides.vendorStanding,
       clock: { now: () => now },
       logger: {
         info: (event) => logs.push({ ...event, level: "info" }),
@@ -65,7 +71,7 @@ describe("DropshipWalletService", () => {
       // The launch rate, pinned so the assertions below do not depend on the environment.
       cardFundingFeeBps: 300,
     });
-  });
+  }
 
   it("credits settled card funding into available balance idempotently", async () => {
     const first = await service.creditFunding({
@@ -729,7 +735,7 @@ describe("DropshipWalletService", () => {
     };
     const result = await service.recordWalletFundingFailure(failure);
 
-    expect(result).toEqual({ pendingCreditVoided: true, ledgerEntryId: 1 });
+    expect(result).toEqual({ pendingCreditVoided: true, ledgerEntryId: 1, vendorPaused: false });
     expect(repository.account.pendingBalanceCents).toBe(0);
     expect(repository.account.availableBalanceCents).toBe(0);
     expect(repository.ledger[0]).toMatchObject({ status: "failed", amountCents: 4000, pendingBalanceAfterCents: 0 });
@@ -749,9 +755,182 @@ describe("DropshipWalletService", () => {
 
     // A replayed webhook finds the entry already failed and moves nothing.
     const replay = await service.recordWalletFundingFailure(failure);
-    expect(replay).toEqual({ pendingCreditVoided: false, ledgerEntryId: 1 });
+    expect(replay).toEqual({ pendingCreditVoided: false, ledgerEntryId: 1, vendorPaused: false });
     expect(repository.account.pendingBalanceCents).toBe(0);
     expect(notificationSender.sent.at(-1)?.message).not.toContain("removed from your balance");
+  });
+
+  it("pauses an active vendor in the void transaction, announces it, and lets the pause notice replace the funding-failed notice", async () => {
+    const standing = new FakeVendorStandingService();
+    service = buildService({ vendorStanding: standing });
+    repository.vendorStatus = "active";
+    await service.creditFunding({
+      vendorId: 10, fundingMethodId: 100, rail: "stripe_ach", status: "pending", amountCents: 4000, currency: "USD",
+      referenceType: "stripe_payment_intent", referenceId: "pi_ach_1", idempotencyKey: "funding-pi-ach-1",
+    });
+    const failure = {
+      vendorId: 10, fundingMethodId: 100, rail: "stripe_ach" as const, amountCents: 4000, currency: "USD", provider: "stripe",
+      providerEventId: "evt_ach_failed_1", providerPaymentIntentId: "pi_ach_1", providerStatus: "requires_payment_method",
+      failureCode: "payment_intent_payment_attempt_failed", failureMessage: "The bank returned the debit.",
+      autoReload: true, autoReloadReason: "minimum_balance" as const, idempotencyKey: "stripe-funding-failed:pi_ach_1",
+    };
+
+    const result = await service.recordWalletFundingFailure(failure);
+
+    expect(result).toEqual({ pendingCreditVoided: true, ledgerEntryId: 1, vendorPaused: true });
+    expect(repository.vendorStatus).toBe("paused");
+    expect(repository.failInputs.at(-1)?.pauseVendor).toEqual({
+      reason: "funding_returned",
+      evidence: {
+        source: "funding_webhook", provider: "stripe", providerEventId: "evt_ach_failed_1", providerPaymentIntentId: "pi_ach_1",
+        failureCode: "payment_intent_payment_attempt_failed", failureMessage: "The bank returned the debit.", rail: "stripe_ach",
+        amountCents: 4000, currency: "USD", autoReload: true, intakeId: null,
+      },
+    });
+    expect(standing.announceCalls).toEqual([{ vendorId: 10, evidence: expect.objectContaining({ source: "funding_webhook", ledgerEntryId: 1, amountCents: 4000 }) }]);
+    expect(notificationSender.sent.filter((sent) => sent.eventType === "dropship_wallet_funding_failed")).toEqual([]);
+    expect(logs.find((entry) => entry.code === "DROPSHIP_WALLET_FUNDING_FAILED")).toMatchObject({
+      level: "warn",
+      context: expect.objectContaining({ pendingCreditVoided: true, vendorPaused: true, standingRevision: 1 }),
+    });
+
+    // A replayed webhook voids nothing, pauses nobody, and announces nothing.
+    const replay = await service.recordWalletFundingFailure(failure);
+    expect(replay).toEqual({ pendingCreditVoided: false, ledgerEntryId: 1, vendorPaused: false });
+    expect(standing.announceCalls).toHaveLength(1);
+    expect(notificationSender.sent.filter((sent) => sent.eventType === "dropship_wallet_funding_failed")).toHaveLength(1);
+  });
+
+  it("treats a card that fails after the wallet counted it as a decline", async () => {
+    service = buildService({ vendorStanding: new FakeVendorStandingService() });
+    repository.vendorStatus = "active";
+    await service.creditFunding({
+      vendorId: 10, fundingMethodId: 99, rail: "stripe_card", status: "pending", amountCents: 4000, currency: "USD",
+      referenceType: "stripe_payment_intent", referenceId: "pi_card_1", idempotencyKey: "funding-pi-card-1",
+    });
+
+    await service.recordWalletFundingFailure({
+      vendorId: 10, fundingMethodId: 99, rail: "stripe_card", amountCents: 4000, currency: "USD", provider: "stripe",
+      providerEventId: "evt_card_failed_1", providerPaymentIntentId: "pi_card_1", failureCode: "card_declined",
+      failureMessage: "Your card was declined.", autoReload: true, idempotencyKey: "stripe-funding-failed:pi_card_1",
+    });
+
+    expect(repository.failInputs.at(-1)?.pauseVendor?.reason).toBe("card_declined");
+  });
+
+  it("falls back to the funding-failed notice when the pause cannot be announced, or nothing is wired to announce it", async () => {
+    const standing = new FakeVendorStandingService();
+    standing.announceError = new Error("standing db down");
+    service = buildService({ vendorStanding: standing });
+    repository.vendorStatus = "active";
+    await service.creditFunding({
+      vendorId: 10, fundingMethodId: 100, rail: "stripe_ach", status: "pending", amountCents: 4000, currency: "USD",
+      referenceType: "stripe_payment_intent", referenceId: "pi_ach_1", idempotencyKey: "funding-pi-ach-1",
+    });
+    const failure = {
+      vendorId: 10, fundingMethodId: 100, rail: "stripe_ach" as const, amountCents: 4000, currency: "USD", provider: "stripe",
+      providerEventId: "evt_ach_failed_1", providerPaymentIntentId: "pi_ach_1", failureCode: "payment_intent_payment_attempt_failed",
+      failureMessage: "The bank returned the debit.", autoReload: true, idempotencyKey: "stripe-funding-failed:pi_ach_1",
+    };
+
+    const result = await service.recordWalletFundingFailure(failure);
+
+    expect(result).toEqual({ pendingCreditVoided: true, ledgerEntryId: 1, vendorPaused: true });
+    expect(repository.vendorStatus).toBe("paused");
+    expect(logs.find((entry) => entry.code === "DROPSHIP_VENDOR_PAUSE_ANNOUNCE_FAILED")).toMatchObject({
+      level: "error",
+      context: expect.objectContaining({ vendorId: 10, error: "standing db down" }),
+    });
+    expect(notificationSender.sent.at(-1)).toMatchObject({ eventType: "dropship_wallet_funding_failed" });
+
+    // No standing service at all: the pause is still recorded and flagged.
+    repository = new FakeWalletRepository();
+    repository.vendorStatus = "active";
+    notificationSender = new FakeNotificationSender();
+    logs = [];
+    service = buildService();
+    await service.creditFunding({
+      vendorId: 10, fundingMethodId: 100, rail: "stripe_ach", status: "pending", amountCents: 4000, currency: "USD",
+      referenceType: "stripe_payment_intent", referenceId: "pi_ach_1", idempotencyKey: "funding-pi-ach-1",
+    });
+    expect(await service.recordWalletFundingFailure(failure)).toEqual({ pendingCreditVoided: true, ledgerEntryId: 1, vendorPaused: true });
+    expect(repository.vendorStatus).toBe("paused");
+    expect(logs.find((entry) => entry.code === "DROPSHIP_VENDOR_PAUSE_UNANNOUNCED")).toMatchObject({ level: "warn" });
+    expect(notificationSender.sent.at(-1)).toMatchObject({ eventType: "dropship_wallet_funding_failed" });
+  });
+
+  it("asks standing to resume the vendor after every settled credit, and never for a pending or replayed one", async () => {
+    const standing = new FakeVendorStandingService();
+    service = buildService({ vendorStanding: standing });
+
+    await service.creditFunding({
+      vendorId: 10, fundingMethodId: 99, rail: "stripe_card", status: "settled", amountCents: 5000, currency: "USD",
+      referenceType: "stripe_payment_intent", referenceId: "pi_card_1", idempotencyKey: "funding-pi-card-1",
+    });
+    expect(standing.restoreCalls).toEqual([{
+      vendorId: 10,
+      evidence: { source: "wallet_funding_credit", ledgerEntryId: 1, rail: "stripe_card", amountCents: 5000, currency: "USD" },
+    }]);
+
+    // Replay: no second check. Pending ACH: nothing settled yet.
+    await service.creditFunding({
+      vendorId: 10, fundingMethodId: 99, rail: "stripe_card", status: "settled", amountCents: 5000, currency: "USD",
+      referenceType: "stripe_payment_intent", referenceId: "pi_card_1", idempotencyKey: "funding-pi-card-1",
+    });
+    await service.creditFunding({
+      vendorId: 10, fundingMethodId: 100, rail: "stripe_ach", status: "pending", amountCents: 4000, currency: "USD",
+      referenceType: "stripe_payment_intent", referenceId: "pi_ach_1", idempotencyKey: "funding-pi-ach-1",
+    });
+    expect(standing.restoreCalls).toHaveLength(1);
+
+    await service.creditManualFunding({
+      vendorId: 10, amountCents: 1500, currency: "USD", reason: "goodwill", idempotencyKey: "manual-credit-1",
+      actor: { actorType: "admin", actorId: "admin-1" },
+    });
+    expect(standing.restoreCalls.at(-1)).toMatchObject({ vendorId: 10, evidence: expect.objectContaining({ source: "wallet_funding_credit", rail: "manual", amountCents: 1500 }) });
+
+    repository.fundingMethods.push(makeFundingMethod({
+      fundingMethodId: 101,
+      rail: "usdc_base",
+      providerCustomerId: null,
+      providerPaymentMethodId: null,
+      usdcWalletAddress: "0x1111111111111111111111111111111111111111",
+      displayLabel: "USDC on Base",
+      isDefault: false,
+    }));
+    await service.creditConfirmedUsdcFunding({
+      vendorId: 10,
+      fundingMethodId: 101,
+      amountCents: 2500,
+      currency: "USD",
+      amountAtomicUnits: "25000000",
+      chainId: 8453,
+      transactionHash: "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      fromAddress: "0x2222222222222222222222222222222222222222",
+      toAddress: "0x1111111111111111111111111111111111111111",
+      confirmations: 12,
+      idempotencyKey: "usdc-credit-1",
+      actor: { actorType: "admin", actorId: "admin-1" },
+    });
+    expect(standing.restoreCalls).toHaveLength(3);
+    expect(standing.restoreCalls.at(-1)).toMatchObject({ vendorId: 10, evidence: expect.objectContaining({ source: "wallet_usdc_funding_credit", rail: "usdc_base", amountCents: 2500 }) });
+  });
+
+  it("logs and moves on when the standing check fails after a credit", async () => {
+    const standing = new FakeVendorStandingService();
+    standing.restoreError = new Error("standing db down");
+    service = buildService({ vendorStanding: standing });
+
+    const result = await service.creditFunding({
+      vendorId: 10, fundingMethodId: 99, rail: "stripe_card", status: "settled", amountCents: 5000, currency: "USD",
+      referenceType: "stripe_payment_intent", referenceId: "pi_card_1", idempotencyKey: "funding-pi-card-1",
+    });
+
+    expect(result.ledgerEntry.status).toBe("settled");
+    expect(logs.find((entry) => entry.code === "DROPSHIP_VENDOR_RESTORE_FAILED")).toMatchObject({
+      level: "error",
+      context: expect.objectContaining({ vendorId: 10, error: "standing db down" }),
+    });
   });
 
   it("warns when the backstop cannot fire, and stays at info for a correct no-op", async () => {
@@ -1152,6 +1331,25 @@ describe("DropshipWalletService", () => {
   });
 });
 
+class FakeVendorStandingService {
+  announceCalls: unknown[] = [];
+  restoreCalls: unknown[] = [];
+  announceError: Error | null = null;
+  restoreError: Error | null = null;
+
+  async announcePause(input: unknown) {
+    if (this.announceError) throw this.announceError;
+    this.announceCalls.push(input);
+    return { outcome: "paused" as const, standing: null, shortfallCents: null, listingHold: null };
+  }
+
+  async restoreIfFunded(input: unknown) {
+    if (this.restoreError) throw this.restoreError;
+    this.restoreCalls.push(input);
+    return { outcome: "unchanged" as const, standing: null, shortfallCents: null, listingHold: null };
+  }
+}
+
 class FakeNotificationSender {
   sent: DropshipNotificationSenderInput[] = [];
   error: Error | null = null;
@@ -1275,6 +1473,8 @@ class FakeWalletRepository implements DropshipWalletRepository {
   account: DropshipWalletAccountRecord = makeAccount();
   /** Drives the guard that keeps a live vendor from removing the card backstop. */
   vendorStatus: DropshipVendorStatus | null = "onboarding";
+  standingRevision = 0;
+  failInputs: FailDropshipPendingFundingRepositoryInput[] = [];
   lastConfigureInput: ConfigureDropshipAutoReloadRepositoryInput | null = null;
   fundingMethods: DropshipFundingMethodRecord[] = [
     makeFundingMethod(),
@@ -1384,7 +1584,8 @@ class FakeWalletRepository implements DropshipWalletRepository {
     return { account: this.account, ledgerEntry, idempotentReplay: false };
   }
 
-  async failPendingFunding(input: FailDropshipPendingFundingRepositoryInput): Promise<DropshipWalletMutationResult | null> {
+  async failPendingFunding(input: FailDropshipPendingFundingRepositoryInput): Promise<DropshipWalletFundingFailureRepositoryResult | null> {
+    this.failInputs.push(input);
     const entry = this.ledger.find((candidate) =>
       candidate.type === "funding"
       && candidate.referenceType === input.referenceType
@@ -1392,7 +1593,7 @@ class FakeWalletRepository implements DropshipWalletRepository {
     );
     if (!entry) return null;
     if (entry.status !== "pending") {
-      return { account: this.account, ledgerEntry: entry, idempotentReplay: true };
+      return { account: this.account, ledgerEntry: entry, idempotentReplay: true, vendorPaused: null };
     }
     const pendingBalanceCents = this.account.pendingBalanceCents - entry.amountCents;
     this.account = { ...this.account, pendingBalanceCents, updatedAt: input.occurredAt };
@@ -1413,7 +1614,23 @@ class FakeWalletRepository implements DropshipWalletRepository {
       },
     };
     this.ledger = this.ledger.map((candidate) => (candidate === entry ? failed : candidate));
-    return { account: this.account, ledgerEntry: failed, idempotentReplay: false };
+    // Mirrors the real repository: the guarded pause rides the void transaction.
+    let vendorPaused: DropshipWalletFundingFailureRepositoryResult["vendorPaused"] = null;
+    if (input.pauseVendor && this.vendorStatus === "active") {
+      this.vendorStatus = "paused";
+      this.standingRevision += 1;
+      vendorPaused = {
+        vendorId: input.vendorId,
+        status: "paused",
+        standingReason: input.pauseVendor.reason,
+        pausedAt: input.occurredAt,
+        standingRevision: this.standingRevision,
+        listingHoldState: "released",
+        listingHoldReconciledAt: null,
+        listingHoldDetail: null,
+      };
+    }
+    return { account: this.account, ledgerEntry: failed, idempotentReplay: false, vendorPaused };
   }
 
   async creditConfirmedUsdcFunding(
@@ -1740,6 +1957,8 @@ function makeVendor(overrides: Partial<DropshipProvisionedVendorProfile> = {}): 
     entitlementCheckedAt: now,
     membershipGraceEndsAt: null,
     includedStoreConnections: 1,
+    standingReason: null,
+    pausedAt: null,
     createdAt: now,
     updatedAt: now,
     ...overrides,
