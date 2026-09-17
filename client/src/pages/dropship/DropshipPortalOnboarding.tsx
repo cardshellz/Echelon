@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useLocation } from "wouter";
@@ -8,6 +8,7 @@ import {
   Boxes,
   CheckCircle2,
   Circle,
+  Clock,
   Fingerprint,
   Mail,
   Plug,
@@ -32,9 +33,18 @@ import {
   type DropshipSensitiveAction,
 } from "@/lib/dropship-auth";
 import {
+  describeAccountSummary,
+  describeActivation,
+  describeOnboardingProgress,
+  describeOnboardingStep,
+  isOnboardingVendor,
+  type ActivationView,
+  type OnboardingStepTone,
+  type OnboardingStepView,
+} from "@/lib/dropship-onboarding";
+import {
   buildStoreConnectionOAuthStartInput,
   fetchJson,
-  formatCents,
   formatStatus,
   postJson,
   type DropshipStoreConnectionListResponse,
@@ -45,6 +55,7 @@ import {
   type DropshipStoreOAuthIntent,
   type DropshipStorePlatform,
 } from "@/lib/dropship-ops-surface";
+import { describeVendorStanding } from "@/lib/dropship-vendor-standing";
 import { DropshipPortalShell } from "./DropshipPortalShell";
 import {
   readStoreOAuthCallbackStatus,
@@ -52,6 +63,19 @@ import {
 } from "./store-oauth-callback-status";
 import { storeOAuthEmailVerificationMessage } from "./store-oauth-verification-copy";
 import { StoreOAuthTargetConfirmationDialog } from "./StoreOAuthTargetConfirmationDialog";
+
+/**
+ * Vendor onboarding.
+ *
+ * One checklist, five rows, each row with its own button, and the activation
+ * step at the bottom of the same card. The store panel sits below it because
+ * connecting a store happens on this page. Once the vendor is past onboarding
+ * the checklist gives way to a short account summary; the store panel stays,
+ * since this is the only page that can connect one, and the shell drops the
+ * page from the nav.
+ */
+
+const ONBOARDING_QUERY_KEY = ["/api/dropship/onboarding/state"] as const;
 
 type PendingAction = "send-email-code" | "verify-email-code" | "passkey-proof" | "oauth-start" | null;
 type PendingActivationAction = "send-email-code" | "verify-email-code" | "passkey-proof" | "activate-account" | null;
@@ -69,30 +93,47 @@ export default function DropshipPortalOnboarding() {
   const queryClient = useQueryClient();
   const [, setLocation] = useLocation();
   const { principal } = useDropshipAuth();
+  // Activation flips the status to active, which would swap the checklist for
+  // the account summary the moment it succeeds. Remember it happened here so
+  // the confirmation stays on screen and the vendor chooses when to move on.
+  const [activatedHere, setActivatedHere] = useState(false);
+  const storePanelRef = useRef<HTMLDivElement | null>(null);
   const onboardingQuery = useQuery<DropshipOnboardingState>({
-    queryKey: ["/api/dropship/onboarding/state"],
-    queryFn: () => fetchJson<DropshipOnboardingState>("/api/dropship/onboarding/state"),
+    queryKey: [...ONBOARDING_QUERY_KEY],
+    queryFn: () => fetchJson<DropshipOnboardingState>(ONBOARDING_QUERY_KEY[0]),
     enabled: !!principal,
   });
   const onboarding = onboardingQuery.data;
-  const completedStepCount = onboarding?.steps.filter((step) => step.status === "complete").length ?? 0;
-  const totalStepCount = onboarding?.steps.length ?? 0;
+  const showChecklist = onboarding ? isOnboardingVendor(onboarding.vendor.status) || activatedHere : true;
+  const progress = onboarding ? describeOnboardingProgress(onboarding.steps) : null;
   const connectionStatus = readStoreOAuthCallbackStatus(window.location.search);
+
+  function navigate(path: string) {
+    setLocation(dropshipPortalPath(path));
+  }
+
+  function revealStorePanel() {
+    storePanelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
 
   return (
     <DropshipPortalShell>
-      <div className="mx-auto w-full max-w-7xl px-4 py-6 sm:px-6">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+      <div className="mx-auto w-full max-w-4xl px-4 py-6 sm:px-6">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <h1 className="flex items-center gap-2 text-2xl font-semibold">
               <Plug className="h-6 w-6 text-[#C060E0]" />
-              Onboarding
+              {showChecklist ? "Onboarding" : "Account"}
             </h1>
-            <p className="mt-1 text-sm text-zinc-500">Connect a marketplace store, confirm catalog access, and complete launch readiness.</p>
+            <p className="mt-1 text-sm text-zinc-500">
+              {showChecklist
+                ? "Connect your store, pick your products, set up your wallet, then activate."
+                : "Your account and store connection."}
+            </p>
           </div>
-          {onboarding && (
-            <Badge variant="outline" className="w-fit border-zinc-200 bg-white text-zinc-700">
-              {completedStepCount} of {totalStepCount} complete
+          {showChecklist && progress && (
+            <Badge variant="outline" className="w-fit border-zinc-200 bg-white text-zinc-700" data-testid="onboarding-progress">
+              {progress.completedCount} of {progress.totalCount} complete
             </Badge>
           )}
         </div>
@@ -114,75 +155,29 @@ export default function DropshipPortalOnboarding() {
         )}
 
         {onboardingQuery.isLoading ? (
-          <div className="mt-5 grid gap-4 lg:grid-cols-[0.8fr_1.2fr]">
+          <div className="mt-5 space-y-4">
             <Skeleton className="h-80 w-full" />
-            <Skeleton className="h-80 w-full" />
+            <Skeleton className="h-64 w-full" />
           </div>
         ) : onboarding ? (
-          <div className="mt-5 grid gap-4 lg:grid-cols-[0.8fr_1.2fr]">
-            <section className="rounded-md border border-zinc-200 bg-white p-5 shadow-sm">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <h2 className="text-lg font-semibold">Launch checklist</h2>
-                  <p className="mt-1 text-sm text-zinc-500">
-                    {onboarding.vendor.businessName || onboarding.vendor.email || "Card Shellz member"}
-                  </p>
-                </div>
-                <Badge variant="outline">{formatStatus(onboarding.vendor.status)}</Badge>
-              </div>
-
-              <div className="mt-5 space-y-3">
-                {onboarding.steps.map((step) => (
-                  <OnboardingStepRow key={step.key} step={step} />
-                ))}
-              </div>
-            </section>
-
-            <section className="space-y-4">
-              <StoreConnectPanel onboarding={onboarding} />
-
-              <div className="grid gap-4 md:grid-cols-3">
-                <LaunchGate
-                  icon={<Boxes className="h-4 w-4" />}
-                  title="Catalog availability"
-                  status={onboarding.catalog.adminCatalogAvailable ? "complete" : "incomplete"}
-                  value={`${onboarding.catalog.adminExposureRuleCount} admin rule(s)`}
-                  detail={onboarding.catalog.adminCatalogAvailable
-                    ? "Catalog access is available for vendor selection."
-                    : "Catalog exposure must be configured by Card Shellz ops."}
-                  actionLabel="Open catalog"
-                  onAction={() => setLocation(dropshipPortalPath("/catalog"))}
-                />
-                <LaunchGate
-                  icon={<CheckCircle2 className="h-4 w-4" />}
-                  title="Product selection"
-                  status={onboarding.catalog.hasVendorSelection ? "complete" : "incomplete"}
-                  value={`${onboarding.catalog.vendorSelectionRuleCount} selection rule(s)`}
-                  detail={onboarding.catalog.hasVendorSelection
-                    ? "Vendor catalog selection exists."
-                    : "Select products after catalog access is available."}
-                  actionLabel="Manage catalog"
-                  onAction={() => setLocation(dropshipPortalPath("/catalog"))}
-                />
-                <LaunchGate
-                  icon={<Wallet className="h-4 w-4" />}
-                  title="Wallet and auto-reload"
-                  status={onboarding.wallet.walletReady ? "complete" : "incomplete"}
-                  value={`${formatCents(onboarding.wallet.availableBalanceCents)} available`}
-                  detail={walletGateDetail(onboarding)}
-                  actionLabel="Open wallet"
-                  onAction={() => setLocation(dropshipPortalPath("/wallet"))}
-                />
-              </div>
-
-              <ActivationPanel
+          <>
+            {showChecklist ? (
+              <LaunchChecklist
                 onboarding={onboarding}
+                onNavigate={navigate}
+                onRevealStorePanel={revealStorePanel}
                 onActivated={(state) => {
-                  queryClient.setQueryData(["/api/dropship/onboarding/state"], state);
+                  setActivatedHere(true);
+                  queryClient.setQueryData([...ONBOARDING_QUERY_KEY], state);
                 }}
               />
-            </section>
-          </div>
+            ) : (
+              <AccountSummaryCard onboarding={onboarding} onOpenDashboard={() => navigate("/dashboard")} />
+            )}
+            <div ref={storePanelRef} className="mt-4 scroll-mt-4">
+              <StoreConnectPanel onboarding={onboarding} />
+            </div>
+          </>
         ) : (
           <Empty className="mt-5 rounded-md border border-dashed p-8">
             <EmptyMedia variant="icon"><Plug /></EmptyMedia>
@@ -194,6 +189,121 @@ export default function DropshipPortalOnboarding() {
         )}
       </div>
     </DropshipPortalShell>
+  );
+}
+
+function LaunchChecklist({
+  onboarding,
+  onNavigate,
+  onRevealStorePanel,
+  onActivated,
+}: {
+  onboarding: DropshipOnboardingState;
+  onNavigate: (path: string) => void;
+  onRevealStorePanel: () => void;
+  onActivated: (state: DropshipOnboardingState) => void;
+}) {
+  return (
+    <section className="mt-5 rounded-md border border-zinc-200 bg-white p-5 shadow-sm" data-testid="onboarding-checklist">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-semibold">Launch checklist</h2>
+          <p className="mt-1 text-sm text-zinc-500">
+            {onboarding.vendor.businessName || onboarding.vendor.email || "Card Shellz member"}
+          </p>
+        </div>
+        <Badge variant="outline">{formatStatus(onboarding.vendor.status)}</Badge>
+      </div>
+
+      <ol className="mt-5 divide-y divide-zinc-200 rounded-md border border-zinc-200">
+        {onboarding.steps.map((step) => (
+          <ChecklistRow
+            key={step.key}
+            view={describeOnboardingStep(step, onboarding)}
+            onNavigate={onNavigate}
+            onRevealStorePanel={onRevealStorePanel}
+          />
+        ))}
+      </ol>
+
+      <ActivationFooter
+        onboarding={onboarding}
+        onActivated={onActivated}
+        onOpenDashboard={() => onNavigate("/dashboard")}
+      />
+    </section>
+  );
+}
+
+function ChecklistRow({
+  view,
+  onNavigate,
+  onRevealStorePanel,
+}: {
+  view: OnboardingStepView;
+  onNavigate: (path: string) => void;
+  onRevealStorePanel: () => void;
+}) {
+  const action = view.action;
+  return (
+    <li className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center" data-testid={`onboarding-step-${view.key}`}>
+      <div className="flex min-w-0 flex-1 items-start gap-3">
+        <div className={`mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md ${stepIconTone(view.tone)}`}>
+          {stepIcon(view)}
+        </div>
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="font-semibold">{view.label}</h3>
+            <Badge variant="outline" className={stepBadgeTone(view.tone)}>{view.badge}</Badge>
+          </div>
+          <p className="mt-1 text-sm text-zinc-500">{view.detail}</p>
+        </div>
+      </div>
+      {action && (
+        <Button
+          type="button"
+          variant={view.tone === "complete" ? "ghost" : "outline"}
+          size="sm"
+          className="h-9 w-fit shrink-0 gap-2"
+          onClick={() => (action.kind === "navigate" ? onNavigate(action.path) : onRevealStorePanel())}
+        >
+          {action.label}
+          <ArrowRight className="h-4 w-4" />
+        </Button>
+      )}
+    </li>
+  );
+}
+
+function stepIcon(view: OnboardingStepView): ReactNode {
+  if (view.tone === "complete") return <CheckCircle2 className="h-4 w-4" />;
+  if (view.tone === "waiting") return <Clock className="h-4 w-4" />;
+  return stepIcons[view.key] ?? <Circle className="h-4 w-4" />;
+}
+
+function AccountSummaryCard({
+  onboarding,
+  onOpenDashboard,
+}: {
+  onboarding: DropshipOnboardingState;
+  onOpenDashboard: () => void;
+}) {
+  const summary = describeAccountSummary(onboarding.vendor.status);
+  const standing = describeVendorStanding(onboarding.vendor);
+  return (
+    <section className="mt-5 rounded-md border border-zinc-200 bg-white p-5 shadow-sm" data-testid="onboarding-account-summary">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <h2 className="text-lg font-semibold">{summary.title}</h2>
+          <p className="mt-1 text-sm text-zinc-500">{standing ? `${standing.reason} ${standing.action}` : summary.detail}</p>
+        </div>
+        <Badge variant="outline">{formatStatus(onboarding.vendor.status)}</Badge>
+      </div>
+      <Button type="button" className="mt-5 h-10 gap-2 bg-[#C060E0] hover:bg-[#a94bc9]" onClick={onOpenDashboard}>
+        Open dashboard
+        <ArrowRight className="h-4 w-4" />
+      </Button>
+    </section>
   );
 }
 
@@ -541,67 +651,6 @@ function StoreConnectPanel({ onboarding }: { onboarding: DropshipOnboardingState
   );
 }
 
-function OnboardingStepRow({ step }: { step: DropshipOnboardingStep }) {
-  return (
-    <div className="flex items-start gap-3 rounded-md border border-zinc-200 p-4">
-      <div className={`mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md ${stepIconTone(step.status)}`}>
-        {step.status === "complete" ? <CheckCircle2 className="h-4 w-4" /> : stepIcons[step.key] ?? <Circle className="h-4 w-4" />}
-      </div>
-      <div className="min-w-0 flex-1">
-        <div className="flex items-start justify-between gap-3">
-          <h3 className="font-semibold">{step.label}</h3>
-          <Badge variant="outline" className={stepBadgeTone(step.status)}>
-            {formatStatus(step.status)}
-          </Badge>
-        </div>
-        <p className="mt-1 text-sm text-zinc-500">{stepDescription(step)}</p>
-      </div>
-    </div>
-  );
-}
-
-function LaunchGate({
-  actionLabel,
-  detail,
-  icon,
-  onAction,
-  status,
-  title,
-  value,
-}: {
-  actionLabel: string;
-  detail: string;
-  icon: ReactNode;
-  onAction: () => void;
-  status: "complete" | "incomplete";
-  title: string;
-  value: string;
-}) {
-  return (
-    <div className="rounded-md border border-zinc-200 bg-white p-5 shadow-sm">
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex items-center gap-3">
-          <div className="flex h-9 w-9 items-center justify-center rounded-md bg-zinc-100 text-zinc-700">
-            {icon}
-          </div>
-          <div>
-            <h3 className="font-semibold">{title}</h3>
-            <p className="mt-1 text-sm text-zinc-500">{value}</p>
-          </div>
-        </div>
-        <Badge variant="outline" className={stepBadgeTone(status)}>
-          {formatStatus(status)}
-        </Badge>
-      </div>
-      <p className="mt-4 text-sm text-zinc-500">{detail}</p>
-      <Button type="button" variant="outline" className="mt-4 h-10 w-full gap-2" onClick={onAction}>
-        {actionLabel}
-        <ArrowRight className="h-4 w-4" />
-      </Button>
-    </div>
-  );
-}
-
 function canReconnectStoreConnection(connection: DropshipStoreConnectionProfileResponse): boolean {
   return ["connected", "needs_reauth", "refresh_failed", "disconnected"].includes(connection.status);
 }
@@ -799,37 +848,20 @@ function activateButtonIcon(hasPasskey: boolean, emailCodeSent: boolean): ReactN
   return <Rocket className="h-4 w-4" />;
 }
 
-function activationPanelDetail(input: {
-  onboarding: DropshipOnboardingState;
-  requiredStepsComplete: boolean;
-  alreadyActive: boolean;
-}): string {
-  if (input.alreadyActive) return "Live order intake can proceed when marketplace orders arrive.";
-  if (input.onboarding.entitlement.status !== "active") return "Active .ops entitlement is required before activation.";
-  if (!input.requiredStepsComplete) return "Complete every required launch gate before activation.";
-  return "All launch gates are complete.";
-}
-
-function activationBadgeTone(input: { alreadyActive: boolean; activationReady: boolean }): string {
-  if (input.alreadyActive) return "border-emerald-200 bg-emerald-50 text-emerald-800";
-  if (input.activationReady) return "border-[#C060E0]/30 bg-[#C060E0]/10 text-[#8941a0]";
+function activationBadgeTone(activation: ActivationView): string {
+  if (activation.alreadyActive) return "border-emerald-200 bg-emerald-50 text-emerald-800";
+  if (activation.ready) return "border-[#C060E0]/30 bg-[#C060E0]/10 text-[#8941a0]";
   return "border-amber-200 bg-amber-50 text-amber-900";
 }
 
-function stepDescription(step: DropshipOnboardingStep): string {
-  if (step.key === "vendor_profile") return "Card Shellz .ops entitlement and vendor profile are available.";
-  if (step.key === "store_connection") return "One marketplace store must be connected with launch-ready credentials before launch.";
-  if (step.key === "catalog_available") return "Card Shellz ops controls the catalog available for vendor selection.";
-  if (step.key === "wallet_payment") return "Add a card and turn on auto-reload in Wallet. That is all the launch needs.";
-  return "Selected products define what can be pushed to connected marketplace stores.";
-}
-
-function ActivationPanel({
+function ActivationFooter({
   onboarding,
   onActivated,
+  onOpenDashboard,
 }: {
   onboarding: DropshipOnboardingState;
   onActivated: (state: DropshipOnboardingState) => void;
+  onOpenDashboard: () => void;
 }) {
   const {
     principal,
@@ -838,18 +870,13 @@ function ActivationPanel({
     verifyEmailStepUp,
     verifyPasskeyStepUp,
   } = useDropshipAuth();
-  const [, setLocation] = useLocation();
   const [emailCodeSent, setEmailCodeSent] = useState(false);
   const [verificationCode, setVerificationCode] = useState("");
   const [pendingAction, setPendingAction] = useState<PendingActivationAction>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const activationAction: DropshipSensitiveAction = "activate_account";
-  const requiredStepsComplete = onboarding.steps.every((step) => !step.required || step.status === "complete");
-  const alreadyActive = onboarding.vendor.status === "active";
-  const activationReady = onboarding.vendor.status === "onboarding"
-    && onboarding.entitlement.status === "active"
-    && requiredStepsComplete;
+  const activation = describeActivation(onboarding);
   const activateProofActive = useMemo(() => {
     return isDropshipSensitiveProofActive({
       principal,
@@ -857,7 +884,7 @@ function ActivationPanel({
       proof: sensitiveProofs.activate_account,
     });
   }, [activationAction, principal, sensitiveProofs.activate_account]);
-  const activateDisabled = !activationReady
+  const activateDisabled = !activation.ready
     || pendingAction !== null
     || (!principal?.hasPasskey && emailCodeSent && verificationCode.length !== 6);
 
@@ -877,7 +904,7 @@ function ActivationPanel({
   }
 
   async function activateAccount() {
-    if (!activationReady) return;
+    if (!activation.ready) return;
 
     if (!activateProofActive) {
       if (principal?.hasPasskey) {
@@ -915,30 +942,30 @@ function ActivationPanel({
       onActivated(state);
       setEmailCodeSent(false);
       setVerificationCode("");
-      setMessage("Dropship account activated.");
+      setMessage("Your .ops account is active.");
     });
   }
 
   return (
-    <div className="rounded-md border border-zinc-200 bg-white p-5 shadow-sm">
+    <div className="mt-5 border-t border-zinc-200 pt-5" data-testid="onboarding-activation">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <h2 className="text-lg font-semibold">Activate .ops</h2>
-          <p className="mt-1 text-sm text-zinc-500">{activationPanelDetail({ onboarding, requiredStepsComplete, alreadyActive })}</p>
+          <h3 className="font-semibold">Activate .ops</h3>
+          <p className="mt-1 text-sm text-zinc-500">{activation.detail}</p>
         </div>
-        <Badge variant="outline" className={activationBadgeTone({ alreadyActive, activationReady })}>
-          {alreadyActive ? "Active" : activationReady ? "Ready" : "Incomplete"}
+        <Badge variant="outline" className={activationBadgeTone(activation)}>
+          {activation.alreadyActive ? "Active" : activation.ready ? "Ready" : "Not yet"}
         </Badge>
       </div>
 
       {error && (
-        <Alert variant="destructive" className="mt-5">
+        <Alert variant="destructive" className="mt-4">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       )}
       {message && (
-        <Alert className="mt-5 border-emerald-200 bg-emerald-50 text-emerald-900">
+        <Alert className="mt-4 border-emerald-200 bg-emerald-50 text-emerald-900">
           <CheckCircle2 className="h-4 w-4" />
           <AlertDescription>{message}</AlertDescription>
         </Alert>
@@ -963,11 +990,11 @@ function ActivationPanel({
         </div>
       )}
 
-      {alreadyActive ? (
+      {activation.alreadyActive ? (
         <Button
           type="button"
-          className="mt-5 h-11 w-full gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
-          onClick={() => setLocation(dropshipPortalPath("/dashboard"))}
+          className="mt-4 h-11 w-full gap-2 bg-[#C060E0] hover:bg-[#a94bc9] sm:w-auto"
+          onClick={onOpenDashboard}
         >
           Open dashboard
           <ArrowRight className="h-4 w-4" />
@@ -976,7 +1003,7 @@ function ActivationPanel({
         <Button
           type="button"
           disabled={activateDisabled}
-          className="mt-5 h-11 w-full gap-2 bg-[#C060E0] hover:bg-[#a94bc9]"
+          className="mt-4 h-11 w-full gap-2 bg-[#C060E0] hover:bg-[#a94bc9] sm:w-auto"
           onClick={activateAccount}
         >
           {activateButtonIcon(principal?.hasPasskey ?? false, emailCodeSent)}
@@ -991,31 +1018,16 @@ function ActivationPanel({
   );
 }
 
-function walletGateDetail(onboarding: DropshipOnboardingState): string {
-  if (onboarding.wallet.walletReady) {
-    return onboarding.wallet.hasSpendableBalance
-      ? "Your wallet has a balance and auto-reload is on."
-      : "Auto-reload is on. Orders will be funded from your card as needed.";
-  }
-  if (!onboarding.wallet.hasCardBackstop) {
-    return onboarding.wallet.hasActiveFundingMethod
-      ? "Your card is still being confirmed. Open Wallet to check."
-      : "Add a card in Wallet. It is only charged if an order arrives and your balance is short.";
-  }
-  if (!onboarding.wallet.autoReloadConfigured) {
-    return "Turn on auto-reload in Wallet so orders never wait for a payment.";
-  }
-  return "Open Wallet to finish setup.";
-}
-
-function stepIconTone(status: DropshipOnboardingStep["status"]): string {
-  if (status === "complete") return "bg-emerald-50 text-emerald-700";
-  if (status === "blocked") return "bg-rose-50 text-rose-700";
+function stepIconTone(tone: OnboardingStepTone): string {
+  if (tone === "complete") return "bg-emerald-50 text-emerald-700";
+  if (tone === "blocked") return "bg-rose-50 text-rose-700";
+  if (tone === "waiting") return "bg-zinc-100 text-zinc-600";
   return "bg-amber-50 text-amber-700";
 }
 
-function stepBadgeTone(status: DropshipOnboardingStep["status"] | "incomplete"): string {
-  if (status === "complete") return "border-emerald-200 bg-emerald-50 text-emerald-800";
-  if (status === "blocked") return "border-rose-200 bg-rose-50 text-rose-800";
+function stepBadgeTone(tone: OnboardingStepTone): string {
+  if (tone === "complete") return "border-emerald-200 bg-emerald-50 text-emerald-800";
+  if (tone === "blocked") return "border-rose-200 bg-rose-50 text-rose-800";
+  if (tone === "waiting") return "border-zinc-200 bg-zinc-50 text-zinc-700";
   return "border-amber-200 bg-amber-50 text-amber-900";
 }

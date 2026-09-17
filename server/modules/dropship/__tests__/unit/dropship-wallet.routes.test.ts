@@ -149,6 +149,7 @@ describe("dropship wallet routes card fee exposure", () => {
           fundingMethods: [],
           recentLedger: [],
           cardFundingFeeBps: 300,
+          usdcBaseDepositAddress: "0x1111111111111111111111111111111111111111",
         };
       },
       configureAutoReload: async (input: unknown) => {
@@ -177,6 +178,13 @@ describe("dropship wallet routes card fee exposure", () => {
 
     expect(response.status).toBe(200);
     expect(response.body.wallet.cardFundingFeeBps).toBe(300);
+  });
+
+  it("exposes the USDC deposit address so the page can show where to send funds", async () => {
+    const response = await jsonRequest(`${server.url}/api/dropship/wallet`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.wallet.usdcBaseDepositAddress).toBe("0x1111111111111111111111111111111111111111");
   });
 
   it("returns the fee and the total alongside the checkout session", async () => {

@@ -14,6 +14,7 @@ import {
   DropshipWalletService,
   resolveDropshipAutoReloadFloors,
   resolveDropshipCardFundingFeeBps,
+  resolveDropshipUsdcBaseDepositAddress,
   type ConfigureDropshipAutoReloadRepositoryInput,
   type CreateDropshipConfirmedUsdcFundingRepositoryInput,
   type CreateDropshipWalletFundingLedgerInput,
@@ -1440,6 +1441,26 @@ describe("resolveDropshipCardFundingFeeBps", () => {
     for (const bad of ["abc", "-1", "12.5", "1001", "3%"]) {
       expect(() => resolveDropshipCardFundingFeeBps({ DROPSHIP_CARD_FUNDING_FEE_BPS: bad }))
         .toThrow(expect.objectContaining({ code: "DROPSHIP_CARD_FUNDING_FEE_MISCONFIGURED" }));
+    }
+  });
+});
+
+describe("resolveDropshipUsdcBaseDepositAddress", () => {
+  it("offers no USDC funding when nothing is configured", () => {
+    expect(resolveDropshipUsdcBaseDepositAddress({})).toBeNull();
+    expect(resolveDropshipUsdcBaseDepositAddress({ DROPSHIP_USDC_BASE_DEPOSIT_ADDRESS: "  " })).toBeNull();
+  });
+
+  it("normalizes a configured Base address", () => {
+    expect(resolveDropshipUsdcBaseDepositAddress({
+      DROPSHIP_USDC_BASE_DEPOSIT_ADDRESS: " 0xABCDEF0123456789abcdef0123456789ABCDEF01 ",
+    })).toBe("0xabcdef0123456789abcdef0123456789abcdef01");
+  });
+
+  it("refuses an address it cannot trust instead of pointing vendors at it", () => {
+    for (const bad of ["abc", "0x1234", "0xZZCDEF0123456789abcdef0123456789ABCDEF01", "ABCDEF0123456789abcdef0123456789ABCDEF01"]) {
+      expect(() => resolveDropshipUsdcBaseDepositAddress({ DROPSHIP_USDC_BASE_DEPOSIT_ADDRESS: bad }))
+        .toThrow(expect.objectContaining({ code: "DROPSHIP_USDC_DEPOSIT_ADDRESS_MISCONFIGURED" }));
     }
   });
 });

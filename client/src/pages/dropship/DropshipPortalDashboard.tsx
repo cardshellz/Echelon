@@ -49,6 +49,7 @@ import {
   isPausedForFunding,
   type VendorStandingNotice,
 } from "@/lib/dropship-vendor-standing";
+import { isOnboardingVendor } from "@/lib/dropship-onboarding";
 import { DropshipPortalShell } from "./DropshipPortalShell";
 
 type DropshipWalletLedgerEntry = DropshipWalletResponse["wallet"]["recentLedger"][number];
@@ -473,16 +474,18 @@ function LaunchChecklistPanel({
           </h2>
           <p className="text-sm text-zinc-500">What is complete and what is still blocking launch.</p>
         </div>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          className="h-9 w-fit gap-2"
-          onClick={() => onNavigate("/onboarding")}
-        >
-          Onboarding
-          <ArrowRight className="h-4 w-4" />
-        </Button>
+        {onboarding && isOnboardingVendor(onboarding.vendor.status) && (
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-9 w-fit gap-2"
+            onClick={() => onNavigate("/onboarding")}
+          >
+            Onboarding
+            <ArrowRight className="h-4 w-4" />
+          </Button>
+        )}
       </div>
 
       {isLoading ? (
@@ -808,7 +811,7 @@ function dashboardNextAction(onboarding: DropshipOnboardingState | undefined): D
 
   if (nextStep.key === "store_connection") {
     return {
-      actionLabel: "Open onboarding",
+      actionLabel: "Connect store",
       message: "Connect or refresh the marketplace store so orders, listings, and tracking can flow through the portal.",
       path: "/onboarding",
       title: "Connect a store",
