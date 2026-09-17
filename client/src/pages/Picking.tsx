@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { QueryLoadError } from "@/components/query-load-error";
+import PickingHistory from "./picking/PickingHistory";
 import { Link } from "wouter";
 import { 
   Scan, 
@@ -93,8 +95,8 @@ interface OrderWithItems extends Order {
 }
 
 // API functions
-async function fetchPickingQueue(): Promise<OrderWithItems[]> {
-  const res = await fetch("/api/picking/queue", { credentials: "include" });
+async function fetchPickingQueue({ signal }: { signal?: AbortSignal }): Promise<OrderWithItems[]> {
+  const res = await fetch("/api/picking/queue", { credentials: "include", signal });
   if (!res.ok) throw new Error("Failed to fetch picking queue");
   return res.json();
 }
@@ -706,11 +708,14 @@ export default function Picking() {
   };
   const queryClient = useQueryClient();
   const pickerId = user?.id || "";
+  const [activeFilter, setActiveFilter] = useState<"all" | "ready" | "active" | "rush" | "done" | "hold" | "exceptions" | "combined">("all");
   
   // Fetch orders from API - auto-refresh every 15s and when window regains focus
-  const { data: apiOrders = [], isLoading, refetch, dataUpdatedAt } = useQuery({
+  const { data: apiOrders = [], isLoading, isError: queueError, isFetching: queueFetching, refetch, dataUpdatedAt } = useQuery({
     queryKey: ["picking-queue"],
+    meta: { handlesLoadError: true },
     queryFn: fetchPickingQueue,
+    enabled: activeFilter !== "done", // Historical browsing does not poll/re-run active queue work.
     refetchInterval: 15000, // Refresh every 15s as fallback
     refetchOnWindowFocus: true, // Refresh when picker returns to app
     refetchOnMount: true, // Always fetch fresh data on mount
@@ -788,7 +793,7 @@ export default function Picking() {
           const data = JSON.parse(event.data);
           if (data.type === "orders:updated") {
             console.log("New order received via WebSocket, refreshing queue");
-            refetch();
+            void queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
             if (soundTheme !== "silent") {
               playSoundLib("success", soundTheme);
             }
@@ -825,7 +830,7 @@ export default function Picking() {
       if (reconnectTimeout) clearTimeout(reconnectTimeout);
       if (ws) ws.close();
     };
-  }, [refetch, soundTheme]);
+  }, [queryClient, soundTheme]);
   
   // Transform API orders to SingleOrder format for UI
   const formatOrderDate = useCallback((dateInput: string | Date | undefined | null): string => {
@@ -1472,7 +1477,6 @@ export default function Picking() {
   const [searchQuery, setSearchQuery] = useState("");
   const [sortBy, setSortBy] = useState<"priority" | "items" | "order" | "age">("priority");
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("desc");
-  const [activeFilter, setActiveFilter] = useState<"all" | "ready" | "active" | "rush" | "done" | "hold" | "exceptions" | "combined">("all");
   
   // UI state
   const [scanInput, setScanInput] = useState("");
@@ -2945,8 +2949,8 @@ export default function Picking() {
 
     // Filtered and sorted queue
     const filteredQueue = (pickingMode === "batch" ? queue : singleQueue).filter(channelMatch).filter(item => {
-      // By default, hide completed items unless filtering for "done"
-      if (activeFilter !== "done" && item.status === "completed") return false;
+      // History renders its own server-paged read model, never action cards.
+      if (activeFilter === "done" || item.status === "completed") return false;
       
       // By default, hide held items unless filtering for "hold"
       const itemOnHold = "onHold" in item && item.onHold;
@@ -2955,7 +2959,6 @@ export default function Picking() {
       // Apply status filter
       if (activeFilter === "ready" && (item.status !== "ready" || itemOnHold)) return false;
       if (activeFilter === "active" && item.status !== "in_progress") return false;
-      if (activeFilter === "done" && item.status !== "completed") return false;
       if (activeFilter === "rush" && item.priority < 9999) return false;
       if (activeFilter === "hold" && !itemOnHold) return false;
       if (activeFilter === "combined" && !("isCombinedGroup" in item && (item as any).isCombinedGroup)) return false;
@@ -3030,6 +3033,7 @@ export default function Picking() {
             <div className="flex items-center gap-1.5">
               {/* Channel Filter */}
               <select
+                aria-label="Picking channel"
                 value={channelFilter}
                 onChange={(e) => setChannelFilter(e.target.value)}
                 className="h-8 text-xs rounded-md border bg-background px-2"
@@ -3099,7 +3103,7 @@ export default function Picking() {
               )}
               
               {/* Grab Next - Primary Action */}
-              <Button 
+              {activeFilter !== "done" && <Button
                 onClick={handleGrabNext}
                 className="bg-emerald-600 hover:bg-emerald-700 h-11 min-h-[44px] px-4 text-base font-medium"
                 disabled={readyItems.length === 0}
@@ -3108,7 +3112,7 @@ export default function Picking() {
                 <Zap className="h-5 w-5 mr-1.5" />
                 <span className="hidden sm:inline">Grab Next</span>
                 <span className="sm:hidden">Next</span>
-              </Button>
+              </Button>}
             </div>
           </div>
 
@@ -3204,13 +3208,13 @@ export default function Picking() {
               onClick={() => setActiveFilter(activeFilter === "done" ? "all" : "done")}
               data-testid="filter-done"
             >
-              <span className="font-bold">{completedItems.length}</span> Done
+              History
             </button>
           </div>
         </div>
 
         {/* Queue Routing Override (Admins/Leads) */}
-        {isAdminOrLead && (
+        {isAdminOrLead && activeFilter !== "done" && (
           <div className="px-3 py-2 bg-amber-50/50 border-b flex justify-between items-center transition-all duration-300">
             <div className="text-xs text-amber-800">
               <span className="font-semibold block sm:inline">Warehouse Routing Mode:</span> 
@@ -3241,6 +3245,7 @@ export default function Picking() {
               <Input
                 placeholder="Search orders, SKUs..."
                 value={searchQuery}
+                maxLength={200}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 className="h-11 min-h-[44px] pl-10 pr-10 text-base"
                 enterKeyHint="search"
@@ -3262,7 +3267,7 @@ export default function Picking() {
               )}
             </div>
             <div className="flex items-center gap-2">
-              <Select value={sortBy} onValueChange={(v) => setSortBy(v as typeof sortBy)}>
+              {activeFilter !== "done" && <><Select value={sortBy} onValueChange={(v) => setSortBy(v as typeof sortBy)}>
                 <SelectTrigger className="flex-1 sm:w-[120px] h-11 min-h-[44px] text-sm" data-testid="select-sort">
                   <SelectValue placeholder="Sort..." />
                 </SelectTrigger>
@@ -3286,13 +3291,13 @@ export default function Picking() {
                 ) : (
                   <ArrowUp className="h-4 w-4" />
                 )}
-              </Button>
+              </Button></>}
               {(searchQuery || activeFilter !== "all") && (
                 <Button
                   variant="ghost"
                   size="sm"
                   className="h-11 min-h-[44px] px-3 text-sm shrink-0"
-                  onClick={() => { setSearchQuery(""); setActiveFilter("all"); }}
+                  onClick={() => { setSearchQuery(""); if (activeFilter !== "done") setActiveFilter("all"); }}
                 >
                   Clear
                 </Button>
@@ -3303,6 +3308,9 @@ export default function Picking() {
 
         {/* Queue List */}
         <div className="p-3 md:p-6 space-y-3">
+          {activeFilter === "done" ? <PickingHistory search={searchQuery} provider={channelFilter} /> : <>
+          {queueError && <QueryLoadError subject="the picking queue" retry={() => void refetch()} refreshing={queueFetching} stale={dataUpdatedAt > 0} />}
+          {isLoading && <p role="status">Loading the picking queue…</p>}
           {pickingMode === "batch" ? (
             (sortedQueue as PickBatch[]).map((batch) => (
               <Card 
@@ -3699,7 +3707,7 @@ export default function Picking() {
             <div className="pt-4">
               <h3 className="text-sm font-medium text-muted-foreground mb-3 flex items-center gap-2">
                 <CheckCircle2 className="h-4 w-4 text-emerald-600" />
-                Completed ({completedItems.length})
+                Completed this session ({completedItems.length})
               </h3>
               {completedItems.map((item) => (
                 <Card 
@@ -3729,6 +3737,7 @@ export default function Picking() {
               ))}
             </div>
           )}
+          </>}
         </div>
       </div>
       

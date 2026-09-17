@@ -573,130 +573,100 @@ export function registerShopifyRoutes(app: Express) {
 
   // Helper function to sync fulfillment status for all non-terminal orders
   async function syncFulfillmentStatus(): Promise<{ shipped: number; cancelled: number; checked: number }> {
-    // Get ALL orders that might need status updates - include everything except already shipped/cancelled
-    // This covers ready, in_progress, completed, ready_to_ship, and any on-hold orders
-    const allOrders = await storage.getOrdersWithItems();
-    
-    console.log(`Fulfillment sync: Found ${allOrders.length} total orders in database`);
-    
-    // Filter to non-terminal orders that have Shopify IDs
-    const activeOrders = allOrders.filter(o => 
-      o.warehouseStatus !== "shipped" && 
-      o.warehouseStatus !== "cancelled" && 
-      o.externalOrderId
-    );
-    
-    console.log(`Fulfillment sync: ${activeOrders.length} active orders to check (not shipped/cancelled, have Shopify ID)`);
-    
-    if (activeOrders.length === 0) {
-      return { shipped: 0, cancelled: 0, checked: 0 };
-    }
-    
-    // Get their Shopify IDs
-    const shopifyOrderIds = activeOrders
-      .filter(o => o.externalOrderId)
-      .map(o => o.externalOrderId!);
-    
-    if (shopifyOrderIds.length === 0) {
-      return { shipped: 0, cancelled: 0, checked: 0 };
-    }
-    
-    // Fetch fulfillment status from Shopify
-    console.log(`Fulfillment sync: Fetching status from Shopify for ${shopifyOrderIds.length} orders...`);
-    const fulfillmentStatuses = await fetchOrdersFulfillmentStatus(shopifyOrderIds);
-    console.log(`Fulfillment sync: Shopify returned ${fulfillmentStatuses.length} order statuses`);
-    
     let shipped = 0;
     let cancelled = 0;
-    
-    for (const status of fulfillmentStatuses) {
-      const order = activeOrders.find(o => o.externalOrderId === status.shopifyOrderId);
-      if (!order) {
-        console.log(`Fulfillment sync: No local order found for Shopify ID ${status.shopifyOrderId}`);
-        continue;
-      }
-      
-      console.log(`Fulfillment sync: Order ${order.orderNumber} (${order.externalOrderId}) - Shopify fulfillment_status: "${status.fulfillmentStatus}", cancelled_at: ${status.cancelledAt}`);
-      
-      // If FULLY fulfilled in Shopify (all line items), mark as shipped
-      // For partial fulfillments, we rely on webhooks to track individual line items
-      if (status.fulfillmentStatus === "fulfilled") {
-        await storage.updateOrderStatus(order.id, "shipped");
-        shipped++;
-        console.log(`Order ${order.orderNumber} marked as shipped (fully fulfilled in Shopify)`);
-      }
-      // If cancelled in Shopify, mark as cancelled and release bin reservations
-      else if (status.cancelledAt) {
-        await storage.updateOrderStatus(order.id, "cancelled");
-        try {
-          const { reservation } = app.locals.services;
-          await reservation.releaseOrderReservation(
-            order.id,
-            "Order cancelled in Shopify",
-            undefined,
-            { disposition: "cancel" },
-          );
-        } catch (e) {
-          console.error(`Failed to release reservations for cancelled order ${order.orderNumber}:`, e);
+    let checked = 0;
+    // Keyset batches preserve coverage as earlier orders leave the active set.
+    for await (const activeOrders of storage.scanOrderBatches({
+      excludedStatuses: ["shipped", "cancelled"], externalOrderOnly: true,
+    })) {
+      const shopifyOrderIds = activeOrders.map(order => order.externalOrderId!);
+      const fulfillmentStatuses = await fetchOrdersFulfillmentStatus(shopifyOrderIds);
+      checked += shopifyOrderIds.length;
+      for (const status of fulfillmentStatuses) {
+        const order = activeOrders.find(o => o.externalOrderId === status.shopifyOrderId);
+        if (!order) {
+          console.log(`Fulfillment sync: No local order found for Shopify ID ${status.shopifyOrderId}`);
+          continue;
         }
-        cancelled++;
-        console.log(`Order ${order.orderNumber} marked as cancelled`);
+      
+        console.log(`Fulfillment sync: Order ${order.orderNumber} (${order.externalOrderId}) - Shopify fulfillment_status: "${status.fulfillmentStatus}", cancelled_at: ${status.cancelledAt}`);
+      
+        // If FULLY fulfilled in Shopify (all line items), mark as shipped
+        // For partial fulfillments, we rely on webhooks to track individual line items
+        if (status.fulfillmentStatus === "fulfilled") {
+          await storage.updateOrderStatus(order.id, "shipped");
+          shipped++;
+          console.log(`Order ${order.orderNumber} marked as shipped (fully fulfilled in Shopify)`);
+        }
+        // If cancelled in Shopify, mark as cancelled and release bin reservations
+        else if (status.cancelledAt) {
+          await storage.updateOrderStatus(order.id, "cancelled");
+          try {
+            const { reservation } = app.locals.services;
+            await reservation.releaseOrderReservation(
+              order.id,
+              "Order cancelled in Shopify",
+              undefined,
+              { disposition: "cancel" },
+            );
+          } catch (e) {
+            console.error(`Failed to release reservations for cancelled order ${order.orderNumber}:`, e);
+          }
+          cancelled++;
+          console.log(`Order ${order.orderNumber} marked as cancelled`);
+        }
       }
-    }
     
+    }
     if (shipped > 0 || cancelled > 0) {
       broadcastOrdersUpdated();
     }
     
-    return { shipped, cancelled, checked: shopifyOrderIds.length };
+    return { shipped, cancelled, checked };
   }
 
   // Reconcile order item locations with product_locations table
   // Updates pending/unassigned items if product_locations has been updated
   async function reconcileOrderItemLocations(): Promise<{ updated: number; checked: number }> {
-    // Get all active orders (not shipped/cancelled) with their items
-    const allOrders = await storage.getOrdersWithItems();
-    const activeOrders = allOrders.filter(o => 
-      o.warehouseStatus !== "shipped" && 
-      o.warehouseStatus !== "cancelled"
-    );
-    
     let updated = 0;
     let checked = 0;
     
-    for (const order of activeOrders) {
-      for (const item of order.items) {
-        checked++;
+    for await (const batch of storage.scanOrderBatches({ excludedStatuses: ["shipped", "cancelled"] })) {
+      for (const order of batch) {
+        for (const item of order.items) {
+          checked++;
         
-        // Only update items that haven't been picked yet
-        if (item.status !== "pending") continue;
+          // Only update items that haven't been picked yet
+          if (item.status !== "pending") continue;
         
-        // Look up current location from inventory_levels (where stock actually is)
-        const binLocation = await storage.getBinLocationFromInventoryBySku(item.sku || '');
+          // Look up current location from inventory_levels (where stock actually is)
+          const binLocation = await storage.getBinLocationFromInventoryBySku(item.sku || '');
         
-        if (!binLocation) continue;
+          if (!binLocation) continue;
         
-        // Check if location/zone needs updating
-        const needsUpdate = 
-          item.location !== binLocation.location ||
-          item.zone !== binLocation.zone ||
-          item.barcode !== binLocation.barcode ||
-          item.imageUrl !== binLocation.imageUrl;
+          // Check if location/zone needs updating
+          const needsUpdate =
+            item.location !== binLocation.location ||
+            item.zone !== binLocation.zone ||
+            item.barcode !== binLocation.barcode ||
+            item.imageUrl !== binLocation.imageUrl;
         
-        if (needsUpdate) {
-          await storage.updateOrderItemLocation(
-            item.id, 
-            binLocation.location, 
-            binLocation.zone,
-            binLocation.barcode || null,
-            binLocation.imageUrl || null
-          );
-          updated++;
-          console.log(`Reconcile: Updated item ${item.sku} in order ${order.orderNumber} to location ${binLocation.location}`);
+          if (needsUpdate) {
+            await storage.updateOrderItemLocation(
+              item.id,
+              binLocation.location,
+              binLocation.zone,
+              binLocation.barcode || null,
+              binLocation.imageUrl || null
+            );
+            updated++;
+            console.log(`Reconcile: Updated item ${item.sku} in order ${order.orderNumber} to location ${binLocation.location}`);
+          }
         }
       }
-    }
     
+    }
     if (updated > 0) {
       broadcastOrdersUpdated();
       console.log(`Location reconcile: Updated ${updated} items out of ${checked} checked`);

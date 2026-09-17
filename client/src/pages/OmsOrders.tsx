@@ -1,5 +1,7 @@
 import React, { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useDebounce } from "@/hooks/use-debounce";
+import { QueryLoadError } from "@/components/query-load-error";
 import {
   ShoppingCart,
   Package,
@@ -201,6 +203,7 @@ export default function OmsOrders() {
     return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
   });
   const limit = 50;
+  const debouncedSearch = useDebounce(search.trim(), 300);
 
   // Fetch stats
   const { data: stats } = useQuery<OmsStats>({
@@ -214,16 +217,17 @@ export default function OmsOrders() {
   });
 
   // Fetch orders
-  const { data: ordersData, isLoading } = useQuery<{ orders: OmsOrder[]; total: number }>({
-    queryKey: ["/api/oms/orders", page, search, statusFilter, channelFilter],
-    queryFn: async () => {
+  const { data: ordersData, isLoading, isError: ordersError, isFetching, refetch } = useQuery<{ orders: OmsOrder[]; total: number }>({
+    queryKey: ["/api/oms/orders", page, debouncedSearch, statusFilter, channelFilter],
+    meta: { handlesLoadError: true },
+    queryFn: async ({ signal }) => {
       const params = new URLSearchParams();
       params.set("page", String(page));
       params.set("limit", String(limit));
-      if (search) params.set("search", search);
+      if (debouncedSearch) params.set("search", debouncedSearch);
       if (statusFilter !== "all") params.set("status", statusFilter);
       if (channelFilter !== "all") params.set("channelId", channelFilter);
-      const res = await fetch(`/api/oms/orders?${params}`);
+      const res = await fetch(`/api/oms/orders?${params}`, { signal });
       if (!res.ok) throw new Error("Failed to fetch orders");
       return res.json();
     },
@@ -422,6 +426,7 @@ export default function OmsOrders() {
       </div>
 
       {/* Orders Table */}
+      {ordersError && <QueryLoadError subject="orders" retry={() => void refetch()} refreshing={isFetching} stale={!!ordersData} />}
       <Card>
         <CardContent className="p-0">
           <Table>
@@ -445,7 +450,7 @@ export default function OmsOrders() {
                     Loading...
                   </TableCell>
                 </TableRow>
-              ) : orders.length === 0 ? (
+              ) : !ordersData ? null : orders.length === 0 ? (
                 <TableRow>
                   <TableCell colSpan={9} className="text-center py-8 text-muted-foreground">
                     No orders found

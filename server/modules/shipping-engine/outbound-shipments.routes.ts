@@ -1,4 +1,5 @@
 import type { Express, Response } from "express";
+import { awaitPageReads, limitPageRead } from "../../platform/http/page-read-limit";
 import { and, desc, eq, gte, ilike, or, sql, type SQL } from "drizzle-orm";
 import { db } from "../../db";
 import { requirePermission } from "../../routes/middleware";
@@ -17,7 +18,7 @@ export function registerOutboundShipmentRoutes(app: Express): void {
   app.get(
     "/api/outbound-shipments",
     requirePermission("orders", "view"),
-    async (req, res) => {
+    limitPageRead(async (req, res) => {
       try {
         const search = stringParam(req.query.search);
         const carrier = stringParam(req.query.carrier);
@@ -81,7 +82,7 @@ export function registerOutboundShipmentRoutes(app: Express): void {
             .leftJoin(orders, eq(orders.id, outboundShipments.orderId))
             .leftJoin(channels, eq(channels.id, outboundShipments.channelId));
 
-        const [rows, totalRows, byCarrier, byStatus] = await Promise.all([
+        const [rows, totalRows, byCarrier, byStatus] = await awaitPageReads([
           base()
             .where(rowsWhere)
             .orderBy(desc(sql`coalesce(${outboundShipments.shippedAt}, ${outboundShipments.createdAt})`))
@@ -119,7 +120,7 @@ export function registerOutboundShipmentRoutes(app: Express): void {
       } catch (error) {
         return sendError(res, error);
       }
-    },
+    }),
   );
 }
 

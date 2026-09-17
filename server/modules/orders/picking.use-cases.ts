@@ -3723,7 +3723,21 @@ export class PickingUseCases {
   // 6. getPickQueue
   // -------------------------------------------------------------------------
 
-  async getPickQueue(warehouseId?: number): Promise<PickQueueOrder[]> {
+  private readonly pendingQueueReads = new Map<number | undefined, Promise<PickQueueOrder[]>>();
+
+  getPickQueue(warehouseId?: number): Promise<PickQueueOrder[]> {
+    // Share concurrent reads, never retain a snapshot after the read settles.
+    // Picks and replenishment commands remain independent of this read model.
+    const pending = this.pendingQueueReads.get(warehouseId);
+    if (pending) return pending;
+    const read = this.loadPickQueue(warehouseId).finally(() => {
+      if (this.pendingQueueReads.get(warehouseId) === read) this.pendingQueueReads.delete(warehouseId);
+    });
+    this.pendingQueueReads.set(warehouseId, read);
+    return read;
+  }
+
+  private async loadPickQueue(warehouseId?: number): Promise<PickQueueOrder[]> {
     const allOrders = await this.storage.getPickQueueOrders();
     const delegated = this.assemblyWorkload ? await this.assemblyWorkload.handedOffOrderIds(
       allOrders.filter((order: Order) => order.onHold !== 1 && order.warehouseStatus === "in_progress"),
@@ -3731,7 +3745,8 @@ export class PickingUseCases {
 
     // Filter to orders with shippable items
     const filteredOrders = allOrders.filter((order: any) => {
-      return !delegated.has(order.id) && order.items.some((item: any) => item.requiresShipping === 1);
+      return (warehouseId === undefined || order.warehouseId === warehouseId) &&
+        !delegated.has(order.id) && order.items.some((item: any) => item.requiresShipping === 1);
     });
 
     // Batch resolve picker names
@@ -3855,14 +3870,19 @@ export class PickingUseCases {
     freshLocationMap: Map<string, { location: string; zone: string; barcode: string | null; imageUrl: string | null }>,
   ): Promise<Map<number, any>> {
     const map = new Map<number, any>();
+    if (items.length === 0) return map;
     try {
       const allLocs = await this.storage.getAllWarehouseLocations();
       const locByCode = new Map(allLocs.map(loc => [loc.code, loc]));
+      // Request-local only: different quantities or bins remain distinct.
+      const variants = new Map<string, Awaited<ReturnType<Storage["getProductVariantBySku"]>>>();
+      const predictions = new Map<string, Awaited<ReturnType<ReplenishmentService["predictReplenAfterPick"]>>>();
 
       for (const item of items) {
         if (!item.sku) continue;
 
-        const variant = await this.storage.getProductVariantBySku(item.sku);
+        if (!variants.has(item.sku)) variants.set(item.sku, await this.storage.getProductVariantBySku(item.sku));
+        const variant = variants.get(item.sku);
         if (!variant) continue;
 
         const locationCode = freshLocationMap.get(item.sku)?.location ?? item.location ?? null;
@@ -3871,11 +3891,12 @@ export class PickingUseCases {
         const location = locByCode.get(locationCode);
         if (!location) continue;
 
-        const prediction = await this.replenishment.predictReplenAfterPick(
-          variant.id,
-          location.id,
-          Number(item.quantity ?? 0),
-        );
+        const quantity = Number(item.quantity ?? 0);
+        const key = JSON.stringify([variant.id, location.id, quantity]);
+        if (!predictions.has(key)) {
+          predictions.set(key, await this.replenishment.predictReplenAfterPick(variant.id, location.id, quantity));
+        }
+        const prediction = predictions.get(key);
         if (prediction) map.set(item.id, prediction);
       }
     } catch (err: any) {

@@ -7,6 +7,7 @@
 export const POSTGRES_SHARD_COUNT = 8;
 
 export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
+  "server/modules/orders/__tests__/integration/order-list.integration.test.ts",
   "server/modules/oms/__tests__/integration/archon-order-delivery.test.ts",
   "server/platform/__tests__/integration/financial-command-results.integration.test.ts",
   "server/modules/procurement/__tests__/integration/procurement-cost-evidence.integration.test.ts",

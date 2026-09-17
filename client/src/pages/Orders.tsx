@@ -1,4 +1,6 @@
 import React, { useState } from "react";
+import { useDebounce } from "@/hooks/use-debounce";
+import { QueryLoadError } from "@/components/query-load-error";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { 
   ShoppingCart, 
@@ -946,19 +948,29 @@ export default function Orders() {
     items: [{ sku: "", name: "", quantity: 1 }],
   });
 
-  const trimmedSearchTerm = searchTerm.trim();
+  const trimmedSearchTerm = useDebounce(searchTerm.trim(), 300);
   const requestBucket: WmsOrderBucket = statusFilter === "combined" ? "needs_pick" : statusFilter;
+  const scope = JSON.stringify([channelFilter, warehouseFilter, statusFilter, trimmedSearchTerm]);
+  const [page, setPage] = useState({ scope, offset: 0 });
+  // Reset synchronously on a scope change, avoiding a request at the old offset.
+  const offset = page.scope === scope ? page.offset : 0;
+  const pageSize = 100;
 
-  const { data: ordersData, isLoading: ordersLoading, refetch: refetchOrders } = useQuery<OrdersResponse>({
-    queryKey: ["/api/wms/orders", channelFilter, warehouseFilter, statusFilter, trimmedSearchTerm],
-    queryFn: async () => {
+  const { data: ordersData, isLoading: ordersLoading, isError: ordersError, isFetching: ordersFetching, refetch: refetchOrders } = useQuery<OrdersResponse>({
+    queryKey: ["/api/wms/orders", channelFilter, warehouseFilter, statusFilter, trimmedSearchTerm, offset],
+    meta: { handlesLoadError: true },
+    // Moving back to a cached page must refresh its membership and counts.
+    // A mounted observer changing its key is not a refetchOnMount event.
+    staleTime: 0,
+    queryFn: async ({ signal }) => {
       const params = new URLSearchParams();
       if (channelFilter !== "all") params.append("channelId", channelFilter);
       if (warehouseFilter !== "all") params.append("warehouseId", warehouseFilter);
       if (trimmedSearchTerm) params.append("search", trimmedSearchTerm);
       params.append("bucket", requestBucket);
-      params.append("limit", "100");
-      const res = await fetch(`/api/wms/orders?${params}`);
+      params.append("limit", String(pageSize));
+      params.append("offset", String(offset));
+      const res = await fetch(`/api/wms/orders?${params}`, { signal });
       if (!res.ok) throw new Error("Failed to fetch orders");
       return res.json();
     },
@@ -967,6 +979,14 @@ export default function Orders() {
   const { data: channels } = useQuery<Channel[]>({
     queryKey: ["/api/channels"],
   });
+
+  React.useEffect(() => {
+    // A pick or cancellation may remove the last row on the current page.
+    // Return to the last valid page instead of stranding the user in emptiness.
+    if (ordersData && ordersData.offset === offset && offset > 0 && offset >= ordersData.total) {
+      setPage({ scope, offset: Math.max(0, Math.ceil(ordersData.total / pageSize) - 1) * pageSize });
+    }
+  }, [ordersData, offset, pageSize, scope]);
 
   const { data: allWarehouses = [] } = useQuery<{ id: number; code: string; name: string; warehouseType: string }[]>({
     queryKey: ["/api/warehouses"],
@@ -1166,9 +1186,9 @@ export default function Orders() {
     return result;
   })();
 
-  const needsPickCount = bucketCounts.needsPick;
-  const issueCount = bucketCounts.issues;
-  const pickedCount = bucketCounts.picked;
+  const needsPickCount = ordersData ? bucketCounts.needsPick : "—";
+  const issueCount = ordersData ? bucketCounts.issues : "—";
+  const pickedCount = ordersData ? bucketCounts.picked : "—";
   const combinedCount = groupedOrders.filter(o => o.isCombinedGroup).length;
 
   // Apply combined filter if active
@@ -1301,7 +1321,7 @@ export default function Orders() {
                   )}
                   data-testid={tab.testId}
                 >
-                  {tab.label} ({tab.countKey ? bucketCounts[tab.countKey] : 0})
+                  {tab.label} ({ordersData && tab.countKey ? bucketCounts[tab.countKey] : "—"})
                 </TabsTrigger>
               ))}
               {combinedCount > 0 && (
@@ -1327,6 +1347,7 @@ export default function Orders() {
                 placeholder="Search orders, customers, SKUs..."
                 className="pl-9 bg-card h-11" 
                 value={searchTerm}
+                maxLength={200}
                 onChange={(e) => setSearchTerm(e.target.value)}
                 autoComplete="off"
                 autoCorrect="off"
@@ -1368,11 +1389,12 @@ export default function Orders() {
             </div>
           </div>
 
+          {ordersError && <QueryLoadError subject="orders" retry={() => void refetchOrders()} refreshing={ordersFetching} stale={!!ordersData} />}
           {ordersLoading ? (
             <div className="flex items-center justify-center py-12">
               <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
             </div>
-          ) : displayOrders.length === 0 ? (
+          ) : !ordersData ? null : displayOrders.length === 0 ? (
             <Card>
               <CardContent className="py-12 text-center text-muted-foreground">
                 <ShoppingCart className="h-12 w-12 mx-auto mb-4 opacity-50" />
@@ -1517,6 +1539,19 @@ export default function Orders() {
                 </Card>
               ))}
             </div>
+          )}
+          {ordersData && ordersData.total > pageSize && (
+            <nav aria-label="Order pages" className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-sm text-muted-foreground">
+                {offset + 1}–{Math.min(offset + pageSize, ordersData.total)} of {ordersData.total} orders
+              </span>
+              <div className="flex gap-2">
+                <Button variant="outline" disabled={offset === 0 || ordersFetching}
+                  onClick={() => setPage({ scope, offset: Math.max(0, offset - pageSize) })}>Previous</Button>
+                <Button variant="outline" disabled={offset + pageSize >= ordersData.total || ordersFetching}
+                  onClick={() => setPage({ scope, offset: offset + pageSize })}>Next</Button>
+              </div>
+            </nav>
           )}
         </div>
 

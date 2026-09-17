@@ -10,6 +10,7 @@ import {
   outboundShipments,
 } from "@shared/schema";
 import { db } from "../../db";
+import { OrderListRepository, type OrderPage, type OrderPageQuery, type OrderScanQuery, type OrderWithItems } from "./order-list.repository";
 import { eq, ne, inArray, and, or, isNull, desc, gte, sql } from "drizzle-orm";
 import { ValidationError } from "../../../shared/errors";
 import { computeSortRank, resolveSlaDueAt } from "./sort-rank";
@@ -273,7 +274,8 @@ export async function recomputeAllActiveSortRanks(): Promise<number> {
 export interface IOrderStorage {
   getOrderByExternalId(externalOrderId: string): Promise<Order | undefined>;
   getOrderById(id: number): Promise<Order | undefined>;
-  getOrdersWithItems(status?: OrderStatus[]): Promise<(Order & { items: OrderItem[] })[]>;
+  getOrderPage(query: OrderPageQuery): Promise<OrderPage>;
+  scanOrderBatches(query?: OrderScanQuery): AsyncGenerator<OrderWithItems[]>;
   getPickQueueOrders(): Promise<(Order & { items: OrderItem[] })[]>;
   createOrderWithItems(order: InsertOrder, items: InsertOrderItem[], txOverride?: any): Promise<Order>;
   claimOrder(orderId: number, pickerId: string): Promise<Order | null>;
@@ -382,40 +384,12 @@ export const orderMethods: IOrderStorage = {
     return result[0];
   },
 
-  async getOrdersWithItems(status?: OrderStatus[]): Promise<(Order & { items: OrderItem[] })[]> {
-    let query = db.select().from(orders);
-    
-    if (status && status.length > 0) {
-      query = query.where(inArray(orders.warehouseStatus, status)) as any;
-    }
-    
-    const orderList = await query.orderBy(desc(orders.createdAt));
-    
-    if (orderList.length === 0) {
-      return [];
-    }
-    
-    const orderIds = orderList.map(o => o.id);
-    if (orderIds.length === 0) return [];
-    
-    const idList = sql.join(orderIds.map(id => sql`${id}`), sql`, `);
-    const allItems = await db.execute(sql`
-      SELECT * FROM wms.order_items 
-      WHERE order_id IN (${idList})
-    `);
-    
-    const itemsByOrderId = new Map<number, any[]>();
-    for (const item of allItems.rows) {
-      const orderId = (item as any).wms_order_id as number;
-      const existing = itemsByOrderId.get(orderId) || [];
-      existing.push(item);
-      itemsByOrderId.set(orderId, existing);
-    }
-    
-    return orderList.map(order => ({
-      ...order,
-      items: itemsByOrderId.get(order.id) || [],
-    }));
+  getOrderPage(query) {
+    return new OrderListRepository(db).page(query);
+  },
+
+  scanOrderBatches(query) {
+    return new OrderListRepository(db).scan(query);
   },
 
   async getPickQueueOrders(): Promise<(Order & { items: OrderItem[] })[]> {
@@ -512,8 +486,7 @@ export const orderMethods: IOrderStorage = {
                 AND COALESCE(oi.picked_quantity, 0) < COALESCE(oi.quantity, 0)
             )
           )
-          -- Completed orders: show for 24 hours in done queue
-          OR (o.warehouse_status = 'completed' AND o.completed_at >= NOW() - INTERVAL '24 hours' AND COALESCE(o.item_count, 0) > 0)
+          -- Historical orders are read separately by PickingHistoryRepository.
         )
       ORDER BY
         -- sort_rank is the single source of truth (flattened composite of
