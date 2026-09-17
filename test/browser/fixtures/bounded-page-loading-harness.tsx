@@ -16,15 +16,33 @@ function ExamplePage() {
   const { data } = useQuery({ queryKey: ["/api/test/page-data"] });
   return <p>{data ? "Page data loaded" : "Page data unavailable"}</p>;
 }
-function HealthHarness() {
+function HandledPage() {
+  const { data, isError, isFetching, refetch } = useQuery({
+    queryKey: ["/api/test/handled-data"],
+    meta: { handlesLoadError: true },
+  });
+  if (isError) return <div role="alert">
+    Could not load handled data.
+    <button disabled={isFetching} onClick={() => void refetch()}>Retry handled data</button>
+  </div>;
+  return <p>{data ? "Handled data loaded" : "Loading handled data"}</p>;
+}
+function HealthHarness({ mode }: { mode: string }) {
   const [mounted, setMounted] = useState(true);
-  return <><PageDataHealth /><button onClick={() => setMounted(false)}>Leave page</button>{mounted && <ExamplePage />}</>;
+  return <>
+    <PageDataHealth />
+    <button onClick={() => setMounted(false)}>Leave page</button>
+    {mounted && <>
+      {mode !== "health-handled" && <ExamplePage />}
+      {mode !== "health" && <HandledPage />}
+    </>}
+  </>;
 }
 const mode = new URLSearchParams(location.search).get("mode");
 createRoot(document.getElementById("root")!).render(
   <QueryClientProvider client={queryClient}>
     <AuthProvider><SettingsProvider>
-      {mode === "health" ? <HealthHarness /> : mode === "oms" ? <OmsOrders /> :
+      {mode?.startsWith("health") ? <HealthHarness mode={mode} /> : mode === "oms" ? <OmsOrders /> :
         mode === "history" ? <OrderHistory /> : mode === "inventory" ? <InventoryHistory /> : mode === "picking" ? <Picking /> : <Orders />}
     </SettingsProvider></AuthProvider>
   </QueryClientProvider>,

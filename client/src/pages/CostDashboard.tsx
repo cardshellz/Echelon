@@ -322,6 +322,7 @@ function ValuationSection() {
   const { data, isLoading, isError, error, isFetching, refetch } = useQuery({
     queryKey: ["/api/cogs/valuation"],
     queryFn: ({ signal }) => readCostReport("/api/cogs/valuation", parseInventoryValuationReport, signal),
+    meta: { handlesLoadError: true },
   });
 
   if (isLoading) {
@@ -487,6 +488,7 @@ function CostExplorer() {
 
   const { data, isLoading, isError, error, isFetching, refetch } = useQuery({
     queryKey: ["/api/cogs/lots", { search: debouncedSearch, onlyPending, limit: pageSize, offset: page * pageSize }],
+    meta: { handlesLoadError: true },
     queryFn: ({ signal }) => {
       const params = new URLSearchParams();
       if (debouncedSearch) params.set("search", debouncedSearch);
@@ -856,6 +858,7 @@ function OrderCOGSSection() {
 
   const { data: cogsData, isLoading, isFetching, error, refetch } = useQuery<OrderCOGSResult | null>({
     queryKey: ["/api/cogs/order", { orderNumber: searchTerm }],
+    meta: { handlesLoadError: true },
     queryFn: async ({ signal }) => {
       if (!searchTerm) return null;
       return readOrderCOGS(searchTerm, signal);

@@ -9,6 +9,9 @@ export function isUnhandledPageReadFailure(query: Query): boolean {
 /** App-wide fallback for screens that have not adopted an inline error state.
  * Only mounted, enabled queries count: failures on a previous page must not
  * follow the user around. Never display payloads, URLs or customer data here.
+ * A query may set meta.handlesLoadError only when its mounted consumer displays
+ * failures (including failed refreshes) and offers its own recovery action.
+ * Exclusion is per query, so another unhandled failure on the page stays visible.
  */
 export function PageDataHealth() {
   const client = useQueryClient();

@@ -2,12 +2,18 @@ import { test, expect, type Page } from "playwright/test";
 import { resolve } from "node:path";
 
 async function setup(page: Page, mode = "wms", fail = false) {
-  const state = { fail, total: 201, requests: [] as string[], writes: [] as string[], errors: [] as string[] };
+  const state = { fail, handledFail: fail, total: 201, requests: [] as string[], writes: [] as string[], errors: [] as string[] };
   page.on("pageerror", error => state.errors.push(error.message));
   await page.route("**/api/**", async route => {
     const url = new URL(route.request().url());
     state.requests.push(url.pathname + url.search);
     if (route.request().method() !== "GET") state.writes.push(url.pathname);
+    if (url.pathname === "/api/test/handled-data") {
+      await route.fulfill(state.handledFail
+        ? { status: 503, json: { error: "Temporarily unavailable" } }
+        : { json: { ok: true } });
+      return;
+    }
     const lists = ["/api/wms/orders", "/api/oms/orders", "/api/orders/history", "/api/inventory/transactions", "/api/test/page-data", "/api/picking/queue", "/api/picking/history"];
     if (state.fail && lists.includes(url.pathname)) {
       await route.fulfill({ status: 503, json: { error: "Temporarily unavailable" } });
@@ -127,6 +133,40 @@ test("app-wide fallback clears when its failed read succeeds", async ({ page }) 
   await page.getByRole("button", { name: "Retry failed loads" }).click();
   await expect(page.getByText("Page data loaded", { exact: true })).toBeVisible();
   await expect(page.getByRole("alert")).toHaveCount(0);
+  expect(state.errors).toEqual([]);
+});
+
+test("an inline error owns its warning and retry without an app-wide duplicate", async ({ page }) => {
+  const state = await setup(page, "health-handled", true);
+  await expect(page.getByRole("alert")).toHaveCount(1);
+  await expect(page.getByRole("alert")).toContainText("Could not load handled data");
+  await expect(page.getByRole("button", { name: "Retry failed loads" })).toHaveCount(0);
+  state.handledFail = false;
+  await page.getByRole("button", { name: "Retry handled data" }).click();
+  await expect(page.getByText("Handled data loaded", { exact: true })).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  expect(state.requests.filter(path => path === "/api/test/handled-data")).toHaveLength(2);
+  expect(state.writes).toEqual([]);
+  expect(state.errors).toEqual([]);
+});
+
+test("an inline error does not hide another failed read or join its app-wide retry", async ({ page }) => {
+  const state = await setup(page, "health-mixed", true);
+  await expect(page.getByRole("alert")).toHaveCount(2);
+  await expect(page.getByText("Some data on this page could not be loaded.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Retry handled data" })).toBeVisible();
+  state.fail = false;
+  await page.getByRole("button", { name: "Retry failed loads" }).click();
+  await expect(page.getByText("Page data loaded", { exact: true })).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveCount(1);
+  await expect(page.getByRole("alert")).toContainText("Could not load handled data");
+  expect(state.requests.filter(path => path === "/api/test/page-data")).toHaveLength(2);
+  expect(state.requests.filter(path => path === "/api/test/handled-data")).toHaveLength(1);
+  state.handledFail = false;
+  await page.getByRole("button", { name: "Retry handled data" }).click();
+  await expect(page.getByText("Handled data loaded", { exact: true })).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  expect(state.writes).toEqual([]);
   expect(state.errors).toEqual([]);
 });
 

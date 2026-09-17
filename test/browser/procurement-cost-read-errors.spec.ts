@@ -55,6 +55,7 @@ for (const surface of surfaces) {
     const failures = await setup(page, surface, () => reply);
     const panel = page.getByRole("tabpanel");
     await expect(panel.getByRole("alert")).toContainText(`${surface.title} could not be loaded`);
+    await expect(page.getByRole("alert")).toHaveCount(1);
     await expect(panel.getByRole("alert")).toContainText("HTTP 500");
     await expect(panel).not.toContainText("private database details");
     await expect(panel.getByText(surface.emptyMessage, { exact: true })).toHaveCount(0);
@@ -63,6 +64,7 @@ for (const surface of surfaces) {
     await panel.getByRole("button", { name: `Retry ${surface.title.toLowerCase()}`, exact: true }).click();
     await expect(panel.getByText(product.productName, { exact: true })).toBeVisible();
     await expect(panel.getByRole("alert")).toHaveCount(0);
+    await expect(page.getByRole("alert")).toHaveCount(0);
     expect(failures).toEqual([]);
   });
 
@@ -71,10 +73,12 @@ for (const surface of surfaces) {
     const failures = await setup(page, surface, () => reply);
     const panel = page.getByRole("tabpanel");
     await expect(panel.getByRole("alert")).toContainText("response is incomplete or invalid");
+    await expect(page.getByRole("alert")).toHaveCount(1);
     await expect(panel.getByText(surface.emptyMessage, { exact: true })).toHaveCount(0);
     reply = { status: 200, body: "not valid JSON", raw: true };
     await panel.getByRole("button", { name: `Retry ${surface.title.toLowerCase()}`, exact: true }).click();
     await expect(panel.getByRole("alert")).toContainText("response is incomplete or invalid");
+    await expect(page.getByRole("alert")).toHaveCount(1);
     reply = { status: 200, body: surface.valid };
     await panel.getByRole("button", { name: `Retry ${surface.title.toLowerCase()}`, exact: true }).click();
     await expect(panel.getByText(product.productName, { exact: true })).toBeVisible();
@@ -102,6 +106,7 @@ for (const surface of surfaces) {
     reply = { status: 500, body: { error: "offline" } };
     await page.getByRole("tab", { name: surface.tab, exact: true }).click();
     await expect(panel.getByRole("alert")).toContainText("HTTP 500");
+    await expect(page.getByRole("alert")).toHaveCount(1);
     await expect(panel.getByText(product.productName, { exact: true })).toHaveCount(0);
     reply = { status: 200, body: surface.valid };
     await panel.getByRole("button", { name: `Retry ${surface.title.toLowerCase()}`, exact: true }).click();

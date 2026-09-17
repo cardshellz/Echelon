@@ -173,6 +173,43 @@ queue resumes normal loading. History never runs replenishment or repairs.
 - PostgreSQL and browser tests use isolated local synthetic/mock data. The new
   database suite and browser journeys are included in existing CI selection.
 
+## Browser CI regression follow-up
+
+The first procurement CI run failed 12 desktop/mobile assertions because the
+app-wide fallback and an existing inline error both announced the same failed
+request. `OrderCOGSSection` already renders its request/validation error and
+explicit retry; `InboundShipmentTracking` already isolates its read error from
+the shipment's operational details. Neither query declared that ownership to
+`PageDataHealth`.
+
+The three cost-report reads (`ValuationSection`, `CostExplorer`,
+`OrderCOGSSection`) and the two tracking reads (`InboundShipmentTracking`,
+`History`) now set `meta.handlesLoadError: true`. Each already handles initial and
+refresh errors with its own recovery action. No response validation, recorded
+totals, provider action, or database write behavior changes. The fallback still
+reports other unhandled active failures on the same page and retries only those
+queries; one inline error does not silence the entire page.
+
+- Eight error-ownership unit cases and three existing cancellation cases pass.
+- The complete client unit suite passes: **1,535 tests across 133 files**. One
+  unchanged source-text assertion required temporary CRLF-to-LF normalization
+  locally. Its source exactly matched the committed blob after normalization;
+  original bytes were restored afterward and no unrelated source/test edit is
+  included.
+- The complete procurement browser suite passes: **274 desktop/mobile tests**.
+- All 32 bounded-page desktop/mobile browser cases pass, including inline-only
+  errors, simultaneous inline/unhandled errors, and independent retry ownership.
+- Valuation/explorer tests now also assert there is exactly one page-level alert;
+  tracking history has a new failed-read/retry regression. Existing assertions
+  are preserved rather than narrowed to hide the extra warning.
+- Validation uses an isolated install from the committed lockfile. The shared
+  checkout's dependencies differed from CI; that exploratory browser run was
+  stopped rather than treated as authoritative. No package or lockfile changes
+  are included, and the shared root dependency directory was not replaced.
+- Application and client-test TypeScript checks and the production client/server
+  build pass with the locked dependencies. The existing bundle-size warning
+  remains; these browser checks are not production memory measurements.
+
 ## After deployment
 
 1. Confirm the deployed commit belongs to this branch/PR, not an unrelated PR

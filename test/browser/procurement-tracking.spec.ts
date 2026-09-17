@@ -89,6 +89,26 @@ test("a tracking read failure stays separate from operational shipment details a
   await expect(page.getByRole("tab", { name: "Lines (1)", exact: true })).toHaveAttribute("data-state", "active");
   expect(failures).toEqual([]);
 });
+
+test("tracking history owns its read failure without an app-wide duplicate", async ({ page }) => {
+  const { data, failures } = await setup(page);
+  // Keep provider refresh notices separate from this failed Echelon history read.
+  data.references[0].lastErrorMessage = null;
+  let fail = true;
+  await page.route("**/api/inbound-shipments/42/tracking/7/history**", (route) => fail
+    ? route.fulfill({ status: 503, json: { error: "Unavailable" } })
+    : route.fallback());
+  await page.goto("/shipments/42?tab=tracking");
+  await panel(page).getByRole("button", { name: "View retained history" }).click();
+  await expect(page.getByRole("alert")).toHaveCount(1);
+  await expect(page.getByRole("alert")).toContainText("Tracking history could not be loaded");
+  await expect(panel(page).getByTestId("inbound-tracking-observation")).toBeVisible();
+  fail = false;
+  await page.getByRole("button", { name: "Retry history" }).click();
+  await expect(panel(page)).toContainText("Retained observations");
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  expect(failures).toEqual([]);
+});
 test("purchase lifecycle opens carrier tracking inside its selected shipment without losing the purchase", async ({ page }) => {
   const { failures } = await setup(page, { ready: false });
   await page.route("**/api/purchase-orders/17/workspace", (route) => route.fulfill({ json: {

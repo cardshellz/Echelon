@@ -38,7 +38,11 @@ function Snapshot({ snapshot }: { snapshot: InboundTrackingSnapshot }) {
 function History({ baseUrl, referenceId }: { baseUrl: string; referenceId: number }) {
   const [cursor, setCursor] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
-  const query = useQuery({ queryKey: [baseUrl, referenceId, "history", cursor], queryFn: async () => inboundTrackingHistorySchema.parse(await (await apiRequest("GET", `${baseUrl}/${referenceId}/history${cursor ? `?beforeId=${cursor}` : ""}`)).json()) });
+  const query = useQuery({
+    queryKey: [baseUrl, referenceId, "history", cursor],
+    queryFn: async () => inboundTrackingHistorySchema.parse(await (await apiRequest("GET", `${baseUrl}/${referenceId}/history${cursor ? `?beforeId=${cursor}` : ""}`)).json()),
+    meta: { handlesLoadError: true },
+  });
   if (query.isPending) return <p role="status">Loading tracking history…</p>;
   if (query.isError) return <div role="alert">Tracking history could not be loaded. <Button variant="outline" onClick={() => query.refetch()}>Retry history</Button></div>;
   const data = query.data;
@@ -66,7 +70,12 @@ export function InboundShipmentTracking(props: Props) {
   const mounted = useRef(true);
   const pending = useRef<PendingCommand | null>(null);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
-  const query = useQuery({ queryKey: [baseUrl], queryFn: async () => inboundTrackingViewSchema.parse(await (await apiRequest("GET", baseUrl)).json()), refetchInterval: 15_000 });
+  const query = useQuery({
+    queryKey: [baseUrl],
+    queryFn: async () => inboundTrackingViewSchema.parse(await (await apiRequest("GET", baseUrl)).json()),
+    refetchInterval: 15_000,
+    meta: { handlesLoadError: true },
+  });
   const mutable = hasPermission("purchasing", "edit") && !["closed", "cancelled"].includes(props.shipmentStatus);
   const mutation = useMutation({
     mutationFn: async (command: PendingCommand) => {
