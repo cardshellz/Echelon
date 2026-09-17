@@ -447,6 +447,93 @@ export class EbayApiClient {
       ...(verified.quantityEvidenceSource ? { quantityEvidenceSource: verified.quantityEvidenceSource } : {}) };
   }
 
+  /** Amend a proven whole-order package, rather than POSTing duplicate fulfilled
+   * quantities. Multi-package/partial orders require a line-scoped Trading
+   * contract and remain reviewable. Every retry starts with provider readback.
+   * https://developer.ebay.com/devzone/xml/docs/Reference/ebay/types/CompleteSaleRequestType.html */
+  async replaceShippingFulfillmentTracking(
+    orderId: string,
+    fulfillment: EbayShippingFulfillmentRequest,
+    authorizedPreviousTrackingNumbers: readonly string[],
+  ): Promise<EbayShippingFulfillmentResponse> {
+    const expectedLines = normalizeFulfillmentLines(fulfillment.lineItems);
+    if (!orderId.trim() || !expectedLines || !fulfillment.trackingNumber.trim()
+      || !fulfillment.shippingCarrierCode?.trim() || authorizedPreviousTrackingNumbers.length === 0
+      || authorizedPreviousTrackingNumbers.some(value => !value.trim())) {
+      throw new ChannelFulfillmentProviderError("EBAY_TRACKING_REPLACEMENT_INVALID", "Tracking replacement requires exact order, lines, carrier and predecessor tracking", "permanent");
+    }
+    if (this.isDryRun) return { fulfillmentId: "DRY_RUN_FULFILLMENT_ID" };
+    const token = await this.authService.getAccessToken(this.channelId);
+    const path = buildEbayShippingFulfillmentPath(orderId);
+    const readCollection = async (): Promise<{ fulfillments: Record<string, unknown>[] }> => {
+      const value = await this.readFulfillmentQuantityEvidence(path, token) as Record<string, unknown> | null;
+      if (!value || !Array.isArray(value.fulfillments)
+        || (value.total !== undefined && value.total !== value.fulfillments.length)
+        || (value.next !== undefined && value.next !== null && value.next !== "")
+        || value.fulfillments.some(item => !item || typeof item !== "object" || Array.isArray(item))) {
+        throw new ChannelFulfillmentProviderError("EBAY_TRACKING_READBACK_INVALID", "Tracking amendment requires a complete fulfillment collection", "transient");
+      }
+      return value as { fulfillments: Record<string, unknown>[] };
+    };
+    const before = await readCollection();
+    if (before.fulfillments.length === 0) return this.createShippingFulfillment(orderId, fulfillment);
+    if (before.fulfillments.length !== 1) {
+      throw new ChannelFulfillmentProviderError("EBAY_TRACKING_REPLACEMENT_AMBIGUOUS", "Order has multiple provider fulfillments; order-level tracking replacement is not authorized", "permanent");
+    }
+    const previous = before.fulfillments[0];
+    if (previous.shipmentTrackingNumber === fulfillment.trackingNumber) {
+      const verified = await this.findShippingFulfillment(orderId, token, fulfillment);
+      if (verified) return verified;
+    }
+    if (typeof previous.shipmentTrackingNumber !== "string"
+      || !authorizedPreviousTrackingNumbers.includes(previous.shipmentTrackingNumber)
+      || typeof previous.fulfillmentId !== "string" || !previous.fulfillmentId) {
+      throw new ChannelFulfillmentProviderError("EBAY_TRACKING_PREDECESSOR_CONFLICT", "Provider tracking does not match an authorized voided predecessor", "permanent");
+    }
+    const order = await this.readFulfillmentQuantityEvidence(`/sell/fulfillment/v1/order/${encodeURIComponent(orderId.trim())}`, token);
+    const providerOrder = order as { orderId?: unknown; lineItems?: unknown; cancelStatus?: { cancelState?: unknown; cancelRequests?: unknown } } | null;
+    const orderLines = normalizeFulfillmentLines(providerOrder?.lineItems);
+    let priorLines = normalizeFulfillmentLines(previous.lineItems);
+    if (!priorLines) {
+      const omitted = readSingleOmittedQuantityFulfillment(before, previous.shipmentTrackingNumber, previous.fulfillmentId);
+      if (omitted) priorLines = proveWholeOrderFulfillmentQuantities({
+        order, orderId, fulfillment: omitted,
+        expectedFulfillmentHref: `${this.baseUrl}${path}/${encodeURIComponent(previous.fulfillmentId)}`,
+      });
+    }
+    const expectedSignature = fulfillmentLineSignature(expectedLines);
+    if (providerOrder?.orderId !== orderId || !orderLines || !priorLines
+      || fulfillmentLineSignature(orderLines) !== expectedSignature
+      || fulfillmentLineSignature(priorLines) !== expectedSignature
+      || providerOrder.cancelStatus?.cancelState !== "NONE_REQUESTED"
+      || !Array.isArray(providerOrder.cancelStatus.cancelRequests) || providerOrder.cancelStatus.cancelRequests.length !== 0) {
+      throw new ChannelFulfillmentProviderError("EBAY_TRACKING_WHOLE_ORDER_UNPROVEN", "Order-level tracking replacement requires exact full-order quantity and cancellation evidence", "permanent");
+    }
+    if (JSON.stringify(await readCollection()) !== JSON.stringify(before)) {
+      throw new ChannelFulfillmentProviderError("EBAY_TRACKING_READBACK_CHANGED", "Provider package changed during amendment admission", "transient");
+    }
+    const xml = (value: string): string => value.replace(/[<>&"']/g, character => ({
+      "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;", "'": "&apos;",
+    })[character]!);
+    const response = await (this.options.request ?? fetch)(`${this.baseUrl}/ws/api.dll`, {
+      method: "POST", signal: AbortSignal.timeout(20_000),
+      headers: { "Content-Type": "text/xml", "X-EBAY-API-CALL-NAME": "CompleteSale",
+        "X-EBAY-API-COMPATIBILITY-LEVEL": "1477", "X-EBAY-API-SITEID": "0", "X-EBAY-API-IAF-TOKEN": token },
+      body: `<?xml version="1.0" encoding="utf-8"?><CompleteSaleRequest xmlns="urn:ebay:apis:eBLBaseComponents"><OrderID>${xml(orderId)}</OrderID><Shipment><ShipmentTrackingDetails><ShipmentTrackingNumber>${xml(fulfillment.trackingNumber)}</ShipmentTrackingNumber><ShippingCarrierUsed>${xml(fulfillment.shippingCarrierCode)}</ShippingCarrierUsed></ShipmentTrackingDetails></Shipment></CompleteSaleRequest>`,
+    });
+    // HTTP 200 / XML Ack alone cannot prove replacement. REST readback must
+    // show one package with the desired identity and exact quantities.
+    if (!response.ok) throw new ChannelFulfillmentProviderError("EBAY_TRACKING_AMENDMENT_FAILED",
+      `eBay CompleteSale returned HTTP ${response.status}`, response.status === 429 || response.status >= 500 ? "transient" : "permanent");
+    const after = await readCollection();
+    if (after.fulfillments.length !== 1 || after.fulfillments[0].shipmentTrackingNumber !== fulfillment.trackingNumber) {
+      throw new ChannelFulfillmentProviderError("EBAY_TRACKING_AMENDMENT_UNVERIFIED", "eBay has not confirmed replacement tracking; retry will reread before writing", "transient");
+    }
+    const verified = await this.findShippingFulfillment(orderId, token, fulfillment);
+    if (!verified) throw new ChannelFulfillmentProviderError("EBAY_TRACKING_AMENDMENT_UNVERIFIED", "Replacement package quantities were not verified", "transient");
+    return verified;
+  }
+
   private async createShippingFulfillmentWithRetry(
     path: string,
     url: string,

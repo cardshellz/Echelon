@@ -1,3 +1,4 @@
+import type { EbayLabelReplacementResult } from "./ebay-label-replacement.repository";
 import { randomUUID } from "node:crypto";
 
 import { z } from "zod";
@@ -86,6 +87,7 @@ export interface MaterializeAndActivatePackageAllocationCommercialFulfillmentRes
 }
 
 export interface ChannelFulfillmentAuthorityService {
+  reconcileEbayLabelReplacement?(labelId: number): Promise<EbayLabelReplacementResult | null>;
   recordPhysicalPackage(
     input: MaterializePhysicalPackageInput,
     options?: { executeImmediately?: boolean },
@@ -213,6 +215,7 @@ function providerCommandInput(
 
   return Object.freeze({
     commandId: command.id,
+    ...(command.metadata.trackingReplacement === true ? { trackingReplacement: true } : {}),
     physicalShipmentId: command.physicalShipmentId,
     omsOrderId: command.omsOrderId,
     legacyWmsShipmentIds: Object.freeze([...packageShipmentIds].sort((left, right) => left - right)),
@@ -297,14 +300,16 @@ export function createCompatibilityChannelFulfillmentProviderExecutor(
             code: "CHANNEL_PROVIDER_NOT_READY",
           });
         }
+        let responseId: string | null = null;
         try {
           const pushed = await fulfillmentPush.pushTrackingForShipmentCommand(providerInput);
-          if (pushed !== true) {
+          if (pushed !== true && !(pushed?.writebackComplete === true && typeof pushed.fulfillmentId === "string" && pushed.fulfillmentId)) {
             throw Object.assign(
               new Error(`eBay writeback returned false for physical shipment ${command.physicalShipmentId}`),
               { code: "EBAY_WRITEBACK_INCOMPLETE" },
             );
           }
+          responseId = pushed?.fulfillmentId ?? null;
         } catch (error) {
           if (isEbayTrackingConflictError(error)) {
             return {
@@ -320,7 +325,7 @@ export function createCompatibilityChannelFulfillmentProviderExecutor(
         }
         return {
           outcome: "success",
-          providerResponseId: null,
+          providerResponseId: responseId,
           metadata: Object.freeze({ legacyWmsShipmentIds: shipmentIds }),
         };
       }
@@ -338,17 +343,37 @@ export function createChannelFulfillmentAuthorityService(dependencies: {
   logger?: ChannelFulfillmentAuthorityLogger;
   createLeaseToken?: () => string;
   leaseDurationMs?: number;
+  labelReplacementEnabled?: boolean;
 }): ChannelFulfillmentAuthorityService {
   const clock = dependencies.clock ?? { now: () => new Date() };
   const logger = dependencies.logger ?? defaultLogger();
   const createLeaseToken = dependencies.createLeaseToken ?? randomUUID;
   const leaseDurationMs = dependencies.leaseDurationMs ?? DEFAULT_LEASE_DURATION_MS;
 
+  async function reconcileEbayLabelReplacement(labelId: number): Promise<EbayLabelReplacementResult | null> {
+    if (dependencies.labelReplacementEnabled === false) return null;
+    const result = await dependencies.repository.reconcileEbayLabelReplacement?.(labelId, clock.now()) ?? null;
+    if (result?.outcome === "applied") {
+      await dependencies.projector.projectPhysicalShipment(result.materialized.physicalShipmentId);
+      await dependencies.repository.markEbayLabelReplacementProjected?.(labelId, clock.now());
+    }
+    if (result) logger.info({ code: "EBAY_LABEL_REPLACEMENT", labelId, outcome: result.outcome,
+      ...(result.outcome === "applied" ? { physicalShipmentId: result.materialized.physicalShipmentId } : { reason: result.reason }) });
+    return result;
+  }
+
   async function runDueBatch(options: {
     commandIds?: readonly number[];
     limit?: number;
   } = {}): Promise<ChannelFulfillmentBatchResult> {
     const limit = options.limit ?? DEFAULT_BATCH_SIZE;
+    if (dependencies.labelReplacementEnabled !== false && !options.commandIds && dependencies.repository.findWaitingEbayLabelReplacements) {
+      for (const labelId of await dependencies.repository.findWaitingEbayLabelReplacements(Math.min(limit, 25))) {
+        try { await reconcileEbayLabelReplacement(labelId); } catch (error) {
+          logger.error({ code: "EBAY_LABEL_REPLACEMENT_RETRY", labelId, error: errorMessage(error) });
+        }
+      }
+    }
     const claimed = await dependencies.repository.claimCommands({
       now: clock.now(),
       leaseToken: createLeaseToken(),
@@ -523,6 +548,7 @@ export function createChannelFulfillmentAuthorityService(dependencies: {
   }
 
   return {
+    reconcileEbayLabelReplacement,
     recordPhysicalPackage,
     ensureLegacyShipment,
     materializeAndActivatePackageAllocationCommercialFulfillment,

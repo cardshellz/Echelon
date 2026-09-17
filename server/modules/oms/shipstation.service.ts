@@ -4512,6 +4512,12 @@ export function createShipStationService(
     };
     let result: { processed: boolean };
     try {
+      const replacement = await dependencies.fulfillmentAuthority?.reconcileEbayLabelReplacement?.(Number(input.shippingProviderLabelId));
+      if (replacement && replacement.outcome !== "applied" && replacement.outcome !== "skipped") {
+        throw new CarrierDispatchAuthorityError("CARRIER_DISPATCH_APPLICATION_FAILED", replacement.reason, {
+          retryable: replacement.outcome === "waiting", context: { shippingProviderLabelId: input.shippingProviderLabelId },
+        });
+      }
       result = await processShipmentNotification(authoritativeShipment, {
         source: "carrier_tracking_confirmed_dispatch",
         dispatchOccurredAt: input.dispatchOccurredAt,

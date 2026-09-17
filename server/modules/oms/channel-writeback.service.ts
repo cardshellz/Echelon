@@ -169,12 +169,18 @@ function shippedChannelShipmentsCte(
                 AND NOT (
                   EXISTS (
                     SELECT 1
-                    FROM wms.physical_shipment_items physical_item
+                    FROM wms.effective_physical_shipment_items physical_item
+                    LEFT JOIN wms.package_allocation_entries allocation_entry
+                      ON allocation_entry.id = physical_item.package_allocation_entry_id
+                    LEFT JOIN wms.package_allocation_source_lines allocation_source
+                      ON allocation_source.id = allocation_entry.package_allocation_source_line_id
                     JOIN oms.channel_fulfillment_push_items push_item
                       ON push_item.physical_shipment_item_id = physical_item.id
                     JOIN oms.channel_fulfillment_pushes push
                       ON push.id = push_item.channel_fulfillment_push_id
-                    WHERE physical_item.legacy_wms_shipment_item_id = eligible_item.id
+                    WHERE COALESCE(physical_item.legacy_wms_shipment_item_id,
+                      physical_item.label_replacement_source_item_id,
+                      allocation_source.source_wms_shipment_item_id) = eligible_item.id
                       AND push.oms_order_id = oo.id
                       AND push.channel_provider = c.provider
                       AND push.push_status IN ('success', 'ignored')
@@ -194,6 +200,25 @@ function shippedChannelShipmentsCte(
                 )
             )
           )
+        ) AND NOT EXISTS (
+          -- Historical tracking events cannot settle a newer replacement.
+          SELECT 1
+          FROM wms.effective_physical_shipment_items replacement_item
+          JOIN wms.ebay_label_replacement_work replacement
+            ON replacement.physical_shipment_id = replacement_item.physical_shipment_id
+            AND replacement.state = 'applied'
+          JOIN wms.outbound_shipment_items source_item
+            ON source_item.id = replacement_item.label_replacement_source_item_id
+          WHERE c.provider = 'ebay' AND source_item.shipment_id = os.id
+            AND NOT EXISTS (
+              SELECT 1 FROM oms.channel_fulfillment_push_items current_push_item
+              JOIN oms.channel_fulfillment_pushes current_push
+                ON current_push.id = current_push_item.channel_fulfillment_push_id
+              WHERE current_push_item.physical_shipment_item_id = replacement_item.id
+                AND current_push.oms_order_id = oo.id AND current_push.channel_provider = 'ebay'
+                AND current_push.push_status = 'success'
+                AND current_push_item.quantity_pushed = replacement_item.quantity_shipped
+            )
         ) AS has_per_shipment_success,
         EXISTS (
           SELECT 1

@@ -201,6 +201,7 @@ export interface ChannelFulfillmentProviderCommandItem {
 }
 
 export interface ChannelFulfillmentProviderCommandInput {
+  readonly trackingReplacement?: boolean;
   readonly commandId: number;
   readonly physicalShipmentId: number;
   readonly omsOrderId: number;
@@ -1602,7 +1603,7 @@ export function createFulfillmentPushService(
 
   async function pushTrackingForShipmentCommand(
     input: ChannelFulfillmentProviderCommandInput,
-  ): Promise<boolean> {
+  ): Promise<boolean | { fulfillmentId: string; writebackComplete: true }> {
     const command = normalizeChannelCommandInput(input);
     const order = await loadCanonicalFulfillmentOrder(command, "ebay");
     const externalOrderId = order.externalOrderId;
@@ -1651,7 +1652,29 @@ export function createFulfillmentPushService(
       shippingCarrierCode: mapCarrierCode(command.carrier),
       trackingNumber: normalizeEbayTrackingNumber(command.trackingNumber),
     };
-    const result = await account.client.createShippingFulfillment(externalOrderId, fulfillmentPayload);
+    let previousTrackingNumbers: string[] = [];
+    if (command.trackingReplacement === true) {
+      const replacementEvidence = await db.execute(sql`
+        SELECT DISTINCT prior_package.tracking_number
+        FROM wms.ebay_label_replacement_work work
+        JOIN wms.physical_shipment_items current_item ON current_item.physical_shipment_id = work.physical_shipment_id
+        JOIN wms.physical_shipment_item_quantity_adjustments adjustment
+          ON adjustment.adjustment_kind = 'provider_label_replacement'
+          AND (adjustment.metadata->>'sourceItemId')::integer = current_item.label_replacement_source_item_id
+        JOIN wms.physical_shipment_items prior_item ON prior_item.id = adjustment.physical_shipment_item_id
+        JOIN wms.physical_shipments prior_package ON prior_package.id = prior_item.physical_shipment_id
+        JOIN wms.fulfillment_plan_lines plan_line ON plan_line.id = current_item.fulfillment_plan_line_id
+        JOIN oms.oms_order_lines order_line ON order_line.id = plan_line.oms_order_line_id
+        WHERE work.state = 'applied' AND work.physical_shipment_id = ${command.physicalShipmentId}
+          AND order_line.order_id = ${command.omsOrderId}`);
+      previousTrackingNumbers = [...new Set<string>((replacementEvidence.rows ?? []).map((row: { tracking_number: string }) => normalizeEbayTrackingNumber(row.tracking_number)))];
+    }
+    if (previousTrackingNumbers.length > 0 && !account.client.replaceShippingFulfillmentTracking) {
+      throw new ChannelFulfillmentProviderError("EBAY_TRACKING_ADAPTER_UNAVAILABLE", "eBay tracking replacement adapter is unavailable", "permanent");
+    }
+    const result = previousTrackingNumbers.length > 0
+      ? await account.client.replaceShippingFulfillmentTracking!(externalOrderId, fulfillmentPayload, previousTrackingNumbers)
+      : await account.client.createShippingFulfillment(externalOrderId, fulfillmentPayload);
     const fulfillmentId = String(result?.fulfillmentId ?? "").trim();
     if (!fulfillmentId) {
       throw Object.assign(
@@ -1677,7 +1700,7 @@ export function createFulfillmentPushService(
         lineItems,
       },
     });
-    return true;
+    return command.trackingReplacement === true ? { fulfillmentId, writebackComplete: true } : true;
   }
 
 
