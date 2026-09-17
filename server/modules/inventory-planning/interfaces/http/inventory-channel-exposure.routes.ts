@@ -9,9 +9,11 @@ import {
 import {
   channelExposureDraftSaveResultSchema,
   createInventoryPublicationTargetRequestSchema,
+  holdInventoryPublicationTargetsRequestSchema,
   inventoryChannelExposureAdminViewSchema,
   inventoryChannelExposurePreviewSchema,
   inventoryPublicationTargetCommandResultSchema,
+  inventoryPublicationTargetHoldResultSchema,
   saveChannelExposurePolicyDraftRequestSchema,
   savePublicationSourceBindingDraftRequestSchema,
   savePublicationVariantMappingDraftRequestSchema,
@@ -36,6 +38,8 @@ import { InventoryPublicationTargetStopService } from "../../application/invento
 import { PostgresInventoryPublicationTargetStopStore } from "../../infrastructure/inventory-publication-target-stop.repository";
 import { InventoryPublicationTargetResumeService } from "../../application/inventory-publication-target-resume.service";
 import { PostgresInventoryPublicationTargetResumeStore } from "../../infrastructure/inventory-publication-target-resume.repository";
+import { InventoryPublicationTargetHoldService } from "../../application/inventory-publication-target-hold.service";
+import { PostgresInventoryPublicationTargetHoldStore } from "../../infrastructure/inventory-publication-target-hold.repository";
 
 const positiveId = z.coerce.number().int().positive().max(2_147_483_647);
 type ChannelExposureService = Pick<
@@ -50,6 +54,7 @@ export interface InventoryChannelExposureRouteDependencies {
   store?: InventoryChannelExposureAdminStore;
   targetStopService?: Pick<InventoryPublicationTargetStopService, "stop">;
   targetResumeService?: Pick<InventoryPublicationTargetResumeService, "review" | "resume">;
+  targetHoldService?: Pick<InventoryPublicationTargetHoldService, "hold" | "release">;
   dropshipChannel?: DropshipDestinationChannelResolver;
 }
 
@@ -68,6 +73,8 @@ export function registerInventoryChannelExposureRoutes(
     ?? new InventoryPublicationTargetStopService(new PostgresInventoryPublicationTargetStopStore());
   const targetResumeService = dependencies.targetResumeService
     ?? new InventoryPublicationTargetResumeService(new PostgresInventoryPublicationTargetResumeStore());
+  const targetHoldService = dependencies.targetHoldService
+    ?? new InventoryPublicationTargetHoldService(new PostgresInventoryPublicationTargetHoldStore());
 
   app.get(
     "/api/inventory-planning/admin/channel-exposure",
@@ -146,6 +153,43 @@ export function registerInventoryChannelExposureRoutes(
         ));
       } catch (error) {
         return sendError(res, error, "resume a stopped publication target");
+      }
+    },
+  );
+
+  // A hold keeps a live destination publishing, at zero, and a release
+  // restores its quantities: both change what the marketplace sells, so they
+  // carry the activation permission like stop and resume.
+  app.put(
+    "/api/inventory-planning/admin/channel-exposure/publication-target-hold",
+    requirePermission("inventory_planning", "activate"),
+    async (req, res) => {
+      try {
+        return res.json(inventoryPublicationTargetHoldResultSchema.parse(
+          await targetHoldService.hold(
+            parseBody(holdInventoryPublicationTargetsRequestSchema, req.body),
+            auditActor(req),
+          ),
+        ));
+      } catch (error) {
+        return sendError(res, error, "hold a publication destination at zero");
+      }
+    },
+  );
+
+  app.put(
+    "/api/inventory-planning/admin/channel-exposure/publication-target-release",
+    requirePermission("inventory_planning", "activate"),
+    async (req, res) => {
+      try {
+        return res.json(inventoryPublicationTargetHoldResultSchema.parse(
+          await targetHoldService.release(
+            parseBody(holdInventoryPublicationTargetsRequestSchema, req.body),
+            auditActor(req),
+          ),
+        ));
+      } catch (error) {
+        return sendError(res, error, "release a held publication destination");
       }
     },
   );

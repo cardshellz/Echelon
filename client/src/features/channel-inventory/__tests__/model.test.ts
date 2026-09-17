@@ -193,6 +193,21 @@ describe("destinations and publishing state", () => {
       .toMatchObject({ label: "Externally managed", tone: "external" });
   });
 
+  it("reads a held live target as publishing zeros, with who held it and why", () => {
+    const held = describePublishing(target({
+      state: "live",
+      hold: { reason: "Vendor 10 paused: card declined", heldAt: "2026-09-17T12:00:00.000Z", heldBy: "dropship-vendor-standing" },
+    }));
+    expect(held).toMatchObject({ label: "Held at zero", tone: "held" });
+    expect(held.explanation).toContain("every quantity it sends is zero");
+    expect(held.explanation).toContain("dropship-vendor-standing: Vendor 10 paused: card declined.");
+    // A hold only means something while the target publishes.
+    expect(describePublishing(target({
+      state: "disabled",
+      hold: { reason: "stale", heldAt: "2026-09-17T12:00:00.000Z", heldBy: "operator-1" },
+    }))).toMatchObject({ label: "Not publishing", tone: "off" });
+  });
+
   it("summarizes the channel rail from server evidence", () => {
     const [shopify] = buildChannelRail(view());
     expect(shopify).toMatchObject({ previewCount: 1, liveCount: 0, hasChannelDefault: false, exceptionCount: 0 });

@@ -151,6 +151,13 @@ function PreviewTable({ view, channel, target, preview, canEdit, onReload, reloa
         {" "}No quantity was sent to the provider.
       </EvidenceNote>
 
+      {preview.hold && (
+        <Callout tone="warning" title="Held at zero">
+          Every quantity this destination publishes is zero while the hold stands.
+          {" "}Held by {preview.hold.heldBy}: {preview.hold.reason}. The canonical ATP below is what would publish once released.
+        </Callout>
+      )}
+
       {preview.blockers.length > 0 && (
         <Callout tone="warning" title={`${pluralize(preview.blockers.length, "blocker")} in the availability snapshot`}>
           <ul className="list-disc space-y-1 pl-4">

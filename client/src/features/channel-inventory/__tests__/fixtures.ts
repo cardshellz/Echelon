@@ -64,6 +64,7 @@ export function target(overrides: Partial<Target> = {}): Target {
     publicationAuthority: "echelon",
     state: "preview",
     revision: "3",
+    hold: null,
     ...overrides,
   };
 }

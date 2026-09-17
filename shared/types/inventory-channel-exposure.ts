@@ -139,6 +139,18 @@ export const publicationVariantMappingHeadSchema = z.object({
   draftMapping: publicationVariantMappingVersionSchema.nullable(),
 }).strict();
 
+/**
+ * A hold on a live publication target: it keeps publishing, but every SKU
+ * quantity it sends is zero until the hold is released. Set by Dropship vendor
+ * standing (a paused vendor) or by an operator; always carries who and why.
+ */
+export const inventoryPublicationTargetHoldSchema = z.object({
+  reason: nonblank(120),
+  heldAt: z.string().datetime({ offset: true }),
+  heldBy: nonblank(100),
+}).strict();
+export type InventoryPublicationTargetHold = z.infer<typeof inventoryPublicationTargetHoldSchema>;
+
 export const inventoryPublicationTargetAdminSchema = z.object({
   id: positiveInteger,
   destinationKind: z.enum(["channel_connection", "dropship_store_connection"]),
@@ -151,6 +163,7 @@ export const inventoryPublicationTargetAdminSchema = z.object({
   publicationAuthority: z.enum(["echelon", "external_provider", "manual"]),
   state: z.enum(["disabled", "preview", "live"]),
   revision: postgresBigintString,
+  hold: inventoryPublicationTargetHoldSchema.nullable(),
 }).strict().superRefine(validatePublicationDestination);
 
 export const legacyPublicationMappingCandidateSchema = z.object({
@@ -436,6 +449,44 @@ export const stopInventoryPublicationTargetRequestSchema = z.object({
   idempotencyKey: nonblank(120),
 }).strict();
 
+/**
+ * Hold and release are keyed by destination, not target id: the caller knows
+ * which store it is pausing, not which targets inventory planning created for
+ * it. Every live Echelon target of the destination is affected together.
+ */
+export const inventoryPublicationTargetHoldDestinationSchema = z.object({
+  destinationKind: z.enum(["channel_connection", "dropship_store_connection"]),
+  connectionId: positiveInteger,
+}).strict();
+export type InventoryPublicationTargetHoldDestination = z.infer<typeof inventoryPublicationTargetHoldDestinationSchema>;
+
+export const holdInventoryPublicationTargetsRequestSchema = z.object({
+  destination: inventoryPublicationTargetHoldDestinationSchema,
+  reason: nonblank(120),
+  idempotencyKey: nonblank(120),
+}).strict();
+export type HoldInventoryPublicationTargetsRequest = z.infer<typeof holdInventoryPublicationTargetsRequestSchema>;
+
+export const inventoryPublicationTargetHoldResultSchema = z.object({
+  destination: inventoryPublicationTargetHoldDestinationSchema,
+  command: z.enum(["hold", "release"]),
+  targets: z.array(z.object({
+    publicationTargetId: positiveInteger,
+    revision: postgresBigintString,
+    /** False when the target was already in the requested hold state. */
+    changed: z.boolean(),
+    /** Outbox rows enqueued to carry the new quantities to the provider. */
+    publicationRows: z.number().int().nonnegative(),
+    /** Products the canonical planner refused to publish; their stock on the marketplace is unchanged. */
+    blockedProductIds: z.array(positiveInteger),
+  }).strict()),
+  alreadyApplied: z.boolean(),
+  runtimeAuthorityChanged: z.literal(false),
+  providerWriteAttempted: z.literal(false),
+  outboxEnqueued: z.boolean(),
+}).strict();
+export type InventoryPublicationTargetHoldResult = z.infer<typeof inventoryPublicationTargetHoldResultSchema>;
+
 export const savePublicationVariantMappingDraftRequestSchema = z.object({
   publicationTargetId: positiveInteger,
   productVariantId: positiveInteger,
@@ -504,6 +555,7 @@ export const inventoryChannelExposurePreviewSchema = z.object({
   publicationAuthority: z.enum(["echelon", "external_provider", "manual"]),
   publicationTargetState: z.enum(["disabled", "preview", "live"]),
   publicationTargetRevision: postgresBigintString,
+  hold: inventoryPublicationTargetHoldSchema.nullable(),
   productId: positiveInteger,
   shadowRunId: plannerPositiveQuantitySchema,
   snapshotFingerprint: sha256Hex,
@@ -663,6 +715,7 @@ export const inventoryChannelExposureRuntimeTargetSchema = z.object({
   externalScopeId: nonblank(240),
   publicationAuthority: z.literal("echelon"),
   publicationTargetState: z.literal("live"),
+  hold: inventoryPublicationTargetHoldSchema.nullable(),
   sourceBinding: z.object({
     bindingId: positiveInteger,
     version: positiveInteger,
