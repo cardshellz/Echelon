@@ -23,6 +23,23 @@ interface StubState {
   codesSent: string[];
   unexpected: string[];
   errors: string[];
+  /** The vendor's standing as the onboarding state reports it; the page shows why selling stopped when paused. */
+  vendorStatus: "active" | "paused";
+  vendorStandingReason: "card_declined" | "funding_returned" | null;
+}
+
+function onboardingJson(state: StubState) {
+  return {
+    vendor: { vendorId: 1, memberId: "m-1", businessName: "Vendor", contactName: null, email: "vendor@example.com", phone: null,
+      status: state.vendorStatus, entitlementStatus: "active", membershipGraceEndsAt: null, includedStoreConnections: 1,
+      standingReason: state.vendorStandingReason, pausedAt: state.vendorStatus === "paused" ? "2026-09-15T00:00:00.000Z" : null },
+    entitlement: { memberId: "m-1", cardShellzEmail: "vendor@example.com", status: "active", planId: "ops", planName: "Ops", subscriptionId: "sub-1", includesDropship: true, reasonCode: "active" },
+    storeConnections: { activeCount: 1, connectedCount: 1, launchReadyConnectedCount: 1, credentialAttentionCount: 0, needsAttentionCount: 0, totalCount: 1, includedLimit: 1, canConnectStore: false },
+    catalog: { adminExposureRuleCount: 1, vendorSelectionRuleCount: 1, adminCatalogAvailable: true, hasVendorSelection: true },
+    wallet: { availableBalanceCents: state.balanceCents, pendingBalanceCents: 0, activeFundingMethodCount: 1, activeStripeFundingMethodCount: 1, activeStripeCardFundingMethodCount: 1, activeUsdcBaseFundingMethodCount: 0,
+      autoReloadEnabled: true, autoReloadFundingMethodId: 10, autoReloadFundingMethodActive: true, autoReloadFundingMethodReady: true, autoReloadFundingMethodIsCard: true },
+    steps: [],
+  };
 }
 
 function walletJson(state: StubState) {
@@ -35,7 +52,8 @@ function walletJson(state: StubState) {
 
 async function setup(page: Page, initial: Partial<StubState> = {}, path = HARNESS_PATH) {
   const state: StubState = { cardStatus: "none", autoReload: null, balanceCents: 0, proofs: {}, failChallenge: false, walletReads: 0,
-    setupSessions: [], autoReloadWrites: [], fundingSessions: [], codesSent: [], unexpected: [], errors: [], ...initial };
+    setupSessions: [], autoReloadWrites: [], fundingSessions: [], codesSent: [], unexpected: [], errors: [],
+    vendorStatus: "active", vendorStandingReason: null, ...initial };
   page.on("pageerror", (error) => state.errors.push(error.message));
   await page.route("**/*", (route) => new URL(route.request().url()).hostname === "127.0.0.1" ? route.continue() : route.abort());
   await page.route("**/api/**", async (route) => {
@@ -57,6 +75,9 @@ async function setup(page: Page, initial: Partial<StubState> = {}, path = HARNES
       const proof = { method: "email_mfa", verifiedAt: "2026-09-15T00:00:00.000Z", expiresAt: "2999-01-01T00:00:00.000Z" };
       state.proofs[body.action] = proof;
       return route.fulfill({ json: { action: body.action, ...proof } });
+    }
+    if (url.pathname === "/api/dropship/onboarding/state" && method === "GET") {
+      return route.fulfill({ json: onboardingJson(state) });
     }
     if (url.pathname === "/api/dropship/wallet" && method === "GET") {
       state.walletReads += 1;
