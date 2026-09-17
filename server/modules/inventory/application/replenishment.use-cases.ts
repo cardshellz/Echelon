@@ -1,4 +1,5 @@
 import { eq, and, or, sql, inArray, isNull, asc } from "drizzle-orm";
+import { logger } from "../../../platform/observability/logger";
 import {
   replenRules,
   replenTasks,
@@ -903,10 +904,10 @@ export class ReplenishmentUseCases {
         if (resolvedSourceVariantId !== args.pickVariantId && resolvedReplenMethod === "full_case") {
           resolvedReplenMethod = "case_break";
         }
-        console.log(
-          `${args.tag} SOURCE: ${sourceResolution.note}; selected ${sourceResolution.variant.sku} ` +
-          `(id=${sourceResolution.variant.id}) at ${sourceLocation.code}`,
-        );
+        logger.debug("replenishment.source_evaluated", {
+          context: args.tag, note: sourceResolution.note,
+          sourceVariantId: sourceResolution.variant.id, sourceLocationId: sourceLocation.id,
+        });
       } else {
         sourceResolutionIssue = sourceResolution.issue;
       }
@@ -963,7 +964,10 @@ export class ReplenishmentUseCases {
     if (contextResult.status === "skip") return contextResult.result;
 
     const { effectiveLevel, implicitZeroLevel, location, variant, evaluatedQty } = contextResult.context;
-    console.log(`${_tag} variant=${variant.sku} loc=${location.code} onHand=${effectiveLevel.variantQty} evaluatedQty=${evaluatedQty} hierarchyLevel=${variant.hierarchyLevel}${implicitZeroLevel ? " implicitZeroLevel=true" : ""}`);
+    logger.debug("replenishment.evaluated", {
+      productVariantId, warehouseLocationId, onHand: effectiveLevel.variantQty,
+      evaluatedQty, hierarchyLevel: variant.hierarchyLevel, implicitZeroLevel,
+    });
 
     const whSettings = await this.getSettingsForWarehouse(location.warehouseId ?? undefined);
     const locConfig = await this.loadLocationConfig(warehouseLocationId, productVariantId);
@@ -988,7 +992,7 @@ export class ReplenishmentUseCases {
       options,
     );
     if (!threshold.thresholdMet) return { status: "skip", skipReason: "above_threshold", params, triggerValue, evaluatedQty };
-    console.log(`${_tag} THRESHOLD MET: method=${resolvedReplenMethod}`);
+    logger.debug("replenishment.threshold_met", { productVariantId, warehouseLocationId, method: resolvedReplenMethod });
 
     const qtyNeeded = this.calculateQtyNeeded(maxQty, triggerValue!, evaluatedQty);
     const sourceDecision = await this.resolveReplenSourceForNeed({
@@ -1055,7 +1059,10 @@ export class ReplenishmentUseCases {
       autoReplen === 1 ? 1 : autoReplen === 2 ? 2 : null, null, whSettings, qtyTargetUnits, resolvedReplenMethod,
     );
 
-    console.log(`${_tag} RESULT: from=${sourceLocation.code} qty=${qtySourceUnits}x${sourceVariant.unitsPerVariant}=${qtyTargetUnits} method=${resolvedReplenMethod}`);
+    logger.debug("replenishment.preview_resolved", {
+      productVariantId, warehouseLocationId, sourceLocationId: sourceLocation.id,
+      qtySourceUnits, qtyTargetUnits, method: resolvedReplenMethod,
+    });
 
     return {
       status: "needed_with_source",

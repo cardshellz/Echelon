@@ -1,4 +1,6 @@
 import type { Express } from "express";
+import { awaitPageReads, limitPageRead } from "../../platform/http/page-read-limit";
+import { offsetPageQuerySchema } from "../../platform/http/page-query";
 import { sql } from "drizzle-orm";
 import { db } from "../../db";
 import { inventoryStorage } from "../inventory";
@@ -300,9 +302,11 @@ export function registerInventoryRoutes(app: Express) {
   });
 
   // Inventory Transactions History
-  app.get("/api/inventory/transactions", requireAuth, async (req, res) => {
+  app.get("/api/inventory/transactions", requireAuth, limitPageRead(async (req, res) => {
     try {
-      const { batchId, transactionType, startDate, endDate, limit, offset, locationCode } = req.query;
+      const { batchId, transactionType, startDate, endDate, locationCode } = req.query;
+      const pageQuery = offsetPageQuerySchema.safeParse(req.query);
+      if (!pageQuery.success) return res.status(400).json({ code: "INVALID_PAGE_QUERY", error: "limit must be 1-200 and offset a nonnegative integer" });
 
       // Resolve locationCode → locationId
       let locationId: number | undefined;
@@ -318,8 +322,7 @@ export function registerInventoryRoutes(app: Express) {
         startDate: startDate ? new Date(startDate as string) : undefined,
         endDate: endDate ? new Date(endDate as string) : undefined,
         locationId,
-        limit: limit ? Math.min(parseInt(limit as string), 200) : 50,
-        offset: offset ? parseInt(offset as string) : 0,
+        ...pageQuery.data,
       });
 
       // Enrich with location, variant, and order details
@@ -332,10 +335,10 @@ export function registerInventoryRoutes(app: Express) {
         if (tx.productVariantId) varIds.add(tx.productVariantId);
         if (tx.orderId) orderIds.add(tx.orderId);
       }
-      const [allLocs, allVariants, orderList] = await Promise.all([
-        locIds.size > 0 ? storage.getAllWarehouseLocations() : [],
-        varIds.size > 0 ? storage.getAllProductVariants() : [],
-        orderIds.size > 0 ? Promise.all([...orderIds].map(id => storage.getOrderById(id))) : [],
+      const [allLocs, allVariants, orderList] = await awaitPageReads([
+        locIds.size > 0 ? storage.getWarehouseLocationsByIds([...locIds]) : [],
+        varIds.size > 0 ? storage.getProductVariantsByIds([...varIds]) : [],
+        orderIds.size > 0 ? awaitPageReads([...orderIds].map(id => storage.getOrderById(id))) : [],
       ]);
       const locMap = new Map(allLocs.filter(l => locIds.has(l.id)).map(l => [l.id, l]));
       const varMap = new Map(allVariants.filter(v => varIds.has(v.id)).map(v => [v.id, v]));
@@ -352,7 +355,7 @@ export function registerInventoryRoutes(app: Express) {
       console.error("Error fetching transactions:", error);
       res.status(500).json({ error: "Failed to fetch transactions" });
     }
-  });
+  }));
 
   // CSV Inventory Upload - bulk update inventory levels
   app.post("/api/inventory/upload-csv", requireAuth, requireLegacyQuantityImport, upload.single("file"), async (req, res) => {

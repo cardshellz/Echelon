@@ -1,5 +1,7 @@
 import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { useDebounce } from "@/hooks/use-debounce";
+import { QueryLoadError } from "@/components/query-load-error";
 import { format, subDays, startOfDay, endOfDay } from "date-fns";
 import {
   Search, Filter, Download, X, ChevronRight, Package,
@@ -78,6 +80,8 @@ export default function OrderHistory() {
   const [filterOpen, setFilterOpen] = useState(false);
   const isMobile = useIsMobile();
   const pageSize = 25;
+  const debouncedSearch = useDebounce(search.trim(), 300);
+  const debouncedSku = useDebounce(sku.trim(), 300);
 
   const getDateRange = () => {
     const now = new Date();
@@ -92,9 +96,9 @@ export default function OrderHistory() {
   const buildQueryParams = () => {
     const params = new URLSearchParams();
     const { startDate, endDate } = getDateRange();
-    if (search) params.set("search", search);
+    if (debouncedSearch) params.set("search", debouncedSearch);
     if (status && status !== "all") params.set("status", status);
-    if (sku) params.set("sku", sku);
+    if (debouncedSku) params.set("sku", debouncedSku);
     if (channel && channel !== "all") params.set("channel", channel);
     if (startDate) params.set("startDate", startDate.toISOString());
     if (endDate) params.set("endDate", endDate.toISOString());
@@ -103,10 +107,11 @@ export default function OrderHistory() {
     return params.toString();
   };
 
-  const { data, isLoading } = useQuery<{ orders: OrderWithItems[]; total: number }>({
-    queryKey: ["orderHistory", search, datePreset, status, sku, channel, page],
-    queryFn: async () => {
-      const res = await fetch(`/api/orders/history?${buildQueryParams()}`);
+  const { data, isLoading, isError, isFetching, refetch } = useQuery<{ orders: OrderWithItems[]; total: number }>({
+    queryKey: ["orderHistory", debouncedSearch, datePreset, status, debouncedSku, channel, page],
+    meta: { handlesLoadError: true },
+    queryFn: async ({ signal }) => {
+      const res = await fetch(`/api/orders/history?${buildQueryParams()}`, { signal });
       if (!res.ok) throw new Error("Failed to fetch order history");
       return res.json();
     },
@@ -206,6 +211,7 @@ export default function OrderHistory() {
 
       <div className="flex-1 overflow-hidden flex">
         <div className="flex-1 overflow-auto">
+          {isError && <QueryLoadError subject="order history" retry={() => void refetch()} refreshing={isFetching} stale={!!data} />}
           {isLoading ? (
             <div className="p-4 space-y-3">{[...Array(10)].map((_, i) => <Skeleton key={i} className="h-16 w-full" />)}</div>
           ) : data?.orders.length === 0 ? (

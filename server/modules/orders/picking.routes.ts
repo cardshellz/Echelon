@@ -1,4 +1,6 @@
 import type { Express } from "express";
+import { awaitPageReads, limitPageRead } from "../../platform/http/page-read-limit";
+import { offsetPageQuerySchema } from "../../platform/http/page-query";
 import { ordersStorage } from "../orders";
 import { channelsStorage } from "../channels";
 import { identityStorage } from "../identity";
@@ -16,8 +18,10 @@ import { engineRefFromRow } from "../shipping/adapters/shipstation.adapter";
 import { reserveAndPushAfterHoldRelease } from "./release-hold-push";
 import { sql } from "drizzle-orm";
 import Papa from "papaparse";
+import { registerPickingHistoryRoutes } from "./picking-history.routes";
 
 export function registerPickingRoutes(app: Express) {
+  registerPickingHistoryRoutes(app);
   const { orderCombining } = app.locals.services;
   const pickerReplenAuthorityRemoved = (res: any) => res.status(410).json({
     error: "Picker replen confirmation has been removed",
@@ -116,7 +120,7 @@ export function registerPickingRoutes(app: Express) {
     }
   });
   
-  // Get orders for picking queue (including completed for Done count)
+  // Active orders use the queue; all-date history has its own bounded reader.
   // Diagnostic endpoint to inspect a specific order's items
   app.get("/api/picking/diagnose/:orderNumber", requireAuth, async (req, res) => {
     try {
@@ -183,7 +187,7 @@ export function registerPickingRoutes(app: Express) {
 
   // ===== PICKING ROUTES (thin adapters → PickingService) =====
 
-  app.get("/api/picking/queue", requireAuth, async (req, res) => {
+  app.get("/api/picking/queue", requireAuth, limitPageRead(async (req, res) => {
     try {
       // Disable caching - pick queue changes frequently
       res.set('Cache-Control', 'no-store, no-cache, must-revalidate, private');
@@ -197,7 +201,7 @@ export function registerPickingRoutes(app: Express) {
       console.error("Error fetching picking queue:", error);
       res.status(500).json({ error: "Failed to fetch picking queue" });
     }
-  });
+  }));
 
   app.get("/api/picking/orders/:id", requireAuth, async (req, res) => {
     try {
@@ -501,15 +505,27 @@ export function registerPickingRoutes(app: Express) {
   });
 
   // Get all orders (for orders management page)
-  app.get("/api/orders", requireAuth, async (req, res) => {
+  app.get("/api/orders", requireAuth, limitPageRead(async (req, res) => {
     try {
-      const orders = await storage.getOrdersWithItems();
-      res.json(orders);
+      // Preserve the legacy array response while making continuation explicit.
+      // The supported WMS endpoint also includes these counts in its JSON body.
+      const limit = Number(req.query.limit ?? 100);
+      const offset = Number(req.query.offset ?? 0);
+      if (!Number.isSafeInteger(limit) || limit < 1 || limit > 250 ||
+          !Number.isSafeInteger(offset) || offset < 0 || offset > 2_147_483_647) {
+        return res.status(400).json({ error: "limit must be 1-250 and offset a nonnegative integer" });
+      }
+      const page = await storage.getOrderPage({ bucket: "all", limit, offset });
+      res.setHeader("X-Total-Count", String(page.total));
+      if (offset + limit < page.total) {
+        res.setHeader("Link", `</api/orders?limit=${limit}&offset=${offset + limit}>; rel="next"`);
+      }
+      res.json(page.orders);
     } catch (error: any) {
       console.error("Error fetching orders:", error);
       res.status(500).json({ error: "Failed to fetch orders" });
     }
-  });
+  }));
 
   // Hold an order (any authenticated user)
   app.post("/api/orders/:id/hold", requireAuth, async (req, res) => {
@@ -1172,111 +1188,110 @@ export function registerPickingRoutes(app: Express) {
         return res.status(403).json({ error: "Admin access required" });
       }
 
-      const allOrders = await storage.getOrdersWithItems(["completed"]);
-      const completedOrders = allOrders.filter(o => o.completedAt);
-
       let logsCreated = 0;
-
       let ordersFailed = 0;
+      let ordersProcessed = 0;
 
-      for (const order of completedOrders) {
-        try {
-          const items = order.items;
+      for await (const batch of storage.scanOrderBatches({ statuses: ["completed"], completedOnly: true })) {
+        for (const order of batch) {
+          ordersProcessed++;
+          try {
+            const items = order.items;
           
-          const existingLogs = await storage.getPickingLogsByOrderId(order.id);
-          if (existingLogs.length > 0) {
-            continue;
-          }
-
-          let pickerName = "Unknown Picker";
-          if (order.assignedPickerId) {
-            const picker = await storage.getUser(order.assignedPickerId);
-            if (picker) {
-              pickerName = picker.displayName || picker.username;
+            const existingLogs = await storage.getPickingLogsByOrderId(order.id);
+            if (existingLogs.length > 0) {
+              continue;
             }
-          }
 
-          if (order.startedAt) {
-            await storage.createPickingLog({
-              actionType: "order_claimed",
-              pickerId: order.assignedPickerId || undefined,
-              pickerName,
-              orderId: order.id,
-              orderNumber: order.orderNumber,
-              orderStatusBefore: "ready",
-              orderStatusAfter: "in_progress",
-            });
-            logsCreated++;
-          }
+            let pickerName = "Unknown Picker";
+            if (order.assignedPickerId) {
+              const picker = await storage.getUser(order.assignedPickerId);
+              if (picker) {
+                pickerName = picker.displayName || picker.username;
+              }
+            }
 
-          for (const item of items) {
-            if (item.status === "completed" && item.pickedQuantity > 0) {
-              const pickMethod = Math.random() > 0.3 ? "scan" : "manual";
-              
+            if (order.startedAt) {
               await storage.createPickingLog({
-                actionType: "item_picked",
+                actionType: "order_claimed",
                 pickerId: order.assignedPickerId || undefined,
                 pickerName,
                 orderId: order.id,
                 orderNumber: order.orderNumber,
-                orderItemId: item.id,
-                sku: item.sku,
-                itemName: item.name,
-                locationCode: item.location,
-                qtyRequested: item.quantity,
-                qtyBefore: 0,
-                qtyAfter: item.pickedQuantity,
-                qtyDelta: item.pickedQuantity,
-                pickMethod,
-                itemStatusBefore: "pending",
-                itemStatusAfter: "completed",
+                orderStatusBefore: "ready",
+                orderStatusAfter: "in_progress",
               });
               logsCreated++;
-            } else if (item.status === "short") {
+            }
+
+            for (const item of items) {
+              if (item.status === "completed" && item.pickedQuantity > 0) {
+                // Historical rows do not establish whether the picker scanned.
+                // Leave the nullable method unknown rather than inventing evidence.
+                await storage.createPickingLog({
+                  actionType: "item_picked",
+                  pickerId: order.assignedPickerId || undefined,
+                  pickerName,
+                  orderId: order.id,
+                  orderNumber: order.orderNumber,
+                  orderItemId: item.id,
+                  sku: item.sku,
+                  itemName: item.name,
+                  locationCode: item.location,
+                  qtyRequested: item.quantity,
+                  qtyBefore: 0,
+                  qtyAfter: item.pickedQuantity,
+                  qtyDelta: item.pickedQuantity,
+                  itemStatusBefore: "pending",
+                  itemStatusAfter: "completed",
+                });
+                logsCreated++;
+              } else if (item.status === "short") {
+                await storage.createPickingLog({
+                  actionType: "item_shorted",
+                  pickerId: order.assignedPickerId || undefined,
+                  pickerName,
+                  orderId: order.id,
+                  orderNumber: order.orderNumber,
+                  orderItemId: item.id,
+                  sku: item.sku,
+                  itemName: item.name,
+                  locationCode: item.location,
+                  qtyRequested: item.quantity,
+                  qtyBefore: 0,
+                  qtyAfter: item.pickedQuantity || 0,
+                  qtyDelta: item.pickedQuantity || 0,
+                  reason: item.shortReason || "not_found",
+                  pickMethod: "short",
+                  itemStatusBefore: "pending",
+                  itemStatusAfter: "short",
+                });
+                logsCreated++;
+              }
+            }
+
+            if (order.completedAt) {
               await storage.createPickingLog({
-                actionType: "item_shorted",
+                actionType: "order_completed",
                 pickerId: order.assignedPickerId || undefined,
                 pickerName,
                 orderId: order.id,
                 orderNumber: order.orderNumber,
-                orderItemId: item.id,
-                sku: item.sku,
-                itemName: item.name,
-                locationCode: item.location,
-                qtyRequested: item.quantity,
-                qtyBefore: 0,
-                qtyAfter: item.pickedQuantity || 0,
-                qtyDelta: item.pickedQuantity || 0,
-                reason: item.shortReason || "not_found",
-                pickMethod: "short",
-                itemStatusBefore: "pending",
-                itemStatusAfter: "short",
+                orderStatusBefore: "in_progress",
+                orderStatusAfter: "completed",
               });
               logsCreated++;
             }
+          } catch (orderErr: any) {
+            console.warn(`[PickingLog Backfill] Failed to backfill order ${order.id}:`, orderErr.message);
+            ordersFailed++;
           }
-
-          if (order.completedAt) {
-            await storage.createPickingLog({
-              actionType: "order_completed",
-              pickerId: order.assignedPickerId || undefined,
-              pickerName,
-              orderId: order.id,
-              orderNumber: order.orderNumber,
-              orderStatusBefore: "in_progress",
-              orderStatusAfter: "completed",
-            });
-            logsCreated++;
-          }
-        } catch (orderErr: any) {
-          console.warn(`[PickingLog Backfill] Failed to backfill order ${order.id}:`, orderErr.message);
-          ordersFailed++;
         }
       }
 
       res.json({ 
         success: true, 
-        ordersProcessed: completedOrders.length,
+        ordersProcessed,
         logsCreated,
         ordersFailed,
       });
@@ -1359,13 +1374,15 @@ export function registerPickingRoutes(app: Express) {
     }
   });
 
-  app.get("/api/orders/history", requireAuth, async (req, res) => {
+  app.get("/api/orders/history", requireAuth, limitPageRead(async (req, res) => {
     try {
       if (!req.session.user || !["admin", "lead"].includes(req.session.user.role)) {
         return res.status(403).json({ error: "Admin or lead access required" });
       }
       
-      const filters: any = {};
+      const pageQuery = offsetPageQuerySchema.safeParse(req.query);
+      if (!pageQuery.success) return res.status(400).json({ code: "INVALID_PAGE_QUERY", error: "limit must be 1-200 and offset a nonnegative integer" });
+      const filters: any = { ...pageQuery.data };
 
       if (req.query.search) filters.search = req.query.search as string;
       if (req.query.orderNumber) filters.orderNumber = req.query.orderNumber as string;
@@ -1380,10 +1397,8 @@ export function registerPickingRoutes(app: Express) {
       }
       if (req.query.startDate) filters.startDate = new Date(req.query.startDate as string);
       if (req.query.endDate) filters.endDate = new Date(req.query.endDate as string);
-      if (req.query.limit) filters.limit = parseInt(req.query.limit as string, 10);
-      if (req.query.offset) filters.offset = parseInt(req.query.offset as string, 10);
 
-      const [orders, total] = await Promise.all([
+      const [orders, total] = await awaitPageReads([
         storage.getOrderHistory(filters),
         storage.getOrderHistoryCount(filters)
       ]);
@@ -1393,7 +1408,7 @@ export function registerPickingRoutes(app: Express) {
       console.error("Error fetching order history:", error);
       res.status(500).json({ error: "Failed to fetch order history" });
     }
-  });
+  }));
   
   app.get("/api/orders/:id/detail", requireAuth, async (req, res) => {
     try {

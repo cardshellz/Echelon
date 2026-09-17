@@ -1,4 +1,6 @@
 import { requireAuth, requirePermission } from "./middleware";
+import { limitPageRead } from "../platform/http/page-read-limit";
+import { numberedPageQuerySchema } from "../platform/http/page-query";
 /**
  * OMS API Routes
  *
@@ -532,9 +534,11 @@ export function registerOmsRoutes(app: Express) {
   // -----------------------------------------------------------------------
   // GET /api/oms/orders — list orders with filters
   // -----------------------------------------------------------------------
-  app.get("/api/oms/orders", requireAuth, async (req: Request, res: Response) => {
+  app.get("/api/oms/orders", requireAuth, limitPageRead(async (req: Request, res: Response) => {
     try {
-      const { channelId, status, search, startDate, endDate, page, limit } = req.query;
+      const { channelId, status, search, startDate, endDate } = req.query;
+      const pageQuery = numberedPageQuerySchema.safeParse(req.query);
+      if (!pageQuery.success) return res.status(400).json({ code: "INVALID_PAGE_QUERY", error: "limit must be 1-200 and page a positive integer within the supported range" });
 
       const result = await getOms(req).listOrders({
         channelId: channelId ? Number(channelId) : undefined,
@@ -542,8 +546,7 @@ export function registerOmsRoutes(app: Express) {
         search: search as string | undefined,
         startDate: startDate as string | undefined,
         endDate: endDate as string | undefined,
-        page: page ? Number(page) : 1,
-        limit: limit ? Number(limit) : 50,
+        ...pageQuery.data,
       });
 
       res.json(result);
@@ -551,7 +554,7 @@ export function registerOmsRoutes(app: Express) {
       console.error("[OMS Routes] List orders error:", err);
       res.status(500).json({ error: err.message });
     }
-  });
+  }));
 
   // -----------------------------------------------------------------------
   // GET /api/oms/orders/:id/flow-history — optional audit history

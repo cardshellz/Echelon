@@ -148,8 +148,9 @@ export default function OutboundShipments() {
 
   const { data, isLoading, isError } = useQuery<OutboundShipmentsResponse>({
     queryKey: [url],
-    queryFn: async () => {
-      const res = await fetch(url, { credentials: "include" });
+    meta: { handlesLoadError: true },
+    queryFn: async ({ signal }) => {
+      const res = await fetch(url, { credentials: "include", signal });
       if (!res.ok) throw new Error("Failed to fetch outbound shipments");
       return res.json();
     },

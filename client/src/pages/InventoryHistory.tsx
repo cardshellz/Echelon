@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { QueryLoadError } from "@/components/query-load-error";
 import { 
   Search, 
   Filter, 
@@ -129,9 +130,10 @@ export default function InventoryHistory() {
   const startDate = subDays(new Date(), parseInt(dateRange));
   const endDate = new Date();
 
-  const { data: transactions = [], isLoading, refetch } = useQuery<InventoryTransaction[]>({
+  const { data: transactions = [], isLoading, isError, isFetching, dataUpdatedAt, refetch } = useQuery<InventoryTransaction[]>({
     queryKey: ["/api/inventory/transactions", transactionType, dateRange, debouncedLocation, page],
-    queryFn: async () => {
+    meta: { handlesLoadError: true },
+    queryFn: async ({ signal }) => {
       const params = new URLSearchParams();
       if (transactionType !== "all") params.set("transactionType", transactionType);
       if (debouncedLocation) params.set("locationCode", debouncedLocation);
@@ -140,7 +142,7 @@ export default function InventoryHistory() {
       params.set("limit", limit.toString());
       params.set("offset", (page * limit).toString());
 
-      const res = await fetch(`/api/inventory/transactions?${params}`);
+      const res = await fetch(`/api/inventory/transactions?${params}`, { signal });
       if (!res.ok) throw new Error("Failed to fetch transactions");
       return res.json();
     },
@@ -324,11 +326,12 @@ export default function InventoryHistory() {
 
       <Card>
         <CardContent className="p-0">
+          {isError && <QueryLoadError subject="inventory history" retry={() => void refetch()} refreshing={isFetching} stale={dataUpdatedAt > 0} />}
           {isLoading ? (
             <div className="flex items-center justify-center py-12">
               <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
             </div>
-          ) : (
+          ) : isError && dataUpdatedAt === 0 ? null : (
             <>
               {/* Mobile card layout */}
               <div className="md:hidden space-y-3 p-3">

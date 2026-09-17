@@ -153,6 +153,11 @@ export async function getAllWarehouseLocations(tx: Tx = db): Promise<WarehouseLo
   return await tx.select().from(warehouseLocations).orderBy(asc(warehouseLocations.code));
 }
 
+export async function getWarehouseLocationsByIds(ids: number[], tx: Tx = db): Promise<WarehouseLocation[]> {
+  if (ids.length === 0) return [];
+  return tx.select().from(warehouseLocations).where(inArray(warehouseLocations.id, ids));
+}
+
 export async function getWarehouseLocationById(id: number, tx: Tx = db): Promise<WarehouseLocation | undefined> {
   const result = await tx.select().from(warehouseLocations).where(eq(warehouseLocations.id, id));
   return result[0];

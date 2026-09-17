@@ -159,7 +159,7 @@ describe("browser CI impact selection", () => {
   });
 
   it("registers every current HTML-injected dropship harness as a dependency root", () => {
-    const files = execFileSync("git", ["ls-files", "-z"], { encoding: "utf8" }).split("\0").filter(Boolean);
+    const files = execFileSync("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], { encoding: "utf8" }).split("\0").filter(Boolean);
     const harnesses = new Set<string>();
     for (const file of files.filter((file) => BROWSER_SUITES.dropship.tests.test(file))) {
       const source = readFileSync(file, "utf8");

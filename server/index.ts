@@ -86,6 +86,7 @@ import {
   schedulerIsDisabled,
 } from "./infrastructure/scheduler-config";
 import { reportError, runWithContext } from "./platform/observability";
+import { createHttpRequestLogger } from "./platform/observability/http-request-log";
 
 declare module "express-session" {
   interface SessionData {
@@ -279,39 +280,7 @@ function buildShipStationWebhookTargetUrl(targetUrl: string): string {
   return parsed.toString();
 }
 
-app.use((req, res, next) => {
-  const start = Date.now();
-  const path = req.path;
-  let capturedJsonResponse: Record<string, any> | undefined = undefined;
-
-  const originalResJson = res.json;
-  res.json = function (bodyJson, ...args) {
-    capturedJsonResponse = bodyJson;
-    return originalResJson.apply(res, [bodyJson, ...args]);
-  };
-
-  res.on("finish", () => {
-    const duration = Date.now() - start;
-    if (path.startsWith("/api")) {
-      let logLine = `${req.method} ${path} ${res.statusCode} in ${duration}ms`;
-      if (capturedJsonResponse) {
-        // Log response body only for errors (status >= 400)
-        if (res.statusCode >= 400) {
-          const jsonStr = JSON.stringify(capturedJsonResponse);
-          if (jsonStr.length > 500) {
-            logLine += ` :: ${jsonStr.slice(0, 500)}...`;
-          } else {
-            logLine += ` :: ${jsonStr}`;
-          }
-        }
-      }
-
-      log(logLine);
-    }
-  });
-
-  next();
-});
+app.use(createHttpRequestLogger());
 
 /**
  * Echelon Sync Scheduler — periodically runs the Echelon orchestrator
