@@ -16,6 +16,7 @@ import type {
 interface StoreContextRow {
   vendor_id: number;
   vendor_status: string;
+  vendor_standing_reason: string | null;
   entitlement_status: string;
   store_connection_id: number;
   store_status: string;
@@ -74,6 +75,7 @@ export class PgDropshipOrderIntakeRepository implements DropshipOrderIntakeRepos
         `SELECT
            v.id AS vendor_id,
            v.status AS vendor_status,
+            v.standing_reason AS vendor_standing_reason,
             v.entitlement_status,
             sc.id AS store_connection_id,
             sc.status AS store_status,
@@ -449,6 +451,7 @@ function mapStoreContextRow(row: StoreContextRow | undefined): DropshipOrderInta
   return {
     vendorId: row.vendor_id,
     vendorStatus: row.vendor_status,
+    vendorStandingReason: row.vendor_standing_reason ?? null,
     entitlementStatus: row.entitlement_status,
     storeConnectionId: row.store_connection_id,
     storeStatus: row.store_status,

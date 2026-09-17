@@ -5,6 +5,7 @@ import {
   type ChannelDestinationSkipReason,
   type ChannelExposurePolicyScope,
   type ChannelExposurePolicyValue,
+  type InventoryPublicationTargetHold,
   type ResolvedChannelExposurePolicy,
 } from "@shared/types/inventory-channel-exposure";
 import { canonicalJson } from "@shared/utils/canonical-json";
@@ -35,6 +36,26 @@ export interface ChannelExposureCalculation {
   afterHoldbackUnits: bigint;
   cappedUnits: bigint;
   publishedUnits: bigint;
+}
+
+/**
+ * A held publication target keeps its canonical ATP in the calculation, so an
+ * operator can see what would publish, but sends nothing: every stage after
+ * the canonical figure is zero. Applied after the policy so an incomplete
+ * policy still fails closed exactly as it would for an unheld target.
+ */
+export function applyPublicationHold(
+  calculation: ChannelExposureCalculation,
+  hold: InventoryPublicationTargetHold | null,
+): ChannelExposureCalculation {
+  if (!hold) return calculation;
+  return {
+    canonicalAtpUnits: calculation.canonicalAtpUnits,
+    sharedUnits: BigInt(0),
+    afterHoldbackUnits: BigInt(0),
+    cappedUnits: BigInt(0),
+    publishedUnits: BigInt(0),
+  };
 }
 
 const policyFields = [

@@ -1441,8 +1441,15 @@ export function buildDropshipSettingsSections(input: {
       label: "Account",
       status: input.vendorStatus === "active" && input.entitlementStatus === "active" ? "ready" : "attention_required",
       comingSoon: false,
-      summary: input.entitlementStatus === "active" ? "Membership entitlement active." : "Membership entitlement needs attention.",
-      blockers: input.entitlementStatus === "active" ? [] : [`entitlement_${input.entitlementStatus}`],
+      summary: input.vendorStatus === "paused"
+        ? "Selling is paused until the wallet is funded."
+        : input.entitlementStatus === "active"
+          ? "Membership entitlement active."
+          : "Membership entitlement needs attention.",
+      blockers: [
+        input.vendorStatus === "paused" ? "vendor_paused" : null,
+        input.entitlementStatus === "active" ? null : `entitlement_${input.entitlementStatus}`,
+      ].filter((value): value is string => value !== null),
     },
     {
       key: "store_connection",

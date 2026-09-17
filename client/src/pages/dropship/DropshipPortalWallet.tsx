@@ -29,6 +29,7 @@ import {
   putJson,
   queryErrorMessage,
   type DropshipAutoReloadConfigResponse,
+  type DropshipOnboardingState,
   type DropshipStripeFundingRail,
   type DropshipStripeFundingSetupSessionResponse,
   type DropshipStripeWalletFundingSessionResponse,
@@ -41,6 +42,7 @@ import {
   useDropshipAuth,
   type DropshipSensitiveAction,
 } from "@/lib/dropship-auth";
+import { describeVendorStanding } from "@/lib/dropship-vendor-standing";
 import {
   AUTO_RELOAD_AMOUNT_PRESETS_CENTS,
   AUTO_RELOAD_DEFAULTS,
@@ -117,6 +119,13 @@ export default function DropshipPortalWallet() {
     queryKey: WALLET_QUERY_KEY,
     queryFn: () => fetchJson<DropshipWalletResponse>(WALLET_QUERY_KEY[0]),
   });
+  // Standing comes from the onboarding state the shell already invalidates
+  // after every wallet change, so a resume shows up as soon as funds settle.
+  const onboardingQuery = useQuery<DropshipOnboardingState>({
+    queryKey: [...ONBOARDING_QUERY_KEY],
+    queryFn: () => fetchJson<DropshipOnboardingState>(ONBOARDING_QUERY_KEY[0]),
+  });
+  const standingNotice = onboardingQuery.data ? describeVendorStanding(onboardingQuery.data.vendor) : null;
   const wallet = walletQuery.data?.wallet ?? null;
   const setup = useMemo(() => (wallet ? deriveWalletSetupState(wallet) : null), [wallet]);
 
@@ -297,6 +306,15 @@ export default function DropshipPortalWallet() {
             Card Shellz charges this wallet for each order you accept: the product cost plus shipping.
           </p>
         </div>
+
+        {standingNotice && (
+          <Alert variant="destructive" className="mt-5" data-testid="wallet-vendor-standing-notice">
+            <AlertCircle className="h-4 w-4" />
+            <AlertDescription>
+              <span className="font-medium">{standingNotice.title}.</span> {standingNotice.reason} {standingNotice.action}
+            </AlertDescription>
+          </Alert>
+        )}
 
         {walletQuery.error && (
           <Alert variant="destructive" className="mt-5">

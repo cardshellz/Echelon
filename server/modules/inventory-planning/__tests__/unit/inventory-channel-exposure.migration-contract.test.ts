@@ -11,6 +11,10 @@ const targetResumeMigration = readFileSync(
   "migrations/0670_inventory_publication_target_resume.sql",
   "utf8",
 );
+const targetHoldMigration = readFileSync(
+  "migrations/0677_inventory_publication_target_hold.sql",
+  "utf8",
+);
 const schema = readFileSync("shared/schema/inventory-planning.schema.ts", "utf8");
 const routes = readFileSync(
   "server/modules/inventory-planning/interfaces/http/inventory-channel-exposure.routes.ts",
@@ -95,7 +99,9 @@ describe("inventory channel exposure inactive foundation", () => {
     // channel destination setup) are edit-gated; everything that can move a
     // target toward publishing stays activate-gated.
     expect(routes.match(/requirePermission\("inventory_planning", "edit"\)/g)).toHaveLength(5);
-    expect(routes.match(/requirePermission\("inventory_planning", "activate"\)/g)).toHaveLength(4);
+    // Stop, resume review, resume, and the hold/release pair: each changes what
+    // a marketplace sells, so all six carry the activation permission.
+    expect(routes.match(/requirePermission\("inventory_planning", "activate"\)/g)).toHaveLength(6);
     // Bulk setup creates disabled targets only, so it must never be activate-gated
     // nor slip into the activation surface.
     expect(routes).toContain("channel-destinations");
@@ -135,5 +141,23 @@ describe("inventory channel exposure inactive foundation", () => {
     expect(targetResumeMigration).not.toMatch(/INSERT\s+INTO/i);
     expect(schema).toContain('"inventory_publication_target_resume_reviews"');
     expect(schema).toContain("inventoryPublicationTargetResumeReviews");
+  });
+
+  it("adds a publication hold that keeps a target live but at zero, gated like activation", () => {
+    expect(targetHoldMigration).toContain("ADD COLUMN hold_reason VARCHAR(120)");
+    expect(targetHoldMigration).toContain("ADD COLUMN held_at TIMESTAMPTZ");
+    expect(targetHoldMigration).toContain("ADD COLUMN held_by VARCHAR(100)");
+    expect(targetHoldMigration).toContain("inventory_publication_targets_hold_chk");
+    expect(targetHoldMigration).toContain("(hold_reason IS NULL AND held_at IS NULL AND held_by IS NULL)");
+    expect(targetHoldMigration).not.toMatch(/UPDATE\s+inventory\.inventory_publication_targets/i);
+    expect(targetHoldMigration).not.toMatch(/INSERT\s+INTO/i);
+    expect(schema).toContain('holdReason: varchar("hold_reason", { length: 120 })');
+    expect(schema).toContain("inventory_publication_targets_hold_chk");
+    expect(routes).toContain("/api/inventory-planning/admin/channel-exposure/publication-target-hold");
+    expect(routes).toContain("/api/inventory-planning/admin/channel-exposure/publication-target-release");
+    for (const path of ["publication-target-hold", "publication-target-release"]) {
+      const route = routes.slice(routes.indexOf(`/api/inventory-planning/admin/channel-exposure/${path}"`));
+      expect(route.slice(0, 200)).toContain('requirePermission("inventory_planning", "activate")');
+    }
   });
 });

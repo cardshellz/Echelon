@@ -1,4 +1,8 @@
 import type { Pool, PoolClient } from "pg";
+import {
+  dropshipVendorStandingReasonEnum,
+  type DropshipVendorStandingReason,
+} from "../../../../shared/schema/dropship.schema";
 import { pool as defaultPool } from "../../../db";
 import type {
   DropshipActivateVendorRepositoryInput,
@@ -27,6 +31,8 @@ interface VendorProfileRow {
   entitlement_checked_at: Date | null;
   membership_grace_ends_at: Date | null;
   included_store_connections: number;
+  standing_reason: string | null;
+  paused_at: Date | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -336,7 +342,8 @@ export class PgDropshipVendorProvisioningRepository implements DropshipVendorPro
            AND status = 'onboarding'
          RETURNING id, member_id, current_subscription_id, current_plan_id, business_name,
                    contact_name, email, phone, status, entitlement_status, entitlement_checked_at,
-                   membership_grace_ends_at, included_store_connections, created_at, updated_at`,
+                   membership_grace_ends_at, included_store_connections, standing_reason, paused_at,
+                   created_at, updated_at`,
         [input.vendorId, input.activatedAt],
       );
       const vendor = mapVendorProfileRow(result.rows[0]);
@@ -370,7 +377,8 @@ async function findVendorByMemberIdWithClient(
   const result = await client.query<VendorProfileRow>(
     `SELECT id, member_id, current_subscription_id, current_plan_id, business_name,
             contact_name, email, phone, status, entitlement_status, entitlement_checked_at,
-            membership_grace_ends_at, included_store_connections, created_at, updated_at
+            membership_grace_ends_at, included_store_connections, standing_reason, paused_at,
+                   created_at, updated_at
      FROM dropship.dropship_vendors
      WHERE member_id::text = $1
      LIMIT 1
@@ -388,7 +396,8 @@ async function findVendorByIdWithClient(
   const result = await client.query<VendorProfileRow>(
     `SELECT id, member_id, current_subscription_id, current_plan_id, business_name,
             contact_name, email, phone, status, entitlement_status, entitlement_checked_at,
-            membership_grace_ends_at, included_store_connections, created_at, updated_at
+            membership_grace_ends_at, included_store_connections, standing_reason, paused_at,
+                   created_at, updated_at
      FROM dropship.dropship_vendors
      WHERE id = $1
      LIMIT 1
@@ -411,7 +420,8 @@ async function insertVendorProfile(
      VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, 1, '{}'::jsonb, $7, $7)
      RETURNING id, member_id, current_subscription_id, current_plan_id, business_name,
                contact_name, email, phone, status, entitlement_status, entitlement_checked_at,
-               membership_grace_ends_at, included_store_connections, created_at, updated_at`,
+               membership_grace_ends_at, included_store_connections, standing_reason, paused_at,
+                   created_at, updated_at`,
     [
       input.entitlement.memberId,
       input.entitlement.subscriptionId,
@@ -448,7 +458,8 @@ async function updateVendorProfile(
      WHERE id = $1
      RETURNING id, member_id, current_subscription_id, current_plan_id, business_name,
                contact_name, email, phone, status, entitlement_status, entitlement_checked_at,
-               membership_grace_ends_at, included_store_connections, created_at, updated_at`,
+               membership_grace_ends_at, included_store_connections, standing_reason, paused_at,
+                   created_at, updated_at`,
     [
       vendorId,
       input.entitlement.subscriptionId,
@@ -532,9 +543,27 @@ function mapVendorProfileRow(row: VendorProfileRow | undefined): DropshipProvisi
     entitlementCheckedAt: row.entitlement_checked_at,
     membershipGraceEndsAt: row.membership_grace_ends_at,
     includedStoreConnections: row.included_store_connections,
+    standingReason: parseStandingReason(row.standing_reason, row.id),
+    pausedAt: row.paused_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+const STANDING_REASONS: ReadonlySet<string> = new Set(dropshipVendorStandingReasonEnum);
+
+function parseStandingReason(value: string | null, vendorId: number): DropshipVendorStandingReason | null {
+  if (value === null) {
+    return null;
+  }
+  if (!STANDING_REASONS.has(value)) {
+    throw new DropshipError(
+      "DROPSHIP_VENDOR_STANDING_REASON_INVALID",
+      "Dropship vendor row carries a standing reason outside its allowed set.",
+      { vendorId, value },
+    );
+  }
+  return value as DropshipVendorStandingReason;
 }
 
 function serializeVendorProfileForAudit(

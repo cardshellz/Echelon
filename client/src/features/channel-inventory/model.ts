@@ -148,7 +148,7 @@ function describeScope(target: Target, provider: string): string {
 // Publishing state
 // ---------------------------------------------------------------------------
 
-export type StateTone = "live" | "preview" | "off" | "external";
+export type StateTone = "live" | "held" | "preview" | "off" | "external";
 
 export interface PublishingStatus {
   label: string;
@@ -167,6 +167,15 @@ export function describePublishing(target: Target): PublishingStatus {
       label: PUBLISHER_LABELS[target.publicationAuthority].label,
       tone: "external",
       explanation: PUBLISHER_LABELS[target.publicationAuthority].description,
+    };
+  }
+  if (target.state === "live" && target.hold) {
+    return {
+      label: "Held at zero",
+      tone: "held",
+      explanation: "Echelon keeps publishing to this destination, but every quantity it sends is zero "
+        + `until the hold is released. Held ${formatHeldAt(target.hold.heldAt)} by ${target.hold.heldBy}: `
+        + `${target.hold.reason}.`,
     };
   }
   switch (target.state) {
@@ -191,6 +200,11 @@ export function describePublishing(target: Target): PublishingStatus {
           + "marketplace already shows is unchanged.",
       };
   }
+}
+
+function formatHeldAt(heldAt: string): string {
+  const date = new Date(heldAt);
+  return Number.isFinite(date.getTime()) ? `on ${date.toLocaleDateString()}` : "at an unknown time";
 }
 
 // ---------------------------------------------------------------------------
@@ -736,6 +750,7 @@ export interface ChannelRailEntry {
   channel: Channel;
   targets: Target[];
   liveCount: number;
+  heldCount: number;
   previewCount: number;
   offCount: number;
   externalCount: number;
@@ -751,6 +766,7 @@ export function buildChannelRail(view: View): ChannelRailEntry[] {
       channel,
       targets,
       liveCount: tones.filter((tone) => tone === "live").length,
+      heldCount: tones.filter((tone) => tone === "held").length,
       previewCount: tones.filter((tone) => tone === "preview").length,
       offCount: tones.filter((tone) => tone === "off").length,
       externalCount: tones.filter((tone) => tone === "external").length,

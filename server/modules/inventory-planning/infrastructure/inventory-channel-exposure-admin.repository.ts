@@ -12,23 +12,24 @@ import {
   publicationVariantMappingVersions,
 } from "@shared/schema";
 import {
-  channelExposureDraftSaveResultSchema,
-  inventoryChannelExposureAdminStoreViewSchema,
-  setUpChannelDestinationsResultSchema,
-  type SetUpChannelDestinationsResult,
-  inventoryChannelExposurePreviewSchema,
-  inventoryPublicationTargetCommandResultSchema,
   type ChannelExposureDraftSaveResult,
+  channelExposureDraftSaveResultSchema,
   type ChannelExposurePolicyHead,
   type ChannelExposurePolicyScope,
   type ChannelExposurePolicyValue,
   type ChannelExposurePolicyVersion,
+  inventoryChannelExposureAdminStoreViewSchema,
   type InventoryChannelExposurePreview,
+  inventoryChannelExposurePreviewSchema,
   type InventoryPublicationTargetCommandResult,
+  inventoryPublicationTargetCommandResultSchema,
+  type InventoryPublicationTargetHold,
   type PublicationSourceBindingHead,
   type PublicationSourceBindingVersion,
   type PublicationVariantMappingHead,
   type PublicationVariantMappingVersion,
+  type SetUpChannelDestinationsResult,
+  setUpChannelDestinationsResultSchema,
 } from "@shared/types/inventory-channel-exposure";
 
 import { db } from "../../../db";
@@ -43,6 +44,7 @@ import type {
   SetInventoryPublicationTargetPreviewStateCommand,
 } from "../application/inventory-channel-exposure-admin.service";
 import {
+  applyPublicationHold,
   calculateChannelExposure,
   calculateChannelExposureDefinitionHash,
   calculatePublicationSourceBindingDefinitionHash,
@@ -170,7 +172,8 @@ implements InventoryChannelExposureAdminStore {
     const targetRows = rows(await this.database.execute(sql`
       SELECT id, destination_kind, channel_id, channel_connection_id,
              dropship_store_connection_id, fulfillment_node_id,
-             provider_scope_type, external_scope_id, publication_authority, state, revision
+             provider_scope_type, external_scope_id, publication_authority, state, revision,
+             hold_reason, held_at, held_by
       FROM inventory.inventory_publication_targets
       ORDER BY channel_id, destination_kind, channel_connection_id,
                dropship_store_connection_id, external_scope_id, id
@@ -333,6 +336,7 @@ implements InventoryChannelExposureAdminStore {
         publicationAuthority: String(row.publication_authority),
         state: String(row.state),
         revision: String(row.revision),
+        hold: publicationHold(row),
       })),
       fulfillmentNodes: nodeRows.map((row) => ({
         id: positiveInteger(row.id, "node.id"),
@@ -1070,7 +1074,8 @@ implements InventoryChannelExposureAdminStore {
       const targetRows = rows(await tx.execute(sql`
         SELECT id, destination_kind, channel_id, channel_connection_id,
                dropship_store_connection_id, provider_scope_type,
-               external_scope_id, publication_authority, state, revision
+               external_scope_id, publication_authority, state, revision,
+               hold_reason, held_at, held_by
         FROM inventory.inventory_publication_targets
         WHERE id = ${publicationTargetId}
       `));
@@ -1294,7 +1299,10 @@ implements InventoryChannelExposureAdminStore {
               context: { publicationTargetId, channelId, productId, productVariantId },
             });
           }
-          const calculation = calculateChannelExposure(canonicalAtp, resolution.policy);
+          const calculation = applyPublicationHold(
+            calculateChannelExposure(canonicalAtp, resolution.policy),
+            publicationHold(target),
+          );
           return [{
             productVariantId,
             sku: network.productVariantSkuSnapshot,
@@ -1320,6 +1328,7 @@ implements InventoryChannelExposureAdminStore {
         publicationAuthority: String(target.publication_authority),
         publicationTargetState: String(target.state),
         publicationTargetRevision: String(target.revision),
+        hold: publicationHold(target),
         productId,
         shadowRunId: run.runId,
         snapshotFingerprint: run.snapshotFingerprint,
@@ -1427,6 +1436,16 @@ async function loadVariantMappingAuditSnapshot(
     definitionHash: String(row.definition_hash),
     externalInventoryItemId: String(row.external_inventory_item_id),
     externalSku: nullableText(row.external_sku),
+  };
+}
+
+/** The hold as the admin surfaces read it; the three columns move together. */
+function publicationHold(row: Record<string, any>): InventoryPublicationTargetHold | null {
+  if (row.hold_reason == null) return null;
+  return {
+    reason: String(row.hold_reason),
+    heldAt: new Date(String(row.held_at)).toISOString(),
+    heldBy: String(row.held_by),
   };
 }
 

@@ -1,11 +1,13 @@
 import { isCustomerSellableVariant } from "@shared/catalog/variant-sales-eligibility";
 import {
+  type InventoryPublicationTargetHold,
   inventoryChannelExposureRuntimePlanSchema,
   type InventoryChannelExposureRuntimePlan,
 } from "@shared/types/inventory-channel-exposure";
 import type { SupplySnapshotDto } from "@shared/types/inventory-availability-planner";
 
 import {
+  applyPublicationHold,
   calculateChannelExposure,
   findPartitionedShareOverages,
   resolveChannelExposurePolicy,
@@ -55,6 +57,8 @@ export interface ActiveInventoryPublicationTargetSnapshot {
   externalScopeId: string;
   publicationAuthority: "echelon";
   publicationTargetState: "live";
+  /** While set, every SKU the target publishes goes to zero; the plan still records canonical ATP. */
+  hold: InventoryPublicationTargetHold | null;
   sourceBinding: ActivePublicationSourceBindingSnapshot | null;
   policies: readonly ActiveChannelExposurePolicySnapshot[];
   mappings: readonly ActivePublicationVariantMappingSnapshot[];
@@ -349,7 +353,7 @@ function planTarget(
       BigInt(0),
     );
     const calculation = resolution.policy
-      ? calculateChannelExposure(canonicalAtp, resolution.policy)
+      ? applyPublicationHold(calculateChannelExposure(canonicalAtp, resolution.policy), target.hold)
       : {
           canonicalAtpUnits: canonicalAtp,
           sharedUnits: BigInt(0),
@@ -395,6 +399,7 @@ function planTarget(
       externalScopeId: target.externalScopeId,
       publicationAuthority: target.publicationAuthority,
       publicationTargetState: target.publicationTargetState,
+      hold: target.hold,
       sourceBinding: binding && sourceWarehouseIds.length > 0 ? {
         bindingId: binding.bindingId,
         version: binding.version,

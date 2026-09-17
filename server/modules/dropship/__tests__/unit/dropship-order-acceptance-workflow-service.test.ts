@@ -302,6 +302,7 @@ class FakeAcceptanceService {
       totalDebitCents: 2722,
       currency: "USD",
       paymentHoldExpiresAt: null,
+      paymentHoldReason: null,
       idempotentReplay: false,
     };
   }
@@ -368,6 +369,7 @@ class SequencedCanonicalAcceptanceRepository implements DropshipOrderAcceptanceR
       totalDebitCents: 2722,
       currency: "USD",
       paymentHoldExpiresAt: null,
+      paymentHoldReason: null,
       idempotentReplay: false,
     };
   }
@@ -436,6 +438,8 @@ function makeVendor(overrides: Partial<DropshipProvisionedVendorProfile> = {}): 
     entitlementCheckedAt: now,
     membershipGraceEndsAt: null,
     includedStoreConnections: 1,
+    standingReason: null,
+    pausedAt: null,
     createdAt: now,
     updatedAt: now,
     ...overrides,

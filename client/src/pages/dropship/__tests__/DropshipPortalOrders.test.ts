@@ -12,7 +12,7 @@ const source = readFileSync(join(__dirname, "..", "DropshipPortalOrders.tsx"), "
 describe("DropshipPortalOrders contract", () => {
   it("asks the server what the held orders need instead of adding money up on the page", () => {
     expect(source).toContain("fetchJson<DropshipPaymentHoldSummaryResponse>(PAYMENT_HOLD_SUMMARY_PATH)");
-    expect(source).toContain("describePaymentHoldSummary(holdSummaryQuery.data.summary, now)");
+    expect(source).toContain("describePaymentHoldSummary(holdSummaryQuery.data.summary, now, {");
     expect(source).not.toMatch(/totalDebitCents\s*-\s*availableBalanceCents/);
   });
 
@@ -22,6 +22,12 @@ describe("DropshipPortalOrders contract", () => {
     expect(banner).toContain('dropshipPortalPath("/wallet")');
     expect(banner).toContain("Show waiting orders");
     expect(banner).toContain("setApplied({ search, status: PAYMENT_HOLD_STATUS })");
+  });
+
+  it("tells a vendor paused for funding what the held orders are really waiting for", () => {
+    expect(source).toContain('useQuery<DropshipOnboardingState>({');
+    expect(source).toContain('queryKey: ["/api/dropship/onboarding/state"],');
+    expect(source).toContain("pausedForFunding: onboardingQuery.data ? isPausedForFunding(onboardingQuery.data.vendor) : false,");
   });
 
   it("puts what each held order needs and how long it has under its status", () => {

@@ -45,6 +45,9 @@ interface PublicationTargetRow {
   external_scope_id: unknown;
   publication_authority: unknown;
   publication_target_state: unknown;
+  hold_reason: unknown;
+  held_at: unknown;
+  held_by: unknown;
 }
 
 interface SourceBindingRow {
@@ -267,7 +270,10 @@ async function loadSelectedPublicationTargets(
             target.provider_scope_type,
             target.external_scope_id,
             target.publication_authority,
-            target.state AS publication_target_state
+            target.state AS publication_target_state,
+            target.hold_reason,
+            target.held_at,
+            target.held_by
      FROM inventory.inventory_publication_targets AS target
      JOIN channels.channels AS policy_channel ON policy_channel.id = target.channel_id
      LEFT JOIN dropship.dropship_store_connections AS dropship_connection
@@ -397,6 +403,7 @@ async function loadSelectedPublicationTargets(
       // A proposal describes the state after activation; assert the actual source
       // row separately so this never relabels an unexpected state as publishable.
       publicationTargetState: "live",
+      hold: publicationTargetHold(row, publicationTargetId),
       sourceBinding: bindings.get(publicationTargetId) ?? null,
       policies: policies.get(channelId) ?? [],
       mappings: mappings.get(publicationTargetId) ?? [],
@@ -583,6 +590,30 @@ function activePolicyValue(input: {
       { cause: error },
     );
   }
+}
+
+/** The hold columns move together; a partial hold is corrupt evidence, not a hold. */
+function publicationTargetHold(
+  row: PublicationTargetRow,
+  publicationTargetId: number,
+): ActiveInventoryPublicationTargetSnapshot["hold"] {
+  if (row.hold_reason == null && row.held_at == null && row.held_by == null) return null;
+  if (row.hold_reason == null || row.held_at == null || row.held_by == null) {
+    throw invalidRow("A publication target carries an incomplete hold.", { publicationTargetId });
+  }
+  return {
+    reason: nonblank(row.hold_reason, "publicationTarget.holdReason"),
+    heldAt: isoTimestamp(row.held_at, "publicationTarget.heldAt"),
+    heldBy: nonblank(row.held_by, "publicationTarget.heldBy"),
+  };
+}
+
+function isoTimestamp(value: unknown, field: string): string {
+  const date = value instanceof Date ? value : new Date(String(value));
+  if (!Number.isFinite(date.getTime())) {
+    throw invalidRow(`${field} is not a valid timestamp.`, { value: String(value) });
+  }
+  return date.toISOString();
 }
 
 function positiveInteger(value: unknown, field: string): number {

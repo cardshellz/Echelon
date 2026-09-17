@@ -6,6 +6,7 @@ import {
 } from "../../../../shared/validation/currency";
 import type { DropshipSourcePlatform } from "../../../../shared/schema/dropship.schema";
 import { DropshipError } from "../domain/errors";
+import { vendorOrderAdmissionFor } from "../domain/vendor-standing";
 import { sendDropshipNotificationSafely } from "./dropship-notification-dispatch";
 import type {
   DropshipClock,
@@ -111,6 +112,8 @@ export interface DropshipOrderIntakeRecord {
 export interface DropshipOrderIntakeStoreContext {
   vendorId: number;
   vendorStatus: string;
+  /** Why the vendor is paused; null unless vendorStatus is `paused`. */
+  vendorStandingReason: string | null;
   entitlementStatus: string;
   storeConnectionId: number;
   storeStatus: string;
@@ -256,7 +259,10 @@ export class DropshipOrderIntakeService {
 export function evaluateDropshipOrderIntakeEligibility(
   context: DropshipOrderIntakeStoreContext,
 ): { status: "received" | "rejected"; rejectionReason: string | null } {
-  if (context.vendorStatus !== "active") {
+  // A vendor paused for a funding reason still receives the order: it is a
+  // race against the zero-quantity hold and waits under the payment hold
+  // rather than being refused (see vendorOrderAdmissionFor).
+  if (vendorOrderAdmissionFor({ status: context.vendorStatus, standingReason: context.vendorStandingReason }) === "reject") {
     return {
       status: "rejected",
       rejectionReason: `Vendor status ${context.vendorStatus} does not allow new dropship order intake.`,

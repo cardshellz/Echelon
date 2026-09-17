@@ -128,7 +128,7 @@ export function registerDropshipWalletRoutes(
             fundingMethodId: fundingMethod.fundingMethod.fundingMethodId,
           });
         } else if (event.kind === "wallet_funding_failed") {
-          await service.notifyWalletFundingFailed(event.failure);
+          await service.recordWalletFundingFailure(event.failure);
         }
         return res.json({
           received: true,

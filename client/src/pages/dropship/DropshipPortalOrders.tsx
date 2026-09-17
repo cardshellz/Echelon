@@ -60,6 +60,7 @@ import {
   queryErrorMessage,
   type DropshipOrderAcceptResponse,
   type DropshipOrderDetail,
+  type DropshipOnboardingState,
   type DropshipOrderDetailResponse,
   type DropshipOrderListItem,
   type DropshipOrderListResponse,
@@ -80,6 +81,7 @@ import {
   describePaymentHoldSummary,
   ordersStatusFilterFromSearch,
 } from "@/lib/dropship-payment-holds";
+import { isPausedForFunding } from "@/lib/dropship-vendor-standing";
 import { DropshipPortalShell } from "./DropshipPortalShell";
 
 type PendingOrderAction =
@@ -145,11 +147,19 @@ export default function DropshipPortalOrders() {
     queryKey: [PAYMENT_HOLD_SUMMARY_PATH],
     queryFn: () => fetchJson<DropshipPaymentHoldSummaryResponse>(PAYMENT_HOLD_SUMMARY_PATH),
   });
+  // Standing decides what a held order is waiting for: the order total, or
+  // the wallet minimum while the vendor is paused for funding.
+  const onboardingQuery = useQuery<DropshipOnboardingState>({
+    queryKey: ["/api/dropship/onboarding/state"],
+    queryFn: () => fetchJson<DropshipOnboardingState>("/api/dropship/onboarding/state"),
+  });
   // Countdowns are worked out against one clock reading per data load, so a
   // render never shows two orders measured against different "now"s.
   const now = useMemo(() => new Date(), [holdSummaryQuery.data, ordersQuery.data]);
   const holdNotice = holdSummaryQuery.data
-    ? describePaymentHoldSummary(holdSummaryQuery.data.summary, now)
+    ? describePaymentHoldSummary(holdSummaryQuery.data.summary, now, {
+      pausedForFunding: onboardingQuery.data ? isPausedForFunding(onboardingQuery.data.vendor) : false,
+    })
     : null;
   const hasActiveProof = (action: DropshipSensitiveAction) => {
     return isDropshipSensitiveProofActive({

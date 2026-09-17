@@ -16,6 +16,23 @@ interface StubState {
   orderRequests: string[];
   unexpected: string[];
   errors: string[];
+  /** The vendor's standing as the onboarding state reports it; a funding pause changes what held orders wait for. */
+  vendorStatus: "active" | "paused";
+  vendorStandingReason: "card_declined" | "funding_returned" | null;
+}
+
+function onboardingJson(state: StubState) {
+  return {
+    vendor: { vendorId: 1, memberId: "m-1", businessName: "Vendor", contactName: null, email: "vendor@example.com", phone: null,
+      status: state.vendorStatus, entitlementStatus: "active", membershipGraceEndsAt: null, includedStoreConnections: 1,
+      standingReason: state.vendorStandingReason, pausedAt: state.vendorStatus === "paused" ? "2026-09-16T00:00:00.000Z" : null },
+    entitlement: { memberId: "m-1", cardShellzEmail: "vendor@example.com", status: "active", planId: "ops", planName: "Ops", subscriptionId: "sub-1", includesDropship: true, reasonCode: "active" },
+    storeConnections: { activeCount: 1, connectedCount: 1, launchReadyConnectedCount: 1, credentialAttentionCount: 0, needsAttentionCount: 0, totalCount: 1, includedLimit: 1, canConnectStore: false },
+    catalog: { adminExposureRuleCount: 1, vendorSelectionRuleCount: 1, adminCatalogAvailable: true, hasVendorSelection: true },
+    wallet: { availableBalanceCents: state.availableBalanceCents, pendingBalanceCents: 0, activeFundingMethodCount: 1, activeStripeFundingMethodCount: 1, activeStripeCardFundingMethodCount: 1, activeUsdcBaseFundingMethodCount: 0,
+      autoReloadEnabled: true, autoReloadFundingMethodId: 10, autoReloadFundingMethodActive: true, autoReloadFundingMethodReady: true, autoReloadFundingMethodIsCard: true },
+    steps: [],
+  };
 }
 
 function heldOrder(intakeId: number, totalDebitCents: number, expiresAt: string) {
@@ -33,7 +50,8 @@ function heldOrder(intakeId: number, totalDebitCents: number, expiresAt: string)
 }
 
 async function setup(page: Page, initial: Partial<StubState> = {}, path = HARNESS_PATH) {
-  const state: StubState = { heldCount: 2, shortfallCents: 15_000, availableBalanceCents: 4_000, orderRequests: [], unexpected: [], errors: [], ...initial };
+  const state: StubState = { heldCount: 2, shortfallCents: 15_000, availableBalanceCents: 4_000, orderRequests: [], unexpected: [], errors: [],
+    vendorStatus: "active", vendorStandingReason: null, ...initial };
   // Deadlines sit a little past whole hours so the countdown text is stable for the length of a test run.
   const firstDeadline = new Date(Date.now() + 27 * HOUR_MS + 30 * 60 * 1000).toISOString();
   const secondDeadline = new Date(Date.now() + 40 * HOUR_MS).toISOString();
@@ -45,6 +63,9 @@ async function setup(page: Page, initial: Partial<StubState> = {}, path = HARNES
     if (url.pathname === "/api/dropship/auth/me") {
       return route.fulfill({ json: { principal: { authIdentityId: 1, memberId: "m-1", cardShellzEmail: "vendor@example.com", hasPasskey: false,
         authMethod: "password", entitlementStatus: "active", authenticatedAt: "2026-09-16T00:00:00.000Z" }, sensitiveProofs: {} } });
+    }
+    if (url.pathname === "/api/dropship/onboarding/state" && method === "GET") {
+      return route.fulfill({ json: onboardingJson(state) });
     }
     if (url.pathname === "/api/dropship/orders/payment-hold-summary" && method === "GET") {
       return route.fulfill({ json: { summary: { heldCount: state.heldCount, totalDebitCents: 19_000, availableBalanceCents: state.availableBalanceCents,
@@ -78,6 +99,17 @@ test("held orders are announced with the amount to add, and each row says what i
   );
   await expect(page.getByTestId("order-hold-detail").first()).toHaveText("Needs $95.00 · cancels in 1d 3h");
   await expect(page.getByTestId("order-hold-detail")).toHaveCount(2);
+  expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("a vendor paused for funding is told the held orders wait for the wallet minimum, even with the money to cover them", async ({ page }) => {
+  const state = await setup(page, { vendorStatus: "paused", vendorStandingReason: "card_declined", shortfallCents: 0, availableBalanceCents: 30_000 });
+  const banner = page.getByTestId("orders-payment-hold-banner");
+  await expect(banner.getByTestId("orders-payment-hold-title")).toHaveText("2 orders are waiting on payment");
+  await expect(banner.getByTestId("orders-payment-hold-detail")).toHaveText(
+    "They need $190.00 in total; your balance is $300.00. Selling is paused. Fund your wallet back to its minimum and they will be accepted. The first one is cancelled in 1d 3h if it is not paid.",
+  );
+  await expect(page.getByRole("button", { name: "Add funds" })).toBeVisible();
   expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
 });
 

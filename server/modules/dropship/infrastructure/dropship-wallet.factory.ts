@@ -3,6 +3,7 @@ import { createDropshipVendorProvisioningServiceFromEnv } from "./dropship-vendo
 import { createStripeDropshipFundingProviderFromEnv } from "./dropship-stripe-funding.provider";
 import { PgDropshipWalletRepository } from "./dropship-wallet.repository";
 import { createDropshipNotificationServiceFromEnv } from "./dropship-notification.factory";
+import { createDropshipVendorStandingServiceFromEnv } from "./dropship-vendor-standing.factory";
 
 export function createDropshipWalletServiceFromEnv(): DropshipWalletService {
   return new DropshipWalletService({
@@ -10,6 +11,7 @@ export function createDropshipWalletServiceFromEnv(): DropshipWalletService {
     repository: new PgDropshipWalletRepository(),
     fundingProvider: createStripeDropshipFundingProviderFromEnv(),
     notificationSender: createDropshipNotificationServiceFromEnv(),
+    vendorStanding: createDropshipVendorStandingServiceFromEnv(),
     clock: systemDropshipWalletClock,
     logger: makeDropshipWalletLogger(),
   });

@@ -13,6 +13,7 @@ import {
   channelExposurePolicyScopeKey,
   findPartitionedShareOverages,
   resolveChannelExposurePolicy,
+  applyPublicationHold,
 } from "../../domain/inventory-channel-exposure";
 
 const completeChannelValue = {
@@ -174,6 +175,19 @@ describe("inventory channel exposure domain", () => {
       publishedUnits: BigInt(20),
     });
     expect(calculateChannelExposure(BigInt(15), policy).publishedUnits).toBe(BigInt(0));
+  });
+
+  it("publishes zero for a held target while keeping the canonical ATP, and leaves an unheld one alone", () => {
+    const calculation = calculateChannelExposure(BigInt(100), resolvedPolicy());
+    const hold = { reason: "Vendor 10 paused: card declined", heldAt: "2026-09-17T12:00:00.000Z", heldBy: "dropship-vendor-standing" };
+    expect(applyPublicationHold(calculation, hold)).toEqual({
+      canonicalAtpUnits: BigInt(100),
+      sharedUnits: BigInt(0),
+      afterHoldbackUnits: BigInt(0),
+      cappedUnits: BigInt(0),
+      publishedUnits: BigInt(0),
+    });
+    expect(applyPublicationHold(calculation, null)).toBe(calculation);
   });
 
   it("publishes zero immediately when the resolved SKU is ineligible", () => {

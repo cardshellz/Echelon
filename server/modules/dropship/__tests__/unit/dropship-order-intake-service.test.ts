@@ -77,6 +77,32 @@ describe("DropshipOrderIntakeService", () => {
     expect(left).toBe(right);
   });
 
+  it("receives an order for a vendor paused for funding, so it can wait under the payment hold", async () => {
+    repository.context = { ...repository.context, vendorStatus: "paused", vendorStandingReason: "card_declined" };
+
+    const result = await service.recordMarketplaceOrder(makeInput());
+
+    expect(result.intake.status).toBe("received");
+    expect(repository.lastRecordInput).toMatchObject({ status: "received", cancellationStatus: null, rejectionReason: null });
+    expect(notificationSender.sent.map((sent) => sent.eventType)).not.toContain("dropship_order_intake_rejected");
+  });
+
+  it("still rejects an operator pause and every other non-active vendor status at intake", () => {
+    expect(evaluateDropshipOrderIntakeEligibility(makeContext({ vendorStatus: "paused", vendorStandingReason: "funding_returned" })))
+      .toEqual({ status: "received", rejectionReason: null });
+    for (const context of [
+      { vendorStatus: "paused", vendorStandingReason: "operator" },
+      { vendorStatus: "paused", vendorStandingReason: null },
+      { vendorStatus: "lapsed", vendorStandingReason: null },
+      { vendorStatus: "onboarding", vendorStandingReason: null },
+    ]) {
+      expect(evaluateDropshipOrderIntakeEligibility(makeContext(context))).toEqual({
+        status: "rejected",
+        rejectionReason: `Vendor status ${context.vendorStatus} does not allow new dropship order intake.`,
+      });
+    }
+  });
+
   it("records disconnected store orders as rejected intake for audit visibility", async () => {
     repository.context = {
       ...repository.context,
@@ -276,6 +302,7 @@ function makeContext(overrides: Partial<DropshipOrderIntakeStoreContext> = {}): 
   return {
     vendorId: 10,
     vendorStatus: "active",
+    vendorStandingReason: null,
     entitlementStatus: "active",
     storeConnectionId: 22,
     storeStatus: "connected",

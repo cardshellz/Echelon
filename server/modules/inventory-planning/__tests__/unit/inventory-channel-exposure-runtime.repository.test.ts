@@ -121,6 +121,26 @@ describe("PostgresInventoryChannelExposureRuntimeExecutor", () => {
     expect(client.release).toHaveBeenCalledOnce();
   });
 
+  it("carries a publication hold into the planner snapshot and treats an unheld target as open", async () => {
+    const held = new PostgresInventoryChannelExposureRuntimeExecutor(
+      { connect: vi.fn(async () => fakeClient("canonical", { dropship: true, held: true })) } as never,
+      vi.fn(async () => ({ productId: 10 }) as never),
+    );
+    const heldContext = await held.execute(10, async (value) => value);
+    expect(heldContext.publicationTargets[0]!.hold).toEqual({
+      reason: "Vendor 10 paused: card declined",
+      heldAt: "2026-09-17T12:00:00.000Z",
+      heldBy: "dropship-vendor-standing",
+    });
+
+    const open = new PostgresInventoryChannelExposureRuntimeExecutor(
+      { connect: vi.fn(async () => fakeClient("canonical", { dropship: true })) } as never,
+      vi.fn(async () => ({ productId: 10 }) as never),
+    );
+    const openContext = await open.execute(10, async (value) => value);
+    expect(openContext.publicationTargets[0]!.hold).toBeNull();
+  });
+
   it("loads a Dropship store as the exact transport owner while retaining its allocation channel", async () => {
     const client = fakeClient("canonical", { dropship: true });
     const executor = new PostgresInventoryChannelExposureRuntimeExecutor(
@@ -142,7 +162,7 @@ describe("PostgresInventoryChannelExposureRuntimeExecutor", () => {
 
 function fakeClient(
   authority: "legacy" | "canonical",
-  options: { invalidTargetRevision?: boolean; dropship?: boolean } = {},
+  options: { invalidTargetRevision?: boolean; dropship?: boolean; held?: boolean } = {},
 ) {
   const query = vi.fn(async (statement: unknown) => {
     const sql = sqlText(statement);
@@ -167,6 +187,9 @@ function fakeClient(
         external_scope_id: "gid://shopify/Location/1",
         publication_authority: "echelon",
         publication_target_state: "live",
+        hold_reason: options.held ? "Vendor 10 paused: card declined" : null,
+        held_at: options.held ? new Date("2026-09-17T12:00:00.000Z") : null,
+        held_by: options.held ? "dropship-vendor-standing" : null,
       }] };
     if (sql.includes("publication_source_binding_heads")) return { rows: [{
       publication_target_id: 91,

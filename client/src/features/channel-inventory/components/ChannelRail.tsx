@@ -57,6 +57,7 @@ export function ChannelRail({ entries, selectedId, onSelect }: {
             </span>
             <span className="flex items-center gap-1" aria-label={railStatusLabel(entry)} title={railStatusLabel(entry)}>
               {entry.liveCount > 0 && <ToneDot tone="live" />}
+              {entry.heldCount > 0 && <ToneDot tone="held" />}
               {entry.previewCount > 0 && <ToneDot tone="preview" />}
               {entry.externalCount > 0 && <ToneDot tone="external" />}
               {entry.offCount > 0 && <ToneDot tone="off" />}
@@ -71,6 +72,7 @@ export function ChannelRail({ entries, selectedId, onSelect }: {
 function railStatusLabel(entry: ChannelRailEntry): string {
   const parts: string[] = [];
   if (entry.liveCount > 0) parts.push(`${entry.liveCount} publishing`);
+  if (entry.heldCount > 0) parts.push(`${entry.heldCount} held at zero`);
   if (entry.previewCount > 0) parts.push(`${entry.previewCount} calculating only`);
   if (entry.externalCount > 0) parts.push(`${entry.externalCount} externally managed`);
   if (entry.offCount > 0) parts.push(`${entry.offCount} not publishing`);

@@ -1,6 +1,5 @@
 export const DROPSHIP_NOTIFICATION_EVENTS = {
   AUTO_RELOAD_FAILED: "dropship_auto_reload_failed",
-  COLLECTION_ACCOUNT_REVIEW: "dropship_collection_account_review",
   RMA_NO_INSPECTION_REVIEW: "dropship_rma_no_inspection_review",
   ENTITLEMENT_BLOCKED: "dropship_entitlement_blocked",
   LISTING_PUSH_FAILED: "dropship_listing_push_failed",
@@ -22,6 +21,8 @@ export const DROPSHIP_NOTIFICATION_EVENTS = {
   STORE_NEEDS_REAUTH: "dropship_store_needs_reauth",
   TRACKING_PUSH_FAILED: "dropship_tracking_push_failed",
   TRACKING_PUSHED: "dropship_tracking_pushed",
+  VENDOR_PAUSED: "dropship_vendor_paused",
+  VENDOR_RESUMED: "dropship_vendor_resumed",
   WALLET_FUNDING_FAILED: "dropship_wallet_funding_failed",
 } as const;
 

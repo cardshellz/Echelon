@@ -131,7 +131,7 @@ function baseHandlers(overrides: Partial<Record<string, RowHandler>> = {}): RowH
       match: "FROM dropship.dropship_vendors v",
       rows: [{
         vendor_id: 10, member_id: "member-1", current_plan_id: "plan-ops", membership_plan_id: "plan-ops",
-        membership_plan_tier: "ops", vendor_status: "active", entitlement_status: "active",
+        membership_plan_tier: "ops", vendor_status: "active", vendor_standing_reason: null, entitlement_status: "active",
         store_connection_id: 22, store_platform: "ebay", store_status: "connected", setup_status: "ready",
         access_token_ref: "vault:access", refresh_token_ref: "vault:refresh",
       }],

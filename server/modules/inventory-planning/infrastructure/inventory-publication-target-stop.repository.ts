@@ -18,8 +18,20 @@ import { InventoryAvailabilityMasterDataError } from "../domain/inventory-availa
 import { quantityPublicationScopeLockKey } from "./quantity-publication-admission.repository";
 
 const IDEMPOTENCY_LOCK_NAMESPACE = 918420;
-const SCOPE_LOCK_SEED = 918420;
+export const PUBLICATION_TARGET_SCOPE_LOCK_SEED = 918420;
+const SCOPE_LOCK_SEED = PUBLICATION_TARGET_SCOPE_LOCK_SEED;
 const RECEIPT_PREFIX = "inventory-publication-target:";
+
+/** The destination identity a scope lookup needs; the stop repository's own row satisfies it. */
+export interface PublicationTargetScopeSource {
+  id: number;
+  destination_kind: string;
+  channel_connection_id: number | null;
+  dropship_store_connection_id: number | null;
+  provider_key: string | null;
+  provider_scope_type: string;
+  external_scope_id: string;
+}
 
 type TargetRow = {
   id: number;
@@ -91,7 +103,7 @@ implements InventoryPublicationTargetStopStore {
             "Only a live publication target can be stopped by this command.");
         }
 
-        const scopes = await loadTargetScopes(client, target);
+        const scopes = await loadPublicationTargetScopes(client, target);
         for (const scope of scopes.sort((left, right) =>
           quantityPublicationScopeLockKey(left).localeCompare(quantityPublicationScopeLockKey(right)))) {
           const scopeKey = quantityPublicationScopeLockKey(scope);
@@ -215,7 +227,16 @@ implements InventoryPublicationTargetStopStore {
   }
 }
 
-async function loadTargetScopes(client: PoolClient, target: TargetRow): Promise<QuantityPublicationScope[]> {
+/**
+ * Every exact provider quantity scope a live target can currently touch: its
+ * active SKU mappings plus any outbox rows still in flight. Commands that
+ * change what the target publishes lock these first, so they never race a
+ * provider request that is mid-flight for the same SKU.
+ */
+export async function loadPublicationTargetScopes(
+  client: PoolClient,
+  target: PublicationTargetScopeSource,
+): Promise<QuantityPublicationScope[]> {
   const connectionId = target.destination_kind === "channel_connection"
     ? target.channel_connection_id
     : target.dropship_store_connection_id;

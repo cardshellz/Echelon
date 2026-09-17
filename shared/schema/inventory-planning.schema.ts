@@ -1851,6 +1851,11 @@ export const inventoryPublicationTargets = inventoryPlanningSchema.table(
     createdBy: varchar("created_by", { length: 100 }).notNull(),
     activatedBy: varchar("activated_by", { length: 100 }),
     activatedAt: timestamp("activated_at", { withTimezone: true }),
+    // Publication hold (migration 0677): while set, the live target publishes
+    // zero for every SKU. The three move together; see the hold check below.
+    holdReason: varchar("hold_reason", { length: 120 }),
+    heldAt: timestamp("held_at", { withTimezone: true }),
+    heldBy: varchar("held_by", { length: 100 }),
     revision: bigint("revision", { mode: "bigint" }).notNull().default(BigInt(1)),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -1885,6 +1890,14 @@ export const inventoryPublicationTargets = inventoryPlanningSchema.table(
     stateValid: check(
       "inventory_publication_targets_state_chk",
       sql`${table.state} IN ('disabled', 'preview', 'live')`,
+    ),
+    holdValid: check(
+      "inventory_publication_targets_hold_chk",
+      sql`(${table.holdReason} IS NULL AND ${table.heldAt} IS NULL AND ${table.heldBy} IS NULL)
+        OR (${table.holdReason} IS NOT NULL AND ${table.holdReason} = btrim(${table.holdReason})
+          AND ${table.holdReason} <> '' AND ${table.heldAt} IS NOT NULL
+          AND ${table.heldBy} IS NOT NULL AND ${table.heldBy} = btrim(${table.heldBy})
+          AND ${table.heldBy} <> '')`,
     ),
     scopeValid: check(
       "inventory_publication_targets_scope_chk",

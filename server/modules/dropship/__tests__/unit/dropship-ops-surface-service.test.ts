@@ -43,6 +43,31 @@ const launchReadyEnv: NodeJS.ProcessEnv = {
 };
 
 describe("DropshipOpsSurfaceService", () => {
+  it("flags a paused vendor on the account section, ahead of any entitlement problem", () => {
+    const sections = buildDropshipSettingsSections({
+      vendorStatus: "paused",
+      entitlementStatus: "active",
+      storeConnections: [],
+      wallet: {
+        availableBalanceCents: 0,
+        pendingBalanceCents: 0,
+        autoReloadEnabled: true,
+        fundingMethodCount: 1,
+        activeStripeFundingMethodCount: 1,
+        activeUsdcBaseFundingMethodCount: 0,
+        autoReloadFundingMethodReady: true,
+      },
+      notificationPreferenceCount: 0,
+      hasContactEmail: true,
+    });
+
+    expect(sections.find((section) => section.key === "account")).toMatchObject({
+      status: "attention_required",
+      summary: "Selling is paused until the wallet is funded.",
+      blockers: ["vendor_paused"],
+    });
+  });
+
   it("builds launch settings sections with Phase 2 surfaces marked coming soon", () => {
     const sections = buildDropshipSettingsSections({
       vendorStatus: "active",
@@ -1289,6 +1314,8 @@ function makeVendor(overrides: Partial<DropshipProvisionedVendorProfile> = {}): 
     entitlementCheckedAt: now,
     membershipGraceEndsAt: null,
     includedStoreConnections: 1,
+    standingReason: null,
+    pausedAt: null,
     createdAt: now,
     updatedAt: now,
     ...overrides,

@@ -92,6 +92,11 @@ const HASH = "a".repeat(64);
 const manualReviewMigrationSql = readFileSync(
   resolve(process.cwd(), "migrations/0654_inventory_manual_transformation_review.sql"), "utf8",
 );
+// The publication hold (0677) alters the targets table 0633 creates; the
+// repositories under test select its columns on every target read.
+const publicationHoldMigrationSql = readFileSync(
+  resolve(process.cwd(), "migrations/0677_inventory_publication_target_hold.sql"), "utf8",
+);
 const FIXED_TIME = "2026-08-26T12:00:00.000Z";
 
 function sslConfig(connectionString: string) {
@@ -338,6 +343,7 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       await migrationClient.query(publicationDestinationOwnerMigrationSql);
       await migrationClient.query(publicationOutboxDestinationOwnerMigrationSql);
       await migrationClient.query(optionalChangeNoteMigrationSql);
+      await migrationClient.query(publicationHoldMigrationSql);
       await migrationClient.query("COMMIT");
     } catch (error) {
       await migrationClient.query("ROLLBACK");

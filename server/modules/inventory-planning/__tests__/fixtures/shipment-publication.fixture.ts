@@ -29,7 +29,8 @@ export const shipmentPublicationFixtureSql = `
     destination_kind text NOT NULL, channel_id integer NOT NULL,
     channel_connection_id integer, dropship_store_connection_id integer,
     provider_scope_type text NOT NULL, external_scope_id text NOT NULL,
-    publication_authority text NOT NULL, state text NOT NULL
+    publication_authority text NOT NULL, state text NOT NULL,
+    hold_reason text, held_at timestamptz, held_by text
   );
   INSERT INTO inventory.inventory_publication_targets(
     id,revision,destination_kind,channel_id,channel_connection_id,

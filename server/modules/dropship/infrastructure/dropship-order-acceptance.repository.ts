@@ -3,6 +3,7 @@ import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
 import { DROPSHIP_DEFAULT_PAYMENT_HOLD_TIMEOUT_MINUTES } from "../../../../shared/schema/dropship.schema";
 import { DropshipError } from "../domain/errors";
+import { vendorOrderAdmissionFor } from "../domain/vendor-standing";
 import { resolveAcceptanceUnitCost } from "../domain/order-acceptance-cost";
 import { isDropshipStoreConnectionLaunchReady } from "../domain/store-connection";
 import type { NormalizedDropshipOrderPayload } from "../application/dropship-order-intake-service";
@@ -49,6 +50,7 @@ interface VendorContextRow {
   membership_plan_id: string | null;
   membership_plan_tier: string | null;
   vendor_status: string;
+  vendor_standing_reason: string | null;
   entitlement_status: string;
   store_connection_id: number;
   store_platform: string;
@@ -229,6 +231,7 @@ type AcceptanceFinancialPlan = Pick<
   | "feesCents"
   | "totalDebitCents"
   | "paymentHoldExpiresAt"
+  | "paymentHoldReason"
   | "costEvidenceHash"
   | "pricingSnapshot"
 >;
@@ -367,6 +370,7 @@ async function acceptOrderWithClient(
       totalDebitCents: plan.totalDebitCents,
       currency: plan.currency,
       paymentHoldExpiresAt: plan.paymentHoldExpiresAt,
+      paymentHoldReason: plan.paymentHoldReason,
       idempotentReplay: false,
     };
   }
@@ -429,6 +433,7 @@ async function acceptOrderWithClient(
     totalDebitCents: plan.totalDebitCents,
     currency: plan.currency,
     paymentHoldExpiresAt: null,
+    paymentHoldReason: null,
     idempotentReplay: false,
   };
 }
@@ -492,12 +497,23 @@ async function prepareCanonicalOrderWithClient(
         });
       }
       const plan = financialPlanFromCanonicalStage(existingStage, input.acceptedAt);
-      if (wallet.availableBalanceCents < plan.totalDebitCents) {
+      const vendor = await loadVendorContextForUpdate(client, {
+        vendorId: existingStage.vendor_id,
+        storeConnectionId: existingStage.store_connection_id,
+      });
+      // A vendor still paused for funding does not get their inventory
+      // re-claimed only to be held again at finalization.
+      const heldForStanding = vendor !== null && vendorOrderAdmissionFor({
+        status: vendor.vendorStatus,
+        standingReason: vendor.vendorStandingReason,
+      }) === "hold";
+      if (heldForStanding || wallet.availableBalanceCents < plan.totalDebitCents) {
         return {
           ...paymentHoldResult({
             ...plan,
             outcome: "payment_hold",
             paymentHoldExpiresAt: intake.paymentHoldExpiresAt,
+            paymentHoldReason: heldForStanding ? "vendor_paused" : "insufficient_balance",
           }),
           idempotentReplay: true,
         };
@@ -730,13 +746,19 @@ async function finalizeCanonicalOrderWithClient(
   const stagedInput = frozenAcceptanceInput(stage, input.acceptedAt);
   const paymentHoldExpired = intake.paymentHoldExpiresAt != null
     && intake.paymentHoldExpiresAt <= input.acceptedAt;
-  if (paymentHoldExpired || wallet.availableBalanceCents < plan.totalDebitCents) {
+  // The vendor may have been paused for funding between staging and now.
+  const heldForStanding = vendorOrderAdmissionFor({
+    status: vendor.vendorStatus,
+    standingReason: vendor.vendorStandingReason,
+  }) === "hold";
+  if (paymentHoldExpired || heldForStanding || wallet.availableBalanceCents < plan.totalDebitCents) {
     const timeoutMinutes = await loadPaymentHoldTimeoutWithClient(client, input.vendorId);
     const paymentHoldPlan: AcceptanceFinancialPlan = {
       ...plan,
       outcome: "payment_hold",
       paymentHoldExpiresAt: intake.paymentHoldExpiresAt
         ?? new Date(input.acceptedAt.getTime() + normalizePositiveMinutes(timeoutMinutes) * 60_000),
+      paymentHoldReason: heldForStanding ? "vendor_paused" : "insufficient_balance",
     };
     await markIntakePaymentHoldWithClient(client, { plan: paymentHoldPlan, input: stagedInput, wallet });
     await markCanonicalCompensationPendingWithClient(
@@ -745,17 +767,23 @@ async function finalizeCanonicalOrderWithClient(
       input.acceptedAt,
       paymentHoldExpired
         ? "payment_hold_expired_before_finalization"
-        : "wallet_balance_changed_before_finalization",
+        : heldForStanding
+          ? "vendor_paused_before_finalization"
+          : "wallet_balance_changed_before_finalization",
     );
     await recordCanonicalStageAuditEventWithClient(client, stage, stagedInput, {
       eventType: paymentHoldExpired
         ? "order_acceptance_payment_hold_expired_after_inventory_claim"
-        : "order_acceptance_wallet_changed_after_inventory_claim",
+        : heldForStanding
+          ? "order_acceptance_vendor_paused_after_inventory_claim"
+          : "order_acceptance_wallet_changed_after_inventory_claim",
       severity: "warning",
       payload: {
         wmsOrderId: Number(stage.wms_order_id),
         availableBalanceCents: wallet.availableBalanceCents,
         requiredCents: plan.totalDebitCents,
+        vendorStatus: vendor.vendorStatus,
+        vendorStandingReason: vendor.vendorStandingReason,
       },
     });
     return paymentHoldResult(paymentHoldPlan);
@@ -816,6 +844,7 @@ async function finalizeCanonicalOrderWithClient(
     totalDebitCents: plan.totalDebitCents,
     currency: plan.currency,
     paymentHoldExpiresAt: null,
+    paymentHoldReason: null,
     idempotentReplay: false,
   };
 }
@@ -1479,6 +1508,7 @@ async function replayAcceptedOrderWithClient(
     totalDebitCents: toSafeInteger(economics.total_debit_cents, "total_debit_cents"),
     currency: economics.currency,
     paymentHoldExpiresAt: null,
+    paymentHoldReason: null,
     idempotentReplay: true,
   };
 }
@@ -1500,6 +1530,7 @@ async function loadVendorContextForUpdate(
        p.id AS membership_plan_id,
        p.tier AS membership_plan_tier,
        v.status AS vendor_status,
+        v.standing_reason AS vendor_standing_reason,
         v.entitlement_status,
         sc.id AS store_connection_id,
         sc.platform AS store_platform,
@@ -1525,6 +1556,7 @@ async function loadVendorContextForUpdate(
     membershipPlanId: row.membership_plan_id,
     membershipPlanTier: row.membership_plan_tier,
     vendorStatus: row.vendor_status,
+    vendorStandingReason: row.vendor_standing_reason ?? null,
     entitlementStatus: row.entitlement_status,
     storeConnectionId: row.store_connection_id,
     storeStatus: row.store_status,
@@ -2692,6 +2724,7 @@ function financialPlanFromCanonicalStage(
     feesCents: toSafeInteger(stage.fees_cents, "stage.fees_cents"),
     totalDebitCents: toSafeInteger(stage.total_debit_cents, "stage.total_debit_cents"),
     paymentHoldExpiresAt: null,
+    paymentHoldReason: null,
     costEvidenceHash: stage.cost_evidence_hash,
     pricingSnapshot: stage.pricing_snapshot,
   };
@@ -2729,13 +2762,19 @@ function paymentHoldResult(plan: AcceptanceFinancialPlan): DropshipOrderAcceptan
     totalDebitCents: plan.totalDebitCents,
     currency: plan.currency,
     paymentHoldExpiresAt: plan.paymentHoldExpiresAt,
+    paymentHoldReason: plan.paymentHoldReason,
     idempotentReplay: false,
   };
 }
 
+/**
+ * Eligibility at finalization. A vendor paused for funding passes here and
+ * is held by the finalize step itself; every other non-active status is a
+ * change that invalidates the staged acceptance.
+ */
 function assertVendorContextCanFinalize(vendor: DropshipAcceptanceVendorContext): void {
   if (
-    vendor.vendorStatus !== "active"
+    vendorOrderAdmissionFor({ status: vendor.vendorStatus, standingReason: vendor.vendorStandingReason }) === "reject"
     || vendor.entitlementStatus !== "active"
     || vendor.storeStatus !== "connected"
     || !vendor.storeLaunchReady
@@ -2747,6 +2786,7 @@ function assertVendorContextCanFinalize(vendor: DropshipAcceptanceVendorContext)
         vendorId: vendor.vendorId,
         storeConnectionId: vendor.storeConnectionId,
         vendorStatus: vendor.vendorStatus,
+        vendorStandingReason: vendor.vendorStandingReason,
         entitlementStatus: vendor.entitlementStatus,
         storeStatus: vendor.storeStatus,
         storeLaunchReady: vendor.storeLaunchReady,

@@ -204,6 +204,7 @@ function adminView(state: "preview" | "live", revision: string) {
       publicationAuthority: "echelon",
       state,
       revision,
+      hold: null,
     }],
     fulfillmentNodes: [{
       id: 7,
@@ -237,6 +238,7 @@ function exposurePreview(state: "preview" | "live", revision: string) {
     publicationAuthority: "echelon",
     publicationTargetState: state,
     publicationTargetRevision: revision,
+    hold: null,
     productId: 10,
     shadowRunId: "81",
     snapshotFingerprint: HASH_A,
@@ -305,6 +307,7 @@ function readyReview() {
         externalScopeId: "gid://shopify/Location/1",
         publicationAuthority: "echelon",
         publicationTargetState: "live",
+        hold: null,
         sourceBinding: {
           bindingId: 8,
           version: 1,

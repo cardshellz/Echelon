@@ -32,6 +32,10 @@ describe("inventory channel exposure routes", () => {
     review: ReturnType<typeof vi.fn>;
     resume: ReturnType<typeof vi.fn>;
   };
+  let targetHoldService: {
+    hold: ReturnType<typeof vi.fn>;
+    release: ReturnType<typeof vi.fn>;
+  };
 
   beforeEach(async () => {
     requirePermissionMock.mockClear();
@@ -55,17 +59,58 @@ describe("inventory channel exposure routes", () => {
       review: vi.fn(async (request, actorId) => blockedResumeReview(request, actorId)),
       resume: vi.fn(async (request) => resumeResult(request)),
     };
+    targetHoldService = {
+      hold: vi.fn(async (request) => holdResult(request, "hold")),
+      release: vi.fn(async (request) => holdResult(request, "release")),
+    };
     const app = express();
     app.use(express.json());
     app.use((req, _res, next) => {
       Object.defineProperty(req, "session", { value: { user: { id: "operator-1" } } });
       next();
     });
-    registerInventoryChannelExposureRoutes(app, { service, targetStopService, targetResumeService });
+    registerInventoryChannelExposureRoutes(app, { service, targetStopService, targetResumeService, targetHoldService });
     server = await startServer(app);
   });
 
   afterEach(async () => server.close());
+
+  it("holds and releases a destination with the activation permission and the session actor", async () => {
+    const request = {
+      destination: { destinationKind: "dropship_store_connection", connectionId: 77 },
+      reason: "Vendor 10 paused: card declined",
+      idempotencyKey: "vendor-standing:10:hold:1",
+    };
+    const hold = await jsonRequest(
+      `${server.url}/api/inventory-planning/admin/channel-exposure/publication-target-hold`,
+      { method: "PUT", body: request },
+    );
+    expect(hold.status).toBe(200);
+    expect(hold.body).toMatchObject({ command: "hold", targets: [{ publicationTargetId: 5, changed: true }] });
+    expect(targetHoldService.hold).toHaveBeenCalledWith(request, "operator-1");
+    expect(requirePermissionMock).toHaveBeenCalledWith("inventory_planning", "activate");
+
+    const release = await jsonRequest(
+      `${server.url}/api/inventory-planning/admin/channel-exposure/publication-target-release`,
+      { method: "PUT", body: { ...request, idempotencyKey: "vendor-standing:10:release:1" } },
+    );
+    expect(release.status).toBe(200);
+    expect(release.body).toMatchObject({ command: "release" });
+    expect(targetHoldService.release).toHaveBeenCalledWith(
+      { ...request, idempotencyKey: "vendor-standing:10:release:1" },
+      "operator-1",
+    );
+  });
+
+  it("rejects a malformed hold request before the service", async () => {
+    const response = await jsonRequest(
+      `${server.url}/api/inventory-planning/admin/channel-exposure/publication-target-hold`,
+      { method: "PUT", body: { destination: { destinationKind: "warehouse", connectionId: 1 }, reason: "x", idempotencyKey: "k-1" } },
+    );
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({ error: { code: "INVENTORY_CHANNEL_EXPOSURE_INVALID_REQUEST" } });
+    expect(targetHoldService.hold).not.toHaveBeenCalled();
+  });
 
   it("gates the view with inventory-planning view permission", async () => {
     const response = await jsonRequest(`${server.url}/api/inventory-planning/admin/channel-exposure`);
@@ -335,6 +380,21 @@ function blockedResumeReview(
     providerWriteAttempted: false as const,
     outboxEnqueued: false as const,
     alreadyApplied: false,
+  };
+}
+
+function holdResult(
+  request: { destination: { destinationKind: string; connectionId: number } },
+  command: "hold" | "release",
+) {
+  return {
+    destination: request.destination,
+    command,
+    targets: [{ publicationTargetId: 5, revision: "4", changed: true, publicationRows: 2, blockedProductIds: [] }],
+    alreadyApplied: false,
+    runtimeAuthorityChanged: false,
+    providerWriteAttempted: false,
+    outboxEnqueued: true,
   };
 }
 

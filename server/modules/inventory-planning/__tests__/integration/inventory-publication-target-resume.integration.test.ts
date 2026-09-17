@@ -64,7 +64,10 @@ CREATE TABLE inventory.inventory_publication_targets (
   dropship_store_connection_id integer,
   provider_scope_type varchar(30) NOT NULL,
   external_scope_id varchar(240) NOT NULL,
-  publication_authority varchar(30) NOT NULL
+  publication_authority varchar(30) NOT NULL,
+  hold_reason varchar(120),
+  held_at timestamptz,
+  held_by varchar(100)
 );
 INSERT INTO inventory.inventory_publication_targets(
   id, state, revision, destination_kind, channel_id, channel_connection_id,

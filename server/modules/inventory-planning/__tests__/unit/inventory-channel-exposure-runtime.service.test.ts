@@ -97,6 +97,25 @@ describe("InventoryChannelExposureRuntimeService", () => {
     expect(plan.targets[0]!.publishable).toBe(false);
   });
 
+  it("publishes zero for every SKU of a held target while keeping its canonical ATP and mappings", async () => {
+    const hold = { reason: "Vendor 10 paused: card declined", heldAt: "2026-09-17T12:00:00.000Z", heldBy: "dropship-vendor-standing" };
+    const held = target({ publicationTargetId: 91, hold });
+    held.destinationKind = "dropship_store_connection";
+    held.channelConnectionId = null;
+    held.dropshipStoreConnectionId = 77;
+    held.channelProvider = "ebay";
+    const open = target({ publicationTargetId: 92 });
+    const service = new InventoryChannelExposureRuntimeService(executor(canonicalContext([held, open])));
+
+    const plan = await service.planProduct(10);
+
+    expect(plan.targets[0]).toMatchObject({ publicationTargetId: 91, hold, publishable: true });
+    expect(plan.targets[0]!.rows.map((row) => [row.canonicalAtpUnits, row.publishedUnits])).toEqual([["25", "0"], ["7", "0"]]);
+    expect(plan.targets[0]!.rows.every((row) => row.mapping !== null && row.blockers.length === 0 && row.warnings.length === 0)).toBe(true);
+    expect(plan.targets[1]).toMatchObject({ publicationTargetId: 92, hold: null });
+    expect(plan.targets[1]!.rows.map((row) => row.publishedUnits)).toEqual(["25", "7"]);
+  });
+
   it("plans a Dropship storefront with the same exact-target ATP and channel dial", async () => {
     const dropship = target();
     dropship.destinationKind = "dropship_store_connection";
@@ -201,6 +220,7 @@ function target(input: {
   channelId?: number;
   sourceWarehouseIds?: number[];
   policy?: ReturnType<typeof policyValue>;
+  hold?: ActiveInventoryPublicationTargetSnapshot["hold"];
 } = {}): ActiveInventoryPublicationTargetSnapshot {
   const publicationTargetId = input.publicationTargetId ?? 91;
   const channelId = input.channelId ?? 7;
@@ -218,6 +238,7 @@ function target(input: {
     externalScopeId: `location-${publicationTargetId}`,
     publicationAuthority: "echelon",
     publicationTargetState: "live",
+    hold: input.hold ?? null,
     sourceBinding: {
       bindingId: publicationTargetId + 100,
       version: 1,
