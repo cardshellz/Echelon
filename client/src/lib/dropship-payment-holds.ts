@@ -23,6 +23,12 @@ const MS_PER_MINUTE = 60_000;
 const MINUTES_PER_HOUR = 60;
 const MINUTES_PER_DAY = 24 * MINUTES_PER_HOUR;
 
+/** What the vendor's standing adds to the held-order copy. */
+export interface PaymentHoldStandingContext {
+  /** True while the vendor is paused for a funding reason: holds wait for the wallet minimum, not the order total. */
+  pausedForFunding: boolean;
+}
+
 export interface PaymentHoldNotice {
   /** "2 orders are waiting on payment" */
   title: string;
@@ -61,21 +67,29 @@ export function formatTimeUntil(target: string | Date | null, now: Date): string
   return `${minutes}m`;
 }
 
-/** The banner copy for a vendor's held orders, or null when nothing is held. */
+/**
+ * The banner copy for a vendor's held orders, or null when nothing is held.
+ * While the vendor is paused for funding, the orders wait for the wallet to
+ * reach its minimum, so the shortfall against the order total is not the
+ * number to show.
+ */
 export function describePaymentHoldSummary(
   summary: DropshipPaymentHoldSummary,
   now: Date,
+  standing: PaymentHoldStandingContext = { pausedForFunding: false },
 ): PaymentHoldNotice | null {
   if (summary.heldCount <= 0) return null;
   const plural = summary.heldCount === 1 ? "" : "s";
-  const needsFunds = summary.shortfallCents > 0;
+  const needsFunds = standing.pausedForFunding || summary.shortfallCents > 0;
   const remaining = formatTimeUntil(summary.earliestExpiresAt, now);
   return {
     title: `${summary.heldCount} order${plural} ${summary.heldCount === 1 ? "is" : "are"} waiting on payment`,
     needs: `${summary.heldCount === 1 ? "It needs" : "They need"} ${formatCents(summary.totalDebitCents)} in total; your balance is ${formatCents(summary.availableBalanceCents)}.`,
-    action: needsFunds
-      ? `Add ${formatCents(summary.shortfallCents)} to accept ${summary.heldCount === 1 ? "it" : "them"}.`
-      : `Your balance covers ${summary.heldCount === 1 ? "it" : "them"} now. Accept ${summary.heldCount === 1 ? "it" : "them"} from the orders list.`,
+    action: standing.pausedForFunding
+      ? `Selling is paused. Fund your wallet back to its minimum and ${summary.heldCount === 1 ? "it" : "they"} will be accepted.`
+      : needsFunds
+        ? `Add ${formatCents(summary.shortfallCents)} to accept ${summary.heldCount === 1 ? "it" : "them"}.`
+        : `Your balance covers ${summary.heldCount === 1 ? "it" : "them"} now. Accept ${summary.heldCount === 1 ? "it" : "them"} from the orders list.`,
     deadline: remaining === null
       ? null
       : remaining === "past due"

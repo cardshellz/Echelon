@@ -101,7 +101,9 @@ export default function DropshipPortalDashboard() {
   // One clock reading per data load so every countdown on the page agrees.
   const now = useMemo(() => new Date(), [holdSummaryQuery.data, ordersQuery.data]);
   const holdNotice = holdSummaryQuery.data
-    ? describePaymentHoldSummary(holdSummaryQuery.data.summary, now)
+    ? describePaymentHoldSummary(holdSummaryQuery.data.summary, now, {
+      pausedForFunding: onboardingQuery.data ? isPausedForFunding(onboardingQuery.data.vendor) : false,
+    })
     : null;
   const heldCount = holdSummaryQuery.data?.summary.heldCount ?? 0;
 

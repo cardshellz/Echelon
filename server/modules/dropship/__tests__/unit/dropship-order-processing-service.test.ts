@@ -360,6 +360,7 @@ describe("DropshipOrderProcessingService", () => {
       totalDebitCents: 7500,
       currency: "USD",
       paymentHoldExpiresAt: new Date("2026-05-03T12:00:00.000Z"),
+      paymentHoldReason: "insufficient_balance",
       idempotentReplay: false,
     });
     const walletAutoReload = new FakeWalletAutoReloadService();
@@ -583,6 +584,30 @@ describe("DropshipOrderProcessingService", () => {
     expect(transient.notificationSender.sent.map((sent) => sent.eventType)).toEqual(["dropship_auto_reload_failed"]);
   });
 
+  it("does not charge the backstop card for an order held because the vendor is paused", async () => {
+    const walletAutoReload = new FakeWalletAutoReloadService();
+    const notificationSender = new FakeNotificationSender();
+    const logs: DropshipLogEvent[] = [];
+    const service = new DropshipOrderProcessingService({
+      repository: new FakeProcessingRepository(makeClaim()),
+      shippingQuote: new FakeShippingQuoteService(),
+      orderAcceptance: new FakeAcceptanceService(null, { ...heldAcceptance(), paymentHoldReason: "vendor_paused" }),
+      walletAutoReload,
+      notificationSender,
+      clock: { now: () => now },
+      logger: captureLogger(logs),
+    });
+
+    const result = await service.processIntake({ intakeId: 1, workerId: "worker-1", idempotencyKey: "process-intake-1" });
+
+    expect(result).toMatchObject({ outcome: "payment_hold" });
+    expect(walletAutoReload.lastInput).toBeNull();
+    expect(logs.find((event) => event.code === "DROPSHIP_ORDER_BACKSTOP_SKIPPED_VENDOR_PAUSED")).toMatchObject({
+      context: expect.objectContaining({ intakeId: 1, vendorId: 10 }),
+    });
+    expect(notificationSender.sent.filter((sent) => sent.eventType === "dropship_auto_reload_failed")).toEqual([]);
+  });
+
   it("does not fail payment-hold processing when auto-reload fails", async () => {
     const repository = new FakeProcessingRepository(makeClaim());
     const quoteService = new FakeShippingQuoteService();
@@ -598,6 +623,7 @@ describe("DropshipOrderProcessingService", () => {
       totalDebitCents: 7500,
       currency: "USD",
       paymentHoldExpiresAt: new Date("2026-05-03T12:00:00.000Z"),
+      paymentHoldReason: "insufficient_balance",
       idempotentReplay: false,
     });
     const logs: DropshipLogEvent[] = [];
@@ -659,6 +685,7 @@ describe("DropshipOrderProcessingService", () => {
       totalDebitCents: 7500,
       currency: "USD",
       paymentHoldExpiresAt: new Date("2026-05-03T12:00:00.000Z"),
+      paymentHoldReason: "insufficient_balance",
       idempotentReplay: false,
     });
     const notificationSender = new FakeNotificationSender();
@@ -909,6 +936,7 @@ class FakeAcceptanceService {
       totalDebitCents: 2722,
       currency: "USD",
       paymentHoldExpiresAt: null,
+      paymentHoldReason: null,
       idempotentReplay: false,
     };
   }
@@ -942,6 +970,7 @@ function heldAcceptance(): DropshipOrderAcceptanceResult {
     totalDebitCents: 7500,
     currency: "USD",
     paymentHoldExpiresAt: new Date("2026-05-03T12:00:00.000Z"),
+    paymentHoldReason: "insufficient_balance",
     idempotentReplay: false,
   };
 }
@@ -959,6 +988,7 @@ function acceptedAfterHold(): DropshipOrderAcceptanceResult {
     totalDebitCents: 7500,
     currency: "USD",
     paymentHoldExpiresAt: null,
+    paymentHoldReason: null,
     idempotentReplay: false,
   };
 }

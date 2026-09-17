@@ -46,6 +46,26 @@ export function isFundingStandingReason(reason: DropshipVendorStandingReason | n
   return reason !== null && DROPSHIP_FUNDING_STANDING_REASONS.has(reason);
 }
 
+/**
+ * What happens to an order that arrives for this vendor.
+ * - accept: the vendor is active; the wallet decides accepted vs. held.
+ * - hold: paused for a funding reason. Listings are at zero, so this is a
+ *   race (a sale that landed before the zero reached the marketplace); it
+ *   waits under the normal payment hold and is accepted when the wallet is
+ *   funded and the vendor resumes, or cancelled when the hold expires.
+ * - reject: onboarding, lapsed, suspended, closed, or paused by an operator.
+ */
+export type DropshipVendorOrderAdmission = "accept" | "hold" | "reject";
+
+export function vendorOrderAdmissionFor(vendor: { status: string; standingReason: string | null }): DropshipVendorOrderAdmission {
+  if (vendor.status === "active") return "accept";
+  if (vendor.status === "paused" && vendor.standingReason !== null
+    && DROPSHIP_FUNDING_STANDING_REASONS.has(vendor.standingReason as DropshipVendorStandingReason)) {
+    return "hold";
+  }
+  return "reject";
+}
+
 /** What inventory planning should hold for a vendor in this standing. */
 export function listingHoldStateFor(status: DropshipVendorStatus): DropshipListingHoldState {
   return status === "paused" ? "held" : "released";

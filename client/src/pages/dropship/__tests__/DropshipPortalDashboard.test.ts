@@ -36,6 +36,8 @@ describe("DropshipPortalDashboard contract", () => {
     const nextAction = source.slice(source.indexOf("function dashboardNextAction"), source.indexOf("function launchStepDetail"));
     expect(nextAction.indexOf("isPausedForFunding(onboarding.vendor)")).toBeLessThan(nextAction.indexOf("onboarding.steps.find"));
     expect(nextAction).toContain('title: "Fund your wallet to resume selling"');
+    // The held-order copy knows about the pause too.
+    expect(source).toContain("pausedForFunding: onboardingQuery.data ? isPausedForFunding(onboardingQuery.data.vendor) : false,");
   });
 
   it("marks held orders in the recent list and counts them on the Orders metric", () => {

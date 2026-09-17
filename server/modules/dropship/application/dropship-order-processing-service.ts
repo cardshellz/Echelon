@@ -390,6 +390,22 @@ export class DropshipOrderProcessingService {
     if (!this.deps.walletAutoReload) {
       return null;
     }
+    if (input.acceptance.outcome === "payment_hold" && input.acceptance.paymentHoldReason === "vendor_paused") {
+      // The vendor is paused because their funding already failed; charging
+      // the same card once per held order would only repeat the decline. The
+      // daily wallet run retries the charge, and a manual top-up resumes them.
+      this.deps.logger.info({
+        code: "DROPSHIP_ORDER_BACKSTOP_SKIPPED_VENDOR_PAUSED",
+        message: "Dropship order is held because the vendor is paused; no backstop charge while paused.",
+        context: {
+          intakeId: input.claim.intake.intakeId,
+          vendorId: input.claim.intake.vendorId,
+          storeConnectionId: input.claim.intake.storeConnectionId,
+          paymentHoldExpiresAt: input.acceptance.paymentHoldExpiresAt?.toISOString() ?? null,
+        },
+      });
+      return null;
+    }
     const autoReloadInput = input.acceptance.outcome === "payment_hold"
       ? {
           vendorId: input.claim.intake.vendorId,

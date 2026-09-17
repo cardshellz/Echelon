@@ -64,6 +64,19 @@ describe("formatTimeUntil", () => {
 });
 
 describe("describePaymentHoldSummary", () => {
+  it("asks a paused vendor for the wallet minimum, even when the balance covers the orders", () => {
+    const paused = describePaymentHoldSummary(summary({ heldCount: 2, shortfallCents: 0, availableBalanceCents: 30_000 }), now, { pausedForFunding: true });
+    expect(paused).toMatchObject({
+      action: "Selling is paused. Fund your wallet back to its minimum and they will be accepted.",
+      needsFunds: true,
+    });
+    const single = describePaymentHoldSummary(summary({ heldCount: 1, shortfallCents: 0 }), now, { pausedForFunding: true });
+    expect(single?.action).toBe("Selling is paused. Fund your wallet back to its minimum and it will be accepted.");
+    // Not paused: unchanged copy.
+    expect(describePaymentHoldSummary(summary({ heldCount: 1, shortfallCents: 0 }), now, { pausedForFunding: false })?.action)
+      .toBe("Your balance covers it now. Accept it from the orders list.");
+  });
+
   it("tells the vendor how many orders wait, what to add, and how long the first one has", () => {
     expect(describePaymentHoldSummary(summary(), now)).toEqual({
       title: "2 orders are waiting on payment",

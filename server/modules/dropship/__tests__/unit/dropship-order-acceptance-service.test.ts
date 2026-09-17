@@ -125,6 +125,46 @@ describe("DropshipOrderAcceptanceService", () => {
     });
   });
 
+  it("tells a paused vendor the order waits for the wallet minimum, not for the order amount", async () => {
+    const repository = new FakeAcceptanceRepository({
+      outcome: "payment_hold",
+      omsOrderId: null,
+      walletLedgerEntryId: null,
+      economicsSnapshotId: null,
+      totalDebitCents: 7500,
+      paymentHoldExpiresAt: new Date("2026-05-03T12:00:00.000Z"),
+      paymentHoldReason: "vendor_paused",
+    });
+    const notificationSender = new FakeNotificationSender();
+    const service = new DropshipOrderAcceptanceService({
+      repository,
+      inventoryAuthority: new FakeInventoryAuthority("legacy"),
+      canonicalFulfillment: new FakeCanonicalFulfillment(),
+      notificationSender,
+      clock: { now: () => now },
+      logger: noopLogger,
+    });
+
+    const result = await service.acceptOrder({
+      intakeId: 1,
+      vendorId: 10,
+      storeConnectionId: 22,
+      shippingQuoteSnapshotId: 33,
+      idempotencyKey: "accept-001",
+      actor: { actorType: "system" },
+    });
+
+    expect(result).toMatchObject({ outcome: "payment_hold", paymentHoldReason: "vendor_paused" });
+    expect(notificationSender.sent[0]).toMatchObject({
+      eventType: "dropship_order_payment_hold",
+      critical: true,
+      payload: expect.objectContaining({ paymentHoldReason: "vendor_paused" }),
+    });
+    expect(notificationSender.sent[0].message).toBe(
+      "Order intake 1 is waiting because selling is paused. Fund your wallet back to its minimum before 2026-05-03T12:00:00.000Z and it will be accepted for USD $75.00.",
+    );
+  });
+
   it("finalizes canonical acceptance only after the WMS whole-order claim succeeds", async () => {
     const repository = new FakeAcceptanceRepository();
     const fulfillment = new FakeCanonicalFulfillment();
@@ -304,6 +344,45 @@ describe("DropshipOrderAcceptanceService", () => {
 });
 
 describe("buildDropshipOrderAcceptancePlan", () => {
+  it("holds an order for a vendor paused for funding whatever the balance, under the normal hold window", () => {
+    const plan = buildDropshipOrderAcceptancePlan(makePlanningInput({
+      vendor: { ...makePlanningInput().vendor, vendorStatus: "paused", vendorStandingReason: "card_declined" },
+    }));
+
+    expect(plan.outcome).toBe("payment_hold");
+    expect(plan.paymentHoldReason).toBe("vendor_paused");
+    expect(plan.paymentHoldExpiresAt?.toISOString()).toBe("2026-05-03T18:00:00.000Z");
+    expect(plan.totalDebitCents).toBe(2722);
+  });
+
+  it("keeps an existing hold deadline for a paused vendor, and names the reason on every hold", () => {
+    const existingExpiresAt = new Date("2026-05-01T20:00:00.000Z");
+    const paused = buildDropshipOrderAcceptancePlan(makePlanningInput({
+      intake: { ...makePlanningInput().intake, status: "processing", paymentHoldExpiresAt: existingExpiresAt },
+      vendor: { ...makePlanningInput().vendor, vendorStatus: "paused", vendorStandingReason: "funding_returned" },
+    }));
+    expect(paused).toMatchObject({ outcome: "payment_hold", paymentHoldReason: "vendor_paused", paymentHoldExpiresAt: existingExpiresAt });
+
+    const short = buildDropshipOrderAcceptancePlan(makePlanningInput({
+      wallet: { walletAccountId: 1, availableBalanceCents: 100, pendingBalanceCents: 0, currency: "USD" },
+    }));
+    expect(short).toMatchObject({ outcome: "payment_hold", paymentHoldReason: "insufficient_balance" });
+    expect(buildDropshipOrderAcceptancePlan(makePlanningInput())).toMatchObject({ outcome: "accepted", paymentHoldReason: null });
+  });
+
+  it("still blocks an operator pause and every other non-active vendor", () => {
+    for (const vendor of [
+      { vendorStatus: "paused", vendorStandingReason: "operator" },
+      { vendorStatus: "paused", vendorStandingReason: null },
+      { vendorStatus: "lapsed", vendorStandingReason: null },
+    ]) {
+      expectDropshipError(
+        () => buildDropshipOrderAcceptancePlan(makePlanningInput({ vendor: { ...makePlanningInput().vendor, ...vendor } })),
+        "DROPSHIP_ORDER_VENDOR_BLOCKED",
+      );
+    }
+  });
+
   it("accepts when address, quote, inventory, and wallet all validate", () => {
     const plan = buildDropshipOrderAcceptancePlan(makePlanningInput());
 
@@ -652,6 +731,7 @@ class FakeAcceptanceRepository implements DropshipOrderAcceptanceRepository {
       totalDebitCents: 2722,
       currency: "USD",
       paymentHoldExpiresAt: null,
+      paymentHoldReason: null,
       idempotentReplay: false,
       ...this.resultOverrides,
     };
@@ -787,6 +867,7 @@ function makePlanningInput(
       membershipPlanId: "ops",
       membershipPlanTier: "ops",
       vendorStatus: "active",
+      vendorStandingReason: null,
       entitlementStatus: "active",
       storeConnectionId: 22,
       storeStatus: "connected",

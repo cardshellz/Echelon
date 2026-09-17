@@ -302,6 +302,7 @@ class FakeAcceptanceService {
       totalDebitCents: 2722,
       currency: "USD",
       paymentHoldExpiresAt: null,
+      paymentHoldReason: null,
       idempotentReplay: false,
     };
   }
@@ -368,6 +369,7 @@ class SequencedCanonicalAcceptanceRepository implements DropshipOrderAcceptanceR
       totalDebitCents: 2722,
       currency: "USD",
       paymentHoldExpiresAt: null,
+      paymentHoldReason: null,
       idempotentReplay: false,
     };
   }
