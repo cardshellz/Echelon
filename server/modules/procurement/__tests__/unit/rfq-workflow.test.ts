@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { reviewRfqQuantity } from "@shared/procurement/rfq-quantity-review";
 import { describe, expect, it } from "vitest";
 import { rfqConvertSchema, rfqQuoteCaptureSchema, rfqQuoteRevisionSchema, type RfqQuoteRevision, type RfqWorkflowDetail } from "@shared/procurement/rfq-workflow";
@@ -122,5 +124,31 @@ describe("RFQ quote form exact amounts", () => {
     const valid = { ...form, amount: "1.00", quoteReference: "Quote", reason: "Supplier email", packagingTreatment: "separate" as const };
     expect(() => rfqQuoteFromForm(valid)).toThrow();
     expect(rfqQuoteFromForm({ ...valid, packagingAmount: "0" }).packagingCostCents).toBe(0);
+  });
+});
+
+describe("RFQ conversion receive-configuration contract", () => {
+  const conversionSource = readFileSync(
+    join(process.cwd(), "server", "modules", "procurement", "rfq-workflow.service.ts"),
+    "utf8",
+  );
+
+  it("carries the quote line's SKU into the purchase line as its receive configuration", () => {
+    // The purchase order line records how goods are expected to arrive and be
+    // counted. The quote request already names the exact SKU it was raised
+    // against, so that identity carries through rather than being re-guessed
+    // by the purchase-order owner.
+    expect(conversionSource).toContain("expectedReceiveVariantId: line.productVariantId");
+  });
+
+  it("stops the conversion when a selected quote line names no SKU", () => {
+    // A quote request line with no SKU cannot answer the question, so the
+    // conversion refuses instead of creating a line with it left open.
+    expect(conversionSource).toContain("RFQ_RECEIVE_CONFIGURATION_REQUIRED");
+    expect(conversionSource).toContain("selected.filter(({ line }) => line.productVariantId == null)");
+    const guardPosition = conversionSource.indexOf("RFQ_RECEIVE_CONFIGURATION_REQUIRED");
+    const createPosition = conversionSource.indexOf("purchasing.createPurchaseOrderWithLines");
+    expect(guardPosition).toBeGreaterThanOrEqual(0);
+    expect(createPosition).toBeGreaterThan(guardPosition);
   });
 });

@@ -104,6 +104,9 @@ const activeProductLine = {
   id: 10,
   status: "open",
   lineType: "product",
+  // The lifecycle gate requires an explicitly chosen receive configuration on
+  // every open product line before the order can advance.
+  expectedReceiveVariantId: 202,
   pricingBasis: "per_piece",
   pricingSource: "manual",
   orderQty: 2,

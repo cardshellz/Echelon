@@ -81,6 +81,13 @@ const publicationOutboxDestinationOwnerMigrationSql = readFileSync(
   resolve(process.cwd(), "migrations/220_inventory_publication_outbox_destination_owners.sql"),
   "utf8",
 );
+// Applied last, as the release runner would: it alters tables 0632 creates, so
+// running it here proves the ALTERs land against a real PostgreSQL rather than
+// only against a faked executor.
+const optionalChangeNoteMigrationSql = readFileSync(
+  resolve(process.cwd(), "migrations/247_inventory_channel_controls_optional_change_note.sql"),
+  "utf8",
+);
 const HASH = "a".repeat(64);
 const manualReviewMigrationSql = readFileSync(
   resolve(process.cwd(), "migrations/0654_inventory_manual_transformation_review.sql"), "utf8",
@@ -330,6 +337,7 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       await migrationClient.query(availabilityCutoverMigrationSql);
       await migrationClient.query(publicationDestinationOwnerMigrationSql);
       await migrationClient.query(publicationOutboxDestinationOwnerMigrationSql);
+      await migrationClient.query(optionalChangeNoteMigrationSql);
       await migrationClient.query("COMMIT");
     } catch (error) {
       await migrationClient.query("ROLLBACK");
@@ -3211,6 +3219,58 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       ),
       "source binding members may change only on the current draft",
     );
+  });
+
+  // Migration 247 is what lets a routine draft save omit an operator note. It
+  // only ever ran against a faked executor before this, so these cases are the
+  // proof that the ALTERs land on a real PostgreSQL and mean what they claim:
+  // NULL is accepted, and a blank string is still refused.
+  it("accepts a null change reason and still refuses a blank one after migration 247", async () => {
+    const channel = await pool.query<{ id: number }>(
+      "INSERT INTO channels.channels (name, provider) VALUES ('Null note channel', 'shopify') RETURNING id",
+    );
+    const channelId = channel.rows[0]!.id;
+    const scopeKey = `channel:${channelId}`;
+
+    const saved = await pool.query<{ change_reason: string | null }>(
+      `INSERT INTO inventory.channel_exposure_policy_versions (
+         scope_key, channel_id, scope_type, version, allocation_semantics,
+         eligible, share_bps, holdback_sellable_units, max_publish_mode,
+         min_publish_sellable_units, definition_hash, change_reason,
+         idempotency_key, request_hash, created_by
+       ) VALUES ($1, $2, 'channel', 1, 'exposure', true, 10000, 0,
+         'unlimited', 0, $3, NULL, 'policy:null-note', $3,
+         'integration-test') RETURNING change_reason`,
+      [scopeKey, channelId, HASH],
+    );
+    expect(saved.rows[0]!.change_reason).toBeNull();
+
+    // A blank note is an empty gesture rather than an omission, so the
+    // null-aware check must still reject it.
+    await expect(pool.query(
+      `INSERT INTO inventory.channel_exposure_policy_versions (
+         scope_key, channel_id, scope_type, version, allocation_semantics,
+         eligible, share_bps, holdback_sellable_units, max_publish_mode,
+         min_publish_sellable_units, definition_hash, change_reason,
+         idempotency_key, request_hash, created_by
+       ) VALUES ($1, $2, 'channel', 2, 'exposure', true, 10000, 0,
+         'unlimited', 0, $3, '   ', 'policy:blank-note', $3,
+         'integration-test')`,
+      [scopeKey, channelId, HASH],
+    )).rejects.toMatchObject({ code: "23514" });
+
+    // The actor is still mandatory: relaxing the note must not have relaxed
+    // who made the change.
+    await expect(pool.query(
+      `INSERT INTO inventory.channel_exposure_policy_versions (
+         scope_key, channel_id, scope_type, version, allocation_semantics,
+         eligible, share_bps, holdback_sellable_units, max_publish_mode,
+         min_publish_sellable_units, definition_hash, change_reason,
+         idempotency_key, request_hash, created_by
+       ) VALUES ($1, $2, 'channel', 3, 'exposure', true, 10000, 0,
+         'unlimited', 0, $3, NULL, 'policy:no-actor', $3, '  ')`,
+      [scopeKey, channelId, HASH],
+    )).rejects.toMatchObject({ code: "23514" });
   });
 
   it("enforces publication-target revisions and append-only exact target/SKU mappings", async () => {

@@ -182,6 +182,7 @@ describe("Spec F Phase 1 — totals-based cost storage", () => {
           {
             productId: 1,
             productVariantId: 11,
+            expectedReceiveVariantId: 11,
             orderQty: 200000,
             totalProductCostCents: 1160000,
             packagingCostCents: 117000,
@@ -241,6 +242,7 @@ describe("Spec F Phase 1 — totals-based cost storage", () => {
           {
             productId: 1,
             productVariantId: 11,
+            expectedReceiveVariantId: 11,
             orderQty: 200000,
             totalProductCostCents: 100000,
             packagingCostCents: 0,
@@ -259,7 +261,11 @@ describe("Spec F Phase 1 — totals-based cost storage", () => {
       expect(row.sku).not.toBe("VARIANT-SKU-C1000");
     });
 
-    it("stores the product SKU on product-level PO lines with no variant", async () => {
+    it("refuses a product line that never says how it is received", async () => {
+      // A purchase order buys pieces, but the package the goods arrive and are
+      // counted in decides whether a receipt books packs or loose pieces. That
+      // is an operator decision, so a line without it is rejected rather than
+      // written with the question left open.
       const captureInserts: any[] = [];
       storage = buildMockStorage({
         getProductVariantById: vi.fn(),
@@ -278,7 +284,7 @@ describe("Spec F Phase 1 — totals-based cost storage", () => {
         storage,
       );
 
-      await svc.createPurchaseOrderWithLines({
+      await expect(svc.createPurchaseOrderWithLines({
         vendorId: 1,
         lines: [
           {
@@ -289,16 +295,11 @@ describe("Spec F Phase 1 — totals-based cost storage", () => {
             packagingCostCents: 0,
           } as any,
         ],
+      })).rejects.toMatchObject({
+        statusCode: 400,
+        details: expect.objectContaining({ code: "PO_RECEIVE_VARIANT_REQUIRED" }),
       });
-
-      const linesInsert = captureInserts.find(
-        (c) => Array.isArray(c.rows) && c.rows[0]?.purchaseOrderId !== undefined,
-      );
-      const row = linesInsert.rows[0];
-      expect(row.productVariantId).toBeNull();
-      expect(row.expectedReceiveVariantId).toBeNull();
-      expect(row.expectedReceiveUnitsPerVariant).toBe(1);
-      expect(row.sku).toBe("PRODUCT-SKU");
+      expect(captureInserts).toHaveLength(0);
     });
 
     it("saves piece economics and clears an inactive receive configuration", async () => {
@@ -316,6 +317,7 @@ describe("Spec F Phase 1 — totals-based cost storage", () => {
         vendorId: 1,
         productId: 1,
         productVariantId: 11,
+        expectedReceiveVariantId: 11,
         isActive: 1,
       };
       storage = buildMockStorage({
@@ -393,6 +395,7 @@ describe("Spec F Phase 1 — totals-based cost storage", () => {
           {
             productId: 1,
             productVariantId: 11,
+            expectedReceiveVariantId: 11,
             orderQty: 100,
             totalProductCostCents: 500,
             packagingCostCents: 0,
@@ -426,6 +429,7 @@ describe("Spec F Phase 1 — totals-based cost storage", () => {
           {
             productId: 1,
             productVariantId: 11,
+            expectedReceiveVariantId: 11,
             orderQty: 200000,
             totalProductCostCents: 1161500,
             packagingCostCents: 0,
@@ -457,6 +461,7 @@ describe("Spec F Phase 1 — totals-based cost storage", () => {
           {
             productId: 1,
             productVariantId: 11,
+            expectedReceiveVariantId: 11,
             orderQty: 100,
             unitCostMills: 375,
           } as any,
@@ -490,6 +495,7 @@ describe("Spec F Phase 1 — totals-based cost storage", () => {
           {
             productId: 1,
             productVariantId: 11,
+            expectedReceiveVariantId: 11,
             orderQty: 100,
             unitCostMills: 375, // old shape
             totalProductCostCents: 500, // new shape — wins
@@ -526,6 +532,7 @@ describe("Spec F Phase 1 — totals-based cost storage", () => {
           {
             productId: 1,
             productVariantId: 11,
+            expectedReceiveVariantId: 11,
             orderQty: 100,
             totalProductCostCents: 500,
           },
@@ -568,6 +575,7 @@ describe("Spec F Phase 1 — totals-based cost storage", () => {
           {
             productId: 1,
             productVariantId: 11,
+            expectedReceiveVariantId: 11,
             orderQty: 200000,
             totalProductCostCents: 1277000,
             packagingCostCents: 0,
