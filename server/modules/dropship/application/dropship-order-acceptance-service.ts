@@ -39,6 +39,30 @@ export type DropshipOrderAcceptanceOutcome = "accepted" | "payment_hold";
  */
 export type DropshipPaymentHoldReason = "insufficient_balance" | "vendor_paused";
 
+/**
+ * What happened to the wallet top-up attempted for a held order in the same
+ * worker pass, so the one hold notice can say it. Null when no top-up was
+ * attempted or it changed nothing worth telling.
+ */
+export type DropshipAcceptanceReloadContext =
+  | { kind: "pending"; amountCents: number; currency: string }
+  | { kind: "declined"; detail: string | null }
+  | { kind: "failed"; message: string }
+  | { kind: "skipped"; reason: string };
+
+export interface DropshipAcceptanceNoticeContext {
+  reload?: DropshipAcceptanceReloadContext | null;
+}
+
+export interface DropshipOrderAcceptanceOptions {
+  /**
+   * False when the caller orchestrates a whole pass (hold, top-up, retry) and
+   * sends the pass's single outcome notice itself via notifyAcceptanceOutcome.
+   * Default true: a stand-alone acceptance tells the vendor right away.
+   */
+  notify?: boolean;
+}
+
 export interface DropshipOrderAcceptanceInput extends AcceptDropshipOrderInput {
   requestHash: string;
   acceptedAt: Date;
@@ -256,7 +280,7 @@ export class DropshipOrderAcceptanceService {
     },
   ) {}
 
-  async acceptOrder(input: unknown): Promise<DropshipOrderAcceptanceResult> {
+  async acceptOrder(input: unknown, options: DropshipOrderAcceptanceOptions = {}): Promise<DropshipOrderAcceptanceResult> {
     const parsed = parseOrderAcceptanceInput(input);
     const acceptedAt = this.deps.clock.now();
     const requestHash = hashDropshipOrderAcceptanceRequest(parsed);
@@ -291,7 +315,9 @@ export class DropshipOrderAcceptanceService {
       },
     });
 
-    await this.notifyOrderAcceptanceResult(result);
+    if (options.notify !== false) {
+      await this.notifyAcceptanceOutcome(result);
+    }
     return result;
   }
 
@@ -381,13 +407,21 @@ export class DropshipOrderAcceptanceService {
     return preparation.result;
   }
 
-  private async notifyOrderAcceptanceResult(result: DropshipOrderAcceptanceResult): Promise<void> {
+  /**
+   * The vendor's one notice for an acceptance outcome. A replay says nothing:
+   * the vendor heard about that outcome when it first happened.
+   */
+  async notifyAcceptanceOutcome(
+    result: DropshipOrderAcceptanceResult,
+    context: DropshipAcceptanceNoticeContext = {},
+  ): Promise<void> {
     if (result.idempotentReplay) {
       return;
     }
 
     const accepted = result.outcome === "accepted";
     const deadline = result.paymentHoldExpiresAt?.toISOString() ?? "the hold expires";
+    const reload = context.reload ?? null;
     await sendDropshipNotificationSafely(this.deps, {
       vendorId: result.vendorId,
       eventType: accepted ? "dropship_order_accepted" : "dropship_order_payment_hold",
@@ -398,7 +432,7 @@ export class DropshipOrderAcceptanceService {
         ? `Order intake ${result.intakeId} was accepted into fulfillment for ${formatNotificationCurrency(result.totalDebitCents, result.currency)}.`
         : result.paymentHoldReason === "vendor_paused"
           ? `Order intake ${result.intakeId} is waiting because selling is paused. Fund your wallet back to its minimum before ${deadline} and it will be accepted for ${formatNotificationCurrency(result.totalDebitCents, result.currency)}.`
-          : `Order intake ${result.intakeId} is on payment hold and requires ${formatNotificationCurrency(result.totalDebitCents, result.currency)} before ${deadline}.`,
+          : `Order intake ${result.intakeId} is on payment hold and requires ${formatNotificationCurrency(result.totalDebitCents, result.currency)} before ${deadline}.${reloadSentenceFor(reload)}`,
       payload: {
         intakeId: result.intakeId,
         vendorId: result.vendorId,
@@ -411,6 +445,7 @@ export class DropshipOrderAcceptanceService {
         currency: result.currency,
         paymentHoldExpiresAt: result.paymentHoldExpiresAt?.toISOString() ?? null,
         paymentHoldReason: result.paymentHoldReason,
+        reload,
       },
       idempotencyKey: `order-acceptance:${result.intakeId}:${result.outcome}`,
     }, {
@@ -423,6 +458,39 @@ export class DropshipOrderAcceptanceService {
         outcome: result.outcome,
       },
     });
+  }
+}
+
+/** The sentence a hold notice adds about the top-up tried in the same pass. */
+function reloadSentenceFor(reload: DropshipAcceptanceReloadContext | null): string {
+  if (!reload) return "";
+  switch (reload.kind) {
+    case "pending":
+      return ` A bank top-up of ${formatNotificationCurrency(reload.amountCents, reload.currency)} is on its way; the order is accepted when it settles.`;
+    case "declined":
+      return ` We tried to charge your card for the shortfall and it was declined${reload.detail ? ` (${reload.detail.replace(/_/g, " ")})` : ""}. Add funds or update your card in Wallet.`;
+    case "failed":
+      return ` We could not top up your wallet automatically (${reload.message}); add funds to accept it sooner.`;
+    case "skipped":
+      return ` Auto-reload could not top it up: ${skipReasonPhraseFor(reload.reason)}. Add funds or check auto-reload in Wallet.`;
+  }
+}
+
+function skipReasonPhraseFor(reason: string): string {
+  switch (reason) {
+    case "auto_reload_disabled":
+      return "auto-reload is off";
+    case "amount_exceeds_max_single_reload":
+      return "the amount is over your single-reload limit";
+    case "funding_method_required":
+    case "funding_method_missing":
+      return "there is no funding method to charge";
+    case "funding_method_not_active":
+    case "funding_method_provider_identity_required":
+    case "funding_method_rail_unsupported":
+      return "your saved funding method cannot be charged";
+    default:
+      return reason.replace(/_/g, " ");
   }
 }
 

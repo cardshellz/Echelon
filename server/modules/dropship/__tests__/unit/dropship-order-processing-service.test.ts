@@ -4,7 +4,6 @@ import {
   DropshipOrderProcessingService,
   aggregateQuoteItems,
   buildQuoteDestination,
-  deriveAutoReloadIssueNotificationKey,
   deriveOrderProcessingIdempotencyKey,
   type DropshipNotificationSenderInput,
   type DropshipLogEvent,
@@ -17,6 +16,7 @@ import {
   type DropshipShippingQuoteResult,
   type DropshipAutoReloadResult,
   type DropshipVendorStandingChange,
+  type DropshipAcceptanceNoticeContext,
 } from "../../application";
 
 const now = new Date("2026-05-01T18:00:00.000Z");
@@ -430,6 +430,9 @@ describe("DropshipOrderProcessingService", () => {
       .not.toBe((acceptanceService.inputs[0] as { idempotencyKey: string }).idempotencyKey);
     expect(fulfillmentSync.calls).toEqual([1001]);
     expect(logs.some((entry) => entry.code === "DROPSHIP_ORDER_ACCEPTED_AFTER_RELOAD")).toBe(true);
+    // One email for the pass: accepted. The hold that preceded it was never announced.
+    expect(acceptanceService.options).toEqual([{ notify: false }, { notify: false }]);
+    expect(acceptanceService.notified.map((notice) => notice.result.outcome)).toEqual(["accepted"]);
   });
 
   it("leaves a held order held when the reload is only pending (ACH), since pending funds are not spendable", async () => {
@@ -465,6 +468,11 @@ describe("DropshipOrderProcessingService", () => {
     expect(result.outcome).toBe("payment_hold");
     expect(acceptanceService.inputs).toHaveLength(1);
     expect(fulfillmentSync.calls).toEqual([]);
+    // One email: the hold, saying a bank top-up is on its way.
+    expect(acceptanceService.notified).toEqual([{
+      result: expect.objectContaining({ outcome: "payment_hold" }),
+      context: { reload: { kind: "pending", amountCents: 7500, currency: "USD" } },
+    }]);
   });
 
   it("keeps the hold, and the credit, when re-acceptance fails after the card was charged", async () => {
@@ -503,10 +511,11 @@ describe("DropshipOrderProcessingService", () => {
     const pauses: unknown[] = [];
     const notificationSender = new FakeNotificationSender();
     const logs: DropshipLogEvent[] = [];
+    const acceptanceService = new FakeAcceptanceService(null, heldAcceptance());
     const service = new DropshipOrderProcessingService({
       repository,
       shippingQuote: new FakeShippingQuoteService(),
-      orderAcceptance: new FakeAcceptanceService(null, heldAcceptance()),
+      orderAcceptance: acceptanceService,
       walletAutoReload: new FakeWalletAutoReloadService(new DropshipError("DROPSHIP_STRIPE_CARD_DECLINED", "Your card was declined.", {
         classification: "permanent",
         stripeCode: "card_declined",
@@ -538,60 +547,70 @@ describe("DropshipOrderProcessingService", () => {
         stripeDeclineCode: "insufficient_funds",
       },
     }]);
-    expect(notificationSender.sent.filter((sent) => sent.eventType === "dropship_auto_reload_failed")).toEqual([]);
+    expect(notificationSender.sent).toEqual([]);
     expect(logs.some((event) => event.code === "DROPSHIP_ORDER_PAYMENT_HOLD_AUTO_RELOAD_FAILED")).toBe(true);
+    // The pause notice stands in for the order notice in this pass.
+    expect(acceptanceService.notified).toEqual([]);
+    expect(logs.some((event) => event.code === "DROPSHIP_ORDER_HOLD_NOTICE_COVERED_BY_PAUSE")).toBe(true);
   });
 
-  it("keeps the auto-reload notice when the decline does not pause anyone, and never pauses for a non-decline error", async () => {
+  it("keeps the hold notice, with the decline in it, when the decline does not pause anyone, and never pauses for a non-decline error", async () => {
     const pauses: unknown[] = [];
     const build = (error: Error, pauseOutcome: () => Promise<DropshipVendorStandingChange>) => {
       const notificationSender = new FakeNotificationSender();
+      const acceptanceService = new FakeAcceptanceService(null, heldAcceptance());
       const logs: DropshipLogEvent[] = [];
       const service = new DropshipOrderProcessingService({
         repository: new FakeProcessingRepository(makeClaim()),
         shippingQuote: new FakeShippingQuoteService(),
-        orderAcceptance: new FakeAcceptanceService(null, heldAcceptance()),
+        orderAcceptance: acceptanceService,
         walletAutoReload: new FakeWalletAutoReloadService(error),
         vendorStanding: { pauseForFundingFailure: async (input) => { pauses.push(input); return pauseOutcome(); } },
         notificationSender,
         clock: { now: () => now },
         logger: captureLogger(logs),
       });
-      return { service, notificationSender, logs };
+      return { service, acceptanceService, notificationSender, logs };
     };
     const unchanged = { outcome: "unchanged", standing: null, shortfallCents: null, listingHold: null } satisfies DropshipVendorStandingChange;
+    const declineError = () => new DropshipError("DROPSHIP_STRIPE_CARD_DECLINED", "Declined.", { classification: "permanent", stripeDeclineCode: "insufficient_funds" });
 
-    // Already paused: the vendor still hears that this order's reload failed.
-    const alreadyPaused = build(new DropshipError("DROPSHIP_STRIPE_CARD_DECLINED", "Declined.", { classification: "permanent" }), async () => unchanged);
+    // Already paused: the vendor still hears that this order's card charge was declined.
+    const alreadyPaused = build(declineError(), async () => unchanged);
     await alreadyPaused.service.processIntake({ intakeId: 1, workerId: "worker-1", idempotencyKey: "process-intake-1" });
     expect(pauses).toHaveLength(1);
-    expect(alreadyPaused.notificationSender.sent.map((sent) => sent.eventType)).toEqual(["dropship_auto_reload_failed"]);
+    expect(alreadyPaused.notificationSender.sent).toEqual([]);
+    expect(alreadyPaused.acceptanceService.notified).toEqual([{
+      result: expect.objectContaining({ outcome: "payment_hold" }),
+      context: { reload: { kind: "declined", detail: "insufficient_funds" } },
+    }]);
 
     // Standing failed: logged for a human, the order pass is unaffected.
-    const standingDown = build(new DropshipError("DROPSHIP_STRIPE_CARD_DECLINED", "Declined.", { classification: "permanent" }), async () => { throw new Error("standing db down"); });
+    const standingDown = build(declineError(), async () => { throw new Error("standing db down"); });
     const result = await standingDown.service.processIntake({ intakeId: 1, workerId: "worker-1", idempotencyKey: "process-intake-1" });
     expect(result.outcome).toBe("payment_hold");
     expect(pauses).toHaveLength(2);
     expect(standingDown.logs.find((event) => event.code === "DROPSHIP_ORDER_VENDOR_PAUSE_FAILED")).toMatchObject({
       context: expect.objectContaining({ intakeId: 1, vendorId: 10, error: "standing db down" }),
     });
-    expect(standingDown.notificationSender.sent.map((sent) => sent.eventType)).toEqual(["dropship_auto_reload_failed"]);
+    expect(standingDown.acceptanceService.notified.map((notice) => notice.context)).toEqual([{ reload: { kind: "declined", detail: "insufficient_funds" } }]);
 
-    // A rate limit or outage is not a decline: nobody is paused for it.
+    // A rate limit or outage is not a decline: nobody is paused for it, and the notice says it failed.
     const transient = build(new DropshipError("DROPSHIP_STRIPE_RATE_LIMITED", "Slow down.", { classification: "transient" }), async () => unchanged);
     await transient.service.processIntake({ intakeId: 1, workerId: "worker-1", idempotencyKey: "process-intake-1" });
     expect(pauses).toHaveLength(2);
-    expect(transient.notificationSender.sent.map((sent) => sent.eventType)).toEqual(["dropship_auto_reload_failed"]);
+    expect(transient.acceptanceService.notified.map((notice) => notice.context)).toEqual([{ reload: { kind: "failed", message: "Slow down." } }]);
   });
 
   it("does not charge the backstop card for an order held because the vendor is paused", async () => {
     const walletAutoReload = new FakeWalletAutoReloadService();
     const notificationSender = new FakeNotificationSender();
+    const acceptanceService = new FakeAcceptanceService(null, { ...heldAcceptance(), paymentHoldReason: "vendor_paused" });
     const logs: DropshipLogEvent[] = [];
     const service = new DropshipOrderProcessingService({
       repository: new FakeProcessingRepository(makeClaim()),
       shippingQuote: new FakeShippingQuoteService(),
-      orderAcceptance: new FakeAcceptanceService(null, { ...heldAcceptance(), paymentHoldReason: "vendor_paused" }),
+      orderAcceptance: acceptanceService,
       walletAutoReload,
       notificationSender,
       clock: { now: () => now },
@@ -605,7 +624,8 @@ describe("DropshipOrderProcessingService", () => {
     expect(logs.find((event) => event.code === "DROPSHIP_ORDER_BACKSTOP_SKIPPED_VENDOR_PAUSED")).toMatchObject({
       context: expect.objectContaining({ intakeId: 1, vendorId: 10 }),
     });
-    expect(notificationSender.sent.filter((sent) => sent.eventType === "dropship_auto_reload_failed")).toEqual([]);
+    expect(notificationSender.sent).toEqual([]);
+    expect(acceptanceService.notified).toEqual([{ result: expect.objectContaining({ paymentHoldReason: "vendor_paused" }), context: { reload: null } }]);
   });
 
   it("does not fail payment-hold processing when auto-reload fails", async () => {
@@ -647,30 +667,15 @@ describe("DropshipOrderProcessingService", () => {
     expect(result.outcome).toBe("payment_hold");
     expect(repository.failure).toBeNull();
     expect(logs.some((event) => event.code === "DROPSHIP_ORDER_PAYMENT_HOLD_AUTO_RELOAD_FAILED")).toBe(true);
-    expect(notificationSender.sent[0]).toMatchObject({
-      vendorId: 10,
-      eventType: "dropship_auto_reload_failed",
-      critical: true,
-      channels: ["email", "in_app"],
-      title: "Dropship auto-reload failed",
-      idempotencyKey: deriveAutoReloadIssueNotificationKey({
-        intakeId: 1,
-        reason: "payment_hold",
-        issueType: "failed",
-        issueCode: "auto_reload_provider_error",
-        issueMessage: "Stripe declined",
-      }),
-      payload: {
-        intakeId: 1,
-        autoReloadReason: "payment_hold",
-        issueType: "failed",
-        issueCode: "auto_reload_provider_error",
-        issueMessage: "Stripe declined",
-      },
-    });
+    // One email: the hold, saying the top-up failed. No separate auto-reload email.
+    expect(notificationSender.sent).toEqual([]);
+    expect(acceptanceService.notified).toEqual([{
+      result: expect.objectContaining({ outcome: "payment_hold", intakeId: 1 }),
+      context: { reload: { kind: "failed", message: "Stripe declined" } },
+    }]);
   });
 
-  it("notifies when payment-hold auto-reload is skipped", async () => {
+  it("folds a skipped payment-hold auto-reload into the hold notice", async () => {
     const repository = new FakeProcessingRepository(makeClaim());
     const quoteService = new FakeShippingQuoteService();
     const acceptanceService = new FakeAcceptanceService(null, {
@@ -721,22 +726,11 @@ describe("DropshipOrderProcessingService", () => {
 
     expect(result.outcome).toBe("payment_hold");
     expect(logs.some((event) => event.code === "DROPSHIP_ORDER_PAYMENT_HOLD_AUTO_RELOAD_SKIPPED")).toBe(true);
-    expect(notificationSender.sent[0]).toMatchObject({
-      eventType: "dropship_auto_reload_failed",
-      critical: true,
-      idempotencyKey: deriveAutoReloadIssueNotificationKey({
-        intakeId: 1,
-        reason: "payment_hold",
-        issueType: "skipped",
-        issueCode: "funding_method_required",
-        issueMessage: "Auto-reload was skipped: funding_method_required.",
-      }),
-      payload: {
-        autoReloadReason: "payment_hold",
-        issueType: "skipped",
-        issueCode: "funding_method_required",
-      },
-    });
+    expect(notificationSender.sent).toEqual([]);
+    expect(acceptanceService.notified).toEqual([{
+      result: expect.objectContaining({ outcome: "payment_hold" }),
+      context: { reload: { kind: "skipped", reason: "funding_method_required" } },
+    }]);
   });
 
   it("cancels a payment hold that expires during processing", async () => {
@@ -910,14 +904,21 @@ class FakePackagingWarningQuoteService {
 
 class FakeAcceptanceService {
   lastInput: unknown = null;
+  options: unknown[] = [];
+  notified: Array<{ result: DropshipOrderAcceptanceResult; context: DropshipAcceptanceNoticeContext }> = [];
 
   constructor(
     private readonly error: Error | null = null,
     private readonly result: DropshipOrderAcceptanceResult | null = null,
   ) {}
 
-  async acceptOrder(input: unknown): Promise<DropshipOrderAcceptanceResult> {
+  async notifyAcceptanceOutcome(result: DropshipOrderAcceptanceResult, context: DropshipAcceptanceNoticeContext = {}): Promise<void> {
+    this.notified.push({ result, context });
+  }
+
+  async acceptOrder(input: unknown, options?: unknown): Promise<DropshipOrderAcceptanceResult> {
     this.lastInput = input;
+    this.options.push(options);
     if (this.error) {
       throw this.error;
     }
@@ -945,11 +946,18 @@ class FakeAcceptanceService {
 /** Answers acceptOrder calls in order, so a hold followed by an acceptance can be scripted. */
 class ScriptedAcceptanceService {
   inputs: unknown[] = [];
+  options: unknown[] = [];
+  notified: Array<{ result: DropshipOrderAcceptanceResult; context: DropshipAcceptanceNoticeContext }> = [];
 
   constructor(private readonly script: Array<DropshipOrderAcceptanceResult | Error>) {}
 
-  async acceptOrder(input: unknown): Promise<DropshipOrderAcceptanceResult> {
+  async notifyAcceptanceOutcome(result: DropshipOrderAcceptanceResult, context: DropshipAcceptanceNoticeContext = {}): Promise<void> {
+    this.notified.push({ result, context });
+  }
+
+  async acceptOrder(input: unknown, options?: unknown): Promise<DropshipOrderAcceptanceResult> {
     this.inputs.push(input);
+    this.options.push(options);
     const next = this.script[this.inputs.length - 1];
     if (!next) throw new Error(`acceptOrder called ${this.inputs.length} times; only ${this.script.length} scripted`);
     if (next instanceof Error) throw next;

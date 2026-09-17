@@ -165,6 +165,65 @@ describe("DropshipOrderAcceptanceService", () => {
     );
   });
 
+  it("stays silent when asked to, and says the pass's one outcome later with what the top-up came to", async () => {
+    const repository = new FakeAcceptanceRepository({
+      outcome: "payment_hold",
+      omsOrderId: null,
+      walletLedgerEntryId: null,
+      economicsSnapshotId: null,
+      totalDebitCents: 7500,
+      paymentHoldExpiresAt: new Date("2026-05-03T12:00:00.000Z"),
+      paymentHoldReason: "insufficient_balance",
+    });
+    const notificationSender = new FakeNotificationSender();
+    const service = new DropshipOrderAcceptanceService({
+      repository,
+      inventoryAuthority: new FakeInventoryAuthority("legacy"),
+      canonicalFulfillment: new FakeCanonicalFulfillment(),
+      notificationSender,
+      clock: { now: () => now },
+      logger: noopLogger,
+    });
+    const input = { intakeId: 1, vendorId: 10, storeConnectionId: 22, shippingQuoteSnapshotId: 33, idempotencyKey: "accept-001", actor: { actorType: "system" as const } };
+
+    const held = await service.acceptOrder(input, { notify: false });
+    expect(held.outcome).toBe("payment_hold");
+    expect(notificationSender.sent).toEqual([]);
+
+    const base = "Order intake 1 is on payment hold and requires USD $75.00 before 2026-05-03T12:00:00.000Z.";
+    const cases: Array<[Parameters<typeof service.notifyAcceptanceOutcome>[1], string]> = [
+      [{}, base],
+      [{ reload: null }, base],
+      [{ reload: { kind: "pending", amountCents: 4000, currency: "USD" } }, `${base} A bank top-up of USD $40.00 is on its way; the order is accepted when it settles.`],
+      [{ reload: { kind: "declined", detail: "insufficient_funds" } }, `${base} We tried to charge your card for the shortfall and it was declined (insufficient funds). Add funds or update your card in Wallet.`],
+      [{ reload: { kind: "declined", detail: null } }, `${base} We tried to charge your card for the shortfall and it was declined. Add funds or update your card in Wallet.`],
+      [{ reload: { kind: "failed", message: "Stripe unavailable" } }, `${base} We could not top up your wallet automatically (Stripe unavailable); add funds to accept it sooner.`],
+      [{ reload: { kind: "skipped", reason: "amount_exceeds_max_single_reload" } }, `${base} Auto-reload could not top it up: the amount is over your single-reload limit. Add funds or check auto-reload in Wallet.`],
+      [{ reload: { kind: "skipped", reason: "some_new_reason" } }, `${base} Auto-reload could not top it up: some new reason. Add funds or check auto-reload in Wallet.`],
+    ];
+    for (const [context, expected] of cases) {
+      notificationSender.sent = [];
+      await service.notifyAcceptanceOutcome(held, context);
+      expect(notificationSender.sent).toHaveLength(1);
+      expect(notificationSender.sent[0]).toMatchObject({
+        eventType: "dropship_order_payment_hold",
+        critical: true,
+        idempotencyKey: "order-acceptance:1:payment_hold",
+        payload: expect.objectContaining({ paymentHoldReason: "insufficient_balance", reload: context?.reload ?? null }),
+      });
+      expect(notificationSender.sent[0].message).toBe(expected);
+    }
+
+    // A replay never re-announces.
+    notificationSender.sent = [];
+    await service.notifyAcceptanceOutcome({ ...held, idempotentReplay: true }, { reload: { kind: "failed", message: "x" } });
+    expect(notificationSender.sent).toEqual([]);
+
+    // The default still tells the vendor right away (manual acceptance from the Orders page).
+    await service.acceptOrder(input);
+    expect(notificationSender.sent.map((sent) => sent.eventType)).toEqual(["dropship_order_payment_hold"]);
+  });
+
   it("finalizes canonical acceptance only after the WMS whole-order claim succeeds", async () => {
     const repository = new FakeAcceptanceRepository();
     const fulfillment = new FakeCanonicalFulfillment();

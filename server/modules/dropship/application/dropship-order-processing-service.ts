@@ -14,6 +14,7 @@ import type {
   DropshipOmsFulfillmentSyncRetryQueue,
 } from "./dropship-ports";
 import type {
+  DropshipAcceptanceReloadContext,
   DropshipOrderAcceptanceResult,
   DropshipOrderAcceptanceService,
 } from "./dropship-order-acceptance-service";
@@ -127,7 +128,7 @@ export interface DropshipOrderProcessingResult {
 export interface DropshipOrderProcessingServiceDependencies {
   repository: DropshipOrderProcessingRepository;
   shippingQuote: Pick<DropshipShippingQuoteService, "quote">;
-  orderAcceptance: Pick<DropshipOrderAcceptanceService, "acceptOrder">;
+  orderAcceptance: Pick<DropshipOrderAcceptanceService, "acceptOrder" | "notifyAcceptanceOutcome">;
   walletAutoReload?: Pick<DropshipWalletService, "handleAutoReload">;
   /** Pauses the vendor when the backstop card charge is declined outright. */
   vendorStanding?: Pick<DropshipVendorStandingService, "pauseForFundingFailure">;
@@ -182,6 +183,8 @@ export class DropshipOrderProcessingService {
         })),
         idempotencyKey: deriveOrderProcessingIdempotencyKey("quote", parsed),
       });
+      // Notices are deferred: a pass can hold, top up and re-accept, and the
+      // vendor hears about its one final outcome (notifyPassOutcome).
       const acceptance = await this.deps.orderAcceptance.acceptOrder({
         intakeId: claim.intake.intakeId,
         vendorId: claim.intake.vendorId,
@@ -192,7 +195,7 @@ export class DropshipOrderProcessingService {
           actorType: "job",
           actorId: parsed.workerId,
         },
-      });
+      }, { notify: false });
 
       const reload = await this.tryHandleAutoReload({
         parsed,
@@ -204,8 +207,9 @@ export class DropshipOrderProcessingService {
         claim,
         quote,
         acceptance,
-        reload,
+        reload: reload.result,
       });
+      await this.notifyPassOutcome(claim, finalAcceptance, reload);
       await syncDropshipAcceptedOrderToWmsSafely(this.deps, {
         acceptance: finalAcceptance,
         source: "order_processing",
@@ -361,7 +365,7 @@ export class DropshipOrderProcessingService {
           actorType: "job",
           actorId: input.parsed.workerId,
         },
-      });
+      }, { notify: false });
       this.deps.logger.info({
         code: retried.outcome === "accepted"
           ? "DROPSHIP_ORDER_ACCEPTED_AFTER_RELOAD"
@@ -386,9 +390,9 @@ export class DropshipOrderProcessingService {
     parsed: ProcessDropshipOrderIntakeInput;
     claim: DropshipOrderProcessingClaim;
     acceptance: DropshipOrderAcceptanceResult;
-  }): Promise<DropshipAutoReloadResult | null> {
+  }): Promise<AutoReloadAttempt> {
     if (!this.deps.walletAutoReload) {
-      return null;
+      return { result: null, issue: null, vendorPaused: false };
     }
     if (input.acceptance.outcome === "payment_hold" && input.acceptance.paymentHoldReason === "vendor_paused") {
       // The vendor is paused because their funding already failed; charging
@@ -404,7 +408,7 @@ export class DropshipOrderProcessingService {
           paymentHoldExpiresAt: input.acceptance.paymentHoldExpiresAt?.toISOString() ?? null,
         },
       });
-      return null;
+      return { result: null, issue: null, vendorPaused: false };
     }
     const autoReloadInput = input.acceptance.outcome === "payment_hold"
       ? {
@@ -440,15 +444,17 @@ export class DropshipOrderProcessingService {
             skipReason: result.skipReason,
           },
         });
-        await this.notifyAutoReloadIssue({
-          claim: input.claim,
-          reason: autoReloadInput.reason,
-          issueType: "skipped",
-          issueCode: result.skipReason ?? "unknown",
-          issueMessage: `Auto-reload was skipped: ${result.skipReason ?? "unknown"}.`,
-        });
+        // A routine top-up skipped after an accepted order is the daily wallet
+        // run's to report; only a held order's skip belongs in this pass's notice.
+        return {
+          result,
+          issue: autoReloadInput.reason === "payment_hold"
+            ? { kind: "skipped", reason: result.skipReason ?? "unknown" }
+            : null,
+          vendorPaused: false,
+        };
       }
-      return result;
+      return { result, issue: null, vendorPaused: false };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       this.deps.logger.warn({
@@ -466,21 +472,18 @@ export class DropshipOrderProcessingService {
         },
       });
       // A decline is the bank refusing the vendor's card: the vendor is paused
-      // on the first one. The pause notice already tells them what happened,
-      // so the generic auto-reload notice is only sent when no pause went out.
-      const pause = isDropshipFundingDeclineError(error)
+      // on the first one, and the pause notice then stands in for this pass's
+      // order notice (see notifyPassOutcome).
+      const declined = isDropshipFundingDeclineError(error);
+      const pause = declined
         ? await this.pauseVendorForDeclineSafely(input.claim, autoReloadInput.reason, error)
         : null;
-      if (pause?.outcome !== "paused") {
-        await this.notifyAutoReloadIssue({
-          claim: input.claim,
-          reason: autoReloadInput.reason,
-          issueType: "failed",
-          issueCode: "auto_reload_provider_error",
-          issueMessage: errorMessage,
-        });
-      }
-      return null;
+      const issue: AutoReloadIssue | null = autoReloadInput.reason !== "payment_hold"
+        ? null
+        : declined
+          ? { kind: "declined", detail: declineDetailFor(error) }
+          : { kind: "failed", message: errorMessage };
+      return { result: null, issue, vendorPaused: pause?.outcome === "paused" };
     }
   }
 
@@ -524,50 +527,49 @@ export class DropshipOrderProcessingService {
     }
   }
 
-  private async notifyAutoReloadIssue(input: {
-    claim: DropshipOrderProcessingClaim;
-    reason: "minimum_balance" | "payment_hold";
-    issueType: "skipped" | "failed";
-    issueCode: string;
-    issueMessage: string;
-  }): Promise<void> {
-    await sendDropshipNotificationSafely(this.deps, {
-      vendorId: input.claim.intake.vendorId,
-      eventType: DROPSHIP_NOTIFICATION_EVENTS.AUTO_RELOAD_FAILED,
-      critical: true,
-      channels: ["email", "in_app"],
-      title: "Dropship auto-reload failed",
-      message: `Auto-reload for order intake ${input.claim.intake.intakeId} did not complete: ${input.issueMessage}`,
-      payload: {
-        intakeId: input.claim.intake.intakeId,
-        vendorId: input.claim.intake.vendorId,
-        storeConnectionId: input.claim.intake.storeConnectionId,
-        platform: input.claim.intake.platform,
-        externalOrderId: input.claim.intake.externalOrderId,
-        autoReloadReason: input.reason,
-        issueType: input.issueType,
-        issueCode: input.issueCode,
-        issueMessage: input.issueMessage,
-      },
-      idempotencyKey: deriveAutoReloadIssueNotificationKey({
-        intakeId: input.claim.intake.intakeId,
-        reason: input.reason,
-        issueType: input.issueType,
-        issueCode: input.issueCode,
-        issueMessage: input.issueMessage,
-      }),
-    }, {
-      code: "DROPSHIP_AUTO_RELOAD_NOTIFICATION_FAILED",
-      message: "Dropship auto-reload failure notification failed.",
-      context: {
-        intakeId: input.claim.intake.intakeId,
-        vendorId: input.claim.intake.vendorId,
-        storeConnectionId: input.claim.intake.storeConnectionId,
-        autoReloadReason: input.reason,
-        issueType: input.issueType,
-        issueCode: input.issueCode,
-      },
-    });
+  /**
+   * One order notice per pass, for its final outcome: accepted (possibly
+   * after a top-up), or held with what the top-up attempt came to. When the
+   * pass paused the vendor, the pause notice already said what happened and
+   * the held order shows on their Dashboard, so no second email goes out.
+   * Never fails the pass: the outcome is already committed.
+   */
+  private async notifyPassOutcome(
+    claim: DropshipOrderProcessingClaim,
+    acceptance: DropshipOrderAcceptanceResult,
+    reload: AutoReloadAttempt,
+  ): Promise<void> {
+    if (acceptance.idempotentReplay) {
+      return;
+    }
+    if (acceptance.outcome === "payment_hold" && reload.vendorPaused) {
+      this.deps.logger.info({
+        code: "DROPSHIP_ORDER_HOLD_NOTICE_COVERED_BY_PAUSE",
+        message: "Dropship order hold notice was not sent: the vendor was paused in this pass and told so.",
+        context: {
+          intakeId: claim.intake.intakeId,
+          vendorId: claim.intake.vendorId,
+          storeConnectionId: claim.intake.storeConnectionId,
+        },
+      });
+      return;
+    }
+    try {
+      await this.deps.orderAcceptance.notifyAcceptanceOutcome(acceptance, {
+        reload: acceptance.outcome === "payment_hold" ? reloadContextFor(reload) : null,
+      });
+    } catch (error) {
+      this.deps.logger.error({
+        code: "DROPSHIP_ORDER_OUTCOME_NOTICE_FAILED",
+        message: "Dropship order outcome notice failed after the pass completed.",
+        context: {
+          intakeId: claim.intake.intakeId,
+          vendorId: claim.intake.vendorId,
+          outcome: acceptance.outcome,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      });
+    }
   }
 
   private async notifyPaymentHoldExpired(
@@ -697,26 +699,37 @@ export function aggregateQuoteItems(
   }));
 }
 
+/** What a held order's top-up attempt came to, for this pass's one notice. */
+type AutoReloadIssue = Exclude<DropshipAcceptanceReloadContext, { kind: "pending" }>;
+
+interface AutoReloadAttempt {
+  result: DropshipAutoReloadResult | null;
+  issue: AutoReloadIssue | null;
+  /** True when this pass paused the vendor for the decline. */
+  vendorPaused: boolean;
+}
+
+function reloadContextFor(attempt: AutoReloadAttempt): DropshipAcceptanceReloadContext | null {
+  if (attempt.issue) {
+    return attempt.issue;
+  }
+  if (attempt.result?.outcome === "funding_created" && attempt.result.fundingStatus === "pending") {
+    return { kind: "pending", amountCents: attempt.result.amountCents, currency: attempt.result.currency };
+  }
+  return null;
+}
+
+function declineDetailFor(error: DropshipError): string | null {
+  const detail = error.context?.stripeDeclineCode;
+  return typeof detail === "string" && detail.length > 0 ? detail : null;
+}
+
 export function deriveOrderProcessingIdempotencyKey(
   stage: "quote" | "accept" | "accept-after-reload" | "auto-reload-payment-hold" | "auto-reload-minimum",
   input: ProcessDropshipOrderIntakeInput,
 ): string {
   const digest = createHash("sha256").update(input.idempotencyKey).digest("hex").slice(0, 32);
   return `order:${input.intakeId}:${stage}:${digest}`;
-}
-
-export function deriveAutoReloadIssueNotificationKey(input: {
-  intakeId: number;
-  reason: "minimum_balance" | "payment_hold";
-  issueType: "skipped" | "failed";
-  issueCode: string;
-  issueMessage: string;
-}): string {
-  const digest = createHash("sha256")
-    .update(`${input.reason}:${input.issueType}:${input.issueCode}:${input.issueMessage}`)
-    .digest("hex")
-    .slice(0, 32);
-  return `order:${input.intakeId}:auto-reload-alert:${digest}`;
 }
 
 export function makeDropshipOrderProcessingLogger(): DropshipLogger {
