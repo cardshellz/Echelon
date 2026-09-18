@@ -1041,7 +1041,17 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     await seedCanonicalRequestForSource(pool, first);
     await seedCanonicalRequestForSource(pool, second);
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
-    const clock = { now: () => new Date("2026-09-18T12:00:00Z") };
+    let workerTime = new Date("2026-09-18T12:00:00Z");
+    const clock = { now: () => new Date(workerTime) };
+    async function advanceWorkerClockToDueCommands() {
+      // Command admission uses PostgreSQL now(). A fixed test date eventually
+      // precedes that deadline. Advance this injected worker clock from the
+      // persisted schedule, rounding past PostgreSQL's sub-millisecond precision.
+      const { rows } = await pool.query<{ due_at: Date | null }>(
+        "SELECT MAX(next_attempt_at) + INTERVAL '1 millisecond' AS due_at FROM oms.channel_fulfillment_pushes",
+      );
+      if (rows[0].due_at && rows[0].due_at > workerTime) workerTime = rows[0].due_at;
+    }
     const workflow = createPackageAllocationLabelCommercialWorkflow({ pool, clock, logger });
     let failBeforeCommit = false;
     const replacementReviews = vi.fn();
@@ -1111,6 +1121,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       const workerRepository = createChannelFulfillmentAuthorityRepository(getTestDb());
       const applied = await workerRepository.reconcileEbayLabelReplacement!(replacement.id, clock.now());
       expect(applied).toMatchObject({ outcome: "applied" });
+      await advanceWorkerClockToDueCommands();
       const worker = createChannelFulfillmentAuthorityService({ repository: workerRepository, clock, logger,
         projector: { projectPhysicalShipment: vi.fn().mockRejectedValue(new Error("injected projection failure")) },
         providerExecutor: { execute: vi.fn().mockRejectedValue(new Error("Provider must remain blocked")) },
@@ -1128,6 +1139,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       JOIN wms.physical_shipments package ON package.id = item.physical_shipment_id ORDER BY item.wms_order_item_id`)).rows)
       .toEqual([{ tracking_number: "TRACK44011", quantity_shipped: 2 }, { tracking_number: "TRACK44011", quantity_shipped: 1 }]);
     const repository = createChannelFulfillmentAuthorityRepository(getTestDb());
+    await advanceWorkerClockToDueCommands();
     const commands = await repository.claimCommands({ now: clock.now(), limit: 25, leaseToken: "relabel-test", leaseDurationMs: 120000 });
     expect(commands).toHaveLength(2);
     expect(commands.map(command => command.items[0].legacyWmsShipmentItemId).sort()).toEqual([first, second]);

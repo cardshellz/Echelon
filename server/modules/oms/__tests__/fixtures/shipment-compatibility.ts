@@ -53,9 +53,16 @@ CREATE TABLE wms.shipping_engine_order_provider_refs(shipping_engine_order_id bi
 CREATE TABLE wms.shipping_engine_order_requests(shipping_engine_order_id bigint,
  shipment_request_id bigint, relationship_type text, created_at timestamp,
  UNIQUE(shipping_engine_order_id,shipment_request_id));
+-- Empty read-side contract for the materializer's replacement replay lookup.
+-- These non-customer shipment suites do not exercise label replacement writes;
+-- the package-allocation integration suite applies and validates actual0679.
+CREATE TABLE wms.ebay_label_replacement_work(
+ shipping_provider_label_id bigint PRIMARY KEY, state varchar(20) NOT NULL,
+ physical_shipment_id bigint UNIQUE, source_item_ids integer[] NOT NULL);
 `;
 
 export const shipmentCompatibilitySeedSql = `
+TRUNCATE wms.ebay_label_replacement_work;
 TRUNCATE wms.shipping_engine_order_requests, wms.shipping_engine_order_provider_refs,
  wms.shipping_engine_orders RESTART IDENTITY;
 ${dispatchRuntimeSeedSql.replace("TRUNCATE inventory.availability_claim_dispatch_movements",
