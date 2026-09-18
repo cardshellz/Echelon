@@ -39,6 +39,8 @@ const BANK: StubMethod = { fundingMethodId: 30, rail: "stripe_ach", status: "act
 
 interface StubState {
   methods: StubMethod[];
+  /** Tests asserting the pending UI release the simulated webhook explicitly. */
+  holdSetupConfirmation: boolean;
   usdcDepositAddress: string | null;
   autoReload: Record<string, unknown> | null;
   balanceCents: number;
@@ -95,7 +97,7 @@ function walletJson(state: StubState) {
 }
 
 async function setup(page: Page, initial: Partial<StubState> = {}, path = HARNESS_PATH) {
-  const state: StubState = { methods: [], usdcDepositAddress: null, autoReload: null, balanceCents: 0, pendingCents: 0, ledger: [], cardFundingFeeBps: 300, limits: null,
+  const state: StubState = { methods: [], holdSetupConfirmation: false, usdcDepositAddress: null, autoReload: null, balanceCents: 0, pendingCents: 0, ledger: [], cardFundingFeeBps: 300, limits: null,
     proofs: {}, failChallenge: false, deleteRefusal: null, detachOutcome: "detached", putRefusalOnce: null, vendorStatus: "onboarding", vendorStandingReason: null,
     walletReads: 0, nextCardId: 10, nextBankId: 30, setupSessions: [], autoReloadWrites: [], fundingSessions: [], usdcRegistrations: [], deletes: [], bodies: [],
     codesSent: [], unexpected: [], errors: [], ...initial };
@@ -133,7 +135,7 @@ async function setup(page: Page, initial: Partial<StubState> = {}, path = HARNES
       state.walletReads += 1;
       // The webhook stands in: a pending row activates a few reads after Stripe returns.
       for (const row of state.methods) {
-        if (row.status === "pending" && row.activatesAfterReads !== undefined) {
+        if (!state.holdSetupConfirmation && row.status === "pending" && row.activatesAfterReads !== undefined) {
           row.activatesAfterReads -= 1;
           if (row.activatesAfterReads <= 0) { row.status = "active"; row.updatedAt = LATER; }
         }
@@ -246,8 +248,16 @@ function seedDraft(page: Page, draft: Record<string, unknown>) {
   return page.addInitScript((value: string) => { window.sessionStorage.setItem("dropship-wallet-setup-draft:v1:1", value); }, JSON.stringify({ v: 1, seenIntro: true, sourceRail: null, sourceMethodId: null, floorCents: null, dailyCostCents: null, backupMethodId: null, pendingStripe: null, deposit: null, ...draft }));
 }
 
+function confirmPendingSetup(state: StubState, rail: "stripe_card" | "stripe_ach") {
+  const pending = state.methods.filter(method => method.rail === rail && method.status === "pending");
+  expect(pending).toHaveLength(1);
+  pending[0].status = "active";
+  pending[0].updatedAt = LATER;
+  delete pending[0].activatesAfterReads;
+}
+
 test("bank vendor, end to end: intro, bank source, floor with guidance, backup card, one authorization, then the deposit step — with one emailed code", async ({ page }) => {
-  const state = await setup(page, { usdcDepositAddress: DEPOSIT_ADDRESS });
+  const state = await setup(page, { usdcDepositAddress: DEPOSIT_ADDRESS, holdSetupConfirmation: true });
   const intro = page.getByTestId("wallet-step-intro");
   await expect(intro.getByRole("heading", { name: "How your wallet works" })).toBeVisible();
   await expect(intro).toContainText("return fee");
@@ -273,8 +283,10 @@ test("bank vendor, end to end: intro, bank source, floor with guidance, backup c
   expect(state.codesSent).toEqual(["add_funding_method"]);
   await shot(page, "02-source-code");
   await enterCode(page);
-  // Stripe's hosted page is stood in for by a same-origin return; the webhook by a few reads.
+  // Hold the webhook until pending UI is observed. Request counts must not race
+  // this assertion during the redirect; the real page's polling observes activation.
   await expect(page.getByTestId("wallet-bank-confirmation")).toContainText("Confirming your bank account with Stripe");
+  confirmPendingSetup(state, "stripe_ach");
   expect(state.setupSessions).toEqual([{ rail: "stripe_ach", returnTo: HARNESS_PATH }]);
   expect(new URL(page.url()).search).toBe("");
   await expect(source.getByRole("status").filter({ hasText: "Bank account added: Chase ending in 1234." })).toBeVisible();
@@ -312,6 +324,7 @@ test("bank vendor, end to end: intro, bank source, floor with guidance, backup c
   await shot(page, "04-backup-empty");
   await backup.getByRole("button", { name: "Add a card" }).click();
   await expect(page.getByTestId("wallet-card-confirmation")).toContainText("Confirming your card with Stripe");
+  confirmPendingSetup(state, "stripe_card");
   expect(state.codesSent).toEqual(["add_funding_method"]);
   await expect(backup).toContainText("Visa ending in 4242 · expires 12/27 will be your backup card.");
   await expect(backup.getByTestId("wallet-impact")).toContainText("only for the shortfall plus the 3% fee");
@@ -370,12 +383,13 @@ test("bank vendor, end to end: intro, bank source, floor with guidance, backup c
 });
 
 test("card vendor: steps 4 and 6 are satisfied rows, the limit is not a false multiple, and the card is both source and backup", async ({ page }) => {
-  const state = await setup(page, { proofs: ALL_PROOFS });
+  const state = await setup(page, { proofs: ALL_PROOFS, holdSetupConfirmation: true });
   await page.getByRole("button", { name: "Set up my wallet" }).click();
   const source = page.getByTestId("wallet-step-source");
   await radio(page, "Top up from", "Card").click();
   await source.getByRole("button", { name: "Add a card" }).click();
   await expect(page.getByTestId("wallet-card-confirmation")).toBeVisible();
+  confirmPendingSetup(state, "stripe_card");
   await expect(source.getByRole("status").filter({ hasText: "Card added: Visa ending in 4242." })).toBeVisible();
   await expect(source.getByTestId("wallet-impact")).toContainText("Every top-up costs 3%");
   await expect(source.getByTestId("wallet-impact")).toContainText("Your card is also your backup card");
