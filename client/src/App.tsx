@@ -20,6 +20,7 @@ import VendorWallet from "@/pages/vendor/VendorWallet";
 import VendorSettings from "@/pages/vendor/VendorSettings";
 import DropshipPortalAuth from "@/pages/dropship/DropshipPortalAuth";
 import DropshipPortalDashboard from "@/pages/dropship/DropshipPortalDashboard";
+import DropshipPortalHome from "@/pages/dropship/DropshipPortalHome";
 import DropshipPortalCatalog from "@/pages/dropship/DropshipPortalCatalog";
 import DropshipPortalNotifications from "@/pages/dropship/DropshipPortalNotifications";
 import DropshipPortalOnboarding from "@/pages/dropship/DropshipPortalOnboarding";
@@ -237,6 +238,9 @@ function DropshipPortalRouter() {
       <Switch>
         <Route path={`${portalRoot}/login`} component={DropshipPortalAuth} />
         <Route path={`${portalRoot}/setup`} component={DropshipPortalAuth} />
+        <Route path={`${portalRoot}/home`}>
+          <DropshipPortalProtectedRoute component={DropshipPortalHome} />
+        </Route>
         <Route path={`${portalRoot}/onboarding`}>
           <DropshipPortalProtectedRoute component={DropshipPortalOnboarding} />
         </Route>
@@ -262,7 +266,7 @@ function DropshipPortalRouter() {
           <DropshipPortalProtectedRoute component={DropshipPortalNotifications} />
         </Route>
         <Route path={portalRoot || "/"}>
-          <Redirect to={dropshipPortalPath("/onboarding")} />
+          <Redirect to={dropshipPortalPath("/home")} />
         </Route>
         <Route component={DropshipPortalAuth} />
       </Switch>

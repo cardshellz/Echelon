@@ -368,6 +368,12 @@ export interface DropshipWalletOverview {
 export interface DropshipWalletView extends DropshipWalletOverview {
   /** Fee rate on card charges, in basis points. ACH and USDC carry none. */
   cardFundingFeeBps: number;
+  /**
+   * Where a vendor sends USDC on Base to fund the wallet, or null when USDC
+   * funding is not offered (nothing configured). Card Shellz credits the
+   * wallet once the transfer is confirmed on chain.
+   */
+  usdcBaseDepositAddress: string | null;
 }
 
 export interface DropshipWalletMutationResult {
@@ -592,6 +598,8 @@ export class DropshipWalletService {
       logger: DropshipLogger;
       /** Card fee rate override; the environment's rate when absent. Injected so tests are deterministic. */
       cardFundingFeeBps?: number;
+      /** USDC deposit address override; the environment's address when absent. Injected so tests are deterministic. */
+      usdcBaseDepositAddress?: string | null;
     },
   ) {}
 
@@ -612,7 +620,11 @@ export class DropshipWalletService {
       ledgerLimit: clampLedgerLimit(input.ledgerLimit),
       now: this.deps.clock.now(),
     });
-    return { ...overview, cardFundingFeeBps: this.cardFundingFeeBps() };
+    return {
+      ...overview,
+      cardFundingFeeBps: this.cardFundingFeeBps(),
+      usdcBaseDepositAddress: this.usdcBaseDepositAddress(),
+    };
   }
 
   async creditFunding(input: unknown): Promise<DropshipWalletMutationResult> {
@@ -1316,6 +1328,12 @@ export class DropshipWalletService {
     return this.deps.cardFundingFeeBps ?? resolveDropshipCardFundingFeeBps();
   }
 
+  private usdcBaseDepositAddress(): string | null {
+    return this.deps.usdcBaseDepositAddress === undefined
+      ? resolveDropshipUsdcBaseDepositAddress()
+      : this.deps.usdcBaseDepositAddress;
+  }
+
   private quoteFunding(rail: DropshipStripeFundingSetupRail, creditCents: number): WalletFundingQuote {
     return quoteWalletFunding({ rail, creditCents, cardFeeBps: this.cardFundingFeeBps() });
   }
@@ -1557,6 +1575,26 @@ export function resolveDropshipCardFundingFeeBps(env: NodeJS.ProcessEnv = proces
     );
   }
   return parsed;
+}
+
+/**
+ * The USDC (Base) deposit address vendors fund the wallet with. Unset means
+ * USDC funding is not offered, and the wallet page does not show it. A
+ * malformed value is refused rather than shown: a typo here would send
+ * vendors' money to an address nobody controls.
+ */
+export function resolveDropshipUsdcBaseDepositAddress(env: NodeJS.ProcessEnv = process.env): string | null {
+  const raw = env.DROPSHIP_USDC_BASE_DEPOSIT_ADDRESS;
+  if (raw === undefined || !raw.trim()) return null;
+  const parsed = usdcBaseWalletAddressSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new DropshipError(
+      "DROPSHIP_USDC_DEPOSIT_ADDRESS_MISCONFIGURED",
+      "Dropship USDC deposit address is misconfigured.",
+      { env: "DROPSHIP_USDC_BASE_DEPOSIT_ADDRESS", value: raw },
+    );
+  }
+  return normalizeUsdcBaseAddress(parsed.data);
 }
 
 /**

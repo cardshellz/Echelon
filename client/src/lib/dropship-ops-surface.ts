@@ -2168,6 +2168,8 @@ export interface DropshipWalletResponse {
     }>;
     /** Fee rate on card charges, in basis points. ACH and USDC carry none. */
     cardFundingFeeBps: number;
+    /** Where USDC on Base is sent to fund the wallet; null when USDC funding is not offered. */
+    usdcBaseDepositAddress: string | null;
   };
 }
 

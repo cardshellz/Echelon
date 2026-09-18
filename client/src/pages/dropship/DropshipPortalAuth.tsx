@@ -63,7 +63,7 @@ export default function DropshipPortalAuth() {
 
   useEffect(() => {
     if (isAuthenticated) {
-      setLocation(dropshipPortalPath("/onboarding"));
+      setLocation(dropshipPortalPath("/home"));
     }
   }, [isAuthenticated, setLocation]);
 
@@ -108,7 +108,7 @@ export default function DropshipPortalAuth() {
   }
 
   function continueToPortal() {
-    setLocation(dropshipPortalPath("/onboarding"));
+    setLocation(dropshipPortalPath("/home"));
   }
 
   async function startResetPassword() {
