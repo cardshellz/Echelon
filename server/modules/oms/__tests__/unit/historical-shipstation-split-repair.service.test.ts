@@ -106,6 +106,16 @@ function dependencies(
 }
 
 describe("historical ShipStation split repair", () => {
+  it("preserves a date-only provider ship date without inventing a historical shipping instant", () => {
+    expect(parseHistoricalProviderPackage(providerShipment({ shipDate: "2026-09-16" })))
+      .toMatchObject({ shippedAt: null, shipCalendarDate: "2026-09-16" });
+  });
+
+  it("uses Pacific time for historical full provider timestamps", () => {
+    const result = parseHistoricalProviderPackage(providerShipment({ shipDate: "2026-09-10T09:38:29.5370000" }));
+    expect(result.shippedAt?.toISOString()).toBe("2026-09-10T16:38:29.537Z");
+  });
+
   it("uses a persisted source value that fits outbound_shipments.source", () => {
     expect(HISTORICAL_SPLIT_REPAIR_SOURCE.length).toBeLessThanOrEqual(30);
   });

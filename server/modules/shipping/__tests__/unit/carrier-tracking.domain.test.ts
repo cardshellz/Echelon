@@ -504,6 +504,31 @@ describe("ShipStation declared-contents evidence", () => {
 });
 
 describe("shipping-provider label normalization", () => {
+  it("normalizes Pacific cancellation time while keeping raw evidence and replay hashes stable", () => {
+    const payload = {
+      shipmentId: 458434391, trackingNumber: "9434650206217286007967", isReturnLabel: false,
+      shipDate: "2026-09-10", voidDate: "2026-09-10T09:38:29.5370000",
+      shipmentItems: [{ lineItemKey: "wms-item-22072", quantity: 2 }],
+    };
+    const before = structuredClone(payload);
+    const observation = normalizeShipStationLabelObservation(payload, new Date("2026-09-10T16:38:58.068Z"));
+    const replay = normalizeShipStationLabelObservation(payload, new Date("2026-09-18T16:00:00Z"));
+    expect(observation.providerOccurredAt?.toISOString()).toBe("2026-09-10T16:38:29.537Z");
+    expect(observation.sanitizedPayload.voidDate).toBe(payload.voidDate);
+    expect(observation.eventHash).toBe(replay.eventHash);
+    expect(payload).toEqual(before);
+  });
+
+  it("retains a ship calendar date without inventing an occurrence time", () => {
+    const observation = normalizeShipStationLabelObservation({
+      shipmentId: 459620581, trackingNumber: "1Z16D13WYW85232525", isReturnLabel: false,
+      shipDate: "2026-09-16", shipmentItems: [{ lineItemKey: "wms-item-22072", quantity: 1 }],
+    }, receivedAt);
+    expect(observation.providerOccurredAt).toBeNull();
+    expect(observation.sanitizedPayload.shipDate).toBe("2026-09-16");
+    expect(observation.labelStatus).toBe("active");
+  });
+
   it("records a label artifact without inventing label-purchase time", () => {
     const observation = normalizeShipStationLabelObservation({
       shipmentId: 442_000_001,

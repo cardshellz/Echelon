@@ -4,7 +4,8 @@
  * Replaces the ShipStation-specific `deriveShipStationShipmentReconcileEvent`
  * for reconcilers that consume canonical types. Takes an `EngineOrderState`
  * and `CanonicalShipmentEvent[]` from the engine interface and returns a
- * reconcile event compatible with `dispatchShipmentEvent`.
+ * reconciliation selection. Shipped/voided selections go back through the
+ * provider authority resolver; they must not invent dispatch timestamps.
  */
 
 import type { EngineOrderState, CanonicalShipmentEvent } from "./types";
@@ -14,7 +15,8 @@ export type ReconcileEvent =
       kind: "shipped";
       trackingNumber: string;
       carrier: string;
-      shipDate: Date;
+      shipDate: Date | null;
+      shipCalendarDate?: string | null;
       serviceCode?: string | null;
       carrierCostCents?: number;
       carrierCostSource?: string;
@@ -54,7 +56,8 @@ export function deriveReconcileEvent(
         latest.trackingNumber?.trim() || input.currentTrackingNumber || "",
       carrier:
         latest.carrierRaw?.trim() || input.currentCarrier || "other",
-      shipDate: latest.shipDate instanceof Date ? latest.shipDate : new Date(latest.shipDate),
+      shipDate: latest.shipDate,
+      ...(latest.shipCalendarDate ? { shipCalendarDate: latest.shipCalendarDate } : {}),
       ...(latest.serviceCode ? { serviceCode: latest.serviceCode } : {}),
       ...(latest.carrierCostCents !== undefined && latest.carrierCostSource
         ? {

@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import { shipStationV1Instant, ShipStationDateError } from "@shared/utils/shipstation-date";
 import { normalizeTrackingNumber } from "../shipping/carrier-tracking.domain";
 
 export const SHIPSTATION_UNMAPPED_PHYSICAL_RULE =
@@ -239,8 +240,14 @@ export async function resolveShipStationUnmappedPhysicalExceptionForVoidedLabel(
   if (!shipmentRef || !voidDateText || !resolvedBy || resolvedBy.length > 120) {
     return false;
   }
-  const voidDate = new Date(voidDateText);
-  if (Number.isNaN(voidDate.getTime())) return false;
+  let voidDate: Date | null;
+  try {
+    voidDate = shipStationV1Instant(voidDateText, "voidDate");
+  } catch (error) {
+    if (!(error instanceof ShipStationDateError)) throw error;
+    return false; // Invalid provider evidence cannot resolve an exception.
+  }
+  if (voidDate === null) return false;
 
   const resolution =
     "ShipStation confirmed that the additional provider label was voided. " +
