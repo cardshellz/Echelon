@@ -504,8 +504,8 @@ test("manage: replacing the backup card is add, designate, then remove the old o
   await expect(methods.getByTestId("wallet-verification")).toBeVisible();
   expect(state.codesSent).toEqual(["remove_funding_method"]);
   await enterCode(page);
-  expect(state.deletes).toEqual(["/api/dropship/wallet/funding-methods/10"]);
   await expect(methods.getByRole("status").filter({ hasText: "Removed. Card Shellz will no longer charge it." })).toBeVisible();
+  expect(state.deletes).toEqual(["/api/dropship/wallet/funding-methods/10"]);
   await expect(methods.getByTestId("wallet-method-10")).toHaveCount(0);
   await methods.getByRole("button", { name: "Show removed" }).click();
   await expect(methods).toContainText("Visa ending in 4242 · Removed");
