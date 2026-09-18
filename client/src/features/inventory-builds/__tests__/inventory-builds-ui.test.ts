@@ -90,8 +90,17 @@ describe("Inventory Builds UI contract", () => {
   it("shows catalog variant build relationships and deep-links to recipes", () => {
     expect(relationships).toContain("/api/inventory/build-relationships/products/");
     expect(relationships).toContain('href="/inventory/builds?tab=recipes"');
-    expect(productDetail).toContain("<ProductBuildRelationships");
+    expect(productDetail).toContain("<ProductConversionCard");
+    expect(source("client/src/features/inventory-builds/ProductConversionCard.tsx")).toContain("<ProductBuildRelationships");
     expect(builds).toContain('new URLSearchParams(search).get("tab") === "recipes"');
     expect(builds).toContain("value={activeBuildsTab}");
+  });
+
+  it("labels legacy parents read-only and omits them from ordinary SKU updates", () => {
+    expect(productDetail).toContain("<TableHead>Legacy parent</TableHead>");
+    expect(productDetail).toContain("Legacy parent (read only)");
+    const update = productDetail.slice(productDetail.indexOf("const updateVariantMutation = useMutation({"));
+    const request = update.slice(0, update.indexOf("onSuccess:"));
+    expect(request).not.toContain("parentVariantId:");
   });
 });
