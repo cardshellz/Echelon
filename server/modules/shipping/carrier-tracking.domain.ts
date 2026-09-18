@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { canonicalJson } from "@shared/utils/canonical-json";
+import { normalizeShipStationDate, normalizeShipStationV1Date, ShipStationDateError } from "@shared/utils/shipstation-date";
 import { z } from "zod";
 
 export const SHIPSTATION_TRACKING_STATUS_CODES = [
@@ -671,16 +672,14 @@ function nullableCarrierCode(value: unknown): string | null {
 }
 
 function parseProviderTimestamp(value: unknown, field: string): Date | null {
-  const raw = nullableString(value);
-  if (!raw) return null;
-  const parsed = new Date(raw);
-  if (Number.isNaN(parsed.getTime())) {
-    throw new CarrierTrackingPayloadError(`ShipStation ${field} is not a valid timestamp`, {
-      field,
-      value: raw,
-    });
+  try {
+    // Tracking's occurred_at is UTC, unlike timezone-less V1 label dates.
+    const normalized = normalizeShipStationDate(value, field, "UTC");
+    return normalized.kind === "timestamp" ? new Date(normalized.iso) : null;
+  } catch (error) {
+    if (!(error instanceof ShipStationDateError)) throw error;
+    throw new CarrierTrackingPayloadError(`ShipStation ${field} is not a valid timestamp`, error.context);
   }
-  return parsed;
 }
 
 export function normalizeTrackingNumber(value: string): string {
@@ -700,8 +699,14 @@ function latestHistoryEvent(events: ShipStationTrackingHistoryEvent[]): {
   const timestamped = events.flatMap((event) => {
     const raw = nullableString(event.occurred_at);
     if (!raw) return [];
-    const occurredAt = new Date(raw);
-    if (Number.isNaN(occurredAt.getTime())) return [];
+    let occurredAt: Date | null;
+    try {
+      occurredAt = parseProviderTimestamp(raw, "occurred_at");
+    } catch (error) {
+      if (!(error instanceof CarrierTrackingPayloadError)) throw error;
+      return [];
+    }
+    if (occurredAt === null) return [];
     return [{ event, occurredAt }];
   });
   timestamped.sort((left, right) => right.occurredAt.getTime() - left.occurredAt.getTime());
@@ -906,8 +911,20 @@ export function normalizeShipStationLabelObservation(
   const shipment = parsed.data;
   const trackingNumber = shipment.trackingNumber.trim();
   const normalizedTrackingNumber = normalizeTrackingNumber(trackingNumber);
-  const shipDate = parseProviderTimestamp(shipment.shipDate, "shipDate");
-  const voidedAt = parseProviderTimestamp(shipment.voidDate, "voidDate");
+  let shipDate: Date | null;
+  let voidedAt: Date | null;
+  try {
+    const normalizedShipDate = normalizeShipStationV1Date(shipment.shipDate, "shipDate");
+    const normalizedVoidDate = normalizeShipStationV1Date(shipment.voidDate, "voidDate");
+    if (normalizedVoidDate.kind === "date") {
+      throw new ShipStationDateError("voidDate", "a cancellation requires a timestamp, not a calendar date");
+    }
+    shipDate = normalizedShipDate.kind === "timestamp" ? new Date(normalizedShipDate.iso) : null;
+    voidedAt = normalizedVoidDate.kind === "timestamp" ? new Date(normalizedVoidDate.iso) : null;
+  } catch (error) {
+    if (!(error instanceof ShipStationDateError)) throw error;
+    throw new CarrierTrackingPayloadError(error.message, error.context);
+  }
   const labelStatus: ShippingProviderLabelStatus = voidedAt ? "voided" : "active";
   const labelDirection: ShippingProviderLabelDirection = shipment.isReturnLabel === true
     ? "return"

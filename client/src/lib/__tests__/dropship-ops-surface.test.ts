@@ -2313,9 +2313,11 @@ describe("dropship ops surface client helpers", () => {
     ).toEqual({
       enabled: true,
       fundingMethodId: 99,
+      backstopFundingMethodId: null,
       minimumBalanceCents: 5000,
       maxSingleReloadCents: 25000,
       paymentHoldTimeoutMinutes: 2880,
+      acknowledgedCardFeeBps: null,
     });
     expect(
       buildAutoReloadConfigInput({
@@ -2328,9 +2330,11 @@ describe("dropship ops surface client helpers", () => {
     ).toEqual({
       enabled: false,
       fundingMethodId: null,
+      backstopFundingMethodId: null,
       minimumBalanceCents: 0,
       maxSingleReloadCents: null,
       paymentHoldTimeoutMinutes: 2880,
+      acknowledgedCardFeeBps: null,
     });
     expect(() =>
       buildAutoReloadConfigInput({

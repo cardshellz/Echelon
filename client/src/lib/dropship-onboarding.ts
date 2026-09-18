@@ -152,9 +152,7 @@ function describeWallet(
     return {
       tone: "complete",
       badge: BADGE_BY_TONE.complete,
-      detail: wallet.hasSpendableBalance
-        ? `${formatCents(wallet.availableBalanceCents)} available. Backup card on file and auto-reload on.`
-        : "Backup card on file and auto-reload on. Nothing is charged until you accept an order.",
+      detail: describeWalletComplete(wallet),
       action: { kind: "navigate", label: "Open wallet", path: "/wallet" },
     };
   }
@@ -167,20 +165,33 @@ function describeWallet(
 }
 
 /**
- * Mirrors the server's launch gate (`buildOnboardingState`): a card on file as
- * the backstop, plus auto-reload bound to a bank account or card. Names the
- * first missing piece so the vendor knows what Wallet will ask for.
+ * One story on every surface: source → floor → backup card → authorize. The
+ * onboarding state does not carry the floor, the labels or the fee rate yet,
+ * so the sentence names the rail and states the timing of the first top-up in
+ * the words of what the code does today (the first daily check after
+ * activation).
  */
-function walletTodoDetail(wallet: DropshipOnboardingState["wallet"]): string {
+function describeWalletComplete(wallet: DropshipOnboardingState["wallet"]): string {
+  const source = wallet.autoReloadFundingMethodIsCard ? "your card" : "your bank account";
+  const balance = wallet.hasSpendableBalance ? `${formatCents(wallet.availableBalanceCents)} available. ` : "";
+  return `${balance}Top-ups from ${source} to your floor; backup card on file. Your first automatic top-up runs on the first daily check after you activate${wallet.autoReloadFundingMethodIsCard ? "" : " (a bank transfer lands in up to 5 business days — our assumption)"}.`;
+}
+
+/**
+ * Mirrors the server's launch gate (`buildOnboardingState`) in the new order
+ * and names the first missing piece so the vendor knows what Wallet asks for.
+ */
+export function walletTodoDetail(wallet: DropshipOnboardingState["wallet"]): string {
+  if (!wallet.hasActiveFundingMethod || (!wallet.autoReloadFundingMethodReady && !wallet.hasStripeReadyFundingMethod)) {
+    return "Choose how your wallet tops up in Wallet: a bank account (free) or a card (with the card fee).";
+  }
   if (!wallet.hasCardBackstop) {
-    return wallet.hasActiveFundingMethod
-      ? "Add your backup card in Wallet. Bank accounts and USDC fund the wallet; the card covers an order your balance cannot."
-      : "Add your backup card in Wallet, then choose how to keep the wallet topped up.";
+    return "Add your backup card in Wallet — it covers an order your balance cannot.";
   }
   if (!wallet.autoReloadConfigured) {
-    return "Turn on auto-reload in Wallet: pick a bank account or your card to keep the balance topped up.";
+    return "Review and turn on auto-reload in Wallet.";
   }
-  return "Open Wallet to finish setup.";
+  return "Confirm your auto-reload terms in Wallet.";
 }
 
 export interface OnboardingProgress {

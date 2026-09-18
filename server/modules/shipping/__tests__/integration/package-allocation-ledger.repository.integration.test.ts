@@ -667,11 +667,14 @@ async function seedAuthorityReadinessLabel(
     readonly contentsStatus?: "authoritative" | "empty";
     readonly contentsLines?: readonly { readonly lineItemKey: string; readonly quantity: number }[];
     readonly receivedAt?: string;
+    readonly voidDate?: string;
+    readonly persistedVoidAt?: string;
   } = {},
 ): Promise<number> {
   const trackingNumber = options.trackingNumber ?? "1Z999AA10123456784";
   const providerLabelId = options.providerLabelId ?? "44001";
   const receivedAt = options.receivedAt ?? "2026-08-23T14:00:00.000Z";
+  const labelStatus = options.voidDate ? "voided" : "active";
   const hasAuthoritativeContents = (options.contentsStatus ?? "authoritative") === "authoritative";
   const contentsLines = hasAuthoritativeContents
     ? options.contentsLines ?? [{ lineItemKey: `wms-item-${sourceId}`, quantity: 2 }] : [];
@@ -684,7 +687,7 @@ async function seedAuthorityReadinessLabel(
     sourceObservationHash: "f".repeat(64),
     createDate: null,
     shipDate: null,
-    voidDate: null,
+    voidDate: options.voidDate ?? null,
     isReturnLabel: false,
     declaredContentsEvidence: {
       evidenceSchemaVersion: 1,
@@ -703,10 +706,11 @@ async function seedAuthorityReadinessLabel(
   const label = await pool.query<{ id: string }>(
     `INSERT INTO wms.shipping_provider_labels (
        provider, provider_label_id, provider_order_id, tracking_number,
-       label_status, label_direction, first_observed_at, last_observed_at
-     ) VALUES ('shipstation', $1, $2, $3, 'active', 'outbound', $4, $4)
+       label_status, label_direction, first_observed_at, last_observed_at, voided_at
+     ) VALUES ('shipstation', $1, $2, $3, $5, 'outbound', $4, $4, $6)
      RETURNING id::text AS id`,
-    [providerLabelId, options.providerOrderId ?? null, trackingNumber, receivedAt],
+    [providerLabelId, options.providerOrderId ?? null, trackingNumber, receivedAt,
+      labelStatus, options.persistedVoidAt ?? null],
   );
   const labelId = positiveSafeIntegerFromPostgres(
     label.rows[0].id,
@@ -715,14 +719,15 @@ async function seedAuthorityReadinessLabel(
   const eventHash = createHash("sha256").update(canonicalJson({
     provider: "shipstation",
     ...payload,
-    labelStatus: "active",
+    labelStatus,
   })).digest("hex");
   await pool.query(
     `INSERT INTO wms.shipping_provider_label_events (
        shipping_provider_label_id, event_hash, event_type, label_status,
        tracking_number, provider_occurred_at, received_at, sanitized_payload
-     ) VALUES ($1, $2, 'label_observed', 'active', $3, NULL, $4, $5::jsonb)`,
-    [labelId, eventHash, trackingNumber, receivedAt, JSON.stringify(payload)],
+     ) VALUES ($1, $2, $6, $7, $3, $8, $4, $5::jsonb)`,
+    [labelId, eventHash, trackingNumber, receivedAt, JSON.stringify(payload),
+      options.voidDate ? "label_voided" : "label_observed", labelStatus, options.persistedVoidAt ?? null],
   );
   return labelId;
 }
@@ -2570,6 +2575,53 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       "physical_consumption_authority_policy_unresolved",
     ]);
     expect(Object.values(await loadLedgerCounts(pool))).toEqual(Array(9).fill(0));
+  });
+
+  it("normalizes a stored legacy Pacific cancellation without bypassing split replacement authorization", async () => {
+    const sourceId = await seedCustomerFulfillmentSource(pool, "DATE-SPLIT-REGRESSION", 2);
+    const oldLabelId = await seedAuthorityReadinessLabel(pool, sourceId, {
+      providerLabelId: "458434391", trackingNumber: "9434650206217286007967",
+      voidDate: "2026-09-10T09:38:29.5370000",
+      persistedVoidAt: "2026-09-10T09:38:29.537Z",
+      receivedAt: "2026-09-10T16:38:58.068Z",
+    });
+    const firstLabelId = await seedAuthorityReadinessLabel(pool, sourceId, {
+      providerLabelId: "459620581", trackingNumber: "1Z16D13WYW85232525",
+      receivedAt: "2026-09-16T11:03:01.140Z",
+      contentsLines: [{ lineItemKey: `wms-item-${sourceId}`, quantity: 1 }],
+    });
+    const secondLabelId = await seedAuthorityReadinessLabel(pool, sourceId, {
+      providerLabelId: "459620652", trackingNumber: "1Z16D13WYW68975578",
+      receivedAt: "2026-09-16T11:03:54.592Z",
+      contentsLines: [{ lineItemKey: `wms-item-${sourceId}`, quantity: 1 }],
+    });
+    const before = await pool.query(`SELECT event_hash, sanitized_payload, provider_occurred_at::text
+      FROM wms.shipping_provider_label_events WHERE shipping_provider_label_id = $1`, [oldLabelId]);
+    const service = new PackageAllocationAuthorityResolutionPreviewService(new PgPackageAllocationLedgerRepository(pool));
+    const result = await service.preview({
+      contractVersion: 1, authorityMode: "shadow_only", previewMode: "bootstrap_selected_scope",
+      groupKey: PRIMARY_GROUP_KEY, sourceWmsShipmentItemIds: [sourceId],
+      shippingProviderLabelIds: [oldLabelId, firstLabelId, secondLabelId],
+    });
+    expect(result.readiness.packageAssessments.every((item) => item.lifecycleStatus === "projected")).toBe(true);
+    expect(result.readiness.packageAssessments.map((item) => ({
+      providerId: item.providerPhysicalShipmentId, contents: item.authoritativeContents,
+    }))).toEqual(expect.arrayContaining([
+      { providerId: "458434391", contents: [{ wmsShipmentItemId: sourceId, quantity: 2 }] },
+      { providerId: "459620581", contents: [{ wmsShipmentItemId: sourceId, quantity: 1 }] },
+      { providerId: "459620652", contents: [{ wmsShipmentItemId: sourceId, quantity: 1 }] },
+    ]));
+    // Correcting a date must not grant the separate replacement authorization.
+    // The resolver now reads all three packages instead of rejecting timestamps.
+    expect(result.resolution).toMatchObject({ outcome: "review" });
+    expect(result.resolution!.reviews.map((review) => review.code)).toEqual([
+      "replacement_action_required", "replacement_action_required",
+    ]);
+    expect(result.resolution!.plannerResult.state.desiredEffectIntents.every((intent) => !intent.executable)).toBe(true);
+    expect(Object.values(await loadLedgerCounts(pool))).toEqual(Array(9).fill(0));
+    const after = await pool.query(`SELECT event_hash, sanitized_payload, provider_occurred_at::text
+      FROM wms.shipping_provider_label_events WHERE shipping_provider_label_id = $1`, [oldLabelId]);
+    expect(after.rows).toEqual(before.rows);
   });
 
   it("resolves locked bootstrap evidence without creating ledger rows", async () => {

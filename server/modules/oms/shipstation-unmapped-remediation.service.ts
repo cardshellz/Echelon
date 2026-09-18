@@ -1,4 +1,5 @@
 import { sql } from "drizzle-orm";
+import { shipStationV1Instant, ShipStationDateError } from "@shared/utils/shipstation-date";
 import { shipmentQuantityEvidenceProjection } from "../inventory/infrastructure/shipment-quantity-evidence.sql";
 import { readSourceShipmentPostedQuantity } from "../inventory/domain/source-shipment-quantity-evidence";
 
@@ -878,11 +879,17 @@ async function resolveProviderShipment(
 
   const trackingNumber = normalizedTrackingNumber(context.trackingNumber);
   const supersededSignature = shipmentItemSignature(providerShipment);
-  const supersededVoidAt = new Date(providerShipment.voidDate);
+  let supersededVoidAt: Date | null;
+  try {
+    supersededVoidAt = shipStationV1Instant(providerShipment.voidDate, "voidDate");
+  } catch (error) {
+    if (!(error instanceof ShipStationDateError)) throw error;
+    return baseResolution;
+  }
   if (
     !trackingNumber
     || !supersededSignature
-    || Number.isNaN(supersededVoidAt.getTime())
+    || supersededVoidAt === null
   ) {
     return baseResolution;
   }
@@ -2672,8 +2679,8 @@ export async function resolveShipStationUnmappedPhysicalAsVoidedLabel(
   if (!shipment) {
     throw new Error(`ShipStation physical shipment ${providerShipmentId} was not found`);
   }
-  const voidDate = new Date(String(shipment.voidDate ?? ""));
-  if (!shipment.voidDate || Number.isNaN(voidDate.getTime())) {
+  const voidDate = shipStationV1Instant(shipment.voidDate, "voidDate");
+  if (voidDate === null) {
     throw new Error("ShipStation does not report this provider label as voided");
   }
 

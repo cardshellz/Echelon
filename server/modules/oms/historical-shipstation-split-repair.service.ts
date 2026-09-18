@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { normalizeShipStationV1Date } from "@shared/utils/shipstation-date";
 
 import type { ShipStationShipment } from "./shipstation.service";
 import { parseExactPositiveWmsShipmentItems } from "../shipping/shipstation-provider-contents.domain";
@@ -26,7 +27,8 @@ export interface HistoricalSplitProviderPackage {
   readonly trackingNumber: string;
   readonly carrierCode: string;
   readonly serviceCode: string | null;
-  readonly shippedAt: Date;
+  readonly shippedAt: Date | null;
+  readonly shipCalendarDate?: string | null;
   readonly items: readonly HistoricalSplitProviderItem[];
 }
 
@@ -216,12 +218,6 @@ function positiveInteger(value: unknown): number | null {
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
-function validDate(value: unknown): Date | null {
-  if (typeof value !== "string" || value.trim().length === 0) return null;
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? null : parsed;
-}
-
 export function historicalSplitRunId(idempotencyKey: string): string {
   const hash = crypto.createHash("sha256").update(idempotencyKey).digest("hex");
   return [
@@ -241,7 +237,8 @@ export function parseHistoricalProviderPackage(
   const orderNumber = String(shipment.orderNumber ?? "").trim();
   const trackingNumber = String(shipment.trackingNumber ?? "").trim();
   const carrierCode = String(shipment.carrierCode ?? "").trim();
-  const shippedAt = validDate(shipment.shipDate);
+  const providerShipDate = normalizeShipStationV1Date(shipment.shipDate, "shipDate");
+  const shippedAt = providerShipDate.kind === "timestamp" ? new Date(providerShipDate.iso) : null;
   if (
     providerShipmentId === null
     || providerOrderId === null
@@ -251,7 +248,7 @@ export function parseHistoricalProviderPackage(
     || trackingNumber.length > 200
     || !carrierCode
     || carrierCode.length > 100
-    || shippedAt === null
+    || providerShipDate.kind === "missing"
   ) {
     throw Object.assign(
       new Error(
@@ -298,6 +295,7 @@ export function parseHistoricalProviderPackage(
     carrierCode,
     serviceCode: String(shipment.serviceCode ?? "").trim() || null,
     shippedAt,
+    shipCalendarDate: providerShipDate.kind === "date" ? providerShipDate.date : null,
     items: Object.freeze(
       exactItems.map(({ sourceShipmentItemId, quantity }) =>
         Object.freeze({ sourceShipmentItemId, quantity })
