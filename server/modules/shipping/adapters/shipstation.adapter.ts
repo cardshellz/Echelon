@@ -17,6 +17,7 @@
  */
 
 import type { ShippingEngine } from "../engine";
+import { normalizeShipStationV1Date } from "@shared/utils/shipstation-date";
 import type {
   EnginePushResult,
   EngineCancelResult,
@@ -180,14 +181,18 @@ export function createShipStationEngine(
       const ssOrderId = fromEngineRef(engineRef);
       const ssOrder = await ss.getOrderById(ssOrderId);
       if (!ssOrder) return null;
+      const holdUntil = normalizeShipStationV1Date(ssOrder.holdUntilDate, "holdUntilDate");
+      const shipDate = normalizeShipStationV1Date(ssOrder.shipDate, "shipDate");
 
       return {
         engineRef,
         status: ssOrder.orderStatus ?? "unknown",
-        holdUntil: ssOrder.holdUntilDate ? new Date(ssOrder.holdUntilDate) : null,
+        holdUntil: holdUntil.kind === "timestamp" ? new Date(holdUntil.iso) : null,
+        holdUntilDate: holdUntil.kind === "date" ? holdUntil.date : null,
         trackingNumber: ssOrder.trackingNumber ?? null,
         carrier: ssOrder.carrierCode ?? null,
-        shipDate: ssOrder.shipDate ? new Date(ssOrder.shipDate) : null,
+        shipDate: shipDate.kind === "timestamp" ? new Date(shipDate.iso) : null,
+        shipCalendarDate: shipDate.kind === "date" ? shipDate.date : null,
       };
     },
 
@@ -204,7 +209,8 @@ export function createShipStationEngine(
       await ss.observeProviderLabels(ssShipments);
 
       return ssShipments.map((s: any) => {
-        if (s.voidDate) {
+        const voidDate = normalizeShipStationV1Date(s.voidDate, "voidDate");
+        if (voidDate.kind !== "missing") {
           return {
             kind: "voided" as const,
             shipmentId: s.shipmentId,
@@ -216,6 +222,7 @@ export function createShipStationEngine(
         const carrierCostCents = parsedCarrierCostCents !== null && parsedCarrierCostCents > 0
           ? parsedCarrierCostCents
           : undefined;
+        const shipDate = normalizeShipStationV1Date(s.shipDate, "shipDate");
         return {
           kind: "shipped" as const,
           shipmentId: s.shipmentId,
@@ -223,7 +230,8 @@ export function createShipStationEngine(
           trackingNumber: s.trackingNumber ?? "",
           carrier: normalizeCarrier(s.carrierCode ?? "other"),
           carrierRaw: s.carrierCode ?? "other",
-          shipDate: new Date(s.shipDate),
+          shipDate: shipDate.kind === "timestamp" ? new Date(shipDate.iso) : null,
+          shipCalendarDate: shipDate.kind === "date" ? shipDate.date : null,
           serviceCode: typeof s.serviceCode === "string" ? s.serviceCode.trim() || null : null,
           carrierCostCents,
           carrierCostSource: carrierCostCents === undefined ? undefined : SHIPSTATION_SHIPMENTS_API_COST_SOURCE,

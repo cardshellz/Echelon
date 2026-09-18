@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { canonicalJson } from "@shared/utils/canonical-json";
+import { normalizeShipStationDate, normalizeShipStationV1Date, SHIPSTATION_V1_TIME_ZONE, ShipStationDateError } from "@shared/utils/shipstation-date";
 import { z } from "zod";
 
 import {
@@ -650,11 +651,26 @@ function adaptLabelEvent(
     if (row.labelStatus !== "voided") {
       throw new ShadowEvidenceError("invalid_v2_label_evidence");
     }
-    const providerOccurredAt = nullableTimestamp(row.providerOccurredAt);
+    let providerOccurredAt = nullableTimestamp(row.providerOccurredAt);
     if (evidence.payload?.voidDate != null) {
-      const payloadVoidAt = timestamp(evidence.payload.voidDate);
-      if (providerOccurredAt === null || payloadVoidAt !== providerOccurredAt) {
-        throw new ShadowEvidenceError("invalid_v2_label_evidence");
+      try {
+        const normalized = normalizeShipStationV1Date(evidence.payload.voidDate, "voidDate");
+        if (normalized.kind !== "timestamp") throw new ShadowEvidenceError("invalid_persisted_timestamp");
+        // Old ingestion parsed unqualified V1 dates as UTC on the production
+        // host. Accept only that exact, reproducible legacy representation or
+        // the correct instant. Hash verification above still authenticates the
+        // unchanged raw payload; arbitrary date-column disagreements still fail.
+        const legacy = normalized.sourceTimeZone === SHIPSTATION_V1_TIME_ZONE
+          ? normalizeShipStationDate(evidence.payload.voidDate, "voidDate", "UTC")
+          : null;
+        if (providerOccurredAt === null || (providerOccurredAt !== normalized.iso
+          && !(legacy?.kind === "timestamp" && providerOccurredAt === legacy.iso))) {
+          throw new ShadowEvidenceError("invalid_v2_label_evidence");
+        }
+        providerOccurredAt = normalized.iso;
+      } catch (error) {
+        if (error instanceof ShipStationDateError) throw new ShadowEvidenceError("invalid_persisted_timestamp");
+        throw error;
       }
     }
     const voidEvent: DeclaredPackageLifecycleEvent = {

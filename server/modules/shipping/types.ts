@@ -55,7 +55,9 @@ export type CanonicalShipmentEvent =
       trackingNumber: string;
       carrier: CanonicalCarrier;
       carrierRaw: string;
-      shipDate: Date;
+      /** Null when the provider supplied only a calendar date. */
+      shipDate: Date | null;
+      shipCalendarDate?: string | null;
       trackingUrl?: string | null;
       serviceCode?: string | null;
       carrierCostCents?: number;
@@ -213,7 +215,9 @@ export interface EngineOrderState {
   engineRef: EngineRef;
   status: string;
   holdUntil?: Date | null;
+  holdUntilDate?: string | null;
   trackingNumber?: string | null;
   carrier?: string | null;
   shipDate?: Date | null;
+  shipCalendarDate?: string | null;
 }

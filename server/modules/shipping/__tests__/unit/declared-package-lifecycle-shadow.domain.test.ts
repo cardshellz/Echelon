@@ -227,6 +227,44 @@ function persistedEventFromObservation(
 }
 
 describe("persisted declared-package lifecycle adapter", () => {
+  it.each([
+    ["legacy UTC ingestion", "2026-09-10T09:38:29.537Z"],
+    ["normalized Pacific ingestion", "2026-09-10T16:38:29.537Z"],
+  ])("reads the real ShipStation V1 void-date shape from %s without changing audit evidence", (_name, providerOccurredAt) => {
+    const event = voidEvent({
+      providerOccurredAt,
+      receivedAt: "2026-09-10T16:38:58.068Z",
+      sanitizedPayload: authoritativePayload({ voidDate: "2026-09-10T09:38:29.5370000" }),
+    });
+    const input = persistedPackage({ labelEvents: [event], confirmedCarrierEvents: [] });
+    const original = JSON.stringify(input);
+    const result = projectPersistedDeclaredPackageLifecycleShadow(input);
+    expect(result).toMatchObject({ outcome: "projected", projection: {
+      labelStatus: "voided", labelVoidedProviderOccurredAt: "2026-09-10T16:38:29.537Z",
+      currentAutomationAuthority: true,
+    } });
+    expect(JSON.stringify(input)).toBe(original);
+  });
+
+  it("still rejects a stored occurrence that is neither the raw legacy date nor its canonical instant", () => {
+    const result = adaptPersistedDeclaredPackageLifecycleEvidence(persistedPackage({
+      labelEvents: [voidEvent({
+        providerOccurredAt: "2026-09-10T10:38:29.537Z",
+        sanitizedPayload: authoritativePayload({ voidDate: "2026-09-10T09:38:29.5370000" }),
+      })], confirmedCarrierEvents: [],
+    }));
+    expect(result).toEqual({ outcome: "rejected", reason: "invalid_v2_label_evidence" });
+  });
+
+  it("continues to reject tampered raw void evidence before timezone normalization", () => {
+    const event = voidEvent();
+    const result = adaptPersistedDeclaredPackageLifecycleEvidence(persistedPackage({
+      labelEvents: [{ ...event, sanitizedPayload: authoritativePayload({ voidDate: "2026-09-10T09:38:29.5370000" }) }],
+      confirmedCarrierEvents: [],
+    }));
+    expect(result.outcome).toBe("rejected");
+  });
+
   it("uses stable database event ids and original received timestamps", () => {
     const result = adaptPersistedDeclaredPackageLifecycleEvidence(persistedPackage());
 
