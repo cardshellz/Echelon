@@ -1,3 +1,4 @@
+import { reconcileEbayLabelReplacement as reconcileLabelReplacement, readLabelReplacementMaterialization, type AuthorizedLabelReplacement, type EbayLabelReplacementResult } from "./ebay-label-replacement.repository";
 import { createHash } from "node:crypto";
 
 import { sql } from "drizzle-orm";
@@ -235,6 +236,9 @@ export interface ClaimChannelFulfillmentCommandsInput {
 }
 
 export interface ChannelFulfillmentAuthorityRepository {
+  reconcileEbayLabelReplacement?(labelId: number, now: Date): Promise<EbayLabelReplacementResult | null>;
+  markEbayLabelReplacementProjected?(labelId: number, now: Date): Promise<void>;
+  findWaitingEbayLabelReplacements?(limit: number): Promise<readonly number[]>;
   resolveLegacyPhysicalPackage(legacyWmsShipmentId: number): Promise<ResolvedLegacyPhysicalPackage>;
   validatePhysicalPackageIdentity(input: MaterializePhysicalPackageInput): Promise<void>;
   materializePhysicalPackage(input: MaterializePhysicalPackageInput): Promise<MaterializePhysicalPackageResult>;
@@ -1915,6 +1919,7 @@ async function findOrCreatePhysicalCustomerItem(
   tx: any,
   item: Omit<MaterializedCustomerItem, "physicalShipmentItemId">,
   physicalShipmentId: number,
+  labelReplacement = false,
 ): Promise<number> {
   const existing = firstRow<{
     id: number;
@@ -1924,7 +1929,9 @@ async function findOrCreatePhysicalCustomerItem(
   }>(await tx.execute(sql`
     SELECT id, physical_shipment_id, shipment_request_item_id, quantity_shipped
     FROM wms.physical_shipment_items
-    WHERE legacy_wms_shipment_item_id = ${item.legacyWmsShipmentItemId}
+    WHERE ${labelReplacement
+      ? sql`label_replacement_source_item_id = ${item.legacyWmsShipmentItemId} AND physical_shipment_id = ${physicalShipmentId}`
+      : sql`legacy_wms_shipment_item_id = ${item.legacyWmsShipmentItemId}`}
     FOR UPDATE
   `));
   if (existing) {
@@ -1949,6 +1956,7 @@ async function findOrCreatePhysicalCustomerItem(
       fulfillment_plan_line_id,
       wms_order_item_id,
       legacy_wms_shipment_item_id,
+      label_replacement_source_item_id,
       shipment_item_purpose,
       replacement_for_order_item_id,
       product_variant_id,
@@ -1960,7 +1968,8 @@ async function findOrCreatePhysicalCustomerItem(
       ${item.shipmentRequestItemId},
       ${item.fulfillmentPlanLineId},
       ${item.wmsOrderItemId},
-      ${item.legacyWmsShipmentItemId},
+      ${labelReplacement ? null : item.legacyWmsShipmentItemId},
+      ${labelReplacement ? item.legacyWmsShipmentItemId : null},
       'customer_fulfillment',
       NULL,
       ${item.productVariantId},
@@ -2372,6 +2381,7 @@ async function insertChannelCommand(
   const metadata = {
     contractVersion: 1,
     source: input.source,
+    ...(input.source === "shipstation_label_replacement" ? { trackingReplacement: true } : {}),
     notifyCustomer: command.notifyCustomer,
     shippingProvider: input.shippingProvider,
     providerPhysicalShipmentId: input.providerPhysicalShipmentId,
@@ -4035,6 +4045,8 @@ export function createChannelFulfillmentAuthorityRepository(
 
   async function materializePhysicalPackage(
     rawInput: MaterializePhysicalPackageInput,
+    authorizedReplacement?: AuthorizedLabelReplacement,
+    transactionOverride?: any,
   ): Promise<MaterializePhysicalPackageResult> {
     const input = canonicalizeInput(rawInput);
     const providerOrderIdentity = requireProviderOrderIdentity(input);
@@ -4045,7 +4057,7 @@ export function createChannelFulfillmentAuthorityRepository(
       );
     }
 
-    return db.transaction(async (tx: any) => {
+    const execute = async (tx: any): Promise<MaterializePhysicalPackageResult> => {
       await acquireIdentityLocks(
         tx,
         input.shippingProvider,
@@ -4055,7 +4067,27 @@ export function createChannelFulfillmentAuthorityRepository(
 
       const contextRows = await loadLegacyPackageRows(tx, input, true);
 
-      validateLegacyHeaders(contextRows, input);
+      if (!authorizedReplacement) {
+        validateLegacyHeaders(contextRows, input);
+        const replay = firstRow<{ physical_shipment_id: string; source_item_ids: number[] }>(await tx.execute(sql`
+          SELECT work.physical_shipment_id, work.source_item_ids FROM wms.ebay_label_replacement_work work
+          JOIN wms.physical_shipments package ON package.id = work.physical_shipment_id
+          WHERE work.state = 'applied' AND package.provider = ${input.shippingProvider}
+            AND package.provider_physical_shipment_id = ${input.providerPhysicalShipmentId}
+            AND package.tracking_number = ${input.trackingNumber}`));
+        if (replay) {
+          if (contextRows.length !== replay.source_item_ids.length || contextRows.some(row => !replay.source_item_ids.includes(Number(row.legacy_shipment_item_id)))) {
+            throw new FulfillmentAuthorityError("PACKAGE_IDENTITY_CONFLICT", "Replacement replay differs from its exact source set");
+          }
+          const engineId = await findOrCreateShippingEngineOrder(tx, input);
+          await findOrCreatePhysicalShipment(tx, input, engineId); // Revalidate provider order, carrier and tracking.
+          return readLabelReplacementMaterialization(tx, Number(replay.physical_shipment_id));
+        }
+      } else if (contextRows.length !== authorizedReplacement.sourceItemIds.length
+        || contextRows.some(row => !authorizedReplacement.sourceItems.some(item => item.sourceShipmentItemId === Number(row.legacy_shipment_item_id)
+          && item.quantity === Number(row.quantity_shipped)))) {
+        throw new FulfillmentAuthorityError("PACKAGE_IDENTITY_CONFLICT", "Replacement must cover exact whole source shipment contents");
+      }
       const { customerItems, nonCustomerRows } = normalizeCustomerItems(contextRows);
       if (customerItems.length === 0 && nonCustomerRows.length === 0) {
         throw new FulfillmentAuthorityError(
@@ -4095,7 +4127,7 @@ export function createChannelFulfillmentAuthorityRepository(
           shipmentRequestId,
           shipmentRequestItemId,
         };
-        const physicalShipmentItemId = await findOrCreatePhysicalCustomerItem(tx, stagedItem, physicalShipmentId);
+        const physicalShipmentItemId = await findOrCreatePhysicalCustomerItem(tx, stagedItem, physicalShipmentId, Boolean(authorizedReplacement));
         materializedCustomerItems.push({ ...stagedItem, physicalShipmentItemId });
       }
 
@@ -4189,7 +4221,26 @@ export function createChannelFulfillmentAuthorityRepository(
         customerFulfillmentItemCount: materializedCustomerItems.length,
         nonCustomerItemCount,
       });
-    });
+    };
+    return transactionOverride ? execute(transactionOverride) : db.transaction(execute);
+  }
+
+  async function reconcileEbayLabelReplacement(labelId: number, now: Date): Promise<EbayLabelReplacementResult | null> {
+    return db.transaction(async (tx: any) => reconcileLabelReplacement(tx, labelId, now,
+      (input, authority) => materializePhysicalPackage(input, authority, tx)));
+  }
+
+  async function markEbayLabelReplacementProjected(labelId: number, now: Date): Promise<void> {
+    await db.execute(sql`UPDATE wms.ebay_label_replacement_work SET projected_at = ${now}
+      WHERE shipping_provider_label_id = ${labelId} AND state = 'applied' AND projected_at IS NULL`);
+  }
+
+  async function findWaitingEbayLabelReplacements(limit: number): Promise<readonly number[]> {
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new FulfillmentAuthorityError("INVALID_INPUT", "Invalid replacement batch limit");
+    return rowsOf<{ shipping_provider_label_id: string }>(await db.execute(sql`
+      SELECT shipping_provider_label_id FROM wms.ebay_label_replacement_work
+      WHERE state = 'waiting' OR (state = 'applied' AND projected_at IS NULL) ORDER BY updated_at, shipping_provider_label_id LIMIT ${limit}`))
+      .map(row => Number(row.shipping_provider_label_id));
   }
 
   async function claimCommands(
@@ -4290,6 +4341,13 @@ export function createChannelFulfillmentAuthorityRepository(
         SELECT command.id
         FROM oms.channel_fulfillment_pushes AS command
         WHERE command.push_status IN ('pending', 'retry')
+          AND NOT EXISTS (SELECT 1 FROM wms.physical_shipments package
+            JOIN wms.shipping_provider_labels label ON label.provider = package.provider
+              AND label.provider_label_id = package.provider_physical_shipment_id
+            WHERE package.id = command.physical_shipment_id AND command.channel_provider = 'ebay'
+              AND label.label_status IN ('voided', 'superseded'))
+          AND NOT EXISTS (SELECT 1 FROM wms.ebay_label_replacement_work replacement
+            WHERE replacement.physical_shipment_id = command.physical_shipment_id AND replacement.projected_at IS NULL)
           AND command.next_attempt_at <= ${input.now}
           AND command.attempt_count < command.max_attempts
           ${idFilter}
@@ -4335,6 +4393,7 @@ export function createChannelFulfillmentAuthorityRepository(
           ) AS shipment_request_item_id,
           COALESCE(
             physical_item.legacy_wms_shipment_item_id,
+            physical_item.label_replacement_source_item_id,
             allocation_source.source_wms_shipment_item_id
           ) AS legacy_wms_shipment_item_id,
           legacy_item.shipment_id AS legacy_wms_shipment_id,
@@ -4351,6 +4410,7 @@ export function createChannelFulfillmentAuthorityRepository(
         JOIN wms.outbound_shipment_items AS legacy_item
           ON legacy_item.id = COALESCE(
             physical_item.legacy_wms_shipment_item_id,
+            physical_item.label_replacement_source_item_id,
             allocation_source.source_wms_shipment_item_id
           )
         WHERE push_item.channel_fulfillment_push_id IN (${buildIdList(dueIds)})
@@ -4522,6 +4582,9 @@ export function createChannelFulfillmentAuthorityRepository(
   }
 
   return {
+    reconcileEbayLabelReplacement,
+    findWaitingEbayLabelReplacements,
+    markEbayLabelReplacementProjected,
     resolveLegacyPhysicalPackage,
     validatePhysicalPackageIdentity,
     materializePhysicalPackage,

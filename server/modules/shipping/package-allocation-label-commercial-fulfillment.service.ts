@@ -49,7 +49,7 @@ export interface PackageAllocationLabelCommercialWorkflowContext {
   readonly bootstrap: Pick<PackageAllocationBootstrapPersistenceService, "persistDiscovered">;
   readonly fulfillmentAuthority: Pick<
     ChannelFulfillmentAuthorityService,
-    "materializeAndActivatePackageAllocationCommercialFulfillment"
+    "materializeAndActivatePackageAllocationCommercialFulfillment" | "reconcileEbayLabelReplacement"
   >;
 }
 
@@ -60,7 +60,8 @@ export interface PackageAllocationLabelCommercialWorkflow {
 
 export type PackageAllocationLabelCommercialFulfillmentResult =
   | Readonly<{ outcome: "disabled" | "skipped"; reason: string }>
-  | Readonly<{ outcome: "review"; reason: string }>
+  | Readonly<{ outcome: "review" | "waiting"; reason: string }>
+  | Readonly<{ outcome: "replaced"; physicalShipmentId: number; commandIds: readonly number[] }>
   | Readonly<{
       outcome: "activated";
       planId: string;
@@ -221,6 +222,8 @@ export class PackageAllocationLabelCommercialFulfillmentService {
     try {
       const links = await this.dependencies.labelLinker.reconcileShipStationLabel(providerShipmentId);
       const result = await this.dependencies.workflow.run(async (context) => {
+        const replacement = await context.fulfillmentAuthority.reconcileEbayLabelReplacement?.(Number(labelObservation.shippingProviderLabelId));
+        if (replacement) return { replacement, bootstrap: null, activated: null };
         const bootstrap = await context.bootstrap.persistDiscovered({
           contractVersion: 1,
           authorityMode: "shadow_only",
@@ -230,7 +233,7 @@ export class PackageAllocationLabelCommercialFulfillmentService {
         });
         const planId = bootstrap.persistence?.planId;
         if (bootstrap.outcome === "review" || !planId) {
-          return { bootstrap, activated: null };
+          return { bootstrap, activated: null, replacement: null };
         }
         const activated: MaterializeAndActivatePackageAllocationCommercialFulfillmentResult =
           await context.fulfillmentAuthority.materializeAndActivatePackageAllocationCommercialFulfillment({
@@ -241,9 +244,19 @@ export class PackageAllocationLabelCommercialFulfillmentService {
             activatedBy: ACTIVATION_ACTOR,
             activationReason: ACTIVATION_REASON,
           });
-        return { bootstrap, activated };
+        return { bootstrap, activated, replacement: null };
       });
+      if (result.replacement?.outcome === "applied") return {
+        outcome: "replaced", physicalShipmentId: result.replacement.materialized.physicalShipmentId,
+        commandIds: result.replacement.materialized.channelCommands.map(command => command.id),
+      };
+      if (result.replacement) {
+        if (result.replacement.outcome === "review") await this.recordReview(shipment, labelObservation,
+          result.replacement.reason, sourceWmsShipmentItemIds, { authority: "ebay_label_replacement" });
+        return result.replacement;
+      }
       const { bootstrap, activated } = result;
+      if (!bootstrap) throw new Error("Label workflow returned no authority result");
       if (activated === null) {
         const reason = bootstrapReviewReason(bootstrap);
         await this.recordReview(shipment, labelObservation, reason, sourceWmsShipmentItemIds, {
