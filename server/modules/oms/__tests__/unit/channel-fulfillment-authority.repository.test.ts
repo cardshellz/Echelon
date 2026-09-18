@@ -273,7 +273,7 @@ describe("channel fulfillment authority repository", () => {
     expect(itemQuery).toContain("LEFT JOIN wms.package_allocation_entries AS allocation_entry");
     expect(itemQuery).toContain("LEFT JOIN wms.package_allocation_source_lines AS allocation_source");
     expect(itemQuery).toContain(
-      "COALESCE( physical_item.legacy_wms_shipment_item_id, allocation_source.source_wms_shipment_item_id )",
+      "COALESCE( physical_item.legacy_wms_shipment_item_id, physical_item.label_replacement_source_item_id, allocation_source.source_wms_shipment_item_id )",
     );
   });
 });

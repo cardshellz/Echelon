@@ -137,7 +137,9 @@ describe("channel-writeback.service", () => {
     expect(text).toContain("push.push_status IN ('success', 'ignored')");
     expect(text).toContain("oms.channel_fulfillment_receipt_items");
     expect(text).toContain("receipt.processing_status IN ('processed', 'ignored')");
-    expect(text).toContain("physical_item.legacy_wms_shipment_item_id = eligible_item.id");
+    expect(text).toContain("wms.effective_physical_shipment_items");
+    expect(text).toContain("physical_item.label_replacement_source_item_id");
+    expect(text).toContain("allocation_source.source_wms_shipment_item_id) = eligible_item.id");
     expect(text).toContain("LEFT JOIN LATERAL");
     expect(text).not.toMatch(
       /c\.provider = 'shopify'[^)]*shopify_fulfillment_id[^)]*IS NOT NULL/,

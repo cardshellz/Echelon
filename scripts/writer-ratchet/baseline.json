@@ -1304,6 +1304,9 @@
   "wms.combined_order_groups": [
     "modules/orders"
   ],
+  "wms.ebay_label_replacement_work": [
+    "modules/oms"
+  ],
   "wms.fulfillment_plan_lines": [
     "modules/oms"
   ],

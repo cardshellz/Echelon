@@ -661,6 +661,7 @@ async function seedAuthorityReadinessLabel(
   sourceId: number,
   options: {
     readonly providerLabelId?: string;
+    readonly carrierCode?: string;
     readonly trackingNumber?: string;
     readonly providerOrderId?: string;
     readonly contentsStatus?: "authoritative" | "empty";
@@ -676,6 +677,7 @@ async function seedAuthorityReadinessLabel(
     ? options.contentsLines ?? [{ lineItemKey: `wms-item-${sourceId}`, quantity: 2 }] : [];
   const payload = {
     payloadSchemaVersion: 2,
+    ...(options.carrierCode ? { carrierCode: options.carrierCode } : {}),
     providerLabelId,
     trackingNumber,
     observationSource: "shipstation_shipment_observation",
@@ -1029,6 +1031,222 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     }
     if (roleCleanupFailure !== undefined) throw roleCleanupFailure;
   });
+
+  it.each(["late_void", "void_first", "both_grouped", "rollback", "concurrent", "worker_projection_failure", "health", "processing", "competing", "repeated"])("conserves eBay combined relabel authority: %s", async mode => {
+    const first = await seedCommercialFulfillmentAuthoritySource(pool, "EBAY-RELABEL-A", 2);
+    const second = await seedCommercialFulfillmentAuthoritySource(pool, "EBAY-RELABEL-B", 1);
+    await pool.query("UPDATE channels.channels SET provider = 'ebay'");
+    await pool.query("UPDATE oms.oms_orders SET external_order_id = 'ebay-order-' || id");
+    await pool.query("UPDATE oms.oms_order_lines SET fulfillment_provider = 'ebay', external_line_item_id = 'ebay-line-' || id");
+    await seedCanonicalRequestForSource(pool, first);
+    await seedCanonicalRequestForSource(pool, second);
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    let workerTime = new Date("2026-09-18T12:00:00Z");
+    const clock = { now: () => new Date(workerTime) };
+    async function advanceWorkerClockToDueCommands() {
+      // Command admission uses PostgreSQL now(). A fixed test date eventually
+      // precedes that deadline. Advance this injected worker clock from the
+      // persisted schedule, rounding past PostgreSQL's sub-millisecond precision.
+      const { rows } = await pool.query<{ due_at: Date | null }>(
+        "SELECT MAX(next_attempt_at) + INTERVAL '1 millisecond' AS due_at FROM oms.channel_fulfillment_pushes",
+      );
+      if (rows[0].due_at && rows[0].due_at > workerTime) workerTime = rows[0].due_at;
+    }
+    const workflow = createPackageAllocationLabelCommercialWorkflow({ pool, clock, logger });
+    let failBeforeCommit = false;
+    const replacementReviews = vi.fn();
+    const handler = new PackageAllocationLabelCommercialFulfillmentService({ enabled: true, logger,
+      labelLinker: { reconcileShipStationLabel: vi.fn().mockResolvedValue({ linksInserted: 0, totalLinks: 0 }) },
+      reviewRepository: { record: replacementReviews },
+      workflow: { run: work => workflow.run(async context => {
+        const result = await work(context);
+        if (failBeforeCommit) throw new Error("injected replacement rollback");
+        return result;
+      }) },
+    });
+    async function makeLabel(providerLabelId: string, items: { lineItemKey: string; quantity: number }[]) {
+      const id = await seedAuthorityReadinessLabel(pool, first, { providerLabelId, providerOrderId: "99001", carrierCode: "ups",
+        trackingNumber: `TRACK${providerLabelId}`, contentsLines: items, receivedAt: "2026-09-17T12:00:00Z" });
+      await pool.query("UPDATE wms.shipping_provider_labels SET carrier = 'ups' WHERE id = $1", [id]);
+      await pool.query(`INSERT INTO wms.shipping_provider_label_links (shipping_provider_label_id, legacy_wms_shipment_id)
+        SELECT DISTINCT $1::bigint, shipment_id FROM wms.outbound_shipment_items WHERE id = ANY($2::integer[])`,
+        [id, items.map(item => Number(item.lineItemKey.replace("wms-item-", "")))]);
+      const shipment = { shipmentId: Number(providerLabelId), orderId: 99001, trackingNumber: `TRACK${providerLabelId}`,
+        isReturnLabel: false, shipmentItems: items };
+      return { id, receive: () => handler.process(shipment, { shippingProviderLabelId: String(id) } as any) };
+    }
+    const a = { lineItemKey: `wms-item-${first}`, quantity: 2 };
+    const b = { lineItemKey: `wms-item-${second}`, quantity: 1 };
+    const original = await makeLabel("44010", [a]);
+    const originalResult = await original.receive();
+    expect(originalResult, JSON.stringify({ originalResult, logs: logger.warn.mock.calls, reviews: replacementReviews.mock.calls })).toMatchObject({ outcome: "activated" });
+    const originalB = mode === "both_grouped" ? await makeLabel("44012", [b]) : null;
+    if (originalB) expect(await originalB.receive()).toMatchObject({ outcome: "activated" });
+    const replacement = await makeLabel("44011", [a, b]);
+    if (mode === "late_void") {
+      expect(await replacement.receive()).toMatchObject({ outcome: "waiting", reason: "awaiting_replaced_label_void" });
+      expect((await pool.query("SELECT SUM(quantity_shipped)::int AS qty FROM wms.effective_physical_shipment_items")).rows).toEqual([{ qty: 2 }]);
+    }
+    async function voidLabel(oldId: number) {
+      const old = (await pool.query("SELECT sanitized_payload FROM wms.shipping_provider_label_events WHERE shipping_provider_label_id = $1 ORDER BY id LIMIT 1", [oldId])).rows[0].sanitized_payload;
+      const payload = { ...old, voidDate: "2026-09-17T13:00:00Z" };
+      const hash = createHash("sha256").update(canonicalJson({ provider: "shipstation", ...payload, labelStatus: "voided" })).digest("hex");
+      await pool.query(`INSERT INTO wms.shipping_provider_label_events (shipping_provider_label_id, event_hash, event_type,
+        label_status, tracking_number, provider_occurred_at, received_at, sanitized_payload)
+        VALUES ($1, $2, 'label_voided', 'voided', $3, '2026-09-17T13:00:00Z', '2026-09-17T13:00:00Z', $4)`, [oldId, hash, payload.trackingNumber, payload]);
+      await pool.query("UPDATE wms.shipping_provider_labels SET label_status = 'voided', last_observed_at = '2026-09-17T13:00:00Z' WHERE id = $1", [oldId]);
+    }
+    for (const oldId of [original.id, ...(originalB ? [originalB.id] : [])]) await voidLabel(oldId);
+    if (mode === "competing") {
+      await makeLabel("44013", [a, b]);
+      expect(await replacement.receive()).toMatchObject({ outcome: "review", reason: "multiple_active_replacement_candidates" });
+      expect((await pool.query("SELECT id FROM wms.physical_shipment_item_quantity_adjustments")).rowCount).toBe(0);
+      expect((await pool.query("SELECT id FROM inventory.inventory_transactions")).rowCount).toBe(0);
+      return;
+    }
+    if (mode === "processing") {
+      await pool.query("UPDATE oms.channel_fulfillment_pushes SET push_status = 'processing'");
+      expect(await replacement.receive()).toMatchObject({ outcome: "waiting", reason: "previous_channel_command_processing" });
+      expect((await pool.query("SELECT id FROM wms.physical_shipment_item_quantity_adjustments")).rowCount).toBe(0);
+      await pool.query("UPDATE oms.channel_fulfillment_pushes SET push_status = 'success'");
+    }
+    if (mode === "rollback") {
+      failBeforeCommit = true;
+      await expect(replacement.receive()).rejects.toThrow("injected replacement rollback");
+      expect((await pool.query("SELECT id FROM wms.physical_shipment_item_quantity_adjustments")).rowCount).toBe(0);
+      expect((await pool.query("SELECT SUM(quantity_shipped)::int AS qty FROM wms.effective_physical_shipment_items")).rows).toEqual([{ qty: 2 }]);
+      failBeforeCommit = false;
+    }
+    if (mode === "worker_projection_failure") {
+      const workerRepository = createChannelFulfillmentAuthorityRepository(getTestDb());
+      const applied = await workerRepository.reconcileEbayLabelReplacement!(replacement.id, clock.now());
+      expect(applied).toMatchObject({ outcome: "applied" });
+      await advanceWorkerClockToDueCommands();
+      const worker = createChannelFulfillmentAuthorityService({ repository: workerRepository, clock, logger,
+        projector: { projectPhysicalShipment: vi.fn().mockRejectedValue(new Error("injected projection failure")) },
+        providerExecutor: { execute: vi.fn().mockRejectedValue(new Error("Provider must remain blocked")) },
+      });
+      expect(await worker.runDueBatch({ limit: 25 })).toMatchObject({ claimed: 0 });
+      expect(await workerRepository.findWaitingEbayLabelReplacements!(25)).toEqual([replacement.id]);
+    }
+    const results = mode === "concurrent"
+      ? await Promise.all([replacement.receive(), replacement.receive()]) : [await replacement.receive()];
+    for (const result of results) expect(result, JSON.stringify(result)).toMatchObject({ outcome: "replaced", commandIds: expect.any(Array) });
+    expect(await replacement.receive()).toMatchObject({ outcome: "replaced" });
+    expect((await pool.query("SELECT quantity_planned, quantity_shipped FROM wms.fulfillment_plan_lines ORDER BY id")).rows)
+      .toEqual([{ quantity_planned: 2, quantity_shipped: 2 }, { quantity_planned: 1, quantity_shipped: 1 }]);
+    expect((await pool.query(`SELECT package.tracking_number, item.quantity_shipped FROM wms.effective_physical_shipment_items item
+      JOIN wms.physical_shipments package ON package.id = item.physical_shipment_id ORDER BY item.wms_order_item_id`)).rows)
+      .toEqual([{ tracking_number: "TRACK44011", quantity_shipped: 2 }, { tracking_number: "TRACK44011", quantity_shipped: 1 }]);
+    const repository = createChannelFulfillmentAuthorityRepository(getTestDb());
+    await advanceWorkerClockToDueCommands();
+    const commands = await repository.claimCommands({ now: clock.now(), limit: 25, leaseToken: "relabel-test", leaseDurationMs: 120000 });
+    expect(commands).toHaveLength(2);
+    expect(commands.map(command => command.items[0].legacyWmsShipmentItemId).sort()).toEqual([first, second]);
+    expect(commands.every(command => command.trackingNumber === "TRACK44011" && command.metadata.trackingReplacement === true)).toBe(true);
+    const providerOrders = (await pool.query(`SELECT orders.id, orders.channel_id, orders.external_order_id, line.external_line_item_id,
+      line.paid_quantity FROM oms.oms_orders orders JOIN oms.oms_order_lines line ON line.order_id = orders.id ORDER BY orders.id`)).rows;
+    const providerPackages = new Map<string, { fulfillmentId: string; shipmentTrackingNumber: string; shippedDate: string;
+      lineItems: { lineItemId: string; quantity: number }[] }[]>();
+    providerOrders.forEach((order, index) => providerPackages.set(order.external_order_id, index === 0 || originalB ? [{
+      fulfillmentId: `provider-${order.id}`, shipmentTrackingNumber: index === 0 ? "TRACK44010" : "TRACK44012",
+      shippedDate: "2026-09-17T12:00:00Z", lineItems: [{ lineItemId: order.external_line_item_id, quantity: order.paid_quantity }],
+    }] : []));
+    const request = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      const path = String(url);
+      if (path.endsWith("/ws/api.dll")) {
+        const orderId = /<OrderID>([^<]+)<\/OrderID>/.exec(String(init?.body))?.[1];
+        const existing = orderId ? providerPackages.get(orderId) : undefined;
+        if (!existing?.[0]) throw new Error("Unexpected amendment order scope");
+        existing[0] = { ...existing[0], shipmentTrackingNumber: "TRACK44011" };
+        return new Response("<CompleteSaleResponse><Ack>Success</Ack></CompleteSaleResponse>");
+      }
+      const order = providerOrders.find(order => path.includes(`/order/${order.external_order_id}`));
+      if (!order) throw new Error("Unexpected provider account/order request");
+      const packages = providerPackages.get(order.external_order_id)!;
+      if (init?.method === "POST") {
+        const body = JSON.parse(String(init.body));
+        expect(packages).toHaveLength(0);
+        packages.push({ fulfillmentId: `provider-${order.id}`, shipmentTrackingNumber: body.trackingNumber,
+          shippedDate: body.shippedDate, lineItems: body.lineItems });
+        return new Response(null, { status: 201, headers: { Location: `${path}/provider-${order.id}` } });
+      }
+      if (path.endsWith("/shipping_fulfillment")) return Response.json({ fulfillments: packages });
+      return Response.json({ orderId: order.external_order_id, orderFulfillmentStatus: "FULFILLED",
+        cancelStatus: { cancelState: "NONE_REQUESTED", cancelRequests: [] },
+        lineItems: [{ lineItemId: order.external_line_item_id, quantity: order.paid_quantity, lineItemFulfillmentStatus: "FULFILLED" }] });
+    });
+    const push = createFulfillmentPushService(getTestDb(), null, { providerClients: {
+      shopify: async () => { throw new Error("Unexpected Shopify account"); },
+      ebay: async channelId => ({ channelId, externalAccountId: `account-${channelId}`,
+        client: new EbayApiClient({ getAccessToken: async () => "test-token" }, channelId, "sandbox", { request, strictFulfillmentReadback: true }) }),
+    } });
+    const executor = createCompatibilityChannelFulfillmentProviderExecutor(push);
+    for (const command of commands) {
+      await expect(executor.execute(command)).resolves.toMatchObject({ outcome: "success", providerResponseId: `provider-${command.omsOrderId}` });
+    }
+    const mutationCount = request.mock.calls.filter(call => call[1]?.method === "POST").length;
+    expect(mutationCount).toBe(2);
+    for (const command of commands) await executor.execute(command);
+    expect(request.mock.calls.filter(call => call[1]?.method === "POST")).toHaveLength(mutationCount);
+    expect([...providerPackages.values()].map(packages => packages[0].shipmentTrackingNumber)).toEqual(["TRACK44011", "TRACK44011"]);
+    // Carrier finalization reuses the proven replacement package and commands.
+    await pool.query("UPDATE wms.outbound_shipments SET status = 'shipped', tracking_number = 'TRACK44011'");
+    const shipmentIds = (await pool.query("SELECT id FROM wms.outbound_shipments ORDER BY id")).rows.map(row => row.id);
+    const dispatchReplay = await repository.materializePhysicalPackage({ legacyWmsShipmentIds: shipmentIds,
+      shippingProvider: "shipstation", providerPhysicalShipmentId: "44011", providerOrderId: "99001",
+      trackingNumber: "TRACK44011", carrier: "ups", shippedAt: clock.now(), source: "carrier_tracking_confirmed_dispatch",
+      legacyHeaderPolicy: "aggregate_projection" });
+    expect(dispatchReplay.channelCommands.map(command => command.id)).toEqual(commands.map(command => command.id));
+    expect((await pool.query("SELECT SUM(quantity_shipped)::int AS qty FROM wms.effective_physical_shipment_items")).rows).toEqual([{ qty: 3 }]);
+
+    if (mode === "health") {
+      const { findChannelWritebackCandidates } = await import("../../../oms/channel-writeback.service");
+      await pool.query("ALTER TABLE wms.orders ADD COLUMN source_table_id VARCHAR(100)");
+      await pool.query("UPDATE wms.orders SET source = 'oms'");
+      await pool.query(`CREATE TABLE oms.webhook_retry_queue (
+        id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, provider TEXT NOT NULL,
+        status TEXT NOT NULL, topic TEXT NOT NULL, payload JSONB NOT NULL)`);
+      // Empty inbound receipt relations complete the health reader's schema;
+      // this scenario only produces outbound canonical commands.
+      await pool.query(`CREATE TABLE oms.channel_fulfillment_receipts (
+        id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, oms_order_id BIGINT NOT NULL,
+        source_provider TEXT NOT NULL, processing_status TEXT NOT NULL);
+        CREATE TABLE oms.channel_fulfillment_receipt_items (
+        id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, receipt_id BIGINT NOT NULL,
+        legacy_wms_shipment_item_id INTEGER, quantity INTEGER NOT NULL)`);
+      await pool.query("UPDATE wms.outbound_shipments SET shipped_at = NOW() - INTERVAL '2 hours'");
+      await pool.query(`INSERT INTO oms.oms_order_events(order_id, event_type, details)
+        SELECT orders.oms_fulfillment_order_id::bigint, 'tracking_pushed',
+          jsonb_build_object('wmsShipmentId', shipment.id, 'trackingNumber', 'TRACK44010')
+        FROM wms.outbound_shipments shipment JOIN wms.orders orders ON orders.id = shipment.order_id`);
+      const candidates = () => findChannelWritebackCandidates(getTestDb(), {
+        provider: "ebay", minAgeMinutes: 1, maxAgeDays: null, excludeRetryStates: false,
+      });
+      // Both tracking_pushed events exist, but each current command must settle.
+      expect(await candidates()).toHaveLength(2);
+      await pool.query("UPDATE oms.channel_fulfillment_pushes SET push_status = 'success' WHERE id = $1", [commands[0].id]);
+      expect(await candidates()).toHaveLength(1);
+      await pool.query("UPDATE oms.channel_fulfillment_pushes SET push_status = 'success' WHERE id = $1", [commands[1].id]);
+      expect(await candidates()).toHaveLength(0);
+    }
+
+    expect((await pool.query("SELECT tracking_number FROM oms.oms_orders ORDER BY id")).rows)
+      .toEqual([{ tracking_number: "TRACK44011" }, { tracking_number: "TRACK44011" }]);
+    expect((await pool.query("SELECT id FROM inventory.inventory_transactions")).rowCount).toBe(0);
+    expect((await pool.query("SELECT qty FROM wms.outbound_shipment_items ORDER BY id")).rows).toEqual([{ qty: 2 }, { qty: 1 }]);
+    if (mode === "repeated") {
+      await pool.query("UPDATE oms.channel_fulfillment_pushes SET push_status = 'success' WHERE id = ANY($1::integer[])", [commands.map(command => command.id)]);
+      await voidLabel(replacement.id);
+      const next = await makeLabel("44014", [a, b]);
+      expect(await next.receive()).toMatchObject({ outcome: "replaced" });
+      expect((await pool.query(`SELECT package.tracking_number, item.quantity_shipped FROM wms.effective_physical_shipment_items item
+        JOIN wms.physical_shipments package ON package.id = item.physical_shipment_id ORDER BY item.wms_order_item_id`)).rows)
+        .toEqual([{ tracking_number: "TRACK44014", quantity_shipped: 2 }, { tracking_number: "TRACK44014", quantity_shipped: 1 }]);
+      expect((await pool.query("SELECT id FROM wms.physical_shipment_item_quantity_adjustments")).rowCount).toBe(3);
+      expect((await pool.query("SELECT id FROM inventory.inventory_transactions")).rowCount).toBe(0);
+    }
+  }, 20000);
 
   it("records one immutable business-shipped fact for an explicit outbound label observation", async () => {
     const label = await pool.query<{ id: number }>(

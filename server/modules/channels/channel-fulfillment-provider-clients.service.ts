@@ -21,7 +21,7 @@ export interface ChannelFulfillmentProviderClients {
   ebay(channelId: number): Promise<Readonly<{
     channelId: number;
     externalAccountId: string;
-    client: Pick<EbayApiClient, "createShippingFulfillment">;
+    client: Pick<EbayApiClient, "createShippingFulfillment"> & Partial<Pick<EbayApiClient, "replaceShippingFulfillmentTracking">>;
   }>>;
 }
 
@@ -92,7 +92,13 @@ export function createChannelFulfillmentProviderClients(dependencies: {
       });
       // Successful HTTP envelopes can still fail while being interpreted by the
       // legacy client. Preserve domain conflicts, never persist raw body errors.
-      const safeClient: Pick<EbayApiClient, "createShippingFulfillment"> = Object.freeze({
+      const safeClient: Pick<EbayApiClient, "createShippingFulfillment" | "replaceShippingFulfillmentTracking"> = Object.freeze({
+        async replaceShippingFulfillmentTracking(orderId, fulfillment, previousTrackingNumbers) {
+          try { return await client.replaceShippingFulfillmentTracking(orderId, fulfillment, previousTrackingNumbers); } catch (error) {
+            if (error instanceof ChannelFulfillmentProviderError || error instanceof EbayFulfillmentIdempotencyConflictError) throw error;
+            throw new ChannelFulfillmentProviderError("EBAY_TRACKING_RESPONSE_INVALID", "eBay tracking replacement could not be verified", "transient");
+          }
+        },
         async createShippingFulfillment(orderId, fulfillment) {
           try { return await client.createShippingFulfillment(orderId, fulfillment); } catch (error) {
             if (error instanceof ChannelFulfillmentProviderError || error instanceof EbayFulfillmentIdempotencyConflictError) throw error;

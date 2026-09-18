@@ -94,13 +94,14 @@ export async function readFulfillmentRequestAllocation(
     shipment_request_item_id: string; fulfillment_plan_line_id: string; legacy_wms_shipment_item_id: number | null;
     provider: string; provider_physical_shipment_id: string; quantity_shipped: number; effective_quantity: number;
   }>(await tx.execute(sql`
-    SELECT item.shipment_request_item_id, item.fulfillment_plan_line_id, item.legacy_wms_shipment_item_id,
+    SELECT item.shipment_request_item_id, item.fulfillment_plan_line_id, COALESCE(item.legacy_wms_shipment_item_id, item.label_replacement_source_item_id) AS legacy_wms_shipment_item_id,
       package.provider, package.provider_physical_shipment_id, item.quantity_shipped,
       item.quantity_shipped + COALESCE(adjustment.quantity_delta, 0) AS effective_quantity
     FROM wms.physical_shipment_items AS item
     JOIN wms.physical_shipments AS package ON package.id = item.physical_shipment_id
     LEFT JOIN wms.physical_shipment_item_quantity_adjustments AS adjustment ON adjustment.physical_shipment_item_id = item.id
-    WHERE item.shipment_item_purpose = 'customer_fulfillment'
+    WHERE adjustment.adjustment_kind IS DISTINCT FROM 'provider_label_replacement'
+      AND item.shipment_item_purpose = 'customer_fulfillment'
       AND (item.fulfillment_plan_line_id = ${fulfillmentPlanLineId}::bigint
         OR item.legacy_wms_shipment_item_id = ${target.legacyWmsShipmentItemId})
     ORDER BY item.id

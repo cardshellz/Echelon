@@ -530,6 +530,7 @@ export function createServices(
   });
   fulfillmentPush.setShopifyClient(createDefaultShopifyAdminClient());
   const channelFulfillmentAuthority = createChannelFulfillmentAuthorityService({
+    labelReplacementEnabled: !envFlagEnabled("PACKAGE_ALLOCATION_COMMERCIAL_FULFILLMENT_DISABLED"),
     repository: createChannelFulfillmentAuthorityRepository(db),
     projector: createChannelFulfillmentProjector(db),
     providerExecutor: createCompatibilityChannelFulfillmentProviderExecutor(fulfillmentPush),
