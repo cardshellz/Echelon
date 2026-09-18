@@ -108,22 +108,30 @@ describe("describeOnboardingStep", () => {
     expect(describeOnboardingStep(step("catalog_selection", "complete"), state({ catalog: { vendorSelectionRuleCount: 3 } })).detail).toContain("3 product selection rules saved");
   });
 
-  it("names the first missing wallet piece: backup card, then auto-reload", () => {
+  it("names the first missing wallet piece in the new order: source, backup card, authorize, terms", () => {
     const empty = describeOnboardingStep(step("wallet_payment"), state());
     expect(empty).toMatchObject({ tone: "todo", action: { kind: "navigate", label: "Set up wallet", path: "/wallet" } });
-    expect(empty.detail).toBe("Add your backup card in Wallet, then choose how to keep the wallet topped up.");
+    expect(empty.detail).toBe("Choose how your wallet tops up in Wallet: a bank account (free) or a card (with the card fee).");
 
-    const bankOnly = describeOnboardingStep(step("wallet_payment"), state({ wallet: { hasActiveFundingMethod: true } }));
-    expect(bankOnly.detail).toContain("the card covers an order your balance cannot");
+    const bankOnly = describeOnboardingStep(step("wallet_payment"), state({ wallet: { hasActiveFundingMethod: true, hasStripeReadyFundingMethod: true } }));
+    expect(bankOnly.detail).toBe("Add your backup card in Wallet — it covers an order your balance cannot.");
 
-    const cardOnly = describeOnboardingStep(step("wallet_payment"), state({ wallet: { hasActiveFundingMethod: true, hasCardBackstop: true } }));
-    expect(cardOnly.detail).toBe("Turn on auto-reload in Wallet: pick a bank account or your card to keep the balance topped up.");
+    const cardOnly = describeOnboardingStep(step("wallet_payment"), state({ wallet: { hasActiveFundingMethod: true, hasStripeReadyFundingMethod: true, hasCardBackstop: true } }));
+    expect(cardOnly.detail).toBe("Review and turn on auto-reload in Wallet.");
+
+    const unacknowledged = describeOnboardingStep(step("wallet_payment"), state({ wallet: { hasActiveFundingMethod: true, hasStripeReadyFundingMethod: true, hasCardBackstop: true, autoReloadConfigured: true } }));
+    expect(unacknowledged.detail).toBe("Confirm your auto-reload terms in Wallet.");
 
     const ready = describeOnboardingStep(step("wallet_payment", "complete"), state({ wallet: { hasCardBackstop: true, autoReloadConfigured: true, walletReady: true } }));
-    expect(ready).toMatchObject({ tone: "complete", detail: "Backup card on file and auto-reload on. Nothing is charged until you accept an order.", action: { kind: "navigate", label: "Open wallet", path: "/wallet" } });
+    expect(ready).toMatchObject({ tone: "complete", action: { kind: "navigate", label: "Open wallet", path: "/wallet" } });
+    expect(ready.detail).toBe("Top-ups from your bank account to your floor; backup card on file. Your first automatic top-up runs on the first daily check after you activate (a bank transfer lands in up to 5 business days — our assumption).");
+    expect(ready.detail).not.toContain("Nothing is charged until you accept an order");
+
+    const cardSource = describeOnboardingStep(step("wallet_payment", "complete"), state({ wallet: { hasCardBackstop: true, autoReloadConfigured: true, walletReady: true, autoReloadFundingMethodIsCard: true } }));
+    expect(cardSource.detail).toBe("Top-ups from your card to your floor; backup card on file. Your first automatic top-up runs on the first daily check after you activate.");
 
     const funded = describeOnboardingStep(step("wallet_payment", "complete"), state({ wallet: { hasCardBackstop: true, autoReloadConfigured: true, walletReady: true, hasSpendableBalance: true, availableBalanceCents: 12_345 } }));
-    expect(funded.detail).toBe("$123.45 available. Backup card on file and auto-reload on.");
+    expect(funded.detail.startsWith("$123.45 available. Top-ups from your bank account")).toBe(true);
   });
 
   it("marks every blocked step as blocked with no button, and explains the membership on the profile row", () => {

@@ -5,116 +5,45 @@ import { describe, expect, it } from "vitest";
 /**
  * Source contract for the vendor Wallet page. The page is a React component
  * with browser-only dependencies, so its structure is checked from source and
- * its behavior from the browser journey in test/browser/dropship-wallet.spec.ts.
+ * its behavior from the browser journeys in test/browser/dropship-wallet.spec.ts.
  */
 const source = readFileSync(join(__dirname, "..", "DropshipPortalWallet.tsx"), "utf8");
 
 function between(start: string, end: string): string {
   const from = source.indexOf(start);
-  const to = source.indexOf(end, from);
-  expect(from).toBeGreaterThan(0);
-  expect(to).toBeGreaterThan(from);
+  const to = source.indexOf(end, from + start.length);
+  expect(from, start).toBeGreaterThan(0);
+  expect(to, end).toBeGreaterThan(from);
   return source.slice(from, to);
 }
 
+const STEP_COMPONENTS = ["function IntroStep", "function SourceStep", "function FloorStep", "function BackupStep", "function ReviewStep", "function DepositStep", "function ManageView"];
+
 describe("DropshipPortalWallet contract", () => {
-  it("derives one next step from the wallet overview instead of showing every form at once", () => {
-    expect(source).toContain("deriveWalletSetupState(wallet)");
-    expect(source).toContain("setup.stage === \"ready\"");
-    expect(source).toContain("<SetupSection");
-    expect(source).toContain("<BalanceSection");
-    expect(source).toContain("<AutoReloadSection");
-  });
-
-  it("shows a paused vendor why selling stopped, from the same onboarding state the shell refreshes after wallet changes", () => {
-    expect(source).toContain("useQuery<DropshipOnboardingState>({");
-    expect(source).toContain("queryKey: [...ONBOARDING_QUERY_KEY],");
-    expect(source).toContain("const standingNotice = onboardingQuery.data ? describeVendorStanding(onboardingQuery.data.vendor) : null;");
-    const notice = source.indexOf('data-testid="wallet-vendor-standing-notice"');
-    expect(notice).toBeGreaterThan(0);
-    expect(notice).toBeLessThan(source.indexOf("{walletQuery.error && ("));
-  });
-
-  it("puts the backup card first, then a bank-or-card choice for top-ups, with the card's role and fee stated before it is added", () => {
-    expect(source).toContain("{ key: \"card\", title: \"Add your backup card\" }");
-    expect(source).toContain("{ key: \"top_up\", title: \"Choose how to top up\" }");
-    const setup = between("function SetupSection", "function BalanceSection");
-    expect(setup).toContain("data-testid=\"wallet-backup-card-role\"");
-    expect(setup).toContain("data-testid=\"wallet-card-fee-note\"");
-    expect(setup).toContain("aria-label=\"Top up from\"");
-    expect(setup).toContain("title=\"Bank account\"");
-    expect(setup).toContain("Add a bank account");
-    expect(setup).toContain("title=\"Card\"");
-  });
-
-  it("words the top-up policy from the model, so the page never claims a fixed reload amount", () => {
-    expect(source).toContain("describeTopUpRule(terms)");
-    expect(source).toContain("describeTopUpFee(terms)");
-    expect(source).toContain("describeAutoReloadMandate(terms)");
-    expect(source).toContain("{PAUSE_ON_DECLINE_NOTE}");
-    expect(source).toContain("describeAutoReloadPolicy({ autoReload, method, backupCard, cardFundingFeeBps })");
-    expect(source).toContain("label=\"Keep my balance at\"");
-    expect(source).toContain("label=\"Largest single top-up\"");
-    expect(source).not.toContain("Add this much each time");
-    expect(source).not.toContain("Reload when my balance drops below");
-  });
-
-  it("lets a ready wallet add funds by bank account, card or USDC, and keeps only the hold timeout and saved methods under Advanced", () => {
-    const balance = between("function BalanceSection", "function AutoReloadSection");
-    expect(balance).toContain("aria-label=\"Pay with\"");
-    expect(balance).toContain("<UsdcFundingPanel");
-    expect(balance).toContain("describeFundingQuote(payWith.method, quote)");
-    const advanced = between("function AdvancedSection", "function ActivitySection");
-    expect(advanced).toContain("<Collapsible open={open}");
-    expect(advanced).toContain("useState(false)");
-    for (const heading of ["Payment hold timeout", "Saved methods"]) {
-      expect(advanced).toContain(`<h3 className="font-medium">${heading}</h3>`);
+  it("renders the six steps and the manage view in order, decided only by deriveWalletFlow", () => {
+    let last = -1;
+    for (const component of STEP_COMPONENTS) {
+      const index = source.indexOf(component);
+      expect(index, component).toBeGreaterThan(last);
+      last = index;
     }
-    expect(advanced).not.toContain("USDC on Base");
-    expect(advanced).not.toContain("Bank account (ACH)");
+    expect(source.match(/deriveWalletFlow\(/g)).toHaveLength(1);
+    expect(source).not.toContain("from \"@/components/ui/switch\"");
+    expect(source).not.toContain("<Checkbox");
+    expect(source).toContain("adaptWalletView(await fetchJson<unknown>(WALLET_QUERY_KEY[0]))");
   });
 
-  it("replaces free-text money fields with whole-dollar presets on the setup step", () => {
-    expect(source).toContain("AUTO_RELOAD_MINIMUM_PRESETS_CENTS");
-    expect(source).toContain("AUTO_RELOAD_CAP_PRESETS_CENTS");
-    expect(source).toContain("role=\"radio\"");
-    const setup = between("function SetupSection", "function BalanceSection");
-    expect(setup).not.toContain("<Input");
-    // The cap can never sit below the balance it protects.
-    expect(setup).toContain("if (capCents < cents) setCapCents(smallestCapFor(cents, capOptions));");
-    expect(setup).toContain("isOptionDisabled={(cents) => cents < minimumCents}");
+  it("holds no money or duration policy of its own", () => {
+    expect(source).not.toMatch(/"3%"|0\.03|"2 hours"|"a few days"|\(2 × your floor\)/);
+    expect(source).not.toMatch(/[^\w_-](300|120|2880)[^\w_-]/);
+    expect(source).not.toMatch(/\d_\d{3}/);
+    expect(source).toContain("formatDurationMinutes(");
+    expect(source).toContain("describeLimitDerivation(");
+    expect(source).toContain("formatFeeRate(wallet.cardFundingFeeBps)");
+    expect(source).not.toMatch(/\.isDefault/);
   });
 
-  it("renders notices and the emailed code prompt inside the acting section, not at the top of the page", () => {
-    expect(source).toContain("function SectionFeedback");
-    const sections = ["function SetupSection", "function BalanceSection", "function AutoReloadSection", "function AdvancedSection"];
-    for (const section of sections) {
-      const body = source.slice(source.indexOf(section));
-      expect(body.slice(0, body.indexOf("\n}\n"))).toContain("<SectionFeedback");
-    }
-    expect(source).toContain("data-testid=\"wallet-verification\"");
-  });
-
-  it("reuses a live proof and parks the request until the code is accepted", () => {
-    expect(source).toContain("isDropshipSensitiveProofActive({ principal, action, proof: sensitiveProofs[action] })");
-    expect(source).toContain("setVerification({ scope, action, intent })");
-    expect(source).toContain("await run(scope, intent)");
-  });
-
-  it("polls for the Stripe webhook after a successful setup, for a card or a bank account, bounded by a timeout", () => {
-    expect(source).toContain("CARD_CONFIRMATION_POLL_INTERVAL_MS");
-    expect(source).toContain("CARD_CONFIRMATION_POLL_TIMEOUT_MS");
-    expect(source).toContain("const awaitingCard = returnedFromSetup && setupRail === \"stripe_card\"");
-    expect(source).toContain("const awaitingBank = returnedFromSetup && setupRail === \"stripe_ach\"");
-    expect(source).toContain("window.history.replaceState");
-  });
-
-  it("offers the way back to onboarding only while the vendor is still onboarding", () => {
-    expect(source).toContain("{setup.stage === \"ready\" && stillOnboarding && (");
-    expect(source).toContain("isOnboardingVendor(onboardingQuery.data.vendor.status)");
-  });
-
-  it("only ever calls the existing wallet routes", () => {
+  it("only ever calls the routes of the contract, with DELETE reserved for removal", () => {
     const routes = [...source.matchAll(/"\/api\/dropship\/[^"]+"/g)].map((match) => match[0]);
     expect(new Set(routes)).toEqual(new Set([
       "\"/api/dropship/wallet?limit=50\"",
@@ -125,5 +54,67 @@ describe("DropshipPortalWallet contract", () => {
       "\"/api/dropship/wallet/funding/stripe/checkout-session\"",
       "\"/api/dropship/wallet/funding-methods/usdc-base\"",
     ]));
+    expect(source.match(/deleteJson</g)).toHaveLength(1);
+    expect(between("function removeMethod", "function addFunds")).toContain("deleteJson<");
+    expect(between("function removeMethod", "function addFunds")).toContain("buildRemoveFundingMethodPath(method.fundingMethodId)");
+    expect(source).toContain("\"add_funding_method\" | \"wallet_funding_high_value\" | \"remove_funding_method\"");
+    expect(source.match(/depositFundingMethodFor\(/g)).toHaveLength(2);
+  });
+
+  it("renders feedback and an impact statement in every step but the intro, and one button that authorizes", () => {
+    for (const [start, end] of [["function SourceStep", "function tryParseDollarInputToCents"], ["function FloorStep", "function centsToDollarText"], ["function BackupStep", "function buildReviewRows"], ["function ReviewStep", "function FundingControls"], ["function DepositStep", "function ManageView"]]) {
+      const body = between(start, end);
+      expect(body, start).toContain("<SectionFeedback");
+      expect(body, start).toMatch(/<Impact>|data-testid="wallet-impact"/);
+    }
+    const intro = between("function IntroStep", "function SourcePicker");
+    expect(intro).not.toContain("wallet-impact");
+    const review = between("function ReviewStep", "function FundingControls");
+    expect(review).toContain("Agree and turn on auto-reload");
+    expect(review).toContain("disabled={busy || disabled}");
+    expect(between("function authorize", "function savePlan")).toContain("buildAuthorizeInput(plan, wallet)");
+    expect(source).toContain("data-testid=\"wallet-verification\"");
+  });
+
+  it("pre-disables removal from roles and words the dialog honestly", () => {
+    const methods = between("function SavedMethods", "function ActivitySection");
+    expect(methods).toContain("disabledReasonForRemoval(method, flow.canTurnOffAutoReload)");
+    expect(methods).toContain("disabled={feedback.busy || reason !== null}");
+    expect(methods).toContain("We also ask Stripe to remove it. Card Shellz will no longer charge it.");
+    expect(source).not.toContain("It can no longer be charged");
+    expect(source).not.toContain("has been notified");
+    expect(between("function showError", "async function run")).toContain("describeWalletError(caught.code, caught.message, caught.context, { surface, limits })");
+  });
+
+  it("keeps the turn-off control behind canTurnOffAutoReload and the Save label behind acknowledgementForSave", () => {
+    expect(source).toContain("{flow.canTurnOffAutoReload && <TurnOffDialog");
+    expect(source).toContain("acknowledgementForSave({ autoReload: wallet.autoReload, cardFundingFeeBps: wallet.cardFundingFeeBps })");
+    expect(source).toContain("submitLabel={ack.saveLabel}");
+    expect(source).toContain("saveLabel={ack.saveLabel}");
+    expect(source).toContain("Transfer started.");
+    expect(source).toContain("Payment received.");
+  });
+
+  it("keeps the standing notice above the wallet error, strips the Stripe marker, and never sends the daily cost", () => {
+    const notice = source.indexOf('data-testid="wallet-vendor-standing-notice"');
+    expect(notice).toBeGreaterThan(0);
+    expect(notice).toBeLessThan(source.indexOf("{walletErrorText && ("));
+    expect(source).toContain("window.history.replaceState");
+    expect(source).toContain("flow.source?.rail === \"stripe_card\" ? (");
+    expect(source).toContain("readWalletDraft(storageOrNull(), vendorId)");
+    // Request builders receive plans and wallets only; the daily cost lives in the draft and component state.
+    for (const builder of ["buildAuthorizeInput(", "buildPlanSaveInput(", "buildConfirmTermsInput(", "buildAutoReloadDisableInput("]) {
+      for (const match of source.matchAll(new RegExp(builder.replace("(", "\\(") + "([^)]*)\\)", "g"))) {
+        expect(match[1], builder).not.toMatch(/daily|cost/i);
+      }
+    }
+    expect(between("function addFunds", "function saveUsdcMethod")).not.toMatch(/daily|cost/i);
+  });
+
+  it("states the intro in the words of what happens today", () => {
+    expect(source).toContain("INTRO_VERIFICATION_NOTE");
+    expect(source).not.toContain("passkey enrollment");
+    expect(source).toContain("describeIntro({ cardFundingFeeBps: wallet.cardFundingFeeBps, usdcOffered: wallet.usdcBaseDepositAddress !== null, holdTimeoutMinutes: flow.holdTimeoutMinutes })");
+    expect(source).toContain("describeActivationTopUp(");
   });
 });

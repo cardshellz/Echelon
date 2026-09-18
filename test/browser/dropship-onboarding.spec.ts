@@ -113,7 +113,7 @@ test("shows one checklist with a button on each open step, the store panel below
   await expect(checklist.getByTestId("onboarding-step-catalog_selection").getByRole("button", { name: "Open catalog" })).toBeVisible();
   const walletRow = checklist.getByTestId("onboarding-step-wallet_payment");
   await expect(walletRow).toContainText("To do");
-  await expect(walletRow).toContainText("Add your backup card in Wallet, then choose how to keep the wallet topped up.");
+  await expect(walletRow).toContainText("Choose how your wallet tops up in Wallet: a bank account (free) or a card (with the card fee).");
   // The old right-hand gate cards are gone: one place for status, one place for the action.
   await expect(page.getByText("Catalog availability")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Manage catalog" })).toHaveCount(0);
