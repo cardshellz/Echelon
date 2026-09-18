@@ -2,6 +2,11 @@ import { describe, expect, it } from "vitest";
 import { resolveShipStationShipmentTimestamp } from "../../shipstation-date.util";
 
 describe("resolveShipStationShipmentTimestamp", () => {
+  it("uses Pacific time for a timezone-less V1 instant instead of appending Z", () => {
+    const result = resolveShipStationShipmentTimestamp("2026-09-10T09:38:29.5370000", new Date("2026-09-11T00:00:00Z"));
+    expect(result.toISOString()).toBe("2026-09-10T16:38:29.537Z");
+  });
+
   it("uses the processing timestamp for ShipStation date-only shipDate values", () => {
     const fallback = new Date("2026-05-02T18:49:25.469Z");
 
