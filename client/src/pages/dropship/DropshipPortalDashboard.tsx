@@ -49,7 +49,7 @@ import {
   isPausedForFunding,
   type VendorStandingNotice,
 } from "@/lib/dropship-vendor-standing";
-import { isOnboardingVendor } from "@/lib/dropship-onboarding";
+import { isOnboardingVendor, walletTodoDetail } from "@/lib/dropship-onboarding";
 import { DropshipPortalShell } from "./DropshipPortalShell";
 
 type DropshipWalletLedgerEntry = DropshipWalletResponse["wallet"]["recentLedger"][number];
@@ -784,9 +784,9 @@ function dashboardNextAction(onboarding: DropshipOnboardingState | undefined): D
   if (isPausedForFunding(onboarding.vendor)) {
     return {
       actionLabel: "Open wallet",
-      message: "Selling is paused because your wallet funding failed. Add funds or update your card; selling resumes on its own once your balance is back to the minimum.",
+      message: "Selling is paused because a top-up failed. Add money in Wallet — a card payment counts at once, a bank transfer only once it settles. Selling resumes on its own when your available balance is back to your floor.",
       path: "/wallet",
-      title: "Fund your wallet to resume selling",
+      title: "Add money to resume selling",
     };
   }
 
@@ -836,11 +836,19 @@ function dashboardNextAction(onboarding: DropshipOnboardingState | undefined): D
     };
   }
 
+  if (onboarding.wallet.autoReloadConfigured && onboarding.wallet.hasCardBackstop) {
+    return {
+      actionLabel: "Open wallet",
+      message: "Auto-reload is on but your agreement to the card fee is not on record. Confirm the terms in Wallet before you activate.",
+      path: "/wallet",
+      title: "Confirm your auto-reload terms",
+    };
+  }
   return {
     actionLabel: "Open wallet",
-    message: "Add a funding method or configure auto-reload so accepted orders can be paid automatically.",
+    message: "Choose your top-up source, set your floor, add a backup card, then turn on auto-reload.",
     path: "/wallet",
-    title: "Set up wallet funding",
+    title: "Set up your wallet",
   };
 }
 
@@ -862,9 +870,6 @@ function launchStepDetail(step: DropshipOnboardingStep, onboarding: DropshipOnbo
     return onboarding.catalog.hasVendorSelection
       ? `${onboarding.catalog.vendorSelectionRuleCount} vendor selection rule(s) saved.`
       : "No product selection has been saved yet.";
-  }
-  if (onboarding.wallet.walletReady) {
-    return "Wallet funding and auto-reload are ready.";
   }
   return walletGateDetail(onboarding);
 }
@@ -893,7 +898,7 @@ function walletMetricValue(
   settings: DropshipSettingsResponse["settings"] | undefined,
   onboarding: DropshipOnboardingState | undefined,
 ): string {
-  if (onboarding?.wallet.walletReady) return "Ready";
+  // The value is always the balance; readiness is the detail line.
   if (settings) return formatCents(settings.wallet.availableBalanceCents);
   if (onboarding) return formatCents(onboarding.wallet.availableBalanceCents);
   return "Loading";
@@ -911,14 +916,11 @@ function walletMetricDetail(
 }
 
 function walletGateDetail(onboarding: DropshipOnboardingState): string {
-  if (onboarding.wallet.walletReady) return "Wallet funding and auto-reload are ready.";
-  if (!onboarding.wallet.autoReloadEnabled) return "Auto-reload is not enabled.";
-  if (!onboarding.wallet.autoReloadFundingMethodReady) return "Auto-reload needs a ready funding method.";
-  // A balance does not satisfy the gate: only a card can back auto-reload.
-  if (!onboarding.wallet.hasCardBackstop) {
-    return "Add a card as the backstop for auto-reload.";
+  if (onboarding.wallet.walletReady) {
+    return `Top-ups from ${onboarding.wallet.autoReloadFundingMethodIsCard ? "card" : "bank"} · backup card on file`;
   }
-  return "Wallet setup needs attention.";
+  // The same next-piece sentence as the onboarding checklist row.
+  return walletTodoDetail(onboarding.wallet);
 }
 
 function connectedStoreSummaryDetail(connection: DropshipStoreConnectionSummary): string {

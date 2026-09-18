@@ -2178,12 +2178,14 @@ export type DropshipWalletFundingRail =
 
 export interface DropshipAutoReloadConfigInput {
   fundingMethodId: number | null;
+  /** The designated backup card (spec D4). Ignored by the server until it stores one; the client always sends it. */
+  backstopFundingMethodId: number | null;
   enabled: boolean;
   minimumBalanceCents: number;
   maxSingleReloadCents: number | null;
   paymentHoldTimeoutMinutes: number;
-  /** The card fee rate the vendor was shown when agreeing; the server refuses a stale one. */
-  acknowledgedCardFeeBps?: number;
+  /** The card fee rate the vendor agreed to; the server refuses a stale one. Null only when disabling. */
+  acknowledgedCardFeeBps: number | null;
 }
 
 export interface DropshipAutoReloadConfigResponse {
@@ -2725,6 +2727,14 @@ export async function postJson<T>(url: string, body: unknown): Promise<T> {
     credentials: "include",
     body: JSON.stringify(body),
   });
+  if (!response.ok) {
+    throw await responseError(response);
+  }
+  return response.json() as Promise<T>;
+}
+
+export async function deleteJson<T>(url: string): Promise<T> {
+  const response = await fetch(url, { method: "DELETE", credentials: "include" });
   if (!response.ok) {
     throw await responseError(response);
   }
@@ -4413,12 +4423,17 @@ export function listingPreviewPushableCount(
 export function buildAutoReloadConfigInput(input: {
   enabled: boolean;
   fundingMethodId: string;
+  backstopFundingMethodId?: string;
   minimumBalance: string;
   maxSingleReload: string;
   paymentHoldTimeoutMinutes: string;
+  acknowledgedCardFeeBps?: number | null;
 }): DropshipAutoReloadConfigInput {
   const fundingMethodId = input.fundingMethodId.trim()
     ? parsePositiveInteger(input.fundingMethodId, "fundingMethodId")
+    : null;
+  const backstopFundingMethodId = input.backstopFundingMethodId?.trim()
+    ? parsePositiveInteger(input.backstopFundingMethodId, "backstopFundingMethodId")
     : null;
   const minimumBalanceCents = parseDollarInputToCents(
     input.minimumBalance,
@@ -4455,9 +4470,11 @@ export function buildAutoReloadConfigInput(input: {
   return {
     enabled: input.enabled,
     fundingMethodId,
+    backstopFundingMethodId,
     minimumBalanceCents,
     maxSingleReloadCents,
     paymentHoldTimeoutMinutes,
+    acknowledgedCardFeeBps: input.acknowledgedCardFeeBps ?? null,
   };
 }
 
