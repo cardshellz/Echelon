@@ -1,4 +1,7 @@
-import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import React, { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { Link, useLocation, useSearch } from "wouter";
+import { fetchJson, HttpResponseError } from "./inventory-planning-http";
+import { inventoryPlanningProductHref, parseInventoryPlanningProductId } from "./inventory-planning-navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   createTransformationModelDraftRequestSchema,
@@ -10,16 +13,7 @@ import {
   type UpdateTransformationModelDraftRequest,
 } from "@shared/types/inventory-availability-admin";
 import {
-  applyInventoryAvailabilityBackfillDraftRequestSchema,
-  applyInventoryAvailabilityBackfillDraftResultSchema,
-  inventoryAvailabilityBackfillQueueResponseSchema,
   inventoryAvailabilityChannelPreviewSchema,
-  refreshInventoryAvailabilityBackfillDraftRequestSchema,
-  refreshInventoryAvailabilityBackfillDraftResultSchema,
-  reviewInventoryAvailabilityBackfillDraftRequestSchema,
-  reviewInventoryAvailabilityBackfillDraftResultSchema,
-  type InventoryAvailabilityBackfillQueueResponse,
-  type InventoryAvailabilityBackfillQueueRow,
   type InventoryAvailabilityChannelPreview,
 } from "@shared/types/inventory-availability-backfill";
 import {
@@ -28,18 +22,6 @@ import {
   type PlannerShadowRunDto,
 } from "@shared/types/inventory-availability-planner";
 import {
-  abortInventoryActivationRequestSchema,
-  captureInventoryPublicationReadbacksRequestSchema,
-  inventoryActivationDryRunSchema,
-  inventoryActivationCommandResultSchema,
-  inventoryPublicationReadbackRunSchema,
-  openInventoryActivationStatusResponseSchema,
-  prepareInventoryActivationRequestSchema,
-  runInventoryActivationDryRunRequestSchema,
-} from "@shared/types/inventory-availability-phase4";
-import { z } from "zod";
-import {
-  AlertTriangle,
   ArrowRight,
   Pencil,
   PlayCircle,
@@ -80,12 +62,6 @@ import {
   unavailableBuildBindingsForEdit,
   transformationRuntimeLabel,
 } from "./supply-transformations-model";
-import { PromiseSafetyPolicyPanel } from "./promise-safety-policy-panel";
-import { InventoryCatalogBatchPanel } from "./inventory-catalog-batch-panel";
-import { InventoryCutoverPreflightPanel } from "./inventory-cutover-preflight-panel";
-import { InventoryCutoverControls } from "./inventory-cutover-controls";
-import { InventoryCutoverOpeningPanel } from "./inventory-cutover-opening-panel";
-import { InventoryPublicationRecoveryPanel } from "./inventory-publication-recovery-panel";
 
 type DraftMutationInput =
   | { kind: "create"; request: CreateTransformationModelDraftRequest }
@@ -97,48 +73,28 @@ type DraftMutationInput =
     };
 
 export default function SupplyTransformations() {
-  const { user, hasPermission } = useAuth();
+  const { hasPermission } = useAuth();
+  const canView = hasPermission("inventory_planning", "view");
   const canEdit = hasPermission("inventory_planning", "edit");
-  const canActivate = hasPermission("inventory_planning", "activate");
   const queryClient = useQueryClient();
   const { toast } = useToast();
   const nextRowId = useRef(1);
   const idempotencyKey = useRef<string | null>(null);
   const shadowIdempotencyKey = useRef<string | null>(null);
-  const backfillIdempotencyKey = useRef<string | null>(null);
-  const refreshBackfillIdempotencyKey = useRef<string | null>(null);
-  const reviewIdempotencyKey = useRef<string | null>(null);
-  const activationDryRunIdempotencyKey = useRef<string | null>(null);
-  const publicationReadbackIdempotencyKey = useRef<string | null>(null);
-  const activationPrepareIdempotencyKey = useRef<string | null>(null);
-  const activationAbortIdempotencyKey = useRef<string | null>(null);
   const [search, setSearch] = useState("");
   const deferredSearch = useDeferredValue(search.trim());
-  const [productId, setProductId] = useState<number | null>(null);
+  const searchParams = useSearch();
+  const [, navigate] = useLocation();
+  const productId = parseInventoryPlanningProductId(searchParams);
+  const setProductId = (selectedId: number | null) => navigate(
+    inventoryPlanningProductHref("/inventory/supply-transformations", selectedId),
+  );
   const [editingCurrentDraft, setEditingCurrentDraft] = useState(false);
   const [buildToPromiseEnabled, setBuildToPromiseEnabled] = useState(false);
   const [selectedBuildRecipeIds, setSelectedBuildRecipeIds] = useState<number[]>([]);
   const [buildAuthorityResolutionConfirmed, setBuildAuthorityResolutionConfirmed] = useState(false);
   const [paths, setPaths] = useState<PathDraft[]>([]);
   const [changeReason, setChangeReason] = useState("");
-  const [queueSearch, setQueueSearch] = useState("");
-  const [queueStateFilter, setQueueStateFilter] = useState("all");
-  const [backfillReason, setBackfillReason] = useState("");
-  const [refreshBackfillReason, setRefreshBackfillReason] = useState("");
-  const [reviewReason, setReviewReason] = useState("");
-  const [activationDryRunReason, setActivationDryRunReason] = useState("");
-  const [publicationReadbackReason, setPublicationReadbackReason] = useState("");
-  const [activationPrepareReason, setActivationPrepareReason] = useState("");
-  const [activationAbortReason, setActivationAbortReason] = useState("");
-
-  const migrationQueueQuery = useQuery<InventoryAvailabilityBackfillQueueResponse>({
-    queryKey: ["/api/inventory-planning/admin/migration-queue"],
-    queryFn: () => fetchJson(
-      "/api/inventory-planning/admin/migration-queue",
-      inventoryAvailabilityBackfillQueueResponseSchema,
-    ),
-  });
-
   const productsQuery = useQuery<ProductOption[]>({
     queryKey: ["/api/inventory-planning/admin/products", deferredSearch],
     queryFn: async () => (await fetchJson(
@@ -147,6 +103,7 @@ export default function SupplyTransformations() {
       }`,
       inventoryPlanningProductOptionsResponseSchema,
     )).products,
+    enabled: canView,
   });
   const viewQuery = useQuery<SupplyTransformationsAdminView>({
     queryKey: ["/api/inventory-planning/admin/supply-transformations", productId],
@@ -154,7 +111,7 @@ export default function SupplyTransformations() {
       `/api/inventory-planning/admin/supply-transformations/${productId}`,
       supplyTransformationsAdminViewSchema,
     ),
-    enabled: productId !== null,
+    enabled: canView && productId !== null,
   });
   const view = viewQuery.data;
   const shadowQuery = useQuery<PlannerShadowRunDto | null>({
@@ -170,7 +127,7 @@ export default function SupplyTransformations() {
         throw error;
       }
     },
-    enabled: productId !== null,
+    enabled: canView && productId !== null,
     retry: false,
   });
   const channelPreviewQuery = useQuery<InventoryAvailabilityChannelPreview | null>({
@@ -186,7 +143,7 @@ export default function SupplyTransformations() {
         throw error;
       }
     },
-    enabled: productId !== null,
+    enabled: canView && productId !== null,
     retry: false,
   });
 
@@ -199,12 +156,6 @@ export default function SupplyTransformations() {
     setChangeReason("");
     idempotencyKey.current = null;
     shadowIdempotencyKey.current = null;
-    backfillIdempotencyKey.current = null;
-    refreshBackfillIdempotencyKey.current = null;
-    reviewIdempotencyKey.current = null;
-    setBackfillReason("");
-    setRefreshBackfillReason("");
-    setReviewReason("");
   }, [productId]);
 
   useEffect(() => {
@@ -281,177 +232,6 @@ export default function SupplyTransformations() {
     },
   });
 
-  const applyBackfillDraft = useMutation({
-    mutationFn: (row: InventoryAvailabilityBackfillQueueRow) => {
-      const request = applyInventoryAvailabilityBackfillDraftRequestSchema.parse({
-        expectedInputHash: row.inputHash,
-        expectedResultHash: row.resultHash,
-        changeReason: backfillReason,
-        idempotencyKey: backfillIdempotencyKey.current
-          ?? `phase3-backfill:${row.productId}:${crypto.randomUUID()}`,
-      });
-      backfillIdempotencyKey.current = request.idempotencyKey;
-      return fetchJson(
-        `/api/inventory-planning/admin/migration-queue/${row.productId}/drafts`,
-        applyInventoryAvailabilityBackfillDraftResultSchema,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(request),
-        },
-      );
-    },
-    onSuccess: async (result, row) => {
-      backfillIdempotencyKey.current = null;
-      setBackfillReason("");
-      await Promise.all([
-        queryClient.invalidateQueries({
-          queryKey: ["/api/inventory-planning/admin/migration-queue"],
-        }),
-        queryClient.invalidateQueries({
-          queryKey: ["/api/inventory-planning/admin/supply-transformations", row.productId],
-        }),
-        queryClient.invalidateQueries({
-          queryKey: ["/api/inventory-planning/admin/migration-queue/channel-preview", row.productId],
-        }),
-      ]);
-      toast({
-        title: result.alreadyApplied ? "Draft already recorded" : "Backfill draft recorded",
-        description: "The deterministic candidate is a draft only. Runtime ATP and channels are unchanged.",
-      });
-    },
-    onError: (error: Error) => {
-      if (error instanceof HttpResponseError && error.status === 409) {
-        backfillIdempotencyKey.current = null;
-        void queryClient.invalidateQueries({
-          queryKey: ["/api/inventory-planning/admin/migration-queue"],
-        });
-      }
-      toast({ title: "Backfill draft not recorded", description: error.message, variant: "destructive" });
-    },
-  });
-
-  const reviewBackfillDraft = useMutation({
-    mutationFn: ({
-      row,
-      decision,
-    }: {
-      row: InventoryAvailabilityBackfillQueueRow;
-      decision: "approved" | "changes_required";
-    }) => {
-      if (!row.draft) throw new Error("Reload the queue; the selected product has no draft.");
-      const request = reviewInventoryAvailabilityBackfillDraftRequestSchema.parse({
-        expectedModelId: row.draft.modelId,
-        expectedModelVersion: row.draft.version,
-        expectedDefinitionHash: row.draft.definitionHash,
-        expectedHeadRevision: row.draft.headRevision,
-        expectedLatestReviewId: row.review?.reviewId ?? null,
-        decision,
-        reason: reviewReason,
-        idempotencyKey: reviewIdempotencyKey.current
-          ?? `phase3-review:${row.productId}:${crypto.randomUUID()}`,
-      });
-      reviewIdempotencyKey.current = request.idempotencyKey;
-      return fetchJson(
-        `/api/inventory-planning/admin/migration-queue/${row.productId}/reviews`,
-        reviewInventoryAvailabilityBackfillDraftResultSchema,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(request),
-        },
-      );
-    },
-    onSuccess: async (result) => {
-      reviewIdempotencyKey.current = null;
-      setReviewReason("");
-      await queryClient.invalidateQueries({
-        queryKey: ["/api/inventory-planning/admin/migration-queue"],
-      });
-      toast({
-        title: result.review.decision === "approved" ? "Draft approved" : "Changes required",
-        description: "Review evidence was recorded. This does not activate the model or publish inventory.",
-      });
-    },
-    onError: (error: Error) => {
-      if (error instanceof HttpResponseError && error.status === 409) {
-        reviewIdempotencyKey.current = null;
-        void queryClient.invalidateQueries({
-          queryKey: ["/api/inventory-planning/admin/migration-queue"],
-        });
-      }
-      toast({ title: "Review not recorded", description: error.message, variant: "destructive" });
-    },
-  });
-
-  const refreshBackfillDraft = useMutation({
-    mutationFn: (row: InventoryAvailabilityBackfillQueueRow) => {
-      const draft = row.draft;
-      if (
-        !draft
-        || draft.origin !== "phase3_backfill"
-        || draft.originInputHash === null
-        || draft.originResultHash === null
-      ) {
-        throw new Error("Reload the queue; only a current Phase 3 backfill draft can be refreshed.");
-      }
-      const request = refreshInventoryAvailabilityBackfillDraftRequestSchema.parse({
-        expectedInputHash: row.inputHash,
-        expectedResultHash: row.resultHash,
-        expectedDraftVersion: draft.version,
-        expectedDraftDefinitionHash: draft.definitionHash,
-        expectedDraftHeadRevision: draft.headRevision,
-        expectedDraftOriginInputHash: draft.originInputHash,
-        expectedDraftOriginResultHash: draft.originResultHash,
-        changeReason: refreshBackfillReason,
-        idempotencyKey: refreshBackfillIdempotencyKey.current
-          ?? `phase3-backfill-refresh:${row.productId}:${crypto.randomUUID()}`,
-      });
-      refreshBackfillIdempotencyKey.current = request.idempotencyKey;
-      return fetchJson(
-        `/api/inventory-planning/admin/migration-queue/${row.productId}/drafts/${draft.modelId}/refresh`,
-        refreshInventoryAvailabilityBackfillDraftResultSchema,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(request),
-        },
-      );
-    },
-    onSuccess: async (result, row) => {
-      refreshBackfillIdempotencyKey.current = null;
-      setRefreshBackfillReason("");
-      await Promise.all([
-        queryClient.invalidateQueries({
-          queryKey: ["/api/inventory-planning/admin/migration-queue"],
-        }),
-        queryClient.invalidateQueries({
-          queryKey: ["/api/inventory-planning/admin/supply-transformations", row.productId],
-        }),
-        queryClient.invalidateQueries({
-          queryKey: ["/api/inventory-planning/admin/migration-queue/channel-preview", row.productId],
-        }),
-      ]);
-      toast({
-        title: result.alreadyApplied ? "Draft refresh already recorded" : "Stale draft superseded",
-        description: `Draft v${result.version} now carries current deterministic provenance. Runtime ATP and channels are unchanged.`,
-      });
-    },
-    onError: (error: Error) => {
-      if (error instanceof HttpResponseError && error.status === 409) {
-        refreshBackfillIdempotencyKey.current = null;
-        void queryClient.invalidateQueries({
-          queryKey: ["/api/inventory-planning/admin/migration-queue"],
-        });
-      }
-      toast({
-        title: "Stale draft not refreshed",
-        description: error.message,
-        variant: "destructive",
-      });
-    },
-  });
-
   const runShadow = useMutation({
     mutationFn: (selectedProductId: number) => {
       const request = runPlannerShadowRequestSchema.parse({
@@ -497,177 +277,6 @@ export default function SupplyTransformations() {
     },
   });
 
-  const runActivationDryRun = useMutation({
-    mutationFn: () => {
-      const queue = migrationQueueQuery.data;
-      if (!queue) throw new Error("Load the current full migration queue first.");
-      const request = runInventoryActivationDryRunRequestSchema.parse({
-        expectedCatalogInputHash: queue.catalogInputHash,
-        expectedCatalogResultHash: queue.catalogResultHash,
-        idempotencyKey: activationDryRunIdempotencyKey.current
-          ?? `inventory-availability-activation-dry-run:${crypto.randomUUID()}`,
-        reason: activationDryRunReason,
-      });
-      activationDryRunIdempotencyKey.current = request.idempotencyKey;
-      return fetchJson(
-        "/api/inventory-planning/admin/activation-runs/dry-run",
-        inventoryActivationDryRunSchema,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(request),
-        },
-      );
-    },
-    onSuccess: (result) => {
-      activationDryRunIdempotencyKey.current = null;
-      toast({
-        title: result.state === "blocked" ? "Publication preparation dry run found blockers" : "Publication preparation dry run is ready",
-        description: "Evidence was recorded without changing runtime ATP or contacting providers.",
-        variant: result.state === "blocked" ? "destructive" : "default",
-      });
-    },
-    onError: (error: Error) => {
-      if (error instanceof HttpResponseError && error.status === 409) {
-        activationDryRunIdempotencyKey.current = null;
-        void queryClient.invalidateQueries({
-          queryKey: ["/api/inventory-planning/admin/migration-queue"],
-        });
-      }
-      toast({ title: "Activation dry run failed", description: error.message, variant: "destructive" });
-    },
-  });
-
-  const capturePublicationReadbacks = useMutation({
-    mutationFn: () => {
-      const request = captureInventoryPublicationReadbacksRequestSchema.parse({
-        idempotencyKey: publicationReadbackIdempotencyKey.current
-          ?? `inventory-publication-readback:${crypto.randomUUID()}`,
-        reason: publicationReadbackReason,
-      });
-      publicationReadbackIdempotencyKey.current = request.idempotencyKey;
-      return fetchJson(
-        "/api/inventory-planning/admin/publication-readbacks/capture",
-        inventoryPublicationReadbackRunSchema,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(request),
-        },
-      );
-    },
-    onSuccess: (result) => {
-      publicationReadbackIdempotencyKey.current = null;
-      runActivationDryRun.reset();
-      toast({
-        title: result.state === "completed" ? "Provider quantities refreshed" : "Some readbacks failed",
-        description: `${result.observedRows} exact target/SKU rows observed; ${result.failedRows} failed. Run a new activation dry run next.`,
-        variant: result.state === "completed" ? "default" : "destructive",
-      });
-    },
-    onError: (error: Error) => {
-      toast({ title: "Provider readback failed", description: error.message, variant: "destructive" });
-    },
-  });
-
-  const openActivationQuery = useQuery({
-    queryKey: ["/api/inventory-planning/admin/activation-runs/open", user?.id],
-    queryFn: ({ signal }) => fetchJson(
-      "/api/inventory-planning/admin/activation-runs/open",
-      openInventoryActivationStatusResponseSchema,
-      { signal, cache: "no-store" },
-    ),
-    enabled: canActivate,
-    refetchInterval: (query) => query.state.data?.activation?.state === "publishing" ? 3_000 : false,
-  });
-
-  const prepareActivation = useMutation({
-    mutationFn: () => {
-      const dryRun = runActivationDryRun.data;
-      if (!dryRun || dryRun.state !== "ready_for_publication") {
-        throw new Error("Run a fresh, ready full-catalog activation dry run first.");
-      }
-      const request = prepareInventoryActivationRequestSchema.parse({
-        sourceDryRunId: dryRun.activationRunId,
-        expectedDryRunResultHash: dryRun.resultHash,
-        idempotencyKey: activationPrepareIdempotencyKey.current
-          ?? `inventory-availability-activation-prepare:${crypto.randomUUID()}`,
-        reason: activationPrepareReason,
-      });
-      activationPrepareIdempotencyKey.current = request.idempotencyKey;
-      return fetchJson(
-        "/api/inventory-planning/admin/activation-runs/prepare",
-        inventoryActivationCommandResultSchema,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(request),
-        },
-      );
-    },
-    onSuccess: (result) => {
-      activationPrepareIdempotencyKey.current = null;
-      void openActivationQuery.refetch();
-      toast({
-        title: result.state === "publication_verified"
-          ? "Conservative preparation verified"
-          : "Conservative publication queued",
-        description: "Legacy ATP and reservations remain authoritative. Complete the final review below before explicitly switching authority.",
-      });
-    },
-    onError: (error: Error) => {
-      toast({ title: "Activation preparation failed", description: error.message, variant: "destructive" });
-    },
-  });
-
-  const abortActivation = useMutation({
-    mutationFn: () => {
-      const activationRunId = openActivationQuery.data?.activation?.activationRunId
-        ?? prepareActivation.data?.activationRunId;
-      if (!activationRunId) throw new Error("No activation preparation is available to abort.");
-      const request = abortInventoryActivationRequestSchema.parse({
-        activationRunId,
-        idempotencyKey: activationAbortIdempotencyKey.current
-          ?? `inventory-availability-activation-abort:${crypto.randomUUID()}`,
-        reason: activationAbortReason,
-      });
-      activationAbortIdempotencyKey.current = request.idempotencyKey;
-      return fetchJson(
-        "/api/inventory-planning/admin/activation-runs/abort",
-        inventoryActivationCommandResultSchema,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(request),
-        },
-      );
-    },
-    onSuccess: (result) => {
-      activationAbortIdempotencyKey.current = null;
-      setActivationAbortReason("");
-      void openActivationQuery.refetch();
-      toast({
-        title: "Activation preparation aborted",
-        description: result.publicationCatchupPending
-          ? "The configuration freeze was released. Legacy authority remains active; current-quantity catch-up is queued, not yet confirmed at providers."
-          : "The configuration freeze was released. Runtime authority remains legacy.",
-      });
-    },
-    onError: (error: Error) => {
-      toast({ title: "Activation abort failed", description: error.message, variant: "destructive" });
-    },
-  });
-
-  const openActivationStatus = openActivationQuery.data?.activation ?? null;
-  const displayedActivationId = openActivationStatus?.activationRunId
-    ?? (abortActivation.data === undefined ? prepareActivation.data?.activationRunId : undefined);
-  const displayedActivationState = openActivationStatus?.state
-    ?? (abortActivation.data === undefined ? prepareActivation.data?.state : undefined);
-  const displayedRuntimeAuthority = openActivationStatus?.runtimeAuthority
-    ?? (abortActivation.data === undefined ? prepareActivation.data?.runtimeAuthority : undefined);
-  const activationStatusUnavailable = canActivate
-    && (openActivationQuery.isLoading || openActivationQuery.isError);
-
   const isEditing = Boolean(view && (view.draftModel === null || editingCurrentDraft));
   const activeVariants = view?.variants.filter((variant) => variant.isActive) ?? [];
   const activeAssemblyRecipes = view?.recipes.filter((recipe) =>
@@ -695,20 +304,6 @@ export default function SupplyTransformations() {
     ? prefillPathsFromModel(previewModel, 1).paths
     : [];
   const displayedPaths = isEditing ? paths : previewPaths;
-  const filteredMigrationRows = useMemo(() => {
-    const normalizedSearch = queueSearch.trim().toLowerCase();
-    return (migrationQueueQuery.data?.products ?? []).filter((row) => {
-      const stateMatches = queueStateFilter === "all" || row.queueState === queueStateFilter;
-      const searchMatches = normalizedSearch.length === 0
-        || row.productName.toLowerCase().includes(normalizedSearch)
-        || (row.productSku ?? "").toLowerCase().includes(normalizedSearch)
-        || String(row.productId) === normalizedSearch;
-      return stateMatches && searchMatches;
-    });
-  }, [migrationQueueQuery.data?.products, queueSearch, queueStateFilter]);
-  const selectedMigrationRow = migrationQueueQuery.data?.products.find((row) =>
-    row.productId === productId) ?? null;
-
   const addPath = (destinationVariantId: number) => {
     if (!view) return;
     const destination = activeVariants.find((variant) => variant.id === destinationVariantId);
@@ -875,6 +470,10 @@ export default function SupplyTransformations() {
     idempotencyKey.current = null;
   };
 
+  if (!canView) {
+    return <div className="p-6 text-sm">Inventory planning view permission is required to access transformation models.</div>;
+  }
+
   return (
     <div className="space-y-6 p-6">
       <div>
@@ -885,236 +484,12 @@ export default function SupplyTransformations() {
         </p>
       </div>
 
-      <Card className="border-amber-300 bg-amber-50/60">
-        <CardContent className="flex gap-3 pt-6 text-sm">
-          <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-700" />
-          <div>
-            <div className="font-semibold text-amber-900">Legacy runtime authority remains active</div>
-            <div className="text-amber-800">
-              This release can capture provider readback and conservatively lower external
-              quantities for a reviewed preparation. It cannot switch ATP or reservation authority
-              to canonical; there is no authority-commit endpoint.
-            </div>
-          </div>
-        </CardContent>
-      </Card>
-
-      <InventoryCatalogBatchPanel rows={migrationQueueQuery.data?.products ?? []} canEdit={canEdit} />
-
-      <MigrationQueuePanel
-        queue={migrationQueueQuery.data ?? null}
-        rows={filteredMigrationRows}
-        selectedRow={selectedMigrationRow}
-        selectedView={view ?? null}
-        isLoading={migrationQueueQuery.isLoading}
-        error={migrationQueueQuery.error as Error | null}
-        canEdit={canEdit}
-        search={queueSearch}
-        stateFilter={queueStateFilter}
-        backfillReason={backfillReason}
-        refreshBackfillReason={refreshBackfillReason}
-        reviewReason={reviewReason}
-        isApplying={applyBackfillDraft.isPending}
-        isRefreshing={refreshBackfillDraft.isPending}
-        isReviewing={reviewBackfillDraft.isPending}
-        onSearchChange={setQueueSearch}
-        onStateFilterChange={setQueueStateFilter}
-        onSelectProduct={setProductId}
-        onBackfillReasonChange={setBackfillReason}
-        onRefreshBackfillReasonChange={(value) => {
-          setRefreshBackfillReason(value);
-          refreshBackfillIdempotencyKey.current = null;
-        }}
-        onReviewReasonChange={setReviewReason}
-        onApply={(row) => applyBackfillDraft.mutate(row)}
-        onRefresh={(row) => refreshBackfillDraft.mutate(row)}
-        onReview={(row, decision) => reviewBackfillDraft.mutate({ row, decision })}
-      />
-
-      <InventoryCutoverPreflightPanel canView={hasPermission("inventory_planning", "view")} actorId={user?.id ?? null} />
-      <InventoryCutoverOpeningPanel key={`opening:${user?.id}`} actorId={user?.id ?? null} canActivate={canActivate}
-        onStateChanged={() => { void openActivationQuery.refetch(); }} />
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Full-catalog publication preparation dry run</CardTitle>
-          <p className="text-sm text-muted-foreground">
-            First refresh exact provider quantities, then run the full-catalog dry run. A ready run
-            may prepare conservative publication while legacy ATP and reservations stay authoritative.
-          </p>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="space-y-2 rounded-md border p-3">
-            <Label htmlFor="publication-readback-reason">1. Provider-readback reason</Label>
-            <Textarea
-              id="publication-readback-reason"
-              value={publicationReadbackReason}
-              onChange={(event) => {
-                setPublicationReadbackReason(event.target.value);
-                publicationReadbackIdempotencyKey.current = null;
-              }}
-              placeholder="Why exact provider quantities are being refreshed"
-              disabled={!canActivate}
-            />
-            <Button
-              type="button"
-              variant="outline"
-              disabled={!canActivate || !publicationReadbackReason.trim() || capturePublicationReadbacks.isPending}
-              onClick={() => capturePublicationReadbacks.mutate()}
-            >
-              {capturePublicationReadbacks.isPending ? "Reading providers…" : "Refresh provider quantities"}
-            </Button>
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="activation-dry-run-reason">2. Full-catalog review reason</Label>
-            <Textarea
-              id="activation-dry-run-reason"
-              value={activationDryRunReason}
-              onChange={(event) => {
-                setActivationDryRunReason(event.target.value);
-                activationDryRunIdempotencyKey.current = null;
-              }}
-              placeholder="Why the complete catalog is being revalidated"
-              disabled={!canActivate}
-            />
-          </div>
-          <Button
-            type="button"
-            disabled={
-              !canActivate
-              || !migrationQueueQuery.data
-              || !activationDryRunReason.trim()
-              || runActivationDryRun.isPending
-            }
-            onClick={() => runActivationDryRun.mutate()}
-          >
-            <ShieldCheck className="mr-2 h-4 w-4" />
-            {runActivationDryRun.isPending ? "Running full-catalog dry run…" : "Run activation dry run"}
-          </Button>
-          {!canActivate && (
-            <div className="text-sm text-muted-foreground">
-              The inventory planning activate ability is required to create activation-review evidence.
-            </div>
-          )}
-          {runActivationDryRun.data && (
-            <div className="space-y-2 rounded-md border p-3 text-sm">
-              <div className="flex flex-wrap items-center gap-2">
-                <Badge variant={runActivationDryRun.data.state === "blocked" ? "destructive" : "default"}>
-                  {runActivationDryRun.data.state.replaceAll("_", " ")}
-                </Badge>
-                <span>{runActivationDryRun.data.summary.readyProducts} ready</span>
-                <span>{runActivationDryRun.data.summary.blockedProducts} blocked</span>
-                <span>{runActivationDryRun.data.summary.publicationRows} channel/SKU rows</span>
-              </div>
-              <div className="text-xs text-muted-foreground">
-                Run {runActivationDryRun.data.activationRunId} · result {runActivationDryRun.data.resultHash.slice(0, 12)} ·
-                runtime unchanged · no provider write · no outbox enqueue
-              </div>
-            </div>
-          )}
-          <div className="space-y-2 rounded-md border border-amber-300 bg-amber-50/40 p-3">
-            <Label htmlFor="activation-prepare-reason">3. Conservative-publication reason</Label>
-            <Textarea
-              id="activation-prepare-reason"
-              value={activationPrepareReason}
-              onChange={(event) => {
-                setActivationPrepareReason(event.target.value);
-                activationPrepareIdempotencyKey.current = null;
-              }}
-              placeholder="Why the reviewed catalog is ready for conservative provider publication"
-              disabled={!canActivate || activationStatusUnavailable || displayedActivationId !== undefined}
-            />
-            <div className="text-xs text-amber-900">
-              This action can lower provider quantities to min(current provider quantity, proposed
-              quantity). It cannot raise quantities or switch runtime ATP/reservation authority.
-            </div>
-            <Button
-              type="button"
-              disabled={
-                !canActivate
-                || runActivationDryRun.data?.state !== "ready_for_publication"
-                || !activationPrepareReason.trim()
-                || prepareActivation.isPending
-                || activationStatusUnavailable
-                || displayedActivationId !== undefined
-              }
-              onClick={() => prepareActivation.mutate()}
-            >
-              {prepareActivation.isPending ? "Preparing conservative publication…" : "Prepare conservative publication"}
-            </Button>
-            {openActivationQuery.isError && (
-              <div className="text-xs text-destructive">
-                Open preparation status could not be verified. Preparation is disabled until status reload succeeds.
-              </div>
-            )}
-            {displayedActivationId !== undefined && displayedActivationState !== undefined && (
-              <div className="space-y-2 rounded-md border bg-background p-3">
-                <div className="text-sm">
-                  Run {displayedActivationId} · {displayedActivationState.replaceAll("_", " ")} ·
-                  runtime authority {displayedRuntimeAuthority}
-                </div>
-                {openActivationStatus && (
-                  <div className="text-xs text-muted-foreground">
-                    {openActivationStatus.outbox.verified}/{openActivationStatus.outbox.total} verified ·{
-                      " "}{openActivationStatus.outbox.queued} queued ·{
-                      " "}{openActivationStatus.outbox.retryableOrDrifted} retrying/drifted ·{
-                      " "}{openActivationStatus.outbox.deadLetter} dead letter
-                  </div>
-                )}
-                {displayedRuntimeAuthority === "legacy" && <>
-                {(openActivationStatus?.outbox.leased ?? 0) > 0 && (
-                  <div className="text-xs text-amber-800">
-                    Wait for {openActivationStatus!.outbox.leased} in-flight provider write(s) before aborting.
-                  </div>
-                )}
-                <Label htmlFor="activation-abort-reason">Abort reason</Label>
-                <Input
-                  id="activation-abort-reason"
-                  value={activationAbortReason}
-                  onChange={(event) => {
-                    setActivationAbortReason(event.target.value);
-                    activationAbortIdempotencyKey.current = null;
-                  }}
-                  placeholder="Why this preparation should be stopped"
-                />
-                <Button
-                  type="button"
-                  variant="destructive"
-                  disabled={
-                    !canActivate
-                    || !activationAbortReason.trim()
-                    || abortActivation.isPending
-                    || openActivationQuery.isFetching
-                    || (openActivationStatus?.outbox.leased ?? 0) > 0
-                  }
-                  onClick={() => abortActivation.mutate()}
-                >
-                  {abortActivation.isPending ? "Aborting…" : "Abort preparation"}
-                </Button>
-                </>}
-                {displayedRuntimeAuthority !== undefined && (
-                  <InventoryCutoverControls
-                    key={`${user?.id}:${displayedActivationId}:${displayedRuntimeAuthority}`}
-                    actorId={user?.id ?? null}
-                    canActivate={canActivate && !activationStatusUnavailable}
-                    activationRunId={displayedActivationId}
-                    runtimeAuthority={displayedRuntimeAuthority}
-                    onStateChanged={() => { void openActivationQuery.refetch(); }}
-                  />
-                )}
-              </div>
-            )}
-          </div>
-        </CardContent>
-      </Card>
-
-      <InventoryPublicationRecoveryPanel
-        key={`${user?.id}:${displayedActivationId ?? "latest"}`}
-        actorId={user?.id ?? null}
-        canActivate={canActivate}
-        activationRunId={displayedActivationId ?? null}
-        onStateChanged={() => { void openActivationQuery.refetch(); }}
-      />
+      <div className="flex flex-wrap gap-4 text-sm">
+        <Link href={inventoryPlanningProductHref("/inventory/cutover", productId)}
+          className="underline underline-offset-2">Catalog-wide cutover controls</Link>
+        <Link href={inventoryPlanningProductHref("/settings/procurement/promise-safety", productId)}
+          className="underline underline-offset-2">Promise safety and demand evidence</Link>
+      </div>
 
       <Card>
         <CardHeader><CardTitle>Select a product</CardTitle></CardHeader>
@@ -1214,8 +589,6 @@ export default function SupplyTransformations() {
             </CardContent>
           </Card>
 
-          <PromiseSafetyPolicyPanel productId={view.product.id} canEdit={canEdit} />
-
           <ShadowComparisonPanel
             run={shadowQuery.data ?? null}
             isLoading={shadowQuery.isLoading}
@@ -1313,354 +686,6 @@ export default function SupplyTransformations() {
         </>
       )}
     </div>
-  );
-}
-
-function MigrationQueuePanel({
-  queue,
-  rows,
-  selectedRow,
-  selectedView,
-  isLoading,
-  error,
-  canEdit,
-  search,
-  stateFilter,
-  backfillReason,
-  refreshBackfillReason,
-  reviewReason,
-  isApplying,
-  isRefreshing,
-  isReviewing,
-  onSearchChange,
-  onStateFilterChange,
-  onSelectProduct,
-  onBackfillReasonChange,
-  onRefreshBackfillReasonChange,
-  onReviewReasonChange,
-  onApply,
-  onRefresh,
-  onReview,
-}: {
-  queue: InventoryAvailabilityBackfillQueueResponse | null;
-  rows: InventoryAvailabilityBackfillQueueRow[];
-  selectedRow: InventoryAvailabilityBackfillQueueRow | null;
-  selectedView: SupplyTransformationsAdminView | null;
-  isLoading: boolean;
-  error: Error | null;
-  canEdit: boolean;
-  search: string;
-  stateFilter: string;
-  backfillReason: string;
-  refreshBackfillReason: string;
-  reviewReason: string;
-  isApplying: boolean;
-  isRefreshing: boolean;
-  isReviewing: boolean;
-  onSearchChange: (value: string) => void;
-  onStateFilterChange: (value: string) => void;
-  onSelectProduct: (productId: number) => void;
-  onBackfillReasonChange: (value: string) => void;
-  onRefreshBackfillReasonChange: (value: string) => void;
-  onReviewReasonChange: (value: string) => void;
-  onApply: (row: InventoryAvailabilityBackfillQueueRow) => void;
-  onRefresh: (row: InventoryAvailabilityBackfillQueueRow) => void;
-  onReview: (
-    row: InventoryAvailabilityBackfillQueueRow,
-    decision: "approved" | "changes_required",
-  ) => void;
-}) {
-  const isManual = selectedRow?.draft?.origin === "operator";
-  const reviewDefinition = isManual
-    ? selectedRow?.draftDefinition
-    : selectedRow?.candidateDefinition;
-  const variants = selectedView?.product.id === selectedRow?.productId
-    ? selectedView?.variants ?? [] : [];
-  const manualEvidenceReady = !isManual || (selectedView?.product.id === selectedRow?.productId
-    && selectedView?.draftModel?.id === selectedRow?.draft?.modelId
-    && selectedView?.draftModel?.definitionHash === selectedRow?.draft?.definitionHash
-    && selectedView?.head?.revision === selectedRow?.draft?.headRevision);
-  const variantById = new Map(variants.map((variant) => [variant.id, variant]));
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Phase 3 migration queue</CardTitle>
-        <p className="text-sm text-muted-foreground">
-          Every active product is classified by one deterministic algorithm. Applying a candidate
-          creates only a draft; approval is review evidence, not activation.
-        </p>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        {isLoading && <div className="text-sm text-muted-foreground">Classifying active products…</div>}
-        {error && <div className="text-sm text-destructive">{error.message}</div>}
-        {queue && (
-          <>
-            <div className="flex flex-wrap gap-2 text-xs">
-              <Badge variant="outline">{queue.summary.totalActiveProducts} active</Badge>
-              <Badge variant="destructive">{queue.summary.blocked} blocked</Badge>
-              <Badge variant="secondary">{queue.summary.excluded} excluded from ATP</Badge>
-              <Badge variant="outline">{queue.summary.notBackfilled} not backfilled</Badge>
-              <Badge variant="outline">{queue.summary.conflictingDraft} conflicting draft</Badge>
-              <Badge variant="outline">{queue.summary.awaitingReview} awaiting review</Badge>
-              <Badge variant="outline">{queue.summary.changesRequired} changes required</Badge>
-              <Badge>{queue.summary.approved} approved</Badge>
-            </div>
-            <div className="grid gap-3 md:grid-cols-2">
-              <div className="space-y-2">
-                <Label htmlFor="migration-queue-search">Search full queue</Label>
-                <Input
-                  id="migration-queue-search"
-                  value={search}
-                  onChange={(event) => onSearchChange(event.target.value)}
-                  placeholder="Product ID, SKU, or name"
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="migration-queue-state">Queue state</Label>
-                <select
-                  id="migration-queue-state"
-                  className="h-10 w-full rounded-md border bg-background px-3 text-sm"
-                  value={stateFilter}
-                  onChange={(event) => onStateFilterChange(event.target.value)}
-                >
-                  <option value="all">All states</option>
-                  <option value="blocked">Blocked</option>
-                  <option value="excluded">Excluded from ATP</option>
-                  <option value="not_backfilled">Not backfilled</option>
-                  <option value="conflicting_draft">Conflicting draft</option>
-                  <option value="awaiting_review">Awaiting review</option>
-                  <option value="changes_required">Changes required</option>
-                  <option value="approved">Approved</option>
-                </select>
-              </div>
-            </div>
-            <div className="max-h-[32rem] overflow-auto rounded-md border">
-              <table className="w-full min-w-[920px] text-left text-sm">
-                <thead className="sticky top-0 border-b bg-muted text-xs uppercase text-muted-foreground">
-                  <tr>
-                    <th className="px-3 py-2">Product</th>
-                    <th className="px-3 py-2">State</th>
-                    <th className="px-3 py-2">Legacy strategy</th>
-                    <th className="px-3 py-2">Candidate</th>
-                    <th className="px-3 py-2 text-right">Variants</th>
-                    <th className="px-3 py-2 text-right">Recipes</th>
-                    <th className="px-3 py-2 text-right">Issues</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {rows.map((row) => (
-                    <tr
-                      key={row.productId}
-                      className={`cursor-pointer border-b last:border-b-0 hover:bg-muted/40 ${
-                        selectedRow?.productId === row.productId ? "bg-blue-50" : ""
-                      }`}
-                      onClick={() => onSelectProduct(row.productId)}
-                    >
-                      <td className="px-3 py-2">
-                        <div className="font-medium">{row.productSku ?? `Product ${row.productId}`}</div>
-                        <div className="text-xs text-muted-foreground">{row.productName}</div>
-                      </td>
-                      <td className="px-3 py-2">
-                        <Badge variant={row.queueState === "blocked" ? "destructive" : "outline"}>
-                          {formatQueueState(row.queueState)}
-                        </Badge>
-                      </td>
-                      <td className="px-3 py-2">{row.legacyInventoryStrategy}</td>
-                      <td className="px-3 py-2">{formatQueueState(row.classification)}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">{row.activeVariantCount}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">{row.activeRecipeCount}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">{row.issues.length}</td>
-                    </tr>
-                  ))}
-                  {rows.length === 0 && (
-                    <tr><td colSpan={7} className="px-3 py-6 text-center text-muted-foreground">No products match.</td></tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-            <div className="text-xs text-muted-foreground">
-              Input {queue.catalogInputHash.slice(0, 12)} · result {queue.catalogResultHash.slice(0, 12)} ·
-              captured {new Date(queue.capturedAt).toLocaleString()}
-            </div>
-          </>
-        )}
-
-        {selectedRow && (
-          <div className="space-y-4 rounded-md border p-4">
-            <div>
-              <div className="font-semibold">
-                {selectedRow.productSku ?? `Product ${selectedRow.productId}`} — {selectedRow.productName}
-              </div>
-              <div className="text-xs text-muted-foreground">
-                {isManual ? "Saved manual rules" : "Generated candidate"} {(
-                  isManual ? selectedRow.draft?.definitionHash : selectedRow.candidateDefinitionHash
-                )?.slice(0, 12) ?? "blocked"} ·
-                input {selectedRow.inputHash.slice(0, 12)} · result {selectedRow.resultHash.slice(0, 12)}
-              </div>
-            </div>
-            {reviewDefinition && (
-              <div className="grid gap-3 text-sm md:grid-cols-3">
-                <div>Directed paths: {reviewDefinition.paths.length}</div>
-                <div>Recipe bindings: {reviewDefinition.recipeBindings.length}</div>
-                <div>Build-to-promise: {reviewDefinition.buildToPromiseEnabled ? "enabled" : "off"}</div>
-              </div>
-            )}
-            {isManual && reviewDefinition && (
-              <div className="space-y-2 rounded-md border p-3 text-sm">
-                <div className="font-medium">Exact saved directions being reviewed</div>
-                {reviewDefinition.paths.map((path) => (
-                  <div key={`${path.sourceVariantId}:${path.destinationVariantId}`}>
-                    {path.inputQty} × {variantById.get(path.sourceVariantId)?.sku
-                      ?? `variant #${path.sourceVariantId}`} → {path.outputQty} ×{" "}
-                    {variantById.get(path.destinationVariantId)?.sku
-                      ?? `variant #${path.destinationVariantId}`} — {path.authorityState}
-                  </div>
-                ))}
-                <div className="text-muted-foreground">
-                  Every conversion step requires a listed allowed direction. Approving does not add the reverse direction.
-                  Review any saved recipe bindings in the draft evidence below.
-                </div>
-                {!manualEvidenceReady && (
-                  <div className="text-amber-800">
-                    Waiting for matching product and draft details. If they do not load, reload
-                    the page before reviewing.
-                  </div>
-                )}
-              </div>
-            )}
-            {selectedRow.issues.length > 0 && (
-              <div className="space-y-2">
-                {selectedRow.issues.map((entry) => (
-                  <div
-                    key={`${entry.code}:${entry.message}`}
-                    className={`rounded-md border p-3 text-sm ${
-                      entry.severity === "blocking"
-                        ? "border-red-300 bg-red-50 text-red-900"
-                        : "border-amber-300 bg-amber-50 text-amber-900"
-                    }`}
-                  >
-                    <span className="font-medium">{entry.code}</span>: {entry.message}
-                  </div>
-                ))}
-              </div>
-            )}
-            {selectedRow.draft && (
-              <div className="text-sm">
-                Draft v{selectedRow.draft.version} · {selectedRow.draft.origin.replaceAll("_", " ")} ·
-                definition {selectedRow.draft.definitionHash.slice(0, 12)} ·
-                {isManual
-                  ? selectedRow.draft.operatorInputHash === selectedRow.inputHash
-                    ? " manual rules; catalog source unchanged"
-                    : " manual rules; catalog source changed — save a new version before review"
-                  : selectedRow.draft.candidateMatch
-                  ? " exact definition and provenance match"
-                  : selectedRow.draft.definitionMatch
-                    ? " definition matches, provenance is stale"
-                    : " definition differs"}
-              </div>
-            )}
-            {canEdit && selectedRow.queueState === "not_backfilled" && (
-              <div className="space-y-3">
-                <Label htmlFor="backfill-change-reason">Draft reason</Label>
-                <Textarea
-                  id="backfill-change-reason"
-                  value={backfillReason}
-                  onChange={(event) => onBackfillReasonChange(event.target.value)}
-                  placeholder="Why this deterministic legacy-to-draft mapping is being recorded"
-                />
-                <Button
-                  type="button"
-                  disabled={!backfillReason.trim() || isApplying || !selectedRow.candidateDefinition}
-                  onClick={() => onApply(selectedRow)}
-                >
-                  <ShieldCheck className="mr-2 h-4 w-4" />
-                  {isApplying ? "Recording draft…" : "Record deterministic draft"}
-                </Button>
-              </div>
-            )}
-            {canEdit && selectedRow.queueState === "conflicting_draft"
-              && selectedRow.draft?.origin === "phase3_backfill" && (
-              <div className="space-y-3 rounded-md border border-amber-300 bg-amber-50 p-3">
-                <div className="text-sm text-amber-900">
-                  The existing Phase 3 draft does not exactly match the current deterministic
-                  input, result, and definition. Refreshing preserves it as immutable history and
-                  creates the next inactive draft version.
-                </div>
-                <Label htmlFor="backfill-refresh-reason">Supersession reason</Label>
-                <Textarea
-                  id="backfill-refresh-reason"
-                  value={refreshBackfillReason}
-                  onChange={(event) => onRefreshBackfillReasonChange(event.target.value)}
-                  placeholder="Why this stale deterministic draft is being superseded"
-                />
-                <Button
-                  type="button"
-                  disabled={!refreshBackfillReason.trim() || isRefreshing || !selectedRow.candidateDefinition}
-                  onClick={() => onRefresh(selectedRow)}
-                >
-                  <ShieldCheck className="mr-2 h-4 w-4" />
-                  {isRefreshing ? "Refreshing draft…" : "Supersede and refresh draft"}
-                </Button>
-              </div>
-            )}
-            {selectedRow.queueState === "conflicting_draft"
-              && selectedRow.draft?.origin === "operator" && (
-              <div className="text-sm text-amber-800">
-                This draft was authored by an operator. Deterministic backfill will not overwrite
-                or supersede it; review and edit it manually.
-              </div>
-            )}
-            {canEdit && ["awaiting_review", "changes_required"].includes(selectedRow.queueState)
-              && selectedRow.draft && (
-              <div className="space-y-3">
-                <Label htmlFor="backfill-review-reason">Review reason</Label>
-                <Textarea
-                  id="backfill-review-reason"
-                  value={reviewReason}
-                  onChange={(event) => onReviewReasonChange(event.target.value)}
-                  placeholder="Evidence supporting approval or required changes"
-                />
-                <div className="flex flex-wrap gap-2">
-                  <Button
-                    type="button"
-                    disabled={!reviewReason.trim() || isReviewing || !manualEvidenceReady}
-                    onClick={() => onReview(selectedRow, "approved")}
-                  >
-                    Approve saved rules
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    disabled={!reviewReason.trim() || isReviewing || !manualEvidenceReady}
-                    onClick={() => onReview(selectedRow, "changes_required")}
-                  >
-                    Require changes
-                  </Button>
-                </div>
-              </div>
-            )}
-            {selectedRow.review && (
-              <div className="rounded-md border bg-muted/30 p-3 text-sm">
-                Review: {formatQueueState(selectedRow.review.decision)} by {selectedRow.review.reviewedBy}
-                {" "}on {new Date(selectedRow.review.reviewedAt).toLocaleString()} — {selectedRow.review.reason}
-              </div>
-            )}
-            {selectedRow.queueState === "changes_required" && (
-              <div className="text-sm text-amber-800">
-                Edit the draft below if its definition is wrong, or record a later approval with
-                new evidence. The review ledger preserves both decisions.
-              </div>
-            )}
-            {selectedRow.queueState === "approved" && (
-              <div className="font-medium text-emerald-700">
-                Approved — not live. These saved rules are approved for activation, but this
-                approval does not change the rules currently in use.
-              </div>
-            )}
-          </div>
-        )}
-      </CardContent>
-    </Card>
   );
 }
 
@@ -2338,60 +1363,4 @@ function formatOperation(operation: PathDraft["operationType"]): string {
 
 function recipeBindingKey(recipeId: number): string {
   return `recipe:${recipeId}:network`;
-}
-
-async function fetchJson<Schema extends z.ZodTypeAny>(
-  url: string,
-  schema: Schema,
-  init?: RequestInit,
-): Promise<z.output<Schema>> {
-  const response = await fetch(url, { credentials: "include", ...init });
-  const body: unknown = await response.json().catch(() => null);
-  if (!response.ok) {
-    const serverError = parseServerError(body);
-    throw new HttpResponseError(
-      response.status,
-      serverError?.code ?? null,
-      serverError?.message ?? `Request failed (${response.status}).`,
-    );
-  }
-  const parsed = schema.safeParse(body);
-  if (!parsed.success) {
-    const issue = parsed.error.issues[0];
-    const path = issue?.path.join(".") || "response";
-    throw new Error(
-      `Server returned invalid data at ${path}: ${issue?.message ?? "invalid response"}.`,
-    );
-  }
-  return parsed.data;
-}
-
-class HttpResponseError extends Error {
-  constructor(
-    readonly status: number,
-    readonly code: string | null,
-    message: string,
-  ) {
-    super(message);
-    this.name = "HttpResponseError";
-  }
-}
-
-function parseServerError(body: unknown): { code: string | null; message: string } | null {
-  const parsed = z.object({
-    error: z.union([
-      z.string(),
-      z.object({
-        code: z.string().optional(),
-        message: z.string().optional(),
-        details: z.array(z.string()).optional(),
-      }).passthrough(),
-    ]),
-  }).passthrough().safeParse(body);
-  if (!parsed.success) return null;
-  if (typeof parsed.data.error === "string") {
-    return { code: null, message: parsed.data.error };
-  }
-  const message = parsed.data.error.details?.[0] ?? parsed.data.error.message;
-  return message ? { code: parsed.data.error.code ?? null, message } : null;
 }

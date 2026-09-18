@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   createPromiseSafetyPolicyDraftAdminRequestSchema,
@@ -41,9 +41,11 @@ type ScopeType = PromiseSafetyAdminScope["scopeType"];
 
 export function PromiseSafetyPolicyPanel({
   productId,
+  canView,
   canEdit,
 }: {
   productId: number;
+  canView: boolean;
   canEdit: boolean;
 }) {
   const queryClient = useQueryClient();
@@ -64,12 +66,18 @@ export function PromiseSafetyPolicyPanel({
 
   const viewQuery = useQuery<PromiseSafetyAdminView>({
     queryKey: ["/api/inventory-planning/admin/promise-safety", productId],
-    queryFn: () => requestJson(
-      `/api/inventory-planning/admin/promise-safety/${productId}`,
-      promiseSafetyAdminViewSchema,
-    ),
+    queryFn: ({ signal }) => {
+      if (!canView) throw new Error("Inventory planning view permission is required.");
+      return requestJson(
+        `/api/inventory-planning/admin/promise-safety/${productId}`,
+        promiseSafetyAdminViewSchema,
+        { signal },
+      );
+    },
+    enabled: canView,
   });
-  const view = viewQuery.data;
+  // A disabled query can still expose cached data after a permission change.
+  const view = canView ? viewQuery.data : undefined;
 
   useEffect(() => {
     if (!view) return;
@@ -111,6 +119,7 @@ export function PromiseSafetyPolicyPanel({
 
   const savePolicy = useMutation({
     mutationFn: async () => {
+      if (!canView || !canEdit) throw new Error("Inventory planning edit permission is required.");
       if (!scope || !parsedPolicy?.success) {
         throw new Error(parsedPolicy && !parsedPolicy.success
           ? parsedPolicy.message
@@ -170,6 +179,7 @@ export function PromiseSafetyPolicyPanel({
 
   const refreshEvidence = useMutation({
     mutationFn: async () => {
+      if (!canView || !canEdit) throw new Error("Inventory planning edit permission is required.");
       const idempotencyKey = refreshIdempotencyKey.current ?? crypto.randomUUID();
       refreshIdempotencyKey.current = idempotencyKey;
       const request = refreshDemandEvidenceAdminRequestSchema.parse({
@@ -205,6 +215,9 @@ export function PromiseSafetyPolicyPanel({
     policyIdempotencyKey.current = null;
   };
 
+  if (!canView) {
+    return <p className="text-sm text-muted-foreground">Inventory planning view permission is required to view ATP promise safety.</p>;
+  }
   if (viewQuery.isLoading) {
     return <div className="text-sm text-muted-foreground">Loading promise safety…</div>;
   }
@@ -219,11 +232,12 @@ export function PromiseSafetyPolicyPanel({
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Promise safety floor</CardTitle>
+        <CardTitle>ATP promise safety floor</CardTitle>
+        <p className="text-sm font-medium">{view.product.sku ? `${view.product.sku} — ` : ""}{view.product.name}</p>
         <p className="text-sm text-muted-foreground">
           Protect inventory before channel dials are applied. The most specific policy wins:
           warehouse/SKU, then SKU, then the business default. Values saved here are drafts used by
-          shadow planning only.
+          shadow planning only. This does not change the purchasing reorder buffer (safetyStockDays).
         </p>
       </CardHeader>
       <CardContent className="space-y-6">

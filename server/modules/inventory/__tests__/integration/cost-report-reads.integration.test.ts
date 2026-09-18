@@ -119,15 +119,27 @@ suite.sequential("COGS read queries against the canonical PostgreSQL schema", ()
 
   it("does not turn an unavailable aggregate COGS query into zero cost and inflated margin", async () => {
     const database = drizzle(pool, { schema });
-    financeTransport.execute.mockImplementation(async (query) => {
-      const compiled = new (await import('drizzle-orm/pg-core')).PgDialect().sqlToQuery(query).sql;
-      if (compiled.includes('AS cogs_mills') && !compiled.includes('oo.channel_id')) {
-        throw Object.assign(new Error('Synthetic COGS read failure'), { code: '57014' });
-      }
-      return database.execute(query);
+    const pendingQueries: Promise<unknown>[] = [];
+    financeTransport.execute.mockImplementation((query) => {
+      const completion = (async () => {
+        const compiled = new (await import('drizzle-orm/pg-core')).PgDialect().sqlToQuery(query).sql;
+        if (compiled.includes('AS cogs_mills') && !compiled.includes('oo.channel_id')) {
+          throw Object.assign(new Error('Synthetic COGS read failure'), { code: '57014' });
+        }
+        return database.execute(query);
+      })();
+      pendingQueries.push(completion);
+      return completion;
     });
-    await expect(getFinanceSummary(new Date('2026-09-10'), new Date('2026-09-11')))
-      .rejects.toMatchObject({ code: '57014' });
+    try {
+      await expect(getFinanceSummary(new Date('2026-09-10'), new Date('2026-09-11')))
+        .rejects.toMatchObject({ code: '57014' });
+    } finally {
+      // Promise.all rejects without cancelling sibling reads. Drain every query
+      // started by this fixture before the next beforeEach takes TRUNCATE locks,
+      // including when the error assertion itself fails.
+      await Promise.allSettled(pendingQueries);
+    }
   });
 
   it("returns an explicit successful-empty response from both read queries", async () => {
