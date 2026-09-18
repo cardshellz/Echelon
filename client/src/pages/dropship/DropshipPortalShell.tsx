@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useLocation } from "wouter";
 import {
   Bell,
@@ -14,9 +15,14 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { dropshipPortalPath, useDropshipAuth } from "@/lib/dropship-auth";
+import { isOnboardingVendor } from "@/lib/dropship-onboarding";
+import { fetchJson, type DropshipOnboardingState } from "@/lib/dropship-ops-surface";
+
+const ONBOARDING_QUERY_KEY = ["/api/dropship/onboarding/state"] as const;
+const ONBOARDING_NAV_HREF = "/onboarding";
 
 const navItems = [
-  { label: "Onboarding", href: "/onboarding", icon: <ListChecks className="h-4 w-4" /> },
+  { label: "Onboarding", href: ONBOARDING_NAV_HREF, icon: <ListChecks className="h-4 w-4" /> },
   { label: "Dashboard", href: "/dashboard", icon: <LayoutDashboard className="h-4 w-4" /> },
   { label: "Catalog", href: "/catalog", icon: <Boxes className="h-4 w-4" /> },
   { label: "Orders", href: "/orders", icon: <ClipboardList className="h-4 w-4" /> },
@@ -28,8 +34,19 @@ const navItems = [
 
 export function DropshipPortalShell({ children }: { children: React.ReactNode }) {
   const [location, setLocation] = useLocation();
-  const { logout } = useDropshipAuth();
+  const { principal, logout } = useDropshipAuth();
   const [loggingOut, setLoggingOut] = useState(false);
+  // The same query every portal page runs, so it is served from the cache.
+  const onboardingQuery = useQuery<DropshipOnboardingState>({
+    queryKey: [...ONBOARDING_QUERY_KEY],
+    queryFn: () => fetchJson<DropshipOnboardingState>(ONBOARDING_QUERY_KEY[0]),
+    enabled: !!principal,
+  });
+  // Onboarding is a one-time page. Once the vendor is past it (active, paused,
+  // lapsed) the item goes and the Dashboard is home; the route itself stays
+  // reachable, because it hosts the store connection panel.
+  const showOnboarding = onboardingQuery.data ? isOnboardingVendor(onboardingQuery.data.vendor.status) : false;
+  const visibleNavItems = navItems.filter((item) => item.href !== ONBOARDING_NAV_HREF || showOnboarding);
 
   async function signOut() {
     setLoggingOut(true);
@@ -59,8 +76,8 @@ export function DropshipPortalShell({ children }: { children: React.ReactNode })
             Sign out
           </Button>
         </div>
-        <nav className="mx-auto flex w-full max-w-7xl gap-1 overflow-x-auto px-4 pb-3 sm:px-6">
-          {navItems.map((item) => {
+        <nav className="mx-auto flex w-full max-w-7xl gap-1 overflow-x-auto px-4 pb-3 sm:px-6" data-testid="portal-nav">
+          {visibleNavItems.map((item) => {
             const href = dropshipPortalPath(item.href);
             const active = location === href || location === item.href || location.endsWith(item.href);
             return (

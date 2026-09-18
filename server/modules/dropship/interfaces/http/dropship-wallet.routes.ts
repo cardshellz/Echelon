@@ -288,6 +288,7 @@ function serializeWalletOverview(wallet: Awaited<ReturnType<DropshipWalletServic
     fundingMethods: wallet.fundingMethods.map(serializeFundingMethod),
     recentLedger: wallet.recentLedger,
     cardFundingFeeBps: wallet.cardFundingFeeBps,
+    usdcBaseDepositAddress: wallet.usdcBaseDepositAddress,
   };
 }
 

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useLocation } from "wouter";
 import type React from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, Bell, CheckCircle2, Fingerprint, KeyRound, Mail, Plug, RefreshCw, Settings, Store, Wallet } from "lucide-react";
@@ -484,6 +485,7 @@ function StoreConnectionsPanel({
   reauthorizeTargetId: number | null;
   result: DropshipStoreConnectionListResponse | undefined;
 }) {
+  const [, setLocation] = useLocation();
   if (isLoading) {
     return (
       <section className="mt-5 rounded-md border border-zinc-200 bg-white p-4">
@@ -535,8 +537,17 @@ function StoreConnectionsPanel({
           <EmptyMedia variant="icon"><Store /></EmptyMedia>
           <EmptyHeader>
             <EmptyTitle>No store connections</EmptyTitle>
-            <EmptyDescription>Connect eBay or Shopify from onboarding before processing dropship orders.</EmptyDescription>
+            <EmptyDescription>Connect eBay or Shopify before processing dropship orders.</EmptyDescription>
           </EmptyHeader>
+          <Button
+            type="button"
+            variant="outline"
+            className="mt-4 h-10 gap-2"
+            onClick={() => setLocation(dropshipPortalPath("/onboarding"))}
+          >
+            <Store className="h-4 w-4" />
+            Connect a store
+          </Button>
         </Empty>
       )}
     </section>
