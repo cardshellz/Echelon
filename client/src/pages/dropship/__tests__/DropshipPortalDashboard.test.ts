@@ -35,7 +35,12 @@ describe("DropshipPortalDashboard contract", () => {
     expect(panel).toContain("Add funds");
     const nextAction = source.slice(source.indexOf("function dashboardNextAction"), source.indexOf("function launchStepDetail"));
     expect(nextAction.indexOf("isPausedForFunding(onboarding.vendor)")).toBeLessThan(nextAction.indexOf("onboarding.steps.find"));
-    expect(nextAction).toContain('title: "Fund your wallet to resume selling"');
+    expect(nextAction).toContain('title: "Add money to resume selling"');
+    expect(nextAction).toContain('title: "Set up your wallet"');
+    expect(nextAction).toContain('title: "Confirm your auto-reload terms"');
+    expect(nextAction).toContain("Choose your top-up source, set your floor, add a backup card, then turn on auto-reload.");
+    expect(source).toContain("return walletTodoDetail(onboarding.wallet);");
+    expect(source).not.toContain('return "Ready";');
     // The held-order copy knows about the pause too.
     expect(source).toContain("pausedForFunding: onboardingQuery.data ? isPausedForFunding(onboardingQuery.data.vendor) : false,");
   });
