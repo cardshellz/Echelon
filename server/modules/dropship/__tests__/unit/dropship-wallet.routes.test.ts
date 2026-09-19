@@ -150,8 +150,32 @@ describe("dropship wallet routes card fee exposure", () => {
           recentLedger: [],
           cardFundingFeeBps: 300,
           usdcBaseDepositAddress: "0x1111111111111111111111111111111111111111",
+          limits: {
+            autoReloadMinTriggerCents: 7_500,
+            autoReloadMinAmountCents: 12_500,
+            manualFundingMinCents: 2_000,
+            manualFundingMaxCents: 400_000,
+            defaultPaymentHoldTimeoutMinutes: 1_440,
+            holdExpiryWarningMinutes: 90,
+          },
         };
       },
+      getWalletForVendor: async () => ({
+        account: { walletAccountId: 1, vendorId: 10, availableBalanceCents: 0, pendingBalanceCents: 0, currency: "USD", status: "active", createdAt: now, updatedAt: now },
+        autoReload: null,
+        fundingMethods: [],
+        recentLedger: [],
+        cardFundingFeeBps: 300,
+        usdcBaseDepositAddress: null,
+        limits: {
+          autoReloadMinTriggerCents: 7_500,
+          autoReloadMinAmountCents: 12_500,
+          manualFundingMinCents: 2_000,
+          manualFundingMaxCents: 400_000,
+          defaultPaymentHoldTimeoutMinutes: 1_440,
+          holdExpiryWarningMinutes: 90,
+        },
+      }),
       configureAutoReload: async (input: unknown) => {
         configureInputs.push(input);
         if (configureError) throw configureError;
@@ -185,6 +209,32 @@ describe("dropship wallet routes card fee exposure", () => {
 
     expect(response.status).toBe(200);
     expect(response.body.wallet.usdcBaseDepositAddress).toBe("0x1111111111111111111111111111111111111111");
+  });
+
+  it("serves the wallet policy limits so the page stops falling back to a hard-coded table", async () => {
+    const response = await jsonRequest(`${server.url}/api/dropship/wallet`);
+
+    expect(response.status).toBe(200);
+    // Field names are the contract the portal's wallet view adapter parses
+    // (client/src/lib/dropship-wallet-view-adapter.ts, rawLimitsSchema).
+    expect(response.body.wallet.limits).toEqual({
+      autoReloadMinTriggerCents: 7_500,
+      autoReloadMinAmountCents: 12_500,
+      manualFundingMinCents: 2_000,
+      manualFundingMaxCents: 400_000,
+      defaultPaymentHoldTimeoutMinutes: 1_440,
+      holdExpiryWarningMinutes: 90,
+    });
+  });
+
+  it("leaves the admin per-vendor wallet serializer unchanged", async () => {
+    // Staff read the policy through GET /api/dropship/admin/wallet/policy, so
+    // the ops screen's shape does not move when the vendor view gains limits.
+    const response = await jsonRequest(`${server.url}/api/dropship/admin/wallet/vendors/10`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.wallet.limits).toBeUndefined();
+    expect(response.body.wallet.cardFundingFeeBps).toBe(300);
   });
 
   it("returns the fee and the total alongside the checkout session", async () => {

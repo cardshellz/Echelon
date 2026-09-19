@@ -6,10 +6,9 @@ import { withAdvisoryLock } from "../../../infrastructure/scheduler-lock";
 import { createDropshipOrderCancellationServiceFromEnv } from "./dropship-order-cancellation.factory";
 import { createDropshipOrderProcessingServiceFromEnv } from "./dropship-order-processing.factory";
 import { createDropshipPaymentHoldExpirationServiceFromEnv } from "./dropship-payment-hold-expiration.factory";
-import {
-  DEFAULT_PAYMENT_HOLD_EXPIRING_WARNING_MINUTES,
-  type DropshipPaymentHoldExpirationService,
-} from "../application/dropship-payment-hold-expiration-service";
+import { type DropshipPaymentHoldExpirationService } from "../application/dropship-payment-hold-expiration-service";
+import type { DropshipWalletPolicyResolver } from "../domain/wallet-policy";
+import { createDropshipWalletPolicyServiceFromEnv } from "./dropship-wallet-policy.factory";
 import type { DropshipOrderCancellationService } from "../application/dropship-order-cancellation-service";
 import type { DropshipOrderProcessingResult } from "../application/dropship-order-processing-service";
 
@@ -158,6 +157,8 @@ export async function runDropshipOrderProcessingIntake(input: {
 export async function runDropshipOrderProcessingSweep(input: {
   repository?: DropshipOrderProcessingQueueRepository;
   paymentHoldExpirationService?: DropshipPaymentHoldExpirationSweepService;
+  /** Wallet policy limits source; the staff-managed policy (with its env fallback) when absent. */
+  walletPolicy?: DropshipWalletPolicyResolver;
   orderCancellationService?: DropshipOrderCancellationSweepService;
   orderProcessingService?: DropshipOrderProcessingSweepService;
   batchSize?: number;
@@ -187,13 +188,15 @@ export async function runDropshipOrderProcessingSweep(input: {
     limit: batchSize,
     workerId,
   });
+  // The warning window is staff-managed wallet policy (migration 0681), not
+  // dyno config: the value here and the value the vendor wallet page shows have
+  // to be the same number. The policy service falls back to the documented
+  // environment value when no policy row exists.
+  const walletLimits = await (input.walletPolicy ?? createDropshipWalletPolicyServiceFromEnv()).resolveWalletLimits();
   const expiring = await paymentHoldExpirationService.notifyExpiringPaymentHolds({
     limit: batchSize,
     workerId,
-    warningWindowMinutes: envPositiveInteger(
-      "DROPSHIP_PAYMENT_HOLD_EXPIRING_WARNING_MINUTES",
-      DEFAULT_PAYMENT_HOLD_EXPIRING_WARNING_MINUTES,
-    ),
+    warningWindowMinutes: walletLimits.holdExpiryWarningMinutes,
   });
   const cancellation = await (
     input.orderCancellationService ?? createDropshipOrderCancellationServiceFromEnv()

@@ -1,0 +1,419 @@
+import { createHash } from "crypto";
+import { z } from "zod";
+import { DropshipError } from "../domain/errors";
+import {
+  DROPSHIP_WALLET_POLICY_ENV_KEYS,
+  MAX_PAYMENT_HOLD_TIMEOUT_MINUTES,
+  resolveDropshipWalletPolicyLimitsFromEnv,
+  walletPolicyInvariantViolations,
+  type DropshipWalletPolicyLimits,
+  type DropshipWalletPolicyResolver,
+} from "../domain/wallet-policy";
+import { resolveDropshipCardFundingFeeBps } from "./dropship-wallet-service";
+import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship-ports";
+
+/**
+ * Dropship wallet policy service.
+ *
+ * Staff edit the wallet's limits here instead of through dyno config. A change
+ * is a NEW VERSION of `dropship.dropship_wallet_policies` (migration 0681);
+ * published rows are immutable, and exactly one row is active. Reads fall back
+ * to the environment resolvers when no row exists, so an empty database (dev)
+ * or the window before the migration lands behaves exactly as it does today.
+ *
+ * Nothing here rewrites stored vendor configuration. Raising a minimum changes
+ * what the wallet will ACCEPT on the next write; every saved auto-reload row
+ * keeps working until its vendor next saves it. The impact report exists so
+ * staff can see, before they save, how many vendors that will be.
+ */
+
+const positiveCentsSchema = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
+const idempotencyKeySchema = z.string().trim().min(8).max(200);
+const actorSchema = z.object({
+  actorType: z.enum(["admin", "system"]),
+  actorId: z.string().trim().min(1).max(255).optional(),
+}).strict();
+
+/**
+ * Boundary schema for a new policy version. Per-field range lives here; the
+ * cross-field rules come from the domain so the Zod schema, the SQL CHECK
+ * constraints and the unit tests all state the same thing once.
+ */
+export const createDropshipWalletPolicyVersionInputSchema = z.object({
+  autoReloadMinTriggerCents: positiveCentsSchema,
+  autoReloadMinAmountCents: positiveCentsSchema,
+  manualFundingMinCents: positiveCentsSchema,
+  manualFundingMaxCents: positiveCentsSchema,
+  defaultPaymentHoldTimeoutMinutes: z.number().int().min(1).max(MAX_PAYMENT_HOLD_TIMEOUT_MINUTES),
+  holdExpiryWarningMinutes: z.number().int().min(1).max(MAX_PAYMENT_HOLD_TIMEOUT_MINUTES),
+  changeNote: z.string().trim().min(1).max(1000).nullable().optional(),
+  idempotencyKey: idempotencyKeySchema,
+  actor: actorSchema,
+}).strict().superRefine((input, context) => {
+  for (const violation of walletPolicyInvariantViolations(input)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: [violation.field],
+      message: violation.message,
+    });
+  }
+});
+
+export type CreateDropshipWalletPolicyVersionInput =
+  z.infer<typeof createDropshipWalletPolicyVersionInputSchema>;
+
+/** Proposed floors to measure the vendor population against. */
+export const dropshipWalletPolicyImpactInputSchema = z.object({
+  autoReloadMinTriggerCents: positiveCentsSchema.optional(),
+  autoReloadMinAmountCents: positiveCentsSchema.optional(),
+}).strict();
+
+export type DropshipWalletPolicyImpactInput = z.infer<typeof dropshipWalletPolicyImpactInputSchema>;
+
+export interface DropshipWalletPolicyActor {
+  actorType: "admin" | "system";
+  actorId: string | null;
+}
+
+export interface DropshipWalletPolicyRecord {
+  policyId: number;
+  version: number;
+  limits: DropshipWalletPolicyLimits;
+  isActive: boolean;
+  changeNote: string | null;
+  createdAt: Date;
+  createdBy: DropshipWalletPolicyActor;
+  deactivatedAt: Date | null;
+}
+
+/**
+ * How many ALREADY-SAVED vendor auto-reload rows sit below a proposed floor.
+ *
+ * Counts are read-only and change nothing: enforcement stays on write
+ * (`assertAutoReloadConfigIsUsable`), so these vendors keep their saved
+ * settings and are only asked to raise them the next time they save.
+ *
+ * Scope: vendors whose lifecycle status is `active` and that have an
+ * auto-reload settings row. A row with no single-reload cap (NULL) is NOT
+ * counted as below the limit — an enabled row without a cap is already refused
+ * for a different reason (`DROPSHIP_AUTO_RELOAD_AMOUNT_REQUIRED`), and raising
+ * a floor neither creates nor fixes that.
+ */
+export interface DropshipWalletPolicyImpact {
+  proposedAutoReloadMinTriggerCents: number;
+  proposedAutoReloadMinAmountCents: number;
+  vendorsBelowMinimumFloor: number;
+  vendorsBelowMinimumSingleTopUpLimit: number;
+  /** Denominator: active vendors that have an auto-reload settings row at all. */
+  activeVendorsWithAutoReloadSettings: number;
+  evaluatedAt: Date;
+}
+
+/**
+ * The card funding fee, served READ-ONLY.
+ *
+ * It is deliberately NOT editable here. A vendor's agreement to a rate is
+ * recorded today only in an audit payload written when they saved auto-reload
+ * (`configureAutoReload` -> `cardFundingFeeBps`), not on the settings row, and
+ * unattended auto-reload charges quote the LIVE rate
+ * (`DropshipWalletService.quoteFunding`). An editable fee would therefore
+ * charge vendors a rate they never agreed to, silently, on a schedule. Storing
+ * the acknowledgement on the settings row is the prerequisite, and is separate
+ * work; until then the rate moves only through a deliberate config change.
+ */
+export interface DropshipWalletPolicyCardFeeView {
+  bps: number;
+  envKey: string;
+  editable: false;
+  readOnlyReason: string;
+}
+
+export interface DropshipWalletPolicyOverview {
+  /** The active policy row, or null when the wallet is still on the env fallback. */
+  policy: DropshipWalletPolicyRecord | null;
+  /** The limits actually in force. */
+  limits: DropshipWalletPolicyLimits;
+  limitsSource: "policy" | "environment";
+  /** What the env resolvers would serve — the values the policy row overrides. */
+  envLimits: DropshipWalletPolicyLimits;
+  /** Which environment variable backs each limit (null: no env override exists). */
+  envKeys: typeof DROPSHIP_WALLET_POLICY_ENV_KEYS;
+  cardFundingFee: DropshipWalletPolicyCardFeeView;
+  impact: DropshipWalletPolicyImpact;
+  generatedAt: Date;
+}
+
+export interface DropshipWalletPolicyMutationResult {
+  policy: DropshipWalletPolicyRecord;
+  /**
+   * The row this version superseded, read inside the same transaction, so the
+   * before -> after log line is not a stale read. Null on a first version and
+   * on an idempotent replay (a replay changes nothing, so it has no "before").
+   */
+  previousPolicy: DropshipWalletPolicyRecord | null;
+  idempotentReplay: boolean;
+}
+
+export interface CreateDropshipWalletPolicyVersionRepositoryInput {
+  limits: DropshipWalletPolicyLimits;
+  changeNote: string | null;
+  idempotencyKey: string;
+  requestHash: string;
+  actor: { actorType: "admin" | "system"; actorId?: string };
+  now: Date;
+}
+
+export interface DropshipWalletPolicyVendorImpactCounts {
+  vendorsBelowMinimumFloor: number;
+  vendorsBelowMinimumSingleTopUpLimit: number;
+  activeVendorsWithAutoReloadSettings: number;
+}
+
+export interface DropshipWalletPolicyRepository {
+  getActivePolicy(): Promise<DropshipWalletPolicyRecord | null>;
+  createPolicyVersion(
+    input: CreateDropshipWalletPolicyVersionRepositoryInput,
+  ): Promise<DropshipWalletPolicyMutationResult>;
+  countVendorsBelowLimits(input: {
+    autoReloadMinTriggerCents: number;
+    autoReloadMinAmountCents: number;
+  }): Promise<DropshipWalletPolicyVendorImpactCounts>;
+}
+
+export class DropshipWalletPolicyService implements DropshipWalletPolicyResolver {
+  constructor(
+    private readonly deps: {
+      repository: DropshipWalletPolicyRepository;
+      clock: DropshipClock;
+      logger: DropshipLogger;
+      /** Environment used for the fallback layer. Injected so reads are deterministic under test. */
+      env?: NodeJS.ProcessEnv;
+      /** Card fee rate override; the environment's rate when absent. Injected so tests are deterministic. */
+      cardFundingFeeBps?: number;
+    },
+  ) {}
+
+  /**
+   * The limits in force: the active policy row, else the environment fallback.
+   * This is the single read the wallet and the hold-expiry sweeper use.
+   */
+  async resolveWalletLimits(): Promise<DropshipWalletPolicyLimits> {
+    return (await this.resolveEffectiveLimits()).limits;
+  }
+
+  /** The active policy row, or null when none has been published. */
+  async getActivePolicy(): Promise<DropshipWalletPolicyRecord | null> {
+    return this.readActivePolicy();
+  }
+
+  /**
+   * Everything the admin screen needs in one read: the active policy, the
+   * env-derived values it overrides, the read-only card fee rate, and the
+   * impact of a proposal (defaulting to the limits already in force).
+   */
+  async getOverview(proposal: unknown = {}): Promise<DropshipWalletPolicyOverview> {
+    const parsed = parseWalletPolicyInput(dropshipWalletPolicyImpactInputSchema, proposal);
+    const effective = await this.resolveEffectiveLimits();
+    const impact = await this.measureImpact(effective.limits, parsed);
+    return {
+      policy: effective.policy,
+      limits: effective.limits,
+      limitsSource: effective.policy ? "policy" : "environment",
+      envLimits: this.envLimits(),
+      envKeys: DROPSHIP_WALLET_POLICY_ENV_KEYS,
+      cardFundingFee: this.cardFundingFeeView(),
+      impact,
+      generatedAt: this.deps.clock.now(),
+    };
+  }
+
+  /**
+   * How many active vendors a proposal would ask to change something. Omitted
+   * fields fall back to the limits in force, so an empty proposal reports the
+   * standing population against today's policy.
+   */
+  async getImpact(proposal: unknown = {}): Promise<DropshipWalletPolicyImpact> {
+    const parsed = parseWalletPolicyInput(dropshipWalletPolicyImpactInputSchema, proposal);
+    const effective = await this.resolveEffectiveLimits();
+    return this.measureImpact(effective.limits, parsed);
+  }
+
+  /**
+   * Publish a new version. The previous active row is retired in the SAME
+   * transaction as the insert, the command row and the audit row, so a partial
+   * failure cannot leave two active policies or an unattributed change.
+   */
+  async createPolicyVersion(input: unknown): Promise<DropshipWalletPolicyMutationResult> {
+    const parsed = parseWalletPolicyInput(createDropshipWalletPolicyVersionInputSchema, input);
+    const limits: DropshipWalletPolicyLimits = {
+      autoReloadMinTriggerCents: parsed.autoReloadMinTriggerCents,
+      autoReloadMinAmountCents: parsed.autoReloadMinAmountCents,
+      manualFundingMinCents: parsed.manualFundingMinCents,
+      manualFundingMaxCents: parsed.manualFundingMaxCents,
+      defaultPaymentHoldTimeoutMinutes: parsed.defaultPaymentHoldTimeoutMinutes,
+      holdExpiryWarningMinutes: parsed.holdExpiryWarningMinutes,
+    };
+    const changeNote = parsed.changeNote ?? null;
+    const now = this.deps.clock.now();
+    const result = await this.deps.repository.createPolicyVersion({
+      limits,
+      changeNote,
+      idempotencyKey: parsed.idempotencyKey,
+      requestHash: hashWalletPolicyRequest({ limits, changeNote }),
+      actor: parsed.actor,
+      now,
+    });
+
+    this.deps.logger.info({
+      code: result.idempotentReplay
+        ? "DROPSHIP_WALLET_POLICY_VERSION_REPLAYED"
+        : "DROPSHIP_WALLET_POLICY_VERSION_PUBLISHED",
+      message: "Dropship wallet policy version command completed.",
+      context: {
+        policyId: result.policy.policyId,
+        version: result.policy.version,
+        idempotentReplay: result.idempotentReplay,
+        actorType: parsed.actor.actorType,
+        actorId: parsed.actor.actorId ?? null,
+        changeNote,
+        before: result.previousPolicy
+          ? { policyId: result.previousPolicy.policyId, version: result.previousPolicy.version, ...result.previousPolicy.limits }
+          : null,
+        after: { policyId: result.policy.policyId, version: result.policy.version, ...result.policy.limits },
+      },
+    });
+    return result;
+  }
+
+  private async measureImpact(
+    effectiveLimits: DropshipWalletPolicyLimits,
+    proposal: DropshipWalletPolicyImpactInput,
+  ): Promise<DropshipWalletPolicyImpact> {
+    const proposed = {
+      autoReloadMinTriggerCents: proposal.autoReloadMinTriggerCents ?? effectiveLimits.autoReloadMinTriggerCents,
+      autoReloadMinAmountCents: proposal.autoReloadMinAmountCents ?? effectiveLimits.autoReloadMinAmountCents,
+    };
+    const counts = await this.deps.repository.countVendorsBelowLimits(proposed);
+    return {
+      proposedAutoReloadMinTriggerCents: proposed.autoReloadMinTriggerCents,
+      proposedAutoReloadMinAmountCents: proposed.autoReloadMinAmountCents,
+      vendorsBelowMinimumFloor: counts.vendorsBelowMinimumFloor,
+      vendorsBelowMinimumSingleTopUpLimit: counts.vendorsBelowMinimumSingleTopUpLimit,
+      activeVendorsWithAutoReloadSettings: counts.activeVendorsWithAutoReloadSettings,
+      evaluatedAt: this.deps.clock.now(),
+    };
+  }
+
+  private async resolveEffectiveLimits(): Promise<{
+    policy: DropshipWalletPolicyRecord | null;
+    limits: DropshipWalletPolicyLimits;
+  }> {
+    const policy = await this.readActivePolicy();
+    return { policy, limits: policy ? policy.limits : this.envLimits() };
+  }
+
+  /**
+   * Reads the active row, tolerating exactly one failure: the table not
+   * existing yet. An unmigrated database (dev, or a dyno that booted ahead of
+   * the release-phase migration) must fall back to the env limits rather than
+   * take the vendor wallet page down. The fallback is announced at WARN — it is
+   * an anomaly that recovered, not a silent swallow — and every other failure
+   * propagates.
+   */
+  private async readActivePolicy(): Promise<DropshipWalletPolicyRecord | null> {
+    try {
+      return await this.deps.repository.getActivePolicy();
+    } catch (error) {
+      if (error instanceof DropshipError && error.code === "DROPSHIP_WALLET_POLICY_TABLE_MISSING") {
+        this.deps.logger.warn({
+          code: "DROPSHIP_WALLET_POLICY_ENV_FALLBACK",
+          message: "Dropship wallet policy table is missing; falling back to the environment limits.",
+          context: { classification: "transient", errorCode: error.code },
+        });
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  private envLimits(): DropshipWalletPolicyLimits {
+    return resolveDropshipWalletPolicyLimitsFromEnv(this.deps.env);
+  }
+
+  private cardFundingFeeView(): DropshipWalletPolicyCardFeeView {
+    return {
+      bps: this.deps.cardFundingFeeBps ?? resolveDropshipCardFundingFeeBps(this.deps.env),
+      envKey: "DROPSHIP_CARD_FUNDING_FEE_BPS",
+      editable: false,
+      readOnlyReason:
+        "A vendor's agreement to the card fee is recorded only in an audit payload, not on their settings row, "
+        + "and unattended auto-reload charges quote the live rate. Making the fee editable here would charge vendors "
+        + "a rate they never agreed to. Storing the acknowledgement is the prerequisite and is separate work.",
+    };
+  }
+}
+
+/** Stable request fingerprint: the same proposal under the same key is a replay. */
+export function hashWalletPolicyRequest(value: {
+  limits: DropshipWalletPolicyLimits;
+  changeNote: string | null;
+}): string {
+  return createHash("sha256").update(JSON.stringify({
+    command: "wallet_policy_version_created",
+    limits: {
+      autoReloadMinTriggerCents: value.limits.autoReloadMinTriggerCents,
+      autoReloadMinAmountCents: value.limits.autoReloadMinAmountCents,
+      manualFundingMinCents: value.limits.manualFundingMinCents,
+      manualFundingMaxCents: value.limits.manualFundingMaxCents,
+      defaultPaymentHoldTimeoutMinutes: value.limits.defaultPaymentHoldTimeoutMinutes,
+      holdExpiryWarningMinutes: value.limits.holdExpiryWarningMinutes,
+    },
+    changeNote: value.changeNote,
+  })).digest("hex");
+}
+
+function parseWalletPolicyInput<T>(schema: z.ZodType<T, z.ZodTypeDef, unknown>, input: unknown): T {
+  const result = schema.safeParse(input);
+  if (!result.success) {
+    throw new DropshipError(
+      "DROPSHIP_WALLET_POLICY_INVALID_INPUT",
+      "Dropship wallet policy input failed validation.",
+      {
+        classification: "permanent",
+        issues: result.error.issues.map((issue) => ({
+          path: issue.path.join("."),
+          code: issue.code,
+          message: issue.message,
+        })),
+      },
+    );
+  }
+  return result.data;
+}
+
+export function makeDropshipWalletPolicyLogger(): DropshipLogger {
+  return {
+    info: (event) => logWalletPolicyEvent("info", event),
+    warn: (event) => logWalletPolicyEvent("warn", event),
+    error: (event) => logWalletPolicyEvent("error", event),
+  };
+}
+
+export const systemDropshipWalletPolicyClock: DropshipClock = {
+  now: () => new Date(),
+};
+
+function logWalletPolicyEvent(level: "info" | "warn" | "error", event: DropshipLogEvent): void {
+  const payload = JSON.stringify({
+    code: event.code,
+    message: event.message,
+    context: event.context ?? {},
+  });
+  if (level === "error") {
+    console.error(payload);
+  } else if (level === "warn") {
+    console.warn(payload);
+  } else {
+    console.info(payload);
+  }
+}

@@ -11,6 +11,7 @@ import {
   type DropshipOrderProcessingQueueRepository,
 } from "../../infrastructure/dropship-order-processing-runner";
 import type { DropshipOrderProcessingResult } from "../../application";
+import type { DropshipWalletPolicyResolver } from "../../domain/wallet-policy";
 
 const now = new Date("2026-05-07T16:30:00.000Z");
 
@@ -25,6 +26,9 @@ describe("runDropshipOrderProcessingSweep", () => {
       paymentHoldExpirationService: new FakePaymentHoldExpirationService(calls),
       orderCancellationService: new FakeOrderCancellationService(calls),
       orderProcessingService: service,
+      // The sweep reads the hold-expiry warning window from the wallet policy,
+      // so the resolver is injected rather than reaching for a database.
+      walletPolicy: fakeWalletPolicy(),
       batchSize: 25,
       staleProcessingMinutes: 45,
       workerId: "worker-1",
@@ -61,6 +65,31 @@ describe("runDropshipOrderProcessingSweep", () => {
       { intakeId: 91, workerId: "worker-1", idempotencyKey: "dropship-order-processing:intake:91" },
       { intakeId: 92, workerId: "worker-1", idempotencyKey: "dropship-order-processing:intake:92" },
     ]);
+  });
+
+  it("warns on the window the wallet policy publishes, not an environment variable", async () => {
+    const calls: string[] = [];
+    const holdExpiration = new FakePaymentHoldExpirationService(calls);
+    // A stale env override must not win: the vendor wallet page shows the
+    // policy's window, so the sweeper has to warn on that same number.
+    process.env.DROPSHIP_PAYMENT_HOLD_EXPIRING_WARNING_MINUTES = "999";
+
+    try {
+      await runDropshipOrderProcessingSweep({
+        repository: new FakeOrderProcessingQueueRepository(calls, [], []),
+        paymentHoldExpirationService: holdExpiration,
+        orderCancellationService: new FakeOrderCancellationService(calls),
+        orderProcessingService: new FakeOrderProcessingService(calls),
+        walletPolicy: fakeWalletPolicy(45),
+        batchSize: 25,
+        workerId: "worker-1",
+        now,
+      });
+    } finally {
+      delete process.env.DROPSHIP_PAYMENT_HOLD_EXPIRING_WARNING_MINUTES;
+    }
+
+    expect(holdExpiration.warningWindowMinutes).toBe(45);
   });
 });
 
@@ -160,6 +189,8 @@ class FakeOrderProcessingQueueRepository implements DropshipOrderProcessingQueue
 }
 
 class FakePaymentHoldExpirationService {
+  warningWindowMinutes: number | null = null;
+
   constructor(private readonly calls: string[]) {}
 
   async expireExpiredPaymentHolds(): Promise<{
@@ -170,13 +201,28 @@ class FakePaymentHoldExpirationService {
     return { expiredCount: 0, expired: [] };
   }
 
-  async notifyExpiringPaymentHolds(): Promise<{
+  async notifyExpiringPaymentHolds(input?: { warningWindowMinutes?: number }): Promise<{
     notifiedCount: number;
     notified: [];
   }> {
     this.calls.push("notify-expiring-holds");
+    this.warningWindowMinutes = input?.warningWindowMinutes ?? null;
     return { notifiedCount: 0, notified: [] };
   }
+}
+
+/** The staff-managed wallet policy the sweep reads its warning window from. */
+function fakeWalletPolicy(holdExpiryWarningMinutes = 120): DropshipWalletPolicyResolver {
+  return {
+    resolveWalletLimits: async () => ({
+      autoReloadMinTriggerCents: 5_000,
+      autoReloadMinAmountCents: 10_000,
+      manualFundingMinCents: 1_000,
+      manualFundingMaxCents: 500_000,
+      defaultPaymentHoldTimeoutMinutes: 2_880,
+      holdExpiryWarningMinutes,
+    }),
+  };
 }
 
 class FakeOrderCancellationService {
