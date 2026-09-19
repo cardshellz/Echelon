@@ -34,8 +34,25 @@ import type {
   WalletLimits,
 } from "./dropship-wallet-view-adapter";
 
-export type WalletFlowStep = "intro" | "source" | "floor" | "backup" | "authorize" | "deposit";
+/** The setup flow, in order. The list is the model's; the page renders it and never reorders it. */
+export const STEP_ORDER = ["intro", "source", "floor", "backup", "authorize", "deposit"] as const;
+export type WalletFlowStep = (typeof STEP_ORDER)[number];
 export type WalletVendorStatus = "onboarding" | "active" | "paused" | "lapsed" | "suspended" | "closed" | string;
+
+/** The one-based number a step carries in the list and in copy ("back at step 4"). */
+export function walletStepNumber(step: WalletFlowStep): number {
+  return STEP_ORDER.indexOf(step) + 1;
+}
+
+/** The step before this one, or null for the first. */
+export function previousWalletStep(step: WalletFlowStep): WalletFlowStep | null {
+  return STEP_ORDER[STEP_ORDER.indexOf(step) - 1] ?? null;
+}
+
+/** -1 for null and for anything not in STEP_ORDER, so an unknown step is simply out of reach. */
+function stepIndex(step: WalletFlowStep | null): number {
+  return step === null ? -1 : STEP_ORDER.indexOf(step);
+}
 
 /** The vendor statuses the server lets turn auto-reload off (rule 13; S4 extends the refusal to paused — Assumption). */
 export const AUTO_RELOAD_OFF_ALLOWED_STATUSES: ReadonlySet<string> = new Set(["onboarding", "lapsed", "suspended", "closed"]);
@@ -55,6 +72,7 @@ export function draftStorageKey(vendorId: number): string {
 }
 
 const sourceRailSchema = z.enum(["stripe_ach", "stripe_card"]);
+const stepSchema = z.enum(STEP_ORDER);
 const optionalCents = z.number().int().nonnegative().nullable();
 const isoDate = z.string().refine((value) => !Number.isNaN(Date.parse(value)), "must be an ISO date");
 
@@ -81,6 +99,12 @@ export const walletDraftSchema = z.object({
   backupMethodId: z.number().int().positive().nullable(),
   pendingStripe: pendingStripeSchema.nullable(),
   deposit: z.enum(["pending", "skipped", "done"]).nullable(),
+  // Where the vendor asked to be, when that is not where the flow left them.
+  // Optional with a default so a draft written before step navigation existed
+  // still parses (no version bump, nothing re-picked); an unreadable value is
+  // dropped to null rather than discarding the whole draft, because a bad
+  // override costs one click and a discarded draft costs every choice.
+  stepOverride: stepSchema.nullable().catch(null).default(null),
 }).strict();
 
 export type WalletDraft = z.infer<typeof walletDraftSchema>;
@@ -97,6 +121,7 @@ export const EMPTY_DRAFT: WalletDraft = Object.freeze({
   backupMethodId: null,
   pendingStripe: null,
   deposit: null,
+  stepOverride: null,
 }) as WalletDraft;
 
 /** A malformed or foreign draft is discarded, never repaired: a lost draft costs one re-pick, nothing more. */
@@ -311,7 +336,12 @@ export function activeMethodsOfRail(wallet: DropshipWalletView, rail: WalletSour
 
 export interface WalletFlowState {
   mode: "flow" | "manage";
+  /** The step on screen: the one the vendor asked for when it is reachable, else `furthestStep`. */
   step: WalletFlowStep | null;
+  /** How far the choices themselves have carried the flow, whatever the vendor is looking at. */
+  furthestStep: WalletFlowStep | null;
+  /** Every step up to and including `furthestStep`; the page makes exactly these clickable. */
+  reachableSteps: WalletFlowStep[];
   needsAcknowledgement: boolean;
   feeRecordMissing: boolean;
   feeChange: { recordedBps: number; currentBps: number } | null;
@@ -375,22 +405,45 @@ export function deriveWalletFlow(input: {
   const depositStepApplies = done && draft.deposit === "pending" && source?.rail === "stripe_ach" && belowFloor;
   const mode: "flow" | "manage" = onboarding && (!done || depositStepApplies) ? "flow" : "manage";
 
-  let step: WalletFlowStep | null = null;
+  // How far the choices carry the flow on their own: the first unsatisfied
+  // requirement. It is the limit on where an override may land, and the step a
+  // Continue returns to.
+  let furthestStep: WalletFlowStep | null = null;
   if (mode === "flow") {
     if (done) {
-      step = "deposit";
-    } else if (!draft.seenIntro && wallet.fundingMethods.length === 0) {
-      step = "intro";
+      furthestStep = "deposit";
+    } else if (!draft.seenIntro) {
+      // Every vendor is shown the charge rules once, whatever is already saved
+      // on the wallet — a card carried over from the old flow is not evidence
+      // that anyone read them. Showing them twice after a lost draft costs one
+      // click; never showing them costs an unexplained charge.
+      furthestStep = "intro";
     } else if (!source) {
-      step = "source";
+      furthestStep = "source";
     } else if (!floorValid) {
-      step = "floor";
+      furthestStep = "floor";
     } else if (!backup) {
-      step = "backup";
+      furthestStep = "backup";
     } else {
-      step = "authorize";
+      furthestStep = "authorize";
     }
   }
+
+  // A step is reachable once the flow has been there: its place in STEP_ORDER
+  // is at or before the furthest step. Once the plan is authorized, though, the
+  // choices are the server's: reopening them would edit a draft that no longer
+  // decides anything, so navigation stops at the review. The intro is only ever
+  // a page of rules, so it stays reachable from everywhere.
+  const furthestIndex = stepIndex(furthestStep);
+  const earliestNavigable = done ? STEP_ORDER.indexOf("authorize") : 0;
+  const reachableSteps: WalletFlowStep[] = furthestIndex < 0
+    ? []
+    : [...(earliestNavigable > 0 ? (["intro"] as WalletFlowStep[]) : []), ...STEP_ORDER.slice(earliestNavigable, furthestIndex + 1)];
+  // An override for a step that is not (or no longer) reachable — or for a step
+  // this build does not know — is ignored rather than refused: the vendor simply
+  // stays where the flow left them.
+  const overrideReachable = draft.stepOverride !== null && reachableSteps.includes(draft.stepOverride);
+  const step: WalletFlowStep | null = overrideReachable ? draft.stepOverride : furthestStep;
 
   const backupDesignated = authorized && wallet.fundingMethods.some((method) => method.roles.isBackupCard && method.roles.chargeable && method.status === "active");
   const sourceDesignated = authorized && wallet.fundingMethods.some((method) => method.roles.isAutoReloadSource && method.status === "active");
@@ -398,6 +451,8 @@ export function deriveWalletFlow(input: {
   return {
     mode,
     step,
+    furthestStep,
+    reachableSteps,
     needsAcknowledgement,
     feeRecordMissing,
     feeChange,
@@ -420,6 +475,94 @@ function derivedDefaultFloor(rail: WalletSourceRail): number {
 /** Manage-mode target for a `{ step }` recovery (spec §1.3 rule 12). */
 export function manageEditorForStep(step: "source" | "floor" | "backup"): "source" | "floor" | "backup" {
   return step;
+}
+
+/**
+ * How one row of the step list reads.
+ *
+ * The intro is a page, not a choice: it is done when it has been read and never
+ * because the flow moved past it (a vendor whose wallet already held a card was
+ * sent straight to step 2 by the old rule and still saw a green tick on a page
+ * they were never shown). Every other step is done once the choices reach past
+ * it, which is what keeps its result on screen while an earlier step is
+ * revisited.
+ */
+export function walletStepState(step: WalletFlowStep, input: { current: WalletFlowStep | null; furthestStep: WalletFlowStep | null; seenIntro: boolean }): "done" | "current" | "later" {
+  if (step === input.current) return "current";
+  if (step === "intro") return input.seenIntro ? "done" : "later";
+  return stepIndex(step) < stepIndex(input.furthestStep) ? "done" : "later";
+}
+
+/**
+ * The line under the source picker, or nothing when no method is preselected.
+ *
+ * "Where you left off" is said only to a vendor who actually left off: a saved
+ * method the flow preselected on its own is described as exactly that.
+ */
+export function describeSourcePreselection(input: {
+  selected: WalletFundingMethod | null;
+  draftSourceMethodId: number | null;
+  suggestedSourceMethodId: number | null;
+  /** A method Stripe has just added announces itself; it needs no second line. */
+  justAdded: boolean;
+}): string | null {
+  if (input.justAdded || input.selected === null) return null;
+  const label = describeFundingMethod(input.selected);
+  if (input.draftSourceMethodId === input.selected.fundingMethodId) return `Pick up where you left off: ${label} is the source you chose earlier.`;
+  if (input.draftSourceMethodId === null && input.suggestedSourceMethodId === input.selected.fundingMethodId) {
+    return `${label} is already saved on your wallet, so we picked it — choose ${input.selected.rail === "stripe_ach" ? "a card" : "a bank account"} instead if you would rather.`;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Moving through the flow. Every transition is a pure draft→draft function, so
+// what a click keeps and what it clears is decided here and unit-tested, never
+// in the page. The rule: a visit changes nothing but where you are, and a
+// downstream value is cleared only when the value above it actually changed.
+// ---------------------------------------------------------------------------
+
+/** Clicking a step in the list, or a Back control: only where the vendor is. */
+export function draftAtStep(draft: WalletDraft, step: WalletFlowStep): WalletDraft {
+  return { ...draft, stepOverride: step };
+}
+
+/** The intro's button. Seen is recorded once and never withdrawn; a revisit lands back where the flow was. */
+export function draftAfterIntro(draft: WalletDraft): WalletDraft {
+  return { ...draft, seenIntro: true, stepOverride: null };
+}
+
+/**
+ * Continue on the source step.
+ *
+ * The floor is cleared only when the rail actually changes, because the floor's
+ * default and its guidance are rail-specific ($250 of cover for a transfer that
+ * takes days, $100 when top-ups land at once). Picking the same method again —
+ * or another account on the same rail — keeps the floor and the backup card, so
+ * a plain revisit costs nothing. A card source still becomes the backup card,
+ * which `deriveWalletFlow` derives from the rail; no draft value moves for it.
+ */
+export function draftAfterSourceChoice(draft: WalletDraft, method: WalletFundingMethod, savedSource: WalletFundingMethod | null): WalletDraft {
+  const railChanged = savedSource !== null && savedSource.rail !== method.rail;
+  return {
+    ...draft,
+    stepOverride: null,
+    sourceMethodId: method.fundingMethodId,
+    sourceRail: isSourceRail(method.rail) ? method.rail : draft.sourceRail,
+    floorCents: railChanged ? null : draft.floorCents,
+  };
+}
+
+/** Continue on the floor step. The daily cost is the vendor's own note and never leaves the browser. */
+export function draftAfterFloorChoice(draft: WalletDraft, floorCents: number, dailyCostCents: number | null): WalletDraft {
+  assertCents(floorCents, "floorCents");
+  if (dailyCostCents !== null) assertCents(dailyCostCents, "dailyCostCents");
+  return { ...draft, stepOverride: null, floorCents, dailyCostCents };
+}
+
+/** Continue on the backup step. Nothing downstream depends on which card it is. */
+export function draftAfterBackupChoice(draft: WalletDraft, card: WalletFundingMethod): WalletDraft {
+  return { ...draft, stepOverride: null, backupMethodId: card.fundingMethodId };
 }
 
 // ---------------------------------------------------------------------------

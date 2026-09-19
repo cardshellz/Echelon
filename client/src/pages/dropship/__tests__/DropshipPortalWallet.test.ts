@@ -33,6 +33,15 @@ describe("DropshipPortalWallet contract", () => {
     expect(source).toContain("adaptWalletView(await fetchJson<unknown>(WALLET_QUERY_KEY[0]))");
   });
 
+  it("words the source preselection from the model, and never claims a setup the vendor did not start", () => {
+    const step = between("function SourceStep", "function tryParseDollarInputToCents");
+    expect(step).toContain("describeSourcePreselection({");
+    expect(step).toContain("draftSourceMethodId: draft.sourceMethodId");
+    expect(step).toContain("suggestedSourceMethodId: flow.suggestedSourceMethodId");
+    expect(step).toContain("justAdded: autoSelectedId !== null");
+    expect(source).not.toContain("Pick up where you left off.");
+  });
+
   it("holds no money or duration policy of its own", () => {
     expect(source).not.toMatch(/"3%"|0\.03|"2 hours"|"a few days"|\(2 × your floor\)/);
     expect(source).not.toMatch(/[^\w_-](300|120|2880)[^\w_-]/);
@@ -111,10 +120,54 @@ describe("DropshipPortalWallet contract", () => {
     expect(between("function addFunds", "function saveUsdcMethod")).not.toMatch(/daily|cost/i);
   });
 
-  it("states the intro in the words of what happens today", () => {
-    expect(source).toContain("INTRO_VERIFICATION_NOTE");
+  it("states the intro in the words of what happens today, from one source of the copy", () => {
     expect(source).not.toContain("passkey enrollment");
-    expect(source).toContain("describeIntro({ cardFundingFeeBps: wallet.cardFundingFeeBps, usdcOffered: wallet.usdcBaseDepositAddress !== null, holdTimeoutMinutes: flow.holdTimeoutMinutes })");
     expect(source).toContain("describeActivationTopUp(");
+    // Step 1 and the manage view's "How your wallet works" render the same component, so the rules are worded once.
+    expect(source.match(/describeIntro\(/g)).toHaveLength(1);
+    expect(source.match(/INTRO_VERIFICATION_NOTE/g)).toHaveLength(2);
+    expect(source).toContain("describeIntro({ cardFundingFeeBps: wallet.cardFundingFeeBps, usdcOffered: wallet.usdcBaseDepositAddress !== null, holdTimeoutMinutes: flow.holdTimeoutMinutes })");
+    expect(source.match(/<WalletHowItWorks wallet=\{wallet\} flow=\{flow\} \/>/g)).toHaveLength(2);
+    expect(between("function IntroStep", "function SourcePicker")).toContain("revisited ? \"Back to setup\" : \"Set up my wallet\"");
+    const manage = between("function HowItWorksSection", "function PlanRow");
+    expect(manage).toContain("data-testid=\"wallet-how-it-works\"");
+    expect(manage).toContain("<CollapsibleContent");
+    expect(source).toContain("<HowItWorksSection wallet={wallet} flow={flow} />");
+  });
+
+  it("navigates the flow only through the model: reachable rows are buttons, every move is a draft transition", () => {
+    // The order of the steps, the step a click lands on and what it keeps all live in the model.
+    expect(source).not.toMatch(/const STEP_ORDER\s*[:=]/);
+    expect(source).toContain("STEP_ORDER,\n  acknowledgementForSave");
+    const indicator = between("function StepIndicator", "function WalletHowItWorks");
+    expect(indicator).toContain("reachable: flow.reachableSteps.includes(step)");
+    // Done, current and later are the model's verdict — the page never infers a tick from a row's position.
+    expect(indicator).toContain("walletStepState(step, { current, furthestStep: flow.furthestStep ?? current, seenIntro: draft.seenIntro })");
+    expect(indicator).not.toMatch(/index [<>]=? \w*[Ii]ndex/);
+    expect(indicator).toContain("data-testid={`wallet-step-link-${step}`}");
+    expect(indicator).toContain("aria-current={state === \"current\" ? \"step\" : undefined}");
+    expect(indicator).toContain("onClick={() => onSelect(step)}");
+    // A row the flow has not reached yet is plain text: no button, nothing focusable.
+    expect(indicator).toContain("<span className=\"flex items-start gap-3\">{body}</span>");
+    expect(indicator).toContain("data-testid=\"wallet-step-indicator\"");
+    // Every move through the flow is one of the model's draft transitions; the page never edits the draft's choices itself.
+    for (const transition of ["draftAtStep(current, step)", "setDraft(draftAfterIntro)", "draftAfterSourceChoice(current, method, flow.source?.method ?? null)",
+      "draftAfterFloorChoice(current, floorCents, dailyCostCents)", "draftAfterBackupChoice(current, card)", "draftAtStep(current, previous)"]) {
+      expect(source, transition).toContain(transition);
+    }
+    expect(source).toContain("revisited={flow.furthestStep !== \"intro\"}");
+    // Back is a plain control on every step screen but the intro, and it saves nothing.
+    const back = between("function StepBack", "function Impact");
+    expect(back).toContain("data-testid=\"wallet-step-back\"");
+    expect(back).toContain("if (!onBack) return null;");
+    for (const [start, end] of [["function SourceStep", "function tryParseDollarInputToCents"], ["function FloorStep", "function centsToDollarText"],
+      ["function BackupStep", "function buildReviewRows"], ["function ReviewStep", "function FundingControls"], ["function DepositStep", "function ManageView"]]) {
+      expect(between(start, end), start).toContain("<StepBack busy=");
+    }
+    expect(between("function IntroStep", "function SourcePicker")).not.toContain("<StepBack");
+    // Review's Change controls open a step; they no longer throw the choice away, and are not offered for a step that is closed.
+    expect(between("function ReviewStep", "function FundingControls")).toContain("onChange(step)");
+    expect(between("function ReviewStep", "function FundingControls")).toContain("{step && flow.reachableSteps.includes(step) && (");
+    expect(source).toContain("onChange={(step) => setDraft((current) => draftAtStep(current, step))}");
   });
 });

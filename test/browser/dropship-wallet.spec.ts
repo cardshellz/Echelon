@@ -36,6 +36,8 @@ interface StubMethod {
 
 const CARD: StubMethod = { fundingMethodId: 10, rail: "stripe_card", status: "active", displayLabel: "Visa ending in 4242", isDefault: true, usdcWalletAddress: null, createdAt: STAMP, updatedAt: STAMP, card: { brand: "Visa", last4: "4242", expMonth: 12, expYear: 2027 } };
 const BANK: StubMethod = { fundingMethodId: 30, rail: "stripe_ach", status: "active", displayLabel: "Chase ending in 1234", isDefault: false, usdcWalletAddress: null, createdAt: STAMP, updatedAt: STAMP, bankAccount: { bankName: "Chase", last4: "1234", accountType: "checking" } };
+/** A card already on the wallet before this flow existed — the case the intro used to skip. */
+const SAVED_CARD: StubMethod = { fundingMethodId: 12, rail: "stripe_card", status: "active", displayLabel: "Amex ending in 6800", isDefault: true, usdcWalletAddress: null, createdAt: STAMP, updatedAt: STAMP, card: { brand: "Amex", last4: "6800", expMonth: 12, expYear: 2028 } };
 
 interface StubState {
   methods: StubMethod[];
@@ -230,6 +232,22 @@ async function enterCode(page: Page, code = "123456") {
 
 function radio(page: Page, group: string, name: string) {
   return page.getByRole("radiogroup", { name: group }).getByRole("radio", { name, exact: true });
+}
+
+/** The step list is rendered twice — once for wide screens, once inside the phone collapsible — and only ever one is on screen. */
+function stepLink(page: Page, step: string) {
+  return page.locator(`[data-testid="wallet-step-link-${step}"]:visible`);
+}
+
+async function openStepList(page: Page) {
+  if ((page.viewportSize()?.width ?? 1280) >= 640) return;
+  const toggle = page.getByRole("button", { name: "Show all steps" });
+  if (await toggle.isVisible()) await toggle.click();
+}
+
+async function clickStep(page: Page, step: string) {
+  await openStepList(page);
+  await stepLink(page, step).click();
 }
 
 async function expectNoHorizontalScroll(page: Page) {
@@ -635,6 +653,125 @@ test("a paused vendor sees the standing notice above everything with a control b
   await expect(page.getByTestId("wallet-method-10").getByTestId("wallet-method-remove")).toBeDisabled();
   await shot(page, "manage-12-paused");
   finish(state);
+});
+
+test("a vendor whose wallet already holds a card still starts at step 1, with no tick on a page they have not seen", async ({ page }) => {
+  // A card carried over from the old wallet: the old rule skipped the intro
+  // whenever any method existed, so this vendor never saw the charge rules.
+  const state = await setup(page, { methods: [SAVED_CARD], proofs: ALL_PROOFS });
+  const intro = page.getByTestId("wallet-step-intro");
+  await expect(intro.getByRole("heading", { name: "How your wallet works" })).toBeVisible();
+  await expect(intro.getByRole("button", { name: "Set up my wallet" })).toBeVisible();
+  await expect(page.getByTestId("wallet-step-source")).toHaveCount(0);
+  await openStepList(page);
+  await expect(stepLink(page, "intro")).toHaveAttribute("aria-current", "step");
+  // Nothing ahead of it is open yet, and nothing behind it is ticked.
+  await expect(page.locator('[data-testid="wallet-step-link-source"]')).toHaveCount(0);
+  await expectNoHorizontalScroll(page);
+  await shot(page, "nav-00-intro-with-saved-card");
+
+  await intro.getByRole("button", { name: "Set up my wallet" }).click();
+  const source = page.getByTestId("wallet-step-source");
+  await expect(source.getByRole("heading", { name: "Choose your top-up source" })).toBeVisible();
+  // The saved card is preselected and said to be exactly that — no half-finished setup is claimed.
+  await expect(source.getByTestId("wallet-source-preselection"))
+    .toHaveText("Amex ending in 6800 is already saved on your wallet, so we picked it — choose a bank account instead if you would rather.");
+  await expect(radio(page, "Top up from", "Card")).toHaveAttribute("aria-checked", "true");
+  await expect(source).toContainText("Amex ending in 6800 · expires 12/28");
+  await openStepList(page);
+  await expect(stepLink(page, "intro")).not.toHaveAttribute("aria-current", "step");
+  await expect(stepLink(page, "source")).toHaveAttribute("aria-current", "step");
+  await shot(page, "nav-00b-source-preselected");
+  finish(state);
+});
+
+test("the step list walks back and forward without losing a choice, and manage keeps the rules on hand", async ({ page }) => {
+  // The draft a vendor holds after steps 1–3, written the way a browser from
+  // before step navigation would still hold it: no `stepOverride` key at all.
+  await seedDraft(page, { sourceRail: "stripe_ach", sourceMethodId: 30, floorCents: 25_000, dailyCostCents: 2_000 });
+  const state = await setup(page, { methods: [BANK, CARD], proofs: ALL_PROOFS });
+
+  // The choices reach step 4. Everything behind it is a control; nothing ahead of it is.
+  const backup = page.getByTestId("wallet-step-backup");
+  await expect(backup.getByRole("heading", { name: "Your backup card" })).toBeVisible();
+  await openStepList(page);
+  await expect(stepLink(page, "backup")).toHaveAttribute("aria-current", "step");
+  await expect(stepLink(page, "floor")).toContainText("$250");
+  await expect(page.locator('[data-testid="wallet-step-link-authorize"]')).toHaveCount(0);
+  await expect(page.locator('[data-testid="wallet-step-link-deposit"]')).toHaveCount(0);
+
+  // Step 2 revisited shows the saved bank account, still chosen.
+  await clickStep(page, "source");
+  const source = page.getByTestId("wallet-step-source");
+  await expect(source.getByRole("heading", { name: "Choose your top-up source" })).toBeVisible();
+  await expect(radio(page, "Top up from", "Bank account")).toHaveAttribute("aria-checked", "true");
+  await expect(source).toContainText("Chase ending in 1234 · checking");
+  await expect(stepLink(page, "source")).toHaveAttribute("aria-current", "step");
+  // Looking back does not undo the steps ahead of it: step 3 still shows the floor it holds.
+  await expect(stepLink(page, "floor")).toContainText("$250");
+  await expectNoHorizontalScroll(page);
+  await shot(page, "nav-01-source-revisited");
+
+  // Continue with nothing changed lands back on step 4 with the floor intact.
+  await source.getByRole("button", { name: "Continue" }).click();
+  await expect(backup.getByRole("heading", { name: "Your backup card" })).toBeVisible();
+  await openStepList(page);
+  await expect(stepLink(page, "floor")).toContainText("$250");
+  const kept = JSON.parse(await page.evaluate(() => window.sessionStorage.getItem("dropship-wallet-setup-draft:v1:1") ?? "{}")) as Record<string, unknown>;
+  expect(kept).toMatchObject({ sourceMethodId: 30, floorCents: 25_000, dailyCostCents: 2_000, stepOverride: null });
+
+  // Step 1 is a page of its own now: the same rules, and a button that only walks back.
+  await clickStep(page, "intro");
+  const intro = page.getByTestId("wallet-step-intro");
+  await expect(intro.getByRole("heading", { name: "How your wallet works" })).toBeVisible();
+  await expect(intro).toContainText("Only money that has settled can pay an order.");
+  await expect(intro.getByTestId("wallet-intro-verification-note")).toContainText("(a 6-digit code by email)");
+  await expect(intro.getByRole("button", { name: "Set up my wallet" })).toHaveCount(0);
+  await expectNoHorizontalScroll(page);
+  await shot(page, "nav-02-intro-revisited");
+  await intro.getByRole("button", { name: "Back to setup" }).click();
+  await expect(backup.getByRole("heading", { name: "Your backup card" })).toBeVisible();
+
+  // The plain Back control walks one step at a time, and Continue returns from there too.
+  await backup.getByRole("button", { name: "Back", exact: true }).click();
+  const floor = page.getByTestId("wallet-step-floor");
+  await expect(floor.getByRole("heading", { name: "Set your floor" })).toBeVisible();
+  await expect(radio(page, "Keep my balance at", "$250")).toHaveAttribute("aria-checked", "true");
+  await shot(page, "nav-03-floor-revisited");
+  await floor.getByRole("button", { name: "Continue" }).click();
+  await expect(backup.getByRole("heading", { name: "Your backup card" })).toBeVisible();
+
+  // Finish setup from there: nothing was lost on the way round.
+  await backup.getByRole("button", { name: "Continue" }).click();
+  const review = page.getByTestId("wallet-step-review");
+  await expect(review.getByTestId("wallet-review-summary")).toContainText("Chase ending in 1234 (bank account, no fee)");
+  await expect(review.getByTestId("wallet-review-summary")).toContainText("$250 — about 12 days at $20 a day");
+  await review.getByRole("button", { name: "Agree and turn on auto-reload" }).click();
+  expect(state.autoReloadWrites).toEqual([{ enabled: true, fundingMethodId: 30, backstopFundingMethodId: 10, minimumBalanceCents: 25_000, maxSingleReloadCents: 50_000, paymentHoldTimeoutMinutes: 2880, acknowledgedCardFeeBps: 300 }]);
+  // At step 6 the plan belongs to the server: the review is still readable, the
+  // earlier steps are not offered, and the review's Change controls go with them.
+  const deposit = page.getByTestId("wallet-step-deposit");
+  await openStepList(page);
+  await expect(page.locator('[data-testid="wallet-step-link-source"]')).toHaveCount(0);
+  await expect(page.locator('[data-testid="wallet-step-link-floor"]')).toHaveCount(0);
+  await expect(stepLink(page, "intro")).toBeVisible();
+  await deposit.getByRole("button", { name: "Back", exact: true }).click();
+  const reviewAgain = page.getByTestId("wallet-step-review");
+  await expect(reviewAgain.getByTestId("wallet-review-summary")).toContainText("Chase ending in 1234 (bank account, no fee)");
+  await expect(reviewAgain.getByRole("button", { name: "Change" })).toHaveCount(0);
+  await clickStep(page, "deposit");
+  await expect(deposit.getByRole("heading", { name: "Add money now (recommended)" })).toBeVisible();
+  await deposit.getByRole("button", { name: "Not now" }).click();
+
+  // Past setup the rules are still one click away, collapsed until asked for.
+  const how = page.getByTestId("wallet-how-it-works");
+  await expect(how).not.toContainText("Only money that has settled can pay an order");
+  await how.getByRole("button").click();
+  await expect(how).toContainText("Only money that has settled can pay an order.");
+  await expect(how.getByTestId("wallet-intro-verification-note")).toBeVisible();
+  await expectNoHorizontalScroll(page);
+  await shot(page, "nav-04-how-it-works");
+  finish(state, "20");
 });
 
 test("a PUT refusal with a step recovery moves the flow back to that step with the alert inside it, and the retry succeeds", async ({ page }) => {
