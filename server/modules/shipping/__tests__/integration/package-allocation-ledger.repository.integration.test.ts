@@ -4962,13 +4962,24 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
         packageAllocationPlanId: persisted.planId!, source: "integration:partial-commercial-isolation",
       });
     expect(materialized).toMatchObject({ customerFulfillmentItemCount: 1 });
-    const commands = await pool.query<{ quantity_pushed: number; quantity_shipped: number }>(`
-      SELECT push_item.quantity_pushed, physical_item.quantity_shipped
+    const commands = await pool.query<{
+      quantity_pushed: number;
+      quantity_shipped: number;
+      allocation_quantity: number;
+    }>(`
+      SELECT push_item.quantity_pushed, physical_item.quantity_shipped,
+        allocation_entry.quantity AS allocation_quantity
       FROM oms.channel_fulfillment_push_items AS push_item
       JOIN wms.physical_shipment_items AS physical_item
         ON physical_item.id = push_item.physical_shipment_item_id
+      JOIN wms.package_allocation_entries AS allocation_entry
+        ON allocation_entry.id = physical_item.package_allocation_entry_id
     `);
-    expect(commands.rows).toEqual([{ quantity_pushed: 1, quantity_shipped: 1 }]);
+    expect(commands.rows).toEqual([{
+      quantity_pushed: 1,
+      quantity_shipped: 2,
+      allocation_quantity: 2,
+    }]);
     expect((await pool.query("SELECT qty FROM wms.outbound_shipment_items WHERE id = $1", [sourceId])).rows)
       .toEqual([{ qty: 2 }]);
   });

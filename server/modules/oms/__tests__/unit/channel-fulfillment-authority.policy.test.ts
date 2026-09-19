@@ -39,6 +39,29 @@ describe("channel fulfillment writeback authority policy", () => {
     });
   });
 
+  it("allows an exact commercial subset without changing physical package quantity", () => {
+    expect(evaluateChannelFulfillmentWritebackPolicy(input({
+      commercialAuthorizedQuantity: 1,
+      cumulativePhysicalQuantity: 2,
+      cumulativeCommercialQuantity: 1,
+    }))).toEqual({ allowed: true, reasons: [] });
+    expect(evaluateChannelFulfillmentWritebackPolicy(input({
+      commercialAuthorizedQuantity: 1,
+      cumulativePhysicalQuantity: 2,
+      cumulativeCommercialQuantity: 2,
+    }))).toEqual({
+      allowed: false,
+      reasons: ["commercial_quantity_exceeds_current_authority"],
+    });
+  });
+
+  it("rejects commercial quantity without matching physical evidence", () => {
+    expect(evaluateChannelFulfillmentWritebackPolicy(input({
+      cumulativePhysicalQuantity: 2,
+      cumulativeCommercialQuantity: 3,
+    })).reasons).toContain("invalid_quantity_authority");
+  });
+
   it.each([
     ["cancelled", "paid", "terminal_commercial_order"],
     ["refunded", "refunded", "terminal_commercial_order"],
