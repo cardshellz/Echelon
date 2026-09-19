@@ -278,8 +278,28 @@ test("bank vendor, end to end: intro, bank source, floor with guidance, backup c
   const state = await setup(page, { usdcDepositAddress: DEPOSIT_ADDRESS, holdSetupConfirmation: true });
   const intro = page.getByTestId("wallet-step-intro");
   await expect(intro.getByRole("heading", { name: "How your wallet works" })).toBeVisible();
-  await expect(intro).toContainText("return fee");
-  await expect(intro).toContainText("If a top-up fails for any other reason, we email you.");
+  await expect(intro.getByTestId("wallet-how-it-works-lede")).toHaveText("Your wallet is how Card Shellz gets paid for the orders you sell. Here is what it does, what it costs, and what happens if a payment fails.");
+  // Six topics, each scannable from its bold lead alone.
+  const topics = intro.getByTestId("wallet-how-it-works-rules").getByRole("listitem");
+  await expect(topics).toHaveCount(6);
+  for (const [index, lead] of ["What your wallet is for.", "Topping it up.", "Your backup payment method.",
+    "What the wallet pays for.", "Payment methods and fees.", "If a payment fails."].entries()) {
+    await expect(topics.nth(index).locator("strong")).toHaveText(lead);
+  }
+  // Every amount comes from the served limits, the rate from the served fee and the deadline from the hold time.
+  await expect(intro).toContainText("Your floor can be anything from $50 upward");
+  await expect(intro).toContainText("the single top-up limit you set, which starts at $100");
+  await expect(intro).toContainText("the same gap is never charged twice");
+  await expect(intro).toContainText("from $10 to $5,000 at a time");
+  await expect(intro).toContainText("its return fee comes out of the wallet too, and that can take your balance below zero");
+  await expect(intro).toContainText("takes up to 5 business days to land (our estimate)");
+  await expect(intro).toContainText("costs 3% on top of the amount");
+  await expect(intro).toContainText("USDC is free");
+  await expect(intro).toContainText("cancelled after your hold time (48 hours)");
+  await expect(intro).toContainText("We email you, and we do not retry the charge ourselves.");
+  // The limit's full wording belongs to the review step, and nothing here points forward to a later step.
+  await expect(intro).not.toContainText("Never charge more than");
+  await expect(intro).not.toContainText("step 5");
   await expect(intro.getByTestId("wallet-intro-verification-note")).toContainText("(a 6-digit code by email)");
   await expect(page.getByTestId("wallet-impact")).toHaveCount(0);
   await expect(page.getByTestId("wallet-balance")).toHaveCount(0);
@@ -363,6 +383,8 @@ test("bank vendor, end to end: intro, bank source, floor with guidance, backup c
     "If a return fee has taken your balance below zero, the shortfall includes that amount.", "Adding money by card now avoids that", "for automatic top-ups and covers", "first daily check after you activate"]) {
     await expect(mandate).toContainText(phrase);
   }
+  // The single top-up limit is explained in full here, beside the number itself; the intro only names it.
+  await expect(mandate).toContainText("Never charge more than $500 in one top-up.");
   await expect(review.getByTestId("wallet-plan-sentence")).toContainText("you keep $250 in your wallet, refilled from your bank for free");
   await expect(review.getByTestId("wallet-activation-quote")).toContainText("$250 bank transfer");
   await expect(review.getByTestId("wallet-fee-acknowledgement-line")).toContainText("records that you agree to the 3% fee");
@@ -724,7 +746,7 @@ test("the step list walks back and forward without losing a choice, and manage k
   await clickStep(page, "intro");
   const intro = page.getByTestId("wallet-step-intro");
   await expect(intro.getByRole("heading", { name: "How your wallet works" })).toBeVisible();
-  await expect(intro).toContainText("Only money that has settled can pay an order.");
+  await expect(intro).toContainText("Only money that has landed can pay for an order,");
   await expect(intro.getByTestId("wallet-intro-verification-note")).toContainText("(a 6-digit code by email)");
   await expect(intro.getByRole("button", { name: "Set up my wallet" })).toHaveCount(0);
   await expectNoHorizontalScroll(page);
@@ -765,9 +787,12 @@ test("the step list walks back and forward without losing a choice, and manage k
 
   // Past setup the rules are still one click away, collapsed until asked for.
   const how = page.getByTestId("wallet-how-it-works");
-  await expect(how).not.toContainText("Only money that has settled can pay an order");
+  await expect(how).not.toContainText("Only money that has landed can pay for an order,");
   await how.getByRole("button").click();
-  await expect(how).toContainText("Only money that has settled can pay an order.");
+  await expect(how).toContainText("Only money that has landed can pay for an order,");
+  // One source: the manage view renders the same lede and the same six topics as step 1.
+  await expect(how.getByTestId("wallet-how-it-works-lede")).toContainText("Your wallet is how Card Shellz gets paid for the orders you sell.");
+  await expect(how.getByTestId("wallet-how-it-works-rules").getByRole("listitem")).toHaveCount(6);
   await expect(how.getByTestId("wallet-intro-verification-note")).toBeVisible();
   await expectNoHorizontalScroll(page);
   await shot(page, "nav-04-how-it-works");

@@ -1022,13 +1022,20 @@ function StepIndicator({ wallet, flow, draft, onSelect }: { wallet: DropshipWall
 // Step 1 — How your wallet works
 // ---------------------------------------------------------------------------
 
-/** The charge rules, worded once: step 1 during setup and the manage view's "How your wallet works" render this. */
+/**
+ * The charge rules, worded once: step 1 during setup and the manage view's
+ * "How your wallet works" render this. Each topic leads with its bold sentence
+ * so the six of them can be scanned without reading the detail.
+ */
 function WalletHowItWorks({ wallet, flow }: { wallet: DropshipWalletView; flow: WalletFlowState }) {
-  const lines = describeIntro({ cardFundingFeeBps: wallet.cardFundingFeeBps, usdcOffered: wallet.usdcBaseDepositAddress !== null, holdTimeoutMinutes: flow.holdTimeoutMinutes });
+  const intro = describeIntro({ cardFundingFeeBps: wallet.cardFundingFeeBps, usdcOffered: wallet.usdcBaseDepositAddress !== null, holdTimeoutMinutes: flow.holdTimeoutMinutes, limits: wallet.limits });
   return (
     <>
-      <ol className="list-decimal space-y-3 pl-5 text-sm text-zinc-700" data-testid="wallet-how-it-works-rules">
-        {lines.map((line) => <li key={line}>{line}</li>)}
+      <p className="text-sm text-zinc-600" data-testid="wallet-how-it-works-lede">{intro.lede}</p>
+      <ol className="mt-3 list-decimal space-y-4 pl-5 text-sm text-zinc-700" data-testid="wallet-how-it-works-rules">
+        {intro.topics.map((topic) => (
+          <li key={topic.lead}><strong className="font-semibold text-zinc-900">{topic.lead}</strong> {topic.detail}</li>
+        ))}
       </ol>
       <p className="mt-4 text-sm text-zinc-500" data-testid="wallet-intro-verification-note">{INTRO_VERIFICATION_NOTE}</p>
     </>
@@ -1039,9 +1046,7 @@ function IntroStep({ wallet, flow, revisited, onContinue }: { wallet: DropshipWa
   return (
     <section className={SECTION} data-testid="wallet-step-intro">
       <h2 className="text-lg font-semibold">How your wallet works</h2>
-      <p className="mt-1 text-sm text-zinc-500">
-        {revisited ? "The charge rules, unchanged. Nothing you have chosen is affected by reading them again." : "Before you choose anything, here is exactly when we charge you and why."}
-      </p>
+      {revisited && <p className="mt-1 text-sm text-zinc-500">The charge rules, unchanged. Nothing you have chosen is affected by reading them again.</p>}
       <div className="mt-4"><WalletHowItWorks wallet={wallet} flow={flow} /></div>
       <Button type="button" className={`mt-5 ${BRAND_BUTTON}`} onClick={onContinue}>{revisited ? "Back to setup" : "Set up my wallet"}</Button>
     </section>
@@ -2078,7 +2083,7 @@ function HowItWorksSection({ wallet, flow }: { wallet: DropshipWalletView; flow:
             </button>
           </CollapsibleTrigger>
         </h2>
-        <p className="mt-1 text-sm text-zinc-500">When we charge you, and why — the same rules you were shown at setup.</p>
+        <p className="mt-1 text-sm text-zinc-500">The same rules you were shown at setup.</p>
         <CollapsibleContent className="mt-4">
           <WalletHowItWorks wallet={wallet} flow={flow} />
         </CollapsibleContent>

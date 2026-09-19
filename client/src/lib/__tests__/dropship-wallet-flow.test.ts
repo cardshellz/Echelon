@@ -48,7 +48,7 @@ import {
   type WalletFlowStep,
   type WalletTerms,
 } from "../dropship-wallet-flow";
-import type { DropshipWalletView, WalletFundingMethod } from "../dropship-wallet-view-adapter";
+import type { DropshipWalletView, WalletFundingMethod, WalletLimits } from "../dropship-wallet-view-adapter";
 
 const STAMP = "2026-09-15T00:00:00.000Z";
 const LATER = "2026-09-16T00:00:00.000Z";
@@ -429,13 +429,43 @@ describe("copy", () => {
     expect(describePlanSentence(terms)).toBe("In one sentence: you keep $250 in your wallet, refilled from your bank for free; if an order ever needs more than what is there, your Visa ending in 4242 covers the shortfall plus 3%.");
   });
 
-  it("pins the intro, the activation fallback and the helper lines", () => {
-    const intro = describeIntro({ cardFundingFeeBps: 300, usdcOffered: true, holdTimeoutMinutes: 2_880 });
-    expect(intro[0]).toContain("return fee");
-    expect(intro[0]).toContain("below zero");
-    expect(intro[4]).toContain("If a top-up fails for any other reason, we email you.");
-    expect(intro[5]).toContain("USDC is free");
-    expect(describeIntro({ cardFundingFeeBps: 300, usdcOffered: false, holdTimeoutMinutes: 2_880 })[5]).not.toContain("USDC");
+  it("pins the intro: six topics, each a lead and its detail, with every amount from the served limits", () => {
+    const limits: WalletLimits = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120 };
+    const intro = describeIntro({ cardFundingFeeBps: 300, usdcOffered: true, holdTimeoutMinutes: 2_880, limits });
+    expect(intro.lede).toBe("Your wallet is how Card Shellz gets paid for the orders you sell. Here is what it does, what it costs, and what happens if a payment fails.");
+    expect(intro.topics).toHaveLength(6);
+    expect(intro.topics.map((topic) => topic.lead)).toEqual([
+      "What your wallet is for.",
+      "Topping it up.",
+      "Your backup payment method.",
+      "What the wallet pays for.",
+      "Payment methods and fees.",
+      "If a payment fails.",
+    ]);
+    expect(intro.topics[0].detail).toBe("It is a prepaid balance Card Shellz holds for your store. Every order you accept is paid from it, so an order can go out the moment it arrives instead of waiting on a payment to clear.");
+    expect(intro.topics[1].detail).toBe("You choose a floor: the balance you want to hold. We top you back up to it once a day, and after any order that drops you below it. Your floor can be anything from $50 upward, and one top-up never charges more than the single top-up limit you set, which starts at $100. Money already on its way counts toward your floor, so the same gap is never charged twice. You can also add money yourself at any time, from $10 to $5,000 at a time.");
+    expect(intro.topics[2].detail).toBe("Every seller keeps a card on file for emergencies. Only money that has landed can pay for an order, so if an order needs more than your balance we charge that card for the difference and send the order straight out. That is what covers you while a bank transfer is still on its way.");
+    expect(intro.topics[3].detail).toBe("The product cost plus shipping on every order you accept. Card Shellz adds nothing on top of an order. When a return is processed its return fee comes out of the wallet too, and that can take your balance below zero.");
+    expect(intro.topics[4].detail).toBe("A bank account costs nothing and takes up to 5 business days to land (our estimate). A card lands at once and costs 3% on top of the amount, whether it is a routine top-up, money you add yourself, or a backup charge. USDC is free; a member of the Card Shellz team credits it after confirming the transfer — it is not instant.");
+    expect(intro.topics[5].detail).toBe("Selling pauses: your listings show nothing for sale, and orders already waiting are cancelled after your hold time (48 hours). We email you, and we do not retry the charge ourselves. Selling starts again on its own once your balance is back at your floor.");
+    // USDC is named only where a deposit address exists.
+    expect(describeIntro({ cardFundingFeeBps: 300, usdcOffered: false, holdTimeoutMinutes: 2_880, limits }).topics[4].detail).not.toContain("USDC");
+    // Every amount, rate and duration is a served value; none is typed into the copy.
+    const other = describeIntro({
+      cardFundingFeeBps: 250,
+      usdcOffered: false,
+      holdTimeoutMinutes: 720,
+      limits: { ...limits, autoReloadMinTriggerCents: 2_500, autoReloadMinAmountCents: 20_000, manualFundingMinCents: 500, manualFundingMaxCents: 250_000 },
+    });
+    expect(other.topics[1].detail).toContain("anything from $25 upward");
+    expect(other.topics[1].detail).toContain("which starts at $200");
+    expect(other.topics[1].detail).toContain("from $5 to $2,500 at a time");
+    expect(other.topics[4].detail).toContain("costs 2.5% on top of the amount");
+    expect(other.topics[5].detail).toContain("after your hold time (12 hours)");
+    // The intro names the single top-up limit but leaves its full wording to the review step, and points forward to no step at all.
+    const whole = [intro.lede, ...intro.topics.flatMap((topic) => [topic.lead, topic.detail])].join(" ");
+    expect(whole).not.toContain("step 5");
+    expect(whole).not.toMatch(/Never charge more than|cancelled if still unpaid/);
     expect(describeActivationTopUp({ cardFundingFeeBps: 300 })).toBe("Your first automatic top-up runs on the first daily check after you activate (about midnight UTC). Until it lands, orders are charged to your backup card at 3%. Adding money by card now avoids that.");
     expect(describeHoldTimeLine(120)).toContain("for orders held from now on");
     expect(describeHoldTimeLine(120)).toContain("We email you 2 hours before.");

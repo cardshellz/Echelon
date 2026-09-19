@@ -28,8 +28,10 @@ export type WalletSourceRail = "stripe_ach" | "stripe_card";
 
 /** Assumption: the upper figure of what a US ACH debit takes to settle; no ETA exists in code or Stripe data. */
 export const ASSUMED_BANK_SETTLEMENT_BUSINESS_DAYS = 5;
+/** The estimate on its own, for copy that already sits inside a bracket of its own. */
+export const BANK_SETTLEMENT_DAYS_PHRASE = `up to ${ASSUMED_BANK_SETTLEMENT_BUSINESS_DAYS} business days`;
 /** The one settlement phrase every screen uses; built from the constant above, never typed. */
-export const BANK_SETTLEMENT_PHRASE = `up to ${ASSUMED_BANK_SETTLEMENT_BUSINESS_DAYS} business days (our assumption)`;
+export const BANK_SETTLEMENT_PHRASE = `${BANK_SETTLEMENT_DAYS_PHRASE} (our assumption)`;
 /** Assumption: five business days span a weekend; orders arrive on calendar days. */
 export const ASSUMED_BANK_SETTLEMENT_CALENDAR_DAYS = 7;
 /** Settlement phrase with the calendar figure, used wherever the 7-day figure is used. */
