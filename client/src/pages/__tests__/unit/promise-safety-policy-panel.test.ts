@@ -13,6 +13,7 @@ vi.mock("@tanstack/react-query", async (importOriginal) => ({
   useMutation: vi.fn(() => ({ mutate: vi.fn(), isPending: false })),
 }));
 vi.mock("@/hooks/use-toast", () => ({ useToast: () => ({ toast: vi.fn() }) }));
+vi.mock("@/features/inventory-builds/SafetyDefinitionReview", () => ({ SafetyDefinitionReview: () => null }));
 
 function view() {
   return promiseSafetyAdminViewSchema.parse({
@@ -70,15 +71,15 @@ describe("promise safety view boundary", () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("renders safety separately from reorder buffering with required safety reasons unchanged", () => {
+  it("renders safety separately from reorder buffering without a routine draft reason field", () => {
     const html = render(true, false);
     expect(html).toContain("ATP promise safety floor");
     expect(html).toContain("SKU-17 — Protected product");
     expect(html).toContain("safetyStockDays");
-    expect(html).toContain("Change reason");
+    expect(html).not.toContain("Change reason");
     expect(html).toContain("Refresh reason");
     expect(html).toContain("view access only");
-    expect(html).toMatch(/<textarea[^>]*id="safety-change-reason"[^>]*disabled/);
+    expect(html).not.toContain("safety-change-reason");
   });
 
   it("forwards cancellation and validates the existing read endpoint", async () => {

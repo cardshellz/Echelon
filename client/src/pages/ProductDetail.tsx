@@ -69,6 +69,7 @@ import {
   type VendorCatalogQuoteSnapshot,
 } from "@/features/supplier-catalog/VendorCatalogQuoteEditor";
 import { ProductConversionCard, ProductConversionSummary } from "@/features/inventory-builds/ProductConversionCard";
+import { ProductSafetySummary } from "@/features/inventory-builds/ProductSafetySummary";
 import { transformationQueryKey } from "@/features/inventory-builds/package-conversion-draft";
 import { createProductVariant } from "@/features/catalog/create-product-variant";
 import {
@@ -3988,6 +3989,7 @@ export default function ProductDetail() {
             {/* ===== INVENTORY TAB ===== */}
             <TabsContent value="inventory" className="mt-4">
               <ProductInventoryTab productId={product.productId} />
+              <ProductSafetySummary productId={product.productId} />
             </TabsContent>
           </Tabs>
         </div>
