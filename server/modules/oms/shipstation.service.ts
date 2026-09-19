@@ -19,6 +19,7 @@ import {
   type ShipmentEvent,
 } from "../orders/shipment-rollup";
 import { resolveShipStationShipmentTimestamp } from "./shipstation-date.util";
+import { partitionCommercialRequestedQuantity } from "./shipstation-commercial-quantity.domain";
 import type { EngineShipmentItemAppendResult } from "../shipping/types";
 import { maybeGetPackInstruction } from "../cartonization/application/wms-pack-plan.service";
 import { resolveRecoveredShipNotifyNoMatchExceptions } from "./ship-notify-reconciliation.service";
@@ -1707,7 +1708,7 @@ export function createShipStationService(
 
       for (const item of parsedShipStationItems ?? []) {
         const sourceResult: any = await tx.execute(sql`
-          SELECT id, qty, split_root_shipment_item_id
+          SELECT id, qty, commercial_requested_qty, split_root_shipment_item_id
           FROM wms.outbound_shipment_items
           WHERE id = ${item.sourceShipmentItemId}
             AND shipment_id = ${parent.id}
@@ -1728,6 +1729,13 @@ export function createShipStationService(
               `quantity ${String(source.qty)}`,
           );
         }
+        const commercialPartition = partitionCommercialRequestedQuantity({
+          sourceQuantity: sourceQty,
+          splitQuantity: item.qty,
+          commercialRequestedQuantity: source.commercial_requested_qty == null
+            ? null
+            : Number(source.commercial_requested_qty),
+        });
 
         if (sourceQty === item.qty) {
           // Preserve the stable wms-item identity when the entire line moves to
@@ -1766,17 +1774,21 @@ export function createShipStationService(
             `WMS shipment item ${item.sourceShipmentItemId} has invalid split lineage`,
           );
         }
+        const childCommercialQty = commercialPartition.childQuantity;
+        const retainedCommercialQty = commercialPartition.retainedQuantity;
 
         const insertedItem: any = await tx.execute(sql`
           INSERT INTO wms.outbound_shipment_items
             (shipment_id, order_item_id, replacement_for_order_item_id,
              correction_for_shipment_item_id, split_root_shipment_item_id,
              shipment_item_purpose, product_variant_id, qty,
+             commercial_requested_qty,
              from_location_id, box_id, weight_oz, tracking_id, created_at)
           SELECT
             ${row.id}, order_item_id, replacement_for_order_item_id,
             correction_for_shipment_item_id, ${rootSourceShipmentItemId},
             shipment_item_purpose, product_variant_id, ${item.qty},
+            ${childCommercialQty},
             from_location_id, box_id, weight_oz,
             ${String(shipment.shipmentId)}, NOW()
           FROM wms.outbound_shipment_items
@@ -1793,7 +1805,8 @@ export function createShipStationService(
 
         const reduced: any = await tx.execute(sql`
           UPDATE wms.outbound_shipment_items
-          SET qty = qty - ${item.qty}
+          SET qty = qty - ${item.qty},
+              commercial_requested_qty = ${retainedCommercialQty}
           WHERE id = ${item.sourceShipmentItemId}
             AND shipment_id = ${parent.id}
             AND qty > ${item.qty}
@@ -1830,7 +1843,8 @@ export function createShipStationService(
     const targetItems: any = await executor.execute(sql`
       SELECT osi.id, osi.order_item_id, osi.replacement_for_order_item_id,
              COALESCE(oi.sku, catalog_variant.sku) AS sku,
-             osi.qty, target_shipment.shipment_purpose,
+             osi.qty, osi.commercial_requested_qty,
+             target_shipment.shipment_purpose,
              osi.provider_membership_state,
              osi.split_root_shipment_item_id
       FROM wms.outbound_shipment_items osi
@@ -1887,6 +1901,7 @@ export function createShipStationService(
           osi.shipment_item_purpose,
           osi.split_root_shipment_item_id,
           osi.product_variant_id,
+          osi.commercial_requested_qty,
           -- Planned shipment items may predate picking, so older rows can
           -- legitimately have no source bin. The pick ledger is the source of
           -- truth once the picker has selected physical stock.
@@ -1922,6 +1937,10 @@ export function createShipStationService(
         await executor.execute(sql`
           UPDATE wms.outbound_shipment_items
           SET qty = ${item.qty},
+              commercial_requested_qty = CASE
+                WHEN commercial_requested_qty IS NULL THEN NULL
+                ELSE LEAST(commercial_requested_qty, ${item.qty})
+              END,
               from_location_id = COALESCE(from_location_id, ${sourceRow.from_location_id}),
               tracking_id = ${String(shipment.shipmentId)},
               provider_membership_state = 'authoritative'
@@ -1952,11 +1971,33 @@ export function createShipStationService(
           ? childItemsByOrderItemId.get(orderItemId)
           : null;
 
+        if (
+          !targetIsReplacement
+          && sourceRow.commercial_requested_qty !== null
+          && (
+            !existingChild
+            || existingChild.commercial_requested_qty === null
+          )
+        ) {
+          // The legacy fallback can copy a physical split but cannot prove
+          // how a reduced commercial request was divided. New splits carry
+          // an explicit partition from createSplitShipment above.
+          throw new ShipStationUnmappedItemsError(
+            `shipstation_split_commercial_quantity_unmapped: WMS source item ` +
+              `${item.sourceShipmentItemId} has reduced commercial demand ` +
+              `without an authoritative child partition`,
+          );
+        }
+
         if (existingChild) {
           await executor.execute(sql`
             UPDATE wms.outbound_shipment_items
             SET product_variant_id = ${sourceRow.product_variant_id},
                 qty = ${item.qty},
+                commercial_requested_qty = CASE
+                  WHEN commercial_requested_qty IS NULL THEN NULL
+                  ELSE LEAST(commercial_requested_qty, ${item.qty})
+                END,
                 from_location_id = ${sourceRow.from_location_id},
                 box_id = ${sourceRow.box_id},
                 weight_oz = ${sourceRow.weight_oz},
@@ -5556,7 +5597,7 @@ export function createShipStationService(
       )`,
       sku: wmsOrderItems.sku,
       name: wmsOrderItems.name,
-      qty: outboundShipmentItems.qty,
+      qty: sql<number>`LEAST(COALESCE(${outboundShipmentItems.commercialRequestedQty}, ${outboundShipmentItems.qty}), ${outboundShipmentItems.qty})`,
       unit_price_cents: wmsOrderItems.paidPriceCents,
     })
       .from(outboundShipmentItems)
@@ -5570,12 +5611,9 @@ export function createShipStationService(
       .where(and(
         eq(outboundShipmentItems.shipmentId, shipmentId),
         sql`COALESCE(${wmsOrderItems.requiresShipping}, 1) = 1`,
-        // Never push a zeroed line to ShipStation. A partial refund can reduce a
-        // line to qty=0 while the shipment still ships other lines; the SS order
-        // must reflect only shippable items. A fully-emptied shipment then has no
-        // items and correctly trips the "no items" guard below (it is cancelled
-        // upstream, never re-pushed).
-        sql`${outboundShipmentItems.qty} > 0`,
+        // Source qty stays positive for provider-label lineage. Only currently
+        // requested units belong in a new or amended ShipStation order.
+        sql`COALESCE(${outboundShipmentItems.commercialRequestedQty}, ${outboundShipmentItems.qty}) > 0`,
       ))
       .orderBy(outboundShipmentItems.id) as WmsShipmentItemRow[];
 
@@ -5592,7 +5630,7 @@ export function createShipStationService(
     const shippableTotalsResult: any = await db.execute(sql`
       SELECT
         COALESCE(SUM(oi.quantity), 0)::int AS order_shippable_qty,
-        COALESCE(SUM(osi.qty), 0)::int AS shipment_shippable_qty
+        COALESCE(SUM(LEAST(COALESCE(osi.commercial_requested_qty, osi.qty), osi.qty)), 0)::int AS shipment_shippable_qty
       FROM wms.order_items oi
       LEFT JOIN wms.outbound_shipment_items osi
         ON COALESCE(osi.order_item_id, osi.replacement_for_order_item_id) = oi.id

@@ -427,6 +427,8 @@ export function resolvePackageAllocationAuthorityEvidence(input: {
         sourceLines: sourceFacts.map((source) => ({
           wmsShipmentItemId: source.sourceWmsShipmentItemId,
           sourceQuantity: source.sourceQuantity,
+          ...(source.commercialRequestedQuantity === undefined ? {}
+            : { commercialRequestedQuantity: source.commercialRequestedQuantity }),
         })),
         packages: resolvedPackages,
         actions: [...input.actions],

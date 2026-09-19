@@ -24,6 +24,7 @@ import {
 } from "./package-allocation-ledger.repository";
 import {
   derivePackageAllocationSourceRegistration,
+  type PackageAllocationSourceFacts,
   type PackageAllocationSourceRegistrationV1,
 } from "./package-allocation-source-identity.domain";
 
@@ -382,11 +383,13 @@ async function assertExactReplay(
 function validateSourceQuantities(
   command: z.output<typeof persistPackageAllocationPlanCommandSchema>,
   registrations: readonly PackageAllocationSourceRegistrationV1[],
+  facts: readonly PackageAllocationSourceFacts[],
 ): void {
   const registrationById = new Map(registrations.map((item) => [
     item.sourceWmsShipmentItemId,
     item,
   ]));
+  const factsById = new Map(facts.map((item) => [item.sourceWmsShipmentItemId, item]));
   for (const source of command.sourceLines) {
     const registration = registrationById.get(source.wmsShipmentItemId);
     if (!registration || registration.sourceQuantity !== source.sourceQuantity) {
@@ -397,6 +400,20 @@ function validateSourceQuantities(
           wmsShipmentItemId: source.wmsShipmentItemId,
           plannerSourceQuantity: source.sourceQuantity,
           persistedSourceQuantity: registration?.sourceQuantity ?? null,
+        },
+      );
+    }
+    const locked = factsById.get(source.wmsShipmentItemId);
+    const lockedCommercialQuantity = locked?.commercialRequestedQuantity ?? locked?.sourceQuantity;
+    const plannerCommercialQuantity = source.commercialRequestedQuantity ?? source.sourceQuantity;
+    if (lockedCommercialQuantity !== plannerCommercialQuantity) {
+      throw new PackageAllocationPersistenceError(
+        "SOURCE_EVIDENCE_CONFLICT",
+        "Planner commercial quantity does not match the locked WMS shipment item",
+        {
+          wmsShipmentItemId: source.wmsShipmentItemId,
+          plannerCommercialQuantity,
+          lockedCommercialQuantity: lockedCommercialQuantity ?? null,
         },
       );
     }
@@ -500,7 +517,7 @@ export class PackageAllocationPlanningService {
       command.sourceLines.map((source) => source.wmsShipmentItemId),
     );
     const registrations = sourceFacts.map(derivePackageAllocationSourceRegistration);
-    validateSourceQuantities(command, registrations);
+    validateSourceQuantities(command, registrations, sourceFacts);
 
     const plannerResult = planPackageAllocationGroup({
       contractVersion: command.contractVersion,

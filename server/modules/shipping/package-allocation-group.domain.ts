@@ -51,6 +51,7 @@ type ParsedEffectIntentEvidence = z.infer<typeof effectIntentEvidenceSchema>;
 const sourceLineSchema = z.object({
   wmsShipmentItemId: positivePostgresInteger,
   sourceQuantity: positivePostgresInteger,
+  commercialRequestedQuantity: z.number().int().nonnegative().max(POSTGRES_INTEGER_MAX).optional(),
   physicalConsumptionAuthorityQuantity: positivePostgresInteger.nullable(),
   authorityVersion: nonNegativeSafeInteger,
 }).strict();
@@ -786,6 +787,16 @@ export function planPackageAllocationGroup(
   const sourceLines = Object.freeze([...input.sourceLines]
     .sort((left, right) => left.wmsShipmentItemId - right.wmsShipmentItemId)
     .map((line) => deepFreeze({ ...line })));
+  for (const source of sourceLines) {
+    if (source.commercialRequestedQuantity !== undefined
+        && source.commercialRequestedQuantity > source.sourceQuantity) {
+      throw new PackageAllocationGroupError(
+        "INVALID_PACKAGE_GROUP",
+        "Commercially requested quantity exceeds immutable source quantity",
+        { wmsShipmentItemId: source.wmsShipmentItemId },
+      );
+    }
+  }
   const sourceEvidence: readonly PackageAllocationGroupSourceEvidenceV1[] = Object.freeze(
     sourceLines.map((line) => deepFreeze({
       ...line,
@@ -799,6 +810,8 @@ export function planPackageAllocationGroup(
       const source = {
         wmsShipmentItemId: previousSource.wmsShipmentItemId,
         sourceQuantity: previousSource.sourceQuantity,
+        ...(previousSource.commercialRequestedQuantity === undefined ? {}
+          : { commercialRequestedQuantity: previousSource.commercialRequestedQuantity }),
         physicalConsumptionAuthorityQuantity: previousSource.physicalConsumptionAuthorityQuantity,
         authorityVersion: previousSource.authorityVersion,
       };
@@ -1632,15 +1645,21 @@ export function planPackageAllocationGroup(
         },
       );
     }
-    if (commercialPostingAllowed && legacyCommercialQuantity > 0) {
+    let commercialRemaining = Math.min(
+      source.commercialRequestedQuantity ?? source.sourceQuantity,
+      source.sourceQuantity,
+    );
+    if (commercialPostingAllowed && legacyCommercialQuantity > 0 && commercialRemaining > 0) {
+      const quantity = Math.min(legacyCommercialQuantity, commercialRemaining);
       desiredIntents.push(effectIntent({
         intentKey: legacyCommercialIntentKey,
         effectType: "commercial_fulfillment",
         subjectKey: `commercial:${source.wmsShipmentItemId}`,
         wmsShipmentItemId: source.wmsShipmentItemId,
         packageKey: null,
-        quantity: Math.min(legacyCommercialQuantity, source.sourceQuantity),
+        quantity,
       }));
+      commercialRemaining -= quantity;
     }
     for (const pkg of commercialPrimaryPackages) {
       if (!commercialPostingAllowed) break;
@@ -1648,7 +1667,7 @@ export function planPackageAllocationGroup(
       const quantity = Math.min(
         primaryCommercialEligibleQuantityByPackage
           .get(pkg.packageKey)?.get(source.wmsShipmentItemId) ?? 0,
-        source.sourceQuantity,
+        commercialRemaining,
       );
       if (quantity === 0) continue;
       desiredIntents.push(effectIntent({
@@ -1659,6 +1678,7 @@ export function planPackageAllocationGroup(
         packageKey: pkg.packageKey,
         quantity,
       }));
+      commercialRemaining -= quantity;
     }
     const totalPhysical = checkedAdd(
       primaryDeclared,

@@ -625,7 +625,7 @@ async function reconcileActiveShipmentItems(
       si.id AS shipment_item_id,
       si.shipment_id,
       si.order_item_id,
-      si.qty AS current_quantity,
+      COALESCE(si.commercial_requested_qty, si.qty) AS current_quantity,
       CASE
         WHEN oi.status IN ('cancelled', 'short') THEN 0
         ELSE GREATEST(
@@ -656,25 +656,22 @@ async function reconcileActiveShipmentItems(
 
   for (const allocation of allocations) {
     const affectedItem = affectedByOrderItemId.get(allocation.orderItemId);
-    if (affectedItem?.manualReviewReason) {
+    // A refund-after-pick remains on the WMS order item for physical review,
+    // but it must not veto the provider amendment for unrelated order lines.
+    // A bought label still receives shipment-level review below.
+    if (affectedItem?.manualReviewReason && affectedItem.manualReviewReason !== "refund_after_pick") {
       reviewReasonByShipmentId.set(allocation.shipmentId, affectedItem.manualReviewReason);
     }
     if (!allocation.changed) continue;
     changedShipmentIds.add(allocation.shipmentId);
-    if (allocation.nextQuantity === 0) {
-      await tx.execute(sql`
-        DELETE FROM wms.outbound_shipment_items
-        WHERE id = ${allocation.shipmentItemId}
-          AND shipment_id = ${allocation.shipmentId}
-      `);
-    } else {
-      await tx.execute(sql`
-        UPDATE wms.outbound_shipment_items
-        SET qty = ${allocation.nextQuantity}
-        WHERE id = ${allocation.shipmentItemId}
-          AND shipment_id = ${allocation.shipmentId}
-      `);
-    }
+    // qty is physical/provider source evidence and must remain positive and
+    // addressable even if the line is no longer commercially requested.
+    await tx.execute(sql`
+      UPDATE wms.outbound_shipment_items
+      SET commercial_requested_qty = ${allocation.nextQuantity}
+      WHERE id = ${allocation.shipmentItemId}
+        AND shipment_id = ${allocation.shipmentId}
+    `);
   }
 
   const shipmentResult = await tx.execute(sql`
@@ -682,7 +679,7 @@ async function reconcileActiveShipmentItems(
       os.id,
       os.status,
       COALESCE((
-        SELECT SUM(si.qty)::int
+        SELECT SUM(COALESCE(si.commercial_requested_qty, si.qty))::int
         FROM wms.outbound_shipment_items si
         WHERE si.shipment_id = os.id
       ), 0)::int AS remaining_quantity,

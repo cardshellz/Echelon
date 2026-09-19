@@ -159,6 +159,70 @@ function previousPlanFrom(result: ReturnType<typeof planPackageAllocationGroup>)
 }
 
 describe("planPackageAllocationGroup", () => {
+  it("keeps refunded provider contents as source evidence but fulfills only the other line", () => {
+    const original = packageInput("A", "44001", 1, "primary");
+    const mixedPackage: PackageAllocationGroupPackageInput = {
+      ...original,
+      lifecycle: {
+        ...original.lifecycle,
+        events: [{
+          ...original.lifecycle.events[0],
+          contentsEvidence: {
+            status: "authoritative",
+            lines: [
+              { wmsShipmentItemId: 7001, quantity: 1 },
+              { wmsShipmentItemId: 7002, quantity: 9 },
+            ],
+          },
+        } as DeclaredPackageLifecycleEvent],
+      },
+    };
+    const result = planPackageAllocationGroup(plannerInput([mixedPackage], [], {
+      sourceLines: [
+        {
+          wmsShipmentItemId: 7001,
+          sourceQuantity: 1,
+          commercialRequestedQuantity: 0,
+          physicalConsumptionAuthorityQuantity: 1,
+          authorityVersion: 1,
+        },
+        {
+          wmsShipmentItemId: 7002,
+          sourceQuantity: 9,
+          commercialRequestedQuantity: 9,
+          physicalConsumptionAuthorityQuantity: 9,
+          authorityVersion: 1,
+        },
+      ],
+    }));
+
+    expect(result.outcome).toBe("proposed");
+    expect(result.state.allocations.map((entry) => entry.wmsShipmentItemId)).toEqual([7001, 7002]);
+    expect(result.state.desiredEffectIntents.filter(
+      (intent) => intent.effectType === "commercial_fulfillment",
+    ).map((intent) => ({ sourceId: intent.wmsShipmentItemId, quantity: intent.quantity })))
+      .toEqual([{ sourceId: 7002, quantity: 9 }]);
+  });
+
+  it("caps a partial refund to current commercial demand without revising source quantity", () => {
+    const result = planPackageAllocationGroup(plannerInput([
+      packageInput("A", "44001", 2, "primary"),
+    ], [], {
+      sourceLines: [{
+        wmsShipmentItemId: 7001,
+        sourceQuantity: 2,
+        commercialRequestedQuantity: 1,
+        physicalConsumptionAuthorityQuantity: 2,
+        authorityVersion: 1,
+      }],
+    }));
+
+    expect(result.state.sourceLines[0]).toMatchObject({ sourceQuantity: 2, commercialRequestedQuantity: 1 });
+    expect(result.state.desiredEffectIntents.filter(
+      (intent) => intent.effectType === "commercial_fulfillment",
+    ).map((intent) => intent.quantity)).toEqual([1]);
+  });
+
   it("plans one conserved primary allocation and inert effect intents for an exact active label", () => {
     const result = planPackageAllocationGroup(plannerInput([
       packageInput("A", "44001", 2, "primary"),

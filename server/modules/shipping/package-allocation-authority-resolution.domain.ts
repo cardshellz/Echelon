@@ -38,6 +38,7 @@ const boundedIdentifier = (field: string, maximum: number) => z.string({
 const resolutionSourceSchema = z.object({
   wmsShipmentItemId: positivePostgresInteger,
   sourceQuantity: positivePostgresInteger,
+  commercialRequestedQuantity: z.number().int().nonnegative().max(POSTGRES_INTEGER_MAX).optional(),
 }).strict();
 
 const observedPackageSchema = z.object({

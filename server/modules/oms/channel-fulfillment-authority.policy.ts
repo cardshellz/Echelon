@@ -4,6 +4,7 @@ export type ChannelFulfillmentWritebackBlockReason =
   | "terminal_commercial_order"
   | "terminal_financial_order"
   | "physical_quantity_exceeds_current_authority"
+  | "commercial_quantity_exceeds_current_authority"
   | "invalid_quantity_authority";
 
 export interface ChannelFulfillmentWritebackPolicyInput {
@@ -16,6 +17,8 @@ export interface ChannelFulfillmentWritebackPolicyInput {
   /** Cumulative paid authority net of explicit cancellation/refund dispositions. */
   readonly commercialAuthorizedQuantity: number;
   readonly cumulativePhysicalQuantity: number;
+  /** Exact channel quantity for package allocations whose physical quantity is larger. */
+  readonly cumulativeCommercialQuantity?: number;
 }
 
 export interface ChannelFulfillmentWritebackPolicyDecision {
@@ -71,8 +74,17 @@ export function evaluateChannelFulfillmentWritebackPolicy(
   if (!Number.isSafeInteger(input.commercialAuthorizedQuantity)
     || input.commercialAuthorizedQuantity < 0
     || !Number.isSafeInteger(input.cumulativePhysicalQuantity)
-    || input.cumulativePhysicalQuantity < 0) {
+    || input.cumulativePhysicalQuantity < 0
+    || (input.cumulativeCommercialQuantity !== undefined && (
+      !Number.isSafeInteger(input.cumulativeCommercialQuantity)
+      || input.cumulativeCommercialQuantity < 0
+      || input.cumulativeCommercialQuantity > input.cumulativePhysicalQuantity
+    ))) {
     reasons.push("invalid_quantity_authority");
+  } else if (input.cumulativeCommercialQuantity !== undefined) {
+    if (input.cumulativeCommercialQuantity > input.commercialAuthorizedQuantity) {
+      reasons.push("commercial_quantity_exceeds_current_authority");
+    }
   } else if (input.cumulativePhysicalQuantity > input.commercialAuthorizedQuantity) {
     reasons.push("physical_quantity_exceeds_current_authority");
   }

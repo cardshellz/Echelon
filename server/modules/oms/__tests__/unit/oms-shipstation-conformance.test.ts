@@ -121,6 +121,7 @@ describe("OMS/WMS authority conformance :: ShipStation handoff", () => {
     expect(SHIPSTATION_SRC).toContain("shipstation_package_contents_missing");
     expect(itemSyncBlock).toContain("shipstation_split_items_unmapped");
     expect(itemSyncBlock).toContain("shipstation_split_source_item_missing");
+    expect(itemSyncBlock).toContain("shipstation_split_commercial_quantity_unmapped");
     expect(itemSyncBlock).toContain("UPDATE wms.outbound_shipment_items");
     expect(itemSyncBlock).toContain("tracking_id = ${String(shipment.shipmentId)}");
     expect(itemSyncBlock).not.toContain("SET qty = 0");
