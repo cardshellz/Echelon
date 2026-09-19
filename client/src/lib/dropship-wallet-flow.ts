@@ -633,14 +633,21 @@ export interface WalletIntroCopy {
 }
 
 /**
- * "How your wallet works": six topics, each a lead sentence and its detail, in
- * the order a seller meets them — what the wallet is, how it is filled, what
- * covers a gap, what it pays out, what that costs, and what a failure does.
+ * "How your wallet works": five topics, each a lead sentence and its detail, in
+ * the order a seller meets them — what the wallet is, what filling it costs,
+ * how it stays funded, what covers a gap, and what a failure does.
  *
- * Every amount, rate and duration is a served value (`limits`,
- * `cardFundingFeeBps`, the hold time): no money or duration is typed into this
- * copy. The single top-up limit is named here with its minimum only; the review
- * step states it in full, beside the number the vendor actually sets.
+ * Only two numbers are quoted, and each is a served value the server enforces:
+ * the card fee and the floor minimum (stated by its purpose, not as a figure
+ * Card Shellz picked). Amounts that are environment defaults rather than
+ * product rules — the manual funding band, the single top-up limit's own
+ * minimum — are deliberately absent: quoting them would promise a rule the
+ * product does not have. The single top-up limit is explained in full on the
+ * review step, beside the number the vendor actually sets.
+ *
+ * USDC carries a fee statement and nothing else: the code credits USDC only
+ * through an admin endpoint and watches no chain, so any timing claim would be
+ * unfounded.
  */
 export function describeIntro(input: {
   cardFundingFeeBps: number;
@@ -650,32 +657,25 @@ export function describeIntro(input: {
 }): WalletIntroCopy {
   const fee = formatFeeRate(input.cardFundingFeeBps);
   const hold = formatDurationMinutes(input.holdTimeoutMinutes);
-  const { limits } = input;
-  const usdc = input.usdcOffered
-    ? " USDC is free; a member of the Card Shellz team credits it after confirming the transfer — it is not instant."
-    : "";
+  const usdc = input.usdcOffered ? " USDC costs nothing." : "";
   return {
     lede: "Your wallet is how Card Shellz gets paid for the orders you sell. Here is what it does, what it costs, and what happens if a payment fails.",
     topics: [
       {
-        lead: "What your wallet is for.",
-        detail: "It is a prepaid balance Card Shellz holds for your store. Every order you accept is paid from it, so an order can go out the moment it arrives instead of waiting on a payment to clear.",
-      },
-      {
-        lead: "Topping it up.",
-        detail: `You choose a floor: the balance you want to hold. We top you back up to it once a day, and after any order that drops you below it. Your floor can be anything from ${formatWholeDollars(limits.autoReloadMinTriggerCents)} upward, and one top-up never charges more than the single top-up limit you set, which starts at ${formatWholeDollars(limits.autoReloadMinAmountCents)}. Money already on its way counts toward your floor, so the same gap is never charged twice. You can also add money yourself at any time, from ${formatWholeDollars(limits.manualFundingMinCents)} to ${formatWholeDollars(limits.manualFundingMaxCents)} at a time.`,
-      },
-      {
-        lead: "Your backup payment method.",
-        detail: "Every seller keeps a card on file for emergencies. Only money that has landed can pay for an order, so if an order needs more than your balance we charge that card for the difference and send the order straight out. That is what covers you while a bank transfer is still on its way.",
-      },
-      {
-        lead: "What the wallet pays for.",
-        detail: "The product cost plus shipping on every order you accept. Card Shellz adds nothing on top of an order. When a return is processed its return fee comes out of the wallet too, and that can take your balance below zero.",
+        lead: "What your wallet is.",
+        detail: "It is a prepaid balance Card Shellz holds for your store. Every order you accept is paid from it: the product cost plus shipping, with nothing added on top. When a return is processed its return fee comes out of the wallet too, and that can take your balance below zero.",
       },
       {
         lead: "Payment methods and fees.",
         detail: `A bank account costs nothing and takes ${BANK_SETTLEMENT_DAYS_PHRASE} to land (our estimate). A card lands at once and costs ${fee} on top of the amount, whether it is a routine top-up, money you add yourself, or a backup charge.${usdc}`,
+      },
+      {
+        lead: "Keeping it funded.",
+        detail: `You choose a floor: the balance you want to hold. We top you back up to it once a day, and after any order that drops you below it. Your floor has to be at least ${formatWholeDollars(input.limits.autoReloadMinTriggerCents)}, so there is always enough to cover a normal order. Money already on its way counts toward your floor, so the same gap is never charged twice. You can also add money yourself at any time.`,
+      },
+      {
+        lead: "Your backup card.",
+        detail: "Every seller keeps a card on file. Only money that has landed can pay for an order, so if an order needs more than your balance we charge that card for the difference and send the order straight out. That is what covers you while a bank transfer is still on its way.",
       },
       {
         lead: "If a payment fails.",

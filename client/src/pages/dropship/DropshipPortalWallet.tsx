@@ -1025,7 +1025,7 @@ function StepIndicator({ wallet, flow, draft, onSelect }: { wallet: DropshipWall
 /**
  * The charge rules, worded once: step 1 during setup and the manage view's
  * "How your wallet works" render this. Each topic leads with its bold sentence
- * so the six of them can be scanned without reading the detail.
+ * so they can be scanned without reading the detail.
  */
 function WalletHowItWorks({ wallet, flow }: { wallet: DropshipWalletView; flow: WalletFlowState }) {
   const intro = describeIntro({ cardFundingFeeBps: wallet.cardFundingFeeBps, usdcOffered: wallet.usdcBaseDepositAddress !== null, holdTimeoutMinutes: flow.holdTimeoutMinutes, limits: wallet.limits });

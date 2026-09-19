@@ -279,25 +279,27 @@ test("bank vendor, end to end: intro, bank source, floor with guidance, backup c
   const intro = page.getByTestId("wallet-step-intro");
   await expect(intro.getByRole("heading", { name: "How your wallet works" })).toBeVisible();
   await expect(intro.getByTestId("wallet-how-it-works-lede")).toHaveText("Your wallet is how Card Shellz gets paid for the orders you sell. Here is what it does, what it costs, and what happens if a payment fails.");
-  // Six topics, each scannable from its bold lead alone.
+  // Five topics, each scannable from its bold lead alone.
   const topics = intro.getByTestId("wallet-how-it-works-rules").getByRole("listitem");
-  await expect(topics).toHaveCount(6);
-  for (const [index, lead] of ["What your wallet is for.", "Topping it up.", "Your backup payment method.",
-    "What the wallet pays for.", "Payment methods and fees.", "If a payment fails."].entries()) {
+  await expect(topics).toHaveCount(5);
+  for (const [index, lead] of ["What your wallet is.", "Payment methods and fees.", "Keeping it funded.",
+    "Your backup card.", "If a payment fails."].entries()) {
     await expect(topics.nth(index).locator("strong")).toHaveText(lead);
   }
-  // Every amount comes from the served limits, the rate from the served fee and the deadline from the hold time.
-  await expect(intro).toContainText("Your floor can be anything from $50 upward");
-  await expect(intro).toContainText("the single top-up limit you set, which starts at $100");
-  await expect(intro).toContainText("the same gap is never charged twice");
-  await expect(intro).toContainText("from $10 to $5,000 at a time");
+  // The floor minimum comes from the served limits, the rate from the served fee and the deadline from the hold time.
   await expect(intro).toContainText("its return fee comes out of the wallet too, and that can take your balance below zero");
   await expect(intro).toContainText("takes up to 5 business days to land (our estimate)");
   await expect(intro).toContainText("costs 3% on top of the amount");
-  await expect(intro).toContainText("USDC is free");
+  await expect(intro).toContainText("USDC costs nothing.");
+  await expect(intro).toContainText("Your floor has to be at least $50, so there is always enough to cover a normal order");
+  await expect(intro).toContainText("the same gap is never charged twice");
+  await expect(intro).toContainText("You can also add money yourself at any time.");
   await expect(intro).toContainText("cancelled after your hold time (48 hours)");
   await expect(intro).toContainText("We email you, and we do not retry the charge ourselves.");
-  // The limit's full wording belongs to the review step, and nothing here points forward to a later step.
+  // No amount the product does not enforce as a rule, no USDC timing claim, and no forward reference to a later step.
+  await expect(intro).not.toContainText("at a time,");
+  await expect(intro).not.toContainText("single top-up limit");
+  await expect(intro).not.toContainText("it is not instant");
   await expect(intro).not.toContainText("Never charge more than");
   await expect(intro).not.toContainText("step 5");
   await expect(intro.getByTestId("wallet-intro-verification-note")).toContainText("(a 6-digit code by email)");
@@ -790,9 +792,9 @@ test("the step list walks back and forward without losing a choice, and manage k
   await expect(how).not.toContainText("Only money that has landed can pay for an order,");
   await how.getByRole("button").click();
   await expect(how).toContainText("Only money that has landed can pay for an order,");
-  // One source: the manage view renders the same lede and the same six topics as step 1.
+  // One source: the manage view renders the same lede and the same five topics as step 1.
   await expect(how.getByTestId("wallet-how-it-works-lede")).toContainText("Your wallet is how Card Shellz gets paid for the orders you sell.");
-  await expect(how.getByTestId("wallet-how-it-works-rules").getByRole("listitem")).toHaveCount(6);
+  await expect(how.getByTestId("wallet-how-it-works-rules").getByRole("listitem")).toHaveCount(5);
   await expect(how.getByTestId("wallet-intro-verification-note")).toBeVisible();
   await expectNoHorizontalScroll(page);
   await shot(page, "nav-04-how-it-works");
