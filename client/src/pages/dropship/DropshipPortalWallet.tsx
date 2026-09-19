@@ -79,6 +79,7 @@ import {
   EMPTY_DRAFT,
   INTRO_VERIFICATION_NOTE,
   LEDGER_REASON_LABELS,
+  STEP_ORDER,
   acknowledgementForSave,
   activeMethodsOfRail,
   buildAuthorizeInput,
@@ -90,6 +91,11 @@ import {
   clearWalletDraft,
   depositFundingMethodFor,
   deriveWalletFlow,
+  draftAfterBackupChoice,
+  draftAfterFloorChoice,
+  draftAfterIntro,
+  draftAfterSourceChoice,
+  draftAtStep,
   describeAcknowledgementBanner,
   describeActivationQuote,
   describeActivationTopUp,
@@ -102,15 +108,19 @@ import {
   describePendingBalance,
   describePlanSentence,
   describeRoleGap,
+  describeSourcePreselection,
   disabledReasonForRemoval,
   isEligibleBackupCard,
   isPendingStripeLive,
   parseStripeReturn,
   planAfterSourceChange,
   planFromWallet,
+  previousWalletStep,
   readWalletDraft,
   resolveStripeReturn,
   stripStripeReturn,
+  walletStepNumber,
+  walletStepState,
   writeWalletDraft,
   type StripePurpose,
   type StripeReturn,
@@ -164,7 +174,6 @@ interface Feedback {
   verification: { code: string; onCodeChange: (value: string) => void; onSubmit: () => void; onCancel: () => void } | null;
 }
 
-const STEP_ORDER: readonly WalletFlowStep[] = ["intro", "source", "floor", "backup", "authorize", "deposit"];
 const STEP_TITLES: Readonly<Record<WalletFlowStep, string>> = {
   intro: "How your wallet works",
   source: "Choose your top-up source",
@@ -173,10 +182,6 @@ const STEP_TITLES: Readonly<Record<WalletFlowStep, string>> = {
   authorize: "Review and turn on auto-reload",
   deposit: "Add money now (recommended)",
 };
-
-function stepNumber(step: WalletFlowStep): number {
-  return STEP_ORDER.indexOf(step) + 1;
-}
 
 export default function DropshipPortalWallet() {
   const queryClient = useQueryClient();
@@ -281,7 +286,7 @@ export default function DropshipPortalWallet() {
         else setReturnBanner({ tone: "info", text: "Payment cancelled. Nothing was charged." });
       } else if (flow?.mode === "flow" && purpose !== "manage_add") {
         const step = scopeForPurpose(purpose);
-        setNotice({ scope: step, tone: "info", text: `Nothing was saved. You are back at step ${stepNumber(step)}.` });
+        setNotice({ scope: step, tone: "info", text: `Nothing was saved. You are back at step ${walletStepNumber(step)}.` });
       } else {
         setReturnBanner({ tone: "info", text: "Nothing was saved." });
       }
@@ -370,9 +375,11 @@ export default function DropshipPortalWallet() {
     if (typeof face.recovery === "object") {
       const step = face.recovery.step;
       if (flow?.mode === "flow") {
+        // The refused value is cleared, so the recomputed furthest step IS the
+        // step to fix; any step the vendor had navigated to is released with it.
         setDraft((current) => step === "source"
-          ? { ...current, sourceMethodId: null, floorCents: null, backupMethodId: null }
-          : step === "floor" ? { ...current, floorCents: null, backupMethodId: null } : { ...current, backupMethodId: null });
+          ? { ...current, stepOverride: null, sourceMethodId: null, floorCents: null, backupMethodId: null }
+          : step === "floor" ? { ...current, stepOverride: null, floorCents: null, backupMethodId: null } : { ...current, stepOverride: null, backupMethodId: null });
         setNotice({ scope: step, tone: "error", text: face.text });
       } else {
         setEditor(step);
@@ -549,6 +556,12 @@ export default function DropshipPortalWallet() {
     void walletQuery.refetch();
   }
 
+  /** A step screen's Back control: the previous step in STEP_ORDER, or nothing at the first one. */
+  function backTo(step: WalletFlowStep): (() => void) | undefined {
+    const previous = previousWalletStep(step);
+    return previous === null ? undefined : () => setDraft((current) => draftAtStep(current, previous));
+  }
+
   const feedback = (scope: WalletScope): Feedback => ({
     busy: busyScope === scope,
     notice: notice?.scope === scope ? notice : null,
@@ -629,9 +642,14 @@ export default function DropshipPortalWallet() {
           )
         ) : flow.mode === "flow" && flow.step ? (
           <>
-            <StepIndicator wallet={wallet} flow={flow} draft={draft} />
+            <StepIndicator wallet={wallet} flow={flow} draft={draft} onSelect={(step) => setDraft((current) => draftAtStep(current, step))} />
             {flow.step === "intro" && (
-              <IntroStep wallet={wallet} flow={flow} onContinue={() => setDraft((current) => ({ ...current, seenIntro: true }))} />
+              <IntroStep
+                wallet={wallet}
+                flow={flow}
+                revisited={flow.furthestStep !== "intro"}
+                onContinue={() => setDraft(draftAfterIntro)}
+              />
             )}
             {flow.step === "source" && (
               <SourceStep
@@ -645,7 +663,8 @@ export default function DropshipPortalWallet() {
                 onAdd={(rail) => startStripeSetup("source", rail, "source")}
                 onRailChange={(rail) => setDraft((current) => (current.sourceRail === rail ? current : { ...current, sourceRail: rail }))}
                 autoSelectedId={autoSelected?.purpose === "source" ? autoSelected.fundingMethodId : null}
-                onContinue={(method) => setDraft((current) => ({ ...current, sourceMethodId: method.fundingMethodId, sourceRail: method.rail as WalletSourceRail, floorCents: current.sourceRail === method.rail ? current.floorCents : null }))}
+                onBack={backTo(flow.step)}
+                onContinue={(method) => setDraft((current) => draftAfterSourceChoice(current, method, flow.source?.method ?? null))}
               />
             )}
             {flow.step === "floor" && flow.source && (
@@ -658,7 +677,8 @@ export default function DropshipPortalWallet() {
                 initialDailyCostCents={draft.dailyCostCents}
                 feedback={feedback("floor")}
                 submitLabel="Continue"
-                onSubmit={(floorCents, dailyCostCents) => setDraft((current) => ({ ...current, floorCents, dailyCostCents }))}
+                onBack={backTo(flow.step)}
+                onSubmit={(floorCents, dailyCostCents) => setDraft((current) => draftAfterFloorChoice(current, floorCents, dailyCostCents))}
               />
             )}
             {flow.step === "backup" && (
@@ -672,7 +692,8 @@ export default function DropshipPortalWallet() {
                 onAdd={() => startStripeSetup("backup", "stripe_card", "backup")}
                 initialCardId={draft.backupMethodId ?? (autoSelected?.purpose === "backup" ? autoSelected.fundingMethodId : null)}
                 submitLabel="Continue"
-                onSubmit={(card) => setDraft((current) => ({ ...current, backupMethodId: card.fundingMethodId }))}
+                onBack={backTo(flow.step)}
+                onSubmit={(card) => setDraft((current) => draftAfterBackupChoice(current, card))}
               />
             )}
             {flow.step === "authorize" && flow.source && flow.backup && (
@@ -682,9 +703,8 @@ export default function DropshipPortalWallet() {
                 draft={draft}
                 feedback={feedback("authorize")}
                 disabled={feeMisconfigured}
-                onChange={(step) => setDraft((current) => step === "source"
-                  ? { ...current, sourceMethodId: null }
-                  : step === "floor" ? { ...current, floorCents: null } : { ...current, backupMethodId: null })}
+                onBack={backTo(flow.step)}
+                onChange={(step) => setDraft((current) => draftAtStep(current, step))}
                 onAuthorize={() => authorize({
                   fundingMethodId: flow.source!.method.fundingMethodId,
                   backupFundingMethodId: flow.backup!.method.fundingMethodId,
@@ -701,6 +721,7 @@ export default function DropshipPortalWallet() {
                 feedback={feedback("deposit")}
                 pendingNotice={pendingStripeNotice?.scope === "deposit" ? pendingStripeNotice : null}
                 onCheckAgain={checkAgain}
+                onBack={backTo(flow.step)}
                 onContinue={(rail, amountCents) => addFunds("deposit", rail, amountCents)}
                 onAddMethod={(rail) => startStripeSetup("deposit", rail, "manage_add")}
                 onNotNow={() => setDraft((current) => ({ ...current, deposit: "skipped" }))}
@@ -833,6 +854,14 @@ function SectionFeedback({ busy, notice, verification }: Feedback) {
   );
 }
 
+/** The plain Back control every step screen but the intro carries: one step earlier, nothing saved and nothing cleared. */
+function StepBack({ busy, onBack }: { busy: boolean; onBack?: () => void }) {
+  if (!onBack) return null;
+  return (
+    <Button type="button" variant="ghost" className="h-10 w-full sm:w-auto" disabled={busy} onClick={onBack} data-testid="wallet-step-back">Back</Button>
+  );
+}
+
 function Impact({ children }: { children: ReactNode }) {
   return (
     <p role="status" aria-live="polite" className="mt-4 rounded-md border border-violet-100 bg-violet-50 p-3 text-sm text-zinc-700" data-testid="wallet-impact">
@@ -898,16 +927,18 @@ const STRIPE_HANDOFF_NOTE = "You finish on Stripe's page. Card Shellz never sees
 
 // ---------------------------------------------------------------------------
 // Step list: done rows show their result, derived rows their explanation, the
-// current row the "Now" badge. Collapsed to one line on phones.
+// current row the "Now" badge. Collapsed to one line on phones. Every step the
+// flow has already reached is a button that goes back to it; the rest are plain
+// text and are not focusable, so nothing offers a step the vendor cannot open.
 // ---------------------------------------------------------------------------
 
-function StepIndicator({ wallet, flow, draft }: { wallet: DropshipWalletView; flow: WalletFlowState; draft: WalletDraft }) {
+function StepIndicator({ wallet, flow, draft, onSelect }: { wallet: DropshipWalletView; flow: WalletFlowState; draft: WalletDraft; onSelect: (step: WalletFlowStep) => void }) {
   const [open, setOpen] = useState(false);
   const current = flow.step ?? "authorize";
   const currentIndex = STEP_ORDER.indexOf(current);
   const fee = formatFeeRate(wallet.cardFundingFeeBps);
-  const rows = STEP_ORDER.map((step, index) => {
-    const state: "done" | "current" | "later" = index < currentIndex ? "done" : index === currentIndex ? "current" : "later";
+  const rows = STEP_ORDER.map((step) => {
+    const state = walletStepState(step, { current, furthestStep: flow.furthestStep ?? current, seenIntro: draft.seenIntro });
     let detail: string | null = null;
     if (step === "source" && state === "done" && flow.source) {
       detail = `${flow.source.rail === "stripe_ach" ? "Bank account" : "Card"} · ${describeFundingMethod(flow.source.method)}`;
@@ -924,29 +955,48 @@ function StepIndicator({ wallet, flow, draft }: { wallet: DropshipWalletView; fl
         ? `First top-up · On the first daily check after you activate we charge ${describeFundingMethod(flow.source.method)} ${formatWholeDollars(quote.chargedCents)} (${formatWholeDollars(quote.amountCents)} + ${formatWholeDollars(quote.feeCents)} fee) to bring your balance to your floor. You can add money any time from Wallet.`
         : "First top-up · Your balance already covers your floor. You can add money any time from Wallet.";
     }
-    return { step, state, detail };
+    return { step, state, detail, reachable: flow.reachableSteps.includes(step) };
   });
   const list = (
     <ol className="space-y-2" data-testid="wallet-step-indicator">
-      {rows.map(({ step, state, detail }, index) => (
-        <li key={step} className="flex items-start gap-3 text-sm">
-          <span
-            className={state === "done"
-              ? "flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-emerald-600 text-white"
-              : state === "current"
-                ? "flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#C060E0] text-white"
-                : "flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-zinc-300 text-zinc-500"}
-            aria-hidden="true"
-          >
-            {state === "done" ? <CheckCircle2 className="h-4 w-4" /> : index + 1}
-          </span>
-          <span className="min-w-0">
-            <span className={state === "later" ? "text-zinc-500" : "font-medium"}>{STEP_TITLES[step]}</span>
-            {state === "current" && <Badge variant="outline" className="ml-2">Now</Badge>}
-            {detail && <span className="block text-zinc-500">{detail}</span>}
-          </span>
-        </li>
-      ))}
+      {rows.map(({ step, state, detail, reachable }, index) => {
+        const body = (
+          <>
+            <span
+              className={state === "done"
+                ? "flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-emerald-600 text-white"
+                : state === "current"
+                  ? "flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#C060E0] text-white"
+                  : "flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-zinc-300 text-zinc-500"}
+              aria-hidden="true"
+            >
+              {state === "done" ? <CheckCircle2 className="h-4 w-4" /> : index + 1}
+            </span>
+            <span className="min-w-0">
+              <span className={state === "later" ? "text-zinc-500" : "font-medium"}>{STEP_TITLES[step]}</span>
+              {state === "current" && <Badge variant="outline" className="ml-2">Now</Badge>}
+              {detail && <span className="block text-zinc-500">{detail}</span>}
+            </span>
+          </>
+        );
+        return (
+          <li key={step} className="text-sm">
+            {reachable ? (
+              <button
+                type="button"
+                className="flex w-full items-start gap-3 rounded-md text-left hover:bg-zinc-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#C060E0]"
+                aria-current={state === "current" ? "step" : undefined}
+                data-testid={`wallet-step-link-${step}`}
+                onClick={() => onSelect(step)}
+              >
+                {body}
+              </button>
+            ) : (
+              <span className="flex items-start gap-3">{body}</span>
+            )}
+          </li>
+        );
+      })}
     </ol>
   );
   return (
@@ -972,17 +1022,28 @@ function StepIndicator({ wallet, flow, draft }: { wallet: DropshipWalletView; fl
 // Step 1 — How your wallet works
 // ---------------------------------------------------------------------------
 
-function IntroStep({ wallet, flow, onContinue }: { wallet: DropshipWalletView; flow: WalletFlowState; onContinue: () => void }) {
+/** The charge rules, worded once: step 1 during setup and the manage view's "How your wallet works" render this. */
+function WalletHowItWorks({ wallet, flow }: { wallet: DropshipWalletView; flow: WalletFlowState }) {
   const lines = describeIntro({ cardFundingFeeBps: wallet.cardFundingFeeBps, usdcOffered: wallet.usdcBaseDepositAddress !== null, holdTimeoutMinutes: flow.holdTimeoutMinutes });
   return (
-    <section className={SECTION} data-testid="wallet-step-intro">
-      <h2 className="text-lg font-semibold">How your wallet works</h2>
-      <p className="mt-1 text-sm text-zinc-500">Before you choose anything, here is exactly when we charge you and why.</p>
-      <ol className="mt-4 list-decimal space-y-3 pl-5 text-sm text-zinc-700">
+    <>
+      <ol className="list-decimal space-y-3 pl-5 text-sm text-zinc-700" data-testid="wallet-how-it-works-rules">
         {lines.map((line) => <li key={line}>{line}</li>)}
       </ol>
       <p className="mt-4 text-sm text-zinc-500" data-testid="wallet-intro-verification-note">{INTRO_VERIFICATION_NOTE}</p>
-      <Button type="button" className={`mt-5 ${BRAND_BUTTON}`} onClick={onContinue}>Set up my wallet</Button>
+    </>
+  );
+}
+
+function IntroStep({ wallet, flow, revisited, onContinue }: { wallet: DropshipWalletView; flow: WalletFlowState; revisited: boolean; onContinue: () => void }) {
+  return (
+    <section className={SECTION} data-testid="wallet-step-intro">
+      <h2 className="text-lg font-semibold">How your wallet works</h2>
+      <p className="mt-1 text-sm text-zinc-500">
+        {revisited ? "The charge rules, unchanged. Nothing you have chosen is affected by reading them again." : "Before you choose anything, here is exactly when we charge you and why."}
+      </p>
+      <div className="mt-4"><WalletHowItWorks wallet={wallet} flow={flow} /></div>
+      <Button type="button" className={`mt-5 ${BRAND_BUTTON}`} onClick={onContinue}>{revisited ? "Back to setup" : "Set up my wallet"}</Button>
     </section>
   );
 }
@@ -1106,7 +1167,7 @@ function SourcePicker({
 }
 
 function SourceStep({
-  wallet, flow, draft, feedback, confirmation, pendingNotice, onCheckAgain, onAdd, onRailChange, autoSelectedId, onContinue,
+  wallet, flow, draft, feedback, confirmation, pendingNotice, onCheckAgain, onAdd, onRailChange, autoSelectedId, onBack, onContinue,
 }: {
   wallet: DropshipWalletView;
   flow: WalletFlowState;
@@ -1118,6 +1179,7 @@ function SourceStep({
   onAdd: (rail: WalletSourceRail) => void;
   onRailChange: (rail: WalletSourceRail) => void;
   autoSelectedId: number | null;
+  onBack?: () => void;
   onContinue: (method: WalletFundingMethod) => void;
 }) {
   const [selectedId, setSelectedId] = useState<number | null>(draft.sourceMethodId ?? flow.suggestedSourceMethodId);
@@ -1135,7 +1197,12 @@ function SourceStep({
   }, [autoSelectedId, wallet.fundingMethods]);
   const selected = wallet.fundingMethods.find((method) => method.fundingMethodId === selectedId && method.status === "active") ?? null;
   const fee = formatFeeRate(wallet.cardFundingFeeBps);
-  const suggested = autoSelectedId === null && draft.sourceMethodId === null && flow.suggestedSourceMethodId !== null && selectedId === flow.suggestedSourceMethodId;
+  const preselection = describeSourcePreselection({
+    selected,
+    draftSourceMethodId: draft.sourceMethodId,
+    suggestedSourceMethodId: flow.suggestedSourceMethodId,
+    justAdded: autoSelectedId !== null,
+  });
   const monthly = draft.dailyCostCents ? monthlyCardFeeEstimate("stripe_card", DEFAULT_FLOOR_CENTS_BY_SOURCE.stripe_card, draft.dailyCostCents, wallet.cardFundingFeeBps) : null;
   const exampleFee = quoteWalletFunding({ rail: "stripe_card", creditCents: EXAMPLE_MONTHLY_SPEND_CENTS, cardFeeBps: wallet.cardFundingFeeBps }).feeCents;
   const canContinue = selected !== null && (selected.rail === "stripe_ach" || selected.roles.chargeable);
@@ -1157,7 +1224,7 @@ function SourceStep({
           editing={false}
         />
       </div>
-      {suggested && <p className="mt-3 text-sm text-zinc-600">Pick up where you left off.</p>}
+      {preselection && <p className="mt-3 text-sm text-zinc-600" data-testid="wallet-source-preselection">{preselection}</p>}
       {wallet.usdcBaseDepositAddress && (
         <p className="mt-3 text-sm text-zinc-500" data-testid="wallet-usdc-note">
           Prefer USDC? It is free too, but manual: you send USDC on Base to Card Shellz's deposit address and a member of our team credits your wallet after confirming the transfer. Because it cannot be pulled automatically, it can never be your top-up source. Use it any time under Add money.
@@ -1175,7 +1242,10 @@ function SourceStep({
       )}
       {pendingNotice && <PendingStripeNotice purpose={pendingNotice.purpose} onCheckAgain={onCheckAgain} />}
       <SectionFeedback {...feedback} />
-      <Button type="button" className={`mt-5 ${BRAND_BUTTON}`} disabled={feedback.busy || !canContinue} onClick={() => selected && onContinue(selected)}>Continue</Button>
+      <div className="mt-5 flex flex-col gap-2 sm:flex-row">
+        <Button type="button" className={BRAND_BUTTON} disabled={feedback.busy || !canContinue} onClick={() => selected && onContinue(selected)}>Continue</Button>
+        <StepBack busy={feedback.busy} onBack={onBack} />
+      </div>
     </section>
   );
 }
@@ -1194,7 +1264,7 @@ function tryParseDollarInputToCents(value: string): number | null {
 }
 
 function FloorStep({
-  wallet, flow, sourceRail, sourceLabel, initialFloorCents, initialDailyCostCents, feedback, submitLabel, onSubmit, onCancel, currentLimitCents, saveNote,
+  wallet, flow, sourceRail, sourceLabel, initialFloorCents, initialDailyCostCents, feedback, submitLabel, onSubmit, onBack, onCancel, currentLimitCents, saveNote,
 }: {
   wallet: DropshipWalletView;
   flow: WalletFlowState;
@@ -1205,6 +1275,8 @@ function FloorStep({
   feedback: Feedback;
   submitLabel: string;
   onSubmit: (floorCents: number, dailyCostCents: number | null) => void;
+  /** The flow's Back control; the manage editor passes `onCancel` instead. */
+  onBack?: () => void;
   onCancel?: () => void;
   /** Manage mode: the saved cap, so the editor can say where the limit moves. */
   currentLimitCents?: number;
@@ -1365,6 +1437,7 @@ function FloorStep({
       <SectionFeedback {...feedback} />
       <div className="mt-5 flex flex-col gap-2 sm:flex-row">
         <Button type="button" className={BRAND_BUTTON} disabled={feedback.busy || !valid || dailyInvalid} onClick={() => onSubmit(floorCents, dailyCents)}>{submitLabel}</Button>
+        <StepBack busy={feedback.busy} onBack={onBack} />
         {onCancel && <Button type="button" variant="ghost" className="h-10" disabled={feedback.busy} onClick={onCancel}>Cancel</Button>}
       </div>
     </section>
@@ -1443,7 +1516,7 @@ function ExpiryLine({ method, now }: { method: WalletFundingMethod; now: Date })
 }
 
 function BackupStep({
-  wallet, now, feedback, confirmation, pendingNotice, onCheckAgain, onAdd, initialCardId, submitLabel, onSubmit, onCancel, saveNote,
+  wallet, now, feedback, confirmation, pendingNotice, onCheckAgain, onAdd, initialCardId, submitLabel, onSubmit, onBack, onCancel, saveNote,
 }: {
   wallet: DropshipWalletView;
   now: Date;
@@ -1455,6 +1528,8 @@ function BackupStep({
   initialCardId: number | null;
   submitLabel: string;
   onSubmit: (card: WalletFundingMethod) => void;
+  /** The flow's Back control; the manage editor passes `onCancel` instead. */
+  onBack?: () => void;
   onCancel?: () => void;
   saveNote?: ReactNode;
 }) {
@@ -1479,6 +1554,7 @@ function BackupStep({
       <SectionFeedback {...feedback} />
       <div className="mt-5 flex flex-col gap-2 sm:flex-row">
         <Button type="button" className={BRAND_BUTTON} disabled={feedback.busy || !selected} onClick={() => selected && onSubmit(selected)}>{submitLabel}</Button>
+        <StepBack busy={feedback.busy} onBack={onBack} />
         {onCancel && <Button type="button" variant="ghost" className="h-10" disabled={feedback.busy} onClick={onCancel}>Cancel</Button>}
       </div>
     </section>
@@ -1502,13 +1578,15 @@ function buildReviewRows({ wallet, terms, dailyCostCents }: { wallet: DropshipWa
 }
 
 function ReviewStep({
-  wallet, flow, draft, feedback, disabled, onChange, onAuthorize,
+  wallet, flow, draft, feedback, disabled, onBack, onChange, onAuthorize,
 }: {
   wallet: DropshipWalletView;
   flow: WalletFlowState;
   draft: WalletDraft;
   feedback: Feedback;
   disabled: boolean;
+  onBack?: () => void;
+  /** Each Change opens that step with its saved value; nothing is cleared until the vendor picks something else. */
   onChange: (step: "source" | "floor" | "backup") => void;
   onAuthorize: () => void;
 }) {
@@ -1528,7 +1606,10 @@ function ReviewStep({
               <dt className="text-xs uppercase tracking-wide text-zinc-500">{label}</dt>
               <dd className="text-zinc-800">{value}</dd>
             </div>
-            {step && <Button type="button" variant="outline" size="sm" className="h-8 w-fit" disabled={busy} onClick={() => onChange(step)}>Change</Button>}
+            {/* Once the plan is authorized those steps are no longer open, so the control is not offered rather than offered and dead. */}
+            {step && flow.reachableSteps.includes(step) && (
+              <Button type="button" variant="outline" size="sm" className="h-8 w-fit" disabled={busy} onClick={() => onChange(step)}>Change</Button>
+            )}
           </div>
         ))}
       </dl>
@@ -1545,7 +1626,10 @@ function ReviewStep({
       </p>
       <Impact>From now on we top up on our own as described above. Nothing is charged until you activate your account.</Impact>
       <SectionFeedback {...feedback} />
-      <Button type="button" className={`mt-5 ${BRAND_BUTTON}`} disabled={busy || disabled} onClick={onAuthorize}>Agree and turn on auto-reload</Button>
+      <div className="mt-5 flex flex-col gap-2 sm:flex-row">
+        <Button type="button" className={BRAND_BUTTON} disabled={busy || disabled} onClick={onAuthorize}>Agree and turn on auto-reload</Button>
+        <StepBack busy={busy} onBack={onBack} />
+      </div>
     </section>
   );
 }
@@ -1674,13 +1758,14 @@ function UsdcFundingPanel({ wallet, busy, onSave }: { wallet: DropshipWalletView
 }
 
 function DepositStep({
-  wallet, flow, feedback, pendingNotice, onCheckAgain, onContinue, onAddMethod, onNotNow,
+  wallet, flow, feedback, pendingNotice, onCheckAgain, onBack, onContinue, onAddMethod, onNotNow,
 }: {
   wallet: DropshipWalletView;
   flow: WalletFlowState;
   feedback: Feedback;
   pendingNotice: { purpose: StripePurpose } | null;
   onCheckAgain: () => void;
+  onBack?: () => void;
   onContinue: (rail: WalletSourceRail, amountCents: number) => void;
   onAddMethod: (rail: WalletSourceRail) => void;
   onNotNow: () => void;
@@ -1707,7 +1792,10 @@ function DepositStep({
       <Impact>The transfer shows as on the way until your bank settles it and counts toward your floor, so we will not start a second one for the same money. Until it lands, money on its way cannot pay an order.</Impact>
       {pendingNotice && <PendingStripeNotice purpose={pendingNotice.purpose} onCheckAgain={onCheckAgain} />}
       <SectionFeedback {...feedback} />
-      <Button type="button" variant="ghost" className="mt-3 h-10 w-full sm:w-auto" disabled={feedback.busy} onClick={onNotNow}>Not now</Button>
+      <div className="mt-3 flex flex-col gap-2 sm:flex-row">
+        <Button type="button" variant="ghost" className="h-10 w-full sm:w-auto" disabled={feedback.busy} onClick={onNotNow}>Not now</Button>
+        <StepBack busy={feedback.busy} onBack={onBack} />
+      </div>
     </section>
   );
 }
@@ -1963,6 +2051,7 @@ function ManageView({
         {editor !== "review" && editor === null && flow.authorized && <SectionFeedback {...bannerFeedback} />}
       </section>
 
+      <HowItWorksSection wallet={wallet} flow={flow} />
       <SavedMethods wallet={wallet} flow={flow} now={now} feedback={feedback("methods")} onRemove={onRemove} onAdd={(rail) => void onAddMethod("methods", rail)} />
       <ActivitySection wallet={wallet} />
 
@@ -1972,6 +2061,29 @@ function ManageView({
         </div>
       )}
     </div>
+  );
+}
+
+/** The step-1 rules, collapsed, for a vendor past setup: the same copy, never a second wording of it. */
+function HowItWorksSection({ wallet, flow }: { wallet: DropshipWalletView; flow: WalletFlowState }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <section className={SECTION} data-testid="wallet-how-it-works">
+      <Collapsible open={open} onOpenChange={setOpen}>
+        <h2 className="text-lg font-semibold">
+          <CollapsibleTrigger asChild>
+            <button type="button" className="flex w-full items-center justify-between gap-3 text-left">
+              How your wallet works
+              <ChevronDown className={open ? "h-5 w-5 shrink-0 rotate-180 text-zinc-500" : "h-5 w-5 shrink-0 text-zinc-500"} aria-hidden="true" />
+            </button>
+          </CollapsibleTrigger>
+        </h2>
+        <p className="mt-1 text-sm text-zinc-500">When we charge you, and why — the same rules you were shown at setup.</p>
+        <CollapsibleContent className="mt-4">
+          <WalletHowItWorks wallet={wallet} flow={flow} />
+        </CollapsibleContent>
+      </Collapsible>
+    </section>
   );
 }
 

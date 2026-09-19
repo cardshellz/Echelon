@@ -11,6 +11,11 @@ import {
   buildRemoveFundingMethodPath,
   depositFundingMethodFor,
   deriveWalletFlow,
+  draftAfterBackupChoice,
+  draftAfterFloorChoice,
+  draftAfterIntro,
+  draftAfterSourceChoice,
+  draftAtStep,
   describeAcknowledgementBanner,
   describeActivationTopUp,
   describeBackupFollow,
@@ -22,6 +27,7 @@ import {
   describePendingBalance,
   describePlanSentence,
   describeRoleGap,
+  describeSourcePreselection,
   disabledReasonForRemoval,
   draftStorageKey,
   isPendingStripeLive,
@@ -30,11 +36,16 @@ import {
   parseStripeReturn,
   planAfterSourceChange,
   planFromWallet,
+  previousWalletStep,
   readWalletDraft,
   resolveStripeReturn,
+  STEP_ORDER,
   stripStripeReturn,
+  walletStepNumber,
+  walletStepState,
   writeWalletDraft,
   type WalletDraft,
+  type WalletFlowStep,
   type WalletTerms,
 } from "../dropship-wallet-flow";
 import type { DropshipWalletView, WalletFundingMethod } from "../dropship-wallet-view-adapter";
@@ -76,27 +87,39 @@ function doneWallet(overrides: Partial<DropshipWalletView> = {}): DropshipWallet
 }
 
 const draft = (overrides: Partial<WalletDraft> = {}): WalletDraft => ({ ...EMPTY_DRAFT, ...overrides });
+/** A draft whose owner has read the intro; nothing past step 1 is reached without one. */
+const started = (overrides: Partial<WalletDraft> = {}): WalletDraft => draft({ seenIntro: true, ...overrides });
 const derive = (w: DropshipWalletView, d: WalletDraft = draft(), vendorStatus = "onboarding") => deriveWalletFlow({ wallet: w, vendorStatus, draft: d, now: NOW });
 
 describe("deriveWalletFlow", () => {
   it("walks the decision table in order", () => {
     expect(derive(wallet())).toMatchObject({ mode: "flow", step: "intro" });
-    expect(derive(wallet(), draft({ seenIntro: true }))).toMatchObject({ step: "source", suggestedSourceMethodId: null });
-    expect(derive(wallet({ fundingMethods: [CARD, BANK] }))).toMatchObject({ step: "source", suggestedSourceMethodId: 30 });
-    expect(derive(wallet({ fundingMethods: [CARD] }))).toMatchObject({ step: "source", suggestedSourceMethodId: 10 });
-    expect(derive(wallet({ fundingMethods: [BANK] }), draft({ sourceMethodId: 30 }))).toMatchObject({ step: "floor", floorCents: 25_000 });
-    expect(derive(wallet({ fundingMethods: [BANK] }), draft({ sourceMethodId: 30, floorCents: 4_000 }))).toMatchObject({ step: "floor" });
-    expect(derive(wallet({ fundingMethods: [BANK] }), draft({ sourceMethodId: 30, floorCents: 25_000 }))).toMatchObject({ step: "backup", backup: null, limitCents: 50_000 });
-    expect(derive(wallet({ fundingMethods: [BANK, CARD] }), draft({ sourceMethodId: 30, floorCents: 25_000 }))).toMatchObject({ step: "backup" });
-    expect(derive(wallet({ fundingMethods: [BANK, CARD] }), draft({ sourceMethodId: 30, floorCents: 25_000, backupMethodId: 10 }))).toMatchObject({ step: "authorize", backup: { satisfiedBySource: false } });
-    expect(derive(wallet({ fundingMethods: [CARD] }), draft({ sourceMethodId: 10, floorCents: 10_000 }))).toMatchObject({ step: "authorize", backup: { method: CARD, satisfiedBySource: true }, limitCents: 25_000 });
+    expect(derive(wallet(), started())).toMatchObject({ step: "source", suggestedSourceMethodId: null });
+    expect(derive(wallet({ fundingMethods: [CARD, BANK] }), started())).toMatchObject({ step: "source", suggestedSourceMethodId: 30 });
+    expect(derive(wallet({ fundingMethods: [CARD] }), started())).toMatchObject({ step: "source", suggestedSourceMethodId: 10 });
+    expect(derive(wallet({ fundingMethods: [BANK] }), started({ sourceMethodId: 30 }))).toMatchObject({ step: "floor", floorCents: 25_000 });
+    expect(derive(wallet({ fundingMethods: [BANK] }), started({ sourceMethodId: 30, floorCents: 4_000 }))).toMatchObject({ step: "floor" });
+    expect(derive(wallet({ fundingMethods: [BANK] }), started({ sourceMethodId: 30, floorCents: 25_000 }))).toMatchObject({ step: "backup", backup: null, limitCents: 50_000 });
+    expect(derive(wallet({ fundingMethods: [BANK, CARD] }), started({ sourceMethodId: 30, floorCents: 25_000 }))).toMatchObject({ step: "backup" });
+    expect(derive(wallet({ fundingMethods: [BANK, CARD] }), started({ sourceMethodId: 30, floorCents: 25_000, backupMethodId: 10 }))).toMatchObject({ step: "authorize", backup: { satisfiedBySource: false } });
+    expect(derive(wallet({ fundingMethods: [CARD] }), started({ sourceMethodId: 10, floorCents: 10_000 }))).toMatchObject({ step: "authorize", backup: { method: CARD, satisfiedBySource: true }, limitCents: 25_000 });
+  });
+
+  it("shows the intro to anyone who has not read it, whatever is already saved on the wallet", () => {
+    // The old rule skipped step 1 whenever a method existed, so a vendor whose
+    // wallet carried a card from the old flow was never shown the charge rules.
+    const carriedOver = method({ fundingMethodId: 12, card: { brand: "Amex", last4: "6800", expMonth: 12, expYear: 2028 } });
+    expect(derive(wallet({ fundingMethods: [carriedOver] }))).toMatchObject({ step: "intro", furthestStep: "intro", reachableSteps: ["intro"] });
+    expect(derive(wallet({ fundingMethods: [carriedOver, BANK] }))).toMatchObject({ step: "intro", furthestStep: "intro" });
+    // Reading it is the only thing that moves the flow on, and it stays read.
+    expect(derive(wallet({ fundingMethods: [carriedOver] }), started())).toMatchObject({ step: "source", suggestedSourceMethodId: 12 });
   });
 
   it("ignores an expired, archived or pending card as backup", () => {
     const expired = method({ fundingMethodId: 11, card: { brand: "Visa", last4: "1111", expMonth: 1, expYear: 2026 } });
-    expect(derive(wallet({ fundingMethods: [BANK, expired] }), draft({ sourceMethodId: 30, floorCents: 25_000, backupMethodId: 11 }))).toMatchObject({ step: "backup", backup: null });
-    expect(derive(wallet({ fundingMethods: [BANK, { ...CARD, status: "archived" }] }), draft({ sourceMethodId: 30, floorCents: 25_000, backupMethodId: 10 })).step).toBe("backup");
-    expect(derive(wallet({ fundingMethods: [BANK, { ...CARD, status: "setup_pending" }] }), draft({ sourceMethodId: 30, floorCents: 25_000, backupMethodId: 10 })).step).toBe("backup");
+    expect(derive(wallet({ fundingMethods: [BANK, expired] }), started({ sourceMethodId: 30, floorCents: 25_000, backupMethodId: 11 }))).toMatchObject({ step: "backup", backup: null });
+    expect(derive(wallet({ fundingMethods: [BANK, { ...CARD, status: "archived" }] }), started({ sourceMethodId: 30, floorCents: 25_000, backupMethodId: 10 })).step).toBe("backup");
+    expect(derive(wallet({ fundingMethods: [BANK, { ...CARD, status: "setup_pending" }] }), started({ sourceMethodId: 30, floorCents: 25_000, backupMethodId: 10 })).step).toBe("backup");
   });
 
   it("ends the flow in manage, with the deposit step only for a bank source below the floor", () => {
@@ -143,6 +166,59 @@ describe("deriveWalletFlow", () => {
     expect(describeAcknowledgementBanner({ feeChange: null, onboarding: true })).toBe("Please review and confirm your auto-reload terms. Nothing changes until you confirm. You cannot activate until you do.");
     expect(describeAcknowledgementBanner({ feeChange: { recordedBps: 300, currentBps: 350 }, onboarding: false })).toContain("automatic top-ups and covers stay at 3%; money you add yourself shows the current fee on Stripe's page");
     expect(describeAcknowledgementBanner({ feeChange: { recordedBps: 300, currentBps: 250 }, onboarding: false })).toContain("Automatic charges already use the lower rate");
+  });
+
+  it("reports how far the flow reached and which steps that makes reachable", () => {
+    expect(derive(wallet())).toMatchObject({ step: "intro", furthestStep: "intro", reachableSteps: ["intro"] });
+    expect(derive(wallet(), started())).toMatchObject({ furthestStep: "source", reachableSteps: ["intro", "source"] });
+    expect(derive(wallet({ fundingMethods: [BANK] }), started({ sourceMethodId: 30 }))).toMatchObject({ furthestStep: "floor", reachableSteps: ["intro", "source", "floor"] });
+    expect(derive(wallet({ fundingMethods: [BANK, CARD] }), started({ sourceMethodId: 30, floorCents: 25_000, backupMethodId: 10 })))
+      .toMatchObject({ furthestStep: "authorize", reachableSteps: ["intro", "source", "floor", "backup", "authorize"] });
+    // Past authorization the choices belong to the server: only the rules and
+    // the review stay open, so step 6 cannot reopen step 2 and edit a dead draft.
+    expect(derive(doneWallet(), started({ deposit: "pending" }))).toMatchObject({ furthestStep: "deposit", reachableSteps: ["intro", "authorize", "deposit"] });
+    expect(derive(doneWallet(), started({ deposit: "pending", stepOverride: "source" })).step).toBe("deposit");
+    expect(derive(doneWallet(), started({ deposit: "pending", stepOverride: "authorize" })).step).toBe("authorize");
+    // Manage has no steps at all, so nothing is reachable and nothing is current.
+    expect(derive(doneWallet(), draft({ stepOverride: "source" }), "active")).toMatchObject({ mode: "manage", step: null, furthestStep: null, reachableSteps: [] });
+  });
+
+  it("marks a step done only when it is behind the flow, and the intro only once it has been read", () => {
+    const seen = { current: "backup" as const, furthestStep: "backup" as const, seenIntro: true };
+    expect(STEP_ORDER.map((step) => walletStepState(step, seen))).toEqual(["done", "done", "done", "current", "later", "later"]);
+    // Revisiting step 2 keeps step 3's result on screen instead of greying it out.
+    expect(STEP_ORDER.map((step) => walletStepState(step, { ...seen, current: "source" }))).toEqual(["done", "current", "done", "later", "later", "later"]);
+    // A vendor carried past step 1 by an authorized plan never sees a tick for a page they were not shown.
+    const unseen = { current: "deposit" as const, furthestStep: "deposit" as const, seenIntro: false };
+    expect(walletStepState("intro", unseen)).toBe("later");
+    expect(walletStepState("intro", { ...unseen, seenIntro: true })).toBe("done");
+    expect(walletStepState("intro", { current: "intro", furthestStep: "intro", seenIntro: false })).toBe("current");
+    expect(walletStepState("source", unseen)).toBe("done");
+  });
+
+  it("shows the step the vendor asked for when it is reachable, and ignores any other override", () => {
+    const w = wallet({ fundingMethods: [BANK, CARD] });
+    const reached = started({ sourceRail: "stripe_ach", sourceMethodId: 30, floorCents: 25_000 });
+    expect(derive(w, reached).step).toBe("backup");
+    for (const step of ["intro", "source", "floor", "backup"] as WalletFlowStep[]) {
+      expect(derive(w, { ...reached, stepOverride: step })).toMatchObject({ step, furthestStep: "backup" });
+    }
+    // Ahead of the flow, or not a step at all: ignored, never an error — the vendor stays where the flow left them.
+    expect(derive(w, { ...reached, stepOverride: "authorize" }).step).toBe("backup");
+    expect(derive(w, { ...reached, stepOverride: "deposit" }).step).toBe("backup");
+    expect(derive(w, { ...reached, stepOverride: "nowhere" as unknown as WalletFlowStep }).step).toBe("backup");
+    // An override held over from earlier in the flow stops being reachable when its value is cleared.
+    expect(derive(w, { ...reached, floorCents: null, stepOverride: "backup" })).toMatchObject({ step: "floor", furthestStep: "floor" });
+    // The intro is reachable from everywhere in the flow, whether or not it was ever shown.
+    const anywhere: Array<[DropshipWalletView, WalletDraft]> = [[wallet(), draft()], [w, reached], [wallet(), started()], [doneWallet(), started({ deposit: "pending" })], [doneWallet(), draft({ deposit: "pending" })]];
+    for (const [anyWallet, anyDraft] of anywhere) expect(derive(anyWallet, anyDraft).reachableSteps[0]).toBe("intro");
+    expect(derive(doneWallet(), draft({ deposit: "pending", stepOverride: "intro" }))).toMatchObject({ step: "intro", furthestStep: "deposit" });
+  });
+
+  it("numbers the steps and walks back through them", () => {
+    expect([...STEP_ORDER]).toEqual(["intro", "source", "floor", "backup", "authorize", "deposit"]);
+    expect(STEP_ORDER.map(walletStepNumber)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(STEP_ORDER.map(previousWalletStep)).toEqual([null, "intro", "source", "floor", "backup", "authorize"]);
   });
 
   it("follows a hand-set cap when the floor changes in manage", () => {
@@ -216,6 +292,15 @@ describe("draft and redirects", () => {
     expect(parseWalletDraft(JSON.stringify(draft({ pendingStripe: { rail: "stripe_ach", purpose: "source", knownMethods: [], ledgerMark: null, startedAt: STAMP, expiresAt: "soon" } })))).toBeNull();
   });
 
+  it("reads a draft written before step navigation existed, and drops an unreadable override rather than the draft", () => {
+    // Exactly what v1 wrote before `stepOverride`: it still parses, with no override and every choice intact.
+    const legacy = { v: 1, seenIntro: true, sourceRail: "stripe_ach", sourceMethodId: 30, floorCents: 25_000, dailyCostCents: 2_000, backupMethodId: 10, pendingStripe: null, deposit: null };
+    expect(parseWalletDraft(JSON.stringify(legacy))).toEqual({ ...legacy, stepOverride: null });
+    expect(parseWalletDraft(JSON.stringify({ ...legacy, stepOverride: "floor" }))).toMatchObject({ stepOverride: "floor", floorCents: 25_000 });
+    expect(parseWalletDraft(JSON.stringify({ ...legacy, stepOverride: "nowhere" }))).toEqual({ ...legacy, stepOverride: null });
+    expect(parseWalletDraft(JSON.stringify({ ...legacy, stepOverride: 3 }))).toEqual({ ...legacy, stepOverride: null });
+  });
+
   it("falls back to an in-memory draft when storage throws", () => {
     const store = new Map<string, string>();
     const storage = { getItem: (key: string) => store.get(key) ?? null, setItem: (key: string, value: string) => { store.set(key, value); }, removeItem: (key: string) => { store.delete(key); } };
@@ -258,6 +343,56 @@ describe("draft and redirects", () => {
     expect(resolveStripeReturn(depositPending, ledgered)).toEqual({ kind: "deposit_seen" });
     const marked = buildPendingStripe({ rail: "stripe_ach", purpose: "deposit", wallet: ledgered, startedAt: NOW, expiresAt: null });
     expect(resolveStripeReturn(marked, ledgered)).toBeNull();
+  });
+});
+
+describe("moving through the flow", () => {
+  const reached = draft({ seenIntro: true, sourceRail: "stripe_ach", sourceMethodId: 30, floorCents: 25_000, dailyCostCents: 2_000, backupMethodId: 10, stepOverride: "source" });
+
+  it("clicking a step changes only where the vendor is", () => {
+    const before = { ...reached };
+    expect(draftAtStep(reached, "floor")).toEqual({ ...reached, stepOverride: "floor" });
+    expect(draftAtStep(reached, "intro")).toEqual({ ...reached, stepOverride: "intro" });
+    expect(reached).toEqual(before);
+  });
+
+  it("records the intro once and sends the vendor back to where the flow was", () => {
+    expect(draftAfterIntro(draft({ stepOverride: "intro" }))).toEqual(draft({ seenIntro: true }));
+    // A revisit withdraws nothing: every choice, and `seenIntro` itself, survive.
+    expect(draftAfterIntro({ ...reached, stepOverride: "intro" })).toEqual({ ...reached, stepOverride: null });
+  });
+
+  it("keeps every downstream value on a Continue that changes nothing, and clears the floor only when the rail changes", () => {
+    const bank31 = method({ fundingMethodId: 31, rail: "stripe_ach" });
+    // Same method: the floor, the backup card and the daily cost all stand; only the override is released.
+    expect(draftAfterSourceChoice(reached, BANK, BANK)).toEqual({ ...reached, stepOverride: null });
+    // Another account on the same rail: the floor still means the same thing.
+    expect(draftAfterSourceChoice(reached, bank31, BANK)).toEqual({ ...reached, stepOverride: null, sourceMethodId: 31 });
+    // A different rail: the floor is rail-specific, so it is re-asked; the backup card is not.
+    expect(draftAfterSourceChoice(reached, CARD, BANK)).toEqual({ ...reached, stepOverride: null, sourceMethodId: 10, sourceRail: "stripe_card", floorCents: null });
+    // First pick: nothing saved to compare against, so nothing to clear.
+    expect(draftAfterSourceChoice(draft({ seenIntro: true }), BANK, null)).toEqual(draft({ seenIntro: true, sourceMethodId: 30, sourceRail: "stripe_ach" }));
+    const before = { ...reached };
+    draftAfterSourceChoice(reached, CARD, BANK);
+    expect(reached).toEqual(before);
+  });
+
+  it("saves the floor and the backup card without touching anything else", () => {
+    expect(draftAfterFloorChoice(reached, 25_000, 2_000)).toEqual({ ...reached, stepOverride: null });
+    expect(draftAfterFloorChoice(reached, 50_000, null)).toEqual({ ...reached, stepOverride: null, floorCents: 50_000, dailyCostCents: null });
+    expect(() => draftAfterFloorChoice(reached, -1, null)).toThrow(RangeError);
+    expect(() => draftAfterFloorChoice(reached, 25_000.5, null)).toThrow(RangeError);
+    expect(() => draftAfterFloorChoice(reached, 25_000, -1)).toThrow(RangeError);
+    expect(draftAfterBackupChoice(reached, CARD)).toEqual({ ...reached, stepOverride: null });
+    expect(draftAfterBackupChoice(reached, method({ fundingMethodId: 11 }))).toEqual({ ...reached, stepOverride: null, backupMethodId: 11 });
+  });
+
+  it("lands a Continue back on the step the choices reach, not the one that was revisited", () => {
+    const w = wallet({ fundingMethods: [BANK, CARD] });
+    const revisiting = { ...reached, backupMethodId: null, stepOverride: "source" as const };
+    expect(derive(w, revisiting).step).toBe("source");
+    const afterContinue = draftAfterSourceChoice(revisiting, BANK, BANK);
+    expect(derive(w, afterContinue)).toMatchObject({ step: "backup", furthestStep: "backup", floorCents: 25_000 });
   });
 });
 
@@ -308,6 +443,21 @@ describe("copy", () => {
     expect(describeRoleGap("backupCard", { holdTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120 })).toContain("we email you 2 hours before");
     expect(describeRoleGap("backupCard", { holdTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120 })).not.toContain("ending in");
     expect(describeRoleGap("source", { holdTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120 })).toContain("Held orders are still covered by your backup card.");
+  });
+
+  it("says why a source is preselected, and claims a half-finished setup only when there is one", () => {
+    const suggestion = { selected: CARD, draftSourceMethodId: null, suggestedSourceMethodId: 10, justAdded: false };
+    // Nothing was chosen before: say what is true — it is already on the wallet — and name the other rail.
+    expect(describeSourcePreselection(suggestion)).toBe("Visa ending in 4242 is already saved on your wallet, so we picked it — choose a bank account instead if you would rather.");
+    expect(describeSourcePreselection({ ...suggestion, selected: BANK, suggestedSourceMethodId: 30 }))
+      .toBe("Chase ending in 1234 is already saved on your wallet, so we picked it — choose a card instead if you would rather.");
+    // A choice they really did make earlier.
+    expect(describeSourcePreselection({ ...suggestion, draftSourceMethodId: 10 })).toBe("Pick up where you left off: Visa ending in 4242 is the source you chose earlier.");
+    // Nothing to say: no selection, a method Stripe has just announced, or a selection that is neither.
+    expect(describeSourcePreselection({ ...suggestion, selected: null })).toBeNull();
+    expect(describeSourcePreselection({ ...suggestion, justAdded: true })).toBeNull();
+    expect(describeSourcePreselection({ ...suggestion, suggestedSourceMethodId: 30 })).toBeNull();
+    expect(describeSourcePreselection({ ...suggestion, draftSourceMethodId: 30 })).toBeNull();
   });
 
   it("labels methods and ledger reasons", () => {
