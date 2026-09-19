@@ -4824,6 +4824,155 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     }
   });
 
+  it("keeps a refunded source line while materializing only other lines in the same label", async () => {
+    const validSourceId = await seedCommercialFulfillmentAuthoritySource(pool, "SKU-REFUND-OTHER-LINES", 9);
+    const lineage = (await pool.query<{
+      shipment_id: number;
+      wms_order_id: number;
+      oms_order_id: string;
+    }>(`
+      SELECT shipment_item.shipment_id,
+        order_item.order_id AS wms_order_id,
+        oms_line.order_id::text AS oms_order_id
+      FROM wms.outbound_shipment_items AS shipment_item
+      JOIN wms.order_items AS order_item ON order_item.id = shipment_item.order_item_id
+      JOIN oms.oms_order_lines AS oms_line ON oms_line.id = order_item.oms_order_line_id
+      WHERE shipment_item.id = $1::integer
+    `, [validSourceId])).rows[0];
+    const refundedOmsLine = await pool.query<{ id: string }>(`
+      INSERT INTO oms.oms_order_lines (
+        order_id, external_line_item_id, fulfillment_provider,
+        paid_quantity, authority_fulfillable_quantity, refunded_quantity
+      ) VALUES ($1::bigint, 'gid://shopify/LineItem/640003', 'shopify', 1, 0, 1)
+      RETURNING id::text AS id
+    `, [lineage.oms_order_id]);
+    const refundedWmsLine = await pool.query<{ id: number }>(`
+      INSERT INTO wms.order_items (order_id, oms_order_line_id, sku, quantity)
+      VALUES ($1::integer, $2::bigint, 'SKU-REFUNDED', 1)
+      RETURNING id
+    `, [lineage.wms_order_id, refundedOmsLine.rows[0].id]);
+    const refundedSource = await pool.query<{ id: number }>(`
+      INSERT INTO wms.outbound_shipment_items (
+        shipment_id, order_item_id, shipment_item_purpose, qty, commercial_requested_qty
+      ) VALUES ($1::integer, $2::integer, 'customer_fulfillment', 1, 0)
+      RETURNING id
+    `, [lineage.shipment_id, refundedWmsLine.rows[0].id]);
+    const refundedSourceId = refundedSource.rows[0].id;
+    await seedOutboundBusinessShipmentLabel(pool, {
+      providerPhysicalShipmentId: "44001",
+      trackingNumber: "1Z0000000000044001",
+      labelStatus: "active",
+      ordinal: 44001,
+    });
+
+    const repository = new PgPackageAllocationLedgerRepository(pool);
+    const facts = await repository.withSerializableTransaction((transaction) =>
+      transaction.readSourceFacts([validSourceId, refundedSourceId]));
+    expect(facts.map((fact) => ({ id: fact.sourceWmsShipmentItemId, cap: fact.commercialRequestedQuantity })))
+      .toEqual([
+        { id: validSourceId, cap: undefined },
+        { id: refundedSourceId, cap: 0 },
+      ].sort((left, right) => left.id - right.id));
+
+    const base = commandFor(validSourceId);
+    const persisted = await new PackageAllocationPlanningService(repository).persist({
+      ...base,
+      sourceLines: [
+        { wmsShipmentItemId: validSourceId, sourceQuantity: 9,
+          physicalConsumptionAuthorityQuantity: 9, authorityVersion: 1 },
+        { wmsShipmentItemId: refundedSourceId, sourceQuantity: 1, commercialRequestedQuantity: 0,
+          physicalConsumptionAuthorityQuantity: 1, authorityVersion: 1 },
+      ],
+      packages: [{
+        ...base.packages[0],
+        lifecycle: {
+          provider: "shipstation",
+          providerPhysicalShipmentId: "44001",
+          events: [{
+            kind: "outbound_label_observed",
+            eventKey: "shipstation:44001:observed",
+            observedAt: "2026-08-22T14:00:00.000Z",
+            providerOccurredAt: "2026-08-22T13:59:50.000Z",
+            trackingNumber: "1Z0000000000044001",
+            contentsEvidence: { status: "authoritative", lines: [
+              { wmsShipmentItemId: validSourceId, quantity: 9 },
+              { wmsShipmentItemId: refundedSourceId, quantity: 1 },
+            ] },
+          }],
+        },
+      }],
+    });
+    expect(persisted.plannerResult.state.desiredEffectIntents.filter((intent) =>
+      intent.effectType === "commercial_fulfillment").map((intent) =>
+      ({ sourceId: intent.wmsShipmentItemId, quantity: intent.quantity })))
+      .toEqual([{ sourceId: validSourceId, quantity: 9 }]);
+
+    const fulfillment = createChannelFulfillmentAuthorityRepository(getTestDb());
+    const materialized = await fulfillment.materializePackageAllocationCommercialFulfillment({
+      packageAllocationPlanId: persisted.planId!, source: "integration:refund-line-isolation",
+    });
+    expect(materialized).toMatchObject({ customerFulfillmentItemCount: 1 });
+    expect(materialized.channelCommands).toHaveLength(1);
+    const commandItems = await pool.query<{ source_id: number; quantity_pushed: number }>(`
+      SELECT source.source_wms_shipment_item_id AS source_id, push_item.quantity_pushed
+      FROM oms.channel_fulfillment_push_items AS push_item
+      JOIN wms.package_allocation_effect_intents AS intent
+        ON intent.id = push_item.package_allocation_effect_intent_id
+      JOIN wms.package_allocation_source_lines AS source
+        ON source.id = intent.package_allocation_source_line_id
+    `);
+    expect(commandItems.rows).toEqual([{ source_id: validSourceId, quantity_pushed: 9 }]);
+    expect((await pool.query("SELECT id FROM wms.outbound_shipment_items WHERE id = $1", [refundedSourceId])).rowCount).toBe(1);
+  });
+
+  it("materializes only the authorized portion of a partly canceled source line", async () => {
+    const sourceId = await seedCommercialFulfillmentAuthoritySource(pool, "SKU-PARTIAL-COMMERCIAL", 2);
+    await pool.query(
+      "UPDATE wms.outbound_shipment_items SET commercial_requested_qty = 1 WHERE id = $1",
+      [sourceId],
+    );
+    await pool.query(`
+      UPDATE oms.oms_order_lines AS line
+      SET authority_fulfillable_quantity = 1, cancelled_quantity = 1
+      FROM wms.order_items AS order_item
+      JOIN wms.outbound_shipment_items AS shipment_item ON shipment_item.order_item_id = order_item.id
+      WHERE shipment_item.id = $1::integer AND line.id = order_item.oms_order_line_id
+    `, [sourceId]);
+    await seedOutboundBusinessShipmentLabel(pool, {
+      providerPhysicalShipmentId: "44001",
+      trackingNumber: "1Z0000000000044001",
+      labelStatus: "active",
+      ordinal: 44001,
+    });
+    const base = commandFor(sourceId);
+    const persisted = await new PackageAllocationPlanningService(
+      new PgPackageAllocationLedgerRepository(pool),
+    ).persist({
+      ...base,
+      sourceLines: [{
+        wmsShipmentItemId: sourceId,
+        sourceQuantity: 2,
+        commercialRequestedQuantity: 1,
+        physicalConsumptionAuthorityQuantity: 2,
+        authorityVersion: 1,
+      }],
+    });
+    const materialized = await createChannelFulfillmentAuthorityRepository(getTestDb())
+      .materializePackageAllocationCommercialFulfillment({
+        packageAllocationPlanId: persisted.planId!, source: "integration:partial-commercial-isolation",
+      });
+    expect(materialized).toMatchObject({ customerFulfillmentItemCount: 1 });
+    const commands = await pool.query<{ quantity_pushed: number; quantity_shipped: number }>(`
+      SELECT push_item.quantity_pushed, physical_item.quantity_shipped
+      FROM oms.channel_fulfillment_push_items AS push_item
+      JOIN wms.physical_shipment_items AS physical_item
+        ON physical_item.id = push_item.physical_shipment_item_id
+    `);
+    expect(commands.rows).toEqual([{ quantity_pushed: 1, quantity_shipped: 1 }]);
+    expect((await pool.query("SELECT qty FROM wms.outbound_shipment_items WHERE id = $1", [sourceId])).rows)
+      .toEqual([{ qty: 2 }]);
+  });
+
   it.each([false, true])("executes exact B/C split quantities and replays without duplicates (stored Shopify mapping: %s)", async (storedShopifyMapping) => {
     const sourceId = await seedCommercialFulfillmentAuthoritySource(
       pool,

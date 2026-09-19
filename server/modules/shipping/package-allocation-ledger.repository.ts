@@ -713,6 +713,22 @@ class PgPackageAllocationLedgerTransaction
                AND split_item.id <> shipment_item.id
            ), 0::bigint)
          ) AS source_quantity,
+         CASE WHEN shipment_item.commercial_requested_qty IS NOT NULL
+           OR EXISTS (
+             SELECT 1
+             FROM wms.outbound_shipment_items AS split_item
+             WHERE split_item.split_root_shipment_item_id = shipment_item.id
+               AND split_item.id <> shipment_item.id
+               AND split_item.commercial_requested_qty IS NOT NULL
+           )
+         THEN COALESCE(shipment_item.commercial_requested_qty, shipment_item.qty)::bigint
+           + COALESCE((
+             SELECT SUM(COALESCE(split_item.commercial_requested_qty, split_item.qty))::bigint
+             FROM wms.outbound_shipment_items AS split_item
+             WHERE split_item.split_root_shipment_item_id = shipment_item.id
+               AND split_item.id <> shipment_item.id
+           ), 0::bigint)
+         ELSE NULL END AS commercial_requested_quantity,
          shipment_item.shipment_item_purpose,
          shipment_item.order_item_id,
          shipment_item.replacement_for_order_item_id,
@@ -748,6 +764,9 @@ class PgPackageAllocationLedgerTransaction
         sourceWmsShipmentItemId: positiveInteger(row.source_wms_shipment_item_id, "source_wms_shipment_item_id"),
         shipmentRequestItemId: optionalBigintText(row.shipment_request_item_id, "shipment_request_item_id"),
         sourceQuantity: positiveInteger(row.source_quantity, "source_quantity"),
+        ...(row.commercial_requested_quantity == null ? {} : {
+          commercialRequestedQuantity: nonnegativeInteger(row.commercial_requested_quantity, "commercial_requested_quantity"),
+        }),
         shipmentItemPurpose: requiredText(row.shipment_item_purpose, "shipment_item_purpose") as PackageAllocationSourceFacts["shipmentItemPurpose"],
         orderItemId: nullablePositiveInteger(row.order_item_id, "order_item_id"),
         replacementForOrderItemId: nullablePositiveInteger(row.replacement_for_order_item_id, "replacement_for_order_item_id"),

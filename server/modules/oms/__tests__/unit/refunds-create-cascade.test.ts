@@ -291,7 +291,7 @@ describe("applyShopifyRefundCascade", () => {
           ],
         };
       }
-      if (text.includes("DELETE FROM wms.outbound_shipment_items")) return { rows: [] };
+      if (text.includes("UPDATE wms.outbound_shipment_items")) return { rows: [] };
       if (text.includes("FROM wms.outbound_shipments os") && text.includes("terminal_provider_sibling")) {
         return {
           rows: [{
@@ -337,7 +337,8 @@ describe("applyShopifyRefundCascade", () => {
       "refund_retired_provider_covered_shipment",
       expect.objectContaining({ skipEngineCancel: true }),
     );
-    expect(mock.calls.filter((text) => text.includes("DELETE FROM wms.outbound_shipment_items"))).toHaveLength(2);
+    expect(mock.calls.filter((text) => text.includes("SET commercial_requested_qty ="))).toHaveLength(2);
+    expect(mock.calls.some((text) => text.includes("DELETE FROM wms.outbound_shipment_items"))).toBe(false);
     expect(mock.calls.some((text) => text.includes("SET qty = 0"))).toBe(false);
     expect(mock.calls.some((text) => text.includes("INSERT INTO wms.returns"))).toBe(false);
     const counterRefreshIndex = mock.calls.findIndex(
@@ -358,6 +359,78 @@ describe("applyShopifyRefundCascade", () => {
         authorizationStatus: "refunded",
       }),
     }));
+  });
+
+  it("preserves a picked refunded source while repushing unrelated commercial lines", async () => {
+    const original = omsLine({
+      paid_quantity: 1,
+      channel_observed_quantity: 1,
+      authority_fulfillable_quantity: 1,
+    });
+    const refunded = omsLine({
+      paid_quantity: 1,
+      channel_observed_quantity: 1,
+      authority_fulfillable_quantity: 0,
+      refund_other_quantity: 1,
+      refunded_quantity: 1,
+      authorization_status: "refunded",
+    });
+    const mock = makeDb((text) => {
+      if (text.includes("FROM wms.orders") && text.includes("ORDER BY id")) return { rows: [{ id: 42 }] };
+      if (text.includes("pg_advisory_xact_lock")) return { rows: [] };
+      if (text.includes("FROM oms.oms_order_lines ol") && text.includes("FOR UPDATE OF ol")) return { rows: [original] };
+      if (text.includes("INSERT INTO oms.order_line_adjustments")) return { rows: [{ id: 1 }] };
+      if (text.includes("LEFT JOIN oms.order_line_adjustments")) return { rows: [refunded] };
+      if (text.includes("UPDATE oms.oms_order_lines")) return { rows: [] };
+      if (text.includes("FROM wms.order_items wi") && text.includes("FOR UPDATE OF wi")) {
+        return { rows: [{
+          id: 700,
+          oms_order_line_id: 110466,
+          external_line_item_id: "441680952",
+          quantity: 1,
+          product_id: 9,
+          picked_quantity: 1,
+          fulfilled_quantity: 0,
+          status: "picked",
+          short_reason: null,
+          on_hold: false,
+          requires_shipping: true,
+        }] };
+      }
+      if (text.includes("UPDATE wms.order_items")) return { rows: [] };
+      if (text.includes("UPDATE wms.orders o")) return { rows: [] };
+      if (text.includes("wms_materialized_quantity = COALESCE(materialized.quantity, 0)")) return { rows: [] };
+      if (text.includes("FROM wms.outbound_shipment_items si") && text.includes("FOR UPDATE OF si, os")) {
+        return { rows: [
+          { shipment_item_id: 701, shipment_id: 800, order_item_id: 700, current_quantity: 1, remaining_demand: 0 },
+          { shipment_item_id: 702, shipment_id: 800, order_item_id: 701, current_quantity: 9, remaining_demand: 9 },
+        ] };
+      }
+      if (text.includes("UPDATE wms.outbound_shipment_items")) return { rows: [] };
+      if (text.includes("FROM wms.outbound_shipments os") && text.includes("terminal_provider_sibling")) {
+        return { rows: [{ id: 800, status: "queued", remaining_quantity: 9, terminal_provider_sibling: false }] };
+      }
+      throw new Error(`Unexpected SQL in mixed-line refund test: ${text}`);
+    });
+    const serviceHelpers = helpers({
+      reconcileRefundOrderDemand: vi.fn(async () => ({ releasedReservationQuantity: 0 })),
+    });
+
+    const result = await applyShopifyRefundCascade(
+      mock.db,
+      refundPayload({
+        refund_line_items: [{ line_item_id: 441680952, quantity: 1, restock_type: "no_restock" }],
+      }),
+      serviceHelpers,
+      { channelId: 36, now: NOW },
+    );
+
+    expect(result.repushedShipments).toBe(1);
+    expect(serviceHelpers.pushShipment).toHaveBeenCalledWith(800);
+    expect(mock.calls.some((text) => text.includes("SET commercial_requested_qty ="))).toBe(true);
+    expect(mock.calls.some((text) => text.includes("DELETE FROM wms.outbound_shipment_items"))).toBe(false);
+    expect(mock.calls.some((text) => text.includes("UPDATE wms.outbound_shipments") && text.includes("requires_review = true"))).toBe(false);
+    expect(mock.calls.some((text) => text.includes("UPDATE wms.order_items") && text.includes("short_reason"))).toBe(true);
   });
 
   it("submits every line from one refund through one grouped demand reconciliation", async () => {

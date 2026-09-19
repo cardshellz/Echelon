@@ -1045,17 +1045,19 @@ async function loadPackageAllocationCommercialEntries(
             OR package_intent.effect_type = 'carrier_tracking'
           )
       )
-    ORDER BY binding.provider, binding.provider_physical_shipment_id,
+    ORDER BY business.business_shipment_recognized_at,
+      binding.provider, binding.provider_physical_shipment_id,
       source.source_wms_shipment_item_id, entry.id
   `));
   const totals = new Map<string, number>();
-  const entries = rows.map((row): PackageAllocationCommercialEntry => {
+  const remainingByIntent = new Map(intents.map((intent) => [intent.id, intent.quantity]));
+  const entries = rows.flatMap((row): PackageAllocationCommercialEntry[] => {
     const id = bigintTextOrNull(row.id);
     const sourceId = bigintTextOrNull(row.package_allocation_source_line_id);
     const bindingId = bigintTextOrNull(row.package_allocation_package_binding_id);
     const intentId = bigintTextOrNull(row.package_allocation_effect_intent_id);
     const sourceWmsShipmentItemId = asPositiveInteger(row.source_wms_shipment_item_id);
-    const quantity = asPositiveInteger(row.quantity);
+    const physicalQuantity = asPositiveInteger(row.quantity);
     const provider = normalizedNullable(row.provider)?.toLowerCase() ?? null;
     const providerPhysicalShipmentId = normalizedNullable(row.provider_physical_shipment_id);
     const trackingNumber = normalizedNullable(row.tracking_number);
@@ -1064,7 +1066,7 @@ async function loadPackageAllocationCommercialEntries(
     const intent = intentId ? intentById.get(intentId) : undefined;
     if (
       !id || !sourceId || !bindingId || !intentId
-      || !sourceWmsShipmentItemId || !quantity
+      || !sourceWmsShipmentItemId || !physicalQuantity
       || !provider || !providerPhysicalShipmentId || !trackingNumber || !carrier
       || !recognizedAt || !intent
       || intent.packageAllocationSourceLineId !== sourceId
@@ -1079,8 +1081,14 @@ async function loadPackageAllocationCommercialEntries(
         { packageAllocationPlanId, allocationEntryId: row.id },
       );
     }
+    // A refund can reduce commercial authority without erasing the provider's
+    // immutable physical allocation. Materialize only the intent's approved
+    // subset, in a stable package order, and leave the other units as evidence.
+    const quantity = Math.min(physicalQuantity, remainingByIntent.get(intentId) ?? 0);
+    if (quantity === 0) return [];
+    remainingByIntent.set(intentId, (remainingByIntent.get(intentId) ?? 0) - quantity);
     totals.set(intentId, (totals.get(intentId) ?? 0) + quantity);
-    return Object.freeze({
+    return [Object.freeze({
       id,
       packageAllocationEffectIntentId: intentId,
       packageAllocationSourceLineId: sourceId,
@@ -1095,7 +1103,7 @@ async function loadPackageAllocationCommercialEntries(
       serviceCode: normalizedNullable(row.service_code),
       businessShipmentRecognizedAt: recognizedAt,
       quantity,
-    });
+    })];
   });
   for (const intent of intents) {
     const allocatedQuantity = totals.get(intent.id) ?? 0;

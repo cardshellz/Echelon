@@ -550,6 +550,10 @@ export const outboundShipmentItems = wmsSchema.table("outbound_shipment_items", 
   shipmentItemPurpose: varchar("shipment_item_purpose", { length: 30 }).notNull().default("customer_fulfillment"),
   productVariantId: integer("product_variant_id").references(() => productVariants.id),
   qty: integer("qty").notNull().default(1),
+  // Nullable for historical rows: NULL means the full physical source qty is
+  // still requested. Refunds can reduce this to zero without deleting the
+  // wms-item identity already present in a provider label.
+  commercialRequestedQty: integer("commercial_requested_qty"),
   fromLocationId: integer("from_location_id").references(() => warehouseLocations.id), // which bin it was picked from
   boxId: varchar("box_id", { length: 100 }), // WMS Cartonization assigned box
   weightOz: integer("weight_oz"), // Actual picked weight

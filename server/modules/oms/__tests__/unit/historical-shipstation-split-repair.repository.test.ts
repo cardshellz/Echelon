@@ -74,6 +74,7 @@ function sourceRow(overrides: Record<string, unknown> = {}) {
     shipment_item_purpose: "customer_fulfillment",
     product_variant_id: 4001,
     qty: 1,
+    commercial_requested_qty: null,
     from_location_id: 5001,
     box_id: null,
     weight_oz: null,
@@ -219,6 +220,36 @@ describe("historical ShipStation split repair repository guards", () => {
     const result = await repository.inspectPackages([packagePlan()]);
     expect(result.unsafe).toEqual([]);
     expect(result.repairableComponents).toHaveLength(1);
+  });
+
+  it("quarantines historical split repair when refund-adjusted commercial demand cannot be partitioned", async () => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("FROM wms.physical_shipments AS physical")) return { rows: [] };
+      if (sql.includes("LEFT JOIN wms.effective_physical_shipment_items AS physical_item")) {
+        return { rows: [sourceRow({ commercial_requested_qty: 0 })] };
+      }
+      if (sql.includes("WHERE external_fulfillment_id = $1")) {
+        return { rows: [{ id: 7101, order_id: 8001, status: "shipped", tracking_number: "9400150106151288520521" }] };
+      }
+      if (sql.includes("WHERE shipment_id = $1")) {
+        return { rows: [{
+          order_item_id: 3001,
+          replacement_for_order_item_id: null,
+          shipment_item_purpose: "customer_fulfillment",
+          product_variant_id: 4001,
+          qty: 1,
+        }] };
+      }
+      throw new Error(`Unexpected SQL: ${sql}`);
+    });
+    const repository = createHistoricalShipStationSplitRepairRepository({ query } as any);
+    const result = await repository.inspectPackages([packagePlan()]);
+    expect(result.repairableComponents).toEqual([]);
+    expect(result.unsafe).toContainEqual(expect.objectContaining({
+      code: "COMMERCIAL_SPLIT_AUTHORITY_UNPARTITIONED",
+      message: expect.stringContaining("cannot partition safely"),
+    }));
+    expect(source).toContain('"COMMERCIAL_SPLIT_AUTHORITY_UNPARTITIONED"');
   });
 
   it("recognizes a fully reshaped noncanonical target as resumable", async () => {
