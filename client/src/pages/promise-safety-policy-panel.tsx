@@ -9,8 +9,11 @@ import {
   updatePromiseSafetyPolicyDraftAdminRequestSchema,
   type PromiseSafetyAdminScope,
   type PromiseSafetyAdminView,
+  type PromiseSafetyPolicyHeadAdmin,
 } from "@shared/types/inventory-promise-safety-admin";
 import { z } from "zod";
+import { SafetyDefinitionReview } from "@/features/inventory-builds/SafetyDefinitionReview";
+import { fetchJson, HttpResponseError } from "./inventory-planning-http";
 import { RefreshCw, ShieldCheck } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -61,8 +64,15 @@ export function PromiseSafetyPolicyPanel({
     daysOfCover: "1",
     untrustedDemandFallbackUnits: "0",
   });
-  const [changeReason, setChangeReason] = useState("");
+  const changeReason = "Saved promise-safety draft from Procurement settings.";
+  const [editing, setEditing] = useState(false);
+  const capturedHead = useRef<PromiseSafetyPolicyHeadAdmin | null>(null);
+  const saveCommand = useRef<{ url: string; init: RequestInit } | null>(null);
+  const [saveUncertain, setSaveUncertain] = useState(false);
+  const [saveConflict, setSaveConflict] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [refreshReason, setRefreshReason] = useState("");
+  const [applyBlocked, setApplyBlocked] = useState(false);
 
   const viewQuery = useQuery<PromiseSafetyAdminView>({
     queryKey: ["/api/inventory-planning/admin/promise-safety", productId],
@@ -109,17 +119,18 @@ export function PromiseSafetyPolicyPanel({
   const scopeKey = scope ? promiseSafetyScopeKey(scope) : null;
 
   useEffect(() => {
-    if (!scope) return;
-    setForm(initialPromiseSafetyPolicyForm(scope, head));
-    setChangeReason("");
+    if (!scope || editing) return;
+    setForm(initialPromiseSafetyPolicyForm(scope, head ? { ...head, draftPolicy: null } : null));
     policyIdempotencyKey.current = null;
-  }, [head, scopeKey]);
+  }, [head, scopeKey, editing]);
 
   const parsedPolicy = scope ? parsePromiseSafetyPolicyForm(scope, form) : null;
 
   const savePolicy = useMutation({
     mutationFn: async () => {
       if (!canView || !canEdit) throw new Error("Inventory planning edit permission is required.");
+      if (saveCommand.current) return fetchJson(saveCommand.current.url, promiseSafetyPolicyDraftAdminResultSchema, saveCommand.current.init);
+      if (!editing || saveConflict) throw new Error("Open a current draft before saving.");
       if (!scope || !parsedPolicy?.success) {
         throw new Error(parsedPolicy && !parsedPolicy.success
           ? parsedPolicy.message
@@ -127,20 +138,18 @@ export function PromiseSafetyPolicyPanel({
       }
       const idempotencyKey = policyIdempotencyKey.current ?? crypto.randomUUID();
       policyIdempotencyKey.current = idempotencyKey;
-      if (head?.draftPolicy) {
+      const baseline = capturedHead.current;
+      if (baseline?.draftPolicy) {
         const request = updatePromiseSafetyPolicyDraftAdminRequestSchema.parse({
-          expectedVersion: head.draftPolicy.version,
-          expectedDefinitionHash: head.draftPolicy.definitionHash,
-          expectedHeadRevision: head.revision,
+          expectedVersion: baseline.draftPolicy.version,
+          expectedDefinitionHash: baseline.draftPolicy.definitionHash,
+          expectedHeadRevision: baseline.revision,
           value: parsedPolicy.value,
           changeReason,
           idempotencyKey,
         });
-        return requestJson(
-          `/api/inventory-planning/admin/promise-safety-policies/drafts/${head.draftPolicy.policyId}`,
-          promiseSafetyPolicyDraftAdminResultSchema,
-          jsonRequest("PUT", request),
-        );
+        saveCommand.current = { url: `/api/inventory-planning/admin/promise-safety-policies/drafts/${baseline.draftPolicy.policyId}`, init: jsonRequest("PUT", request) };
+        return fetchJson(saveCommand.current.url, promiseSafetyPolicyDraftAdminResultSchema, saveCommand.current.init);
       }
       const request = createPromiseSafetyPolicyDraftAdminRequestSchema.parse({
         scope,
@@ -148,15 +157,12 @@ export function PromiseSafetyPolicyPanel({
         changeReason,
         idempotencyKey,
       });
-      return requestJson(
-        "/api/inventory-planning/admin/promise-safety-policies/drafts",
-        promiseSafetyPolicyDraftAdminResultSchema,
-        jsonRequest("POST", request),
-      );
+      saveCommand.current = { url: "/api/inventory-planning/admin/promise-safety-policies/drafts", init: jsonRequest("POST", request) };
+      return fetchJson(saveCommand.current.url, promiseSafetyPolicyDraftAdminResultSchema, saveCommand.current.init);
     },
     onSuccess: async (result) => {
       policyIdempotencyKey.current = null;
-      setChangeReason("");
+      saveCommand.current = null; setEditing(false); setSaveUncertain(false); setSaveConflict(false); setSaveError(null);
       await Promise.all([
         queryClient.invalidateQueries({
           queryKey: ["/api/inventory-planning/admin/promise-safety", productId],
@@ -170,11 +176,14 @@ export function PromiseSafetyPolicyPanel({
         description: `Draft v${result.version} was recorded. Runtime ATP is unchanged.`,
       });
     },
-    onError: (error: Error) => toast({
-      title: "Safety draft was not saved",
-      description: error.message,
-      variant: "destructive",
-    }),
+    onError: (error: Error) => {
+      const rejected = error instanceof HttpResponseError && error.status >= 400 && error.status < 500;
+      setSaveUncertain(!rejected && saveCommand.current !== null);
+      setSaveConflict(rejected);
+      if (rejected) saveCommand.current = null;
+      setSaveError(rejected ? "The draft was rejected. Discard edits, reload, and review before saving again."
+        : saveCommand.current ? "Save outcome is unknown. Retry the identical saved command." : error.message);
+    },
   });
 
   const refreshEvidence = useMutation({
@@ -211,6 +220,7 @@ export function PromiseSafetyPolicyPanel({
   });
 
   const updateForm = (patch: Partial<PromiseSafetyPolicyForm>) => {
+    if (!editing || saveUncertain || saveConflict || savePolicy.isPending) return;
     setForm((current) => ({ ...current, ...patch }));
     policyIdempotencyKey.current = null;
   };
@@ -237,11 +247,11 @@ export function PromiseSafetyPolicyPanel({
         <p className="text-sm text-muted-foreground">
           Protect inventory before channel dials are applied. The most specific policy wins:
           warehouse/SKU, then SKU, then the business default. Values saved here are drafts used by
-          shadow planning only. This does not change the purchasing reorder buffer (safetyStockDays).
+          shadow planning only until reviewed and applied. This does not change the purchasing reorder buffer (safetyStockDays).
         </p>
       </CardHeader>
       <CardContent className="space-y-6">
-        <section className="space-y-3">
+        <fieldset disabled={applyBlocked || saveUncertain || savePolicy.isPending} className="min-w-0 space-y-3">
           <div className="grid gap-3 lg:grid-cols-3">
             <div className="space-y-2">
               <Label htmlFor="safety-scope-type">Policy scope</Label>
@@ -249,6 +259,7 @@ export function PromiseSafetyPolicyPanel({
                 id="safety-scope-type"
                 className="h-10 w-full rounded-md border bg-background px-3 text-sm"
                 value={scopeType}
+                disabled={editing}
                 onChange={(event) => setScopeType(event.target.value as ScopeType)}
               >
                 <option value="business">Business default</option>
@@ -263,6 +274,7 @@ export function PromiseSafetyPolicyPanel({
                   id="safety-variant"
                   className="h-10 w-full rounded-md border bg-background px-3 text-sm"
                   value={variantId ?? ""}
+                  disabled={editing}
                   onChange={(event) => setVariantId(event.target.value ? Number(event.target.value) : null)}
                 >
                   <option value="">Choose a SKU</option>
@@ -281,6 +293,7 @@ export function PromiseSafetyPolicyPanel({
                   id="safety-warehouse"
                   className="h-10 w-full rounded-md border bg-background px-3 text-sm"
                   value={warehouseId ?? ""}
+                  disabled={editing}
                   onChange={(event) => setWarehouseId(event.target.value ? Number(event.target.value) : null)}
                 >
                   <option value="">Choose a warehouse</option>
@@ -293,7 +306,13 @@ export function PromiseSafetyPolicyPanel({
               </div>
             )}
           </div>
-          <div className="grid gap-3 lg:grid-cols-3">
+          {canEdit && !editing && <Button variant="outline" onClick={() => {
+            if (!scope) return;
+            capturedHead.current = head ?? null; setForm(initialPromiseSafetyPolicyForm(scope, head));
+            setEditing(true); setSaveError(null); setSaveConflict(false); saveCommand.current = null;
+          }}>{head?.draftPolicy ? "Continue editing safety draft" : "Edit safety policy"}</Button>}
+          <p className="text-sm font-medium">{editing ? "Your changes — not live" : "Active policy"}</p>
+          <fieldset disabled={!editing || !canEdit || saveConflict} className="min-w-0 grid gap-3 lg:grid-cols-3">
             <div className="space-y-2">
               <Label htmlFor="safety-policy-mode">Safety method</Label>
               <select
@@ -349,7 +368,7 @@ export function PromiseSafetyPolicyPanel({
                 </div>
               </>
             )}
-          </div>
+          </fieldset>
           {form.policyMode === "days_of_cover" && (
             <div className="text-xs text-muted-foreground">
               Trusted demand uses the calculated days-of-cover floor. Untrusted, stale, or missing
@@ -374,33 +393,28 @@ export function PromiseSafetyPolicyPanel({
             </div>
           </div>
 
-          <div className="space-y-2">
-            <Label htmlFor="safety-change-reason">Change reason</Label>
-            <Textarea
-              id="safety-change-reason"
-              value={changeReason}
-              onChange={(event) => {
-                setChangeReason(event.target.value);
-                policyIdempotencyKey.current = null;
-              }}
-              placeholder="Why this safety floor is correct"
-              disabled={!canEdit}
-            />
-          </div>
+          {editing && <p className="text-xs text-muted-foreground">Audit note: {changeReason}</p>}
           {parsedPolicy && !parsedPolicy.success && (
             <div className="text-sm text-destructive">{parsedPolicy.message}</div>
           )}
           <Button
             type="button"
-            disabled={!canEdit || !scope || !parsedPolicy?.success || !changeReason.trim() || savePolicy.isPending}
+            disabled={!canEdit || !editing || saveConflict || !scope || !parsedPolicy?.success || savePolicy.isPending}
             onClick={() => savePolicy.mutate()}
           >
             <ShieldCheck className="mr-2 h-4 w-4" />
             {savePolicy.isPending ? "Saving draft…" : head?.draftPolicy ? "Update safety draft" : "Create safety draft"}
           </Button>
-        </section>
+          {editing && <Button variant="ghost" onClick={() => {
+            setEditing(false); setSaveConflict(false); setSaveError(null); saveCommand.current = null;
+            void viewQuery.refetch();
+          }}>{saveConflict ? "Discard edits and reload" : "Cancel safety edits"}</Button>}
+        </fieldset>
+        {saveError && <p role="alert" className="text-sm text-destructive">{saveError}</p>}
+        {saveUncertain && <Button onClick={() => savePolicy.mutate()} disabled={savePolicy.isPending}>Retry same safety save</Button>}
+        {!editing && scopeKey && <SafetyDefinitionReview head={head ?? null} scopeKey={scopeKey} onBlockedChange={setApplyBlocked} />}
 
-        <section className="space-y-3 border-t pt-5">
+        <fieldset disabled={applyBlocked} className="min-w-0 space-y-3 border-t pt-5">
           <div>
             <h3 className="font-semibold">Demand evidence</h3>
             <p className="text-sm text-muted-foreground">
@@ -436,7 +450,7 @@ export function PromiseSafetyPolicyPanel({
           </Button>
 
           <DemandEvidenceTable view={view} />
-        </section>
+        </fieldset>
 
         <section className="space-y-2 border-t pt-5">
           <h3 className="font-semibold">Recorded policy hierarchy</h3>

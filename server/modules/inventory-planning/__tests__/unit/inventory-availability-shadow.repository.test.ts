@@ -14,6 +14,8 @@ import {
 } from "../../domain/inventory-availability-planner";
 import {
   captureActiveSupplySnapshotInsideTransaction,
+  captureProductDraftReviewSnapshotInsideTransaction,
+  captureSafetyDraftReviewSnapshotInsideTransaction,
   InventoryAvailabilityShadowRepositoryError,
   PostgresInventoryAvailabilityShadowRepository,
 } from "../../infrastructure/inventory-availability-shadow.repository";
@@ -23,6 +25,28 @@ const CAPTURED_AT = "2026-08-27T12:00:00.000Z";
 const COMPLETED_AT = new Date("2026-08-27T12:00:01.000Z");
 
 describe("Postgres inventory availability shadow repository", () => {
+  it("selects only the named safety draft with active models and other policies", async () => {
+    const client = fakeSnapshotClient();
+    await captureSafetyDraftReviewSnapshotInsideTransaction(client as never, 10, "business");
+    const model = client.query.mock.calls.find(call => String(call[0]).includes("FROM inventory.transformation_model_heads"));
+    expect(String(model?.[0])).toContain("model.id = head.active_model_id");
+    const safety = client.query.mock.calls.find(call => String(call[0]).includes("FROM inventory.promise_safety_policy_heads"));
+    expect(String(safety?.[0])).toContain("CASE WHEN head.scope_key=$2 THEN head.draft_policy_id ELSE head.active_policy_id END");
+    const safetyCall = safety as unknown as [unknown, unknown[]] | undefined;
+    expect(safetyCall?.[1]).toEqual([expect.any(Array), "business"]);
+  });
+  it("uses only the reviewed product draft and keeps other products on active models", async () => {
+    const selected = fakeSnapshotClient();
+    await captureProductDraftReviewSnapshotInsideTransaction(selected as never, 10, 10);
+    const selectedModel = selected.query.mock.calls.find(call => String(call[0]).includes("FROM inventory.transformation_model_heads"));
+    expect(String(selectedModel?.[0])).toContain("head.draft_model_id");
+    const other = fakeSnapshotClient();
+    await captureProductDraftReviewSnapshotInsideTransaction(other as never, 10, 20);
+    const otherModel = other.query.mock.calls.find(call => String(call[0]).includes("FROM inventory.transformation_model_heads"));
+    expect(String(otherModel?.[0])).toContain("model.id = head.active_model_id");
+    expect(String(otherModel?.[0])).not.toContain("COALESCE(head.draft_model_id");
+  });
+
   it("captures runtime ATP from active heads only on the caller's transaction", async () => {
     const client = fakeSnapshotClient();
 

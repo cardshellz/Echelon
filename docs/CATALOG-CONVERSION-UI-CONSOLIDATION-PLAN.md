@@ -271,6 +271,11 @@ Phase 4: a migration test proving the rewritten constraint still rejects a
 
 ## Phase 1 implementation record — 2026-09-18
 
+Follow-up implementation: see [Product conversion Review and Apply](CATALOG-CONVERSION-REVIEW-APPLY-IMPLEMENTATION.md)
+for the local product-model Apply transaction, publication progress, and Inventory
+safety summary. The record below describes PR #1494, not that later branch.
+Expanded Phase 1 remains open for complete-scope Procurement safety-policy Apply.
+
 Status: **partially implemented; expanded Phase 1 is not complete** in the clean `codex/catalog-conversion-ui-consolidation-20260918`
 worktree from refreshed `origin/main` commit `c073e22d617c17d9dd7496c63ee8b8658e25163c`.
 Not committed, merged, deployed, or activated by this work. The original checkout's

@@ -10,6 +10,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { useAuth } from "@/lib/auth";
 import { prefillPathsFromModel, transformationRuntimeLabel } from "@/pages/supply-transformations-model";
 import { ProductBuildRelationships } from "./ProductBuildRelationships";
+import { ProductDefinitionReview } from "./ProductDefinitionReview";
 import {
   buildPackageLadder, updatePackageLadderDirection, type PackageDirection,
 } from "./package-conversion-ladder";
@@ -127,6 +128,7 @@ function AuthorizedConversionCard({ productId, inventoryStrategy, enabled, canEd
   const [error, setError] = useState<string | null>(null);
   const [conflict, setConflict] = useState(false);
   const [uncertain, setUncertain] = useState(false);
+  const [applyBlocked, setApplyBlocked] = useState(false);
   const pendingCommand = useRef<PackageConversionCommand | null>(null);
   const mutation = useMutation({
     mutationFn: savePackageConversionCommand,
@@ -243,7 +245,7 @@ function AuthorizedConversionCard({ productId, inventoryStrategy, enabled, canEd
               <ul className="mt-2 list-disc space-y-1 pl-5">{issues.map(issue => <li key={issue}>{issue}</li>)}</ul>
             </div>}
             {!canEdit && <p className="text-sm text-muted-foreground">View only. Inventory planning edit permission is required to change directions.</p>}
-            {canEdit && !edit && <Button variant="outline" disabled={issues.length > 0 || ladder.rows.length === 0 || query.isFetching}
+            {canEdit && !edit && <Button variant="outline" disabled={applyBlocked || issues.length > 0 || ladder.rows.length === 0 || query.isFetching}
               onClick={() => {
                 if (!query.data) return;
                 try { setEdit(beginPackageConversionEdit(query.data)); setMessage(null); setError(null); }
@@ -264,6 +266,7 @@ function AuthorizedConversionCard({ productId, inventoryStrategy, enabled, canEd
         </>}
         {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
         {message && <p role="status" className="text-sm text-green-700 dark:text-green-300">{message}</p>}
+        {!edit && view && <ProductDefinitionReview key={productId} view={view} onApplyBlockedChange={setApplyBlocked} />}
       </CardContent>
     </Card>
     {strategy === "recipe_managed" && <ProductBuildRelationships productId={productId} enabled={enabled} />}

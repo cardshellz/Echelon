@@ -25,6 +25,7 @@ import {
   loadManagedSellableVariantIds,
 } from "./inventory-channel-exposure-runtime.repository";
 import { captureActiveSupplySnapshotInsideTransaction } from "./inventory-availability-shadow.repository";
+import type { SupplySnapshotDto } from "@shared/types/inventory-availability-planner";
 import { assertInventoryCutoverFenceHeldInsideTransaction } from "./inventory-cutover-admission-fence.repository";
 import { InventoryChannelQuantityRuntimeService } from "../application/inventory-channel-quantity-runtime.service";
 
@@ -235,6 +236,30 @@ export function createTransactionScopedInventoryPublicationService(
     options.channelId,
     logger,
   );
+}
+
+/** Admin-only dry run. The proposed snapshot cannot reach an enqueue callback. */
+export async function previewProductDefinitionPublicationInsideTransaction(
+  client: InventoryAvailabilityTransactionQueryClient,
+  productId: number,
+  supplySnapshot: SupplySnapshotDto,
+) {
+  if (supplySnapshot.productId !== productId) throw new Error("Review snapshot product mismatch");
+  const context = await createPublicationContext(client, undefined, true);
+  const managedSellableVariantIds = await loadManagedSellableVariantIds(client, productId);
+  const publicationTargets = await loadChannelExposurePublicationTargets(client, productId, managedSellableVariantIds);
+  const plan = planInventoryChannelExposureProduct({
+    ...context, supplySnapshot, managedSellableVariantIds, publicationTargets,
+  }, productId);
+  const preview = new AuthorityAwareInventoryPublicationService({
+    execute: async work => work({ ...context, planProduct: async () => plan,
+      enqueueFullPublications: async () => { throw new Error("A definition review cannot enqueue publication"); },
+    }),
+  });
+  const result = await preview.publishProduct({ productId, dryRun: true, triggeredBy: "product_definition_review" },
+    async () => { throw new Error("A definition review cannot use legacy publication"); });
+  if (result.authority !== "canonical") throw new Error("Canonical definition review required");
+  return result.publication;
 }
 
 async function createPublicationContext(
