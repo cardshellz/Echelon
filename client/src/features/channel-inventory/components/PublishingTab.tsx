@@ -201,7 +201,7 @@ function DestinationPublishing({ view, channel, target, canActivate }: {
         )}
         <EvidenceNote>
           First activation is the reviewed cutover on{" "}
-          <Link href="/inventory/supply-transformations" className="underline underline-offset-2">Supply &amp; Transformations</Link>.
+          <Link href="/inventory/cutover" className="underline underline-offset-2">Inventory Cutover</Link>.
           A routine "apply saved changes" step after cutover is not available yet; resuming a stopped
           destination re-uses its active configuration and does not apply pending drafts.
         </EvidenceNote>

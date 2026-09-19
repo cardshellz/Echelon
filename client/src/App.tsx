@@ -32,6 +32,8 @@ import Dashboard from "@/pages/Dashboard";
 import Inventory from "@/pages/Inventory";
 import Builds from "@/pages/Builds";
 import SupplyTransformations from "@/pages/SupplyTransformations";
+import InventoryCutover from "@/pages/InventoryCutover";
+import ProcurementPromiseSafetySettings from "@/pages/ProcurementPromiseSafetySettings";
 import ChannelInventory from "@/pages/ChannelInventory";
 import BuildRecipeCreate from "@/pages/BuildRecipeCreate";
 import Orders from "@/pages/Orders";
@@ -323,6 +325,12 @@ function Router() {
         <Route path="/inventory/builds">
           <ProtectedRoute component={Builds} allowedRoles={["admin", "lead"]} />
         </Route>
+        <Route path="/inventory/cutover">
+          <ProtectedRoute
+            component={InventoryCutover}
+            requiredPermission={{ resource: "inventory_planning", action: "view" }}
+          />
+        </Route>
         <Route path="/inventory/supply-transformations">
           <ProtectedRoute
             component={SupplyTransformations}
@@ -547,6 +555,12 @@ function Router() {
         </Route>
         {/* Spec A: procurement settings page. MUST be registered before
             /settings so wouter does not fall through to the general page. */}
+        <Route path="/settings/procurement/promise-safety">
+          <ProtectedRoute
+            component={ProcurementPromiseSafetySettings}
+            requiredPermission={{ resource: "inventory_planning", action: "view" }}
+          />
+        </Route>
         <Route path="/settings/procurement">
           <ProtectedRoute component={ProcurementSettings} allowedRoles={["admin"]} />
         </Route>

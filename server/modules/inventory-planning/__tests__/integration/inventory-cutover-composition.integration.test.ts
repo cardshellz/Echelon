@@ -27,6 +27,10 @@ import { PostgresInventoryAvailabilityClaimRepository } from "../../infrastructu
 import { PostgresCanonicalClaimInventoryRepository } from "../../../inventory/infrastructure/canonical-claim-inventory.repository";
 import { createAuthorityAwareInventoryPublicationService } from "../../infrastructure/inventory-availability-runtime-publication.repository";
 import { installQuantityCutoverFixture, saveCompositionQuantityOpening } from "../fixtures/inventory-quantity-cutover.fixture";
+import { ProductDefinitionService } from "../../application/inventory-product-definition.service";
+import { PostgresProductDefinitionStore } from "../../infrastructure/inventory-product-definition.repository";
+import { SafetyDefinitionService } from "../../application/inventory-safety-definition.service";
+import { PostgresSafetyDefinitionStore } from "../../infrastructure/inventory-safety-definition.repository";
 
 // Only the application's process-global connection is disabled. Every owner under
 // test receives the uniquely created disposable pool/client; no owner is mocked.
@@ -34,6 +38,131 @@ vi.mock("../../../../db", () => ({ pool: {} }));
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
 const dbDescribe = databaseUrl && disposable ? describe : describe.skip;
+
+async function proveRoutineDefinitionApply(database: InventoryCutoverTestDatabase) {
+  await database.pool.query(readFileSync(resolve(process.cwd(), "migrations/0680_inventory_product_definition_applications.sql"), "utf8"));
+  const stockBefore = (await database.pool.query("SELECT * FROM inventory.inventory_levels ORDER BY id")).rows;
+  const claimsBefore = (await database.pool.query("SELECT * FROM inventory.availability_claims ORDER BY id")).rows;
+  const authorityBefore = (await database.pool.query("SELECT * FROM inventory.availability_runtime_authority")).rows;
+  const model = (await database.pool.query<{ id: number }>(`INSERT INTO inventory.transformation_model_versions
+    (product_id,version,build_to_promise_enabled,definition_hash,validation_state,validation_errors,change_reason,idempotency_key,request_hash,created_by,supersedes_model_id)
+    VALUES(20,2,false,repeat('e',64),'valid','[]','Routine test draft','routine-draft',repeat('e',64),'operator',
+      (SELECT active_model_id FROM inventory.transformation_model_heads WHERE product_id=20)) RETURNING id`)).rows[0];
+  await database.pool.query("UPDATE inventory.transformation_model_heads SET draft_model_id=$1,revision=revision+1 WHERE product_id=20", [model.id]);
+  const head = (await database.pool.query<{ revision: string; active_model_id: number }>("SELECT revision::text,active_model_id FROM inventory.transformation_model_heads WHERE product_id=20")).rows[0];
+  const service = new ProductDefinitionService(new PostgresProductDefinitionStore(database.pool));
+  const selection = { productId: 20, draftModelId: model.id, expectedHeadRevision: head.revision, expectedDefinitionHash: "e".repeat(64) };
+  const review = await service.review(selection);
+  expect(review).toMatchObject({ ready: true, blockers: [], affectedProductIds: [20] });
+  expect((await service.review(selection)).reviewHash).toBe(review.reviewHash);
+  expect((await database.pool.query("SELECT active_model_id FROM inventory.transformation_model_heads WHERE product_id=20")).rows[0].active_model_id).toBe(head.active_model_id);
+  const command = { ...selection, expectedReviewHash: review.reviewHash, idempotencyKey: "routine-apply" };
+  await expect(service.apply({ ...command, expectedReviewHash: "0".repeat(64) }, "operator"))
+    .rejects.toMatchObject({ code: "DEFINITION_REVIEW_STALE" });
+  const outboxBefore = (await database.pool.query("SELECT * FROM inventory.inventory_publication_outbox ORDER BY id")).rows;
+  await database.pool.query(`CREATE FUNCTION inventory.test_definition_receipt_failure() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN RAISE EXCEPTION 'synthetic definition receipt failure'; END $$;
+    CREATE TRIGGER test_definition_receipt_failure BEFORE INSERT ON inventory.product_definition_applications
+    FOR EACH ROW EXECUTE FUNCTION inventory.test_definition_receipt_failure()`);
+  try { await expect(service.apply(command, "operator")).rejects.toThrow("synthetic definition receipt failure"); }
+  finally { await database.pool.query("DROP TRIGGER test_definition_receipt_failure ON inventory.product_definition_applications; DROP FUNCTION inventory.test_definition_receipt_failure()"); }
+  expect((await database.pool.query("SELECT active_model_id FROM inventory.transformation_model_heads WHERE product_id=20")).rows[0].active_model_id).toBe(head.active_model_id);
+  expect((await database.pool.query("SELECT * FROM inventory.inventory_publication_outbox ORDER BY id")).rows).toEqual(outboxBefore);
+  const results = await Promise.all([service.apply(command, "operator"), service.apply(command, "operator")]);
+  expect(results.map(result => result.alreadyApplied).sort()).toEqual([false, true]);
+  expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.product_definition_applications")).rows[0].count).toBe(1);
+  expect((await service.progress(20))?.publications).toHaveLength(review.channels.length);
+  await expect(service.apply(command, "different-operator")).rejects.toMatchObject({ code: "DEFINITION_COMMAND_CONFLICT" });
+  await expect(database.pool.query("UPDATE inventory.product_definition_applications SET actor='rewrite'")).rejects.toThrow("immutable");
+  expect((await database.pool.query("SELECT * FROM inventory.inventory_levels ORDER BY id")).rows).toEqual(stockBefore);
+  expect((await database.pool.query("SELECT * FROM inventory.availability_claims ORDER BY id")).rows).toEqual(claimsBefore);
+  expect((await database.pool.query("SELECT * FROM inventory.availability_runtime_authority")).rows).toEqual(authorityBefore);
+  await proveRoutineSafetyApply(database);
+}
+
+async function proveRoutineSafetyApply(database: InventoryCutoverTestDatabase) {
+  // A second product proves that a business review is not restricted to the
+  // product selected in Procurement. Its active model is configured explicitly.
+  await database.pool.query(`INSERT INTO catalog.products(id,sku) VALUES(30,'OTHER');
+    INSERT INTO catalog.product_variants(id,product_id,sku) VALUES(301,30,'OTHER-EA');
+    INSERT INTO inventory.transformation_model_versions(product_id,version,build_to_promise_enabled,definition_hash,validation_state,validation_errors,change_reason,idempotency_key,request_hash,created_by)
+    VALUES(30,1,false,repeat('f',64),'valid','[]','Second product','other-draft',repeat('f',64),'operator');
+    INSERT INTO inventory.transformation_model_heads(product_id,draft_model_id,revision,updated_by,update_reason)
+    SELECT 30,id,0,'operator','Second product' FROM inventory.transformation_model_versions WHERE product_id=30;`);
+  const client = await database.pool.connect();
+  try {
+    await client.query("BEGIN");
+    await acquireInventoryCutoverFenceInsideTransaction(client, { expectedAuthority: "canonical", expectedConfigurationRunId: null });
+    const id = (await client.query("SELECT draft_model_id FROM inventory.transformation_model_heads WHERE product_id=30")).rows[0].draft_model_id;
+    if ((await client.query("SELECT id FROM inventory.inventory_publication_targets WHERE id=1")).rowCount) {
+      const mapping = (await client.query(`INSERT INTO inventory.publication_variant_mapping_versions(publication_target_id,product_variant_id,version,external_inventory_item_id,external_sku,
+        definition_hash,change_reason,idempotency_key,request_hash,created_by)
+        VALUES(1,301,1,'other-item','OTHER-EA',repeat('b',64),'Second item','other-mapping',repeat('b',64),'operator') RETURNING id`)).rows[0];
+      await client.query("INSERT INTO inventory.publication_variant_mapping_heads(publication_target_id,product_variant_id,draft_mapping_id,revision,updated_by,update_reason) VALUES(1,301,$1,1,'operator','Second item')", [mapping.id]);
+      await promoteInventoryCutoverDefinitionsInsideTransaction(client, { contractVersion: "inventory_cutover_selection_manifest_v1", productIds: [30], publicationTargetIds: [1],
+        selections: [{ kind: "variant_mapping", key: "1:301", definitionId: mapping.id, definitionHash: "b".repeat(64) }] }, { actor: "operator", reason: "Fixture mapping", occurredAt: new Date() });
+    }
+    await promoteInventoryCutoverDefinitionsInsideTransaction(client, { contractVersion: "inventory_cutover_selection_manifest_v1", productIds: [30], publicationTargetIds: [],
+      selections: [{ kind: "model", key: "30", definitionId: id, definitionHash: "f".repeat(64) }] }, { actor: "operator", reason: "Fixture", occurredAt: new Date() });
+    await client.query("COMMIT");
+  } catch (error) { await client.query("ROLLBACK"); throw error; } finally { client.release(); }
+  const draft = (await database.pool.query(`INSERT INTO inventory.promise_safety_policy_versions
+    (scope_key,scope_type,version,policy_mode,fixed_units,definition_hash,change_reason,idempotency_key,request_hash,created_by,supersedes_policy_id)
+    SELECT 'business','business',2,'fixed_units',1,repeat('a',64),'Routine safety','safety-draft',repeat('a',64),'operator',active_policy_id
+    FROM inventory.promise_safety_policy_heads WHERE scope_key='business' RETURNING id`)).rows[0];
+  await database.pool.query("UPDATE inventory.promise_safety_policy_heads SET draft_policy_id=$1,revision=revision+1 WHERE scope_key='business'", [draft.id]);
+  const head = (await database.pool.query("SELECT revision::text,active_policy_id FROM inventory.promise_safety_policy_heads WHERE scope_key='business'")).rows[0];
+  const stockBefore = (await database.pool.query("SELECT * FROM inventory.inventory_levels ORDER BY id")).rows;
+  const service = new SafetyDefinitionService(new PostgresSafetyDefinitionStore(database.pool));
+  const selection = { scopeKey: "business", draftPolicyId: draft.id, expectedHeadRevision: head.revision, expectedDefinitionHash: "a".repeat(64) };
+  const review = await service.review(selection);
+  expect(review).toMatchObject({ ready: true, affectedProductIds: [20,30], proposedPolicy: { policyMode: "fixed_units", fixedUnits: 1 } });
+  expect(review.atp.map(row => row.productId)).toEqual(expect.arrayContaining([20,30]));
+  const command = { ...selection, expectedReviewHash: review.reviewHash, idempotencyKey: "safety-apply" };
+  await database.pool.query("UPDATE warehouse.warehouses SET code='CHANGED' WHERE id=1");
+  await expect(service.apply(command,"operator")).rejects.toMatchObject({ code: "DEFINITION_REVIEW_STALE" });
+  await database.pool.query("UPDATE warehouse.warehouses SET code='MAIN' WHERE id=1");
+  await expect(service.apply({ ...command, expectedReviewHash: "0".repeat(64) }, "operator")).rejects.toMatchObject({ code: "DEFINITION_REVIEW_STALE" });
+  const outboxBefore = (await database.pool.query("SELECT * FROM inventory.inventory_publication_outbox ORDER BY id")).rows;
+  await database.pool.query(`CREATE FUNCTION inventory.test_safety_receipt_failure() RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN RAISE EXCEPTION 'synthetic safety receipt failure'; END $$;
+    CREATE TRIGGER test_safety_receipt_failure BEFORE INSERT ON inventory.safety_definition_applications
+    FOR EACH ROW EXECUTE FUNCTION inventory.test_safety_receipt_failure()`);
+  try { await expect(service.apply(command,"operator")).rejects.toThrow("synthetic safety receipt failure"); }
+  finally { await database.pool.query("DROP TRIGGER test_safety_receipt_failure ON inventory.safety_definition_applications; DROP FUNCTION inventory.test_safety_receipt_failure()"); }
+  expect((await database.pool.query("SELECT active_policy_id FROM inventory.promise_safety_policy_heads WHERE scope_key='business'")).rows[0].active_policy_id).toBe(head.active_policy_id);
+  expect((await database.pool.query("SELECT * FROM inventory.inventory_publication_outbox ORDER BY id")).rows).toEqual(outboxBefore);
+  const results = await Promise.all([service.apply(command,"operator"),service.apply(command,"operator")]);
+  expect(results.map(row => row.alreadyApplied).sort()).toEqual([false,true]);
+  expect((await service.progress("business"))?.publications).toHaveLength(review.channels.length);
+  await expect(service.apply(command,"different-operator")).rejects.toMatchObject({ code: "DEFINITION_COMMAND_CONFLICT" });
+  await expect(database.pool.query("UPDATE inventory.safety_definition_applications SET actor='rewrite'")).rejects.toThrow("immutable");
+  expect((await database.pool.query("SELECT * FROM inventory.inventory_levels ORDER BY id")).rows).toEqual(stockBefore);
+  await database.pool.query("INSERT INTO warehouse.warehouses(id,code) VALUES(2,'SECOND')");
+  for (const scopeType of ["network_variant", "warehouse_variant"] as const) {
+    const scopeKey = scopeType === "network_variant" ? "network:variant:101" : "warehouse:1:variant:101";
+    const previous = (await database.pool.query("SELECT id,version FROM inventory.promise_safety_policy_versions WHERE scope_key=$1 ORDER BY version DESC LIMIT 1", [scopeKey])).rows[0];
+    const policy = (await database.pool.query(`INSERT INTO inventory.promise_safety_policy_versions
+      (scope_key,scope_type,product_variant_id,warehouse_id,version,policy_mode,days_of_cover_milli_days,untrusted_demand_fallback_units,demand_method_version,
+       definition_hash,change_reason,idempotency_key,request_hash,created_by,supersedes_policy_id)
+      VALUES($1,$2,101,$3,$8,$4,$5,$6,$7,repeat('b',64),'Scoped safety',$1,repeat('b',64),'operator',$9) RETURNING id`,
+    [scopeKey,scopeType,scopeType === "warehouse_variant" ? 1 : null,scopeType === "warehouse_variant" ? "days_of_cover" : "off",
+      scopeType === "warehouse_variant" ? 1000 : null,scopeType === "warehouse_variant" ? 2 : null,scopeType === "warehouse_variant" ? "irreversible_consumption_v1_28d" : null,
+      previous ? previous.version + 1 : 1,previous?.id ?? null])).rows[0];
+    const scopedHead = (await database.pool.query(`INSERT INTO inventory.promise_safety_policy_heads(scope_key,draft_policy_id,revision,updated_by,update_reason)
+      VALUES($1,$2,0,'operator','Scoped safety') ON CONFLICT(scope_key) DO UPDATE SET draft_policy_id=$2,revision=promise_safety_policy_heads.revision+1 RETURNING revision::text`, [scopeKey,policy.id])).rows[0];
+    const scopedSelection = { scopeKey, draftPolicyId: policy.id, expectedHeadRevision: scopedHead.revision, expectedDefinitionHash: "b".repeat(64) };
+    const scoped = await service.review(scopedSelection);
+    expect(scoped).toMatchObject({ ready: true, affectedProductIds: [20] });
+    expect(scoped.atp.map(row => row.warehouseId)).toEqual(expect.arrayContaining([1,2]));
+    if (scopeType === "warehouse_variant") {
+      expect(scoped.atp.find(row => row.warehouseId === 2)?.proposed).toBe(scoped.atp.find(row => row.warehouseId === 2)?.current);
+      const main = scoped.atp.find(row => row.warehouseId === 1)!;
+      expect(BigInt(main.current)-BigInt(main.proposed)).toBe(BigInt(2));
+    }
+    await service.apply({ ...scopedSelection, expectedReviewHash: scoped.reviewHash, idempotencyKey: `apply:${scopeKey}` },"operator");
+  }
+}
 
 dbDescribe.sequential("cutover composition with actual snapshot, claim and receipt owners", () => {
   let database: InventoryCutoverTestDatabase;
@@ -147,6 +276,9 @@ dbDescribe.sequential("cutover composition with actual snapshot, claim and recei
     expect(await completion.finish(request,"operator")).toMatchObject({ alreadyApplied:true });
     expect((await database.pool.query("SELECT activation_run_id FROM inventory.quantity_publication_gate")).rows).toEqual([{ activation_run_id:null }]);
   });
+  it("applies a product draft after completed migration without altering custody or authority", async () => {
+    await proveRoutineDefinitionApply(database);
+  }, 20000);
 });
 
 dbDescribe.sequential("empty-bin promise handoff through complete cutover composition", () => {
@@ -565,4 +697,7 @@ dbDescribe.sequential("cutover composition with one actual publication target", 
     await expect(admission.runOutbox(leased,provider)).rejects.toMatchObject({ code:"PUBLICATION_OUTBOX_AUTHORIZATION_INVALID" });
     expect(provider).not.toHaveBeenCalled();
   },20_000);
+  it("atomically applies a product draft with channel publication and rolls back receipt failures", async () => {
+    await proveRoutineDefinitionApply(database);
+  }, 20000);
 });

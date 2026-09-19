@@ -578,6 +578,12 @@
   "inventory.planner_shadow_runs": [
     "modules/inventory-planning"
   ],
+    "inventory.safety_definition_applications": [
+      "modules/inventory-planning"
+    ],
+    "inventory.product_definition_applications": [
+    "modules/inventory-planning"
+  ],
   "inventory.promise_safety_policy_heads": [
     "modules/inventory-planning"
   ],

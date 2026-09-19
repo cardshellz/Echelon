@@ -68,7 +68,9 @@ import {
   type VendorCatalogQuoteDraft,
   type VendorCatalogQuoteSnapshot,
 } from "@/features/supplier-catalog/VendorCatalogQuoteEditor";
-import { ProductBuildRelationships } from "@/features/inventory-builds/ProductBuildRelationships";
+import { ProductConversionCard, ProductConversionSummary } from "@/features/inventory-builds/ProductConversionCard";
+import { ProductSafetySummary } from "@/features/inventory-builds/ProductSafetySummary";
+import { transformationQueryKey } from "@/features/inventory-builds/package-conversion-draft";
 import { createProductVariant } from "@/features/catalog/create-product-variant";
 import {
   VARIANT_UOM_DEFINITIONS,
@@ -1692,6 +1694,7 @@ export default function ProductDetail() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}`] });
       toast({ title: "Product updated" });
+      if (product?.productId) queryClient.invalidateQueries({ queryKey: transformationQueryKey(product.productId) });
       setIsDirty(false);
       setContentDirty(false);
     },
@@ -1737,6 +1740,7 @@ export default function ProductDetail() {
       queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}`] });
       queryClient.invalidateQueries({ queryKey: ["/api/products"] });
       toast({ title: "Product reactivated successfully" });
+      if (product?.productId) queryClient.invalidateQueries({ queryKey: transformationQueryKey(product.productId) });
     },
     onError: (err: Error) => {
       toast({ title: "Reactivation failed", description: err.message, variant: "destructive" });
@@ -1857,6 +1861,7 @@ export default function ProductDetail() {
         ? `Archived: transferred ${data.archived.inventoryTransferred} units, ${data.archived.variants} variants deactivated`
         : `Archived: ${data.archived.variants} variants deactivated, ${data.archived.inventoryPreserved} inventory units preserved`;
       toast({ title: msg });
+      if (product?.productId) queryClient.invalidateQueries({ queryKey: transformationQueryKey(product.productId) });
       setArchiveDialogOpen(false);
       setArchiveDeps(null);
       setTransferMode(false);
@@ -2321,6 +2326,7 @@ export default function ProductDetail() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: [`/api/products/${productId}`] });
       setVariantDialogOpen(false);
+      if (product?.productId) queryClient.invalidateQueries({ queryKey: transformationQueryKey(product.productId) });
       const returnTo = safeInternalPath(new URLSearchParams(searchStr).get("returnTo"));
       if (returnTo) {
         toast({ title: "Variant created", description: "Returning to shipment receipt setup." });
@@ -2366,7 +2372,8 @@ export default function ProductDetail() {
           hierarchyLevel: data.hierarchyLevel,
           uomType: data.uomType,
           barcode: data.barcode || null,
-          parentVariantId: data.parentVariantId,
+          // Conversion rules are authored separately. Do not overwrite a legacy
+          // parent from a stale form when saving unrelated SKU attributes.
           isBaseUnit: data.isBaseUnit,
           requiresShipping: data.requiresShipping,
           trackInventory: data.trackInventory,
@@ -2391,6 +2398,7 @@ export default function ProductDetail() {
         return;
       }
       toast({ title: "Variant updated" });
+      if (product?.productId) queryClient.invalidateQueries({ queryKey: transformationQueryKey(product.productId) });
     },
     onError: (err: Error) => {
       toast({ title: "Failed to update variant", description: err.message, variant: "destructive" });
@@ -2546,6 +2554,7 @@ export default function ProductDetail() {
         : `Archived ${data.archived.variant.sku}`;
       toast({ title: msg });
       setArchiveVariant(null);
+      if (product?.productId) queryClient.invalidateQueries({ queryKey: transformationQueryKey(product.productId) });
       setVariantArchiveDeps(null);
       setVariantTransferMode(false);
       setVariantTransferTarget(null);
@@ -2884,6 +2893,7 @@ export default function ProductDetail() {
                         </Button>
                       </div>
                     )}
+                    {product?.productId && <ProductConversionSummary productId={product.productId} enabled={activeTab === "overview"} />}
                   </div>
                 </CardContent>
               </Card>
@@ -3628,7 +3638,7 @@ export default function ProductDetail() {
                             </div>
                             <p className="text-sm mb-2">{variant.name}</p>
                             <div className="flex items-center justify-between text-xs text-muted-foreground">
-                              <span>Units: {variant.unitsPerVariant}{parentVariant ? ` → ${parentVariant.sku}` : ""}</span>
+                              <span>Units: {variant.unitsPerVariant}{parentVariant ? ` · Legacy parent: ${parentVariant.sku}` : ""}</span>
                               <span className="font-mono">{variant.barcode || "No barcode"}</span>
                             </div>
                             <div className="mt-2">
@@ -3680,7 +3690,7 @@ export default function ProductDetail() {
                               <TableHead>Name</TableHead>
                               <TableHead>Type</TableHead>
                               <TableHead>Units</TableHead>
-                              <TableHead>Breaks Into</TableHead>
+                              <TableHead>Legacy parent</TableHead>
                               <TableHead>Barcode</TableHead>
                               <TableHead>Package</TableHead>
                               <TableHead>Customer sale</TableHead>
@@ -3806,9 +3816,10 @@ export default function ProductDetail() {
                 </CardContent>
               </Card>
               {product?.productId && (
-                <ProductBuildRelationships
+                <ProductConversionCard
                   enabled={activeTab === "variants"}
                   productId={product.productId}
+                  inventoryStrategy={product.inventoryStrategy ?? DEFAULT_PRODUCT_INVENTORY_STRATEGY}
                 />
               )}
             </TabsContent>
@@ -3978,6 +3989,7 @@ export default function ProductDetail() {
             {/* ===== INVENTORY TAB ===== */}
             <TabsContent value="inventory" className="mt-4">
               <ProductInventoryTab productId={product.productId} />
+              <ProductSafetySummary productId={product.productId} />
             </TabsContent>
           </Tabs>
         </div>
@@ -4316,8 +4328,8 @@ export default function ProductDetail() {
               />
             )}
 
-            <div className="space-y-1.5">
-              <Label>Breaks Into (Parent Variant)</Label>
+            <fieldset disabled className="space-y-1.5">
+              <legend className="text-sm font-medium">Legacy parent (read only)</legend>
               {isSingleUnitVariantUomType(variantForm.uomType) ? (
                 <p className="rounded-md border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
                   {getVariantUomDefinition(variantForm.uomType).label} is a base inventory unit and does not break down further.
@@ -4359,11 +4371,9 @@ export default function ProductDetail() {
                 </Select>
               )}
               <p className="text-xs text-muted-foreground">
-                {variantForm.isBaseUnit
-                  ? "This variant is marked as the smallest inventory unit for this product."
-                  : "Which smaller variant does this break down into?"}
+                Retained for compatibility. Manage conversion directions in the product's Variants section; this legacy value is not the conversion model.
               </p>
-            </div>
+            </fieldset>
           </div>
           <DialogFooter className="gap-2">
             <Button variant="outline" onClick={() => setVariantDialogOpen(false)}>

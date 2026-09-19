@@ -1,6 +1,6 @@
 // This page distinguishes settings with runtime consumers from retained options.
 // Saved values remain readable even when their feature is unavailable.
-import { useRef } from "react";
+import React, { useRef } from "react";
 import { z } from "zod";
 import { useAuth } from "@/lib/auth";
 import { Button } from "@/components/ui/button";
@@ -11,6 +11,7 @@ import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
 import { Settings2 } from "lucide-react";
+import { Link } from "wouter";
 
 type ProcurementSettings = {
   requireApproval: boolean;
@@ -214,6 +215,21 @@ export default function ProcurementSettings() {
         </p>
         {!canEdit && <p className="mt-2 text-sm">Your role has read-only access to these settings.</p>}
       </div>
+
+      {hasPermission("inventory_planning", "view") && (
+        <Card>
+          <CardContent className="space-y-2 p-4">
+            <h2 className="font-semibold">ATP promise safety</h2>
+            <p className="text-sm text-muted-foreground">
+              Review promise-safety floors and demand evidence. These controls are separate from
+              the purchasing reorder buffer (safetyStockDays).
+            </p>
+            <Button asChild variant="outline">
+              <Link href="/settings/procurement/promise-safety">Manage ATP promise safety</Link>
+            </Button>
+          </CardContent>
+        </Card>
+      )}
 
       {query.isLoading && <p role="status" className="text-sm">Loading procurement settings…</p>}
       {loadFailed && (

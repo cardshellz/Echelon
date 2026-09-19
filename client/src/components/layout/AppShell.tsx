@@ -166,6 +166,12 @@ const navStructure: NavEntry[] = [
         href: "/inventory/supply-transformations",
         requiredPermission: { resource: "inventory_planning", action: "view" },
       },
+      {
+        label: "Inventory Cutover",
+        icon: Shield,
+        href: "/inventory/cutover",
+        requiredPermission: { resource: "inventory_planning", action: "view" },
+      },
       { label: "Warehouses", icon: Building2, href: "/warehouse" },
       { label: "Pick Zones", icon: MapIcon, href: "/pick-zones" },
       { label: "Slotting Setup", icon: MapPin, href: "/slotting-setup" },

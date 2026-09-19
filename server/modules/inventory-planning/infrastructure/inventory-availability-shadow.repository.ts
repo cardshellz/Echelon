@@ -27,7 +27,7 @@ type QueryResult = { rows: any[] };
 export type InventoryAvailabilitySnapshotQueryClient = InventoryAvailabilityTransactionQueryClient;
 type QueryClient = InventoryAvailabilitySnapshotQueryClient;
 type ClientPool = Pick<Pool, "connect">;
-type SnapshotSelection = "draft_preferred" | "active_only";
+type SnapshotSelection = "draft_preferred" | "active_only" | { reviewedProductId: number } | { reviewedSafetyScope: string };
 
 // Defensive corruption/abuse bound: a package/build graph spanning this many products
 // cannot be reviewed or calculated safely inside a synchronous admin shadow request.
@@ -166,7 +166,9 @@ async function loadSelectedModel(
   productId: number,
   selection: SnapshotSelection,
 ): Promise<LoadedModel | null> {
-  const selectedModelExpression = selection === "active_only"
+  const useActiveModel = selection === "active_only"
+    || (typeof selection === "object" && (!("reviewedProductId" in selection) || selection.reviewedProductId !== productId));
+  const selectedModelExpression = useActiveModel
     ? "head.active_model_id"
     : "COALESCE(head.draft_model_id, head.active_model_id)";
   const modelRow = rows(await client.query(
@@ -256,7 +258,7 @@ async function loadSelectedModel(
     modelId,
     productId,
     version: integer(modelRow.version, "model.version"),
-    lifecycleSelection: selection === "active_only" || modelRow.draft_model_id == null
+    lifecycleSelection: useActiveModel || modelRow.draft_model_id == null
       ? "active_head"
       : "draft_head",
     lifecycleStatus: modelRow.lifecycle_status,
@@ -513,7 +515,7 @@ async function captureGraphInsideTransaction(
     ...inventoryPositions.map((entry) => entry.warehouseLocationId),
     ...outputLocations.map((entry) => entry.warehouseLocationId),
   ]);
-  const selectedLocationPolicyExpression = selection === "active_only"
+  const selectedLocationPolicyExpression = selection !== "draft_preferred"
     ? "head.active_policy_id"
     : "COALESCE(head.draft_policy_id, head.active_policy_id)";
   const locationRows = locationIds.length === 0 ? [] : rows(await client.query(
@@ -550,7 +552,7 @@ async function captureGraphInsideTransaction(
     promisePolicy: row.policy_id == null ? null : {
       policyId: integer(row.policy_id, "locationPolicy.id"),
       version: integer(row.policy_version, "locationPolicy.version"),
-      lifecycleSelection: selection === "active_only" || row.draft_policy_id == null
+      lifecycleSelection: selection !== "draft_preferred" || row.draft_policy_id == null
         ? "active_head"
         : "draft_head",
       eligibilityMode: row.eligibility_mode,
@@ -558,7 +560,10 @@ async function captureGraphInsideTransaction(
     },
   }));
 
-  const selectedSafetyPolicyExpression = selection === "active_only"
+  const reviewedSafetyScope = typeof selection === "object" && "reviewedSafetyScope" in selection ? selection.reviewedSafetyScope : null;
+  const selectedSafetyPolicyExpression = reviewedSafetyScope !== null
+    ? "CASE WHEN head.scope_key=$2 THEN head.draft_policy_id ELSE head.active_policy_id END"
+    : selection !== "draft_preferred"
     ? "head.active_policy_id"
     : "COALESCE(head.draft_policy_id, head.active_policy_id)";
   const safetyRows = rows(await client.query(
@@ -582,12 +587,12 @@ async function captureGraphInsideTransaction(
      WHERE policy.scope_key = 'business'
         OR policy.product_variant_id = ANY($1::integer[])
      ORDER BY policy.scope_key`,
-    [variantIds],
+    reviewedSafetyScope !== null ? [variantIds, reviewedSafetyScope] : [variantIds],
   ));
   const safetyPolicies: SupplySnapshotDto["safetyPolicies"] = safetyRows.map((row) => ({
     policyId: integer(row.policy_id, "safetyPolicy.id"),
     version: integer(row.version, "safetyPolicy.version"),
-    lifecycleSelection: selection === "active_only" || row.draft_policy_id == null
+    lifecycleSelection: (selection !== "draft_preferred" && reviewedSafetyScope !== row.scope_key) || row.draft_policy_id == null
       ? "active_head"
       : "draft_head",
     scopeKey: String(row.scope_key),
@@ -716,6 +721,26 @@ export async function captureActiveSupplySnapshotInsideTransaction(
   productId: number,
 ): Promise<SupplySnapshotDto> {
   return captureInsideTransaction(client, validateProductId(productId), "active_only");
+}
+
+/** Review exactly one product draft, including when it is a dependency of the
+ * requested root. All other models and policies stay on their active heads. */
+export async function captureProductDraftReviewSnapshotInsideTransaction(
+  client: InventoryAvailabilitySnapshotQueryClient,
+  productId: number,
+  reviewedProductId: number,
+): Promise<SupplySnapshotDto> {
+  return captureInsideTransaction(client, validateProductId(productId), {
+    reviewedProductId: validateProductId(reviewedProductId),
+  });
+}
+
+/** Only the explicitly reviewed safety scope uses a draft. Models and every
+ * other safety/location policy remain active, including dependency products. */
+export async function captureSafetyDraftReviewSnapshotInsideTransaction(
+  client: InventoryAvailabilitySnapshotQueryClient, productId: number, reviewedSafetyScope: string,
+): Promise<SupplySnapshotDto> {
+  return captureInsideTransaction(client, validateProductId(productId), { reviewedSafetyScope });
 }
 
 /** Read-only proposed-model capture for a caller-owned cutover review transaction. */

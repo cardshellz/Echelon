@@ -36,6 +36,8 @@ describe("inventory availability Phase 1 admin surface contract", () => {
 
   it("places conversion authority under destination SKU columns and states runtime isolation", () => {
     const page = source("client/src/pages/SupplyTransformations.tsx");
+    const cutover = source("client/src/pages/InventoryCutover.tsx");
+    const migrationQueue = source("client/src/pages/inventory-migration-queue-panel.tsx");
     const navigation = source("client/src/components/layout/AppShell.tsx");
     const app = source("client/src/App.tsx");
 
@@ -43,10 +45,10 @@ describe("inventory availability Phase 1 admin surface contract", () => {
     expect(page).toContain("path.destinationVariantId === destination.id");
     expect(page).toContain("Drafts do not affect ATP");
     expect(page).toContain("transformationRuntimeLabel(view)");
-    expect(page).toContain("Approved — not live");
+    expect(migrationQueue).toContain("Approved — not live");
     expect(page).toContain("automatic refresh cannot replace your manual rules");
-    expect(page).toContain("expectedLatestReviewId: row.review?.reviewId ?? null");
-    expect(page).toContain("!manualEvidenceReady");
+    expect(cutover).toContain("expectedLatestReviewId: row.review?.reviewId ?? null");
+    expect(migrationQueue).toContain("!manualEvidenceReady");
     expect(page).not.toContain("/activate");
     expect(navigation).toContain("Supply & Transformations");
     expect(navigation).toContain('requiredPermission: { resource: "inventory_planning", action: "view" }');

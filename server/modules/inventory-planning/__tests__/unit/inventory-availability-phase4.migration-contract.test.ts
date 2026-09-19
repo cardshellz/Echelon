@@ -16,7 +16,7 @@ const claimRepository = source(
 const activationRepository = source(
   "server/modules/inventory-planning/infrastructure/inventory-availability-activation-dry-run.repository.ts",
 );
-const adminPage = source("client/src/pages/SupplyTransformations.tsx");
+const adminPage = source("client/src/pages/InventoryCutover.tsx");
 
 describe("inventory availability Phase 4 inactive contracts", () => {
   it("keeps claim simulation append-only and incapable of operational inventory writes", () => {
@@ -62,13 +62,14 @@ describe("inventory availability Phase 4 inactive contracts", () => {
     expect(routes).not.toMatch(/adapter\.(?:push|publish|sync|set)/i);
   });
 
-  it("exposes role-gated readback and conservative preparation without authority commit", () => {
+  it("keeps role-gated readback and conservative preparation on the cutover page", () => {
     expect(adminPage).toContain('hasPermission("inventory_planning", "activate")');
     expect(adminPage).toContain("/api/inventory-planning/admin/activation-runs/dry-run");
     expect(adminPage).toContain("/api/inventory-planning/admin/publication-readbacks/capture");
     expect(adminPage).toContain("/api/inventory-planning/admin/activation-runs/prepare");
     expect(adminPage).toContain("/api/inventory-planning/admin/activation-runs/abort");
-    expect(adminPage).toContain("there is no authority-commit endpoint");
+    expect(adminPage).toContain("explicit final-review controls and inventory activation permission");
+    expect(adminPage).toContain("<InventoryCutoverControls");
     expect(adminPage).toContain("no provider write · no outbox enqueue");
     expect(adminPage).not.toContain("/api/inventory-planning/admin/activation-runs/commit");
   });

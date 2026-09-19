@@ -1,4 +1,6 @@
 import type { Pool, PoolClient } from "pg";
+import { voidedLabelPostingFactsSchema, type VoidedLabelPostingFacts } from "./package-allocation-voided-label.domain";
+import { VOIDED_LABEL_POSTING_FACTS_SQL, VOIDED_LABEL_POSTING_FACTS_REQUIRED_RELATIONS } from "./package-allocation-voided-label.query";
 
 import type { PersistedDeclaredPackageEvidence } from "./declared-package-lifecycle-shadow.domain";
 import type {
@@ -43,6 +45,7 @@ const AUTHORITY_DISCOVERY_RELATIONSHIP_TYPE_SET = new Set<string>(
 export const PACKAGE_ALLOCATION_AUTHORITY_PREVIEW_REQUIRED_RELATIONS:
 readonly string[] = Object.freeze([...new Set([
   ...PACKAGE_ALLOCATION_AUTHORITY_DISCOVERY_REQUIRED_RELATIONS,
+  ...VOIDED_LABEL_POSTING_FACTS_REQUIRED_RELATIONS,
   "catalog.product_variants",
   "wms.carrier_tracking_event_matches",
   "wms.carrier_tracking_events",
@@ -165,6 +168,8 @@ export interface LockedPackageAllocationAuthorityEvidence {
   readonly evidenceKey: string;
   readonly persistedEvidence: PersistedDeclaredPackageEvidence;
   readonly splitContinuation?: PackageAllocationSplitContinuationEvidenceV1 | null;
+  /** Absent means unproven, never permission to discard a canceled package. */
+  readonly voidedLabelPostingFacts?: VoidedLabelPostingFacts | null;
 }
 
 export interface PackageAllocationAuthorityDiscoveredPackageEvidence {
@@ -1356,6 +1361,30 @@ class PgPackageAllocationLedgerTransaction
       }));
     }
 
+    const voidedLabelIds = labelResult.rows.filter(row => row.label_status === "voided")
+      .map(row => positiveSafeInteger(row.shipping_provider_label_id, "shipping_provider_label_id"));
+    const postingFactsByLabelId = new Map<number, VoidedLabelPostingFacts>();
+    if (voidedLabelIds.length > 0) {
+      const postingRows = await this.client.query(VOIDED_LABEL_POSTING_FACTS_SQL, [voidedLabelIds]);
+      for (const row of postingRows.rows) {
+        const parsed = voidedLabelPostingFactsSchema.safeParse({
+          shippingProviderLabelId: positiveSafeInteger(row.label_id, "label_id"),
+          provider: row.provider, providerPhysicalShipmentId: row.provider_label_id,
+          trackingNumber: row.tracking_number, hasOrderScope: row.has_order_scope,
+          hasAllocationBinding: row.has_allocation_binding, hasPhysicalPackage: row.has_physical_package,
+          hasLegacyPackage: row.has_legacy_package, hasChannelCommand: row.has_channel_command,
+          hasChannelReceipt: row.has_channel_receipt,
+        });
+        if (!parsed.success || postingFactsByLabelId.has(parsed.data.shippingProviderLabelId)) {
+          throw new PackageAllocationLedgerRepositoryError("INVALID_DATABASE_EVIDENCE", "Invalid voided-label posting facts");
+        }
+        postingFactsByLabelId.set(parsed.data.shippingProviderLabelId, Object.freeze(parsed.data));
+      }
+      if (postingFactsByLabelId.size !== voidedLabelIds.length || voidedLabelIds.some(id => !postingFactsByLabelId.has(id))) {
+        throw new PackageAllocationLedgerRepositoryError("INVALID_DATABASE_EVIDENCE", "Incomplete voided-label posting facts");
+      }
+    }
+
     return Object.freeze(
       labelResult.rows.map((raw) => {
         const row = raw as Record<string, unknown>;
@@ -1413,6 +1442,7 @@ class PgPackageAllocationLedgerTransaction
           evidenceKey: `shipping-provider-label:${labelId}`,
           persistedEvidence,
           splitContinuation: splitContinuationsByLabelId.get(labelId) ?? null,
+          ...(postingFactsByLabelId.has(labelId) ? { voidedLabelPostingFacts: postingFactsByLabelId.get(labelId)! } : {}),
         });
       }),
     );
