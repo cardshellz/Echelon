@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import { canonicalJson } from "@shared/utils/canonical-json";
 import { z } from "zod";
+import { voidedLabelExclusionEvidenceSchema } from "./package-allocation-voided-label.domain";
 
 import {
   packageAllocationGroupPlannerInputSchema,
@@ -112,6 +113,7 @@ export const packageAllocationPlanAuthoritySnapshotSchema = z.discriminatedUnion
       selectionCompleteness: z.literal("unproven_outside_persisted_relationships"),
       excludedUnrelatedEvidenceKeys: z.array(z.string().regex(/^shipping-provider-label:[1-9]\d*$/))
         .max(MAX_AUTHORITY_PACKAGES).optional(),
+      excludedVoidedLabelEvidence: z.array(voidedLabelExclusionEvidenceSchema).max(MAX_AUTHORITY_PACKAGES).optional(),
       relationshipSelectionEvidence:
         packageAllocationRelationshipSelectionEvidenceSnapshotSchema,
     }).strict(),

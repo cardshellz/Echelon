@@ -14,6 +14,7 @@ import {
   type PackageAllocationAuthorityResolutionResultV1,
 } from "./package-allocation-authority-resolution.domain";
 import { adaptPersistedDeclaredPackageLifecycleEvidence } from "./declared-package-lifecycle-shadow.domain";
+import { assessVoidedLabelExclusion, type VoidedLabelExclusionEvidence } from "./package-allocation-voided-label.domain";
 import type {
   LockedPackageAllocationAuthorityEvidence,
   PackageAllocationAuthorityDiscoveredPackageEvidence,
@@ -317,6 +318,7 @@ function sortPackages(
 
 export interface PackageAllocationAuthorityEvidenceResolutionV1 {
   readonly excludedUnrelatedEvidenceKeys: readonly string[];
+  readonly excludedVoidedLabelEvidence: readonly VoidedLabelExclusionEvidence[];
   readonly sourceFacts: readonly PackageAllocationSourceFacts[];
   readonly packages: readonly LockedPackageAllocationAuthorityEvidence[];
   readonly readiness: PackageAllocationAuthorityReadinessResultV1;
@@ -355,6 +357,8 @@ export function resolvePackageAllocationAuthorityEvidence(input: {
   });
   const adaptedPackages = packages.map((pkg) => ({
     evidenceKey: pkg.evidenceKey,
+    persistedEvidence: pkg.persistedEvidence,
+    voidedLabelPostingFacts: pkg.voidedLabelPostingFacts,
     splitContinuation: pkg.splitContinuation ?? null,
     adapted: adaptPersistedDeclaredPackageLifecycleEvidence(
       pkg.persistedEvidence,
@@ -362,16 +366,26 @@ export function resolvePackageAllocationAuthorityEvidence(input: {
   }));
   const sourceIds = new Set(sourceFacts.map((source) => source.sourceWmsShipmentItemId));
   const previousPackageKeys = new Set(input.previousPlan?.packageEvidence.map((pkg) => pkg.packageKey) ?? []);
+  const actionPackageKeys = new Set(input.actions.flatMap(action => [action.fromPackageKey,
+    ...(action.kind === "transfer_awaiting_allocation" ? action.targets.map(target => target.packageKey) : [])]));
   const assessmentByKey = new Map(readiness.packageAssessments.map((assessment) => [assessment.evidenceKey, assessment]));
   // Provider order relationships discover candidates; they do not make every
-  // package in the order part of this source group. Keep unknown/mixed history,
-  // any overlap, and every previously bound package. Only complete, disjoint
-  // package histories can be excluded from planning, never from the audit.
+  // package in the order part of this source group. Keep every prior binding
+  // and action participant. An unused voided label requires its own posting
+  // proof below; otherwise only complete, disjoint histories may be excluded.
+  // Both kinds of exclusion retain all package history in the audit.
   const excludedUnrelatedEvidenceKeys: string[] = [];
+  const excludedVoidedLabelEvidence: VoidedLabelExclusionEvidence[] = [];
   const relevantPackages = adaptedPackages.filter((pkg) => {
     if (pkg.adapted.outcome !== "adapted") return true;
     const lifecycle = pkg.adapted.input;
-    if (previousPackageKeys.has(packageAllocationPackageKey(lifecycle.provider, lifecycle.providerPhysicalShipmentId))) return true;
+    const packageKey = packageAllocationPackageKey(lifecycle.provider, lifecycle.providerPhysicalShipmentId);
+    if (previousPackageKeys.has(packageKey) || actionPackageKeys.has(packageKey)) return true;
+    const voidedExclusion = assessVoidedLabelExclusion(pkg.evidenceKey, pkg.persistedEvidence, pkg.voidedLabelPostingFacts);
+    if (voidedExclusion) {
+      excludedVoidedLabelEvidence.push(voidedExclusion);
+      return false;
+    }
     const assessment = assessmentByKey.get(pkg.evidenceKey);
     if (!assessment || assessment.lifecycleStatus !== "projected" || assessment.evidenceCoverage !== "current_flow"
       || assessment.authoritativeContents.length === 0
@@ -419,7 +433,7 @@ export function resolvePackageAllocationAuthorityEvidence(input: {
       })
     : null;
 
-  return deepFreeze({ sourceFacts, packages, readiness, resolution, excludedUnrelatedEvidenceKeys });
+  return deepFreeze({ sourceFacts, packages, readiness, resolution, excludedUnrelatedEvidenceKeys, excludedVoidedLabelEvidence });
 }
 
 /**

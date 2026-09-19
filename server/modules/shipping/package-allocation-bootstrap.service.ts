@@ -234,10 +234,20 @@ function unchangedAuthoritySnapshot(
     })
   )
     return observed;
+  // A repeated observation of an unused voided label may change its history
+  // hash, not the live allocation. Freshly re-proven identity/absence facts
+  // corroborate the original exclusion; retain that immutable original audit.
+  const priorExclusions = prior.excludedVoidedLabelEvidence ?? [];
+  const observedExclusions = observed.excludedVoidedLabelEvidence ?? [];
+  const withoutLifecycleHash = (entries: typeof priorExclusions) => entries.map(
+    ({ lifecycleEvidenceHash: _hash, ...facts }) => facts,
+  );
+  if (canonicalJson(withoutLifecycleHash(priorExclusions)) !== canonicalJson(withoutLifecycleHash(observedExclusions))) return observed;
   // Compare every other strict-schema field exactly. The fresh evidence was
   // normalized and hashed by buildPackageAllocationAuthorityRelationshipSelectionEvidence.
   const corroboratedPrior = {
     ...prior,
+    ...(observed.excludedVoidedLabelEvidence ? { excludedVoidedLabelEvidence: observed.excludedVoidedLabelEvidence } : {}),
     relationshipSelectionEvidence: {
       ...priorEvidence,
       packages: currentEvidence.packages,
@@ -470,6 +480,8 @@ export class PackageAllocationBootstrapPersistenceService {
           selectionCompleteness:
             "unproven_outside_persisted_relationships" as const,
           excludedUnrelatedEvidenceKeys: [...evidenceResolution.excludedUnrelatedEvidenceKeys],
+          ...(evidenceResolution.excludedVoidedLabelEvidence.length > 0
+            ? { excludedVoidedLabelEvidence: [...evidenceResolution.excludedVoidedLabelEvidence] } : {}),
           relationshipSelectionEvidence: {
             contractVersion: relationshipSelectionEvidence.contractVersion,
             evidenceType: relationshipSelectionEvidence.evidenceType,

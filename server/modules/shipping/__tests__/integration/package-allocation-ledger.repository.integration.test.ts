@@ -57,6 +57,8 @@ import {
   type PackageAllocationDiscoveryExecutionAuditReport,
 } from "../../package-allocation-authority-discovery-execution-audit.repository";
 import { packageAllocationPackageKey } from "../../package-allocation-authority-resolution.domain";
+import { resolvePackageAllocationAuthorityEvidence } from "../../package-allocation-authority-resolution.service";
+import { assessVoidedLabelExclusion } from "../../package-allocation-voided-label.domain";
 import { PackageAllocationAuthorityReadinessService } from "../../package-allocation-authority-readiness.service";
 import { PackageAllocationAuthorityResolutionPreviewService } from "../../package-allocation-authority-resolution.service";
 import {
@@ -159,6 +161,7 @@ async function installProviderExecutionTestRelations(pool: Pool): Promise<void> 
     );
     ALTER TABLE wms.outbound_shipments
       ADD COLUMN channel_id INTEGER REFERENCES channels.channels(id),
+      ADD COLUMN engine_shipment_ref VARCHAR(100),
       ADD COLUMN shopify_fulfillment_id VARCHAR(100);
     CREATE TABLE oms.oms_order_events (
       id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -503,7 +506,8 @@ async function seedCanonicalRequestForSource(
   );
   const request = await pool.query<{ id: string }>(
     `INSERT INTO wms.shipment_requests (
-    fulfillment_plan_id, wms_order_id, legacy_wms_shipment_id) VALUES ($1, $2, $3) RETURNING id::text AS id`,
+    fulfillment_plan_id, wms_order_id, legacy_wms_shipment_id, warehouse_id)
+    VALUES ($1, $2, $3, (SELECT warehouse_id FROM wms.orders WHERE id = $2)) RETURNING id::text AS id`,
     [plan.rows[0].id, row.order_id, row.shipment_id],
   );
   await pool.query(
@@ -605,7 +609,7 @@ async function installExecutionAuditRole(pool: Pool): Promise<void> {
     ALTER ROLE ${EXECUTION_AUDIT_ROLE}
       NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT
       NOREPLICATION NOBYPASSRLS;
-    GRANT USAGE ON SCHEMA catalog, wms TO ${EXECUTION_AUDIT_ROLE};
+    GRANT USAGE ON SCHEMA catalog, wms, oms, channels TO ${EXECUTION_AUDIT_ROLE};
     GRANT SELECT ON TABLE ${requiredRelations.join(", ")}
       TO ${EXECUTION_AUDIT_ROLE};
   `);
@@ -1004,6 +1008,13 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
   beforeAll(async () => {
     await runMigrations();
     pool = getTestPool();
+    // The focused foundation omits ingress receipts. Install the exact
+    // production table/index contract used by retired-label footprint reads.
+    const foundation = readFileSync(resolve(process.cwd(), "migrations/0593_fulfillment_authority_cutover_foundation.sql"), "utf8");
+    const receiptStart = foundation.indexOf("CREATE TABLE IF NOT EXISTS oms.channel_fulfillment_receipts (");
+    const receiptEnd = foundation.indexOf("CREATE TABLE IF NOT EXISTS oms.channel_fulfillment_receipt_attempts (");
+    if (receiptStart < 0 || receiptEnd <= receiptStart) throw new Error("Production receipt fixture markers are missing");
+    await pool.query(foundation.slice(receiptStart, receiptEnd));
     // Historical correction now projects immutable dispatch evidence even when
     // this legacy package fixture has no canonical receipts to read.
     await pool.query(shipmentQuantityEvidenceFixtureSql);
@@ -1214,10 +1225,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
         status TEXT NOT NULL, topic TEXT NOT NULL, payload JSONB NOT NULL)`);
       // Empty inbound receipt relations complete the health reader's schema;
       // this scenario only produces outbound canonical commands.
-      await pool.query(`CREATE TABLE oms.channel_fulfillment_receipts (
-        id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, oms_order_id BIGINT NOT NULL,
-        source_provider TEXT NOT NULL, processing_status TEXT NOT NULL);
-        CREATE TABLE oms.channel_fulfillment_receipt_items (
+      await pool.query(`CREATE TABLE oms.channel_fulfillment_receipt_items (
         id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY, receipt_id BIGINT NOT NULL,
         legacy_wms_shipment_item_id INTEGER, quantity INTEGER NOT NULL)`);
       await pool.query("UPDATE wms.outbound_shipments SET shipped_at = NOW() - INTERVAL '2 hours'");
@@ -2576,6 +2584,67 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     ]);
     expect(Object.values(await loadLedgerCounts(pool))).toEqual(Array(9).fill(0));
   });
+
+  it.each(["unposted", "binding", "physical", "legacy", "pending", "retry", "success", "receipt", "unmapped_receipt", "other_store_receipt"] as const)(
+    "reads exact canceled-label posting footprints under a restricted read-only role: %s", async footprint => {
+      const sourceId = await seedCommercialFulfillmentAuthoritySource(pool, "VOIDED-FOOTPRINT", 2);
+      await seedCanonicalRequestForSource(pool, sourceId);
+      const oldId = await seedAuthorityReadinessLabel(pool, sourceId, {
+        providerLabelId: "43999", trackingNumber: "VOIDED-TRACK", providerOrderId: "99001",
+        voidDate: "2026-08-22T06:00:00.1234567", persistedVoidAt: "2026-08-22T13:00:00.123Z",
+        receivedAt: "2026-08-22T14:00:00Z",
+      });
+      await pool.query(`INSERT INTO wms.shipping_provider_label_links (shipping_provider_label_id, shipment_request_id)
+        SELECT $1, shipment_request_id FROM wms.shipment_request_items WHERE legacy_wms_shipment_item_id = $2`, [oldId, sourceId]);
+      const liveIds = await Promise.all(["44011", "44012"].map(providerLabelId => seedAuthorityReadinessLabel(pool, sourceId, {
+        providerLabelId, trackingNumber: `LIVE-${providerLabelId}`, receivedAt: "2026-08-23T14:00:00Z",
+        contentsLines: [{ lineItemKey: `wms-item-${sourceId}`, quantity: 1 }],
+      })));
+      const order = (await pool.query<{ id: string; channel_id: number }>("SELECT id::text, channel_id FROM oms.oms_orders")).rows[0];
+      if (footprint === "binding") {
+        await new PackageAllocationPlanningService(new PgPackageAllocationLedgerRepository(pool)).persist(
+          commandFor(sourceId, { providerPhysicalShipmentId: "43999", trackingNumber: "VOIDED-TRACK" }),
+        );
+      } else if (footprint === "physical") {
+        await pool.query(`INSERT INTO wms.physical_shipments (provider, provider_physical_shipment_id, tracking_number, status)
+          VALUES ('shipstation', '43999', 'VOIDED-TRACK', 'shipped')`);
+      } else if (footprint === "legacy") {
+        await pool.query("UPDATE wms.outbound_shipments SET external_fulfillment_id = 'shipstation_shipment:43999'");
+      } else if (["pending", "retry", "success"].includes(footprint)) {
+        // A package record with a different identity cannot hide a command
+        // for the canceled tracking number on this order.
+        const physical = (await pool.query<{ id: string }>(`INSERT INTO wms.physical_shipments
+          (provider, provider_physical_shipment_id, tracking_number, status)
+          VALUES ('shipstation', 'other-package', 'OTHER-TRACK', 'shipped') RETURNING id::text`)).rows[0];
+        await pool.query(`INSERT INTO oms.channel_fulfillment_pushes (oms_order_id, physical_shipment_id, channel_provider,
+          channel_fulfillment_scope_key, command_key, request_hash, tracking_number, carrier, push_status)
+          VALUES ($1, $2, 'shopify', 'order', 'voided-footprint', $3, ' voided-track ', 'ups', $4)`,
+        [order.id, physical.id, "a".repeat(64), footprint]);
+      } else if (["receipt", "unmapped_receipt", "other_store_receipt"].includes(footprint)) {
+        const channelId = footprint === "other_store_receipt"
+          ? (await pool.query<{ id: number }>("INSERT INTO channels.channels (name, provider, status) VALUES ('Other store', 'shopify', 'active') RETURNING id")).rows[0].id
+          : order.channel_id;
+        await pool.query(`INSERT INTO oms.channel_fulfillment_receipts (receipt_key, request_hash, source_provider,
+          source_channel_id, source_order_id, source_fulfillment_id, event_kind, source, tracking_number, oms_order_id)
+          VALUES ('voided-receipt', $1, 'shopify', $2, '640001', 'receipt-fulfillment', 'created', 'integration', ' voided-track ', $3)`,
+        ["b".repeat(64), channelId, footprint === "receipt" ? order.id : null]);
+      }
+      await withExecutionAuditRole(pool, async scopedPool => {
+        const repository = new PgPackageAllocationLedgerRepository(scopedPool);
+        await repository.withRepeatableReadOnlyTransaction(async transaction => {
+          const packages = await transaction.readAuthorityReadinessPackages([oldId, ...liveIds]);
+          const old = packages.find(pkg => pkg.persistedEvidence.shippingProviderLabelId === oldId)!;
+          const proof = assessVoidedLabelExclusion(old.evidenceKey, old.persistedEvidence, old.voidedLabelPostingFacts);
+          const eligible = footprint === "unposted" || footprint === "other_store_receipt";
+          expect(proof !== null, JSON.stringify(old.voidedLabelPostingFacts)).toBe(eligible);
+          const result = resolvePackageAllocationAuthorityEvidence({ groupKey: PRIMARY_GROUP_KEY, expectedGroupVersion: 0,
+            previousPlan: null, actions: [], packages, sourceFacts: await transaction.readSourceFacts([sourceId]) });
+          expect(result.resolution?.outcome).toBe(eligible ? "proposed" : "review");
+          expect(result.excludedVoidedLabelEvidence).toHaveLength(eligible ? 1 : 0);
+        });
+      });
+    },
+  );
 
   it("normalizes a stored legacy Pacific cancellation without bypassing split replacement authorization", async () => {
     const sourceId = await seedCustomerFulfillmentSource(pool, "DATE-SPLIT-REGRESSION", 2);
@@ -4487,6 +4556,10 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     { orderedQuantity: 2, arrival: "reversed", labelIds: [44011, 44010] },
     { orderedQuantity: 2, arrival: "concurrent", labelIds: [44010, 44011] },
     { orderedQuantity: 2, arrival: "retry_after_rollback", labelIds: [44010, 44011] },
+    { orderedQuantity: 2, arrival: "voided_conflict", labelIds: [44010, 44011] },
+    { orderedQuantity: 2, arrival: "voided_conflict_concurrent", labelIds: [44010, 44011] },
+    { orderedQuantity: 2, arrival: "voided_conflict_rollback", labelIds: [44010, 44011] },
+    { orderedQuantity: 2, arrival: "voided_conflict_unmapped_source", labelIds: [44010, 44011] },
   ])("sends raw ShipStation labels to Shopify before carrier pickup ($arrival, $orderedQuantity ordered units)", async ({ orderedQuantity, arrival, labelIds }) => {
     // Fill in the production label-link contract missing from the minimal
     // fixture so the real observer and linker can run without database mocks.
@@ -4529,6 +4602,13 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       WHERE id = $1`, [source.order_id, source.channel_id, warehouse.id]);
     await pool.query(`UPDATE wms.outbound_shipments SET channel_id = $2,
       external_fulfillment_id = NULL, tracking_number = NULL WHERE id = $1`, [source.shipment_id, source.channel_id]);
+    const hasVoidedConflict = arrival.startsWith("voided_conflict");
+    if (hasVoidedConflict) await seedCanonicalRequestForSource(pool, sourceId);
+    if (arrival === "voided_conflict_unmapped_source") {
+      // Order-level canonical lineage is known, but the historical WMS item
+      // itself has no canonical request-item mapping (the production shape).
+      await pool.query("DELETE FROM wms.shipment_request_items WHERE legacy_wms_shipment_item_id = $1", [sourceId]);
+    }
 
     const created: Array<{ id: string; trackingNumber: string; quantity: number }> = [];
     const providerRequest = vi.fn(async (query: string, variables?: Record<string, unknown>): Promise<unknown> => {
@@ -4585,7 +4665,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     const workflow = createPackageAllocationLabelCommercialWorkflow({
       pool, clock, logger,
     });
-    let failBeforeCommit = arrival === "retry_after_rollback";
+    let failBeforeCommit = arrival === "retry_after_rollback" || arrival === "voided_conflict_rollback";
     const labelHandler = new PackageAllocationLabelCommercialFulfillmentService({
       enabled: true,
       workflow: {
@@ -4600,6 +4680,26 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       },
       labelLinker: observer, reviewRepository: { record: recordReview }, logger,
     });
+    const voidedShipment = (quantity: number) => ({
+      shipmentId: 43999, orderId: 99001, orderKey: `wms-${source.shipment_id}`,
+      trackingNumber: "VOIDED-UNUSED-PACKAGE", carrierCode: "ups", isReturnLabel: false,
+      voidDate: "2026-08-22T06:00:00.1234567", shipDate: "2026-08-22",
+      shipmentItems: [{ lineItemKey: `wms-item-${sourceId}`, quantity }],
+    });
+    let originalVoidEvents: unknown[] = [];
+    if (hasVoidedConflict) {
+      // Real observer, two authenticated contradictory snapshots of the SAME
+      // canceled label. It was never allocated or sent to the sales channel.
+      for (const quantity of [1, 2]) {
+        await observer.observeShipStationLabel(voidedShipment(quantity));
+        now = new Date(now.getTime() + 60_000);
+      }
+      await observer.reconcileShipStationLabel("43999");
+      originalVoidEvents = (await pool.query(`SELECT event.* FROM wms.shipping_provider_label_events event
+        JOIN wms.shipping_provider_labels label ON label.id = event.shipping_provider_label_id
+        WHERE label.provider_label_id = '43999' ORDER BY event.id`)).rows;
+      expect(originalVoidEvents).toHaveLength(2);
+    }
     const recordShipment = vi.fn().mockRejectedValue(new Error("Carrier pickup has not occurred"));
     const recordReplacementShipmentFromAvailableInventory = vi.fn().mockRejectedValue(new Error("No replacement was authorized"));
     vi.stubEnv("SHIPSTATION_API_KEY", "label-test-key");
@@ -4640,11 +4740,17 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       }
       const dispatchCommands = async (expectedCount: number) => {
         expect(recordReview.mock.calls, JSON.stringify(recordReview.mock.calls)).toEqual([]);
+        // PostgreSQL admission timestamps, not the historical provider time,
+        // determine when an otherwise immediately due command can be claimed.
+        const due = (await pool.query<{ due_at: Date | null }>(
+          "SELECT MAX(next_attempt_at) + INTERVAL '1 millisecond' AS due_at FROM oms.channel_fulfillment_pushes",
+        )).rows[0].due_at;
+        if (due && due > now) now = due;
         const batch = await fulfillment.runDueBatch({ limit: 10 });
         const commands = await pool.query("SELECT id, push_status, last_error_code, last_error FROM oms.channel_fulfillment_pushes ORDER BY id");
         expect(batch, JSON.stringify({ commands: commands.rows, errors: logger.error.mock.calls })).toMatchObject({ claimed: expectedCount, succeeded: expectedCount });
       };
-      if (arrival === "concurrent") {
+      if (arrival === "concurrent" || arrival === "voided_conflict_concurrent") {
         // Drain both callbacks even if one fails so test cleanup cannot race
         // a still-running transaction from the other label.
         const outcomes = await Promise.allSettled(labelIds.map(receiveLabel));
@@ -4660,6 +4766,26 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       expect(created.map((pkg) => [pkg.trackingNumber, pkg.quantity]).sort()).toEqual([
         ["1Z0000000000044010", 1], ["1Z0000000000044011", 1],
       ]);
+      if (hasVoidedConflict) {
+        const plansBefore = (await pool.query("SELECT id, authority_snapshot FROM wms.package_allocation_plans ORDER BY id")).rows;
+        for (const plan of plansBefore) {
+          expect(plan.authority_snapshot.excludedVoidedLabelEvidence).toEqual([expect.objectContaining({
+            reason: "voided_without_posting_or_allocation",
+            postingFacts: expect.objectContaining({ hasOrderScope: true, hasPhysicalPackage: false, hasChannelCommand: false }),
+          })]);
+        }
+        // Another old-label observation changes its evidence hash without
+        // changing the two current parcels or rewriting their original audit.
+        now = new Date(now.getTime() + 60_000);
+        await observer.observeShipStationLabel({ ...voidedShipment(2), serviceCode: "ups_ground" });
+        await receiveLabel(44011);
+        expect((await pool.query("SELECT id, authority_snapshot FROM wms.package_allocation_plans ORDER BY id")).rows).toEqual(plansBefore);
+        expect((await pool.query(`SELECT event.* FROM wms.shipping_provider_label_events event
+          JOIN wms.shipping_provider_labels label ON label.id = event.shipping_provider_label_id
+          WHERE label.provider_label_id = '43999' ORDER BY event.id`)).rows.slice(0, 2)).toEqual(originalVoidEvents);
+        expect((await pool.query("SELECT id FROM wms.physical_shipments WHERE provider_physical_shipment_id = '43999'")).rowCount).toBe(0);
+        expect((await pool.query("SELECT id FROM wms.package_allocation_package_bindings WHERE provider_physical_shipment_id = '43999'")).rowCount).toBe(0);
+      }
       for (const labelId of [44010, 44011, 44011]) {
         await receiveLabel(labelId);
       }
