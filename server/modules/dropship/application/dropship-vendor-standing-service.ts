@@ -501,7 +501,11 @@ function pauseMessageFor(reason: DropshipVendorStandingReason, evidence: Record<
     ? ` (${evidence.stripeDeclineCode.replace(/_/g, " ")})`
     : "";
   const how = reason === "funding_returned"
-    ? `A bank transfer${amount ? ` of ${amount}` : ""} to your wallet was returned by your bank.`
+    ? evidence.disputed === true
+      // A settled credit taken back (funding design phase 4): the bank
+      // reversed a payment that had already landed, whichever rail it used.
+      ? `A payment${amount ? ` of ${amount}` : ""} you added to your wallet was disputed and taken back by your bank.`
+      : `A bank transfer${amount ? ` of ${amount}` : ""} to your wallet was returned by your bank.`
     : `Your saved card was declined${declineDetail} when we tried to top up your wallet${amount ? ` by ${amount}` : ""}.`;
   return `${how} Orders are not being accepted and your listings show nothing for sale until your wallet is funded again. Add funds by ACH or update your card in Wallet; selling resumes on its own once your balance is back to the minimum.`;
 }

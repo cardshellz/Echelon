@@ -186,6 +186,24 @@ describe("DropshipVendorStandingService", () => {
       expect(notificationSender.sent[0].message).toContain("A bank transfer of USD $40.00 to your wallet was returned by your bank.");
     });
 
+    it("words a pause for a settled payment the bank took back as a dispute, not as a returned transfer (funding design phase 4)", async () => {
+      repository.seed(standing({ vendorId: 10, status: "paused", standingReason: "funding_returned", pausedAt: NOW, standingRevision: 4 }), [77]);
+
+      const result = await service.announcePause({
+        vendorId: 10,
+        evidence: { source: "dispute_webhook", disputed: true, ledgerEntryId: 56, amountCents: 4000, currency: "USD" },
+      });
+
+      expect(result).toMatchObject({ outcome: "paused" });
+      expect(notificationSender.sent[0]).toMatchObject({
+        eventType: "dropship_vendor_paused",
+        payload: expect.objectContaining({ reason: "funding_returned", disputed: true, ledgerEntryId: 56 }),
+      });
+      expect(notificationSender.sent[0].message).toContain("A payment of USD $40.00 you added to your wallet was disputed and taken back by your bank.");
+      expect(notificationSender.sent[0].message).not.toContain("returned by your bank");
+      expect(notificationSender.sent[0].message).toContain("selling resumes on its own once your balance is back to the minimum");
+    });
+
     it("announces nothing for a vendor who is active or paused by an operator", async () => {
       repository.seed(standing({ vendorId: 10, status: "active" }), [77]);
       repository.seed(standing({ vendorId: 11, status: "paused", standingReason: "operator", pausedAt: NOW }), [78]);

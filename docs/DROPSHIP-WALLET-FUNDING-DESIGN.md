@@ -59,9 +59,30 @@ permission; the funding method records the Financial Connections account id;
 the balance is read at link time and on `refreshed_balance` webhooks and
 appended to `dropship.dropship_funding_method_balance_verifications`.
 
+## Reversals (phase 4)
+
+A credit that settled can still be taken back: a card chargeback, or an ACH
+debit the bank returns after it cleared. Stripe reports both as disputes on the
+funding payment intent (`charge.dispute.*`). `domain/funding-reversal.ts`,
+applied by the wallet service and repository:
+
+- funds withdrawn (an active dispute, or `funds_withdrawn`) → one
+  `funding_reversal` debit per dispute of min(disputed amount, credit), the
+  balance allowed negative, the vendor paused in the same transaction with the
+  `funding_returned` reason; the daily wallet run collects. An inquiry
+  ("warning" statuses) moves nothing until funds are withdrawn, and one that
+  closes without a chargeback (`warning_closed`) moves nothing at all.
+- dispute won (`funds_reinstated`, or closed as won) → one
+  `funding_reinstated` credit of the reversal; the vendor resumes if funded.
+- dispute lost → the reversal stands; only the log says so.
+- a dispute on a payment the wallet never recorded belongs to another product
+  and is ignored.
+
+The card fee charged with a card credit is not the vendor's to lose twice: the
+reversal is bounded by what the wallet received, and the fee is written off.
+
 ## Remaining phases
 
-4. Reversals — dispute and ACH-return webhooks: debit, pause, collect.
 5. Vendor-facing — "keep $X" as the one setting, optional top-up amount, new
    words, rules page rewrite, low-balance alert.
 6. USDC in a Card Shellz wallet — addresses, chain watcher, custody.

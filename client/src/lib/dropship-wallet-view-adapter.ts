@@ -77,7 +77,8 @@ export interface WalletAutoReload {
 
 export type WalletLedgerReason =
   | "daily_top_up" | "after_order_top_up" | "activation_top_up" | "covered_held_order" | "manual_top_up"
-  | "usdc_deposit" | "admin_credit" | "order" | "return_fee" | "return_credit" | "insurance_pool_credit" | "other";
+  | "usdc_deposit" | "admin_credit" | "order" | "advance_fee" | "funding_reversed" | "funding_reinstated"
+  | "return_fee" | "return_credit" | "insurance_pool_credit" | "other";
 
 export interface WalletLedgerEntry {
   ledgerEntryId: number;
@@ -272,7 +273,8 @@ const rawAutoReloadSchema = z.object({
 
 const ledgerReasonSchema = z.enum([
   "daily_top_up", "after_order_top_up", "activation_top_up", "covered_held_order", "manual_top_up",
-  "usdc_deposit", "admin_credit", "order", "return_fee", "return_credit", "insurance_pool_credit", "other",
+  "usdc_deposit", "admin_credit", "order", "advance_fee", "funding_reversed", "funding_reinstated",
+  "return_fee", "return_credit", "insurance_pool_credit", "other",
 ]);
 
 const rawLedgerEntrySchema = z.object({
@@ -574,6 +576,12 @@ export function deriveLedgerReason(entry: Pick<RawLedgerEntry, "type" | "reason"
   switch (entry.type) {
     case "order_debit":
       return "order";
+    case "advance_fee":
+      return "advance_fee";
+    case "funding_reversal":
+      return "funding_reversed";
+    case "funding_reinstated":
+      return "funding_reinstated";
     case "return_fee":
       return "return_fee";
     case "return_credit":

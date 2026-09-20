@@ -16,6 +16,12 @@ import type { DropshipVendorStandingReason, DropshipVendorStatus } from "../../.
 import { DropshipError } from "../domain/errors";
 import { standingReasonForFailedFunding } from "../domain/vendor-standing";
 import {
+  DROPSHIP_DISPUTE_STATUSES,
+  DROPSHIP_FUNDING_REVERSAL_STANDING_REASON,
+  disputeOutcomeFor,
+  type DropshipDisputeStatus,
+} from "../domain/funding-reversal";
+import {
   assessAdvanceStanding,
   decideCardBackstopCharge,
   type DropshipAdvanceContext,
@@ -29,6 +35,7 @@ import {
 } from "../domain/wallet-policy";
 import {
   formatNotificationCurrency,
+  formatNotificationDate,
   sendDropshipNotificationSafely,
 } from "./dropship-notification-dispatch";
 import { DROPSHIP_NOTIFICATION_EVENTS } from "./dropship-notification-events";
@@ -96,6 +103,9 @@ export const dropshipWalletLedgerTypeSchema = z.enum([
   "manual_adjustment",
   /** The service fee on an order accepted against pending ACH (migration 0688). */
   "advance_fee",
+  /** A settled credit taken back by a dispute or ACH return, and its return when the dispute is won (migration 0689). */
+  "funding_reversal",
+  "funding_reinstated",
 ]);
 export type DropshipWalletLedgerType = z.infer<typeof dropshipWalletLedgerTypeSchema>;
 
@@ -253,6 +263,36 @@ export const recordDropshipWalletFundingFailureInputSchema = z.object({
   idempotencyKey: idempotencyKeySchema,
 }).strict();
 
+export const dropshipDisputeStatusSchema = z.enum(
+  DROPSHIP_DISPUTE_STATUSES as [DropshipDisputeStatus, ...DropshipDisputeStatus[]],
+);
+
+/** A provider dispute on a funding payment: a card chargeback or an ACH debit returned after it cleared. */
+export const recordDropshipWalletFundingReversalInputSchema = z.object({
+  provider: z.literal("stripe"),
+  providerEventId: z.string().trim().min(1).max(255),
+  providerDisputeId: z.string().trim().min(1).max(255),
+  providerPaymentIntentId: z.string().trim().min(1).max(255),
+  amountCents: PositiveCentsSchema,
+  currency: CurrencyCodeSchema,
+  status: dropshipDisputeStatusSchema,
+  reason: z.string().trim().min(1).max(120).nullable(),
+  /** True once the provider has taken the funds: an inquiry that has not moves nothing yet. */
+  fundsWithdrawn: z.boolean(),
+}).strict();
+
+export const recordDropshipWalletDisputeOutcomeInputSchema = z.object({
+  provider: z.literal("stripe"),
+  providerEventId: z.string().trim().min(1).max(255),
+  providerDisputeId: z.string().trim().min(1).max(255),
+  providerPaymentIntentId: z.string().trim().min(1).max(255),
+  amountCents: PositiveCentsSchema,
+  currency: CurrencyCodeSchema,
+  status: dropshipDisputeStatusSchema,
+  /** True when the funds came back to us: the dispute was won. */
+  fundsReinstated: z.boolean(),
+}).strict();
+
 export const registerDropshipFundingMethodInputSchema = z.object({
   vendorId: positiveIdSchema,
   rail: dropshipWalletFundingRailSchema,
@@ -295,6 +335,8 @@ export type CreditDropshipWalletManualFundingInput = z.infer<typeof creditDropsh
 export type CreditDropshipWalletConfirmedUsdcFundingInput = z.infer<typeof creditDropshipWalletConfirmedUsdcFundingInputSchema>;
 export type HandleDropshipAutoReloadInput = z.infer<typeof handleDropshipAutoReloadInputSchema>;
 export type RecordDropshipWalletFundingFailureInput = z.infer<typeof recordDropshipWalletFundingFailureInputSchema>;
+export type RecordDropshipWalletFundingReversalInput = z.infer<typeof recordDropshipWalletFundingReversalInputSchema>;
+export type RecordDropshipWalletDisputeOutcomeInput = z.infer<typeof recordDropshipWalletDisputeOutcomeInputSchema>;
 export type RegisterDropshipFundingMethodInput = z.infer<typeof registerDropshipFundingMethodInputSchema>;
 export type RegisterDropshipUsdcBaseFundingMethodForMemberInput = z.infer<typeof registerDropshipUsdcBaseFundingMethodForMemberInputSchema>;
 
@@ -488,6 +530,83 @@ export interface DropshipWalletFundingFailureRepositoryResult extends DropshipWa
   /** The vendor's standing after this call paused it; null when nothing changed (replay, or already paused). */
   vendorPaused: DropshipVendorStandingRecord | null;
 }
+
+export interface ReverseDropshipSettledFundingRepositoryInput {
+  provider: "stripe";
+  providerPaymentIntentId: string;
+  providerDisputeId: string;
+  providerEventId: string;
+  disputeAmountCents: number;
+  currency: string;
+  disputeStatus: DropshipDisputeStatus;
+  disputeReason: string | null;
+  occurredAt: Date;
+  /** Pause the vendor in the same transaction as the reversal; null keeps standing untouched (tests only). */
+  pauseVendor: {
+    reason: DropshipVendorStandingReason;
+    evidence: Record<string, unknown>;
+  } | null;
+}
+
+export type DropshipFundingReversalRepositoryResult =
+  | {
+      outcome: "reversed";
+      vendorId: number;
+      account: DropshipWalletAccountRecord;
+      /** The settled credit the dispute is about. */
+      credit: DropshipWalletLedgerRecord;
+      reversal: DropshipWalletLedgerRecord;
+      idempotentReplay: boolean;
+      /** The vendor's standing after this call paused it; null when nothing changed (replay, or already paused). */
+      vendorPaused: DropshipVendorStandingRecord | null;
+    }
+  | {
+      outcome: "ignored";
+      vendorId: number;
+      credit: DropshipWalletLedgerRecord;
+      reason: "credit_not_settled" | "currency_mismatch" | "nothing_to_reverse";
+    };
+
+export interface ReinstateDropshipReversedFundingRepositoryInput {
+  provider: "stripe";
+  providerDisputeId: string;
+  providerEventId: string;
+  occurredAt: Date;
+}
+
+export interface DropshipFundingReinstatementRepositoryResult {
+  vendorId: number;
+  account: DropshipWalletAccountRecord;
+  reversal: DropshipWalletLedgerRecord;
+  reinstatement: DropshipWalletLedgerRecord;
+  idempotentReplay: boolean;
+}
+
+export type DropshipWalletFundingReversalResult =
+  | { outcome: "deferred" }
+  | { outcome: "not_applicable" }
+  | { outcome: "ignored"; reason: "credit_not_settled" | "currency_mismatch" | "nothing_to_reverse" }
+  | {
+      outcome: "reversed";
+      vendorId: number;
+      reversalLedgerEntryId: number;
+      reversalCents: number;
+      availableBalanceAfterCents: number;
+      vendorPaused: boolean;
+      idempotentReplay: boolean;
+    };
+
+export type DropshipWalletDisputeOutcomeResult =
+  | { outcome: "unchanged" }
+  | { outcome: "not_applicable" }
+  | {
+      outcome: "reinstated";
+      vendorId: number;
+      reinstatementLedgerEntryId: number;
+      amountCents: number;
+      availableBalanceAfterCents: number;
+      idempotentReplay: boolean;
+    };
 
 export interface DropshipWalletFundingFailureResult {
   /** True when this call voided a pending credit; false on a replay or when nothing was recorded for the payment. */
@@ -683,6 +802,20 @@ export interface DropshipWalletRepository {
     provider: "stripe";
     providerAccountId: string;
   }): Promise<DropshipFundingMethodRecord | null>;
+  /**
+   * Take back a settled funding credit the provider disputed: one
+   * `funding_reversal` debit per dispute, the vendor paused in the same
+   * transaction. Null when no funding credit matches the payment intent;
+   * `ignored` when the credit is not reversible (domain/funding-reversal.ts);
+   * a replay returns the existing reversal and moves nothing.
+   */
+  reverseSettledFunding(
+    input: ReverseDropshipSettledFundingRepositoryInput,
+  ): Promise<DropshipFundingReversalRepositoryResult | null>;
+  /** Credit a reversal back once the dispute is won; null when no reversal exists for the dispute. */
+  reinstateReversedFunding(
+    input: ReinstateDropshipReversedFundingRepositoryInput,
+  ): Promise<DropshipFundingReinstatementRepositoryResult | null>;
 }
 
 export type CreateDropshipWalletFundingLedgerInput = Omit<CreditDropshipWalletFundingInput, "walletAccountId"> & {
@@ -1513,6 +1646,230 @@ export class DropshipWalletService {
     });
 
     return { pendingCreditVoided, ledgerEntryId, vendorPaused: vendorPaused !== null };
+  }
+
+  /**
+   * A settled credit the provider has taken back: a card chargeback, or an
+   * ACH debit returned after it cleared (funding design phase 4). The
+   * reversal posts against the credit and the vendor is paused in the same
+   * transaction, then the vendor is told once. An inquiry that has not
+   * withdrawn funds moves nothing yet; a dispute on a payment the wallet never
+   * recorded is not ours; a replayed webhook finds the reversal and moves
+   * nothing.
+   */
+  async recordWalletFundingReversal(input: unknown): Promise<DropshipWalletFundingReversalResult> {
+    const parsed = parseWalletInput(recordDropshipWalletFundingReversalInputSchema, input);
+    const context = {
+      provider: parsed.provider,
+      providerEventId: parsed.providerEventId,
+      providerDisputeId: parsed.providerDisputeId,
+      providerPaymentIntentId: parsed.providerPaymentIntentId,
+      amountCents: parsed.amountCents,
+      currency: parsed.currency,
+      disputeStatus: parsed.status,
+      disputeReason: parsed.reason,
+    };
+    if (!parsed.fundsWithdrawn) {
+      this.deps.logger.info({
+        code: "DROPSHIP_WALLET_FUNDING_DISPUTE_OPENED",
+        message: "Dropship wallet funding dispute was opened without withdrawing funds; nothing moves until it does.",
+        context,
+      });
+      return { outcome: "deferred" };
+    }
+    const pauseEvidence = {
+      source: "dispute_webhook",
+      disputed: true,
+      ...context,
+    };
+    const result = await this.deps.repository.reverseSettledFunding({
+      provider: parsed.provider,
+      providerPaymentIntentId: parsed.providerPaymentIntentId,
+      providerDisputeId: parsed.providerDisputeId,
+      providerEventId: parsed.providerEventId,
+      disputeAmountCents: parsed.amountCents,
+      currency: parsed.currency,
+      disputeStatus: parsed.status,
+      disputeReason: parsed.reason,
+      occurredAt: this.deps.clock.now(),
+      // The money is gone whichever rail it came over: the vendor is paused
+      // in the same transaction as the reversal, so the two facts never part.
+      pauseVendor: { reason: DROPSHIP_FUNDING_REVERSAL_STANDING_REASON, evidence: pauseEvidence },
+    });
+    if (!result) {
+      // Every dispute on the Stripe account arrives here; one on a payment the
+      // wallet never recorded belongs to another product.
+      this.deps.logger.info({
+        code: "DROPSHIP_WALLET_FUNDING_DISPUTE_UNMATCHED",
+        message: "Dropship wallet funding dispute did not match a recorded funding credit.",
+        context,
+      });
+      return { outcome: "not_applicable" };
+    }
+    if (result.outcome === "ignored") {
+      this.deps.logger.warn({
+        code: "DROPSHIP_WALLET_FUNDING_REVERSAL_IGNORED",
+        message: "Dropship wallet funding dispute matched a credit that cannot be reversed as reported; a human should look.",
+        context: { ...context, vendorId: result.vendorId, creditLedgerEntryId: result.credit.ledgerEntryId, creditStatus: result.credit.status, creditCurrency: result.credit.currency, reason: result.reason },
+      });
+      return { outcome: "ignored", reason: result.reason };
+    }
+    const reversalCents = -result.reversal.amountCents;
+    this.deps.logger.warn({
+      code: "DROPSHIP_WALLET_FUNDING_REVERSED",
+      message: "Dropship wallet funding credit was reversed by a dispute.",
+      context: {
+        ...context,
+        vendorId: result.vendorId,
+        creditLedgerEntryId: result.credit.ledgerEntryId,
+        reversalLedgerEntryId: result.reversal.ledgerEntryId,
+        reversalCents,
+        availableBalanceAfterCents: result.account.availableBalanceCents,
+        vendorPaused: result.vendorPaused !== null,
+        standingRevision: result.vendorPaused?.standingRevision ?? null,
+        idempotentReplay: result.idempotentReplay,
+      },
+    });
+    const summary = {
+      outcome: "reversed" as const,
+      vendorId: result.vendorId,
+      reversalLedgerEntryId: result.reversal.ledgerEntryId,
+      reversalCents,
+      availableBalanceAfterCents: result.account.availableBalanceCents,
+      vendorPaused: result.vendorPaused !== null,
+      idempotentReplay: result.idempotentReplay,
+    };
+    if (result.idempotentReplay) {
+      return summary;
+    }
+    // The pause notice tells the vendor what was reversed and what to do, so
+    // the reversal notice is only sent when no pause went out.
+    const pauseAnnounced = result.vendorPaused !== null
+      && await this.announceVendorPauseSafely(result.vendorId, { ...pauseEvidence, ledgerEntryId: result.reversal.ledgerEntryId });
+    if (pauseAnnounced) {
+      return summary;
+    }
+    const credited = formatNotificationDate(result.credit.settledAt ?? result.credit.createdAt);
+    const balance = formatNotificationCurrency(result.account.availableBalanceCents, result.account.currency);
+    await sendDropshipNotificationSafely(this.deps, {
+      vendorId: result.vendorId,
+      eventType: DROPSHIP_NOTIFICATION_EVENTS.WALLET_FUNDING_REVERSED,
+      critical: true,
+      channels: ["email", "in_app"],
+      title: "A payment to your wallet was reversed",
+      message: `Your bank reversed ${formatNotificationCurrency(reversalCents, result.account.currency)} that you added on ${credited}. That amount has been taken back out of your wallet, leaving ${balance}.${result.account.availableBalanceCents < 0 ? " Your wallet is below zero until funds are added; the daily wallet run collects the shortfall from your saved funding source when one is set up." : ""}`,
+      payload: {
+        ...context,
+        vendorId: result.vendorId,
+        creditLedgerEntryId: result.credit.ledgerEntryId,
+        reversalLedgerEntryId: result.reversal.ledgerEntryId,
+        reversalCents,
+        availableBalanceAfterCents: result.account.availableBalanceCents,
+      },
+      idempotencyKey: `stripe-dispute-reversed:${parsed.providerDisputeId}`,
+    }, {
+      code: "DROPSHIP_WALLET_FUNDING_REVERSAL_NOTIFICATION_FAILED",
+      message: "Dropship wallet funding reversal notification failed after the reversal committed.",
+      context: { ...context, vendorId: result.vendorId, reversalLedgerEntryId: result.reversal.ledgerEntryId },
+    });
+    return summary;
+  }
+
+  /**
+   * A dispute closed. Won: the provider returns the funds and the wallet
+   * credits the reversal back, then checks whether the vendor can resume.
+   * Lost: the reversal stands and only the log says so. Any other status
+   * changes nothing.
+   */
+  async recordWalletFundingDisputeOutcome(input: unknown): Promise<DropshipWalletDisputeOutcomeResult> {
+    const parsed = parseWalletInput(recordDropshipWalletDisputeOutcomeInputSchema, input);
+    const context = {
+      provider: parsed.provider,
+      providerEventId: parsed.providerEventId,
+      providerDisputeId: parsed.providerDisputeId,
+      providerPaymentIntentId: parsed.providerPaymentIntentId,
+      amountCents: parsed.amountCents,
+      currency: parsed.currency,
+      disputeStatus: parsed.status,
+    };
+    if (!parsed.fundsReinstated) {
+      const lost = disputeOutcomeFor(parsed.status) === "lost";
+      const event = {
+        code: lost ? "DROPSHIP_WALLET_FUNDING_DISPUTE_LOST" : "DROPSHIP_WALLET_FUNDING_DISPUTE_UNCHANGED",
+        message: lost
+          ? "Dropship wallet funding dispute was lost; the reversal stands."
+          : "Dropship wallet funding dispute event changed nothing.",
+        context,
+      };
+      if (lost) this.deps.logger.warn(event);
+      else this.deps.logger.info(event);
+      return { outcome: "unchanged" };
+    }
+    const result = await this.deps.repository.reinstateReversedFunding({
+      provider: parsed.provider,
+      providerDisputeId: parsed.providerDisputeId,
+      providerEventId: parsed.providerEventId,
+      occurredAt: this.deps.clock.now(),
+    });
+    if (!result) {
+      this.deps.logger.info({
+        code: "DROPSHIP_WALLET_FUNDING_REINSTATEMENT_UNMATCHED",
+        message: "Dropship wallet funding dispute was won but no reversal was recorded for it; nothing to credit back.",
+        context,
+      });
+      return { outcome: "not_applicable" };
+    }
+    this.deps.logger.info({
+      code: "DROPSHIP_WALLET_FUNDING_REINSTATED",
+      message: "Dropship wallet funding reversal was credited back after the dispute was won.",
+      context: {
+        ...context,
+        vendorId: result.vendorId,
+        reversalLedgerEntryId: result.reversal.ledgerEntryId,
+        reinstatementLedgerEntryId: result.reinstatement.ledgerEntryId,
+        amountCents: result.reinstatement.amountCents,
+        availableBalanceAfterCents: result.account.availableBalanceCents,
+        idempotentReplay: result.idempotentReplay,
+      },
+    });
+    const summary = {
+      outcome: "reinstated" as const,
+      vendorId: result.vendorId,
+      reinstatementLedgerEntryId: result.reinstatement.ledgerEntryId,
+      amountCents: result.reinstatement.amountCents,
+      availableBalanceAfterCents: result.account.availableBalanceCents,
+      idempotentReplay: result.idempotentReplay,
+    };
+    if (result.idempotentReplay) {
+      return summary;
+    }
+    await this.restoreVendorStandingIfFunded(result.vendorId, {
+      source: "dispute_webhook",
+      ...context,
+      reinstatementLedgerEntryId: result.reinstatement.ledgerEntryId,
+    });
+    await sendDropshipNotificationSafely(this.deps, {
+      vendorId: result.vendorId,
+      eventType: DROPSHIP_NOTIFICATION_EVENTS.WALLET_FUNDING_REINSTATED,
+      critical: false,
+      channels: ["email", "in_app"],
+      title: "A reversed payment was returned to your wallet",
+      message: `The dispute on ${formatNotificationCurrency(result.reinstatement.amountCents, result.account.currency)} you added was resolved in your favour, and that amount is back in your wallet, leaving ${formatNotificationCurrency(result.account.availableBalanceCents, result.account.currency)}.`,
+      payload: {
+        ...context,
+        vendorId: result.vendorId,
+        reversalLedgerEntryId: result.reversal.ledgerEntryId,
+        reinstatementLedgerEntryId: result.reinstatement.ledgerEntryId,
+        amountCents: result.reinstatement.amountCents,
+        availableBalanceAfterCents: result.account.availableBalanceCents,
+      },
+      idempotencyKey: `stripe-dispute-reinstated:${parsed.providerDisputeId}`,
+    }, {
+      code: "DROPSHIP_WALLET_FUNDING_REINSTATEMENT_NOTIFICATION_FAILED",
+      message: "Dropship wallet funding reinstatement notification failed after the credit committed.",
+      context: { ...context, vendorId: result.vendorId, reinstatementLedgerEntryId: result.reinstatement.ledgerEntryId },
+    });
+    return summary;
   }
 
   /**

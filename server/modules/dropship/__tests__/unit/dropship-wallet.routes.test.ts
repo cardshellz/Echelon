@@ -421,6 +421,14 @@ describe("dropship wallet routes advance and bank balance (funding design phase 
         calls.push({ method: "recordBankBalanceRefresh", input });
         return { outcome: "recorded" };
       },
+      recordWalletFundingReversal: async (input: unknown) => {
+        calls.push({ method: "recordWalletFundingReversal", input });
+        return { outcome: "reversed" };
+      },
+      recordWalletFundingDisputeOutcome: async (input: unknown) => {
+        calls.push({ method: "recordWalletFundingDisputeOutcome", input });
+        return { outcome: "reinstated" };
+      },
     } as unknown as DropshipWalletService;
     const provider = {
       parseWebhookEvent: async () => webhookEvent,
@@ -491,5 +499,28 @@ describe("dropship wallet routes advance and bank balance (funding design phase 
 
     expect((await postWebhook()).status).toBe(200);
     expect(calls).toEqual([{ method: "recordBankBalanceRefresh", input: { providerAccountId: "fca_1", snapshot, providerEventId: "evt_r1" } }]);
+  });
+
+  it("hands a dispute to the wallet as a reversal, and a closed dispute as its outcome (funding design phase 4)", async () => {
+    const reversal = {
+      provider: "stripe", providerEventId: "evt_dp_1", providerDisputeId: "dp_1", providerPaymentIntentId: "pi_1",
+      amountCents: 5_000, currency: "USD", status: "needs_response", reason: "fraudulent", fundsWithdrawn: true,
+    };
+    webhookEvent = { kind: "wallet_funding_disputed", providerEventId: "evt_dp_1", eventType: "charge.dispute.created", reversal };
+    const disputed = await postWebhook();
+    expect(disputed.status).toBe(200);
+    expect(disputed.body).toEqual({ received: true, eventType: "charge.dispute.created", action: "wallet_funding_disputed" });
+    expect(calls).toEqual([{ method: "recordWalletFundingReversal", input: reversal }]);
+
+    calls = [];
+    const outcome = {
+      provider: "stripe", providerEventId: "evt_dp_2", providerDisputeId: "dp_1", providerPaymentIntentId: "pi_1",
+      amountCents: 5_000, currency: "USD", status: "won", fundsReinstated: true,
+    };
+    webhookEvent = { kind: "wallet_funding_dispute_closed", providerEventId: "evt_dp_2", eventType: "charge.dispute.closed", outcome };
+    const closed = await postWebhook();
+    expect(closed.status).toBe(200);
+    expect(closed.body).toEqual({ received: true, eventType: "charge.dispute.closed", action: "wallet_funding_dispute_closed" });
+    expect(calls).toEqual([{ method: "recordWalletFundingDisputeOutcome", input: outcome }]);
   });
 });

@@ -147,6 +147,10 @@ export const dropshipWalletLedgerTypeEnum = [
   "manual_adjustment",
   // The service fee on an order accepted against pending ACH (migration 0688).
   "advance_fee",
+  // A settled credit taken back by a dispute or ACH return, and its return
+  // when the dispute is won (migration 0689).
+  "funding_reversal",
+  "funding_reinstated",
 ] as const;
 export type DropshipWalletLedgerType =
   (typeof dropshipWalletLedgerTypeEnum)[number];
@@ -1656,7 +1660,7 @@ export const dropshipWalletLedger = dropshipSchema.table(
     index("dropship_wallet_ledger_vendor_idx").on(table.vendorId),
     check(
       "dropship_wallet_ledger_type_chk",
-      sql`${table.type} IN ('funding','order_debit','refund_credit','return_credit','return_fee','insurance_pool_credit','manual_adjustment','advance_fee')`,
+      sql`${table.type} IN ('funding','order_debit','refund_credit','return_credit','return_fee','insurance_pool_credit','manual_adjustment','advance_fee','funding_reversal','funding_reinstated')`,
     ),
     check(
       "dropship_wallet_ledger_status_chk",

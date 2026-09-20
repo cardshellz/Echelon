@@ -4,6 +4,7 @@ import { pool as defaultPool } from "../../../db";
 import { DropshipError } from "../domain/errors";
 import { FUNDING_METHOD_FINANCIAL_CONNECTIONS_ACCOUNT_KEY } from "../domain/funding-method";
 import type { DropshipAdvanceContext } from "../domain/acceptance-funding";
+import { decideFundingReversal } from "../domain/funding-reversal";
 import { pauseDropshipVendorWithClient } from "./dropship-vendor-standing.repository";
 import { loadAdvancePolicyWithClient, loadAdvanceSourcesWithClient } from "./dropship-advance.reader";
 import type {
@@ -14,6 +15,8 @@ import type {
   DropshipAutoReloadSettingRecord,
   DropshipBankBalanceVerificationRecord,
   DropshipConfirmedUsdcFundingResult,
+  DropshipFundingReinstatementRepositoryResult,
+  DropshipFundingReversalRepositoryResult,
   DropshipFundingMethodMutationResult,
   DropshipFundingMethodRecord,
   DropshipUsdcLedgerEntryRecord,
@@ -25,6 +28,8 @@ import type {
   DropshipWalletRepository,
   FailDropshipPendingFundingRepositoryInput,
   RecordDropshipBankBalanceVerificationRepositoryInput,
+  ReinstateDropshipReversedFundingRepositoryInput,
+  ReverseDropshipSettledFundingRepositoryInput,
   UpsertDropshipFundingMethodRepositoryInput,
 } from "../application/dropship-wallet-service";
 
@@ -934,6 +939,334 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository {
     return result.rows[0] ? mapFundingMethodRow(result.rows[0]) : null;
   }
 
+  async reverseSettledFunding(
+    input: ReverseDropshipSettledFundingRepositoryInput,
+  ): Promise<DropshipFundingReversalRepositoryResult | null> {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      // The dispute names the provider's payment; the wallet's credit for it
+      // is the only thing that says which vendor this is.
+      const credit = await findLedgerByReferenceWithClient(client, {
+        referenceType: "stripe_payment_intent",
+        referenceId: input.providerPaymentIntentId,
+        type: "funding",
+        forUpdate: true,
+      });
+      if (!credit) {
+        await client.query("COMMIT");
+        return null;
+      }
+      if (credit.walletAccountId === null) {
+        throw new DropshipError(
+          "DROPSHIP_WALLET_LEDGER_ACCOUNT_MISSING",
+          "Dropship wallet funding ledger entry is not attached to a wallet account.",
+          { vendorId: credit.vendorId, ledgerEntryId: credit.ledgerEntryId, retryable: false },
+        );
+      }
+      const existing = await findLedgerByReferenceWithClient(client, {
+        referenceType: DISPUTE_REVERSAL_REFERENCE_TYPE,
+        referenceId: input.providerDisputeId,
+        type: "funding_reversal",
+        forUpdate: false,
+      });
+      if (existing) {
+        const account = await loadWalletAccountByIdWithClient(client, {
+          vendorId: credit.vendorId,
+          walletAccountId: credit.walletAccountId,
+        });
+        await client.query("COMMIT");
+        return {
+          outcome: "reversed",
+          vendorId: credit.vendorId,
+          account: requiredRow(account ?? undefined, "Dropship wallet account for a reversed credit was not found."),
+          credit,
+          reversal: existing,
+          idempotentReplay: true,
+          vendorPaused: null,
+        };
+      }
+      const decision = decideFundingReversal({
+        credit: { amountCents: credit.amountCents, currency: credit.currency, status: credit.status },
+        dispute: { amountCents: input.disputeAmountCents, currency: input.currency },
+      });
+      if (decision.outcome === "ignore") {
+        await client.query("COMMIT");
+        return { outcome: "ignored", vendorId: credit.vendorId, credit, reason: decision.reason };
+      }
+      const account = await loadWalletAccountByIdWithClient(client, {
+        vendorId: credit.vendorId,
+        walletAccountId: credit.walletAccountId,
+        forUpdate: true,
+      });
+      if (!account) {
+        throw new DropshipError(
+          "DROPSHIP_WALLET_ACCOUNT_NOT_FOUND",
+          "Dropship wallet account was not found.",
+          { vendorId: credit.vendorId, walletAccountId: credit.walletAccountId, retryable: false },
+        );
+      }
+      // The balance may go negative: the money left with the bank, and the
+      // negative is the receivable the daily wallet run collects.
+      const nextAvailable = account.availableBalanceCents - decision.reversalCents;
+      const updatedAccount = await updateWalletBalancesWithClient(client, {
+        walletAccountId: account.walletAccountId,
+        vendorId: credit.vendorId,
+        availableBalanceCents: nextAvailable,
+        pendingBalanceCents: account.pendingBalanceCents,
+        updatedAt: input.occurredAt,
+      });
+      const reversal = await insertLedgerEntryWithClient(client, {
+        walletAccountId: account.walletAccountId,
+        vendorId: credit.vendorId,
+        type: "funding_reversal",
+        status: "settled",
+        amountCents: -decision.reversalCents,
+        currency: credit.currency,
+        availableBalanceAfterCents: nextAvailable,
+        pendingBalanceAfterCents: account.pendingBalanceCents,
+        referenceType: DISPUTE_REVERSAL_REFERENCE_TYPE,
+        referenceId: input.providerDisputeId,
+        idempotencyKey: `stripe-dispute:${input.providerDisputeId}`,
+        fundingMethodId: credit.fundingMethodId,
+        externalTransactionId: null,
+        metadata: {
+          provider: input.provider,
+          providerEventId: input.providerEventId,
+          providerDisputeId: input.providerDisputeId,
+          providerPaymentIntentId: input.providerPaymentIntentId,
+          fundingLedgerEntryId: credit.ledgerEntryId,
+          creditAmountCents: credit.amountCents,
+          disputeAmountCents: input.disputeAmountCents,
+          disputeStatus: input.disputeStatus,
+          disputeReason: input.disputeReason,
+          rail: credit.metadata.rail ?? null,
+        },
+        createdAt: input.occurredAt,
+        settledAt: input.occurredAt,
+      });
+      await recordWalletAuditEvent(client, {
+        vendorId: credit.vendorId,
+        entityType: "dropship_wallet_ledger",
+        entityId: String(reversal.ledgerEntryId),
+        eventType: "wallet_funding_reversed",
+        payload: {
+          ...serializeLedgerForAudit(reversal),
+          before: { availableBalanceCents: account.availableBalanceCents },
+          after: { availableBalanceCents: nextAvailable },
+        },
+        createdAt: input.occurredAt,
+      });
+      // Same transaction as the reversal: the vendor is paused because this
+      // credit was taken back, and the two facts commit or roll back together.
+      const pause = input.pauseVendor
+        ? await pauseDropshipVendorWithClient(client, {
+            vendorId: credit.vendorId,
+            reason: input.pauseVendor.reason,
+            evidence: { ...input.pauseVendor.evidence, ledgerEntryId: reversal.ledgerEntryId },
+            now: input.occurredAt,
+          })
+        : null;
+      await client.query("COMMIT");
+      return {
+        outcome: "reversed",
+        vendorId: credit.vendorId,
+        account: updatedAccount,
+        credit,
+        reversal,
+        idempotentReplay: false,
+        vendorPaused: pause?.changed ? pause.standing : null,
+      };
+    } catch (error) {
+      await rollbackQuietly(client);
+      if (isUniqueViolation(error)) {
+        const replay = await this.findFundingReversalReplay(input);
+        if (replay) return replay;
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * After a unique violation while posting a reversal: two deliveries of the
+   * same dispute raced, and the loser reads the winner's row. Read-only, so a
+   * violation raised anywhere else can never turn into a reversal posted
+   * without its pause.
+   */
+  private async findFundingReversalReplay(
+    input: Pick<ReverseDropshipSettledFundingRepositoryInput, "providerPaymentIntentId" | "providerDisputeId">,
+  ): Promise<DropshipFundingReversalRepositoryResult | null> {
+    const client = await this.dbPool.connect();
+    try {
+      const credit = await findLedgerByReferenceWithClient(client, {
+        referenceType: "stripe_payment_intent",
+        referenceId: input.providerPaymentIntentId,
+        type: "funding",
+        forUpdate: false,
+      });
+      const reversal = await findLedgerByReferenceWithClient(client, {
+        referenceType: DISPUTE_REVERSAL_REFERENCE_TYPE,
+        referenceId: input.providerDisputeId,
+        type: "funding_reversal",
+        forUpdate: false,
+      });
+      if (!credit || !reversal || credit.walletAccountId === null) return null;
+      const account = await loadWalletAccountByIdWithClient(client, {
+        vendorId: credit.vendorId,
+        walletAccountId: credit.walletAccountId,
+      });
+      if (!account) return null;
+      return { outcome: "reversed", vendorId: credit.vendorId, account, credit, reversal, idempotentReplay: true, vendorPaused: null };
+    } finally {
+      client.release();
+    }
+  }
+
+  async reinstateReversedFunding(
+    input: ReinstateDropshipReversedFundingRepositoryInput,
+  ): Promise<DropshipFundingReinstatementRepositoryResult | null> {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      const reversal = await findLedgerByReferenceWithClient(client, {
+        referenceType: DISPUTE_REVERSAL_REFERENCE_TYPE,
+        referenceId: input.providerDisputeId,
+        type: "funding_reversal",
+        forUpdate: true,
+      });
+      if (!reversal || reversal.walletAccountId === null) {
+        await client.query("COMMIT");
+        return null;
+      }
+      const existing = await findLedgerByReferenceWithClient(client, {
+        referenceType: DISPUTE_REINSTATEMENT_REFERENCE_TYPE,
+        referenceId: input.providerDisputeId,
+        type: "funding_reinstated",
+        forUpdate: false,
+      });
+      if (existing) {
+        const account = await loadWalletAccountByIdWithClient(client, {
+          vendorId: reversal.vendorId,
+          walletAccountId: reversal.walletAccountId,
+        });
+        await client.query("COMMIT");
+        return {
+          vendorId: reversal.vendorId,
+          account: requiredRow(account ?? undefined, "Dropship wallet account for a reinstated credit was not found."),
+          reversal,
+          reinstatement: existing,
+          idempotentReplay: true,
+        };
+      }
+      const account = await loadWalletAccountByIdWithClient(client, {
+        vendorId: reversal.vendorId,
+        walletAccountId: reversal.walletAccountId,
+        forUpdate: true,
+      });
+      if (!account) {
+        throw new DropshipError(
+          "DROPSHIP_WALLET_ACCOUNT_NOT_FOUND",
+          "Dropship wallet account was not found.",
+          { vendorId: reversal.vendorId, walletAccountId: reversal.walletAccountId, retryable: false },
+        );
+      }
+      const amountCents = -reversal.amountCents;
+      const nextAvailable = account.availableBalanceCents + amountCents;
+      const updatedAccount = await updateWalletBalancesWithClient(client, {
+        walletAccountId: account.walletAccountId,
+        vendorId: reversal.vendorId,
+        availableBalanceCents: nextAvailable,
+        pendingBalanceCents: account.pendingBalanceCents,
+        updatedAt: input.occurredAt,
+      });
+      const reinstatement = await insertLedgerEntryWithClient(client, {
+        walletAccountId: account.walletAccountId,
+        vendorId: reversal.vendorId,
+        type: "funding_reinstated",
+        status: "settled",
+        amountCents,
+        currency: reversal.currency,
+        availableBalanceAfterCents: nextAvailable,
+        pendingBalanceAfterCents: account.pendingBalanceCents,
+        referenceType: DISPUTE_REINSTATEMENT_REFERENCE_TYPE,
+        referenceId: input.providerDisputeId,
+        idempotencyKey: `stripe-dispute-reinstated:${input.providerDisputeId}`,
+        fundingMethodId: reversal.fundingMethodId,
+        externalTransactionId: null,
+        metadata: {
+          provider: input.provider,
+          providerEventId: input.providerEventId,
+          providerDisputeId: input.providerDisputeId,
+          reversalLedgerEntryId: reversal.ledgerEntryId,
+          fundingLedgerEntryId: reversal.metadata.fundingLedgerEntryId ?? null,
+        },
+        createdAt: input.occurredAt,
+        settledAt: input.occurredAt,
+      });
+      await recordWalletAuditEvent(client, {
+        vendorId: reversal.vendorId,
+        entityType: "dropship_wallet_ledger",
+        entityId: String(reinstatement.ledgerEntryId),
+        eventType: "wallet_funding_reinstated",
+        payload: {
+          ...serializeLedgerForAudit(reinstatement),
+          before: { availableBalanceCents: account.availableBalanceCents },
+          after: { availableBalanceCents: nextAvailable },
+        },
+        createdAt: input.occurredAt,
+      });
+      await client.query("COMMIT");
+      return {
+        vendorId: reversal.vendorId,
+        account: updatedAccount,
+        reversal,
+        reinstatement,
+        idempotentReplay: false,
+      };
+    } catch (error) {
+      await rollbackQuietly(client);
+      if (isUniqueViolation(error)) {
+        const replay = await this.findFundingReinstatementReplay(input);
+        if (replay) return replay;
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /** The read-only counterpart of findFundingReversalReplay for a reinstatement that lost a race. */
+  private async findFundingReinstatementReplay(
+    input: Pick<ReinstateDropshipReversedFundingRepositoryInput, "providerDisputeId">,
+  ): Promise<DropshipFundingReinstatementRepositoryResult | null> {
+    const client = await this.dbPool.connect();
+    try {
+      const reversal = await findLedgerByReferenceWithClient(client, {
+        referenceType: DISPUTE_REVERSAL_REFERENCE_TYPE,
+        referenceId: input.providerDisputeId,
+        type: "funding_reversal",
+        forUpdate: false,
+      });
+      const reinstatement = await findLedgerByReferenceWithClient(client, {
+        referenceType: DISPUTE_REINSTATEMENT_REFERENCE_TYPE,
+        referenceId: input.providerDisputeId,
+        type: "funding_reinstated",
+        forUpdate: false,
+      });
+      if (!reversal || !reinstatement || reversal.walletAccountId === null) return null;
+      const account = await loadWalletAccountByIdWithClient(client, {
+        vendorId: reversal.vendorId,
+        walletAccountId: reversal.walletAccountId,
+      });
+      if (!account) return null;
+      return { vendorId: reversal.vendorId, account, reversal, reinstatement, idempotentReplay: true };
+    } finally {
+      client.release();
+    }
+  }
+
   async getVendorLifecycleStatus(vendorId: number): Promise<DropshipVendorStatus | null> {
     const result = await this.dbPool.query<{ status: DropshipVendorStatus }>(
       `SELECT status FROM dropship.dropship_vendors WHERE id = $1`,
@@ -1458,6 +1791,40 @@ async function updateLedgerSettlementWithClient(
     ],
   );
   return mapLedgerRow(requiredRow(result.rows[0], "Dropship wallet pending funding settlement did not return a row."));
+}
+
+/** Reference types of the two rows a dispute can add to the ledger (funding design phase 4). */
+const DISPUTE_REVERSAL_REFERENCE_TYPE = "stripe_dispute";
+const DISPUTE_REINSTATEMENT_REFERENCE_TYPE = "stripe_dispute_reinstated";
+
+/**
+ * A ledger row by its provider reference, across vendors: a dispute names
+ * the provider's payment, and the credit for it is what says whose wallet it
+ * is. The reference index is unique, so at most one row matches.
+ */
+async function findLedgerByReferenceWithClient(
+  client: PoolClient,
+  input: {
+    referenceType: string;
+    referenceId: string;
+    type: DropshipWalletLedgerRecord["type"];
+    forUpdate: boolean;
+  },
+): Promise<DropshipWalletLedgerRecord | null> {
+  const result = await client.query<WalletLedgerRow>(
+    `SELECT id, wallet_account_id, vendor_id, type, status, amount_cents, currency,
+            available_balance_after_cents, pending_balance_after_cents,
+            reference_type, reference_id, idempotency_key, funding_method_id,
+            external_transaction_id, metadata, created_at, settled_at
+     FROM dropship.dropship_wallet_ledger
+     WHERE reference_type = $1
+       AND reference_id = $2
+       AND type = $3
+     ORDER BY id ASC
+     LIMIT 1${input.forUpdate ? "\n     FOR UPDATE" : ""}`,
+    [input.referenceType, input.referenceId, input.type],
+  );
+  return result.rows[0] ? mapLedgerRow(result.rows[0]) : null;
 }
 
 /** The funding entry a provider payment reference points at, locked for the transaction. */

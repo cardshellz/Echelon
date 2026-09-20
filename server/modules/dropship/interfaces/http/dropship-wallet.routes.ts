@@ -136,6 +136,10 @@ export function registerDropshipWalletRoutes(
           await verifyBankBalanceSafely(service, fundingMethod, event.providerEventId);
         } else if (event.kind === "wallet_funding_failed") {
           await service.recordWalletFundingFailure(event.failure);
+        } else if (event.kind === "wallet_funding_disputed") {
+          await service.recordWalletFundingReversal(event.reversal);
+        } else if (event.kind === "wallet_funding_dispute_closed") {
+          await service.recordWalletFundingDisputeOutcome(event.outcome);
         } else if (event.kind === "bank_balance_refreshed") {
           await service.recordBankBalanceRefresh({
             providerAccountId: event.providerAccountId,
