@@ -146,7 +146,7 @@ export function registerDropshipWalletRoutes(
       const wallet = await service.getWalletForMember(req.session.dropship!.memberId, {
         ledgerLimit: parseLedgerLimit(req.query.limit),
       });
-      return res.json({ wallet: serializeWalletOverview(wallet) });
+      return res.json({ wallet: serializeVendorWalletView(wallet) });
     } catch (error) {
       return sendDropshipWalletError(res, error);
     }
@@ -281,6 +281,11 @@ function parsePositiveInteger(value: string | undefined, key: string): number {
   return parsed;
 }
 
+/**
+ * The admin per-vendor view. Deliberately unchanged: the ops screen reads this
+ * shape today and the wallet policy is served to staff through
+ * `GET /api/dropship/admin/wallet/policy` instead.
+ */
 function serializeWalletOverview(wallet: Awaited<ReturnType<DropshipWalletService["getWalletForVendor"]>>) {
   return {
     account: wallet.account,
@@ -289,6 +294,29 @@ function serializeWalletOverview(wallet: Awaited<ReturnType<DropshipWalletServic
     recentLedger: wallet.recentLedger,
     cardFundingFeeBps: wallet.cardFundingFeeBps,
     usdcBaseDepositAddress: wallet.usdcBaseDepositAddress,
+  };
+}
+
+/**
+ * The vendor view: the admin shape plus the wallet policy limits in force.
+ *
+ * `limits` is the contract the portal's wallet view adapter reads
+ * (client/src/lib/dropship-wallet-view-adapter.ts, `rawLimitsSchema`); until it
+ * was served the page fell back to a hard-coded table that env overrides and
+ * staff edits were invisible to. Field names are passed through exactly as the
+ * service resolves them — no renaming here.
+ */
+function serializeVendorWalletView(wallet: Awaited<ReturnType<DropshipWalletService["getWalletForVendor"]>>) {
+  return {
+    ...serializeWalletOverview(wallet),
+    limits: {
+      autoReloadMinTriggerCents: wallet.limits.autoReloadMinTriggerCents,
+      autoReloadMinAmountCents: wallet.limits.autoReloadMinAmountCents,
+      manualFundingMinCents: wallet.limits.manualFundingMinCents,
+      manualFundingMaxCents: wallet.limits.manualFundingMaxCents,
+      defaultPaymentHoldTimeoutMinutes: wallet.limits.defaultPaymentHoldTimeoutMinutes,
+      holdExpiryWarningMinutes: wallet.limits.holdExpiryWarningMinutes,
+    },
   };
 }
 

@@ -14,6 +14,7 @@ import { z } from "zod";
 import { formatFeeRate } from "@shared/dropship/wallet-funding-fee";
 import type { DropshipAutoReloadConfigInput } from "./dropship-ops-surface";
 import {
+  BANK_SETTLEMENT_DAYS_PHRASE,
   BANK_SETTLEMENT_PHRASE,
   EXAMPLE_SHORTFALL,
   activationTopUp,
@@ -619,19 +620,69 @@ export function describeActivationQuote(input: {
   }
 }
 
-export function describeIntro(input: { cardFundingFeeBps: number; usdcOffered: boolean; holdTimeoutMinutes: number }): string[] {
+/** One topic of the intro: the lead sentence, set in bold, and the detail under it. */
+export interface WalletIntroTopic {
+  lead: string;
+  detail: string;
+}
+
+export interface WalletIntroCopy {
+  /** The line above the list: what the wallet is, before any of the detail. */
+  lede: string;
+  topics: readonly WalletIntroTopic[];
+}
+
+/**
+ * "How your wallet works": five topics, each a lead sentence and its detail, in
+ * the order a seller meets them — what the wallet is, what filling it costs,
+ * how it stays funded, what covers a gap, and what a failure does.
+ *
+ * Only two numbers are quoted, and each is a served value the server enforces:
+ * the card fee and the floor minimum (stated by its purpose, not as a figure
+ * Card Shellz picked). Amounts that are environment defaults rather than
+ * product rules — the manual funding band, the single top-up limit's own
+ * minimum — are deliberately absent: quoting them would promise a rule the
+ * product does not have. The single top-up limit is explained in full on the
+ * review step, beside the number the vendor actually sets.
+ *
+ * USDC carries a fee statement and nothing else: the code credits USDC only
+ * through an admin endpoint and watches no chain, so any timing claim would be
+ * unfounded.
+ */
+export function describeIntro(input: {
+  cardFundingFeeBps: number;
+  usdcOffered: boolean;
+  holdTimeoutMinutes: number;
+  limits: WalletLimits;
+}): WalletIntroCopy {
   const fee = formatFeeRate(input.cardFundingFeeBps);
   const hold = formatDurationMinutes(input.holdTimeoutMinutes);
-  return [
-    "Your wallet pays for each order you accept: the product cost plus shipping. Card Shellz adds no fee to orders. Your wallet is also charged a return fee when a return is processed — that fee can take your balance below zero.",
-    "Only money that has settled can pay an order. A bank transfer that is still on its way cannot pay an order, and it does not resume selling either.",
-    `You choose a balance to keep — your floor. Once a day, and after any order that takes your balance below it, we top the wallet back up to the floor from the source you choose: a bank account (no fee; a transfer takes ${BANK_SETTLEMENT_PHRASE} to land) or a card (${fee} fee; lands at once). Money already on its way counts toward the floor, so the same gap is never debited twice.`,
-    `Every seller keeps a backup card. While your account is active, if an order needs more than your available balance, we charge that card for the shortfall plus the ${fee} fee and accept the order right away — up to your single top-up limit (step 5 explains it), and even while a bank top-up is still landing or your top-up source cannot be charged. If a return fee has taken your balance below zero, the shortfall includes that amount. It is never used for routine top-ups unless it is also your source.`,
-    `If a top-up is declined, or a bank transfer is returned before it lands, selling pauses: your listings show nothing for sale and new orders wait — and are cancelled if still unpaid after your hold time (${hold} unless you change it). Selling resumes on its own once settled money brings your balance back to your floor. We do not retry the failed charge ourselves. If a top-up fails for any other reason, we email you.`,
-    input.usdcOffered
-      ? "You can add money at any time by bank account or card, or USDC. USDC is free; a member of the Card Shellz team credits it after confirming the transfer — it is not instant."
-      : "You can add money at any time by bank account or card.",
-  ];
+  const usdc = input.usdcOffered ? " USDC costs nothing." : "";
+  return {
+    lede: "Your wallet is how Card Shellz gets paid for the orders you sell. Here is what it does, what it costs, and what happens if a payment fails.",
+    topics: [
+      {
+        lead: "What your wallet is.",
+        detail: "It is a prepaid balance Card Shellz holds for your store. Every order you accept is paid from it: the product cost plus shipping, with nothing added on top. When a return is processed its return fee comes out of the wallet too, and that can take your balance below zero.",
+      },
+      {
+        lead: "Payment methods and fees.",
+        detail: `A bank account costs nothing and takes ${BANK_SETTLEMENT_DAYS_PHRASE} to land (our estimate). A card lands at once and costs ${fee} on top of the amount, whether it is a routine top-up, money you add yourself, or a backup charge.${usdc}`,
+      },
+      {
+        lead: "Keeping it funded.",
+        detail: `You choose a floor: the balance you want to hold. We top you back up to it once a day, and after any order that drops you below it. Your floor has to be at least ${formatWholeDollars(input.limits.autoReloadMinTriggerCents)}, so there is always enough to cover a normal order. Money already on its way counts toward your floor, so the same gap is never charged twice. You can also add money yourself at any time.`,
+      },
+      {
+        lead: "Your backup card.",
+        detail: "Every seller keeps a card on file. Only money that has landed can pay for an order, so if an order needs more than your balance we charge that card for the difference and send the order straight out. That is what covers you while a bank transfer is still on its way.",
+      },
+      {
+        lead: "If a payment fails.",
+        detail: `Selling pauses: your listings show nothing for sale, and orders already waiting are cancelled after your hold time (${hold}). We email you, and we do not retry the charge ourselves. Selling starts again on its own once your balance is back at your floor.`,
+      },
+    ],
+  };
 }
 
 export const INTRO_VERIFICATION_NOTE = "We will ask you to confirm it is you when you add your first account or card (a 6-digit code by email), again if setup takes longer than ten minutes, and once more if you add money.";

@@ -8,9 +8,16 @@ import type {
   DropshipLogger,
   DropshipNotificationSender,
 } from "./dropship-ports";
+import { DEFAULT_PAYMENT_HOLD_EXPIRING_WARNING_MINUTES as DEFAULT_HOLD_EXPIRY_WARNING_MINUTES } from "../domain/wallet-policy";
 
 const DEFAULT_PAYMENT_HOLD_EXPIRATION_LIMIT = 100;
-export const DEFAULT_PAYMENT_HOLD_EXPIRING_WARNING_MINUTES = 120;
+
+/**
+ * Re-exported from the wallet policy domain so the warning window has ONE
+ * definition: the staff-managed policy, the environment fallback and this
+ * service default are all the same number.
+ */
+export { DEFAULT_PAYMENT_HOLD_EXPIRING_WARNING_MINUTES } from "../domain/wallet-policy";
 
 const expireDropshipPaymentHoldsInputSchema = z.object({
   workerId: z.string().trim().min(1).max(255),
@@ -133,7 +140,7 @@ export class DropshipPaymentHoldExpirationService {
   async notifyExpiringPaymentHolds(input: unknown): Promise<DropshipPaymentHoldExpiringNotificationResult> {
     const parsed = parseNotifyExpiringPaymentHoldsInput(input);
     const now = this.deps.clock.now();
-    const warningWindowMinutes = parsed.warningWindowMinutes ?? DEFAULT_PAYMENT_HOLD_EXPIRING_WARNING_MINUTES;
+    const warningWindowMinutes = parsed.warningWindowMinutes ?? DEFAULT_HOLD_EXPIRY_WARNING_MINUTES;
     const expiring = await this.deps.repository.listExpiringPaymentHolds({
       now,
       warningWindowMinutes,

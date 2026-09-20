@@ -55,6 +55,7 @@ import { registerDropshipAdminShippingConfigRoutes } from "./modules/dropship/in
 import { registerDropshipAdminCarrierProtectionRoutes } from "./modules/dropship/interfaces/http/dropship-admin-carrier-protection.routes";
 import { registerDropshipAdminCarrierClaimRoutes } from "./modules/dropship/interfaces/http/dropship-admin-carrier-claim.routes";
 import { registerDropshipAdminReturnPolicyRoutes } from "./modules/dropship/interfaces/http/dropship-admin-return-policy.routes";
+import { registerDropshipAdminWalletPolicyRoutes } from "./modules/dropship/interfaces/http/dropship-admin-wallet-policy.routes";
 import { registerDropshipAdminOmsChannelConfigRoutes } from "./modules/dropship/interfaces/http/dropship-admin-oms-channel-config.routes";
 import { registerDropshipAdminWorkerOpsRoutes } from "./modules/dropship/interfaces/http/dropship-admin-worker-ops.routes";
 import { registerDropshipAdminEbayOAuthBrandingRoutes } from "./modules/dropship/interfaces/http/dropship-admin-ebay-oauth-branding.routes";
@@ -140,6 +141,7 @@ export async function registerRoutes(
   registerDropshipAdminCarrierProtectionRoutes(app);
   registerDropshipAdminCarrierClaimRoutes(app);
   registerDropshipAdminReturnPolicyRoutes(app);
+  registerDropshipAdminWalletPolicyRoutes(app);
   registerShippingAdminRoutes(app);
   registerFulfillmentProviderConnectionAdminRoutes(app);
   registerFulfillmentRoutingAdminRoutes(app);
