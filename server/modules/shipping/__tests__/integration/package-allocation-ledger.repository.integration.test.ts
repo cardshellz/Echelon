@@ -5081,9 +5081,15 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
         ON source.id = intent.package_allocation_source_line_id
     `);
     expect(channelItems.rows).toEqual([{ source_id: shippedSourceId, quantity_pushed: 2 }]);
-    expect((await pool.query<{ legacy_wms_shipment_item_id: number }>(
-      "SELECT legacy_wms_shipment_item_id FROM wms.physical_shipment_items",
-    )).rows).toEqual([{ legacy_wms_shipment_item_id: shippedSourceId }]);
+    const physicalItems = await pool.query<{ source_id: number | null }>(`
+      SELECT source.source_wms_shipment_item_id AS source_id
+      FROM wms.physical_shipment_items AS physical_item
+      LEFT JOIN wms.package_allocation_entries AS entry
+        ON entry.id = physical_item.package_allocation_entry_id
+      LEFT JOIN wms.package_allocation_source_lines AS source
+        ON source.id = entry.package_allocation_source_line_id
+    `);
+    expect(physicalItems.rows).toEqual([{ source_id: shippedSourceId }]);
   });
 
   it("materializes only the authorized portion of a partly canceled source line", async () => {
