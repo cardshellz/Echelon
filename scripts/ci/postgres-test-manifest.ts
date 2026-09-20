@@ -75,6 +75,7 @@ export const POSTGRES_TEST_FILES: readonly string[] = Object.freeze([
   "server/modules/channels/__tests__/integration/source-lock.integration.test.ts",
   "server/modules/inventory/__tests__/integration/allocation-concurrency.integration.test.ts",
   "server/modules/shipping/__tests__/integration/package-allocation-ledger.repository.integration.test.ts",
+  "server/modules/shipping/__tests__/integration/carrier-tracking-recovery.integration.test.ts",
   "server/modules/shipping-engine/__tests__/integration/fulfillment-provider-connections.integration.test.ts",
   "server/modules/dropship/__tests__/integration/dropship-ebay-listing-policy-bulk.integration.test.ts",
   "server/modules/dropship/__tests__/integration/dropship-listing-price.integration.test.ts",

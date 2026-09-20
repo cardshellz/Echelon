@@ -21,6 +21,7 @@ function fixture(
   description: string,
   statusCode: "AC" | "IT" = "AC",
   labelPollLeaseOwner: string | null = "label-poll-test",
+  carrierCode = "stamps_com",
 ) {
   const finalizeLabelTrackingPollAttempt = vi
     .fn()
@@ -69,7 +70,7 @@ function fixture(
       {
         shippingProviderLabelId: 4159,
         providerLabelId: "448530246",
-        carrierCode: "stamps_com",
+        carrierCode,
         trackingNumber: "9434650106151112859195",
         normalizedTrackingNumber: "9434650106151112859195",
         attemptNumber: 1,
@@ -115,10 +116,61 @@ function fixture(
     finalizeLabelTrackingPollAttempt,
     enqueueDispatchCommand,
     getLabelTrackingSnapshot,
+    transaction,
   };
 }
 
 describe("CarrierTrackingService exact-label polling", () => {
+  it.each([
+    ["ups_walleted", "ups"],
+    ["stamps_com", "usps"],
+  ])("accepts exact-label tracking when carrier account %s is returned as %s", async (account, carrier) => {
+    const test = fixture("PICKED_UP", "Carrier picked up item", "IT", "label-poll-test", account);
+    test.getLabelTrackingSnapshot.mockResolvedValueOnce({
+      httpStatus: 200,
+      payload: {
+        tracking_number: "9434650106151112859195",
+        carrier_code: carrier,
+        status_code: "IT",
+        events: [],
+      },
+    });
+
+    expect(await test.service.pollShipStationLabels(25)).toMatchObject({
+      labelPollsConfirmed: 1,
+      labelPollsReviewRequired: 0,
+      errors: 0,
+    });
+    expect(test.enqueueDispatchCommand).toHaveBeenCalledOnce();
+    expect(test.transaction.insertOrGetEvent).toHaveBeenCalledWith(expect.objectContaining({
+      providerLabelId: "448530246",
+      carrier,
+      sanitizedPayload: expect.objectContaining({ carrierCode: carrier }),
+    }));
+    expect(test.getLabelTrackingSnapshot).toHaveBeenCalledWith(expect.objectContaining({
+      carrierCode: account,
+      resourceUrl: "https://api.shipstation.com/v2/labels/se-448530246/track",
+    }));
+  });
+
+  it("still rejects different tracking on an exact-label response with a carrier alias", async () => {
+    const test = fixture("PICKED_UP", "Carrier picked up item");
+    test.getLabelTrackingSnapshot.mockResolvedValueOnce({
+      httpStatus: 200,
+      payload: {
+        label_id: "se-448530246",
+        tracking_number: "9434650106151112859196",
+        carrier_code: "usps",
+        status_code: "IT",
+        events: [],
+      },
+    });
+
+    expect(await test.service.pollShipStationLabels(25)).toMatchObject({ labelPollsReviewRequired: 1 });
+    expect(test.transaction.insertOrGetEvent).not.toHaveBeenCalled();
+    expect(test.enqueueDispatchCommand).not.toHaveBeenCalled();
+  });
+
   it("turns a physical pickup snapshot into the existing dispatch command", async () => {
     const test = fixture("PICKED_UP", "USPS picked up item");
 

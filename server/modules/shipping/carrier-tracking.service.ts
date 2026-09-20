@@ -1402,7 +1402,12 @@ function normalizeTrackingSnapshot(
   }
   if (
     event.normalizedTrackingNumber !== request.normalizedTrackingNumber
-    || event.carrier !== request.carrierCode
+    // Exact-label requests are bound to the provider's immutable label endpoint.
+    // Its account code (ups_walleted/stamps_com) can differ from the response's
+    // parcel carrier (ups/usps). Keep both raw values as evidence, but do not
+    // treat that difference as another package. Generic tracking lookups still
+    // require their carrier identity because they have no label endpoint anchor.
+    || (providerLabelId === null && event.carrier !== request.carrierCode)
     || (providerLabelId !== null && event.providerLabelId !== providerLabelId)
   ) {
     throw new ShipStationTrackingEventsError(
