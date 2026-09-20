@@ -1,21 +1,21 @@
 /**
  * Dropship wallet policy — the pure model behind the staff "Wallet policy" tab.
  *
- * Everything the tab decides lives here: how a dollar box becomes integer
- * cents, which cross-field rules reject a form BEFORE it reaches
+ * Everything the tab decides lives here: how a dollar or percent box becomes
+ * an integer, which cross-field rules reject a form BEFORE it reaches
  * `POST /api/dropship/admin/wallet/policy`, whether the form still matches the
  * limits in force, what the request body looks like, and what a server error
  * code means to a human. The panel renders; it does not decide.
  *
  * The cross-field rules and their exact messages mirror
  * `server/modules/dropship/domain/wallet-policy.ts`
- * (`walletPolicyInvariantViolations`) and the CHECK constraints in migration
- * 0681, so staff read the same sentence client-side that the server would send
- * back. The client is a convenience, never the authority: the server re-checks
- * every rule.
+ * (`walletPolicyInvariantViolations`) and the CHECK constraints in migrations
+ * 0682 and 0683, so staff read the same sentence client-side that the server
+ * would send back. The client is a convenience, never the authority: the
+ * server re-checks every rule.
  *
  * Money is integer cents throughout — no floating point anywhere in this file.
- * Timings are whole minutes.
+ * Fees are basis points. Timings are whole minutes or whole days.
  */
 
 import { z } from "zod";
@@ -33,6 +33,12 @@ export const DROPSHIP_WALLET_POLICY_IDEMPOTENCY_PREFIX = "dropship-wallet-policy
  */
 export const DROPSHIP_WALLET_POLICY_MAX_HOLD_TIMEOUT_MINUTES = 43_200;
 
+/** 100%. Mirrors MAX_ADVANCE_FEE_BPS and `dropship_wallet_policies_advance_fee_chk`. */
+export const DROPSHIP_WALLET_POLICY_MAX_ADVANCE_FEE_BPS = 10_000;
+
+/** A year. Mirrors MAX_TIER_CHANGE_GRACE_DAYS and `dropship_wallet_policies_grace_days_chk`. */
+export const DROPSHIP_WALLET_POLICY_MAX_TIER_CHANGE_GRACE_DAYS = 365;
+
 /** The server bound on every cents field (`positiveCentsSchema`). */
 const MAX_CENTS = Number.MAX_SAFE_INTEGER;
 
@@ -47,11 +53,15 @@ const MAX_IDEMPOTENCY_KEY_LENGTH = 200;
 
 const walletPolicyLimitsSchema = z.object({
   autoReloadMinTriggerCents: z.number().int(),
+  caseTierMinimumCents: z.number().int(),
   autoReloadMinAmountCents: z.number().int(),
   manualFundingMinCents: z.number().int(),
   manualFundingMaxCents: z.number().int(),
   defaultPaymentHoldTimeoutMinutes: z.number().int(),
   holdExpiryWarningMinutes: z.number().int(),
+  advanceFeeBps: z.number().int(),
+  advanceCapCents: z.number().int(),
+  tierChangeGraceDays: z.number().int(),
 });
 
 const walletPolicyRecordSchema = z.object({
@@ -92,12 +102,17 @@ const walletPolicyCardFeeSchema = z.object({
 
 const walletPolicyEnvKeysSchema = z.object({
   autoReloadMinTriggerCents: z.string().nullable(),
+  caseTierMinimumCents: z.string().nullable(),
   autoReloadMinAmountCents: z.string().nullable(),
   manualFundingMinCents: z.string().nullable(),
   manualFundingMaxCents: z.string().nullable(),
-  // The hold timeout has no environment override; the server serves null.
+  // The hold timeout, the case tier, the advance and the grace have no
+  // environment override; the server serves null for each.
   defaultPaymentHoldTimeoutMinutes: z.string().nullable(),
   holdExpiryWarningMinutes: z.string().nullable(),
+  advanceFeeBps: z.string().nullable(),
+  advanceCapCents: z.string().nullable(),
+  tierChangeGraceDays: z.string().nullable(),
 });
 
 export const dropshipWalletPolicyOverviewSchema = z.object({
@@ -180,12 +195,18 @@ export function buildDropshipWalletPolicyOverviewUrl(proposal?: {
 export interface DropshipWalletPolicyForm {
   /** Dollars as typed; converted to integer cents on parse. */
   autoReloadMinTriggerDollars: string;
+  caseTierMinimumDollars: string;
   autoReloadMinAmountDollars: string;
   manualFundingMinDollars: string;
   manualFundingMaxDollars: string;
   /** Whole minutes as typed. */
   defaultPaymentHoldTimeoutMinutes: string;
   holdExpiryWarningMinutes: string;
+  /** Percent as typed ("1.5"); converted to integer basis points on parse. */
+  advanceFeePercent: string;
+  advanceCapDollars: string;
+  /** Whole days as typed. */
+  tierChangeGraceDays: string;
   /** Optional operator note recorded with the new version. */
   changeNote: string;
 }
@@ -194,39 +215,54 @@ export type DropshipWalletPolicyFormField = keyof DropshipWalletPolicyForm;
 
 export type DropshipWalletPolicyLimitField = keyof DropshipWalletPolicyLimitsView;
 
+export type DropshipWalletPolicyLimitUnit = "cents" | "minutes" | "bps" | "days";
+
 export interface DropshipWalletPolicyLimitDescriptor {
   limitField: DropshipWalletPolicyLimitField;
   formField: DropshipWalletPolicyFormField;
   label: string;
-  unit: "cents" | "minutes";
+  unit: DropshipWalletPolicyLimitUnit;
+  /** Whether zero is a legitimate value (an advance cap of zero advances nothing). */
+  allowZero: boolean;
   help: string;
 }
 
 /**
- * The six limits in display order, with the form field each one edits. The
- * panel walks this list instead of hard-coding six rows twice (form + "where
+ * The ten limits in display order, with the form field each one edits. The
+ * panel walks this list instead of hard-coding ten rows twice (form + "where
  * the value came from" table).
  */
 export const DROPSHIP_WALLET_POLICY_LIMIT_DESCRIPTORS: readonly DropshipWalletPolicyLimitDescriptor[] = [
   {
     limitField: "autoReloadMinTriggerCents",
     formField: "autoReloadMinTriggerDollars",
-    label: "Auto-reload trigger floor",
+    label: "Pack tier minimum",
     unit: "cents",
-    help: "Auto-reload fires below this balance. A vendor may not set a lower trigger.",
+    allowZero: false,
+    help: "The lowest minimum balance any vendor may keep; applies to vendors selling eaches and inner packs. Auto-reload fires below a vendor's minimum.",
+  },
+  {
+    limitField: "caseTierMinimumCents",
+    formField: "caseTierMinimumDollars",
+    label: "Case tier minimum",
+    unit: "cents",
+    allowZero: false,
+    help: "Vendors with case listings enabled must keep at least this. Never below the pack tier minimum.",
   },
   {
     limitField: "autoReloadMinAmountCents",
     formField: "autoReloadMinAmountDollars",
     label: "Minimum single top-up limit",
     unit: "cents",
-    help: "Smallest permitted single auto-reload top-up. Never below the trigger floor, or a top-up could not clear the trigger.",
+    allowZero: false,
+    help: "Smallest permitted single auto-reload top-up. Never below the pack tier minimum, or a top-up could not clear the trigger.",
   },
   {
     limitField: "manualFundingMinCents",
     formField: "manualFundingMinDollars",
     label: "Manual top-up minimum",
     unit: "cents",
+    allowZero: false,
     help: "Smallest vendor-initiated manual top-up.",
   },
   {
@@ -234,6 +270,7 @@ export const DROPSHIP_WALLET_POLICY_LIMIT_DESCRIPTORS: readonly DropshipWalletPo
     formField: "manualFundingMaxDollars",
     label: "Manual top-up maximum",
     unit: "cents",
+    allowZero: false,
     help: "Largest vendor-initiated manual top-up.",
   },
   {
@@ -241,14 +278,40 @@ export const DROPSHIP_WALLET_POLICY_LIMIT_DESCRIPTORS: readonly DropshipWalletPo
     formField: "defaultPaymentHoldTimeoutMinutes",
     label: "Payment hold timeout",
     unit: "minutes",
-    help: "How long an unfunded order waits in payment hold before it is cancelled.",
+    allowZero: false,
+    help: "How long an unfunded order waits in payment hold before it is cancelled. Applies to every wallet; vendors do not choose it.",
   },
   {
     limitField: "holdExpiryWarningMinutes",
     formField: "holdExpiryWarningMinutes",
     label: "Hold expiry warning",
     unit: "minutes",
+    allowZero: false,
     help: "How long before a hold expires the vendor is warned. Must be shorter than the timeout.",
+  },
+  {
+    limitField: "advanceFeeBps",
+    formField: "advanceFeePercent",
+    label: "Advance fee",
+    unit: "bps",
+    allowZero: true,
+    help: "Service fee on the pending bank money an order is accepted against, charged only on the amount used.",
+  },
+  {
+    limitField: "advanceCapCents",
+    formField: "advanceCapDollars",
+    label: "Advance cap",
+    unit: "cents",
+    allowZero: true,
+    help: "The most pending bank money an order may be accepted against, per vendor. Zero advances nothing. A vendor's credit profile can override it.",
+  },
+  {
+    limitField: "tierChangeGraceDays",
+    formField: "tierChangeGraceDays",
+    label: "Tier change grace",
+    unit: "days",
+    allowZero: true,
+    help: "How long a vendor below a raised tier minimum keeps that tier's listings before they are unpublished. Zero enforces immediately.",
   },
 ];
 
@@ -257,21 +320,29 @@ const FORM_FIELD_BY_LIMIT_FIELD: Record<
   DropshipWalletPolicyFormField
 > = {
   autoReloadMinTriggerCents: "autoReloadMinTriggerDollars",
+  caseTierMinimumCents: "caseTierMinimumDollars",
   autoReloadMinAmountCents: "autoReloadMinAmountDollars",
   manualFundingMinCents: "manualFundingMinDollars",
   manualFundingMaxCents: "manualFundingMaxDollars",
   defaultPaymentHoldTimeoutMinutes: "defaultPaymentHoldTimeoutMinutes",
   holdExpiryWarningMinutes: "holdExpiryWarningMinutes",
+  advanceFeeBps: "advanceFeePercent",
+  advanceCapCents: "advanceCapDollars",
+  tierChangeGraceDays: "tierChangeGraceDays",
 };
 
 /** A blank form, used before the overview has loaded. Never submitted. */
 export const emptyDropshipWalletPolicyForm: DropshipWalletPolicyForm = Object.freeze({
   autoReloadMinTriggerDollars: "",
+  caseTierMinimumDollars: "",
   autoReloadMinAmountDollars: "",
   manualFundingMinDollars: "",
   manualFundingMaxDollars: "",
   defaultPaymentHoldTimeoutMinutes: "",
   holdExpiryWarningMinutes: "",
+  advanceFeePercent: "",
+  advanceCapDollars: "",
+  tierChangeGraceDays: "",
   changeNote: "",
 });
 
@@ -281,11 +352,15 @@ export function dropshipWalletPolicyFormFromLimits(
 ): DropshipWalletPolicyForm {
   return {
     autoReloadMinTriggerDollars: centsToDollarInput(limits.autoReloadMinTriggerCents),
+    caseTierMinimumDollars: centsToDollarInput(limits.caseTierMinimumCents),
     autoReloadMinAmountDollars: centsToDollarInput(limits.autoReloadMinAmountCents),
     manualFundingMinDollars: centsToDollarInput(limits.manualFundingMinCents),
     manualFundingMaxDollars: centsToDollarInput(limits.manualFundingMaxCents),
     defaultPaymentHoldTimeoutMinutes: String(limits.defaultPaymentHoldTimeoutMinutes),
     holdExpiryWarningMinutes: String(limits.holdExpiryWarningMinutes),
+    advanceFeePercent: basisPointsToPercentInput(limits.advanceFeeBps),
+    advanceCapDollars: centsToDollarInput(limits.advanceCapCents),
+    tierChangeGraceDays: String(limits.tierChangeGraceDays),
     // A note describes THIS change, so it never carries over from the version in force.
     changeNote: "",
   };
@@ -293,9 +368,18 @@ export function dropshipWalletPolicyFormFromLimits(
 
 /** Integer-cents -> "12.34". No floating point: the fraction is string-padded. */
 export function centsToDollarInput(cents: number): string {
-  if (!Number.isSafeInteger(cents)) return "";
-  const sign = cents < 0 ? "-" : "";
-  const absolute = Math.abs(cents);
+  return hundredthsToDecimalInput(cents);
+}
+
+/** Integer basis points -> "1.50" (percent). Same digit arithmetic as cents. */
+export function basisPointsToPercentInput(bps: number): string {
+  return hundredthsToDecimalInput(bps);
+}
+
+function hundredthsToDecimalInput(value: number): string {
+  if (!Number.isSafeInteger(value)) return "";
+  const sign = value < 0 ? "-" : "";
+  const absolute = Math.abs(value);
   const whole = Math.trunc(absolute / 100);
   const fraction = String(absolute % 100).padStart(2, "0");
   return `${sign}${whole}.${fraction}`;
@@ -304,11 +388,7 @@ export function centsToDollarInput(cents: number): string {
 /** Basis points -> "2.90%". Integer math only; the fee is never re-computed here. */
 export function formatDropshipBasisPoints(bps: number): string {
   if (!Number.isSafeInteger(bps)) return "unknown";
-  const sign = bps < 0 ? "-" : "";
-  const absolute = Math.abs(bps);
-  const whole = Math.trunc(absolute / 100);
-  const fraction = String(absolute % 100).padStart(2, "0");
-  return `${sign}${whole}.${fraction}%`;
+  return `${hundredthsToDecimalInput(bps)}%`;
 }
 
 // --- Cross-field rules ------------------------------------------------------
@@ -340,6 +420,12 @@ export function dropshipWalletPolicyInvariantViolations(
         "Minimum single top-up limit must be at least the minimum floor, otherwise a top-up can never clear the trigger.",
     });
   }
+  if (limits.caseTierMinimumCents < limits.autoReloadMinTriggerCents) {
+    violations.push({
+      field: "caseTierMinimumCents",
+      message: "Case tier minimum must be at least the pack tier minimum.",
+    });
+  }
   if (limits.holdExpiryWarningMinutes >= limits.defaultPaymentHoldTimeoutMinutes) {
     violations.push({
       field: "holdExpiryWarningMinutes",
@@ -361,7 +447,7 @@ export type ParsedDropshipWalletPolicyForm =
 
 /**
  * Parses the whole form, reporting EVERY problem at once. Per-field ranges
- * first; the cross-field rules only run once all six numbers are known, since
+ * first; the cross-field rules only run once all ten numbers are known, since
  * comparing a missing value to a present one says nothing useful.
  */
 export function parseDropshipWalletPolicyForm(
@@ -369,7 +455,8 @@ export function parseDropshipWalletPolicyForm(
 ): ParsedDropshipWalletPolicyForm {
   const errors: DropshipWalletPolicyFormErrors = {};
 
-  const trigger = readDollars(form.autoReloadMinTriggerDollars, "Auto-reload trigger floor", errors, "autoReloadMinTriggerDollars");
+  const trigger = readDollars(form.autoReloadMinTriggerDollars, "Pack tier minimum", errors, "autoReloadMinTriggerDollars");
+  const caseTier = readDollars(form.caseTierMinimumDollars, "Case tier minimum", errors, "caseTierMinimumDollars");
   const amount = readDollars(form.autoReloadMinAmountDollars, "Minimum single top-up limit", errors, "autoReloadMinAmountDollars");
   const manualMin = readDollars(form.manualFundingMinDollars, "Manual top-up minimum", errors, "manualFundingMinDollars");
   const manualMax = readDollars(form.manualFundingMaxDollars, "Manual top-up maximum", errors, "manualFundingMaxDollars");
@@ -387,6 +474,9 @@ export function parseDropshipWalletPolicyForm(
     errors,
     "holdExpiryWarningMinutes",
   );
+  const advanceFee = readPercent(form.advanceFeePercent, "Advance fee", errors, "advanceFeePercent");
+  const advanceCap = readDollars(form.advanceCapDollars, "Advance cap", errors, "advanceCapDollars", { allowZero: true });
+  const graceDays = readDays(form.tierChangeGraceDays, "Tier change grace", errors, "tierChangeGraceDays");
 
   const note = form.changeNote.trim();
   if (note.length > MAX_CHANGE_NOTE_LENGTH) {
@@ -394,19 +484,23 @@ export function parseDropshipWalletPolicyForm(
   }
 
   if (
-    trigger === null || amount === null || manualMin === null || manualMax === null
-    || holdTimeout === null || warning === null
+    trigger === null || caseTier === null || amount === null || manualMin === null || manualMax === null
+    || holdTimeout === null || warning === null || advanceFee === null || advanceCap === null || graceDays === null
   ) {
     return { success: false, errors };
   }
 
   const limits: DropshipWalletPolicyLimitsView = {
     autoReloadMinTriggerCents: trigger,
+    caseTierMinimumCents: caseTier,
     autoReloadMinAmountCents: amount,
     manualFundingMinCents: manualMin,
     manualFundingMaxCents: manualMax,
     defaultPaymentHoldTimeoutMinutes: holdTimeout,
     holdExpiryWarningMinutes: warning,
+    advanceFeeBps: advanceFee,
+    advanceCapCents: advanceCap,
+    tierChangeGraceDays: graceDays,
   };
   for (const violation of dropshipWalletPolicyInvariantViolations(limits)) {
     const field = FORM_FIELD_BY_LIMIT_FIELD[violation.field];
@@ -424,12 +518,15 @@ function readDollars(
   label: string,
   errors: DropshipWalletPolicyFormErrors,
   field: DropshipWalletPolicyFormField,
+  options: { allowZero?: boolean } = {},
 ): number | null {
-  const parsed = parseDollarsToCents(value);
+  const parsed = parseDollarsToCents(value, options);
   if (parsed.ok) return parsed.cents;
   errors[field] = parsed.reason === "range"
     ? `${label} is larger than this system can record.`
-    : `${label} must be a dollar amount greater than zero, with at most two decimal places.`;
+    : options.allowZero
+      ? `${label} must be a dollar amount of zero or more, with at most two decimal places.`
+      : `${label} must be a dollar amount greater than zero, with at most two decimal places.`;
   return null;
 }
 
@@ -448,6 +545,34 @@ function readMinutes(
   return null;
 }
 
+function readPercent(
+  value: string,
+  label: string,
+  errors: DropshipWalletPolicyFormErrors,
+  field: DropshipWalletPolicyFormField,
+): number | null {
+  const parsed = parsePercentToBasisPoints(value);
+  if (parsed.ok) return parsed.bps;
+  errors[field] = parsed.reason === "range"
+    ? `${label} cannot exceed 100%.`
+    : `${label} must be a percentage of zero or more, with at most two decimal places.`;
+  return null;
+}
+
+function readDays(
+  value: string,
+  label: string,
+  errors: DropshipWalletPolicyFormErrors,
+  field: DropshipWalletPolicyFormField,
+): number | null {
+  const parsed = parseWholeDays(value, DROPSHIP_WALLET_POLICY_MAX_TIER_CHANGE_GRACE_DAYS);
+  if (parsed.ok) return parsed.days;
+  errors[field] = parsed.reason === "range"
+    ? `${label} cannot exceed ${DROPSHIP_WALLET_POLICY_MAX_TIER_CHANGE_GRACE_DAYS} days.`
+    : `${label} must be a whole number of days, zero or more.`;
+  return null;
+}
+
 type ParsedDollars = { ok: true; cents: number } | { ok: false; reason: "format" | "range" };
 
 /**
@@ -455,17 +580,40 @@ type ParsedDollars = { ok: true; cents: number } | { ok: false; reason: "format"
  * read as one integer, so no value ever passes through a float (0.1 + 0.2
  * arithmetic cannot round a cent here).
  */
-export function parseDollarsToCents(value: string): ParsedDollars {
+export function parseDollarsToCents(
+  value: string,
+  options: { allowZero?: boolean } = {},
+): ParsedDollars {
+  const parsed = parseHundredths(value);
+  if (!parsed.ok) return parsed.reason === "range" ? { ok: false, reason: "range" } : { ok: false, reason: "format" };
+  if (parsed.value > MAX_CENTS) return { ok: false, reason: "range" };
+  // The server requires a positive amount for most limits; "0" and "0.00" are
+  // a format error to the operator, not a range error, because the fix is to
+  // type a real amount. A cap may be zero: that is "advance nothing".
+  if (parsed.value <= 0 && !options.allowZero) return { ok: false, reason: "format" };
+  return { ok: true, cents: parsed.value };
+}
+
+type ParsedPercent = { ok: true; bps: number } | { ok: false; reason: "format" | "range" };
+
+/** "1", "1.5", "1.25" -> 100, 150, 125 basis points. Zero is allowed; above 100% is a range error. */
+export function parsePercentToBasisPoints(value: string): ParsedPercent {
+  const parsed = parseHundredths(value);
+  if (!parsed.ok) return { ok: false, reason: parsed.reason };
+  if (parsed.value > DROPSHIP_WALLET_POLICY_MAX_ADVANCE_FEE_BPS) return { ok: false, reason: "range" };
+  return { ok: true, bps: parsed.value };
+}
+
+type ParsedHundredths = { ok: true; value: number } | { ok: false; reason: "format" | "range" };
+
+function parseHundredths(value: string): ParsedHundredths {
   const match = /^(\d+)(?:\.(\d{1,2}))?$/.exec(value.trim());
   if (!match) return { ok: false, reason: "format" };
   const whole = match[1] ?? "";
   const fraction = (match[2] ?? "").padEnd(2, "0");
-  const cents = Number(`${whole}${fraction}`);
-  if (!Number.isSafeInteger(cents) || cents > MAX_CENTS) return { ok: false, reason: "range" };
-  // The server requires a positive amount; "0" and "0.00" are a format error to
-  // the operator, not a range error, because the fix is to type a real amount.
-  if (cents <= 0) return { ok: false, reason: "format" };
-  return { ok: true, cents };
+  const parsed = Number(`${whole}${fraction}`);
+  if (!Number.isSafeInteger(parsed)) return { ok: false, reason: "range" };
+  return { ok: true, value: parsed };
 }
 
 type ParsedMinutes = { ok: true; minutes: number } | { ok: false; reason: "format" | "range" };
@@ -478,6 +626,18 @@ export function parseWholeMinutes(value: string, maximum: number): ParsedMinutes
   if (minutes <= 0) return { ok: false, reason: "format" };
   if (minutes > maximum) return { ok: false, reason: "range" };
   return { ok: true, minutes };
+}
+
+type ParsedDays = { ok: true; days: number } | { ok: false; reason: "format" | "range" };
+
+/** Whole days, zero allowed (a grace of zero enforces a raised tier immediately). */
+export function parseWholeDays(value: string, maximum: number): ParsedDays {
+  const normalized = value.trim();
+  if (!/^\d+$/.test(normalized)) return { ok: false, reason: "format" };
+  const days = Number(normalized);
+  if (!Number.isSafeInteger(days)) return { ok: false, reason: "range" };
+  if (days > maximum) return { ok: false, reason: "range" };
+  return { ok: true, days };
 }
 
 // --- Dirty check ------------------------------------------------------------
@@ -549,11 +709,15 @@ export function dropshipWalletPolicyProposedMinimums(
  */
 export interface DropshipWalletPolicyVersionRequest {
   autoReloadMinTriggerCents: number;
+  caseTierMinimumCents: number;
   autoReloadMinAmountCents: number;
   manualFundingMinCents: number;
   manualFundingMaxCents: number;
   defaultPaymentHoldTimeoutMinutes: number;
   holdExpiryWarningMinutes: number;
+  advanceFeeBps: number;
+  advanceCapCents: number;
+  tierChangeGraceDays: number;
   changeNote: string | null;
   idempotencyKey: string;
 }
@@ -584,11 +748,15 @@ export function buildDropshipWalletPolicyVersionRequest(input: {
   }
   return {
     autoReloadMinTriggerCents: input.limits.autoReloadMinTriggerCents,
+    caseTierMinimumCents: input.limits.caseTierMinimumCents,
     autoReloadMinAmountCents: input.limits.autoReloadMinAmountCents,
     manualFundingMinCents: input.limits.manualFundingMinCents,
     manualFundingMaxCents: input.limits.manualFundingMaxCents,
     defaultPaymentHoldTimeoutMinutes: input.limits.defaultPaymentHoldTimeoutMinutes,
     holdExpiryWarningMinutes: input.limits.holdExpiryWarningMinutes,
+    advanceFeeBps: input.limits.advanceFeeBps,
+    advanceCapCents: input.limits.advanceCapCents,
+    tierChangeGraceDays: input.limits.tierChangeGraceDays,
     changeNote: changeNote ? changeNote : null,
     idempotencyKey,
   };
@@ -631,12 +799,12 @@ export function dropshipWalletPolicySourceLabel(
   if (limitsSource === "policy") return "Published policy version";
   return envKey
     ? `Environment variable ${envKey}`
-    : "Schema default (no environment variable exists)";
+    : "Built-in default (no environment variable exists)";
 }
 
 /** What the environment layer would serve for this limit, named. */
 export function dropshipWalletPolicyEnvLabel(envKey: string | null): string {
-  return envKey ?? "Schema default (no environment variable exists)";
+  return envKey ?? "Built-in default (no environment variable exists)";
 }
 
 function isPositiveInteger(value: number | undefined): value is number {

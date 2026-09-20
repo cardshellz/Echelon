@@ -43,30 +43,43 @@ function overviewFixture(
   return {
     policy: null,
     limits: {
-      autoReloadMinTriggerCents: 5_000,
+      autoReloadMinTriggerCents: 10_000,
+      caseTierMinimumCents: 50_000,
       autoReloadMinAmountCents: 10_000,
       manualFundingMinCents: 1_000,
       manualFundingMaxCents: 500_000,
-      defaultPaymentHoldTimeoutMinutes: 2_880,
+      defaultPaymentHoldTimeoutMinutes: 1_440,
       holdExpiryWarningMinutes: 120,
+      advanceFeeBps: 100,
+      advanceCapCents: 50_000,
+      tierChangeGraceDays: 14,
     },
     limitsSource: "environment",
     envLimits: {
-      autoReloadMinTriggerCents: 5_000,
+      autoReloadMinTriggerCents: 10_000,
+      caseTierMinimumCents: 50_000,
       autoReloadMinAmountCents: 10_000,
       manualFundingMinCents: 1_000,
       manualFundingMaxCents: 500_000,
-      defaultPaymentHoldTimeoutMinutes: 2_880,
+      defaultPaymentHoldTimeoutMinutes: 1_440,
       holdExpiryWarningMinutes: 120,
+      advanceFeeBps: 100,
+      advanceCapCents: 50_000,
+      tierChangeGraceDays: 14,
     },
     envKeys: {
       autoReloadMinTriggerCents: "DROPSHIP_AUTO_RELOAD_MIN_TRIGGER_CENTS",
+      caseTierMinimumCents: null,
       autoReloadMinAmountCents: "DROPSHIP_AUTO_RELOAD_MIN_AMOUNT_CENTS",
       manualFundingMinCents: "DROPSHIP_STRIPE_MIN_WALLET_FUNDING_CENTS",
       manualFundingMaxCents: "DROPSHIP_STRIPE_MAX_WALLET_FUNDING_CENTS",
-      // The hold timeout has no environment override; the server serves null.
+      // The hold timeout, the case tier, the advance and the grace have no
+      // environment override; the server serves null for each.
       defaultPaymentHoldTimeoutMinutes: null,
       holdExpiryWarningMinutes: "DROPSHIP_PAYMENT_HOLD_EXPIRING_WARNING_MINUTES",
+      advanceFeeBps: null,
+      advanceCapCents: null,
+      tierChangeGraceDays: null,
     },
     cardFundingFee: {
       bps: 290,
@@ -191,7 +204,8 @@ describe("dropship wallet policy tab", () => {
     );
     expect(html).not.toContain("Card funding fee");
     expect(html).not.toContain("7 of 19");
-    expect(html).not.toContain("$50.00");
+    expect(html).not.toContain("$100.00");
+    expect(html).not.toContain("$500.00");
     expect(html).not.toContain("<input");
     expect(vi.mocked(useQuery).mock.calls[0]![0]).toMatchObject({ enabled: false });
   });
@@ -203,7 +217,7 @@ describe("dropship wallet policy tab", () => {
     );
     const inputs = tags(html, "input");
     const textareas = tags(html, "textarea");
-    expect(inputs).toHaveLength(6);
+    expect(inputs).toHaveLength(10);
     expect(textareas).toHaveLength(1);
     for (const element of [...inputs, ...textareas]) {
       expect(element).toMatch(DISABLED_ATTRIBUTE);
@@ -214,10 +228,15 @@ describe("dropship wallet policy tab", () => {
     expect(tags(html, "fieldset")[0]).toMatch(DISABLED_ATTRIBUTE);
   });
 
-  it("opens the six limit boxes for an operator who may manage operations", () => {
+  it("opens the ten limit boxes for an operator who may manage operations", () => {
     const html = renderPanel({ canEdit: true, overview: overviewFixture() });
     const inputs = tags(html, "input");
-    expect(inputs).toHaveLength(6);
+    expect(inputs).toHaveLength(10);
+    // The new limits are labelled in their own units, never as dollars.
+    expect(html).toContain("Case tier minimum ($)");
+    expect(html).toContain("Advance fee (%)");
+    expect(html).toContain("Advance cap ($)");
+    expect(html).toContain("Tier change grace (days)");
     for (const input of inputs) {
       expect(input).not.toMatch(DISABLED_ATTRIBUTE);
     }
@@ -230,10 +249,9 @@ describe("dropship wallet policy tab", () => {
     expect(impact).toContain("7 of 19");
     expect(impact).toContain("3 of 19");
     // The minimums the counts were measured against come from the payload, not
-    // from the form: the fixture's limits in force are $50.00 and $100.00.
+    // from the form: the fixture's limits in force are $100.00 and $100.00.
     expect(impact).toContain("$75.00");
     expect(impact).toContain("$250.00");
-    expect(impact).not.toContain("$50.00");
     expect(impact).not.toContain("$100.00");
     expect(impact).toContain("Saving does not change their stored settings.");
     expect(impact).toContain(
@@ -290,11 +308,15 @@ describe("dropship wallet policy tab", () => {
     expect(html).toContain("Environment fallback");
     expect(html).toContain("Environment variable DROPSHIP_AUTO_RELOAD_MIN_TRIGGER_CENTS");
     expect(html).toContain("Environment variable DROPSHIP_PAYMENT_HOLD_EXPIRING_WARNING_MINUTES");
-    // The payment hold timeout has no environment variable; the page says so
-    // rather than inventing one.
-    expect(html).toContain("Schema default (no environment variable exists)");
+    // The payment hold timeout, the case tier, the advance and the grace have
+    // no environment variable; the page says so rather than inventing one.
+    expect(html).toContain("Built-in default (no environment variable exists)");
+    expect(html).not.toContain("Schema default");
     expect(html).toContain("No policy version has been published");
-    expect(html).toContain("2,880 min");
+    expect(html).toContain("1,440 min");
+    // Each new limit is printed in its own unit.
+    expect(html).toContain("1.00%");
+    expect(html).toContain("14 days");
   });
 
   it("names the published version and its author once a policy row exists", () => {

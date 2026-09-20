@@ -157,6 +157,10 @@ describe("dropship wallet routes card fee exposure", () => {
             manualFundingMaxCents: 400_000,
             defaultPaymentHoldTimeoutMinutes: 1_440,
             holdExpiryWarningMinutes: 90,
+            caseTierMinimumCents: 55_000,
+            advanceFeeBps: 150,
+            advanceCapCents: 75_000,
+            tierChangeGraceDays: 21,
           },
         };
       },
@@ -174,6 +178,10 @@ describe("dropship wallet routes card fee exposure", () => {
           manualFundingMaxCents: 400_000,
           defaultPaymentHoldTimeoutMinutes: 1_440,
           holdExpiryWarningMinutes: 90,
+          caseTierMinimumCents: 55_000,
+          advanceFeeBps: 150,
+          advanceCapCents: 75_000,
+          tierChangeGraceDays: 21,
         },
       }),
       configureAutoReload: async (input: unknown) => {
@@ -224,6 +232,10 @@ describe("dropship wallet routes card fee exposure", () => {
       manualFundingMaxCents: 400_000,
       defaultPaymentHoldTimeoutMinutes: 1_440,
       holdExpiryWarningMinutes: 90,
+      caseTierMinimumCents: 55_000,
+      advanceFeeBps: 150,
+      advanceCapCents: 75_000,
+      tierChangeGraceDays: 21,
     });
   });
 

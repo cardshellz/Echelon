@@ -398,7 +398,10 @@ export function deriveWalletFlow(input: {
   const limitCents = authorized && autoReload.maxSingleReloadCents !== null
     ? capAfterFloorChange(autoReload.minimumBalanceCents, floorCents, autoReload.maxSingleReloadCents, wallet.limits)
     : derivedLimit;
-  const holdTimeoutMinutes = autoReload?.paymentHoldTimeoutMinutes ?? wallet.limits.defaultPaymentHoldTimeoutMinutes;
+  // The hold is set by staff for every wallet (the wallet policy governs at
+  // acceptance time); the saved row's value is only what this client last
+  // echoed back, so it is never what the vendor is shown.
+  const holdTimeoutMinutes = wallet.limits.defaultPaymentHoldTimeoutMinutes;
 
   // Step 6 applies only to a bank-source onboarding vendor whose settled plus
   // pending money is below the floor; otherwise the flow ends in manage.
@@ -823,7 +826,7 @@ export function buildAutoReloadDisableInput(wallet: Pick<DropshipWalletView, "au
     backstopFundingMethodId: existing?.backstopFundingMethodId ?? null,
     minimumBalanceCents: existing?.minimumBalanceCents ?? 25_000,
     maxSingleReloadCents: existing?.maxSingleReloadCents ?? null,
-    paymentHoldTimeoutMinutes: existing?.paymentHoldTimeoutMinutes ?? wallet.limits.defaultPaymentHoldTimeoutMinutes,
+    paymentHoldTimeoutMinutes: wallet.limits.defaultPaymentHoldTimeoutMinutes,
     acknowledgedCardFeeBps: null,
   };
 }
@@ -837,7 +840,7 @@ export function planFromWallet(wallet: DropshipWalletView): WalletPlanInput | nu
     backupFundingMethodId: autoReload.backstopFundingMethodId,
     floorCents: autoReload.minimumBalanceCents,
     limitCents: autoReload.maxSingleReloadCents ?? derivedLimitCents(autoReload.minimumBalanceCents, wallet.limits),
-    holdTimeoutMinutes: autoReload.paymentHoldTimeoutMinutes,
+    holdTimeoutMinutes: wallet.limits.defaultPaymentHoldTimeoutMinutes,
   };
 }
 
@@ -875,9 +878,9 @@ export function depositFundingMethodFor(wallet: DropshipWalletView, rail: Wallet
   return active.find((method) => method.fundingMethodId === configuredId) ?? active[0] ?? null;
 }
 
-/** Copy for the Limits editor's hold-time line: only orders held from now on take the new deadline. */
+/** Copy for the Limits editor's hold-time line: the hold is CardShellz's setting, shown so the vendor knows the deadline their held orders get. */
 export function describeHoldTimeLine(holdExpiryWarningMinutes: number): string {
-  return `How long a waiting order stays open before it is cancelled, for orders held from now on — an order already waiting keeps the deadline it was given. We email you ${formatDurationMinutes(holdExpiryWarningMinutes)} before.`;
+  return `How long a waiting order stays open before it is cancelled. Set by CardShellz for every wallet, for orders held from now on — an order already waiting keeps the deadline it was given. We email you ${formatDurationMinutes(holdExpiryWarningMinutes)} before.`;
 }
 
 /** Copy for the pending-balance line. */

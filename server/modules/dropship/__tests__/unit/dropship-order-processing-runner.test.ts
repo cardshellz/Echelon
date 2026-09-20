@@ -215,12 +215,16 @@ class FakePaymentHoldExpirationService {
 function fakeWalletPolicy(holdExpiryWarningMinutes = 120): DropshipWalletPolicyResolver {
   return {
     resolveWalletLimits: async () => ({
-      autoReloadMinTriggerCents: 5_000,
+      autoReloadMinTriggerCents: 10_000,
+      caseTierMinimumCents: 50_000,
       autoReloadMinAmountCents: 10_000,
       manualFundingMinCents: 1_000,
       manualFundingMaxCents: 500_000,
-      defaultPaymentHoldTimeoutMinutes: 2_880,
+      defaultPaymentHoldTimeoutMinutes: 1_440,
       holdExpiryWarningMinutes,
+      advanceFeeBps: 100,
+      advanceCapCents: 50_000,
+      tierChangeGraceDays: 14,
     }),
   };
 }

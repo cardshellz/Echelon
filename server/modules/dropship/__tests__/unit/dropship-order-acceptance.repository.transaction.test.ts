@@ -170,6 +170,10 @@ function baseHandlers(overrides: Partial<Record<string, RowHandler>> = {}): RowH
       match: "FROM dropship.dropship_wallet_accounts",
       rows: [{ id: 1, vendor_id: 10, available_balance_cents: WALLET_BALANCE_CENTS, pending_balance_cents: 0, currency: "USD", status: "active" }],
     },
+    // The wallet policy table is absent by default, so the hold falls back to
+    // the vendor row and then the documented default; a dedicated test covers
+    // the policy-first path.
+    policyTable: { match: "to_regclass('dropship.dropship_wallet_policies')", rows: [{ present: null }] },
     holdTimeout: { match: "FROM dropship.dropship_auto_reload_settings", rows: [] },
     omsOrder: { match: "INSERT INTO oms.oms_orders", rows: [{ id: 1001 }] },
     omsEvent: { match: "INSERT INTO oms.oms_order_events", rows: [] },
@@ -629,6 +633,79 @@ describe("PgDropshipOrderAcceptanceRepository (transaction)", () => {
     expect(stageUpdate).toBeDefined();
     expect(stageUpdate?.params[2]).toBe("payment_hold_expired_before_finalization");
     expect(db.calls.at(-1)?.sql).toBe("COMMIT");
+  });
+
+  it("opens a fresh payment hold for the length the active wallet policy sets, not the vendor row", async () => {
+    const db = createFakeDb(baseHandlers({
+      intake: {
+        match: "FROM dropship.dropship_order_intake",
+        rows: [intakeRow({ status: "processing", oms_order_id: 1001, payment_hold_expires_at: null })],
+      },
+      stageSelect: {
+        match: "FROM dropship.dropship_order_acceptance_stages",
+        rows: [canonicalStageRow()],
+      },
+      walletSelect: {
+        match: "FROM dropship.dropship_wallet_accounts",
+        rows: [{ id: 1, vendor_id: 10, available_balance_cents: 100, pending_balance_cents: 0, currency: "USD", status: "active" }],
+      },
+      // The policy table exists and its active row says 24 hours; the vendor
+      // row still carries the old 48-hour default and must not win.
+      policyTable: {
+        match: "to_regclass('dropship.dropship_wallet_policies')",
+        rows: [{ present: "dropship.dropship_wallet_policies" }],
+      },
+      policyRow: {
+        match: "FROM dropship.dropship_wallet_policies",
+        rows: [{ default_payment_hold_timeout_minutes: 1_440 }],
+      },
+      holdTimeout: {
+        match: "FROM dropship.dropship_auto_reload_settings",
+        rows: [{ payment_hold_timeout_minutes: 2_880 }],
+      },
+    }));
+    const { repository } = createRepository(db, availableCost());
+
+    const result = await repository.finalizeCanonicalOrder(acceptanceInput());
+
+    expect(result).toMatchObject({
+      outcome: "payment_hold",
+      paymentHoldExpiresAt: new Date("2026-09-13T15:00:00.000Z"),
+    });
+    expect(db.statements("FROM dropship.dropship_wallet_policies")).toHaveLength(1);
+    // The vendor row is not consulted once the policy has answered.
+    expect(db.statements("FROM dropship.dropship_auto_reload_settings")).toHaveLength(0);
+  });
+
+  it("falls back to the vendor row for the hold length when the policy table is absent", async () => {
+    const db = createFakeDb(baseHandlers({
+      intake: {
+        match: "FROM dropship.dropship_order_intake",
+        rows: [intakeRow({ status: "processing", oms_order_id: 1001, payment_hold_expires_at: null })],
+      },
+      stageSelect: {
+        match: "FROM dropship.dropship_order_acceptance_stages",
+        rows: [canonicalStageRow()],
+      },
+      walletSelect: {
+        match: "FROM dropship.dropship_wallet_accounts",
+        rows: [{ id: 1, vendor_id: 10, available_balance_cents: 100, pending_balance_cents: 0, currency: "USD", status: "active" }],
+      },
+      holdTimeout: {
+        match: "FROM dropship.dropship_auto_reload_settings",
+        rows: [{ payment_hold_timeout_minutes: 2_880 }],
+      },
+    }));
+    const { repository } = createRepository(db, availableCost());
+
+    const result = await repository.finalizeCanonicalOrder(acceptanceInput());
+
+    expect(result).toMatchObject({
+      outcome: "payment_hold",
+      paymentHoldExpiresAt: new Date("2026-09-14T15:00:00.000Z"),
+    });
+    // A missing relation is never queried inside the transaction: it would abort it.
+    expect(db.statements("FROM dropship.dropship_wallet_policies")).toHaveLength(0);
   });
 
   it("does not debit after an existing payment-hold deadline even when the wallet is now funded", async () => {

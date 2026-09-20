@@ -27,7 +27,13 @@ import { warehouses } from "./warehouse.schema";
 
 export const dropshipSchema = pgSchema("dropship");
 
-export const DROPSHIP_DEFAULT_PAYMENT_HOLD_TIMEOUT_MINUTES = 48 * 60;
+/**
+ * 24 hours (owner decision, 2026-09-20; migration 0683). The active wallet
+ * policy row governs at acceptance time; this constant is the fallback for a
+ * database that row has not reached, and the column default for new vendor
+ * auto-reload rows.
+ */
+export const DROPSHIP_DEFAULT_PAYMENT_HOLD_TIMEOUT_MINUTES = 24 * 60;
 export const DROPSHIP_DEFAULT_RETURN_WINDOW_DAYS = 30;
 export const DROPSHIP_DEFAULT_INSURANCE_POOL_FEE_BPS = 200;
 export const DROPSHIP_DEFAULT_SHIPPING_MARKUP_BPS = 0;
