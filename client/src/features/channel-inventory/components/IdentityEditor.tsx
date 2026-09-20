@@ -27,6 +27,7 @@ const IDENTITY_HINTS: Record<string, string> = {
   shopify: "The Shopify inventory item id for this SKU at the store.",
   ebay: "The inventory item identifier registered on the eBay seller account for this SKU.",
 };
+const IDENTITY_POPOVER_VIEWPORT_MARGIN_PX = 16;
 
 /**
  * Exact external identity of one SKU at one destination. Integration setup,
@@ -71,7 +72,12 @@ export function IdentityCell({ view, target, variant, provider, canEdit, onReloa
                 : <><Pencil className="mr-1 h-3.5 w-3.5" aria-hidden="true" />Edit</>}
             </Button>
           </PopoverTrigger>
-          <PopoverContent align="end" className="w-[min(24rem,90vw)]">
+          <PopoverContent
+            align="end"
+            collisionPadding={IDENTITY_POPOVER_VIEWPORT_MARGIN_PX}
+            sticky="always"
+            className="w-[min(24rem,90vw)] max-h-[min(calc(100dvh-2rem),var(--radix-popover-content-available-height))] overflow-y-auto overscroll-contain"
+          >
             <IdentityForm
               view={view}
               target={target}

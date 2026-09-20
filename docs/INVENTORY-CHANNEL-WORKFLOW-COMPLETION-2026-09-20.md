@@ -121,9 +121,10 @@ Final local results after integrating main, including its SKU publication holds:
 | --- | --- |
 | `npm run check -- --incremental false` | Passed |
 | `npm run check:tests` | Passed (server and client test TypeScript) |
-| `vitest run unit --maxWorkers=4` | 13,898 passed; 39 skipped; zero failed |
+| First integrated `vitest run unit --maxWorkers=4` | 13,898 passed; 39 skipped; zero failed |
+| Final full unit rerun after recovery/layout hardening | 13,899 passed; one localhost-fetch failure in unchanged wallet tests; 39 skipped. That file then passed all 14 tests in isolation; see qualification below |
 | `scripts/ci/postgres-tests.ts`, all eight shards | 86 suite files; 1,339 passed; zero skipped or failed |
-| `playwright.inventory.config.ts` | 56 passed, desktop and mobile |
+| `playwright.inventory.config.ts` | 58 passed, desktop and mobile, including short-view-height recovery |
 | `catalog-conversions.spec.ts` in the Dropship browser configuration | 28 passed, desktop and mobile |
 | Desktop/mobile visual inspection | Channel Apply and SKU warehouse editor screenshots inspected |
 
@@ -132,6 +133,20 @@ localhost-only disposable PostgreSQL cluster. That cluster was stopped after
 validation; existing database services were not stopped or reconfigured.
 Browser/provider APIs are mocked; none are production acceptance tests. GitHub
 CI has not been counted as passing by this local validation record.
+
+The first GitHub browser run found an offscreen Retry action after error feedback
+expanded the identity popover. A compact-height regression reproduced it locally.
+`IdentityCell` now bounds the popover to the available viewport and enables internal
+scrolling; all four regular/compact desktop/mobile recovery cases pass without
+forced clicks, and the full 58-test inventory browser rerun passes. Final review
+also hardened `PostgresChannelPublicationStatusReader.read` to discard a connection
+if rollback fails; both rollback outcomes have passing unit regressions.
+
+The final broad unit rerun had one `TypeError: fetch failed` in the unchanged
+`dropship-admin-wallet-policy.routes.test.ts` localhost HTTP test. Its entire
+14-test file passed immediately in isolation. The specific transient cause was
+not established; this is not represented as an uninterrupted green final local
+run, nor used to justify a change to unrelated wallet behavior.
 
 Two unchanged migration files (0678 and 0683) were mechanically normalized to LF
 locally for existing literal-newline tests; their Git-normalized content is not

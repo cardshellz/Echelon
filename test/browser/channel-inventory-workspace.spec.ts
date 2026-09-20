@@ -241,20 +241,32 @@ test("failed delivery reads hide stale evidence and never turn failure into zero
   expect(state.writes).toEqual([]);
 });
 
-test("identity editor retains its exact retry after a lost response", async ({ page }) => {
-  const state = await setup(page, { query: "?channel=3&destination=5&tab=quantities&product=10" });
-  await page.getByRole("button", { name: "Edit", exact: true }).click();
-  await page.getByLabel("Inventory item id", { exact: true }).fill("new-provider-item");
-  state.loseResponse = true;
-  await page.getByRole("button", { name: "Save identity", exact: true }).click();
-  await expect(page.getByText("Save outcome unknown", { exact: true })).toBeVisible();
-  await expect(page.getByLabel("Inventory item id", { exact: true })).toBeDisabled();
-  await page.getByRole("button", { name: "Retry same save", exact: true }).click();
-  await expect.poll(() => state.writes.length).toBe(2);
-  expect(state.writes[1].raw).toBe(state.writes[0].raw);
-  expect(state.writes[0].body).toMatchObject({ productVariantId: 101, publicationTargetId: 5, changeReason: null, externalInventoryItemId: "new-provider-item" });
-  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
-});
+for (const compactViewport of [false, true]) {
+  test(`identity editor retains its exact retry after a lost response${compactViewport ? " in a compact viewport" : ""}`, async ({ page }) => {
+    if (compactViewport) await page.setViewportSize({ width: page.viewportSize()!.width, height: 420 });
+    const state = await setup(page, { query: "?channel=3&destination=5&tab=quantities&product=10" });
+    await page.getByRole("button", { name: "Edit", exact: true }).click();
+    await page.getByLabel("Inventory item id", { exact: true }).fill("new-provider-item");
+    state.loseResponse = true;
+    await page.getByRole("button", { name: "Save identity", exact: true }).click();
+    await expect(page.getByText("Save outcome unknown", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("Inventory item id", { exact: true })).toBeDisabled();
+    // Error feedback grows the popover. Its container must remain inside the
+    // viewport and scroll the real action into reach, without a forced click.
+    await expect.poll(async () => {
+      const bounds = await page.getByRole("dialog").boundingBox();
+      return bounds !== null && bounds.y >= 0 && bounds.y + bounds.height <= page.viewportSize()!.height;
+    }).toBe(true);
+    const retry = page.getByRole("button", { name: "Retry same save", exact: true });
+    await retry.scrollIntoViewIfNeeded();
+    await expect(retry).toBeInViewport();
+    await retry.click();
+    await expect.poll(() => state.writes.length).toBe(2);
+    expect(state.writes[1].raw).toBe(state.writes[0].raw);
+    expect(state.writes[0].body).toMatchObject({ productVariantId: 101, publicationTargetId: 5, changeReason: null, externalInventoryItemId: "new-provider-item" });
+    expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+  });
+}
 
 test("SKU exceptions keep inherited fields and retry the same command after a lost response", async ({ page }) => {
   const state = await setup(page);

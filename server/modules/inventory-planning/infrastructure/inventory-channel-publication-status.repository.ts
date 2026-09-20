@@ -10,6 +10,7 @@ export class PostgresChannelPublicationStatusReader implements ChannelPublicatio
 
   async read(request: ChannelPublicationStatusRequest): Promise<unknown> {
     const client = await this.pool.connect();
+    let discardConnection = false;
     try {
       await client.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
       await client.query("SET LOCAL statement_timeout = '8s'");
@@ -85,9 +86,13 @@ export class PostgresChannelPublicationStatusReader implements ChannelPublicatio
       };
     } catch (error) {
       try { await client.query("ROLLBACK"); }
-      catch (rollbackError) { throw new AggregateError([error, rollbackError], "Publication status read and rollback failed."); }
+      catch (rollbackError) {
+        // A failed rollback cannot return an unknown transaction to the pool.
+        discardConnection = true;
+        throw new AggregateError([error, rollbackError], "Publication status read and rollback failed.");
+      }
       throw error;
-    } finally { client.release(); }
+    } finally { client.release(discardConnection); }
   }
 }
 
