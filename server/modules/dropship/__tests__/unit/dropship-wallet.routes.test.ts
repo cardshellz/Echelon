@@ -239,6 +239,20 @@ describe("dropship wallet routes card fee exposure", () => {
     });
   });
 
+  it("serves the listing tiers the vendor is held to, with the raise in grace and its date", async () => {
+    const response = await jsonRequest(`${server.url}/api/dropship/wallet`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.wallet.listingTiers).toEqual({
+      pack: { tier: "pack", eligible: true, reason: null, minimumCents: 7_500, shortfallCents: 0, upcoming: null },
+      case: {
+        tier: "case", eligible: false, reason: "case_tier_balance_below_minimum", minimumCents: 55_000, shortfallCents: 55_000,
+        upcoming: { minimumCents: 75_000, policyVersion: 3, enforcesAt: "2026-09-30T12:00:00.000Z", affectsVendor: true },
+      },
+      generatedAt: "2026-09-16T12:00:00.000Z",
+    });
+  });
+
   it("leaves the admin per-vendor wallet serializer unchanged", async () => {
     // Staff read the policy through GET /api/dropship/admin/wallet/policy, so
     // the ops screen's shape does not move when the vendor view gains limits.
@@ -246,6 +260,7 @@ describe("dropship wallet routes card fee exposure", () => {
 
     expect(response.status).toBe(200);
     expect(response.body.wallet.limits).toBeUndefined();
+    expect(response.body.wallet.listingTiers).toBeUndefined();
     expect(response.body.wallet.cardFundingFeeBps).toBe(300);
   });
 
@@ -305,8 +320,30 @@ describe("dropship wallet routes card fee exposure", () => {
 function buildApp(service: DropshipWalletService): express.Express {
   const app = express();
   app.use(express.json());
-  registerDropshipWalletRoutes(app, service, {} as StripeDropshipFundingProvider);
+  registerDropshipWalletRoutes(app, service, {} as StripeDropshipFundingProvider, { resolveForVendor: fakeListingTierView });
   return app;
+}
+
+/** The tier standing the vendor view composes in; pinned so the serializer's shape is asserted, not the rules. */
+async function fakeListingTierView(vendorId: number) {
+  const generatedAt = new Date("2026-09-16T12:00:00.000Z");
+  const enforcesAt = new Date("2026-09-30T12:00:00.000Z");
+  return {
+    vendorId,
+    minimums: {
+      pack: { tier: "pack" as const, minimumCents: 7_500, version: 2, upcoming: null },
+      case: { tier: "case" as const, minimumCents: 55_000, version: 2, upcoming: { minimumCents: 75_000, version: 3, enforcesAt } },
+    },
+    eligibility: {
+      pack: { tier: "pack" as const, eligible: true, reason: null, minimumCents: 7_500, shortfallCents: 0, upcoming: null },
+      case: {
+        tier: "case" as const, eligible: false, reason: "case_tier_balance_below_minimum" as const, minimumCents: 55_000, shortfallCents: 55_000,
+        upcoming: { minimumCents: 75_000, version: 3, enforcesAt, affectsVendor: true },
+      },
+    },
+    funding: { minimumBalanceCents: 7_500, availableBalanceCents: 0, pendingBalanceCents: 0, currency: "USD" },
+    generatedAt,
+  };
 }
 
 async function startServer(app: express.Express): Promise<{ url: string; close: () => Promise<void> }> {

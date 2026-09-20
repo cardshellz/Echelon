@@ -1,6 +1,7 @@
 import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
 import { DropshipError } from "../domain/errors";
+import { parseCatalogVariantUomType } from "../domain/listing-tiers";
 import type {
   CreateDropshipListingPushJobRepositoryInput,
   CreateDropshipListingPushJobRepositoryResult,
@@ -101,6 +102,7 @@ interface CandidateRow {
   product_is_active: boolean;
   variant_is_active: boolean;
   units_per_variant: number;
+  uom_type: string;
   default_retail_price_cents: string | number | null;
 }
 
@@ -341,6 +343,7 @@ export class PgDropshipListingPreviewRepository implements DropshipListingPrevie
            p.is_active AS product_is_active,
            pv.is_active AS variant_is_active,
            pv.units_per_variant,
+           pv.uom_type,
            COALESCE((ROUND(retail_cache.price::numeric * 100))::bigint, pv.price_cents) AS default_retail_price_cents
          FROM catalog.product_variants pv
          INNER JOIN catalog.products p ON p.id = pv.product_id
@@ -923,6 +926,7 @@ function mapCandidateRow(row: CandidateRow): DropshipListingCatalogCandidate {
     ebayBrowseCategoryName: row.ebay_browse_category_name,
     productIsActive: row.product_is_active,
     variantIsActive: row.variant_is_active,
+    variantUomType: parseCatalogVariantUomType(row.uom_type, { productVariantId: row.product_variant_id }),
     unitsPerVariant: Math.max(1, row.units_per_variant),
     catalogUnitsPerVariant: row.units_per_variant,
     defaultRetailPriceCents: row.default_retail_price_cents === null ? null : Number(row.default_retail_price_cents),

@@ -136,6 +136,7 @@ export function previewRow(overrides: Partial<PreviewRow> = {}): PreviewRow {
     productVariantId: 101,
     sku: "CARD-P5",
     unitsPerVariant: 5,
+    hold: null,
     canonicalAtpUnits: "100",
     sharedUnits: "80",
     afterHoldbackUnits: "75",

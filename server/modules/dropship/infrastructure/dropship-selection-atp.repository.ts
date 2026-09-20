@@ -1,6 +1,7 @@
 import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
 import { DropshipError } from "../domain/errors";
+import { parseCatalogVariantUomType } from "../domain/listing-tiers";
 import type {
   DropshipSelectionAtpRepository,
   DropshipVendorCatalogCandidate,
@@ -65,6 +66,7 @@ interface VendorCatalogCandidateRow {
   variant_sku: string | null;
   variant_name: string;
   units_per_variant: number;
+  uom_type: string;
   variant_is_active: boolean;
   product_line_ids: number[] | null;
   product_line_names: string[] | null;
@@ -301,6 +303,7 @@ export class PgDropshipSelectionAtpRepository implements DropshipSelectionAtpRep
            pv.sku AS variant_sku,
            pv.name AS variant_name,
            pv.units_per_variant,
+           pv.uom_type,
            pv.is_active AS variant_is_active,
            COALESCE(line_data.product_line_ids, ARRAY[]::int[]) AS product_line_ids,
            COALESCE(line_data.product_line_names, ARRAY[]::text[]) AS product_line_names
@@ -481,6 +484,7 @@ function mapVendorCatalogCandidateRow(row: VendorCatalogCandidateRow): DropshipV
     productLineNames: row.product_line_names ?? [],
     productIsActive: row.product_is_active,
     variantIsActive: row.variant_is_active,
+    variantUomType: parseCatalogVariantUomType(row.uom_type, { productVariantId: row.product_variant_id }),
   };
 }
 

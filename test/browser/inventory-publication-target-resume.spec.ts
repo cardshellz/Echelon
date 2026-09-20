@@ -373,6 +373,7 @@ function runtimeRow() {
       externalInventoryItemId: "inventory-item-101",
       externalSku: "CARD-P5",
     },
+    hold: null,
     blockers: [],
     warnings: [],
   };

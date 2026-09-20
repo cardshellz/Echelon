@@ -1,6 +1,7 @@
 import type { Pool, PoolClient } from "pg";
 import { pool as defaultPool } from "../../../db";
 import { DropshipError } from "../domain/errors";
+import { parseCatalogVariantUomType } from "../domain/listing-tiers";
 import type {
   DropshipCatalogExposureRepository,
   DropshipCatalogExposureRuleRecord,
@@ -43,6 +44,7 @@ interface CatalogPreviewRow {
   variant_sku: string | null;
   variant_name: string;
   variant_is_active: boolean;
+  uom_type: string;
   product_line_ids: number[] | null;
   product_line_names: string[] | null;
 }
@@ -213,6 +215,7 @@ export class PgDropshipCatalogExposureRepository implements DropshipCatalogExpos
            pv.sku AS variant_sku,
            pv.name AS variant_name,
            pv.is_active AS variant_is_active,
+           pv.uom_type,
            ARRAY_REMOVE(ARRAY_AGG(DISTINCT plp.product_line_id), NULL) AS product_line_ids,
            ARRAY_REMOVE(ARRAY_AGG(DISTINCT pl.name), NULL) AS product_line_names
          FROM catalog.product_variants pv
@@ -221,7 +224,7 @@ export class PgDropshipCatalogExposureRepository implements DropshipCatalogExpos
          LEFT JOIN catalog.product_lines pl ON pl.id = plp.product_line_id
          ${whereSql}
          GROUP BY p.id, p.sku, p.name, p.category, p.is_active,
-                  pv.id, pv.sku, pv.name, pv.is_active, pv.position
+                  pv.id, pv.sku, pv.name, pv.is_active, pv.uom_type, pv.position
          ORDER BY p.name ASC, pv.position ASC, pv.name ASC`,
         params,
       );
@@ -340,6 +343,7 @@ function mapCatalogPreviewRow(row: CatalogPreviewRow): DropshipCatalogPreviewCan
     productLineNames: row.product_line_names ?? [],
     productIsActive: row.product_is_active,
     variantIsActive: row.variant_is_active,
+    variantUomType: parseCatalogVariantUomType(row.uom_type, { productVariantId: row.product_variant_id }),
   };
 }
 

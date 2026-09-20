@@ -39,3 +39,8 @@ export function formatNotificationCurrency(amountCents: number, currency: string
   const cents = Math.abs(amountCents) % 100;
   return `${currency.toUpperCase()} ${amountCents < 0 ? "-" : ""}$${dollars}.${String(cents).padStart(2, "0")}`;
 }
+
+/** A calendar date for vendor-facing copy, in UTC so the same instant always reads the same. */
+export function formatNotificationDate(date: Date): string {
+  return new Intl.DateTimeFormat("en-US", { timeZone: "UTC", year: "numeric", month: "long", day: "numeric" }).format(date);
+}

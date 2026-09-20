@@ -159,6 +159,34 @@ describe("InventoryChannelExposureRuntimeService", () => {
     expect(plan.targets[1]!.rows.map((row) => row.publishedUnits)).toEqual(["25", "7"]);
   });
 
+  it("publishes zero for a SKU under a SKU-level hold while the rest of the target keeps its quantities", async () => {
+    const hold = { reason: "Dropship vendor 10: case tier below minimum", heldAt: "2026-09-17T12:00:00.000Z", heldBy: "dropship-listing-tiers" };
+    const gated = target({ publicationTargetId: 91, variantHolds: [{ productVariantId: 102, hold }] });
+    gated.destinationKind = "dropship_store_connection";
+    gated.channelConnectionId = null;
+    gated.dropshipStoreConnectionId = 77;
+    gated.channelProvider = "ebay";
+    const service = new InventoryChannelExposureRuntimeService(executor(canonicalContext([gated])));
+
+    const plan = await service.planProduct(10);
+
+    expect(plan.targets[0]).toMatchObject({ publicationTargetId: 91, hold: null, publishable: true });
+    expect(plan.targets[0]!.rows.map((row) => [row.productVariantId, row.canonicalAtpUnits, row.publishedUnits, row.hold]))
+      .toEqual([[101, "25", "25", null], [102, "7", "0", hold]]);
+    expect(plan.targets[0]!.rows.every((row) => row.mapping !== null && row.blockers.length === 0)).toBe(true);
+  });
+
+  it("lets the destination hold win over a SKU-level hold and reports it on every row", async () => {
+    const targetHold = { reason: "Vendor 10 paused: card declined", heldAt: "2026-09-17T12:00:00.000Z", heldBy: "dropship-vendor-standing" };
+    const skuHold = { reason: "Dropship vendor 10: case tier below minimum", heldAt: "2026-09-17T13:00:00.000Z", heldBy: "dropship-listing-tiers" };
+    const both = target({ publicationTargetId: 91, hold: targetHold, variantHolds: [{ productVariantId: 102, hold: skuHold }] });
+    const service = new InventoryChannelExposureRuntimeService(executor(canonicalContext([both])));
+
+    const plan = await service.planProduct(10);
+
+    expect(plan.targets[0]!.rows.map((row) => [row.publishedUnits, row.hold])).toEqual([["0", targetHold], ["0", targetHold]]);
+  });
+
   it("plans a Dropship storefront with the same exact-target ATP and channel dial", async () => {
     const dropship = target();
     dropship.destinationKind = "dropship_store_connection";
@@ -264,6 +292,7 @@ function target(input: {
   sourceWarehouseIds?: number[];
   policy?: ReturnType<typeof policyValue>;
   hold?: ActiveInventoryPublicationTargetSnapshot["hold"];
+  variantHolds?: ActiveInventoryPublicationTargetSnapshot["variantHolds"];
 } = {}): ActiveInventoryPublicationTargetSnapshot {
   const publicationTargetId = input.publicationTargetId ?? 91;
   const channelId = input.channelId ?? 7;
@@ -308,6 +337,7 @@ function target(input: {
       externalInventoryItemId: `external-${publicationTargetId}-${productVariantId}`,
       externalSku: productVariantId === 101 ? "EA" : "P5",
     })),
+    variantHolds: input.variantHolds ?? [],
   };
 }
 

@@ -35,6 +35,7 @@ const candidate: DropshipVendorCatalogCandidate = {
   category: "Supplies",
   productIsActive: true,
   variantIsActive: true,
+  variantUomType: "pack",
 };
 
 const exposedDecision = {
@@ -371,8 +372,17 @@ function makeService(
     logger: { info: () => undefined, warn: () => undefined, error: () => undefined },
     repository,
     atp,
+    listingTiers: { resolveForVendor: async () => ({ eligibility: catalogListingTiers }) },
   });
 }
+
+const catalogListingTiers = {
+  pack: { tier: "pack" as const, eligible: true, reason: null, minimumCents: 10_000, shortfallCents: 0, upcoming: null },
+  case: {
+    tier: "case" as const, eligible: false, reason: "case_tier_balance_below_minimum" as const,
+    minimumCents: 50_000, shortfallCents: 38_000, upcoming: null,
+  },
+};
 
 function makeSelectionRuleRecord(
   input: Partial<DropshipVendorSelectionRuleRecord> & Pick<DropshipVendorSelectionRuleRecord, "id" | "scopeType" | "action">,

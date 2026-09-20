@@ -139,6 +139,34 @@ describe("PostgresInventoryChannelExposureRuntimeExecutor", () => {
     );
     const openContext = await open.execute(10, async (value) => value);
     expect(openContext.publicationTargets[0]!.hold).toBeNull();
+    expect(openContext.publicationTargets[0]!.variantHolds).toEqual([]);
+  });
+
+  it("carries SKU-level holds into the planner snapshot, scoped to the product's own variants", async () => {
+    const client = fakeClient("canonical", { dropship: true, variantHeld: true });
+    const executor = new PostgresInventoryChannelExposureRuntimeExecutor(
+      { connect: vi.fn(async () => client) } as never,
+      vi.fn(async () => ({ productId: 10 }) as never),
+    );
+
+    const context = await executor.execute(10, async (value) => value);
+
+    expect(context.publicationTargets[0]!.hold).toBeNull();
+    expect(context.publicationTargets[0]!.variantHolds).toEqual([{
+      productVariantId: 101,
+      hold: {
+        reason: "Dropship vendor 10: case tier below minimum",
+        heldAt: "2026-09-17T13:00:00.000Z",
+        heldBy: "dropship-listing-tiers",
+      },
+    }]);
+    const holdRead = client.query.mock.calls
+      .map((call) => {
+        const [statement, values] = call as unknown[];
+        return { sql: sqlText(statement), params: values };
+      })
+      .find((call) => call.sql.includes("inventory_publication_target_variant_holds"));
+    expect(holdRead?.params).toEqual([[91], [101]]);
   });
 
   it("loads a Dropship store as the exact transport owner while retaining its allocation channel", async () => {
@@ -162,7 +190,7 @@ describe("PostgresInventoryChannelExposureRuntimeExecutor", () => {
 
 function fakeClient(
   authority: "legacy" | "canonical",
-  options: { invalidTargetRevision?: boolean; dropship?: boolean; held?: boolean } = {},
+  options: { invalidTargetRevision?: boolean; dropship?: boolean; held?: boolean; variantHeld?: boolean } = {},
 ) {
   const query = vi.fn(async (statement: unknown) => {
     const sql = sqlText(statement);
@@ -217,6 +245,13 @@ function fakeClient(
       max_publish_sellable_units: null,
       min_publish_sellable_units: "0",
     }] };
+    if (sql.includes("inventory_publication_target_variant_holds")) return { rows: options.variantHeld ? [{
+      publication_target_id: 91,
+      product_variant_id: 101,
+      hold_reason: "Dropship vendor 10: case tier below minimum",
+      held_at: new Date("2026-09-17T13:00:00.000Z"),
+      held_by: "dropship-listing-tiers",
+    }] : [] };
     if (sql.includes("publication_variant_mapping_heads")) return { rows: [{
       publication_target_id: 91,
       product_variant_id: 101,

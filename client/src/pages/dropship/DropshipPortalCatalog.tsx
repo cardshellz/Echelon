@@ -46,6 +46,7 @@ import {
   queryErrorCode,
   queryErrorMessage,
   type DropshipCatalogResponse,
+  type DropshipCatalogListingTier,
   type DropshipCatalogRow,
   type DropshipEbayStoreCategoryAssignmentResponse,
   type DropshipEbayStoreCategoryResponse,
@@ -1332,6 +1333,16 @@ function CatalogTable({
                   >
                     {row.selectionDecision.selected ? "Selected" : formatStatus(row.selectionDecision.reason)}
                   </Badge>
+                  {row.selectionDecision.selected && row.listingTier && !row.listingTier.eligible && (
+                    <Badge
+                      variant="outline"
+                      className="ml-1 border-amber-200 bg-amber-50 text-amber-900"
+                      data-testid={`catalog-tier-off-sale-${row.productVariantId}`}
+                      title={describeCatalogListingTier(row.listingTier)}
+                    >
+                      {row.listingTier.tier === "case" ? "Cases off sale" : "Off sale"}
+                    </Badge>
+                  )}
                 </TableCell>
                 <TableCell className="text-right">
                   {row.selectionDecision.selected ? (
@@ -1392,6 +1403,20 @@ function pushButtonIcon(pendingListingAction: PendingListingAction, emailCodeSen
   if (pendingListingAction === "send-code" || (emailCodeSent && pendingListingAction !== "push")) return <Mail className="h-4 w-4" />;
   if (pendingListingAction === "push") return <Send className="h-4 w-4" />;
   return <ArrowRight className="h-4 w-4" />;
+}
+
+/** Why a selected SKU is not on sale, in the vendor's words: the gate and what closes it. */
+export function describeCatalogListingTier(tier: DropshipCatalogListingTier): string {
+  const minimum = formatCatalogDollars(tier.minimumCents);
+  const shortfall = formatCatalogDollars(tier.shortfallCents);
+  if (tier.tier === "case") {
+    return `Case listings go on sale once your wallet balance (counting money still settling) reaches ${minimum}. You are ${shortfall} short. Pack and inner pack listings are not affected.`;
+  }
+  return `Pack and inner pack listings need your wallet to keep the ${minimum} minimum: an auto-reload minimum at ${minimum} or a balance at ${minimum}. You are ${shortfall} short.`;
+}
+
+function formatCatalogDollars(centsValue: number): string {
+  return `$${(centsValue / 100).toLocaleString("en-US", { minimumFractionDigits: 0, maximumFractionDigits: 2 })}`;
 }
 
 function canSelectRow(row: DropshipCatalogRow): boolean {

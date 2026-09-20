@@ -1,3 +1,4 @@
+import type { VariantUomType } from "../../../../shared/catalog/variant-uom";
 import { DropshipError } from "./errors";
 
 export type DropshipCatalogExposureScope =
@@ -28,6 +29,8 @@ export interface DropshipCatalogVariantCandidate {
   category: string | null;
   productIsActive: boolean;
   variantIsActive: boolean;
+  /** `catalog.product_variants.uom_type`; decides the listing tier (see `listing-tiers.ts`). */
+  variantUomType: VariantUomType;
 }
 
 export type DropshipCatalogExposureDecisionReason =

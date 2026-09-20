@@ -90,6 +90,18 @@ export class PgDropshipWalletPolicyRepository implements DropshipWalletPolicyRep
     }
   }
 
+  /** Every published version, oldest first: the immutable history the listing tiers are enforced from. */
+  async listPolicyVersions(): Promise<DropshipWalletPolicyRecord[]> {
+    try {
+      const result = await this.dbPool.query<PolicyRow>(
+        `SELECT * FROM dropship.dropship_wallet_policies ORDER BY version ASC`,
+      );
+      return result.rows.map(mapPolicyRow);
+    } catch (error) {
+      throw mapWalletPolicyError(error);
+    }
+  }
+
   /**
    * Counts already-saved auto-reload rows that sit below a proposed floor.
    *

@@ -503,6 +503,54 @@ export const inventoryPublicationTargetHoldResultSchema = z.object({
 }).strict();
 export type InventoryPublicationTargetHoldResult = z.infer<typeof inventoryPublicationTargetHoldResultSchema>;
 
+/**
+ * SKU-level hold and release: the same destination addressing as a target
+ * hold, narrowed to the listed product variants. Every live Echelon target of
+ * the destination holds (or releases) exactly those SKUs; the rest of its
+ * catalog keeps publishing as planned. A hold on a SKU the target has no
+ * mapping for is kept, so a listing created later publishes zero from its
+ * first plan. Bounded so one command cannot lock a destination's provider
+ * scopes for longer than the lock timeout allows.
+ */
+export const INVENTORY_PUBLICATION_TARGET_VARIANT_HOLD_MAX_VARIANTS = 500;
+
+export const holdInventoryPublicationTargetVariantsRequestSchema = z.object({
+  destination: inventoryPublicationTargetHoldDestinationSchema,
+  productVariantIds: z.array(positiveInteger)
+    .min(1)
+    .max(INVENTORY_PUBLICATION_TARGET_VARIANT_HOLD_MAX_VARIANTS)
+    .refine((ids) => new Set(ids).size === ids.length, { message: "productVariantIds must be unique." }),
+  reason: nonblank(120),
+  idempotencyKey: nonblank(120),
+}).strict();
+export type HoldInventoryPublicationTargetVariantsRequest = z.infer<
+  typeof holdInventoryPublicationTargetVariantsRequestSchema
+>;
+
+export const inventoryPublicationTargetVariantHoldResultSchema = z.object({
+  destination: inventoryPublicationTargetHoldDestinationSchema,
+  command: z.enum(["hold", "release"]),
+  /** The SKUs the command named, in request order. */
+  productVariantIds: z.array(positiveInteger),
+  targets: z.array(z.object({
+    publicationTargetId: positiveInteger,
+    revision: postgresBigintString,
+    /** SKUs whose hold changed on this target; empty when every SKU was already in the requested state. */
+    changedProductVariantIds: z.array(positiveInteger),
+    /** Outbox rows enqueued to carry the new quantities to the provider. */
+    publicationRows: z.number().int().nonnegative(),
+    /** Products the canonical planner refused to publish; their stock on the marketplace is unchanged. */
+    blockedProductIds: z.array(positiveInteger),
+  }).strict()),
+  alreadyApplied: z.boolean(),
+  runtimeAuthorityChanged: z.literal(false),
+  providerWriteAttempted: z.literal(false),
+  outboxEnqueued: z.boolean(),
+}).strict();
+export type InventoryPublicationTargetVariantHoldResult = z.infer<
+  typeof inventoryPublicationTargetVariantHoldResultSchema
+>;
+
 export const savePublicationVariantMappingDraftRequestSchema = z.object({
   publicationTargetId: positiveInteger,
   productVariantId: positiveInteger,
@@ -614,6 +662,8 @@ export const inventoryChannelExposurePreviewSchema = z.object({
       externalInventoryItemId: nonblank(240),
       externalSku: z.string().trim().min(1).max(100).nullable(),
     }).strict().nullable(),
+    /** The hold that zeroes this SKU in the preview: the target's, else the SKU-level one, else null. */
+    hold: inventoryPublicationTargetHoldSchema.nullable(),
   }).strict()),
   blockers: z.array(z.object({
     code: nonblank(100),
@@ -700,6 +750,11 @@ const inventoryChannelExposureRuntimeRowSchema = z.object({
   }).strict()),
   policy: resolvedChannelExposurePolicySchema.nullable(),
   mapping: activePublicationVariantMappingEvidenceSchema.nullable(),
+  /**
+   * The hold that zeroed this SKU's published quantity: the target's own hold
+   * when it has one, otherwise the SKU-level hold, otherwise null.
+   */
+  hold: inventoryPublicationTargetHoldSchema.nullable(),
   blockers: z.array(inventoryChannelExposureRuntimeIssueSchema),
   warnings: z.array(inventoryChannelExposureRuntimeIssueSchema),
 }).strict().superRefine((row, context) => {

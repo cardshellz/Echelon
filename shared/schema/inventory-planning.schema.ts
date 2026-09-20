@@ -1924,6 +1924,40 @@ export const inventoryPublicationTargets = inventoryPlanningSchema.table(
   }),
 );
 
+/**
+ * SKU-level publication hold (migration 0684). While a row exists, the live
+ * target publishes zero for that SKU alone and the rest of its catalog as
+ * planned; releasing deletes the row. The destination-wide hold lives on
+ * `inventoryPublicationTargets.holdReason` and wins when both are set.
+ */
+export const inventoryPublicationTargetVariantHolds = inventoryPlanningSchema.table(
+  "inventory_publication_target_variant_holds",
+  {
+    publicationTargetId: integer("publication_target_id").notNull()
+      .references(() => inventoryPublicationTargets.id, { onDelete: "cascade" }),
+    productVariantId: integer("product_variant_id").notNull()
+      .references(() => productVariants.id, { onDelete: "restrict" }),
+    holdReason: varchar("hold_reason", { length: 120 }).notNull(),
+    heldAt: timestamp("held_at", { withTimezone: true }).notNull(),
+    heldBy: varchar("held_by", { length: 100 }).notNull(),
+  },
+  (table) => ({
+    primary: primaryKey({
+      name: "inventory_publication_target_variant_holds_pkey",
+      columns: [table.publicationTargetId, table.productVariantId],
+    }),
+    variantIndex: index("inventory_publication_target_variant_holds_variant_idx").on(table.productVariantId),
+    reasonValid: check(
+      "inventory_publication_target_variant_holds_reason_chk",
+      sql`${table.holdReason} = btrim(${table.holdReason}) AND ${table.holdReason} <> ''`,
+    ),
+    actorValid: check(
+      "inventory_publication_target_variant_holds_actor_chk",
+      sql`${table.heldBy} = btrim(${table.heldBy}) AND ${table.heldBy} <> ''`,
+    ),
+  }),
+);
+
 export const inventoryPublicationTargetResumeReviews = inventoryPlanningSchema.table(
   "inventory_publication_target_resume_reviews",
   {
