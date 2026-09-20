@@ -92,6 +92,42 @@ function correctionService(pool: Pool): HistoricalContentsCorrectionService {
   );
 }
 
+async function enqueueConfirmedCurrentLabel(input: Readonly<{
+  readonly pool: Pool;
+  readonly result: unknown;
+  readonly enqueueReprocess?: (providerOrderId: string) => Promise<void>;
+}>): Promise<void> {
+  if (!input.enqueueReprocess || input.result === null || typeof input.result !== "object"
+    || !("shippingProviderLabelId" in input.result)
+    || typeof input.result.shippingProviderLabelId !== "string") return;
+  const label = await input.pool.query<{
+    provider_order_id: string | null;
+    current_authoritative: boolean;
+  }>(
+    `SELECT label.provider_order_id,
+            EXISTS (
+              SELECT 1 FROM wms.shipping_provider_label_events AS event
+              WHERE event.shipping_provider_label_id = label.id
+                AND event.event_type = 'label_observed'
+                AND event.sanitized_payload->>'payloadSchemaVersion' = '2'
+                AND event.sanitized_payload->'declaredContentsEvidence'->>'status' = 'authoritative'
+            ) AS current_authoritative
+     FROM wms.shipping_provider_labels AS label
+     WHERE label.id = $1::bigint AND label.provider = 'shipstation'
+       AND label.label_direction = 'outbound'`,
+    [input.result.shippingProviderLabelId],
+  );
+  if (label.rows.length !== 1) {
+    throw new Error("Confirmed ShipStation contents lost their provider label identity");
+  }
+  if (!label.rows[0].current_authoritative) return;
+  const providerOrderId = label.rows[0].provider_order_id;
+  if (!providerOrderId || !/^[1-9][0-9]*$/.test(providerOrderId)) {
+    throw new Error("Confirmed ShipStation contents cannot be reprocessed without exact provider order identity");
+  }
+  await input.enqueueReprocess(providerOrderId);
+}
+
 async function exceptionIdForWorkItem(input: Readonly<{
   readonly pool: Pool;
   readonly workItemId: number;
@@ -186,16 +222,25 @@ export async function decideHistoricalContentsReview(input: Readonly<{
     | "cannot_prove";
   readonly reason: string;
   readonly reviewService?: HistoricalContentsReviewService;
+  readonly enqueueReprocess?: (providerOrderId: string) => Promise<void>;
 }>): Promise<unknown> {
   try {
     const exceptionId = await exceptionIdForWorkItem(input);
-    return await (input.reviewService ?? service(input.pool)).decide({
+    const result = await (input.reviewService ?? service(input.pool)).decide({
       exceptionId,
       expectedPreviewEvidenceHash: input.expectedPreviewEvidenceHash,
       authenticatedActorUserId: input.actorUserId,
       decision: input.decision,
       reason: input.reason,
     });
+    if (input.decision === "wms_confirmed") {
+      await enqueueConfirmedCurrentLabel({
+        pool: input.pool,
+        result,
+        enqueueReprocess: input.enqueueReprocess,
+      });
+    }
+    return result;
   } catch (error) {
     return actionError(error);
   }

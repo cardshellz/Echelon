@@ -433,7 +433,12 @@ function projectContentsTimeline(
             "not_prior_content_evidence",
           );
         }
-        if (resolvedSnapshot.fingerprint !== null) {
+        // A provider-declared item can be wrong even when its line key parses.
+        // Only an authenticated lead's named correction may supersede that
+        // immutable provider observation. Automatic recovery cannot do so.
+        if (resolvedSnapshot.fingerprint !== null
+          && (resolvedSnapshot.source !== "provider"
+            || event.authorization !== "lead_approved")) {
           invalidContentResolution(
             event.eventKey,
             resolvesEventKey,

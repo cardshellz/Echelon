@@ -439,6 +439,26 @@ describe("projectDeclaredPackageLifecycle", () => {
     });
   });
 
+  it("lets a lead correct a named authoritative provider line without erasing the provider evidence", () => {
+    const state = projectDeclaredPackageLifecycle(lifecycle([
+      observedLabel(),
+      contentsAttestation(),
+    ]));
+
+    expect(state).toMatchObject({
+      contentsStatus: "authoritative",
+      observedContentsEvidenceStatuses: ["authoritative"],
+      activeContentsEvidenceStatuses: [],
+      authoritativeContents: [{ wmsShipmentItemId: 7001, quantity: 2 }],
+      commercialFulfillmentPostingEligible: true,
+      inventoryPostingEligible: true,
+      reviewReasons: [],
+    });
+    expect(state.evidenceHash).not.toBe(projectDeclaredPackageLifecycle(lifecycle([
+      observedLabel(),
+    ])).evidenceHash);
+  });
+
   it.each([
     [
       "a duplicate reference",
@@ -460,10 +480,10 @@ describe("projectDeclaredPackageLifecycle", () => {
       ],
     ],
     [
-      "authoritative provider evidence",
+      "authoritative provider evidence without lead authorization",
       [
         observedLabel(),
-        contentsAttestation(),
+        contentsAttestation({ authorization: "system_recovered" }),
       ],
     ],
     [

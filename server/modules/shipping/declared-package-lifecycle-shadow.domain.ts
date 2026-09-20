@@ -576,6 +576,7 @@ function assertSystemRecoveryReferences(
     throw new ShadowEvidenceError("invalid_system_recovery_evidence");
   }
   const eventById = new Map(labelEvents.map((event) => [event.id, event]));
+  const operatorResolution = parsed.data.recoveryStatus === "wms_confirmed_after_provider_conflict";
   const historicalV1EventIds = new Set(labelEvents.flatMap((event) => {
     if (!["label_observed", "label_voided"].includes(event.eventType)) return [];
     const eventPayload = plainRecord(event.sanitizedPayload);
@@ -594,24 +595,31 @@ function assertSystemRecoveryReferences(
     const historicalV1 = payloadVersion === undefined || payloadVersion === 1;
     const nonAuthoritativeV2 = payloadVersion === 2
       && plainRecord(resolvedPayload?.declaredContentsEvidence)?.status !== "authoritative";
+    const authoritativeV2 = payloadVersion === 2
+      && plainRecord(resolvedPayload?.declaredContentsEvidence)?.status === "authoritative";
     if (
       resolvedId <= previousId
       || resolved === undefined
       || resolved.id >= recoveryRow.id
       || !["label_observed", "label_voided"].includes(resolved.eventType)
       || resolvedPayload === null
-      || (!historicalV1 && !nonAuthoritativeV2)
+      || (!historicalV1 && !nonAuthoritativeV2 && !(operatorResolution && authoritativeV2))
     ) {
       throw new ShadowEvidenceError("invalid_system_recovery_evidence");
     }
     if (historicalV1) historicalV1ReferenceCount += 1;
     previousId = resolvedId;
   }
-  if (historicalV1ReferenceCount === 0) {
+  if (historicalV1ReferenceCount === 0 && !operatorResolution) {
     throw new ShadowEvidenceError("invalid_system_recovery_evidence");
   }
   const resolvedIds = new Set(parsed.data.resolvedLabelEventIds);
   if ([...historicalV1EventIds].some((eventId) => !resolvedIds.has(eventId))) {
+    throw new ShadowEvidenceError("invalid_system_recovery_evidence");
+  }
+  if (operatorResolution && labelEvents.some((event) =>
+    ["label_observed", "label_voided"].includes(event.eventType)
+    && !resolvedIds.has(event.id))) {
     throw new ShadowEvidenceError("invalid_system_recovery_evidence");
   }
 }

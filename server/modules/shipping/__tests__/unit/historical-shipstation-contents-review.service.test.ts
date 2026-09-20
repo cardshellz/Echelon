@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { HistoricalShipStationContentsClient } from "../../historical-shipstation-contents-audit.client";
+import { buildHistoricalShipStationContentsRecoveryEvidence } from "../../historical-shipstation-contents-recovery.domain";
 import {
+  classifyReviewedShipStationContents,
   HistoricalShipStationContentsReviewService,
   HistoricalShipStationContentsReviewServiceError,
   type HistoricalShipStationContentsReviewCandidate,
@@ -105,6 +107,48 @@ function harness() {
 }
 
 describe("HistoricalShipStationContentsReviewService", () => {
+  it("classifies an authoritative provider item absent from the linked WMS package as a review conflict", () => {
+    const rawProviderItems = [
+      { lineItemKey: "wms-item-7001", quantity: 2 },
+      { lineItemKey: "wms-item-7002", quantity: 1 },
+    ];
+    const recovery = buildHistoricalShipStationContentsRecoveryEvidence({
+      providerShipmentId: candidate.providerShipmentId,
+      providerStatus: "authoritative",
+      rawProviderItems,
+      expectedContents: candidate.expectedContents,
+    });
+    expect(recovery?.recoveryStatus).toBe("provider_line_keys_authoritative");
+    const provider = Object.freeze({
+      kind: "found" as const,
+      evidence: Object.freeze({
+        status: "authoritative" as const,
+        recoveryStatus: "provider_line_keys_authoritative" as const,
+        providerItemCount: 2,
+        recognizedProviderItemCount: 2,
+        canonicalLineCount: 2,
+        malformedItemCount: 0,
+        unrecognizedItemCount: 0,
+        duplicateLineItemCount: 0,
+        recoveryEvidence: null,
+      }),
+      recoveryEvidenceDetails: recovery,
+      providerObservation: Object.freeze({
+        evidenceHash: providerObservationHash,
+        lines: Object.freeze([
+          Object.freeze({ sku: "WMS-SKU", quantity: 2 }),
+          Object.freeze({ sku: "REFUNDED-SKU", quantity: 1 }),
+        ]),
+      }),
+    });
+    expect(classifyReviewedShipStationContents(provider, candidate.expectedContents)).toMatchObject({
+      evidence: { status: "authoritative", recoveryStatus: "provider_wms_conflict" },
+      recoveryEvidenceDetails: null,
+      providerObservation: { evidenceHash: providerObservationHash },
+    });
+    expect(provider.evidence.recoveryStatus).toBe("provider_line_keys_authoritative");
+  });
+
   it("persists intake only after exact provider evidence is re-fetched", async () => {
     const test = harness();
 
