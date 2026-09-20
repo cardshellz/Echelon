@@ -21,6 +21,7 @@ import {
   disputeOutcomeFor,
   type DropshipDisputeStatus,
 } from "../domain/funding-reversal";
+import { decideAutopayRefill, deriveSingleChargeBoundCents } from "../domain/autopay-refill";
 import {
   assessAdvanceStanding,
   decideCardBackstopCharge,
@@ -167,8 +168,16 @@ export const configureDropshipAutoReloadInputSchema = z.object({
   vendorId: positiveIdSchema,
   fundingMethodId: positiveIdSchema.nullable(),
   enabled: z.boolean(),
+  /** The one number the vendor keeps: the balance autopay tops back up to ("keep $X"). */
   minimumBalanceCents: CentsSchema,
-  maxSingleReloadCents: CentsSchema.nullable(),
+  /**
+   * The per-charge bound. Left out (or null) it is derived as max(minimum,
+   * top-up amount): the vendor keeps one number and the bound is the
+   * server's (funding design phase 5). Older clients still send their own.
+   */
+  maxSingleReloadCents: CentsSchema.nullable().optional(),
+  /** What each automatic refill pulls; null or left out pulls the minimum. */
+  topUpAmountCents: PositiveCentsSchema.nullable().optional(),
   paymentHoldTimeoutMinutes: z.number().int().positive().max(60 * 24 * 30),
   /**
    * The card fee rate the vendor was shown when they agreed to auto-reload.
@@ -372,7 +381,10 @@ export interface DropshipAutoReloadSettingRecord {
   fundingMethodId: number | null;
   enabled: boolean;
   minimumBalanceCents: number;
+  /** The per-charge bound: the client's, or max(minimum, top-up) derived at configure time. */
   maxSingleReloadCents: number | null;
+  /** What each automatic refill pulls; null pulls the minimum (migration 0690). */
+  topUpAmountCents: number | null;
   paymentHoldTimeoutMinutes: number;
   createdAt: Date;
   updatedAt: Date;
@@ -830,7 +842,14 @@ export type CreateDropshipWalletOrderDebitInput = Omit<DebitDropshipWalletForOrd
   occurredAt: Date;
 };
 
-export interface ConfigureDropshipAutoReloadRepositoryInput extends ConfigureDropshipAutoReloadInput {
+/** The configuration with its amounts resolved: the bound as sent, or derived from the minimum and the top-up amount. */
+export type ResolvedDropshipAutoReloadConfig =
+  Omit<ConfigureDropshipAutoReloadInput, "maxSingleReloadCents" | "topUpAmountCents"> & {
+    maxSingleReloadCents: number | null;
+    topUpAmountCents: number | null;
+  };
+
+export interface ConfigureDropshipAutoReloadRepositoryInput extends ResolvedDropshipAutoReloadConfig {
   /** The card fee rate in force when the vendor agreed, recorded in the audit trail. */
   cardFundingFeeBps: number;
   updatedAt: Date;
@@ -1103,7 +1122,7 @@ export class DropshipWalletService {
   }
 
   async configureAutoReload(input: unknown): Promise<DropshipAutoReloadSettingRecord> {
-    const parsed = parseWalletInput(configureDropshipAutoReloadInputSchema, input);
+    const parsed = resolveAutoReloadAmounts(parseWalletInput(configureDropshipAutoReloadInputSchema, input));
     const limits = await this.walletLimits();
     assertAutoReloadConfigIsUsable(parsed, limits);
     const cardFundingFeeBps = this.cardFundingFeeBps();
@@ -1124,6 +1143,7 @@ export class DropshipWalletService {
         enabled: parsed.enabled,
         fundingMethodId: parsed.fundingMethodId,
         minimumBalanceCents: parsed.minimumBalanceCents,
+        topUpAmountCents: parsed.topUpAmountCents,
         maxSingleReloadCents: parsed.maxSingleReloadCents,
         cardFundingFeeBps,
         acknowledgedCardFeeBps: parsed.acknowledgedCardFeeBps ?? null,
@@ -1432,6 +1452,7 @@ export class DropshipWalletService {
       availableBalanceCents: wallet.account.availableBalanceCents,
       pendingBalanceCents: wallet.account.pendingBalanceCents,
       minimumBalanceCents: setting.minimumBalanceCents,
+      topUpAmountCents: setting.topUpAmountCents,
       maxSingleReloadCents: setting.maxSingleReloadCents,
       requiredBalanceCents: parsed.requiredBalanceCents ?? null,
       reason: parsed.reason,
@@ -1503,6 +1524,10 @@ export class DropshipWalletService {
         vendorId: parsed.vendorId,
         fundingMethodId: chargeMethod.fundingMethodId,
         amountCents: quote.creditCents,
+        // A routine refill: how far under the minimum the wallet sat, and
+        // whether the per-charge bound left some of that for the next run.
+        refillShortfallCents: amount.refill?.shortfallCents ?? null,
+        refillPartial: amount.refill?.partial ?? false,
         cardFeeCents: quote.feeCents,
         cardFeeBps: quote.feeBps,
         chargedCents: quote.chargedCents,
@@ -2117,10 +2142,13 @@ function calculateAutoReloadAmount(input: {
   availableBalanceCents: number;
   pendingBalanceCents: number;
   minimumBalanceCents: number;
+  topUpAmountCents: number | null;
   maxSingleReloadCents: number | null;
   requiredBalanceCents: number | null;
   reason: HandleDropshipAutoReloadInput["reason"];
-}): { outcome: "funding_created"; amountCents: number } | { outcome: "skipped"; skipReason: string } {
+}):
+  | { outcome: "funding_created"; amountCents: number; refill: { shortfallCents: number; partial: boolean } | null }
+  | { outcome: "skipped"; skipReason: string } {
   if (input.reason === "payment_hold") {
     const charge = decideCardBackstopCharge({
       availableBalanceCents: input.availableBalanceCents,
@@ -2134,16 +2162,26 @@ function calculateAutoReloadAmount(input: {
     if (charge.outcome === "limit_below_gap") {
       return { outcome: "skipped", skipReason: "amount_exceeds_max_single_reload" };
     }
-    return { outcome: "funding_created", amountCents: charge.amountCents };
+    return { outcome: "funding_created", amountCents: charge.amountCents, refill: null };
   }
-  const amountNeededCents = input.minimumBalanceCents - (input.availableBalanceCents + input.pendingBalanceCents);
-  if (amountNeededCents <= 0) {
+  // A routine refill pulls the top-up amount (the minimum by default), or the
+  // whole shortfall when that is more, and never more than the per-charge
+  // bound: a deep negative is collected over several runs, never skipped.
+  const refill = decideAutopayRefill({
+    availableBalanceCents: input.availableBalanceCents,
+    pendingBalanceCents: input.pendingBalanceCents,
+    minimumBalanceCents: input.minimumBalanceCents,
+    topUpAmountCents: input.topUpAmountCents,
+    singleChargeBoundCents: input.maxSingleReloadCents,
+  });
+  if (refill.outcome === "not_needed") {
     return { outcome: "skipped", skipReason: "balance_already_sufficient" };
   }
-  if (input.maxSingleReloadCents !== null && amountNeededCents > input.maxSingleReloadCents) {
-    return { outcome: "skipped", skipReason: "amount_exceeds_max_single_reload" };
-  }
-  return { outcome: "funding_created", amountCents: amountNeededCents };
+  return {
+    outcome: "funding_created",
+    amountCents: refill.amountCents,
+    refill: { shortfallCents: refill.shortfallCents, partial: refill.partial },
+  };
 }
 
 /**
@@ -2355,12 +2393,41 @@ export function resolveDropshipAutoReloadFloors(
  * floors validated against, and the floors recorded in the log line are the
  * same numbers.
  */
+/**
+ * The amounts as stored. The top-up amount is the vendor's optional second
+ * number; the per-charge bound is derived from the two unless the client
+ * sent one (older clients do), and stays null while autopay is off and
+ * nothing was sent.
+ */
+function resolveAutoReloadAmounts(input: ConfigureDropshipAutoReloadInput): ResolvedDropshipAutoReloadConfig {
+  const topUpAmountCents = input.topUpAmountCents ?? null;
+  const maxSingleReloadCents = input.maxSingleReloadCents
+    ?? (input.enabled
+      ? deriveSingleChargeBoundCents({ minimumBalanceCents: input.minimumBalanceCents, topUpAmountCents })
+      : null);
+  return { ...input, maxSingleReloadCents, topUpAmountCents };
+}
+
 function assertAutoReloadConfigIsUsable(
-  input: ConfigureDropshipAutoReloadInput,
+  input: ResolvedDropshipAutoReloadConfig,
   limits: Pick<DropshipWalletPolicyLimits, "autoReloadMinTriggerCents" | "autoReloadMinAmountCents">,
 ): void {
   if (!input.enabled) {
     return;
+  }
+
+  // A top-up amount below the policy's smallest top-up would make every
+  // refill a nuisance pull; the minimum itself is already held above it.
+  if (input.topUpAmountCents !== null && input.topUpAmountCents < limits.autoReloadMinAmountCents) {
+    throw new DropshipError(
+      "DROPSHIP_AUTO_RELOAD_TOP_UP_BELOW_MINIMUM",
+      "Auto-reload top-up amount is below the minimum allowed.",
+      {
+        vendorId: input.vendorId,
+        topUpAmountCents: input.topUpAmountCents,
+        floorCents: limits.autoReloadMinAmountCents,
+      },
+    );
   }
 
   if (!input.fundingMethodId) {
@@ -2408,14 +2475,18 @@ function assertAutoReloadConfigIsUsable(
 
   if (
     input.maxSingleReloadCents !== null
-    && input.maxSingleReloadCents < input.minimumBalanceCents
+    && (
+      input.maxSingleReloadCents < input.minimumBalanceCents
+      || (input.topUpAmountCents !== null && input.maxSingleReloadCents < input.topUpAmountCents)
+    )
   ) {
     throw new DropshipError(
       "DROPSHIP_AUTO_RELOAD_INVALID_LIMITS",
-      "Auto-reload maximum single reload must be at least the minimum balance.",
+      "Auto-reload maximum single reload must be at least the minimum balance and the top-up amount.",
       {
         vendorId: input.vendorId,
         minimumBalanceCents: input.minimumBalanceCents,
+        topUpAmountCents: input.topUpAmountCents,
         maxSingleReloadCents: input.maxSingleReloadCents,
       },
     );

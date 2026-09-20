@@ -41,6 +41,10 @@ const walletFundingReversalMigrationSql = readFileSync(
   resolve(process.cwd(), "migrations/0689_dropship_wallet_funding_reversal.sql"),
   "utf8",
 );
+const walletTopUpAmountMigrationSql = readFileSync(
+  resolve(process.cwd(), "migrations/0690_dropship_wallet_top_up_amount.sql"),
+  "utf8",
+);
 
 function sslConfig(connectionString: string) {
   return /localhost|127\.0\.0\.1/.test(connectionString)
@@ -253,6 +257,7 @@ describeWithDb("Dropship V2 database foundation", () => {
     await client.query(channelConnectionBrandingMigrationSql);
     await client.query(walletAdvanceMigrationSql);
     await client.query(walletFundingReversalMigrationSql);
+    await client.query(walletTopUpAmountMigrationSql);
 
     const channel = await client.query<{ id: number }>(
       `INSERT INTO channels.channels (name, type, provider, status, sync_enabled, sync_mode)
@@ -578,6 +583,32 @@ describeWithDb("Dropship V2 database foundation", () => {
         [wallet.rows[0].id, vendorAId],
       ),
       "23514",
+    );
+  });
+
+  it("keeps the top-up amount migration repeatable, accepts a positive or absent top-up, and refuses one of nothing", async () => {
+    await client!.query(walletTopUpAmountMigrationSql);
+
+    const setting = await client!.query<{ id: number; top_up_amount_cents: string | null }>(
+      `INSERT INTO dropship.dropship_auto_reload_settings (vendor_id, top_up_amount_cents)
+       VALUES ($1, 15000)
+       ON CONFLICT (vendor_id) DO UPDATE SET top_up_amount_cents = EXCLUDED.top_up_amount_cents
+       RETURNING id, top_up_amount_cents`,
+      [vendorAId],
+    );
+    expect(Number(setting.rows[0].top_up_amount_cents)).toBe(15000);
+    await expectDatabaseError(
+      client!,
+      () => client!.query(
+        `UPDATE dropship.dropship_auto_reload_settings SET top_up_amount_cents = 0 WHERE id = $1`,
+        [setting.rows[0].id],
+      ),
+      "23514",
+    );
+    // Absent means "the minimum": every row from before the column is valid as it stands.
+    await client!.query(
+      `UPDATE dropship.dropship_auto_reload_settings SET top_up_amount_cents = NULL WHERE id = $1`,
+      [setting.rows[0].id],
     );
   });
 

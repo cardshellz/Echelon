@@ -66,7 +66,10 @@ export interface WalletAutoReload {
   autoReloadSettingId: number;
   enabled: boolean;
   minimumBalanceCents: number;
+  /** The per-charge bound the server holds autopay to; derived from the minimum and the top-up amount unless set by an older client. */
   maxSingleReloadCents: number | null;
+  /** What each automatic refill pulls; null pulls the minimum (served since funding design phase 5). */
+  topUpAmountCents: number | null;
   paymentHoldTimeoutMinutes: number;
   fundingMethodId: number | null;
   updatedAt: string;
@@ -263,6 +266,7 @@ const rawAutoReloadSchema = z.object({
   enabled: z.boolean(),
   minimumBalanceCents: cents,
   maxSingleReloadCents: cents.nullable(),
+  topUpAmountCents: cents.nullable().optional(),
   paymentHoldTimeoutMinutes: z.number().int().positive(),
   fundingMethodId: z.number().int().nullable(),
   updatedAt: isoString,
@@ -637,6 +641,8 @@ export function adaptWalletView(raw: unknown): DropshipWalletView {
       enabled: wallet.autoReload.enabled,
       minimumBalanceCents: wallet.autoReload.minimumBalanceCents,
       maxSingleReloadCents: wallet.autoReload.maxSingleReloadCents,
+      // An older server serves no top-up amount; null reads the same as "the minimum".
+      topUpAmountCents: wallet.autoReload.topUpAmountCents ?? null,
       paymentHoldTimeoutMinutes: wallet.autoReload.paymentHoldTimeoutMinutes,
       fundingMethodId: wallet.autoReload.fundingMethodId,
       updatedAt: wallet.autoReload.updatedAt,

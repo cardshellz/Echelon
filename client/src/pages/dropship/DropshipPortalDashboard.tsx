@@ -784,7 +784,7 @@ function dashboardNextAction(onboarding: DropshipOnboardingState | undefined): D
   if (isPausedForFunding(onboarding.vendor)) {
     return {
       actionLabel: "Open wallet",
-      message: "Selling is paused because a top-up failed. Add money in Wallet — a card payment counts at once, a bank transfer only once it settles. Selling resumes on its own when your available balance is back to your floor.",
+      message: "Selling is paused because a top-up failed. Add money in Wallet — a card payment counts at once, a bank transfer only once it settles. Selling resumes on its own when your available balance is back to your minimum.",
       path: "/wallet",
       title: "Add money to resume selling",
     };
@@ -839,14 +839,14 @@ function dashboardNextAction(onboarding: DropshipOnboardingState | undefined): D
   if (onboarding.wallet.autoReloadConfigured && onboarding.wallet.hasCardBackstop) {
     return {
       actionLabel: "Open wallet",
-      message: "Auto-reload is on but your agreement to the card fee is not on record. Confirm the terms in Wallet before you activate.",
+      message: "Autopay is on but your agreement to the card fee is not on record. Confirm the terms in Wallet before you activate.",
       path: "/wallet",
-      title: "Confirm your auto-reload terms",
+      title: "Confirm your autopay terms",
     };
   }
   return {
     actionLabel: "Open wallet",
-    message: "Choose your top-up source, set your floor, add a backup card, then turn on auto-reload.",
+    message: "Choose your autopay source, set your minimum, add a backup card, then turn on autopay.",
     path: "/wallet",
     title: "Set up your wallet",
   };
@@ -910,9 +910,9 @@ function walletMetricDetail(
 ): string {
   if (onboarding) return walletGateDetail(onboarding);
   if (!settings) return "Wallet readiness loading";
-  if (!settings.wallet.autoReloadEnabled) return "Auto-reload disabled";
+  if (!settings.wallet.autoReloadEnabled) return "Autopay disabled";
   if (!settings.wallet.autoReloadFundingMethodReady) return "Funding method needed";
-  return "Auto-reload ready";
+  return "Autopay ready";
 }
 
 function walletGateDetail(onboarding: DropshipOnboardingState): string {

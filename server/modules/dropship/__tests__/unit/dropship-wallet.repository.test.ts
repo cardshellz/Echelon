@@ -770,3 +770,116 @@ describe("PgDropshipWalletRepository funding reversals (funding design phase 4)"
     expect(none.mock.calls.map((call) => String(call[0]).trim().split(/\s+/)[0])).toEqual(["BEGIN", "SELECT", "COMMIT"]);
   });
 });
+
+describe("PgDropshipWalletRepository.configureAutoReload (funding design phase 5)", () => {
+  const updatedAt = new Date("2026-09-20T12:00:00.000Z");
+
+  function makeAutoReloadRow(overrides: Record<string, unknown> = {}) {
+    return {
+      id: 7,
+      vendor_id: 10,
+      funding_method_id: 100,
+      enabled: true,
+      minimum_balance_cents: "50000",
+      max_single_reload_cents: "50000",
+      top_up_amount_cents: null,
+      payment_hold_timeout_minutes: 1440,
+      created_at: updatedAt,
+      updated_at: updatedAt,
+      ...overrides,
+    };
+  }
+
+  function makeConfigureInput(overrides: Record<string, unknown> = {}) {
+    return {
+      vendorId: 10,
+      fundingMethodId: 100,
+      enabled: true,
+      minimumBalanceCents: 50_000,
+      maxSingleReloadCents: 50_000,
+      topUpAmountCents: null,
+      paymentHoldTimeoutMinutes: 1440,
+      cardFundingFeeBps: 300,
+      acknowledgedCardFeeBps: 300,
+      updatedAt,
+      ...overrides,
+    };
+  }
+
+  it("stores the top-up amount in the same upsert as the minimum and the bound, and records it in the audit row", async () => {
+    const statements: string[] = [];
+    const captured: { upsert?: unknown[]; audit?: unknown[] } = {};
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      statements.push(sql.trim().split(/\s+/).slice(0, 2).join(" "));
+      if (sql.includes("FROM dropship.dropship_funding_methods")) {
+        expect(params).toEqual([100, 10]);
+        return { rows: [{ id: 100, vendor_id: 10, rail: "stripe_ach", status: "active" }] };
+      }
+      if (sql.includes("INSERT INTO dropship.dropship_auto_reload_settings")) {
+        captured.upsert = params;
+        expect(sql).toContain("top_up_amount_cents = EXCLUDED.top_up_amount_cents");
+        return { rows: [makeAutoReloadRow({ max_single_reload_cents: "150000", top_up_amount_cents: "150000" })] };
+      }
+      if (sql.includes("INSERT INTO dropship.dropship_audit_events")) {
+        captured.audit = params;
+        return { rows: [] };
+      }
+      return { rows: [] };
+    });
+
+    const setting = await new PgDropshipWalletRepository(makePool(query)).configureAutoReload(
+      makeConfigureInput({ maxSingleReloadCents: 150_000, topUpAmountCents: 150_000 }),
+    );
+
+    // Parameter order is the contract with the SQL: $7 is reused for both timestamps, $8 is the top-up amount.
+    expect(captured.upsert).toEqual([10, 100, true, 50_000, 150_000, 1440, updatedAt, 150_000]);
+    expect(setting).toMatchObject({
+      autoReloadSettingId: 7,
+      minimumBalanceCents: 50_000,
+      maxSingleReloadCents: 150_000,
+      topUpAmountCents: 150_000,
+    });
+    expect(captured.audit?.[3]).toBe("wallet_auto_reload_configured");
+    expect(JSON.parse(String(captured.audit?.[4]))).toMatchObject({
+      minimumBalanceCents: 50_000,
+      topUpAmountCents: 150_000,
+      maxSingleReloadCents: 150_000,
+      cardFundingFeeBps: 300,
+      acknowledgedCardFeeBps: 300,
+    });
+    expect(statements[0]).toBe("BEGIN");
+    expect(statements.at(-1)).toBe("COMMIT");
+  });
+
+  it("stores a null top-up amount (pull the minimum) and reads it back as null", async () => {
+    const captured: { upsert?: unknown[] } = {};
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      if (sql.includes("FROM dropship.dropship_funding_methods")) return { rows: [{ id: 100, vendor_id: 10, status: "active" }] };
+      if (sql.includes("INSERT INTO dropship.dropship_auto_reload_settings")) {
+        captured.upsert = params;
+        return { rows: [makeAutoReloadRow()] };
+      }
+      return { rows: [] };
+    });
+
+    const setting = await new PgDropshipWalletRepository(makePool(query)).configureAutoReload(makeConfigureInput());
+
+    expect(captured.upsert?.[7]).toBeNull();
+    expect(setting.topUpAmountCents).toBeNull();
+    expect(setting.maxSingleReloadCents).toBe(50_000);
+  });
+
+  it("rolls back and stores nothing when the funding method is not active", async () => {
+    const statements: string[] = [];
+    const query = vi.fn(async (sql: string) => {
+      statements.push(sql.trim().split(/\s+/).slice(0, 2).join(" "));
+      if (sql.includes("FROM dropship.dropship_funding_methods")) return { rows: [{ id: 100, vendor_id: 10, status: "detached" }] };
+      if (sql.includes("INSERT INTO dropship.dropship_auto_reload_settings")) throw new Error("must not upsert");
+      return { rows: [] };
+    });
+
+    await expect(new PgDropshipWalletRepository(makePool(query)).configureAutoReload(makeConfigureInput()))
+      .rejects.toMatchObject({ code: "DROPSHIP_FUNDING_METHOD_NOT_ACTIVE" });
+    expect(statements).toEqual(["BEGIN", "SELECT id,", "ROLLBACK"]);
+  });
+});

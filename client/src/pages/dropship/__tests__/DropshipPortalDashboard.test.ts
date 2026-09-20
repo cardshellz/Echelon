@@ -37,8 +37,8 @@ describe("DropshipPortalDashboard contract", () => {
     expect(nextAction.indexOf("isPausedForFunding(onboarding.vendor)")).toBeLessThan(nextAction.indexOf("onboarding.steps.find"));
     expect(nextAction).toContain('title: "Add money to resume selling"');
     expect(nextAction).toContain('title: "Set up your wallet"');
-    expect(nextAction).toContain('title: "Confirm your auto-reload terms"');
-    expect(nextAction).toContain("Choose your top-up source, set your floor, add a backup card, then turn on auto-reload.");
+    expect(nextAction).toContain('title: "Confirm your autopay terms"');
+    expect(nextAction).toContain("Choose your autopay source, set your minimum, add a backup card, then turn on autopay.");
     expect(source).toContain("return walletTodoDetail(onboarding.wallet);");
     expect(source).not.toContain('return "Ready";');
     // The held-order copy knows about the pause too.

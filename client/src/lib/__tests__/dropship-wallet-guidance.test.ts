@@ -10,14 +10,11 @@ import {
   CARD_EXPIRY_WARNING_MONTHS,
   DEFAULT_FLOOR_CENTS_BY_SOURCE,
   FLOOR_PRESETS_CENTS,
-  LIMIT_PRESETS_CENTS,
   activationTopUp,
-  capAfterFloorChange,
+  chargeBoundCents,
   cardExpiryState,
   daysOfCover,
   depositAmountDefault,
-  derivedLimitCents,
-  describeLimitDerivation,
   firstFillFeeCents,
   floorBandCents,
   floorVerdict,
@@ -46,7 +43,6 @@ describe("constants", () => {
     expect(BANK_SETTLEMENT_PHRASE).toBe("up to 5 business days (our assumption)");
     expect(DEFAULT_FLOOR_CENTS_BY_SOURCE).toEqual({ stripe_ach: 25_000, stripe_card: 10_000 });
     expect(FLOOR_PRESETS_CENTS).toEqual([10_000, 25_000, 50_000, 100_000, 250_000]);
-    expect(LIMIT_PRESETS_CENTS).toEqual([25_000, 50_000, 100_000, 250_000, 500_000]);
     expect(CARD_EXPIRY_WARNING_MONTHS).toBe(2);
   });
 });
@@ -56,9 +52,9 @@ describe("rounding", () => {
     expect(roundUpToStep(0)).toBe(0);
     expect(roundUpToStep(20_000)).toBe(20_000);
     expect(roundUpToStep(20_001)).toBe(25_000);
-    expect(snapUpToPreset(50_000, LIMIT_PRESETS_CENTS)).toBe(50_000);
-    expect(snapUpToPreset(20_000, LIMIT_PRESETS_CENTS)).toBe(25_000);
-    expect(snapUpToPreset(600_000, LIMIT_PRESETS_CENTS)).toBe(600_000);
+    expect(snapUpToPreset(50_000, FLOOR_PRESETS_CENTS)).toBe(50_000);
+    expect(snapUpToPreset(20_000, FLOOR_PRESETS_CENTS)).toBe(25_000);
+    expect(snapUpToPreset(600_000, FLOOR_PRESETS_CENTS)).toBe(600_000);
     expect(presetsIncluding([100, 300], 200, null, 300)).toEqual([100, 200, 300]);
     expect(() => roundUpToStep(-1)).toThrow(RangeError);
     expect(() => roundUpToStep(1.5)).toThrow(RangeError);
@@ -94,13 +90,19 @@ describe("example A: bank vendor at $20 a day", () => {
     expect(monthlyCardFeeEstimate("stripe_ach", 25_000, daily, BPS)).toEqual({ estimateCents: 0, maxCents: 1_800, monthlySpendCents: 60_000 });
     expect(monthlyCardFeeEstimate("stripe_ach", 10_000, daily, BPS)).toEqual({ estimateCents: 514, maxCents: 1_800, monthlySpendCents: 60_000 });
   });
-  it("derives the $500 limit as 2 × the floor and the activation top-up as $250 pending", () => {
-    expect(derivedLimitCents(25_000, LIMITS)).toBe(50_000);
-    expect(describeLimitDerivation(25_000, 50_000)).toBe("2 × your floor");
+  it("bounds one charge at the larger of the minimum and the top-up amount, and quotes the activation top-up as $250 pending", () => {
+    expect(chargeBoundCents(25_000, null)).toBe(25_000);
+    expect(chargeBoundCents(25_000, 10_000)).toBe(25_000);
+    expect(chargeBoundCents(25_000, 40_000)).toBe(40_000);
     expect(largestCoverableOrderCents(25_000, 50_000)).toBe(75_000);
     expect(largestCoverableOrderCents(0, 50_000)).toBe(50_000);
-    expect(activationTopUp({ sourceRail: "stripe_ach", floorCents: 25_000, limitCents: 50_000, availableCents: 0, pendingCents: 0, bps: BPS }))
-      .toEqual({ outcome: "top_up", amountCents: 25_000, feeCents: 0, chargedCents: 25_000, lands: "pending" });
+    expect(activationTopUp({ sourceRail: "stripe_ach", floorCents: 25_000, topUpCents: null, availableCents: 0, pendingCents: 0, bps: BPS }))
+      .toEqual({ outcome: "top_up", amountCents: 25_000, feeCents: 0, chargedCents: 25_000, lands: "pending", partial: false });
+    // A small dip still pulls the whole top-up amount, the minimum by default.
+    expect(activationTopUp({ sourceRail: "stripe_ach", floorCents: 25_000, topUpCents: null, availableCents: 24_000, pendingCents: 0, bps: BPS }))
+      .toMatchObject({ outcome: "top_up", amountCents: 25_000, partial: false });
+    expect(activationTopUp({ sourceRail: "stripe_ach", floorCents: 25_000, topUpCents: 40_000, availableCents: 24_000, pendingCents: 0, bps: BPS }))
+      .toMatchObject({ outcome: "top_up", amountCents: 40_000, partial: false });
     expect(shortfallExample({ orderCents: 7_500, availableCents: 2_000, bps: BPS })).toEqual({ shortfallCents: 5_500, feeCents: 165, chargedCents: 5_665 });
     expect(shortfallExample({ orderCents: 1_000, availableCents: 2_000, bps: BPS })).toEqual({ shortfallCents: 0, feeCents: 0, chargedCents: 0 });
   });
@@ -116,8 +118,6 @@ describe("example B: bank vendor at $300 a day", () => {
     expect(floorVerdict("stripe_ach", daysOfCover(210_000, daily))).toBe("tight");
     expect(floorVerdict("stripe_ach", daysOfCover(300_000, daily))).toBe("keeps_up");
     expect(monthlyCardFeeEstimate("stripe_ach", 300_000, daily, BPS).estimateCents).toBe(0);
-    expect(derivedLimitCents(300_000, LIMITS)).toBe(600_000);
-    expect(describeLimitDerivation(300_000, 600_000)).toBe("2 × your floor");
     expect(depositAmountDefault(300_000, LIMITS)).toBe(300_000);
     expect(depositAmountDefault(600_000, LIMITS)).toBe(500_000);
     expect(depositAmountDefault(500, LIMITS)).toBe(1_000);
@@ -127,19 +127,15 @@ describe("example B: bank vendor at $300 a day", () => {
 
 describe("example C: card vendor at $60 a day", () => {
   const daily = 6_000;
-  it("recommends $100, a $250 limit that is not 2 × the floor, and $54 a month", () => {
+  it("recommends $100, a $100 first fill, and $54 a month", () => {
     expect(recommendedFloorCents("stripe_card", daily, LIMITS)).toBe(10_000);
     expect(floorBandCents("stripe_card", daily, LIMITS)).toEqual([10_000, 15_000]);
     expect(monthlyCardFeeEstimate("stripe_card", 10_000, daily, BPS)).toEqual({ estimateCents: 5_400, maxCents: 5_400, monthlySpendCents: 180_000 });
     expect(monthlyCardFeeEstimate("stripe_card", 100_000, daily, BPS).estimateCents).toBe(5_400);
     expect(firstFillFeeCents(10_000, BPS)).toBe(300);
     expect(firstFillFeeCents(100_000, BPS)).toBe(3_000);
-    expect(derivedLimitCents(10_000, LIMITS)).toBe(25_000);
-    expect(describeLimitDerivation(10_000, 25_000)).toBe("at least 2 × your floor, rounded up to the next preset");
-    expect(describeLimitDerivation(5_000, 25_000)).toBe("at least 2 × your floor, rounded up to the next preset");
-    expect(describeLimitDerivation(15_000, 50_000)).toBe("at least 2 × your floor, rounded up to the next preset");
-    expect(activationTopUp({ sourceRail: "stripe_card", floorCents: 10_000, limitCents: 25_000, availableCents: 0, pendingCents: 0, bps: BPS }))
-      .toEqual({ outcome: "top_up", amountCents: 10_000, feeCents: 300, chargedCents: 10_300, lands: "instant" });
+    expect(activationTopUp({ sourceRail: "stripe_card", floorCents: 10_000, topUpCents: null, availableCents: 0, pendingCents: 0, bps: BPS }))
+      .toEqual({ outcome: "top_up", amountCents: 10_000, feeCents: 300, chargedCents: 10_300, lands: "instant", partial: false });
     expect(recommendedFloorCents("stripe_card", null, LIMITS)).toBe(10_000);
     expect(recommendedFloorCents("stripe_ach", null, LIMITS)).toBe(25_000);
   });
@@ -147,13 +143,17 @@ describe("example C: card vendor at $60 a day", () => {
 
 describe("example D: bank vendor below zero", () => {
   it("takes the signed balance everywhere without throwing", () => {
-    expect(activationTopUp({ sourceRail: "stripe_ach", floorCents: 25_000, limitCents: 50_000, availableCents: -5_000, pendingCents: 0, bps: BPS }))
-      .toEqual({ outcome: "top_up", amountCents: 30_000, feeCents: 0, chargedCents: 30_000, lands: "pending" });
-    expect(activationTopUp({ sourceRail: "stripe_card", floorCents: 25_000, limitCents: 50_000, availableCents: -5_000, pendingCents: 0, bps: BPS }))
-      .toMatchObject({ outcome: "top_up", chargedCents: 30_900 });
-    expect(activationTopUp({ sourceRail: "stripe_ach", floorCents: 25_000, limitCents: 50_000, availableCents: 0, pendingCents: 25_000, bps: BPS })).toEqual({ outcome: "not_needed" });
-    expect(activationTopUp({ sourceRail: "stripe_ach", floorCents: 25_000, limitCents: 50_000, availableCents: -60_000, pendingCents: 0, bps: BPS }))
-      .toEqual({ outcome: "skipped_over_limit", amountCents: 85_000, limitCents: 50_000 });
+    // Below zero by $50 with a $250 minimum: the shortfall is $300, but one charge never exceeds the bound; the next daily check continues.
+    expect(activationTopUp({ sourceRail: "stripe_ach", floorCents: 25_000, topUpCents: null, availableCents: -5_000, pendingCents: 0, bps: BPS }))
+      .toEqual({ outcome: "top_up", amountCents: 25_000, feeCents: 0, chargedCents: 25_000, lands: "pending", partial: true });
+    expect(activationTopUp({ sourceRail: "stripe_card", floorCents: 25_000, topUpCents: null, availableCents: -5_000, pendingCents: 0, bps: BPS }))
+      .toMatchObject({ outcome: "top_up", chargedCents: 25_750, partial: true });
+    // A top-up amount large enough covers the whole shortfall in one pull.
+    expect(activationTopUp({ sourceRail: "stripe_ach", floorCents: 25_000, topUpCents: 50_000, availableCents: -5_000, pendingCents: 0, bps: BPS }))
+      .toEqual({ outcome: "top_up", amountCents: 50_000, feeCents: 0, chargedCents: 50_000, lands: "pending", partial: false });
+    expect(activationTopUp({ sourceRail: "stripe_ach", floorCents: 25_000, topUpCents: null, availableCents: 0, pendingCents: 25_000, bps: BPS })).toEqual({ outcome: "not_needed" });
+    expect(activationTopUp({ sourceRail: "stripe_ach", floorCents: 25_000, topUpCents: null, availableCents: -60_000, pendingCents: 0, bps: BPS }))
+      .toEqual({ outcome: "top_up", amountCents: 25_000, feeCents: 0, chargedCents: 25_000, lands: "pending", partial: true });
     expect(largestCoverableOrderCents(-5_000, 50_000)).toBe(45_000);
     expect(largestCoverableOrderCents(-60_000, 50_000)).toBe(0);
     expect(shortfallExample({ orderCents: 7_500, availableCents: -5_000, bps: BPS })).toEqual({ shortfallCents: 12_500, feeCents: 375, chargedCents: 12_875 });
@@ -164,21 +164,15 @@ describe("the signed contract", () => {
   it("rejects negative or fractional amounts and never hands a negative to the fee helper", () => {
     const spy = vi.spyOn(feeModule, "calculateCardFundingFeeCents");
     expect(() => firstFillFeeCents(-1, BPS)).toThrow(RangeError);
-    expect(() => derivedLimitCents(1.5, LIMITS)).toThrow(RangeError);
+    expect(() => chargeBoundCents(1.5, null)).toThrow(RangeError);
+    expect(() => chargeBoundCents(25_000, -1)).toThrow(RangeError);
     expect(() => daysOfCover(100, -1)).toThrow(RangeError);
     expect(() => largestCoverableOrderCents(1.5, 100)).toThrow(RangeError);
     expect(() => largestCoverableOrderCents(-100, -1)).toThrow(RangeError);
     shortfallExample({ orderCents: 100, availableCents: -100_000, bps: BPS });
-    activationTopUp({ sourceRail: "stripe_card", floorCents: 100, limitCents: 1_000_000, availableCents: -500_000, pendingCents: -10, bps: BPS });
+    activationTopUp({ sourceRail: "stripe_card", floorCents: 100, topUpCents: 1_000_000, availableCents: -500_000, pendingCents: -10, bps: BPS });
     for (const call of spy.mock.calls) expect(call[0]).toBeGreaterThanOrEqual(0);
     spy.mockRestore();
-  });
-
-  it("keeps a hand-set cap unless it falls below the new floor", () => {
-    expect(capAfterFloorChange(25_000, 100_000, 50_000, LIMITS)).toBe(250_000);
-    expect(capAfterFloorChange(25_000, 100_000, 100_000, LIMITS)).toBe(100_000);
-    expect(capAfterFloorChange(25_000, 250_000, 100_000, LIMITS)).toBe(500_000);
-    expect(capAfterFloorChange(25_000, 250_000, 50_000, LIMITS)).toBe(500_000);
   });
 });
 
