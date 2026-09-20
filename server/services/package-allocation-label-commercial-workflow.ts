@@ -74,8 +74,11 @@ export function createPackageAllocationLabelCommercialWorkflow(dependencies: {
             });
             return work({
               async loadLabelContents(shippingProviderLabelId) {
+                const exactLabelId = Number(shippingProviderLabelId);
+                if (!Number.isSafeInteger(exactLabelId) || exactLabelId <= 0
+                  || String(exactLabelId) !== String(shippingProviderLabelId)) return null;
                 const locked = await ledger.withSerializableTransaction((transaction) =>
-                  transaction.lockAuthorityReadinessPackages([shippingProviderLabelId]));
+                  transaction.lockAuthorityReadinessPackages([exactLabelId]));
                 if (locked.length !== 1) return null;
                 const persistedEvidence = locked[0].persistedEvidence;
                 const adapted = adaptPersistedDeclaredPackageLifecycleEvidence(persistedEvidence);

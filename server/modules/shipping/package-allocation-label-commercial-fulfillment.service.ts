@@ -46,7 +46,7 @@ export interface PackageAllocationLabelLinker {
 }
 
 export interface PackageAllocationLabelCommercialWorkflowContext {
-  readonly loadLabelContents: (shippingProviderLabelId: number) => Promise<Readonly<{
+  readonly loadLabelContents: (shippingProviderLabelId: number | string) => Promise<Readonly<{
     readonly authoritativeContents: readonly Readonly<{ wmsShipmentItemId: number; quantity: number }>[] | null;
     readonly providerObservations: readonly Readonly<{
       readonly eventKey: string;
