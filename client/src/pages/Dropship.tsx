@@ -258,6 +258,8 @@ import {
 } from "@/lib/dropship-return-policy-scope";
 import { ReturnInspectionModal } from "@/components/dropship/ReturnInspectionModal";
 import { EbayOAuthBrandingAdminPanel } from "@/components/dropship/EbayOAuthBrandingAdminPanel";
+import { useAuth } from "@/lib/auth";
+import { DropshipWalletPolicyPanel } from "./dropship-wallet-policy-panel";
 
 type AuditSeverityFilter = DropshipSeverity | "all";
 type DogfoodReadinessStatusFilter = DropshipDogfoodReadinessStatus | "all";
@@ -284,6 +286,7 @@ type DropshipOpsTabValue =
   | "shipping"
   | "order-intake"
   | "wallet-ops"
+  | "wallet-policy"
   | "stores"
   | "listing-pushes"
   | "tracking-pushes"
@@ -365,6 +368,7 @@ const dropshipOpsTabValues = new Set<DropshipOpsTabValue>([
   "shipping",
   "order-intake",
   "wallet-ops",
+  "wallet-policy",
   "stores",
   "listing-pushes",
   "tracking-pushes",
@@ -910,6 +914,10 @@ export default function Dropship() {
 
           <TabsContent value="wallet-ops" className="m-0">
             <WalletOpsTab />
+          </TabsContent>
+
+          <TabsContent value="wallet-policy" className="m-0">
+            <WalletPolicyTab />
           </TabsContent>
 
           <TabsContent value="stores" className="m-0">
@@ -4744,6 +4752,26 @@ function OrderIntakeOpsTab({
         selectedIntakeId={selectedIntakeId}
       />
     </div>
+  );
+}
+
+/**
+ * Wallet policy tab.
+ *
+ * `/dropship` is gated by ROLE, so a lead reaches this page without necessarily
+ * holding the dropship abilities the wallet policy routes require. The two
+ * permissions the server enforces are therefore read here and passed down
+ * separately: `dropship:view` for the GET (no permission, no data) and
+ * `dropship:manage_operations` for the POST (no permission, every control is
+ * disabled).
+ */
+function WalletPolicyTab() {
+  const { hasPermission } = useAuth();
+  return (
+    <DropshipWalletPolicyPanel
+      canView={hasPermission("dropship", "view")}
+      canEdit={hasPermission("dropship", "manage_operations")}
+    />
   );
 }
 

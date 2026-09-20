@@ -322,6 +322,9 @@
   "dropship.dropship_wallet_maintenance_runs": [
     "modules/dropship"
   ],
+  "dropship.dropship_wallet_policies": [
+    "modules/dropship"
+  ],
   "dropship.dropship_zone_rules": [
     "modules/dropship"
   ],
@@ -578,10 +581,7 @@
   "inventory.planner_shadow_runs": [
     "modules/inventory-planning"
   ],
-    "inventory.safety_definition_applications": [
-      "modules/inventory-planning"
-    ],
-    "inventory.product_definition_applications": [
+  "inventory.product_definition_applications": [
     "modules/inventory-planning"
   ],
   "inventory.promise_safety_policy_heads": [
@@ -649,6 +649,9 @@
   ],
   "inventory.replen_tier_defaults": [
     "modules/inventory"
+  ],
+  "inventory.safety_definition_applications": [
+    "modules/inventory-planning"
   ],
   "inventory.transformation_model_heads": [
     "modules/inventory-planning"

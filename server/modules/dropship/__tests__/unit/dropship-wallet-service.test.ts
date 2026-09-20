@@ -2,6 +2,10 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type { DropshipVendorStatus } from "../../../../../shared/schema/dropship.schema";
 import { DropshipError } from "../../domain/errors";
 import type {
+  DropshipWalletPolicyLimits,
+  DropshipWalletPolicyResolver,
+} from "../../domain/wallet-policy";
+import type {
   DropshipLogEvent,
   DropshipNotificationSenderInput,
 } from "../../application/dropship-ports";
@@ -56,13 +60,17 @@ describe("DropshipWalletService", () => {
     service = buildService();
   });
 
-  function buildService(overrides: { vendorStanding?: FakeVendorStandingService } = {}): DropshipWalletService {
+  function buildService(overrides: {
+    vendorStanding?: FakeVendorStandingService;
+    walletPolicy?: DropshipWalletPolicyResolver;
+  } = {}): DropshipWalletService {
     return new DropshipWalletService({
       vendorProvisioning: new FakeVendorProvisioningService() as unknown as DropshipVendorProvisioningService,
       repository,
       fundingProvider,
       notificationSender,
       vendorStanding: overrides.vendorStanding,
+      walletPolicy: overrides.walletPolicy,
       clock: { now: () => now },
       logger: {
         info: (event) => logs.push({ ...event, level: "info" }),
@@ -1165,6 +1173,114 @@ describe("DropshipWalletService", () => {
     expect(wallet.cardFundingFeeBps).toBe(300);
     const memberWallet = await service.getWalletForMember("member-1");
     expect(memberWallet.cardFundingFeeBps).toBe(300);
+  });
+
+  describe("wallet policy limits", () => {
+    /** A published policy that differs from every environment default. */
+    const publishedLimits: DropshipWalletPolicyLimits = {
+      autoReloadMinTriggerCents: 9_000,
+      autoReloadMinAmountCents: 20_000,
+      manualFundingMinCents: 2_500,
+      manualFundingMaxCents: 60_000,
+      defaultPaymentHoldTimeoutMinutes: 1_440,
+      holdExpiryWarningMinutes: 45,
+    };
+    const policy: DropshipWalletPolicyResolver = { resolveWalletLimits: async () => ({ ...publishedLimits }) };
+
+    it("serves the published limits with the wallet so the page stops guessing them", async () => {
+      const wallet = await buildService({ walletPolicy: policy }).getWalletForVendor(10);
+      expect(wallet.limits).toEqual(publishedLimits);
+    });
+
+    it("falls back to the environment limits when no policy resolver is wired", async () => {
+      const wallet = await service.getWalletForVendor(10);
+      expect(wallet.limits).toEqual({
+        autoReloadMinTriggerCents: 5_000,
+        autoReloadMinAmountCents: 10_000,
+        manualFundingMinCents: 1_000,
+        manualFundingMaxCents: 500_000,
+        defaultPaymentHoldTimeoutMinutes: 2_880,
+        holdExpiryWarningMinutes: 120,
+      });
+    });
+
+    it("enforces the published auto-reload floors, not the environment defaults", async () => {
+      const policyService = buildService({ walletPolicy: policy });
+      // 5000/10000 clears the env defaults but not the published policy.
+      await expect(policyService.configureAutoReload({
+        vendorId: 10,
+        fundingMethodId: 99,
+        enabled: true,
+        minimumBalanceCents: 5_000,
+        maxSingleReloadCents: 10_000,
+        paymentHoldTimeoutMinutes: 2880,
+      })).rejects.toMatchObject({
+        code: "DROPSHIP_AUTO_RELOAD_TRIGGER_BELOW_MINIMUM",
+        context: expect.objectContaining({ floorCents: 9_000 }),
+      });
+
+      await expect(policyService.configureAutoReload({
+        vendorId: 10,
+        fundingMethodId: 99,
+        enabled: true,
+        minimumBalanceCents: 9_000,
+        maxSingleReloadCents: 10_000,
+        paymentHoldTimeoutMinutes: 2880,
+      })).rejects.toMatchObject({
+        code: "DROPSHIP_AUTO_RELOAD_AMOUNT_BELOW_MINIMUM",
+        context: expect.objectContaining({ floorCents: 20_000 }),
+      });
+
+      const setting = await policyService.configureAutoReload({
+        vendorId: 10,
+        fundingMethodId: 99,
+        enabled: true,
+        minimumBalanceCents: 9_000,
+        maxSingleReloadCents: 20_000,
+        paymentHoldTimeoutMinutes: 2880,
+      });
+      expect(setting.minimumBalanceCents).toBe(9_000);
+      expect(logs.at(-1)).toMatchObject({
+        code: "DROPSHIP_AUTO_RELOAD_CONFIGURED",
+        context: expect.objectContaining({
+          autoReloadMinTriggerCents: 9_000,
+          autoReloadMinAmountCents: 20_000,
+        }),
+      });
+    });
+
+    it("enforces the published manual top-up bounds on a funding session", async () => {
+      const policyService = buildService({ walletPolicy: policy });
+
+      await expect(policyService.createStripeWalletFundingSessionForMember("member-1", {
+        fundingMethodId: 99,
+        amountCents: 2_000,
+        successUrl: "https://cardshellz.io/wallet?wallet_funding=success",
+        cancelUrl: "https://cardshellz.io/wallet?wallet_funding=cancelled",
+      })).rejects.toMatchObject({
+        code: "DROPSHIP_WALLET_FUNDING_AMOUNT_OUT_OF_RANGE",
+        context: expect.objectContaining({ minCents: 2_500, maxCents: 60_000 }),
+      });
+
+      // Above the published ceiling but well inside the environment default.
+      await expect(policyService.createStripeWalletFundingSessionForMember("member-1", {
+        fundingMethodId: 99,
+        amountCents: 100_000,
+        successUrl: "https://cardshellz.io/wallet?wallet_funding=success",
+        cancelUrl: "https://cardshellz.io/wallet?wallet_funding=cancelled",
+      })).rejects.toMatchObject({
+        code: "DROPSHIP_WALLET_FUNDING_AMOUNT_OUT_OF_RANGE",
+        context: expect.objectContaining({ maxCents: 60_000 }),
+      });
+
+      const session = await policyService.createStripeWalletFundingSessionForMember("member-1", {
+        fundingMethodId: 99,
+        amountCents: 25_000,
+        successUrl: "https://cardshellz.io/wallet?wallet_funding=success",
+        cancelUrl: "https://cardshellz.io/wallet?wallet_funding=cancelled",
+      });
+      expect(session).toMatchObject({ amountCents: 25_000 });
+    });
   });
 
   it("records the fee rate the vendor agreed to when auto-reload is configured", async () => {

@@ -16,6 +16,11 @@ import type { DropshipVendorStandingReason, DropshipVendorStatus } from "../../.
 import { DropshipError } from "../domain/errors";
 import { standingReasonForFailedFunding } from "../domain/vendor-standing";
 import {
+  resolveDropshipWalletPolicyLimitsFromEnv,
+  type DropshipWalletPolicyLimits,
+  type DropshipWalletPolicyResolver,
+} from "../domain/wallet-policy";
+import {
   formatNotificationCurrency,
   sendDropshipNotificationSafely,
 } from "./dropship-notification-dispatch";
@@ -374,6 +379,13 @@ export interface DropshipWalletView extends DropshipWalletOverview {
    * wallet once the transfer is confirmed on chain.
    */
   usdcBaseDepositAddress: string | null;
+  /**
+   * The wallet policy limits in force — the staff-managed
+   * `dropship.dropship_wallet_policies` row, or the environment fallback. The
+   * portal renders these instead of a hard-coded table, so a limit change is
+   * visible to vendors the moment it is published.
+   */
+  limits: DropshipWalletPolicyLimits;
 }
 
 export interface DropshipWalletMutationResult {
@@ -596,6 +608,13 @@ export class DropshipWalletService {
       vendorStanding?: Pick<DropshipVendorStandingService, "announcePause" | "restoreIfFunded">;
       clock: DropshipClock;
       logger: DropshipLogger;
+      /**
+       * Wallet policy limits (auto-reload floors, manual funding bounds, hold
+       * timings). Absent means the documented environment fallback, exactly as
+       * before this became staff-managed data. Injected so tests are
+       * deterministic.
+       */
+      walletPolicy?: DropshipWalletPolicyResolver;
       /** Card fee rate override; the environment's rate when absent. Injected so tests are deterministic. */
       cardFundingFeeBps?: number;
       /** USDC deposit address override; the environment's address when absent. Injected so tests are deterministic. */
@@ -624,6 +643,7 @@ export class DropshipWalletService {
       ...overview,
       cardFundingFeeBps: this.cardFundingFeeBps(),
       usdcBaseDepositAddress: this.usdcBaseDepositAddress(),
+      limits: await this.walletLimits(),
     };
   }
 
@@ -691,7 +711,8 @@ export class DropshipWalletService {
 
   async configureAutoReload(input: unknown): Promise<DropshipAutoReloadSettingRecord> {
     const parsed = parseWalletInput(configureDropshipAutoReloadInputSchema, input);
-    assertAutoReloadConfigIsUsable(parsed);
+    const limits = await this.walletLimits();
+    assertAutoReloadConfigIsUsable(parsed, limits);
     const cardFundingFeeBps = this.cardFundingFeeBps();
     assertCardFeeAcknowledgementIsCurrent(parsed, cardFundingFeeBps);
     await this.assertAutoReloadMayBeDisabled(parsed);
@@ -713,6 +734,8 @@ export class DropshipWalletService {
         maxSingleReloadCents: parsed.maxSingleReloadCents,
         cardFundingFeeBps,
         acknowledgedCardFeeBps: parsed.acknowledgedCardFeeBps ?? null,
+        autoReloadMinTriggerCents: limits.autoReloadMinTriggerCents,
+        autoReloadMinAmountCents: limits.autoReloadMinAmountCents,
       },
     });
     return setting;
@@ -853,7 +876,7 @@ export class DropshipWalletService {
       );
     }
 
-    assertStripeWalletFundingAmount(parsed.amountCents);
+    assertStripeWalletFundingAmount(parsed.amountCents, await this.walletLimits());
     const provisioned = await this.provisionVendor(memberId);
     const vendor = provisioned.vendor;
     const wallet = await this.deps.repository.getOverview({
@@ -1324,6 +1347,17 @@ export class DropshipWalletService {
     });
   }
 
+  /**
+   * The wallet policy limits in force. The injected resolver reads the active
+   * policy row; with no resolver wired the documented environment fallback is
+   * used, which is what every caller got before the policy table existed.
+   */
+  private async walletLimits(): Promise<DropshipWalletPolicyLimits> {
+    return this.deps.walletPolicy
+      ? this.deps.walletPolicy.resolveWalletLimits()
+      : resolveDropshipWalletPolicyLimitsFromEnv();
+  }
+
   private cardFundingFeeBps(): number {
     return this.deps.cardFundingFeeBps ?? resolveDropshipCardFundingFeeBps();
   }
@@ -1618,35 +1652,19 @@ function assertCardFeeAcknowledgementIsCurrent(
 }
 
 /**
- * Auto-reload floors.
+ * Manual (vendor-initiated) wallet funding bounds.
  *
- * The TRIGGER floor is the one that matters operationally: auto-reload fires
- * when the balance drops BELOW the trigger, so a trigger smaller than a single
- * order's debit (product cost + shipping) leaves the balance sitting happily
- * above the trigger while still failing to cover the next order. Auto-reload
- * would be switched on and the order would still land in payment hold.
- *
- * The AMOUNT floor keeps Stripe's fixed per-charge fee from dominating: at
- * 2.9% + $0.30, a $25 reload costs ~4.1% against ~3.0% at $250.
- *
- * Both are env-tunable so they can be adjusted without a deploy, matching the
- * manual funding limits below.
+ * `limits` is the resolved wallet policy — the active
+ * `dropship.dropship_wallet_policies` row, or the environment fallback. This
+ * function reads NO ambient state, so the bounds a vendor is held to are
+ * exactly the bounds the wallet page showed them.
  */
-const DEFAULT_AUTO_RELOAD_MIN_TRIGGER_CENTS = 5_000;
-const DEFAULT_AUTO_RELOAD_MIN_AMOUNT_CENTS = 10_000;
-
-const DEFAULT_STRIPE_MIN_WALLET_FUNDING_CENTS = 1000;
-const DEFAULT_STRIPE_MAX_WALLET_FUNDING_CENTS = 500000;
-
-function assertStripeWalletFundingAmount(amountCents: number): void {
-  const minCents = parsePositiveEnvInteger(
-    process.env.DROPSHIP_STRIPE_MIN_WALLET_FUNDING_CENTS,
-    DEFAULT_STRIPE_MIN_WALLET_FUNDING_CENTS,
-  );
-  const maxCents = parsePositiveEnvInteger(
-    process.env.DROPSHIP_STRIPE_MAX_WALLET_FUNDING_CENTS,
-    DEFAULT_STRIPE_MAX_WALLET_FUNDING_CENTS,
-  );
+export function assertStripeWalletFundingAmount(
+  amountCents: number,
+  limits: Pick<DropshipWalletPolicyLimits, "manualFundingMinCents" | "manualFundingMaxCents">,
+): void {
+  const minCents = limits.manualFundingMinCents;
+  const maxCents = limits.manualFundingMaxCents;
   if (minCents > maxCents) {
     throw new DropshipError(
       "DROPSHIP_WALLET_FUNDING_LIMITS_INVALID",
@@ -1664,31 +1682,37 @@ function assertStripeWalletFundingAmount(amountCents: number): void {
 }
 
 /**
- * Resolves the auto-reload floors. `env` is injectable so the limits are
- * deterministic under test rather than depending on ambient process state.
+ * Resolves the auto-reload floors FROM THE ENVIRONMENT.
+ *
+ * This is the documented fallback layer, not the source of truth: the limits in
+ * force come from `dropship.dropship_wallet_policies` through the injected
+ * policy resolver, and these values are what the wallet uses when no policy row
+ * exists (an empty dev database, or before migration 0681 lands). `env` is
+ * injectable so the result is deterministic under test rather than depending on
+ * ambient process state.
  */
 export function resolveDropshipAutoReloadFloors(
   env: NodeJS.ProcessEnv = process.env,
 ): { minTriggerCents: number; minAmountCents: number } {
+  const limits = resolveDropshipWalletPolicyLimitsFromEnv(env);
   return {
-    minTriggerCents: parsePositiveEnvInteger(
-      env.DROPSHIP_AUTO_RELOAD_MIN_TRIGGER_CENTS,
-      DEFAULT_AUTO_RELOAD_MIN_TRIGGER_CENTS,
-    ),
-    minAmountCents: parsePositiveEnvInteger(
-      env.DROPSHIP_AUTO_RELOAD_MIN_AMOUNT_CENTS,
-      DEFAULT_AUTO_RELOAD_MIN_AMOUNT_CENTS,
-    ),
+    minTriggerCents: limits.autoReloadMinTriggerCents,
+    minAmountCents: limits.autoReloadMinAmountCents,
   };
 }
 
-function parsePositiveEnvInteger(value: string | undefined, fallback: number): number {
-  if (!value?.trim()) return fallback;
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
-}
-
-function assertAutoReloadConfigIsUsable(input: ConfigureDropshipAutoReloadInput): void {
+/**
+ * Auto-reload configuration rules.
+ *
+ * `limits` is passed in rather than resolved here so a single request is judged
+ * against one snapshot of the policy: the floors the vendor was shown, the
+ * floors validated against, and the floors recorded in the log line are the
+ * same numbers.
+ */
+function assertAutoReloadConfigIsUsable(
+  input: ConfigureDropshipAutoReloadInput,
+  limits: Pick<DropshipWalletPolicyLimits, "autoReloadMinTriggerCents" | "autoReloadMinAmountCents">,
+): void {
   if (!input.enabled) {
     return;
   }
@@ -1701,16 +1725,14 @@ function assertAutoReloadConfigIsUsable(input: ConfigureDropshipAutoReloadInput)
     );
   }
 
-  const floors = resolveDropshipAutoReloadFloors();
-
-  if (input.minimumBalanceCents < floors.minTriggerCents) {
+  if (input.minimumBalanceCents < limits.autoReloadMinTriggerCents) {
     throw new DropshipError(
       "DROPSHIP_AUTO_RELOAD_TRIGGER_BELOW_MINIMUM",
       "Auto-reload trigger balance is below the minimum allowed.",
       {
         vendorId: input.vendorId,
         minimumBalanceCents: input.minimumBalanceCents,
-        floorCents: floors.minTriggerCents,
+        floorCents: limits.autoReloadMinTriggerCents,
       },
     );
   }
@@ -1726,14 +1748,14 @@ function assertAutoReloadConfigIsUsable(input: ConfigureDropshipAutoReloadInput)
     );
   }
 
-  if (input.maxSingleReloadCents < floors.minAmountCents) {
+  if (input.maxSingleReloadCents < limits.autoReloadMinAmountCents) {
     throw new DropshipError(
       "DROPSHIP_AUTO_RELOAD_AMOUNT_BELOW_MINIMUM",
       "Auto-reload amount is below the minimum allowed.",
       {
         vendorId: input.vendorId,
         maxSingleReloadCents: input.maxSingleReloadCents,
-        floorCents: floors.minAmountCents,
+        floorCents: limits.autoReloadMinAmountCents,
       },
     );
   }

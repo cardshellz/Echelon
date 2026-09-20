@@ -126,8 +126,17 @@ describe("DropshipPortalWallet contract", () => {
     // Step 1 and the manage view's "How your wallet works" render the same component, so the rules are worded once.
     expect(source.match(/describeIntro\(/g)).toHaveLength(1);
     expect(source.match(/INTRO_VERIFICATION_NOTE/g)).toHaveLength(2);
-    expect(source).toContain("describeIntro({ cardFundingFeeBps: wallet.cardFundingFeeBps, usdcOffered: wallet.usdcBaseDepositAddress !== null, holdTimeoutMinutes: flow.holdTimeoutMinutes })");
+    expect(source).toContain("describeIntro({ cardFundingFeeBps: wallet.cardFundingFeeBps, usdcOffered: wallet.usdcBaseDepositAddress !== null, holdTimeoutMinutes: flow.holdTimeoutMinutes, limits: wallet.limits })");
     expect(source.match(/<WalletHowItWorks wallet=\{wallet\} flow=\{flow\} \/>/g)).toHaveLength(2);
+    // Lede, then one list item per topic, each led by its bold sentence — the copy is the model's and is never re-worded here.
+    const rules = between("function WalletHowItWorks", "function IntroStep");
+    expect(rules).toContain("{intro.lede}");
+    expect(rules).toContain("{intro.topics.map((topic) => (");
+    expect(rules).toContain("<strong className=\"font-semibold text-zinc-900\">{topic.lead}</strong> {topic.detail}");
+    expect(rules).toContain("data-testid=\"wallet-how-it-works-rules\"");
+    // The intro names the single top-up limit; the review step is where it is explained in full.
+    expect(source).not.toContain("step 5 explains it");
+    expect(between("function buildReviewRows", "function ReviewStep")).toContain("\"Single top-up limit\"");
     expect(between("function IntroStep", "function SourcePicker")).toContain("revisited ? \"Back to setup\" : \"Set up my wallet\"");
     const manage = between("function HowItWorksSection", "function PlanRow");
     expect(manage).toContain("data-testid=\"wallet-how-it-works\"");
@@ -169,5 +178,20 @@ describe("DropshipPortalWallet contract", () => {
     expect(between("function ReviewStep", "function FundingControls")).toContain("onChange(step)");
     expect(between("function ReviewStep", "function FundingControls")).toContain("{step && flow.reachableSteps.includes(step) && (");
     expect(source).toContain("onChange={(step) => setDraft((current) => draftAtStep(current, step))}");
+  });
+
+  it("writes the draft synchronously before a Stripe redirect navigates away", () => {
+    // React runs a state updater on its next render, which is after
+    // window.location.assign has fired, so a draft written only through
+    // setDraft can lose the race and the vendor returns from Stripe with no
+    // record of the setup they started.
+    const redirects = source.split("window.location.assign(");
+    expect(redirects.length).toBeGreaterThan(1);
+    for (const before of redirects.slice(0, -1)) {
+      const tail = before.slice(-400);
+      expect(tail).toContain("commitDraftBeforeRedirect(");
+      expect(tail).not.toContain("setDraft((current)");
+    }
+    expect(source).toContain("function commitDraftBeforeRedirect(next: WalletDraft)");
   });
 });
