@@ -28,7 +28,11 @@ import {
 
 const MAX_ORDER_LINES = 500;
 
-type EchelonSchema = typeof import("@shared/schema");
+// This repository uses explicit table queries, not every application's
+// relational graph. Keep expanding inventory schemas out of this type boundary.
+type EchelonSchema = Pick<typeof import("@shared/schema"),
+  "omsHistoricalLineIdentityRepairCommands" | "omsOrderEvents" | "omsOrderLines"
+  | "omsOrders" | "webhookInbox" | "wmsOrderItems" | "wmsOrders">;
 export type HistoricalIdentityRepairDatabase =
   | NodePgDatabase<EchelonSchema>
   | NodePgTransaction<EchelonSchema, ExtractTablesWithRelations<EchelonSchema>>;

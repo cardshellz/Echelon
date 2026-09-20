@@ -28,6 +28,7 @@ describe("inventory channel exposure routes", () => {
     saveVariantMappingDraft: ReturnType<typeof vi.fn>;
   };
   let targetStopService: { stop: ReturnType<typeof vi.fn> };
+  let publicationStatusService: { read: ReturnType<typeof vi.fn> };
   let targetResumeService: {
     review: ReturnType<typeof vi.fn>;
     resume: ReturnType<typeof vi.fn>;
@@ -55,6 +56,8 @@ describe("inventory channel exposure routes", () => {
       saveVariantMappingDraft: vi.fn(async () => saveResult()),
     };
     targetStopService = { stop: vi.fn(async () => targetResult("disabled", "4")) };
+    publicationStatusService = { read: vi.fn(async () => ({ publicationTargetId: 5, productId: 10,
+      capturedAt: "2026-09-20T00:00:00.000Z", runtimeAuthority: "legacy", targetRevision: "1", rows: [] })) };
     targetResumeService = {
       review: vi.fn(async (request, actorId) => blockedResumeReview(request, actorId)),
       resume: vi.fn(async (request) => resumeResult(request)),
@@ -69,11 +72,22 @@ describe("inventory channel exposure routes", () => {
       Object.defineProperty(req, "session", { value: { user: { id: "operator-1" } } });
       next();
     });
-    registerInventoryChannelExposureRoutes(app, { service, targetStopService, targetResumeService, targetHoldService });
+    registerInventoryChannelExposureRoutes(app, { service, targetStopService, targetResumeService, targetHoldService, publicationStatusService });
     server = await startServer(app);
   });
 
   afterEach(async () => server.close());
+
+  it("reads delivery evidence with view permission and validates both identifiers", async () => {
+    const result = await jsonRequest(`${server.url}/api/inventory-planning/admin/channel-exposure/publication-status?publicationTargetId=5&productId=10`);
+    expect(result.status).toBe(200);
+    expect(publicationStatusService.read).toHaveBeenCalledWith({ publicationTargetId: 5, productId: 10 });
+    expect(requirePermissionMock).toHaveBeenCalledWith("inventory_planning", "view");
+    publicationStatusService.read.mockClear();
+    const bad = await jsonRequest(`${server.url}/api/inventory-planning/admin/channel-exposure/publication-status?publicationTargetId=5&productId=no`);
+    expect(bad.status).toBe(400);
+    expect(publicationStatusService.read).not.toHaveBeenCalled();
+  });
 
   it("holds and releases a destination with the activation permission and the session actor", async () => {
     const request = {

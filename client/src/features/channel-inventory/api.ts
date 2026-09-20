@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { channelPublicationStatusSchema } from "@shared/types/inventory-channel-publication-status";
 
 import { plannerShadowRunSchema } from "@shared/types/inventory-availability-planner";
 import {
@@ -50,6 +51,7 @@ const ADMIN_BASE = "/api/inventory-planning/admin/channel-exposure";
 export const ENDPOINTS = {
   view: ADMIN_BASE,
   preview: `${ADMIN_BASE}/preview`,
+  publicationStatus: `${ADMIN_BASE}/publication-status`,
   policyDraft: `${ADMIN_BASE}/policy-draft`,
   sourceBindingDraft: `${ADMIN_BASE}/source-binding-draft`,
   variantMappingDraft: `${ADMIN_BASE}/variant-mapping-draft`,
@@ -184,6 +186,13 @@ export function fetchPreview(publicationTargetId: number, productId: number): Pr
   return requestJson(
     `${ENDPOINTS.preview}?publicationTargetId=${publicationTargetId}&productId=${productId}`,
     inventoryChannelExposurePreviewSchema,
+  );
+}
+
+export function fetchPublicationStatus(publicationTargetId: number, productId: number) {
+  return requestJson(
+    `${ENDPOINTS.publicationStatus}?publicationTargetId=${publicationTargetId}&productId=${productId}`,
+    channelPublicationStatusSchema,
   );
 }
 

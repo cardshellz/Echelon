@@ -4,11 +4,12 @@ import express from "express";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerProductDefinitionRoutes } from "../../interfaces/http/inventory-product-definition.routes";
 import { registerSafetyDefinitionRoutes } from "../../interfaces/http/inventory-safety-definition.routes";
+import { registerChannelDefinitionRoutes } from "../../interfaces/http/inventory-channel-definition.routes";
 import { ProductDefinitionError } from "../../application/inventory-product-definition.service";
 
 const { hasPermission } = vi.hoisted(() => ({ hasPermission: vi.fn(async () => true) }));
 vi.mock("../../../identity", () => ({ hasPermission }));
-describe.each(["product", "safety"] as const)("%s definition permission boundary", kind => {
+describe.each(["product", "safety", "channel"] as const)("%s definition permission boundary", kind => {
   let server: http.Server;
   let url: string;
   let service: { review: ReturnType<typeof vi.fn>; apply: ReturnType<typeof vi.fn>; progress: ReturnType<typeof vi.fn> };
@@ -22,6 +23,7 @@ describe.each(["product", "safety"] as const)("%s definition permission boundary
       next();
     });
     if (kind === "product") registerProductDefinitionRoutes(app, service as never);
+    else if (kind === "channel") registerChannelDefinitionRoutes(app, service as never);
     else registerSafetyDefinitionRoutes(app, service as never);
     server = http.createServer(app);
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));

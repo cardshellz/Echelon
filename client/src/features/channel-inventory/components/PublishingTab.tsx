@@ -20,6 +20,7 @@ import {
 } from "../model";
 import { Callout, EvidenceNote, KeyValue, PendingPill, ReasonDialog, SectionCard, StatePill } from "./primitives";
 import { NoDestinationYet } from "./SupplyTab";
+import { ChannelDefinitionReview } from "./ChannelDefinitionReview";
 
 type Command = "include" | "exclude" | "stop" | "review" | "resume";
 
@@ -32,8 +33,11 @@ export function PublishingTab({ view, channel, target, canEdit, canActivate, onA
   canActivate: boolean;
   onAddDestination(): void;
 }) {
-  if (!target) return <NoDestinationYet canEdit={canEdit} onAdd={onAddDestination} />;
-  return <DestinationPublishing key={`${target.id}:${target.revision}`} view={view} channel={channel} target={target} canActivate={canActivate} />;
+  return <div className="space-y-4">
+    <ChannelDefinitionReview key={channel.id} view={view} channel={channel} canActivate={canActivate} />
+    {target ? <DestinationPublishing key={`${target.id}:${target.revision}`} view={view} channel={channel} target={target} canActivate={canActivate} />
+      : <NoDestinationYet canEdit={canEdit} onAdd={onAddDestination} />}
+  </div>;
 }
 
 function DestinationPublishing({ view, channel, target, canActivate }: {
@@ -202,8 +206,8 @@ function DestinationPublishing({ view, channel, target, canActivate }: {
         <EvidenceNote>
           First activation is the reviewed cutover on{" "}
           <Link href="/inventory/cutover" className="underline underline-offset-2">Inventory Cutover</Link>.
-          A routine "apply saved changes" step after cutover is not available yet; resuming a stopped
-          destination re-uses its active configuration and does not apply pending drafts.
+          After cutover, Review and Apply above applies saved channel changes. Resuming a stopped
+          destination still re-uses its active configuration and does not apply pending drafts.
         </EvidenceNote>
       </SectionCard>
 

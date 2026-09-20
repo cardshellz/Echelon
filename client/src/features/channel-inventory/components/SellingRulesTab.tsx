@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMemo, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { Plus, Search } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -7,8 +7,11 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
 
-import { buildPolicyDraftRequest, describeError, isConflict, savePolicyDraft } from "../api";
-import { invalidateChannelInventory, useCommandKey } from "../hooks";
+import { buildPolicyDraftRequest, savePolicyDraft } from "../api";
+import { invalidateChannelInventory } from "../hooks";
+import { useDraftEditor } from "../use-draft-editor";
+import { useDraftNavigation } from "../DraftNavigation";
+import { DraftSaveFeedback } from "./DraftSaveFeedback";
 import {
   findPolicyHead,
   listExceptions,
@@ -19,13 +22,12 @@ import {
   savedPolicy,
   type Channel,
   type ExceptionRow,
-  type PolicyForm,
   type PolicyFormError,
   type View,
 } from "../model";
 import { ExceptionSheet, type ExceptionSubject } from "./ExceptionSheet";
 import { PolicyFields } from "./PolicyFields";
-import { ActivePill, Callout, ConflictAlert, EvidenceNote, FormValidationStop, NoteField, PendingPill, SectionCard, StatePill } from "./primitives";
+import { ActivePill, Callout, EvidenceNote, NoteField, PendingPill, SectionCard, StatePill } from "./primitives";
 
 /** Channel default plus the product/SKU exceptions that override it. */
 export function SellingRulesTab({ view, channel, canEdit, focusProductId, onFocusProduct, onReload, reloading }: {
@@ -38,6 +40,7 @@ export function SellingRulesTab({ view, channel, canEdit, focusProductId, onFocu
   reloading: boolean;
 }) {
   const [sheet, setSheet] = useState<{ open: boolean; subject: ExceptionSubject | null }>({ open: false, subject: null });
+  const navigate = useDraftNavigation();
   return (
     <div className="space-y-4">
       <ChannelDefaultCard key={channel.id} view={view} channel={channel} canEdit={canEdit} onReload={onReload} reloading={reloading} />
@@ -45,7 +48,7 @@ export function SellingRulesTab({ view, channel, canEdit, focusProductId, onFocu
         view={view}
         channel={channel}
         canEdit={canEdit}
-        onOpen={(subject) => setSheet({ open: true, subject })}
+        onOpen={(subject) => navigate(() => setSheet({ open: true, subject }))}
       />
       {sheet.open && (
         <ExceptionSheet
@@ -74,59 +77,40 @@ function ChannelDefaultCard({ view, channel, canEdit, onReload, reloading }: {
 }) {
   const queryClient = useQueryClient();
   const { toast } = useToast();
-  const command = useCommandKey();
   const scope = useMemo(() => ({ scopeType: "channel" as const, channelId: channel.id }), [channel.id]);
   const head = findPolicyHead(view.policyHeads, scope);
   const saved = savedPolicy(head);
   const savedForm = useMemo(() => policyValueToForm(saved?.value ?? null), [saved?.value]);
-  const [form, setForm] = useState<PolicyForm>(savedForm);
   const [errors, setErrors] = useState<PolicyFormError[]>([]);
-  const [note, setNote] = useState("");
-  const [conflict, setConflict] = useState<string | null>(null);
   const fingerprint = `${head?.revision ?? "0"}:${head?.draftPolicy?.definitionHash ?? ""}:${head?.activePolicy?.definitionHash ?? ""}`;
-
-  useEffect(() => {
-    setForm(savedForm);
-    setErrors([]);
-    setConflict(null);
-    command.clear();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fingerprint]);
-
-  const save = useMutation({
-    mutationFn: () => {
-      const parsed = policyFormToValue(form);
+  const editor = useDraftEditor({
+    value: { form: savedForm, note: "" }, baseline: head, fingerprint,
+    equal: (left, right) => samePolicyForm(left.form, right.form) && left.note === right.note,
+    build: (value, baseline, idempotencyKey) => {
+      const parsed = policyFormToValue(value.form);
       if (!parsed.ok) {
         setErrors(parsed.errors);
-        return Promise.reject(new FormValidationStop());
+        throw new Error("Check the highlighted selling-rule fields.");
       }
       setErrors([]);
-      return savePolicyDraft(buildPolicyDraftRequest({
+      return buildPolicyDraftRequest({
         scope,
         value: parsed.value,
-        head,
-        note,
-        idempotencyKey: command.keyFor(JSON.stringify({ scope, value: parsed.value, note, fingerprint })),
-      }));
+        head: baseline,
+        note: value.note,
+        idempotencyKey,
+      });
     },
-    onSuccess: async () => {
-      command.clear();
-      setNote("");
+    send: savePolicyDraft,
+    onSaved: async () => {
       await invalidateChannelInventory(queryClient);
       toast({
         title: `Channel default saved for ${channel.name}`,
         description: "Pending activation. Items with their own rule keep their explicit values.",
       });
     },
-    onError: (error) => {
-      if (error instanceof FormValidationStop) return;
-      const described = describeError(error);
-      if (isConflict(error)) { setConflict(described.message); return; }
-      toast({ title: described.title, description: described.message, variant: "destructive" });
-    },
   });
-
-  const changed = !samePolicyForm(form, savedForm);
+  const { form, note } = editor.value;
   const missing = missingChannelDefaultFields(saved?.value ?? null);
   const formError = errors.find((error) => error.field === "form")?.message ?? null;
 
@@ -152,25 +136,25 @@ function ChannelDefaultCard({ view, channel, canEdit, onReload, reloading }: {
           Until a complete default exists, nothing on {channel.name} can be published.
         </Callout>
       )}
-      {conflict && <ConflictAlert message={conflict} onReload={onReload} reloading={reloading} />}
+      <DraftSaveFeedback {...editor} onReload={() => { editor.reset(); setErrors([]); onReload(); }} reloading={reloading} />
       <PolicyFields
         idPrefix={`channel-${channel.id}`}
         form={form}
-        onChange={(patch) => setForm((current) => ({ ...current, ...patch }))}
+        onChange={(patch) => editor.setValue(current => ({ ...current, form: { ...current.form, ...patch } }))}
         scopeType="channel"
         inherited={null}
         errors={errors}
-        disabled={!canEdit || save.isPending}
+        disabled={!canEdit || editor.locked || reloading}
         unitNoun="units of each SKU"
       />
       {formError && <Callout tone="warning">{formError}</Callout>}
       {canEdit && (
         <div className="flex flex-col gap-3 border-t pt-4 sm:flex-row sm:items-end sm:justify-between">
-          <NoteField id={`channel-default-note-${channel.id}`} value={note} onChange={setNote} disabled={save.isPending} />
+          <NoteField id={`channel-default-note-${channel.id}`} value={note} onChange={note => editor.setValue(current => ({ ...current, note }))} disabled={editor.locked} />
           <div className="flex items-center gap-3">
-            {changed && !save.isPending && <span className="text-xs text-muted-foreground">Unsaved changes</span>}
-            <Button type="button" disabled={!changed || save.isPending} onClick={() => save.mutate()}>
-              {save.isPending ? "Saving…" : "Save channel default"}
+            {editor.dirty && !editor.pending && <span className="text-xs text-muted-foreground">Unsaved changes</span>}
+            <Button type="button" disabled={editor.pending || (!editor.uncertain && (!editor.dirty || editor.conflict || reloading))} onClick={() => void editor.save()}>
+              {editor.pending ? "Saving…" : editor.uncertain ? "Retry same save" : "Save channel default"}
             </Button>
           </div>
         </div>

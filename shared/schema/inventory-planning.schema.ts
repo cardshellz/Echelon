@@ -2036,6 +2036,8 @@ export const channelExposurePolicyVersions = inventoryPlanningSchema.table(
     maxPublishMode: varchar("max_publish_mode", { length: 20 }),
     maxPublishSellableUnits: bigint("max_publish_sellable_units", { mode: "bigint" }),
     minPublishSellableUnits: bigint("min_publish_sellable_units", { mode: "bigint" }),
+    sourceFulfillmentNodeIds: integer("source_fulfillment_node_ids").array(),
+    inheritAll: boolean("inherit_all").notNull().default(false),
     definitionHash: varchar("definition_hash", { length: 64 }).notNull(),
     supersedesPolicyId: integer("supersedes_policy_id")
       .references((): AnyPgColumn => channelExposurePolicyVersions.id, { onDelete: "restrict" }),
@@ -2084,7 +2086,8 @@ export const channelExposurePolicyVersions = inventoryPlanningSchema.table(
     ),
     valuePresent: check(
       "channel_exposure_policy_versions_value_chk",
-      sql`${table.allocationSemantics} IS NOT NULL OR ${table.eligible} IS NOT NULL
+      sql`${table.inheritAll} OR ${table.sourceFulfillmentNodeIds} IS NOT NULL
+        OR ${table.allocationSemantics} IS NOT NULL OR ${table.eligible} IS NOT NULL
         OR ${table.shareBps} IS NOT NULL OR ${table.holdbackSellableUnits} IS NOT NULL
         OR ${table.maxPublishMode} IS NOT NULL
         OR ${table.minPublishSellableUnits} IS NOT NULL`,
@@ -2093,6 +2096,21 @@ export const channelExposurePolicyVersions = inventoryPlanningSchema.table(
       "channel_exposure_policy_versions_semantics_chk",
       sql`${table.allocationSemantics} IS NULL
         OR ${table.allocationSemantics} IN ('exposure', 'partitioned')`,
+    ),
+    inheritanceValid: check(
+      "channel_exposure_policy_versions_inherit_chk",
+      sql`NOT ${table.inheritAll} OR (${table.scopeType} <> 'channel'
+        AND ${table.sourceFulfillmentNodeIds} IS NULL AND ${table.allocationSemantics} IS NULL
+        AND ${table.eligible} IS NULL AND ${table.shareBps} IS NULL AND ${table.holdbackSellableUnits} IS NULL
+        AND ${table.maxPublishMode} IS NULL AND ${table.maxPublishSellableUnits} IS NULL
+        AND ${table.minPublishSellableUnits} IS NULL)`,
+    ),
+    supplyValid: check(
+      "channel_exposure_policy_versions_supply_chk",
+      sql`${table.sourceFulfillmentNodeIds} IS NULL OR (${table.scopeType} <> 'channel'
+        AND cardinality(${table.sourceFulfillmentNodeIds}) BETWEEN 1 AND 100
+        AND array_ndims(${table.sourceFulfillmentNodeIds}) = 1
+        AND array_position(${table.sourceFulfillmentNodeIds}, NULL) IS NULL)`,
     ),
     quantitiesValid: check(
       "channel_exposure_policy_versions_quantity_chk",
@@ -2141,6 +2159,15 @@ export const channelExposurePolicyVersions = inventoryPlanningSchema.table(
     ),
   }),
 );
+
+/** Database-maintained FK index of the version-owned warehouse selection. */
+export const channelPolicySourceNodeReferences = inventoryPlanningSchema.table("channel_policy_source_node_references", {
+  policyId: integer("policy_id").notNull().references(() => channelExposurePolicyVersions.id, { onDelete: "cascade" }),
+  fulfillmentNodeId: integer("fulfillment_node_id").notNull().references(() => fulfillmentNodes.id, { onDelete: "restrict" }),
+}, table => ({
+  pk: primaryKey({ columns: [table.policyId, table.fulfillmentNodeId] }),
+  nodeIndex: index("channel_policy_source_node_references_node_idx").on(table.fulfillmentNodeId),
+}));
 
 export const channelExposurePolicyHeads = inventoryPlanningSchema.table(
   "channel_exposure_policy_heads",

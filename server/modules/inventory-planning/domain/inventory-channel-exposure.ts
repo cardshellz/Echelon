@@ -124,7 +124,7 @@ export function resolveChannelExposurePolicy(
   const byKey = new Map(input.policies.map((policy) => [policy.scopeKey, policy] as const));
   const ordered = expectedKeys.flatMap((key) => {
     const policy = byKey.get(key);
-    return policy ? [policy] : [];
+    return policy && !policy.value.inheritAll ? [policy] : [];
   });
   const values: Partial<Record<keyof ChannelExposurePolicyValue, unknown>> = {};
   const sources: Partial<Record<keyof ChannelExposurePolicyValue, string>> = {};
@@ -157,6 +157,23 @@ export function resolveChannelExposurePolicy(
     },
   };
   return { policy, missingFields: [] };
+}
+
+/** The same source precedence is used by runtime, readiness and saved preview. */
+export function resolveChannelSourceOverride(input: ChannelExposureResolutionInput): {
+  scopeKey: string; fulfillmentNodeIds: readonly number[];
+} | null {
+  const keys = [
+    channelExposurePolicyScopeKey({ scopeType: "variant", channelId: input.channelId, productId: input.productId, productVariantId: input.productVariantId }),
+    channelExposurePolicyScopeKey({ scopeType: "product", channelId: input.channelId, productId: input.productId }),
+  ];
+  for (const scopeKey of keys) {
+    const candidate = input.policies.find(policy => policy.scopeKey === scopeKey);
+    if (candidate && !candidate.value.inheritAll && candidate.value.sourceFulfillmentNodeIds != null) {
+      return { scopeKey, fulfillmentNodeIds: candidate.value.sourceFulfillmentNodeIds };
+    }
+  }
+  return null;
 }
 
 export function calculateChannelExposure(
