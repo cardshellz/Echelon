@@ -124,7 +124,7 @@ The designer handoff's other backend gaps remain explicit, not disguised as work
    is not equivalent to restoring inheritance.
 4. A complete location promise-eligibility editor and any unimplemented direct provider adapters.
 
-See [handoff implementation gaps](INVENTORY-CHANNEL-CONTROLS-DESIGNER-HANDOFF.md#gaps-still-open-surfaced-in-the-ui-as-such)
+See the later [handoff completion checkpoint](INVENTORY-CHANNEL-CONTROLS-DESIGNER-HANDOFF.md#completion-checkpoint--2026-09-20)
 and the visible explanations in Supply, ExceptionSheet, and PublishingTab. This batch
 closes the previously missing per-SKU delivery-status read path, not those separate contracts.
 

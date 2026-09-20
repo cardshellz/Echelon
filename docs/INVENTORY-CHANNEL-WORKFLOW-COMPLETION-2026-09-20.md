@@ -6,6 +6,11 @@ This expands the [earlier UI batch](INVENTORY-UI-COMPLETION-BATCH-2026-09-20.md)
 on `codex/inventory-ui-cutover-completion-20260920`. Both batches are delivered in
 **one PR**, not separate deployments. The original dirty catalog checkout is untouched.
 
+Final integration base: refreshed `origin/main` at
+`a06e994a363c41bb4fd2c51d3e317608884134a8` (PR #1506). The existing SKU publication
+holds from that workstream are preserved and tested with source overrides and
+restored inheritance. This branch has its own PR; it is not part of PR #1506.
+
 It completes the channel-workspace workflow: warehouse supply, channel defaults,
 product/SKU exceptions, restoring inheritance, whole-channel Review → Apply,
 and recorded delivery visibility. It uses the existing canonical ATP planner,
@@ -20,15 +25,15 @@ channel quantities or runtime authority were changed during this work.
 
 | Action | Behavior | Exact owner |
 | --- | --- | --- |
-| Select default warehouses | Existing destination binding remains the default supply set | `SupplyTab`; `PostgresInventoryChannelExposureAdminStore.saveSourceBindingDraft` |
-| Override product/SKU warehouses | SKU selection wins over product selection, then destination default. An override replaces the whole set, never unions it | `ExceptionSheet.RuleEditor`; `resolveChannelSourceOverride`; runtime `planTarget` |
-| Adjust channel/item dials | Existing field-by-field SKU → product → channel inheritance and existing server arithmetic | `resolveChannelExposurePolicy`, `calculateChannelExposure` |
-| Restore all inheritance | Explicit `inheritAll` version follows future parent changes after Apply; does not copy current parent values or delete history | `policyFormToValue`; `channelExposurePolicyValueSchema` |
-| Save | Actor, time, request identity, before/after audit; optional note, no mandatory reason; no publication | `InventoryChannelExposureAdminService.savePolicyDraft`; its PostgreSQL store |
-| Review | All pending channel policy/source/mapping heads, not just the displayed product; affected live targets across channels share one fresh inventory snapshot | `PostgresChannelDefinitionStore.review`, `captureReview`, `loadChannelDefinitionReviewTargets` |
-| Apply | Activation permission, fresh review-hash check, exact promotion, existing publisher/outbox and immutable receipt in one transaction | `registerChannelDefinitionRoutes`; `PostgresChannelDefinitionStore.apply` |
-| Retry | Original actor-bound command/key; one committed application under concurrent retries | `ChannelDefinitionReview`; `ChannelDefinitionService.apply`; PostgreSQL idempotency lock |
-| Check delivery | Requested, accepted and observed quantities remain separate; unknown is not zero; reads recorded evidence only | `PublicationStatus`; `ChannelPublicationStatusService.read`; `PostgresChannelDefinitionStore.progress` |
+| Select default warehouses | Existing destination binding remains the default supply set | [`SupplyTab`](../client/src/features/channel-inventory/components/SupplyTab.tsx#L23); [`saveSourceBindingDraft`](../server/modules/inventory-planning/infrastructure/inventory-channel-exposure-admin.repository.ts#L928) |
+| Override product/SKU warehouses | SKU selection wins over product selection, then destination default. An override replaces the whole set, never unions it | [`RuleEditor`](../client/src/features/channel-inventory/components/ExceptionSheet.tsx#L187); [`resolveChannelSourceOverride`](../server/modules/inventory-planning/domain/inventory-channel-exposure.ts#L163); [`planTarget`](../server/modules/inventory-planning/application/inventory-channel-exposure-runtime.service.ts#L244) |
+| Adjust channel/item dials | Existing field-by-field SKU → product → channel inheritance and existing server arithmetic | [`resolveChannelExposurePolicy`](../server/modules/inventory-planning/domain/inventory-channel-exposure.ts#L107), [`calculateChannelExposure`](../server/modules/inventory-planning/domain/inventory-channel-exposure.ts#L179) |
+| Restore all inheritance | Explicit `inheritAll` version follows future parent changes after Apply; does not copy current parent values or delete history | [`policyFormToValue`](../client/src/features/channel-inventory/model.ts#L379); [`channelExposurePolicyValueSchema`](../shared/types/inventory-channel-exposure.ts#L51) |
+| Save | Actor, time, request identity, before/after audit; optional note, no mandatory reason; no publication | [`InventoryChannelExposureAdminService.savePolicyDraft`](../server/modules/inventory-planning/application/inventory-channel-exposure-admin.service.ts#L195); [`savePolicyDraft` store](../server/modules/inventory-planning/infrastructure/inventory-channel-exposure-admin.repository.ts#L790) |
+| Review | All pending channel policy/source/mapping heads, not just the displayed product; affected live targets across channels share one fresh inventory snapshot | [`captureReview`](../server/modules/inventory-planning/infrastructure/inventory-channel-definition.repository.ts#L86), [`loadChanges`](../server/modules/inventory-planning/infrastructure/inventory-channel-definition.repository.ts#L174), [`loadChannelDefinitionReviewTargets`](../server/modules/inventory-planning/infrastructure/inventory-channel-exposure-runtime.repository.ts#L209) |
+| Apply | Activation permission, fresh review-hash check, exact promotion, existing publisher/outbox and immutable receipt in one transaction | [`registerChannelDefinitionRoutes`](../server/modules/inventory-planning/interfaces/http/inventory-channel-definition.routes.ts#L7); [`PostgresChannelDefinitionStore.apply`](../server/modules/inventory-planning/infrastructure/inventory-channel-definition.repository.ts#L23) |
+| Retry | Original actor-bound command/key; one committed application under concurrent retries | [`ChannelDefinitionReview`](../client/src/features/channel-inventory/components/ChannelDefinitionReview.tsx#L19); [`ChannelDefinitionService.apply`](../server/modules/inventory-planning/application/inventory-channel-definition.service.ts#L25); store idempotency lock at the Apply link above |
+| Check delivery | Requested, accepted and observed quantities remain separate; unknown is not zero; reads recorded evidence only | [`PublicationStatus`](../client/src/features/channel-inventory/components/PublicationStatus.tsx#L16); [`ChannelPublicationStatusService.read`](../server/modules/inventory-planning/application/inventory-channel-publication-status.service.ts#L16); [`PostgresChannelDefinitionStore.progress`](../server/modules/inventory-planning/infrastructure/inventory-channel-definition.repository.ts#L54) |
 
 Source files:
 
@@ -80,6 +85,10 @@ concurrent deletion protection; it is not independently editable configuration.
 The migration selects no definitions and changes no physical quantities, target
 states, provider ownership or runtime authority.
 
+Migration: [`0686_inventory_channel_definition_completion.sql`](../migrations/0686_inventory_channel_definition_completion.sql#L1).
+The number was selected after integrating main's 0684/0685 migrations; the full
+unit run includes the migration-prefix collision guard.
+
 ## Failure modes and boundaries
 
 - Missing/inactive/duplicate override warehouses block live publication; no
@@ -98,12 +107,37 @@ states, provider ownership or runtime authority.
   migration. Resume continues to use active definitions, never pending drafts.
 - Browser navigation guards are not durable offline storage; forced closure or a
   crash can lose an unconfirmed local command.
+- Rollback after applying new source overrides/inheritance is not a blind code
+  downgrade: older readers do not understand those fields. Keep affected
+  publication stopped until an explicitly reviewed compatible policy is restored
+  or the forward fix is deployed. Retain immutable receipts and policy history;
+  this additive migration is not a data-deletion rollback script.
 
 ## Validation
 
-Final post-main-integration results will be recorded here before PR publication.
-Database checks use an owned localhost-only disposable cluster. Browser/provider
-APIs are mocked; none are production acceptance tests.
+Final local results after integrating main, including its SKU publication holds:
+
+| Check | Result |
+| --- | --- |
+| `npm run check -- --incremental false` | Passed |
+| `npm run check:tests` | Passed (server and client test TypeScript) |
+| `vitest run unit --maxWorkers=4` | 13,898 passed; 39 skipped; zero failed |
+| `scripts/ci/postgres-tests.ts`, all eight shards | 86 suite files; 1,339 passed; zero skipped or failed |
+| `playwright.inventory.config.ts` | 56 passed, desktop and mobile |
+| `catalog-conversions.spec.ts` in the Dropship browser configuration | 28 passed, desktop and mobile |
+| Desktop/mobile visual inspection | Channel Apply and SKU warehouse editor screenshots inspected |
+
+Database checks used the repository's isolated-per-suite runner against an owned
+localhost-only disposable PostgreSQL cluster. That cluster was stopped after
+validation; existing database services were not stopped or reconfigured.
+Browser/provider APIs are mocked; none are production acceptance tests. GitHub
+CI has not been counted as passing by this local validation record.
+
+Two unchanged migration files (0678 and 0683) were mechanically normalized to LF
+locally for existing literal-newline tests; their Git-normalized content is not
+changed by this PR. A type-only narrowing of the historical OMS identity-repair
+repository's Drizzle schema avoids TypeScript's excessive-instantiation limit
+after adding the schema relations; its runtime operations are unchanged.
 
 Focused proofs cover source precedence, inheritance, audited save/reset round
 trips, reference integrity, stale reviews, immutable receipts, rollback after

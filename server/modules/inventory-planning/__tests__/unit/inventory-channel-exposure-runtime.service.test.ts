@@ -43,6 +43,18 @@ describe("product and SKU warehouse overrides", () => {
     expect(plan.targets[0].publishable).toBe(false);
     expect(plan.targets[0].rows[1]).toMatchObject({ canonicalAtpUnits: "0",blockers:[{ code:"CHANNEL_SOURCE_OVERRIDE_UNAVAILABLE" }] });
   });
+  it("retains SKU publication holds through warehouse overrides and restored inheritance", async () => {
+    const configured = withOverrides();
+    const hold = { reason: "Listing tier below minimum", heldAt: "2026-09-20T12:00:00.000Z", heldBy: "dropship-listing-tiers" };
+    configured.variantHolds = [{ productVariantId: 102, hold }];
+    const initial = await new InventoryChannelExposureRuntimeService(executor(canonicalContext([configured]))).planProduct(10);
+    expect(initial.targets[0].rows[1]).toMatchObject({ canonicalAtpUnits: "2", publishedUnits: "0", hold, sourceWarehouseBreakdown: [{ warehouseId: 2 }] });
+    configured.policies = configured.policies.map(policy => policy.scopeType === "variant"
+      ? { ...policy, value: { ...inherited, inheritAll: true } } : policy);
+    const restored = await new InventoryChannelExposureRuntimeService(executor(canonicalContext([configured]))).planProduct(10);
+    expect(restored.targets[0].rows[1]).toMatchObject({ canonicalAtpUnits: "7", publishedUnits: "0", hold, sourceWarehouseBreakdown: [{ warehouseId: 1 }] });
+    expect(restored.targets[0].rows[0].publishedUnits).toBe("25");
+  });
   it("checks partitioned shares using each SKU's actual overridden supply", async () => {
     const first = withOverrides();
     first.policies = first.policies.map(policy => policy.scopeType === "channel"
