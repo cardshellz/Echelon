@@ -2170,8 +2170,8 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
             END,
             next_attempt_at = ${input.nextAttemptAt},
             confirmed_at = CASE
-              WHEN ${input.outcome}::text = 'confirmed' THEN ${input.completedAt}
-              ELSE NULL
+              WHEN ${input.outcome}::text = 'confirmed' THEN ${input.completedAt}::timestamptz
+              ELSE NULL::timestamptz
             END,
             last_event_id = ${input.carrierTrackingEventId},
             lease_owner = NULL,
@@ -3184,6 +3184,9 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
           },
 
           async markEventReconciled(eventId, matchAttemptId, resolution, reconciledAt) {
+            // A label identity match does not imply shipment lineage is ready.
+            // Persist its retry so unlinked labels cannot occupy every new-event
+            // batch; the database retry-shape contract must allow this state.
             const matchedWithoutLineage =
               resolution.status === "matched"
               && resolution.selectedCandidate?.labelDirection === "outbound"
