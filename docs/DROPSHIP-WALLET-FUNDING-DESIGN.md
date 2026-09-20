@@ -39,7 +39,7 @@ zero for that tier's SKUs (`domain/listing-tiers.ts`, the hourly reconciler).
    settling. Represented as an overdraft of `available`, bounded by the
    eligible pending credits and by the cap (policy cap, or the vendor's
    credit-profile override). Fee on the amount used (`advance_fee` ledger row,
-   migration 0686), posted in the same transaction as the order debit and
+   migration 0688), posted in the same transaction as the order debit and
    counted inside the bound. All-or-nothing per order: an order the advance
    cannot cover whole goes to the card. Eligibility is judged per bank
    account: company account holder, a balance read through Stripe Financial

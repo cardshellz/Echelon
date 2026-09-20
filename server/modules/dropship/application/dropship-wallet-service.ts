@@ -94,7 +94,7 @@ export const dropshipWalletLedgerTypeSchema = z.enum([
   "return_fee",
   "insurance_pool_credit",
   "manual_adjustment",
-  /** The service fee on an order accepted against pending ACH (migration 0686). */
+  /** The service fee on an order accepted against pending ACH (migration 0688). */
   "advance_fee",
 ]);
 export type DropshipWalletLedgerType = z.infer<typeof dropshipWalletLedgerTypeSchema>;

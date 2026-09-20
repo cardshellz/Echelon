@@ -34,7 +34,7 @@ const channelConnectionBrandingMigrationSql = readFileSync(
   "utf8",
 );
 const walletAdvanceMigrationSql = readFileSync(
-  resolve(process.cwd(), "migrations/0686_dropship_wallet_advance.sql"),
+  resolve(process.cwd(), "migrations/0688_dropship_wallet_advance.sql"),
   "utf8",
 );
 

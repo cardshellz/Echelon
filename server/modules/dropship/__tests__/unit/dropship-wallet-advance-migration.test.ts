@@ -2,10 +2,10 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
-const migrationSql = readFileSync(resolve(process.cwd(), "migrations/0686_dropship_wallet_advance.sql"), "utf8");
+const migrationSql = readFileSync(resolve(process.cwd(), "migrations/0688_dropship_wallet_advance.sql"), "utf8");
 const schema = readFileSync(resolve(process.cwd(), "shared/schema/dropship.schema.ts"), "utf8");
 
-describe("0686 dropship wallet advance migration", () => {
+describe("0688 dropship wallet advance migration", () => {
   it("adds the advance fee ledger kind without dropping any existing kind", () => {
     expect(migrationSql).toContain("DROP CONSTRAINT IF EXISTS dropship_wallet_ledger_type_chk");
     for (const kind of [
