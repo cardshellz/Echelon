@@ -348,7 +348,8 @@ function makeService(overrides: {
       error: (event) => logs.push({ level: "error", event }),
     },
   });
-  return { service, chain, depositRepository, ledgerRepository, logs, sent, restored };
+  // Tests that pass `chain: null` never touch the chain; the rest get the scripted one.
+  return { service, chain: chain as ScriptedChain, depositRepository, ledgerRepository, logs, sent, restored };
 }
 
 async function seedAddresses(harness: ReturnType<typeof makeService>) {

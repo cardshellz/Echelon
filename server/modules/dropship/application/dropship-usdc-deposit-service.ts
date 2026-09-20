@@ -53,6 +53,7 @@ import type {
   DropshipUsdcLedgerEntryRecord,
 } from "./dropship-wallet-service";
 import type { DropshipVendorStandingService } from "./dropship-vendor-standing-service";
+import type { DropshipVendorProvisioningService } from "./dropship-vendor-provisioning-service";
 
 // ---- ports ----
 
@@ -280,6 +281,8 @@ export class DropshipUsdcDepositService {
       notificationSender?: DropshipNotificationSender;
       /** Resumes a vendor paused for funding once a settled deposit funds the wallet. */
       vendorStanding?: Pick<DropshipVendorStandingService, "restoreIfFunded">;
+      /** Resolves the signed-in member to their vendor for the portal routes. */
+      vendorProvisioning?: Pick<DropshipVendorProvisioningService, "provisionForMember">;
       clock: DropshipClock;
       logger: DropshipLogger;
     },
@@ -304,6 +307,28 @@ export class DropshipUsdcDepositService {
       settleTag: this.deps.config.settleTag,
       keyFingerprint: this.deps.deriver?.keyFingerprint ?? null,
     };
+  }
+
+  /**
+   * Index 0 under the configured key: the operator compares it with their
+   * own wallet's first receiving address once, proving the key and path
+   * (docs/DROPSHIP-USDC-CUSTODY-RUNBOOK.md). Null when no key is configured.
+   */
+  verificationAddress(): string | null {
+    return this.deps.deriver?.deriveDepositAddress(0).checksumAddress ?? null;
+  }
+
+  /** The signed-in member's vendor is handed their address. */
+  async assignDepositAddressForMember(memberId: string): Promise<{ address: DropshipUsdcDepositAddressRecord; created: boolean }> {
+    if (!this.deps.vendorProvisioning) {
+      throw new DropshipError(
+        "DROPSHIP_USDC_DEPOSIT_INVALID_INPUT",
+        "Vendor provisioning is not available to resolve the member.",
+        { classification: "fatal" },
+      );
+    }
+    const provisioned = await this.deps.vendorProvisioning.provisionForMember(memberId);
+    return this.assignDepositAddress(provisioned.vendor.vendorId);
   }
 
   /** The address the vendor was handed, if any. A read: nothing is assigned here. */

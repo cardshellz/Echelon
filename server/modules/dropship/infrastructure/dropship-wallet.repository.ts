@@ -6,6 +6,7 @@ import { FUNDING_METHOD_FINANCIAL_CONNECTIONS_ACCOUNT_KEY } from "../domain/fund
 import type { DropshipAdvanceContext } from "../domain/acceptance-funding";
 import { decideFundingReversal } from "../domain/funding-reversal";
 import { pauseDropshipVendorWithClient } from "./dropship-vendor-standing.repository";
+import { usdcTransactionReferenceId } from "../application/dropship-wallet-service";
 import { loadAdvancePolicyWithClient, loadAdvanceSourcesWithClient } from "./dropship-advance.reader";
 import type {
   ConfigureDropshipAutoReloadRepositoryInput,
@@ -363,7 +364,7 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository, Dro
       const existingUsdc = await findUsdcLedgerByTransactionWithClient(client, {
         chainId: input.chainId,
         transactionHash: input.transactionHash,
-        logIndex: null,
+        logIndex: input.logIndex,
       });
       if (existingUsdc) {
         const replay = await replayConfirmedUsdcFundingWithClient(client, input, existingUsdc);
@@ -395,7 +396,7 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository, Dro
       }
 
       const referenceType = "usdc_base_transaction";
-      const referenceId = `${input.chainId}:${input.transactionHash}`;
+      const referenceId = usdcTransactionReferenceId(input);
       const replay = await findReplayLedgerWithClient(client, {
         vendorId: input.vendorId,
         idempotencyKey: input.idempotencyKey,
@@ -419,6 +420,7 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository, Dro
           transactionHash: input.transactionHash,
           fromAddress: input.fromAddress ?? null,
           toAddress: input.toAddress,
+          logIndex: input.logIndex,
           amountAtomicUnits: input.amountAtomicUnits,
           confirmations: input.confirmations,
           status: "settled",
@@ -486,6 +488,7 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository, Dro
         transactionHash: input.transactionHash,
         fromAddress: input.fromAddress ?? null,
         toAddress: input.toAddress,
+        logIndex: input.logIndex,
         amountAtomicUnits: input.amountAtomicUnits,
         confirmations: input.confirmations,
         status: "settled",
@@ -1892,7 +1895,7 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository, Dro
       const usdcLedgerEntry = await findUsdcLedgerByTransactionWithClient(client, {
         chainId: input.chainId,
         transactionHash: input.transactionHash,
-        logIndex: null,
+        logIndex: input.logIndex,
       });
       if (usdcLedgerEntry) {
         const replay = await replayConfirmedUsdcFundingWithClient(client, input, usdcLedgerEntry);
@@ -1904,7 +1907,7 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository, Dro
         vendorId: input.vendorId,
         idempotencyKey: input.idempotencyKey,
         referenceType: "usdc_base_transaction",
-        referenceId: `${input.chainId}:${input.transactionHash}`,
+        referenceId: usdcTransactionReferenceId(input),
       });
       if (!ledgerEntry) {
         await client.query("COMMIT");
@@ -1916,7 +1919,7 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository, Dro
         currency: input.currency,
         status: "settled",
         referenceType: "usdc_base_transaction",
-        referenceId: `${input.chainId}:${input.transactionHash}`,
+        referenceId: usdcTransactionReferenceId(input),
         requestHash: input.requestHash,
       });
       const account = await getOrCreateWalletAccountWithClient(client, {
@@ -1931,6 +1934,7 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository, Dro
         transactionHash: input.transactionHash,
         fromAddress: input.fromAddress ?? null,
         toAddress: input.toAddress,
+        logIndex: input.logIndex,
         amountAtomicUnits: input.amountAtomicUnits,
         confirmations: input.confirmations,
         status: "settled",
@@ -2019,7 +2023,7 @@ async function replayConfirmedUsdcFundingWithClient(
     currency: input.currency,
     status: "settled",
     referenceType: "usdc_base_transaction",
-    referenceId: `${input.chainId}:${input.transactionHash}`,
+    referenceId: usdcTransactionReferenceId(input),
     requestHash: input.requestHash,
   });
   if (

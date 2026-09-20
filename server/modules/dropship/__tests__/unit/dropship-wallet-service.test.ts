@@ -19,6 +19,7 @@ import type {
 import {
   DropshipWalletService,
   resolveDropshipAutoReloadFloors,
+  usdcTransactionReferenceId,
   resolveDropshipCardFundingFeeBps,
   resolveDropshipUsdcBaseDepositAddress,
   type ConfigureDropshipAutoReloadRepositoryInput,
@@ -72,6 +73,8 @@ describe("DropshipWalletService", () => {
   function buildService(overrides: {
     vendorStanding?: FakeVendorStandingService;
     walletPolicy?: DropshipWalletPolicyResolver;
+    usdcBaseDepositAddress?: string | null;
+    usdcDepositAddressLookup?: (vendorId: number) => Promise<string | null>;
   } = {}): DropshipWalletService {
     return new DropshipWalletService({
       vendorProvisioning: new FakeVendorProvisioningService() as unknown as DropshipVendorProvisioningService,
@@ -80,6 +83,12 @@ describe("DropshipWalletService", () => {
       notificationSender,
       vendorStanding: overrides.vendorStanding,
       walletPolicy: overrides.walletPolicy,
+      // The shared deposit address the manual USDC credits below name; the
+      // vendor's own address comes from the lookup (funding design phase 6).
+      usdcBaseDepositAddress: overrides.usdcBaseDepositAddress === undefined
+        ? "0x1111111111111111111111111111111111111111"
+        : overrides.usdcBaseDepositAddress,
+      usdcDepositAddressLookup: overrides.usdcDepositAddressLookup,
       clock: { now: () => now },
       logger: {
         info: (event) => logs.push({ ...event, level: "info" }),
@@ -428,6 +437,66 @@ describe("DropshipWalletService", () => {
       idempotencyKey: "usdc-credit-wrong-rail",
       actor: { actorType: "admin", actorId: "admin-1" },
     })).rejects.toMatchObject({ code: "DROPSHIP_FUNDING_METHOD_RAIL_MISMATCH" });
+  });
+
+  it("refuses a manual USDC credit whose dollar amount is not the USDC amount in whole cents (funding design phase 6)", async () => {
+    await expect(service.creditConfirmedUsdcFunding({
+      vendorId: 10,
+      amountCents: 2501,
+      currency: "USD",
+      amountAtomicUnits: "25000000",
+      chainId: 8453,
+      transactionHash: `0x${"c".repeat(64)}`,
+      toAddress: "0x1111111111111111111111111111111111111111",
+      confirmations: 12,
+      idempotencyKey: "usdc-credit-mismatch",
+      actor: { actorType: "admin", actorId: "admin-1" },
+    })).rejects.toMatchObject({ code: "DROPSHIP_USDC_AMOUNT_MISMATCH", context: { expectedCents: 2500, amountCents: 2501 } });
+    expect(repository.ledger).toHaveLength(0);
+  });
+
+  it("refuses a manual USDC credit for a transfer to an address Card Shellz does not control", async () => {
+    const credit = (toAddress: string) => ({
+      vendorId: 10,
+      amountCents: 2500,
+      currency: "USD",
+      amountAtomicUnits: "25000000",
+      chainId: 8453,
+      transactionHash: `0x${"c".repeat(64)}`,
+      toAddress,
+      confirmations: 12,
+      idempotencyKey: "usdc-credit-elsewhere",
+      actor: { actorType: "admin" as const, actorId: "admin-1" },
+    });
+    await expect(service.creditConfirmedUsdcFunding(credit("0x3333333333333333333333333333333333333333")))
+      .rejects.toMatchObject({ code: "DROPSHIP_USDC_DEPOSIT_ADDRESS_UNKNOWN", context: { allowedAddresses: ["0x1111111111111111111111111111111111111111"] } });
+    // Nothing configured at all: no transfer can be attributed to anyone.
+    await expect(buildService({ usdcBaseDepositAddress: null }).creditConfirmedUsdcFunding(credit("0x1111111111111111111111111111111111111111")))
+      .rejects.toMatchObject({ code: "DROPSHIP_USDC_DEPOSIT_ADDRESS_UNKNOWN", message: expect.stringContaining("No USDC deposit address") });
+    expect(repository.ledger).toHaveLength(0);
+  });
+
+  it("accepts a manual USDC credit to the vendor's own deposit address and keys one transfer of a batch by its log index", async () => {
+    const own = buildService({
+      usdcBaseDepositAddress: null,
+      usdcDepositAddressLookup: async (vendorId) => (vendorId === 10 ? "0x4444444444444444444444444444444444444444" : null),
+    });
+    const result = await own.creditConfirmedUsdcFunding({
+      vendorId: 10,
+      amountCents: 2512,
+      currency: "USD",
+      amountAtomicUnits: "25123456",
+      chainId: 8453,
+      transactionHash: `0x${"d".repeat(64)}`,
+      toAddress: "0x4444444444444444444444444444444444444444",
+      logIndex: 3,
+      confirmations: 12,
+      idempotencyKey: "usdc-credit-own",
+      actor: { actorType: "admin", actorId: "admin-1" },
+    });
+    expect(result.ledgerEntry).toMatchObject({ amountCents: 2512, referenceId: `8453:0x${"d".repeat(64)}:3` });
+    expect(result.usdcLedgerEntry).toMatchObject({ logIndex: 3 });
+    expect(logs.find((log) => log.code === "DROPSHIP_WALLET_USDC_FUNDING_CREDITED")?.context).toMatchObject({ logIndex: 3 });
   });
 
   it("debits accepted orders as negative settled ledger entries", async () => {
@@ -2163,7 +2232,7 @@ class FakeWalletRepository implements DropshipWalletRepository {
       throw new DropshipError("DROPSHIP_FUNDING_METHOD_RAIL_MISMATCH", "Funding method rail mismatch.");
     }
     const referenceType = "usdc_base_transaction";
-    const referenceId = `${input.chainId}:${input.transactionHash}`;
+    const referenceId = usdcTransactionReferenceId(input);
     const existingUsdc = this.usdcLedger.find((entry) =>
       entry.chainId === input.chainId && entry.transactionHash === input.transactionHash
     );
@@ -2432,7 +2501,7 @@ class FakeWalletRepository implements DropshipWalletRepository {
       status: "settled",
       observedAt: input.observedAt,
       settledAt: input.occurredAt,
-      logIndex: null,
+      logIndex: input.logIndex,
       blockNumber: null,
       blockHash: null,
       tokenAddress: null,

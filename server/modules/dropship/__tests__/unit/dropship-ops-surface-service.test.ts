@@ -282,8 +282,8 @@ describe("DropshipOpsSurfaceService", () => {
     expect(checks.every((check) => check.status === "ready" || check.status === "not_applicable")).toBe(true);
     expect(checks.find((check) => check.key === "usdc_base_funding")).toMatchObject({
       status: "not_applicable",
-      requiredEnv: [],
-      message: expect.stringContaining("planned optional funding rail"),
+      requiredEnv: ["DROPSHIP_USDC_BASE_XPUB", "DROPSHIP_USDC_BASE_RPC_URL", "DROPSHIP_USDC_WATCHER_ENABLED"],
+      message: expect.stringContaining("not offered"),
     });
     expect(JSON.stringify(checks)).not.toContain("ebay-secret");
     expect(JSON.stringify(checks)).not.toContain("shopify-secret");
@@ -338,8 +338,18 @@ describe("DropshipOpsSurfaceService", () => {
     expect(checks.find((check) => check.key === "stripe_funding")).toMatchObject({ status: "blocked" });
     expect(checks.find((check) => check.key === "usdc_base_funding")).toMatchObject({
       status: "not_applicable",
-      requiredEnv: [],
+      requiredEnv: ["DROPSHIP_USDC_BASE_XPUB", "DROPSHIP_USDC_BASE_RPC_URL", "DROPSHIP_USDC_WATCHER_ENABLED"],
     });
+  });
+
+  it("reports how far USDC deposits are configured without gating launch (funding design phase 6)", () => {
+    const usdc = (env: Record<string, string>) => buildDropshipSystemReadinessChecks(env).find((check) => check.key === "usdc_base_funding");
+    expect(usdc({ DROPSHIP_USDC_BASE_XPUB: "xpub6Cexample" })).toMatchObject({ status: "warning", message: expect.stringContaining("no Base node is configured") });
+    expect(usdc({ DROPSHIP_USDC_BASE_XPUB: "xpub6Cexample", DROPSHIP_USDC_BASE_RPC_URL: "https://rpc.example.test" })).toMatchObject({ status: "warning", message: expect.stringContaining("DROPSHIP_USDC_WATCHER_ENABLED=true") });
+    expect(usdc({ DROPSHIP_USDC_BASE_XPUB: "xpub6Cexample", DROPSHIP_USDC_BASE_RPC_URL: "https://rpc.example.test", DROPSHIP_USDC_WATCHER_ENABLED: "true" })).toMatchObject({ status: "ready" });
+    expect(usdc({ DROPSHIP_USDC_BASE_XPUB: "xpub6Cexample", DROPSHIP_USDC_BASE_RPC_URL: "https://rpc.example.test", DROPSHIP_USDC_WATCHER_ENABLED: "true", DROPSHIP_USDC_WATCHER_DISABLED: "true" })).toMatchObject({ status: "warning" });
+    // The key itself never appears on the readiness surface.
+    expect(JSON.stringify(usdc({ DROPSHIP_USDC_BASE_XPUB: "xpub6Cexample" }))).not.toContain("xpub6Cexample");
   });
 
   it("warns when dropship email notifications would fall back to SMTP_USER", () => {

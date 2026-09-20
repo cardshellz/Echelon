@@ -22,7 +22,7 @@ import {
   type DropshipDisputeStatus,
 } from "../domain/funding-reversal";
 import { decideAutopayRefill, deriveSingleChargeBoundCents } from "../domain/autopay-refill";
-import type { UsdcTransferObservation } from "../domain/usdc-deposits";
+import { usdcAtomicUnitsToCents, type UsdcTransferObservation } from "../domain/usdc-deposits";
 import {
   assessAdvanceStanding,
   decideCardBackstopCharge,
@@ -223,6 +223,8 @@ export const creditDropshipWalletConfirmedUsdcFundingInputSchema = z.object({
   transactionHash: usdcBaseTransactionHashSchema,
   fromAddress: usdcBaseWalletAddressSchema.nullable().optional(),
   toAddress: usdcBaseWalletAddressSchema,
+  /** Which transfer in the transaction, for a batched withdrawal; absent means the transaction's only transfer. */
+  logIndex: z.number().int().min(0).max(1_000_000).nullable().optional(),
   confirmations: z.number().int().positive().max(10_000),
   observedAt: optionalObservedAtSchema,
   idempotencyKey: idempotencyKeySchema,
@@ -931,9 +933,10 @@ export interface UpsertDropshipFundingMethodRepositoryInput extends RegisterDrop
 }
 
 export type CreateDropshipConfirmedUsdcFundingRepositoryInput =
-  Omit<CreditDropshipWalletConfirmedUsdcFundingInput, "fundingMethodId" | "observedAt"> & {
+  Omit<CreditDropshipWalletConfirmedUsdcFundingInput, "fundingMethodId" | "observedAt" | "logIndex"> & {
     fundingMethodId: number | null;
     observedAt: Date;
+    logIndex: number | null;
     requestHash: string;
     occurredAt: Date;
   };
@@ -963,6 +966,12 @@ export class DropshipWalletService {
       cardFundingFeeBps?: number;
       /** USDC deposit address override; the environment's address when absent. Injected so tests are deterministic. */
       usdcBaseDepositAddress?: string | null;
+      /**
+       * The vendor's own USDC deposit address (funding design phase 6), or
+       * null when none was handed out. A manual credit must name it or the
+       * shared address: a transfer to anywhere else cannot be attributed.
+       */
+      usdcDepositAddressLookup?: (vendorId: number) => Promise<string | null>;
     },
   ) {}
 
@@ -1263,12 +1272,30 @@ export class DropshipWalletService {
       creditDropshipWalletConfirmedUsdcFundingInputSchema,
       input,
     ));
+    // Two independent amounts would let a typo credit dollars the chain never
+    // carried: the cents must be the atomic units, rounded down to whole cents.
+    const expected = usdcAtomicUnitsToCents(parsed.amountAtomicUnits);
+    if (expected.cents !== parsed.amountCents) {
+      throw new DropshipError(
+        "DROPSHIP_USDC_AMOUNT_MISMATCH",
+        "The dollar amount does not match the USDC amount: whole cents are the atomic units divided by 10,000, rounded down.",
+        {
+          vendorId: parsed.vendorId,
+          amountCents: parsed.amountCents,
+          expectedCents: expected.cents,
+          amountAtomicUnits: parsed.amountAtomicUnits,
+          classification: "permanent",
+        },
+      );
+    }
+    await this.assertUsdcDepositAddressIsOurs(parsed.vendorId, parsed.toAddress);
     const occurredAt = this.deps.clock.now();
     const requestHash = hashWalletConfirmedUsdcFundingRequest(parsed);
     const result = await this.deps.repository.creditConfirmedUsdcFunding({
       ...parsed,
       fundingMethodId: parsed.fundingMethodId ?? null,
       observedAt: parsed.observedAt ?? occurredAt,
+      logIndex: parsed.logIndex ?? null,
       requestHash,
       occurredAt,
     });
@@ -1285,6 +1312,7 @@ export class DropshipWalletService {
           amountCents: parsed.amountCents,
           amountAtomicUnits: parsed.amountAtomicUnits,
           transactionHash: parsed.transactionHash,
+          logIndex: parsed.logIndex ?? null,
           chainId: parsed.chainId,
           confirmations: parsed.confirmations,
           actorType: parsed.actor.actorType,
@@ -2075,6 +2103,26 @@ export class DropshipWalletService {
     return this.deps.cardFundingFeeBps ?? resolveDropshipCardFundingFeeBps();
   }
 
+  /**
+   * A manual USDC credit is only ever for a transfer to an address Card
+   * Shellz controls: the vendor's own deposit address (funding design phase
+   * 6) or the shared address, when either is configured.
+   */
+  private async assertUsdcDepositAddressIsOurs(vendorId: number, toAddress: string): Promise<void> {
+    const own = this.deps.usdcDepositAddressLookup ? await this.deps.usdcDepositAddressLookup(vendorId) : null;
+    const shared = this.usdcBaseDepositAddress();
+    const allowed = [own, shared].filter((address): address is string => address !== null).map((address) => address.toLowerCase());
+    if (!allowed.includes(toAddress)) {
+      throw new DropshipError(
+        "DROPSHIP_USDC_DEPOSIT_ADDRESS_UNKNOWN",
+        allowed.length === 0
+          ? "No USDC deposit address is configured for this vendor; the transfer cannot be attributed."
+          : "The transfer was not sent to this vendor's deposit address or the shared deposit address.",
+        { vendorId, toAddress, allowedAddresses: allowed, classification: "permanent" },
+      );
+    }
+  }
+
   private usdcBaseDepositAddress(): string | null {
     return this.deps.usdcBaseDepositAddress === undefined
       ? resolveDropshipUsdcBaseDepositAddress()
@@ -2595,9 +2643,21 @@ export function hashWalletConfirmedUsdcFundingRequest(
     transactionHash: input.transactionHash,
     fromAddress: input.fromAddress ?? null,
     toAddress: input.toAddress,
+    logIndex: input.logIndex ?? null,
     referenceType: "usdc_base_transaction",
-    referenceId: `${input.chainId}:${input.transactionHash}`,
+    referenceId: usdcTransactionReferenceId(input),
   });
+}
+
+/**
+ * The ledger reference of a USDC transfer: the transaction alone for a
+ * credit recorded without a log index, the transaction and the log when the
+ * watcher (or a staff member crediting one transfer of a batch) named it.
+ */
+export function usdcTransactionReferenceId(input: { chainId: number; transactionHash: string; logIndex?: number | null }): string {
+  return input.logIndex === null || input.logIndex === undefined
+    ? `${input.chainId}:${input.transactionHash}`
+    : `${input.chainId}:${input.transactionHash}:${input.logIndex}`;
 }
 
 export function hashWalletOrderDebitRequest(input: DebitDropshipWalletForOrderInput): string {

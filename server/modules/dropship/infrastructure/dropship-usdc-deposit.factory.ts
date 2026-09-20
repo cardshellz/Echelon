@@ -25,6 +25,7 @@ import { createBaseJsonRpcClientFromEnv } from "./base-json-rpc.client";
 import { createDropshipNotificationServiceFromEnv } from "./dropship-notification.factory";
 import { PgDropshipUsdcDepositRepository } from "./dropship-usdc-deposit.repository";
 import { createDropshipVendorStandingServiceFromEnv } from "./dropship-vendor-standing.factory";
+import { createDropshipVendorProvisioningServiceFromEnv } from "./dropship-vendor-provisioning.factory";
 import { PgDropshipWalletRepository } from "./dropship-wallet.repository";
 import { HdUsdcDepositAddressDeriver } from "./usdc-hd-address-deriver";
 
@@ -72,6 +73,7 @@ export function createDropshipUsdcDepositServiceFromEnv(env: NodeJS.ProcessEnv =
     config: resolveDropshipUsdcWatcherConfigFromEnv(env),
     notificationSender: createDropshipNotificationServiceFromEnv(),
     vendorStanding: createDropshipVendorStandingServiceFromEnv(),
+    vendorProvisioning: createDropshipVendorProvisioningServiceFromEnv(),
     clock: systemDropshipUsdcDepositClock,
     logger,
   });
