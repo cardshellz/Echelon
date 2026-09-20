@@ -21,6 +21,9 @@ async function setup(page: Page) {
     const request = route.request();
     const url = new URL(request.url());
     const path = url.pathname;
+    if (request.method() === "GET" && path === "/api/inventory-planning/admin/channel-definitions/3/progress") {
+      return route.fulfill({ json: null });
+    }
     if (request.method() === "GET" && path === "/api/auth/me") {
       return route.fulfill({ json: {
         user: { id: "operator-1", username: "operator", role: "admin" },

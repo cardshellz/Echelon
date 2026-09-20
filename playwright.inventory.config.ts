@@ -12,6 +12,7 @@ export default defineConfig({
     "inventory-availability.spec.ts",
     "inventory-authority-gates.spec.ts",
     "inventory-publication-target-resume.spec.ts",
+    "channel-inventory-workspace.spec.ts",
   ],
   fullyParallel: false,
   workers: 1,

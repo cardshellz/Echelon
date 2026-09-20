@@ -415,7 +415,7 @@ function publicationIntentsFromPlan(
           providerScopeType: target.providerScopeType,
           externalScopeId: target.externalScopeId,
           sourceBindingId: target.sourceBinding.bindingId,
-          sourceWarehouseIds: target.sourceBinding.warehouseIds,
+          sourceWarehouseIds: row.sourceWarehouseBreakdown.map(source => source.warehouseId),
           mappings: [],
         },
         {

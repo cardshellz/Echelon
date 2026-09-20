@@ -369,3 +369,27 @@ unrelated edits were left untouched. Phases 2–4 are not implemented here.
 Next work remains **inside Phase 1**, not Phase 2. Complete the above routine
 workflow before declaring this phase finished. Phase 3 consumer migration and
 Phase 4 retirement remain explicitly cutover-gated.
+
+### Superseding source and validation checkpoint — 2026-09-20
+
+The preceding continuation notes are historical, not the current implementation
+inventory. At refreshed `origin/main` `a06e994a363c41bb4fd2c51d3e317608884134a8`:
+
+- Routine per-product Review → Apply and delivery progress are already implemented
+  in [`ProductDefinitionReview`](../client/src/features/inventory-builds/ProductDefinitionReview.tsx#L16)
+  and [`registerProductDefinitionRoutes`](../server/modules/inventory-planning/interfaces/http/inventory-product-definition.routes.ts#L8).
+- Procurement safety Review → Apply is implemented in
+  [`SafetyDefinitionReview`](../client/src/features/inventory-builds/SafetyDefinitionReview.tsx#L14).
+  Inventory displays the read-only
+  [`ProductSafetySummary`](../client/src/features/inventory-builds/ProductSafetySummary.tsx#L10).
+  These are existing features, not a new ATP engine or additions claimed by this batch.
+- The [coordinated channel completion batch](INVENTORY-CHANNEL-WORKFLOW-COMPLETION-2026-09-20.md)
+  adds whole-channel Review → Apply, product/SKU warehouse overrides, restoring
+  inheritance, reliable draft recovery and recorded per-SKU delivery visibility
+  together, on one branch and in one PR. Its report records complete local unit,
+  eight-shard PostgreSQL and relevant desktop/mobile browser results.
+
+This closes the listed routine Channel Inventory workflow gaps in source; it
+does not certify physical opening stock, activate production, retire legacy
+consumers, or claim unimplemented provider adapters/location-policy editors.
+Deployment, production acceptance and explicitly approved cutover remain distinct.

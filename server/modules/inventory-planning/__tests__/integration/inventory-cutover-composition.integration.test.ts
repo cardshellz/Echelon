@@ -31,6 +31,8 @@ import { ProductDefinitionService } from "../../application/inventory-product-de
 import { PostgresProductDefinitionStore } from "../../infrastructure/inventory-product-definition.repository";
 import { SafetyDefinitionService } from "../../application/inventory-safety-definition.service";
 import { PostgresSafetyDefinitionStore } from "../../infrastructure/inventory-safety-definition.repository";
+import { ChannelDefinitionService } from "../../application/inventory-channel-definition.service";
+import { PostgresChannelDefinitionStore } from "../../infrastructure/inventory-channel-definition.repository";
 
 // Only the application's process-global connection is disabled. Every owner under
 // test receives the uniquely created disposable pool/client; no owner is mocked.
@@ -700,4 +702,79 @@ dbDescribe.sequential("cutover composition with one actual publication target", 
   it("atomically applies a product draft with channel publication and rolls back receipt failures", async () => {
     await proveRoutineDefinitionApply(database);
   }, 20000);
+  it("reviews and atomically applies channel rules, source overrides and inheritance with one durable retry", async () => {
+    const service = new ChannelDefinitionService(new PostgresChannelDefinitionStore(database.pool));
+    const stock = (await database.pool.query("SELECT * FROM inventory.inventory_levels ORDER BY id")).rows;
+    const claims = (await database.pool.query("SELECT * FROM inventory.availability_claims ORDER BY id")).rows;
+    const authority = (await database.pool.query("SELECT * FROM inventory.availability_runtime_authority")).rows;
+    const targets = (await database.pool.query("SELECT * FROM inventory.inventory_publication_targets ORDER BY id")).rows;
+    await database.pool.query(`INSERT INTO warehouse.fulfillment_nodes(code,name,node_type,warehouse_id,inventory_authority,fulfillment_authority,created_by)
+      VALUES('SECOND','Second warehouse','internal_warehouse',2,'echelon','echelon','operator')`);
+    const node = (await database.pool.query("SELECT id FROM warehouse.fulfillment_nodes WHERE code='SECOND'")).rows[0].id;
+    const policy = (await database.pool.query(`INSERT INTO inventory.channel_exposure_policy_versions
+      (scope_key,channel_id,scope_type,product_id,product_variant_id,version,source_fulfillment_node_ids,share_bps,definition_hash,change_reason,idempotency_key,request_hash,created_by)
+      VALUES('channel:36:variant:101',36,'variant',20,101,1,$1,5000,repeat('1',64),'Scoped supply','channel-supply',repeat('1',64),'operator') RETURNING id`, [[node]])).rows[0];
+    await database.pool.query(`INSERT INTO inventory.channel_exposure_policy_heads(scope_key,channel_id,draft_policy_id,revision,updated_by,update_reason)
+      VALUES('channel:36:variant:101',36,$1,1,'operator','Scoped supply')`, [policy.id]);
+    expect((await database.pool.query("SELECT fulfillment_node_id FROM inventory.channel_policy_source_node_references WHERE policy_id=$1", [policy.id])).rows)
+      .toEqual([{ fulfillment_node_id: node }]);
+    await expect(database.pool.query("DELETE FROM warehouse.fulfillment_nodes WHERE id=$1", [node])).rejects.toMatchObject({ code: "23503" });
+    await expect(database.pool.query("DELETE FROM inventory.channel_policy_source_node_references WHERE policy_id=$1", [policy.id]))
+      .rejects.toThrow("maintained by their policy version");
+    await database.pool.query("UPDATE warehouse.fulfillment_nodes SET lifecycle_status='active',activated_by='operator',activated_at=transaction_timestamp() WHERE id=$1", [node]);
+    const review = await service.review({ channelId:36 });
+    expect(review).toMatchObject({ ready:true,affectedProductIds:[20,30],blockers:[] });
+    expect(review.quantities.find(row => row.variantId===101)).toMatchObject({ targetId:1,proposed:"0",warehouses:[{ warehouseId:2,available:"0" }] });
+    expect((await service.review({ channelId:36 })).reviewHash).toBe(review.reviewHash);
+    const command = { channelId:36,expectedReviewHash:review.reviewHash,idempotencyKey:"channel-apply" };
+    await expect(service.apply({ ...command,expectedReviewHash:"0".repeat(64) },"operator")).rejects.toMatchObject({ code:"CHANNEL_DEFINITION_REVIEW_STALE" });
+    const outbox = (await database.pool.query("SELECT * FROM inventory.inventory_publication_outbox ORDER BY id")).rows;
+    await database.pool.query(`CREATE FUNCTION inventory.test_channel_receipt_failure() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'synthetic channel receipt failure'; END $$;
+      CREATE TRIGGER test_channel_receipt_failure BEFORE INSERT ON inventory.channel_definition_applications
+      FOR EACH ROW EXECUTE FUNCTION inventory.test_channel_receipt_failure()`);
+    try { await expect(service.apply(command,"operator")).rejects.toThrow("synthetic channel receipt failure"); }
+    finally { await database.pool.query("DROP TRIGGER test_channel_receipt_failure ON inventory.channel_definition_applications; DROP FUNCTION inventory.test_channel_receipt_failure()"); }
+    expect((await database.pool.query("SELECT lifecycle_status FROM inventory.channel_exposure_policy_versions WHERE id=$1",[policy.id])).rows[0].lifecycle_status).toBe("draft");
+    expect((await database.pool.query("SELECT * FROM inventory.inventory_publication_outbox ORDER BY id")).rows).toEqual(outbox);
+    const results = await Promise.all([service.apply(command,"operator"),service.apply(command,"operator")]);
+    expect(results.map(result => result.alreadyApplied).sort()).toEqual([false,true]);
+    expect((await service.progress({ channelId:36 }))?.publications.find(row => row.variantId===101)).toMatchObject({ desiredQuantity:"0" });
+    await expect(service.apply(command,"another-user")).rejects.toMatchObject({ code:"CHANNEL_DEFINITION_COMMAND_CONFLICT" });
+    await expect(database.pool.query("UPDATE inventory.channel_definition_applications SET actor='forged'")).rejects.toThrow("immutable");
+    await expect(database.pool.query("UPDATE inventory.channel_exposure_policy_versions SET source_fulfillment_node_ids=ARRAY[1] WHERE id=$1",[policy.id])).rejects.toThrow(/immutable|invalid channel exposure lifecycle transition/);
+    await expect(database.pool.query("DELETE FROM warehouse.fulfillment_nodes WHERE id=$1",[node])).rejects.toThrow("cannot be deleted");
+    const tombstone = (await database.pool.query(`INSERT INTO inventory.channel_exposure_policy_versions
+      (scope_key,channel_id,scope_type,product_id,product_variant_id,version,inherit_all,definition_hash,change_reason,idempotency_key,request_hash,created_by,supersedes_policy_id)
+      VALUES('channel:36:variant:101',36,'variant',20,101,2,true,repeat('2',64),'Restore inheritance','channel-inherit',repeat('2',64),'operator',$1) RETURNING id`,[policy.id])).rows[0];
+    await database.pool.query("UPDATE inventory.channel_exposure_policy_heads SET draft_policy_id=$1,revision=revision+1 WHERE scope_key='channel:36:variant:101'",[tombstone.id]);
+    const inherited = await service.review({ channelId:36 });
+    expect(inherited.ready).toBe(true);
+    expect(inherited.quantities[0].warehouses.map(row => row.warehouseId)).toEqual([1]);
+    expect(BigInt(inherited.quantities[0].proposed)).toBeGreaterThan(BigInt(0));
+    await service.apply({ channelId:36,expectedReviewHash:inherited.reviewHash,idempotencyKey:"channel-inherit-apply" },"operator");
+    await database.pool.query("UPDATE warehouse.fulfillment_nodes SET lifecycle_status='retired',retired_by='operator',retired_at=clock_timestamp() WHERE id=$1", [node]);
+    await database.pool.query("UPDATE inventory.channel_exposure_policy_versions SET lifecycle_status='retired',retired_by='operator',retired_at=clock_timestamp() WHERE id=$1", [policy.id]);
+    expect((await database.pool.query("SELECT fulfillment_node_id FROM inventory.channel_policy_source_node_references WHERE policy_id=$1", [policy.id])).rows)
+      .toEqual([{ fulfillment_node_id: node }]);
+    expect((await database.pool.query("SELECT * FROM inventory.inventory_levels ORDER BY id")).rows).toEqual(stock);
+    expect((await database.pool.query("SELECT * FROM inventory.availability_claims ORDER BY id")).rows).toEqual(claims);
+    expect((await database.pool.query("SELECT * FROM inventory.availability_runtime_authority")).rows).toEqual(authority);
+    expect((await database.pool.query("SELECT * FROM inventory.inventory_publication_targets ORDER BY id")).rows).toEqual(targets);
+  },30000);
+  it("does not silently redirect an established marketplace identity", async () => {
+    await database.pool.query(`WITH inserted AS (INSERT INTO inventory.publication_variant_mapping_versions
+      (publication_target_id,product_variant_id,version,external_inventory_item_id,external_sku,definition_hash,
+       change_reason,idempotency_key,request_hash,created_by,supersedes_mapping_id)
+      SELECT 1,101,version+1,'replacement-item-101','P5',repeat('3',64),'Remap','remap',repeat('3',64),'operator',id
+      FROM inventory.publication_variant_mapping_versions WHERE id=(SELECT active_mapping_id FROM inventory.publication_variant_mapping_heads WHERE publication_target_id=1 AND product_variant_id=101)
+      RETURNING id) UPDATE inventory.publication_variant_mapping_heads SET draft_mapping_id=(SELECT id FROM inserted),revision=revision+1
+      WHERE publication_target_id=1 AND product_variant_id=101`);
+    const service = new ChannelDefinitionService(new PostgresChannelDefinitionStore(database.pool));
+    const review = await service.review({ channelId:36 });
+    expect(review.ready).toBe(false);
+    expect(review.blockers.some(message => message.includes("retiring its previous identity"))).toBe(true);
+    await expect(service.apply({ channelId:36,expectedReviewHash:review.reviewHash,idempotencyKey:"reject-retarget" },"operator"))
+      .rejects.toMatchObject({ code:"CHANNEL_DEFINITION_REVIEW_BLOCKED" });
+  });
 });

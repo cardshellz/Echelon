@@ -260,7 +260,7 @@ export function sameIdSet(left: readonly number[], right: readonly number[]): bo
 // Policy fields, forms, and inheritance display
 // ---------------------------------------------------------------------------
 
-export type PolicyFieldKey = keyof ChannelExposurePolicyValue;
+export type PolicyFieldKey = Exclude<keyof ChannelExposurePolicyValue, "sourceFulfillmentNodeIds" | "inheritAll">;
 
 export interface PolicyFieldMeta {
   key: PolicyFieldKey;
@@ -373,10 +373,12 @@ export type PolicyFormResult =
 
 /**
  * Validates operator input into the exact server value. Inherit → null.
- * The server additionally rejects a rule with every field null; we surface
- * that here so the operator learns it before a round trip.
+ * Channel defaults require explicit fields. Product/SKU editors may restore
+ * all inheritance with a versioned tombstone instead of deleting the rule.
  */
-export function policyFormToValue(form: PolicyForm): PolicyFormResult {
+export function policyFormToValue(form: PolicyForm, options: {
+  allowInheritAll?: boolean; sourceFulfillmentNodeIds?: number[] | null;
+} = {}): PolicyFormResult {
   const errors: PolicyFormError[] = [];
   let shareBps: number | null = null;
   if (form.shareMode === "set") {
@@ -410,12 +412,14 @@ export function policyFormToValue(form: PolicyForm): PolicyFormResult {
     holdbackSellableUnits: holdback,
     maxPublish,
     minPublishSellableUnits: min,
+    ...(options.sourceFulfillmentNodeIds == null ? {} : { sourceFulfillmentNodeIds: [...options.sourceFulfillmentNodeIds].sort((a,b) => a-b) }),
   };
+  if (options.sourceFulfillmentNodeIds?.length === 0) errors.push({ field: "form", message: "Select at least one supply warehouse, or use inherited supply." });
   if (errors.length === 0 && Object.values(value).every((field) => field === null)) {
-    errors.push({
+    if (options.allowInheritAll) value.inheritAll = true;
+    else errors.push({
       field: "form",
-      message: "A rule needs at least one setting of its own. To stop overriding entirely, "
-        + "keep one field explicit; removing a whole rule is not available yet.",
+      message: "A channel default needs explicit settings. Product and SKU exceptions can restore inheritance.",
     });
   }
   return errors.length === 0 ? { ok: true, value } : { ok: false, errors };
@@ -445,9 +449,10 @@ export function formatFieldValue(field: PolicyFieldKey, value: ChannelExposurePo
 }
 
 export function explicitFieldLabels(value: ChannelExposurePolicyValue): string[] {
-  return POLICY_FIELDS
+  if (value.inheritAll) return ["Restore inheritance"];
+  return [...(value.sourceFulfillmentNodeIds ? ["Supply warehouses"] : []), ...POLICY_FIELDS
     .filter((field) => formatFieldValue(field.key, value) !== null)
-    .map((field) => field.label);
+    .map((field) => field.label)];
 }
 
 // Scope keys match server/modules/inventory-planning/domain/inventory-channel-exposure.ts
@@ -564,6 +569,7 @@ export function listExceptions(view: View, channelId: number): ExceptionRow[] {
       const saved = savedPolicy(head);
       const scope = head.draftPolicy?.scope ?? head.activePolicy?.scope ?? null;
       if (!saved || !scope || scope.scopeType === "channel") return [];
+      if (saved.value.inheritAll && !head.draftPolicy) return [];
       const subject = subjects.get(head.scopeKey) ?? null;
       const productLabel = subject
         ? `${subject.productSku ? `${subject.productSku} · ` : ""}${subject.productName}`

@@ -1,7 +1,7 @@
 import { useCallback, useRef } from "react";
 import { keepPreviousData, useQuery, type QueryClient } from "@tanstack/react-query";
 
-import { ENDPOINTS, fetchPreview, fetchPublishingStatus, fetchShopifyLocations, fetchView } from "./api";
+import { ENDPOINTS, fetchPreview, fetchPublicationStatus, fetchPublishingStatus, fetchShopifyLocations, fetchView } from "./api";
 
 /** React Query wiring for the Channel Inventory workspace. */
 
@@ -34,6 +34,15 @@ export function usePublishingStatus() {
     queryKey: PUBLISHING_STATUS_QUERY_KEY,
     queryFn: fetchPublishingStatus,
     refetchInterval: PUBLISHING_STATUS_REFRESH_MS,
+  });
+}
+
+export function usePublicationStatus(publicationTargetId: number, productId: number) {
+  return useQuery({
+    queryKey: [ENDPOINTS.publicationStatus, publicationTargetId, productId],
+    queryFn: () => fetchPublicationStatus(publicationTargetId, productId),
+    refetchInterval: PUBLISHING_STATUS_REFRESH_MS,
+    retry: false,
   });
 }
 

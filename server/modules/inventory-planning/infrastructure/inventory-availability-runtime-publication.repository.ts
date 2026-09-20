@@ -17,7 +17,7 @@ import {
   type InventoryAvailabilityRuntimePublicationExecutor,
   type InventoryAvailabilityRuntimePublicationLogger,
 } from "../application/inventory-availability-runtime-publication.service";
-import { planInventoryChannelExposureProduct } from "../application/inventory-channel-exposure-runtime.service";
+import { planInventoryChannelExposureProduct, type ActiveInventoryPublicationTargetSnapshot } from "../application/inventory-channel-exposure-runtime.service";
 import type { ChannelExposurePolicyCandidate } from "../domain/inventory-channel-exposure";
 import { loadAndLockRuntimeAuthority } from "./inventory-availability-runtime-atp.repository";
 import {
@@ -63,6 +63,8 @@ interface PolicyRow extends Record<string, unknown> {
   max_publish_mode: string | null;
   max_publish_sellable_units: string | null;
   min_publish_sellable_units: string | null;
+  source_fulfillment_node_ids?: number[] | null;
+  inherit_all?: boolean;
 }
 
 interface MappingRow extends Record<string, unknown> {
@@ -243,11 +245,12 @@ export async function previewProductDefinitionPublicationInsideTransaction(
   client: InventoryAvailabilityTransactionQueryClient,
   productId: number,
   supplySnapshot: SupplySnapshotDto,
+  reviewedTargets?: readonly ActiveInventoryPublicationTargetSnapshot[],
 ) {
   if (supplySnapshot.productId !== productId) throw new Error("Review snapshot product mismatch");
   const context = await createPublicationContext(client, undefined, true);
   const managedSellableVariantIds = await loadManagedSellableVariantIds(client, productId);
-  const publicationTargets = await loadChannelExposurePublicationTargets(client, productId, managedSellableVariantIds);
+  const publicationTargets = reviewedTargets ?? await loadChannelExposurePublicationTargets(client, productId, managedSellableVariantIds);
   const plan = planInventoryChannelExposureProduct({
     ...context, supplySnapshot, managedSellableVariantIds, publicationTargets,
   }, productId);
@@ -419,7 +422,8 @@ async function loadZeroPublicationTargets(
             policy.holdback_sellable_units::text AS holdback_sellable_units,
             policy.max_publish_mode,
             policy.max_publish_sellable_units::text AS max_publish_sellable_units,
-            policy.min_publish_sellable_units::text AS min_publish_sellable_units
+            policy.min_publish_sellable_units::text AS min_publish_sellable_units,
+            policy.source_fulfillment_node_ids, policy.inherit_all
      FROM inventory.channel_exposure_policy_heads AS head
      JOIN inventory.channel_exposure_policy_versions AS policy
        ON policy.id = head.active_policy_id
@@ -574,6 +578,10 @@ function parsePolicy(row: PolicyRow): ChannelExposurePolicyCandidate {
           }
         : invalidPolicyMax(row);
   const value: ChannelExposurePolicyValue = {
+    ...(row.source_fulfillment_node_ids == null ? {} : {
+      sourceFulfillmentNodeIds: uniquePositiveIntegers(row.source_fulfillment_node_ids, "policy.sourceFulfillmentNodeId"),
+    }),
+    ...(row.inherit_all === true ? { inheritAll: true as const } : {}),
     allocationSemantics: nullableEnum(
       row.allocation_semantics,
       ["exposure", "partitioned"] as const,

@@ -52,10 +52,22 @@ describe("policy form ↔ value", () => {
     expect(unlimited).toMatchObject({ ok: true, value: { maxPublish: { mode: "unlimited" } } });
   });
 
-  it("refuses a rule with nothing explicit and explains that whole-rule removal is not available", () => {
+  it("refuses an empty default unless item-scope inheritance is explicitly enabled", () => {
     const result = policyFormToValue(EMPTY_POLICY_FORM);
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.errors[0]).toMatchObject({ field: "form" });
+  });
+
+  it("restores inheritance with an explicit tombstone instead of copying current parent values", () => {
+    expect(policyFormToValue(EMPTY_POLICY_FORM, { allowInheritAll: true })).toEqual({
+      ok: true, value: policyValue({ inheritAll: true }),
+    });
+  });
+
+  it("saves a warehouse-only override and rejects an explicit empty warehouse set", () => {
+    expect(policyFormToValue(EMPTY_POLICY_FORM, { allowInheritAll: true, sourceFulfillmentNodeIds: [8,7] }))
+      .toEqual({ ok: true, value: policyValue({ sourceFulfillmentNodeIds: [7,8] }) });
+    expect(policyFormToValue(EMPTY_POLICY_FORM, { allowInheritAll: true, sourceFulfillmentNodeIds: [] }).ok).toBe(false);
   });
 
   it("reports field-level validation errors instead of sending them", () => {

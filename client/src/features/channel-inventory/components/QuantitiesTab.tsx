@@ -7,6 +7,7 @@ import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useToast } from "@/hooks/use-toast";
+import { useIsMobile } from "@/hooks/use-mobile";
 import { cn } from "@/lib/utils";
 
 import { ChannelInventoryApiError, describeError, runAvailabilitySnapshot } from "../api";
@@ -26,6 +27,7 @@ import {
 } from "../model";
 import { IdentityCell } from "./IdentityEditor";
 import { ProductPicker } from "./ProductPicker";
+import { PublicationStatus } from "./PublicationStatus";
 import { Callout, EvidenceNote, SectionCard, SourceTag, StatePill } from "./primitives";
 import { NoDestinationYet } from "./SupplyTab";
 
@@ -125,6 +127,7 @@ export function QuantitiesTab({ view, channel, target, canEdit, productId, onPro
           now={now}
         />
       )}
+      {productId !== null && <PublicationStatus key={`${target.id}:${productId}`} target={target} productId={productId} view={view} />}
     </SectionCard>
   );
 }
@@ -140,6 +143,7 @@ function PreviewTable({ view, channel, target, preview, canEdit, onReload, reloa
   now: () => Date;
 }) {
   const [expanded, setExpanded] = useState<number | null>(null);
+  const mobile = useIsMobile();
   const draftPolicies = preview.selectedPolicies.filter((policy) => policy.authority === "draft").length;
   const provider = describeDestination(target, view).provider;
   return (
@@ -172,6 +176,29 @@ function PreviewTable({ view, channel, target, preview, canEdit, onReload, reloa
 
       {preview.rows.length === 0 ? (
         <Callout>This product has no sellable, tracked SKUs to calculate.</Callout>
+      ) : mobile ? (
+        <div className="space-y-3">{preview.rows.map(row => {
+          const isOpen = expanded === row.productVariantId;
+          return <article key={row.productVariantId} className="overflow-hidden rounded-lg border" aria-label={`${row.sku ?? row.productVariantId} proposed quantity`}>
+            <div className="space-y-3 p-4">
+              <div><p className="break-all font-medium">{row.sku ?? `SKU #${row.productVariantId}`}</p>
+                <p className="text-xs text-muted-foreground">{describePackUnit(row.unitsPerVariant)}</p></div>
+              <dl className="grid grid-cols-2 gap-3">
+                <div><dt className="text-xs text-muted-foreground">Available</dt><dd className="text-lg tabular-nums">{formatUnits(row.canonicalAtpUnits)}</dd></div>
+                <div><dt className="text-xs text-muted-foreground">Proposed</dt><dd className="text-lg font-semibold tabular-nums">{formatUnits(row.publishedUnits)}</dd></div>
+              </dl>
+              {!row.policy && <StatePill tone="blocked">No complete rule</StatePill>}
+              <IdentityCell view={view} target={target}
+                variant={{ id: row.productVariantId, sku: row.sku, name: row.sku ?? `SKU #${row.productVariantId}` }}
+                provider={provider} canEdit={canEdit} onReload={onReload} reloading={reloading} />
+              <Button type="button" size="sm" variant="outline" aria-expanded={isOpen} aria-label={`Explain ${row.sku ?? row.productVariantId}`}
+                onClick={() => setExpanded(isOpen ? null : row.productVariantId)}>
+                {isOpen ? "Hide calculation" : "Explain quantity"}<ChevronDown className={cn("ml-2 h-4 w-4", isOpen && "rotate-180")} aria-hidden="true" />
+              </Button>
+            </div>
+            {isOpen && <div className="border-t bg-muted/30"><RowExplanation row={row} view={view} explanation={explainQuantity(row)} /></div>}
+          </article>;
+        })}</div>
       ) : (
         <div className="overflow-x-auto rounded-md border">
           <Table>
@@ -180,9 +207,6 @@ function PreviewTable({ view, channel, target, preview, canEdit, onReload, reloa
                 <TableHead className="w-8" />
                 <TableHead>SKU</TableHead>
                 <TableHead className="text-right">Available</TableHead>
-                <TableHead className="text-right">After offer</TableHead>
-                <TableHead className="text-right">After keep back</TableHead>
-                <TableHead className="text-right">After maximum</TableHead>
                 <TableHead className="text-right">Proposed</TableHead>
                 <TableHead>Identity at {channel.name}</TableHead>
               </TableRow>
@@ -204,9 +228,6 @@ function PreviewTable({ view, channel, target, preview, canEdit, onReload, reloa
                         <div className="text-xs text-muted-foreground">{describePackUnit(row.unitsPerVariant)}</div>
                       </TableCell>
                       <TableCell className="text-right tabular-nums">{formatUnits(row.canonicalAtpUnits)}</TableCell>
-                      <TableCell className="text-right tabular-nums">{row.policy ? formatUnits(row.sharedUnits) : "—"}</TableCell>
-                      <TableCell className="text-right tabular-nums">{row.policy ? formatUnits(row.afterHoldbackUnits) : "—"}</TableCell>
-                      <TableCell className="text-right tabular-nums">{row.policy ? formatUnits(row.cappedUnits) : "—"}</TableCell>
                       <TableCell className="text-right">
                         <span className="text-base font-semibold tabular-nums">{formatUnits(row.publishedUnits)}</span>
                         {!row.policy && <div><StatePill tone="blocked">No complete rule</StatePill></div>}
@@ -225,7 +246,7 @@ function PreviewTable({ view, channel, target, preview, canEdit, onReload, reloa
                     </TableRow>
                     {isOpen && (
                       <TableRow className="bg-muted/30 hover:bg-muted/30">
-                        <TableCell colSpan={8} className="p-0">
+                        <TableCell colSpan={5} className="p-0">
                           <RowExplanation row={row} view={view} explanation={explanation} />
                         </TableCell>
                       </TableRow>
@@ -238,8 +259,8 @@ function PreviewTable({ view, channel, target, preview, canEdit, onReload, reloa
         </div>
       )}
       <EvidenceNote>
-        Available counts only the warehouses chosen for this destination. Provider acknowledgements
-        and read-back quantities are not shown on this page yet; use the sync log for delivery history.
+        Available counts only the warehouses chosen for this destination. These proposed quantities
+        are calculations, not provider delivery confirmations.
       </EvidenceNote>
     </div>
   );

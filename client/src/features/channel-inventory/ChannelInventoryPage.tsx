@@ -20,6 +20,7 @@ import { SupplyTab } from "./components/SupplyTab";
 import { Callout } from "./components/primitives";
 import { useChannelInventoryView } from "./hooks";
 import { buildChannelRail, providerLabel, reconcileSelection, summarizePendingChanges } from "./model";
+import { DraftNavigation, useDraftNavigation } from "./DraftNavigation";
 
 export const CHANNEL_INVENTORY_PATH = "/channels/inventory";
 
@@ -67,25 +68,31 @@ function writeSelection(selection: PageSelection): string {
  * calculates availability itself and never publishes on save.
  */
 export default function ChannelInventoryPage() {
+  const { user, hasPermission } = useAuth();
+  if (!hasPermission("inventory_planning", "view")) return <div className="p-6"><Callout title="Inventory planning access required">
+    You need inventory planning view permission to see channel inventory. No inventory settings have been loaded.
+  </Callout></div>;
+  return <DraftNavigation key={user?.id}><AuthorizedChannelInventoryPage /></DraftNavigation>;
+}
+
+function AuthorizedChannelInventoryPage() {
   const { hasPermission } = useAuth();
   const canEdit = hasPermission("inventory_planning", "edit");
   const canActivate = hasPermission("inventory_planning", "activate");
   const isMobile = useIsMobile();
   const search = useSearch();
   const [, navigate] = useLocation();
-  const [selection, setSelection] = useState<PageSelection>(() => readSelection(search));
+  const selection = useMemo(() => readSelection(search), [search]);
+  const requestNavigation = useDraftNavigation();
+  const setSelection = useCallback((update: (current: PageSelection) => PageSelection) => {
+    const next = writeSelection(update(selection));
+    navigate(`${CHANNEL_INVENTORY_PATH}${next ? `?${next}` : ""}`);
+  }, [selection, navigate]);
   const [addingDestination, setAddingDestination] = useState(false);
   const now = useCallback(() => new Date(), []);
 
   const viewQuery = useChannelInventoryView(selection.productId);
   const view = viewQuery.data ?? null;
-
-  // Keep the URL shareable: every selection lives in the query string so a
-  // link from a product page or a colleague opens the same channel and tab.
-  useEffect(() => {
-    const next = writeSelection(selection);
-    if (next !== search) navigate(`${CHANNEL_INVENTORY_PATH}${next ? `?${next}` : ""}`, { replace: true });
-  }, [selection, search, navigate]);
 
   const rail = useMemo(() => (view ? buildChannelRail(view) : []), [view]);
   const channelId = reconcileSelection(selection.channelId, view?.channels ?? []);
@@ -102,13 +109,14 @@ export default function ChannelInventoryPage() {
   useEffect(() => {
     if (!view) return;
     if (channelId !== selection.channelId || targetId !== selection.targetId) {
-      setSelection((current) => ({ ...current, channelId, targetId }));
+      const next = writeSelection({ ...selection, channelId, targetId });
+      navigate(`${CHANNEL_INVENTORY_PATH}?${next}`, { replace: true });
     }
-  }, [view, channelId, targetId, selection.channelId, selection.targetId]);
+  }, [view, channelId, targetId, selection, navigate]);
 
   const focusProduct = useCallback((productId: number) => {
     setSelection((current) => (current.productId === productId ? current : { ...current, productId }));
-  }, []);
+  }, [setSelection]);
   const reload = useCallback(() => { void viewQuery.refetch(); }, [viewQuery]);
 
   if (viewQuery.isLoading && !view) return <PageSkeleton />;
@@ -126,7 +134,15 @@ export default function ChannelInventoryPage() {
   const pending = channel ? summarizePendingChanges(view, channel.id, targetId) : null;
 
   return (
-    <div className="mx-auto w-full max-w-[1440px] space-y-6 p-4 md:p-6">
+    <div className="mx-auto w-full max-w-[1440px] space-y-6 p-4 md:p-6" onClickCapture={event => {
+      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      const anchor = (event.target as Element).closest("a[href]") as HTMLAnchorElement | null;
+      if (!anchor || anchor.target === "_blank" || anchor.hasAttribute("download")) return;
+      const destination = new URL(anchor.href, window.location.href);
+      if (destination.origin !== window.location.origin || destination.href === window.location.href) return;
+      event.preventDefault(); event.stopPropagation();
+      requestNavigation(() => navigate(`${destination.pathname}${destination.search}${destination.hash}`));
+    }}>
       <header className="flex flex-wrap items-start justify-between gap-4">
         <div className="space-y-1">
           <h1 className="text-2xl font-semibold tracking-tight">Channel Inventory</h1>
@@ -152,11 +168,11 @@ export default function ChannelInventoryPage() {
         <div className="grid gap-6 lg:grid-cols-[17rem_minmax(0,1fr)]">
           <aside className="space-y-3">
             {isMobile ? (
-              <ChannelSelect entries={rail} selectedId={channelId} onSelect={(id) => setSelection((current) => ({ ...current, channelId: id, targetId: null }))} />
+              <ChannelSelect entries={rail} selectedId={channelId} onSelect={(id) => requestNavigation(() => setSelection((current) => ({ ...current, channelId: id, targetId: null })))} />
             ) : (
               <>
                 <p className="px-3 text-xs font-medium uppercase tracking-wide text-muted-foreground">Sales channels</p>
-                <ChannelRail entries={rail} selectedId={channelId} onSelect={(id) => setSelection((current) => ({ ...current, channelId: id, targetId: null }))} />
+                <ChannelRail entries={rail} selectedId={channelId} onSelect={(id) => requestNavigation(() => setSelection((current) => ({ ...current, channelId: id, targetId: null })))} />
               </>
             )}
           </aside>
@@ -180,12 +196,12 @@ export default function ChannelInventoryPage() {
                 view={view}
                 targets={targets}
                 selectedId={targetId}
-                onSelect={(id) => setSelection((current) => ({ ...current, targetId: id }))}
+                onSelect={(id) => requestNavigation(() => setSelection((current) => ({ ...current, targetId: id })))}
                 canEdit={canEdit}
-                onAdd={() => setAddingDestination(true)}
+                onAdd={() => requestNavigation(() => setAddingDestination(true))}
               />
 
-              <Tabs value={selection.tab} onValueChange={(value) => setSelection((current) => ({ ...current, tab: value as Tab }))}>
+              <Tabs value={selection.tab} onValueChange={(value) => requestNavigation(() => setSelection((current) => ({ ...current, tab: value as Tab })))}>
                 <TabsList className="w-full justify-start overflow-x-auto sm:w-auto">
                   <TabsTrigger value="supply">Supply</TabsTrigger>
                   <TabsTrigger value="rules">Selling rules</TabsTrigger>
@@ -204,6 +220,7 @@ export default function ChannelInventoryPage() {
                 </TabsContent>
                 <TabsContent value="rules" className="mt-4">
                   <SellingRulesTab
+                    key={channel.id}
                     view={view}
                     channel={channel}
                     canEdit={canEdit}
@@ -220,7 +237,7 @@ export default function ChannelInventoryPage() {
                     target={target}
                     canEdit={canEdit}
                     productId={selection.productId}
-                    onProductChange={focusProduct}
+                    onProductChange={id => requestNavigation(() => focusProduct(id))}
                     onAddDestination={() => setAddingDestination(true)}
                     onReload={reload}
                     reloading={viewQuery.isFetching}
