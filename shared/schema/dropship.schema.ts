@@ -3485,6 +3485,57 @@ export const dropshipChannelConnectionBrandingRevisions = dropshipSchema.table(
   ],
 );
 
+/**
+ * Per-vendor USDC deposit addresses (funding design phase 6, migration 0691).
+ * Derived on the server from the watch-only account key: 0/derivation_index.
+ */
+export const dropshipUsdcDepositAddresses = dropshipSchema.table(
+  "dropship_usdc_deposit_addresses",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+    vendorId: integer("vendor_id")
+      .notNull()
+      .references(() => dropshipVendors.id, { onDelete: "cascade" }),
+    chainId: integer("chain_id").notNull().default(8453),
+    keyFingerprint: varchar("key_fingerprint", { length: 16 }).notNull(),
+    derivationIndex: integer("derivation_index").notNull(),
+    address: varchar("address", { length: 42 }).notNull(),
+    checksumAddress: varchar("checksum_address", { length: 42 }).notNull(),
+    assignedAt: timestamp("assigned_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [
+    uniqueIndex("dropship_usdc_deposit_vendor_idx").on(table.vendorId, table.chainId),
+    uniqueIndex("dropship_usdc_deposit_key_index_idx").on(
+      table.chainId,
+      table.keyFingerprint,
+      table.derivationIndex,
+    ),
+    uniqueIndex("dropship_usdc_deposit_address_idx").on(table.chainId, table.address),
+    check("dropship_usdc_deposit_index_chk", sql`${table.derivationIndex} >= 0`),
+    check("dropship_usdc_deposit_address_chk", sql`${table.address} ~ '^0x[0-9a-f]{40}$'`),
+  ],
+);
+
+/** Where the USDC watcher has scanned to, per chain and token contract (migration 0691). */
+export const dropshipUsdcWatcherCursors = dropshipSchema.table(
+  "dropship_usdc_watcher_cursors",
+  {
+    chainId: integer("chain_id").notNull(),
+    tokenAddress: varchar("token_address", { length: 42 }).notNull(),
+    lastScannedBlock: bigint("last_scanned_block", { mode: "number" }).notNull(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.chainId, table.tokenAddress] }),
+    check("dropship_usdc_cursor_block_chk", sql`${table.lastScannedBlock} >= 0`),
+    check("dropship_usdc_cursor_token_chk", sql`${table.tokenAddress} ~ '^0x[0-9a-f]{40}$'`),
+  ],
+);
+
 export const dropshipUsdcLedgerEntries = dropshipSchema.table(
   "dropship_usdc_ledger_entries",
   {
@@ -3510,14 +3561,42 @@ export const dropshipUsdcLedgerEntries = dropshipSchema.table(
       .defaultNow()
       .notNull(),
     settledAt: timestamp("settled_at", { withTimezone: true }),
+    // Chain facts the watcher records (migration 0691): the log's place in
+    // its block, the token, the vendor address it landed on, the sub-cent
+    // remainder left uncredited, and when a reorg voided it.
+    logIndex: integer("log_index"),
+    blockNumber: bigint("block_number", { mode: "number" }),
+    blockHash: varchar("block_hash", { length: 66 }),
+    tokenAddress: varchar("token_address", { length: 42 }),
+    depositAddressId: integer("deposit_address_id").references(
+      () => dropshipUsdcDepositAddresses.id,
+      { onDelete: "set null" },
+    ),
+    dustAtomicUnits: numeric("dust_atomic_units", { precision: 78, scale: 0 })
+      .notNull()
+      .default("0"),
+    voidedAt: timestamp("voided_at", { withTimezone: true }),
   },
   (table) => [
-    uniqueIndex("dropship_usdc_tx_idx").on(
+    // The identity is the log, not the transaction: a batched withdrawal
+    // carries several transfers in one transaction. Manual staff credits
+    // have no log index and keep one identity per transaction via -1.
+    uniqueIndex("dropship_usdc_tx_log_idx").on(
       table.chainId,
       table.transactionHash,
+      sql`COALESCE(${table.logIndex}, -1)`,
     ),
+    index("dropship_usdc_pending_idx")
+      .on(table.status, table.blockNumber)
+      .where(sql`${table.status} = 'pending'`),
+    index("dropship_usdc_deposit_address_ref_idx")
+      .on(table.depositAddressId)
+      .where(sql`${table.depositAddressId} IS NOT NULL`),
     check("dropship_usdc_amount_chk", sql`${table.amountAtomicUnits} > 0`),
     check("dropship_usdc_confirmations_chk", sql`${table.confirmations} >= 0`),
+    check("dropship_usdc_status_chk", sql`${table.status} IN ('pending', 'settled', 'voided', 'dust')`),
+    check("dropship_usdc_log_index_chk", sql`${table.logIndex} IS NULL OR ${table.logIndex} >= 0`),
+    check("dropship_usdc_dust_chk", sql`${table.dustAtomicUnits} >= 0 AND ${table.dustAtomicUnits} < 10000`),
   ],
 );
 
