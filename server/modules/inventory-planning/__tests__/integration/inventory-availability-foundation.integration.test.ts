@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 
 import { config } from "dotenv";
@@ -6,6 +7,7 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import pg from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import * as databaseSchema from "@shared/schema";
+import { canonicalJson } from "@shared/utils/canonical-json";
 import { WarehouseInventorySourceService } from "../../../warehouse/application/warehouse-inventory-source.service";
 import { PostgresWarehouseInventorySourceStore } from "../../../warehouse/infrastructure/warehouse-inventory-source.repository";
 import { InventoryChannelExposureAdminService } from "../../application/inventory-channel-exposure-admin.service";
@@ -23,6 +25,8 @@ import { loadInventoryAvailabilityBackfillSources } from "../../infrastructure/i
 import { planInventoryAvailabilityBackfill } from "../../domain/inventory-availability-backfill";
 import { InventoryAvailabilityBackfillService } from "../../application/inventory-availability-backfill.service";
 import { InventoryCatalogBatchService } from "../../application/inventory-catalog-batch.service";
+import { GradedCardPolicyCorrection } from "../../../../../scripts/lib/graded-card-policy-correction";
+import { createLegacyInventoryAtpService } from "../../../inventory/atp.service";
 import { catalogBatchExecutionPreview } from "@shared/types/inventory-catalog-batch";
 import { PostgresInventoryAvailabilityBackfillRepository } from "../../infrastructure/inventory-availability-backfill.repository";
 import { transformationModelDefinitionSchema } from "../../domain/inventory-availability-master-data.contracts";
@@ -216,6 +220,7 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
         sku varchar(100),
         name text NOT NULL DEFAULT 'Integration product',
         inventory_strategy varchar(30) NOT NULL DEFAULT 'physical_fungible',
+        updated_at timestamptz NOT NULL DEFAULT now(),
         is_active boolean NOT NULL DEFAULT true
       );
       CREATE TABLE catalog.product_variants (
@@ -428,6 +433,161 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       locationId: location.rows[0].id,
     };
   }
+
+  async function seedGradedCorrection(units: number[] = [1, 1]) {
+    const scope = await seedProductAndWarehouse(units);
+    const selection = [{ id: scope.productId, sku: `SLAB-${scope.productId}`, name: "Test graded card PSA 10" }];
+    await pool.query("UPDATE catalog.products SET sku=$2,name=$3 WHERE id=$1",
+      [scope.productId, selection[0]!.sku, selection[0]!.name]);
+    const database = drizzle(pool, { schema: databaseSchema });
+    const backfill = new InventoryAvailabilityBackfillService(new PostgresInventoryAvailabilityBackfillRepository(database),
+      new PostgresInventoryAvailabilityMasterDataStore(database), { previewLatestShadowChannels: async () => null },
+      { now: () => new Date(FIXED_TIME) });
+    const [source] = await loadInventoryAvailabilityBackfillSources(database, [scope.productId]);
+    const candidate = planInventoryAvailabilityBackfill(source!);
+    const model = await backfill.applyProductDraft(scope.productId, {
+      expectedInputHash: candidate.inputHash, expectedResultHash: candidate.resultHash,
+      changeReason: "Fixture original graded-card configuration", idempotencyKey: `graded:seed:${scope.productId}`,
+    }, "integration-test");
+    await backfill.reviewProductDraft(scope.productId, { expectedModelId: model.modelId,
+      expectedModelVersion: model.version, expectedDefinitionHash: model.definitionHash, expectedHeadRevision: "0",
+      expectedLatestReviewId: null, decision: "approved", reason: "Fixture original review",
+      idempotencyKey: `graded:seed-review:${scope.productId}` }, "integration-test");
+    return { ...scope, selection, model };
+  }
+
+  it("graded-card correction isolates certificate SKUs, preserves history and stock, and replays without duplicates", async () => {
+    const scope = await seedGradedCorrection();
+    const unrelated = await seedProductAndWarehouse([25, 500]);
+    await pool.query(`INSERT INTO inventory.inventory_levels (warehouse_location_id,product_variant_id,variant_qty,reserved_qty,picked_qty)
+      VALUES($1,$2,3,1,1),($1,$3,0,0,0)`, [scope.locationId, ...scope.variantIds]);
+    const beforeStock = (await pool.query("SELECT * FROM inventory.inventory_levels ORDER BY id")).rows;
+    const correction = new GradedCardPolicyCorrection(pool, { now: () => new Date(FIXED_TIME) });
+    const preview = await correction.preview(scope.selection);
+    const command = { operationId: "graded:integration", actor: "integration-test", reason: "Owner-approved physical-only correction", preview };
+    expect((await pool.query("SELECT inventory_strategy FROM catalog.products WHERE id=$1", [scope.productId])).rows[0].inventory_strategy).toBe("physical_fungible");
+    expect(await correction.apply(command)).toMatchObject({ catalog: { alreadyApplied: false }, products: [{ productId: scope.productId, reviewed: true }] });
+    expect((await pool.query("SELECT inventory_strategy FROM catalog.products WHERE id=$1", [scope.productId])).rows[0].inventory_strategy).toBe("physical_only");
+    expect((await pool.query("SELECT inventory_strategy FROM catalog.products WHERE id=$1", [unrelated.productId])).rows[0].inventory_strategy).toBe("physical_fungible");
+    expect((await pool.query("SELECT * FROM inventory.inventory_levels ORDER BY id")).rows).toEqual(beforeStock);
+    const availability = await createLegacyInventoryAtpService(drizzle(pool, { schema: databaseSchema }))
+      .getAtpPerVariantByWarehouse(scope.productId, scope.warehouseId);
+    expect(availability.map(row => ({ id: row.productVariantId, atp: row.atpUnits }))).toEqual([
+      { id: scope.variantIds[0], atp: 2 }, { id: scope.variantIds[1], atp: 0 },
+    ]);
+    const current = (await pool.query(`SELECT h.active_model_id,m.lifecycle_status,m.build_to_promise_enabled,
+      (SELECT count(*)::int FROM inventory.transformation_model_paths WHERE model_id=m.id) AS paths
+      FROM inventory.transformation_model_heads h JOIN inventory.transformation_model_versions m ON m.id=h.draft_model_id
+      WHERE h.product_id=$1`, [scope.productId])).rows[0];
+    expect(current).toEqual({ active_model_id: null, lifecycle_status: "draft", build_to_promise_enabled: false, paths: 0 });
+    expect((await pool.query("SELECT lifecycle_status FROM inventory.transformation_model_versions WHERE id=$1", [scope.model.modelId])).rows[0].lifecycle_status).toBe("superseded");
+    expect((await pool.query("SELECT count(*)::int AS n FROM inventory.transformation_model_paths WHERE model_id=$1", [scope.model.modelId])).rows[0].n).toBe(2);
+    const auditCount = (await pool.query("SELECT count(*)::int AS n FROM public.audit_events")).rows[0].n;
+    expect(await correction.apply(command)).toMatchObject({ catalog: { alreadyApplied: true } });
+    expect((await pool.query("SELECT count(*)::int AS n FROM public.audit_events")).rows[0].n).toBe(auditCount);
+    expect((await pool.query("SELECT count(*)::int AS n FROM inventory.transformation_model_versions WHERE product_id=$1", [scope.productId])).rows[0].n).toBe(2);
+    expect((await pool.query("SELECT authority FROM inventory.availability_runtime_authority")).rows[0].authority).toBe("legacy");
+    expect((await pool.query("SELECT count(*)::int AS n FROM inventory.inventory_publication_outbox")).rows[0].n).toBe(0);
+  });
+
+  it("graded-card correction leaves tracking disabled and resumes after the catalog stage", async () => {
+    const scope = await seedGradedCorrection([1]);
+    await pool.query("UPDATE catalog.product_variants SET track_inventory=false WHERE product_id=$1", [scope.productId]);
+    const correction = new GradedCardPolicyCorrection(pool, { now: () => new Date(FIXED_TIME) });
+    const command = { operationId: "graded:resume", actor: "integration-test", reason: "Physical only; do not change tracking", preview: await correction.preview(scope.selection) };
+    await correction.correctCatalog(command);
+    expect(await correction.apply(command)).toMatchObject({ catalog: { alreadyApplied: true },
+      products: [{ productId: scope.productId, reviewed: false, classification: "excluded_unmanaged" }] });
+    expect((await pool.query("SELECT track_inventory FROM catalog.product_variants WHERE product_id=$1", [scope.productId])).rows[0].track_inventory).toBe(false);
+    expect((await pool.query("SELECT count(*)::int AS n FROM inventory.transformation_model_reviews WHERE product_id=$1", [scope.productId])).rows[0].n).toBe(1);
+  });
+
+  it("graded-card correction rejects stale tracking or identity without writing", async () => {
+    const scope = await seedGradedCorrection();
+    const correction = new GradedCardPolicyCorrection(pool, { now: () => new Date(FIXED_TIME) });
+    const command = { operationId: "graded:stale", actor: "integration-test", reason: "Physical only", preview: await correction.preview(scope.selection) };
+    await pool.query("UPDATE catalog.product_variants SET track_inventory=false WHERE id=$1", [scope.variantIds[0]]);
+    await expect(correction.apply(command)).rejects.toThrow("changed after preview");
+    expect((await pool.query("SELECT inventory_strategy FROM catalog.products WHERE id=$1", [scope.productId])).rows[0].inventory_strategy).toBe("physical_fungible");
+    await expect(correction.preview([{ ...scope.selection[0], sku: "WRONG" }])).rejects.toThrow("identity changed");
+    await expect(correction.preview([])).rejects.toThrow();
+    await expect(correction.preview([...scope.selection, ...scope.selection])).rejects.toThrow();
+  });
+
+  it("graded-card correction rolls the entire catalog batch back if audit persistence fails", async () => {
+    const first = await seedGradedCorrection();
+    const second = await seedGradedCorrection();
+    const correction = new GradedCardPolicyCorrection(pool, { now: () => new Date(FIXED_TIME) });
+    const command = { operationId: "graded:rollback", actor: "integration-test", reason: "Physical only", preview: await correction.preview([...first.selection, ...second.selection]) };
+    await pool.query(`CREATE FUNCTION public.reject_graded_audit() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN IF NEW.action='catalog.inventory_strategy.changed' AND NEW.target='catalog.products:${second.productId}' THEN RAISE EXCEPTION 'fixture audit failure'; END IF; RETURN NEW; END; $$;
+      CREATE TRIGGER reject_graded_audit BEFORE INSERT ON public.audit_events FOR EACH ROW EXECUTE FUNCTION public.reject_graded_audit()`);
+    try {
+      await expect(correction.apply(command)).rejects.toThrow();
+      expect((await pool.query("SELECT inventory_strategy FROM catalog.products ORDER BY id")).rows.map(row => row.inventory_strategy)).toEqual(["physical_fungible", "physical_fungible"]);
+      expect((await pool.query("SELECT count(*)::int AS n FROM public.audit_events WHERE action='catalog.inventory_strategy.changed'")).rows[0].n).toBe(0);
+      expect((await pool.query("SELECT count(*)::int AS n FROM public.idempotency_keys WHERE key LIKE 'graded-card-policy:%'")).rows[0].n).toBe(0);
+    } finally { await pool.query("DROP TRIGGER reject_graded_audit ON public.audit_events; DROP FUNCTION public.reject_graded_audit()"); }
+  });
+
+  it("graded-card correction revalidates operator-supplied preview identity and eligibility", async () => {
+    const scope = await seedGradedCorrection();
+    const correction = new GradedCardPolicyCorrection(pool, { now: () => new Date(FIXED_TIME) });
+    const preview = await correction.preview(scope.selection);
+    const command = { operationId: "graded:invalid-preview", actor: "integration-test", reason: "Physical only", preview };
+    await expect(correction.apply({ ...command, preview: { ...preview, stateHash: "0".repeat(64) } }))
+      .rejects.toThrow("Preview hash mismatch");
+    await expect(correction.apply({ ...command, preview: { ...preview,
+      selection: [{ ...scope.selection[0], name: "Not the approved product" }] } }))
+      .rejects.toThrow("identity changed");
+
+    // Even a matching database fingerprint cannot authorize an ineligible SKU.
+    await pool.query("UPDATE catalog.product_variants SET units_per_variant=2 WHERE id=$1", [scope.variantIds[0]]);
+    const state = { ...preview.state, variants: preview.state.variants.map(variant =>
+      variant.id === scope.variantIds[0] ? { ...variant, units_per_variant: 2 } : variant) };
+    const stateHash = createHash("sha256").update(canonicalJson(state)).digest("hex");
+    await expect(correction.apply({ ...command, preview: { ...preview, state, stateHash } }))
+      .rejects.toMatchObject({ code: "GRADED_CARD_CORRECTION_BLOCKED", message: expect.stringContaining("variants require review") });
+    expect((await pool.query("SELECT inventory_strategy FROM catalog.products WHERE id=$1", [scope.productId])).rows[0].inventory_strategy)
+      .toBe("physical_fungible");
+    expect((await pool.query("SELECT count(*)::int AS n FROM public.idempotency_keys WHERE key LIKE 'graded-card-policy:%'")).rows[0].n).toBe(0);
+  });
+
+  it("graded-card correction concurrent catalog retries cannot double-write and can resume with the same command", async () => {
+    const scope = await seedGradedCorrection();
+    const correction = new GradedCardPolicyCorrection(pool, { now: () => new Date(FIXED_TIME) });
+    const command = { operationId: "graded:concurrent", actor: "integration-test", reason: "Physical only", preview: await correction.preview(scope.selection) };
+    const receiptKey = `graded-card-policy:${command.operationId}`;
+    const blocker = await pool.connect();
+    let outcomes: PromiseSettledResult<{ alreadyApplied: boolean }>[] = [];
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query("SELECT pg_advisory_xact_lock(918420,hashtext($1))", [receiptKey]);
+      const pending = Promise.allSettled([correction.correctCatalog(command), correction.correctCatalog(command)]);
+      try {
+        // Both REPEATABLE READ snapshots must predate the first commit. The
+        // losing snapshot must abort, not apply a duplicate mutation or receipt.
+        await vi.waitFor(async () => {
+          const waiting = await pool.query(`SELECT count(*)::int AS n FROM pg_locks
+            WHERE locktype='advisory' AND classid=918420
+              AND objid=(hashtext($1)::bigint & 4294967295) AND NOT granted
+              AND database=(SELECT oid FROM pg_database WHERE datname=current_database())`, [receiptKey]);
+          expect(waiting.rows[0].n).toBe(2);
+        }, { timeout: 5_000, interval: 10 });
+      } finally {
+        await blocker.query("ROLLBACK");
+        outcomes = await pending;
+      }
+    } finally { blocker.release(); }
+    expect(outcomes.filter(outcome => outcome.status === "fulfilled")).toHaveLength(1);
+    const rejected = outcomes.find(outcome => outcome.status === "rejected");
+    expect(rejected?.status === "rejected" ? rejected.reason.cause?.code ?? rejected.reason.code : null).toBe("40001");
+    await expect(correction.apply(command)).resolves.toMatchObject({ catalog: { alreadyApplied: true } });
+    await expect(correction.apply({ ...command, reason: "Different request using the same key" }))
+      .rejects.toThrow("Correction command key was reused");
+    expect((await pool.query("SELECT count(*)::int AS n FROM public.audit_events WHERE action='catalog.inventory_strategy.changed'")).rows[0].n).toBe(1);
+    expect((await pool.query("SELECT count(*)::int AS n FROM public.idempotency_keys WHERE key=$1", [receiptKey])).rows[0].n).toBe(1);
+  });
 
   async function insertDraftModel(
     productId: number,
