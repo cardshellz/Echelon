@@ -226,10 +226,14 @@ describe("eBay Adapter", () => {
   describe("canonical inventory readback", () => {
     it("reads the exact eBay SKU through the selected connection context", async () => {
       const getInventoryItem = vi.fn(async () => ({
+        sku: "CS-TL35-P25",
         availability: { shipToLocationAvailability: { quantity: 9 } },
       }));
+      const getInventoryOffersPage = vi.fn(async () => ({ total: 1, offers: [{
+        sku: "CS-TL35-P25", marketplaceId: "EBAY_US", offerId: "offer-1", status: "PUBLISHED", availableQuantity: 9,
+      }] }));
       const getApiClient = vi.spyOn(adapter as any, "getApiClient")
-        .mockResolvedValue({ getInventoryItem });
+        .mockResolvedValue({ getInventoryItem, getInventoryOffersPage });
 
       const result = await adapter.readInventory(2, [{
         variantId: 101,
@@ -246,7 +250,9 @@ describe("eBay Adapter", () => {
 
       expect(getApiClient).toHaveBeenCalledWith(2, 22, "seller-account-1");
       expect(getInventoryItem).toHaveBeenCalledWith("CS-TL35-P25");
-      expect(result).toEqual([{ variantId: 101, observedQty: 9, status: "success" }]);
+      expect(result).toEqual([{ variantId: 101, observedQty: 9, status: "success", providerResponse: {
+        sku: "CS-TL35-P25", marketplaceId: "EBAY_US", offerId: "offer-1", inventoryItemQuantity: 9, offerQuantity: 9, observedQuantity: 9,
+      } }]);
     });
 
     it("rejects a canonical inventory-item identity that conflicts with its SKU", async () => {

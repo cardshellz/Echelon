@@ -14,6 +14,7 @@ import { ChannelFulfillmentProviderError } from "../../channel-fulfillment-provi
 import { ebayQuantityMutationIdentity, executeAdmittedEbayQuantityRequest, type EbayQuantityRequestAdmission } from "../../quantity-publication-request";
 import { createProviderRequestDeadline, boundedProviderRetryAfterSeconds } from "../../provider-request-limits";
 import { executeEbayQuantityHttp } from "./ebay-quantity-http";
+import { ebayInventoryOffersPath } from "./ebay-inventory-quantity";
 import type {
   EbayInventoryItem,
   EbayOffer,
@@ -278,6 +279,12 @@ export class EbayApiClient {
     }
   }
 
+  /** Complete, validated discovery is owned by the quantity protocol, not the legacy first-offer helper. */
+  async getInventoryOffersPage(sku: string, marketplaceId: string, offset: number, limit: number): Promise<unknown> {
+    return this.request({ method: "GET", path: ebayInventoryOffersPath(sku, marketplaceId, offset, limit),
+      headers: { "X-EBAY-C-MARKETPLACE-ID": marketplaceId } });
+  }
+
   /**
    * Publish an offer (single-variation listing).
    * POST /sell/inventory/v1/offer/{offerId}/publish
@@ -295,11 +302,13 @@ export class EbayApiClient {
    */
   async bulkUpdatePriceQuantity(
     request: EbayBulkPriceQuantityRequest,
+    marketplaceId?: string,
   ): Promise<EbayBulkPriceQuantityResponse> {
     return await this.request({
       method: "POST",
       path: "/sell/inventory/v1/bulk_update_price_quantity",
       body: request,
+      ...(marketplaceId ? { headers: { "X-EBAY-C-MARKETPLACE-ID": marketplaceId } } : {}),
     });
   }
 

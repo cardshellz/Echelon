@@ -21,8 +21,10 @@ export type ShopifyVariantIdentity = z.infer<typeof variantSchema>;
 const levelSchema = z.object({
   inventory_item_id: providerRestIdentitySchema,
   location_id: providerRestIdentitySchema,
-  available: z.number().int().nonnegative().safe(),
+  available: z.number().int().nonnegative().safe().nullable(),
 });
+
+const apiVersionPattern = /^\d{4}-(01|04|07|10)$/;
 
 /** Read-only provider boundary. Credentials never follow a redirect or a Link URL. */
 export class ShopifyIdentityReader {
@@ -30,7 +32,7 @@ export class ShopifyIdentityReader {
 
   private async get(connection: ShopifyIdentityConnection, path: string): Promise<Response> {
     if (!/^[a-z0-9][a-z0-9-]*\.myshopify\.com$/i.test(connection.shopDomain)
-      || !/^\d{4}-\d{2}$/.test(connection.apiVersion)) {
+      || !apiVersionPattern.test(connection.apiVersion)) {
       throw new ChannelIdentityError("SHOPIFY_CONNECTION_INVALID", "Invalid Shopify domain or API version");
     }
     let response: Response;
@@ -63,14 +65,33 @@ export class ShopifyIdentityReader {
   }
 
   async inventory(connection: ShopifyIdentityConnection, locationId: string): Promise<Map<string, number>> {
-    externalIdentitySchema.parse(locationId);
+    const levels = await this.inventoryLevels(connection, locationId);
     const quantities = new Map<string, number>();
+    for (const [id, quantity] of levels) {
+      if (quantity === null) throw new ChannelIdentityError("SHOPIFY_INVENTORY_RESPONSE_INVALID", "Inventory contains an untracked item; its quantity is unknown, not zero");
+      quantities.set(id, quantity);
+    }
+    return quantities;
+  }
+
+  /** Shopify explicitly returns null for untracked items. Preserve that evidence. */
+  async inventoryLevels(connection: ShopifyIdentityConnection, locationId: string): Promise<Map<string, number | null>> {
+    externalIdentitySchema.parse(locationId);
+    const quantities = new Map<string, number | null>();
     const cursors = new Set<string>();
     let cursor: string | null = null;
+    let servedVersion: string | null = null;
     const maxPages = 2_000; // Bounded to 500,000 records; incomplete reads must never be applied.
     for (let page = 0; page < maxPages; page++) {
       const query = new URLSearchParams(cursor ? { page_info: cursor, limit: "250" } : { location_ids: locationId, limit: "250" });
-      const response = await this.get(connection, `inventory_levels.json?${query}`);
+      const response = await this.get({ ...connection, apiVersion: servedVersion ?? connection.apiVersion }, `inventory_levels.json?${query}`);
+      const responseVersion: string = response.headers.get("X-Shopify-API-Version") ?? servedVersion ?? connection.apiVersion;
+      if (!apiVersionPattern.test(responseVersion) || (servedVersion !== null && responseVersion !== servedVersion)) {
+        throw new ChannelIdentityError("SHOPIFY_INVENTORY_PAGINATION_INVALID", "Shopify changed or returned an invalid API version during inventory pagination");
+      }
+      // Retired request versions fall forward. Only the trusted response header,
+      // never a version supplied solely by a Link URL, may choose the served version.
+      servedVersion = responseVersion;
       const parsed = z.object({ inventory_levels: z.array(levelSchema) }).safeParse(await response.json());
       if (!parsed.success) throw new ChannelIdentityError("SHOPIFY_INVENTORY_RESPONSE_INVALID", "Inventory contains invalid IDs or quantities; no quantities may be applied");
       for (const level of parsed.data.inventory_levels) {
@@ -80,14 +101,18 @@ export class ShopifyIdentityReader {
         quantities.set(level.inventory_item_id, level.available);
       }
       const link = response.headers.get("Link");
-      const next = link?.split(",").find((part) => /rel="next"/.test(part));
+      const nextLinks = link?.split(",").filter((part) => /rel="next"/.test(part)) ?? [];
+      if (nextLinks.length > 1) throw new ChannelIdentityError("SHOPIFY_INVENTORY_PAGINATION_INVALID", "Shopify returned ambiguous inventory pagination");
+      const next = nextLinks[0];
       if (!next) return quantities;
       const href = next.match(/<([^>]+)>/)?.[1];
-      const nextUrl = href ? new URL(href) : null;
+      let nextUrl: URL | null = null;
+      try { nextUrl = href ? new URL(href) : null; } catch { /* Invalid URL classified below. */ }
       cursor = nextUrl?.searchParams.get("page_info") ?? null;
-      if (!cursor || cursors.has(cursor) || nextUrl?.hostname !== connection.shopDomain
+      if (!cursor || cursors.has(cursor) || nextUrl?.hostname !== connection.shopDomain.toLowerCase()
         || nextUrl?.protocol !== "https:" || nextUrl?.port || nextUrl?.username || nextUrl?.password
-        || nextUrl?.pathname !== `/admin/api/${connection.apiVersion}/inventory_levels.json`) {
+        || nextUrl?.hash || nextUrl?.searchParams.getAll("page_info").length !== 1
+        || nextUrl?.pathname !== `/admin/api/${servedVersion}/inventory_levels.json`) {
         throw new ChannelIdentityError("SHOPIFY_INVENTORY_PAGINATION_INVALID", "Inventory pagination is incomplete, repeated, or outside the selected store");
       }
       cursors.add(cursor);

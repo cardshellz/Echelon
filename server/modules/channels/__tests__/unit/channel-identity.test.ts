@@ -61,6 +61,38 @@ describe("channel-scoped identity boundary", () => {
     await expect(new ShopifyIdentityReader(request).inventory(connection, "20")).rejects.toMatchObject({ code: "SHOPIFY_INVENTORY_PAGINATION_INVALID" });
     expect(request).toHaveBeenCalledTimes(1);
   });
+  it("follows the actual served API version without following the provider URL", async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce(response({ inventory_levels: [{ inventory_item_id: 5, location_id: 20, available: null }] }, {
+        "X-Shopify-API-Version": "2025-10", Link: '<https://second-store.myshopify.com/admin/api/2025-10/inventory_levels.json?page_info=next>; rel="next"',
+      }))
+      .mockResolvedValueOnce(response({ inventory_levels: [{ inventory_item_id: 6, location_id: 20, available: 0 }] }, { "X-Shopify-API-Version": "2025-10" }));
+    expect([...await new ShopifyIdentityReader(request).inventoryLevels(connection, "20")]).toEqual([["5", null], ["6", 0]]);
+    expect(request.mock.calls[1]![0]).toBe("https://second-store.myshopify.com/admin/api/2025-10/inventory_levels.json?page_info=next&limit=250");
+    expect(request.mock.calls[1]![1]).toMatchObject({ redirect: "error", method: "GET" });
+  });
+  it.each([
+    '<https://second-store.myshopify.com/admin/api/2025-10/inventory_levels.json?page_info=next>; rel="next"',
+    '<https://second-store.myshopify.com/admin/api/2024-01/inventory_levels.json?page_info=a&page_info=b>; rel="next"',
+    '<not-a-url>; rel="next"',
+    '<https://second-store.myshopify.com/admin/api/2024-01/inventory_levels.json?page_info=a>; rel="next", <https://second-store.myshopify.com/admin/api/2024-01/inventory_levels.json?page_info=b>; rel="next"',
+  ])("rejects untrusted version changes and ambiguous next links", async (Link) => {
+    const request = vi.fn().mockResolvedValue(response({ inventory_levels: [] }, { Link }));
+    await expect(new ShopifyIdentityReader(request).inventoryLevels(connection, "20")).rejects.toMatchObject({ code: "SHOPIFY_INVENTORY_PAGINATION_INVALID" });
+    expect(request).toHaveBeenCalledTimes(1);
+  });
+  it("rejects a served version changing between pages", async () => {
+    const request = vi.fn()
+      .mockResolvedValueOnce(response({ inventory_levels: [] }, { "X-Shopify-API-Version": "2025-10", Link: '<https://second-store.myshopify.com/admin/api/2025-10/inventory_levels.json?page_info=next>; rel="next"' }))
+      .mockResolvedValueOnce(response({ inventory_levels: [] }, { "X-Shopify-API-Version": "2026-01" }));
+    await expect(new ShopifyIdentityReader(request).inventoryLevels(connection, "20")).rejects.toMatchObject({ code: "SHOPIFY_INVENTORY_PAGINATION_INVALID" });
+  });
+  it("rejects duplicate identities even when the first quantity is unknown", async () => {
+    const request = vi.fn().mockResolvedValue(response({ inventory_levels: [
+      { inventory_item_id: 5, location_id: 20, available: null }, { inventory_item_id: 5, location_id: 20, available: 0 },
+    ] }));
+    await expect(new ShopifyIdentityReader(request).inventoryLevels(connection, "20")).rejects.toMatchObject({ code: "SHOPIFY_INVENTORY_SCOPE_AMBIGUOUS" });
+  });
   it("rejects a different warehouse location before returning any observations", async () => {
     const request = vi.fn().mockResolvedValue(response({ inventory_levels: [{ inventory_item_id: 5, location_id: 21, available: 3 }] }));
     await expect(new ShopifyIdentityReader(request).inventory(connection, "20")).rejects.toMatchObject({ code: "SHOPIFY_INVENTORY_SCOPE_AMBIGUOUS" });

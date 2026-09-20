@@ -79,9 +79,19 @@ export class ChannelIdentityService {
     const selectedLocation = locationId || connection.shopifyLocationId;
     if (!selectedLocation) throw new ChannelIdentityError("CHANNEL_LOCATION_REQUIRED", "External inventory requires an explicit provider location");
     const mappings = indexInventoryIdentities(await this.inventoryIdentities(channelId));
-    const quantities = await this.reader.inventory(connection, selectedLocation);
+    const levels = await this.reader.inventoryLevels(connection, selectedLocation);
+    const quantities = new Map<string, number>();
+    const unavailableItems: { externalInventoryItemId: string; reason: "untracked" }[] = [];
+    for (const [id, quantity] of levels) {
+      if (quantity !== null) quantities.set(id, quantity);
+      else {
+        if (mappings.has(id)) throw new ChannelIdentityError("SHOPIFY_MAPPED_INVENTORY_UNTRACKED", "A mapped Shopify inventory item is untracked; no quantities may be applied");
+        unavailableItems.push({ externalInventoryItemId: id, reason: "untracked" });
+      }
+    }
     return {
       channelId, connectionId: connection.id, externalLocationId: selectedLocation,
+      unavailableItems,
       items: [...quantities].map(([externalInventoryItemId, quantity]) => ({
         externalInventoryItemId, productVariantId: mappings.get(externalInventoryItemId) ?? null, quantity,
       })),

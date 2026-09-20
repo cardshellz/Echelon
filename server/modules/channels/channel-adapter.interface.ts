@@ -120,6 +120,9 @@ export interface InventoryReadResult {
   status: "success" | "error";
   error?: string;
   errorCode?: string;
+  retryable?: boolean;
+  /** Exact provider quantities/identities retained with durable readback evidence. */
+  providerResponse?: unknown;
 }
 
 export class InventoryPublicationConfigurationError extends Error {
