@@ -291,10 +291,10 @@ test("bank vendor, end to end: intro, bank source, floor with guidance, backup c
   await expect(intro).toContainText("takes up to 5 business days to land (our estimate)");
   await expect(intro).toContainText("costs 3% on top of the amount");
   await expect(intro).toContainText("USDC costs nothing.");
-  await expect(intro).toContainText("Your floor has to be at least $50, so there is always enough to cover a normal order");
+  await expect(intro).toContainText("Your floor has to be at least $100, so there is always enough to cover a normal order");
   await expect(intro).toContainText("the same gap is never charged twice");
   await expect(intro).toContainText("You can also add money yourself at any time.");
-  await expect(intro).toContainText("cancelled after your hold time (48 hours)");
+  await expect(intro).toContainText("cancelled after your hold time (24 hours)");
   await expect(intro).toContainText("We email you, and we do not retry the charge ourselves.");
   // No amount the product does not enforce as a rule, no USDC timing claim, and no forward reference to a later step.
   await expect(intro).not.toContainText("at a time,");
@@ -379,9 +379,9 @@ test("bank vendor, end to end: intro, bank source, floor with guidance, backup c
   await expect(summary).toContainText("$250 — about 12 days at $20 a day");
   await expect(summary).toContainText("Visa ending in 4242");
   await expect(summary).toContainText("$500 — 2 × your floor");
-  await expect(summary).toContainText("48 hours — the default");
+  await expect(summary).toContainText("24 hours — set by CardShellz for every wallet.");
   const mandate = review.getByTestId("wallet-mandate");
-  for (const phrase of ["$250", "$500", "shortfall", "up to the single top-up limit", "48 hours", "2 hours", "before it lands",
+  for (const phrase of ["$250", "$500", "shortfall", "up to the single top-up limit", "24 hours", "2 hours", "before it lands",
     "If a return fee has taken your balance below zero, the shortfall includes that amount.", "Adding money by card now avoids that", "for automatic top-ups and covers", "first daily check after you activate"]) {
     await expect(mandate).toContainText(phrase);
   }
@@ -394,7 +394,7 @@ test("bank vendor, end to end: intro, bank source, floor with guidance, backup c
   await expectNoHorizontalScroll(page);
   await shot(page, "05-review");
   await review.getByRole("button", { name: "Agree and turn on auto-reload" }).click();
-  expect(state.autoReloadWrites).toEqual([{ enabled: true, fundingMethodId: 30, backstopFundingMethodId: 10, minimumBalanceCents: 25_000, maxSingleReloadCents: 50_000, paymentHoldTimeoutMinutes: 2880, acknowledgedCardFeeBps: 300 }]);
+  expect(state.autoReloadWrites).toEqual([{ enabled: true, fundingMethodId: 30, backstopFundingMethodId: 10, minimumBalanceCents: 25_000, maxSingleReloadCents: 50_000, paymentHoldTimeoutMinutes: 1440, acknowledgedCardFeeBps: 300 }]);
 
   // Step 6: recommended, never a gate.
   const deposit = page.getByTestId("wallet-step-deposit");
@@ -413,7 +413,7 @@ test("bank vendor, end to end: intro, bank source, floor with guidance, backup c
   await expect(manage.getByTestId("wallet-plan-floor")).toContainText("$250 — topped up once a day");
   await expect(manage.getByTestId("wallet-plan-floor")).toContainText("≈ 12 days at $20 a day");
   await expect(manage.getByTestId("wallet-plan-backup-card")).toContainText("Visa ending in 4242 · expires 12/27");
-  await expect(manage.getByTestId("wallet-plan-limits")).toContainText("Single top-up limit $500 · hold time 48 hours");
+  await expect(manage.getByTestId("wallet-plan-limits")).toContainText("Single top-up limit $500 · hold time 24 hours");
   await expect(manage.getByTestId("wallet-plan-authorization")).toContainText("at a 3% card fee");
   await expect(manage.getByTestId("wallet-deposit-callout")).toBeVisible();
   await expect(manage.getByRole("button", { name: "Back to onboarding" })).toBeVisible();
@@ -460,7 +460,7 @@ test("card vendor: steps 4 and 6 are satisfied rows, the limit is not a false mu
   await expect(page.getByText("(2 × your floor)")).toHaveCount(0);
   await shot(page, "card-05-review");
   await review.getByRole("button", { name: "Agree and turn on auto-reload" }).click();
-  expect(state.autoReloadWrites).toEqual([{ enabled: true, fundingMethodId: 10, backstopFundingMethodId: 10, minimumBalanceCents: 10_000, maxSingleReloadCents: 25_000, paymentHoldTimeoutMinutes: 2880, acknowledgedCardFeeBps: 300 }]);
+  expect(state.autoReloadWrites).toEqual([{ enabled: true, fundingMethodId: 10, backstopFundingMethodId: 10, minimumBalanceCents: 10_000, maxSingleReloadCents: 25_000, paymentHoldTimeoutMinutes: 1440, acknowledgedCardFeeBps: 300 }]);
   await expect(page.getByTestId("wallet-manage")).toBeVisible();
   await expect(page.getByTestId("wallet-step-deposit")).toHaveCount(0);
   await expect(page.getByTestId("wallet-plan").getByRole("status")).toContainText("Auto-reload is on.");
@@ -503,21 +503,23 @@ test("manage: changing the floor lifts the limit with it and saves the whole row
   await expectNoHorizontalScroll(page);
   await shot(page, "manage-02-floor-editor");
   await plan.getByRole("button", { name: "Save", exact: true }).click();
-  expect(state.autoReloadWrites).toEqual([{ enabled: true, fundingMethodId: 30, backstopFundingMethodId: 10, minimumBalanceCents: 100_000, maxSingleReloadCents: 250_000, paymentHoldTimeoutMinutes: 2880, acknowledgedCardFeeBps: 300 }]);
+  expect(state.autoReloadWrites).toEqual([{ enabled: true, fundingMethodId: 30, backstopFundingMethodId: 10, minimumBalanceCents: 100_000, maxSingleReloadCents: 250_000, paymentHoldTimeoutMinutes: 1440, acknowledgedCardFeeBps: 300 }]);
   await expect(plan.getByTestId("wallet-plan-floor")).toContainText("$1,000 — topped up once a day");
-  await expect(plan.getByTestId("wallet-plan-limits")).toContainText("Single top-up limit $2,500 · hold time 48 hours");
+  await expect(plan.getByTestId("wallet-plan-limits")).toContainText("Single top-up limit $2,500 · hold time 24 hours");
 
-  // The Limits editor speaks from the served warning window, never a constant.
+  // The Limits editor speaks from the served warning window, never a constant,
+  // and the hold time is CardShellz's setting: shown, never chosen here.
   await plan.getByTestId("wallet-plan-limits").getByRole("button", { name: "Change" }).click();
   const limits = page.getByTestId("wallet-limits-editor");
   await expect(limits).toContainText("for orders held from now on");
   await expect(limits).toContainText("We email you 2 hours before.");
+  await expect(limits.getByTestId("wallet-hold-time")).toContainText("24 hours — set by CardShellz for every wallet.");
+  await expect(limits.getByRole("radiogroup", { name: "Hold time" })).toHaveCount(0);
   await radio(page, "Single top-up limit", "$5,000").click();
-  await radio(page, "Hold time", "72 hours").click();
   await shot(page, "manage-03-limits-editor");
   await limits.getByRole("button", { name: "Save", exact: true }).click();
-  expect(state.autoReloadWrites[1]).toMatchObject({ maxSingleReloadCents: 500_000, paymentHoldTimeoutMinutes: 4320, minimumBalanceCents: 100_000 });
-  await expect(plan.getByTestId("wallet-plan-limits")).toContainText("Single top-up limit $5,000 · hold time 72 hours");
+  expect(state.autoReloadWrites[1]).toMatchObject({ maxSingleReloadCents: 500_000, paymentHoldTimeoutMinutes: 1440, minimumBalanceCents: 100_000 });
+  await expect(plan.getByTestId("wallet-plan-limits")).toContainText("Single top-up limit $5,000 · hold time 24 hours");
   finish(state);
 });
 
@@ -538,7 +540,7 @@ test("manage: replacing the backup card is add, designate, then remove the old o
   await expect(page.getByTestId("wallet-funding-return")).toContainText("Card added: Visa ending in 9999.");
   await shot(page, "manage-05-new-card-offer");
   await offer.getByRole("button", { name: "Use as backup card" }).click();
-  expect(state.autoReloadWrites).toEqual([{ enabled: true, fundingMethodId: 30, backstopFundingMethodId: 11, minimumBalanceCents: 25_000, maxSingleReloadCents: 50_000, paymentHoldTimeoutMinutes: 2880, acknowledgedCardFeeBps: 300 }]);
+  expect(state.autoReloadWrites).toEqual([{ enabled: true, fundingMethodId: 30, backstopFundingMethodId: 11, minimumBalanceCents: 25_000, maxSingleReloadCents: 50_000, paymentHoldTimeoutMinutes: 1440, acknowledgedCardFeeBps: 300 }]);
   await expect(page.getByTestId("wallet-plan-backup-card")).toContainText("Visa ending in 9999");
   await expect(methods.getByTestId("wallet-method-11")).toContainText("Backup card");
   await expect(oldCard.getByTestId("wallet-method-remove")).toBeEnabled();
@@ -771,7 +773,7 @@ test("the step list walks back and forward without losing a choice, and manage k
   await expect(review.getByTestId("wallet-review-summary")).toContainText("Chase ending in 1234 (bank account, no fee)");
   await expect(review.getByTestId("wallet-review-summary")).toContainText("$250 — about 12 days at $20 a day");
   await review.getByRole("button", { name: "Agree and turn on auto-reload" }).click();
-  expect(state.autoReloadWrites).toEqual([{ enabled: true, fundingMethodId: 30, backstopFundingMethodId: 10, minimumBalanceCents: 25_000, maxSingleReloadCents: 50_000, paymentHoldTimeoutMinutes: 2880, acknowledgedCardFeeBps: 300 }]);
+  expect(state.autoReloadWrites).toEqual([{ enabled: true, fundingMethodId: 30, backstopFundingMethodId: 10, minimumBalanceCents: 25_000, maxSingleReloadCents: 50_000, paymentHoldTimeoutMinutes: 1440, acknowledgedCardFeeBps: 300 }]);
   // At step 6 the plan belongs to the server: the review is still readable, the
   // earlier steps are not offered, and the review's Change controls go with them.
   const deposit = page.getByTestId("wallet-step-deposit");

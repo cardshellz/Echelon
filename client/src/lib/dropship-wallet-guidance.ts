@@ -58,8 +58,6 @@ export const FIRST_FILL_EXAMPLE_FLOORS_CENTS: readonly [number, number] = [10_00
 export const LIMIT_MULTIPLIER = 2;
 /** Existing presets plus $5,000; all ≥ the server's minimum amount. */
 export const LIMIT_PRESETS_CENTS: readonly number[] = [25_000, 50_000, 100_000, 250_000, 500_000];
-/** 12 h · 24 h · 48 h (server default) · 72 h · 7 days. */
-export const HOLD_TIMEOUT_PRESETS_MINUTES: readonly number[] = [720, 1_440, 2_880, 4_320, 10_080];
 /** Existing presets; the floor is added at runtime; clamped to the manual funding limits. */
 export const DEPOSIT_PRESETS_CENTS: readonly number[] = [2_500, 5_000, 10_000, 25_000];
 /** Monthly figures are "about". */

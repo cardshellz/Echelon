@@ -301,6 +301,9 @@
   "dropship.dropship_usdc_ledger_entries": [
     "modules/dropship"
   ],
+  "dropship.dropship_vendor_credit_profiles": [
+    "modules/dropship"
+  ],
   "dropship.dropship_vendor_listings": [
     "modules/dropship"
   ],

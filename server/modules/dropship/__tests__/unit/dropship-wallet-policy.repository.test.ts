@@ -6,11 +6,15 @@ const now = new Date("2026-09-19T10:00:00.000Z");
 
 const limits = {
   autoReloadMinTriggerCents: 9_000,
+  caseTierMinimumCents: 55_000,
   autoReloadMinAmountCents: 20_000,
   manualFundingMinCents: 2_500,
   manualFundingMaxCents: 60_000,
   defaultPaymentHoldTimeoutMinutes: 1_440,
   holdExpiryWarningMinutes: 45,
+  advanceFeeBps: 150,
+  advanceCapCents: 75_000,
+  tierChangeGraceDays: 21,
 };
 
 const command = {
@@ -69,6 +73,21 @@ describe("PgDropshipWalletPolicyRepository", () => {
         code: "DROPSHIP_WALLET_POLICY_INVALID_STORED_VALUE",
         context: expect.objectContaining({ classification: "fatal", column: "minimum_floor_cents" }),
       });
+    });
+
+    it("accepts a zero advance cap and a zero fee, and refuses a negative one", async () => {
+      const zeroed = vi.fn(async (_sql: string, _values?: unknown[]) =>
+        result([{ ...policyRow(), advance_cap_cents: "0", advance_fee_bps: 0, tier_change_grace_days: 0 }]));
+      const policy = await new PgDropshipWalletPolicyRepository({ query: zeroed } as unknown as Pool).getActivePolicy();
+      expect(policy?.limits).toMatchObject({ advanceCapCents: 0, advanceFeeBps: 0, tierChangeGraceDays: 0 });
+
+      const negative = vi.fn(async (_sql: string, _values?: unknown[]) =>
+        result([{ ...policyRow(), advance_cap_cents: "-1" }]));
+      await expect(new PgDropshipWalletPolicyRepository({ query: negative } as unknown as Pool).getActivePolicy())
+        .rejects.toMatchObject({
+          code: "DROPSHIP_WALLET_POLICY_INVALID_STORED_VALUE",
+          context: expect.objectContaining({ column: "advance_cap_cents" }),
+        });
     });
   });
 
@@ -132,6 +151,8 @@ describe("PgDropshipWalletPolicyRepository", () => {
       expect(retire).toContain("SET is_active = false, deactivated_at = $2");
       const insert = client.queries.find((query) => query.includes("INSERT INTO dropship.dropship_wallet_policies"));
       expect(insert).toBeDefined();
+      expect(insert).toContain("case_tier_minimum_cents");
+      expect(insert).toContain("advance_fee_bps, advance_cap_cents, tier_change_grace_days");
       expect(client.queries.some((query) => query.includes("INSERT INTO dropship.dropship_audit_events"))).toBe(true);
 
       // The audit row carries the real staff actor, never 'system'.
@@ -140,12 +161,13 @@ describe("PgDropshipWalletPolicyRepository", () => {
       expect(auditParams?.[4]).toBe("admin-1");
       const auditPayload = JSON.parse(String(auditParams?.[5]));
       expect(auditPayload.before).toMatchObject({ policyId: 7, autoReloadMinTriggerCents: 5_000 });
-      expect(auditPayload.after).toMatchObject({ autoReloadMinTriggerCents: 9_000 });
+      expect(auditPayload.after).toMatchObject({ autoReloadMinTriggerCents: 9_000, advanceCapCents: 75_000 });
       expect(auditPayload.idempotencyKey).toBe("wallet-policy-001");
 
-      // The insert carries integer cents exactly as given.
+      // The insert carries integer cents, bps and days exactly as given, in column order.
       const insertParams = client.paramsFor("INSERT INTO dropship.dropship_wallet_policies");
-      expect(insertParams?.slice(0, 7)).toEqual([4, 9_000, 20_000, 2_500, 60_000, 1_440, 45]);
+      expect(insertParams?.slice(0, 11)).toEqual([4, 9_000, 55_000, 20_000, 2_500, 60_000, 1_440, 45, 150, 75_000, 21]);
+      expect(insertParams?.slice(11)).toEqual(["Autumn cohort floors.", now, "admin", "admin-1"]);
     });
 
     it("skips the retire when no version has ever been published", async () => {
@@ -294,11 +316,15 @@ function policyRow(): Record<string, unknown> {
     version: 3,
     // pg returns bigint columns as strings; the mapper has to parse them.
     minimum_floor_cents: "9000",
+    case_tier_minimum_cents: "55000",
     minimum_single_top_up_limit_cents: "20000",
     manual_top_up_minimum_cents: "2500",
     manual_top_up_maximum_cents: "60000",
     default_payment_hold_timeout_minutes: 1_440,
     hold_expiry_warning_minutes: 45,
+    advance_fee_bps: 150,
+    advance_cap_cents: "75000",
+    tier_change_grace_days: 21,
     is_active: true,
     change_note: "Autumn cohort floors.",
     created_at: now,

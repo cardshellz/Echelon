@@ -1,6 +1,7 @@
 import type { Express, Request, Response } from "express";
 import { requirePermission } from "../../../../routes/middleware";
 import { DropshipError } from "../../domain/errors";
+import { fundingMethodAccountHolderType } from "../../domain/funding-method";
 import { makeDropshipWalletLogger, type DropshipWalletService } from "../../application/dropship-wallet-service";
 import { httpStatusForDropshipStripeErrorCode } from "../../infrastructure/dropship-stripe-error";
 import { createDropshipWalletServiceFromEnv } from "../../infrastructure/dropship-wallet.factory";
@@ -311,11 +312,15 @@ function serializeVendorWalletView(wallet: Awaited<ReturnType<DropshipWalletServ
     ...serializeWalletOverview(wallet),
     limits: {
       autoReloadMinTriggerCents: wallet.limits.autoReloadMinTriggerCents,
+      caseTierMinimumCents: wallet.limits.caseTierMinimumCents,
       autoReloadMinAmountCents: wallet.limits.autoReloadMinAmountCents,
       manualFundingMinCents: wallet.limits.manualFundingMinCents,
       manualFundingMaxCents: wallet.limits.manualFundingMaxCents,
       defaultPaymentHoldTimeoutMinutes: wallet.limits.defaultPaymentHoldTimeoutMinutes,
       holdExpiryWarningMinutes: wallet.limits.holdExpiryWarningMinutes,
+      advanceFeeBps: wallet.limits.advanceFeeBps,
+      advanceCapCents: wallet.limits.advanceCapCents,
+      tierChangeGraceDays: wallet.limits.tierChangeGraceDays,
     },
   };
 }
@@ -330,6 +335,9 @@ function serializeFundingMethod(
     displayLabel: method.displayLabel,
     isDefault: method.isDefault,
     usdcWalletAddress: method.rail === "usdc_base" ? method.usdcWalletAddress : null,
+    // Bank accounts only; null for every other rail and for bank accounts
+    // linked before the holder type was recorded (migration 0683).
+    accountHolderType: method.rail === "stripe_ach" ? fundingMethodAccountHolderType(method.metadata) : null,
     createdAt: method.createdAt,
     updatedAt: method.updatedAt,
   };

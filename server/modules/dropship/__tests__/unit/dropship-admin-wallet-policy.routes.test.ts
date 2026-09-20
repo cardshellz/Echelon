@@ -18,14 +18,19 @@ vi.mock("../../../../routes/middleware", () => ({
 }));
 
 const POLICY_URL = "/api/dropship/admin/wallet/policy";
+const CREDIT_PROFILE_URL = "/api/dropship/admin/vendors/10/credit-profile";
 
 const validBody = {
   autoReloadMinTriggerCents: 9_000,
+  caseTierMinimumCents: 55_000,
   autoReloadMinAmountCents: 20_000,
   manualFundingMinCents: 2_500,
   manualFundingMaxCents: 60_000,
   defaultPaymentHoldTimeoutMinutes: 1_440,
   holdExpiryWarningMinutes: 45,
+  advanceFeeBps: 150,
+  advanceCapCents: 75_000,
+  tierChangeGraceDays: 21,
 };
 
 describe("dropship admin wallet policy routes", () => {
@@ -168,6 +173,67 @@ describe("dropship admin wallet policy routes", () => {
       message: "Dropship wallet policy request failed.",
     });
   });
+
+  describe("vendor credit profile", () => {
+    it("gates the read on dropship:view and passes the vendor id from the path", async () => {
+      const response = await jsonRequest(`${server.url}${CREDIT_PROFILE_URL}`);
+
+      expect(response.status).toBe(200);
+      expect(permissionChecks).toContainEqual(["dropship", "view"]);
+      expect(service.creditProfileReadVendorId).toBe(10);
+      expect(response.body).toMatchObject({ vendorId: 10, effectiveAdvanceCapCents: 50_000 });
+    });
+
+    it("gates the write on dropship:manage_operations and passes the path vendor id, the actor and the key", async () => {
+      const response = await jsonRequest(`${server.url}${CREDIT_PROFILE_URL}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", "Idempotency-Key": "credit-profile-route-001" },
+        // A vendorId in the body must not override the path.
+        body: JSON.stringify({ vendorId: 99, advanceCapOverrideCents: 200_000, note: "trusted" }),
+      });
+
+      expect(response.status).toBe(200);
+      expect(permissionChecks).toContainEqual(["dropship", "manage_operations"]);
+      expect(service.creditProfileSetInput).toMatchObject({
+        vendorId: 10,
+        advanceCapOverrideCents: 200_000,
+        note: "trusted",
+        idempotencyKey: "credit-profile-route-001",
+        actor: { actorType: "admin", actorId: "admin-1" },
+      });
+    });
+
+    it("refuses a vendor id that is not a positive integer, before touching the service", async () => {
+      for (const bad of ["0", "-1", "abc", "1.5"]) {
+        const response = await jsonRequest(`${server.url}/api/dropship/admin/vendors/${bad}/credit-profile`);
+        expect(response.status, bad).toBe(400);
+        expect(response.body.error).toMatchObject({ code: "DROPSHIP_VENDOR_CREDIT_PROFILE_INVALID_INPUT" });
+      }
+      expect(service.creditProfileReadVendorId).toBeNull();
+    });
+
+    it("maps the credit profile error classes to their statuses", async () => {
+      const cases: Array<[string, number]> = [
+        ["DROPSHIP_VENDOR_CREDIT_PROFILE_INVALID_INPUT", 400],
+        ["DROPSHIP_VENDOR_CREDIT_PROFILE_NOT_FOUND", 404],
+        ["DROPSHIP_VENDOR_CREDIT_PROFILE_VENDOR_NOT_FOUND", 404],
+        ["DROPSHIP_VENDOR_CREDIT_PROFILE_IDEMPOTENCY_CONFLICT", 409],
+        ["DROPSHIP_VENDOR_CREDIT_PROFILE_COMMAND_INCOMPLETE", 409],
+        ["DROPSHIP_VENDOR_CREDIT_PROFILE_TABLE_MISSING", 503],
+        ["DROPSHIP_VENDOR_CREDIT_PROFILE_INVALID_STORED_VALUE", 500],
+      ];
+      for (const [code, status] of cases) {
+        service.creditProfileSetError = new DropshipError(code, "failed", { classification: "permanent" });
+        const response = await jsonRequest(`${server.url}${CREDIT_PROFILE_URL}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json", "Idempotency-Key": "credit-profile-route-002" },
+          body: JSON.stringify({ advanceCapOverrideCents: null }),
+        });
+        expect(response.status, code).toBe(status);
+        expect(response.body.error).toMatchObject({ code });
+      }
+    });
+  });
 });
 
 class FakeService {
@@ -175,6 +241,9 @@ class FakeService {
   createInput: unknown = null;
   createError: unknown = null;
   replay = false;
+  creditProfileReadVendorId: unknown = null;
+  creditProfileSetInput: unknown = null;
+  creditProfileSetError: unknown = null;
 
   async getOverview(input: unknown) {
     this.overviewInput = input;
@@ -201,6 +270,31 @@ class FakeService {
       policy: { policyId: 9, version: 4 },
       previousPolicy: null,
       idempotentReplay: this.replay,
+    };
+  }
+
+  async getVendorCreditProfile(vendorId: unknown) {
+    this.creditProfileReadVendorId = vendorId;
+    return {
+      vendorId,
+      profile: null,
+      policyAdvanceCapCents: 50_000,
+      effectiveAdvanceCapCents: 50_000,
+      effectiveAdvanceCapSource: "policy",
+      generatedAt: new Date("2026-09-20T10:00:00.000Z"),
+    };
+  }
+
+  async setVendorCreditProfile(input: unknown) {
+    if (this.creditProfileSetError) throw this.creditProfileSetError;
+    this.creditProfileSetInput = input;
+    return {
+      profile: { vendorId: 10, advanceCapOverrideCents: 200_000 },
+      previousProfile: null,
+      idempotentReplay: false,
+      policyAdvanceCapCents: 50_000,
+      effectiveAdvanceCapCents: 200_000,
+      effectiveAdvanceCapSource: "vendor_override",
     };
   }
 }
