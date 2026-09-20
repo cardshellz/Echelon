@@ -22,7 +22,7 @@ describe("canonical fulfillment SQL array bindings", () => {
   it("uses typed PostgreSQL ARRAY builders on outbound and inbound paths", () => {
     expect(ingressSource).toContain("sqlTextArray(lineIds)");
     expect(ingressSource).toContain("sqlTextArray(providerIds)");
-    expect(ingressSource).toContain("sqlIntegerArray(wmsOrderIds)");
+    expect(ingressSource).toContain("sqlIntegerArray(sourceIds)");
     expect(pushSource).toContain("sqlBigintArray(legacyWmsShipmentIds)");
     expect(pushSource).toContain("sqlTextArray(deadFulfillmentIds)");
   });
@@ -41,7 +41,7 @@ describe("channel fulfillment source-echo adoption", () => {
   it("does not treat a uniqueness conflict as successful package adoption", () => {
     const adoptionSource = ingressSource.slice(
       ingressSource.indexOf("async function findExistingLegacyPackageByTracking"),
-      ingressSource.indexOf("async function findOrCreateLegacyPackage"),
+      ingressSource.indexOf("async function persistReceiptItems"),
     );
     expect(adoptionSource).not.toContain("ON CONFLICT");
     expect(adoptionSource).not.toContain("unique constraint");

@@ -486,7 +486,7 @@ describe("Migrated writers use C4 functions", () => {
       "utf-8",
     );
     const selfHealStart = src.indexOf("Self-heal: auto-complete orders with zero shippable");
-    const selfHealEnd = src.indexOf("Self-heal: if shipments exist", selfHealStart);
+    const selfHealEnd = src.indexOf("Shipping transitions belong to shipment processing", selfHealStart);
     const block = src.slice(selfHealStart, selfHealEnd);
 
     expect(block).toContain("completeOrder(db,");

@@ -22,8 +22,8 @@ const OMISSION_CORRECTION_MIGRATION_SOURCE = readFileSync(
   resolve(__dirname, "../../../../../migrations/183_omission_correction_shipment_item_authority.sql"),
   "utf8",
 );
-const SHIPMENT_ROLLUP_SOURCE = readFileSync(
-  resolve(__dirname, "../../../orders/shipment-rollup.ts"),
+const SHIPPING_PROGRESS_SOURCE = readFileSync(
+  resolve(__dirname, "../../../wms/shipping-progress.query.ts"),
   "utf8",
 );
 
@@ -122,8 +122,8 @@ describe("Control Tower flow action ownership", () => {
     expect(REPLACEMENT_MIGRATION_SOURCE).toContain(
       "CHECK (order_item_id IS NULL OR replacement_for_order_item_id IS NULL)",
     );
-    expect(SHIPMENT_ROLLUP_SOURCE).toContain(
-      "COALESCE(shipment_purpose, 'customer_fulfillment') = 'customer_fulfillment'",
+    expect(SHIPPING_PROGRESS_SOURCE).toContain(
+      "COALESCE(shipment.shipment_purpose, 'customer_fulfillment') = 'customer_fulfillment'",
     );
   });
   it("classifies an original packing omission without repeating inventory or fulfillment authority", () => {

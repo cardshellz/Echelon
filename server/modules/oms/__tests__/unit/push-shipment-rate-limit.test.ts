@@ -225,7 +225,9 @@ describe("pushShipment :: ShipStation 429 on a keyed create", () => {
     expect(result).toEqual({ shipstationOrderId: 782684779, orderKey: `echelon-wms-shp-${SHIPMENT_ID}` });
     expect(fetchMock.mock.calls.map(([, init]: any) => init.method)).toEqual(["GET", "GET", "POST"]);
     expect(sleep).toHaveBeenCalledWith(3_000);
-    expect(mock.transaction).toHaveBeenCalledTimes(1);
+    // Persisting the engine identity and the locked order-line status rollup
+    // each own an atomic transaction; neither repeats the provider POST.
+    expect(mock.transaction).toHaveBeenCalledTimes(2);
     expect(mock.executed.some((text) => /UPDATE wms\.outbound_shipments/i.test(text))).toBe(true);
     expect(sessionLock.calls[0].settled).toBe("resolved");
   });

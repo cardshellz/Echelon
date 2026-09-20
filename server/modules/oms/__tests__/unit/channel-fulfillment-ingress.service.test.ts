@@ -52,10 +52,10 @@ function prepared(
     sourceEcho: false,
     physicalShipmentId: null,
     materializationIdentity: Object.freeze({
-      shippingProvider: "shopify",
-      providerPhysicalShipmentId: "6312306376863",
-      providerOrderId: "12140180865183",
-      providerOrderKey: "12140180865183",
+      shippingProvider: "shipstation",
+      providerPhysicalShipmentId: "442326748",
+      providerOrderId: "755417850",
+      providerOrderKey: "echelon-wms-shp-501",
       trackingNumber: "1ZTEST",
       carrier: "UPS",
       trackingUrl: "https://example.test/track/1ZTEST",
@@ -118,6 +118,45 @@ function repositoryMock(
     recordReviewException: vi.fn().mockResolvedValue(undefined),
   };
 }
+
+it("retains a nonshipping receipt without warehouse, inventory, engine or tracking side effects", async () => {
+  const repository = repositoryMock(prepared({
+    nonShippingOnly: true, materializationIdentity: null, physicalShipmentId: null,
+    legacyWmsShipmentIds: [], inventoryItems: [], cancellationCandidates: [],
+  }));
+  const deps = dependencies(repository);
+  const result = await createChannelFulfillmentIngressService(deps).process(input());
+  expect(result).toMatchObject({ processingStatus: "processed", physicalShipmentId: null, inventoryFailures: 0 });
+  expect(deps.authority.recordPhysicalPackage).not.toHaveBeenCalled();
+  expect(deps.authority.projectPhysicalPackage).not.toHaveBeenCalled();
+  expect(deps.inventory.recordShipment).not.toHaveBeenCalled();
+  expect(deps.cancelEngineShipment).not.toHaveBeenCalled();
+  expect(repository.attachPhysicalShipment).not.toHaveBeenCalled();
+  expect(repository.recordTrackingAmendment).not.toHaveBeenCalled();
+  expect(repository.completeReceipt).toHaveBeenCalledWith(expect.objectContaining({
+    processingStatus: "processed", physicalShipmentId: null, metadata: { nonShippingOnly: true },
+  }));
+});
+
+it("routes unmatched physical channel fulfillment to review without shipment or inventory mutations", async () => {
+  const repository = repositoryMock(prepared({
+    shippingEvidenceMissing: true, materializationIdentity: null, physicalShipmentId: null,
+    legacyWmsShipmentIds: [], inventoryItems: [], cancellationCandidates: [],
+  }));
+  const deps = dependencies(repository);
+  const result = await createChannelFulfillmentIngressService(deps).process(input());
+  expect(result).toMatchObject({ processingStatus: "review", physicalShipmentId: null });
+  expect(repository.recordReviewException).toHaveBeenCalledWith(expect.objectContaining({
+    rule: "shipping_engine_evidence_missing",
+  }));
+  expect(repository.completeReceipt).toHaveBeenCalledWith(expect.objectContaining({
+    processingStatus: "review", errorCode: "SHIPPING_ENGINE_EVIDENCE_MISSING",
+  }));
+  expect(deps.authority.recordPhysicalPackage).not.toHaveBeenCalled();
+  expect(deps.authority.projectPhysicalPackage).not.toHaveBeenCalled();
+  expect(deps.inventory.recordShipment).not.toHaveBeenCalled();
+  expect(deps.cancelEngineShipment).not.toHaveBeenCalled();
+});
 
 function dependencies(repository: ChannelFulfillmentIngressRepository) {
   return {
@@ -193,9 +232,9 @@ describe("channel fulfillment ingress", () => {
     expect(deps.authority.recordPhysicalPackage).toHaveBeenCalledWith(
       expect.objectContaining({
         legacyWmsShipmentIds: [501],
-        shippingProvider: "shopify",
-        providerPhysicalShipmentId: "6312306376863",
-        providerOrderId: "12140180865183",
+        shippingProvider: "shipstation",
+        providerPhysicalShipmentId: "442326748",
+        providerOrderId: "755417850",
         suppressChannelProviders: ["shopify"],
       }),
       { executeImmediately: false },
@@ -227,7 +266,7 @@ describe("channel fulfillment ingress", () => {
     });
   });
 
-  it("materializes and projects fulfillment-only lines without calling the inventory writer", async () => {
+  it("materializes and projects non-inventory physical lines without calling the inventory writer", async () => {
     const repository = repositoryMock(prepared({
       inventoryItems: Object.freeze([]),
       cancellationCandidates: Object.freeze([]),

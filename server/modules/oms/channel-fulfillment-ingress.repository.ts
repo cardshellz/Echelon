@@ -6,7 +6,6 @@ import {
   sqlTextArray,
 } from "../../infrastructure/postgres-array";
 import {
-  buildProviderPhysicalShipmentIdentity,
   parseLegacyProviderPhysicalShipmentId,
 } from "./channel-fulfillment-authority.repository";
 import {
@@ -34,6 +33,10 @@ export interface IngressEngineCancellationCandidate {
 }
 
 export interface PreparedChannelFulfillmentReceipt {
+  /** Commercial-only receipt: no warehouse package, picking or inventory work. */
+  readonly nonShippingOnly?: boolean;
+  /** A marketplace fulfillment is retained, but cannot create engine evidence. */
+  readonly shippingEvidenceMissing?: boolean;
   readonly receiptId: number;
   readonly omsOrderId: number;
   readonly terminalReplay: boolean;
@@ -198,6 +201,7 @@ interface ResolvedLine {
   wmsItemPickedQuantity: number;
   wmsItemStatus: string;
   requiresInventoryPosting: boolean;
+  requiresShipping: boolean;
   warehouseLocationId: number | null;
   quantity: number;
   sourceFulfillmentLineId: string | null;
@@ -666,6 +670,7 @@ async function resolveExactLines(
       wmsItemPickedQuantity: Number(row.wms_item_picked_quantity),
       wmsItemStatus: String(row.wms_item_status),
       requiresInventoryPosting: inventoryDecision.requiresInventoryPosting,
+      requiresShipping: inventoryDecision.reason !== "non_shipping_item",
       warehouseLocationId: positiveInteger(row.warehouse_location_id),
       quantity: inputLine.quantity,
       sourceFulfillmentLineId: inputLine.sourceFulfillmentLineId,
@@ -695,7 +700,9 @@ async function findExactEcho(
       ON item.channel_fulfillment_push_id = push.id
     LEFT JOIN wms.physical_shipment_items physical_item
       ON physical_item.id = item.physical_shipment_item_id
+    JOIN wms.physical_shipments physical ON physical.id = push.physical_shipment_id
     WHERE push.channel_provider = ${input.sourceProvider}
+      AND physical.provider <> ${input.sourceProvider}
       AND push.oms_order_id = ${omsOrderId}
       AND push.channel_fulfillment_id = ANY(${sqlTextArray(providerIds)})
       AND push.push_status IN ('success', 'ignored')
@@ -765,6 +772,7 @@ async function loadCanonicalEchoInventoryItems(
     JOIN wms.outbound_shipments shipment ON shipment.id = source.shipment_id
     JOIN wms.order_items order_item ON order_item.id = source.order_item_id
     WHERE source.id = ANY(${sqlIntegerArray(sourceIds)})
+      AND COALESCE(shipment.source, '') NOT LIKE '%_fulfillment_receipt'
     ORDER BY source.shipment_id, source.id
   `));
   if (rows.length !== sourceIds.length) {
@@ -796,46 +804,6 @@ async function loadCanonicalEchoInventoryItems(
   return Object.freeze(items);
 }
 
-async function findExistingCanonicalPackage(
-  tx: any,
-  input: NormalizedChannelFulfillmentIngress,
-): Promise<{ physicalShipmentId: number; itemRows: any[] } | null> {
-  const result = await tx.execute(sql`
-    SELECT
-      physical.id AS physical_shipment_id,
-      oms_line.external_line_item_id AS channel_order_line_id,
-      item.quantity_shipped::int AS quantity,
-      item.id AS physical_shipment_item_id,
-      item.legacy_wms_shipment_item_id,
-      legacy_item.shipment_id AS legacy_wms_shipment_id
-    FROM wms.physical_shipments physical
-    JOIN wms.effective_physical_shipment_items item ON item.physical_shipment_id = physical.id
-    LEFT JOIN wms.outbound_shipment_items legacy_item
-      ON legacy_item.id = item.legacy_wms_shipment_item_id
-    JOIN wms.fulfillment_plan_lines plan_line ON plan_line.id = item.fulfillment_plan_line_id
-    JOIN oms.oms_order_lines oms_line ON oms_line.id = plan_line.oms_order_line_id
-    WHERE physical.provider = ${input.sourceProvider}
-      AND physical.provider_physical_shipment_id = ${input.sourceFulfillmentId}
-      AND item.shipment_item_purpose = 'customer_fulfillment'
-    ORDER BY physical.id, item.id
-  `);
-  const rows = rowsOf<any>(result);
-  if (rows.length === 0) return null;
-  const physicalIds = new Set(rows.map((row) => Number(row.physical_shipment_id)));
-  if (physicalIds.size !== 1) {
-    throw new ChannelFulfillmentIngressError(
-      "CANONICAL_PACKAGE_CONFLICT",
-      "A provider physical shipment identity maps to multiple canonical packages",
-      { sourceProvider: input.sourceProvider, sourceFulfillmentId: input.sourceFulfillmentId, physicalShipmentIds: [...physicalIds] },
-    );
-  }
-  assertExactAllocation(inputLineMap(input), rows, "CANONICAL_PACKAGE_CONFLICT", {
-    sourceProvider: input.sourceProvider,
-    sourceFulfillmentId: input.sourceFulfillmentId,
-  });
-  return { physicalShipmentId: [...physicalIds][0], itemRows: rows };
-}
-
 async function findExistingCanonicalPackageByTracking(
   tx: any,
   input: NormalizedChannelFulfillmentIngress,
@@ -856,9 +824,12 @@ async function findExistingCanonicalPackageByTracking(
     JOIN wms.effective_physical_shipment_items item ON item.physical_shipment_id = physical.id
     LEFT JOIN wms.outbound_shipment_items legacy_item
       ON legacy_item.id = item.legacy_wms_shipment_item_id
+    LEFT JOIN wms.outbound_shipments legacy_shipment ON legacy_shipment.id = legacy_item.shipment_id
     JOIN wms.fulfillment_plan_lines plan_line ON plan_line.id = item.fulfillment_plan_line_id
     JOIN oms.oms_order_lines oms_line ON oms_line.id = plan_line.oms_order_line_id
     WHERE physical.status = 'shipped'
+      AND physical.provider <> ${input.sourceProvider}
+      AND COALESCE(legacy_shipment.source, '') NOT LIKE '%_fulfillment_receipt'
       AND oms_line.order_id = ${omsOrderId}
       AND item.shipment_item_purpose = 'customer_fulfillment'
       AND UPPER(REGEXP_REPLACE(BTRIM(physical.tracking_number), '[^a-zA-Z0-9]', '', 'g'))
@@ -944,6 +915,7 @@ async function findExistingLegacyPackageByTracking(
       JOIN oms.oms_order_lines oms_line ON oms_line.id = order_item.oms_order_line_id
       WHERE shipment.order_id = ${wmsOrderId}
         AND shipment.status = 'shipped'
+        AND COALESCE(shipment.source, '') NOT LIKE '%_fulfillment_receipt'
         AND shipment_item.shipment_item_purpose = 'customer_fulfillment'
         AND shipment_item.qty > 0
         AND UPPER(REGEXP_REPLACE(BTRIM(shipment.tracking_number), '[^a-zA-Z0-9]', '', 'g'))
@@ -992,6 +964,7 @@ async function findExistingLegacyPackageByTracking(
     if (
       !parsedPhysical
       || !shippingProvider
+      || shippingProvider === input.sourceProvider
       || parsedPhysical.provider !== shippingProvider
       || (!providerOrderId && !providerOrderKey)
       || !persistedTrackingNumber
@@ -1071,178 +1044,18 @@ async function findExistingLegacyPackageByTracking(
   });
 }
 
-async function findOrCreateLegacyPackage(
-  tx: any,
-  input: NormalizedChannelFulfillmentIngress,
-  lines: readonly ResolvedLine[],
-  inventoryAuthority: "legacy" | "canonical",
-): Promise<{ legacyShipmentIds: number[]; inventoryItems: IngressInventoryItem[]; lineRows: any[] }> {
-  const physicalIdentity = buildProviderPhysicalShipmentIdentity(
-    input.sourceProvider,
-    input.sourceFulfillmentId,
-  );
-  const byWmsOrder = new Map<number, ResolvedLine[]>();
-  for (const line of lines) {
-    const group = byWmsOrder.get(line.wmsOrderId) ?? [];
-    group.push(line);
-    byWmsOrder.set(line.wmsOrderId, group);
-  }
-
-  const legacyShipmentIds: number[] = [];
-  const inventoryItems: IngressInventoryItem[] = [];
-  const lineRows: any[] = [];
-  for (const [wmsOrderId, orderLines] of [...byWmsOrder.entries()].sort(([left], [right]) => left - right)) {
-    let shipment = firstRow<{ id: number }>(await tx.execute(sql`
-      SELECT id
-      FROM wms.outbound_shipments
-      WHERE order_id = ${wmsOrderId}
-        AND external_fulfillment_id = ${physicalIdentity}
-      FOR UPDATE
-    `));
-    if (!shipment) {
-      shipment = firstRow<{ id: number }>(await tx.execute(sql`
-        INSERT INTO wms.outbound_shipments (
-          order_id,
-          channel_id,
-          external_fulfillment_id,
-          source,
-          status,
-          carrier,
-          tracking_number,
-          tracking_url,
-          shipped_at,
-          shipping_engine,
-          engine_order_ref,
-          engine_shipment_ref,
-          shopify_fulfillment_id,
-          requires_review,
-          review_reason,
-          created_at,
-          updated_at
-        )
-        VALUES (
-          ${wmsOrderId},
-          ${orderLines[0].sourceChannelId},
-          ${physicalIdentity},
-          ${`${input.sourceProvider}_fulfillment_receipt`},
-          'shipped',
-          ${input.carrier},
-          ${input.trackingNumber},
-          ${input.trackingUrl},
-          ${input.shippedAt},
-          ${input.sourceProvider},
-          ${input.sourceOrderId},
-          ${input.sourceFulfillmentId},
-          ${input.sourceProvider === "shopify" ? input.sourceFulfillmentId : null},
-          ${orderLines.some((line) => !line.productVariantId
-            || (line.requiresInventoryPosting && inventoryAuthority === "legacy" && !line.warehouseLocationId))},
-          ${orderLines.some((line) => !line.productVariantId
-            || (line.requiresInventoryPosting && inventoryAuthority === "legacy" && !line.warehouseLocationId))
-            ? "external_fulfillment_inventory_lineage_missing"
-            : null},
-          NOW(),
-          NOW()
-        )
-        RETURNING id
-      `));
-    }
-    if (!shipment) {
-      throw new ChannelFulfillmentIngressError(
-        "CANONICAL_PACKAGE_CONFLICT",
-        "Failed to create the compatibility shipment row",
-        { wmsOrderId, sourceFulfillmentId: input.sourceFulfillmentId },
-        { reviewRequired: false },
-      );
-    }
-    const legacyWmsShipmentId = Number(shipment.id);
-    legacyShipmentIds.push(legacyWmsShipmentId);
-
-    for (const line of orderLines) {
-      let shipmentItem = firstRow<{ id: number; qty: number }>(await tx.execute(sql`
-        SELECT id, qty::int AS qty
-        FROM wms.outbound_shipment_items
-        WHERE shipment_id = ${legacyWmsShipmentId}
-          AND order_item_id = ${line.wmsOrderItemId}
-          AND shipment_item_purpose = 'customer_fulfillment'
-        FOR UPDATE
-      `));
-      if (shipmentItem && Number(shipmentItem.qty) !== line.quantity) {
-        throw new ChannelFulfillmentIngressError(
-          "PACKAGE_ITEM_CONFLICT",
-          "An existing compatibility shipment item has a different quantity",
-          {
-            legacyWmsShipmentId,
-            wmsOrderItemId: line.wmsOrderItemId,
-            existingQuantity: Number(shipmentItem.qty),
-            receiptQuantity: line.quantity,
-          },
-        );
-      }
-      if (!shipmentItem) {
-        shipmentItem = firstRow<{ id: number; qty: number }>(await tx.execute(sql`
-          INSERT INTO wms.outbound_shipment_items (
-            shipment_id,
-            order_item_id,
-            shipment_item_purpose,
-            product_variant_id,
-            qty,
-            from_location_id,
-            tracking_id,
-            created_at
-          )
-          VALUES (
-            ${legacyWmsShipmentId},
-            ${line.wmsOrderItemId},
-            'customer_fulfillment',
-            ${line.productVariantId},
-            ${line.quantity},
-            ${!line.requiresInventoryPosting || inventoryAuthority === "canonical" ? null : line.warehouseLocationId},
-            ${input.trackingNumber},
-            NOW()
-          )
-          RETURNING id, qty::int AS qty
-        `));
-      }
-      if (!shipmentItem) {
-        throw new ChannelFulfillmentIngressError(
-          "CANONICAL_PACKAGE_CONFLICT",
-          "Failed to create the compatibility shipment item",
-          { legacyWmsShipmentId, wmsOrderItemId: line.wmsOrderItemId },
-          { reviewRequired: false },
-        );
-      }
-      const legacyWmsShipmentItemId = Number(shipmentItem.id);
-      lineRows.push({
-        line,
-        legacyWmsShipmentItemId,
-        physicalShipmentItemId: null,
-      });
-      if (line.requiresInventoryPosting) {
-        inventoryItems.push(Object.freeze({
-          legacyWmsShipmentId,
-          legacyWmsShipmentItemId,
-          wmsOrderId,
-          wmsOrderItemId: line.wmsOrderItemId,
-          productVariantId: line.productVariantId,
-          warehouseLocationId: line.warehouseLocationId,
-          quantity: line.quantity,
-          deductFromOnHandOnly: line.wmsItemPickedQuantity <= 0,
-        }));
-      }
-    }
-  }
-  return { legacyShipmentIds, inventoryItems, lineRows };
-}
 
 async function persistReceiptItems(
   tx: any,
   receiptId: number,
   lineRows: readonly any[],
 ): Promise<void> {
+  // A reviewed receipt may precede local engine evidence. Replay may fill a
+  // missing binding, never replace its quantity, line identity or existing link.
   for (const row of lineRows) {
     const line: ResolvedLine = row.line;
     await tx.execute(sql`
-      INSERT INTO oms.channel_fulfillment_receipt_items (
+      INSERT INTO oms.channel_fulfillment_receipt_items AS retained (
         receipt_id,
         source_fulfillment_line_id,
         channel_order_line_id,
@@ -1264,7 +1077,16 @@ async function persistReceiptItems(
         ${row.physicalShipmentItemId ?? null},
         NOW()
       )
-      ON CONFLICT (receipt_id, channel_order_line_id) DO NOTHING
+      ON CONFLICT (receipt_id, channel_order_line_id) DO UPDATE
+      SET legacy_wms_shipment_item_id = COALESCE(retained.legacy_wms_shipment_item_id, EXCLUDED.legacy_wms_shipment_item_id),
+          physical_shipment_item_id = COALESCE(retained.physical_shipment_item_id, EXCLUDED.physical_shipment_item_id)
+      WHERE retained.quantity = EXCLUDED.quantity
+        AND retained.oms_order_line_id = EXCLUDED.oms_order_line_id
+        AND retained.wms_order_item_id = EXCLUDED.wms_order_item_id
+        AND (retained.legacy_wms_shipment_item_id IS NULL OR EXCLUDED.legacy_wms_shipment_item_id IS NULL
+          OR retained.legacy_wms_shipment_item_id = EXCLUDED.legacy_wms_shipment_item_id)
+        AND (retained.physical_shipment_item_id IS NULL OR EXCLUDED.physical_shipment_item_id IS NULL
+          OR retained.physical_shipment_item_id = EXCLUDED.physical_shipment_item_id)
     `);
   }
   const persisted = rowsOf<any>(await tx.execute(sql`
@@ -1305,65 +1127,6 @@ async function persistReceiptItems(
       );
     }
   }
-}
-
-async function findCancellationCandidates(
-  tx: any,
-  input: NormalizedChannelFulfillmentIngress,
-  lines: readonly ResolvedLine[],
-  packageLegacyShipmentIds: readonly number[],
-): Promise<{ candidates: IngressEngineCancellationCandidate[]; partialOverlapShipmentIds: number[] }> {
-  const wmsOrderIds = [...new Set(lines.map((line) => line.wmsOrderId))];
-  if (wmsOrderIds.length === 0) return { candidates: [], partialOverlapShipmentIds: [] };
-  const result = await tx.execute(sql`
-    SELECT
-      shipment.id AS wms_shipment_id,
-      COALESCE(NULLIF(BTRIM(shipment.shipping_engine), ''),
-        CASE WHEN shipment.shipstation_order_id IS NOT NULL THEN 'shipstation' END
-      ) AS engine,
-      COALESCE(NULLIF(BTRIM(shipment.engine_order_ref), ''), shipment.shipstation_order_id::text) AS engine_order_ref,
-      NULLIF(BTRIM(shipment.engine_shipment_ref), '') AS engine_shipment_ref,
-      item.order_item_id,
-      item.qty::int AS quantity
-    FROM wms.outbound_shipments shipment
-    JOIN wms.outbound_shipment_items item ON item.shipment_id = shipment.id
-    WHERE shipment.order_id = ANY(${sqlIntegerArray(wmsOrderIds)})
-      AND shipment.id <> ALL(${sqlIntegerArray(packageLegacyShipmentIds)})
-      AND shipment.status IN ('planned', 'queued', 'labeled', 'on_hold')
-      AND item.shipment_item_purpose = 'customer_fulfillment'
-      AND item.qty > 0
-    ORDER BY shipment.id, item.id
-  `);
-  const fulfilledByOrderItem = new Map(lines.map((line) => [line.wmsOrderItemId, line.quantity]));
-  const grouped = new Map<number, any[]>();
-  for (const row of rowsOf<any>(result)) {
-    const rows = grouped.get(Number(row.wms_shipment_id)) ?? [];
-    rows.push(row);
-    grouped.set(Number(row.wms_shipment_id), rows);
-  }
-  const candidates: IngressEngineCancellationCandidate[] = [];
-  const partialOverlapShipmentIds: number[] = [];
-  for (const [shipmentId, shipmentRows] of grouped) {
-    const overlap = shipmentRows.some((row) => fulfilledByOrderItem.has(Number(row.order_item_id)));
-    if (!overlap) continue;
-    const fullyCovered = shipmentRows.every((row) =>
-      (fulfilledByOrderItem.get(Number(row.order_item_id)) ?? 0) >= Number(row.quantity),
-    );
-    const first = shipmentRows[0];
-    const engine = nullableText(first.engine);
-    const engineOrderRef = nullableText(first.engine_order_ref);
-    if (fullyCovered && engine && engineOrderRef && engine !== input.sourceProvider) {
-      candidates.push(Object.freeze({
-        wmsShipmentId: shipmentId,
-        engine,
-        engineOrderRef,
-        engineShipmentRef: nullableText(first.engine_shipment_ref),
-      }));
-    } else if (!fullyCovered) {
-      partialOverlapShipmentIds.push(shipmentId);
-    }
-  }
-  return { candidates, partialOverlapShipmentIds };
 }
 
 export function createChannelFulfillmentIngressRepository(
@@ -1677,7 +1440,14 @@ export function createChannelFulfillmentIngressRepository(
       await assertActiveReceiptLease(tx, receiptId, leaseToken, now);
 
       const order = await resolveOmsOrder(tx, input);
-      const lines = await resolveExactLines(tx, input, order.omsOrderId);
+      const resolvedLines = await resolveExactLines(tx, input, order.omsOrderId);
+      const nonShippingRows = resolvedLines.filter(line => !line.requiresShipping).map(line => ({ line }));
+      const lines = resolvedLines.filter(line => line.requiresShipping);
+      const physicalLineIds = new Set(lines.map(line => line.channelOrderLineId));
+      const physicalInput = Object.freeze({
+        ...input, lineItems: input.lineItems.filter(line => physicalLineIds.has(line.channelOrderLineId)),
+      });
+      const allReceiptRows = (physicalRows: readonly any[]) => [...physicalRows, ...nonShippingRows];
       await tx.execute(sql`
         UPDATE oms.channel_fulfillment_receipts
         SET oms_order_id = ${order.omsOrderId},
@@ -1686,7 +1456,18 @@ export function createChannelFulfillmentIngressRepository(
         WHERE id = ${receiptId}
       `);
 
-      const echo = await findExactEcho(tx, input, order.omsOrderId);
+      if (lines.length === 0) {
+        await persistReceiptItems(tx, receiptId, nonShippingRows);
+        return Object.freeze({
+          receiptId, omsOrderId: order.omsOrderId, nonShippingOnly: true,
+          terminalReplay: false, sourceEcho: false, physicalShipmentId: null,
+          materializationIdentity: null, legacyWmsShipmentIds: Object.freeze([]),
+          inventoryItems: Object.freeze([]), cancellationCandidates: Object.freeze([]),
+          partialOverlapShipmentIds: Object.freeze([]),
+        });
+      }
+
+      const echo = await findExactEcho(tx, physicalInput, order.omsOrderId);
       if (echo) {
         const inventoryItems = inventoryAuthority === "canonical"
           ? await loadCanonicalEchoInventoryItems(tx, lines, echo.itemRows.map(row => ({
@@ -1694,14 +1475,14 @@ export function createChannelFulfillmentIngressRepository(
               channelOrderLineId: String(row.channel_order_line_id),
             }))) : [];
         const byChannelLine = new Map(echo.itemRows.map((row) => [row.channel_order_line_id, row]));
-        await persistReceiptItems(tx, receiptId, lines.map((line) => {
+        await persistReceiptItems(tx, receiptId, allReceiptRows(lines.map((line) => {
           const row = byChannelLine.get(line.channelOrderLineId);
           return {
             line,
             legacyWmsShipmentItemId: positiveInteger(row?.legacy_wms_shipment_item_id),
             physicalShipmentItemId: positiveInteger(row?.physical_shipment_item_id),
           };
-        }));
+        })));
         return Object.freeze({
           receiptId,
           omsOrderId: order.omsOrderId,
@@ -1716,10 +1497,7 @@ export function createChannelFulfillmentIngressRepository(
         });
       }
 
-      const existingPhysical = await findExistingCanonicalPackage(tx, input);
-      const existingPhysicalByTracking = existingPhysical
-        ? null
-        : await findExistingCanonicalPackageByTracking(tx, input, order.omsOrderId);
+      const existingPhysicalByTracking = await findExistingCanonicalPackageByTracking(tx, physicalInput, order.omsOrderId);
       if (existingPhysicalByTracking) {
         const inventoryItems = inventoryAuthority === "canonical"
           ? await loadCanonicalEchoInventoryItems(tx, lines, existingPhysicalByTracking.itemRows.map(row => ({
@@ -1729,14 +1507,14 @@ export function createChannelFulfillmentIngressRepository(
         const byChannelLine = new Map(
           existingPhysicalByTracking.itemRows.map((row) => [row.channel_order_line_id, row]),
         );
-        await persistReceiptItems(tx, receiptId, lines.map((line) => {
+        await persistReceiptItems(tx, receiptId, allReceiptRows(lines.map((line) => {
           const row = byChannelLine.get(line.channelOrderLineId);
           return {
             line,
             legacyWmsShipmentItemId: positiveInteger(row?.legacy_wms_shipment_item_id),
             physicalShipmentItemId: positiveInteger(row?.physical_shipment_item_id),
           };
-        }));
+        })));
         return Object.freeze({
           receiptId,
           omsOrderId: order.omsOrderId,
@@ -1751,110 +1529,39 @@ export function createChannelFulfillmentIngressRepository(
         });
       }
 
-      let packageRows: any[];
-      let physicalShipmentId: number | null;
-      let materializationIdentity: IngressPhysicalPackageIdentity | null;
-      let legacyWmsShipmentIds: number[];
-      let inventoryItems: IngressInventoryItem[];
-      if (existingPhysical) {
-        physicalShipmentId = existingPhysical.physicalShipmentId;
-        materializationIdentity = null;
-        const byChannelLine = new Map(existingPhysical.itemRows.map((row) => [row.channel_order_line_id, row]));
-        packageRows = lines.map((line) => {
-          const row = byChannelLine.get(line.channelOrderLineId);
-          return {
-            line,
-            legacyWmsShipmentItemId: positiveInteger(row?.legacy_wms_shipment_item_id),
-            legacyWmsShipmentId: positiveInteger(row?.legacy_wms_shipment_id),
-            physicalShipmentItemId: positiveInteger(row?.physical_shipment_item_id),
-          };
+      const existingLegacy = await findExistingLegacyPackageByTracking(tx, physicalInput, lines);
+      if (existingLegacy) {
+        const inventoryItems = inventoryAuthority === "canonical"
+          ? await loadCanonicalEchoInventoryItems(tx, lines, existingLegacy.lineRows.map(row => ({
+              sourceShipmentItemId: positiveInteger(row.legacyWmsShipmentItemId),
+              channelOrderLineId: row.line.channelOrderLineId,
+            }))) : [];
+        await persistReceiptItems(tx, receiptId, allReceiptRows(existingLegacy.lineRows));
+        return Object.freeze({
+          receiptId,
+          omsOrderId: order.omsOrderId,
+          terminalReplay: false,
+          sourceEcho: true,
+          physicalShipmentId: null,
+          materializationIdentity: existingLegacy.materializationIdentity,
+          legacyWmsShipmentIds: existingLegacy.legacyShipmentIds,
+          inventoryItems: Object.freeze(inventoryItems),
+          cancellationCandidates: Object.freeze([]),
+          partialOverlapShipmentIds: Object.freeze([]),
         });
-        legacyWmsShipmentIds = rowsOf<{ legacy_shipment_id: number }>(await tx.execute(sql`
-          SELECT DISTINCT shipment_item.shipment_id AS legacy_shipment_id
-          FROM wms.effective_physical_shipment_items physical_item
-          JOIN wms.outbound_shipment_items shipment_item
-            ON shipment_item.id = physical_item.legacy_wms_shipment_item_id
-          WHERE physical_item.physical_shipment_id = ${physicalShipmentId}
-          ORDER BY shipment_item.shipment_id
-        `)).map((row) => Number(row.legacy_shipment_id));
-        inventoryItems = inventoryAuthority === "canonical"
-          ? [...await loadCanonicalEchoInventoryItems(tx, lines, existingPhysical.itemRows.map(row => ({
-              sourceShipmentItemId: positiveInteger(row.legacy_wms_shipment_item_id),
-              channelOrderLineId: String(row.channel_order_line_id),
-            })))]
-          : packageRows
-          .filter((row) =>
-            row.line.requiresInventoryPosting
-            && positiveInteger(row.legacyWmsShipmentItemId)
-            && positiveInteger(row.legacyWmsShipmentId))
-          .map((row) => Object.freeze({
-            legacyWmsShipmentId: Number(row.legacyWmsShipmentId),
-            legacyWmsShipmentItemId: Number(row.legacyWmsShipmentItemId),
-            wmsOrderId: row.line.wmsOrderId,
-            wmsOrderItemId: row.line.wmsOrderItemId,
-            productVariantId: row.line.productVariantId,
-            warehouseLocationId: row.line.warehouseLocationId,
-            quantity: row.line.quantity,
-            deductFromOnHandOnly: row.line.wmsItemPickedQuantity <= 0,
-          }));
-      } else {
-        const existingLegacy = await findExistingLegacyPackageByTracking(tx, input, lines);
-        if (existingLegacy) {
-          const inventoryItems = inventoryAuthority === "canonical"
-            ? await loadCanonicalEchoInventoryItems(tx, lines, existingLegacy.lineRows.map(row => ({
-                sourceShipmentItemId: positiveInteger(row.legacyWmsShipmentItemId),
-                channelOrderLineId: row.line.channelOrderLineId,
-              }))) : [];
-          await persistReceiptItems(tx, receiptId, existingLegacy.lineRows);
-          return Object.freeze({
-            receiptId,
-            omsOrderId: order.omsOrderId,
-            terminalReplay: false,
-            sourceEcho: true,
-            physicalShipmentId: null,
-            materializationIdentity: existingLegacy.materializationIdentity,
-            legacyWmsShipmentIds: existingLegacy.legacyShipmentIds,
-            inventoryItems: Object.freeze(inventoryItems),
-            cancellationCandidates: Object.freeze([]),
-            partialOverlapShipmentIds: Object.freeze([]),
-          });
-        }
-
-        const created = await findOrCreateLegacyPackage(tx, input, lines, inventoryAuthority);
-        physicalShipmentId = null;
-        materializationIdentity = Object.freeze({
-          shippingProvider: input.sourceProvider,
-          providerPhysicalShipmentId: input.sourceFulfillmentId,
-          providerOrderId: input.sourceOrderId,
-          providerOrderKey: input.sourceOrderId,
-          trackingNumber: input.trackingNumber,
-          carrier: input.carrier,
-          trackingUrl: input.trackingUrl,
-          serviceCode: null,
-          shippedAt: input.shippedAt,
-        });
-        packageRows = created.lineRows;
-        legacyWmsShipmentIds = created.legacyShipmentIds;
-        inventoryItems = created.inventoryItems;
       }
-      await persistReceiptItems(tx, receiptId, packageRows);
-      const cancellation = await findCancellationCandidates(
-        tx,
-        input,
-        lines,
-        legacyWmsShipmentIds,
-      );
+
+      // The sales channel reports commercial fulfillment, not physical
+      // warehouse shipment authority. Only an exact engine package/echo may
+      // project picks or inventory. Retain unmatched line evidence for review
+      // instead of manufacturing a shipped warehouse package from the receipt.
+      await persistReceiptItems(tx, receiptId, resolvedLines.map(line => ({ line })));
       return Object.freeze({
-        receiptId,
-        omsOrderId: order.omsOrderId,
-        terminalReplay: false,
-        sourceEcho: false,
-        physicalShipmentId,
-        materializationIdentity,
-        legacyWmsShipmentIds: Object.freeze([...legacyWmsShipmentIds]),
-        inventoryItems: Object.freeze([...inventoryItems]),
-        cancellationCandidates: Object.freeze(cancellation.candidates),
-        partialOverlapShipmentIds: Object.freeze(cancellation.partialOverlapShipmentIds),
+        receiptId, omsOrderId: order.omsOrderId, shippingEvidenceMissing: true,
+        terminalReplay: false, sourceEcho: false, physicalShipmentId: null,
+        materializationIdentity: null, legacyWmsShipmentIds: Object.freeze([]),
+        inventoryItems: Object.freeze([]), cancellationCandidates: Object.freeze([]),
+        partialOverlapShipmentIds: Object.freeze([]),
       });
     });
   }
@@ -1926,16 +1633,21 @@ export function createChannelFulfillmentIngressRepository(
           AND physical_item.physical_shipment_id = ${physicalShipmentId}
           AND receipt_item.physical_shipment_item_id IS NULL
       `);
+      // Preparation already validated matching OMS/WMS/catalog shipping facts.
+      // Commercial-only rows stay in the receipt, deliberately without a
+      // physical item. Unknown/missing WMS configuration still fails closed.
       const unresolved = firstRow<{ count: number }>(await tx.execute(sql`
         SELECT COUNT(*)::int AS count
-        FROM oms.channel_fulfillment_receipt_items
-        WHERE receipt_id = ${receiptId}
-          AND physical_shipment_item_id IS NULL
+        FROM oms.channel_fulfillment_receipt_items receipt_item
+        LEFT JOIN wms.order_items order_item ON order_item.id = receipt_item.wms_order_item_id
+        WHERE receipt_item.receipt_id = ${receiptId}
+          AND receipt_item.physical_shipment_item_id IS NULL
+          AND COALESCE(order_item.requires_shipping, 1) <> 0
       `));
       if (Number(unresolved?.count ?? 0) > 0) {
         throw new ChannelFulfillmentIngressError(
           "CANONICAL_PACKAGE_CONFLICT",
-          "Not every receipt item resolved to the canonical physical package",
+          "Not every physical receipt item resolved to the canonical physical package",
           { receiptId, physicalShipmentId, unresolvedItems: Number(unresolved?.count ?? 0) },
         );
       }

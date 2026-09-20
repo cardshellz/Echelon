@@ -26,7 +26,9 @@ describe("pick queue edited shipped order guard", () => {
     expect(PICK_QUEUE_SRC).not.toContain("SELECT o.*");
     expect(PICK_QUEUE_SRC).not.toContain("SELECT * FROM wms.order_items");
     expect(PICK_QUEUE_SRC).not.toContain("OR (o.source = 'shopify' AND o.source_table_id = oms.id::text)");
-    expect(PICK_QUEUE_SRC).toMatch(/SELECT order_id, status\s+FROM wms\.outbound_shipments\s+WHERE order_id IN/);
+    expect(PICK_QUEUE_SRC).not.toContain("recomputeOrderStatusFromShipments(");
+    expect(PICK_QUEUE_SRC).not.toContain("cancelStaleShipmentsIfFullyCovered(");
+    expect(PICK_QUEUE_SRC).not.toMatch(/SELECT order_id, status\s+FROM wms\.outbound_shipments/);
     expect(PICK_QUEUE_SRC).not.toMatch(/SELECT status FROM wms\.outbound_shipments WHERE order_id =/);
   });
 });

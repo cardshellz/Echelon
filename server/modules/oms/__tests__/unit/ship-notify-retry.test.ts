@@ -467,6 +467,14 @@ describe("webhook retry enqueue unique constraint races", () => {
 });
 
 describe("enqueueOmsWmsSyncRetry", () => {
+  it("retains a bounded reservation failure cause on the initial durable handoff", async () => {
+    const { db, inserts } = makeDb();
+    const cause = Object.assign(new Error("could not serialize access"), { code: "40001" });
+    await enqueueOmsWmsSyncRetry(db, 10, new Error("Reservation prerequisite failed", { cause }));
+    expect(inserts[0]!.values.lastError)
+      .toBe("Reservation prerequisite failed; caused by [40001] could not serialize access");
+  });
+
   it("inserts an immediately due internal OMS/WMS sync row", async () => {
     const { db, inserts } = makeDb();
     const before = Date.now();
@@ -1191,6 +1199,20 @@ describe("dispatchOmsWmsSyncRetry", () => {
   });
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it("retains the inner reservation error after retries are exhausted", async () => {
+    const sync = vi.fn(async () => {
+      throw new Error("Reservation prerequisite failed", {
+        cause: Object.assign(new Error("could not serialize access"), { code: "40001" }),
+      });
+    });
+    const { db, updates } = makeDb({ wmsSync: { syncOmsOrderToWms: sync } });
+    expect(await dispatchOmsWmsSyncRetry(db, {
+      id: 914, provider: "internal", topic: "oms_wms_sync", payload: { omsOrderId: 10 }, attempts: 4,
+    })).toBe("dead");
+    expect(updates[0]!.set.lastError)
+      .toBe("Reservation prerequisite failed; caused by [40001] could not serialize access");
   });
 
   it("calls syncOmsOrderToWms and marks the row successful", async () => {

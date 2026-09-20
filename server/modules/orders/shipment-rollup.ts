@@ -1,11 +1,9 @@
 /**
  * Shipment-level state mutations + order-level roll-up.
  *
- * Per refactor plan §6 Commit 15 and invariant #4:
- *   - The only writers of `wms.outbound_shipments.status` are the
- *     `markShipment*` helpers in this file.
- *   - The only writer of `wms.orders.warehouse_status` (post-C16) is
- *     `recomputeOrderStatusFromShipments` in this file.
+ * Engine event handlers use the markShipment* helpers for package state.
+ * Order shipping status is derived from physical line coverage, using the
+ * same policy and evidence reader as the canonical WMS package projector.
  *
  * Each mark-* helper is single-purpose and idempotent: a call that
  * would not change any column (same status + same tracking / void
@@ -35,12 +33,13 @@
 
 import { sql } from "drizzle-orm";
 import {
-  deriveWmsFromShipments,
   type ShipmentStatus,
   type WmsWarehouseStatus,
 } from "@shared/enums/order-status";
 import { engineRefFromRow } from "../shipping/adapters/shipstation.adapter";
 import type { EngineRef } from "../shipping/types";
+import { deriveWmsShippingProgress } from "@shared/wms-shipping-progress";
+import { shippingProgressLine, wmsShippingProgressQuery, type WmsShippingProgressRow } from "../wms/shipping-progress.query";
 
 // ─── Public types ────────────────────────────────────────────────────
 
@@ -58,28 +57,9 @@ export interface RecomputeResult {
    *  without clobbering valid in-warehouse pick progress. */
   warehouseStatus: WmsWarehouseStatus;
   /** True when the derived status differs from the current row and an
-   *  UPDATE was issued. False when no row was found, when shipments
-   *  are empty, or when the current status already matches. */
+   *  UPDATE was issued. False when no row was found or the current
+   *  status already matches. Missing packages are zero line coverage. */
   changed: boolean;
-}
-
-function shouldPreserveWarehouseProgressDuringOpenShipmentRollup(orderRow: any): boolean {
-  const status = String(orderRow?.warehouse_status ?? "");
-  const shippableUnits = Number(orderRow?.shippable_unit_count ?? 0);
-  const pickedUnits = Number(orderRow?.picked_unit_count ?? 0);
-
-  if (status === "picking") return true;
-  if (
-    status === "picked" ||
-    status === "packing" ||
-    status === "packed" ||
-    status === "ready_to_ship" ||
-    status === "completed"
-  ) {
-    return shippableUnits > 0 && pickedUnits >= shippableUnits;
-  }
-
-  return false;
 }
 
 /**
@@ -801,26 +781,10 @@ export async function markShipmentVoided(
 // ─── recomputeOrderStatusFromShipments ──────────────────────────────
 
 /**
- * Roll the order-level `warehouse_status` up from the shipments that
- * belong to `wmsOrderId`. This is the ONLY path that writes
- * `wms.orders.warehouse_status` once invariant #4 is fully enforced
- * (C16 removes remaining direct writers).
- *
- * Behavior:
- *   - Reads all shipments for the order (status column only).
- *   - Feeds them into the pure `deriveWmsFromShipments` enum helper.
- *   - Compares the derived status to the current `warehouse_status`.
- *     If different, UPDATEs. Otherwise, no-op.
- *   - `completed_at` is stamped only on the transition INTO `shipped`
- *     (matches legacy behavior in processShipNotify) so the timestamp
- *     remains the first-shipped time, not the last-recompute time.
- *
- * Missing order row → returns `{ changed: false }` with the derived
- * status from the empty input (`"ready"`); the caller can log but
- * the helper will not throw. This is a deliberate departure from
- * `loadShipment` because order rows can legitimately be missing in
- * pre-cutover data and forcing a throw would break the fallback path
- * in SHIP_NOTIFY v2.
+ * Derive warehouse shipping status from coverage of every physical order line.
+ * Canonical projection uses the same domain policy; neither a nonphysical
+ * fulfillment nor a cancelled/missing package can discharge physical demand.
+ * The existing public name is retained for callers of shipment events.
  */
 export async function recomputeOrderStatusFromShipments(
   db: any,
@@ -829,77 +793,40 @@ export async function recomputeOrderStatusFromShipments(
 ): Promise<RecomputeResult> {
   assertPositiveInt(wmsOrderId, "wmsOrderId");
 
-  // Pull current order row + all its shipments in two reads. Two round
-  // trips is fine — the SHIP_NOTIFY loop is per-shipment and already
-  // serial; optimizing to a single query would muddy the types.
+  if (typeof db.transaction === "function") {
+    return db.transaction((tx: any) => recomputeLockedOrderShippingStatus(tx, wmsOrderId, opts));
+  }
+  // Callers can supply an already-owned transaction/execute adapter.
+  return recomputeLockedOrderShippingStatus(db, wmsOrderId, opts);
+}
+
+async function recomputeLockedOrderShippingStatus(
+  db: any, wmsOrderId: number, opts: { now?: Date },
+): Promise<RecomputeResult> {
+
+  // Serialize the read/derive/write with other rollups of this order. A header
+  // update alone cannot prove coverage: lines without a shipment must be read.
   const orderResult: any = await db.execute(sql`
     SELECT
       o.id,
       o.warehouse_status,
-      o.completed_at,
-      COALESCE(SUM(CASE
-        WHEN COALESCE(oi.requires_shipping, 1) <> 0 THEN COALESCE(oi.quantity, 0)
-        ELSE 0
-      END), 0)::int AS shippable_unit_count,
-      COALESCE(SUM(CASE
-        WHEN COALESCE(oi.requires_shipping, 1) <> 0 THEN COALESCE(oi.picked_quantity, 0)
-        ELSE 0
-      END), 0)::int AS picked_unit_count
+      o.completed_at
     FROM wms.orders o
-    LEFT JOIN wms.order_items oi ON oi.order_id = o.id
     WHERE o.id = ${wmsOrderId}
-    GROUP BY o.id, o.warehouse_status, o.completed_at
-    LIMIT 1
+    FOR UPDATE
   `);
   const orderRow: any = orderResult?.rows?.[0];
 
-  const shipmentsResult: any = await db.execute(sql`
-    SELECT status
-    FROM wms.outbound_shipments
-    WHERE order_id = ${wmsOrderId}
-      AND COALESCE(shipment_purpose, 'customer_fulfillment') = 'customer_fulfillment'
-  `);
-  const shipmentRows: Array<{ status: string }> = shipmentsResult?.rows ?? [];
-  const statuses = shipmentRows.map((r) => r.status as ShipmentStatus);
-
-  const derived = deriveWmsFromShipments(statuses);
+  const linesResult = await db.execute(wmsShippingProgressQuery([wmsOrderId]));
 
   if (!orderRow) {
-    return { warehouseStatus: derived, changed: false };
+    return { warehouseStatus: "ready", changed: false };
   }
+  const lines = (linesResult.rows as WmsShippingProgressRow[]).map(shippingProgressLine);
+  const derived = deriveWmsShippingProgress(orderRow.warehouse_status, lines);
 
   if (orderRow.warehouse_status === derived) {
     return { warehouseStatus: derived, changed: false };
-  }
-
-  // Guard: `cancelled` is terminal for roll-up purposes. Once an order
-  // is cancelled (by the OMS↔WMS reconciler or a cancel cascade), the
-  // shipment-based derivation must NOT flip it back to `ready_to_ship`
-  // or any other non-terminal state. Without this guard, the reconciler
-  // sets cancelled → `deriveWmsFromShipments` re-derives ready_to_ship
-  // → reconciler re-fires ss.cancelOrder → "already shipped" spam loop.
-  // The only forward transition from cancelled is `shipped` (physical
-  // shipment already left the building — truth wins, needs human review).
-  if (orderRow.warehouse_status === "cancelled" && derived !== "shipped") {
-    return { warehouseStatus: "cancelled", changed: false };
-  }
-
-  // Empty-shipments roll-up: `deriveWmsFromShipments([])` returns
-  // `"ready"`. We do NOT clobber an order already in a post-ready state
-  // (picking/packed/etc.) just because its shipments were deleted; a
-  // shipment-less order should not be flipped backward. Shipment
-  // deletions are extremely rare (admin-only) and always accompanied
-  // by an explicit state write.
-  if (statuses.length === 0 && derived === "ready") {
-    return { warehouseStatus: orderRow.warehouse_status, changed: false };
-  }
-
-  if (
-    statuses.length > 0 &&
-    derived === "ready" &&
-    shouldPreserveWarehouseProgressDuringOpenShipmentRollup(orderRow)
-  ) {
-    return { warehouseStatus: orderRow.warehouse_status, changed: false };
   }
 
   const now = opts.now ?? new Date();

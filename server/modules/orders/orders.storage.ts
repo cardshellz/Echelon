@@ -16,7 +16,7 @@ import { ValidationError } from "../../../shared/errors";
 import { computeSortRank, resolveSlaDueAt } from "./sort-rank";
 import { getSlaCutoffConfig, type SlaCutoffConfig } from "../warehouse/settings.resolver";
 import { insertWmsOrder, type WmsOrderInsert } from "../wms/insert-order";
-import { cancelStaleShipmentsIfFullyCovered, recomputeOrderStatusFromShipments } from "./shipment-rollup";
+import { recomputeOrderStatusFromShipments } from "./shipment-rollup";
 import { transitionOrderStatus, completeOrder } from "./order-status-core";
 import { completeWmsOrderAndRelease, type ReservationReleaser } from "./cancel-wms-order";
 import type { WmsWarehouseStatus } from "@shared/enums/order-status";
@@ -575,18 +575,6 @@ export const orderMethods: IOrderStorage = {
       ORDER BY order_id, id
     `);
 
-    const shipmentStatusResult = await db.execute<{ order_id: number; status: string }>(sql`
-      SELECT order_id, status
-      FROM wms.outbound_shipments
-      WHERE order_id IN (${idList})
-    `);
-    const shipmentStatusesByOrderId = new Map<number, string[]>();
-    for (const shipment of shipmentStatusResult.rows) {
-      const existing = shipmentStatusesByOrderId.get(shipment.order_id) || [];
-      existing.push(shipment.status);
-      shipmentStatusesByOrderId.set(shipment.order_id, existing);
-    }
-    
     // Map wms.order_items columns to expected structure
     const allItems: any[] = allItemsResult.rows.map((row: any) => ({
       id: row.id,
@@ -770,44 +758,9 @@ export const orderMethods: IOrderStorage = {
         }
       }
 
-      // Self-heal: if shipments exist and are all shipped/cancelled/returned/lost
-      // but warehouse_status is still a pick-queue state, the rollup was
-      // missed (webhook failure, race, etc.). Re-run it now.
-      if (["ready", "in_progress", "partially_shipped", "ready_to_ship"].includes(order.warehouseStatus)) {
-        try {
-          const shipmentStatuses = shipmentStatusesByOrderId.get(order.id) || [];
-          if (shipmentStatuses.length > 0) {
-            const hasOpen = shipmentStatuses.some(
-              (s: string) => s === "planned" || s === "queued" || s === "labeled" || s === "voided"
-            );
-            const hasShipped = shipmentStatuses.some(
-              (s: string) => s === "shipped" || s === "returned" || s === "lost"
-            );
-            if (hasShipped && !hasOpen) {
-              const rollup = await recomputeOrderStatusFromShipments(db, order.id);
-              if (rollup.changed) {
-                order.warehouseStatus = rollup.warehouseStatus;
-                console.log(
-                  `[PickQueue] Self-healed order ${order.orderNumber} (id=${order.id}): warehouse_status → ${rollup.warehouseStatus}`,
-                );
-              }
-            } else if (hasShipped && hasOpen) {
-              const cleaned = await cancelStaleShipmentsIfFullyCovered(db, order.id);
-              if (cleaned) {
-                const rollup = await recomputeOrderStatusFromShipments(db, order.id);
-                if (rollup.changed) {
-                  order.warehouseStatus = rollup.warehouseStatus;
-                  console.log(
-                    `[PickQueue] Self-healed order ${order.orderNumber} (id=${order.id}): cancelled stale shipments → ${rollup.warehouseStatus}`,
-                  );
-                }
-              }
-            }
-          }
-        } catch (err) {
-          console.error(`[PickQueue] Shipment rollup self-heal failed for order ${order.orderNumber}:`, err);
-        }
-      }
+      // Shipping transitions belong to shipment processing/reconciliation, not
+      // a page read. In particular, terminal package headers do not prove that
+      // physical order lines without any package have been fulfilled.
     }
 
     return orderRows.map((order: any) => ({

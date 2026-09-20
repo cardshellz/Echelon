@@ -1480,346 +1480,82 @@ describe("markShipmentVoided", () => {
 // Read order: order row FIRST, then shipments list. Tests script the
 // response queue in that order.
 
-describe("recomputeOrderStatusFromShipments :: state matrix", () => {
-  it("1 shipment 'shipped' → order 'shipped' (changed=true)", async () => {
-    const mock = makeDb([
-      {
-        rows: [
-          {
-            id: 42,
-            warehouse_status: "ready_to_ship",
-            completed_at: null,
-          },
-        ],
-      },
-      { rows: [{ status: "shipped" }] },
-      { rows: [] }, // UPDATE
-    ]);
-    const result = await recomputeOrderStatusFromShipments(mock.db, 42, {
-      now: NOW,
-    });
-    expect(result).toEqual({ warehouseStatus: "shipped", changed: true });
-    expect(mock.getCallCount()).toBe(3);
-    expect(mock.calls[2].sqlText).toContain("allocation_exceptions");
-    expect(mock.calls[2].sqlText).toContain("shipment_rollup");
-    expect(mock.calls[2].sqlText).toContain("::text");
-    expect(mock.calls[2].sqlText).toContain("::timestamptz");
-  });
+describe("recomputeOrderStatusFromShipments :: physical line coverage", () => {
+  function line(overrides: Record<string, unknown> = {}) {
+    return { id: 10, quantity: 2, picked_quantity: 0, requires_shipping: 1,
+      status: "pending", shipped_quantity: 0, authority_fulfillable_quantity: 2, ...overrides };
+  }
 
-  it("2 shipments both 'shipped' → 'shipped'", async () => {
+  it.each([
+    ["ready", [line({ shipped_quantity: 2 })], "shipped"],
+    ["ready", [line({ shipped_quantity: 1 })], "partially_shipped"],
+    ["ready", [line({ shipped_quantity: 2 }), line({ id: 11 })], "partially_shipped"],
+    ["ready", [line()], "ready"],
+    ["shipped", [line()], "ready"],
+    ["ready_to_ship", [line()], "ready"],
+    ["ready_to_ship", [line({ picked_quantity: 2 })], "ready_to_ship"],
+    ["in_progress", [line({ picked_quantity: 1 })], "in_progress"],
+    ["picking", [line()], "picking"],
+    ["cancelled", [line({ shipped_quantity: 2 })], "shipped"],
+    ["shipped", [line({ shipped_quantity: 2 })], "shipped"],
+    ["ready", [line({ requires_shipping: 0, shipped_quantity: 2 }), line({ id: 11 })], "ready"],
+    ["ready", [line({ shipped_quantity: 1, authority_fulfillable_quantity: 1 })], "shipped"],
+    ["ready", [line({ shipped_quantity: 2 }), line({ id: 11, status: "cancelled" })], "shipped"],
+  ])("%s with physical line facts derives %s", async (current, lines, expected) => {
     const mock = makeDb([
-      {
-        rows: [
-          {
-            id: 42,
-            warehouse_status: "partially_shipped",
-            completed_at: null,
-          },
-        ],
-      },
-      { rows: [{ status: "shipped" }, { status: "shipped" }] },
+      { rows: [{ id: 42, warehouse_status: current, completed_at: null }] },
+      { rows: lines },
       { rows: [] },
     ]);
-    const result = await recomputeOrderStatusFromShipments(mock.db, 42, {
-      now: NOW,
-    });
-    expect(result).toEqual({ warehouseStatus: "shipped", changed: true });
+    const result = await recomputeOrderStatusFromShipments(mock.db, 42, { now: NOW });
+    expect(result).toEqual({ warehouseStatus: expected, changed: current !== expected });
+    expect(mock.getCallCount()).toBe(current === expected ? 2 : 3);
+    expect(mock.calls[0].sqlText).toContain("FOR UPDATE");
+    expect(mock.calls[1].sqlText).toContain("LEFT JOIN LATERAL");
+    expect(mock.calls[1].sqlText).toContain("shipment.order_id = oi.order_id");
+    expect(mock.calls[1].sqlText).toContain("customer_fulfillment");
   });
 
-  it("1 shipped + 1 planned → 'partially_shipped'", async () => {
+  it("stamps completion once and closes blockers only for proven shipment completion", async () => {
+    for (const completedAt of [null, NOW]) {
+      const mock = makeDb([
+        { rows: [{ id: 42, warehouse_status: "ready", completed_at: completedAt }] },
+        { rows: [line({ shipped_quantity: 2 })] }, { rows: [] },
+      ]);
+      await recomputeOrderStatusFromShipments(mock.db, 42, { now: NOW });
+      expect(mock.calls[2].sqlText).toContain("allocation_exceptions");
+      expect(mock.calls[2].sqlText).toContain("shipment_rollup");
+      expect(mock.calls[2].sqlText).toContain("::timestamptz");
+      expect(mock.calls[2].sqlText.includes("completed_at")).toBe(completedAt === null);
+    }
+  });
+
+  it("does not fabricate shipment completion for empty evidence", async () => {
     const mock = makeDb([
-      {
-        rows: [
-          {
-            id: 42,
-            warehouse_status: "ready_to_ship",
-            completed_at: null,
-          },
-        ],
-      },
-      { rows: [{ status: "shipped" }, { status: "planned" }] },
+      { rows: [{ id: 42, warehouse_status: "picking", completed_at: null }] },
       { rows: [] },
     ]);
-    const result = await recomputeOrderStatusFromShipments(mock.db, 42, {
-      now: NOW,
-    });
-    expect(result).toEqual({
-      warehouseStatus: "partially_shipped",
-      changed: true,
-    });
+    expect(await recomputeOrderStatusFromShipments(mock.db, 42, { now: NOW }))
+      .toEqual({ warehouseStatus: "picking", changed: false });
   });
 
-  it("1 shipped + 1 cancelled → 'shipped' (cancelled counts as fulfilled)", async () => {
-    const mock = makeDb([
-      {
-        rows: [
-          {
-            id: 42,
-            warehouse_status: "ready_to_ship",
-            completed_at: null,
-          },
-        ],
-      },
-      { rows: [{ status: "shipped" }, { status: "cancelled" }] },
-      { rows: [] },
-    ]);
-    const result = await recomputeOrderStatusFromShipments(mock.db, 42, {
-      now: NOW,
-    });
-    expect(result.warehouseStatus).toBe("shipped");
-    expect(result.changed).toBe(true);
+  it("returns a no-op for a missing order and rejects invalid IDs before reading", async () => {
+    const missing = makeDb([{ rows: [] }, { rows: [] }]);
+    expect(await recomputeOrderStatusFromShipments(missing.db, 42, { now: NOW }))
+      .toEqual({ warehouseStatus: "ready", changed: false });
+    const invalid = makeDb([]);
+    await expect(recomputeOrderStatusFromShipments(invalid.db, 0, { now: NOW }))
+      .rejects.toMatchObject({ code: "INVALID_ARGUMENT", field: "wmsOrderId" });
+    expect(invalid.getCallCount()).toBe(0);
   });
 
-  it("2 shipments both cancelled → 'cancelled'", async () => {
+  it("rejects invalid evidence without persisting a status", async () => {
     const mock = makeDb([
-      {
-        rows: [
-          {
-            id: 42,
-            warehouse_status: "ready_to_ship",
-            completed_at: null,
-          },
-        ],
-      },
-      { rows: [{ status: "cancelled" }, { status: "cancelled" }] },
-      { rows: [] },
+      { rows: [{ id: 42, warehouse_status: "ready", completed_at: null }] },
+      { rows: [line({ shipped_quantity: -1 })] },
     ]);
-    const result = await recomputeOrderStatusFromShipments(mock.db, 42, {
-      now: NOW,
-    });
-    expect(result.warehouseStatus).toBe("cancelled");
-    expect(result.changed).toBe(true);
-  });
-
-  it("empty shipments + already-post-ready order → no change (no clobber)", async () => {
-    const mock = makeDb([
-      {
-        rows: [
-          {
-            id: 42,
-            warehouse_status: "picking",
-            completed_at: null,
-          },
-        ],
-      },
-      { rows: [] }, // no shipments
-    ]);
-    const result = await recomputeOrderStatusFromShipments(mock.db, 42, {
-      now: NOW,
-    });
-    // Keeps current state, no UPDATE.
-    expect(result.changed).toBe(false);
-    expect(result.warehouseStatus).toBe("picking");
+    await expect(recomputeOrderStatusFromShipments(mock.db, 42, { now: NOW })).rejects.toThrow();
     expect(mock.getCallCount()).toBe(2);
-  });
-
-  it("open shipment with no shipped progress does not promote an unpicked order", async () => {
-    const mock = makeDb([
-      {
-        rows: [
-          {
-            id: 42,
-            warehouse_status: "ready",
-            completed_at: null,
-            shippable_unit_count: 14,
-            picked_unit_count: 0,
-          },
-        ],
-      },
-      { rows: [{ status: "queued" }] },
-    ]);
-    const result = await recomputeOrderStatusFromShipments(mock.db, 42, {
-      now: NOW,
-    });
-    expect(result).toEqual({ warehouseStatus: "ready", changed: false });
-    expect(mock.getCallCount()).toBe(2);
-  });
-
-  it("open shipment rolls invalid unpicked ready_to_ship status back to ready", async () => {
-    const mock = makeDb([
-      {
-        rows: [
-          {
-            id: 42,
-            warehouse_status: "ready_to_ship",
-            completed_at: null,
-            shippable_unit_count: 14,
-            picked_unit_count: 0,
-          },
-        ],
-      },
-      { rows: [{ status: "queued" }] },
-      { rows: [] },
-    ]);
-    const result = await recomputeOrderStatusFromShipments(mock.db, 42, {
-      now: NOW,
-    });
-    expect(result).toEqual({ warehouseStatus: "ready", changed: true });
-    expect(mock.getCallCount()).toBe(3);
-  });
-
-  it("open shipment preserves ready_to_ship when all shippable units are picked", async () => {
-    const mock = makeDb([
-      {
-        rows: [
-          {
-            id: 42,
-            warehouse_status: "ready_to_ship",
-            completed_at: null,
-            shippable_unit_count: 14,
-            picked_unit_count: 14,
-          },
-        ],
-      },
-      { rows: [{ status: "queued" }] },
-    ]);
-    const result = await recomputeOrderStatusFromShipments(mock.db, 42, {
-      now: NOW,
-    });
-    expect(result).toEqual({
-      warehouseStatus: "ready_to_ship",
-      changed: false,
-    });
-    expect(mock.getCallCount()).toBe(2);
-  });
-
-  it("already matches derived state → changed=false, no UPDATE", async () => {
-    const mock = makeDb([
-      {
-        rows: [
-          {
-            id: 42,
-            warehouse_status: "shipped",
-            completed_at: new Date("2026-04-23T10:00:00Z"),
-          },
-        ],
-      },
-      { rows: [{ status: "shipped" }] },
-    ]);
-    const result = await recomputeOrderStatusFromShipments(mock.db, 42, {
-      now: NOW,
-    });
-    expect(result).toEqual({ warehouseStatus: "shipped", changed: false });
-    expect(mock.getCallCount()).toBe(2); // SELECTs only, no UPDATE.
-  });
-
-  it("missing order row → changed=false, no throw", async () => {
-    const mock = makeDb([
-      { rows: [] }, // order missing
-      { rows: [] }, // shipments
-    ]);
-    const result = await recomputeOrderStatusFromShipments(mock.db, 42, {
-      now: NOW,
-    });
-    expect(result.changed).toBe(false);
-    expect(result.warehouseStatus).toBe("ready"); // empty derivation
-  });
-
-  it("stamps completed_at on transition to 'shipped' when previously null", async () => {
-    const mock = makeDb([
-      {
-        rows: [
-          { id: 42, warehouse_status: "ready_to_ship", completed_at: null },
-        ],
-      },
-      { rows: [{ status: "shipped" }] },
-      { rows: [] },
-    ]);
-    await recomputeOrderStatusFromShipments(mock.db, 42, { now: NOW });
-    // Assert that there were exactly 3 DB calls (SELECT order, SELECT
-    // shipments, UPDATE). The distinction between the "stamp" UPDATE
-    // and the "no-stamp" UPDATE is observable via the execute call
-    // signature — we verify the shape by inspecting params below.
-    expect(mock.getCallCount()).toBe(3);
-    // The 3rd call is the UPDATE. Its SQL text must include
-    // "completed_at" — it's the stamping variant.
-    expect(mock.calls[2].sqlText).toMatch(/completed_at/);
-  });
-
-  it("does NOT re-stamp completed_at when transitioning to 'shipped' but it was already set", async () => {
-    const prev = new Date("2026-04-20T08:00:00Z");
-    const mock = makeDb([
-      {
-        rows: [
-          {
-            id: 42,
-            warehouse_status: "partially_shipped",
-            completed_at: prev,
-          },
-        ],
-      },
-      { rows: [{ status: "shipped" }, { status: "shipped" }] },
-      { rows: [] },
-    ]);
-    await recomputeOrderStatusFromShipments(mock.db, 42, { now: NOW });
-    expect(mock.getCallCount()).toBe(3);
-    // The no-stamp variant must NOT include completed_at.
-    expect(mock.calls[2].sqlText).not.toMatch(/completed_at/);
-  });
-
-  it("rejects non-positive wmsOrderId without DB access", async () => {
-    const mock = makeDb([]);
-    await expect(
-      recomputeOrderStatusFromShipments(mock.db, 0, { now: NOW }),
-    ).rejects.toMatchObject({
-      code: "INVALID_ARGUMENT",
-      field: "wmsOrderId",
-    });
-    expect(mock.getCallCount()).toBe(0);
-  });
-
-  // Regression: cancelled↔ready_to_ship oscillation (cancel-spam fix).
-  // When warehouse_status is already 'cancelled', the rollup must NOT
-  // flip it back to ready_to_ship even if shipments are still open.
-  it("cancelled order with open shipments → stays cancelled (no oscillation)", async () => {
-    const mock = makeDb([
-      {
-        rows: [
-          { id: 42, warehouse_status: "cancelled", completed_at: null },
-        ],
-      },
-      { rows: [{ status: "planned" }] },
-    ]);
-    const result = await recomputeOrderStatusFromShipments(mock.db, 42, {
-      now: NOW,
-    });
-    expect(result.warehouseStatus).toBe("cancelled");
-    expect(result.changed).toBe(false);
-    expect(mock.getCallCount()).toBe(2); // SELECTs only, no UPDATE
-  });
-
-  it("cancelled order with all-cancelled shipments → stays cancelled", async () => {
-    const mock = makeDb([
-      {
-        rows: [
-          { id: 42, warehouse_status: "cancelled", completed_at: null },
-        ],
-      },
-      { rows: [{ status: "cancelled" }, { status: "cancelled" }] },
-    ]);
-    const result = await recomputeOrderStatusFromShipments(mock.db, 42, {
-      now: NOW,
-    });
-    expect(result.warehouseStatus).toBe("cancelled");
-    expect(result.changed).toBe(false);
-  });
-
-  // Edge: if shipments actually shipped after OMS cancelled, truth wins.
-  it("cancelled order with shipped shipment → transitions to shipped (truth wins)", async () => {
-    const mock = makeDb([
-      {
-        rows: [
-          { id: 42, warehouse_status: "cancelled", completed_at: null },
-        ],
-      },
-      { rows: [{ status: "shipped" }] },
-      { rows: [] }, // UPDATE
-    ]);
-    const result = await recomputeOrderStatusFromShipments(mock.db, 42, {
-      now: NOW,
-    });
-    expect(result.warehouseStatus).toBe("shipped");
-    expect(result.changed).toBe(true);
   });
 });
 

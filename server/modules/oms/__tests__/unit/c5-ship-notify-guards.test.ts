@@ -131,10 +131,11 @@ describe("D-FULLQTY: canonical idempotent quantity projection", () => {
     );
   });
 
-  it("only counts packages with confirmed shipped status", () => {
-    expect(PROJECTION_SRC).toContain("AND package.status = 'shipped'");
+  it("counts shipped and subsequently returned packages, never unshipped labels", () => {
+    expect(PROJECTION_SRC).toContain("AND package.status IN ('shipped', 'returned')");
     expect(PROJECTION_SRC).not.toMatch(/package\.status\s+IN\s*\([^)]*'queued'/);
     expect(PROJECTION_SRC).not.toMatch(/package\.status\s+IN\s*\([^)]*'labeled'/);
+    expect(PROJECTION_SRC).not.toMatch(/package\.status\s+IN\s*\([^)]*'voided'/);
   });
 
   it("projects each affected WMS line by canonical line identity", () => {

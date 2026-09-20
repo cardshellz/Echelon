@@ -372,6 +372,41 @@ export function createChannelFulfillmentIngressService(
         clock.now(),
       );
 
+      if (prepared.shippingEvidenceMissing) {
+        const failure = Object.freeze({
+          code: "SHIPPING_ENGINE_EVIDENCE_MISSING",
+          message: "Channel fulfillment has no matching shipping-engine package; no warehouse or inventory changes were made",
+          context: Object.freeze({ omsOrderId: prepared.omsOrderId,
+            sourceOrderId: input.sourceOrderId, sourceFulfillmentId: input.sourceFulfillmentId,
+            lineItems: input.lineItems }),
+        });
+        await renewLease();
+        await recordReview(dependencies.repository, {
+          receiptId: staged.receiptId, leaseToken: activeLeaseToken, failure, completedAt: clock.now(),
+        });
+        logger.warn({ code: failure.code, ...context, omsOrderId: prepared.omsOrderId });
+        return Object.freeze({
+          receiptId: staged.receiptId, processingStatus: "review", physicalShipmentId: null,
+          sourceEcho: false, replayed: false, inventoryFailures: 0,
+          cancellationFailures: 0, partialOverlapShipmentIds: Object.freeze([]),
+        });
+      }
+
+      if (prepared.nonShippingOnly) {
+        await renewLease();
+        await dependencies.repository.completeReceipt({
+          receiptId: staged.receiptId, leaseToken: activeLeaseToken,
+          processingStatus: "processed", physicalShipmentId: null,
+          completedAt: clock.now(), metadata: Object.freeze({ nonShippingOnly: true }),
+        });
+        logger.info({ code: "CHANNEL_NON_SHIPPING_FULFILLMENT_RECORDED", ...context });
+        return Object.freeze({
+          receiptId: staged.receiptId, processingStatus: "processed", physicalShipmentId: null,
+          sourceEcho: false, replayed: false, inventoryFailures: 0,
+          cancellationFailures: 0, partialOverlapShipmentIds: Object.freeze([]),
+        });
+      }
+
       let physicalShipmentId = prepared.physicalShipmentId;
       activePhysicalShipmentId = physicalShipmentId;
       if (!physicalShipmentId) {
