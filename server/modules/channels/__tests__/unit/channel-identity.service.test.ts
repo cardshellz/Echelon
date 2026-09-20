@@ -109,4 +109,27 @@ describe("verified feed creation", () => {
     expect(db.update).not.toHaveBeenCalled();
     expect(db.insert).not.toHaveBeenCalled();
   });
+  it("returns mapped stock from all fallback-version pages without mutating configuration or quantities", async () => {
+    const db = database([[account], [{ ...listing, externalInventoryItemId: "5" }]]);
+    const request = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ inventory_levels: [
+        { inventory_item_id: 6, location_id: 20, available: null },
+      ] }), { headers: { "X-Shopify-API-Version": "2025-10",
+        Link: '<https://second.myshopify.com/admin/api/2024-01/inventory_levels.json?limit=250&page_info=next>; rel="next"' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ inventory_levels: [
+        { inventory_item_id: 5, location_id: 20, available: 42 },
+      ] }), { headers: { "X-Shopify-API-Version": "2025-10" } }));
+    const reader = new ShopifyIdentityReader(request);
+    await expect(new ChannelIdentityService(db as never, reader).externalInventory(2)).resolves.toEqual({
+      channelId: 2, connectionId: 7, externalLocationId: "20",
+      items: [{ externalInventoryItemId: "5", productVariantId: 1, quantity: 42 }],
+      unavailableItems: [{ externalInventoryItemId: "6", reason: "untracked" }],
+    });
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(request.mock.calls[1]![0]).toBe("https://second.myshopify.com/admin/api/2025-10/inventory_levels.json?page_info=next&limit=250");
+    expect(db.update).not.toHaveBeenCalled();
+    expect(db.insert).not.toHaveBeenCalled();
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(account.apiVersion).toBe("2024-01");
+  });
 });
