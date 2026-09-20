@@ -1,6 +1,7 @@
 import type { Express, Request, Response } from "express";
 
 import { db, pool } from "../../db";
+import { enqueueShipStationRetry } from "../oms/webhook-retry.worker";
 import { hasPermission } from "../identity";
 import { requireAuth, requirePermission } from "../../routes/middleware";
 import {
@@ -281,6 +282,11 @@ export function registerOperationsControlTowerRoutes(app: Express) {
           expectedPreviewEvidenceHash: req.body?.expectedPreviewEvidenceHash,
           decision: req.body?.decision,
           reason: req.body?.reason,
+          enqueueReprocess: async (providerOrderId) => {
+            await enqueueShipStationRetry(db, {
+              resource_url: `/shipments?orderId=${providerOrderId}`,
+            });
+          },
         }));
       } catch (error) {
         sendControlTowerV2Error(res, error, "Failed to record historical package-content decision");

@@ -52,8 +52,20 @@ function fixture(enabled = true) {
   };
   const reviewRepository = { record: vi.fn().mockResolvedValue(undefined) };
   const logger = { info: vi.fn(), warn: vi.fn() };
+  const loadLabelContents = vi.fn().mockResolvedValue({
+    authoritativeContents: [{ wmsShipmentItemId: 70001, quantity: 1 }],
+    providerObservations: [{
+      eventKey: "label-event:1",
+      contents: [{ wmsShipmentItemId: 70001, quantity: 1 }],
+    }],
+    leadCorrections: [],
+  });
   const workflow: PackageAllocationLabelCommercialWorkflow = {
-    run: async (work) => work({ bootstrap: bootstrap as any, fulfillmentAuthority: fulfillmentAuthority as any }),
+    run: async (work) => work({
+      loadLabelContents,
+      bootstrap: bootstrap as any,
+      fulfillmentAuthority: fulfillmentAuthority as any,
+    }),
   };
   const runWorkflow = vi.spyOn(workflow, "run");
   const service = new PackageAllocationLabelCommercialFulfillmentService({
@@ -63,7 +75,8 @@ function fixture(enabled = true) {
     reviewRepository,
     logger,
   });
-  return { service, labelLinker, bootstrap, fulfillmentAuthority, reviewRepository, logger, runWorkflow };
+  return { service, labelLinker, bootstrap, fulfillmentAuthority, reviewRepository, logger, runWorkflow,
+    loadLabelContents };
 }
 
 const observation = {
@@ -150,6 +163,52 @@ describe("PackageAllocationLabelCommercialFulfillmentService", () => {
         causationId: "shipstation-shipment:44001",
       }));
     expect(f.reviewRepository.record).not.toHaveBeenCalled();
+  });
+
+  it("activates only lead-corrected contents when the provider included an unshipped refunded line", async () => {
+    const f = fixture();
+    f.loadLabelContents.mockResolvedValue({
+      authoritativeContents: [{ wmsShipmentItemId: 70001, quantity: 1 }],
+      providerObservations: [{
+        eventKey: "label-event:1",
+        contents: [
+          { wmsShipmentItemId: 70001, quantity: 1 },
+          { wmsShipmentItemId: 70002, quantity: 1 },
+        ],
+      }],
+      leadCorrections: [{ resolvesEventKeys: ["label-event:1"] }],
+    });
+
+    await expect(f.service.process(shipment({ shipmentItems: [
+      { lineItemKey: "wms-item-70001", quantity: 1 },
+      { lineItemKey: "wms-item-70002", quantity: 1 },
+    ] }), observation)).resolves.toMatchObject({ outcome: "activated" });
+    expect(f.bootstrap.persistDiscovered).toHaveBeenCalledWith(expect.objectContaining({
+      sourceWmsShipmentItemIds: [70001],
+    }));
+  });
+
+  it("blocks a provider/WMS discrepancy without a named lead correction", async () => {
+    const f = fixture();
+    f.loadLabelContents.mockResolvedValue({
+      authoritativeContents: [{ wmsShipmentItemId: 70001, quantity: 1 }],
+      providerObservations: [{
+        eventKey: "label-event:1",
+        contents: [
+          { wmsShipmentItemId: 70001, quantity: 1 },
+          { wmsShipmentItemId: 70002, quantity: 1 },
+        ],
+      }],
+      leadCorrections: [],
+    });
+
+    await expect(f.service.process(shipment({ shipmentItems: [
+      { lineItemKey: "wms-item-70001", quantity: 1 },
+      { lineItemKey: "wms-item-70002", quantity: 1 },
+    ] }), observation)).resolves.toEqual({ outcome: "review", reason: "PACKAGE_EVIDENCE_NOT_FOUND" });
+    expect(f.bootstrap.persistDiscovered).not.toHaveBeenCalled();
+    expect(f.fulfillmentAuthority.materializeAndActivatePackageAllocationCommercialFulfillment)
+      .not.toHaveBeenCalled();
   });
 
   it("records review and performs no plan or channel write when provider contents are not exact", async () => {

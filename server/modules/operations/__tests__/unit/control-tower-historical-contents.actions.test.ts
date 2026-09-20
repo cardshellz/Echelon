@@ -132,4 +132,62 @@ describe("Control Tower historical package-content actions", () => {
       reason: "The available evidence does not establish either package record.",
     });
   });
+
+  it("queues an exact ShipStation order replay only after a lead-confirmed current-label correction", async () => {
+    const query = vi.fn(async (statement: string) => statement.includes("control_tower_work_items")
+      ? { rows: [{
+          source_namespace: "wms.reconciliation_exceptions",
+          source_type: "reconciliation_exception",
+          source_key: "501",
+          code: "historical_shipstation_contents_review",
+          row_version: 3,
+          source_status: "open",
+        }] }
+      : { rows: [{ provider_order_id: "78002", current_authoritative: true }] });
+    const enqueueReprocess = vi.fn(async () => undefined);
+    const decide = vi.fn(async () => ({
+      kind: "created", exceptionId: "501", shippingProviderLabelId: "41",
+    }));
+    await expect(decideHistoricalContentsReview({
+      pool: { query } as unknown as Pool,
+      workItemId: 71,
+      version: 3,
+      actorUserId: "lead-1",
+      expectedPreviewEvidenceHash: "a".repeat(64),
+      decision: "wms_confirmed",
+      reason: "The refunded line was not physically packed.",
+      reviewService: { preview: vi.fn(), decide },
+      enqueueReprocess,
+    })).resolves.toMatchObject({ shippingProviderLabelId: "41" });
+    expect(enqueueReprocess).toHaveBeenCalledExactlyOnceWith("78002");
+    expect(query).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not reprocess a historical-only confirmation", async () => {
+    const query = vi.fn(async (statement: string) => statement.includes("control_tower_work_items")
+      ? { rows: [{
+          source_namespace: "wms.reconciliation_exceptions",
+          source_type: "reconciliation_exception",
+          source_key: "501",
+          code: "historical_shipstation_contents_review",
+          row_version: 3,
+          source_status: "open",
+        }] }
+      : { rows: [{ provider_order_id: "78002", current_authoritative: false }] });
+    const enqueueReprocess = vi.fn(async () => undefined);
+    await decideHistoricalContentsReview({
+      pool: { query } as unknown as Pool,
+      workItemId: 71,
+      version: 3,
+      actorUserId: "lead-1",
+      expectedPreviewEvidenceHash: "a".repeat(64),
+      decision: "wms_confirmed",
+      reason: "Historical WMS evidence was reviewed.",
+      reviewService: { preview: vi.fn(), decide: vi.fn(async () => ({
+        kind: "created", exceptionId: "501", shippingProviderLabelId: "41",
+      })) },
+      enqueueReprocess,
+    });
+    expect(enqueueReprocess).not.toHaveBeenCalled();
+  });
 });
