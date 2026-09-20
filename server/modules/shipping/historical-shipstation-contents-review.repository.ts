@@ -4,7 +4,11 @@ import type { Pool, PoolClient } from "pg";
 
 import { canonicalJson } from "@shared/utils/canonical-json";
 
-import { PgHistoricalShipStationContentsAttestationRepository } from "./historical-shipstation-contents-attestation.repository";
+import {
+  loadCurrentShipStationContentsConflictCandidate,
+  loadCurrentShipStationContentsConflictReviewSnapshot,
+  PgHistoricalShipStationContentsAttestationRepository,
+} from "./historical-shipstation-contents-attestation.repository";
 import {
   buildHistoricalShipStationContentsSystemRecoveryEvent,
   type HistoricalShipStationContentsRecoveryLabelStatus,
@@ -417,7 +421,21 @@ implements HistoricalShipStationContentsReviewRepository {
       this.attestationRepository.loadReviewSnapshot(shippingProviderLabelId),
       this.recoveryRepository.loadSnapshot(shippingProviderLabelId),
     ]);
-    if (review === null || recovery === null) return null;
+    if (review === null || recovery === null) {
+      const current = await loadCurrentShipStationContentsConflictReviewSnapshot(
+        this.pool, shippingProviderLabelId, false,
+      );
+      if (current === null) return null;
+      return Object.freeze({
+        ...current.candidate,
+        trackingNumber: current.reviewContext.trackingNumber,
+        labelStatus: "active" as const,
+        shipStationOrderId: current.reviewContext.shipStationOrderId,
+        wmsOrders: current.reviewContext.wmsOrders,
+        linkedShipments: current.reviewContext.linkedShipments,
+        linePresentations: current.reviewContext.linePresentations,
+      });
+    }
     if (canonicalJson(review.candidate) !== canonicalJson({
       shippingProviderLabelId: recovery.candidate.shippingProviderLabelId,
       providerShipmentId: recovery.candidate.providerShipmentId,
@@ -467,6 +485,8 @@ implements HistoricalShipStationContentsReviewRepository {
         client,
         record.candidate.shippingProviderLabelId,
         true,
+      ) ?? await loadCurrentShipStationContentsConflictCandidate(
+        client, record.candidate.shippingProviderLabelId, true,
       );
       if (lockedCandidate === null || canonicalJson(lockedCandidate) !== canonicalJson({
         shippingProviderLabelId: record.candidate.shippingProviderLabelId,
@@ -660,6 +680,8 @@ implements HistoricalShipStationContentsReviewRepository {
         client,
         input.snapshot.candidate.shippingProviderLabelId,
         true,
+      ) ?? await loadCurrentShipStationContentsConflictCandidate(
+        client, input.snapshot.candidate.shippingProviderLabelId, true,
       );
       if (lockedCandidate === null || canonicalJson(lockedCandidate) !== canonicalJson({
         shippingProviderLabelId: input.snapshot.candidate.shippingProviderLabelId,
@@ -678,15 +700,6 @@ implements HistoricalShipStationContentsReviewRepository {
          FROM wms.shipping_provider_label_events AS event
          WHERE event.shipping_provider_label_id = $1::bigint
            AND event.event_type IN ('label_observed', 'label_voided')
-           AND (
-             NOT (event.sanitized_payload ? 'payloadSchemaVersion')
-             OR event.sanitized_payload->>'payloadSchemaVersion' = '1'
-             OR (
-               event.sanitized_payload->>'payloadSchemaVersion' = '2'
-               AND event.sanitized_payload->'declaredContentsEvidence'->>'status'
-                 IS DISTINCT FROM 'authoritative'
-             )
-           )
          ORDER BY event.id
          LIMIT $2::integer
          FOR KEY SHARE`,
@@ -695,7 +708,7 @@ implements HistoricalShipStationContentsReviewRepository {
       if (resolved.rows.length < 1 || resolved.rows.length > MAX_RESOLVED_EVENTS) {
         throw new HistoricalShipStationContentsReviewRepositoryError(
           "INVALID_DATABASE_EVIDENCE",
-          "Historical contents review has no bounded non-authoritative evidence to resolve",
+          "Contents review has no bounded provider evidence to resolve",
         );
       }
       const event = buildHistoricalShipStationContentsSystemRecoveryEvent({

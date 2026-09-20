@@ -95,6 +95,7 @@ import { PgHistoricalShipStationContentsReviewRepository } from "../../historica
 import { HistoricalShipStationContentsReviewService } from "../../historical-shipstation-contents-review.service";
 import { PgHistoricalShipStationContentsCorrectionRepository } from "../../historical-shipstation-contents-correction.repository";
 import { HistoricalShipStationContentsCorrectionService } from "../../historical-shipstation-contents-correction.service";
+import { projectPersistedDeclaredPackageLifecycleShadow } from "../../declared-package-lifecycle-shadow.domain";
 import { shipmentQuantityEvidenceFixtureSql } from "../fixtures/shipment-quantity-evidence.fixture";
 
 const PRIMARY_GROUP_KEY = "86e1be0d-c7d8-4c91-919f-04f5eb547f79";
@@ -4925,6 +4926,121 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     expect((await pool.query("SELECT id FROM wms.outbound_shipment_items WHERE id = $1", [refundedSourceId])).rowCount).toBe(1);
   });
 
+  it("reviews a current authoritative label with a deleted refunded source before isolating the shipped line", async () => {
+    const shippedSourceId = await seedCommercialFulfillmentAuthoritySource(
+      pool, "SKU-ACTUALLY-SHIPPED", 2,
+    );
+    const deletedRefundedSourceId = shippedSourceId + 100_000;
+    const shipment = await pool.query<{ shipment_id: number }>(
+      "SELECT shipment_id FROM wms.outbound_shipment_items WHERE id = $1::integer",
+      [shippedSourceId],
+    );
+    const labelId = await seedAuthorityReadinessLabel(pool, shippedSourceId, {
+      providerLabelId: "57002",
+      providerOrderId: "78002",
+      trackingNumber: "1ZCURRENTREFUNDREVIEW",
+      contentsLines: [
+        { lineItemKey: `wms-item-${shippedSourceId}`, quantity: 2 },
+        { lineItemKey: `wms-item-${deletedRefundedSourceId}`, quantity: 1 },
+      ],
+    });
+    await pool.query(
+      `INSERT INTO wms.shipping_provider_label_links (
+         shipping_provider_label_id, legacy_wms_shipment_id
+       ) VALUES ($1::bigint, $2::integer)`,
+      [labelId, shipment.rows[0].shipment_id],
+    );
+    const leadUserId = "22222222-2222-4222-8222-222222222223";
+    await pool.query(
+      `INSERT INTO identity.users (id, username, password, role, active)
+       VALUES ($1, 'current-review-lead', 'test-only-password-hash', 'lead', 1)`,
+      [leadUserId],
+    );
+    const providerObservationHash = "b".repeat(64);
+    const client: HistoricalShipStationContentsClient = {
+      async loadShipmentContents(providerShipmentId, expectedContents) {
+        expect(providerShipmentId).toBe(57_002);
+        expect(expectedContents).toMatchObject({
+          kind: "available",
+          lines: [{ wmsShipmentItemId: shippedSourceId, quantity: 2 }],
+        });
+        const providerItems = [
+          { lineItemKey: `wms-item-${shippedSourceId}`, quantity: 2 },
+          { lineItemKey: `wms-item-${deletedRefundedSourceId}`, quantity: 1 },
+        ];
+        const recovery = buildHistoricalShipStationContentsRecoveryEvidence({
+          providerShipmentId,
+          providerStatus: "authoritative",
+          rawProviderItems: providerItems,
+          expectedContents,
+        });
+        if (recovery === null) throw new Error("Expected authoritative provider evidence");
+        return Object.freeze({
+          kind: "found" as const,
+          evidence: Object.freeze({
+            status: "authoritative" as const,
+            recoveryStatus: recovery.recoveryStatus,
+            providerItemCount: 2,
+            recognizedProviderItemCount: 2,
+            canonicalLineCount: 2,
+            malformedItemCount: 0,
+            unrecognizedItemCount: 0,
+            duplicateLineItemCount: 0,
+            recoveryEvidence: null,
+          }),
+          recoveryEvidenceDetails: recovery,
+          providerObservation: Object.freeze({
+            evidenceHash: providerObservationHash,
+            lines: Object.freeze([
+              Object.freeze({ sku: "SKU-ACTUALLY-SHIPPED", quantity: 2 }),
+              Object.freeze({ sku: "SKU-REFUNDED-NOT-SHIPPED", quantity: 1 }),
+            ]),
+          }),
+        });
+      },
+    };
+    const service = new HistoricalShipStationContentsReviewService(
+      new PgHistoricalShipStationContentsReviewRepository(pool), client,
+    );
+    const intake = await service.intake({
+      shippingProviderLabelId: String(labelId),
+      reason: "provider_wms_conflict",
+      expectedEvidenceHash: providerObservationHash,
+    });
+    const preview = await service.preview(intake.exceptionId);
+    expect(preview).toMatchObject({
+      trackingNumber: "1ZCURRENTREFUNDREVIEW",
+      wmsContents: [{ wmsShipmentItemId: shippedSourceId, quantity: 2 }],
+      providerContents: [
+        { sku: "SKU-ACTUALLY-SHIPPED", quantity: 2 },
+        { sku: "SKU-REFUNDED-NOT-SHIPPED", quantity: 1 },
+      ],
+    });
+    const correction = await service.decide({
+      exceptionId: intake.exceptionId,
+      expectedPreviewEvidenceHash: preview.previewEvidenceHash,
+      authenticatedActorUserId: leadUserId,
+      decision: "wms_confirmed",
+      reason: "The refunded source was not physically packed; only the linked WMS source shipped.",
+    });
+    expect(correction).toMatchObject({ kind: "created", shippingProviderLabelId: String(labelId) });
+    const persisted = await new PgPackageAllocationLedgerRepository(pool)
+      .withSerializableTransaction((transaction) =>
+        transaction.lockAuthorityReadinessPackages([labelId]));
+    expect(persisted).toHaveLength(1);
+    const projected = projectPersistedDeclaredPackageLifecycleShadow(persisted[0].persistedEvidence);
+    expect(projected).toMatchObject({
+      outcome: "projected",
+      projection: { authoritativeContents: [{ wmsShipmentItemId: shippedSourceId, quantity: 2 }] },
+    });
+    expect((await pool.query(
+      "SELECT id FROM wms.outbound_shipment_items WHERE id = $1::integer",
+      [deletedRefundedSourceId],
+    )).rowCount).toBe(0);
+    expect((await pool.query("SELECT id FROM wms.physical_shipment_items")).rowCount).toBe(0);
+    expect((await pool.query("SELECT id FROM oms.channel_fulfillment_push_items")).rowCount).toBe(0);
+  });
+
   it("materializes only the authorized portion of a partly canceled source line", async () => {
     const sourceId = await seedCommercialFulfillmentAuthoritySource(pool, "SKU-PARTIAL-COMMERCIAL", 2);
     await pool.query(
@@ -5547,7 +5663,17 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       });
       const label = new PackageAllocationLabelCommercialFulfillmentService({
         enabled: true,
-        workflow: { run: async (work) => work({ bootstrap, fulfillmentAuthority: fulfillment }) },
+        workflow: { run: async (work) => work({
+          loadLabelContents: async () => ({
+            authoritativeContents: [{ wmsShipmentItemId: sourceId, quantity: 2 }],
+            providerObservations: [{ eventKey: "test-label", contents: [
+              { wmsShipmentItemId: sourceId, quantity: 2 },
+            ] }],
+            leadCorrections: [],
+          }),
+          bootstrap,
+          fulfillmentAuthority: fulfillment,
+        }) },
         labelLinker: {
           reconcileShipStationLabel: async () => ({
             shippingProviderLabelId: labelId,

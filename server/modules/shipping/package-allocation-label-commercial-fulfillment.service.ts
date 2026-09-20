@@ -46,6 +46,14 @@ export interface PackageAllocationLabelLinker {
 }
 
 export interface PackageAllocationLabelCommercialWorkflowContext {
+  readonly loadLabelContents: (shippingProviderLabelId: number) => Promise<Readonly<{
+    readonly authoritativeContents: readonly Readonly<{ wmsShipmentItemId: number; quantity: number }>[] | null;
+    readonly providerObservations: readonly Readonly<{
+      readonly eventKey: string;
+      readonly contents: readonly Readonly<{ wmsShipmentItemId: number; quantity: number }>[];
+    }>[];
+    readonly leadCorrections: readonly Readonly<{ readonly resolvesEventKeys: readonly string[] }>[];
+  }> | null>;
   readonly bootstrap: Pick<PackageAllocationBootstrapPersistenceService, "persistDiscovered">;
   readonly fulfillmentAuthority: Pick<
     ChannelFulfillmentAuthorityService,
@@ -207,13 +215,13 @@ export class PackageAllocationLabelCommercialFulfillmentService {
     }
 
     const exactItems = parseExactPositiveWmsShipmentItems(shipment.shipmentItems);
-    const sourceWmsShipmentItemIds = exactItems?.map((item) => item.sourceShipmentItemId) ?? [];
+    const providerSourceWmsShipmentItemIds = exactItems?.map((item) => item.sourceShipmentItemId) ?? [];
     if (!exactItems) {
       await this.recordReview(
         shipment,
         labelObservation,
         "provider_contents_not_authoritative",
-        sourceWmsShipmentItemIds,
+        providerSourceWmsShipmentItemIds,
         {},
       );
       return Object.freeze({ outcome: "review", reason: "provider_contents_not_authoritative" });
@@ -224,6 +232,42 @@ export class PackageAllocationLabelCommercialFulfillmentService {
       const result = await this.dependencies.workflow.run(async (context) => {
         const replacement = await context.fulfillmentAuthority.reconcileEbayLabelReplacement?.(Number(labelObservation.shippingProviderLabelId));
         if (replacement) return { replacement, bootstrap: null, activated: null };
+        const persisted = await context.loadLabelContents(labelObservation.shippingProviderLabelId);
+        if (!persisted?.authoritativeContents) {
+          throw new PackageAllocationLedgerRepositoryError(
+            "PACKAGE_EVIDENCE_NOT_FOUND",
+            "The persisted label does not have authoritative contents",
+            { shippingProviderLabelId: labelObservation.shippingProviderLabelId },
+          );
+        }
+        const providerLines = exactItems.map((item) => ({
+          wmsShipmentItemId: item.sourceShipmentItemId,
+          quantity: item.quantity,
+        }));
+        const sameLines = (left: readonly Readonly<{ wmsShipmentItemId: number; quantity: number }>[],
+          right: readonly Readonly<{ wmsShipmentItemId: number; quantity: number }>[]) =>
+          JSON.stringify([...left].sort((a, b) => a.wmsShipmentItemId - b.wmsShipmentItemId))
+          === JSON.stringify([...right].sort((a, b) => a.wmsShipmentItemId - b.wmsShipmentItemId));
+        const matchingObservation = persisted.providerObservations.find((event) =>
+          sameLines(event.contents, providerLines));
+        if (!matchingObservation) {
+          throw new PackageAllocationLedgerRepositoryError(
+            "PACKAGE_EVIDENCE_NOT_FOUND",
+            "The current provider lines do not match a persisted label observation",
+            { shippingProviderLabelId: labelObservation.shippingProviderLabelId },
+          );
+        }
+        if (!sameLines(persisted.authoritativeContents, providerLines)
+          && !persisted.leadCorrections.some((correction) =>
+            correction.resolvesEventKeys.includes(matchingObservation.eventKey))) {
+          throw new PackageAllocationLedgerRepositoryError(
+            "PACKAGE_EVIDENCE_NOT_FOUND",
+            "A lead-confirmed correction is required to supersede provider contents",
+            { shippingProviderLabelId: labelObservation.shippingProviderLabelId },
+          );
+        }
+        const sourceWmsShipmentItemIds = persisted.authoritativeContents.map(
+          (line) => line.wmsShipmentItemId);
         const bootstrap = await context.bootstrap.persistDiscovered({
           contractVersion: 1,
           authorityMode: "shadow_only",
@@ -252,14 +296,14 @@ export class PackageAllocationLabelCommercialFulfillmentService {
       };
       if (result.replacement) {
         if (result.replacement.outcome === "review") await this.recordReview(shipment, labelObservation,
-          result.replacement.reason, sourceWmsShipmentItemIds, { authority: "ebay_label_replacement" });
+          result.replacement.reason, providerSourceWmsShipmentItemIds, { authority: "ebay_label_replacement" });
         return result.replacement;
       }
       const { bootstrap, activated } = result;
       if (!bootstrap) throw new Error("Label workflow returned no authority result");
       if (activated === null) {
         const reason = bootstrapReviewReason(bootstrap);
-        await this.recordReview(shipment, labelObservation, reason, sourceWmsShipmentItemIds, {
+        await this.recordReview(shipment, labelObservation, reason, providerSourceWmsShipmentItemIds, {
           labelLinksInserted: links.linksInserted,
           totalLabelLinks: links.totalLinks,
           selectedShippingProviderLabelIds: bootstrap.selectedShippingProviderLabelIds,
@@ -288,7 +332,7 @@ export class PackageAllocationLabelCommercialFulfillmentService {
         shipment,
         labelObservation,
         review.reasonCode,
-        sourceWmsShipmentItemIds,
+        providerSourceWmsShipmentItemIds,
         review.details,
       );
       return Object.freeze({ outcome: "review", reason: review.reasonCode });
