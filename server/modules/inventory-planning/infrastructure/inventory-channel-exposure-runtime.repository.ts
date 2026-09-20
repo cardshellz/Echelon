@@ -61,6 +61,8 @@ interface SourceBindingRow {
 }
 
 interface PolicyRow {
+  source_fulfillment_node_ids?: number[] | null;
+  inherit_all?: boolean;
   channel_id: unknown;
   scope_key: unknown;
   policy_id: unknown;
@@ -193,6 +195,17 @@ export async function loadActivePublicationTargets(
   return loadSelectedPublicationTargets(client, productId, productVariantIds, channelId, false);
 }
 
+/** Review only: drafts for this channel, active definitions for every other
+ * live channel so shared partition budgets are checked across the whole pool. */
+export async function loadChannelDefinitionReviewTargets(
+  client: InventoryAvailabilityTransactionQueryClient,
+  productId: number,
+  productVariantIds: readonly number[],
+  draftChannelId: number,
+): Promise<ActiveInventoryPublicationTargetSnapshot[]> {
+  return loadSelectedPublicationTargets(client, productId, productVariantIds, undefined, false, undefined, false, draftChannelId);
+}
+
 /**
  * Projects draft-preferred preview targets into their proposed post-cutover state.
  * It writes nothing and must never be used by a live runtime reader/publisher.
@@ -235,19 +248,27 @@ async function loadSelectedPublicationTargets(
   proposed: boolean,
   selectedTargetId?: number,
   activeDefinitionsOnly = false,
+  draftChannelId?: number,
 ): Promise<ActiveInventoryPublicationTargetSnapshot[]> {
   const targetState = proposed ? "preview" : "live";
   const useProposedDefinitions = proposed && !activeDefinitionsOnly;
-  const bindingPointer = useProposedDefinitions
+  const channelDraft = draftChannelId == null ? null : positiveInteger(draftChannelId, "draftChannelId");
+  const bindingPointer = channelDraft !== null
+    ? `CASE WHEN target.channel_id=${channelDraft} THEN COALESCE(head.draft_binding_id, head.active_binding_id) ELSE head.active_binding_id END`
+    : useProposedDefinitions
     ? "COALESCE(head.draft_binding_id, head.active_binding_id)"
     : "head.active_binding_id";
-  const policyPointer = useProposedDefinitions
+  const policyPointer = channelDraft !== null
+    ? `CASE WHEN head.channel_id=${channelDraft} THEN COALESCE(head.draft_policy_id, head.active_policy_id) ELSE head.active_policy_id END`
+    : useProposedDefinitions
     ? "COALESCE(head.draft_policy_id, head.active_policy_id)"
     : "head.active_policy_id";
-  const mappingPointer = useProposedDefinitions
+  const mappingPointer = channelDraft !== null
+    ? `CASE WHEN head.publication_target_id IN (SELECT id FROM inventory.inventory_publication_targets WHERE channel_id=${channelDraft}) THEN COALESCE(head.draft_mapping_id, head.active_mapping_id) ELSE head.active_mapping_id END`
+    : useProposedDefinitions
     ? "COALESCE(head.draft_mapping_id, head.active_mapping_id)"
     : "head.active_mapping_id";
-  const definitionStates = useProposedDefinitions ? "('draft', 'sealed')" : "('sealed')";
+  const definitionStates = useProposedDefinitions || channelDraft !== null ? "('draft', 'sealed')" : "('sealed')";
   const targetValues: unknown[] = [];
   const channelFilter = channelId == null ? "" : "AND target.channel_id = $1";
   if (channelId != null) targetValues.push(positiveInteger(channelId, "channelId"));
@@ -328,7 +349,8 @@ async function loadSelectedPublicationTargets(
             policy.holdback_sellable_units::text AS holdback_sellable_units,
             policy.max_publish_mode,
             policy.max_publish_sellable_units::text AS max_publish_sellable_units,
-            policy.min_publish_sellable_units::text AS min_publish_sellable_units
+            policy.min_publish_sellable_units::text AS min_publish_sellable_units,
+            policy.source_fulfillment_node_ids, policy.inherit_all
      FROM inventory.channel_exposure_policy_heads AS head
      JOIN inventory.channel_exposure_policy_versions AS policy
        ON policy.id = ${policyPointer}
@@ -360,6 +382,10 @@ async function loadSelectedPublicationTargets(
 
   const bindings = mapBindings(bindingResult.rows);
   const policies = groupPoliciesByChannel(policyResult.rows, productId);
+  const overrideNodeIds = [...new Set(policyResult.rows.flatMap(row => row.source_fulfillment_node_ids ?? []))];
+  const overrideNodes = overrideNodeIds.length === 0 ? [] : (await client.query<{
+    id: number; warehouse_id: number; lifecycle_status: "draft" | "active" | "retired";
+  }>("SELECT id,warehouse_id,lifecycle_status FROM warehouse.fulfillment_nodes WHERE id=ANY($1::integer[]) ORDER BY id", [overrideNodeIds])).rows;
   const mappings = groupMappingsByTarget(mappingResult.rows);
   return targetResult.rows.map((row): ActiveInventoryPublicationTargetSnapshot => {
     const publicationTargetId = positiveInteger(row.publication_target_id, "publicationTarget.id");
@@ -405,6 +431,8 @@ async function loadSelectedPublicationTargets(
       publicationTargetState: "live",
       hold: publicationTargetHold(row, publicationTargetId),
       sourceBinding: bindings.get(publicationTargetId) ?? null,
+      sourceOverrideMembers: overrideNodes.map(node => ({ fulfillmentNodeId: positiveInteger(node.id, "override.nodeId"),
+        warehouseId: positiveInteger(node.warehouse_id, "override.warehouseId"), fulfillmentNodeLifecycleStatus: lifecycleStatus(node.lifecycle_status) })),
       policies: policies.get(channelId) ?? [],
       mappings: mappings.get(publicationTargetId) ?? [],
     };
@@ -517,6 +545,8 @@ function groupPoliciesByChannel(
         maxPublishMode: row.max_publish_mode,
         maxPublishSellableUnits: row.max_publish_sellable_units,
         minPublishSellableUnits: row.min_publish_sellable_units,
+        sourceFulfillmentNodeIds: row.source_fulfillment_node_ids,
+        inheritAll: row.inherit_all,
       }),
     };
     result.set(channelId, [...(result.get(channelId) ?? []), policy]);
@@ -565,9 +595,13 @@ function activePolicyValue(input: {
   maxPublishMode: unknown;
   maxPublishSellableUnits: unknown;
   minPublishSellableUnits: unknown;
+  sourceFulfillmentNodeIds?: unknown;
+  inheritAll?: unknown;
 }): ChannelExposurePolicyValue {
   try {
     return channelExposurePolicyValueSchema.parse({
+      ...(input.sourceFulfillmentNodeIds == null ? {} : { sourceFulfillmentNodeIds: input.sourceFulfillmentNodeIds }),
+      ...(input.inheritAll === true ? { inheritAll: true } : {}),
       allocationSemantics: input.allocationSemantics == null
         ? null : String(input.allocationSemantics),
       eligible: input.eligible == null ? null : input.eligible,

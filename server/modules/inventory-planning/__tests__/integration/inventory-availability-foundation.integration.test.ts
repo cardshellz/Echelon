@@ -344,6 +344,7 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       await migrationClient.query(publicationOutboxDestinationOwnerMigrationSql);
       await migrationClient.query(optionalChangeNoteMigrationSql);
       await migrationClient.query(publicationHoldMigrationSql);
+      await migrationClient.query(readFileSync(resolve(process.cwd(), "migrations/0686_inventory_channel_definition_completion.sql"), "utf8"));
       await migrationClient.query("COMMIT");
     } catch (error) {
       await migrationClient.query("ROLLBACK");
@@ -354,7 +355,14 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
   }, 300_000);
 
   beforeEach(async () => {
-    await pool.query(`
+    // This fixture owns the disposable schema. Production's new immutable
+    // history guards intentionally reject cascading TRUNCATE; suspend only
+    // those two statement guards while resetting this test database.
+    const reset = await pool.connect();
+    try { await reset.query(`
+      BEGIN;
+      ALTER TABLE inventory.channel_definition_applications DISABLE TRIGGER channel_definition_application_no_truncate;
+      ALTER TABLE inventory.channel_policy_source_node_references DISABLE TRIGGER channel_policy_source_references_no_truncate;
       TRUNCATE TABLE
         warehouse.fulfillment_provider_accounts,
         dropship.dropship_vendors,
@@ -363,8 +371,14 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
         warehouse.warehouses,
         public.idempotency_keys,
         public.audit_events
-      RESTART IDENTITY CASCADE
-    `);
+      RESTART IDENTITY CASCADE;
+      ALTER TABLE inventory.channel_policy_source_node_references ENABLE TRIGGER channel_policy_source_references_no_truncate;
+      ALTER TABLE inventory.channel_definition_applications ENABLE TRIGGER channel_definition_application_no_truncate;
+      COMMIT;
+    `); } catch (error) {
+      await reset.query("ROLLBACK");
+      throw error;
+    } finally { reset.release(); }
   });
 
   afterAll(async () => {
@@ -479,6 +493,37 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
     expect((await pool.query("SELECT authority,activation_run_id FROM inventory.availability_runtime_authority")).rows)
       .toEqual([{ authority: "legacy", activation_run_id: null }]);
     expect((await service.getView()).warehouses[0].source?.id).toBe(saved.fulfillmentNodeId);
+  });
+
+  it("round trips a warehouse-only SKU override and inheritance reset through the audited draft writer", async () => {
+    const { scope, database, service, request } = await sourceSetup();
+    const source = await service.prepareDraft(request, "operator");
+    const channelId = (await pool.query("INSERT INTO channels.channels(name,provider) VALUES ('Supply override','shopify') RETURNING id")).rows[0].id;
+    const exposure = new InventoryChannelExposureAdminService(new PostgresInventoryChannelExposureAdminStore(database));
+    const inherited = { allocationSemantics: null, eligible: null, shareBps: null, holdbackSellableUnits: null, maxPublish: null, minPublishSellableUnits: null };
+    const command = { scope: { scopeType: "variant", channelId, productId: scope.productId, productVariantId: scope.variantIds[0] },
+      value: { ...inherited, sourceFulfillmentNodeIds: [source.fulfillmentNodeId] },
+      expectedHeadRevision: "0", expectedDraftPolicyId: null, expectedDraftDefinitionHash: null, idempotencyKey: "warehouse-only" };
+    const saved = await exposure.savePolicyDraft(command, "operator");
+    await expect(exposure.savePolicyDraft(command, "operator")).resolves.toEqual({ ...saved, alreadyApplied: true });
+    expect((await pool.query("SELECT source_fulfillment_node_ids,inherit_all FROM inventory.channel_exposure_policy_versions WHERE id=$1", [saved.definitionId])).rows)
+      .toEqual([{ source_fulfillment_node_ids: [source.fulfillmentNodeId], inherit_all: false }]);
+    const reset = await exposure.savePolicyDraft({ ...command, value: { ...inherited, inheritAll: true },
+      expectedHeadRevision: saved.headRevision, expectedDraftPolicyId: saved.definitionId,
+      expectedDraftDefinitionHash: saved.definitionHash, idempotencyKey: "inherit-all" }, "operator");
+    expect(reset.definitionId).toBe(saved.definitionId);
+    expect(reset.definitionHash).not.toBe(saved.definitionHash);
+    expect((await pool.query("SELECT source_fulfillment_node_ids,inherit_all FROM inventory.channel_exposure_policy_versions WHERE id=$1", [saved.definitionId])).rows)
+      .toEqual([{ source_fulfillment_node_ids: null, inherit_all: true }]);
+    expect((await pool.query("SELECT * FROM inventory.channel_policy_source_node_references")).rows).toEqual([]);
+    const audits = (await pool.query("SELECT actor,changes,context FROM public.audit_events WHERE action='inventory_availability.channel_exposure_policy.draft_saved' ORDER BY id")).rows;
+    expect(audits).toHaveLength(2);
+    expect(audits[1]).toMatchObject({ actor: "operator", changes: {
+      before: { value: { sourceFulfillmentNodeIds: [source.fulfillmentNodeId] } }, after: { value: { inheritAll: true } },
+    }, context: { note: null } });
+    expect((await pool.query("SELECT count(*)::int AS count FROM inventory.inventory_publication_outbox")).rows[0].count).toBe(0);
+    expect((await pool.query("SELECT count(*)::int AS count FROM inventory.inventory_levels")).rows[0].count).toBe(0);
+    expect((await pool.query("SELECT authority FROM inventory.availability_runtime_authority")).rows).toEqual([{ authority: "legacy" }]);
   });
 
   it("preserves a configured incoming channel feed in the draft and immutable audit without creating an outgoing target", async () => {

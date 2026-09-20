@@ -135,8 +135,8 @@ function SupplyEditor({ view, target, canEdit, onReload, reloading }: {
           </div>
         )}
         <EvidenceNote>
-          Supply is set per destination. Narrower warehouse rules for one product or SKU are not
-          available yet; every product on this destination draws from the same warehouses.
+          These are the default supply warehouses for this destination. Set different warehouses
+          for a product or SKU in Selling rules → Exceptions. The narrower selection replaces the default.
         </EvidenceNote>
       </SectionCard>
 

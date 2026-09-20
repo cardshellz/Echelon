@@ -596,13 +596,17 @@ never shown as basis points; pack units are stated per SKU; saved drafts are vis
 - Sensitive contracts (`setInventoryPublicationTargetPreviewStateRequestSchema`,
   stop, resume review/resume, global control, cutover) are unchanged and still require a reason.
 
-### Gaps still open (surfaced in the UI as such)
+### Completion checkpoint — 2026-09-20
+
+The [coordinated completion batch](INVENTORY-CHANNEL-WORKFLOW-COMPLETION-2026-09-20.md)
+implements the previously open channel-workspace contracts below. This is
+source/test status, not a production activation receipt.
 
 | Gap | How the UI treats it today |
 | --- | --- |
-| Product/SKU-scoped warehouse supply | Supply tab states supply is per destination; no per-item control is offered |
-| Removing an entire product/SKU rule | Editor requires at least one explicit field and says removal is not available yet |
-| Routine post-cutover "apply saved drafts" | Publishing tab lists pending drafts and states activation is the reviewed cutover; Resume is documented as using the active configuration only |
+| Product/SKU-scoped warehouse supply | Exception editor offers inherited or explicit warehouses. SKU → product → destination default replaces the set; runtime, saved preview and cutover projection use it |
+| Removing an entire product/SKU rule | Restore all inheritance saves a versioned tombstone; Review/Apply restores parent settings without deleting history |
+| Routine post-cutover "apply saved drafts" | Whole-channel Review/Apply uses fresh canonical evidence, exact retries and atomic definition/outbox/receipt persistence. It cannot activate first cutover or resume stopped destinations |
 | Per-SKU desired/acknowledged/observed status | Implemented in the [2026-09-20 UI batch](INVENTORY-UI-COMPLETION-BATCH-2026-09-20.md): Quantities separates proposed quantities from exact-active-identity persisted delivery records, with timestamps and explicit unknowns. Reload does not call a provider |
 | Location promise-eligibility editor | Not part of this page (inventory policy, Supply & Transformations) |
 | Providers without an adapter (e.g. Amazon, TikTok direct) | Listed, but destination registration is disabled with an explanation |

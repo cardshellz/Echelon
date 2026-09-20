@@ -243,7 +243,7 @@ export class InventoryAvailabilityActivationDryRunService {
         const partitionOverages = findPartitionedShareOverages(resolvedTargetPreviews.flatMap((preview) =>
           preview.rows.flatMap((row) => row.policy ? [{
             productVariantId: row.productVariantId,
-            sourceWarehouseIds: preview.warehouseIds,
+            sourceWarehouseIds: row.sourceWarehouseBreakdown.map(source => source.warehouseId),
             policy: row.policy,
           }] : [])));
         for (const overage of partitionOverages) {
@@ -385,7 +385,7 @@ export class InventoryAvailabilityActivationDryRunService {
           sourceBindingId: preview.sourceBindingId,
           sourceBindingVersion: preview.sourceBindingVersion,
           sourceBindingDefinitionHash: preview.sourceBindingDefinitionHash,
-          sourceWarehouseIds: preview.warehouseIds,
+          sourceWarehouseIds: row.sourceWarehouseBreakdown.map(source => source.warehouseId),
           sourceWarehouseBreakdown: row.sourceWarehouseBreakdown,
           mappingId: mapping?.mappingId ?? null,
           mappingVersion: mapping?.version ?? null,

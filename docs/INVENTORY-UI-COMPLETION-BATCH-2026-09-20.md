@@ -1,5 +1,10 @@
 # Inventory UI batch — 2026-09-20
 
+> Historical first-batch record. The subsequent [coordinated channel-workflow batch](INVENTORY-CHANNEL-WORKFLOW-COMPLETION-2026-09-20.md)
+> extends the same branch and closes the first three remaining gaps below. Both
+> batches are delivered together. The tests and no-migration statement in this
+> earlier record describe its original commit, not the combined PR.
+
 ## Outcome and boundary
 
 Implemented together on `codex/inventory-ui-cutover-completion-20260920`, from refreshed

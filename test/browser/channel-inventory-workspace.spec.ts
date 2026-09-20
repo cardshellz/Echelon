@@ -2,16 +2,19 @@ import { resolve } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import { view, policyHead, policyValue, previewRow, target, HASH_A, HASH_B } from "../../client/src/features/channel-inventory/__tests__/fixtures";
 import type { ChannelPublicationStatus } from "../../shared/types/inventory-channel-publication-status";
+import type { ChannelDefinitionProgress, ChannelDefinitionReview } from "../../shared/types/inventory-channel-definition";
 
 const BASE = "/api/inventory-planning/admin/channel-exposure";
 const AT = "2026-09-20T14:00:00.000Z";
 const defaults = policyValue({ allocationSemantics: "exposure", eligible: true, shareBps: 5000,
   holdbackSellableUnits: "0", maxPublish: { mode: "unlimited" }, minPublishSellableUnits: "0" });
 
-async function setup(page: Page, options: { permission?: "none" | "view" | "edit"; query?: string } = {}) {
+async function setup(page: Page, options: { permission?: "none" | "view" | "edit"; query?: string; pending?: boolean; legacy?: boolean } = {}) {
   const data = view({
     publicationTargets: [target(), target({ id: 6, channelId: 4, channelConnectionId: 44, providerScopeType: "account", externalScopeId: "ebay-user-9" })],
-    policyHeads: [policyHead({ scopeKey: "channel:3", channelId: 3, scope: { scopeType: "channel", channelId: 3 }, active: defaults })],
+    policyHeads: [policyHead({ scopeKey: "channel:3", channelId: 3, scope: { scopeType: "channel", channelId: 3 }, active: defaults,
+      draft: options.pending ? { ...defaults, shareBps: 8000 } : null, revision: options.pending ? "2" : "1" })],
+    runtimeAuthority: options.legacy ? "legacy" : "canonical",
     sourceBindingHeads: [{ publicationTargetId: 5, revision: "1", draftBinding: null,
       activeBinding: { bindingId: 10, publicationTargetId: 5, version: 1, lifecycleStatus: "sealed", definitionHash: HASH_A,
         fulfillmentNodeIds: [7], changeReason: null, createdBy: "operator-1", createdAt: AT, updatedAt: AT } }],
@@ -21,6 +24,7 @@ async function setup(page: Page, options: { permission?: "none" | "view" | "edit
         changeReason: null, createdBy: "operator-1", createdAt: AT, updatedAt: AT } }],
   });
   const state = { data, writes: [] as Array<{ path: string; body: Record<string, unknown>; raw: string }>,
+    applyLostResponse: false, applyConflict: false, reviewBlocked: false, progress: null as ChannelDefinitionProgress | null,
     reads: [] as string[], errors: [] as string[], unexpected: [] as string[], loseResponse: false, conflict: false, invalidResponse: false,
     statusFailed: false, status: { publicationTargetId: 5, productId: 10, capturedAt: AT, runtimeAuthority: "canonical", targetRevision: "3",
       rows: [{ productVariantId: 101, activeInventoryItemId: "test-item",
@@ -41,6 +45,7 @@ async function setup(page: Page, options: { permission?: "none" | "view" | "edit
           : ["inventory_planning:view", "inventory_planning:edit", "inventory_planning:activate"],
       } });
       if (path === BASE) return route.fulfill({ json: state.data });
+      if (path === "/api/inventory-planning/admin/channel-definitions/3/progress") return route.fulfill({ json: state.progress });
       if (path === `${BASE}/preview`) return route.fulfill({ json: {
         publicationTargetId: 5, destinationKind: "channel_connection", channelId: 3, channelConnectionId: 33, dropshipStoreConnectionId: null,
         providerScopeType: "location", externalScopeId: "gid://shopify/Location/1", publicationAuthority: "echelon",
@@ -57,9 +62,28 @@ async function setup(page: Page, options: { permission?: "none" | "view" | "edit
       if (path === "/api/sync/status") return route.fulfill({ json: { global: { globalEnabled: true, sweepIntervalMinutes: 15,
         revision: "1", changedBy: "operator-1", changeReason: "Approved", lastSweepAt: null } } });
       if (path === "/api/inventory-planning/runtime-authority") return route.fulfill({ json: {
-        contractVersion: "inventory_runtime_authority_readout_v1", authority: "canonical", liveAllocator: "inventory_exposure",
+        contractVersion: "inventory_runtime_authority_readout_v1", authority: options.legacy ? "legacy" : "canonical", liveAllocator: options.legacy ? "channel_allocation" : "inventory_exposure",
         revision: "9", activationRunId: "44", changedBy: "operator-1", changeReason: "Approved", changedAt: AT,
       } });
+    }
+    if (req.method() === "POST" && path === "/api/inventory-planning/admin/channel-definitions/review") {
+      const review: ChannelDefinitionReview = { channelId: 3, channelName: "Shopify US", authorityRevision: "9", activationRunId: "44",
+        reviewHash: HASH_A, ready: !state.reviewBlocked, blockers: state.reviewBlocked ? ["Warehouse evidence is unavailable. Refresh inventory evidence before applying."] : [],
+        affectedProductIds: [10,20], changes: [{ selection: { kind: "channel_policy", key: "channel:3", definitionId: 2, definitionHash: HASH_B },
+          headRevision: "2", label: "Channel default", before: { share_bps: 5000 }, after: { share_bps: 8000 } }],
+        destinations: [{ id: 5, state: "live", authority: "echelon", scope: "gid://shopify/Location/1" }],
+        quantities: [{ productId: 10, variantId: 101, sku: "CARD-P5", targetId: 5, channelName: "Shopify US", current: "50", proposed: "80", warehouses: [{ warehouseId: 1, available: "100" }] },
+          { productId: 20, variantId: 201, sku: "BOX-C25", targetId: 5, channelName: "Shopify US", current: "2", proposed: "4", warehouses: [{ warehouseId: 1, available: "5" }] }] };
+      return route.fulfill({ json: review });
+    }
+    if (req.method() === "POST" && path === "/api/inventory-planning/admin/channel-definitions/apply") {
+      const body = req.postDataJSON(); state.writes.push({ path, body, raw: req.postData()! });
+      if (state.applyConflict) return route.fulfill({ status: 409, json: { error: { code: "CHANNEL_REVIEW_CHANGED", message: "Inventory or settings changed. Review the channel again." } } });
+      const alreadyApplied = state.progress !== null;
+      state.progress = { receipt: { channelId: 3, appliedAt: AT, appliedBy: "operator-1", reviewHash: HASH_A, publicationIds: [], changedDefinitions: 1, alreadyApplied: false }, publications: [] };
+      state.data.policyHeads[0] = policyHead({ scopeKey: "channel:3", channelId: 3, scope: { scopeType: "channel", channelId: 3 }, active: { ...defaults, shareBps: 8000 }, revision: "3" });
+      if (state.applyLostResponse) { state.applyLostResponse = false; return route.abort("failed"); }
+      return route.fulfill({ json: { ...state.progress.receipt, alreadyApplied } });
     }
     if (req.method() === "PUT" && ["policy-draft", "source-binding-draft", "variant-mapping-draft"].some(suffix => path === `${BASE}/${suffix}`)) {
       const body = req.postDataJSON();
@@ -250,4 +274,113 @@ test("SKU exceptions keep inherited fields and retry the same command after a lo
   expect(state.writes[0].body).toMatchObject({ scope: { scopeType: "variant", channelId: 3, productId: 10, productVariantId: 101 },
     value: { shareBps: 2500, eligible: null, holdbackSellableUnits: null, maxPublish: null }, changeReason: null });
   expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("review covers the whole channel and Apply queues the saved batch without a reason field", async ({ page }, testInfo) => {
+  const state = await setup(page, { pending: true, query: "?channel=3&destination=5&tab=publishing" });
+  await page.getByRole("button", { name: "Review saved channel changes", exact: true }).click();
+  const review = page.getByLabel("Channel changes review", { exact: true });
+  await expect(review).toContainText("1 saved change · 2 affected products");
+  await expect(review).toContainText("CARD-P5"); await expect(review).toContainText("BOX-C25");
+  await expect(review).toContainText("50 → 80");
+  await expect(review.getByRole("textbox")).toHaveCount(0);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("channel-apply-review.png"), fullPage: true });
+  await page.getByRole("button", { name: "Apply reviewed channel changes", exact: true }).click();
+  await expect(page.getByText("Channel settings applied", { exact: true })).toBeVisible();
+  expect(state.writes).toHaveLength(1);
+  expect(state.writes[0].body).toMatchObject({ channelId: 3, expectedReviewHash: HASH_A });
+  expect(state.writes[0].path).toBe("/api/inventory-planning/admin/channel-definitions/apply");
+  expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("lost Apply responses retain the exact command through background refresh and block navigation", async ({ page }) => {
+  const state = await setup(page, { pending: true, query: "?channel=3&destination=5&tab=publishing" });
+  await page.getByRole("button", { name: "Review saved channel changes", exact: true }).click();
+  state.applyLostResponse = true;
+  await page.getByRole("button", { name: "Apply reviewed channel changes", exact: true }).click();
+  await expect(page.getByText(/Apply outcome is unknown/)).toBeVisible();
+  await page.evaluate(() => window.dispatchEvent(new Event("channel-inventory-test-refresh")));
+  await expect(page.getByText("Saved settings changed. Review again before applying.", { exact: true })).toBeVisible();
+  await page.getByRole("tab", { name: "Supply", exact: true }).click();
+  await expect(page.getByRole("alertdialog")).toContainText("Resolve the save first");
+  await page.getByRole("button", { name: "Keep editing", exact: true }).click();
+  await page.getByRole("button", { name: "Retry same Apply", exact: true }).click();
+  await expect(page.getByText("Channel settings applied", { exact: true })).toBeVisible();
+  expect(state.writes).toHaveLength(2);
+  expect(state.writes[1].raw).toBe(state.writes[0].raw);
+  expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("stale Apply returns to review and does not reuse its rejected command", async ({ page }) => {
+  const state = await setup(page, { pending: true, query: "?channel=3&destination=5&tab=publishing" });
+  await page.getByRole("button", { name: "Review saved channel changes", exact: true }).click();
+  state.applyConflict = true;
+  await page.getByRole("button", { name: "Apply reviewed channel changes", exact: true }).click();
+  await expect(page.getByText("Inventory or settings changed. Review the channel again.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Retry same Apply", exact: true })).toHaveCount(0);
+  state.applyConflict = false;
+  await page.getByRole("button", { name: "Review saved channel changes", exact: true }).click();
+  await page.getByRole("button", { name: "Apply reviewed channel changes", exact: true }).click();
+  await expect(page.getByText("Channel settings applied", { exact: true })).toBeVisible();
+  expect(state.writes).toHaveLength(2);
+  expect(state.writes[1].body.idempotencyKey).not.toBe(state.writes[0].body.idempotencyKey);
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("blocked reviews cannot apply and view-only users can review but not activate", async ({ page }) => {
+  const state = await setup(page, { pending: true, permission: "view", query: "?channel=3&destination=5&tab=publishing" });
+  state.reviewBlocked = true;
+  await page.getByRole("button", { name: "Review saved channel changes", exact: true }).click();
+  await expect(page.getByText(/Warehouse evidence is unavailable/)).toBeVisible();
+  await expect(page.getByText("Your role can review but needs inventory activation permission to apply.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Apply reviewed channel changes", exact: true })).toHaveCount(0);
+  expect(state.writes).toEqual([]); expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("pre-cutover workspace cannot use routine Apply to activate the migration", async ({ page }) => {
+  const state = await setup(page, { pending: true, legacy: true, query: "?channel=3&destination=5&tab=publishing" });
+  await expect(page.getByText(/Saved changes are prepared for the first inventory cutover/)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Review saved channel changes", exact: true })).toHaveCount(0);
+  expect(state.reads.some(path => path.endsWith("/progress"))).toBe(false);
+  expect(state.writes).toEqual([]); expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
+});
+
+test("SKU warehouse override saves independently of selling dials", async ({ page }, testInfo) => {
+  const state = await setup(page);
+  await page.getByRole("button", { name: "Add exception", exact: true }).click();
+  const sheet = page.getByRole("dialog");
+  await sheet.getByRole("combobox").click();
+  await page.getByRole("option", { name: /Card Shell/ }).click();
+  await sheet.getByRole("radio", { name: "CARD-P5", exact: true }).click();
+  await sheet.getByRole("checkbox", { name: "Use inherited warehouses", exact: true }).uncheck();
+  await sheet.getByRole("checkbox", { name: /Canada 3PL/ }).check();
+  await sheet.getByRole("button", { name: "Save exception", exact: true }).scrollIntoViewIfNeeded();
+  await page.screenshot({ path: testInfo.outputPath("sku-supply-override.png") });
+  await sheet.getByRole("button", { name: "Save exception", exact: true }).click();
+  await expect.poll(() => state.writes.length).toBe(1);
+  expect(state.writes[0].body).toMatchObject({ scope: { scopeType: "variant", channelId: 3, productId: 10, productVariantId: 101 },
+    value: { sourceFulfillmentNodeIds: [8], shareBps: null, eligible: null, holdbackSellableUnits: null, maxPublish: null }, changeReason: null });
+  expect(state.writes[0].body.value).not.toHaveProperty("inheritAll");
+  expect(state.unexpected).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("an existing SKU exception can restore complete inheritance as an audited draft", async ({ page }) => {
+  const state = await setup(page);
+  state.data.policyHeads.push(policyHead({ scopeKey: "channel:3:variant:101", channelId: 3,
+    scope: { scopeType: "variant", channelId: 3, productId: 10, productVariantId: 101 },
+    active: policyValue({ shareBps: 2500, sourceFulfillmentNodeIds: [8] }) }));
+  await page.evaluate(() => window.dispatchEvent(new Event("channel-inventory-test-refresh")));
+  await page.getByRole("button", { name: "Add exception", exact: true }).click();
+  const sheet = page.getByRole("dialog");
+  await sheet.getByRole("combobox").click(); await page.getByRole("option", { name: /Card Shell/ }).click();
+  await sheet.getByRole("radio", { name: "CARD-P5", exact: true }).click();
+  await expect(sheet.getByLabel("Offer percentage", { exact: true })).toHaveValue("25");
+  await sheet.getByRole("button", { name: "Restore all inheritance", exact: true }).click();
+  await expect(sheet.getByRole("checkbox", { name: "Use inherited warehouses", exact: true })).toBeChecked();
+  await sheet.getByRole("button", { name: "Save exception", exact: true }).click();
+  await expect.poll(() => state.writes.length).toBe(1);
+  expect(state.writes[0].body).toMatchObject({ expectedHeadRevision: "1", value: { inheritAll: true, shareBps: null,
+    allocationSemantics: null, eligible: null, holdbackSellableUnits: null, maxPublish: null, minPublishSellableUnits: null } });
+  expect(state.errors).toEqual([]); expect(state.unexpected).toEqual([]);
 });

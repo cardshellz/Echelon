@@ -51,6 +51,7 @@ import {
   calculatePublicationVariantMappingDefinitionHash,
   channelExposurePolicyScopeKey,
   resolveChannelExposurePolicy,
+  resolveChannelSourceOverride,
   type ChannelExposurePolicyCandidate,
 } from "../domain/inventory-channel-exposure";
 import {
@@ -193,6 +194,7 @@ implements InventoryChannelExposureAdminStore {
              policy.allocation_semantics, policy.eligible, policy.share_bps,
              policy.holdback_sellable_units, policy.max_publish_mode,
              policy.max_publish_sellable_units, policy.min_publish_sellable_units,
+             policy.source_fulfillment_node_ids, policy.inherit_all,
              policy.definition_hash, policy.change_reason, policy.created_by,
              policy.created_at, policy.updated_at
       FROM inventory.channel_exposure_policy_heads AS head
@@ -798,6 +800,9 @@ implements InventoryChannelExposureAdminStore {
       const scopeKey = channelExposurePolicyScopeKey(command.scope);
       await tx.execute(sql`SELECT pg_advisory_xact_lock(${POLICY_LOCK_NAMESPACE}, hashtext(${scopeKey}))`);
       await validatePolicyScope(tx, command.scope);
+      if (command.value.sourceFulfillmentNodeIds) {
+        await assertFulfillmentNodesUsable(tx, command.value.sourceFulfillmentNodeIds);
+      }
       const headRows = rows(await tx.execute(sql`
         SELECT scope_key, revision, active_policy_id, draft_policy_id
         FROM inventory.channel_exposure_policy_heads
@@ -1145,7 +1150,8 @@ implements InventoryChannelExposureAdminStore {
                policy.version, policy.definition_hash, policy.scope_type,
                policy.allocation_semantics, policy.eligible, policy.share_bps,
                policy.holdback_sellable_units, policy.max_publish_mode,
-               policy.max_publish_sellable_units, policy.min_publish_sellable_units
+               policy.max_publish_sellable_units, policy.min_publish_sellable_units,
+               policy.source_fulfillment_node_ids, policy.inherit_all
         FROM inventory.channel_exposure_policy_heads AS head
         CROSS JOIN LATERAL (
           VALUES ('draft', head.draft_policy_id), ('active', head.active_policy_id)
@@ -1156,6 +1162,11 @@ implements InventoryChannelExposureAdminStore {
         ORDER BY head.scope_key, CASE pointer.pointer_type WHEN 'draft' THEN 0 ELSE 1 END
       `));
       const policyCandidates = selectedPolicyCandidates(policyRows);
+      const overrideNodeIds = [...new Set(policyCandidates.flatMap(policy => policy.value.sourceFulfillmentNodeIds ?? []))];
+      const overrideNodes = overrideNodeIds.length === 0 ? [] : rows(await tx.execute(sql`
+        SELECT id, warehouse_id FROM warehouse.fulfillment_nodes
+        WHERE id=ANY(${sqlIntegerArray(overrideNodeIds)}) AND lifecycle_status<>'retired'
+      `));
       const selectedPolicies = selectedPolicyEvidence(policyRows);
       const variantMappingRows = rows(await tx.execute(sql`
         SELECT head.product_variant_id, pointer.pointer_type,
@@ -1260,8 +1271,16 @@ implements InventoryChannelExposureAdminStore {
             policies: policyCandidates,
           });
           const mapping = selectedMappings.get(productVariantId) ?? null;
+          const sourceOverride = resolveChannelSourceOverride({ channelId, productId, productVariantId, policies: policyCandidates });
+          const rowWarehouses = sourceOverride
+            ? overrideNodes.filter(node => sourceOverride.fulfillmentNodeIds.includes(Number(node.id))).map(node => Number(node.warehouse_id))
+            : warehouseIds;
+          if (sourceOverride && (rowWarehouses.length !== sourceOverride.fulfillmentNodeIds.length
+            || rowWarehouses.some(id => !shadowWarehouseIds.has(id)))) {
+            blockers.push({ code: "CHANNEL_SOURCE_OVERRIDE_UNAVAILABLE", message: "A selected warehouse is missing or unavailable in this ATP snapshot.", context: { productVariantId } });
+          }
           const sourceWarehouseBreakdown = sourceBindingId === null ? [] : results
-            .filter((row) => row.warehouseId !== null && warehouseIds.includes(row.warehouseId))
+            .filter((row) => row.warehouseId !== null && rowWarehouses.includes(row.warehouseId))
             .map((row) => ({
               warehouseId: row.warehouseId!,
               canonicalAtpUnits: BigInt(row.proposedAtpUnits).toString(),
@@ -1387,7 +1406,8 @@ async function loadPolicyAuditSnapshot(
 ): Promise<PolicyAuditSnapshot> {
   const row = rows(await tx.execute(sql`
     SELECT definition_hash, allocation_semantics, eligible, share_bps, holdback_sellable_units,
-           max_publish_mode, max_publish_sellable_units, min_publish_sellable_units
+           max_publish_mode, max_publish_sellable_units, min_publish_sellable_units,
+           source_fulfillment_node_ids, inherit_all
     FROM inventory.channel_exposure_policy_versions
     WHERE id = ${policyId}
   `))[0];
@@ -1451,6 +1471,8 @@ function publicationHold(row: Record<string, any>): InventoryPublicationTargetHo
 
 function policyColumns(value: ChannelExposurePolicyValue) {
   return {
+    sourceFulfillmentNodeIds: value.sourceFulfillmentNodeIds ?? null,
+    inheritAll: value.inheritAll ?? false,
     allocationSemantics: value.allocationSemantics,
     eligible: value.eligible,
     shareBps: value.shareBps,
@@ -1812,6 +1834,8 @@ function policyScope(row: Record<string, any>): ChannelExposurePolicyScope {
 
 function policyValue(row: Record<string, any>): ChannelExposurePolicyValue {
   return {
+    ...(row.source_fulfillment_node_ids == null ? {} : { sourceFulfillmentNodeIds: row.source_fulfillment_node_ids as number[] }),
+    ...(row.inherit_all === true ? { inheritAll: true as const } : {}),
     allocationSemantics: row.allocation_semantics == null ? null : String(row.allocation_semantics) as "exposure" | "partitioned",
     eligible: row.eligible == null ? null : Boolean(row.eligible),
     shareBps: row.share_bps == null ? null : nonnegativeInteger(row.share_bps, "policy.shareBps"),

@@ -102,6 +102,7 @@ import { registerInventoryCutoverPreflightRoutes } from "./modules/inventory-pla
 import { registerInventoryRuntimeAuthorityRoutes } from "./modules/inventory-planning/interfaces/http/inventory-runtime-authority.routes";
 import { registerInventoryCutoverCommitRoutes } from "./modules/inventory-planning/interfaces/http/inventory-cutover-commit.routes";
 import { registerProductDefinitionRoutes } from "./modules/inventory-planning/interfaces/http/inventory-product-definition.routes";
+import { registerChannelDefinitionRoutes } from "./modules/inventory-planning/interfaces/http/inventory-channel-definition.routes";
 import { registerSafetyDefinitionRoutes } from "./modules/inventory-planning/interfaces/http/inventory-safety-definition.routes";
 import { registerInventoryCutoverCompletionRoutes } from "./modules/inventory-planning/interfaces/http/inventory-cutover-completion.routes";
 import { registerInventoryCutoverOpeningRoutes } from "./modules/inventory-planning/interfaces/http/inventory-cutover-opening.routes";
@@ -163,6 +164,7 @@ export async function registerRoutes(
   registerInventoryRuntimeAuthorityRoutes(app);
   registerInventoryCutoverCommitRoutes(app);
   registerProductDefinitionRoutes(app);
+  registerChannelDefinitionRoutes(app);
   registerSafetyDefinitionRoutes(app);
   registerInventoryCutoverCompletionRoutes(app);
   registerInventoryCutoverOpeningRoutes(app);

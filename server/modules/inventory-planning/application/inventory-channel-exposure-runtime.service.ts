@@ -11,6 +11,7 @@ import {
   calculateChannelExposure,
   findPartitionedShareOverages,
   resolveChannelExposurePolicy,
+  resolveChannelSourceOverride,
   type ChannelExposurePolicyCandidate,
 } from "../domain/inventory-channel-exposure";
 import { projectCanonicalAtp } from "../domain/inventory-availability-planner";
@@ -60,6 +61,7 @@ export interface ActiveInventoryPublicationTargetSnapshot {
   /** While set, every SKU the target publishes goes to zero; the plan still records canonical ATP. */
   hold: InventoryPublicationTargetHold | null;
   sourceBinding: ActivePublicationSourceBindingSnapshot | null;
+  sourceOverrideMembers?: ActivePublicationSourceBindingSnapshot["members"];
   policies: readonly ActiveChannelExposurePolicySnapshot[];
   mappings: readonly ActivePublicationVariantMappingSnapshot[];
 }
@@ -293,6 +295,18 @@ function planTarget(
   const rows = variants.map((variant): RuntimeRow => {
     const blockers: RuntimeIssue[] = [];
     const warnings: RuntimeIssue[] = [];
+    const sourceOverride = resolveChannelSourceOverride({ channelId: target.channelId, productId, productVariantId: variant.id, policies: target.policies });
+    const overrideMembers = sourceOverride ? (target.sourceOverrideMembers ?? [])
+      .filter(member => sourceOverride.fulfillmentNodeIds.includes(member.fulfillmentNodeId)) : [];
+    const rowWarehouseIds = sourceOverride ? uniqueNumbers(overrideMembers.map(member => member.warehouseId)) : sourceWarehouseIds;
+    if (sourceOverride && (overrideMembers.length !== sourceOverride.fulfillmentNodeIds.length
+      || rowWarehouseIds.length !== overrideMembers.length
+      || overrideMembers.some(member => member.fulfillmentNodeLifecycleStatus !== "active")
+      || rowWarehouseIds.some(id => !activeSnapshotWarehouses.has(id)))) {
+      blockers.push(issue("CHANNEL_SOURCE_OVERRIDE_UNAVAILABLE", "An overriding supply warehouse is missing, duplicated or inactive.", {
+        productVariantId: variant.id, scopeKey: sourceOverride.scopeKey,
+      }));
+    }
     const resolution = resolveChannelExposurePolicy({
       channelId: target.channelId,
       productId,
@@ -326,7 +340,7 @@ function planTarget(
       ));
     }
 
-    const sourceWarehouseBreakdown = sourceWarehouseIds.map((warehouseId) => {
+    const sourceWarehouseBreakdown = rowWarehouseIds.map((warehouseId) => {
       const projection = projectCanonicalAtp(snapshot, {
         targetVariantId: variant.id,
         scope: { kind: "warehouse", warehouseId },
@@ -424,14 +438,14 @@ function planTarget(
 function applyPartitionOverages(targets: PlannedTarget[]): void {
   const rows = targets.flatMap((planned) => planned.target.rows.flatMap((row) => row.policy ? [{
     productVariantId: row.productVariantId,
-    sourceWarehouseIds: planned.sourceWarehouseIds,
+    sourceWarehouseIds: row.sourceWarehouseBreakdown.map(source => source.warehouseId),
     policy: row.policy,
   }] : []));
   for (const overage of findPartitionedShareOverages(rows)) {
     for (const planned of targets) {
       const row = planned.target.rows.find((candidate) => candidate.productVariantId === overage.productVariantId);
       if (!row?.policy || row.policy.allocationSemantics !== "partitioned" || !row.policy.eligible
-        || !planned.sourceWarehouseIds.includes(overage.warehouseId)) continue;
+        || !row.sourceWarehouseBreakdown.some(source => source.warehouseId === overage.warehouseId)) continue;
       row.blockers = uniqueIssues([...row.blockers, issue(
         "PARTITIONED_CHANNEL_SHARE_EXCEEDS_100_PERCENT",
         "Active partitioned channel shares exceed 100 percent for a SKU and source warehouse.",

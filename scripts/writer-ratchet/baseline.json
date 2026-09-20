@@ -461,6 +461,9 @@
   "inventory.build_runs": [
     "modules/inventory"
   ],
+  "inventory.channel_definition_applications": [
+    "modules/inventory-planning"
+  ],
   "inventory.channel_exposure_policy_heads": [
     "modules/inventory-planning"
   ],

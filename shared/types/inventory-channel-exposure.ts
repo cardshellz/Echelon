@@ -58,8 +58,21 @@ export const channelExposurePolicyValueSchema = z.object({
     z.object({ mode: z.literal("units"), units: postgresBigintString }).strict(),
   ]).nullable(),
   minPublishSellableUnits: postgresBigintString.nullable(),
+  // Optional additions preserve the meaning and hashes of existing definitions.
+  // Narrower supply replaces the inherited set; it never combines warehouses
+  // before the canonical planner evaluates each warehouse independently.
+  sourceFulfillmentNodeIds: z.array(positiveInteger).min(1).max(100)
+    .refine(ids => new Set(ids).size === ids.length, "Supply warehouses must be distinct")
+    .nullable().optional(),
+  // An explicit, versioned tombstone restores inheritance without deleting audit
+  // history or copying today's parent values into another editable authority.
+  inheritAll: z.literal(true).optional(),
 }).strict().superRefine((value, context) => {
-  if (Object.values(value).every((field) => field === null)) {
+  const explicit = Object.entries(value).some(([key, field]) => key !== "inheritAll" && field != null);
+  if (value.inheritAll && explicit) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "Restoring inheritance cannot also set an override." });
+  }
+  if (!value.inheritAll && !explicit) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
       message: "At least one channel-exposure field must be set at this scope.",
@@ -288,6 +301,9 @@ export const saveChannelExposurePolicyDraftRequestSchema = z.object({
   changeReason: optionalChangeNote,
   idempotencyKey: nonblank(120),
 }).strict().superRefine((request, context) => {
+  if (request.scope.scopeType === "channel" && (request.value.inheritAll || request.value.sourceFulfillmentNodeIds != null)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["value"], message: "Channel defaults cannot be removed. Configure default warehouses in Supply." });
+  }
   if ((request.expectedDraftPolicyId === null) !== (request.expectedDraftDefinitionHash === null)) {
     context.addIssue({
       code: z.ZodIssueCode.custom,

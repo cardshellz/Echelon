@@ -33,7 +33,11 @@ import {
   type Channel,
   type PolicyFormError,
   type View,
+  EMPTY_POLICY_FORM,
+  sameIdSet,
 } from "../model";
+import { NodeChecklist } from "./NodeChecklist";
+import { Checkbox } from "@/components/ui/checkbox";
 import { PolicyFields } from "./PolicyFields";
 import { ProductPicker } from "./ProductPicker";
 import { ActivePill, Callout, EvidenceNote, NoteField, PendingPill } from "./primitives";
@@ -199,10 +203,12 @@ function RuleEditor({ view, channel, scope, unitNoun, canEdit, onSaved, onReload
   const [errors, setErrors] = useState<PolicyFormError[]>([]);
   const fingerprint = `${head?.revision ?? "0"}:${head?.draftPolicy?.definitionHash ?? ""}:${head?.activePolicy?.definitionHash ?? ""}`;
   const editor = useDraftEditor({
-    value: { form: savedForm, note: "" }, baseline: head, fingerprint,
-    equal: (left, right) => samePolicyForm(left.form, right.form) && left.note === right.note,
+    value: { form: savedForm, note: "", sources: saved?.value.sourceFulfillmentNodeIds ?? null }, baseline: head, fingerprint,
+    equal: (left, right) => samePolicyForm(left.form, right.form) && left.note === right.note
+      && ((left.sources === null && right.sources === null)
+        || (left.sources !== null && right.sources !== null && sameIdSet(left.sources, right.sources))),
     build: (value, baseline, idempotencyKey) => {
-      const parsed = policyFormToValue(value.form);
+      const parsed = policyFormToValue(value.form, { allowInheritAll: true, sourceFulfillmentNodeIds: value.sources });
       if (!parsed.ok) {
         setErrors(parsed.errors);
         throw new Error("Check the highlighted exception fields.");
@@ -247,11 +253,29 @@ function RuleEditor({ view, channel, scope, unitNoun, canEdit, onSaved, onReload
         disabled={!canEdit || editor.locked || reloading}
         unitNoun={unitNoun}
       />
+      <fieldset className="space-y-3 rounded-md border p-3" disabled={!canEdit || editor.locked || reloading}>
+        <legend className="px-1 text-sm font-medium">Supply warehouses</legend>
+        <label className="flex items-center gap-2 text-sm">
+          <Checkbox checked={editor.value.sources === null} onCheckedChange={checked => editor.setValue(current => ({
+            ...current, sources: checked === true ? null : [],
+          }))} />Use inherited warehouses
+        </label>
+        <p className="text-xs text-muted-foreground">A SKU uses its own selection, otherwise the product selection, otherwise the destination's default warehouses. An override replaces that set; it does not add warehouses.</p>
+        {editor.value.sources !== null && <NodeChecklist nodes={view.fulfillmentNodes.filter(node => node.lifecycleStatus !== "retired")}
+          selectedIds={editor.value.sources} idPrefix={`exception-supply-${scopeKey(scope)}`}
+          disabled={!canEdit || editor.locked || reloading}
+          onToggle={(id, checked) => editor.setValue(current => ({ ...current, sources: checked
+            ? [...(current.sources ?? []), id] : (current.sources ?? []).filter(existing => existing !== id) }))} />}
+      </fieldset>
       {formError && <Callout tone="warning">{formError}</Callout>}
       <EvidenceNote>
-        Setting a field back to Inherit stops this item from overriding it. Removing an entire
-        saved rule is not available yet; keep at least one field explicit.
+        Setting a field back to Inherit follows future changes to the broader rule. Restoring
+        all inheritance is saved as a draft and takes effect only after Review and Apply.
       </EvidenceNote>
+      {canEdit && saved && <Button type="button" variant="outline" disabled={editor.locked || reloading}
+        onClick={() => editor.setValue(current => ({ ...current, form: EMPTY_POLICY_FORM, sources: null }))}>
+        Restore all inheritance
+      </Button>}
       {canEdit && (
         <SheetFooter className="flex-col gap-3 border-t pt-4 sm:flex-row sm:items-end sm:justify-between">
           <NoteField id={`exception-note-${scopeKey(scope)}`} value={note} onChange={note => editor.setValue(current => ({ ...current, note }))} disabled={editor.locked} />

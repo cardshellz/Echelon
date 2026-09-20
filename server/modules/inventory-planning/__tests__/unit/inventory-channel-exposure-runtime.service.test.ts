@@ -11,6 +11,49 @@ import { sealSupplySnapshot } from "../../domain/inventory-availability-planner"
 
 const HASH = "a".repeat(64);
 
+describe("product and SKU warehouse overrides", () => {
+  const inherited = { allocationSemantics: null, eligible: null, shareBps: null,
+    holdbackSellableUnits: null, maxPublish: null, minPublishSellableUnits: null };
+  function withOverrides() {
+    const configured = target({ sourceWarehouseIds: [1, 2] });
+    configured.sourceOverrideMembers = configured.sourceBinding!.members;
+    configured.policies = [...configured.policies,
+      { scopeKey: "channel:7:product:10", scopeType: "product", policyId: 500, version: 1, definitionHash: HASH,
+        value: { ...inherited, sourceFulfillmentNodeIds: [11] } },
+      { scopeKey: "channel:7:variant:102", scopeType: "variant", policyId: 501, version: 1, definitionHash: HASH,
+        value: { ...inherited, sourceFulfillmentNodeIds: [12] } },
+    ];
+    return configured;
+  }
+  it("replaces rather than unions sources, SKU then product then destination", async () => {
+    const plan = await new InventoryChannelExposureRuntimeService(executor(canonicalContext([withOverrides()]))).planProduct(10);
+    expect(plan.targets[0].rows.map(row => [row.productVariantId,row.canonicalAtpUnits,row.sourceWarehouseBreakdown.map(source => source.warehouseId)]))
+      .toEqual([[101,"25",[1]],[102,"2",[2]]]);
+  });
+  it("restores product inheritance after the SKU tombstone without erasing exact stock", async () => {
+    const configured = withOverrides();
+    configured.policies = configured.policies.map(policy => policy.scopeType === "variant"
+      ? { ...policy,value: { ...inherited,inheritAll: true } } : policy);
+    const plan = await new InventoryChannelExposureRuntimeService(executor(canonicalContext([configured]))).planProduct(10);
+    expect(plan.targets[0].rows[1]).toMatchObject({ canonicalAtpUnits: "7",sourceWarehouseBreakdown:[{ warehouseId:1 }] });
+  });
+  it("fails closed on an unavailable overridden warehouse instead of falling back to defaults", async () => {
+    const configured = withOverrides(); configured.sourceOverrideMembers = [];
+    const plan = await new InventoryChannelExposureRuntimeService(executor(canonicalContext([configured]))).planProduct(10);
+    expect(plan.targets[0].publishable).toBe(false);
+    expect(plan.targets[0].rows[1]).toMatchObject({ canonicalAtpUnits: "0",blockers:[{ code:"CHANNEL_SOURCE_OVERRIDE_UNAVAILABLE" }] });
+  });
+  it("checks partitioned shares using each SKU's actual overridden supply", async () => {
+    const first = withOverrides();
+    first.policies = first.policies.map(policy => policy.scopeType === "channel"
+      ? { ...policy,value:policyValue({ allocationSemantics:"partitioned",shareBps:8000 }) } : policy);
+    const second = target({ publicationTargetId:92,channelId:8,sourceWarehouseIds:[1],policy:policyValue({ allocationSemantics:"partitioned",shareBps:8000 }) });
+    const plan = await new InventoryChannelExposureRuntimeService(executor(canonicalContext([first,second]))).planProduct(10);
+    expect(plan.targets[0].rows[0].blockers.some(issue => issue.code === "PARTITIONED_CHANNEL_SHARE_EXCEEDS_100_PERCENT")).toBe(true);
+    expect(plan.targets[0].rows[1].blockers).toEqual([]);
+  });
+});
+
 describe("InventoryChannelExposureRuntimeService", () => {
   it("returns no canonical target calculations or side effects while legacy owns authority", async () => {
     const service = new InventoryChannelExposureRuntimeService(executor({
