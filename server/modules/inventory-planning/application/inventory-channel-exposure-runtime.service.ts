@@ -44,6 +44,12 @@ export interface ActivePublicationVariantMappingSnapshot {
   externalSku: string | null;
 }
 
+/** A SKU-level hold on the target: this SKU publishes zero while the rest of the target is planned as usual. */
+export interface ActivePublicationVariantHoldSnapshot {
+  productVariantId: number;
+  hold: InventoryPublicationTargetHold;
+}
+
 export interface ActiveInventoryPublicationTargetSnapshot {
   publicationTargetId: number;
   publicationTargetRevision: string;
@@ -62,6 +68,8 @@ export interface ActiveInventoryPublicationTargetSnapshot {
   sourceBinding: ActivePublicationSourceBindingSnapshot | null;
   policies: readonly ActiveChannelExposurePolicySnapshot[];
   mappings: readonly ActivePublicationVariantMappingSnapshot[];
+  /** SKU-level holds among the product's variants; the target hold above wins when both are set. */
+  variantHolds: readonly ActivePublicationVariantHoldSnapshot[];
 }
 
 export interface InventoryChannelExposureRuntimeContext {
@@ -290,7 +298,11 @@ function planTarget(
   }
 
   const mappings = new Map(target.mappings.map((mapping) => [mapping.productVariantId, mapping] as const));
+  const variantHolds = new Map(target.variantHolds.map((entry) => [entry.productVariantId, entry.hold] as const));
   const rows = variants.map((variant): RuntimeRow => {
+    // The hold that zeroes this SKU: the destination-wide hold covers every SKU
+    // and wins; otherwise a SKU-level hold covers this one alone.
+    const hold = target.hold ?? variantHolds.get(variant.id) ?? null;
     const blockers: RuntimeIssue[] = [];
     const warnings: RuntimeIssue[] = [];
     const resolution = resolveChannelExposurePolicy({
@@ -353,7 +365,7 @@ function planTarget(
       BigInt(0),
     );
     const calculation = resolution.policy
-      ? applyPublicationHold(calculateChannelExposure(canonicalAtp, resolution.policy), target.hold)
+      ? applyPublicationHold(calculateChannelExposure(canonicalAtp, resolution.policy), hold)
       : {
           canonicalAtpUnits: canonicalAtp,
           sharedUnits: BigInt(0),
@@ -379,6 +391,7 @@ function planTarget(
         externalInventoryItemId: mapping.externalInventoryItemId,
         externalSku: mapping.externalSku,
       } : null,
+      hold,
       blockers: uniqueIssues(blockers),
       warnings: uniqueIssues(warnings),
     };

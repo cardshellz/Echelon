@@ -66,6 +66,7 @@ import {
   type DropshipWalletPolicyLimitUnit,
   type DropshipWalletPolicyLimitsView,
   type DropshipWalletPolicyOverview,
+  describeDropshipWalletPolicyTierEnforcement,
 } from "./dropship-wallet-policy-model";
 
 export function DropshipWalletPolicyPanel({
@@ -395,6 +396,15 @@ function LimitSourceTable({ overview }: { overview: DropshipWalletPolicyOverview
           : "No policy version has been published, so the wallet is still running on the environment "
             + "values below. Publishing a version here takes over from them."}
       </p>
+      {overview.listingTierEnforcement && (
+        <ul className="mt-2 space-y-1 text-sm" data-testid="wallet-policy-tier-enforcement">
+          {[overview.listingTierEnforcement.pack, overview.listingTierEnforcement.case].map((enforcement) => (
+            <li key={enforcement.tier}>
+              {describeDropshipWalletPolicyTierEnforcement(enforcement, formatCents, formatDateTime)}
+            </li>
+          ))}
+        </ul>
+      )}
       <div className="mt-3 overflow-x-auto">
         <Table>
           <TableHeader>

@@ -13,6 +13,7 @@ import {
   InventoryChannelExposureRuntimeService,
   type ActiveChannelExposurePolicySnapshot,
   type ActiveInventoryPublicationTargetSnapshot,
+  type ActivePublicationVariantHoldSnapshot,
   type ActivePublicationSourceBindingSnapshot,
   type ActivePublicationVariantMappingSnapshot,
   type InventoryChannelExposureRuntimeContext,
@@ -86,6 +87,14 @@ interface MappingRow {
   mapping_definition_hash: unknown;
   external_inventory_item_id: unknown;
   external_sku: unknown;
+}
+
+interface VariantHoldRow {
+  publication_target_id: unknown;
+  product_variant_id: unknown;
+  hold_reason: unknown;
+  held_at: unknown;
+  held_by: unknown;
 }
 
 /**
@@ -358,9 +367,25 @@ async function loadSelectedPublicationTargets(
         [targetIds, productVariantIds],
       );
 
+  const variantHoldResult = productVariantIds.length === 0
+    ? { rows: [] as VariantHoldRow[] }
+    : await client.query<VariantHoldRow>(
+          `SELECT hold.publication_target_id,
+                  hold.product_variant_id,
+                  hold.hold_reason,
+                  hold.held_at,
+                  hold.held_by
+           FROM inventory.inventory_publication_target_variant_holds AS hold
+           WHERE hold.publication_target_id = ANY($1::integer[])
+             AND hold.product_variant_id = ANY($2::integer[])
+           ORDER BY hold.publication_target_id, hold.product_variant_id`,
+        [targetIds, productVariantIds],
+      );
+
   const bindings = mapBindings(bindingResult.rows);
   const policies = groupPoliciesByChannel(policyResult.rows, productId);
   const mappings = groupMappingsByTarget(mappingResult.rows);
+  const variantHolds = groupVariantHoldsByTarget(variantHoldResult.rows);
   return targetResult.rows.map((row): ActiveInventoryPublicationTargetSnapshot => {
     const publicationTargetId = positiveInteger(row.publication_target_id, "publicationTarget.id");
     const channelId = positiveInteger(row.channel_id, "publicationTarget.channelId");
@@ -407,6 +432,7 @@ async function loadSelectedPublicationTargets(
       sourceBinding: bindings.get(publicationTargetId) ?? null,
       policies: policies.get(channelId) ?? [],
       mappings: mappings.get(publicationTargetId) ?? [],
+      variantHolds: variantHolds.get(publicationTargetId) ?? [],
     };
   });
 }
@@ -550,6 +576,38 @@ function groupMappingsByTarget(
       externalSku: nullableNonblank(row.external_sku, "mapping.externalSku"),
     };
     result.set(publicationTargetId, [...(result.get(publicationTargetId) ?? []), mapping]);
+  }
+  for (const values of result.values()) {
+    values.sort((left, right) => left.productVariantId - right.productVariantId);
+  }
+  return result;
+}
+
+function groupVariantHoldsByTarget(
+  rows: readonly VariantHoldRow[],
+): Map<number, ActivePublicationVariantHoldSnapshot[]> {
+  const result = new Map<number, ActivePublicationVariantHoldSnapshot[]>();
+  const seen = new Set<string>();
+  for (const row of rows) {
+    const publicationTargetId = positiveInteger(row.publication_target_id, "variantHold.targetId");
+    const productVariantId = positiveInteger(row.product_variant_id, "variantHold.variantId");
+    const uniqueKey = `${publicationTargetId}:${productVariantId}`;
+    if (seen.has(uniqueKey)) {
+      throw invalidRow("More than one SKU-level hold resolved for a target SKU.", {
+        publicationTargetId,
+        productVariantId,
+      });
+    }
+    seen.add(uniqueKey);
+    const entry: ActivePublicationVariantHoldSnapshot = {
+      productVariantId,
+      hold: {
+        reason: nonblank(row.hold_reason, "variantHold.reason"),
+        heldAt: isoTimestamp(row.held_at, "variantHold.heldAt"),
+        heldBy: nonblank(row.held_by, "variantHold.heldBy"),
+      },
+    };
+    result.set(publicationTargetId, [...(result.get(publicationTargetId) ?? []), entry]);
   }
   for (const values of result.values()) {
     values.sort((left, right) => left.productVariantId - right.productVariantId);

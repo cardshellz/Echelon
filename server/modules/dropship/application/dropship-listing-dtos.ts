@@ -48,6 +48,7 @@ export function toDropshipVendorListingPreview(preview: DropshipListingPreviewRe
       marketplaceCategoryId: row.marketplaceCategoryId, marketplaceCategoryName: row.marketplaceCategoryName,
       storeCategoryNames: [...row.storeCategoryNames], businessPolicySelection: row.businessPolicySelection,
       previewHash: row.previewHash, adminExposureDecision: row.adminExposureDecision, selectionDecision: row.selectionDecision,
+      listingTier: row.listingTier,
       ...(row.presentation ? { presentation: dropshipListingPresentationSchema.parse(row.presentation) } : {}),
       ...(row.economics ? { economics: dropshipListingEconomicsSchema.parse(row.economics) } : {}),
     })),

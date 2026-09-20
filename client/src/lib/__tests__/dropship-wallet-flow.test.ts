@@ -72,7 +72,8 @@ function wallet(overrides: Partial<DropshipWalletView> = {}): DropshipWalletView
   const base: DropshipWalletView = {
     account: { availableBalanceCents: 0, pendingBalanceCents: 0, currency: "USD", status: "active" },
     autoReload: null, fundingMethods: [], recentLedger: [], cardFundingFeeBps: 300, usdcBaseDepositAddress: null,
-    limits: LIMITS, setupStatus: { sourceReady: false, backupReady: false, acknowledged: false, done: false, launchReady: false }, clientFallbacks: [],
+    limits: LIMITS, setupStatus: { sourceReady: false, backupReady: false, acknowledged: false, done: false, launchReady: false }, listingTiers: null,
+    clientFallbacks: [],
   };
   return { ...base, ...overrides };
 }

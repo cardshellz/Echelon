@@ -39,7 +39,14 @@ import {
 import { dropshipPortalPath, isDropshipSensitiveProofActive, useDropshipAuth, type DropshipSensitiveAction } from "@/lib/dropship-auth";
 import { isOnboardingVendor } from "@/lib/dropship-onboarding";
 import { describeVendorStanding } from "@/lib/dropship-vendor-standing";
-import { adaptWalletView, type DropshipWalletView, type WalletFundingMethod, type WalletLimits } from "@/lib/dropship-wallet-view-adapter";
+import {
+  adaptWalletView,
+  type DropshipWalletView,
+  type WalletFundingMethod,
+  type WalletLimits,
+  type WalletListingTierStatus,
+  type WalletListingTiers,
+} from "@/lib/dropship-wallet-view-adapter";
 import {
   BANK_SETTLEMENT_PHRASE,
   BANK_SETTLEMENT_PHRASE_WITH_CALENDAR,
@@ -1983,6 +1990,8 @@ function ManageView({
         <SectionFeedback {...feedback("money")} />
       </section>
 
+      {wallet.listingTiers && <ListingTiersSection tiers={wallet.listingTiers} />}
+
       <section className={SECTION} data-testid="wallet-plan">
         <h2 className="text-lg font-semibold">Your plan</h2>
         {!flow.authorized ? (
@@ -2085,6 +2094,64 @@ function ManageView({
 }
 
 /** The step-1 rules, collapsed, for a vendor past setup: the same copy, never a second wording of it. */
+/**
+ * What is on sale, per listing tier, as the server decided it: the minimum
+ * each tier needs, whether this wallet meets it, and a raise still in its
+ * grace period. Packs and inner packs share one minimum; cases have their own.
+ */
+function ListingTiersSection({ tiers }: { tiers: WalletListingTiers }) {
+  return (
+    <section className={SECTION} data-testid="wallet-listing-tiers">
+      <h2 className="text-lg font-semibold">What is on sale</h2>
+      <p className="mt-1 text-sm text-zinc-600">
+        Each kind of listing needs a minimum wallet balance, set by CardShellz. Packs and inner packs share one minimum; cases have their own. Money still settling counts.
+      </p>
+      <ul className="mt-3 space-y-3">
+        {[tiers.pack, tiers.case].map((tier) => (
+          <li key={tier.tier} className="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between" data-testid={`wallet-listing-tier-${tier.tier}`}>
+            <div>
+              <div className="font-medium">{tier.tier === "case" ? "Cases" : "Packs and inner packs"} · minimum {formatWholeDollars(tier.minimumCents)}</div>
+              <p className="text-sm text-zinc-600">{describeListingTier(tier)}</p>
+              {tier.upcoming && (
+                <p className="text-sm text-amber-800" data-testid={`wallet-listing-tier-${tier.tier}-upcoming`}>
+                  {describeUpcomingListingTier(tier)}
+                </p>
+              )}
+            </div>
+            <Badge
+              variant="outline"
+              className={tier.eligible ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-amber-200 bg-amber-50 text-amber-900"}
+            >
+              {tier.eligible ? "On sale" : "Off sale"}
+            </Badge>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+function describeListingTier(tier: WalletListingTierStatus): string {
+  if (tier.eligible) {
+    return tier.tier === "case"
+      ? "Your balance is at or above the case minimum, so your case listings are on sale."
+      : "Your wallet keeps this minimum, so these listings are on sale.";
+  }
+  const shortfall = formatWholeDollars(tier.shortfallCents);
+  return tier.tier === "case"
+    ? `Case listings go on sale on their own once your balance reaches the minimum. You are ${shortfall} short.`
+    : `These listings are off sale until your wallet keeps the minimum: raise your auto-reload minimum to it, or add ${shortfall}.`;
+}
+
+function describeUpcomingListingTier(tier: WalletListingTierStatus): string {
+  const upcoming = tier.upcoming!;
+  const date = new Date(upcoming.enforcesAt).toLocaleDateString("en-US", { timeZone: "UTC", year: "numeric", month: "long", day: "numeric" });
+  const rises = `The minimum rises to ${formatWholeDollars(upcoming.minimumCents)} on ${date}.`;
+  return upcoming.affectsVendor
+    ? `${rises} As things stand you would fall below it; bring your wallet up before then to keep these listings on sale.`
+    : `${rises} Your wallet already meets it.`;
+}
+
 function HowItWorksSection({ wallet, flow }: { wallet: DropshipWalletView; flow: WalletFlowState }) {
   const [open, setOpen] = useState(false);
   return (

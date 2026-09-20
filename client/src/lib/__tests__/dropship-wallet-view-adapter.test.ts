@@ -42,9 +42,10 @@ describe("adaptWalletView", () => {
     expect(view.recentLedger[0]).toMatchObject({ reason: "order", availableBalanceAfterCents: -5000, cardFee: null, failure: null });
     expect(view.limits).toEqual(CLIENT_FALLBACK_LIMITS);
     expect(view.setupStatus).toEqual({ sourceReady: true, backupReady: true, acknowledged: true, done: true, launchReady: true });
+    expect(view.listingTiers).toBeNull();
     expect(view.clientFallbacks.sort()).toEqual([
       "acknowledgement_assumed_from_settings_row", "backstop_from_first_active_card", "bank_details_from_label", "card_details_from_label",
-      "ledger_reason_derived", "limits_from_documented_defaults", "roles_derived", "setup_status_derived",
+      "ledger_reason_derived", "limits_from_documented_defaults", "listing_tiers_not_served", "roles_derived", "setup_status_derived",
     ]);
     // The page never sees provider internals.
     expect(view.account).not.toHaveProperty("walletAccountId");
@@ -59,14 +60,23 @@ describe("adaptWalletView", () => {
       fundingMethods: [rawMethod({ status: "active", card: { brand: "Visa", last4: "4242", expMonth: 12, expYear: 2027 }, roles: { isAutoReloadSource: false, isBackupCard: true, chargeable: true } })],
       recentLedger: [{ ledgerEntryId: 2, type: "funding", status: "settled", amountCents: 5500, currency: "USD", availableBalanceAfterCents: 0, pendingBalanceAfterCents: 0, createdAt: STAMP, settledAt: STAMP,
         reason: "covered_held_order", fundingMethodId: 10, cardFee: { feeCents: 165, feeBps: 300, chargedCents: 5665 }, failure: null }],
-      limits, setupStatus,
+      limits, setupStatus, listingTiers: servedListingTiers(),
     }));
     expect(view.autoReload).toMatchObject({ backstopFundingMethodId: 11, acknowledgedCardFeeBps: 250, acknowledgedAt: LATER });
     expect(view.fundingMethods[0].card).toEqual({ brand: "Visa", last4: "4242", expMonth: 12, expYear: 2027 });
     expect(view.recentLedger[0]).toMatchObject({ reason: "covered_held_order", cardFee: { feeCents: 165, feeBps: 300, chargedCents: 5665 } });
     expect(view.limits).toEqual(limits);
     expect(view.setupStatus).toEqual(setupStatus);
+    expect(view.listingTiers).toEqual(servedListingTiers());
     expect(view.clientFallbacks).toEqual([]);
+  });
+
+  it("takes the listing tiers exactly as served and never derives them", () => {
+    const tiers = servedListingTiers();
+    expect(adaptWalletView(rawWallet({ listingTiers: tiers })).listingTiers).toEqual(tiers);
+    // A malformed tier (money that is not integer cents) is a contract break, not something to paper over.
+    expect(() => adaptWalletView(rawWallet({ listingTiers: { ...tiers, case: { ...tiers.case, shortfallCents: 12.5 } } }))).toThrow();
+    expect(() => adaptWalletView(rawWallet({ listingTiers: { ...tiers, pack: { ...tiers.pack, reason: "vibes" } } }))).toThrow();
   });
 
   it("fills a limit an older server did not serve from the documented default, and names the fallback", () => {
@@ -164,3 +174,14 @@ describe("derivations", () => {
     expect(deriveLedgerReason({ type: "funding", reason: "manual_top_up", referenceType: null, metadata: null })).toBe("manual_top_up");
   });
 });
+
+function servedListingTiers() {
+  return {
+    pack: { tier: "pack" as const, eligible: true, reason: null, minimumCents: 10_000, shortfallCents: 0, upcoming: null },
+    case: {
+      tier: "case" as const, eligible: false, reason: "case_tier_balance_below_minimum" as const, minimumCents: 50_000, shortfallCents: 38_000,
+      upcoming: { minimumCents: 75_000, policyVersion: 3, enforcesAt: "2026-10-01T00:00:00.000Z", affectsVendor: true },
+    },
+    generatedAt: STAMP,
+  };
+}

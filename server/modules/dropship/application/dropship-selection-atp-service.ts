@@ -7,6 +7,11 @@ import {
 } from "../domain/catalog-exposure";
 import { DropshipError } from "../domain/errors";
 import {
+  listingTierForVariantUomType,
+  type DropshipListingTierEligibility,
+  type DropshipListingTierStatus,
+} from "../domain/listing-tiers";
+import {
   assertDropshipVendorSelectionRuleTarget,
   evaluateDropshipVendorCatalogSelection,
   type DropshipVendorCatalogSelectionDecision,
@@ -63,6 +68,8 @@ export interface DropshipVendorCatalogCandidate extends DropshipCatalogVariantCa
 export interface DropshipVendorCatalogPreviewRow extends DropshipVendorCatalogCandidate {
   adminExposureDecision: DropshipCatalogExposureDecision;
   selectionDecision: DropshipVendorCatalogSelectionDecision;
+  /** The listing tier this SKU sells in and whether it is on sale for the vendor. */
+  listingTier: DropshipListingTierStatus;
 }
 
 export interface DropshipVendorCatalogCategoryFacet {
@@ -136,6 +143,8 @@ export interface DropshipSelectionAtpServiceDependencies {
   logger: DropshipLogger;
   repository: DropshipSelectionAtpRepository;
   atp: DropshipAtpProvider;
+  /** Which of the vendor's listing tiers are on sale, for the catalog rows. */
+  listingTiers: { resolveForVendor(vendorId: number): Promise<{ eligibility: DropshipListingTierEligibility }> };
 }
 
 export interface NormalizedDropshipVendorSelectionRule extends ReplaceDropshipVendorSelectionRule {
@@ -239,7 +248,7 @@ export class DropshipSelectionAtpService {
     const facets = buildCatalogFacets(exposedFacetCandidates);
 
     const productVariantIds = uniqueNumbers(candidates.map((candidate) => candidate.productVariantId));
-    const [atp, overrideRows] = await Promise.all([
+    const [atp, overrideRows, listingTiers] = await Promise.all([
       this.deps.atp.getVariantAtp(candidates.map((candidate) => ({
         productId: candidate.productId,
         productVariantId: candidate.productVariantId,
@@ -248,6 +257,7 @@ export class DropshipSelectionAtpService {
         vendorId: parsed.vendorId,
         productVariantIds,
       }),
+      this.deps.listingTiers.resolveForVendor(parsed.vendorId),
     ]);
     const atpByVariantId = atp.quantities;
 
@@ -270,6 +280,7 @@ export class DropshipSelectionAtpService {
         ...candidate,
         adminExposureDecision,
         selectionDecision,
+        listingTier: listingTiers.eligibility[listingTierForVariantUomType(candidate.variantUomType)],
       };
     });
     const exposedRows = evaluatedRows.filter((row) => row.adminExposureDecision.exposed);

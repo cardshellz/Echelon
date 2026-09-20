@@ -50,6 +50,8 @@ interface StubState {
   ledger: Record<string, unknown>[];
   cardFundingFeeBps: number;
   limits: Record<string, number> | null;
+  /** The server's listing tier decision; null models a server that does not serve it yet. */
+  listingTiers: Record<string, unknown> | null;
   proofs: Record<string, { method: string; verifiedAt: string; expiresAt: string }>;
   failChallenge: boolean;
   deleteRefusal: string | null;
@@ -95,11 +97,22 @@ function walletJson(state: StubState) {
   return { wallet: {
     account: { walletAccountId: 1, vendorId: 1, availableBalanceCents: state.balanceCents, pendingBalanceCents: state.pendingCents, currency: "USD", status: "active", createdAt: STAMP, updatedAt: STAMP },
     autoReload: state.autoReload, fundingMethods, recentLedger: state.ledger, cardFundingFeeBps: state.cardFundingFeeBps, usdcBaseDepositAddress: state.usdcDepositAddress,
-    ...(state.limits ? { limits: state.limits } : {}) } };
+    ...(state.limits ? { limits: state.limits } : {}),
+    ...(state.listingTiers ? { listingTiers: state.listingTiers } : {}) } };
+}
+
+/** Pack tier on sale; case tier $380 short of $500 with a raise to $750 landing in grace. */
+function listingTiersJson() {
+  return {
+    pack: { tier: "pack", eligible: true, reason: null, minimumCents: 10_000, shortfallCents: 0, upcoming: null },
+    case: { tier: "case", eligible: false, reason: "case_tier_balance_below_minimum", minimumCents: 50_000, shortfallCents: 38_000,
+      upcoming: { minimumCents: 75_000, policyVersion: 3, enforcesAt: "2026-10-04T15:00:00.000Z", affectsVendor: true } },
+    generatedAt: STAMP,
+  };
 }
 
 async function setup(page: Page, initial: Partial<StubState> = {}, path = HARNESS_PATH) {
-  const state: StubState = { methods: [], holdSetupConfirmation: false, usdcDepositAddress: null, autoReload: null, balanceCents: 0, pendingCents: 0, ledger: [], cardFundingFeeBps: 300, limits: null,
+  const state: StubState = { methods: [], holdSetupConfirmation: false, usdcDepositAddress: null, autoReload: null, balanceCents: 0, pendingCents: 0, ledger: [], cardFundingFeeBps: 300, limits: null, listingTiers: null,
     proofs: {}, failChallenge: false, deleteRefusal: null, detachOutcome: "detached", putRefusalOnce: null, vendorStatus: "onboarding", vendorStandingReason: null,
     walletReads: 0, nextCardId: 10, nextBankId: 30, setupSessions: [], autoReloadWrites: [], fundingSessions: [], usdcRegistrations: [], deletes: [], bodies: [],
     codesSent: [], unexpected: [], errors: [], ...initial };
@@ -668,6 +681,33 @@ test("a wrong code is rejected in place and can be retried; a failed code email 
   finish(state);
 });
 
+test("manage: the wallet says which listing tiers are on sale, what each needs, and a raise still in grace", async ({ page }) => {
+  const state = await setup(page, { vendorStatus: "active", methods: [CARD, BANK], autoReload: doneAutoReload(), balanceCents: 12_000, proofs: ALL_PROOFS, listingTiers: listingTiersJson() });
+  const tiers = page.getByTestId("wallet-listing-tiers");
+  await expect(tiers).toContainText("What is on sale");
+  // Between the balance and the plan: the first thing after the number is what it buys.
+  const balanceY = await page.getByTestId("wallet-balance").boundingBox().then((box) => box?.y ?? 0);
+  const tiersY = await tiers.boundingBox().then((box) => box?.y ?? 0);
+  const planY = await page.getByTestId("wallet-plan").boundingBox().then((box) => box?.y ?? 0);
+  expect(tiersY).toBeGreaterThan(balanceY);
+  expect(planY).toBeGreaterThan(tiersY);
+  const pack = tiers.getByTestId("wallet-listing-tier-pack");
+  await expect(pack).toContainText("Packs and inner packs · minimum $100");
+  await expect(pack).toContainText("On sale");
+  await expect(pack).toContainText("Your wallet keeps this minimum, so these listings are on sale.");
+  await expect(pack.getByTestId("wallet-listing-tier-pack-upcoming")).toHaveCount(0);
+  const cases = tiers.getByTestId("wallet-listing-tier-case");
+  await expect(cases).toContainText("Cases · minimum $500");
+  await expect(cases).toContainText("Off sale");
+  await expect(cases).toContainText("Case listings go on sale on their own once your balance reaches the minimum. You are $380 short.");
+  await expect(cases.getByTestId("wallet-listing-tier-case-upcoming")).toContainText(
+    "The minimum rises to $750 on October 4, 2026. As things stand you would fall below it; bring your wallet up before then to keep these listings on sale.",
+  );
+  await expectNoHorizontalScroll(page);
+  await shot(page, "manage-13-listing-tiers");
+  finish(state);
+});
+
 test("a paused vendor sees the standing notice above everything with a control behind it, and no way to turn auto-reload off", async ({ page }) => {
   const state = await setup(page, { vendorStatus: "paused", vendorStandingReason: "card_declined", methods: [CARD, BANK], autoReload: doneAutoReload(), proofs: ALL_PROOFS });
   const notice = page.getByTestId("wallet-vendor-standing-notice");
@@ -677,6 +717,8 @@ test("a paused vendor sees the standing notice above everything with a control b
   await expect(page.getByTestId("wallet-step-backup")).toBeVisible();
   await expect(page.getByTestId("wallet-auto-reload-off")).toHaveCount(0);
   await expect(page.getByTestId("wallet-method-10").getByTestId("wallet-method-remove")).toBeDisabled();
+  // A server that does not serve the listing tiers yet leaves the section out rather than guessing.
+  await expect(page.getByTestId("wallet-listing-tiers")).toHaveCount(0);
   await shot(page, "manage-12-paused");
   finish(state);
 });

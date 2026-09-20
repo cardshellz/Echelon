@@ -1603,6 +1603,16 @@ export interface DropshipCatalogRow {
   productLineNames: string[];
   unitsPerVariant: number;
   selectionDecision: DropshipCatalogSelectionDecision;
+  /** The listing tier this SKU sells in and whether it is on sale; absent from a server one release behind. */
+  listingTier?: DropshipCatalogListingTier;
+}
+
+export interface DropshipCatalogListingTier {
+  tier: "pack" | "case";
+  eligible: boolean;
+  reason: "pack_tier_minimum_not_kept" | "case_tier_balance_below_minimum" | null;
+  minimumCents: number;
+  shortfallCents: number;
 }
 
 export interface DropshipCatalogFacets {

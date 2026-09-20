@@ -15,7 +15,7 @@ describe("listing price local draft authority", () => {
     context = { vendorId: 10, vendorStatus: "onboarding", entitlementStatus: "active",
       storeConnectionId: 22, storeStatus: "connected", setupStatus: "incomplete", platform: "ebay", storeLaunchReady: false };
     const candidate = { productId: 7, productVariantId: 101, productLineIds: [], category: "Mailers",
-      productIsActive: true, variantIsActive: true, defaultRetailPriceCents: 899 } as DropshipListingCatalogCandidate;
+      productIsActive: true, variantIsActive: true, variantUomType: "pack", defaultRetailPriceCents: 899 } as DropshipListingCatalogCandidate;
     tx = {
       vendorId: 10,
       catalog: {

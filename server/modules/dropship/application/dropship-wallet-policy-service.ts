@@ -16,6 +16,11 @@ import {
   type DropshipWalletPolicyLimits,
   type DropshipWalletPolicyResolver,
 } from "../domain/wallet-policy";
+import {
+  resolveEnforcedListingTierMinimums,
+  type DropshipEnforcedListingTierMinimums,
+  type DropshipListingTierPolicyVersion,
+} from "../domain/listing-tiers";
 import { resolveDropshipCardFundingFeeBps } from "./dropship-wallet-service";
 import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship-ports";
 
@@ -176,6 +181,11 @@ export interface DropshipWalletPolicyOverview {
   envKeys: typeof DROPSHIP_WALLET_POLICY_ENV_KEYS;
   cardFundingFee: DropshipWalletPolicyCardFeeView;
   impact: DropshipWalletPolicyImpact;
+  /**
+   * The listing tier minimums enforced right now and any raise still inside
+   * its grace period, from the version history (see `listing-tiers.ts`).
+   */
+  listingTierEnforcement: DropshipEnforcedListingTierMinimums;
   generatedAt: Date;
 }
 
@@ -207,6 +217,8 @@ export interface DropshipWalletPolicyVendorImpactCounts {
 
 export interface DropshipWalletPolicyRepository {
   getActivePolicy(): Promise<DropshipWalletPolicyRecord | null>;
+  /** Every published version, oldest first. */
+  listPolicyVersions(): Promise<DropshipWalletPolicyRecord[]>;
   createPolicyVersion(
     input: CreateDropshipWalletPolicyVersionRepositoryInput,
   ): Promise<DropshipWalletPolicyMutationResult>;
@@ -290,6 +302,7 @@ export class DropshipWalletPolicyService implements DropshipWalletPolicyResolver
     const parsed = parseWalletPolicyInput(dropshipWalletPolicyImpactInputSchema, proposal);
     const effective = await this.resolveEffectiveLimits();
     const impact = await this.measureImpact(effective.limits, parsed);
+    const generatedAt = this.deps.clock.now();
     return {
       policy: effective.policy,
       limits: effective.limits,
@@ -298,8 +311,31 @@ export class DropshipWalletPolicyService implements DropshipWalletPolicyResolver
       envKeys: DROPSHIP_WALLET_POLICY_ENV_KEYS,
       cardFundingFee: this.cardFundingFeeView(),
       impact,
-      generatedAt: this.deps.clock.now(),
+      listingTierEnforcement: await this.resolveListingTierMinimums(generatedAt),
+      generatedAt,
     };
+  }
+
+  /**
+   * The listing tier minimums in force at `now`, with grace: a version that
+   * raised a tier is enforced `tier_change_grace_days` after it was published,
+   * a lowering immediately. Resolved from the whole immutable version history,
+   * so the answer for a given instant never changes. With no published
+   * version (unmigrated database, empty table) the environment fallback
+   * behaves like a version published at the epoch: enforced, no grace.
+   */
+  async resolveListingTierMinimums(now: Date = this.deps.clock.now()): Promise<DropshipEnforcedListingTierMinimums> {
+    const versions = await this.readPolicyVersions();
+    const history: DropshipListingTierPolicyVersion[] = versions.length > 0
+      ? versions.map((record) => ({
+          version: record.version,
+          packTierMinimumCents: record.limits.autoReloadMinTriggerCents,
+          caseTierMinimumCents: record.limits.caseTierMinimumCents,
+          tierChangeGraceDays: record.limits.tierChangeGraceDays,
+          createdAt: record.createdAt,
+        }))
+      : [environmentFallbackTierVersion(this.envLimits())];
+    return resolveEnforcedListingTierMinimums(history, now);
   }
 
   /**
@@ -514,6 +550,23 @@ export class DropshipWalletPolicyService implements DropshipWalletPolicyResolver
     }
   }
 
+  /** Same tolerance as the active-row read: a missing table means "no history", at WARN. */
+  private async readPolicyVersions(): Promise<DropshipWalletPolicyRecord[]> {
+    try {
+      return await this.deps.repository.listPolicyVersions();
+    } catch (error) {
+      if (error instanceof DropshipError && error.code === "DROPSHIP_WALLET_POLICY_TABLE_MISSING") {
+        this.deps.logger.warn({
+          code: "DROPSHIP_WALLET_POLICY_ENV_FALLBACK",
+          message: "Dropship wallet policy table is missing; listing tier minimums fall back to the environment limits.",
+          context: { classification: "transient", errorCode: error.code },
+        });
+        return [];
+      }
+      throw error;
+    }
+  }
+
   /** Same tolerance as the policy read: a missing profile table means "no override", at WARN. */
   private async readCreditProfile(vendorId: number): Promise<DropshipVendorCreditProfile | null> {
     try {
@@ -616,6 +669,20 @@ function parseOrThrow<T>(
     });
   }
   return result.data;
+}
+
+/**
+ * The fallback limits as a policy version: version 1, published at the epoch,
+ * so it is enforced from the start and nothing is in grace.
+ */
+function environmentFallbackTierVersion(limits: DropshipWalletPolicyLimits): DropshipListingTierPolicyVersion {
+  return {
+    version: 1,
+    packTierMinimumCents: limits.autoReloadMinTriggerCents,
+    caseTierMinimumCents: limits.caseTierMinimumCents,
+    tierChangeGraceDays: limits.tierChangeGraceDays,
+    createdAt: new Date(0),
+  };
 }
 
 export function makeDropshipWalletPolicyLogger(): DropshipLogger {

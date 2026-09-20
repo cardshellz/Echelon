@@ -21,7 +21,7 @@ function makeContext(): ListingShippingEstimateContext {
 function makeCandidate(): DropshipListingCatalogCandidate {
   return {
     productId: 501, productVariantId: 101, productLineIds: [9], category: "Protectors",
-    productIsActive: true, variantIsActive: true, unitsPerVariant: 100, defaultRetailPriceCents: 1199,
+    productIsActive: true, variantIsActive: true, variantUomType: "pack", unitsPerVariant: 100, defaultRetailPriceCents: 1199,
     sku: "PACK", productName: "Sleeves", variantName: "100 pack", title: "Sleeves", description: null,
     brand: null, gtin: null, mpn: null, condition: "new", itemSpecifics: null, imageUrls: [], weightGrams: 100,
     ebayBrowseCategoryId: null, ebayBrowseCategoryName: null,
