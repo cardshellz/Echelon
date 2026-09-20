@@ -22,6 +22,7 @@ import {
   type DropshipDisputeStatus,
 } from "../domain/funding-reversal";
 import { decideAutopayRefill, deriveSingleChargeBoundCents } from "../domain/autopay-refill";
+import type { UsdcTransferObservation } from "../domain/usdc-deposits";
 import {
   assessAdvanceStanding,
   decideCardBackstopCharge,
@@ -423,6 +424,15 @@ export interface DropshipUsdcLedgerEntryRecord {
   status: string;
   observedAt: Date;
   settledAt: Date | null;
+  /** Chain facts the watcher records (migration 0691); null on a manual staff credit. */
+  logIndex: number | null;
+  blockNumber: number | null;
+  blockHash: string | null;
+  tokenAddress: string | null;
+  depositAddressId: number | null;
+  /** The sub-cent remainder left at the address, never credited. */
+  dustAtomicUnits: string;
+  voidedAt: Date | null;
 }
 
 export interface DropshipWalletOverview {
@@ -630,6 +640,67 @@ export interface DropshipWalletFundingFailureResult {
 
 export interface DropshipConfirmedUsdcFundingResult extends DropshipWalletMutationResult {
   usdcLedgerEntry: DropshipUsdcLedgerEntryRecord;
+}
+
+/** A USDC transfer the watcher found, recorded against the vendor whose deposit address received it. */
+export interface ObserveDropshipUsdcDepositRepositoryInput {
+  vendorId: number;
+  depositAddressId: number;
+  transfer: UsdcTransferObservation;
+  /** Whole cents credited; zero for dust. */
+  amountCents: number;
+  dustAtomicUnits: string;
+  confirmations: number;
+  /** pending: credited to the pending balance; settled: available; dust: recorded, never credited. */
+  status: "pending" | "settled" | "dust";
+  currency: string;
+  requestHash: string;
+  occurredAt: Date;
+}
+
+export interface DropshipUsdcDepositLedgerResult {
+  account: DropshipWalletAccountRecord;
+  /** Null for dust: no money moved. */
+  ledgerEntry: DropshipWalletLedgerRecord | null;
+  usdcLedgerEntry: DropshipUsdcLedgerEntryRecord;
+  idempotentReplay: boolean;
+}
+
+export interface SettleDropshipUsdcDepositRepositoryInput {
+  vendorId: number;
+  usdcLedgerEntryId: number;
+  confirmations: number;
+  current: { blockNumber: number; blockHash: string };
+  occurredAt: Date;
+}
+
+export interface VoidDropshipUsdcDepositRepositoryInput {
+  vendorId: number;
+  usdcLedgerEntryId: number;
+  reasonCode: string;
+  reasonMessage: string;
+  occurredAt: Date;
+}
+
+export interface RecordDropshipUsdcDepositMovedRepositoryInput {
+  vendorId: number;
+  usdcLedgerEntryId: number;
+  confirmations: number;
+  current: { blockNumber: number; blockHash: string };
+  occurredAt: Date;
+}
+
+/**
+ * The wallet ledger's side of watched USDC deposits (funding design phase 6):
+ * every write moves the wallet balances and the chain observation together.
+ */
+export interface DropshipUsdcDepositLedgerRepository {
+  findUsdcDepositByLog(input: { chainId: number; transactionHash: string; logIndex: number }): Promise<DropshipUsdcLedgerEntryRecord | null>;
+  listPendingUsdcDeposits(input: { chainId: number; limit: number }): Promise<DropshipUsdcLedgerEntryRecord[]>;
+  observeUsdcDeposit(input: ObserveDropshipUsdcDepositRepositoryInput): Promise<DropshipUsdcDepositLedgerResult>;
+  settleUsdcDeposit(input: SettleDropshipUsdcDepositRepositoryInput): Promise<DropshipUsdcDepositLedgerResult>;
+  voidUsdcDeposit(input: VoidDropshipUsdcDepositRepositoryInput): Promise<DropshipUsdcDepositLedgerResult>;
+  recordUsdcDepositMoved(input: RecordDropshipUsdcDepositMovedRepositoryInput): Promise<DropshipUsdcLedgerEntryRecord>;
 }
 
 export interface DropshipFundingMethodMutationResult {

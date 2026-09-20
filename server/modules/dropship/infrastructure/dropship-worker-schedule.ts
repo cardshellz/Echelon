@@ -8,7 +8,8 @@ export type DropshipWorkerScheduleName =
   | "orderProcessing"
   | "ebayOrderIntake"
   | "returnIntake"
-  | "returnsMaintenance";
+  | "returnsMaintenance"
+  | "usdcWatcher";
 
 interface DropshipWorkerScheduleDefinition {
   initialDelayEnvironmentVariable: string;
@@ -41,6 +42,12 @@ const SCHEDULE_DEFINITIONS: Record<
   returnsMaintenance: {
     initialDelayEnvironmentVariable: "DROPSHIP_RETURNS_MAINTENANCE_WORKER_INITIAL_DELAY_MS",
     defaultInitialDelayMs: 150_000,
+  },
+  // The USDC chain watcher polls a node every half minute; it starts after
+  // the queue workers and before the maintenance sweep.
+  usdcWatcher: {
+    initialDelayEnvironmentVariable: "DROPSHIP_USDC_WATCHER_INITIAL_DELAY_MS",
+    defaultInitialDelayMs: 45_000,
   },
 };
 

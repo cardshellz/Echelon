@@ -11,6 +11,7 @@ describe("resolveDropshipWorkerSchedule", () => {
     expect(resolveDropshipWorkerSchedule("ebayOrderIntake", environment).initialDelayMs).toBe(30_000);
     expect(resolveDropshipWorkerSchedule("returnIntake", environment).initialDelayMs).toBe(90_000);
     expect(resolveDropshipWorkerSchedule("returnsMaintenance", environment).initialDelayMs).toBe(150_000);
+    expect(resolveDropshipWorkerSchedule("usdcWatcher", environment).initialDelayMs).toBe(45_000);
   });
 
   it("accepts a non-negative per-worker environment override", () => {

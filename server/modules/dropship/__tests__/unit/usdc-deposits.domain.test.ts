@@ -135,15 +135,21 @@ describe("decideUsdcDepositObservation", () => {
 });
 
 describe("decideUsdcDepositSettlement", () => {
-  const base = { recordedBlockHash: BLOCK_HASH, headBlockNumber: 1_000, safeBlockNumber: 900 };
+  const base = { recordedBlockNumber: 901, recordedBlockHash: BLOCK_HASH, headBlockNumber: 1_000, safeBlockNumber: 900, voidAfterBlocks: 60 };
 
   it("settles once the transfer's block is at or below the safe head, and waits above it", () => {
     expect(decideUsdcDepositSettlement({ ...base, current: { blockNumber: 900, blockHash: BLOCK_HASH } })).toEqual({ outcome: "settle", confirmations: 101 });
     expect(decideUsdcDepositSettlement({ ...base, current: { blockNumber: 901, blockHash: BLOCK_HASH } })).toEqual({ outcome: "wait", confirmations: 100 });
   });
 
-  it("voids a transfer whose receipt is gone and re-records one that moved to another block", () => {
+  it("voids a transfer whose receipt is gone once the chain has moved the grace past its block, and waits before that", () => {
     expect(decideUsdcDepositSettlement({ ...base, current: null })).toEqual({ outcome: "void", confirmations: 0 });
+    expect(decideUsdcDepositSettlement({ ...base, recordedBlockNumber: 941, current: null })).toEqual({ outcome: "wait", confirmations: 0 });
+    expect(decideUsdcDepositSettlement({ ...base, recordedBlockNumber: 940, current: null })).toEqual({ outcome: "void", confirmations: 0 });
+    expect(() => decideUsdcDepositSettlement({ ...base, voidAfterBlocks: 0, current: null })).toThrowError(expect.objectContaining({ code: DROPSHIP_USDC_DEPOSIT_INVALID }));
+  });
+
+  it("re-records a transfer that moved to another block", () => {
     expect(decideUsdcDepositSettlement({ ...base, current: { blockNumber: 902, blockHash: OTHER_BLOCK_HASH } })).toEqual({ outcome: "moved", confirmations: 99 });
     // Moved is judged before settle: a block hash change is never settled on the old record.
     expect(decideUsdcDepositSettlement({ ...base, current: { blockNumber: 800, blockHash: OTHER_BLOCK_HASH } })).toEqual({ outcome: "moved", confirmations: 201 });

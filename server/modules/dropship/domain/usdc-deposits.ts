@@ -185,22 +185,32 @@ export type UsdcDepositSettlementDecision =
 /**
  * What to do with a pending credit on a later tick, given where the transfer
  * sits now (from its receipt) and where the safe head is. A transfer whose
- * receipt is gone was reorged out: its pending credit is voided. One that
+ * receipt is gone was reorged out; a reorged transaction is usually
+ * re-included within moments, so the credit is voided only once the chain
+ * has moved `voidAfterBlocks` past the block it was recorded in. One that
  * moved to another block is re-recorded and judged again next tick.
  */
 export function decideUsdcDepositSettlement(input: {
+  recordedBlockNumber: number;
   recordedBlockHash: string;
   current: { blockNumber: number; blockHash: string } | null;
   headBlockNumber: number;
   safeBlockNumber: number;
+  voidAfterBlocks: number;
 }): UsdcDepositSettlementDecision {
+  assertBlockNumber(input.recordedBlockNumber, "recordedBlockNumber");
   assertBlockNumber(input.headBlockNumber, "headBlockNumber");
   assertBlockNumber(input.safeBlockNumber, "safeBlockNumber");
+  if (!Number.isSafeInteger(input.voidAfterBlocks) || input.voidAfterBlocks < 1) {
+    throw depositInvalid("voidAfterBlocks", input.voidAfterBlocks, "must be at least 1");
+  }
   if (typeof input.recordedBlockHash !== "string" || !EVM_WORD_PATTERN.test(input.recordedBlockHash)) {
     throw depositInvalid("recordedBlockHash", input.recordedBlockHash, "must be a 32-byte hex word");
   }
   if (input.current === null) {
-    return { outcome: "void", confirmations: 0 };
+    return input.headBlockNumber - input.recordedBlockNumber >= input.voidAfterBlocks
+      ? { outcome: "void", confirmations: 0 }
+      : { outcome: "wait", confirmations: 0 };
   }
   assertBlockNumber(input.current.blockNumber, "current.blockNumber");
   if (typeof input.current.blockHash !== "string" || !EVM_WORD_PATTERN.test(input.current.blockHash)) {

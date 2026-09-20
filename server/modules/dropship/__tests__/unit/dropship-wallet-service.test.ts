@@ -2432,6 +2432,13 @@ class FakeWalletRepository implements DropshipWalletRepository {
       status: "settled",
       observedAt: input.observedAt,
       settledAt: input.occurredAt,
+      logIndex: null,
+      blockNumber: null,
+      blockHash: null,
+      tokenAddress: null,
+      depositAddressId: null,
+      dustAtomicUnits: "0",
+      voidedAt: null,
     };
     this.usdcLedger.push(usdcLedgerEntry);
     return usdcLedgerEntry;

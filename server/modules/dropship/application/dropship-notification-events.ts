@@ -31,6 +31,10 @@ export const DROPSHIP_NOTIFICATION_EVENTS = {
   WALLET_FUNDING_REVERSED: "dropship_wallet_funding_reversed",
   /** The daily wallet run found the balance below its minimum and autopay could not top it up (funding design phase 5). */
   WALLET_LOW_BALANCE: "dropship_wallet_low_balance",
+  /** The chain watcher credited a USDC transfer to the vendor's deposit address (funding design phase 6). */
+  USDC_DEPOSIT_LANDED: "dropship_usdc_deposit_landed",
+  /** A pending USDC deposit was removed by the network before it settled (funding design phase 6). */
+  USDC_DEPOSIT_VOIDED: "dropship_usdc_deposit_voided",
 } as const;
 
 export type DropshipNotificationEventType =
