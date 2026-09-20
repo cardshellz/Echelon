@@ -1,7 +1,10 @@
 import Stripe from "stripe";
 import { describe, expect, it, vi } from "vitest";
 import { DropshipError } from "../../domain/errors";
-import { StripeDropshipFundingProvider } from "../../infrastructure/dropship-stripe-funding.provider";
+import {
+  StripeDropshipFundingProvider,
+  bankBalanceSnapshotFromAccount,
+} from "../../infrastructure/dropship-stripe-funding.provider";
 
 describe("StripeDropshipFundingProvider", () => {
   it("creates setup sessions without creating duplicate customers when one is reusable", async () => {
@@ -759,3 +762,141 @@ function makeStripeDouble() {
     paymentMethods: { retrieve: ReturnType<typeof vi.fn> };
   };
 }
+
+describe("StripeDropshipFundingProvider bank balances (funding design phase 3)", () => {
+  function makeStripeWithFinancialConnections() {
+    const stripe = makeStripeDouble();
+    const financialConnections = { accounts: { retrieve: vi.fn(), refresh: vi.fn() } };
+    return Object.assign(stripe, { financialConnections });
+  }
+
+  function linkedAccount(overrides: Record<string, unknown> = {}) {
+    return {
+      id: "fca_1",
+      status: "active",
+      permissions: ["payment_method", "balances"],
+      balance: { as_of: 1_780_000_000, type: "cash", cash: { available: { usd: 250_000 } }, current: { usd: 250_000 } },
+      balance_refresh: { status: "succeeded", last_attempted_at: 1_780_000_000, next_refresh_available_at: 1_780_003_600 },
+      ...overrides,
+    };
+  }
+
+  it("asks for the balances permission when a bank account is linked, and nothing for a card", async () => {
+    const stripe = makeStripeDouble();
+    const provider = new StripeDropshipFundingProvider({ stripeClient: stripe, webhookSecret: "whsec_test" });
+    const base = {
+      vendorId: 10, memberId: "member-1", customerEmail: null, customerName: "Vendor", existingProviderCustomerId: "cus_existing",
+      successUrl: "https://cardshellz.io/wallet?ok", cancelUrl: "https://cardshellz.io/wallet?cancel", now: new Date("2026-09-20T12:00:00.000Z"),
+    };
+
+    await provider.createStripeSetupSession({ ...base, rail: "stripe_ach" });
+    await provider.createStripeSetupSession({ ...base, rail: "stripe_card" });
+
+    const [bank, card] = stripe.checkout.sessions.create.mock.calls.map((call) => call[0]);
+    expect(bank.payment_method_options).toEqual({
+      us_bank_account: { financial_connections: { permissions: ["payment_method", "balances"] } },
+    });
+    expect(card.payment_method_options).toBeUndefined();
+  });
+
+  it("records the Financial Connections account behind a linked bank account, and null for one entered by hand", async () => {
+    const stripe = makeStripeDouble();
+    const provider = new StripeDropshipFundingProvider({ stripeClient: stripe, webhookSecret: "whsec_test" });
+    const setupEvent = {
+      id: "evt_bank_1",
+      type: "setup_intent.succeeded",
+      data: { object: { id: "seti_bank", customer: "cus_1", payment_method: "pm_bank", metadata: { type: "dropship_funding_setup", dropship_vendor_id: "10", requested_rail: "stripe_ach" } } },
+    };
+    const bankMethod = (financialConnectionsAccount: string | null) => ({
+      id: "pm_bank",
+      type: "us_bank_account",
+      us_bank_account: { bank_name: "Test Bank", last4: "6789", account_type: "checking", account_holder_type: "company", financial_connections_account: financialConnectionsAccount },
+    });
+
+    stripe.webhooks.constructEvent.mockReturnValueOnce(setupEvent);
+    stripe.paymentMethods.retrieve.mockResolvedValueOnce(bankMethod("fca_1"));
+    const linked = await provider.parseWebhookEvent({ rawBody: Buffer.from("{}"), signature: "sig" });
+    expect(linked.kind === "funding_method_setup_completed" ? linked.fundingMethod.metadata : {}).toEqual(expect.objectContaining({
+      accountHolderType: "company",
+      financialConnectionsAccountId: "fca_1",
+      last4: "6789",
+    }));
+
+    stripe.webhooks.constructEvent.mockReturnValueOnce(setupEvent);
+    stripe.paymentMethods.retrieve.mockResolvedValueOnce(bankMethod(null));
+    const manual = await provider.parseWebhookEvent({ rawBody: Buffer.from("{}"), signature: "sig" });
+    expect(manual.kind === "funding_method_setup_completed" ? manual.fundingMethod.metadata?.financialConnectionsAccountId : "x").toBeNull();
+  });
+
+  it("reads a linked account's balance as reported: integer minor units by lowercase currency", () => {
+    expect(bankBalanceSnapshotFromAccount(linkedAccount() as never)).toEqual({
+      status: "succeeded",
+      availableByCurrency: { usd: 250_000 },
+      asOf: new Date(1_780_000_000 * 1000),
+    });
+    expect(bankBalanceSnapshotFromAccount(linkedAccount({ status: "disconnected" }) as never)).toEqual({ status: "failed", reason: "account_disconnected" });
+    expect(bankBalanceSnapshotFromAccount(linkedAccount({ permissions: ["payment_method"] }) as never)).toEqual({ status: "failed", reason: "balances_permission_missing" });
+    expect(bankBalanceSnapshotFromAccount(linkedAccount({ balance: { as_of: 1, type: "credit", credit: { used: { usd: 5 } }, current: { usd: -5 } } }) as never))
+      .toEqual({ status: "failed", reason: "balance_not_cash" });
+    expect(bankBalanceSnapshotFromAccount(linkedAccount({ balance: null, balance_refresh: { status: "pending", last_attempted_at: 1, next_refresh_available_at: null } }) as never))
+      .toEqual({ status: "pending", nextRefreshAvailableAt: null });
+    expect(bankBalanceSnapshotFromAccount(linkedAccount({ balance: null, balance_refresh: { status: "failed", last_attempted_at: 1, next_refresh_available_at: 1_780_003_600 } }) as never))
+      .toEqual({ status: "failed", reason: "balance_refresh_failed" });
+    expect(bankBalanceSnapshotFromAccount(linkedAccount({ balance: null, balance_refresh: null }) as never)).toEqual({ status: "pending", nextRefreshAvailableAt: null });
+  });
+
+  it("returns the balance on the account without requesting a refresh", async () => {
+    const stripe = makeStripeWithFinancialConnections();
+    stripe.financialConnections.accounts.retrieve.mockResolvedValueOnce(linkedAccount());
+    const provider = new StripeDropshipFundingProvider({ stripeClient: stripe, webhookSecret: "whsec_test" });
+
+    const snapshot = await provider.readBankBalance({ providerAccountId: "fca_1", now: new Date("2026-09-20T12:00:00.000Z") });
+
+    expect(snapshot).toMatchObject({ status: "succeeded", availableByCurrency: { usd: 250_000 } });
+    expect(stripe.financialConnections.accounts.retrieve).toHaveBeenCalledWith("fca_1");
+    expect(stripe.financialConnections.accounts.refresh).not.toHaveBeenCalled();
+  });
+
+  it("requests one balance refresh when the account carries none, and none while a refresh is already pending", async () => {
+    const stripe = makeStripeWithFinancialConnections();
+    const provider = new StripeDropshipFundingProvider({ stripeClient: stripe, webhookSecret: "whsec_test" });
+    const pendingRefresh = { status: "pending", last_attempted_at: 1_780_000_000, next_refresh_available_at: null };
+
+    stripe.financialConnections.accounts.retrieve.mockResolvedValueOnce(linkedAccount({ balance: null, balance_refresh: null }));
+    stripe.financialConnections.accounts.refresh.mockResolvedValueOnce(linkedAccount({ balance: null, balance_refresh: pendingRefresh }));
+    expect(await provider.readBankBalance({ providerAccountId: "fca_1", now: new Date() })).toEqual({ status: "pending", nextRefreshAvailableAt: null });
+    expect(stripe.financialConnections.accounts.refresh).toHaveBeenCalledWith("fca_1", { features: ["balance"] });
+
+    stripe.financialConnections.accounts.retrieve.mockResolvedValueOnce(linkedAccount({ balance: null, balance_refresh: pendingRefresh }));
+    expect(await provider.readBankBalance({ providerAccountId: "fca_1", now: new Date() })).toEqual({ status: "pending", nextRefreshAvailableAt: null });
+    expect(stripe.financialConnections.accounts.refresh).toHaveBeenCalledTimes(1);
+  });
+
+  it("classifies a provider failure while reading a balance", async () => {
+    const stripe = makeStripeWithFinancialConnections();
+    stripe.financialConnections.accounts.retrieve.mockRejectedValueOnce(new Stripe.errors.StripeConnectionError({ type: "api_error", message: "socket hang up" }));
+    const provider = new StripeDropshipFundingProvider({ stripeClient: stripe, webhookSecret: "whsec_test" });
+
+    await expect(provider.readBankBalance({ providerAccountId: "fca_1", now: new Date() })).rejects.toMatchObject({ code: "DROPSHIP_STRIPE_UNREACHABLE" });
+  });
+
+  it("parses a refreshed-balance webhook into a snapshot for the account it names", async () => {
+    const stripe = makeStripeDouble();
+    const provider = new StripeDropshipFundingProvider({ stripeClient: stripe, webhookSecret: "whsec_test" });
+    stripe.webhooks.constructEvent.mockReturnValueOnce({
+      id: "evt_refresh_1",
+      type: "financial_connections.account.refreshed_balance",
+      data: { object: linkedAccount({ balance: { as_of: 1_780_100_000, type: "cash", cash: { available: { usd: 90_000 } }, current: { usd: 90_000 } } }) },
+    });
+
+    const event = await provider.parseWebhookEvent({ rawBody: Buffer.from("{}"), signature: "sig" });
+
+    expect(event).toEqual({
+      kind: "bank_balance_refreshed",
+      providerEventId: "evt_refresh_1",
+      eventType: "financial_connections.account.refreshed_balance",
+      providerAccountId: "fca_1",
+      snapshot: { status: "succeeded", availableByCurrency: { usd: 90_000 }, asOf: new Date(1_780_100_000 * 1000) },
+    });
+  });
+});

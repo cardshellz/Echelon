@@ -16,6 +16,13 @@ import type { DropshipVendorStandingReason, DropshipVendorStatus } from "../../.
 import { DropshipError } from "../domain/errors";
 import { standingReasonForFailedFunding } from "../domain/vendor-standing";
 import {
+  assessAdvanceStanding,
+  decideCardBackstopCharge,
+  type DropshipAdvanceContext,
+  type DropshipAdvanceStanding,
+} from "../domain/acceptance-funding";
+import { fundingMethodFinancialConnectionsAccountId } from "../domain/funding-method";
+import {
   resolveDropshipWalletPolicyLimitsFromEnv,
   type DropshipWalletPolicyLimits,
   type DropshipWalletPolicyResolver,
@@ -87,6 +94,8 @@ export const dropshipWalletLedgerTypeSchema = z.enum([
   "return_fee",
   "insurance_pool_credit",
   "manual_adjustment",
+  /** The service fee on an order accepted against pending ACH (migration 0688). */
+  "advance_fee",
 ]);
 export type DropshipWalletLedgerType = z.infer<typeof dropshipWalletLedgerTypeSchema>;
 
@@ -386,7 +395,69 @@ export interface DropshipWalletView extends DropshipWalletOverview {
    * visible to vendors the moment it is published.
    */
   limits: DropshipWalletPolicyLimits;
+  /**
+   * The vendor's pending-ACH advance position (funding design phase 3): which
+   * bank accounts qualify, the cap and fee in force, and how much a new order
+   * could draw. Null when the policy could not be read.
+   */
+  advance: DropshipAdvanceStanding | null;
 }
+
+/**
+ * What the funding provider reports for a linked bank account, before the
+ * wallet's currency is applied: every available cash balance by lowercase
+ * ISO currency code, in the provider's integer minor units.
+ */
+export type DropshipBankBalanceSnapshot =
+  | { status: "succeeded"; availableByCurrency: Readonly<Record<string, number>>; asOf: Date }
+  | { status: "pending"; nextRefreshAvailableAt: Date | null }
+  | { status: "failed"; reason: string };
+
+/** A bank balance read through the funding provider, in the wallet's currency. */
+export type DropshipBankBalanceReading =
+  | {
+      status: "succeeded";
+      providerAccountId: string;
+      /** The provider's available cash balance in integer minor units of `currency`. */
+      availableCents: number;
+      currency: string;
+      asOf: Date;
+    }
+  | { status: "pending"; providerAccountId: string; nextRefreshAvailableAt: Date | null }
+  | { status: "failed"; providerAccountId: string; reason: string };
+
+export type DropshipBankBalanceVerificationSource = "link" | "refresh" | "webhook";
+
+export interface DropshipBankBalanceVerificationRecord {
+  verificationId: number;
+  vendorId: number;
+  fundingMethodId: number;
+  provider: string;
+  providerAccountId: string;
+  status: DropshipBankBalanceReading["status"];
+  source: DropshipBankBalanceVerificationSource;
+  availableCents: number | null;
+  currency: string | null;
+  balanceAsOf: Date | null;
+  providerEventId: string | null;
+  createdAt: Date;
+}
+
+export interface RecordDropshipBankBalanceVerificationRepositoryInput {
+  vendorId: number;
+  fundingMethodId: number;
+  provider: "stripe";
+  reading: DropshipBankBalanceReading;
+  source: DropshipBankBalanceVerificationSource;
+  /** The provider event that carried the reading; a replay records nothing twice. Null for a read we initiated. */
+  providerEventId: string | null;
+  occurredAt: Date;
+}
+
+export type DropshipBankBalanceVerificationOutcome =
+  | { outcome: "recorded"; record: DropshipBankBalanceVerificationRecord; idempotentReplay: boolean }
+  | { outcome: "not_applicable"; reason: "not_bank_account" | "no_provider_account" | "funding_method_missing" | "provider_not_configured" }
+  | { outcome: "failed"; message: string };
 
 export interface DropshipWalletMutationResult {
   account: DropshipWalletAccountRecord;
@@ -529,6 +600,45 @@ export interface DropshipWalletFundingProvider {
     idempotencyKey: string;
     now: Date;
   }): Promise<DropshipStripeAutoReloadPaymentIntent>;
+  /**
+   * Read the balance of a bank account linked through the provider. A
+   * `pending` reading means a refresh was requested and the provider will
+   * report the balance later (webhook); `failed` names why nothing was read.
+   */
+  readBankBalance(input: {
+    providerAccountId: string;
+    now: Date;
+  }): Promise<DropshipBankBalanceSnapshot>;
+}
+
+/**
+ * The reading the wallet records from a provider snapshot: the available cash
+ * balance in the wallet's currency. A snapshot without that currency is a
+ * failed reading, not a zero — nothing about the account is known.
+ */
+export function bankBalanceReadingFor(input: {
+  providerAccountId: string;
+  currency: string;
+  snapshot: DropshipBankBalanceSnapshot;
+}): DropshipBankBalanceReading {
+  const { providerAccountId, snapshot } = input;
+  if (snapshot.status === "pending") {
+    return { status: "pending", providerAccountId, nextRefreshAvailableAt: snapshot.nextRefreshAvailableAt };
+  }
+  if (snapshot.status === "failed") {
+    return { status: "failed", providerAccountId, reason: snapshot.reason };
+  }
+  const availableCents = snapshot.availableByCurrency[input.currency.toLowerCase()];
+  if (typeof availableCents !== "number" || !Number.isSafeInteger(availableCents)) {
+    return { status: "failed", providerAccountId, reason: "balance_currency_missing" };
+  }
+  return {
+    status: "succeeded",
+    providerAccountId,
+    availableCents,
+    currency: input.currency.toUpperCase(),
+    asOf: snapshot.asOf,
+  };
 }
 
 export interface DropshipWalletRepository {
@@ -562,6 +672,17 @@ export interface DropshipWalletRepository {
   failPendingFunding(input: FailDropshipPendingFundingRepositoryInput): Promise<DropshipWalletFundingFailureRepositoryResult | null>;
   upsertFundingMethod(input: UpsertDropshipFundingMethodRepositoryInput): Promise<DropshipFundingMethodMutationResult>;
   creditConfirmedUsdcFunding(input: CreateDropshipConfirmedUsdcFundingRepositoryInput): Promise<DropshipConfirmedUsdcFundingResult>;
+  /** The facts the pending-ACH advance is decided from, read in one transaction; null when the policy is unreadable. */
+  readAdvanceContext(input: { vendorId: number; now: Date }): Promise<DropshipAdvanceContext | null>;
+  /** Append a bank balance reading for a funding method of this vendor, with its audit row. */
+  recordBankBalanceVerification(
+    input: RecordDropshipBankBalanceVerificationRepositoryInput,
+  ): Promise<{ record: DropshipBankBalanceVerificationRecord; idempotentReplay: boolean }>;
+  /** The bank-account funding method linked to a provider account, or null. */
+  findFundingMethodByProviderAccount(input: {
+    provider: "stripe";
+    providerAccountId: string;
+  }): Promise<DropshipFundingMethodRecord | null>;
 }
 
 export type CreateDropshipWalletFundingLedgerInput = Omit<CreditDropshipWalletFundingInput, "walletAccountId"> & {
@@ -634,17 +755,156 @@ export class DropshipWalletService {
     vendorId: number,
     input: { ledgerLimit?: number } = {},
   ): Promise<DropshipWalletView> {
+    const now = this.deps.clock.now();
     const overview = await this.deps.repository.getOverview({
       vendorId,
       ledgerLimit: clampLedgerLimit(input.ledgerLimit),
-      now: this.deps.clock.now(),
+      now,
     });
+    const advanceContext = await this.deps.repository.readAdvanceContext({ vendorId, now });
     return {
       ...overview,
       cardFundingFeeBps: this.cardFundingFeeBps(),
       usdcBaseDepositAddress: this.usdcBaseDepositAddress(),
       limits: await this.walletLimits(),
+      advance: advanceContext
+        ? assessAdvanceStanding({
+            availableBalanceCents: overview.account.availableBalanceCents,
+            context: advanceContext,
+          })
+        : null,
     };
+  }
+
+  /**
+   * Read and record the balance behind a bank account (funding design phase
+   * 3): one of the three facts the pending-ACH advance requires. Best-effort
+   * by design — the account was linked and stays usable whatever happens
+   * here; a failed or missing reading only means "balance not verified", so
+   * nothing is advanced against that account until a later reading succeeds.
+   */
+  async verifyBankBalanceForFundingMethod(input: {
+    vendorId: number;
+    fundingMethodId: number;
+    source: Extract<DropshipBankBalanceVerificationSource, "link" | "refresh">;
+    providerEventId: string | null;
+  }): Promise<DropshipBankBalanceVerificationOutcome> {
+    const provider = this.deps.fundingProvider;
+    if (!provider) {
+      return { outcome: "not_applicable", reason: "provider_not_configured" };
+    }
+    const now = this.deps.clock.now();
+    const wallet = await this.deps.repository.getOverview({ vendorId: input.vendorId, ledgerLimit: 1, now });
+    const method = wallet.fundingMethods.find((candidate) => candidate.fundingMethodId === input.fundingMethodId);
+    if (!method) {
+      return { outcome: "not_applicable", reason: "funding_method_missing" };
+    }
+    if (method.rail !== "stripe_ach") {
+      return { outcome: "not_applicable", reason: "not_bank_account" };
+    }
+    const providerAccountId = fundingMethodFinancialConnectionsAccountId(method.metadata);
+    if (!providerAccountId) {
+      this.deps.logger.info({
+        code: "DROPSHIP_BANK_BALANCE_NOT_READABLE",
+        message: "Dropship bank account was not linked through the provider's account connection; its balance cannot be read, so it will not qualify for the pending-ACH advance.",
+        context: { vendorId: input.vendorId, fundingMethodId: input.fundingMethodId },
+      });
+      return { outcome: "not_applicable", reason: "no_provider_account" };
+    }
+    try {
+      const snapshot = await provider.readBankBalance({ providerAccountId, now });
+      const reading = bankBalanceReadingFor({ providerAccountId, currency: wallet.account.currency, snapshot });
+      const recorded = await this.deps.repository.recordBankBalanceVerification({
+        vendorId: input.vendorId,
+        fundingMethodId: input.fundingMethodId,
+        provider: "stripe",
+        reading,
+        source: input.source,
+        providerEventId: input.providerEventId,
+        occurredAt: now,
+      });
+      this.logBankBalanceReading(reading, { vendorId: input.vendorId, fundingMethodId: input.fundingMethodId, source: input.source, idempotentReplay: recorded.idempotentReplay });
+      return { outcome: "recorded", record: recorded.record, idempotentReplay: recorded.idempotentReplay };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.deps.logger.warn({
+        code: "DROPSHIP_BANK_BALANCE_VERIFICATION_FAILED",
+        message: "Dropship bank balance could not be read or recorded; the account stays unverified for the pending-ACH advance.",
+        context: { vendorId: input.vendorId, fundingMethodId: input.fundingMethodId, providerAccountId, source: input.source, error: message },
+      });
+      return { outcome: "failed", message };
+    }
+  }
+
+  /**
+   * The provider reported a refreshed balance for a linked account (webhook).
+   * Recorded against the bank account it belongs to; unknown accounts are
+   * ignored at DEBUG, since the provider also reports accounts linked for
+   * other products.
+   */
+  async recordBankBalanceRefresh(input: {
+    providerAccountId: string;
+    snapshot: DropshipBankBalanceSnapshot;
+    providerEventId: string;
+  }): Promise<DropshipBankBalanceVerificationOutcome> {
+    const method = await this.deps.repository.findFundingMethodByProviderAccount({
+      provider: "stripe",
+      providerAccountId: input.providerAccountId,
+    });
+    if (!method) {
+      // Expected: the provider reports every linked account, including ones
+      // other products linked. Info, not warn — nothing needs a human.
+      this.deps.logger.info({
+        code: "DROPSHIP_BANK_BALANCE_REFRESH_UNMATCHED",
+        message: "Dropship bank balance refresh did not match a funding method.",
+        context: { providerAccountId: input.providerAccountId, providerEventId: input.providerEventId },
+      });
+      return { outcome: "not_applicable", reason: "funding_method_missing" };
+    }
+    const now = this.deps.clock.now();
+    const wallet = await this.deps.repository.getOverview({ vendorId: method.vendorId, ledgerLimit: 1, now });
+    const reading = bankBalanceReadingFor({
+      providerAccountId: input.providerAccountId,
+      currency: wallet.account.currency,
+      snapshot: input.snapshot,
+    });
+    const recorded = await this.deps.repository.recordBankBalanceVerification({
+      vendorId: method.vendorId,
+      fundingMethodId: method.fundingMethodId,
+      provider: "stripe",
+      reading,
+      source: "webhook",
+      providerEventId: input.providerEventId,
+      occurredAt: now,
+    });
+    this.logBankBalanceReading(reading, { vendorId: method.vendorId, fundingMethodId: method.fundingMethodId, source: "webhook", idempotentReplay: recorded.idempotentReplay });
+    return { outcome: "recorded", record: recorded.record, idempotentReplay: recorded.idempotentReplay };
+  }
+
+  private logBankBalanceReading(
+    reading: DropshipBankBalanceReading,
+    context: { vendorId: number; fundingMethodId: number; source: DropshipBankBalanceVerificationSource; idempotentReplay: boolean },
+  ): void {
+    const base = { ...context, providerAccountId: reading.providerAccountId, status: reading.status };
+    if (reading.status === "succeeded") {
+      this.deps.logger.info({
+        code: "DROPSHIP_BANK_BALANCE_VERIFIED",
+        message: "Dropship bank balance was read and recorded.",
+        context: { ...base, availableCents: reading.availableCents, currency: reading.currency, asOf: reading.asOf.toISOString() },
+      });
+    } else if (reading.status === "pending") {
+      this.deps.logger.info({
+        code: "DROPSHIP_BANK_BALANCE_REFRESH_PENDING",
+        message: "Dropship bank balance refresh was requested; the provider reports it later.",
+        context: { ...base, nextRefreshAvailableAt: reading.nextRefreshAvailableAt?.toISOString() ?? null },
+      });
+    } else {
+      this.deps.logger.warn({
+        code: "DROPSHIP_BANK_BALANCE_READ_FAILED",
+        message: "Dropship bank balance could not be read; the account stays unverified for the pending-ACH advance.",
+        context: { ...base, reason: reading.reason },
+      });
+    }
   }
 
   async creditFunding(input: unknown): Promise<DropshipWalletMutationResult> {
@@ -1219,7 +1479,7 @@ export class DropshipWalletService {
       critical: true,
       channels: ["email", "in_app"],
       title: "Dropship wallet funding failed",
-      message: `Wallet funding for ${formatNotificationCurrency(parsed.amountCents, parsed.currency)} failed${parsed.failureMessage ? `: ${parsed.failureMessage}` : "."}${pendingCreditVoided ? " The pending credit has been removed from your balance." : ""}`,
+      message: `Wallet funding for ${formatNotificationCurrency(parsed.amountCents, parsed.currency)} failed${parsed.failureMessage ? `: ${parsed.failureMessage}` : "."}${pendingCreditVoided ? " The pending credit has been removed from your balance." : ""}${negativeBalanceSentenceFor(voided?.account ?? null)}`,
       payload: {
         vendorId: parsed.vendorId,
         fundingMethodId: parsed.fundingMethodId ?? null,
@@ -1486,6 +1746,16 @@ function normalizeConfirmedUsdcFundingInput(
  * spend pending money, so the backstop measures against the available balance
  * alone and charges the card for the whole gap.
  */
+/**
+ * What a reload puts in the wallet.
+ *
+ * A routine top-up restores the vendor's minimum, counting credits still
+ * settling so an ACH reload in flight is not stacked. A held order's backstop
+ * charge follows the funding design's card rule (domain/acceptance-funding.ts,
+ * decideCardBackstopCharge): back to the minimum, or the vendor's single
+ * top-up limit when that is smaller, and never less than the order's gap —
+ * pending money does not count, because the order cannot wait for it.
+ */
 function calculateAutoReloadAmount(input: {
   availableBalanceCents: number;
   pendingBalanceCents: number;
@@ -1494,13 +1764,22 @@ function calculateAutoReloadAmount(input: {
   requiredBalanceCents: number | null;
   reason: HandleDropshipAutoReloadInput["reason"];
 }): { outcome: "funding_created"; amountCents: number } | { outcome: "skipped"; skipReason: string } {
-  const targetBalanceCents = input.reason === "payment_hold"
-    ? Math.max(input.minimumBalanceCents, input.requiredBalanceCents ?? 0)
-    : input.minimumBalanceCents;
-  const countedBalanceCents = input.reason === "payment_hold"
-    ? input.availableBalanceCents
-    : input.availableBalanceCents + input.pendingBalanceCents;
-  const amountNeededCents = targetBalanceCents - countedBalanceCents;
+  if (input.reason === "payment_hold") {
+    const charge = decideCardBackstopCharge({
+      availableBalanceCents: input.availableBalanceCents,
+      minimumBalanceCents: input.minimumBalanceCents,
+      requiredBalanceCents: input.requiredBalanceCents ?? 0,
+      singleChargeLimitCents: input.maxSingleReloadCents,
+    });
+    if (charge.outcome === "not_needed") {
+      return { outcome: "skipped", skipReason: "balance_already_sufficient" };
+    }
+    if (charge.outcome === "limit_below_gap") {
+      return { outcome: "skipped", skipReason: "amount_exceeds_max_single_reload" };
+    }
+    return { outcome: "funding_created", amountCents: charge.amountCents };
+  }
+  const amountNeededCents = input.minimumBalanceCents - (input.availableBalanceCents + input.pendingBalanceCents);
   if (amountNeededCents <= 0) {
     return { outcome: "skipped", skipReason: "balance_already_sufficient" };
   }
@@ -1573,6 +1852,16 @@ function skippedAutoReload(
     skipReason,
     idempotentReplay: false,
   };
+}
+
+/**
+ * Orders accepted against a transfer that then failed leave the balance
+ * negative (funding design phase 3). The notice says so and what happens next:
+ * the daily wallet run collects it, and selling stays paused until then.
+ */
+function negativeBalanceSentenceFor(account: DropshipWalletAccountRecord | null): string {
+  if (!account || account.availableBalanceCents >= 0) return "";
+  return ` Orders accepted against it leave your balance at ${formatNotificationCurrency(account.availableBalanceCents, account.currency)}; the next wallet run collects that amount from your funding source.`;
 }
 
 /** What the provider needs to charge the fee: the rate and the amount, or nothing for a fee-free rail. */

@@ -361,6 +361,7 @@ describe("DropshipOrderProcessingService", () => {
       currency: "USD",
       paymentHoldExpiresAt: new Date("2026-05-03T12:00:00.000Z"),
       paymentHoldReason: "insufficient_balance",
+      advance: null,
       idempotentReplay: false,
     });
     const walletAutoReload = new FakeWalletAutoReloadService();
@@ -644,6 +645,7 @@ describe("DropshipOrderProcessingService", () => {
       currency: "USD",
       paymentHoldExpiresAt: new Date("2026-05-03T12:00:00.000Z"),
       paymentHoldReason: "insufficient_balance",
+      advance: null,
       idempotentReplay: false,
     });
     const logs: DropshipLogEvent[] = [];
@@ -691,6 +693,7 @@ describe("DropshipOrderProcessingService", () => {
       currency: "USD",
       paymentHoldExpiresAt: new Date("2026-05-03T12:00:00.000Z"),
       paymentHoldReason: "insufficient_balance",
+      advance: null,
       idempotentReplay: false,
     });
     const notificationSender = new FakeNotificationSender();
@@ -938,6 +941,7 @@ class FakeAcceptanceService {
       currency: "USD",
       paymentHoldExpiresAt: null,
       paymentHoldReason: null,
+      advance: null,
       idempotentReplay: false,
     };
   }
@@ -979,6 +983,7 @@ function heldAcceptance(): DropshipOrderAcceptanceResult {
     currency: "USD",
     paymentHoldExpiresAt: new Date("2026-05-03T12:00:00.000Z"),
     paymentHoldReason: "insufficient_balance",
+    advance: null,
     idempotentReplay: false,
   };
 }
@@ -997,6 +1002,7 @@ function acceptedAfterHold(): DropshipOrderAcceptanceResult {
     currency: "USD",
     paymentHoldExpiresAt: null,
     paymentHoldReason: null,
+    advance: null,
     idempotentReplay: false,
   };
 }

@@ -1,10 +1,14 @@
 import Stripe from "stripe";
 import { formatFeeRate } from "../../../../shared/dropship/wallet-funding-fee";
 import { DropshipError } from "../domain/errors";
-import { FUNDING_METHOD_ACCOUNT_HOLDER_TYPE_KEY } from "../domain/funding-method";
+import {
+  FUNDING_METHOD_ACCOUNT_HOLDER_TYPE_KEY,
+  FUNDING_METHOD_FINANCIAL_CONNECTIONS_ACCOUNT_KEY,
+} from "../domain/funding-method";
 import { toDropshipStripeError } from "./dropship-stripe-error";
 import type {
   CreditDropshipWalletFundingInput,
+  DropshipBankBalanceSnapshot,
   DropshipStripeAutoReloadPaymentIntent,
   DropshipStripeFundingSetupRail,
   DropshipStripeWalletFundingSession,
@@ -47,6 +51,14 @@ export type DropshipStripeFundingWebhookEvent =
       providerEventId: string;
       eventType: string;
       failure: RecordDropshipWalletFundingFailureInput;
+    }
+  | {
+      /** Financial Connections reported a refreshed balance for a linked bank account. */
+      kind: "bank_balance_refreshed";
+      providerEventId: string;
+      eventType: string;
+      providerAccountId: string;
+      snapshot: DropshipBankBalanceSnapshot;
     }
   | {
       kind: "ignored";
@@ -96,6 +108,7 @@ export class StripeDropshipFundingProvider implements DropshipWalletFundingProvi
       mode: "setup",
       customer: customerId,
       payment_method_types: paymentMethodTypesForRail(input.rail),
+      ...paymentMethodOptionsForRail(input.rail),
       success_url: input.successUrl,
       cancel_url: input.cancelUrl,
       metadata,
@@ -185,6 +198,7 @@ export class StripeDropshipFundingProvider implements DropshipWalletFundingProvi
       mode: "payment",
       customer: customerId,
       payment_method_types: paymentMethodTypesForRail(input.rail),
+      ...paymentMethodOptionsForRail(input.rail),
       line_items: lineItems,
       success_url: input.successUrl,
       cancel_url: input.cancelUrl,
@@ -309,6 +323,16 @@ export class StripeDropshipFundingProvider implements DropshipWalletFundingProvi
     if (event.type === "payment_intent.payment_failed") {
       return this.parsePaymentIntentFundingFailureEvent(event);
     }
+    if (event.type === "financial_connections.account.refreshed_balance") {
+      const account = event.data.object as Stripe.FinancialConnections.Account;
+      return {
+        kind: "bank_balance_refreshed",
+        providerEventId: event.id,
+        eventType: event.type,
+        providerAccountId: account.id,
+        snapshot: bankBalanceSnapshotFromAccount(account),
+      };
+    }
 
     return {
       kind: "ignored",
@@ -316,6 +340,29 @@ export class StripeDropshipFundingProvider implements DropshipWalletFundingProvi
       eventType: event.type,
       reason: "unsupported_event_type",
     };
+  }
+
+  /**
+   * The balance behind a bank account linked through Financial Connections.
+   * The account is read as it stands; when it carries no balance and no
+   * refresh is in flight, one is requested, and the provider reports the
+   * result through `financial_connections.account.refreshed_balance`.
+   */
+  async readBankBalance(input: { providerAccountId: string; now: Date }): Promise<DropshipBankBalanceSnapshot> {
+    const stripe = this.getStripe();
+    const account = await this.callStripe(
+      "financialConnections.accounts.retrieve",
+      () => stripe.financialConnections.accounts.retrieve(input.providerAccountId),
+    );
+    const snapshot = bankBalanceSnapshotFromAccount(account);
+    if (snapshot.status !== "pending" || account.balance_refresh?.status === "pending") {
+      return snapshot;
+    }
+    const refreshed = await this.callStripe(
+      "financialConnections.accounts.refresh",
+      () => stripe.financialConnections.accounts.refresh(input.providerAccountId, { features: ["balance"] }),
+    );
+    return bankBalanceSnapshotFromAccount(refreshed);
   }
 
   private parsePaymentIntentFundingFailureEvent(event: Stripe.Event): DropshipStripeFundingWebhookEvent {
@@ -776,9 +823,75 @@ function sanitizedPaymentMethodMetadata(input: {
       // value is kept exactly as Stripe reports it and read back through
       // fundingMethodAccountHolderType, which treats anything else as unknown.
       [FUNDING_METHOD_ACCOUNT_HOLDER_TYPE_KEY]: input.paymentMethod.us_bank_account.account_holder_type ?? null,
+      // The Financial Connections account behind the bank account, when it was
+      // linked through the provider's connection flow (null for manual entry
+      // and micro-deposits). Its balance is read for the pending-ACH advance.
+      [FUNDING_METHOD_FINANCIAL_CONNECTIONS_ACCOUNT_KEY]:
+        input.paymentMethod.us_bank_account.financial_connections_account ?? null,
     };
   }
   return base;
+}
+
+/**
+ * For a bank account, the vendor links it through Financial Connections with
+ * the `balances` permission beside the mandatory `payment_method`: a balance
+ * read is one of the three facts the pending-ACH advance requires. Cards get
+ * no options. The verification method is left to Stripe's default so a bank
+ * the connection flow does not support can still be added by micro-deposits
+ * (that account simply never qualifies for the advance).
+ */
+function paymentMethodOptionsForRail(
+  rail: DropshipStripeFundingSetupRail,
+): Pick<Stripe.Checkout.SessionCreateParams, "payment_method_options"> {
+  if (rail !== "stripe_ach") return {};
+  return {
+    payment_method_options: {
+      us_bank_account: {
+        financial_connections: { permissions: ["payment_method", "balances"] },
+      },
+    },
+  };
+}
+
+/**
+ * What a Financial Connections account says about its balance, independent
+ * of any wallet currency. Amounts are Stripe's integer minor units keyed by
+ * lowercase ISO currency code, passed through as reported.
+ */
+export function bankBalanceSnapshotFromAccount(
+  account: Pick<Stripe.FinancialConnections.Account, "status" | "permissions" | "balance" | "balance_refresh">,
+): DropshipBankBalanceSnapshot {
+  if (account.status !== "active") {
+    return { status: "failed", reason: `account_${account.status}` };
+  }
+  if (!(account.permissions ?? []).includes("balances")) {
+    return { status: "failed", reason: "balances_permission_missing" };
+  }
+  const balance = account.balance;
+  if (balance) {
+    if (balance.type !== "cash" || !balance.cash?.available) {
+      return { status: "failed", reason: "balance_not_cash" };
+    }
+    const availableByCurrency: Record<string, number> = {};
+    for (const [currency, amount] of Object.entries(balance.cash.available)) {
+      if (Number.isSafeInteger(amount)) availableByCurrency[currency.toLowerCase()] = amount;
+    }
+    if (!Number.isSafeInteger(balance.as_of) || balance.as_of <= 0) {
+      return { status: "failed", reason: "balance_as_of_invalid" };
+    }
+    return { status: "succeeded", availableByCurrency, asOf: new Date(balance.as_of * 1000) };
+  }
+  const refresh = account.balance_refresh;
+  if (refresh?.status === "failed") {
+    return { status: "failed", reason: "balance_refresh_failed" };
+  }
+  return {
+    status: "pending",
+    nextRefreshAvailableAt: typeof refresh?.next_refresh_available_at === "number"
+      ? new Date(refresh.next_refresh_available_at * 1000)
+      : null,
+  };
 }
 
 function idFromExpandable(value: string | { id?: string } | null | undefined): string | null {

@@ -44,6 +44,7 @@ import {
   type DropshipWalletView,
   type WalletFundingMethod,
   type WalletLimits,
+  type WalletAdvance,
   type WalletListingTierStatus,
   type WalletListingTiers,
 } from "@/lib/dropship-wallet-view-adapter";
@@ -105,12 +106,15 @@ import {
   describeAcknowledgementBanner,
   describeActivationQuote,
   describeActivationTopUp,
+  describeAdvanceReason,
+  describeAdvanceStanding,
   describeBackupFollow,
   describeFundingMethod,
   describeFundingMethodDetailed,
   describeHoldTimeLine,
   describeIntro,
   describeMandate,
+  describeNegativeBalance,
   describePendingBalance,
   describePlanSentence,
   describeRoleGap,
@@ -1955,11 +1959,11 @@ function ManageView({
             <div className="text-sm text-zinc-500">Available balance</div>
             <div className="mt-1 text-4xl font-semibold" data-testid="wallet-available">{formatSignedCents(wallet.account.availableBalanceCents)}</div>
             {wallet.account.pendingBalanceCents > 0 && (
-              <p className="mt-1 text-sm text-zinc-500" data-testid="wallet-pending">{describePendingBalance(wallet.account.pendingBalanceCents)}</p>
+              <p className="mt-1 text-sm text-zinc-500" data-testid="wallet-pending">{describePendingBalance(wallet.account.pendingBalanceCents, wallet.advance)}</p>
             )}
             {wallet.account.availableBalanceCents < 0 && (
               <p className="mt-1 text-sm text-red-700" data-testid="wallet-negative-note">
-                {formatSignedCents(wallet.account.availableBalanceCents)} — a return fee took the balance below zero. Your next top-up covers it, unless the top-up needed exceeds your single top-up limit ({formatWholeDollars(flow.limitCents)}) — then we email you instead of charging. Until then, a backup-card charge for an order includes this shortfall (order plus the amount below zero, plus {fee}).
+                {describeNegativeBalance({ availableCents: wallet.account.availableBalanceCents, advance: wallet.advance, limitCents: flow.limitCents, cardFundingFeeBps: wallet.cardFundingFeeBps })}
               </p>
             )}
             {flow.authorized && <Badge variant="outline" className="mt-2">Floor {formatWholeDollars(floorCents)}</Badge>}
@@ -1991,6 +1995,7 @@ function ManageView({
       </section>
 
       {wallet.listingTiers && <ListingTiersSection tiers={wallet.listingTiers} />}
+      {wallet.advance && <AdvanceSection advance={wallet.advance} wallet={wallet} />}
 
       <section className={SECTION} data-testid="wallet-plan">
         <h2 className="text-lg font-semibold">Your plan</h2>
@@ -2127,6 +2132,54 @@ function ListingTiersSection({ tiers }: { tiers: WalletListingTiers }) {
           </li>
         ))}
       </ul>
+    </section>
+  );
+}
+
+/**
+ * Orders while a transfer lands: the pending-transfer advance as the server
+ * assessed it — what it costs, how much could pay for orders now, and per bank
+ * account which of the three facts is still missing. Nothing here is decided
+ * by the page.
+ */
+function AdvanceSection({ advance, wallet }: { advance: WalletAdvance; wallet: DropshipWalletView }) {
+  const copy = describeAdvanceStanding(advance);
+  const labelFor = (fundingMethodId: number) =>
+    wallet.fundingMethods.find((method) => method.fundingMethodId === fundingMethodId)?.displayLabel ?? `Bank account #${fundingMethodId}`;
+  return (
+    <section className={SECTION} data-testid="wallet-advance">
+      <h2 className="text-lg font-semibold">Orders while a transfer lands</h2>
+      <p className="mt-1 text-sm text-zinc-600">
+        A bank transfer still on its way can pay for an order once the account it comes from qualifies: a business account, a balance we could read when you linked it, and one earlier transfer from it that landed.
+      </p>
+      <p className="mt-3 font-medium" data-testid="wallet-advance-status">{copy.headline}</p>
+      <ul className="mt-1 space-y-1 text-sm text-zinc-600" data-testid="wallet-advance-details">
+        {copy.details.map((detail) => <li key={detail}>{detail}</li>)}
+      </ul>
+      {advance.sources.length > 0 && (
+        <ul className="mt-3 space-y-2">
+          {advance.sources.map((source) => (
+            <li key={source.fundingMethodId} className="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between" data-testid={`wallet-advance-source-${source.fundingMethodId}`}>
+              <div>
+                <div className="font-medium">
+                  {labelFor(source.fundingMethodId)}{source.pendingCents > 0 ? ` · ${formatWholeDollars(source.pendingCents)} on the way` : ""}
+                </div>
+                {source.reasons.length > 0 && (
+                  <ul className="text-sm text-zinc-600">
+                    {source.reasons.map((reason) => <li key={reason}>{describeAdvanceReason(reason)}</li>)}
+                  </ul>
+                )}
+              </div>
+              <Badge
+                variant="outline"
+                className={source.eligible ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-amber-200 bg-amber-50 text-amber-900"}
+              >
+                {source.eligible ? "Qualifies" : "Not yet"}
+              </Badge>
+            </li>
+          ))}
+        </ul>
+      )}
     </section>
   );
 }

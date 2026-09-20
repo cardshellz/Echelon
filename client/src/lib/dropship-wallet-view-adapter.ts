@@ -141,6 +141,42 @@ export interface WalletListingTiers {
   generatedAt: string;
 }
 
+export type WalletAdvanceReason =
+  | "no_bank_account"
+  | "no_pending_credit"
+  | "account_holder_not_company"
+  | "bank_balance_not_verified"
+  | "first_pull_not_settled"
+  | "advance_cap_zero";
+
+/** One bank account and the three facts the pending-transfer advance needs from it, as the server judged them. */
+export interface WalletAdvanceSource {
+  fundingMethodId: number;
+  /** This account's transfers still on their way, in cents. */
+  pendingCents: number;
+  accountHolderType: "individual" | "company" | null;
+  balanceVerified: boolean;
+  priorPullSettled: boolean;
+  eligible: boolean;
+  reasons: WalletAdvanceReason[];
+}
+
+/**
+ * The vendor's pending-transfer advance position: what qualifies, the fee and
+ * cap in force, how far the balance is already overdrawn against transfers
+ * on their way, and what a new order could still draw. A server decision;
+ * the client never derives it.
+ */
+export interface WalletAdvance {
+  policy: { feeBps: number; capCents: number; capSource: "policy" | "vendor_override" };
+  sources: WalletAdvanceSource[];
+  eligiblePendingCents: number;
+  allowanceCents: number;
+  exposureCents: number;
+  headroomCents: number;
+  reasons: WalletAdvanceReason[];
+}
+
 export interface WalletSetupStatus {
   sourceReady: boolean;
   backupReady: boolean;
@@ -159,7 +195,8 @@ export type WalletClientFallback =
   | "limits_from_documented_defaults"
   | "ledger_reason_derived"
   | "setup_status_derived"
-  | "listing_tiers_not_served";
+  | "listing_tiers_not_served"
+  | "advance_not_served";
 
 export interface DropshipWalletView {
   account: { availableBalanceCents: number; pendingBalanceCents: number; currency: string; status: string };
@@ -172,6 +209,8 @@ export interface DropshipWalletView {
   setupStatus: WalletSetupStatus;
   /** Which listing tiers are on sale, as the server decided; null when a server one release behind did not serve them. */
   listingTiers: WalletListingTiers | null;
+  /** The pending-transfer advance position; null when the server could not read the policy or did not serve it. */
+  advance: WalletAdvance | null;
   /** Which parts of this view the client derived because the server did not serve them. Empty once the server serves the full DTO. */
   clientFallbacks: WalletClientFallback[];
 }
@@ -292,6 +331,37 @@ const rawListingTiersSchema = z.object({
   generatedAt: isoString,
 });
 
+const walletAdvanceReasonSchema = z.enum([
+  "no_bank_account",
+  "no_pending_credit",
+  "account_holder_not_company",
+  "bank_balance_not_verified",
+  "first_pull_not_settled",
+  "advance_cap_zero",
+]);
+
+const rawAdvanceSchema = z.object({
+  policy: z.object({
+    feeBps: z.number().int().nonnegative(),
+    capCents: cents,
+    capSource: z.enum(["policy", "vendor_override"]),
+  }),
+  sources: z.array(z.object({
+    fundingMethodId: z.number().int().positive(),
+    pendingCents: cents,
+    accountHolderType: z.enum(["individual", "company"]).nullable(),
+    balanceVerified: z.boolean(),
+    priorPullSettled: z.boolean(),
+    eligible: z.boolean(),
+    reasons: z.array(walletAdvanceReasonSchema),
+  })),
+  eligiblePendingCents: cents,
+  allowanceCents: cents,
+  exposureCents: cents,
+  headroomCents: cents,
+  reasons: z.array(walletAdvanceReasonSchema),
+});
+
 const rawSetupStatusSchema = z.object({
   sourceReady: z.boolean(),
   backupReady: z.boolean(),
@@ -316,6 +386,8 @@ export const rawWalletResponseSchema = z.object({
     limits: rawLimitsSchema.optional(),
     setupStatus: rawSetupStatusSchema.optional(),
     listingTiers: rawListingTiersSchema.optional(),
+    // Null is a served answer ("the policy could not be read"); absent means an older server.
+    advance: rawAdvanceSchema.nullable().optional(),
   }).passthrough(),
 });
 
@@ -623,6 +695,11 @@ export function adaptWalletView(raw: unknown): DropshipWalletView {
   const listingTiers: WalletListingTiers | null = wallet.listingTiers ?? null;
   if (!wallet.listingTiers) fallbacks.add("listing_tiers_not_served");
 
+  // The advance position is a server decision too. Only an absent field is a
+  // fallback; a served null means the server had no policy to decide from.
+  const advance: WalletAdvance | null = wallet.advance ?? null;
+  if (wallet.advance === undefined) fallbacks.add("advance_not_served");
+
   return {
     account: {
       availableBalanceCents: wallet.account.availableBalanceCents,
@@ -638,6 +715,7 @@ export function adaptWalletView(raw: unknown): DropshipWalletView {
     limits,
     setupStatus,
     listingTiers,
+    advance,
     clientFallbacks: [...fallbacks],
   };
 }

@@ -24,6 +24,9 @@ import {
   describeHoldTimeLine,
   describeIntro,
   describeMandate,
+  describeAdvanceReason,
+  describeAdvanceStanding,
+  describeNegativeBalance,
   describePendingBalance,
   describePlanSentence,
   describeRoleGap,
@@ -72,7 +75,7 @@ function wallet(overrides: Partial<DropshipWalletView> = {}): DropshipWalletView
   const base: DropshipWalletView = {
     account: { availableBalanceCents: 0, pendingBalanceCents: 0, currency: "USD", status: "active" },
     autoReload: null, fundingMethods: [], recentLedger: [], cardFundingFeeBps: 300, usdcBaseDepositAddress: null,
-    limits: LIMITS, setupStatus: { sourceReady: false, backupReady: false, acknowledged: false, done: false, launchReady: false }, listingTiers: null,
+    limits: LIMITS, setupStatus: { sourceReady: false, backupReady: false, acknowledged: false, done: false, launchReady: false }, listingTiers: null, advance: null,
     clientFallbacks: [],
   };
   return { ...base, ...overrides };
@@ -448,10 +451,10 @@ describe("copy", () => {
       "Your backup card.",
       "If a payment fails.",
     ]);
-    expect(intro.topics[0].detail).toBe("It is a prepaid balance Card Shellz holds for your store. Every order you accept is paid from it: the product cost plus shipping, with nothing added on top. When a return is processed its return fee comes out of the wallet too, and that can take your balance below zero.");
+    expect(intro.topics[0].detail).toBe("It is a prepaid balance Card Shellz holds for your store. Every order you accept is paid from it: the product cost plus shipping, with nothing added on top. When a return is processed its return fee comes out of the wallet too, and that can take your balance below zero. So can a bank transfer that is returned after it paid for an order.");
     expect(intro.topics[1].detail).toBe("A bank account costs nothing and takes up to 5 business days to land (our estimate). A card lands at once and costs 3% on top of the amount, whether it is a routine top-up, money you add yourself, or a backup charge. USDC costs nothing.");
     expect(intro.topics[2].detail).toBe("You choose a floor: the balance you want to hold. We top you back up to it once a day, and after any order that drops you below it. Your floor has to be at least $50, so there is always enough to cover a normal order. Money already on its way counts toward your floor, so the same gap is never charged twice. You can also add money yourself at any time.");
-    expect(intro.topics[3].detail).toBe("Every seller keeps a card on file. Only money that has landed can pay for an order, so if an order needs more than your balance we charge that card for the difference and send the order straight out. That is what covers you while a bank transfer is still on its way.");
+    expect(intro.topics[3].detail).toBe("Every seller keeps a card on file. Money that has landed pays for orders first; a bank transfer still on its way can pay too, once the account it comes from qualifies (see 'Orders while a transfer lands' in Wallet). If an order still needs more than your balance, we charge that card for the difference and send the order straight out.");
     expect(intro.topics[4].detail).toBe("Selling pauses: your listings show nothing for sale, and orders already waiting are cancelled after your hold time (48 hours). We email you, and we do not retry the charge ourselves. Selling starts again on its own once your balance is back at your floor.");
     // USDC is named only where a deposit address exists, and never with a timing claim: nothing in the code watches the chain.
     const noUsdc = describeIntro({ cardFundingFeeBps: 300, usdcOffered: false, holdTimeoutMinutes: 2_880, limits });
@@ -476,6 +479,9 @@ describe("copy", () => {
     expect(describeHoldTimeLine(120)).toContain("for orders held from now on");
     expect(describeHoldTimeLine(120)).toContain("We email you 2 hours before.");
     expect(describePendingBalance(25_000)).toBe("$250 on the way — a bank transfer takes up to 5 business days (our assumption) to land; this money cannot pay orders yet.");
+    expect(describePendingBalance(25_000, advance({ headroomCents: 20_000 }))).toBe("$250 on the way — a bank transfer takes up to 5 business days (our assumption) to land; up to $200 of it can pay for orders now, for a 1% fee on the amount used.");
+    expect(describePendingBalance(25_000, advance({ headroomCents: 40_000 }))).toContain("up to $250 of it can pay for orders now");
+    expect(describePendingBalance(25_000, advance({ headroomCents: 0 }))).toContain("this money cannot pay orders yet.");
     expect(describeRoleGap("backupCard", { holdTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120 })).toContain("we email you 2 hours before");
     expect(describeRoleGap("backupCard", { holdTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120 })).not.toContain("ending in");
     expect(describeRoleGap("source", { holdTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120 })).toContain("Held orders are still covered by your backup card.");
@@ -505,5 +511,54 @@ describe("copy", () => {
     expect(describeFundingMethod(method({ fundingMethodId: 13, card: null, displayLabel: "My card" }))).toBe("My card");
     expect(Object.keys(LEDGER_REASON_LABELS)).toHaveLength(12);
     expect(LEDGER_REASON_LABELS.covered_held_order).toBe("Covered a held order");
+  });
+});
+
+function advance(overrides: Partial<import("../dropship-wallet-view-adapter").WalletAdvance> = {}): import("../dropship-wallet-view-adapter").WalletAdvance {
+  return {
+    policy: { feeBps: 100, capCents: 50_000, capSource: "policy" },
+    sources: [{ fundingMethodId: 30, pendingCents: 25_000, accountHolderType: "company", balanceVerified: true, priorPullSettled: true, eligible: true, reasons: [] }],
+    eligiblePendingCents: 25_000,
+    allowanceCents: 25_000,
+    exposureCents: 0,
+    headroomCents: 25_000,
+    reasons: [],
+    ...overrides,
+  };
+}
+
+describe("advance copy (funding design phase 3)", () => {
+  it("names each missing fact in the vendor's words", () => {
+    expect(describeAdvanceReason("no_bank_account")).toBe("Add a bank account: the advance applies to bank transfers only.");
+    expect(describeAdvanceReason("no_pending_credit")).toBe("No bank transfer is on its way right now.");
+    expect(describeAdvanceReason("account_holder_not_company")).toBe("The bank account has to be a business account.");
+    expect(describeAdvanceReason("bank_balance_not_verified")).toBe("We could not read the account's balance when it was linked. Link it again through your bank to enable this.");
+    expect(describeAdvanceReason("first_pull_not_settled")).toBe("One earlier transfer from this account has to land first.");
+    expect(describeAdvanceReason("advance_cap_zero")).toBe("Card Shellz has set your advance limit to $0.");
+  });
+
+  it("states the headroom, the exhausted allowance, or the reasons, always with the terms", () => {
+    expect(describeAdvanceStanding(advance({ headroomCents: 20_000 }))).toEqual({
+      headline: "Up to $200 of money on its way can pay for orders now.",
+      details: ["Fee 1% on the amount used; at most $500 outstanding at a time."],
+    });
+    expect(describeAdvanceStanding(advance({ headroomCents: 0, exposureCents: 25_000 }))).toEqual({
+      headline: "Orders have already used $250 of money on its way; nothing more until it lands.",
+      details: ["Fee 1% on the amount used; at most $500 outstanding at a time."],
+    });
+    expect(describeAdvanceStanding(advance({ headroomCents: 0, allowanceCents: 0, eligiblePendingCents: 0, sources: [], reasons: ["no_bank_account"] }))).toEqual({
+      headline: "No money on its way can pay for orders yet.",
+      details: ["Add a bank account: the advance applies to bank transfers only.", "Fee 1% on the amount used; at most $500 outstanding at a time."],
+    });
+  });
+
+  it("explains a negative balance by what caused it", () => {
+    const base = { limitCents: 50_000, cardFundingFeeBps: 300 };
+    expect(describeNegativeBalance({ ...base, availableCents: -30_300, advance: advance({ eligiblePendingCents: 50_000 }) }))
+      .toBe("$303 below zero — $303 of it was paid from a bank transfer still on its way and clears when that lands. If the transfer is returned instead, the amount is collected by your next top-up.");
+    expect(describeNegativeBalance({ ...base, availableCents: -30_300, advance: advance({ eligiblePendingCents: 10_000 }) }))
+      .toContain("$100 of it was paid from a bank transfer still on its way");
+    expect(describeNegativeBalance({ ...base, availableCents: -1_250, advance: null }))
+      .toBe("$12.50 below zero — a return fee or a returned transfer took the balance below zero. Your next top-up covers it, unless the top-up needed exceeds your single top-up limit ($500) — then we email you instead of charging. Until then, a backup-card charge for an order includes this shortfall (order plus the amount below zero, plus 3%).");
   });
 });

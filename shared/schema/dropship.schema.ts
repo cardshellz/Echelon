@@ -145,6 +145,8 @@ export const dropshipWalletLedgerTypeEnum = [
   "return_fee",
   "insurance_pool_credit",
   "manual_adjustment",
+  // The service fee on an order accepted against pending ACH (migration 0688).
+  "advance_fee",
 ] as const;
 export type DropshipWalletLedgerType =
   (typeof dropshipWalletLedgerTypeEnum)[number];
@@ -1508,10 +1510,10 @@ export const dropshipWalletAccounts = dropshipSchema.table(
   },
   (table) => [
     uniqueIndex("dropship_wallet_vendor_idx").on(table.vendorId),
-    check(
-      "dropship_wallet_available_chk",
-      sql`${table.availableBalanceCents} >= 0`,
-    ),
+    // No lower bound on the available balance: migration 191 dropped the
+    // phase-0 check so return-fee remainders (and, since phase 3 of the
+    // funding design, the pending-ACH advance) can take it negative. The
+    // negative is the receivable the daily wallet run collects.
     check(
       "dropship_wallet_pending_chk",
       sql`${table.pendingBalanceCents} >= 0`,
@@ -1654,7 +1656,7 @@ export const dropshipWalletLedger = dropshipSchema.table(
     index("dropship_wallet_ledger_vendor_idx").on(table.vendorId),
     check(
       "dropship_wallet_ledger_type_chk",
-      sql`${table.type} IN ('funding','order_debit','refund_credit','return_credit','return_fee','insurance_pool_credit','manual_adjustment')`,
+      sql`${table.type} IN ('funding','order_debit','refund_credit','return_credit','return_fee','insurance_pool_credit','manual_adjustment','advance_fee')`,
     ),
     check(
       "dropship_wallet_ledger_status_chk",
@@ -1668,12 +1670,62 @@ export const dropshipWalletLedger = dropshipSchema.table(
     OR (${table.referenceType} IS NOT NULL AND ${table.referenceId} IS NOT NULL)
   `,
     ),
+    // The after-balance check was dropped by migration 191 together with the
+    // account's lower bound: an entry may record a negative available balance.
     check(
-      "dropship_wallet_ledger_balance_chk",
-      sql`
-    (${table.availableBalanceAfterCents} IS NULL OR ${table.availableBalanceAfterCents} >= 0)
-    AND (${table.pendingBalanceAfterCents} IS NULL OR ${table.pendingBalanceAfterCents} >= 0)
-  `,
+      "dropship_wallet_ledger_pending_after_chk",
+      sql`${table.pendingBalanceAfterCents} IS NULL OR ${table.pendingBalanceAfterCents} >= 0`,
+    ),
+  ],
+);
+
+/**
+ * Append-only bank balance reads through the payment provider (migration
+ * 0688). The latest succeeded row for a funding method is the "balance
+ * verified" fact the pending-ACH advance requires
+ * (server/modules/dropship/domain/acceptance-funding.ts).
+ */
+export const dropshipFundingMethodBalanceVerifications = dropshipSchema.table(
+  "dropship_funding_method_balance_verifications",
+  {
+    id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+    vendorId: integer("vendor_id")
+      .notNull()
+      .references(() => dropshipVendors.id, { onDelete: "cascade" }),
+    fundingMethodId: integer("funding_method_id")
+      .notNull()
+      .references(() => dropshipFundingMethods.id, { onDelete: "cascade" }),
+    provider: varchar("provider", { length: 40 }).notNull(),
+    providerAccountId: varchar("provider_account_id", { length: 255 }).notNull(),
+    status: varchar("status", { length: 20 }).notNull(),
+    source: varchar("source", { length: 20 }).notNull(),
+    /** Provider integer minor units; negative when the holder owes the bank. */
+    availableCents: bigint("available_cents", { mode: "number" }),
+    currency: varchar("currency", { length: 3 }),
+    balanceAsOf: timestamp("balance_as_of", { withTimezone: true }),
+    providerEventId: varchar("provider_event_id", { length: 255 }),
+    detail: jsonb("detail"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
+  },
+  (table) => [
+    index("dropship_funding_method_balance_verifications_method_idx")
+      .on(table.fundingMethodId, table.createdAt, table.id),
+    uniqueIndex("dropship_funding_method_balance_verifications_event_idx")
+      .on(table.provider, table.providerEventId)
+      .where(sql`${table.providerEventId} IS NOT NULL`),
+    check(
+      "dropship_funding_method_balance_verifications_status_chk",
+      sql`${table.status} IN ('succeeded','pending','failed')`,
+    ),
+    check(
+      "dropship_funding_method_balance_verifications_source_chk",
+      sql`${table.source} IN ('link','refresh','webhook')`,
+    ),
+    check(
+      "dropship_funding_method_balance_verifications_succeeded_chk",
+      sql`${table.status} <> 'succeeded' OR (${table.availableCents} IS NOT NULL AND ${table.currency} IS NOT NULL AND ${table.balanceAsOf} IS NOT NULL)`,
     ),
   ],
 );

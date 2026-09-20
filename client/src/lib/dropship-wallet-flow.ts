@@ -33,6 +33,8 @@ import type {
   WalletFundingMethod,
   WalletLedgerReason,
   WalletLimits,
+  WalletAdvance,
+  WalletAdvanceReason,
 } from "./dropship-wallet-view-adapter";
 
 /** The setup flow, in order. The list is the model's; the page renders it and never reorders it. */
@@ -666,7 +668,7 @@ export function describeIntro(input: {
     topics: [
       {
         lead: "What your wallet is.",
-        detail: "It is a prepaid balance Card Shellz holds for your store. Every order you accept is paid from it: the product cost plus shipping, with nothing added on top. When a return is processed its return fee comes out of the wallet too, and that can take your balance below zero.",
+        detail: "It is a prepaid balance Card Shellz holds for your store. Every order you accept is paid from it: the product cost plus shipping, with nothing added on top. When a return is processed its return fee comes out of the wallet too, and that can take your balance below zero. So can a bank transfer that is returned after it paid for an order.",
       },
       {
         lead: "Payment methods and fees.",
@@ -678,7 +680,7 @@ export function describeIntro(input: {
       },
       {
         lead: "Your backup card.",
-        detail: "Every seller keeps a card on file. Only money that has landed can pay for an order, so if an order needs more than your balance we charge that card for the difference and send the order straight out. That is what covers you while a bank transfer is still on its way.",
+        detail: "Every seller keeps a card on file. Money that has landed pays for orders first; a bank transfer still on its way can pay too, once the account it comes from qualifies (see 'Orders while a transfer lands' in Wallet). If an order still needs more than your balance, we charge that card for the difference and send the order straight out.",
       },
       {
         lead: "If a payment fails.",
@@ -718,7 +720,7 @@ export function describeMandate(terms: WalletTerms): string[] {
   }
   return [
     `Debit ${terms.sourceLabel} to bring your balance up to ${floor} — once a day, and after any order that takes it lower. No fee. Money already on its way counts, so the same gap is not debited twice.`,
-    `While your account is active, charge ${terms.backupLabel} only when an order needs more than your available balance: the shortfall plus the ${fee} card fee, up to the single top-up limit in the next line, and accept the order at once — even while a bank top-up is still landing or your top-up source cannot be charged. Example: ${exampleText}. Money still on its way from your bank does not count for this. ${belowZero}`,
+    `While your account is active, charge ${terms.backupLabel} only when an order needs more than your available balance: the shortfall plus the ${fee} card fee, up to the single top-up limit in the next line, and accept the order at once — even while a bank top-up is still landing or your top-up source cannot be charged. Example: ${exampleText}. Money still on its way counts only through the pending-transfer advance, when your account qualifies for it. ${belowZero}`,
     limitLine,
     `${describeActivationTopUp(terms)} Once it runs, it debits ${terms.sourceLabel} for the amount that brings you to ${floor}, and that transfer takes ${BANK_SETTLEMENT_PHRASE} to land; a bank transfer you start now helps once it lands.`,
     `Pause selling if a top-up is declined or a bank transfer is returned before it lands, and resume on its own once settled money brings your balance back to ${floor}. We do not retry the failed charge ourselves; if a top-up fails for any other reason, we email you.`,
@@ -883,9 +885,84 @@ export function describeHoldTimeLine(holdExpiryWarningMinutes: number): string {
   return `How long a waiting order stays open before it is cancelled. Set by CardShellz for every wallet, for orders held from now on — an order already waiting keeps the deadline it was given. We email you ${formatDurationMinutes(holdExpiryWarningMinutes)} before.`;
 }
 
-/** Copy for the pending-balance line. */
-export function describePendingBalance(pendingCents: number): string {
-  return `${formatWholeDollars(pendingCents)} on the way — a bank transfer takes ${BANK_SETTLEMENT_PHRASE} to land; this money cannot pay orders yet.`;
+/**
+ * Copy for the pending-balance line. With an advance position that has
+ * headroom, the line says how much of the money on its way can already pay
+ * for orders; otherwise it says plainly that it cannot yet.
+ */
+export function describePendingBalance(pendingCents: number, advance: WalletAdvance | null = null): string {
+  const lead = `${formatWholeDollars(pendingCents)} on the way — a bank transfer takes ${BANK_SETTLEMENT_PHRASE} to land;`;
+  if (advance && advance.headroomCents > 0) {
+    const usable = Math.min(advance.headroomCents, pendingCents);
+    return `${lead} up to ${formatWholeDollars(usable)} of it can pay for orders now, for a ${formatFeeRate(advance.policy.feeBps)} fee on the amount used.`;
+  }
+  return `${lead} this money cannot pay orders yet.`;
+}
+
+/** Why a bank account's transfers cannot be advanced against, in the vendor's words. */
+export function describeAdvanceReason(reason: WalletAdvanceReason): string {
+  switch (reason) {
+    case "no_bank_account":
+      return "Add a bank account: the advance applies to bank transfers only.";
+    case "no_pending_credit":
+      return "No bank transfer is on its way right now.";
+    case "account_holder_not_company":
+      return "The bank account has to be a business account.";
+    case "bank_balance_not_verified":
+      return "We could not read the account's balance when it was linked. Link it again through your bank to enable this.";
+    case "first_pull_not_settled":
+      return "One earlier transfer from this account has to land first.";
+    case "advance_cap_zero":
+      return "Card Shellz has set your advance limit to $0.";
+  }
+}
+
+export interface WalletAdvanceStandingCopy {
+  headline: string;
+  /** Policy terms, or the reasons nothing can be advanced; one sentence each. */
+  details: string[];
+}
+
+/** The state of the pending-transfer advance, as the wallet page shows it. */
+export function describeAdvanceStanding(advance: WalletAdvance): WalletAdvanceStandingCopy {
+  const fee = formatFeeRate(advance.policy.feeBps);
+  const cap = formatWholeDollars(advance.policy.capCents);
+  const terms = `Fee ${fee} on the amount used; at most ${cap} outstanding at a time.`;
+  if (advance.headroomCents > 0) {
+    return {
+      headline: `Up to ${formatWholeDollars(advance.headroomCents)} of money on its way can pay for orders now.`,
+      details: [terms],
+    };
+  }
+  if (advance.exposureCents > 0 && advance.allowanceCents > 0) {
+    return {
+      headline: `Orders have already used ${formatWholeDollars(Math.min(advance.exposureCents, advance.allowanceCents))} of money on its way; nothing more until it lands.`,
+      details: [terms],
+    };
+  }
+  return {
+    headline: "No money on its way can pay for orders yet.",
+    details: [...advance.reasons.map(describeAdvanceReason), terms],
+  };
+}
+
+/**
+ * The line under a negative balance. Money on its way that qualifies for the
+ * advance covers the negative until it lands; otherwise the negative is a
+ * return fee or a returned transfer, collected by the next top-up.
+ */
+export function describeNegativeBalance(input: {
+  availableCents: number;
+  advance: WalletAdvance | null;
+  limitCents: number;
+  cardFundingFeeBps: number;
+}): string {
+  const negative = formatWholeDollars(-input.availableCents);
+  const covered = input.advance ? Math.min(input.advance.eligiblePendingCents, -input.availableCents) : 0;
+  if (covered > 0) {
+    return `${negative} below zero — ${formatWholeDollars(covered)} of it was paid from a bank transfer still on its way and clears when that lands. If the transfer is returned instead, the amount is collected by your next top-up.`;
+  }
+  return `${negative} below zero — a return fee or a returned transfer took the balance below zero. Your next top-up covers it, unless the top-up needed exceeds your single top-up limit (${formatWholeDollars(input.limitCents)}) — then we email you instead of charging. Until then, a backup-card charge for an order includes this shortfall (order plus the amount below zero, plus ${formatFeeRate(input.cardFundingFeeBps)}).`;
 }
 
 /** The role-warning texts (spec §2.8); they name no card label, because the view does not identify the archived card. */

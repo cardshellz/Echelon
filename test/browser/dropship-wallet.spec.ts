@@ -52,6 +52,7 @@ interface StubState {
   limits: Record<string, number> | null;
   /** The server's listing tier decision; null models a server that does not serve it yet. */
   listingTiers: Record<string, unknown> | null;
+  advance: Record<string, unknown> | null;
   proofs: Record<string, { method: string; verifiedAt: string; expiresAt: string }>;
   failChallenge: boolean;
   deleteRefusal: string | null;
@@ -98,7 +99,21 @@ function walletJson(state: StubState) {
     account: { walletAccountId: 1, vendorId: 1, availableBalanceCents: state.balanceCents, pendingBalanceCents: state.pendingCents, currency: "USD", status: "active", createdAt: STAMP, updatedAt: STAMP },
     autoReload: state.autoReload, fundingMethods, recentLedger: state.ledger, cardFundingFeeBps: state.cardFundingFeeBps, usdcBaseDepositAddress: state.usdcDepositAddress,
     ...(state.limits ? { limits: state.limits } : {}),
-    ...(state.listingTiers ? { listingTiers: state.listingTiers } : {}) } };
+    ...(state.listingTiers ? { listingTiers: state.listingTiers } : {}),
+    ...(state.advance ? { advance: state.advance } : {}) } };
+}
+
+/** The bank account (method 30) qualifies with $400 on the way; the card never appears. */
+function advanceJson() {
+  return {
+    policy: { feeBps: 100, capCents: 50_000, capSource: "policy" },
+    sources: [{ fundingMethodId: 30, pendingCents: 40_000, accountHolderType: "company", balanceVerified: true, priorPullSettled: true, eligible: true, reasons: [] }],
+    eligiblePendingCents: 40_000,
+    allowanceCents: 40_000,
+    exposureCents: 0,
+    headroomCents: 40_000,
+    reasons: [],
+  };
 }
 
 /** Pack tier on sale; case tier $380 short of $500 with a raise to $750 landing in grace. */
@@ -112,7 +127,7 @@ function listingTiersJson() {
 }
 
 async function setup(page: Page, initial: Partial<StubState> = {}, path = HARNESS_PATH) {
-  const state: StubState = { methods: [], holdSetupConfirmation: false, usdcDepositAddress: null, autoReload: null, balanceCents: 0, pendingCents: 0, ledger: [], cardFundingFeeBps: 300, limits: null, listingTiers: null,
+  const state: StubState = { methods: [], holdSetupConfirmation: false, usdcDepositAddress: null, autoReload: null, balanceCents: 0, pendingCents: 0, ledger: [], cardFundingFeeBps: 300, limits: null, listingTiers: null, advance: null,
     proofs: {}, failChallenge: false, deleteRefusal: null, detachOutcome: "detached", putRefusalOnce: null, vendorStatus: "onboarding", vendorStandingReason: null,
     walletReads: 0, nextCardId: 10, nextBankId: 30, setupSessions: [], autoReloadWrites: [], fundingSessions: [], usdcRegistrations: [], deletes: [], bodies: [],
     codesSent: [], unexpected: [], errors: [], ...initial };
@@ -708,6 +723,25 @@ test("manage: the wallet says which listing tiers are on sale, what each needs, 
   finish(state);
 });
 
+test("manage: the wallet says what money on its way can already pay for, and why a bank account qualifies", async ({ page }) => {
+  const state = await setup(page, { vendorStatus: "active", methods: [CARD, BANK], autoReload: doneAutoReload(), balanceCents: 12_000, pendingCents: 40_000, proofs: ALL_PROOFS, advance: advanceJson() });
+  await expect(page.getByTestId("wallet-pending")).toContainText("$400 on the way — a bank transfer takes up to 5 business days (our assumption) to land; up to $400 of it can pay for orders now, for a 1% fee on the amount used.");
+  const section = page.getByTestId("wallet-advance");
+  await expect(section).toContainText("Orders while a transfer lands");
+  await expect(section.getByTestId("wallet-advance-status")).toHaveText("Up to $400 of money on its way can pay for orders now.");
+  await expect(section.getByTestId("wallet-advance-details")).toContainText("Fee 1% on the amount used; at most $500 outstanding at a time.");
+  const bank = section.getByTestId("wallet-advance-source-30");
+  await expect(bank).toContainText("Chase ending in 1234 · $400 on the way");
+  await expect(bank).toContainText("Qualifies");
+  await expect(section.getByTestId("wallet-advance-source-10")).toHaveCount(0);
+  // Below the tiers when both are served, above the plan.
+  const planY = await page.getByTestId("wallet-plan").boundingBox().then((box) => box?.y ?? 0);
+  expect(await section.boundingBox().then((box) => box?.y ?? 0)).toBeLessThan(planY);
+  await expectNoHorizontalScroll(page);
+  await shot(page, "manage-14-advance");
+  finish(state);
+});
+
 test("a paused vendor sees the standing notice above everything with a control behind it, and no way to turn auto-reload off", async ({ page }) => {
   const state = await setup(page, { vendorStatus: "paused", vendorStandingReason: "card_declined", methods: [CARD, BANK], autoReload: doneAutoReload(), proofs: ALL_PROOFS });
   const notice = page.getByTestId("wallet-vendor-standing-notice");
@@ -792,7 +826,7 @@ test("the step list walks back and forward without losing a choice, and manage k
   await clickStep(page, "intro");
   const intro = page.getByTestId("wallet-step-intro");
   await expect(intro.getByRole("heading", { name: "How your wallet works" })).toBeVisible();
-  await expect(intro).toContainText("Only money that has landed can pay for an order,");
+  await expect(intro).toContainText("Money that has landed pays for orders first;");
   await expect(intro.getByTestId("wallet-intro-verification-note")).toContainText("(a 6-digit code by email)");
   await expect(intro.getByRole("button", { name: "Set up my wallet" })).toHaveCount(0);
   await expectNoHorizontalScroll(page);
@@ -833,9 +867,9 @@ test("the step list walks back and forward without losing a choice, and manage k
 
   // Past setup the rules are still one click away, collapsed until asked for.
   const how = page.getByTestId("wallet-how-it-works");
-  await expect(how).not.toContainText("Only money that has landed can pay for an order,");
+  await expect(how).not.toContainText("Money that has landed pays for orders first;");
   await how.getByRole("button").click();
-  await expect(how).toContainText("Only money that has landed can pay for an order,");
+  await expect(how).toContainText("Money that has landed pays for orders first;");
   // One source: the manage view renders the same lede and the same five topics as step 1.
   await expect(how.getByTestId("wallet-how-it-works-lede")).toContainText("Your wallet is how Card Shellz gets paid for the orders you sell.");
   await expect(how.getByTestId("wallet-how-it-works-rules").getByRole("listitem")).toHaveCount(5);

@@ -362,3 +362,134 @@ async function jsonRequest(url: string, init?: RequestInit): Promise<{ status: n
   const response = await fetch(url, init);
   return { status: response.status, body: await response.json() };
 }
+
+describe("dropship wallet routes advance and bank balance (funding design phase 3)", () => {
+  const now = "2026-09-20T12:00:00.000Z";
+  const advance = {
+    policy: { feeBps: 100, capCents: 50_000, capSource: "policy" },
+    sources: [{ fundingMethodId: 100, pendingCents: 40_000, accountHolderType: "company", balanceVerified: true, priorPullSettled: true, eligible: true, reasons: [] }],
+    eligiblePendingCents: 40_000,
+    allowanceCents: 40_000,
+    exposureCents: 0,
+    headroomCents: 40_000,
+    reasons: [],
+  };
+  let server: { url: string; close: () => Promise<void> };
+  let calls: Array<{ method: string; input: unknown }>;
+  let webhookEvent: unknown;
+  let verifyError: unknown;
+  let registrationReplayed: boolean;
+
+  beforeEach(async () => {
+    calls = [];
+    webhookEvent = null;
+    verifyError = null;
+    registrationReplayed = false;
+    for (const level of ["error", "warn", "info"] as const) {
+      vi.spyOn(console, level).mockImplementation(() => {});
+    }
+    const wallet = {
+      account: { walletAccountId: 1, vendorId: 10, availableBalanceCents: 0, pendingBalanceCents: 40_000, currency: "USD", status: "active", createdAt: now, updatedAt: now },
+      autoReload: null,
+      fundingMethods: [],
+      recentLedger: [],
+      cardFundingFeeBps: 300,
+      usdcBaseDepositAddress: null,
+      limits: {
+        autoReloadMinTriggerCents: 7_500, autoReloadMinAmountCents: 12_500, manualFundingMinCents: 2_000, manualFundingMaxCents: 400_000,
+        defaultPaymentHoldTimeoutMinutes: 1_440, holdExpiryWarningMinutes: 90, caseTierMinimumCents: 55_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14,
+      },
+      advance,
+    };
+    const service = {
+      getWalletForMember: async () => wallet,
+      getWalletForVendor: async () => wallet,
+      registerFundingMethod: async (input: { vendorId: number; rail: string }) => {
+        calls.push({ method: "registerFundingMethod", input });
+        return { fundingMethod: { fundingMethodId: 100, vendorId: input.vendorId, rail: input.rail }, idempotentReplay: registrationReplayed };
+      },
+      creditFunding: async (input: unknown) => {
+        calls.push({ method: "creditFunding", input });
+        return {};
+      },
+      verifyBankBalanceForFundingMethod: async (input: unknown) => {
+        calls.push({ method: "verifyBankBalanceForFundingMethod", input });
+        if (verifyError) throw verifyError;
+        return { outcome: "recorded" };
+      },
+      recordBankBalanceRefresh: async (input: unknown) => {
+        calls.push({ method: "recordBankBalanceRefresh", input });
+        return { outcome: "recorded" };
+      },
+    } as unknown as DropshipWalletService;
+    const provider = {
+      parseWebhookEvent: async () => webhookEvent,
+    } as unknown as StripeDropshipFundingProvider;
+    const app = express();
+    app.use(express.json());
+    // The real app captures the raw body for signature checks; the fake provider ignores it.
+    app.use((req, _res, next) => {
+      (req as Request & { rawBody?: Buffer }).rawBody = Buffer.from("{}");
+      next();
+    });
+    registerDropshipWalletRoutes(app, service, provider, { resolveForVendor: fakeListingTierView });
+    server = await startServer(app);
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await server.close();
+  });
+
+  it("serves the vendor's advance position exactly as the service assessed it", async () => {
+    const response = await jsonRequest(`${server.url}/api/dropship/wallet`);
+
+    expect(response.status).toBe(200);
+    expect(response.body.wallet.advance).toEqual(advance);
+  });
+
+  async function postWebhook() {
+    return jsonRequest(`${server.url}/api/webhooks/dropship/stripe`, {
+      method: "POST",
+      headers: { "content-type": "application/json", "stripe-signature": "sig" },
+      body: "{}",
+    });
+  }
+
+  it("reads the balance behind a bank account right after it is registered, and never for a card", async () => {
+    webhookEvent = { kind: "funding_method_setup_completed", providerEventId: "evt_1", eventType: "setup_intent.succeeded", fundingMethod: { vendorId: 10, rail: "stripe_ach" } };
+    expect((await postWebhook()).status).toBe(200);
+    expect(calls.map((call) => call.method)).toEqual(["registerFundingMethod", "verifyBankBalanceForFundingMethod"]);
+    expect(calls[1].input).toEqual({ vendorId: 10, fundingMethodId: 100, source: "link", providerEventId: "evt_1" });
+
+    calls = [];
+    webhookEvent = { kind: "funding_method_setup_completed", providerEventId: "evt_2", eventType: "setup_intent.succeeded", fundingMethod: { vendorId: 10, rail: "stripe_card" } };
+    expect((await postWebhook()).status).toBe(200);
+    expect(calls.map((call) => call.method)).toEqual(["registerFundingMethod"]);
+
+    // A replayed setup event, or a later transfer from the same account, registers nothing new and reads nothing.
+    calls = [];
+    registrationReplayed = true;
+    webhookEvent = { kind: "wallet_funding_recorded", providerEventId: "evt_4", eventType: "payment_intent.processing", fundingMethod: { vendorId: 10, rail: "stripe_ach" }, fundingCredit: { amountCents: 5_000 } };
+    expect((await postWebhook()).status).toBe(200);
+    expect(calls.map((call) => call.method)).toEqual(["registerFundingMethod", "creditFunding"]);
+  });
+
+  it("acknowledges the webhook even when the balance read throws: the registration is the durable work", async () => {
+    verifyError = new Error("stripe unreachable");
+    webhookEvent = { kind: "funding_method_setup_completed", providerEventId: "evt_3", eventType: "setup_intent.succeeded", fundingMethod: { vendorId: 10, rail: "stripe_ach" } };
+
+    const response = await postWebhook();
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ received: true, action: "funding_method_setup_completed" });
+  });
+
+  it("records a refreshed balance the provider reports", async () => {
+    const snapshot = { status: "succeeded", availableByCurrency: { usd: 90_000 }, asOf: now };
+    webhookEvent = { kind: "bank_balance_refreshed", providerEventId: "evt_r1", eventType: "financial_connections.account.refreshed_balance", providerAccountId: "fca_1", snapshot };
+
+    expect((await postWebhook()).status).toBe(200);
+    expect(calls).toEqual([{ method: "recordBankBalanceRefresh", input: { providerAccountId: "fca_1", snapshot, providerEventId: "evt_r1" } }]);
+  });
+});

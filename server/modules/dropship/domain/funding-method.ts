@@ -21,3 +21,19 @@ export function fundingMethodAccountHolderType(
   const value = metadata?.[FUNDING_METHOD_ACCOUNT_HOLDER_TYPE_KEY];
   return value === "company" || value === "individual" ? value : null;
 }
+
+/**
+ * The metadata key the Stripe funding provider writes for a `us_bank_account`
+ * collected through Financial Connections: the provider-side account whose
+ * balance can be read (funding design phase 3). Absent for an account entered
+ * manually or verified by micro-deposits, which therefore can never be
+ * "balance verified" and never qualifies for the pending-ACH advance.
+ */
+export const FUNDING_METHOD_FINANCIAL_CONNECTIONS_ACCOUNT_KEY = "financialConnectionsAccountId";
+
+export function fundingMethodFinancialConnectionsAccountId(
+  metadata: Record<string, unknown> | null | undefined,
+): string | null {
+  const value = metadata?.[FUNDING_METHOD_FINANCIAL_CONNECTIONS_ACCOUNT_KEY];
+  return typeof value === "string" && value.trim() !== "" ? value : null;
+}

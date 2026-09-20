@@ -2,13 +2,17 @@ import type { Pool, PoolClient } from "pg";
 import type { DropshipVendorStatus } from "../../../../shared/schema/dropship.schema";
 import { pool as defaultPool } from "../../../db";
 import { DropshipError } from "../domain/errors";
+import { FUNDING_METHOD_FINANCIAL_CONNECTIONS_ACCOUNT_KEY } from "../domain/funding-method";
+import type { DropshipAdvanceContext } from "../domain/acceptance-funding";
 import { pauseDropshipVendorWithClient } from "./dropship-vendor-standing.repository";
+import { loadAdvancePolicyWithClient, loadAdvanceSourcesWithClient } from "./dropship-advance.reader";
 import type {
   ConfigureDropshipAutoReloadRepositoryInput,
   CreateDropshipConfirmedUsdcFundingRepositoryInput,
   CreateDropshipWalletFundingLedgerInput,
   CreateDropshipWalletOrderDebitInput,
   DropshipAutoReloadSettingRecord,
+  DropshipBankBalanceVerificationRecord,
   DropshipConfirmedUsdcFundingResult,
   DropshipFundingMethodMutationResult,
   DropshipFundingMethodRecord,
@@ -20,6 +24,7 @@ import type {
   DropshipWalletOverview,
   DropshipWalletRepository,
   FailDropshipPendingFundingRepositoryInput,
+  RecordDropshipBankBalanceVerificationRepositoryInput,
   UpsertDropshipFundingMethodRepositoryInput,
 } from "../application/dropship-wallet-service";
 
@@ -83,6 +88,21 @@ interface WalletLedgerRow {
   metadata: Record<string, unknown> | null;
   created_at: Date;
   settled_at: Date | null;
+}
+
+interface BalanceVerificationRow {
+  id: number;
+  vendor_id: number;
+  funding_method_id: number;
+  provider: string;
+  provider_account_id: string;
+  status: string;
+  source: string;
+  available_cents: string | number | null;
+  currency: string | null;
+  balance_as_of: Date | null;
+  provider_event_id: string | null;
+  created_at: Date;
 }
 
 interface UsdcLedgerRow {
@@ -773,6 +793,145 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository {
     } finally {
       client.release();
     }
+  }
+
+  async readAdvanceContext(input: { vendorId: number; now: Date }): Promise<DropshipAdvanceContext | null> {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      const account = await getOrCreateWalletAccountWithClient(client, {
+        vendorId: input.vendorId,
+        currency: "USD",
+        now: input.now,
+      });
+      const policy = await loadAdvancePolicyWithClient(client, input.vendorId);
+      const sources = policy
+        ? await loadAdvanceSourcesWithClient(client, { vendorId: input.vendorId, walletAccountId: account.walletAccountId })
+        : [];
+      await client.query("COMMIT");
+      return policy ? { policy, sources } : null;
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async recordBankBalanceVerification(
+    input: RecordDropshipBankBalanceVerificationRepositoryInput,
+  ): Promise<{ record: DropshipBankBalanceVerificationRecord; idempotentReplay: boolean }> {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      const method = await client.query<{ id: number }>(
+        `SELECT id
+         FROM dropship.dropship_funding_methods
+         WHERE id = $1
+           AND vendor_id = $2
+         LIMIT 1`,
+        [input.fundingMethodId, input.vendorId],
+      );
+      if (!method.rows[0]) {
+        throw new DropshipError(
+          "DROPSHIP_FUNDING_METHOD_NOT_FOUND",
+          "Dropship funding method was not found for this vendor.",
+          { vendorId: input.vendorId, fundingMethodId: input.fundingMethodId, retryable: false },
+        );
+      }
+      const reading = input.reading;
+      const inserted = await client.query<BalanceVerificationRow>(
+        `INSERT INTO dropship.dropship_funding_method_balance_verifications
+          (vendor_id, funding_method_id, provider, provider_account_id, status, source,
+           available_cents, currency, balance_as_of, provider_event_id, detail, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12)
+         ON CONFLICT (provider, provider_event_id) WHERE provider_event_id IS NOT NULL DO NOTHING
+         RETURNING id, vendor_id, funding_method_id, provider, provider_account_id, status, source,
+                   available_cents, currency, balance_as_of, provider_event_id, created_at`,
+        [
+          input.vendorId,
+          input.fundingMethodId,
+          input.provider,
+          reading.providerAccountId,
+          reading.status,
+          input.source,
+          reading.status === "succeeded" ? reading.availableCents : null,
+          reading.status === "succeeded" ? reading.currency : null,
+          reading.status === "succeeded" ? reading.asOf : null,
+          input.providerEventId,
+          JSON.stringify(
+            reading.status === "failed"
+              ? { reason: reading.reason }
+              : reading.status === "pending"
+                ? { nextRefreshAvailableAt: reading.nextRefreshAvailableAt?.toISOString() ?? null }
+                : {},
+          ),
+          input.occurredAt,
+        ],
+      );
+      let row = inserted.rows[0];
+      let idempotentReplay = false;
+      if (!row) {
+        // Only a provider event id can conflict: the same event was recorded before.
+        const existing = await client.query<BalanceVerificationRow>(
+          `SELECT id, vendor_id, funding_method_id, provider, provider_account_id, status, source,
+                  available_cents, currency, balance_as_of, provider_event_id, created_at
+           FROM dropship.dropship_funding_method_balance_verifications
+           WHERE provider = $1
+             AND provider_event_id = $2
+           LIMIT 1`,
+          [input.provider, input.providerEventId],
+        );
+        row = requiredRow(existing.rows[0], "Dropship bank balance verification conflict did not resolve to a row.");
+        idempotentReplay = true;
+      } else {
+        await recordWalletAuditEvent(client, {
+          vendorId: input.vendorId,
+          entityType: "dropship_funding_method_balance_verification",
+          entityId: String(row.id),
+          eventType: `wallet_bank_balance_${reading.status}`,
+          payload: {
+            fundingMethodId: input.fundingMethodId,
+            provider: input.provider,
+            providerAccountId: reading.providerAccountId,
+            source: input.source,
+            providerEventId: input.providerEventId,
+            status: reading.status,
+            availableCents: reading.status === "succeeded" ? reading.availableCents : null,
+            currency: reading.status === "succeeded" ? reading.currency : null,
+            balanceAsOf: reading.status === "succeeded" ? reading.asOf.toISOString() : null,
+            reason: reading.status === "failed" ? reading.reason : null,
+          },
+          createdAt: input.occurredAt,
+        });
+      }
+      await client.query("COMMIT");
+      return { record: mapBalanceVerificationRow(row), idempotentReplay };
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async findFundingMethodByProviderAccount(input: {
+    provider: "stripe";
+    providerAccountId: string;
+  }): Promise<DropshipFundingMethodRecord | null> {
+    const result = await this.dbPool.query<FundingMethodRow>(
+      `SELECT id, vendor_id, rail, status, provider_customer_id,
+              provider_payment_method_id, usdc_wallet_address, display_label,
+              is_default, metadata, created_at, updated_at
+       FROM dropship.dropship_funding_methods
+       WHERE rail = 'stripe_ach'
+         AND metadata->>'provider' = $1
+         AND metadata->>$2 = $3
+       ORDER BY (status = 'active') DESC, id DESC
+       LIMIT 1`,
+      [input.provider, FUNDING_METHOD_FINANCIAL_CONNECTIONS_ACCOUNT_KEY, input.providerAccountId],
+    );
+    return result.rows[0] ? mapFundingMethodRow(result.rows[0]) : null;
   }
 
   async getVendorLifecycleStatus(vendorId: number): Promise<DropshipVendorStatus | null> {
@@ -1912,6 +2071,37 @@ function mapFundingMethodRow(row: FundingMethodRow): DropshipFundingMethodRecord
     metadata: row.metadata ?? {},
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+  };
+}
+
+function mapBalanceVerificationRow(row: BalanceVerificationRow): DropshipBankBalanceVerificationRecord {
+  if (row.status !== "succeeded" && row.status !== "pending" && row.status !== "failed") {
+    throw new DropshipError(
+      "DROPSHIP_BANK_BALANCE_VERIFICATION_INVALID_STORED_VALUE",
+      "Dropship bank balance verification has an unknown status.",
+      { verificationId: row.id, status: row.status, classification: "fatal" },
+    );
+  }
+  if (row.source !== "link" && row.source !== "refresh" && row.source !== "webhook") {
+    throw new DropshipError(
+      "DROPSHIP_BANK_BALANCE_VERIFICATION_INVALID_STORED_VALUE",
+      "Dropship bank balance verification has an unknown source.",
+      { verificationId: row.id, source: row.source, classification: "fatal" },
+    );
+  }
+  return {
+    verificationId: row.id,
+    vendorId: row.vendor_id,
+    fundingMethodId: row.funding_method_id,
+    provider: row.provider,
+    providerAccountId: row.provider_account_id,
+    status: row.status,
+    source: row.source,
+    availableCents: row.available_cents === null ? null : toSafeInteger(row.available_cents, "available_cents"),
+    currency: row.currency,
+    balanceAsOf: row.balance_as_of,
+    providerEventId: row.provider_event_id,
+    createdAt: row.created_at,
   };
 }
 
