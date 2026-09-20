@@ -84,8 +84,29 @@ describe("verified feed creation", () => {
   it("rejects multiple accounts even if an inbound caller supplies one explicit ID", async () => {
     const db = database([[account, { ...account, id: 8 }]]);
     const reader = new ShopifyIdentityReader();
-    const read = vi.spyOn(reader, "inventory");
+    const read = vi.spyOn(reader, "inventoryLevels");
     await expect(new ChannelIdentityService(db as never, reader).externalInventory(2, "20", 7)).rejects.toMatchObject({ code: "CHANNEL_CONNECTION_UNRESOLVED" });
     expect(read).not.toHaveBeenCalled();
+  });
+  it("separates unmapped untracked items from quantities without blocking mapped numeric stock", async () => {
+    const db = database([[account], [{ ...listing, externalInventoryItemId: "5" }]]);
+    const reader = new ShopifyIdentityReader();
+    vi.spyOn(reader, "inventoryLevels").mockResolvedValue(new Map<string, number | null>([["5", 0], ["6", null]]));
+    await expect(new ChannelIdentityService(db as never, reader).externalInventory(2)).resolves.toEqual({
+      channelId: 2, connectionId: 7, externalLocationId: "20",
+      items: [{ externalInventoryItemId: "5", productVariantId: 1, quantity: 0 }],
+      unavailableItems: [{ externalInventoryItemId: "6", reason: "untracked" }],
+    });
+    expect(db.update).not.toHaveBeenCalled();
+    expect(db.insert).not.toHaveBeenCalled();
+  });
+  it("fails closed if an untracked Shopify item has an active mapping", async () => {
+    const db = database([[account], [{ ...listing, externalInventoryItemId: "5" }]]);
+    const reader = new ShopifyIdentityReader();
+    vi.spyOn(reader, "inventoryLevels").mockResolvedValue(new Map([["5", null]]));
+    await expect(new ChannelIdentityService(db as never, reader).externalInventory(2))
+      .rejects.toMatchObject({ code: "SHOPIFY_MAPPED_INVENTORY_UNTRACKED" });
+    expect(db.update).not.toHaveBeenCalled();
+    expect(db.insert).not.toHaveBeenCalled();
   });
 });

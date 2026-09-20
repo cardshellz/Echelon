@@ -82,7 +82,7 @@ export class ChannelInventoryPublicationTransportAdapter
         throw new InventoryPublicationTransportError(
           result.errorCode ?? "PROVIDER_READBACK_FAILED",
           result.error ?? "Provider inventory readback failed.",
-          true,
+          result.retryable !== false,
         );
       }
       if (!Number.isSafeInteger(result.observedQty) || result.observedQty < 0) {

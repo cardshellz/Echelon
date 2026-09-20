@@ -42,6 +42,7 @@ import { InventoryPublicationConfigurationError } from "../channel-adapter.inter
 
 import { EbayAuthService, createEbayAuthConfig } from "./ebay/ebay-auth.service";
 import { EbayApiClient, createEbayApiClient } from "./ebay/ebay-api.client";
+import { EbayInventoryQuantityError, ebayInventoryMarketplace, publishEbayInventoryQuantity, readEbayInventoryQuantity } from "./ebay/ebay-inventory-quantity";
 import { EbayListingBuilder, createEbayListingBuilder } from "./ebay/ebay-listing-builder";
 import { mapCarrierToEbay } from "./ebay/ebay-category-map";
 import { EbayMarketplaceListingConnector } from "../listing-connectors/ebay-listing.connector";
@@ -246,14 +247,12 @@ export class EbayAdapter implements IChannelAdapter {
         retryable: false,
       }));
     }
-    const publicationItems = context
-      ? items.map((item) => ({ ...item, sku: exactEbayInventoryItemKey(item) }))
-      : items;
-    const client = await this.getApiClient(
-      channelId,
-      context?.channelConnectionId,
-      context?.externalScopeId,
-    );
+    // Canonical targets identify the inventory SKU, not an offer ID. Resolve the
+    // exact published offer and update both provider limits in one operation.
+    // Never enter the legacy item-only PUT / stale-offer recovery below.
+    if (context) return this.pushCanonicalInventory(channelId, items, context);
+    const publicationItems = items;
+    const client = await this.getApiClient(channelId);
     const results: InventoryPushResult[] = [];
 
     // eBay supports bulk update — batch up to 25 items per call
@@ -420,6 +419,7 @@ export class EbayAdapter implements IChannelAdapter {
         status: "error" as const,
         error: "eBay canonical inventory readback requires an exact account scope",
         errorCode: "EBAY_INVENTORY_SCOPE_UNSUPPORTED",
+        retryable: false,
       }));
     }
     const publicationItems = items.map((item) => ({
@@ -431,23 +431,44 @@ export class EbayAdapter implements IChannelAdapter {
       context.channelConnectionId,
       context.externalScopeId,
     );
+    const metadata = await this.getConnectionMetadata(channelId, context.channelConnectionId);
     const results: InventoryReadResult[] = [];
     for (const item of publicationItems) {
       try {
-        const inventoryItem = await client.getInventoryItem(item.sku);
-        const observedQty = Number(
-          inventoryItem?.availability?.shipToLocationAvailability?.quantity,
-        );
-        if (!Number.isSafeInteger(observedQty) || observedQty < 0) {
-          throw new Error("eBay did not return a nonnegative integer inventory quantity");
+        if (item.providerScopeType !== "account" || item.externalScopeId !== context.externalScopeId) {
+          throw new EbayInventoryQuantityError("EBAY_INVENTORY_SCOPE_MISMATCH", "The item does not belong to the selected eBay account scope.");
         }
-        results.push({ variantId: item.variantId, observedQty, status: "success" });
+        const observation = await readEbayInventoryQuantity(client, item.sku, ebayInventoryMarketplace(metadata.siteId));
+        results.push({ variantId: item.variantId, observedQty: observation.observedQuantity, status: "success", providerResponse: observation });
       } catch (error) {
         results.push({
           variantId: item.variantId,
           observedQty: 0,
           status: "error",
           error: error instanceof Error ? error.message : String(error),
+          ...(error instanceof EbayInventoryQuantityError ? { errorCode: error.code, retryable: error.retryable } : {}),
+        });
+      }
+    }
+    return results;
+  }
+
+  private async pushCanonicalInventory(
+    channelId: number, items: InventoryPushItem[], context: InventoryPublicationContext,
+  ): Promise<InventoryPushResult[]> {
+    const client = await this.getApiClient(channelId, context.channelConnectionId, context.externalScopeId);
+    const metadata = await this.getConnectionMetadata(channelId, context.channelConnectionId);
+    const results: InventoryPushResult[] = [];
+    for (const item of items) {
+      try {
+        await publishEbayInventoryQuantity(client, exactEbayInventoryItemKey(item), ebayInventoryMarketplace(metadata.siteId), item.allocatedQty);
+        results.push({ variantId: item.variantId, pushedQty: item.allocatedQty, status: "success" });
+      } catch (error) {
+        results.push({
+          variantId: item.variantId, pushedQty: 0, status: "error",
+          error: error instanceof Error ? error.message : String(error),
+          ...(error instanceof EbayInventoryQuantityError ? { errorCode: error.code, retryable: error.retryable }
+            : error instanceof InventoryPublicationConfigurationError ? { errorCode: error.code, retryable: false } : {}),
         });
       }
     }

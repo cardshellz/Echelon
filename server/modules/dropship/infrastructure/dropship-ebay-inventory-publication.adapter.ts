@@ -1,5 +1,10 @@
 import type { Pool } from "pg";
 import { executeEbayQuantityHttpResponse } from "../../channels/adapters/ebay/ebay-quantity-http";
+import { PROVIDER_REQUEST_TIMEOUT_MS } from "../../channels/provider-request-limits";
+import {
+  EbayInventoryQuantityError, ebayInventoryMarketplace, ebayInventoryOffersPath,
+  publishEbayInventoryQuantity, readEbayInventoryQuantity, type EbayInventoryQuantityClient,
+} from "../../channels/adapters/ebay/ebay-inventory-quantity";
 import { observeEbayQuantityRequest } from "../../inventory-planning/application/quantity-provider-request-evidence";
 
 import { pool as defaultPool } from "../../../db";
@@ -97,40 +102,41 @@ export class EbayDropshipInventoryPublicationTransportAdapter
   async publishAbsolute(
     request: AbsoluteInventoryPublicationRequest,
   ): Promise<AbsoluteInventoryPublicationResult> {
-    const context = await this.loadContext(request);
-    const sku = exactEbayInventoryItemKey(request);
-    const current = await this.requestJson({
-      ...context,
-      method: "GET",
-      path: inventoryItemPath(sku),
-    });
-    const payload = withAbsoluteQuantity(current, request.desiredQuantity);
-    const response = await this.requestNoContent({
-      ...context,
-      method: "PUT",
-      path: inventoryItemPath(sku),
-      body: payload,
-    });
-    return {
-      publishedQuantity: request.desiredQuantity,
-      providerResponse: response,
-    };
+    try {
+      const context = await this.loadContext(request);
+      const response = await publishEbayInventoryQuantity(
+        this.quantityClient(context), exactEbayInventoryItemKey(request),
+        ebayInventoryMarketplace(context.credential.config.marketplaceId), request.desiredQuantity,
+      );
+      return { publishedQuantity: request.desiredQuantity, providerResponse: response };
+    } catch (error) { throw translateQuantityError(error); }
   }
 
   async readAbsolute(
     request: AbsoluteInventoryReadRequest,
   ): Promise<AbsoluteInventoryReadResult> {
-    const context = await this.loadContext(request);
-    const sku = exactEbayInventoryItemKey(request);
-    const payload = await this.requestJson({
-      ...context,
-      method: "GET",
-      path: inventoryItemPath(sku),
-    });
-    const observedQuantity = inventoryQuantity(payload);
+    try {
+      const context = await this.loadContext(request);
+      const observation = await readEbayInventoryQuantity(
+        this.quantityClient(context), exactEbayInventoryItemKey(request), ebayInventoryMarketplace(context.credential.config.marketplaceId),
+      );
+      return { observedQuantity: observation.observedQuantity, providerResponse: observation };
+    } catch (error) { throw translateQuantityError(error); }
+  }
+
+  private quantityClient(context: {
+    destination: DropshipInventoryPublicationDestination;
+    credential: DropshipMarketplaceStoreCredentials;
+    baseUrl: string;
+  }): EbayInventoryQuantityClient {
     return {
-      observedQuantity,
-      providerResponse: { status: 200, observedQuantity },
+      getInventoryItem: (sku) => this.requestJson({ ...context, method: "GET", path: inventoryItemPath(sku) }),
+      getInventoryOffersPage: (sku, marketplaceId, offset, limit) => this.requestJson({
+        ...context, method: "GET", path: ebayInventoryOffersPath(sku, marketplaceId, offset, limit),
+      }),
+      bulkUpdatePriceQuantity: (body, marketplaceId) => this.requestQuantity({
+        ...context, method: "POST", path: "/sell/inventory/v1/bulk_update_price_quantity", body, marketplaceId,
+      }),
     };
   }
 
@@ -238,20 +244,21 @@ export class EbayDropshipInventoryPublicationTransportAdapter
     );
   }
 
-  private async requestNoContent(input: {
+  private async requestQuantity(input: {
     destination: DropshipInventoryPublicationDestination;
     credential: DropshipMarketplaceStoreCredentials;
     baseUrl: string;
-    method: "PUT";
+    method: "POST";
     path: string;
-    body: Record<string, unknown>;
-  }): Promise<Record<string, unknown>> {
+    body: unknown;
+    marketplaceId: string;
+  }): Promise<unknown> {
     const response = await observeEbayQuantityRequest(input,async () => {
       try {
         return await executeEbayQuantityHttpResponse({
           url: `${input.baseUrl}${input.path}`,method: input.method,path: input.path,body: input.body,
           headers: { Authorization: `Bearer ${input.credential.accessToken}`,"Content-Type": "application/json",
-            Accept: "application/json","Content-Language": "en-US" },
+            Accept: "application/json","Content-Language": "en-US", "X-EBAY-C-MARKETPLACE-ID": input.marketplaceId },
           request: this.fetchFn,now: () => this.clock.now(),
           onFailure: (status,text) => this.throwInventoryHttpError(input.destination,status,text),
         });
@@ -262,28 +269,29 @@ export class EbayDropshipInventoryPublicationTransportAdapter
           { errorName: error instanceof Error ? error.name : "UnknownError" },{ cause: error });
       }
     });
-    return { status: response.status };
+    return response.value;
   }
 
   private async request(input: {
     destination: DropshipInventoryPublicationDestination;
     credential: DropshipMarketplaceStoreCredentials;
     baseUrl: string;
-    method: "GET" | "PUT";
+    method: "GET";
     path: string;
-    body?: Record<string, unknown>;
   }): Promise<Response> {
     let response: Response;
     try {
       response = await this.fetchFn(`${input.baseUrl}${input.path}`, {
         method: input.method,
+        redirect: "error",
+        signal: AbortSignal.timeout(PROVIDER_REQUEST_TIMEOUT_MS),
         headers: {
           Authorization: `Bearer ${input.credential.accessToken}`,
           "Content-Type": "application/json",
           Accept: "application/json",
           "Content-Language": "en-US",
+          "X-EBAY-C-MARKETPLACE-ID": ebayInventoryMarketplace(input.credential.config.marketplaceId),
         },
-        body: input.body === undefined ? undefined : JSON.stringify(input.body),
       });
     } catch (error) {
       throw new InventoryPublicationTransportError(
@@ -350,58 +358,11 @@ function inventoryItemPath(sku: string): string {
   return `/sell/inventory/v1/inventory_item/${encodeURIComponent(sku)}`;
 }
 
-function withAbsoluteQuantity(
-  input: Record<string, unknown>,
-  quantity: number,
-): Record<string, unknown> {
-  if (!Number.isSafeInteger(quantity) || quantity < 0) {
-    throw configurationError(
-      "DROPSHIP_EBAY_INVENTORY_QUANTITY_INVALID",
-      "The desired eBay inventory quantity must be a nonnegative safe integer.",
-      { quantity },
-    );
+function translateQuantityError(error: unknown): unknown {
+  if (error instanceof EbayInventoryQuantityError) {
+    return new InventoryPublicationTransportError(error.code, error.message, error.retryable, undefined, { cause: error });
   }
-  const availability = requiredRecord(input.availability, "availability");
-  const shipToLocationAvailability = requiredRecord(
-    availability.shipToLocationAvailability,
-    "availability.shipToLocationAvailability",
-  );
-  return {
-    ...input,
-    availability: {
-      ...availability,
-      shipToLocationAvailability: {
-        ...shipToLocationAvailability,
-        quantity,
-      },
-    },
-  };
-}
-
-function inventoryQuantity(input: Record<string, unknown>): number {
-  const availability = requiredRecord(input.availability, "availability");
-  const shipToLocationAvailability = requiredRecord(
-    availability.shipToLocationAvailability,
-    "availability.shipToLocationAvailability",
-  );
-  const quantity = shipToLocationAvailability.quantity;
-  if (!Number.isSafeInteger(quantity) || Number(quantity) < 0) {
-    throw new InventoryPublicationTransportError(
-      "DROPSHIP_EBAY_INVENTORY_QUANTITY_INVALID",
-      "eBay did not return a nonnegative integer inventory quantity.",
-      true,
-    );
-  }
-  return Number(quantity);
-}
-
-function requiredRecord(value: unknown, field: string): Record<string, unknown> {
-  if (isRecord(value)) return value;
-  throw new InventoryPublicationTransportError(
-    "DROPSHIP_EBAY_INVENTORY_RESPONSE_INVALID",
-    `eBay inventory response is missing ${field}.`,
-    true,
-  );
+  return error;
 }
 
 function exactEbayInventoryItemKey(

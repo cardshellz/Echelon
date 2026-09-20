@@ -36,6 +36,7 @@ import type {
   CancellationPushResult,
 } from "../channel-adapter.interface";
 import { InventoryPublicationConfigurationError } from "../channel-adapter.interface";
+import { providerRestIdentitySchema } from "../channel-identity.domain";
 import { ShopifyMarketplaceListingConnector } from "../listing-connectors/shopify-listing.connector";
 import type { QuantityPublicationAdmission } from "../../inventory-planning/application/quantity-publication-admission.port";
 
@@ -232,6 +233,7 @@ export class ShopifyAdapter implements IChannelAdapter {
         status: "error" as const,
         error: "Shopify canonical inventory readback requires an exact location scope",
         errorCode: "SHOPIFY_INVENTORY_SCOPE_UNSUPPORTED",
+        retryable: false,
       }));
     }
     const creds = await this.getCredentials(channelId, context.channelConnectionId);
@@ -240,18 +242,23 @@ export class ShopifyAdapter implements IChannelAdapter {
       try {
         const inventoryItemId = shopifyRestId(item.externalInventoryItemId, "inventory item ID");
         const locationId = shopifyRestId(item.externalScopeId, "location ID");
+        if (item.providerScopeType !== "location" || locationId !== shopifyRestId(context.externalScopeId, "location ID")) {
+          throw new InventoryPublicationConfigurationError("SHOPIFY_INVENTORY_SCOPE_MISMATCH", "The item does not belong to the selected Shopify location.");
+        }
         const payload = await this.shopifyGet(
           creds,
           `/inventory_levels.json?inventory_item_ids=${inventoryItemId}`
             + `&location_ids=${locationId}`,
         );
         const levels = Array.isArray(payload?.inventory_levels) ? payload.inventory_levels : [];
-        const level = levels.find((candidate: any) =>
-          String(candidate.inventory_item_id) === String(inventoryItemId)
-          && String(candidate.location_id) === String(locationId));
-        const observedQty = Number(level?.available);
-        if (!Number.isSafeInteger(observedQty) || observedQty < 0) {
-          throw new Error("Shopify did not return one nonnegative integer inventory level");
+        const level = levels.length === 1 ? levels[0] : null;
+        const returnedItem = providerRestIdentitySchema.safeParse(level?.inventory_item_id);
+        const returnedLocation = providerRestIdentitySchema.safeParse(level?.location_id);
+        const observedQty = level?.available;
+        if (!returnedItem.success || returnedItem.data !== String(inventoryItemId)
+          || !returnedLocation.success || returnedLocation.data !== String(locationId)
+          || typeof observedQty !== "number" || !Number.isSafeInteger(observedQty) || observedQty < 0) {
+          throw new Error("Shopify did not return exactly one matching inventory level with a numeric nonnegative safe-integer quantity; unknown is not zero");
         }
         results.push({ variantId: item.variantId, observedQty, status: "success" });
       } catch (error) {
@@ -261,7 +268,7 @@ export class ShopifyAdapter implements IChannelAdapter {
           status: "error",
           error: error instanceof Error ? error.message : String(error),
           ...(error instanceof InventoryPublicationConfigurationError
-            ? { errorCode: error.code }
+            ? { errorCode: error.code, retryable: false }
             : {}),
         });
       }
