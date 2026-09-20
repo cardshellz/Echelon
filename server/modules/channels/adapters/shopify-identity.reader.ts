@@ -84,7 +84,8 @@ export class ShopifyIdentityReader {
     const maxPages = 2_000; // Bounded to 500,000 records; incomplete reads must never be applied.
     for (let page = 0; page < maxPages; page++) {
       const query = new URLSearchParams(cursor ? { page_info: cursor, limit: "250" } : { location_ids: locationId, limit: "250" });
-      const response = await this.get({ ...connection, apiVersion: servedVersion ?? connection.apiVersion }, `inventory_levels.json?${query}`);
+      const requestedVersion: string = servedVersion ?? connection.apiVersion;
+      const response = await this.get({ ...connection, apiVersion: requestedVersion }, `inventory_levels.json?${query}`);
       const responseVersion: string = response.headers.get("X-Shopify-API-Version") ?? servedVersion ?? connection.apiVersion;
       if (!apiVersionPattern.test(responseVersion) || (servedVersion !== null && responseVersion !== servedVersion)) {
         throw new ChannelIdentityError("SHOPIFY_INVENTORY_PAGINATION_INVALID", "Shopify changed or returned an invalid API version during inventory pagination");
@@ -109,10 +110,15 @@ export class ShopifyIdentityReader {
       let nextUrl: URL | null = null;
       try { nextUrl = href ? new URL(href) : null; } catch { /* Invalid URL classified below. */ }
       cursor = nextUrl?.searchParams.get("page_info") ?? null;
+      // Shopify can retain the request version in Link when serving a newer one.
+      // Accept either exact resource path, but only carry the cursor forward;
+      // the next request is still constructed locally using the pinned served version.
+      const hasExpectedPath = nextUrl?.pathname === `/admin/api/${requestedVersion}/inventory_levels.json`
+        || nextUrl?.pathname === `/admin/api/${servedVersion}/inventory_levels.json`;
       if (!cursor || cursors.has(cursor) || nextUrl?.hostname !== connection.shopDomain.toLowerCase()
         || nextUrl?.protocol !== "https:" || nextUrl?.port || nextUrl?.username || nextUrl?.password
         || nextUrl?.hash || nextUrl?.searchParams.getAll("page_info").length !== 1
-        || nextUrl?.pathname !== `/admin/api/${servedVersion}/inventory_levels.json`) {
+        || !hasExpectedPath) {
         throw new ChannelIdentityError("SHOPIFY_INVENTORY_PAGINATION_INVALID", "Inventory pagination is incomplete, repeated, or outside the selected store");
       }
       cursors.add(cursor);
