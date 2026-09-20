@@ -40,6 +40,8 @@ import { InventoryPublicationTargetResumeService } from "../../application/inven
 import { PostgresInventoryPublicationTargetResumeStore } from "../../infrastructure/inventory-publication-target-resume.repository";
 import { InventoryPublicationTargetHoldService } from "../../application/inventory-publication-target-hold.service";
 import { PostgresInventoryPublicationTargetHoldStore } from "../../infrastructure/inventory-publication-target-hold.repository";
+import { ChannelPublicationStatusService } from "../../application/inventory-channel-publication-status.service";
+import { PostgresChannelPublicationStatusReader } from "../../infrastructure/inventory-channel-publication-status.repository";
 
 const positiveId = z.coerce.number().int().positive().max(2_147_483_647);
 type ChannelExposureService = Pick<
@@ -56,6 +58,7 @@ export interface InventoryChannelExposureRouteDependencies {
   targetResumeService?: Pick<InventoryPublicationTargetResumeService, "review" | "resume">;
   targetHoldService?: Pick<InventoryPublicationTargetHoldService, "hold" | "release">;
   dropshipChannel?: DropshipDestinationChannelResolver;
+  publicationStatusService?: Pick<ChannelPublicationStatusService, "read">;
 }
 
 export function registerInventoryChannelExposureRoutes(
@@ -75,6 +78,24 @@ export function registerInventoryChannelExposureRoutes(
     ?? new InventoryPublicationTargetResumeService(new PostgresInventoryPublicationTargetResumeStore());
   const targetHoldService = dependencies.targetHoldService
     ?? new InventoryPublicationTargetHoldService(new PostgresInventoryPublicationTargetHoldStore());
+  const publicationStatusService = dependencies.publicationStatusService
+    ?? new ChannelPublicationStatusService(new PostgresChannelPublicationStatusReader(pool));
+
+  app.get(
+    "/api/inventory-planning/admin/channel-exposure/publication-status",
+    requirePermission("inventory_planning", "view"),
+    async (req, res) => {
+      res.setHeader("Cache-Control", "no-store");
+      try {
+        return res.json(await publicationStatusService.read({
+          publicationTargetId: parseId(req.query.publicationTargetId, "publication target"),
+          productId: parseId(req.query.productId, "product"),
+        }));
+      } catch (error) {
+        return sendError(res, error, "read recorded publication status");
+      }
+    },
+  );
 
   app.get(
     "/api/inventory-planning/admin/channel-exposure",

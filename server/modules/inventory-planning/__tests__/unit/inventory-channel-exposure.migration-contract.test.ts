@@ -94,7 +94,9 @@ describe("inventory channel exposure inactive foundation", () => {
   });
 
   it("gates configuration, preview, stop, and evidence-bound resume with the intended roles", () => {
-    expect(routes.match(/requirePermission\("inventory_planning", "view"\)/g)).toHaveLength(2);
+    // Workspace, quantity preview, and persisted delivery evidence are read-only.
+    expect(routes.match(/requirePermission\("inventory_planning", "view"\)/g)).toHaveLength(3);
+    expect(routes).toMatch(/publication-status"[\s\S]{0,150}?requirePermission\("inventory_planning", "view"\)/);
     // Setup routes (three drafts, single destination registration, and bulk
     // channel destination setup) are edit-gated; everything that can move a
     // target toward publishing stays activate-gated.

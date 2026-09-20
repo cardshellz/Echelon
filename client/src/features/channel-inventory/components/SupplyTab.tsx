@@ -1,12 +1,13 @@
-import { useEffect, useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 
 import { WarehouseInventorySourceSetup } from "@/components/inventory/WarehouseInventorySourceSetup";
 import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 
-import { buildSupplyDraftRequest, describeError, isConflict, saveSupplyDraft } from "../api";
-import { invalidateChannelInventory, useCommandKey } from "../hooks";
+import { buildSupplyDraftRequest, saveSupplyDraft } from "../api";
+import { invalidateChannelInventory } from "../hooks";
+import { useDraftEditor } from "../use-draft-editor";
+import { DraftSaveFeedback } from "./DraftSaveFeedback";
 import {
   describeDestination,
   describeSupply,
@@ -16,7 +17,7 @@ import {
   type View,
 } from "../model";
 import { NodeChecklist } from "./NodeChecklist";
-import { ActivePill, Callout, ConflictAlert, EvidenceNote, NoteField, PendingPill, SectionCard } from "./primitives";
+import { ActivePill, Callout, EvidenceNote, NoteField, PendingPill, SectionCard } from "./primitives";
 
 /** Which warehouses may supply the selected destination. */
 export function SupplyTab({ view, target, canEdit, onAddDestination, onReload, reloading }: {
@@ -61,56 +62,25 @@ function SupplyEditor({ view, target, canEdit, onReload, reloading }: {
 }) {
   const queryClient = useQueryClient();
   const { toast } = useToast();
-  const command = useCommandKey();
   const identity = describeDestination(target, view);
   const head = view.sourceBindingHeads.find((item) => item.publicationTargetId === target.id) ?? null;
   const supply = describeSupply(head);
-  const [selected, setSelected] = useState<number[]>(supply.savedNodeIds);
-  const [note, setNote] = useState("");
-  const [conflict, setConflict] = useState<string | null>(null);
   const savedFingerprint = `${head?.revision ?? "0"}:${head?.draftBinding?.definitionHash ?? ""}:${head?.activeBinding?.definitionHash ?? ""}`;
-
-  // A fresh server revision (own save, reload, or another operator) resets the
-  // working set to what is actually saved.
-  useEffect(() => {
-    setSelected(supply.savedNodeIds);
-    setConflict(null);
-    command.clear();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [savedFingerprint]);
-
-  const save = useMutation({
-    mutationFn: () => {
-      const request = buildSupplyDraftRequest({
-        publicationTargetId: target.id,
-        fulfillmentNodeIds: selected,
-        head,
-        note,
-        idempotencyKey: command.keyFor(JSON.stringify({ target: target.id, selected: [...selected].sort(), note, savedFingerprint })),
-      });
-      return saveSupplyDraft(request);
-    },
-    onSuccess: async () => {
-      command.clear();
-      setNote("");
-      setConflict(null);
+  const editor = useDraftEditor({
+    value: { selected: supply.savedNodeIds, note: "" }, baseline: head, fingerprint: savedFingerprint,
+    equal: (left, right) => sameIdSet(left.selected, right.selected) && left.note === right.note,
+    build: (value, baseline, idempotencyKey) => buildSupplyDraftRequest({ publicationTargetId: target.id,
+      fulfillmentNodeIds: value.selected, head: baseline, note: value.note, idempotencyKey }),
+    send: saveSupplyDraft,
+    onSaved: async () => {
       await invalidateChannelInventory(queryClient);
       toast({
         title: `Supply saved for ${identity.title}`,
         description: "Takes effect when this configuration is activated. Nothing was sent to the provider.",
       });
     },
-    onError: (error) => {
-      const described = describeError(error);
-      if (isConflict(error)) {
-        setConflict(described.message);
-        return;
-      }
-      toast({ title: described.title, description: described.message, variant: "destructive" });
-    },
   });
-
-  const changed = !sameIdSet(selected, supply.savedNodeIds);
+  const { selected, note } = editor.value;
   const nodes = view.fulfillmentNodes;
 
   return (
@@ -132,7 +102,7 @@ function SupplyEditor({ view, target, canEdit, onReload, reloading }: {
             any quantity. There is no fallback to every warehouse.
           </Callout>
         )}
-        {conflict && <ConflictAlert message={conflict} onReload={onReload} reloading={reloading} />}
+        <DraftSaveFeedback {...editor} onReload={() => { editor.reset(); onReload(); }} reloading={reloading} />
         {nodes.length === 0 ? (
           <Callout title="No warehouses are prepared as supply sources yet">
             Prepare an existing warehouse below to make it selectable.
@@ -143,23 +113,23 @@ function SupplyEditor({ view, target, canEdit, onReload, reloading }: {
             nodes={nodes}
             selectedIds={selected}
             activeIds={supply.activeNodeIds}
-            disabled={!canEdit || save.isPending}
-            onToggle={(nodeId, checked) => setSelected((current) => checked
-              ? [...new Set([...current, nodeId])]
-              : current.filter((id) => id !== nodeId))}
+            disabled={!canEdit || editor.locked || reloading}
+            onToggle={(nodeId, checked) => editor.setValue(current => ({ ...current, selected: checked
+              ? [...new Set([...current.selected, nodeId])]
+              : current.selected.filter((id) => id !== nodeId) }))}
           />
         )}
         {canEdit && (
           <div className="flex flex-col gap-3 border-t pt-4 sm:flex-row sm:items-end sm:justify-between">
-            <NoteField id={`supply-note-${target.id}`} value={note} onChange={setNote} disabled={save.isPending} />
+            <NoteField id={`supply-note-${target.id}`} value={note} onChange={note => editor.setValue(current => ({ ...current, note }))} disabled={editor.locked} />
             <div className="flex items-center gap-3">
-              {changed && !save.isPending && <span className="text-xs text-muted-foreground">Unsaved changes</span>}
+              {editor.dirty && !editor.pending && <span className="text-xs text-muted-foreground">Unsaved changes</span>}
               <Button
                 type="button"
-                disabled={!changed || selected.length === 0 || save.isPending}
-                onClick={() => save.mutate()}
+                disabled={editor.pending || (!editor.uncertain && (!editor.dirty || editor.conflict || selected.length === 0 || reloading))}
+                onClick={() => void editor.save()}
               >
-                {save.isPending ? "Saving…" : "Save supply"}
+                {editor.pending ? "Saving…" : editor.uncertain ? "Retry same save" : "Save supply"}
               </Button>
             </div>
           </div>

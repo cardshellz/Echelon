@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import type { ChannelExposurePolicyScope } from "@shared/types/inventory-channel-exposure";
 
 import { Button } from "@/components/ui/button";
@@ -15,11 +15,13 @@ import {
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { useToast } from "@/hooks/use-toast";
 
-import { buildPolicyDraftRequest, describeError, isConflict, savePolicyDraft } from "../api";
+import { buildPolicyDraftRequest, savePolicyDraft } from "../api";
 import { describePackUnit } from "../format";
-import { invalidateChannelInventory, useCommandKey } from "../hooks";
+import { invalidateChannelInventory } from "../hooks";
+import { useDraftEditor } from "../use-draft-editor";
+import { useDraftNavigation } from "../DraftNavigation";
+import { DraftSaveFeedback } from "./DraftSaveFeedback";
 import {
-  EMPTY_POLICY_FORM,
   findPolicyHead,
   policyFormToValue,
   policyValueToForm,
@@ -29,13 +31,12 @@ import {
   savedPolicy,
   sellableVariants,
   type Channel,
-  type PolicyForm,
   type PolicyFormError,
   type View,
 } from "../model";
 import { PolicyFields } from "./PolicyFields";
 import { ProductPicker } from "./ProductPicker";
-import { ActivePill, Callout, ConflictAlert, EvidenceNote, FormValidationStop, NoteField, PendingPill } from "./primitives";
+import { ActivePill, Callout, EvidenceNote, NoteField, PendingPill } from "./primitives";
 
 export interface ExceptionSubject {
   productId: number;
@@ -62,6 +63,7 @@ export function ExceptionSheet({ open, onOpenChange, view, channel, subject, can
 }) {
   const [productId, setProductId] = useState<number | null>(subject?.productId ?? null);
   const [variantId, setVariantId] = useState<number | null>(subject?.productVariantId ?? null);
+  const navigate = useDraftNavigation();
 
   // SKU lists live on the focused product; focusing here keeps one product in
   // focus across the Selling rules and Quantities tabs.
@@ -79,7 +81,7 @@ export function ExceptionSheet({ open, onOpenChange, view, channel, subject, can
       : { scopeType: "variant", channelId: channel.id, productId, productVariantId: variantId };
 
   return (
-    <Sheet open={open} onOpenChange={onOpenChange}>
+    <Sheet open={open} onOpenChange={next => navigate(() => onOpenChange(next))}>
       <SheetContent className="flex w-full flex-col gap-0 overflow-y-auto p-0 sm:max-w-2xl">
         <SheetHeader className="border-b px-6 py-4 text-left">
           <SheetTitle>{subject ? "Exception" : "New exception"} on {channel.name}</SheetTitle>
@@ -96,7 +98,7 @@ export function ExceptionSheet({ open, onOpenChange, view, channel, subject, can
                 id="exception-product"
                 products={view.products}
                 value={productId}
-                onChange={(id) => { setProductId(id); setVariantId(null); }}
+                onChange={(id) => navigate(() => { setProductId(id); setVariantId(null); })}
               />
             </div>
           )}
@@ -107,7 +109,7 @@ export function ExceptionSheet({ open, onOpenChange, view, channel, subject, can
                 <ScopeChoice
                   variants={variants}
                   value={variantId}
-                  onChange={setVariantId}
+                  onChange={id => navigate(() => setVariantId(id))}
                   locked={subject !== null}
                 />
               ) : (
@@ -190,43 +192,32 @@ function RuleEditor({ view, channel, scope, unitNoun, canEdit, onSaved, onReload
 }) {
   const queryClient = useQueryClient();
   const { toast } = useToast();
-  const command = useCommandKey();
   const head = findPolicyHead(view.policyHeads, scope);
   const saved = savedPolicy(head);
   const savedForm = useMemo(() => policyValueToForm(saved?.value ?? null), [saved?.value]);
   const inherited = useMemo(() => resolveSavedFields(view.policyHeads, scope), [view.policyHeads, scope]);
-  const [form, setForm] = useState<PolicyForm>(savedForm);
   const [errors, setErrors] = useState<PolicyFormError[]>([]);
-  const [note, setNote] = useState("");
-  const [conflict, setConflict] = useState<string | null>(null);
   const fingerprint = `${head?.revision ?? "0"}:${head?.draftPolicy?.definitionHash ?? ""}:${head?.activePolicy?.definitionHash ?? ""}`;
-
-  useEffect(() => {
-    setForm(savedForm);
-    setErrors([]);
-    setConflict(null);
-    command.clear();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fingerprint]);
-
-  const save = useMutation({
-    mutationFn: () => {
-      const parsed = policyFormToValue(form);
+  const editor = useDraftEditor({
+    value: { form: savedForm, note: "" }, baseline: head, fingerprint,
+    equal: (left, right) => samePolicyForm(left.form, right.form) && left.note === right.note,
+    build: (value, baseline, idempotencyKey) => {
+      const parsed = policyFormToValue(value.form);
       if (!parsed.ok) {
         setErrors(parsed.errors);
-        return Promise.reject(new FormValidationStop());
+        throw new Error("Check the highlighted exception fields.");
       }
       setErrors([]);
-      return savePolicyDraft(buildPolicyDraftRequest({
+      return buildPolicyDraftRequest({
         scope,
         value: parsed.value,
-        head,
-        note,
-        idempotencyKey: command.keyFor(JSON.stringify({ scope, value: parsed.value, note, fingerprint })),
-      }));
+        head: baseline,
+        note: value.note,
+        idempotencyKey,
+      });
     },
-    onSuccess: async () => {
-      command.clear();
+    send: savePolicyDraft,
+    onSaved: async () => {
       await invalidateChannelInventory(queryClient);
       toast({
         title: "Exception saved",
@@ -234,15 +225,8 @@ function RuleEditor({ view, channel, scope, unitNoun, canEdit, onSaved, onReload
       });
       onSaved();
     },
-    onError: (error) => {
-      if (error instanceof FormValidationStop) return;
-      const described = describeError(error);
-      if (isConflict(error)) { setConflict(described.message); return; }
-      toast({ title: described.title, description: described.message, variant: "destructive" });
-    },
   });
-
-  const changed = !samePolicyForm(form, savedForm);
+  const { form, note } = editor.value;
   const formError = errors.find((error) => error.field === "form")?.message ?? null;
 
   return (
@@ -252,15 +236,15 @@ function RuleEditor({ view, channel, scope, unitNoun, canEdit, onSaved, onReload
         {head?.draftPolicy && <PendingPill>Saved draft v{head.draftPolicy.version}, pending activation</PendingPill>}
         {!saved && <span>No rule saved yet for this item on {channel.name}.</span>}
       </div>
-      {conflict && <ConflictAlert message={conflict} onReload={onReload} reloading={reloading} />}
+      <DraftSaveFeedback {...editor} onReload={() => { editor.reset(); setErrors([]); onReload(); }} reloading={reloading} />
       <PolicyFields
         idPrefix={`exception-${scopeKey(scope)}`}
         form={form}
-        onChange={(patch) => setForm((current) => ({ ...current, ...patch }))}
+        onChange={(patch) => editor.setValue(current => ({ ...current, form: { ...current.form, ...patch } }))}
         scopeType={scope.scopeType}
         inherited={inherited}
         errors={errors}
-        disabled={!canEdit || save.isPending}
+        disabled={!canEdit || editor.locked || reloading}
         unitNoun={unitNoun}
       />
       {formError && <Callout tone="warning">{formError}</Callout>}
@@ -270,9 +254,9 @@ function RuleEditor({ view, channel, scope, unitNoun, canEdit, onSaved, onReload
       </EvidenceNote>
       {canEdit && (
         <SheetFooter className="flex-col gap-3 border-t pt-4 sm:flex-row sm:items-end sm:justify-between">
-          <NoteField id={`exception-note-${scopeKey(scope)}`} value={note} onChange={setNote} disabled={save.isPending} />
-          <Button type="button" disabled={!changed || save.isPending} onClick={() => save.mutate()}>
-            {save.isPending ? "Saving…" : "Save exception"}
+          <NoteField id={`exception-note-${scopeKey(scope)}`} value={note} onChange={note => editor.setValue(current => ({ ...current, note }))} disabled={editor.locked} />
+          <Button type="button" disabled={editor.pending || (!editor.uncertain && (!editor.dirty || editor.conflict || reloading))} onClick={() => void editor.save()}>
+            {editor.pending ? "Saving…" : editor.uncertain ? "Retry same save" : "Save exception"}
           </Button>
         </SheetFooter>
       )}
