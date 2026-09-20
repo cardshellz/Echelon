@@ -25,6 +25,7 @@ const activeCandidate: DropshipCatalogVariantCandidate = {
   category: "Supplies",
   productIsActive: true,
   variantIsActive: true,
+  variantUomType: "pack",
 };
 
 describe("dropship catalog exposure domain", () => {

@@ -127,6 +127,75 @@ describe("DropshipWalletPolicyService", () => {
     });
   });
 
+  describe("resolveListingTierMinimums", () => {
+    const day = 24 * 60 * 60 * 1000;
+
+    it("enforces a raise only after the grace period of the version that raised it", async () => {
+      const seeded = makePolicy(fallbackLimits, {
+        policyId: 1, version: 1, isActive: false, createdAt: new Date(now.getTime() - 10 * day),
+        createdBy: { actorType: "system", actorId: null }, deactivatedAt: new Date(now.getTime() - 2 * day),
+      });
+      const raised = makePolicy(
+        { ...publishedLimits, autoReloadMinTriggerCents: 15_000, caseTierMinimumCents: 75_000, tierChangeGraceDays: 14 },
+        { policyId: 2, version: 2, createdAt: new Date(now.getTime() - 2 * day) },
+      );
+      repository.activePolicy = raised;
+      repository.versions = [raised, seeded];
+
+      const minimums = await service.resolveListingTierMinimums(now);
+
+      expect(minimums.pack).toEqual({
+        tier: "pack", minimumCents: fallbackLimits.autoReloadMinTriggerCents, version: 1,
+        upcoming: { minimumCents: 15_000, version: 2, enforcesAt: new Date(now.getTime() + 12 * day) },
+      });
+      expect(minimums.case).toEqual({
+        tier: "case", minimumCents: fallbackLimits.caseTierMinimumCents, version: 1,
+        upcoming: { minimumCents: 75_000, version: 2, enforcesAt: new Date(now.getTime() + 12 * day) },
+      });
+      const later = await service.resolveListingTierMinimums(new Date(now.getTime() + 12 * day));
+      expect(later.pack).toEqual({ tier: "pack", minimumCents: 15_000, version: 2, upcoming: null });
+      expect(later.case).toEqual({ tier: "case", minimumCents: 75_000, version: 2, upcoming: null });
+    });
+
+    it("uses the clock when none is given and the published values with nothing in grace", async () => {
+      repository.activePolicy = makePolicy(publishedLimits);
+
+      const minimums = await service.resolveListingTierMinimums();
+
+      expect(minimums.pack).toEqual({ tier: "pack", minimumCents: publishedLimits.autoReloadMinTriggerCents, version: 3, upcoming: null });
+      expect(minimums.case).toEqual({ tier: "case", minimumCents: publishedLimits.caseTierMinimumCents, version: 3, upcoming: null });
+    });
+
+    it("treats the environment fallback as a version enforced from the start, at WARN when the table is missing", async () => {
+      repository.getActiveError = new DropshipError(
+        "DROPSHIP_WALLET_POLICY_TABLE_MISSING",
+        "Dropship wallet policy table does not exist yet.",
+        { classification: "transient" },
+      );
+
+      const minimums = await service.resolveListingTierMinimums(now);
+
+      expect(minimums.pack).toEqual({ tier: "pack", minimumCents: fallbackLimits.autoReloadMinTriggerCents, version: 1, upcoming: null });
+      expect(minimums.case).toEqual({ tier: "case", minimumCents: fallbackLimits.caseTierMinimumCents, version: 1, upcoming: null });
+      expect(logs).toEqual([expect.objectContaining({ level: "warn", code: "DROPSHIP_WALLET_POLICY_ENV_FALLBACK" })]);
+
+      repository.getActiveError = null;
+      repository.activePolicy = null;
+      repository.versions = [];
+      const empty = await service.resolveListingTierMinimums(now);
+      expect(empty.pack.minimumCents).toBe(fallbackLimits.autoReloadMinTriggerCents);
+    });
+
+    it("propagates every other history read failure", async () => {
+      repository.getActiveError = new DropshipError(
+        "DROPSHIP_WALLET_POLICY_INVALID_STORED_VALUE",
+        "Stored wallet policy money is not a positive integer number of cents.",
+        { classification: "fatal" },
+      );
+      await expect(service.resolveListingTierMinimums(now)).rejects.toMatchObject({ code: "DROPSHIP_WALLET_POLICY_INVALID_STORED_VALUE" });
+    });
+  });
+
   describe("getOverview", () => {
     it("serves the policy, the fallback values it overrides, the read-only fee and the impact", async () => {
       repository.activePolicy = makePolicy(publishedLimits);
@@ -159,6 +228,12 @@ describe("DropshipWalletPolicyService", () => {
         activeVendorsWithAutoReloadSettings: 31,
         evaluatedAt: now,
       });
+      // The staff screen sees what the tiers enforce today; a lone version has nothing in grace.
+      expect(overview.listingTierEnforcement).toEqual({
+        pack: { tier: "pack", minimumCents: publishedLimits.autoReloadMinTriggerCents, version: 3, upcoming: null },
+        case: { tier: "case", minimumCents: publishedLimits.caseTierMinimumCents, version: 3, upcoming: null },
+      });
+      expect(overview.generatedAt).toEqual(now);
     });
 
     it("reports the environment as the source when nothing is published", async () => {
@@ -607,6 +682,8 @@ function makeProfile(overrides: Partial<DropshipVendorCreditProfile> = {}): Drop
 
 class FakeWalletPolicyRepository implements DropshipWalletPolicyRepository {
   activePolicy: DropshipWalletPolicyRecord | null = null;
+  /** The version history; defaults to the active policy alone. */
+  versions: DropshipWalletPolicyRecord[] | null = null;
   getActiveError: unknown = null;
   replay = false;
   created: CreateDropshipWalletPolicyVersionRepositoryInput[] = [];
@@ -620,6 +697,12 @@ class FakeWalletPolicyRepository implements DropshipWalletPolicyRepository {
   async getActivePolicy(): Promise<DropshipWalletPolicyRecord | null> {
     if (this.getActiveError) throw this.getActiveError;
     return this.activePolicy;
+  }
+
+  async listPolicyVersions(): Promise<DropshipWalletPolicyRecord[]> {
+    if (this.getActiveError) throw this.getActiveError;
+    if (this.versions) return this.versions;
+    return this.activePolicy ? [this.activePolicy] : [];
   }
 
   async createPolicyVersion(

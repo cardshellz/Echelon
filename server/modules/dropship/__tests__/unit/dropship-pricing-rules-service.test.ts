@@ -22,7 +22,7 @@ describe("store pricing review and approval", () => {
   beforeEach(() => {
     candidates = Array.from({ length: 1000 }, (_, index) => ({ productId: 7, productVariantId: index + 1,
       productName: "Mailers", variantName: `Pack ${index + 1}`, title: `Mailer ${index + 1}`, sku: `SKU-${index + 1}`,
-      productLineIds: [2], category: "Mailers", productIsActive: true, variantIsActive: true,
+      productLineIds: [2], category: "Mailers", productIsActive: true, variantIsActive: true, variantUomType: "pack",
       defaultRetailPriceCents: 899, unitsPerVariant: 50 } as DropshipListingCatalogCandidate));
     state = { profile: null, revisionId: null, updatedAt: null }; stored = null; settings = []; currentCost = cost;
     const catalog = {

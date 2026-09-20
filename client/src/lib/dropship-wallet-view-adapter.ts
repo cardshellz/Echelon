@@ -115,6 +115,32 @@ export interface WalletLimits {
   tierChangeGraceDays: number;
 }
 
+export type WalletListingTier = "pack" | "case";
+export type WalletListingTierBlockReason = "pack_tier_minimum_not_kept" | "case_tier_balance_below_minimum";
+
+/** One tier as the server decided it: on sale or not, the minimum enforced now, and a raise still in grace. */
+export interface WalletListingTierStatus {
+  tier: WalletListingTier;
+  eligible: boolean;
+  reason: WalletListingTierBlockReason | null;
+  minimumCents: number;
+  /** How far the vendor is from the gate as things stand; zero when on sale. */
+  shortfallCents: number;
+  upcoming: {
+    minimumCents: number;
+    policyVersion: number;
+    /** ISO timestamp: when the raised minimum starts being enforced. */
+    enforcesAt: string;
+    affectsVendor: boolean;
+  } | null;
+}
+
+export interface WalletListingTiers {
+  pack: WalletListingTierStatus;
+  case: WalletListingTierStatus;
+  generatedAt: string;
+}
+
 export interface WalletSetupStatus {
   sourceReady: boolean;
   backupReady: boolean;
@@ -132,7 +158,8 @@ export type WalletClientFallback =
   | "roles_derived"
   | "limits_from_documented_defaults"
   | "ledger_reason_derived"
-  | "setup_status_derived";
+  | "setup_status_derived"
+  | "listing_tiers_not_served";
 
 export interface DropshipWalletView {
   account: { availableBalanceCents: number; pendingBalanceCents: number; currency: string; status: string };
@@ -143,6 +170,8 @@ export interface DropshipWalletView {
   usdcBaseDepositAddress: string | null;
   limits: WalletLimits;
   setupStatus: WalletSetupStatus;
+  /** Which listing tiers are on sale, as the server decided; null when a server one release behind did not serve them. */
+  listingTiers: WalletListingTiers | null;
   /** Which parts of this view the client derived because the server did not serve them. Empty once the server serves the full DTO. */
   clientFallbacks: WalletClientFallback[];
 }
@@ -243,6 +272,26 @@ const rawLimitsSchema = z.object({
   tierChangeGraceDays: z.number().int().nonnegative().optional(),
 });
 
+const rawListingTierStatusSchema = z.object({
+  tier: z.enum(["pack", "case"]),
+  eligible: z.boolean(),
+  reason: z.enum(["pack_tier_minimum_not_kept", "case_tier_balance_below_minimum"]).nullable(),
+  minimumCents: cents,
+  shortfallCents: cents,
+  upcoming: z.object({
+    minimumCents: cents,
+    policyVersion: z.number().int().positive(),
+    enforcesAt: isoString,
+    affectsVendor: z.boolean(),
+  }).nullable(),
+});
+
+const rawListingTiersSchema = z.object({
+  pack: rawListingTierStatusSchema,
+  case: rawListingTierStatusSchema,
+  generatedAt: isoString,
+});
+
 const rawSetupStatusSchema = z.object({
   sourceReady: z.boolean(),
   backupReady: z.boolean(),
@@ -266,6 +315,7 @@ export const rawWalletResponseSchema = z.object({
     usdcBaseDepositAddress: z.string().nullable(),
     limits: rawLimitsSchema.optional(),
     setupStatus: rawSetupStatusSchema.optional(),
+    listingTiers: rawListingTiersSchema.optional(),
   }).passthrough(),
 });
 
@@ -568,6 +618,11 @@ export function adaptWalletView(raw: unknown): DropshipWalletView {
   const setupStatus = wallet.setupStatus ?? deriveSetupStatus({ autoReload, fundingMethods, cardFundingFeeBps: wallet.cardFundingFeeBps });
   if (!wallet.setupStatus) fallbacks.add("setup_status_derived");
 
+  // The tiers are a server decision (policy history plus wallet facts); the
+  // client never derives them. A server without them leaves the section out.
+  const listingTiers: WalletListingTiers | null = wallet.listingTiers ?? null;
+  if (!wallet.listingTiers) fallbacks.add("listing_tiers_not_served");
+
   return {
     account: {
       availableBalanceCents: wallet.account.availableBalanceCents,
@@ -582,6 +637,7 @@ export function adaptWalletView(raw: unknown): DropshipWalletView {
     usdcBaseDepositAddress: wallet.usdcBaseDepositAddress,
     limits,
     setupStatus,
+    listingTiers,
     clientFallbacks: [...fallbacks],
   };
 }

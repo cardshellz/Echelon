@@ -17,7 +17,7 @@ const productCost: DropshipProductCost = { status: "available", unitCostCents: 8
   planId: "ops-plan", source: "variant_fixed_price", overrideId: "override-1", issue: null };
 
 const candidate: DropshipListingCatalogCandidate = {
-  productId: 5, productVariantId: 7, productLineIds: [], productIsActive: true, variantIsActive: true,
+  productId: 5, productVariantId: 7, productLineIds: [], productIsActive: true, variantIsActive: true, variantUomType: "pack",
   sku: "PACK-25", productName: "Card protectors", variantName: "25 pack", title: "Card protectors 25 pack",
   description: "<p>Protect <strong>25 cards</strong>.</p>", category: "Protectors", ebayBrowseCategoryId: "183438",
   ebayBrowseCategoryName: "Card Toploaders", brand: "Card Shellz", gtin: "123456789012", mpn: "PACK-25",

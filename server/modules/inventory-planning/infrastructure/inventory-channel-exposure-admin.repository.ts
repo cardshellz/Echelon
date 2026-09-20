@@ -1172,6 +1172,19 @@ implements InventoryChannelExposureAdminStore {
                  CASE pointer.pointer_type WHEN 'draft' THEN 0 ELSE 1 END
       `));
       const selectedMappings = selectedVariantMappingEvidence(variantMappingRows);
+      // SKU-level holds zero one SKU of the target while the destination hold
+      // (on the target row) zeroes them all; the preview mirrors the runtime.
+      const variantHoldRows = rows(await tx.execute(sql`
+        SELECT hold.product_variant_id, hold.hold_reason, hold.held_at, hold.held_by
+        FROM inventory.inventory_publication_target_variant_holds AS hold
+        WHERE hold.publication_target_id = ${publicationTargetId}
+          AND hold.product_variant_id = ANY(${sqlIntegerArray([...sellableVariantIds])})
+        ORDER BY hold.product_variant_id
+      `));
+      const variantHolds = new Map(variantHoldRows.map((row) => [
+        positiveInteger(row.product_variant_id, "variantHold.variantId"),
+        publicationHold(row),
+      ]));
       const selectedModelRows = rows(await tx.execute(sql`
         SELECT model.id AS model_id, model.version, model.definition_hash
         FROM inventory.transformation_model_heads AS head
@@ -1260,6 +1273,7 @@ implements InventoryChannelExposureAdminStore {
             policies: policyCandidates,
           });
           const mapping = selectedMappings.get(productVariantId) ?? null;
+          const hold = publicationHold(target) ?? variantHolds.get(productVariantId) ?? null;
           const sourceWarehouseBreakdown = sourceBindingId === null ? [] : results
             .filter((row) => row.warehouseId !== null && warehouseIds.includes(row.warehouseId))
             .map((row) => ({
@@ -1290,6 +1304,7 @@ implements InventoryChannelExposureAdminStore {
               sourceWarehouseBreakdown,
               policy: null,
               mapping,
+              hold,
             }];
           }
           if (resolution.policy.eligible && mapping === null) {
@@ -1301,7 +1316,7 @@ implements InventoryChannelExposureAdminStore {
           }
           const calculation = applyPublicationHold(
             calculateChannelExposure(canonicalAtp, resolution.policy),
-            publicationHold(target),
+            hold,
           );
           return [{
             productVariantId,
@@ -1315,6 +1330,7 @@ implements InventoryChannelExposureAdminStore {
             sourceWarehouseBreakdown,
             policy: resolution.policy,
             mapping,
+            hold,
           }];
         });
       return inventoryChannelExposurePreviewSchema.parse({

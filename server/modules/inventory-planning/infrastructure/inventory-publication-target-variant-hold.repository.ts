@@ -1,19 +1,22 @@
 import type { Pool, PoolClient } from "pg";
 
 import {
-  inventoryPublicationTargetHoldResultSchema,
-  type InventoryPublicationTargetHoldDestination,
-  type InventoryPublicationTargetHoldResult,
+  inventoryPublicationTargetVariantHoldResultSchema,
+  type InventoryPublicationTargetVariantHoldResult,
 } from "@shared/types/inventory-channel-exposure";
 
 import { pool } from "../../../db";
 import type {
-  InventoryPublicationTargetHoldCommand,
-  InventoryPublicationTargetHoldStore,
-} from "../application/inventory-publication-target-hold.service";
+  InventoryPublicationTargetVariantHoldCommand,
+  InventoryPublicationTargetVariantHoldStore,
+} from "../application/inventory-publication-target-variant-hold.service";
 import { InventoryAvailabilityRuntimePublicationError } from "../application/inventory-availability-runtime-publication.service";
 import { InventoryAvailabilityMasterDataError } from "../domain/inventory-availability-master-data.contracts";
 import { createTransactionScopedInventoryPublicationService } from "./inventory-availability-runtime-publication.repository";
+import {
+  loadLiveTargets,
+  type PublicationTargetHoldTargetRow,
+} from "./inventory-publication-target-hold.repository";
 import {
   loadPublicationTargetScopes,
   PUBLICATION_TARGET_SCOPE_LOCK_SEED,
@@ -21,32 +24,26 @@ import {
 import { quantityPublicationScopeLockKey } from "./quantity-publication-admission.repository";
 
 /**
- * Applies a hold or a release to every live Echelon target of one destination
- * and republishes the affected products in the same transaction, so the
- * marketplace sees the zeros (or the restored quantities) as soon as the
- * outbox drains. Mirrors the target-stop store: idempotency receipts in
- * `public.idempotency_keys`, session advisory locks on every exact provider
- * scope so an in-flight quantity request is never raced, an audit row per
- * changed target, and a SERIALIZABLE transaction because the transaction-
- * scoped publisher demands one.
+ * Applies a SKU-level hold or release to every live Echelon target of one
+ * destination and republishes the affected products in the same transaction,
+ * so the marketplace sees the zeros (or the restored quantities) as soon as
+ * the outbox drains. Mirrors the destination hold store: idempotency receipts
+ * in `public.idempotency_keys`, session advisory locks on every exact provider
+ * scope of a target about to change so an in-flight quantity request is never
+ * raced, a revision bump and an audit row per changed target, and a
+ * SERIALIZABLE transaction because the transaction-scoped publisher demands
+ * one.
+ *
+ * A SKU already in the requested state is left alone and reported as
+ * unchanged; a hold on a SKU the target has no mapping for is still recorded,
+ * so a listing created later publishes zero from its first plan.
  */
 
-const RECEIPT_PREFIX = "inventory-publication-target:";
-const PRODUCT_SAVEPOINT = "publication_target_hold_product";
+const RECEIPT_PREFIX = "inventory-publication-target-variant:";
+const PRODUCT_SAVEPOINT = "publication_target_variant_hold_product";
 
-/** A live target of the destination, as both hold stores lock and read it. */
-export interface PublicationTargetHoldTargetRow {
-  id: number;
-  state: string;
-  revision: string;
-  channel_id: number;
-  destination_kind: string;
-  channel_connection_id: number | null;
-  dropship_store_connection_id: number | null;
-  provider_key: string | null;
-  provider_scope_type: string;
-  external_scope_id: string;
-  hold_reason: string | null;
+interface HeldVariantRow {
+  product_variant_id: number;
 }
 
 interface RepublishOutcome {
@@ -54,14 +51,25 @@ interface RepublishOutcome {
   blockedProductIds: number[];
 }
 
-export class PostgresInventoryPublicationTargetHoldStore implements InventoryPublicationTargetHoldStore {
+interface TargetPlan {
+  target: PublicationTargetHoldTargetRow;
+  /** The named SKUs this target currently holds, before the command. */
+  heldBefore: number[];
+  /** The named SKUs whose hold state the command changes on this target. */
+  changing: number[];
+}
+
+export class PostgresInventoryPublicationTargetVariantHoldStore
+implements InventoryPublicationTargetVariantHoldStore {
   constructor(private readonly connectionPool: Pick<Pool, "connect"> = pool) {}
 
-  async apply(command: InventoryPublicationTargetHoldCommand): Promise<InventoryPublicationTargetHoldResult> {
+  async apply(
+    command: InventoryPublicationTargetVariantHoldCommand,
+  ): Promise<InventoryPublicationTargetVariantHoldResult> {
     const client = await this.connectionPool.connect();
     const scopeKeys: string[] = [];
     let inTransaction = false;
-    let result: InventoryPublicationTargetHoldResult | undefined;
+    let result: InventoryPublicationTargetVariantHoldResult | undefined;
     let workError: unknown;
     let discard: Error | undefined;
     try {
@@ -76,14 +84,23 @@ export class PostgresInventoryPublicationTargetHoldStore implements InventoryPub
         await client.query("COMMIT");
         inTransaction = false;
       } else {
-        const targets = await loadLiveTargets(client, command.destination);
         const wantsHold = command.command === "hold";
-        const changing = targets.filter((target) => (target.hold_reason === null) === wantsHold);
+        const targets = await loadLiveTargets(client, command.destination);
+        const plans: TargetPlan[] = [];
+        for (const target of targets) {
+          const heldBefore = await loadHeldVariantIds(client, target.id, command.productVariantIds);
+          const held = new Set(heldBefore);
+          plans.push({
+            target,
+            heldBefore,
+            changing: command.productVariantIds.filter((productVariantId) => held.has(productVariantId) !== wantsHold),
+          });
+        }
 
         // Lock every exact provider scope of a target that is about to change
         // what it publishes; a quantity request already in flight wins.
-        for (const target of changing) {
-          const scopes = await loadPublicationTargetScopes(client, target);
+        for (const plan of plans.filter((candidate) => candidate.changing.length > 0)) {
+          const scopes = await loadPublicationTargetScopes(client, plan.target);
           for (const scope of scopes.sort((left, right) =>
             quantityPublicationScopeLockKey(left).localeCompare(quantityPublicationScopeLockKey(right)))) {
             const scopeKey = quantityPublicationScopeLockKey(scope);
@@ -109,45 +126,63 @@ export class PostgresInventoryPublicationTargetHoldStore implements InventoryPub
           [receiptKey, command.requestHash, command.occurredAt],
         );
 
-        const targetResults: InventoryPublicationTargetHoldResult["targets"] = [];
-        for (const target of targets) {
-          const changed = changing.includes(target);
-          if (!changed) {
+        const targetResults: InventoryPublicationTargetVariantHoldResult["targets"] = [];
+        for (const plan of plans) {
+          const { target, changing } = plan;
+          if (changing.length === 0) {
             targetResults.push({
               publicationTargetId: target.id,
               revision: target.revision,
-              changed: false,
+              changedProductVariantIds: [],
               publicationRows: 0,
               blockedProductIds: [],
             });
             continue;
           }
+          const written = wantsHold
+            ? await client.query(
+                `INSERT INTO inventory.inventory_publication_target_variant_holds
+                   (publication_target_id, product_variant_id, hold_reason, held_at, held_by)
+                 SELECT $1, product_variant_id, $3, $4, $5
+                 FROM unnest($2::integer[]) AS requested(product_variant_id)
+                 ON CONFLICT (publication_target_id, product_variant_id) DO NOTHING`,
+                [target.id, changing, command.reason, command.occurredAt, command.actorId],
+              )
+            : await client.query(
+                `DELETE FROM inventory.inventory_publication_target_variant_holds
+                 WHERE publication_target_id = $1
+                   AND product_variant_id = ANY($2::integer[])`,
+                [target.id, changing],
+              );
+          if (written.rowCount !== changing.length) {
+            throw holdError(
+              409,
+              "INVENTORY_PUBLICATION_TARGET_VARIANT_HOLD_CONCURRENT_CHANGE",
+              `A concurrent SKU hold change prevented the ${command.command} command. Retry it.`,
+            );
+          }
           const updated = await client.query<{ revision: string }>(
-            wantsHold
-              ? `UPDATE inventory.inventory_publication_targets
-                 SET hold_reason=$3, held_at=$4, held_by=$5, revision=revision+1, updated_at=$4
-                 WHERE id=$1 AND revision=$2::bigint AND state='live' AND hold_reason IS NULL
-                 RETURNING revision::text`
-              : `UPDATE inventory.inventory_publication_targets
-                 SET hold_reason=NULL, held_at=NULL, held_by=NULL, revision=revision+1, updated_at=$4
-                 WHERE id=$1 AND revision=$2::bigint AND state='live' AND hold_reason IS NOT NULL
-                 RETURNING revision::text`,
-            wantsHold
-              ? [target.id, target.revision, command.reason, command.occurredAt, command.actorId]
-              : [target.id, target.revision, null, command.occurredAt],
+            `UPDATE inventory.inventory_publication_targets
+             SET revision=revision+1, updated_at=$3
+             WHERE id=$1 AND revision=$2::bigint AND state='live'
+             RETURNING revision::text`,
+            [target.id, target.revision, command.occurredAt],
           );
           if (updated.rowCount !== 1) {
             throw holdError(
               409,
-              "INVENTORY_PUBLICATION_TARGET_HOLD_CONCURRENT_CHANGE",
+              "INVENTORY_PUBLICATION_TARGET_VARIANT_HOLD_CONCURRENT_CHANGE",
               `A concurrent target change prevented the ${command.command} command. Retry it.`,
             );
           }
-          const republished = await republishTarget(client, target, command);
+          const republished = await republishChangedProducts(client, target, changing, command);
+          const heldAfter = wantsHold
+            ? [...new Set([...plan.heldBefore, ...changing])].sort((a, b) => a - b)
+            : plan.heldBefore.filter((productVariantId) => !changing.includes(productVariantId));
           targetResults.push({
             publicationTargetId: target.id,
             revision: updated.rows[0]!.revision,
-            changed: true,
+            changedProductVariantIds: changing,
             publicationRows: republished.publicationRows,
             blockedProductIds: republished.blockedProductIds,
           });
@@ -159,16 +194,18 @@ export class PostgresInventoryPublicationTargetHoldStore implements InventoryPub
               command.occurredAt,
               command.actorId,
               wantsHold
-                ? "inventory_availability.publication_target.held"
-                : "inventory_availability.publication_target.released",
+                ? "inventory_availability.publication_target.variants_held"
+                : "inventory_availability.publication_target.variants_released",
               `inventory.inventory_publication_target:${target.id}`,
               JSON.stringify({
-                before: { hold: wantsHold ? null : { reason: target.hold_reason }, revision: target.revision },
-                after: { hold: wantsHold ? { reason: command.reason } : null, revision: updated.rows[0]!.revision },
+                before: { heldProductVariantIds: plan.heldBefore, revision: target.revision },
+                after: { heldProductVariantIds: heldAfter, revision: updated.rows[0]!.revision },
               }),
               JSON.stringify({
                 reason: command.reason,
                 destination: command.destination,
+                productVariantIds: command.productVariantIds,
+                changedProductVariantIds: changing,
                 idempotencyKey: command.idempotencyKey,
                 requestHash: command.requestHash,
                 publicationRows: republished.publicationRows,
@@ -178,9 +215,10 @@ export class PostgresInventoryPublicationTargetHoldStore implements InventoryPub
           );
         }
 
-        result = inventoryPublicationTargetHoldResultSchema.parse({
+        result = inventoryPublicationTargetVariantHoldResultSchema.parse({
           destination: command.destination,
           command: command.command,
+          productVariantIds: command.productVariantIds,
           targets: targetResults,
           alreadyApplied: false,
           runtimeAuthorityChanged: false,
@@ -191,7 +229,7 @@ export class PostgresInventoryPublicationTargetHoldStore implements InventoryPub
           `UPDATE public.idempotency_keys
            SET response_body=$2::jsonb
            WHERE key=$1`,
-          [receiptKey, JSON.stringify({ commandType: `inventory_publication_target_${command.command}`, result })],
+          [receiptKey, JSON.stringify({ commandType: `inventory_publication_target_variant_${command.command}`, result })],
         );
         await client.query("COMMIT");
         inTransaction = false;
@@ -224,60 +262,53 @@ export class PostgresInventoryPublicationTargetHoldStore implements InventoryPub
     if (discard) {
       throw holdError(
         503,
-        "INVENTORY_PUBLICATION_TARGET_HOLD_CLEANUP_UNCERTAIN",
+        "INVENTORY_PUBLICATION_TARGET_VARIANT_HOLD_CLEANUP_UNCERTAIN",
         "The command outcome may have committed, but connection cleanup was uncertain. Retry the same idempotency key.",
       );
     }
     if (!result) {
-      throw holdError(500, "INVENTORY_PUBLICATION_TARGET_HOLD_RESULT_MISSING",
-        "The publication-target hold transaction returned no result.");
+      throw holdError(500, "INVENTORY_PUBLICATION_TARGET_VARIANT_HOLD_RESULT_MISSING",
+        "The publication-target SKU hold transaction returned no result.");
     }
     return result;
   }
 }
 
-export async function loadLiveTargets(
+/** The named SKUs this target currently holds, locked for the rest of the command. */
+async function loadHeldVariantIds(
   client: PoolClient,
-  destination: InventoryPublicationTargetHoldDestination,
-): Promise<PublicationTargetHoldTargetRow[]> {
-  return (await client.query<PublicationTargetHoldTargetRow>(
-    `SELECT target.id, target.state, target.revision::text, target.channel_id,
-            target.destination_kind, target.channel_connection_id,
-            target.dropship_store_connection_id,
-            lower(CASE target.destination_kind
-              WHEN 'channel_connection' THEN channel_row.provider
-              WHEN 'dropship_store_connection' THEN dropship_connection.platform
-            END) AS provider_key,
-            target.provider_scope_type, target.external_scope_id, target.hold_reason
-     FROM inventory.inventory_publication_targets AS target
-     JOIN channels.channels AS channel_row ON channel_row.id = target.channel_id
-     LEFT JOIN dropship.dropship_store_connections AS dropship_connection
-       ON dropship_connection.id = target.dropship_store_connection_id
-     WHERE target.state = 'live'
-       AND target.publication_authority = 'echelon'
-       AND target.destination_kind = $1
-       AND COALESCE(target.channel_connection_id, target.dropship_store_connection_id) = $2
-     ORDER BY target.id
-     FOR UPDATE OF target`,
-    [destination.destinationKind, destination.connectionId],
+  publicationTargetId: number,
+  productVariantIds: readonly number[],
+): Promise<number[]> {
+  const rows = (await client.query<HeldVariantRow>(
+    `SELECT product_variant_id
+     FROM inventory.inventory_publication_target_variant_holds
+     WHERE publication_target_id = $1
+       AND product_variant_id = ANY($2::integer[])
+     ORDER BY product_variant_id
+     FOR UPDATE`,
+    [publicationTargetId, productVariantIds],
   )).rows;
+  return rows.map((row) => Number(row.product_variant_id));
 }
 
 /**
- * Republish every mapped, sellable product of the target so the outbox carries
- * the post-command quantities. A product the canonical planner refuses is
- * recorded and skipped under a savepoint rather than failing the command: a
- * hold is a safety action and must land even when one product's evidence is
- * incomplete. While legacy authority owns publication there is nothing to
- * enqueue; the hold is still recorded for the runtime to honor later.
+ * Republish the mapped, sellable products of the SKUs the command changed so
+ * the outbox carries the post-command quantities. A product the canonical
+ * planner refuses is recorded and skipped under a savepoint rather than
+ * failing the command: a hold is a safety action and must land even when one
+ * product's evidence is incomplete. While legacy authority owns publication
+ * there is nothing to enqueue; the hold is still recorded for the runtime to
+ * honor later.
  */
-async function republishTarget(
+async function republishChangedProducts(
   client: PoolClient,
   target: PublicationTargetHoldTargetRow,
-  command: InventoryPublicationTargetHoldCommand,
+  productVariantIds: readonly number[],
+  command: InventoryPublicationTargetVariantHoldCommand,
 ): Promise<RepublishOutcome> {
   const publisher = createTransactionScopedInventoryPublicationService(client, { channelId: target.channel_id });
-  const productIds = await listTargetProductIds(client, target.id);
+  const productIds = await listMappedProductIds(client, target.id, productVariantIds);
   const outcome: RepublishOutcome = { publicationRows: 0, blockedProductIds: [] };
   for (const productId of productIds) {
     await client.query(`SAVEPOINT ${PRODUCT_SAVEPOINT}`);
@@ -287,7 +318,9 @@ async function republishTarget(
         publicationTargetId: target.id,
         channelId: target.channel_id,
         dryRun: false,
-        triggeredBy: command.command === "hold" ? "publication_target_hold" : "publication_target_release",
+        triggeredBy: command.command === "hold"
+          ? "publication_target_variant_hold"
+          : "publication_target_variant_release",
       }, async () => null);
       await client.query(`RELEASE SAVEPOINT ${PRODUCT_SAVEPOINT}`);
       if (routed.authority === "legacy") {
@@ -303,20 +336,25 @@ async function republishTarget(
   return outcome;
 }
 
-async function listTargetProductIds(client: PoolClient, publicationTargetId: number): Promise<number[]> {
+async function listMappedProductIds(
+  client: PoolClient,
+  publicationTargetId: number,
+  productVariantIds: readonly number[],
+): Promise<number[]> {
   const rows = (await client.query<{ product_id: number }>(
     `SELECT DISTINCT variant.product_id
      FROM inventory.publication_variant_mapping_heads AS mapping_head
      JOIN catalog.product_variants AS variant
        ON variant.id = mapping_head.product_variant_id
      WHERE mapping_head.publication_target_id = $1
+       AND mapping_head.product_variant_id = ANY($2::integer[])
        AND mapping_head.active_mapping_id IS NOT NULL
        AND variant.is_active = true
        AND variant.requires_shipping = true
        AND COALESCE(variant.track_inventory, true) = true
        AND variant.sales_eligibility = 'sellable'
      ORDER BY variant.product_id`,
-    [publicationTargetId],
+    [publicationTargetId, productVariantIds],
   )).rows;
   return rows.map((row) => Number(row.product_id));
 }
@@ -325,7 +363,7 @@ async function loadReplay(
   client: PoolClient,
   receiptKey: string,
   requestHash: string,
-): Promise<InventoryPublicationTargetHoldResult | null> {
+): Promise<InventoryPublicationTargetVariantHoldResult | null> {
   const receipt = (await client.query<{ request_hash: string; response_body: unknown }>(
     "SELECT request_hash,response_body FROM public.idempotency_keys WHERE key=$1",
     [receiptKey],
@@ -336,7 +374,7 @@ async function loadReplay(
       "The idempotency key was already used with different inputs.");
   }
   const body = receipt.response_body as Record<string, unknown> | null;
-  const parsed = inventoryPublicationTargetHoldResultSchema.safeParse(body?.result);
+  const parsed = inventoryPublicationTargetVariantHoldResultSchema.safeParse(body?.result);
   if (!parsed.success) {
     throw holdError(500, "INVENTORY_PUBLICATION_TARGET_RECEIPT_INVALID",
       "The prior target command has an incomplete receipt.");

@@ -10,10 +10,12 @@ import {
   buildDropshipWalletPolicyOverviewUrl,
   buildDropshipWalletPolicyVersionRequest,
   centsToDollarInput,
+  describeDropshipWalletPolicyTierEnforcement,
   dropshipWalletPolicyEnvLabel,
   dropshipWalletPolicyFormFromLimits,
   dropshipWalletPolicyInvariantViolations,
   dropshipWalletPolicyLimitsKey,
+  dropshipWalletPolicyOverviewSchema,
   dropshipWalletPolicyProposedMinimums,
   dropshipWalletPolicySaveErrorMessage,
   dropshipWalletPolicySourceLabel,
@@ -46,6 +48,42 @@ const LIMITS: DropshipWalletPolicyLimitsView = {
 function baselineForm(patch: Partial<DropshipWalletPolicyForm> = {}): DropshipWalletPolicyForm {
   return { ...dropshipWalletPolicyFormFromLimits(LIMITS), ...patch };
 }
+
+describe("describeDropshipWalletPolicyTierEnforcement", () => {
+  const money = (cents: number) => `$${(cents / 100).toFixed(2)}`;
+  const date = (iso: string) => iso.slice(0, 10);
+
+  it("names the minimum enforced now and, during grace, the raise and the date it lands", () => {
+    expect(describeDropshipWalletPolicyTierEnforcement(
+      { tier: "pack", minimumCents: 10_000, version: 2, upcoming: null }, money, date,
+    )).toBe("Pack tier: $100.00 enforced now (version 2)");
+    expect(describeDropshipWalletPolicyTierEnforcement(
+      { tier: "case", minimumCents: 50_000, version: 2, upcoming: { minimumCents: 75_000, version: 3, enforcesAt: "2026-10-04T15:00:00.000Z" } }, money, date,
+    )).toBe("Case tier: $500.00 enforced now (version 2); rises to $750.00 on 2026-10-04 (version 3, grace running)");
+  });
+
+  it("accepts an overview with or without the enforcement block", () => {
+    const envKeys = Object.fromEntries(Object.keys(LIMITS).map((key) => [key, null]));
+    const base = {
+      policy: null, limitsSource: "environment", limits: LIMITS, envLimits: LIMITS,
+      envKeys, cardFundingFee: { bps: 300, envKey: "X", editable: false, readOnlyReason: "no" },
+      impact: { proposedAutoReloadMinTriggerCents: 1, proposedAutoReloadMinAmountCents: 1, vendorsBelowMinimumFloor: 0, vendorsBelowMinimumSingleTopUpLimit: 0, activeVendorsWithAutoReloadSettings: 0, evaluatedAt: "2026-09-20T00:00:00.000Z" },
+      generatedAt: "2026-09-20T00:00:00.000Z",
+    };
+    expect(dropshipWalletPolicyOverviewSchema.safeParse(base).success).toBe(true);
+    expect(dropshipWalletPolicyOverviewSchema.safeParse({
+      ...base,
+      listingTierEnforcement: {
+        pack: { tier: "pack", minimumCents: 10_000, version: 2, upcoming: null },
+        case: { tier: "case", minimumCents: 50_000, version: 2, upcoming: { minimumCents: 75_000, version: 3, enforcesAt: "2026-10-04T15:00:00.000Z" } },
+      },
+    }).success).toBe(true);
+    expect(dropshipWalletPolicyOverviewSchema.safeParse({
+      ...base,
+      listingTierEnforcement: { pack: { tier: "pack", minimumCents: -1, version: 2, upcoming: null } },
+    }).success).toBe(false);
+  });
+});
 
 describe("dropship wallet policy form model", () => {
   it("renders the limits in force as dollar, percent and whole-number inputs and never carries the old note forward", () => {

@@ -97,6 +97,11 @@ const manualReviewMigrationSql = readFileSync(
 const publicationHoldMigrationSql = readFileSync(
   resolve(process.cwd(), "migrations/0677_inventory_publication_target_hold.sql"), "utf8",
 );
+// The SKU-level hold (0684) is a table the same target read joins for the
+// product's variants; without it every canonical target read fails.
+const variantHoldMigrationSql = readFileSync(
+  resolve(process.cwd(), "migrations/0684_inventory_publication_target_variant_holds.sql"), "utf8",
+);
 const FIXED_TIME = "2026-08-26T12:00:00.000Z";
 
 function sslConfig(connectionString: string) {
@@ -344,6 +349,7 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       await migrationClient.query(publicationOutboxDestinationOwnerMigrationSql);
       await migrationClient.query(optionalChangeNoteMigrationSql);
       await migrationClient.query(publicationHoldMigrationSql);
+      await migrationClient.query(variantHoldMigrationSql);
       await migrationClient.query("COMMIT");
     } catch (error) {
       await migrationClient.query("ROLLBACK");

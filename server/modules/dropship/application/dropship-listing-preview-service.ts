@@ -18,6 +18,11 @@ import {
 } from "../domain/catalog-exposure";
 import { DropshipError } from "../domain/errors";
 import {
+  listingTierForVariantUomType,
+  type DropshipListingTierEligibility,
+  type DropshipListingTierStatus,
+} from "../domain/listing-tiers";
+import {
   evaluateDropshipVendorCatalogSelection,
   type DropshipVendorCatalogSelectionDecision,
   type DropshipVendorSelectionRule,
@@ -129,6 +134,12 @@ export interface DropshipListingPreviewRow {
   previewHash: string;
   adminExposureDecision: DropshipCatalogExposureDecision;
   selectionDecision: DropshipVendorCatalogSelectionDecision;
+  /**
+   * The listing tier this SKU sells in and whether that tier is on sale for
+   * the vendor. Off sale blocks a new listing and zeroes the quantity of an
+   * existing one; null only when the catalog variant could not be found.
+   */
+  listingTier: DropshipListingTierStatus | null;
   listingIntent: DropshipMarketplaceListingIntent | null;
 }
 
@@ -234,8 +245,14 @@ export interface DropshipListingPreviewServiceDependencies {
   atp: DropshipAtpProvider;
   marketplaceListing: DropshipMarketplaceListingProvider;
   ebayFulfillmentPolicyGuard: DropshipEbayFulfillmentPolicyGuard;
+  /** Which of the vendor's listing tiers are on sale (wallet policy + wallet facts). */
+  listingTiers: DropshipListingTierGateReader;
   clock: DropshipClock;
   logger: DropshipLogger;
+}
+
+export interface DropshipListingTierGateReader {
+  resolveForVendor(vendorId: number): Promise<{ eligibility: DropshipListingTierEligibility }>;
 }
 
 export class DropshipListingPreviewService {
@@ -302,6 +319,7 @@ export class DropshipListingPreviewService {
   ): Promise<DropshipListingPreviewResult> {
     const generatedAt = this.deps.clock.now();
     const config = await this.deps.repository.getStoreListingConfig(parsed.storeConnectionId);
+    const listingTiers = (await this.deps.listingTiers.resolveForVendor(parsed.vendorId)).eligibility;
     const uniqueVariantIds = uniquePositiveIntegers(parsed.productVariantIds);
     const requestedRetailPriceByVariantId = normalizeRequestedRetailPricesByVariantId({
       productVariantIds: uniqueVariantIds,
@@ -426,6 +444,7 @@ export class DropshipListingPreviewService {
         config: effectiveConfig,
         selectionDecision,
         adminExposureDecision,
+        tierStatus: listingTiers[listingTierForVariantUomType(candidate.variantUomType)],
         packageReadiness: packageReadiness.get(productVariantId) ?? null,
         pricingPolicies,
         existingListing,
@@ -822,6 +841,7 @@ function buildListingPreviewRow(input: {
   config: DropshipStoreListingConfig | null;
   selectionDecision: DropshipVendorCatalogSelectionDecision;
   adminExposureDecision: DropshipCatalogExposureDecision;
+  tierStatus: DropshipListingTierStatus;
   packageReadiness: DropshipListingPackageReadiness | null;
   pricingPolicies: readonly DropshipPricingPolicyRecord[];
   existingListing: DropshipExistingVendorListing | null;
@@ -840,6 +860,16 @@ function buildListingPreviewRow(input: {
   if (!input.selectionDecision.selected) {
     blockers.push(`selection:${input.selectionDecision.reason}`);
   }
+  // A tier that is off sale blocks the row and zeroes its quantity: a new
+  // listing cannot be created, and a SKU already on the marketplace publishes
+  // zero, which inventory planning holds and any push here writes the same.
+  // The marketplace validation then also reports the zero quantity, exactly
+  // as it does for a sold-out SKU; the tier blocker says why.
+  const tierOffSale = !input.tierStatus.eligible;
+  if (tierOffSale) {
+    blockers.push(`listing_tier:${input.tierStatus.reason}`);
+  }
+  const marketplaceQuantity = tierOffSale ? 0 : input.selectionDecision.marketplaceQuantity;
   if (!input.config) {
     blockers.push("listing_config_required");
   } else if (input.config.platform !== input.context.platform) {
@@ -878,7 +908,7 @@ function buildListingPreviewRow(input: {
         config: input.config,
         content: input.resolvedContent ? { ...input.candidate, description: input.resolvedContent.descriptionHtml } : input.candidate,
         priceCents,
-        quantity: input.selectionDecision.marketplaceQuantity,
+        quantity: marketplaceQuantity,
         storeCategoryNames: input.storeCategoryNames,
       })
     : { intent: null, blockers: [], warnings: [] };
@@ -913,7 +943,8 @@ function buildListingPreviewRow(input: {
     marketplaceCategoryName: marketplaceValidation.intent?.marketplaceCategoryName
       ?? input.candidate.ebayBrowseCategoryName,
     storeCategoryNames: marketplaceValidation.intent?.storeCategoryNames ?? [],
-    marketplaceQuantity: input.selectionDecision.marketplaceQuantity,
+    marketplaceQuantity,
+    listingTier: { tier: input.tierStatus.tier, eligible: input.tierStatus.eligible, reason: input.tierStatus.reason },
     blockers,
     warnings,
     intent: marketplaceValidation.intent,
@@ -936,7 +967,7 @@ function buildListingPreviewRow(input: {
     previewStatus,
     blockers,
     warnings,
-    marketplaceQuantity: input.selectionDecision.marketplaceQuantity,
+    marketplaceQuantity,
     priceCents,
     marketplaceCategoryId: marketplaceValidation.intent?.marketplaceCategoryId
       ?? input.candidate.ebayBrowseCategoryId,
@@ -947,6 +978,7 @@ function buildListingPreviewRow(input: {
     previewHash,
     adminExposureDecision: input.adminExposureDecision,
     selectionDecision: input.selectionDecision,
+    listingTier: input.tierStatus,
     listingIntent: marketplaceValidation.intent,
   };
 }
@@ -995,6 +1027,7 @@ function missingCatalogPreviewRow(input: {
       marketplaceQuantity: 0,
       quantityCapApplied: false,
     },
+    listingTier: null,
     listingIntent: null,
   };
 }

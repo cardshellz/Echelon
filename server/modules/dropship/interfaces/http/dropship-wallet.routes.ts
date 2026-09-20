@@ -5,6 +5,9 @@ import { fundingMethodAccountHolderType } from "../../domain/funding-method";
 import { makeDropshipWalletLogger, type DropshipWalletService } from "../../application/dropship-wallet-service";
 import { httpStatusForDropshipStripeErrorCode } from "../../infrastructure/dropship-stripe-error";
 import { createDropshipWalletServiceFromEnv } from "../../infrastructure/dropship-wallet.factory";
+import { createDropshipListingTierServiceFromEnv } from "../../infrastructure/dropship-listing-tier.factory";
+import type { DropshipListingTierService, DropshipVendorListingTierView } from "../../application/dropship-listing-tier-service";
+import type { DropshipListingTierStatus } from "../../domain/listing-tiers";
 import {
   createStripeDropshipFundingProviderFromEnv,
   type StripeDropshipFundingProvider,
@@ -21,6 +24,7 @@ export function registerDropshipWalletRoutes(
   app: Express,
   service: DropshipWalletService = createDropshipWalletServiceFromEnv(),
   stripeFundingProvider: StripeDropshipFundingProvider = createStripeDropshipFundingProviderFromEnv(),
+  listingTierService: Pick<DropshipListingTierService, "resolveForVendor"> = createDropshipListingTierServiceFromEnv(),
 ): void {
   app.get(
     "/api/dropship/admin/wallet/vendors/:vendorId",
@@ -147,7 +151,10 @@ export function registerDropshipWalletRoutes(
       const wallet = await service.getWalletForMember(req.session.dropship!.memberId, {
         ledgerLimit: parseLedgerLimit(req.query.limit),
       });
-      return res.json({ wallet: serializeVendorWalletView(wallet) });
+      // The tiers are read after the wallet so both describe the same vendor
+      // as this request resolved them; the route composes, it does not decide.
+      const listingTiers = await listingTierService.resolveForVendor(wallet.account.vendorId);
+      return res.json({ wallet: serializeVendorWalletView(wallet, listingTiers) });
     } catch (error) {
       return sendDropshipWalletError(res, error);
     }
@@ -307,9 +314,13 @@ function serializeWalletOverview(wallet: Awaited<ReturnType<DropshipWalletServic
  * staff edits were invisible to. Field names are passed through exactly as the
  * service resolves them — no renaming here.
  */
-function serializeVendorWalletView(wallet: Awaited<ReturnType<DropshipWalletService["getWalletForVendor"]>>) {
+function serializeVendorWalletView(
+  wallet: Awaited<ReturnType<DropshipWalletService["getWalletForVendor"]>>,
+  listingTiers: DropshipVendorListingTierView,
+) {
   return {
     ...serializeWalletOverview(wallet),
+    listingTiers: serializeListingTiers(listingTiers),
     limits: {
       autoReloadMinTriggerCents: wallet.limits.autoReloadMinTriggerCents,
       caseTierMinimumCents: wallet.limits.caseTierMinimumCents,
@@ -322,6 +333,34 @@ function serializeVendorWalletView(wallet: Awaited<ReturnType<DropshipWalletServ
       advanceCapCents: wallet.limits.advanceCapCents,
       tierChangeGraceDays: wallet.limits.tierChangeGraceDays,
     },
+  };
+}
+
+/**
+ * What is on sale and what it takes, per tier: the minimum enforced now, the
+ * shortfall as things stand, and a raise still in its grace period with the
+ * date it lands. Money stays integer cents; dates are ISO strings.
+ */
+function serializeListingTiers(view: DropshipVendorListingTierView) {
+  const serializeTier = (status: DropshipListingTierStatus) => ({
+    tier: status.tier,
+    eligible: status.eligible,
+    reason: status.reason,
+    minimumCents: status.minimumCents,
+    shortfallCents: status.shortfallCents,
+    upcoming: status.upcoming
+      ? {
+          minimumCents: status.upcoming.minimumCents,
+          policyVersion: status.upcoming.version,
+          enforcesAt: status.upcoming.enforcesAt.toISOString(),
+          affectsVendor: status.upcoming.affectsVendor,
+        }
+      : null,
+  });
+  return {
+    pack: serializeTier(view.eligibility.pack),
+    case: serializeTier(view.eligibility.case),
+    generatedAt: view.generatedAt.toISOString(),
   };
 }
 

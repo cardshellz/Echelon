@@ -115,6 +115,22 @@ const walletPolicyEnvKeysSchema = z.object({
   tierChangeGraceDays: z.string().nullable(),
 });
 
+/**
+ * What a listing tier enforces right now and, when a raise is still inside its
+ * grace period, what it will enforce and from when. Read-only evidence from
+ * the version history; publishing a version is what changes it.
+ */
+const walletPolicyTierEnforcementSchema = z.object({
+  tier: z.enum(["pack", "case"]),
+  minimumCents: z.number().int().nonnegative(),
+  version: z.number().int().positive(),
+  upcoming: z.object({
+    minimumCents: z.number().int().nonnegative(),
+    version: z.number().int().positive(),
+    enforcesAt: z.string(),
+  }).nullable(),
+});
+
 export const dropshipWalletPolicyOverviewSchema = z.object({
   policy: walletPolicyRecordSchema.nullable(),
   limits: walletPolicyLimitsSchema,
@@ -123,8 +139,31 @@ export const dropshipWalletPolicyOverviewSchema = z.object({
   envKeys: walletPolicyEnvKeysSchema,
   cardFundingFee: walletPolicyCardFeeSchema,
   impact: walletPolicyImpactSchema,
+  /** Absent from a server one release behind; the panel then shows no enforcement line. */
+  listingTierEnforcement: z.object({
+    pack: walletPolicyTierEnforcementSchema,
+    case: walletPolicyTierEnforcementSchema,
+  }).optional(),
   generatedAt: z.string(),
 });
+
+export type DropshipWalletPolicyTierEnforcement = z.infer<typeof walletPolicyTierEnforcementSchema>;
+
+/**
+ * One line per tier for the staff screen: the minimum enforced today and, if
+ * a raise is still in grace, the number and date it lands. Dollars only; the
+ * cents of a tier minimum are always zero in practice but are kept exact.
+ */
+export function describeDropshipWalletPolicyTierEnforcement(
+  enforcement: DropshipWalletPolicyTierEnforcement,
+  formatMoney: (cents: number) => string,
+  formatDate: (iso: string) => string,
+): string {
+  const label = enforcement.tier === "case" ? "Case tier" : "Pack tier";
+  const now = `${label}: ${formatMoney(enforcement.minimumCents)} enforced now (version ${enforcement.version})`;
+  if (!enforcement.upcoming) return now;
+  return `${now}; rises to ${formatMoney(enforcement.upcoming.minimumCents)} on ${formatDate(enforcement.upcoming.enforcesAt)} (version ${enforcement.upcoming.version}, grace running)`;
+}
 
 export const dropshipWalletPolicyMutationSchema = z.object({
   policy: walletPolicyRecordSchema,

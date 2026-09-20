@@ -16,6 +16,7 @@ import { PgDropshipListingPreviewRepository } from "./dropship-listing-preview.r
 import { PgShellzClubProductCostAdapter } from "./shellz-club-product-cost.adapter";
 import { createDropshipVendorProvisioningServiceFromEnv } from "./dropship-vendor-provisioning.factory";
 import { createDropshipEbayFulfillmentPolicyGuardFromEnv } from "./dropship-ebay-fulfillment-policy-guard.factory";
+import { createDropshipListingTierServiceFromEnv } from "./dropship-listing-tier.factory";
 
 export function createDropshipListingPreviewServiceFromEnv(): DropshipListingPreviewService {
   const repository = new PgDropshipListingPreviewRepository();
@@ -41,6 +42,7 @@ export function createDropshipListingPreviewServiceFromEnv(): DropshipListingPre
     }),
     marketplaceListing: new ConfigDrivenDropshipMarketplaceListingProvider(),
     ebayFulfillmentPolicyGuard: createDropshipEbayFulfillmentPolicyGuardFromEnv(),
+    listingTiers: createDropshipListingTierServiceFromEnv(),
     clock: systemDropshipListingPreviewClock,
     logger,
   });

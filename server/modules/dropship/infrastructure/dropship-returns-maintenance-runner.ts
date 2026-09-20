@@ -4,6 +4,11 @@ import { withAdvisoryLock } from "../../../infrastructure/scheduler-lock";
 import { createDropshipWalletMaintenanceServiceFromEnv } from "./dropship-wallet-maintenance.factory";
 import { createDropshipNoInspectionWatcherServiceFromEnv } from "./dropship-no-inspection-watcher.factory";
 import { createDropshipVendorStandingServiceFromEnv } from "./dropship-vendor-standing.factory";
+import { createDropshipListingTierServiceFromEnv } from "./dropship-listing-tier.factory";
+import type {
+  DropshipListingTierReconcileResult,
+  ReconcileDropshipListingTiersInput,
+} from "../application/dropship-listing-tier-service";
 import type {
   DropshipWalletMaintenanceResult,
   RunDropshipWalletMaintenanceInput,
@@ -48,6 +53,10 @@ interface NoInspectionWatcherRunnerService {
   runWatcher(input: { workerId: string; limit?: number }): Promise<DropshipNoInspectionWatcherResult>;
 }
 
+interface ListingTierRunnerService {
+  reconcileListingTiers(input: ReconcileDropshipListingTiersInput): Promise<DropshipListingTierReconcileResult>;
+}
+
 const DROPSHIP_RETURNS_MAINTENANCE_LOCK_ID = 736211;
 const DEFAULT_INTERVAL_MS = 60 * 60 * 1000; // hourly tick; wallet maintenance is once-per-day per vendor, retries ride the tick
 const DEFAULT_BATCH_SIZE = 100;
@@ -55,12 +64,14 @@ const DEFAULT_BATCH_SIZE = 100;
 export async function runDropshipReturnsMaintenanceSweep(input: {
   walletMaintenanceService?: WalletMaintenanceRunnerService;
   vendorStandingService?: VendorStandingRunnerService;
+  listingTierService?: ListingTierRunnerService;
   noInspectionWatcherService?: NoInspectionWatcherRunnerService;
   batchSize?: number;
   workerId?: string;
 } = {}): Promise<{
   walletMaintenance: DropshipWalletMaintenanceResult;
   vendorStanding: DropshipVendorStandingReconcileResult;
+  listingTiers: DropshipListingTierReconcileResult;
   noInspection: DropshipNoInspectionWatcherResult;
 }> {
   const workerId = input.workerId ?? defaultWorkerId();
@@ -70,6 +81,8 @@ export async function runDropshipReturnsMaintenanceSweep(input: {
     ?? createDropshipWalletMaintenanceServiceFromEnv();
   const vendorStandingService = input.vendorStandingService
     ?? createDropshipVendorStandingServiceFromEnv();
+  const listingTierService = input.listingTierService
+    ?? createDropshipListingTierServiceFromEnv();
   const noInspectionWatcherService = input.noInspectionWatcherService
     ?? createDropshipNoInspectionWatcherServiceFromEnv();
 
@@ -81,11 +94,17 @@ export async function runDropshipReturnsMaintenanceSweep(input: {
     workerId,
     limit: batchSize,
   });
+  // After the wallet and standing passes, so a top-up that settled or a resume
+  // on this tick is reflected in which tiers are on sale.
+  const listingTiers = await listingTierService.reconcileListingTiers({
+    workerId,
+    limit: batchSize,
+  });
   const noInspection = await noInspectionWatcherService.runWatcher({
     workerId,
     limit: batchSize,
   });
-  return { walletMaintenance, vendorStanding, noInspection };
+  return { walletMaintenance, vendorStanding, listingTiers, noInspection };
 }
 
 export function startDropshipReturnsMaintenanceWorker(): void {
@@ -115,6 +134,9 @@ export function startDropshipReturnsMaintenanceWorker(): void {
           || wallet.failedCount > 0
           || standing.restore.scannedCount > 0
           || standing.listingHolds.scannedCount > 0
+          || result.listingTiers.changedCount > 0
+          || result.listingTiers.deferredCount > 0
+          || result.listingTiers.failedCount > 0
           || result.noInspection.queuedCount > 0
         ) {
           console.info(JSON.stringify({
@@ -133,6 +155,7 @@ export function startDropshipReturnsMaintenanceWorker(): void {
                 replayedCount: wallet.replayedCount,
               },
               vendorStanding: standing,
+              listingTiers: result.listingTiers,
               noInspection: {
                 scannedCount: result.noInspection.scannedCount,
                 queuedCount: result.noInspection.queuedCount,

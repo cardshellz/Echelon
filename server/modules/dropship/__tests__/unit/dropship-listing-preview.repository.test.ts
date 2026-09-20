@@ -113,6 +113,7 @@ describe("PgDropshipListingPreviewRepository", () => {
       product_is_active: true,
       variant_is_active: true,
       units_per_variant: 1,
+      uom_type: "each",
       default_retail_price_cents: "1299",
     });
     const repository = new PgDropshipListingPreviewRepository(makePool(client));

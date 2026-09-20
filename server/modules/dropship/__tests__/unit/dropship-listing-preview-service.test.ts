@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import type { DropshipListingTierEligibility } from "../../domain/listing-tiers";
 import { resolveListingContent, listingCatalogHash } from "../../application/dropship-listing-content-resolver";
 import { noContentProfile } from "../fixtures/listing-content.fixture";
 import type { SavedListingPriceRevision } from "../../../../../shared/dropship/listing-price";
@@ -49,10 +50,12 @@ describe("DropshipListingPreviewService", () => {
     issues: Array<{ code: string; message: string }>;
   };
   let evaluatedFulfillmentPolicyIds: string[];
+  let listingTierEligibility: DropshipListingTierEligibility;
 
   beforeEach(() => {
     repository = new FakeListingPreviewRepository();
     logs = [];
+    listingTierEligibility = allTiersOnSale();
     ebayPolicyPreflight = {
       compatible: true,
       fulfillmentPolicyId: "fulfillment-policy",
@@ -72,6 +75,7 @@ describe("DropshipListingPreviewService", () => {
         },
         evaluateWithAccessToken: async () => ebayPolicyPreflight,
       },
+      listingTiers: { resolveForVendor: async () => ({ eligibility: listingTierEligibility }) },
       clock: { now: () => now },
       logger: {
         info: (event) => logs.push(event),
@@ -79,6 +83,40 @@ describe("DropshipListingPreviewService", () => {
         error: (event) => logs.push(event),
       },
     });
+  });
+
+  it("reports the tier a SKU sells in and leaves an on-sale tier alone", async () => {
+    const preview = await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] });
+    expect(preview.rows[0].listingTier).toEqual(listingTierEligibility.pack);
+    expect(preview.rows[0].blockers.filter((blocker) => blocker.startsWith("listing_tier:"))).toEqual([]);
+    expect(preview.rows[0].marketplaceQuantity).toBe(4);
+  });
+
+  it("blocks a new listing in a tier that is off sale, and names the reason", async () => {
+    repository.candidate.variantUomType = "case";
+    listingTierEligibility = { ...allTiersOnSale(), case: caseTierOffSale() };
+
+    const preview = await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] });
+
+    expect(preview.rows[0].previewStatus).toBe("blocked");
+    expect(preview.rows[0].blockers).toContain("listing_tier:case_tier_balance_below_minimum");
+    expect(preview.rows[0].marketplaceQuantity).toBe(0);
+    expect(preview.rows[0].listingTier).toMatchObject({ tier: "case", eligible: false, shortfallCents: 38_000 });
+    expect(preview.summary).toMatchObject({ blocked: 1, ready: 0 });
+  });
+
+  it("zeroes a listed SKU whose tier went off sale and names the tier as the reason, like a sold-out SKU", async () => {
+    repository.candidate.variantUomType = "case";
+    listingTierEligibility = { ...allTiersOnSale(), case: caseTierOffSale() };
+    repository.existingListings = [{ productVariantId: 101, listingId: 1, status: "active", vendorRetailPriceCents: null,
+      quantityCap: null, externalListingId: "ebay-1" }];
+
+    const preview = await service.previewForMember("member-1", { storeConnectionId: 22, productVariantIds: [101] });
+
+    expect(preview.rows[0].blockers).toEqual(["listing_tier:case_tier_balance_below_minimum", "marketplace_quantity_unavailable"]);
+    expect(preview.rows[0].previewStatus).toBe("blocked");
+    expect(preview.rows[0].marketplaceQuantity).toBe(0);
+    expect(preview.rows[0].currentListingStatus).toBe("active");
   });
 
   it("uses the exact sanitized description and rejects unreviewed content before queueing", async () => {
@@ -812,6 +850,7 @@ function makeCandidate(): DropshipListingCatalogCandidate {
     ebayBrowseCategoryName: "Card Toploaders & Holders",
     productIsActive: true,
     variantIsActive: true,
+    variantUomType: "pack",
     unitsPerVariant: 3,
     defaultRetailPriceCents: 1199,
     sku: "CS-TOPLOADER-35PT",
@@ -862,4 +901,15 @@ function makeVendor(input: { memberId: string }): DropshipProvisionedVendorProfi
     createdAt: now,
     updatedAt: now,
   };
+}
+
+function allTiersOnSale(): DropshipListingTierEligibility {
+  return {
+    pack: { tier: "pack", eligible: true, reason: null, minimumCents: 10_000, shortfallCents: 0, upcoming: null },
+    case: { tier: "case", eligible: true, reason: null, minimumCents: 50_000, shortfallCents: 0, upcoming: null },
+  };
+}
+
+function caseTierOffSale(): DropshipListingTierEligibility["case"] {
+  return { tier: "case", eligible: false, reason: "case_tier_balance_below_minimum", minimumCents: 50_000, shortfallCents: 38_000, upcoming: null };
 }

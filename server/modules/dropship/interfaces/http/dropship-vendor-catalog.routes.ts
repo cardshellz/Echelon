@@ -9,6 +9,7 @@ import {
   systemDropshipSelectionAtpClock,
 } from "../../application/dropship-selection-atp-service";
 import { ChannelAllocationDropshipAtpProvider } from "../../infrastructure/dropship-atp.provider";
+import { createDropshipListingTierServiceFromEnv } from "../../infrastructure/dropship-listing-tier.factory";
 import { resolveDropshipOmsChannelIdWithClient } from "../../infrastructure/dropship-order-intake.repository";
 import { PgDropshipSelectionAtpRepository } from "../../infrastructure/dropship-selection-atp.repository";
 import { DropshipError } from "../../domain/errors";
@@ -86,6 +87,7 @@ function createDropshipSelectionAtpServiceFromEnv(): DropshipSelectionAtpService
       runtimeQuantity: createInventoryChannelQuantityRuntimeService(pool),
       resolveDropshipOmsChannelId: () => resolveDropshipOmsChannelIdWithClient(pool),
     }),
+    listingTiers: createDropshipListingTierServiceFromEnv(),
   });
 }
 

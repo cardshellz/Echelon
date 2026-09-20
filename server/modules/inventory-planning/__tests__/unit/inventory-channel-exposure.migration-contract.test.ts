@@ -15,6 +15,10 @@ const targetHoldMigration = readFileSync(
   "migrations/0677_inventory_publication_target_hold.sql",
   "utf8",
 );
+const variantHoldMigration = readFileSync(
+  "migrations/0684_inventory_publication_target_variant_holds.sql",
+  "utf8",
+);
 const schema = readFileSync("shared/schema/inventory-planning.schema.ts", "utf8");
 const routes = readFileSync(
   "server/modules/inventory-planning/interfaces/http/inventory-channel-exposure.routes.ts",
@@ -148,6 +152,12 @@ describe("inventory channel exposure inactive foundation", () => {
     expect(targetHoldMigration).toContain("ADD COLUMN held_at TIMESTAMPTZ");
     expect(targetHoldMigration).toContain("ADD COLUMN held_by VARCHAR(100)");
     expect(targetHoldMigration).toContain("inventory_publication_targets_hold_chk");
+    // The SKU-level hold (0684) is its own table keyed by target and variant,
+    // and the Drizzle schema carries it alongside the target hold columns.
+    expect(variantHoldMigration).toContain("CREATE TABLE IF NOT EXISTS inventory.inventory_publication_target_variant_holds");
+    expect(variantHoldMigration).toContain("PRIMARY KEY (publication_target_id, product_variant_id)");
+    expect(variantHoldMigration).toContain("inventory_publication_target_variant_holds_reason_chk");
+    expect(schema).toContain('"inventory_publication_target_variant_holds"');
     expect(targetHoldMigration).toContain("(hold_reason IS NULL AND held_at IS NULL AND held_by IS NULL)");
     expect(targetHoldMigration).not.toMatch(/UPDATE\s+inventory\.inventory_publication_targets/i);
     expect(targetHoldMigration).not.toMatch(/INSERT\s+INTO/i);

@@ -304,6 +304,9 @@
   "dropship.dropship_vendor_credit_profiles": [
     "modules/dropship"
   ],
+  "dropship.dropship_vendor_listing_tier_holds": [
+    "modules/dropship"
+  ],
   "dropship.dropship_vendor_listings": [
     "modules/dropship"
   ],
@@ -534,6 +537,9 @@
     "modules/inventory-planning"
   ],
   "inventory.inventory_publication_target_resume_reviews": [
+    "modules/inventory-planning"
+  ],
+  "inventory.inventory_publication_target_variant_holds": [
     "modules/inventory-planning"
   ],
   "inventory.inventory_publication_targets": [
