@@ -5041,13 +5041,14 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     expect((await pool.query("SELECT id FROM oms.channel_fulfillment_push_items")).rowCount).toBe(0);
 
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const recordReview = vi.fn();
     const handler = new PackageAllocationLabelCommercialFulfillmentService({
       enabled: true,
       logger,
       labelLinker: {
         reconcileShipStationLabel: vi.fn().mockResolvedValue({ linksInserted: 0, totalLinks: 1 }),
       },
-      reviewRepository: { record: vi.fn() },
+      reviewRepository: { record: recordReview },
       workflow: createPackageAllocationLabelCommercialWorkflow({
         pool,
         clock: { now: () => new Date("2026-08-28T13:00:00.000Z") },
@@ -5064,7 +5065,9 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
         { lineItemKey: `wms-item-${deletedRefundedSourceId}`, quantity: 1 },
       ],
     }, { shippingProviderLabelId: labelId } as any);
-    expect(replay).toMatchObject({ outcome: "activated" });
+    expect(replay, JSON.stringify({
+      replay, reviews: recordReview.mock.calls, warnings: logger.warn.mock.calls,
+    })).toMatchObject({ outcome: "activated" });
     const channelItems = await pool.query<{ source_id: number; quantity_pushed: number }>(`
       SELECT source.source_wms_shipment_item_id AS source_id, push_item.quantity_pushed
       FROM oms.channel_fulfillment_push_items AS push_item
