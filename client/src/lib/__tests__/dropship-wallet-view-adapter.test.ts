@@ -43,8 +43,9 @@ describe("adaptWalletView", () => {
     expect(view.limits).toEqual(CLIENT_FALLBACK_LIMITS);
     expect(view.setupStatus).toEqual({ sourceReady: true, backupReady: true, acknowledged: true, done: true, launchReady: true });
     expect(view.listingTiers).toBeNull();
+    expect(view.advance).toBeNull();
     expect(view.clientFallbacks.sort()).toEqual([
-      "acknowledgement_assumed_from_settings_row", "backstop_from_first_active_card", "bank_details_from_label", "card_details_from_label",
+      "acknowledgement_assumed_from_settings_row", "advance_not_served", "backstop_from_first_active_card", "bank_details_from_label", "card_details_from_label",
       "ledger_reason_derived", "limits_from_documented_defaults", "listing_tiers_not_served", "roles_derived", "setup_status_derived",
     ]);
     // The page never sees provider internals.
@@ -60,7 +61,7 @@ describe("adaptWalletView", () => {
       fundingMethods: [rawMethod({ status: "active", card: { brand: "Visa", last4: "4242", expMonth: 12, expYear: 2027 }, roles: { isAutoReloadSource: false, isBackupCard: true, chargeable: true } })],
       recentLedger: [{ ledgerEntryId: 2, type: "funding", status: "settled", amountCents: 5500, currency: "USD", availableBalanceAfterCents: 0, pendingBalanceAfterCents: 0, createdAt: STAMP, settledAt: STAMP,
         reason: "covered_held_order", fundingMethodId: 10, cardFee: { feeCents: 165, feeBps: 300, chargedCents: 5665 }, failure: null }],
-      limits, setupStatus, listingTiers: servedListingTiers(),
+      limits, setupStatus, listingTiers: servedListingTiers(), advance: servedAdvance(),
     }));
     expect(view.autoReload).toMatchObject({ backstopFundingMethodId: 11, acknowledgedCardFeeBps: 250, acknowledgedAt: LATER });
     expect(view.fundingMethods[0].card).toEqual({ brand: "Visa", last4: "4242", expMonth: 12, expYear: 2027 });
@@ -68,7 +69,20 @@ describe("adaptWalletView", () => {
     expect(view.limits).toEqual(limits);
     expect(view.setupStatus).toEqual(setupStatus);
     expect(view.listingTiers).toEqual(servedListingTiers());
+    expect(view.advance).toEqual(servedAdvance());
     expect(view.clientFallbacks).toEqual([]);
+  });
+
+  it("takes the advance position as served, treats a served null as an answer, and refuses a malformed one", () => {
+    const advance = servedAdvance();
+    expect(adaptWalletView(rawWallet({ advance, listingTiers: servedListingTiers(), limits: servedLimits(), setupStatus: servedSetupStatus() })).clientFallbacks).toEqual([]);
+    const served = adaptWalletView(rawWallet({ advance: null, listingTiers: servedListingTiers(), limits: servedLimits(), setupStatus: servedSetupStatus() }));
+    expect(served.advance).toBeNull();
+    expect(served.clientFallbacks).toEqual([]);
+    expect(adaptWalletView(rawWallet({ advance })).advance).toEqual(advance);
+    expect(() => adaptWalletView(rawWallet({ advance: { ...advance, headroomCents: 12.5 } }))).toThrow();
+    expect(() => adaptWalletView(rawWallet({ advance: { ...advance, reasons: ["vibes"] } }))).toThrow();
+    expect(() => adaptWalletView(rawWallet({ advance: { ...advance, policy: { ...advance.policy, capSource: "guess" } } }))).toThrow();
   });
 
   it("takes the listing tiers exactly as served and never derives them", () => {
@@ -183,5 +197,26 @@ function servedListingTiers() {
       upcoming: { minimumCents: 75_000, policyVersion: 3, enforcesAt: "2026-10-01T00:00:00.000Z", affectsVendor: true },
     },
     generatedAt: STAMP,
+  };
+}
+
+function servedLimits() {
+  return { autoReloadMinTriggerCents: 5000, caseTierMinimumCents: 40000, autoReloadMinAmountCents: 10000, manualFundingMinCents: 1000, manualFundingMaxCents: 500000, defaultPaymentHoldTimeoutMinutes: 2880, holdExpiryWarningMinutes: 90, advanceFeeBps: 125, advanceCapCents: 30000, tierChangeGraceDays: 7 };
+}
+
+function servedSetupStatus() {
+  return { sourceReady: true, backupReady: true, acknowledged: false, done: true, launchReady: false };
+}
+
+/** A company bank account with $400 on the way that qualifies; the cap is the policy's $500. */
+function servedAdvance() {
+  return {
+    policy: { feeBps: 100, capCents: 50_000, capSource: "policy" as const },
+    sources: [{ fundingMethodId: 30, pendingCents: 40_000, accountHolderType: "company" as const, balanceVerified: true, priorPullSettled: true, eligible: true, reasons: [] }],
+    eligiblePendingCents: 40_000,
+    allowanceCents: 40_000,
+    exposureCents: 0,
+    headroomCents: 40_000,
+    reasons: [],
   };
 }

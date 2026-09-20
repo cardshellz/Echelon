@@ -33,6 +33,10 @@ const channelConnectionBrandingMigrationSql = readFileSync(
   ),
   "utf8",
 );
+const walletAdvanceMigrationSql = readFileSync(
+  resolve(process.cwd(), "migrations/0686_dropship_wallet_advance.sql"),
+  "utf8",
+);
 
 function sslConfig(connectionString: string) {
   return /localhost|127\.0\.0\.1/.test(connectionString)
@@ -243,6 +247,7 @@ describeWithDb("Dropship V2 database foundation", () => {
     await client.query(carrierProtectionMigrationSql);
     await client.query(carrierClaimMigrationSql);
     await client.query(channelConnectionBrandingMigrationSql);
+    await client.query(walletAdvanceMigrationSql);
 
     const channel = await client.query<{ id: number }>(
       `INSERT INTO channels.channels (name, type, provider, status, sync_enabled, sync_mode)
@@ -438,6 +443,89 @@ describeWithDb("Dropship V2 database foundation", () => {
         [vendorBId],
       ),
       "23514",
+    );
+  });
+
+  it("keeps the wallet advance migration repeatable, admits the advance fee kind, and keeps balance readings append-only", async () => {
+    // Re-running the migration is a no-op.
+    await client!.query(walletAdvanceMigrationSql);
+
+    const wallet = await client!.query<{ id: number }>(
+      `INSERT INTO dropship.dropship_wallet_accounts (vendor_id, available_balance_cents, pending_balance_cents)
+       VALUES ($1, 0, 0)
+       ON CONFLICT (vendor_id) DO UPDATE SET updated_at = now()
+       RETURNING id`,
+      [vendorAId],
+    );
+    await client!.query(
+      `INSERT INTO dropship.dropship_wallet_ledger
+        (wallet_account_id, vendor_id, type, status, amount_cents, reference_type, reference_id, idempotency_key)
+       VALUES ($1, $2, 'advance_fee', 'settled', -17, 'order_intake_advance_fee', '1', 'order:1:abc:advance-fee')`,
+      [wallet.rows[0].id, vendorAId],
+    );
+    await expectDatabaseError(
+      client!,
+      () => client!.query(
+        `INSERT INTO dropship.dropship_wallet_ledger
+          (wallet_account_id, vendor_id, type, status, amount_cents)
+         VALUES ($1, $2, 'advance', 'settled', -1)`,
+        [wallet.rows[0].id, vendorAId],
+      ),
+      "23514",
+    );
+
+    const method = await client!.query<{ id: number }>(
+      `INSERT INTO dropship.dropship_funding_methods (vendor_id, rail, display_label)
+       VALUES ($1, 'stripe_ach', 'Bank ending in 6789')
+       RETURNING id`,
+      [vendorAId],
+    );
+    const reading = await client!.query<{ id: number }>(
+      `INSERT INTO dropship.dropship_funding_method_balance_verifications
+        (vendor_id, funding_method_id, provider, provider_account_id, status, source,
+         available_cents, currency, balance_as_of, provider_event_id, detail)
+       VALUES ($1, $2, 'stripe', 'fca_1', 'succeeded', 'link', 250000, 'USD', now(), 'evt_setup_1', '{}'::jsonb)
+       RETURNING id`,
+      [vendorAId, method.rows[0].id],
+    );
+    // One row per provider event.
+    await expectDatabaseError(
+      client!,
+      () => client!.query(
+        `INSERT INTO dropship.dropship_funding_method_balance_verifications
+          (vendor_id, funding_method_id, provider, provider_account_id, status, source, provider_event_id)
+         VALUES ($1, $2, 'stripe', 'fca_1', 'failed', 'webhook', 'evt_setup_1')`,
+        [vendorAId, method.rows[0].id],
+      ),
+      "23505",
+    );
+    // A succeeded reading must carry its amount, currency and time.
+    await expectDatabaseError(
+      client!,
+      () => client!.query(
+        `INSERT INTO dropship.dropship_funding_method_balance_verifications
+          (vendor_id, funding_method_id, provider, provider_account_id, status, source)
+         VALUES ($1, $2, 'stripe', 'fca_1', 'succeeded', 'refresh')`,
+        [vendorAId, method.rows[0].id],
+      ),
+      "23514",
+    );
+    // Readings are evidence: never rewritten, never removed.
+    await expectDatabaseError(
+      client!,
+      () => client!.query(
+        `UPDATE dropship.dropship_funding_method_balance_verifications SET available_cents = 1 WHERE id = $1`,
+        [reading.rows[0].id],
+      ),
+      "P0001",
+    );
+    await expectDatabaseError(
+      client!,
+      () => client!.query(
+        `DELETE FROM dropship.dropship_funding_method_balance_verifications WHERE id = $1`,
+        [reading.rows[0].id],
+      ),
+      "P0001",
     );
   });
 

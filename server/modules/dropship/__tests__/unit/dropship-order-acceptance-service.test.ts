@@ -423,7 +423,7 @@ describe("buildDropshipOrderAcceptancePlan", () => {
     expect(paused).toMatchObject({ outcome: "payment_hold", paymentHoldReason: "vendor_paused", paymentHoldExpiresAt: existingExpiresAt });
 
     const short = buildDropshipOrderAcceptancePlan(makePlanningInput({
-      wallet: { walletAccountId: 1, availableBalanceCents: 100, pendingBalanceCents: 0, currency: "USD" },
+      wallet: { walletAccountId: 1, availableBalanceCents: 100, pendingBalanceCents: 0, currency: "USD", advance: null },
     }));
     expect(short).toMatchObject({ outcome: "payment_hold", paymentHoldReason: "insufficient_balance" });
     expect(buildDropshipOrderAcceptancePlan(makePlanningInput())).toMatchObject({ outcome: "accepted", paymentHoldReason: null });
@@ -477,6 +477,7 @@ describe("buildDropshipOrderAcceptancePlan", () => {
         availableBalanceCents: 100,
         pendingBalanceCents: 10_000,
         currency: "USD",
+        advance: null,
       },
     }));
 
@@ -498,6 +499,7 @@ describe("buildDropshipOrderAcceptancePlan", () => {
         availableBalanceCents: 100,
         pendingBalanceCents: 10_000,
         currency: "USD",
+        advance: null,
       },
     }));
     const secondSweep = buildDropshipOrderAcceptancePlan(makePlanningInput({
@@ -511,6 +513,7 @@ describe("buildDropshipOrderAcceptancePlan", () => {
         availableBalanceCents: 100,
         pendingBalanceCents: 10_000,
         currency: "USD",
+        advance: null,
       },
       acceptedAt: new Date("2026-05-01T18:10:00.000Z"),
     }));
@@ -791,6 +794,7 @@ class FakeAcceptanceRepository implements DropshipOrderAcceptanceRepository {
       currency: "USD",
       paymentHoldExpiresAt: null,
       paymentHoldReason: null,
+      advance: null,
       idempotentReplay: false,
       ...this.resultOverrides,
     };
@@ -956,6 +960,7 @@ function makePlanningInput(
       availableBalanceCents: 5000,
       pendingBalanceCents: 0,
       currency: "USD",
+      advance: null,
     },
     paymentHoldTimeoutMinutes: 2880,
     requestHash: "request-hash",

@@ -278,3 +278,168 @@ function makePool(query: (sql: string, params?: unknown[]) => Promise<{ rows: un
   const client = { query, release: vi.fn() } as unknown as PoolClient;
   return { query, connect: async () => client } as unknown as Pool;
 }
+
+describe("PgDropshipWalletRepository advance and bank balance (funding design phase 3)", () => {
+  const occurred = new Date("2026-09-20T12:00:00.000Z");
+
+  function makeVerificationRow(overrides: Record<string, unknown> = {}) {
+    return {
+      id: 31,
+      vendor_id: 10,
+      funding_method_id: 100,
+      provider: "stripe",
+      provider_account_id: "fca_1",
+      status: "succeeded",
+      source: "link",
+      available_cents: "250000",
+      currency: "USD",
+      balance_as_of: occurred,
+      provider_event_id: "evt_setup_1",
+      created_at: occurred,
+      ...overrides,
+    };
+  }
+
+  it("reads the advance facts in one transaction: account, policy, override and bank accounts", async () => {
+    const statements: string[] = [];
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      statements.push(sql.trim().split(/\s+/).slice(0, 2).join(" "));
+      if (sql.includes("to_regclass($1)")) return { rows: [{ present: String(params?.[0]) }] };
+      if (sql.startsWith("INSERT INTO dropship.dropship_wallet_accounts")) return { rows: [] };
+      if (sql.includes("FROM dropship.dropship_wallet_accounts")) return { rows: [makeAccountRow({ available_balance_cents: "-300", pending_balance_cents: "50000" })] };
+      if (sql.includes("SELECT advance_fee_bps, advance_cap_cents")) return { rows: [{ advance_fee_bps: 100, advance_cap_cents: "50000" }] };
+      if (sql.includes("SELECT advance_cap_override_cents")) {
+        expect(params).toEqual([10]);
+        return { rows: [{ advance_cap_override_cents: null }] };
+      }
+      if (sql.includes("FROM dropship.dropship_funding_methods m")) {
+        expect(params).toEqual([10, 5, "stripe_ach"]);
+        return { rows: [{ funding_method_id: 100, metadata: { accountHolderType: "company" }, pending_cents: "50000", prior_pull_settled: true, balance_verified: true }] };
+      }
+      return { rows: [] };
+    });
+
+    const context = await new PgDropshipWalletRepository(makePool(query)).readAdvanceContext({ vendorId: 10, now: occurred });
+
+    expect(context).toEqual({
+      policy: { feeBps: 100, capCents: 50_000, capSource: "policy" },
+      sources: [{ fundingMethodId: 100, pendingCents: 50_000, accountHolderType: "company", balanceVerified: true, priorPullSettled: true }],
+    });
+    expect(statements[0]).toBe("BEGIN");
+    expect(statements.at(-1)).toBe("COMMIT");
+  });
+
+  it("returns no advance context, without reading bank accounts, while the policy table is absent", async () => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("to_regclass($1)")) return { rows: [{ present: null }] };
+      if (sql.includes("FROM dropship.dropship_wallet_accounts")) return { rows: [makeAccountRow()] };
+      if (sql.includes("FROM dropship.dropship_funding_methods m")) throw new Error("must not read sources");
+      return { rows: [] };
+    });
+
+    expect(await new PgDropshipWalletRepository(makePool(query)).readAdvanceContext({ vendorId: 10, now: occurred })).toBeNull();
+  });
+
+  it("appends a succeeded balance reading with its audit row, in one transaction", async () => {
+    const statements: string[] = [];
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      statements.push(sql.trim().split(/\s+/).slice(0, 2).join(" "));
+      if (sql.includes("FROM dropship.dropship_funding_methods")) {
+        expect(params).toEqual([100, 10]);
+        return { rows: [{ id: 100 }] };
+      }
+      if (sql.startsWith("INSERT INTO dropship.dropship_funding_method_balance_verifications")) {
+        expect(sql).toContain("ON CONFLICT (provider, provider_event_id) WHERE provider_event_id IS NOT NULL DO NOTHING");
+        expect(params).toEqual([10, 100, "stripe", "fca_1", "succeeded", "link", 250_000, "USD", occurred, "evt_setup_1", "{}", occurred]);
+        return { rows: [makeVerificationRow()] };
+      }
+      if (sql.includes("INSERT INTO dropship.dropship_audit_events")) {
+        expect(params?.slice(0, 4)).toEqual([10, "dropship_funding_method_balance_verification", "31", "wallet_bank_balance_succeeded"]);
+        expect(JSON.parse(String(params?.[4]))).toMatchObject({ fundingMethodId: 100, providerAccountId: "fca_1", availableCents: 250_000, currency: "USD", source: "link" });
+        return { rows: [] };
+      }
+      return { rows: [] };
+    });
+
+    const result = await new PgDropshipWalletRepository(makePool(query)).recordBankBalanceVerification({
+      vendorId: 10,
+      fundingMethodId: 100,
+      provider: "stripe",
+      reading: { status: "succeeded", providerAccountId: "fca_1", availableCents: 250_000, currency: "USD", asOf: occurred },
+      source: "link",
+      providerEventId: "evt_setup_1",
+      occurredAt: occurred,
+    });
+
+    expect(result).toEqual({
+      idempotentReplay: false,
+      record: {
+        verificationId: 31, vendorId: 10, fundingMethodId: 100, provider: "stripe", providerAccountId: "fca_1", status: "succeeded", source: "link",
+        availableCents: 250_000, currency: "USD", balanceAsOf: occurred, providerEventId: "evt_setup_1", createdAt: occurred,
+      },
+    });
+    expect(statements).toEqual(["BEGIN", "SELECT id", "INSERT INTO", "INSERT INTO", "COMMIT"]);
+  });
+
+  it("returns the existing reading, without a second audit row, when the provider event was already recorded", async () => {
+    const statements: string[] = [];
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      statements.push(sql.trim().split(/\s+/).slice(0, 2).join(" "));
+      if (sql.includes("FROM dropship.dropship_funding_methods")) return { rows: [{ id: 100 }] };
+      if (sql.startsWith("INSERT INTO dropship.dropship_funding_method_balance_verifications")) return { rows: [] };
+      if (sql.includes("FROM dropship.dropship_funding_method_balance_verifications")) {
+        expect(params).toEqual(["stripe", "evt_setup_1"]);
+        return { rows: [makeVerificationRow({ status: "failed", available_cents: null, currency: null, balance_as_of: null })] };
+      }
+      if (sql.includes("dropship_audit_events")) throw new Error("no audit on replay");
+      return { rows: [] };
+    });
+
+    const result = await new PgDropshipWalletRepository(makePool(query)).recordBankBalanceVerification({
+      vendorId: 10,
+      fundingMethodId: 100,
+      provider: "stripe",
+      reading: { status: "failed", providerAccountId: "fca_1", reason: "balances_permission_missing" },
+      source: "link",
+      providerEventId: "evt_setup_1",
+      occurredAt: occurred,
+    });
+
+    expect(result).toMatchObject({ idempotentReplay: true, record: { verificationId: 31, status: "failed", availableCents: null } });
+    expect(statements.at(-1)).toBe("COMMIT");
+  });
+
+  it("refuses to record a reading for a funding method that is not the vendor's", async () => {
+    const query = vi.fn(async (sql: string) => {
+      if (sql.includes("FROM dropship.dropship_funding_methods")) return { rows: [] };
+      return { rows: [] };
+    });
+
+    await expect(new PgDropshipWalletRepository(makePool(query)).recordBankBalanceVerification({
+      vendorId: 10,
+      fundingMethodId: 100,
+      provider: "stripe",
+      reading: { status: "pending", providerAccountId: "fca_1", nextRefreshAvailableAt: null },
+      source: "refresh",
+      providerEventId: null,
+      occurredAt: occurred,
+    })).rejects.toMatchObject({ code: "DROPSHIP_FUNDING_METHOD_NOT_FOUND" });
+    expect(query.mock.calls.map((call) => String(call[0]).trim().split(/\s+/)[0])).toEqual(["BEGIN", "SELECT", "ROLLBACK"]);
+  });
+
+  it("finds the bank account linked to a provider account through its metadata", async () => {
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      expect(sql).toContain("WHERE rail = 'stripe_ach'");
+      expect(params).toEqual(["stripe", "financialConnectionsAccountId", "fca_1"]);
+      return { rows: [{
+        id: 100, vendor_id: 10, rail: "stripe_ach", status: "active", provider_customer_id: "cus_1", provider_payment_method_id: "pm_bank",
+        usdc_wallet_address: null, display_label: "ACH ending in 6789", is_default: false,
+        metadata: { provider: "stripe", financialConnectionsAccountId: "fca_1" }, created_at: occurred, updated_at: occurred,
+      }] };
+    });
+
+    const method = await new PgDropshipWalletRepository(makePool(query)).findFundingMethodByProviderAccount({ provider: "stripe", providerAccountId: "fca_1" });
+
+    expect(method).toMatchObject({ fundingMethodId: 100, vendorId: 10, rail: "stripe_ach", metadata: { financialConnectionsAccountId: "fca_1" } });
+  });
+});

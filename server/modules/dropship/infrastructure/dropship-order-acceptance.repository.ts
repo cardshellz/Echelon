@@ -4,6 +4,13 @@ import { pool as defaultPool } from "../../../db";
 import { DROPSHIP_DEFAULT_PAYMENT_HOLD_TIMEOUT_MINUTES } from "../../../../shared/schema/dropship.schema";
 import { DropshipError } from "../domain/errors";
 import { vendorOrderAdmissionFor } from "../domain/vendor-standing";
+import {
+  decideAcceptanceFunding,
+  type DropshipAcceptanceFundingDecision,
+  type DropshipAdvanceContext,
+  type DropshipAdvanceRefusal,
+} from "../domain/acceptance-funding";
+import { loadAdvancePolicyWithClient, loadAdvanceSourcesWithClient } from "./dropship-advance.reader";
 import { resolveAcceptanceUnitCost } from "../domain/order-acceptance-cost";
 import { isDropshipStoreConnectionLaunchReady } from "../domain/store-connection";
 import type { NormalizedDropshipOrderPayload } from "../application/dropship-order-intake-service";
@@ -22,6 +29,7 @@ import {
   type DropshipAcceptanceVendorContext,
   type DropshipAcceptanceWalletState,
   type DropshipCanonicalOrderAcceptancePreparation,
+  type DropshipOrderAcceptanceAdvanceSummary,
   type DropshipOrderAcceptanceInput,
   type DropshipOrderAcceptancePlan,
   type DropshipOrderAcceptanceRepository,
@@ -357,22 +365,9 @@ async function acceptOrderWithClient(
       plan,
       input,
       wallet,
+      shortfall: plan.funding.outcome === "payment_hold" ? plan.funding.shortfall : null,
     });
-    return {
-      outcome: "payment_hold",
-      intakeId: plan.intakeId,
-      vendorId: plan.vendorId,
-      storeConnectionId: plan.storeConnectionId,
-      shippingQuoteSnapshotId: plan.shippingQuoteSnapshotId,
-      omsOrderId: null,
-      walletLedgerEntryId: null,
-      economicsSnapshotId: null,
-      totalDebitCents: plan.totalDebitCents,
-      currency: plan.currency,
-      paymentHoldExpiresAt: plan.paymentHoldExpiresAt,
-      paymentHoldReason: plan.paymentHoldReason,
-      idempotentReplay: false,
-    };
+    return paymentHoldResult(plan);
   }
 
   const omsOrderId = await createOmsOrderWithClient(client, plan, intake);
@@ -392,11 +387,13 @@ async function acceptOrderWithClient(
     inventoryLevels,
     omsOrderId,
   });
-  const walletLedgerEntryId = await debitWalletWithClient(client, {
+  const debit = await debitWalletWithClient(client, {
     plan,
     wallet,
     input,
+    funding: plan.funding,
   });
+  const walletLedgerEntryId = debit.ledgerEntryId;
   const economicsSnapshotId = await createEconomicsSnapshotWithClient(client, {
     plan,
     vendor,
@@ -417,6 +414,7 @@ async function acceptOrderWithClient(
       walletLedgerEntryId,
       economicsSnapshotId,
       totalDebitCents: plan.totalDebitCents,
+      advance: debit.advance,
       requestHash: input.requestHash,
     },
   });
@@ -434,6 +432,7 @@ async function acceptOrderWithClient(
     currency: plan.currency,
     paymentHoldExpiresAt: null,
     paymentHoldReason: null,
+    advance: debit.advance,
     idempotentReplay: false,
   };
 }
@@ -507,13 +506,19 @@ async function prepareCanonicalOrderWithClient(
         status: vendor.vendorStatus,
         standingReason: vendor.vendorStandingReason,
       }) === "hold";
-      if (heldForStanding || wallet.availableBalanceCents < plan.totalDebitCents) {
+      const funding = decideAcceptanceFunding({
+        availableBalanceCents: wallet.availableBalanceCents,
+        totalDebitCents: plan.totalDebitCents,
+        standingHold: heldForStanding,
+        advance: wallet.advance,
+      });
+      if (funding.outcome === "payment_hold") {
         return {
           ...paymentHoldResult({
             ...plan,
             outcome: "payment_hold",
             paymentHoldExpiresAt: intake.paymentHoldExpiresAt,
-            paymentHoldReason: heldForStanding ? "vendor_paused" : "insufficient_balance",
+            paymentHoldReason: funding.reason,
           }),
           idempotentReplay: true,
         };
@@ -565,7 +570,12 @@ async function prepareCanonicalOrderWithClient(
     "canonical_claim",
   );
   if (plan.outcome === "payment_hold") {
-    await markIntakePaymentHoldWithClient(client, { plan, input, wallet });
+    await markIntakePaymentHoldWithClient(client, {
+      plan,
+      input,
+      wallet,
+      shortfall: plan.funding.outcome === "payment_hold" ? plan.funding.shortfall : null,
+    });
     return paymentHoldResult(plan);
   }
 
@@ -751,7 +761,15 @@ async function finalizeCanonicalOrderWithClient(
     status: vendor.vendorStatus,
     standingReason: vendor.vendorStandingReason,
   }) === "hold";
-  if (paymentHoldExpired || heldForStanding || wallet.availableBalanceCents < plan.totalDebitCents) {
+  // The funding decision is made again here, from the wallet as it is now:
+  // a pending credit may have settled or failed since the order was staged.
+  const funding = decideAcceptanceFunding({
+    availableBalanceCents: wallet.availableBalanceCents,
+    totalDebitCents: plan.totalDebitCents,
+    standingHold: heldForStanding,
+    advance: wallet.advance,
+  });
+  if (paymentHoldExpired || funding.outcome === "payment_hold") {
     const timeoutMinutes = await loadPaymentHoldTimeoutWithClient(client, input.vendorId);
     const paymentHoldPlan: AcceptanceFinancialPlan = {
       ...plan,
@@ -760,7 +778,12 @@ async function finalizeCanonicalOrderWithClient(
         ?? new Date(input.acceptedAt.getTime() + normalizePositiveMinutes(timeoutMinutes) * 60_000),
       paymentHoldReason: heldForStanding ? "vendor_paused" : "insufficient_balance",
     };
-    await markIntakePaymentHoldWithClient(client, { plan: paymentHoldPlan, input: stagedInput, wallet });
+    await markIntakePaymentHoldWithClient(client, {
+      plan: paymentHoldPlan,
+      input: stagedInput,
+      wallet,
+      shortfall: funding.outcome === "payment_hold" ? funding.shortfall : null,
+    });
     await markCanonicalCompensationPendingWithClient(
       client,
       stage,
@@ -789,7 +812,8 @@ async function finalizeCanonicalOrderWithClient(
     return paymentHoldResult(paymentHoldPlan);
   }
 
-  const walletLedgerEntryId = await debitWalletWithClient(client, { plan, wallet, input: stagedInput });
+  const debit = await debitWalletWithClient(client, { plan, wallet, input: stagedInput, funding });
+  const walletLedgerEntryId = debit.ledgerEntryId;
   const economicsSnapshotId = await createEconomicsSnapshotWithClient(client, {
     plan,
     vendor: {
@@ -828,6 +852,7 @@ async function finalizeCanonicalOrderWithClient(
       walletLedgerEntryId,
       economicsSnapshotId,
       totalDebitCents: plan.totalDebitCents,
+      advance: debit.advance,
       requestHash: input.requestHash,
       inventoryAuthority: "canonical",
     },
@@ -845,6 +870,7 @@ async function finalizeCanonicalOrderWithClient(
     currency: plan.currency,
     paymentHoldExpiresAt: null,
     paymentHoldReason: null,
+    advance: debit.advance,
     idempotentReplay: false,
   };
 }
@@ -1509,6 +1535,9 @@ async function replayAcceptedOrderWithClient(
     currency: economics.currency,
     paymentHoldExpiresAt: null,
     paymentHoldReason: null,
+    // The advance, like the hold reason, is not re-derived on a replay; the
+    // ledger rows of the original acceptance are the record.
+    advance: null,
     idempotentReplay: true,
   };
 }
@@ -1837,7 +1866,26 @@ async function getOrCreateWalletForUpdate(
     availableBalanceCents: toSafeInteger(row.available_balance_cents, "available_balance_cents"),
     pendingBalanceCents: toSafeInteger(row.pending_balance_cents, "pending_balance_cents"),
     currency: row.currency,
+    advance: await loadAdvanceContextWithClient(client, { vendorId: input.vendorId, walletAccountId: row.id }),
   };
+}
+
+/**
+ * The facts the pending-ACH advance is decided from, read on this client
+ * under the wallet row lock just taken, so the decision and the debit see one
+ * snapshot. Null when the policy is unreadable: nothing is advanced, and
+ * orders the available balance covers still flow.
+ */
+async function loadAdvanceContextWithClient(
+  client: PoolClient,
+  input: { vendorId: number; walletAccountId: number },
+): Promise<DropshipAdvanceContext | null> {
+  const policy = await loadAdvancePolicyWithClient(client, input.vendorId);
+  if (!policy) {
+    return null;
+  }
+  const sources = await loadAdvanceSourcesWithClient(client, input);
+  return { policy, sources };
 }
 
 /**
@@ -1885,6 +1933,8 @@ async function markIntakePaymentHoldWithClient(
     plan: AcceptanceFinancialPlan;
     input: DropshipOrderAcceptanceInput;
     wallet: DropshipAcceptanceWalletState;
+    /** What the order was short by and why pending money did not cover it; null for a standing hold. */
+    shortfall: { gapCents: number; advanceRefusal: DropshipAdvanceRefusal } | null;
   },
 ): Promise<void> {
   await client.query(
@@ -1910,6 +1960,7 @@ async function markIntakePaymentHoldWithClient(
       availableBalanceCents: input.wallet.availableBalanceCents,
       pendingBalanceCents: input.wallet.pendingBalanceCents,
       paymentHoldExpiresAt: input.plan.paymentHoldExpiresAt?.toISOString() ?? null,
+      shortfall: input.shortfall,
       requestHash: input.input.requestHash,
     },
   });
@@ -2093,16 +2144,44 @@ function validateInventoryAvailability(
   }
 }
 
+interface WalletDebitOutcome {
+  ledgerEntryId: number;
+  advance: DropshipOrderAcceptanceAdvanceSummary | null;
+}
+
+/**
+ * The order debit, and the advance fee when pending money paid part of it.
+ *
+ * Both rows post in this transaction under the wallet row lock. The available
+ * balance may end negative only by what the funding decision allowed: the
+ * eligible pending credits, never past the cap, fee included. That bound is
+ * checked again here against the same locked balances the decision was made
+ * from, so a caller that hands in a decision for another wallet state cannot
+ * overdraw. The fee row references the same intake under its own reference
+ * type (the ledger's reference index is unique) and its own idempotency key.
+ */
 async function debitWalletWithClient(
   client: PoolClient,
   input: {
     plan: AcceptanceFinancialPlan;
     wallet: DropshipAcceptanceWalletState;
     input: DropshipOrderAcceptanceInput;
+    funding: DropshipAcceptanceFundingDecision;
   },
-): Promise<number> {
-  const nextAvailableBalanceCents = input.wallet.availableBalanceCents - input.plan.totalDebitCents;
-  if (nextAvailableBalanceCents < 0) {
+): Promise<WalletDebitOutcome> {
+  if (input.funding.outcome !== "accepted") {
+    throw new DropshipError(
+      "DROPSHIP_WALLET_DEBIT_WITHOUT_FUNDING",
+      "Dropship wallet debit was attempted for an order the funding decision holds.",
+      { intakeId: input.plan.intakeId, walletAccountId: input.wallet.walletAccountId, classification: "fatal" },
+    );
+  }
+  const advance = input.funding.source === "advance" ? input.funding.advance : null;
+  const feeCents = advance?.feeCents ?? 0;
+  const availableAfterDebitCents = input.wallet.availableBalanceCents - input.plan.totalDebitCents;
+  const availableAfterFeeCents = availableAfterDebitCents - feeCents;
+  const overdraftFloorCents = advance ? -Math.min(advance.eligiblePendingCents, advance.capCents) : 0;
+  if (availableAfterFeeCents < overdraftFloorCents) {
     throw new DropshipError(
       "DROPSHIP_WALLET_INSUFFICIENT_FUNDS",
       "Dropship wallet has insufficient available funds for order acceptance.",
@@ -2110,7 +2189,8 @@ async function debitWalletWithClient(
         intakeId: input.plan.intakeId,
         walletAccountId: input.wallet.walletAccountId,
         availableBalanceCents: input.wallet.availableBalanceCents,
-        requiredCents: input.plan.totalDebitCents,
+        requiredCents: input.plan.totalDebitCents + feeCents,
+        overdraftFloorCents,
       },
     );
   }
@@ -2123,10 +2203,11 @@ async function debitWalletWithClient(
     [
       input.wallet.walletAccountId,
       input.plan.vendorId,
-      nextAvailableBalanceCents,
+      availableAfterFeeCents,
       input.input.acceptedAt,
     ],
   );
+  const orderDebitKey = buildWalletLedgerIdempotencyKey(input.plan.intakeId, input.input.idempotencyKey);
   const result = await client.query<WalletLedgerIdRow>(
     `INSERT INTO dropship.dropship_wallet_ledger
       (wallet_account_id, vendor_id, type, status, amount_cents, currency,
@@ -2141,10 +2222,10 @@ async function debitWalletWithClient(
       input.plan.vendorId,
       -input.plan.totalDebitCents,
       input.plan.currency,
-      nextAvailableBalanceCents,
+      availableAfterDebitCents,
       input.wallet.pendingBalanceCents,
       String(input.plan.intakeId),
-      buildWalletLedgerIdempotencyKey(input.plan.intakeId, input.input.idempotencyKey),
+      orderDebitKey,
       JSON.stringify({
         requestHash: input.input.requestHash,
         submittedIdempotencyKey: input.input.idempotencyKey,
@@ -2157,6 +2238,21 @@ async function debitWalletWithClient(
         pricingSnapshotVersion: DROPSHIP_PRICING_SNAPSHOT_VERSION,
         costAuthority: "shellz_club_ops_product_cost",
         costEvidenceHash: input.plan.costEvidenceHash,
+        // And, when pending money paid part of it, exactly what was advanced
+        // against what, so the negative balance it leaves is explained.
+        advance: advance
+          ? {
+              advanceCents: advance.advanceCents,
+              feeCents: advance.feeCents,
+              feeBps: advance.feeBps,
+              capCents: advance.capCents,
+              capSource: advance.capSource,
+              eligiblePendingCents: advance.eligiblePendingCents,
+              exposureBeforeCents: advance.exposureBeforeCents,
+              exposureAfterCents: advance.exposureAfterCents,
+              fundingMethodIds: advance.fundingMethodIds,
+            }
+          : null,
       }),
       input.input.acceptedAt,
     ],
@@ -2175,12 +2271,84 @@ async function debitWalletWithClient(
         intakeId: input.plan.intakeId,
         walletAccountId: input.wallet.walletAccountId,
         amountCents: -input.plan.totalDebitCents,
-        availableBalanceAfterCents: nextAvailableBalanceCents,
+        availableBalanceBeforeCents: input.wallet.availableBalanceCents,
+        availableBalanceAfterCents: availableAfterDebitCents,
+        advanceCents: advance?.advanceCents ?? null,
       }),
       input.input.acceptedAt,
     ],
   );
-  return ledgerEntryId;
+  if (!advance) {
+    return { ledgerEntryId, advance: null };
+  }
+  // A zero fee (a zero-rate policy) posts no row: the ledger refuses a zero
+  // amount, and the order debit's metadata already records the advance.
+  let feeLedgerEntryId: number | null = null;
+  if (feeCents > 0) {
+    const fee = await client.query<WalletLedgerIdRow>(
+      `INSERT INTO dropship.dropship_wallet_ledger
+        (wallet_account_id, vendor_id, type, status, amount_cents, currency,
+         available_balance_after_cents, pending_balance_after_cents,
+         reference_type, reference_id, idempotency_key, metadata, created_at, settled_at)
+       VALUES ($1, $2, 'advance_fee', 'settled', $3, $4,
+         $5, $6,
+         'order_intake_advance_fee', $7, $8, $9::jsonb, $10, $10)
+       RETURNING id`,
+      [
+        input.wallet.walletAccountId,
+        input.plan.vendorId,
+        -feeCents,
+        input.plan.currency,
+        availableAfterFeeCents,
+        input.wallet.pendingBalanceCents,
+        String(input.plan.intakeId),
+        `${orderDebitKey}:advance-fee`,
+        JSON.stringify({
+          intakeId: input.plan.intakeId,
+          orderDebitLedgerEntryId: ledgerEntryId,
+          advanceCents: advance.advanceCents,
+          feeBps: advance.feeBps,
+          feeCents: advance.feeCents,
+          capCents: advance.capCents,
+          capSource: advance.capSource,
+          fundingMethodIds: advance.fundingMethodIds,
+        }),
+        input.input.acceptedAt,
+      ],
+    );
+    feeLedgerEntryId = requiredRow(fee.rows[0], "Dropship wallet advance fee insert did not return a row.").id;
+    await client.query(
+      `INSERT INTO dropship.dropship_audit_events
+        (vendor_id, entity_type, entity_id, event_type,
+         actor_type, actor_id, severity, payload, created_at)
+       VALUES ($1, 'dropship_wallet_ledger', $2, 'wallet_advance_fee_charged',
+               'system', NULL, 'info', $3::jsonb, $4)`,
+      [
+        input.plan.vendorId,
+        String(feeLedgerEntryId),
+        JSON.stringify({
+          intakeId: input.plan.intakeId,
+          walletAccountId: input.wallet.walletAccountId,
+          orderDebitLedgerEntryId: ledgerEntryId,
+          amountCents: -feeCents,
+          advanceCents: advance.advanceCents,
+          feeBps: advance.feeBps,
+          availableBalanceBeforeCents: availableAfterDebitCents,
+          availableBalanceAfterCents: availableAfterFeeCents,
+        }),
+        input.input.acceptedAt,
+      ],
+    );
+  }
+  return {
+    ledgerEntryId,
+    advance: {
+      advanceCents: advance.advanceCents,
+      feeCents: advance.feeCents,
+      feeBps: advance.feeBps,
+      feeLedgerEntryId,
+    },
+  };
 }
 
 async function createEconomicsSnapshotWithClient(
@@ -2791,6 +2959,7 @@ function paymentHoldResult(plan: AcceptanceFinancialPlan): DropshipOrderAcceptan
     currency: plan.currency,
     paymentHoldExpiresAt: plan.paymentHoldExpiresAt,
     paymentHoldReason: plan.paymentHoldReason,
+    advance: null,
     idempotentReplay: false,
   };
 }

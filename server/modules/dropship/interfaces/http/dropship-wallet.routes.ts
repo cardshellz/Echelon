@@ -125,15 +125,23 @@ export function registerDropshipWalletRoutes(
           signature,
         });
         if (event.kind === "funding_method_setup_completed") {
-          await service.registerFundingMethod(event.fundingMethod);
+          const registered = await service.registerFundingMethod(event.fundingMethod);
+          await verifyBankBalanceSafely(service, registered, event.providerEventId);
         } else if (event.kind === "wallet_funding_recorded") {
           const fundingMethod = await service.registerFundingMethod(event.fundingMethod);
           await service.creditFunding({
             ...event.fundingCredit,
             fundingMethodId: fundingMethod.fundingMethod.fundingMethodId,
           });
+          await verifyBankBalanceSafely(service, fundingMethod, event.providerEventId);
         } else if (event.kind === "wallet_funding_failed") {
           await service.recordWalletFundingFailure(event.failure);
+        } else if (event.kind === "bank_balance_refreshed") {
+          await service.recordBankBalanceRefresh({
+            providerAccountId: event.providerAccountId,
+            snapshot: event.snapshot,
+            providerEventId: event.providerEventId,
+          });
         }
         return res.json({
           received: true,
@@ -302,7 +310,49 @@ function serializeWalletOverview(wallet: Awaited<ReturnType<DropshipWalletServic
     recentLedger: wallet.recentLedger,
     cardFundingFeeBps: wallet.cardFundingFeeBps,
     usdcBaseDepositAddress: wallet.usdcBaseDepositAddress,
+    // The pending-ACH advance position, exactly as the domain assessed it:
+    // integer cents, booleans and reason codes; nothing here is a date.
+    advance: wallet.advance,
   };
+}
+
+/**
+ * A bank account just linked: read its balance for the pending-ACH advance.
+ * Only a registration that created the method reads (a replayed event, or a
+ * later transfer from the same account, registers nothing new), so each bank
+ * account is read once at link time. The registration is the webhook's
+ * durable work and has committed; this read is best-effort and must not turn
+ * the acknowledgement into a 5xx (Stripe would only replay an event whose
+ * work is done). The service logs every outcome; an unexpected throw is
+ * logged here and the account stays "balance not verified" until a later
+ * reading.
+ */
+async function verifyBankBalanceSafely(
+  service: DropshipWalletService,
+  registered: { fundingMethod: { vendorId: number; fundingMethodId: number; rail: string }; idempotentReplay: boolean },
+  providerEventId: string,
+): Promise<void> {
+  const fundingMethod = registered.fundingMethod;
+  if (fundingMethod.rail !== "stripe_ach" || registered.idempotentReplay) return;
+  try {
+    await service.verifyBankBalanceForFundingMethod({
+      vendorId: fundingMethod.vendorId,
+      fundingMethodId: fundingMethod.fundingMethodId,
+      source: "link",
+      providerEventId,
+    });
+  } catch (error) {
+    walletRouteLogger.warn({
+      code: "DROPSHIP_BANK_BALANCE_VERIFICATION_UNHANDLED",
+      message: "Dropship bank balance verification threw after the funding method was registered; the account stays unverified.",
+      context: {
+        vendorId: fundingMethod.vendorId,
+        fundingMethodId: fundingMethod.fundingMethodId,
+        providerEventId,
+        error: error instanceof Error ? error.message : String(error),
+      },
+    });
+  }
 }
 
 /**

@@ -7,6 +7,12 @@ import { DROPSHIP_DEFAULT_PAYMENT_HOLD_TIMEOUT_MINUTES } from "../../../../share
 import { DropshipError } from "../domain/errors";
 import { vendorOrderAdmissionFor } from "../domain/vendor-standing";
 import {
+  decideAcceptanceFunding,
+  type DropshipAcceptanceFundingDecision,
+  type DropshipAdvanceContext,
+} from "../domain/acceptance-funding";
+import { formatFeeRate } from "../../../../shared/dropship/wallet-funding-fee";
+import {
   ACCEPTANCE_COST_AUTHORITY,
   buildAcceptanceCostEvidenceHash,
   type DropshipAcceptanceProductCostEvidence,
@@ -68,6 +74,16 @@ export interface DropshipOrderAcceptanceInput extends AcceptDropshipOrderInput {
   acceptedAt: Date;
 }
 
+/** What an acceptance drew from pending ACH (funding design phase 3). */
+export interface DropshipOrderAcceptanceAdvanceSummary {
+  /** The part of the debit paid by bank transfers still settling. */
+  advanceCents: number;
+  feeCents: number;
+  feeBps: number;
+  /** The `advance_fee` ledger row; null when the fee came to zero. */
+  feeLedgerEntryId: number | null;
+}
+
 export interface DropshipOrderAcceptanceResult {
   outcome: DropshipOrderAcceptanceOutcome;
   intakeId: number;
@@ -82,6 +98,11 @@ export interface DropshipOrderAcceptanceResult {
   paymentHoldExpiresAt: Date | null;
   /** Set when outcome is `payment_hold` and the reason is known; null on replays that do not re-derive it. */
   paymentHoldReason: DropshipPaymentHoldReason | null;
+  /**
+   * The pending-ACH advance this acceptance drew; null when the available
+   * balance paid, the order is held, or this is a replay (not re-derived).
+   */
+  advance: DropshipOrderAcceptanceAdvanceSummary | null;
   idempotentReplay: boolean;
 }
 
@@ -218,6 +239,12 @@ export interface DropshipAcceptanceWalletState {
   availableBalanceCents: number;
   pendingBalanceCents: number;
   currency: string;
+  /**
+   * The facts the pending-ACH advance is decided from, read under the same
+   * wallet lock as the balances. Null when they could not be read: the order
+   * then never advances, it holds (domain/acceptance-funding.ts).
+   */
+  advance: DropshipAdvanceContext | null;
 }
 
 export interface DropshipAcceptancePlanningInput {
@@ -260,6 +287,8 @@ export interface DropshipOrderAcceptancePlan {
   totalDebitCents: number;
   paymentHoldExpiresAt: Date | null;
   paymentHoldReason: DropshipPaymentHoldReason | null;
+  /** How the debit is funded, or why it is not (the waterfall in domain/acceptance-funding.ts). */
+  funding: DropshipAcceptanceFundingDecision;
   /** Content hash of the cost inputs that produced the debit (see order-acceptance-cost). */
   costEvidenceHash: string;
   pricingSnapshot: Record<string, unknown>;
@@ -311,6 +340,8 @@ export class DropshipOrderAcceptanceService {
         walletLedgerEntryId: result.walletLedgerEntryId,
         economicsSnapshotId: result.economicsSnapshotId,
         totalDebitCents: result.totalDebitCents,
+        advanceCents: result.advance?.advanceCents ?? null,
+        advanceFeeCents: result.advance?.feeCents ?? null,
         idempotentReplay: result.idempotentReplay,
       },
     });
@@ -429,7 +460,7 @@ export class DropshipOrderAcceptanceService {
       channels: ["email", "in_app"],
       title: accepted ? "Dropship order accepted" : "Dropship order needs wallet funding",
       message: accepted
-        ? `Order intake ${result.intakeId} was accepted into fulfillment for ${formatNotificationCurrency(result.totalDebitCents, result.currency)}.`
+        ? `Order intake ${result.intakeId} was accepted into fulfillment for ${formatNotificationCurrency(result.totalDebitCents, result.currency)}.${advanceSentenceFor(result)}`
         : result.paymentHoldReason === "vendor_paused"
           ? `Order intake ${result.intakeId} is waiting because selling is paused. Fund your wallet back to its minimum before ${deadline} and it will be accepted for ${formatNotificationCurrency(result.totalDebitCents, result.currency)}.`
           : `Order intake ${result.intakeId} is on payment hold and requires ${formatNotificationCurrency(result.totalDebitCents, result.currency)} before ${deadline}.${reloadSentenceFor(reload)}`,
@@ -445,6 +476,7 @@ export class DropshipOrderAcceptanceService {
         currency: result.currency,
         paymentHoldExpiresAt: result.paymentHoldExpiresAt?.toISOString() ?? null,
         paymentHoldReason: result.paymentHoldReason,
+        advance: result.advance,
         reload,
       },
       idempotencyKey: `order-acceptance:${result.intakeId}:${result.outcome}`,
@@ -459,6 +491,15 @@ export class DropshipOrderAcceptanceService {
       },
     });
   }
+}
+
+/** The sentence an acceptance notice adds when a bank transfer still on its way paid part of the order. */
+function advanceSentenceFor(result: DropshipOrderAcceptanceResult): string {
+  if (!result.advance) return "";
+  const fee = result.advance.feeCents > 0
+    ? ` A ${formatFeeRate(result.advance.feeBps)} fee of ${formatNotificationCurrency(result.advance.feeCents, result.currency)} was charged for it.`
+    : "";
+  return ` ${formatNotificationCurrency(result.advance.advanceCents, result.currency)} of it was covered by a bank transfer still on its way.${fee}`;
 }
 
 /** The sentence a hold notice adds about the top-up tried in the same pass. */
@@ -536,16 +577,23 @@ export function buildDropshipOrderAcceptancePlan(
   }
 
   const activePaymentHoldExpiresAt = normalizeActivePaymentHoldExpiresAt(input.intake, input.acceptedAt);
-  // A vendor paused for funding is held whatever the balance: no order is
-  // accepted until the wallet is back to its minimum and the vendor resumes.
-  const paymentHoldReason: DropshipPaymentHoldReason | null = vendorOrderAdmissionFor({
-    status: input.vendor.vendorStatus,
-    standingReason: input.vendor.vendorStandingReason,
-  }) === "hold"
-    ? "vendor_paused"
-    : input.wallet.availableBalanceCents >= totalDebitCents
-      ? null
-      : "insufficient_balance";
+  // The funding waterfall (domain/acceptance-funding.ts): a vendor paused for
+  // funding is held whatever the balance, until the wallet is back to its
+  // minimum and the vendor resumes. Otherwise available money pays; then
+  // eligible pending ACH is advanced against; else the order holds and the
+  // processing pass tries the card on file.
+  const funding = decideAcceptanceFunding({
+    availableBalanceCents: input.wallet.availableBalanceCents,
+    totalDebitCents,
+    standingHold: vendorOrderAdmissionFor({
+      status: input.vendor.vendorStatus,
+      standingReason: input.vendor.vendorStandingReason,
+    }) === "hold",
+    advance: input.wallet.advance,
+  });
+  const paymentHoldReason: DropshipPaymentHoldReason | null = funding.outcome === "payment_hold"
+    ? funding.reason
+    : null;
   const paymentHoldExpiresAt = paymentHoldReason === null
     ? null
     : activePaymentHoldExpiresAt
@@ -573,6 +621,7 @@ export function buildDropshipOrderAcceptancePlan(
     totalDebitCents,
     paymentHoldExpiresAt,
     paymentHoldReason,
+    funding,
     costEvidenceHash,
     pricingSnapshot: {
       version: DROPSHIP_PRICING_SNAPSHOT_VERSION,

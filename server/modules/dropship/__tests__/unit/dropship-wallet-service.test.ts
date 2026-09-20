@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { DropshipVendorStatus } from "../../../../../shared/schema/dropship.schema";
 import { DropshipError } from "../../domain/errors";
+import type { DropshipAdvanceContext } from "../../domain/acceptance-funding";
 import type {
   DropshipWalletPolicyLimits,
   DropshipWalletPolicyResolver,
@@ -25,6 +26,9 @@ import {
   type CreateDropshipWalletOrderDebitInput,
   type DropshipAutoReloadSettingRecord,
   type DropshipAutoReloadResult,
+  type DropshipBankBalanceSnapshot,
+  type DropshipBankBalanceVerificationRecord,
+  type RecordDropshipBankBalanceVerificationRepositoryInput,
   type DropshipConfirmedUsdcFundingResult,
   type DropshipFundingMethodMutationResult,
   type DropshipFundingMethodRecord,
@@ -1489,6 +1493,9 @@ class FakeNotificationSender {
 }
 
 class FakeFundingProvider implements DropshipWalletFundingProvider {
+  /** What a bank balance read reports; USD by default so the wallet's currency resolves. */
+  bankBalanceSnapshot: DropshipBankBalanceSnapshot = { status: "succeeded", availableByCurrency: { usd: 123_456 }, asOf: now };
+  bankBalanceReads: string[] = [];
   fundingSessionInputs: Array<Parameters<DropshipWalletFundingProvider["createStripeWalletFundingSession"]>[0]> = [];
   paymentIntentInputs: Array<Parameters<DropshipWalletFundingProvider["createStripeAutoReloadPaymentIntent"]>[0]> = [];
   /** When set, the fake reports this charged amount instead of what it was asked for. */
@@ -1538,6 +1545,11 @@ class FakeFundingProvider implements DropshipWalletFundingProvider {
       externalTransactionId: input.rail === "stripe_ach" ? null : `ch_auto_${input.amountCents}`,
     };
   }
+
+  async readBankBalance(input: { providerAccountId: string; now: Date }): Promise<DropshipBankBalanceSnapshot> {
+    this.bankBalanceReads.push(input.providerAccountId);
+    return this.bankBalanceSnapshot;
+  }
 }
 
 class FakeVendorProvisioningService {
@@ -1549,6 +1561,170 @@ class FakeVendorProvisioningService {
     };
   }
 }
+
+describe("DropshipWalletService advance and bank balance (funding design phase 3)", () => {
+  let repository: FakeWalletRepository;
+  let fundingProvider: FakeFundingProvider;
+  let logs: Array<DropshipLogEvent & { level: "info" | "warn" | "error" }>;
+  let service: DropshipWalletService;
+
+  beforeEach(() => {
+    repository = new FakeWalletRepository();
+    fundingProvider = new FakeFundingProvider();
+    logs = [];
+    service = new DropshipWalletService({
+      vendorProvisioning: new FakeVendorProvisioningService() as unknown as DropshipVendorProvisioningService,
+      repository,
+      fundingProvider,
+      notificationSender: new FakeNotificationSender(),
+      clock: { now: () => now },
+      logger: {
+        info: (event) => logs.push({ ...event, level: "info" }),
+        warn: (event) => logs.push({ ...event, level: "warn" }),
+        error: (event) => logs.push({ ...event, level: "error" }),
+      },
+      cardFundingFeeBps: 300,
+    });
+  });
+
+  function bankAccount(overrides: Partial<DropshipFundingMethodRecord> = {}): DropshipFundingMethodRecord {
+    return makeFundingMethod({
+      fundingMethodId: 100,
+      rail: "stripe_ach",
+      displayLabel: "ACH ending in 6789",
+      isDefault: false,
+      metadata: { provider: "stripe", accountHolderType: "company", financialConnectionsAccountId: "fca_1" },
+      ...overrides,
+    });
+  }
+
+  it("charges the card the vendor's limit when it sits between the order gap and back-to-minimum", async () => {
+    repository.account = { ...makeAccount(), availableBalanceCents: 2_000 };
+    repository.autoReload = makeAutoReloadSetting({ fundingMethodId: 99, minimumBalanceCents: 10_000, maxSingleReloadCents: 4_000 });
+
+    const result = await service.handleAutoReload({
+      vendorId: 10,
+      reason: "payment_hold",
+      requiredBalanceCents: 5_000,
+      intakeId: 456,
+      idempotencyKey: "auto-reload-intake-456",
+    });
+
+    // Gap 3,000; back to minimum 8,000; limit 4,000 wins and still covers the order.
+    expect(result).toMatchObject({ outcome: "funding_created", fundingMethodId: 99, amountCents: 4_000, fundingStatus: "settled" });
+    expect(repository.account.availableBalanceCents).toBe(6_000);
+  });
+
+  it("composes the vendor's advance position into the wallet view, and reports its absence", async () => {
+    repository.account = { ...makeAccount(), availableBalanceCents: -5_000 };
+    repository.advanceContext = {
+      policy: { feeBps: 100, capCents: 50_000, capSource: "policy" },
+      sources: [{ fundingMethodId: 100, pendingCents: 40_000, accountHolderType: "company", balanceVerified: true, priorPullSettled: true }],
+    };
+
+    const view = await service.getWalletForVendor(10);
+    expect(view.advance).toMatchObject({
+      eligiblePendingCents: 40_000,
+      allowanceCents: 40_000,
+      exposureCents: 5_000,
+      headroomCents: 35_000,
+      reasons: [],
+      policy: { feeBps: 100, capCents: 50_000, capSource: "policy" },
+    });
+
+    repository.advanceContext = null;
+    expect((await service.getWalletForVendor(10)).advance).toBeNull();
+  });
+
+  it("reads and records the balance behind a linked bank account, once per provider event", async () => {
+    repository.fundingMethods = [makeFundingMethod(), bankAccount()];
+
+    const first = await service.verifyBankBalanceForFundingMethod({ vendorId: 10, fundingMethodId: 100, source: "link", providerEventId: "evt_setup_1" });
+    expect(first).toMatchObject({
+      outcome: "recorded",
+      idempotentReplay: false,
+      record: { fundingMethodId: 100, providerAccountId: "fca_1", status: "succeeded", source: "link", availableCents: 123_456, currency: "USD", balanceAsOf: now },
+    });
+    expect(fundingProvider.bankBalanceReads).toEqual(["fca_1"]);
+    expect(logs.at(-1)).toMatchObject({ level: "info", code: "DROPSHIP_BANK_BALANCE_VERIFIED", context: expect.objectContaining({ availableCents: 123_456 }) });
+
+    const replay = await service.verifyBankBalanceForFundingMethod({ vendorId: 10, fundingMethodId: 100, source: "link", providerEventId: "evt_setup_1" });
+    expect(replay).toMatchObject({ outcome: "recorded", idempotentReplay: true });
+    expect(repository.verifications).toHaveLength(1);
+  });
+
+  it("leaves a card, and a bank account not linked through the provider, unverified without reading anything", async () => {
+    repository.fundingMethods = [makeFundingMethod(), bankAccount({ metadata: { provider: "stripe", accountHolderType: "company" } })];
+
+    expect(await service.verifyBankBalanceForFundingMethod({ vendorId: 10, fundingMethodId: 99, source: "link", providerEventId: "evt_1" }))
+      .toEqual({ outcome: "not_applicable", reason: "not_bank_account" });
+    expect(await service.verifyBankBalanceForFundingMethod({ vendorId: 10, fundingMethodId: 100, source: "link", providerEventId: "evt_1" }))
+      .toEqual({ outcome: "not_applicable", reason: "no_provider_account" });
+    expect(await service.verifyBankBalanceForFundingMethod({ vendorId: 10, fundingMethodId: 7, source: "link", providerEventId: "evt_1" }))
+      .toEqual({ outcome: "not_applicable", reason: "funding_method_missing" });
+    expect(fundingProvider.bankBalanceReads).toEqual([]);
+    expect(repository.verifications).toEqual([]);
+  });
+
+  it("records a failed reading when the provider reports no balance in the wallet's currency, and never throws", async () => {
+    repository.fundingMethods = [bankAccount()];
+    fundingProvider.bankBalanceSnapshot = { status: "succeeded", availableByCurrency: { eur: 500 }, asOf: now };
+
+    const outcome = await service.verifyBankBalanceForFundingMethod({ vendorId: 10, fundingMethodId: 100, source: "refresh", providerEventId: null });
+    expect(outcome).toMatchObject({ outcome: "recorded", record: { status: "failed", availableCents: null } });
+    expect(repository.verifications[0]).toMatchObject({ reading: { status: "failed", reason: "balance_currency_missing" }, source: "refresh", providerEventId: null });
+    expect(logs.at(-1)).toMatchObject({ level: "warn", code: "DROPSHIP_BANK_BALANCE_READ_FAILED" });
+
+    fundingProvider.readBankBalance = async () => { throw new Error("stripe unreachable"); };
+    const failed = await service.verifyBankBalanceForFundingMethod({ vendorId: 10, fundingMethodId: 100, source: "link", providerEventId: "evt_2" });
+    expect(failed).toEqual({ outcome: "failed", message: "stripe unreachable" });
+    expect(logs.at(-1)).toMatchObject({ level: "warn", code: "DROPSHIP_BANK_BALANCE_VERIFICATION_FAILED" });
+  });
+
+  it("tells the vendor a returned transfer leaves the balance negative when orders were paid from it", async () => {
+    const notificationSender = new FakeNotificationSender();
+    service = new DropshipWalletService({
+      vendorProvisioning: new FakeVendorProvisioningService() as unknown as DropshipVendorProvisioningService,
+      repository,
+      fundingProvider,
+      notificationSender,
+      clock: { now: () => now },
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+      cardFundingFeeBps: 300,
+    });
+    // $500 arrived pending, an order then drew $303 of it (balance -$303), and the bank returns the transfer.
+    await service.creditFunding({
+      vendorId: 10, fundingMethodId: 100, rail: "stripe_ach", status: "pending", amountCents: 50_000, currency: "USD",
+      referenceType: "stripe_payment_intent", referenceId: "pi_ach_9", idempotencyKey: "stripe-funding:pi_ach_9",
+    });
+    repository.account = { ...repository.account, availableBalanceCents: -30_300 };
+
+    const result = await service.recordWalletFundingFailure({
+      vendorId: 10, fundingMethodId: 100, rail: "stripe_ach", amountCents: 50_000, currency: "USD", provider: "stripe",
+      providerEventId: "evt_ach_returned_9", providerPaymentIntentId: "pi_ach_9", providerStatus: "requires_payment_method",
+      failureCode: "payment_intent_payment_attempt_failed", failureMessage: "The bank returned the debit.", autoReload: false,
+      idempotencyKey: "stripe-funding-failed:pi_ach_9",
+    });
+
+    expect(result.pendingCreditVoided).toBe(true);
+    expect(repository.account).toMatchObject({ availableBalanceCents: -30_300, pendingBalanceCents: 0 });
+    const notice = notificationSender.sent.at(-1);
+    expect(notice?.message).toContain("The pending credit has been removed from your balance.");
+    expect(notice?.message).toContain("Orders accepted against it leave your balance at USD -$303.00; the next wallet run collects that amount from your funding source.");
+  });
+
+  it("records a refreshed balance the provider reports against the account it belongs to, and ignores unknown accounts", async () => {
+    repository.fundingMethods = [bankAccount()];
+    const snapshot: DropshipBankBalanceSnapshot = { status: "succeeded", availableByCurrency: { usd: 90_000 }, asOf: now };
+
+    const matched = await service.recordBankBalanceRefresh({ providerAccountId: "fca_1", snapshot, providerEventId: "evt_refresh_1" });
+    expect(matched).toMatchObject({ outcome: "recorded", record: { fundingMethodId: 100, status: "succeeded", source: "webhook", availableCents: 90_000 } });
+
+    const unmatched = await service.recordBankBalanceRefresh({ providerAccountId: "fca_other", snapshot, providerEventId: "evt_refresh_2" });
+    expect(unmatched).toEqual({ outcome: "not_applicable", reason: "funding_method_missing" });
+    expect(repository.verifications).toHaveLength(1);
+  });
+});
 
 describe("resolveDropshipCardFundingFeeBps", () => {
   it("defaults to the launch rate when nothing is configured", () => {
@@ -1634,9 +1810,48 @@ class FakeWalletRepository implements DropshipWalletRepository {
   autoReload: DropshipAutoReloadSettingRecord | null = null;
   ledger: DropshipWalletLedgerRecord[] = [];
   usdcLedger: DropshipUsdcLedgerEntryRecord[] = [];
+  /** The advance facts the view composes from; null models an unreadable policy. */
+  advanceContext: DropshipAdvanceContext | null = null;
+  verifications: RecordDropshipBankBalanceVerificationRepositoryInput[] = [];
 
   async getOrCreateWalletAccount(): Promise<DropshipWalletAccountRecord> {
     return this.account;
+  }
+
+  async readAdvanceContext(): Promise<DropshipAdvanceContext | null> {
+    return this.advanceContext;
+  }
+
+  async recordBankBalanceVerification(
+    input: RecordDropshipBankBalanceVerificationRepositoryInput,
+  ): Promise<{ record: DropshipBankBalanceVerificationRecord; idempotentReplay: boolean }> {
+    const idempotentReplay = input.providerEventId !== null
+      && this.verifications.some((entry) => entry.providerEventId === input.providerEventId);
+    if (!idempotentReplay) this.verifications.push(input);
+    const reading = input.reading;
+    return {
+      record: {
+        verificationId: this.verifications.length,
+        vendorId: input.vendorId,
+        fundingMethodId: input.fundingMethodId,
+        provider: input.provider,
+        providerAccountId: reading.providerAccountId,
+        status: reading.status,
+        source: input.source,
+        availableCents: reading.status === "succeeded" ? reading.availableCents : null,
+        currency: reading.status === "succeeded" ? reading.currency : null,
+        balanceAsOf: reading.status === "succeeded" ? reading.asOf : null,
+        providerEventId: input.providerEventId,
+        createdAt: input.occurredAt,
+      },
+      idempotentReplay,
+    };
+  }
+
+  async findFundingMethodByProviderAccount(input: { provider: "stripe"; providerAccountId: string }): Promise<DropshipFundingMethodRecord | null> {
+    return this.fundingMethods.find((method) =>
+      method.rail === "stripe_ach" && method.metadata.financialConnectionsAccountId === input.providerAccountId,
+    ) ?? null;
   }
 
   async getOverview(): Promise<DropshipWalletOverview> {

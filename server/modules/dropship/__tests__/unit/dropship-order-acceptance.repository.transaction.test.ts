@@ -175,6 +175,13 @@ function baseHandlers(overrides: Partial<Record<string, RowHandler>> = {}): RowH
     // the policy-first path.
     policyTable: { match: "to_regclass('dropship.dropship_wallet_policies')", rows: [{ present: null }] },
     holdTimeout: { match: "FROM dropship.dropship_auto_reload_settings", rows: [] },
+    // The pending-ACH advance reads (dropship-advance.reader.ts) probe their
+    // relations by parameter. Absent by default, so nothing is advanced and the
+    // hold rule is the plain balance check; the advance tests make them present.
+    advanceTableProbe: { match: "to_regclass($1)", rows: () => [{ present: null }] },
+    advancePolicy: { match: "SELECT advance_fee_bps, advance_cap_cents", rows: [] },
+    creditProfile: { match: "SELECT advance_cap_override_cents", rows: [] },
+    advanceSources: { match: "FROM dropship.dropship_funding_methods m", rows: [] },
     omsOrder: { match: "INSERT INTO oms.oms_orders", rows: [{ id: 1001 }] },
     omsEvent: { match: "INSERT INTO oms.oms_order_events", rows: [] },
     omsLines: { match: "INSERT INTO oms.oms_order_lines", rows: [{ id: 2001, product_variant_id: VARIANT_ID, quantity: 2 }] },
@@ -212,6 +219,27 @@ function baseHandlers(overrides: Partial<Record<string, RowHandler>> = {}): RowH
     existingLedger: { match: "FROM dropship.dropship_wallet_ledger", rows: [] },
   };
   return Object.values({ ...defaults, ...overrides });
+}
+
+/** The advance relations present, with the launch policy (1% fee, $500 cap) and no vendor override. */
+function advancePresent(): Partial<Record<string, RowHandler>> {
+  return {
+    advanceTableProbe: { match: "to_regclass($1)", rows: (params) => [{ present: String(params[0]) }] },
+    advancePolicy: { match: "SELECT advance_fee_bps, advance_cap_cents", rows: [{ advance_fee_bps: 100, advance_cap_cents: 50_000 }] },
+    creditProfile: { match: "SELECT advance_cap_override_cents", rows: [] },
+  };
+}
+
+/** A company bank account with a verified balance, a settled earlier pull, and $500 pending. */
+function eligibleSourceRow(overrides: Record<string, unknown> = {}) {
+  return {
+    funding_method_id: 100,
+    metadata: { provider: "stripe", accountHolderType: "company", financialConnectionsAccountId: "fca_1" },
+    pending_cents: "50000",
+    prior_pull_settled: true,
+    balance_verified: true,
+    ...overrides,
+  };
 }
 
 function acceptanceInput(): DropshipOrderAcceptanceInput {
@@ -331,6 +359,97 @@ describe("PgDropshipOrderAcceptanceRepository (transaction)", () => {
     expect(omsLine.params[7]).toBe(UNIT_COST_CENTS);
     expect(omsLine.params[8]).toBe(UNIT_COST_CENTS * 2);
 
+    expect(db.calls.at(-1)?.sql).toBe("COMMIT");
+  });
+
+  it("accepts against pending ACH when the balance is short, posting the debit and the fee in one transaction", async () => {
+    const db = createFakeDb(baseHandlers({
+      ...advancePresent(),
+      walletSelect: {
+        match: "FROM dropship.dropship_wallet_accounts",
+        rows: [{ id: 1, vendor_id: 10, available_balance_cents: 1_000, pending_balance_cents: 50_000, currency: "USD", status: "active" }],
+      },
+      advanceSources: {
+        match: "FROM dropship.dropship_funding_methods m",
+        rows: (params) => {
+          expect(params).toEqual([10, 1, "stripe_ach"]);
+          return [eligibleSourceRow()];
+        },
+      },
+    }));
+    const { repository } = createRepository(db, availableCost());
+
+    const result = await repository.acceptOrder(acceptanceInput());
+
+    const expectedDebit = UNIT_COST_CENTS * 2 + SHIPPING_CENTS; // 2740
+    const expectedAdvance = expectedDebit - 1_000; // 1740: the debit less the positive balance
+    const expectedFee = 17; // 1% of 1740 = 17.4, rounded half up
+    expect(result).toMatchObject({
+      outcome: "accepted",
+      totalDebitCents: expectedDebit,
+      advance: { advanceCents: expectedAdvance, feeCents: expectedFee, feeBps: 100, feeLedgerEntryId: 77 },
+    });
+
+    // One balance write: the debit and the fee both come off available, which ends negative.
+    const walletUpdates = db.statements("UPDATE dropship.dropship_wallet_accounts");
+    expect(walletUpdates).toHaveLength(1);
+    expect(walletUpdates[0].params[2]).toBe(1_000 - expectedDebit - expectedFee);
+
+    const [orderDebit, advanceFee] = db.statements("INSERT INTO dropship.dropship_wallet_ledger");
+    expect(orderDebit.sql).toContain("'order_debit'");
+    expect(orderDebit.params[2]).toBe(-expectedDebit);
+    expect(orderDebit.params[4]).toBe(1_000 - expectedDebit);
+    expect(orderDebit.params[5]).toBe(50_000);
+    expect(JSON.parse(String(orderDebit.params[8])).advance).toEqual({
+      advanceCents: expectedAdvance,
+      feeCents: expectedFee,
+      feeBps: 100,
+      capCents: 50_000,
+      capSource: "policy",
+      eligiblePendingCents: 50_000,
+      exposureBeforeCents: 0,
+      exposureAfterCents: expectedAdvance + expectedFee,
+      fundingMethodIds: [100],
+    });
+    expect(advanceFee.sql).toContain("'advance_fee'");
+    expect(advanceFee.sql).toContain("'order_intake_advance_fee'");
+    expect(advanceFee.params[2]).toBe(-expectedFee);
+    expect(advanceFee.params[4]).toBe(1_000 - expectedDebit - expectedFee);
+    expect(String(advanceFee.params[7])).toMatch(/^order:1:[0-9a-f]{32}:advance-fee$/);
+    expect(JSON.parse(String(advanceFee.params[8]))).toMatchObject({ intakeId: 1, orderDebitLedgerEntryId: 77, advanceCents: expectedAdvance, feeBps: 100 });
+
+    const auditTypes = db.statements("INSERT INTO dropship.dropship_audit_events").map((call) => call.sql.match(/'([a-z_]+)',\s*\n\s+'system'/)?.[1] ?? call.params[3]);
+    expect(auditTypes).toContain("wallet_advance_fee_charged");
+    expect(db.calls.at(-1)?.sql).toBe("COMMIT");
+  });
+
+  it("holds the order, with the reason pending money could not be advanced, when the bank account does not qualify", async () => {
+    const db = createFakeDb(baseHandlers({
+      ...advancePresent(),
+      walletSelect: {
+        match: "FROM dropship.dropship_wallet_accounts",
+        rows: [{ id: 1, vendor_id: 10, available_balance_cents: 1_000, pending_balance_cents: 50_000, currency: "USD", status: "active" }],
+      },
+      advanceSources: {
+        match: "FROM dropship.dropship_funding_methods m",
+        rows: [eligibleSourceRow({ prior_pull_settled: false })],
+      },
+    }));
+    const { repository } = createRepository(db, availableCost());
+
+    const result = await repository.acceptOrder(acceptanceInput());
+
+    expect(result).toMatchObject({ outcome: "payment_hold", paymentHoldReason: "insufficient_balance", advance: null });
+    expect(db.statements("UPDATE dropship.dropship_wallet_accounts")).toHaveLength(0);
+    expect(db.statements("INSERT INTO dropship.dropship_wallet_ledger")).toHaveLength(0);
+    const holdAudit = db.statements("INSERT INTO dropship.dropship_audit_events")
+      .flatMap((call) => call.params.filter((param) => typeof param === "string" && param.includes('"shortfall"')))
+      .map((payload) => JSON.parse(String(payload)));
+    expect(holdAudit).toHaveLength(1);
+    expect(holdAudit[0].shortfall).toEqual({
+      gapCents: UNIT_COST_CENTS * 2 + SHIPPING_CENTS - 1_000,
+      advanceRefusal: { code: "no_eligible_source", reasons: ["first_pull_not_settled"] },
+    });
     expect(db.calls.at(-1)?.sql).toBe("COMMIT");
   });
 

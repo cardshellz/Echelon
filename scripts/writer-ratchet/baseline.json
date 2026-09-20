@@ -172,6 +172,9 @@
   "dropship.dropship_ebay_store_category_assignments": [
     "modules/dropship"
   ],
+  "dropship.dropship_funding_method_balance_verifications": [
+    "modules/dropship"
+  ],
   "dropship.dropship_funding_methods": [
     "modules/dropship"
   ],
