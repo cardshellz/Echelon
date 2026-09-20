@@ -83,7 +83,7 @@ function wallet(overrides: Partial<DropshipWalletView> = {}): DropshipWalletView
 
 function doneWallet(overrides: Partial<DropshipWalletView> = {}): DropshipWalletView {
   return wallet({
-    autoReload: { autoReloadSettingId: 5, enabled: true, minimumBalanceCents: 25_000, maxSingleReloadCents: 50_000, paymentHoldTimeoutMinutes: 2_880, fundingMethodId: 30, updatedAt: STAMP, backstopFundingMethodId: 10, acknowledgedCardFeeBps: 300, acknowledgedAt: STAMP },
+    autoReload: { autoReloadSettingId: 5, enabled: true, minimumBalanceCents: 25_000, maxSingleReloadCents: 50_000, topUpAmountCents: null, paymentHoldTimeoutMinutes: 2_880, fundingMethodId: 30, updatedAt: STAMP, backstopFundingMethodId: 10, acknowledgedCardFeeBps: 300, acknowledgedAt: STAMP },
     fundingMethods: [{ ...CARD, roles: { isAutoReloadSource: false, isBackupCard: true, chargeable: true } }, { ...BANK, roles: { isAutoReloadSource: true, isBackupCard: false, chargeable: false } }],
     setupStatus: { sourceReady: true, backupReady: true, acknowledged: true, done: true, launchReady: true },
     ...overrides,
@@ -103,10 +103,10 @@ describe("deriveWalletFlow", () => {
     expect(derive(wallet({ fundingMethods: [CARD] }), started())).toMatchObject({ step: "source", suggestedSourceMethodId: 10 });
     expect(derive(wallet({ fundingMethods: [BANK] }), started({ sourceMethodId: 30 }))).toMatchObject({ step: "floor", floorCents: 25_000 });
     expect(derive(wallet({ fundingMethods: [BANK] }), started({ sourceMethodId: 30, floorCents: 4_000 }))).toMatchObject({ step: "floor" });
-    expect(derive(wallet({ fundingMethods: [BANK] }), started({ sourceMethodId: 30, floorCents: 25_000 }))).toMatchObject({ step: "backup", backup: null, limitCents: 50_000 });
+    expect(derive(wallet({ fundingMethods: [BANK] }), started({ sourceMethodId: 30, floorCents: 25_000 }))).toMatchObject({ step: "backup", backup: null, topUpCents: null, limitCents: 25_000 });
     expect(derive(wallet({ fundingMethods: [BANK, CARD] }), started({ sourceMethodId: 30, floorCents: 25_000 }))).toMatchObject({ step: "backup" });
     expect(derive(wallet({ fundingMethods: [BANK, CARD] }), started({ sourceMethodId: 30, floorCents: 25_000, backupMethodId: 10 }))).toMatchObject({ step: "authorize", backup: { satisfiedBySource: false } });
-    expect(derive(wallet({ fundingMethods: [CARD] }), started({ sourceMethodId: 10, floorCents: 10_000 }))).toMatchObject({ step: "authorize", backup: { method: CARD, satisfiedBySource: true }, limitCents: 25_000 });
+    expect(derive(wallet({ fundingMethods: [CARD] }), started({ sourceMethodId: 10, floorCents: 10_000 }))).toMatchObject({ step: "authorize", backup: { method: CARD, satisfiedBySource: true }, limitCents: 10_000 });
   });
 
   it("shows the intro to anyone who has not read it, whatever is already saved on the wallet", () => {
@@ -146,7 +146,7 @@ describe("deriveWalletFlow", () => {
   });
 
   it("treats the seed row (enabled, no method) as not authorized", () => {
-    const seed = wallet({ autoReload: { autoReloadSettingId: 1, enabled: true, minimumBalanceCents: 25_000, maxSingleReloadCents: null, paymentHoldTimeoutMinutes: 2_880, fundingMethodId: null, updatedAt: STAMP, backstopFundingMethodId: null, acknowledgedCardFeeBps: null, acknowledgedAt: null } });
+    const seed = wallet({ autoReload: { autoReloadSettingId: 1, enabled: true, minimumBalanceCents: 25_000, maxSingleReloadCents: null, topUpAmountCents: null, paymentHoldTimeoutMinutes: 2_880, fundingMethodId: null, updatedAt: STAMP, backstopFundingMethodId: null, acknowledgedCardFeeBps: null, acknowledgedAt: null } });
     expect(derive(seed)).toMatchObject({ authorized: false, feeRecordMissing: false, roleGaps: { backupCard: false, source: false }, canTurnOffAutoReload: false });
   });
 
@@ -167,7 +167,7 @@ describe("deriveWalletFlow", () => {
     expect(derive(raised)).toMatchObject({ needsAcknowledgement: true, feeRecordMissing: false, feeChange: { recordedBps: 300, currentBps: 350 } });
     expect(derive(doneWallet())).toMatchObject({ needsAcknowledgement: false, feeChange: null });
     expect(derive(doneWallet({ cardFundingFeeBps: 350 })).needsAcknowledgement).toBe(false);
-    expect(describeAcknowledgementBanner({ feeChange: null, onboarding: true })).toBe("Please review and confirm your auto-reload terms. Nothing changes until you confirm. You cannot activate until you do.");
+    expect(describeAcknowledgementBanner({ feeChange: null, onboarding: true })).toBe("Please review and confirm your autopay terms. Nothing changes until you confirm. You cannot activate until you do.");
     expect(describeAcknowledgementBanner({ feeChange: { recordedBps: 300, currentBps: 350 }, onboarding: false })).toContain("automatic top-ups and covers stay at 3%; money you add yourself shows the current fee on Stripe's page");
     expect(describeAcknowledgementBanner({ feeChange: { recordedBps: 300, currentBps: 250 }, onboarding: false })).toContain("Automatic charges already use the lower rate");
   });
@@ -225,10 +225,14 @@ describe("deriveWalletFlow", () => {
     expect(STEP_ORDER.map(previousWalletStep)).toEqual([null, "intro", "source", "floor", "backup", "authorize"]);
   });
 
-  it("follows a hand-set cap when the floor changes in manage", () => {
-    const handSet = doneWallet({ autoReload: { ...doneWallet().autoReload!, maxSingleReloadCents: 100_000 } });
-    expect(derive(handSet, draft({ floorCents: 50_000 }), "active").limitCents).toBe(100_000);
-    expect(derive(doneWallet(), draft({ floorCents: 100_000 }), "active").limitCents).toBe(250_000);
+  it("holds autopay to the server's bound until the amounts change, then to the one the server will derive", () => {
+    const stored = doneWallet({ autoReload: { ...doneWallet().autoReload!, maxSingleReloadCents: 100_000 } });
+    expect(derive(stored, draft(), "active")).toMatchObject({ floorCents: 25_000, topUpCents: null, limitCents: 100_000 });
+    expect(derive(stored, draft({ floorCents: 50_000 }), "active")).toMatchObject({ floorCents: 50_000, topUpCents: null, limitCents: 50_000 });
+    expect(derive(doneWallet(), draft({ topUpCents: 75_000 }), "active")).toMatchObject({ floorCents: 25_000, topUpCents: 75_000, limitCents: 75_000 });
+    const withTopUp = doneWallet({ autoReload: { ...doneWallet().autoReload!, topUpAmountCents: 40_000, maxSingleReloadCents: 40_000 } });
+    expect(derive(withTopUp, draft(), "active")).toMatchObject({ topUpCents: 40_000, limitCents: 40_000 });
+    expect(derive(withTopUp, draft({ floorCents: 100_000 }), "active")).toMatchObject({ topUpCents: 40_000, limitCents: 100_000 });
   });
 });
 
@@ -241,12 +245,14 @@ describe("acknowledgementForSave and builders", () => {
     expect(acknowledgementForSave({ autoReload: { ...doneWallet().autoReload!, acknowledgedCardFeeBps: null }, cardFundingFeeBps: 300 })).toEqual({ acknowledgedCardFeeBps: 300, saveLabel: "Save and accept the 3% card fee", feeChangeNote: null });
   });
 
-  it("builds the seven-key bodies", () => {
-    const plan = { fundingMethodId: 30, backupFundingMethodId: 10, floorCents: 25_000, limitCents: 50_000, holdTimeoutMinutes: 2_880 };
-    expect(buildAuthorizeInput(plan, wallet())).toEqual({ enabled: true, fundingMethodId: 30, backstopFundingMethodId: 10, minimumBalanceCents: 25_000, maxSingleReloadCents: 50_000, paymentHoldTimeoutMinutes: 2_880, acknowledgedCardFeeBps: 300 });
+  it("builds the seven-key bodies: the minimum and the top-up amount go up, the bound never does", () => {
+    const plan = { fundingMethodId: 30, backupFundingMethodId: 10, floorCents: 25_000, topUpCents: null, limitCents: 50_000, holdTimeoutMinutes: 2_880 };
+    expect(buildAuthorizeInput(plan, wallet())).toEqual({ enabled: true, fundingMethodId: 30, backstopFundingMethodId: 10, minimumBalanceCents: 25_000, topUpAmountCents: null, paymentHoldTimeoutMinutes: 2_880, acknowledgedCardFeeBps: 300 });
+    expect(buildAuthorizeInput({ ...plan, topUpCents: 40_000 }, wallet())).toMatchObject({ topUpAmountCents: 40_000 });
+    expect(buildAuthorizeInput(plan, wallet())).not.toHaveProperty("maxSingleReloadCents");
     expect(buildConfirmTermsInput(plan, wallet({ cardFundingFeeBps: 350 })).acknowledgedCardFeeBps).toBe(350);
     expect(buildPlanSaveInput(plan, doneWallet({ cardFundingFeeBps: 350 })).acknowledgedCardFeeBps).toBe(300);
-    expect(buildAutoReloadDisableInput(doneWallet())).toEqual({ enabled: false, fundingMethodId: 30, backstopFundingMethodId: 10, minimumBalanceCents: 25_000, maxSingleReloadCents: 50_000, paymentHoldTimeoutMinutes: 2_880, acknowledgedCardFeeBps: null });
+    expect(buildAutoReloadDisableInput(doneWallet())).toEqual({ enabled: false, fundingMethodId: 30, backstopFundingMethodId: 10, minimumBalanceCents: 25_000, topUpAmountCents: null, paymentHoldTimeoutMinutes: 2_880, acknowledgedCardFeeBps: null });
     // The hold is CardShellz's policy for every wallet: a saved row still
     // carrying an older value is never echoed back, shown or derived from.
     const policyHold = doneWallet({ limits: { ...LIMITS, defaultPaymentHoldTimeoutMinutes: 1_440 } });
@@ -254,7 +260,7 @@ describe("acknowledgementForSave and builders", () => {
     expect(planFromWallet(policyHold)?.holdTimeoutMinutes).toBe(1_440);
     expect(derive(policyHold).holdTimeoutMinutes).toBe(1_440);
     expect(() => buildAuthorizeInput({ ...plan, floorCents: 4_000 }, wallet())).toThrow("at least $50");
-    expect(() => buildAuthorizeInput({ ...plan, limitCents: 20_000 }, wallet())).toThrow("at least your floor");
+    expect(() => buildAuthorizeInput({ ...plan, topUpCents: 5_000 }, wallet())).toThrow("The top-up amount must be at least $100.");
     expect(() => buildAuthorizeInput({ ...plan, backupFundingMethodId: 0 }, wallet())).toThrow("backup card");
     expect(buildRemoveFundingMethodPath(10)).toBe("/api/dropship/wallet/funding-methods/10");
     expect(() => buildRemoveFundingMethodPath(0)).toThrow();
@@ -275,8 +281,8 @@ describe("acknowledgementForSave and builders", () => {
   it("pre-disables removal from enabled-aware roles", () => {
     const backup = { ...CARD, roles: { isAutoReloadSource: false, isBackupCard: true, chargeable: true } };
     expect(disabledReasonForRemoval(backup, false)).toBe("This is your backup card — choose another backup card first, then remove this one.");
-    expect(disabledReasonForRemoval(backup, true)).toBe("This is your backup card — choose another backup card first, then remove this one. — or turn off auto-reload.");
-    expect(disabledReasonForRemoval({ ...BANK, roles: { isAutoReloadSource: true, isBackupCard: false, chargeable: false } }, false)).toBe("This is your top-up source — choose another source first, then remove this one.");
+    expect(disabledReasonForRemoval(backup, true)).toBe("This is your backup card — choose another backup card first, then remove this one. — or turn off autopay.");
+    expect(disabledReasonForRemoval({ ...BANK, roles: { isAutoReloadSource: true, isBackupCard: false, chargeable: false } }, false)).toBe("This is your autopay source — choose another source first, then remove this one.");
     expect(disabledReasonForRemoval(CARD, false)).toBeNull();
     expect(disabledReasonForRemoval(method({ fundingMethodId: 20, rail: "usdc_base", roles: { isAutoReloadSource: false, isBackupCard: false, chargeable: false } }), false)).toBeNull();
   });
@@ -305,10 +311,12 @@ describe("draft and redirects", () => {
   it("reads a draft written before step navigation existed, and drops an unreadable override rather than the draft", () => {
     // Exactly what v1 wrote before `stepOverride`: it still parses, with no override and every choice intact.
     const legacy = { v: 1, seenIntro: true, sourceRail: "stripe_ach", sourceMethodId: 30, floorCents: 25_000, dailyCostCents: 2_000, backupMethodId: 10, pendingStripe: null, deposit: null };
-    expect(parseWalletDraft(JSON.stringify(legacy))).toEqual({ ...legacy, stepOverride: null });
-    expect(parseWalletDraft(JSON.stringify({ ...legacy, stepOverride: "floor" }))).toMatchObject({ stepOverride: "floor", floorCents: 25_000 });
-    expect(parseWalletDraft(JSON.stringify({ ...legacy, stepOverride: "nowhere" }))).toEqual({ ...legacy, stepOverride: null });
-    expect(parseWalletDraft(JSON.stringify({ ...legacy, stepOverride: 3 }))).toEqual({ ...legacy, stepOverride: null });
+    // A draft from before the top-up amount existed reads as "the minimum".
+    expect(parseWalletDraft(JSON.stringify(legacy))).toEqual({ ...legacy, stepOverride: null, topUpCents: null });
+    expect(parseWalletDraft(JSON.stringify({ ...legacy, stepOverride: "floor" }))).toMatchObject({ stepOverride: "floor", floorCents: 25_000, topUpCents: null });
+    expect(parseWalletDraft(JSON.stringify({ ...legacy, stepOverride: "nowhere" }))).toEqual({ ...legacy, stepOverride: null, topUpCents: null });
+    expect(parseWalletDraft(JSON.stringify({ ...legacy, stepOverride: 3 }))).toEqual({ ...legacy, stepOverride: null, topUpCents: null });
+    expect(parseWalletDraft(JSON.stringify({ ...legacy, topUpCents: 40_000 }))).toMatchObject({ topUpCents: 40_000 });
   });
 
   it("falls back to an in-memory draft when storage throws", () => {
@@ -388,11 +396,13 @@ describe("moving through the flow", () => {
   });
 
   it("saves the floor and the backup card without touching anything else", () => {
-    expect(draftAfterFloorChoice(reached, 25_000, 2_000)).toEqual({ ...reached, stepOverride: null });
-    expect(draftAfterFloorChoice(reached, 50_000, null)).toEqual({ ...reached, stepOverride: null, floorCents: 50_000, dailyCostCents: null });
-    expect(() => draftAfterFloorChoice(reached, -1, null)).toThrow(RangeError);
-    expect(() => draftAfterFloorChoice(reached, 25_000.5, null)).toThrow(RangeError);
-    expect(() => draftAfterFloorChoice(reached, 25_000, -1)).toThrow(RangeError);
+    expect(draftAfterFloorChoice(reached, 25_000, null, 2_000)).toEqual({ ...reached, stepOverride: null });
+    expect(draftAfterFloorChoice(reached, 50_000, null, null)).toEqual({ ...reached, stepOverride: null, floorCents: 50_000, dailyCostCents: null });
+    expect(draftAfterFloorChoice(reached, 50_000, 75_000, null)).toEqual({ ...reached, stepOverride: null, floorCents: 50_000, topUpCents: 75_000, dailyCostCents: null });
+    expect(() => draftAfterFloorChoice(reached, -1, null, null)).toThrow(RangeError);
+    expect(() => draftAfterFloorChoice(reached, 25_000.5, null, null)).toThrow(RangeError);
+    expect(() => draftAfterFloorChoice(reached, 25_000, -1, null)).toThrow(RangeError);
+    expect(() => draftAfterFloorChoice(reached, 25_000, null, -1)).toThrow(RangeError);
     expect(draftAfterBackupChoice(reached, CARD)).toEqual({ ...reached, stepOverride: null });
     expect(draftAfterBackupChoice(reached, method({ fundingMethodId: 11 }))).toEqual({ ...reached, stepOverride: null, backupMethodId: 11 });
   });
@@ -407,74 +417,88 @@ describe("moving through the flow", () => {
 });
 
 describe("copy", () => {
-  const terms: WalletTerms = { sourceRail: "stripe_ach", sourceLabel: "Chase ending in 1234", backupLabel: "Visa ending in 4242", floorCents: 25_000, limitCents: 50_000, holdTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, cardFundingFeeBps: 300 };
+  const terms: WalletTerms = { sourceRail: "stripe_ach", sourceLabel: "Chase ending in 1234", backupLabel: "Visa ending in 4242", floorCents: 25_000, topUpCents: null, limitCents: 50_000, holdTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, cardFundingFeeBps: 300 };
 
-  it("words the bank mandate from the numbers", () => {
+  it("words the bank mandate from the numbers: the minimum, the top-up amount and the bound", () => {
     const lines = describeMandate(terms);
     expect(lines).toHaveLength(6);
-    expect(lines[0]).toBe("Debit Chase ending in 1234 to bring your balance up to $250 — once a day, and after any order that takes it lower. No fee. Money already on its way counts, so the same gap is not debited twice.");
-    expect(lines[1]).toContain("While your account is active, charge Visa ending in 4242 only when an order needs more than your available balance: the shortfall plus the 3% card fee, up to the single top-up limit");
-    expect(lines[1]).toContain("even while a bank top-up is still landing or your top-up source cannot be charged");
+    expect(lines[0]).toBe("Debit Chase ending in 1234 whenever an order takes your balance below your minimum of $250, and at the daily check: your top-up amount of $250 (your minimum), or more if that alone would not bring you back to $250. No fee. Money already on its way counts, so the same gap is not debited twice.");
+    expect(lines[1]).toContain("While your account is active, charge Visa ending in 4242 only when an order needs more than your available balance: the shortfall plus the 3% card fee, up to $500");
+    expect(lines[1]).toContain("even while a bank top-up is still landing or your autopay source cannot be charged");
     expect(lines[1]).toContain("a $75 order with $20 available charges $55 + $1.65");
     expect(lines[1]).toContain("If a return fee has taken your balance below zero, the shortfall includes that amount.");
-    expect(lines[2]).toBe("Never charge more than $500 in one top-up. An order needing more than your available balance plus $500 is not charged: it waits for you to add money and is cancelled if still unpaid after 48 hours. We email you 2 hours before that.");
+    expect(lines[2]).toBe("Never take more than $500 in one charge — the larger of your minimum and your top-up amount. An order needing more than your available balance plus $500 is not charged: it waits for you to add money and is cancelled if still unpaid after 48 hours. We email you 2 hours before that.");
     expect(lines[3]).toContain("first daily check after you activate (about midnight UTC)");
     expect(lines[3]).toContain("Adding money by card now avoids that");
+    expect(lines[3]).toContain("debits Chase ending in 1234 for your top-up amount ($250), or more if that alone would not reach $250");
     expect(lines[4]).toContain("before it lands");
     expect(lines[4]).toContain("We do not retry");
+    expect(lines[5]).toContain("autopay stays on; the source, minimum, top-up amount and backup card can be changed at any time in Wallet");
     expect(lines[5]).toContain("for automatic top-ups and covers");
     expect(lines[5]).toContain("shows the current fee on Stripe's page");
     const joined = lines.join(" ");
-    expect(joined).not.toMatch(/refill|has been notified|never more than|\(2 × your floor\)/);
+    expect(joined).not.toMatch(/refill|has been notified|single top-up limit|floor|auto-reload/);
     expect(describeMandate({ ...terms, holdExpiryWarningMinutes: 90 })[2]).toContain("1 hour 30 minutes");
+    // A top-up amount the vendor chose is named as theirs, not as the minimum.
+    const chosen = describeMandate({ ...terms, topUpCents: 40_000, limitCents: 40_000 });
+    expect(chosen[0]).toContain("your top-up amount of $400, or more if that alone would not bring you back to $250");
+    expect(chosen[2]).toContain("Never take more than $400 in one charge");
   });
 
-  it("words the card mandate with the first fill and the bank-return clause", () => {
+  it("words the card mandate with the routine top-up's fee and the bank-return clause", () => {
     const lines = describeMandate({ ...terms, sourceRail: "stripe_card", sourceLabel: "Visa ending in 4242", floorCents: 10_000, limitCents: 25_000 });
-    expect(lines[0]).toBe("Charge Visa ending in 4242, plus the 3% fee, to bring your balance up to $100 — once a day and after any order that takes it lower ($100 + $3 = $103 when the wallet is empty).");
+    expect(lines[0]).toBe("Charge Visa ending in 4242, plus the 3% fee, whenever an order takes your balance below your minimum of $100, and at the daily check: your top-up amount of $100 (your minimum), or more if that alone would not bring you back to $100 ($100 + $3 = $103 for a routine top-up).");
     expect(lines[1]).toContain("Visa ending in 4242 is also your backup card");
+    expect(lines[1]).toContain("(up to $250)");
     expect(lines[1]).toContain("If a return fee has taken your balance below zero, the shortfall includes that amount.");
+    expect(lines[3]).toContain("charges Visa ending in 4242 your top-up amount ($100), or more if that alone would not reach $100");
     expect(lines[4]).toContain("or a bank transfer you started is returned before it lands");
-    expect(describePlanSentence({ ...terms, sourceRail: "stripe_card", sourceLabel: "Visa ending in 4242", floorCents: 10_000 })).toBe("In one sentence: you keep $100 in your wallet, refilled from your Visa ending in 4242 at 3%; the same card covers any shortfall.");
-    expect(describePlanSentence(terms)).toBe("In one sentence: you keep $250 in your wallet, refilled from your bank for free; if an order ever needs more than what is there, your Visa ending in 4242 covers the shortfall plus 3%.");
+    expect(describePlanSentence({ ...terms, sourceRail: "stripe_card", sourceLabel: "Visa ending in 4242", floorCents: 10_000 })).toBe("In one sentence: you keep $100 in your wallet, topped up by $100 from your Visa ending in 4242 at 3%; the same card covers any shortfall.");
+    expect(describePlanSentence(terms)).toBe("In one sentence: you keep $250 in your wallet; when an order takes it lower, autopay pulls $250 from your bank for free, and your Visa ending in 4242 covers any shortfall plus 3%.");
+    expect(describePlanSentence({ ...terms, topUpCents: 40_000 })).toContain("autopay pulls $400 from your bank for free");
   });
 
-  it("pins the intro: five topics, each a lead and its detail, quoting only the values the server enforces", () => {
+  it("pins the rules page: six topics, each a lead and its detail, quoting only the values the server enforces", () => {
     const limits: WalletLimits = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, caseTierMinimumCents: 50_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14 };
     const intro = describeIntro({ cardFundingFeeBps: 300, usdcOffered: true, holdTimeoutMinutes: 2_880, limits });
-    expect(intro.lede).toBe("Your wallet is how Card Shellz gets paid for the orders you sell. Here is what it does, what it costs, and what happens if a payment fails.");
-    expect(intro.topics).toHaveLength(5);
+    expect(intro.lede).toBe("Your wallet is the deposit Card Shellz draws on for the orders you sell. Here is what it holds, what it lets you sell, how it stays funded, and what happens when a payment fails.");
+    expect(intro.topics).toHaveLength(6);
     expect(intro.topics.map((topic) => topic.lead)).toEqual([
       "What your wallet is.",
-      "Payment methods and fees.",
-      "Keeping it funded.",
-      "Your backup card.",
-      "If a payment fails.",
+      "What you can sell, and the minimum it needs.",
+      "Keeping it funded: your minimum and autopay.",
+      "Ways to pay, and what each costs.",
+      "Orders while a transfer lands, and your backup card.",
+      "If a payment fails or is taken back.",
     ]);
-    expect(intro.topics[0].detail).toBe("It is a prepaid balance Card Shellz holds for your store. Every order you accept is paid from it: the product cost plus shipping, with nothing added on top. When a return is processed its return fee comes out of the wallet too, and that can take your balance below zero. So can a bank transfer that is returned after it paid for an order.");
-    expect(intro.topics[1].detail).toBe("A bank account costs nothing and takes up to 5 business days to land (our estimate). A card lands at once and costs 3% on top of the amount, whether it is a routine top-up, money you add yourself, or a backup charge. USDC costs nothing.");
-    expect(intro.topics[2].detail).toBe("You choose a floor: the balance you want to hold. We top you back up to it once a day, and after any order that drops you below it. Your floor has to be at least $50, so there is always enough to cover a normal order. Money already on its way counts toward your floor, so the same gap is never charged twice. You can also add money yourself at any time.");
-    expect(intro.topics[3].detail).toBe("Every seller keeps a card on file. Money that has landed pays for orders first; a bank transfer still on its way can pay too, once the account it comes from qualifies (see 'Orders while a transfer lands' in Wallet). If an order still needs more than your balance, we charge that card for the difference and send the order straight out.");
-    expect(intro.topics[4].detail).toBe("Selling pauses: your listings show nothing for sale, and orders already waiting are cancelled after your hold time (48 hours). We email you, and we do not retry the charge ourselves. Selling starts again on its own once your balance is back at your floor.");
+    expect(intro.topics[0].detail).toBe("A prepaid deposit Card Shellz holds for your store. Every order you accept is paid from it: the product cost plus shipping, with nothing added on top. A return fee comes out of it too, and so does a payment your bank takes back after it landed; either can take the balance below zero.");
+    expect(intro.topics[1].detail).toBe("Singles, packs and inner packs are on sale while you keep at least $50 in your wallet. Cases are on sale once your balance, counting money on its way, has reached $500. If Card Shellz raises a minimum you keep selling for 14 days after the notice, then that tier comes off sale until you are back above it.");
+    expect(intro.topics[2].detail).toBe("You choose the minimum you keep — at least $50, or $500 to sell cases. Whenever an order takes your balance below it, and at a daily check, autopay pulls a top-up from your bank account or card: your top-up amount, which is your minimum unless you set another, or more if that alone would not reach your minimum. Money already on its way counts, so the same gap is never pulled twice. Autopay never takes more than the larger of your minimum and your top-up amount in one charge. You can also add money yourself at any time.");
+    expect(intro.topics[3].detail).toBe("A bank account costs nothing and takes up to 5 business days to land (our estimate). A card lands at once and costs 3% on top of the amount, whether autopay charged it, you added money yourself, or it covered an order. USDC costs nothing.");
+    expect(intro.topics[4].detail).toBe("Money that has landed pays for orders first. A bank transfer still on its way can pay too, once the account it comes from qualifies — a business account, a balance we could read when it was linked, and one earlier transfer from it landed — for a 1% fee on the amount used, at most $500 outstanding at a time. If an order still needs more than your balance, we charge your backup card for the difference plus 3% and send the order out. An order the card cannot cover waits 48 hours for you to add money, then is cancelled.");
+    expect(intro.topics[5].detail).toBe("Selling pauses: your listings show nothing for sale, and orders already waiting are cancelled after your hold time (48 hours). We email you, and we do not retry the charge ourselves. A payment your bank takes back after it landed is taken out of your wallet the same way. Selling starts again on its own once your balance is back at your minimum.");
     // USDC is named only where a deposit address exists, and never with a timing claim: nothing in the code watches the chain.
     const noUsdc = describeIntro({ cardFundingFeeBps: 300, usdcOffered: false, holdTimeoutMinutes: 2_880, limits });
-    expect(noUsdc.topics[1].detail).not.toContain("USDC");
-    expect(intro.topics[1].detail).not.toMatch(/instant|confirming the transfer|credits it/);
-    // The rate, the floor minimum and the hold time are served values; none is typed into the copy.
+    expect(noUsdc.topics[3].detail).not.toContain("USDC");
+    expect(intro.topics[3].detail).not.toMatch(/instant|confirming the transfer|credits it/);
+    // Every number is a served value; none is typed into the copy.
     const other = describeIntro({
       cardFundingFeeBps: 250,
       usdcOffered: false,
       holdTimeoutMinutes: 720,
-      limits: { ...limits, autoReloadMinTriggerCents: 2_500 },
+      limits: { ...limits, autoReloadMinTriggerCents: 2_500, caseTierMinimumCents: 75_000, tierChangeGraceDays: 30, advanceFeeBps: 150, advanceCapCents: 100_000 },
     });
-    expect(other.topics[1].detail).toContain("costs 2.5% on top of the amount");
-    expect(other.topics[2].detail).toContain("at least $25, so there is always enough to cover a normal order");
-    expect(other.topics[4].detail).toContain("after your hold time (12 hours)");
-    // Amounts the product does not actually enforce as rules are absent: the manual funding band and the single top-up limit's own minimum.
+    expect(other.topics[1].detail).toContain("at least $25 in your wallet. Cases are on sale once your balance, counting money on its way, has reached $750. If Card Shellz raises a minimum you keep selling for 30 days");
+    expect(other.topics[2].detail).toContain("at least $25, or $750 to sell cases");
+    expect(other.topics[3].detail).toContain("costs 2.5% on top of the amount");
+    expect(other.topics[4].detail).toContain("for a 1.5% fee on the amount used, at most $1,000 outstanding at a time");
+    expect(other.topics[4].detail).toContain("waits 12 hours for you to add money");
+    expect(other.topics[5].detail).toContain("after your hold time (12 hours)");
+    // The old vocabulary is gone from the rules page.
     const whole = [intro.lede, ...intro.topics.flatMap((topic) => [topic.lead, topic.detail])].join(" ");
-    expect(whole).not.toMatch(/at a time|single top-up limit|Never charge more than|step 5/);
-    // Exactly two amounts are quoted: the fee and the floor minimum.
-    expect(whole.match(/\$[\d,]*\d|\d+(?:\.\d+)?%/g)).toEqual(["3%", "$50"]);
+    expect(whole).not.toMatch(/single top-up limit|Never charge more than|step 5|floor|auto-reload|backstop/);
+    // Exactly the enforced amounts are quoted: the two tier minimums (twice), the card fee (twice), the advance fee and its cap.
+    expect(whole.match(/\$[\d,]*\d|\d+(?:\.\d+)?%/g)).toEqual(["$50", "$500", "$50", "$500", "3%", "1%", "$500", "3%"]);
     expect(describeActivationTopUp({ cardFundingFeeBps: 300 })).toBe("Your first automatic top-up runs on the first daily check after you activate (about midnight UTC). Until it lands, orders are charged to your backup card at 3%. Adding money by card now avoids that.");
     expect(describeHoldTimeLine(120)).toContain("for orders held from now on");
     expect(describeHoldTimeLine(120)).toContain("We email you 2 hours before.");
@@ -484,6 +508,7 @@ describe("copy", () => {
     expect(describePendingBalance(25_000, advance({ headroomCents: 0 }))).toContain("this money cannot pay orders yet.");
     expect(describeRoleGap("backupCard", { holdTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120 })).toContain("we email you 2 hours before");
     expect(describeRoleGap("backupCard", { holdTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120 })).not.toContain("ending in");
+    expect(describeRoleGap("source", { holdTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120 })).toContain("Autopay source needed");
     expect(describeRoleGap("source", { holdTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120 })).toContain("Held orders are still covered by your backup card.");
   });
 
@@ -562,6 +587,6 @@ describe("advance copy (funding design phase 3)", () => {
     expect(describeNegativeBalance({ ...base, availableCents: -30_300, advance: advance({ eligiblePendingCents: 10_000 }) }))
       .toContain("$100 of it was paid from a bank transfer still on its way");
     expect(describeNegativeBalance({ ...base, availableCents: -1_250, advance: null }))
-      .toBe("$12.50 below zero — a return fee or a returned transfer took the balance below zero. Your next top-up covers it, unless the top-up needed exceeds your single top-up limit ($500) — then we email you instead of charging. Until then, a backup-card charge for an order includes this shortfall (order plus the amount below zero, plus 3%).");
+      .toBe("$12.50 below zero — a return fee or a returned transfer took the balance below zero. Your next top-up covers it, up to $500 in one charge; anything beyond that is collected over the following daily checks. Until then, a backup-card charge for an order includes this shortfall (order plus the amount below zero, plus 3%).");
   });
 });

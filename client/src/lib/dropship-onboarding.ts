@@ -165,8 +165,8 @@ function describeWallet(
 }
 
 /**
- * One story on every surface: source → floor → backup card → authorize. The
- * onboarding state does not carry the floor, the labels or the fee rate yet,
+ * One story on every surface: source → minimum → backup card → authorize. The
+ * onboarding state does not carry the minimum, the labels or the fee rate yet,
  * so the sentence names the rail and states the timing of the first top-up in
  * the words of what the code does today (the first daily check after
  * activation).
@@ -174,7 +174,7 @@ function describeWallet(
 function describeWalletComplete(wallet: DropshipOnboardingState["wallet"]): string {
   const source = wallet.autoReloadFundingMethodIsCard ? "your card" : "your bank account";
   const balance = wallet.hasSpendableBalance ? `${formatCents(wallet.availableBalanceCents)} available. ` : "";
-  return `${balance}Top-ups from ${source} to your floor; backup card on file. Your first automatic top-up runs on the first daily check after you activate${wallet.autoReloadFundingMethodIsCard ? "" : " (a bank transfer lands in up to 5 business days — our assumption)"}.`;
+  return `${balance}Autopay from ${source} to your minimum; backup card on file. Your first automatic top-up runs on the first daily check after you activate${wallet.autoReloadFundingMethodIsCard ? "" : " (a bank transfer lands in up to 5 business days — our assumption)"}.`;
 }
 
 /**
@@ -189,9 +189,9 @@ export function walletTodoDetail(wallet: DropshipOnboardingState["wallet"]): str
     return "Add your backup card in Wallet — it covers an order your balance cannot.";
   }
   if (!wallet.autoReloadConfigured) {
-    return "Review and turn on auto-reload in Wallet.";
+    return "Review and turn on autopay in Wallet.";
   }
-  return "Confirm your auto-reload terms in Wallet.";
+  return "Confirm your autopay terms in Wallet.";
 }
 
 export interface OnboardingProgress {

@@ -25,7 +25,7 @@ export type WalletErrorSurface = "put" | "get" | "delete" | "checkout" | "setup"
 
 const SUPPORT = "Contact Card Shellz support if this persists.";
 const INVALID_INPUT = "Something in the request was not valid. Reload the page and try again.";
-const SOURCE_GONE = "Your top-up source is no longer available. Choose or add another.";
+const SOURCE_GONE = "Your autopay source is no longer available. Choose or add another.";
 const STRIPE_UNAVAILABLE = `Card and bank services are unavailable right now. ${SUPPORT}`;
 
 export function describeWalletError(
@@ -59,7 +59,7 @@ export function describeWalletError(
     case "DROPSHIP_FUNDING_METHOD_IS_BACKUP_CARD":
       return { text: "This is your backup card. Choose another backup card first, then remove this one.", recovery: "refetch" };
     case "DROPSHIP_FUNDING_METHOD_IS_AUTO_RELOAD_SOURCE":
-      return { text: "This is your top-up source. Choose another source first, then remove this one.", recovery: "refetch" };
+      return { text: "This is your autopay source. Choose another source first, then remove this one.", recovery: "refetch" };
     case "DROPSHIP_AUTO_RELOAD_REQUIRED_WHILE_ACTIVE":
       return { text: "Auto-reload stays on while your account is active or paused.", recovery: "refetch" };
     case "DROPSHIP_FUNDING_METHOD_NOT_FOUND":

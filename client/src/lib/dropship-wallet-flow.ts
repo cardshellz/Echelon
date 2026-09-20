@@ -20,8 +20,7 @@ import {
   activationTopUp,
   assertCents,
   cardExpiryState,
-  derivedLimitCents,
-  capAfterFloorChange,
+  chargeBoundCents,
   firstFillFeeCents,
   formatDurationMinutes,
   formatWholeDollars,
@@ -98,6 +97,9 @@ export const walletDraftSchema = z.object({
   sourceRail: sourceRailSchema.nullable(),
   sourceMethodId: z.number().int().positive().nullable(),
   floorCents: optionalCents,
+  // The optional top-up amount (funding design phase 5); null is "the minimum".
+  // Defaulted so a draft written before it existed still parses.
+  topUpCents: optionalCents.default(null),
   dailyCostCents: optionalCents,
   backupMethodId: z.number().int().positive().nullable(),
   pendingStripe: pendingStripeSchema.nullable(),
@@ -120,6 +122,7 @@ export const EMPTY_DRAFT: WalletDraft = Object.freeze({
   sourceRail: null,
   sourceMethodId: null,
   floorCents: null,
+  topUpCents: null,
   dailyCostCents: null,
   backupMethodId: null,
   pendingStripe: null,
@@ -354,7 +357,11 @@ export interface WalletFlowState {
   source: { rail: WalletSourceRail; method: WalletFundingMethod } | null;
   suggestedSourceMethodId: number | null;
   backup: { method: WalletFundingMethod; satisfiedBySource: boolean } | null;
+  /** The minimum the vendor keeps ("keep $X"). */
   floorCents: number;
+  /** What each automatic refill pulls; null is the minimum. */
+  topUpCents: number | null;
+  /** The single-charge bound the server holds autopay to: max(minimum, top-up), or the stored one while nothing here changes the amounts. */
   limitCents: number;
   holdTimeoutMinutes: number;
   roleGaps: { backupCard: boolean; source: boolean };
@@ -399,10 +406,14 @@ export function deriveWalletFlow(input: {
     ? { method: source.method, satisfiedBySource: true }
     : (draftBackup ?? configuredBackup) ? { method: (draftBackup ?? configuredBackup) as WalletFundingMethod, satisfiedBySource: false } : null;
 
-  const derivedLimit = derivedLimitCents(floorCents, wallet.limits);
-  const limitCents = authorized && autoReload.maxSingleReloadCents !== null
-    ? capAfterFloorChange(autoReload.minimumBalanceCents, floorCents, autoReload.maxSingleReloadCents, wallet.limits)
-    : derivedLimit;
+  // The top-up amount: the draft's choice, else what the server holds; null means "the minimum".
+  const topUpCents = draft.topUpCents ?? (authorized ? autoReload.topUpAmountCents : null);
+  // The single-charge bound is the server's: the stored one while nothing here
+  // changes the amounts, else the one it will derive from the new amounts.
+  const amountsUntouched = draft.floorCents === null && draft.topUpCents === null;
+  const limitCents = authorized && amountsUntouched && autoReload.maxSingleReloadCents !== null
+    ? autoReload.maxSingleReloadCents
+    : chargeBoundCents(floorCents, topUpCents);
   // The hold is set by staff for every wallet (the wallet policy governs at
   // acceptance time); the saved row's value is only what this client last
   // echoed back, so it is never what the vendor is shown.
@@ -469,6 +480,7 @@ export function deriveWalletFlow(input: {
     suggestedSourceMethodId: suggested?.fundingMethodId ?? null,
     backup,
     floorCents,
+    topUpCents,
     limitCents,
     holdTimeoutMinutes,
     roleGaps: { backupCard: authorized && !backupDesignated, source: authorized && !sourceDesignated },
@@ -562,11 +574,12 @@ export function draftAfterSourceChoice(draft: WalletDraft, method: WalletFunding
   };
 }
 
-/** Continue on the floor step. The daily cost is the vendor's own note and never leaves the browser. */
-export function draftAfterFloorChoice(draft: WalletDraft, floorCents: number, dailyCostCents: number | null): WalletDraft {
+/** Continue on the minimum step. The daily cost is the vendor's own note and never leaves the browser. */
+export function draftAfterFloorChoice(draft: WalletDraft, floorCents: number, topUpCents: number | null, dailyCostCents: number | null): WalletDraft {
   assertCents(floorCents, "floorCents");
+  if (topUpCents !== null) assertCents(topUpCents, "topUpCents");
   if (dailyCostCents !== null) assertCents(dailyCostCents, "dailyCostCents");
-  return { ...draft, stepOverride: null, floorCents, dailyCostCents };
+  return { ...draft, stepOverride: null, floorCents, topUpCents, dailyCostCents };
 }
 
 /** Continue on the backup step. Nothing downstream depends on which card it is. */
@@ -582,7 +595,11 @@ export interface WalletTerms {
   sourceRail: WalletSourceRail;
   sourceLabel: string;
   backupLabel: string;
+  /** The minimum the vendor keeps. */
   floorCents: number;
+  /** What each refill pulls; null is the minimum. */
+  topUpCents: number | null;
+  /** The single-charge bound. */
   limitCents: number;
   holdTimeoutMinutes: number;
   holdExpiryWarningMinutes: number;
@@ -609,23 +626,19 @@ export function describeActivationQuote(input: {
   const result = activationTopUp({
     sourceRail: terms.sourceRail,
     floorCents: terms.floorCents,
-    limitCents: terms.limitCents,
+    topUpCents: terms.topUpCents,
     availableCents: input.availableCents,
     pendingCents: input.pendingCents,
     bps: terms.cardFundingFeeBps,
   });
-  switch (result.outcome) {
-    case "not_needed":
-      return "Your balance already covers your floor, so the first daily check after you activate starts no top-up.";
-    case "skipped_over_limit":
-      return `Your balance is ${formatWholeDollars(input.availableCents)}, so the top-up needed (${formatWholeDollars(result.amountCents)}) is more than your ${formatWholeDollars(result.limitCents)} single top-up limit; the daily check charges nothing and we email you instead. Add money or raise the limit under Limits.`;
-    case "top_up":
-      return terms.sourceRail === "stripe_card"
-        ? `Balance now ${formatWholeDollars(input.availableCents)}, so the first daily check after you activate charges ${formatWholeDollars(result.chargedCents)} to ${terms.sourceLabel} (${formatWholeDollars(result.amountCents)} plus ${formatWholeDollars(result.feeCents)} fee), landing at once.`
-        : `Balance now ${formatWholeDollars(input.availableCents)}, so the first daily check after you activate starts a ${formatWholeDollars(result.amountCents)} bank transfer from ${terms.sourceLabel} (no fee; ${BANK_SETTLEMENT_PHRASE} to land). Until it lands, any shortfall goes to ${terms.backupLabel} at ${fee}.`;
-    default:
-      return "";
+  if (result.outcome === "not_needed") {
+    return "Your balance already covers your minimum, so the first daily check after you activate starts no top-up.";
   }
+  // The bound cut the pull short of the minimum: the next daily check continues.
+  const more = result.partial ? " — the most autopay takes in one charge; the next daily check continues" : "";
+  return terms.sourceRail === "stripe_card"
+    ? `Balance now ${formatWholeDollars(input.availableCents)}, so the first daily check after you activate charges ${formatWholeDollars(result.chargedCents)} to ${terms.sourceLabel} (${formatWholeDollars(result.amountCents)} plus ${formatWholeDollars(result.feeCents)} fee${more}), landing at once.`
+    : `Balance now ${formatWholeDollars(input.availableCents)}, so the first daily check after you activate starts a ${formatWholeDollars(result.amountCents)} bank transfer from ${terms.sourceLabel}${more} (no fee; ${BANK_SETTLEMENT_PHRASE} to land). Until it lands, any shortfall goes to ${terms.backupLabel} at ${fee}.`;
 }
 
 /** One topic of the intro: the lead sentence, set in bold, and the detail under it. */
@@ -641,17 +654,15 @@ export interface WalletIntroCopy {
 }
 
 /**
- * "How your wallet works": five topics, each a lead sentence and its detail, in
- * the order a seller meets them — what the wallet is, what filling it costs,
- * how it stays funded, what covers a gap, and what a failure does.
+ * "How your wallet works": six topics, each a lead sentence and its detail, in
+ * the order a seller meets them — what the wallet is, what it lets you sell,
+ * how it stays funded, what each way of paying costs, what covers a gap, and
+ * what a failure does. The words are the deposit model's (funding design
+ * phase 5): minimum, top-up amount, autopay, backup card.
  *
- * Only two numbers are quoted, and each is a served value the server enforces:
- * the card fee and the floor minimum (stated by its purpose, not as a figure
- * Card Shellz picked). Amounts that are environment defaults rather than
- * product rules — the manual funding band, the single top-up limit's own
- * minimum — are deliberately absent: quoting them would promise a rule the
- * product does not have. The single top-up limit is explained in full on the
- * review step, beside the number the vendor actually sets.
+ * Every number quoted is a served value the server enforces: the card fee,
+ * the two tier minimums, the grace period, the advance fee and cap, and the
+ * hold time. Nothing the product does not enforce as a rule is quoted.
  *
  * USDC carries a fee statement and nothing else: the code credits USDC only
  * through an admin endpoint and watches no chain, so any timing claim would be
@@ -665,29 +676,38 @@ export function describeIntro(input: {
 }): WalletIntroCopy {
   const fee = formatFeeRate(input.cardFundingFeeBps);
   const hold = formatDurationMinutes(input.holdTimeoutMinutes);
+  const pack = formatWholeDollars(input.limits.autoReloadMinTriggerCents);
+  const cases = formatWholeDollars(input.limits.caseTierMinimumCents);
+  const grace = `${input.limits.tierChangeGraceDays} day${input.limits.tierChangeGraceDays === 1 ? "" : "s"}`;
+  const advanceFee = formatFeeRate(input.limits.advanceFeeBps);
+  const advanceCap = formatWholeDollars(input.limits.advanceCapCents);
   const usdc = input.usdcOffered ? " USDC costs nothing." : "";
   return {
-    lede: "Your wallet is how Card Shellz gets paid for the orders you sell. Here is what it does, what it costs, and what happens if a payment fails.",
+    lede: "Your wallet is the deposit Card Shellz draws on for the orders you sell. Here is what it holds, what it lets you sell, how it stays funded, and what happens when a payment fails.",
     topics: [
       {
         lead: "What your wallet is.",
-        detail: "It is a prepaid balance Card Shellz holds for your store. Every order you accept is paid from it: the product cost plus shipping, with nothing added on top. When a return is processed its return fee comes out of the wallet too, and that can take your balance below zero. So can a bank transfer that is returned after it paid for an order.",
+        detail: "A prepaid deposit Card Shellz holds for your store. Every order you accept is paid from it: the product cost plus shipping, with nothing added on top. A return fee comes out of it too, and so does a payment your bank takes back after it landed; either can take the balance below zero.",
       },
       {
-        lead: "Payment methods and fees.",
-        detail: `A bank account costs nothing and takes ${BANK_SETTLEMENT_DAYS_PHRASE} to land (our estimate). A card lands at once and costs ${fee} on top of the amount, whether it is a routine top-up, money you add yourself, or a backup charge.${usdc}`,
+        lead: "What you can sell, and the minimum it needs.",
+        detail: `Singles, packs and inner packs are on sale while you keep at least ${pack} in your wallet. Cases are on sale once your balance, counting money on its way, has reached ${cases}. If Card Shellz raises a minimum you keep selling for ${grace} after the notice, then that tier comes off sale until you are back above it.`,
       },
       {
-        lead: "Keeping it funded.",
-        detail: `You choose a floor: the balance you want to hold. We top you back up to it once a day, and after any order that drops you below it. Your floor has to be at least ${formatWholeDollars(input.limits.autoReloadMinTriggerCents)}, so there is always enough to cover a normal order. Money already on its way counts toward your floor, so the same gap is never charged twice. You can also add money yourself at any time.`,
+        lead: "Keeping it funded: your minimum and autopay.",
+        detail: `You choose the minimum you keep — at least ${pack}, or ${cases} to sell cases. Whenever an order takes your balance below it, and at a daily check, autopay pulls a top-up from your bank account or card: your top-up amount, which is your minimum unless you set another, or more if that alone would not reach your minimum. Money already on its way counts, so the same gap is never pulled twice. Autopay never takes more than the larger of your minimum and your top-up amount in one charge. You can also add money yourself at any time.`,
       },
       {
-        lead: "Your backup card.",
-        detail: "Every seller keeps a card on file. Money that has landed pays for orders first; a bank transfer still on its way can pay too, once the account it comes from qualifies (see 'Orders while a transfer lands' in Wallet). If an order still needs more than your balance, we charge that card for the difference and send the order straight out.",
+        lead: "Ways to pay, and what each costs.",
+        detail: `A bank account costs nothing and takes ${BANK_SETTLEMENT_DAYS_PHRASE} to land (our estimate). A card lands at once and costs ${fee} on top of the amount, whether autopay charged it, you added money yourself, or it covered an order.${usdc}`,
       },
       {
-        lead: "If a payment fails.",
-        detail: `Selling pauses: your listings show nothing for sale, and orders already waiting are cancelled after your hold time (${hold}). We email you, and we do not retry the charge ourselves. Selling starts again on its own once your balance is back at your floor.`,
+        lead: "Orders while a transfer lands, and your backup card.",
+        detail: `Money that has landed pays for orders first. A bank transfer still on its way can pay too, once the account it comes from qualifies — a business account, a balance we could read when it was linked, and one earlier transfer from it landed — for a ${advanceFee} fee on the amount used, at most ${advanceCap} outstanding at a time. If an order still needs more than your balance, we charge your backup card for the difference plus ${fee} and send the order out. An order the card cannot cover waits ${hold} for you to add money, then is cancelled.`,
+      },
+      {
+        lead: "If a payment fails or is taken back.",
+        detail: `Selling pauses: your listings show nothing for sale, and orders already waiting are cancelled after your hold time (${hold}). We email you, and we do not retry the charge ourselves. A payment your bank takes back after it landed is taken out of your wallet the same way. Selling starts again on its own once your balance is back at your minimum.`,
       },
     ],
   };
@@ -695,48 +715,58 @@ export function describeIntro(input: {
 
 export const INTRO_VERIFICATION_NOTE = "We will ask you to confirm it is you when you add your first account or card (a 6-digit code by email), again if setup takes longer than ten minutes, and once more if you add money.";
 
+/** The top-up amount as the mandate names it: the vendor's, or the minimum. */
+function topUpForTerms(terms: Pick<WalletTerms, "floorCents" | "topUpCents">): { cents: number; isMinimum: boolean } {
+  const cents = terms.topUpCents ?? terms.floorCents;
+  return { cents, isMinimum: cents === terms.floorCents };
+}
+
 /** The standing authorization, one numbered line per charge it allows. */
 export function describeMandate(terms: WalletTerms): string[] {
   assertCents(terms.floorCents, "floorCents");
   assertCents(terms.limitCents, "limitCents");
+  if (terms.topUpCents !== null) assertCents(terms.topUpCents, "topUpCents");
   const fee = formatFeeRate(terms.cardFundingFeeBps);
-  const floor = formatWholeDollars(terms.floorCents);
-  const limit = formatWholeDollars(terms.limitCents);
+  const minimum = formatWholeDollars(terms.floorCents);
+  const bound = formatWholeDollars(terms.limitCents);
+  const topUp = topUpForTerms(terms);
+  const topUpText = `${formatWholeDollars(topUp.cents)}${topUp.isMinimum ? " (your minimum)" : ""}`;
   const hold = formatDurationMinutes(terms.holdTimeoutMinutes);
   const warning = formatDurationMinutes(terms.holdExpiryWarningMinutes);
   const example = shortfallExample({ orderCents: EXAMPLE_SHORTFALL.orderCents, availableCents: EXAMPLE_SHORTFALL.availableCents, bps: terms.cardFundingFeeBps });
   const exampleText = `a ${formatWholeDollars(EXAMPLE_SHORTFALL.orderCents)} order with ${formatWholeDollars(EXAMPLE_SHORTFALL.availableCents)} available charges ${formatWholeDollars(example.shortfallCents)} + ${formatWholeDollars(example.feeCents)}`;
   const belowZero = "If a return fee has taken your balance below zero, the shortfall includes that amount.";
-  const limitLine = `Never charge more than ${limit} in one top-up. An order needing more than your available balance plus ${limit} is not charged: it waits for you to add money and is cancelled if still unpaid after ${hold}. We email you ${warning} before that.`;
-  const termsLine = `While your account is active, auto-reload stays on; the source, floor, limit, hold time and backup card can be changed at any time in Wallet. The ${fee} card fee is the rate you agree to today for automatic top-ups and covers; if Card Shellz ever raises it, we ask you to confirm before charging those at the higher rate. Money you add yourself shows the current fee on Stripe's page before you pay.`;
+  const boundLine = `Never take more than ${bound} in one charge — the larger of your minimum and your top-up amount. An order needing more than your available balance plus ${bound} is not charged: it waits for you to add money and is cancelled if still unpaid after ${hold}. We email you ${warning} before that.`;
+  const termsLine = `While your account is active, autopay stays on; the source, minimum, top-up amount and backup card can be changed at any time in Wallet. The ${fee} card fee is the rate you agree to today for automatic top-ups and covers; if Card Shellz ever raises it, we ask you to confirm before charging those at the higher rate. Money you add yourself shows the current fee on Stripe's page before you pay.`;
 
   if (terms.sourceRail === "stripe_card") {
-    const fill = firstFillFeeCents(terms.floorCents, terms.cardFundingFeeBps);
+    const fill = firstFillFeeCents(topUp.cents, terms.cardFundingFeeBps);
     return [
-      `Charge ${terms.sourceLabel}, plus the ${fee} fee, to bring your balance up to ${floor} — once a day and after any order that takes it lower (${floor} + ${formatWholeDollars(fill)} = ${formatWholeDollars(terms.floorCents + fill)} when the wallet is empty).`,
-      `${terms.sourceLabel} is also your backup card: while your account is active, an order needing more than your available balance is charged the shortfall plus ${fee} (up to the single top-up limit) and goes out at once; the next routine top-up then brings the balance back to ${floor} (also plus ${fee}). Example: ${exampleText}. ${belowZero}`,
-      limitLine,
-      `${describeActivationTopUp(terms)} Once it runs, it charges ${terms.sourceLabel} to bring your balance to ${floor} — unless you add money first.`,
-      `Pause selling if a charge is declined, or a bank transfer you started is returned before it lands, and resume on its own once your balance is back to ${floor}. We do not retry the failed charge ourselves; if a top-up fails for any other reason, we email you.`,
+      `Charge ${terms.sourceLabel}, plus the ${fee} fee, whenever an order takes your balance below your minimum of ${minimum}, and at the daily check: your top-up amount of ${topUpText}, or more if that alone would not bring you back to ${minimum} (${formatWholeDollars(topUp.cents)} + ${formatWholeDollars(fill)} = ${formatWholeDollars(topUp.cents + fill)} for a routine top-up).`,
+      `${terms.sourceLabel} is also your backup card: while your account is active, an order needing more than your available balance is charged the shortfall plus ${fee} (up to ${bound}) and goes out at once; the next routine top-up then brings the balance back to ${minimum} (also plus ${fee}). Example: ${exampleText}. ${belowZero}`,
+      boundLine,
+      `${describeActivationTopUp(terms)} Once it runs, it charges ${terms.sourceLabel} your top-up amount (${formatWholeDollars(topUp.cents)}), or more if that alone would not reach ${minimum} — unless you add money first.`,
+      `Pause selling if a charge is declined, or a bank transfer you started is returned before it lands, and resume on its own once your balance is back to ${minimum}. We do not retry the failed charge ourselves; if a top-up fails for any other reason, we email you.`,
       termsLine,
     ];
   }
   return [
-    `Debit ${terms.sourceLabel} to bring your balance up to ${floor} — once a day, and after any order that takes it lower. No fee. Money already on its way counts, so the same gap is not debited twice.`,
-    `While your account is active, charge ${terms.backupLabel} only when an order needs more than your available balance: the shortfall plus the ${fee} card fee, up to the single top-up limit in the next line, and accept the order at once — even while a bank top-up is still landing or your top-up source cannot be charged. Example: ${exampleText}. Money still on its way counts only through the pending-transfer advance, when your account qualifies for it. ${belowZero}`,
-    limitLine,
-    `${describeActivationTopUp(terms)} Once it runs, it debits ${terms.sourceLabel} for the amount that brings you to ${floor}, and that transfer takes ${BANK_SETTLEMENT_PHRASE} to land; a bank transfer you start now helps once it lands.`,
-    `Pause selling if a top-up is declined or a bank transfer is returned before it lands, and resume on its own once settled money brings your balance back to ${floor}. We do not retry the failed charge ourselves; if a top-up fails for any other reason, we email you.`,
+    `Debit ${terms.sourceLabel} whenever an order takes your balance below your minimum of ${minimum}, and at the daily check: your top-up amount of ${topUpText}, or more if that alone would not bring you back to ${minimum}. No fee. Money already on its way counts, so the same gap is not debited twice.`,
+    `While your account is active, charge ${terms.backupLabel} only when an order needs more than your available balance: the shortfall plus the ${fee} card fee, up to ${bound}, and accept the order at once — even while a bank top-up is still landing or your autopay source cannot be charged. Example: ${exampleText}. Money still on its way counts only through the pending-transfer advance, when your account qualifies for it. ${belowZero}`,
+    boundLine,
+    `${describeActivationTopUp(terms)} Once it runs, it debits ${terms.sourceLabel} for your top-up amount (${formatWholeDollars(topUp.cents)}), or more if that alone would not reach ${minimum}, and that transfer takes ${BANK_SETTLEMENT_PHRASE} to land; a bank transfer you start now helps once it lands.`,
+    `Pause selling if a top-up is declined or a bank transfer is returned before it lands, and resume on its own once settled money brings your balance back to ${minimum}. We do not retry the failed charge ourselves; if a top-up fails for any other reason, we email you.`,
     termsLine,
   ];
 }
 
 export function describePlanSentence(terms: WalletTerms): string {
   const fee = formatFeeRate(terms.cardFundingFeeBps);
-  const floor = formatWholeDollars(terms.floorCents);
+  const minimum = formatWholeDollars(terms.floorCents);
+  const topUp = formatWholeDollars(topUpForTerms(terms).cents);
   return terms.sourceRail === "stripe_card"
-    ? `In one sentence: you keep ${floor} in your wallet, refilled from your ${terms.sourceLabel} at ${fee}; the same card covers any shortfall.`
-    : `In one sentence: you keep ${floor} in your wallet, refilled from your bank for free; if an order ever needs more than what is there, your ${terms.backupLabel} covers the shortfall plus ${fee}.`;
+    ? `In one sentence: you keep ${minimum} in your wallet, topped up by ${topUp} from your ${terms.sourceLabel} at ${fee}; the same card covers any shortfall.`
+    : `In one sentence: you keep ${minimum} in your wallet; when an order takes it lower, autopay pulls ${topUp} from your bank for free, and your ${terms.backupLabel} covers any shortfall plus ${fee}.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -773,23 +803,29 @@ export function acknowledgementForSave(input: {
 export interface WalletPlanInput {
   fundingMethodId: number;
   backupFundingMethodId: number;
+  /** The minimum the vendor keeps. */
   floorCents: number;
+  /** What each refill pulls; null is the minimum. */
+  topUpCents: number | null;
+  /** The single-charge bound, for copy only: the server derives and stores its own. */
   limitCents: number;
   holdTimeoutMinutes: number;
 }
 
 function assertPlan(plan: WalletPlanInput, limits: WalletLimits): void {
-  if (!Number.isSafeInteger(plan.fundingMethodId) || plan.fundingMethodId <= 0) throw new Error("A top-up source is required.");
+  if (!Number.isSafeInteger(plan.fundingMethodId) || plan.fundingMethodId <= 0) throw new Error("An autopay source is required.");
   if (!Number.isSafeInteger(plan.backupFundingMethodId) || plan.backupFundingMethodId <= 0) throw new Error("A backup card is required.");
   assertCents(plan.floorCents, "floorCents");
   assertCents(plan.limitCents, "limitCents");
-  if (plan.floorCents < limits.autoReloadMinTriggerCents) throw new Error(`The floor must be at least ${formatWholeDollars(limits.autoReloadMinTriggerCents)}.`);
-  if (plan.limitCents < plan.floorCents) throw new Error("The single top-up limit must be at least your floor.");
-  if (plan.limitCents < limits.autoReloadMinAmountCents) throw new Error(`The single top-up limit must be at least ${formatWholeDollars(limits.autoReloadMinAmountCents)}.`);
+  if (plan.floorCents < limits.autoReloadMinTriggerCents) throw new Error(`Your minimum must be at least ${formatWholeDollars(limits.autoReloadMinTriggerCents)}.`);
+  if (plan.topUpCents !== null) {
+    assertCents(plan.topUpCents, "topUpCents");
+    if (plan.topUpCents < limits.autoReloadMinAmountCents) throw new Error(`The top-up amount must be at least ${formatWholeDollars(limits.autoReloadMinAmountCents)}.`);
+  }
   if (!Number.isSafeInteger(plan.holdTimeoutMinutes) || plan.holdTimeoutMinutes < 1) throw new Error("The hold time must be at least one minute.");
 }
 
-/** Step 5: the one PUT that turns auto-reload on; always carries the rate in force. */
+/** Step 5: the one PUT that turns autopay on; always carries the rate in force. The bound is never sent: the server derives it. */
 export function buildAuthorizeInput(plan: WalletPlanInput, wallet: Pick<DropshipWalletView, "cardFundingFeeBps" | "limits">): DropshipAutoReloadConfigInput {
   assertPlan(plan, wallet.limits);
   return {
@@ -797,7 +833,7 @@ export function buildAuthorizeInput(plan: WalletPlanInput, wallet: Pick<Dropship
     fundingMethodId: plan.fundingMethodId,
     backstopFundingMethodId: plan.backupFundingMethodId,
     minimumBalanceCents: plan.floorCents,
-    maxSingleReloadCents: plan.limitCents,
+    topUpAmountCents: plan.topUpCents,
     paymentHoldTimeoutMinutes: plan.holdTimeoutMinutes,
     acknowledgedCardFeeBps: wallet.cardFundingFeeBps,
   };
@@ -811,7 +847,7 @@ export function buildPlanSaveInput(plan: WalletPlanInput, wallet: Pick<DropshipW
     fundingMethodId: plan.fundingMethodId,
     backstopFundingMethodId: plan.backupFundingMethodId,
     minimumBalanceCents: plan.floorCents,
-    maxSingleReloadCents: plan.limitCents,
+    topUpAmountCents: plan.topUpCents,
     paymentHoldTimeoutMinutes: plan.holdTimeoutMinutes,
     acknowledgedCardFeeBps: acknowledgementForSave({ autoReload: wallet.autoReload, cardFundingFeeBps: wallet.cardFundingFeeBps }).acknowledgedCardFeeBps,
   };
@@ -822,7 +858,7 @@ export function buildConfirmTermsInput(plan: WalletPlanInput, wallet: Pick<Drops
   return buildAuthorizeInput(plan, wallet);
 }
 
-/** Turn auto-reload off while keeping the saved amounts; the acknowledgement is withdrawn with it. */
+/** Turn autopay off while keeping the saved amounts; the acknowledgement is withdrawn with it. */
 export function buildAutoReloadDisableInput(wallet: Pick<DropshipWalletView, "autoReload" | "limits">): DropshipAutoReloadConfigInput {
   const existing = wallet.autoReload;
   return {
@@ -830,7 +866,7 @@ export function buildAutoReloadDisableInput(wallet: Pick<DropshipWalletView, "au
     fundingMethodId: existing?.fundingMethodId ?? null,
     backstopFundingMethodId: existing?.backstopFundingMethodId ?? null,
     minimumBalanceCents: existing?.minimumBalanceCents ?? 25_000,
-    maxSingleReloadCents: existing?.maxSingleReloadCents ?? null,
+    topUpAmountCents: existing?.topUpAmountCents ?? null,
     paymentHoldTimeoutMinutes: wallet.limits.defaultPaymentHoldTimeoutMinutes,
     acknowledgedCardFeeBps: null,
   };
@@ -844,7 +880,8 @@ export function planFromWallet(wallet: DropshipWalletView): WalletPlanInput | nu
     fundingMethodId: autoReload.fundingMethodId,
     backupFundingMethodId: autoReload.backstopFundingMethodId,
     floorCents: autoReload.minimumBalanceCents,
-    limitCents: autoReload.maxSingleReloadCents ?? derivedLimitCents(autoReload.minimumBalanceCents, wallet.limits),
+    topUpCents: autoReload.topUpAmountCents,
+    limitCents: autoReload.maxSingleReloadCents ?? chargeBoundCents(autoReload.minimumBalanceCents, autoReload.topUpAmountCents),
     holdTimeoutMinutes: wallet.limits.defaultPaymentHoldTimeoutMinutes,
   };
 }
@@ -870,9 +907,9 @@ export function buildRemoveFundingMethodPath(fundingMethodId: number): string {
 
 /** The exact server reason a removal would be refused, so the click never fails for a reason the page already knows. */
 export function disabledReasonForRemoval(method: WalletFundingMethod, canTurnOffAutoReload: boolean): string | null {
-  const suffix = canTurnOffAutoReload ? " — or turn off auto-reload." : "";
+  const suffix = canTurnOffAutoReload ? " — or turn off autopay." : "";
   if (method.roles.isBackupCard) return `This is your backup card — choose another backup card first, then remove this one.${suffix}`;
-  if (method.roles.isAutoReloadSource) return `This is your top-up source — choose another source first, then remove this one.${suffix}`;
+  if (method.roles.isAutoReloadSource) return `This is your autopay source — choose another source first, then remove this one.${suffix}`;
   return null;
 }
 
@@ -965,7 +1002,7 @@ export function describeNegativeBalance(input: {
   if (covered > 0) {
     return `${negative} below zero — ${formatWholeDollars(covered)} of it was paid from a bank transfer still on its way and clears when that lands. If the transfer is returned instead, the amount is collected by your next top-up.`;
   }
-  return `${negative} below zero — a return fee or a returned transfer took the balance below zero. Your next top-up covers it, unless the top-up needed exceeds your single top-up limit (${formatWholeDollars(input.limitCents)}) — then we email you instead of charging. Until then, a backup-card charge for an order includes this shortfall (order plus the amount below zero, plus ${formatFeeRate(input.cardFundingFeeBps)}).`;
+  return `${negative} below zero — a return fee or a returned transfer took the balance below zero. Your next top-up covers it, up to ${formatWholeDollars(input.limitCents)} in one charge; anything beyond that is collected over the following daily checks. Until then, a backup-card charge for an order includes this shortfall (order plus the amount below zero, plus ${formatFeeRate(input.cardFundingFeeBps)}).`;
 }
 
 /** The role-warning texts (spec §2.8); they name no card label, because the view does not identify the archived card. */
@@ -973,13 +1010,13 @@ export function describeRoleGap(gap: "backupCard" | "source", input: { holdTimeo
   if (gap === "backupCard") {
     return `Backup card needed — your backup card was removed at Stripe or can no longer be charged. Until you choose one, an order your balance cannot cover waits for you to add money and is cancelled after ${formatDurationMinutes(input.holdTimeoutMinutes)} (we email you ${formatDurationMinutes(input.holdExpiryWarningMinutes)} before).`;
   }
-  return "Top-up source needed — your top-up source was removed at Stripe or can no longer be charged, so routine top-ups are not running. Held orders are still covered by your backup card. Choose another source.";
+  return "Autopay source needed — your autopay source was removed at Stripe or can no longer be charged, so routine top-ups are not running. Held orders are still covered by your backup card. Choose another source.";
 }
 
 /** The acknowledgement banner's three faces (spec §2.8). */
 export function describeAcknowledgementBanner(input: { feeChange: { recordedBps: number; currentBps: number } | null; onboarding: boolean }): string {
   if (!input.feeChange) {
-    return `Please review and confirm your auto-reload terms. Nothing changes until you confirm.${input.onboarding ? " You cannot activate until you do." : ""}`;
+    return `Please review and confirm your autopay terms. Nothing changes until you confirm.${input.onboarding ? " You cannot activate until you do." : ""}`;
   }
   const recorded = formatFeeRate(input.feeChange.recordedBps);
   const current = formatFeeRate(input.feeChange.currentBps);

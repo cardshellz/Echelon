@@ -117,21 +117,21 @@ describe("describeOnboardingStep", () => {
     expect(bankOnly.detail).toBe("Add your backup card in Wallet — it covers an order your balance cannot.");
 
     const cardOnly = describeOnboardingStep(step("wallet_payment"), state({ wallet: { hasActiveFundingMethod: true, hasStripeReadyFundingMethod: true, hasCardBackstop: true } }));
-    expect(cardOnly.detail).toBe("Review and turn on auto-reload in Wallet.");
+    expect(cardOnly.detail).toBe("Review and turn on autopay in Wallet.");
 
     const unacknowledged = describeOnboardingStep(step("wallet_payment"), state({ wallet: { hasActiveFundingMethod: true, hasStripeReadyFundingMethod: true, hasCardBackstop: true, autoReloadConfigured: true } }));
-    expect(unacknowledged.detail).toBe("Confirm your auto-reload terms in Wallet.");
+    expect(unacknowledged.detail).toBe("Confirm your autopay terms in Wallet.");
 
     const ready = describeOnboardingStep(step("wallet_payment", "complete"), state({ wallet: { hasCardBackstop: true, autoReloadConfigured: true, walletReady: true } }));
     expect(ready).toMatchObject({ tone: "complete", action: { kind: "navigate", label: "Open wallet", path: "/wallet" } });
-    expect(ready.detail).toBe("Top-ups from your bank account to your floor; backup card on file. Your first automatic top-up runs on the first daily check after you activate (a bank transfer lands in up to 5 business days — our assumption).");
+    expect(ready.detail).toBe("Autopay from your bank account to your minimum; backup card on file. Your first automatic top-up runs on the first daily check after you activate (a bank transfer lands in up to 5 business days — our assumption).");
     expect(ready.detail).not.toContain("Nothing is charged until you accept an order");
 
     const cardSource = describeOnboardingStep(step("wallet_payment", "complete"), state({ wallet: { hasCardBackstop: true, autoReloadConfigured: true, walletReady: true, autoReloadFundingMethodIsCard: true } }));
-    expect(cardSource.detail).toBe("Top-ups from your card to your floor; backup card on file. Your first automatic top-up runs on the first daily check after you activate.");
+    expect(cardSource.detail).toBe("Autopay from your card to your minimum; backup card on file. Your first automatic top-up runs on the first daily check after you activate.");
 
     const funded = describeOnboardingStep(step("wallet_payment", "complete"), state({ wallet: { hasCardBackstop: true, autoReloadConfigured: true, walletReady: true, hasSpendableBalance: true, availableBalanceCents: 12_345 } }));
-    expect(funded.detail.startsWith("$123.45 available. Top-ups from your bank account")).toBe(true);
+    expect(funded.detail.startsWith("$123.45 available. Autopay from your bank account")).toBe(true);
   });
 
   it("marks every blocked step as blocked with no button, and explains the membership on the profile row", () => {

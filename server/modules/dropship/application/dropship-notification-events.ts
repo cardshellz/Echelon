@@ -29,6 +29,8 @@ export const DROPSHIP_NOTIFICATION_EVENTS = {
   WALLET_FUNDING_FAILED: "dropship_wallet_funding_failed",
   WALLET_FUNDING_REINSTATED: "dropship_wallet_funding_reinstated",
   WALLET_FUNDING_REVERSED: "dropship_wallet_funding_reversed",
+  /** The daily wallet run found the balance below its minimum and autopay could not top it up (funding design phase 5). */
+  WALLET_LOW_BALANCE: "dropship_wallet_low_balance",
 } as const;
 
 export type DropshipNotificationEventType =

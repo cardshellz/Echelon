@@ -54,10 +54,6 @@ export const FLOOR_PRESETS_CENTS: readonly number[] = [10_000, 25_000, 50_000, 1
 export const DEFAULT_FLOOR_CENTS_BY_SOURCE: Readonly<Record<WalletSourceRail, number>> = { stripe_ach: 25_000, stripe_card: 10_000 };
 /** The two floors quoted in the card floor copy; fees computed, never typed. */
 export const FIRST_FILL_EXAMPLE_FLOORS_CENTS: readonly [number, number] = [10_000, 100_000];
-/** D3: default single top-up limit = 2 × floor, snapped up to a preset. */
-export const LIMIT_MULTIPLIER = 2;
-/** Existing presets plus $5,000; all ≥ the server's minimum amount. */
-export const LIMIT_PRESETS_CENTS: readonly number[] = [25_000, 50_000, 100_000, 250_000, 500_000];
 /** Existing presets; the floor is added at runtime; clamped to the manual funding limits. */
 export const DEPOSIT_PRESETS_CENTS: readonly number[] = [2_500, 5_000, 10_000, 25_000];
 /** Monthly figures are "about". */
@@ -223,30 +219,18 @@ export function moneyParkedCents(floorCents: number): number {
 }
 
 // ---------------------------------------------------------------------------
-// The single top-up limit (D3)
+// The single-charge bound (funding design phase 5)
 // ---------------------------------------------------------------------------
 
-export function derivedLimitCents(floorCents: number, limits: WalletLimits): number {
+/**
+ * The most autopay may take in one charge: the minimum, or the top-up amount
+ * when that is larger. Mirrors the bound the server derives and enforces
+ * (`domain/autopay-refill.ts`); the vendor never sets it.
+ */
+export function chargeBoundCents(floorCents: number, topUpCents: number | null): number {
   assertCents(floorCents, "floorCents");
-  return snapUpToPreset(Math.max(floorCents * LIMIT_MULTIPLIER, limits.autoReloadMinAmountCents, floorCents), LIMIT_PRESETS_CENTS);
-}
-
-/** Never a false multiple: $100 → $250 is 2.5×, so it reads "at least 2 × your floor, rounded up to the next preset". */
-export function describeLimitDerivation(floorCents: number, limitCents: number): string {
-  assertCents(floorCents, "floorCents");
-  assertCents(limitCents, "limitCents");
-  return limitCents === floorCents * LIMIT_MULTIPLIER
-    ? `${LIMIT_MULTIPLIER} × your floor`
-    : `at least ${LIMIT_MULTIPLIER} × your floor, rounded up to the next preset`;
-}
-
-/** A derived cap follows the floor; a hand-set cap is kept unless it would fall below the new floor. */
-export function capAfterFloorChange(oldFloorCents: number, newFloorCents: number, currentCapCents: number, limits: WalletLimits): number {
-  assertCents(oldFloorCents, "oldFloorCents");
-  assertCents(newFloorCents, "newFloorCents");
-  assertCents(currentCapCents, "currentCapCents");
-  if (currentCapCents === derivedLimitCents(oldFloorCents, limits)) return derivedLimitCents(newFloorCents, limits);
-  return currentCapCents >= newFloorCents ? currentCapCents : derivedLimitCents(newFloorCents, limits);
+  if (topUpCents !== null) assertCents(topUpCents, "topUpCents");
+  return Math.max(floorCents, topUpCents ?? floorCents);
 }
 
 /** The cap applies to the whole shortfall, which includes a deficit: available −$50, limit $500 → $450. */
@@ -262,32 +246,43 @@ export function largestCoverableOrderCents(availableCents: number, limitCents: n
 
 export type ActivationTopUp =
   | { outcome: "not_needed" }
-  | { outcome: "skipped_over_limit"; amountCents: number; limitCents: number }
-  | { outcome: "top_up"; amountCents: number; feeCents: number; chargedCents: number; lands: "instant" | "pending" };
+  | {
+      outcome: "top_up";
+      amountCents: number;
+      feeCents: number;
+      chargedCents: number;
+      lands: "instant" | "pending";
+      /** True when the single-charge bound left part of the shortfall for the next daily check. */
+      partial: boolean;
+    };
 
-/** Mirrors `calculateAutoReloadAmount` for the routine top-up, including its cap skip; pending money counts. */
+/**
+ * Mirrors the server's routine refill (`domain/autopay-refill.ts`): the
+ * top-up amount (the minimum by default), or the whole shortfall when that is
+ * more, never past the single-charge bound; pending money counts.
+ */
 export function activationTopUp(input: {
   sourceRail: WalletSourceRail;
   floorCents: number;
-  limitCents: number;
+  topUpCents: number | null;
   availableCents: number;
   pendingCents: number;
   bps: number;
 }): ActivationTopUp {
-  assertCents(input.floorCents, "floorCents");
-  assertCents(input.limitCents, "limitCents");
+  const bound = chargeBoundCents(input.floorCents, input.topUpCents);
   assertSignedCents(input.availableCents, "availableCents");
   assertSignedCents(input.pendingCents, "pendingCents");
   const needed = input.floorCents - (input.availableCents + input.pendingCents);
   if (needed <= 0) return { outcome: "not_needed" };
-  if (needed > input.limitCents) return { outcome: "skipped_over_limit", amountCents: needed, limitCents: input.limitCents };
-  const quote = quoteWalletFunding({ rail: input.sourceRail, creditCents: needed, cardFeeBps: input.bps });
+  const amount = Math.min(Math.max(needed, input.topUpCents ?? input.floorCents), bound);
+  const quote = quoteWalletFunding({ rail: input.sourceRail, creditCents: amount, cardFeeBps: input.bps });
   return {
     outcome: "top_up",
     amountCents: quote.creditCents,
     feeCents: quote.feeCents,
     chargedCents: quote.chargedCents,
     lands: input.sourceRail === "stripe_card" ? "instant" : "pending",
+    partial: amount < needed,
   };
 }
 

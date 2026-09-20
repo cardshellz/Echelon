@@ -176,7 +176,7 @@ describe("DropshipListingTierService", () => {
         ["dropship_listing_tier_held", "dropship-listing-tier:10:case:held:1"],
       ]);
       expect(notificationSender.sent[0].title).toBe("Your listings are off sale until your wallet keeps the USD $100.00 minimum");
-      expect(notificationSender.sent[0].message).toContain("your auto-reload minimum is USD $50.00 and your wallet has USD $90.00");
+      expect(notificationSender.sent[0].message).toContain("your minimum is USD $50.00 and your wallet has USD $90.00");
       expect(notificationSender.sent[0].message).toContain("Raise your minimum to USD $100.00, or add USD $10.00");
     });
 
