@@ -111,7 +111,9 @@ const releaseScript = readFileSync(
 
 describe("Dropship V2 schema contract", () => {
   it("uses the agreed launch defaults without floating point money", () => {
-    expect(DROPSHIP_DEFAULT_PAYMENT_HOLD_TIMEOUT_MINUTES).toBe(2880);
+    // 24 hours since migration 0683; the launch migration text below still
+    // reads 48 hours because applied migrations are immutable.
+    expect(DROPSHIP_DEFAULT_PAYMENT_HOLD_TIMEOUT_MINUTES).toBe(1440);
     expect(DROPSHIP_DEFAULT_RETURN_WINDOW_DAYS).toBe(30);
     expect(DROPSHIP_DEFAULT_INSURANCE_POOL_FEE_BPS).toBe(200);
     expect(DROPSHIP_DEFAULT_SHIPPING_MARKUP_BPS).toBe(0);

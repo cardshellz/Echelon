@@ -53,7 +53,7 @@ import type { DropshipWalletView, WalletFundingMethod, WalletLimits } from "../d
 const STAMP = "2026-09-15T00:00:00.000Z";
 const LATER = "2026-09-16T00:00:00.000Z";
 const NOW = new Date("2026-09-18T12:00:00.000Z");
-const LIMITS = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120 };
+const LIMITS = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, caseTierMinimumCents: 50_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14 };
 
 function method(overrides: Partial<WalletFundingMethod> & { fundingMethodId: number }): WalletFundingMethod {
   const rail = overrides.rail ?? "stripe_card";
@@ -243,6 +243,12 @@ describe("acknowledgementForSave and builders", () => {
     expect(buildConfirmTermsInput(plan, wallet({ cardFundingFeeBps: 350 })).acknowledgedCardFeeBps).toBe(350);
     expect(buildPlanSaveInput(plan, doneWallet({ cardFundingFeeBps: 350 })).acknowledgedCardFeeBps).toBe(300);
     expect(buildAutoReloadDisableInput(doneWallet())).toEqual({ enabled: false, fundingMethodId: 30, backstopFundingMethodId: 10, minimumBalanceCents: 25_000, maxSingleReloadCents: 50_000, paymentHoldTimeoutMinutes: 2_880, acknowledgedCardFeeBps: null });
+    // The hold is CardShellz's policy for every wallet: a saved row still
+    // carrying an older value is never echoed back, shown or derived from.
+    const policyHold = doneWallet({ limits: { ...LIMITS, defaultPaymentHoldTimeoutMinutes: 1_440 } });
+    expect(buildAutoReloadDisableInput(policyHold).paymentHoldTimeoutMinutes).toBe(1_440);
+    expect(planFromWallet(policyHold)?.holdTimeoutMinutes).toBe(1_440);
+    expect(derive(policyHold).holdTimeoutMinutes).toBe(1_440);
     expect(() => buildAuthorizeInput({ ...plan, floorCents: 4_000 }, wallet())).toThrow("at least $50");
     expect(() => buildAuthorizeInput({ ...plan, limitCents: 20_000 }, wallet())).toThrow("at least your floor");
     expect(() => buildAuthorizeInput({ ...plan, backupFundingMethodId: 0 }, wallet())).toThrow("backup card");
@@ -430,7 +436,7 @@ describe("copy", () => {
   });
 
   it("pins the intro: five topics, each a lead and its detail, quoting only the values the server enforces", () => {
-    const limits: WalletLimits = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120 };
+    const limits: WalletLimits = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, caseTierMinimumCents: 50_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14 };
     const intro = describeIntro({ cardFundingFeeBps: 300, usdcOffered: true, holdTimeoutMinutes: 2_880, limits });
     expect(intro.lede).toBe("Your wallet is how Card Shellz gets paid for the orders you sell. Here is what it does, what it costs, and what happens if a payment fails.");
     expect(intro.topics).toHaveLength(5);

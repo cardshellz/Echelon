@@ -5,11 +5,13 @@ import { DropshipError } from "../../domain/errors";
 import { createDropshipWalletPolicyServiceFromEnv } from "../../infrastructure/dropship-wallet-policy.factory";
 
 /**
- * Admin surface for the staff-managed wallet policy (migration 0681).
+ * Admin surface for the staff-managed wallet policy (migrations 0682, 0683)
+ * and the per-vendor credit profile.
  *
  * The limits are versioned and immutable: POST publishes a NEW VERSION and
- * retires the current one; there is no PATCH. Routes orchestrate only — every
- * rule, default and count lives in DropshipWalletPolicyService.
+ * retires the current one; there is no PATCH. The credit profile is mutable
+ * configuration set with PUT. Routes orchestrate only — every rule, default
+ * and count lives in DropshipWalletPolicyService.
  *
  * The card funding fee is served read-only on the GET. It is NOT editable here:
  * a vendor's agreement to a rate is recorded only in an audit payload, not on
@@ -56,6 +58,37 @@ export function registerDropshipAdminWalletPolicyRoutes(
       }
     },
   );
+
+  app.get(
+    "/api/dropship/admin/vendors/:vendorId/credit-profile",
+    requirePermission("dropship", "view"),
+    async (req, res) => {
+      try {
+        const view = await service.getVendorCreditProfile(parseVendorId(req));
+        return res.json(view);
+      } catch (error) {
+        return sendDropshipWalletPolicyError(res, error);
+      }
+    },
+  );
+
+  app.put(
+    "/api/dropship/admin/vendors/:vendorId/credit-profile",
+    requirePermission("dropship", "manage_operations"),
+    async (req, res) => {
+      try {
+        const result = await service.setVendorCreditProfile({
+          ...req.body,
+          vendorId: parseVendorId(req),
+          idempotencyKey: resolveIdempotencyKey(req),
+          actor: adminActor(req),
+        });
+        return res.json(result);
+      } catch (error) {
+        return sendDropshipWalletPolicyError(res, error);
+      }
+    },
+  );
 }
 
 function sendDropshipWalletPolicyError(res: Response, error: unknown): Response {
@@ -81,16 +114,22 @@ function sendDropshipWalletPolicyError(res: Response, error: unknown): Response 
 function statusForDropshipWalletPolicyError(code: string): number {
   switch (code) {
     case "DROPSHIP_WALLET_POLICY_INVALID_INPUT":
+    case "DROPSHIP_VENDOR_CREDIT_PROFILE_INVALID_INPUT":
     case "DROPSHIP_IDEMPOTENCY_KEY_REQUIRED":
       return 400;
     case "DROPSHIP_WALLET_POLICY_NOT_FOUND":
+    case "DROPSHIP_VENDOR_CREDIT_PROFILE_NOT_FOUND":
+    case "DROPSHIP_VENDOR_CREDIT_PROFILE_VENDOR_NOT_FOUND":
       return 404;
     case "DROPSHIP_WALLET_POLICY_IDEMPOTENCY_CONFLICT":
     case "DROPSHIP_WALLET_POLICY_COMMAND_INCOMPLETE":
     case "DROPSHIP_WALLET_POLICY_CONFLICT":
+    case "DROPSHIP_VENDOR_CREDIT_PROFILE_IDEMPOTENCY_CONFLICT":
+    case "DROPSHIP_VENDOR_CREDIT_PROFILE_COMMAND_INCOMPLETE":
       return 409;
     // The table is not there yet: the caller retries after the migration lands.
     case "DROPSHIP_WALLET_POLICY_TABLE_MISSING":
+    case "DROPSHIP_VENDOR_CREDIT_PROFILE_TABLE_MISSING":
       return 503;
     default:
       return 500;
@@ -113,6 +152,19 @@ function optionalCents(value: unknown, key: string): Record<string, number> {
     );
   }
   return { [key]: parsed };
+}
+
+function parseVendorId(req: Request): number {
+  const raw = req.params.vendorId;
+  const parsed = typeof raw === "string" && /^\d+$/.test(raw) ? Number(raw) : Number.NaN;
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new DropshipError(
+      "DROPSHIP_VENDOR_CREDIT_PROFILE_INVALID_INPUT",
+      "Vendor id must be a positive integer.",
+      { classification: "permanent", field: "vendorId", value: raw },
+    );
+  }
+  return parsed;
 }
 
 function resolveIdempotencyKey(req: Request): string {

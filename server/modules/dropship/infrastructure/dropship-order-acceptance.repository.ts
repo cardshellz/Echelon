@@ -1840,7 +1840,35 @@ async function getOrCreateWalletForUpdate(
   };
 }
 
+/**
+ * How long this order may wait in payment hold.
+ *
+ * The staff-managed wallet policy governs (migration 0683): the hold length is
+ * a platform decision, and the vendor client only ever echoed the default into
+ * the per-vendor column, so the active policy row wins whenever one exists.
+ * The vendor row and then the documented default are the fallbacks for a
+ * database the policy migration has not reached yet.
+ *
+ * The policy table is probed with to_regclass first: a query against a
+ * missing relation would abort this transaction, and a dyno booting ahead of
+ * the release-phase migration must still accept orders.
+ */
 async function loadPaymentHoldTimeoutWithClient(client: PoolClient, vendorId: number): Promise<number> {
+  const policyTable = await client.query<{ present: string | null }>(
+    `SELECT to_regclass('dropship.dropship_wallet_policies')::text AS present`,
+  );
+  if (policyTable.rows[0]?.present) {
+    const policy = await client.query<{ default_payment_hold_timeout_minutes: number }>(
+      `SELECT default_payment_hold_timeout_minutes
+       FROM dropship.dropship_wallet_policies
+       WHERE is_active = true
+       LIMIT 1`,
+    );
+    const policyMinutes = policy.rows[0]?.default_payment_hold_timeout_minutes;
+    if (Number.isInteger(policyMinutes) && policyMinutes > 0) {
+      return policyMinutes;
+    }
+  }
   const result = await client.query<AutoReloadRow>(
     `SELECT payment_hold_timeout_minutes
      FROM dropship.dropship_auto_reload_settings

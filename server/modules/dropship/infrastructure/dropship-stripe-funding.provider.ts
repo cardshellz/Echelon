@@ -1,6 +1,7 @@
 import Stripe from "stripe";
 import { formatFeeRate } from "../../../../shared/dropship/wallet-funding-fee";
 import { DropshipError } from "../domain/errors";
+import { FUNDING_METHOD_ACCOUNT_HOLDER_TYPE_KEY } from "../domain/funding-method";
 import { toDropshipStripeError } from "./dropship-stripe-error";
 import type {
   CreditDropshipWalletFundingInput,
@@ -769,6 +770,12 @@ function sanitizedPaymentMethodMetadata(input: {
       bankName: input.paymentMethod.us_bank_account.bank_name,
       last4: input.paymentMethod.us_bank_account.last4,
       accountType: input.paymentMethod.us_bank_account.account_type,
+      // individual | company | null. A company account can return an ACH
+      // debit as unauthorized for 2 banking days; a consumer account for about
+      // 60. The pending-ACH advance is only offered against the former, so the
+      // value is kept exactly as Stripe reports it and read back through
+      // fundingMethodAccountHolderType, which treats anything else as unknown.
+      [FUNDING_METHOD_ACCOUNT_HOLDER_TYPE_KEY]: input.paymentMethod.us_bank_account.account_holder_type ?? null,
     };
   }
   return base;

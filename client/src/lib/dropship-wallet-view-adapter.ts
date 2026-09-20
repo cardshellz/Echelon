@@ -97,12 +97,22 @@ export interface WalletLedgerEntry {
 }
 
 export interface WalletLimits {
+  /** Pack tier minimum (eaches and inner packs): the lowest floor any vendor may keep. */
   autoReloadMinTriggerCents: number;
+  /** Case tier minimum: a vendor with case listings enabled keeps at least this. */
+  caseTierMinimumCents: number;
   autoReloadMinAmountCents: number;
   manualFundingMinCents: number;
   manualFundingMaxCents: number;
+  /** Set by staff for every wallet; the vendor never chooses it. */
   defaultPaymentHoldTimeoutMinutes: number;
   holdExpiryWarningMinutes: number;
+  /** Service fee, in basis points, on pending bank money an order is accepted against. */
+  advanceFeeBps: number;
+  /** Ceiling on that pending amount; zero advances nothing. */
+  advanceCapCents: number;
+  /** Days a vendor below a raised tier minimum keeps that tier's listings. */
+  tierChangeGraceDays: number;
 }
 
 export interface WalletSetupStatus {
@@ -215,13 +225,22 @@ const rawLedgerEntrySchema = z.object({
   metadata: z.record(z.unknown()).nullable().optional(),
 }).passthrough();
 
+/**
+ * The four limits the funding design added (migration 0683) are optional on
+ * the wire so a server one release behind still serves a wallet; a missing one
+ * is filled from the documented default and the fallback is named.
+ */
 const rawLimitsSchema = z.object({
   autoReloadMinTriggerCents: cents,
+  caseTierMinimumCents: cents.optional(),
   autoReloadMinAmountCents: cents,
   manualFundingMinCents: cents,
   manualFundingMaxCents: cents,
   defaultPaymentHoldTimeoutMinutes: z.number().int().positive(),
   holdExpiryWarningMinutes: z.number().int().positive(),
+  advanceFeeBps: z.number().int().nonnegative().optional(),
+  advanceCapCents: z.number().int().nonnegative().optional(),
+  tierChangeGraceDays: z.number().int().nonnegative().optional(),
 });
 
 const rawSetupStatusSchema = z.object({
@@ -260,22 +279,32 @@ type RawLedgerEntry = z.infer<typeof rawLedgerEntrySchema>;
 // ---------------------------------------------------------------------------
 
 /**
- * The server's documented defaults, used only until `wallet.limits` is served
- * (spec §4.1 / S8): DEFAULT_AUTO_RELOAD_MIN_TRIGGER_CENTS 5 000 and
- * DEFAULT_AUTO_RELOAD_MIN_AMOUNT_CENTS 10 000 (dropship-wallet-service.ts),
- * DEFAULT_STRIPE_MIN/MAX_WALLET_FUNDING_CENTS 1 000 / 500 000, the 48-hour
- * payment hold default and DEFAULT_PAYMENT_HOLD_EXPIRING_WARNING_MINUTES 120
- * (dropship-payment-hold-expiration-service.ts). Environment overrides are
- * invisible to the client until the server serves the resolved values.
+ * The server's documented defaults
+ * (server/modules/dropship/domain/wallet-policy.ts, migration 0683 version 2),
+ * used only for a limit the server did not serve: pack tier $100, case tier
+ * $500, minimum single top-up $100, manual top-up $10–$5,000, 24-hour payment
+ * hold warned 2 hours before expiry, 1% advance fee capped at $500, 14 days
+ * of grace after a tier is raised. A staff-published policy is invisible to the
+ * client until the server serves the resolved values.
  */
 export const CLIENT_FALLBACK_LIMITS: WalletLimits = Object.freeze({
-  autoReloadMinTriggerCents: 5_000,
+  autoReloadMinTriggerCents: 10_000,
+  caseTierMinimumCents: 50_000,
   autoReloadMinAmountCents: 10_000,
   manualFundingMinCents: 1_000,
   manualFundingMaxCents: 500_000,
-  defaultPaymentHoldTimeoutMinutes: 2_880,
+  defaultPaymentHoldTimeoutMinutes: 1_440,
   holdExpiryWarningMinutes: 120,
+  advanceFeeBps: 100,
+  advanceCapCents: 50_000,
+  tierChangeGraceDays: 14,
 });
+
+/** The keys of `value` whose entries are defined, so a spread never overwrites a default with `undefined`. */
+function definedEntries<T extends object>(value: T): Partial<T> {
+  const entries = Object.entries(value).filter(([, entry]) => entry !== undefined);
+  return Object.fromEntries(entries) as Partial<T>;
+}
 
 /** "Visa ending in 4242" / "Chase ending in 1234": the label Stripe's provider writes today. */
 const LABEL_ENDING_IN = /^(.+?) ending in (\d{4})$/;
@@ -528,8 +557,13 @@ export function adaptWalletView(raw: unknown): DropshipWalletView {
     };
   });
 
-  const limits = wallet.limits ?? { ...CLIENT_FALLBACK_LIMITS };
-  if (!wallet.limits) fallbacks.add("limits_from_documented_defaults");
+  const served = wallet.limits ?? null;
+  const limits: WalletLimits = { ...CLIENT_FALLBACK_LIMITS, ...(served ? definedEntries(served) : {}) };
+  // Either no limits at all, or a server that predates one of them: the page
+  // is then quoting a documented default for that value, and says so.
+  if (!served || (Object.keys(CLIENT_FALLBACK_LIMITS) as Array<keyof WalletLimits>).some((key) => served[key] === undefined)) {
+    fallbacks.add("limits_from_documented_defaults");
+  }
 
   const setupStatus = wallet.setupStatus ?? deriveSetupStatus({ autoReload, fundingMethods, cardFundingFeeBps: wallet.cardFundingFeeBps });
   if (!wallet.setupStatus) fallbacks.add("setup_status_derived");

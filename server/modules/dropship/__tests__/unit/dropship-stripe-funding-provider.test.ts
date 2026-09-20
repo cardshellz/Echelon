@@ -335,6 +335,7 @@ describe("StripeDropshipFundingProvider", () => {
         bank_name: "Test Bank",
         last4: "6789",
         account_type: "checking",
+        account_holder_type: "company",
       },
     });
 
@@ -365,6 +366,16 @@ describe("StripeDropshipFundingProvider", () => {
         idempotencyKey: "stripe-funding:pi_ach",
       },
     });
+    // The holder type decides the ACH return window (2 banking days for a
+    // company account, ~60 for a consumer one) and so whether the pending-ACH
+    // advance may be offered; it is kept exactly as Stripe reports it.
+    const metadata = (event as { fundingMethod?: { metadata?: Record<string, unknown> } }).fundingMethod?.metadata;
+    expect(metadata).toEqual(expect.objectContaining({
+      accountType: "checking",
+      accountHolderType: "company",
+    }));
+    expect(JSON.stringify(event)).not.toContain("routing");
+    expect(JSON.stringify(event)).not.toContain("account_number");
   });
 
   it("parses wallet funding failed webhooks into vendor failure notifications", async () => {

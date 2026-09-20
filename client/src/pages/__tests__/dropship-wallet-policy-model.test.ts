@@ -2,7 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import {
   DROPSHIP_WALLET_POLICY_ADMIN_URL,
+  DROPSHIP_WALLET_POLICY_LIMIT_DESCRIPTORS,
+  DROPSHIP_WALLET_POLICY_MAX_ADVANCE_FEE_BPS,
   DROPSHIP_WALLET_POLICY_MAX_HOLD_TIMEOUT_MINUTES,
+  DROPSHIP_WALLET_POLICY_MAX_TIER_CHANGE_GRACE_DAYS,
+  basisPointsToPercentInput,
   buildDropshipWalletPolicyOverviewUrl,
   buildDropshipWalletPolicyVersionRequest,
   centsToDollarInput,
@@ -15,20 +19,28 @@ import {
   dropshipWalletPolicySourceLabel,
   formatDropshipBasisPoints,
   isDropshipWalletPolicyFormDirty,
+  parseDollarsToCents,
   parseDropshipWalletPolicyForm,
   parseDropshipWalletPolicyMutation,
   parseDropshipWalletPolicyOverview,
+  parsePercentToBasisPoints,
+  parseWholeDays,
   type DropshipWalletPolicyForm,
   type DropshipWalletPolicyLimitsView,
 } from "../dropship-wallet-policy-model";
 
+/** The launch values migration 0683 publishes as version 2. */
 const LIMITS: DropshipWalletPolicyLimitsView = {
-  autoReloadMinTriggerCents: 5_000,
+  autoReloadMinTriggerCents: 10_000,
+  caseTierMinimumCents: 50_000,
   autoReloadMinAmountCents: 10_000,
   manualFundingMinCents: 1_000,
   manualFundingMaxCents: 500_000,
-  defaultPaymentHoldTimeoutMinutes: 2_880,
+  defaultPaymentHoldTimeoutMinutes: 1_440,
   holdExpiryWarningMinutes: 120,
+  advanceFeeBps: 100,
+  advanceCapCents: 50_000,
+  tierChangeGraceDays: 14,
 };
 
 function baselineForm(patch: Partial<DropshipWalletPolicyForm> = {}): DropshipWalletPolicyForm {
@@ -36,54 +48,100 @@ function baselineForm(patch: Partial<DropshipWalletPolicyForm> = {}): DropshipWa
 }
 
 describe("dropship wallet policy form model", () => {
-  it("renders the limits in force as dollar inputs and never carries the old note forward", () => {
+  it("renders the limits in force as dollar, percent and whole-number inputs and never carries the old note forward", () => {
     expect(dropshipWalletPolicyFormFromLimits(LIMITS)).toEqual({
-      autoReloadMinTriggerDollars: "50.00",
+      autoReloadMinTriggerDollars: "100.00",
+      caseTierMinimumDollars: "500.00",
       autoReloadMinAmountDollars: "100.00",
       manualFundingMinDollars: "10.00",
       manualFundingMaxDollars: "5000.00",
-      defaultPaymentHoldTimeoutMinutes: "2880",
+      defaultPaymentHoldTimeoutMinutes: "1440",
       holdExpiryWarningMinutes: "120",
+      advanceFeePercent: "1.00",
+      advanceCapDollars: "500.00",
+      tierChangeGraceDays: "14",
       changeNote: "",
     });
     expect(centsToDollarInput(1)).toBe("0.01");
     expect(centsToDollarInput(0)).toBe("0.00");
     expect(centsToDollarInput(123_456)).toBe("1234.56");
+    expect(basisPointsToPercentInput(150)).toBe("1.50");
+    expect(basisPointsToPercentInput(0)).toBe("0.00");
   });
 
-  it("parses dollars into integer cents without floating-point arithmetic", () => {
+  it("lists the ten limits in display order, each mapped to its own form field", () => {
+    expect(DROPSHIP_WALLET_POLICY_LIMIT_DESCRIPTORS.map((descriptor) => descriptor.limitField)).toEqual([
+      "autoReloadMinTriggerCents",
+      "caseTierMinimumCents",
+      "autoReloadMinAmountCents",
+      "manualFundingMinCents",
+      "manualFundingMaxCents",
+      "defaultPaymentHoldTimeoutMinutes",
+      "holdExpiryWarningMinutes",
+      "advanceFeeBps",
+      "advanceCapCents",
+      "tierChangeGraceDays",
+    ]);
+    expect(new Set(DROPSHIP_WALLET_POLICY_LIMIT_DESCRIPTORS.map((descriptor) => descriptor.formField)).size).toBe(10);
+    // Only the advance fee, the advance cap and the grace may be zero.
+    expect(DROPSHIP_WALLET_POLICY_LIMIT_DESCRIPTORS.filter((descriptor) => descriptor.allowZero).map((descriptor) => descriptor.limitField))
+      .toEqual(["advanceFeeBps", "advanceCapCents", "tierChangeGraceDays"]);
+  });
+
+  it("parses dollars and percents into integers without floating-point arithmetic", () => {
     const parsed = parseDropshipWalletPolicyForm(baselineForm({
       // 69.29 * 100 is 6928.999999999999 in binary floating point; the model
       // concatenates the digits instead, so the cent is never lost.
       autoReloadMinTriggerDollars: "69.29",
+      caseTierMinimumDollars: "69.29",
       autoReloadMinAmountDollars: "1234.5",
       manualFundingMinDollars: "0.07",
       manualFundingMaxDollars: "  5000  ",
+      advanceFeePercent: "1.15",
+      advanceCapDollars: "0",
+      tierChangeGraceDays: "0",
     }));
     expect(parsed).toMatchObject({
       success: true,
       limits: {
         autoReloadMinTriggerCents: 6_929,
+        caseTierMinimumCents: 6_929,
         autoReloadMinAmountCents: 123_450,
         manualFundingMinCents: 7,
         manualFundingMaxCents: 500_000,
+        advanceFeeBps: 115,
+        advanceCapCents: 0,
+        tierChangeGraceDays: 0,
       },
     });
+    expect(parsePercentToBasisPoints("100")).toEqual({ ok: true, bps: 10_000 });
+    expect(parsePercentToBasisPoints("100.01")).toEqual({ ok: false, reason: "range" });
+    expect(parsePercentToBasisPoints("1.5%")).toEqual({ ok: false, reason: "format" });
+    expect(parseDollarsToCents("0", { allowZero: true })).toEqual({ ok: true, cents: 0 });
+    expect(parseDollarsToCents("0")).toEqual({ ok: false, reason: "format" });
+    expect(parseWholeDays("365", 365)).toEqual({ ok: true, days: 365 });
+    expect(parseWholeDays("366", 365)).toEqual({ ok: false, reason: "range" });
+    expect(parseWholeDays("1.5", 365)).toEqual({ ok: false, reason: "format" });
   });
 
   it("rejects malformed, zero, negative and over-precise amounts with a per-field message", () => {
     const parsed = parseDropshipWalletPolicyForm({
       autoReloadMinTriggerDollars: "",
+      caseTierMinimumDollars: "0",
       autoReloadMinAmountDollars: "abc",
       manualFundingMinDollars: "-5",
       manualFundingMaxDollars: "1.234",
       defaultPaymentHoldTimeoutMinutes: "0",
       holdExpiryWarningMinutes: "12.5",
+      advanceFeePercent: "-1",
+      advanceCapDollars: "abc",
+      tierChangeGraceDays: "-1",
       changeNote: "",
     });
     expect(parsed.success).toBe(false);
     if (parsed.success) throw new Error("expected a rejection");
     expect(parsed.errors.autoReloadMinTriggerDollars).toContain("greater than zero");
+    expect(parsed.errors.caseTierMinimumDollars).toContain("greater than zero");
     expect(parsed.errors.autoReloadMinAmountDollars).toContain("at most two decimal places");
     expect(parsed.errors.manualFundingMinDollars).toContain("greater than zero");
     expect(parsed.errors.manualFundingMaxDollars).toContain("at most two decimal places");
@@ -92,6 +150,15 @@ describe("dropship wallet policy form model", () => {
     );
     expect(parsed.errors.holdExpiryWarningMinutes).toBe(
       "Hold expiry warning must be a whole number of minutes greater than zero.",
+    );
+    expect(parsed.errors.advanceFeePercent).toBe(
+      "Advance fee must be a percentage of zero or more, with at most two decimal places.",
+    );
+    expect(parsed.errors.advanceCapDollars).toBe(
+      "Advance cap must be a dollar amount of zero or more, with at most two decimal places.",
+    );
+    expect(parsed.errors.tierChangeGraceDays).toBe(
+      "Tier change grace must be a whole number of days, zero or more.",
     );
   });
 
@@ -106,19 +173,25 @@ describe("dropship wallet policy form model", () => {
     );
   });
 
-  it("holds the payment hold timeout to the 30-day ceiling the database enforces", () => {
+  it("holds the payment hold timeout, the advance fee and the grace to the ceilings the database enforces", () => {
     expect(DROPSHIP_WALLET_POLICY_MAX_HOLD_TIMEOUT_MINUTES).toBe(43_200);
+    expect(DROPSHIP_WALLET_POLICY_MAX_ADVANCE_FEE_BPS).toBe(10_000);
+    expect(DROPSHIP_WALLET_POLICY_MAX_TIER_CHANGE_GRACE_DAYS).toBe(365);
     expect(parseDropshipWalletPolicyForm(baselineForm({
       defaultPaymentHoldTimeoutMinutes: "43200",
     })).success).toBe(true);
     const parsed = parseDropshipWalletPolicyForm(baselineForm({
       defaultPaymentHoldTimeoutMinutes: "43201",
+      advanceFeePercent: "100.5",
+      tierChangeGraceDays: "366",
     }));
     expect(parsed.success).toBe(false);
     if (parsed.success) throw new Error("expected a rejection");
     expect(parsed.errors.defaultPaymentHoldTimeoutMinutes).toBe(
       "Payment hold timeout cannot exceed 43,200 minutes (30 days).",
     );
+    expect(parsed.errors.advanceFeePercent).toBe("Advance fee cannot exceed 100%.");
+    expect(parsed.errors.tierChangeGraceDays).toBe("Tier change grace cannot exceed 365 days.");
   });
 
   it("states the manual range rule in the server's own words, on the maximum field", () => {
@@ -145,15 +218,34 @@ describe("dropship wallet policy form model", () => {
       "Minimum single top-up limit must be at least the minimum floor, otherwise a top-up can never clear the trigger.";
     expect(dropshipWalletPolicyInvariantViolations({
       ...LIMITS,
-      autoReloadMinAmountCents: 4_999,
+      autoReloadMinAmountCents: 9_999,
     })).toEqual([{ field: "autoReloadMinAmountCents", message }]);
 
     const parsed = parseDropshipWalletPolicyForm(baselineForm({
-      autoReloadMinAmountDollars: "49.99",
+      autoReloadMinAmountDollars: "99.99",
     }));
     expect(parsed.success).toBe(false);
     if (parsed.success) throw new Error("expected a rejection");
     expect(parsed.errors.autoReloadMinAmountDollars).toBe(message);
+  });
+
+  it("states the case-tier-covers-pack-tier rule in the server's own words", () => {
+    const message = "Case tier minimum must be at least the pack tier minimum.";
+    expect(dropshipWalletPolicyInvariantViolations({
+      ...LIMITS,
+      caseTierMinimumCents: 9_999,
+    })).toEqual([{ field: "caseTierMinimumCents", message }]);
+    expect(dropshipWalletPolicyInvariantViolations({
+      ...LIMITS,
+      caseTierMinimumCents: 10_000,
+    })).toEqual([]);
+
+    const parsed = parseDropshipWalletPolicyForm(baselineForm({
+      caseTierMinimumDollars: "99.99",
+    }));
+    expect(parsed.success).toBe(false);
+    if (parsed.success) throw new Error("expected a rejection");
+    expect(parsed.errors.caseTierMinimumDollars).toBe(message);
   });
 
   it("states the warning-inside-the-hold rule in the server's own words", () => {
@@ -164,7 +256,7 @@ describe("dropship wallet policy form model", () => {
     })).toEqual([{ field: "holdExpiryWarningMinutes", message }]);
 
     const parsed = parseDropshipWalletPolicyForm(baselineForm({
-      holdExpiryWarningMinutes: "2880",
+      holdExpiryWarningMinutes: "1440",
     }));
     expect(parsed.success).toBe(false);
     if (parsed.success) throw new Error("expected a rejection");
@@ -174,14 +266,19 @@ describe("dropship wallet policy form model", () => {
   it("reports every cross-field violation at once instead of the first", () => {
     expect(dropshipWalletPolicyInvariantViolations({
       autoReloadMinTriggerCents: 10_000,
+      caseTierMinimumCents: 9_000,
       autoReloadMinAmountCents: 5_000,
       manualFundingMinCents: 900_000,
       manualFundingMaxCents: 1_000,
       defaultPaymentHoldTimeoutMinutes: 60,
       holdExpiryWarningMinutes: 60,
+      advanceFeeBps: 100,
+      advanceCapCents: 50_000,
+      tierChangeGraceDays: 14,
     }).map((violation) => violation.field)).toEqual([
       "manualFundingMaxCents",
       "autoReloadMinAmountCents",
+      "caseTierMinimumCents",
       "holdExpiryWarningMinutes",
     ]);
   });
@@ -198,7 +295,11 @@ describe("dropship wallet policy form model", () => {
   it("treats a changed limit as dirty and a re-typed or annotated one as clean", () => {
     expect(isDropshipWalletPolicyFormDirty(baselineForm(), LIMITS)).toBe(false);
     expect(isDropshipWalletPolicyFormDirty(
-      baselineForm({ autoReloadMinTriggerDollars: "50" }),
+      baselineForm({ autoReloadMinTriggerDollars: "100" }),
+      LIMITS,
+    )).toBe(false);
+    expect(isDropshipWalletPolicyFormDirty(
+      baselineForm({ advanceFeePercent: "1" }),
       LIMITS,
     )).toBe(false);
     expect(isDropshipWalletPolicyFormDirty(
@@ -206,11 +307,15 @@ describe("dropship wallet policy form model", () => {
       LIMITS,
     )).toBe(false);
     expect(isDropshipWalletPolicyFormDirty(
-      baselineForm({ autoReloadMinTriggerDollars: "50.01" }),
+      baselineForm({ autoReloadMinTriggerDollars: "100.01" }),
       LIMITS,
     )).toBe(true);
     expect(isDropshipWalletPolicyFormDirty(
-      baselineForm({ holdExpiryWarningMinutes: "121" }),
+      baselineForm({ advanceCapDollars: "0" }),
+      LIMITS,
+    )).toBe(true);
+    expect(isDropshipWalletPolicyFormDirty(
+      baselineForm({ tierChangeGraceDays: "15" }),
       LIMITS,
     )).toBe(true);
     expect(isDropshipWalletPolicyFormDirty(
@@ -221,18 +326,19 @@ describe("dropship wallet policy form model", () => {
 
   it("identifies a set of limits so a version published elsewhere resets the form", () => {
     expect(dropshipWalletPolicyLimitsKey(LIMITS)).toBe(
-      "autoReloadMinTriggerCents=5000|autoReloadMinAmountCents=10000"
+      "autoReloadMinTriggerCents=10000|caseTierMinimumCents=50000|autoReloadMinAmountCents=10000"
       + "|manualFundingMinCents=1000|manualFundingMaxCents=500000"
-      + "|defaultPaymentHoldTimeoutMinutes=2880|holdExpiryWarningMinutes=120",
+      + "|defaultPaymentHoldTimeoutMinutes=1440|holdExpiryWarningMinutes=120"
+      + "|advanceFeeBps=100|advanceCapCents=50000|tierChangeGraceDays=14",
     );
-    expect(dropshipWalletPolicyLimitsKey({ ...LIMITS, holdExpiryWarningMinutes: 121 }))
+    expect(dropshipWalletPolicyLimitsKey({ ...LIMITS, advanceCapCents: 50_001 }))
       .not.toBe(dropshipWalletPolicyLimitsKey(LIMITS));
   });
 
   it("only proposes minimums when a minimum actually moved", () => {
     expect(dropshipWalletPolicyProposedMinimums(baselineForm(), LIMITS)).toBeNull();
     expect(dropshipWalletPolicyProposedMinimums(
-      baselineForm({ manualFundingMaxDollars: "9000.00" }),
+      baselineForm({ manualFundingMaxDollars: "9000.00", caseTierMinimumDollars: "900.00" }),
       LIMITS,
     )).toBeNull();
     expect(dropshipWalletPolicyProposedMinimums(
@@ -244,7 +350,7 @@ describe("dropship wallet policy form model", () => {
     expect(dropshipWalletPolicyProposedMinimums(
       baselineForm({ autoReloadMinTriggerDollars: "75.", autoReloadMinAmountDollars: "250" }),
       LIMITS,
-    )).toEqual({ autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 25_000 });
+    )).toEqual({ autoReloadMinTriggerCents: 10_000, autoReloadMinAmountCents: 25_000 });
   });
 
   it("builds the overview URL with only the proposed minimums the server accepts", () => {
@@ -266,14 +372,18 @@ describe("dropship wallet policy form model", () => {
       idempotencyKey: " dropship-wallet-policy:0d9f  ",
     });
     expect(Object.keys(request).sort()).toEqual([
+      "advanceCapCents",
+      "advanceFeeBps",
       "autoReloadMinAmountCents",
       "autoReloadMinTriggerCents",
+      "caseTierMinimumCents",
       "changeNote",
       "defaultPaymentHoldTimeoutMinutes",
       "holdExpiryWarningMinutes",
       "idempotencyKey",
       "manualFundingMaxCents",
       "manualFundingMinCents",
+      "tierChangeGraceDays",
     ]);
     expect(request).toMatchObject({
       ...LIMITS,
@@ -293,6 +403,11 @@ describe("dropship wallet policy form model", () => {
       changeNote: null,
       idempotencyKey: "dropship-wallet-policy:0d9f",
     })).toThrow(/can never clear the trigger/);
+    expect(() => buildDropshipWalletPolicyVersionRequest({
+      limits: { ...LIMITS, caseTierMinimumCents: 1 },
+      changeNote: null,
+      idempotencyKey: "dropship-wallet-policy:0d9f",
+    })).toThrow(/at least the pack tier minimum/);
     expect(() => buildDropshipWalletPolicyVersionRequest({
       limits: LIMITS,
       changeNote: null,
@@ -327,22 +442,23 @@ describe("dropship wallet policy form model", () => {
       .toBe("Network request failed.");
   });
 
-  it("names the source of each value, including the hold timeout with no environment variable", () => {
+  it("names the source of each value, including the limits with no environment variable", () => {
     expect(dropshipWalletPolicySourceLabel("policy", "DROPSHIP_AUTO_RELOAD_MIN_TRIGGER_CENTS"))
       .toBe("Published policy version");
     expect(dropshipWalletPolicySourceLabel("environment", "DROPSHIP_AUTO_RELOAD_MIN_TRIGGER_CENTS"))
       .toBe("Environment variable DROPSHIP_AUTO_RELOAD_MIN_TRIGGER_CENTS");
     expect(dropshipWalletPolicySourceLabel("environment", null))
-      .toBe("Schema default (no environment variable exists)");
-    expect(dropshipWalletPolicyEnvLabel(null)).toBe("Schema default (no environment variable exists)");
+      .toBe("Built-in default (no environment variable exists)");
+    expect(dropshipWalletPolicyEnvLabel(null)).toBe("Built-in default (no environment variable exists)");
     expect(dropshipWalletPolicyEnvLabel("DROPSHIP_CARD_FUNDING_FEE_BPS"))
       .toBe("DROPSHIP_CARD_FUNDING_FEE_BPS");
   });
 
-  it("formats the read-only card fee rate with integer math", () => {
+  it("formats basis points with integer math", () => {
     expect(formatDropshipBasisPoints(290)).toBe("2.90%");
     expect(formatDropshipBasisPoints(5)).toBe("0.05%");
     expect(formatDropshipBasisPoints(10_000)).toBe("100.00%");
+    expect(formatDropshipBasisPoints(0)).toBe("0.00%");
   });
 
   it("refuses a response it cannot verify instead of rendering a guess", () => {
@@ -353,11 +469,15 @@ describe("dropship wallet policy form model", () => {
       envLimits: LIMITS,
       envKeys: {
         autoReloadMinTriggerCents: "DROPSHIP_AUTO_RELOAD_MIN_TRIGGER_CENTS",
+        caseTierMinimumCents: null,
         autoReloadMinAmountCents: "DROPSHIP_AUTO_RELOAD_MIN_AMOUNT_CENTS",
         manualFundingMinCents: "DROPSHIP_STRIPE_MIN_WALLET_FUNDING_CENTS",
         manualFundingMaxCents: "DROPSHIP_STRIPE_MAX_WALLET_FUNDING_CENTS",
         defaultPaymentHoldTimeoutMinutes: null,
         holdExpiryWarningMinutes: "DROPSHIP_PAYMENT_HOLD_EXPIRING_WARNING_MINUTES",
+        advanceFeeBps: null,
+        advanceCapCents: null,
+        tierChangeGraceDays: null,
       },
       cardFundingFee: {
         bps: 290,
@@ -366,7 +486,7 @@ describe("dropship wallet policy form model", () => {
         readOnlyReason: "Vendors agreed to the live rate.",
       },
       impact: {
-        proposedAutoReloadMinTriggerCents: 5_000,
+        proposedAutoReloadMinTriggerCents: 10_000,
         proposedAutoReloadMinAmountCents: 10_000,
         vendorsBelowMinimumFloor: 0,
         vendorsBelowMinimumSingleTopUpLimit: 0,
@@ -378,6 +498,10 @@ describe("dropship wallet policy form model", () => {
     expect(parseDropshipWalletPolicyOverview(overview).limitsSource).toBe("environment");
     expect(() => parseDropshipWalletPolicyOverview({ ...overview, impact: null }))
       .toThrow(/wallet policy response was not in the expected shape at impact/);
+    // A server that has not learned the new limits is a shape the page cannot trust.
+    const { advanceCapCents: _omitted, ...withoutCap } = LIMITS;
+    expect(() => parseDropshipWalletPolicyOverview({ ...overview, limits: withoutCap }))
+      .toThrow(/wallet policy response was not in the expected shape at limits.advanceCapCents/);
     expect(() => parseDropshipWalletPolicyMutation({ idempotentReplay: true }))
       .toThrow(/wallet policy save response was not in the expected shape/);
   });

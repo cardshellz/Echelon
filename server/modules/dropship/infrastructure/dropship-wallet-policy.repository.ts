@@ -9,19 +9,29 @@ import type {
   DropshipWalletPolicyRepository,
   DropshipWalletPolicyVendorImpactCounts,
 } from "../application/dropship-wallet-policy-service";
+import {
+  claimAdminConfigCommand,
+  completeAdminConfigCommand,
+  parseAdminConfigCommandEntityId,
+  rollbackQuietly,
+} from "./dropship-admin-config-command";
 
 /**
- * PG repository for the staff-managed wallet policy (migration 0681).
+ * PG repository for the staff-managed wallet policy (migrations 0682, 0683).
  *
  * Column <-> field mapping (the SQL names describe the policy, the TypeScript
  * names match the wallet DTO the portal reads, so the serializer stays a plain
  * pass-through):
- *   minimum_floor_cents                  -> autoReloadMinTriggerCents
+ *   minimum_floor_cents                  -> autoReloadMinTriggerCents (pack tier)
+ *   case_tier_minimum_cents              -> caseTierMinimumCents
  *   minimum_single_top_up_limit_cents    -> autoReloadMinAmountCents
  *   manual_top_up_minimum_cents          -> manualFundingMinCents
  *   manual_top_up_maximum_cents          -> manualFundingMaxCents
  *   default_payment_hold_timeout_minutes -> defaultPaymentHoldTimeoutMinutes
  *   hold_expiry_warning_minutes          -> holdExpiryWarningMinutes
+ *   advance_fee_bps                      -> advanceFeeBps
+ *   advance_cap_cents                    -> advanceCapCents
+ *   tier_change_grace_days               -> tierChangeGraceDays
  *
  * Published rows are immutable (DB trigger); a change inserts a new version and
  * retires the previous one inside ONE transaction with its command row and its
@@ -33,29 +43,30 @@ const WALLET_POLICY_ADVISORY_LOCK_ID = 94003;
 
 const COMMAND_TYPE = "wallet_policy_version_created";
 const ENTITY_TYPE = "dropship_wallet_policy";
+const COMMAND_CODES = {
+  idempotencyConflict: "DROPSHIP_WALLET_POLICY_IDEMPOTENCY_CONFLICT",
+  commandIncomplete: "DROPSHIP_WALLET_POLICY_COMMAND_INCOMPLETE",
+};
 
 interface PolicyRow {
   id: number;
   version: number;
   minimum_floor_cents: string | number;
+  case_tier_minimum_cents: string | number;
   minimum_single_top_up_limit_cents: string | number;
   manual_top_up_minimum_cents: string | number;
   manual_top_up_maximum_cents: string | number;
   default_payment_hold_timeout_minutes: number;
   hold_expiry_warning_minutes: number;
+  advance_fee_bps: number;
+  advance_cap_cents: string | number;
+  tier_change_grace_days: number;
   is_active: boolean;
   change_note: string | null;
   created_at: Date;
   created_by_actor_type: "admin" | "system";
   created_by_actor_id: string | null;
   deactivated_at: Date | null;
-}
-
-interface AdminCommandRow {
-  id: number;
-  command_type: string;
-  request_hash: string;
-  entity_id: string | null;
 }
 
 interface ImpactCountRow {
@@ -122,9 +133,20 @@ export class PgDropshipWalletPolicyRepository implements DropshipWalletPolicyRep
     const client = await this.dbPool.connect();
     try {
       await client.query("BEGIN");
-      const command = await claimCommand(client, input);
+      const command = await claimAdminConfigCommand(client, {
+        commandType: COMMAND_TYPE,
+        entityType: ENTITY_TYPE,
+        idempotencyKey: input.idempotencyKey,
+        requestHash: input.requestHash,
+        actor: input.actor,
+        now: input.now,
+        codes: COMMAND_CODES,
+      });
       if (command.idempotentReplay) {
-        const policy = await loadPolicyById(client, parseEntityId(command.entityId));
+        const policy = await loadPolicyById(
+          client,
+          parseAdminConfigCommandEntityId(command.entityId, COMMAND_CODES.commandIncomplete),
+        );
         await client.query("COMMIT");
         // A replay changed nothing, so it has no before -> after to report.
         return { policy, previousPolicy: null, idempotentReplay: true };
@@ -154,20 +176,25 @@ export class PgDropshipWalletPolicyRepository implements DropshipWalletPolicyRep
 
       const inserted = await client.query<PolicyRow>(
         `INSERT INTO dropship.dropship_wallet_policies
-          (version, minimum_floor_cents, minimum_single_top_up_limit_cents,
+          (version, minimum_floor_cents, case_tier_minimum_cents, minimum_single_top_up_limit_cents,
            manual_top_up_minimum_cents, manual_top_up_maximum_cents,
            default_payment_hold_timeout_minutes, hold_expiry_warning_minutes,
+           advance_fee_bps, advance_cap_cents, tier_change_grace_days,
            is_active, change_note, created_at, created_by_actor_type, created_by_actor_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8, $9, $10, $11)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, true, $12, $13, $14, $15)
          RETURNING *`,
         [
           version,
           input.limits.autoReloadMinTriggerCents,
+          input.limits.caseTierMinimumCents,
           input.limits.autoReloadMinAmountCents,
           input.limits.manualFundingMinCents,
           input.limits.manualFundingMaxCents,
           input.limits.defaultPaymentHoldTimeoutMinutes,
           input.limits.holdExpiryWarningMinutes,
+          input.limits.advanceFeeBps,
+          input.limits.advanceCapCents,
+          input.limits.tierChangeGraceDays,
           input.changeNote,
           input.now,
           input.actor.actorType,
@@ -176,7 +203,12 @@ export class PgDropshipWalletPolicyRepository implements DropshipWalletPolicyRep
       );
       const policy = mapPolicyRow(requiredRow(inserted.rows[0], "Wallet policy insert returned no row."));
 
-      await completeCommand(client, command.commandId, policy.policyId, input.now);
+      await completeAdminConfigCommand(client, {
+        commandId: command.commandId,
+        entityType: ENTITY_TYPE,
+        entityId: String(policy.policyId),
+        now: input.now,
+      });
       await recordAuditEvent(client, {
         entityId: policy.policyId,
         actor: input.actor,
@@ -200,76 +232,6 @@ export class PgDropshipWalletPolicyRepository implements DropshipWalletPolicyRep
       client.release();
     }
   }
-}
-
-async function claimCommand(
-  client: PoolClient,
-  input: CreateDropshipWalletPolicyVersionRepositoryInput,
-): Promise<{ commandId: number; entityId: string | null; idempotentReplay: boolean }> {
-  const inserted = await client.query<{ id: number }>(
-    `INSERT INTO dropship.dropship_admin_config_commands
-      (command_type, idempotency_key, request_hash, entity_type, actor_type, actor_id, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
-     ON CONFLICT (idempotency_key) DO NOTHING
-     RETURNING id`,
-    [
-      COMMAND_TYPE,
-      input.idempotencyKey,
-      input.requestHash,
-      ENTITY_TYPE,
-      input.actor.actorType,
-      input.actor.actorId ?? null,
-      input.now,
-    ],
-  );
-  const insertedId = inserted.rows[0]?.id;
-  if (insertedId) {
-    return { commandId: insertedId, entityId: null, idempotentReplay: false };
-  }
-  const existing = await client.query<AdminCommandRow>(
-    `SELECT id, command_type, request_hash, entity_id
-     FROM dropship.dropship_admin_config_commands
-     WHERE idempotency_key = $1
-     FOR UPDATE`,
-    [input.idempotencyKey],
-  );
-  const row = requiredRow(existing.rows[0], "Wallet policy command row was not found after conflict.");
-  if (row.command_type !== COMMAND_TYPE || row.request_hash !== input.requestHash) {
-    throw new DropshipError(
-      "DROPSHIP_WALLET_POLICY_IDEMPOTENCY_CONFLICT",
-      "Idempotency key was reused for a different wallet policy request.",
-      {
-        classification: "permanent",
-        idempotencyKey: input.idempotencyKey,
-        commandTypeMatches: row.command_type === COMMAND_TYPE,
-        requestHashMatches: row.request_hash === input.requestHash,
-      },
-    );
-  }
-  if (!row.entity_id) {
-    // The original attempt died between claiming the key and finishing. Retry
-    // is safe once the incomplete command is resolved, so this is transient.
-    throw new DropshipError(
-      "DROPSHIP_WALLET_POLICY_COMMAND_INCOMPLETE",
-      "Wallet policy command replay is incomplete.",
-      { classification: "transient", idempotencyKey: input.idempotencyKey },
-    );
-  }
-  return { commandId: row.id, entityId: row.entity_id, idempotentReplay: true };
-}
-
-async function completeCommand(
-  client: PoolClient,
-  commandId: number,
-  policyId: number,
-  now: Date,
-): Promise<void> {
-  await client.query(
-    `UPDATE dropship.dropship_admin_config_commands
-     SET entity_type = $2, entity_id = $3, completed_at = $4
-     WHERE id = $1`,
-    [commandId, ENTITY_TYPE, String(policyId), now],
-  );
 }
 
 /**
@@ -312,11 +274,15 @@ async function loadPolicyById(client: PoolClient, policyId: number): Promise<Dro
 function mapPolicyRow(row: PolicyRow): DropshipWalletPolicyRecord {
   const limits: DropshipWalletPolicyLimits = {
     autoReloadMinTriggerCents: money(row.minimum_floor_cents, "minimum_floor_cents"),
+    caseTierMinimumCents: money(row.case_tier_minimum_cents, "case_tier_minimum_cents"),
     autoReloadMinAmountCents: money(row.minimum_single_top_up_limit_cents, "minimum_single_top_up_limit_cents"),
     manualFundingMinCents: money(row.manual_top_up_minimum_cents, "manual_top_up_minimum_cents"),
     manualFundingMaxCents: money(row.manual_top_up_maximum_cents, "manual_top_up_maximum_cents"),
     defaultPaymentHoldTimeoutMinutes: minutes(row.default_payment_hold_timeout_minutes, "default_payment_hold_timeout_minutes"),
     holdExpiryWarningMinutes: minutes(row.hold_expiry_warning_minutes, "hold_expiry_warning_minutes"),
+    advanceFeeBps: nonNegativeInteger(row.advance_fee_bps, "advance_fee_bps"),
+    advanceCapCents: nonNegativeMoney(row.advance_cap_cents, "advance_cap_cents"),
+    tierChangeGraceDays: nonNegativeInteger(row.tier_change_grace_days, "tier_change_grace_days"),
   };
   return {
     policyId: row.id,
@@ -343,6 +309,19 @@ function money(value: string | number, column: string): number {
   return parsed;
 }
 
+/** The advance cap may legitimately be zero (nothing is advanced). */
+function nonNegativeMoney(value: string | number, column: string): number {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new DropshipError(
+      "DROPSHIP_WALLET_POLICY_INVALID_STORED_VALUE",
+      "Stored wallet policy money is not a non-negative integer number of cents.",
+      { classification: "fatal", column, value },
+    );
+  }
+  return parsed;
+}
+
 function minutes(value: number, column: string): number {
   if (!Number.isSafeInteger(value) || value <= 0) {
     throw new DropshipError(
@@ -352,6 +331,19 @@ function minutes(value: number, column: string): number {
     );
   }
   return value;
+}
+
+/** Basis points and grace days: whole numbers, zero allowed. */
+function nonNegativeInteger(value: number, column: string): number {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new DropshipError(
+      "DROPSHIP_WALLET_POLICY_INVALID_STORED_VALUE",
+      "Stored wallet policy value is not a non-negative whole number.",
+      { classification: "fatal", column, value },
+    );
+  }
+  return parsed;
 }
 
 function count(value: string | number): number {
@@ -366,31 +358,11 @@ function count(value: string | number): number {
   return parsed;
 }
 
-function parseEntityId(value: string | null): number {
-  const parsed = Number(value);
-  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
-    throw new DropshipError(
-      "DROPSHIP_WALLET_POLICY_COMMAND_INCOMPLETE",
-      "Wallet policy command has no valid entity id.",
-      { classification: "transient", entityId: value },
-    );
-  }
-  return parsed;
-}
-
 function requiredRow<T>(row: T | null | undefined, message: string): T {
   if (!row) {
     throw new DropshipError("DROPSHIP_WALLET_POLICY_NOT_FOUND", message, { classification: "permanent" });
   }
   return row;
-}
-
-async function rollbackQuietly(client: PoolClient): Promise<void> {
-  try {
-    await client.query("ROLLBACK");
-  } catch {
-    // Preserve the original failure; the pool discards a client left in a bad state.
-  }
 }
 
 /**

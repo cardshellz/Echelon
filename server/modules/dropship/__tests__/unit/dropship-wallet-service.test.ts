@@ -490,7 +490,7 @@ describe("DropshipWalletService", () => {
       vendorId: 10,
       fundingMethodId: null,
       enabled: true,
-      minimumBalanceCents: 5000,
+      minimumBalanceCents: 10000,
       maxSingleReloadCents: 25000,
       paymentHoldTimeoutMinutes: 2880,
     })).rejects.toMatchObject({ code: "DROPSHIP_AUTO_RELOAD_FUNDING_METHOD_REQUIRED" });
@@ -509,7 +509,7 @@ describe("DropshipWalletService", () => {
       paymentHoldTimeoutMinutes: 2880,
     })).rejects.toMatchObject({
       code: "DROPSHIP_AUTO_RELOAD_TRIGGER_BELOW_MINIMUM",
-      context: expect.objectContaining({ floorCents: 5000 }),
+      context: expect.objectContaining({ floorCents: 10000 }),
     });
 
     await expect(service.configureAutoReload({
@@ -525,7 +525,7 @@ describe("DropshipWalletService", () => {
       vendorId: 10,
       fundingMethodId: 99,
       enabled: true,
-      minimumBalanceCents: 5000,
+      minimumBalanceCents: 10000,
       maxSingleReloadCents: 5000,
       paymentHoldTimeoutMinutes: 2880,
     })).rejects.toMatchObject({
@@ -538,7 +538,7 @@ describe("DropshipWalletService", () => {
       vendorId: 10,
       fundingMethodId: 99,
       enabled: true,
-      minimumBalanceCents: 5000,
+      minimumBalanceCents: 10000,
       maxSingleReloadCents: null,
       paymentHoldTimeoutMinutes: 2880,
     })).rejects.toMatchObject({ code: "DROPSHIP_AUTO_RELOAD_AMOUNT_REQUIRED" });
@@ -574,7 +574,7 @@ describe("DropshipWalletService", () => {
       vendorId: 10,
       fundingMethodId: 200,
       enabled: true,
-      minimumBalanceCents: 5000,
+      minimumBalanceCents: 10000,
       maxSingleReloadCents: 25000,
       paymentHoldTimeoutMinutes: 2880,
     })).rejects.toMatchObject({
@@ -590,7 +590,7 @@ describe("DropshipWalletService", () => {
       vendorId: 10,
       fundingMethodId: 99,
       enabled: false,
-      minimumBalanceCents: 5000,
+      minimumBalanceCents: 10000,
       maxSingleReloadCents: 25000,
       paymentHoldTimeoutMinutes: 2880,
     })).rejects.toMatchObject({
@@ -606,7 +606,7 @@ describe("DropshipWalletService", () => {
         vendorId: 10,
         fundingMethodId: 99,
         enabled: false,
-        minimumBalanceCents: 5000,
+        minimumBalanceCents: 10000,
         maxSingleReloadCents: 25000,
         paymentHoldTimeoutMinutes: 2880,
       });
@@ -619,7 +619,7 @@ describe("DropshipWalletService", () => {
       vendorId: 10,
       fundingMethodId: 99,
       enabled: true,
-      minimumBalanceCents: 5000,
+      minimumBalanceCents: 10000,
       maxSingleReloadCents: 25000,
       paymentHoldTimeoutMinutes: 2880,
     });
@@ -628,7 +628,7 @@ describe("DropshipWalletService", () => {
       vendorId: 10,
       fundingMethodId: 99,
       enabled: true,
-      minimumBalanceCents: 5000,
+      minimumBalanceCents: 10000,
       maxSingleReloadCents: 25000,
       paymentHoldTimeoutMinutes: 2880,
     });
@@ -650,7 +650,7 @@ describe("DropshipWalletService", () => {
       vendorId: 10,
       fundingMethodId: 101,
       enabled: true,
-      minimumBalanceCents: 5000,
+      minimumBalanceCents: 10000,
       maxSingleReloadCents: 25000,
       paymentHoldTimeoutMinutes: 2880,
     })).rejects.toMatchObject({ code: "DROPSHIP_AUTO_RELOAD_FUNDING_METHOD_RAIL_UNSUPPORTED" });
@@ -1184,6 +1184,10 @@ describe("DropshipWalletService", () => {
       manualFundingMaxCents: 60_000,
       defaultPaymentHoldTimeoutMinutes: 1_440,
       holdExpiryWarningMinutes: 45,
+      caseTierMinimumCents: 55_000,
+      advanceFeeBps: 150,
+      advanceCapCents: 75_000,
+      tierChangeGraceDays: 21,
     };
     const policy: DropshipWalletPolicyResolver = { resolveWalletLimits: async () => ({ ...publishedLimits }) };
 
@@ -1195,23 +1199,28 @@ describe("DropshipWalletService", () => {
     it("falls back to the environment limits when no policy resolver is wired", async () => {
       const wallet = await service.getWalletForVendor(10);
       expect(wallet.limits).toEqual({
-        autoReloadMinTriggerCents: 5_000,
+        autoReloadMinTriggerCents: 10_000,
+        caseTierMinimumCents: 50_000,
         autoReloadMinAmountCents: 10_000,
         manualFundingMinCents: 1_000,
         manualFundingMaxCents: 500_000,
-        defaultPaymentHoldTimeoutMinutes: 2_880,
+        defaultPaymentHoldTimeoutMinutes: 1_440,
         holdExpiryWarningMinutes: 120,
+        advanceFeeBps: 100,
+        advanceCapCents: 50_000,
+        tierChangeGraceDays: 14,
       });
     });
 
     it("enforces the published auto-reload floors, not the environment defaults", async () => {
       const policyService = buildService({ walletPolicy: policy });
-      // 5000/10000 clears the env defaults but not the published policy.
+      // 8500/10000 sits below the published 9_000 floor; the refusal must
+      // name the PUBLISHED floor, never the fallback default.
       await expect(policyService.configureAutoReload({
         vendorId: 10,
         fundingMethodId: 99,
         enabled: true,
-        minimumBalanceCents: 5_000,
+        minimumBalanceCents: 8_500,
         maxSingleReloadCents: 10_000,
         paymentHoldTimeoutMinutes: 2880,
       })).rejects.toMatchObject({
@@ -1288,7 +1297,7 @@ describe("DropshipWalletService", () => {
       vendorId: 10,
       fundingMethodId: 99,
       enabled: true,
-      minimumBalanceCents: 5000,
+      minimumBalanceCents: 10000,
       maxSingleReloadCents: 25000,
       paymentHoldTimeoutMinutes: 2880,
       acknowledgedCardFeeBps: 300,
@@ -1306,7 +1315,7 @@ describe("DropshipWalletService", () => {
       vendorId: 10,
       fundingMethodId: 99,
       enabled: true,
-      minimumBalanceCents: 5000,
+      minimumBalanceCents: 10000,
       maxSingleReloadCents: 25000,
       paymentHoldTimeoutMinutes: 2880,
       acknowledgedCardFeeBps: 250,
@@ -1322,7 +1331,7 @@ describe("DropshipWalletService", () => {
       vendorId: 10,
       fundingMethodId: 99,
       enabled: false,
-      minimumBalanceCents: 5000,
+      minimumBalanceCents: 10000,
       maxSingleReloadCents: 25000,
       paymentHoldTimeoutMinutes: 2880,
       acknowledgedCardFeeBps: 250,
@@ -1584,7 +1593,7 @@ describe("resolveDropshipUsdcBaseDepositAddress", () => {
 describe("resolveDropshipAutoReloadFloors", () => {
   it("defaults to a trigger that clears one order and an amount that is not fee-dominated", () => {
     expect(resolveDropshipAutoReloadFloors({})).toEqual({
-      minTriggerCents: 5_000,
+      minTriggerCents: 10_000,
       minAmountCents: 10_000,
     });
   });
@@ -1601,7 +1610,7 @@ describe("resolveDropshipAutoReloadFloors", () => {
       expect(resolveDropshipAutoReloadFloors({
         DROPSHIP_AUTO_RELOAD_MIN_TRIGGER_CENTS: bad,
         DROPSHIP_AUTO_RELOAD_MIN_AMOUNT_CENTS: bad,
-      })).toEqual({ minTriggerCents: 5_000, minAmountCents: 10_000 });
+      })).toEqual({ minTriggerCents: 10_000, minAmountCents: 10_000 });
     }
   });
 });
@@ -2052,7 +2061,7 @@ function makeAutoReloadSetting(
     vendorId: 10,
     fundingMethodId: 99,
     enabled: true,
-    minimumBalanceCents: 5000,
+    minimumBalanceCents: 10000,
     maxSingleReloadCents: 25000,
     paymentHoldTimeoutMinutes: 2880,
     createdAt: now,

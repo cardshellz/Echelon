@@ -52,7 +52,6 @@ import {
   FIRST_FILL_EXAMPLE_FLOORS_CENTS,
   FLOOR_PRESETS_CENTS,
   FLOOR_STEP_CENTS,
-  HOLD_TIMEOUT_PRESETS_MINUTES,
   LIMIT_PRESETS_CENTS,
   activationTopUp,
   capAfterFloorChange,
@@ -381,7 +380,7 @@ export default function DropshipPortalWallet() {
       setNotice({ scope, tone: "error", text: caught instanceof Error && caught.message.trim() ? caught.message : "Wallet request failed." });
       return;
     }
-    const limits = wallet?.limits ?? { autoReloadMinTriggerCents: 0, autoReloadMinAmountCents: 0, manualFundingMinCents: 0, manualFundingMaxCents: 0, defaultPaymentHoldTimeoutMinutes: 1, holdExpiryWarningMinutes: 1 };
+    const limits = wallet?.limits ?? { autoReloadMinTriggerCents: 0, caseTierMinimumCents: 0, autoReloadMinAmountCents: 0, manualFundingMinCents: 0, manualFundingMaxCents: 0, defaultPaymentHoldTimeoutMinutes: 1, holdExpiryWarningMinutes: 1, advanceFeeBps: 0, advanceCapCents: 0, tierChangeGraceDays: 0 };
     const face = describeWalletError(caught.code, caught.message, caught.context, { surface, limits });
     if (caught.code === "DROPSHIP_CARD_FUNDING_FEE_MISCONFIGURED") setFeeMisconfigured(true);
     if (face.recovery === "verify") {
@@ -588,7 +587,7 @@ export default function DropshipPortalWallet() {
 
   const walletErrorText = walletQuery.error
     ? describeWalletError(walletQuery.error instanceof DropshipApiError ? walletQuery.error.code : null, queryErrorMessage(walletQuery.error, "Unable to load your wallet."), null, {
-      surface: "get", limits: { autoReloadMinTriggerCents: 0, autoReloadMinAmountCents: 0, manualFundingMinCents: 0, manualFundingMaxCents: 0, defaultPaymentHoldTimeoutMinutes: 1, holdExpiryWarningMinutes: 1 },
+      surface: "get", limits: { autoReloadMinTriggerCents: 0, caseTierMinimumCents: 0, autoReloadMinAmountCents: 0, manualFundingMinCents: 0, manualFundingMaxCents: 0, defaultPaymentHoldTimeoutMinutes: 1, holdExpiryWarningMinutes: 1, advanceFeeBps: 0, advanceCapCents: 0, tierChangeGraceDays: 0 },
     }).text
     : null;
 
@@ -1593,7 +1592,7 @@ function buildReviewRows({ wallet, terms, dailyCostCents }: { wallet: DropshipWa
     ["Floor", `${formatWholeDollars(terms.floorCents)}${days !== null && dailyCostCents !== null ? ` — about ${days} days at ${formatWholeDollars(dailyCostCents)} a day` : ""}`, "floor"],
     ["Backup card", terms.sourceRail === "stripe_card" ? `${terms.backupLabel} — also your top-up source` : terms.backupLabel, terms.sourceRail === "stripe_card" ? null : "backup"],
     ["Single top-up limit", `${formatWholeDollars(terms.limitCents)} — ${describeLimitDerivation(terms.floorCents, terms.limitCents)}. Change it later under Limits.`, null],
-    ["Hold time", `${formatDurationMinutes(terms.holdTimeoutMinutes)}${terms.holdTimeoutMinutes === wallet.limits.defaultPaymentHoldTimeoutMinutes ? " — the default" : ""}. Change it later under Limits.`, null],
+    ["Hold time", `${formatDurationMinutes(terms.holdTimeoutMinutes)} — set by CardShellz for every wallet.`, null],
   ];
   return { rows, mandate: describeMandate(terms) };
 }
@@ -2057,7 +2056,7 @@ function ManageView({
         )}
         {editor === "limits" && (
           <div className="mt-4 border-t border-zinc-200 pt-4">
-            <LimitsEditor wallet={wallet} flow={flow} floorCents={floorCents} initialLimitCents={plan?.limitCents ?? flow.limitCents} initialHoldMinutes={flow.holdTimeoutMinutes}
+            <LimitsEditor wallet={wallet} flow={flow} floorCents={floorCents} initialLimitCents={plan?.limitCents ?? flow.limitCents}
               feedback={planFeedback} saveLabel={ack.saveLabel} saveNote={saveNote} onCancel={() => setEditor(null)}
               onSave={(limitCents, holdTimeoutMinutes) => savePart((current) => ({ ...current, limitCents, holdTimeoutMinutes }), "Limits updated.")} />
           </div>
@@ -2184,13 +2183,12 @@ function SourceEditor({
 }
 
 function LimitsEditor({
-  wallet, flow, floorCents, initialLimitCents, initialHoldMinutes, feedback, saveLabel, saveNote, onCancel, onSave,
+  wallet, flow, floorCents, initialLimitCents, feedback, saveLabel, saveNote, onCancel, onSave,
 }: {
   wallet: DropshipWalletView;
   flow: WalletFlowState;
   floorCents: number;
   initialLimitCents: number;
-  initialHoldMinutes: number;
   feedback: Feedback;
   saveLabel: string;
   saveNote: ReactNode;
@@ -2201,10 +2199,12 @@ function LimitsEditor({
   const fee = formatFeeRate(wallet.cardFundingFeeBps);
   const derived = derivedLimitCents(floorCents, limits);
   const [limitCents, setLimitCents] = useState(initialLimitCents);
-  const [holdMinutes, setHoldMinutes] = useState(initialHoldMinutes);
+  // The hold is CardShellz's setting for every wallet, not a vendor choice: it
+  // is shown here so the deadline held orders get is never a surprise, and the
+  // policy value is what the save carries.
+  const holdTimeoutMinutes = limits.defaultPaymentHoldTimeoutMinutes;
   const floorOfChips = Math.max(floorCents, limits.autoReloadMinAmountCents);
   const chips = presetsIncluding(LIMIT_PRESETS_CENTS, initialLimitCents, derived).filter((cents) => cents >= floorOfChips);
-  const holdChips = presetsIncluding(HOLD_TIMEOUT_PRESETS_MINUTES, initialHoldMinutes);
   return (
     <div data-testid="wallet-limits-editor">
       <h3 className="font-medium">Limits</h3>
@@ -2219,19 +2219,15 @@ function LimitsEditor({
           We never charge more than this in one top-up. Nothing is ever charged because of this limit. If an order needs more than your available balance plus this limit, we do not charge the card: the order waits for you to add money and is cancelled after the hold time if still short. A routine top-up is normally at most your floor, so this limit matters mostly for the backup card. If a return fee ever takes your balance below zero, the next backup-card charge includes that shortfall (so it can be more than {fee} of the order), and if the top-up needed exceeds the limit we email you instead of charging.
         </p>
       </div>
-      <div role="radiogroup" aria-label="Hold time" className="mt-4 space-y-2">
+      <div className="mt-4 space-y-2" data-testid="wallet-hold-time">
         <div className="text-sm font-medium">Hold time</div>
-        <div className="flex flex-wrap gap-2">
-          {holdChips.map((minutes) => (
-            <RadioChip key={minutes} label={formatDurationMinutes(minutes)} selected={holdMinutes === minutes} disabled={feedback.busy} onSelect={() => setHoldMinutes(minutes)} />
-          ))}
-        </div>
+        <p className="text-sm">{formatDurationMinutes(holdTimeoutMinutes)} — set by CardShellz for every wallet.</p>
         <p className="text-sm text-zinc-600">{describeHoldTimeLine(limits.holdExpiryWarningMinutes)}</p>
       </div>
       {saveNote}
       <SectionFeedback {...feedback} />
       <div className="mt-4 flex flex-col gap-2 sm:flex-row">
-        <Button type="button" className={BRAND_BUTTON} disabled={feedback.busy || limitCents < flow.floorCents} onClick={() => onSave(limitCents, holdMinutes)}>{saveLabel}</Button>
+        <Button type="button" className={BRAND_BUTTON} disabled={feedback.busy || limitCents < flow.floorCents} onClick={() => onSave(limitCents, holdTimeoutMinutes)}>{saveLabel}</Button>
         <Button type="button" variant="ghost" className="h-10" disabled={feedback.busy} onClick={onCancel}>Cancel</Button>
       </div>
     </div>

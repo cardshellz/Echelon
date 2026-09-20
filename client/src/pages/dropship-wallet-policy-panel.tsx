@@ -1,6 +1,8 @@
 /**
- * Dropship "Wallet policy" tab — the staff surface for the six limits the
- * vendor wallet enforces (migration 0681).
+ * Dropship "Wallet policy" tab — the staff surface for the ten limits the
+ * vendor wallet enforces (migrations 0682, 0683): the two listing tier
+ * minimums, the top-up bounds, the payment hold, the pending-ACH advance and
+ * the tier-change grace.
  *
  * This component only renders and posts. Every decision — dollars to integer
  * cents, the cross-field rules, whether the form still matches what is in
@@ -61,6 +63,7 @@ import {
   parseDropshipWalletPolicyOverview,
   type DropshipWalletPolicyForm,
   type DropshipWalletPolicyImpactView,
+  type DropshipWalletPolicyLimitUnit,
   type DropshipWalletPolicyLimitsView,
   type DropshipWalletPolicyOverview,
 } from "./dropship-wallet-policy-model";
@@ -202,9 +205,10 @@ export function DropshipWalletPolicyPanel({
               Wallet policy
             </h2>
             <p className="text-sm text-muted-foreground">
-              The limits the vendor wallet enforces: the auto-reload floors, the manual top-up
-              bounds, the payment hold timeout and the hold expiry warning window. Saving publishes
-              a new immutable version and retires the current one.
+              The limits the vendor wallet enforces: the pack and case tier minimums, the top-up
+              bounds, the payment hold and its warning window, the pending-bank advance fee and
+              cap, and the grace after a tier is raised. Saving publishes a new immutable version
+              and retires the current one.
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -256,7 +260,8 @@ export function DropshipWalletPolicyPanel({
           <section className="rounded-md border bg-card p-4" data-testid="wallet-policy-form">
             <h3 className="font-semibold">New policy version</h3>
             <p className="text-sm text-muted-foreground">
-              Amounts are dollars and are stored as whole cents. Timings are whole minutes.
+              Amounts are dollars and are stored as whole cents. The advance fee is a percentage
+              stored as whole basis points. Timings are whole minutes or whole days.
               {canEdit
                 ? " Publishing retires the current version in the same transaction."
                 : " The dropship manage-operations permission is required to change these values."}
@@ -272,11 +277,11 @@ export function DropshipWalletPolicyPanel({
                   <div key={descriptor.formField} className="space-y-2">
                     <Label htmlFor={inputId}>
                       {descriptor.label}
-                      {descriptor.unit === "cents" ? " ($)" : " (minutes)"}
+                      {unitSuffix(descriptor.unit)}
                     </Label>
                     <Input
                       id={inputId}
-                      inputMode={descriptor.unit === "cents" ? "decimal" : "numeric"}
+                      inputMode={descriptor.unit === "cents" || descriptor.unit === "bps" ? "decimal" : "numeric"}
                       value={form[descriptor.formField]}
                       disabled={!canEdit || busy}
                       onChange={(event) =>
@@ -530,13 +535,33 @@ function CardFundingFeePanel({
   );
 }
 
+function unitSuffix(unit: DropshipWalletPolicyLimitUnit): string {
+  switch (unit) {
+    case "cents":
+      return " ($)";
+    case "minutes":
+      return " (minutes)";
+    case "bps":
+      return " (%)";
+    case "days":
+      return " (days)";
+  }
+}
+
 function formatLimit(
   limits: DropshipWalletPolicyLimitsView,
   field: keyof DropshipWalletPolicyLimitsView,
-  unit: "cents" | "minutes",
+  unit: DropshipWalletPolicyLimitUnit,
 ): string {
   const value = limits[field];
-  return unit === "cents"
-    ? formatCents(value)
-    : `${value.toLocaleString("en-US")} min`;
+  switch (unit) {
+    case "cents":
+      return formatCents(value);
+    case "minutes":
+      return `${value.toLocaleString("en-US")} min`;
+    case "bps":
+      return formatDropshipBasisPoints(value);
+    case "days":
+      return `${value.toLocaleString("en-US")} ${value === 1 ? "day" : "days"}`;
+  }
 }
