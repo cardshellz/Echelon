@@ -103,7 +103,7 @@ describe("Shopify refund line disposition", () => {
   });
 
   describe("allocateActiveShipmentItems", () => {
-    it("deletes all active shipment demand after a full refund", () => {
+    it("zeroes active commercial demand without erasing shipment-item identity", () => {
       expect(allocateActiveShipmentItems([
         { shipmentItemId: 1, shipmentId: 10, orderItemId: 100, currentQuantity: 2, remainingDemand: 0 },
         { shipmentItemId: 2, shipmentId: 11, orderItemId: 100, currentQuantity: 2, remainingDemand: 0 },

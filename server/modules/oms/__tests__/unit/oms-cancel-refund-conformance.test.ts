@@ -122,10 +122,10 @@ describe("OMS/WMS authority conformance :: Shopify cancel and refund finality", 
       "allocates partial remaining demand once across split shipments",
     );
     expect(REFUND_RECONCILE_SHIPMENTS_TEST_SRC).toContain(
-      "deletes all active shipment demand after a full refund",
+      "zeroes active commercial demand without erasing shipment-item identity",
     );
-    expect(refundAdjustmentBlock).toContain("DELETE FROM wms.outbound_shipment_items");
-    expect(refundAdjustmentBlock).toContain("SET qty = ${allocation.nextQuantity}");
+    expect(refundAdjustmentBlock).not.toContain("DELETE FROM wms.outbound_shipment_items");
+    expect(refundAdjustmentBlock).toContain("SET commercial_requested_qty = ${allocation.nextQuantity}");
     expect(refundAdjustmentBlock).not.toContain("SET qty = GREATEST(0");
     expect(SHOPIFY_REFUND_SRC).toContain('plan.status === "queued"');
     expect(SHOPIFY_REFUND_SRC).toContain("helpers.pushShipment(plan.shipmentId)");

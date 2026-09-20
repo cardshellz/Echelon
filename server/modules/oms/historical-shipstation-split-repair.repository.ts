@@ -49,6 +49,7 @@ interface SourceItemRow {
   shipment_item_purpose: string;
   product_variant_id: number | null;
   qty: number;
+  commercial_requested_qty: number | null;
   from_location_id: number | null;
   box_id: string | null;
   weight_oz: number | null;
@@ -209,6 +210,9 @@ function parseSourceRow(raw: Record<string, unknown>): SourceItemRow {
     shipment_item_purpose: String(raw.shipment_item_purpose ?? ""),
     product_variant_id: raw.product_variant_id == null ? null : Number(raw.product_variant_id),
     qty: Number(raw.qty),
+    commercial_requested_qty: raw.commercial_requested_qty == null
+      ? null
+      : Number(raw.commercial_requested_qty),
     from_location_id: raw.from_location_id == null ? null : Number(raw.from_location_id),
     box_id: raw.box_id == null ? null : String(raw.box_id),
     weight_oz: raw.weight_oz == null ? null : Number(raw.weight_oz),
@@ -238,6 +242,7 @@ async function loadSourceRows(
        shipment.external_fulfillment_id, shipment.tracking_number, shipment.carrier,
        item.order_item_id, item.replacement_for_order_item_id,
        item.shipment_item_purpose, item.product_variant_id, item.qty,
+       item.commercial_requested_qty,
        item.from_location_id, item.box_id, item.weight_oz,
        item.provider_membership_state,
        physical_item.physical_shipment_id AS canonical_physical_shipment_id,
@@ -2176,6 +2181,25 @@ export function createHistoricalShipStationSplitRepairRepository(
         canonicalSupports: Object.freeze(canonicalSupports),
         canonicalCorrections: Object.freeze(canonicalCorrections),
       });
+      const adjustedSourceIds = [...new Set([
+        ...supportedComponent.packages,
+        ...canonicalSupports.map((support) => support.packagePlan),
+      ].flatMap((plan) => plan.providerPackage.items.map(
+        (item) => item.sourceShipmentItemId,
+      )))].filter((sourceId) =>
+        sourceRows.get(sourceId)?.commercial_requested_qty != null
+      );
+      if (adjustedSourceIds.length > 0) {
+        unsafe.push(immutableFailure(
+          supportedComponent.packages.map((plan) =>
+            plan.providerPackage.providerShipmentId
+          ),
+          "COMMERCIAL_SPLIT_AUTHORITY_UNPARTITIONED",
+          `WMS shipment items ${adjustedSourceIds.join(", ")} have refund-adjusted ` +
+            `commercial demand that this historical split repair cannot partition safely`,
+        ));
+        continue;
+      }
       const resumedCount = supportedComponent.packages.filter((plan) =>
         resumedProviderIds.has(plan.providerPackage.providerShipmentId)
       ).length;
@@ -2332,6 +2356,16 @@ export function createHistoricalShipStationSplitRepairRepository(
         throw repairError(
           "SOURCE_ITEM_SET_CHANGED",
           `Component ${component.componentKey} lost source WMS shipment items after inspection`,
+        );
+      }
+      const adjustedSource = [...sources.values()].find(
+        (source) => source.commercial_requested_qty !== null,
+      );
+      if (adjustedSource) {
+        throw repairError(
+          "COMMERCIAL_SPLIT_AUTHORITY_UNPARTITIONED",
+          `WMS shipment item ${adjustedSource.id} has refund-adjusted commercial demand ` +
+            `that this historical split repair cannot partition safely`,
         );
       }
       const orderIds = [...new Set([...sources.values()].map((row) => row.order_id))]

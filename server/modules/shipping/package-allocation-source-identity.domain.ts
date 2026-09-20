@@ -22,6 +22,9 @@ export const packageAllocationSourceFactsSchema = z.object({
   sourceWmsShipmentItemId: positivePostgresInteger,
   shipmentRequestItemId: positiveBigintText,
   sourceQuantity: positivePostgresInteger,
+  // Absent on historical facts; a present zero preserves the source identity
+  // while prohibiting a new commercial fulfillment for that line.
+  commercialRequestedQuantity: z.number().int().nonnegative().max(POSTGRES_INTEGER_MAX).optional(),
   shipmentItemPurpose: z.enum([
     "customer_fulfillment",
     "replacement",

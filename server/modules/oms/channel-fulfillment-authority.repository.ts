@@ -349,7 +349,9 @@ interface PackageAllocationCommercialEntry {
   readonly carrier: string;
   readonly serviceCode: string | null;
   readonly businessShipmentRecognizedAt: Date;
-  readonly quantity: number;
+  readonly physicalQuantity: number;
+  /** Quantity this package may ask the channel to fulfill. */
+  readonly commercialQuantity: number;
 }
 
 interface MaterializedPackageAllocationCommercialItem extends MaterializedCustomerItem {
@@ -1045,17 +1047,19 @@ async function loadPackageAllocationCommercialEntries(
             OR package_intent.effect_type = 'carrier_tracking'
           )
       )
-    ORDER BY binding.provider, binding.provider_physical_shipment_id,
+    ORDER BY business.business_shipment_recognized_at,
+      binding.provider, binding.provider_physical_shipment_id,
       source.source_wms_shipment_item_id, entry.id
   `));
   const totals = new Map<string, number>();
-  const entries = rows.map((row): PackageAllocationCommercialEntry => {
+  const remainingByIntent = new Map(intents.map((intent) => [intent.id, intent.quantity]));
+  const entries = rows.flatMap((row): PackageAllocationCommercialEntry[] => {
     const id = bigintTextOrNull(row.id);
     const sourceId = bigintTextOrNull(row.package_allocation_source_line_id);
     const bindingId = bigintTextOrNull(row.package_allocation_package_binding_id);
     const intentId = bigintTextOrNull(row.package_allocation_effect_intent_id);
     const sourceWmsShipmentItemId = asPositiveInteger(row.source_wms_shipment_item_id);
-    const quantity = asPositiveInteger(row.quantity);
+    const physicalQuantity = asPositiveInteger(row.quantity);
     const provider = normalizedNullable(row.provider)?.toLowerCase() ?? null;
     const providerPhysicalShipmentId = normalizedNullable(row.provider_physical_shipment_id);
     const trackingNumber = normalizedNullable(row.tracking_number);
@@ -1064,7 +1068,7 @@ async function loadPackageAllocationCommercialEntries(
     const intent = intentId ? intentById.get(intentId) : undefined;
     if (
       !id || !sourceId || !bindingId || !intentId
-      || !sourceWmsShipmentItemId || !quantity
+      || !sourceWmsShipmentItemId || !physicalQuantity
       || !provider || !providerPhysicalShipmentId || !trackingNumber || !carrier
       || !recognizedAt || !intent
       || intent.packageAllocationSourceLineId !== sourceId
@@ -1079,8 +1083,14 @@ async function loadPackageAllocationCommercialEntries(
         { packageAllocationPlanId, allocationEntryId: row.id },
       );
     }
+    // A refund can reduce commercial authority without erasing the provider's
+    // immutable physical allocation. Materialize only the intent's approved
+    // subset, in a stable package order, and leave the other units as evidence.
+    const quantity = Math.min(physicalQuantity, remainingByIntent.get(intentId) ?? 0);
+    if (quantity === 0) return [];
+    remainingByIntent.set(intentId, (remainingByIntent.get(intentId) ?? 0) - quantity);
     totals.set(intentId, (totals.get(intentId) ?? 0) + quantity);
-    return Object.freeze({
+    return [Object.freeze({
       id,
       packageAllocationEffectIntentId: intentId,
       packageAllocationSourceLineId: sourceId,
@@ -1094,8 +1104,9 @@ async function loadPackageAllocationCommercialEntries(
       carrier,
       serviceCode: normalizedNullable(row.service_code),
       businessShipmentRecognizedAt: recognizedAt,
-      quantity,
-    });
+      physicalQuantity,
+      commercialQuantity: quantity,
+    })];
   });
   for (const intent of intents) {
     const allocatedQuantity = totals.get(intent.id) ?? 0;
@@ -2018,7 +2029,7 @@ async function findOrCreatePhysicalPackageAllocationCustomerItem(
       || Number(existing.shipment_request_item_id) !== item.shipmentRequestItemId
       || Number(existing.fulfillment_plan_line_id) !== item.fulfillmentPlanLineId
       || Number(existing.wms_order_item_id) !== item.wmsOrderItemId
-      || Number(existing.quantity_shipped) !== entry.quantity
+      || Number(existing.quantity_shipped) !== entry.physicalQuantity
       || String(existing.sku) !== item.sku
     ) {
       throw new FulfillmentAuthorityError(
@@ -2059,7 +2070,7 @@ async function findOrCreatePhysicalPackageAllocationCustomerItem(
       NULL,
       ${item.productVariantId},
       ${item.sku},
-      ${entry.quantity},
+      ${entry.physicalQuantity},
       NOW()
     )
     RETURNING id
@@ -2273,19 +2284,36 @@ async function recalculatePlanLine(tx: any, fulfillmentPlanLineId: number): Prom
 async function findLineWritebackDecisions(
   tx: any,
   items: readonly MaterializedCustomerItem[],
+  quantityBasis: "physical" | "commercial" = "physical",
 ): Promise<Map<number, ChannelFulfillmentWritebackPolicyDecision>> {
   const decisions = new Map<number, ChannelFulfillmentWritebackPolicyDecision>();
   const uniqueLines = new Map<number, MaterializedCustomerItem>();
   for (const item of items) uniqueLines.set(item.fulfillmentPlanLineId, item);
 
   for (const [fulfillmentPlanLineId, item] of uniqueLines) {
-    const aggregate = firstRow<{ shipped_quantity: number }>(await tx.execute(sql`
-      SELECT COALESCE(SUM(quantity_shipped), 0)::int AS shipped_quantity
-      FROM wms.effective_physical_shipment_items
-      WHERE fulfillment_plan_line_id = ${fulfillmentPlanLineId}
-        AND shipment_item_purpose = 'customer_fulfillment'
+    const aggregate = firstRow<{
+      shipped_quantity: number;
+      commercial_quantity: number;
+    }>(await tx.execute(sql`
+      SELECT
+        COALESCE(SUM(physical.quantity_shipped), 0)::int AS shipped_quantity,
+        COALESCE(SUM(CASE
+          WHEN physical.package_allocation_entry_id IS NULL
+            THEN physical.quantity_shipped
+          ELSE commercial.quantity_pushed
+        END), 0)::int AS commercial_quantity
+      FROM wms.effective_physical_shipment_items AS physical
+      LEFT JOIN LATERAL (
+        SELECT COALESCE(SUM(push_item.quantity_pushed), 0)::int AS quantity_pushed
+        FROM oms.channel_fulfillment_push_items AS push_item
+        WHERE push_item.physical_shipment_item_id = physical.id
+          AND push_item.package_allocation_effect_intent_id IS NOT NULL
+      ) AS commercial ON TRUE
+      WHERE physical.fulfillment_plan_line_id = ${fulfillmentPlanLineId}
+        AND physical.shipment_item_purpose = 'customer_fulfillment'
     `));
     const shippedQuantity = Number(aggregate?.shipped_quantity ?? 0);
+    const commercialQuantity = Number(aggregate?.commercial_quantity ?? 0);
     const decision = evaluateChannelFulfillmentWritebackPolicy({
       channelProvider: item.channelProvider,
       lineFulfillmentProvider: item.lineFulfillmentProvider,
@@ -2295,10 +2323,14 @@ async function findLineWritebackDecisions(
       reviewReason: item.reviewReason,
       commercialAuthorizedQuantity: item.commercialAuthorizedQuantity,
       cumulativePhysicalQuantity: shippedQuantity,
+      ...(quantityBasis === "commercial"
+        ? { cumulativeCommercialQuantity: commercialQuantity }
+        : {}),
     });
     decisions.set(fulfillmentPlanLineId, decision);
 
-    if (decision.reasons.includes("physical_quantity_exceeds_current_authority")) {
+    if (decision.reasons.includes("physical_quantity_exceeds_current_authority")
+      || decision.reasons.includes("commercial_quantity_exceeds_current_authority")) {
       const affectedLegacyShipmentIds = [...new Set(
         items
           .filter((candidate) => candidate.fulfillmentPlanLineId === fulfillmentPlanLineId)
@@ -2921,7 +2953,10 @@ async function loadInheritedActivatedCommercialMaterialization(
       OR (intent.package_allocation_package_binding_id IS NOT NULL
         AND entry.package_allocation_package_binding_id IS DISTINCT FROM
           intent.package_allocation_package_binding_id)
-      OR entry.target_kind IS DISTINCT FROM 'package' OR physical_item.quantity_shipped IS DISTINCT FROM item.quantity_pushed
+      OR entry.target_kind IS DISTINCT FROM 'package'
+      OR entry.quantity IS DISTINCT FROM physical_item.quantity_shipped
+      OR item.quantity_pushed <= 0
+      OR item.quantity_pushed > physical_item.quantity_shipped
       OR physical_item.physical_shipment_id IS DISTINCT FROM command.physical_shipment_id
       OR item.oms_order_line_id IS DISTINCT FROM order_item.oms_order_line_id
       OR item.channel_order_line_id IS DISTINCT FROM oms_line.external_line_item_id
@@ -3652,7 +3687,7 @@ export function createChannelFulfillmentAuthorityRepository(
             physicalShipmentItemId,
             packageAllocationEntryId: entry.id,
             packageAllocationEffectIntentId: entry.packageAllocationEffectIntentId,
-            allocatedQuantity: entry.quantity,
+            allocatedQuantity: entry.commercialQuantity,
           });
         }
         materializedPackages.push({
@@ -3670,24 +3705,6 @@ export function createChannelFulfillmentAuthorityRepository(
       for (const fulfillmentPlanLineId of planLineIds) {
         await recalculatePlanLine(tx, fulfillmentPlanLineId);
       }
-      const writebackDecisions = await findLineWritebackDecisions(
-        tx,
-        allMaterializedItems,
-      );
-      const blockedLines = [...writebackDecisions.entries()]
-        .filter(([, decision]) => !decision.allowed)
-        .map(([fulfillmentPlanLineId, decision]) => ({
-          fulfillmentPlanLineId,
-          reasons: decision.reasons,
-        }));
-      if (blockedLines.length > 0) {
-        throw new FulfillmentAuthorityError(
-          "CHANNEL_WRITEBACK_NOT_AUTHORIZED",
-          "Package-allocation commercial fulfillment is blocked by current OMS authority",
-          { packageAllocationPlanId: input.packageAllocationPlanId, blockedLines },
-        );
-      }
-
       const persistedCommands: MaterializedChannelCommand[] = [];
       for (const materializedPackage of materializedPackages) {
         const commands = planChannelFulfillmentCommands({
@@ -3729,6 +3746,27 @@ export function createChannelFulfillmentAuthorityRepository(
         }
       }
       await assertPackageAllocationCommercialIntentCoverage(tx, intents);
+      // The physical package may contain more units than the channel is still
+      // authorized to fulfill. Commands are shadow-only here, so verify their
+      // exact persisted quantities before this transaction can commit.
+      const writebackDecisions = await findLineWritebackDecisions(
+        tx,
+        allMaterializedItems,
+        "commercial",
+      );
+      const blockedLines = [...writebackDecisions.entries()]
+        .filter(([, decision]) => !decision.allowed)
+        .map(([fulfillmentPlanLineId, decision]) => ({
+          fulfillmentPlanLineId,
+          reasons: decision.reasons,
+        }));
+      if (blockedLines.length > 0) {
+        throw new FulfillmentAuthorityError(
+          "CHANNEL_WRITEBACK_NOT_AUTHORIZED",
+          "Package-allocation commercial fulfillment is blocked by current OMS authority",
+          { packageAllocationPlanId: input.packageAllocationPlanId, blockedLines },
+        );
+      }
 
       return Object.freeze({
         packageAllocationPlanId: input.packageAllocationPlanId,

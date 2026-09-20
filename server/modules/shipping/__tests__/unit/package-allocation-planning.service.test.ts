@@ -405,6 +405,38 @@ describe("PackageAllocationPlanningService", () => {
     expect(repository.transaction.appendCalls).toHaveLength(0);
   });
 
+  it("cannot restore a refunded commercial line by omitting its locked zero cap", async () => {
+    const repository = new InMemoryLedgerRepository();
+    repository.transaction.facts = [sourceFacts({ commercialRequestedQuantity: 0 })];
+    const service = new PackageAllocationPlanningService(repository);
+
+    await expect(service.persist(command())).rejects.toSatisfy((error: unknown) => {
+      expectPersistenceError(error, "SOURCE_EVIDENCE_CONFLICT");
+      return true;
+    });
+    expect(repository.transaction.appendCalls).toHaveLength(0);
+  });
+
+  it("persists zero commercial demand without deleting the source registration", async () => {
+    const repository = new InMemoryLedgerRepository();
+    repository.transaction.facts = [sourceFacts({ commercialRequestedQuantity: 0 })];
+    const service = new PackageAllocationPlanningService(repository);
+    const input = command({
+      sourceLines: [{
+        wmsShipmentItemId: 7001,
+        sourceQuantity: 2,
+        commercialRequestedQuantity: 0,
+        physicalConsumptionAuthorityQuantity: 2,
+        authorityVersion: 1,
+      }],
+    });
+
+    const result = await service.persist(input);
+    expect(result.plannerResult.state.desiredEffectIntents.some((intent) =>
+      intent.effectType === "commercial_fulfillment")).toBe(false);
+    expect(repository.transaction.sources.has(7001)).toBe(true);
+  });
+
   it("rejects a corrupted persisted base snapshot before planning", async () => {
     const repository = new InMemoryLedgerRepository();
     repository.transaction.group = Object.freeze({ id: "1", groupKey, currentVersion: 1 });
