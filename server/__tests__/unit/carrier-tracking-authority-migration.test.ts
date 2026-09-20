@@ -1,7 +1,9 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { getTableConfig, PgDialect } from "drizzle-orm/pg-core";
 import { describe, expect, it } from "vitest";
+import { carrierTrackingReconciliationState } from "../../../shared/schema/fulfillment.schema";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const migration = readFileSync(
@@ -12,8 +14,24 @@ const v2WebhookAuthMigration = readFileSync(
   join(here, "..", "..", "..", "migrations", "0591_carrier_tracking_v2_webhook_auth.sql"),
   "utf8",
 );
+const matchedRetryMigration = readFileSync(
+  join(here, "..", "..", "..", "migrations", "0686_carrier_tracking_matched_lineage_retry.sql"),
+  "utf8",
+);
 
 describe("carrier tracking authority migration", () => {
+  it("keeps the matched-label retry constraint identical in migrations and the application schema", () => {
+    const constraint = getTableConfig(carrierTrackingReconciliationState).checks
+      .find((entry) => entry.name === "carrier_tracking_reconciliation_state_retry_shape_chk");
+    expect(constraint).toBeDefined();
+    const predicate = new PgDialect().sqlToQuery(constraint!.value).sql
+      .replace(/"wms"\."carrier_tracking_reconciliation_state"\./g, "")
+      .replaceAll('"', "")
+      .replace(/\s+/g, " ").trim();
+    expect(matchedRetryMigration.replace(/\s+/g, " ")).toContain(`CHECK ( ${predicate} );`);
+    expect(matchedRetryMigration).not.toMatch(/\b(INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+(wms|oms|inventory)\./i);
+  });
+
   it("separates labels, label links, label events, authenticated receipts, parse attempts, carrier events, and match attempts", () => {
     expect(migration).toContain("CREATE TABLE IF NOT EXISTS wms.shipping_provider_labels");
     expect(migration).toContain("CREATE TABLE IF NOT EXISTS wms.shipping_provider_label_links");

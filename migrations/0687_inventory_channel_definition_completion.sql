@@ -1,6 +1,6 @@
 BEGIN;
 
--- Additive only: no definitions selected, inventory moved, or publication enabled.
+-- Additive only: no definitions selected, no inventory moved, no publication enabled.
 ALTER TABLE inventory.channel_exposure_policy_versions
   ADD COLUMN source_fulfillment_node_ids integer[],
   ADD COLUMN inherit_all boolean NOT NULL DEFAULT false;

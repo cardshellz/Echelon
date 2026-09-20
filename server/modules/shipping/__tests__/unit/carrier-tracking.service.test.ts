@@ -596,6 +596,27 @@ describe("CarrierTrackingService", () => {
     expect(repository.persistVerifiedWebhookReceipt).not.toHaveBeenCalled();
   });
 
+  it("retains carrier identity validation for lookups without an exact provider label", async () => {
+    const { repository, enqueueDispatchCommand } = repositoryWithCandidates([]);
+    const service = new CarrierTrackingService({
+      repository,
+      clock: { now: () => new Date(now) },
+      logger: logger(),
+      trackingEventsClient: {
+        isConfigured: () => true,
+        getTrackingSnapshot: vi.fn().mockResolvedValue({
+          httpStatus: 200,
+          payload: { ...payload().data, carrier_code: "fedex" },
+        }),
+      },
+    });
+
+    await expect(service.hydrateShipStationTrackingIdentity({
+      carrierCode: "ups", trackingNumber: "1Z999AA10123456784",
+    })).rejects.toMatchObject({ code: "INVALID_RESPONSE" });
+    expect(enqueueDispatchCommand).not.toHaveBeenCalled();
+  });
+
   it("retries transient hydration failures with deterministic bounded backoff", async () => {
     const { repository } = repositoryWithCandidates([]);
     vi.mocked(repository.claimWebhookHydrations).mockResolvedValue([{

@@ -6,10 +6,14 @@ This expands the [earlier UI batch](INVENTORY-UI-COMPLETION-BATCH-2026-09-20.md)
 on `codex/inventory-ui-cutover-completion-20260920`. Both batches are delivered in
 **one PR**, not separate deployments. The original dirty catalog checkout is untouched.
 
-Final integration base: refreshed `origin/main` at
-`a06e994a363c41bb4fd2c51d3e317608884134a8` (PR #1506). The existing SKU publication
-holds from that workstream are preserved and tested with source overrides and
-restored inheritance. This branch has its own PR; it is not part of PR #1506.
+Integration base: refreshed `origin/main` at
+`dcf449486008c868771a87300a4031b42e5d2bd0` (PR #1507), after the full local
+validation against `a06e994a363c41bb4fd2c51d3e317608884134a8` (PR #1506).
+The existing SKU publication holds from #1506 are preserved and tested with
+source overrides and restored inheritance. #1507's carrier-tracking changes
+and PostgreSQL coverage are preserved; its 0686 migration required renumbering
+this branch's additive migration to 0687. This branch is delivered as PR #1508,
+not as part of either preceding workstream.
 
 It completes the channel-workspace workflow: warehouse supply, channel defaults,
 product/SKU exceptions, restoring inheritance, whole-channel Review → Apply,
@@ -85,9 +89,9 @@ concurrent deletion protection; it is not independently editable configuration.
 The migration selects no definitions and changes no physical quantities, target
 states, provider ownership or runtime authority.
 
-Migration: [`0686_inventory_channel_definition_completion.sql`](../migrations/0686_inventory_channel_definition_completion.sql#L1).
-The number was selected after integrating main's 0684/0685 migrations; the full
-unit run includes the migration-prefix collision guard.
+Migration: [`0687_inventory_channel_definition_completion.sql`](../migrations/0687_inventory_channel_definition_completion.sql#L1).
+The number was selected after integrating main's 0684/0685/0686 migrations;
+the migration-prefix and combined 87-file PostgreSQL-manifest guards were rerun.
 
 ## Failure modes and boundaries
 
@@ -115,7 +119,9 @@ unit run includes the migration-prefix collision guard.
 
 ## Validation
 
-Final local results after integrating main, including its SKU publication holds:
+Local results after integrating #1506, including its SKU publication holds;
+the later #1507 merge retains both PostgreSQL suite additions and renumbers only
+our migration. Latest-commit GitHub CI is checked separately before handoff:
 
 | Check | Result |
 | --- | --- |

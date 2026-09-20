@@ -350,7 +350,7 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
       await migrationClient.query(optionalChangeNoteMigrationSql);
       await migrationClient.query(publicationHoldMigrationSql);
       await migrationClient.query(variantHoldMigrationSql);
-      await migrationClient.query(readFileSync(resolve(process.cwd(), "migrations/0686_inventory_channel_definition_completion.sql"), "utf8"));
+      await migrationClient.query(readFileSync(resolve(process.cwd(), "migrations/0687_inventory_channel_definition_completion.sql"), "utf8"));
       await migrationClient.query("COMMIT");
     } catch (error) {
       await migrationClient.query("ROLLBACK");

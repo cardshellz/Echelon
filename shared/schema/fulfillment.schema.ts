@@ -1335,6 +1335,14 @@ export const carrierTrackingReconciliationState = wmsSchema.table("carrier_track
   nextReconcileAt: timestamp("next_reconcile_at", { withTimezone: true }),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
 }, (table) => [
+  check("carrier_tracking_reconciliation_state_retry_shape_chk", sql`
+    (${table.lastMatchStatus} IN ('unmatched', 'ambiguous', 'review') AND ${table.nextReconcileAt} IS NOT NULL)
+    OR (
+      ${table.lastMatchStatus} = 'matched'
+      AND (${table.nextReconcileAt} IS NULL OR ${table.nextReconcileAt} > ${table.lastReconciledAt})
+    )
+    OR (${table.lastMatchStatus} = 'voided_label' AND ${table.nextReconcileAt} IS NULL)
+  `),
   index("idx_carrier_tracking_reconciliation_state_due")
     .on(table.nextReconcileAt, table.lastReconciledAt),
 ]);
