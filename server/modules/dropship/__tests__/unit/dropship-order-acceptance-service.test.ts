@@ -198,8 +198,8 @@ describe("DropshipOrderAcceptanceService", () => {
       [{ reload: { kind: "declined", detail: "insufficient_funds" } }, `${base} We tried to charge your card for the shortfall and it was declined (insufficient funds). Add funds or update your card in Wallet.`],
       [{ reload: { kind: "declined", detail: null } }, `${base} We tried to charge your card for the shortfall and it was declined. Add funds or update your card in Wallet.`],
       [{ reload: { kind: "failed", message: "Stripe unavailable" } }, `${base} We could not top up your wallet automatically (Stripe unavailable); add funds to accept it sooner.`],
-      [{ reload: { kind: "skipped", reason: "amount_exceeds_max_single_reload" } }, `${base} Auto-reload could not top it up: the amount is over your single-reload limit. Add funds or check auto-reload in Wallet.`],
-      [{ reload: { kind: "skipped", reason: "some_new_reason" } }, `${base} Auto-reload could not top it up: some new reason. Add funds or check auto-reload in Wallet.`],
+      [{ reload: { kind: "skipped", reason: "amount_exceeds_max_single_reload" } }, `${base} Autopay could not top it up: the amount is more than autopay may charge in one go. Add money or check autopay in Wallet.`],
+      [{ reload: { kind: "skipped", reason: "some_new_reason" } }, `${base} Autopay could not top it up: some new reason. Add money or check autopay in Wallet.`],
     ];
     for (const [context, expected] of cases) {
       notificationSender.sent = [];

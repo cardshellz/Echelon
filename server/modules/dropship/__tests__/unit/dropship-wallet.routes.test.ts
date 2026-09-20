@@ -286,6 +286,22 @@ describe("dropship wallet routes card fee exposure", () => {
     expect(configureInputs).toEqual([expect.objectContaining({ vendorId: 10, acknowledgedCardFeeBps: 300 })]);
   });
 
+  it("passes the top-up amount through and leaves the bound to the service when the client sends none (funding design phase 5)", async () => {
+    const response = await jsonRequest(`${server.url}/api/dropship/wallet/auto-reload`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ enabled: true, fundingMethodId: 10, minimumBalanceCents: 10_000, topUpAmountCents: 25_000, paymentHoldTimeoutMinutes: 1440, acknowledgedCardFeeBps: 300 }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(configureInputs).toEqual([{
+      vendorId: 10, fundingMethodId: 10, enabled: true, minimumBalanceCents: 10_000, topUpAmountCents: 25_000,
+      paymentHoldTimeoutMinutes: 1440, acknowledgedCardFeeBps: 300,
+    }]);
+    // Not defaulted to null here: the service derives the bound only when nothing was sent.
+    expect((configureInputs[0] as Record<string, unknown>).maxSingleReloadCents).toBeUndefined();
+  });
+
   it("reports a stale fee acknowledgement as a conflict the vendor resolves by re-reading, not as bad input", async () => {
     configureError = new DropshipError(
       "DROPSHIP_CARD_FUNDING_FEE_ACKNOWLEDGEMENT_STALE",

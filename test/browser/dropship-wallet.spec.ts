@@ -15,7 +15,7 @@ const LIVE_PROOF = { method: "email_mfa", verifiedAt: STAMP, expiresAt: "2999-01
 const ALL_PROOFS = { add_funding_method: LIVE_PROOF, wallet_funding_high_value: LIVE_PROOF, remove_funding_method: LIVE_PROOF };
 /** Where step screenshots go when WALLET_SHOTS_DIR is set (never in CI). */
 const SHOTS_DIR = process.env.WALLET_SHOTS_DIR ?? null;
-const PUT_KEYS = ["enabled", "fundingMethodId", "backstopFundingMethodId", "minimumBalanceCents", "maxSingleReloadCents", "paymentHoldTimeoutMinutes", "acknowledgedCardFeeBps"].sort();
+const PUT_KEYS = ["enabled", "fundingMethodId", "backstopFundingMethodId", "minimumBalanceCents", "topUpAmountCents", "paymentHoldTimeoutMinutes", "acknowledgedCardFeeBps"].sort();
 
 interface StubMethod {
   fundingMethodId: number;
@@ -75,7 +75,7 @@ interface StubState {
 }
 
 function doneAutoReload(overrides: Record<string, unknown> = {}) {
-  return { autoReloadSettingId: 5, enabled: true, minimumBalanceCents: 25_000, maxSingleReloadCents: 50_000, paymentHoldTimeoutMinutes: 2880, fundingMethodId: 30, updatedAt: STAMP,
+  return { autoReloadSettingId: 5, enabled: true, minimumBalanceCents: 25_000, maxSingleReloadCents: 50_000, topUpAmountCents: null, paymentHoldTimeoutMinutes: 2880, fundingMethodId: 30, updatedAt: STAMP,
     backstopFundingMethodId: 10, acknowledgedCardFeeBps: 300, acknowledgedAt: STAMP, ...overrides };
 }
 
@@ -191,7 +191,14 @@ async function setup(page: Page, initial: Partial<StubState> = {}, path = HARNES
         return route.fulfill({ status: refusal.status, json: { error: { code: refusal.code, message: "Refused by the stub.", context: refusal.context ?? null } } });
       }
       // The stub serves the D4/D7 fields the real server will store: the designated backup card and the acknowledgement.
-      state.autoReload = { autoReloadSettingId: 5, updatedAt: LATER, ...body, acknowledgedAt: body.acknowledgedCardFeeBps === null ? null : LATER };
+      // It also derives the single-charge bound the way the server does: max(minimum, top-up amount), never sent by this client.
+      const minimumBalanceCents = Number(body.minimumBalanceCents);
+      const topUpAmountCents = typeof body.topUpAmountCents === "number" ? body.topUpAmountCents : null;
+      state.autoReload = {
+        autoReloadSettingId: 5, updatedAt: LATER, ...body, topUpAmountCents,
+        maxSingleReloadCents: body.enabled ? Math.max(minimumBalanceCents, topUpAmountCents ?? minimumBalanceCents) : null,
+        acknowledgedAt: body.acknowledgedCardFeeBps === null ? null : LATER,
+      };
       return route.fulfill({ json: { autoReload: state.autoReload, idempotentReplay: false } });
     }
     if (url.pathname === "/api/dropship/wallet/funding/stripe/checkout-session" && method === "POST") {
@@ -302,34 +309,38 @@ function confirmPendingSetup(state: StubState, rail: "stripe_card" | "stripe_ach
   delete pending[0].activatesAfterReads;
 }
 
-test("bank vendor, end to end: intro, bank source, floor with guidance, backup card, one authorization, then the deposit step — with one emailed code", async ({ page }) => {
+test("bank vendor, end to end: intro, bank source, minimum with guidance and a top-up amount, backup card, one authorization, then the deposit step — with one emailed code", async ({ page }) => {
   const state = await setup(page, { usdcDepositAddress: DEPOSIT_ADDRESS, holdSetupConfirmation: true });
   const intro = page.getByTestId("wallet-step-intro");
   await expect(intro.getByRole("heading", { name: "How your wallet works" })).toBeVisible();
-  await expect(intro.getByTestId("wallet-how-it-works-lede")).toHaveText("Your wallet is how Card Shellz gets paid for the orders you sell. Here is what it does, what it costs, and what happens if a payment fails.");
-  // Five topics, each scannable from its bold lead alone.
+  await expect(intro.getByTestId("wallet-how-it-works-lede")).toHaveText("Your wallet is the deposit Card Shellz draws on for the orders you sell. Here is what it holds, what it lets you sell, how it stays funded, and what happens when a payment fails.");
+  // Six topics, each scannable from its bold lead alone.
   const topics = intro.getByTestId("wallet-how-it-works-rules").getByRole("listitem");
-  await expect(topics).toHaveCount(5);
-  for (const [index, lead] of ["What your wallet is.", "Payment methods and fees.", "Keeping it funded.",
-    "Your backup card.", "If a payment fails."].entries()) {
+  await expect(topics).toHaveCount(6);
+  for (const [index, lead] of ["What your wallet is.", "What you can sell, and the minimum it needs.", "Keeping it funded: your minimum and autopay.",
+    "Ways to pay, and what each costs.", "Orders while a transfer lands, and your backup card.", "If a payment fails or is taken back."].entries()) {
     await expect(topics.nth(index).locator("strong")).toHaveText(lead);
   }
-  // The floor minimum comes from the served limits, the rate from the served fee and the deadline from the hold time.
-  await expect(intro).toContainText("its return fee comes out of the wallet too, and that can take your balance below zero");
+  // The tier minimums, the grace period, the advance terms, the rate and the deadline all come from served values.
+  await expect(intro).toContainText("A return fee comes out of it too, and so does a payment your bank takes back after it landed; either can take the balance below zero");
+  await expect(intro).toContainText("Singles, packs and inner packs are on sale while you keep at least $100 in your wallet. Cases are on sale once your balance, counting money on its way, has reached $500.");
+  await expect(intro).toContainText("you keep selling for 14 days after the notice");
   await expect(intro).toContainText("takes up to 5 business days to land (our estimate)");
   await expect(intro).toContainText("costs 3% on top of the amount");
   await expect(intro).toContainText("USDC costs nothing.");
-  await expect(intro).toContainText("Your floor has to be at least $100, so there is always enough to cover a normal order");
-  await expect(intro).toContainText("the same gap is never charged twice");
+  await expect(intro).toContainText("the same gap is never pulled twice");
+  await expect(intro).toContainText("Autopay never takes more than the larger of your minimum and your top-up amount in one charge.");
   await expect(intro).toContainText("You can also add money yourself at any time.");
+  await expect(intro).toContainText("for a 1% fee on the amount used, at most $500 outstanding at a time");
   await expect(intro).toContainText("cancelled after your hold time (24 hours)");
   await expect(intro).toContainText("We email you, and we do not retry the charge ourselves.");
-  // No amount the product does not enforce as a rule, no USDC timing claim, and no forward reference to a later step.
-  await expect(intro).not.toContainText("at a time,");
+  // No amount the product does not enforce as a rule, no USDC timing claim, no forward reference, and none of the old words.
   await expect(intro).not.toContainText("single top-up limit");
   await expect(intro).not.toContainText("it is not instant");
   await expect(intro).not.toContainText("Never charge more than");
   await expect(intro).not.toContainText("step 5");
+  await expect(intro).not.toContainText("floor");
+  await expect(intro).not.toContainText("auto-reload");
   await expect(intro.getByTestId("wallet-intro-verification-note")).toContainText("(a 6-digit code by email)");
   await expect(page.getByTestId("wallet-impact")).toHaveCount(0);
   await expect(page.getByTestId("wallet-balance")).toHaveCount(0);
@@ -339,9 +350,9 @@ test("bank vendor, end to end: intro, bank source, floor with guidance, backup c
 
   // Step 2: nothing pre-selected; the recommendation is a badge, not a choice.
   const source = page.getByTestId("wallet-step-source");
-  await expect(source.getByRole("heading", { name: "Choose your top-up source" })).toBeVisible();
+  await expect(source.getByRole("heading", { name: "Choose your autopay source" })).toBeVisible();
   await expect(source.getByRole("button", { name: "Continue" })).toBeDisabled();
-  await expect(source.getByTestId("wallet-usdc-note")).toContainText("can never be your top-up source");
+  await expect(source.getByTestId("wallet-usdc-note")).toContainText("can never be your autopay source");
   await shot(page, "02-source-empty");
   await radio(page, "Top up from", "Bank account").click();
   await expect(source.getByTestId("wallet-impact")).toContainText("Routine top-ups are free");
@@ -364,23 +375,33 @@ test("bank vendor, end to end: intro, bank source, floor with guidance, backup c
   await shot(page, "02-source-bank-added");
   await source.getByRole("button", { name: "Continue" }).click();
 
-  // Step 3: guidance follows the daily cost, which never leaves the browser.
+  // Step 3: guidance follows the daily cost, which never leaves the browser; the tier minimums come from the served limits.
   const floor = page.getByTestId("wallet-step-floor");
-  await expect(floor.getByRole("heading", { name: "Set your floor" })).toBeVisible();
+  await expect(floor.getByRole("heading", { name: "Set your minimum" })).toBeVisible();
+  await expect(floor.getByTestId("wallet-tier-hint")).toContainText("Singles, packs and inner packs need at least $100; cases need $500.");
   await expect(radio(page, "Keep my balance at", "$250")).toContainText("Default");
+  await expect(radio(page, "Keep my balance at", "$500")).toContainText("Sells cases");
   await shot(page, "03-floor-default");
   await page.getByTestId("wallet-daily-cost").fill("20");
-  await expect(floor.getByTestId("wallet-floor-recommendation")).toContainText("we suggest a floor of $200");
+  await expect(floor.getByTestId("wallet-floor-recommendation")).toContainText("we suggest a minimum of $200");
   await expect(radio(page, "Keep my balance at", "Recommended $200")).toHaveAttribute("aria-checked", "true");
   await expect(radio(page, "Keep my balance at", "$250")).toContainText("≈ 12 days");
   await radio(page, "Keep my balance at", "$250").click();
   await expect(floor.getByTestId("wallet-floor-verdict")).toContainText("Keeps up");
   await expect(floor.getByTestId("wallet-guidance-fee")).toContainText("about $0 a month at $600 of orders — at most 3% of what actually goes on the card, $18 if all $600 did");
-  await expect(floor.getByTestId("wallet-guidance-parked")).toContainText("Routine top-ups keep up to $250");
+  await expect(floor.getByTestId("wallet-guidance-parked")).toContainText("Autopay keeps at least $250 in the wallet, topping up by $250 at a time.");
   await expect(floor.getByTestId("wallet-guidance-activation")).toContainText("$250 from Chase ending in 1234");
   await expect(floor.getByTestId("wallet-guidance-activation")).toContainText("first daily check after you activate");
-  await expect(floor.getByTestId("wallet-floor-limit-note")).toContainText("$500 (2 × your floor)");
+  await expect(floor.getByTestId("wallet-floor-limit-note")).toContainText("Autopay never takes more than $250 in one charge (your minimum)");
   await expect(floor.getByTestId("wallet-floor-limit-note")).toContainText("2 hours");
+  // The optional top-up amount: fewer, bigger pulls; the bound follows it.
+  await page.getByTestId("wallet-top-up-custom").fill("50");
+  await expect(floor.getByRole("alert")).toHaveText("The top-up amount must be at least $100.");
+  await expect(floor.getByRole("button", { name: "Continue" })).toBeDisabled();
+  await page.getByTestId("wallet-top-up-custom").fill("400");
+  await expect(floor.getByTestId("wallet-guidance-parked")).toContainText("topping up by $400 at a time");
+  await expect(floor.getByTestId("wallet-guidance-activation")).toContainText("$400 from Chase ending in 1234");
+  await expect(floor.getByTestId("wallet-floor-limit-note")).toContainText("Autopay never takes more than $400 in one charge (your top-up amount)");
   await expectNoHorizontalScroll(page);
   await shot(page, "03-floor-guidance");
   await floor.getByRole("button", { name: "Continue" }).click();
@@ -401,28 +422,28 @@ test("bank vendor, end to end: intro, bank source, floor with guidance, backup c
 
   // Step 5: the whole mandate, one button, no checkbox.
   const review = page.getByTestId("wallet-step-review");
-  await expect(review.getByRole("heading", { name: "Review and turn on auto-reload" })).toBeVisible();
+  await expect(review.getByRole("heading", { name: "Review and turn on autopay" })).toBeVisible();
   const summary = review.getByTestId("wallet-review-summary");
   await expect(summary).toContainText("Chase ending in 1234 (bank account, no fee)");
   await expect(summary).toContainText("$250 — about 12 days at $20 a day");
   await expect(summary).toContainText("Visa ending in 4242");
-  await expect(summary).toContainText("$500 — 2 × your floor");
+  await expect(summary).toContainText("$400. Autopay never takes more than $400 in one charge.");
   await expect(summary).toContainText("24 hours — set by CardShellz for every wallet.");
   const mandate = review.getByTestId("wallet-mandate");
-  for (const phrase of ["$250", "$500", "shortfall", "up to the single top-up limit", "24 hours", "2 hours", "before it lands",
+  for (const phrase of ["your minimum of $250", "your top-up amount of $400", "shortfall", "up to $400", "24 hours", "2 hours", "before it lands",
     "If a return fee has taken your balance below zero, the shortfall includes that amount.", "Adding money by card now avoids that", "for automatic top-ups and covers", "first daily check after you activate"]) {
     await expect(mandate).toContainText(phrase);
   }
-  // The single top-up limit is explained in full here, beside the number itself; the intro only names it.
-  await expect(mandate).toContainText("Never charge more than $500 in one top-up.");
-  await expect(review.getByTestId("wallet-plan-sentence")).toContainText("you keep $250 in your wallet, refilled from your bank for free");
-  await expect(review.getByTestId("wallet-activation-quote")).toContainText("$250 bank transfer");
+  // The single-charge bound is explained in full here, beside the numbers themselves; the intro only states the rule.
+  await expect(mandate).toContainText("Never take more than $400 in one charge — the larger of your minimum and your top-up amount.");
+  await expect(review.getByTestId("wallet-plan-sentence")).toContainText("you keep $250 in your wallet; when an order takes it lower, autopay pulls $400 from your bank for free");
+  await expect(review.getByTestId("wallet-activation-quote")).toContainText("$400 bank transfer");
   await expect(review.getByTestId("wallet-fee-acknowledgement-line")).toContainText("records that you agree to the 3% fee");
   await expect(review.getByRole("checkbox")).toHaveCount(0);
   await expectNoHorizontalScroll(page);
   await shot(page, "05-review");
-  await review.getByRole("button", { name: "Agree and turn on auto-reload" }).click();
-  expect(state.autoReloadWrites).toEqual([{ enabled: true, fundingMethodId: 30, backstopFundingMethodId: 10, minimumBalanceCents: 25_000, maxSingleReloadCents: 50_000, paymentHoldTimeoutMinutes: 1440, acknowledgedCardFeeBps: 300 }]);
+  await review.getByRole("button", { name: "Agree and turn on autopay" }).click();
+  expect(state.autoReloadWrites).toEqual([{ enabled: true, fundingMethodId: 30, backstopFundingMethodId: 10, minimumBalanceCents: 25_000, topUpAmountCents: 40_000, paymentHoldTimeoutMinutes: 1440, acknowledgedCardFeeBps: 300 }]);
 
   // Step 6: recommended, never a gate.
   const deposit = page.getByTestId("wallet-step-deposit");
@@ -438,10 +459,11 @@ test("bank vendor, end to end: intro, bank source, floor with guidance, backup c
   const manage = page.getByTestId("wallet-manage");
   await expect(manage).toBeVisible();
   await expect(manage.getByTestId("wallet-plan-source")).toContainText("Chase ending in 1234 · bank account · no fee");
-  await expect(manage.getByTestId("wallet-plan-floor")).toContainText("$250 — topped up once a day");
+  await expect(manage.getByTestId("wallet-plan-floor")).toContainText("$250 — autopay tops it up after any order that takes it lower, and at the daily check.");
   await expect(manage.getByTestId("wallet-plan-floor")).toContainText("≈ 12 days at $20 a day");
+  await expect(manage.getByTestId("wallet-plan-top-up")).toContainText("Top-up amount $400 · never more than $400 in one charge.");
   await expect(manage.getByTestId("wallet-plan-backup-card")).toContainText("Visa ending in 4242 · expires 12/27");
-  await expect(manage.getByTestId("wallet-plan-limits")).toContainText("Single top-up limit $500 · hold time 24 hours");
+  await expect(manage.getByTestId("wallet-plan-limits")).toContainText("24 hours — set by CardShellz for every wallet.");
   await expect(manage.getByTestId("wallet-plan-authorization")).toContainText("at a 3% card fee");
   await expect(manage.getByTestId("wallet-deposit-callout")).toBeVisible();
   await expect(manage.getByRole("button", { name: "Back to onboarding" })).toBeVisible();
@@ -452,7 +474,7 @@ test("bank vendor, end to end: intro, bank source, floor with guidance, backup c
   finish(state, "20");
 });
 
-test("card vendor: steps 4 and 6 are satisfied rows, the limit is not a false multiple, and the card is both source and backup", async ({ page }) => {
+test("card vendor: steps 4 and 6 are satisfied rows, the bound is the minimum, and the card is both source and backup", async ({ page }) => {
   const state = await setup(page, { proofs: ALL_PROOFS, holdSetupConfirmation: true });
   await page.getByRole("button", { name: "Set up my wallet" }).click();
   const source = page.getByTestId("wallet-step-source");
@@ -471,7 +493,7 @@ test("card vendor: steps 4 and 6 are satisfied rows, the limit is not a false mu
   await expect(radio(page, "Keep my balance at", "$100")).toContainText("Default");
   await expect(floor).toContainText("$3 at $100, $30 at $1,000");
   await expect(floor.getByTestId("wallet-guidance-activation")).toContainText("$103");
-  await expect(floor.getByTestId("wallet-floor-limit-note")).toContainText("Single top-up limit: $250 (at least 2 × your floor, rounded up to the next preset)");
+  await expect(floor.getByTestId("wallet-floor-limit-note")).toContainText("Autopay never takes more than $100 in one charge (your minimum)");
   await shot(page, "card-03-floor");
   await floor.getByRole("button", { name: "Continue" }).click();
 
@@ -481,17 +503,17 @@ test("card vendor: steps 4 and 6 are satisfied rows, the limit is not a false mu
   await expect(steps).toContainText("First top-up ·");
   await expect(steps).toContainText("$103");
   const review = page.getByTestId("wallet-step-review");
-  await expect(review.getByTestId("wallet-review-summary")).toContainText("$250 — at least 2 × your floor, rounded up to the next preset");
-  await expect(review.getByTestId("wallet-review-summary")).toContainText("Visa ending in 4242 — also your top-up source");
+  await expect(review.getByTestId("wallet-review-summary")).toContainText("$100 — your minimum. Autopay never takes more than $100 in one charge.");
+  await expect(review.getByTestId("wallet-review-summary")).toContainText("Visa ending in 4242 — also your autopay source");
   await expect(review.getByTestId("wallet-mandate")).toContainText("or a bank transfer you started is returned before it lands");
   await expect(review.getByTestId("wallet-mandate")).toContainText("$100 + $3 = $103");
   await expect(page.getByText("(2 × your floor)")).toHaveCount(0);
   await shot(page, "card-05-review");
-  await review.getByRole("button", { name: "Agree and turn on auto-reload" }).click();
-  expect(state.autoReloadWrites).toEqual([{ enabled: true, fundingMethodId: 10, backstopFundingMethodId: 10, minimumBalanceCents: 10_000, maxSingleReloadCents: 25_000, paymentHoldTimeoutMinutes: 1440, acknowledgedCardFeeBps: 300 }]);
+  await review.getByRole("button", { name: "Agree and turn on autopay" }).click();
+  expect(state.autoReloadWrites).toEqual([{ enabled: true, fundingMethodId: 10, backstopFundingMethodId: 10, minimumBalanceCents: 10_000, topUpAmountCents: null, paymentHoldTimeoutMinutes: 1440, acknowledgedCardFeeBps: 300 }]);
   await expect(page.getByTestId("wallet-manage")).toBeVisible();
   await expect(page.getByTestId("wallet-step-deposit")).toHaveCount(0);
-  await expect(page.getByTestId("wallet-plan").getByRole("status")).toContainText("Auto-reload is on.");
+  await expect(page.getByTestId("wallet-plan").getByRole("status")).toContainText("Autopay is on.");
   await expect(page.getByTestId("wallet-plan-backup-card")).toContainText("The same card you top up with");
   await expect(page.getByTestId("wallet-plan-backup-card").getByRole("button", { name: "Change" })).toHaveCount(0);
   await shot(page, "card-07-manage");
@@ -517,7 +539,7 @@ test("a cancelled Stripe return at step 4 saves nothing and says so next to the 
   finish(state);
 });
 
-test("manage: changing the floor lifts the limit with it and saves the whole row at the recorded rate", async ({ page }) => {
+test("manage: changing the minimum moves the bound with it, the top-up amount is its own number, and each save sends the whole row at the recorded rate", async ({ page }) => {
   const state = await setup(page, { vendorStatus: "active", methods: [CARD, BANK], autoReload: doneAutoReload(), balanceCents: 30_000, proofs: ALL_PROOFS });
   const plan = page.getByTestId("wallet-plan");
   await expect(page.getByTestId("wallet-available")).toHaveText("$300.00");
@@ -525,29 +547,33 @@ test("manage: changing the floor lifts the limit with it and saves the whole row
   await expect(page.getByRole("button", { name: "Back to onboarding" })).toHaveCount(0);
   await expect(page.getByTestId("wallet-auto-reload-off")).toHaveCount(0);
   await shot(page, "manage-01-plan");
+  // The stored bound ($500) shows until the amounts change; the minimum editor then shows the bound the server will derive.
+  await expect(plan.getByTestId("wallet-plan-top-up")).toContainText("Top-up amount $250 (your minimum) · never more than $500 in one charge.");
   await plan.getByTestId("wallet-plan-floor").getByRole("button", { name: "Change" }).click();
   await radio(page, "Keep my balance at", "$1,000").click();
-  await expect(plan).toContainText("Single top-up limit lifted to $2,500 (at least 2 × your floor, rounded up to the next preset)");
+  await expect(plan.getByTestId("wallet-floor-limit-note")).toContainText("Autopay never takes more than $1,000 in one charge (your minimum)");
   await expectNoHorizontalScroll(page);
   await shot(page, "manage-02-floor-editor");
   await plan.getByRole("button", { name: "Save", exact: true }).click();
-  expect(state.autoReloadWrites).toEqual([{ enabled: true, fundingMethodId: 30, backstopFundingMethodId: 10, minimumBalanceCents: 100_000, maxSingleReloadCents: 250_000, paymentHoldTimeoutMinutes: 1440, acknowledgedCardFeeBps: 300 }]);
-  await expect(plan.getByTestId("wallet-plan-floor")).toContainText("$1,000 — topped up once a day");
-  await expect(plan.getByTestId("wallet-plan-limits")).toContainText("Single top-up limit $2,500 · hold time 24 hours");
+  expect(state.autoReloadWrites).toEqual([{ enabled: true, fundingMethodId: 30, backstopFundingMethodId: 10, minimumBalanceCents: 100_000, topUpAmountCents: null, paymentHoldTimeoutMinutes: 1440, acknowledgedCardFeeBps: 300 }]);
+  await expect(plan.getByTestId("wallet-plan-floor")).toContainText("$1,000 — autopay tops it up after any order that takes it lower");
+  await expect(plan.getByTestId("wallet-plan-top-up")).toContainText("Top-up amount $1,000 (your minimum) · never more than $1,000 in one charge.");
 
-  // The Limits editor speaks from the served warning window, never a constant,
-  // and the hold time is CardShellz's setting: shown, never chosen here.
-  await plan.getByTestId("wallet-plan-limits").getByRole("button", { name: "Change" }).click();
-  const limits = page.getByTestId("wallet-limits-editor");
-  await expect(limits).toContainText("for orders held from now on");
-  await expect(limits).toContainText("We email you 2 hours before.");
-  await expect(limits.getByTestId("wallet-hold-time")).toContainText("24 hours — set by CardShellz for every wallet.");
-  await expect(limits.getByRole("radiogroup", { name: "Hold time" })).toHaveCount(0);
-  await radio(page, "Single top-up limit", "$5,000").click();
-  await shot(page, "manage-03-limits-editor");
-  await limits.getByRole("button", { name: "Save", exact: true }).click();
-  expect(state.autoReloadWrites[1]).toMatchObject({ maxSingleReloadCents: 500_000, paymentHoldTimeoutMinutes: 1440, minimumBalanceCents: 100_000 });
-  await expect(plan.getByTestId("wallet-plan-limits")).toContainText("Single top-up limit $5,000 · hold time 24 hours");
+  // The hold time is CardShellz's setting: shown from the served warning window, never chosen here.
+  await expect(plan.getByTestId("wallet-plan-limits")).toContainText("24 hours — set by CardShellz for every wallet.");
+  await expect(plan.getByTestId("wallet-plan-limits")).toContainText("for orders held from now on");
+  await expect(plan.getByTestId("wallet-plan-limits")).toContainText("We email you 2 hours before.");
+  await expect(plan.getByTestId("wallet-plan-limits").getByRole("button", { name: "Change" })).toHaveCount(0);
+
+  // A top-up amount of its own: bigger, fewer pulls, and the bound follows it.
+  await plan.getByTestId("wallet-plan-floor").getByRole("button", { name: "Change" }).click();
+  await page.getByTestId("wallet-top-up-custom").fill("2500");
+  await expect(plan.getByTestId("wallet-floor-limit-note")).toContainText("Autopay never takes more than $2,500 in one charge (your top-up amount)");
+  await shot(page, "manage-03-top-up-editor");
+  await plan.getByRole("button", { name: "Save", exact: true }).click();
+  expect(state.autoReloadWrites[1]).toMatchObject({ topUpAmountCents: 250_000, minimumBalanceCents: 100_000, paymentHoldTimeoutMinutes: 1440 });
+  expect(state.autoReloadWrites[1]).not.toHaveProperty("maxSingleReloadCents");
+  await expect(plan.getByTestId("wallet-plan-top-up")).toContainText("Top-up amount $2,500 · never more than $2,500 in one charge.");
   finish(state);
 });
 
@@ -558,7 +584,7 @@ test("manage: replacing the backup card is add, designate, then remove the old o
   await expect(oldCard).toContainText("Backup card");
   await expect(oldCard.getByTestId("wallet-method-remove")).toBeDisabled();
   await expect(oldCard).toContainText("This is your backup card — choose another backup card first, then remove this one.");
-  await expect(methods.getByTestId("wallet-method-30")).toContainText("This is your top-up source — choose another source first, then remove this one.");
+  await expect(methods.getByTestId("wallet-method-30")).toContainText("This is your autopay source — choose another source first, then remove this one.");
   await expect(methods).toContainText("To replace a card: add the new one, make it the backup card");
   await shot(page, "manage-04-methods");
 
@@ -568,7 +594,7 @@ test("manage: replacing the backup card is add, designate, then remove the old o
   await expect(page.getByTestId("wallet-funding-return")).toContainText("Card added: Visa ending in 9999.");
   await shot(page, "manage-05-new-card-offer");
   await offer.getByRole("button", { name: "Use as backup card" }).click();
-  expect(state.autoReloadWrites).toEqual([{ enabled: true, fundingMethodId: 30, backstopFundingMethodId: 11, minimumBalanceCents: 25_000, maxSingleReloadCents: 50_000, paymentHoldTimeoutMinutes: 1440, acknowledgedCardFeeBps: 300 }]);
+  expect(state.autoReloadWrites).toEqual([{ enabled: true, fundingMethodId: 30, backstopFundingMethodId: 11, minimumBalanceCents: 25_000, topUpAmountCents: null, paymentHoldTimeoutMinutes: 1440, acknowledgedCardFeeBps: 300 }]);
   await expect(page.getByTestId("wallet-plan-backup-card")).toContainText("Visa ending in 9999");
   await expect(methods.getByTestId("wallet-method-11")).toContainText("Backup card");
   await expect(oldCard.getByTestId("wallet-method-remove")).toBeEnabled();
@@ -611,7 +637,7 @@ test("manage: a server refusal to remove a method in a role renders the exact se
   state.deleteRefusal = "DROPSHIP_FUNDING_METHOD_IS_AUTO_RELOAD_SOURCE";
   await methods.getByTestId("wallet-method-30").getByTestId("wallet-method-remove").click();
   await page.getByRole("alertdialog").getByRole("button", { name: "Remove" }).click();
-  await expect(methods.getByRole("alert")).toHaveText("This is your top-up source. Choose another source first, then remove this one.");
+  await expect(methods.getByRole("alert")).toHaveText("This is your autopay source. Choose another source first, then remove this one.");
   await shot(page, "manage-08-remove-refused");
   state.deleteRefusal = null;
   state.detachOutcome = "pending";
@@ -742,7 +768,7 @@ test("manage: the wallet says what money on its way can already pay for, and why
   finish(state);
 });
 
-test("a paused vendor sees the standing notice above everything with a control behind it, and no way to turn auto-reload off", async ({ page }) => {
+test("a paused vendor sees the standing notice above everything with a control behind it, and no way to turn autopay off", async ({ page }) => {
   const state = await setup(page, { vendorStatus: "paused", vendorStandingReason: "card_declined", methods: [CARD, BANK], autoReload: doneAutoReload(), proofs: ALL_PROOFS });
   const notice = page.getByTestId("wallet-vendor-standing-notice");
   await expect(notice).toContainText("Selling is paused");
@@ -774,7 +800,7 @@ test("a vendor whose wallet already holds a card still starts at step 1, with no
 
   await intro.getByRole("button", { name: "Set up my wallet" }).click();
   const source = page.getByTestId("wallet-step-source");
-  await expect(source.getByRole("heading", { name: "Choose your top-up source" })).toBeVisible();
+  await expect(source.getByRole("heading", { name: "Choose your autopay source" })).toBeVisible();
   // The saved card is preselected and said to be exactly that — no half-finished setup is claimed.
   await expect(source.getByTestId("wallet-source-preselection"))
     .toHaveText("Amex ending in 6800 is already saved on your wallet, so we picked it — choose a bank account instead if you would rather.");
@@ -805,7 +831,7 @@ test("the step list walks back and forward without losing a choice, and manage k
   // Step 2 revisited shows the saved bank account, still chosen.
   await clickStep(page, "source");
   const source = page.getByTestId("wallet-step-source");
-  await expect(source.getByRole("heading", { name: "Choose your top-up source" })).toBeVisible();
+  await expect(source.getByRole("heading", { name: "Choose your autopay source" })).toBeVisible();
   await expect(radio(page, "Top up from", "Bank account")).toHaveAttribute("aria-checked", "true");
   await expect(source).toContainText("Chase ending in 1234 · checking");
   await expect(stepLink(page, "source")).toHaveAttribute("aria-current", "step");
@@ -826,7 +852,7 @@ test("the step list walks back and forward without losing a choice, and manage k
   await clickStep(page, "intro");
   const intro = page.getByTestId("wallet-step-intro");
   await expect(intro.getByRole("heading", { name: "How your wallet works" })).toBeVisible();
-  await expect(intro).toContainText("Money that has landed pays for orders first;");
+  await expect(intro).toContainText("Money that has landed pays for orders first.");
   await expect(intro.getByTestId("wallet-intro-verification-note")).toContainText("(a 6-digit code by email)");
   await expect(intro.getByRole("button", { name: "Set up my wallet" })).toHaveCount(0);
   await expectNoHorizontalScroll(page);
@@ -837,7 +863,7 @@ test("the step list walks back and forward without losing a choice, and manage k
   // The plain Back control walks one step at a time, and Continue returns from there too.
   await backup.getByRole("button", { name: "Back", exact: true }).click();
   const floor = page.getByTestId("wallet-step-floor");
-  await expect(floor.getByRole("heading", { name: "Set your floor" })).toBeVisible();
+  await expect(floor.getByRole("heading", { name: "Set your minimum" })).toBeVisible();
   await expect(radio(page, "Keep my balance at", "$250")).toHaveAttribute("aria-checked", "true");
   await shot(page, "nav-03-floor-revisited");
   await floor.getByRole("button", { name: "Continue" }).click();
@@ -848,8 +874,8 @@ test("the step list walks back and forward without losing a choice, and manage k
   const review = page.getByTestId("wallet-step-review");
   await expect(review.getByTestId("wallet-review-summary")).toContainText("Chase ending in 1234 (bank account, no fee)");
   await expect(review.getByTestId("wallet-review-summary")).toContainText("$250 — about 12 days at $20 a day");
-  await review.getByRole("button", { name: "Agree and turn on auto-reload" }).click();
-  expect(state.autoReloadWrites).toEqual([{ enabled: true, fundingMethodId: 30, backstopFundingMethodId: 10, minimumBalanceCents: 25_000, maxSingleReloadCents: 50_000, paymentHoldTimeoutMinutes: 1440, acknowledgedCardFeeBps: 300 }]);
+  await review.getByRole("button", { name: "Agree and turn on autopay" }).click();
+  expect(state.autoReloadWrites).toEqual([{ enabled: true, fundingMethodId: 30, backstopFundingMethodId: 10, minimumBalanceCents: 25_000, topUpAmountCents: null, paymentHoldTimeoutMinutes: 1440, acknowledgedCardFeeBps: 300 }]);
   // At step 6 the plan belongs to the server: the review is still readable, the
   // earlier steps are not offered, and the review's Change controls go with them.
   const deposit = page.getByTestId("wallet-step-deposit");
@@ -867,12 +893,12 @@ test("the step list walks back and forward without losing a choice, and manage k
 
   // Past setup the rules are still one click away, collapsed until asked for.
   const how = page.getByTestId("wallet-how-it-works");
-  await expect(how).not.toContainText("Money that has landed pays for orders first;");
+  await expect(how).not.toContainText("Money that has landed pays for orders first.");
   await how.getByRole("button").click();
-  await expect(how).toContainText("Money that has landed pays for orders first;");
-  // One source: the manage view renders the same lede and the same five topics as step 1.
-  await expect(how.getByTestId("wallet-how-it-works-lede")).toContainText("Your wallet is how Card Shellz gets paid for the orders you sell.");
-  await expect(how.getByTestId("wallet-how-it-works-rules").getByRole("listitem")).toHaveCount(5);
+  await expect(how).toContainText("Money that has landed pays for orders first.");
+  // One source: the manage view renders the same lede and the same six topics as step 1.
+  await expect(how.getByTestId("wallet-how-it-works-lede")).toContainText("Your wallet is the deposit Card Shellz draws on for the orders you sell.");
+  await expect(how.getByTestId("wallet-how-it-works-rules").getByRole("listitem")).toHaveCount(6);
   await expect(how.getByTestId("wallet-intro-verification-note")).toBeVisible();
   await expectNoHorizontalScroll(page);
   await shot(page, "nav-04-how-it-works");
@@ -883,12 +909,12 @@ test("a PUT refusal with a step recovery moves the flow back to that step with t
   await seedDraft(page, { sourceRail: "stripe_ach", sourceMethodId: 30, floorCents: 25_000, backupMethodId: 10 });
   const state = await setup(page, { methods: [CARD, BANK], proofs: ALL_PROOFS, putRefusalOnce: { status: 409, code: "DROPSHIP_BACKUP_CARD_EXPIRED", context: { expMonth: 1, expYear: 2026 } } });
   const review = page.getByTestId("wallet-step-review");
-  await review.getByRole("button", { name: "Agree and turn on auto-reload" }).click();
+  await review.getByRole("button", { name: "Agree and turn on autopay" }).click();
   const backup = page.getByTestId("wallet-step-backup");
   await expect(backup.getByRole("alert")).toHaveText("That card has expired. Add a current card.");
   await shot(page, "04b-put-refusal");
   await backup.getByRole("button", { name: "Continue" }).click();
-  await page.getByTestId("wallet-step-review").getByRole("button", { name: "Agree and turn on auto-reload" }).click();
+  await page.getByTestId("wallet-step-review").getByRole("button", { name: "Agree and turn on autopay" }).click();
   await expect(page.getByTestId("wallet-step-deposit")).toBeVisible();
   expect(state.autoReloadWrites).toHaveLength(2);
   finish(state);

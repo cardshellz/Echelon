@@ -542,15 +542,29 @@ describe("DropshipWalletService", () => {
       context: expect.objectContaining({ floorCents: 10000 }),
     });
 
-    // A standing card mandate is always bounded: an unbounded reload is refused.
+    // A top-up amount below the policy's smallest top-up would make every refill a nuisance pull.
     await expect(service.configureAutoReload({
       vendorId: 10,
       fundingMethodId: 99,
       enabled: true,
       minimumBalanceCents: 10000,
-      maxSingleReloadCents: null,
+      topUpAmountCents: 5000,
       paymentHoldTimeoutMinutes: 2880,
-    })).rejects.toMatchObject({ code: "DROPSHIP_AUTO_RELOAD_AMOUNT_REQUIRED" });
+    })).rejects.toMatchObject({
+      code: "DROPSHIP_AUTO_RELOAD_TOP_UP_BELOW_MINIMUM",
+      context: expect.objectContaining({ topUpAmountCents: 5000, floorCents: 10000 }),
+    });
+
+    // An older client's own bound must cover the top-up amount as well as the minimum.
+    await expect(service.configureAutoReload({
+      vendorId: 10,
+      fundingMethodId: 99,
+      enabled: true,
+      minimumBalanceCents: 10000,
+      topUpAmountCents: 30000,
+      maxSingleReloadCents: 20000,
+      paymentHoldTimeoutMinutes: 2880,
+    })).rejects.toMatchObject({ code: "DROPSHIP_AUTO_RELOAD_INVALID_LIMITS" });
 
     await expect(service.configureAutoReload({
       vendorId: 10,
@@ -644,6 +658,36 @@ describe("DropshipWalletService", () => {
     expect(logs.at(-1)).toMatchObject({ code: "DROPSHIP_AUTO_RELOAD_CONFIGURED" });
   });
 
+  it("keeps one number for the vendor: the bound is derived from the minimum and the top-up amount when the client sends none (funding design phase 5)", async () => {
+    const derived = await service.configureAutoReload({
+      vendorId: 10, fundingMethodId: 99, enabled: true, minimumBalanceCents: 10000, paymentHoldTimeoutMinutes: 2880,
+    });
+    expect(derived).toMatchObject({ minimumBalanceCents: 10000, topUpAmountCents: null, maxSingleReloadCents: 10000 });
+    expect(repository.lastConfigureInput).toMatchObject({ topUpAmountCents: null, maxSingleReloadCents: 10000 });
+
+    // An explicit null bound derives too: the bound is the server's, never unbounded.
+    const bigger = await service.configureAutoReload({
+      vendorId: 10, fundingMethodId: 99, enabled: true, minimumBalanceCents: 10000, topUpAmountCents: 25000, maxSingleReloadCents: null, paymentHoldTimeoutMinutes: 2880,
+    });
+    expect(bigger).toMatchObject({ topUpAmountCents: 25000, maxSingleReloadCents: 25000 });
+
+    // An older client's own bound is kept as long as it covers both amounts.
+    const explicit = await service.configureAutoReload({
+      vendorId: 10, fundingMethodId: 99, enabled: true, minimumBalanceCents: 10000, topUpAmountCents: 15000, maxSingleReloadCents: 40000, paymentHoldTimeoutMinutes: 2880,
+    });
+    expect(explicit).toMatchObject({ topUpAmountCents: 15000, maxSingleReloadCents: 40000 });
+    expect(logs.at(-1)).toMatchObject({
+      code: "DROPSHIP_AUTO_RELOAD_CONFIGURED",
+      context: expect.objectContaining({ topUpAmountCents: 15000, maxSingleReloadCents: 40000 }),
+    });
+
+    // Off, with nothing sent: nothing is derived for a mandate that is not in force.
+    const off = await service.configureAutoReload({
+      vendorId: 10, fundingMethodId: 99, enabled: false, minimumBalanceCents: 10000, paymentHoldTimeoutMinutes: 2880,
+    });
+    expect(off).toMatchObject({ enabled: false, topUpAmountCents: null, maxSingleReloadCents: null });
+  });
+
   it("rejects non-Stripe funding methods for enabled auto-reload", async () => {
     repository.fundingMethods.push(makeFundingMethod({
       fundingMethodId: 101,
@@ -722,9 +766,44 @@ describe("DropshipWalletService", () => {
     expect(covered).toMatchObject({ outcome: "skipped", skipReason: "balance_already_sufficient" });
     expect(fundingProvider.paymentIntentInputs).toHaveLength(0);
 
+    // Under the minimum by 1,500: the refill pulls the top-up amount (the minimum, 5,000, by default), not the gap.
     repository.account = { ...repository.account, pendingBalanceCents: 2500 };
     const topped = await service.handleAutoReload({ vendorId: 10, reason: "minimum_balance", idempotencyKey: "routine-pending-2" });
-    expect(topped).toMatchObject({ outcome: "funding_created", amountCents: 1500, fundingStatus: "pending" });
+    expect(topped).toMatchObject({ outcome: "funding_created", amountCents: 5000, fundingStatus: "pending" });
+  });
+
+  it("pulls the top-up amount on a routine refill, or the whole shortfall when that is more, never past the bound (funding design phase 5)", async () => {
+    // Default: the minimum itself, even for a small dip, so refills are few.
+    repository.autoReload = makeAutoReloadSetting({ fundingMethodId: 100, minimumBalanceCents: 10000, maxSingleReloadCents: 10000 });
+    repository.account = { ...repository.account, availableBalanceCents: 9500 };
+    expect(await service.handleAutoReload({ vendorId: 10, reason: "minimum_balance", idempotencyKey: "refill-1" }))
+      .toMatchObject({ outcome: "funding_created", amountCents: 10000, fundingStatus: "pending" });
+    expect(logs.at(-1)).toMatchObject({
+      code: "DROPSHIP_AUTO_RELOAD_FUNDING_CREATED",
+      context: expect.objectContaining({ refillShortfallCents: 500, refillPartial: false }),
+    });
+
+    // The top-up amount the vendor chose.
+    repository.autoReload = makeAutoReloadSetting({ fundingMethodId: 100, minimumBalanceCents: 10000, topUpAmountCents: 25000, maxSingleReloadCents: 25000 });
+    repository.account = { ...repository.account, availableBalanceCents: 9500, pendingBalanceCents: 0 };
+    expect(await service.handleAutoReload({ vendorId: 10, reason: "minimum_balance", idempotencyKey: "refill-2" }))
+      .toMatchObject({ outcome: "funding_created", amountCents: 25000 });
+
+    // A shortfall bigger than the top-up amount: the whole shortfall, within the bound.
+    repository.autoReload = makeAutoReloadSetting({ fundingMethodId: 100, minimumBalanceCents: 10000, topUpAmountCents: 15000, maxSingleReloadCents: 20000 });
+    repository.account = { ...repository.account, availableBalanceCents: -8000, pendingBalanceCents: 0 };
+    expect(await service.handleAutoReload({ vendorId: 10, reason: "minimum_balance", idempotencyKey: "refill-3" }))
+      .toMatchObject({ outcome: "funding_created", amountCents: 18000 });
+
+    // Past the bound: a bounded partial pull, logged as such, never a skip.
+    repository.account = { ...repository.account, availableBalanceCents: -50000, pendingBalanceCents: 0 };
+    expect(await service.handleAutoReload({ vendorId: 10, reason: "minimum_balance", idempotencyKey: "refill-4" }))
+      .toMatchObject({ outcome: "funding_created", amountCents: 20000 });
+    expect(logs.at(-1)).toMatchObject({
+      code: "DROPSHIP_AUTO_RELOAD_FUNDING_CREATED",
+      context: expect.objectContaining({ refillShortfallCents: 60000, refillPartial: true }),
+    });
+    expect(fundingProvider.paymentIntentInputs.map((input) => input.amountCents)).toEqual([10000, 25000, 18000, 20000]);
   });
 
   it("charges the card for a held order's whole gap even while an ACH credit is pending", async () => {
@@ -2198,6 +2277,7 @@ class FakeWalletRepository implements DropshipWalletRepository {
       enabled: input.enabled,
       minimumBalanceCents: input.minimumBalanceCents,
       maxSingleReloadCents: input.maxSingleReloadCents,
+      topUpAmountCents: input.topUpAmountCents,
       paymentHoldTimeoutMinutes: input.paymentHoldTimeoutMinutes,
       createdAt: this.autoReload?.createdAt ?? input.updatedAt,
       updatedAt: input.updatedAt,
@@ -2381,6 +2461,7 @@ function makeAutoReloadSetting(
     enabled: true,
     minimumBalanceCents: 10000,
     maxSingleReloadCents: 25000,
+    topUpAmountCents: null,
     paymentHoldTimeoutMinutes: 2880,
     createdAt: now,
     updatedAt: now,

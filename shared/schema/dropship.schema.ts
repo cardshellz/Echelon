@@ -1586,6 +1586,8 @@ export const dropshipAutoReloadSettings = dropshipSchema.table(
       .notNull()
       .default(5000),
     maxSingleReloadCents: bigint("max_single_reload_cents", { mode: "number" }),
+    // What each automatic refill pulls; null pulls the minimum (migration 0690).
+    topUpAmountCents: bigint("top_up_amount_cents", { mode: "number" }),
     paymentHoldTimeoutMinutes: integer("payment_hold_timeout_minutes")
       .notNull()
       .default(DROPSHIP_DEFAULT_PAYMENT_HOLD_TIMEOUT_MINUTES),
@@ -1609,6 +1611,10 @@ export const dropshipAutoReloadSettings = dropshipSchema.table(
     check(
       "dropship_auto_reload_timeout_chk",
       sql`${table.paymentHoldTimeoutMinutes} > 0`,
+    ),
+    check(
+      "dropship_auto_reload_top_up_chk",
+      sql`${table.topUpAmountCents} IS NULL OR ${table.topUpAmountCents} > 0`,
     ),
   ],
 );

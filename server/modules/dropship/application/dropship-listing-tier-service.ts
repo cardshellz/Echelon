@@ -503,8 +503,8 @@ function heldMessage(status: DropshipListingTierStatus, funding: DropshipVendorL
     return `Your wallet has ${counted}${pending}. Case listings need ${minimum}; add ${shortfall} and they go back on sale on their own. Pack and inner pack listings are not affected.`;
   }
   const kept = funding.minimumBalanceCents === null
-    ? "no auto-reload minimum is set"
-    : `your auto-reload minimum is ${formatNotificationCurrency(funding.minimumBalanceCents, funding.currency)}`;
+    ? "no minimum is set"
+    : `your minimum is ${formatNotificationCurrency(funding.minimumBalanceCents, funding.currency)}`;
   return `Card Shellz requires every wallet to keep at least ${minimum} for pack and inner pack listings. Right now ${kept} and your wallet has ${counted}${pending}. Raise your minimum to ${minimum}, or add ${shortfall}, and your listings go back on sale on their own.`;
 }
 
@@ -539,8 +539,8 @@ function graceMessage(
     return `Card Shellz is raising the minimum wallet balance for case listings from ${current} to ${upcoming}. Your wallet has ${counted} today; bring it to ${upcoming} before ${date} to keep your case listings on sale.`;
   }
   const kept = funding.minimumBalanceCents === null
-    ? "no auto-reload minimum is set"
-    : `your auto-reload minimum is ${formatNotificationCurrency(funding.minimumBalanceCents, funding.currency)}`;
+    ? "no minimum is set"
+    : `your minimum is ${formatNotificationCurrency(funding.minimumBalanceCents, funding.currency)}`;
   return `Card Shellz is raising the minimum wallet balance for pack and inner pack listings from ${current} to ${upcoming}. Today ${kept} and your wallet has ${counted}; raise your minimum to ${upcoming} before ${date} to keep those listings on sale.`;
 }
 

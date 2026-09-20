@@ -184,7 +184,9 @@ export function registerDropshipWalletRoutes(
           fundingMethodId: req.body?.fundingMethodId ?? null,
           enabled: req.body?.enabled,
           minimumBalanceCents: req.body?.minimumBalanceCents,
-          maxSingleReloadCents: req.body?.maxSingleReloadCents ?? null,
+          // Left out by clients that keep one number: the service derives the bound.
+          maxSingleReloadCents: req.body?.maxSingleReloadCents,
+          topUpAmountCents: req.body?.topUpAmountCents,
           paymentHoldTimeoutMinutes: req.body?.paymentHoldTimeoutMinutes,
           acknowledgedCardFeeBps: req.body?.acknowledgedCardFeeBps,
         });

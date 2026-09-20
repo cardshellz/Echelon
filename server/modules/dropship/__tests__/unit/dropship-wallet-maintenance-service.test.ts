@@ -253,7 +253,7 @@ describe("DropshipWalletMaintenanceService", () => {
 
     expect(await run()).toMatchObject({ declinedCount: 1 });
     expect(notificationSender.sent).toHaveLength(1);
-    expect(notificationSender.sent[0]).toMatchObject({ title: "Dropship wallet top-up declined" });
+    expect(notificationSender.sent[0]).toMatchObject({ title: "Your wallet is below its minimum: the autopay charge was declined" });
 
     repository.runs = [];
     repository.due = [10];
@@ -287,10 +287,10 @@ describe("DropshipWalletMaintenanceService", () => {
     expect(notificationSender.sent).toHaveLength(1);
     expect(notificationSender.sent[0]).toMatchObject({
       vendorId: 10,
-      eventType: "dropship_auto_reload_failed",
+      eventType: "dropship_wallet_low_balance",
       critical: true,
       channels: ["email", "in_app"],
-      title: "Dropship wallet top-up declined",
+      title: "Your wallet is below its minimum: the autopay charge was declined",
       idempotencyKey: "wallet-maintenance:10:2026-05-01:declined",
       payload: expect.objectContaining({
         source: "wallet_maintenance",
@@ -301,7 +301,7 @@ describe("DropshipWalletMaintenanceService", () => {
       }),
     });
     expect(notificationSender.sent[0].message).toContain("declined (insufficient funds)");
-    expect(notificationSender.sent[0].message).toContain("add funds by ACH");
+    expect(notificationSender.sent[0].message).toContain("add money by bank transfer");
 
     now = new Date("2026-05-01T21:00:00.000Z");
     expect((await run()).scannedCount).toBe(0);
@@ -326,8 +326,8 @@ describe("DropshipWalletMaintenanceService", () => {
       [10, "wallet-maintenance:10:2026-05-01:attention"],
       [11, "wallet-maintenance:11:2026-05-01:attention"],
     ]);
-    expect(notificationSender.sent[0].message).toContain("single-reload limit");
-    expect(notificationSender.sent[1].message).toContain("cannot charge your saved funding method");
+    expect(notificationSender.sent[0].message).toContain("more than autopay may charge in one go");
+    expect(notificationSender.sent[1].message).toContain("cannot charge your saved bank account or card");
     expect(logs.filter((entry) => entry.code === "DROPSHIP_WALLET_MAINTENANCE_NEEDS_VENDOR_ATTENTION")).toHaveLength(2);
   });
 

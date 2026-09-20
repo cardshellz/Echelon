@@ -47,7 +47,7 @@ describe("DropshipPortalWallet contract", () => {
     expect(source).not.toMatch(/[^\w_-](300|120|2880)[^\w_-]/);
     expect(source).not.toMatch(/\d_\d{3}/);
     expect(source).toContain("formatDurationMinutes(");
-    expect(source).toContain("describeLimitDerivation(");
+    expect(source).toContain("chargeBoundCents(");
     expect(source).toContain("formatFeeRate(wallet.cardFundingFeeBps)");
     expect(source).not.toMatch(/\.isDefault/);
   });
@@ -79,7 +79,7 @@ describe("DropshipPortalWallet contract", () => {
     const intro = between("function IntroStep", "function SourcePicker");
     expect(intro).not.toContain("wallet-impact");
     const review = between("function ReviewStep", "function FundingControls");
-    expect(review).toContain("Agree and turn on auto-reload");
+    expect(review).toContain("Agree and turn on autopay");
     expect(review).toContain("disabled={busy || disabled}");
     expect(between("function authorize", "function savePlan")).toContain("buildAuthorizeInput(plan, wallet)");
     expect(source).toContain("data-testid=\"wallet-verification\"");
@@ -136,7 +136,7 @@ describe("DropshipPortalWallet contract", () => {
     expect(rules).toContain("data-testid=\"wallet-how-it-works-rules\"");
     // The intro names the single top-up limit; the review step is where it is explained in full.
     expect(source).not.toContain("step 5 explains it");
-    expect(between("function buildReviewRows", "function ReviewStep")).toContain("\"Single top-up limit\"");
+    expect(between("function buildReviewRows", "function ReviewStep")).toContain("\"Top-up amount\"");
     expect(between("function IntroStep", "function SourcePicker")).toContain("revisited ? \"Back to setup\" : \"Set up my wallet\"");
     const manage = between("function HowItWorksSection", "function PlanRow");
     expect(manage).toContain("data-testid=\"wallet-how-it-works\"");
@@ -161,7 +161,7 @@ describe("DropshipPortalWallet contract", () => {
     expect(indicator).toContain("data-testid=\"wallet-step-indicator\"");
     // Every move through the flow is one of the model's draft transitions; the page never edits the draft's choices itself.
     for (const transition of ["draftAtStep(current, step)", "setDraft(draftAfterIntro)", "draftAfterSourceChoice(current, method, flow.source?.method ?? null)",
-      "draftAfterFloorChoice(current, floorCents, dailyCostCents)", "draftAfterBackupChoice(current, card)", "draftAtStep(current, previous)"]) {
+      "draftAfterFloorChoice(current, floorCents, topUpCents, dailyCostCents)", "draftAfterBackupChoice(current, card)", "draftAtStep(current, previous)"]) {
       expect(source, transition).toContain(transition);
     }
     expect(source).toContain("revisited={flow.furthestStep !== \"intro\"}");

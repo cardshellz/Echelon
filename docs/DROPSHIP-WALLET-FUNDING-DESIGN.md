@@ -81,8 +81,37 @@ applied by the wallet service and repository:
 The card fee charged with a card credit is not the vendor's to lose twice: the
 reversal is bounded by what the wallet received, and the fee is written off.
 
+## Vendor-facing (phase 5)
+
+The vendor keeps one number: the **minimum** (`minimum_balance_cents`,
+"keep $X"), at least the pack tier and at least the case tier to sell cases.
+An optional **top-up amount** (`top_up_amount_cents`, migration 0690; null
+pulls the minimum) says how much each automatic refill pulls, so a vendor
+who wants fewer pulls takes bigger ones. `domain/autopay-refill.ts`:
+
+- refill (after any order debit and at the daily check, while the balance
+  counting pending is under the minimum): pull the top-up amount, or the
+  whole shortfall when that is more, never past the single-charge bound;
+- the bound is the server's, max(minimum, top-up amount), derived when the
+  client sends none (`max_single_reload_cents` keeps it; an older client's
+  own bound is honoured while it covers both amounts). A deep negative is
+  collected over several daily runs, never skipped and never unbounded;
+- the card shortfall charge at acceptance is unchanged: min(back-to-minimum,
+  bound), never less than the gap.
+
+Words on every vendor surface: minimum, top-up amount, autopay, backup card,
+bank account or card. Not floor, auto-reload, single top-up limit. The rules
+page ("How your wallet works") has six topics quoting only served values:
+the two tier minimums, the grace period, the card fee, the advance fee and
+cap, the hold time.
+
+Low-balance alert: the daily wallet run's cannot-top-up outcomes (autopay
+off, no usable bank account or card, a declined charge) are sent as
+`dropship_wallet_low_balance`, once per vendor per day per outcome, in the
+words above. A refill the bound cut short is logged (`refillPartial`) and
+continues on the next run; nothing more is sent, because autopay is still
+working.
+
 ## Remaining phases
 
-5. Vendor-facing — "keep $X" as the one setting, optional top-up amount, new
-   words, rules page rewrite, low-balance alert.
 6. USDC in a Card Shellz wallet — addresses, chain watcher, custody.

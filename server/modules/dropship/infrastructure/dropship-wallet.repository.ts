@@ -70,6 +70,7 @@ interface AutoReloadRow {
   enabled: boolean;
   minimum_balance_cents: string | number;
   max_single_reload_cents: string | number | null;
+  top_up_amount_cents: string | number | null;
   payment_hold_timeout_minutes: number;
   created_at: Date;
   updated_at: Date;
@@ -627,17 +628,20 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository {
       const result = await client.query<AutoReloadRow>(
         `INSERT INTO dropship.dropship_auto_reload_settings
           (vendor_id, funding_method_id, enabled, minimum_balance_cents,
-           max_single_reload_cents, payment_hold_timeout_minutes, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+           max_single_reload_cents, payment_hold_timeout_minutes, created_at, updated_at,
+           top_up_amount_cents)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $7, $8)
          ON CONFLICT (vendor_id) DO UPDATE
            SET funding_method_id = EXCLUDED.funding_method_id,
                enabled = EXCLUDED.enabled,
                minimum_balance_cents = EXCLUDED.minimum_balance_cents,
                max_single_reload_cents = EXCLUDED.max_single_reload_cents,
+               top_up_amount_cents = EXCLUDED.top_up_amount_cents,
                payment_hold_timeout_minutes = EXCLUDED.payment_hold_timeout_minutes,
                updated_at = EXCLUDED.updated_at
          RETURNING id, vendor_id, funding_method_id, enabled, minimum_balance_cents,
-                   max_single_reload_cents, payment_hold_timeout_minutes, created_at, updated_at`,
+                   max_single_reload_cents, top_up_amount_cents, payment_hold_timeout_minutes,
+                   created_at, updated_at`,
         [
           input.vendorId,
           input.fundingMethodId,
@@ -646,6 +650,7 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository {
           input.maxSingleReloadCents,
           input.paymentHoldTimeoutMinutes,
           input.updatedAt,
+          input.topUpAmountCents,
         ],
       );
       const setting = mapAutoReloadRow(requiredRow(
@@ -661,6 +666,7 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository {
           enabled: setting.enabled,
           fundingMethodId: setting.fundingMethodId,
           minimumBalanceCents: setting.minimumBalanceCents,
+          topUpAmountCents: setting.topUpAmountCents,
           maxSingleReloadCents: setting.maxSingleReloadCents,
           paymentHoldTimeoutMinutes: setting.paymentHoldTimeoutMinutes,
           // The fee rate the vendor agreed to is part of the mandate: it is
@@ -2251,7 +2257,8 @@ async function getAutoReloadSettingWithClient(
 ): Promise<DropshipAutoReloadSettingRecord | null> {
   const result = await client.query<AutoReloadRow>(
     `SELECT id, vendor_id, funding_method_id, enabled, minimum_balance_cents,
-            max_single_reload_cents, payment_hold_timeout_minutes, created_at, updated_at
+            max_single_reload_cents, top_up_amount_cents, payment_hold_timeout_minutes,
+            created_at, updated_at
      FROM dropship.dropship_auto_reload_settings
      WHERE vendor_id = $1
      LIMIT 1`,
@@ -2482,6 +2489,9 @@ function mapAutoReloadRow(row: AutoReloadRow): DropshipAutoReloadSettingRecord {
     maxSingleReloadCents: row.max_single_reload_cents === null
       ? null
       : toSafeInteger(row.max_single_reload_cents, "max_single_reload_cents"),
+    topUpAmountCents: row.top_up_amount_cents === null || row.top_up_amount_cents === undefined
+      ? null
+      : toSafeInteger(row.top_up_amount_cents, "top_up_amount_cents"),
     paymentHoldTimeoutMinutes: row.payment_hold_timeout_minutes,
     createdAt: row.created_at,
     updatedAt: row.updated_at,

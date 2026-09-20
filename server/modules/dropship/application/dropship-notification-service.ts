@@ -54,6 +54,7 @@ export const DROPSHIP_LAUNCH_NOTIFICATION_PREFERENCES: DropshipLaunchNotificatio
   { eventType: DROPSHIP_NOTIFICATION_EVENTS.WALLET_FUNDING_FAILED, critical: true },
   { eventType: DROPSHIP_NOTIFICATION_EVENTS.WALLET_FUNDING_REINSTATED, critical: false },
   { eventType: DROPSHIP_NOTIFICATION_EVENTS.WALLET_FUNDING_REVERSED, critical: true },
+  { eventType: DROPSHIP_NOTIFICATION_EVENTS.WALLET_LOW_BALANCE, critical: true },
 ];
 
 const sendDropshipNotificationInputSchema = z.object({

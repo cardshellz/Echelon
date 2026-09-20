@@ -513,23 +513,23 @@ function reloadSentenceFor(reload: DropshipAcceptanceReloadContext | null): stri
     case "failed":
       return ` We could not top up your wallet automatically (${reload.message}); add funds to accept it sooner.`;
     case "skipped":
-      return ` Auto-reload could not top it up: ${skipReasonPhraseFor(reload.reason)}. Add funds or check auto-reload in Wallet.`;
+      return ` Autopay could not top it up: ${skipReasonPhraseFor(reload.reason)}. Add money or check autopay in Wallet.`;
   }
 }
 
 function skipReasonPhraseFor(reason: string): string {
   switch (reason) {
     case "auto_reload_disabled":
-      return "auto-reload is off";
+      return "autopay is off";
     case "amount_exceeds_max_single_reload":
-      return "the amount is over your single-reload limit";
+      return "the amount is more than autopay may charge in one go";
     case "funding_method_required":
     case "funding_method_missing":
-      return "there is no funding method to charge";
+      return "there is no bank account or card to charge";
     case "funding_method_not_active":
     case "funding_method_provider_identity_required":
     case "funding_method_rail_unsupported":
-      return "your saved funding method cannot be charged";
+      return "your saved bank account or card cannot be charged";
     default:
       return reason.replace(/_/g, " ");
   }

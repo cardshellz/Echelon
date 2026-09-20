@@ -60,14 +60,11 @@ import {
   FIRST_FILL_EXAMPLE_FLOORS_CENTS,
   FLOOR_PRESETS_CENTS,
   FLOOR_STEP_CENTS,
-  LIMIT_PRESETS_CENTS,
   activationTopUp,
-  capAfterFloorChange,
   cardExpiryState,
+  chargeBoundCents,
   daysOfCover,
   depositAmountDefault,
-  derivedLimitCents,
-  describeLimitDerivation,
   firstFillFeeCents,
   floorVerdict,
   formatDurationMinutes,
@@ -146,7 +143,7 @@ import { DropshipPortalShell } from "./DropshipPortalShell";
 /**
  * Vendor wallet.
  *
- * Six steps, decision first: how the wallet works, the top-up source, the
+ * Six steps, decision first: how the wallet works, the autopay source, the
  * floor, the backup card, one review-and-authorize click, and an optional
  * first deposit; then a manage view where every choice has a Change control.
  * The page renders what the pure models decide (`deriveWalletFlow`, the
@@ -164,7 +161,7 @@ const SECTION = "mt-5 rounded-md border border-zinc-200 bg-white p-5";
 type WalletSensitiveAction = Extract<DropshipSensitiveAction, "add_funding_method" | "wallet_funding_high_value" | "remove_funding_method">;
 /** Which part of the page an action, its notice and its code prompt belong to. */
 type WalletScope = WalletFlowStep | "banner" | "money" | "plan" | "methods";
-type ManageEditor = "source" | "floor" | "backup" | "limits" | "review" | null;
+type ManageEditor = "source" | "floor" | "backup" | "review" | null;
 
 interface WalletNotice {
   scope: WalletScope;
@@ -186,10 +183,10 @@ interface Feedback {
 
 const STEP_TITLES: Readonly<Record<WalletFlowStep, string>> = {
   intro: "How your wallet works",
-  source: "Choose your top-up source",
-  floor: "Set your floor",
+  source: "Choose your autopay source",
+  floor: "Set your minimum",
   backup: "Your backup card",
-  authorize: "Review and turn on auto-reload",
+  authorize: "Review and turn on autopay",
   deposit: "Add money now (recommended)",
 };
 
@@ -510,7 +507,7 @@ export default function DropshipPortalWallet() {
     return putAutoReload("authorize", body, () => {
       // Step 6 renders only from a pending deposit marker on a bank source.
       setDraft((current) => ({ ...current, deposit: bankSource ? "pending" : null }));
-      setNotice({ scope: "plan", tone: "success", text: "Auto-reload is on." });
+      setNotice({ scope: "plan", tone: "success", text: "Autopay is on." });
     });
   }
 
@@ -527,14 +524,14 @@ export default function DropshipPortalWallet() {
     if (!wallet) return Promise.resolve();
     return putAutoReload("banner", buildConfirmTermsInput(plan, wallet), () => {
       setEditor(null);
-      setNotice({ scope: "plan", tone: "success", text: "Terms confirmed. Auto-reload is on." });
+      setNotice({ scope: "plan", tone: "success", text: "Terms confirmed. Autopay is on." });
     });
   }
 
   function turnOffAutoReload() {
     if (!wallet) return Promise.resolve();
     return putAutoReload("plan", buildAutoReloadDisableInput(wallet), () => {
-      setNotice({ scope: "plan", tone: "success", text: "Auto-reload is off. Nothing is charged automatically." });
+      setNotice({ scope: "plan", tone: "success", text: "Autopay is off. Nothing is charged automatically." });
     });
   }
 
@@ -629,7 +626,7 @@ export default function DropshipPortalWallet() {
                 <span className="mt-3 flex flex-wrap gap-2">
                   <Button type="button" variant="outline" size="sm" className="h-9" onClick={() => setAddMoneyOpen(true)}>Add money</Button>
                   {flow.source?.rail === "stripe_card" ? (
-                    <Button type="button" variant="outline" size="sm" className="h-9" onClick={() => setEditor("source")}>Change top-up source</Button>
+                    <Button type="button" variant="outline" size="sm" className="h-9" onClick={() => setEditor("source")}>Change autopay source</Button>
                   ) : (
                     <Button type="button" variant="outline" size="sm" className="h-9" onClick={() => setEditor("backup")}>Change backup card</Button>
                   )}
@@ -700,11 +697,12 @@ export default function DropshipPortalWallet() {
                 sourceRail={flow.source.rail}
                 sourceLabel={describeFundingMethod(flow.source.method)}
                 initialFloorCents={draft.floorCents ?? recommendedFloorCents(flow.source.rail, draft.dailyCostCents, wallet.limits)}
+                initialTopUpCents={draft.topUpCents}
                 initialDailyCostCents={draft.dailyCostCents}
                 feedback={feedback("floor")}
                 submitLabel="Continue"
                 onBack={backTo(flow.step)}
-                onSubmit={(floorCents, dailyCostCents) => setDraft((current) => draftAfterFloorChoice(current, floorCents, dailyCostCents))}
+                onSubmit={(floorCents, topUpCents, dailyCostCents) => setDraft((current) => draftAfterFloorChoice(current, floorCents, topUpCents, dailyCostCents))}
               />
             )}
             {flow.step === "backup" && (
@@ -735,6 +733,7 @@ export default function DropshipPortalWallet() {
                   fundingMethodId: flow.source!.method.fundingMethodId,
                   backupFundingMethodId: flow.backup!.method.fundingMethodId,
                   floorCents: flow.floorCents,
+                  topUpCents: flow.topUpCents,
                   limitCents: flow.limitCents,
                   holdTimeoutMinutes: flow.holdTimeoutMinutes,
                 })}
@@ -817,6 +816,7 @@ function termsFor(wallet: DropshipWalletView, flow: WalletFlowState): WalletTerm
     sourceLabel: describeFundingMethod(flow.source.method),
     backupLabel: describeFundingMethod(flow.backup.method),
     floorCents: flow.floorCents,
+    topUpCents: flow.topUpCents,
     limitCents: flow.limitCents,
     holdTimeoutMinutes: flow.holdTimeoutMinutes,
     holdExpiryWarningMinutes: wallet.limits.holdExpiryWarningMinutes,
@@ -833,6 +833,7 @@ function termsForPlan(wallet: DropshipWalletView, plan: WalletPlanInput): Wallet
     sourceLabel: describeFundingMethod(source),
     backupLabel: describeFundingMethod(backup),
     floorCents: plan.floorCents,
+    topUpCents: plan.topUpCents,
     limitCents: plan.limitCents,
     holdTimeoutMinutes: plan.holdTimeoutMinutes,
     holdExpiryWarningMinutes: wallet.limits.holdExpiryWarningMinutes,
@@ -972,14 +973,14 @@ function StepIndicator({ wallet, flow, draft, onSelect }: { wallet: DropshipWall
       const days = daysOfCover(flow.floorCents, draft.dailyCostCents);
       detail = `${formatWholeDollars(flow.floorCents)}${days === null ? "" : ` · ≈ ${days} days`}`;
     } else if (step === "backup" && flow.source?.rail === "stripe_card" && state !== "later") {
-      detail = `Backup card · ${describeFundingMethod(flow.source.method)} — the card you top up with is also your backup card. If an order needs more than your balance, the same card pays the shortfall plus ${fee}, up to your single top-up limit.`;
+      detail = `Backup card · ${describeFundingMethod(flow.source.method)} — the card you top up with is also your backup card. If an order needs more than your balance, the same card pays the shortfall plus ${fee}, up to ${formatWholeDollars(flow.limitCents)} in one charge.`;
     } else if (step === "backup" && state === "done" && flow.backup) {
       detail = describeFundingMethodDetailed(flow.backup.method);
     } else if (step === "deposit" && flow.source?.rail === "stripe_card" && flow.backup) {
-      const quote = activationTopUp({ sourceRail: "stripe_card", floorCents: flow.floorCents, limitCents: flow.limitCents, availableCents: wallet.account.availableBalanceCents, pendingCents: wallet.account.pendingBalanceCents, bps: wallet.cardFundingFeeBps });
+      const quote = activationTopUp({ sourceRail: "stripe_card", floorCents: flow.floorCents, topUpCents: flow.topUpCents, availableCents: wallet.account.availableBalanceCents, pendingCents: wallet.account.pendingBalanceCents, bps: wallet.cardFundingFeeBps });
       detail = quote.outcome === "top_up"
-        ? `First top-up · On the first daily check after you activate we charge ${describeFundingMethod(flow.source.method)} ${formatWholeDollars(quote.chargedCents)} (${formatWholeDollars(quote.amountCents)} + ${formatWholeDollars(quote.feeCents)} fee) to bring your balance to your floor. You can add money any time from Wallet.`
-        : "First top-up · Your balance already covers your floor. You can add money any time from Wallet.";
+        ? `First top-up · On the first daily check after you activate we charge ${describeFundingMethod(flow.source.method)} ${formatWholeDollars(quote.chargedCents)} (${formatWholeDollars(quote.amountCents)} + ${formatWholeDollars(quote.feeCents)} fee) to bring your balance back to your minimum. You can add money any time from Wallet.`
+        : "First top-up · Your balance already covers your minimum. You can add money any time from Wallet.";
     }
     return { step, state, detail, reachable: flow.reachableSteps.includes(step) };
   });
@@ -1104,15 +1105,15 @@ function SourcePicker({
     ? [
       ["Fee", "None"],
       ["Speed", `Up to 5 business days to land (our assumption — Stripe gives us no date)`],
-      ["Money parked", "Higher floor recommended, so more of your money sits in the wallet"],
-      ["When an order needs more than your balance", `Your backup card pays the shortfall plus ${fee}, up to your single top-up limit`],
-      ["Best for", "Most sellers: fees stay near zero when the floor keeps up"],
+      ["Money parked", "Higher minimum recommended, so more of your money sits in the wallet"],
+      ["When an order needs more than your balance", `Your backup card pays the shortfall plus ${fee}, up to the larger of your minimum and your top-up amount`],
+      ["Best for", "Most sellers: fees stay near zero when the minimum keeps up"],
     ]
     : [
       ["Fee", `${fee} on every top-up, on top of the amount`],
       ["Speed", "Lands at once"],
-      ["Money parked", `A lower floor is fine, so less of your money sits in the wallet — the first fill to the floor is charged ${fee} once`],
-      ["When an order needs more than your balance", `The same card pays the shortfall plus ${fee}, up to your single top-up limit`],
+      ["Money parked", `A lower minimum is fine, so less of your money sits in the wallet — the first fill to the minimum is charged ${fee} once`],
+      ["When an order needs more than your balance", `The same card pays the shortfall plus ${fee}, up to the larger of your minimum and your top-up amount`],
       ["Best for", "Sellers who would rather park less money and pay the fee"],
     ];
 
@@ -1240,7 +1241,7 @@ function SourceStep({
 
   return (
     <section className={SECTION} data-testid="wallet-step-source">
-      <h2 className="text-lg font-semibold">Choose your top-up source</h2>
+      <h2 className="text-lg font-semibold">Choose your autopay source</h2>
       <p className="mt-1 text-sm text-zinc-500">This is where your routine top-ups come from — the money that pays your orders day to day. You can change it later.</p>
       <div className="mt-4">
         <SourcePicker
@@ -1258,11 +1259,11 @@ function SourceStep({
       {preselection && <p className="mt-3 text-sm text-zinc-600" data-testid="wallet-source-preselection">{preselection}</p>}
       {wallet.usdcBaseDepositAddress && (
         <p className="mt-3 text-sm text-zinc-500" data-testid="wallet-usdc-note">
-          Prefer USDC? It is free too, but manual: you send USDC on Base to Card Shellz's deposit address and a member of our team credits your wallet after confirming the transfer. Because it cannot be pulled automatically, it can never be your top-up source. Use it any time under Add money.
+          Prefer USDC? It is free too, but manual: you send USDC on Base to Card Shellz's deposit address and a member of our team credits your wallet after confirming the transfer. Because it cannot be pulled automatically, it can never be your autopay source. Use it any time under Add money.
         </p>
       )}
       {rail === "stripe_ach" && (
-        <Impact>Routine top-ups are free. While a transfer is landing, orders draw on what has already settled; if an order needs more, your backup card covers the shortfall plus {fee} (up to your single top-up limit). A higher floor in the next step makes that rare.</Impact>
+        <Impact>Routine top-ups are free. While a transfer is landing, orders draw on what has already settled; if an order needs more, your backup card covers the shortfall plus {fee} (up to the larger of your minimum and your top-up amount). A higher minimum in the next step makes that rare.</Impact>
       )}
       {rail === "stripe_card" && (
         <Impact>
@@ -1295,22 +1296,22 @@ function tryParseDollarInputToCents(value: string): number | null {
 }
 
 function FloorStep({
-  wallet, flow, sourceRail, sourceLabel, initialFloorCents, initialDailyCostCents, feedback, submitLabel, onSubmit, onBack, onCancel, currentLimitCents, saveNote,
+  wallet, flow, sourceRail, sourceLabel, initialFloorCents, initialTopUpCents, initialDailyCostCents, feedback, submitLabel, onSubmit, onBack, onCancel, saveNote,
 }: {
   wallet: DropshipWalletView;
   flow: WalletFlowState;
   sourceRail: WalletSourceRail;
   sourceLabel: string;
   initialFloorCents: number;
+  /** The saved top-up amount; null is "the minimum". */
+  initialTopUpCents: number | null;
   initialDailyCostCents: number | null;
   feedback: Feedback;
   submitLabel: string;
-  onSubmit: (floorCents: number, dailyCostCents: number | null) => void;
+  onSubmit: (floorCents: number, topUpCents: number | null, dailyCostCents: number | null) => void;
   /** The flow's Back control; the manage editor passes `onCancel` instead. */
   onBack?: () => void;
   onCancel?: () => void;
-  /** Manage mode: the saved cap, so the editor can say where the limit moves. */
-  currentLimitCents?: number;
   saveNote?: ReactNode;
 }) {
   const limits = wallet.limits;
@@ -1320,20 +1321,24 @@ function FloorStep({
   const [chipClicked, setChipClicked] = useState(false);
   const [customText, setCustomText] = useState("");
   const [customError, setCustomError] = useState("");
+  const [topUpText, setTopUpText] = useState(initialTopUpCents === null ? "" : centsToDollarText(initialTopUpCents));
+  const [topUpError, setTopUpError] = useState("");
   const dailyCents = dailyText.trim() ? tryParseDollarInputToCents(dailyText) : null;
   const dailyInvalid = dailyText.trim() !== "" && dailyCents === null;
   const recommended = dailyCents ? recommendedFloorCents(sourceRail, dailyCents, limits) : null;
-  const chips = presetsIncluding(FLOOR_PRESETS_CENTS, recommended, initialFloorCents).filter((cents) => cents >= limits.autoReloadMinTriggerCents);
+  // The case minimum is always offered: it is the number a vendor who sells cases keeps.
+  const chips = presetsIncluding(FLOOR_PRESETS_CENTS, recommended, initialFloorCents, limits.caseTierMinimumCents).filter((cents) => cents >= limits.autoReloadMinTriggerCents);
   const days = daysOfCover(floorCents, dailyCents);
   const verdict = floorVerdict(sourceRail, days);
-  const limitCents = currentLimitCents === undefined
-    ? derivedLimitCents(floorCents, limits)
-    : capAfterFloorChange(initialFloorCents, floorCents, currentLimitCents, limits);
+  // The top-up amount: blank means the minimum; anything typed has to parse and clear the policy's smallest top-up.
+  const typedTopUp = topUpText.trim() ? tryParseDollarInputToCents(topUpText) : null;
+  const topUpCents = topUpError ? null : typedTopUp;
+  const boundCents = chargeBoundCents(floorCents, topUpCents);
   const holdMinutes = flow.holdTimeoutMinutes;
   const estimate = dailyCents ? monthlyCardFeeEstimate(sourceRail, floorCents, dailyCents, wallet.cardFundingFeeBps) : null;
   const example = shortfallExample({ orderCents: EXAMPLE_SHORTFALL.orderCents, availableCents: EXAMPLE_SHORTFALL.availableCents, bps: wallet.cardFundingFeeBps });
   const exampleCardTopUp = quoteWalletFunding({ rail: "stripe_card", creditCents: EXAMPLE_CARD_TOP_UP_CENTS, cardFeeBps: wallet.cardFundingFeeBps });
-  const activation = activationTopUp({ sourceRail, floorCents, limitCents, availableCents: wallet.account.availableBalanceCents, pendingCents: wallet.account.pendingBalanceCents, bps: wallet.cardFundingFeeBps });
+  const activation = activationTopUp({ sourceRail, floorCents, topUpCents, availableCents: wallet.account.availableBalanceCents, pendingCents: wallet.account.pendingBalanceCents, bps: wallet.cardFundingFeeBps });
 
   function applyDaily(next: string) {
     setDailyText(next);
@@ -1355,21 +1360,32 @@ function FloorStep({
     const cents = tryParseDollarInputToCents(text);
     if (cents === null) { setCustomError("Enter a whole dollar amount like 250."); return; }
     const rounded = roundUpToStep(cents, FLOOR_STEP_CENTS);
-    if (rounded < limits.autoReloadMinTriggerCents) { setCustomError(`The floor must be at least ${formatWholeDollars(limits.autoReloadMinTriggerCents)}.`); return; }
+    if (rounded < limits.autoReloadMinTriggerCents) { setCustomError(`Your minimum must be at least ${formatWholeDollars(limits.autoReloadMinTriggerCents)}.`); return; }
     setChipClicked(true);
     setFloorCents(rounded);
   }
 
-  const valid = floorCents >= limits.autoReloadMinTriggerCents && !customError;
-  const limitMoved = currentLimitCents !== undefined && limitCents !== currentLimitCents;
+  function applyTopUp(text: string) {
+    setTopUpText(text);
+    setTopUpError("");
+    if (!text.trim()) return;
+    const cents = tryParseDollarInputToCents(text);
+    if (cents === null) { setTopUpError("Enter a whole dollar amount like 250, or leave it blank."); return; }
+    if (cents < limits.autoReloadMinAmountCents) { setTopUpError(`The top-up amount must be at least ${formatWholeDollars(limits.autoReloadMinAmountCents)}.`); return; }
+  }
+
+  const valid = floorCents >= limits.autoReloadMinTriggerCents && !customError && !topUpError;
 
   return (
     <section className={SECTION} data-testid="wallet-step-floor">
-      <h2 className="text-lg font-semibold">Set your floor</h2>
+      <h2 className="text-lg font-semibold">Set your minimum</h2>
       <p className="mt-1 text-sm text-zinc-600">
         {sourceRail === "stripe_ach"
-          ? "The floor is the balance we keep your wallet at. With a bank account, a higher floor means orders rarely outrun your settled money, so the backup card is rarely charged. The trade-off: more of your money sits in the wallet."
-          : `With a card, top-ups land at once, so a low floor is fine. The fee is ${fee} of everything you spend whatever floor you choose — a higher floor parks more of your money and costs ${fee} once on the first fill (${formatWholeDollars(firstFillFeeCents(FIRST_FILL_EXAMPLE_FLOORS_CENTS[0], wallet.cardFundingFeeBps))} at ${formatWholeDollars(FIRST_FILL_EXAMPLE_FLOORS_CENTS[0])}, ${formatWholeDollars(firstFillFeeCents(FIRST_FILL_EXAMPLE_FLOORS_CENTS[1], wallet.cardFundingFeeBps))} at ${formatWholeDollars(FIRST_FILL_EXAMPLE_FLOORS_CENTS[1])}).`}
+          ? "Your minimum is the balance autopay keeps your wallet at. With a bank account, a higher minimum means orders rarely outrun your settled money, so the backup card is rarely charged. The trade-off: more of your money sits in the wallet."
+          : `With a card, top-ups land at once, so a low minimum is fine. The fee is ${fee} of everything you spend whatever minimum you choose — a higher minimum parks more of your money and costs ${fee} once on the first fill (${formatWholeDollars(firstFillFeeCents(FIRST_FILL_EXAMPLE_FLOORS_CENTS[0], wallet.cardFundingFeeBps))} at ${formatWholeDollars(FIRST_FILL_EXAMPLE_FLOORS_CENTS[0])}, ${formatWholeDollars(firstFillFeeCents(FIRST_FILL_EXAMPLE_FLOORS_CENTS[1], wallet.cardFundingFeeBps))} at ${formatWholeDollars(FIRST_FILL_EXAMPLE_FLOORS_CENTS[1])}).`}
+      </p>
+      <p className="mt-2 text-sm text-zinc-700" data-testid="wallet-tier-hint">
+        Singles, packs and inner packs need at least {formatWholeDollars(limits.autoReloadMinTriggerCents)}; cases need {formatWholeDollars(limits.caseTierMinimumCents)}. Keep at least the tier you sell.
       </p>
 
       <div className="mt-4 space-y-2">
@@ -1380,14 +1396,14 @@ function FloorStep({
             <RadioChip key={cents} label={formatWholeDollars(cents)} selected={dailyCents === cents} disabled={feedback.busy} onSelect={() => applyDaily(centsToDollarText(cents))} />
           ))}
         </div>
-        <p className="text-xs text-zinc-500">Product cost plus shipping, all orders added up. A guess is fine — you can change the floor any time. This number stays on your device and is never sent to Card Shellz.</p>
+        <p className="text-xs text-zinc-500">Product cost plus shipping, all orders added up. A guess is fine — you can change your minimum any time. This number stays on your device and is never sent to Card Shellz.</p>
         {dailyInvalid && <p role="alert" className="text-sm text-red-700">Enter a dollar amount like 40.00</p>}
       </div>
 
       {recommended !== null && dailyCents !== null && (
         <div className="mt-4 rounded-md border border-zinc-200 bg-zinc-50 p-3 text-sm" data-testid="wallet-floor-recommendation">
           {sourceRail === "stripe_ach"
-            ? `Based on ${formatWholeDollars(dailyCents)} a day, we suggest a floor of ${formatWholeDollars(recommended)}: about ${daysOfCover(recommended, dailyCents)} days of orders — enough for a bank top-up to land, ${BANK_SETTLEMENT_PHRASE_WITH_CALENDAR}, plus a busy weekend.`
+            ? `Based on ${formatWholeDollars(dailyCents)} a day, we suggest a minimum of ${formatWholeDollars(recommended)}: about ${daysOfCover(recommended, dailyCents)} days of orders — enough for a bank top-up to land, ${BANK_SETTLEMENT_PHRASE_WITH_CALENDAR}, plus a busy weekend.`
             : `Based on ${formatWholeDollars(dailyCents)} a day, we suggest ${formatWholeDollars(recommended)}: about ${daysOfCover(recommended, dailyCents) === 1 ? "a day" : `${daysOfCover(recommended, dailyCents)} days`} of orders; top-ups land at once.`}
           {floorCents !== recommended && (
             <Button type="button" variant="outline" size="sm" className="ml-2 h-8" disabled={feedback.busy} onClick={() => chooseChip(recommended)}>Use {formatWholeDollars(recommended)}</Button>
@@ -1401,12 +1417,13 @@ function FloorStep({
           {chips.map((cents) => {
             const isDefault = dailyCents === null && cents === DEFAULT_FLOOR_CENTS_BY_SOURCE[sourceRail];
             const isRecommended = recommended === cents;
+            const isCaseMinimum = cents === limits.caseTierMinimumCents;
             const chipDays = daysOfCover(cents, dailyCents);
             return (
               <RadioChip
                 key={cents}
                 label={isRecommended && !FLOOR_PRESETS_CENTS.includes(cents) ? `Recommended ${formatWholeDollars(cents)}` : formatWholeDollars(cents)}
-                hint={chipDays !== null ? `≈ ${chipDays} days` : isDefault ? "Default" : undefined}
+                hint={chipDays !== null ? `≈ ${chipDays} days` : isDefault ? "Default" : isCaseMinimum ? "Sells cases" : undefined}
                 selected={floorCents === cents && !customText.trim()}
                 disabled={feedback.busy}
                 onSelect={() => chooseChip(cents)}
@@ -1421,26 +1438,33 @@ function FloorStep({
         </div>
       </div>
 
+      <div className="mt-4 max-w-xs space-y-1" data-testid="wallet-top-up-amount">
+        <Label htmlFor="wallet-top-up-custom">Top-up amount (optional)</Label>
+        <Input id="wallet-top-up-custom" data-testid="wallet-top-up-custom" inputMode="numeric" placeholder={`${formatWholeDollars(floorCents)} — your minimum`} value={topUpText} disabled={feedback.busy} onChange={(event) => applyTopUp(event.target.value)} className="h-10" />
+        <p className="text-xs text-zinc-500">What autopay pulls when an order takes your balance below your minimum. Blank tops up by your minimum; a larger amount means fewer, bigger top-ups.</p>
+        {topUpError && <p role="alert" className="text-sm text-red-700">{topUpError}</p>}
+      </div>
+
       <div className="mt-4 space-y-2 rounded-md border border-violet-100 bg-violet-50 p-3 text-sm text-zinc-700" data-testid="wallet-floor-guidance">
         <p role="status" aria-live="polite" data-testid="wallet-impact">
           {sourceRail === "stripe_ach"
             ? `Keeping ${formatWholeDollars(floorCents)} means routine top-ups are free and the backup card is charged only when orders outrun your settled money.`
-            : `Keeping ${formatWholeDollars(floorCents)} means every top-up, whatever its size, costs ${fee}; the floor changes how much of your money sits in the wallet, not the fee.`}
+            : `Keeping ${formatWholeDollars(floorCents)} means every top-up, whatever its size, costs ${fee}; the minimum changes how much of your money sits in the wallet, not the fee.`}
         </p>
         {days !== null && dailyCents !== null && (
           <p data-testid="wallet-guidance-days">
             About {days} days of typical orders at {formatWholeDollars(dailyCents)} a day.{" "}
             <span data-testid="wallet-floor-verdict">
-              {verdict === "keeps_up" && `Keeps up: a bank transfer — ${BANK_SETTLEMENT_PHRASE_WITH_CALENDAR} — lands before the floor runs out, with time to spare.`}
-              {verdict === "tight" && `Tight: a transfer lands about when the floor runs out — no margin for a busy weekend, so some orders may hit your backup card at ${fee}.`}
+              {verdict === "keeps_up" && `Keeps up: a bank transfer — ${BANK_SETTLEMENT_PHRASE_WITH_CALENDAR} — lands before the minimum runs out, with time to spare.`}
+              {verdict === "tight" && `Tight: a transfer lands about when the minimum runs out — no margin for a busy weekend, so some orders may hit your backup card at ${fee}.`}
               {verdict === "may_fall_short" && `May fall short: shorter than a transfer can take, so expect some orders to hit your backup card at ${fee}.`}
               {verdict === "instant" && "Fine with a card: top-ups land at once."}
             </span>
           </p>
         )}
         <p data-testid="wallet-guidance-parked">
-          Routine top-ups keep up to {formatWholeDollars(floorCents)} in the wallet.
-          {sourceRail === "stripe_ach" ? " — plus transfers on the way." : ` The first fill to ${formatWholeDollars(floorCents)} is charged ${fee} once: ${formatWholeDollars(firstFillFeeCents(floorCents, wallet.cardFundingFeeBps))}.`}
+          Autopay keeps at least {formatWholeDollars(floorCents)} in the wallet, topping up by {formatWholeDollars(topUpCents ?? floorCents)} at a time.
+          {sourceRail === "stripe_ach" ? " Transfers on the way count." : ` The first fill to ${formatWholeDollars(floorCents)} is charged ${fee} once: ${formatWholeDollars(firstFillFeeCents(floorCents, wallet.cardFundingFeeBps))}.`}
         </p>
         <p data-testid="wallet-guidance-fee">
           {sourceRail === "stripe_ach"
@@ -1448,26 +1472,22 @@ function FloorStep({
               ? `Estimated card fees: about ${formatWholeDollars(estimate.estimateCents)} a month at ${formatWholeDollars(estimate.monthlySpendCents)} of orders — at most ${fee} of what actually goes on the card, ${formatWholeDollars(estimate.maxCents)} if all ${formatWholeDollars(estimate.monthlySpendCents)} did. The estimate assumes even daily orders and transfers landing in ${BANK_SETTLEMENT_PHRASE_WITH_CALENDAR}.`
               : `Card fees: $0 on routine top-ups. Only a shortfall is charged ${fee} — for example a ${formatWholeDollars(EXAMPLE_SHORTFALL.orderCents)} order with ${formatWholeDollars(EXAMPLE_SHORTFALL.availableCents)} available charges your backup card ${formatWholeDollars(example.shortfallCents)} + ${formatWholeDollars(example.feeCents)}.`
             : estimate
-              ? `Card fees: about ${formatWholeDollars(estimate.estimateCents)} a month at ${formatWholeDollars(estimate.monthlySpendCents)} of orders (${fee} of every top-up) — the same at any floor, plus ${fee} once on the first fill.`
-              : `Card fees: ${fee} of every top-up, whatever floor you choose. For example a ${formatWholeDollars(exampleCardTopUp.creditCents)} top-up charges ${formatWholeDollars(exampleCardTopUp.chargedCents)}.`}
+              ? `Card fees: about ${formatWholeDollars(estimate.estimateCents)} a month at ${formatWholeDollars(estimate.monthlySpendCents)} of orders (${fee} of every top-up) — the same at any minimum, plus ${fee} once on the first fill.`
+              : `Card fees: ${fee} of every top-up, whatever minimum you choose. For example a ${formatWholeDollars(exampleCardTopUp.creditCents)} top-up charges ${formatWholeDollars(exampleCardTopUp.chargedCents)}.`}
         </p>
         <p data-testid="wallet-guidance-activation">
-          {activation.outcome === "top_up" && sourceRail === "stripe_ach" && `On the first daily check after you activate (about midnight UTC): we start a top-up of ${formatWholeDollars(activation.amountCents)} from ${sourceLabel} — free, ${BANK_SETTLEMENT_PHRASE} to land. Until it lands, orders are charged to your backup card at ${fee}. Adding money by card now avoids that.`}
-          {activation.outcome === "top_up" && sourceRail === "stripe_card" && `On the first daily check after you activate (about midnight UTC): we charge ${sourceLabel} ${formatWholeDollars(activation.chargedCents)} (${formatWholeDollars(activation.amountCents)} + ${formatWholeDollars(activation.feeCents)} fee) at once.`}
-          {activation.outcome === "not_needed" && "On the first daily check after you activate: no top-up — your balance already covers your floor."}
-          {activation.outcome === "skipped_over_limit" && `On the first daily check after you activate: the top-up needed (${formatWholeDollars(activation.amountCents)}) is more than your single top-up limit (${formatWholeDollars(activation.limitCents)}), so we do not charge it and email you instead. Add money or raise the limit under Limits.`}
+          {activation.outcome === "top_up" && sourceRail === "stripe_ach" && `On the first daily check after you activate (about midnight UTC): we start a top-up of ${formatWholeDollars(activation.amountCents)} from ${sourceLabel} — free, ${BANK_SETTLEMENT_PHRASE} to land${activation.partial ? "; the most autopay takes in one charge, so the next daily check continues" : ""}. Until it lands, orders are charged to your backup card at ${fee}. Adding money by card now avoids that.`}
+          {activation.outcome === "top_up" && sourceRail === "stripe_card" && `On the first daily check after you activate (about midnight UTC): we charge ${sourceLabel} ${formatWholeDollars(activation.chargedCents)} (${formatWholeDollars(activation.amountCents)} + ${formatWholeDollars(activation.feeCents)} fee) at once${activation.partial ? "; the most autopay takes in one charge, so the next daily check continues" : ""}.`}
+          {activation.outcome === "not_needed" && "On the first daily check after you activate: no top-up — your balance already covers your minimum."}
         </p>
         <p className="text-xs text-zinc-600" data-testid="wallet-floor-limit-note">
-          Single top-up limit: {formatWholeDollars(limitCents)} ({describeLimitDerivation(floorCents, limitCents)}). We never charge more than this in one top-up. An order needing more than your available balance plus this limit waits for you to add money and is cancelled after {formatDurationMinutes(holdMinutes)}; we email you {formatDurationMinutes(limits.holdExpiryWarningMinutes)} before that. Change it later under Limits.
+          Autopay never takes more than {formatWholeDollars(boundCents)} in one charge ({boundCents === floorCents ? "your minimum" : "your top-up amount"}). An order needing more than your available balance plus {formatWholeDollars(boundCents)} waits for you to add money and is cancelled after {formatDurationMinutes(holdMinutes)}; we email you {formatDurationMinutes(limits.holdExpiryWarningMinutes)} before that.
         </p>
       </div>
-      {limitMoved && (
-        <p className="mt-3 text-sm text-zinc-600">Single top-up limit lifted to {formatWholeDollars(limitCents)} ({describeLimitDerivation(floorCents, limitCents)}).</p>
-      )}
       {saveNote}
       <SectionFeedback {...feedback} />
       <div className="mt-5 flex flex-col gap-2 sm:flex-row">
-        <Button type="button" className={BRAND_BUTTON} disabled={feedback.busy || !valid || dailyInvalid} onClick={() => onSubmit(floorCents, dailyCents)}>{submitLabel}</Button>
+        <Button type="button" className={BRAND_BUTTON} disabled={feedback.busy || !valid || dailyInvalid} onClick={() => onSubmit(floorCents, topUpCents, dailyCents)}>{submitLabel}</Button>
         <StepBack busy={feedback.busy} onBack={onBack} />
         {onCancel && <Button type="button" variant="ghost" className="h-10" disabled={feedback.busy} onClick={onCancel}>Cancel</Button>}
       </div>
@@ -1576,10 +1596,10 @@ function BackupStep({
     <section className={SECTION} data-testid="wallet-step-backup">
       <h2 className="text-lg font-semibold">Your backup card</h2>
       <p className="mt-1 text-sm text-zinc-600">
-        Bank transfers take days to land. A card lets an order go out when your balance is short: we charge it the shortfall plus the {fee} fee — never to refill the wallet — and accept the order right away, even while a bank top-up is still landing. It is never used for routine top-ups. Keep your floor high and it may never be used.
+        Bank transfers take days to land. A card lets an order go out when your balance is short: we charge it the shortfall plus the {fee} fee — never to refill the wallet — and accept the order right away, even while a bank top-up is still landing. It is never used for routine top-ups. Keep your minimum high and it may never be used.
       </p>
       <BackupPicker wallet={wallet} now={now} selectedId={selected?.fundingMethodId ?? null} onSelect={setSelectedId} busy={feedback.busy} onAdd={onAdd} confirmation={confirmation} onCheckAgain={onCheckAgain} />
-      <Impact>While your account is active, we only ever charge this card when an order needs more than your available balance, and only for the shortfall plus the {fee} fee — up to your single top-up limit. If a return fee has taken your balance below zero, the shortfall includes that amount. Your bank top-ups stay free.</Impact>
+      <Impact>While your account is active, we only ever charge this card when an order needs more than your available balance, and only for the shortfall plus the {fee} fee — up to the larger of your minimum and your top-up amount. If a return fee has taken your balance below zero, the shortfall includes that amount. Your bank top-ups stay free.</Impact>
       {pendingNotice && <PendingStripeNotice purpose={pendingNotice.purpose} onCheckAgain={onCheckAgain} />}
       {saveNote}
       <SectionFeedback {...feedback} />
@@ -1598,11 +1618,12 @@ function BackupStep({
 
 function buildReviewRows({ wallet, terms, dailyCostCents }: { wallet: DropshipWalletView; terms: WalletTerms; dailyCostCents: number | null }) {
   const days = daysOfCover(terms.floorCents, dailyCostCents);
+  const topUp = terms.topUpCents ?? terms.floorCents;
   const rows: Array<[string, string, ("source" | "floor" | "backup") | null]> = [
-    ["Top-ups from", terms.sourceRail === "stripe_ach" ? `${terms.sourceLabel} (bank account, no fee)` : `${terms.sourceLabel} (card, ${formatFeeRate(terms.cardFundingFeeBps)} fee)`, "source"],
-    ["Floor", `${formatWholeDollars(terms.floorCents)}${days !== null && dailyCostCents !== null ? ` — about ${days} days at ${formatWholeDollars(dailyCostCents)} a day` : ""}`, "floor"],
-    ["Backup card", terms.sourceRail === "stripe_card" ? `${terms.backupLabel} — also your top-up source` : terms.backupLabel, terms.sourceRail === "stripe_card" ? null : "backup"],
-    ["Single top-up limit", `${formatWholeDollars(terms.limitCents)} — ${describeLimitDerivation(terms.floorCents, terms.limitCents)}. Change it later under Limits.`, null],
+    ["Autopay from", terms.sourceRail === "stripe_ach" ? `${terms.sourceLabel} (bank account, no fee)` : `${terms.sourceLabel} (card, ${formatFeeRate(terms.cardFundingFeeBps)} fee)`, "source"],
+    ["Minimum", `${formatWholeDollars(terms.floorCents)}${days !== null && dailyCostCents !== null ? ` — about ${days} days at ${formatWholeDollars(dailyCostCents)} a day` : ""}`, "floor"],
+    ["Backup card", terms.sourceRail === "stripe_card" ? `${terms.backupLabel} — also your autopay source` : terms.backupLabel, terms.sourceRail === "stripe_card" ? null : "backup"],
+    ["Top-up amount", `${formatWholeDollars(topUp)}${topUp === terms.floorCents ? " — your minimum" : ""}. Autopay never takes more than ${formatWholeDollars(terms.limitCents)} in one charge.`, "floor"],
     ["Hold time", `${formatDurationMinutes(terms.holdTimeoutMinutes)} — set by CardShellz for every wallet.`, null],
   ];
   return { rows, mandate: describeMandate(terms) };
@@ -1628,7 +1649,7 @@ function ReviewStep({
   const busy = feedback.busy;
   return (
     <section className={SECTION} data-testid="wallet-step-review">
-      <h2 className="text-lg font-semibold">Review and turn on auto-reload</h2>
+      <h2 className="text-lg font-semibold">Review and turn on autopay</h2>
       <p className="mt-1 text-sm text-zinc-600">This is everything Card Shellz may charge without you present. Read it once; you can change any of it later.</p>
       <dl className="mt-4 divide-y divide-zinc-200 rounded-md border border-zinc-200" data-testid="wallet-review-summary">
         {rows.map(([label, value, step]) => (
@@ -1658,7 +1679,7 @@ function ReviewStep({
       <Impact>From now on we top up on our own as described above. Nothing is charged until you activate your account.</Impact>
       <SectionFeedback {...feedback} />
       <div className="mt-5 flex flex-col gap-2 sm:flex-row">
-        <Button type="button" className={BRAND_BUTTON} disabled={busy || disabled} onClick={onAuthorize}>Agree and turn on auto-reload</Button>
+        <Button type="button" className={BRAND_BUTTON} disabled={busy || disabled} onClick={onAuthorize}>Agree and turn on autopay</Button>
         <StepBack busy={busy} onBack={onBack} />
       </div>
     </section>
@@ -1804,11 +1825,13 @@ function DepositStep({
   const terms = termsFor(wallet, flow);
   if (!terms) return null;
   const fee = formatFeeRate(wallet.cardFundingFeeBps);
+  const first = activationTopUp({ sourceRail: terms.sourceRail, floorCents: terms.floorCents, topUpCents: terms.topUpCents, availableCents: wallet.account.availableBalanceCents, pendingCents: wallet.account.pendingBalanceCents, bps: wallet.cardFundingFeeBps });
+  const firstAmount = formatWholeDollars(first.outcome === "top_up" ? first.amountCents : terms.topUpCents ?? terms.floorCents);
   return (
     <section className={SECTION} data-testid="wallet-step-deposit">
       <h2 className="text-lg font-semibold">Add money now (recommended)</h2>
       <p className="mt-1 text-sm text-zinc-600">
-        Your balance is {formatWholeDollars(wallet.account.availableBalanceCents)}. {describeActivationTopUp(terms)} That first top-up is {formatWholeDollars(terms.floorCents)} from {terms.sourceLabel}, no fee, and it takes {BANK_SETTLEMENT_PHRASE} to land. Until then any order is charged to your backup card {terms.backupLabel} for the shortfall plus {fee}. Money you add by card is available at once; a bank transfer you start now helps once it lands.
+        Your balance is {formatWholeDollars(wallet.account.availableBalanceCents)}. {describeActivationTopUp(terms)} That first top-up is {firstAmount} from {terms.sourceLabel}, no fee, and it takes {BANK_SETTLEMENT_PHRASE} to land. Until then any order is charged to your backup card {terms.backupLabel} for the shortfall plus {fee}. Money you add by card is available at once; a bank transfer you start now helps once it lands.
       </p>
       <FundingControls
         wallet={wallet}
@@ -1820,7 +1843,7 @@ function DepositStep({
         onAddMethod={onAddMethod}
         extraBelowButton={<p className="text-xs text-zinc-500">Adding money is a separate payment, so we may ask you to confirm it is you again.</p>}
       />
-      <Impact>The transfer shows as on the way until your bank settles it and counts toward your floor, so we will not start a second one for the same money. Until it lands, money on its way cannot pay an order.</Impact>
+      <Impact>The transfer shows as on the way until your bank settles it and counts toward your minimum, so we will not start a second one for the same money. Until it lands, money on its way cannot pay an order.</Impact>
       {pendingNotice && <PendingStripeNotice purpose={pendingNotice.purpose} onCheckAgain={onCheckAgain} />}
       <SectionFeedback {...feedback} />
       <div className="mt-3 flex flex-col gap-2 sm:flex-row">
@@ -1873,6 +1896,8 @@ function ManageView({
   const bannerFeedback = feedback("banner");
   const planFeedback = feedback("plan");
   const floorCents = wallet.autoReload?.minimumBalanceCents ?? flow.floorCents;
+  const topUpShown = plan?.topUpCents ?? flow.topUpCents;
+  const boundShown = plan?.limitCents ?? flow.limitCents;
   const belowFloor = stillOnboarding && wallet.account.availableBalanceCents + wallet.account.pendingBalanceCents < floorCents;
 
   const saveNote = (
@@ -1884,7 +1909,7 @@ function ManageView({
 
   /** A plan with one part replaced, saved as a whole row. */
   function savePart(update: (current: WalletPlanInput) => WalletPlanInput, successText?: string) {
-    const base = plan ?? { fundingMethodId: source?.fundingMethodId ?? 0, backupFundingMethodId: backup?.fundingMethodId ?? 0, floorCents: flow.floorCents, limitCents: flow.limitCents, holdTimeoutMinutes: flow.holdTimeoutMinutes };
+    const base = plan ?? { fundingMethodId: source?.fundingMethodId ?? 0, backupFundingMethodId: backup?.fundingMethodId ?? 0, floorCents: flow.floorCents, topUpCents: flow.topUpCents, limitCents: flow.limitCents, holdTimeoutMinutes: flow.holdTimeoutMinutes };
     return onSavePlan(update(base), successText);
   }
 
@@ -1917,7 +1942,7 @@ function ManageView({
             {flow.roleGaps.source && (
               <span className="mt-2 block">
                 {describeRoleGap("source", { holdTimeoutMinutes: flow.holdTimeoutMinutes, holdExpiryWarningMinutes: wallet.limits.holdExpiryWarningMinutes })}
-                <span className="mt-2 block"><Button type="button" variant="outline" size="sm" className="h-9" onClick={() => setEditor("source")}>Change top-up source</Button></span>
+                <span className="mt-2 block"><Button type="button" variant="outline" size="sm" className="h-9" onClick={() => setEditor("source")}>Change autopay source</Button></span>
               </span>
             )}
           </AlertDescription>
@@ -1927,8 +1952,8 @@ function ManageView({
         <Alert className="mt-5 border-emerald-200 bg-emerald-50 text-emerald-900" data-testid="wallet-new-method-offer">
           <CheckCircle2 className="h-4 w-4" />
           <AlertDescription>
-            {describeFundingMethod(newMethodOffer)} added.{newMethodOffer.rail === "stripe_ach" ? " Use it for top-ups?" : ""}
-            {source?.rail === "stripe_card" && newMethodOffer.rail === "stripe_card" && <span className="block text-xs">Using it for top-ups also makes it your backup card.</span>}
+            {describeFundingMethod(newMethodOffer)} added.{newMethodOffer.rail === "stripe_ach" ? " Use it for autopay?" : ""}
+            {source?.rail === "stripe_card" && newMethodOffer.rail === "stripe_card" && <span className="block text-xs">Using it for autopay also makes it your backup card.</span>}
             {ack.feeChangeNote && <span className="block text-xs">{ack.feeChangeNote}</span>}
             <span className="mt-3 flex flex-wrap gap-2">
               {newMethodOffer.rail === "stripe_card" && (
@@ -1936,7 +1961,7 @@ function ManageView({
                   onClick={() => savePart((current) => ({ ...current, backupFundingMethodId: newMethodOffer.fundingMethodId }), "Backup card updated.")}>Use as backup card</Button>
               )}
               <Button type="button" variant="outline" size="sm" className="h-9 bg-white" disabled={planFeedback.busy}
-                onClick={() => savePart((current) => planAfterSourceChange(current, newMethodOffer, current.backupFundingMethodId), "Top-up source updated.")}>Use for top-ups</Button>
+                onClick={() => savePart((current) => planAfterSourceChange(current, newMethodOffer, current.backupFundingMethodId), "Autopay source updated.")}>Use for autopay</Button>
               <Button type="button" variant="ghost" size="sm" className="h-9" disabled={planFeedback.busy} onClick={dismissOffer}>Keep current</Button>
             </span>
           </AlertDescription>
@@ -1966,7 +1991,7 @@ function ManageView({
                 {describeNegativeBalance({ availableCents: wallet.account.availableBalanceCents, advance: wallet.advance, limitCents: flow.limitCents, cardFundingFeeBps: wallet.cardFundingFeeBps })}
               </p>
             )}
-            {flow.authorized && <Badge variant="outline" className="mt-2">Floor {formatWholeDollars(floorCents)}</Badge>}
+            {flow.authorized && <Badge variant="outline" className="mt-2">Minimum {formatWholeDollars(floorCents)}</Badge>}
           </div>
           <Button type="button" variant={addMoneyOpen ? "outline" : "default"} className={addMoneyOpen ? "h-10 w-full sm:w-auto" : BRAND_BUTTON} onClick={() => setAddMoneyOpen(!addMoneyOpen)}>
             {addMoneyOpen ? "Close" : "Add money"}
@@ -2001,19 +2026,22 @@ function ManageView({
         <h2 className="text-lg font-semibold">Your plan</h2>
         {!flow.authorized ? (
           <div className="mt-2">
-            <p className="text-sm text-zinc-600">Auto-reload is off. Nothing is charged automatically; you cannot activate or sell until it is on.</p>
+            <p className="text-sm text-zinc-600">Autopay is off. Nothing is charged automatically; you cannot activate or sell until it is on.</p>
             {editor !== "review" && (
-              <Button type="button" className={`mt-4 ${BRAND_BUTTON}`} disabled={planFeedback.busy || feeMisconfigured} onClick={() => setEditor("review")}>Turn on auto-reload</Button>
+              <Button type="button" className={`mt-4 ${BRAND_BUTTON}`} disabled={planFeedback.busy || feeMisconfigured} onClick={() => setEditor("review")}>Turn on autopay</Button>
             )}
           </div>
         ) : (
           <dl className="mt-3 divide-y divide-zinc-200 rounded-md border border-zinc-200">
-            <PlanRow testId="wallet-plan-source" label="Top-ups from" busy={planFeedback.busy} onChange={editor === "source" ? null : () => setEditor("source")}>
+            <PlanRow testId="wallet-plan-source" label="Autopay from" busy={planFeedback.busy} onChange={editor === "source" ? null : () => setEditor("source")}>
               {source ? `${describeFundingMethod(source)} · ${source.rail === "stripe_ach" ? "bank account · no fee" : `card · ${fee} fee`}` : "Not set"}
             </PlanRow>
-            <PlanRow testId="wallet-plan-floor" label="Floor" busy={planFeedback.busy} onChange={editor === "floor" ? null : () => setEditor("floor")}>
-              {formatWholeDollars(floorCents)} — topped up once a day and after any order that takes it lower.
+            <PlanRow testId="wallet-plan-floor" label="Minimum" busy={planFeedback.busy} onChange={editor === "floor" ? null : () => setEditor("floor")}>
+              {formatWholeDollars(floorCents)} — autopay tops it up after any order that takes it lower, and at the daily check.
               {draft.dailyCostCents !== null && daysOfCover(floorCents, draft.dailyCostCents) !== null && ` ≈ ${daysOfCover(floorCents, draft.dailyCostCents)} days at ${formatWholeDollars(draft.dailyCostCents)} a day.`}
+              <span className="block text-xs text-zinc-500" data-testid="wallet-plan-top-up">
+                Top-up amount {formatWholeDollars(topUpShown ?? floorCents)}{topUpShown === null || topUpShown === floorCents ? " (your minimum)" : ""} · never more than {formatWholeDollars(boundShown)} in one charge.
+              </span>
             </PlanRow>
             <PlanRow testId="wallet-plan-backup-card" label="Backup card" busy={planFeedback.busy} onChange={source?.rail === "stripe_card" || editor === "backup" ? null : () => setEditor("backup")}>
               {backup ? describeFundingMethodDetailed(backup) : "Not set"}
@@ -2025,12 +2053,12 @@ function ManageView({
               <span className="block text-xs text-zinc-500">
                 {source?.rail === "stripe_card"
                   ? "The same card you top up with."
-                  : `Charged only for the shortfall on an order, plus ${fee}, up to your single top-up limit — even while a bank top-up is still landing.`}
+                  : `Charged only for the shortfall on an order, plus ${fee}, up to ${formatWholeDollars(boundShown)} — even while a bank top-up is still landing.`}
                 {backup?.card && cardExpiryState(backup.card, now) === "expired" && " Add a new backup card before it is needed — an expired card is declined at charge time and selling pauses."}
               </span>
             </PlanRow>
-            <PlanRow testId="wallet-plan-limits" label="Limits" busy={planFeedback.busy} onChange={editor === "limits" ? null : () => setEditor("limits")}>
-              Single top-up limit {formatWholeDollars(plan?.limitCents ?? flow.limitCents)} · hold time {formatDurationMinutes(flow.holdTimeoutMinutes)}
+            <PlanRow testId="wallet-plan-limits" label="Hold time" busy={planFeedback.busy} onChange={null}>
+              {formatDurationMinutes(flow.holdTimeoutMinutes)} — set by CardShellz for every wallet. {describeHoldTimeLine(wallet.limits.holdExpiryWarningMinutes)}
             </PlanRow>
             <PlanRow testId="wallet-plan-authorization" label="Authorization" busy={planFeedback.busy} onChange={null}>
               {wallet.autoReload?.acknowledgedAt === null || wallet.autoReload?.acknowledgedCardFeeBps === null
@@ -2039,7 +2067,7 @@ function ManageView({
                   ? `Recorded ${formatDateTime(wallet.autoReload?.acknowledgedAt)} at a ${formatFeeRate(flow.feeChange.recordedBps)} card fee; the card fee is now ${formatFeeRate(flow.feeChange.currentBps)} — confirm the new terms above.`
                   : `Recorded ${formatDateTime(wallet.autoReload?.acknowledgedAt)} at a ${fee} card fee. The terms above are the current terms.`}
             </PlanRow>
-            <PlanRow testId="wallet-plan-auto-reload" label="Auto-reload" busy={planFeedback.busy} onChange={null}>
+            <PlanRow testId="wallet-plan-auto-reload" label="Autopay" busy={planFeedback.busy} onChange={null}>
               On
               {flow.canTurnOffAutoReload && <TurnOffDialog busy={planFeedback.busy} onConfirm={() => void onTurnOff()} />}
             </PlanRow>
@@ -2050,15 +2078,15 @@ function ManageView({
           <div className="mt-4 border-t border-zinc-200 pt-4" data-testid="wallet-source-editor">
             <SourceEditor wallet={wallet} now={now} plan={plan} currentBackup={backup} feedback={planFeedback} saveLabel={ack.saveLabel} saveNote={saveNote}
               onAdd={(rail) => void onAddMethod("plan", rail)} onCancel={() => setEditor(null)}
-              onSave={(next) => savePart(() => next, "Top-up source updated.")} />
+              onSave={(next) => savePart(() => next, "Autopay source updated.")} />
           </div>
         )}
         {editor === "floor" && flow.source && (
           <div className="mt-4 border-t border-zinc-200 pt-4">
             <FloorStep wallet={wallet} flow={flow} sourceRail={flow.source.rail} sourceLabel={describeFundingMethod(flow.source.method)}
-              initialFloorCents={floorCents} initialDailyCostCents={draft.dailyCostCents} feedback={planFeedback} submitLabel={ack.saveLabel}
-              currentLimitCents={plan?.limitCents ?? flow.limitCents} saveNote={saveNote} onCancel={() => setEditor(null)}
-              onSubmit={(newFloor) => savePart((current) => ({ ...current, floorCents: newFloor, limitCents: capAfterFloorChange(current.floorCents, newFloor, current.limitCents, wallet.limits) }), "Floor updated.")} />
+              initialFloorCents={floorCents} initialTopUpCents={topUpShown} initialDailyCostCents={draft.dailyCostCents} feedback={planFeedback} submitLabel={ack.saveLabel}
+              saveNote={saveNote} onCancel={() => setEditor(null)}
+              onSubmit={(newFloor, newTopUp) => savePart((current) => ({ ...current, floorCents: newFloor, topUpCents: newTopUp, limitCents: chargeBoundCents(newFloor, newTopUp) }), "Minimum updated.")} />
           </div>
         )}
         {editor === "backup" && (
@@ -2066,13 +2094,6 @@ function ManageView({
             <BackupStep wallet={wallet} now={now} feedback={planFeedback} confirmation={null} pendingNotice={null} onCheckAgain={onCheckAgain}
               onAdd={() => void onAddMethod("plan", "stripe_card")} initialCardId={backup?.fundingMethodId ?? null} submitLabel={ack.saveLabel} saveNote={saveNote}
               onCancel={() => setEditor(null)} onSubmit={(card) => savePart((current) => ({ ...current, backupFundingMethodId: card.fundingMethodId }), "Backup card updated.")} />
-          </div>
-        )}
-        {editor === "limits" && (
-          <div className="mt-4 border-t border-zinc-200 pt-4">
-            <LimitsEditor wallet={wallet} flow={flow} floorCents={floorCents} initialLimitCents={plan?.limitCents ?? flow.limitCents}
-              feedback={planFeedback} saveLabel={ack.saveLabel} saveNote={saveNote} onCancel={() => setEditor(null)}
-              onSave={(limitCents, holdTimeoutMinutes) => savePart((current) => ({ ...current, limitCents, holdTimeoutMinutes }), "Limits updated.")} />
           </div>
         )}
         {editor === "review" && (
@@ -2193,7 +2214,7 @@ function describeListingTier(tier: WalletListingTierStatus): string {
   const shortfall = formatWholeDollars(tier.shortfallCents);
   return tier.tier === "case"
     ? `Case listings go on sale on their own once your balance reaches the minimum. You are ${shortfall} short.`
-    : `These listings are off sale until your wallet keeps the minimum: raise your auto-reload minimum to it, or add ${shortfall}.`;
+    : `These listings are off sale until your wallet keeps the minimum: raise your minimum to it, or add ${shortfall}.`;
 }
 
 function describeUpcomingListingTier(tier: WalletListingTierStatus): string {
@@ -2243,11 +2264,11 @@ function TurnOffDialog({ busy, onConfirm }: { busy: boolean; onConfirm: () => vo
   const [open, setOpen] = useState(false);
   return (
     <>
-      <Button type="button" variant="outline" size="sm" className="ml-3 h-8" disabled={busy} onClick={() => setOpen(true)} data-testid="wallet-auto-reload-off">Turn off auto-reload</Button>
+      <Button type="button" variant="outline" size="sm" className="ml-3 h-8" disabled={busy} onClick={() => setOpen(true)} data-testid="wallet-auto-reload-off">Turn off autopay</Button>
       <AlertDialog open={open} onOpenChange={setOpen}>
         <AlertDialogContent className="max-w-[calc(100vw-2rem)] sm:max-w-md">
           <AlertDialogHeader>
-            <AlertDialogTitle>Turn off auto-reload?</AlertDialogTitle>
+            <AlertDialogTitle>Turn off autopay?</AlertDialogTitle>
             <AlertDialogDescription>
               Nothing will be charged automatically and your saved methods stay. You cannot activate or sell until it is on again; turning it back on asks you to review and agree to the terms.
             </AlertDialogDescription>
@@ -2285,7 +2306,7 @@ function SourceEditor({
   const next = selected && plan ? planAfterSourceChange(plan, selected, backupId) : null;
   return (
     <div>
-      <h3 className="font-medium">Change your top-up source</h3>
+      <h3 className="font-medium">Change your autopay source</h3>
       <div className="mt-3">
         <SourcePicker wallet={wallet} selectedId={selectedId} initialRail={null} onSelect={(method) => setSelectedId(method?.fundingMethodId ?? null)} busy={feedback.busy} onAdd={onAdd} confirmation={null} onCheckAgain={() => {}} editing />
       </div>
@@ -2302,59 +2323,7 @@ function SourceEditor({
   );
 }
 
-function LimitsEditor({
-  wallet, flow, floorCents, initialLimitCents, feedback, saveLabel, saveNote, onCancel, onSave,
-}: {
-  wallet: DropshipWalletView;
-  flow: WalletFlowState;
-  floorCents: number;
-  initialLimitCents: number;
-  feedback: Feedback;
-  saveLabel: string;
-  saveNote: ReactNode;
-  onCancel: () => void;
-  onSave: (limitCents: number, holdTimeoutMinutes: number) => void;
-}) {
-  const limits: WalletLimits = wallet.limits;
-  const fee = formatFeeRate(wallet.cardFundingFeeBps);
-  const derived = derivedLimitCents(floorCents, limits);
-  const [limitCents, setLimitCents] = useState(initialLimitCents);
-  // The hold is CardShellz's setting for every wallet, not a vendor choice: it
-  // is shown here so the deadline held orders get is never a surprise, and the
-  // policy value is what the save carries.
-  const holdTimeoutMinutes = limits.defaultPaymentHoldTimeoutMinutes;
-  const floorOfChips = Math.max(floorCents, limits.autoReloadMinAmountCents);
-  const chips = presetsIncluding(LIMIT_PRESETS_CENTS, initialLimitCents, derived).filter((cents) => cents >= floorOfChips);
-  return (
-    <div data-testid="wallet-limits-editor">
-      <h3 className="font-medium">Limits</h3>
-      <div role="radiogroup" aria-label="Single top-up limit" className="mt-3 space-y-2">
-        <div className="text-sm font-medium">Single top-up limit</div>
-        <div className="flex flex-wrap gap-2">
-          {chips.map((cents) => (
-            <RadioChip key={cents} label={formatWholeDollars(cents)} hint={cents === derived ? "Use recommended" : undefined} selected={limitCents === cents} disabled={feedback.busy} onSelect={() => setLimitCents(cents)} />
-          ))}
-        </div>
-        <p className="text-sm text-zinc-600">
-          We never charge more than this in one top-up. Nothing is ever charged because of this limit. If an order needs more than your available balance plus this limit, we do not charge the card: the order waits for you to add money and is cancelled after the hold time if still short. A routine top-up is normally at most your floor, so this limit matters mostly for the backup card. If a return fee ever takes your balance below zero, the next backup-card charge includes that shortfall (so it can be more than {fee} of the order), and if the top-up needed exceeds the limit we email you instead of charging.
-        </p>
-      </div>
-      <div className="mt-4 space-y-2" data-testid="wallet-hold-time">
-        <div className="text-sm font-medium">Hold time</div>
-        <p className="text-sm">{formatDurationMinutes(holdTimeoutMinutes)} — set by CardShellz for every wallet.</p>
-        <p className="text-sm text-zinc-600">{describeHoldTimeLine(limits.holdExpiryWarningMinutes)}</p>
-      </div>
-      {saveNote}
-      <SectionFeedback {...feedback} />
-      <div className="mt-4 flex flex-col gap-2 sm:flex-row">
-        <Button type="button" className={BRAND_BUTTON} disabled={feedback.busy || limitCents < flow.floorCents} onClick={() => onSave(limitCents, holdTimeoutMinutes)}>{saveLabel}</Button>
-        <Button type="button" variant="ghost" className="h-10" disabled={feedback.busy} onClick={onCancel}>Cancel</Button>
-      </div>
-    </div>
-  );
-}
-
-/** The §2.5 review inline: Confirm terms for an authorized row, Turn on auto-reload for a disabled one. */
+/** The §2.5 review inline: Confirm terms for an authorized row, Turn on autopay for a disabled one. */
 function ConfirmTermsEditor({
   wallet, flow, draft, plan, feedback, disabled, onCancel, onConfirm,
 }: {
@@ -2368,13 +2337,13 @@ function ConfirmTermsEditor({
   onConfirm: (plan: WalletPlanInput) => void;
 }) {
   const fallbackPlan: WalletPlanInput | null = plan ?? (flow.source && flow.backup
-    ? { fundingMethodId: flow.source.method.fundingMethodId, backupFundingMethodId: flow.backup.method.fundingMethodId, floorCents: flow.floorCents, limitCents: flow.limitCents, holdTimeoutMinutes: flow.holdTimeoutMinutes }
+    ? { fundingMethodId: flow.source.method.fundingMethodId, backupFundingMethodId: flow.backup.method.fundingMethodId, floorCents: flow.floorCents, topUpCents: flow.topUpCents, limitCents: flow.limitCents, holdTimeoutMinutes: flow.holdTimeoutMinutes }
     : null);
   const terms = fallbackPlan ? termsForPlan(wallet, fallbackPlan) : null;
   if (!fallbackPlan || !terms) {
     return (
       <div>
-        <p className="text-sm text-zinc-600">Choose a top-up source and a backup card before turning auto-reload on.</p>
+        <p className="text-sm text-zinc-600">Choose an autopay source and a backup card before turning autopay on.</p>
         <Button type="button" variant="ghost" className="mt-3 h-10" onClick={onCancel}>Cancel</Button>
       </div>
     );
@@ -2383,7 +2352,7 @@ function ConfirmTermsEditor({
   const fee = formatFeeRate(wallet.cardFundingFeeBps);
   return (
     <div data-testid="wallet-step-review">
-      <h3 className="font-medium">{flow.authorized ? "Confirm your auto-reload terms" : "Review and turn on auto-reload"}</h3>
+      <h3 className="font-medium">{flow.authorized ? "Confirm your autopay terms" : "Review and turn on autopay"}</h3>
       <dl className="mt-3 divide-y divide-zinc-200 rounded-md border border-zinc-200" data-testid="wallet-review-summary">
         {rows.map(([label, value]) => (
           <div key={label} className="p-3 text-sm">
@@ -2402,7 +2371,7 @@ function ConfirmTermsEditor({
       <SectionFeedback {...feedback} />
       <div className="mt-4 flex flex-col gap-2 sm:flex-row">
         <Button type="button" className={BRAND_BUTTON} disabled={feedback.busy || disabled} onClick={() => onConfirm(fallbackPlan)}>
-          {flow.authorized ? "Confirm terms" : "Agree and turn on auto-reload"}
+          {flow.authorized ? "Confirm terms" : "Agree and turn on autopay"}
         </Button>
         <Button type="button" variant="ghost" className="h-10" disabled={feedback.busy} onClick={onCancel}>Cancel</Button>
       </div>
@@ -2438,7 +2407,7 @@ function SavedMethods({
                   <div className="min-w-0">
                     <span className="font-medium">{describeFundingMethodDetailed(method)}</span>
                     <span className="ml-2 flex-wrap gap-1 inline-flex">
-                      {method.roles.isAutoReloadSource && <Badge variant="outline">Top-up source</Badge>}
+                      {method.roles.isAutoReloadSource && <Badge variant="outline">Autopay source</Badge>}
                       {method.roles.isBackupCard && <Badge variant="outline">Backup card</Badge>}
                       {method.status === "setup_pending" && <Badge variant="outline">Verifying</Badge>}
                       {method.status === "failed" && <Badge variant="destructive">Failed</Badge>}
@@ -2474,7 +2443,7 @@ function SavedMethods({
         <Button type="button" variant="outline" size="sm" className="h-9 gap-2" disabled={feedback.busy} onClick={() => onAdd("stripe_card")}><CreditCard className="h-4 w-4" />Add a card</Button>
         <Button type="button" variant="outline" size="sm" className="h-9 gap-2" disabled={feedback.busy} onClick={() => onAdd("stripe_ach")}><Landmark className="h-4 w-4" />Add a bank account</Button>
       </div>
-      <p className="mt-3 text-xs text-zinc-500">To replace a card: add the new one, make it the backup card (and your top-up source, if that card was it), then remove the old one.</p>
+      <p className="mt-3 text-xs text-zinc-500">To replace a card: add the new one, make it the backup card (and your autopay source, if that card was it), then remove the old one.</p>
       <SectionFeedback {...feedback} />
       <AlertDialog open={removing !== null} onOpenChange={(open) => { if (!open) setRemoving(null); }}>
         <AlertDialogContent className="max-w-[calc(100vw-2rem)] sm:max-w-md">

@@ -2191,8 +2191,15 @@ export interface DropshipAutoReloadConfigInput {
   /** The designated backup card (spec D4). Ignored by the server until it stores one; the client always sends it. */
   backstopFundingMethodId: number | null;
   enabled: boolean;
+  /** The one number the vendor keeps ("keep $X"): the balance autopay tops back up to. */
   minimumBalanceCents: number;
-  maxSingleReloadCents: number | null;
+  /** What each automatic refill pulls; null pulls the minimum. */
+  topUpAmountCents: number | null;
+  /**
+   * The per-charge bound. Left out, the server derives it as max(minimum,
+   * top-up amount); this client never sends one (funding design phase 5).
+   */
+  maxSingleReloadCents?: number | null;
   paymentHoldTimeoutMinutes: number;
   /** The card fee rate the vendor agreed to; the server refuses a stale one. Null only when disabling. */
   acknowledgedCardFeeBps: number | null;
@@ -4482,6 +4489,8 @@ export function buildAutoReloadConfigInput(input: {
     fundingMethodId,
     backstopFundingMethodId,
     minimumBalanceCents,
+    // This older builder predates the top-up amount: null pulls the minimum.
+    topUpAmountCents: null,
     maxSingleReloadCents,
     paymentHoldTimeoutMinutes,
     acknowledgedCardFeeBps: input.acknowledgedCardFeeBps ?? null,
