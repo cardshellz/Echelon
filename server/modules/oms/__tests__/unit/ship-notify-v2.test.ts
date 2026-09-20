@@ -590,6 +590,8 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
           },
         ],
       },
+      // Preserve the voided tracking in shipment_tracking_history.
+      { rows: [] },
       // UPDATE outbound_shipments → voided
       { rows: [] },
       // recompute: SELECT order
@@ -602,9 +604,11 @@ describe("processShipNotify V2 :: shipment found by shipstation_order_id", () =>
           },
         ],
       },
-      // recompute: SELECT shipments
-      { rows: [{ status: "voided" }] },
-      // recompute: UPDATE order (voided on its own derives to ready_to_ship)
+      // recompute: the physical line remains picked, but has no live package.
+      { rows: [{ order_id: 42, warehouse_status: "shipped", id: 8502,
+        quantity: 1, picked_quantity: 1, requires_shipping: 1, status: "picked",
+        authority_fulfillable_quantity: 1, shipped_quantity: 0 }] },
+      // recompute: UPDATE order; a void cannot retain shipped status.
       { rows: [] },
       // SELECT oms_fulfillment_order_id
       { rows: [{ oms_fulfillment_order_id: "9999" }] },

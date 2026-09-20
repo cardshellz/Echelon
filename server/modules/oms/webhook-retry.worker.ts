@@ -2,6 +2,7 @@ import { webhookRetryQueue } from "@shared/schema";
 import { eq, lte, and, sql } from "drizzle-orm";
 import { incr } from "../../instrumentation/metrics";
 import { createShipmentForOrder } from "../wms/create-shipment";
+import { describeWmsSyncFailure } from "./domain/wms-sync-failure";
 import {
   movePendingShipmentItemsToLateEditResidual,
 } from "../wms/late-order-shipment-coverage";
@@ -431,14 +432,7 @@ export async function enqueueOmsWmsSyncRetry(
     );
   }
 
-  const message =
-    cause instanceof Error
-      ? cause.message
-      : typeof cause === "string"
-        ? cause
-        : cause == null
-          ? ""
-          : String(cause);
+  const message = describeWmsSyncFailure(cause);
 
   if (await hasPendingRetryForScope(dbArg, {
     provider: "internal",
@@ -1019,7 +1013,7 @@ export async function dispatchOmsWmsSyncRetry(
     const { status, attempts, nextRetryAt } = await recordRetryFailure(
       dbArg,
       item,
-      err?.message || String(err),
+      describeWmsSyncFailure(err),
       { topic: "oms_wms_sync", orderId: omsOrderId },
     );
     if (status === "dead") {

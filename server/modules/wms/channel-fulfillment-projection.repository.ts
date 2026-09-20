@@ -1,4 +1,7 @@
 import { sql } from "drizzle-orm";
+import { deriveWmsShippingProgress, type WmsShippingProgressLine } from "@shared/wms-shipping-progress";
+import type { WmsWarehouseStatus } from "@shared/enums/order-status";
+import { shippingProgressLine, wmsShippingProgressQuery, type WmsShippingProgressRow } from "./shipping-progress.query";
 
 export class WmsFulfillmentProjectionError extends Error {
   constructor(
@@ -50,22 +53,49 @@ export async function projectPhysicalShipmentToWms(
     );
   }
 
+  // Acquire each affected order before reading quantity coverage. A lock taken
+  // in the coverage SELECT itself can wait on another projector while retaining
+  // its pre-wait snapshot, then overwrite that projector's completed status.
+  const affected = await transaction.execute(sql`
+    SELECT orders.id AS order_id
+    FROM wms.orders orders
+    WHERE orders.id IN (
+      SELECT order_item.order_id
+      FROM wms.physical_shipment_items physical_item
+      JOIN wms.order_items order_item ON order_item.id = physical_item.wms_order_item_id
+      WHERE physical_item.physical_shipment_id = ${physicalShipmentId}
+        AND physical_item.shipment_item_purpose = 'customer_fulfillment'
+    )
+    ORDER BY orders.id
+    FOR UPDATE OF orders
+  `);
+  const orderIds = affected.rows.map((row: { order_id: number }) => Number(row.order_id));
+
   await transaction.execute(sql`
     WITH affected AS (
       SELECT DISTINCT item.wms_order_item_id
-      FROM wms.effective_physical_shipment_items item
+      FROM wms.physical_shipment_items item
       WHERE item.physical_shipment_id = ${physicalShipmentId}
         AND item.shipment_item_purpose = 'customer_fulfillment'
         AND item.wms_order_item_id IS NOT NULL
-    ), shipped AS (
+    ), shipped_quantities AS (
       SELECT item.wms_order_item_id,
              SUM(item.quantity_shipped)::int AS shipped_quantity
       FROM wms.effective_physical_shipment_items item
       JOIN wms.physical_shipments package ON package.id = item.physical_shipment_id
+      JOIN wms.shipment_request_items request_item ON request_item.id = item.shipment_request_item_id
+      LEFT JOIN wms.outbound_shipment_items legacy_item
+        ON legacy_item.id = COALESCE(item.legacy_wms_shipment_item_id, request_item.legacy_wms_shipment_item_id)
+      LEFT JOIN wms.outbound_shipments legacy_shipment ON legacy_shipment.id = legacy_item.shipment_id
       WHERE item.wms_order_item_id IN (SELECT wms_order_item_id FROM affected)
         AND item.shipment_item_purpose = 'customer_fulfillment'
-        AND package.status = 'shipped'
+        AND package.status IN ('shipped', 'returned')
+        AND COALESCE(legacy_shipment.source, '') NOT LIKE '%_fulfillment_receipt'
       GROUP BY item.wms_order_item_id
+    ), shipped AS (
+      SELECT affected.wms_order_item_id, COALESCE(shipped_quantities.shipped_quantity, 0) AS shipped_quantity
+      FROM affected
+      LEFT JOIN shipped_quantities USING (wms_order_item_id)
     )
     UPDATE wms.order_items order_item
     SET fulfilled_quantity = LEAST(order_item.quantity, shipped.shipped_quantity),
@@ -93,36 +123,28 @@ export async function projectPhysicalShipmentToWms(
         END
     FROM shipped
     WHERE order_item.id = shipped.wms_order_item_id
+      AND order_item.requires_shipping = 1
+      AND order_item.status <> 'cancelled'
   `);
 
-  await transaction.execute(sql`
-    WITH affected_orders AS (
-      SELECT DISTINCT order_item.order_id
-      FROM wms.effective_physical_shipment_items physical_item
-      JOIN wms.order_items order_item ON order_item.id = physical_item.wms_order_item_id
-      WHERE physical_item.physical_shipment_id = ${physicalShipmentId}
-        AND physical_item.shipment_item_purpose = 'customer_fulfillment'
-    ), rollup AS (
-      SELECT
-        order_item.order_id,
-        SUM(order_item.quantity) FILTER (WHERE order_item.requires_shipping = 1)::int AS required_quantity,
-        SUM(order_item.picked_quantity) FILTER (WHERE order_item.requires_shipping = 1)::int AS picked_quantity,
-        SUM(order_item.fulfilled_quantity) FILTER (WHERE order_item.requires_shipping = 1)::int AS fulfilled_quantity
-      FROM wms.order_items order_item
-      WHERE order_item.order_id IN (SELECT order_id FROM affected_orders)
-      GROUP BY order_item.order_id
-    )
-    UPDATE wms.orders wms_order
-    SET picked_count = COALESCE(rollup.picked_quantity, 0),
-        warehouse_status = CASE
-          WHEN COALESCE(rollup.required_quantity, 0) > 0
-           AND COALESCE(rollup.fulfilled_quantity, 0) >= rollup.required_quantity THEN 'shipped'
-          WHEN COALESCE(rollup.fulfilled_quantity, 0) > 0 THEN 'partially_shipped'
-          ELSE wms_order.warehouse_status
-        END,
-        updated_at = NOW()
-    FROM rollup
-    WHERE wms_order.id = rollup.order_id
-      AND wms_order.warehouse_status <> 'cancelled'
-  `);
+  if (orderIds.length === 0) return;
+  const result = await transaction.execute(wmsShippingProgressQuery(orderIds));
+  const orders = new Map<number, { status: WmsWarehouseStatus; lines: WmsShippingProgressLine[] }>();
+  for (const row of result.rows as WmsShippingProgressRow[]) {
+    const orderId = Number(row.order_id);
+    const order: { status: WmsWarehouseStatus; lines: WmsShippingProgressLine[] } =
+      orders.get(orderId) ?? { status: row.warehouse_status as WmsWarehouseStatus, lines: [] };
+    order.lines.push(shippingProgressLine(row));
+    orders.set(orderId, order);
+  }
+  for (const [orderId, order] of orders) {
+    const status = deriveWmsShippingProgress(order.status, order.lines);
+    const pickedCount = order.lines.filter(line => line.requiresShipping)
+      .reduce((sum, line) => sum + line.pickedQuantity, 0);
+    await transaction.execute(sql`
+      UPDATE wms.orders
+      SET picked_count = ${pickedCount}, warehouse_status = ${status}, updated_at = NOW()
+      WHERE id = ${orderId}
+    `);
+  }
 }

@@ -157,33 +157,34 @@ describeDatabase.sequential("channel shipment runtime exact preparation PostgreS
     `);
   }
 
-  it.each(["last pick", "primary location"])("canonical preparation leaves the new source bin NULL despite a %s hint", async (hint) => {
+  it.each(["last pick", "primary location"])("canonical preparation cannot turn a %s hint into shipment evidence", async (hint) => {
     await canonical();
     if (hint === "primary location") await pool.query("DELETE FROM inventory.inventory_transactions");
     const result = await prepare();
     expect((await pool.query("SELECT from_location_id FROM wms.outbound_shipment_items")).rows)
-      .toEqual([{ from_location_id: null }]);
-    expect(result.inventoryItems).toHaveLength(1);
-    expect(result.inventoryItems[0].warehouseLocationId).toBe(hint === "last pick" ? 20 : 25);
+      .toEqual([]);
+    expect(result).toMatchObject({ shippingEvidenceMissing: true, physicalShipmentId: null, inventoryItems: [] });
     expect(statements[1]).toContain("availability_runtime_authority");
     expect(statements[1]).toContain("FOR SHARE");
     expect(statements[2]).toContain("pg_advisory_xact_lock");
   });
 
-  it.each(["last pick", "primary location"])("legacy preparation retains its existing %s source selection", async (hint) => {
+  it.each(["last pick", "primary location"])("legacy preparation cannot turn a %s hint into shipment evidence", async (hint) => {
     if (hint === "primary location") await pool.query("DELETE FROM inventory.inventory_transactions");
-    await prepare();
+    expect(await prepare()).toMatchObject({ shippingEvidenceMissing: true, inventoryItems: [] });
     expect((await pool.query("SELECT from_location_id FROM wms.outbound_shipment_items")).rows)
-      .toEqual([{ from_location_id: hint === "last pick" ? 20 : 25 }]);
+      .toEqual([]);
   });
 
-  it("canonical preparation permits no hint and does not mark a valid variant as missing lineage solely for a NULL bin", async () => {
+  it("retains unmatched physical receipt evidence without inventing a package or source bin", async () => {
     await canonical();
     await pool.query("DELETE FROM inventory.inventory_transactions; DELETE FROM warehouse.product_locations");
     const result = await prepare();
-    expect(result.inventoryItems[0].warehouseLocationId).toBeNull();
+    expect(result).toMatchObject({ shippingEvidenceMissing: true, inventoryItems: [] });
     expect((await pool.query("SELECT requires_review,review_reason FROM wms.outbound_shipments")).rows)
-      .toEqual([{ requires_review: false, review_reason: null }]);
+      .toEqual([]);
+    expect((await pool.query("SELECT channel_order_line_id,wms_order_item_id,legacy_wms_shipment_item_id FROM oms.channel_fulfillment_receipt_items")).rows)
+      .toEqual([{ channel_order_line_id: "line-1", wms_order_item_id: 50, legacy_wms_shipment_item_id: null }]);
   });
 
   it.each(["legacy", "canonical"])("records %s provider fulfillment for a non-inventory line without posting inventory", async (authority) => {
@@ -193,22 +194,13 @@ describeDatabase.sequential("channel shipment runtime exact preparation PostgreS
     const result = await prepare();
 
     expect(result.inventoryItems).toEqual([]);
-    expect((await pool.query(`SELECT item.order_item_id,item.product_variant_id,item.qty,item.from_location_id,
-      shipment.requires_review,shipment.review_reason
-      FROM wms.outbound_shipment_items item
-      JOIN wms.outbound_shipments shipment ON shipment.id=item.shipment_id`)).rows).toEqual([{
-      order_item_id: 50,
-      product_variant_id: 30,
-      qty: 2,
-      from_location_id: null,
-      requires_review: false,
-      review_reason: null,
-    }]);
+    expect(result).toMatchObject({ nonShippingOnly: true, physicalShipmentId: null, legacyWmsShipmentIds: [] });
+    expect((await pool.query("SELECT * FROM wms.outbound_shipment_items")).rows).toEqual([]);
     expect((await pool.query("SELECT channel_order_line_id,wms_order_item_id FROM oms.channel_fulfillment_receipt_items")).rows)
       .toEqual([{ channel_order_line_id: "line-1", wms_order_item_id: 50 }]);
   });
 
-  it("accepts a canonical non-inventory package without inventing inventory source lineage", async () => {
+  it("preserves an old nonshipping package without using it as warehouse authority", async () => {
     await canonical();
     await configureNonInventoryLine();
     await pool.query(`
@@ -222,10 +214,11 @@ describeDatabase.sequential("channel shipment runtime exact preparation PostgreS
 
     const result = await prepare();
 
-    expect(result).toMatchObject({ physicalShipmentId: 701, inventoryItems: [] });
+    expect(result).toMatchObject({ nonShippingOnly: true, physicalShipmentId: null, inventoryItems: [] });
     expect((await pool.query("SELECT * FROM wms.outbound_shipment_items")).rows).toEqual([]);
     expect((await pool.query("SELECT physical_shipment_item_id FROM oms.channel_fulfillment_receipt_items")).rows)
-      .toEqual([{ physical_shipment_item_id: 901 }]);
+      .toEqual([{ physical_shipment_item_id: null }]);
+    expect((await pool.query("SELECT id FROM wms.physical_shipments")).rows).toEqual([{ id: 701 }]);
   });
 
   it("fails closed before package writes when OMS, WMS, and catalog shipping facts conflict", async () => {
@@ -306,7 +299,7 @@ describeDatabase.sequential("channel shipment runtime exact preparation PostgreS
     }]);
   });
 
-  it("reuses source identifiers on preparation replay and never overwrites a persisted source bin", async () => {
+  it("replays unmatched receipt evidence without manufacturing a source or selecting a different bin", async () => {
     await canonical();
     const first = await prepare();
     await pool.query("UPDATE wms.outbound_shipment_items SET from_location_id=20");
@@ -314,7 +307,11 @@ describeDatabase.sequential("channel shipment runtime exact preparation PostgreS
     expect(second.inventoryItems.map((row) => row.legacyWmsShipmentItemId))
       .toEqual(first.inventoryItems.map((row) => row.legacyWmsShipmentItemId));
     expect((await pool.query("SELECT from_location_id FROM wms.outbound_shipment_items")).rows)
-      .toEqual([{ from_location_id: 20 }]);
+      .toEqual([]);
+    expect(first.shippingEvidenceMissing).toBe(true);
+    expect(second.shippingEvidenceMissing).toBe(true);
+    expect((await pool.query("SELECT channel_order_line_id,wms_order_item_id FROM oms.channel_fulfillment_receipt_items")).rows)
+      .toEqual([{ channel_order_line_id: "line-1", wms_order_item_id: 50 }]);
   });
 
   it.each(["missing", "invalid revision"])("fails closed for %s authority before any receipt/source write", async (kind) => {
@@ -327,7 +324,7 @@ describeDatabase.sequential("channel shipment runtime exact preparation PostgreS
     expect(statements).toHaveLength(3); // BEGIN, authority pin, ROLLBACK.
   });
 
-  it("does not silently omit inventory posting for an existing provider package whose physical item lacks an exact source link", async () => {
+  it("retains an old channel-only package for review instead of treating it as shipping authority", async () => {
     await canonical();
     await pool.query(`
       INSERT INTO wms.physical_shipments (id,provider,provider_physical_shipment_id,status)
@@ -337,8 +334,9 @@ describeDatabase.sequential("channel shipment runtime exact preparation PostgreS
         (id,physical_shipment_id,legacy_wms_shipment_item_id,fulfillment_plan_line_id,quantity_shipped,shipment_item_purpose)
         VALUES (901,701,NULL,801,2,'customer_fulfillment');
     `);
-    await expect(prepare()).rejects.toMatchObject({ code: "ECHO_COMMAND_CONFLICT" });
-    expect((await pool.query("SELECT * FROM oms.channel_fulfillment_receipt_items")).rows).toEqual([]);
+    expect(await prepare()).toMatchObject({ shippingEvidenceMissing: true, physicalShipmentId: null, inventoryItems: [] });
+    expect((await pool.query("SELECT physical_shipment_item_id FROM oms.channel_fulfillment_receipt_items")).rows)
+      .toEqual([{ physical_shipment_item_id: null }]);
   });
 
   it("holds the authority pin while waiting for an existing WMS lock so activation cannot overtake preparation", async () => {
@@ -451,32 +449,7 @@ describeDatabase.sequential("provider non-inventory fulfillment cutover acceptan
     };
   }
 
-  async function materializeProviderPackage(sourceShipmentItemId: number) {
-    const client = await pool.connect();
-    let began = false;
-    try {
-      await client.query("BEGIN");
-      began = true;
-      await client.query(`INSERT INTO wms.physical_shipments
-        (id,provider,provider_physical_shipment_id,status,tracking_number)
-        VALUES (701,'shopify','201','shipped',NULL)`);
-      await client.query(`INSERT INTO wms.fulfillment_plan_lines (id,oms_order_line_id)
-        VALUES (801,12)`);
-      await client.query(`INSERT INTO wms.physical_shipment_items
-        (id,physical_shipment_id,legacy_wms_shipment_item_id,fulfillment_plan_line_id,
-         quantity_shipped,shipment_item_purpose,wms_order_item_id,
-         replacement_for_order_item_id,package_allocation_entry_id,product_variant_id,sku)
-        VALUES (901,701,$1,801,2,'customer_fulfillment',50,NULL,NULL,30,'SKU-30')`,
-      [sourceShipmentItemId]);
-      await client.query("COMMIT");
-      began = false;
-    } catch (error) {
-      if (began) await client.query("ROLLBACK");
-      throw error;
-    } finally {
-      client.release();
-    }
-  }
+
 
   it("carries actual non-inventory ingress evidence into read-only no-inventory-demand preflight", async () => {
     const inventoryBeforeIngress = await snapshot(inventoryWriterTables);
@@ -485,21 +458,9 @@ describeDatabase.sequential("provider non-inventory fulfillment cutover acceptan
 
     expect(prepared.inventoryItems).toEqual([]);
     expect(await snapshot(inventoryWriterTables)).toEqual(inventoryBeforeIngress);
-    const sourceRows = (await pool.query<{
-      id: number;
-      order_item_id: number;
-      product_variant_id: number;
-      qty: number;
-      from_location_id: number | null;
-    }>(`SELECT id,order_item_id,product_variant_id,qty,from_location_id
-        FROM wms.outbound_shipment_items ORDER BY id`)).rows;
-    expect(sourceRows).toEqual([expect.objectContaining({
-      order_item_id: 50,
-      product_variant_id: 30,
-      qty: 2,
-      from_location_id: null,
-    })]);
-    await materializeProviderPackage(sourceRows[0]!.id);
+    expect(prepared).toMatchObject({ nonShippingOnly: true, physicalShipmentId: null });
+    expect((await pool.query("SELECT * FROM wms.outbound_shipment_items")).rows).toEqual([]);
+    expect((await pool.query("SELECT * FROM wms.physical_shipments")).rows).toEqual([]);
 
     const beforePreflight = await snapshot(preflightObservedTables);
     const { service, trace, releaseCount } = connectedPreflight();
