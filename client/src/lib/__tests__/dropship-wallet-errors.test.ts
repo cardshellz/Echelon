@@ -51,3 +51,11 @@ describe("describeWalletError", () => {
     for (const code of codes) expect(face(code).text).not.toMatch(/has been notified/);
   });
 });
+
+describe("USDC deposit refusals (funding design phase 6)", () => {
+  it("tells the vendor when deposits are not offered, and sends an assignment fault to support", () => {
+    expect(face("DROPSHIP_USDC_DEPOSITS_NOT_OFFERED", "usdc")).toEqual({ text: "USDC deposits are not available right now.", recovery: "refetch" });
+    expect(face("DROPSHIP_USDC_DEPOSIT_ADDRESS_CONFLICT", "usdc")).toEqual({ text: "We could not assign your deposit address. Contact Card Shellz support if this persists.", recovery: "none" });
+    expect(face("DROPSHIP_USDC_DEPOSIT_ADDRESS_DERIVATION_MISMATCH", "usdc")).toMatchObject({ recovery: "none" });
+  });
+});

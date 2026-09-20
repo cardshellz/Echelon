@@ -202,6 +202,22 @@ export type WalletClientFallback =
   | "listing_tiers_not_served"
   | "advance_not_served";
 
+/**
+ * The vendor's USDC deposit position (funding design phase 6): whether the
+ * rail is offered (a deposit address can be handed out) and watched (deposits
+ * are credited automatically), the timing the watcher enforces, and the
+ * address the vendor was handed, or null until they ask for one.
+ */
+export interface WalletUsdcDeposit {
+  offered: boolean;
+  watched: boolean;
+  chainId: number;
+  tokenAddress: string;
+  minConfirmations: number;
+  settleTag: "safe" | "finalized";
+  address: { address: string; checksumAddress: string; assignedAt: string } | null;
+}
+
 export interface DropshipWalletView {
   account: { availableBalanceCents: number; pendingBalanceCents: number; currency: string; status: string };
   autoReload: WalletAutoReload | null;
@@ -209,6 +225,8 @@ export interface DropshipWalletView {
   recentLedger: WalletLedgerEntry[];
   cardFundingFeeBps: number;
   usdcBaseDepositAddress: string | null;
+  /** The vendor's own USDC deposit position; null when a server one release behind did not serve it. */
+  usdcDeposit: WalletUsdcDeposit | null;
   limits: WalletLimits;
   setupStatus: WalletSetupStatus;
   /** Which listing tiers are on sale, as the server decided; null when a server one release behind did not serve them. */
@@ -227,6 +245,16 @@ export interface DropshipWalletView {
 const isoString = z.string().min(1);
 const signedCents = z.number().int();
 const cents = z.number().int().nonnegative();
+
+const rawUsdcDepositSchema = z.object({
+  offered: z.boolean(),
+  watched: z.boolean(),
+  chainId: z.number().int().positive(),
+  tokenAddress: z.string().min(1),
+  minConfirmations: z.number().int().positive(),
+  settleTag: z.enum(["safe", "finalized"]),
+  address: z.object({ address: z.string().min(1), checksumAddress: z.string().min(1), assignedAt: isoString }).passthrough().nullable(),
+}).passthrough();
 
 const rawCardSchema = z.object({
   brand: z.string(),
@@ -389,6 +417,7 @@ export const rawWalletResponseSchema = z.object({
     recentLedger: z.array(rawLedgerEntrySchema),
     cardFundingFeeBps: z.number().int().nonnegative(),
     usdcBaseDepositAddress: z.string().nullable(),
+    usdcDeposit: rawUsdcDepositSchema.optional(),
     limits: rawLimitsSchema.optional(),
     setupStatus: rawSetupStatusSchema.optional(),
     listingTiers: rawListingTiersSchema.optional(),
@@ -726,6 +755,19 @@ export function adaptWalletView(raw: unknown): DropshipWalletView {
     recentLedger,
     cardFundingFeeBps: wallet.cardFundingFeeBps,
     usdcBaseDepositAddress: wallet.usdcBaseDepositAddress,
+    usdcDeposit: wallet.usdcDeposit
+      ? {
+          offered: wallet.usdcDeposit.offered,
+          watched: wallet.usdcDeposit.watched,
+          chainId: wallet.usdcDeposit.chainId,
+          tokenAddress: wallet.usdcDeposit.tokenAddress,
+          minConfirmations: wallet.usdcDeposit.minConfirmations,
+          settleTag: wallet.usdcDeposit.settleTag,
+          address: wallet.usdcDeposit.address
+            ? { address: wallet.usdcDeposit.address.address, checksumAddress: wallet.usdcDeposit.address.checksumAddress, assignedAt: wallet.usdcDeposit.address.assignedAt }
+            : null,
+        }
+      : null,
     limits,
     setupStatus,
     listingTiers,

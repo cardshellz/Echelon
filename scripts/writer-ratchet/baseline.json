@@ -301,7 +301,13 @@
   "dropship.dropship_store_setup_checks": [
     "modules/dropship"
   ],
+  "dropship.dropship_usdc_deposit_addresses": [
+    "modules/dropship"
+  ],
   "dropship.dropship_usdc_ledger_entries": [
+    "modules/dropship"
+  ],
+  "dropship.dropship_usdc_watcher_cursors": [
     "modules/dropship"
   ],
   "dropship.dropship_vendor_credit_profiles": [

@@ -223,3 +223,21 @@ function servedAdvance() {
     reasons: [],
   };
 }
+
+describe("USDC deposit position (funding design phase 6)", () => {
+  const usdcDeposit = {
+    offered: true, watched: true, chainId: 8453, tokenAddress: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", minConfirmations: 6, settleTag: "safe",
+    address: { address: "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266", checksumAddress: "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266", assignedAt: "2026-09-21T10:00:00.000Z" },
+  };
+
+  it("carries the served position through unchanged, address and all", () => {
+    expect(adaptWalletView(rawWallet({ usdcDeposit })).usdcDeposit).toEqual(usdcDeposit);
+    expect(adaptWalletView(rawWallet({ usdcDeposit: { ...usdcDeposit, address: null } })).usdcDeposit).toEqual({ ...usdcDeposit, address: null });
+  });
+
+  it("is null when an older server does not serve it, and refuses a malformed one", () => {
+    expect(adaptWalletView(rawWallet()).usdcDeposit).toBeNull();
+    expect(() => adaptWalletView(rawWallet({ usdcDeposit: { ...usdcDeposit, settleTag: "latest" } }))).toThrow();
+    expect(() => adaptWalletView(rawWallet({ usdcDeposit: { ...usdcDeposit, minConfirmations: 0 } }))).toThrow();
+  });
+});
