@@ -18,7 +18,9 @@ receivable the daily wallet run collects.
   besides a card. Free. Lands in days; counted as `pending` until it does.
 - **Card** — routine autopay or backstop, at the card fee (3% at launch,
   disclosed when set and on every charge).
-- **USDC** — one-off; phase 6 moves it to a wallet Card Shellz controls.
+- **USDC** — one-off deposits to the vendor's own address in a wallet Card
+  Shellz controls, credited by the chain watcher (phase 6). No fee, and it
+  can never be pulled, so it is never the autopay source.
 
 ## Tiers (phase 1 and 2, merged)
 
@@ -112,6 +114,58 @@ words above. A refill the bound cut short is logged (`refillPartial`) and
 continues on the next run; nothing more is sent, because autopay is still
 working.
 
-## Remaining phases
+## USDC in a Card Shellz wallet (phase 6)
 
-6. USDC in a Card Shellz wallet — addresses, chain watcher, custody.
+No provider and no fee: Card Shellz holds the USDC itself. The operator
+generates a BIP-39 seed offline and puts only the account-level extended
+PUBLIC key (BIP-44 for Ethereum, m/44'/60'/0') in `DROPSHIP_USDC_BASE_XPUB`;
+the spending key never exists on a server (`infrastructure/usdc-hd-address-deriver.ts`
+refuses a private key outright). Migration 0691; the words are in
+`docs/DROPSHIP-USDC-CUSTODY-RUNBOOK.md`.
+
+- **Addresses.** Each vendor gets their own address, 0/i under the account
+  key, the first time they ask (`POST /api/dropship/wallet/usdc/deposit-address`)
+  and the same one forever (`dropship.dropship_usdc_deposit_addresses`: one
+  per vendor per chain, one index per key, one address per chain; index
+  allocation under an advisory lock). Reading the wallet never assigns one.
+- **Watcher** (`application/dropship-usdc-deposit-service.ts`, worker
+  `dropship-usdc-watcher-runner.ts`, every 30 s by default). Before any money
+  is read the node and token are verified: chain id 8453, `decimals() == 6`,
+  `symbol() == "USDC"`. A scan tick reads `Transfer` logs of the USDC contract
+  to every vendor address over the next block range and records each one:
+  the identity is (chain, transaction, log index), so a batched exchange
+  withdrawal credits every vendor in it. A transfer is credited to the
+  **pending** balance once it has `minConfirmations` (6) and **settles**
+  (pending → available) once its block is at or below the network's `safe`
+  head, which is as far as a sequencer reorg can reach; a transfer already at
+  or below the safe head is credited settled at once. Whole cents are the
+  atomic units divided by 10,000, rounded down; the remainder is **dust**,
+  recorded at the address and never credited. A scan stops before any
+  transfer it cannot record, so nothing is credited out of order and a
+  permanent fault stays visible until a human acts.
+- **Settlement tick.** Every pending credit is judged against its receipt:
+  settle at the safe head; re-record one re-included in another block; void
+  one whose receipt is gone once the chain has moved `voidAfterBlocks` (60)
+  past the block it was recorded in (the pending amount leaves the balance
+  through the same path a returned bank transfer uses). A voided credit is
+  never re-credited by automation; if the transfer comes back, a human credits
+  it by hand with the transaction on file.
+- **Custody.** Nothing on the server signs or sends. Sweeping vendor addresses
+  to the treasury is done with the offline key (runbook). The admin custody
+  report (`GET /api/dropship/admin/wallet/usdc/custody`) compares every
+  address's on-chain USDC balance with what the ledger expects there before
+  any sweep and alerts on funds the watcher never credited; it also shows the
+  key fingerprint and the index-0 address the operator verifies against
+  their own wallet once.
+- **Manual credit** stays as the fallback for a transfer the watcher did not
+  see, hardened: the dollar amount must equal the USDC amount in whole cents,
+  the transfer must have gone to the vendor's own address or the shared one,
+  and one transfer of a batch is named by its log index, which dedupes against
+  the watcher.
+- **Vendor words.** The wallet shows the vendor's own address, the timing the
+  watcher enforces (confirmations to show, the safe head to settle) and one
+  warning: only USDC on the Base network; anything else sent there cannot be
+  recovered. The vendor is told when a deposit lands and if one is voided.
+
+All six phases of the funding design are delivered; later work (a USDC
+autopay pull from a self-custody wallet) is not designed here.

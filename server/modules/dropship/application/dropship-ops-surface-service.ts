@@ -899,7 +899,7 @@ export function buildDropshipSystemReadinessChecks(
     buildSplitShipmentHandoffCheck(env),
     buildDogfoodSmokeFreshnessCheck(env),
     buildStripeFundingCheck(env),
-    buildUsdcBaseFundingCheck(),
+    buildUsdcBaseFundingCheck(env),
   ];
 }
 
@@ -1311,13 +1311,44 @@ function buildStripeFundingCheck(env: NodeJS.ProcessEnv): DropshipSystemReadines
   };
 }
 
-function buildUsdcBaseFundingCheck(): DropshipSystemReadinessCheck {
+/**
+ * USDC deposits (funding design phase 6) are optional and never gate launch.
+ * The check reports how far the rail is configured: the watch-only key hands
+ * vendors addresses, the node lets the watcher credit deposits, the worker
+ * flag runs it. The key's index-0 address for the operator's one-time
+ * verification is on the admin custody report, not here.
+ */
+function buildUsdcBaseFundingCheck(env: NodeJS.ProcessEnv): DropshipSystemReadinessCheck {
+  const requiredEnv = ["DROPSHIP_USDC_BASE_XPUB", "DROPSHIP_USDC_BASE_RPC_URL", "DROPSHIP_USDC_WATCHER_ENABLED"];
+  const keyConfigured = Boolean(env.DROPSHIP_USDC_BASE_XPUB?.trim());
+  const nodeConfigured = Boolean(env.DROPSHIP_USDC_BASE_RPC_URL?.trim());
+  const watcherEnabled = env.DROPSHIP_USDC_WATCHER_ENABLED === "true" && env.DROPSHIP_USDC_WATCHER_DISABLED !== "true";
+  const base = { key: "usdc_base_funding", label: "USDC on Base (optional)", requiredEnv };
+  if (!keyConfigured) {
+    return {
+      ...base,
+      status: "not_applicable",
+      message: "USDC deposits are not offered: no account extended public key is configured. Optional; launch readiness is unaffected.",
+    };
+  }
+  if (!nodeConfigured) {
+    return {
+      ...base,
+      status: "warning",
+      message: "Vendors are handed USDC deposit addresses, but no Base node is configured: deposits are not credited automatically and must be credited by staff.",
+    };
+  }
+  if (!watcherEnabled) {
+    return {
+      ...base,
+      status: "warning",
+      message: "The USDC key and node are configured, but the watcher worker is not enabled: deposits are not credited until DROPSHIP_USDC_WATCHER_ENABLED=true.",
+    };
+  }
   return {
-    key: "usdc_base_funding",
-    label: "USDC on Base (optional)",
-    status: "not_applicable",
-    message: "USDC is a planned optional funding rail and does not affect launch readiness. Wallet registration and audited ledger foundations remain available; provider-backed chain verification is not configured.",
-    requiredEnv: [],
+    ...base,
+    status: "ready",
+    message: "USDC deposit addresses are handed out and the chain watcher credits deposits automatically.",
   };
 }
 

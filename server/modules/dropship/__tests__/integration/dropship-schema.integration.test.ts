@@ -45,6 +45,10 @@ const walletTopUpAmountMigrationSql = readFileSync(
   resolve(process.cwd(), "migrations/0690_dropship_wallet_top_up_amount.sql"),
   "utf8",
 );
+const usdcDepositAddressesMigrationSql = readFileSync(
+  resolve(process.cwd(), "migrations/0691_dropship_usdc_deposit_addresses.sql"),
+  "utf8",
+);
 
 function sslConfig(connectionString: string) {
   return /localhost|127\.0\.0\.1/.test(connectionString)
@@ -258,6 +262,7 @@ describeWithDb("Dropship V2 database foundation", () => {
     await client.query(walletAdvanceMigrationSql);
     await client.query(walletFundingReversalMigrationSql);
     await client.query(walletTopUpAmountMigrationSql);
+    await client.query(usdcDepositAddressesMigrationSql);
 
     const channel = await client.query<{ id: number }>(
       `INSERT INTO channels.channels (name, type, provider, status, sync_enabled, sync_mode)
@@ -610,6 +615,163 @@ describeWithDb("Dropship V2 database foundation", () => {
       `UPDATE dropship.dropship_auto_reload_settings SET top_up_amount_cents = NULL WHERE id = $1`,
       [setting.rows[0].id],
     );
+  });
+
+  it("keeps the USDC deposit migration repeatable and gives each vendor one address per chain, each key one index, each chain one address", async () => {
+    await client!.query(usdcDepositAddressesMigrationSql);
+
+    const address = "0x" + "a".repeat(40);
+    const inserted = await client!.query<{ id: number }>(
+      `INSERT INTO dropship.dropship_usdc_deposit_addresses
+        (vendor_id, chain_id, key_fingerprint, derivation_index, address, checksum_address)
+       VALUES ($1, 8453, '3bf95407', 0, $2, $2)
+       RETURNING id`,
+      [vendorAId, address],
+    );
+    expect(inserted.rows[0].id).toBeGreaterThan(0);
+    // A second address for the same vendor on the same chain.
+    await expectDatabaseError(
+      client!,
+      () => client!.query(
+        `INSERT INTO dropship.dropship_usdc_deposit_addresses
+          (vendor_id, chain_id, key_fingerprint, derivation_index, address, checksum_address)
+         VALUES ($1, 8453, '3bf95407', 1, $2, $2)`,
+        [vendorAId, "0x" + "b".repeat(40)],
+      ),
+      "23505",
+    );
+    // The same index under the same key for another vendor.
+    await expectDatabaseError(
+      client!,
+      () => client!.query(
+        `INSERT INTO dropship.dropship_usdc_deposit_addresses
+          (vendor_id, chain_id, key_fingerprint, derivation_index, address, checksum_address)
+         VALUES ($1, 8453, '3bf95407', 0, $2, $2)`,
+        [vendorBId, "0x" + "c".repeat(40)],
+      ),
+      "23505",
+    );
+    // The same address twice.
+    await expectDatabaseError(
+      client!,
+      () => client!.query(
+        `INSERT INTO dropship.dropship_usdc_deposit_addresses
+          (vendor_id, chain_id, key_fingerprint, derivation_index, address, checksum_address)
+         VALUES ($1, 8453, '3bf95407', 1, $2, $2)`,
+        [vendorBId, address],
+      ),
+      "23505",
+    );
+    // Only a lowercase 0x address is stored; the checksum form is a separate column.
+    await expectDatabaseError(
+      client!,
+      () => client!.query(
+        `INSERT INTO dropship.dropship_usdc_deposit_addresses
+          (vendor_id, chain_id, key_fingerprint, derivation_index, address, checksum_address)
+         VALUES ($1, 8453, '3bf95407', 1, $2, $2)`,
+        [vendorBId, "0x" + "B".repeat(40)],
+      ),
+      "23514",
+    );
+    // A rotated key starts its own index space.
+    await client!.query(
+      `INSERT INTO dropship.dropship_usdc_deposit_addresses
+        (vendor_id, chain_id, key_fingerprint, derivation_index, address, checksum_address)
+       VALUES ($1, 8453, '00000001', 0, $2, $2)`,
+      [vendorBId, "0x" + "d".repeat(40)],
+    );
+
+    // The watcher's place: one row per chain and token, never negative.
+    await client!.query(
+      `INSERT INTO dropship.dropship_usdc_watcher_cursors (chain_id, token_address, last_scanned_block)
+       VALUES (8453, $1, 35000000)
+       ON CONFLICT (chain_id, token_address) DO UPDATE SET last_scanned_block = EXCLUDED.last_scanned_block`,
+      ["0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"],
+    );
+    await expectDatabaseError(
+      client!,
+      () => client!.query(
+        `UPDATE dropship.dropship_usdc_watcher_cursors SET last_scanned_block = -1 WHERE chain_id = 8453`,
+      ),
+      "23514",
+    );
+  });
+
+  it("identifies a chain observation by its log, keeps manual credits one per transaction, and pins the status lifecycle", async () => {
+    const tx = "0x" + "ab".repeat(32);
+    const blockHash = "0x" + "cd".repeat(32);
+    // A batched withdrawal: two transfers in one transaction are two observations.
+    for (const logIndex of [3, 4]) {
+      await client!.query(
+        `INSERT INTO dropship.dropship_usdc_ledger_entries
+          (vendor_id, chain_id, transaction_hash, log_index, block_number, block_hash, token_address,
+           amount_atomic_units, dust_atomic_units, status)
+         VALUES ($1, 8453, $2, $3, 35000000, $4, '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913', '25123456', 3456, 'pending')`,
+        [vendorAId, tx, logIndex, blockHash],
+      );
+    }
+    await expectDatabaseError(
+      client!,
+      () => client!.query(
+        `INSERT INTO dropship.dropship_usdc_ledger_entries
+          (vendor_id, chain_id, transaction_hash, log_index, amount_atomic_units, status)
+         VALUES ($1, 8453, $2, 3, '1', 'pending')`,
+        [vendorAId, tx],
+      ),
+      "23505",
+    );
+    // A manual staff credit carries no log index and is still one per transaction.
+    const manualTx = "0x" + "ef".repeat(32);
+    await client!.query(
+      `INSERT INTO dropship.dropship_usdc_ledger_entries
+        (vendor_id, chain_id, transaction_hash, amount_atomic_units, status)
+       VALUES ($1, 8453, $2, '10000', 'settled')`,
+      [vendorAId, manualTx],
+    );
+    await expectDatabaseError(
+      client!,
+      () => client!.query(
+        `INSERT INTO dropship.dropship_usdc_ledger_entries
+          (vendor_id, chain_id, transaction_hash, amount_atomic_units, status)
+         VALUES ($1, 8453, $2, '10000', 'settled')`,
+        [vendorAId, manualTx],
+      ),
+      "23505",
+    );
+    // The lifecycle is a closed list, dust is under one cent, log indexes are not negative.
+    await expectDatabaseError(
+      client!,
+      () => client!.query(
+        `UPDATE dropship.dropship_usdc_ledger_entries SET status = 'confirming' WHERE transaction_hash = $1`,
+        [manualTx],
+      ),
+      "23514",
+    );
+    await expectDatabaseError(
+      client!,
+      () => client!.query(
+        `UPDATE dropship.dropship_usdc_ledger_entries SET dust_atomic_units = 10000 WHERE transaction_hash = $1`,
+        [manualTx],
+      ),
+      "23514",
+    );
+    await expectDatabaseError(
+      client!,
+      () => client!.query(
+        `UPDATE dropship.dropship_usdc_ledger_entries SET log_index = -1 WHERE transaction_hash = $1`,
+        [manualTx],
+      ),
+      "23514",
+    );
+    const voided = await client!.query<{ status: string; voided_at: Date | null }>(
+      `UPDATE dropship.dropship_usdc_ledger_entries
+       SET status = 'voided', voided_at = now()
+       WHERE transaction_hash = $1 AND log_index = 4
+       RETURNING status, voided_at`,
+      [tx],
+    );
+    expect(voided.rows[0].status).toBe("voided");
+    expect(voided.rows[0].voided_at).not.toBeNull();
   });
 
   it("blocks missing package dimensions and invalid shipping policy values", async () => {

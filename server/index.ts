@@ -21,6 +21,7 @@ import { startDropshipOrderProcessingWorker } from "./modules/dropship/infrastru
 import { startDropshipEbayOrderIntakeWorker } from "./modules/dropship/infrastructure/dropship-ebay-order-intake-runner";
 import { startDropshipReturnsMaintenanceWorker } from "./modules/dropship/infrastructure/dropship-returns-maintenance-runner";
 import { startDropshipReturnIntakeWorker } from "./modules/dropship/infrastructure/dropship-return-intake-runner";
+import { startDropshipUsdcWatcherWorker } from "./modules/dropship/infrastructure/dropship-usdc-watcher-runner";
 import {
   setDropshipFulfillmentSync,
   setDropshipInventoryRuntimeAuthorityGate,
@@ -918,6 +919,7 @@ function startEchelonSyncScheduler(
         startDropshipEbayOrderIntakeWorker();
         startDropshipReturnsMaintenanceWorker();
         startDropshipReturnIntakeWorker();
+        startDropshipUsdcWatcherWorker();
       } else {
         logSchedulerDisabled("scheduler", "Dropship workers");
       }

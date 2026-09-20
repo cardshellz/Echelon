@@ -13,6 +13,19 @@ import {
   type StripeDropshipFundingProvider,
 } from "../../infrastructure/dropship-stripe-funding.provider";
 import { requireDropshipAuth, requireDropshipSensitiveActionProof } from "./dropship-auth.routes";
+import { createDropshipUsdcDepositServiceFromEnv } from "../../infrastructure/dropship-usdc-deposit.factory";
+import type {
+  DropshipUsdcCustodyReport,
+  DropshipUsdcDepositAddressRecord,
+  DropshipUsdcDepositService,
+  DropshipUsdcOffering,
+} from "../../application/dropship-usdc-deposit-service";
+
+/** What the wallet routes need from the USDC deposit service (funding design phase 6). */
+type UsdcDepositRouteService = Pick<
+  DropshipUsdcDepositService,
+  "offering" | "verificationAddress" | "getDepositAddress" | "assignDepositAddressForMember" | "runCustodyCheck"
+>;
 
 /**
  * Wallet route failures are logged here rather than at each call site so every
@@ -25,6 +38,7 @@ export function registerDropshipWalletRoutes(
   service: DropshipWalletService = createDropshipWalletServiceFromEnv(),
   stripeFundingProvider: StripeDropshipFundingProvider = createStripeDropshipFundingProviderFromEnv(),
   listingTierService: Pick<DropshipListingTierService, "resolveForVendor"> = createDropshipListingTierServiceFromEnv(),
+  usdcDepositService: UsdcDepositRouteService = createDropshipUsdcDepositServiceFromEnv(),
 ): void {
   app.get(
     "/api/dropship/admin/wallet/vendors/:vendorId",
@@ -166,11 +180,47 @@ export function registerDropshipWalletRoutes(
       // The tiers are read after the wallet so both describe the same vendor
       // as this request resolved them; the route composes, it does not decide.
       const listingTiers = await listingTierService.resolveForVendor(wallet.account.vendorId);
-      return res.json({ wallet: serializeVendorWalletView(wallet, listingTiers) });
+      // The vendor's own USDC deposit address, if they asked for one. A read
+      // never assigns; the POST below does.
+      const usdcDepositAddress = await usdcDepositService.getDepositAddress(wallet.account.vendorId);
+      return res.json({
+        wallet: serializeVendorWalletView(wallet, listingTiers, serializeUsdcDeposit(usdcDepositService.offering(), usdcDepositAddress)),
+      });
     } catch (error) {
       return sendDropshipWalletError(res, error);
     }
   });
+
+  // The vendor's own USDC deposit address (funding design phase 6): assigned
+  // the first time they ask, the same one every time after.
+  app.post("/api/dropship/wallet/usdc/deposit-address", requireDropshipAuth, async (req, res) => {
+    try {
+      const result = await usdcDepositService.assignDepositAddressForMember(req.session.dropship!.memberId);
+      return res.status(result.created ? 201 : 200).json({
+        usdcDeposit: serializeUsdcDeposit(usdcDepositService.offering(), result.address),
+        created: result.created,
+      });
+    } catch (error) {
+      return sendDropshipWalletError(res, error);
+    }
+  });
+
+  // Custody: every deposit address against its on-chain balance, plus the
+  // key's index-0 address for the operator's one-time verification.
+  app.get(
+    "/api/dropship/admin/wallet/usdc/custody",
+    requirePermission("dropship", "manage_operations"),
+    async (_req, res) => {
+      try {
+        const report = await usdcDepositService.runCustodyCheck();
+        return res.json({
+          custody: serializeUsdcCustodyReport(report, usdcDepositService.offering(), usdcDepositService.verificationAddress()),
+        });
+      } catch (error) {
+        return sendDropshipWalletError(res, error);
+      }
+    },
+  );
 
   app.put(
     "/api/dropship/wallet/auto-reload",
@@ -373,10 +423,12 @@ async function verifyBankBalanceSafely(
 function serializeVendorWalletView(
   wallet: Awaited<ReturnType<DropshipWalletService["getWalletForVendor"]>>,
   listingTiers: DropshipVendorListingTierView,
+  usdcDeposit: SerializedUsdcDeposit,
 ) {
   return {
     ...serializeWalletOverview(wallet),
     listingTiers: serializeListingTiers(listingTiers),
+    usdcDeposit,
     limits: {
       autoReloadMinTriggerCents: wallet.limits.autoReloadMinTriggerCents,
       caseTierMinimumCents: wallet.limits.caseTierMinimumCents,
@@ -397,6 +449,43 @@ function serializeVendorWalletView(
  * shortfall as things stand, and a raise still in its grace period with the
  * date it lands. Money stays integer cents; dates are ISO strings.
  */
+type SerializedUsdcDeposit = ReturnType<typeof serializeUsdcDeposit>;
+
+/**
+ * The vendor's USDC deposit position (funding design phase 6): whether the
+ * rail is offered and watched, the timing the watcher enforces, and the
+ * address they were handed, or null until they ask for one. Field names are
+ * the contract the portal's wallet view adapter parses.
+ */
+function serializeUsdcDeposit(offering: DropshipUsdcOffering, address: DropshipUsdcDepositAddressRecord | null) {
+  return {
+    offered: offering.offered,
+    watched: offering.watched,
+    chainId: offering.chainId,
+    tokenAddress: offering.tokenAddress,
+    minConfirmations: offering.minConfirmations,
+    settleTag: offering.settleTag,
+    address: address
+      ? { address: address.address, checksumAddress: address.checksumAddress, assignedAt: address.assignedAt.toISOString() }
+      : null,
+  };
+}
+
+function serializeUsdcCustodyReport(report: DropshipUsdcCustodyReport, offering: DropshipUsdcOffering, verificationAddress: string | null) {
+  return {
+    outcome: report.outcome,
+    checkedAt: report.checkedAt.toISOString(),
+    chainId: report.chainId,
+    tokenAddress: report.tokenAddress,
+    offered: offering.offered,
+    watched: offering.watched,
+    keyFingerprint: offering.keyFingerprint,
+    verificationAddress,
+    addresses: report.addresses,
+    totals: report.totals,
+  };
+}
+
 function serializeListingTiers(view: DropshipVendorListingTierView) {
   const serializeTier = (status: DropshipListingTierStatus) => ({
     tier: status.tier,
@@ -596,7 +685,11 @@ function statusForDropshipWalletError(code: string): number {
   if (code === "DROPSHIP_WALLET_INSUFFICIENT_FUNDS") {
     return 402;
   }
-  if (code === "DROPSHIP_FUNDING_METHOD_NOT_FOUND" || code === "DROPSHIP_WALLET_ACCOUNT_NOT_FOUND") {
+  if (
+    code === "DROPSHIP_FUNDING_METHOD_NOT_FOUND"
+    || code === "DROPSHIP_WALLET_ACCOUNT_NOT_FOUND"
+    || code === "DROPSHIP_USDC_LEDGER_ENTRY_NOT_FOUND"
+  ) {
     return 404;
   }
   if (
@@ -610,6 +703,8 @@ function statusForDropshipWalletError(code: string): number {
     || code === "DROPSHIP_CARD_FUNDING_FEE_ACKNOWLEDGEMENT_STALE"
     || code === "DROPSHIP_FUNDING_METHOD_RAIL_MISMATCH"
     || code === "DROPSHIP_USDC_TRANSACTION_CONFLICT"
+    || code === "DROPSHIP_USDC_DEPOSIT_ADDRESS_CONFLICT"
+    || code === "DROPSHIP_USDC_WALLET_LEDGER_MISSING"
   ) {
     return 409;
   }
@@ -618,8 +713,24 @@ function statusForDropshipWalletError(code: string): number {
     || code === "DROPSHIP_STRIPE_SECRET_NOT_CONFIGURED"
     || code === "DROPSHIP_STRIPE_WEBHOOK_SECRET_NOT_CONFIGURED"
     || code === "DROPSHIP_CARD_FUNDING_FEE_MISCONFIGURED"
+    // USDC deposits (funding design phase 6): not offered, or misconfigured, is
+    // the deployment's state, not the caller's fault.
+    || code === "DROPSHIP_USDC_DEPOSITS_NOT_OFFERED"
+    || code === "DROPSHIP_USDC_CHAIN_NOT_CONFIGURED"
+    || code === "DROPSHIP_USDC_DEPOSIT_ADDRESS_MISCONFIGURED"
+    || code === "DROPSHIP_USDC_XPUB_MISCONFIGURED"
+    || code === "DROPSHIP_USDC_RPC_MISCONFIGURED"
+    || code === "DROPSHIP_USDC_WATCHER_MISCONFIGURED"
   ) {
     return 503;
+  }
+  if (
+    // The node, not this service, failed or answered nonsense.
+    code === "DROPSHIP_USDC_RPC_TRANSPORT_FAILED"
+    || code === "DROPSHIP_USDC_RPC_REJECTED"
+    || code === "DROPSHIP_USDC_RPC_RESPONSE_INVALID"
+  ) {
+    return 502;
   }
   if (code === "DROPSHIP_STRIPE_SETUP_SESSION_URL_MISSING") {
     return 502;

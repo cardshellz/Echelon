@@ -110,6 +110,9 @@ import {
   describeFundingMethodDetailed,
   describeHoldTimeLine,
   describeIntro,
+  describeUsdcDeposit,
+  describeUsdcSourceNote,
+  usdcOfferedFor,
   describeMandate,
   describeNegativeBalance,
   describePendingBalance,
@@ -573,6 +576,15 @@ export default function DropshipPortalWallet() {
     });
   }
 
+  /** Asks for the vendor's own deposit address (funding design phase 6): receiving money needs no step-up. */
+  async function requestUsdcAddress() {
+    await run("money", "usdc", async () => {
+      await postJson<unknown>("/api/dropship/wallet/usdc/deposit-address", {});
+      await refreshAfterWalletChange();
+      setNotice({ scope: "money", tone: "success", text: "Your USDC deposit address is ready." });
+    });
+  }
+
   function checkAgain() {
     setConfirmationTimedOut(false);
     setPendingStripeNotice(null);
@@ -779,6 +791,7 @@ export default function DropshipPortalWallet() {
             onAddMethod={(scope, rail) => startStripeSetup(scope, rail, "manage_add")}
             onAddFunds={(rail, amount) => addFunds("money", rail, amount)}
             onSaveUsdc={saveUsdcMethod}
+            onRequestUsdcAddress={requestUsdcAddress}
             onBackToOnboarding={() => setLocation(dropshipPortalPath("/onboarding"))}
           />
         )}
@@ -1055,7 +1068,7 @@ function StepIndicator({ wallet, flow, draft, onSelect }: { wallet: DropshipWall
  * so they can be scanned without reading the detail.
  */
 function WalletHowItWorks({ wallet, flow }: { wallet: DropshipWalletView; flow: WalletFlowState }) {
-  const intro = describeIntro({ cardFundingFeeBps: wallet.cardFundingFeeBps, usdcOffered: wallet.usdcBaseDepositAddress !== null, holdTimeoutMinutes: flow.holdTimeoutMinutes, limits: wallet.limits });
+  const intro = describeIntro({ cardFundingFeeBps: wallet.cardFundingFeeBps, usdcOffered: usdcOfferedFor(wallet), usdcDeposit: wallet.usdcDeposit, holdTimeoutMinutes: flow.holdTimeoutMinutes, limits: wallet.limits });
   return (
     <>
       <p className="text-sm text-zinc-600" data-testid="wallet-how-it-works-lede">{intro.lede}</p>
@@ -1257,10 +1270,8 @@ function SourceStep({
         />
       </div>
       {preselection && <p className="mt-3 text-sm text-zinc-600" data-testid="wallet-source-preselection">{preselection}</p>}
-      {wallet.usdcBaseDepositAddress && (
-        <p className="mt-3 text-sm text-zinc-500" data-testid="wallet-usdc-note">
-          Prefer USDC? It is free too, but manual: you send USDC on Base to Card Shellz's deposit address and a member of our team credits your wallet after confirming the transfer. Because it cannot be pulled automatically, it can never be your autopay source. Use it any time under Add money.
-        </p>
+      {usdcOfferedFor(wallet) && (
+        <p className="mt-3 text-sm text-zinc-500" data-testid="wallet-usdc-note">{describeUsdcSourceNote(wallet.usdcDeposit)}</p>
       )}
       {rail === "stripe_ach" && (
         <Impact>Routine top-ups are free. While a transfer is landing, orders draw on what has already settled; if an order needs more, your backup card covers the shortfall plus {fee} (up to the larger of your minimum and your top-up amount). A higher minimum in the next step makes that rare.</Impact>
@@ -1691,7 +1702,7 @@ function ReviewStep({
 // ---------------------------------------------------------------------------
 
 function FundingControls({
-  wallet, floorCents, busy, quoteTestId, usdcOffered, onContinue, onAddMethod, onSaveUsdc, extraBelowButton,
+  wallet, floorCents, busy, quoteTestId, usdcOffered, onContinue, onAddMethod, onSaveUsdc, onRequestUsdcAddress, extraBelowButton,
 }: {
   wallet: DropshipWalletView;
   floorCents: number;
@@ -1701,6 +1712,7 @@ function FundingControls({
   onContinue: (rail: WalletSourceRail, amountCents: number) => void;
   onAddMethod: (rail: WalletSourceRail) => void;
   onSaveUsdc?: (input: { walletAddress: string; displayLabel: string }) => void;
+  onRequestUsdcAddress?: () => void;
   extraBelowButton?: ReactNode;
 }) {
   const limits = wallet.limits;
@@ -1738,8 +1750,8 @@ function FundingControls({
         <RadioChip label={`Card (${fee} fee)`} selected={rail === "stripe_card"} disabled={busy} onSelect={() => setRail("stripe_card")} />
         {usdcOffered && <RadioChip label="USDC on Base" hint="No fee · manual" selected={rail === "usdc"} disabled={busy} onSelect={() => setRail("usdc")} />}
       </div>
-      {rail === "usdc" && wallet.usdcBaseDepositAddress && onSaveUsdc ? (
-        <UsdcFundingPanel wallet={wallet} busy={busy} onSave={onSaveUsdc} />
+      {rail === "usdc" && usdcOffered && onSaveUsdc ? (
+        <UsdcFundingPanel wallet={wallet} busy={busy} onSave={onSaveUsdc} onRequestAddress={onRequestUsdcAddress} />
       ) : rail !== "usdc" ? (
         <>
           <p className="text-xs text-zinc-500">You finish on Stripe's page. The account or card you use there is saved to your wallet.</p>
@@ -1775,10 +1787,37 @@ function FundingControls({
   );
 }
 
-function UsdcFundingPanel({ wallet, busy, onSave }: { wallet: DropshipWalletView; busy: boolean; onSave: (input: { walletAddress: string; displayLabel: string }) => void }) {
+function UsdcFundingPanel({ wallet, busy, onSave, onRequestAddress }: {
+  wallet: DropshipWalletView;
+  busy: boolean;
+  onSave: (input: { walletAddress: string; displayLabel: string }) => void;
+  onRequestAddress?: () => void;
+}) {
   const [walletAddress, setWalletAddress] = useState("");
   const [displayLabel, setDisplayLabel] = useState("USDC on Base");
   const registered = wallet.fundingMethods.filter((method) => method.rail === "usdc_base" && method.status === "active");
+  const deposit = wallet.usdcDeposit;
+  if (deposit?.offered) {
+    // The vendor's own address (funding design phase 6): nothing to register,
+    // nothing for staff to match. The words are the model's.
+    const copy = describeUsdcDeposit(deposit);
+    return (
+      <div className="space-y-3" data-testid="wallet-usdc-funding">
+        {deposit.address ? (
+          <div className="rounded-md border border-zinc-200 bg-zinc-50 p-3 text-sm">
+            <div className="text-xs uppercase text-zinc-500">Your deposit address (Base)</div>
+            <code className="mt-1 block break-all font-mono text-zinc-900" data-testid="wallet-usdc-deposit-address">{deposit.address.checksumAddress}</code>
+          </div>
+        ) : (
+          <Button type="button" variant="outline" className="h-10 w-full gap-2 sm:w-auto" disabled={busy || !onRequestAddress} onClick={onRequestAddress} data-testid="wallet-usdc-request-address">
+            <Coins className="h-4 w-4" />Get my deposit address
+          </Button>
+        )}
+        <p className="text-sm text-zinc-600" data-testid="wallet-usdc-timing">{copy.timing}</p>
+        <p className="text-xs text-zinc-500" data-testid="wallet-usdc-warning">{copy.warning}</p>
+      </div>
+    );
+  }
   return (
     <div className="space-y-3" data-testid="wallet-usdc-funding">
       <div className="rounded-md border border-zinc-200 bg-zinc-50 p-3 text-sm">
@@ -1860,7 +1899,7 @@ function DepositStep({
 
 function ManageView({
   wallet, flow, draft, now, stillOnboarding, editor, setEditor, addMoneyOpen, setAddMoneyOpen, newMethodOffer, dismissOffer, returnBanner, dismissReturnBanner,
-  pendingNotice, onCheckAgain, feedback, feeMisconfigured, onSavePlan, onConfirmTerms, onTurnOff, onRemove, onAddMethod, onAddFunds, onSaveUsdc, onBackToOnboarding,
+  pendingNotice, onCheckAgain, feedback, feeMisconfigured, onSavePlan, onConfirmTerms, onTurnOff, onRemove, onAddMethod, onAddFunds, onSaveUsdc, onRequestUsdcAddress, onBackToOnboarding,
 }: {
   wallet: DropshipWalletView;
   flow: WalletFlowState;
@@ -1886,6 +1925,7 @@ function ManageView({
   onAddMethod: (scope: WalletScope, rail: WalletSourceRail) => Promise<void>;
   onAddFunds: (rail: WalletSourceRail, amountCents: number) => Promise<void>;
   onSaveUsdc: (input: { walletAddress: string; displayLabel: string }) => Promise<void>;
+  onRequestUsdcAddress: () => Promise<void>;
   onBackToOnboarding: () => void;
 }) {
   const plan = planFromWallet(wallet);
@@ -2009,10 +2049,11 @@ function ManageView({
               floorCents={floorCents}
               busy={feedback("money").busy}
               quoteTestId="wallet-funding-quote"
-              usdcOffered={wallet.usdcBaseDepositAddress !== null}
+              usdcOffered={usdcOfferedFor(wallet)}
               onContinue={(rail, amount) => void onAddFunds(rail, amount)}
               onAddMethod={(rail) => void onAddMethod("money", rail)}
               onSaveUsdc={(input) => void onSaveUsdc(input)}
+              onRequestUsdcAddress={() => void onRequestUsdcAddress()}
             />
           </div>
         )}

@@ -62,6 +62,7 @@ describe("DropshipPortalWallet contract", () => {
       "\"/api/dropship/wallet/auto-reload\"",
       "\"/api/dropship/wallet/funding/stripe/checkout-session\"",
       "\"/api/dropship/wallet/funding-methods/usdc-base\"",
+      "\"/api/dropship/wallet/usdc/deposit-address\"",
     ]));
     expect(source.match(/deleteJson</g)).toHaveLength(1);
     expect(between("function removeMethod", "function addFunds")).toContain("deleteJson<");
@@ -126,7 +127,7 @@ describe("DropshipPortalWallet contract", () => {
     // Step 1 and the manage view's "How your wallet works" render the same component, so the rules are worded once.
     expect(source.match(/describeIntro\(/g)).toHaveLength(1);
     expect(source.match(/INTRO_VERIFICATION_NOTE/g)).toHaveLength(2);
-    expect(source).toContain("describeIntro({ cardFundingFeeBps: wallet.cardFundingFeeBps, usdcOffered: wallet.usdcBaseDepositAddress !== null, holdTimeoutMinutes: flow.holdTimeoutMinutes, limits: wallet.limits })");
+    expect(source).toContain("describeIntro({ cardFundingFeeBps: wallet.cardFundingFeeBps, usdcOffered: usdcOfferedFor(wallet), usdcDeposit: wallet.usdcDeposit, holdTimeoutMinutes: flow.holdTimeoutMinutes, limits: wallet.limits })");
     expect(source.match(/<WalletHowItWorks wallet=\{wallet\} flow=\{flow\} \/>/g)).toHaveLength(2);
     // Lede, then one list item per topic, each led by its bold sentence — the copy is the model's and is never re-worded here.
     const rules = between("function WalletHowItWorks", "function IntroStep");
@@ -193,5 +194,26 @@ describe("DropshipPortalWallet contract", () => {
       expect(tail).not.toContain("setDraft((current)");
     }
     expect(source).toContain("function commitDraftBeforeRedirect(next: WalletDraft)");
+  });
+});
+
+describe("USDC deposits on the wallet page (funding design phase 6)", () => {
+  it("shows the vendor's own address or offers to get one, with the model's words, and asks for it without a step-up", () => {
+    const panel = between("function UsdcFundingPanel", "function DepositStep");
+    expect(panel).toContain("deposit.address.checksumAddress");
+    expect(panel).toContain("data-testid=\"wallet-usdc-request-address\"");
+    expect(panel).toContain("Get my deposit address");
+    expect(panel).toContain("describeUsdcDeposit(deposit)");
+    expect(panel).toContain("data-testid=\"wallet-usdc-timing\"");
+    expect(panel).toContain("data-testid=\"wallet-usdc-warning\"");
+    // The shared-address panel stays for a deployment without a key.
+    expect(panel).toContain("wallet.usdcBaseDepositAddress");
+    const request = between("async function requestUsdcAddress", "function checkAgain");
+    expect(request).toContain("run(\"money\", \"usdc\"");
+    expect(request).not.toContain("withVerification");
+    expect(request).toContain("\"/api/dropship/wallet/usdc/deposit-address\"");
+    expect(source.match(/usdcOfferedFor\(wallet\)/g)).toHaveLength(3);
+    expect(source).toContain("describeUsdcSourceNote(wallet.usdcDeposit)");
+    expect(source).not.toContain("wallet.usdcBaseDepositAddress !== null");
   });
 });

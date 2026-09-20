@@ -217,6 +217,10 @@ describe("dropship wallet routes card fee exposure", () => {
 
     expect(response.status).toBe(200);
     expect(response.body.wallet.usdcBaseDepositAddress).toBe("0x1111111111111111111111111111111111111111");
+    // The vendor's own deposit position (funding design phase 6): nothing offered here.
+    expect(response.body.wallet.usdcDeposit).toEqual({
+      offered: false, watched: false, chainId: 8453, tokenAddress: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", minConfirmations: 6, settleTag: "safe", address: null,
+    });
   });
 
   it("serves the wallet policy limits so the page stops falling back to a hard-coded table", async () => {
@@ -333,10 +337,33 @@ describe("dropship wallet routes card fee exposure", () => {
   });
 });
 
-function buildApp(service: DropshipWalletService): express.Express {
+type UsdcRouteService = NonNullable<Parameters<typeof registerDropshipWalletRoutes>[4]>;
+
+/** A deployment with no USDC key: nothing offered, nothing watched, no address to hand out. */
+function fakeUsdcDepositService(overrides: Partial<UsdcRouteService> = {}): UsdcRouteService {
+  return {
+    offering: () => ({ offered: false, watched: false, chainId: 8453, tokenAddress: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", minConfirmations: 6, settleTag: "safe" as const, keyFingerprint: null }),
+    verificationAddress: () => null,
+    getDepositAddress: async () => null,
+    assignDepositAddressForMember: async () => {
+      throw new DropshipError("DROPSHIP_USDC_DEPOSITS_NOT_OFFERED", "USDC deposits are not offered: no account key is configured.", { classification: "permanent" });
+    },
+    runCustodyCheck: async () => ({
+      outcome: "not_configured" as const,
+      checkedAt: new Date("2026-09-21T10:00:00.000Z"),
+      chainId: 8453,
+      tokenAddress: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      addresses: [],
+      totals: { expectedAtomicUnits: "0", onChainAtomicUnits: "0", unrecordedAtomicUnits: "0", reviewCount: 0, unreadCount: 0 },
+    }),
+    ...overrides,
+  };
+}
+
+function buildApp(service: DropshipWalletService, usdcDepositService: UsdcRouteService = fakeUsdcDepositService()): express.Express {
   const app = express();
   app.use(express.json());
-  registerDropshipWalletRoutes(app, service, {} as StripeDropshipFundingProvider, { resolveForVendor: fakeListingTierView });
+  registerDropshipWalletRoutes(app, service, {} as StripeDropshipFundingProvider, { resolveForVendor: fakeListingTierView }, usdcDepositService);
   return app;
 }
 
@@ -456,7 +483,7 @@ describe("dropship wallet routes advance and bank balance (funding design phase 
       (req as Request & { rawBody?: Buffer }).rawBody = Buffer.from("{}");
       next();
     });
-    registerDropshipWalletRoutes(app, service, provider, { resolveForVendor: fakeListingTierView });
+    registerDropshipWalletRoutes(app, service, provider, { resolveForVendor: fakeListingTierView }, fakeUsdcDepositService());
     server = await startServer(app);
   });
 
@@ -538,5 +565,126 @@ describe("dropship wallet routes advance and bank balance (funding design phase 
     expect(closed.status).toBe(200);
     expect(closed.body).toEqual({ received: true, eventType: "charge.dispute.closed", action: "wallet_funding_dispute_closed" });
     expect(calls).toEqual([{ method: "recordWalletFundingDisputeOutcome", input: outcome }]);
+  });
+});
+
+describe("dropship wallet routes USDC deposits (funding design phase 6)", () => {
+  const now = new Date("2026-09-21T10:00:00.000Z");
+  const wallet = {
+    account: { walletAccountId: 1, vendorId: 10, availableBalanceCents: 0, pendingBalanceCents: 0, currency: "USD", status: "active", createdAt: now, updatedAt: now },
+    autoReload: null,
+    fundingMethods: [],
+    recentLedger: [],
+    cardFundingFeeBps: 300,
+    usdcBaseDepositAddress: null,
+    limits: {
+      autoReloadMinTriggerCents: 7_500, autoReloadMinAmountCents: 12_500, manualFundingMinCents: 2_000, manualFundingMaxCents: 400_000,
+      defaultPaymentHoldTimeoutMinutes: 1_440, holdExpiryWarningMinutes: 90, caseTierMinimumCents: 55_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14,
+    },
+    advance: null,
+  };
+  const address = {
+    depositAddressId: 7, vendorId: 10, chainId: 8453, keyFingerprint: "3bf95407", derivationIndex: 0,
+    address: "0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266", checksumAddress: "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266", assignedAt: now,
+  };
+  const offering = { offered: true, watched: true, chainId: 8453, tokenAddress: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", minConfirmations: 6, settleTag: "safe" as const, keyFingerprint: "3bf95407" };
+  let server: { url: string; close: () => Promise<void> };
+  let assigned: string[];
+  let created: boolean;
+
+  beforeEach(async () => {
+    assigned = [];
+    created = true;
+    for (const level of ["error", "warn", "info"] as const) {
+      vi.spyOn(console, level).mockImplementation(() => {});
+    }
+    const service = { getWalletForMember: async () => wallet } as unknown as DropshipWalletService;
+    server = await startServer(buildApp(service, fakeUsdcDepositService({
+      offering: () => offering,
+      verificationAddress: () => address.checksumAddress,
+      getDepositAddress: async (vendorId) => (vendorId === 10 ? address : null),
+      assignDepositAddressForMember: async (memberId) => {
+        assigned.push(memberId);
+        return { address, created };
+      },
+      runCustodyCheck: async () => ({
+        outcome: "checked" as const,
+        checkedAt: now,
+        chainId: 8453,
+        tokenAddress: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+        addresses: [{ depositAddressId: 7, vendorId: 10, address: address.address, checksumAddress: address.checksumAddress, expectedAtomicUnits: "25123456", onChainAtomicUnits: "25123456", creditedCents: 2_512, observationCount: 1, status: "holding" as const, unrecordedAtomicUnits: "0" }],
+        totals: { expectedAtomicUnits: "25123456", onChainAtomicUnits: "25123456", unrecordedAtomicUnits: "0", reviewCount: 0, unreadCount: 0 },
+      }),
+    })));
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await server.close();
+  });
+
+  it("composes the vendor's own deposit address and the watcher's timing into the wallet view without assigning anything", async () => {
+    const response = await jsonRequest(`${server.url}/api/dropship/wallet`);
+    expect(response.status).toBe(200);
+    expect(response.body.wallet.usdcDeposit).toEqual({
+      offered: true, watched: true, chainId: 8453, tokenAddress: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", minConfirmations: 6, settleTag: "safe",
+      address: { address: address.address, checksumAddress: address.checksumAddress, assignedAt: "2026-09-21T10:00:00.000Z" },
+    });
+    expect(assigned).toEqual([]);
+  });
+
+  it("hands the signed-in member their address: 201 the first time, 200 every time after", async () => {
+    const first = await jsonRequest(`${server.url}/api/dropship/wallet/usdc/deposit-address`, { method: "POST" });
+    expect(first.status).toBe(201);
+    expect(first.body).toEqual({
+      created: true,
+      usdcDeposit: expect.objectContaining({ offered: true, address: expect.objectContaining({ checksumAddress: address.checksumAddress }) }),
+    });
+    created = false;
+    const again = await jsonRequest(`${server.url}/api/dropship/wallet/usdc/deposit-address`, { method: "POST" });
+    expect(again.status).toBe(200);
+    expect(again.body.created).toBe(false);
+    expect(assigned).toEqual(["member-1", "member-1"]);
+  });
+
+  it("answers 503 with the structured code when USDC deposits are not offered", async () => {
+    const bare = await startServer(buildApp({ getWalletForMember: async () => wallet } as unknown as DropshipWalletService));
+    try {
+      const response = await jsonRequest(`${bare.url}/api/dropship/wallet/usdc/deposit-address`, { method: "POST" });
+      expect(response.status).toBe(503);
+      expect(response.body.error.code).toBe("DROPSHIP_USDC_DEPOSITS_NOT_OFFERED");
+    } finally {
+      await bare.close();
+    }
+  });
+
+  it("serves the custody report to staff with the key fingerprint and the index-0 verification address", async () => {
+    const response = await jsonRequest(`${server.url}/api/dropship/admin/wallet/usdc/custody`);
+    expect(response.status).toBe(200);
+    expect(response.body.custody).toEqual({
+      outcome: "checked",
+      checkedAt: "2026-09-21T10:00:00.000Z",
+      chainId: 8453,
+      tokenAddress: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+      offered: true,
+      watched: true,
+      keyFingerprint: "3bf95407",
+      verificationAddress: address.checksumAddress,
+      addresses: [expect.objectContaining({ vendorId: 10, status: "holding", onChainAtomicUnits: "25123456", creditedCents: 2_512 })],
+      totals: { expectedAtomicUnits: "25123456", onChainAtomicUnits: "25123456", unrecordedAtomicUnits: "0", reviewCount: 0, unreadCount: 0 },
+    });
+  });
+
+  it("maps the node's failures to 502 and a missing observation to 404", async () => {
+    const failing = await startServer(buildApp({ getWalletForMember: async () => wallet } as unknown as DropshipWalletService, fakeUsdcDepositService({
+      runCustodyCheck: async () => { throw new DropshipError("DROPSHIP_USDC_RPC_TRANSPORT_FAILED", "The node could not be reached.", { classification: "transient" }); },
+      assignDepositAddressForMember: async () => { throw new DropshipError("DROPSHIP_USDC_LEDGER_ENTRY_NOT_FOUND", "missing", { classification: "permanent" }); },
+    })));
+    try {
+      expect((await jsonRequest(`${failing.url}/api/dropship/admin/wallet/usdc/custody`)).status).toBe(502);
+      expect((await jsonRequest(`${failing.url}/api/dropship/wallet/usdc/deposit-address`, { method: "POST" })).status).toBe(404);
+    } finally {
+      await failing.close();
+    }
   });
 });

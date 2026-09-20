@@ -11,6 +11,9 @@ const HARNESS_PATH = "/__wallet-test";
 const STAMP = "2026-09-15T00:00:00.000Z";
 const LATER = "2026-09-16T00:00:00.000Z";
 const DEPOSIT_ADDRESS = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd";
+/** The vendor's own deposit address (funding design phase 6), in its EIP-55 form. */
+const OWN_ADDRESS = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
+const WATCHED_USDC = { offered: true, watched: true, chainId: 8453, tokenAddress: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", minConfirmations: 6, settleTag: "safe", address: null as Record<string, unknown> | null };
 const LIVE_PROOF = { method: "email_mfa", verifiedAt: STAMP, expiresAt: "2999-01-01T00:00:00.000Z" };
 const ALL_PROOFS = { add_funding_method: LIVE_PROOF, wallet_funding_high_value: LIVE_PROOF, remove_funding_method: LIVE_PROOF };
 /** Where step screenshots go when WALLET_SHOTS_DIR is set (never in CI). */
@@ -44,6 +47,8 @@ interface StubState {
   /** Tests asserting the pending UI release the simulated webhook explicitly. */
   holdSetupConfirmation: boolean;
   usdcDepositAddress: string | null;
+  /** The served deposit position (funding design phase 6); null models a server one release behind. */
+  usdcDeposit: Record<string, unknown> | null;
   autoReload: Record<string, unknown> | null;
   balanceCents: number;
   pendingCents: number;
@@ -67,6 +72,7 @@ interface StubState {
   autoReloadWrites: Record<string, unknown>[];
   fundingSessions: Record<string, unknown>[];
   usdcRegistrations: Record<string, unknown>[];
+  usdcAddressRequests: number;
   deletes: string[];
   bodies: string[];
   codesSent: string[];
@@ -98,6 +104,7 @@ function walletJson(state: StubState) {
   return { wallet: {
     account: { walletAccountId: 1, vendorId: 1, availableBalanceCents: state.balanceCents, pendingBalanceCents: state.pendingCents, currency: "USD", status: "active", createdAt: STAMP, updatedAt: STAMP },
     autoReload: state.autoReload, fundingMethods, recentLedger: state.ledger, cardFundingFeeBps: state.cardFundingFeeBps, usdcBaseDepositAddress: state.usdcDepositAddress,
+    ...(state.usdcDeposit ? { usdcDeposit: state.usdcDeposit } : {}),
     ...(state.limits ? { limits: state.limits } : {}),
     ...(state.listingTiers ? { listingTiers: state.listingTiers } : {}),
     ...(state.advance ? { advance: state.advance } : {}) } };
@@ -127,9 +134,9 @@ function listingTiersJson() {
 }
 
 async function setup(page: Page, initial: Partial<StubState> = {}, path = HARNESS_PATH) {
-  const state: StubState = { methods: [], holdSetupConfirmation: false, usdcDepositAddress: null, autoReload: null, balanceCents: 0, pendingCents: 0, ledger: [], cardFundingFeeBps: 300, limits: null, listingTiers: null, advance: null,
+  const state: StubState = { methods: [], holdSetupConfirmation: false, usdcDepositAddress: null, usdcDeposit: null, autoReload: null, balanceCents: 0, pendingCents: 0, ledger: [], cardFundingFeeBps: 300, limits: null, listingTiers: null, advance: null,
     proofs: {}, failChallenge: false, deleteRefusal: null, detachOutcome: "detached", putRefusalOnce: null, vendorStatus: "onboarding", vendorStandingReason: null,
-    walletReads: 0, nextCardId: 10, nextBankId: 30, setupSessions: [], autoReloadWrites: [], fundingSessions: [], usdcRegistrations: [], deletes: [], bodies: [],
+    walletReads: 0, nextCardId: 10, nextBankId: 30, setupSessions: [], autoReloadWrites: [], fundingSessions: [], usdcRegistrations: [], usdcAddressRequests: 0, deletes: [], bodies: [],
     codesSent: [], unexpected: [], errors: [], ...initial };
   // Fixtures are copied so a journey that archives or activates a row never leaks into the next one; new ids follow the fixtures.
   state.methods = state.methods.map((row) => ({ ...row }));
@@ -213,6 +220,16 @@ async function setup(page: Page, initial: Partial<StubState> = {}, path = HARNES
         createdAt: LATER, settledAt: paidByCard ? LATER : null, metadata: { provider: "stripe" } });
       if (paidByCard) state.balanceCents += amountCents; else state.pendingCents += amountCents;
       return route.fulfill({ json: { fundingSession: { checkoutUrl: `${path}?wallet_funding=success`, providerSessionId: "cs_2", amountCents, cardFeeCents, chargedCents: amountCents + cardFeeCents, currency: "USD", expiresAt: "2999-01-01T00:00:00.000Z" } } });
+    }
+    if (url.pathname === "/api/dropship/wallet/usdc/deposit-address" && method === "POST") {
+      state.usdcAddressRequests += 1;
+      const deposit = state.usdcDeposit;
+      if (!deposit || deposit.offered !== true) {
+        return route.fulfill({ status: 503, json: { error: { code: "DROPSHIP_USDC_DEPOSITS_NOT_OFFERED", message: "USDC deposits are not offered: no account key is configured." } } });
+      }
+      const created = deposit.address === null;
+      if (created) deposit.address = { address: OWN_ADDRESS.toLowerCase(), checksumAddress: OWN_ADDRESS, assignedAt: LATER };
+      return route.fulfill({ status: created ? 201 : 200, json: { usdcDeposit: deposit, created } });
     }
     if (url.pathname === "/api/dropship/wallet/funding-methods/usdc-base" && method === "POST") {
       const body = route.request().postDataJSON() as { walletAddress: string; displayLabel: string };
@@ -918,4 +935,35 @@ test("a PUT refusal with a step recovery moves the flow back to that step with t
   await expect(page.getByTestId("wallet-step-deposit")).toBeVisible();
   expect(state.autoReloadWrites).toHaveLength(2);
   finish(state);
+});
+
+test("manage: USDC lands on the vendor's own address — get it once, then the timing and the warning are the model's", async ({ page }) => {
+  const state = await setup(page, { vendorStatus: "active", methods: [CARD, BANK], autoReload: doneAutoReload(), balanceCents: 4_250, usdcDeposit: { ...WATCHED_USDC } });
+  await expect(page.getByTestId("wallet-available")).toHaveText("$42.50");
+  await page.getByRole("button", { name: "Add money" }).click();
+  await radio(page, "Pay with", "USDC on Base").click();
+  const usdc = page.getByTestId("wallet-usdc-funding");
+  // No address yet: the panel offers to get one and says nothing about sending from anywhere.
+  await expect(usdc.getByTestId("wallet-usdc-deposit-address")).toHaveCount(0);
+  await expect(usdc.getByLabel("Wallet address you send from")).toHaveCount(0);
+  await expect(usdc.getByTestId("wallet-usdc-timing")).toHaveText("No fee. A transfer shows in your wallet after 6 confirmations and is available for orders once the network settles it — usually within a few minutes (our estimate).");
+  await expect(usdc.getByTestId("wallet-usdc-warning")).toHaveText("Send only USDC on the Base network to this address. Anything else sent here cannot be recovered.");
+  await usdc.getByTestId("wallet-usdc-request-address").click();
+  await expect(page.getByRole("status").filter({ hasText: "Your USDC deposit address is ready." })).toHaveCount(1);
+  await expect(usdc.getByTestId("wallet-usdc-deposit-address")).toHaveText(OWN_ADDRESS);
+  await expect(usdc.getByTestId("wallet-usdc-request-address")).toHaveCount(0);
+  expect(state.usdcAddressRequests).toBe(1);
+  await expectNoHorizontalScroll(page);
+  await shot(page, "manage-11-usdc-own-address");
+});
+
+test("manage: without a key, asking for a USDC address is refused in the model's words", async ({ page }) => {
+  const state = await setup(page, { vendorStatus: "active", methods: [CARD, BANK], autoReload: doneAutoReload(), balanceCents: 4_250, usdcDeposit: { ...WATCHED_USDC, offered: false, watched: false }, usdcDepositAddress: DEPOSIT_ADDRESS });
+  await page.getByRole("button", { name: "Add money" }).click();
+  await radio(page, "Pay with", "USDC on Base").click();
+  // Only the shared address is configured: the legacy panel, with the manual credit wording.
+  const usdc = page.getByTestId("wallet-usdc-funding");
+  await expect(usdc.getByTestId("wallet-usdc-deposit-address")).toHaveText(DEPOSIT_ADDRESS);
+  await expect(usdc).toContainText("A member of the Card Shellz team credits your wallet after confirming the transfer — this is not instant.");
+  expect(state.usdcAddressRequests).toBe(0);
 });

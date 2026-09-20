@@ -50,8 +50,13 @@ import {
   type WalletDraft,
   type WalletFlowStep,
   type WalletTerms,
+  describeUsdcDeposit,
+  describeUsdcIntroSentence,
+  describeUsdcSourceNote,
+  usdcOfferedFor,
 } from "../dropship-wallet-flow";
-import type { DropshipWalletView, WalletFundingMethod, WalletLimits } from "../dropship-wallet-view-adapter";
+import type {
+  WalletUsdcDeposit, DropshipWalletView, WalletFundingMethod, WalletLimits } from "../dropship-wallet-view-adapter";
 
 const STAMP = "2026-09-15T00:00:00.000Z";
 const LATER = "2026-09-16T00:00:00.000Z";
@@ -74,7 +79,7 @@ const BANK = method({ fundingMethodId: 30, rail: "stripe_ach" });
 function wallet(overrides: Partial<DropshipWalletView> = {}): DropshipWalletView {
   const base: DropshipWalletView = {
     account: { availableBalanceCents: 0, pendingBalanceCents: 0, currency: "USD", status: "active" },
-    autoReload: null, fundingMethods: [], recentLedger: [], cardFundingFeeBps: 300, usdcBaseDepositAddress: null,
+    autoReload: null, fundingMethods: [], recentLedger: [], cardFundingFeeBps: 300, usdcBaseDepositAddress: null, usdcDeposit: null,
     limits: LIMITS, setupStatus: { sourceReady: false, backupReady: false, acknowledged: false, done: false, launchReady: false }, listingTiers: null, advance: null,
     clientFallbacks: [],
   };
@@ -588,5 +593,46 @@ describe("advance copy (funding design phase 3)", () => {
       .toContain("$100 of it was paid from a bank transfer still on its way");
     expect(describeNegativeBalance({ ...base, availableCents: -1_250, advance: null }))
       .toBe("$12.50 below zero — a return fee or a returned transfer took the balance below zero. Your next top-up covers it, up to $500 in one charge; anything beyond that is collected over the following daily checks. Until then, a backup-card charge for an order includes this shortfall (order plus the amount below zero, plus 3%).");
+  });
+});
+
+describe("USDC deposits in the wallet's words (funding design phase 6)", () => {
+  const limits: WalletLimits = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, caseTierMinimumCents: 50_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14 };
+  const watched: WalletUsdcDeposit = { offered: true, watched: true, chainId: 8453, tokenAddress: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", minConfirmations: 6, settleTag: "safe", address: null };
+  const unwatched: WalletUsdcDeposit = { ...watched, watched: false };
+  const notOffered: WalletUsdcDeposit = { ...watched, offered: false, watched: false };
+
+  it("says only what the watcher enforces in the intro: confirmations to show, the safe head to settle", () => {
+    const base = { cardFundingFeeBps: 300, usdcOffered: true, holdTimeoutMinutes: 2_880, limits };
+    expect(describeIntro({ ...base, usdcDeposit: watched }).topics[3].detail).toMatch(/ USDC on Base costs nothing: a transfer to your own deposit address shows in your wallet after 6 confirmations and is available once the network settles it\.$/);
+    expect(describeIntro({ ...base, usdcDeposit: { ...watched, minConfirmations: 1 } }).topics[3].detail).toContain("after 1 confirmation and");
+    expect(describeIntro({ ...base, usdcDeposit: unwatched }).topics[3].detail).toMatch(/ USDC on Base costs nothing; a member of our team credits a transfer to your own deposit address after confirming it\.$/);
+    // Only the shared address: the old sentence, and nothing about timing.
+    expect(describeIntro({ ...base, usdcDeposit: null }).topics[3].detail).toMatch(/ USDC costs nothing\.$/);
+    expect(describeIntro({ ...base, usdcDeposit: notOffered }).topics[3].detail).toMatch(/ USDC costs nothing\.$/);
+    expect(describeIntro({ ...base, usdcOffered: false, usdcDeposit: notOffered }).topics[3].detail).not.toContain("USDC");
+    expect(describeUsdcIntroSentence(null, false)).toBe("");
+  });
+
+  it("offers USDC when the vendor can be handed an address or a shared one exists", () => {
+    expect(usdcOfferedFor({ usdcDeposit: watched, usdcBaseDepositAddress: null })).toBe(true);
+    expect(usdcOfferedFor({ usdcDeposit: null, usdcBaseDepositAddress: "0x1111111111111111111111111111111111111111" })).toBe(true);
+    expect(usdcOfferedFor({ usdcDeposit: notOffered, usdcBaseDepositAddress: null })).toBe(false);
+    expect(usdcOfferedFor({ usdcDeposit: null, usdcBaseDepositAddress: null })).toBe(false);
+  });
+
+  it("words the deposit panel: the watcher's timing or the manual credit, and the one warning that matters", () => {
+    expect(describeUsdcDeposit(watched)).toEqual({
+      timing: "No fee. A transfer shows in your wallet after 6 confirmations and is available for orders once the network settles it — usually within a few minutes (our estimate).",
+      warning: "Send only USDC on the Base network to this address. Anything else sent here cannot be recovered.",
+    });
+    expect(describeUsdcDeposit(unwatched).timing).toBe("No fee. A member of the Card Shellz team credits your wallet after confirming the transfer — this is not instant.");
+  });
+
+  it("explains on the source step why USDC can never be the autopay source, in each mode", () => {
+    expect(describeUsdcSourceNote(watched)).toBe("Prefer USDC? It costs nothing: send USDC on Base to your own deposit address under Add money and it lands in your wallet on its own. It cannot be pulled, so it can never be your autopay source.");
+    expect(describeUsdcSourceNote(unwatched)).toContain("a member of our team credits your wallet after confirming the transfer");
+    expect(describeUsdcSourceNote(null)).toContain("Card Shellz's deposit address");
+    expect(describeUsdcSourceNote(notOffered)).toContain("Card Shellz's deposit address");
   });
 });

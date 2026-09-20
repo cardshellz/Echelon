@@ -6,6 +6,7 @@ import { FUNDING_METHOD_FINANCIAL_CONNECTIONS_ACCOUNT_KEY } from "../domain/fund
 import type { DropshipAdvanceContext } from "../domain/acceptance-funding";
 import { decideFundingReversal } from "../domain/funding-reversal";
 import { pauseDropshipVendorWithClient } from "./dropship-vendor-standing.repository";
+import { usdcTransactionReferenceId } from "../application/dropship-wallet-service";
 import { loadAdvancePolicyWithClient, loadAdvanceSourcesWithClient } from "./dropship-advance.reader";
 import type {
   ConfigureDropshipAutoReloadRepositoryInput,
@@ -31,6 +32,12 @@ import type {
   ReinstateDropshipReversedFundingRepositoryInput,
   ReverseDropshipSettledFundingRepositoryInput,
   UpsertDropshipFundingMethodRepositoryInput,
+  DropshipUsdcDepositLedgerRepository,
+  DropshipUsdcDepositLedgerResult,
+  ObserveDropshipUsdcDepositRepositoryInput,
+  RecordDropshipUsdcDepositMovedRepositoryInput,
+  SettleDropshipUsdcDepositRepositoryInput,
+  VoidDropshipUsdcDepositRepositoryInput,
 } from "../application/dropship-wallet-service";
 
 interface WalletAccountRow {
@@ -124,9 +131,22 @@ interface UsdcLedgerRow {
   status: string;
   observed_at: Date;
   settled_at: Date | null;
+  log_index: number | null;
+  block_number: string | number | null;
+  block_hash: string | null;
+  token_address: string | null;
+  deposit_address_id: number | null;
+  dust_atomic_units: string | number | null;
+  voided_at: Date | null;
 }
 
-export class PgDropshipWalletRepository implements DropshipWalletRepository {
+/** Every column of a USDC observation, for SELECT and RETURNING alike. */
+const USDC_LEDGER_COLUMNS = `id, vendor_id, wallet_ledger_id, chain_id, transaction_hash,
+            from_address, to_address, amount_atomic_units, confirmations,
+            status, observed_at, settled_at, log_index, block_number, block_hash,
+            token_address, deposit_address_id, dust_atomic_units, voided_at`;
+
+export class PgDropshipWalletRepository implements DropshipWalletRepository, DropshipUsdcDepositLedgerRepository {
   constructor(private readonly dbPool: Pool = defaultPool) {}
 
   async getOrCreateWalletAccount(input: {
@@ -344,6 +364,7 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository {
       const existingUsdc = await findUsdcLedgerByTransactionWithClient(client, {
         chainId: input.chainId,
         transactionHash: input.transactionHash,
+        logIndex: input.logIndex,
       });
       if (existingUsdc) {
         const replay = await replayConfirmedUsdcFundingWithClient(client, input, existingUsdc);
@@ -375,7 +396,7 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository {
       }
 
       const referenceType = "usdc_base_transaction";
-      const referenceId = `${input.chainId}:${input.transactionHash}`;
+      const referenceId = usdcTransactionReferenceId(input);
       const replay = await findReplayLedgerWithClient(client, {
         vendorId: input.vendorId,
         idempotencyKey: input.idempotencyKey,
@@ -399,6 +420,7 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository {
           transactionHash: input.transactionHash,
           fromAddress: input.fromAddress ?? null,
           toAddress: input.toAddress,
+          logIndex: input.logIndex,
           amountAtomicUnits: input.amountAtomicUnits,
           confirmations: input.confirmations,
           status: "settled",
@@ -466,6 +488,7 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository {
         transactionHash: input.transactionHash,
         fromAddress: input.fromAddress ?? null,
         toAddress: input.toAddress,
+        logIndex: input.logIndex,
         amountAtomicUnits: input.amountAtomicUnits,
         confirmations: input.confirmations,
         status: "settled",
@@ -686,6 +709,391 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository {
     }
   }
 
+  // ---- USDC deposits watched on chain (funding design phase 6) ----
+
+  async findUsdcDepositByLog(input: { chainId: number; transactionHash: string; logIndex: number }): Promise<DropshipUsdcLedgerEntryRecord | null> {
+    const result = await this.dbPool.query<UsdcLedgerRow>(
+      `SELECT ${USDC_LEDGER_COLUMNS}
+       FROM dropship.dropship_usdc_ledger_entries
+       WHERE chain_id = $1
+         AND transaction_hash = $2
+         AND log_index = $3
+       LIMIT 1`,
+      [input.chainId, input.transactionHash, input.logIndex],
+    );
+    return result.rows[0] ? mapUsdcLedgerRow(result.rows[0]) : null;
+  }
+
+  async listPendingUsdcDeposits(input: { chainId: number; limit: number }): Promise<DropshipUsdcLedgerEntryRecord[]> {
+    const result = await this.dbPool.query<UsdcLedgerRow>(
+      `SELECT ${USDC_LEDGER_COLUMNS}
+       FROM dropship.dropship_usdc_ledger_entries
+       WHERE chain_id = $1
+         AND status = 'pending'
+         AND log_index IS NOT NULL
+       ORDER BY block_number ASC NULLS FIRST, id ASC
+       LIMIT $2`,
+      [input.chainId, input.limit],
+    );
+    return result.rows.map(mapUsdcLedgerRow);
+  }
+
+  /**
+   * Record a transfer the watcher found. Pending or settled, the wallet
+   * balance and the chain observation are written in one transaction; dust
+   * is recorded and moves nothing. A replayed scan (the cursor did not
+   * advance after a failure) finds its own row and moves nothing twice.
+   */
+  async observeUsdcDeposit(input: ObserveDropshipUsdcDepositRepositoryInput): Promise<DropshipUsdcDepositLedgerResult> {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      const existing = await findUsdcLedgerByTransactionWithClient(client, {
+        chainId: input.transfer.chainId,
+        transactionHash: input.transfer.transactionHash,
+        logIndex: input.transfer.logIndex,
+      });
+      if (existing) {
+        assertUsdcObservationMatches(existing, input);
+        const replay = await readUsdcDepositLedgerResultWithClient(client, {
+          vendorId: input.vendorId,
+          currency: input.currency,
+          usdcLedgerEntry: existing,
+          now: input.occurredAt,
+        });
+        await client.query("COMMIT");
+        return replay;
+      }
+
+      const account = await loadWalletAccountForMutation(client, {
+        vendorId: input.vendorId,
+        walletAccountId: null,
+        currency: input.currency,
+        occurredAt: input.occurredAt,
+      });
+      const chainFacts = {
+        vendorId: input.vendorId,
+        chainId: input.transfer.chainId,
+        transactionHash: input.transfer.transactionHash,
+        fromAddress: input.transfer.fromAddress,
+        toAddress: input.transfer.toAddress,
+        amountAtomicUnits: input.transfer.amountAtomicUnits,
+        confirmations: input.confirmations,
+        observedAt: input.occurredAt,
+        logIndex: input.transfer.logIndex,
+        blockNumber: input.transfer.blockNumber,
+        blockHash: input.transfer.blockHash,
+        tokenAddress: input.transfer.tokenAddress,
+        depositAddressId: input.depositAddressId,
+        dustAtomicUnits: input.dustAtomicUnits,
+      };
+
+      if (input.status === "dust") {
+        const usdcLedgerEntry = await insertUsdcLedgerEntryWithClient(client, {
+          ...chainFacts,
+          walletLedgerId: null,
+          status: "dust",
+          settledAt: null,
+        });
+        await recordWalletAuditEvent(client, {
+          vendorId: input.vendorId,
+          entityType: "dropship_usdc_ledger_entries",
+          entityId: String(usdcLedgerEntry.usdcLedgerEntryId),
+          eventType: "wallet_usdc_deposit_dust",
+          payload: serializeUsdcLedgerForAudit(usdcLedgerEntry),
+          createdAt: input.occurredAt,
+        });
+        await client.query("COMMIT");
+        return { account, ledgerEntry: null, usdcLedgerEntry, idempotentReplay: false };
+      }
+
+      const referenceType = "usdc_base_transaction";
+      const referenceId = usdcDepositReferenceId(input.transfer);
+      const nextAvailable = input.status === "settled"
+        ? account.availableBalanceCents + input.amountCents
+        : account.availableBalanceCents;
+      const nextPending = input.status === "pending"
+        ? account.pendingBalanceCents + input.amountCents
+        : account.pendingBalanceCents;
+      const updatedAccount = await updateWalletBalancesWithClient(client, {
+        walletAccountId: account.walletAccountId,
+        vendorId: input.vendorId,
+        availableBalanceCents: nextAvailable,
+        pendingBalanceCents: nextPending,
+        updatedAt: input.occurredAt,
+      });
+      const ledgerEntry = await insertLedgerEntryWithClient(client, {
+        walletAccountId: account.walletAccountId,
+        vendorId: input.vendorId,
+        type: "funding",
+        status: input.status,
+        amountCents: input.amountCents,
+        currency: input.currency,
+        availableBalanceAfterCents: nextAvailable,
+        pendingBalanceAfterCents: nextPending,
+        referenceType,
+        referenceId,
+        idempotencyKey: `usdc-deposit:${referenceId}`,
+        fundingMethodId: null,
+        externalTransactionId: input.transfer.transactionHash,
+        metadata: {
+          rail: "usdc_base",
+          source: "chain_watcher",
+          chainId: input.transfer.chainId,
+          tokenAddress: input.transfer.tokenAddress,
+          transactionHash: input.transfer.transactionHash,
+          logIndex: input.transfer.logIndex,
+          blockNumber: input.transfer.blockNumber,
+          blockHash: input.transfer.blockHash,
+          fromAddress: input.transfer.fromAddress,
+          toAddress: input.transfer.toAddress,
+          amountAtomicUnits: input.transfer.amountAtomicUnits,
+          dustAtomicUnits: input.dustAtomicUnits,
+          confirmations: input.confirmations,
+          depositAddressId: input.depositAddressId,
+          requestHash: input.requestHash,
+        },
+        createdAt: input.occurredAt,
+        settledAt: input.status === "settled" ? input.occurredAt : null,
+      });
+      const usdcLedgerEntry = await insertUsdcLedgerEntryWithClient(client, {
+        ...chainFacts,
+        walletLedgerId: ledgerEntry.ledgerEntryId,
+        status: input.status,
+        settledAt: input.status === "settled" ? input.occurredAt : null,
+      });
+      await recordWalletAuditEvent(client, {
+        vendorId: input.vendorId,
+        entityType: "dropship_wallet_ledger",
+        entityId: String(ledgerEntry.ledgerEntryId),
+        eventType: input.status === "settled" ? "wallet_funding_settled" : "wallet_funding_pending",
+        payload: serializeLedgerForAudit(ledgerEntry),
+        createdAt: input.occurredAt,
+      });
+      await recordWalletAuditEvent(client, {
+        vendorId: input.vendorId,
+        entityType: "dropship_usdc_ledger_entries",
+        entityId: String(usdcLedgerEntry.usdcLedgerEntryId),
+        eventType: "wallet_usdc_deposit_observed",
+        payload: serializeUsdcLedgerForAudit(usdcLedgerEntry),
+        createdAt: input.occurredAt,
+      });
+      await client.query("COMMIT");
+      return { account: updatedAccount, ledgerEntry, usdcLedgerEntry, idempotentReplay: false };
+    } catch (error) {
+      await rollbackQuietly(client);
+      if (isUniqueViolation(error)) {
+        // Two watcher ticks raced on one transfer: read what the winner
+        // wrote, without a transaction, and report it as a replay.
+        const replay = await this.findUsdcDepositReplay(input);
+        if (replay) return replay;
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /** Settle a pending deposit once its block is at or below the safe head: pending → available. */
+  async settleUsdcDeposit(input: SettleDropshipUsdcDepositRepositoryInput): Promise<DropshipUsdcDepositLedgerResult> {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      const usdcLedgerEntry = await requireUsdcLedgerForUpdate(client, input);
+      if (usdcLedgerEntry.status !== "pending") {
+        const replay = await readUsdcDepositLedgerResultWithClient(client, {
+          vendorId: input.vendorId,
+          currency: null,
+          usdcLedgerEntry,
+          now: input.occurredAt,
+        });
+        await client.query("COMMIT");
+        return replay;
+      }
+      const { account, ledgerEntry } = await loadPendingUsdcCreditForUpdate(client, { vendorId: input.vendorId, usdcLedgerEntry });
+      const settled = await settlePendingFundingWithClient(client, {
+        account,
+        ledgerEntry,
+        fundingMethodId: null,
+        externalTransactionId: usdcLedgerEntry.transactionHash,
+        metadata: {
+          settledFromPending: true,
+          settledBlockNumber: input.current.blockNumber,
+          settledBlockHash: input.current.blockHash,
+          confirmations: input.confirmations,
+        },
+        settledAt: input.occurredAt,
+      });
+      const updatedUsdc = await updateUsdcLedgerChainStateWithClient(client, {
+        usdcLedgerEntryId: usdcLedgerEntry.usdcLedgerEntryId,
+        vendorId: input.vendorId,
+        status: "settled",
+        confirmations: input.confirmations,
+        blockNumber: input.current.blockNumber,
+        blockHash: input.current.blockHash,
+        settledAt: input.occurredAt,
+        voidedAt: null,
+      });
+      await recordWalletAuditEvent(client, {
+        vendorId: input.vendorId,
+        entityType: "dropship_wallet_ledger",
+        entityId: String(settled.ledgerEntry.ledgerEntryId),
+        eventType: "wallet_funding_settled",
+        payload: serializeLedgerForAudit(settled.ledgerEntry),
+        createdAt: input.occurredAt,
+      });
+      await recordWalletAuditEvent(client, {
+        vendorId: input.vendorId,
+        entityType: "dropship_usdc_ledger_entries",
+        entityId: String(updatedUsdc.usdcLedgerEntryId),
+        eventType: "wallet_usdc_deposit_settled",
+        payload: serializeUsdcLedgerForAudit(updatedUsdc),
+        createdAt: input.occurredAt,
+      });
+      await client.query("COMMIT");
+      return { account: settled.account, ledgerEntry: settled.ledgerEntry, usdcLedgerEntry: updatedUsdc, idempotentReplay: false };
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /** Void a pending deposit a reorg removed: the amount leaves the pending balance, nothing else moves. */
+  async voidUsdcDeposit(input: VoidDropshipUsdcDepositRepositoryInput): Promise<DropshipUsdcDepositLedgerResult> {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      const usdcLedgerEntry = await requireUsdcLedgerForUpdate(client, input);
+      if (usdcLedgerEntry.status !== "pending") {
+        const replay = await readUsdcDepositLedgerResultWithClient(client, {
+          vendorId: input.vendorId,
+          currency: null,
+          usdcLedgerEntry,
+          now: input.occurredAt,
+        });
+        await client.query("COMMIT");
+        return replay;
+      }
+      if (usdcLedgerEntry.blockNumber === null || usdcLedgerEntry.blockHash === null) {
+        // Only a watched deposit (one with a block on record) is ever voided
+        // automatically; a manual staff credit is reversed by hand.
+        throw new DropshipError(
+          "DROPSHIP_USDC_DEPOSIT_CHAIN_FACTS_MISSING",
+          "A USDC deposit without a block on record cannot be voided automatically.",
+          { vendorId: input.vendorId, usdcLedgerEntryId: usdcLedgerEntry.usdcLedgerEntryId, classification: "permanent" },
+        );
+      }
+      const { ledgerEntry } = await loadPendingUsdcCreditForUpdate(client, { vendorId: input.vendorId, usdcLedgerEntry });
+      const voided = await voidPendingFundingWithClient(client, {
+        vendorId: input.vendorId,
+        ledgerEntry,
+        failure: {
+          code: input.reasonCode,
+          message: input.reasonMessage,
+          providerStatus: "reorged",
+          providerEventId: `usdc-deposit-void:${usdcDepositReferenceId(usdcLedgerEntry)}`,
+        },
+        occurredAt: input.occurredAt,
+      });
+      const updatedUsdc = await updateUsdcLedgerChainStateWithClient(client, {
+        usdcLedgerEntryId: usdcLedgerEntry.usdcLedgerEntryId,
+        vendorId: input.vendorId,
+        status: "voided",
+        confirmations: 0,
+        blockNumber: usdcLedgerEntry.blockNumber,
+        blockHash: usdcLedgerEntry.blockHash,
+        settledAt: null,
+        voidedAt: input.occurredAt,
+      });
+      await recordWalletAuditEvent(client, {
+        vendorId: input.vendorId,
+        entityType: "dropship_usdc_ledger_entries",
+        entityId: String(updatedUsdc.usdcLedgerEntryId),
+        eventType: "wallet_usdc_deposit_voided",
+        payload: { ...serializeUsdcLedgerForAudit(updatedUsdc), reasonCode: input.reasonCode, reasonMessage: input.reasonMessage },
+        createdAt: input.occurredAt,
+      });
+      await client.query("COMMIT");
+      return { account: voided.account, ledgerEntry: voided.ledgerEntry, usdcLedgerEntry: updatedUsdc, idempotentReplay: false };
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /** A pending deposit re-included in another block: record where it sits now; no money moves. */
+  async recordUsdcDepositMoved(input: RecordDropshipUsdcDepositMovedRepositoryInput): Promise<DropshipUsdcLedgerEntryRecord> {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      const usdcLedgerEntry = await requireUsdcLedgerForUpdate(client, input);
+      if (usdcLedgerEntry.status !== "pending") {
+        await client.query("COMMIT");
+        return usdcLedgerEntry;
+      }
+      const moved = await updateUsdcLedgerChainStateWithClient(client, {
+        usdcLedgerEntryId: usdcLedgerEntry.usdcLedgerEntryId,
+        vendorId: input.vendorId,
+        status: "pending",
+        confirmations: input.confirmations,
+        blockNumber: input.current.blockNumber,
+        blockHash: input.current.blockHash,
+        settledAt: null,
+        voidedAt: null,
+      });
+      await recordWalletAuditEvent(client, {
+        vendorId: input.vendorId,
+        entityType: "dropship_usdc_ledger_entries",
+        entityId: String(moved.usdcLedgerEntryId),
+        eventType: "wallet_usdc_deposit_moved",
+        payload: {
+          ...serializeUsdcLedgerForAudit(moved),
+          previousBlockNumber: usdcLedgerEntry.blockNumber,
+          previousBlockHash: usdcLedgerEntry.blockHash,
+        },
+        createdAt: input.occurredAt,
+      });
+      await client.query("COMMIT");
+      return moved;
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /** Read-only: what a racing tick already wrote for this transfer. */
+  private async findUsdcDepositReplay(input: ObserveDropshipUsdcDepositRepositoryInput): Promise<DropshipUsdcDepositLedgerResult | null> {
+    const client = await this.dbPool.connect();
+    try {
+      const result = await client.query<UsdcLedgerRow>(
+        `SELECT ${USDC_LEDGER_COLUMNS}
+         FROM dropship.dropship_usdc_ledger_entries
+         WHERE chain_id = $1
+           AND transaction_hash = $2
+           AND log_index = $3
+         LIMIT 1`,
+        [input.transfer.chainId, input.transfer.transactionHash, input.transfer.logIndex],
+      );
+      if (!result.rows[0]) return null;
+      const usdcLedgerEntry = mapUsdcLedgerRow(result.rows[0]);
+      assertUsdcObservationMatches(usdcLedgerEntry, input);
+      return readUsdcDepositLedgerResultWithClient(client, {
+        vendorId: input.vendorId,
+        currency: input.currency,
+        usdcLedgerEntry,
+        now: input.occurredAt,
+      });
+    } finally {
+      client.release();
+    }
+  }
+
   async failPendingFunding(input: FailDropshipPendingFundingRepositoryInput): Promise<DropshipWalletFundingFailureRepositoryResult | null> {
     const client = await this.dbPool.connect();
     try {
@@ -720,66 +1128,16 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository {
         };
       }
 
-      const account = await loadWalletAccountByIdWithClient(client, {
+      const { account: updatedAccount, ledgerEntry: failedEntry } = await voidPendingFundingWithClient(client, {
         vendorId: input.vendorId,
-        walletAccountId: ledgerEntry.walletAccountId,
-        forUpdate: true,
-      });
-      if (!account) {
-        throw new DropshipError(
-          "DROPSHIP_WALLET_ACCOUNT_NOT_FOUND",
-          "Dropship wallet account was not found.",
-          { vendorId: input.vendorId, walletAccountId: ledgerEntry.walletAccountId, retryable: false },
-        );
-      }
-      const nextPending = account.pendingBalanceCents - ledgerEntry.amountCents;
-      if (nextPending < 0) {
-        // The pending balance no longer contains this credit. That is a
-        // bookkeeping fault, not something to paper over with a clamp: fail
-        // closed so the webhook is retried and a human sees the code.
-        throw new DropshipError(
-          "DROPSHIP_WALLET_PENDING_BALANCE_INCONSISTENT",
-          "Dropship wallet pending balance is smaller than the pending credit being voided.",
-          {
-            vendorId: input.vendorId,
-            walletAccountId: account.walletAccountId,
-            ledgerEntryId: ledgerEntry.ledgerEntryId,
-            pendingBalanceCents: account.pendingBalanceCents,
-            amountCents: ledgerEntry.amountCents,
-            retryable: false,
-          },
-        );
-      }
-      const updatedAccount = await updateWalletBalancesWithClient(client, {
-        walletAccountId: account.walletAccountId,
-        vendorId: input.vendorId,
-        availableBalanceCents: account.availableBalanceCents,
-        pendingBalanceCents: nextPending,
-        updatedAt: input.occurredAt,
-      });
-      const failedEntry = await updateLedgerFailureWithClient(client, {
-        ledgerEntryId: ledgerEntry.ledgerEntryId,
-        vendorId: input.vendorId,
-        availableBalanceAfterCents: account.availableBalanceCents,
-        pendingBalanceAfterCents: nextPending,
-        metadata: {
-          ...ledgerEntry.metadata,
-          failure: {
-            code: input.failureCode,
-            message: input.failureMessage,
-            providerStatus: input.providerStatus,
-            providerEventId: input.providerEventId,
-            failedAt: input.occurredAt.toISOString(),
-          },
+        ledgerEntry,
+        failure: {
+          code: input.failureCode,
+          message: input.failureMessage,
+          providerStatus: input.providerStatus,
+          providerEventId: input.providerEventId,
         },
-      });
-      await recordWalletAuditEvent(client, {
-        vendorId: input.vendorId,
-        entityType: "dropship_wallet_ledger",
-        entityId: String(failedEntry.ledgerEntryId),
-        eventType: "wallet_funding_failed",
-        payload: serializeLedgerForAudit(failedEntry),
-        createdAt: input.occurredAt,
+        occurredAt: input.occurredAt,
       });
       // Same transaction as the void: the vendor is paused because this
       // credit failed, and the two facts commit or roll back together.
@@ -1537,6 +1895,7 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository {
       const usdcLedgerEntry = await findUsdcLedgerByTransactionWithClient(client, {
         chainId: input.chainId,
         transactionHash: input.transactionHash,
+        logIndex: input.logIndex,
       });
       if (usdcLedgerEntry) {
         const replay = await replayConfirmedUsdcFundingWithClient(client, input, usdcLedgerEntry);
@@ -1548,7 +1907,7 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository {
         vendorId: input.vendorId,
         idempotencyKey: input.idempotencyKey,
         referenceType: "usdc_base_transaction",
-        referenceId: `${input.chainId}:${input.transactionHash}`,
+        referenceId: usdcTransactionReferenceId(input),
       });
       if (!ledgerEntry) {
         await client.query("COMMIT");
@@ -1560,7 +1919,7 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository {
         currency: input.currency,
         status: "settled",
         referenceType: "usdc_base_transaction",
-        referenceId: `${input.chainId}:${input.transactionHash}`,
+        referenceId: usdcTransactionReferenceId(input),
         requestHash: input.requestHash,
       });
       const account = await getOrCreateWalletAccountWithClient(client, {
@@ -1575,6 +1934,7 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository {
         transactionHash: input.transactionHash,
         fromAddress: input.fromAddress ?? null,
         toAddress: input.toAddress,
+        logIndex: input.logIndex,
         amountAtomicUnits: input.amountAtomicUnits,
         confirmations: input.confirmations,
         status: "settled",
@@ -1663,7 +2023,7 @@ async function replayConfirmedUsdcFundingWithClient(
     currency: input.currency,
     status: "settled",
     referenceType: "usdc_base_transaction",
-    referenceId: `${input.chainId}:${input.transactionHash}`,
+    referenceId: usdcTransactionReferenceId(input),
     requestHash: input.requestHash,
   });
   if (
@@ -1693,6 +2053,104 @@ async function replayConfirmedUsdcFundingWithClient(
     usdcLedgerEntry,
     idempotentReplay: true,
   };
+}
+
+/**
+ * Void a pending funding credit: the amount leaves the pending balance, the
+ * ledger row is marked failed with the reason, and the audit row is written.
+ * Shared by a returned bank transfer and a USDC deposit a reorg removed.
+ */
+async function voidPendingFundingWithClient(
+  client: PoolClient,
+  input: {
+    vendorId: number;
+    ledgerEntry: DropshipWalletLedgerRecord;
+    failure: {
+      code: string | null;
+      message: string | null;
+      providerStatus: string | null;
+      providerEventId: string;
+    };
+    occurredAt: Date;
+  },
+): Promise<{ account: DropshipWalletAccountRecord; ledgerEntry: DropshipWalletLedgerRecord }> {
+  const { ledgerEntry } = input;
+  if (ledgerEntry.walletAccountId === null) {
+    throw new DropshipError(
+      "DROPSHIP_WALLET_LEDGER_ACCOUNT_MISSING",
+      "Dropship wallet funding ledger entry is not attached to a wallet account.",
+      { vendorId: input.vendorId, ledgerEntryId: ledgerEntry.ledgerEntryId, retryable: false },
+    );
+  }
+  if (ledgerEntry.status !== "pending" || ledgerEntry.type !== "funding") {
+    throw new DropshipError(
+      "DROPSHIP_WALLET_SETTLEMENT_STATE_INVALID",
+      "Only pending funding ledger entries can be voided.",
+      { ledgerEntryId: ledgerEntry.ledgerEntryId, status: ledgerEntry.status },
+    );
+  }
+  const account = await loadWalletAccountByIdWithClient(client, {
+    vendorId: input.vendorId,
+    walletAccountId: ledgerEntry.walletAccountId,
+    forUpdate: true,
+  });
+  if (!account) {
+    throw new DropshipError(
+      "DROPSHIP_WALLET_ACCOUNT_NOT_FOUND",
+      "Dropship wallet account was not found.",
+      { vendorId: input.vendorId, walletAccountId: ledgerEntry.walletAccountId, retryable: false },
+    );
+  }
+  const nextPending = account.pendingBalanceCents - ledgerEntry.amountCents;
+  if (nextPending < 0) {
+    // The pending balance no longer contains this credit. That is a
+    // bookkeeping fault, not something to paper over with a clamp: fail
+    // closed so the caller retries and a human sees the code.
+    throw new DropshipError(
+      "DROPSHIP_WALLET_PENDING_BALANCE_INCONSISTENT",
+      "Dropship wallet pending balance is smaller than the pending credit being voided.",
+      {
+        vendorId: input.vendorId,
+        walletAccountId: account.walletAccountId,
+        ledgerEntryId: ledgerEntry.ledgerEntryId,
+        pendingBalanceCents: account.pendingBalanceCents,
+        amountCents: ledgerEntry.amountCents,
+        retryable: false,
+      },
+    );
+  }
+  const updatedAccount = await updateWalletBalancesWithClient(client, {
+    walletAccountId: account.walletAccountId,
+    vendorId: input.vendorId,
+    availableBalanceCents: account.availableBalanceCents,
+    pendingBalanceCents: nextPending,
+    updatedAt: input.occurredAt,
+  });
+  const failedEntry = await updateLedgerFailureWithClient(client, {
+    ledgerEntryId: ledgerEntry.ledgerEntryId,
+    vendorId: input.vendorId,
+    availableBalanceAfterCents: account.availableBalanceCents,
+    pendingBalanceAfterCents: nextPending,
+    metadata: {
+      ...ledgerEntry.metadata,
+      failure: {
+        code: input.failure.code,
+        message: input.failure.message,
+        providerStatus: input.failure.providerStatus,
+        providerEventId: input.failure.providerEventId,
+        failedAt: input.occurredAt.toISOString(),
+      },
+    },
+  });
+  await recordWalletAuditEvent(client, {
+    vendorId: input.vendorId,
+    entityType: "dropship_wallet_ledger",
+    entityId: String(failedEntry.ledgerEntryId),
+    eventType: "wallet_funding_failed",
+    payload: serializeLedgerForAudit(failedEntry),
+    createdAt: input.occurredAt,
+  });
+  return { account: updatedAccount, ledgerEntry: failedEntry };
 }
 
 async function settlePendingFundingWithClient(
@@ -2173,32 +2631,89 @@ async function loadWalletLedgerByIdWithClient(
   return mapLedgerRow(requiredRow(result.rows[0], "Dropship wallet ledger replay did not return a row."));
 }
 
+/**
+ * One observation per (chain, transaction, log). A manual staff credit has
+ * no log index and is keyed as -1, the same rule as the unique index.
+ */
 async function findUsdcLedgerByTransactionWithClient(
   client: PoolClient,
   input: {
     chainId: number;
     transactionHash: string;
+    logIndex: number | null;
   },
 ): Promise<DropshipUsdcLedgerEntryRecord | null> {
   const result = await client.query<UsdcLedgerRow>(
-    `SELECT id, vendor_id, wallet_ledger_id, chain_id, transaction_hash,
-            from_address, to_address, amount_atomic_units, confirmations,
-            status, observed_at, settled_at
+    `SELECT ${USDC_LEDGER_COLUMNS}
      FROM dropship.dropship_usdc_ledger_entries
      WHERE chain_id = $1
        AND transaction_hash = $2
+       AND COALESCE(log_index, -1) = $3
      LIMIT 1
      FOR UPDATE`,
-    [input.chainId, input.transactionHash],
+    [input.chainId, input.transactionHash, input.logIndex ?? -1],
   );
   return result.rows[0] ? mapUsdcLedgerRow(result.rows[0]) : null;
+}
+
+async function loadUsdcLedgerByIdWithClient(
+  client: PoolClient,
+  input: { usdcLedgerEntryId: number; vendorId: number; forUpdate: boolean },
+): Promise<DropshipUsdcLedgerEntryRecord | null> {
+  const result = await client.query<UsdcLedgerRow>(
+    `SELECT ${USDC_LEDGER_COLUMNS}
+     FROM dropship.dropship_usdc_ledger_entries
+     WHERE id = $1
+       AND vendor_id = $2
+     LIMIT 1${input.forUpdate ? "\n     FOR UPDATE" : ""}`,
+    [input.usdcLedgerEntryId, input.vendorId],
+  );
+  return result.rows[0] ? mapUsdcLedgerRow(result.rows[0]) : null;
+}
+
+async function updateUsdcLedgerChainStateWithClient(
+  client: PoolClient,
+  input: {
+    usdcLedgerEntryId: number;
+    vendorId: number;
+    status: "pending" | "settled" | "voided";
+    confirmations: number;
+    blockNumber: number;
+    blockHash: string;
+    settledAt: Date | null;
+    voidedAt: Date | null;
+  },
+): Promise<DropshipUsdcLedgerEntryRecord> {
+  const result = await client.query<UsdcLedgerRow>(
+    `UPDATE dropship.dropship_usdc_ledger_entries
+     SET status = $3,
+         confirmations = $4,
+         block_number = $5,
+         block_hash = $6,
+         settled_at = $7,
+         voided_at = $8
+     WHERE id = $1
+       AND vendor_id = $2
+     RETURNING ${USDC_LEDGER_COLUMNS}`,
+    [
+      input.usdcLedgerEntryId,
+      input.vendorId,
+      input.status,
+      input.confirmations,
+      input.blockNumber,
+      input.blockHash,
+      input.settledAt,
+      input.voidedAt,
+    ],
+  );
+  return mapUsdcLedgerRow(requiredRow(result.rows[0], "Dropship USDC ledger update did not return a row."));
 }
 
 async function insertUsdcLedgerEntryWithClient(
   client: PoolClient,
   input: {
     vendorId: number;
-    walletLedgerId: number;
+    walletLedgerId: number | null;
     chainId: number;
     transactionHash: string;
     fromAddress: string | null;
@@ -2207,17 +2722,23 @@ async function insertUsdcLedgerEntryWithClient(
     confirmations: number;
     status: string;
     observedAt: Date;
-    settledAt: Date;
+    settledAt: Date | null;
+    /** Chain facts the watcher records; a manual staff credit leaves them null. */
+    logIndex?: number | null;
+    blockNumber?: number | null;
+    blockHash?: string | null;
+    tokenAddress?: string | null;
+    depositAddressId?: number | null;
+    dustAtomicUnits?: string;
   },
 ): Promise<DropshipUsdcLedgerEntryRecord> {
   const result = await client.query<UsdcLedgerRow>(
     `INSERT INTO dropship.dropship_usdc_ledger_entries
       (vendor_id, wallet_ledger_id, chain_id, transaction_hash, from_address,
-       to_address, amount_atomic_units, confirmations, status, observed_at, settled_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-     RETURNING id, vendor_id, wallet_ledger_id, chain_id, transaction_hash,
-               from_address, to_address, amount_atomic_units, confirmations,
-               status, observed_at, settled_at`,
+       to_address, amount_atomic_units, confirmations, status, observed_at, settled_at,
+       log_index, block_number, block_hash, token_address, deposit_address_id, dust_atomic_units)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+     RETURNING ${USDC_LEDGER_COLUMNS}`,
     [
       input.vendorId,
       input.walletLedgerId,
@@ -2230,6 +2751,12 @@ async function insertUsdcLedgerEntryWithClient(
       input.status,
       input.observedAt,
       input.settledAt,
+      input.logIndex ?? null,
+      input.blockNumber ?? null,
+      input.blockHash ?? null,
+      input.tokenAddress ?? null,
+      input.depositAddressId ?? null,
+      input.dustAtomicUnits ?? "0",
     ],
   );
   return mapUsdcLedgerRow(requiredRow(result.rows[0], "Dropship USDC ledger insert did not return a row."));
@@ -2415,6 +2942,13 @@ function serializeUsdcLedgerForAudit(usdcLedgerEntry: DropshipUsdcLedgerEntryRec
     amountAtomicUnits: usdcLedgerEntry.amountAtomicUnits,
     confirmations: usdcLedgerEntry.confirmations,
     status: usdcLedgerEntry.status,
+    logIndex: usdcLedgerEntry.logIndex,
+    blockNumber: usdcLedgerEntry.blockNumber,
+    blockHash: usdcLedgerEntry.blockHash,
+    tokenAddress: usdcLedgerEntry.tokenAddress,
+    depositAddressId: usdcLedgerEntry.depositAddressId,
+    dustAtomicUnits: usdcLedgerEntry.dustAtomicUnits,
+    voidedAt: usdcLedgerEntry.voidedAt ? usdcLedgerEntry.voidedAt.toISOString() : null,
   };
 }
 
@@ -2538,6 +3072,17 @@ function mapUsdcLedgerRow(row: UsdcLedgerRow): DropshipUsdcLedgerEntryRecord {
     status: row.status,
     observedAt: row.observed_at,
     settledAt: row.settled_at,
+    logIndex: row.log_index ?? null,
+    blockNumber: row.block_number === null || row.block_number === undefined
+      ? null
+      : toSafeInteger(row.block_number, "block_number"),
+    blockHash: row.block_hash ?? null,
+    tokenAddress: row.token_address ?? null,
+    depositAddressId: row.deposit_address_id ?? null,
+    dustAtomicUnits: row.dust_atomic_units === null || row.dust_atomic_units === undefined
+      ? "0"
+      : String(row.dust_atomic_units),
+    voidedAt: row.voided_at ?? null,
   };
 }
 
@@ -2558,6 +3103,120 @@ function requiredRow<T>(row: T | undefined, message: string): T {
     throw new Error(message);
   }
   return row;
+}
+
+function usdcDepositReferenceId(transfer: { chainId: number; transactionHash: string; logIndex: number | null }): string {
+  return `${transfer.chainId}:${transfer.transactionHash}:${transfer.logIndex ?? -1}`;
+}
+
+/** The same (chain, transaction, log) must always mean the same transfer to the same vendor. */
+function assertUsdcObservationMatches(
+  existing: DropshipUsdcLedgerEntryRecord,
+  input: ObserveDropshipUsdcDepositRepositoryInput,
+): void {
+  if (
+    existing.vendorId !== input.vendorId
+    || existing.amountAtomicUnits !== input.transfer.amountAtomicUnits
+    || existing.toAddress !== input.transfer.toAddress
+  ) {
+    throw new DropshipError(
+      "DROPSHIP_USDC_TRANSACTION_CONFLICT",
+      "USDC transfer log is already recorded with different details.",
+      {
+        usdcLedgerEntryId: existing.usdcLedgerEntryId,
+        recordedVendorId: existing.vendorId,
+        vendorId: input.vendorId,
+        transactionHash: input.transfer.transactionHash,
+        logIndex: input.transfer.logIndex,
+        retryable: false,
+      },
+    );
+  }
+}
+
+async function requireUsdcLedgerForUpdate(
+  client: PoolClient,
+  input: { vendorId: number; usdcLedgerEntryId: number },
+): Promise<DropshipUsdcLedgerEntryRecord> {
+  const usdcLedgerEntry = await loadUsdcLedgerByIdWithClient(client, {
+    usdcLedgerEntryId: input.usdcLedgerEntryId,
+    vendorId: input.vendorId,
+    forUpdate: true,
+  });
+  if (!usdcLedgerEntry) {
+    throw new DropshipError(
+      "DROPSHIP_USDC_LEDGER_ENTRY_NOT_FOUND",
+      "USDC deposit observation was not found for this vendor.",
+      { vendorId: input.vendorId, usdcLedgerEntryId: input.usdcLedgerEntryId, retryable: false },
+    );
+  }
+  return usdcLedgerEntry;
+}
+
+/** The pending wallet credit behind a pending observation, with its account row locked. */
+async function loadPendingUsdcCreditForUpdate(
+  client: PoolClient,
+  input: { vendorId: number; usdcLedgerEntry: DropshipUsdcLedgerEntryRecord },
+): Promise<{ account: DropshipWalletAccountRecord; ledgerEntry: DropshipWalletLedgerRecord }> {
+  if (input.usdcLedgerEntry.walletLedgerId === null) {
+    throw new DropshipError(
+      "DROPSHIP_USDC_WALLET_LEDGER_MISSING",
+      "USDC transaction is not linked to a wallet ledger entry.",
+      { vendorId: input.vendorId, usdcLedgerEntryId: input.usdcLedgerEntry.usdcLedgerEntryId, retryable: false },
+    );
+  }
+  const ledgerEntry = await loadWalletLedgerByIdWithClient(client, {
+    vendorId: input.vendorId,
+    ledgerEntryId: input.usdcLedgerEntry.walletLedgerId,
+  });
+  if (ledgerEntry.walletAccountId === null) {
+    throw new DropshipError(
+      "DROPSHIP_WALLET_LEDGER_ACCOUNT_MISSING",
+      "Dropship wallet funding ledger entry is not attached to a wallet account.",
+      { vendorId: input.vendorId, ledgerEntryId: ledgerEntry.ledgerEntryId, retryable: false },
+    );
+  }
+  const account = await loadWalletAccountByIdWithClient(client, {
+    vendorId: input.vendorId,
+    walletAccountId: ledgerEntry.walletAccountId,
+    forUpdate: true,
+  });
+  if (!account) {
+    throw new DropshipError(
+      "DROPSHIP_WALLET_ACCOUNT_NOT_FOUND",
+      "Dropship wallet account was not found.",
+      { vendorId: input.vendorId, walletAccountId: ledgerEntry.walletAccountId, retryable: false },
+    );
+  }
+  return { account, ledgerEntry };
+}
+
+/** The observation as it stands, with its wallet credit and account: what a replay reports. */
+async function readUsdcDepositLedgerResultWithClient(
+  client: PoolClient,
+  input: {
+    vendorId: number;
+    /** Needed only when the account may not exist yet (a dust replay). */
+    currency: string | null;
+    usdcLedgerEntry: DropshipUsdcLedgerEntryRecord;
+    now: Date;
+  },
+): Promise<DropshipUsdcDepositLedgerResult> {
+  const ledgerEntry = input.usdcLedgerEntry.walletLedgerId === null
+    ? null
+    : await loadWalletLedgerByIdWithClient(client, {
+        vendorId: input.vendorId,
+        ledgerEntryId: input.usdcLedgerEntry.walletLedgerId,
+      });
+  const account = ledgerEntry?.walletAccountId
+    ? await loadWalletAccountByIdWithClient(client, { vendorId: input.vendorId, walletAccountId: ledgerEntry.walletAccountId })
+    : await getOrCreateWalletAccountWithClient(client, { vendorId: input.vendorId, currency: input.currency ?? "USD", now: input.now });
+  return {
+    account: requiredRow(account ?? undefined, "Dropship wallet account for a USDC deposit was not found."),
+    ledgerEntry,
+    usdcLedgerEntry: input.usdcLedgerEntry,
+    idempotentReplay: true,
+  };
 }
 
 function isUniqueViolation(error: unknown): boolean {

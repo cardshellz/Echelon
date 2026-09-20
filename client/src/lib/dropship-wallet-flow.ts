@@ -34,6 +34,7 @@ import type {
   WalletLimits,
   WalletAdvance,
   WalletAdvanceReason,
+  WalletUsdcDeposit,
 } from "./dropship-wallet-view-adapter";
 
 /** The setup flow, in order. The list is the model's; the page renders it and never reorders it. */
@@ -266,6 +267,50 @@ export function resolveStripeReturn(pending: PendingStripe, wallet: DropshipWall
 // ---------------------------------------------------------------------------
 // Labels
 // ---------------------------------------------------------------------------
+
+/** USDC is offered when the vendor can be handed their own address, or a shared one is configured. */
+export function usdcOfferedFor(wallet: Pick<DropshipWalletView, "usdcDeposit" | "usdcBaseDepositAddress">): boolean {
+  return wallet.usdcDeposit?.offered === true || wallet.usdcBaseDepositAddress !== null;
+}
+
+function confirmationsPhrase(count: number): string {
+  return `${count} confirmation${count === 1 ? "" : "s"}`;
+}
+
+/** The intro's USDC sentence, leading with a space so it appends to the ways-to-pay detail; empty when USDC is not offered. */
+export function describeUsdcIntroSentence(deposit: WalletUsdcDeposit | null, sharedOffered: boolean): string {
+  if (deposit?.offered) {
+    return deposit.watched
+      ? ` USDC on Base costs nothing: a transfer to your own deposit address shows in your wallet after ${confirmationsPhrase(deposit.minConfirmations)} and is available once the network settles it.`
+      : " USDC on Base costs nothing; a member of our team credits a transfer to your own deposit address after confirming it.";
+  }
+  return sharedOffered ? " USDC costs nothing." : "";
+}
+
+/**
+ * The deposit panel's words: the timing the watcher enforces (or the manual
+ * credit when nothing watches the chain) and the one warning that matters,
+ * because a token or network other than USDC on Base cannot be recovered.
+ */
+export function describeUsdcDeposit(deposit: WalletUsdcDeposit): { timing: string; warning: string } {
+  return {
+    timing: deposit.watched
+      ? `No fee. A transfer shows in your wallet after ${confirmationsPhrase(deposit.minConfirmations)} and is available for orders once the network settles it — usually within a few minutes (our estimate).`
+      : "No fee. A member of the Card Shellz team credits your wallet after confirming the transfer — this is not instant.",
+    warning: "Send only USDC on the Base network to this address. Anything else sent here cannot be recovered.",
+  };
+}
+
+/** The setup step's aside about USDC: what it is good for and why it can never be the autopay source. */
+export function describeUsdcSourceNote(deposit: WalletUsdcDeposit | null): string {
+  if (deposit?.offered && deposit.watched) {
+    return "Prefer USDC? It costs nothing: send USDC on Base to your own deposit address under Add money and it lands in your wallet on its own. It cannot be pulled, so it can never be your autopay source.";
+  }
+  if (deposit?.offered) {
+    return "Prefer USDC? It costs nothing: send USDC on Base to your own deposit address under Add money and a member of our team credits your wallet after confirming the transfer. It cannot be pulled, so it can never be your autopay source.";
+  }
+  return "Prefer USDC? It is free too, but manual: you send USDC on Base to Card Shellz's deposit address and a member of our team credits your wallet after confirming the transfer. Because it cannot be pulled automatically, it can never be your autopay source. Use it any time under Add money.";
+}
 
 export function describeFundingMethod(method: WalletFundingMethod): string {
   if (method.card) return `${method.card.brand} ending in ${method.card.last4}`;
@@ -664,13 +709,17 @@ export interface WalletIntroCopy {
  * the two tier minimums, the grace period, the advance fee and cap, and the
  * hold time. Nothing the product does not enforce as a rule is quoted.
  *
- * USDC carries a fee statement and nothing else: the code credits USDC only
- * through an admin endpoint and watches no chain, so any timing claim would be
- * unfounded.
+ * USDC (funding design phase 6): with a deposit address of the vendor's own
+ * and a chain watcher, the intro says what the watcher enforces — the
+ * confirmations before a transfer shows and settlement at the network's safe
+ * head — and nothing more. Without the watcher only the fee is stated, since
+ * a staff member credits the transfer by hand.
  */
 export function describeIntro(input: {
   cardFundingFeeBps: number;
   usdcOffered: boolean;
+  /** The served deposit position; absent or null means only the shared address, if any. */
+  usdcDeposit?: WalletUsdcDeposit | null;
   holdTimeoutMinutes: number;
   limits: WalletLimits;
 }): WalletIntroCopy {
@@ -681,7 +730,7 @@ export function describeIntro(input: {
   const grace = `${input.limits.tierChangeGraceDays} day${input.limits.tierChangeGraceDays === 1 ? "" : "s"}`;
   const advanceFee = formatFeeRate(input.limits.advanceFeeBps);
   const advanceCap = formatWholeDollars(input.limits.advanceCapCents);
-  const usdc = input.usdcOffered ? " USDC costs nothing." : "";
+  const usdc = describeUsdcIntroSentence(input.usdcDeposit ?? null, input.usdcOffered);
   return {
     lede: "Your wallet is the deposit Card Shellz draws on for the orders you sell. Here is what it holds, what it lets you sell, how it stays funded, and what happens when a payment fails.",
     topics: [

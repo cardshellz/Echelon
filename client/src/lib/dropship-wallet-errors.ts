@@ -108,6 +108,11 @@ export function describeWalletError(
       return { text: "Stripe is busy. Try again in a moment.", recovery: "none" };
     case "DROPSHIP_WALLET_VIEW_INVALID":
       return { text: "Something went wrong on our side. Nothing was changed unless it shows below after a reload.", recovery: "refetch" };
+    case "DROPSHIP_USDC_DEPOSITS_NOT_OFFERED":
+      return { text: "USDC deposits are not available right now.", recovery: "refetch" };
+    case "DROPSHIP_USDC_DEPOSIT_ADDRESS_CONFLICT":
+    case "DROPSHIP_USDC_DEPOSIT_ADDRESS_DERIVATION_MISMATCH":
+      return { text: `We could not assign your deposit address. ${SUPPORT}`, recovery: "none" };
     default:
       break;
   }
