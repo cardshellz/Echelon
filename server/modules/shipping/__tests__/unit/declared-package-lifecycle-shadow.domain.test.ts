@@ -148,7 +148,13 @@ function systemRecoveryEvent(
   };
 }
 
-function operatorRecoveryEvent(): PersistedShippingProviderLabelEventRow {
+function operatorRecoveryEvent(attestedContents: readonly Readonly<{
+  wmsShipmentItemId: number;
+  quantity: number;
+}>[] = [
+  { wmsShipmentItemId: 7001, quantity: 2 },
+  { wmsShipmentItemId: 7002, quantity: 1 },
+]): PersistedShippingProviderLabelEventRow {
   const event = buildHistoricalShipStationContentsSystemRecoveryEvent({
     shippingProviderLabelId: "41",
     providerShipmentId: 44_001,
@@ -158,10 +164,7 @@ function operatorRecoveryEvent(): PersistedShippingProviderLabelEventRow {
       contractVersion: 1,
       recoveryStatus: "wms_confirmed_after_provider_conflict",
       evidenceHash: "e".repeat(64),
-      attestedContents: [
-        { wmsShipmentItemId: 7001, quantity: 2 },
-        { wmsShipmentItemId: 7002, quantity: 1 },
-      ],
+      attestedContents,
     },
     resolvedLabelEventIds: [101],
     authorization: {
@@ -439,6 +442,26 @@ describe("persisted declared-package lifecycle adapter", () => {
         { wmsShipmentItemId: 7001, quantity: 2 },
         { wmsShipmentItemId: 7002, quantity: 1 },
       ],
+    });
+  });
+
+  it("projects a lead correction of current authoritative provider contents", () => {
+    const result = projectPersistedDeclaredPackageLifecycleShadow(persistedPackage({
+      labelEvents: [labelEvent(), operatorRecoveryEvent([
+        { wmsShipmentItemId: 7001, quantity: 2 },
+      ])],
+      lastObservedAt: labelReceivedAt,
+      confirmedCarrierEvents: [],
+    }));
+
+    expect(result).toMatchObject({
+      outcome: "projected",
+      projection: {
+        contentsStatus: "authoritative",
+        authoritativeContents: [{ wmsShipmentItemId: 7001, quantity: 2 }],
+        commercialFulfillmentPostingEligible: true,
+        inventoryPostingEligible: true,
+      },
     });
   });
 

@@ -8,7 +8,7 @@ import { QuantityProviderEvidenceCollector, type QuantityProviderResponseEvidenc
 
 describe("EbayDropshipInventoryPublicationTransportAdapter", () => {
   it("preserves the retryable transport contract for an ambiguous write failure", async () => {
-    const fetchFn = vi.fn().mockResolvedValueOnce(jsonResponse(inventoryItem(2))).mockRejectedValueOnce(new Error("fetch failed"));
+    const fetchFn = vi.fn().mockResolvedValueOnce(jsonResponse(offerPage(2))).mockRejectedValueOnce(new Error("fetch failed"));
     const { adapter } = fixture(fetchFn);
     const evidence: QuantityProviderResponseEvidence[] = [];
     const collector = new QuantityProviderEvidenceCollector({ start: async () => "1",finish: async (_id,row) => { evidence.push(row); } },
@@ -20,7 +20,7 @@ describe("EbayDropshipInventoryPublicationTransportAdapter", () => {
     expect(fetchFn).toHaveBeenCalledTimes(2);
   });
   it.each([400,401])("retains terminal HTTP %s evidence while preserving Dropship errors and auth health", async status => {
-    const fetchFn = vi.fn().mockResolvedValueOnce(jsonResponse(inventoryItem(2))).mockResolvedValueOnce(new Response(JSON.stringify({ errors: [{
+    const fetchFn = vi.fn().mockResolvedValueOnce(jsonResponse(offerPage(2))).mockResolvedValueOnce(new Response(JSON.stringify({ errors: [{
       errorId: 25001,message: "You have exceeded your maximum call limit of 250 for item per day. Try back after 1 day.",
     }] }),{ status }));
     const { adapter,health } = fixture(fetchFn);
@@ -37,14 +37,14 @@ describe("EbayDropshipInventoryPublicationTransportAdapter", () => {
   });
   it("publishes the supplied absolute quantity through the exact Dropship store", async () => {
     const fetchFn = vi.fn()
-      .mockResolvedValueOnce(jsonResponse(inventoryItem(2)))
-      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+      .mockResolvedValueOnce(jsonResponse(offerPage(2)))
+      .mockResolvedValueOnce(jsonResponse({ responses: [{ sku: "SKU-101", offerId: "offer-1", statusCode: 200 }] }));
     const { adapter, credentials } = fixture(fetchFn);
 
     await expect(adapter.publishAbsolute({
       ...request(),
       desiredQuantity: 7,
-    })).resolves.toEqual({ publishedQuantity: 7, providerResponse: { status: 204 } });
+    })).resolves.toEqual({ publishedQuantity: 7, providerResponse: { sku: "SKU-101", marketplaceId: "EBAY_US", offerId: "offer-1", quantity: 7 } });
 
     expect(credentials.loadFreshForStoreConnection).toHaveBeenCalledWith({
       vendorId: 12,
@@ -52,29 +52,31 @@ describe("EbayDropshipInventoryPublicationTransportAdapter", () => {
     });
     expect(fetchFn).toHaveBeenNthCalledWith(
       1,
-      "https://api.ebay.com/sell/inventory/v1/inventory_item/SKU-101",
+      "https://api.ebay.com/sell/inventory/v1/offer?sku=SKU-101&marketplace_id=EBAY_US&offset=0&limit=200",
       expect.objectContaining({ method: "GET" }),
     );
-    const put = fetchFn.mock.calls[1]![1] as RequestInit;
-    expect(JSON.parse(String(put.body))).toMatchObject({
-      availability: { shipToLocationAvailability: { quantity: 7 } },
-      product: { title: "Example" },
+    const post = fetchFn.mock.calls[1]![1] as RequestInit;
+    expect(fetchFn.mock.calls[1]![0]).toBe("https://api.ebay.com/sell/inventory/v1/bulk_update_price_quantity");
+    expect(post.method).toBe("POST");
+    expect(post.headers).toMatchObject({ Authorization: "Bearer secret-token" });
+    expect(JSON.parse(String(post.body))).toEqual({
+      requests: [{ sku: "SKU-101", shipToLocationAvailability: { quantity: 7 }, offers: [{ offerId: "offer-1", availableQuantity: 7 }] }],
     });
   });
 
   it("reads the provider quantity without applying another ATP formula", async () => {
-    const fetchFn = vi.fn(async () => jsonResponse(inventoryItem(9)));
+    const fetchFn = vi.fn().mockResolvedValueOnce(jsonResponse(offerPage(9))).mockResolvedValueOnce(jsonResponse(inventoryItem(12)));
     const { adapter } = fixture(fetchFn);
 
     await expect(adapter.readAbsolute(request())).resolves.toEqual({
       observedQuantity: 9,
-      providerResponse: { status: 200, observedQuantity: 9 },
+      providerResponse: { sku: "SKU-101", marketplaceId: "EBAY_US", offerId: "offer-1", inventoryItemQuantity: 12, offerQuantity: 9, observedQuantity: 9 },
     });
-    expect(fetchFn).toHaveBeenCalledOnce();
+    expect(fetchFn).toHaveBeenCalledTimes(2);
   });
 
   it("uses the registered provider inventory-item ID when the optional SKU is absent", async () => {
-    const fetchFn = vi.fn(async () => jsonResponse(inventoryItem(9)));
+    const fetchFn = vi.fn().mockResolvedValueOnce(jsonResponse(offerPage(9))).mockResolvedValueOnce(jsonResponse(inventoryItem(9)));
     const { adapter } = fixture(fetchFn);
 
     await expect(adapter.readAbsolute({
@@ -128,6 +130,36 @@ describe("EbayDropshipInventoryPublicationTransportAdapter", () => {
       status: "refresh_failed",
       invalidateAccessToken: true,
     }));
+  });
+  it("never writes when offer discovery is ambiguous", async () => {
+    const offer = offerPage(7).offers[0]!;
+    const fetchFn = vi.fn().mockResolvedValue(jsonResponse({ total: 2, offers: [offer, { ...offer, offerId: "offer-2" }] }));
+    const { adapter } = fixture(fetchFn);
+    await expect(adapter.publishAbsolute({ ...request(), desiredQuantity: 7 }))
+      .rejects.toMatchObject({ code: "EBAY_INVENTORY_OFFER_AMBIGUOUS", retryable: false });
+    expect(fetchFn).toHaveBeenCalledOnce();
+    expect(fetchFn.mock.calls[0]![1]).toMatchObject({ method: "GET" });
+  });
+  it("does not report a partial HTTP-200 bulk result as a successful publication", async () => {
+    const fetchFn = vi.fn().mockResolvedValueOnce(jsonResponse(offerPage(2)))
+      .mockResolvedValueOnce(jsonResponse({ responses: [{ sku: "SKU-101", offerId: "offer-1", statusCode: 400 }] }));
+    const { adapter } = fixture(fetchFn);
+    await expect(adapter.publishAbsolute({ ...request(), desiredQuantity: 7 }))
+      .rejects.toMatchObject({ code: "EBAY_INVENTORY_ACKNOWLEDGEMENT_INVALID", retryable: true });
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+  it.each([null, false, "0", -1])("does not turn invalid item quantity %s into zero", async (quantity) => {
+    const fetchFn = vi.fn().mockResolvedValueOnce(jsonResponse(offerPage(7)))
+      .mockResolvedValueOnce(jsonResponse({ ...inventoryItem(0), availability: { shipToLocationAvailability: { quantity } } }));
+    await expect(fixture(fetchFn).adapter.readAbsolute(request())).rejects.toMatchObject({ code: "EBAY_INVENTORY_QUANTITY_INVALID" });
+  });
+  it("keeps configured marketplace and independently owned credentials", async () => {
+    const page = offerPage(7);
+    const fetchFn = vi.fn().mockResolvedValueOnce(jsonResponse({ ...page, offers: page.offers.map(offer => ({ ...offer, marketplaceId: "EBAY_GB" })) }))
+      .mockResolvedValueOnce(jsonResponse(inventoryItem(7)));
+    await fixture(fetchFn, { config: { marketplaceId: "EBAY_GB" } }).adapter.readAbsolute(request());
+    expect(fetchFn.mock.calls[0]![0]).toContain("marketplace_id=EBAY_GB");
+    expect(fetchFn.mock.calls[0]![1].headers).toMatchObject({ Authorization: "Bearer secret-token" });
   });
 });
 
@@ -203,10 +235,15 @@ function credential(
 
 function inventoryItem(quantity: number) {
   return {
+    sku: "SKU-101",
     availability: { shipToLocationAvailability: { quantity } },
     condition: "NEW",
     product: { title: "Example" },
   };
+}
+
+function offerPage(availableQuantity: number) {
+  return { total: 1, offers: [{ sku: "SKU-101", marketplaceId: "EBAY_US", offerId: "offer-1", status: "PUBLISHED", availableQuantity }] };
 }
 
 function jsonResponse(body: unknown): Response {

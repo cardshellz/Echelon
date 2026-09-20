@@ -497,6 +497,76 @@ async function loadCandidate(
   });
 }
 
+/** Current v2 labels with a provider/WMS disagreement are operator-only
+ * candidates. Automatic historical recovery must never select them. */
+export async function loadCurrentShipStationContentsConflictCandidate(
+  client: QueryClient,
+  shippingProviderLabelId: string,
+  lockRow: boolean,
+): Promise<(HistoricalShipStationContentsCandidate & Readonly<{
+  trackingNumber: string;
+  labelStatus: "active";
+}>) | null> {
+  const result = await client.query(
+    `SELECT label.id::text AS shipping_provider_label_id,
+            label.provider_label_id, label.tracking_number
+     FROM wms.shipping_provider_labels AS label
+     WHERE label.id = $1::bigint
+       AND label.provider = 'shipstation'
+       AND label.label_direction = 'outbound'
+       AND label.label_status = 'active'
+       AND label.provider_label_id ~ '^[1-9][0-9]*$'
+       AND EXISTS (
+         SELECT 1 FROM wms.shipping_provider_label_events AS event
+         WHERE event.shipping_provider_label_id = label.id
+           AND event.event_type = 'label_observed'
+           AND event.sanitized_payload->>'payloadSchemaVersion' = '2'
+           AND event.sanitized_payload->'declaredContentsEvidence'->>'status' = 'authoritative'
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM wms.shipping_provider_label_events AS correction
+         WHERE correction.shipping_provider_label_id = label.id
+           AND correction.event_type = 'contents_recovered'
+       )
+     ${lockRow ? "FOR UPDATE" : ""}`,
+    [positiveBigintText(shippingProviderLabelId, "shippingProviderLabelId")],
+  );
+  if (result.rows.length === 0) return null;
+  if (result.rows.length !== 1) {
+    throw new HistoricalShipStationContentsAttestationRepositoryError(
+      "INVALID_DATABASE_EVIDENCE", "Current label identity is duplicated",
+    );
+  }
+  const row = result.rows[0];
+  const providerShipmentId = positiveSafeInteger(row.provider_label_id, "providerShipmentId");
+  const expectedContents = await loadHistoricalShipStationExpectedContents(
+    client as unknown as Pick<PoolClient, "query">,
+    shippingProviderLabelId,
+  );
+  if (expectedContents.kind !== "available") return null;
+  return Object.freeze({
+    shippingProviderLabelId,
+    providerShipmentId,
+    trackingNumber: exactBoundedText(row.tracking_number, "trackingNumber", 200),
+    labelStatus: "active" as const,
+    expectedContents,
+  });
+}
+
+export async function loadCurrentShipStationContentsConflictReviewSnapshot(
+  client: QueryClient,
+  shippingProviderLabelId: string,
+  lockRow: boolean,
+): Promise<HistoricalShipStationContentsAttestationReviewSnapshot | null> {
+  const candidate = await loadCurrentShipStationContentsConflictCandidate(
+    client, shippingProviderLabelId, lockRow,
+  );
+  return candidate === null ? null : Object.freeze({
+    candidate,
+    reviewContext: await loadReviewContext(client, candidate),
+  });
+}
+
 async function loadReviewContext(
   client: QueryClient,
   candidate: HistoricalShipStationContentsCandidate,

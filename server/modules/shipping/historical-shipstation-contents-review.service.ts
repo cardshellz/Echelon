@@ -5,6 +5,7 @@ import { z } from "zod";
 
 import type {
   HistoricalShipStationContentsClient,
+  HistoricalShipStationContentsLookupResult,
   HistoricalShipStationContentsProviderObservation,
 } from "./historical-shipstation-contents-audit.client";
 import type { HistoricalShipStationContentsReviewReason } from "./historical-shipstation-contents-audit.service";
@@ -166,6 +167,39 @@ function sameCandidate(
   return canonicalJson(left) === canonicalJson(right);
 }
 
+/** Provider line keys can be syntactically authoritative yet disagree with the
+ * linked WMS package. Review that disagreement instead of accepting those
+ * keys as proof that the extra item was physically packed. */
+export function classifyReviewedShipStationContents(
+  provider: HistoricalShipStationContentsLookupResult,
+  expectedContents: HistoricalShipStationExpectedContentsEvidence,
+): HistoricalShipStationContentsLookupResult {
+  if (provider.kind !== "found" || provider.evidence.status !== "authoritative"
+    || expectedContents.kind !== "available"
+    || provider.recoveryEvidenceDetails?.recoveryStatus !== "provider_line_keys_authoritative") {
+    return provider;
+  }
+  const normalized = (lines: readonly Readonly<{
+    readonly wmsShipmentItemId: number;
+    readonly quantity: number;
+  }>[]) => canonicalJson([...lines].map((line) => ({
+    wmsShipmentItemId: line.wmsShipmentItemId,
+    quantity: line.quantity,
+  })).sort((left, right) => left.wmsShipmentItemId - right.wmsShipmentItemId
+    || left.quantity - right.quantity));
+  if (normalized(provider.recoveryEvidenceDetails.attestedContents)
+    === normalized(expectedContents.lines)) return provider;
+  return Object.freeze({
+    ...provider,
+    evidence: Object.freeze({
+      ...provider.evidence,
+      recoveryStatus: "provider_wms_conflict" as const,
+      recoveryEvidence: null,
+    }),
+    recoveryEvidenceDetails: null,
+  });
+}
+
 export interface HistoricalShipStationContentsResolutionPreview {
   readonly exceptionId: string;
   readonly shippingProviderLabelId: string;
@@ -226,10 +260,10 @@ export class HistoricalShipStationContentsReviewService {
         "Historical contents review candidate is no longer eligible",
       );
     }
-    const provider = await this.providerClient.loadShipmentContents(
+    const provider = classifyReviewedShipStationContents(await this.providerClient.loadShipmentContents(
       candidate.providerShipmentId,
       candidate.expectedContents,
-    );
+    ), candidate.expectedContents);
     if (provider.kind === "not_found") {
       throw new HistoricalShipStationContentsReviewServiceError(
         "PROVIDER_SHIPMENT_NOT_FOUND",
@@ -360,10 +394,10 @@ export class HistoricalShipStationContentsReviewService {
         "Historical contents candidate changed and requires a new intake",
       );
     }
-    const provider = await this.providerClient.loadShipmentContents(
+    const provider = classifyReviewedShipStationContents(await this.providerClient.loadShipmentContents(
       currentCandidate.providerShipmentId,
       currentCandidate.expectedContents,
-    );
+    ), currentCandidate.expectedContents);
     if (provider.kind === "not_found") {
       throw new HistoricalShipStationContentsReviewServiceError(
         "PROVIDER_SHIPMENT_NOT_FOUND",

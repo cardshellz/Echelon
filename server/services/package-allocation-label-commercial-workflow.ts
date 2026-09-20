@@ -8,6 +8,10 @@ import {
   PackageAllocationLedgerRepositoryError,
 } from "../modules/shipping/package-allocation-ledger.repository";
 import type { PackageAllocationLabelCommercialWorkflow } from "../modules/shipping/package-allocation-label-commercial-fulfillment.service";
+import {
+  adaptPersistedDeclaredPackageLifecycleEvidence,
+  projectPersistedDeclaredPackageLifecycleShadow,
+} from "../modules/shipping/declared-package-lifecycle-shadow.domain";
 import { createChannelFulfillmentAuthorityRepository } from "../modules/oms/channel-fulfillment-authority.repository";
 import {
   createChannelFulfillmentAuthorityService,
@@ -53,9 +57,8 @@ export function createPackageAllocationLabelCommercialWorkflow(dependencies: {
               set_config('statement_timeout', ${STATEMENT_TIMEOUT}, true),
               set_config('lock_timeout', ${LOCK_TIMEOUT}, true),
               set_config('idle_in_transaction_session_timeout', ${IDLE_TRANSACTION_TIMEOUT}, true)`);
-            const bootstrap = new PackageAllocationBootstrapPersistenceService(
-              createTransactionBoundPackageAllocationLedgerRepository(client),
-            );
+            const ledger = createTransactionBoundPackageAllocationLedgerRepository(client);
+            const bootstrap = new PackageAllocationBootstrapPersistenceService(ledger);
             const fulfillmentAuthority = createChannelFulfillmentAuthorityService({
               repository: createChannelFulfillmentAuthorityRepository(tx),
               projector: createChannelFulfillmentProjector(tx),
@@ -69,7 +72,35 @@ export function createPackageAllocationLabelCommercialWorkflow(dependencies: {
                 error: (event) => dependencies.logger.error(event),
               },
             });
-            return work({ bootstrap, fulfillmentAuthority });
+            return work({
+              async loadLabelContents(shippingProviderLabelId) {
+                const exactLabelId = Number(shippingProviderLabelId);
+                if (!Number.isSafeInteger(exactLabelId) || exactLabelId <= 0
+                  || String(exactLabelId) !== String(shippingProviderLabelId)) return null;
+                const locked = await ledger.withSerializableTransaction((transaction) =>
+                  transaction.lockAuthorityReadinessPackages([exactLabelId]));
+                if (locked.length !== 1) return null;
+                const persistedEvidence = locked[0].persistedEvidence;
+                const adapted = adaptPersistedDeclaredPackageLifecycleEvidence(persistedEvidence);
+                const projected = projectPersistedDeclaredPackageLifecycleShadow(persistedEvidence);
+                if (adapted.outcome !== "adapted" || projected.outcome !== "projected") return null;
+                return Object.freeze({
+                  authoritativeContents: projected.projection.authoritativeContents,
+                  providerObservations: Object.freeze(adapted.input.events.flatMap((event) =>
+                    event.kind === "outbound_label_observed"
+                    && event.contentsEvidence.status === "authoritative"
+                      ? [{ eventKey: event.eventKey, contents: event.contentsEvidence.lines }]
+                      : [])),
+                  leadCorrections: Object.freeze(adapted.input.events.flatMap((event) =>
+                    event.kind === "package_contents_attested"
+                    && event.authorization === "lead_approved"
+                      ? [{ resolvesEventKeys: event.resolvesEventKeys }]
+                      : [])),
+                });
+              },
+              bootstrap,
+              fulfillmentAuthority,
+            });
           }, { isolationLevel: "serializable" });
           for (const event of committedEvents) dependencies.logger.info(event);
           return result;
