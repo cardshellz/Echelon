@@ -228,12 +228,14 @@ export default function DropshipPortalWallet() {
   // The draft of not-yet-authorized choices, vendor-scoped in sessionStorage,
   // in memory when storage is unavailable. Loaded once the vendor id is known.
   const [draft, setDraftState] = useState<WalletDraft>(EMPTY_DRAFT);
+  const draftRef = useRef<WalletDraft>(EMPTY_DRAFT);
   const [draftLoaded, setDraftLoaded] = useState(false);
   const [storageFailed, setStorageFailed] = useState(false);
   const vendorId = vendor?.vendorId ?? null;
   useEffect(() => {
     if (vendorId === null || draftLoaded) return;
     const read = readWalletDraft(storageOrNull(), vendorId);
+    draftRef.current = read.draft;
     setDraftState(read.draft);
     setStorageFailed(read.storageFailed);
     setDraftLoaded(true);
@@ -241,9 +243,23 @@ export default function DropshipPortalWallet() {
   function setDraft(update: (current: WalletDraft) => WalletDraft) {
     setDraftState((current) => {
       const next = update(current);
+      draftRef.current = next;
       if (vendorId !== null && !writeWalletDraft(storageOrNull(), vendorId, next)) setStorageFailed(true);
       return next;
     });
+  }
+
+  /**
+   * A Stripe redirect leaves the page. React runs a state updater during its
+   * next render, which is after `window.location.assign` has been called, so a
+   * draft written only through `setDraft` races the navigation: lose the race
+   * and the vendor comes back with no record of the setup they started. The
+   * redirect paths write synchronously through here before they navigate.
+   */
+  function commitDraftBeforeRedirect(next: WalletDraft) {
+    draftRef.current = next;
+    if (vendorId !== null && !writeWalletDraft(storageOrNull(), vendorId, next)) setStorageFailed(true);
+    setDraftState(next);
   }
 
   const flow = useMemo(
@@ -464,7 +480,7 @@ export default function DropshipPortalWallet() {
       const input = buildStripeFundingSetupSessionInput({ rail, returnTo: returnPath() });
       const response = await postJson<DropshipStripeFundingSetupSessionResponse>("/api/dropship/wallet/funding-methods/stripe/setup-session", input);
       const pendingStripe = buildPendingStripe({ rail, purpose, wallet, startedAt: new Date(), expiresAt: response.setupSession.expiresAt });
-      setDraft((current) => ({ ...current, pendingStripe }));
+      commitDraftBeforeRedirect({ ...draftRef.current, pendingStripe });
       window.location.assign(response.setupSession.checkoutUrl);
     });
   }
@@ -537,7 +553,7 @@ export default function DropshipPortalWallet() {
         returnTo: returnPath(),
       });
       const pendingStripe = buildPendingStripe({ rail, purpose: "deposit", wallet, startedAt: new Date(), expiresAt: response.fundingSession.expiresAt });
-      setDraft((current) => ({ ...current, pendingStripe }));
+      commitDraftBeforeRedirect({ ...draftRef.current, pendingStripe });
       window.location.assign(response.fundingSession.checkoutUrl);
     });
   }

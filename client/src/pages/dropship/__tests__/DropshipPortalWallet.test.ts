@@ -179,4 +179,19 @@ describe("DropshipPortalWallet contract", () => {
     expect(between("function ReviewStep", "function FundingControls")).toContain("{step && flow.reachableSteps.includes(step) && (");
     expect(source).toContain("onChange={(step) => setDraft((current) => draftAtStep(current, step))}");
   });
+
+  it("writes the draft synchronously before a Stripe redirect navigates away", () => {
+    // React runs a state updater on its next render, which is after
+    // window.location.assign has fired, so a draft written only through
+    // setDraft can lose the race and the vendor returns from Stripe with no
+    // record of the setup they started.
+    const redirects = source.split("window.location.assign(");
+    expect(redirects.length).toBeGreaterThan(1);
+    for (const before of redirects.slice(0, -1)) {
+      const tail = before.slice(-400);
+      expect(tail).toContain("commitDraftBeforeRedirect(");
+      expect(tail).not.toContain("setDraft((current)");
+    }
+    expect(source).toContain("function commitDraftBeforeRedirect(next: WalletDraft)");
+  });
 });

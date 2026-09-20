@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const migrationSql = readFileSync(
-  resolve(process.cwd(), "migrations/0681_dropship_wallet_policy.sql"),
+  resolve(process.cwd(), "migrations/0682_dropship_wallet_policy.sql"),
   "utf8",
 );
 
