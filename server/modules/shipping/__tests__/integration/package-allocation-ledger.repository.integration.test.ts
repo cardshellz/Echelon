@@ -4945,6 +4945,10 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       ],
     });
     await pool.query(
+      "UPDATE wms.shipping_provider_labels SET carrier = 'ups' WHERE id = $1::bigint",
+      [labelId],
+    );
+    await pool.query(
       `INSERT INTO wms.shipping_provider_label_links (
          shipping_provider_label_id, legacy_wms_shipment_id
        ) VALUES ($1::bigint, $2::integer)`,
