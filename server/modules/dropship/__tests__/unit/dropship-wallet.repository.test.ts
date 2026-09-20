@@ -443,3 +443,330 @@ describe("PgDropshipWalletRepository advance and bank balance (funding design ph
     expect(method).toMatchObject({ fundingMethodId: 100, vendorId: 10, rail: "stripe_ach", metadata: { financialConnectionsAccountId: "fca_1" } });
   });
 });
+
+describe("PgDropshipWalletRepository funding reversals (funding design phase 4)", () => {
+  const reversal = {
+    provider: "stripe" as const,
+    providerPaymentIntentId: "pi_ach_1",
+    providerDisputeId: "dp_1",
+    providerEventId: "evt_dp_1",
+    disputeAmountCents: 4000,
+    currency: "USD",
+    disputeStatus: "needs_response" as const,
+    disputeReason: "fraudulent",
+    occurredAt,
+    pauseVendor: {
+      reason: "funding_returned" as const,
+      evidence: { source: "dispute_webhook", disputed: true, providerEventId: "evt_dp_1" },
+    },
+  };
+  const reinstatement = { provider: "stripe" as const, providerDisputeId: "dp_1", providerEventId: "evt_dp_won", occurredAt };
+
+  /** The settled ACH credit the dispute is about: 4000 landed, with the funding method that sent it. */
+  const settledCredit = () => makeLedgerRow({
+    status: "settled", settled_at: occurredAt, available_balance_after_cents: "5000", pending_balance_after_cents: "0",
+  });
+  const reversalRow = (overrides: Record<string, unknown> = {}) => makeLedgerRow({
+    id: 2, type: "funding_reversal", status: "settled", amount_cents: "-4000",
+    available_balance_after_cents: "-3000", pending_balance_after_cents: "4000",
+    reference_type: "stripe_dispute", reference_id: "dp_1", idempotency_key: "stripe-dispute:dp_1",
+    metadata: { provider: "stripe", fundingLedgerEntryId: 1, rail: "stripe_ach" }, settled_at: occurredAt,
+    ...overrides,
+  });
+  const reinstatementRow = () => makeLedgerRow({
+    id: 3, type: "funding_reinstated", status: "settled", amount_cents: "4000",
+    available_balance_after_cents: "1000", pending_balance_after_cents: "4000",
+    reference_type: "stripe_dispute_reinstated", reference_id: "dp_1", idempotency_key: "stripe-dispute-reinstated:dp_1",
+    metadata: { provider: "stripe", reversalLedgerEntryId: 2, fundingLedgerEntryId: 1 }, settled_at: occurredAt,
+  });
+
+  it("debits the disputed amount, posts one reversal row, audits it, and pauses the vendor in the same transaction", async () => {
+    const statements: string[] = [];
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      const sqlText = String(sql);
+      statements.push(sqlText.trim().split(/\s+/).slice(0, 2).join(" "));
+      if (sqlText.includes("FROM dropship.dropship_wallet_ledger")) {
+        expect(sqlText).toContain("AND type = $3");
+        if (params?.[0] === "stripe_payment_intent") {
+          expect(sqlText).toContain("FOR UPDATE");
+          expect(params).toEqual(["stripe_payment_intent", "pi_ach_1", "funding"]);
+          return { rows: [settledCredit()] };
+        }
+        expect(sqlText).not.toContain("FOR UPDATE");
+        expect(params).toEqual(["stripe_dispute", "dp_1", "funding_reversal"]);
+        return { rows: [] };
+      }
+      if (sqlText.includes("FROM dropship.dropship_wallet_accounts")) {
+        expect(sqlText).toContain("FOR UPDATE");
+        expect(params).toEqual([5, 10]);
+        return { rows: [makeAccountRow({ available_balance_cents: "1000", pending_balance_cents: "4000" })] };
+      }
+      if (sqlText.startsWith("UPDATE dropship.dropship_wallet_accounts")) {
+        // The balance goes negative: the money left with the bank, and the pending side is untouched.
+        expect(params).toEqual([5, 10, -3000, 4000, occurredAt]);
+        return { rows: [makeAccountRow({ available_balance_cents: "-3000", pending_balance_cents: "4000" })] };
+      }
+      if (sqlText.startsWith("INSERT INTO dropship.dropship_wallet_ledger")) {
+        expect(params?.slice(0, 13)).toEqual([
+          5, 10, "funding_reversal", "settled", -4000, "USD", -3000, 4000,
+          "stripe_dispute", "dp_1", "stripe-dispute:dp_1", 100, null,
+        ]);
+        expect(JSON.parse(String(params?.[13]))).toEqual({
+          provider: "stripe", providerEventId: "evt_dp_1", providerDisputeId: "dp_1", providerPaymentIntentId: "pi_ach_1",
+          fundingLedgerEntryId: 1, creditAmountCents: 4000, disputeAmountCents: 4000,
+          disputeStatus: "needs_response", disputeReason: "fraudulent", rail: "stripe_ach",
+        });
+        expect(params?.slice(14)).toEqual([occurredAt, occurredAt]);
+        return { rows: [reversalRow()] };
+      }
+      if (sqlText.includes("INSERT INTO dropship.dropship_audit_events") && sqlText.includes("'dropship_vendor'")) {
+        expect(params?.slice(0, 3)).toEqual([10, "10", "vendor_paused"]);
+        expect(JSON.parse(String(params?.[3]))).toMatchObject({
+          reason: "funding_returned",
+          evidence: { source: "dispute_webhook", disputed: true, providerEventId: "evt_dp_1", ledgerEntryId: 2 },
+        });
+        return { rows: [] };
+      }
+      if (sqlText.includes("INSERT INTO dropship.dropship_audit_events")) {
+        expect(params?.slice(0, 4)).toEqual([10, "dropship_wallet_ledger", "2", "wallet_funding_reversed"]);
+        expect(JSON.parse(String(params?.[4]))).toMatchObject({
+          type: "funding_reversal", before: { availableBalanceCents: 1000 }, after: { availableBalanceCents: -3000 },
+        });
+        return { rows: [] };
+      }
+      if (sqlText.startsWith("UPDATE dropship.dropship_vendors")) {
+        expect(sqlText).toContain("SET status = 'paused'");
+        expect(params).toEqual([10, "funding_returned", occurredAt]);
+        return { rows: [makeStandingRow({ status: "paused", standing_reason: "funding_returned", paused_at: occurredAt, standing_revision: 1 })] };
+      }
+      return { rows: [] };
+    });
+
+    const result = await new PgDropshipWalletRepository(makePool(query)).reverseSettledFunding(reversal);
+
+    expect(result).toMatchObject({
+      outcome: "reversed",
+      vendorId: 10,
+      idempotentReplay: false,
+      account: { walletAccountId: 5, availableBalanceCents: -3000, pendingBalanceCents: 4000 },
+      credit: { ledgerEntryId: 1, status: "settled", amountCents: 4000 },
+      reversal: { ledgerEntryId: 2, type: "funding_reversal", amountCents: -4000, referenceType: "stripe_dispute", referenceId: "dp_1" },
+      vendorPaused: { vendorId: 10, status: "paused", standingReason: "funding_returned", standingRevision: 1 },
+    });
+    expect(statements).toEqual([
+      "BEGIN",
+      "SELECT id,",
+      "SELECT id,",
+      "SELECT id,",
+      "UPDATE dropship.dropship_wallet_accounts",
+      "INSERT INTO",
+      "INSERT INTO",
+      "UPDATE dropship.dropship_vendors",
+      "INSERT INTO",
+      "COMMIT",
+    ]);
+  });
+
+  it("returns the reversal already posted for the dispute on a replay, moving nothing and pausing nobody", async () => {
+    const statements: string[] = [];
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      const sqlText = String(sql);
+      statements.push(sqlText.trim().split(/\s+/).slice(0, 2).join(" "));
+      if (sqlText.includes("FROM dropship.dropship_wallet_ledger")) {
+        return { rows: [params?.[0] === "stripe_payment_intent" ? settledCredit() : reversalRow()] };
+      }
+      if (sqlText.includes("FROM dropship.dropship_wallet_accounts")) {
+        expect(sqlText).not.toContain("FOR UPDATE");
+        return { rows: [makeAccountRow({ available_balance_cents: "-3000", pending_balance_cents: "4000" })] };
+      }
+      return { rows: [] };
+    });
+
+    const result = await new PgDropshipWalletRepository(makePool(query)).reverseSettledFunding(reversal);
+
+    expect(result).toMatchObject({
+      outcome: "reversed", idempotentReplay: true, vendorPaused: null,
+      reversal: { ledgerEntryId: 2, amountCents: -4000 }, account: { availableBalanceCents: -3000 },
+    });
+    expect(statements).toEqual(["BEGIN", "SELECT id,", "SELECT id,", "SELECT id,", "COMMIT"]);
+  });
+
+  it("returns null for a payment the wallet never recorded, and ignores a credit that is pending or in another currency", async () => {
+    const none = vi.fn(async (_sql: string, _params?: unknown[]) => ({ rows: [] as unknown[] }));
+    await expect(new PgDropshipWalletRepository(makePool(none)).reverseSettledFunding(reversal)).resolves.toBeNull();
+    expect(none.mock.calls.map((call) => String(call[0]).trim().split(/\s+/)[0])).toEqual(["BEGIN", "SELECT", "COMMIT"]);
+
+    const cases = [
+      { credit: makeLedgerRow(), currency: "USD", reason: "credit_not_settled" },
+      { credit: settledCredit(), currency: "EUR", reason: "currency_mismatch" },
+    ];
+    for (const { credit, currency, reason } of cases) {
+      const statements: string[] = [];
+      const query = vi.fn(async (sql: string, params?: unknown[]) => {
+        const sqlText = String(sql);
+        statements.push(sqlText.trim().split(/\s+/)[0]);
+        if (sqlText.includes("FROM dropship.dropship_wallet_ledger")) {
+          return { rows: params?.[0] === "stripe_payment_intent" ? [credit] : [] };
+        }
+        return { rows: [] };
+      });
+
+      const result = await new PgDropshipWalletRepository(makePool(query)).reverseSettledFunding({ ...reversal, currency });
+
+      expect(result).toEqual({ outcome: "ignored", vendorId: 10, credit: expect.objectContaining({ ledgerEntryId: 1 }), reason });
+      expect(statements).toEqual(["BEGIN", "SELECT", "SELECT", "COMMIT"]);
+    }
+  });
+
+  it("never takes back more than the credit put in: the card fee above it is not the vendor's loss", async () => {
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      const sqlText = String(sql);
+      if (sqlText.includes("FROM dropship.dropship_wallet_ledger")) {
+        return { rows: params?.[0] === "stripe_payment_intent" ? [settledCredit()] : [] };
+      }
+      if (sqlText.includes("FROM dropship.dropship_wallet_accounts")) {
+        return { rows: [makeAccountRow({ available_balance_cents: "5000", pending_balance_cents: "0" })] };
+      }
+      if (sqlText.startsWith("UPDATE dropship.dropship_wallet_accounts")) {
+        expect(params).toEqual([5, 10, 1000, 0, occurredAt]);
+        return { rows: [makeAccountRow({ available_balance_cents: "1000", pending_balance_cents: "0" })] };
+      }
+      if (sqlText.startsWith("INSERT INTO dropship.dropship_wallet_ledger")) {
+        expect(params?.[4]).toBe(-4000);
+        expect(JSON.parse(String(params?.[13]))).toMatchObject({ creditAmountCents: 4000, disputeAmountCents: 4120 });
+        return { rows: [reversalRow({ available_balance_after_cents: "1000", pending_balance_after_cents: "0" })] };
+      }
+      return { rows: [] };
+    });
+
+    const result = await new PgDropshipWalletRepository(makePool(query))
+      .reverseSettledFunding({ ...reversal, disputeAmountCents: 4120, pauseVendor: null });
+
+    expect(result).toMatchObject({ outcome: "reversed", reversal: { amountCents: -4000 }, account: { availableBalanceCents: 1000 }, vendorPaused: null });
+    expect(query.mock.calls.some((call) => String(call[0]).startsWith("UPDATE dropship.dropship_vendors"))).toBe(false);
+  });
+
+  it("reads the winner's row when two deliveries of the same dispute race on the unique reference", async () => {
+    let posted = false;
+    const statements: string[] = [];
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      const sqlText = String(sql);
+      statements.push(sqlText.trim().split(/\s+/)[0]);
+      if (sqlText.includes("FROM dropship.dropship_wallet_ledger")) {
+        if (params?.[0] === "stripe_payment_intent") return { rows: [settledCredit()] };
+        return { rows: posted ? [reversalRow()] : [] };
+      }
+      if (sqlText.includes("FROM dropship.dropship_wallet_accounts")) {
+        return { rows: [makeAccountRow({ available_balance_cents: "1000", pending_balance_cents: "4000" })] };
+      }
+      if (sqlText.startsWith("UPDATE dropship.dropship_wallet_accounts")) {
+        return { rows: [makeAccountRow({ available_balance_cents: "-3000", pending_balance_cents: "4000" })] };
+      }
+      if (sqlText.startsWith("INSERT INTO dropship.dropship_wallet_ledger")) {
+        posted = true;
+        throw Object.assign(new Error("duplicate key value violates unique constraint"), { code: "23505" });
+      }
+      return { rows: [] };
+    });
+
+    const result = await new PgDropshipWalletRepository(makePool(query)).reverseSettledFunding(reversal);
+
+    expect(result).toMatchObject({ outcome: "reversed", idempotentReplay: true, vendorPaused: null, reversal: { ledgerEntryId: 2 } });
+    // The loser rolls back and reads the winner's row without a second transaction or a second pause attempt.
+    expect(statements).toEqual([
+      "BEGIN", "SELECT", "SELECT", "SELECT", "UPDATE", "INSERT", "ROLLBACK",
+      "SELECT", "SELECT", "SELECT",
+    ]);
+  });
+
+  it("credits a reversal back when the dispute is won, with its own row and audit, in one transaction", async () => {
+    const statements: string[] = [];
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      const sqlText = String(sql);
+      statements.push(sqlText.trim().split(/\s+/).slice(0, 2).join(" "));
+      if (sqlText.includes("FROM dropship.dropship_wallet_ledger")) {
+        if (params?.[0] === "stripe_dispute") {
+          expect(sqlText).toContain("FOR UPDATE");
+          expect(params).toEqual(["stripe_dispute", "dp_1", "funding_reversal"]);
+          return { rows: [reversalRow()] };
+        }
+        expect(sqlText).not.toContain("FOR UPDATE");
+        expect(params).toEqual(["stripe_dispute_reinstated", "dp_1", "funding_reinstated"]);
+        return { rows: [] };
+      }
+      if (sqlText.includes("FROM dropship.dropship_wallet_accounts")) {
+        expect(sqlText).toContain("FOR UPDATE");
+        expect(params).toEqual([5, 10]);
+        return { rows: [makeAccountRow({ available_balance_cents: "-3000", pending_balance_cents: "4000" })] };
+      }
+      if (sqlText.startsWith("UPDATE dropship.dropship_wallet_accounts")) {
+        expect(params).toEqual([5, 10, 1000, 4000, occurredAt]);
+        return { rows: [makeAccountRow({ available_balance_cents: "1000", pending_balance_cents: "4000" })] };
+      }
+      if (sqlText.startsWith("INSERT INTO dropship.dropship_wallet_ledger")) {
+        expect(params?.slice(0, 13)).toEqual([
+          5, 10, "funding_reinstated", "settled", 4000, "USD", 1000, 4000,
+          "stripe_dispute_reinstated", "dp_1", "stripe-dispute-reinstated:dp_1", 100, null,
+        ]);
+        expect(JSON.parse(String(params?.[13]))).toEqual({
+          provider: "stripe", providerEventId: "evt_dp_won", providerDisputeId: "dp_1", reversalLedgerEntryId: 2, fundingLedgerEntryId: 1,
+        });
+        expect(params?.slice(14)).toEqual([occurredAt, occurredAt]);
+        return { rows: [reinstatementRow()] };
+      }
+      if (sqlText.includes("INSERT INTO dropship.dropship_audit_events")) {
+        expect(params?.slice(0, 4)).toEqual([10, "dropship_wallet_ledger", "3", "wallet_funding_reinstated"]);
+        expect(JSON.parse(String(params?.[4]))).toMatchObject({
+          type: "funding_reinstated", before: { availableBalanceCents: -3000 }, after: { availableBalanceCents: 1000 },
+        });
+        return { rows: [] };
+      }
+      return { rows: [] };
+    });
+
+    const result = await new PgDropshipWalletRepository(makePool(query)).reinstateReversedFunding(reinstatement);
+
+    expect(result).toMatchObject({
+      vendorId: 10,
+      idempotentReplay: false,
+      account: { availableBalanceCents: 1000, pendingBalanceCents: 4000 },
+      reversal: { ledgerEntryId: 2, amountCents: -4000 },
+      reinstatement: { ledgerEntryId: 3, type: "funding_reinstated", amountCents: 4000, referenceType: "stripe_dispute_reinstated" },
+    });
+    expect(statements).toEqual([
+      "BEGIN",
+      "SELECT id,",
+      "SELECT id,",
+      "SELECT id,",
+      "UPDATE dropship.dropship_wallet_accounts",
+      "INSERT INTO",
+      "INSERT INTO",
+      "COMMIT",
+    ]);
+  });
+
+  it("returns the reinstatement already posted on a replay, and null when no reversal exists for the dispute", async () => {
+    const statements: string[] = [];
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      const sqlText = String(sql);
+      statements.push(sqlText.trim().split(/\s+/)[0]);
+      if (sqlText.includes("FROM dropship.dropship_wallet_ledger")) {
+        return { rows: [params?.[0] === "stripe_dispute" ? reversalRow() : reinstatementRow()] };
+      }
+      if (sqlText.includes("FROM dropship.dropship_wallet_accounts")) {
+        expect(sqlText).not.toContain("FOR UPDATE");
+        return { rows: [makeAccountRow({ available_balance_cents: "1000", pending_balance_cents: "4000" })] };
+      }
+      return { rows: [] };
+    });
+
+    const replay = await new PgDropshipWalletRepository(makePool(query)).reinstateReversedFunding(reinstatement);
+
+    expect(replay).toMatchObject({ idempotentReplay: true, reinstatement: { ledgerEntryId: 3 }, account: { availableBalanceCents: 1000 } });
+    expect(statements).toEqual(["BEGIN", "SELECT", "SELECT", "SELECT", "COMMIT"]);
+
+    const none = vi.fn(async (_sql: string, _params?: unknown[]) => ({ rows: [] as unknown[] }));
+    await expect(new PgDropshipWalletRepository(makePool(none)).reinstateReversedFunding(reinstatement)).resolves.toBeNull();
+    expect(none.mock.calls.map((call) => String(call[0]).trim().split(/\s+/)[0])).toEqual(["BEGIN", "SELECT", "COMMIT"]);
+  });
+});

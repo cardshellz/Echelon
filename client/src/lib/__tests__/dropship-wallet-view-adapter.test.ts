@@ -175,6 +175,9 @@ describe("derivations", () => {
     const funding = (extra: Record<string, unknown>) => deriveLedgerReason({ type: "funding", reason: undefined, referenceType: null, metadata: null, ...extra });
     expect(deriveLedgerReason({ type: "order_debit", reason: undefined, referenceType: null, metadata: null })).toBe("order");
     expect(deriveLedgerReason({ type: "return_fee", reason: undefined, referenceType: null, metadata: null })).toBe("return_fee");
+    expect(deriveLedgerReason({ type: "advance_fee", reason: undefined, referenceType: null, metadata: null })).toBe("advance_fee");
+    expect(deriveLedgerReason({ type: "funding_reversal", reason: undefined, referenceType: null, metadata: null })).toBe("funding_reversed");
+    expect(deriveLedgerReason({ type: "funding_reinstated", reason: undefined, referenceType: null, metadata: null })).toBe("funding_reinstated");
     expect(deriveLedgerReason({ type: "weird", reason: undefined, referenceType: null, metadata: null })).toBe("other");
     expect(funding({ metadata: { autoReload: true, autoReloadReason: "payment_hold" } })).toBe("covered_held_order");
     expect(funding({ metadata: { autoReload: true, autoReloadReason: "minimum_balance", trigger: "daily" } })).toBe("daily_top_up");

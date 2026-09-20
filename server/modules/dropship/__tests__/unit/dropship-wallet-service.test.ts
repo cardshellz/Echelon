@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import type { DropshipVendorStatus } from "../../../../../shared/schema/dropship.schema";
+import type { DropshipVendorStandingReason, DropshipVendorStatus } from "../../../../../shared/schema/dropship.schema";
 import { DropshipError } from "../../domain/errors";
+import { decideFundingReversal } from "../../domain/funding-reversal";
 import type { DropshipAdvanceContext } from "../../domain/acceptance-funding";
 import type {
   DropshipWalletPolicyLimits,
@@ -30,6 +31,8 @@ import {
   type DropshipBankBalanceVerificationRecord,
   type RecordDropshipBankBalanceVerificationRepositoryInput,
   type DropshipConfirmedUsdcFundingResult,
+  type DropshipFundingReinstatementRepositoryResult,
+  type DropshipFundingReversalRepositoryResult,
   type DropshipFundingMethodMutationResult,
   type DropshipFundingMethodRecord,
   type DropshipStripeAutoReloadPaymentIntent,
@@ -44,6 +47,8 @@ import {
   type DropshipWalletOverview,
   type DropshipWalletRepository,
   type FailDropshipPendingFundingRepositoryInput,
+  type ReinstateDropshipReversedFundingRepositoryInput,
+  type ReverseDropshipSettledFundingRepositoryInput,
   type UpsertDropshipFundingMethodRepositoryInput,
 } from "../../application/dropship-wallet-service";
 
@@ -1797,6 +1802,8 @@ class FakeWalletRepository implements DropshipWalletRepository {
   vendorStatus: DropshipVendorStatus | null = "onboarding";
   standingRevision = 0;
   failInputs: FailDropshipPendingFundingRepositoryInput[] = [];
+  reverseInputs: ReverseDropshipSettledFundingRepositoryInput[] = [];
+  reinstateInputs: ReinstateDropshipReversedFundingRepositoryInput[] = [];
   lastConfigureInput: ConfigureDropshipAutoReloadRepositoryInput | null = null;
   fundingMethods: DropshipFundingMethodRecord[] = [
     makeFundingMethod(),
@@ -1976,22 +1983,97 @@ class FakeWalletRepository implements DropshipWalletRepository {
     };
     this.ledger = this.ledger.map((candidate) => (candidate === entry ? failed : candidate));
     // Mirrors the real repository: the guarded pause rides the void transaction.
-    let vendorPaused: DropshipWalletFundingFailureRepositoryResult["vendorPaused"] = null;
-    if (input.pauseVendor && this.vendorStatus === "active") {
-      this.vendorStatus = "paused";
-      this.standingRevision += 1;
-      vendorPaused = {
-        vendorId: input.vendorId,
-        status: "paused",
-        standingReason: input.pauseVendor.reason,
-        pausedAt: input.occurredAt,
-        standingRevision: this.standingRevision,
-        listingHoldState: "released",
-        listingHoldReconciledAt: null,
-        listingHoldDetail: null,
-      };
-    }
+    const vendorPaused = input.pauseVendor
+      ? this.pauseIfActive(input.vendorId, input.pauseVendor.reason, input.occurredAt)
+      : null;
     return { account: this.account, ledgerEntry: failed, idempotentReplay: false, vendorPaused };
+  }
+
+  async reverseSettledFunding(
+    input: ReverseDropshipSettledFundingRepositoryInput,
+  ): Promise<DropshipFundingReversalRepositoryResult | null> {
+    this.reverseInputs.push(input);
+    const credit = this.ledger.find((entry) =>
+      entry.type === "funding"
+      && entry.referenceType === "stripe_payment_intent"
+      && entry.referenceId === input.providerPaymentIntentId
+    );
+    if (!credit) return null;
+    const existing = this.ledger.find((entry) =>
+      entry.type === "funding_reversal" && entry.referenceType === "stripe_dispute" && entry.referenceId === input.providerDisputeId
+    );
+    if (existing) {
+      return { outcome: "reversed", vendorId: credit.vendorId, account: this.account, credit, reversal: existing, idempotentReplay: true, vendorPaused: null };
+    }
+    const decision = decideFundingReversal({
+      credit: { amountCents: credit.amountCents, currency: credit.currency, status: credit.status },
+      dispute: { amountCents: input.disputeAmountCents, currency: input.currency },
+    });
+    if (decision.outcome === "ignore") {
+      return { outcome: "ignored", vendorId: credit.vendorId, credit, reason: decision.reason };
+    }
+    const availableBalanceCents = this.account.availableBalanceCents - decision.reversalCents;
+    this.account = { ...this.account, availableBalanceCents, updatedAt: input.occurredAt };
+    const reversal = this.insertLedger({
+      type: "funding_reversal",
+      status: "settled",
+      amountCents: -decision.reversalCents,
+      currency: credit.currency,
+      availableBalanceAfterCents: availableBalanceCents,
+      pendingBalanceAfterCents: this.account.pendingBalanceCents,
+      referenceType: "stripe_dispute",
+      referenceId: input.providerDisputeId,
+      idempotencyKey: `stripe-dispute:${input.providerDisputeId}`,
+      fundingMethodId: credit.fundingMethodId,
+      metadata: {
+        provider: input.provider,
+        providerEventId: input.providerEventId,
+        fundingLedgerEntryId: credit.ledgerEntryId,
+        disputeStatus: input.disputeStatus,
+      },
+      createdAt: input.occurredAt,
+      settledAt: input.occurredAt,
+    });
+    // Mirrors the real repository: the guarded pause rides the reversal transaction.
+    const vendorPaused = input.pauseVendor
+      ? this.pauseIfActive(credit.vendorId, input.pauseVendor.reason, input.occurredAt)
+      : null;
+    return { outcome: "reversed", vendorId: credit.vendorId, account: this.account, credit, reversal, idempotentReplay: false, vendorPaused };
+  }
+
+  async reinstateReversedFunding(
+    input: ReinstateDropshipReversedFundingRepositoryInput,
+  ): Promise<DropshipFundingReinstatementRepositoryResult | null> {
+    this.reinstateInputs.push(input);
+    const reversal = this.ledger.find((entry) =>
+      entry.type === "funding_reversal" && entry.referenceType === "stripe_dispute" && entry.referenceId === input.providerDisputeId
+    );
+    if (!reversal) return null;
+    const existing = this.ledger.find((entry) =>
+      entry.type === "funding_reinstated" && entry.referenceType === "stripe_dispute_reinstated" && entry.referenceId === input.providerDisputeId
+    );
+    if (existing) {
+      return { vendorId: reversal.vendorId, account: this.account, reversal, reinstatement: existing, idempotentReplay: true };
+    }
+    const amountCents = -reversal.amountCents;
+    const availableBalanceCents = this.account.availableBalanceCents + amountCents;
+    this.account = { ...this.account, availableBalanceCents, updatedAt: input.occurredAt };
+    const reinstatement = this.insertLedger({
+      type: "funding_reinstated",
+      status: "settled",
+      amountCents,
+      currency: reversal.currency,
+      availableBalanceAfterCents: availableBalanceCents,
+      pendingBalanceAfterCents: this.account.pendingBalanceCents,
+      referenceType: "stripe_dispute_reinstated",
+      referenceId: input.providerDisputeId,
+      idempotencyKey: `stripe-dispute-reinstated:${input.providerDisputeId}`,
+      fundingMethodId: reversal.fundingMethodId,
+      metadata: { provider: input.provider, providerEventId: input.providerEventId, reversalLedgerEntryId: reversal.ledgerEntryId },
+      createdAt: input.occurredAt,
+      settledAt: input.occurredAt,
+    });
+    return { vendorId: reversal.vendorId, account: this.account, reversal, reinstatement, idempotentReplay: false };
   }
 
   async creditConfirmedUsdcFunding(
@@ -2218,6 +2300,27 @@ class FakeWalletRepository implements DropshipWalletRepository {
     return fundingMethod;
   }
 
+  /** The real repository's guarded pause: only an active vendor changes, and each pause bumps the standing revision. */
+  private pauseIfActive(
+    vendorId: number,
+    reason: DropshipVendorStandingReason,
+    occurredAt: Date,
+  ): DropshipWalletFundingFailureRepositoryResult["vendorPaused"] {
+    if (this.vendorStatus !== "active") return null;
+    this.vendorStatus = "paused";
+    this.standingRevision += 1;
+    return {
+      vendorId,
+      status: "paused",
+      standingReason: reason,
+      pausedAt: occurredAt,
+      standingRevision: this.standingRevision,
+      listingHoldState: "released",
+      listingHoldReconciledAt: null,
+      listingHoldDetail: null,
+    };
+  }
+
   private insertLedger(
     input: Omit<DropshipWalletLedgerRecord, "ledgerEntryId" | "walletAccountId" | "vendorId" | "externalTransactionId">
       & { externalTransactionId?: string | null },
@@ -2325,3 +2428,269 @@ function makeVendor(overrides: Partial<DropshipProvisionedVendorProfile> = {}): 
     ...overrides,
   };
 }
+
+describe("DropshipWalletService funding reversals (funding design phase 4)", () => {
+  let repository: FakeWalletRepository;
+  let notificationSender: FakeNotificationSender;
+  let standing: FakeVendorStandingService;
+  let logs: Array<DropshipLogEvent & { level: "info" | "warn" | "error" }>;
+  let service: DropshipWalletService;
+
+  /** A chargeback on the settled card top-up below, as the provider reports it once the funds are gone. */
+  const dispute = {
+    provider: "stripe" as const,
+    providerEventId: "evt_dp_1",
+    providerDisputeId: "dp_1",
+    providerPaymentIntentId: "pi_card_1",
+    amountCents: 5_000,
+    currency: "USD",
+    status: "needs_response" as const,
+    reason: "fraudulent",
+    fundsWithdrawn: true,
+  };
+  const won = {
+    provider: "stripe" as const,
+    providerEventId: "evt_dp_2",
+    providerDisputeId: "dp_1",
+    providerPaymentIntentId: "pi_card_1",
+    amountCents: 5_000,
+    currency: "USD",
+    status: "won" as const,
+    fundsReinstated: true,
+  };
+
+  beforeEach(async () => {
+    repository = new FakeWalletRepository();
+    notificationSender = new FakeNotificationSender();
+    standing = new FakeVendorStandingService();
+    logs = [];
+    service = new DropshipWalletService({
+      vendorProvisioning: new FakeVendorProvisioningService() as unknown as DropshipVendorProvisioningService,
+      repository,
+      fundingProvider: new FakeFundingProvider(),
+      notificationSender,
+      vendorStanding: standing,
+      clock: { now: () => now },
+      logger: {
+        info: (event) => logs.push({ ...event, level: "info" }),
+        warn: (event) => logs.push({ ...event, level: "warn" }),
+        error: (event) => logs.push({ ...event, level: "error" }),
+      },
+      cardFundingFeeBps: 300,
+    });
+    // A card top-up that settled and was partly spent: the reversal takes back more than is left.
+    await service.creditFunding({
+      vendorId: 10, fundingMethodId: 99, rail: "stripe_card", status: "settled", amountCents: 5_000, currency: "USD",
+      referenceType: "stripe_payment_intent", referenceId: "pi_card_1", idempotencyKey: "funding-pi-card-1",
+    });
+    repository.account = { ...repository.account, availableBalanceCents: 2_000 };
+    logs = [];
+    notificationSender.sent = [];
+    standing.restoreCalls = [];
+  });
+
+  it("takes the credit back when the bank disputes it, pauses the vendor in the same write, and lets the pause notice carry the news", async () => {
+    repository.vendorStatus = "active";
+
+    const result = await service.recordWalletFundingReversal(dispute);
+
+    expect(result).toEqual({
+      outcome: "reversed", vendorId: 10, reversalLedgerEntryId: 2, reversalCents: 5_000,
+      availableBalanceAfterCents: -3_000, vendorPaused: true, idempotentReplay: false,
+    });
+    expect(repository.account.availableBalanceCents).toBe(-3_000);
+    expect(repository.ledger[1]).toMatchObject({
+      type: "funding_reversal", status: "settled", amountCents: -5_000, availableBalanceAfterCents: -3_000,
+      referenceType: "stripe_dispute", referenceId: "dp_1", idempotencyKey: "stripe-dispute:dp_1", fundingMethodId: 99,
+    });
+    expect(repository.reverseInputs).toEqual([{
+      provider: "stripe", providerPaymentIntentId: "pi_card_1", providerDisputeId: "dp_1", providerEventId: "evt_dp_1",
+      disputeAmountCents: 5_000, currency: "USD", disputeStatus: "needs_response", disputeReason: "fraudulent", occurredAt: now,
+      pauseVendor: {
+        reason: "funding_returned",
+        evidence: {
+          source: "dispute_webhook", disputed: true, provider: "stripe", providerEventId: "evt_dp_1", providerDisputeId: "dp_1",
+          providerPaymentIntentId: "pi_card_1", amountCents: 5_000, currency: "USD", disputeStatus: "needs_response", disputeReason: "fraudulent",
+        },
+      },
+    }]);
+    expect(repository.vendorStatus).toBe("paused");
+    expect(standing.announceCalls).toEqual([{
+      vendorId: 10,
+      evidence: expect.objectContaining({ source: "dispute_webhook", disputed: true, ledgerEntryId: 2, amountCents: 5_000 }),
+    }]);
+    expect(notificationSender.sent).toEqual([]);
+    expect(logs.find((entry) => entry.code === "DROPSHIP_WALLET_FUNDING_REVERSED")).toMatchObject({
+      level: "warn",
+      context: expect.objectContaining({
+        vendorId: 10, creditLedgerEntryId: 1, reversalLedgerEntryId: 2, reversalCents: 5_000,
+        availableBalanceAfterCents: -3_000, vendorPaused: true, standingRevision: 1, idempotentReplay: false,
+      }),
+    });
+
+    // A replayed webhook finds the reversal, moves nothing, pauses nobody, and says nothing more.
+    const replay = await service.recordWalletFundingReversal(dispute);
+    expect(replay).toEqual({
+      outcome: "reversed", vendorId: 10, reversalLedgerEntryId: 2, reversalCents: 5_000,
+      availableBalanceAfterCents: -3_000, vendorPaused: false, idempotentReplay: true,
+    });
+    expect(repository.ledger).toHaveLength(2);
+    expect(repository.account.availableBalanceCents).toBe(-3_000);
+    expect(standing.announceCalls).toHaveLength(1);
+    expect(notificationSender.sent).toEqual([]);
+  });
+
+  it("takes back no more than the credit put in, and tells the vendor itself when no pause goes out", async () => {
+    // The vendor is still onboarding: nothing to pause, so the wallet's own notice carries the news.
+    const result = await service.recordWalletFundingReversal({ ...dispute, amountCents: 5_150 });
+
+    expect(result).toMatchObject({ outcome: "reversed", reversalCents: 5_000, availableBalanceAfterCents: -3_000, vendorPaused: false });
+    expect(repository.vendorStatus).toBe("onboarding");
+    expect(standing.announceCalls).toEqual([]);
+    expect(notificationSender.sent).toEqual([expect.objectContaining({
+      vendorId: 10,
+      eventType: "dropship_wallet_funding_reversed",
+      critical: true,
+      title: "A payment to your wallet was reversed",
+      idempotencyKey: "stripe-dispute-reversed:dp_1",
+      payload: expect.objectContaining({
+        providerDisputeId: "dp_1", creditLedgerEntryId: 1, reversalLedgerEntryId: 2, reversalCents: 5_000, availableBalanceAfterCents: -3_000,
+      }),
+    })]);
+    expect(notificationSender.sent[0].message).toBe(
+      "Your bank reversed USD $50.00 that you added on May 1, 2026. That amount has been taken back out of your wallet, leaving USD -$30.00. Your wallet is below zero until funds are added; the daily wallet run collects the shortfall from your saved funding source when one is set up.",
+    );
+  });
+
+  it("falls back to its own notice when the pause cannot be announced", async () => {
+    repository.vendorStatus = "active";
+    standing.announceError = new Error("standing db down");
+
+    const result = await service.recordWalletFundingReversal(dispute);
+
+    expect(result).toMatchObject({ outcome: "reversed", vendorPaused: true });
+    expect(repository.vendorStatus).toBe("paused");
+    expect(logs.find((entry) => entry.code === "DROPSHIP_VENDOR_PAUSE_ANNOUNCE_FAILED")).toMatchObject({ level: "error" });
+    expect(notificationSender.sent.map((sent) => sent.eventType)).toEqual(["dropship_wallet_funding_reversed"]);
+  });
+
+  it("moves nothing for an inquiry that has not withdrawn funds, or a dispute on a payment the wallet never recorded", async () => {
+    expect(await service.recordWalletFundingReversal({ ...dispute, status: "warning_needs_response", fundsWithdrawn: false }))
+      .toEqual({ outcome: "deferred" });
+    expect(repository.reverseInputs).toEqual([]);
+    expect(logs).toEqual([expect.objectContaining({ level: "info", code: "DROPSHIP_WALLET_FUNDING_DISPUTE_OPENED" })]);
+
+    expect(await service.recordWalletFundingReversal({ ...dispute, providerPaymentIntentId: "pi_other_product" }))
+      .toEqual({ outcome: "not_applicable" });
+    expect(logs.at(-1)).toMatchObject({
+      level: "info",
+      code: "DROPSHIP_WALLET_FUNDING_DISPUTE_UNMATCHED",
+      context: expect.objectContaining({ providerPaymentIntentId: "pi_other_product" }),
+    });
+
+    expect(repository.ledger).toHaveLength(1);
+    expect(repository.account.availableBalanceCents).toBe(2_000);
+    expect(notificationSender.sent).toEqual([]);
+    expect(standing.announceCalls).toEqual([]);
+  });
+
+  it("refuses to reverse a credit that never settled or one in another currency, and flags it for a human", async () => {
+    await service.creditFunding({
+      vendorId: 10, fundingMethodId: 100, rail: "stripe_ach", status: "pending", amountCents: 4_000, currency: "USD",
+      referenceType: "stripe_payment_intent", referenceId: "pi_ach_1", idempotencyKey: "funding-pi-ach-1",
+    });
+    logs = [];
+
+    expect(await service.recordWalletFundingReversal({ ...dispute, providerPaymentIntentId: "pi_ach_1", amountCents: 4_000 }))
+      .toEqual({ outcome: "ignored", reason: "credit_not_settled" });
+    expect(logs.at(-1)).toMatchObject({
+      level: "warn",
+      code: "DROPSHIP_WALLET_FUNDING_REVERSAL_IGNORED",
+      context: expect.objectContaining({ vendorId: 10, creditLedgerEntryId: 2, creditStatus: "pending", reason: "credit_not_settled" }),
+    });
+    expect(await service.recordWalletFundingReversal({ ...dispute, currency: "EUR" })).toEqual({ outcome: "ignored", reason: "currency_mismatch" });
+
+    expect(repository.ledger).toHaveLength(2);
+    expect(repository.account).toMatchObject({ availableBalanceCents: 2_000, pendingBalanceCents: 4_000 });
+    expect(notificationSender.sent).toEqual([]);
+  });
+
+  it("credits a reversal back when the dispute is won, asks standing whether the vendor can resume, and tells them", async () => {
+    repository.vendorStatus = "active";
+    await service.recordWalletFundingReversal(dispute);
+    logs = [];
+    notificationSender.sent = [];
+
+    const result = await service.recordWalletFundingDisputeOutcome(won);
+
+    expect(result).toEqual({
+      outcome: "reinstated", vendorId: 10, reinstatementLedgerEntryId: 3, amountCents: 5_000, availableBalanceAfterCents: 2_000, idempotentReplay: false,
+    });
+    expect(repository.account.availableBalanceCents).toBe(2_000);
+    expect(repository.ledger[2]).toMatchObject({
+      type: "funding_reinstated", status: "settled", amountCents: 5_000, availableBalanceAfterCents: 2_000,
+      referenceType: "stripe_dispute_reinstated", referenceId: "dp_1", idempotencyKey: "stripe-dispute-reinstated:dp_1", fundingMethodId: 99,
+    });
+    expect(repository.reinstateInputs).toEqual([{ provider: "stripe", providerDisputeId: "dp_1", providerEventId: "evt_dp_2", occurredAt: now }]);
+    expect(standing.restoreCalls).toEqual([{
+      vendorId: 10,
+      evidence: expect.objectContaining({ source: "dispute_webhook", providerDisputeId: "dp_1", reinstatementLedgerEntryId: 3 }),
+    }]);
+    expect(notificationSender.sent).toEqual([expect.objectContaining({
+      vendorId: 10,
+      eventType: "dropship_wallet_funding_reinstated",
+      critical: false,
+      title: "A reversed payment was returned to your wallet",
+      idempotencyKey: "stripe-dispute-reinstated:dp_1",
+      payload: expect.objectContaining({ reversalLedgerEntryId: 2, reinstatementLedgerEntryId: 3, amountCents: 5_000, availableBalanceAfterCents: 2_000 }),
+    })]);
+    expect(notificationSender.sent[0].message).toBe(
+      "The dispute on USD $50.00 you added was resolved in your favour, and that amount is back in your wallet, leaving USD $20.00.",
+    );
+    expect(logs.find((entry) => entry.code === "DROPSHIP_WALLET_FUNDING_REINSTATED")).toMatchObject({
+      level: "info",
+      context: expect.objectContaining({ reversalLedgerEntryId: 2, reinstatementLedgerEntryId: 3, amountCents: 5_000, idempotentReplay: false }),
+    });
+
+    // A replay credits nothing more and asks nobody anything.
+    expect(await service.recordWalletFundingDisputeOutcome(won)).toEqual({
+      outcome: "reinstated", vendorId: 10, reinstatementLedgerEntryId: 3, amountCents: 5_000, availableBalanceAfterCents: 2_000, idempotentReplay: true,
+    });
+    expect(repository.ledger).toHaveLength(3);
+    expect(standing.restoreCalls).toHaveLength(1);
+    expect(notificationSender.sent).toHaveLength(1);
+  });
+
+  it("leaves a lost dispute where it is, logs a closed inquiry as unchanged, and credits nothing for a win with no reversal on file", async () => {
+    expect(await service.recordWalletFundingDisputeOutcome({ ...won, status: "lost", fundsReinstated: false })).toEqual({ outcome: "unchanged" });
+    expect(logs.at(-1)).toMatchObject({ level: "warn", code: "DROPSHIP_WALLET_FUNDING_DISPUTE_LOST" });
+
+    expect(await service.recordWalletFundingDisputeOutcome({ ...won, status: "warning_closed", fundsReinstated: false })).toEqual({ outcome: "unchanged" });
+    expect(logs.at(-1)).toMatchObject({ level: "info", code: "DROPSHIP_WALLET_FUNDING_DISPUTE_UNCHANGED" });
+
+    expect(await service.recordWalletFundingDisputeOutcome({ ...won, providerDisputeId: "dp_unknown" })).toEqual({ outcome: "not_applicable" });
+    expect(logs.at(-1)).toMatchObject({ level: "info", code: "DROPSHIP_WALLET_FUNDING_REINSTATEMENT_UNMATCHED" });
+
+    expect(repository.reinstateInputs).toHaveLength(1);
+    expect(repository.ledger).toHaveLength(1);
+    expect(standing.restoreCalls).toEqual([]);
+    expect(notificationSender.sent).toEqual([]);
+  });
+
+  it("rejects malformed dispute input before touching anything", async () => {
+    for (const bad of [
+      { ...dispute, amountCents: -1 },
+      { ...dispute, amountCents: 12.5 },
+      { ...dispute, status: "chargeback" },
+      { ...dispute, fundsWithdrawn: "yes" },
+      { ...dispute, extra: true },
+    ]) {
+      await expect(service.recordWalletFundingReversal(bad)).rejects.toMatchObject({ code: "DROPSHIP_WALLET_INVALID_INPUT" });
+    }
+    await expect(service.recordWalletFundingDisputeOutcome({ ...won, fundsReinstated: undefined }))
+      .rejects.toMatchObject({ code: "DROPSHIP_WALLET_INVALID_INPUT" });
+    expect(repository.reverseInputs).toEqual([]);
+    expect(repository.reinstateInputs).toEqual([]);
+    expect(logs).toEqual([]);
+  });
+});

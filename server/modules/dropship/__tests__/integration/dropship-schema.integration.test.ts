@@ -37,6 +37,10 @@ const walletAdvanceMigrationSql = readFileSync(
   resolve(process.cwd(), "migrations/0688_dropship_wallet_advance.sql"),
   "utf8",
 );
+const walletFundingReversalMigrationSql = readFileSync(
+  resolve(process.cwd(), "migrations/0689_dropship_wallet_funding_reversal.sql"),
+  "utf8",
+);
 
 function sslConfig(connectionString: string) {
   return /localhost|127\.0\.0\.1/.test(connectionString)
@@ -248,6 +252,7 @@ describeWithDb("Dropship V2 database foundation", () => {
     await client.query(carrierClaimMigrationSql);
     await client.query(channelConnectionBrandingMigrationSql);
     await client.query(walletAdvanceMigrationSql);
+    await client.query(walletFundingReversalMigrationSql);
 
     const channel = await client.query<{ id: number }>(
       `INSERT INTO channels.channels (name, type, provider, status, sync_enabled, sync_mode)
@@ -526,6 +531,53 @@ describeWithDb("Dropship V2 database foundation", () => {
         [reading.rows[0].id],
       ),
       "P0001",
+    );
+  });
+
+  it("keeps the wallet funding reversal migration repeatable and admits one reversal and one reinstatement per dispute", async () => {
+    // Re-running the migration is a no-op; it also re-admits the two kinds after 0688 was re-run above.
+    await client!.query(walletFundingReversalMigrationSql);
+
+    const wallet = await client!.query<{ id: number }>(
+      `INSERT INTO dropship.dropship_wallet_accounts (vendor_id, available_balance_cents, pending_balance_cents)
+       VALUES ($1, 0, 0)
+       ON CONFLICT (vendor_id) DO UPDATE SET updated_at = now()
+       RETURNING id`,
+      [vendorAId],
+    );
+    await client!.query(
+      `INSERT INTO dropship.dropship_wallet_ledger
+        (wallet_account_id, vendor_id, type, status, amount_cents, reference_type, reference_id, idempotency_key)
+       VALUES ($1, $2, 'funding_reversal', 'settled', -4000, 'stripe_dispute', 'dp_1', 'stripe-dispute:dp_1')`,
+      [wallet.rows[0].id, vendorAId],
+    );
+    // One reversal per dispute: a replayed webhook cannot post a second one.
+    await expectDatabaseError(
+      client!,
+      () => client!.query(
+        `INSERT INTO dropship.dropship_wallet_ledger
+          (wallet_account_id, vendor_id, type, status, amount_cents, reference_type, reference_id, idempotency_key)
+         VALUES ($1, $2, 'funding_reversal', 'settled', -4000, 'stripe_dispute', 'dp_1', 'stripe-dispute:dp_1:again')`,
+        [wallet.rows[0].id, vendorAId],
+      ),
+      "23505",
+    );
+    await client!.query(
+      `INSERT INTO dropship.dropship_wallet_ledger
+        (wallet_account_id, vendor_id, type, status, amount_cents, reference_type, reference_id, idempotency_key)
+       VALUES ($1, $2, 'funding_reinstated', 'settled', 4000, 'stripe_dispute_reinstated', 'dp_1', 'stripe-dispute-reinstated:dp_1')`,
+      [wallet.rows[0].id, vendorAId],
+    );
+    // The kinds are a closed list: anything else is refused by the constraint.
+    await expectDatabaseError(
+      client!,
+      () => client!.query(
+        `INSERT INTO dropship.dropship_wallet_ledger
+          (wallet_account_id, vendor_id, type, status, amount_cents)
+         VALUES ($1, $2, 'chargeback', 'settled', -1)`,
+        [wallet.rows[0].id, vendorAId],
+      ),
+      "23514",
     );
   });
 

@@ -27,6 +27,8 @@ export const DROPSHIP_NOTIFICATION_EVENTS = {
   VENDOR_PAUSED: "dropship_vendor_paused",
   VENDOR_RESUMED: "dropship_vendor_resumed",
   WALLET_FUNDING_FAILED: "dropship_wallet_funding_failed",
+  WALLET_FUNDING_REINSTATED: "dropship_wallet_funding_reinstated",
+  WALLET_FUNDING_REVERSED: "dropship_wallet_funding_reversed",
 } as const;
 
 export type DropshipNotificationEventType =

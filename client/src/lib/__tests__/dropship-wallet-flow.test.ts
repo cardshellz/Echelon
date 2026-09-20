@@ -509,8 +509,11 @@ describe("copy", () => {
     expect(describeFundingMethodDetailed(method({ fundingMethodId: 12, card: { brand: "Visa", last4: "4242", expMonth: null, expYear: null } }))).toBe("Visa ending in 4242");
     expect(describeFundingMethod(method({ fundingMethodId: 20, rail: "usdc_base", usdcWalletAddress: "0x1234567890abcdef1234567890abcdef12345678" }))).toBe("USDC · 0x1234…5678");
     expect(describeFundingMethod(method({ fundingMethodId: 13, card: null, displayLabel: "My card" }))).toBe("My card");
-    expect(Object.keys(LEDGER_REASON_LABELS)).toHaveLength(12);
+    expect(Object.keys(LEDGER_REASON_LABELS)).toHaveLength(15);
     expect(LEDGER_REASON_LABELS.covered_held_order).toBe("Covered a held order");
+    expect(LEDGER_REASON_LABELS.advance_fee).toBe("Fee for paying an order from money on its way");
+    expect(LEDGER_REASON_LABELS.funding_reversed).toBe("Payment reversed by your bank");
+    expect(LEDGER_REASON_LABELS.funding_reinstated).toBe("Reversed payment returned");
   });
 });
 

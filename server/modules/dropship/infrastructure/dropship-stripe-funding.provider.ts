@@ -6,6 +6,12 @@ import {
   FUNDING_METHOD_FINANCIAL_CONNECTIONS_ACCOUNT_KEY,
 } from "../domain/funding-method";
 import { toDropshipStripeError } from "./dropship-stripe-error";
+import {
+  DROPSHIP_DISPUTE_STATUSES,
+  disputeOutcomeFor,
+  disputeWithdrawsFunds,
+  type DropshipDisputeStatus,
+} from "../domain/funding-reversal";
 import type {
   CreditDropshipWalletFundingInput,
   DropshipBankBalanceSnapshot,
@@ -16,7 +22,9 @@ import type {
   DropshipWalletFundingCardFeeRate,
   DropshipWalletFundingProvider,
   HandleDropshipAutoReloadInput,
+  RecordDropshipWalletDisputeOutcomeInput,
   RecordDropshipWalletFundingFailureInput,
+  RecordDropshipWalletFundingReversalInput,
   RegisterDropshipFundingMethodInput,
 } from "../application/dropship-wallet-service";
 
@@ -51,6 +59,20 @@ export type DropshipStripeFundingWebhookEvent =
       providerEventId: string;
       eventType: string;
       failure: RecordDropshipWalletFundingFailureInput;
+    }
+  | {
+      /** A dispute on a payment: a card chargeback or an ACH debit returned after it cleared. */
+      kind: "wallet_funding_disputed";
+      providerEventId: string;
+      eventType: string;
+      reversal: RecordDropshipWalletFundingReversalInput;
+    }
+  | {
+      /** A dispute closed or its funds came back. */
+      kind: "wallet_funding_dispute_closed";
+      providerEventId: string;
+      eventType: string;
+      outcome: RecordDropshipWalletDisputeOutcomeInput;
     }
   | {
       /** Financial Connections reported a refreshed balance for a linked bank account. */
@@ -323,6 +345,16 @@ export class StripeDropshipFundingProvider implements DropshipWalletFundingProvi
     if (event.type === "payment_intent.payment_failed") {
       return this.parsePaymentIntentFundingFailureEvent(event);
     }
+    if (
+      event.type === "charge.dispute.created"
+      || event.type === "charge.dispute.updated"
+      || event.type === "charge.dispute.funds_withdrawn"
+    ) {
+      return this.parseDisputeEvent(event, "reversal");
+    }
+    if (event.type === "charge.dispute.closed" || event.type === "charge.dispute.funds_reinstated") {
+      return this.parseDisputeEvent(event, "outcome");
+    }
     if (event.type === "financial_connections.account.refreshed_balance") {
       const account = event.data.object as Stripe.FinancialConnections.Account;
       return {
@@ -339,6 +371,61 @@ export class StripeDropshipFundingProvider implements DropshipWalletFundingProvi
       providerEventId: event.id,
       eventType: event.type,
       reason: "unsupported_event_type",
+    };
+  }
+
+  /**
+   * A dispute event, as the wallet needs it. Every dispute on the Stripe
+   * account arrives here, so the wallet decides whether the payment is one of
+   * its funding credits; the provider only says what Stripe said. A dispute
+   * that names no payment intent cannot be matched and is ignored.
+   */
+  private parseDisputeEvent(event: Stripe.Event, kind: "reversal" | "outcome"): DropshipStripeFundingWebhookEvent {
+    const dispute = event.data.object as Stripe.Dispute;
+    const providerPaymentIntentId = idFromExpandable(dispute.payment_intent);
+    if (!providerPaymentIntentId) {
+      return { kind: "ignored", providerEventId: event.id, eventType: event.type, reason: "dispute_without_payment_intent" };
+    }
+    const status = parseDisputeStatus(dispute.status);
+    if (!status) {
+      return { kind: "ignored", providerEventId: event.id, eventType: event.type, reason: `unknown_dispute_status:${String(dispute.status)}` };
+    }
+    if (!Number.isSafeInteger(dispute.amount) || dispute.amount <= 0) {
+      throw new DropshipError(
+        "DROPSHIP_STRIPE_WEBHOOK_METADATA_INVALID",
+        "Stripe dispute carries an amount that is not a positive integer.",
+        { providerEventId: event.id, disputeId: dispute.id, amount: dispute.amount },
+      );
+    }
+    const common = {
+      provider: "stripe" as const,
+      providerEventId: event.id,
+      providerDisputeId: dispute.id,
+      providerPaymentIntentId,
+      amountCents: dispute.amount,
+      currency: dispute.currency.toUpperCase(),
+      status,
+    };
+    if (kind === "reversal") {
+      return {
+        kind: "wallet_funding_disputed",
+        providerEventId: event.id,
+        eventType: event.type,
+        reversal: {
+          ...common,
+          reason: typeof dispute.reason === "string" && dispute.reason.trim() ? dispute.reason.trim().slice(0, 120) : null,
+          fundsWithdrawn: event.type === "charge.dispute.funds_withdrawn" || disputeWithdrawsFunds(status),
+        },
+      };
+    }
+    return {
+      kind: "wallet_funding_dispute_closed",
+      providerEventId: event.id,
+      eventType: event.type,
+      outcome: {
+        ...common,
+        fundsReinstated: event.type === "charge.dispute.funds_reinstated" || disputeOutcomeFor(status) === "won",
+      },
     };
   }
 
@@ -892,6 +979,12 @@ export function bankBalanceSnapshotFromAccount(
       ? new Date(refresh.next_refresh_available_at * 1000)
       : null,
   };
+}
+
+function parseDisputeStatus(value: unknown): DropshipDisputeStatus | null {
+  return typeof value === "string" && (DROPSHIP_DISPUTE_STATUSES as readonly string[]).includes(value)
+    ? (value as DropshipDisputeStatus)
+    : null;
 }
 
 function idFromExpandable(value: string | { id?: string } | null | undefined): string | null {

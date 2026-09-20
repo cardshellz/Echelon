@@ -900,3 +900,107 @@ describe("StripeDropshipFundingProvider bank balances (funding design phase 3)",
     });
   });
 });
+
+describe("StripeDropshipFundingProvider disputes (funding design phase 4)", () => {
+  /** A Stripe dispute event as the SDK delivers it, with the fields the wallet reads. */
+  function disputeEvent(type: string, dispute: Record<string, unknown> = {}) {
+    return {
+      id: "evt_dp_1",
+      type,
+      data: {
+        object: {
+          id: "dp_1",
+          object: "dispute",
+          amount: 5000,
+          currency: "usd",
+          charge: "ch_1",
+          payment_intent: "pi_1",
+          reason: "fraudulent",
+          status: "needs_response",
+          ...dispute,
+        },
+      },
+    };
+  }
+
+  async function parse(event: unknown) {
+    const stripe = makeStripeDouble();
+    stripe.webhooks.constructEvent.mockReturnValueOnce(event);
+    const provider = new StripeDropshipFundingProvider({ stripeClient: stripe, webhookSecret: "whsec_test" });
+    return provider.parseWebhookEvent({ rawBody: Buffer.from("{}"), signature: "sig" });
+  }
+
+  it("turns a chargeback that has taken the funds into a reversal the wallet can post", async () => {
+    await expect(parse(disputeEvent("charge.dispute.created"))).resolves.toEqual({
+      kind: "wallet_funding_disputed",
+      providerEventId: "evt_dp_1",
+      eventType: "charge.dispute.created",
+      reversal: {
+        provider: "stripe",
+        providerEventId: "evt_dp_1",
+        providerDisputeId: "dp_1",
+        providerPaymentIntentId: "pi_1",
+        amountCents: 5000,
+        currency: "USD",
+        status: "needs_response",
+        reason: "fraudulent",
+        fundsWithdrawn: true,
+      },
+    });
+  });
+
+  it("reports an inquiry as opened but not withdrawn, and a funds_withdrawn event as withdrawn whatever the status says", async () => {
+    expect(await parse(disputeEvent("charge.dispute.created", { status: "warning_needs_response", reason: null })))
+      .toMatchObject({ kind: "wallet_funding_disputed", reversal: { status: "warning_needs_response", reason: null, fundsWithdrawn: false } });
+    expect(await parse(disputeEvent("charge.dispute.funds_withdrawn", { status: "warning_under_review" })))
+      .toMatchObject({ kind: "wallet_funding_disputed", eventType: "charge.dispute.funds_withdrawn", reversal: { fundsWithdrawn: true } });
+    expect(await parse(disputeEvent("charge.dispute.updated", { status: "under_review" })))
+      .toMatchObject({ kind: "wallet_funding_disputed", reversal: { status: "under_review", fundsWithdrawn: true } });
+  });
+
+  it("turns a closed dispute into an outcome: won or funds_reinstated bring the money back, lost does not", async () => {
+    await expect(parse(disputeEvent("charge.dispute.closed", { status: "won" }))).resolves.toEqual({
+      kind: "wallet_funding_dispute_closed",
+      providerEventId: "evt_dp_1",
+      eventType: "charge.dispute.closed",
+      outcome: {
+        provider: "stripe",
+        providerEventId: "evt_dp_1",
+        providerDisputeId: "dp_1",
+        providerPaymentIntentId: "pi_1",
+        amountCents: 5000,
+        currency: "USD",
+        status: "won",
+        fundsReinstated: true,
+      },
+    });
+    expect(await parse(disputeEvent("charge.dispute.closed", { status: "lost" })))
+      .toMatchObject({ kind: "wallet_funding_dispute_closed", outcome: { status: "lost", fundsReinstated: false } });
+    expect(await parse(disputeEvent("charge.dispute.closed", { status: "warning_closed" })))
+      .toMatchObject({ outcome: { status: "warning_closed", fundsReinstated: false } });
+    expect(await parse(disputeEvent("charge.dispute.funds_reinstated", { status: "under_review" })))
+      .toMatchObject({ eventType: "charge.dispute.funds_reinstated", outcome: { fundsReinstated: true } });
+  });
+
+  it("reads an expanded payment intent by its id, trims the reason to what the wallet stores, and treats a blank reason as none", async () => {
+    expect(await parse(disputeEvent("charge.dispute.created", { payment_intent: { id: "pi_expanded" }, reason: `  ${"x".repeat(200)}  ` })))
+      .toMatchObject({ reversal: { providerPaymentIntentId: "pi_expanded", reason: "x".repeat(120) } });
+    expect(await parse(disputeEvent("charge.dispute.created", { reason: "   " }))).toMatchObject({ reversal: { reason: null } });
+  });
+
+  it("ignores a dispute that names no payment intent, or carries a status the wallet does not know", async () => {
+    expect(await parse(disputeEvent("charge.dispute.created", { payment_intent: null }))).toEqual({
+      kind: "ignored", providerEventId: "evt_dp_1", eventType: "charge.dispute.created", reason: "dispute_without_payment_intent",
+    });
+    expect(await parse(disputeEvent("charge.dispute.closed", { status: "something_new" }))).toEqual({
+      kind: "ignored", providerEventId: "evt_dp_1", eventType: "charge.dispute.closed", reason: "unknown_dispute_status:something_new",
+    });
+  });
+
+  it("refuses a dispute whose amount is not a positive integer rather than posting a guess", async () => {
+    for (const amount of [0, -5000, 12.5]) {
+      await expect(parse(disputeEvent("charge.dispute.created", { amount })))
+        .rejects.toMatchObject({ code: "DROPSHIP_STRIPE_WEBHOOK_METADATA_INVALID" });
+    }
+  });
+});
