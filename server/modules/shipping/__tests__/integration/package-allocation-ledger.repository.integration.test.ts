@@ -5039,6 +5039,44 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     )).rowCount).toBe(0);
     expect((await pool.query("SELECT id FROM wms.physical_shipment_items")).rowCount).toBe(0);
     expect((await pool.query("SELECT id FROM oms.channel_fulfillment_push_items")).rowCount).toBe(0);
+
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const handler = new PackageAllocationLabelCommercialFulfillmentService({
+      enabled: true,
+      logger,
+      labelLinker: {
+        reconcileShipStationLabel: vi.fn().mockResolvedValue({ linksInserted: 0, totalLinks: 1 }),
+      },
+      reviewRepository: { record: vi.fn() },
+      workflow: createPackageAllocationLabelCommercialWorkflow({
+        pool,
+        clock: { now: () => new Date("2026-08-28T13:00:00.000Z") },
+        logger,
+      }),
+    });
+    const replay = await handler.process({
+      shipmentId: 57_002,
+      orderId: 78_002,
+      trackingNumber: "1ZCURRENTREFUNDREVIEW",
+      isReturnLabel: false,
+      shipmentItems: [
+        { lineItemKey: `wms-item-${shippedSourceId}`, quantity: 2 },
+        { lineItemKey: `wms-item-${deletedRefundedSourceId}`, quantity: 1 },
+      ],
+    }, { shippingProviderLabelId: labelId } as any);
+    expect(replay).toMatchObject({ outcome: "activated" });
+    const channelItems = await pool.query<{ source_id: number; quantity_pushed: number }>(`
+      SELECT source.source_wms_shipment_item_id AS source_id, push_item.quantity_pushed
+      FROM oms.channel_fulfillment_push_items AS push_item
+      JOIN wms.package_allocation_effect_intents AS intent
+        ON intent.id = push_item.package_allocation_effect_intent_id
+      JOIN wms.package_allocation_source_lines AS source
+        ON source.id = intent.package_allocation_source_line_id
+    `);
+    expect(channelItems.rows).toEqual([{ source_id: shippedSourceId, quantity_pushed: 2 }]);
+    expect((await pool.query<{ legacy_wms_shipment_item_id: number }>(
+      "SELECT legacy_wms_shipment_item_id FROM wms.physical_shipment_items",
+    )).rows).toEqual([{ legacy_wms_shipment_item_id: shippedSourceId }]);
   });
 
   it("materializes only the authorized portion of a partly canceled source line", async () => {
