@@ -70,6 +70,16 @@ describe("writer-ratchet (P2.1)", () => {
     ).toEqual([]);
   });
 
+  it("keeps Walmart connection writes in channels and order reconciliation writes in OMS", () => {
+    for (const table of ["channels.walmart_connections", "channels.walmart_connection_events", "channels.walmart_order_receipts"]) {
+      expect(current[table]).toEqual(["modules/channels"]);
+    }
+    for (const table of ["oms.oms_orders", "oms.oms_order_lines", "oms.oms_order_events"]) {
+      expect(current[table]).toContain("modules/oms");
+      expect(current[table]).not.toContain("modules/channels");
+    }
+  });
+
   it("eliminated writers are removed from the baseline (no rot)", () => {
     const stale: string[] = [];
     for (const [table, buckets] of Object.entries(baseline)) {

@@ -130,6 +130,14 @@ import { describeAllocationFailure } from "../modules/channels/allocation-engine
 import { logger as platformLogger } from "../platform/observability/logger";
 import { createSourceLockService } from "../modules/channels/source-lock.service";
 import { createShopifyAdapter } from "../modules/channels/adapters/shopify.adapter";
+import { WalmartChannelService } from "../modules/channels/adapters/walmart/walmart-channel.service";
+import { WalmartConnectionRepository } from "../modules/channels/adapters/walmart/walmart-connection.repository";
+import { WalmartAdapter } from "../modules/channels/adapters/walmart/walmart.adapter";
+import { WalmartOrderPollService } from "../modules/channels/adapters/walmart/walmart-order-poll.service";
+import { PostgresChannelOrderObservationWriter } from "../modules/oms/channel-order-observation.repository";
+import { PostgresInventoryPublicationSupplyReader } from "../modules/inventory-planning/infrastructure/inventory-publication-supply-read.repository";
+import { createWalmartFulfillmentExecutor } from "../modules/channels/adapters/walmart/walmart-fulfillment";
+import { AesGcmFulfillmentProviderCredentialCipher } from "../modules/shipping-engine/infrastructure/fulfillment-provider-credential-cipher";
 import { createEbayAdapter } from "../modules/channels/adapters/ebay.adapter";
 import { ChannelAdapterRegistry } from "../modules/channels/channel-adapter.interface";
 import { ChannelInventoryPublicationTransportAdapter } from "../modules/channels/channel-inventory-publication-transport.adapter";
@@ -368,9 +376,16 @@ export function createServices(
   const sourceLockService = createSourceLockService(db);
   const shopifyAdapter = createShopifyAdapter(db, quantityPublicationAdmission);
   const ebayAdapter = createEbayAdapter(db);
+  const walmart = new WalmartChannelService(new WalmartConnectionRepository(databasePool),
+    AesGcmFulfillmentProviderCredentialCipher.fromEnvOrNull({
+      SHIPPING_PROVIDER_CREDENTIAL_ENCRYPTION_KEY: process.env.WALMART_CREDENTIAL_ENCRYPTION_KEY,
+      SHIPPING_PROVIDER_CREDENTIAL_KEY_ID: process.env.WALMART_CREDENTIAL_KEY_ID,
+    }), { liveEnabled: envFlagEnabled("WALMART_LIVE_ENABLED"), productionServer: process.env.NODE_ENV === "production" });
+  const walmartAdapter = new WalmartAdapter(walmart, new PostgresInventoryPublicationSupplyReader(databasePool));
   const adapterRegistry = new ChannelAdapterRegistry();
   adapterRegistry.register(shopifyAdapter);
   adapterRegistry.register(ebayAdapter);
+  adapterRegistry.register(walmartAdapter);
   const inventoryPublicationTransports = new InventoryPublicationTransportRegistry();
   inventoryPublicationTransports.register(
     new ChannelInventoryPublicationTransportAdapter(shopifyAdapter),
@@ -381,9 +396,11 @@ export function createServices(
   inventoryPublicationTransports.register(
     createEbayDropshipInventoryPublicationTransportAdapterFromEnv(),
   );
+  inventoryPublicationTransports.register(new ChannelInventoryPublicationTransportAdapter(walmartAdapter));
   const channelShippingCapabilities = new ChannelShippingCapabilityRegistry();
   channelShippingCapabilities.register(shopifyAdapter);
   channelShippingCapabilities.register(ebayAdapter);
+  channelShippingCapabilities.register(walmartAdapter);
   channelShippingCapabilities.register(
     MANUAL_CHANNEL_SHIPPING_CAPABILITY_DECLARATION,
   );
@@ -544,7 +561,8 @@ export function createServices(
     labelReplacementEnabled: !envFlagEnabled("PACKAGE_ALLOCATION_COMMERCIAL_FULFILLMENT_DISABLED"),
     repository: createChannelFulfillmentAuthorityRepository(db),
     projector: createChannelFulfillmentProjector(db),
-    providerExecutor: createCompatibilityChannelFulfillmentProviderExecutor(fulfillmentPush),
+    providerExecutor: createWalmartFulfillmentExecutor(walmart, fulfillmentPush.prepareWalmartFulfillmentCommand,
+      createCompatibilityChannelFulfillmentProviderExecutor(fulfillmentPush)),
     shopifyLabelLifecycle,
   });
   const channelFulfillmentReviewRetry = createChannelFulfillmentReviewRetryService({
@@ -654,6 +672,7 @@ export function createServices(
 
   // WMS Sync — bridges OMS → WMS for fulfillment
   const wmsSync = new WmsSyncService({
+    resolveChannelWarehouse: channelId => walmart.repository.resolveWarehouse(channelId),
     inventoryCore: inventoryCore as any,
     reservation,
     fulfillmentRouter,
@@ -666,6 +685,8 @@ export function createServices(
 
   // SyncRecovery — unified order-pipeline gap recovery (Shopify → shopify_orders
   // → OMS → WMS). Runs on a schedule and is exposed via /api/sync/recover-orders.
+  const walmartOrderPoll = new WalmartOrderPollService(walmart, oms, id => wmsSync.syncOmsOrderToWms(id),
+    new PostgresChannelOrderObservationWriter(databasePool));
   const syncRecovery = new SyncRecoveryService(db, { oms, wmsSync, shipStation });
 
   return {
@@ -726,6 +747,8 @@ export function createServices(
     carrierTrackingLogger,
     wmsSync,
     syncRecovery,
+    walmart,
+    walmartOrderPoll,
   };
 }
 

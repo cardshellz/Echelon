@@ -32,6 +32,7 @@ const SKIP_EXPLANATIONS: Record<string, string> = {
   already_registered: "Already set up",
   no_publishing_adapter: "Echelon cannot publish to this provider yet",
   no_verified_account: "The connection has no verified account id yet",
+  no_provider_location: "The connection has no verified fulfillment center yet",
   no_shopify_location: "The connection has no Shopify location recorded yet",
 };
 

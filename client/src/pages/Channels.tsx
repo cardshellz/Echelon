@@ -1,3 +1,4 @@
+import WalmartConnectionPanel from "@/components/WalmartConnectionPanel";
 import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "@/lib/auth";
@@ -117,6 +118,7 @@ interface EbaySettings {
 const PROVIDER_OPTIONS = [
   { value: "shopify", label: "Shopify", icon: "🛒" },
   { value: "ebay", label: "eBay", icon: "🏷️" },
+  { value: "walmart", label: "Walmart US", icon: "🛍️" },
   { value: "amazon", label: "Amazon", icon: "📦" },
   { value: "etsy", label: "Etsy", icon: "🎨" },
   { value: "manual", label: "Manual Entry", icon: "✏️" },
@@ -675,6 +677,8 @@ export default function Channels() {
                 </TabsContent>
                 
                 <TabsContent value="connection" className="space-y-4 mt-4">
+                  {selectedChannel.provider === "walmart" ? <WalmartConnectionPanel key={selectedChannel.id} channelId={selectedChannel.id} canEdit={canEdit} warehouses={warehouses} /> : <>
+
                   {selectedChannel.connection ? (
                     <div className="space-y-4">
                       <div className="flex items-center gap-2 p-3 bg-muted rounded-lg">
@@ -940,6 +944,7 @@ export default function Channels() {
                       </p>
                     </div>
                   )}
+                  </>}
                 </TabsContent>
 
                 {selectedChannel.type === 'partner' && (

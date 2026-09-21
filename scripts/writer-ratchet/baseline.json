@@ -124,6 +124,15 @@
     "modules/inventory-planning",
     "server/db.ts"
   ],
+  "channels.walmart_connection_events": [
+    "modules/channels"
+  ],
+  "channels.walmart_connections": [
+    "modules/channels"
+  ],
+  "channels.walmart_order_receipts": [
+    "modules/channels"
+  ],
   "dropship.dropship_admin_config_commands": [
     "modules/dropship"
   ],

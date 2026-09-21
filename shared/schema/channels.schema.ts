@@ -27,7 +27,7 @@ export type ChannelType = typeof channelTypeEnum[number];
 export const channelOwnershipEnum = ["internal", "partner"] as const;
 export type ChannelOwnership = typeof channelOwnershipEnum[number];
 
-export const channelProviderEnum = ["shopify", "ebay", "amazon", "etsy", "manual"] as const;
+export const channelProviderEnum = ["shopify", "ebay", "walmart", "amazon", "etsy", "manual"] as const;
 export type ChannelProvider = typeof channelProviderEnum[number];
 
 export const channelStatusEnum = ["active", "paused", "pending_setup", "error"] as const;
