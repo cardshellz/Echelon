@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { useLocation } from "wouter";
+import { Link, useLocation } from "wouter";
 import {
   AlertCircle,
   ArrowLeft,
@@ -140,6 +140,9 @@ export default function DropshipPortalAuth() {
               </h1>
               <p className="mt-5 text-base leading-7 text-zinc-600">
                 Start with the email on your Card Shellz account. Eligible members can continue with a code, password, or passkey.
+              </p>
+              <p className="mt-6 text-sm text-zinc-500">
+                <Link href={dropshipPortalPath("/privacy")} className="underline hover:text-zinc-700" data-testid="auth-privacy-link">Privacy policy</Link>
               </p>
             </div>
           </div>
