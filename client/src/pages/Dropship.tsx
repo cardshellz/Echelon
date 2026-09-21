@@ -1238,10 +1238,11 @@ function DogfoodReadinessTab({
       <section className="rounded-md border bg-card p-4">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div>
-            <h2 className="text-lg font-semibold">Dogfood readiness</h2>
+            <h2 className="text-lg font-semibold">Launch checklist</h2>
             <p className="text-sm text-muted-foreground">
-              Validate each vendor/store against the minimum internal launch
-              checklist before running live orders.
+              Every vendor and store against the internal launch checklist.
+              These rows are the detail behind the verdict above: a blocker
+              here is the thing to fix.
             </p>
           </div>
           <div className="flex flex-col gap-2 lg:flex-row">
@@ -1297,7 +1298,7 @@ function DogfoodReadinessTab({
         </div>
       </section>
 
-      <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+      <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4" data-testid="launch-checklist-counts">
         <CatalogMetric
           icon={<CheckCircle2 className="h-4 w-4" />}
           label="Ready"
@@ -7765,7 +7766,7 @@ function DogfoodLaunchGatePanel({
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <h2 className="text-lg font-semibold">Dogfood launch gate</h2>
+            <h2 className="text-lg font-semibold">Can we run live orders?</h2>
             <Badge
               variant="outline"
               className={dogfoodReadinessStatusTone(displayStatus)}
@@ -7774,47 +7775,18 @@ function DogfoodLaunchGatePanel({
             </Badge>
           </div>
           <p className="mt-1 text-sm text-muted-foreground">{displayMessage}</p>
-        </div>
-        <div className="grid w-full gap-2 sm:grid-cols-2 lg:w-auto lg:min-w-[520px] lg:grid-cols-4">
-          <LaunchGateMetric label="Ready" value={gate.readyVendorStoreCount} />
-          <LaunchGateMetric
-            label="System blocked"
-            value={gate.systemBlockedCount}
-          />
-          <LaunchGateMetric
-            label="Rows blocked"
-            value={gate.blockedVendorStoreCount}
-          />
-          <LaunchGateMetric label="Warnings" value={gate.warningCount} />
+          {/*
+            The verdict only. Every blocker behind it is a row of the launch
+            checklist below and a card in system prerequisites above, and
+            printing them here as well made one problem look like three.
+          */}
+          <p className="mt-1 text-sm text-muted-foreground">
+            This is a summary of the two panels below it: system prerequisites
+            for the environment, and the launch checklist for each vendor and
+            store. Fix a blocker there, not here.
+          </p>
         </div>
       </div>
-      {gate.firstBlockers.length > 0 && (
-        <div className="mt-4 grid gap-2 lg:grid-cols-2">
-          {gate.firstBlockers.slice(0, 4).map((blocker, index) => (
-            <div
-              key={`${blocker.scope}:${blocker.key}:${blocker.vendorId ?? "system"}:${index}`}
-              className="rounded-md border p-3"
-            >
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="font-medium">{blocker.label}</div>
-                  <div className="mt-1 text-sm text-muted-foreground">
-                    {blocker.message}
-                  </div>
-                </div>
-                <Badge
-                  variant="outline"
-                  className="shrink-0 border-zinc-200 bg-zinc-50 text-zinc-700"
-                >
-                  {blocker.scope === "system"
-                    ? "System"
-                    : `Vendor ${blocker.vendorId}`}
-                </Badge>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
       {candidates.length > 0 && (
         <div className="mt-4 border-t pt-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
@@ -8023,7 +7995,18 @@ function DogfoodSmokePanel({
     <section className="rounded-md border bg-card p-4">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
-          <h2 className="text-lg font-semibold">Dogfood smoke evidence</h2>
+          <h2 className="text-lg font-semibold">Has a real order run end to end?</h2>
+          {/*
+            A different question from the checklist: that one asks whether a
+            vendor is configured to trade, this one asks whether an order has
+            actually gone out. Red here does not block the checklist, and red
+            there does not explain this.
+          */}
+          <p className="mt-1 text-sm text-muted-foreground">
+            Evidence of a listing pushed, an order taken in, a shipment made
+            and tracking sent back. Separate from the launch checklist: a
+            vendor can be fully configured and still have no order yet.
+          </p>
           <p className="mt-1 text-sm text-muted-foreground">{smoke.message}</p>
         </div>
         <div className="grid w-full gap-2 sm:grid-cols-3 lg:w-auto lg:min-w-[420px]">
@@ -8258,12 +8241,9 @@ function DogfoodReadinessTable({
   return (
     <section className="rounded-md border bg-card">
       <div className="flex items-center justify-between border-b px-4 py-3">
-        <div>
-          <h2 className="text-lg font-semibold">Launch checklist</h2>
-          <p className="text-sm text-muted-foreground">
-            {total} matching row{total === 1 ? "" : "s"}
-          </p>
-        </div>
+        <p className="text-sm text-muted-foreground">
+          {total} matching row{total === 1 ? "" : "s"}
+        </p>
       </div>
       <Table>
         <TableHeader>
