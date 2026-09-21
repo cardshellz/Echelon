@@ -89,6 +89,9 @@ import { withAdvisoryLock } from "../infrastructure/scheduler-lock";
 import { envFlagEnabled } from "../infrastructure/scheduler-config";
 import type { Pool } from "pg";
 import { createShipStationService } from "../modules/oms/shipstation.service";
+import { createShipStationRelatedLabelReader } from "../modules/shipping/shipstation-related-labels.reader";
+import { createShipStationLabelReconciliationService } from "../modules/oms/shipstation-label-reconciliation.service";
+import { createShipStationLabelReconciliationRepository } from "../modules/oms/shipstation-label-reconciliation.repository";
 import { createShipStationEngine } from "../modules/shipping";
 import { createDrizzleCarrierTrackingRepository } from "../modules/shipping/carrier-tracking.repository";
 import {
@@ -622,10 +625,17 @@ export function createServices(
       shipmentInventory.recordReplacementShipmentFromAvailableInventory(input),
   }, {
     providerLabelObserver: carrierTracking,
+    relatedLabelReader: createShipStationRelatedLabelReader(databasePool),
     fulfillmentAuthority: channelFulfillmentAuthority,
     labelCommercialFulfillment,
   });
   providerDispatchAuthority = shipStation;
+  const shipStationLabelReconciliation = createShipStationLabelReconciliationService({
+    repository: createShipStationLabelReconciliationRepository(db),
+    source: shipStation.labelReconciliationSource,
+    processLabels: shipStation.processProviderLabelSnapshots,
+    clock: systemCarrierTrackingClock,
+  });
   const shipStationPhysicalRecovery = createShipStationPhysicalRecoveryService(db, {
     client: createShipStationPhysicalRecoveryClient(),
     carrierTracking,
@@ -732,6 +742,7 @@ export function createServices(
     shipStation,
     shipStationPhysicalRecovery,
     shippingEngine,
+    shipStationLabelReconciliation,
     carrierTracking,
     carrierTrackingLogger,
     wmsSync,

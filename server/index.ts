@@ -60,6 +60,7 @@ import { cancelWmsOrderAndRelease, completeWmsOrderAndRelease } from "./modules/
 import { setPickQueueReservationService } from "./modules/orders/orders.storage";
 import { engineRefFromRow, toEngineRef } from "./modules/shipping";
 import { startCarrierTrackingReconciliationScheduler } from "./modules/shipping/carrier-tracking-reconciliation.scheduler";
+import { startShipStationLabelReconciliationScheduler } from "./modules/oms/shipstation-label-reconciliation.scheduler";
 import {
   installShipStationTrackingRawBodyCapture,
   registerShipStationTrackingWebhook,
@@ -916,6 +917,12 @@ function startEchelonSyncScheduler(
           "Carrier tracking reconciliation",
           "CARRIER_TRACKING_RECONCILIATION_DISABLED",
         );
+      }
+
+      if (!schedulersDisabled("SHIPSTATION_LABEL_RECONCILIATION_DISABLED")) {
+        startShipStationLabelReconciliationScheduler(services.shipStationLabelReconciliation);
+      } else {
+        logSchedulerDisabled("scheduler", "ShipStation label reconciliation", "SHIPSTATION_LABEL_RECONCILIATION_DISABLED");
       }
 
       if (!schedulersDisabled()) {
