@@ -380,6 +380,17 @@ export function isEligibleBackupCard(method: WalletFundingMethod, now: Date): bo
   return method.card === null || cardExpiryState(method.card, now) !== "expired";
 }
 
+/**
+ * The rail the source picker opens on when the vendor has not chosen one.
+ *
+ * Bank is the rail the page recommends (it carries no card fee), so it is also
+ * the rail the page defaults to. A card already saved on the wallet does NOT
+ * flip the default: defaulting to the more expensive rail because a card
+ * happens to exist contradicts the recommendation shown beside it. The saved
+ * card stays one click away and is named on screen.
+ */
+export const RECOMMENDED_SOURCE_RAIL: WalletSourceRail = "stripe_ach";
+
 export function activeMethodsOfRail(wallet: DropshipWalletView, rail: WalletSourceRail): WalletFundingMethod[] {
   return wallet.fundingMethods.filter((method) => method.rail === rail && method.status === "active").sort(newestFirst);
 }
@@ -438,7 +449,9 @@ export function deriveWalletFlow(input: {
   const draftSource = draft.sourceMethodId === null ? null : sourceCandidates.find((method) => method.fundingMethodId === draft.sourceMethodId) ?? null;
   const sourceMethod = draftSource ?? configuredSource;
   const source = sourceMethod && isSourceRail(sourceMethod.rail) ? { rail: sourceMethod.rail, method: sourceMethod } : null;
-  const suggested = source ? null : (activeMethodsOfRail(wallet, "stripe_ach")[0] ?? activeMethodsOfRail(wallet, "stripe_card")[0] ?? null);
+  // Only a saved BANK account is preselected. A saved card is offered by name
+  // (describeSavedCardAlternative) instead of being chosen for the vendor.
+  const suggested = source ? null : (activeMethodsOfRail(wallet, RECOMMENDED_SOURCE_RAIL)[0] ?? null);
 
   const floorFromServer = authorized ? autoReload.minimumBalanceCents : null;
   const floorCents = draft.floorCents ?? floorFromServer ?? (source ? derivedDefaultFloor(source.rail) : derivedDefaultFloor("stripe_ach"));
@@ -579,6 +592,22 @@ export function describeSourcePreselection(input: {
     return `${label} is already saved on your wallet, so we picked it — choose ${input.selected.rail === "stripe_ach" ? "a card" : "a bank account"} instead if you would rather.`;
   }
   return null;
+}
+
+/**
+ * Names a card already saved on the wallet while the picker sits on the
+ * recommended bank rail with nothing selected. Without this the card is
+ * invisible until the vendor clicks Card, which reads as if it were lost.
+ */
+export function describeSavedCardAlternative(input: {
+  rail: WalletSourceRail;
+  selected: WalletFundingMethod | null;
+  cards: readonly WalletFundingMethod[];
+}): string | null {
+  if (input.rail !== RECOMMENDED_SOURCE_RAIL || input.selected !== null) return null;
+  const card = input.cards[0];
+  if (!card) return null;
+  return `${describeFundingMethod(card)} is already saved. Choose Card to use it, or add a bank account and pay no fees.`;
 }
 
 // ---------------------------------------------------------------------------

@@ -365,9 +365,11 @@ test("bank vendor, end to end: intro, bank source, minimum with guidance and a t
   await shot(page, "01-intro");
   await intro.getByRole("button", { name: "Set up my wallet" }).click();
 
-  // Step 2: nothing pre-selected; the recommendation is a badge, not a choice.
+  // Step 2: the recommended rail is the default, but no method is chosen for the
+  // vendor, so Continue stays disabled until they pick one.
   const source = page.getByTestId("wallet-step-source");
   await expect(source.getByRole("heading", { name: "Choose your autopay source" })).toBeVisible();
+  await expect(radio(page, "Top up from", "Bank account")).toHaveAttribute("aria-checked", "true");
   await expect(source.getByRole("button", { name: "Continue" })).toBeDisabled();
   await expect(source.getByTestId("wallet-usdc-note")).toContainText("can never be your autopay source");
   await shot(page, "02-source-empty");
@@ -818,15 +820,26 @@ test("a vendor whose wallet already holds a card still starts at step 1, with no
   await intro.getByRole("button", { name: "Set up my wallet" }).click();
   const source = page.getByTestId("wallet-step-source");
   await expect(source.getByRole("heading", { name: "Choose your autopay source" })).toBeVisible();
-  // The saved card is preselected and said to be exactly that — no half-finished setup is claimed.
-  await expect(source.getByTestId("wallet-source-preselection"))
-    .toHaveText("Amex ending in 6800 is already saved on your wallet, so we picked it — choose a bank account instead if you would rather.");
+  // A saved card does not flip the default onto the fee-bearing rail: the picker
+  // opens on the recommended bank rail and names the card as the alternative.
+  await expect(radio(page, "Top up from", "Bank account")).toHaveAttribute("aria-checked", "true");
+  await expect(radio(page, "Top up from", "Card")).toHaveAttribute("aria-checked", "false");
+  await expect(source.getByTestId("wallet-source-preselection")).toHaveCount(0);
+  await expect(source.getByTestId("wallet-source-saved-card"))
+    .toHaveText("Amex ending in 6800 is already saved. Choose Card to use it, or add a bank account and pay no fees.");
+  await expect(source.getByTestId("wallet-impact")).toContainText("Routine top-ups are free");
+  // The whole option is the control: a click on the comparison text picks the rail.
+  await source.getByTestId("wallet-source-option-card").getByText("Lands at once").click();
   await expect(radio(page, "Top up from", "Card")).toHaveAttribute("aria-checked", "true");
+  await expect(source.getByTestId("wallet-source-saved-card")).toHaveCount(0);
   await expect(source).toContainText("Amex ending in 6800 · expires 12/28");
+  // Using a control inside the chosen option does not re-pick the rail.
+  await source.getByRole("button", { name: "Add another card" }).click();
+  await expect(radio(page, "Top up from", "Card")).toHaveAttribute("aria-checked", "true");
   await openStepList(page);
   await expect(stepLink(page, "intro")).not.toHaveAttribute("aria-current", "step");
   await expect(stepLink(page, "source")).toHaveAttribute("aria-current", "step");
-  await shot(page, "nav-00b-source-preselected");
+  await shot(page, "nav-00b-source-bank-default");
   finish(state);
 });
 

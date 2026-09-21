@@ -30,6 +30,7 @@ import {
   describePendingBalance,
   describePlanSentence,
   describeRoleGap,
+  describeSavedCardAlternative,
   describeSourcePreselection,
   disabledReasonForRemoval,
   draftStorageKey,
@@ -41,6 +42,7 @@ import {
   planFromWallet,
   previousWalletStep,
   readWalletDraft,
+  RECOMMENDED_SOURCE_RAIL,
   resolveStripeReturn,
   STEP_ORDER,
   stripStripeReturn,
@@ -105,7 +107,8 @@ describe("deriveWalletFlow", () => {
     expect(derive(wallet())).toMatchObject({ mode: "flow", step: "intro" });
     expect(derive(wallet(), started())).toMatchObject({ step: "source", suggestedSourceMethodId: null });
     expect(derive(wallet({ fundingMethods: [CARD, BANK] }), started())).toMatchObject({ step: "source", suggestedSourceMethodId: 30 });
-    expect(derive(wallet({ fundingMethods: [CARD] }), started())).toMatchObject({ step: "source", suggestedSourceMethodId: 10 });
+    // A saved card is never preselected: the picker opens on the recommended bank rail.
+    expect(derive(wallet({ fundingMethods: [CARD] }), started())).toMatchObject({ step: "source", suggestedSourceMethodId: null });
     expect(derive(wallet({ fundingMethods: [BANK] }), started({ sourceMethodId: 30 }))).toMatchObject({ step: "floor", floorCents: 25_000 });
     expect(derive(wallet({ fundingMethods: [BANK] }), started({ sourceMethodId: 30, floorCents: 4_000 }))).toMatchObject({ step: "floor" });
     expect(derive(wallet({ fundingMethods: [BANK] }), started({ sourceMethodId: 30, floorCents: 25_000 }))).toMatchObject({ step: "backup", backup: null, topUpCents: null, limitCents: 25_000 });
@@ -121,7 +124,7 @@ describe("deriveWalletFlow", () => {
     expect(derive(wallet({ fundingMethods: [carriedOver] }))).toMatchObject({ step: "intro", furthestStep: "intro", reachableSteps: ["intro"] });
     expect(derive(wallet({ fundingMethods: [carriedOver, BANK] }))).toMatchObject({ step: "intro", furthestStep: "intro" });
     // Reading it is the only thing that moves the flow on, and it stays read.
-    expect(derive(wallet({ fundingMethods: [carriedOver] }), started())).toMatchObject({ step: "source", suggestedSourceMethodId: 12 });
+    expect(derive(wallet({ fundingMethods: [carriedOver] }), started())).toMatchObject({ step: "source", suggestedSourceMethodId: null });
   });
 
   it("ignores an expired, archived or pending card as backup", () => {
@@ -530,6 +533,31 @@ describe("copy", () => {
     expect(describeSourcePreselection({ ...suggestion, justAdded: true })).toBeNull();
     expect(describeSourcePreselection({ ...suggestion, suggestedSourceMethodId: 30 })).toBeNull();
     expect(describeSourcePreselection({ ...suggestion, draftSourceMethodId: 30 })).toBeNull();
+  });
+
+  it("opens on the recommended bank rail and names a saved card instead of picking it", () => {
+    // The page recommends the bank rail, so the bank rail is what it defaults to.
+    expect(RECOMMENDED_SOURCE_RAIL).toBe("stripe_ach");
+    // A card already on the wallet is offered by name, not chosen for the vendor.
+    expect(describeSavedCardAlternative({ rail: "stripe_ach", selected: null, cards: [CARD] }))
+      .toBe("Visa ending in 4242 is already saved. Choose Card to use it, or add a bank account and pay no fees.");
+    // Nothing to offer: no card saved, the vendor is already on the card rail,
+    // or something is selected, so the card is on screen either way.
+    expect(describeSavedCardAlternative({ rail: "stripe_ach", selected: null, cards: [] })).toBeNull();
+    expect(describeSavedCardAlternative({ rail: "stripe_card", selected: null, cards: [CARD] })).toBeNull();
+    expect(describeSavedCardAlternative({ rail: "stripe_ach", selected: BANK, cards: [CARD] })).toBeNull();
+  });
+
+  it("preselects a saved bank account but never a saved card", () => {
+    // A bank is both recommended and free, so it is chosen for the vendor.
+    expect(derive(wallet({ fundingMethods: [BANK] }), started())).toMatchObject({ suggestedSourceMethodId: 30 });
+    expect(derive(wallet({ fundingMethods: [CARD, BANK] }), started())).toMatchObject({ suggestedSourceMethodId: 30 });
+    // A card alone leaves the picker on the bank rail with nothing selected, so
+    // the vendor chooses the fee deliberately rather than inheriting it.
+    expect(derive(wallet({ fundingMethods: [CARD] }), started())).toMatchObject({ suggestedSourceMethodId: null });
+    // An explicit choice still wins over the default.
+    expect(derive(wallet({ fundingMethods: [CARD] }), started({ sourceMethodId: 10 })))
+      .toMatchObject({ source: { rail: "stripe_card", method: CARD }, suggestedSourceMethodId: null });
   });
 
   it("labels methods and ledger reasons", () => {
