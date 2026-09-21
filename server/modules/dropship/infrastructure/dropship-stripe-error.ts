@@ -1,4 +1,5 @@
 import Stripe from "stripe";
+import type { DropshipLogger } from "../application/dropship-ports";
 import { DropshipError } from "../domain/errors";
 
 /**
@@ -19,7 +20,8 @@ interface StripeFailureMapping {
   /**
    * Stripe writes card-error messages for cardholders and documents them as safe
    * to display. Every other Stripe message can name request parameters and account
-   * configuration, so it stays in the structured context and the log instead.
+   * configuration, so it is kept out of the error entirely and written to the log
+   * by `logStripeCallFailure` — routes echo this error's context to the caller.
    */
   readonly useStripeMessage: boolean;
   /** HTTP status. 5xx means "retryable", 4xx means "terminal" — senders key off this. */
@@ -134,6 +136,53 @@ export function httpStatusForDropshipStripeErrorCode(code: string): number | nul
 
 function mappingForStripeError(error: Stripe.errors.StripeError): StripeFailureMapping {
   return STRIPE_FAILURE_MAPPINGS[error.type] ?? UNCLASSIFIED_STRIPE_FAILURE;
+}
+
+/**
+ * ERROR means a human at Card Shellz has to look at it. A declined card is the
+ * vendor's to fix and they are told on screen, and a transient failure recovers
+ * on the next attempt. Everything else is our request, our credentials or our
+ * Stripe account settings, and nobody else can fix it.
+ */
+function logLevelForStripeFailure(mapping: StripeFailureMapping): "warn" | "error" {
+  return mapping.classification === "transient" || mapping.useStripeMessage ? "warn" : "error";
+}
+
+/**
+ * Records why Stripe refused a call, server-side only.
+ *
+ * The vendor-facing error is deliberately sanitized (see `useStripeMessage`),
+ * and Stripe's own message is the only thing that names the parameter or the
+ * account setting it objected to. It is written here rather than attached to
+ * the error context, because routes echo that context back to the caller and
+ * it can describe our account configuration. Without this line a Stripe
+ * refusal reaches the operator as a bare status code with no reason at all.
+ *
+ * A failure that did not come from Stripe is left alone: it belongs to
+ * whatever raised it, and reporting it as a payment-provider fault would
+ * misdirect the next person reading the log.
+ */
+export function logStripeCallFailure(logger: DropshipLogger, operation: string, error: unknown): void {
+  if (error instanceof DropshipError || !(error instanceof Stripe.errors.StripeError)) return;
+  const mapping = mappingForStripeError(error);
+  const event = {
+    code: "DROPSHIP_STRIPE_CALL_FAILED",
+    message: `Stripe refused ${operation}: ${error.message}`,
+    context: {
+      operation,
+      classification: mapping.classification,
+      errorCode: mapping.code,
+      stripeType: error.type,
+      stripeRawType: error.rawType ?? null,
+      stripeCode: error.code ?? null,
+      stripeParam: error.param ?? null,
+      stripeStatusCode: error.statusCode ?? null,
+      stripeRequestId: error.requestId ?? null,
+      stripeDocUrl: error.doc_url ?? null,
+    },
+  };
+  if (logLevelForStripeFailure(mapping) === "error") logger.error(event);
+  else logger.warn(event);
 }
 
 /**

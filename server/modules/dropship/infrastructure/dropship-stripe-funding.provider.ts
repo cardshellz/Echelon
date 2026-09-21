@@ -5,7 +5,9 @@ import {
   FUNDING_METHOD_ACCOUNT_HOLDER_TYPE_KEY,
   FUNDING_METHOD_FINANCIAL_CONNECTIONS_ACCOUNT_KEY,
 } from "../domain/funding-method";
-import { toDropshipStripeError } from "./dropship-stripe-error";
+import { makeDropshipWalletLogger } from "../application/dropship-wallet-service";
+import type { DropshipLogger } from "../application/dropship-ports";
+import { logStripeCallFailure, toDropshipStripeError } from "./dropship-stripe-error";
 import {
   DROPSHIP_DISPUTE_STATUSES,
   disputeOutcomeFor,
@@ -98,6 +100,8 @@ export class StripeDropshipFundingProvider implements DropshipWalletFundingProvi
       webhookSecret?: string;
       stripeClient?: Stripe;
     } = {},
+    /** Injected so a test can assert what a Stripe refusal records. */
+    private readonly logger: DropshipLogger = makeDropshipWalletLogger(),
   ) {}
 
   async createStripeSetupSession(input: {
@@ -714,6 +718,10 @@ export class StripeDropshipFundingProvider implements DropshipWalletFundingProvi
     try {
       return await run();
     } catch (error) {
+      // The thrown error is sanitized for the vendor, so Stripe's own reason is
+      // recorded here or it is lost: without it an operator sees only a status
+      // code and cannot tell a misconfigured account from a malformed request.
+      logStripeCallFailure(this.logger, operation, error);
       throw toDropshipStripeError(operation, error);
     }
   }

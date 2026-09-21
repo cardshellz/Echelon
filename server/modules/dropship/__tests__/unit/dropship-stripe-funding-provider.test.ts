@@ -45,6 +45,95 @@ describe("StripeDropshipFundingProvider", () => {
     }));
   });
 
+  it("records why Stripe refused a call without putting Stripe's wording in front of the vendor", async () => {
+    // A refusal Stripe explains only in its message: no code, no param, which is
+    // exactly the shape that left an operator with a bare 400 and no reason.
+    const refusal = new Stripe.errors.StripeInvalidRequestError({
+      type: "invalid_request_error",
+      message: "The payment method type \"us_bank_account\" is not activated for your account.",
+      requestId: "req_test_1",
+      statusCode: 400,
+    });
+    const stripe = makeStripeDouble();
+    stripe.checkout.sessions.create = vi.fn(async () => { throw refusal; });
+    const logger = makeLoggerDouble();
+    const provider = new StripeDropshipFundingProvider({ stripeClient: stripe, webhookSecret: "whsec_test" }, logger);
+
+    const thrown = await provider.createStripeSetupSession({
+      vendorId: 10,
+      memberId: "member-1",
+      rail: "stripe_ach",
+      customerEmail: "vendor@cardshellz.test",
+      customerName: "Vendor",
+      existingProviderCustomerId: "cus_existing",
+      successUrl: "https://cardshellz.io/wallet?funding_setup=success",
+      cancelUrl: "https://cardshellz.io/wallet?funding_setup=cancelled",
+      now: new Date("2026-05-03T12:00:00.000Z"),
+    }).catch((error: unknown) => error);
+
+    // The vendor is told nothing about our account configuration, and neither
+    // is the error context, which routes echo back to the caller verbatim.
+    expect(thrown).toBeInstanceOf(DropshipError);
+    const error = thrown as DropshipError;
+    expect(error.code).toBe("DROPSHIP_STRIPE_REQUEST_REJECTED");
+    expect(error.message).toBe("Stripe rejected the payment request. Card Shellz has been notified.");
+    expect(JSON.stringify({ message: error.message, context: error.context })).not.toContain("not activated");
+
+    // Our account settings are nobody else's to fix, so this needs a human.
+    expect(logger.warns).toHaveLength(0);
+    expect(logger.errors).toHaveLength(1);
+    expect(logger.errors[0]).toMatchObject({
+      code: "DROPSHIP_STRIPE_CALL_FAILED",
+      message: 'Stripe refused createStripeSetupSession: The payment method type "us_bank_account" is not activated for your account.',
+      context: expect.objectContaining({
+        operation: "createStripeSetupSession",
+        classification: "permanent",
+        errorCode: "DROPSHIP_STRIPE_REQUEST_REJECTED",
+        stripeRawType: "invalid_request_error",
+        stripeStatusCode: 400,
+        stripeRequestId: "req_test_1",
+      }),
+    });
+  });
+
+  it("logs a declined card as the vendor's to fix, not a human's", async () => {
+    const decline = new Stripe.errors.StripeCardError({
+      type: "card_error",
+      message: "Your card was declined.",
+      code: "card_declined",
+      decline_code: "insufficient_funds",
+      requestId: "req_test_2",
+      statusCode: 402,
+    });
+    const stripe = makeStripeDouble();
+    stripe.paymentIntents.create = vi.fn(async () => { throw decline; });
+    const logger = makeLoggerDouble();
+    const provider = new StripeDropshipFundingProvider({ stripeClient: stripe, webhookSecret: "whsec_test" }, logger);
+
+    await expect(provider.createStripeAutoReloadPaymentIntent({
+      vendorId: 10,
+      fundingMethodId: 1,
+      rail: "stripe_card",
+      amountCents: 6_500,
+      cardFee: null,
+      currency: "usd",
+      providerCustomerId: "cus_existing",
+      providerPaymentMethodId: "pm_1",
+      reason: "minimum_balance",
+      intakeId: null,
+      requiredBalanceCents: null,
+      idempotencyKey: "auto-reload:10:1",
+      now: new Date("2026-05-03T12:00:00.000Z"),
+    })).rejects.toMatchObject({ code: "DROPSHIP_STRIPE_CARD_DECLINED" });
+
+    expect(logger.errors).toHaveLength(0);
+    expect(logger.warns).toHaveLength(1);
+    expect(logger.warns[0]).toMatchObject({
+      code: "DROPSHIP_STRIPE_CALL_FAILED",
+      context: expect.objectContaining({ stripeCode: "card_declined", stripeRequestId: "req_test_2" }),
+    });
+  });
+
   it("creates wallet funding payment sessions with reusable Stripe funding methods", async () => {
     const stripe = makeStripeDouble();
     const provider = new StripeDropshipFundingProvider({
@@ -716,6 +805,19 @@ function visaPaymentMethod() {
     id: "pm_1",
     type: "card",
     card: { brand: "visa", last4: "4242", exp_month: 12, exp_year: 2030 },
+  };
+}
+
+/** Collects what a failed Stripe call recorded, by level. */
+function makeLoggerDouble() {
+  const warns: Array<{ code: string; message: string; context?: Record<string, unknown> }> = [];
+  const errors: Array<{ code: string; message: string; context?: Record<string, unknown> }> = [];
+  return {
+    warns,
+    errors,
+    info: () => {},
+    warn: (event: { code: string; message: string; context?: Record<string, unknown> }) => { warns.push(event); },
+    error: (event: { code: string; message: string; context?: Record<string, unknown> }) => { errors.push(event); },
   };
 }
 
