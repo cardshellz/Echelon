@@ -36,6 +36,15 @@ describe("StripeDropshipFundingProvider", () => {
       mode: "setup",
       customer: "cus_existing",
       payment_method_types: ["us_bank_account"],
+      // A setup-mode session collecting a bank debit needs a currency to build
+      // its mandate with, and us_bank_account has no per-method currency field
+      // to carry one. Without this Stripe refuses the request outright.
+      currency: "usd",
+      payment_method_options: {
+        us_bank_account: {
+          financial_connections: { permissions: ["payment_method", "balances"] },
+        },
+      },
       metadata: expect.objectContaining({
         type: "dropship_funding_setup",
         dropship_vendor_id: "10",
@@ -43,6 +52,62 @@ describe("StripeDropshipFundingProvider", () => {
         requested_rail: "stripe_ach",
       }),
     }));
+  });
+
+  it("opens a card setup session with no currency and no bank options", async () => {
+    const stripe = makeStripeDouble();
+    const provider = new StripeDropshipFundingProvider({ stripeClient: stripe, webhookSecret: "whsec_test" });
+
+    await provider.createStripeSetupSession({
+      vendorId: 10,
+      memberId: "member-1",
+      rail: "stripe_card",
+      customerEmail: "vendor@cardshellz.test",
+      customerName: "Vendor",
+      existingProviderCustomerId: "cus_existing",
+      successUrl: "https://cardshellz.io/wallet?funding_setup=success",
+      cancelUrl: "https://cardshellz.io/wallet?funding_setup=cancelled",
+      now: new Date("2026-05-03T12:00:00.000Z"),
+    });
+
+    // A card mandate needs no currency, so the card path is left exactly as it
+    // was: the bank fix must not change a rail that already worked.
+    const params = stripe.checkout.sessions.create.mock.calls[0][0] as Record<string, unknown>;
+    expect(params.payment_method_types).toEqual(["card"]);
+    expect(params).not.toHaveProperty("currency");
+    expect(params).not.toHaveProperty("payment_method_options");
+  });
+
+  it("takes a payment-mode session's currency from its line items, not from a second field", async () => {
+    const stripe = makeStripeDouble();
+    const provider = new StripeDropshipFundingProvider({ stripeClient: stripe, webhookSecret: "whsec_test" });
+
+    await provider.createStripeWalletFundingSession({
+      vendorId: 10,
+      memberId: "member-1",
+      fundingMethodId: 1,
+      rail: "stripe_ach",
+      amountCents: 10_000,
+      cardFee: null,
+      currency: "usd",
+      customerEmail: "vendor@cardshellz.test",
+      customerName: "Vendor",
+      existingProviderCustomerId: "cus_existing",
+      providerPaymentMethodId: null,
+      successUrl: "https://cardshellz.io/wallet?wallet_funding=success",
+      cancelUrl: "https://cardshellz.io/wallet?wallet_funding=cancelled",
+      now: new Date("2026-05-03T12:00:00.000Z"),
+    });
+
+    // Stating it twice would let the two disagree, so only setup mode carries it.
+    const params = stripe.checkout.sessions.create.mock.calls[0][0] as Record<string, unknown>;
+    expect(params.mode).toBe("payment");
+    expect(params).not.toHaveProperty("currency");
+    expect(params.payment_method_options).toEqual({
+      us_bank_account: {
+        financial_connections: { permissions: ["payment_method", "balances"] },
+      },
+    });
   });
 
   it("reads which rails the Stripe account can run, treating an absent capability as not enabled", async () => {

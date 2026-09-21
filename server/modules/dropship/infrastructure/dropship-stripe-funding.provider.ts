@@ -157,7 +157,7 @@ export class StripeDropshipFundingProvider implements DropshipWalletFundingProvi
       mode: "setup",
       customer: customerId,
       payment_method_types: paymentMethodTypesForRail(input.rail),
-      ...paymentMethodOptionsForRail(input.rail),
+      ...setupSessionRailFieldsForRail(input.rail),
       success_url: input.successUrl,
       cancel_url: input.cancelUrl,
       metadata,
@@ -791,6 +791,20 @@ export function createStripeDropshipFundingProviderFromEnv(): StripeDropshipFund
   return new StripeDropshipFundingProvider();
 }
 
+/**
+ * The currency a bank setup session is opened in, lowercase per Stripe.
+ *
+ * A setup-mode Checkout Session collecting a bank debit needs a currency to
+ * build its mandate with, and `us_bank_account` has no per-method currency
+ * field to carry one (its sibling `acss_debit` does, documented as "only
+ * accepted for Checkout Sessions in setup mode"), so it has to come from the
+ * session's own `currency`. A card session needs none and is not given one.
+ *
+ * Wallets are USD everywhere today. If a wallet's currency ever becomes a
+ * stored value, this must be threaded from that wallet instead of pinned here.
+ */
+const BANK_SETUP_SESSION_CURRENCY = "usd";
+
 function paymentMethodTypesForRail(rail: DropshipStripeFundingSetupRail): Array<"card" | "us_bank_account"> {
   return rail === "stripe_card" ? ["card"] : ["us_bank_account"];
 }
@@ -970,6 +984,20 @@ function paymentMethodOptionsForRail(
       },
     },
   };
+}
+
+/**
+ * The same options plus the currency a setup-mode session needs.
+ *
+ * A payment-mode session takes its currency from its line items, so only the
+ * setup-mode one carries this field; giving it to both would state the
+ * currency twice and let the two disagree.
+ */
+function setupSessionRailFieldsForRail(
+  rail: DropshipStripeFundingSetupRail,
+): Pick<Stripe.Checkout.SessionCreateParams, "payment_method_options" | "currency"> {
+  if (rail !== "stripe_ach") return {};
+  return { currency: BANK_SETUP_SESSION_CURRENCY, ...paymentMethodOptionsForRail(rail) };
 }
 
 /**
