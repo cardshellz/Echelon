@@ -45,6 +45,27 @@ describe("StripeDropshipFundingProvider", () => {
     }));
   });
 
+  it("reads which rails the Stripe account can run, treating an absent capability as not enabled", async () => {
+    const stripe = makeStripeDouble();
+    // ACH was never enabled on this account: the capability is simply absent,
+    // which is the shape that produced an unexplained refusal for a vendor.
+    // Cast for the same reason the whole double is cast: a partial account is
+    // all this call reads, and spelling out every Account field proves nothing.
+    stripe.accounts.retrieve = vi.fn(async () => (
+      { id: "acct_live", capabilities: { card_payments: "active" } } as unknown as Stripe.Response<Stripe.Account>
+    ));
+    const provider = new StripeDropshipFundingProvider({ stripeClient: stripe, webhookSecret: "whsec_test" });
+
+    expect(await provider.readRailAvailability()).toEqual({
+      outcome: "read",
+      accountId: "acct_live",
+      cardPayments: "active",
+      achPayments: null,
+      reason: null,
+    });
+    expect(stripe.accounts.retrieve).toHaveBeenCalledWith();
+  });
+
   it("records why Stripe refused a call without putting Stripe's wording in front of the vendor", async () => {
     // A refusal Stripe explains only in its message: no code, no param, which is
     // exactly the shape that left an operator with a bare 400 and no reason.
@@ -852,6 +873,12 @@ function makeStripeDouble() {
     setupIntents: {
       retrieve: vi.fn(),
     },
+    accounts: {
+      retrieve: vi.fn(async () => ({
+        id: "acct_test",
+        capabilities: { card_payments: "active", us_bank_account_ach_payments: "active" },
+      })),
+    },
     paymentMethods: {
       retrieve: vi.fn(),
     },
@@ -861,6 +888,7 @@ function makeStripeDouble() {
     webhooks: { constructEvent: ReturnType<typeof vi.fn> };
     paymentIntents: { create: ReturnType<typeof vi.fn> };
     setupIntents: { retrieve: ReturnType<typeof vi.fn> };
+    accounts: { retrieve: ReturnType<typeof vi.fn> };
     paymentMethods: { retrieve: ReturnType<typeof vi.fn> };
   };
 }

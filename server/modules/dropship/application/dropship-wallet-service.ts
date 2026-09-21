@@ -757,7 +757,28 @@ export interface DropshipAutoReloadResult {
   idempotentReplay: boolean;
 }
 
+/** Stripe's own word on whether a funding rail is usable: one of its capability states. */
+export type DropshipStripeRailState = "active" | "inactive" | "pending";
+
+/**
+ * Which rails the Stripe account can run, as the account itself reports them.
+ *
+ * `outcome` is "unavailable" when the account could not be read at all (no
+ * credentials, Stripe unreachable); the rail fields are then null and `reason`
+ * carries the structured error code. A rail we never asked about is also null,
+ * which is why the two are distinguished by `outcome` rather than by nulls.
+ */
+export interface DropshipStripeRailAvailability {
+  outcome: "read" | "unavailable";
+  accountId: string | null;
+  cardPayments: DropshipStripeRailState | null;
+  achPayments: DropshipStripeRailState | null;
+  reason: string | null;
+}
+
 export interface DropshipWalletFundingProvider {
+  /** Read-only: which rails the Stripe account can actually run. */
+  readRailAvailability(): Promise<DropshipStripeRailAvailability>;
   createStripeSetupSession(input: {
     vendorId: number;
     memberId: string;

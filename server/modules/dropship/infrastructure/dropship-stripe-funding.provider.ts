@@ -19,6 +19,7 @@ import type {
   DropshipBankBalanceSnapshot,
   DropshipStripeAutoReloadPaymentIntent,
   DropshipStripeFundingSetupRail,
+  DropshipStripeRailAvailability,
   DropshipStripeWalletFundingSession,
   DropshipWalletFundingCardFee,
   DropshipWalletFundingCardFeeRate,
@@ -103,6 +104,28 @@ export class StripeDropshipFundingProvider implements DropshipWalletFundingProvi
     /** Injected so a test can assert what a Stripe refusal records. */
     private readonly logger: DropshipLogger = makeDropshipWalletLogger(),
   ) {}
+
+  /**
+   * Which funding rails the Stripe account can actually run.
+   *
+   * A rail that is configured in our environment can still be refused by
+   * Stripe because the account never enabled it, and Stripe explains that
+   * only in prose on the failing request. Reading the account's capabilities
+   * turns the same fact into something the readiness page can state before a
+   * vendor ever meets it. Read-only: it retrieves the platform account and
+   * changes nothing.
+   */
+  async readRailAvailability(): Promise<DropshipStripeRailAvailability> {
+    const stripe = this.getStripe();
+    const account = await this.callStripe("readRailAvailability", () => stripe.accounts.retrieve());
+    return {
+      outcome: "read",
+      accountId: account.id ?? null,
+      cardPayments: account.capabilities?.card_payments ?? null,
+      achPayments: account.capabilities?.us_bank_account_ach_payments ?? null,
+      reason: null,
+    };
+  }
 
   async createStripeSetupSession(input: {
     vendorId: number;

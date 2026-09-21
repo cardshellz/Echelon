@@ -3,6 +3,10 @@ import { DropshipError } from "../domain/errors";
 import { DROPSHIP_LAUNCH_NOTIFICATION_PREFERENCES } from "./dropship-notification-service";
 import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship-ports";
 import type { DropshipVendorProvisioningService } from "./dropship-vendor-provisioning-service";
+import type {
+  DropshipStripeRailAvailability,
+  DropshipStripeRailState,
+} from "./dropship-wallet-service";
 
 const positiveIdSchema = z.number().int().positive();
 const pageSchema = z.number().int().positive().default(1);
@@ -370,8 +374,29 @@ export class DropshipOpsSurfaceService {
       clock: DropshipClock;
       logger: DropshipLogger;
       env?: NodeJS.ProcessEnv;
+      /**
+       * What the Stripe account reports it can run. Omitted, the Stripe check
+       * reports configuration only, exactly as it did before this existed.
+       */
+      stripeRails?: () => Promise<DropshipStripeRailAvailability>;
     },
   ) {}
+
+  /** Never throws: a readiness page must render even when Stripe cannot be reached. */
+  private async readStripeRails(): Promise<DropshipStripeRailAvailability | null> {
+    const read = this.deps.stripeRails;
+    if (!read) return null;
+    try {
+      return await read();
+    } catch (error) {
+      this.deps.logger.warn({
+        code: "DROPSHIP_STRIPE_RAILS_UNREADABLE",
+        message: "Stripe rail availability could not be read for the readiness page.",
+        context: { error: error instanceof DropshipError ? error.code : "unknown_error" },
+      });
+      return null;
+    }
+  }
 
   async getVendorSettingsForMember(memberId: string): Promise<DropshipVendorSettingsOverview> {
     const vendor = await this.deps.vendorProvisioning.provisionForMember(memberId);
@@ -420,7 +445,7 @@ export class DropshipOpsSurfaceService {
       generatedAt: this.deps.clock.now(),
     });
     const { launchGateItems, ...publicResult } = result;
-    const systemChecks = buildDropshipSystemReadinessChecks(this.deps.env ?? process.env);
+    const systemChecks = buildDropshipSystemReadinessChecks(this.deps.env ?? process.env, await this.readStripeRails());
     this.deps.logger.info({
       code: "DROPSHIP_DOGFOOD_READINESS_VIEWED",
       message: "Dropship dogfood readiness was loaded.",
@@ -495,7 +520,7 @@ export class DropshipOpsSurfaceService {
       }),
     ]);
     const { launchGateItems, ...publicReadiness } = readinessResult;
-    const systemChecks = buildDropshipSystemReadinessChecks(this.deps.env ?? process.env);
+    const systemChecks = buildDropshipSystemReadinessChecks(this.deps.env ?? process.env, await this.readStripeRails());
     const launchGateReadinessItems = isDogfoodLaunchStatusScoped(parsed)
       ? publicReadiness.items
       : launchGateItems ?? publicReadiness.items;
@@ -882,6 +907,8 @@ function buildDogfoodLaunchGateMessage(input: {
 
 export function buildDropshipSystemReadinessChecks(
   env: NodeJS.ProcessEnv,
+  /** What the Stripe account itself reports; null when it was not read at all. */
+  stripeRails: DropshipStripeRailAvailability | null = null,
 ): DropshipSystemReadinessCheck[] {
   return [
     buildSchedulerCheck(env),
@@ -898,7 +925,7 @@ export function buildDropshipSystemReadinessChecks(
     buildShipStationWebhookSecurityCheck(env),
     buildSplitShipmentHandoffCheck(env),
     buildDogfoodSmokeFreshnessCheck(env),
-    buildStripeFundingCheck(env),
+    buildStripeFundingCheck(env, stripeRails),
     buildUsdcBaseFundingCheck(env),
   ];
 }
@@ -1284,7 +1311,20 @@ function buildDogfoodSmokeFreshnessCheck(env: NodeJS.ProcessEnv): DropshipSystem
   };
 }
 
-function buildStripeFundingCheck(env: NodeJS.ProcessEnv): DropshipSystemReadinessCheck {
+/**
+ * Stripe funding readiness: the environment first, then what the Stripe
+ * account will actually accept.
+ *
+ * Configuration alone was never the whole story. A vendor adding a bank
+ * account meets a bare refusal when the account has not enabled ACH, and that
+ * fact belongs here rather than in a failed request. Cards are the backstop
+ * the whole shortfall waterfall depends on, so a card capability that is not
+ * active blocks; ACH only warns, because a card vendor can still trade.
+ */
+function buildStripeFundingCheck(
+  env: NodeJS.ProcessEnv,
+  rails: DropshipStripeRailAvailability | null,
+): DropshipSystemReadinessCheck {
   const missing = missingEnv(env, ["STRIPE_SECRET_KEY"]);
   const hasWebhookSecret = hasEnv(env, "DROPSHIP_STRIPE_WEBHOOK_SECRET")
     || hasEnv(env, "STRIPE_DROPSHIP_WEBHOOK_SECRET")
@@ -1302,13 +1342,52 @@ function buildStripeFundingCheck(env: NodeJS.ProcessEnv): DropshipSystemReadines
     };
   }
 
-  return {
+  const base = {
     key: "stripe_funding",
     label: "Stripe funding",
-    status: "ready",
-    message: "Stripe wallet funding and webhook verification are configured.",
     requiredEnv: ["STRIPE_SECRET_KEY", "DROPSHIP_STRIPE_WEBHOOK_SECRET or STRIPE_DROPSHIP_WEBHOOK_SECRET or STRIPE_WEBHOOK_SECRET"],
   };
+
+  // Not read, or not readable: report what this check has always asserted —
+  // the configuration — and say the rails are unconfirmed. Deliberately not a
+  // warning: a brief Stripe outage must not turn launch readiness amber.
+  if (rails === null || rails.outcome !== "read") {
+    const reason = rails?.reason ? ` (${rails.reason})` : "";
+    return {
+      ...base,
+      status: "ready",
+      message: `Stripe wallet funding and webhook verification are configured. The account's enabled rails could not be confirmed${reason}.`,
+    };
+  }
+
+  if (rails.cardPayments !== "active") {
+    return {
+      ...base,
+      status: "blocked",
+      message: `Card payments are ${describeRailState(rails.cardPayments)} on the Stripe account, so no vendor can add the backup card activation requires. Enable card payments in Stripe.`,
+    };
+  }
+
+  if (rails.achPayments !== "active") {
+    return {
+      ...base,
+      status: "warning",
+      message: `Vendors cannot add a bank account: US bank account ACH payments is ${describeRailState(rails.achPayments)} on the Stripe account. Enable it in Stripe, or vendors must fund by card and pay the card fee.`,
+    };
+  }
+
+  return {
+    ...base,
+    status: "ready",
+    message: "Stripe wallet funding is configured, and the account has card payments and bank transfers (ACH) enabled.",
+  };
+}
+
+/** Stripe's capability states, said plainly; an absent capability was never requested. */
+function describeRailState(state: DropshipStripeRailState | null): string {
+  if (state === null) return "not enabled";
+  if (state === "pending") return "pending Stripe review";
+  return state;
 }
 
 /**
