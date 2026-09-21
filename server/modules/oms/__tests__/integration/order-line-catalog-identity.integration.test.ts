@@ -13,7 +13,7 @@ import { createHistoricalOrderLineIdentityRepairService } from "../../applicatio
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
 const describeDatabase = databaseUrl && disposable ? describe : describe.skip;
-const tables = [schema.productVariants, schema.channelListings, schema.omsOrders, schema.omsOrderLines,
+const tables = [schema.products, schema.channelProductIdentities, schema.productVariants, schema.channelListings, schema.omsOrders, schema.omsOrderLines,
   schema.omsOrderEvents, schema.omsOrderLineAuthorityEvents, schema.webhookInbox,
   schema.wmsOrders, schema.wmsOrderItems, schema.omsHistoricalLineIdentityRepairCommands,
   schema.productLocations, schema.warehouseLocations];
@@ -57,11 +57,12 @@ describeDatabase.sequential("order line identity PostgreSQL and WMS handoff", ()
     orm = drizzle(database.pool, { schema });
   });
   beforeEach(async () => {
-    await database.pool.query(`TRUNCATE catalog.product_variants, channels.channel_listings,
+    await database.pool.query(`TRUNCATE catalog.products, channels.channel_product_identities, catalog.product_variants, channels.channel_listings,
       oms.oms_orders, oms.oms_order_lines, oms.oms_order_events, oms.oms_order_line_authority_events,
       oms.webhook_inbox, wms.orders, wms.order_items,
       oms.historical_order_line_identity_repair_commands RESTART IDENTITY`);
-    await database.pool.query(`INSERT INTO catalog.product_variants(id,product_id,name,sku,compare_at_price_cents)
+    await database.pool.query(`INSERT INTO catalog.products(id,name) VALUES(1,'Product');
+      INSERT INTO catalog.product_variants(id,product_id,name,sku,compare_at_price_cents)
       VALUES (11,1,'Example pack','EXAMPLE-P5',2500), (12,1,'Example case','EXAMPLE-C25',10000);
       INSERT INTO channels.channel_listings(channel_id,product_variant_id,external_product_id,external_variant_id)
       VALUES (2,11,'1000','1001'),(3,12,'1000','1001');`);

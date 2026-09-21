@@ -16,6 +16,7 @@ import {
   type PostgresRunnerDependencies,
 } from "../../../scripts/ci/postgres-tests";
 
+const firstShardFileCount = Math.ceil(POSTGRES_TEST_FILES.length / POSTGRES_SHARD_COUNT);
 const disposableEnvironment: NodeJS.ProcessEnv = {
   ECHELON_TEST_DATABASE_URL: "postgresql://postgres:secret@127.0.0.1:5432/echelon_test",
   ECHELON_TEST_DATABASE_DISPOSABLE: "true",
@@ -55,6 +56,7 @@ function runnerFixture() {
 describe("PostgreSQL CI coverage and isolation", () => {
   it("preserves all 70 prior files and explicitly adds reviewed hardening suites", () => {
     const addedSuites = [
+      "server/modules/catalog/__tests__/integration/inventory-tracking-policy.integration.test.ts",
       "server/modules/orders/__tests__/integration/order-list.integration.test.ts",
       "server/modules/orders/__tests__/integration/shipping-progress.integration.test.ts",
       "server/modules/oms/__tests__/integration/archon-order-delivery.test.ts",
@@ -75,8 +77,8 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/shipping/__tests__/integration/carrier-tracking-recovery.integration.test.ts",
       "server/modules/channels/__tests__/integration/walmart-connection.integration.test.ts",
     ];
-    expect(POSTGRES_TEST_FILES).toHaveLength(89);
-    expect(new Set(POSTGRES_TEST_FILES).size).toBe(89);
+    expect(POSTGRES_TEST_FILES).toHaveLength(90);
+    expect(new Set(POSTGRES_TEST_FILES).size).toBe(90);
     expect(POSTGRES_TEST_FILES).toEqual(expect.arrayContaining(addedSuites));
     // Preserve the original inventory digest as well as the explicit additions;
     // adding hardening coverage must not silently remove an older suite.
@@ -89,7 +91,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
 
   it("assigns every file exactly once across 8 deterministic balanced shards", () => {
     const shards = Array.from({ length: POSTGRES_SHARD_COUNT }, (_, index) => selectPostgresShardFiles({ index: index + 1, count: 8 }));
-    expect(shards.map((files) => files.length)).toEqual([12, 11, 11, 11, 11, 11, 11, 11]);
+    expect(shards.map((files) => files.length)).toEqual(Array.from({ length: POSTGRES_SHARD_COUNT }, (_, index) => Math.floor(POSTGRES_TEST_FILES.length / POSTGRES_SHARD_COUNT) + (index < POSTGRES_TEST_FILES.length % POSTGRES_SHARD_COUNT ? 1 : 0)));
     expect(shards.flat().sort()).toEqual([...POSTGRES_TEST_FILES].sort());
     expect(new Set(shards.flat()).size).toBe(POSTGRES_TEST_FILES.length);
     expect(selectPostgresShardFiles({ index: 1, count: 8 })).toEqual(shards[0]);
@@ -118,7 +120,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
         reports.push(args.at(-1)!);
       }
     }
-    expect(new Set(reports).size).toBe(89);
+    expect(new Set(reports).size).toBe(90);
     expect(() => buildPostgresVitestArgs({ index: 1, count: 8 }, POSTGRES_TEST_FILES[1])).toThrow();
     const source = readFileSync(resolve(POSTGRES_REPOSITORY_ROOT, "scripts/ci/postgres-tests.ts"), "utf8");
     expect(source).toContain("spawnSync(process.execPath, [...args]");
@@ -176,8 +178,8 @@ describe("PostgreSQL CI coverage and isolation", () => {
     };
     const originalEnv = { ...environment };
     expect(await runPostgresShard(["1/8"], environment, fixture.dependencies)).toBe(0);
-    expect(fixture.connections).toHaveLength(12);
-    expect(fixture.dependencies.runTest).toHaveBeenCalledTimes(12);
+    expect(fixture.connections).toHaveLength(firstShardFileCount);
+    expect(fixture.dependencies.runTest).toHaveBeenCalledTimes(firstShardFileCount);
     expect(fixture.dependencies.error).not.toHaveBeenCalled();
     expect(environment).toEqual(originalEnv);
     const databaseNames: string[] = [];
@@ -201,7 +203,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
       databaseNames.push(childUrl.pathname);
       expect(fixture.events.slice(index * 5, index * 5 + 5)).toEqual(["connect", calls[0], "run", calls[1], "end"]);
     }
-    expect(new Set(databaseNames).size).toBe(12);
+    expect(new Set(databaseNames).size).toBe(firstShardFileCount);
   });
 
   it("never drops a database when CREATE fails or collides, and continues the remaining files", async () => {
@@ -216,8 +218,8 @@ describe("PostgreSQL CI coverage and isolation", () => {
     expect(fixture.connections[0].query.mock.calls).toHaveLength(1);
     expect(fixture.connections[0].query.mock.calls[0][0]).toMatch(/^CREATE DATABASE /);
     expect(fixture.connections[0].end).toHaveBeenCalledOnce();
-    expect(fixture.dependencies.runTest).toHaveBeenCalledTimes(11);
-    expect(fixture.connections).toHaveLength(12);
+    expect(fixture.dependencies.runTest).toHaveBeenCalledTimes(firstShardFileCount - 1);
+    expect(fixture.connections).toHaveLength(firstShardFileCount);
     const failure = JSON.parse(vi.mocked(fixture.dependencies.error).mock.calls[0][0]);
     expect(failure).toMatchObject({ phase: "database create", detail: "42P04" });
     expect(failure.database).toMatch(/^echelon_ci_s1_/);
@@ -235,7 +237,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
     expect(await runPostgresShard(["1/8"], disposableEnvironment, fixture.dependencies)).toBe(1);
     expect(fixture.connections[0].query.mock.calls[1][0]).toMatch(/^DROP DATABASE "echelon_ci_s1_/);
     expect(fixture.connections[0].end).toHaveBeenCalledOnce();
-    expect(fixture.dependencies.runTest).toHaveBeenCalledTimes(12);
+    expect(fixture.dependencies.runTest).toHaveBeenCalledTimes(firstShardFileCount);
     expect(vi.mocked(fixture.dependencies.error).mock.calls.flat().join(" ")).not.toContain("secret");
   });
 
@@ -244,7 +246,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
     vi.mocked(fixture.dependencies.runTest).mockImplementationOnce(() => { throw new Error("secret"); });
     expect(await runPostgresShard(["1/8"], disposableEnvironment, fixture.dependencies)).toBe(1);
     expect(fixture.connections[0].query.mock.calls[1][0]).toMatch(/^DROP DATABASE /);
-    expect(fixture.dependencies.runTest).toHaveBeenCalledTimes(12);
+    expect(fixture.dependencies.runTest).toHaveBeenCalledTimes(firstShardFileCount);
   });
 
   it("reports cleanup and connection-close failures without hiding passing child status", async () => {
@@ -257,7 +259,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
       return connection;
     });
     expect(await runPostgresShard(["1/8"], disposableEnvironment, fixture.dependencies)).toBe(1);
-    expect(fixture.dependencies.runTest).toHaveBeenCalledTimes(12);
+    expect(fixture.dependencies.runTest).toHaveBeenCalledTimes(firstShardFileCount);
     const failures = vi.mocked(fixture.dependencies.error).mock.calls.map(([event]) => JSON.parse(event));
     expect(failures.map((event) => event.phase)).toEqual(["database cleanup", "admin connection close"]);
     expect(failures[0].database).toMatch(/^echelon_ci_s1_/);
@@ -274,7 +276,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
     expect(await runPostgresShard(["1/8"], disposableEnvironment, fixture.dependencies)).toBe(1);
     expect(fixture.connections[0].query).not.toHaveBeenCalled();
     expect(fixture.connections[0].end).toHaveBeenCalledOnce();
-    expect(fixture.dependencies.runTest).toHaveBeenCalledTimes(11);
+    expect(fixture.dependencies.runTest).toHaveBeenCalledTimes(firstShardFileCount - 1);
   });
 
   it("does not connect without safe configuration or a valid generated DB name", async () => {

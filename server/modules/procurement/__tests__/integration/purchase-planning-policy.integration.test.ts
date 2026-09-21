@@ -33,7 +33,7 @@ suite.sequential("purchase planning policy PostgreSQL owner", () => {
     if (!lock.rows[0].acquired) throw new Error("Another procurement fixture owns the schema lease");
     await pool.query("CREATE SCHEMA procurement"); ownsProcurement = true;
     await pool.query("CREATE SCHEMA catalog"); ownsCatalog = true;
-    await pool.query("CREATE TABLE catalog.products (id integer PRIMARY KEY, sku text, name text NOT NULL, is_active boolean NOT NULL DEFAULT true)");
+    await pool.query("CREATE TABLE catalog.products (id integer PRIMARY KEY, sku text, name text NOT NULL, is_active boolean NOT NULL DEFAULT true, inventory_tracking_default boolean NOT NULL DEFAULT true)");
     await pool.query("INSERT INTO catalog.products(id,sku,name) VALUES (10,'POLICY-10','Policy test item')");
     await pool.query("CREATE TABLE procurement.purchase_forecast_observations (forecast_policy_capture_version integer NOT NULL, forecast_policy_fingerprint varchar(64), forecast_policy_snapshot jsonb)");
     await pool.query("INSERT INTO procurement.purchase_forecast_observations VALUES (1, repeat('a',64), '{\"method\":\"legacy\"}')");
@@ -131,8 +131,8 @@ suite.sequential("purchase planning policy PostgreSQL owner", () => {
       demand_event_line_id int, event_start_date date, planning_as_of_date date, expected_pieces int, weighted_pieces int)`);
     await pool.query("CREATE SCHEMA wms"); ownsWms = true;
     await pool.query("CREATE TABLE wms.orders (id int, order_placed_at timestamptz, cancelled_at timestamptz, warehouse_status text)");
-    await pool.query("CREATE TABLE wms.order_items (order_id int, sku text, quantity int, status text, requires_shipping int)");
-    await pool.query("CREATE TABLE catalog.product_variants (id int, product_id int, sku text, units_per_variant int, is_active boolean)");
+    await pool.query("CREATE TABLE wms.order_items (order_id int, sku text, quantity int, status text, requires_shipping int, catalog_product_id integer, inventory_tracking boolean)");
+    await pool.query("CREATE TABLE catalog.product_variants (id int, product_id int, sku text, units_per_variant int, is_active boolean, inventory_tracking_override boolean)");
     await pool.query("INSERT INTO procurement.purchase_recommendation_runs VALUES (1, '2026-09-01T00:00:00Z', 'completed')");
     const inserted = await pool.query(`INSERT INTO procurement.purchase_forecast_observations
       (run_id, product_id, product_sku, product_name, scope, forecast_method, forecast_version,

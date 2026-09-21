@@ -1,13 +1,19 @@
 /** Read-contract fixture for the real demand reader; not migration proof. */
 export const demandDispatchFixtureSql = `
 CREATE SCHEMA inventory; CREATE SCHEMA warehouse; CREATE SCHEMA wms; CREATE SCHEMA catalog;
-CREATE TABLE catalog.products (id integer PRIMARY KEY, is_active boolean);
+CREATE TABLE catalog.products (id integer PRIMARY KEY, is_active boolean,
+      inventory_tracking_default boolean NOT NULL DEFAULT true
+    );
 CREATE TABLE catalog.product_variants (id integer PRIMARY KEY, product_id integer, sku varchar(100),
-  is_active boolean, requires_shipping boolean, track_inventory boolean, created_at timestamptz);
+  is_active boolean, requires_shipping boolean, track_inventory boolean, created_at timestamptz,
+      inventory_tracking_override boolean
+    );
 CREATE TABLE warehouse.warehouses (id integer PRIMARY KEY, inventory_source_type varchar(20), is_active integer, created_at timestamptz);
 CREATE TABLE warehouse.warehouse_locations (id integer PRIMARY KEY, warehouse_id integer);
 CREATE TABLE wms.orders (id integer PRIMARY KEY, warehouse_id integer);
-CREATE TABLE wms.order_items (id integer PRIMARY KEY, order_id integer, sku varchar(100));
+CREATE TABLE wms.order_items (id integer PRIMARY KEY, order_id integer, sku varchar(100),
+      catalog_product_id integer, inventory_tracking boolean
+    );
 CREATE TABLE wms.outbound_shipments (id integer PRIMARY KEY, order_id integer);
 CREATE TABLE wms.outbound_shipment_items (id integer PRIMARY KEY, shipment_id integer, order_item_id integer,
   product_variant_id integer, qty integer, from_location_id integer, shipment_item_purpose varchar(30),

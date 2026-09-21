@@ -18,6 +18,7 @@ export type CreateProductVariantInput = {
   maxUnitsPerPackage?: number | null;
   requiresShipping?: boolean;
   trackInventory?: boolean;
+  inventoryTrackingOverride?: boolean | null;
   salesEligibility?: VariantSalesEligibility;
 };
 

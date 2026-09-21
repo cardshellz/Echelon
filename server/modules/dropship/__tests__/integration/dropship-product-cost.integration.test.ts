@@ -51,8 +51,12 @@ describeDatabase.sequential("Shellz Club product cost PostgreSQL source guarante
       CREATE TABLE channels.channels (id integer PRIMARY KEY, name text, provider text, status text);
       CREATE TABLE membership.plan_channel_access (plan_id varchar, channel_id integer, enabled boolean,
         UNIQUE(plan_id,channel_id));
-      CREATE TABLE catalog.products (id integer PRIMARY KEY, shopify_product_id varchar(100));
-      CREATE TABLE catalog.product_variants (id integer PRIMARY KEY, product_id integer, shopify_variant_id varchar(100));
+      CREATE TABLE catalog.products (id integer PRIMARY KEY, shopify_product_id varchar(100),
+      inventory_tracking_default boolean NOT NULL DEFAULT true
+    );
+      CREATE TABLE catalog.product_variants (id integer PRIMARY KEY, product_id integer, shopify_variant_id varchar(100),
+      inventory_tracking_override boolean
+    );
       CREATE TABLE public.shopify_variants (id varchar PRIMARY KEY, product_id text, price numeric(10,2));
       CREATE TABLE membership.plan_variant_overrides (id varchar PRIMARY KEY, plan_id varchar,
         variant_id text, product_id text, override_type text, fixed_price numeric(10,2),

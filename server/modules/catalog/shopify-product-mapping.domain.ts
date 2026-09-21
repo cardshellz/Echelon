@@ -29,6 +29,7 @@ export interface ShopifyProductMappingSource {
   productName: string;
   productSku: string | null;
   catalogProductId: string | null;
+  channelProductId?: string | null;
   channel: {
     id: number;
     name: string;
@@ -167,7 +168,7 @@ export function buildShopifyProductMappingSummary(
     .sort((left, right) => left.variantId - right.variantId);
   const activeVariants = variants.filter((variant) => variant.isActive);
   const evidenceProductIds = uniqueSortedIds(
-    activeVariants.flatMap((variant) => [variant.feedProductId, variant.listingProductId]),
+    [source.channelProductId ?? null, ...activeVariants.flatMap((variant) => [variant.feedProductId, variant.listingProductId])],
   );
   const activeVariantIssueIds = activeVariants
     .filter((variant) => (
@@ -203,7 +204,7 @@ export function buildShopifyProductMappingSummary(
     : evidenceProductIds.length === 0
       ? catalogProductId
       : null;
-  const repairable = activeVariants.length > 0 && recommendedProductId !== null && [
+  const repairable = (activeVariants.length > 0 || variants.length === 0) && recommendedProductId !== null && [
     "catalog_only",
     "channel_only",
     "incomplete",
@@ -211,6 +212,7 @@ export function buildShopifyProductMappingSummary(
   ].includes(status);
   const fingerprint = JSON.stringify({
     catalogProductId,
+    channelProductId: source.channelProductId ?? null,
     channelId: source.channel.id,
     variants: variants.map((variant) => ({
       variantId: variant.variantId,

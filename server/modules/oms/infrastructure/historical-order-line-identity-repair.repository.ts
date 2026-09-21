@@ -379,8 +379,11 @@ export function createHistoricalIdentityRepairRepository(
       });
     },
 
-    resolveIdentity(input) {
-      return resolveOrderLineCatalogIdentity(database, input);
+    async resolveIdentity(input) {
+      const identity = await resolveOrderLineCatalogIdentity(database, input);
+      // This historical command repairs variant/bin custody only. Product-only
+      // identities must not enter a command that requires an inventory variant.
+      return identity?.id != null ? identity : null;
     },
 
     async repairLine(input): Promise<HistoricalIdentityRepairLineChange> {

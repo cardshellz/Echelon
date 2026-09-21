@@ -1,4 +1,8 @@
 export interface ChannelFulfillmentInventoryConfiguration {
+  readonly omsInventoryTracking?: boolean | null;
+  readonly wmsInventoryTracking?: boolean | null;
+  readonly omsCatalogProductId?: number | null;
+  readonly wmsCatalogProductId?: number | null;
   readonly omsRequiresShipping: boolean | null;
   readonly wmsRequiresShipping: number;
   readonly productVariantId: number | null;
@@ -70,6 +74,18 @@ export function decideChannelFulfillmentInventoryPosting(
       requiresInventoryPosting: false,
       reason: "non_shipping_item",
     });
+  }
+  const omsTracking = configuration.omsInventoryTracking ?? null;
+  const wmsTracking = configuration.wmsInventoryTracking ?? null;
+  if (omsTracking !== wmsTracking || ((omsTracking !== null || wmsTracking !== null)
+    && (!configuration.omsCatalogProductId || configuration.omsCatalogProductId !== configuration.wmsCatalogProductId))) {
+    return Object.freeze({ status: "conflict", reasons: Object.freeze(["inventory_policy_snapshot_conflict"]) });
+  }
+  if (omsTracking === false) {
+    return Object.freeze({ status: "resolved", requiresInventoryPosting: false, reason: "non_inventory_item" });
+  }
+  if (omsTracking === true && configuration.catalogTrackInventory === false) {
+    return Object.freeze({ status: "conflict", reasons: Object.freeze(["catalog_inventory_policy_changed"]) });
   }
   // The catalog's historical NULL value retains its established meaning of
   // inventory-tracked. Only an explicit false disables inventory movement.

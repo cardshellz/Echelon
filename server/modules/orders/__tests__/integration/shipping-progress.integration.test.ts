@@ -15,17 +15,23 @@ const now = new Date("2026-09-20T12:00:00Z");
 // and the effective-quantity view below are loaded from the real migrations.
 const prerequisites = `
   CREATE SCHEMA wms; CREATE SCHEMA oms; CREATE SCHEMA catalog; CREATE SCHEMA warehouse;
-  CREATE TABLE catalog.product_variants (id integer PRIMARY KEY);
+  CREATE TABLE catalog.product_variants (id integer PRIMARY KEY,
+      inventory_tracking_override boolean
+    );
   CREATE TABLE warehouse.warehouses (id integer PRIMARY KEY);
   CREATE TABLE oms.oms_orders (id bigint PRIMARY KEY);
   CREATE TABLE oms.oms_order_lines (id bigint PRIMARY KEY, order_id bigint REFERENCES oms.oms_orders(id),
-    authority_fulfillable_quantity integer NOT NULL);
+    authority_fulfillable_quantity integer NOT NULL,
+      catalog_product_id integer, inventory_tracking boolean
+    );
   CREATE TABLE wms.orders (id integer PRIMARY KEY, warehouse_status text NOT NULL,
     picked_count integer NOT NULL DEFAULT 0, completed_at timestamp, updated_at timestamp);
   CREATE TABLE wms.order_items (id integer PRIMARY KEY, order_id integer REFERENCES wms.orders(id),
     oms_order_line_id bigint REFERENCES oms.oms_order_lines(id), quantity integer NOT NULL,
     picked_quantity integer NOT NULL DEFAULT 0, fulfilled_quantity integer NOT NULL DEFAULT 0,
-    requires_shipping integer NOT NULL DEFAULT 1, status text NOT NULL DEFAULT 'pending', picked_at timestamp);
+    requires_shipping integer NOT NULL DEFAULT 1, status text NOT NULL DEFAULT 'pending', picked_at timestamp,
+      catalog_product_id integer, inventory_tracking boolean
+    );
   CREATE TABLE wms.outbound_shipments (id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     order_id integer REFERENCES wms.orders(id), shipment_purpose text NOT NULL DEFAULT 'customer_fulfillment',
     source text NOT NULL, status text NOT NULL);

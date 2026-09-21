@@ -1,6 +1,7 @@
 import { and, asc, eq, or, sql } from "drizzle-orm";
 import {
   channelConnections,
+  channelProductIdentities,
   channelFeeds,
   channelListings,
   channels,
@@ -21,6 +22,7 @@ import {
   type VerifiedShopifyVariantIdentity,
 } from "./shopify-product-mapping.domain";
 import { enqueueShippingGroupMetafieldWrite } from "./shipping-group-sync";
+import { upsertChannelProductIdentity } from "../channels/channel-product-identity.repository";
 
 const DEFAULT_SHOPIFY_API_VERSION = "2024-01";
 const SHOPIFY_REQUEST_TIMEOUT_MS = 10_000;
@@ -171,11 +173,14 @@ async function loadMapping(
     ))
     .orderBy(asc(productVariants.id));
 
+  const [productIdentity] = await client.select().from(channelProductIdentities)
+    .where(and(eq(channelProductIdentities.productId, product.id), eq(channelProductIdentities.channelId, channel.id))).limit(1);
   const source: ShopifyProductMappingSource = {
     productId: product.id,
     productName: product.name,
     productSku: product.sku,
     catalogProductId: product.shopifyProductId,
+    channelProductId: productIdentity?.externalProductId ?? null,
     channel,
     variants: rows.map((row) => ({
       variantId: row.variantId,
@@ -488,12 +493,17 @@ function activeVariantAuditSnapshot(summary: ShopifyProductMappingSummary) {
     }));
 }
 
-export function createShopifyProductMappingService() {
+export function createShopifyProductMappingService(dependencies: {
+  database?: typeof db;
+  verifyShopifyProduct?: typeof fetchVerifiedShopifyProduct;
+} = {}) {
+  const database = dependencies.database ?? db;
+  const verifyShopifyProduct = dependencies.verifyShopifyProduct ?? fetchVerifiedShopifyProduct;
   async function getSummary(
     productId: number,
     channelId?: number | null,
   ): Promise<ShopifyProductMappingSummary> {
-    return (await loadMapping(db, productId, channelId)).summary;
+    return (await loadMapping(database, productId, channelId)).summary;
   }
 
   async function repair(input: {
@@ -501,6 +511,7 @@ export function createShopifyProductMappingService() {
     targetProductId: string | number;
     channelId?: number | null;
     actor: string;
+    allowProductOnlyAdoption?: boolean;
     /** Live snapshot supplied only by the internal catalog-import owner. */
     verifiedShopifyProduct?: VerifiedShopifyProduct;
     /** Exact local/remote rows produced by that same internal catalog import. */
@@ -526,17 +537,18 @@ export function createShopifyProductMappingService() {
         500,
       );
     }
-    const loaded = await loadMapping(db, input.productId, input.channelId);
+    const loaded = await loadMapping(database, input.productId, input.channelId);
     const before = loaded.summary;
     const verifiedShopifyProduct = input.verifiedShopifyProduct
       ? validateVerifiedShopifyProduct(input.verifiedShopifyProduct, targetProductId)
-      : await fetchVerifiedShopifyProduct(before.channel.id, targetProductId);
+      : await verifyShopifyProduct(before.channel.id, targetProductId);
     const repairEvaluation = evaluateShopifyProductMappingRepair({
       summary: before,
       requestedProductId: targetProductId,
       verifiedRemoteVariants: verifiedShopifyProduct.variants,
       allowUnmappedAdoption: Boolean(
-        input.verifiedShopifyProduct && input.importedVariantBindings?.length,
+        (input.verifiedShopifyProduct && input.importedVariantBindings?.length)
+        || (input.allowProductOnlyAdoption === true && before.variants.length === 0),
       ),
       importedVariantBindings: input.importedVariantBindings,
       expectedVariant: input.expectedVariant,
@@ -553,7 +565,7 @@ export function createShopifyProductMappingService() {
     }
     const mappedVariantIds = repairEvaluation.mappedVariantIds;
     const variantMappings = repairEvaluation.variantMappings;
-    const requiresWrite = mappingRequiresWrite(before, targetProductId, variantMappings);
+    const requiresWrite = before.channelProductId !== targetProductId || mappingRequiresWrite(before, targetProductId, variantMappings);
 
     if (!requiresWrite) {
       return {
@@ -573,7 +585,7 @@ export function createShopifyProductMappingService() {
       };
     }
 
-    const writeResult = await db.transaction(async (tx) => {
+    const writeResult = await database.transaction(async (tx) => {
       await tx.execute(sql`
         SELECT pg_advisory_xact_lock(
           hashtextextended(${`shopify-product-mapping:${before.channel.id}:${targetProductId}`}, 0::bigint)
@@ -727,6 +739,10 @@ export function createShopifyProductMappingService() {
           404,
         );
       }
+
+      await upsertChannelProductIdentity(tx, {
+        channelId: before.channel.id, productId: input.productId, externalProductId: targetProductId,
+      });
 
       let updatedFeedCount = 0;
       let createdFeedCount = 0;

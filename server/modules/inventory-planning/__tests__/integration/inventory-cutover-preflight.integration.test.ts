@@ -43,8 +43,9 @@ describeDatabase.sequential("inventory cutover connected preflight PostgreSQL", 
       CREATE TABLE catalog.product_variants (
         id integer PRIMARY KEY, product_id integer NOT NULL, sku varchar(100) NOT NULL,
         is_active boolean NOT NULL, requires_shipping boolean NOT NULL,
-        track_inventory boolean, sales_eligibility varchar(30) NOT NULL
-      );
+        track_inventory boolean, sales_eligibility varchar(30) NOT NULL,
+      inventory_tracking_override boolean
+    );
       CREATE TABLE wms.orders (
         id integer PRIMARY KEY, warehouse_id integer, warehouse_status varchar(30),
         on_hold integer NOT NULL, channel_id integer, source varchar(50), external_order_id varchar(100),
@@ -55,8 +56,9 @@ describeDatabase.sequential("inventory cutover connected preflight PostgreSQL", 
         source_item_id varchar(100), sku varchar(100) NOT NULL, product_id integer,
         quantity integer NOT NULL, picked_quantity integer NOT NULL, fulfilled_quantity integer NOT NULL,
         status varchar(30), on_hold boolean NOT NULL, requires_shipping integer NOT NULL,
-        location varchar(100), short_reason varchar(100)
-      );
+        location varchar(100), short_reason varchar(100),
+      catalog_product_id integer, inventory_tracking boolean
+    );
       CREATE TABLE wms.outbound_shipments (id integer PRIMARY KEY, order_id integer NOT NULL, status varchar(30), held boolean);
       CREATE TABLE wms.outbound_shipment_items (
         id integer PRIMARY KEY, shipment_id integer NOT NULL, order_item_id integer,

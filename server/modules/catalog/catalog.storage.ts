@@ -22,6 +22,7 @@ import {
   sql,
 } from "../../storage/base";
 import { OPEN_SHIPMENT_STATUSES } from "@shared/enums/order-status";
+import { prepareVariantInventoryTracking, updateProductInventoryTracking, InventoryTrackingPolicyError } from "./inventory-tracking-policy.repository";
 import { renameWmsOrderItemSku } from "../wms/order-item-commands";
 import type {
   Product,
@@ -150,11 +151,18 @@ export const productMethods: IProductStorage = {
   },
 
   async createProduct(product: InsertProduct, executor: any = db): Promise<Product> {
+    if (product.inventoryTrackingDefault !== undefined && typeof product.inventoryTrackingDefault !== "boolean") {
+      throw new InventoryTrackingPolicyError("INVENTORY_POLICY_INVALID", "Product inventory tracking must be a boolean", 400);
+    }
     const result = await executor.insert(products).values(product).returning();
     return result[0];
   },
 
   async updateProduct(id: number, updates: Partial<InsertProduct>, executor: any = db): Promise<Product | null> {
+    if (updates.inventoryTrackingDefault !== undefined) {
+      if (executor === db) return db.transaction(tx => productMethods.updateProduct(id, updates, tx));
+      await updateProductInventoryTracking(executor, id, updates.inventoryTrackingDefault, "catalog.storage", new Date());
+    }
     const result = await executor.update(products)
       .set({ ...updates, updatedAt: new Date() })
       .where(eq(products.id, id))
@@ -209,13 +217,23 @@ export const productMethods: IProductStorage = {
   },
 
   async createProductVariant(variant: InsertProductVariant, executor: any = db): Promise<ProductVariant> {
-    const result = await executor.insert(productVariants).values(variant).returning();
+    if (executor === db) return db.transaction(tx => productMethods.createProductVariant(variant, tx));
+    const policy = await prepareVariantInventoryTracking(executor, variant);
+    const result = await executor.insert(productVariants).values({ ...variant, ...policy }).returning();
     return result[0];
   },
 
   async updateProductVariant(id: number, updates: Partial<InsertProductVariant>, executor: any = db): Promise<ProductVariant | null> {
+    const policyChanged = ["trackInventory", "inventoryTrackingOverride", "requiresShipping"].some(key => Object.prototype.hasOwnProperty.call(updates, key));
+    let policy: Partial<InsertProductVariant> = {};
+    if (policyChanged) {
+      if (executor === db) return db.transaction(tx => productMethods.updateProductVariant(id, updates, tx));
+      const existing = await productMethods.getProductVariantById(id, executor);
+      if (!existing) return null;
+      policy = await prepareVariantInventoryTracking(executor, { ...updates, productId: existing.productId }, id);
+    }
     const result = await executor.update(productVariants)
-      .set({ ...updates, updatedAt: new Date() })
+      .set({ ...updates, ...policy, updatedAt: new Date() })
       .where(eq(productVariants.id, id))
       .returning();
     return result[0] || null;

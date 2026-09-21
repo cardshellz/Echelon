@@ -17,7 +17,7 @@ import {
   type OmsLineAuthorityState,
 } from "./oms-line-authority";
 import { recordOmsLineAuthorityEvent } from "./oms-line-authority-ledger";
-import { resolveOrderLineCatalogIdentity, recordOrderLineCatalogIdentity } from "./order-line-catalog-identity.service";
+import { resolveOrderLineCatalogIdentity, recordOrderLineCatalogIdentity, orderLineInventoryIdentitySnapshot } from "./order-line-catalog-identity.service";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -278,6 +278,7 @@ export function createOmsService(db: any, reservationService?: any) {
         const [insertedLine] = await tx.insert(omsOrderLines).values({
           orderId: inserted.id,
           productVariantId,
+          ...orderLineInventoryIdentitySnapshot(identity),
           externalLineItemId: item.externalLineItemId,
           externalProductId: item.externalProductId || null,
           sku: item.sku,
@@ -404,7 +405,7 @@ export function createOmsService(db: any, reservationService?: any) {
               .limit(1);
             const previousAuthority = lockedLine ?? existingLine;
             const identity = await resolveOrderLineCatalogIdentity(tx, {
-              ...item, channelId, previousVariantId: previousAuthority.productVariantId,
+              ...item, channelId, previousVariantId: previousAuthority.productVariantId, previousProductId: previousAuthority.catalogProductId,
             });
             const productVariantId = identity?.id ?? null;
             const variantCompareAtPrice = identity?.compareAtPriceCents ?? null;
@@ -414,6 +415,7 @@ export function createOmsService(db: any, reservationService?: any) {
               .update(omsOrderLines)
               .set({
                 productVariantId: productVariantId ?? previousAuthority.productVariantId,
+                ...orderLineInventoryIdentitySnapshot(identity, previousAuthority),
                 externalProductId: item.externalProductId ?? previousAuthority.externalProductId ?? null,
                 sku: item.sku ?? previousAuthority.sku,
                 title: item.title ?? previousAuthority.title,
@@ -444,7 +446,7 @@ export function createOmsService(db: any, reservationService?: any) {
               .where(eq(omsOrderLines.id, existingLine.id));
 
             await recordOrderLineCatalogIdentity(tx, { orderId: existingOrder.id, orderLineId: existingLine.id,
-              channelId, previousVariantId: previousAuthority.productVariantId, identity,
+              channelId, previousVariantId: previousAuthority.productVariantId, previousProductId: previousAuthority.catalogProductId, identity,
               source: { ...item, channelId }, sourceEventId: data.sourceEventId });
             await recordOmsLineAuthorityEvent({
               db: tx,
@@ -468,6 +470,7 @@ export function createOmsService(db: any, reservationService?: any) {
           const [insertedLine] = await tx.insert(omsOrderLines).values({
             orderId: existingOrder.id,
             productVariantId,
+            ...orderLineInventoryIdentitySnapshot(identity),
             externalLineItemId: item.externalLineItemId,
             externalProductId: item.externalProductId || null,
             sku: item.sku,

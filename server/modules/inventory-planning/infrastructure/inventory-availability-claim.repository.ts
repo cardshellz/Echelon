@@ -675,7 +675,7 @@ async function loadOrder(client: PoolClient, orderId: number, lock: boolean): Pr
   }
   const itemRows = rows(await client.query(
      `SELECT item.id AS order_item_id,
-             item.sku,
+             item.sku, item.inventory_tracking, item.catalog_product_id,
              item.product_id AS stored_product_id,
              item.requires_shipping AS order_item_requires_shipping,
              item.short_reason AS short_reason,
@@ -692,7 +692,8 @@ async function loadOrder(client: PoolClient, orderId: number, lock: boolean): Pr
      FROM wms.order_items AS item
      LEFT JOIN catalog.product_variants AS variant
        ON variant.is_active = true
-      AND upper(variant.sku) = upper(item.sku)
+      AND ((item.catalog_product_id IS NOT NULL AND variant.id = item.product_id)
+        OR (item.catalog_product_id IS NULL AND upper(variant.sku) = upper(item.sku)))
      WHERE item.order_id = $1
      ORDER BY item.id
      ${lock ? "FOR UPDATE OF item" : ""}`,
@@ -721,7 +722,7 @@ async function loadOrder(client: PoolClient, orderId: number, lock: boolean): Pr
         { orderId, orderItemId, requiresShipping: row.order_item_requires_shipping },
       );
     }
-    if (itemRequiresShipping === 0) continue;
+    if (itemRequiresShipping === 0 || (row.inventory_tracking === false && row.catalog_product_id != null)) continue;
     if (row.target_variant_id == null || row.root_product_id == null) {
       throw new InventoryAvailabilityClaimRepositoryError(
         "ORDER_ITEM_VARIANT_MISSING",
@@ -740,6 +741,12 @@ async function loadOrder(client: PoolClient, orderId: number, lock: boolean): Pr
           { orderId, orderItemId, storedProductId, targetVariantId, rootProductId, sku: String(row.sku) },
         );
       }
+    }
+    if (row.inventory_tracking === true && (Number(row.catalog_product_id) !== rootProductId
+      || Number(row.stored_product_id) !== targetVariantId || row.requires_shipping !== true || row.track_inventory !== true)) {
+      throw new InventoryAvailabilityClaimRepositoryError("ORDER_ITEM_INVENTORY_POLICY_CONFLICT",
+        "Order inventory policy conflicts with its catalog identity; review the mapping before claiming.",
+        { orderId, orderItemId, targetVariantId, rootProductId });
     }
     if (row.requires_shipping !== true || row.track_inventory !== true) continue;
     if (row.is_active !== true || row.sales_eligibility !== "sellable") {

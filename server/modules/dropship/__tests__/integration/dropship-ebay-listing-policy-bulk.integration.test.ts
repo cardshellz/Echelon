@@ -43,7 +43,9 @@ describeDatabase.sequential("bulk eBay listing policy PostgreSQL guarantees", ()
         id integer PRIMARY KEY, vendor_id integer NOT NULL REFERENCES dropship.dropship_vendors(id),
         platform text NOT NULL, status text NOT NULL
       );
-      CREATE TABLE catalog.product_variants (id integer PRIMARY KEY);
+      CREATE TABLE catalog.product_variants (id integer PRIMARY KEY,
+      inventory_tracking_override boolean
+    );
       CREATE TABLE dropship.dropship_audit_events (
         id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
         vendor_id integer, store_connection_id integer, entity_type text, entity_id text,

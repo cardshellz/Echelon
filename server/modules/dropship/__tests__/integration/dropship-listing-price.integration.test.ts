@@ -40,8 +40,12 @@ describeDatabase.sequential("listing price PostgreSQL transaction guarantees", (
     await pool.query(qualify(`
       CREATE TABLE dropship.dropship_vendors (id integer PRIMARY KEY, member_id text);
       CREATE TABLE dropship.dropship_store_connections (id integer PRIMARY KEY, vendor_id integer NOT NULL REFERENCES dropship.dropship_vendors(id));
-      CREATE TABLE catalog.products (id integer PRIMARY KEY);
-      CREATE TABLE catalog.product_variants (id integer PRIMARY KEY, product_id integer REFERENCES catalog.products(id));
+      CREATE TABLE catalog.products (id integer PRIMARY KEY,
+      inventory_tracking_default boolean NOT NULL DEFAULT true
+    );
+      CREATE TABLE catalog.product_variants (id integer PRIMARY KEY, product_id integer REFERENCES catalog.products(id),
+      inventory_tracking_override boolean
+    );
       CREATE TABLE catalog.product_line_products (product_id integer);
       CREATE TABLE dropship.dropship_catalog_rules (id integer);
       CREATE TABLE dropship.dropship_vendor_selection_rules (id integer);

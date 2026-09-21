@@ -129,7 +129,7 @@ export async function duplicateProduct(
   // ── Copy variants (two-pass so parent hierarchy remaps to the new ids) ──
   const newIdBySourceVariant = new Map<number, number>();
   for (const v of sourceVariants) {
-    const { id: _vid, createdAt: _vc, updatedAt: _vu, ...variantFields } = v as any;
+    const { id: _vid, createdAt: _vc, updatedAt: _vu, trackInventory: _effectiveTracking, ...variantFields } = v as any;
     const created = await storage.createProductVariant({
       ...variantFields,
       productId: newProduct.id,

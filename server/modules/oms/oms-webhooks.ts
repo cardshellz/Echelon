@@ -34,7 +34,7 @@ import {
   __test__ as refundCascadeTest,
 } from "./shopify-refund-cascade.service";
 import { normalizeShopifyLineItems } from "./shopify-line-item-normalizer";
-import { resolveOrderLineCatalogIdentity, recordOrderLineCatalogIdentity } from "./order-line-catalog-identity.service";
+import { resolveOrderLineCatalogIdentity, recordOrderLineCatalogIdentity, orderLineInventoryIdentitySnapshot } from "./order-line-catalog-identity.service";
 import {
   processShopifyFulfillmentIngress,
 } from "./shopify-fulfillment-ingress.adapter";
@@ -1348,7 +1348,7 @@ export function registerOmsWebhooks(
               const previousAuthority = lockedLine ?? existingLine;
               const identity = await resolveOrderLineCatalogIdentity(tx, {
                 channelId: existing.channelId, sku: item.sku,
-                previousVariantId: previousAuthority.productVariantId,
+                previousVariantId: previousAuthority.productVariantId, previousProductId: previousAuthority.catalogProductId,
                 externalVariantId: normalizedLine?.externalVariantId,
                 externalProductId: normalizedLine?.externalProductId,
               });
@@ -1387,11 +1387,12 @@ export function registerOmsWebhooks(
                   planDiscountCents: normalizedLine?.planDiscountCents ?? existingLine.planDiscountCents,
                   couponDiscountCents: normalizedLine?.couponDiscountCents ?? existingLine.couponDiscountCents,
                   productVariantId: productVariantId ?? previousAuthority.productVariantId,
+                  ...orderLineInventoryIdentitySnapshot(identity, previousAuthority),
                 })
                 .where(eq(omsOrderLines.id, existingLine.id));
 
               await recordOrderLineCatalogIdentity(tx, { orderId: existing.id, orderLineId: existingLine.id,
-                channelId: existing.channelId, previousVariantId: previousAuthority.productVariantId, identity,
+                channelId: existing.channelId, previousVariantId: previousAuthority.productVariantId, previousProductId: previousAuthority.catalogProductId, identity,
                 source: { channelId: existing.channelId, sku: item.sku,
                   externalVariantId: normalizedLine?.externalVariantId, externalProductId: normalizedLine?.externalProductId },
                 sourceEventId: `webhook_inbox:${inbox.receipt.id}` });
@@ -1436,6 +1437,7 @@ export function registerOmsWebhooks(
               const [insertedLine] = await tx.insert(omsOrderLines).values({
                 orderId: existing.id,
                 productVariantId,
+                ...orderLineInventoryIdentitySnapshot(identity),
                 externalLineItemId: lineId,
                 sku: item.sku,
                 title: displayName,

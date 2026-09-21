@@ -1,3 +1,4 @@
+import { productMethods } from "../catalog/catalog.storage";
 /**
  * Catalog Backfill Service
  *
@@ -583,16 +584,13 @@ class CatalogBackfillService {
         return null;
       }
       if (!isDryRun) {
-        const [updated] = await this.db
-          .update(productVariants)
-          .set({
+        const updated = await productMethods.updateProductVariant(existingVariant.id, {
             sku,
             name: variantName,
             barcode: shopifyVariant.barcode,
             priceCents,
             compareAtPriceCents,
             requiresShipping,
-            ...(requiresShipping ? {} : { trackInventory: false }),
             shopifyVariantId: shopifyVariantId,
             shopifyInventoryItemId: shopifyInventoryItemId,
             unitsPerVariant,
@@ -601,10 +599,7 @@ class CatalogBackfillService {
             option1Value: shopifyVariant.option1,
             option2Value: shopifyVariant.option2,
             option3Value: shopifyVariant.option3,
-            updatedAt: new Date(),
-          })
-          .where(eq(productVariants.id, existingVariant.id))
-          .returning();
+          }, this.db);
         echelonVariant = updated;
       } else {
         echelonVariant = existingVariant;
@@ -612,9 +607,7 @@ class CatalogBackfillService {
       result.variants.updated++;
     } else {
       if (!isDryRun) {
-        const [created] = await this.db
-          .insert(productVariants)
-          .values({
+        const created = await productMethods.createProductVariant({
             productId,
             sku,
             name: variantName,
@@ -622,7 +615,6 @@ class CatalogBackfillService {
             priceCents,
             compareAtPriceCents,
             requiresShipping,
-            trackInventory: requiresShipping,
             shopifyVariantId: shopifyVariantId,
             shopifyInventoryItemId: shopifyInventoryItemId,
             unitsPerVariant,
@@ -632,8 +624,7 @@ class CatalogBackfillService {
             option1Value: shopifyVariant.option1,
             option2Value: shopifyVariant.option2,
             option3Value: shopifyVariant.option3,
-          })
-          .returning();
+          }, this.db);
         echelonVariant = created;
       } else {
         echelonVariant = { id: -1, sku } as any;

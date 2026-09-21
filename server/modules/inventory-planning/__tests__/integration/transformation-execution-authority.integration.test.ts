@@ -40,8 +40,9 @@ const fixtureSql = `
     revision bigint NOT NULL, activation_run_id bigint
   );
   CREATE TABLE catalog.product_variants (
-    id integer PRIMARY KEY, product_id integer NOT NULL, units_per_variant integer NOT NULL
-  );
+    id integer PRIMARY KEY, product_id integer NOT NULL, units_per_variant integer NOT NULL,
+      inventory_tracking_override boolean
+    );
   CREATE TABLE inventory.transformation_model_versions (
     id integer PRIMARY KEY, product_id integer NOT NULL, version integer NOT NULL,
     lifecycle_status text NOT NULL, validation_state text NOT NULL,

@@ -1178,7 +1178,7 @@ export default function Picking() {
       return {
         ...order,
         items,
-        status: allDone ? "completed" : order.status,
+        status: allDone ? "completed" : order.status === "completed" ? "in_progress" : order.status,
       };
     }));
 
@@ -1190,13 +1190,19 @@ export default function Picking() {
       return {
         ...batch,
         items,
-        status: allDone ? "completed" : batch.status,
+        status: allDone ? "completed" : batch.status === "completed" ? "in_progress" : batch.status,
       };
     }));
   };
 
   const discardOptimisticLocalOrderForItem = (itemId: number) => {
-    setLocalSingleQueue(prev => prev.filter(order => !order.items.some(item => item.id === itemId)));
+    const confirmedItem = queryClient.getQueryData<OrderWithItems[]>(["picking-queue"])
+      ?.flatMap(order => order.items).find(item => item.id === itemId);
+    if (confirmedItem) applyServerItemToLocalQueues(confirmedItem);
+    else {
+      setLocalSingleQueue(prev => prev.filter(order => !order.items.some(item => item.id === itemId)));
+      setQueue(prev => prev.filter(batch => !batch.items.some(item => item.id === itemId)));
+    }
   };
 
   // Mutation for updating items
@@ -1222,6 +1228,11 @@ export default function Picking() {
       applyServerItemToLocalQueues(updatedItem);
       queryClient.invalidateQueries({ queryKey: ["picking-queue"] });
 
+      if (inventory?.resolution?.reviewRequired && !inventory.resolution.autoResolved) {
+        orderCompletedPendingRef.current = false;
+        toast({ title: "Pick not saved", description: inventory.resolution.message, variant: "destructive" });
+        return;
+      }
       const replen = inventory?.replen;
       binCountPendingRef.current = false;
       if (inventory?.resolution?.autoResolved && inventory.resolution.reviewRequired) {

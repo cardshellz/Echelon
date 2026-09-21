@@ -81,6 +81,8 @@ async function loadSnapshot(
         'omsProductVariantId', oms_line.product_variant_id,
         'omsSku', oms_line.sku,
         'omsRequiresShipping', oms_line.requires_shipping,
+        'omsInventoryTracking', oms_line.inventory_tracking, 'wmsInventoryTracking', wms_item.inventory_tracking,
+        'omsCatalogProductId', oms_line.catalog_product_id, 'wmsCatalogProductId', wms_item.catalog_product_id,
         'omsPaidQuantity', oms_line.paid_quantity,
         'omsMaxPaidQuantity', COALESCE(authority.max_paid_quantity, 0),
         'wmsOrderItemId', receipt_item.wms_order_item_id,

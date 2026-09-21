@@ -49,11 +49,14 @@ describeWithDisposableDb.sequential("purchase recommendation and RFQ PostgreSQL 
     pool = new pg.Pool({ connectionString: TEST_DB_URL, ssl: sslConfig(TEST_DB_URL!) });
     await pool.query("CREATE SCHEMA catalog; CREATE SCHEMA procurement; CREATE SCHEMA warehouse;");
     await pool.query(`
-      CREATE TABLE catalog.products (id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY, sku VARCHAR(100));
+      CREATE TABLE catalog.products (id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY, sku VARCHAR(100),
+      inventory_tracking_default boolean NOT NULL DEFAULT true
+    );
       CREATE TABLE catalog.product_variants (
         id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-        product_id INTEGER NOT NULL REFERENCES catalog.products(id)
-      );
+        product_id INTEGER NOT NULL REFERENCES catalog.products(id),
+      inventory_tracking_override boolean
+    );
       CREATE TABLE warehouse.warehouses (id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY);
       CREATE TABLE procurement.vendors (
         id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

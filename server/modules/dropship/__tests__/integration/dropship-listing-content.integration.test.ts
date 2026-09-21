@@ -24,8 +24,12 @@ const target = { storeConnectionId: 22, productVariantId: 101 };
     await query(`
       CREATE TABLE dropship.dropship_vendors (id int PRIMARY KEY, member_id text);
       CREATE TABLE dropship.dropship_store_connections (id int PRIMARY KEY, vendor_id int REFERENCES dropship.dropship_vendors(id), UNIQUE(id,vendor_id));
-      CREATE TABLE catalog.products (id int PRIMARY KEY);
-      CREATE TABLE catalog.product_variants (id int PRIMARY KEY, product_id int REFERENCES catalog.products(id));
+      CREATE TABLE catalog.products (id int PRIMARY KEY,
+      inventory_tracking_default boolean NOT NULL DEFAULT true
+    );
+      CREATE TABLE catalog.product_variants (id int PRIMARY KEY, product_id int REFERENCES catalog.products(id),
+      inventory_tracking_override boolean
+    );
       CREATE TABLE catalog.product_line_products (product_id int);
       CREATE TABLE dropship.dropship_catalog_rules (id int);
       CREATE TABLE dropship.dropship_vendor_selection_rules (id int);
