@@ -56,10 +56,18 @@ When a pending credit settles, the existing settlement path adds it to
 removes it from `pending`; the negative stays, the vendor is paused in the
 same transaction, and the daily wallet run collects the amount.
 
-Balance verification: the ACH setup session asks for the `balances`
-permission; the funding method records the Financial Connections account id;
-the balance is read at link time and on `refreshed_balance` webhooks and
-appended to `dropship.dropship_funding_method_balance_verifications`.
+Balance verification is opt-in. The ACH setup session asks Financial
+Connections for `payment_method` only, because Stripe refuses the entire bank
+link when an account requests `balances` before registering for that product,
+and the vendor meets that as a bare failure at "Add a bank account". Setting
+`DROPSHIP_STRIPE_FINANCIAL_CONNECTIONS_BALANCES=true`, once the registration
+at Stripe is approved, adds the permission back. Without it a bank account
+still funds the wallet and pays for orders; it simply never qualifies for the
+pending-ACH advance, since the balance is one of the three facts that requires.
+When the permission is granted, the funding method records the Financial
+Connections account id, and the balance is read at link time and on
+`refreshed_balance` webhooks and appended to
+`dropship.dropship_funding_method_balance_verifications`.
 
 ## Reversals (phase 4)
 

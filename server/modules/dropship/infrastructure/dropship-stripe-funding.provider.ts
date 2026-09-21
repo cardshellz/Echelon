@@ -5,7 +5,7 @@ import {
   FUNDING_METHOD_ACCOUNT_HOLDER_TYPE_KEY,
   FUNDING_METHOD_FINANCIAL_CONNECTIONS_ACCOUNT_KEY,
 } from "../domain/funding-method";
-import { makeDropshipWalletLogger } from "../application/dropship-wallet-service";
+import { STRIPE_BANK_BALANCE_PERMISSION_ENV, makeDropshipWalletLogger } from "../application/dropship-wallet-service";
 import type { DropshipLogger } from "../application/dropship-ports";
 import { logStripeCallFailure, toDropshipStripeError } from "./dropship-stripe-error";
 import {
@@ -100,6 +100,8 @@ export class StripeDropshipFundingProvider implements DropshipWalletFundingProvi
       secretKey?: string;
       webhookSecret?: string;
       stripeClient?: Stripe;
+      /** Overrides the environment; see `shouldRequestBankBalances`. */
+      requestBankBalances?: boolean;
     } = {},
     /** Injected so a test can assert what a Stripe refusal records. */
     private readonly logger: DropshipLogger = makeDropshipWalletLogger(),
@@ -157,7 +159,7 @@ export class StripeDropshipFundingProvider implements DropshipWalletFundingProvi
       mode: "setup",
       customer: customerId,
       payment_method_types: paymentMethodTypesForRail(input.rail),
-      ...setupSessionRailFieldsForRail(input.rail),
+      ...paymentMethodOptionsForRail(input.rail, this.shouldRequestBankBalances()),
       success_url: input.successUrl,
       cancel_url: input.cancelUrl,
       metadata,
@@ -247,7 +249,7 @@ export class StripeDropshipFundingProvider implements DropshipWalletFundingProvi
       mode: "payment",
       customer: customerId,
       payment_method_types: paymentMethodTypesForRail(input.rail),
-      ...paymentMethodOptionsForRail(input.rail),
+      ...paymentMethodOptionsForRail(input.rail, this.shouldRequestBankBalances()),
       line_items: lineItems,
       success_url: input.successUrl,
       cancel_url: input.cancelUrl,
@@ -770,6 +772,18 @@ export class StripeDropshipFundingProvider implements DropshipWalletFundingProvi
     return this.stripeClient;
   }
 
+  /**
+   * Whether to ask Financial Connections for the balance permission.
+   *
+   * Off unless explicitly turned on, because asking for it without the Stripe
+   * registration makes Stripe refuse the whole bank link. Read per call rather
+   * than cached so turning it on takes effect on the next request.
+   */
+  private shouldRequestBankBalances(): boolean {
+    if (this.config.requestBankBalances !== undefined) return this.config.requestBankBalances;
+    return process.env[STRIPE_BANK_BALANCE_PERMISSION_ENV] === "true";
+  }
+
   private getWebhookSecret(): string {
     const secret =
       this.config.webhookSecret
@@ -790,20 +804,6 @@ export class StripeDropshipFundingProvider implements DropshipWalletFundingProvi
 export function createStripeDropshipFundingProviderFromEnv(): StripeDropshipFundingProvider {
   return new StripeDropshipFundingProvider();
 }
-
-/**
- * The currency a bank setup session is opened in, lowercase per Stripe.
- *
- * A setup-mode Checkout Session collecting a bank debit needs a currency to
- * build its mandate with, and `us_bank_account` has no per-method currency
- * field to carry one (its sibling `acss_debit` does, documented as "only
- * accepted for Checkout Sessions in setup mode"), so it has to come from the
- * session's own `currency`. A card session needs none and is not given one.
- *
- * Wallets are USD everywhere today. If a wallet's currency ever becomes a
- * stored value, this must be threaded from that wallet instead of pinned here.
- */
-const BANK_SETUP_SESSION_CURRENCY = "usd";
 
 function paymentMethodTypesForRail(rail: DropshipStripeFundingSetupRail): Array<"card" | "us_bank_account"> {
   return rail === "stripe_card" ? ["card"] : ["us_bank_account"];
@@ -966,39 +966,44 @@ function sanitizedPaymentMethodMetadata(input: {
 }
 
 /**
- * For a bank account, the vendor links it through Financial Connections with
- * the `balances` permission beside the mandatory `payment_method`: a balance
- * read is one of the three facts the pending-ACH advance requires. Cards get
- * no options. The verification method is left to Stripe's default so a bank
- * the connection flow does not support can still be added by micro-deposits
- * (that account simply never qualifies for the advance).
+ * The Financial Connections permissions a bank link asks for.
+ *
+ * `payment_method` is what makes the account chargeable and is always asked
+ * for. `balances` is extra: a balance read is one of the three facts the
+ * pending-ACH advance requires, and WITHOUT IT A BANK ACCOUNT STILL WORKS for
+ * autopay, top-ups and every other debit — it simply never qualifies for the
+ * advance (`bankBalanceSnapshotFromAccount` reports `balances_permission_missing`).
+ *
+ * Stripe refuses the whole request when an account asks for `balances` before
+ * registering for the Financial Connections balances product, and it refuses
+ * it with an uncatalogued invalid_request_error, so the vendor meets a bare
+ * failure at "Add a bank account". Asking for it is therefore opt-in: the
+ * default collects bank details only, and an operator turns it on once the
+ * registration at Stripe is approved.
+ */
+function financialConnectionsPermissions(requestBalances: boolean): Array<"payment_method" | "balances"> {
+  return requestBalances ? ["payment_method", "balances"] : ["payment_method"];
+}
+
+/**
+ * Bank links carry the Financial Connections options; cards get none. The
+ * verification method is left to Stripe's default so a bank the connection
+ * flow does not support can still be added by micro-deposits.
  */
 function paymentMethodOptionsForRail(
   rail: DropshipStripeFundingSetupRail,
+  requestBalances: boolean,
 ): Pick<Stripe.Checkout.SessionCreateParams, "payment_method_options"> {
   if (rail !== "stripe_ach") return {};
   return {
     payment_method_options: {
       us_bank_account: {
-        financial_connections: { permissions: ["payment_method", "balances"] },
+        financial_connections: { permissions: financialConnectionsPermissions(requestBalances) },
       },
     },
   };
 }
 
-/**
- * The same options plus the currency a setup-mode session needs.
- *
- * A payment-mode session takes its currency from its line items, so only the
- * setup-mode one carries this field; giving it to both would state the
- * currency twice and let the two disagree.
- */
-function setupSessionRailFieldsForRail(
-  rail: DropshipStripeFundingSetupRail,
-): Pick<Stripe.Checkout.SessionCreateParams, "payment_method_options" | "currency"> {
-  if (rail !== "stripe_ach") return {};
-  return { currency: BANK_SETUP_SESSION_CURRENCY, ...paymentMethodOptionsForRail(rail) };
-}
 
 /**
  * What a Financial Connections account says about its balance, independent

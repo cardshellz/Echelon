@@ -757,6 +757,15 @@ export interface DropshipAutoReloadResult {
   idempotentReplay: boolean;
 }
 
+/**
+ * Turns on the Financial Connections balance permission when a bank account is
+ * linked. Off by default: Stripe refuses the entire bank link when the
+ * permission is requested before the account is registered for that product,
+ * and a bank account without it still funds the wallet — it only forfeits the
+ * pending-bank advance, which needs the balance read.
+ */
+export const STRIPE_BANK_BALANCE_PERMISSION_ENV = "DROPSHIP_STRIPE_FINANCIAL_CONNECTIONS_BALANCES";
+
 /** Stripe's own word on whether a funding rail is usable: one of its capability states. */
 export type DropshipStripeRailState = "active" | "inactive" | "pending";
 

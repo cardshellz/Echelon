@@ -359,10 +359,20 @@ describe("DropshipOpsSurfaceService", () => {
       ...overrides,
     });
 
-    // Both rails live: the only state that says so outright.
+    // Both rails live, and the reader says what the balance permission costs:
+    // a bank account funds the wallet either way, only the advance depends on it.
     expect(stripe(read({}))).toMatchObject({
       status: "ready",
-      message: "Stripe wallet funding is configured, and the account has card payments and bank transfers (ACH) enabled.",
+      message: "Stripe wallet funding is configured, and the account has card payments and bank transfers (ACH) enabled."
+        + " Bank balances are not read, so no bank account qualifies for the pending-bank advance."
+        + " Register for Stripe Financial Connections balances, then set DROPSHIP_STRIPE_FINANCIAL_CONNECTIONS_BALANCES=true.",
+    });
+    expect(buildDropshipSystemReadinessChecks(
+      { ...configured, DROPSHIP_STRIPE_FINANCIAL_CONNECTIONS_BALANCES: "true" },
+      read({}),
+    ).find((check) => check.key === "stripe_funding")).toMatchObject({
+      status: "ready",
+      message: expect.stringContaining("Bank balances are read at link time"),
     });
 
     // ACH off is exactly the failure a vendor meets as a bare refusal when they

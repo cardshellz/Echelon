@@ -3,6 +3,7 @@ import { DropshipError } from "../domain/errors";
 import { DROPSHIP_LAUNCH_NOTIFICATION_PREFERENCES } from "./dropship-notification-service";
 import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship-ports";
 import type { DropshipVendorProvisioningService } from "./dropship-vendor-provisioning-service";
+import { STRIPE_BANK_BALANCE_PERMISSION_ENV } from "./dropship-wallet-service";
 import type {
   DropshipStripeRailAvailability,
   DropshipStripeRailState,
@@ -1379,8 +1380,22 @@ function buildStripeFundingCheck(
   return {
     ...base,
     status: "ready",
-    message: "Stripe wallet funding is configured, and the account has card payments and bank transfers (ACH) enabled.",
+    message: `Stripe wallet funding is configured, and the account has card payments and bank transfers (ACH) enabled.${describeBankBalancePermission(env)}`,
   };
+}
+
+/**
+ * What asking, or not asking, for the Financial Connections balance permission
+ * costs. Not a status of its own: a bank account works either way, and only
+ * the pending-bank advance depends on the balance read. Stripe refuses the
+ * whole bank link when the permission is requested before the product is
+ * registered, which is why it is off unless deliberately turned on.
+ */
+function describeBankBalancePermission(env: NodeJS.ProcessEnv): string {
+  if (env[STRIPE_BANK_BALANCE_PERMISSION_ENV] === "true") {
+    return " Bank balances are read at link time, so bank accounts can qualify for the pending-bank advance.";
+  }
+  return ` Bank balances are not read, so no bank account qualifies for the pending-bank advance. Register for Stripe Financial Connections balances, then set ${STRIPE_BANK_BALANCE_PERMISSION_ENV}=true.`;
 }
 
 /** Stripe's capability states, said plainly; an absent capability was never requested. */

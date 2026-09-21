@@ -36,13 +36,12 @@ describe("StripeDropshipFundingProvider", () => {
       mode: "setup",
       customer: "cus_existing",
       payment_method_types: ["us_bank_account"],
-      // A setup-mode session collecting a bank debit needs a currency to build
-      // its mandate with, and us_bank_account has no per-method currency field
-      // to carry one. Without this Stripe refuses the request outright.
-      currency: "usd",
+      // Balances are NOT asked for by default. Stripe refuses the whole bank
+      // link when an unregistered account requests them, which is exactly how
+      // this reached a vendor as a bare failure at "Add a bank account".
       payment_method_options: {
         us_bank_account: {
-          financial_connections: { permissions: ["payment_method", "balances"] },
+          financial_connections: { permissions: ["payment_method"] },
         },
       },
       metadata: expect.objectContaining({
@@ -52,6 +51,31 @@ describe("StripeDropshipFundingProvider", () => {
         requested_rail: "stripe_ach",
       }),
     }));
+  });
+
+  it("asks for the balance permission only when it is turned on", async () => {
+    const setupSession = async (requestBankBalances: boolean | undefined) => {
+      const stripe = makeStripeDouble();
+      const provider = new StripeDropshipFundingProvider({ stripeClient: stripe, webhookSecret: "whsec_test", requestBankBalances });
+      await provider.createStripeSetupSession({
+        vendorId: 10,
+        memberId: "member-1",
+        rail: "stripe_ach",
+        customerEmail: "vendor@cardshellz.test",
+        customerName: "Vendor",
+        existingProviderCustomerId: "cus_existing",
+        successUrl: "https://cardshellz.io/wallet?funding_setup=success",
+        cancelUrl: "https://cardshellz.io/wallet?funding_setup=cancelled",
+        now: new Date("2026-05-03T12:00:00.000Z"),
+      });
+      const params = stripe.checkout.sessions.create.mock.calls[0][0] as Record<string, any>;
+      return params.payment_method_options.us_bank_account.financial_connections.permissions as string[];
+    };
+
+    // Turned on, once the Stripe registration is approved: the advance can read
+    // a balance. Left alone, the link collects bank details and nothing else.
+    expect(await setupSession(true)).toEqual(["payment_method", "balances"]);
+    expect(await setupSession(false)).toEqual(["payment_method"]);
   });
 
   it("opens a card setup session with no currency and no bank options", async () => {
@@ -105,7 +129,7 @@ describe("StripeDropshipFundingProvider", () => {
     expect(params).not.toHaveProperty("currency");
     expect(params.payment_method_options).toEqual({
       us_bank_account: {
-        financial_connections: { permissions: ["payment_method", "balances"] },
+        financial_connections: { permissions: ["payment_method"] },
       },
     });
   });
@@ -989,7 +1013,7 @@ describe("StripeDropshipFundingProvider bank balances (funding design phase 3)",
 
     const [bank, card] = stripe.checkout.sessions.create.mock.calls.map((call) => call[0]);
     expect(bank.payment_method_options).toEqual({
-      us_bank_account: { financial_connections: { permissions: ["payment_method", "balances"] } },
+      us_bank_account: { financial_connections: { permissions: ["payment_method"] } },
     });
     expect(card.payment_method_options).toBeUndefined();
   });
