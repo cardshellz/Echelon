@@ -92,9 +92,11 @@ export async function readFulfillmentRequestAllocation(
   }));
   const physicalRows = rows<{
     shipment_request_item_id: string; fulfillment_plan_line_id: string; legacy_wms_shipment_item_id: number | null;
+    label_replacement_source_item_id: number | null;
     provider: string; provider_physical_shipment_id: string; quantity_shipped: number; effective_quantity: number;
   }>(await tx.execute(sql`
-    SELECT item.shipment_request_item_id, item.fulfillment_plan_line_id, COALESCE(item.legacy_wms_shipment_item_id, item.label_replacement_source_item_id) AS legacy_wms_shipment_item_id,
+    SELECT item.shipment_request_item_id, item.fulfillment_plan_line_id, item.legacy_wms_shipment_item_id,
+      item.label_replacement_source_item_id,
       package.provider, package.provider_physical_shipment_id, item.quantity_shipped,
       item.quantity_shipped + COALESCE(adjustment.quantity_delta, 0) AS effective_quantity
     FROM wms.physical_shipment_items AS item
@@ -109,6 +111,7 @@ export async function readFulfillmentRequestAllocation(
   const physical: FulfillmentRequestPhysicalSnapshot[] = physicalRows.map(row => ({
     shipmentRequestItemId: Number(row.shipment_request_item_id), fulfillmentPlanLineId: Number(row.fulfillment_plan_line_id),
     legacyWmsShipmentItemId: row.legacy_wms_shipment_item_id == null ? null : Number(row.legacy_wms_shipment_item_id),
+    labelReplacementSourceItemId: row.label_replacement_source_item_id == null ? null : Number(row.label_replacement_source_item_id),
     shippingProvider: row.provider, providerPhysicalShipmentId: row.provider_physical_shipment_id,
     quantityShipped: Number(row.quantity_shipped), effectiveQuantityShipped: Number(row.effective_quantity),
   }));
