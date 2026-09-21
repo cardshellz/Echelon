@@ -74,6 +74,9 @@
   "channels.channel_product_allocation": [
     "modules/channels"
   ],
+  "channels.channel_product_identities": [
+    "modules/channels"
+  ],
   "channels.channel_product_lines": [
     "modules/channels"
   ],

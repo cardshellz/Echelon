@@ -9,6 +9,8 @@ import { inventoryTrackingPolicyBaseFixture } from "../fixtures/inventory-tracki
 import { PickingUseCases } from "../../../orders/picking.use-cases";
 import { createShopifyProductMappingService } from "../../shopify-product-mapping.service";
 import { createReservationService } from "../../../channels/reservation.service";
+import { createCatalogBackfillService, type BackfillResult } from "../../../channels/catalog-backfill.service";
+import { removeChannelProductIdentities, upsertChannelProductIdentity } from "../../../channels/channel-product-identity.repository";
 import { PostgresInventoryAvailabilityClaimRepository } from "../../../inventory-planning/infrastructure/inventory-availability-claim.repository";
 import { productMethods } from "../../catalog.storage";
 import { updateProductInventoryTracking } from "../../inventory-tracking-policy.repository";
@@ -52,9 +54,104 @@ describeDatabase.sequential("product inventory policy migration and transactions
   afterAll(async () => { await database?.close(); });
 
   const createVariant = (override?: boolean | null) => orm.transaction(tx => productMethods.createProductVariant({
-    productId: 1, name: "Variant", sku: `V-${String(override)}`,
+    productId: 1, name: "Variant", sku: `V-${String(override).toUpperCase()}`,
     ...(override === undefined ? {} : { inventoryTrackingOverride: override }),
   }, tx));
+
+  const importVariant = async (sku: string, requiresShipping: boolean) => {
+    const result: BackfillResult = {
+      success: true, dryRun: false,
+      products: { total: 1, created: 0, updated: 0, skipped: 0 },
+      variants: { total: 1, created: 0, updated: 0, skipped: 0 },
+      feeds: { created: 0, updated: 0 }, listings: { created: 0, updated: 0 },
+      pricing: { created: 0, updated: 0 }, assets: { created: 0 },
+      inventory: { imported: 0, skipped: 0, noShopifyData: 0 },
+      errors: [], mappingConflicts: [], mappings: [], reconciliation: [],
+    };
+    const imported = await orm.transaction(tx => {
+      const importer = createCatalogBackfillService(tx);
+      // Exercise the real per-variant import and Catalog writer without fetching
+      // a remote catalog. Keep this private seam out of the production API.
+      return importer["processVariant"](1, "1000", {
+        id: 1001, title: "Default Title", sku, price: "1.00", compare_at_price: null,
+        barcode: null, weight: null, weight_unit: null, inventory_item_id: 1002,
+        requires_shipping: requiresShipping, position: 1,
+        option1: null, option2: null, option3: null,
+      }, 36, false, result, false, 1, 1);
+    });
+    expect(result.errors).toEqual([]);
+    expect(imported).not.toBeNull();
+    return imported!;
+  };
+
+  it.each([true, false].flatMap(productDefault => [true, false].map(requiresShipping => ({
+    productDefault, requiresShipping,
+  }))))("imports a new variant with product default $productDefault and shipping $requiresShipping, preserving inheritance on replay", async ({ productDefault, requiresShipping }) => {
+    await orm.transaction(tx => updateProductInventoryTracking(tx, 1, productDefault, "user:test", now));
+    const imported = await importVariant("IMPORTED", requiresShipping);
+    expect(await importVariant("IMPORTED", requiresShipping)).toEqual(imported);
+    expect(await orm.select().from(schema.productVariants)).toMatchObject([{
+      id: imported.echelonVariantId, inventoryTrackingOverride: null,
+      trackInventory: requiresShipping && productDefault, requiresShipping,
+    }]);
+    expect(await orm.select().from(schema.channelFeeds)).toMatchObject([{
+      productVariantId: imported.echelonVariantId, isActive: requiresShipping && productDefault ? 1 : 0,
+    }]);
+    expect(await orm.select().from(schema.channelListings)).toHaveLength(1);
+  });
+
+  it.each([true, false].flatMap(productDefault => [null, true, false].map(override => ({
+    productDefault, override,
+  }))))("preserves override $override under product default $productDefault through physical, digital and physical imports", async ({ productDefault, override }) => {
+    await orm.transaction(tx => updateProductInventoryTracking(tx, 1, productDefault, "user:test", now));
+    const variant = await createVariant(override);
+    for (const requiresShipping of [true, false, true]) {
+      const imported = await importVariant(variant.sku!, requiresShipping);
+      expect(imported.echelonVariantId).toBe(variant.id);
+      const expectedTracking = requiresShipping && (override ?? productDefault);
+      expect(await orm.select().from(schema.productVariants)).toMatchObject([{
+        id: variant.id, inventoryTrackingOverride: override, trackInventory: expectedTracking, requiresShipping,
+      }]);
+      expect(await orm.select().from(schema.channelFeeds)).toMatchObject([{
+        productVariantId: variant.id, isActive: expectedTracking ? 1 : 0,
+      }]);
+      expect(await orm.select().from(schema.channelListings)).toHaveLength(1);
+    }
+  });
+
+  it("keeps binding upserts idempotent and removals scoped to their channel and product inside the caller transaction", async () => {
+    await database.pool.query("INSERT INTO catalog.products(id,name) VALUES(2,'Other product')");
+    const identity = { channelId: 36, productId: 1, externalProductId: "1000" };
+    await orm.transaction(async tx => {
+      await upsertChannelProductIdentity(tx, identity);
+      await upsertChannelProductIdentity(tx, identity);
+      await upsertChannelProductIdentity(tx, { ...identity, channelId: 37 });
+      await upsertChannelProductIdentity(tx, { ...identity, productId: 2, externalProductId: "2000" });
+      await removeChannelProductIdentities(tx, { channelId: 36, productIds: [] });
+    });
+    expect(await orm.select().from(schema.channelProductIdentities)).toHaveLength(3);
+    await expect(orm.transaction(async tx => {
+      await removeChannelProductIdentities(tx, { channelId: 36, productIds: [1] });
+      throw new Error("Abort repair");
+    })).rejects.toThrow("Abort repair");
+    expect(await orm.select().from(schema.channelProductIdentities)).toHaveLength(3);
+    await orm.transaction(tx => removeChannelProductIdentities(tx, { channelId: 36, productIds: [1] }));
+    expect((await orm.select().from(schema.channelProductIdentities))
+      .map(row => [row.channelId, row.productId]).sort()).toEqual([[36, 2], [37, 1]]);
+  });
+
+  it("rejects malformed bindings and competing external owners without changing the established identity", async () => {
+    const identity = { channelId: 36, productId: 1, externalProductId: "1000" };
+    await database.pool.query("INSERT INTO catalog.products(id,name) VALUES(2,'Other product')");
+    await orm.transaction(tx => upsertChannelProductIdentity(tx, identity));
+    await expect(orm.transaction(tx => upsertChannelProductIdentity(tx, { ...identity, productId: 2 })))
+      .rejects.toMatchObject({ code: "23505" });
+    await expect(orm.transaction(tx => upsertChannelProductIdentity(tx, { ...identity, externalProductId: " " })))
+      .rejects.toMatchObject({ name: "ZodError" });
+    await expect(orm.transaction(tx => removeChannelProductIdentities(tx, { channelId: 0, productIds: [1] })))
+      .rejects.toMatchObject({ name: "ZodError" });
+    expect(await orm.select().from(schema.channelProductIdentities)).toMatchObject([identity]);
+  });
 
   it("inherits both defaults while explicit overrides survive product changes and migration replay", async () => {
     const inherited = await createVariant();

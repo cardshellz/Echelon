@@ -46,6 +46,12 @@ describe("writer-ratchet (P2.1)", () => {
     expect(baseline["oms.archon_order_outbox"]).toEqual(["modules/oms"]);
   });
 
+  it("channel product identities have only the Channels owning writer, including operational scripts", () => {
+    expect(current["channels.channel_product_identities"]).toEqual(["modules/channels"]);
+    expect(currentIncludingScripts["channels.channel_product_identities"]).toEqual(["modules/channels"]);
+    expect(baseline["channels.channel_product_identities"]).toEqual(["modules/channels"]);
+  });
+
   it("no table gains a writer that is not in the baseline", () => {
     const added: string[] = [];
     for (const [table, buckets] of Object.entries(current)) {

@@ -23,6 +23,8 @@ In Product Detail, edit **Default inventory tracking**. In each variant editor, 
 
 The schema supports channel-scoped bindings; the product-only setup UI in this change is Shopify-specific. There is no automatic product-name match, unscoped provider-ID match, or product-SKU fallback that could guess the owner. A tracked physical product still requires its normal stock variant before inventory movement can occur.
 
+Channels is the sole writer of `channels.channel_product_identities` through `channel-product-identity.repository.ts`. Catalog calls that owner inside the existing verified mapping or reconciliation transaction, preserving atomic metadata, binding, and audit changes. The writer ratchet enforces this ownership for runtime and operational scripts.
+
 New OMS lines record catalog product identity and effective inventory tracking; WMS materialization copies these facts and the canonical product/variant SKU. Source replay preserves established snapshots, including legacy NULL snapshots. A later product setting change affects new lines rather than rewriting old orders. The migration does not classify existing orders or repair historical pick records.
 
 ## Picking, reservation, and fulfillment
@@ -45,6 +47,7 @@ Apply the migration before deploying code that selects its new columns. Configur
 
 - Policy matrix, digital eligibility, malformed/ambiguous writes, and shipping-policy disagreement have unit coverage.
 - Disposable PostgreSQL exercises migration/replay, both override directions, returning to inheritance, rollback, concurrent receipt versus disabling tracking, verified product-only mapping, channel isolation, reused SKU rejection, OMS replay, WMS materialization, reservation/claim exclusion, and pick/replay/unpick under both inventory authorities.
+- Shopify import regressions exercise both product defaults, all three variant override choices, physical/digital transitions, feed eligibility, and idempotent import replay through the real Catalog writer. Binding persistence tests cover channel isolation, invalid input, conflicting ownership, and transaction rollback.
 - The PostgreSQL CI manifest grows from 88 to 89 files. Reduced schema fixtures include the new columns so Drizzle reads exercise the same field contract.
 - Desktop/mobile browser tests cover rejected, tracked-success, and untracked-success responses for manual, scan, and pick-all handlers with one and four unfinished lines.
 

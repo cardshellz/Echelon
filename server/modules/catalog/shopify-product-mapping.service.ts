@@ -22,6 +22,7 @@ import {
   type VerifiedShopifyVariantIdentity,
 } from "./shopify-product-mapping.domain";
 import { enqueueShippingGroupMetafieldWrite } from "./shipping-group-sync";
+import { upsertChannelProductIdentity } from "../channels/channel-product-identity.repository";
 
 const DEFAULT_SHOPIFY_API_VERSION = "2024-01";
 const SHOPIFY_REQUEST_TIMEOUT_MS = 10_000;
@@ -739,10 +740,9 @@ export function createShopifyProductMappingService(dependencies: {
         );
       }
 
-      await tx.insert(channelProductIdentities).values({
+      await upsertChannelProductIdentity(tx, {
         channelId: before.channel.id, productId: input.productId, externalProductId: targetProductId,
-      }).onConflictDoUpdate({ target: [channelProductIdentities.channelId, channelProductIdentities.productId],
-        set: { externalProductId: targetProductId } });
+      });
 
       let updatedFeedCount = 0;
       let createdFeedCount = 0;
