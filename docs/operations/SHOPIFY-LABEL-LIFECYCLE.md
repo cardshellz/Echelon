@@ -20,12 +20,39 @@ orders #63261 / #63300. Echelon still stored the original as active, and both
 Shopify orders retained tracking `877510065050` instead of `877520887962`.
 The five other voids returned by the same recent ShipStation query, for #63268,
 were already recorded as voided in Echelon. This does **not** establish that all
-voids fail, or why this particular void notification was absent. It establishes
-that webhook-only discovery is insufficient. Both shipment shapes share intake.
+voids fail, or that ShipStation sent a void notification. The documented
+`SHIP_NOTIFY` trigger is outbound-label creation, not a guaranteed void event.
+Both shipment shapes share intake; receiving a replacement must also refresh
+known prior labels rather than depend on a separate notification for the void.
+
+### Immediate replacement-label check
+
+`processShipNotify` now refreshes related active labels before observing and
+allocating the incoming outbound label. The shipping-owned read port reuses the
+indexed source/request/engine relationship discovery and exact provider order
+identity. It excludes the incoming label itself, returns and already-recorded
+voids. No SKU, order-number, default-store or quantity-based void inference is used.
+
+The provider read uses each prior label's actual order ID (which can differ from
+the new label's order after combining/recreating shipments). Standalone labels
+are looked up by tracking but still require an exact provider label ID match.
+Only confirmed provider `voidDate` evidence enters the existing void observer
+before the incoming label's commercial processing. An active split sibling is
+left untouched. Provider read/identity/observation failures fail the webhook and
+use the existing durable webhook retry path; they cannot authorize a guessed void.
+
+The refresh is bounded to 50 candidate labels, five pages per provider order,
+and ten cached order/tracking scopes per webhook. No database connection is held
+across HTTP calls. First labels with no known related active label incur no
+additional provider read. This runs on notification intake, not a WMS page load.
+
+### Periodic safety net
 
 The follow-up adds `shipstation-label-reconciliation.*` in OMS:
 
 - A separate scheduler starts after 30 seconds and checks every five minutes.
+  This remains necessary for a void with no replacement or a missed creation event;
+  replacements no longer wait for the next scheduled scan to discover known voids.
   It respects `DISABLE_SCHEDULERS` and `SHIPSTATION_LABEL_RECONCILIATION_DISABLED`.
 - It queries the [ShipStation V1 shipment list](https://www.shipstation.com/docs/api/shipments/list/)
   by **void date**, not label creation date, including exact item contents.
@@ -63,14 +90,15 @@ scheduler. Turning off its feature flag pauses discovery, not correction work
 already enqueued. Existing carrier-possession checks and notification policy
 remain in force; this is not a promise of silent customer notifications.
 
-New regressions cover missed ordinary/combined voids, no replacement, reversed
-label order, complete pagination, partial failure, restart, concurrency and stale
-leases. Real PostgreSQL tests exercise discovery through provider observation,
+New regressions cover missed ordinary/combined voids, a replacement-only webhook
+whose new label has never been recorded locally, no replacement, valid splits,
+cross-provider-order source relationships, complete pagination, partial failure,
+restart, concurrency and stale leases. Real PostgreSQL tests exercise discovery through provider observation,
 Shopify correction intake and replacement fulfillment, and verify unchanged
 inventory. External provider mutations remain mocked; actual correction of
 #63261 / #63300 still requires production acceptance after deployment.
 
-Follow-up validation: 2,049 unit tests across 158 files and all 119 tests in
+Follow-up validation: 2,079 unit tests across 160 files and all 122 tests in
 the package-allocation PostgreSQL suite passed. Migration-prefix and writer
 ownership guards passed, and `0693` was checked against freshly fetched main.
 Application/server-test typechecks report only the shared dependency tree's

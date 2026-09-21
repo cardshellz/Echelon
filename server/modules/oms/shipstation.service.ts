@@ -15,6 +15,8 @@ import { omsOrderEvents, outboundShipments, wmsOrders, outboundShipmentItems, wm
 import { buildTrackingUrl } from "./tracking-url.util";
 import { createShipStationLabelReconciliationClient } from "./shipstation-label-reconciliation.client";
 import type { ShipStationLabelSnapshot } from "./shipstation-label-reconciliation.service";
+import { createShipStationReplacementLabelRefresh } from "./shipstation-replacement-label-refresh.service";
+import type { ShipStationRelatedLabelReader } from "../shipping/shipstation-related-labels.reader";
 import {
   dispatchShipmentEvent,
   recomputeOrderStatusFromShipments,
@@ -1006,6 +1008,7 @@ export function createShipStationService(
   inventoryCore?: ShipStationInventoryRecorder,
   dependencies: {
     providerLabelObserver?: ShippingProviderLabelObserver;
+    relatedLabelReader?: ShipStationRelatedLabelReader;
     fulfillmentAuthority?: ChannelFulfillmentAuthorityService;
     labelCommercialFulfillment?: Pick<
       PackageAllocationLabelCommercialFulfillmentService,
@@ -4335,8 +4338,9 @@ export function createShipStationService(
   }
 
   async function processShipNotify(resourceUrl: string): Promise<number> {
-    // SHIP_NOTIFY proves only that ShipStation created, changed, or voided a
-    // label. It does not prove carrier possession. Persist every label as
+    // SHIP_NOTIFY announces label creation, not a guaranteed void notification.
+    // Its fetched snapshots may include voids, but prove no carrier possession.
+    // Persist every label as
     // provider evidence; an explicit outbound observation records only the
     // package-level business-shipped fact. Exact outbound contents may also
     // create audited commercial-only channel commands; carrier possession and
@@ -4347,18 +4351,29 @@ export function createShipStationService(
     );
 
     const shipments = data.shipments || [];
-    return processProviderLabelSnapshots(shipments);
+    if (dependencies.labelCommercialFulfillment && !dependencies.relatedLabelReader) {
+      throw Object.assign(new Error("Related-label refresh is not initialized"),
+        { code: "SHIPSTATION_LABEL_REFRESH_UNAVAILABLE" });
+    }
+    const refresh = dependencies.relatedLabelReader ? createShipStationReplacementLabelRefresh({
+      reader: dependencies.relatedLabelReader,
+      source: createShipStationLabelReconciliationClient(apiRequest, isConfigured),
+      observeVoids: processProviderLabelSnapshots,
+    }) : null;
+    return processProviderLabelSnapshots(shipments, refresh?.beforeActiveLabel);
   }
 
   /** Shared webhook/poll intake. This records provider evidence and commercial
    * commands only; it never invokes carrier dispatch or inventory movement. */
-  async function processProviderLabelSnapshots(shipments: ShipStationLabelSnapshot[]): Promise<number> {
+  async function processProviderLabelSnapshots(shipments: ShipStationLabelSnapshot[],
+    beforeActiveLabel?: (label: ShipStationLabelSnapshot) => Promise<void>): Promise<number> {
     let observed = 0;
     const failures: Array<{ shipmentId: number | null; message: string }> = [];
 
     for (const shipment of shipments) {
       try {
         const detailedShipment = await hydrateReturnLabelDirection(shipment);
+        await beforeActiveLabel?.(detailedShipment);
         const labelObservation = await observeProviderLabel(detailedShipment);
         if (dependencies.labelCommercialFulfillment) {
           await dependencies.labelCommercialFulfillment.process(

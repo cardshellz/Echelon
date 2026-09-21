@@ -89,6 +89,7 @@ import { withAdvisoryLock } from "../infrastructure/scheduler-lock";
 import { envFlagEnabled } from "../infrastructure/scheduler-config";
 import type { Pool } from "pg";
 import { createShipStationService } from "../modules/oms/shipstation.service";
+import { createShipStationRelatedLabelReader } from "../modules/shipping/shipstation-related-labels.reader";
 import { createShipStationLabelReconciliationService } from "../modules/oms/shipstation-label-reconciliation.service";
 import { createShipStationLabelReconciliationRepository } from "../modules/oms/shipstation-label-reconciliation.repository";
 import { createShipStationEngine } from "../modules/shipping";
@@ -606,6 +607,7 @@ export function createServices(
       shipmentInventory.recordReplacementShipmentFromAvailableInventory(input),
   }, {
     providerLabelObserver: carrierTracking,
+    relatedLabelReader: createShipStationRelatedLabelReader(databasePool),
     fulfillmentAuthority: channelFulfillmentAuthority,
     labelCommercialFulfillment,
   });

@@ -68,4 +68,13 @@ describe("ShipStation void discovery HTTP boundary", () => {
     expect(url.searchParams.get("orderId")).toBe("790960007");
     expect(url.searchParams.has("orderStatus")).toBe(false); expect(url.searchParams.has("orderNumber")).toBe(false);
   });
+  it("uses the supported tracking filter for a standalone prior label", async () => {
+    const f = fixture(); await f.client.listTrackingLabels(label.trackingNumber, 1);
+    const args = (f.request.mock.calls as unknown as unknown[][])[0];
+    const url = new URL(String(args[1]), "https://ssapi.shipstation.com");
+    expect(url.searchParams.get("trackingNumber")).toBe(label.trackingNumber);
+    expect(url.searchParams.has("shipmentId")).toBe(false);
+    expect(url.searchParams.get("pageSize")).toBe("100");
+    expect(args[3]).toEqual({ retries: 0, timeoutMs: 10000 });
+  });
 });

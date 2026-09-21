@@ -185,6 +185,7 @@ function createTestShipStationService(mock: ReturnType<typeof makeDb>, inventory
     fulfillmentAuthority: mock.fulfillmentAuthority as any,
     providerLabelObserver: mock.providerLabelObserver as any,
     labelCommercialFulfillment: mock.labelCommercialFulfillment as any,
+    relatedLabelReader: { findRelatedActiveLabels: async () => [] },
   });
 }
 

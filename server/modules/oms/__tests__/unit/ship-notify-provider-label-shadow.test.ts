@@ -15,7 +15,7 @@ describe("SHIP_NOTIFY provider-label authority boundary", () => {
     const process = source.indexOf("processShipmentNotification(", loopStart);
 
     expect(processShipNotify).toBeGreaterThan(0);
-    expect(source.slice(processShipNotify, loopStart)).toContain("return processProviderLabelSnapshots(shipments)");
+    expect(source.slice(processShipNotify, loopStart)).toContain("return processProviderLabelSnapshots(shipments, refresh?.beforeActiveLabel)");
     expect(loopStart).toBeGreaterThan(processShipNotify);
     expect(observe).toBeGreaterThan(loopStart);
     expect(functionEnd).toBeGreaterThan(observe);

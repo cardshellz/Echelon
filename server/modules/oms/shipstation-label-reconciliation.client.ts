@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { SHIPSTATION_V1_TIME_ZONE, shipStationV1Instant } from "@shared/utils/shipstation-date";
 import type { ShipStationApiRequester } from "./shipstation-api-request";
+import type { ShipStationLabelRefreshSource } from "./shipstation-replacement-label-refresh.service";
 import { LabelReconciliationError, ORDER_LABEL_PAGE_SIZE, VOID_PAGE_SIZE,
   type LabelScanSource, type ShipStationLabelPage } from "./shipstation-label-reconciliation.service";
 
@@ -26,7 +27,7 @@ export function shipStationQueryDate(date: Date): string {
   return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}`;
 }
 
-export function createShipStationLabelReconciliationClient(request: ShipStationApiRequester, isConfigured: () => boolean): LabelScanSource {
+export function createShipStationLabelReconciliationClient(request: ShipStationApiRequester, isConfigured: () => boolean): LabelScanSource & ShipStationLabelRefreshSource {
   async function read(params: URLSearchParams, expectedPage: number, pageSize: number, orderId?: number): Promise<ShipStationLabelPage> {
     params.set("includeShipmentItems", "true");
     params.set("page", String(expectedPage)); params.set("pageSize", String(pageSize));
@@ -67,6 +68,10 @@ export function createShipStationLabelReconciliationClient(request: ShipStationA
     async listOrderLabels(orderId, page) {
       positiveId.parse(orderId); positiveId.parse(page);
       return read(new URLSearchParams({ orderId: String(orderId) }), page, ORDER_LABEL_PAGE_SIZE, orderId);
+    },
+    async listTrackingLabels(trackingNumber, page) {
+      z.string().trim().min(1).max(200).parse(trackingNumber); positiveId.parse(page);
+      return read(new URLSearchParams({ trackingNumber }), page, ORDER_LABEL_PAGE_SIZE);
     },
   };
 }
