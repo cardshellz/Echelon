@@ -13,6 +13,8 @@
 import { eq, and, sql } from "drizzle-orm";
 import { omsOrderEvents, outboundShipments, wmsOrders, outboundShipmentItems, wmsOrderItems } from "@shared/schema";
 import { buildTrackingUrl } from "./tracking-url.util";
+import { createShipStationLabelReconciliationClient } from "./shipstation-label-reconciliation.client";
+import type { ShipStationLabelSnapshot } from "./shipstation-label-reconciliation.service";
 import {
   dispatchShipmentEvent,
   recomputeOrderStatusFromShipments,
@@ -854,6 +856,7 @@ export interface ShipStationShipment {
   createDate?: string | null;
   shipDate: string;
   voidDate: string | null;
+  voided?: boolean;
   shipmentCost: number;
   isReturnLabel?: boolean;
   // Populated only when caller passes includeShipmentItems=true on the
@@ -4302,8 +4305,8 @@ export function createShipStationService(
   }
 
   async function hydrateReturnLabelDirection(
-    shipment: ShipStationShipment,
-  ): Promise<ShipStationShipment> {
+    shipment: ShipStationLabelSnapshot,
+  ): Promise<ShipStationLabelSnapshot> {
     if (typeof shipment.isReturnLabel === "boolean") return shipment;
 
     const shipmentId = Number(shipment.shipmentId);
@@ -4319,7 +4322,7 @@ export function createShipStationService(
   }
 
   async function observeProviderLabel(
-    shipment: ShipStationShipment,
+    shipment: ShipStationLabelSnapshot,
   ): Promise<StoredShippingProviderLabelObservation> {
     return requireProviderLabelObserver().observeShipStationLabel(shipment);
   }
@@ -4344,6 +4347,12 @@ export function createShipStationService(
     );
 
     const shipments = data.shipments || [];
+    return processProviderLabelSnapshots(shipments);
+  }
+
+  /** Shared webhook/poll intake. This records provider evidence and commercial
+   * commands only; it never invokes carrier dispatch or inventory movement. */
+  async function processProviderLabelSnapshots(shipments: ShipStationLabelSnapshot[]): Promise<number> {
     let observed = 0;
     const failures: Array<{ shipmentId: number | null; message: string }> = [];
 
@@ -4359,7 +4368,7 @@ export function createShipStationService(
         }
         if (detailedShipment.isReturnLabel === true) {
           await resolveShipStationUnmappedPhysicalExceptionForReturnLabel(db, {
-            shipment: detailedShipment,
+            shipment: { ...detailedShipment, shipmentItems: undefined },
             resolvedBy: "system:shipstation_notify",
             notes: "Automatically classified from ShipStation return-label direction.",
           });
@@ -5926,6 +5935,8 @@ export function createShipStationService(
     getOrderByNumber,
     processManualShipmentNotification,
     processShipNotify,
+    processProviderLabelSnapshots,
+    labelReconciliationSource: createShipStationLabelReconciliationClient(apiRequest, isConfigured),
     observeProviderLabels,
     confirmDispatch,
     registerWebhook,

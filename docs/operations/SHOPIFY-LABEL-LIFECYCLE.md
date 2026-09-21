@@ -2,7 +2,7 @@
 
 ## Scope and status
 
-This change closes the canonical Shopify void/relabel gap. A voided label cannot
+The channel correction handles a void after the shipping owner records it. A voided label cannot
 send a new fulfillment. If its fulfillment already reached Shopify, the worker
 cancels only the matching package, verifies the result, and then lets the exact
 replacement use the existing label-time fulfillment path.
@@ -11,6 +11,72 @@ Implementation and local tests are complete. Deployment and a real Shopify
 void/relabel acceptance check are not proven by these tests. No production data,
 inventory quantities, emails, or historical backfills were changed during this
 implementation. Unrelated catalog work was preserved in a separate checkout.
+
+## Void discovery follow-up (2026-09-21)
+
+Production readback after PR #1516 demonstrated a separate intake gap: ShipStation
+shipment `460595426` was voided and replaced by `460686839` for the combined
+orders #63261 / #63300. Echelon still stored the original as active, and both
+Shopify orders retained tracking `877510065050` instead of `877520887962`.
+The five other voids returned by the same recent ShipStation query, for #63268,
+were already recorded as voided in Echelon. This does **not** establish that all
+voids fail, or why this particular void notification was absent. It establishes
+that webhook-only discovery is insufficient. Both shipment shapes share intake.
+
+The follow-up adds `shipstation-label-reconciliation.*` in OMS:
+
+- A separate scheduler starts after 30 seconds and checks every five minutes.
+  It respects `DISABLE_SCHEDULERS` and `SHIPSTATION_LABEL_RECONCILIATION_DISABLED`.
+- It queries the [ShipStation V1 shipment list](https://www.shipstation.com/docs/api/shipments/list/)
+  by **void date**, not label creation date, including exact item contents.
+  V1 query boundaries use Pacific local time, matching the shared provider date contract.
+- One run processes at most ten voids. Related orders are read sequentially, by
+  exact provider order ID, with at most five pages of 100 labels each. HTTP reads
+  have a ten-second timeout and no inline rate-limit sleeps. No connection is
+  held across provider HTTP calls. This work does not run during a WMS page load.
+- A fenced database lease and persisted page/window survive restarts. A failed
+  read, observation, outbox insertion or checkpoint commit retains that page for
+  retry. Concurrent workers cannot advance each other's progress.
+- Voids are observed first; related labels then enter the **same** commercial
+  fulfillment processing used by webhooks. This discovers void-only cases and
+  reconsiders replacements that arrived before their predecessor void.
+- Bootstrap checks the preceding 24 hours, with a two-minute provider settle
+  delay. Completed scans overlap by 24 hours; an outage backlog advances in
+  one-day windows. This is not an unbounded historical backfill. Very late
+  provider visibility beyond the overlap requires a separately approved replay.
+- Invalid identities, ambiguous dates, incomplete pages, changed contents and
+  carrier-possession conflicts are not silently accepted. Failed/stalled
+  discovery is visible in the **existing Operations Tower**, including its
+  checkpoint error code. A persistently malformed page requires investigation;
+  it is not skipped while reporting the scan successful.
+
+Migration `0693_shipstation_label_reconciliation.sql` adds only the durable
+checkpoint; OMS is its sole writer. Existing shipping evidence, channel outboxes,
+correction receipts and inventory ownership remain unchanged. The same configured
+V1 account is used as current webhook intake; supporting additional ShipStation
+accounts requires account-scoped credentials and checkpoints, not a default-store
+fallback. Shopify/eBay account selection remains with their existing channel owners.
+
+This follow-up is implemented locally, **not deployed or applied to those orders**.
+Provider GET verification was read-only. Deploy the migration before starting the
+scheduler. Turning off its feature flag pauses discovery, not correction work
+already enqueued. Existing carrier-possession checks and notification policy
+remain in force; this is not a promise of silent customer notifications.
+
+New regressions cover missed ordinary/combined voids, no replacement, reversed
+label order, complete pagination, partial failure, restart, concurrency and stale
+leases. Real PostgreSQL tests exercise discovery through provider observation,
+Shopify correction intake and replacement fulfillment, and verify unchanged
+inventory. External provider mutations remain mocked; actual correction of
+#63261 / #63300 still requires production acceptance after deployment.
+
+Follow-up validation: 2,049 unit tests across 158 files and all 119 tests in
+the package-allocation PostgreSQL suite passed. Migration-prefix and writer
+ownership guards passed, and `0693` was checked against freshly fetched main.
+Application/server-test typechecks report only the shared dependency tree's
+missing `@noble/hashes`, `@noble/curves`, and `@scure/bip32` modules (and the
+resulting unknown-byte errors) in untouched Dropship files. Complete CI with
+the lockfile-installed dependencies remains required before merge.
 
 ## Concrete execution path
 
