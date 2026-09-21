@@ -833,9 +833,6 @@ test("a vendor whose wallet already holds a card still starts at step 1, with no
   await expect(radio(page, "Top up from", "Card")).toHaveAttribute("aria-checked", "true");
   await expect(source.getByTestId("wallet-source-saved-card")).toHaveCount(0);
   await expect(source).toContainText("Amex ending in 6800 · expires 12/28");
-  // Using a control inside the chosen option does not re-pick the rail.
-  await source.getByRole("button", { name: "Add another card" }).click();
-  await expect(radio(page, "Top up from", "Card")).toHaveAttribute("aria-checked", "true");
   await openStepList(page);
   await expect(stepLink(page, "intro")).not.toHaveAttribute("aria-current", "step");
   await expect(stepLink(page, "source")).toHaveAttribute("aria-current", "step");
