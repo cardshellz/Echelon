@@ -31,7 +31,7 @@ describeDatabase.sequential("product inventory policy migration and transactions
   const now = new Date("2026-09-21T12:00:00Z");
   beforeAll(async () => {
     database = await createInventoryCutoverTestDatabase(databaseUrl, disposable, inventoryTrackingPolicyBaseFixture);
-    migration = await readFile(resolve("migrations/0693_product_inventory_tracking_policy.sql"), "utf8");
+    migration = await readFile(resolve("migrations/0694_product_inventory_tracking_policy.sql"), "utf8");
     await database.pool.query(`INSERT INTO catalog.products(id,name) VALUES(1,'Existing');
       INSERT INTO catalog.product_variants(id,product_id,name,track_inventory)
       VALUES(1,1,'Tracked',true),(2,1,'Untracked',false),(3,1,'Legacy null',null);`);
