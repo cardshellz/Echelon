@@ -106,6 +106,7 @@ export async function runMigrations(): Promise<void> {
     "migrations/0674_label_time_package_portions.sql",
     "migrations/0679_ebay_label_replacement_authority.sql",
     "migrations/0681_outbound_shipment_commercial_requested_quantity.sql",
+    "migrations/0692_shopify_label_lifecycle.sql",
   ].map((relativePath) => readFileSync(resolve(process.cwd(), relativePath), "utf8"));
   const client = await getTestPool().connect();
   let discardError: Error | undefined;

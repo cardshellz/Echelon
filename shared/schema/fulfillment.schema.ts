@@ -1416,6 +1416,45 @@ export const carrierDispatchCommandRequeues = wmsSchema.table("carrier_dispatch_
     .on(table.carrierDispatchCommandId, table.createdAt, table.id),
 ]);
 
+/** Corrections have their own durable work/audit; original push commands and
+ * physical package identity remain immutable. PostgreSQL guards live in 0692. */
+export const shopifyLabelVoidWork = omsSchema.table("shopify_label_void_work", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  shippingProviderLabelId: bigint("shipping_provider_label_id", { mode: "number" }).notNull().references(() => shippingProviderLabels.id, { onDelete: "restrict" }),
+  physicalShipmentId: bigint("physical_shipment_id", { mode: "number" }).notNull().references(() => physicalShipments.id, { onDelete: "restrict" }),
+  omsOrderId: bigint("oms_order_id", { mode: "number" }).notNull().references(() => omsOrders.id, { onDelete: "restrict" }),
+  state: varchar("state", { length: 20 }).notNull().default("pending"),
+  attemptCount: integer("attempt_count").notNull().default(0),
+  nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }),
+  lastErrorCode: varchar("last_error_code", { length: 100 }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+}, table => [
+  uniqueIndex("shopify_label_void_package_order").on(table.physicalShipmentId, table.omsOrderId),
+  index("shopify_label_void_due").on(table.nextAttemptAt, table.id).where(sql`${table.state} = 'pending'`),
+  check("shopify_label_void_state", sql`${table.state} IN ('pending', 'complete', 'review')`),
+  check("shopify_label_void_attempt_count", sql`${table.attemptCount} BETWEEN 0 AND 10`),
+  check("shopify_label_void_due_state", sql`(${table.state} = 'pending') = (${table.nextAttemptAt} IS NOT NULL)`),
+  check("shopify_label_void_completed_state", sql`(${table.state} = 'complete') = (${table.completedAt} IS NOT NULL)`),
+]);
+
+export const shopifyLabelVoidAttempts = omsSchema.table("shopify_label_void_attempts", {
+  id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
+  workId: bigint("work_id", { mode: "number" }).notNull().references(() => shopifyLabelVoidWork.id, { onDelete: "restrict" }),
+  attemptNumber: integer("attempt_number").notNull(),
+  outcome: varchar("outcome", { length: 20 }).notNull(),
+  errorCode: varchar("error_code", { length: 100 }),
+  evidence: jsonb("evidence").notNull(),
+  actor: varchar("actor", { length: 100 }).notNull(),
+  completedAt: timestamp("completed_at", { withTimezone: true }).notNull(),
+}, table => [
+  uniqueIndex("shopify_label_void_attempt_number").on(table.workId, table.attemptNumber),
+  check("shopify_label_void_attempt_range", sql`${table.attemptNumber} BETWEEN 1 AND 10`),
+  check("shopify_label_void_attempt_outcome", sql`${table.outcome} IN ('pending', 'complete', 'review')`),
+  check("shopify_label_void_attempt_evidence", sql`jsonb_typeof(${table.evidence}) = 'object'`),
+]);
+
 export const channelFulfillmentPushes = omsSchema.table("channel_fulfillment_pushes", {
   id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
   omsOrderId: bigint("oms_order_id", { mode: "number" }).notNull().references(() => omsOrders.id, { onDelete: "restrict" }),

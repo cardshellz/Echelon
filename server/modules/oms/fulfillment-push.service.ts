@@ -26,6 +26,8 @@ import type { EbayApiClient } from "../channels/adapters/ebay/ebay-api.client";
 import type { ChannelFulfillmentProviderClients, ShopifyFulfillmentAccount } from "../channels/channel-fulfillment-provider-clients.service";
 import { ChannelFulfillmentProviderError } from "../channels/channel-fulfillment-provider.error";
 import { resolveChannelFulfillmentNotifyCustomer } from "./channel-fulfillment-notification.policy";
+import { shopifyOrderFulfillmentLockId } from "./shopify-fulfillment-lock";
+import { assertShopifyCommandLabelActive } from "./shopify-label-command-guard.repository";
 import type { EbayShippingFulfillmentRequest } from "../channels/adapters/ebay/ebay-types";
 import type {
   ShopifyAdminGraphQLClient,
@@ -89,7 +91,6 @@ export const SHOPIFY_PUSH_INCOMPLETE = "shopify_push_incomplete";
 export const SHOPIFY_PUSH_PACKAGE_STATE_CONFLICT =
   "shopify_push_package_state_conflict";
 
-const SHOPIFY_FULFILLMENT_OMS_LOCK_BASE = 1_600_000_000_000;
 const SHOPIFY_FULFILLMENT_GROUP_LOCK_BASE = 1_700_000_000_000;
 export const SHOPIFY_CANCEL_INVALID_INPUT = "shopify_cancel_invalid_input";
 export const SHOPIFY_CANCEL_USER_ERRORS = "shopify_cancel_user_errors";
@@ -977,6 +978,40 @@ export function createFulfillmentPushService(
     provider: "shopify" | "ebay",
   ): Promise<T[]> {
     const allocationItems = command.items.filter((item) => item.packageAllocationEntryId != null);
+    if (provider === "shopify" && command.trackingReplacement === true) {
+      const result = await db.execute(sql`SELECT item.label_replacement_source_item_id AS source_id,
+        item.quantity_shipped, line.id AS oms_order_line_id, line.external_line_item_id,
+        source.order_item_id, push_item.quantity_pushed
+        FROM oms.channel_fulfillment_pushes push
+        JOIN oms.channel_fulfillment_push_items push_item ON push_item.channel_fulfillment_push_id = push.id
+        JOIN wms.physical_shipment_items item ON item.id = push_item.physical_shipment_item_id
+          AND item.physical_shipment_id = push.physical_shipment_id
+        JOIN wms.ebay_label_replacement_work work ON work.physical_shipment_id = item.physical_shipment_id
+          AND work.state = 'applied'
+        JOIN wms.outbound_shipment_items source ON source.id = item.label_replacement_source_item_id
+          AND source.id = ANY(work.source_item_ids)
+        JOIN wms.order_items order_item ON order_item.id = source.order_item_id
+        JOIN oms.oms_order_lines line ON line.id = order_item.oms_order_line_id
+          AND line.id = push_item.oms_order_line_id AND line.order_id = push.oms_order_id
+        WHERE push.id = ${command.commandId} AND push.physical_shipment_id = ${command.physicalShipmentId}
+          AND push.oms_order_id = ${command.omsOrderId} AND push.channel_provider = 'shopify'
+          AND push.tracking_number = ${command.trackingNumber} AND push.carrier = ${command.carrier}
+          AND item.shipment_item_purpose = 'customer_fulfillment'`);
+      const proof: Array<Record<string, unknown>> = result?.rows ?? [];
+      if (proof.length !== command.items.length || command.items.some(item => {
+        const match = proof.filter(row => Number(row.source_id) === item.legacyWmsShipmentItemId);
+        return match.length !== 1 || Number(match[0].quantity_shipped) !== item.quantity
+          || Number(match[0].quantity_pushed) !== item.quantity || Number(match[0].oms_order_line_id) !== item.omsOrderLineId
+          || match[0].external_line_item_id !== item.channelOrderLineId
+          || !rows.some(row => row.shipment_item_id === item.legacyWmsShipmentItemId
+            && row.order_item_id === Number(match[0].order_item_id));
+      })) throw new ChannelFulfillmentProviderInputError(CHANNEL_FULFILLMENT_LINEAGE_MISMATCH,
+        "Shopify replacement has no exact persisted package grant", { commandId: command.commandId });
+      const projected = rows.map(row => ({ ...row,
+        qty: command.items.find(item => item.legacyWmsShipmentItemId === row.shipment_item_id)?.quantity ?? row.qty }));
+      assertExactChannelCommandLineage(command, projected, isShopifyFulfillmentProvider);
+      return projected;
+    }
 
     // The allocation source is frozen; the compatibility WMS row can shrink
     // when ShipStation splits its units into separate shipment rows. Read the
@@ -1086,10 +1121,9 @@ export function createFulfillmentPushService(
     scopeId: number,
     shipmentId: number,
   ): number {
-    const base = scope === "combined_group"
-      ? SHOPIFY_FULFILLMENT_GROUP_LOCK_BASE
-      : SHOPIFY_FULFILLMENT_OMS_LOCK_BASE;
-    const lockId = base + scopeId;
+    const lockId = scope === "combined_group"
+      ? SHOPIFY_FULFILLMENT_GROUP_LOCK_BASE + scopeId
+      : shopifyOrderFulfillmentLockId(scopeId);
     if (!Number.isSafeInteger(lockId)) {
       throw new ShopifyFulfillmentPushError(
         `pushShopifyFulfillment: ${scope} ${scopeId} exceeds advisory-lock key range`,
@@ -1770,6 +1804,7 @@ export function createFulfillmentPushService(
         anchorShipmentId,
       );
       const execute = async () => {
+        await assertShopifyCommandLabelActive(db, command);
         const order = await loadCanonicalFulfillmentOrder(command, "shopify");
         const account = await requireProviderClients().shopify(order.channelId);
         if (account.channelId !== order.channelId) throw new ChannelFulfillmentProviderError("FULFILLMENT_ACCOUNT_CHANNEL_MISMATCH", "Resolved Shopify account belongs to another channel");
@@ -2570,6 +2605,7 @@ export function createFulfillmentPushService(
     );
 
     // ---- 9. Call fulfillmentCreateV2 -----------------------------------
+    if (command) await assertShopifyCommandLabelActive(db, command);
     const mutation = `
       mutation fulfillmentCreateV2($fulfillment: FulfillmentV2Input!) {
         fulfillmentCreateV2(fulfillment: $fulfillment) {

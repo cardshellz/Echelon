@@ -1043,6 +1043,21 @@ describe("CarrierTrackingService", () => {
     }));
   });
 
+  it("queues outbound void corrections even when the label event is a replay", async () => {
+    const { repository } = repositoryWithCandidates([]);
+    vi.mocked(repository.observeProviderLabel).mockResolvedValue({ shippingProviderLabelId: 10, labelInserted: false, eventInserted: false });
+    const observe = vi.fn().mockRejectedValueOnce(new Error("Intake unavailable")).mockResolvedValue(undefined);
+    const service = new CarrierTrackingService({ repository, clock: { now: () => new Date(now) }, logger: logger(), labelVoidObserver: { observe } });
+    const shipment = { shipmentId: 442000001, orderId: 755000001, trackingNumber: "1Z999AA10123456784",
+      isReturnLabel: false, voidDate: now.toISOString() };
+    await expect(service.observeShipStationLabel(shipment)).rejects.toThrow("Intake unavailable");
+    await service.observeShipStationLabel(shipment);
+    expect(observe.mock.calls).toEqual([[10], [10]]);
+    await service.observeShipStationLabel({ ...shipment, voidDate: null });
+    await service.observeShipStationLabel({ ...shipment, isReturnLabel: true });
+    expect(observe).toHaveBeenCalledTimes(2);
+  });
+
   it("reconciles late label links before retrying unmatched carrier events", async () => {
     const { repository } = repositoryWithCandidates([{
       shippingProviderLabelId: 10,

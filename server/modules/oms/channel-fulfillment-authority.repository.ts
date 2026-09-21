@@ -4103,7 +4103,7 @@ export function createChannelFulfillmentAuthorityRepository(
         input.providerPhysicalShipmentId,
       );
 
-      const contextRows = await loadLegacyPackageRows(tx, input, true);
+      let contextRows = await loadLegacyPackageRows(tx, input, true);
 
       if (!authorizedReplacement) {
         validateLegacyHeaders(contextRows, input);
@@ -4114,13 +4114,31 @@ export function createChannelFulfillmentAuthorityRepository(
             AND package.provider_physical_shipment_id = ${input.providerPhysicalShipmentId}
             AND package.tracking_number = ${input.trackingNumber}`));
         if (replay) {
-          if (contextRows.length !== replay.source_item_ids.length || contextRows.some(row => !replay.source_item_ids.includes(Number(row.legacy_shipment_item_id)))) {
+          const replaySourceIds = new Set(replay.source_item_ids);
+          const replayRows = contextRows.filter(row => replaySourceIds.has(Number(row.legacy_shipment_item_id)));
+          // Shopify replacements transfer an exact package-sized portion, not
+          // the whole legacy shipment header. Carrier replay must preserve that
+          // saved scope when unrelated items share the header. eBay retains its
+          // existing whole-source contract.
+          const shopifyPackageScope = replayRows.length > 0 && replayRows.every(row => row.channel_provider === 'shopify');
+          if (replaySourceIds.size !== replay.source_item_ids.length
+            || replayRows.length !== replaySourceIds.size
+            || (!shopifyPackageScope && contextRows.length !== replaySourceIds.size)) {
             throw new FulfillmentAuthorityError("PACKAGE_IDENTITY_CONFLICT", "Replacement replay differs from its exact source set");
           }
           const engineId = await findOrCreateShippingEngineOrder(tx, input);
           await findOrCreatePhysicalShipment(tx, input, engineId); // Revalidate provider order, carrier and tracking.
           return readLabelReplacementMaterialization(tx, Number(replay.physical_shipment_id));
         }
+      } else if (authorizedReplacement.shopifyPackageScope === true) {
+        contextRows = contextRows.filter(row => authorizedReplacement.sourceItemIds.includes(Number(row.legacy_shipment_item_id)));
+        if (contextRows.length !== authorizedReplacement.sourceItemIds.length
+          || contextRows.some(row => row.channel_provider !== 'shopify' || !authorizedReplacement.sourceItems.some(item =>
+            item.sourceShipmentItemId === Number(row.legacy_shipment_item_id) && item.quantity <= Number(row.quantity_shipped)))) {
+          throw new FulfillmentAuthorityError("PACKAGE_IDENTITY_CONFLICT", "Shopify replacement differs from its exact authorized package allocation");
+        }
+        contextRows = contextRows.map(row => ({ ...row, quantity_shipped: authorizedReplacement.sourceItems.find(
+          item => item.sourceShipmentItemId === Number(row.legacy_shipment_item_id))!.quantity }));
       } else if (contextRows.length !== authorizedReplacement.sourceItemIds.length
         || contextRows.some(row => !authorizedReplacement.sourceItems.some(item => item.sourceShipmentItemId === Number(row.legacy_shipment_item_id)
           && item.quantity === Number(row.quantity_shipped)))) {
@@ -4382,7 +4400,7 @@ export function createChannelFulfillmentAuthorityRepository(
           AND NOT EXISTS (SELECT 1 FROM wms.physical_shipments package
             JOIN wms.shipping_provider_labels label ON label.provider = package.provider
               AND label.provider_label_id = package.provider_physical_shipment_id
-            WHERE package.id = command.physical_shipment_id AND command.channel_provider = 'ebay'
+            WHERE package.id = command.physical_shipment_id AND command.channel_provider IN ('ebay', 'shopify')
               AND label.label_status IN ('voided', 'superseded'))
           AND NOT EXISTS (SELECT 1 FROM wms.ebay_label_replacement_work replacement
             WHERE replacement.physical_shipment_id = command.physical_shipment_id AND replacement.projected_at IS NULL)

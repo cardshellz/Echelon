@@ -217,6 +217,8 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
       labelPollLeaseOwner?: string;
       dispatchAuthority?: CarrierDispatchAuthority;
       dispatchLeaseOwner?: string;
+      /** Channel-owned correction intake; no remote mutation during observation. */
+      labelVoidObserver?: { observe(labelId: number): Promise<void> };
     },
   ) {}
 
@@ -228,6 +230,11 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
       this.dependencies.clock.now(),
     );
     const result = await this.dependencies.repository.observeProviderLabel(observation);
+    if (observation.labelStatus === "voided" && observation.labelDirection === "outbound") {
+      // Also runs for replayed observations: a crash between evidence commit
+      // and intake must be recoverable by the webhook/poll retry.
+      await this.dependencies.labelVoidObserver?.observe(Number(result.shippingProviderLabelId));
+    }
     this.dependencies.logger.info({
       code: "SHIPPING_PROVIDER_LABEL_OBSERVED",
       message: "Shipping-provider label evidence was durably recorded.",

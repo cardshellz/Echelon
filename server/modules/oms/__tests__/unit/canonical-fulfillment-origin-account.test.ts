@@ -25,6 +25,7 @@ function database(options: { provider?: string; channelMismatch?: boolean; exter
     const { sql: text, params } = dialect.sqlToQuery(query);
     const id = Number(params[0]) % 100;
     const provider = options.provider ?? "shopify";
+    if (text.includes("SELECT command.id, label.id AS label_id")) return { rows: [{ id, label_id: String(id), label_status: "active" }] };
     if (/^\s*(INSERT|UPDATE)/.test(text)) { events.push({ text, params }); return { rows: [], rowCount: 1 }; }
     if (text.includes("FROM oms.oms_orders oms_order")) return { rows: options.missingOrder ? [] : [{ oms_order_id: id,
       channel_id: id + 10, external_order_id: "10001", channel_provider: provider,
@@ -86,6 +87,22 @@ function shopifyAccount(channelId: number, settings: { existing?: boolean; exist
 }
 
 describe("canonical fulfillment originating account", () => {
+  it("rechecks a claimed label after provider reads and before sending the create", async () => {
+    let voided = false;
+    const db = database();
+    const execute = db.execute;
+    db.execute = vi.fn(async (query: SQL) => {
+      if (voided && dialect.sqlToQuery(query).sql.includes("SELECT command.id, label.id AS label_id")) {
+        return { rows: [{ id: 1, label_id: "7", label_status: "voided" }] };
+      }
+      return execute(query);
+    }) as typeof db.execute;
+    const account = shopifyAccount(11, { afterRead: async () => { voided = true; } });
+    const service = createFulfillmentPushService(db, null, { providerClients: { shopify: async () => account, ebay: vi.fn() } });
+    await expect(service.pushShopifyFulfillmentForCommand(command())).rejects.toMatchObject({ code: "PACKAGE_LABEL_INACTIVE" });
+    expect(account.client.request.mock.calls.every(([query]) => !query.includes("mutation"))).toBe(true);
+  });
+
   it.each([undefined, true, false].flatMap(notifyCustomer => [false, true].map(storedPathA => ({ notifyCustomer, storedPathA }))))(
     "uses only the command's notification intent in the actual Shopify payload: %j", async ({ notifyCustomer, storedPathA }) => {
       const account = shopifyAccount(11);
