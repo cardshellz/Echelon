@@ -370,6 +370,25 @@ const BASE_ISSUES: FlowIssueDef[] = [
     `,
   },
   {
+    code: "SHIPSTATION_VOID_RECONCILIATION_UNHEALTHY", kind: "stuck", stage: "shipped", severity: "critical",
+    message: "Shipping-label void recovery needs attention",
+    why: "The check for voided ShipStation labels failed or fell behind. Sales channels may still show cancelled tracking until recovery resumes.",
+    remediation: "CODE_FIX", replaySafe: false,
+    count: () => sql`
+      SELECT COUNT(*)::int AS count FROM oms.shipstation_label_reconciliation_checkpoint
+      WHERE consecutive_failures > 0
+         OR completed_through < NOW() - INTERVAL '30 minutes'
+    `,
+    sample: () => sql`
+      SELECT completed_through, window_start, window_end, next_page, last_success_at,
+             last_error_code, consecutive_failures, updated_at AS at
+      FROM oms.shipstation_label_reconciliation_checkpoint
+      WHERE consecutive_failures > 0
+         OR completed_through < NOW() - INTERVAL '30 minutes'
+      LIMIT 1
+    `,
+  },
+  {
     code: "SHOPIFY_RECOVERY_UNHEALTHY", kind: "stuck", stage: "intake", severity: "critical",
     message: "Shopify order recovery is not healthy",
     why: "The automatic Shopify cleanup has not completed recently or its latest run failed. Missing orders will still appear separately, but this safety net needs to be restored before another intake interruption.",

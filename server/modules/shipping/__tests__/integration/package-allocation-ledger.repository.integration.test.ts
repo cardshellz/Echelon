@@ -36,8 +36,11 @@ import { createShopifyLabelLifecycleRepository } from "../../../oms/shopify-labe
 import { createShopifyLabelLifecycleService } from "../../../oms/shopify-label-lifecycle.service";
 import { createChannelFulfillmentProjector } from "../../../oms/channel-fulfillment-projection.repository";
 import { createShipStationService } from "../../../oms/shipstation.service";
+import { createShipStationLabelReconciliationRepository } from "../../../oms/shipstation-label-reconciliation.repository";
+import { createShipStationLabelReconciliationService, planLabelScanWindow, type ShipStationLabelSnapshot } from "../../../oms/shipstation-label-reconciliation.service";
 import { CarrierTrackingService } from "../../carrier-tracking.service";
 import { createDrizzleCarrierTrackingRepository } from "../../carrier-tracking.repository";
+import { createShipStationRelatedLabelReader } from "../../shipstation-related-labels.reader";
 import { EbayApiClient } from "../../../channels/adapters/ebay/ebay-api.client";
 import type { ShopifyAdminGraphQLClient } from "../../../shopify/admin-gql-client";
 import { PackageAllocationLabelCommercialFulfillmentService } from "../../package-allocation-label-commercial-fulfillment.service";
@@ -107,6 +110,31 @@ const CONCURRENCY_TEST_TIMEOUT_MS = 20_000;
 const BARRIER_TIMEOUT_MS = 5_000;
 const EXECUTION_AUDIT_ROLE = "package_allocation_discovery_execution_auditor";
 
+async function deliverReplacementWebhook(
+  createIntake: () => ReturnType<typeof createShipStationService>, incoming: ShipStationLabelSnapshot,
+  related: ShipStationLabelSnapshot[],
+): Promise<void> {
+  vi.stubEnv("SHIPSTATION_API_KEY", "label-test-key");
+  vi.stubEnv("SHIPSTATION_API_SECRET", "label-test-secret");
+  const fetchLabel = vi.fn(async (rawUrl: string | URL | Request) => {
+    const params = new URL(String(rawUrl)).searchParams;
+    if (params.has("orderId")) {
+      expect(params.get("orderId")).toBe(String(related[0].orderId));
+      return new Response(JSON.stringify({ shipments: related, page: 1, pages: 1, total: related.length }));
+    }
+    expect(params.get("batchId")).toBe("replacement-only");
+    return new Response(JSON.stringify({ shipments: [incoming] }));
+  });
+  vi.stubGlobal("fetch", fetchLabel);
+  try {
+    const intake = createIntake();
+    await expect(intake.processShipNotify("/shipments?batchId=replacement-only")).resolves.toBe(1);
+    expect(fetchLabel.mock.calls.some(([url]) => new URL(String(url)).searchParams.has("orderId"))).toBe(true);
+    // Delivery replay sees the persisted void and cannot mint duplicate work.
+    await expect(intake.processShipNotify("/shipments?batchId=replacement-only")).resolves.toBe(1);
+  } finally { vi.unstubAllGlobals(); vi.unstubAllEnvs(); }
+}
+
 /**
  * The named-schema fixture stops at command persistence. These additional
  * columns use shared/schema/{oms,orders}.schema.ts definitions so this suite
@@ -115,6 +143,12 @@ const EXECUTION_AUDIT_ROLE = "package_allocation_discovery_execution_auditor";
  */
 async function installProviderExecutionTestRelations(pool: Pool): Promise<void> {
   await pool.query(`
+    -- Migration 154 carrier-label insert contract. Install for every test,
+    -- rather than relying on a later webhook test to add these columns.
+    ALTER TABLE wms.shipping_provider_labels
+      ADD COLUMN IF NOT EXISTS last_link_reconciled_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS next_link_reconcile_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS link_reconcile_attempts INTEGER NOT NULL DEFAULT 0;
     ALTER TABLE oms.oms_orders
       ADD COLUMN external_order_number VARCHAR(50),
       ADD COLUMN ordered_at TIMESTAMP NOT NULL,
@@ -1265,7 +1299,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     }
   }, 20000);
 
-  it.each(['unsent', 'sent', 'late_void', 'split', 'lost_cancel_response', 'claimed_before_void', 'concurrent', 'receipt_rollback', 'contents_changed'])(
+  it.each(['unsent', 'sent', 'late_void', 'missed_void_poll', 'missed_void_webhook', 'split', 'lost_cancel_response', 'claimed_before_void', 'concurrent', 'receipt_rollback', 'contents_changed'])(
     'corrects Shopify void/relabel end to end without changing a sibling: %s', async mode => {
       const split = mode === 'split';
       const sourceId = await seedCommercialFulfillmentAuthoritySource(pool, 'SHOPIFY-RELABEL', split ? 2 : 1);
@@ -1382,12 +1416,40 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       if (mode === 'late_void') expect(await replacement.receive()).toMatchObject({ outcome: 'waiting', reason: 'awaiting_replaced_label_void' });
       const oldPayload = (await pool.query('SELECT sanitized_payload FROM wms.shipping_provider_label_events WHERE shipping_provider_label_id = $1 ORDER BY id LIMIT 1', [old.id])).rows[0].sanitized_payload;
       const payload = { ...oldPayload, voidDate: '2026-09-17T13:00:00Z' };
+      if (mode === 'missed_void_poll' || mode === 'missed_void_webhook') {
+        // The lightweight seed predates the runtime label normalizer. Supply
+        // its migration-defined normalized identity before exercising intake.
+        await pool.query('UPDATE wms.shipping_provider_labels SET normalized_tracking_number = tracking_number');
+        expect(await replacement.receive()).toMatchObject({ outcome: 'waiting', reason: 'awaiting_replaced_label_void' });
+        const tracking = new CarrierTrackingService({ repository: createDrizzleCarrierTrackingRepository(getTestDb()),
+          clock, logger, labelVoidObserver: lifecycle });
+        const createIntake = () => createShipStationService(getTestDb(), undefined, { providerLabelObserver: tracking, labelCommercialFulfillment: handler,
+          relatedLabelReader: createShipStationRelatedLabelReader(pool) });
+        const originalSnapshot = { shipmentId: 44010, orderId: 99001, orderKey: 'provider-order-key-99001', orderNumber: '640001',
+          carrierCode: 'ups', serviceCode: 'ups_ground', trackingNumber: 'TRACK44010', shipmentCost: 0,
+          isReturnLabel: false, shipDate: '2026-09-17', voidDate: payload.voidDate,
+          shipmentItems: [{ lineItemKey: `wms-item-${sourceId}`, sku: 'SHOPIFY-RELABEL', quantity: 1 }] };
+        const replacementSnapshot = { ...originalSnapshot, shipmentId: 44011, trackingNumber: 'TRACK44011', voidDate: null };
+        const scan = createShipStationLabelReconciliationService({
+          repository: createShipStationLabelReconciliationRepository(getTestDb()), clock,
+          processLabels: createIntake().processProviderLabelSnapshots,
+          source: { isConfigured: () => true,
+            listVoids: async () => ({ shipments: [originalSnapshot], page: 1, pages: 1, total: 1 }),
+            listOrderLabels: async () => ({ shipments: [replacementSnapshot, originalSnapshot], page: 1, pages: 1, total: 2 }) },
+        });
+        if (mode === 'missed_void_poll') expect(await scan.runOnce()).toMatchObject({ voids: 1, orders: 1 });
+        else await deliverReplacementWebhook(createIntake, replacementSnapshot, [originalSnapshot, replacementSnapshot]);
+        expect((await pool.query("SELECT label_status FROM wms.shipping_provider_labels WHERE id = $1", [old.id])).rows)
+          .toEqual([{ label_status: 'voided' }]);
+        expect((await pool.query('SELECT state FROM oms.shopify_label_void_work')).rows).toEqual([{ state: 'pending' }]);
+      } else {
       const hash = createHash('sha256').update(canonicalJson({ provider: 'shipstation', ...payload, labelStatus: 'voided' })).digest('hex');
       await pool.query(`INSERT INTO wms.shipping_provider_label_events(shipping_provider_label_id, event_hash, event_type,
         label_status, tracking_number, provider_occurred_at, received_at, sanitized_payload)
         VALUES ($1, $2, 'label_voided', 'voided', $3, '2026-09-17T13:00:00Z', '2026-09-17T13:00:00Z', $4)`, [old.id, hash, payload.trackingNumber, payload]);
       await pool.query("UPDATE wms.shipping_provider_labels SET label_status = 'voided', last_observed_at = '2026-09-17T13:00:00Z' WHERE id = $1", [old.id]);
       await lifecycle.observe(old.id); await lifecycle.observe(old.id);
+      }
       if (claimed.length) {
         await expect(executor.execute(claimed[0])).rejects.toMatchObject({ code: 'PACKAGE_LABEL_INACTIVE' });
         await repository.completeAttempt({ commandId: claimed[0].id, leaseToken: claimed[0].leaseToken,
@@ -1447,6 +1509,124 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       await expect(pool.query("UPDATE oms.shopify_label_void_work SET state = 'pending', next_attempt_at = now(), completed_at = NULL")).rejects.toMatchObject({ code: '55000' });
       await expect(pool.query('DELETE FROM oms.shopify_label_void_attempts')).rejects.toMatchObject({ code: '55000' });
     }, 20_000);
+
+  it.each(['poll', 'replacement_webhook'])("discovers a missed combined-order void and queues a correction for each exact originating order: %s", async mode => {
+    const sources = [await seedCommercialFulfillmentAuthoritySource(pool, 'VOID-COMBINED-A', 12),
+      await seedCommercialFulfillmentAuthoritySource(pool, 'VOID-COMBINED-B', 5)];
+    for (const source of sources) await seedCanonicalRequestForSource(pool, source);
+    await pool.query("UPDATE oms.oms_orders SET external_order_id = 'gid://shopify/Order/' || (640000 + id)");
+    await pool.query("UPDATE oms.oms_order_lines SET external_line_item_id = 'gid://shopify/LineItem/' || (650000 + id)");
+    const items = sources.map((id, index) => ({ lineItemKey: `wms-item-${id}`, quantity: index === 0 ? 12 : 5 }));
+    const oldId = await seedAuthorityReadinessLabel(pool, sources[0], { providerLabelId: '460595426', providerOrderId: '790960007',
+      trackingNumber: '877510065050', carrierCode: 'fedex', contentsLines: items });
+    await pool.query("UPDATE wms.shipping_provider_labels SET normalized_tracking_number = tracking_number, carrier = 'fedex'");
+    await pool.query(`INSERT INTO wms.shipping_provider_label_links(shipping_provider_label_id, legacy_wms_shipment_id)
+      SELECT label.id, item.shipment_id FROM wms.shipping_provider_labels label CROSS JOIN wms.outbound_shipment_items item`);
+    const clock = { now: () => new Date('2099-09-21T20:00:00Z') };
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const handler = new PackageAllocationLabelCommercialFulfillmentService({ enabled: true, logger,
+      workflow: createPackageAllocationLabelCommercialWorkflow({ pool, clock, logger }),
+      labelLinker: { reconcileShipStationLabel: vi.fn().mockResolvedValue({ linksInserted: 0, totalLinks: 0 }) },
+      reviewRepository: { record: vi.fn() } });
+    const original = { shipmentId: 460595426, orderId: 790960007, orderKey: 'echelon-wms-shp-17763', orderNumber: '63300',
+      trackingNumber: '877510065050', carrierCode: 'fedex', serviceCode: 'fedex_ground', shipmentCost: 0,
+      isReturnLabel: false, shipDate: '2026-09-21', voidDate: null as string | null, shipmentItems: items.map(item => ({ ...item, sku: 'SAME-SKU' })) };
+    const replacement = { ...original, shipmentId: 460686839, trackingNumber: '877520887962' };
+    const originalResult = await handler.process(original, { shippingProviderLabelId: String(oldId) } as any);
+    expect(originalResult, JSON.stringify({ originalResult, warnings: logger.warn.mock.calls })).toMatchObject({ outcome: 'activated' });
+    if (mode === 'poll') {
+      const replacementId = await seedAuthorityReadinessLabel(pool, sources[0], { providerLabelId: '460686839', providerOrderId: '790960007',
+        trackingNumber: '877520887962', carrierCode: 'fedex', contentsLines: items });
+      await pool.query("UPDATE wms.shipping_provider_labels SET normalized_tracking_number = tracking_number, carrier = 'fedex' WHERE id = $1", [replacementId]);
+      await pool.query(`INSERT INTO wms.shipping_provider_label_links(shipping_provider_label_id, legacy_wms_shipment_id)
+        SELECT $1, shipment_id FROM wms.outbound_shipment_items`, [replacementId]);
+      expect(await handler.process(replacement, { shippingProviderLabelId: String(replacementId) } as any))
+        .toMatchObject({ outcome: 'waiting', reason: 'awaiting_replaced_label_void' });
+    } else {
+      expect((await pool.query("SELECT id FROM wms.shipping_provider_labels WHERE provider_label_id = '460686839'")).rows).toEqual([]);
+    }
+    const lifecycle = createShopifyLabelLifecycleRepository(getTestDb());
+    const observer = new CarrierTrackingService({ repository: createDrizzleCarrierTrackingRepository(getTestDb()), clock, logger,
+      labelVoidObserver: { observe: labelId => lifecycle.observe(labelId, clock.now()) } });
+    const createIntake = () => createShipStationService(getTestDb(), undefined, { providerLabelObserver: observer, labelCommercialFulfillment: handler,
+      relatedLabelReader: createShipStationRelatedLabelReader(pool) });
+    const voided = { ...original, voidDate: '2026-09-21T10:23:21.9930000' };
+    const scan = createShipStationLabelReconciliationService({ repository: createShipStationLabelReconciliationRepository(getTestDb()), clock,
+      processLabels: createIntake().processProviderLabelSnapshots, source: { isConfigured: () => true,
+        listVoids: async () => ({ shipments: [voided], page: 1, pages: 1, total: 1 }),
+        listOrderLabels: async () => ({ shipments: [replacement, voided], page: 1, pages: 1, total: 2 }) } });
+    if (mode === 'poll') await scan.runOnce();
+    else await deliverReplacementWebhook(createIntake, replacement, [replacement, voided]);
+    const replacementId = Number((await pool.query("SELECT id FROM wms.shipping_provider_labels WHERE provider_label_id = '460686839'")).rows[0].id);
+    const work = (await pool.query('SELECT shipping_provider_label_id, oms_order_id FROM oms.shopify_label_void_work ORDER BY oms_order_id')).rows;
+    expect(work.map(row => Number(row.shipping_provider_label_id))).toEqual([oldId, oldId]);
+    expect(work.map(row => String(row.oms_order_id))).toEqual((await pool.query('SELECT id FROM oms.oms_orders ORDER BY id')).rows.map(row => String(row.id)));
+    expect((await pool.query('SELECT reason FROM wms.ebay_label_replacement_work WHERE shipping_provider_label_id = $1', [replacementId])).rows)
+      .toEqual([{ reason: 'shopify_predecessor_void_pending' }]);
+    expect((await pool.query('SELECT id FROM inventory.inventory_transactions')).rowCount).toBe(0);
+    expect((await pool.query('SELECT SUM(quantity_shipped)::int AS quantity FROM wms.effective_physical_shipment_items')).rows).toEqual([{ quantity: 17 }]);
+  });
+
+  it("finds prior labels through source relationships across provider orders, without matching unrelated same-SKU orders", async () => {
+    const source = await seedCommercialFulfillmentAuthoritySource(pool, 'REFRESH-SOURCE', 2);
+    const unrelatedSource = await seedCommercialFulfillmentAuthoritySource(pool, 'REFRESH-UNRELATED', 1);
+    await pool.query("UPDATE wms.order_items SET sku = 'SAME-SKU'");
+    const old = await seedAuthorityReadinessLabel(pool, source, { providerLabelId: '55001', providerOrderId: '95001', trackingNumber: 'TRACK55001' });
+    const unrelated = await seedAuthorityReadinessLabel(pool, unrelatedSource, { providerLabelId: '55002', providerOrderId: '95002', trackingNumber: 'TRACK55002' });
+    for (const [label, item] of [[old, source], [unrelated, unrelatedSource]]) {
+      await pool.query(`INSERT INTO wms.shipping_provider_label_links(shipping_provider_label_id, legacy_wms_shipment_id)
+        SELECT $1, shipment_id FROM wms.outbound_shipment_items WHERE id = $2`, [label, item]);
+    }
+    const reader = createShipStationRelatedLabelReader(pool);
+    expect(await reader.findRelatedActiveLabels({ providerLabelId: '55003', providerOrderId: '95003', sourceWmsShipmentItemIds: [source] }))
+      .toEqual([{ providerLabelId: '55001', providerOrderId: '95001', trackingNumber: 'TRACK55001' }]);
+    // Exact provider order lookup still works before a link has been reconciled.
+    expect(await reader.findRelatedActiveLabels({ providerLabelId: '55003', providerOrderId: '95001', sourceWmsShipmentItemIds: [] }))
+      .toEqual([{ providerLabelId: '55001', providerOrderId: '95001', trackingNumber: 'TRACK55001' }]);
+    expect(await reader.findRelatedActiveLabels({ providerLabelId: '55001', providerOrderId: '95001', sourceWmsShipmentItemIds: [source] })).toEqual([]);
+    await pool.query("UPDATE wms.shipping_provider_labels SET label_direction = 'return' WHERE id = $1", [old]);
+    expect(await reader.findRelatedActiveLabels({ providerLabelId: '55003', providerOrderId: '95001', sourceWmsShipmentItemIds: [source] })).toEqual([]);
+    await pool.query("UPDATE wms.shipping_provider_labels SET label_direction = 'outbound', label_status = 'voided', voided_at = now() WHERE id = $1", [old]);
+    expect(await reader.findRelatedActiveLabels({ providerLabelId: '55003', providerOrderId: '95001', sourceWmsShipmentItemIds: [source] })).toEqual([]);
+  });
+
+  it("fences concurrent void scans, resumes pages after restart, and retains failed windows", async () => {
+    const repository = createShipStationLabelReconciliationRepository(getTestDb());
+    const now = new Date('2026-09-21T20:00:00Z');
+    const initial = new Date('2026-09-20T20:00:00Z');
+    const checkpoint = await repository.readOrCreate(initial, now);
+    const window = planLabelScanWindow(checkpoint, now)!;
+    const claims = await Promise.all([repository.claim(checkpoint, window, now), repository.claim(checkpoint, window, now)]);
+    expect(claims.filter(Boolean)).toHaveLength(1);
+    const claim = claims.find(value => value !== null)!;
+    await repository.completePage(claim, true, now);
+    const restarted = createShipStationLabelReconciliationRepository(getTestDb());
+    const saved = await restarted.readOrCreate(new Date('2026-09-21T19:00:00Z'), now);
+    expect(saved).toMatchObject({ completedThrough: initial, window: { ...window, page: 2 } });
+    const next = (await restarted.claim(saved, saved.window!, now))!;
+    await expect(repository.completePage(claim, false, now)).rejects.toMatchObject({ code: 'SHIPSTATION_LABEL_SCAN_LEASE_LOST' });
+    await restarted.fail(next, 'SHIPSTATION_LABEL_SCAN_FAILED', now);
+    const failed = await restarted.readOrCreate(initial, now);
+    expect(failed.window).toEqual(saved.window); expect(failed.completedThrough).toEqual(initial);
+    const retry = (await restarted.claim(failed, failed.window!, now))!;
+    await restarted.completePage(retry, false, now);
+    expect(await restarted.readOrCreate(initial, now)).toMatchObject({ completedThrough: window.end, window: null, lastSuccessAt: now });
+    expect((await pool.query('SELECT last_error_code, consecutive_failures FROM oms.shipstation_label_reconciliation_checkpoint')).rows)
+      .toEqual([{ last_error_code: null, consecutive_failures: 0 }]);
+  });
+
+  it("does not let an expired void-scan worker renew or commit a successor's progress", async () => {
+    const repository = createShipStationLabelReconciliationRepository(getTestDb());
+    const now = new Date('2026-09-21T20:00:00Z');
+    const checkpoint = await repository.readOrCreate(new Date('2026-09-20'), now);
+    const claim = (await repository.claim(checkpoint, planLabelScanWindow(checkpoint, now)!, now))!;
+    const afterExpiry = new Date(now.getTime() + 300001);
+    await expect(repository.renew(claim, afterExpiry)).rejects.toMatchObject({ code: 'SHIPSTATION_LABEL_SCAN_LEASE_LOST' });
+    const saved = await repository.readOrCreate(now, afterExpiry);
+    const successor = (await repository.claim(saved, saved.window!, afterExpiry))!;
+    await expect(repository.fail(claim, 'STALE_FAILURE', afterExpiry)).rejects.toMatchObject({ code: 'SHIPSTATION_LABEL_SCAN_LEASE_LOST' });
+    await repository.completePage(successor, false, afterExpiry);
+  });
 
   it("records one immutable business-shipped fact for an explicit outbound label observation", async () => {
     const label = await pool.query<{ id: number }>(
@@ -4751,10 +4931,6 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     // Fill in the production label-link contract missing from the minimal
     // fixture so the real observer and linker can run without database mocks.
     await pool.query(`
-      ALTER TABLE wms.shipping_provider_labels
-        ADD COLUMN IF NOT EXISTS last_link_reconciled_at TIMESTAMPTZ,
-        ADD COLUMN IF NOT EXISTS next_link_reconcile_at TIMESTAMPTZ,
-        ADD COLUMN IF NOT EXISTS link_reconcile_attempts INTEGER NOT NULL DEFAULT 0;
       ALTER TABLE wms.shipping_provider_label_links
         ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}',
         ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -4894,19 +5070,24 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     vi.stubEnv("SHOPIFY_FULFILLMENT_PUSH_ENABLED", "true");
     const fetchLabel = vi.fn(async (url: string | URL | Request) => {
       expect(String(url)).toContain("includeShipmentItems=true");
-      const currentLabel = Number(new URL(String(url)).searchParams.get("labelId"));
-      expect([44010, 44011, 44012]).toContain(currentLabel);
-      return new Response(JSON.stringify({ shipments: [{
-        shipmentId: currentLabel, orderId: 99001, orderKey: `wms-${source.shipment_id}`,
-        trackingNumber: `1Z00000000000${currentLabel}`, carrierCode: "ups", serviceCode: "ups_ground",
+      const params = new URL(String(url)).searchParams;
+      const currentLabel = Number(params.get("labelId"));
+      if (params.has("orderId")) expect(params.get("orderId")).toBe("99001");
+      else expect([44010, 44011, 44012]).toContain(currentLabel);
+      const shipment = (labelId: number) => ({
+        shipmentId: labelId, orderId: 99001, orderKey: `wms-${source.shipment_id}`,
+        trackingNumber: `1Z00000000000${labelId}`, carrierCode: "ups", serviceCode: "ups_ground",
         createDate: "2026-08-23T10:00:00.000", shipDate: "2026-08-23", isReturnLabel: false,
         shipmentItems: [{ lineItemKey: `wms-item-${sourceId}`, quantity: 1 }],
-      }] }), { status: 200, headers: { "Content-Type": "application/json" } });
+      });
+      const shipments = params.has("orderId") ? [44010, 44011, 44012].map(shipment) : [shipment(currentLabel)];
+      return new Response(JSON.stringify({ shipments, page: 1, pages: 1, total: shipments.length }), { status: 200, headers: { "Content-Type": "application/json" } });
     });
     vi.stubGlobal("fetch", fetchLabel);
     try {
       const shipstation = createShipStationService(getTestDb(), { recordShipment, recordReplacementShipmentFromAvailableInventory }, {
         providerLabelObserver: observer, labelCommercialFulfillment: labelHandler,
+        relatedLabelReader: createShipStationRelatedLabelReader(pool),
       });
       const receiveLabel = async (labelId: number) => {
         await expect(shipstation.processShipNotify(`/shipments?labelId=${labelId}`)).resolves.toBe(1);
