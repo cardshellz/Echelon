@@ -130,6 +130,9 @@ and rejection of stock from another warehouse. No production database was used.
 Application and new-test TypeScript checks and the production client/server build
 are included in the validation record. Final regression run: 293 passing tests across 16 files, including nine actual
 PostgreSQL tests. Production client/server build passed.
+The Walmart PostgreSQL suite is registered in the explicit CI manifest (89 files,
+up from 88); all 42 CI coverage/isolation guard tests also passed. The guard retains
+the prior suite inventory and verifies the new suite runs in an isolated database.
 
 ## Official contract references
 
