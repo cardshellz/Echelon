@@ -4,6 +4,7 @@ export const PACKAGE_ALLOCATION_LABEL_COMMERCIAL_REVIEW_RULE =
   "package_allocation_label_commercial_fulfillment_review";
 
 export interface PackageAllocationLabelCommercialReviewInput {
+  readonly operation?: "label_void";
   readonly shippingProviderLabelId: number;
   readonly providerShipmentId: string;
   readonly providerOrderId: string | null;
@@ -63,13 +64,17 @@ export function createPackageAllocationLabelCommercialReviewRepository(
       const idempotencyKey = [
         "shipstation_label_commercial_fulfillment",
         `label:${shippingProviderLabelId}`,
+        ...(rawInput.operation ? [rawInput.operation] : []),
       ].join(":").slice(0, 500);
-      const summary = (
+      const summary = rawInput.operation === "label_void"
+        ? `Voided ShipStation shipment ${providerShipmentId} could not be safely removed from Shopify fulfillment (${reasonCode}).`
+        : (
         `ShipStation shipment ${providerShipmentId} could not be safely marked shipped `
         + `on its sales channel (${reasonCode}).`
       );
       const details = {
         ...(rawInput.details ?? {}),
+        ...(rawInput.operation ? { operation: rawInput.operation } : {}),
         fulfillmentMutationBlocked: true,
         inventoryMutationBlocked: true,
         channelWritebackBlocked: true,

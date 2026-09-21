@@ -1,4 +1,5 @@
 import type { EbayLabelReplacementResult } from "./ebay-label-replacement.repository";
+import type { ShopifyLabelLifecycleService } from "./shopify-label-lifecycle.service";
 import { randomUUID } from "node:crypto";
 
 import { z } from "zod";
@@ -87,6 +88,7 @@ export interface MaterializeAndActivatePackageAllocationCommercialFulfillmentRes
 }
 
 export interface ChannelFulfillmentAuthorityService {
+  runLabelLifecycleBatch?(): Promise<void>;
   reconcileEbayLabelReplacement?(labelId: number): Promise<EbayLabelReplacementResult | null>;
   recordPhysicalPackage(
     input: MaterializePhysicalPackageInput,
@@ -344,6 +346,7 @@ export function createChannelFulfillmentAuthorityService(dependencies: {
   createLeaseToken?: () => string;
   leaseDurationMs?: number;
   labelReplacementEnabled?: boolean;
+  shopifyLabelLifecycle?: Pick<ShopifyLabelLifecycleService, "runDueBatch">;
 }): ChannelFulfillmentAuthorityService {
   const clock = dependencies.clock ?? { now: () => new Date() };
   const logger = dependencies.logger ?? defaultLogger();
@@ -548,6 +551,7 @@ export function createChannelFulfillmentAuthorityService(dependencies: {
   }
 
   return {
+    runLabelLifecycleBatch: async () => { await dependencies.shopifyLabelLifecycle?.runDueBatch(); },
     reconcileEbayLabelReplacement,
     recordPhysicalPackage,
     ensureLegacyShipment,

@@ -8,6 +8,8 @@ const DEFAULT_BATCH_SIZE = 25;
 
 let timer: ReturnType<typeof setInterval> | null = null;
 let runInFlight = false;
+let labelLifecycleInFlight = false;
+let labelLifecycleLastError: string | null = null;
 let lastRunAt: Date | null = null;
 let lastSuccessAt: Date | null = null;
 let lastError: string | null = null;
@@ -18,6 +20,8 @@ export interface ChannelFulfillmentCommandWorkerHeartbeat {
   readonly lastRunAt: string | null;
   readonly lastSuccessAt: string | null;
   readonly lastError: string | null;
+  readonly labelLifecycleInFlight: boolean;
+  readonly labelLifecycleLastError: string | null;
 }
 
 export function getChannelFulfillmentCommandWorkerHeartbeat(): ChannelFulfillmentCommandWorkerHeartbeat {
@@ -27,6 +31,8 @@ export function getChannelFulfillmentCommandWorkerHeartbeat(): ChannelFulfillmen
     lastRunAt: lastRunAt?.toISOString() ?? null,
     lastSuccessAt: lastSuccessAt?.toISOString() ?? null,
     lastError,
+    labelLifecycleInFlight,
+    labelLifecycleLastError,
   });
 }
 
@@ -60,6 +66,20 @@ export async function runChannelFulfillmentCommandWorkerOnce(
   }
 }
 
+export async function runChannelLabelLifecycleWorkerOnce(service: ChannelFulfillmentAuthorityService): Promise<void> {
+  if (labelLifecycleInFlight || !service.runLabelLifecycleBatch) return;
+  labelLifecycleInFlight = true;
+  try {
+    await service.runLabelLifecycleBatch();
+    labelLifecycleLastError = null;
+  } catch (error) {
+    labelLifecycleLastError = error instanceof Error ? error.message : String(error);
+    console.error(JSON.stringify({ code: "CHANNEL_LABEL_LIFECYCLE_WORKER_FAILED", error: labelLifecycleLastError }));
+  } finally {
+    labelLifecycleInFlight = false;
+  }
+}
+
 export function startChannelFulfillmentCommandWorker(
   service: ChannelFulfillmentAuthorityService,
   options: { intervalMs?: number; batchSize?: number } = {},
@@ -75,6 +95,9 @@ export function startChannelFulfillmentCommandWorker(
   }
 
   const tick = () => {
+    // Corrections have their own single-flight lane. An unavailable Shopify
+    // account must not hold up fresh label fulfillment for unrelated orders.
+    void runChannelLabelLifecycleWorkerOnce(service);
     void runChannelFulfillmentCommandWorkerOnce(service, batchSize).catch(() => undefined);
   };
   timer = setInterval(tick, intervalMs);
@@ -91,6 +114,8 @@ export function resetChannelFulfillmentCommandWorkerForTest(): void {
   if (timer !== null) clearInterval(timer);
   timer = null;
   runInFlight = false;
+  labelLifecycleInFlight = false;
+  labelLifecycleLastError = null;
   lastRunAt = null;
   lastSuccessAt = null;
   lastError = null;
