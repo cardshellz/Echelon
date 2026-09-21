@@ -829,6 +829,9 @@
   "oms.package_allocation_commercial_fulfillment_activations": [
     "modules/oms"
   ],
+  "oms.shipstation_label_reconciliation_checkpoint": [
+    "modules/oms"
+  ],
   "oms.shopify_label_void_attempts": [
     "modules/oms"
   ],
