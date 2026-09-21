@@ -70,6 +70,8 @@ import { recordReceivingReconciliationFailure, recordReceiveValidationWarnings }
 import { reconcileApprovedInvoiceVarianceForPurchaseOrderLineInTransaction } from "../modules/procurement/ap-ledger.service";
 import { createOmsService } from "../modules/oms/oms.service";
 import { createFulfillmentPushService } from "../modules/oms/fulfillment-push.service";
+import { createShopifyLabelLifecycleRepository } from "../modules/oms/shopify-label-lifecycle.repository";
+import { createShopifyLabelLifecycleService } from "../modules/oms/shopify-label-lifecycle.service";
 import { createChannelFulfillmentAuthorityRepository } from "../modules/oms/channel-fulfillment-authority.repository";
 import { createChannelFulfillmentReviewRetryRepository } from "../modules/oms/channel-fulfillment-review-retry.repository";
 import { createChannelFulfillmentReviewRetryService } from "../modules/oms/channel-fulfillment-review-retry.service";
@@ -520,13 +522,19 @@ export function createServices(
   // Fulfillment Push. eBay is injected later when polling starts; Shopify is
   // wired here so ShipStation webhooks and retry workers can create Shopify
   // fulfillments without relying on route-local setup.
-  const fulfillmentPush = createFulfillmentPushService(db, null, {
-    runExclusive: withAdvisoryLock,
-    providerClients: createChannelFulfillmentProviderClients({
+  const fulfillmentProviderClients = createChannelFulfillmentProviderClients({
       channels: channelsStorage,
       identities: new ChannelIdentityService(db),
       ebayAuth: () => createFulfillmentEbayAuth(db),
-    }),
+  });
+  const shopifyLabelLifecycle = createShopifyLabelLifecycleService({
+    repository: createShopifyLabelLifecycleRepository(db), providerClients: fulfillmentProviderClients,
+    runExclusive: withAdvisoryLock, clock: { now: () => new Date() },
+    logger: { info: event => console.log(JSON.stringify(event)), error: event => console.error(JSON.stringify(event)) },
+  });
+  const fulfillmentPush = createFulfillmentPushService(db, null, {
+    runExclusive: withAdvisoryLock,
+    providerClients: fulfillmentProviderClients,
   });
   fulfillmentPush.setShopifyClient(createDefaultShopifyAdminClient());
   const channelFulfillmentAuthority = createChannelFulfillmentAuthorityService({
@@ -534,6 +542,7 @@ export function createServices(
     repository: createChannelFulfillmentAuthorityRepository(db),
     projector: createChannelFulfillmentProjector(db),
     providerExecutor: createCompatibilityChannelFulfillmentProviderExecutor(fulfillmentPush),
+    shopifyLabelLifecycle,
   });
   const channelFulfillmentReviewRetry = createChannelFulfillmentReviewRetryService({
     repository: createChannelFulfillmentReviewRetryRepository(db),
@@ -572,6 +581,7 @@ export function createServices(
     logger: carrierTrackingLogger,
     trackingEventsClient: createShipStationTrackingEventsClient(),
     dispatchAuthority: dispatchAuthorityProxy,
+    labelVoidObserver: shopifyLabelLifecycle,
   });
   const labelCommercialFulfillment =
     new PackageAllocationLabelCommercialFulfillmentService({
