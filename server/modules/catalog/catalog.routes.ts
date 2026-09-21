@@ -43,6 +43,8 @@ import {
   assertProductInventoryStrategyTransition,
   parseProductInventoryStrategy,
 } from "./inventory-strategy-policy";
+import { updateProductInventoryTracking, InventoryTrackingPolicyError } from "./inventory-tracking-policy.repository";
+import { parseInventoryTrackingWrite } from "@shared/catalog/inventory-tracking-policy";
 import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
 import { isCustomerSellableVariant } from "@shared/catalog/variant-sales-eligibility";
 import {
@@ -92,16 +94,17 @@ function coercePackingFlagsOnVariantPayload(input: unknown): {
 const variantFulfillmentSchema = z.object({
   requiresShipping: z.boolean().optional(),
   trackInventory: z.boolean().optional(),
+  inventoryTrackingOverride: z.boolean().nullable().optional(),
 }).strict();
 
 export function coerceVariantFulfillmentOnPayload(
   input: unknown,
   existing?: { requiresShipping: boolean; trackInventory: boolean | null },
-): { requiresShipping?: boolean; trackInventory?: boolean } {
+): { requiresShipping?: boolean; trackInventory?: boolean; inventoryTrackingOverride?: boolean | null } {
   if (!input || typeof input !== "object" || Array.isArray(input)) return {};
   const source = input as Record<string, unknown>;
   const candidate: Record<string, unknown> = {};
-  for (const key of ["requiresShipping", "trackInventory"] as const) {
+  for (const key of ["requiresShipping", "trackInventory", "inventoryTrackingOverride"] as const) {
     if (Object.prototype.hasOwnProperty.call(source, key)) candidate[key] = source[key];
   }
   if (Object.keys(candidate).length === 0) return {};
@@ -119,12 +122,14 @@ export function coerceVariantFulfillmentOnPayload(
   const trackInventory = parsed.data.trackInventory
     ?? existing?.trackInventory
     ?? true;
-  if (!requiresShipping && trackInventory !== false) {
+  if (!requiresShipping && trackInventory !== false && parsed.data.inventoryTrackingOverride === undefined) {
     throw Object.assign(
       new Error("Digital variants must set trackInventory to false"),
       { statusCode: 400 },
     );
   }
+  try { parseInventoryTrackingWrite(parsed.data); }
+  catch (error) { throw Object.assign(error instanceof Error ? error : new Error("Invalid inventory policy"), { statusCode: 400 }); }
   return parsed.data;
 }
 import { inventoryStorage } from "../inventory";
@@ -935,6 +940,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
         productId,
         channelId,
         targetProductId: req.body?.targetProductId,
+        allowProductOnlyAdoption: req.body?.allowProductOnlyAdoption === true,
         actor: `user:${actorId}`,
       });
       res.json(result);
@@ -988,6 +994,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
         : await createProduct();
       res.json(created);
     } catch (error: any) {
+      if (error instanceof InventoryTrackingPolicyError) return res.status(error.statusCode).json({ error: error.message, code: error.code });
       if (sendInventoryLegacyAdminControlError(res, error)) return;
       if (error instanceof ProductInventoryStrategyError) {
         return res.status(error.statusCode).json({
@@ -1181,6 +1188,9 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
           }
         }
 
+        if (persistedUpdates.inventoryTrackingDefault !== undefined) {
+          await updateProductInventoryTracking(tx, id, persistedUpdates.inventoryTrackingDefault, actor, new Date());
+        }
         const product = await storage.updateProduct(id, persistedUpdates, tx);
         if (!product) {
           return { product: null, renamedVariants: 0, renamedFrom: null as string | null };
@@ -1287,6 +1297,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       const existingVariants = await storage.getProductVariantsByProductId(id);
       res.json({ ...updateResult.product, variants: existingVariants });
     } catch (error: any) {
+      if (error instanceof InventoryTrackingPolicyError) return res.status(error.statusCode).json({ error: error.message, code: error.code });
       if (sendInventoryLegacyAdminControlError(res, error)) return;
       if (error?.code === "23505" || error?.cause?.code === "23505") {
         return res.status(409).json({ error: "SKU already exists" });
@@ -1627,6 +1638,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
       });
       res.json(variant);
     } catch (error: any) {
+      if (error instanceof InventoryTrackingPolicyError) return res.status(error.statusCode).json({ error: error.message, code: error.code });
       if (Number.isInteger(error?.statusCode)) {
         return res.status(error.statusCode).json({
           error: error.message,
@@ -1733,6 +1745,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
         if (
           existing.requiresShipping !== updatedVariant.requiresShipping
           || existing.trackInventory !== updatedVariant.trackInventory
+          || existing.inventoryTrackingOverride !== updatedVariant.inventoryTrackingOverride
         ) {
           await persistAuditEvent(tx, {
             actor,
@@ -1742,10 +1755,12 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
               before: {
                 requiresShipping: existing.requiresShipping,
                 trackInventory: existing.trackInventory,
+                inventoryTrackingOverride: existing.inventoryTrackingOverride,
               },
               after: {
                 requiresShipping: updatedVariant.requiresShipping,
                 trackInventory: updatedVariant.trackInventory,
+                inventoryTrackingOverride: updatedVariant.inventoryTrackingOverride,
               },
             },
             context: {
@@ -1794,6 +1809,7 @@ const HAS_SHIPPABLE_VARIANT = sql`EXISTS (
 
       res.json(updateResult.variant);
     } catch (error: any) {
+      if (error instanceof InventoryTrackingPolicyError) return res.status(error.statusCode).json({ error: error.message, code: error.code });
       if (error?.code === "23505" || error?.cause?.code === "23505") {
         return res.status(409).json({ error: "SKU already exists" });
       }

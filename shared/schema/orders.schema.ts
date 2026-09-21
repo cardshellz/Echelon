@@ -201,6 +201,8 @@ export const orderItems = wmsSchema.table("order_items", {
   // ===== CHANNEL LINKAGE =====
   // Links to source raw tables for full line item data (pricing, properties, etc.)
   omsOrderLineId: bigint("oms_order_line_id", { mode: "number" }),
+  catalogProductId: integer("catalog_product_id"),
+  inventoryTracking: boolean("inventory_tracking"),
   shopifyLineItemId: varchar("shopify_line_item_id", { length: 50 }), // Legacy
   sourceItemId: varchar("source_item_id", { length: 100 }), // ID in source table for JOIN lookups
 

@@ -9,6 +9,7 @@ const baseURL = `http://127.0.0.1:${port}`;
 export default defineConfig({
   testDir: "./test/browser",
   testMatch: [
+    "picking-inventory-policy.spec.ts",
     "inventory-availability.spec.ts",
     "inventory-authority-gates.spec.ts",
     "inventory-publication-target-resume.spec.ts",

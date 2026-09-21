@@ -53,8 +53,9 @@ describeWithDisposableDb.sequential("invoice variance COGS PostgreSQL transactio
       CREATE TABLE catalog.product_variants (
         id INTEGER PRIMARY KEY,
         sku VARCHAR(100) NOT NULL,
-        units_per_variant INTEGER NOT NULL DEFAULT 1
-      );
+        units_per_variant INTEGER NOT NULL DEFAULT 1,
+      inventory_tracking_override boolean
+    );
 
       CREATE TABLE inventory.inventory_lots (
         id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

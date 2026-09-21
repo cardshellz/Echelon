@@ -18,8 +18,9 @@ const fixtureSql = `
   CREATE TABLE oms.oms_order_lines (
     id bigint PRIMARY KEY, order_id bigint, product_variant_id integer, sku text,
     authority_fulfillable_quantity integer, wms_materialized_quantity integer,
-    authorization_status text, requires_shipping boolean, quantity integer
-  );
+    authorization_status text, requires_shipping boolean, quantity integer,
+      catalog_product_id integer, inventory_tracking boolean
+    );
   ${cutoverReceiptSchemaFixtureSql}
 `;
 

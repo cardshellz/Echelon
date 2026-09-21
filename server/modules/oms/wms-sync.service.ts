@@ -83,6 +83,8 @@ type DbLike = typeof db | any;
 type MaterializableOmsLine = {
   id: number;
   productVariantId: number | null;
+  catalogProductId?: number | null;
+  inventoryTracking?: boolean | null;
   sku: string | null;
   name: string | null;
   title: string | null;
@@ -338,6 +340,8 @@ function mapLockedOmsLine(row: any): MaterializableOmsLine {
   return {
     id: toNonNegativeInteger(row.id, "oms_order_lines.id"),
     productVariantId: toNullableInteger(row.product_variant_id),
+    catalogProductId: toNullableInteger(row.catalog_product_id),
+    inventoryTracking: toNullableBoolean(row.inventory_tracking),
     sku: row.sku ?? null,
     name: row.name ?? null,
     title: row.title ?? null,
@@ -373,9 +377,9 @@ export async function buildWmsLineItemFromOmsLine(
   const variantId = line.productVariantId || null;
   const catalogSku = variantId
     ? await createOrderLineCatalogIdentityRepository(database).catalogSku(variantId)
-    : null;
+    : line.catalogProductId ? await createOrderLineCatalogIdentityRepository(database).catalogProductSku(line.catalogProductId) : null;
   let binLocation: WmsBinLocation | null = null;
-  if (variantId) {
+  if (variantId && line.inventoryTracking !== false) {
     try {
       binLocation = await resolveAssignedBinLocation(database, variantId);
     } catch (err: any) {
@@ -401,6 +405,8 @@ export async function buildWmsLineItemFromOmsLine(
   return {
     orderId,
     omsOrderLineId: line.id,
+    catalogProductId: line.catalogProductId ?? null,
+    inventoryTracking: line.inventoryTracking ?? null,
     sku: selectWmsCatalogSku(line.sku, catalogSku),
     name: buildChannelLineDisplayName({
       name: line.name,
@@ -466,6 +472,8 @@ export class WmsSyncService {
       SELECT
         id,
         product_variant_id,
+        catalog_product_id,
+        inventory_tracking,
         sku,
         name,
         title,
@@ -2670,7 +2678,7 @@ export class WmsSyncService {
       const wmsQty = wmsItem.quantity;
       const catalogSku = omsLine.productVariantId
         ? await createOrderLineCatalogIdentityRepository(db).catalogSku(omsLine.productVariantId)
-        : null;
+        : omsLine.catalogProductId ? await createOrderLineCatalogIdentityRepository(db).catalogProductSku(omsLine.catalogProductId) : null;
       const resolvedSku = selectWmsCatalogSku(omsLine.sku, catalogSku);
 
       if (omsQty === wmsQty) {

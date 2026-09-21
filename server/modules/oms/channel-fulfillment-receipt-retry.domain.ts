@@ -51,6 +51,10 @@ export const receiptRetryLineSnapshotSchema = z.object({
   omsProductVariantId: nullablePositiveId,
   omsSku: nullableText,
   omsRequiresShipping: z.boolean().nullable(),
+  omsInventoryTracking: z.boolean().nullable().optional(),
+  wmsInventoryTracking: z.boolean().nullable().optional(),
+  omsCatalogProductId: nullablePositiveId.optional(),
+  wmsCatalogProductId: nullablePositiveId.optional(),
   omsPaidQuantity: nonnegativeInteger.nullable(),
   omsMaxPaidQuantity: nonnegativeInteger.nullable(),
   wmsOrderItemId: nullablePositiveId,
@@ -248,6 +252,8 @@ function addLineBlockers(
 
   const decision = decideChannelFulfillmentInventoryPosting({
     omsRequiresShipping: line.omsRequiresShipping,
+    omsInventoryTracking: line.omsInventoryTracking, wmsInventoryTracking: line.wmsInventoryTracking,
+    omsCatalogProductId: line.omsCatalogProductId, wmsCatalogProductId: line.wmsCatalogProductId,
     wmsRequiresShipping: line.wmsRequiresShipping ?? Number.NaN,
     productVariantId: line.omsProductVariantId,
     catalogVariantId: line.catalogVariantId,

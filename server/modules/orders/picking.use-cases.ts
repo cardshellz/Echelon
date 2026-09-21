@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { eq, and, sql } from "drizzle-orm";
 import { IntegrityError, NotFoundError, ValidationError } from "../../../shared/errors";
-import { AuditLogger } from "../../infrastructure/auditLogger";
+import { AuditLogger, persistAuditEvent } from "../../infrastructure/auditLogger";
 import {
   inventoryLevels,
   warehouseLocations,
@@ -20,6 +20,7 @@ import type {
   Order,
   ItemStatus,
   OrderStatus,
+  ProductVariant,
 } from "@shared/schema";
 import {
   ensurePackPlan,
@@ -1088,6 +1089,31 @@ export class PickingUseCases {
     };
   }
 
+  private assertTrackedSnapshotMatchesVariant(item: OrderItem, variant: ProductVariant | undefined): void {
+    if (item.inventoryTracking == null) return;
+    if (item.catalogProductId == null || (item.inventoryTracking && (
+      variant == null || item.productId !== variant.id || item.catalogProductId !== variant.productId
+      || variant.requiresShipping === false || variant.trackInventory === false
+    ))) {
+      throw new IntegrityError("Order inventory policy conflicts with its catalog identity; review the mapping before picking", {
+        reason: "picker_inventory_policy_conflict", orderId: item.orderId, orderItemId: item.id,
+        catalogProductId: item.catalogProductId, productVariantId: item.productId,
+      });
+    }
+  }
+
+  private async recordConfirmationOnlyPick(tx: any, before: OrderItem, after: OrderItem, userId?: string): Promise<void> {
+    if (before.inventoryTracking !== false || before.catalogProductId == null || before.pickedQuantity === after.pickedQuantity) return;
+    await persistAuditEvent(tx, {
+      actor: userId ? `user:${userId}` : "system:picking",
+      action: after.pickedQuantity > before.pickedQuantity ? "wms.non_inventory_pick_confirmed" : "wms.non_inventory_pick_reversed",
+      target: `wms.order_item:${before.id}`,
+      changes: { before: { pickedQuantity: before.pickedQuantity, status: before.status },
+        after: { pickedQuantity: after.pickedQuantity, status: after.status } },
+      context: { orderId: before.orderId, catalogProductId: before.catalogProductId, inventoryTracking: false },
+    });
+  }
+
   private async applyLegacyPickProgressTransaction(
     tx: any,
     input: {
@@ -1210,6 +1236,7 @@ export class PickingUseCases {
       pickedAt: deductResult.success ? new Date() : input.beforeItem.pickedAt,
     });
     if (!updatedItem) throw new IntegrityError(`Item ${input.itemId} not found`);
+    await this.recordConfirmationOnlyPick(tx, input.beforeItem, updatedItem as OrderItem, input.userId);
     return { item: updatedItem as OrderItem, deductResult, idempotentReplay: false };
   }
 
@@ -1218,6 +1245,7 @@ export class PickingUseCases {
     beforeItem: OrderItem;
     effectivePickedQuantity: number;
     shortReason?: string;
+    userId?: string;
     status: ItemStatus;
   }): Promise<PickProgressAtomicResult> {
     return this.db.transaction(async (tx: any) => {
@@ -1294,6 +1322,7 @@ export class PickingUseCases {
         pickedAt: input.status === "pending" ? null : input.beforeItem.pickedAt ?? new Date(),
       });
       if (!updatedItem) throw new IntegrityError(`Item ${input.itemId} not found`);
+      await this.recordConfirmationOnlyPick(tx, input.beforeItem, updatedItem as OrderItem, input.userId);
       return {
         item: updatedItem as OrderItem,
         deductResult: {
@@ -1314,7 +1343,11 @@ export class PickingUseCases {
     pickedQty: number,
     options: { warehouseLocationId?: number; warehouseId?: number | null },
   ): Promise<{ target: CanonicalPickTarget | null; nonInventory: boolean }> {
-    const productVariant = await this.storage.getProductVariantBySku(item.sku);
+    if (item.inventoryTracking === false && item.catalogProductId != null) return { target: null, nonInventory: true };
+    const productVariant = item.catalogProductId != null && item.productId != null
+      ? await this.storage.getProductVariantById(item.productId)
+      : await this.storage.getProductVariantBySku(item.sku);
+    this.assertTrackedSnapshotMatchesVariant(item, productVariant);
     if (!productVariant?.id) {
       if (item.requiresShipping === 1) {
         throw new IntegrityError(`Tracked picker SKU ${item.sku} has no active catalog variant`, {
@@ -1935,6 +1968,7 @@ export class PickingUseCases {
         status: status as ItemStatus,
         effectivePickedQuantity,
         shortReason,
+        userId,
       });
       if (atomicResult.idempotentReplay) {
         console.log(`[Pick] Item ${itemId} reached the requested status while waiting for its lock - returning success (idempotent)`);
@@ -1990,7 +2024,7 @@ export class PickingUseCases {
     // Build inventory context for picker UI
     const inventoryCtx: PickInventoryContext = emptyPickInventoryContext(item.sku);
 
-    if (item.status === "short" && beforeItem.status !== "short") {
+    if (item.inventoryTracking !== false && item.status === "short" && beforeItem.status !== "short") {
       try {
         const queued = await this.queueShortPickReplen({
           item,
@@ -2264,6 +2298,9 @@ export class PickingUseCases {
       ?? await this.resolvePostPickStatusForOrder(item.orderId, settings.postPickStatus);
     await this.storage.updateOrderProgress(item.orderId, postPickStatus);
 
+    if (pickDeductResult && !pickDeductResult.success) {
+      return { success: false, error: pickDeductResult.error, message: pickDeductResult.message };
+    }
     return { success: true, item, inventory: inventoryCtx };
   }
 
@@ -2524,9 +2561,17 @@ export class PickingUseCases {
         pickedQty,
       });
     }
-    const productVariant = await this.storage.getProductVariantBySku(item.sku);
+    if (item.inventoryTracking === false && item.catalogProductId != null) {
+      return { success: true, noVariant: true, productVariantId: 0, locationId: 0, locationCode: null, systemQtyAfter: 0 };
+    }
+    const productVariant = item.catalogProductId != null && item.productId != null
+      ? await this.storage.getProductVariantById(item.productId)
+      : await this.storage.getProductVariantBySku(item.sku);
+    this.assertTrackedSnapshotMatchesVariant(item, productVariant);
     if (!productVariant) {
-      // No variant mapping — can't deduct, but this is non-fatal for non-inventory items
+      if (item.requiresShipping === 1) throw new IntegrityError(`Physical picker SKU ${item.sku} has no catalog inventory policy`, {
+        reason: "picker_inventory_identity_missing", orderId: item.orderId, orderItemId: item.id,
+      });
       return { success: true, noVariant: true, productVariantId: 0, locationId: 0, locationCode: null, systemQtyAfter: 0 };
     }
 
@@ -3008,8 +3053,12 @@ export class PickingUseCases {
     let inventoryTracked = false;
 
     if (["completed", "in_progress", "short"].includes(beforeItem.status)) {
-      variant = await this.storage.getProductVariantBySku(beforeItem.sku);
-      inventoryTracked = beforeItem.requiresShipping === 1
+      variant = beforeItem.catalogProductId != null && beforeItem.productId != null
+        ? await this.storage.getProductVariantById(beforeItem.productId)
+        : await this.storage.getProductVariantBySku(beforeItem.sku);
+      this.assertTrackedSnapshotMatchesVariant(beforeItem, variant);
+      inventoryTracked = !(beforeItem.inventoryTracking === false && beforeItem.catalogProductId != null)
+        && beforeItem.requiresShipping === 1
         && variant?.requiresShipping !== false
         && variant?.trackInventory !== false;
     }
@@ -3184,6 +3233,9 @@ export class PickingUseCases {
         shortReason: itemState.status === "short" ? null : undefined,
         pickedAt: itemUpdates.pickedAt,
       });
+
+      if (!updatedItem) throw new IntegrityError(`Item ${itemId} not found`);
+      await this.recordConfirmationOnlyPick(tx, beforeItem, updatedItem as OrderItem, params.userId);
 
       const siblingItems = await tx
         .select()
@@ -3533,7 +3585,7 @@ export class PickingUseCases {
       if ((item.pickedQuantity || 0) !== item.quantity) {
         blockers.push(`${item.sku} picked ${item.pickedQuantity || 0}/${item.quantity}`);
       }
-      if (!item.location || item.location === "UNASSIGNED") {
+      if (!(item.inventoryTracking === false && item.catalogProductId != null) && (!item.location || item.location === "UNASSIGNED")) {
         blockers.push(`${item.sku} has no pick bin`);
       }
     }
@@ -3769,7 +3821,7 @@ export class PickingUseCases {
     const skusNeedingLookup = new Set<string>();
     for (const order of filteredOrders) {
       for (const item of (order as any).items) {
-        if (item.sku && item.requiresShipping === 1 && item.status === "pending") {
+        if (item.sku && item.requiresShipping === 1 && item.status === "pending" && item.inventoryTracking !== false) {
           skusNeedingLookup.add(item.sku);
         }
       }
@@ -3785,7 +3837,7 @@ export class PickingUseCases {
     // Replen predictions
     const pendingReplenItems = filteredOrders.flatMap((order: any) =>
       (order.items ?? [])
-        .filter((item: any) => item.sku && item.requiresShipping === 1 && item.status === "pending")
+        .filter((item: any) => item.sku && item.requiresShipping === 1 && item.status === "pending" && item.inventoryTracking !== false)
         .map((item: any) => ({
           id: item.id,
           sku: item.sku,
@@ -3807,6 +3859,7 @@ export class PickingUseCases {
 
       const itemsWithFreshLocations = shippableItems.map((item: any) => {
         let updatedItem = { ...item };
+        if (item.inventoryTracking === false && item.catalogProductId != null) return updatedItem;
 
         // For pending items, always use freshest location
         if (item.status === "pending" && item.sku) {

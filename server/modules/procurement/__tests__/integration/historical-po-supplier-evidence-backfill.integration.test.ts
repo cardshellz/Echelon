@@ -96,15 +96,17 @@ describeWithDisposableDb.sequential(
           id INTEGER PRIMARY KEY,
           name TEXT NOT NULL,
           sku TEXT,
-          is_active BOOLEAN NOT NULL
-        );
+          is_active BOOLEAN NOT NULL,
+      inventory_tracking_default boolean NOT NULL DEFAULT true
+    );
 
         CREATE TABLE catalog.product_variants (
           id INTEGER PRIMARY KEY,
           product_id INTEGER NOT NULL REFERENCES catalog.products(id),
           sku TEXT,
-          is_active BOOLEAN NOT NULL
-        );
+          is_active BOOLEAN NOT NULL,
+      inventory_tracking_override boolean
+    );
 
         CREATE TABLE procurement.vendor_products (
           id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

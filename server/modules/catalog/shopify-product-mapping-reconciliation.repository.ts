@@ -10,6 +10,7 @@ import {
 } from "drizzle-orm";
 import {
   channelConnections,
+  channelProductIdentities,
   channelFeeds,
   channelListings,
   channels,
@@ -684,6 +685,8 @@ export function createShopifyProductMappingReconciliationRepository(
           })
           .where(eq(products.id, input.productId));
 
+        await tx.delete(channelProductIdentities).where(and(eq(channelProductIdentities.productId, input.productId), eq(channelProductIdentities.channelId, input.channelId)));
+
         const clearedVariants = await tx
           .update(productVariants)
           .set({
@@ -919,6 +922,8 @@ export function createShopifyProductMappingReconciliationRepository(
         const detachedVariantIds = detachedVariants.map(
           (variant) => variant.id,
         );
+
+        await tx.delete(channelProductIdentities).where(and(inArray(channelProductIdentities.productId, detachedProductIds), eq(channelProductIdentities.channelId, input.channel.id)));
 
         const clearedProducts = await tx
           .update(products)

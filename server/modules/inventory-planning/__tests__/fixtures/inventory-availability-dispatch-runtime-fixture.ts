@@ -7,7 +7,9 @@ import { dispatchOwnerFixtureSql, dispatchOwnerSeedSql } from "../../../inventor
  */
 export const dispatchRuntimeFixtureSql = `${dispatchOwnerFixtureSql}
 CREATE SCHEMA catalog;
-CREATE TABLE catalog.product_variants(id integer PRIMARY KEY);
+CREATE TABLE catalog.product_variants(id integer PRIMARY KEY,
+      inventory_tracking_override boolean
+    );
 ALTER TABLE wms.orders ADD COLUMN warehouse_id integer REFERENCES warehouse.warehouses,
   ADD COLUMN warehouse_status varchar(30) NOT NULL DEFAULT 'ready_to_ship', ADD COLUMN on_hold integer NOT NULL DEFAULT 0,
   ADD COLUMN cancelled_at timestamp;

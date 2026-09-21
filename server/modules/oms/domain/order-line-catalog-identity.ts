@@ -7,6 +7,7 @@ export const orderLineIdentityInputSchema = z.object({
   externalProductId: optionalReference,
   sku: optionalReference,
   previousVariantId: z.number().int().positive().safe().nullish(),
+  previousProductId: z.number().int().positive().safe().nullish(),
 });
 export type OrderLineIdentityInput = z.input<typeof orderLineIdentityInputSchema>;
 export const catalogIdentityCandidateSchema = z.object({
@@ -14,13 +15,24 @@ export const catalogIdentityCandidateSchema = z.object({
   sku: z.string().max(100).regex(/^[^\u0000-\u001f\u007f]*$/).nullable(),
   isActive: z.boolean(),
   compareAtPriceCents: z.number().int().safe().nullable(),
+  productId: z.number().int().positive().safe().optional(),
+  trackInventory: z.boolean().nullable().optional(),
+  channelProductIds: z.array(z.string()).optional(),
+  channelVariantIds: z.array(z.string()).optional(),
 });
 export type CatalogIdentityCandidate = z.infer<typeof catalogIdentityCandidateSchema>;
 export const channelIdentityCandidateSchema = catalogIdentityCandidateSchema.extend({
   externalProductId: z.string().nullable(),
 });
 export type ChannelIdentityCandidate = z.infer<typeof channelIdentityCandidateSchema>;
-export type ResolvedOrderLineIdentity = CatalogIdentityCandidate & { matchedBy: "channel_variant_id" | "sku" };
+export type ResolvedOrderLineIdentity = CatalogIdentityCandidate & {
+  matchedBy: "channel_variant_id" | "sku";
+  inventoryTracking?: boolean;
+};
+export type ResolvedCatalogOrderLineIdentity = ResolvedOrderLineIdentity | {
+  id: null; productId: number; sku: string | null; isActive: boolean;
+  compareAtPriceCents: null; inventoryTracking: boolean; matchedBy: "channel_product_id";
+};
 
 export class OrderLineIdentityError extends Error {
   readonly classification = "manual_review";
@@ -56,6 +68,10 @@ export function selectOrderLineCatalogIdentity(
   const external = channel[0];
   const sku = bySku[0];
   const selectedId = external?.id ?? sku?.id;
+  const selectedProductId = external?.productId ?? sku?.productId;
+  if (input.previousProductId != null && selectedProductId !== undefined && input.previousProductId !== selectedProductId) {
+    fail("ORDER_LINE_IDENTITY_CHANGE_REQUIRES_REVIEW", "Source identity would replace an existing catalog product");
+  }
   if (input.previousVariantId != null && selectedId !== undefined && input.previousVariantId !== selectedId) {
     fail("ORDER_LINE_IDENTITY_CHANGE_REQUIRES_REVIEW", "Source identity would replace the catalog identity of an existing order line");
   }
@@ -68,12 +84,18 @@ export function selectOrderLineCatalogIdentity(
     if (!external.isActive && input.previousVariantId !== external.id) {
       fail("ORDER_LINE_VARIANT_INACTIVE", "Channel variant is linked to an inactive catalog item");
     }
-    return { id: external.id, sku: external.sku, isActive: external.isActive,
-      compareAtPriceCents: external.compareAtPriceCents, matchedBy: "channel_variant_id" };
+    const { externalProductId: _externalProductId, ...catalogIdentity } = external;
+    return { ...catalogIdentity, ...(external.trackInventory !== undefined ? { inventoryTracking: external.trackInventory !== false } : {}), matchedBy: "channel_variant_id" };
   }
   // Historical bound identities may be inactive; new SKU-only assignments require an active catalog item.
   // Never fall back to an unscoped provider ID or a title.
-  return sku?.isActive ? { ...sku, matchedBy: "sku" } : null;
+  if (sku && input.externalProductId && sku.channelProductIds?.some(id => id !== input.externalProductId)) {
+    fail("ORDER_LINE_PRODUCT_IDENTITY_CONFLICT", "Source SKU belongs to a different product in this channel");
+  }
+  if (sku && input.externalVariantId && sku.channelVariantIds?.some(id => id !== input.externalVariantId)) {
+    fail("ORDER_LINE_VARIANT_IDENTITY_CONFLICT", "Source SKU belongs to a different variant in this channel");
+  }
+  return sku?.isActive ? { ...sku, ...(sku.trackInventory !== undefined ? { inventoryTracking: sku.trackInventory !== false } : {}), matchedBy: "sku" } : null;
 }
 
 /** Source SKU remains on OMS; WMS uses the catalog snapshot when an identity is resolved. */

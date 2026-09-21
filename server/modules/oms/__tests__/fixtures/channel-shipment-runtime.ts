@@ -8,15 +8,21 @@ export const channelShipmentRuntimeFixtureSql = `
     (singleton_key boolean PRIMARY KEY, authority text, revision bigint, activation_run_id bigint);
   CREATE TABLE channels.channels (id integer PRIMARY KEY, provider text);
   CREATE TABLE catalog.product_variants (id integer PRIMARY KEY, requires_shipping boolean NOT NULL,
-    track_inventory boolean);
+    track_inventory boolean,
+      inventory_tracking_override boolean
+    );
   CREATE TABLE oms.oms_orders (id bigint PRIMARY KEY, channel_id integer, external_order_id text);
   CREATE TABLE oms.oms_order_lines (id bigint PRIMARY KEY, order_id bigint, external_line_item_id text,
     paid_quantity integer, authority_fulfillable_quantity integer, product_variant_id integer, sku text,
-    requires_shipping boolean);
+    requires_shipping boolean,
+      catalog_product_id integer, inventory_tracking boolean
+    );
   CREATE TABLE oms.oms_order_line_authority_events (order_line_id bigint, paid_quantity integer);
   CREATE TABLE wms.orders (id integer PRIMARY KEY, warehouse_status text);
   CREATE TABLE wms.order_items (id integer PRIMARY KEY, order_id integer, oms_order_line_id bigint,
-    quantity integer, picked_quantity integer, status text, requires_shipping integer);
+    quantity integer, picked_quantity integer, status text, requires_shipping integer,
+      catalog_product_id integer, inventory_tracking boolean, sku varchar(100)
+    );
   CREATE TABLE inventory.inventory_transactions (id integer PRIMARY KEY, order_item_id integer,
     product_variant_id integer, transaction_type text, from_location_id integer, created_at timestamp);
   CREATE TABLE inventory.inventory_levels (warehouse_location_id integer, product_variant_id integer, variant_qty integer);

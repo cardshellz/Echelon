@@ -36,7 +36,7 @@ suite.sequential("receipt-aware planning source PostgreSQL guarantees", () => {
         "CREATE SCHEMA inventory",
         "CREATE SCHEMA catalog",
         "CREATE SCHEMA warehouse",
-        "CREATE TABLE catalog.product_variants(id integer PRIMARY KEY,product_id integer NOT NULL,units_per_variant integer NOT NULL,is_active boolean NOT NULL)",
+        "CREATE TABLE catalog.product_variants(id integer PRIMARY KEY,product_id integer NOT NULL,units_per_variant integer NOT NULL,is_active boolean NOT NULL,inventory_tracking_override boolean)",
         "CREATE TABLE warehouse.warehouse_locations(id integer PRIMARY KEY,location_type text)",
         "CREATE TABLE inventory.inventory_levels(product_variant_id integer NOT NULL REFERENCES catalog.product_variants(id),warehouse_location_id integer REFERENCES warehouse.warehouse_locations(id),variant_qty integer NOT NULL,reserved_qty integer NOT NULL DEFAULT 0)",
         "CREATE TABLE procurement.purchase_orders(id integer PRIMARY KEY,po_number text NOT NULL,status text NOT NULL,confirmed_delivery_date date,expected_delivery_date date)",
