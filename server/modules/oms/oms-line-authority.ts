@@ -18,6 +18,13 @@ export interface OmsLineAuthorityInput {
   financialStatus?: string | null;
   quantity: number | null | undefined;
   fulfillableQuantity?: number | null;
+  /**
+   * Shopify line `current_quantity`: the ordered quantity minus units removed
+   * by order edits or cancellation. This, not `fulfillable_quantity`, is the
+   * commercial ceiling for what the warehouse still owes. Null when the
+   * channel payload does not carry it.
+   */
+  currentQuantity?: number | null;
   previous?: {
     paidQuantity?: number | null;
     authorityFulfillableQuantity?: number | null;
@@ -106,6 +113,40 @@ function statusForQuantities(paidQuantity: number): OmsLineAuthorizationStatus {
   return "authorized";
 }
 
+/**
+ * Shopify's `fulfillable_quantity` is workflow permission, not demand. It
+ * drops to 0 while a fulfillment order is on hold (a merchant-of-record app
+ * such as Global-e processing an international order, a fraud check, an
+ * address problem), scheduled, or moving between locations, and it falls as
+ * units are fulfilled. None of those mean the customer no longer wants the
+ * goods (see channel-fulfillment-quantity-authority.ts: "remaining work, not a
+ * lifetime cap or a cancellation count").
+ *
+ * So a readiness refresh may RAISE authority (a hold or schedule is released)
+ * but may LOWER it only to `current_quantity`, the channel's record of units
+ * removed by an order edit or cancellation. Lowering on a hold used to cancel
+ * already-materialized WMS lines that were never restored when the hold lifted
+ * (order #63275, 2026-09-18).
+ *
+ * When `current_quantity` is absent, keep the legacy fulfillable-driven rule:
+ * without it an order-edit removal is indistinguishable from a hold, and
+ * picking units the customer removed is the costlier mistake.
+ */
+function refreshedReadinessAuthority(input: {
+  paidQuantity: number;
+  previousFulfillableQuantity: number;
+  incomingFulfillableQuantity: number;
+  incomingCurrentQuantity: number | null;
+}): number {
+  const raisedByReadiness = Math.max(
+    input.previousFulfillableQuantity,
+    input.incomingFulfillableQuantity,
+  );
+  const commercialCeiling =
+    input.incomingCurrentQuantity ?? input.incomingFulfillableQuantity;
+  return Math.min(input.paidQuantity, commercialCeiling, raisedByReadiness);
+}
+
 function coerceDate(value: Date | string | null | undefined): Date | null {
   if (!value) return null;
   const date = value instanceof Date ? value : new Date(value);
@@ -166,6 +207,10 @@ export function deriveOmsLineAuthority(
     input.fulfillableQuantity,
     "fulfillableQuantity",
   );
+  const incomingCurrentQuantity = finiteNonNegativeIntegerOrNull(
+    input.currentQuantity,
+    "currentQuantity",
+  );
   const previousAuthorizationStatus = String(
     input.previous?.authorizationStatus ??
       statusForQuantities(previousPaidQuantity),
@@ -181,7 +226,12 @@ export function deriveOmsLineAuthority(
     (previousAuthorizationStatus === "seen" ||
       previousAuthorizationStatus === "authorized");
   const authorityFulfillableQuantity = canRefreshOperationalReadiness
-    ? Math.min(paidQuantity, incomingFulfillableQuantity)
+    ? refreshedReadinessAuthority({
+      paidQuantity,
+      previousFulfillableQuantity,
+      incomingFulfillableQuantity,
+      incomingCurrentQuantity,
+    })
     : Math.min(previousFulfillableQuantity, paidQuantity);
 
   return {

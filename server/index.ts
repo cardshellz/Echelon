@@ -55,7 +55,8 @@ import { registerOmsWebhooks } from "./modules/oms/oms-webhooks";
 import { startShopifyBridgeListener } from "./modules/oms/shopify-bridge";
 import { eq, and, sql } from "drizzle-orm";
 import { dispatchShipmentEvent, recomputeOrderStatusFromShipments } from "./modules/orders/shipment-rollup";
-import { cancelWmsOrderAndRelease, completeWmsOrderAndRelease } from "./modules/orders/cancel-wms-order";
+import { cancelWmsOrderAndRelease } from "./modules/orders/cancel-wms-order";
+import { runStartupZombieOrderRepair } from "./modules/orders/zombie-order-repair";
 import { setPickQueueReservationService } from "./modules/orders/orders.storage";
 import { engineRefFromRow, toEngineRef } from "./modules/shipping";
 import { startCarrierTrackingReconciliationScheduler } from "./modules/shipping/carrier-tracking-reconciliation.scheduler";
@@ -1137,47 +1138,15 @@ function startEchelonSyncScheduler(
   setTimeout(async () => {
     try {
       // Zombie orders: active warehouse_status but no pending shippable items.
-      // These get stuck in the pick queue forever because nothing triggers
-      // their status transition.
-      const zombieCandidates: any = await db.execute(sql`
-        SELECT o.id, o.order_number,
-          CASE
-            WHEN NOT EXISTS (
-              SELECT 1 FROM wms.order_items ai WHERE ai.order_id = o.id
-            ) THEN 'cancelled'
-            WHEN EXISTS (
-              SELECT 1 FROM wms.order_items ai
-              WHERE ai.order_id = o.id
-                AND ai.status NOT IN ('cancelled')
-            ) THEN 'completed'
-            ELSE 'cancelled'
-          END AS target_status
-        FROM wms.orders o
-        WHERE o.warehouse_status IN ('ready', 'in_progress', 'partially_shipped', 'ready_to_ship')
-          AND NOT EXISTS (
-            SELECT 1 FROM wms.order_items oi
-            WHERE oi.order_id = o.id
-              AND COALESCE(oi.requires_shipping, 1) <> 0
-              AND COALESCE(oi.quantity, 0) > 0
-              AND oi.status NOT IN ('cancelled', 'completed', 'short')
-              -- physically picked = not pickable, whatever the label says
-              AND COALESCE(oi.picked_quantity, 0) < COALESCE(oi.quantity, 0)
-          )
-      `);
-      const zombieFixed: string[] = [];
-      for (const row of zombieCandidates.rows as any[]) {
-        // Terminal transitions must release leftover reservations (P0.1c /
-        // 'completed'-status fix) — raw transitions here leaked them.
-        const result = row.target_status === "cancelled"
-          ? await cancelWmsOrderAndRelease(db, services.reservation, row.id, "zombie_data_repair")
-          : await completeWmsOrderAndRelease(db, services.reservation, row.id, "zombie_data_repair");
-        if (result.transitioned) {
-          zombieFixed.push(`${row.order_number}→${row.target_status}`);
-        }
-      }
-      if (zombieFixed.length > 0) {
-        console.warn(`[Data Repair] Transitioned ${zombieFixed.length} zombie order(s) with no pending items:`,
-          zombieFixed.join(', '));
+      // Orders whose live OMS order still owes units are skipped and reported
+      // (see zombie-order-repair.ts) rather than cancelled out from under it.
+      const { transitioned } = await runStartupZombieOrderRepair({
+        db,
+        reservation: services.reservation,
+      });
+      if (transitioned.length > 0) {
+        console.warn(`[Data Repair] Transitioned ${transitioned.length} zombie order(s) with no pending items:`,
+          transitioned.join(', '));
       }
     } catch (err: any) {
       console.warn("[Data Repair] Zombie-order reconciliation error:", err?.message);

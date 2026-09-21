@@ -242,6 +242,7 @@ function buildOmsWmsOrderScope(omsOrderId: number, fulfillmentPartitionKey: stri
 
 type WmsReconciliationAutoRepairRule =
   | "materialize_authorized_oms_line"
+  | "restore_cancelled_line_for_recovered_authority"
   | "create_missing_initial_shipment"
   | "attach_authorized_line_to_planned_shipment"
   | "attach_authorized_line_to_editable_engine_order"
@@ -249,6 +250,7 @@ type WmsReconciliationAutoRepairRule =
 
 type WmsReconciliationManualReviewRule =
   | "picked_quantity_exceeds_oms_authority"
+  | "restored_line_inventory_claim_not_reconciled"
   | "edit_removed_picked_wms_item"
   | "edit_picked_quantity_exceeds_oms_authority"
   | "ambiguous_late_edit_shipment_target"
@@ -2026,6 +2028,161 @@ export class WmsSyncService {
     return { updated: true, sortRankChanged, promoted };
   }
 
+  /**
+   * Restore a cancelled, never-picked WMS line whose OMS authority is owed
+   * again. Line-level cancellation is always authority-driven, so positive
+   * remaining authority means the cancellation was transient: before
+   * 2026-09-21 a Shopify fulfillment hold could zero authority for minutes and
+   * cancel the line (order #63275). Nothing else re-materializes it — the
+   * missing-line insert and its duplicate guard both treat any existing row,
+   * cancelled included, as present.
+   *
+   * Uses the missing-line insert's per-order advisory lock and OMS line row
+   * locks, re-checks the item under lock, and restores only the quantity still
+   * unmaterialized, so concurrent syncs cannot double-materialize the line.
+   */
+  private async restoreCancelledLineForRecoveredAuthority(args: {
+    omsOrderId: number;
+    wmsOrderId: number;
+    wmsItem: {
+      id: number;
+      omsOrderLineId: number | null;
+      sku: string | null;
+      pickedQuantity: number | null;
+      fulfilledQuantity: number | null;
+    };
+    omsLine: {
+      quantity?: number | null;
+      authorityFulfillableQuantity?: number | null;
+      wmsMaterializedQuantity?: number | null;
+    } | undefined;
+  }): Promise<void> {
+    const { omsOrderId, wmsOrderId, wmsItem } = args;
+    const omsOrderLineId = wmsItem.omsOrderLineId;
+    if (!omsOrderLineId || !args.omsLine) return;
+    if ((wmsItem.pickedQuantity ?? 0) > 0 || (wmsItem.fulfilledQuantity ?? 0) > 0) return;
+    if (getOmsLineRemainingMaterializableQuantity(args.omsLine) <= 0) return;
+
+    const restored = await db.transaction(async (tx: any) => {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(918407, ${omsOrderId})`);
+
+      const lockedLine = (await this.lockOmsLinesForMaterialization(tx, omsOrderId))
+        .find((candidate) => candidate.id === omsOrderLineId);
+      if (!lockedLine) return null;
+      const restorableQuantity = getOmsLineRemainingMaterializableQuantity(lockedLine);
+      if (restorableQuantity <= 0) return null;
+
+      const lockedItemResult = await tx.execute(sql`
+        SELECT status, quantity, picked_quantity, fulfilled_quantity
+        FROM wms.order_items
+        WHERE id = ${wmsItem.id} AND order_id = ${wmsOrderId}
+        FOR UPDATE
+      `);
+      const lockedItem = lockedItemResult.rows?.[0];
+      if (
+        !lockedItem ||
+        lockedItem.status !== "cancelled" ||
+        Number(lockedItem.picked_quantity ?? 0) > 0 ||
+        Number(lockedItem.fulfilled_quantity ?? 0) > 0
+      ) {
+        return null;
+      }
+
+      const reconciled = await reconcileWmsOrderItemAuthority(tx, {
+        itemId: wmsItem.id,
+        orderId: wmsOrderId,
+        authorityQuantity: restorableQuantity,
+      });
+      await this.incrementOmsLineMaterializedQuantities(tx, [
+        { omsOrderLineId, quantity: restorableQuantity },
+      ]);
+      await this.recordWmsReconciliationAuditEvent(
+        tx,
+        omsOrderId,
+        "restore_cancelled_line_for_recovered_authority",
+        {
+          wmsOrderId,
+          wmsOrderItemId: wmsItem.id,
+          omsOrderLineId,
+          sku: wmsItem.sku,
+          before: { status: "cancelled", quantity: Number(lockedItem.quantity ?? 0) },
+          after: { status: reconciled.status, quantity: restorableQuantity },
+        },
+      );
+      return { quantity: restorableQuantity, status: reconciled.status };
+    });
+
+    if (!restored) return;
+    console.log(
+      `[WMS Sync] Restored cancelled item ${wmsItem.sku} (id ${wmsItem.id}) on WMS order ${wmsOrderId}: ` +
+        `qty 0 -> ${restored.quantity}, status cancelled -> ${restored.status} (OMS authority recovered)`,
+    );
+
+    // Re-claim inventory for the restored line. It is not an orphan (its
+    // original shipment row survived), so the reservation boundary later in
+    // this reconcile never sees it — why the manual #63275 restore stayed
+    // unreserved. reconcileOrderDemand releases and re-reserves the whole
+    // order, idempotent by construction. Called after commit with no
+    // dbOverride: the same pattern edit propagation uses, and the only one the
+    // canonical claim service accepts (it owns its serializable transactions).
+    // A retry cannot recover a failed claim here — the next sync sees the line
+    // already restored — so a failure becomes a durable review exception
+    // (surfaced by the Operations Control Tower) rather than a throw.
+    try {
+      const claim = await this.services.reservation.reconcileOrderDemand({
+        orderId: wmsOrderId,
+        sourceEventId: `wms_line_restore:${wmsItem.id}`,
+        demandChanged: true,
+        reason: "Cancelled line restored after OMS authority recovered — reconciling inventory claim",
+      });
+      console.log(
+        `[WMS Sync] Re-claimed inventory for restored WMS order ${wmsOrderId}: ` +
+          `reserved=${claim?.reservation?.reserved ?? 0}, failed=${claim?.reservation?.failed?.length ?? 0}`,
+      );
+    } catch (err: any) {
+      const message = err?.message ?? String(err);
+      console.error(JSON.stringify({
+        level: "error",
+        code: "WMS_LINE_RESTORE_CLAIM_NOT_RECONCILED",
+        action: "restore_cancelled_line",
+        outcome: "claim_failed",
+        error_code: err?.code ?? null,
+        message,
+        context: {
+          oms_order_id: omsOrderId,
+          wms_order_id: wmsOrderId,
+          wms_order_item_id: wmsItem.id,
+          oms_order_line_id: omsOrderLineId,
+        },
+      }));
+      try {
+        await this.recordWmsReconciliationReviewException(db, {
+          rule: "restored_line_inventory_claim_not_reconciled",
+          source: "reconcileExistingWmsOrderLines",
+          omsOrderId,
+          wmsOrderId,
+          wmsOrderItemId: wmsItem.id,
+          omsOrderLineId,
+          sku: wmsItem.sku,
+          omsQuantity: restored.quantity,
+          wmsQuantity: restored.quantity,
+          pickedQuantity: 0,
+          summary:
+            `Restored WMS item ${wmsItem.id} (${restored.quantity} units) but its inventory ` +
+            `claim was not reconciled`,
+          reviewMessage: message,
+        });
+      } catch (recordErr: any) {
+        // The structured error above is the surviving signal; never let the
+        // bookkeeping failure undo a correct line restore.
+        console.error(
+          `[WMS Sync] Failed to record claim review exception for WMS item ${wmsItem.id}: ` +
+            `${recordErr?.message ?? recordErr}`,
+        );
+      }
+    }
+  }
+
   private async reconcileExistingWmsOrderLines(
     omsOrderId: number,
     wmsOrderId: number,
@@ -2092,7 +2249,15 @@ export class WmsSyncService {
     const omsLineById = new Map(omsLines.map((line) => [line.id, line]));
     for (const wmsItem of existingItems) {
       if (!wmsItem.omsOrderLineId) continue;
-      if (wmsItem.status === "cancelled") continue;
+      if (wmsItem.status === "cancelled") {
+        await this.restoreCancelledLineForRecoveredAuthority({
+          omsOrderId,
+          wmsOrderId,
+          wmsItem,
+          omsLine: omsLineById.get(wmsItem.omsOrderLineId),
+        });
+        continue;
+      }
 
       const omsLine = omsLineById.get(wmsItem.omsOrderLineId);
       const omsQty = omsLine ? getOmsLineMaterializableQuantity(omsLine) : 0;

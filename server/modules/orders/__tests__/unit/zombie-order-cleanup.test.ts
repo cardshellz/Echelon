@@ -55,11 +55,21 @@ describe("Startup zombie repair", () => {
     resolve(__dirname, "../../../../index.ts"),
     "utf-8",
   );
-
-  const repairSection = INDEX_SRC.slice(
-    INDEX_SRC.indexOf("Zombie orders: active warehouse_status"),
-    INDEX_SRC.indexOf("Shipped-order cleanup error"),
+  // The repair SQL moved out of index.ts into zombie-order-repair.ts (2026-09-21).
+  const repairSection = readFileSync(
+    resolve(__dirname, "../../zombie-order-repair.ts"),
+    "utf-8",
   );
+
+  it("is still wired into startup", () => {
+    expect(INDEX_SRC).toContain("runStartupZombieOrderRepair({");
+  });
+
+  it("guards terminal transitions against live OMS demand", () => {
+    expect(repairSection).toContain(
+      "${LIVE_OMS_DEMAND_NOT_CARRIED_BY_WMS_ORDER_O} AS oms_still_owes_unmaterialized_units",
+    );
+  });
 
   it("targets orders in active pick-queue statuses", () => {
     expect(repairSection).toContain("'ready', 'in_progress', 'partially_shipped', 'ready_to_ship'");
