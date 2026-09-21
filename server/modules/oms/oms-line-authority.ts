@@ -48,6 +48,7 @@ const AUTHORIZING_TOPICS = new Set([
   "ebay/orders",
   "ebay/poll",
   "ebay/webhook",
+  "walmart/acknowledged",
   "manual/create",
   "shopify/bridge",
   // Operator/reconciler backfill: re-authorize a paid line that was left
@@ -128,16 +129,33 @@ export function deriveOmsLineAuthority(
       input.fulfillableQuantity,
       "fulfillableQuantity",
     );
+    const dispositionCap = input.sourceTopic === "walmart/acknowledged"
+      ? Math.max(0, observedQuantity
+        - requireNonNegativeInteger(input.previous?.cancelledQuantity, "previous.cancelledQuantity")
+        - requireNonNegativeInteger(input.previous?.refundedQuantity, "previous.refundedQuantity"))
+      : observedQuantity;
     const authorityFulfillableQuantity = Math.min(
       observedQuantity,
+      dispositionCap,
       fulfillableQuantity ?? observedQuantity,
     );
+    let authorizationStatus = statusForQuantities(observedQuantity);
+    if (input.sourceTopic === "walmart/acknowledged" && dispositionCap < observedQuantity) {
+      const previousStatus = input.previous?.authorizationStatus;
+      switch (previousStatus) {
+        case "cancelled": case "partially_cancelled": case "refunded": case "partially_refunded":
+          authorizationStatus = previousStatus;
+          break;
+        default:
+          authorizationStatus = "review";
+      }
+    }
 
     return {
       channelObservedQuantity: observedQuantity,
       paidQuantity: observedQuantity,
       authorityFulfillableQuantity,
-      authorizationStatus: statusForQuantities(observedQuantity),
+      authorizationStatus,
       authorizedAt: input.now ?? new Date(),
       authorizedByEventId: input.sourceEventId ?? null,
       authoritySourceTopic: input.sourceTopic,

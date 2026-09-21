@@ -218,6 +218,7 @@ export const inventoryChannelExposureAdminViewSchema = z.object({
       // Shopify only: the primary inventory location saved on the connection.
       // A suggestion for destination setup, never an implicit target scope.
       shopifyLocationId: z.string().trim().min(1).max(50).nullable(),
+      providerLocationId: z.string().trim().min(1).max(100).nullable().optional(),
       // eBay only: the provider-verified seller account behind the OAuth
       // credential. Account-scoped destinations must name exactly this id.
       providerAccount: z.object({
@@ -363,6 +364,7 @@ export const createInventoryPublicationTargetRequestSchema = z.object({
 export const PUBLICATION_PROVIDER_SCOPE_TYPES = {
   shopify: "location",
   ebay: "account",
+  walmart: "location",
 } as const satisfies Record<string, "account" | "location">;
 export type PublicationAdapterProvider = keyof typeof PUBLICATION_PROVIDER_SCOPE_TYPES;
 
@@ -416,6 +418,7 @@ export const CHANNEL_DESTINATION_SKIP_REASONS = [
   "no_publishing_adapter",
   "no_verified_account",
   "no_shopify_location",
+  "no_provider_location",
 ] as const;
 export const channelDestinationSkipReasonSchema = z.enum(CHANNEL_DESTINATION_SKIP_REASONS);
 export type ChannelDestinationSkipReason = z.infer<typeof channelDestinationSkipReasonSchema>;

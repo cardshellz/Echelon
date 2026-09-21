@@ -160,6 +160,9 @@ implements InventoryChannelExposureAdminStore {
         AND btrim(external_account_id) <> ''
         AND external_account_verified_at IS NOT NULL
     `));
+    const walmartRows = channelRows.some(row => row.provider === "walmart")
+      ? rows(await this.database.execute(sql`SELECT connection_id,ship_node_id FROM channels.walmart_connections`)) : [];
+    const walmartLocations = new Map(walmartRows.map(row => [Number(row.connection_id), String(row.ship_node_id)]));
     const dropshipStoreRows = rows(await this.database.execute(sql`
       SELECT connection.id, connection.vendor_id, vendor.business_name AS vendor_name,
              connection.platform, connection.status,
@@ -301,6 +304,7 @@ implements InventoryChannelExposureAdminStore {
             shopifyLocationId: String(row.provider) === "shopify"
               ? nullableText(connection.shopify_location_id)
               : null,
+            providerLocationId: walmartLocations.get(Number(connection.id)) ?? null,
             providerAccount: String(row.provider) === "ebay"
               ? ebayAccountsByChannelEnvironment.get(`${channelId}:${String(connection.environment)}`)
                 ?? null
@@ -2171,10 +2175,15 @@ async function loadDerivableConnections(
   `));
   const verifiedByEnvironment = new Map(ebayAccountRows.map((row) =>
     [String(row.environment), String(row.external_account_id)] as const));
+  const walmartRows = connectionRows.some(row => row.provider === "walmart")
+    ? rows(await tx.execute(sql`SELECT connection_id, ship_node_id FROM channels.walmart_connections WHERE channel_id = ${channelId}`))
+    : [];
+  const walmartLocations = new Map(walmartRows.map(row => [Number(row.connection_id), String(row.ship_node_id)]));
   return connectionRows.map((row) => ({
     id: positiveInteger(row.id, "connection.id"),
     provider: String(row.provider),
     shopifyLocationId: nullableText(row.shopify_location_id),
+    providerLocationId: walmartLocations.get(Number(row.id)) ?? null,
     verifiedAccountId: verifiedByEnvironment.get(String(row.environment)) ?? null,
     label: String(row.label),
   }));

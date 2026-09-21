@@ -179,7 +179,7 @@ function legacyShipmentIdsFromCommand(
   return Object.freeze([...new Set(parsed.data)].sort((left, right) => left - right));
 }
 
-function providerCommandInput(
+export function providerCommandInput(
   command: ClaimedChannelFulfillmentCommand,
 ): ChannelFulfillmentProviderCommandInput {
   const savedShipmentIds = legacyShipmentIdsFromCommand(command);
