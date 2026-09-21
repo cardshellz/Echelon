@@ -35,13 +35,17 @@ production activation; it will affect ordinary purchases of multiple units.
 - `walmart-order.domain.ts`: exact USD cents, quantity/status validation, purchase
   order and line identity, shipping deadline and service level, monotonic
   cancellation disposition. Existing order or line price changes require review.
-- `walmart-connection.repository.ts/reconcileOrderState`: transactional header and
-  cancellation reconciliation with before/after quantities in OMS events. WMS uses
-  the configured warehouse through the optional channel warehouse resolver.
+- `mapWalmartOrderObservation` normalizes provider states into the OMS-owned
+  `ChannelOrderObservationWriter` API. `PostgresChannelOrderObservationWriter`
+  performs transactional header/cancellation reconciliation with before/after
+  quantities in OMS events and verifies channel, provider, order and line identity.
+  WMS uses the configured warehouse through the optional channel warehouse resolver.
 - `walmart.adapter.ts`: canonical inventory outbox only; verifies the connection,
   ship node, exact SKU mapping and supply warehouse. Publishes absolute quantities
   and reads them back. Channel Inventory derives the saved Walmart node and retains
   its existing preview/activation controls. Saving the connection does not publish.
+  Supply facts come through inventory-planning's `InventoryPublicationSupplyReader`;
+  missing, inactive and other-warehouse sources cannot authorize positive stock.
 - `walmart-fulfillment.ts`: executes existing durable fulfillment commands after
   exact persisted OMS/WMS/package lineage checks. Rejects cancelled/refunded authority
   and voided/superseded labels. Reads Walmart before retrying and confirms tracking
@@ -57,6 +61,11 @@ File names without a directory above are under
 `migrations/`. Shared integrations are in `server/services/index.ts`,
 `server/modules/oms/oms-line-authority.ts`, `fulfillment-push.service.ts`, and
 `wms-sync.service.ts`.
+The observation API and PostgreSQL writer are in `server/modules/oms/`; the supply
+read API and implementation are in inventory-planning's `application/` and
+`infrastructure/` directories. Channels does not write OMS tables or query the
+inventory-planning foundation directly. The writer baseline adds only the three
+new channel-owned Walmart tables; the existing architecture guards remain active.
 
 ## Explicit limitations and failure modes
 
@@ -133,6 +142,14 @@ PostgreSQL tests. Production client/server build passed.
 The Walmart PostgreSQL suite is registered in the explicit CI manifest (89 files,
 up from 88); all 42 CI coverage/isolation guard tests also passed. The guard retains
 the prior suite inventory and verifies the new suite runs in an isolated database.
+
+The ownership-boundary follow-up passes both previously failing architecture suites,
+the Walmart regression tests and 11 disposable PostgreSQL tests (including exact
+order identity and rollback after a later line's financial failure). The full local
+unit run passed 14,239 tests; three existing Dropship migration assertions failed on
+Windows CRLF copies and all 17 tests in those three files passed with the committed
+LF content. The original bytes were restored; those migrations are unchanged.
+Application, full server/client test TypeScript checks, and the production build passed.
 
 ## Official contract references
 

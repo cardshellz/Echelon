@@ -3,15 +3,17 @@ import { WalmartAdapter } from "../../adapters/walmart/walmart.adapter";
 import { WalmartChannelService } from "../../adapters/walmart/walmart-channel.service";
 import { ChannelInventoryPublicationTransportAdapter } from "../../channel-inventory-publication-transport.adapter";
 import { deriveChannelDestinations } from "../../../inventory-planning/domain/inventory-channel-exposure";
+import type { InventoryPublicationSourceWarehouse } from "../../../inventory-planning/application/inventory-publication-supply-read.port";
 
 function setup() {
   const api = { setInventory: vi.fn(), inventory: vi.fn(async () => 5) };
-  const row = { connection_id: 2, ship_node_id: "NODE", environment: "production", channel_id: 1 };
+  const row = { connection_id: 2, ship_node_id: "NODE", environment: "production", channel_id: 1, warehouse_id: 4 };
   const service = { connection: vi.fn(async () => row), requireRuntime: vi.fn(), api: () => api,
-    repository: { withLock: vi.fn(async (_id, action) => action()), assertWarehouse: vi.fn(), assertInventorySupply: vi.fn(),
+    repository: { withLock: vi.fn(async (_id, action) => action()), assertWarehouse: vi.fn(),
       mappings: vi.fn(async () => [{ product_variant_id: 3, channel_sku: "SKU" }]) } };
-  const adapter = new WalmartAdapter(service as unknown as WalmartChannelService);
-  return { api, service, adapter, transport: new ChannelInventoryPublicationTransportAdapter(adapter) };
+  const supply = { getSourceWarehouses: vi.fn(async (): Promise<ReadonlyArray<InventoryPublicationSourceWarehouse>> => [{ warehouseId: 4, isActive: true }]) };
+  const adapter = new WalmartAdapter(service as unknown as WalmartChannelService, supply);
+  return { api, service, supply, adapter, transport: new ChannelInventoryPublicationTransportAdapter(adapter) };
 }
 describe("Walmart exact inventory destination", () => {
   const request = { channelId: 1, productVariantId: 3, externalSku: "SKU", externalInventoryItemId: "SKU", desiredQuantity: 0,
@@ -20,9 +22,9 @@ describe("Walmart exact inventory destination", () => {
     const s = setup();
     expect((await s.transport.publishAbsolute(request)).publishedQuantity).toBe(0);
     expect(s.api.setInventory).toHaveBeenCalledWith("SKU", "NODE", 0);
-    expect(s.service.repository.assertInventorySupply).not.toHaveBeenCalled();
+    expect(s.supply.getSourceWarehouses).not.toHaveBeenCalled();
     await s.transport.publishAbsolute({ ...request, desiredQuantity: 5 });
-    expect(s.service.repository.assertInventorySupply).toHaveBeenCalledOnce();
+    expect(s.supply.getSourceWarehouses).toHaveBeenCalledWith({ channelId: 1, channelConnectionId: 2, providerScopeType: "location", externalScopeId: "NODE" });
     expect(s.service.connection).toHaveBeenCalledWith(1, 2);
     expect((await s.transport.readAbsolute(request)).observedQuantity).toBe(5);
   });
@@ -36,6 +38,17 @@ describe("Walmart exact inventory destination", () => {
     const s = setup();
     await expect(s.adapter.pushInventory(1, [])).rejects.toMatchObject({ code: "WALMART_PUBLICATION_AUTHORITY_REQUIRED" });
     expect(s.api.setInventory).not.toHaveBeenCalled();
+  });
+  it.each([
+    [], [{ warehouseId: 5, isActive: true }], [{ warehouseId: null, isActive: true }],
+    [{ warehouseId: 4, isActive: false }], [{ warehouseId: 4, isActive: true }, { warehouseId: 5, isActive: false }],
+  ])("rejects incomplete or conflicting planning supply before publishing: %j", async (...sources) => {
+    const s = setup();
+    s.supply.getSourceWarehouses.mockResolvedValue(sources);
+    await expect(s.transport.publishAbsolute({ ...request, desiredQuantity: 5 })).rejects.toMatchObject({ code: "WALMART_INVENTORY_SUPPLY_MISMATCH" });
+    expect(s.api.setInventory).not.toHaveBeenCalled();
+    // A conservative zero does not depend on an active stock source.
+    await expect(s.transport.publishAbsolute(request)).resolves.toMatchObject({ publishedQuantity: 0 });
   });
   it("derives the verified Walmart node without borrowing a Shopify location", () => {
     const base = { id: 2, provider: "walmart", shopifyLocationId: "UNRELATED", verifiedAccountId: null, label: "Walmart" };

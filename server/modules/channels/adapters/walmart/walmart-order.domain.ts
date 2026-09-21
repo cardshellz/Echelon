@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import Decimal from "decimal.js";
 import type { OrderData } from "../../../oms/oms.service";
+import { channelOrderObservationSchema, type ChannelOrderObservation } from "../../../oms/channel-order-observation";
 import { WalmartApiError } from "./walmart-client";
 import type { WalmartOrder } from "./walmart-us-api";
 
@@ -22,19 +23,22 @@ function invalid(code: string, message: string) { return new WalmartApiError(cod
 export function walmartOrderHash(order: unknown): string {
   return createHash("sha256").update(JSON.stringify(order)).digest("hex");
 }
-export interface WalmartLineDisposition {
-  quantity: number; cancelled_quantity: number; refunded_quantity: number;
-  authority_fulfillable_quantity: number; authorization_status: string;
-}
-export function reconcileWalmartLineDisposition(line: WalmartOrder["orderLines"]["orderLine"][number], before: WalmartLineDisposition): WalmartLineDisposition {
-  const cancelled = line.orderLineStatuses.orderLineStatus.filter(state => state.status === "Cancelled")
-    .reduce((sum, state) => sum + state.statusQuantity.amount, 0);
-  if (before.quantity !== line.orderLineQuantity.amount || before.cancelled_quantity > cancelled || before.refunded_quantity > 0) {
-    throw invalid("WALMART_AUTHORITY_CONFLICT", "Provider order conflicts with an existing quantity, cancellation or refund disposition");
-  }
-  return { ...before, cancelled_quantity: cancelled,
-    authority_fulfillable_quantity: Math.min(before.authority_fulfillable_quantity, before.quantity - cancelled),
-    authorization_status: cancelled === before.quantity ? "cancelled" : cancelled > 0 ? "partially_cancelled" : before.authorization_status };
+/** Normalize provider states; OMS owns persisted comparisons and disposition writes. */
+export function mapWalmartOrderObservation(channelId: number, orderId: number, order: WalmartOrder, data: OrderData, now: Date): ChannelOrderObservation {
+  return channelOrderObservationSchema.parse({
+    channelId, orderId, provider: "walmart", externalOrderId: order.purchaseOrderId,
+    actor: "walmart-order-poller", observedAt: now, sourceEventId: data.sourceEventId,
+    status: data.status, fulfillmentStatus: data.fulfillmentStatus, rawPayload: order,
+    subtotalCents: data.subtotalCents, shippingCents: data.shippingCents, taxCents: data.taxCents, totalCents: data.totalCents,
+    lines: order.orderLines.orderLine.map(line => {
+      const mapped = data.lineItems.find(item => item.externalLineItemId === line.lineNumber);
+      return { externalLineItemId: line.lineNumber, quantity: line.orderLineQuantity.amount,
+        cancelledQuantity: line.orderLineStatuses.orderLineStatus.filter(state => state.status === "Cancelled")
+          .reduce((total, state) => total + state.statusQuantity.amount, 0),
+        paidPriceCents: mapped?.paidPriceCents, totalCents: mapped?.totalCents,
+        providerStates: line.orderLineStatuses.orderLineStatus };
+    }),
+  });
 }
 export function validateWalmartOrderScope(order: WalmartOrder, shipNodeId: string): void {
   if (order.shipNode.type !== "SellerFulfilled" || order.shipNode.id !== shipNodeId) {

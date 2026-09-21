@@ -131,6 +131,8 @@ import { WalmartChannelService } from "../modules/channels/adapters/walmart/walm
 import { WalmartConnectionRepository } from "../modules/channels/adapters/walmart/walmart-connection.repository";
 import { WalmartAdapter } from "../modules/channels/adapters/walmart/walmart.adapter";
 import { WalmartOrderPollService } from "../modules/channels/adapters/walmart/walmart-order-poll.service";
+import { PostgresChannelOrderObservationWriter } from "../modules/oms/channel-order-observation.repository";
+import { PostgresInventoryPublicationSupplyReader } from "../modules/inventory-planning/infrastructure/inventory-publication-supply-read.repository";
 import { createWalmartFulfillmentExecutor } from "../modules/channels/adapters/walmart/walmart-fulfillment";
 import { AesGcmFulfillmentProviderCredentialCipher } from "../modules/shipping-engine/infrastructure/fulfillment-provider-credential-cipher";
 import { createEbayAdapter } from "../modules/channels/adapters/ebay.adapter";
@@ -376,7 +378,7 @@ export function createServices(
       SHIPPING_PROVIDER_CREDENTIAL_ENCRYPTION_KEY: process.env.WALMART_CREDENTIAL_ENCRYPTION_KEY,
       SHIPPING_PROVIDER_CREDENTIAL_KEY_ID: process.env.WALMART_CREDENTIAL_KEY_ID,
     }), { liveEnabled: envFlagEnabled("WALMART_LIVE_ENABLED"), productionServer: process.env.NODE_ENV === "production" });
-  const walmartAdapter = new WalmartAdapter(walmart);
+  const walmartAdapter = new WalmartAdapter(walmart, new PostgresInventoryPublicationSupplyReader(databasePool));
   const adapterRegistry = new ChannelAdapterRegistry();
   adapterRegistry.register(shopifyAdapter);
   adapterRegistry.register(ebayAdapter);
@@ -673,7 +675,8 @@ export function createServices(
 
   // SyncRecovery — unified order-pipeline gap recovery (Shopify → shopify_orders
   // → OMS → WMS). Runs on a schedule and is exposed via /api/sync/recover-orders.
-  const walmartOrderPoll = new WalmartOrderPollService(walmart, oms, id => wmsSync.syncOmsOrderToWms(id));
+  const walmartOrderPoll = new WalmartOrderPollService(walmart, oms, id => wmsSync.syncOmsOrderToWms(id),
+    new PostgresChannelOrderObservationWriter(databasePool));
   const syncRecovery = new SyncRecoveryService(db, { oms, wmsSync, shipStation });
 
   return {

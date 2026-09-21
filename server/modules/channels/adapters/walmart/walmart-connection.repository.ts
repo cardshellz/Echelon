@@ -3,10 +3,7 @@ import { z } from "zod";
 import { walmartStatusSchema, type WalmartChannelStatus, type WalmartConnectInput } from "@shared/types/walmart-channel";
 import type { FulfillmentProviderCredentialRecord } from "../../../shipping-engine/application/connected-fulfillment-method-catalog.service";
 import { WalmartApiError } from "./walmart-client";
-import type { WalmartOrder } from "./walmart-us-api";
-import type { OrderData } from "../../../oms/oms.service";
 import { VARIANT_SALES_ELIGIBILITY_LOCK_NAMESPACE } from "@shared/catalog/variant-sales-eligibility";
-import { reconcileWalmartLineDisposition, type WalmartLineDisposition } from "./walmart-order.domain";
 
 const LOCK_NAMESPACE = 94122;
 const positiveId = z.number().int().positive().max(2_147_483_647);
@@ -155,19 +152,6 @@ export class WalmartConnectionRepository {
     }
     return { warehouseId: positiveId.parse(row.warehouse_id), warehouseType: z.string().min(1).parse(row.warehouse_type) };
   }
-  async assertInventorySupply(row: WalmartConnectionRecord): Promise<void> {
-    const supply = await this.query<{ warehouse_id: number }>(`SELECT DISTINCT node.warehouse_id
-      FROM inventory.inventory_publication_targets target
-      JOIN inventory.publication_source_binding_heads head ON head.publication_target_id=target.id
-      JOIN inventory.publication_source_binding_versions binding ON binding.id=head.active_binding_id AND binding.lifecycle_status='sealed'
-      JOIN inventory.publication_source_binding_members member ON member.binding_id=head.active_binding_id
-      JOIN warehouse.fulfillment_nodes node ON node.id=member.fulfillment_node_id AND node.lifecycle_status='active'
-      WHERE target.destination_kind='channel_connection' AND target.channel_id=$1 AND target.channel_connection_id=$2
-        AND target.provider_scope_type='location' AND target.external_scope_id=$3`, [row.channel_id,row.connection_id,row.ship_node_id]);
-    if (supply.rows.length !== 1 || supply.rows[0].warehouse_id !== row.warehouse_id) {
-      throw new WalmartApiError("WALMART_INVENTORY_SUPPLY_MISMATCH", "Walmart stock must come only from its configured fulfillment warehouse", false);
-    }
-  }
   async exceptions(channelId: number) {
     const result = await this.query<{ purchase_order_id: string; error_code: string; observed_at: Date }>(`SELECT purchase_order_id,error_code,observed_at
       FROM channels.walmart_order_receipts WHERE channel_id=$1 AND status='failed' ORDER BY observed_at DESC,purchase_order_id LIMIT 50`, [channelId]);
@@ -221,11 +205,6 @@ export class WalmartConnectionRepository {
       FROM channels.walmart_order_receipts WHERE channel_id=$1 AND purchase_order_id=$2`, [channelId, purchaseOrderId])).rows[0];
     return row ? { ...row, oms_order_id: row.oms_order_id === null ? null : z.coerce.number().int().positive().safe().parse(row.oms_order_id) } : null;
   }
-  async findOrder(channelId: number, purchaseOrderId: string): Promise<number | null> {
-    const result = await this.query("SELECT id FROM oms.oms_orders WHERE channel_id=$1 AND external_order_id=$2", [channelId, purchaseOrderId]);
-    if (result.rows.length > 1) throw new WalmartApiError("WALMART_OMS_IDENTITY_AMBIGUOUS", "Multiple OMS orders share this Walmart purchase order identity", false);
-    return result.rows[0] ? z.coerce.number().int().positive().safe().parse(result.rows[0].id) : null;
-  }
   async recordReceipt(channelId: number, purchaseOrderId: string, hash: string, status: "processing" | "completed" | "failed" | "ignored",
     orderId: number | null, errorCode: string | null, now: Date): Promise<void> {
     await this.query(`INSERT INTO channels.walmart_order_receipts (channel_id,purchase_order_id,source_hash,status,oms_order_id,error_code,observed_at,completed_at)
@@ -234,38 +213,6 @@ export class WalmartConnectionRepository {
       oms_order_id=COALESCE(EXCLUDED.oms_order_id,walmart_order_receipts.oms_order_id),error_code=EXCLUDED.error_code,
       observed_at=EXCLUDED.observed_at,completed_at=EXCLUDED.completed_at`, [channelId, purchaseOrderId, hash, status, orderId, errorCode, now]);
   }
-  async reconcileOrderState(orderId: number, order: WalmartOrder, data: OrderData, now: Date): Promise<void> {
-    await this.transaction(async client => {
-      const before = await client.query(`SELECT id,status,fulfillment_status,subtotal_cents,shipping_cents,tax_cents,total_cents FROM oms.oms_orders WHERE id=$1 FOR UPDATE`, [orderId]);
-      if (before.rowCount !== 1) throw new WalmartApiError("WALMART_OMS_ORDER_MISSING", "Imported Walmart order could not be resolved", false);
-      const header = before.rows[0];
-      if (header.subtotal_cents !== data.subtotalCents || header.shipping_cents !== data.shippingCents
-        || header.tax_cents !== data.taxCents || header.total_cents !== data.totalCents) {
-        throw new WalmartApiError("WALMART_FINANCIAL_DRIFT", "Walmart order totals changed after import and require financial reconciliation", false);
-      }
-      const changes: Array<{ lineNumber: string; before: WalmartLineDisposition; after: WalmartLineDisposition }> = [];
-      for (const line of order.orderLines.orderLine) {
-        const existing = await client.query<WalmartLineDisposition & { id: number; paid_price_cents: number; total_price_cents: number }>(`SELECT id,quantity,cancelled_quantity,refunded_quantity,authority_fulfillable_quantity,authorization_status,paid_price_cents,total_price_cents FROM oms.oms_order_lines
-          WHERE order_id=$1 AND external_line_item_id=$2 FOR UPDATE`, [orderId, line.lineNumber]);
-        if (existing.rows.length !== 1) throw new WalmartApiError("WALMART_AUTHORITY_CONFLICT", "Walmart line identity could not be resolved exactly", false);
-        const mapped = data.lineItems.find(item => item.externalLineItemId === line.lineNumber);
-        if (!mapped || existing.rows[0].paid_price_cents !== mapped.paidPriceCents || existing.rows[0].total_price_cents !== mapped.totalCents) {
-          throw new WalmartApiError("WALMART_FINANCIAL_DRIFT", "Walmart line prices changed after import and require financial reconciliation", false);
-        }
-        const prior = existing.rows[0], after = reconcileWalmartLineDisposition(line, prior);
-        changes.push({ lineNumber: line.lineNumber, before: prior, after });
-        await client.query(`UPDATE oms.oms_order_lines SET cancelled_quantity=$2,authority_fulfillable_quantity=$3,
-          authorization_status=$4,updated_at=$5 WHERE id=$1`, [prior.id, after.cancelled_quantity, after.authority_fulfillable_quantity, after.authorization_status, now]);
-      }
-      await client.query(`UPDATE oms.oms_orders SET status=CASE WHEN $2='cancelled' THEN 'cancelled' ELSE status END,
-        fulfillment_status=CASE WHEN $5='fulfilled' THEN 'fulfilled' ELSE fulfillment_status END,
-        raw_payload=$3::jsonb,updated_at=$4 WHERE id=$1`, [orderId, data.status, JSON.stringify(order), now, data.fulfillmentStatus]);
-      await client.query(`INSERT INTO oms.oms_order_events (order_id,event_type,details,created_at) VALUES ($1,'walmart_order_observed',$2::jsonb,$3)`,
-        [orderId, JSON.stringify({ actor: "walmart-order-poller", sourceEventId: data.sourceEventId, before: before.rows[0], providerStatus: data.status, changes,
-          lines: order.orderLines.orderLine.map(line => ({ lineNumber: line.lineNumber, states: line.orderLineStatuses.orderLineStatus })) }), now]);
-    });
-  }
-
   private async transaction<T>(action: (client: PoolClient) => Promise<T>): Promise<T> {
     const client = await this.pool.connect();
     try { await client.query("BEGIN"); const result = await action(client); await client.query("COMMIT"); return result; }

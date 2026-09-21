@@ -5,13 +5,14 @@ import type {
 } from "../../channel-adapter.interface";
 import { WalmartChannelService } from "./walmart-channel.service";
 import { WalmartApiError } from "./walmart-client";
+import type { InventoryPublicationSupplyReader } from "../../../inventory-planning/application/inventory-publication-supply-read.port";
 
 export class WalmartAdapter implements IChannelAdapter {
   readonly adapterName = "Walmart US";
   readonly providerKey = "walmart";
   readonly shippingCapabilities = { acceptsEngineQuotes: false, managesOwnRates: true, enforcesDestinationEligibility: true };
   readonly inventoryPublicationScopeTypes = ["location"] as const;
-  constructor(private readonly channels: WalmartChannelService) {}
+  constructor(private readonly channels: WalmartChannelService, private readonly supply: InventoryPublicationSupplyReader) {}
 
   private async scope(channelId: number, context?: InventoryPublicationContext) {
     if (!context || context.authority !== "canonical_outbox" || context.providerScopeType !== "location") {
@@ -31,7 +32,11 @@ export class WalmartAdapter implements IChannelAdapter {
       // Positive promises require the active, exact warehouse supply binding.
       if (items.some(item => item.allocatedQty > 0)) {
         await this.channels.repository.assertWarehouse(scope.connection);
-        await this.channels.repository.assertInventorySupply(scope.connection);
+        const sources = await this.supply.getSourceWarehouses({ channelId, channelConnectionId: scope.connection.connection_id,
+          providerScopeType: "location", externalScopeId: scope.connection.ship_node_id });
+        if (sources.length === 0 || sources.some(source => !source.isActive || source.warehouseId !== scope.connection.warehouse_id)) {
+          throw new WalmartApiError("WALMART_INVENTORY_SUPPLY_MISMATCH", "Walmart stock must come only from its configured fulfillment warehouse", false);
+        }
       }
       const results: InventoryPushResult[] = [];
       for (const item of items) {

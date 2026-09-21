@@ -4,7 +4,9 @@ import { describeWithDisposableDb, getTestPool, closeTestDb } from "../../../../
 import { WalmartConnectionRepository } from "../../adapters/walmart/walmart-connection.repository";
 import { AesGcmFulfillmentProviderCredentialCipher } from "../../../shipping-engine/infrastructure/fulfillment-provider-credential-cipher";
 import { parseWalmartOrder } from "../../adapters/walmart/walmart-us-api";
-import { mapWalmartOrder } from "../../adapters/walmart/walmart-order.domain";
+import { mapWalmartOrder, mapWalmartOrderObservation } from "../../adapters/walmart/walmart-order.domain";
+import { PostgresChannelOrderObservationWriter } from "../../../oms/channel-order-observation.repository";
+import { PostgresInventoryPublicationSupplyReader } from "../../../inventory-planning/infrastructure/inventory-publication-supply-read.repository";
 import { walmartOrderFixture } from "../unit/walmart-fixture";
 
 function migrationTable(file: string, name: string): string {
@@ -21,6 +23,8 @@ describeWithDisposableDb("Walmart account and order PostgreSQL transactions", ()
   const now = new Date("2026-09-21T12:00:00Z");
   const cipher = new AesGcmFulfillmentProviderCredentialCipher(Buffer.alloc(32, 7), "test-key");
   let repository: WalmartConnectionRepository;
+  let observations: PostgresChannelOrderObservationWriter;
+  let supply: PostgresInventoryPublicationSupplyReader;
   let channelId: number, otherChannelId: number, warehouseId: number, variantId: number;
   const command = () => ({ clientId: "test", clientSecret: "secret", environment: "production" as const,
     expectedPartnerId: "PARTNER-1", shipNodeId: "NODE-1", warehouseId, importSince: "2026-09-20T12:00:00.000Z" });
@@ -56,6 +60,8 @@ describeWithDisposableDb("Walmart account and order PostgreSQL transactions", ()
     const productId = (await pool.query("INSERT INTO catalog.products(sku,name) VALUES('PRODUCT','Product') RETURNING id")).rows[0].id;
     variantId = (await pool.query("INSERT INTO catalog.product_variants(product_id,sku,name) VALUES($1,'ECHELON-SKU','Variant') RETURNING id", [productId])).rows[0].id;
     repository = new WalmartConnectionRepository(pool);
+    observations = new PostgresChannelOrderObservationWriter(pool);
+    supply = new PostgresInventoryPublicationSupplyReader(pool);
   });
   afterAll(closeTestDb);
 
@@ -102,24 +108,53 @@ describeWithDisposableDb("Walmart account and order PostgreSQL transactions", ()
     const orderId = Number((await pool.query("INSERT INTO oms.oms_orders(channel_id,external_order_id,ordered_at,subtotal_cents,tax_cents,total_cents) VALUES($1,'PO-123',$2,1999,120,2119) RETURNING id", [channelId, now])).rows[0].id);
     await pool.query("INSERT INTO oms.oms_order_lines(order_id,external_line_item_id,sku,title,quantity,paid_quantity,authority_fulfillable_quantity,paid_price_cents,total_price_cents) VALUES($1,'1','WALMART-SKU','Test',1,1,1,1999,1999)", [orderId]);
     const order = parseWalmartOrder(walmartOrderFixture("Cancelled"));
-    await expect(repository.reconcileOrderState(orderId, order, { ...mapWalmartOrder(order, "NODE-1", true), totalCents: 1 }, now))
-      .rejects.toMatchObject({ code: "WALMART_FINANCIAL_DRIFT" });
-    await repository.reconcileOrderState(orderId, order, mapWalmartOrder(order, "NODE-1", true), now);
+    await expect(observations.reconcile(mapWalmartOrderObservation(channelId, orderId, order, { ...mapWalmartOrder(order, "NODE-1", true), totalCents: 1 }, now)))
+      .rejects.toMatchObject({ code: "OMS_ORDER_FINANCIAL_DRIFT" });
+    await observations.reconcile(mapWalmartOrderObservation(channelId, orderId, order, mapWalmartOrder(order, "NODE-1", true), now));
     expect((await pool.query("SELECT cancelled_quantity,authority_fulfillable_quantity FROM oms.oms_order_lines WHERE order_id=$1", [orderId])).rows[0]).toEqual({ cancelled_quantity: 1, authority_fulfillable_quantity: 0 });
     const stale = parseWalmartOrder(walmartOrderFixture("Acknowledged"));
-    await expect(repository.reconcileOrderState(orderId, stale, mapWalmartOrder(stale, "NODE-1", true), now)).rejects.toMatchObject({ code: "WALMART_AUTHORITY_CONFLICT" });
+    await expect(observations.reconcile(mapWalmartOrderObservation(channelId, orderId, stale, mapWalmartOrder(stale, "NODE-1", true), now))).rejects.toMatchObject({ code: "OMS_ORDER_AUTHORITY_CONFLICT" });
     await repository.recordReceipt(channelId, "PO-123", "a".repeat(64), "completed", orderId, null, now);
     expect((await repository.receipt(channelId, "PO-123"))?.oms_order_id).toBe(orderId);
     expect((await pool.query("SELECT status FROM oms.oms_orders WHERE id=$1", [orderId])).rows[0].status).toBe("cancelled");
-    expect(await repository.findOrder(channelId, "PO-123")).toBe(orderId);
+    expect(await observations.findOrder({ channelId, provider: "walmart", externalOrderId: "PO-123" })).toBe(orderId);
     await repository.recordReceipt(channelId, "PO-REVIEW", "b".repeat(64), "failed", null, "WALMART_MULTI_QUANTITY_REVIEW", now);
     expect(await repository.exceptions(channelId)).toEqual([{ purchaseOrderId: "PO-REVIEW", errorCode: "WALMART_MULTI_QUANTITY_REVIEW", observedAt: now.toISOString() }]);
     await repository.markPoll(channelId, now, { checkpoint: now });
     expect((await repository.status(channelId))?.lastSuccessAt).toBe(now.toISOString());
   });
-  it("allows stock only from the bound warehouse's active, sealed source binding", async () => {
+  it("scopes OMS observation writes to exact channel, provider and external order identity", async () => {
+    const orderId = (await observations.findOrder({ channelId, provider: "walmart", externalOrderId: "PO-123" }))!;
+    const order = parseWalmartOrder(walmartOrderFixture("Cancelled"));
+    const input = mapWalmartOrderObservation(channelId, orderId, order, mapWalmartOrder(order, "NODE-1", true), now);
+    const before = await getTestPool().query("SELECT * FROM oms.oms_order_events WHERE order_id=$1", [orderId]);
+    for (const override of [{ channelId: otherChannelId }, { provider: "ebay" }, { externalOrderId: "OTHER" }]) {
+      await expect(observations.reconcile({ ...input, ...override })).rejects.toMatchObject({ code: "OMS_ORDER_MISSING" });
+    }
+    expect(await observations.findOrder({ channelId, provider: "ebay", externalOrderId: "PO-123" })).toBeNull();
+    expect((await getTestPool().query("SELECT * FROM oms.oms_order_events WHERE order_id=$1", [orderId])).rows).toEqual(before.rows);
+  });
+  it("rolls back earlier line changes when a later line has financial drift", async () => {
+    const pool = getTestPool();
+    const orderId = Number((await pool.query("INSERT INTO oms.oms_orders(channel_id,external_order_id,ordered_at,subtotal_cents,tax_cents,total_cents) VALUES($1,'PO-TWO',$2,3998,240,4238) RETURNING id", [channelId, now])).rows[0].id);
+    for (const lineId of ["1", "2"]) {
+      await pool.query("INSERT INTO oms.oms_order_lines(order_id,external_line_item_id,sku,title,quantity,paid_quantity,authority_fulfillable_quantity,paid_price_cents,total_price_cents) VALUES($1,$2,'WALMART-SKU','Test',1,1,1,1999,1999)", [orderId, lineId]);
+    }
+    const order = parseWalmartOrder(walmartOrderFixture("Cancelled"));
+    order.purchaseOrderId = "PO-TWO";
+    order.orderLines.orderLine.push({ ...order.orderLines.orderLine[0], lineNumber: "2" });
+    const input = mapWalmartOrderObservation(channelId, orderId, order, mapWalmartOrder(order, "NODE-1", true), now);
+    input.lines[1].paidPriceCents = 1;
+    await expect(observations.reconcile(input)).rejects.toMatchObject({ code: "OMS_ORDER_FINANCIAL_DRIFT" });
+    expect((await pool.query("SELECT cancelled_quantity,authority_fulfillable_quantity FROM oms.oms_order_lines WHERE order_id=$1 ORDER BY id", [orderId])).rows)
+      .toEqual([{ cancelled_quantity: 0, authority_fulfillable_quantity: 1 }, { cancelled_quantity: 0, authority_fulfillable_quantity: 1 }]);
+    expect((await pool.query("SELECT id FROM oms.oms_order_events WHERE order_id=$1", [orderId])).rowCount).toBe(0);
+    expect((await pool.query("SELECT status FROM oms.oms_orders WHERE id=$1", [orderId])).rows[0].status).not.toBe("cancelled");
+  });
+  it("reads only the exact sealed binding and exposes inactive nodes to the caller", async () => {
     const pool = getTestPool(), row = (await repository.get(channelId))!;
-    await expect(repository.assertInventorySupply(row)).rejects.toMatchObject({ code: "WALMART_INVENTORY_SUPPLY_MISMATCH" });
+    const scope = { channelId, channelConnectionId: row.connection_id, providerScopeType: "location" as const, externalScopeId: row.ship_node_id };
+    await expect(supply.getSourceWarehouses(scope)).resolves.toEqual([]);
     const node = (await pool.query(`INSERT INTO warehouse.fulfillment_nodes(code,name,node_type,warehouse_id,inventory_authority,fulfillment_authority,lifecycle_status,created_by,activated_by,activated_at)
       VALUES('WALMART-NODE','Test node','internal_warehouse',$1,'echelon','echelon','active','operator','operator',$2) RETURNING id`, [warehouseId, now])).rows[0].id;
     const target = (await pool.query(`INSERT INTO inventory.inventory_publication_targets(channel_id,channel_connection_id,fulfillment_node_id,provider_scope_type,external_scope_id,publication_authority,change_reason,created_by)
@@ -128,9 +163,14 @@ describeWithDisposableDb("Walmart account and order PostgreSQL transactions", ()
       VALUES($1,1,'sealed',$2,$2,'test','test-binding','operator','operator',$3) RETURNING id`, [target, "a".repeat(64), now])).rows[0].id;
     await pool.query("INSERT INTO inventory.publication_source_binding_members(binding_id,publication_target_id,fulfillment_node_id,priority) VALUES($1,$2,$3,1)", [binding,target,node]);
     await pool.query("INSERT INTO inventory.publication_source_binding_heads(publication_target_id,active_binding_id,updated_by,update_reason) VALUES($1,$2,'operator','test')", [target,binding]);
-    await expect(repository.assertInventorySupply(row)).resolves.toBeUndefined();
+    await expect(supply.getSourceWarehouses(scope)).resolves.toEqual([{ warehouseId, isActive: true }]);
+    for (const override of [{ channelId: otherChannelId }, { channelConnectionId: row.connection_id + 1 }, { externalScopeId: "OTHER" }]) {
+      await expect(supply.getSourceWarehouses({ ...scope, ...override })).resolves.toEqual([]);
+    }
     const other = (await pool.query("INSERT INTO warehouse.warehouses(code,name) VALUES('OTHER','Other warehouse') RETURNING id")).rows[0].id;
     await pool.query("UPDATE warehouse.fulfillment_nodes SET warehouse_id=$1 WHERE id=$2", [other,node]);
-    await expect(repository.assertInventorySupply(row)).rejects.toMatchObject({ code: "WALMART_INVENTORY_SUPPLY_MISMATCH" });
+    await expect(supply.getSourceWarehouses(scope)).resolves.toEqual([{ warehouseId: other, isActive: true }]);
+    await pool.query("UPDATE warehouse.fulfillment_nodes SET lifecycle_status='retired',retired_by='operator',retired_at=$2 WHERE id=$1", [node, now]);
+    await expect(supply.getSourceWarehouses(scope)).resolves.toEqual([{ warehouseId: other, isActive: false }]);
   });
 });

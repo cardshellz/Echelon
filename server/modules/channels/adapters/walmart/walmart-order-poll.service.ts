@@ -1,16 +1,21 @@
 import { z } from "zod";
 import type { OmsService } from "../../../oms/oms.service";
+import { ChannelOrderObservationError, type ChannelOrderObservationWriter } from "../../../oms/channel-order-observation";
 import { WalmartApiError } from "./walmart-client";
 import { WalmartChannelService } from "./walmart-channel.service";
 import { parseWalmartOrder } from "./walmart-us-api";
-import { mapWalmartOrder, walmartOrderHash, validateWalmartOrderScope } from "./walmart-order.domain";
+import { mapWalmartOrder, mapWalmartOrderObservation, walmartOrderHash, validateWalmartOrderScope } from "./walmart-order.domain";
 
 const OVERLAP_MS = 24 * 60 * 60 * 1_000;
 const MAX_PAGES = 100;
+function failureCode(error: unknown, fallback: string): string {
+  return error instanceof WalmartApiError || error instanceof ChannelOrderObservationError ? error.code : fallback;
+}
 export class WalmartOrderPollService {
   constructor(private readonly channels: WalmartChannelService,
     private readonly oms: Pick<OmsService, "ingestOrder">,
     private readonly syncToWms: (orderId: number) => Promise<unknown>,
+    private readonly observations: ChannelOrderObservationWriter,
     private readonly now: () => Date = () => new Date()) {}
 
   async poll(channelId: number): Promise<{ observed: number; processed: number }> {
@@ -47,7 +52,7 @@ export class WalmartOrderPollService {
               seen.add(id); observed++;
               const hash = walmartOrderHash(raw);
               const receipt = await repository.receipt(channelId, id);
-              let orderId = receipt?.oms_order_id ?? await repository.findOrder(channelId, id);
+              let orderId = receipt?.oms_order_id ?? await this.observations.findOrder({ channelId, provider: "walmart", externalOrderId: id });
               try {
                 let order = parseWalmartOrder(raw);
                 const normalizedHash = walmartOrderHash(order);
@@ -68,7 +73,7 @@ export class WalmartOrderPollService {
                   // Persist the observation with zero warehouse authority before the remote acknowledgment.
                   const observation = mapWalmartOrder(order, row.ship_node_id, false);
                   if (orderId === null) orderId = (await this.oms.ingestOrder(channelId, id, observation)).id;
-                  else await repository.reconcileOrderState(orderId, order, observation, now);
+                  else await this.observations.reconcile(mapWalmartOrderObservation(channelId, orderId, order, observation, now));
                   await repository.recordReceipt(channelId, id, hash, "processing", orderId, null, now);
                   order = await api.acknowledge(id);
                   validateWalmartOrderScope(order, row.ship_node_id);
@@ -83,10 +88,10 @@ export class WalmartOrderPollService {
                 // Reconcile terminal header/disposition before granting authority
                 // to an existing observation, including recovery after an ACK
                 // succeeded remotely but its local receipt was never written.
-                if (orderId !== null) await repository.reconcileOrderState(orderId, order, data, now);
+                if (orderId !== null) await this.observations.reconcile(mapWalmartOrderObservation(channelId, orderId, order, data, now));
                 const existingOrderId = orderId;
                 orderId = (await this.oms.ingestOrder(channelId, id, data)).id;
-                if (existingOrderId === null) await repository.reconcileOrderState(orderId, order, data, now);
+                if (existingOrderId === null) await this.observations.reconcile(mapWalmartOrderObservation(channelId, orderId, order, data, now));
                 const warehouseOrderId = await this.syncToWms(orderId);
                 if (warehouseOrderId == null && data.status !== "cancelled" && data.fulfillmentStatus !== "fulfilled"
                   && data.lineItems.some(line => (line.fulfillableQuantity ?? 0) > 0)) {
@@ -95,7 +100,7 @@ export class WalmartOrderPollService {
                 await repository.recordReceipt(channelId, id, walmartOrderHash(order), "completed", orderId, null, now);
                 processed++;
               } catch (error) {
-                const code = error instanceof WalmartApiError ? error.code : "WALMART_ORDER_PROCESSING_FAILED";
+                const code = failureCode(error, "WALMART_ORDER_PROCESSING_FAILED");
                 failure = code;
                 await repository.recordReceipt(channelId, id, hash, "failed", orderId, code, now);
                 console.error(JSON.stringify({ code, channelId, purchaseOrderId: id, omsOrderId: orderId }));
@@ -115,7 +120,7 @@ export class WalmartOrderPollService {
         await repository.markPoll(channelId, now, { checkpoint: now });
         return { observed, processed };
       } catch (error) {
-        await repository.markPoll(channelId, now, { errorCode: error instanceof WalmartApiError ? error.code : "WALMART_POLL_FAILED" });
+        await repository.markPoll(channelId, now, { errorCode: failureCode(error, "WALMART_POLL_FAILED") });
         throw error;
       }
     });
@@ -130,7 +135,7 @@ export function startWalmartOrderPolling(service: WalmartOrderPollService, chann
     try {
       for (const channelId of await channels.repository.enabledChannels()) {
         try { await service.poll(channelId); }
-        catch (error) { console.error(JSON.stringify({ code: error instanceof WalmartApiError ? error.code : "WALMART_POLL_FAILED", channelId })); }
+        catch (error) { console.error(JSON.stringify({ code: failureCode(error, "WALMART_POLL_FAILED"), channelId })); }
       }
     } catch { console.error(JSON.stringify({ code: "WALMART_CHANNEL_SCAN_FAILED" })); }
     finally { running = false; }
