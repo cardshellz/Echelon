@@ -200,6 +200,11 @@ describe("DropshipOrderAcceptanceService", () => {
       [{ reload: { kind: "failed", message: "Stripe unavailable" } }, `${base} We could not top up your wallet automatically (Stripe unavailable); add funds to accept it sooner.`],
       [{ reload: { kind: "skipped", reason: "amount_exceeds_max_single_reload" } }, `${base} Autopay could not top it up: the amount is more than autopay may charge in one go. Add money or check autopay in Wallet.`],
       [{ reload: { kind: "skipped", reason: "some_new_reason" } }, `${base} Autopay could not top it up: some new reason. Add money or check autopay in Wallet.`],
+      // Charged and still short: the vendor is owed both facts in one notice.
+      [
+        { reload: { kind: "charged", amountCents: 10_000, cardFeeCents: 300, chargedCents: 10_300, currency: "USD" } },
+        `${base} We topped up your wallet by USD $100.00 from your card; with the USD $3.00 card fee your card was charged USD $103.00.`,
+      ],
     ];
     for (const [context, expected] of cases) {
       notificationSender.sent = [];
@@ -222,6 +227,47 @@ describe("DropshipOrderAcceptanceService", () => {
     // The default still tells the vendor right away (manual acceptance from the Orders page).
     await service.acceptOrder(input);
     expect(notificationSender.sent.map((sent) => sent.eventType)).toEqual(["dropship_order_payment_hold"]);
+  });
+
+  it("tells an accepted order's vendor that autopay charged their card, and what the fee was", async () => {
+    const repository = new FakeAcceptanceRepository({ outcome: "accepted", totalDebitCents: 7500 });
+    const notificationSender = new FakeNotificationSender();
+    const service = new DropshipOrderAcceptanceService({
+      repository,
+      inventoryAuthority: new FakeInventoryAuthority("legacy"),
+      canonicalFulfillment: new FakeCanonicalFulfillment(),
+      notificationSender,
+      clock: { now: () => now },
+      logger: noopLogger,
+    });
+    const accepted = await service.acceptOrder(validAcceptanceInput(), { notify: false });
+    expect(accepted.outcome).toBe("accepted");
+    const base = "Order intake 1 was accepted into fulfillment for USD $75.00.";
+
+    // A card charge the vendor never pressed a button for is disclosed here or
+    // nowhere: this is the only notice tied to the charge that paid the order.
+    notificationSender.sent = [];
+    await service.notifyAcceptanceOutcome(accepted, {
+      reload: { kind: "charged", amountCents: 10_000, cardFeeCents: 300, chargedCents: 10_300, currency: "USD" },
+    });
+    expect(notificationSender.sent[0]).toMatchObject({ eventType: "dropship_order_accepted", critical: false });
+    expect(notificationSender.sent[0].message)
+      .toBe(`${base} We topped up your wallet by USD $100.00 from your card; with the USD $3.00 card fee your card was charged USD $103.00.`);
+
+    // A free rail carries no fee sentence to invent.
+    notificationSender.sent = [];
+    await service.notifyAcceptanceOutcome(accepted, {
+      reload: { kind: "charged", amountCents: 10_000, cardFeeCents: 0, chargedCents: 10_000, currency: "USD" },
+    });
+    expect(notificationSender.sent[0].message)
+      .toBe(`${base} We topped up your wallet by USD $100.00 from your saved payment method.`);
+
+    // Nothing was charged in the pass, so the notice claims no charge.
+    for (const reload of [null, { kind: "pending" as const, amountCents: 4_000, currency: "USD" }]) {
+      notificationSender.sent = [];
+      await service.notifyAcceptanceOutcome(accepted, { reload });
+      expect(notificationSender.sent[0].message).toBe(base);
+    }
   });
 
   it("finalizes canonical acceptance only after the WMS whole-order claim succeeds", async () => {
