@@ -2,7 +2,7 @@ import { pgTable, pgSchema, text, varchar, integer, timestamp, jsonb, bigint, bo
 import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
-import { products, productVariants } from "./catalog.schema";
+import { products, productVariants, forecastProductIdentities } from "./catalog.schema";
 import { warehouses, warehouseLocations } from "./warehouse.schema";
 import { users } from "./identity.schema";
 
@@ -1059,7 +1059,9 @@ export const purchaseForecastObservations = procurementSchema.table("purchase_fo
   id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
   runId: integer("run_id").notNull().references(() => purchaseRecommendationRuns.id, { onDelete: "restrict" }),
   observationKey: varchar("observation_key", { length: 160 }).notNull(),
-  productId: integer("product_id").notNull().references(() => products.id, { onDelete: "restrict" }),
+  // The immutable source identity can outlive its live catalog product.
+  // New observations still require a current product through the DB insert guard.
+  productId: integer("product_id").notNull().references(() => forecastProductIdentities.productId, { onDelete: "restrict" }),
   selectedReceiveVariantId: integer("selected_receive_variant_id").references(() => productVariants.id, { onDelete: "restrict" }),
   scope: varchar("scope", { length: 40 }).notNull().default("product_all_warehouses"),
   productSku: varchar("product_sku", { length: 100 }).notNull(),
