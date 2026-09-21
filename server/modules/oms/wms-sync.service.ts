@@ -83,6 +83,8 @@ type DbLike = typeof db | any;
 type MaterializableOmsLine = {
   id: number;
   productVariantId: number | null;
+  catalogProductId?: number | null;
+  inventoryTracking?: boolean | null;
   sku: string | null;
   name: string | null;
   title: string | null;
@@ -338,6 +340,8 @@ function mapLockedOmsLine(row: any): MaterializableOmsLine {
   return {
     id: toNonNegativeInteger(row.id, "oms_order_lines.id"),
     productVariantId: toNullableInteger(row.product_variant_id),
+    catalogProductId: toNullableInteger(row.catalog_product_id),
+    inventoryTracking: toNullableBoolean(row.inventory_tracking),
     sku: row.sku ?? null,
     name: row.name ?? null,
     title: row.title ?? null,
@@ -373,9 +377,9 @@ export async function buildWmsLineItemFromOmsLine(
   const variantId = line.productVariantId || null;
   const catalogSku = variantId
     ? await createOrderLineCatalogIdentityRepository(database).catalogSku(variantId)
-    : null;
+    : line.catalogProductId ? await createOrderLineCatalogIdentityRepository(database).catalogProductSku(line.catalogProductId) : null;
   let binLocation: WmsBinLocation | null = null;
-  if (variantId) {
+  if (variantId && line.inventoryTracking !== false) {
     try {
       binLocation = await resolveAssignedBinLocation(database, variantId);
     } catch (err: any) {
@@ -401,6 +405,8 @@ export async function buildWmsLineItemFromOmsLine(
   return {
     orderId,
     omsOrderLineId: line.id,
+    catalogProductId: line.catalogProductId ?? null,
+    inventoryTracking: line.inventoryTracking ?? null,
     sku: selectWmsCatalogSku(line.sku, catalogSku),
     name: buildChannelLineDisplayName({
       name: line.name,
@@ -420,6 +426,8 @@ export async function buildWmsLineItemFromOmsLine(
 }
 
 interface WmsSyncServices {
+  /** Exact channel-owned warehouse assignments, such as a Walmart ship node. */
+  resolveChannelWarehouse?: (channelId: number) => Promise<{ warehouseId: number; warehouseType: string } | null>;
   inventoryCore: any;
   reservation: any;
   fulfillmentRouter: any;
@@ -466,6 +474,8 @@ export class WmsSyncService {
       SELECT
         id,
         product_variant_id,
+        catalog_product_id,
+        inventory_tracking,
         sku,
         name,
         title,
@@ -766,6 +776,7 @@ export class WmsSyncService {
       }
 
       // 1. Check if already synced (orders.source_table_id points to oms_orders.id)
+      const pinnedChannelWarehouse = await this.services.resolveChannelWarehouse?.(omsOrder.channelId) ?? null;
       const existingWmsOrder = await db
         .select({
           id: wmsOrders.id,
@@ -785,6 +796,9 @@ export class WmsSyncService {
         .limit(1);
 
       if (existingWmsOrder.length > 0) {
+        if (pinnedChannelWarehouse && existingWmsOrder[0].warehouseId !== pinnedChannelWarehouse.warehouseId) {
+          throw new WmsShipmentPrerequisiteError("Existing warehouse order differs from the channel's configured fulfillment center", { omsOrderId });
+        }
         const wmsOrderId = existingWmsOrder[0].id;
         if (isTerminalResidualRecovery) {
           await this.refreshOmsLineMaterializedQuantities(omsOrderId);
@@ -917,7 +931,7 @@ export class WmsSyncService {
       // and revalidate that exact assignment before considering the generic
       // router, then verify the canonical claim's frozen quote agrees with it.
       let routing: { warehouseId: number; warehouseType: string } | null =
-        await this.resolvePinnedDropshipWarehouse(omsOrder);
+        pinnedChannelWarehouse ?? await this.resolvePinnedDropshipWarehouse(omsOrder);
       if (isDropshipAcceptanceClaim) {
         if (!routing || routing.warehouseId !== pinnedDropshipWarehouseId) {
           throw new WmsRequiredInventoryClaimError(
@@ -2670,7 +2684,7 @@ export class WmsSyncService {
       const wmsQty = wmsItem.quantity;
       const catalogSku = omsLine.productVariantId
         ? await createOrderLineCatalogIdentityRepository(db).catalogSku(omsLine.productVariantId)
-        : null;
+        : omsLine.catalogProductId ? await createOrderLineCatalogIdentityRepository(db).catalogProductSku(omsLine.catalogProductId) : null;
       const resolvedSku = selectWmsCatalogSku(omsLine.sku, catalogSku);
 
       if (omsQty === wmsQty) {

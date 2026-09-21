@@ -523,12 +523,14 @@ class ReservationService implements ReservationServiceContract {
     const syncVariantIds = new Set<number>();
 
     for (const item of items) {
+      if (item.inventoryTracking === false && item.catalogProductId != null) continue;
       try {
         // 1. Resolve product variant by SKU
         const [variant] = await dbh
           .select()
           .from(productVariants)
-          .where(eq(productVariants.sku, item.sku))
+          .where(item.catalogProductId != null && item.productId != null
+            ? eq(productVariants.id, item.productId) : eq(productVariants.sku, item.sku))
           .limit(1);
 
         if (!variant) {
@@ -546,6 +548,13 @@ class ReservationService implements ReservationServiceContract {
             orderItemId: item.id,
             reason: `Product variant "${item.sku}" is internal-only and cannot be promised to a customer`,
           });
+          continue;
+        }
+
+        if (item.inventoryTracking === true && (item.catalogProductId !== variant.productId
+          || item.productId !== variant.id || variant.requiresShipping === false || variant.trackInventory === false)) {
+          result.failed.push({ sku: item.sku, orderItemId: item.id,
+            reason: "Order inventory policy conflicts with its catalog identity; review the mapping before reserving" });
           continue;
         }
 

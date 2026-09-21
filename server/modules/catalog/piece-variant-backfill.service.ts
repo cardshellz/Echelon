@@ -262,9 +262,9 @@ const INSERT_PIECE_VARIANT_QUERY = `
   INSERT INTO catalog.product_variants AS pv (
     product_id, sku, name, uom_type, units_per_variant, hierarchy_level,
     parent_variant_id, is_base_unit, sales_eligibility, requires_shipping,
-    track_inventory, is_active, dropship_eligible
+    inventory_tracking_override, track_inventory, is_active, dropship_eligible
   )
-  SELECT $1, $2, $3, $4, $5, $6, NULL, $7, $8, $9, $10, $11, $12
+  SELECT $1, $2, $3, $4, $5, $6, NULL, $7, $8, $9, $10, $10, $11, $12
   WHERE NOT EXISTS (
     SELECT 1
     FROM catalog.product_variants single_unit

@@ -43,6 +43,7 @@ export type DefinitionAuthority = "draft" | "active";
 export const PUBLISHING_ADAPTERS = {
   shopify: { scopeType: "location", scopeNoun: "Shopify location" },
   ebay: { scopeType: "account", scopeNoun: "eBay seller account" },
+  walmart: { scopeType: "location", scopeNoun: "Walmart fulfillment center" },
 } as const;
 
 export type SupportedProvider = keyof typeof PUBLISHING_ADAPTERS;
@@ -54,6 +55,7 @@ export function isSupportedProvider(provider: string): provider is SupportedProv
 export const PROVIDER_LABELS: Record<string, string> = {
   shopify: "Shopify",
   ebay: "eBay",
+  walmart: "Walmart US",
   tiktok: "TikTok",
   amazon: "Amazon",
   instagram: "Instagram",
@@ -835,7 +837,7 @@ export function destinationOptionsFor(channel: Channel, view: View): Destination
       scopeType: adapter?.scopeType ?? "account",
       verifiedAccountId: connection.providerAccount?.externalAccountId ?? null,
       verifiedAccountLabel: connection.providerAccount?.displayName ?? null,
-      suggestedLocationId: connection.shopifyLocationId,
+      suggestedLocationId: channel.provider === "shopify" ? connection.shopifyLocationId : connection.providerLocationId ?? null,
       supported: adapter !== null,
     };
   });

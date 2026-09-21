@@ -68,6 +68,29 @@ async function deduct(service: PickingUseCases, item: any) {
 }
 
 describe("PickingUseCases._deductInventory :: line with no assigned bin", () => {
+  it("requires explicit non-inventory policy for an unmapped physical product", async () => {
+    const { service, storage, inventoryCore } = makeService([]);
+    storage.getProductVariantBySku.mockResolvedValue(undefined as never);
+    const item = { ...unassignedLine(1), requiresShipping: 1 };
+    await expect(deduct(service, item)).rejects.toMatchObject({
+      context: { reason: "picker_inventory_identity_missing" },
+    });
+    expect(await deduct(service, { ...item, catalogProductId: 10, inventoryTracking: false }))
+      .toMatchObject({ success: true, noVariant: true });
+    expect(inventoryCore.pickItem).not.toHaveBeenCalled();
+  });
+
+  it("rejects a tracked snapshot whose current variant is untracked", async () => {
+    const { service, storage, inventoryCore } = makeService([]);
+    Object.assign(storage, { getProductVariantById: vi.fn(async () => ({
+      id: 100, productId: 10, requiresShipping: true, trackInventory: false,
+    })) });
+    await expect(deduct(service, { ...unassignedLine(1), requiresShipping: 1,
+      productId: 100, catalogProductId: 10, inventoryTracking: true }))
+      .rejects.toMatchObject({ context: { reason: "picker_inventory_policy_conflict" } });
+    expect(inventoryCore.pickItem).not.toHaveBeenCalled();
+  });
+
   it("reports the best stocked bin and its quantity when no single bin covers the line", async () => {
     const { service, inventoryCore } = makeService([
       { warehouseLocationId: 1, variantQty: 2 },

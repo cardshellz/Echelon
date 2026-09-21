@@ -13,6 +13,19 @@ function fixture() {
 }
 
 describe("pick queue read load", () => {
+  it("keeps product-only items visible without looking up another SKU's stock or replenishment", async () => {
+    const { service, storage, replen } = fixture();
+    storage.getPickQueueOrders.mockResolvedValue([{ id: 1, combinedGroupId: 69, items: [{
+      id: 2, sku: "REUSED", requiresShipping: 1, status: "pending", quantity: 1,
+      catalogProductId: 3, inventoryTracking: false, location: "UNASSIGNED",
+    }] }] as never);
+    const result = await service.getPickQueue();
+    expect(result[0].items[0]).toMatchObject({ id: 2, location: "UNASSIGNED", inventoryTracking: false });
+    expect(storage.getProductVariantBySku).not.toHaveBeenCalled();
+    expect(storage.getAllWarehouseLocations).not.toHaveBeenCalled();
+    expect(replen.predictReplenAfterPick).not.toHaveBeenCalled();
+  });
+
   it("shares only in-flight reads and refreshes after completion", async () => {
     const { service, storage } = fixture();
     const first = service.getPickQueue();

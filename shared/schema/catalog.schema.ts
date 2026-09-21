@@ -117,6 +117,7 @@ export const products = catalogSchema.table("products", {
   safetyStockDays: integer("safety_stock_days").notNull().default(7), // Safety stock buffer in days of cover
   status: varchar("status", { length: 20 }).default("active"), // active, draft, archived
   inventoryType: varchar("inventory_type", { length: 20 }).notNull().default("inventory"), // inventory, non_inventory, expense
+  inventoryTrackingDefault: boolean("inventory_tracking_default").notNull().default(true),
   isActive: boolean("is_active").notNull().default(true),
   condition: varchar("condition", { length: 30 }).default("new"), // new, used, refurbished
   countryOfOrigin: varchar("country_of_origin", { length: 2 }), // ISO 3166-1 alpha-2
@@ -188,6 +189,8 @@ export const productVariants = catalogSchema.table("product_variants", {
   // channel inventory quantity workflows.
   requiresShipping: boolean("requires_shipping").notNull().default(true),
   trackInventory: boolean("track_inventory").default(true),
+  // NULL inherits the product default; trackInventory is the effective compatibility projection.
+  inventoryTrackingOverride: boolean("inventory_tracking_override"),
   // Customer promise identity is independent from physical inventory. An
   // internal-only variant can remain tracked and participate in builds/ATP,
   // but customer-facing channel and reservation boundaries must reject it.

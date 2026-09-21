@@ -945,7 +945,7 @@ export function createFulfillmentPushService(
   const runExclusive: FulfillmentPushExclusiveRunner =
     options.runExclusive ?? (async (_lockId, fn) => fn());
 
-  async function loadCanonicalFulfillmentOrder(command: ChannelFulfillmentProviderCommandInput, provider: "shopify" | "ebay") {
+  async function loadCanonicalFulfillmentOrder(command: ChannelFulfillmentProviderCommandInput, provider: "shopify" | "ebay" | "walmart") {
     const result = await db.execute(sql`
       SELECT oms_order.id AS oms_order_id, oms_order.channel_id, oms_order.external_order_id,
              oms_order.ordered_at, oms_order.created_at AS oms_created_at,
@@ -975,7 +975,7 @@ export function createFulfillmentPushService(
   async function projectCanonicalCommandQuantities<T extends LegacyShipmentLineSnapshot>(
     command: ChannelFulfillmentProviderCommandInput,
     rows: readonly T[],
-    provider: "shopify" | "ebay",
+    provider: "shopify" | "ebay" | "walmart",
   ): Promise<T[]> {
     const allocationItems = command.items.filter((item) => item.packageAllocationEntryId != null);
     if (provider === "shopify" && command.trackingReplacement === true) {
@@ -1052,7 +1052,7 @@ export function createFulfillmentPushService(
     const persistedItems: Array<Record<string, unknown>> = result?.rows ?? [];
     const evidence = persistedItems.filter((row) => row.package_allocation_entry_id != null || row.package_allocation_effect_intent_id != null);
     if (allocationItems.length === 0 && evidence.length === 0) {
-      assertExactChannelCommandLineage(command, rows, provider === "shopify" ? isShopifyFulfillmentProvider : isEbayFulfillmentProvider);
+      assertExactChannelCommandLineage(command, rows, provider === "shopify" ? isShopifyFulfillmentProvider : provider === "ebay" ? isEbayFulfillmentProvider : (value) => value === "walmart");
       return [...rows];
     }
     const fail = (shipmentItemId?: number): never => {
@@ -1112,7 +1112,7 @@ export function createFulfillmentPushService(
     }));
     // Retain every original source/order/provider identity check. Only a proven
     // allocated row changes quantity; non-allocation legacy rows stay exact.
-    assertExactChannelCommandLineage(command, projected, provider === "shopify" ? isShopifyFulfillmentProvider : isEbayFulfillmentProvider);
+    assertExactChannelCommandLineage(command, projected, provider === "shopify" ? isShopifyFulfillmentProvider : provider === "ebay" ? isEbayFulfillmentProvider : (value) => value === "walmart");
     return projected;
   }
 
@@ -1633,6 +1633,48 @@ export function createFulfillmentPushService(
 
   async function pushTrackingForShipment(shipmentId: number): Promise<boolean> {
     return pushTrackingForShipmentInternal(shipmentId);
+  }
+
+  async function prepareWalmartFulfillmentCommand(input: ChannelFulfillmentProviderCommandInput) {
+    const command = normalizeChannelCommandInput(input);
+    const order = await loadCanonicalFulfillmentOrder(command, "walmart");
+    const shipmentItemIds = command.items.map((item) => item.legacyWmsShipmentItemId);
+    const lineResult: any = await db.execute(sql`
+      SELECT
+        shipment_item.shipment_id,
+        shipment_item.id AS shipment_item_id,
+        shipment_item.order_item_id,
+        order_item.oms_order_line_id,
+        order_line.order_id AS oms_order_id,
+        order_line.fulfillment_provider,
+        order_line.external_line_item_id,
+        shipment_item.qty::int AS qty
+      FROM wms.outbound_shipment_items shipment_item
+      JOIN wms.order_items order_item ON order_item.id = shipment_item.order_item_id
+      JOIN oms.oms_order_lines order_line ON order_line.id = order_item.oms_order_line_id
+      WHERE shipment_item.id = ANY(${sqlBigintArray(shipmentItemIds)})
+        AND shipment_item.shipment_id = ANY(${sqlBigintArray(command.legacyWmsShipmentIds)})
+        AND COALESCE(order_item.status, 'pending') <> 'cancelled'
+      ORDER BY shipment_item.id
+    `);
+    const rawLineItems: LegacyShipmentLineSnapshot[] = lineResult?.rows ?? [];
+    await projectCanonicalCommandQuantities(command, rawLineItems, "walmart");
+    const revoked = await db.execute(sql`
+      SELECT line.id FROM oms.oms_order_lines line
+      WHERE line.order_id = ${command.omsOrderId}
+        AND line.id = ANY(${sqlBigintArray(command.items.map(item => item.omsOrderLineId))})
+        AND (line.cancelled_quantity > 0 OR line.refunded_quantity > 0 OR line.paid_quantity <= 0)
+      UNION ALL
+      SELECT source_order.id FROM oms.oms_orders source_order WHERE source_order.id = ${command.omsOrderId}
+        AND (source_order.status IN ('cancelled','refunded') OR source_order.financial_status IN ('refunded','voided'))
+      UNION ALL
+      SELECT package.id FROM wms.physical_shipments package
+      JOIN wms.shipping_provider_labels label ON label.provider = package.provider
+        AND label.provider_label_id = package.provider_physical_shipment_id
+      WHERE package.id = ${command.physicalShipmentId} AND label.label_status IN ('voided','superseded')
+    `);
+    if ((revoked?.rows ?? []).length > 0) throw new ChannelFulfillmentProviderError("WALMART_FULFILLMENT_REVOKED", "Cancelled, refunded, voided or superseded shipment authority requires review");
+    return order;
   }
 
   async function pushTrackingForShipmentCommand(
@@ -3657,6 +3699,7 @@ export function createFulfillmentPushService(
     pushTracking,
     pushTrackingForShipment,
     pushTrackingForShipmentCommand,
+    prepareWalmartFulfillmentCommand,
     setEbayClient,
     setShopifyClient,
     setDropshipMarketplaceTrackingService,

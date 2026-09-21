@@ -74,6 +74,9 @@
   "channels.channel_product_allocation": [
     "modules/channels"
   ],
+  "channels.channel_product_identities": [
+    "modules/channels"
+  ],
   "channels.channel_product_lines": [
     "modules/channels"
   ],
@@ -120,6 +123,15 @@
     "modules/channels",
     "modules/inventory-planning",
     "server/db.ts"
+  ],
+  "channels.walmart_connection_events": [
+    "modules/channels"
+  ],
+  "channels.walmart_connections": [
+    "modules/channels"
+  ],
+  "channels.walmart_order_receipts": [
+    "modules/channels"
   ],
   "dropship.dropship_admin_config_commands": [
     "modules/dropship"
@@ -824,6 +836,9 @@
     "modules/oms"
   ],
   "oms.package_allocation_commercial_fulfillment_activations": [
+    "modules/oms"
+  ],
+  "oms.shipstation_label_reconciliation_checkpoint": [
     "modules/oms"
   ],
   "oms.shopify_label_void_attempts": [

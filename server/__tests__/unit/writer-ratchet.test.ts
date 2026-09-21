@@ -46,6 +46,12 @@ describe("writer-ratchet (P2.1)", () => {
     expect(baseline["oms.archon_order_outbox"]).toEqual(["modules/oms"]);
   });
 
+  it("channel product identities have only the Channels owning writer, including operational scripts", () => {
+    expect(current["channels.channel_product_identities"]).toEqual(["modules/channels"]);
+    expect(currentIncludingScripts["channels.channel_product_identities"]).toEqual(["modules/channels"]);
+    expect(baseline["channels.channel_product_identities"]).toEqual(["modules/channels"]);
+  });
+
   it("no table gains a writer that is not in the baseline", () => {
     const added: string[] = [];
     for (const [table, buckets] of Object.entries(current)) {
@@ -62,6 +68,16 @@ describe("writer-ratchet (P2.1)", () => {
         `regenerate the baseline in this PR:\n  npx tsx scripts/writer-ratchet/generate-baseline.ts\n\n` +
         added.join("\n"),
     ).toEqual([]);
+  });
+
+  it("keeps Walmart connection writes in channels and order reconciliation writes in OMS", () => {
+    for (const table of ["channels.walmart_connections", "channels.walmart_connection_events", "channels.walmart_order_receipts"]) {
+      expect(current[table]).toEqual(["modules/channels"]);
+    }
+    for (const table of ["oms.oms_orders", "oms.oms_order_lines", "oms.oms_order_events"]) {
+      expect(current[table]).toContain("modules/oms");
+      expect(current[table]).not.toContain("modules/channels");
+    }
   });
 
   it("eliminated writers are removed from the baseline (no rot)", () => {

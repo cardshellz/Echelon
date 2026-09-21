@@ -93,6 +93,7 @@ export function registerChannelRoutes(app: Express) {
 
       const destination = await storage.getChannelById(channelId, transaction);
       if (!destination) return res.status(404).json({ error: "Channel not found" });
+      if (destination.provider === "walmart") return res.status(409).json({ error: "Verify and link the Walmart SKU in the channel connection panel" });
       if (destination.provider === "shopify") {
         const productLines = await storage.getProductLineIdsByProduct(variant.productId, transaction);
         const channelLines = await storage.getActiveChannelProductLineIds(channelId, transaction);
@@ -648,6 +649,10 @@ export function registerChannelRoutes(app: Express) {
   app.put("/api/channels/:id", requirePermission("channels", "edit"), async (req, res) => {
     try {
       const channelId = parseInt(req.params.id);
+      const existing = await storage.getChannelById(channelId);
+      if ((existing?.provider === "walmart" || req.body.provider === "walmart") && req.body.provider && req.body.provider !== existing?.provider) {
+        return res.status(409).json({ error: "Create a dedicated Walmart channel; existing channel providers cannot be converted" });
+      }
       const updateChannel = (executor: ChannelRouteTransaction = db) => storage.updateChannel(channelId, req.body, executor);
       const channel = hasLegacyInventoryChannelConfiguration(req.body)
         ? await inventoryLegacyAdminControl.executeLegacyWrite(
@@ -695,9 +700,10 @@ export function registerChannelRoutes(app: Express) {
         return res.status(404).json({ error: "Channel not found" });
       }
 
+      if (channel.provider === "walmart") return res.status(409).json({ error: "Use the Walmart connection setup" });
       const connection = await storage.upsertChannelConnection({
+        ...req.body,
         channelId,
-        ...req.body
       });
 
       res.json(toPublicChannelConnection(connection));

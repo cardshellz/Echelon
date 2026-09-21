@@ -1,3 +1,4 @@
+import { startWalmartOrderPolling } from "./modules/channels/adapters/walmart/walmart-order-poll.service";
 import { startArchonOrderDelivery } from "./modules/oms/archon-order-delivery.worker";
 import express, { type Request, Response, NextFunction } from "express";
 import session from "express-session";
@@ -59,6 +60,7 @@ import { cancelWmsOrderAndRelease, completeWmsOrderAndRelease } from "./modules/
 import { setPickQueueReservationService } from "./modules/orders/orders.storage";
 import { engineRefFromRow, toEngineRef } from "./modules/shipping";
 import { startCarrierTrackingReconciliationScheduler } from "./modules/shipping/carrier-tracking-reconciliation.scheduler";
+import { startShipStationLabelReconciliationScheduler } from "./modules/oms/shipstation-label-reconciliation.scheduler";
 import {
   installShipStationTrackingRawBodyCapture,
   registerShipStationTrackingWebhook,
@@ -473,6 +475,10 @@ function startEchelonSyncScheduler(
   });
   setDropshipFulfillmentSync(services.wmsSync);
   setDropshipInventoryRuntimeAuthorityGate(services.dropshipInventoryRuntimeAuthority);
+
+  if (process.env.WALMART_ORDER_POLLING_ENABLED === "true" && !schedulersDisabled("WALMART_ORDER_POLLING_DISABLED")) {
+    startWalmartOrderPolling(services.walmartOrderPoll, services.walmart);
+  }
 
   // Start eBay Order Polling (5-min safety net — NON-NEGOTIABLE)
   try {
@@ -911,6 +917,12 @@ function startEchelonSyncScheduler(
           "Carrier tracking reconciliation",
           "CARRIER_TRACKING_RECONCILIATION_DISABLED",
         );
+      }
+
+      if (!schedulersDisabled("SHIPSTATION_LABEL_RECONCILIATION_DISABLED")) {
+        startShipStationLabelReconciliationScheduler(services.shipStationLabelReconciliation);
+      } else {
+        logSchedulerDisabled("scheduler", "ShipStation label reconciliation", "SHIPSTATION_LABEL_RECONCILIATION_DISABLED");
       }
 
       if (!schedulersDisabled()) {

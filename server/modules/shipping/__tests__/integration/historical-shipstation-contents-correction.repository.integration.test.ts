@@ -32,8 +32,9 @@ const fixtureSql = `
   );
   CREATE TABLE catalog.product_variants (
     id integer PRIMARY KEY, sku text, name text NOT NULL, is_active boolean NOT NULL,
-    requires_shipping boolean NOT NULL, track_inventory boolean NOT NULL
-  );
+    requires_shipping boolean NOT NULL, track_inventory boolean NOT NULL,
+      inventory_tracking_override boolean
+    );
   CREATE TABLE inventory.inventory_transactions (
     id integer PRIMARY KEY, order_id integer, shipment_id integer, shipment_item_id integer,
     order_item_id integer, product_variant_id integer, from_location_id integer,

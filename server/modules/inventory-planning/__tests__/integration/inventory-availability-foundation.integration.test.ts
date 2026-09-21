@@ -221,8 +221,9 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
         name text NOT NULL DEFAULT 'Integration product',
         inventory_strategy varchar(30) NOT NULL DEFAULT 'physical_fungible',
         updated_at timestamptz NOT NULL DEFAULT now(),
-        is_active boolean NOT NULL DEFAULT true
-      );
+        is_active boolean NOT NULL DEFAULT true,
+      inventory_tracking_default boolean NOT NULL DEFAULT true
+    );
       CREATE TABLE catalog.product_variants (
         id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
         product_id integer NOT NULL REFERENCES catalog.products(id) ON DELETE RESTRICT,
@@ -235,8 +236,9 @@ describeWithDisposableDb.sequential("inventory availability Slice 1 PostgreSQL g
         requires_shipping boolean NOT NULL DEFAULT true,
         track_inventory boolean DEFAULT true,
         sales_eligibility varchar(20) NOT NULL DEFAULT 'sellable',
-        CONSTRAINT product_variants_id_product_uq UNIQUE (id, product_id)
-      );
+        CONSTRAINT product_variants_id_product_uq UNIQUE (id, product_id),
+      inventory_tracking_override boolean
+    );
       CREATE TABLE warehouse.warehouses (
         id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
         code varchar(20) NOT NULL DEFAULT 'TEST',

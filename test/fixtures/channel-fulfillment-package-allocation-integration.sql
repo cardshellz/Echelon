@@ -253,3 +253,5 @@ CREATE UNIQUE INDEX uq_channel_fulfillment_push_items_physical_item
     physical_shipment_item_id
   )
   WHERE physical_shipment_item_id IS NOT NULL;
+
+ALTER TABLE oms.oms_order_lines ADD COLUMN catalog_product_id integer, ADD COLUMN inventory_tracking boolean;

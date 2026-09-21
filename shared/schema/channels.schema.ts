@@ -6,6 +6,19 @@ import { products, productVariants, productAssets, productLines } from "./catalo
 
 export const channelsSchema = pgSchema("channels");
 
+// Product identity exists independently of warehouse variants. Channel scope prevents
+// an external product ID in one store from claiming the same ID in another store.
+export const channelProductIdentities = channelsSchema.table("channel_product_identities", {
+  id: integer("id").primaryKey().generatedAlwaysAsIdentity(),
+  channelId: integer("channel_id").notNull().references(() => channels.id),
+  productId: integer("product_id").notNull().references(() => products.id),
+  externalProductId: varchar("external_product_id", { length: 100 }).notNull(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+}, table => [
+  uniqueIndex("channel_product_identities_external_uq").on(table.channelId, table.externalProductId),
+  uniqueIndex("channel_product_identities_product_uq").on(table.channelId, table.productId),
+]);
+
 // Channel types
 export const channelTypeEnum = ["shopify", "amazon", "ebay", "wholesale"] as const;
 export type ChannelType = typeof channelTypeEnum[number];
@@ -14,7 +27,7 @@ export type ChannelType = typeof channelTypeEnum[number];
 export const channelOwnershipEnum = ["internal", "partner"] as const;
 export type ChannelOwnership = typeof channelOwnershipEnum[number];
 
-export const channelProviderEnum = ["shopify", "ebay", "amazon", "etsy", "manual"] as const;
+export const channelProviderEnum = ["shopify", "ebay", "walmart", "amazon", "etsy", "manual"] as const;
 export type ChannelProvider = typeof channelProviderEnum[number];
 
 export const channelStatusEnum = ["active", "paused", "pending_setup", "error"] as const;

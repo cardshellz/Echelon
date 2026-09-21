@@ -142,6 +142,8 @@ export const omsOrderLines = omsSchema.table("oms_order_lines", {
   id: bigint("id", { mode: "number" }).primaryKey().generatedAlwaysAsIdentity(),
   orderId: bigint("order_id", { mode: "number" }).notNull().references(() => omsOrders.id, { onDelete: "cascade" }),
   productVariantId: integer("product_variant_id").references(() => productVariants.id),
+  catalogProductId: integer("catalog_product_id").references(() => products.id),
+  inventoryTracking: boolean("inventory_tracking"), // Resolved policy snapshot; NULL is unresolved/legacy.
   externalLineItemId: varchar("external_line_item_id", { length: 100 }),
   externalProductId: varchar("external_product_id", { length: 100 }),
 

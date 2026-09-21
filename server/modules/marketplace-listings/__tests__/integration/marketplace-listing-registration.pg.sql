@@ -14,15 +14,17 @@ CREATE SCHEMA ebay;
 
 CREATE TABLE catalog.products (
   id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-  name TEXT NOT NULL
-);
+  name TEXT NOT NULL,
+      inventory_tracking_default boolean NOT NULL DEFAULT true
+    );
 
 CREATE TABLE catalog.product_variants (
   id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   product_id INTEGER NOT NULL REFERENCES catalog.products(id) ON DELETE RESTRICT,
   sku VARCHAR(100),
-  name TEXT NOT NULL
-);
+  name TEXT NOT NULL,
+      inventory_tracking_override boolean
+    );
 
 CREATE TABLE channels.channels (
   id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

@@ -124,6 +124,15 @@ describe("getFlowWaterfall", () => {
     expect(issueBlock).toContain("checkpoint.consecutive_failures > 0");
   });
 
+  it("surfaces failed or stalled void discovery in the existing Operations Tower", () => {
+    const start = FLOW_WATERFALL_SRC.indexOf('code: "SHIPSTATION_VOID_RECONCILIATION_UNHEALTHY"');
+    const issueBlock = FLOW_WATERFALL_SRC.slice(start, FLOW_WATERFALL_SRC.indexOf("\n  },", start));
+    expect(issueBlock).toContain("oms.shipstation_label_reconciliation_checkpoint");
+    expect(issueBlock).toContain("consecutive_failures > 0");
+    expect(issueBlock).toContain("completed_through < NOW() - INTERVAL '30 minutes'");
+    expect(issueBlock).toContain("last_error_code");
+  });
+
   it("alerts when the Shopify source-to-raw reconciliation checkpoint is stale", () => {
     const start = FLOW_WATERFALL_SRC.indexOf('code: "SHOPIFY_SOURCE_RECONCILIATION_UNHEALTHY"');
     const end = FLOW_WATERFALL_SRC.indexOf("\n  },", start);

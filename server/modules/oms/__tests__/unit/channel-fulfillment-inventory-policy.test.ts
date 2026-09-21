@@ -11,6 +11,21 @@ const tracked = {
 } as const;
 
 describe("channel fulfillment inventory policy", () => {
+  it("keeps matching untracked snapshots authoritative for a product without variants", () => {
+    expect(decideChannelFulfillmentInventoryPosting({ ...tracked,
+      productVariantId: null, catalogVariantId: null, catalogRequiresShipping: null, catalogTrackInventory: null,
+      omsInventoryTracking: false, wmsInventoryTracking: false, omsCatalogProductId: 10, wmsCatalogProductId: 10,
+    })).toEqual({ status: "resolved", requiresInventoryPosting: false, reason: "non_inventory_item" });
+  });
+
+  it.each([
+    { omsInventoryTracking: false, wmsInventoryTracking: true, omsCatalogProductId: 10, wmsCatalogProductId: 10 },
+    { omsInventoryTracking: false, wmsInventoryTracking: false, omsCatalogProductId: 10, wmsCatalogProductId: 11 },
+    { omsInventoryTracking: true, wmsInventoryTracking: true, omsCatalogProductId: 10, wmsCatalogProductId: 10, catalogTrackInventory: false },
+  ])("rejects snapshot or catalog policy disagreement", input => {
+    expect(decideChannelFulfillmentInventoryPosting({ ...tracked, ...input })).toMatchObject({ status: "conflict" });
+  });
+
   it("posts inventory only for a tracked physical line", () => {
     expect(decideChannelFulfillmentInventoryPosting(tracked)).toEqual({
       status: "resolved",

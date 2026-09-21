@@ -42,7 +42,6 @@ const providerNonInventoryCutoverFixtureSql = `${fixtureSql}
     ADD COLUMN fulfillment_partition_key varchar(100);
   ALTER TABLE wms.order_items
     ADD COLUMN source_item_id varchar(100),
-    ADD COLUMN sku varchar(100),
     ADD COLUMN product_id integer,
     ADD COLUMN fulfilled_quantity integer,
     ADD COLUMN on_hold boolean,
@@ -198,6 +197,16 @@ describeDatabase.sequential("channel shipment runtime exact preparation PostgreS
     expect((await pool.query("SELECT * FROM wms.outbound_shipment_items")).rows).toEqual([]);
     expect((await pool.query("SELECT channel_order_line_id,wms_order_item_id FROM oms.channel_fulfillment_receipt_items")).rows)
       .toEqual([{ channel_order_line_id: "line-1", wms_order_item_id: 50 }]);
+  });
+
+  it("accepts product-only physical fulfillment identity without a provider SKU or inventory variant", async () => {
+    await pool.query(`
+      UPDATE oms.oms_order_lines SET product_variant_id=NULL,sku=NULL,catalog_product_id=300,inventory_tracking=false WHERE id=12;
+      UPDATE wms.order_items SET sku='PRODUCT-300',catalog_product_id=300,inventory_tracking=false WHERE id=50;
+    `);
+    expect(await prepare()).toMatchObject({ shippingEvidenceMissing: true, inventoryItems: [] });
+    expect((await pool.query("SELECT wms_order_item_id FROM oms.channel_fulfillment_receipt_items")).rows)
+      .toEqual([{ wms_order_item_id: 50 }]);
   });
 
   it("preserves an old nonshipping package without using it as warehouse authority", async () => {

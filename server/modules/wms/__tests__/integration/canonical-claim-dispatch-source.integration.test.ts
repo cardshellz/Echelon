@@ -24,7 +24,9 @@ describeDatabase.sequential("WMS canonical dispatch source PostgreSQL owner", ()
     database = await createInventoryCutoverTestDatabase(databaseUrl, disposable); pool = database.pool;
     await pool.query(`CREATE SCHEMA wms;
       CREATE TABLE wms.orders (id integer PRIMARY KEY, warehouse_id integer, warehouse_status text, on_hold integer, cancelled_at timestamptz);
-      CREATE TABLE wms.order_items (id integer PRIMARY KEY, order_id integer REFERENCES wms.orders(id), product_id integer, status text, on_hold boolean, requires_shipping integer);
+      CREATE TABLE wms.order_items (id integer PRIMARY KEY, order_id integer REFERENCES wms.orders(id), product_id integer, status text, on_hold boolean, requires_shipping integer,
+      catalog_product_id integer, inventory_tracking boolean
+    );
       CREATE TABLE wms.outbound_shipments (id integer PRIMARY KEY, order_id integer REFERENCES wms.orders(id), status text, held boolean, requires_review boolean,
         shipment_purpose text, replaces_shipment_id integer, cancelled_at timestamptz, voided_at timestamptz);
       CREATE TABLE wms.outbound_shipment_items (id integer PRIMARY KEY, shipment_id integer REFERENCES wms.outbound_shipments(id), order_item_id integer REFERENCES wms.order_items(id),

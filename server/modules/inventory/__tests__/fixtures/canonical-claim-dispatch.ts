@@ -39,7 +39,9 @@ export const dispatchOwnerFixtureSql = `
   CREATE TABLE warehouse.warehouses(id integer PRIMARY KEY);
   CREATE TABLE warehouse.warehouse_locations(id integer PRIMARY KEY, warehouse_id integer NOT NULL REFERENCES warehouse.warehouses);
   CREATE TABLE wms.orders(id integer PRIMARY KEY);
-  CREATE TABLE wms.order_items(id integer PRIMARY KEY, order_id integer NOT NULL REFERENCES wms.orders);
+  CREATE TABLE wms.order_items(id integer PRIMARY KEY, order_id integer NOT NULL REFERENCES wms.orders,
+      catalog_product_id integer, inventory_tracking boolean
+    );
   CREATE TABLE wms.outbound_shipments(id integer PRIMARY KEY);
   CREATE TABLE wms.outbound_shipment_items(id integer PRIMARY KEY, shipment_id integer NOT NULL REFERENCES wms.outbound_shipments);
   CREATE TABLE inventory.inventory_levels (
