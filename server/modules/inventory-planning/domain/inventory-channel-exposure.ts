@@ -258,6 +258,7 @@ export interface DerivableChannelConnection {
   provider: string;
   /** Primary location this connection already writes inventory to, if stored. */
   shopifyLocationId: string | null;
+  providerLocationId?: string | null;
   /** Provider-verified account id; null when the credential does not carry one. */
   verifiedAccountId: string | null;
   label: string;
@@ -353,10 +354,14 @@ export function deriveChannelDestinations(input: {
       return;
     }
     if (scopeId === null || scopeId.trim().length === 0) {
+      let reason: SkippedDestination["reason"] = "no_verified_account";
+      if (providerScopeType === "location") {
+        reason = provider === "shopify" ? "no_shopify_location" : "no_provider_location";
+      }
       skipped.push({
         ...base,
         providerScopeType,
-        reason: providerScopeType === "location" ? "no_shopify_location" : "no_verified_account",
+        reason,
       });
       return;
     }
@@ -371,11 +376,12 @@ export function deriveChannelDestinations(input: {
 
   for (const connection of input.connections) {
     const scopeType = publicationScopeTypeFor(connection.provider);
+    const locationId = connection.provider === "shopify" ? connection.shopifyLocationId : connection.providerLocationId ?? null;
     consider(
       "channel_connection",
       connection.id,
       connection.provider,
-      scopeType === "location" ? connection.shopifyLocationId : connection.verifiedAccountId,
+      scopeType === "location" ? locationId : connection.verifiedAccountId,
       connection.label,
     );
   }

@@ -1,3 +1,4 @@
+import { startWalmartOrderPolling } from "./modules/channels/adapters/walmart/walmart-order-poll.service";
 import { startArchonOrderDelivery } from "./modules/oms/archon-order-delivery.worker";
 import express, { type Request, Response, NextFunction } from "express";
 import session from "express-session";
@@ -473,6 +474,10 @@ function startEchelonSyncScheduler(
   });
   setDropshipFulfillmentSync(services.wmsSync);
   setDropshipInventoryRuntimeAuthorityGate(services.dropshipInventoryRuntimeAuthority);
+
+  if (process.env.WALMART_ORDER_POLLING_ENABLED === "true" && !schedulersDisabled("WALMART_ORDER_POLLING_DISABLED")) {
+    startWalmartOrderPolling(services.walmartOrderPoll, services.walmart);
+  }
 
   // Start eBay Order Polling (5-min safety net — NON-NEGOTIABLE)
   try {
