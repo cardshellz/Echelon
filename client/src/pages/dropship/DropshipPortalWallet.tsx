@@ -393,7 +393,7 @@ export default function DropshipPortalWallet() {
       setNotice({ scope, tone: "error", text: caught instanceof Error && caught.message.trim() ? caught.message : "Wallet request failed." });
       return;
     }
-    const limits = wallet?.limits ?? { autoReloadMinTriggerCents: 0, caseTierMinimumCents: 0, autoReloadMinAmountCents: 0, manualFundingMinCents: 0, manualFundingMaxCents: 0, defaultPaymentHoldTimeoutMinutes: 1, holdExpiryWarningMinutes: 1, advanceFeeBps: 0, advanceCapCents: 0, tierChangeGraceDays: 0 };
+    const limits = wallet?.limits ?? { bankBalanceReadOffered: false, autoReloadMinTriggerCents: 0, caseTierMinimumCents: 0, autoReloadMinAmountCents: 0, manualFundingMinCents: 0, manualFundingMaxCents: 0, defaultPaymentHoldTimeoutMinutes: 1, holdExpiryWarningMinutes: 1, advanceFeeBps: 0, advanceCapCents: 0, tierChangeGraceDays: 0 };
     const face = describeWalletError(caught.code, caught.message, caught.context, { surface, limits });
     if (caught.code === "DROPSHIP_CARD_FUNDING_FEE_MISCONFIGURED") setFeeMisconfigured(true);
     if (face.recovery === "verify") {
@@ -609,7 +609,7 @@ export default function DropshipPortalWallet() {
 
   const walletErrorText = walletQuery.error
     ? describeWalletError(walletQuery.error instanceof DropshipApiError ? walletQuery.error.code : null, queryErrorMessage(walletQuery.error, "Unable to load your wallet."), null, {
-      surface: "get", limits: { autoReloadMinTriggerCents: 0, caseTierMinimumCents: 0, autoReloadMinAmountCents: 0, manualFundingMinCents: 0, manualFundingMaxCents: 0, defaultPaymentHoldTimeoutMinutes: 1, holdExpiryWarningMinutes: 1, advanceFeeBps: 0, advanceCapCents: 0, tierChangeGraceDays: 0 },
+      surface: "get", limits: { bankBalanceReadOffered: false, autoReloadMinTriggerCents: 0, caseTierMinimumCents: 0, autoReloadMinAmountCents: 0, manualFundingMinCents: 0, manualFundingMaxCents: 0, defaultPaymentHoldTimeoutMinutes: 1, holdExpiryWarningMinutes: 1, advanceFeeBps: 0, advanceCapCents: 0, tierChangeGraceDays: 0 },
     }).text
     : null;
 
@@ -2235,7 +2235,7 @@ function ListingTiersSection({ tiers }: { tiers: WalletListingTiers }) {
  * by the page.
  */
 function AdvanceSection({ advance, wallet }: { advance: WalletAdvance; wallet: DropshipWalletView }) {
-  const copy = describeAdvanceStanding(advance);
+  const copy = describeAdvanceStanding(advance, wallet.limits.bankBalanceReadOffered);
   const labelFor = (fundingMethodId: number) =>
     wallet.fundingMethods.find((method) => method.fundingMethodId === fundingMethodId)?.displayLabel ?? `Bank account #${fundingMethodId}`;
   return (
@@ -2258,7 +2258,7 @@ function AdvanceSection({ advance, wallet }: { advance: WalletAdvance; wallet: D
                 </div>
                 {source.reasons.length > 0 && (
                   <ul className="text-sm text-zinc-600">
-                    {source.reasons.map((reason) => <li key={reason}>{describeAdvanceReason(reason)}</li>)}
+                    {source.reasons.map((reason) => <li key={reason}>{describeAdvanceReason(reason, wallet.limits.bankBalanceReadOffered)}</li>)}
                   </ul>
                 )}
               </div>

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { describeWalletError } from "../dropship-wallet-errors";
 
-const LIMITS = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, caseTierMinimumCents: 50_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14 };
+const LIMITS = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, caseTierMinimumCents: 50_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14, bankBalanceReadOffered: false };
 const face = (code: string | null, surface: "put" | "get" | "delete" | "checkout" | "setup" | "usdc" | "other" = "other", context: Record<string, unknown> | null = null) =>
   describeWalletError(code, "server message", context, { surface, limits: LIMITS });
 

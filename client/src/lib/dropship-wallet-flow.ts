@@ -1018,7 +1018,11 @@ export function describePendingBalance(pendingCents: number, advance: WalletAdva
 }
 
 /** Why a bank account's transfers cannot be advanced against, in the vendor's words. */
-export function describeAdvanceReason(reason: WalletAdvanceReason): string {
+export function describeAdvanceReason(
+  reason: WalletAdvanceReason,
+  /** False when no bank link reads a balance, so relinking cannot help. */
+  bankBalanceReadOffered = true,
+): string {
   switch (reason) {
     case "no_bank_account":
       return "Add a bank account: the advance applies to bank transfers only.";
@@ -1027,7 +1031,11 @@ export function describeAdvanceReason(reason: WalletAdvanceReason): string {
     case "account_holder_not_company":
       return "The bank account has to be a business account.";
     case "bank_balance_not_verified":
-      return "We could not read the account's balance when it was linked. Link it again through your bank to enable this.";
+      // Telling a vendor to link again is only honest when linking would read
+      // a balance at all; otherwise it is a loop with no exit.
+      return bankBalanceReadOffered
+        ? "We could not read the account's balance when it was linked. Link it again through your bank to enable this."
+        : "Card Shellz is not reading bank balances right now, so this is unavailable for every seller. Nothing for you to do.";
     case "first_pull_not_settled":
       return "One earlier transfer from this account has to land first.";
     case "advance_cap_zero":
@@ -1042,7 +1050,11 @@ export interface WalletAdvanceStandingCopy {
 }
 
 /** The state of the pending-transfer advance, as the wallet page shows it. */
-export function describeAdvanceStanding(advance: WalletAdvance): WalletAdvanceStandingCopy {
+export function describeAdvanceStanding(
+  advance: WalletAdvance,
+  /** Passed through to the reasons; see `describeAdvanceReason`. */
+  bankBalanceReadOffered = true,
+): WalletAdvanceStandingCopy {
   const fee = formatFeeRate(advance.policy.feeBps);
   const cap = formatWholeDollars(advance.policy.capCents);
   const terms = `Fee ${fee} on the amount used; at most ${cap} outstanding at a time.`;
@@ -1060,7 +1072,7 @@ export function describeAdvanceStanding(advance: WalletAdvance): WalletAdvanceSt
   }
   return {
     headline: "No money on its way can pay for orders yet.",
-    details: [...advance.reasons.map(describeAdvanceReason), terms],
+    details: [...advance.reasons.map((reason) => describeAdvanceReason(reason, bankBalanceReadOffered)), terms],
   };
 }
 

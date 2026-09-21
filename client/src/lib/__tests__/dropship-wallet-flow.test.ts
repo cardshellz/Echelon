@@ -24,12 +24,12 @@ import {
   describeHoldTimeLine,
   describeIntro,
   describeMandate,
-  describeAdvanceReason,
   describeAdvanceStanding,
   describeNegativeBalance,
   describePendingBalance,
   describePlanSentence,
   describeRoleGap,
+  describeAdvanceReason,
   describeSavedCardAlternative,
   describeSourcePreselection,
   disabledReasonForRemoval,
@@ -63,7 +63,7 @@ import type {
 const STAMP = "2026-09-15T00:00:00.000Z";
 const LATER = "2026-09-16T00:00:00.000Z";
 const NOW = new Date("2026-09-18T12:00:00.000Z");
-const LIMITS = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, caseTierMinimumCents: 50_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14 };
+const LIMITS = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, caseTierMinimumCents: 50_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14, bankBalanceReadOffered: false };
 
 function method(overrides: Partial<WalletFundingMethod> & { fundingMethodId: number }): WalletFundingMethod {
   const rail = overrides.rail ?? "stripe_card";
@@ -467,7 +467,7 @@ describe("copy", () => {
   });
 
   it("pins the rules page: six topics, each a lead and its detail, quoting only the values the server enforces", () => {
-    const limits: WalletLimits = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, caseTierMinimumCents: 50_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14 };
+    const limits: WalletLimits = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, caseTierMinimumCents: 50_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14, bankBalanceReadOffered: false };
     const intro = describeIntro({ cardFundingFeeBps: 300, usdcOffered: true, holdTimeoutMinutes: 2_880, limits });
     expect(intro.lede).toBe("Your wallet is the deposit Card Shellz draws on for the orders you sell. Here is what it holds, what it lets you sell, how it stays funded, and what happens when a payment fails.");
     expect(intro.topics).toHaveLength(6);
@@ -533,6 +533,23 @@ describe("copy", () => {
     expect(describeSourcePreselection({ ...suggestion, justAdded: true })).toBeNull();
     expect(describeSourcePreselection({ ...suggestion, suggestedSourceMethodId: 30 })).toBeNull();
     expect(describeSourcePreselection({ ...suggestion, draftSourceMethodId: 30 })).toBeNull();
+  });
+
+  it("never tells a seller to relink a bank account when no link reads a balance", () => {
+    // The advance needs a balance read. When the platform asks for that
+    // permission, "link it again" is a real fix for one account...
+    expect(describeAdvanceReason("bank_balance_not_verified", true))
+      .toBe("We could not read the account's balance when it was linked. Link it again through your bank to enable this.");
+
+    // ...but when it asks for no balances at all, relinking can never work, so
+    // sending a seller round that loop would be a lie.
+    expect(describeAdvanceReason("bank_balance_not_verified", false))
+      .toBe("Card Shellz is not reading bank balances right now, so this is unavailable for every seller. Nothing for you to do.");
+
+    // Every other reason is about that one account and reads the same either way.
+    for (const reason of ["no_bank_account", "no_pending_credit", "account_holder_not_company", "first_pull_not_settled", "advance_cap_zero"] as const) {
+      expect(describeAdvanceReason(reason, true)).toBe(describeAdvanceReason(reason, false));
+    }
   });
 
   it("opens on the recommended bank rail and names a saved card instead of picking it", () => {
@@ -625,7 +642,7 @@ describe("advance copy (funding design phase 3)", () => {
 });
 
 describe("USDC deposits in the wallet's words (funding design phase 6)", () => {
-  const limits: WalletLimits = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, caseTierMinimumCents: 50_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14 };
+  const limits: WalletLimits = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, caseTierMinimumCents: 50_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14, bankBalanceReadOffered: false };
   const watched: WalletUsdcDeposit = { offered: true, watched: true, chainId: 8453, tokenAddress: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", minConfirmations: 6, settleTag: "safe", address: null };
   const unwatched: WalletUsdcDeposit = { ...watched, watched: false };
   const notOffered: WalletUsdcDeposit = { ...watched, offered: false, watched: false };
