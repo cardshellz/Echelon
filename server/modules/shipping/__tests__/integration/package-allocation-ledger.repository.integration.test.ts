@@ -524,7 +524,11 @@ async function seedCanonicalRequestForSource(
     [sourceId],
   );
   const row = source.rows[0];
-  const plan = await pool.query<{ id: string }>(
+  const existingPlan = await pool.query<{ id: string }>(
+    "SELECT id::text AS id FROM wms.fulfillment_plans WHERE wms_order_id = $1 AND plan_status = 'active'",
+    [row.order_id],
+  );
+  const plan = existingPlan.rows.length > 0 ? existingPlan : await pool.query<{ id: string }>(
     `INSERT INTO wms.fulfillment_plans (oms_order_id, wms_order_id, planner_version)
     VALUES ($1, $2, 'canonical-v1') RETURNING id::text AS id`,
     [row.oms_order_id, row.order_id],
@@ -542,7 +546,11 @@ async function seedCanonicalRequestForSource(
       row.qty,
     ],
   );
-  const request = await pool.query<{ id: string }>(
+  const existingRequest = await pool.query<{ id: string }>(
+    "SELECT id::text AS id FROM wms.shipment_requests WHERE legacy_wms_shipment_id = $1",
+    [row.shipment_id],
+  );
+  const request = existingRequest.rows.length > 0 ? existingRequest : await pool.query<{ id: string }>(
     `INSERT INTO wms.shipment_requests (
     fulfillment_plan_id, wms_order_id, legacy_wms_shipment_id, warehouse_id)
     VALUES ($1, $2, $3, (SELECT warehouse_id FROM wms.orders WHERE id = $2)) RETURNING id::text AS id`,
@@ -1298,6 +1306,214 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       expect((await pool.query("SELECT id FROM inventory.inventory_transactions")).rowCount).toBe(0);
     }
   }, 20000);
+
+  it.each(['sequential', 'concurrent', 'repeated', 'rollback', 'late_void', 'ambiguous', 'competing'])(
+    'matches split relabels by package lineage and updates exact Shopify quantities: %s', async mode => {
+      const source = await seedCommercialFulfillmentAuthoritySource(pool, 'SPLIT-CASES', 4);
+      const sibling = Number((await pool.query(`WITH original AS (
+        SELECT item.shipment_id, item.product_variant_id, order_item.order_id, line.order_id AS oms_order_id
+        FROM wms.outbound_shipment_items item JOIN wms.order_items order_item ON order_item.id = item.order_item_id
+        JOIN oms.oms_order_lines line ON line.id = order_item.oms_order_line_id WHERE item.id = $1
+      ), line AS (
+        INSERT INTO oms.oms_order_lines(order_id, external_line_item_id, fulfillment_provider, paid_quantity, authority_fulfillable_quantity)
+        SELECT oms_order_id, 'gid://shopify/LineItem/640003', 'shopify', 1, 1 FROM original RETURNING id
+      ), authority AS (
+        INSERT INTO oms.oms_order_line_authority_events(order_line_id, paid_quantity) SELECT id, 1 FROM line
+      ), order_item AS (
+        INSERT INTO wms.order_items(order_id, oms_order_line_id, sku, quantity)
+        SELECT original.order_id, line.id, 'OTHER-CASE', 1 FROM original CROSS JOIN line RETURNING id
+      ) INSERT INTO wms.outbound_shipment_items(shipment_id, order_item_id, shipment_item_purpose, product_variant_id, qty)
+        SELECT original.shipment_id, order_item.id, 'customer_fulfillment', original.product_variant_id, 1
+        FROM original CROSS JOIN order_item RETURNING id`, [source])).rows[0].id);
+      const channelId = Number((await pool.query('SELECT channel_id FROM oms.oms_orders')).rows[0].channel_id);
+      const warehouseId = (await pool.query(`INSERT INTO warehouse.warehouses(code, name, shopify_location_id)
+        VALUES ('SPLIT-RELABEL', 'Split relabel test', '640010') RETURNING id`)).rows[0].id;
+      await pool.query("UPDATE wms.orders SET channel_id = $1, warehouse_id = $2, external_order_id = 'gid://shopify/Order/640001'", [channelId, warehouseId]);
+      await pool.query('UPDATE wms.outbound_shipments SET channel_id = $1', [channelId]);
+      for (const sourceId of [source, sibling]) await seedCanonicalRequestForSource(pool, sourceId);
+      const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+      const clock = { now: () => new Date('2099-09-21T12:00:00Z') };
+      const workflow = createPackageAllocationLabelCommercialWorkflow({ pool, clock, logger });
+      let failBeforeCommit = false;
+      const splitReviews = vi.fn();
+      const handler = new PackageAllocationLabelCommercialFulfillmentService({ enabled: true, logger,
+        workflow: { run: work => workflow.run(async context => {
+          const result = await work(context);
+          if (failBeforeCommit) throw new Error('Injected split replacement rollback');
+          return result;
+        }) },
+        labelLinker: { reconcileShipStationLabel: vi.fn().mockResolvedValue({ linksInserted: 0, totalLinks: 0 }) },
+        reviewRepository: { record: splitReviews },
+      });
+      async function label(providerLabelId: number, providerOrderId: number, sourceId: number) {
+        const items = [{ lineItemKey: `wms-item-${sourceId}`, quantity: 1 }];
+        const id = await seedAuthorityReadinessLabel(pool, sourceId, { providerLabelId: String(providerLabelId),
+          providerOrderId: String(providerOrderId), carrierCode: 'ups', trackingNumber: `TRACK${providerLabelId}`,
+          contentsLines: items, receivedAt: '2026-09-17T12:00:00Z' });
+        // All split provider orders retain the same key/header, just as in 63268.
+        await pool.query("UPDATE wms.shipping_provider_labels SET carrier = 'ups', provider_order_key = 'shared-original-order' WHERE id = $1", [id]);
+        await pool.query(`INSERT INTO wms.shipping_provider_label_links(shipping_provider_label_id, legacy_wms_shipment_id)
+          SELECT $1, shipment_id FROM wms.outbound_shipment_items WHERE id = $2`, [id, sourceId]);
+        return { id, providerLabelId, providerOrderId, sourceId,
+          receive: () => handler.process({ shipmentId: providerLabelId, orderId: providerOrderId,
+            trackingNumber: `TRACK${providerLabelId}`, isReturnLabel: false, shipmentItems: items },
+          { shippingProviderLabelId: String(id) } as any) };
+      }
+      const old = [];
+      for (let index = 0; index < 5; index++) old.push(await label(45000 + index, 95000 + index, index < 4 ? source : sibling));
+      for (const pkg of old) await pkg.receive();
+
+      type ProviderPackage = { id: string; status: string; tracking: string; quantity: number; lineId: string };
+      const packages: ProviderPackage[] = [];
+      const mutations: string[] = [];
+      const lineIds = ['gid://shopify/LineItem/640002', 'gid://shopify/LineItem/640003'];
+      const client: ShopifyAdminGraphQLClient = { async request<T>(query: string, variables?: Record<string, unknown>): Promise<T> {
+        if (query.includes('labelLifecycleLines')) {
+          const pkg = packages.find(item => item.id === variables?.id)!;
+          return { fulfillment: { id: pkg.id, order: { id: 'gid://shopify/Order/640001' }, fulfillmentLineItems: {
+            nodes: [{ quantity: pkg.quantity, lineItem: { id: pkg.lineId } }], pageInfo: { hasNextPage: false, endCursor: null },
+          } } } as T;
+        }
+        if (query.includes('cancelVoidedLabelPackage')) {
+          const pkg = packages.find(item => item.id === variables?.id)!;
+          pkg.status = 'CANCELLED'; mutations.push(`cancel:${pkg.tracking}`);
+          return { fulfillmentCancel: { fulfillment: { id: pkg.id, status: pkg.status }, userErrors: [] } } as T;
+        }
+        if (query.includes('exactFulfillmentPackageForOrder') || query.includes('labelLifecyclePackages')) {
+          expect(variables?.id).toBe('gid://shopify/Order/640001');
+          return { order: { id: 'gid://shopify/Order/640001', fulfillmentsCount: { count: packages.length }, fulfillments: packages.map(pkg => ({
+            id: pkg.id, status: pkg.status, trackingInfo: [{ number: pkg.tracking }], fulfillmentLineItems: {
+              nodes: [{ quantity: pkg.quantity, lineItem: { id: pkg.lineId } }], pageInfo: { hasNextPage: false },
+            },
+          })) } } as T;
+        }
+        if (query.includes('fulfillmentOrders(first:')) return { order: { fulfillmentOrders: { edges: [{ node: {
+          id: 'gid://shopify/FulfillmentOrder/640020', status: 'OPEN', assignedLocation: { location: { id: 'gid://shopify/Location/640010' } },
+          lineItems: { edges: lineIds.map((id, index) => ({ node: {
+            id: `gid://shopify/FulfillmentOrderLineItem/${640021 + index}`, lineItem: { id },
+            remainingQuantity: (index === 0 ? 4 : 1) - packages.filter(pkg => pkg.status === 'SUCCESS' && pkg.lineId === id)
+              .reduce((sum, pkg) => sum + pkg.quantity, 0),
+          } })) },
+        } }] } } } as T;
+        if (query.includes('fulfillmentCreateV2')) {
+          const input = variables!.fulfillment as { trackingInfo: { number: string }; lineItemsByFulfillmentOrder: Array<{
+            fulfillmentOrderLineItems: Array<{ id: string; quantity: number }> }> };
+          const lines = input.lineItemsByFulfillmentOrder.flatMap(item => item.fulfillmentOrderLineItems);
+          expect(lines).toHaveLength(1); expect(lines[0].quantity).toBe(1);
+          const lineIndex = [640021, 640022].findIndex(id => lines[0].id === `gid://shopify/FulfillmentOrderLineItem/${id}`);
+          expect(lineIndex).toBeGreaterThanOrEqual(0);
+          const pkg = { id: `gid://shopify/Fulfillment/${641000 + packages.length}`, status: 'SUCCESS',
+            tracking: input.trackingInfo.number, quantity: lines[0].quantity, lineId: lineIds[lineIndex] };
+          packages.push(pkg); mutations.push(`create:${pkg.tracking}`);
+          return { fulfillmentCreateV2: { fulfillment: { id: pkg.id }, userErrors: [] } } as T;
+        }
+        throw new Error(`Unexpected split replacement provider operation: ${query.slice(0, 80)}`);
+      } };
+      const clients = { shopify: async (requestedChannel: number) => {
+        expect(requestedChannel).toBe(channelId);
+        return { channelId, connectionId: 987, externalAccountId: 'origin-store.myshopify.com', client };
+      }, ebay: async () => { throw new Error('Unexpected eBay connection'); } };
+      const runExclusive = async <T>(id: number, action: () => Promise<T>): Promise<T | null> => {
+        const connection = await pool.connect();
+        let locked = false;
+        try {
+          locked = (await connection.query('SELECT pg_try_advisory_lock($1::bigint) AS locked', [id])).rows[0].locked;
+          return locked ? await action() : null;
+        } finally {
+          if (locked) await connection.query('SELECT pg_advisory_unlock($1::bigint)', [id]);
+          connection.release();
+        }
+      };
+      const lifecycleRepository = createShopifyLabelLifecycleRepository(getTestDb());
+      const lifecycle = createShopifyLabelLifecycleService({ repository: lifecycleRepository, providerClients: clients, runExclusive, clock, logger });
+      const repository = createChannelFulfillmentAuthorityRepository(getTestDb());
+      const executor = createCompatibilityChannelFulfillmentProviderExecutor(createFulfillmentPushService(getTestDb(), null, { providerClients: clients, runExclusive }));
+      const worker = createChannelFulfillmentAuthorityService({ repository, providerExecutor: executor,
+        projector: createChannelFulfillmentProjector(getTestDb()), shopifyLabelLifecycle: lifecycle, clock, logger });
+      expect(await worker.runDueBatch(), JSON.stringify(logger.error.mock.calls)).toMatchObject({ succeeded: 5, reviewRequired: 0, retryScheduled: 0 });
+
+      async function voidLabel(id: number) {
+        const evidence = (await pool.query('SELECT sanitized_payload FROM wms.shipping_provider_label_events WHERE shipping_provider_label_id = $1 ORDER BY id LIMIT 1', [id])).rows[0].sanitized_payload;
+        const payload = { ...evidence, voidDate: '2026-09-17T13:00:00Z' };
+        const hash = createHash('sha256').update(canonicalJson({ provider: 'shipstation', ...payload, labelStatus: 'voided' })).digest('hex');
+        await pool.query(`INSERT INTO wms.shipping_provider_label_events(shipping_provider_label_id, event_hash, event_type,
+          label_status, tracking_number, provider_occurred_at, received_at, sanitized_payload)
+          VALUES ($1, $2, 'label_voided', 'voided', $3, '2026-09-17T13:00:00Z', '2026-09-17T13:00:00Z', $4)`, [id, hash, payload.trackingNumber, payload]);
+        await pool.query("UPDATE wms.shipping_provider_labels SET label_status = 'voided', last_observed_at = '2026-09-17T13:00:00Z' WHERE id = $1", [id]);
+        await lifecycleRepository.observe(id, clock.now());
+      }
+      const replacements = [];
+      for (let index = 0; index < old.length; index++) replacements.push(await label(45100 + index,
+        mode === 'ambiguous' && index < 4 ? 95999 : old[index].providerOrderId, old[index].sourceId));
+      for (const pkg of old.slice(1)) await voidLabel(pkg.id);
+      if (mode === 'late_void') expect(await replacements[0].receive())
+        .toMatchObject({ outcome: 'waiting', reason: 'awaiting_replaced_label_void' });
+      await voidLabel(old[0].id);
+      await worker.runLabelLifecycleBatch!();
+      expect(packages.filter(pkg => pkg.status === 'SUCCESS')).toHaveLength(0);
+      expect((await pool.query('SELECT state FROM oms.shopify_label_void_work')).rows).toEqual(Array(5).fill({ state: 'complete' }));
+      if (mode === 'ambiguous') {
+        expect(await replacements[0].receive()).toMatchObject({ outcome: 'review', reason: 'ambiguous_replacement_allocation' });
+        expect((await pool.query('SELECT id FROM wms.physical_shipment_item_quantity_adjustments')).rowCount).toBe(0);
+        return;
+      }
+      if (mode === 'competing') {
+        await label(45999, old[0].providerOrderId, source);
+        expect(await replacements[0].receive()).toMatchObject({ outcome: 'review', reason: 'multiple_active_replacement_candidates' });
+        expect((await pool.query('SELECT id FROM wms.physical_shipment_item_quantity_adjustments')).rowCount).toBe(0);
+        return;
+      }
+      if (mode === 'rollback') {
+        failBeforeCommit = true;
+        await expect(replacements[0].receive()).rejects.toThrow('Injected split replacement rollback');
+        expect((await pool.query('SELECT id FROM wms.physical_shipment_item_quantity_adjustments')).rowCount).toBe(0);
+        failBeforeCommit = false;
+      }
+      if (mode === 'concurrent') {
+        const results = await Promise.all([replacements[0].receive(), replacements[1].receive(), replacements[0].receive()]);
+        for (const result of results) expect(result, JSON.stringify(result)).toMatchObject({ outcome: 'replaced' });
+      }
+      for (const pkg of [...replacements].reverse()) {
+        const result = await pkg.receive();
+        expect(result, JSON.stringify({ label: pkg.id, result, reviews: splitReviews.mock.calls })).toMatchObject({ outcome: 'replaced' });
+      }
+      await worker.runDueBatch();
+      expect(packages.filter(pkg => pkg.status === 'SUCCESS').map(pkg => pkg.tracking).sort(), JSON.stringify(logger.error.mock.calls))
+        .toEqual(replacements.map(pkg => `TRACK${pkg.providerLabelId}`).sort());
+      const pairings = (await pool.query(`SELECT old_label.provider_order_id AS previous_order, new_label.provider_order_id AS replacement_order,
+          adjustment.metadata->>'matchingContract' AS matching_contract,
+          adjustment.metadata->>'previousProviderOrderId' AS audited_previous_order,
+          adjustment.metadata->>'replacementProviderOrderId' AS audited_replacement_order
+        FROM wms.physical_shipment_item_quantity_adjustments adjustment
+        JOIN wms.physical_shipment_items item ON item.id = adjustment.physical_shipment_item_id
+        JOIN wms.physical_shipments package ON package.id = item.physical_shipment_id
+        JOIN wms.shipping_provider_labels old_label ON old_label.provider = package.provider AND old_label.provider_label_id = package.provider_physical_shipment_id
+        JOIN wms.shipping_provider_labels new_label ON new_label.id = (adjustment.metadata->>'replacementLabelId')::bigint`)).rows;
+      expect(pairings).toHaveLength(5);
+      for (const pair of pairings) {
+        expect(pair.previous_order).toBe(pair.replacement_order);
+        expect(pair.audited_previous_order).toBe(pair.previous_order);
+        expect(pair.audited_replacement_order).toBe(pair.replacement_order);
+        expect(pair.matching_contract).toBe('package-lineage-v1');
+      }
+      const mutationCount = mutations.length;
+      for (const pkg of replacements) await pkg.receive();
+      await worker.runDueBatch();
+      expect(mutations).toHaveLength(mutationCount);
+      if (mode === 'repeated') {
+        await voidLabel(replacements[0].id); await worker.runLabelLifecycleBatch!();
+        const again = await label(45200, old[0].providerOrderId, source);
+        expect(await again.receive()).toMatchObject({ outcome: 'replaced' }); await worker.runDueBatch();
+        expect(packages.filter(pkg => pkg.status === 'SUCCESS').map(pkg => pkg.tracking).sort())
+          .toEqual(['TRACK45200', ...replacements.slice(1).map(pkg => `TRACK${pkg.providerLabelId}`)].sort());
+      }
+      expect((await pool.query('SELECT SUM(quantity_shipped)::int AS quantity FROM wms.effective_physical_shipment_items')).rows).toEqual([{ quantity: 5 }]);
+      expect(packages.filter(pkg => pkg.status === 'SUCCESS' && pkg.lineId === lineIds[0])).toHaveLength(4);
+      expect(packages.filter(pkg => pkg.status === 'SUCCESS' && pkg.lineId === lineIds[1])).toHaveLength(1);
+      expect((await pool.query('SELECT id FROM wms.physical_shipment_item_quantity_adjustments')).rowCount).toBe(mode === 'repeated' ? 6 : 5);
+      expect((await pool.query('SELECT id FROM inventory.inventory_transactions')).rowCount).toBe(0);
+      expect((await pool.query('SELECT qty FROM wms.outbound_shipment_items ORDER BY id')).rows).toEqual([{ qty: 4 }, { qty: 1 }]);
+    }, 30_000);
 
   it.each(['unsent', 'sent', 'late_void', 'missed_void_poll', 'missed_void_webhook', 'split', 'lost_cancel_response', 'claimed_before_void', 'concurrent', 'receipt_rollback', 'contents_changed'])(
     'corrects Shopify void/relabel end to end without changing a sibling: %s', async mode => {

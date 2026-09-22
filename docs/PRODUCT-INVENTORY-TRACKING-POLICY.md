@@ -17,6 +17,18 @@ Products with no variants use the product default directly. Digital variants rem
 
 In Product Detail, edit **Default inventory tracking**. In each variant editor, select **Inherit product**, **Track inventory**, or **Do not track inventory**. Returning an override to Inherit immediately uses the current product default. Changing the product default leaves explicit overrides intact.
 
+## Bulk product groups
+
+On **Products**, filter by product line, category, status, or search. Choose **Select all matching** (or individual checkboxes), then **Inventory tracking**. Select **Do not track inventory**, choose **Review changes**, and apply the reviewed selection. This requires `inventory:edit` and accepts up to 500 products per batch. Narrow the filters for larger groups. Changing filters clears the selection.
+
+The review lists product-only items, inherited variant changes, explicit overrides that will remain, and each blocking dependency. An explicit Track override remains tracked when the product default is changed to Do not track; the reverse override also remains intact. The product list displays the product default, not a claim that every variant has the same effective policy. This edits the selected current products; it does not create a group rule for future products.
+
+`loadBulkInventoryTrackingSelection` locks selected products in ascending ID order and calls the same dependency inspection used by the individual policy owner. `createBulkInventoryTrackingService` rechecks the preview hash and all blockers inside the apply transaction, then calls `updateProductInventoryTracking` for each changed product. A missing product, changed review, or dependency blocks the entire batch. A write failure rolls back product changes, variant projections, feed changes, and audit records together. Resolve the blocker or remove that product from the selection and review again; there is no force bypass.
+
+Apply requires an `Idempotency-Key` and uses the existing durable command ledger. A transport retry with the same key and request returns the saved result without reapplying it. Per-product audit events and one batch event record the authenticated actor, before/after defaults, preserved override counts, preview hash, and command key. Existing orders retain their saved policy. Enabling tracking does not reactivate channel quantity feeds.
+
+Disposable PostgreSQL tests cover both override directions, product-only batches, blockers, stale reviews, deleted/missing selections, rollback after a later write failure, exact replay after a subsequent edit, and overlapping batches. Desktop/mobile tests use the real Products page with mocked APIs for filtering, selection, review/apply, preserved overrides, blockers, stale responses, uncertain transport retries, and permissions. These are local/CI checks, not evidence of production deployment.
+
 ## Identity and order policy
 
 `resolveOrderLineCatalogIdentity` in `server/modules/oms/order-line-catalog-identity.service.ts` resolves a product without variants through a verified, channel-scoped product binding. The Shopify mapping panel can verify and link a remote product without creating warehouse variants. A reused source SKU cannot override this binding. SKU fallback also rejects known conflicting provider product/variant identities.

@@ -11,7 +11,7 @@ const tables = [schema.shippingGroups, schema.products, schema.productVariants, 
   schema.inventoryAvailabilityClaimResources, schema.auditEvents, schema.productLocations, schema.warehouseLocations,
   schema.allocationExceptions, schema.pickingLogs, schema.inventoryAvailabilityRuntimeAuthority, schema.inventoryAvailabilityClaimCommands];
 
-/** Existing table columns are a query fixture. The new policy columns/constraints come only from migration 0693. */
+/** Existing table columns are a query fixture. The new policy columns/constraints come only from migration 0694. */
 export const inventoryTrackingPolicyBaseFixture = [...new Set(tables.map(t => getTableConfig(t).schema ?? "public"))]
   .map(name => `CREATE SCHEMA IF NOT EXISTS ${quote(name)};`).join("\n") + tables.map((table: PgTable) => {
     const config = getTableConfig(table);

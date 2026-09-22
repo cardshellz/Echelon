@@ -21,8 +21,8 @@ async function lockProduct(tx: Transaction, productId: number) {
 }
 
 /** Policy changes cannot discard stock, reservations, picks, or pending publication work. */
-async function assertTransitionAllowed(tx: Transaction, variant: ProductVariant, next: boolean): Promise<void> {
-  if ((variant.trackInventory !== false) === next) return;
+async function transitionBlockers(tx: Transaction, variant: ProductVariant, next: boolean): Promise<string[]> {
+  if ((variant.trackInventory !== false) === next) return [];
   // These locks also serialize changes with existing level and claim mutations.
   await tx.execute(sql`SELECT id FROM inventory.inventory_levels
     WHERE product_variant_id = ${variant.id} ORDER BY id FOR UPDATE`);
@@ -31,7 +31,7 @@ async function assertTransitionAllowed(tx: Transaction, variant: ProductVariant,
       EXISTS (SELECT 1 FROM inventory.inventory_levels WHERE product_variant_id = ${variant.id}
         AND (variant_qty <> 0 OR reserved_qty <> 0 OR picked_qty <> 0 OR packed_qty <> 0 OR backorder_qty <> 0)) AS stock,
       EXISTS (SELECT 1 FROM inventory.inventory_lots WHERE product_variant_id = ${variant.id}
-        AND (qty_on_hand <> 0 OR qty_reserved <> 0)) AS lots,
+        AND (qty_on_hand <> 0 OR qty_reserved <> 0 OR qty_picked <> 0 OR qty_packed <> 0)) AS lots,
       EXISTS (SELECT 1 FROM inventory.availability_claim_lines
         WHERE target_variant_id = ${variant.id} AND planned_qty > released_target_qty + consumed_target_qty) AS claims,
       EXISTS (SELECT 1 FROM inventory.availability_claim_resources
@@ -49,11 +49,30 @@ async function assertTransitionAllowed(tx: Transaction, variant: ProductVariant,
   `);
   const row = result.rows[0];
   if (!row) throw new Error("Inventory policy dependency query returned no row");
-  const blockers = Object.entries(row).filter(([, present]) => present === true).map(([name]) => name);
+  return Object.entries(row).filter(([, present]) => present === true).map(([name]) => name);
+}
+
+async function assertTransitionAllowed(tx: Transaction, variant: ProductVariant, next: boolean): Promise<void> {
+  const blockers = await transitionBlockers(tx, variant, next);
   if (blockers.length > 0) throw new InventoryTrackingPolicyError(
     "INVENTORY_POLICY_HAS_DEPENDENCIES",
     `Variant ${variant.id} cannot change inventory tracking while it has: ${blockers.join(", ")}`,
   );
+}
+
+/** A read-only review uses the same locks and dependency checks as the writer. */
+export async function inspectProductInventoryTracking(tx: Transaction, productId: number, next: boolean) {
+  const product = await lockProduct(tx, productId);
+  const variants = await tx.select().from(productVariants).where(eq(productVariants.productId, productId))
+    .orderBy(productVariants.id).for("update");
+  const transitions = [];
+  for (const variant of variants) {
+    const effective = resolveInventoryTrackingPolicy({ inventoryTrackingDefault: next,
+      inventoryTrackingOverride: variant.inventoryTrackingOverride, requiresShipping: variant.requiresShipping });
+    transitions.push({ variant, effective, blockers: product.inventoryTrackingDefault === next
+      ? [] : await transitionBlockers(tx, variant, effective) });
+  }
+  return { product, transitions };
 }
 
 async function projectVariant(tx: Transaction, variant: ProductVariant, next: boolean, now: Date): Promise<void> {
