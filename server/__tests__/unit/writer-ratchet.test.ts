@@ -46,6 +46,12 @@ describe("writer-ratchet (P2.1)", () => {
     expect(baseline["oms.archon_order_outbox"]).toEqual(["modules/oms"]);
   });
 
+  it("channel product identities have only the Channels owning writer, including operational scripts", () => {
+    expect(current["channels.channel_product_identities"]).toEqual(["modules/channels"]);
+    expect(currentIncludingScripts["channels.channel_product_identities"]).toEqual(["modules/channels"]);
+    expect(baseline["channels.channel_product_identities"]).toEqual(["modules/channels"]);
+  });
+
   it("no table gains a writer that is not in the baseline", () => {
     const added: string[] = [];
     for (const [table, buckets] of Object.entries(current)) {
@@ -88,5 +94,20 @@ describe("writer-ratchet (P2.1)", () => {
         `improvement is locked in:\n  npx tsx scripts/writer-ratchet/generate-baseline.ts\n\n` +
         stale.join("\n"),
     ).toEqual([]);
+  });
+
+  it("keeps the catalog cleanup's purchase and count mutations with their existing owners", () => {
+    for (const topology of [current,currentIncludingScripts]) {
+      for (const table of ["procurement.po_events","procurement.purchase_order_lines","procurement.vendor_products"]) {
+        expect(topology[table]).toEqual(["modules/procurement"]);
+      }
+      expect(topology["inventory.cycle_count_items"]).not.toContain("modules/catalog");
+      expect(topology["public.audit_events"]).not.toContain("modules/catalog");
+      expect(topology["catalog.product_cleanup_receipts"]).toEqual(["modules/catalog"]);
+    }
+    expect(current["inventory.cycle_count_items"]).toEqual(["modules/inventory"]);
+    // Existing QA fixture writer is unchanged; the production cleanup does not
+    // add a second runtime owner or a new script writer.
+    expect(currentIncludingScripts["inventory.cycle_count_items"]).toEqual(["modules/inventory","scripts/create-daily-replen-qa-counts.ts"]);
   });
 });

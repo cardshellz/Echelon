@@ -20,6 +20,7 @@ import {
 } from "@shared/schema";
 import { db } from "../../db";
 import { persistAuditEvent } from "../../infrastructure/auditLogger";
+import { removeChannelProductIdentities } from "../channels/channel-product-identity.repository";
 import {
   buildShopifyProductMappingSummary,
   normalizeShopifyId,
@@ -684,6 +685,10 @@ export function createShopifyProductMappingReconciliationRepository(
           })
           .where(eq(products.id, input.productId));
 
+        await removeChannelProductIdentities(tx, {
+          channelId: input.channelId, productIds: [input.productId],
+        });
+
         const clearedVariants = await tx
           .update(productVariants)
           .set({
@@ -919,6 +924,10 @@ export function createShopifyProductMappingReconciliationRepository(
         const detachedVariantIds = detachedVariants.map(
           (variant) => variant.id,
         );
+
+        await removeChannelProductIdentities(tx, {
+          channelId: input.channel.id, productIds: detachedProductIds,
+        });
 
         const clearedProducts = await tx
           .update(products)

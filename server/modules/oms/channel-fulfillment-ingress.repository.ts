@@ -171,7 +171,12 @@ interface ResolvedLineRow {
   max_paid_quantity: number;
   product_variant_id: number | null;
   sku: string | null;
+  wms_sku: string | null;
   oms_requires_shipping: boolean | null;
+  oms_inventory_tracking: boolean | null;
+  wms_inventory_tracking: boolean | null;
+  oms_catalog_product_id: number | null;
+  wms_catalog_product_id: number | null;
   catalog_variant_id: number | null;
   catalog_requires_shipping: boolean | null;
   catalog_track_inventory: boolean | null;
@@ -500,7 +505,10 @@ async function resolveExactLines(
       COALESCE(authority.max_paid_quantity, 0)::int AS max_paid_quantity,
       ol.product_variant_id,
       ol.sku,
+      oi.sku AS wms_sku,
       ol.requires_shipping AS oms_requires_shipping,
+      ol.inventory_tracking AS oms_inventory_tracking, oi.inventory_tracking AS wms_inventory_tracking,
+      ol.catalog_product_id AS oms_catalog_product_id, oi.catalog_product_id AS wms_catalog_product_id,
       variant.id AS catalog_variant_id,
       variant.requires_shipping AS catalog_requires_shipping,
       variant.track_inventory AS catalog_track_inventory,
@@ -623,7 +631,9 @@ async function resolveExactLines(
         },
       );
     }
-    const sku = nullableText(row.sku);
+    // An explicitly untracked product may have no provider SKU. Use its already
+    // materialized WMS identity; policy agreement is validated below.
+    const sku = nullableText(row.sku) ?? (row.oms_inventory_tracking === false ? nullableText(row.wms_sku) : null);
     if (!sku) {
       throw new ChannelFulfillmentIngressError(
         "WMS_LINEAGE_MISSING",
@@ -634,6 +644,8 @@ async function resolveExactLines(
     const productVariantId = positiveInteger(row.product_variant_id);
     const inventoryDecision = decideChannelFulfillmentInventoryPosting({
       omsRequiresShipping: row.oms_requires_shipping,
+      omsInventoryTracking: row.oms_inventory_tracking, wmsInventoryTracking: row.wms_inventory_tracking,
+      omsCatalogProductId: positiveInteger(row.oms_catalog_product_id), wmsCatalogProductId: positiveInteger(row.wms_catalog_product_id),
       wmsRequiresShipping: Number(row.wms_requires_shipping),
       productVariantId,
       catalogVariantId: positiveInteger(row.catalog_variant_id),

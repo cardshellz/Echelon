@@ -8,7 +8,9 @@ const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
 const ddl = `CREATE SCHEMA channels; CREATE SCHEMA catalog; CREATE SCHEMA warehouse;
  CREATE TABLE channels.channels(id integer PRIMARY KEY,provider text,status text,sync_enabled boolean);
  CREATE TABLE channels.channel_connections(id integer PRIMARY KEY,channel_id integer NOT NULL REFERENCES channels.channels(id));
- CREATE TABLE catalog.product_variants(id integer PRIMARY KEY,product_id integer NOT NULL,sku text);
+ CREATE TABLE catalog.product_variants(id integer PRIMARY KEY,product_id integer NOT NULL,sku text,
+      inventory_tracking_override boolean
+    );
  CREATE TABLE channels.channel_feeds(id integer PRIMARY KEY,channel_id integer,product_variant_id integer,
   channel_inventory_item_id text,channel_sku text,is_active integer,quarantined_at timestamptz,UNIQUE(channel_id,product_variant_id));
  CREATE TABLE channels.channel_listings(id integer PRIMARY KEY,channel_id integer,product_variant_id integer,external_sku text,UNIQUE(channel_id,product_variant_id));

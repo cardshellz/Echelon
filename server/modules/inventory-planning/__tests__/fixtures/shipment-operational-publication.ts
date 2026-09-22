@@ -12,7 +12,9 @@ export async function installOperationalPublicationPrerequisites(pool: Pool): Pr
     ALTER TABLE warehouse.warehouse_locations ADD COLUMN pick_sequence integer;
     CREATE TABLE wms.orders(id integer PRIMARY KEY,warehouse_id integer NOT NULL REFERENCES warehouse.warehouses,
       warehouse_status text NOT NULL DEFAULT 'ready_to_ship',on_hold integer NOT NULL DEFAULT 0,cancelled_at timestamp);
-    CREATE TABLE wms.order_items(id integer PRIMARY KEY,order_id integer NOT NULL REFERENCES wms.orders);
+    CREATE TABLE wms.order_items(id integer PRIMARY KEY,order_id integer NOT NULL REFERENCES wms.orders,
+      catalog_product_id integer, inventory_tracking boolean
+    );
     CREATE TABLE wms.outbound_shipments(id integer PRIMARY KEY,order_id integer NOT NULL REFERENCES wms.orders,
       status text NOT NULL DEFAULT 'shipped',held boolean NOT NULL DEFAULT false,requires_review boolean NOT NULL DEFAULT false,
       review_reason text,shipment_purpose text NOT NULL DEFAULT 'customer_fulfillment',replaces_shipment_id integer,

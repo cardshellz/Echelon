@@ -59,6 +59,7 @@ CREATE TABLE catalog.products (
   safety_stock_days integer NOT NULL DEFAULT 7,
   status varchar(20) DEFAULT 'active',
   inventory_type varchar(20) NOT NULL DEFAULT 'inventory',
+  inventory_tracking_default boolean NOT NULL DEFAULT true,
   inventory_strategy varchar(30) NOT NULL DEFAULT 'physical_fungible' CHECK (inventory_strategy IN ('physical_fungible', 'recipe_managed', 'physical_only')),
   is_active boolean NOT NULL DEFAULT true,
   condition varchar(30) DEFAULT 'new',
@@ -102,6 +103,7 @@ CREATE TABLE catalog.product_variants (
   avg_cost_cents bigint,
   requires_shipping boolean NOT NULL DEFAULT true,
   track_inventory boolean DEFAULT true,
+  inventory_tracking_override boolean,
   inventory_policy varchar(20) DEFAULT 'deny',
   shopify_variant_id varchar(100),
   shopify_inventory_item_id varchar(100),
@@ -586,3 +588,6 @@ CREATE TABLE channels.source_lock_config (
   updated_at timestamp NOT NULL DEFAULT now(),
   UNIQUE (channel_id, field_type)
 );
+
+-- Product policy and immutable order-line policy snapshots (0693).
+ALTER TABLE wms.order_items ADD COLUMN catalog_product_id integer, ADD COLUMN inventory_tracking boolean;

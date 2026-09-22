@@ -113,7 +113,8 @@ async function createMinimalDependencies(client: pg.PoolClient) {
       sku varchar(100),
       name text NOT NULL,
       category varchar(100),
-      is_active boolean NOT NULL DEFAULT true
+      is_active boolean NOT NULL DEFAULT true,
+      inventory_tracking_default boolean NOT NULL DEFAULT true
     );
 
     CREATE TABLE IF NOT EXISTS catalog.product_variants (
@@ -122,7 +123,8 @@ async function createMinimalDependencies(client: pg.PoolClient) {
       sku varchar(100),
       name text NOT NULL,
       units_per_variant integer NOT NULL DEFAULT 1,
-      is_active boolean NOT NULL DEFAULT true
+      is_active boolean NOT NULL DEFAULT true,
+      inventory_tracking_override boolean
     );
 
     CREATE TABLE IF NOT EXISTS channels.channels (

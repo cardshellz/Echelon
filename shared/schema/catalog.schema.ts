@@ -2,6 +2,8 @@ import { pgTable, text, varchar, integer, bigint, numeric, timestamp, jsonb, boo
 import { sql } from "drizzle-orm";
 import { createInsertSchema } from "drizzle-zod";
 import { z } from "zod";
+import { users } from "./identity.schema";
+import { auditEvents } from "./audit.schema";
 import { VARIANT_UOM_TYPES, type VariantUomType } from "../catalog/variant-uom";
 import {
   DEFAULT_PRODUCT_INVENTORY_STRATEGY,
@@ -117,6 +119,7 @@ export const products = catalogSchema.table("products", {
   safetyStockDays: integer("safety_stock_days").notNull().default(7), // Safety stock buffer in days of cover
   status: varchar("status", { length: 20 }).default("active"), // active, draft, archived
   inventoryType: varchar("inventory_type", { length: 20 }).notNull().default("inventory"), // inventory, non_inventory, expense
+  inventoryTrackingDefault: boolean("inventory_tracking_default").notNull().default(true),
   isActive: boolean("is_active").notNull().default(true),
   condition: varchar("condition", { length: 30 }).default("new"), // new, used, refurbished
   countryOfOrigin: varchar("country_of_origin", { length: 2 }), // ISO 3166-1 alpha-2
@@ -150,6 +153,48 @@ export const insertProductSchema = createInsertSchema(products, {
 
 export type InsertProduct = z.infer<typeof insertProductSchema>;
 export type Product = typeof products.$inferSelect;
+
+// Historical forecast identity is deliberately not a foreign key to a live
+// product. Registration and removal require the DB guards in migration 0695.
+export const forecastProductIdentities = catalogSchema.table("forecast_product_identities", {
+  productId: integer("product_id").primaryKey(),
+  catalogSnapshot: jsonb("catalog_snapshot").notNull(),
+  registeredAt: timestamp("registered_at", { withTimezone: true }).notNull().default(sql`transaction_timestamp()`),
+}, (table) => [
+  check("forecast_product_identities_product_id_check", sql`${table.productId} > 0`),
+  check("forecast_product_identity_snapshot_chk", sql`(jsonb_typeof(${table.catalogSnapshot})='object'
+    AND ${table.catalogSnapshot}->'id'=to_jsonb(${table.productId})) IS TRUE`),
+]);
+
+export const productCleanupReceipts = catalogSchema.table("product_cleanup_receipts", {
+  commandKey: text("command_key").primaryKey(),
+  requestHash: varchar("request_hash", { length: 64 }).notNull(),
+  expectedHash: varchar("expected_hash", { length: 64 }).notNull(),
+  sourceProductId: integer("source_product_id").notNull().unique("product_cleanup_receipts_source_product_id_key").references(() => forecastProductIdentities.productId, { onDelete: "restrict" }),
+  targetProductId: integer("target_product_id").notNull().references(() => products.id, { onDelete: "restrict" }),
+  actorId: varchar("actor_id", { length: 100 }).notNull().references(() => users.id, { onDelete: "restrict" }),
+  databaseActor: text("database_actor").notNull().default(sql`current_user`),
+  ownerTransactionId: text("owner_transaction_id").notNull().default(sql`pg_current_xact_id()::text`),
+  approval: text("approval").notNull(),
+  occurredAt: timestamp("occurred_at", { withTimezone: true }).notNull(),
+  beforeState: jsonb("before_state").notNull(),
+  afterState: jsonb("after_state").notNull(),
+  manifest: jsonb("manifest").notNull(),
+  result: jsonb("result").notNull(),
+  auditEventId: bigint("audit_event_id", { mode: "bigint" }).notNull().references(() => auditEvents.id, { onDelete: "restrict" }),
+}, (table) => [
+  check("product_cleanup_receipts_command_key_check", sql`length(btrim(${table.commandKey})) BETWEEN 1 AND 160`),
+  check("product_cleanup_receipts_request_hash_check", sql`${table.requestHash} ~ '^[a-f0-9]{64}$'`),
+  check("product_cleanup_receipts_expected_hash_check", sql`${table.expectedHash} ~ '^[a-f0-9]{64}$'`),
+  check("product_cleanup_receipts_approval_check", sql`length(btrim(${table.approval})) BETWEEN 10 AND 1000`),
+  check("product_cleanup_receipts_before_state_check", sql`jsonb_typeof(${table.beforeState})='object'`),
+  check("product_cleanup_receipts_after_state_check", sql`jsonb_typeof(${table.afterState})='object'`),
+  check("product_cleanup_receipts_manifest_check", sql`jsonb_typeof(${table.manifest})='object'`),
+  check("product_cleanup_receipts_result_check", sql`jsonb_typeof(${table.result})='object'`),
+  check("product_cleanup_distinct_identities_chk", sql`${table.sourceProductId} <> ${table.targetProductId}`),
+  check("product_cleanup_source_snapshot_chk", sql`(${table.beforeState}->'sourceProduct'->'id'=to_jsonb(${table.sourceProductId})) IS TRUE`),
+  check("product_cleanup_removed_source_chk", sql`(${table.afterState}->'sourceProduct'='null'::jsonb) IS TRUE`),
+]);
 
 // ============================================================================
 // PRODUCT VARIANTS - Inventory identities and sellable/purchasable package configurations
@@ -188,6 +233,8 @@ export const productVariants = catalogSchema.table("product_variants", {
   // channel inventory quantity workflows.
   requiresShipping: boolean("requires_shipping").notNull().default(true),
   trackInventory: boolean("track_inventory").default(true),
+  // NULL inherits the product default; trackInventory is the effective compatibility projection.
+  inventoryTrackingOverride: boolean("inventory_tracking_override"),
   // Customer promise identity is independent from physical inventory. An
   // internal-only variant can remain tracked and participate in builds/ATP,
   // but customer-facing channel and reservation boundaries must reject it.

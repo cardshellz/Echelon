@@ -1,8 +1,12 @@
 export const SHARED_SHIPPING_LEGACY_FIXTURE_SQL = `CREATE SCHEMA shipping; CREATE SCHEMA dropship; CREATE SCHEMA warehouse; CREATE SCHEMA catalog; CREATE SCHEMA channels;
       CREATE TABLE channels.channels(id integer PRIMARY KEY,name text,type text,provider text,status text,shipping_config jsonb);
       CREATE TABLE channels.channel_warehouse_assignments(channel_id integer,warehouse_id integer,enabled boolean);
-      CREATE TABLE catalog.product_variants(id integer PRIMARY KEY,sku text,product_id integer,weight_grams numeric,length_mm numeric,width_mm numeric,height_mm numeric,ships_in_own_container boolean,max_units_per_package integer);
-      CREATE TABLE catalog.products(id integer PRIMARY KEY,shipping_group_id integer);
+      CREATE TABLE catalog.product_variants(id integer PRIMARY KEY,sku text,product_id integer,weight_grams numeric,length_mm numeric,width_mm numeric,height_mm numeric,ships_in_own_container boolean,max_units_per_package integer,
+      inventory_tracking_override boolean
+    );
+      CREATE TABLE catalog.products(id integer PRIMARY KEY,shipping_group_id integer,
+      inventory_tracking_default boolean NOT NULL DEFAULT true
+    );
       CREATE TABLE catalog.shipping_groups(id integer PRIMARY KEY,code text);
       INSERT INTO catalog.shipping_groups VALUES(1,'protection');
       INSERT INTO catalog.products VALUES(1,1);

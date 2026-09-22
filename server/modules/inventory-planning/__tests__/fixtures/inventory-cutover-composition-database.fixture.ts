@@ -29,20 +29,28 @@ CREATE TABLE channels.sync_settings(
 INSERT INTO channels.sync_settings(singleton_key,global_enabled) VALUES(true,true);
 CREATE TABLE dropship.dropship_vendors(id integer PRIMARY KEY,business_name text NOT NULL);
 CREATE TABLE dropship.dropship_store_connections(id integer PRIMARY KEY,vendor_id integer REFERENCES dropship.dropship_vendors(id),platform text DEFAULT 'ebay',status text DEFAULT 'disconnected',external_display_name text,external_account_id text,shop_domain text);
-CREATE TABLE catalog.products(id integer PRIMARY KEY,sku text,name text NOT NULL DEFAULT 'Pack',inventory_strategy text NOT NULL DEFAULT 'physical_only',is_active boolean NOT NULL DEFAULT true);
+CREATE TABLE catalog.products(id integer PRIMARY KEY,sku text,name text NOT NULL DEFAULT 'Pack',inventory_strategy text NOT NULL DEFAULT 'physical_only',is_active boolean NOT NULL DEFAULT true,
+      inventory_tracking_default boolean NOT NULL DEFAULT true
+    );
 CREATE TABLE catalog.product_variants(id integer PRIMARY KEY,product_id integer NOT NULL REFERENCES catalog.products(id),sku text,name text NOT NULL DEFAULT 'P5',
- units_per_variant integer NOT NULL DEFAULT 5,uom_type text DEFAULT 'pack',hierarchy_level integer DEFAULT 1,is_active boolean DEFAULT true,requires_shipping boolean DEFAULT true,track_inventory boolean DEFAULT true,sales_eligibility text DEFAULT 'sellable',UNIQUE(id,product_id));
+ units_per_variant integer NOT NULL DEFAULT 5,uom_type text DEFAULT 'pack',hierarchy_level integer DEFAULT 1,is_active boolean DEFAULT true,requires_shipping boolean DEFAULT true,track_inventory boolean DEFAULT true,sales_eligibility text DEFAULT 'sellable',UNIQUE(id,product_id),
+      inventory_tracking_override boolean
+    );
 CREATE TABLE warehouse.warehouses(id integer PRIMARY KEY,code text NOT NULL DEFAULT 'MAIN',name text DEFAULT 'Main',warehouse_type text DEFAULT 'operations',inventory_source_type text DEFAULT 'internal',inventory_source_config jsonb,hub_warehouse_id integer,is_active integer DEFAULT 1,created_at timestamptz DEFAULT now());
 CREATE TABLE warehouse.warehouse_locations(id integer PRIMARY KEY,warehouse_id integer REFERENCES warehouse.warehouses(id),code text DEFAULT 'PICK',location_type text DEFAULT 'pick',is_active integer DEFAULT 1,is_pickable integer DEFAULT 1,cycle_count_freeze_id integer);
 CREATE TABLE warehouse.product_locations(id integer PRIMARY KEY,product_variant_id integer REFERENCES catalog.product_variants(id),warehouse_location_id integer REFERENCES warehouse.warehouse_locations(id),name text DEFAULT 'Slot',location text DEFAULT 'PICK',zone text DEFAULT 'PICK',is_primary integer DEFAULT 1,status text DEFAULT 'active');
 CREATE TABLE inventory.build_recipes(id integer PRIMARY KEY,code text NOT NULL,version integer NOT NULL,status text NOT NULL,output_product_id integer REFERENCES catalog.products(id),name text DEFAULT 'Recipe',recipe_type text DEFAULT 'conversion',output_variant_id integer REFERENCES catalog.product_variants(id),output_units_per_variant integer NOT NULL,output_qty integer NOT NULL);
 CREATE TABLE inventory.build_recipe_components(id integer PRIMARY KEY,recipe_id integer REFERENCES inventory.build_recipes(id),component_product_id integer REFERENCES catalog.products(id),component_variant_id integer REFERENCES catalog.product_variants(id),component_units_per_variant integer NOT NULL,qty integer NOT NULL);
 CREATE TABLE wms.orders(id integer PRIMARY KEY,warehouse_id integer,warehouse_status text,on_hold integer,channel_id integer,source text,external_order_id text,oms_fulfillment_order_id text,fulfillment_partition_key text);
-CREATE TABLE wms.order_items(id integer PRIMARY KEY,order_id integer,oms_order_line_id bigint,source_item_id text,sku text,product_id integer,quantity integer,picked_quantity integer,fulfilled_quantity integer,status text,on_hold boolean,requires_shipping integer,location text,short_reason text,picked_at timestamptz);
+CREATE TABLE wms.order_items(id integer PRIMARY KEY,order_id integer,oms_order_line_id bigint,source_item_id text,sku text,product_id integer,quantity integer,picked_quantity integer,fulfilled_quantity integer,status text,on_hold boolean,requires_shipping integer,location text,short_reason text,picked_at timestamptz,
+      catalog_product_id integer, inventory_tracking boolean
+    );
 ${cutoverShipmentSchemaFixtureSql}
 CREATE TABLE wms.order_build_demands(id integer PRIMARY KEY,order_id integer,order_item_id integer,target_variant_id integer,root_build_order_id integer,status text,requested_qty integer,promised_qty integer);
 CREATE TABLE oms.oms_orders(id bigint PRIMARY KEY,status text);
-CREATE TABLE oms.oms_order_lines(id bigint PRIMARY KEY,order_id bigint,product_variant_id integer,sku text,requires_shipping boolean,quantity integer,authority_fulfillable_quantity integer,wms_materialized_quantity integer,authorization_status text);
+CREATE TABLE oms.oms_order_lines(id bigint PRIMARY KEY,order_id bigint,product_variant_id integer,sku text,requires_shipping boolean,quantity integer,authority_fulfillable_quantity integer,wms_materialized_quantity integer,authorization_status text,
+      catalog_product_id integer, inventory_tracking boolean
+    );
 ${cutoverReceiptSchemaFixtureSql}
 CREATE TABLE oms.order_item_costs(id integer GENERATED BY DEFAULT AS IDENTITY(START WITH 100) PRIMARY KEY,order_id integer,order_item_id integer,inventory_lot_id integer,product_variant_id integer,qty integer,unit_cost_mills bigint,total_cost_mills bigint,created_at timestamptz,unit_cost_cents bigint,total_cost_cents bigint);
 CREATE TABLE inventory.inventory_levels(id integer PRIMARY KEY,warehouse_location_id integer REFERENCES warehouse.warehouse_locations(id),product_variant_id integer REFERENCES catalog.product_variants(id),variant_qty integer,reserved_qty integer,picked_qty integer,packed_qty integer,backorder_qty integer DEFAULT 0,updated_at timestamptz);

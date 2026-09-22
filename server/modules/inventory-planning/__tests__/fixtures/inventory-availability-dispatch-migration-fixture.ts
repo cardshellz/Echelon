@@ -6,14 +6,18 @@ CREATE SCHEMA warehouse;
 CREATE SCHEMA catalog;
 CREATE SCHEMA wms;
 CREATE TABLE wms.orders (id integer PRIMARY KEY);
-CREATE TABLE wms.order_items (id integer PRIMARY KEY);
+CREATE TABLE wms.order_items (id integer PRIMARY KEY,
+      catalog_product_id integer, inventory_tracking boolean
+    );
 CREATE TABLE wms.outbound_shipments (id integer PRIMARY KEY);
 CREATE TABLE wms.outbound_shipment_items (id integer PRIMARY KEY);
 CREATE TABLE wms.physical_shipments (id bigint PRIMARY KEY);
 CREATE TABLE wms.physical_shipment_items (id bigint PRIMARY KEY);
 CREATE TABLE warehouse.warehouses (id integer PRIMARY KEY);
 CREATE TABLE warehouse.warehouse_locations (id integer PRIMARY KEY);
-CREATE TABLE catalog.product_variants (id integer PRIMARY KEY);
+CREATE TABLE catalog.product_variants (id integer PRIMARY KEY,
+      inventory_tracking_override boolean
+    );
 CREATE TABLE inventory.inventory_transactions (id integer PRIMARY KEY, transaction_type varchar(30) NOT NULL);
 CREATE TABLE inventory.availability_claims (
   id bigint PRIMARY KEY, order_id integer NOT NULL, UNIQUE (id, order_id)

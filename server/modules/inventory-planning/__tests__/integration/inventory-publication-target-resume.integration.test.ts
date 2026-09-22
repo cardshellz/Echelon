@@ -76,8 +76,9 @@ INSERT INTO inventory.inventory_publication_targets(
 
 CREATE TABLE catalog.product_variants (
   id integer PRIMARY KEY,
-  product_id integer NOT NULL
-);
+  product_id integer NOT NULL,
+      inventory_tracking_override boolean
+    );
 CREATE TABLE inventory.publication_variant_mapping_versions (
   id integer PRIMARY KEY,
   lifecycle_status varchar(20) NOT NULL,

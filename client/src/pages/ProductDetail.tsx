@@ -347,6 +347,7 @@ interface ProductVariantRow {
   maxUnitsPerPackage: number | null;
   requiresShipping: boolean;
   trackInventory: boolean | null;
+  inventoryTrackingOverride: boolean | null;
   salesEligibility: VariantSalesEligibility;
   hierarchyLevel: number;
   uomType?: VariantUomType | null;
@@ -376,6 +377,7 @@ interface ProductDetailData {
   status: string | null;
   baseUnit: string;
   inventoryStrategy: ProductInventoryStrategy;
+  inventoryTrackingDefault: boolean;
   isActive: boolean;
   leadTimeDays: number;
   safetyStockDays: number;
@@ -842,6 +844,7 @@ function ShopifyProductMappingPanel({ productId, enabled }: { productId: number;
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [confirmTargetId, setConfirmTargetId] = useState<string | null>(null);
+  const [productOnlyTarget, setProductOnlyTarget] = useState("");
   const queryKey = [`/api/products/${productId}/shopify-mapping`];
   const { data, isLoading, isError, error } = useQuery<ShopifyProductMappingDto>({
     queryKey,
@@ -854,7 +857,7 @@ function ShopifyProductMappingPanel({ productId, enabled }: { productId: number;
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ channelId: data?.channel.id, targetProductId }),
+        body: JSON.stringify({ channelId: data?.channel.id, targetProductId, allowProductOnlyAdoption: data?.variants.length === 0 && data?.status === "unmapped" }),
       });
       const body = await response.json().catch(() => null);
       if (!response.ok) throw new Error(formatShopifyMappingRepairError(body));
@@ -920,6 +923,15 @@ function ShopifyProductMappingPanel({ productId, enabled }: { productId: number;
                 </div>
               </div>
 
+              {data.status === "unmapped" && data.variants.length === 0 && (
+                <div className="space-y-2 border-t pt-4">
+                  <Label htmlFor="product-only-shopify-id">Shopify product ID</Label>
+                  <Input id="product-only-shopify-id" value={productOnlyTarget} onChange={event => setProductOnlyTarget(event.target.value)} />
+                  <p className="text-xs text-muted-foreground">Link this product for order matching without creating warehouse variants. Shopify will verify the product before the mapping is saved.</p>
+                  <Button size="sm" disabled={!/^[1-9][0-9]*$/.test(productOnlyTarget.trim()) || repairMutation.isPending}
+                    onClick={() => setConfirmTargetId(productOnlyTarget.trim())}>Verify and link product</Button>
+                </div>
+              )}
               {data.repairable && data.recommendedProductId && (
                 <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-4">
                   <p className="text-sm">
@@ -1580,6 +1592,7 @@ export default function ProductDetail() {
     sku: "",
     baseUnit: "",
     inventoryStrategy: DEFAULT_PRODUCT_INVENTORY_STRATEGY,
+    inventoryTrackingDefault: true,
     leadTimeDays: 120,
     safetyStockDays: 7,
   });
@@ -1614,6 +1627,7 @@ export default function ProductDetail() {
         sku: product.sku || "",
         baseUnit: product.baseUnit || "piece",
         inventoryStrategy: product.inventoryStrategy ?? DEFAULT_PRODUCT_INVENTORY_STRATEGY,
+        inventoryTrackingDefault: product.inventoryTrackingDefault ?? true,
         leadTimeDays: product.leadTimeDays ?? 120,
         safetyStockDays: product.safetyStockDays ?? 7,
       });
@@ -1636,7 +1650,7 @@ export default function ProductDetail() {
     }
   }, [product]);
 
-  const updateField = useCallback((field: string, value: string | number) => {
+  const updateField = useCallback((field: string, value: string | number | boolean) => {
     setEditForm((prev) => ({ ...prev, [field]: value }));
     setIsDirty(true);
   }, []);
@@ -1675,6 +1689,9 @@ export default function ProductDetail() {
         seoDescription: contentForm.seoDescription || null,
         status: contentForm.status || "active",
       };
+      if (editForm.inventoryTrackingDefault !== (product?.inventoryTrackingDefault ?? true)) {
+        productUpdate.inventoryTrackingDefault = editForm.inventoryTrackingDefault;
+      }
       const persistedInventoryStrategy = product?.inventoryStrategy ?? DEFAULT_PRODUCT_INVENTORY_STRATEGY;
       if (editForm.inventoryStrategy !== persistedInventoryStrategy) {
         productUpdate.inventoryStrategy = editForm.inventoryStrategy;
@@ -2126,7 +2143,7 @@ export default function ProductDetail() {
     shipsInOwnContainer: false,
     maxUnitsPerPackage: "",
     requiresShipping: true,
-    trackInventory: true,
+    inventoryTrackingOverride: null as boolean | null,
     salesEligibility: "sellable" as VariantSalesEligibility,
   });
   const [skuManuallyEdited, setSkuManuallyEdited] = useState(false);
@@ -2204,7 +2221,7 @@ export default function ProductDetail() {
       shipsInOwnContainer: false,
       maxUnitsPerPackage: "",
       requiresShipping: true,
-      trackInventory: true,
+      inventoryTrackingOverride: null as boolean | null,
       salesEligibility: "sellable",
     });
     setVariantDialogOpen(true);
@@ -2242,7 +2259,7 @@ export default function ProductDetail() {
       shipsInOwnContainer: false,
       maxUnitsPerPackage: "",
       requiresShipping: true,
-      trackInventory: true,
+      inventoryTrackingOverride: null as boolean | null,
       salesEligibility: "sellable",
     });
     setVariantDialogOpen(true);
@@ -2269,7 +2286,7 @@ export default function ProductDetail() {
       shipsInOwnContainer: variant.shipsInOwnContainer ?? false,
       maxUnitsPerPackage: variant.maxUnitsPerPackage != null ? String(variant.maxUnitsPerPackage) : "",
       requiresShipping: variant.requiresShipping !== false,
-      trackInventory: variant.trackInventory !== false,
+      inventoryTrackingOverride: variant.inventoryTrackingOverride ?? null,
       salesEligibility: variant.salesEligibility ?? "sellable",
     });
     setVariantDialogOpen(true);
@@ -2317,7 +2334,7 @@ export default function ProductDetail() {
         parentVariantId: data.parentVariantId,
         isBaseUnit: data.isBaseUnit,
         requiresShipping: data.requiresShipping,
-        trackInventory: data.trackInventory,
+        inventoryTrackingOverride: data.inventoryTrackingOverride,
         salesEligibility: data.salesEligibility,
         ...packageAttributes,
         ...packingFlags,
@@ -2376,7 +2393,7 @@ export default function ProductDetail() {
           // parent from a stale form when saving unrelated SKU attributes.
           isBaseUnit: data.isBaseUnit,
           requiresShipping: data.requiresShipping,
-          trackInventory: data.trackInventory,
+          inventoryTrackingOverride: data.inventoryTrackingOverride,
           salesEligibility: data.salesEligibility,
           ...packageAttributes,
           ...packingFlags,
@@ -2833,6 +2850,21 @@ export default function ProductDetail() {
                         className="h-9 capitalize"
                       />
                     </div>
+                  </div>
+                  <div className="space-y-2 border-t pt-4">
+                    <Label htmlFor="product-inventory-tracking">Default inventory tracking</Label>
+                    <Select value={editForm.inventoryTrackingDefault ? "tracked" : "untracked"}
+                      onValueChange={value => updateField("inventoryTrackingDefault", value === "tracked")}>
+                      <SelectTrigger id="product-inventory-tracking"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="tracked">Track inventory</SelectItem>
+                        <SelectItem value="untracked">Do not track inventory</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p className="text-xs text-muted-foreground">
+                      Applies to this product and variants that inherit it. Variants can override it in either direction.
+                      Untracked physical products still require pick confirmation.
+                    </p>
                   </div>
                   <div className="space-y-2 border-t pt-4" data-testid="inventory-behavior-control">
                     <div>
@@ -4205,7 +4237,6 @@ export default function ProductDetail() {
                     onCheckedChange={(checked) => setVariantForm((prev) => ({
                       ...prev,
                       requiresShipping: checked === true,
-                      trackInventory: checked === true ? prev.trackInventory : false,
                     }))}
                   />
                   <div>
@@ -4215,22 +4246,26 @@ export default function ProductDetail() {
                     <p className="text-xs text-muted-foreground">Turn this off for gift cards, donations, and other digital items.</p>
                   </div>
                 </div>
-                <div className="flex items-start gap-2">
-                  <Checkbox
-                    id="variant-track-inventory"
-                    checked={variantForm.trackInventory}
+                <div className="space-y-1.5">
+                  <Label htmlFor="variant-track-inventory">Inventory tracking</Label>
+                  <Select
+                    value={variantForm.inventoryTrackingOverride === null ? "inherit" : variantForm.inventoryTrackingOverride ? "tracked" : "untracked"}
                     disabled={!variantForm.requiresShipping}
-                    onCheckedChange={(checked) => setVariantForm((prev) => ({
-                      ...prev,
-                      trackInventory: checked === true,
+                    onValueChange={(value) => setVariantForm(prev => ({ ...prev,
+                      inventoryTrackingOverride: value === "inherit" ? null : value === "tracked",
                     }))}
-                  />
-                  <div>
-                    <label htmlFor="variant-track-inventory" className="text-sm cursor-pointer">
-                      Track inventory and include in ATP
-                    </label>
-                    <p className="text-xs text-muted-foreground">Turn this off for physical items that ship but are not warehouse-managed.</p>
-                  </div>
+                  >
+                    <SelectTrigger id="variant-track-inventory"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="inherit">Inherit product ({product.inventoryTrackingDefault ? "tracked" : "not tracked"})</SelectItem>
+                      <SelectItem value="tracked">Track inventory</SelectItem>
+                      <SelectItem value="untracked">Do not track inventory</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    Effective: {!variantForm.requiresShipping ? "not tracked (digital item)" : (variantForm.inventoryTrackingOverride ?? product.inventoryTrackingDefault) ? "tracked" : "not tracked"}.
+                    Physical items still require pick confirmation when tracking is off.
+                  </p>
                 </div>
               </div>
             </div>

@@ -61,7 +61,9 @@ databaseSuite("assembly work PostgreSQL ownership and atomicity", () => {
       CREATE TABLE inventory.availability_claim_lines (id bigint PRIMARY KEY, claim_id bigint REFERENCES inventory.availability_claims(id), order_item_id integer NOT NULL, requested_qty bigint NOT NULL, planned_qty bigint NOT NULL, picked_target_qty bigint NOT NULL, released_target_qty bigint NOT NULL DEFAULT 0, consumed_target_qty bigint NOT NULL DEFAULT 0, shortfall_qty bigint NOT NULL DEFAULT 0);
       CREATE TABLE inventory.availability_claim_operations (id bigint PRIMARY KEY, claim_id bigint REFERENCES inventory.availability_claims(id), UNIQUE(id,claim_id));
       CREATE TABLE wms.orders (id integer PRIMARY KEY, warehouse_status text NOT NULL, on_hold integer DEFAULT 0, assigned_picker_id varchar, warehouse_id integer, updated_at timestamptz);
-      CREATE TABLE wms.order_items (id integer PRIMARY KEY, order_id integer REFERENCES wms.orders(id), status text NOT NULL, on_hold boolean NOT NULL DEFAULT false, requires_shipping integer NOT NULL DEFAULT 1, location varchar(50), zone varchar(10), sku text NOT NULL DEFAULT 'P5', quantity integer NOT NULL DEFAULT 2, picked_quantity integer NOT NULL DEFAULT 0);
+      CREATE TABLE wms.order_items (id integer PRIMARY KEY, order_id integer REFERENCES wms.orders(id), status text NOT NULL, on_hold boolean NOT NULL DEFAULT false, requires_shipping integer NOT NULL DEFAULT 1, location varchar(50), zone varchar(10), sku text NOT NULL DEFAULT 'P5', quantity integer NOT NULL DEFAULT 2, picked_quantity integer NOT NULL DEFAULT 0,
+      catalog_product_id integer, inventory_tracking boolean
+    );
       CREATE TABLE wms.allocation_exceptions (id integer PRIMARY KEY, order_id integer REFERENCES wms.orders(id), status text NOT NULL, metadata jsonb);
       CREATE TABLE wms.outbound_shipments (id integer PRIMARY KEY, order_id integer REFERENCES wms.orders(id), status text NOT NULL);
       CREATE TABLE wms.outbound_shipment_items (id integer PRIMARY KEY, shipment_id integer REFERENCES wms.outbound_shipments(id), order_item_id integer REFERENCES wms.order_items(id), shipment_item_purpose text NOT NULL, qty integer NOT NULL);

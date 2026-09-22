@@ -40,7 +40,9 @@ test(
    CREATE TABLE channels.channels(id integer PRIMARY KEY,name text,provider text,shipping_config jsonb);
    INSERT INTO channels.channels VALUES(36,'Shopify','shopify','{}'),(37,'Ebay','ebay','{}'),(80,'Dropship OMS','manual','{"dropship":{"omsChannel":true}}');
    CREATE TABLE oms.oms_orders(id serial PRIMARY KEY,channel_id integer,external_order_id text,external_order_number text,customer_email text,customer_name text,customer_phone text,external_customer_id text,raw_payload jsonb,total_cents bigint DEFAULT 1200,subtotal_cents bigint DEFAULT 1000,shipping_cents bigint DEFAULT 100,tax_cents bigint DEFAULT 100,discount_cents bigint DEFAULT 0,refund_amount_cents bigint DEFAULT 0,currency text DEFAULT 'USD',financial_status text DEFAULT 'paid',fulfillment_status text DEFAULT 'unfulfilled',status text DEFAULT 'confirmed',ordered_at timestamptz DEFAULT '2026-09-14T12:00:00Z',tracking_number text,tracking_carrier text,tags text);
-   CREATE TABLE oms.oms_order_lines(id serial PRIMARY KEY,order_id integer REFERENCES oms.oms_orders(id),sku text,title text,quantity integer,retail_price_cents bigint,total_discount_cents bigint,external_product_id text,fulfillment_status text);
+   CREATE TABLE oms.oms_order_lines(id serial PRIMARY KEY,order_id integer REFERENCES oms.oms_orders(id),sku text,title text,quantity integer,retail_price_cents bigint,total_discount_cents bigint,external_product_id text,fulfillment_status text,
+      catalog_product_id integer, inventory_tracking boolean
+    );
    INSERT INTO oms.oms_orders(channel_id,external_order_id,raw_payload) VALUES(36,'historic','{"source_name":"tiktok"}');`);
       const migration = await readFile(
         new URL(
