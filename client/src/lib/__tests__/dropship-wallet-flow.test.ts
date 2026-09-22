@@ -10,6 +10,9 @@ import {
   buildPlanSaveInput,
   buildRemoveFundingMethodPath,
   depositFundingMethodFor,
+  depositDefaultCents,
+  depositOptions,
+  describeDepositOption,
   defaultMinimumCents,
   deriveWalletFlow,
   describeMinimumOption,
@@ -759,5 +762,40 @@ describe("the top-up amount's quick picks", () => {
     expect(topUpCentsFor({ kind: "multiple", factor: 2 }, 50_000)).toBe(100_000);
     expect(topUpCentsFor({ kind: "custom", cents: 80_000 }, 50_000)).toBe(80_000);
     expect(() => topUpCentsFor({ kind: "minimum" }, -1)).toThrow(RangeError);
+  });
+});
+
+describe("adding money: the top-up step's picks again", () => {
+  it("offers the minimum, its multiples and the vendor's own top-up amount, within the manual funding limits", () => {
+    expect(depositOptions({ minimumCents: 10_000, topUpCents: null, limits: LIMITS })).toEqual([
+      { factor: 1, cents: 10_000 }, { factor: 2, cents: 20_000 }, { factor: 3, cents: 30_000 }, { factor: 5, cents: 50_000 },
+    ]);
+    // A top-up amount that is already a pick is not offered twice; one of the vendor's own takes its place in the order.
+    expect(depositOptions({ minimumCents: 10_000, topUpCents: 20_000, limits: LIMITS })).toEqual([
+      { factor: 1, cents: 10_000 }, { factor: 2, cents: 20_000 }, { factor: 3, cents: 30_000 }, { factor: 5, cents: 50_000 },
+    ]);
+    expect(depositOptions({ minimumCents: 50_000, topUpCents: 80_000, limits: LIMITS })).toEqual([
+      { factor: 1, cents: 50_000 }, { factor: null, cents: 80_000 }, { factor: 2, cents: 100_000 }, { factor: 3, cents: 150_000 }, { factor: 5, cents: 250_000 },
+    ]);
+    // LIMITS cap manual funding at $5,000: picks past it are left out, a minimum past it included.
+    expect(depositOptions({ minimumCents: 200_000, topUpCents: null, limits: LIMITS })).toEqual([{ factor: 1, cents: 200_000 }, { factor: 2, cents: 400_000 }]);
+    expect(depositOptions({ minimumCents: 600_000, topUpCents: null, limits: LIMITS })).toEqual([]);
+    // A multiple the top-up step hides (under LIMITS' $100 smallest top-up) stays hidden here.
+    expect(depositOptions({ minimumCents: 2_000, topUpCents: null, limits: LIMITS })).toEqual([{ factor: 1, cents: 2_000 }, { factor: 5, cents: 10_000 }]);
+    expect(() => depositOptions({ minimumCents: 10_000, topUpCents: -1, limits: LIMITS })).toThrow(RangeError);
+    expect(describeDepositOption({ factor: 1, cents: 10_000 })).toBe("Your minimum");
+    expect(describeDepositOption({ factor: 3, cents: 30_000 })).toBe("3× your minimum");
+    expect(describeDepositOption({ factor: null, cents: 80_000 })).toBe("Your top-up amount");
+  });
+
+  it("opens on what autopay would pull next, else the minimum, else the smallest pick, and on nothing when nothing is offered", () => {
+    const options = depositOptions({ minimumCents: 50_000, topUpCents: 80_000, limits: LIMITS });
+    expect(depositDefaultCents(options, 80_000)).toBe(80_000);
+    expect(depositDefaultCents(options, 50_000)).toBe(50_000);
+    // The next top-up is not a pick (a shortfall past the minimum): the minimum.
+    expect(depositDefaultCents(options, 70_000)).toBe(50_000);
+    expect(depositDefaultCents([{ factor: 2, cents: 20_000 }, { factor: 5, cents: 50_000 }], 70_000)).toBe(20_000);
+    expect(depositDefaultCents([], 10_000)).toBeNull();
+    expect(() => depositDefaultCents(options, 1.5)).toThrow(RangeError);
   });
 });

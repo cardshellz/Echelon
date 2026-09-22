@@ -107,7 +107,11 @@ bigger ones. The step offers it as quick picks beside the minimum itself —
 2×, 3× and 5× the minimum, recomputed whenever the minimum changes so a
 "2×" pick follows it (`topUpOptions`) — plus an amount of the vendor's own;
 a saved amount that equals a multiple reads as that multiple, any other as
-the vendor's own. `domain/autopay-refill.ts`:
+the vendor's own. Adding money — step 6 and the manage view's Add money
+panel — offers the same picks again, plus the vendor's own top-up amount
+when it is not one of them, within the manual funding limits, and opens on
+what autopay would pull next (`depositOptions`, `nextTopUpCents`); the old
+fixed presets below the minimum are gone. `domain/autopay-refill.ts`:
 
 - refill (after any order debit and at the daily check, while the balance
   counting pending is under the minimum): pull the top-up amount, or the

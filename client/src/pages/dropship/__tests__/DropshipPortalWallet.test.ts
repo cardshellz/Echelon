@@ -156,6 +156,27 @@ describe("DropshipPortalWallet contract", () => {
     expect(step).not.toContain("initialDailyCostCents");
   });
 
+  it("adds money with the top-up step's picks again, opening on what autopay would pull next", () => {
+    const controls = between("function FundingControls", "function UsdcFundingPanel");
+    expect(controls).toContain("const options = depositOptions({ minimumCents: floorCents, topUpCents, limits });");
+    expect(controls).toContain("depositDefaultCents(options, nextTopUpCents({ floorCents, topUpCents, availableCents: wallet.account.availableBalanceCents, pendingCents: wallet.account.pendingBalanceCents }))");
+    expect(controls).toContain("hint={describeDepositOption(option)}");
+    expect(controls).toContain('testId={`wallet-deposit-${option.factor === null ? "top-up" : `${option.factor}x`}`}');
+    // A pick the plan no longer offers counts as none, and nothing is sent without an amount.
+    expect(controls).toContain("const preset = options.some((option) => option.cents === presetCents) ? presetCents : null;");
+    expect(controls).toContain('if (amountCents === null) { setCustomError("Pick an amount or enter one."); return; }');
+    expect(controls).toContain('<Label htmlFor="wallet-custom-amount">Or another amount</Label>');
+    // Step 6 names the amount the controls open on, and both callers hand the controls the plan's top-up amount.
+    const step = between("function DepositStep", "function ManageView");
+    expect(step).toContain("formatWholeDollars(nextTopUpCents({ floorCents: terms.floorCents, topUpCents: terms.topUpCents, availableCents: wallet.account.availableBalanceCents, pendingCents: wallet.account.pendingBalanceCents }))");
+    expect(step).toContain("topUpCents={terms.topUpCents}");
+    const manage = between("function ManageView", "function ListingTiersSection");
+    expect(manage).toContain("const topUpCents = wallet.autoReload ? wallet.autoReload.topUpAmountCents : flow.topUpCents;");
+    expect(manage).toContain("topUpCents={topUpCents}");
+    // The fixed presets below the minimum are gone from the whole page.
+    expect(source).not.toMatch(/DEPOSIT_PRESETS_CENTS|presetsIncluding|depositAmountDefault|placeholder="75\.00"/);
+  });
+
   it("states the intro in the words of what happens today, from one source of the copy", () => {
     expect(source).not.toContain("passkey enrollment");
     expect(source).toContain("describeActivationTopUp(");

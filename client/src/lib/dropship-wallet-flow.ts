@@ -670,6 +670,56 @@ export function topUpCentsFor(choice: WalletTopUpChoice, minimumCents: number): 
   return choice.cents;
 }
 
+// ---------------------------------------------------------------------------
+// Adding money: the top-up step's picks again, so the two cards agree
+// ---------------------------------------------------------------------------
+
+export interface WalletDepositOption {
+  cents: number;
+  /** 1 for the minimum, a multiple of it, or null for the vendor's own top-up amount when it is neither. */
+  factor: WalletTopUpOption["factor"] | null;
+}
+
+/**
+ * The amounts offered when adding money: the same picks as the top-up step
+ * (the minimum and its multiples) plus the vendor's own top-up amount when it
+ * is not one of them, so what autopay would pull is always on offer. Anything
+ * outside the manual funding limits is left out; the vendor can still type an
+ * amount of their own.
+ */
+export function depositOptions(input: {
+  minimumCents: number;
+  topUpCents: number | null;
+  limits: Pick<WalletLimits, "autoReloadMinAmountCents" | "manualFundingMinCents" | "manualFundingMaxCents">;
+}): WalletDepositOption[] {
+  const picks: WalletDepositOption[] = [...topUpOptions(input.minimumCents, input.limits)];
+  if (input.topUpCents !== null) {
+    assertCents(input.topUpCents, "topUpCents");
+    if (!picks.some((pick) => pick.cents === input.topUpCents)) picks.push({ factor: null, cents: input.topUpCents });
+  }
+  return picks
+    .filter((pick) => pick.cents >= input.limits.manualFundingMinCents && pick.cents <= input.limits.manualFundingMaxCents)
+    .sort((left, right) => left.cents - right.cents);
+}
+
+/** What each pick is, under its amount. */
+export function describeDepositOption(option: WalletDepositOption): string {
+  return option.factor === null ? "Your top-up amount" : describeTopUpOption({ factor: option.factor, cents: option.cents });
+}
+
+/**
+ * The pick the add-money controls open on: what autopay would pull next when
+ * it is offered, else the minimum, else the smallest amount offered; null when
+ * the limits leave nothing to offer and the vendor must type an amount.
+ */
+export function depositDefaultCents(options: readonly WalletDepositOption[], nextTopUpCents: number): number | null {
+  assertCents(nextTopUpCents, "nextTopUpCents");
+  const preferred = options.find((option) => option.cents === nextTopUpCents)
+    ?? options.find((option) => option.factor === 1)
+    ?? options[0];
+  return preferred?.cents ?? null;
+}
+
 /** Manage-mode target for a `{ step }` recovery (spec §1.3 rule 12). */
 export function manageEditorForStep(step: "source" | "floor" | "backup"): "source" | "floor" | "backup" {
   return step;
