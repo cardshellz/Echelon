@@ -7,7 +7,11 @@
   "catalog.product_categories": [
     "modules/catalog"
   ],
+  "catalog.product_cleanup_receipts": [
+    "modules/catalog"
+  ],
   "catalog.product_line_products": [
+    "modules/catalog",
     "modules/channels"
   ],
   "catalog.product_lines": [
