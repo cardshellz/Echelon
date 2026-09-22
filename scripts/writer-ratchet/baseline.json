@@ -848,6 +848,12 @@
   "oms.shipstation_label_reconciliation_checkpoint": [
     "modules/oms"
   ],
+  "oms.shipstation_label_recovery_attempts": [
+    "modules/oms"
+  ],
+  "oms.shipstation_label_recovery_work": [
+    "modules/oms"
+  ],
   "oms.shopify_label_void_attempts": [
     "modules/oms"
   ],

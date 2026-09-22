@@ -50,6 +50,19 @@ export function createShipStationLabelReconciliationClient(request: ShipStationA
   }
   return {
     isConfigured,
+    async getLabel(labelId, trackingNumber) {
+      positiveId.parse(labelId);
+      const tracking = z.string().trim().min(1).max(200).parse(trackingNumber);
+      // V1 documents trackingNumber, not shipmentId, as a List Shipments filter.
+      // Tracking narrows the read; the exact immutable shipment ID selects the
+      // label. Never treat an unfiltered page or another label as this void.
+      const result = await read(new URLSearchParams({ trackingNumber: tracking }), 1, ORDER_LABEL_PAGE_SIZE);
+      if (result.pages > 1) throw new LabelReconciliationError('SHIPSTATION_LABEL_LOOKUP_LIMIT');
+      if (result.shipments.some(label => label.trackingNumber !== tracking)) throw new LabelReconciliationError('SHIPSTATION_LABEL_PAGE_INCOMPLETE');
+      const match = result.shipments.find(label => label.shipmentId === labelId);
+      if (!match) throw new LabelReconciliationError('SHIPSTATION_LABEL_NOT_FOUND');
+      return match;
+    },
     async listVoids(window) {
       z.number().int().positive().safe().parse(window.page);
       if (window.start >= window.end) throw new LabelReconciliationError("SHIPSTATION_LABEL_WINDOW_INVALID");

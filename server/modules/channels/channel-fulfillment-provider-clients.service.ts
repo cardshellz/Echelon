@@ -93,8 +93,8 @@ export function createChannelFulfillmentProviderClients(dependencies: {
       // Successful HTTP envelopes can still fail while being interpreted by the
       // legacy client. Preserve domain conflicts, never persist raw body errors.
       const safeClient: Pick<EbayApiClient, "createShippingFulfillment" | "replaceShippingFulfillmentTracking"> = Object.freeze({
-        async replaceShippingFulfillmentTracking(orderId, fulfillment, previousTrackingNumbers) {
-          try { return await client.replaceShippingFulfillmentTracking(orderId, fulfillment, previousTrackingNumbers); } catch (error) {
+        async replaceShippingFulfillmentTracking(orderId, fulfillment, previousTrackingNumbers, replacementBatch) {
+          try { return await client.replaceShippingFulfillmentTracking(orderId, fulfillment, previousTrackingNumbers, replacementBatch); } catch (error) {
             if (error instanceof ChannelFulfillmentProviderError || error instanceof EbayFulfillmentIdempotencyConflictError) throw error;
             throw new ChannelFulfillmentProviderError("EBAY_TRACKING_RESPONSE_INVALID", "eBay tracking replacement could not be verified", "transient");
           }

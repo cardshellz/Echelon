@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createShipStationLabelReconciliationService, planLabelScanWindow,
-  type LabelScanCheckpoint, type LabelScanRepository, type LabelScanSource, type ShipStationLabelSnapshot } from "../../shipstation-label-reconciliation.service";
+  LabelReconciliationError, labelRecoveryFailure,
+  type LabelRecoverySeed, type LabelScanCheckpoint, type LabelScanRepository, type LabelScanSource, type ShipStationLabelSnapshot } from "../../shipstation-label-reconciliation.service";
 import type { ShipStationShipment } from "../../shipstation.service";
 
 const now = new Date("2026-09-21T20:00:00Z");
@@ -13,33 +14,44 @@ function shipment(id: number, voided = false, orderId = 790960007): ShipStationS
 }
 function fixture() {
   const checkpoint: LabelScanCheckpoint = { version: 0, completedThrough: new Date("2026-09-20T20:00:00Z"), window: null, lastSuccessAt: null };
+  const pending: LabelRecoverySeed[] = [];
   const repository = {
     readOrCreate: vi.fn(async () => checkpoint),
     claim: vi.fn<LabelScanRepository["claim"]>(async (state, window) => ({ ...state, window, version: state.version + 1 })),
-    renew: vi.fn(async () => undefined), completePage: vi.fn(async () => undefined), fail: vi.fn(async () => undefined),
+    renew: vi.fn(async () => undefined),
+    completePage: vi.fn<LabelScanRepository['completePage']>(async (_claim, _more, _now, labels = []) => { pending.push(...labels); }),
+    fail: vi.fn(async () => undefined),
+    claimOrder: vi.fn<LabelScanRepository['claimOrder']>(async () => { const next = pending.shift(); return next ? { ...next, version: 1, attempts: 1 } : null; }),
+    renewOrder: vi.fn(async () => undefined), finishOrder: vi.fn<LabelScanRepository['finishOrder']>(async () => undefined),
   } satisfies LabelScanRepository;
   const original = shipment(460595426, true);
   const replacement = shipment(460686839);
+  const getLabel = vi.fn<LabelScanSource['getLabel']>();
   const source = {
     isConfigured: vi.fn(() => true),
+    getLabel,
     listVoids: vi.fn<LabelScanSource["listVoids"]>(async () => ({ shipments: [original], page: 1, pages: 1, total: 1 })),
     // Deliberately reversed provider order. Processing must still put voids first.
     listOrderLabels: vi.fn<LabelScanSource["listOrderLabels"]>(async (_orderId, _page) => ({ shipments: [replacement, original], page: 1, pages: 1, total: 2 })),
   } satisfies LabelScanSource;
+  getLabel.mockImplementation(async id => (await source.listVoids.mock.results.at(-1)!.value).shipments.find((label: ShipStationLabelSnapshot) => label.shipmentId === id)!);
   const processLabels = vi.fn(async (labels: ShipStationLabelSnapshot[]) => labels.length);
-  const service = createShipStationLabelReconciliationService({ repository, source, processLabels, clock: { now: () => now } });
-  return { service, repository, source, processLabels, checkpoint, original, replacement };
+  const logger = { error: vi.fn() };
+  const service = createShipStationLabelReconciliationService({ repository, source, processLabels, logger, clock: { now: () => now } });
+  return { service, repository, source, processLabels, checkpoint, original, replacement, pending, logger };
 }
 
 describe("durable ShipStation void discovery", () => {
   it.each(["ordinary", "combined"])("recovers a missed %s void before admitting its replacement", async shape => {
     const f = fixture();
     if (shape === "ordinary") f.original.shipmentItems = f.replacement.shipmentItems = f.original.shipmentItems!.slice(0, 1);
-    expect(await f.service.runOnce()).toEqual({ outcome: "processed", voids: 1, orders: 1 });
+    expect(await f.service.runOnce()).toMatchObject({ outcome: "processed", voids: 1, orders: 1, recovered: 1 });
     expect(f.processLabels.mock.calls.map(([labels]) => labels.map(label => label.shipmentId)))
       .toEqual([[460595426], [460595426, 460686839]]);
     expect(f.source.listOrderLabels).toHaveBeenCalledWith(790960007, 1);
-    expect(f.repository.completePage).toHaveBeenCalledWith(expect.objectContaining({ version: 1 }), false, now);
+    expect(f.repository.completePage).toHaveBeenCalledWith(expect.objectContaining({ version: 1 }), false, now,
+      [{ providerLabelId: f.original.shipmentId, providerOrderId: f.original.orderId, trackingNumber: f.original.trackingNumber }]);
+    expect(f.source.getLabel).toHaveBeenCalledWith(f.original.shipmentId, f.original.trackingNumber);
   });
   it("discovers a void without requiring a replacement notification", async () => {
     const f = fixture(); f.source.listOrderLabels.mockResolvedValue({ shipments: [f.original], page: 1, pages: 1, total: 1 });
@@ -49,7 +61,7 @@ describe("durable ShipStation void discovery", () => {
   it("observes a standalone void without inventing an order ID", async () => {
     const f = fixture();
     f.source.listVoids.mockResolvedValue({ shipments: [{ ...f.original, orderId: null }], page: 1, pages: 1, total: 1 });
-    expect(await f.service.runOnce()).toEqual({ outcome: "processed", voids: 1, orders: 0 });
+    expect(await f.service.runOnce()).toMatchObject({ outcome: "processed", voids: 1, orders: 0, recovered: 1 });
     expect(f.source.listOrderLabels).not.toHaveBeenCalled(); expect(f.processLabels).toHaveBeenCalledTimes(1);
   });
   it("reads each affected order once per page, including multiple voids", async () => {
@@ -65,7 +77,7 @@ describe("durable ShipStation void discovery", () => {
     await f.service.runOnce();
     expect(f.source.listVoids).toHaveBeenCalledTimes(1);
     expect(f.source.listVoids).toHaveBeenCalledWith(f.checkpoint.window);
-    expect(f.repository.completePage).toHaveBeenCalledWith(expect.objectContaining({ window: f.checkpoint.window }), true, now);
+    expect(f.repository.completePage).toHaveBeenCalledWith(expect.objectContaining({ window: f.checkpoint.window }), true, now, expect.any(Array));
   });
   it("paginates related labels before processing any active replacement", async () => {
     const f = fixture(); f.source.listOrderLabels.mockResolvedValueOnce({ shipments: [f.original], page: 1, pages: 2, total: 2 })
@@ -73,24 +85,59 @@ describe("durable ShipStation void discovery", () => {
     await f.service.runOnce(); expect(f.source.listOrderLabels.mock.calls).toEqual([[790960007, 1], [790960007, 2]]);
     expect(f.processLabels.mock.calls[1][0]).toEqual([f.original, f.replacement]);
   });
-  it.each(["provider", "observation", "checkpoint"])("does not advance on a %s failure", async failure => {
+  it.each(["provider", "observation"])("retains a %s failure independently after durable discovery advances", async failure => {
     const f = fixture();
     if (failure === "provider") f.source.listOrderLabels.mockRejectedValue(new Error("private provider response"));
     if (failure === "observation") f.processLabels.mockRejectedValue(new Error("intake failed"));
-    if (failure === "checkpoint") f.repository.completePage.mockRejectedValue(new Error("database unavailable"));
+    expect(await f.service.runOnce()).toMatchObject({ outcome: 'processed', deferred: 1, recovered: 0 });
+    expect(f.repository.fail).not.toHaveBeenCalled();
+    expect(f.repository.completePage).toHaveBeenCalledOnce();
+    expect(f.repository.finishOrder).toHaveBeenCalledWith(expect.anything(), { state: 'pending', code: 'SHIPSTATION_ORDER_RECOVERY_FAILED', nextAttemptAt: new Date(now.getTime() + 300000) }, now);
+  });
+  it('does not lose work when durable discovery fails', async () => {
+    const f = fixture(); f.repository.completePage.mockRejectedValue(new Error('database unavailable'));
     await expect(f.service.runOnce()).rejects.toThrow();
-    expect(f.repository.fail).toHaveBeenCalledWith(expect.anything(), "SHIPSTATION_LABEL_SCAN_FAILED", now);
-    if (failure !== "checkpoint") expect(f.repository.completePage).not.toHaveBeenCalled();
+    expect(f.repository.fail).toHaveBeenCalledWith(expect.anything(), 'SHIPSTATION_LABEL_SCAN_FAILED', now);
+    expect(f.processLabels).not.toHaveBeenCalled();
   });
   it("does not turn an incomplete/stale order read into proof the void disappeared", async () => {
     const f = fixture(); f.source.listOrderLabels.mockResolvedValue({ shipments: [f.replacement], page: 1, pages: 1, total: 1 });
-    await expect(f.service.runOnce()).rejects.toMatchObject({ code: "SHIPSTATION_VOID_SNAPSHOT_CONFLICT" });
-    expect(f.processLabels).toHaveBeenCalledTimes(1); expect(f.repository.completePage).not.toHaveBeenCalled();
+    expect(await f.service.runOnce()).toMatchObject({ deferred: 1 });
+    expect(f.repository.finishOrder.mock.calls[0][1].code).toBe('SHIPSTATION_VOID_SNAPSHOT_CONFLICT');
+    expect(f.processLabels).toHaveBeenCalledTimes(1);
   });
   it("bounds order-label pagination and does not process an incomplete order", async () => {
     const f = fixture(); f.source.listOrderLabels.mockImplementation(async (_id, page) => ({ shipments: [], page, pages: 9, total: 900 }));
-    await expect(f.service.runOnce()).rejects.toMatchObject({ code: "SHIPSTATION_ORDER_LABEL_LIMIT" });
+    expect(await f.service.runOnce()).toMatchObject({ reviewRequired: 1 });
+    expect(f.logger.error).toHaveBeenCalledWith(expect.objectContaining({ reason: 'SHIPSTATION_ORDER_LABEL_LIMIT' }));
     expect(f.source.listOrderLabels).toHaveBeenCalledTimes(5); expect(f.processLabels).toHaveBeenCalledTimes(1);
+  });
+  it('continues with another order after an oversized order requires review', async () => {
+    const f = fixture(); const good = shipment(460595429, true, 12345);
+    f.source.listVoids.mockResolvedValue({ shipments: [f.original, good], page: 1, pages: 1, total: 2 });
+    f.source.listOrderLabels.mockImplementation(async (id, page) => id === good.orderId
+      ? { shipments: [good], page: 1, pages: 1, total: 1 } : { shipments: [], page, pages: 9, total: 900 });
+    expect(await f.service.runOnce()).toMatchObject({ recovered: 1, reviewRequired: 1 });
+    expect(f.repository.finishOrder.mock.calls.map(call => call[1].state)).toEqual(['review', 'complete']);
+  });
+  it('runs queued recovery even when discovery fails', async () => {
+    const f = fixture(); f.pending.push({ providerLabelId: f.original.shipmentId, providerOrderId: f.original.orderId!, trackingNumber: f.original.trackingNumber! });
+    f.source.getLabel.mockResolvedValue(f.original); f.source.listVoids.mockRejectedValue(new Error('API unavailable'));
+    await expect(f.service.runOnce()).rejects.toThrow('API unavailable');
+    expect(f.repository.finishOrder.mock.calls[0][1].state).toBe('complete');
+  });
+  it.each(['lease', 'receipt'])('continues other jobs after a %s failure without claiming success', async failure => {
+    const f = fixture(); const good = shipment(460595429, true, 12345);
+    f.source.listVoids.mockResolvedValue({ shipments: [f.original, good], page: 1, pages: 1, total: 2 });
+    f.source.listOrderLabels.mockImplementation(async id => ({ shipments: [id === good.orderId ? good : f.original], page: 1, pages: 1, total: 1 }));
+    if (failure === 'lease') f.repository.renewOrder.mockRejectedValueOnce(new LabelReconciliationError('SHIPSTATION_LABEL_SCAN_LEASE_LOST'));
+    else f.repository.finishOrder.mockRejectedValueOnce(new Error('receipt rollback'));
+    expect(await f.service.runOnce()).toMatchObject({ deferred: 1, recovered: 1 });
+    expect(f.repository.finishOrder.mock.calls.at(-1)![0].providerLabelId).toBe(good.shipmentId);
+  });
+  it('bounds transient retries without retaining private response bodies', () => {
+    expect(labelRecoveryFailure(new Error('token and address'), 8, now)).toEqual({ state: 'review', code: 'SHIPSTATION_ORDER_RECOVERY_FAILED', nextAttemptAt: null });
+    expect(labelRecoveryFailure(new LabelReconciliationError('SHIPSTATION_LABEL_PAGE_INVALID'), 1, now).state).toBe('review');
   });
   it("does not call the provider if another process owns the lease", async () => {
     const f = fixture(); f.repository.claim.mockResolvedValue(null);
