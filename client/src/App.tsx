@@ -78,6 +78,13 @@ import Returns from "@/pages/Returns";
 import ReturnCases from "@/pages/ReturnCases";
 import ReturnPolicies from "@/pages/ReturnPolicies";
 import CustomerReturnPortalPreview from "@/pages/CustomerReturnPortalPreview";
+import CustomerReturnPortalAccess from "@/pages/CustomerReturnPortalAccess";
+import {
+  CUSTOMER_RETURN_PORTAL_PATH,
+  CUSTOMER_RETURN_PORTAL_ACCESS_PATH,
+  CUSTOMER_RETURN_PORTAL_LEGACY_PATH,
+  isCustomerReturnPortalPath,
+} from "@shared/returns/customer-return-portal-paths";
 import InboundShipments from "@/pages/InboundShipments";
 import OutboundShipments from "@/pages/OutboundShipments";
 import InboundShipmentDetail from "@/pages/InboundShipmentDetail";
@@ -285,6 +292,19 @@ function DropshipPortalRouter() {
 function Router() {
   const [location] = useLocation();
   const { user, isLoading } = useAuth();
+
+  // The prelaunch customer experience has its own access screen and never
+  // renders the warehouse application shell, including during sign-in.
+  if (isCustomerReturnPortalPath(location)) {
+    return (
+      <Switch>
+        <Route path={CUSTOMER_RETURN_PORTAL_ACCESS_PATH} component={CustomerReturnPortalAccess} />
+        <Route path={CUSTOMER_RETURN_PORTAL_PATH} component={CustomerReturnPortalPreview} />
+        <Route path={CUSTOMER_RETURN_PORTAL_LEGACY_PATH}><Redirect to={CUSTOMER_RETURN_PORTAL_PATH} /></Route>
+        <Route component={NotFound} />
+      </Switch>
+    );
+  }
 
   if (isDropshipPortalHost() || location.startsWith("/dropship-portal")) {
     return <DropshipPortalRouter />;
@@ -523,9 +543,6 @@ function Router() {
         <Route path="/returns/cases">
           <ProtectedRoute component={ReturnCases} allowedRoles={["admin", "lead"]} />
         </Route>
-        <Route path="/returns/portal-preview">
-          <ProtectedRoute component={CustomerReturnPortalPreview} allowedRoles={["admin"]} />
-        </Route>
         <Route path="/returns/receiving">
           <ProtectedRoute component={Returns} allowedRoles={["admin", "lead"]} />
         </Route>
@@ -599,6 +616,13 @@ function Router() {
   );
 }
 
+function StaffPWAUpdatePrompt() {
+  const [location] = useLocation();
+  // Existing workers also bypass these paths, but direct portal visits should
+  // not install Echelon's offline worker in the first place.
+  return isCustomerReturnPortalPath(location) ? null : <PWAUpdatePrompt />;
+}
+
 function App() {
   return (
     <QueryClientProvider client={queryClient}>
@@ -606,7 +630,7 @@ function App() {
         <SettingsProvider>
           <TooltipProvider>
             <Toaster />
-            <PWAUpdatePrompt />
+            <StaffPWAUpdatePrompt />
             <Router />
           </TooltipProvider>
         </SettingsProvider>

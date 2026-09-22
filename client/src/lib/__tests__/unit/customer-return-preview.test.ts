@@ -251,6 +251,22 @@ describe("customer return preview drafts", () => {
 });
 
 describe("customer return preview response verification", () => {
+  it("keeps order and quantity verification when the standalone flow leaves scenario verification to its gateway", () => {
+    expect(() =>
+      assertPreviewOrderMatches(order, undefined, order.orderReference),
+    ).not.toThrow();
+    expect(() =>
+      assertPreviewOrderMatches(order, undefined, "OTHER-ORDER"),
+    ).toThrow();
+    expect(() =>
+      assertPreviewOrderMatches(
+        { ...order, lines: [{ ...order.lines[2], eligibleQuantity: 1 }] },
+        undefined,
+        order.orderReference,
+      ),
+    ).toThrow();
+  });
+
   it("rejects a response for another order/scenario, duplicate line IDs or impossible eligible quantities", () => {
     expect(() =>
       assertPreviewOrderMatches(order, order.scenarioId, " SAMPLE-1001 "),

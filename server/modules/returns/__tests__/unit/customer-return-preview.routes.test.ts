@@ -4,9 +4,15 @@ import express from "express";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerCustomerReturnPreviewRoutes, type CustomerReturnPreviewRouteDependencies } from "../../interfaces/http/customer-return-preview.routes";
 import { CustomerReturnPreviewService } from "../../application/customer-return-preview.service";
+import {
+  CUSTOMER_RETURN_PORTAL_PATH, CUSTOMER_RETURN_PORTAL_ACCESS_PATH,
+  CUSTOMER_RETURN_PORTAL_LEGACY_PATH, CUSTOMER_RETURN_PREVIEW_API_PATH,
+} from "@shared/returns/customer-return-portal-paths";
 
-const API = "/api/returns/admin/portal-preview";
-const PAGE = "/returns/portal-preview";
+const API = CUSTOMER_RETURN_PREVIEW_API_PATH;
+const PAGE = CUSTOMER_RETURN_PORTAL_PATH;
+const ACCESS = CUSTOMER_RETURN_PORTAL_ACCESS_PATH;
+const LEGACY = CUSTOMER_RETURN_PORTAL_LEGACY_PATH;
 const admin = () => ({ id: "admin-1", active: 1, role: "admin", roles: [{ name: "Administrator", isSystem: 1 }] });
 const identityStorage = vi.hoisted(() => ({ getUser: vi.fn(), getUserRoles: vi.fn() }));
 vi.mock("../../../identity", () => ({ identityStorage }));
@@ -76,16 +82,22 @@ describe("private customer return preview HTTP boundaries", () => {
   afterEach(close);
 
   it.each(["anonymous", "customer", "dropship", "vendor", "internal_key", "missing_id", "numeric_id"])(
-    "rejects %s authentication on both API and direct page before reading identity", async kind => {
+    "rejects %s API authentication and sends portal roots only to the fixed login gate", async kind => {
       session = kind === "customer" ? { customer: { id: "admin-1" } }
         : kind === "dropship" ? { dropshipUser: { id: "admin-1" } }
         : kind === "vendor" ? { vendor: { id: "admin-1" } }
         : kind === "missing_id" ? { user: { role: "admin", active: 1 } }
         : kind === "numeric_id" ? { user: { id: 123, role: "admin" } } : {};
       const headers: Record<string, string> = kind === "internal_key" ? { Authorization: "Bearer synthetic-internal-key" } : {};
-      for (const path of [API, `${API}/order`, `${API}/review`, PAGE, `${PAGE}/nested`]) {
+      for (const path of [API, `${API}/order`, `${API}/review`, `${PAGE}/nested`]) {
         const response = await request(path, "GET", undefined, headers);
         expect(response.status).toBe(401); expectPrivate(response);
+        expect(response.text).not.toContain("application shell");
+      }
+      for (const path of [PAGE, LEGACY]) {
+        const response = await request(path, "GET", undefined, headers);
+        expect(response.status).toBe(303); expectPrivate(response);
+        expect(response.headers.get("location")).toBe(ACCESS);
         expect(response.text).not.toContain("application shell");
       }
       expect(readIdentity).not.toHaveBeenCalled(); expect(fallback).not.toHaveBeenCalled(); expectNoService();
@@ -100,10 +112,10 @@ describe("private customer return preview HTTP boundaries", () => {
         : kind === "custom_administrator" ? { ...admin(), roles: [{ name: "Administrator", isSystem: 0 }] }
         : kind === "wrong_role_name" ? { ...admin(), roles: [{ name: "administrator", isSystem: 1 }] }
         : kind === "wrong_identity" ? { ...admin(), id: "another-user" } : null;
-      for (const path of [API, PAGE]) {
+      for (const path of [API, PAGE, LEGACY]) {
         const response = await request(path); expect(response.status).toBe(403); expectPrivate(response);
       }
-      expect(readIdentity).toHaveBeenCalledTimes(2);
+      expect(readIdentity).toHaveBeenCalledTimes(3);
       expect(readIdentity).toHaveBeenCalledWith("admin-1"); expectNoService(); expect(fallback).not.toHaveBeenCalled();
     });
 
@@ -114,12 +126,12 @@ describe("private customer return preview HTTP boundaries", () => {
       else if (kind === "malformed_membership") identity = { ...admin(), roles: [{ name: "Administrator", isSystem: true }] };
       else if (kind === "extra_private_data") identity = { ...admin(), password: "secret-password" };
       else identity = undefined;
-      for (const path of [API, PAGE]) {
+      for (const path of [API, PAGE, LEGACY]) {
         const response = await request(path); expect(response.status).toBe(503); expectPrivate(response);
         expect(response.text).not.toMatch(/secret|customer@/);
       }
       expect(reportFailure.mock.calls).toEqual([[{ operation: "state", code: "RETURN_PREVIEW_UNAVAILABLE" }],
-        [{ operation: "page", code: "RETURN_PREVIEW_UNAVAILABLE" }]]);
+        [{ operation: "page", code: "RETURN_PREVIEW_UNAVAILABLE" }], [{ operation: "page", code: "RETURN_PREVIEW_UNAVAILABLE" }]]);
       expectNoService(); expect(fallback).not.toHaveBeenCalled();
     });
 
@@ -154,8 +166,9 @@ describe("private customer return preview HTTP boundaries", () => {
       const response = await request(path, "HEAD"); expect(response.status).toBe(200); expectPrivate(response); expect(response.text).toBe("");
     }
     session = {};
-    for (const path of [API, PAGE]) {
-      const response = await request(path, "HEAD"); expect(response.status).toBe(401); expectPrivate(response); expect(response.text).toBe("");
+    for (const path of [API, PAGE, LEGACY]) {
+      const response = await request(path, "HEAD"); expect(response.status).toBe(path === API ? 401 : 303); expectPrivate(response); expect(response.text).toBe("");
+      expect(response.headers.get("location")).toBe(path === API ? null : ACCESS);
     }
     expect(fallback).toHaveBeenCalledTimes(1);
   });
@@ -215,8 +228,10 @@ describe("private customer return preview HTTP boundaries", () => {
   });
 
   it.each(["POST", "PUT", "DELETE", "OPTIONS"])("denies page %s before SPA fallback", async method => {
-    const response = await request(PAGE, method);
-    expect(response.status).toBe(405); expect(response.headers.get("allow")).toBe("GET, HEAD"); expectPrivate(response);
+    for (const path of [PAGE, ACCESS, LEGACY]) {
+      const response = await request(path, method);
+      expect(response.status).toBe(405); expect(response.headers.get("allow")).toBe("GET, HEAD"); expectPrivate(response);
+    }
     expectNoService(); expect(fallback).not.toHaveBeenCalled();
   });
 
@@ -233,11 +248,92 @@ describe("private customer return preview HTTP boundaries", () => {
   });
 
   it.each(["malformed", "oversized"])("sanitizes the global parser's %s error with private headers", async kind => {
-    for (const path of [API + "/order", PAGE]) {
+    for (const path of [API + "/order", PAGE, ACCESS, LEGACY]) {
       const response = await fetch(baseUrl + path, { method: "POST", headers: { "Content-Type": "application/json" },
         body: kind === "malformed" ? '{"secret-private-value":' : JSON.stringify({ value: "x".repeat(110_000) }) });
       expect(response.status).toBe(kind === "malformed" ? 400 : 413); expectPrivate(response);
       expect(await response.text()).not.toContain("secret-private-value"); expectNoService(); expect(fallback).not.toHaveBeenCalled();
     }
+  });
+
+  it.each(["GET", "HEAD"])("serves only the unauthenticated sign-in SPA shell for access %s", async method => {
+    session = {};
+    identityError = new Error("The identity dependency is unavailable");
+    const response = await request(ACCESS, method);
+    expect(response.status).toBe(200); expectPrivate(response);
+    expect(response.headers.get("location")).toBeNull();
+    expect(readIdentity).not.toHaveBeenCalled(); expectNoService(); expect(fallback).toHaveBeenCalledOnce();
+  });
+
+  it.each(["GET", "HEAD"])("redirects authorized legacy %s to the fixed standalone root after a fresh identity check", async method => {
+    const response = await request(LEGACY, method, undefined, { "X-Forwarded-Host": "untrusted.example" });
+    expect(response.status).toBe(303); expectPrivate(response);
+    expect(response.headers.get("location")).toBe(PAGE);
+    expect(readIdentity).toHaveBeenCalledExactlyOnceWith("admin-1"); expectNoService(); expect(fallback).not.toHaveBeenCalled();
+  });
+
+  it.each([PAGE, ACCESS, LEGACY])("rejects query bypasses and return destinations on %s", async path => {
+    for (const query of ["?returnTo=https%3A%2F%2Funtrusted.example", "?admin=true", "?preview=true", "?next=%2Forders"]) {
+      for (const currentSession of [{}, { user: { id: "admin-1" } }]) {
+        session = currentSession;
+        const response = await request(path + query);
+        expect(response.status).toBe(400); expectPrivate(response);
+        expect(response.headers.get("location")).toBeNull(); expect(response.text).not.toContain("untrusted.example");
+      }
+    }
+    expect(readIdentity).not.toHaveBeenCalled(); expectNoService(); expect(fallback).not.toHaveBeenCalled();
+  });
+
+  it.each([`${PAGE}/hidden`, `${ACCESS}/hidden`, `${LEGACY}/hidden`])("requires authorization then rejects unknown page descendant %s", async path => {
+    const authorized = await request(path);
+    expect(authorized.status).toBe(404); expectPrivate(authorized);
+    expect(readIdentity).toHaveBeenCalledExactlyOnceWith("admin-1");
+    identity = { ...admin(), role: "picker" };
+    expect((await request(path)).status).toBe(403);
+    session = {};
+    const anonymous = await request(path);
+    expect(anonymous.status).toBe(401); expectPrivate(anonymous); expect(anonymous.headers.get("location")).toBeNull();
+    expectNoService(); expect(fallback).not.toHaveBeenCalled();
+  });
+
+  it("does not let login page access authorize the API or permit anonymous page writes", async () => {
+    session = {};
+    expect((await request(ACCESS)).status).toBe(200);
+    expect((await request(API)).status).toBe(401);
+    for (const path of [PAGE, ACCESS, LEGACY]) {
+      const response = await request(path, "POST", { username: "admin-1", role: "admin" });
+      expect(response.status).toBe(405); expectPrivate(response);
+    }
+    expect(readIdentity).not.toHaveBeenCalled(); expectNoService(); expect(fallback).toHaveBeenCalledOnce();
+  });
+
+  it.each([`${ACCESS}/`, "/RETURN-PORTAL/ACCESS", "/RETURN-PORTAL/ACCESS/"])("serves the same anonymous login-only gate for %s", async path => {
+    session = {};
+    const response = await request(path);
+    expect(response.status).toBe(200); expectPrivate(response);
+    expect(readIdentity).not.toHaveBeenCalled(); expectNoService(); expect(fallback).toHaveBeenCalledOnce();
+  });
+
+  it.each([`${PAGE}/`, "/RETURN-PORTAL", "/RETURN-PORTAL/"])("preserves fresh portal root authorization for %s", async path => {
+    const authorized = await request(path);
+    expect(authorized.status).toBe(200); expectPrivate(authorized);
+    expect(readIdentity).toHaveBeenCalledExactlyOnceWith("admin-1");
+    session = {};
+    const anonymous = await request(path);
+    expect(anonymous.status).toBe(303); expectPrivate(anonymous);
+    expect(anonymous.headers.get("location")).toBe(ACCESS);
+    expectNoService(); expect(fallback).toHaveBeenCalledOnce();
+  });
+
+  it.each([`${LEGACY}/`, "/RETURNS/PORTAL-PREVIEW", "/RETURNS/PORTAL-PREVIEW/"])("keeps legacy %s redirects fixed and authorized", async path => {
+    const authorized = await request(path);
+    expect(authorized.status).toBe(303); expectPrivate(authorized);
+    expect(authorized.headers.get("location")).toBe(PAGE);
+    expect(readIdentity).toHaveBeenCalledExactlyOnceWith("admin-1");
+    session = {};
+    const anonymous = await request(path);
+    expect(anonymous.status).toBe(303); expectPrivate(anonymous);
+    expect(anonymous.headers.get("location")).toBe(ACCESS);
+    expectNoService(); expect(fallback).not.toHaveBeenCalled();
   });
 });

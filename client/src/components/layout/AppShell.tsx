@@ -66,6 +66,7 @@ import { useAuth } from "@/lib/auth";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
 import { NotificationBell } from "@/components/NotificationBell";
 import { PageDataHealth } from "@/components/page-data-health";
+import { CUSTOMER_RETURN_PORTAL_PATH } from "@shared/returns/customer-return-portal-paths";
 
 // --- Navigation types ---
 
@@ -197,7 +198,7 @@ const navStructure: NavEntry[] = [
     roles: ["admin", "lead"],
     children: [
       { label: "Cases", icon: ClipboardList, href: "/returns/cases" },
-      { label: "Portal preview", icon: Store, href: "/returns/portal-preview", roles: ["admin"] },
+      { label: "Customer portal", icon: Store, href: CUSTOMER_RETURN_PORTAL_PATH, roles: ["admin"] },
       { label: "Policies", icon: FileText, href: "/return-policies", roles: ["admin"] },
       { label: "Receiving", icon: PackageCheck, href: "/returns/receiving" },
     ],

@@ -177,11 +177,11 @@ export function buildPreviewReviewInput(
 
 export function assertPreviewOrderMatches(
   order: ReturnPreviewOrder,
-  scenarioId: string,
+  scenarioId: string | undefined,
   reference: string,
 ): void {
   if (
-    order.scenarioId !== scenarioId ||
+    (scenarioId !== undefined && order.scenarioId !== scenarioId) ||
     normalizedPreviewReference(order.orderReference) !==
       normalizedPreviewReference(reference) ||
     new Set(order.lines.map((line) => line.id)).size !== order.lines.length ||

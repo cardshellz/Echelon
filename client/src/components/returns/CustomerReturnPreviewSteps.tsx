@@ -534,14 +534,10 @@ export function PreviewReview({
         <Button
           className="min-h-11 w-full"
           disabled
-          aria-describedby="preview-readiness"
+          aria-describedby="return-testing-status"
         >
           Get return labels
         </Button>
-        <p className="text-center text-xs text-muted-foreground">
-          Preview only. No return has been created and no labels have been
-          purchased.
-        </p>
         <Button variant="ghost" className="min-h-11 w-full" onClick={onBack}>
           <ArrowLeft className="mr-2 h-4 w-4" />
           Back to packing

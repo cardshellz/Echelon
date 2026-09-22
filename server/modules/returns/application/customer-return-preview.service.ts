@@ -110,7 +110,9 @@ function loadSampleOrder(input: ReturnPreviewLookupInput): ReturnPreviewOrder {
     mode: "admin_preview", scenarioId: input.scenarioId, orderReference: sample.description.orderReference,
     purchasedAt: sample.facts.order.purchasedAt, evaluatedAt: eligibility.evaluatedAt,
     returnWindowEndsAt: eligibility.returnWindowEndsAt,
-    message: "Simulation using a fictional order. Reviewing creates no return, shipping label or refund.",
+    // Test-mode messaging belongs to the private wrapper, outside the shared
+    // customer journey. Reserve this field for actual order-level information.
+    message: null,
     lines: eligibility.lines.map(line => {
       const display = sample.displayLines.find(candidate => candidate.id === line.lineId);
       if (!display) throw new Error("A fictional order line is missing its display data.");

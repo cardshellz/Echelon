@@ -119,7 +119,8 @@ describe("CustomerReturnPreviewService lookup", () => {
       const result = service.lookup({ scenarioId: scenario.id, orderReference: scenario.orderReference });
       expect(returnPreviewOrderSchema.safeParse(result).success).toBe(true);
       expect(result.evaluatedAt).toBe(CUSTOMER_RETURN_PREVIEW_EVALUATED_AT);
-      expect(result.message).toContain("fictional order");
+      // Testing status belongs to the host wrapper, outside the customer flow.
+      expect(result.message).toBeNull();
       const serialized = JSON.stringify(result);
       for (const forbidden of ["fulfillmentId", "fulfillmentLineItemId", "warehouse", "staff", "evidenceId", "channelId", "orderId", "fictional-allocation:", "gid://"]) {
         expect(serialized).not.toContain(forbidden);
