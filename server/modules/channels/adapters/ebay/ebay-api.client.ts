@@ -11,6 +11,7 @@
 
 import type { EbayAuthService } from "./ebay-auth.service";
 import { ChannelFulfillmentProviderError } from "../../channel-fulfillment-provider.error";
+import { replaceEbayPackageTracking, type EbayTrackingReplacementBatch } from "./ebay-package-tracking-replacement";
 import { ebayQuantityMutationIdentity, executeAdmittedEbayQuantityRequest, type EbayQuantityRequestAdmission } from "../../quantity-publication-request";
 import { createProviderRequestDeadline, boundedProviderRetryAfterSeconds } from "../../provider-request-limits";
 import { executeEbayQuantityHttp } from "./ebay-quantity-http";
@@ -456,14 +457,15 @@ export class EbayApiClient {
       ...(verified.quantityEvidenceSource ? { quantityEvidenceSource: verified.quantityEvidenceSource } : {}) };
   }
 
-  /** Amend a proven whole-order package, rather than POSTing duplicate fulfilled
-   * quantities. Multi-package/partial orders require a line-scoped Trading
-   * contract and remain reviewable. Every retry starts with provider readback.
+  /** Amend proven tracking rather than POSTing duplicate fulfilled quantities.
+   * Multi-package commands carry the complete immutable replacement batch and
+   * use the line-scoped Trading contract. Every retry starts with readback.
    * https://developer.ebay.com/devzone/xml/docs/Reference/ebay/types/CompleteSaleRequestType.html */
   async replaceShippingFulfillmentTracking(
     orderId: string,
     fulfillment: EbayShippingFulfillmentRequest,
     authorizedPreviousTrackingNumbers: readonly string[],
+    replacementBatch?: EbayTrackingReplacementBatch,
   ): Promise<EbayShippingFulfillmentResponse> {
     const expectedLines = normalizeFulfillmentLines(fulfillment.lineItems);
     if (!orderId.trim() || !expectedLines || !fulfillment.trackingNumber.trim()
@@ -473,6 +475,34 @@ export class EbayApiClient {
     }
     if (this.isDryRun) return { fulfillmentId: "DRY_RUN_FULFILLMENT_ID" };
     const token = await this.authService.getAccessToken(this.channelId);
+    const replacePackages = async () => {
+      if (!replacementBatch) throw new ChannelFulfillmentProviderError("EBAY_TRACKING_REPLACEMENT_AMBIGUOUS", "Package-scoped tracking amendment requires an exact replacement batch", "permanent");
+      return replaceEbayPackageTracking({ orderId, current: fulfillment, previousTrackingNumbers: authorizedPreviousTrackingNumbers,
+        batch: replacementBatch, read: path => this.readFulfillmentQuantityEvidence(path, token),
+        create: () => this.createShippingFulfillment(orderId, fulfillment),
+        trading: async (call, body) => {
+          const response = await (this.options.request ?? fetch)(`${this.baseUrl}/ws/api.dll`, {
+            method: "POST", signal: AbortSignal.timeout(20_000),
+            headers: { "Content-Type": "text/xml", "X-EBAY-API-CALL-NAME": call,
+              "X-EBAY-API-COMPATIBILITY-LEVEL": "1477", "X-EBAY-API-SITEID": "0", "X-EBAY-API-IAF-TOKEN": token },
+            body: `<?xml version="1.0" encoding="utf-8"?><${call}Request xmlns="urn:ebay:apis:eBLBaseComponents">${body}</${call}Request>`,
+          });
+          if (!response.ok) throw new ChannelFulfillmentProviderError("EBAY_TRACKING_AMENDMENT_FAILED", `eBay ${call} returned HTTP ${response.status}`,
+            response.status === 408 || response.status === 429 || response.status >= 500 ? "transient" : "permanent");
+          const reader = response.body?.getReader();
+          if (!reader) throw new ChannelFulfillmentProviderError("EBAY_TRACKING_RESPONSE_INVALID", "eBay returned no tracking response", "transient");
+          const decoder = new TextDecoder(); let value = ""; let bytes = 0;
+          try {
+            for (;;) {
+              const part = await reader.read(); if (part.done) break;
+              bytes += part.value.byteLength;
+              if (bytes > 2_000_000) throw new ChannelFulfillmentProviderError("EBAY_TRACKING_RESPONSE_TOO_LARGE", "eBay tracking response exceeded its bound", "permanent");
+              value += decoder.decode(part.value, { stream: true });
+            }
+            return value + decoder.decode();
+          } finally { await reader.cancel(); reader.releaseLock(); }
+        } });
+    };
     const path = buildEbayShippingFulfillmentPath(orderId);
     const readCollection = async (): Promise<{ fulfillments: Record<string, unknown>[] }> => {
       const value = await this.readFulfillmentQuantityEvidence(path, token) as Record<string, unknown> | null;
@@ -485,6 +515,7 @@ export class EbayApiClient {
       return value as { fulfillments: Record<string, unknown>[] };
     };
     const before = await readCollection();
+    if (replacementBatch && (replacementBatch.packages.length > 1 || before.fulfillments.length > 1)) return replacePackages();
     if (before.fulfillments.length === 0) return this.createShippingFulfillment(orderId, fulfillment);
     if (before.fulfillments.length !== 1) {
       throw new ChannelFulfillmentProviderError("EBAY_TRACKING_REPLACEMENT_AMBIGUOUS", "Order has multiple provider fulfillments; order-level tracking replacement is not authorized", "permanent");
@@ -516,6 +547,7 @@ export class EbayApiClient {
       || fulfillmentLineSignature(priorLines) !== expectedSignature
       || providerOrder.cancelStatus?.cancelState !== "NONE_REQUESTED"
       || !Array.isArray(providerOrder.cancelStatus.cancelRequests) || providerOrder.cancelStatus.cancelRequests.length !== 0) {
+      if (replacementBatch) return replacePackages();
       throw new ChannelFulfillmentProviderError("EBAY_TRACKING_WHOLE_ORDER_UNPROVEN", "Order-level tracking replacement requires exact full-order quantity and cancellation evidence", "permanent");
     }
     if (JSON.stringify(await readCollection()) !== JSON.stringify(before)) {

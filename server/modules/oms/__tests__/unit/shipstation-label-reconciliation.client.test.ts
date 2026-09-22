@@ -15,6 +15,34 @@ function fixture(value: unknown = page) {
 const window = { start: new Date("2026-09-20T20:00:00Z"), end: new Date("2026-09-21T19:58:00Z"), page: 1 };
 
 describe("ShipStation void discovery HTTP boundary", () => {
+  it("reloads a queued void through supported tracking filtering and selects its exact shipment ID", async () => {
+    const f = fixture({ ...page, total: 2, shipments: [{ ...label, shipmentId: 460595425 }, label] });
+    expect(await f.client.getLabel(label.shipmentId, label.trackingNumber)).toEqual(label);
+    const args = (f.request.mock.calls as unknown as unknown[][])[0];
+    const url = new URL(String(args[1]), "https://ssapi.shipstation.com");
+    expect(url.searchParams.get("trackingNumber")).toBe(label.trackingNumber);
+    expect(url.searchParams.has("shipmentId")).toBe(false);
+    expect(url.searchParams.get("includeShipmentItems")).toBe("true");
+    expect(args[3]).toEqual({ retries: 0, timeoutMs: 10000 });
+  });
+  it.each([
+    { ...page, shipments: [{ ...label, trackingNumber: "UNRELATED" }] },
+    { ...page, shipments: [{ ...label, shipmentId: 123 }] },
+    { page: 1, pages: 1, total: 0, shipments: [] },
+  ])("never substitutes an unrelated shipment for a queued void", async response => {
+    await expect(fixture(response).client.getLabel(label.shipmentId, label.trackingNumber)).rejects.toThrow();
+  });
+  it("refuses an oversized tracking lookup instead of accepting a partial collection", async () => {
+    const response = { page: 1, pages: 2, total: 101, shipments: Array.from({ length: 100 }, (_, index) => ({ ...label, shipmentId: label.shipmentId + index })) };
+    await expect(fixture(response).client.getLabel(label.shipmentId, label.trackingNumber))
+      .rejects.toMatchObject({ code: "SHIPSTATION_LABEL_LOOKUP_LIMIT" });
+  });
+  it("rejects an invalid queued identity before requesting provider data", async () => {
+    const f = fixture();
+    await expect(f.client.getLabel(0, label.trackingNumber)).rejects.toThrow();
+    await expect(f.client.getLabel(label.shipmentId, " ")).rejects.toThrow();
+    expect(f.request).not.toHaveBeenCalled();
+  });
   it("requests void dates, not creation dates, with exact contents and bounded HTTP work", async () => {
     const f = fixture(); expect((await f.client.listVoids(window)).shipments[0].shipmentId).toBe(460595426);
     const args = (f.request.mock.calls as unknown as unknown[][])[0];

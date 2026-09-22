@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { decideEbayLabelReplacement } from "../../ebay-label-replacement.domain";
+import { planLabelReplacement } from "../../label-replacement-plan.domain";
 import { MAX_LABEL_REPLACEMENT_ITEMS, scopeLabelReplacementPredecessors, type LabelReplacementScopeInput } from "../../label-replacement-scope.domain";
 
 describe("channel-independent label replacement package scope", () => {
@@ -23,8 +23,8 @@ describe("channel-independent label replacement package scope", () => {
     const result = scopeLabelReplacementPredecessors({ ...input,
       previous: previous.map(item => item.physicalItemId === 2 ? { ...item, labelStatus: "active" } : item) });
     expect(result).toEqual({ outcome: "scoped", physicalItemIds: [2] });
-    expect(decideEbayLabelReplacement({ contents: [{ sourceItemId: 100, quantity: 1 }],
-      previous: [{ sourceItemId: 100, quantity: 1, physicalItemId: 2, labelStatus: "active", carrierPossession: false }] }))
+    expect(planLabelReplacement({ labelId: 1, candidates: [{ labelId: 1, providerOrderId: 'provider-split-2', contents: [{ sourceItemId: 100, quantity: 1 }] }],
+      previous: [{ ...previous[1], quantity: 1, labelStatus: "active", carrierPossession: false }] }))
       .toMatchObject({ outcome: "waiting", reason: "awaiting_replaced_label_void" });
   });
   it("does not treat a different source under the same WMS header as a competitor", () => {
@@ -44,10 +44,9 @@ describe("channel-independent label replacement package scope", () => {
   it.each([null, "new-provider-order"])("does not invent a pairing when provider lineage is %s", providerOrderId => {
     const result = scopeLabelReplacementPredecessors({ ...input, providerOrderId });
     expect(result).toEqual({ outcome: "scoped", physicalItemIds: [1, 2, 3, 4] });
-    expect(decideEbayLabelReplacement({ contents: [{ sourceItemId: 100, quantity: 1 }],
-      previous: previous.map(item => ({ sourceItemId: item.sourceItemId, physicalItemId: item.physicalItemId,
-        quantity: 1, labelStatus: item.labelStatus, carrierPossession: false })) }))
-      .toEqual({ outcome: "review", reason: "ambiguous_replacement_allocation" });
+    expect(planLabelReplacement({ labelId: 1, candidates: [{ labelId: 1, providerOrderId, contents: [{ sourceItemId: 100, quantity: 1 }] }],
+      previous: previous.map(item => ({ ...item, quantity: 1, carrierPossession: false })) }))
+      .toEqual({ outcome: "waiting", reason: "replacement_repack_incomplete" });
   });
   it("ignores an active sibling only after identifying the matching voided lineage", () => {
     expect(scopeLabelReplacementPredecessors({ ...input, previous: [...previous,

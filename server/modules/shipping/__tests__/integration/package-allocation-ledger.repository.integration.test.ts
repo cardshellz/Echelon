@@ -37,6 +37,7 @@ import { createShopifyLabelLifecycleService } from "../../../oms/shopify-label-l
 import { createChannelFulfillmentProjector } from "../../../oms/channel-fulfillment-projection.repository";
 import { createShipStationService } from "../../../oms/shipstation.service";
 import { createShipStationLabelReconciliationRepository } from "../../../oms/shipstation-label-reconciliation.repository";
+import type { EbayShippingFulfillmentRequest } from "../../../channels/adapters/ebay/ebay-types";
 import { createShipStationLabelReconciliationService, planLabelScanWindow, type ShipStationLabelSnapshot } from "../../../oms/shipstation-label-reconciliation.service";
 import { CarrierTrackingService } from "../../carrier-tracking.service";
 import { createDrizzleCarrierTrackingRepository } from "../../carrier-tracking.repository";
@@ -1453,8 +1454,19 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
       expect(packages.filter(pkg => pkg.status === 'SUCCESS')).toHaveLength(0);
       expect((await pool.query('SELECT state FROM oms.shopify_label_void_work')).rows).toEqual(Array(5).fill({ state: 'complete' }));
       if (mode === 'ambiguous') {
-        expect(await replacements[0].receive()).toMatchObject({ outcome: 'review', reason: 'ambiguous_replacement_allocation' });
-        expect((await pool.query('SELECT id FROM wms.physical_shipment_item_quantity_adjustments')).rowCount).toBe(0);
+        // Provider order identities changed for all four units, but all four
+        // predecessors are voided and the complete new cohort conserves the
+        // same canonical source. There is no arbitrary one-to-one pairing.
+        expect(await replacements[0].receive()).toMatchObject({ outcome: 'replaced' });
+        expect((await pool.query('SELECT id FROM wms.physical_shipment_item_quantity_adjustments')).rowCount).toBe(4);
+        expect((await pool.query("SELECT COUNT(DISTINCT replacement_batch_id)::int AS batches FROM wms.ebay_label_replacement_work WHERE state = 'applied'")).rows).toEqual([{ batches: 1 }]);
+        await worker.runDueBatch();
+        expect(packages.filter(pkg => pkg.status === 'SUCCESS').map(pkg => pkg.tracking).sort())
+          .toEqual(replacements.slice(0, 4).map(pkg => `TRACK${pkg.providerLabelId}`).sort());
+        expect(await replacements[4].receive()).toMatchObject({ outcome: 'replaced' });
+        await worker.runDueBatch();
+        expect(packages.filter(pkg => pkg.status === 'SUCCESS').map(pkg => pkg.tracking).sort())
+          .toEqual(replacements.map(pkg => `TRACK${pkg.providerLabelId}`).sort());
         return;
       }
       if (mode === 'competing') {
@@ -1650,6 +1662,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
           repository: createShipStationLabelReconciliationRepository(getTestDb()), clock,
           processLabels: createIntake().processProviderLabelSnapshots,
           source: { isConfigured: () => true,
+            getLabel: async () => originalSnapshot,
             listVoids: async () => ({ shipments: [originalSnapshot], page: 1, pages: 1, total: 1 }),
             listOrderLabels: async () => ({ shipments: [replacementSnapshot, originalSnapshot], page: 1, pages: 1, total: 2 }) },
         });
@@ -1769,6 +1782,7 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     const voided = { ...original, voidDate: '2026-09-21T10:23:21.9930000' };
     const scan = createShipStationLabelReconciliationService({ repository: createShipStationLabelReconciliationRepository(getTestDb()), clock,
       processLabels: createIntake().processProviderLabelSnapshots, source: { isConfigured: () => true,
+        getLabel: async () => voided,
         listVoids: async () => ({ shipments: [voided], page: 1, pages: 1, total: 1 }),
         listOrderLabels: async () => ({ shipments: [replacement, voided], page: 1, pages: 1, total: 2 }) } });
     if (mode === 'poll') await scan.runOnce();
@@ -1804,6 +1818,140 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
     expect(await reader.findRelatedActiveLabels({ providerLabelId: '55003', providerOrderId: '95001', sourceWmsShipmentItemIds: [source] })).toEqual([]);
     await pool.query("UPDATE wms.shipping_provider_labels SET label_direction = 'outbound', label_status = 'voided', voided_at = now() WHERE id = $1", [old]);
     expect(await reader.findRelatedActiveLabels({ providerLabelId: '55003', providerOrderId: '95001', sourceWmsShipmentItemIds: [source] })).toEqual([]);
+  });
+
+  it.each(['shopify', 'ebay'] as const)('conserves split, merge, rollback and duplicate repack events for %s', async provider => {
+    const source = await seedCommercialFulfillmentAuthoritySource(pool, `REPACK-${provider}`, 2);
+    await pool.query('UPDATE channels.channels SET provider = $1', [provider]);
+    await pool.query('UPDATE oms.oms_order_lines SET fulfillment_provider = $1', [provider]);
+    if (provider === 'ebay') {
+      await pool.query("UPDATE oms.oms_orders SET external_order_id = 'repack-ebay-order'");
+      await pool.query("UPDATE oms.oms_order_lines SET external_line_item_id = 'repack-ebay-line'");
+    }
+    await seedCanonicalRequestForSource(pool, source);
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const clock = { now: () => new Date('2026-10-01T12:00:00Z') };
+    const workflow = createPackageAllocationLabelCommercialWorkflow({ pool, clock, logger });
+    let rollback = false;
+    const handler = new PackageAllocationLabelCommercialFulfillmentService({ enabled: true, logger,
+      labelLinker: { reconcileShipStationLabel: vi.fn().mockResolvedValue({ linksInserted: 0, totalLinks: 0 }) },
+      reviewRepository: { record: vi.fn() }, workflow: { run: work => workflow.run(async context => {
+        const result = await work(context); if (rollback) throw new Error('repack rollback'); return result;
+      }) } });
+    async function label(providerLabelId: number, quantity: number, providerOrderId = 99001) {
+      const items = [{ lineItemKey: `wms-item-${source}`, quantity }];
+      const id = await seedAuthorityReadinessLabel(pool, source, { providerLabelId: String(providerLabelId), providerOrderId: String(providerOrderId),
+        trackingNumber: `REPACK${providerLabelId}`, carrierCode: 'ups', contentsLines: items, receivedAt: '2026-09-17T12:00:00Z' });
+      await pool.query("UPDATE wms.shipping_provider_labels SET carrier = 'ups' WHERE id = $1", [id]);
+      await pool.query(`INSERT INTO wms.shipping_provider_label_links(shipping_provider_label_id, legacy_wms_shipment_id)
+        SELECT $1, shipment_id FROM wms.outbound_shipment_items WHERE id = $2`, [id, source]);
+      return { id, receive: () => handler.process({ shipmentId: providerLabelId, orderId: providerOrderId,
+        trackingNumber: `REPACK${providerLabelId}`, isReturnLabel: false, shipmentItems: items }, { shippingProviderLabelId: String(id) } as any) };
+    }
+    const lifecycleRepository = createShopifyLabelLifecycleRepository(getTestDb());
+    const client: ShopifyAdminGraphQLClient = { async request<T>() {
+      return { order: { id: 'gid://shopify/Order/640001', fulfillmentsCount: { count: 0 }, fulfillments: [] } } as T;
+    } };
+    const lifecycle = createShopifyLabelLifecycleService({ repository: lifecycleRepository,
+      providerClients: { shopify: async channelId => ({ channelId, connectionId: 987, externalAccountId: 'test.myshopify.com', client }),
+        ebay: async () => { throw new Error('No eBay writes in allocation test'); } }, runExclusive: async (_id, work) => work(), clock, logger });
+    async function voidLabel(id: number) {
+      const original = (await pool.query('SELECT sanitized_payload FROM wms.shipping_provider_label_events WHERE shipping_provider_label_id = $1 ORDER BY id LIMIT 1', [id])).rows[0].sanitized_payload;
+      const payload = { ...original, voidDate: '2026-09-17T13:00:00Z' };
+      const hash = createHash('sha256').update(canonicalJson({ provider: 'shipstation', ...payload, labelStatus: 'voided' })).digest('hex');
+      await pool.query(`INSERT INTO wms.shipping_provider_label_events(shipping_provider_label_id,event_hash,event_type,label_status,tracking_number,provider_occurred_at,received_at,sanitized_payload)
+        VALUES ($1,$2,'label_voided','voided',$3,'2026-09-17T13:00:00Z','2026-09-17T13:00:00Z',$4)`, [id, hash, payload.trackingNumber, payload]);
+      await pool.query("UPDATE wms.shipping_provider_labels SET label_status = 'voided', last_observed_at = '2026-09-17T13:00:00Z' WHERE id = $1", [id]);
+      if (provider === 'shopify') { await lifecycle.observe(id); await lifecycle.runDueBatch(); }
+    }
+    const original = await label(71001, 2); expect(await original.receive()).toMatchObject({ outcome: 'activated' });
+    await voidLabel(original.id);
+    // A negative-only transfer cannot commit, even if application validation is bypassed.
+    const oldItem = (await pool.query('SELECT id FROM wms.physical_shipment_items')).rows[0].id;
+    await expect(pool.query(`INSERT INTO wms.physical_shipment_item_quantity_adjustments
+      (physical_shipment_item_id, quantity_delta, adjustment_kind, repair_run_id, idempotency_key, operator, reason, metadata, created_at)
+      VALUES ($1,-2,'provider_label_replacement','11111111-1111-4111-8111-111111111111','invalid-half-repack','integration','negative only',
+        '{"replacementBatchId":"11111111-1111-4111-8111-111111111111"}', NOW())`, [oldItem])).rejects.toMatchObject({ code: '23514' });
+    const a = await label(71002, 1);
+    expect(await a.receive()).toMatchObject({ outcome: 'waiting', reason: 'replacement_repack_incomplete' });
+    expect((await pool.query('SELECT id FROM wms.physical_shipment_item_quantity_adjustments')).rowCount).toBe(0);
+    const b = await label(71003, 1, 99002);
+    rollback = true; await expect(b.receive()).rejects.toThrow('repack rollback'); rollback = false;
+    expect((await pool.query('SELECT id FROM wms.physical_shipments')).rowCount).toBe(1);
+    expect((await pool.query('SELECT id FROM wms.physical_shipment_item_quantity_adjustments')).rowCount).toBe(0);
+    const applied = await Promise.all([a.receive(), b.receive(), a.receive()]);
+    for (const result of applied) expect(result, JSON.stringify({ result, logs: logger.error.mock.calls })).toMatchObject({ outcome: 'replaced' });
+    expect((await pool.query(`SELECT package.tracking_number, item.quantity_shipped FROM wms.effective_physical_shipment_items item
+      JOIN wms.physical_shipments package ON package.id = item.physical_shipment_id ORDER BY package.tracking_number`)).rows)
+      .toEqual([{ tracking_number: 'REPACK71002', quantity_shipped: 1 }, { tracking_number: 'REPACK71003', quantity_shipped: 1 }]);
+    expect((await pool.query("SELECT COUNT(DISTINCT replacement_batch_id)::int AS batches FROM wms.ebay_label_replacement_work WHERE state = 'applied'")).rows).toEqual([{ batches: 1 }]);
+    await expect(pool.query("UPDATE wms.ebay_label_replacement_work SET replacement_batch_id = NULL WHERE state = 'applied'")).rejects.toMatchObject({ code: '55000' });
+    if (provider === 'ebay') {
+      const amend = vi.fn(async (orderId: string, pkg: EbayShippingFulfillmentRequest, previous: readonly string[], batch?: { packages: readonly EbayShippingFulfillmentRequest[] }) => {
+        expect(orderId).toBe('repack-ebay-order'); expect(previous).toEqual(['REPACK71001']);
+        expect(pkg.lineItems).toEqual([{ lineItemId: 'repack-ebay-line', quantity: 1 }]);
+        expect(batch!.packages.map(item => ({ tracking: item.trackingNumber, lines: item.lineItems })))
+          .toEqual(['REPACK71002', 'REPACK71003'].map(tracking => ({ tracking, lines: [{ lineItemId: 'repack-ebay-line', quantity: 1 }] })));
+        return { fulfillmentId: `remote-${pkg.trackingNumber}` };
+      });
+      const push = createFulfillmentPushService(getTestDb(), null, { providerClients: {
+        shopify: async () => { throw new Error('Wrong originating channel'); },
+        ebay: async channelId => ({ channelId, externalAccountId: 'repack-ebay-account', client: {
+          createShippingFulfillment: async () => { throw new Error('Replacement must consult the amendment adapter'); }, replaceShippingFulfillmentTracking: amend,
+        } }),
+      } });
+      const worker = createChannelFulfillmentAuthorityService({ repository: createChannelFulfillmentAuthorityRepository(getTestDb()),
+        providerExecutor: createCompatibilityChannelFulfillmentProviderExecutor(push), projector: createChannelFulfillmentProjector(getTestDb()), clock, logger });
+      expect(await worker.runDueBatch(), JSON.stringify(logger.error.mock.calls)).toMatchObject({ succeeded: 2, retryScheduled: 0, reviewRequired: 0 });
+      expect(amend).toHaveBeenCalledTimes(2);
+    }
+    await voidLabel(a.id); await voidLabel(b.id);
+    const merged = await label(71004, 2); expect(await merged.receive()).toMatchObject({ outcome: 'replaced' });
+    expect(await merged.receive()).toMatchObject({ outcome: 'replaced' });
+    expect((await pool.query('SELECT quantity_shipped FROM wms.effective_physical_shipment_items')).rows).toEqual([{ quantity_shipped: 2 }]);
+    expect((await pool.query('SELECT id FROM wms.physical_shipment_item_quantity_adjustments')).rowCount).toBe(3);
+    expect((await pool.query('SELECT qty FROM wms.outbound_shipment_items')).rows).toEqual([{ qty: 2 }]);
+    expect((await pool.query('SELECT id FROM inventory.inventory_transactions')).rowCount).toBe(0);
+  }, 30000);
+
+  it('atomically hands off void discovery and fences independently retryable recovery', async () => {
+    const repository = createShipStationLabelReconciliationRepository(getTestDb());
+    const now = new Date('2026-09-21T20:00:00Z');
+    const current = await repository.readOrCreate(new Date('2026-09-20'), now);
+    const claim = (await repository.claim(current, planLabelScanWindow(current, now)!, now))!;
+    // Force the second insert to fail: neither first queue row nor watermark may commit.
+    await pool.query(`CREATE FUNCTION oms.reject_test_recovery_seed() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN IF NEW.provider_label_id = 2 THEN RAISE EXCEPTION 'injected handoff failure'; END IF; RETURN NEW; END $$;
+      CREATE TRIGGER reject_test_recovery_seed BEFORE INSERT ON oms.shipstation_label_recovery_work FOR EACH ROW EXECUTE FUNCTION oms.reject_test_recovery_seed()`);
+    try {
+      await expect(repository.completePage(claim, false, now, [{ providerLabelId: 1, providerOrderId: 101, trackingNumber: 'TRACK1' }, { providerLabelId: 2, providerOrderId: 102, trackingNumber: 'TRACK2' }])).rejects.toThrow('injected handoff failure');
+    } finally { await pool.query('DROP TRIGGER reject_test_recovery_seed ON oms.shipstation_label_recovery_work; DROP FUNCTION oms.reject_test_recovery_seed()'); }
+    expect((await pool.query('SELECT id FROM oms.shipstation_label_reconciliation_checkpoint WHERE completed_through = $1', [current.completedThrough])).rowCount).toBe(1);
+    expect((await pool.query('SELECT * FROM oms.shipstation_label_recovery_work')).rowCount).toBe(0);
+    await repository.completePage(claim, false, now, [{ providerLabelId: 1, providerOrderId: 101, trackingNumber: 'TRACK1' }, { providerLabelId: 2, providerOrderId: 102, trackingNumber: 'TRACK2' }]);
+    const jobs = await Promise.all([repository.claimOrder(now), repository.claimOrder(now), repository.claimOrder(now)]);
+    expect(jobs.filter(Boolean)).toHaveLength(2);
+    const first = jobs.find(job => job?.providerLabelId === 1)!;
+    expect(first.trackingNumber).toBe('TRACK1');
+    const second = jobs.find(job => job?.providerLabelId === 2)!;
+    await repository.finishOrder(first, { state: 'pending', code: 'PROVIDER_UNAVAILABLE', nextAttemptAt: new Date(now.getTime() + 600000) }, now);
+    await repository.finishOrder(second, { state: 'complete', code: null, nextAttemptAt: null }, now);
+    expect(await repository.claimOrder(now)).toBeNull();
+    const later = new Date(now.getTime() + 600000);
+    const retry = (await repository.claimOrder(later))!; expect(retry).toMatchObject({ providerLabelId: 1, attempts: 2 });
+    await expect(repository.finishOrder(first, { state: 'complete', code: null, nextAttemptAt: null }, later)).rejects.toMatchObject({ code: 'SHIPSTATION_LABEL_SCAN_LEASE_LOST' });
+    const expired = new Date(later.getTime() + 300001);
+    const successor = (await repository.claimOrder(expired))!;
+    await expect(repository.renewOrder(retry, expired)).rejects.toMatchObject({ code: 'SHIPSTATION_LABEL_SCAN_LEASE_LOST' });
+    await repository.finishOrder(successor, { state: 'review', code: 'SHIPSTATION_ORDER_LABEL_LIMIT', nextAttemptAt: null }, expired);
+    expect(await repository.claimOrder(expired)).toBeNull();
+    const { getFlowBucketSamples } = await import('../../../oms/flow-waterfall.service');
+    expect((await getFlowBucketSamples(getTestDb(), 'SHIPSTATION_LABEL_RECOVERY_BLOCKED')).rows)
+      .toMatchObject([{ shipstation_order_id: '101', shipstation_shipment_id: '1', tracking_number: 'TRACK1', state: 'review', last_error_code: 'SHIPSTATION_ORDER_LABEL_LIMIT' }]);
+    expect((await pool.query('SELECT provider_label_id::int, attempt_number, outcome FROM oms.shipstation_label_recovery_attempts ORDER BY provider_label_id, attempt_number')).rows)
+      .toEqual([{ provider_label_id: 1, attempt_number: 1, outcome: 'pending' }, { provider_label_id: 1, attempt_number: 2, outcome: 'review' }, { provider_label_id: 2, attempt_number: 1, outcome: 'complete' }]);
+    await expect(pool.query('DELETE FROM oms.shipstation_label_recovery_attempts')).rejects.toMatchObject({ code: '55000' });
+    await expect(pool.query("UPDATE oms.shipstation_label_recovery_work SET state = 'pending', next_attempt_at = NOW() WHERE state = 'review'")).rejects.toMatchObject({ code: '55000' });
   });
 
   it("fences concurrent void scans, resumes pages after restart, and retains failed windows", async () => {

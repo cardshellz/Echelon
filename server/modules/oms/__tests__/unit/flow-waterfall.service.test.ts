@@ -53,6 +53,14 @@ describe("getFlowWaterfall", () => {
     expect(FLOW_WATERFALL_SRC).toContain("const slaBreached = num");
     expect(FLOW_WATERFALL_SRC).toContain("sla: { breached: slaBreached, sample: [] }");
   });
+  it('surfaces failed per-order label recovery without treating a healthy discovery cursor as completion', () => {
+    const issue = FLOW_WATERFALL_SRC.slice(FLOW_WATERFALL_SRC.indexOf('code: "SHIPSTATION_LABEL_RECOVERY_BLOCKED"'), FLOW_WATERFALL_SRC.indexOf('code: "SHOPIFY_RECOVERY_UNHEALTHY"'));
+    expect(issue).toContain('oms.shipstation_label_recovery_work');
+    expect(issue).toContain("state = 'review'");
+    expect(issue).toContain('shipstation_order_id');
+    expect(issue).toContain('tracking_number');
+    expect(issue).toContain('LIMIT 50');
+  });
 
   it("keeps the OMS primary key indexable when correlating WMS orders", () => {
     expect(FLOW_WATERFALL_SRC).toContain("wmsOmsOrderLinkSql");

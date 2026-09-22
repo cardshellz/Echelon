@@ -11,6 +11,8 @@ import { buildBulkInventoryTrackingPreview } from "./bulk-inventory-tracking.dom
 import { loadBulkInventoryTrackingSelection, type InventoryTrackingTransaction } from "./bulk-inventory-tracking.repository";
 import { InventoryTrackingPolicyError, updateProductInventoryTracking } from "./inventory-tracking-policy.repository";
 
+import { InventoryTrackingHistoryCapacityError } from "@shared/catalog/inventory-tracking-history";
+
 export class BulkInventoryTrackingError extends InventoryTrackingPolicyError {
   constructor(code: string, message: string, readonly context?: Record<string, unknown>) {
     super(code, message, 409);
@@ -18,7 +20,7 @@ export class BulkInventoryTrackingError extends InventoryTrackingPolicyError {
 }
 
 export function classifyBulkInventoryTrackingFailure(error: unknown): FinancialCommandFailureDisposition {
-  if (error instanceof InventoryTrackingPolicyError) return {
+  if (error instanceof InventoryTrackingPolicyError || error instanceof InventoryTrackingHistoryCapacityError) return {
     kind: "rejected", httpStatus: error.statusCode, errorCode: error.code, errorMessage: error.message,
     body: { error: error.message, code: error.code,
       ...(error instanceof BulkInventoryTrackingError ? { context: error.context } : {}) },
@@ -32,8 +34,8 @@ export function createBulkInventoryTrackingService(database: typeof db = db, clo
   async function previewInTransaction(tx: InventoryTrackingTransaction, input: unknown): Promise<BulkInventoryTrackingPreview> {
     const request = bulkInventoryTrackingRequestSchema.parse(input);
     return buildBulkInventoryTrackingPreview(
-      await loadBulkInventoryTrackingSelection(tx, request.productIds, request.inventoryTrackingDefault),
-      request.inventoryTrackingDefault,
+      await loadBulkInventoryTrackingSelection(tx, request.productIds, request.inventoryTrackingDefault, request.stockDisposition),
+      request.inventoryTrackingDefault, request.stockDisposition,
     );
   }
   return {
@@ -57,7 +59,7 @@ export function createBulkInventoryTrackingService(database: typeof db = db, clo
           const actor = `${descriptor.actorType}:${descriptor.actorId}`;
           const now = clock();
           for (const product of changed) {
-            await updateProductInventoryTracking(tx, product.productId, request.inventoryTrackingDefault, actor, now);
+            await updateProductInventoryTracking(tx, product.productId, request.inventoryTrackingDefault, actor, now, request.stockDisposition);
           }
           const result = bulkInventoryTrackingResultSchema.parse({
             inventoryTrackingDefault: request.inventoryTrackingDefault,

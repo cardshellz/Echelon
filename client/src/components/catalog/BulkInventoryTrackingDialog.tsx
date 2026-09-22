@@ -9,6 +9,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { InventoryTrackingBlockerDetails } from "./InventoryTrackingBlockerDetails";
+import { formatDashboardMills } from "@/lib/cost-dashboard-money";
 
 class InventoryTrackingRequestError extends Error {
   constructor(message: string, readonly code?: string) { super(message); }
@@ -43,7 +44,7 @@ export function BulkInventoryTrackingDialog({ productIds, onClose, onApplied }: 
   const review = useMutation({
     mutationFn: async (ids: number[]) => readResult(await fetch(`${BULK_INVENTORY_TRACKING_PATH}/preview`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ productIds: ids, inventoryTrackingDefault: next }),
+      body: JSON.stringify({ productIds: ids, inventoryTrackingDefault: next, ...(!next ? { stockDisposition: "retain_history" } : {}) }),
     }), bulkInventoryTrackingPreviewSchema),
     onMutate: ids => { setReviewProductIds(ids); setShowBlockedOnly(false); setError(null); setPreview(null); setCommandKey(null); },
     onSuccess: result => { setPreview(result); setCommandKey(crypto.randomUUID()); },
@@ -54,7 +55,8 @@ export function BulkInventoryTrackingDialog({ productIds, onClose, onApplied }: 
       if (!preview || !commandKey) throw new Error("Review the selection before applying changes.");
       return readResult(await fetch(`${BULK_INVENTORY_TRACKING_PATH}/apply`, {
         method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": commandKey },
-        body: JSON.stringify({ productIds: reviewProductIds, inventoryTrackingDefault: preview.inventoryTrackingDefault, expectedPreviewHash: preview.previewHash }),
+        body: JSON.stringify({ productIds: reviewProductIds, inventoryTrackingDefault: preview.inventoryTrackingDefault,
+          stockDisposition: preview.stockDisposition, expectedPreviewHash: preview.previewHash }),
       }), bulkInventoryTrackingResultSchema);
     },
     onMutate: () => setError(null),
@@ -96,6 +98,8 @@ export function BulkInventoryTrackingDialog({ productIds, onClose, onApplied }: 
           </SelectContent>
         </Select>
         <p className="text-sm text-muted-foreground">Products without variants use this default directly. Inheriting variants follow it; explicit variant choices are kept. Existing orders keep their recorded policy.</p>
+        {!next && <p className="text-sm">Stop tracking and keep history: save the last recorded balances, then remove them from managed stock and current inventory valuation. This records no physical disposal, loss, shipment, or accounting journal. Future orders still require pick confirmation, without stock checks or deductions. Active order work must be resolved first.</p>}
+        {next && <p className="text-sm text-muted-foreground">Previously retained balances stay historical. Turning tracking back on does not restore them; record a new opening count through Inventory.</p>}
       </div>
       {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
       {excludedCount > 0 && <div className="space-y-2 rounded-md border p-3 text-sm" data-testid="bulk-inventory-excluded">
@@ -119,6 +123,13 @@ export function BulkInventoryTrackingDialog({ productIds, onClose, onApplied }: 
             <p className="text-xs text-muted-foreground">{product.sku ?? `Product ${product.productId}`} · {product.currentDefault === null ? "Unavailable" : product.currentDefault ? "Tracks inventory" : "Does not track inventory"}
               {product.status === "change" && ` → ${next ? "Track inventory" : "Do not track inventory"}`}</p>
             <p className="text-xs text-muted-foreground">{product.variantCount === 0 ? "No variants — product default applies directly." : `${product.changingVariantCount} variants change; ${product.trackedOverrideCount} explicit Track and ${product.untrackedOverrideCount} explicit Do not track overrides are kept.`}</p>
+            {product.history?.map(history => <div key={history.variantId} className="rounded border p-2 text-xs space-y-1" data-testid={`tracking-history-review-${history.variantId}`}>
+              <p className="font-medium">{history.sku ?? `Variant ${history.variantId}`}: last recorded balances to keep in history</p>
+              <p>Stock records: On hand {history.summary.onHand} · Reserved {history.summary.reserved} · Picked {history.summary.picked} · Packed {history.summary.packed} · Backorder {history.summary.backorder}</p>
+              <p>Lots: On hand {history.summary.lotOnHand} · Reserved {history.summary.lotReserved} · Picked {history.summary.lotPicked} · Packed {history.summary.lotPacked}</p>
+              <p>{history.summary.levelCount} stock records · {history.summary.lotCount} lots · Recorded on-hand lot value {formatDashboardMills(history.summary.recordedOnHandValueMills)}</p>
+              <p>These are historical records, not a verified physical count. Stock records and lots describe the same stock and are not added together. Receipts, picks, shipments and their costs remain available.</p>
+            </div>)}
             {product.blockers.map((blocker, index) => <InventoryTrackingBlockerDetails key={`${blocker.variantId}-${blocker.code}-${index}`} blocker={blocker} />)}
           </li>)}
         </ul>

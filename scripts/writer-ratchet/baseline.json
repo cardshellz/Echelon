@@ -690,6 +690,9 @@
   "inventory.safety_definition_applications": [
     "modules/inventory-planning"
   ],
+  "inventory.tracking_stop_history": [
+    "modules/inventory"
+  ],
   "inventory.transformation_model_heads": [
     "modules/inventory-planning"
   ],
@@ -843,6 +846,12 @@
     "modules/oms"
   ],
   "oms.shipstation_label_reconciliation_checkpoint": [
+    "modules/oms"
+  ],
+  "oms.shipstation_label_recovery_attempts": [
+    "modules/oms"
+  ],
+  "oms.shipstation_label_recovery_work": [
     "modules/oms"
   ],
   "oms.shopify_label_void_attempts": [

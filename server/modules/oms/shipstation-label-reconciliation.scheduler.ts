@@ -13,7 +13,7 @@ export function startShipStationLabelReconciliationScheduler(
     running = true;
     try {
       const result = await service.runOnce();
-      if (result.outcome === "processed") logger.info(JSON.stringify({
+      if (result.outcome === "processed" || result.recovered || result.deferred || result.reviewRequired) logger.info(JSON.stringify({
         code: "SHIPSTATION_LABEL_RECONCILIATION_COMPLETED", ...result,
       }));
     } catch {

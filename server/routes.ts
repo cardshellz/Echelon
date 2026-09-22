@@ -20,6 +20,7 @@ import { registerBuildRoutes } from "./modules/inventory/build.routes";
 import { registerNotificationRoutes } from "./modules/notifications";
 import { registerFinanceAnalyticsRoutes } from "./modules/oms/finance-analytics.routes";
 import { registerWalmartChannelRoutes } from "./modules/channels/adapters/walmart/walmart.routes";
+import { registerChannelCatalogRoutes } from "./modules/channels/channel-catalog.routes";
 import { registerChannelRoutes } from "./modules/channels/channels.routes";
 import { registerSettingsRoutes } from "./modules/warehouse/settings.routes";
 import { registerPickZoneRoutes } from "./modules/warehouse/pick-zones.routes";
@@ -213,6 +214,7 @@ export async function registerRoutes(
   registerBuildRoutes(app);
   registerChannelRoutes(app);
   registerWalmartChannelRoutes(app);
+  registerChannelCatalogRoutes(app);
   registerMarketplaceListingRegistrationRoutes(
     app,
     createMarketplaceListingRegistrationResolverFromEnv(),

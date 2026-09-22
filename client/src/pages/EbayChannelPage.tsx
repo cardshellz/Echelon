@@ -9,7 +9,7 @@
 
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { useLocation } from "wouter";
+import { ChannelWorkspaceHeader } from "@/components/channels/ChannelWorkspaceHeader";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
@@ -46,11 +46,9 @@ import {
   XCircle,
   MapPin,
   FileText,
-  Store,
   ShieldCheck,
   Clock,
   ExternalLink,
-  ArrowLeft,
   Layers,
   Tag,
   Search,
@@ -355,7 +353,6 @@ function PolicyOverrideRow({
 // ============================================================================
 
 export default function EbayChannelPage() {
-  const [, navigate] = useLocation();
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
@@ -1007,20 +1004,7 @@ export default function EbayChannelPage() {
   return (
     <div className="p-2 sm:p-4 md:p-6 space-y-4 sm:space-y-6 max-w-6xl mx-auto">
       {/* Page Header */}
-      <div className="flex items-center gap-3">
-        <Button variant="ghost" size="icon" onClick={() => navigate("/channels")}>
-          <ArrowLeft className="h-5 w-5" />
-        </Button>
-        <div className="bg-blue-500/10 p-2 rounded-lg">
-          <Store className="h-6 w-6 text-blue-600" />
-        </div>
-        <div className="flex-1">
-          <h1 className="text-2xl font-bold tracking-tight">eBay Channel</h1>
-          <p className="text-sm text-muted-foreground">
-            Store setup, category mapping, and listing feed
-          </p>
-        </div>
-      </div>
+      <ChannelWorkspaceHeader name="eBay" description="Store setup, category mapping, and listing feed" />
 
       {/* ================================================================== */}
       {/* SECTION 1: Store Setup                                             */}

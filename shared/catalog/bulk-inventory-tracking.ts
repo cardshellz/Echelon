@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { inventoryTrackingHistoryReviewSchema } from "./inventory-tracking-history";
 
 // Bound one interactive transaction, its locks, and the review payload.
 export const MAX_BULK_INVENTORY_TRACKING_PRODUCTS = 500;
@@ -31,15 +32,22 @@ export const inventoryTrackingEvidenceSchema = z.object({
   records: z.array(inventoryTrackingEvidenceRecordSchema).max(MAX_INVENTORY_TRACKING_EVIDENCE_RECORDS),
 });
 
-export const bulkInventoryTrackingRequestSchema = z.object({
+const bulkInventoryTrackingRequestObject = z.object({
   productIds: z.array(id).min(1).max(MAX_BULK_INVENTORY_TRACKING_PRODUCTS)
     .refine(ids => new Set(ids).size === ids.length, "Select each product only once"),
   inventoryTrackingDefault: z.boolean(),
+  // Explicit intent from the reviewed stop-tracking flow. Existing callers
+  // retain the dependency guard until they adopt this contract.
+  stockDisposition: z.literal("retain_history").optional(),
 }).strict();
 
-export const bulkInventoryTrackingApplySchema = bulkInventoryTrackingRequestSchema.extend({
+const validDisposition = (value: { inventoryTrackingDefault: boolean; stockDisposition?: "retain_history" }) =>
+  value.stockDisposition === undefined || value.inventoryTrackingDefault === false;
+export const bulkInventoryTrackingRequestSchema = bulkInventoryTrackingRequestObject.refine(validDisposition,
+  "Retaining history is only valid when stopping tracking");
+export const bulkInventoryTrackingApplySchema = bulkInventoryTrackingRequestObject.extend({
   expectedPreviewHash: z.string().regex(/^[a-f0-9]{64}$/),
-});
+}).refine(validDisposition, "Retaining history is only valid when stopping tracking");
 
 export const inventoryTrackingBlockerSchema = z.object({
   variantId: id.nullable(),
@@ -60,11 +68,13 @@ export const bulkInventoryTrackingProductSchema = z.object({
   trackedOverrideCount: count,
   untrackedOverrideCount: count,
   blockers: z.array(inventoryTrackingBlockerSchema),
+  history: z.array(inventoryTrackingHistoryReviewSchema).optional(),
 });
 
 export const bulkInventoryTrackingPreviewSchema = z.object({
   previewHash: z.string().regex(/^[a-f0-9]{64}$/),
   inventoryTrackingDefault: z.boolean(),
+  stockDisposition: z.literal("retain_history").optional(),
   products: z.array(bulkInventoryTrackingProductSchema).min(1).max(MAX_BULK_INVENTORY_TRACKING_PRODUCTS),
 });
 

@@ -978,7 +978,7 @@ export function createFulfillmentPushService(
     provider: "shopify" | "ebay" | "walmart",
   ): Promise<T[]> {
     const allocationItems = command.items.filter((item) => item.packageAllocationEntryId != null);
-    if (provider === "shopify" && command.trackingReplacement === true) {
+    if ((provider === "shopify" || provider === "ebay") && command.trackingReplacement === true) {
       const result = await db.execute(sql`SELECT item.label_replacement_source_item_id AS source_id,
         item.quantity_shipped, line.id AS oms_order_line_id, line.external_line_item_id,
         source.order_item_id, push_item.quantity_pushed
@@ -994,7 +994,7 @@ export function createFulfillmentPushService(
         JOIN oms.oms_order_lines line ON line.id = order_item.oms_order_line_id
           AND line.id = push_item.oms_order_line_id AND line.order_id = push.oms_order_id
         WHERE push.id = ${command.commandId} AND push.physical_shipment_id = ${command.physicalShipmentId}
-          AND push.oms_order_id = ${command.omsOrderId} AND push.channel_provider = 'shopify'
+          AND push.oms_order_id = ${command.omsOrderId} AND push.channel_provider = ${provider}
           AND push.tracking_number = ${command.trackingNumber} AND push.carrier = ${command.carrier}
           AND item.shipment_item_purpose = 'customer_fulfillment'`);
       const proof: Array<Record<string, unknown>> = result?.rows ?? [];
@@ -1006,10 +1006,10 @@ export function createFulfillmentPushService(
           || !rows.some(row => row.shipment_item_id === item.legacyWmsShipmentItemId
             && row.order_item_id === Number(match[0].order_item_id));
       })) throw new ChannelFulfillmentProviderInputError(CHANNEL_FULFILLMENT_LINEAGE_MISMATCH,
-        "Shopify replacement has no exact persisted package grant", { commandId: command.commandId });
+        "Replacement has no exact persisted package grant", { commandId: command.commandId });
       const projected = rows.map(row => ({ ...row,
         qty: command.items.find(item => item.legacyWmsShipmentItemId === row.shipment_item_id)?.quantity ?? row.qty }));
-      assertExactChannelCommandLineage(command, projected, isShopifyFulfillmentProvider);
+      assertExactChannelCommandLineage(command, projected, provider === 'shopify' ? isShopifyFulfillmentProvider : (value) => value === 'ebay');
       return projected;
     }
 
@@ -1680,6 +1680,17 @@ export function createFulfillmentPushService(
   async function pushTrackingForShipmentCommand(
     input: ChannelFulfillmentProviderCommandInput,
   ): Promise<boolean | { fulfillmentId: string; writebackComplete: true }> {
+    const validated = normalizeChannelCommandInput(input);
+    // All eBay writes for an order share the same lock, including ordinary
+    // packages. Two repack commands must not race each other's read/modify/write.
+    const result = await runExclusive(shopifyOrderFulfillmentLockId(validated.omsOrderId), () => pushEbayCommandExclusive(validated));
+    if (result === null) throw new ChannelFulfillmentProviderError("EBAY_FULFILLMENT_IN_PROGRESS", "Another fulfillment update owns this order", "transient");
+    return result;
+  }
+
+  async function pushEbayCommandExclusive(
+    input: ChannelFulfillmentProviderCommandInput,
+  ): Promise<boolean | { fulfillmentId: string; writebackComplete: true }> {
     const command = normalizeChannelCommandInput(input);
     const order = await loadCanonicalFulfillmentOrder(command, "ebay");
     const externalOrderId = order.externalOrderId;
@@ -1729,6 +1740,7 @@ export function createFulfillmentPushService(
       trackingNumber: normalizeEbayTrackingNumber(command.trackingNumber),
     };
     let previousTrackingNumbers: string[] = [];
+    let replacementPackages: EbayShippingFulfillmentRequest[] | undefined;
     if (command.trackingReplacement === true) {
       const replacementEvidence = await db.execute(sql`
         SELECT DISTINCT prior_package.tracking_number
@@ -1737,6 +1749,8 @@ export function createFulfillmentPushService(
         JOIN wms.physical_shipment_item_quantity_adjustments adjustment
           ON adjustment.adjustment_kind = 'provider_label_replacement'
           AND (adjustment.metadata->>'sourceItemId')::integer = current_item.label_replacement_source_item_id
+          AND (adjustment.repair_run_id = work.replacement_batch_id
+            OR (work.replacement_batch_id IS NULL AND adjustment.metadata->>'replacementLabelId' = work.shipping_provider_label_id::text))
         JOIN wms.physical_shipment_items prior_item ON prior_item.id = adjustment.physical_shipment_item_id
         JOIN wms.physical_shipments prior_package ON prior_package.id = prior_item.physical_shipment_id
         JOIN wms.fulfillment_plan_lines plan_line ON plan_line.id = current_item.fulfillment_plan_line_id
@@ -1744,12 +1758,41 @@ export function createFulfillmentPushService(
         WHERE work.state = 'applied' AND work.physical_shipment_id = ${command.physicalShipmentId}
           AND order_line.order_id = ${command.omsOrderId}`);
       previousTrackingNumbers = [...new Set<string>((replacementEvidence.rows ?? []).map((row: { tracking_number: string }) => normalizeEbayTrackingNumber(row.tracking_number)))];
+      // A combined replacement can also contain a newly fulfilled source from
+      // another order. That order has no consumed predecessor: its exact grant
+      // was admitted under ordinary paid/request quantity constraints.
+      const batchEvidence = await db.execute(sql`
+        SELECT package.id::text AS package_id, package.tracking_number, package.carrier,
+          line.external_line_item_id, SUM(item.quantity_shipped)::integer AS quantity
+        FROM wms.ebay_label_replacement_work current_work
+        JOIN wms.ebay_label_replacement_work work ON work.state = 'applied'
+          AND (work.shipping_provider_label_id = current_work.shipping_provider_label_id
+            OR work.replacement_batch_id = current_work.replacement_batch_id)
+        JOIN wms.physical_shipments package ON package.id = work.physical_shipment_id
+        JOIN wms.physical_shipment_items item ON item.physical_shipment_id = package.id
+        JOIN wms.fulfillment_plan_lines plan ON plan.id = item.fulfillment_plan_line_id
+        JOIN oms.oms_order_lines line ON line.id = plan.oms_order_line_id
+        JOIN wms.shipping_provider_labels label ON label.id = work.shipping_provider_label_id
+        WHERE current_work.physical_shipment_id = ${command.physicalShipmentId} AND current_work.state = 'applied'
+          AND line.order_id = ${command.omsOrderId} AND label.label_status = 'active'
+        GROUP BY package.id, line.external_line_item_id ORDER BY package.id, line.external_line_item_id`);
+      const packages = new Map<string, EbayShippingFulfillmentRequest>();
+      for (const row of batchEvidence.rows as { package_id: string; tracking_number: string; carrier: string; external_line_item_id: string; quantity: number }[]) {
+        let pkg = packages.get(row.package_id);
+        if (!pkg) {
+          pkg = { trackingNumber: normalizeEbayTrackingNumber(row.tracking_number), shippingCarrierCode: mapCarrierCode(row.carrier), shippedDate: shippedAt.toISOString(), lineItems: [] };
+          packages.set(row.package_id, pkg);
+        }
+        pkg.lineItems.push({ lineItemId: row.external_line_item_id, quantity: row.quantity });
+      }
+      replacementPackages = [...packages.values()];
+      if (!packages.has(String(command.physicalShipmentId))) throw new ChannelFulfillmentProviderError("EBAY_TRACKING_REPLACEMENT_INVALID", "The current replacement batch is no longer active", "permanent");
     }
     if (previousTrackingNumbers.length > 0 && !account.client.replaceShippingFulfillmentTracking) {
       throw new ChannelFulfillmentProviderError("EBAY_TRACKING_ADAPTER_UNAVAILABLE", "eBay tracking replacement adapter is unavailable", "permanent");
     }
     const result = previousTrackingNumbers.length > 0
-      ? await account.client.replaceShippingFulfillmentTracking!(externalOrderId, fulfillmentPayload, previousTrackingNumbers)
+      ? await account.client.replaceShippingFulfillmentTracking!(externalOrderId, fulfillmentPayload, previousTrackingNumbers, { packages: replacementPackages! })
       : await account.client.createShippingFulfillment(externalOrderId, fulfillmentPayload);
     const fulfillmentId = String(result?.fulfillmentId ?? "").trim();
     if (!fulfillmentId) {

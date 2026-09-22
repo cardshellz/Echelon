@@ -108,6 +108,7 @@ export async function runMigrations(): Promise<void> {
     "migrations/0681_outbound_shipment_commercial_requested_quantity.sql",
     "migrations/0692_shopify_label_lifecycle.sql",
     "migrations/0693_shipstation_label_reconciliation.sql",
+    "migrations/0698_shipping_repack_recovery.sql",
   ].map((relativePath) => readFileSync(resolve(process.cwd(), relativePath), "utf8"));
   const client = await getTestPool().connect();
   let discardError: Error | undefined;
@@ -138,6 +139,8 @@ export async function runMigrations(): Promise<void> {
 
 const TRUNCATE_TABLES = [
   "oms.shipstation_label_reconciliation_checkpoint",
+  "oms.shipstation_label_recovery_attempts",
+  "oms.shipstation_label_recovery_work",
   "oms.package_allocation_commercial_fulfillment_activations",
   "oms.channel_fulfillment_push_items",
   "oms.channel_fulfillment_pushes",
