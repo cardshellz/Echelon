@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { beforeAll, afterAll, expect, it } from "vitest";
 import { describeWithDisposableDb, getTestPool, closeTestDb } from "../../../../../test/setup-integration";
 import { WalmartConnectionRepository } from "../../adapters/walmart/walmart-connection.repository";
+import { PostgresChannelCatalogRepository } from "../../channel-catalog.repository";
 import { AesGcmFulfillmentProviderCredentialCipher } from "../../../shipping-engine/infrastructure/fulfillment-provider-credential-cipher";
 import { parseWalmartOrder } from "../../adapters/walmart/walmart-us-api";
 import { mapWalmartOrder, mapWalmartOrderObservation } from "../../adapters/walmart/walmart-order.domain";
@@ -23,6 +24,7 @@ describeWithDisposableDb("Walmart account and order PostgreSQL transactions", ()
   const now = new Date("2026-09-21T12:00:00Z");
   const cipher = new AesGcmFulfillmentProviderCredentialCipher(Buffer.alloc(32, 7), "test-key");
   let repository: WalmartConnectionRepository;
+  let catalog: PostgresChannelCatalogRepository;
   let observations: PostgresChannelOrderObservationWriter;
   let supply: PostgresInventoryPublicationSupplyReader;
   let channelId: number, otherChannelId: number, warehouseId: number, variantId: number;
@@ -37,6 +39,10 @@ describeWithDisposableDb("Walmart account and order PostgreSQL transactions", ()
     await pool.query("SET search_path TO channels,public");
     await pool.query(migrationTable("migrations/0001_past_molly_hayes.sql", '"channel_connections"'));
     await pool.query(migrationTable("migrations/0001_past_molly_hayes.sql", '"channel_feeds"').replaceAll('"variant_id"', '"product_variant_id"'));
+    await pool.query(migrationTable("migrations/0001_past_molly_hayes.sql", '"channel_listings"').replaceAll('"variant_id"', '"product_variant_id"'));
+    await pool.query("CREATE UNIQUE INDEX ON channels.channel_listings(channel_id,product_variant_id)");
+    await pool.query(readFileSync("migrations/0107_audit_events.sql", "utf8").replaceAll('"audit_events"', 'public."audit_events"'));
+    await pool.query("TRUNCATE public.audit_events");
     await pool.query(`ALTER TABLE channels.channel_feeds ADD COLUMN channel_id integer REFERENCES channels.channels(id),
       ADD COLUMN channel_inventory_item_id varchar(100), ADD COLUMN quarantined_at timestamp;
       CREATE UNIQUE INDEX ON channels.channel_feeds(channel_id,product_variant_id);
@@ -60,6 +66,7 @@ describeWithDisposableDb("Walmart account and order PostgreSQL transactions", ()
     const productId = (await pool.query("INSERT INTO catalog.products(sku,name) VALUES('PRODUCT','Product') RETURNING id")).rows[0].id;
     variantId = (await pool.query("INSERT INTO catalog.product_variants(product_id,sku,name) VALUES($1,'ECHELON-SKU','Variant') RETURNING id", [productId])).rows[0].id;
     repository = new WalmartConnectionRepository(pool);
+    catalog = new PostgresChannelCatalogRepository(pool);
     observations = new PostgresChannelOrderObservationWriter(pool);
     supply = new PostgresInventoryPublicationSupplyReader(pool);
   });
@@ -69,10 +76,12 @@ describeWithDisposableDb("Walmart account and order PostgreSQL transactions", ()
     await expect(repository.save(command(), channelId, "Seller", "operator", now, () => { throw new Error("vault failed"); })).rejects.toThrow("vault failed");
     expect((await getTestPool().query("SELECT id FROM channels.channel_connections")).rowCount).toBe(0);
   });
-  it("stores encrypted credentials, scoped identity, paused intake and an immutable audit", async () => {
+  it("stores encrypted credentials, scoped identity, automatic intake and an immutable audit", async () => {
     await repository.save(command(), channelId, "Seller", "operator", now, seal);
     const row = (await repository.get(channelId))!;
     expect(row.orders_enabled).toBe(false);
+    expect((await repository.status(channelId))?.ordersEnabled).toBe(true);
+    expect(await repository.enabledChannels()).toContain(channelId);
     expect(JSON.stringify(row.encrypted_credentials)).not.toContain('"secret"');
     expect(await repository.status(channelId)).not.toHaveProperty("encrypted_credentials");
     await repository.assertWarehouse(row);
@@ -87,9 +96,71 @@ describeWithDisposableDb("Walmart account and order PostgreSQL transactions", ()
     await expect(repository.save({ ...command(), shipNodeId: "OTHER" }, channelId, "Seller", "operator", now, seal)).rejects.toMatchObject({ code: "WALMART_CONNECTION_IDENTITY_CONFLICT" });
   });
   it("links exact SKU identities idempotently and rejects remapping", async () => {
-    await Promise.all([1, 2].map(() => repository.linkSku(channelId, variantId, "WALMART-SKU", "operator", now)));
+    const account = { channelId, connectionId: (await repository.get(channelId))!.connection_id, provider: "walmart" };
+    const item = { sku: "WALMART-SKU", title: "Product", externalProductId: "WPID", externalVariantId: "WALMART-SKU",
+      externalInventoryItemId: "WALMART-SKU", lifecycleStatus: "ACTIVE", publishedStatus: "PUBLISHED" };
+    const save = (sku: string) => catalog.saveMappings(account, [{ item: { ...item, sku }, productVariantId: variantId, expectedLocalSku: null }], "operator", now);
+    await Promise.all([1, 2].map(() => save("WALMART-SKU")));
     expect(await repository.mappings(channelId)).toHaveLength(1);
-    await expect(repository.linkSku(channelId, variantId, "DIFFERENT", "operator", now)).rejects.toMatchObject({ code: "WALMART_MAPPING_CONFLICT" });
+    expect((await getTestPool().query("SELECT external_sku FROM channels.channel_listings WHERE channel_id=$1", [channelId])).rows).toEqual([{ external_sku: "WALMART-SKU" }]);
+    expect((await getTestPool().query("SELECT actor,action FROM public.audit_events")).rows).toEqual([{ actor: "operator", action: "channel_identity.verified_catalog_mapping" }]);
+    await expect(save("DIFFERENT")).rejects.toMatchObject({ code: "CHANNEL_MAPPING_CONFLICT" });
+  });
+  it("rolls back a whole mapping batch and its audit when a later variant is unavailable", async () => {
+    const pool = getTestPool();
+    const product = (await pool.query("SELECT product_id FROM catalog.product_variants WHERE id=$1", [variantId])).rows[0].product_id;
+    const ids = (await pool.query("INSERT INTO catalog.product_variants(product_id,sku,name,is_active) VALUES($1,'BATCH-A','A',true),($1,'BATCH-B','B',false) RETURNING id", [product])).rows.map(row => row.id);
+    const account = { channelId, connectionId: (await repository.get(channelId))!.connection_id, provider: "walmart" };
+    const batch = ids.map((id, i) => ({ productVariantId: id, expectedLocalSku: null,
+      item: { sku: `BATCH-${i}`, title: "Batch", externalProductId: null, externalVariantId: `BATCH-${i}`, externalInventoryItemId: `BATCH-${i}`, lifecycleStatus: "ACTIVE", publishedStatus: "PUBLISHED" } }));
+    await expect(catalog.saveMappings(account, batch, "batch", now)).rejects.toMatchObject({ code: "CHANNEL_VARIANT_UNAVAILABLE" });
+    expect((await pool.query("SELECT id FROM channels.channel_feeds WHERE product_variant_id=ANY($1::int[])", [ids])).rowCount).toBe(0);
+    expect((await pool.query("SELECT id FROM channels.channel_listings WHERE product_variant_id=ANY($1::int[])", [ids])).rowCount).toBe(0);
+    expect((await pool.query("SELECT id FROM public.audit_events WHERE actor='batch'")).rowCount).toBe(0);
+  });
+  it("rechecks automatic SKU identity, account scope and quarantines inside the transaction", async () => {
+    const account = { channelId, connectionId: (await repository.get(channelId))!.connection_id, provider: "walmart" };
+    const entry = { productVariantId: variantId, expectedLocalSku: "OLD-SKU",
+      item: { sku: "WALMART-SKU", title: "Product", externalProductId: "WPID", externalVariantId: "WALMART-SKU",
+        externalInventoryItemId: "WALMART-SKU", lifecycleStatus: "ACTIVE", publishedStatus: "PUBLISHED" } };
+    await expect(catalog.saveMappings(account, [entry], "operator", now)).rejects.toMatchObject({ code: "CHANNEL_CATALOG_SKU_CHANGED" });
+    await expect(catalog.saveMappings({ ...account, connectionId: account.connectionId + 100 }, [{ ...entry, expectedLocalSku: null }], "operator", now)).rejects.toMatchObject({ code: "CHANNEL_CONNECTION_CHANGED" });
+    await getTestPool().query("UPDATE channels.channel_feeds SET quarantined_at=$1 WHERE channel_id=$2", [now, channelId]);
+    await expect(catalog.saveMappings(account, [{ ...entry, expectedLocalSku: null }], "operator", now)).rejects.toMatchObject({ code: "CHANNEL_MAPPING_INACTIVE" });
+    await getTestPool().query("UPDATE channels.channel_feeds SET quarantined_at=NULL WHERE channel_id=$1", [channelId]);
+  });
+  it("serializes competing mappings so only one variant can own a provider SKU", async () => {
+    const pool = getTestPool();
+    const ids = (await pool.query("SELECT id FROM catalog.product_variants WHERE sku IN ('BATCH-A','BATCH-B') ORDER BY id")).rows.map(row => row.id);
+    await pool.query("UPDATE catalog.product_variants SET is_active=true WHERE id=ANY($1::int[])", [ids]);
+    const account = { channelId, connectionId: (await repository.get(channelId))!.connection_id, provider: "walmart" };
+    const item = { sku: "RACE", title: "Race", externalProductId: null, externalVariantId: "RACE", externalInventoryItemId: "RACE", lifecycleStatus: "ACTIVE", publishedStatus: "PUBLISHED" };
+    const results = await Promise.allSettled(ids.map(id => catalog.saveMappings(account, [{ item, productVariantId: id, expectedLocalSku: null }], "race", now)));
+    expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter(result => result.status === "rejected")).toHaveLength(1);
+    expect((await pool.query("SELECT id FROM public.audit_events WHERE actor='race'")).rowCount).toBe(1);
+  });
+  it("uses the existing channel pause control regardless of the legacy intake flag", async () => {
+    await getTestPool().query("UPDATE channels.channels SET status='paused' WHERE id=$1", [channelId]);
+    expect((await repository.status(channelId))?.ordersEnabled).toBe(false);
+    expect(await repository.enabledChannels()).not.toContain(channelId);
+    await repository.save(command(), channelId, "Seller", "operator", now, seal);
+    expect((await repository.status(channelId))?.ordersEnabled).toBe(false);
+    await getTestPool().query("UPDATE channels.channels SET status='active' WHERE id=$1", [channelId]);
+  });
+  it("upgrades previously verified pending setup once with an immutable audit and preserves pauses", async () => {
+    const sql = readFileSync("migrations/249_walmart_channel_status_authority.sql", "utf8");
+    const pool = getTestPool();
+    await pool.query("UPDATE channels.channels SET status='pending_setup' WHERE id=$1", [channelId]);
+    await pool.query(sql);
+    await pool.query(sql);
+    expect((await repository.status(channelId))?.ordersEnabled).toBe(true);
+    expect((await pool.query("SELECT id FROM channels.walmart_connection_events WHERE event_type='channel_setup_completed'")).rowCount).toBe(1);
+    expect((await pool.query("SELECT status FROM channels.channels WHERE id=$1", [otherChannelId])).rows[0].status).toBe("pending_setup");
+    await pool.query("UPDATE channels.channels SET status='paused' WHERE id=$1", [channelId]);
+    await pool.query(sql);
+    expect((await repository.status(channelId))?.ordersEnabled).toBe(false);
+    await pool.query("UPDATE channels.channels SET status='active' WHERE id=$1", [channelId]);
   });
   it("allows only one concurrent revision update", async () => {
     const revision = (await repository.get(channelId))!.revision;
@@ -122,6 +193,8 @@ describeWithDisposableDb("Walmart account and order PostgreSQL transactions", ()
     expect(await repository.exceptions(channelId)).toEqual([{ purchaseOrderId: "PO-REVIEW", errorCode: "WALMART_MULTI_QUANTITY_REVIEW", observedAt: now.toISOString() }]);
     await repository.markPoll(channelId, now, { checkpoint: now });
     expect((await repository.status(channelId))?.lastSuccessAt).toBe(now.toISOString());
+    expect((await pool.query("SELECT sync_status,sync_error,last_sync_at FROM channels.channel_connections WHERE channel_id=$1", [channelId])).rows[0])
+      .toEqual({ sync_status: "ok", sync_error: null, last_sync_at: now });
   });
   it("scopes OMS observation writes to exact channel, provider and external order identity", async () => {
     const orderId = (await observations.findOrder({ channelId, provider: "walmart", externalOrderId: "PO-123" }))!;

@@ -5,7 +5,7 @@ import { parseWalmartOrder } from "../../adapters/walmart/walmart-us-api";
 import { walmartOrderFixture } from "./walmart-fixture";
 import { ChannelOrderObservationError } from "../../../oms/channel-order-observation";
 
-function setup() {
+function setup(resolveSkuMappings?: (channelId: number, skus: readonly string[]) => Promise<void>) {
   const receipts = new Map<string, { source_hash: string; status: string; oms_order_id: number | null }>();
   const repository = {
     withLock: vi.fn(async (_id, action) => action()), assertWarehouse: vi.fn(), markPoll: vi.fn(),
@@ -20,7 +20,7 @@ function setup() {
   const oms = { ingestOrder: vi.fn(async () => ({ id: 42 })) };
   const sync = vi.fn(async () => 123 as number | null);
   const observations = { findOrder: vi.fn(async () => null as number | null), reconcile: vi.fn() };
-  const service = new WalmartOrderPollService(channels as unknown as WalmartChannelService, oms as never, sync, observations, () => new Date("2026-09-21T12:00:00Z"));
+  const service = new WalmartOrderPollService(channels as unknown as WalmartChannelService, oms as never, sync, observations, () => new Date("2026-09-21T12:00:00Z"), resolveSkuMappings);
   return { repository, api, channels, oms, sync, service, observations };
 }
 describe("Walmart acknowledgment-aware order polling", () => {
@@ -66,9 +66,23 @@ describe("Walmart acknowledgment-aware order polling", () => {
     expect(query.get("shipNode")).toBe("NODE-1");
   });
   it("blocks paused channels without any provider reads", async () => {
-    const s = setup(); s.channels.connection.mockResolvedValue({ orders_enabled: false, channel_status: "active", ship_node_id: "NODE-1", import_since: new Date(), checkpoint_at: null });
+    const s = setup(); s.channels.connection.mockResolvedValue({ orders_enabled: true, channel_status: "paused", ship_node_id: "NODE-1", import_since: new Date(), checkpoint_at: null });
     await expect(s.service.poll(1)).rejects.toMatchObject({ code: "WALMART_INTAKE_PAUSED" });
     expect(s.api.orders).not.toHaveBeenCalled();
+  });
+  it("imports from an active connected channel without the obsolete intake opt-in", async () => {
+    const s = setup();
+    const row = await s.channels.connection();
+    s.channels.connection.mockResolvedValue({ ...row, orders_enabled: false });
+    await expect(s.service.poll(1)).resolves.toEqual({ observed: 1, processed: 1 });
+  });
+  it("resolves exact SKU mappings before acknowledging an order", async () => {
+    const resolve = vi.fn(async () => { s.repository.mappings.mockResolvedValue([{ product_variant_id: 1, channel_sku: "WALMART-SKU" }]); });
+    const s = setup(resolve);
+    s.repository.mappings.mockResolvedValue([]);
+    await expect(s.service.poll(1)).resolves.toEqual({ observed: 1, processed: 1 });
+    expect(resolve).toHaveBeenCalledWith(1, ["WALMART-SKU"]);
+    expect(resolve.mock.invocationCallOrder[0]).toBeLessThan(s.api.acknowledge.mock.invocationCallOrder[0]);
   });
   it("does not mark incomplete warehouse handoffs completed", async () => {
     const s = setup(); s.sync.mockResolvedValue(null);

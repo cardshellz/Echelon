@@ -15,6 +15,7 @@ export default defineConfig({
     "inventory-authority-gates.spec.ts",
     "inventory-publication-target-resume.spec.ts",
     "channel-inventory-workspace.spec.ts",
+    "walmart-channel-workspace.spec.ts",
   ],
   fullyParallel: false,
   workers: 1,

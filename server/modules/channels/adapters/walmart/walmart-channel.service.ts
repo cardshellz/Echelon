@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { walmartConnectSchema, walmartControlSchema, walmartKeyInputSchema, walmartMappingSchema } from "@shared/types/walmart-channel";
+import { walmartConnectSchema, walmartControlSchema, walmartKeyInputSchema } from "@shared/types/walmart-channel";
 import type { FulfillmentProviderCredentialCipher } from "../../../shipping-engine/application/connected-fulfillment-method-catalog.service";
 import { WalmartApiError, WalmartClient, walmartCredentialsSchema } from "./walmart-client";
 import { WalmartUsApi, type WalmartShipNode, type WalmartUsApiPort } from "./walmart-us-api";
@@ -18,11 +18,21 @@ export class WalmartChannelService {
   constructor(
     readonly repository: WalmartConnectionRepository,
     private readonly cipher: FulfillmentProviderCredentialCipher | null,
-    private readonly policy: { liveEnabled: boolean; productionServer: boolean },
+    private readonly policy: { liveEnabled: boolean; productionServer: boolean; pollingDisabledReason?: string | null },
     private readonly now: () => Date = () => new Date(),
     private readonly createApi: (credentials: z.infer<typeof walmartCredentialsSchema>) => WalmartUsApiPort
       = credentials => new WalmartUsApi(new WalmartClient(credentials)),
   ) {}
+  async status(channelId: number) {
+    const status = await this.repository.status(channelId);
+    if (!status) return null;
+    const orderSyncBlockedReason = status.environment === "sandbox" && this.policy.productionServer
+      ? "Sandbox orders cannot enter the production warehouse."
+      : status.environment === "production" && !this.policy.liveEnabled
+        ? "Walmart operations are disabled by server configuration."
+        : this.policy.pollingDisabledReason ? "Automatic order sync is disabled by server configuration." : null;
+    return { ...status, orderSyncBlockedReason };
+  }
   async preview(input: unknown) {
     this.requireCipher();
     const keys = walmartKeyInputSchema.parse(input);
@@ -37,10 +47,11 @@ export class WalmartChannelService {
     const now = this.now();
     const since = new Date(command.importSince);
     const MAX_IMPORT_AGE_MS = 180 * 24 * 60 * 60 * 1_000;
-    if (since > now || now.getTime() - since.getTime() > MAX_IMPORT_AGE_MS) {
-      throw new WalmartApiError("WALMART_IMPORT_BOUNDARY_INVALID", "Import start must be within the last 180 days", false);
-    }
     return this.repository.withLock(channelId, async () => {
+      const existing = await this.repository.get(channelId);
+      if (!existing && (since > now || now.getTime() - since.getTime() > MAX_IMPORT_AGE_MS)) {
+        throw new WalmartApiError("WALMART_IMPORT_BOUNDARY_INVALID", "Import start must be within the last 180 days", false);
+      }
       const credentials = { clientId: command.clientId, clientSecret: command.clientSecret, environment: command.environment, market: "us" as const };
       const api = this.createApi(credentials);
       const account = await api.account();
@@ -52,7 +63,7 @@ export class WalmartChannelService {
       await this.repository.save(command, channelId, account.partnerName, actor, now,
         connectionId => cipher.seal({ connectionId, provider: "walmart", credential: JSON.stringify(credentials) }));
       this.clients.delete(channelId);
-      return this.repository.status(channelId);
+      return this.status(channelId);
     });
   }
   async control(channelId: number, input: unknown, actor: string) {
@@ -67,20 +78,9 @@ export class WalmartChannelService {
           throw new WalmartApiError("WALMART_ACCOUNT_CHANGED", "Account or fulfillment center verification failed", false);
         }
         await this.repository.assertWarehouse(row);
-        const status = await this.repository.status(channelId);
-        if (!status?.mappedSkus) throw new WalmartApiError("WALMART_MAPPINGS_REQUIRED", "Link your Walmart SKUs before enabling order intake", false);
       }
       await this.repository.control(channelId, command.ordersEnabled, command.expectedRevision, actor, this.now());
-      return this.repository.status(channelId);
-    });
-  }
-  async linkSku(channelId: number, input: unknown, actor: string) {
-    const command = walmartMappingSchema.parse(input);
-    return this.repository.withLock(channelId, async () => {
-      const row = await this.connection(channelId);
-      await this.api(row).inventory(command.sku, row.ship_node_id);
-      await this.repository.linkSku(channelId, command.productVariantId, command.sku, actor, this.now());
-      return this.repository.status(channelId);
+      return this.status(channelId);
     });
   }
   async connection(channelId: number, expectedConnectionId?: number): Promise<WalmartConnectionRecord> {
@@ -91,7 +91,7 @@ export class WalmartChannelService {
     return row;
   }
   requireRuntime(row: WalmartConnectionRecord): void {
-    if (row.environment === "production" && !this.policy.liveEnabled) throw new WalmartApiError("WALMART_LIVE_DISABLED", "Live Walmart operations have not been enabled on this server", false);
+    if (row.environment === "production" && !this.policy.liveEnabled) throw new WalmartApiError("WALMART_LIVE_DISABLED", "Walmart operations are disabled by server configuration", false);
     if (row.environment === "sandbox" && this.policy.productionServer) throw new WalmartApiError("WALMART_SANDBOX_IMPORT_BLOCKED", "Sandbox orders cannot enter the production warehouse", false);
   }
   api(row: WalmartConnectionRecord): WalmartUsApiPort {

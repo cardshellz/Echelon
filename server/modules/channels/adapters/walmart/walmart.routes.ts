@@ -4,8 +4,17 @@ import { requirePermission } from "../../../../routes/middleware";
 import type { WalmartChannelService } from "./walmart-channel.service";
 import type { WalmartOrderPollService } from "./walmart-order-poll.service";
 import { WalmartApiError } from "./walmart-client";
+import type { ChannelCatalogDirectory } from "../../channel-catalog.routes";
+import { sendCatalogError } from "../../channel-catalog.routes";
+import { ChannelIdentityError } from "../../channel-identity.domain";
+import { walmartMappingSchema } from "@shared/types/walmart-channel";
 
 export function registerWalmartChannelRoutes(app: Express): void {
+  const catalog = async (channelId: number) => {
+    const directory: ChannelCatalogDirectory | undefined = app.locals.services?.channelCatalog;
+    if (!directory) throw new WalmartApiError("WALMART_UNAVAILABLE", "Channel catalog is unavailable", true);
+    return directory.forChannel(channelId);
+  };
   const route = (method: "get" | "post", suffix: string, edit: boolean,
     action: (service: WalmartChannelService, worker: WalmartOrderPollService, req: Request, channelId: number) => Promise<unknown>) => {
     app[method](`/api/channels/:id/walmart${suffix}`, requirePermission("channels", edit ? "edit" : "view"), async (req, res) => {
@@ -18,20 +27,27 @@ export function registerWalmartChannelRoutes(app: Express): void {
       } catch (error) { sendError(res, error); }
     });
   };
-  route("get", "", false, (service, _worker, _req, id) => service.repository.status(id));
+  route("get", "", false, (service, _worker, _req, id) => service.status(id));
   route("post", "/verify", true, (service, _worker, req) => service.preview(req.body));
   route("post", "/connect", true, (service, _worker, req, id) => service.connect(id, req.body, actor(req)));
   route("post", "/control", true, (service, _worker, req, id) => service.control(id, req.body, actor(req)));
   route("post", "/poll", true, (_service, worker, _req, id) => worker.poll(id));
   route("get", "/mappings", false, (service, _worker, _req, id) => service.repository.mappings(id));
   route("get", "/exceptions", false, (service, _worker, _req, id) => service.repository.exceptions(id));
-  route("get", "/catalog", false, (service, _worker, req) => service.repository.catalogSearch(z.string().parse(req.query.q)));
-  route("post", "/mappings", true, (service, _worker, req, id) => service.linkSku(id, req.body, actor(req)));
+  // Compatibility aliases for an open pre-upgrade browser; mapping still goes
+  // through the shared channel identity owner and current provider evidence.
+  route("get", "/catalog", false, async (_service, _worker, req, id) => (await catalog(id)).searchVariants(req.query.q));
+  route("post", "/mappings", true, async (service, _worker, req, id) => {
+    const mapping = walmartMappingSchema.parse(req.body);
+    await (await catalog(id)).link(id, { mappings: [mapping] }, actor(req));
+    return service.repository.status(id);
+  });
 }
 function actor(req: Request): string {
   return z.string().min(1).parse(req.session?.user?.id);
 }
 function sendError(res: Response, error: unknown): void {
+  if (error instanceof ChannelIdentityError) return sendCatalogError(res, error);
   // Never log request bodies, Zod inputs, database parameters, or provider payloads:
   // account verification and connection requests contain credentials.
   const known = error instanceof WalmartApiError;

@@ -476,7 +476,7 @@ function startEchelonSyncScheduler(
   setDropshipFulfillmentSync(services.wmsSync);
   setDropshipInventoryRuntimeAuthorityGate(services.dropshipInventoryRuntimeAuthority);
 
-  if (process.env.WALMART_ORDER_POLLING_ENABLED === "true" && !schedulersDisabled("WALMART_ORDER_POLLING_DISABLED")) {
+  if (process.env.WALMART_ORDER_POLLING_ENABLED !== "false" && !schedulersDisabled("WALMART_ORDER_POLLING_DISABLED")) {
     startWalmartOrderPolling(services.walmartOrderPoll, services.walmart);
   }
 

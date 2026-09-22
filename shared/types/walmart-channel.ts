@@ -1,6 +1,8 @@
 import { z } from "zod";
 
 export const walmartIdentifier = z.string().trim().min(1).max(100);
+export const walmartVerifiedAccountSchema = z.object({ partnerId: walmartIdentifier, partnerName: z.string().min(1),
+  nodes: z.array(z.object({ shipNode: walmartIdentifier, shipNodeName: z.string() })) });
 export const walmartKeyInputSchema = z.object({
   clientId: z.string().trim().min(1).max(500).refine(value => !value.includes(":")),
   clientSecret: z.string().min(1).max(2_000).refine(value => value.trim().length > 0),
@@ -30,6 +32,7 @@ export const walmartStatusSchema = z.object({
   warehouseId: z.number().int().positive().max(2_147_483_647),
   ordersEnabled: z.boolean(),
   importSince: z.string().datetime(),
+  orderSyncBlockedReason: z.string().nullable().optional(),
   lastPollAt: z.string().datetime().nullable(),
   lastSuccessAt: z.string().datetime().nullable(),
   lastErrorCode: z.string().nullable(),
