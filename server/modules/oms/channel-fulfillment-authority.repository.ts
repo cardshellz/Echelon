@@ -4116,33 +4116,30 @@ export function createChannelFulfillmentAuthorityRepository(
         if (replay) {
           const replaySourceIds = new Set(replay.source_item_ids);
           const replayRows = contextRows.filter(row => replaySourceIds.has(Number(row.legacy_shipment_item_id)));
-          // Shopify replacements transfer an exact package-sized portion, not
+          // Replacements transfer an exact package-sized portion, not
           // the whole legacy shipment header. Carrier replay must preserve that
-          // saved scope when unrelated items share the header. eBay retains its
-          // existing whole-source contract.
-          const shopifyPackageScope = replayRows.length > 0 && replayRows.every(row => row.channel_provider === 'shopify');
+          // saved scope when unrelated items share the header.
+          const packageScope = replayRows.length > 0 && replayRows.every(row => row.channel_provider === 'shopify' || row.channel_provider === 'ebay');
           if (replaySourceIds.size !== replay.source_item_ids.length
             || replayRows.length !== replaySourceIds.size
-            || (!shopifyPackageScope && contextRows.length !== replaySourceIds.size)) {
+            || (!packageScope && contextRows.length !== replaySourceIds.size)) {
             throw new FulfillmentAuthorityError("PACKAGE_IDENTITY_CONFLICT", "Replacement replay differs from its exact source set");
           }
           const engineId = await findOrCreateShippingEngineOrder(tx, input);
           await findOrCreatePhysicalShipment(tx, input, engineId); // Revalidate provider order, carrier and tracking.
           return readLabelReplacementMaterialization(tx, Number(replay.physical_shipment_id));
         }
-      } else if (authorizedReplacement.shopifyPackageScope === true) {
+      } else if (authorizedReplacement.packageScope === true) {
         contextRows = contextRows.filter(row => authorizedReplacement.sourceItemIds.includes(Number(row.legacy_shipment_item_id)));
         if (contextRows.length !== authorizedReplacement.sourceItemIds.length
-          || contextRows.some(row => row.channel_provider !== 'shopify' || !authorizedReplacement.sourceItems.some(item =>
+          || contextRows.some(row => (row.channel_provider !== 'shopify' && row.channel_provider !== 'ebay') || !authorizedReplacement.sourceItems.some(item =>
             item.sourceShipmentItemId === Number(row.legacy_shipment_item_id) && item.quantity <= Number(row.quantity_shipped)))) {
-          throw new FulfillmentAuthorityError("PACKAGE_IDENTITY_CONFLICT", "Shopify replacement differs from its exact authorized package allocation");
+          throw new FulfillmentAuthorityError("PACKAGE_IDENTITY_CONFLICT", "Replacement differs from its exact authorized package allocation");
         }
         contextRows = contextRows.map(row => ({ ...row, quantity_shipped: authorizedReplacement.sourceItems.find(
           item => item.sourceShipmentItemId === Number(row.legacy_shipment_item_id))!.quantity }));
-      } else if (contextRows.length !== authorizedReplacement.sourceItemIds.length
-        || contextRows.some(row => !authorizedReplacement.sourceItems.some(item => item.sourceShipmentItemId === Number(row.legacy_shipment_item_id)
-          && item.quantity === Number(row.quantity_shipped)))) {
-        throw new FulfillmentAuthorityError("PACKAGE_IDENTITY_CONFLICT", "Replacement must cover exact whole source shipment contents");
+      } else {
+        throw new FulfillmentAuthorityError("PACKAGE_IDENTITY_CONFLICT", "Replacement requires an exact package allocation grant");
       }
       const { customerItems, nonCustomerRows } = normalizeCustomerItems(contextRows);
       if (customerItems.length === 0 && nonCustomerRows.length === 0) {
@@ -4283,7 +4280,7 @@ export function createChannelFulfillmentAuthorityRepository(
 
   async function reconcileEbayLabelReplacement(labelId: number, now: Date): Promise<EbayLabelReplacementResult | null> {
     return db.transaction(async (tx: any) => reconcileLabelReplacement(tx, labelId, now,
-      (input, authority) => materializePhysicalPackage(input, authority, tx)));
+      (input, authority) => materializePhysicalPackage(input, authority, tx)), { isolationLevel: 'serializable' });
   }
 
   async function markEbayLabelReplacementProjected(labelId: number, now: Date): Promise<void> {
