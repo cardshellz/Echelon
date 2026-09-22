@@ -9,7 +9,7 @@ async function setup(page: Page, edit = true) {
     { id: 3, name: "Other group", sku: "OTHER", productLineIds: [11], categoryId: 20, variants: [], inventoryTrackingDefault: true },
   ].map(product => ({ ...product, isActive: true, status: "active", baseUnit: "piece" }));
   const state = { products, previews: [] as BulkInventoryTrackingRequest[], applies: [] as Array<{ body: BulkInventoryTrackingApply; key: string | undefined }>,
-    blocked: false, stale: false, uncertain: false, errors: [] as string[] };
+    blocked: false, newlyBlocked: false, stale: false, uncertain: false, errors: [] as string[] };
   page.on("pageerror", error => state.errors.push(error.message));
   await page.route("**/api/**", async route => {
     const req = route.request(); const path = new URL(req.url()).pathname;
@@ -19,12 +19,23 @@ async function setup(page: Page, edit = true) {
     if (path === "/api/product-categories") return route.fulfill({ json: [{ id: 20, name: "Stickers", isActive: true }, { id: 21, name: "Cards", isActive: true }] });
     if (path === `${BULK_INVENTORY_TRACKING_PATH}/preview`) {
       const body = req.postDataJSON() as BulkInventoryTrackingRequest; state.previews.push(body);
-      return route.fulfill({ json: { previewHash: "a".repeat(64), inventoryTrackingDefault: body.inventoryTrackingDefault,
+      return route.fulfill({ json: { previewHash: (body.productIds.length === 2 ? "a" : "b").repeat(64), inventoryTrackingDefault: body.inventoryTrackingDefault,
         products: body.productIds.map(id => { const product = products.find(p => p.id === id)!; return {
           productId: id, name: product.name, sku: product.sku, currentDefault: product.inventoryTrackingDefault,
-          status: state.blocked && id === 2 ? "blocked" : product.inventoryTrackingDefault === body.inventoryTrackingDefault ? "unchanged" : "change",
+          status: (state.blocked && id === 2) || (state.newlyBlocked && id === 1) ? "blocked" : product.inventoryTrackingDefault === body.inventoryTrackingDefault ? "unchanged" : "change",
           variantCount: product.variants.length, changingVariantCount: id === 2 ? 1 : 0, trackedOverrideCount: id === 2 ? 1 : 0, untrackedOverrideCount: 0,
-          blockers: state.blocked && id === 2 ? [{ variantId: 21, code: "stock", message: "CARD-INHERITED: stock or warehouse quantities" }] : [],
+          blockers: state.blocked && id === 2 ? [
+            { variantId: 21, code: "stock", message: "CARD-INHERITED: stock or warehouse quantities", evidence: {
+              totalCount: 1, records: [{ kind: "stock", recordId: 1284, locationId: 1, locationCode: "UNSORTED",
+                onHand: 0, reserved: 0, picked: 1, packed: 0, backorder: 0 }] } },
+            { variantId: 21, code: "lots", message: "CARD-INHERITED: inventory lots", evidence: {
+              totalCount: 21, records: [{ kind: "lots", recordId: 1300, lotNumber: "LOT-RECON-0121", locationId: 1,
+                locationCode: "UNSORTED", onHand: 0, reserved: 0, picked: 1, packed: 0 }] } },
+            { variantId: 21, code: "oms_orders", message: "CARD-INHERITED: unfinished sales orders", evidence: {
+              totalCount: 1, records: [{ kind: "oms_orders", recordId: 100036, orderId: 35774, orderNumber: "#56076",
+                status: "confirmed", fulfillmentStatus: "unfulfilled", quantity: 6, warehouseOrderCount: 1,
+                warehouseOrders: [{ orderId: 200540, orderNumber: "#56076", status: "cancelled" }] }] } },
+          ] : state.newlyBlocked && id === 1 ? [{ variantId: null, code: "CATALOG_PRODUCT_MISSING", message: "Product no longer exists." }] : [],
         }; }),
       } });
     }
@@ -92,11 +103,69 @@ test("clears selection across filters and selects grid cards without navigating"
   expect(state.previews[0].productIds).toEqual([2]); expect(state.errors).toEqual([]);
 });
 
-test("shows blockers and prevents a partial apply", async ({ page }) => {
+test("shows exact blockers and order links and prevents a partial apply", async ({ page }, testInfo) => {
   const state = await setup(page); state.blocked = true; await selectGroup(page);
   await expect(page.getByTestId("bulk-inventory-apply")).toBeDisabled();
   await expect(page.getByTestId("bulk-inventory-product-2")).toContainText("stock or warehouse quantities");
   await expect(page.getByTestId("bulk-inventory-review")).toContainText("No products will change");
+  const blocked = page.getByTestId("bulk-inventory-product-2");
+  await expect(blocked).toContainText("UNSORTED (location 1)");
+  await expect(blocked).toContainText("On hand 0 · Reserved 0 · Picked 1 · Packed 0 · Backorder 0");
+  await expect(blocked).toContainText("Lot LOT-RECON-0121 (ID 1300)");
+  await expect(blocked).toContainText("Showing 1 of 21 blocking records");
+  await expect(blocked.getByRole("link", { name: /Sales order #56076/ })).toHaveAttribute("href", "/oms/orders?orderId=35774");
+  await expect(blocked.getByRole("link", { name: /Warehouse order #56076/ })).toHaveAttribute("href", "/orders?orderId=200540");
+  await expect(blocked).toContainText("confirmed · unfulfilled");
+  await expect(blocked).toContainText("cancelled warehouse order does not establish that the sales order is cancelled");
+  await page.getByRole("button", { name: "Show blockers only", exact: true }).click();
+  await expect(page.getByTestId("bulk-inventory-product-1")).toHaveCount(0);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("bulk-blocker-details.png"), fullPage: true });
+  expect(state.applies).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("freshly reviews eligible products, retries their exact command, and retains excluded products for follow-up", async ({ page }) => {
+  const state = await setup(page); state.blocked = true; await selectGroup(page);
+  await page.getByRole("button", { name: "Review eligible products only (1)", exact: true }).click();
+  await expect(page.getByTestId("bulk-inventory-excluded")).toContainText("1 excluded products will stay unchanged and selected");
+  await expect(page.getByTestId("bulk-inventory-apply")).toBeEnabled();
+  expect(state.previews).toEqual([{ productIds: [1, 2], inventoryTrackingDefault: false }, { productIds: [1], inventoryTrackingDefault: false }]);
+  state.stale = true;
+  await page.getByTestId("bulk-inventory-apply").click();
+  await expect(page.getByTestId("bulk-inventory-apply")).toHaveCount(0);
+  await page.getByRole("button", { name: "Review changes", exact: true }).click();
+  await expect(page.getByTestId("bulk-inventory-apply")).toBeEnabled();
+  expect(state.previews.at(-1)?.productIds).toEqual([1]);
+  state.uncertain = true;
+  await page.getByTestId("bulk-inventory-apply").click();
+  await expect(page.getByRole("alert")).toBeVisible();
+  await page.getByTestId("bulk-inventory-apply").click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  expect(state.applies).toHaveLength(3);
+  expect(state.applies[1]).toEqual(state.applies[2]);
+  expect(state.applies[0].key).not.toBe(state.applies[1].key);
+  expect(state.applies[2].body).toEqual({ productIds: [1], inventoryTrackingDefault: false, expectedPreviewHash: "b".repeat(64) });
+  expect(state.products.map(p => p.inventoryTrackingDefault)).toEqual([false, true, true]);
+  await expect(page.getByText("1 selected", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Inventory tracking", exact: true }).click();
+  await page.getByRole("button", { name: "Review changes", exact: true }).click();
+  await expect(page.getByTestId("bulk-inventory-product-2")).toBeVisible();
+  expect(state.previews.at(-1)?.productIds).toEqual([2]);
+  expect(state.errors).toEqual([]);
+});
+
+test("re-reviews the full selection and refuses a subset that becomes blocked", async ({ page }) => {
+  const state = await setup(page); state.blocked = true; await selectGroup(page);
+  await page.getByRole("button", { name: "Review eligible products only (1)", exact: true }).click();
+  await expect(page.getByTestId("bulk-inventory-apply")).toBeEnabled();
+  await page.getByRole("button", { name: "Review full selection", exact: true }).click();
+  await expect(page.getByTestId("bulk-inventory-product-2")).toBeVisible();
+  await expect(page.getByTestId("bulk-inventory-apply")).toBeDisabled();
+  state.newlyBlocked = true;
+  await page.getByRole("button", { name: "Review eligible products only (1)", exact: true }).click();
+  await expect(page.getByTestId("bulk-inventory-product-1")).toContainText("Product no longer exists");
+  await expect(page.getByTestId("bulk-inventory-apply")).toBeDisabled();
+  expect(state.previews.map(p => p.productIds)).toEqual([[1, 2], [1], [1, 2], [1]]);
   expect(state.applies).toEqual([]); expect(state.errors).toEqual([]);
 });
 
