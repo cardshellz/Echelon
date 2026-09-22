@@ -34,6 +34,32 @@ describe("physical packages allocate existing ordered units", () => {
     expect(resolve({ ...target, legacyWmsShipmentItemId: 51 }, [request], [])).toMatchObject({ kind: "reuse", reason: "source_item" });
   });
 
+  it("counts sibling replacement portions without treating them as replays of this package", () => {
+    expect(resolve({ ...target, legacyWmsShipmentItemId: 51 }, [request], [
+      { ...physical, labelReplacementSourceItemId: 51 },
+      { ...physical, providerPhysicalShipmentId: 'package-3', labelReplacementSourceItemId: 51 },
+    ])).toMatchObject({ kind: 'reuse', reason: 'source_item' });
+  });
+
+  it("replays only the exact replacement package and still counts its siblings against paid quantity", () => {
+    const items = [physical, { ...physical, providerPhysicalShipmentId: target.providerPhysicalShipmentId }]
+      .map(item => ({ ...item, labelReplacementSourceItemId: 51 }));
+    expect(resolve({ ...target, legacyWmsShipmentItemId: 51, quantityPlanned: 2 },
+      [{ ...request, quantityRequested: 2 }], items)).toMatchObject({ kind: 'reuse', reason: 'physical_replay' });
+    expect(() => resolve({ ...target, legacyWmsShipmentItemId: 51, providerPhysicalShipmentId: 'new-package', quantityPlanned: 2 },
+      [{ ...request, quantityRequested: 2 }], items)).toThrow('physical_quantity_exceeds_paid_authority');
+  });
+
+  it("does not allow replacement provenance to weaken immutable replay or exclusive legacy identity", () => {
+    const replacement = { ...physical, labelReplacementSourceItemId: target.legacyWmsShipmentItemId,
+      providerPhysicalShipmentId: target.providerPhysicalShipmentId };
+    expect(() => resolve(target, [request], [{ ...replacement, quantityShipped: 2 }]))
+      .toThrow('immutable_physical_allocation_changed');
+    expect(() => resolve(target, [request], [{ ...replacement, legacyWmsShipmentItemId: target.legacyWmsShipmentItemId }]))
+      .toThrow('ambiguous_physical_source_provenance');
+    expect(() => resolve(target, [request], [replacement, replacement])).toThrow('ambiguous_physical_replay');
+  });
+
   it("creates a request only for units that have not already been requested", () => {
     expect(resolve(target, [{ ...request, quantityRequested: 1 }], [physical])).toEqual({ kind: "create" });
     expect(resolve({ ...target, fulfillmentPlanId: null, fulfillmentPlanLineId: null }, [], [])).toEqual({ kind: "create" });

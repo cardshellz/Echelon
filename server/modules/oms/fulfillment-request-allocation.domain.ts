@@ -35,6 +35,9 @@ const physicalSchema = z.object({
   legacyWmsShipmentItemId: id.nullable(),
   shippingProvider: z.string().min(1),
   providerPhysicalShipmentId: z.string().min(1),
+  // Unlike legacy exclusive provenance, this identifies a portion of a source
+  // line. Several independent packages can carry that same source identity.
+  labelReplacementSourceItemId: id.nullable().optional(),
   // Retain the immutable quantity as well as any append-only correction.
   quantityShipped: quantity.positive(),
   effectiveQuantityShipped: quantity,
@@ -108,7 +111,11 @@ export function resolveFulfillmentRequestAllocation(
   }
   const samePackage = (item: FulfillmentRequestPhysicalSnapshot): boolean =>
     item.shippingProvider === target.shippingProvider && item.providerPhysicalShipmentId === target.providerPhysicalShipmentId;
-  const replays = physical.filter(item => item.legacyWmsShipmentItemId === target.legacyWmsShipmentItemId);
+  if (physical.some(item => item.legacyWmsShipmentItemId !== null && item.labelReplacementSourceItemId != null)) {
+    fail("ambiguous_physical_source_provenance");
+  }
+  const replays = physical.filter(item => item.legacyWmsShipmentItemId === target.legacyWmsShipmentItemId
+    || (item.labelReplacementSourceItemId === target.legacyWmsShipmentItemId && samePackage(item)));
   if (replays.length > 1) fail("ambiguous_physical_replay");
   const replay = replays[0];
   if (replay && (!samePackage(replay) || replay.fulfillmentPlanLineId !== target.fulfillmentPlanLineId

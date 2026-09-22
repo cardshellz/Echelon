@@ -380,6 +380,17 @@ export function isEligibleBackupCard(method: WalletFundingMethod, now: Date): bo
   return method.card === null || cardExpiryState(method.card, now) !== "expired";
 }
 
+/**
+ * The rail the source picker opens on when the vendor has not chosen one.
+ *
+ * Bank is the rail the page recommends (it carries no card fee), so it is also
+ * the rail the page defaults to. A card already saved on the wallet does NOT
+ * flip the default: defaulting to the more expensive rail because a card
+ * happens to exist contradicts the recommendation shown beside it. The saved
+ * card stays one click away and is named on screen.
+ */
+export const RECOMMENDED_SOURCE_RAIL: WalletSourceRail = "stripe_ach";
+
 export function activeMethodsOfRail(wallet: DropshipWalletView, rail: WalletSourceRail): WalletFundingMethod[] {
   return wallet.fundingMethods.filter((method) => method.rail === rail && method.status === "active").sort(newestFirst);
 }
@@ -438,7 +449,9 @@ export function deriveWalletFlow(input: {
   const draftSource = draft.sourceMethodId === null ? null : sourceCandidates.find((method) => method.fundingMethodId === draft.sourceMethodId) ?? null;
   const sourceMethod = draftSource ?? configuredSource;
   const source = sourceMethod && isSourceRail(sourceMethod.rail) ? { rail: sourceMethod.rail, method: sourceMethod } : null;
-  const suggested = source ? null : (activeMethodsOfRail(wallet, "stripe_ach")[0] ?? activeMethodsOfRail(wallet, "stripe_card")[0] ?? null);
+  // Only a saved BANK account is preselected. A saved card is offered by name
+  // (describeSavedCardAlternative) instead of being chosen for the vendor.
+  const suggested = source ? null : (activeMethodsOfRail(wallet, RECOMMENDED_SOURCE_RAIL)[0] ?? null);
 
   const floorFromServer = authorized ? autoReload.minimumBalanceCents : null;
   const floorCents = draft.floorCents ?? floorFromServer ?? (source ? derivedDefaultFloor(source.rail) : derivedDefaultFloor("stripe_ach"));
@@ -579,6 +592,22 @@ export function describeSourcePreselection(input: {
     return `${label} is already saved on your wallet, so we picked it — choose ${input.selected.rail === "stripe_ach" ? "a card" : "a bank account"} instead if you would rather.`;
   }
   return null;
+}
+
+/**
+ * Names a card already saved on the wallet while the picker sits on the
+ * recommended bank rail with nothing selected. Without this the card is
+ * invisible until the vendor clicks Card, which reads as if it were lost.
+ */
+export function describeSavedCardAlternative(input: {
+  rail: WalletSourceRail;
+  selected: WalletFundingMethod | null;
+  cards: readonly WalletFundingMethod[];
+}): string | null {
+  if (input.rail !== RECOMMENDED_SOURCE_RAIL || input.selected !== null) return null;
+  const card = input.cards[0];
+  if (!card) return null;
+  return `${describeFundingMethod(card)} is already saved. Choose Card to use it, or add a bank account and pay no fees.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -989,7 +1018,11 @@ export function describePendingBalance(pendingCents: number, advance: WalletAdva
 }
 
 /** Why a bank account's transfers cannot be advanced against, in the vendor's words. */
-export function describeAdvanceReason(reason: WalletAdvanceReason): string {
+export function describeAdvanceReason(
+  reason: WalletAdvanceReason,
+  /** False when no bank link reads a balance, so relinking cannot help. */
+  bankBalanceReadOffered = true,
+): string {
   switch (reason) {
     case "no_bank_account":
       return "Add a bank account: the advance applies to bank transfers only.";
@@ -998,7 +1031,11 @@ export function describeAdvanceReason(reason: WalletAdvanceReason): string {
     case "account_holder_not_company":
       return "The bank account has to be a business account.";
     case "bank_balance_not_verified":
-      return "We could not read the account's balance when it was linked. Link it again through your bank to enable this.";
+      // Telling a vendor to link again is only honest when linking would read
+      // a balance at all; otherwise it is a loop with no exit.
+      return bankBalanceReadOffered
+        ? "We could not read the account's balance when it was linked. Link it again through your bank to enable this."
+        : "Card Shellz is not reading bank balances right now, so this is unavailable for every seller. Nothing for you to do.";
     case "first_pull_not_settled":
       return "One earlier transfer from this account has to land first.";
     case "advance_cap_zero":
@@ -1013,7 +1050,11 @@ export interface WalletAdvanceStandingCopy {
 }
 
 /** The state of the pending-transfer advance, as the wallet page shows it. */
-export function describeAdvanceStanding(advance: WalletAdvance): WalletAdvanceStandingCopy {
+export function describeAdvanceStanding(
+  advance: WalletAdvance,
+  /** Passed through to the reasons; see `describeAdvanceReason`. */
+  bankBalanceReadOffered = true,
+): WalletAdvanceStandingCopy {
   const fee = formatFeeRate(advance.policy.feeBps);
   const cap = formatWholeDollars(advance.policy.capCents);
   const terms = `Fee ${fee} on the amount used; at most ${cap} outstanding at a time.`;
@@ -1031,7 +1072,7 @@ export function describeAdvanceStanding(advance: WalletAdvance): WalletAdvanceSt
   }
   return {
     headline: "No money on its way can pay for orders yet.",
-    details: [...advance.reasons.map(describeAdvanceReason), terms],
+    details: [...advance.reasons.map((reason) => describeAdvanceReason(reason, bankBalanceReadOffered)), terms],
   };
 }
 
