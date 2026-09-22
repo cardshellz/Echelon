@@ -609,6 +609,67 @@ export function defaultMinimumCents(wallet: Pick<DropshipWalletView, "limits" | 
   return wallet.listingTiers?.case.eligible && cases ? cases.cents : options[0].cents;
 }
 
+// ---------------------------------------------------------------------------
+// The top-up amount: the minimum, a multiple of it, or an amount of the vendor's own
+// ---------------------------------------------------------------------------
+
+/** The quick picks offered beside the minimum itself, as multiples of it. */
+export const TOP_UP_MULTIPLES = [2, 3, 5] as const;
+export type TopUpMultiple = (typeof TOP_UP_MULTIPLES)[number];
+
+export interface WalletTopUpOption {
+  /** 1 is the minimum itself; the rest are multiples of it. */
+  factor: 1 | TopUpMultiple;
+  cents: number;
+}
+
+/**
+ * The top-up amounts offered for a minimum: the minimum itself (what a blank
+ * amount has always meant) and its multiples, recomputed whenever the minimum
+ * changes so a vendor who picked "2×" keeps 2× of whatever minimum they settle
+ * on. A multiple below the policy's smallest top-up is not offered; the
+ * minimum itself always is.
+ */
+export function topUpOptions(minimumCents: number, limits: Pick<WalletLimits, "autoReloadMinAmountCents">): WalletTopUpOption[] {
+  assertCents(minimumCents, "minimumCents");
+  const multiples: WalletTopUpOption[] = TOP_UP_MULTIPLES
+    .map((factor) => ({ factor, cents: minimumCents * factor }))
+    .filter((option) => option.cents >= limits.autoReloadMinAmountCents);
+  return [{ factor: 1, cents: minimumCents }, ...multiples];
+}
+
+/** What each quick pick is, under its amount. */
+export function describeTopUpOption(option: WalletTopUpOption): string {
+  return option.factor === 1 ? "Your minimum" : `${option.factor}× your minimum`;
+}
+
+export type WalletTopUpChoice =
+  | { kind: "minimum" }
+  | { kind: "multiple"; factor: TopUpMultiple }
+  | { kind: "custom"; cents: number };
+
+/**
+ * How a saved top-up amount reads against a minimum: the minimum itself
+ * (null, or the same number), one of its multiples, or the vendor's own
+ * amount. The multiples are matched first so a saved 2× keeps following the
+ * minimum rather than freezing as a custom number.
+ */
+export function topUpChoiceFor(savedTopUpCents: number | null, minimumCents: number): WalletTopUpChoice {
+  assertCents(minimumCents, "minimumCents");
+  if (savedTopUpCents === null || savedTopUpCents === minimumCents) return { kind: "minimum" };
+  assertCents(savedTopUpCents, "savedTopUpCents");
+  const factor = TOP_UP_MULTIPLES.find((candidate) => candidate * minimumCents === savedTopUpCents);
+  return factor ? { kind: "multiple", factor } : { kind: "custom", cents: savedTopUpCents };
+}
+
+/** The amount a choice sends: null for the minimum (the server pulls the minimum), else the amount. */
+export function topUpCentsFor(choice: WalletTopUpChoice, minimumCents: number): number | null {
+  assertCents(minimumCents, "minimumCents");
+  if (choice.kind === "minimum") return null;
+  if (choice.kind === "multiple") return minimumCents * choice.factor;
+  return choice.cents;
+}
+
 /** Manage-mode target for a `{ step }` recovery (spec §1.3 rule 12). */
 export function manageEditorForStep(step: "source" | "floor" | "backup"): "source" | "floor" | "backup" {
   return step;
