@@ -29,6 +29,7 @@ import {
   type DropshipAutoReloadSettingRecord,
   type DropshipAutoReloadResult,
   type DropshipBankBalanceSnapshot,
+  type DropshipStripeRailAvailability,
   type DropshipBankBalanceVerificationRecord,
   type RecordDropshipBankBalanceVerificationRepositoryInput,
   type DropshipConfirmedUsdcFundingResult,
@@ -1646,6 +1647,11 @@ class FakeNotificationSender {
 }
 
 class FakeFundingProvider implements DropshipWalletFundingProvider {
+  /** Both rails live: the wallet service never reads this, only the readiness page does. */
+  async readRailAvailability(): Promise<DropshipStripeRailAvailability> {
+    return { outcome: "read", accountId: "acct_test", cardPayments: "active", achPayments: "active", reason: null };
+  }
+
   /** What a bank balance read reports; USD by default so the wallet's currency resolves. */
   bankBalanceSnapshot: DropshipBankBalanceSnapshot = { status: "succeeded", availableByCurrency: { usd: 123_456 }, asOf: now };
   bankBalanceReads: string[] = [];

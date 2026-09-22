@@ -555,8 +555,10 @@ export class DropshipOrderProcessingService {
       return;
     }
     try {
+      // The context reaches both outcomes now: an accepted order whose backup
+      // card was charged in this same pass has to say so, with the fee.
       await this.deps.orderAcceptance.notifyAcceptanceOutcome(acceptance, {
-        reload: acceptance.outcome === "payment_hold" ? reloadContextFor(reload) : null,
+        reload: reloadContextFor(reload),
       });
     } catch (error) {
       this.deps.logger.error({
@@ -700,7 +702,7 @@ export function aggregateQuoteItems(
 }
 
 /** What a held order's top-up attempt came to, for this pass's one notice. */
-type AutoReloadIssue = Exclude<DropshipAcceptanceReloadContext, { kind: "pending" }>;
+type AutoReloadIssue = Exclude<DropshipAcceptanceReloadContext, { kind: "pending" } | { kind: "charged" }>;
 
 interface AutoReloadAttempt {
   result: DropshipAutoReloadResult | null;
@@ -715,6 +717,15 @@ function reloadContextFor(attempt: AutoReloadAttempt): DropshipAcceptanceReloadC
   }
   if (attempt.result?.outcome === "funding_created" && attempt.result.fundingStatus === "pending") {
     return { kind: "pending", amountCents: attempt.result.amountCents, currency: attempt.result.currency };
+  }
+  if (attempt.result?.outcome === "funding_created" && attempt.result.fundingStatus === "settled") {
+    return {
+      kind: "charged",
+      amountCents: attempt.result.amountCents,
+      cardFeeCents: attempt.result.cardFeeCents,
+      chargedCents: attempt.result.chargedCents,
+      currency: attempt.result.currency,
+    };
   }
   return null;
 }

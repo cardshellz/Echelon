@@ -29,6 +29,9 @@ import {
   type ShopifyProductSyncResult,
 } from "@/lib/shopify-product-sync-result";
 import { useAuth } from "@/lib/auth";
+import { Checkbox } from "@/components/ui/checkbox";
+import { BulkInventoryTrackingDialog } from "@/components/catalog/BulkInventoryTrackingDialog";
+import { MAX_BULK_INVENTORY_TRACKING_PRODUCTS } from "@shared/catalog/bulk-inventory-tracking";
 
 interface ProductVariant {
   id: number;
@@ -49,6 +52,7 @@ interface ProductVariant {
 
 interface Product {
   id: number;
+  inventoryTrackingDefault: boolean;
   sku: string | null;
   name: string;
   description: string | null;
@@ -87,6 +91,8 @@ export default function Products() {
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [categoryFilter, setCategoryFilter] = useState<string>("all");
   const [productLineFilter, setProductLineFilter] = useState<string>("all");
+  const [selection, setSelection] = useState<{ context: string; ids: number[] }>({ context: "", ids: [] });
+  const [bulkProductIds, setBulkProductIds] = useState<number[] | null>(null);
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [categoryDialogOpen, setCategoryDialogOpen] = useState(false);
   const [newCategoryName, setNewCategoryName] = useState("");
@@ -246,6 +252,24 @@ export default function Products() {
     variants: products.reduce((acc, p) => acc + (p.variants?.length || 0), 0),
   };
 
+  // Bind selection to its filter context synchronously: hidden products must
+  // never enter an apply request, even during the render after a filter change.
+  const selectionContext = JSON.stringify([searchQuery, statusFilter, categoryFilter, productLineFilter]);
+  const visibleIds = new Set(filteredProducts.map(product => product.id));
+  const selectedIds = selection.context === selectionContext ? selection.ids.filter(id => visibleIds.has(id)) : [];
+  const selectedSet = new Set(selectedIds);
+  const selectionCheckbox = (product: Product) => canSyncShopifyCatalog && (
+    <span className="inline-flex p-2" onClick={event => event.stopPropagation()}>
+      <Checkbox aria-label={`Select ${product.name}`} checked={selectedSet.has(product.id)}
+        disabled={!selectedSet.has(product.id) && selectedIds.length >= MAX_BULK_INVENTORY_TRACKING_PRODUCTS}
+        onCheckedChange={checked => setSelection({ context: selectionContext,
+          ids: checked === true ? [...selectedIds, product.id] : selectedIds.filter(id => id !== product.id),
+        })} />
+    </span>
+  );
+  const inventoryDefaultLabel = (product: Product) => product.inventoryTrackingDefault === false
+    ? "Do not track" : product.inventoryTrackingDefault === true ? "Track inventory" : "Not available";
+
   return (
     <div className="p-2 md:p-6 space-y-4 md:space-y-6">
       <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
@@ -314,7 +338,7 @@ export default function Products() {
             <Input
               placeholder="Search products..."
               value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
+              onChange={(e) => { setSelection({ context: "", ids: [] }); setSearchQuery(e.target.value); }}
               className="pl-9 w-full h-10"
               autoComplete="off"
               autoCorrect="off"
@@ -323,7 +347,7 @@ export default function Products() {
               data-testid="input-search-products"
             />
           </div>
-          <Select value={statusFilter} onValueChange={setStatusFilter}>
+          <Select value={statusFilter} onValueChange={value => { setSelection({ context: "", ids: [] }); setStatusFilter(value); }}>
             <SelectTrigger className="w-28 md:w-36 h-10" data-testid="select-status-filter">
               <SelectValue placeholder="Status" />
             </SelectTrigger>
@@ -335,7 +359,7 @@ export default function Products() {
             </SelectContent>
           </Select>
           {activeProductCategories.length > 0 && (
-            <Select value={categoryFilter} onValueChange={setCategoryFilter}>
+            <Select value={categoryFilter} onValueChange={value => { setSelection({ context: "", ids: [] }); setCategoryFilter(value); }}>
               <SelectTrigger className="w-32 md:w-40 h-10" data-testid="select-category-filter">
                 <SelectValue placeholder="Category" />
               </SelectTrigger>
@@ -348,7 +372,7 @@ export default function Products() {
             </Select>
           )}
           {productLines.length > 0 && (
-            <Select value={productLineFilter} onValueChange={setProductLineFilter}>
+            <Select value={productLineFilter} onValueChange={value => { setSelection({ context: "", ids: [] }); setProductLineFilter(value); }}>
               <SelectTrigger className="w-32 md:w-40 h-10" data-testid="select-productline-filter">
                 <SelectValue placeholder="Product Line" />
               </SelectTrigger>
@@ -383,6 +407,17 @@ export default function Products() {
         </div>
       </div>
 
+      {canSyncShopifyCatalog && <div className="flex flex-wrap items-center gap-2 rounded-md border p-3" data-testid="bulk-product-actions">
+        <span className="text-sm">{selectedIds.length} selected</span>
+        <Button variant="outline" size="sm" disabled={isLoading || filteredProducts.length === 0 || filteredProducts.length > MAX_BULK_INVENTORY_TRACKING_PRODUCTS}
+          onClick={() => setSelection({ context: selectionContext, ids: filteredProducts.map(product => product.id) })}>
+          Select all {filteredProducts.length} matching
+        </Button>
+        <Button variant="ghost" size="sm" disabled={selectedIds.length === 0} onClick={() => setSelection({ context: selectionContext, ids: [] })}>Clear selection</Button>
+        <Button size="sm" disabled={selectedIds.length === 0 || isLoading} onClick={() => setBulkProductIds([...selectedIds].sort((a, b) => a - b))}>Inventory tracking</Button>
+        {filteredProducts.length > MAX_BULK_INVENTORY_TRACKING_PRODUCTS && <p className="w-full text-sm text-muted-foreground">Select up to {MAX_BULK_INVENTORY_TRACKING_PRODUCTS} products per batch. Narrow your filters to select an entire group.</p>}
+      </div>}
+
       {isLoading ? (
         <div className="text-center py-12">Loading products...</div>
       ) : filteredProducts.length === 0 ? (
@@ -408,6 +443,7 @@ export default function Products() {
               data-testid={`product-card-${product.id}`}
             >
               <CardContent className="p-3 md:p-4">
+                <div className="flex items-center justify-between mb-2">{selectionCheckbox(product)}<Badge variant="outline">{inventoryDefaultLabel(product)}</Badge></div>
                 <div className="aspect-square bg-muted rounded-lg mb-3 flex items-center justify-center overflow-hidden">
                   {product.imageUrl ? (
                     <img 
@@ -444,6 +480,7 @@ export default function Products() {
               >
                 <CardContent className="p-3">
                   <div className="flex items-center gap-3">
+                    {selectionCheckbox(product)}
                     <div className="w-12 h-12 bg-muted rounded flex-shrink-0 flex items-center justify-center overflow-hidden">
                       {product.imageUrl ? (
                         <img 
@@ -458,7 +495,8 @@ export default function Products() {
                     <div className="flex-1 min-w-0">
                       <p className="font-medium text-sm truncate">{product.name}</p>
                       <p className="text-xs text-muted-foreground font-mono">{product.sku || '-'}</p>
-                      <div className="flex items-center gap-2 mt-1">
+                      <div className="flex flex-wrap items-center gap-2 mt-1">
+                        <Badge variant="outline" className="text-xs">{inventoryDefaultLabel(product)}</Badge>
                         <Badge variant={product.isActive ? "default" : "secondary"} className="text-xs">
                           {product.isActive ? "Active" : "Inactive"}
                         </Badge>
@@ -477,12 +515,14 @@ export default function Products() {
             <Table>
               <TableHeader>
                 <TableRow>
+                  {canSyncShopifyCatalog && <TableHead className="w-12"><span className="sr-only">Select products</span></TableHead>}
                   <TableHead className="w-12"></TableHead>
                   <TableHead>Product</TableHead>
                   <TableHead>SKU</TableHead>
                   <TableHead>Unit</TableHead>
                   <TableHead>Category</TableHead>
                   <TableHead>Status</TableHead>
+                  <TableHead>Inventory default</TableHead>
                   <TableHead className="w-12"></TableHead>
                 </TableRow>
               </TableHeader>
@@ -494,6 +534,7 @@ export default function Products() {
                     onClick={() => setLocation(`/products/${product.id}`)}
                     data-testid={`product-row-${product.id}`}
                   >
+                    {canSyncShopifyCatalog && <TableCell className="p-0">{selectionCheckbox(product)}</TableCell>}
                     <TableCell>
                       <div className="w-10 h-10 bg-muted rounded flex items-center justify-center overflow-hidden">
                         {product.imageUrl ? (
@@ -524,9 +565,8 @@ export default function Products() {
                       </Badge>
 
                     </TableCell>
-                    <TableCell>
-                      <ChevronRight className="h-4 w-4 text-muted-foreground" />
-                    </TableCell>
+                    <TableCell><Badge variant="outline">{inventoryDefaultLabel(product)}</Badge></TableCell>
+                    <TableCell><ChevronRight className="h-4 w-4 text-muted-foreground" /></TableCell>
                   </TableRow>
                 ))}
               </TableBody>
@@ -538,6 +578,15 @@ export default function Products() {
       <div className="text-xs md:text-sm text-muted-foreground">
         Showing {filteredProducts.length} of {products.length} products
       </div>
+
+      {bulkProductIds && <BulkInventoryTrackingDialog productIds={bulkProductIds} onClose={() => setBulkProductIds(null)} onApplied={result => {
+        queryClient.invalidateQueries({ predicate: query => typeof query.queryKey[0] === "string" && (
+          query.queryKey[0].startsWith("/api/products") || query.queryKey[0].startsWith("/api/product-variants")
+        ) });
+        setSelection({ context: selectionContext, ids: [] });
+        setBulkProductIds(null);
+        toast({ title: "Inventory tracking updated", description: `${result.changedProductIds.length} products changed; ${result.unchangedProductIds.length} already set. Variant overrides preserved.` });
+      }} />}
 
       <Dialog open={createDialogOpen} onOpenChange={setCreateDialogOpen}>
         <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto p-4">
