@@ -484,8 +484,14 @@ test("bank vendor, end to end: intro, bank source, minimum with guidance and a t
   const deposit = page.getByTestId("wallet-step-deposit");
   await expect(deposit.getByRole("heading", { name: "Add money now (recommended)" })).toBeVisible();
   await expect(deposit).toContainText("first daily check after you activate");
-  await expect(radio(page, "Amount", "$500")).toHaveAttribute("aria-checked", "true");
-  await expect(deposit.getByTestId("wallet-deposit-quote")).toContainText("once the bank transfer settles");
+  // The amounts are the top-up step's picks again — the $500 minimum, the vendor's own $800 top-up and the multiples — opening on the $800 the copy names; nothing below the minimum is offered.
+  await expect(deposit).toContainText("That first top-up is $800 from");
+  await expect(page.getByRole("radiogroup", { name: "Amount", exact: true }).getByRole("radio")).toHaveCount(5);
+  for (const [amount, hint] of [["$500", "Your minimum"], ["$800", "Your top-up amount"], ["$1,000", "2× your minimum"], ["$1,500", "3× your minimum"], ["$2,500", "5× your minimum"]]) {
+    await expect(radio(page, "Amount", amount)).toContainText(hint);
+  }
+  await expect(radio(page, "Amount", "$800")).toHaveAttribute("aria-checked", "true");
+  await expect(deposit.getByTestId("wallet-deposit-quote")).toContainText("No fee. $800.00 goes into your wallet once the bank transfer settles");
   await expect(deposit).toContainText("we may ask you to confirm it is you again");
   await expectNoHorizontalScroll(page);
   await shot(page, "06-deposit");
@@ -699,10 +705,14 @@ test("manage: adding money by card, bank or USDC quotes the fee honestly and ret
   await page.getByRole("button", { name: "Add money" }).click();
   const panel = page.getByTestId("wallet-add-money");
   await expect(radio(page, "Pay with", "Bank account (no fee)")).toHaveAttribute("aria-checked", "true");
-  await radio(page, "Amount", "$100").click();
-  await expect(panel.getByTestId("wallet-funding-quote")).toHaveText("No fee. $100.00 goes into your wallet once the bank transfer settles — up to 5 business days (our assumption). It cannot pay orders until then.");
+  // The picks are the plan's: the $250 minimum, which autopay would pull next with $42.50 in the wallet, opens selected, then its multiples.
+  await expect(page.getByRole("radiogroup", { name: "Amount", exact: true }).getByRole("radio")).toHaveCount(4);
+  await expect(radio(page, "Amount", "$250")).toHaveAttribute("aria-checked", "true");
+  await expect(radio(page, "Amount", "$250")).toContainText("Your minimum");
+  await expect(radio(page, "Amount", "$1,250")).toContainText("5× your minimum");
+  await expect(panel.getByTestId("wallet-funding-quote")).toHaveText("No fee. $250.00 goes into your wallet once the bank transfer settles — up to 5 business days (our assumption). It cannot pay orders until then.");
   await radio(page, "Pay with", "Card (3% fee)").click();
-  await expect(panel.getByTestId("wallet-funding-quote")).toHaveText("Card fee (3%): $3.00. Your card is charged $103.00 and $100.00 goes into your wallet, available at once.");
+  await expect(panel.getByTestId("wallet-funding-quote")).toHaveText("Card fee (3%): $7.50. Your card is charged $257.50 and $250.00 goes into your wallet, available at once.");
   await expectNoHorizontalScroll(page);
   await shot(page, "manage-09-add-money-card");
 
@@ -718,25 +728,28 @@ test("manage: adding money by card, bank or USDC quotes the fee honestly and ret
   await shot(page, "manage-10-add-money-usdc");
 
   await radio(page, "Pay with", "Card (3% fee)").click();
-  await radio(page, "Amount", "$100").click();
+  await radio(page, "Amount", "$250").click();
   await panel.getByRole("button", { name: "Continue on Stripe" }).click();
   await expect(page.getByTestId("wallet-balance").getByTestId("wallet-verification")).toBeVisible();
   expect(state.codesSent).toEqual(["wallet_funding_high_value"]);
   await enterCode(page);
   await expect(page.getByTestId("wallet-funding-return")).toContainText("Payment received. Your balance updates as soon as Stripe confirms it.");
-  expect(state.fundingSessions).toEqual([{ fundingMethodId: 10, amountCents: 10_000, returnTo: HARNESS_PATH }]);
-  await expect(page.getByTestId("wallet-available")).toHaveText("$142.50");
+  expect(state.fundingSessions).toEqual([{ fundingMethodId: 10, amountCents: 25_000, returnTo: HARNESS_PATH }]);
+  await expect(page.getByTestId("wallet-available")).toHaveText("$292.50");
   await expect(page.getByTestId("wallet-activity")).toContainText("Money you added");
   expect(new URL(page.url()).search).toBe("");
   await shot(page, "manage-11-funding-return");
 
   // A bank transfer comes back as money on the way, with the one settlement phrase.
   await page.getByRole("button", { name: "Add money" }).click();
-  await radio(page, "Amount", "$250").click();
+  // Back above the minimum, the panel opens on the routine top-up amount — the $250 minimum — and 2× is a click away.
+  await expect(radio(page, "Amount", "$250")).toHaveAttribute("aria-checked", "true");
+  await radio(page, "Amount", "$500").click();
+  await expect(radio(page, "Amount", "$500")).toContainText("2× your minimum");
   await panel.getByRole("button", { name: "Continue on Stripe" }).click();
   await expect(page.getByTestId("wallet-funding-return")).toContainText("Transfer started. It shows as on the way once Stripe confirms it");
-  expect(state.fundingSessions[1]).toEqual({ fundingMethodId: 30, amountCents: 25_000, returnTo: HARNESS_PATH });
-  await expect(page.getByTestId("wallet-pending")).toContainText("$250 on the way — a bank transfer takes up to 5 business days (our assumption) to land");
+  expect(state.fundingSessions[1]).toEqual({ fundingMethodId: 30, amountCents: 50_000, returnTo: HARNESS_PATH });
+  await expect(page.getByTestId("wallet-pending")).toContainText("$500 on the way — a bank transfer takes up to 5 business days (our assumption) to land");
   await expect(page.getByText(/a few days/)).toHaveCount(0);
   finish(state);
 });

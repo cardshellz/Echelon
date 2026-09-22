@@ -50,7 +50,6 @@ import {
 } from "@/lib/dropship-wallet-view-adapter";
 import {
   BANK_SETTLEMENT_PHRASE,
-  DEPOSIT_PRESETS_CENTS,
   EXAMPLE_CARD_TOP_UP_CENTS,
   EXAMPLE_MONTHLY_SPEND_CENTS,
   EXAMPLE_SHORTFALL,
@@ -58,12 +57,11 @@ import {
   activationTopUp,
   cardExpiryState,
   chargeBoundCents,
-  depositAmountDefault,
   firstFillFeeCents,
   formatDurationMinutes,
   formatSignedCents,
   formatWholeDollars,
-  presetsIncluding,
+  nextTopUpCents,
   shortfallExample,
   type WalletSourceRail,
 } from "@/lib/dropship-wallet-guidance";
@@ -107,6 +105,9 @@ import {
   describeMandate,
   describeMinimumOption,
   describeNegativeBalance,
+  depositDefaultCents,
+  depositOptions,
+  describeDepositOption,
   describePendingBalance,
   describePlanSentence,
   describeRoleGap,
@@ -1671,10 +1672,12 @@ function ReviewStep({
 // ---------------------------------------------------------------------------
 
 function FundingControls({
-  wallet, floorCents, busy, quoteTestId, usdcOffered, onContinue, onAddMethod, onSaveUsdc, onRequestUsdcAddress, extraBelowButton,
+  wallet, floorCents, topUpCents, busy, quoteTestId, usdcOffered, onContinue, onAddMethod, onSaveUsdc, onRequestUsdcAddress, extraBelowButton,
 }: {
   wallet: DropshipWalletView;
   floorCents: number;
+  /** The autopay top-up amount, null for the minimum: always one of the picks, and what the controls open on. */
+  topUpCents: number | null;
   busy: boolean;
   quoteTestId: string;
   usdcOffered: boolean;
@@ -1687,23 +1690,26 @@ function FundingControls({
   const limits = wallet.limits;
   const fee = formatFeeRate(wallet.cardFundingFeeBps);
   const [rail, setRail] = useState<WalletSourceRail | "usdc">("stripe_ach");
-  const defaultAmount = depositAmountDefault(floorCents, limits);
-  const [presetCents, setPresetCents] = useState(defaultAmount);
+  // The top-up step's picks again, so the two cards agree; they open on what autopay would pull next.
+  const options = depositOptions({ minimumCents: floorCents, topUpCents, limits });
+  const [presetCents, setPresetCents] = useState<number | null>(() => depositDefaultCents(options, nextTopUpCents({ floorCents, topUpCents, availableCents: wallet.account.availableBalanceCents, pendingCents: wallet.account.pendingBalanceCents })));
   const [customText, setCustomText] = useState("");
   const [customError, setCustomError] = useState("");
-  const chips = presetsIncluding(DEPOSIT_PRESETS_CENTS, floorCents).filter((cents) => cents >= limits.manualFundingMinCents && cents <= limits.manualFundingMaxCents);
-  const chosen = customText.trim() ? tryParseDollarInputToCents(customText) : presetCents;
+  // A pick the picks no longer offer (the plan changed underneath) counts as none.
+  const preset = options.some((option) => option.cents === presetCents) ? presetCents : null;
+  const chosen = customText.trim() ? tryParseDollarInputToCents(customText) : preset;
   const method = rail === "usdc" ? null : depositFundingMethodFor(wallet, rail);
   const quote = rail !== "usdc" && chosen !== null && chosen > 0 ? quoteWalletFunding({ rail, creditCents: chosen, cardFeeBps: wallet.cardFundingFeeBps }) : null;
 
   function submit() {
     if (rail === "usdc") return;
-    let amountCents = presetCents;
+    let amountCents = preset;
     if (customText.trim()) {
       const parsed = tryParseDollarInputToCents(customText);
-      if (parsed === null) { setCustomError("Enter a dollar amount like 75.00"); return; }
+      if (parsed === null) { setCustomError("Enter an amount in dollars and cents, like 250.00"); return; }
       amountCents = parsed;
     }
+    if (amountCents === null) { setCustomError("Pick an amount or enter one."); return; }
     if (amountCents < limits.manualFundingMinCents || amountCents > limits.manualFundingMaxCents) {
       setCustomError(`Amounts must be between ${formatWholeDollars(limits.manualFundingMinCents)} and ${formatWholeDollars(limits.manualFundingMaxCents)}.`);
       return;
@@ -1725,13 +1731,21 @@ function FundingControls({
         <>
           <p className="text-xs text-zinc-500">You finish on Stripe's page. The account or card you use there is saved to your wallet.</p>
           <div role="radiogroup" aria-label="Amount" className="flex flex-wrap gap-2">
-            {chips.map((cents) => (
-              <RadioChip key={cents} label={formatWholeDollars(cents)} selected={!customText.trim() && presetCents === cents} disabled={busy} onSelect={() => { setPresetCents(cents); setCustomText(""); setCustomError(""); }} />
+            {options.map((option) => (
+              <RadioChip
+                key={option.cents}
+                label={formatWholeDollars(option.cents)}
+                hint={describeDepositOption(option)}
+                selected={!customText.trim() && preset === option.cents}
+                disabled={busy}
+                onSelect={() => { setPresetCents(option.cents); setCustomText(""); setCustomError(""); }}
+                testId={`wallet-deposit-${option.factor === null ? "top-up" : `${option.factor}x`}`}
+              />
             ))}
           </div>
           <div className="max-w-xs space-y-1">
             <Label htmlFor="wallet-custom-amount">Or another amount</Label>
-            <Input id="wallet-custom-amount" inputMode="decimal" placeholder="75.00" value={customText} disabled={busy} onChange={(event) => { setCustomText(event.target.value); setCustomError(""); }} className="h-10" />
+            <Input id="wallet-custom-amount" inputMode="decimal" placeholder="Dollars and cents" value={customText} disabled={busy} onChange={(event) => { setCustomText(event.target.value); setCustomError(""); }} className="h-10" />
             {customError && <p role="alert" className="text-sm text-red-700">{customError}</p>}
           </div>
           {quote && (
@@ -1833,8 +1847,8 @@ function DepositStep({
   const terms = termsFor(wallet, flow);
   if (!terms) return null;
   const fee = formatFeeRate(wallet.cardFundingFeeBps);
-  const first = activationTopUp({ sourceRail: terms.sourceRail, floorCents: terms.floorCents, topUpCents: terms.topUpCents, availableCents: wallet.account.availableBalanceCents, pendingCents: wallet.account.pendingBalanceCents, bps: wallet.cardFundingFeeBps });
-  const firstAmount = formatWholeDollars(first.outcome === "top_up" ? first.amountCents : terms.topUpCents ?? terms.floorCents);
+  // What autopay would pull first: named here and preselected in the controls below.
+  const firstAmount = formatWholeDollars(nextTopUpCents({ floorCents: terms.floorCents, topUpCents: terms.topUpCents, availableCents: wallet.account.availableBalanceCents, pendingCents: wallet.account.pendingBalanceCents }));
   return (
     <section className={SECTION} data-testid="wallet-step-deposit">
       <h2 className="text-lg font-semibold">Add money now (recommended)</h2>
@@ -1844,6 +1858,7 @@ function DepositStep({
       <FundingControls
         wallet={wallet}
         floorCents={terms.floorCents}
+        topUpCents={terms.topUpCents}
         busy={feedback.busy}
         quoteTestId="wallet-deposit-quote"
         usdcOffered={false}
@@ -1905,6 +1920,8 @@ function ManageView({
   const bannerFeedback = feedback("banner");
   const planFeedback = feedback("plan");
   const floorCents = wallet.autoReload?.minimumBalanceCents ?? flow.floorCents;
+  // The saved plan's top-up amount (null is the minimum), the draft's while none is saved. Not `??`: a saved null must not fall through.
+  const topUpCents = wallet.autoReload ? wallet.autoReload.topUpAmountCents : flow.topUpCents;
   const topUpShown = plan?.topUpCents ?? flow.topUpCents;
   const boundShown = plan?.limitCents ?? flow.limitCents;
   const belowFloor = stillOnboarding && wallet.account.availableBalanceCents + wallet.account.pendingBalanceCents < floorCents;
@@ -2016,6 +2033,7 @@ function ManageView({
             <FundingControls
               wallet={wallet}
               floorCents={floorCents}
+              topUpCents={topUpCents}
               busy={feedback("money").busy}
               quoteTestId="wallet-funding-quote"
               usdcOffered={usdcOfferedFor(wallet)}

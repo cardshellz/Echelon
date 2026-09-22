@@ -18,7 +18,6 @@
  */
 
 import { calculateCardFundingFeeCents, quoteWalletFunding } from "@shared/dropship/wallet-funding-fee";
-import type { WalletLimits } from "./dropship-wallet-view-adapter";
 
 export type WalletSourceRail = "stripe_ach" | "stripe_card";
 
@@ -34,8 +33,6 @@ export const BANK_SETTLEMENT_DAYS_PHRASE = `up to ${ASSUMED_BANK_SETTLEMENT_BUSI
 export const BANK_SETTLEMENT_PHRASE = `${BANK_SETTLEMENT_DAYS_PHRASE} (our assumption)`;
 /** The two floors quoted in the card floor copy; fees computed, never typed. */
 export const FIRST_FILL_EXAMPLE_FLOORS_CENTS: readonly [number, number] = [10_000, 100_000];
-/** Existing presets; the floor is added at runtime; clamped to the manual funding limits. */
-export const DEPOSIT_PRESETS_CENTS: readonly number[] = [2_500, 5_000, 10_000, 25_000];
 /** Card-source example when no daily cost is entered, prefixed "for example". */
 export const EXAMPLE_MONTHLY_SPEND_CENTS = 100_000;
 /** Card-source example when no daily cost is entered: what one $100 top-up charges. */
@@ -67,19 +64,6 @@ export function assertSignedCents(value: number, field: string): void {
 /** Integer division for non-negative operands. */
 function floorDiv(numerator: number, denominator: number): number {
   return (numerator - (numerator % denominator)) / denominator;
-}
-
-// ---------------------------------------------------------------------------
-// Presets
-// ---------------------------------------------------------------------------
-
-/** The presets plus whatever is already saved, so an existing choice is never shown as "none of these". */
-export function presetsIncluding(presets: readonly number[], ...extra: Array<number | null>): number[] {
-  const values = new Set<number>(presets);
-  for (const value of extra) {
-    if (value !== null && Number.isSafeInteger(value) && value > 0) values.add(value);
-  }
-  return [...values].sort((left, right) => left - right);
 }
 
 // ---------------------------------------------------------------------------
@@ -130,25 +114,40 @@ export type ActivationTopUp =
       partial: boolean;
     };
 
-/**
- * Mirrors the server's routine refill (`domain/autopay-refill.ts`): the
- * top-up amount (the minimum by default), or the whole shortfall when that is
- * more, never past the single-charge bound; pending money counts.
- */
-export function activationTopUp(input: {
-  sourceRail: WalletSourceRail;
+export interface ActivationTopUpAmountInput {
   floorCents: number;
+  /** The autopay top-up amount; null means the minimum. */
   topUpCents: number | null;
   availableCents: number;
   pendingCents: number;
-  bps: number;
-}): ActivationTopUp {
-  const bound = chargeBoundCents(input.floorCents, input.topUpCents);
+}
+
+/** How far the balance, money on its way included, is below the minimum; zero or less once it is reached. */
+function shortOfMinimumCents(input: ActivationTopUpAmountInput): number {
+  assertCents(input.floorCents, "floorCents");
   assertSignedCents(input.availableCents, "availableCents");
   assertSignedCents(input.pendingCents, "pendingCents");
-  const needed = input.floorCents - (input.availableCents + input.pendingCents);
-  if (needed <= 0) return { outcome: "not_needed" };
-  const amount = Math.min(Math.max(needed, input.topUpCents ?? input.floorCents), bound);
+  return input.floorCents - (input.availableCents + input.pendingCents);
+}
+
+/**
+ * The activation top-up's amount, or null when the balance already reaches
+ * the minimum. Mirrors the server's routine refill
+ * (`domain/autopay-refill.ts`): the top-up amount (the minimum by default),
+ * or the whole shortfall when that is more, never past the single-charge
+ * bound; pending money counts.
+ */
+export function activationTopUpAmountCents(input: ActivationTopUpAmountInput): number | null {
+  const bound = chargeBoundCents(input.floorCents, input.topUpCents);
+  const needed = shortOfMinimumCents(input);
+  if (needed <= 0) return null;
+  return Math.min(Math.max(needed, input.topUpCents ?? input.floorCents), bound);
+}
+
+/** The activation top-up as the vendor's autopay source would take it: amount, fee and when it lands. */
+export function activationTopUp(input: ActivationTopUpAmountInput & { sourceRail: WalletSourceRail; bps: number }): ActivationTopUp {
+  const amount = activationTopUpAmountCents(input);
+  if (amount === null) return { outcome: "not_needed" };
   const quote = quoteWalletFunding({ rail: input.sourceRail, creditCents: amount, cardFeeBps: input.bps });
   return {
     outcome: "top_up",
@@ -156,8 +155,18 @@ export function activationTopUp(input: {
     feeCents: quote.feeCents,
     chargedCents: quote.chargedCents,
     lands: input.sourceRail === "stripe_card" ? "instant" : "pending",
-    partial: amount < needed,
+    partial: amount < shortOfMinimumCents(input),
   };
+}
+
+/**
+ * What autopay would pull next: the activation top-up while the balance is
+ * short of the minimum, otherwise the top-up amount, the minimum by default.
+ * The add-money picks open on it, so the amount the copy names is the one
+ * preselected.
+ */
+export function nextTopUpCents(input: ActivationTopUpAmountInput): number {
+  return activationTopUpAmountCents(input) ?? input.topUpCents ?? input.floorCents;
 }
 
 export interface ShortfallExample {
@@ -173,11 +182,6 @@ export function shortfallExample(input: { orderCents: number; availableCents: nu
   const shortfallCents = Math.max(0, input.orderCents - input.availableCents);
   const feeCents = calculateCardFundingFeeCents(shortfallCents, input.bps);
   return { shortfallCents, feeCents, chargedCents: shortfallCents + feeCents };
-}
-
-export function depositAmountDefault(floorCents: number, limits: WalletLimits): number {
-  assertCents(floorCents, "floorCents");
-  return Math.min(Math.max(floorCents, limits.manualFundingMinCents), limits.manualFundingMaxCents);
 }
 
 // ---------------------------------------------------------------------------
