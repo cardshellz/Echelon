@@ -125,20 +125,28 @@ describe("DropshipPortalWallet contract", () => {
     expect(source).toContain("Payment received.");
   });
 
-  it("keeps the standing notice above the wallet error, strips the Stripe marker, and never sends the daily cost", () => {
+  it("keeps the standing notice above the wallet error and strips the Stripe marker", () => {
     const notice = source.indexOf('data-testid="wallet-vendor-standing-notice"');
     expect(notice).toBeGreaterThan(0);
     expect(notice).toBeLessThan(source.indexOf("{walletErrorText && ("));
     expect(source).toContain("window.history.replaceState");
     expect(source).toContain("flow.source?.rail === \"stripe_card\" ? (");
     expect(source).toContain("readWalletDraft(storageOrNull(), vendorId)");
-    // Request builders receive plans and wallets only; the daily cost lives in the draft and component state.
-    for (const builder of ["buildAuthorizeInput(", "buildPlanSaveInput(", "buildConfirmTermsInput(", "buildAutoReloadDisableInput("]) {
-      for (const match of source.matchAll(new RegExp(builder.replace("(", "\\(") + "([^)]*)\\)", "g"))) {
-        expect(match[1], builder).not.toMatch(/daily|cost/i);
-      }
-    }
-    expect(between("function addFunds", "function saveUsdcMethod")).not.toMatch(/daily|cost/i);
+  });
+
+  it("offers the two tier minimums on the minimum step and nothing to guess or type for the amount", () => {
+    const step = between("function FloorStep", "function centsToDollarText");
+    expect(step).toContain('aria-label="Minimum"');
+    expect(step).toContain("const options = minimumOptions(limits);");
+    expect(step).toContain("useState(minimumOptionFor(initialFloorCents, limits))");
+    expect(step).toContain("hint={describeMinimumOption(option.tier)}");
+    expect(step).toContain("testId={`wallet-minimum-${option.tier}`}");
+    expect(step).toContain("options.some((option) => option.cents === floorCents)");
+    expect(step).toContain('data-testid="wallet-top-up-custom"');
+    // The daily-cost guesser, the recommendation and the free-form amount are gone from the whole page.
+    // (The deposit step keeps its own "Or another amount" input; only the minimum's free-form amount is gone.)
+    expect(source).not.toMatch(/daily (order )?cost|dailyCost|wallet-floor-custom|recommendedFloor|Keep my balance at/i);
+    expect(step).not.toContain("initialDailyCostCents");
   });
 
   it("states the intro in the words of what happens today, from one source of the copy", () => {
@@ -182,7 +190,7 @@ describe("DropshipPortalWallet contract", () => {
     expect(indicator).toContain("data-testid=\"wallet-step-indicator\"");
     // Every move through the flow is one of the model's draft transitions; the page never edits the draft's choices itself.
     for (const transition of ["draftAtStep(current, step)", "setDraft(draftAfterIntro)", "draftAfterSourceChoice(current, method, flow.source?.method ?? null)",
-      "draftAfterFloorChoice(current, floorCents, topUpCents, dailyCostCents)", "draftAfterBackupChoice(current, card)", "draftAtStep(current, previous)"]) {
+      "draftAfterFloorChoice(current, floorCents, topUpCents)", "draftAfterBackupChoice(current, card)", "draftAtStep(current, previous)"]) {
       expect(source, transition).toContain(transition);
     }
     expect(source).toContain("revisited={flow.furthestStep !== \"intro\"}");

@@ -32,32 +32,10 @@ export const ASSUMED_BANK_SETTLEMENT_BUSINESS_DAYS = 5;
 export const BANK_SETTLEMENT_DAYS_PHRASE = `up to ${ASSUMED_BANK_SETTLEMENT_BUSINESS_DAYS} business days`;
 /** The one settlement phrase every screen uses; built from the constant above, never typed. */
 export const BANK_SETTLEMENT_PHRASE = `${BANK_SETTLEMENT_DAYS_PHRASE} (our assumption)`;
-/** Assumption: five business days span a weekend; orders arrive on calendar days. */
-export const ASSUMED_BANK_SETTLEMENT_CALENDAR_DAYS = 7;
-/** Settlement phrase with the calendar figure, used wherever the 7-day figure is used. */
-export const BANK_SETTLEMENT_PHRASE_WITH_CALENDAR = `up to ${ASSUMED_BANK_SETTLEMENT_BUSINESS_DAYS} business days (about ${ASSUMED_BANK_SETTLEMENT_CALENDAR_DAYS} calendar days, our assumption)`;
-/** A busy weekend, or orders that land just before a transfer does. */
-export const BANK_FLOOR_BUFFER_DAYS = 3;
-/** Target days of cover for a bank source: pending money cannot pay orders, so the floor carries the orders that arrive while a top-up is in flight. */
-export const BANK_FLOOR_COVER_DAYS = ASSUMED_BANK_SETTLEMENT_CALENDAR_DAYS + BANK_FLOOR_BUFFER_DAYS;
-/** "Keeps up" only at the cover the recommendation itself uses, so verdict and recommendation never contradict. */
-export const BANK_KEEPS_UP_MIN_DAYS = BANK_FLOOR_COVER_DAYS;
-/** Between 7 and 9 days the transfer lands about when the floor is exhausted: "Tight". */
-export const BANK_TIGHT_MIN_DAYS = ASSUMED_BANK_SETTLEMENT_CALENDAR_DAYS;
-/** Card top-ups settle at once and the after-order top-up refills the same pass; one day of orders is enough. */
-export const CARD_FLOOR_COVER_DAYS = 1;
-/** Recommendations and custom floors round up to $50, the server's trigger minimum. */
-export const FLOOR_STEP_CENTS = 5_000;
-/** Existing presets plus $2,500 for high-volume bank vendors; chips below `limits.autoReloadMinTriggerCents` are hidden at runtime. */
-export const FLOOR_PRESETS_CENTS: readonly number[] = [10_000, 25_000, 50_000, 100_000, 250_000];
-/** Assumption: bank keeps today's $250 default; card $100 is the lowest preset whose derived limit clears the $100 minimum. */
-export const DEFAULT_FLOOR_CENTS_BY_SOURCE: Readonly<Record<WalletSourceRail, number>> = { stripe_ach: 25_000, stripe_card: 10_000 };
 /** The two floors quoted in the card floor copy; fees computed, never typed. */
 export const FIRST_FILL_EXAMPLE_FLOORS_CENTS: readonly [number, number] = [10_000, 100_000];
 /** Existing presets; the floor is added at runtime; clamped to the manual funding limits. */
 export const DEPOSIT_PRESETS_CENTS: readonly number[] = [2_500, 5_000, 10_000, 25_000];
-/** Monthly figures are "about". */
-export const ESTIMATE_DAYS_PER_MONTH = 30;
 /** Card-source example when no daily cost is entered, prefixed "for example". */
 export const EXAMPLE_MONTHLY_SPEND_CENTS = 100_000;
 /** Card-source example when no daily cost is entered: what one $100 top-up charges. */
@@ -66,8 +44,6 @@ export const EXAMPLE_CARD_TOP_UP_CENTS = 10_000;
 export const EXAMPLE_SHORTFALL = Object.freeze({ orderCents: 7_500, availableCents: 2_000 });
 /** Warn two months ahead: time for a new card and a Stripe round-trip. */
 export const CARD_EXPIRY_WARNING_MONTHS = 2;
-/** Quick picks for the optional daily order cost. */
-export const DAILY_COST_PRESETS_CENTS: readonly number[] = [1_000, 2_500, 5_000, 10_000, 25_000];
 
 const MINUTES_PER_HOUR = 60;
 const MINUTES_PER_DAY = 1_440;
@@ -94,22 +70,8 @@ function floorDiv(numerator: number, denominator: number): number {
 }
 
 // ---------------------------------------------------------------------------
-// Rounding and presets
+// Presets
 // ---------------------------------------------------------------------------
-
-export function roundUpToStep(centsValue: number, step: number = FLOOR_STEP_CENTS): number {
-  assertCents(centsValue, "cents");
-  assertCents(step, "step");
-  if (step === 0) throw new RangeError("step must be positive.");
-  return floorDiv(centsValue + step - 1, step) * step;
-}
-
-/** The smallest preset ≥ the value; the value itself beyond the largest preset. */
-export function snapUpToPreset(centsValue: number, presets: readonly number[]): number {
-  assertCents(centsValue, "cents");
-  const sorted = [...presets].sort((left, right) => left - right);
-  return sorted.find((preset) => preset >= centsValue) ?? centsValue;
-}
 
 /** The presets plus whatever is already saved, so an existing choice is never shown as "none of these". */
 export function presetsIncluding(presets: readonly number[], ...extra: Array<number | null>): number[] {
@@ -121,101 +83,13 @@ export function presetsIncluding(presets: readonly number[], ...extra: Array<num
 }
 
 // ---------------------------------------------------------------------------
-// Cover and recommendation
-// ---------------------------------------------------------------------------
-
-export function daysOfCover(floorCents: number, dailyCents: number | null): number | null {
-  assertCents(floorCents, "floorCents");
-  if (dailyCents === null) return null;
-  assertCents(dailyCents, "dailyCents");
-  if (dailyCents === 0) return null;
-  return floorDiv(floorCents, dailyCents);
-}
-
-export function coverDays(sourceRail: WalletSourceRail): number {
-  return sourceRail === "stripe_ach" ? BANK_FLOOR_COVER_DAYS : CARD_FLOOR_COVER_DAYS;
-}
-
-export function recommendedFloorCents(sourceRail: WalletSourceRail, dailyCents: number | null, limits: WalletLimits): number {
-  if (dailyCents === null) return DEFAULT_FLOOR_CENTS_BY_SOURCE[sourceRail];
-  assertCents(dailyCents, "dailyCents");
-  if (dailyCents === 0) return DEFAULT_FLOOR_CENTS_BY_SOURCE[sourceRail];
-  return Math.max(limits.autoReloadMinTriggerCents, roundUpToStep(dailyCents * coverDays(sourceRail)));
-}
-
-/** [low, high]: bank 7–10 days of orders, card 1–2 days. Null without a daily cost. */
-export function floorBandCents(sourceRail: WalletSourceRail, dailyCents: number | null, limits: WalletLimits): [number, number] | null {
-  if (dailyCents === null || dailyCents === 0) return null;
-  assertCents(dailyCents, "dailyCents");
-  const recommended = recommendedFloorCents(sourceRail, dailyCents, limits);
-  if (sourceRail === "stripe_ach") {
-    return [Math.max(limits.autoReloadMinTriggerCents, roundUpToStep(dailyCents * ASSUMED_BANK_SETTLEMENT_CALENDAR_DAYS)), recommended];
-  }
-  return [recommended, Math.max(limits.autoReloadMinTriggerCents, roundUpToStep(dailyCents * 2))];
-}
-
-export type FloorVerdict = "unknown" | "instant" | "keeps_up" | "tight" | "may_fall_short";
-
-export function floorVerdict(sourceRail: WalletSourceRail, days: number | null): FloorVerdict {
-  if (days === null) return "unknown";
-  if (sourceRail === "stripe_card") return "instant";
-  if (days >= BANK_KEEPS_UP_MIN_DAYS) return "keeps_up";
-  if (days >= BANK_TIGHT_MIN_DAYS) return "tight";
-  return "may_fall_short";
-}
-
-// ---------------------------------------------------------------------------
 // Fees
 // ---------------------------------------------------------------------------
-
-export function monthlySpendCents(dailyCents: number): number {
-  assertCents(dailyCents, "dailyCents");
-  return dailyCents * ESTIMATE_DAYS_PER_MONTH;
-}
-
-/**
- * Bank source, steady state with even daily orders and transfers landing 7
- * days later: the available balance bottoms out at floor − 7 × daily; the
- * bank delivers floor/7 per day and the card covers the rest.
- */
-export function uncoveredPerWindowCents(floorCents: number, dailyCents: number): number {
-  assertCents(floorCents, "floorCents");
-  assertCents(dailyCents, "dailyCents");
-  return Math.max(0, dailyCents * ASSUMED_BANK_SETTLEMENT_CALENDAR_DAYS - floorCents);
-}
-
-export function cardCoveredMonthlyCents(sourceRail: WalletSourceRail, floorCents: number, dailyCents: number): number {
-  if (sourceRail === "stripe_card") return monthlySpendCents(dailyCents);
-  return floorDiv(uncoveredPerWindowCents(floorCents, dailyCents) * ESTIMATE_DAYS_PER_MONTH, ASSUMED_BANK_SETTLEMENT_CALENDAR_DAYS);
-}
-
-export interface MonthlyCardFeeEstimate {
-  /** The estimate under the steady-state assumption. */
-  estimateCents: number;
-  /** The bound if every order went on the card. */
-  maxCents: number;
-  monthlySpendCents: number;
-}
-
-export function monthlyCardFeeEstimate(sourceRail: WalletSourceRail, floorCents: number, dailyCents: number, bps: number): MonthlyCardFeeEstimate {
-  const spend = monthlySpendCents(dailyCents);
-  return {
-    estimateCents: calculateCardFundingFeeCents(cardCoveredMonthlyCents(sourceRail, floorCents, dailyCents), bps),
-    maxCents: calculateCardFundingFeeCents(spend, bps),
-    monthlySpendCents: spend,
-  };
-}
 
 /** Card source: the one-time fee on filling an empty wallet to the floor. */
 export function firstFillFeeCents(floorCents: number, bps: number): number {
   assertCents(floorCents, "floorCents");
   return calculateCardFundingFeeCents(floorCents, bps);
-}
-
-/** "Routine top-ups keep up to": the floor. Bank copy adds "plus transfers on the way". */
-export function moneyParkedCents(floorCents: number): number {
-  assertCents(floorCents, "floorCents");
-  return floorCents;
 }
 
 // ---------------------------------------------------------------------------
