@@ -93,6 +93,7 @@ import ShippingServiceLevels from "@/pages/ShippingServiceLevels";
 import ShippingServiceLevelDetail from "@/pages/ShippingServiceLevelDetail";
 import NotificationPreferences from "@/pages/NotificationPreferences";
 import EbayChannelPage from "@/pages/EbayChannelPage";
+import WalmartChannelPage from "@/pages/WalmartChannelPage";
 import ShopifyChannelPage from "@/pages/ShopifyChannelPage";
 import SyncLogPage from "@/pages/SyncLogPage";
 import OmsOrders from "@/pages/OmsOrders";
@@ -423,6 +424,9 @@ function Router() {
         </Route>
         <Route path="/channels/ebay">
           <ProtectedRoute component={EbayChannelPage} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/channels/walmart/:channelId">
+          <ProtectedRoute component={WalmartChannelPage} allowedRoles={["admin", "lead"]} />
         </Route>
         <Route path="/channels/inventory">
           <ProtectedRoute

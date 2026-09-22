@@ -16,14 +16,15 @@ export class WalmartOrderPollService {
     private readonly oms: Pick<OmsService, "ingestOrder">,
     private readonly syncToWms: (orderId: number) => Promise<unknown>,
     private readonly observations: ChannelOrderObservationWriter,
-    private readonly now: () => Date = () => new Date()) {}
+    private readonly now: () => Date = () => new Date(),
+    private readonly resolveSkuMappings?: (channelId: number, skus: readonly string[]) => Promise<void>) {}
 
   async poll(channelId: number): Promise<{ observed: number; processed: number }> {
     const repository = this.channels.repository;
     return repository.withLock(channelId, async () => {
       const row = await this.channels.connection(channelId);
       this.channels.requireRuntime(row);
-      if (!row.orders_enabled || row.channel_status !== "active") throw new WalmartApiError("WALMART_INTAKE_PAUSED", "Order intake is paused", false);
+      if (row.channel_status !== "active") throw new WalmartApiError("WALMART_INTAKE_PAUSED", "The sales channel is paused", false);
       await repository.assertWarehouse(row);
       const api = this.channels.api(row), now = this.now();
       const start = new Date(Math.max(row.import_since.getTime(), (row.checkpoint_at ?? row.import_since).getTime() - OVERLAP_MS));
@@ -61,6 +62,11 @@ export class WalmartOrderPollService {
                 validateWalmartOrderScope(order, row.ship_node_id);
                 // Validate all monetary data and mappings before accepting the order.
                 mapWalmartOrder(order, row.ship_node_id, false);
+                const unmapped = [...new Set(order.orderLines.orderLine.map(line => line.item.sku).filter(sku => !mappedSkus.has(sku)))];
+                if (unmapped.length && this.resolveSkuMappings) {
+                  await this.resolveSkuMappings(channelId, unmapped);
+                  for (const mapping of await repository.mappings(channelId)) mappedSkus.add(mapping.channel_sku);
+                }
                 if (order.orderLines.orderLine.some(line => !mappedSkus.has(line.item.sku))) {
                   throw new WalmartApiError("WALMART_SKU_UNMAPPED", "Link every order SKU to an Echelon variant before acknowledgment", false);
                 }

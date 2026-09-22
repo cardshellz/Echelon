@@ -59,9 +59,9 @@ describe("Walmart exact inventory destination", () => {
 });
 
 describe("Walmart production activation boundary", () => {
-  it("blocks production without the runtime opt-in and sandbox on a production server", () => {
+  it("honors an explicit server kill switch and blocks sandbox on a production server", () => {
     const service = new WalmartChannelService({} as never, null, { liveEnabled: false, productionServer: true });
-    expect(() => service.requireRuntime({ environment: "production" } as never)).toThrow(/not been enabled/);
+    expect(() => service.requireRuntime({ environment: "production" } as never)).toThrow(/disabled by server configuration/);
     expect(() => service.requireRuntime({ environment: "sandbox" } as never)).toThrow(/production warehouse/);
   });
   it("requires a credential vault before verification sends anything", async () => {

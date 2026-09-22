@@ -86,7 +86,7 @@ import { createChannelFulfillmentIngressRepository } from "../modules/oms/channe
 import { createChannelFulfillmentIngressService } from "../modules/oms/channel-fulfillment-ingress.service";
 import { markShipmentCancelled } from "../modules/orders/shipment-rollup";
 import { withAdvisoryLock } from "../infrastructure/scheduler-lock";
-import { envFlagEnabled } from "../infrastructure/scheduler-config";
+import { envFlagEnabled, getSchedulerDisableReason } from "../infrastructure/scheduler-config";
 import type { Pool } from "pg";
 import { createShipStationService } from "../modules/oms/shipstation.service";
 import { createShipStationRelatedLabelReader } from "../modules/shipping/shipstation-related-labels.reader";
@@ -131,6 +131,10 @@ import { logger as platformLogger } from "../platform/observability/logger";
 import { createSourceLockService } from "../modules/channels/source-lock.service";
 import { createShopifyAdapter } from "../modules/channels/adapters/shopify.adapter";
 import { WalmartChannelService } from "../modules/channels/adapters/walmart/walmart-channel.service";
+import { WalmartCatalogAdapter } from "../modules/channels/adapters/walmart/walmart-catalog.adapter";
+import { ChannelCatalogService } from "../modules/channels/channel-catalog.service";
+import { PostgresChannelCatalogRepository } from "../modules/channels/channel-catalog.repository";
+import { ChannelIdentityError } from "../modules/channels/channel-identity.domain";
 import { WalmartConnectionRepository } from "../modules/channels/adapters/walmart/walmart-connection.repository";
 import { WalmartAdapter } from "../modules/channels/adapters/walmart/walmart.adapter";
 import { WalmartOrderPollService } from "../modules/channels/adapters/walmart/walmart-order-poll.service";
@@ -380,7 +384,17 @@ export function createServices(
     AesGcmFulfillmentProviderCredentialCipher.fromEnvOrNull({
       SHIPPING_PROVIDER_CREDENTIAL_ENCRYPTION_KEY: process.env.WALMART_CREDENTIAL_ENCRYPTION_KEY,
       SHIPPING_PROVIDER_CREDENTIAL_KEY_ID: process.env.WALMART_CREDENTIAL_KEY_ID,
-    }), { liveEnabled: envFlagEnabled("WALMART_LIVE_ENABLED"), productionServer: process.env.NODE_ENV === "production" });
+    }), { liveEnabled: process.env.WALMART_LIVE_ENABLED !== "false", productionServer: process.env.NODE_ENV === "production",
+      pollingDisabledReason: process.env.WALMART_ORDER_POLLING_ENABLED === "false" ? "WALMART_ORDER_POLLING_ENABLED=false"
+        : getSchedulerDisableReason("WALMART_ORDER_POLLING_DISABLED") });
+  const channelCatalogRepository = new PostgresChannelCatalogRepository(databasePool);
+  const walmartCatalog = new ChannelCatalogService(channelCatalogRepository, new WalmartCatalogAdapter(walmart));
+  const catalogProviders = new Map<string, ChannelCatalogService>([["walmart", walmartCatalog]]);
+  const channelCatalog = { async forChannel(channelId: number) {
+    const service = catalogProviders.get(await channelCatalogRepository.providerKey(channelId));
+    if (!service) throw new ChannelIdentityError("CHANNEL_CATALOG_UNSUPPORTED", "This channel uses its provider configuration page for catalog management");
+    return service;
+  } };
   const walmartAdapter = new WalmartAdapter(walmart, new PostgresInventoryPublicationSupplyReader(databasePool));
   const adapterRegistry = new ChannelAdapterRegistry();
   adapterRegistry.register(shopifyAdapter);
@@ -686,7 +700,8 @@ export function createServices(
   // SyncRecovery — unified order-pipeline gap recovery (Shopify → shopify_orders
   // → OMS → WMS). Runs on a schedule and is exposed via /api/sync/recover-orders.
   const walmartOrderPoll = new WalmartOrderPollService(walmart, oms, id => wmsSync.syncOmsOrderToWms(id),
-    new PostgresChannelOrderObservationWriter(databasePool));
+    new PostgresChannelOrderObservationWriter(databasePool), () => new Date(),
+    (channelId, skus) => walmartCatalog.linkExactSkus(channelId, skus, "walmart-order-intake"));
   const syncRecovery = new SyncRecoveryService(db, { oms, wmsSync, shipStation });
 
   return {
@@ -748,6 +763,7 @@ export function createServices(
     wmsSync,
     syncRecovery,
     walmart,
+    channelCatalog,
     walmartOrderPoll,
   };
 }
