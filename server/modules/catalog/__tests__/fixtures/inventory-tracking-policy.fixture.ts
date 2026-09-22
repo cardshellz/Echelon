@@ -7,7 +7,7 @@ const introducedColumns = new Set(["inventory_tracking_default", "inventory_trac
 const tables = [schema.shippingGroups, schema.products, schema.productVariants, schema.channels, schema.channelFeeds,
   schema.channelListings, schema.omsOrders, schema.omsOrderLines, schema.omsOrderEvents,
   schema.omsOrderLineAuthorityEvents, schema.wmsOrders, schema.wmsOrderItems,
-  schema.inventoryLevels, schema.inventoryLots, schema.inventoryAvailabilityClaimLines,
+  schema.inventoryLevels, schema.inventoryLots, schema.buildComponentReservations, schema.inventoryAvailabilityClaimLines,
   schema.inventoryAvailabilityClaimResources, schema.auditEvents, schema.productLocations, schema.warehouseLocations,
   schema.allocationExceptions, schema.pickingLogs, schema.inventoryAvailabilityRuntimeAuthority, schema.inventoryAvailabilityClaimCommands];
 
@@ -32,12 +32,15 @@ export const inventoryTrackingPolicyBaseFixture = [...new Set(tables.map(t => ge
     });
     return `CREATE TABLE ${quote(config.schema ?? "public")}.${quote(config.name)} (${columns.join(",")});`;
   }).join("\n") + `
+    CREATE TABLE inventory.cutover_admission_fence (singleton_key boolean PRIMARY KEY, epoch bigint NOT NULL);
+    INSERT INTO inventory.cutover_admission_fence VALUES(true,1);
+    CREATE TABLE inventory.quantity_ledger_opening (singleton_key boolean PRIMARY KEY, command_id bigint);
     CREATE SCHEMA membership;
     CREATE TABLE membership.shopify_metafield_outbox (id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
       target_type text, target_id text, namespace text, key text, value jsonb, operation text, dedupe_key text,
       status text NOT NULL DEFAULT 'pending', scheduled_for timestamp, attempts integer DEFAULT 0, last_error text);
     CREATE UNIQUE INDEX policy_test_metafield_uq ON membership.shopify_metafield_outbox(dedupe_key) WHERE status = 'pending';
-    CREATE TABLE inventory.replen_tasks (id integer, order_id integer, pick_product_variant_id integer, status text, exception_reason text, notes text, blocks_shipment boolean, created_at timestamp);
+    CREATE TABLE inventory.replen_tasks (id integer, order_id integer, pick_product_variant_id integer, source_product_variant_id integer, status text, exception_reason text, notes text, blocks_shipment boolean, created_at timestamp);
     CREATE TABLE inventory.inventory_publication_outbox (id integer, product_variant_id integer, state text);
     CREATE UNIQUE INDEX policy_test_order_uq ON oms.oms_orders(channel_id, external_order_id);
     CREATE UNIQUE INDEX policy_test_authority_event_uq ON oms.oms_order_line_authority_events(event_key);

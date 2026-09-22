@@ -690,6 +690,9 @@
   "inventory.safety_definition_applications": [
     "modules/inventory-planning"
   ],
+  "inventory.tracking_stop_history": [
+    "modules/inventory"
+  ],
   "inventory.transformation_model_heads": [
     "modules/inventory-planning"
   ],

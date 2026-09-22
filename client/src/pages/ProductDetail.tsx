@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useInventoryCommand } from "@/lib/inventory-command";
+import { InventoryTrackingHistory } from "@/components/catalog/InventoryTrackingHistory";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useRoute, useLocation, useSearch } from "wouter";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
@@ -2865,6 +2866,7 @@ export default function ProductDetail() {
                       Applies to this product and variants that inherit it. Variants can override it in either direction.
                       Untracked physical products still require pick confirmation.
                     </p>
+                    <InventoryTrackingHistory key={product.id} productId={product.id} />
                   </div>
                   <div className="space-y-2 border-t pt-4" data-testid="inventory-behavior-control">
                     <div>
