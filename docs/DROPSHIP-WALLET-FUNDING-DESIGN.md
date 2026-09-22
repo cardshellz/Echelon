@@ -151,6 +151,13 @@ refuses a private key outright). Migration 0691; the words are in
   recorded at the address and never credited. A scan stops before any
   transfer it cannot record, so nothing is credited out of order and a
   permanent fault stays visible until a human acts.
+- **No cap.** Owner decision: a single USDC deposit has no maximum. The
+  watcher credits every transfer above zero in full; the Stripe funding
+  range (`assertStripeWalletFundingAmount`,
+  `DROPSHIP_STRIPE_MAX_WALLET_FUNDING_CENTS`) is never consulted on this
+  path. The one bound is representability: `usdcAtomicUnitsToCents` refuses
+  an amount above `Number.MAX_SAFE_INTEGER` cents with
+  `DROPSHIP_USDC_DEPOSIT_INVALID`.
 - **Settlement tick.** Every pending credit is judged against its receipt:
   settle at the safe head; re-record one re-included in another block; void
   one whose receipt is gone once the chain has moved `voidAfterBlocks` (60)
