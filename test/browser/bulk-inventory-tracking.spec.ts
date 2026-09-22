@@ -9,7 +9,7 @@ async function setup(page: Page, edit = true) {
     { id: 3, name: "Other group", sku: "OTHER", productLineIds: [11], categoryId: 20, variants: [], inventoryTrackingDefault: true },
   ].map(product => ({ ...product, isActive: true, status: "active", baseUnit: "piece" }));
   const state = { products, previews: [] as BulkInventoryTrackingRequest[], applies: [] as Array<{ body: BulkInventoryTrackingApply; key: string | undefined }>,
-    blocked: false, newlyBlocked: false, stale: false, uncertain: false, errors: [] as string[] };
+    history: false, blocked: false, newlyBlocked: false, stale: false, uncertain: false, errors: [] as string[] };
   page.on("pageerror", error => state.errors.push(error.message));
   await page.route("**/api/**", async route => {
     const req = route.request(); const path = new URL(req.url()).pathname;
@@ -19,11 +19,14 @@ async function setup(page: Page, edit = true) {
     if (path === "/api/product-categories") return route.fulfill({ json: [{ id: 20, name: "Stickers", isActive: true }, { id: 21, name: "Cards", isActive: true }] });
     if (path === `${BULK_INVENTORY_TRACKING_PATH}/preview`) {
       const body = req.postDataJSON() as BulkInventoryTrackingRequest; state.previews.push(body);
-      return route.fulfill({ json: { previewHash: (body.productIds.length === 2 ? "a" : "b").repeat(64), inventoryTrackingDefault: body.inventoryTrackingDefault,
+      return route.fulfill({ json: { previewHash: (body.productIds.length === 2 ? "a" : "b").repeat(64), inventoryTrackingDefault: body.inventoryTrackingDefault, stockDisposition: body.stockDisposition,
         products: body.productIds.map(id => { const product = products.find(p => p.id === id)!; return {
           productId: id, name: product.name, sku: product.sku, currentDefault: product.inventoryTrackingDefault,
           status: (state.blocked && id === 2) || (state.newlyBlocked && id === 1) ? "blocked" : product.inventoryTrackingDefault === body.inventoryTrackingDefault ? "unchanged" : "change",
           variantCount: product.variants.length, changingVariantCount: id === 2 ? 1 : 0, trackedOverrideCount: id === 2 ? 1 : 0, untrackedOverrideCount: 0,
+          history: state.history && id === 2 ? [{ variantId: 21, sku: 'CARD-INHERITED', snapshotHash: 'c'.repeat(64), summary: {
+            levelCount: 1, lotCount: 1, onHand: '2', reserved: '0', picked: '1', packed: '0', backorder: '0',
+            lotOnHand: '2', lotReserved: '0', lotPicked: '1', lotPacked: '0', recordedOnHandValueMills: '1250000' } }] : [],
           blockers: state.blocked && id === 2 ? [
             { variantId: 21, code: "stock", message: "CARD-INHERITED: stock or warehouse quantities", evidence: {
               totalCount: 1, records: [{ kind: "stock", recordId: 1284, locationId: 1, locationCode: "UNSORTED",
@@ -69,7 +72,7 @@ async function selectGroup(page: Page) {
 
 test("selects the filtered group, reviews product-only defaults and overrides, and refreshes after apply", async ({ page }, testInfo) => {
   const state = await setup(page); await selectGroup(page);
-  expect(state.previews).toEqual([{ productIds: [1, 2], inventoryTrackingDefault: false }]);
+  expect(state.previews).toEqual([{ productIds: [1, 2], inventoryTrackingDefault: false, stockDisposition: "retain_history" }]);
   await expect(page.getByTestId("bulk-inventory-product-1")).toContainText("No variants");
   await expect(page.getByTestId("bulk-inventory-product-2")).toContainText("1 explicit Track");
   await expect(page.getByTestId("bulk-inventory-review")).toContainText("1 variant overrides preserved");
@@ -80,7 +83,7 @@ test("selects the filtered group, reviews product-only defaults and overrides, a
   await expect(page.getByText("0 selected", { exact: true })).toBeVisible();
   await expect(page.getByText("Do not track", { exact: true }).filter({ visible: true })).toHaveCount(2);
   await page.screenshot({ path: testInfo.outputPath("bulk-products.png"), fullPage: true });
-  expect(state.applies[0]).toMatchObject({ body: { productIds: [1, 2], inventoryTrackingDefault: false, expectedPreviewHash: "a".repeat(64) } });
+  expect(state.applies[0]).toMatchObject({ body: { productIds: [1, 2], inventoryTrackingDefault: false, stockDisposition: "retain_history", expectedPreviewHash: "a".repeat(64) } });
   expect(state.applies[0].key).toBeTruthy();
   expect(state.products[2].inventoryTrackingDefault).toBe(true); expect(state.errors).toEqual([]);
 });
@@ -129,7 +132,7 @@ test("freshly reviews eligible products, retries their exact command, and retain
   await page.getByRole("button", { name: "Review eligible products only (1)", exact: true }).click();
   await expect(page.getByTestId("bulk-inventory-excluded")).toContainText("1 excluded products will stay unchanged and selected");
   await expect(page.getByTestId("bulk-inventory-apply")).toBeEnabled();
-  expect(state.previews).toEqual([{ productIds: [1, 2], inventoryTrackingDefault: false }, { productIds: [1], inventoryTrackingDefault: false }]);
+  expect(state.previews).toEqual([{ productIds: [1, 2], inventoryTrackingDefault: false, stockDisposition: "retain_history" }, { productIds: [1], inventoryTrackingDefault: false, stockDisposition: "retain_history" }]);
   state.stale = true;
   await page.getByTestId("bulk-inventory-apply").click();
   await expect(page.getByTestId("bulk-inventory-apply")).toHaveCount(0);
@@ -144,7 +147,7 @@ test("freshly reviews eligible products, retries their exact command, and retain
   expect(state.applies).toHaveLength(3);
   expect(state.applies[1]).toEqual(state.applies[2]);
   expect(state.applies[0].key).not.toBe(state.applies[1].key);
-  expect(state.applies[2].body).toEqual({ productIds: [1], inventoryTrackingDefault: false, expectedPreviewHash: "b".repeat(64) });
+  expect(state.applies[2].body).toEqual({ productIds: [1], inventoryTrackingDefault: false, stockDisposition: "retain_history", expectedPreviewHash: "b".repeat(64) });
   expect(state.products.map(p => p.inventoryTrackingDefault)).toEqual([false, true, true]);
   await expect(page.getByText("1 selected", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Inventory tracking", exact: true }).click();
@@ -190,4 +193,21 @@ test("hides bulk editing from users without inventory edit permission", async ({
   await expect(page.getByTestId("bulk-product-actions")).toHaveCount(0);
   await expect(page.getByRole("checkbox")).toHaveCount(0);
   expect(state.previews).toEqual([]); expect(state.errors).toEqual([]);
+});
+
+test("reviews retained balances and applies the exact stop-tracking intent", async ({ page }, testInfo) => {
+  const state = await setup(page); state.history = true;
+  await selectGroup(page);
+  const history = page.getByTestId("tracking-history-review-21");
+  await expect(history).toContainText("last recorded balances to keep in history");
+  await expect(history).toContainText("On hand 2");
+  await expect(history).toContainText("Picked 1");
+  await expect(history).toContainText("$125.00");
+  await expect(page.getByRole("dialog")).toContainText("without stock checks or deductions");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("stop-tracking-history.png"), fullPage: true });
+  await page.getByTestId("bulk-inventory-apply").click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  expect(state.applies[0].body.stockDisposition).toBe("retain_history");
+  expect(state.errors).toEqual([]);
 });

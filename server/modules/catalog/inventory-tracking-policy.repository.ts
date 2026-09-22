@@ -4,8 +4,13 @@ import type { InsertProductVariant, ProductVariant } from "@shared/schema";
 import { parseInventoryTrackingWrite, resolveInventoryTrackingPolicy } from "@shared/catalog/inventory-tracking-policy";
 import { persistAuditEvent } from "../../infrastructure/auditLogger";
 import type { db } from "../../db";
+import { loadTrackingStopSnapshot, retainTrackingStopHistory, trackingStopOperationalBlockers } from "../inventory/infrastructure/tracking-stop.repository";
+
+import { MAX_TRACKING_HISTORY_RECORDS } from "@shared/catalog/inventory-tracking-history";
 
 type Transaction = Pick<typeof db, "select" | "update" | "insert" | "execute">;
+
+type StockDisposition = "retain_history" | undefined;
 
 export class InventoryTrackingPolicyError extends Error {
   constructor(readonly code: string, message: string, readonly statusCode = 409) {
@@ -21,7 +26,7 @@ async function lockProduct(tx: Transaction, productId: number) {
 }
 
 /** Policy changes cannot discard stock, reservations, picks, or pending publication work. */
-async function transitionBlockers(tx: Transaction, variant: ProductVariant, next: boolean): Promise<string[]> {
+async function transitionBlockers(tx: Transaction, variant: ProductVariant, next: boolean, disposition?: StockDisposition): Promise<string[]> {
   if ((variant.trackInventory !== false) === next) return [];
   // These locks also serialize changes with existing level and claim mutations.
   await tx.execute(sql`SELECT id FROM inventory.inventory_levels
@@ -49,11 +54,14 @@ async function transitionBlockers(tx: Transaction, variant: ProductVariant, next
   `);
   const row = result.rows[0];
   if (!row) throw new Error("Inventory policy dependency query returned no row");
-  return Object.entries(row).filter(([, present]) => present === true).map(([name]) => name);
+  const dependencies = Object.entries(row).filter(([, present]) => present === true).map(([name]) => name);
+  if (next || disposition !== "retain_history") return dependencies;
+  return [...dependencies.filter(code => code !== "stock" && code !== "lots"),
+    ...await trackingStopOperationalBlockers(tx, variant.id)];
 }
 
-async function assertTransitionAllowed(tx: Transaction, variant: ProductVariant, next: boolean): Promise<void> {
-  const blockers = await transitionBlockers(tx, variant, next);
+async function assertTransitionAllowed(tx: Transaction, variant: ProductVariant, next: boolean, disposition?: StockDisposition): Promise<void> {
+  const blockers = await transitionBlockers(tx, variant, next, disposition);
   if (blockers.length > 0) throw new InventoryTrackingPolicyError(
     "INVENTORY_POLICY_HAS_DEPENDENCIES",
     `Variant ${variant.id} cannot change inventory tracking while it has: ${blockers.join(", ")}`,
@@ -61,7 +69,7 @@ async function assertTransitionAllowed(tx: Transaction, variant: ProductVariant,
 }
 
 /** A read-only review uses the same locks and dependency checks as the writer. */
-export async function inspectProductInventoryTracking(tx: Transaction, productId: number, next: boolean) {
+export async function inspectProductInventoryTracking(tx: Transaction, productId: number, next: boolean, disposition?: StockDisposition, historyRecordBudget = MAX_TRACKING_HISTORY_RECORDS) {
   const product = await lockProduct(tx, productId);
   const variants = await tx.select().from(productVariants).where(eq(productVariants.productId, productId))
     .orderBy(productVariants.id).for("update");
@@ -69,21 +77,31 @@ export async function inspectProductInventoryTracking(tx: Transaction, productId
   for (const variant of variants) {
     const effective = resolveInventoryTrackingPolicy({ inventoryTrackingDefault: next,
       inventoryTrackingOverride: variant.inventoryTrackingOverride, requiresShipping: variant.requiresShipping });
+    const stopping = product.inventoryTrackingDefault !== next && !effective && variant.trackInventory !== false
+      && disposition === "retain_history";
+    const history = stopping ? await loadTrackingStopSnapshot(tx, variant.id, historyRecordBudget) : undefined;
+    if (history) historyRecordBudget -= history.summary.levelCount + history.summary.lotCount;
     transitions.push({ variant, effective, blockers: product.inventoryTrackingDefault === next
-      ? [] : await transitionBlockers(tx, variant, effective) });
+      ? [] : await transitionBlockers(tx, variant, effective, disposition),
+      history });
   }
   return { product, transitions };
 }
 
-async function projectVariant(tx: Transaction, variant: ProductVariant, next: boolean, now: Date): Promise<void> {
+async function projectVariant(tx: Transaction, variant: ProductVariant, next: boolean, now: Date, actor: string, disposition?: StockDisposition): Promise<void> {
   if ((variant.trackInventory !== false) === next) return;
-  await assertTransitionAllowed(tx, variant, next);
+  await assertTransitionAllowed(tx, variant, next, disposition);
+  if (!next && disposition === "retain_history") await retainTrackingStopHistory(tx, {
+    productId: variant.productId, variantId: variant.id, actor, now,
+    snapshot: await loadTrackingStopSnapshot(tx, variant.id),
+  });
   await tx.update(productVariants).set({ trackInventory: next, updatedAt: now }).where(eq(productVariants.id, variant.id));
   if (!next) await tx.update(channelFeeds).set({ isActive: 0, updatedAt: now }).where(eq(channelFeeds.productVariantId, variant.id));
 }
 
 export async function updateProductInventoryTracking(
   tx: Transaction, productId: number, next: boolean, actor: string, now: Date,
+  disposition?: StockDisposition,
 ): Promise<void> {
   if (typeof next !== "boolean") throw new InventoryTrackingPolicyError("INVENTORY_POLICY_INVALID", "Product inventory tracking must be a boolean", 400);
   const product = await lockProduct(tx, productId);
@@ -93,12 +111,12 @@ export async function updateProductInventoryTracking(
   for (const variant of variants) {
     const effective = resolveInventoryTrackingPolicy({ inventoryTrackingDefault: next,
       inventoryTrackingOverride: variant.inventoryTrackingOverride, requiresShipping: variant.requiresShipping });
-    await projectVariant(tx, variant, effective, now);
+    await projectVariant(tx, variant, effective, now, actor, disposition);
   }
   await tx.update(products).set({ inventoryTrackingDefault: next, updatedAt: now }).where(eq(products.id, productId));
   await persistAuditEvent(tx, { actor, action: "catalog.inventory_tracking_default.changed", target: `product:${productId}`,
     changes: { before: { inventoryTrackingDefault: product.inventoryTrackingDefault }, after: { inventoryTrackingDefault: next } },
-    context: { variantIds: variants.filter(v => v.inventoryTrackingOverride === null).map(v => v.id) },
+    context: { variantIds: variants.filter(v => v.inventoryTrackingOverride === null).map(v => v.id), stockDisposition: disposition },
   }, { timestamp: now });
 }
 

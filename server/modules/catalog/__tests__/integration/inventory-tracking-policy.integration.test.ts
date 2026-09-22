@@ -23,6 +23,10 @@ import { normalizeShopifyLineItems } from "../../../oms/shopify-line-item-normal
 import { buildWmsLineItemFromOmsLine } from "../../../oms/wms-sync.service";
 import { decideChannelFulfillmentInventoryPosting } from "../../../oms/domain/channel-fulfillment-inventory-policy";
 
+import { listTrackingStopHistory, exportTrackingStopHistory } from "../../../inventory/infrastructure/tracking-stop.repository";
+
+import { COGSService } from "../../../inventory/cogs.service";
+
 const databaseUrl = process.env.ECHELON_TEST_DATABASE_URL;
 const disposable = process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
 const describeDatabase = databaseUrl && disposable ? describe : describe.skip;
@@ -42,6 +46,7 @@ describeDatabase.sequential("product inventory policy migration and transactions
       VALUES(1,1,'Tracked',true),(2,1,'Untracked',false),(3,1,'Legacy null',null);`);
     await database.pool.query(migration);
     await database.pool.query(custodyMigration);
+    await database.pool.query(await readFile(resolve("migrations/0697_inventory_tracking_history.sql"), "utf8"));
     for (const file of ["136_financial_command_results.sql", "140_financial_command_operations.sql"]) {
       await database.pool.query(await readFile(resolve("migrations", file), "utf8"));
     }
@@ -50,13 +55,16 @@ describeDatabase.sequential("product inventory policy migration and transactions
     orm = drizzle(database.pool, { schema });
   });
   beforeEach(async () => {
-    await database.pool.query(`TRUNCATE catalog.products, catalog.product_variants, channels.channels,
+    await database.pool.query(`ALTER TABLE inventory.tracking_stop_history DISABLE TRIGGER tracking_stop_history_no_truncate;
+      TRUNCATE inventory.tracking_stop_history, inventory.build_component_reservations, inventory.quantity_ledger_opening, inventory.replen_tasks;
+      TRUNCATE catalog.products, catalog.product_variants, channels.channels,
       channels.channel_product_identities, channels.channel_listings, channels.channel_feeds,
       oms.oms_orders, oms.oms_order_lines, oms.oms_order_events, oms.oms_order_line_authority_events,
       wms.orders, wms.order_items, wms.picking_logs, wms.allocation_exceptions, inventory.inventory_levels, inventory.inventory_lots,
       inventory.availability_claim_lines, inventory.availability_claim_resources,
       inventory.inventory_publication_outbox, inventory.availability_runtime_authority, inventory.availability_claim_commands,
       warehouse.warehouse_locations, public.audit_events, public.financial_command_results RESTART IDENTITY CASCADE;
+      ALTER TABLE inventory.tracking_stop_history ENABLE TRIGGER tracking_stop_history_no_truncate;
       INSERT INTO catalog.products(id,name,sku) VALUES(1,'Product','PRODUCT');
       INSERT INTO channels.channels(id,name,provider) VALUES(36,'Store','shopify'),(37,'Other store','shopify');`);
   });
@@ -74,6 +82,206 @@ describeDatabase.sequential("product inventory policy migration and transactions
       idempotencyKey: key, requestHash: createHash("sha256").update(JSON.stringify(input)).digest("hex"),
       commandName: "catalog.inventory_tracking.bulk", contractVersion: 1 };
   }
+
+  const stopRequest = { productIds: [1], inventoryTrackingDefault: false, stockDisposition: "retain_history" as const };
+  async function stockForStop() {
+    const variant = await createVariant();
+    await database.pool.query("INSERT INTO warehouse.warehouse_locations(id,code) VALUES(1,'UNSORTED')");
+    await database.pool.query(`INSERT INTO inventory.inventory_levels(product_variant_id,warehouse_location_id,variant_qty,reserved_qty,picked_qty,packed_qty,backorder_qty)
+      VALUES($1,1,2,1,3,4,5);
+      `, [variant.id]);
+    await database.pool.query(`INSERT INTO inventory.inventory_lots(product_variant_id,warehouse_location_id,lot_number,received_at,
+      qty_on_hand,qty_reserved,qty_picked,qty_packed,qty_received,qty_consumed,unit_cost_mills,total_unit_cost_mills)
+      VALUES($1,1,'HISTORY', $2,2,1,3,4,12,3,9007199254740993,9007199254740993)`, [variant.id, now]);
+    return variant;
+  }
+  async function stopThroughReview(request = stopRequest, key = "stop-tracking") {
+    const service = bulkService(); const preview = await service.preview(request);
+    const input = { ...request, expectedPreviewHash: preview.previewHash };
+    return { preview, input, result: await service.apply(input, bulkCommand(input, key)) };
+  }
+
+  it("stops managed balances while retaining exact immutable quantities, cost precision, identity and replay evidence", async () => {
+    const variant = await stockForStop();
+    const before = (await database.pool.query(`SELECT to_jsonb(l)::text AS lot FROM inventory.inventory_lots l`)).rows[0].lot;
+    await orm.insert(schema.channelFeeds).values({ channelId: 36, productVariantId: variant.id, channelVariantId: "stop-probe", isActive: 1 });
+    const outcome = await stopThroughReview();
+    expect(outcome.preview.products[0]).toMatchObject({ status: "change", blockers: [], history: [{ variantId: variant.id,
+      summary: { levelCount: 1, lotCount: 1, onHand: "2", reserved: "1", picked: "3", packed: "4", backorder: "5", recordedOnHandValueMills: "18014398509481986" } }] });
+    expect(outcome.result).toMatchObject({ httpStatus: 200, body: { changedProductIds: [1] } });
+    expect((await orm.select().from(schema.inventoryLevels))[0]).toMatchObject({ variantQty: 0, reservedQty: 0, pickedQty: 0, packedQty: 0, backorderQty: 0 });
+    expect((await database.pool.query(`SELECT qty_on_hand,qty_reserved,qty_picked,qty_packed,qty_received,qty_consumed,status,unit_cost_mills::text FROM inventory.inventory_lots`)).rows[0])
+      .toEqual({ qty_on_hand: 0, qty_reserved: 0, qty_picked: 0, qty_packed: 0, qty_received: 12, qty_consumed: 3, status: "tracking_stopped", unit_cost_mills: "9007199254740993" });
+    const history = (await database.pool.query(`SELECT actor,stopped_at,lots->0 AS lot,(lots->0)::text AS exact_lot,snapshot_hash FROM inventory.tracking_stop_history`)).rows;
+    expect(history).toHaveLength(1);
+    expect(history[0]).toMatchObject({ actor: "user:policy-test", stopped_at: now, exact_lot: before,
+      snapshot_hash: outcome.preview.products[0].history![0].snapshotHash });
+    expect((await orm.select().from(schema.channelFeeds))[0].isActive).toBe(0);
+    expect(await bulkService().apply(outcome.input, bulkCommand(outcome.input, "stop-tracking"))).toEqual({ ...outcome.result, replayed: true });
+    expect((await database.pool.query("SELECT count(*)::int AS count FROM inventory.tracking_stop_history")).rows[0].count).toBe(1);
+    for (const statement of ["UPDATE inventory.tracking_stop_history SET actor='changed'", "DELETE FROM inventory.tracking_stop_history", "TRUNCATE inventory.tracking_stop_history"]) {
+      await expect(database.pool.query(statement)).rejects.toMatchObject({ code: "23514" });
+    }
+    const records = await listTrackingStopHistory(orm, 1);
+    expect(records.records[0].summary.recordedOnHandValueMills).toBe("18014398509481986");
+    const document = await exportTrackingStopHistory(orm, 1, records.records[0].id);
+    expect(document).toContain('"unit_cost_mills": 9007199254740993');
+    expect(await exportTrackingStopHistory(orm, 2, records.records[0].id)).toBeNull();
+    // Re-enabling starts from a new managed balance, never stale retained stock.
+    await orm.transaction(tx => updateProductInventoryTracking(tx, 1, true, "user:test", now));
+    expect((await orm.select().from(schema.inventoryLevels))[0].variantQty).toBe(0);
+    expect((await orm.select().from(schema.inventoryLots))[0].status).toBe("tracking_stopped");
+  });
+
+  it.each(["quantity", "cost", "unshown-lot"])("invalidates a stop-tracking review after a %s changes", async change => {
+    const variant = await stockForStop(); const service = bulkService();
+    if (change === "unshown-lot") await database.pool.query(`INSERT INTO inventory.inventory_lots(product_variant_id,warehouse_location_id,lot_number,received_at,qty_on_hand)
+      SELECT $1,1,'TAIL-'||n,now(),1 FROM generate_series(1,21)n`, [variant.id]);
+    const preview = await service.preview(stopRequest);
+    if (change === "quantity") await database.pool.query("UPDATE inventory.inventory_levels SET picked_qty=4");
+    if (change === "cost") await database.pool.query("UPDATE inventory.inventory_lots SET unit_cost_mills=9007199254740994");
+    if (change === "unshown-lot") await database.pool.query("UPDATE inventory.inventory_lots SET qty_on_hand=2 WHERE lot_number='TAIL-21'");
+    const input = { ...stopRequest, expectedPreviewHash: preview.previewHash };
+    expect(await service.apply(input, bulkCommand(input))).toMatchObject({ httpStatus: 409, body: { code: "BULK_INVENTORY_PREVIEW_STALE" } });
+    expect((await orm.select().from(schema.products))[0].inventoryTrackingDefault).toBe(true);
+    expect((await database.pool.query("SELECT * FROM inventory.tracking_stop_history")).rows).toHaveLength(0);
+  });
+
+  it.each(["oms_orders", "open_orders", "build_reservations", "frozen_locations", "replenishment", "quantity_ledger"])(
+    "does not archive an unresolved %s obligation", async blocker => {
+      const variant = await stockForStop();
+      if (blocker === "oms_orders") {
+        const [sale] = await orm.insert(schema.omsOrders).values({ channelId: 36, externalOrderId: "open", status: "confirmed", orderedAt: now }).returning();
+        await orm.insert(schema.omsOrderLines).values({ orderId: sale.id, productVariantId: variant.id, quantity: 1 });
+      }
+      if (blocker === "open_orders") {
+        const [order] = await orm.insert(schema.wmsOrders).values({ orderNumber: "OPEN", customerName: "Test", warehouseStatus: "ready" }).returning();
+        await orm.insert(schema.wmsOrderItems).values({ orderId: order.id, productId: variant.id, sku: variant.sku!, name: "Variant", quantity: 1 });
+      }
+      if (blocker === "build_reservations") await database.pool.query(`INSERT INTO inventory.build_component_reservations(build_order_component_id,inventory_lot_id,reserved_qty)
+        SELECT 1,id,1 FROM inventory.inventory_lots`);
+      if (blocker === "frozen_locations") await database.pool.query("UPDATE warehouse.warehouse_locations SET cycle_count_freeze_id=1");
+      if (blocker === "replenishment") await database.pool.query("INSERT INTO inventory.replen_tasks(pick_product_variant_id,status) VALUES($1,'pending')", [variant.id]);
+      if (blocker === "quantity_ledger") await database.pool.query("INSERT INTO inventory.quantity_ledger_opening VALUES(true,1)");
+      const { preview, result } = await stopThroughReview();
+      expect(preview.products[0].blockers.map(b => b.code)).toContain(blocker);
+      expect(result).toMatchObject({ httpStatus: 409, body: { code: "BULK_INVENTORY_TRACKING_BLOCKED" } });
+      expect((await orm.select().from(schema.inventoryLevels))[0].variantQty).toBe(2);
+      expect((await database.pool.query("SELECT * FROM inventory.tracking_stop_history")).rows).toHaveLength(0);
+    });
+
+  it("rolls back history, balances, feed and policies together when a later product fails", async () => {
+    const variant = await stockForStop();
+    await orm.insert(schema.channelFeeds).values({ channelId: 36, productVariantId: variant.id, channelVariantId: "rollback-history", isActive: 1 });
+    await database.pool.query(`INSERT INTO catalog.products(id,name) VALUES(2,'Failure probe');
+      CREATE FUNCTION catalog.fail_stop_probe() RETURNS trigger LANGUAGE plpgsql AS $probe$
+        BEGIN IF NEW.id=2 THEN RAISE EXCEPTION 'Injected stop failure'; END IF; RETURN NEW; END $probe$;
+      CREATE TRIGGER stop_failure BEFORE UPDATE ON catalog.products FOR EACH ROW EXECUTE FUNCTION catalog.fail_stop_probe();`);
+    try {
+      await expect(stopThroughReview({ ...stopRequest, productIds: [1,2] })).rejects.toThrow();
+      expect((await orm.select().from(schema.inventoryLevels))[0].variantQty).toBe(2);
+      expect((await orm.select().from(schema.inventoryLots))[0].qtyPicked).toBe(3);
+      expect((await orm.select().from(schema.channelFeeds))[0].isActive).toBe(1);
+      expect((await orm.select().from(schema.products)).every(p => p.inventoryTrackingDefault)).toBe(true);
+      expect((await database.pool.query("SELECT * FROM inventory.tracking_stop_history")).rows).toHaveLength(0);
+      expect(await orm.select().from(schema.auditEvents)).toHaveLength(0);
+    } finally { await database.pool.query("DROP TRIGGER stop_failure ON catalog.products; DROP FUNCTION catalog.fail_stop_probe()"); }
+  });
+
+  it("preserves explicit tracked overrides and every terminal order record while stopping inherited stock", async () => {
+    const variant = await stockForStop(); const tracked = await createVariant(true);
+    await database.pool.query("INSERT INTO inventory.inventory_levels(product_variant_id,warehouse_location_id,variant_qty) VALUES($1,1,9)", [tracked.id]);
+    const [order] = await orm.insert(schema.wmsOrders).values({ orderNumber: "SHIPPED", customerName: "Test", warehouseStatus: "shipped" }).returning();
+    await orm.insert(schema.wmsOrderItems).values({ orderId: order.id, productId: variant.id, sku: variant.sku!, name: "Variant", quantity: 1,
+      pickedQuantity: 1, fulfilledQuantity: 1, status: "completed", inventoryTracking: true, catalogProductId: 1 });
+    const before = await orm.select().from(schema.wmsOrderItems);
+    expect((await stopThroughReview()).result.httpStatus).toBe(200);
+    expect(await orm.select().from(schema.wmsOrderItems)).toEqual(before);
+    expect((await orm.select().from(schema.productVariants).where(eq(schema.productVariants.id, tracked.id)))[0].trackInventory).toBe(true);
+    expect((await orm.select().from(schema.inventoryLevels).where(eq(schema.inventoryLevels.productVariantId, tracked.id)))[0].variantQty).toBe(9);
+    expect((await database.pool.query("SELECT product_variant_id FROM inventory.tracking_stop_history")).rows).toEqual([{ product_variant_id: variant.id }]);
+  });
+
+
+  it.each(["stock", "lot", "oms", "wms"])("serializes a new %s write against the history transition", async kind => {
+    const variant = await stockForStop();
+    const [sale] = await orm.insert(schema.omsOrders).values({ channelId: 36, externalOrderId: "race", status: "confirmed", orderedAt: now }).returning();
+    const [order] = await orm.insert(schema.wmsOrders).values({ orderNumber: "RACE", customerName: "Test", warehouseStatus: "ready" }).returning();
+    let release!: () => void; let ready!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const entered = new Promise<void>(resolve => { ready = resolve; });
+    const transition = orm.transaction(async tx => {
+      await updateProductInventoryTracking(tx, 1, false, "race-owner", now, "retain_history");
+      ready(); await gate;
+    });
+    await Promise.race([entered, transition]);
+    const writer = await database.pool.connect();
+    let attempt: Promise<unknown> | undefined;
+    try {
+      const statement = kind === "stock" ? `INSERT INTO inventory.inventory_levels(product_variant_id,warehouse_location_id,variant_qty) VALUES($1,2,1)`
+        : kind === "lot" ? `INSERT INTO inventory.inventory_lots(product_variant_id,warehouse_location_id,lot_number,received_at,qty_on_hand) VALUES($1,1,'RACE',now(),1)`
+        : kind === "oms" ? `INSERT INTO oms.oms_order_lines(order_id,product_variant_id,catalog_product_id,inventory_tracking,quantity) VALUES(${sale.id},$1,1,true,1)`
+        : `INSERT INTO wms.order_items(order_id,product_id,catalog_product_id,inventory_tracking,sku,name,quantity) VALUES(${order.id},$1,1,true,'RACE','Race',1)`;
+      attempt = writer.query(statement, [variant.id]).then(() => null, error => error);
+      release(); await transition;
+      expect(await attempt).toMatchObject({ code: "23514" });
+      expect((await orm.select().from(schema.inventoryLevels))[0].variantQty).toBe(0);
+      expect((await database.pool.query("SELECT summary->>'onHand' AS quantity FROM inventory.tracking_stop_history")).rows).toEqual([{ quantity: "2" }]);
+    } finally { release(); await transition; await attempt; writer.release(); }
+  });
+
+  it("picks a future combined-order line after stopping without checking or deducting stock", async () => {
+    const variant = await stockForStop();
+    expect((await stopThroughReview()).result.httpStatus).toBe(200);
+    await database.pool.query(`INSERT INTO channels.channel_listings(channel_id,product_variant_id,external_product_id,external_variant_id)
+      VALUES(36,$1,'1000','1001')`, [variant.id]);
+    const identity = await resolveOrderLineCatalogIdentity(orm, { channelId: 36, externalProductId: "1000", externalVariantId: "1001", sku: variant.sku });
+    expect(identity).toMatchObject({ id: variant.id, productId: 1, inventoryTracking: false });
+    const [order] = await orm.insert(schema.wmsOrders).values({ orderNumber: "FUTURE", customerName: "Test", combinedGroupId: 700, warehouseStatus: "ready" }).returning();
+    const [item] = await orm.insert(schema.wmsOrderItems).values({ orderId: order.id, productId: variant.id, sku: variant.sku!, name: "Variant", quantity: 5,
+      catalogProductId: 1, inventoryTracking: false, requiresShipping: 1, location: "UNASSIGNED" }).returning();
+    const storage = {
+      getOrderItemById: async (id: number) => (await orm.select().from(schema.wmsOrderItems).where(eq(schema.wmsOrderItems.id, id)))[0],
+      getOrderById: async (id: number) => (await orm.select().from(schema.wmsOrders).where(eq(schema.wmsOrders.id, id)))[0],
+      getOrderItems: async (id: number) => orm.select().from(schema.wmsOrderItems).where(eq(schema.wmsOrderItems.orderId, id)),
+      getAllWarehouseSettings: async () => [], getUser: async () => ({ id: "picker", username: "picker", role: "picker" }),
+      createPickingLog: async (row: typeof schema.pickingLogs.$inferInsert) => orm.insert(schema.pickingLogs).values(row),
+      updateOrderProgress: vi.fn(async () => undefined), getProductVariantBySku: vi.fn(async () => undefined),
+    };
+    const inventoryCore = { withTx: () => inventoryCore, pickItem: vi.fn(), unpickItem: vi.fn() };
+    const service = new PickingUseCases(orm as never, inventoryCore as never, {} as never, storage as never);
+    expect(await service.pickItem(item.id, { status: "completed", pickedQuantity: 5, userId: "picker", pickMethod: "pick_all" }))
+      .toMatchObject({ success: true, item: { pickedQuantity: 5, status: "completed" } });
+    expect(inventoryCore.pickItem).not.toHaveBeenCalled();
+    expect((await orm.select().from(schema.inventoryLevels))[0].pickedQty).toBe(0);
+    expect((await database.pool.query("SELECT summary->>'picked' AS quantity FROM inventory.tracking_stop_history")).rows).toEqual([{ quantity: "3" }]);
+    expect(decideChannelFulfillmentInventoryPosting({ omsRequiresShipping: true, wmsRequiresShipping: 1,
+      omsInventoryTracking: false, wmsInventoryTracking: false, omsCatalogProductId: 1, wmsCatalogProductId: 1,
+      productVariantId: variant.id, catalogVariantId: variant.id, catalogRequiresShipping: true, catalogTrackInventory: false,
+    })).toMatchObject({ status: "resolved", requiresInventoryPosting: false });
+    expect(await new COGSService(orm).getInventoryValuation()).toMatchObject({ totalQty: 0, totalValueCents: 0 });
+  });
+
+
+  it("bounds combined snapshot size before returning or applying an interactive review", async () => {
+    const variant = await createVariant();
+    await database.pool.query(`INSERT INTO inventory.inventory_levels(product_variant_id,warehouse_location_id,variant_qty)
+      SELECT $1,n,1 FROM generate_series(1,10001)n`, [variant.id]);
+    await expect(bulkService().preview(stopRequest)).rejects.toMatchObject({ code: "BULK_INVENTORY_HISTORY_TOO_LARGE" });
+    expect((await database.pool.query("SELECT * FROM inventory.tracking_stop_history")).rows).toHaveLength(0);
+    expect((await orm.select().from(schema.products))[0].inventoryTrackingDefault).toBe(true);
+  });
+
+  it("records an empty transition and preserves its evidence when migrations run again", async () => {
+    await createVariant();
+    expect((await stopThroughReview()).result.httpStatus).toBe(200);
+    const before = await database.pool.query("SELECT to_jsonb(h)::text AS document FROM inventory.tracking_stop_history h");
+    expect(before.rows).toHaveLength(1);
+    await database.pool.query(await readFile(resolve("migrations/0697_inventory_tracking_history.sql"), "utf8"));
+    expect((await database.pool.query("SELECT to_jsonb(h)::text AS document FROM inventory.tracking_stop_history h")).rows).toEqual(before.rows);
+    await expect(database.pool.query("DELETE FROM inventory.tracking_stop_history")).rejects.toMatchObject({ code: "23514" });
+  });
+
 
   it("bulk changes product-only and variant products while preserving overrides in both directions", async () => {
     await database.pool.query("INSERT INTO catalog.products(id,name) VALUES(2,'No variants'),(3,'Already set')");
