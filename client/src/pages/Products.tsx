@@ -579,13 +579,13 @@ export default function Products() {
         Showing {filteredProducts.length} of {products.length} products
       </div>
 
-      {bulkProductIds && <BulkInventoryTrackingDialog productIds={bulkProductIds} onClose={() => setBulkProductIds(null)} onApplied={result => {
+      {bulkProductIds && <BulkInventoryTrackingDialog productIds={bulkProductIds} onClose={() => setBulkProductIds(null)} onApplied={(result, remainingProductIds) => {
         queryClient.invalidateQueries({ predicate: query => typeof query.queryKey[0] === "string" && (
           query.queryKey[0].startsWith("/api/products") || query.queryKey[0].startsWith("/api/product-variants")
         ) });
-        setSelection({ context: selectionContext, ids: [] });
+        setSelection({ context: selectionContext, ids: remainingProductIds });
         setBulkProductIds(null);
-        toast({ title: "Inventory tracking updated", description: `${result.changedProductIds.length} products changed; ${result.unchangedProductIds.length} already set. Variant overrides preserved.` });
+        toast({ title: "Inventory tracking updated", description: `${result.changedProductIds.length} products changed; ${result.unchangedProductIds.length} already set. Variant overrides preserved.${remainingProductIds.length ? ` ${remainingProductIds.length} excluded products remain selected.` : ""}` });
       }} />}
 
       <Dialog open={createDialogOpen} onOpenChange={setCreateDialogOpen}>

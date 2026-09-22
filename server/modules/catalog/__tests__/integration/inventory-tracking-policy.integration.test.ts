@@ -31,14 +31,17 @@ describeDatabase.sequential("product inventory policy migration and transactions
   let database: InventoryCutoverTestDatabase;
   let orm: ReturnType<typeof drizzle<typeof schema>>;
   let migration: string;
+  let custodyMigration: string;
   const now = new Date("2026-09-21T12:00:00Z");
   beforeAll(async () => {
     database = await createInventoryCutoverTestDatabase(databaseUrl, disposable, inventoryTrackingPolicyBaseFixture);
     migration = await readFile(resolve("migrations/0694_product_inventory_tracking_policy.sql"), "utf8");
+    custodyMigration = await readFile(resolve("migrations/0696_inventory_tracking_lot_custody.sql"), "utf8");
     await database.pool.query(`INSERT INTO catalog.products(id,name) VALUES(1,'Existing');
       INSERT INTO catalog.product_variants(id,product_id,name,track_inventory)
       VALUES(1,1,'Tracked',true),(2,1,'Untracked',false),(3,1,'Legacy null',null);`);
     await database.pool.query(migration);
+    await database.pool.query(custodyMigration);
     for (const file of ["136_financial_command_results.sql", "140_financial_command_operations.sql"]) {
       await database.pool.query(await readFile(resolve("migrations", file), "utf8"));
     }
@@ -53,7 +56,7 @@ describeDatabase.sequential("product inventory policy migration and transactions
       wms.orders, wms.order_items, wms.picking_logs, wms.allocation_exceptions, inventory.inventory_levels, inventory.inventory_lots,
       inventory.availability_claim_lines, inventory.availability_claim_resources,
       inventory.inventory_publication_outbox, inventory.availability_runtime_authority, inventory.availability_claim_commands,
-      public.audit_events, public.financial_command_results RESTART IDENTITY CASCADE;
+      warehouse.warehouse_locations, public.audit_events, public.financial_command_results RESTART IDENTITY CASCADE;
       INSERT INTO catalog.products(id,name,sku) VALUES(1,'Product','PRODUCT');
       INSERT INTO channels.channels(id,name,provider) VALUES(36,'Store','shopify'),(37,'Other store','shopify');`);
   });
@@ -114,6 +117,114 @@ describeDatabase.sequential("product inventory policy migration and transactions
     expect((await orm.select().from(schema.products)).every(p => p.inventoryTrackingDefault)).toBe(true);
     expect(await orm.select().from(schema.auditEvents)).toHaveLength(0);
     expect((await orm.select().from(schema.inventoryLevels))[0].variantQty).toBe(2);
+  });
+
+  it("requires a fresh eligible-subset preview and applies only that subset with audits and replay", async () => {
+    await database.pool.query("INSERT INTO catalog.products(id,name) VALUES(2,'Eligible')");
+    const variant = await createVariant();
+    await database.pool.query("INSERT INTO inventory.inventory_levels(product_variant_id,warehouse_location_id,variant_qty) VALUES($1,1,2)", [variant.id]);
+    const service = bulkService();
+    const full = await service.preview({ productIds: [1, 2], inventoryTrackingDefault: false });
+    const request = { productIds: [2], inventoryTrackingDefault: false };
+    const wrong = { ...request, expectedPreviewHash: full.previewHash };
+    expect(await service.apply(wrong, bulkCommand(wrong, "wrong-subset")))
+      .toMatchObject({ httpStatus: 409, body: { code: "BULK_INVENTORY_PREVIEW_STALE" } });
+    const preview = await service.preview(request);
+    const input = { ...request, expectedPreviewHash: preview.previewHash };
+    const result = await service.apply(input, bulkCommand(input));
+    expect(result).toMatchObject({ httpStatus: 200, body: { changedProductIds: [2] } });
+    expect(await service.apply(input, bulkCommand(input))).toEqual({ ...result, replayed: true });
+    expect((await orm.select().from(schema.products).orderBy(schema.products.id)).map(p => p.inventoryTrackingDefault)).toEqual([true, false]);
+    expect((await orm.select().from(schema.inventoryLevels))[0].variantQty).toBe(2);
+    expect((await orm.select().from(schema.auditEvents)).filter(a => a.action === "catalog.inventory_tracking_default.changed"))
+      .toMatchObject([{ target: "product:2" }]);
+  });
+
+  it("returns exact stock, lot and order evidence without treating a cancelled warehouse order as a cancelled sale", async () => {
+    const variant = await createVariant();
+    const [location] = await orm.insert(schema.warehouseLocations).values({ code: "UNSORTED" }).returning();
+    const [level] = await orm.insert(schema.inventoryLevels).values({ productVariantId: variant.id, warehouseLocationId: location.id,
+      variantQty: 2, reservedQty: 1, pickedQty: 3, packedQty: 4, backorderQty: 5 }).returning();
+    const [lot] = await orm.insert(schema.inventoryLots).values({ productVariantId: variant.id, warehouseLocationId: location.id,
+      lotNumber: "LOT-RECON", qtyOnHand: 2, qtyReserved: 1, qtyPicked: 3, qtyPacked: 4, receivedAt: now }).returning();
+    const [sale] = await orm.insert(schema.omsOrders).values({ channelId: 36, externalOrderId: "56076", externalOrderNumber: "#56076",
+      status: "confirmed", fulfillmentStatus: null, orderedAt: now }).returning();
+    const [line] = await orm.insert(schema.omsOrderLines).values({ orderId: sale.id, productVariantId: variant.id, quantity: 6 }).returning();
+    const [cancelled] = await orm.insert(schema.wmsOrders).values({ orderNumber: "#56076", customerName: "Test", warehouseStatus: "cancelled" }).returning();
+    const [ready] = await orm.insert(schema.wmsOrders).values({ orderNumber: "#63309", customerName: "Test", warehouseStatus: "ready" }).returning();
+    await orm.insert(schema.wmsOrderItems).values({ orderId: cancelled.id, omsOrderLineId: line.id, productId: variant.id,
+      sku: variant.sku!, name: "Variant", quantity: 6, pickedQuantity: 6, status: "completed" });
+    // Legacy null-variant SKU matching must agree with the transition guard.
+    const [item] = await orm.insert(schema.wmsOrderItems).values({ orderId: ready.id, sku: variant.sku!, name: "Variant", quantity: 1 }).returning();
+    const service = bulkService();
+    const request = { productIds: [1], inventoryTrackingDefault: false };
+    const preview = await service.preview(request);
+    const blockers = Object.fromEntries(preview.products[0].blockers.map(b => [b.code, b.evidence]));
+    expect(blockers.stock).toEqual({ totalCount: 1, records: [{ kind: "stock", recordId: level.id, locationId: location.id,
+      locationCode: "UNSORTED", onHand: 2, reserved: 1, picked: 3, packed: 4, backorder: 5 }] });
+    expect(blockers.lots).toEqual({ totalCount: 1, records: [{ kind: "lots", recordId: lot.id, lotNumber: "LOT-RECON",
+      locationId: location.id, locationCode: "UNSORTED", onHand: 2, reserved: 1, picked: 3, packed: 4 }] });
+    expect(blockers.open_orders).toEqual({ totalCount: 1, records: [{ kind: "open_orders", recordId: item.id,
+      orderId: ready.id, orderNumber: "#63309", status: "ready", itemStatus: "pending", quantity: 1, picked: 0, fulfilled: 0 }] });
+    expect(blockers.oms_orders).toEqual({ totalCount: 1, records: [{ kind: "oms_orders", recordId: line.id,
+      orderId: sale.id, orderNumber: "#56076", status: "confirmed", fulfillmentStatus: null, quantity: 6,
+      warehouseOrderCount: 1, warehouseOrders: [{ orderId: cancelled.id, orderNumber: "#56076", status: "cancelled" }] }] });
+    for (const statement of ["UPDATE inventory.inventory_levels SET picked_qty=7", "UPDATE oms.oms_orders SET status='processing'"]) {
+      const before = await service.preview(request);
+      await database.pool.query(statement);
+      expect((await service.preview(request)).previewHash).not.toBe(before.previewHash);
+      const input = { ...request, expectedPreviewHash: before.previewHash };
+      expect(await service.apply(input, bulkCommand(input, statement)))
+        .toMatchObject({ httpStatus: 409, body: { code: "BULK_INVENTORY_PREVIEW_STALE" } });
+    }
+    expect((await orm.select().from(schema.products))[0].inventoryTrackingDefault).toBe(true);
+    expect((await orm.select().from(schema.omsOrders))[0].status).toBe("processing");
+    expect(await orm.select().from(schema.auditEvents)).toHaveLength(0);
+  });
+
+  it("bounds evidence per variant and preserves exact bigint claim and publication IDs", async () => {
+    const variant = await createVariant();
+    await database.pool.query(`INSERT INTO inventory.inventory_levels(product_variant_id,warehouse_location_id,variant_qty)
+      SELECT $1,n,1 FROM generate_series(1,21) n;
+      `, [variant.id]);
+    const large = "9007199254740993";
+    await database.pool.query(`INSERT INTO inventory.availability_claim_lines
+      (id,claim_id,line_key,order_item_id,target_variant_id,requested_qty,planned_qty,shortfall_qty)
+      VALUES($1,$1,'line',1,$2,$1,$1,0)`, [large, variant.id]);
+    await database.pool.query(`INSERT INTO inventory.availability_claim_resources
+      (id,claim_id,claim_line_id,warehouse_id,warehouse_location_id,inventory_level_id,source_variant_id,claimed_qty)
+      VALUES($1,$1,$1,1,1,1,$2,$1)`, [large, variant.id]);
+    await database.pool.query("INSERT INTO inventory.inventory_publication_outbox(id,product_variant_id,state) VALUES(77,$1,'desired'),(78,$1,'verified')", [variant.id]);
+    const preview = await bulkService().preview({ productIds: [1], inventoryTrackingDefault: false });
+    const blockers = Object.fromEntries(preview.products[0].blockers.map(b => [b.code, b.evidence]));
+    expect(blockers.stock?.totalCount).toBe(21);
+    expect(blockers.stock?.records).toHaveLength(20);
+    expect(blockers.stock?.records[0]).toMatchObject({ locationCode: null, locationId: 1 });
+    expect(blockers.claims).toEqual({ totalCount: 1, records: [{ kind: "claims", recordId: large, claimId: large,
+      orderItemId: 1, planned: large, released: "0", consumed: "0" }] });
+    expect(blockers.resources).toEqual({ totalCount: 1, records: [{ kind: "resources", recordId: large, claimId: large,
+      locationId: 1, locationCode: null, claimed: large, released: "0", consumed: "0" }] });
+    expect(blockers.publication).toEqual({ totalCount: 1, records: [{ kind: "publication", recordId: "77", state: "desired" }] });
+  });
+
+  it.each(["qty_picked", "qty_packed"])("blocks a custody-only lot in %s and rejects new untracked custody", async bucket => {
+    const variant = await createVariant();
+    await database.pool.query(`INSERT INTO inventory.inventory_lots(product_variant_id,warehouse_location_id,lot_number,received_at,${bucket})
+      VALUES($1,1,'CUSTODY',now(),1)`, [variant.id]);
+    const preview = await bulkService().preview({ productIds: [1], inventoryTrackingDefault: false });
+    expect(preview.products[0]).toMatchObject({ status: "blocked", blockers: [{ code: "lots", evidence: { totalCount: 1 } }] });
+    await expect(orm.transaction(tx => updateProductInventoryTracking(tx, 1, false, "user:test", now)))
+      .rejects.toMatchObject({ code: "INVENTORY_POLICY_HAS_DEPENDENCIES" });
+    await expect(orm.transaction(tx => productMethods.updateProductVariant(variant.id, { inventoryTrackingOverride: false }, tx)))
+      .rejects.toMatchObject({ code: "INVENTORY_POLICY_HAS_DEPENDENCIES" });
+    // Explicit fixture reconciliation; the policy owner must never do this itself.
+    await database.pool.query(`UPDATE inventory.inventory_lots SET ${bucket}=0`);
+    await orm.transaction(tx => updateProductInventoryTracking(tx, 1, false, "user:test", now));
+    await expect(database.pool.query(`UPDATE inventory.inventory_lots SET ${bucket}=1`)).rejects.toMatchObject({ code: "23514" });
+    await expect(database.pool.query(`INSERT INTO inventory.inventory_lots(product_variant_id,warehouse_location_id,lot_number,received_at,${bucket})
+      VALUES($1,1,'UNTRACKED',now(),1)`, [variant.id])).rejects.toMatchObject({ code: "23514" });
+    await database.pool.query(custodyMigration);
+    await expect(database.pool.query(`UPDATE inventory.inventory_lots SET ${bucket}=1`)).rejects.toMatchObject({ code: "23514" });
   });
 
   it.each(["stock", "override", "new-variant", "product"])("rejects a stale bulk preview after a %s change", async change => {
@@ -294,6 +405,7 @@ describeDatabase.sequential("product inventory policy migration and transactions
     expect((await orm.select().from(schema.productVariants).orderBy(schema.productVariants.id)).map(v => [v.id, v.trackInventory]))
       .toEqual([[inherited.id, false], [tracked.id, true], [untracked.id, false]]);
     await database.pool.query(migration);
+    await database.pool.query(custodyMigration);
     expect((await orm.select().from(schema.productVariants).where(eq(schema.productVariants.id, inherited.id)))[0].inventoryTrackingOverride).toBeNull();
     await orm.transaction(tx => updateProductInventoryTracking(tx, 1, true, "user:test", now));
     expect((await orm.select().from(schema.productVariants).orderBy(schema.productVariants.id)).map(v => [v.id, v.trackInventory]))
@@ -332,7 +444,7 @@ describeDatabase.sequential("product inventory policy migration and transactions
     expect(await orm.select().from(schema.auditEvents)).toHaveLength(0);
   });
 
-  it("serializes a concurrent stock receipt with disabling tracking", async () => {
+  it.each(["stock", "picked-lot", "packed-lot"])("serializes a concurrent %s write with disabling tracking", async kind => {
     const variant = await createVariant();
     const owner = await database.pool.connect();
     const receipt = await database.pool.connect();
@@ -342,11 +454,14 @@ describeDatabase.sequential("product inventory policy migration and transactions
       await owner.query("SELECT id FROM catalog.product_variants WHERE id=$1 FOR UPDATE", [variant.id]);
       await owner.query("UPDATE catalog.products SET inventory_tracking_default=false WHERE id=1");
       await owner.query("UPDATE catalog.product_variants SET track_inventory=false WHERE id=$1", [variant.id]);
-      const attempt = receipt.query(`INSERT INTO inventory.inventory_levels(product_variant_id,warehouse_location_id,variant_qty)
-        VALUES($1,1,1)`, [variant.id]).then(() => null, error => error);
+      const insert = kind === "stock" ? `INSERT INTO inventory.inventory_levels(product_variant_id,warehouse_location_id,variant_qty) VALUES($1,1,1)`
+        : `INSERT INTO inventory.inventory_lots(product_variant_id,warehouse_location_id,lot_number,received_at,${kind === "picked-lot" ? "qty_picked" : "qty_packed"})
+          VALUES($1,1,'CONCURRENT',now(),1)`;
+      const attempt = receipt.query(insert, [variant.id]).then(() => null, error => error);
       await owner.query("COMMIT");
       expect(await attempt).toMatchObject({ code: "23514" });
       expect(await orm.select().from(schema.inventoryLevels)).toHaveLength(0);
+      expect(await orm.select().from(schema.inventoryLots)).toHaveLength(0);
     } finally { await owner.query("ROLLBACK"); owner.release(); receipt.release(); }
   });
 

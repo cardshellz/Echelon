@@ -31,7 +31,7 @@ async function transitionBlockers(tx: Transaction, variant: ProductVariant, next
       EXISTS (SELECT 1 FROM inventory.inventory_levels WHERE product_variant_id = ${variant.id}
         AND (variant_qty <> 0 OR reserved_qty <> 0 OR picked_qty <> 0 OR packed_qty <> 0 OR backorder_qty <> 0)) AS stock,
       EXISTS (SELECT 1 FROM inventory.inventory_lots WHERE product_variant_id = ${variant.id}
-        AND (qty_on_hand <> 0 OR qty_reserved <> 0)) AS lots,
+        AND (qty_on_hand <> 0 OR qty_reserved <> 0 OR qty_picked <> 0 OR qty_packed <> 0)) AS lots,
       EXISTS (SELECT 1 FROM inventory.availability_claim_lines
         WHERE target_variant_id = ${variant.id} AND planned_qty > released_target_qty + consumed_target_qty) AS claims,
       EXISTS (SELECT 1 FROM inventory.availability_claim_resources

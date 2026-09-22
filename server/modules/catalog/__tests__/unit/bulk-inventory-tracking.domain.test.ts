@@ -41,4 +41,20 @@ describe("bulk inventory policy review", () => {
     input.push({ productId: 2, snapshot: null });
     expect(buildBulkInventoryTrackingPreview(input, false).products.map(p => [p.productId, p.status])).toEqual([[1, "unchanged"], [2, "blocked"]]);
   });
+  it("fingerprints the exact reviewed dependency records and their counts", () => {
+    const input = selection();
+    const transition = input[0].snapshot!.transitions[0];
+    transition.blockers = ["stock"];
+    transition.evidence = { stock: { totalCount: 1, records: [{ kind: "stock", recordId: 7,
+      locationId: 1, locationCode: "UNSORTED", onHand: 0, reserved: 0, picked: 1, packed: 0, backorder: 0 }] } };
+    const reviewed = buildBulkInventoryTrackingPreview(input, false);
+    expect(reviewed.products[0].blockers[0].evidence).toEqual(transition.evidence.stock);
+    expect(buildBulkInventoryTrackingPreview(structuredClone(input), false)).toEqual(reviewed);
+    transition.evidence.stock.records = [{ kind: "stock", recordId: 7,
+      locationId: 1, locationCode: "UNSORTED", onHand: 0, reserved: 0, picked: 2, packed: 0, backorder: 0 }];
+    expect(buildBulkInventoryTrackingPreview(input, false).previewHash).not.toBe(reviewed.previewHash);
+    const updated = buildBulkInventoryTrackingPreview(input, false);
+    transition.evidence.stock.totalCount = 2;
+    expect(buildBulkInventoryTrackingPreview(input, false).previewHash).not.toBe(updated.previewHash);
+  });
 });

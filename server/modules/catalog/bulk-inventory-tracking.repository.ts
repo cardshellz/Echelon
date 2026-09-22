@@ -3,6 +3,7 @@ import { products } from "@shared/schema";
 import type { db } from "../../db";
 import { inspectProductInventoryTracking } from "./inventory-tracking-policy.repository";
 import type { BulkInventoryTrackingSelection } from "./bulk-inventory-tracking.domain";
+import { loadInventoryTrackingEvidence } from "./inventory-tracking-evidence.repository";
 
 export type InventoryTrackingTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
@@ -19,5 +20,9 @@ export async function loadBulkInventoryTrackingSelection(
     result.push({ productId, snapshot: existing.has(productId)
       ? await inspectProductInventoryTracking(tx, productId, next) : null });
   }
-  return result;
+  const evidence = await loadInventoryTrackingEvidence(tx, result.flatMap(({ snapshot }) =>
+    snapshot?.transitions.map(t => ({ variantId: t.variant.id, blockers: t.blockers })) ?? []));
+  return result.map(entry => ({ ...entry, snapshot: entry.snapshot ? { ...entry.snapshot,
+    transitions: entry.snapshot.transitions.map(t => ({ ...t, evidence: evidence.get(t.variant.id) ?? {} })),
+  } : null }));
 }
