@@ -883,3 +883,170 @@ describe("PgDropshipWalletRepository.configureAutoReload (funding design phase 5
     expect(statements).toEqual(["BEGIN", "SELECT id,", "ROLLBACK"]);
   });
 });
+
+describe("PgDropshipWalletRepository funding method removal", () => {
+  const archivedAt = new Date("2026-09-22T01:00:00.000Z");
+  const removal = { vendorId: 10, fundingMethodId: 30, actorMemberId: "member-1", archivedAt };
+
+  function makeFundingMethodRow(overrides: Record<string, unknown> = {}) {
+    return {
+      id: 30,
+      vendor_id: 10,
+      rail: "stripe_ach",
+      status: "active",
+      provider_customer_id: "cus_1",
+      provider_payment_method_id: "pm_bank",
+      usdc_wallet_address: null,
+      display_label: "Chase ending in 5990",
+      is_default: true,
+      metadata: { accountHolderType: "company" },
+      created_at: archivedAt,
+      updated_at: archivedAt,
+      ...overrides,
+    };
+  }
+
+  /** The facts the archive reads under the lock, answered by table. */
+  function removalQuery(input: {
+    method?: Record<string, unknown> | null;
+    autoReload?: Record<string, unknown> | null;
+    pendingFunding?: number;
+    otherCards?: number;
+    vendorStatus?: string | null;
+    statements: string[];
+    params: unknown[][];
+  }) {
+    return vi.fn(async (sql: string, params?: unknown[]) => {
+      const sqlText = String(sql);
+      input.statements.push(sqlText.trim().split(/\s+/).slice(0, 2).join(" "));
+      if (params) input.params.push(params);
+      if (sqlText.includes("FROM dropship.dropship_funding_methods") && sqlText.includes("FOR UPDATE")) {
+        expect(params).toEqual([30, 10]);
+        return { rows: input.method === null ? [] : [input.method ?? makeFundingMethodRow()] };
+      }
+      if (sqlText.includes("FROM dropship.dropship_auto_reload_settings")) {
+        return { rows: input.autoReload ? [input.autoReload] : [] };
+      }
+      if (sqlText.includes("FROM dropship.dropship_wallet_ledger")) {
+        expect(sqlText).toContain("AND status = 'pending'");
+        expect(params).toEqual([10, 30]);
+        return { rows: [{ count: input.pendingFunding ?? 0 }] };
+      }
+      if (sqlText.includes("COUNT(*)") && sqlText.includes("FROM dropship.dropship_funding_methods")) {
+        expect(sqlText).toContain("AND id <> $2");
+        expect(sqlText).toContain("AND rail = 'stripe_card'");
+        expect(params).toEqual([10, 30]);
+        return { rows: [{ count: input.otherCards ?? 0 }] };
+      }
+      if (sqlText.includes("FROM dropship.dropship_vendors")) {
+        return { rows: input.vendorStatus === null ? [] : [{ status: input.vendorStatus ?? "active" }] };
+      }
+      if (sqlText.startsWith("UPDATE dropship.dropship_funding_methods")) {
+        return { rows: [makeFundingMethodRow({ status: "archived", is_default: false, metadata: { accountHolderType: "company", archivedAt: archivedAt.toISOString(), archivedByMemberId: "member-1" } })] };
+      }
+      return { rows: [] };
+    });
+  }
+
+  it("archives the method, drops its default flag, and audits the member in one transaction", async () => {
+    const statements: string[] = [];
+    const params: unknown[][] = [];
+    const query = removalQuery({ statements, params, autoReload: { id: 1, vendor_id: 10, funding_method_id: 99, enabled: true, minimum_balance_cents: "25000", max_single_reload_cents: null, top_up_amount_cents: null, payment_hold_timeout_minutes: 1440, created_at: archivedAt, updated_at: archivedAt } });
+
+    const result = await new PgDropshipWalletRepository(makePool(query)).archiveFundingMethod(removal);
+
+    expect(result.idempotentReplay).toBe(false);
+    expect(result.fundingMethod).toMatchObject({ fundingMethodId: 30, status: "archived", isDefault: false, metadata: { archivedByMemberId: "member-1" } });
+    expect(statements).toEqual(["BEGIN", "SELECT id,", "SELECT id,", "SELECT COUNT(*)::int", "SELECT COUNT(*)::int", "SELECT status", "UPDATE dropship.dropship_funding_methods", "INSERT INTO", "COMMIT"]);
+    const update = params.find((entry) => entry.length === 4 && entry[0] === 30 && entry[1] === 10 && typeof entry[2] === "string");
+    expect(update).toBeDefined();
+    expect(JSON.parse(String(update?.[2]))).toEqual({ archivedAt: archivedAt.toISOString(), archivedByMemberId: "member-1" });
+    expect(update?.[3]).toBe(archivedAt);
+    const updateSql = String(query.mock.calls.find(([sql]) => String(sql).startsWith("UPDATE dropship.dropship_funding_methods"))?.[0]);
+    expect(updateSql).toContain("SET status = 'archived'");
+    expect(updateSql).toContain("is_default = false");
+    expect(updateSql).toContain("AND status <> 'archived'");
+    const audit = params.find((entry) => entry[1] === "dropship_funding_methods");
+    expect(audit?.slice(0, 4)).toEqual([10, "dropship_funding_methods", "30", "funding_method_archived"]);
+    expect(JSON.parse(String(audit?.[4]))).toEqual({ rail: "stripe_ach", previousStatus: "active", wasDefault: true, providerPaymentMethodId: "pm_bank" });
+    expect(audit?.slice(6)).toEqual(["member", "member-1"]);
+  });
+
+  it("refuses the enabled autopay source and rolls back without touching the row", async () => {
+    const statements: string[] = [];
+    const query = removalQuery({ statements, params: [], autoReload: { id: 1, vendor_id: 10, funding_method_id: 30, enabled: true, minimum_balance_cents: "25000", max_single_reload_cents: null, top_up_amount_cents: null, payment_hold_timeout_minutes: 1440, created_at: archivedAt, updated_at: archivedAt } });
+
+    await expect(new PgDropshipWalletRepository(makePool(query)).archiveFundingMethod(removal)).rejects.toMatchObject({
+      code: "DROPSHIP_FUNDING_METHOD_IS_AUTO_RELOAD_SOURCE",
+      context: { vendorId: 10, fundingMethodId: 30, classification: "permanent" },
+    });
+    expect(statements).not.toContain("UPDATE dropship.dropship_funding_methods");
+    expect(statements).not.toContain("INSERT INTO");
+    expect(statements.at(-1)).toBe("ROLLBACK");
+  });
+
+  it("refuses while a top-up from the method is pending, and the only card of a live vendor", async () => {
+    const pending = removalQuery({ statements: [], params: [], pendingFunding: 1 });
+    await expect(new PgDropshipWalletRepository(makePool(pending)).archiveFundingMethod(removal)).rejects.toMatchObject({
+      code: "DROPSHIP_FUNDING_METHOD_HAS_PENDING_FUNDING",
+      context: { pendingFundingCount: 1 },
+    });
+
+    const lastCard = removalQuery({ statements: [], params: [], method: makeFundingMethodRow({ rail: "stripe_card", provider_payment_method_id: "pm_card" }), otherCards: 0, vendorStatus: "active" });
+    await expect(new PgDropshipWalletRepository(makePool(lastCard)).archiveFundingMethod(removal)).rejects.toMatchObject({
+      code: "DROPSHIP_FUNDING_METHOD_IS_BACKUP_CARD",
+      context: { vendorStatus: "active" },
+    });
+  });
+
+  it("replays an archived method without writing, and reports a missing one as not found", async () => {
+    const statements: string[] = [];
+    const replay = removalQuery({ statements, params: [], method: makeFundingMethodRow({ status: "archived", is_default: false }) });
+    const result = await new PgDropshipWalletRepository(makePool(replay)).archiveFundingMethod(removal);
+    expect(result).toMatchObject({ idempotentReplay: true, fundingMethod: { fundingMethodId: 30, status: "archived" } });
+    expect(statements).not.toContain("UPDATE dropship.dropship_funding_methods");
+    expect(statements.at(-1)).toBe("COMMIT");
+
+    const missing = removalQuery({ statements: [], params: [], method: null });
+    await expect(new PgDropshipWalletRepository(makePool(missing)).archiveFundingMethod(removal)).rejects.toMatchObject({
+      code: "DROPSHIP_FUNDING_METHOD_NOT_FOUND",
+    });
+  });
+
+  it("records the provider detach outcome on the archived method with its audit row", async () => {
+    const statements: string[] = [];
+    const recordedAt = new Date("2026-09-22T01:00:05.000Z");
+    const query = vi.fn(async (sql: string, params?: unknown[]) => {
+      const sqlText = String(sql);
+      statements.push(sqlText.trim().split(/\s+/).slice(0, 2).join(" "));
+      if (sqlText.startsWith("UPDATE dropship.dropship_funding_methods")) {
+        expect(sqlText).toContain("AND status = 'archived'");
+        expect(params?.slice(0, 2)).toEqual([30, 10]);
+        expect(JSON.parse(String(params?.[2]))).toEqual({ providerDetach: { outcome: "pending", errorCode: "DROPSHIP_STRIPE_UNREACHABLE", recordedAt: recordedAt.toISOString() } });
+        expect(params?.[3]).toBe(recordedAt);
+        return { rows: [makeFundingMethodRow({ status: "archived", metadata: { providerDetach: { outcome: "pending", errorCode: "DROPSHIP_STRIPE_UNREACHABLE", recordedAt: recordedAt.toISOString() } } })] };
+      }
+      if (sqlText.includes("INSERT INTO dropship.dropship_audit_events")) {
+        expect(params?.slice(0, 4)).toEqual([10, "dropship_funding_methods", "30", "funding_method_provider_detach_recorded"]);
+        expect(JSON.parse(String(params?.[4]))).toEqual({ outcome: "pending", errorCode: "DROPSHIP_STRIPE_UNREACHABLE" });
+        expect(params?.slice(6)).toEqual(["system", null]);
+        return { rows: [] };
+      }
+      return { rows: [] };
+    });
+
+    const method = await new PgDropshipWalletRepository(makePool(query)).recordFundingMethodDetachOutcome({
+      vendorId: 10, fundingMethodId: 30, outcome: "pending", errorCode: "DROPSHIP_STRIPE_UNREACHABLE", recordedAt,
+    });
+
+    expect(method).toMatchObject({ fundingMethodId: 30, status: "archived", metadata: { providerDetach: { outcome: "pending" } } });
+    expect(statements).toEqual(["BEGIN", "UPDATE dropship.dropship_funding_methods", "INSERT INTO", "COMMIT"]);
+  });
+
+  it("refuses to record a detach outcome on a method that is not archived", async () => {
+    const query = vi.fn(async () => ({ rows: [] }));
+    await expect(new PgDropshipWalletRepository(makePool(query)).recordFundingMethodDetachOutcome({
+      vendorId: 10, fundingMethodId: 30, outcome: "detached", errorCode: null, recordedAt: archivedAt,
+    })).rejects.toMatchObject({ code: "DROPSHIP_FUNDING_METHOD_NOT_ARCHIVED" });
+  });
+});

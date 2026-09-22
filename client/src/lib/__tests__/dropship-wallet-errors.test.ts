@@ -17,6 +17,7 @@ describe("describeWalletError", () => {
     expect(face("DROPSHIP_BACKUP_CARD_EXPIRED", "put")).toEqual({ text: "That card has expired. Add a current card.", recovery: { step: "backup" } });
     expect(face("DROPSHIP_FUNDING_METHOD_IS_BACKUP_CARD", "delete")).toEqual({ text: "This is your backup card. Choose another backup card first, then remove this one.", recovery: "refetch" });
     expect(face("DROPSHIP_FUNDING_METHOD_IS_AUTO_RELOAD_SOURCE", "delete")).toEqual({ text: "This is your autopay source. Choose another source first, then remove this one.", recovery: "refetch" });
+    expect(face("DROPSHIP_FUNDING_METHOD_HAS_PENDING_FUNDING", "delete")).toEqual({ text: "A top-up from this method is still on its way. Remove it once that top-up lands or fails.", recovery: "refetch" });
     expect(face("DROPSHIP_AUTO_RELOAD_REQUIRED_WHILE_ACTIVE", "put")).toEqual({ text: "Auto-reload stays on while your account is active or paused.", recovery: "refetch" });
     expect(face("DROPSHIP_FUNDING_METHOD_NOT_FOUND", "put")).toEqual({ text: "Your autopay source is no longer available. Choose or add another.", recovery: { step: "source" } });
     expect(face("DROPSHIP_FUNDING_METHOD_NOT_FOUND", "delete")).toEqual({ text: "That method is no longer on your wallet.", recovery: "refetch" });

@@ -970,6 +970,7 @@ function makeStripeDouble() {
     },
     paymentMethods: {
       retrieve: vi.fn(),
+      detach: vi.fn(),
     },
   } as unknown as Stripe & {
     customers: { create: ReturnType<typeof vi.fn> };
@@ -978,7 +979,7 @@ function makeStripeDouble() {
     paymentIntents: { create: ReturnType<typeof vi.fn> };
     setupIntents: { retrieve: ReturnType<typeof vi.fn> };
     accounts: { retrieve: ReturnType<typeof vi.fn> };
-    paymentMethods: { retrieve: ReturnType<typeof vi.fn> };
+    paymentMethods: { retrieve: ReturnType<typeof vi.fn>; detach: ReturnType<typeof vi.fn> };
   };
 }
 
@@ -1221,5 +1222,56 @@ describe("StripeDropshipFundingProvider disputes (funding design phase 4)", () =
       await expect(parse(disputeEvent("charge.dispute.created", { amount })))
         .rejects.toMatchObject({ code: "DROPSHIP_STRIPE_WEBHOOK_METADATA_INVALID" });
     }
+  });
+});
+
+describe("StripeDropshipFundingProvider.detachPaymentMethod (funding method removal)", () => {
+  it("detaches the payment method from its customer and says so", async () => {
+    const stripe = makeStripeDouble();
+    stripe.paymentMethods.detach.mockResolvedValue({ id: "pm_bank", customer: null });
+    const provider = new StripeDropshipFundingProvider({ stripeClient: stripe, webhookSecret: "whsec_test" });
+
+    expect(await provider.detachPaymentMethod({ providerPaymentMethodId: "pm_bank" })).toEqual({ outcome: "detached" });
+    expect(stripe.paymentMethods.detach).toHaveBeenCalledWith("pm_bank");
+  });
+
+  it("treats a payment method Stripe no longer has as already detached", async () => {
+    const stripe = makeStripeDouble();
+    stripe.paymentMethods.detach.mockRejectedValue(new Stripe.errors.StripeInvalidRequestError({
+      type: "invalid_request_error",
+      message: "No such payment_method: 'pm_gone'",
+      code: "resource_missing",
+      param: "payment_method",
+      statusCode: 404,
+      requestId: "req_gone",
+    }));
+    const provider = new StripeDropshipFundingProvider({ stripeClient: stripe, webhookSecret: "whsec_test" });
+
+    expect(await provider.detachPaymentMethod({ providerPaymentMethodId: "pm_gone" })).toEqual({ outcome: "already_detached" });
+  });
+
+  it("throws every other refusal classified, so the caller records what the archived method reports", async () => {
+    const stripe = makeStripeDouble();
+    stripe.paymentMethods.detach.mockRejectedValue(new Stripe.errors.StripeConnectionError({
+      type: "api_error",
+      message: "socket hang up",
+    }));
+    const provider = new StripeDropshipFundingProvider({ stripeClient: stripe, webhookSecret: "whsec_test" });
+
+    await expect(provider.detachPaymentMethod({ providerPaymentMethodId: "pm_bank" })).rejects.toMatchObject({
+      code: "DROPSHIP_STRIPE_UNREACHABLE",
+      context: { classification: "transient" },
+    });
+
+    stripe.paymentMethods.detach.mockRejectedValue(new Stripe.errors.StripeInvalidRequestError({
+      type: "invalid_request_error",
+      message: "The payment method you provided is not attached to a customer.",
+      statusCode: 400,
+      requestId: "req_unattached",
+    }));
+    await expect(provider.detachPaymentMethod({ providerPaymentMethodId: "pm_bank" })).rejects.toMatchObject({
+      code: "DROPSHIP_STRIPE_REQUEST_REJECTED",
+      context: { classification: "permanent", stripeRequestId: "req_unattached" },
+    });
   });
 });

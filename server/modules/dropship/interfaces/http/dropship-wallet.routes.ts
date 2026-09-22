@@ -2,6 +2,7 @@ import type { Express, Request, Response } from "express";
 import { requirePermission } from "../../../../routes/middleware";
 import { DropshipError } from "../../domain/errors";
 import { fundingMethodAccountHolderType } from "../../domain/funding-method";
+import { FUNDING_METHOD_REMOVAL_REFUSAL_CODES } from "../../domain/funding-method-removal";
 import { STRIPE_BANK_BALANCE_PERMISSION_ENV, makeDropshipWalletLogger, type DropshipWalletService } from "../../application/dropship-wallet-service";
 import { httpStatusForDropshipStripeErrorCode } from "../../infrastructure/dropship-stripe-error";
 import { createDropshipWalletServiceFromEnv } from "../../infrastructure/dropship-wallet.factory";
@@ -292,6 +293,27 @@ export function registerDropshipWalletRoutes(
         return res.status(result.idempotentReplay ? 200 : 201).json({
           fundingMethod: serializeFundingMethod(result.fundingMethod),
           idempotentReplay: result.idempotentReplay,
+        });
+      } catch (error) {
+        return sendDropshipWalletError(res, error);
+      }
+    },
+  );
+
+  app.delete(
+    "/api/dropship/wallet/funding-methods/:fundingMethodId",
+    requireDropshipAuth,
+    requireDropshipSensitiveActionProof("remove_funding_method"),
+    async (req, res) => {
+      try {
+        const result = await service.removeFundingMethodForMember(
+          req.session.dropship!.memberId,
+          { fundingMethodId: parsePositiveInteger(req.params.fundingMethodId, "fundingMethodId") },
+        );
+        return res.json({
+          fundingMethod: serializeFundingMethod(result.fundingMethod),
+          idempotentReplay: result.idempotentReplay,
+          providerDetach: result.providerDetach,
         });
       } catch (error) {
         return sendDropshipWalletError(res, error);
@@ -705,6 +727,9 @@ function statusForDropshipWalletError(code: string): number {
     || code === "DROPSHIP_AUTO_RELOAD_REQUIRED_WHILE_ACTIVE"
     // The fee on screen is out of date: the vendor re-reads, then retries.
     || code === "DROPSHIP_CARD_FUNDING_FEE_ACKNOWLEDGEMENT_STALE"
+    // A removal refused for a role the method still holds, or a top-up still
+    // in flight on it: the wallet's state, not the caller's input.
+    || (FUNDING_METHOD_REMOVAL_REFUSAL_CODES as readonly string[]).includes(code)
     || code === "DROPSHIP_FUNDING_METHOD_RAIL_MISMATCH"
     || code === "DROPSHIP_USDC_TRANSACTION_CONFLICT"
     || code === "DROPSHIP_USDC_DEPOSIT_ADDRESS_CONFLICT"

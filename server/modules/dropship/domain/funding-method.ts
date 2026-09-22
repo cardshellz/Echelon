@@ -37,3 +37,42 @@ export function fundingMethodFinancialConnectionsAccountId(
   const value = metadata?.[FUNDING_METHOD_FINANCIAL_CONNECTIONS_ACCOUNT_KEY];
   return typeof value === "string" && value.trim() !== "" ? value : null;
 }
+
+/**
+ * How the provider-side removal of a funding method ended (funding method
+ * removal). Our ledger archives the method first, which is what stops every
+ * charge; the provider detach is hygiene on Stripe's side, so an outcome
+ * other than `detached` never un-archives anything — it is recorded on the
+ * method so the vendor's screen and the audit trail both say the provider
+ * side is still owed.
+ */
+export const FUNDING_METHOD_DETACH_OUTCOMES = [
+  "detached",
+  /** The provider no longer had the payment method. */
+  "already_detached",
+  /** The provider could not be reached; the detach is owed. */
+  "pending",
+  /** The provider refused; a human reconciles the provider side. */
+  "requires_review",
+  /** The rail has no provider-side object to detach (USDC, manual). */
+  "not_applicable",
+] as const;
+
+export type FundingMethodDetachOutcome = (typeof FUNDING_METHOD_DETACH_OUTCOMES)[number];
+
+/** The metadata key under which an archived method keeps its provider detach outcome. */
+export const FUNDING_METHOD_PROVIDER_DETACH_KEY = "providerDetach";
+/** The metadata keys an archived method carries: when and by which member it was removed. */
+export const FUNDING_METHOD_ARCHIVED_AT_KEY = "archivedAt";
+export const FUNDING_METHOD_ARCHIVED_BY_MEMBER_KEY = "archivedByMemberId";
+
+export function fundingMethodProviderDetachOutcome(
+  metadata: Record<string, unknown> | null | undefined,
+): FundingMethodDetachOutcome | null {
+  const record = metadata?.[FUNDING_METHOD_PROVIDER_DETACH_KEY];
+  if (!record || typeof record !== "object") return null;
+  const outcome = (record as Record<string, unknown>).outcome;
+  return (FUNDING_METHOD_DETACH_OUTCOMES as readonly unknown[]).includes(outcome)
+    ? (outcome as FundingMethodDetachOutcome)
+    : null;
+}
