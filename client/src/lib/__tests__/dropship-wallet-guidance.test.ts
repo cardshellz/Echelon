@@ -2,32 +2,19 @@ import { describe, expect, it, vi } from "vitest";
 import * as feeModule from "@shared/dropship/wallet-funding-fee";
 import {
   ASSUMED_BANK_SETTLEMENT_BUSINESS_DAYS,
-  ASSUMED_BANK_SETTLEMENT_CALENDAR_DAYS,
-  BANK_FLOOR_COVER_DAYS,
-  BANK_KEEPS_UP_MIN_DAYS,
   BANK_SETTLEMENT_PHRASE,
-  BANK_TIGHT_MIN_DAYS,
   CARD_EXPIRY_WARNING_MONTHS,
-  DEFAULT_FLOOR_CENTS_BY_SOURCE,
-  FLOOR_PRESETS_CENTS,
   activationTopUp,
   chargeBoundCents,
   cardExpiryState,
-  daysOfCover,
   depositAmountDefault,
   firstFillFeeCents,
-  floorBandCents,
-  floorVerdict,
   formatDurationMinutes,
   formatSignedCents,
   formatWholeDollars,
   largestCoverableOrderCents,
-  monthlyCardFeeEstimate,
   presetsIncluding,
-  recommendedFloorCents,
-  roundUpToStep,
   shortfallExample,
-  snapUpToPreset,
 } from "../dropship-wallet-guidance";
 
 const LIMITS = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, caseTierMinimumCents: 50_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14, bankBalanceReadOffered: false };
@@ -36,60 +23,19 @@ const BPS = 300;
 describe("constants", () => {
   it("pins the product decisions by name and value", () => {
     expect(ASSUMED_BANK_SETTLEMENT_BUSINESS_DAYS).toBe(5);
-    expect(ASSUMED_BANK_SETTLEMENT_CALENDAR_DAYS).toBe(7);
-    expect(BANK_FLOOR_COVER_DAYS).toBe(10);
-    expect(BANK_KEEPS_UP_MIN_DAYS).toBe(10);
-    expect(BANK_TIGHT_MIN_DAYS).toBe(7);
     expect(BANK_SETTLEMENT_PHRASE).toBe("up to 5 business days (our assumption)");
-    expect(DEFAULT_FLOOR_CENTS_BY_SOURCE).toEqual({ stripe_ach: 25_000, stripe_card: 10_000 });
-    expect(FLOOR_PRESETS_CENTS).toEqual([10_000, 25_000, 50_000, 100_000, 250_000]);
     expect(CARD_EXPIRY_WARNING_MONTHS).toBe(2);
   });
 });
 
-describe("rounding", () => {
-  it("rounds up to the step and snaps up to presets", () => {
-    expect(roundUpToStep(0)).toBe(0);
-    expect(roundUpToStep(20_000)).toBe(20_000);
-    expect(roundUpToStep(20_001)).toBe(25_000);
-    expect(snapUpToPreset(50_000, FLOOR_PRESETS_CENTS)).toBe(50_000);
-    expect(snapUpToPreset(20_000, FLOOR_PRESETS_CENTS)).toBe(25_000);
-    expect(snapUpToPreset(600_000, FLOOR_PRESETS_CENTS)).toBe(600_000);
+describe("presets", () => {
+  it("adds what is already saved to the presets, sorted, and ignores blanks", () => {
     expect(presetsIncluding([100, 300], 200, null, 300)).toEqual([100, 200, 300]);
-    expect(() => roundUpToStep(-1)).toThrow(RangeError);
-    expect(() => roundUpToStep(1.5)).toThrow(RangeError);
-  });
-
-  it("computes days of cover by integer division and null on no daily cost", () => {
-    expect(daysOfCover(25_000, 2_000)).toBe(12);
-    expect(daysOfCover(25_000, 30_000)).toBe(0);
-    expect(daysOfCover(25_000, null)).toBeNull();
-    expect(daysOfCover(25_000, 0)).toBeNull();
+    expect(presetsIncluding([2_500, 5_000], 0, -1, 1.5)).toEqual([2_500, 5_000]);
   });
 });
 
-describe("example A: bank vendor at $20 a day", () => {
-  const daily = 2_000;
-  it("recommends $200, a band of $150–$200, and the chip days", () => {
-    expect(recommendedFloorCents("stripe_ach", daily, LIMITS)).toBe(20_000);
-    expect(floorBandCents("stripe_ach", daily, LIMITS)).toEqual([15_000, 20_000]);
-    expect(FLOOR_PRESETS_CENTS.map((cents) => daysOfCover(cents, daily))).toEqual([5, 12, 25, 50, 125]);
-    expect(daysOfCover(20_000, daily)).toBe(10);
-  });
-  it("verdicts: 5 → may fall short, 7 → tight, 10 → keeps up", () => {
-    expect(floorVerdict("stripe_ach", 5)).toBe("may_fall_short");
-    expect(floorVerdict("stripe_ach", 6)).toBe("may_fall_short");
-    expect(floorVerdict("stripe_ach", 7)).toBe("tight");
-    expect(floorVerdict("stripe_ach", 9)).toBe("tight");
-    expect(floorVerdict("stripe_ach", 10)).toBe("keeps_up");
-    expect(floorVerdict("stripe_ach", 12)).toBe("keeps_up");
-    expect(floorVerdict("stripe_card", 1)).toBe("instant");
-    expect(floorVerdict("stripe_ach", null)).toBe("unknown");
-  });
-  it("estimates $0 at the $250 default and $5.14 at $100, with an $18 bound", () => {
-    expect(monthlyCardFeeEstimate("stripe_ach", 25_000, daily, BPS)).toEqual({ estimateCents: 0, maxCents: 1_800, monthlySpendCents: 60_000 });
-    expect(monthlyCardFeeEstimate("stripe_ach", 10_000, daily, BPS)).toEqual({ estimateCents: 514, maxCents: 1_800, monthlySpendCents: 60_000 });
-  });
+describe("example A: bank vendor", () => {
   it("bounds one charge at the larger of the minimum and the top-up amount, and quotes the activation top-up as $250 pending", () => {
     expect(chargeBoundCents(25_000, null)).toBe(25_000);
     expect(chargeBoundCents(25_000, 10_000)).toBe(25_000);
@@ -108,16 +54,8 @@ describe("example A: bank vendor at $20 a day", () => {
   });
 });
 
-describe("example B: bank vendor at $300 a day", () => {
-  const daily = 30_000;
-  it("recommends $3,000 with a $2,100 band and a $6,000 limit beyond the largest preset", () => {
-    expect(recommendedFloorCents("stripe_ach", daily, LIMITS)).toBe(300_000);
-    expect(floorBandCents("stripe_ach", daily, LIMITS)).toEqual([210_000, 300_000]);
-    expect(floorVerdict("stripe_ach", daysOfCover(25_000, daily))).toBe("may_fall_short");
-    expect(monthlyCardFeeEstimate("stripe_ach", 25_000, daily, BPS)).toEqual({ estimateCents: 23_786, maxCents: 27_000, monthlySpendCents: 900_000 });
-    expect(floorVerdict("stripe_ach", daysOfCover(210_000, daily))).toBe("tight");
-    expect(floorVerdict("stripe_ach", daysOfCover(300_000, daily))).toBe("keeps_up");
-    expect(monthlyCardFeeEstimate("stripe_ach", 300_000, daily, BPS).estimateCents).toBe(0);
+describe("example B: bank vendor with a large minimum", () => {
+  it("defaults the deposit to the minimum within the funding limits, and quotes a large shortfall", () => {
     expect(depositAmountDefault(300_000, LIMITS)).toBe(300_000);
     expect(depositAmountDefault(600_000, LIMITS)).toBe(500_000);
     expect(depositAmountDefault(500, LIMITS)).toBe(1_000);
@@ -125,19 +63,12 @@ describe("example B: bank vendor at $300 a day", () => {
   });
 });
 
-describe("example C: card vendor at $60 a day", () => {
-  const daily = 6_000;
-  it("recommends $100, a $100 first fill, and $54 a month", () => {
-    expect(recommendedFloorCents("stripe_card", daily, LIMITS)).toBe(10_000);
-    expect(floorBandCents("stripe_card", daily, LIMITS)).toEqual([10_000, 15_000]);
-    expect(monthlyCardFeeEstimate("stripe_card", 10_000, daily, BPS)).toEqual({ estimateCents: 5_400, maxCents: 5_400, monthlySpendCents: 180_000 });
-    expect(monthlyCardFeeEstimate("stripe_card", 100_000, daily, BPS).estimateCents).toBe(5_400);
+describe("example C: card vendor", () => {
+  it("charges the first fill once at the fee rate and quotes the activation charge", () => {
     expect(firstFillFeeCents(10_000, BPS)).toBe(300);
     expect(firstFillFeeCents(100_000, BPS)).toBe(3_000);
     expect(activationTopUp({ sourceRail: "stripe_card", floorCents: 10_000, topUpCents: null, availableCents: 0, pendingCents: 0, bps: BPS }))
       .toEqual({ outcome: "top_up", amountCents: 10_000, feeCents: 300, chargedCents: 10_300, lands: "instant", partial: false });
-    expect(recommendedFloorCents("stripe_card", null, LIMITS)).toBe(10_000);
-    expect(recommendedFloorCents("stripe_ach", null, LIMITS)).toBe(25_000);
   });
 });
 
@@ -166,7 +97,6 @@ describe("the signed contract", () => {
     expect(() => firstFillFeeCents(-1, BPS)).toThrow(RangeError);
     expect(() => chargeBoundCents(1.5, null)).toThrow(RangeError);
     expect(() => chargeBoundCents(25_000, -1)).toThrow(RangeError);
-    expect(() => daysOfCover(100, -1)).toThrow(RangeError);
     expect(() => largestCoverableOrderCents(1.5, 100)).toThrow(RangeError);
     expect(() => largestCoverableOrderCents(-100, -1)).toThrow(RangeError);
     shortfallExample({ orderCents: 100, availableCents: -100_000, bps: BPS });
