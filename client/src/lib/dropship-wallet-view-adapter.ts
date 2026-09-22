@@ -101,6 +101,12 @@ export interface WalletLedgerEntry {
 }
 
 export interface WalletLimits {
+  /**
+   * Whether linking a bank account reads its balance. False means no account
+   * can qualify for the advance, so the wallet must not tell a vendor to link
+   * again: it would never work.
+   */
+  bankBalanceReadOffered: boolean;
   /** Pack tier minimum (eaches and inner packs): the lowest floor any vendor may keep. */
   autoReloadMinTriggerCents: number;
   /** Case tier minimum: a vendor with case listings enabled keeps at least this. */
@@ -333,6 +339,7 @@ const rawLedgerEntrySchema = z.object({
  * is filled from the documented default and the fallback is named.
  */
 const rawLimitsSchema = z.object({
+  bankBalanceReadOffered: z.boolean().optional(),
   autoReloadMinTriggerCents: cents,
   caseTierMinimumCents: cents.optional(),
   autoReloadMinAmountCents: cents,
@@ -445,6 +452,9 @@ type RawLedgerEntry = z.infer<typeof rawLedgerEntrySchema>;
  * client until the server serves the resolved values.
  */
 export const CLIENT_FALLBACK_LIMITS: WalletLimits = Object.freeze({
+  // False by default: claiming a balance can be read when it cannot would send
+  // a vendor to relink an account forever.
+  bankBalanceReadOffered: false,
   autoReloadMinTriggerCents: 10_000,
   caseTierMinimumCents: 50_000,
   autoReloadMinAmountCents: 10_000,

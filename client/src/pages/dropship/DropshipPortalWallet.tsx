@@ -118,6 +118,7 @@ import {
   describePendingBalance,
   describePlanSentence,
   describeRoleGap,
+  describeSavedCardAlternative,
   describeSourcePreselection,
   disabledReasonForRemoval,
   isEligibleBackupCard,
@@ -127,6 +128,7 @@ import {
   planFromWallet,
   previousWalletStep,
   readWalletDraft,
+  RECOMMENDED_SOURCE_RAIL,
   resolveStripeReturn,
   stripStripeReturn,
   walletStepNumber,
@@ -391,7 +393,7 @@ export default function DropshipPortalWallet() {
       setNotice({ scope, tone: "error", text: caught instanceof Error && caught.message.trim() ? caught.message : "Wallet request failed." });
       return;
     }
-    const limits = wallet?.limits ?? { autoReloadMinTriggerCents: 0, caseTierMinimumCents: 0, autoReloadMinAmountCents: 0, manualFundingMinCents: 0, manualFundingMaxCents: 0, defaultPaymentHoldTimeoutMinutes: 1, holdExpiryWarningMinutes: 1, advanceFeeBps: 0, advanceCapCents: 0, tierChangeGraceDays: 0 };
+    const limits = wallet?.limits ?? { bankBalanceReadOffered: false, autoReloadMinTriggerCents: 0, caseTierMinimumCents: 0, autoReloadMinAmountCents: 0, manualFundingMinCents: 0, manualFundingMaxCents: 0, defaultPaymentHoldTimeoutMinutes: 1, holdExpiryWarningMinutes: 1, advanceFeeBps: 0, advanceCapCents: 0, tierChangeGraceDays: 0 };
     const face = describeWalletError(caught.code, caught.message, caught.context, { surface, limits });
     if (caught.code === "DROPSHIP_CARD_FUNDING_FEE_MISCONFIGURED") setFeeMisconfigured(true);
     if (face.recovery === "verify") {
@@ -607,7 +609,7 @@ export default function DropshipPortalWallet() {
 
   const walletErrorText = walletQuery.error
     ? describeWalletError(walletQuery.error instanceof DropshipApiError ? walletQuery.error.code : null, queryErrorMessage(walletQuery.error, "Unable to load your wallet."), null, {
-      surface: "get", limits: { autoReloadMinTriggerCents: 0, caseTierMinimumCents: 0, autoReloadMinAmountCents: 0, manualFundingMinCents: 0, manualFundingMaxCents: 0, defaultPaymentHoldTimeoutMinutes: 1, holdExpiryWarningMinutes: 1, advanceFeeBps: 0, advanceCapCents: 0, tierChangeGraceDays: 0 },
+      surface: "get", limits: { bankBalanceReadOffered: false, autoReloadMinTriggerCents: 0, caseTierMinimumCents: 0, autoReloadMinAmountCents: 0, manualFundingMinCents: 0, manualFundingMaxCents: 0, defaultPaymentHoldTimeoutMinutes: 1, holdExpiryWarningMinutes: 1, advanceFeeBps: 0, advanceCapCents: 0, tierChangeGraceDays: 0 },
     }).text
     : null;
 
@@ -1113,7 +1115,7 @@ function SourcePicker({
   const fee = formatFeeRate(wallet.cardFundingFeeBps);
   const selected = wallet.fundingMethods.find((method) => method.fundingMethodId === selectedId) ?? null;
   const [railChoice, setRailChoice] = useState<WalletSourceRail | null>(null);
-  const rail = selected ? (selected.rail as WalletSourceRail) : (railChoice ?? initialRail);
+  const rail = selected ? (selected.rail as WalletSourceRail) : (railChoice ?? initialRail ?? RECOMMENDED_SOURCE_RAIL);
   const rows = (kind: WalletSourceRail) => kind === "stripe_ach"
     ? [
       ["Fee", "None"],
@@ -1141,9 +1143,27 @@ function SourcePicker({
     const pendingRows = wallet.fundingMethods.filter((method) => method.rail === kind && method.status !== "active" && method.status !== "archived");
     const isSelected = rail === kind;
     const title = kind === "stripe_ach" ? "Bank account" : "Card";
+    // The whole card is the radio: a vendor reading the comparison rows expects
+    // to click the row they just read, not hunt for the icon. The controls that
+    // appear inside the selected card stop the click from reaching it, so using
+    // them never re-picks the rail and discards a chosen method.
     return (
-      <div className={isSelected ? "rounded-md border border-[#C060E0] bg-[#C060E0]/5 p-4" : "rounded-md border border-zinc-200 p-4"} data-testid={`wallet-source-option-${kind === "stripe_ach" ? "bank" : "card"}`}>
-        <button type="button" role="radio" aria-checked={isSelected} aria-label={title} disabled={busy} onClick={() => choose(kind)} className="flex w-full items-start gap-3 text-left">
+      <div
+        role="radio"
+        aria-checked={isSelected}
+        aria-label={title}
+        aria-disabled={busy}
+        tabIndex={busy ? -1 : 0}
+        onClick={() => { if (!busy) choose(kind); }}
+        onKeyDown={(event) => {
+          if (busy || (event.key !== "Enter" && event.key !== " ")) return;
+          event.preventDefault();
+          choose(kind);
+        }}
+        className={`${isSelected ? "rounded-md border border-[#C060E0] bg-[#C060E0]/5 p-4" : "rounded-md border border-zinc-200 p-4"} ${busy ? "cursor-default" : "cursor-pointer"} focus:outline-none focus-visible:ring-2 focus-visible:ring-[#C060E0] focus-visible:ring-offset-2`}
+        data-testid={`wallet-source-option-${kind === "stripe_ach" ? "bank" : "card"}`}
+      >
+        <div className="flex w-full items-start gap-3 text-left">
           <span className={isSelected ? "mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-[#C060E0] text-white" : "mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-zinc-100 text-zinc-700"}>
             {kind === "stripe_ach" ? <Landmark className="h-4 w-4" /> : <CreditCard className="h-4 w-4" />}
           </span>
@@ -1151,7 +1171,7 @@ function SourcePicker({
             <span className="block font-medium">{title}</span>
             {kind === "stripe_ach" && <Badge variant="outline" className="mt-1 border-emerald-300 text-emerald-700">Recommended: no fees</Badge>}
           </span>
-        </button>
+        </div>
         <dl className="mt-3 space-y-2 text-sm">
           {rows(kind).map(([label, value]) => (
             <div key={label}>
@@ -1161,7 +1181,7 @@ function SourcePicker({
           ))}
         </dl>
         {isSelected && (
-          <div className="mt-3 space-y-2">
+          <div className="mt-3 space-y-2" onClick={(event) => event.stopPropagation()}>
             {confirmation?.rail === kind ? (
               <MethodConfirmation rail={kind} timedOut={confirmation.timedOut} onCheckAgain={onCheckAgain} />
             ) : active.length === 0 ? (
@@ -1248,6 +1268,15 @@ function SourceStep({
     suggestedSourceMethodId: flow.suggestedSourceMethodId,
     justAdded: autoSelectedId !== null,
   });
+  // The rail actually on screen: what the vendor chose, else the rail a Stripe
+  // return points at, else the recommended one. The picker applies the same
+  // fallback, so what is highlighted and what is explained below always agree.
+  const shownRail = rail ?? confirmation?.rail ?? RECOMMENDED_SOURCE_RAIL;
+  const savedCardAlternative = describeSavedCardAlternative({
+    rail: shownRail,
+    selected,
+    cards: wallet.fundingMethods.filter((method) => isEligibleBackupCard(method, new Date())),
+  });
   const monthly = draft.dailyCostCents ? monthlyCardFeeEstimate("stripe_card", DEFAULT_FLOOR_CENTS_BY_SOURCE.stripe_card, draft.dailyCostCents, wallet.cardFundingFeeBps) : null;
   const exampleFee = quoteWalletFunding({ rail: "stripe_card", creditCents: EXAMPLE_MONTHLY_SPEND_CENTS, cardFeeBps: wallet.cardFundingFeeBps }).feeCents;
   const canContinue = selected !== null && (selected.rail === "stripe_ach" || selected.roles.chargeable);
@@ -1260,7 +1289,7 @@ function SourceStep({
         <SourcePicker
           wallet={wallet}
           selectedId={selectedId}
-          initialRail={rail ?? confirmation?.rail ?? null}
+          initialRail={shownRail}
           onSelect={(method, kind) => { setSelectedId(method?.fundingMethodId ?? null); setRail(kind); onRailChange(kind); }}
           busy={feedback.busy}
           onAdd={onAdd}
@@ -1270,13 +1299,14 @@ function SourceStep({
         />
       </div>
       {preselection && <p className="mt-3 text-sm text-zinc-600" data-testid="wallet-source-preselection">{preselection}</p>}
+      {savedCardAlternative && <p className="mt-3 text-sm text-zinc-600" data-testid="wallet-source-saved-card">{savedCardAlternative}</p>}
       {usdcOfferedFor(wallet) && (
         <p className="mt-3 text-sm text-zinc-500" data-testid="wallet-usdc-note">{describeUsdcSourceNote(wallet.usdcDeposit)}</p>
       )}
-      {rail === "stripe_ach" && (
+      {shownRail === "stripe_ach" && (
         <Impact>Routine top-ups are free. While a transfer is landing, orders draw on what has already settled; if an order needs more, your backup card covers the shortfall plus {fee} (up to the larger of your minimum and your top-up amount). A higher minimum in the next step makes that rare.</Impact>
       )}
-      {rail === "stripe_card" && (
+      {shownRail === "stripe_card" && (
         <Impact>
           Every top-up costs {fee}: {monthly
             ? `at ${formatWholeDollars(monthly.monthlySpendCents)} of orders a month that is about ${formatWholeDollars(monthly.estimateCents)} in fees`
@@ -2205,7 +2235,7 @@ function ListingTiersSection({ tiers }: { tiers: WalletListingTiers }) {
  * by the page.
  */
 function AdvanceSection({ advance, wallet }: { advance: WalletAdvance; wallet: DropshipWalletView }) {
-  const copy = describeAdvanceStanding(advance);
+  const copy = describeAdvanceStanding(advance, wallet.limits.bankBalanceReadOffered);
   const labelFor = (fundingMethodId: number) =>
     wallet.fundingMethods.find((method) => method.fundingMethodId === fundingMethodId)?.displayLabel ?? `Bank account #${fundingMethodId}`;
   return (
@@ -2228,7 +2258,7 @@ function AdvanceSection({ advance, wallet }: { advance: WalletAdvance; wallet: D
                 </div>
                 {source.reasons.length > 0 && (
                   <ul className="text-sm text-zinc-600">
-                    {source.reasons.map((reason) => <li key={reason}>{describeAdvanceReason(reason)}</li>)}
+                    {source.reasons.map((reason) => <li key={reason}>{describeAdvanceReason(reason, wallet.limits.bankBalanceReadOffered)}</li>)}
                   </ul>
                 )}
               </div>

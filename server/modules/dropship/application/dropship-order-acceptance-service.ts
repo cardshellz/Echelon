@@ -52,6 +52,8 @@ export type DropshipPaymentHoldReason = "insufficient_balance" | "vendor_paused"
  */
 export type DropshipAcceptanceReloadContext =
   | { kind: "pending"; amountCents: number; currency: string }
+  /** A top-up this pass actually took: what the wallet got, the fee, what was charged. */
+  | { kind: "charged"; amountCents: number; cardFeeCents: number; chargedCents: number; currency: string }
   | { kind: "declined"; detail: string | null }
   | { kind: "failed"; message: string }
   | { kind: "skipped"; reason: string };
@@ -460,7 +462,7 @@ export class DropshipOrderAcceptanceService {
       channels: ["email", "in_app"],
       title: accepted ? "Dropship order accepted" : "Dropship order needs wallet funding",
       message: accepted
-        ? `Order intake ${result.intakeId} was accepted into fulfillment for ${formatNotificationCurrency(result.totalDebitCents, result.currency)}.${advanceSentenceFor(result)}`
+        ? `Order intake ${result.intakeId} was accepted into fulfillment for ${formatNotificationCurrency(result.totalDebitCents, result.currency)}.${advanceSentenceFor(result)}${chargeSentenceFor(reload)}`
         : result.paymentHoldReason === "vendor_paused"
           ? `Order intake ${result.intakeId} is waiting because selling is paused. Fund your wallet back to its minimum before ${deadline} and it will be accepted for ${formatNotificationCurrency(result.totalDebitCents, result.currency)}.`
           : `Order intake ${result.intakeId} is on payment hold and requires ${formatNotificationCurrency(result.totalDebitCents, result.currency)} before ${deadline}.${reloadSentenceFor(reload)}`,
@@ -502,10 +504,32 @@ function advanceSentenceFor(result: DropshipOrderAcceptanceResult): string {
   return ` ${formatNotificationCurrency(result.advance.advanceCents, result.currency)} of it was covered by a bank transfer still on its way.${fee}`;
 }
 
+/**
+ * The sentence that names a top-up this pass actually took.
+ *
+ * Autopay charges without the vendor pressing anything, so the notice for the
+ * order that triggered it is the only place a particular charge is disclosed.
+ * The fee is named as an amount rather than a rate: all three numbers are
+ * integer cents already, and a rate would have to be re-derived from them.
+ */
+function chargeSentenceFor(reload: DropshipAcceptanceReloadContext | null): string {
+  if (!reload || reload.kind !== "charged") return "";
+  const credited = formatNotificationCurrency(reload.amountCents, reload.currency);
+  if (reload.cardFeeCents <= 0) {
+    return ` We topped up your wallet by ${credited} from your saved payment method.`;
+  }
+  const fee = formatNotificationCurrency(reload.cardFeeCents, reload.currency);
+  const charged = formatNotificationCurrency(reload.chargedCents, reload.currency);
+  return ` We topped up your wallet by ${credited} from your card; with the ${fee} card fee your card was charged ${charged}.`;
+}
+
 /** The sentence a hold notice adds about the top-up tried in the same pass. */
 function reloadSentenceFor(reload: DropshipAcceptanceReloadContext | null): string {
   if (!reload) return "";
   switch (reload.kind) {
+    case "charged":
+      // Charged and still short: the vendor is owed both facts in one notice.
+      return chargeSentenceFor(reload);
     case "pending":
       return ` A bank top-up of ${formatNotificationCurrency(reload.amountCents, reload.currency)} is on its way; the order is accepted when it settles.`;
     case "declined":

@@ -19,6 +19,7 @@ import VendorOrders from "@/pages/vendor/VendorOrders";
 import VendorWallet from "@/pages/vendor/VendorWallet";
 import VendorSettings from "@/pages/vendor/VendorSettings";
 import DropshipPortalAuth from "@/pages/dropship/DropshipPortalAuth";
+import DropshipPortalPrivacy from "@/pages/dropship/DropshipPortalPrivacy";
 import DropshipPortalDashboard from "@/pages/dropship/DropshipPortalDashboard";
 import DropshipPortalHome from "@/pages/dropship/DropshipPortalHome";
 import DropshipPortalCatalog from "@/pages/dropship/DropshipPortalCatalog";
@@ -240,6 +241,9 @@ function DropshipPortalRouter() {
       <Switch>
         <Route path={`${portalRoot}/login`} component={DropshipPortalAuth} />
         <Route path={`${portalRoot}/setup`} component={DropshipPortalAuth} />
+        {/* Public on purpose: vendors read it before signing in, and payment
+            providers reviewing our data use open it without an account. */}
+        <Route path={`${portalRoot}/privacy`} component={DropshipPortalPrivacy} />
         <Route path={`${portalRoot}/home`}>
           <DropshipPortalProtectedRoute component={DropshipPortalHome} />
         </Route>

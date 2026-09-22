@@ -24,12 +24,13 @@ import {
   describeHoldTimeLine,
   describeIntro,
   describeMandate,
-  describeAdvanceReason,
   describeAdvanceStanding,
   describeNegativeBalance,
   describePendingBalance,
   describePlanSentence,
   describeRoleGap,
+  describeAdvanceReason,
+  describeSavedCardAlternative,
   describeSourcePreselection,
   disabledReasonForRemoval,
   draftStorageKey,
@@ -41,6 +42,7 @@ import {
   planFromWallet,
   previousWalletStep,
   readWalletDraft,
+  RECOMMENDED_SOURCE_RAIL,
   resolveStripeReturn,
   STEP_ORDER,
   stripStripeReturn,
@@ -61,7 +63,7 @@ import type {
 const STAMP = "2026-09-15T00:00:00.000Z";
 const LATER = "2026-09-16T00:00:00.000Z";
 const NOW = new Date("2026-09-18T12:00:00.000Z");
-const LIMITS = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, caseTierMinimumCents: 50_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14 };
+const LIMITS = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, caseTierMinimumCents: 50_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14, bankBalanceReadOffered: false };
 
 function method(overrides: Partial<WalletFundingMethod> & { fundingMethodId: number }): WalletFundingMethod {
   const rail = overrides.rail ?? "stripe_card";
@@ -105,7 +107,8 @@ describe("deriveWalletFlow", () => {
     expect(derive(wallet())).toMatchObject({ mode: "flow", step: "intro" });
     expect(derive(wallet(), started())).toMatchObject({ step: "source", suggestedSourceMethodId: null });
     expect(derive(wallet({ fundingMethods: [CARD, BANK] }), started())).toMatchObject({ step: "source", suggestedSourceMethodId: 30 });
-    expect(derive(wallet({ fundingMethods: [CARD] }), started())).toMatchObject({ step: "source", suggestedSourceMethodId: 10 });
+    // A saved card is never preselected: the picker opens on the recommended bank rail.
+    expect(derive(wallet({ fundingMethods: [CARD] }), started())).toMatchObject({ step: "source", suggestedSourceMethodId: null });
     expect(derive(wallet({ fundingMethods: [BANK] }), started({ sourceMethodId: 30 }))).toMatchObject({ step: "floor", floorCents: 25_000 });
     expect(derive(wallet({ fundingMethods: [BANK] }), started({ sourceMethodId: 30, floorCents: 4_000 }))).toMatchObject({ step: "floor" });
     expect(derive(wallet({ fundingMethods: [BANK] }), started({ sourceMethodId: 30, floorCents: 25_000 }))).toMatchObject({ step: "backup", backup: null, topUpCents: null, limitCents: 25_000 });
@@ -121,7 +124,7 @@ describe("deriveWalletFlow", () => {
     expect(derive(wallet({ fundingMethods: [carriedOver] }))).toMatchObject({ step: "intro", furthestStep: "intro", reachableSteps: ["intro"] });
     expect(derive(wallet({ fundingMethods: [carriedOver, BANK] }))).toMatchObject({ step: "intro", furthestStep: "intro" });
     // Reading it is the only thing that moves the flow on, and it stays read.
-    expect(derive(wallet({ fundingMethods: [carriedOver] }), started())).toMatchObject({ step: "source", suggestedSourceMethodId: 12 });
+    expect(derive(wallet({ fundingMethods: [carriedOver] }), started())).toMatchObject({ step: "source", suggestedSourceMethodId: null });
   });
 
   it("ignores an expired, archived or pending card as backup", () => {
@@ -464,7 +467,7 @@ describe("copy", () => {
   });
 
   it("pins the rules page: six topics, each a lead and its detail, quoting only the values the server enforces", () => {
-    const limits: WalletLimits = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, caseTierMinimumCents: 50_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14 };
+    const limits: WalletLimits = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, caseTierMinimumCents: 50_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14, bankBalanceReadOffered: false };
     const intro = describeIntro({ cardFundingFeeBps: 300, usdcOffered: true, holdTimeoutMinutes: 2_880, limits });
     expect(intro.lede).toBe("Your wallet is the deposit Card Shellz draws on for the orders you sell. Here is what it holds, what it lets you sell, how it stays funded, and what happens when a payment fails.");
     expect(intro.topics).toHaveLength(6);
@@ -532,6 +535,48 @@ describe("copy", () => {
     expect(describeSourcePreselection({ ...suggestion, draftSourceMethodId: 30 })).toBeNull();
   });
 
+  it("never tells a seller to relink a bank account when no link reads a balance", () => {
+    // The advance needs a balance read. When the platform asks for that
+    // permission, "link it again" is a real fix for one account...
+    expect(describeAdvanceReason("bank_balance_not_verified", true))
+      .toBe("We could not read the account's balance when it was linked. Link it again through your bank to enable this.");
+
+    // ...but when it asks for no balances at all, relinking can never work, so
+    // sending a seller round that loop would be a lie.
+    expect(describeAdvanceReason("bank_balance_not_verified", false))
+      .toBe("Card Shellz is not reading bank balances right now, so this is unavailable for every seller. Nothing for you to do.");
+
+    // Every other reason is about that one account and reads the same either way.
+    for (const reason of ["no_bank_account", "no_pending_credit", "account_holder_not_company", "first_pull_not_settled", "advance_cap_zero"] as const) {
+      expect(describeAdvanceReason(reason, true)).toBe(describeAdvanceReason(reason, false));
+    }
+  });
+
+  it("opens on the recommended bank rail and names a saved card instead of picking it", () => {
+    // The page recommends the bank rail, so the bank rail is what it defaults to.
+    expect(RECOMMENDED_SOURCE_RAIL).toBe("stripe_ach");
+    // A card already on the wallet is offered by name, not chosen for the vendor.
+    expect(describeSavedCardAlternative({ rail: "stripe_ach", selected: null, cards: [CARD] }))
+      .toBe("Visa ending in 4242 is already saved. Choose Card to use it, or add a bank account and pay no fees.");
+    // Nothing to offer: no card saved, the vendor is already on the card rail,
+    // or something is selected, so the card is on screen either way.
+    expect(describeSavedCardAlternative({ rail: "stripe_ach", selected: null, cards: [] })).toBeNull();
+    expect(describeSavedCardAlternative({ rail: "stripe_card", selected: null, cards: [CARD] })).toBeNull();
+    expect(describeSavedCardAlternative({ rail: "stripe_ach", selected: BANK, cards: [CARD] })).toBeNull();
+  });
+
+  it("preselects a saved bank account but never a saved card", () => {
+    // A bank is both recommended and free, so it is chosen for the vendor.
+    expect(derive(wallet({ fundingMethods: [BANK] }), started())).toMatchObject({ suggestedSourceMethodId: 30 });
+    expect(derive(wallet({ fundingMethods: [CARD, BANK] }), started())).toMatchObject({ suggestedSourceMethodId: 30 });
+    // A card alone leaves the picker on the bank rail with nothing selected, so
+    // the vendor chooses the fee deliberately rather than inheriting it.
+    expect(derive(wallet({ fundingMethods: [CARD] }), started())).toMatchObject({ suggestedSourceMethodId: null });
+    // An explicit choice still wins over the default.
+    expect(derive(wallet({ fundingMethods: [CARD] }), started({ sourceMethodId: 10 })))
+      .toMatchObject({ source: { rail: "stripe_card", method: CARD }, suggestedSourceMethodId: null });
+  });
+
   it("labels methods and ledger reasons", () => {
     expect(describeFundingMethod(CARD)).toBe("Visa ending in 4242");
     expect(describeFundingMethodDetailed(CARD)).toBe("Visa ending in 4242 · expires 12/27");
@@ -597,7 +642,7 @@ describe("advance copy (funding design phase 3)", () => {
 });
 
 describe("USDC deposits in the wallet's words (funding design phase 6)", () => {
-  const limits: WalletLimits = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, caseTierMinimumCents: 50_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14 };
+  const limits: WalletLimits = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, caseTierMinimumCents: 50_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14, bankBalanceReadOffered: false };
   const watched: WalletUsdcDeposit = { offered: true, watched: true, chainId: 8453, tokenAddress: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", minConfirmations: 6, settleTag: "safe", address: null };
   const unwatched: WalletUsdcDeposit = { ...watched, watched: false };
   const notOffered: WalletUsdcDeposit = { ...watched, offered: false, watched: false };
