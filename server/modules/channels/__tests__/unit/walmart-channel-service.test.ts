@@ -55,6 +55,28 @@ function setup(nodes: WalmartShipNode[], partnerId = command.expectedPartnerId) 
 }
 
 describe("Walmart seller fulfillment-center eligibility", () => {
+  it("allows credential replacement after the original import boundary ages past 180 days", async () => {
+    const s = setup([node("VIRTUAL")]);
+    const oldCommand = { ...command, importSince: "2025-01-01T00:00:00.000Z" };
+    const row = (await s.repository.get(2))!;
+    vi.mocked(s.repository.get).mockResolvedValue({ ...row, import_since: new Date(oldCommand.importSince) });
+    await s.service.connect(2, oldCommand, "operator");
+    expect(s.save).toHaveBeenCalledWith(oldCommand, 2, "Seller", "operator", now, expect.any(Function));
+    vi.mocked(s.repository.get).mockResolvedValue(null);
+    s.save.mockClear();
+    await expect(s.service.connect(2, oldCommand, "operator")).rejects.toMatchObject({ code: "WALMART_IMPORT_BOUNDARY_INVALID" });
+    expect(s.save).not.toHaveBeenCalled();
+  });
+  it.each([
+    [{ liveEnabled: false, productionServer: true }, "Walmart operations are disabled by server configuration."],
+    [{ liveEnabled: true, productionServer: true, pollingDisabledReason: "DISABLE_SCHEDULERS=true" }, "Automatic order sync is disabled by server configuration."],
+    [{ liveEnabled: true, productionServer: true }, null],
+  ])("reports effective server policy in the connection status", async (policy, expected) => {
+    const s = setup([node("VIRTUAL")]);
+    const service = new WalmartChannelService(s.repository, null, policy);
+    expect((await service.status(2))?.orderSyncBlockedReason).toBe(expected);
+    expect(s.request).not.toHaveBeenCalled();
+  });
   it.each(["VIRTUAL", "PHYSICAL"])("verifies, saves and enables an active %s center", async nodeType => {
     const center = node(nodeType);
     const s = setup([center]);

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
+import { ChannelProviderError } from "../../channel-provider.error";
 
 export const walmartCredentialsSchema = z.object({
   clientId: z.string().trim().min(1).max(500).refine((value) => !value.includes(":")),
@@ -9,14 +10,14 @@ export const walmartCredentialsSchema = z.object({
 }).strict();
 export type WalmartCredentials = z.infer<typeof walmartCredentialsSchema>;
 
-export class WalmartApiError extends Error {
+export class WalmartApiError extends ChannelProviderError {
   constructor(
     readonly code: string,
     message: string,
     readonly retryable: boolean,
     readonly status: number | null = null,
   ) {
-    super(message);
+    super(code, message, retryable, status);
     this.name = "WalmartApiError";
   }
 }

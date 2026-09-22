@@ -1,13 +1,14 @@
-# Walmart US direct channel — draft implementation and acceptance
+# Walmart US direct channel — configuration and acceptance
 
-Updated 2026-09-21. Base: `dec04ebdc8f6b12d3194d7854d03dad46a1fd8b3`.
+Updated 2026-09-22.
 
 ## Status
 
 The owner confirmed Walmart US, direct connection in Echelon, and seller fulfillment.
-This change adds the connection UI and application paths. It is **not a connected
-production account** and is **not approved for live intake**. No production
-credentials, records, stock, orders, deployment, or marketplace settings were changed.
+The owner subsequently connected the account and requested the same configuration
+structure as other channels, with automatic order intake on connection. The current
+refactor is validated locally; its deployment and live provider behavior are not
+proven by these tests. No production credentials or records were changed during it.
 
 The first implementation deliberately supports one unit per order line. A
 representative multi-unit US order is still required to prove charge semantics.
@@ -17,10 +18,24 @@ production activation; it will affect ordinary purchases of multiple units.
 
 ## Implemented execution paths
 
-- `client/src/components/WalmartConnectionPanel.tsx`: verify own-account Client ID
-  and Client Secret, select the verified seller-operated fulfillment center and
-  an Echelon warehouse, choose an import boundary, save paused, link exact SKUs,
-  control intake, inspect failed purchase-order IDs, and run a manual poll.
+- Channels → Walmart → **Configure** opens `/channels/walmart/:channelId`, using
+  the same full-page Store Setup / Listing Feed structure and shared header as eBay.
+  Credentials appear only in Connect/Reconnect. Store Setup shows account, location,
+  warehouse, import boundary, sync health and server disable reasons.
+- `client/src/components/channels/ChannelCatalogFeed.tsx` provides a provider-neutral
+  paginated catalog table, exact remote SKU search, bulk exact-match selection and
+  an explicit Echelon variant picker. Listing creation and pricing remain in Seller Center.
+- `server/modules/channels/channel-catalog.service.ts` owns matching and verified
+  batch linking. `channel-catalog.repository.ts` commits shared `channel_feeds`,
+  `channel_listings`, and audit records atomically. It rejects identity conflicts,
+  unavailable variants, changed connections and quarantined mappings. Replays are
+  idempotent; per-channel row locks serialize competing SKU assignments.
+- `walmart-catalog.adapter.ts` translates authenticated Walmart catalog reads into
+  this shared contract. It contains no matching rules or persistence.
+- `client/src/components/WalmartConnectionPanel.tsx` verifies own-account keys,
+  selects the verified seller fulfillment center, warehouse and import boundary,
+  and saves the connection. There is no separate intake-enable step. Completing
+  pending setup activates the channel; reconnect preserves an explicit channel pause.
 - `walmart-channel.service.ts`: validates US identity and permissions, binds one
   verified partner/environment/node/warehouse to a channel, and encrypts credentials
   through the existing AES-GCM vault. Public responses contain no credentials.
@@ -32,6 +47,14 @@ production activation; it will affect ordinary purchases of multiple units.
   observations without warehouse authority, acknowledges and reads the order back,
   then authorizes OMS/WMS work. Failures retain the checkpoint and appear in the UI.
   Per-channel PostgreSQL advisory locks serialize polling, setup and stock writes.
+  Missing mappings can resolve automatically only from unique exact local SKUs,
+  with current provider verification and a write-time local identity check. Unmatched
+  or ambiguous SKUs stay blocked before acknowledgment and appear as order exceptions.
+- `249_walmart_channel_status_authority.sql` moves previously verified Walmart
+  channels from `pending_setup` to `active` with an immutable setup event. It is
+  idempotent and preserves explicit pauses. The obsolete `orders_enabled` field is
+  retained for compatibility; `channels.status` now governs polling. Deployment
+  can therefore begin intake from an existing connection's saved import boundary.
 - `walmart-order.domain.ts`: exact USD cents, quantity/status validation, purchase
   order and line identity, shipping deadline and service level, monotonic
   cancellation disposition. Existing order or line price changes require review.
@@ -91,16 +114,19 @@ new channel-owned Walmart tables; the existing architecture guards remain active
 
 ## Deployment and connection acceptance
 
-1. Review and deploy the migration and application together after the outstanding
-   provider/financial acceptance work. Keep runtime controls off during setup.
+1. Deploy the migrations and application together. Verified pending-setup accounts
+   become active; intentionally paused accounts stay paused. Preserve explicit
+   server disable switches when intake must remain stopped during acceptance.
 2. Configure `WALMART_CREDENTIAL_ENCRYPTION_KEY` with a 32-byte AES key in the existing
    vault's supported hex/base64 format; optionally set `WALMART_CREDENTIAL_KEY_ID`.
    Store server secrets through the deployment secret manager, not source control.
-3. In Channels, add **Walmart US**, open Connection and verify credentials for the
+3. In Channels, add **Walmart US**, open **Configure** and verify credentials for the
    owner's own Walmart US account. Verify returned partner and fulfillment center.
-   Save the explicit warehouse and import boundary with intake paused.
-4. Link each existing Walmart listing SKU to its exact active, sellable,
-   inventory-managed Echelon variant. Unsupported or quarantined identities fail.
+   Save the explicit warehouse and import boundary. Orders then sync automatically
+   while the channel is active. Use the existing Channels Active/Paused control.
+4. Browse Listing Feed. Link exact matches in bulk or choose the correct variant for
+   different remote SKUs. Unique exact matches can also resolve during intake.
+   Unsupported, conflicting or quarantined identities require review.
 5. Reconcile a real multi-unit order's charges and taxes against Seller Center.
    Complete sandbox/provider contract acceptance for profile, nodes, pagination,
    acknowledgment, inventory PUT/readback, shipping POST/readback, cancellation,
@@ -108,10 +134,11 @@ new channel-owned Walmart tables; the existing architecture guards remain active
 6. Verify a controlled order's OMS money, SKU identity, warehouse, reservation,
    shipment command and provider tracking. Verify cancellation and physical-dispatch
    behavior, and downstream sales attribution, before general intake.
-7. After approval, set `WALMART_LIVE_ENABLED=true` and
-   `WALMART_ORDER_POLLING_ENABLED=true`; enable intake in the channel panel.
-   Polling otherwise remains off. Global scheduler controls are respected.
-   Sandbox orders are prohibited on a production server.
+7. No affirmative server flag or second enable button is required. Explicit
+   `WALMART_LIVE_ENABLED=false`, `WALMART_ORDER_POLLING_ENABLED=false`,
+   `WALMART_ORDER_POLLING_DISABLED=true`, and global scheduler disable controls
+   still apply and are reflected in Store Setup. Sandbox orders are prohibited
+   on a production server.
 8. Configure the Walmart destination separately in Channel Inventory. Its sealed
    supply binding must draw only from the configured warehouse. Review the quantity
    preview and provider readback before enabling stock publication.
@@ -123,6 +150,13 @@ records to recover a failed provider call; retry the receipt/command after revie
 its provider state.
 
 ## Validation
+
+The configuration refactor has 137 passing focused checks across nine suites,
+including 16 actual PostgreSQL tests and the writer-ownership ratchet. Twelve
+desktop/mobile browser scenarios verify normal page structure, bulk links,
+pagination, explicit variant selection, connect/reconnect, permissions and error
+states. Browser tests mock provider responses; they do not prove live acceptance.
+Historical validation below belongs to the original connector implementation.
 
 Focused tests cover authentication and secret redaction, cents boundaries, API
 response validation, acknowledgment recovery, duplicate polling, unmapped SKUs,
@@ -159,6 +193,8 @@ Application, full server/client test TypeScript checks, and the production build
 - [US get-order guide](https://developer.walmart.com/us-marketplace/docs/get-an-order)
 - [US acknowledgment reference](https://developer.walmart.com/us-marketplace/reference/acknowledgeorders)
 - [US inventory update](https://developer.walmart.com/us-marketplace/reference/updateinventoryforanitem)
+- [US catalog pagination](https://developer.walmart.com/us-marketplace/reference/getallitems)
+- [US exact item lookup](https://developer.walmart.com/us-marketplace/reference/getanitem)
 - [Global ship-order guide](https://developer.walmart.com/global-marketplace/docs/ship-an-order-mp)
 
 The US shipping schema and Global 3.1 documentation are not fully consistent about
