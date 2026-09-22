@@ -68,6 +68,12 @@ describe("bulk inventory tracking HTTP boundary", () => {
       expect(bulkInventoryTrackingRequestSchema.safeParse(input).success).toBe(false);
     }
   });
+  it("requires an explicit valid stop intent and rejects it when enabling tracking", async () => {
+    expect(bulkInventoryTrackingRequestSchema.safeParse({ ...request, stockDisposition: "retain_history" }).success).toBe(true);
+    expect(bulkInventoryTrackingRequestSchema.safeParse({ ...request, stockDisposition: "discard" }).success).toBe(false);
+    expect((await post("preview", { ...request, inventoryTrackingDefault: true, stockDisposition: "retain_history" })).status).toBe(400);
+    expect(mocks.preview).not.toHaveBeenCalled();
+  });
   it("validates preview output and disables caching", async () => {
     mocks.preview.mockResolvedValue(preview);
     expect(await post("preview", request)).toMatchObject({ status: 200, body: preview, headers: { "cache-control": "no-store" } });

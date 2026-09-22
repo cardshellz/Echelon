@@ -45,6 +45,7 @@ import {
 } from "./inventory-strategy-policy";
 import { updateProductInventoryTracking, InventoryTrackingPolicyError } from "./inventory-tracking-policy.repository";
 import { registerBulkInventoryTrackingRoutes } from "./bulk-inventory-tracking.routes";
+import { registerInventoryTrackingHistoryRoutes } from "./inventory-tracking-history.routes";
 import { parseInventoryTrackingWrite } from "@shared/catalog/inventory-tracking-policy";
 import { isInventoryManagedVariant } from "@shared/catalog/variant-inventory-eligibility";
 import { isCustomerSellableVariant } from "@shared/catalog/variant-sales-eligibility";
@@ -378,6 +379,7 @@ export async function registerProductRoutes(app: Express) {
   const inventoryLegacyAdminControl = createInventoryLegacyAdminControlService();
   registerShopifyProductMappingReconciliationRoutes(app);
   registerBulkInventoryTrackingRoutes(app);
+  registerInventoryTrackingHistoryRoutes(app);
   // ============================================================================
   // Products API (Master Catalog)
   // ============================================================================

@@ -7,7 +7,10 @@ import { financialCommandFromRequest } from "../../platform/commands/http-comman
 import { FinancialCommandError } from "../../platform/commands/transactional-command.service";
 import { createBulkInventoryTrackingService } from "./bulk-inventory-tracking.service";
 
+import { InventoryTrackingHistoryCapacityError } from "@shared/catalog/inventory-tracking-history";
+
 function sendError(res: Response, error: unknown): Response {
+  if (error instanceof InventoryTrackingHistoryCapacityError) return res.status(error.statusCode).json({ error: error.message, code: error.code });
   if (error instanceof FinancialCommandError) {
     for (const [key, value] of Object.entries(error.responseHeaders ?? {})) res.setHeader(key, value);
     return res.status(error.statusCode).json({ error: error.message, code: error.code });
