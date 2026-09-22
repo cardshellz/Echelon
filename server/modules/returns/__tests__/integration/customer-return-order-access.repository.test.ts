@@ -2,25 +2,18 @@ import { readFileSync } from "node:fs";
 import { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { PostgresCustomerReturnOrderAccessRepository } from "../../infrastructure/customer-return-order-access.repository";
+import { resolveReturnsTestDatabase } from "../support/disposable-database";
 
 // Deliberately separate from the authorization suite, which rebuilds its schemas.
-const connectionString = process.env.RETURNS_ACCESS_TEST_DATABASE_URL;
-const enabled = Boolean(connectionString) && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
-const integration = enabled ? describe.sequential : describe.skip;
+const connectionString = resolveReturnsTestDatabase(process.env, "access");
+const integration = connectionString ? describe.sequential : describe.skip;
 
 integration("customer return order lookup against migration-defined PostgreSQL", () => {
   let pool: Pool;
   let repository: PostgresCustomerReturnOrderAccessRepository;
   let guestOrderId: number;
   beforeAll(async () => {
-    const url = new URL(connectionString!);
-    if (!["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)
-      || !/^\/returns_access_test(?:_[a-z0-9]+)?$/.test(url.pathname)
-      || connectionString === process.env.DATABASE_URL
-      || connectionString === process.env.EXTERNAL_DATABASE_URL) {
-      throw new Error("Returns access tests require an explicitly disposable local returns_access_test database.");
-    }
-    pool = new Pool({ connectionString, max: 3 });
+    pool = new Pool({ connectionString: connectionString!, max: 3, connectionTimeoutMillis: 5_000, statement_timeout: 10_000 });
     const source = readFileSync("migrations/0002_concerned_darwin.sql", "utf8");
     const table = source.match(/CREATE TABLE "oms"\."oms_orders" \([\s\S]*?\r?\n\);/);
     if (!table) throw new Error("Canonical OMS order table migration was not found.");

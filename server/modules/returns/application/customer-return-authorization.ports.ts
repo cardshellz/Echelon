@@ -21,6 +21,8 @@ export interface CustomerReturnAuthorizationAllocation {
   fulfillmentId: string;
   fulfillmentLineItemId: string;
   quantity: number;
+  /** Original purchased units on this exact WMS item and provider fulfillment line. */
+  originalQuantity: number;
   /** Total eligible units for this original fulfillment line, before claims. */
   eligibleQuantity: number;
   deliveryEvidence: ReturnAuthorizationSnapshot;
@@ -63,6 +65,7 @@ export interface LockedCustomerReturnAuthorizationSource {
   }[];
   allocationClaims: {
     omsOrderLineId: number;
+    wmsOrderItemId: number;
     fulfillmentId: string;
     fulfillmentLineItemId: string;
     quantity: number;

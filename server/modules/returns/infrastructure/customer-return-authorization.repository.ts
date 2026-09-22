@@ -52,6 +52,7 @@ const inputSchema = commandSchema.extend({
       fulfillmentId: boundedText(200),
       fulfillmentLineItemId: boundedText(200),
       quantity,
+      originalQuantity: quantity,
       eligibleQuantity: quantity,
       deliveryEvidence: z.unknown(),
     }).strict()).min(1).max(MAX_ALLOCATIONS_PER_LINE),
@@ -183,13 +184,15 @@ class PostgresCustomerReturnAuthorizationTransaction implements CustomerReturnAu
     }
     const claimedByItem = new Map<number, number>();
     const claimedByLine = new Map<number, number>();
-    const allocationClaims = new Map<string, LockedCustomerReturnAuthorizationSource["allocationClaims"][number]>();
+    const allocationClaims: LockedCustomerReturnAuthorizationSource["allocationClaims"] = [];
+    const allocationLines = new Map<string, number>();
     for (const row of claimRows) {
       const itemId = readInteger(row.wms_order_item_id, "claimed WMS item id", true);
       const claimedQuantity = readInteger(row.quantity, "claimed quantity");
       claimedByItem.set(itemId, add(claimedByItem.get(itemId) ?? 0, claimedQuantity));
       const claim = {
         omsOrderLineId: readInteger(row.oms_order_line_id, "claimed OMS line id", true),
+        wmsOrderItemId: itemId,
         fulfillmentId: readText(row.fulfillment_id, "fulfillment id"),
         fulfillmentLineItemId: readText(row.fulfillment_line_item_id, "fulfillment line id"),
         quantity: claimedQuantity,
@@ -201,11 +204,12 @@ class PostgresCustomerReturnAuthorizationTransaction implements CustomerReturnAu
       }
       claimedByLine.set(claim.omsOrderLineId, add(claimedByLine.get(claim.omsOrderLineId) ?? 0, claimedQuantity));
       const key = allocationKey(claim.fulfillmentId, claim.fulfillmentLineItemId);
-      const existing = allocationClaims.get(key);
-      if (existing && existing.omsOrderLineId !== claim.omsOrderLineId) {
+      const existingLine = allocationLines.get(key);
+      if (existingLine !== undefined && existingLine !== claim.omsOrderLineId) {
         fail("RETURN_AUTHORIZATION_DATA_INVALID", "A fulfillment line is linked to conflicting ordered lines.");
       }
-      allocationClaims.set(key, { ...claim, quantity: add(existing?.quantity ?? 0, claim.quantity) });
+      allocationLines.set(key, claim.omsOrderLineId);
+      allocationClaims.push(claim);
     }
     const source: LockedCustomerReturnAuthorizationSource = {
       channelId: input.channelId,
@@ -232,7 +236,7 @@ class PostgresCustomerReturnAuthorizationTransaction implements CustomerReturnAu
           wmsItems,
         };
       }),
-      allocationClaims: [...allocationClaims.values()],
+      allocationClaims,
     };
     this.source = structuredClone(source);
     return source;
@@ -242,7 +246,10 @@ class PostgresCustomerReturnAuthorizationTransaction implements CustomerReturnAu
     validate(inputSchema, rawInput);
     validateSnapshot(rawInput.policySnapshot, "policy snapshot");
     validateSnapshot(rawInput.warehouseSnapshot, "warehouse snapshot");
-    for (const line of rawInput.lines) for (const allocation of line.allocations) validateSnapshot(allocation.deliveryEvidence, "delivery evidence");
+    for (const line of rawInput.lines) for (const allocation of line.allocations) {
+      validateSnapshot(allocation.deliveryEvidence, "delivery evidence");
+      validateSnapshot({ ...allocation.deliveryEvidence, wmsOriginalQuantity: allocation.originalQuantity }, "delivery evidence");
+    }
     // Keep the validated command stable across awaits even if a caller retains
     // and changes its object while PostgreSQL is waiting on another transaction.
     const input = structuredClone(rawInput);
@@ -285,7 +292,7 @@ class PostgresCustomerReturnAuthorizationTransaction implements CustomerReturnAu
              quantity, eligible_quantity, delivery_evidence, created_at)
           VALUES (${result.authorizationId}, ${lineId}, ${allocation.wmsOrderItemId}, ${allocation.fulfillmentId},
             ${allocation.fulfillmentLineItemId}, ${allocation.quantity}, ${allocation.eligibleQuantity},
-            ${JSON.stringify(allocation.deliveryEvidence)}::jsonb, ${input.now})
+            ${JSON.stringify({ ...allocation.deliveryEvidence, wmsOriginalQuantity: allocation.originalQuantity })}::jsonb, ${input.now})
         `);
       }
     }
@@ -328,6 +335,7 @@ class PostgresCustomerReturnAuthorizationTransaction implements CustomerReturnAu
 function assertCapacity(input: PersistCustomerReturnAuthorizationInput, source: LockedCustomerReturnAuthorizationSource): void {
   const selectedLines = new Set<number>();
   const requestedByItem = new Map<number, number>();
+  const originalByItem = new Map<number, number>();
   const requestedByAllocation = new Map<string, { omsOrderLineId: number; quantity: number; capacity: number }>();
   for (const line of input.lines) {
     if (selectedLines.has(line.omsOrderLineId)) invalid("Duplicate ordered lines are not allowed.");
@@ -354,17 +362,28 @@ function assertCapacity(input: PersistCustomerReturnAuthorizationInput, source: 
       if (add(add(item.legacyExpectedQuantity, item.claimedQuantity), itemQuantity) > item.fulfilledQuantity) {
         exceeded("The WMS fulfilled quantity has already been claimed.", line.omsOrderLineId);
       }
+      const originalQuantity = add(originalByItem.get(item.wmsOrderItemId) ?? 0, allocation.originalQuantity);
+      originalByItem.set(item.wmsOrderItemId, originalQuantity);
+      if (originalQuantity > item.fulfilledQuantity) {
+        fail("RETURN_AUTHORIZATION_SOURCE_CONFLICT", "An original fulfillment allocation exceeds its WMS source.");
+      }
       const previous = requestedByAllocation.get(key);
       if (previous && (previous.omsOrderLineId !== line.omsOrderLineId || previous.capacity !== allocation.eligibleQuantity)) {
         fail("RETURN_AUTHORIZATION_SOURCE_CONFLICT", "A fulfillment line has conflicting identity or eligible capacity.");
       }
       const current = { omsOrderLineId: line.omsOrderLineId, capacity: allocation.eligibleQuantity, quantity: add(previous?.quantity ?? 0, allocation.quantity) };
       requestedByAllocation.set(key, current);
-      const claimed = source.allocationClaims.find((candidate) => allocationKey(candidate.fulfillmentId, candidate.fulfillmentLineItemId) === key);
-      if (claimed && claimed.omsOrderLineId !== line.omsOrderLineId) {
+      const claims = source.allocationClaims.filter((candidate) => allocationKey(candidate.fulfillmentId, candidate.fulfillmentLineItemId) === key);
+      if (claims.some(claim => claim.omsOrderLineId !== line.omsOrderLineId)) {
         fail("RETURN_AUTHORIZATION_SOURCE_CONFLICT", "A fulfillment line was previously claimed against another ordered line.");
       }
-      if (add(claimed?.quantity ?? 0, current.quantity) > current.capacity) {
+      const exactClaimed = claims.filter(claim => claim.wmsOrderItemId === allocation.wmsOrderItemId)
+        .reduce((total, claim) => add(total, claim.quantity), 0);
+      if (add(exactClaimed, allocation.quantity) > allocation.originalQuantity) {
+        exceeded("The original fulfillment's WMS allocation has already been claimed.", line.omsOrderLineId);
+      }
+      const claimedQuantity = claims.reduce((total, claim) => add(total, claim.quantity), 0);
+      if (add(claimedQuantity, current.quantity) > current.capacity) {
         exceeded("The original fulfillment's eligible quantity has already been claimed.", line.omsOrderLineId);
       }
     }

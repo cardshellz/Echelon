@@ -8,10 +8,10 @@ import {
 } from "../../application/customer-return-authorization.ports";
 import { CustomerReturnAuthorizationService, type CustomerReturnTrustedSource } from "../../application/customer-return-authorization.service";
 import { PostgresCustomerReturnAuthorizationStore } from "../../infrastructure/customer-return-authorization.repository";
+import { resolveReturnsTestDatabase } from "../support/disposable-database";
 
-const connectionString = process.env.ECHELON_TEST_DATABASE_URL;
-const enabled = Boolean(connectionString) && process.env.ECHELON_TEST_DATABASE_DISPOSABLE === "true";
-const integration = enabled ? describe.sequential : describe.skip;
+const connectionString = resolveReturnsTestDatabase(process.env, "authorization");
+const integration = connectionString ? describe.sequential : describe.skip;
 const NOW = new Date("2026-09-22T12:00:00.000Z");
 const LINE_ONE = "gid://shopify/LineItem/10001";
 const LINE_TWO = "gid://shopify/LineItem/10002";
@@ -28,22 +28,6 @@ function migrationTable(file: string, marker: string): string {
   return table[0];
 }
 
-function assertDisposableLocalDatabase(raw: string): void {
-  const url = new URL(raw);
-  if (!["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)
-    || !/^\/returns_portal_test(?:_[a-z0-9]+)?$/.test(url.pathname)
-    || process.env.ECHELON_TEST_DATABASE_DISPOSABLE !== "true") {
-    throw new Error("Authorization integration tests require an explicitly disposable local returns_portal_test database.");
-  }
-  for (const protectedUrl of [process.env.DATABASE_URL, process.env.EXTERNAL_DATABASE_URL]) {
-    if (!protectedUrl) continue;
-    const protectedDatabase = new URL(protectedUrl);
-    if (protectedDatabase.hostname === url.hostname && protectedDatabase.port === url.port && protectedDatabase.pathname === url.pathname) {
-      throw new Error("The authorization test database matches an application database.");
-    }
-  }
-}
-
 function commandOf(input: PersistCustomerReturnAuthorizationInput): CustomerReturnAuthorizationCommand {
   return { channelId: input.channelId, idempotencyKey: input.idempotencyKey };
 }
@@ -56,7 +40,7 @@ function request(key = "request-1", quantity = 2): PersistCustomerReturnAuthoriz
     warehouseSnapshot: { warehouseId: 1, version: 2, address: { countryCode: "US" } },
     lines: [{ omsOrderLineId: 10001, externalLineItemId: LINE_ONE, quantity, reasonCode: null,
       allocations: [{ wmsOrderItemId: 1001, fulfillmentId: "fulfillment-1", fulfillmentLineItemId: "fulfillment-line-1",
-        quantity, eligibleQuantity: 2, deliveryEvidence: { source: "shopify", status: "delivered", observedAt: NOW.toISOString() } }] }],
+        quantity, originalQuantity: 2, eligibleQuantity: 2, deliveryEvidence: { source: "shopify", status: "delivered", observedAt: NOW.toISOString() } }] }],
   };
 }
 
@@ -65,8 +49,7 @@ integration("customer authorization on migration-defined PostgreSQL", () => {
   let store: PostgresCustomerReturnAuthorizationStore;
 
   beforeAll(async () => {
-    assertDisposableLocalDatabase(connectionString!);
-    pool = new Pool({ connectionString, max: 8, statement_timeout: 10_000 });
+    pool = new Pool({ connectionString: connectionString!, max: 8, connectionTimeoutMillis: 5_000, statement_timeout: 10_000 });
     await pool.query("DROP SCHEMA IF EXISTS returns CASCADE; DROP SCHEMA IF EXISTS wms CASCADE; DROP SCHEMA IF EXISTS oms CASCADE; DROP SCHEMA IF EXISTS channels CASCADE");
     await pool.query("CREATE SCHEMA returns; CREATE SCHEMA wms; CREATE SCHEMA oms; CREATE SCHEMA channels");
     // Existing owner relations are extracted from their real migrations. The
@@ -87,7 +70,7 @@ integration("customer authorization on migration-defined PostgreSQL", () => {
     await pool.query(readFileSync("migrations/131_refund_line_disposition_authority.sql", "utf8"));
     // The complete new migration, including deferred constraints and triggers,
     // executes verbatim. No persistence SQL or PostgreSQL operation is mocked.
-    await pool.query(readFileSync("migrations/0698_customer_return_authorizations.sql", "utf8"));
+    await pool.query(readFileSync("migrations/0699_customer_return_authorizations.sql", "utf8"));
     store = new PostgresCustomerReturnAuthorizationStore(drizzle(pool));
   });
 
@@ -225,7 +208,44 @@ integration("customer authorization on migration-defined PostgreSQL", () => {
     await authorize({ ...secondPart, lines: [{ ...secondPart.lines[0], quantity: 1, allocations: [{ ...secondPart.lines[0].allocations[0], quantity: 1 }] }] });
     const locked = await store.transaction(tx => tx.lockSource({ channelId: 36, omsOrderId: 100, omsOrderLineIds: [10001] }));
     expect(locked?.lines[0].claimedQuantity).toBe(2);
-    expect(locked?.allocationClaims).toEqual([{ omsOrderLineId: 10001, fulfillmentId: "fulfillment-1", fulfillmentLineItemId: "fulfillment-line-1", quantity: 2 }]);
+    expect(locked?.allocationClaims.sort((a, b) => a.wmsOrderItemId - b.wmsOrderItemId)).toEqual([
+      { omsOrderLineId: 10001, wmsOrderItemId: 1001, fulfillmentId: "fulfillment-1", fulfillmentLineItemId: "fulfillment-line-1", quantity: 1 },
+      { omsOrderLineId: 10001, wmsOrderItemId: 1002, fulfillmentId: "fulfillment-1", fulfillmentLineItemId: "fulfillment-line-1", quantity: 1 },
+    ]);
+  });
+
+  it("enforces the exact original WMS/fulfillment bound independently of item and provider capacity", async () => {
+    const base = request("original-first", 1);
+    const original = { ...base.lines[0].allocations[0], originalQuantity: 1, eligibleQuantity: 4 };
+    const first = { ...base, lines: [{ ...base.lines[0], allocations: [original] }] };
+    await authorize(first);
+    await expect(authorize({ ...first, idempotencyKey: "exhausted-original" }))
+      .rejects.toMatchObject({ code: "RETURN_AUTHORIZATION_QUANTITY_EXCEEDED" });
+    // This item's second unit belongs to another original fulfillment, not the exhausted one.
+    await authorize({ ...first, idempotencyKey: "other-original", lines: [{ ...first.lines[0],
+      allocations: [{ ...original, fulfillmentId: "fulfillment-other", fulfillmentLineItemId: "fulfillment-line-other", eligibleQuantity: 1 }] }] });
+    const evidence = (await pool.query("SELECT delivery_evidence FROM returns.customer_return_authorization_allocations")).rows;
+    expect(evidence.every(row => row.delivery_evidence.wmsOriginalQuantity === 1)).toBe(true);
+    expect(await counts()).toEqual([2, 2, 2, 2, 2, 2]);
+  });
+
+  it("rejects overlapping original quantities in one WMS item even when the selected total fits", async () => {
+    const base = request("overlapping-originals");
+    const first = { ...base.lines[0].allocations[0], quantity: 1 };
+    await expect(authorize({ ...base, lines: [{ ...base.lines[0], allocations: [first,
+      { ...first, fulfillmentId: "other", fulfillmentLineItemId: "other-line" }] }] }))
+      .rejects.toMatchObject({ code: "RETURN_AUTHORIZATION_SOURCE_CONFLICT" });
+    expect(await counts()).toEqual([0, 0, 0, 0, 0, 0]);
+  });
+
+  it("validates snapshot size after adding the immutable original quantity", async () => {
+    const base = request();
+    const evidence = { data: "x".repeat(65_536 - Buffer.byteLength(JSON.stringify({ data: "" }), "utf8")) };
+    expect(Buffer.byteLength(JSON.stringify(evidence), "utf8")).toBe(65_536);
+    await expect(authorize({ ...base, lines: [{ ...base.lines[0],
+      allocations: [{ ...base.lines[0].allocations[0], deliveryEvidence: evidence }] }] }))
+      .rejects.toMatchObject({ code: "RETURN_AUTHORIZATION_INPUT_INVALID" });
+    expect(await counts()).toEqual([0, 0, 0, 0, 0, 0]);
   });
 
   it("rolls back every record if the durable outbox write fails, then permits the same key retry", async () => {
@@ -361,7 +381,7 @@ integration("customer authorization on migration-defined PostgreSQL", () => {
     expect(result.authorizationNumber).toBe("RMA-10000000000");
   });
 
-  function service(): CustomerReturnAuthorizationService {
+  function service(split = false): CustomerReturnAuthorizationService {
     const source: CustomerReturnTrustedSource = {
       observedAt: NOW.toISOString(),
       facts: {
@@ -369,12 +389,14 @@ integration("customer authorization on migration-defined PostgreSQL", () => {
         order: { orderId: "gid://shopify/Order/100", channelId: 36, provider: "shopify", destinationCountryCode: "US",
           purchasedAt: "2026-08-20T12:00:00.000Z", lines: [{ lineId: LINE_ONE, sku: "SAME-SKU", requiresShipping: true,
             purchasedQuantity: 4, claims: [], allocations: [{ allocationId: "allocation-1", fulfillmentId: "fulfillment-1",
-              fulfillmentLineItemId: "fulfillment-line-1", quantity: 2, status: "active", staffDeliveryOverride: null,
+              fulfillmentLineItemId: "fulfillment-line-1", quantity: split ? 4 : 2, status: "active", staffDeliveryOverride: null,
               deliveryEvidence: [{ evidenceId: "delivered-1", source: "shopify", status: "delivered",
                 occurredAt: "2026-09-21T12:00:00.000Z", observedAt: NOW.toISOString() }] }] }] },
       },
       mappings: [{ lineId: LINE_ONE, omsOrderLineId: 10001, externalLineItemId: LINE_ONE,
-        allocations: [{ allocationId: "allocation-1", wmsOrderItemId: 1001 }] }],
+        allocations: [{ allocationId: "allocation-1", externalClaimAllocations: [],
+          wmsAllocations: split ? [{ wmsOrderItemId: 1002, originalQuantity: 2 }, { wmsOrderItemId: 1001, originalQuantity: 2 }]
+            : [{ wmsOrderItemId: 1001, originalQuantity: 2 }] }] }],
       warehouse: { warehouseId: 1, version: 1, address: { name: "Synthetic Warehouse", address1: "1 Test Way",
         address2: null, city: "Test", state: "NY", postalCode: "10001", countryCode: "US" } },
     };
@@ -384,6 +406,30 @@ integration("customer authorization on migration-defined PostgreSQL", () => {
       sourceReader: { read: async () => structuredClone(source) },
     });
   }
+
+  it("persists split provider claims and reserves only the remaining WMS unit on the second partial request", async () => {
+    const application = service(true);
+    const preview = await application.prepare({ orderReference: "63210" });
+    expect(preview.eligibility.eligibleQuantity).toBe(4);
+    const first = { orderReference: "63210", eligibilityRevision: preview.eligibilityRevision,
+      idempotencyKey: "split-first", lines: [{ lineId: LINE_ONE, quantity: 3 }] };
+    const result = await application.submit(first);
+    const firstClaims = await pool.query(`SELECT wms_order_item_id, quantity, eligible_quantity
+      FROM returns.customer_return_authorization_allocations WHERE authorization_id = $1 ORDER BY wms_order_item_id`, [result.authorizationId]);
+    expect(firstClaims.rows).toEqual([{ wms_order_item_id: 1001, quantity: 2, eligible_quantity: 4 },
+      { wms_order_item_id: 1002, quantity: 1, eligible_quantity: 4 }]);
+    await expect(application.submit({ ...first, idempotencyKey: "split-stale" })).rejects.toMatchObject({ code: "RETURN_REVIEW_CHANGED" });
+    const remaining = await application.prepare({ orderReference: "63210" });
+    expect(remaining.eligibility.eligibleQuantity).toBe(1);
+    const second = await application.submit({ ...first, idempotencyKey: "split-second", eligibilityRevision: remaining.eligibilityRevision,
+      lines: [{ lineId: LINE_ONE, quantity: 1 }] });
+    const secondClaims = await pool.query(`SELECT wms_order_item_id, quantity FROM returns.customer_return_authorization_allocations
+      WHERE authorization_id = $1`, [second.authorizationId]);
+    expect(secondClaims.rows).toEqual([{ wms_order_item_id: 1002, quantity: 1 }]);
+    expect((await application.prepare({ orderReference: "63210" })).eligibility.eligibleQuantity).toBe(0);
+    expect(await application.submit(first)).toEqual({ ...result, replayed: true });
+    expect(await counts()).toEqual([2, 2, 3, 2, 2, 2]);
+  });
 
   it("runs real service prepare with source-only locks and submit with atomic repository persistence", async () => {
     const application = service();

@@ -40,7 +40,10 @@ function trustedSource(): CustomerReturnTrustedSource {
       },
     },
     mappings: [{ lineId: LINE_ID, omsOrderLineId: 301, externalLineItemId: LINE_ID,
-      allocations: [{ allocationId: "allocation-1", wmsOrderItemId: 401 }, { allocationId: "allocation-2", wmsOrderItemId: 402 }] }],
+      allocations: [
+        { allocationId: "allocation-1", wmsAllocations: [{ wmsOrderItemId: 401, originalQuantity: 2 }], externalClaimAllocations: [] },
+        { allocationId: "allocation-2", wmsAllocations: [{ wmsOrderItemId: 402, originalQuantity: 1 }], externalClaimAllocations: [] },
+      ] }],
     warehouse: { warehouseId: 7, version: 2, address: { name: "Returns", address1: "123 Warehouse Lane", address2: null,
       city: "Cleveland", state: "OH", postalCode: "44101", countryCode: "US" } },
   };
@@ -114,7 +117,112 @@ function submission(preview: CustomerReturnAuthorizationPreview, quantity = 3) {
     lines: [{ lineId: LINE_ID, quantity }] };
 }
 
+function splitFixture() {
+  const f = fixture();
+  const line = f.state.source.facts.order.lines[0];
+  line.purchasedQuantity = 4;
+  line.allocations = [{ ...line.allocations[0], quantity: 4 }];
+  f.state.source.mappings[0].allocations = [{ allocationId: "allocation-1", externalClaimAllocations: [],
+    wmsAllocations: [{ wmsOrderItemId: 402, originalQuantity: 2 }, { wmsOrderItemId: 401, originalQuantity: 2 }] }];
+  f.state.locked!.lines[0].orderedQuantity = 4;
+  f.state.locked!.lines[0].wmsItems[1].fulfilledQuantity = 2;
+  return f;
+}
+
+function claimSplitItem(f: ReturnType<typeof splitFixture>, wmsOrderItemId: number, quantity: number) {
+  const current = f.state.locked!;
+  current.lines[0].claimedQuantity += quantity;
+  current.lines[0].wmsItems.find(item => item.wmsOrderItemId === wmsOrderItemId)!.claimedQuantity += quantity;
+  current.allocationClaims.push({ omsOrderLineId: 301, wmsOrderItemId, fulfillmentId: "fulfillment-1",
+    fulfillmentLineItemId: "fulfillment-line-1", quantity });
+}
+
 describe("CustomerReturnAuthorizationService", () => {
+  it("splits one provider fulfillment across exact WMS items and uses only the remaining item on a second partial request", async () => {
+    const f = splitFixture();
+    const preview = await f.service.prepare({ orderReference: "63210" });
+    const first = submission(preview, 3);
+    await f.service.submit(first);
+    expect(f.persisted[0].lines[0].allocations).toMatchObject([
+      { wmsOrderItemId: 401, originalQuantity: 2, quantity: 2, eligibleQuantity: 4 },
+      { wmsOrderItemId: 402, originalQuantity: 2, quantity: 1, eligibleQuantity: 4 },
+    ]);
+    claimSplitItem(f, 401, 2); claimSplitItem(f, 402, 1);
+    await expect(f.service.submit({ ...first, idempotencyKey: "stale-second" })).rejects.toMatchObject({ code: "RETURN_REVIEW_CHANGED" });
+    const secondPreview = await f.service.prepare({ orderReference: "63210" });
+    expect(secondPreview.eligibility.eligibleQuantity).toBe(1);
+    await f.service.submit({ ...submission(secondPreview, 1), idempotencyKey: "second" });
+    expect(f.persisted[1].lines[0].allocations).toMatchObject([{ wmsOrderItemId: 402, quantity: 1, originalQuantity: 2 }]);
+    expect(f.persisted[1].lines[0].allocations).toHaveLength(1);
+    await expect(f.service.submit(first)).resolves.toMatchObject({ replayed: true });
+    expect(f.persisted).toHaveLength(2);
+  });
+
+  it("does not consume another WMS item's capacity when the later sorted item was previously claimed", async () => {
+    const f = splitFixture(); claimSplitItem(f, 402, 2);
+    const preview = await f.service.prepare({ orderReference: "63210" });
+    await f.service.submit(submission(preview, 2));
+    expect(f.persisted[0].lines[0].allocations).toMatchObject([{ wmsOrderItemId: 401, quantity: 2 }]);
+    expect(f.persisted[0].lines[0].allocations).toHaveLength(1);
+  });
+
+  it("keeps split selection and review stable when exact suballocations are reordered", async () => {
+    const f = splitFixture();
+    const preview = await f.service.prepare({ orderReference: "63210" });
+    f.state.source.mappings[0].allocations[0].wmsAllocations.reverse();
+    expect((await f.service.prepare({ orderReference: "63210" })).eligibilityRevision).toBe(preview.eligibilityRevision);
+    await f.service.submit(submission(preview, 1));
+    expect(f.persisted[0].lines[0].allocations[0]).toMatchObject({ wmsOrderItemId: 401, quantity: 1 });
+  });
+
+  it("requires exact native claim suballocations before returning remaining units of a split fulfillment", async () => {
+    const f = splitFixture();
+    f.state.source.facts.order.lines[0].claims = [{ claimId: "native-1", allocationId: "allocation-1", quantity: 2 }];
+    await expect(f.service.prepare({ orderReference: "63210" })).rejects.toMatchObject({ code: "RETURN_SOURCE_MISMATCH" });
+    f.state.source.mappings[0].allocations[0].externalClaimAllocations = [{ claimId: "native-1",
+      wmsAllocations: [{ wmsOrderItemId: 401, quantity: 2 }] }];
+    const preview = await f.service.prepare({ orderReference: "63210" });
+    await f.service.submit(submission(preview, 2));
+    expect(f.persisted[0].lines[0].allocations).toMatchObject([{ wmsOrderItemId: 402, quantity: 2 }]);
+    expect(f.persisted[0].lines[0].allocations).toHaveLength(1);
+  });
+
+  it("resolves a native claim to the only exact WMS item and preserves unallocated claims as a blocker", async () => {
+    const f = fixture();
+    f.state.source.facts.order.lines[0].claims = [{ claimId: "native-1", allocationId: "allocation-1", quantity: 1 }];
+    const preview = await f.service.prepare({ orderReference: "63210" });
+    await f.service.submit(submission(preview, 2));
+    expect(f.persisted[0].lines[0].allocations).toMatchObject([{ wmsOrderItemId: 401, quantity: 1 }, { wmsOrderItemId: 402, quantity: 1 }]);
+    f.state.source.facts.order.lines[0].claims[0].allocationId = null;
+    expect((await f.service.prepare({ orderReference: "63210" })).eligibility.lines[0])
+      .toMatchObject({ eligibleQuantity: 0, reasons: ["claim_allocation_unknown"] });
+  });
+
+  it.each(["original_sum", "duplicate_item", "item_capacity", "native_orphan", "native_duplicate", "native_duplicate_item", "native_wrong_allocation", "native_sum", "native_item", "native_overclaim", "local_overclaim", "local_item_totals"])(
+    "rejects inconsistent split lineage: %s", async kind => {
+      const f = splitFixture();
+      const mapped = f.state.source.mappings[0].allocations[0];
+      if (kind === "original_sum") mapped.wmsAllocations[0].originalQuantity = 1;
+      if (kind === "duplicate_item") mapped.wmsAllocations[0].wmsOrderItemId = 401;
+      if (kind === "item_capacity") { mapped.wmsAllocations[0].originalQuantity = 3; mapped.wmsAllocations[1].originalQuantity = 1; }
+      if (kind.startsWith("native")) {
+        f.state.source.facts.order.lines[0].claims = [{ claimId: "native-1", allocationId: "allocation-1", quantity: 2 }];
+        mapped.externalClaimAllocations = [{ claimId: "native-1", wmsAllocations: [{ wmsOrderItemId: 401, quantity: 2 }] }];
+        if (kind === "native_orphan") mapped.externalClaimAllocations[0].claimId = "unrelated";
+        if (kind === "native_duplicate") mapped.externalClaimAllocations.push(structuredClone(mapped.externalClaimAllocations[0]));
+        if (kind === "native_duplicate_item") mapped.externalClaimAllocations[0].wmsAllocations = [
+          { wmsOrderItemId: 401, quantity: 1 }, { wmsOrderItemId: 401, quantity: 1 }];
+        if (kind === "native_wrong_allocation") f.state.source.facts.order.lines[0].claims[0].allocationId = null;
+        if (kind === "native_sum") mapped.externalClaimAllocations[0].wmsAllocations[0].quantity = 1;
+        if (kind === "native_item") mapped.externalClaimAllocations[0].wmsAllocations[0].wmsOrderItemId = 999;
+        if (kind === "native_overclaim") claimSplitItem(f, 401, 1);
+      }
+      if (kind === "local_overclaim") claimSplitItem(f, 401, 3);
+      if (kind === "local_item_totals") { claimSplitItem(f, 401, 1); f.state.locked!.allocationClaims[0].wmsOrderItemId = 402; }
+      await expect(f.service.prepare({ orderReference: "63210" })).rejects.toMatchObject({ code: "RETURN_SOURCE_MISMATCH" });
+      expect(f.persist).not.toHaveBeenCalled();
+    });
+
   it("prepares trusted facts and current claims without creating a command or authorization", async () => {
     const f = fixture();
     const preview = await f.service.prepare({ orderReference: "#63210" });
@@ -190,7 +298,7 @@ describe("CustomerReturnAuthorizationService", () => {
     const current = f.state.locked!;
     current.lines[0].claimedQuantity = 1;
     current.lines[0].wmsItems[0].claimedQuantity = 1;
-    current.allocationClaims = [{ omsOrderLineId: 301, fulfillmentId: "fulfillment-1", fulfillmentLineItemId: "fulfillment-line-1", quantity: 1 }];
+    current.allocationClaims = [{ omsOrderLineId: 301, wmsOrderItemId: 401, fulfillmentId: "fulfillment-1", fulfillmentLineItemId: "fulfillment-line-1", quantity: 1 }];
     await expect(f.service.submit(submission(preview))).rejects.toMatchObject({ code: "RETURN_REVIEW_CHANGED" });
     expect(f.persist).not.toHaveBeenCalled();
     expect((await f.service.prepare({ orderReference: "63210" })).eligibility.eligibleQuantity).toBe(2);

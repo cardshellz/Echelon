@@ -34,7 +34,15 @@ const submitInputSchema = prepareInputSchema.extend({
 
 const mappingSchema = z.object({
   lineId: identity, omsOrderLineId: id, externalLineItemId: identity.max(100),
-  allocations: z.array(z.object({ allocationId: identity, wmsOrderItemId: id }).strict()).max(200),
+  allocations: z.array(z.object({
+    allocationId: identity,
+    wmsAllocations: z.array(z.object({ wmsOrderItemId: id, originalQuantity: id }).strict()).min(1).max(200),
+    /** Required for split native claims; a single exact item has no lineage ambiguity. */
+    externalClaimAllocations: z.array(z.object({
+      claimId: identity,
+      wmsAllocations: z.array(z.object({ wmsOrderItemId: id, quantity: id }).strict()).min(1).max(200),
+    }).strict()).max(200),
+  }).strict()).max(200),
 }).strict();
 const nonnegativeQuantity = z.number().int().nonnegative().safe();
 const lockedSourceSchema = z.object({
@@ -48,13 +56,13 @@ const lockedSourceSchema = z.object({
     }).strict()).max(200),
   }).strict()).max(200),
   allocationClaims: z.array(z.object({
-    omsOrderLineId: id, fulfillmentId: identity, fulfillmentLineItemId: identity,
+    omsOrderLineId: id, wmsOrderItemId: id, fulfillmentId: identity, fulfillmentLineItemId: identity,
     quantity: z.number().int().positive().safe(),
   }).strict()).max(40_000),
 }).strict().superRefine((source, context) => {
   const lineIds = source.lines.map(line => line.omsOrderLineId);
   const itemIds = source.lines.flatMap(line => line.wmsItems.map(item => item.wmsOrderItemId));
-  const claimIds = source.allocationClaims.map(claim => JSON.stringify([claim.fulfillmentId, claim.fulfillmentLineItemId]));
+  const claimIds = source.allocationClaims.map(claim => JSON.stringify([claim.wmsOrderItemId, claim.fulfillmentId, claim.fulfillmentLineItemId]));
   if (new Set(lineIds).size !== lineIds.length || new Set(itemIds).size !== itemIds.length || new Set(claimIds).size !== claimIds.length) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: "Locked source identities must be unique." });
   }
@@ -135,7 +143,7 @@ export class CustomerReturnAuthorizationService {
     return this.dependencies.store.transaction(async tx => {
       const locked = await tx.lockSource({ channelId: order.channelId, omsOrderId: order.omsOrderId,
         omsOrderLineIds: source.mappings.map(mapping => mapping.omsOrderLineId) });
-      const facts = this.withCurrentClaims(source, locked, order.omsOrderId);
+      const { facts } = this.withCurrentClaims(source, locked, order.omsOrderId);
       return this.preview(source, facts);
     });
   }
@@ -163,12 +171,12 @@ export class CustomerReturnAuthorizationService {
       if (this.dependencies.isIntakeReady() !== true) throw failure("RETURN_INTAKE_NOT_READY", "New returns are not enabled.");
       const locked = await tx.lockSource({ channelId: order.channelId, omsOrderId: order.omsOrderId,
         omsOrderLineIds: source.mappings.map(mapping => mapping.omsOrderLineId) });
-      const facts = this.withCurrentClaims(source, locked, order.omsOrderId);
+      const { facts, claimsByWmsAllocation } = this.withCurrentClaims(source, locked, order.omsOrderId);
       const preview = this.preview(source, facts);
       if (preview.eligibilityRevision !== input.eligibilityRevision) {
         throw failure("RETURN_REVIEW_CHANGED", "The return details changed. Review the current available quantities.");
       }
-      const selected = lines.map(request => this.allocate(request, source, preview.eligibility, facts));
+      const selected = lines.map(request => this.allocate(request, source, preview.eligibility, facts, claimsByWmsAllocation));
       // Audit the same injected decision instant used for the window check under lock.
       const now = new Date(facts.now);
       return parse(resultSchema, await tx.persist({ ...command, omsOrderId: order.omsOrderId, semanticHash,
@@ -201,43 +209,98 @@ export class CustomerReturnAuthorizationService {
         || mapping.allocations.some(allocation => !active.some(fact => fact.allocationId === allocation.allocationId))) {
         throw failure("RETURN_SOURCE_MISMATCH", "Fulfillment mappings must identify each active purchased allocation exactly once.");
       }
+      for (const mapped of mapping.allocations) {
+        const allocation = active.find(candidate => candidate.allocationId === mapped.allocationId)!;
+        if (new Set(mapped.wmsAllocations.map(item => item.wmsOrderItemId)).size !== mapped.wmsAllocations.length
+          || sumQuantities(mapped.wmsAllocations.map(item => item.originalQuantity)) !== allocation.quantity
+          || new Set(mapped.externalClaimAllocations.map(claim => claim.claimId)).size !== mapped.externalClaimAllocations.length) {
+          throw failure("RETURN_SOURCE_MISMATCH", "Original fulfillment quantities must have exact, distinct WMS allocations.");
+        }
+        for (const external of mapped.externalClaimAllocations) {
+          const claim = line.claims.find(candidate => candidate.claimId === external.claimId);
+          if (!claim || claim.allocationId !== mapped.allocationId
+            || new Set(external.wmsAllocations.map(item => item.wmsOrderItemId)).size !== external.wmsAllocations.length
+            || sumQuantities(external.wmsAllocations.map(item => item.quantity)) !== claim.quantity
+            || external.wmsAllocations.some(item => !mapped.wmsAllocations.some(original => original.wmsOrderItemId === item.wmsOrderItemId))) {
+            throw failure("RETURN_SOURCE_MISMATCH", "External return claims require exact quantity and WMS identity reconciliation.");
+          }
+        }
+      }
     }
     const source = { facts: { policy: facts.policy, order: facts.order }, mappings, warehouse, observedAt };
     this.assertFresh(source, now);
     return source;
   }
 
-  private withCurrentClaims(source: CustomerReturnTrustedSource, locked: LockedCustomerReturnAuthorizationSource | null, omsOrderId: number): CustomerReturnEligibilityInput {
+  private withCurrentClaims(source: CustomerReturnTrustedSource, locked: LockedCustomerReturnAuthorizationSource | null, omsOrderId: number): {
+    facts: CustomerReturnEligibilityInput; claimsByWmsAllocation: ReadonlyMap<string, number>;
+  } {
     if (!locked || locked.channelId !== source.facts.order.channelId || locked.omsOrderId !== omsOrderId) {
       throw failure("RETURN_SOURCE_MISMATCH", "The order source is no longer available.");
     }
     locked = parse(lockedSourceSchema, locked);
     const now = this.now();
     this.assertFresh(source, now);
+    const claimsByWmsAllocation = new Map<string, number>();
     const lines = source.facts.order.lines.map(line => {
       const mapping = source.mappings.find(candidate => candidate.lineId === line.lineId)!;
       const current = locked.lines.find(candidate => candidate.omsOrderLineId === mapping.omsOrderLineId);
       if (!current || current.externalLineItemId !== mapping.externalLineItemId || current.orderedQuantity !== line.purchasedQuantity) {
         throw failure("RETURN_SOURCE_MISMATCH", "Purchased quantities or identities changed. Reload the order.");
       }
-      if (mapping.allocations.some(allocation => !current.wmsItems.some(item => item.wmsOrderItemId === allocation.wmsOrderItemId))) {
-        throw failure("RETURN_SOURCE_MISMATCH", "A fulfillment does not belong to the purchased line.");
+      const originalByItem = new Map<number, number>();
+      for (const allocation of mapping.allocations) for (const original of allocation.wmsAllocations) {
+        const item = current.wmsItems.find(candidate => candidate.wmsOrderItemId === original.wmsOrderItemId);
+        const total = sumQuantities([originalByItem.get(original.wmsOrderItemId) ?? 0, original.originalQuantity]);
+        if (!item || total > item.fulfilledQuantity) {
+          throw failure("RETURN_SOURCE_MISMATCH", "Original fulfillment quantities exceed their exact WMS source.");
+        }
+        originalByItem.set(original.wmsOrderItemId, total);
       }
       const localClaims = locked.allocationClaims.filter(claim => claim.omsOrderLineId === mapping.omsOrderLineId);
       const localQuantity = localClaims.reduce((sum, claim) => sum + claim.quantity, 0);
       if (!Number.isSafeInteger(localQuantity) || localQuantity !== current.claimedQuantity) {
         throw failure("RETURN_SOURCE_MISMATCH", "Current return claims require reconciliation.");
       }
+      if (localClaims.some(claim => !current.wmsItems.some(item => item.wmsOrderItemId === claim.wmsOrderItemId))
+        || current.wmsItems.some(item => sumQuantities(localClaims.filter(claim => claim.wmsOrderItemId === item.wmsOrderItemId)
+          .map(claim => claim.quantity)) !== item.claimedQuantity)) {
+        throw failure("RETURN_SOURCE_MISMATCH", "Current WMS return claim quantities require reconciliation.");
+      }
       const claims = line.claims.map(claim => ({ ...claim }));
       // Legacy cases without a proven fulfillment mapping must be reviewed, not guessed.
       if (current.legacyExpectedQuantity > 0) claims.push({ claimId: `legacy:${mapping.omsOrderLineId}`, allocationId: null, quantity: current.legacyExpectedQuantity });
       for (const claim of localClaims) {
         const allocation = line.allocations.find(candidate => candidate.fulfillmentId === claim.fulfillmentId && candidate.fulfillmentLineItemId === claim.fulfillmentLineItemId);
-        claims.push({ claimId: `echelon:${hash([claim.fulfillmentId, claim.fulfillmentLineItemId])}`, allocationId: allocation?.allocationId ?? null, quantity: claim.quantity });
+        if (allocation?.status === "active") {
+          const mapped = mapping.allocations.find(candidate => candidate.allocationId === allocation.allocationId)!;
+          if (!mapped.wmsAllocations.some(item => item.wmsOrderItemId === claim.wmsOrderItemId)) {
+            throw failure("RETURN_SOURCE_MISMATCH", "A current return claim no longer has its original WMS allocation.");
+          }
+          claimsByWmsAllocation.set(wmsAllocationKey(allocation.allocationId, claim.wmsOrderItemId), claim.quantity);
+        }
+        claims.push({ claimId: `echelon:${hash({ fulfillmentId: claim.fulfillmentId, fulfillmentLineItemId: claim.fulfillmentLineItemId,
+          wmsOrderItemId: claim.wmsOrderItemId })}`, allocationId: allocation?.allocationId ?? null, quantity: claim.quantity });
+      }
+      for (const mapped of mapping.allocations) {
+        for (const claim of line.claims.filter(candidate => candidate.allocationId === mapped.allocationId)) {
+          const exact = mapped.externalClaimAllocations.find(candidate => candidate.claimId === claim.claimId)?.wmsAllocations;
+          // A provider total alone cannot identify which of several original WMS items was claimed.
+          const subclaims = exact ?? (mapped.wmsAllocations.length === 1
+            ? [{ wmsOrderItemId: mapped.wmsAllocations[0].wmsOrderItemId, quantity: claim.quantity }] : null);
+          if (!subclaims) throw failure("RETURN_SOURCE_MISMATCH", "An external return needs exact WMS claim reconciliation.");
+          for (const subclaim of subclaims) {
+            const key = wmsAllocationKey(mapped.allocationId, subclaim.wmsOrderItemId);
+            claimsByWmsAllocation.set(key, sumQuantities([claimsByWmsAllocation.get(key) ?? 0, subclaim.quantity]));
+          }
+        }
+        if (mapped.wmsAllocations.some(item => (claimsByWmsAllocation.get(wmsAllocationKey(mapped.allocationId, item.wmsOrderItemId)) ?? 0) > item.originalQuantity)) {
+          throw failure("RETURN_SOURCE_MISMATCH", "An original WMS allocation is overclaimed.");
+        }
       }
       return { ...line, claims };
     });
-    return customerReturnEligibilityInputSchema.parse({ ...source.facts, now: now.toISOString(), order: { ...source.facts.order, lines } });
+    return { facts: customerReturnEligibilityInputSchema.parse({ ...source.facts, now: now.toISOString(), order: { ...source.facts.order, lines } }), claimsByWmsAllocation };
   }
 
   private preview(source: CustomerReturnTrustedSource, facts: CustomerReturnEligibilityInput): CustomerReturnAuthorizationPreview {
@@ -256,7 +319,8 @@ export class CustomerReturnAuthorizationService {
   }
 
   private allocate(request: z.infer<typeof selectionSchema>, source: CustomerReturnTrustedSource,
-    eligibility: CustomerReturnEligibilityOutput, facts: CustomerReturnEligibilityInput): PersistCustomerReturnAuthorizationInput["lines"][number] {
+    eligibility: CustomerReturnEligibilityOutput, facts: CustomerReturnEligibilityInput,
+    claimsByWmsAllocation: ReadonlyMap<string, number>): PersistCustomerReturnAuthorizationInput["lines"][number] {
     const mapping = source.mappings.find(line => line.lineId === request.lineId);
     const line = eligibility.lines.find(line => line.lineId === request.lineId);
     if (!mapping || !line || request.quantity > line.eligibleQuantity) {
@@ -267,15 +331,22 @@ export class CustomerReturnAuthorizationService {
     const rawLine = facts.order.lines.find(line => line.lineId === request.lineId)!;
     for (const allocation of [...line.allocations].sort((left, right) => compare(left.allocationId, right.allocationId))) {
       if (!remaining || !allocation.eligibleQuantity) continue;
-      const quantity = Math.min(remaining, allocation.eligibleQuantity);
+      let allocationRemaining = Math.min(remaining, allocation.eligibleQuantity);
       const mapped = mapping.allocations.find(candidate => candidate.allocationId === allocation.allocationId);
       const evidence = rawLine.allocations.find(candidate => candidate.allocationId === allocation.allocationId);
       if (!mapped || !evidence) throw failure("RETURN_SOURCE_MISMATCH", "A selected fulfillment mapping is unavailable.");
-      allocations.push({ wmsOrderItemId: mapped.wmsOrderItemId, fulfillmentId: allocation.fulfillmentId,
-        fulfillmentLineItemId: allocation.fulfillmentLineItemId, quantity,
-        eligibleQuantity: allocation.deliveredQuantity,
-        deliveryEvidence: { ...evidence, basis: allocation.deliveryBasis, observedAt: source.observedAt } });
-      remaining -= quantity;
+      for (const original of [...mapped.wmsAllocations].sort((left, right) => left.wmsOrderItemId - right.wmsOrderItemId)) {
+        const claimed = claimsByWmsAllocation.get(wmsAllocationKey(mapped.allocationId, original.wmsOrderItemId)) ?? 0;
+        const quantity = Math.min(allocationRemaining, original.originalQuantity - claimed);
+        if (!quantity) continue;
+        allocations.push({ wmsOrderItemId: original.wmsOrderItemId, originalQuantity: original.originalQuantity,
+          fulfillmentId: allocation.fulfillmentId, fulfillmentLineItemId: allocation.fulfillmentLineItemId, quantity,
+          eligibleQuantity: allocation.deliveredQuantity,
+          deliveryEvidence: { ...evidence, basis: allocation.deliveryBasis, observedAt: source.observedAt,
+            wmsAllocations: mapped.wmsAllocations, externalClaimAllocations: mapped.externalClaimAllocations } });
+        remaining -= quantity;
+        allocationRemaining -= quantity;
+      }
     }
     if (remaining) throw failure("RETURN_QUANTITY_UNAVAILABLE", "Selected units could not be allocated to delivered fulfillments.");
     return { omsOrderLineId: mapping.omsOrderLineId, externalLineItemId: mapping.externalLineItemId,
@@ -322,6 +393,12 @@ function replayResult(existing: { semanticHash: string; result: CustomerReturnAu
   return parse(resultSchema, { ...existing.result, replayed: true });
 }
 function compare(left: string, right: string): number { return left < right ? -1 : left > right ? 1 : 0; }
+function wmsAllocationKey(allocationId: string, wmsOrderItemId: number): string { return JSON.stringify([allocationId, wmsOrderItemId]); }
+function sumQuantities(values: readonly number[]): number {
+  const total = values.reduce((sum, value) => sum + value, 0);
+  if (!Number.isSafeInteger(total)) throw failure("RETURN_SOURCE_MISMATCH", "Aggregate source quantities exceed the supported range.");
+  return total;
+}
 function hash(value: unknown): string { return createHash("sha256").update(JSON.stringify(canonical(value))).digest("hex"); }
 function canonical(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(canonical).sort((left, right) => compare(JSON.stringify(left), JSON.stringify(right)));

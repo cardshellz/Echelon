@@ -12,7 +12,7 @@ Confirmed commercial scope is domestic U.S. Shopify orders, a 365-day purchase w
 - `application/customer-return-order-access.service.ts` requires a trusted request-scoped customer principal or an exact guest order grant. Its PostgreSQL adapter matches aliases within that scope and detects ambiguity. A reference alone never grants access.
 - `domain/customer-return-eligibility.ts` evaluates strict, complete source facts against an injected instant. Original fulfillment identities remain distinct from purchased lines and WMS partitions. Unknown/conflicting delivery or unresolved claims cannot grant units. A staff exception covers only its approved quantity.
 - `application/customer-return-authorization.service.ts` rechecks access before replay, loads provider facts outside transactions, then reads current local claims under source locks. A versioned review fingerprint includes decision evidence, configuration and destination; polling observation timestamps do not invalidate unchanged selections. Submission allocates quantities deterministically and persists one authorization.
-- `infrastructure/customer-return-authorization.repository.ts` persists the root, purchased lines, original fulfillment allocations/claims, command result, audit and outbox atomically. It checks OMS, WMS-item and fulfillment capacity under the existing return order lock and row locks. Migration `0698_customer_return_authorizations.sql` adds foreign keys, ownership guards, balanced evidence constraints and append-only history.
+- `infrastructure/customer-return-authorization.repository.ts` persists the root, purchased lines, original fulfillment allocations/claims, command result, audit and outbox atomically. It checks OMS, WMS-item and fulfillment capacity under the existing return order lock and row locks. Migration `0699_customer_return_authorizations.sql` adds foreign keys, ownership guards, balanced evidence constraints and append-only history.
 
 Optional customer reason stays null when omitted. It is not replaced with a fabricated reason. Policy and warehouse snapshots belong to the authorization. Payment execution and inventory movements are absent from this increment.
 
@@ -21,6 +21,8 @@ Optional customer reason stays null when omitted. It is not replaced with a fabr
 `CustomerReturnAuthorizationService` requires injected order access, source reader, transaction store, clock, actor reader, source-age limit and intake-readiness check. The readiness check must stay closed until all existing return writers participate in one entitlement contract. There is intentionally no environment switch or HTTP endpoint that enables these writes today.
 
 The live source reader must provide complete, paginated facts and exact mappings, normalize provider identities consistently, and distinguish active original fulfillment from canceled/replacement provenance. Its external claim list must exclude Shopify Returns already mirrored from local Echelon authorizations by exact provider identity. Local claims are merged separately under lock; counting both would reserve the same units twice. Legacy expected returns without proven fulfillment allocation currently require review.
+
+One provider fulfillment line may contain several exact WMS allocations. Their original purchased quantities must sum to the provider quantity; current claims retain both provider and WMS identity. A native external claim against such a split also needs exact quantity-bearing WMS attribution. If that evidence is absent, the service requires reconciliation rather than assigning the claim to whichever warehouse record appears first.
 
 The principal adapter must verify account identity or an order-bound email token before supplying the application principal. The HTTP layer must project a restricted customer DTO from the internal eligibility model; evidence IDs, staff audit identities and warehouse configuration are internal. Never accept eligibility facts, destinations, principal identity or staff approvals from a customer request body.
 
@@ -39,6 +41,19 @@ node node_modules/typescript/bin/tsc --noEmit --incremental false
 ```
 
 These test databases must be disposable. The tests rebuild only their dedicated schemas after checking explicit opt-in and local database identity. Order lookup applies the original OMS table definition plus its customer identity migration. Authorization tests apply the complete new migration against prerequisite schemas. Provider APIs are represented by trusted test fixtures; passing these tests does not prove live Shopify or ShipStation acceptance.
+
+Both database suites are also registered in `scripts/ci/postgres-test-manifest.ts`. CI creates a fresh database and process per test file. The returns test guard accepts that exact owned-name convention, rejects remote/query-override/application targets and keeps the two local suite databases separate.
+
+### Verified integration boundaries
+
+The following source findings determine the next increment; they are not claims about current production records:
+
+- `normalizeShopifyFulfillmentIngress` in `server/modules/oms/shopify-fulfillment-ingress.adapter.ts` assigns the REST line ID to both purchased-line and source-fulfillment-line fields. `ShopifyFulfillmentSnapshotReader.fetch` in `server/modules/oms/shopify-fulfillment-snapshot.ts` queries GraphQL `FulfillmentLineItem.id` separately from `lineItem.id`. The reader must prove provider identity provenance and exact quantity-bearing WMS mappings; a similarly named receipt column is insufficient. Existing readers do not supply complete paginated delivery and native Return evidence.
+- `loadSourceItems` in `infrastructure/open-return-case.repository.ts` and `createExpectedReturn` in `server/modules/oms/shopify-refund-cascade.service.ts` subtract legacy expected quantities without the new claims. Materializing an expected child also requires an exact allocation-to-child-item link so its units are not counted twice. No existing writer has been changed in this increment.
+- `ReturnCaseFinancialService.issueCustomerRefund` can resume a reserved intent before deriving current action availability. Its `resumeCustomerRefund` invokes the provider. The manual-refund fence must therefore cover quote, reservation, pending execution and case association races; hiding the action alone is insufficient. `ReturnsService.processReturn` also needs a canonical receiving boundary for linked merchandise.
+- Canonical child cases require a policy ID and operational snapshot in `shared/schema/returns.schema.ts`. The eligibility snapshot stored here is not that operational policy contract. Pin both to the authorization before materializing children; do not silently resolve a different policy later.
+- Echelon staff sessions and Dropship member challenges are not retail customer proof. The adjacent `shellz-club-app` has a Shopify App Proxy and member JWT flow in `server/routes/portal.ts` and `server/portal-jwt.ts`, but no dedicated audience/shop/channel-bound handoff to Echelon. Its active-membership requirement also cannot cover retail guests. Dedicated customer and order-bound guest adapters are still required.
+- Warehouse address records exist in `shared/schema/warehouse.schema.ts`, but fields are nullable and there is no versioned return-destination selection. The outbound default warehouse is not an approved return destination. Add staff configuration with a validated address and snapshot its version.
 
 ### Remaining implementation and launch gates
 
