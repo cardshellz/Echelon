@@ -97,9 +97,12 @@ export default function WalmartConnectionPanel({ channelId, canEdit, warehouses 
       {account && <div className="space-y-3">
         <p>Verified: <strong>{account.partnerName}</strong> ({account.partnerId})</p>
         {!status.data && <>
-          <Label htmlFor="walmart-node">Walmart fulfillment center</Label><select id="walmart-node" className="w-full border rounded p-2" value={shipNode} onChange={event => setShipNode(event.target.value)}>
+          <Label htmlFor="walmart-node">Walmart fulfillment center</Label><select id="walmart-node" className="w-full border rounded p-2" value={shipNode} disabled={account.nodes.length === 0} aria-describedby={account.nodes.length === 0 ? "walmart-no-centers" : undefined} onChange={event => setShipNode(event.target.value)}>
             <option value="">Select a fulfillment center</option>{account.nodes.map(node => <option key={node.shipNode} value={node.shipNode}>{node.shipNodeName} ({node.shipNode})</option>)}
           </select>
+          {account.nodes.length === 0 && <p id="walmart-no-centers" role="alert" className="text-sm text-destructive">
+            No supported active fulfillment centers were returned for this account and environment. Check your fulfillment centers in Walmart Seller Center, then verify the account again.
+          </p>}
           <Label htmlFor="walmart-warehouse">Echelon warehouse</Label><select id="walmart-warehouse" className="w-full border rounded p-2" value={warehouse} onChange={event => setWarehouse(event.target.value)}>
             <option value="">Select a warehouse</option>{warehouses.map(warehouse => <option key={warehouse.id} value={warehouse.id}>{warehouse.code} — {warehouse.name}</option>)}
           </select>

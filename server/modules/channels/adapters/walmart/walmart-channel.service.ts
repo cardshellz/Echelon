@@ -2,8 +2,16 @@ import { z } from "zod";
 import { walmartConnectSchema, walmartControlSchema, walmartKeyInputSchema, walmartMappingSchema } from "@shared/types/walmart-channel";
 import type { FulfillmentProviderCredentialCipher } from "../../../shipping-engine/application/connected-fulfillment-method-catalog.service";
 import { WalmartApiError, WalmartClient, walmartCredentialsSchema } from "./walmart-client";
-import { WalmartUsApi, type WalmartUsApiPort } from "./walmart-us-api";
+import { WalmartUsApi, type WalmartShipNode, type WalmartUsApiPort } from "./walmart-us-api";
 import { WalmartConnectionRepository, type WalmartConnectionRecord } from "./walmart-connection.repository";
+
+function isActiveSellerShipNode(node: WalmartShipNode): boolean {
+  // Walmart's default seller inventory location is VIRTUAL. Settings also
+  // returns PHYSICAL and 3PL nodes; this connector supports seller fulfillment.
+  // https://developer.walmart.com/us-marketplace/reference/getallfulfillmentcenters
+  // https://developer.walmart.com/global-marketplace/docs/bulk-inventory
+  return node.status === "ACTIVE" && (node.nodeType === "PHYSICAL" || node.nodeType === "VIRTUAL");
+}
 
 export class WalmartChannelService {
   private readonly clients = new Map<number, { revision: number; api: WalmartUsApiPort }>();
@@ -21,7 +29,7 @@ export class WalmartChannelService {
     const api = this.createApi({ ...keys, market: "us" });
     const account = await api.account();
     await api.orders(new URLSearchParams({ limit: "1", shipNodeType: "SellerFulfilled", replacementInfo: "true" }));
-    return { ...account, nodes: account.nodes.filter(node => node.status === "ACTIVE" && node.nodeType === "PHYSICAL") };
+    return { ...account, nodes: account.nodes.filter(isActiveSellerShipNode) };
   }
   async connect(channelId: number, input: unknown, actor: string) {
     const command = walmartConnectSchema.parse(input);
@@ -37,7 +45,7 @@ export class WalmartChannelService {
       const api = this.createApi(credentials);
       const account = await api.account();
       if (account.partnerId !== command.expectedPartnerId) throw new WalmartApiError("WALMART_ACCOUNT_CHANGED", "The verified Walmart account changed; verify the connection again", false);
-      if (!account.nodes.some(node => node.shipNode === command.shipNodeId && node.nodeType === "PHYSICAL" && node.status === "ACTIVE")) {
+      if (!account.nodes.some(node => node.shipNode === command.shipNodeId && isActiveSellerShipNode(node))) {
         throw new WalmartApiError("WALMART_SHIP_NODE_INVALID", "Select an active seller-operated Walmart fulfillment center", false);
       }
       await api.orders(new URLSearchParams({ limit: "1", shipNodeType: "SellerFulfilled", replacementInfo: "true" }));
@@ -55,7 +63,7 @@ export class WalmartChannelService {
         this.requireRuntime(row);
         const api = this.api(row);
         const account = await api.account();
-        if (account.partnerId !== row.partner_id || !account.nodes.some(node => node.shipNode === row.ship_node_id && node.status === "ACTIVE" && node.nodeType === "PHYSICAL")) {
+        if (account.partnerId !== row.partner_id || !account.nodes.some(node => node.shipNode === row.ship_node_id && isActiveSellerShipNode(node))) {
           throw new WalmartApiError("WALMART_ACCOUNT_CHANGED", "Account or fulfillment center verification failed", false);
         }
         await this.repository.assertWarehouse(row);
