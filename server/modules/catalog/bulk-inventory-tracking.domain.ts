@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { canonicalJson } from "@shared/utils/canonical-json";
-import { bulkInventoryTrackingPreviewSchema, type BulkInventoryTrackingProduct } from "@shared/catalog/bulk-inventory-tracking";
+import { bulkInventoryTrackingPreviewSchema, type BulkInventoryTrackingProduct, type InventoryTrackingEvidence } from "@shared/catalog/bulk-inventory-tracking";
 import type { Product, ProductVariant } from "@shared/schema";
 
 export type BulkInventoryTrackingSelection = Array<{
@@ -11,6 +11,7 @@ export type BulkInventoryTrackingSelection = Array<{
       variant: Pick<ProductVariant, "id" | "name" | "sku" | "requiresShipping" | "inventoryTrackingOverride" | "trackInventory" | "updatedAt">;
       effective: boolean;
       blockers: string[];
+      evidence?: Record<string, InventoryTrackingEvidence>;
     }>;
   } | null;
 }>;
@@ -27,9 +28,10 @@ export function buildBulkInventoryTrackingPreview(selection: BulkInventoryTracki
       status: "blocked", variantCount: 0, changingVariantCount: 0, trackedOverrideCount: 0, untrackedOverrideCount: 0,
       blockers: [{ variantId: null, code: "CATALOG_PRODUCT_MISSING", message: "Product no longer exists. Remove it from the selection." }] };
     const { product, transitions } = snapshot;
-    const blockers = transitions.flatMap(({ variant, blockers }) => blockers.map(code => ({
+    const blockers = transitions.flatMap(({ variant, blockers, evidence }) => blockers.map(code => ({
       variantId: variant.id, code,
       message: `${variant.sku ?? variant.name}: ${blockerMessages[code] ?? code}`,
+      evidence: evidence?.[code],
     })));
     return { productId, name: product.name, sku: product.sku, currentDefault: product.inventoryTrackingDefault,
       status: blockers.length > 0 ? "blocked" : product.inventoryTrackingDefault === next ? "unchanged" : "change",
@@ -44,11 +46,11 @@ export function buildBulkInventoryTrackingPreview(selection: BulkInventoryTracki
   const evidence = selection.map(({ productId, snapshot }) => ({ productId,
     product: snapshot ? { name: snapshot.product.name, sku: snapshot.product.sku,
       default: snapshot.product.inventoryTrackingDefault, updatedAt: snapshot.product.updatedAt } : null,
-    variants: snapshot?.transitions.map(({ variant, effective, blockers }) => ({ id: variant.id,
+    variants: snapshot?.transitions.map(({ variant, effective, blockers, evidence }) => ({ id: variant.id,
       sku: variant.sku, name: variant.name, requiresShipping: variant.requiresShipping,
       override: variant.inventoryTrackingOverride, current: variant.trackInventory,
-      updatedAt: variant.updatedAt, effective, blockers })) ?? [],
+      updatedAt: variant.updatedAt, effective, blockers, evidence })) ?? [],
   }));
-  const previewHash = createHash("sha256").update(canonicalJson({ version: 1, next, evidence })).digest("hex");
+  const previewHash = createHash("sha256").update(canonicalJson({ version: 2, next, evidence })).digest("hex");
   return bulkInventoryTrackingPreviewSchema.parse({ previewHash, inventoryTrackingDefault: next, products });
 }
