@@ -54,7 +54,7 @@ describe("adaptWalletView", () => {
   });
 
   it("uses every served §4.1 field as-is and applies no fallback", () => {
-    const limits = { autoReloadMinTriggerCents: 5000, caseTierMinimumCents: 40000, autoReloadMinAmountCents: 10000, manualFundingMinCents: 1000, manualFundingMaxCents: 500000, defaultPaymentHoldTimeoutMinutes: 2880, holdExpiryWarningMinutes: 90, advanceFeeBps: 125, advanceCapCents: 30000, tierChangeGraceDays: 7 };
+    const limits = { autoReloadMinTriggerCents: 5000, caseTierMinimumCents: 40000, autoReloadMinAmountCents: 10000, manualFundingMinCents: 1000, manualFundingMaxCents: 500000, defaultPaymentHoldTimeoutMinutes: 2880, holdExpiryWarningMinutes: 90, advanceFeeBps: 125, advanceCapCents: 30000, tierChangeGraceDays: 7, bankBalanceReadOffered: false };
     const setupStatus = { sourceReady: true, backupReady: true, acknowledged: false, done: true, launchReady: false };
     const view = adaptWalletView(rawWallet({
       autoReload: rawAutoReload({ backstopFundingMethodId: 11, acknowledgedCardFeeBps: 250, acknowledgedAt: LATER }),
@@ -103,7 +103,7 @@ describe("adaptWalletView", () => {
     expect(CLIENT_FALLBACK_LIMITS).toEqual({
       autoReloadMinTriggerCents: 10_000, caseTierMinimumCents: 50_000, autoReloadMinAmountCents: 10_000,
       manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, defaultPaymentHoldTimeoutMinutes: 1_440,
-      holdExpiryWarningMinutes: 120, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14,
+      holdExpiryWarningMinutes: 120, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14, bankBalanceReadOffered: false,
     });
   });
 
@@ -204,7 +204,7 @@ function servedListingTiers() {
 }
 
 function servedLimits() {
-  return { autoReloadMinTriggerCents: 5000, caseTierMinimumCents: 40000, autoReloadMinAmountCents: 10000, manualFundingMinCents: 1000, manualFundingMaxCents: 500000, defaultPaymentHoldTimeoutMinutes: 2880, holdExpiryWarningMinutes: 90, advanceFeeBps: 125, advanceCapCents: 30000, tierChangeGraceDays: 7 };
+  return { autoReloadMinTriggerCents: 5000, caseTierMinimumCents: 40000, autoReloadMinAmountCents: 10000, manualFundingMinCents: 1000, manualFundingMaxCents: 500000, defaultPaymentHoldTimeoutMinutes: 2880, holdExpiryWarningMinutes: 90, advanceFeeBps: 125, advanceCapCents: 30000, tierChangeGraceDays: 7, bankBalanceReadOffered: false };
 }
 
 function servedSetupStatus() {

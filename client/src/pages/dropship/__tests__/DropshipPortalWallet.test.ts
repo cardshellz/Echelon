@@ -40,6 +40,26 @@ describe("DropshipPortalWallet contract", () => {
     expect(step).toContain("suggestedSourceMethodId: flow.suggestedSourceMethodId");
     expect(step).toContain("justAdded: autoSelectedId !== null");
     expect(source).not.toContain("Pick up where you left off.");
+    // A saved card is named by the model, never silently adopted as the source.
+    expect(step).toContain("describeSavedCardAlternative({");
+    expect(step).toContain("data-testid=\"wallet-source-saved-card\"");
+  });
+
+  it("makes each source option one whole clickable radio that defaults to the recommended rail", () => {
+    const picker = between("function SourcePicker", "function SourceStep");
+    // The radio is the card itself, not a button around the icon and title.
+    expect(picker).toContain("role=\"radio\"");
+    expect(picker).toContain("onKeyDown={(event) => {");
+    expect(picker).not.toMatch(/<button[^>]*role="radio"/);
+    // Controls inside the selected card act on their own, without re-picking the rail.
+    expect(picker).toContain("onClick={(event) => event.stopPropagation()}");
+    // Neither the picker nor the step names a rail of its own.
+    expect(picker).toContain("railChoice ?? initialRail ?? RECOMMENDED_SOURCE_RAIL");
+    const step = between("function SourceStep", "function tryParseDollarInputToCents");
+    expect(step).toContain("const shownRail = rail ?? confirmation?.rail ?? RECOMMENDED_SOURCE_RAIL");
+    expect(step).toContain("initialRail={shownRail}");
+    expect(step).toContain("{shownRail === \"stripe_ach\" && (");
+    expect(step).toContain("{shownRail === \"stripe_card\" && (");
   });
 
   it("holds no money or duration policy of its own", () => {

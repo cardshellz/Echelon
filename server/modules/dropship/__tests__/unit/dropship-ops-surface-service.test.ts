@@ -13,6 +13,7 @@ import {
   type DropshipOpsSurfaceRepository,
   type DropshipVendorSettingsOverview,
 } from "../../application/dropship-ops-surface-service";
+import type { DropshipStripeRailAvailability } from "../../application/dropship-wallet-service";
 import type {
   DropshipProvisionVendorRepositoryResult,
   DropshipProvisionedVendorProfile,
@@ -340,6 +341,78 @@ describe("DropshipOpsSurfaceService", () => {
       status: "not_applicable",
       requiredEnv: ["DROPSHIP_USDC_BASE_XPUB", "DROPSHIP_USDC_BASE_RPC_URL", "DROPSHIP_USDC_WATCHER_ENABLED"],
     });
+  });
+
+  it("reports which rails the Stripe account will actually accept, not only that keys are set", () => {
+    const configured = {
+      STRIPE_SECRET_KEY: "stripe-secret",
+      DROPSHIP_STRIPE_WEBHOOK_SECRET: "whsec_test",
+    };
+    const stripe = (rails: DropshipStripeRailAvailability | null) =>
+      buildDropshipSystemReadinessChecks(configured, rails).find((check) => check.key === "stripe_funding");
+    const read = (overrides: Partial<DropshipStripeRailAvailability>): DropshipStripeRailAvailability => ({
+      outcome: "read",
+      accountId: "acct_test",
+      cardPayments: "active",
+      achPayments: "active",
+      reason: null,
+      ...overrides,
+    });
+
+    // Both rails live, and the reader says what the balance permission costs:
+    // a bank account funds the wallet either way, only the advance depends on it.
+    expect(stripe(read({}))).toMatchObject({
+      status: "ready",
+      message: "Stripe wallet funding is configured, and the account has card payments and bank transfers (ACH) enabled."
+        + " Bank balances are not read, so no bank account qualifies for the pending-bank advance."
+        + " Register for Stripe Financial Connections balances, then set DROPSHIP_STRIPE_FINANCIAL_CONNECTIONS_BALANCES=true.",
+    });
+    expect(buildDropshipSystemReadinessChecks(
+      { ...configured, DROPSHIP_STRIPE_FINANCIAL_CONNECTIONS_BALANCES: "true" },
+      read({}),
+    ).find((check) => check.key === "stripe_funding")).toMatchObject({
+      status: "ready",
+      message: expect.stringContaining("Bank balances are read at link time"),
+    });
+
+    // ACH off is exactly the failure a vendor meets as a bare refusal when they
+    // try to add a bank account. It warns rather than blocks: a card vendor trades.
+    expect(stripe(read({ achPayments: "inactive" }))).toMatchObject({
+      status: "warning",
+      message: expect.stringContaining("Vendors cannot add a bank account: US bank account ACH payments is inactive"),
+    });
+    expect(stripe(read({ achPayments: null }))).toMatchObject({
+      status: "warning",
+      message: expect.stringContaining("is not enabled"),
+    });
+    expect(stripe(read({ achPayments: "pending" }))).toMatchObject({
+      status: "warning",
+      message: expect.stringContaining("is pending Stripe review"),
+    });
+
+    // Cards are the backup every activation requires, so they block, and they
+    // outrank ACH when both are off.
+    expect(stripe(read({ cardPayments: "inactive" }))).toMatchObject({ status: "blocked" });
+    expect(stripe(read({ cardPayments: "inactive", achPayments: "inactive" }))).toMatchObject({
+      status: "blocked",
+      message: expect.stringContaining("Card payments are inactive"),
+    });
+
+    // Unread or unreadable reports the configuration it always reported and
+    // says the rails are unconfirmed. Never a warning: a brief Stripe outage
+    // must not turn launch readiness amber.
+    expect(stripe(null)).toMatchObject({
+      status: "ready",
+      message: "Stripe wallet funding and webhook verification are configured. The account's enabled rails could not be confirmed.",
+    });
+    expect(stripe({ outcome: "unavailable", accountId: null, cardPayments: null, achPayments: null, reason: "DROPSHIP_STRIPE_UNREACHABLE" })).toMatchObject({
+      status: "ready",
+      message: expect.stringContaining("(DROPSHIP_STRIPE_UNREACHABLE)"),
+    });
+
+    // Missing keys still outrank everything: there is nothing to ask Stripe with.
+    expect(buildDropshipSystemReadinessChecks({}, read({})).find((check) => check.key === "stripe_funding"))
+      .toMatchObject({ status: "blocked" });
   });
 
   it("reports how far USDC deposits are configured without gating launch (funding design phase 6)", () => {

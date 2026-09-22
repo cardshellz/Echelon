@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useLocation } from "wouter";
+import { Link, useLocation } from "wouter";
 import {
   Bell,
   Boxes,
@@ -99,6 +99,9 @@ export function DropshipPortalShell({ children }: { children: React.ReactNode })
         </nav>
       </header>
       {children}
+      <footer className="mx-auto w-full max-w-7xl px-4 py-6 text-xs text-zinc-500 sm:px-6">
+        <Link href={dropshipPortalPath("/privacy")} className="underline hover:text-zinc-700" data-testid="portal-privacy-link">Privacy policy</Link>
+      </footer>
     </main>
   );
 }

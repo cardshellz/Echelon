@@ -240,6 +240,8 @@ describe("dropship wallet routes card fee exposure", () => {
       advanceFeeBps: 150,
       advanceCapCents: 75_000,
       tierChangeGraceDays: 21,
+      // Served so the wallet page knows whether "link it again" is a real fix.
+      bankBalanceReadOffered: false,
     });
   });
 

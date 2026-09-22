@@ -2,7 +2,7 @@ import type { Express, Request, Response } from "express";
 import { requirePermission } from "../../../../routes/middleware";
 import { DropshipError } from "../../domain/errors";
 import { fundingMethodAccountHolderType } from "../../domain/funding-method";
-import { makeDropshipWalletLogger, type DropshipWalletService } from "../../application/dropship-wallet-service";
+import { STRIPE_BANK_BALANCE_PERMISSION_ENV, makeDropshipWalletLogger, type DropshipWalletService } from "../../application/dropship-wallet-service";
 import { httpStatusForDropshipStripeErrorCode } from "../../infrastructure/dropship-stripe-error";
 import { createDropshipWalletServiceFromEnv } from "../../infrastructure/dropship-wallet.factory";
 import { createDropshipListingTierServiceFromEnv } from "../../infrastructure/dropship-listing-tier.factory";
@@ -440,6 +440,10 @@ function serializeVendorWalletView(
       advanceFeeBps: wallet.limits.advanceFeeBps,
       advanceCapCents: wallet.limits.advanceCapCents,
       tierChangeGraceDays: wallet.limits.tierChangeGraceDays,
+      // Whether linking a bank account reads its balance at all. False means no
+      // account can become advance-eligible, however many times it is relinked,
+      // so the vendor must be told that rather than told to try again.
+      bankBalanceReadOffered: process.env[STRIPE_BANK_BALANCE_PERMISSION_ENV] === "true",
     },
   };
 }
