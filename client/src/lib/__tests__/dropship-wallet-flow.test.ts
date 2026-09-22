@@ -13,8 +13,12 @@ import {
   defaultMinimumCents,
   deriveWalletFlow,
   describeMinimumOption,
+  describeTopUpOption,
   minimumOptionFor,
   minimumOptions,
+  topUpCentsFor,
+  topUpChoiceFor,
+  topUpOptions,
   draftAfterBackupChoice,
   draftAfterFloorChoice,
   draftAfterIntro,
@@ -721,5 +725,39 @@ describe("the minimum: two tier options", () => {
     expect(defaultMinimumCents(wallet({ listingTiers: casesOnSale }))).toBe(50_000);
     // A policy with one option has nothing higher to open on.
     expect(defaultMinimumCents({ limits: { ...LIMITS, autoReloadMinTriggerCents: 50_000 }, listingTiers: casesOnSale })).toBe(50_000);
+  });
+});
+
+describe("the top-up amount's quick picks", () => {
+  it("offers the minimum and its 2×, 3× and 5× multiples, dropping a multiple under the policy's smallest top-up", () => {
+    expect(topUpOptions(10_000, LIMITS)).toEqual([
+      { factor: 1, cents: 10_000 }, { factor: 2, cents: 20_000 }, { factor: 3, cents: 30_000 }, { factor: 5, cents: 50_000 },
+    ]);
+    // LIMITS' smallest top-up is $100: at a $50 minimum only 2× and above clear it.
+    expect(topUpOptions(5_000, LIMITS)).toEqual([{ factor: 1, cents: 5_000 }, { factor: 2, cents: 10_000 }, { factor: 3, cents: 15_000 }, { factor: 5, cents: 25_000 }]);
+    expect(topUpOptions(2_000, LIMITS)).toEqual([{ factor: 1, cents: 2_000 }, { factor: 5, cents: 10_000 }]);
+    expect(describeTopUpOption({ factor: 1, cents: 10_000 })).toBe("Your minimum");
+    expect(describeTopUpOption({ factor: 2, cents: 20_000 })).toBe("2× your minimum");
+    expect(describeTopUpOption({ factor: 5, cents: 50_000 })).toBe("5× your minimum");
+    expect(() => topUpOptions(-1, LIMITS)).toThrow(RangeError);
+  });
+
+  it("reads a saved amount as the minimum, a multiple that will follow the minimum, or the vendor's own number", () => {
+    expect(topUpChoiceFor(null, 10_000)).toEqual({ kind: "minimum" });
+    expect(topUpChoiceFor(10_000, 10_000)).toEqual({ kind: "minimum" });
+    expect(topUpChoiceFor(20_000, 10_000)).toEqual({ kind: "multiple", factor: 2 });
+    expect(topUpChoiceFor(50_000, 10_000)).toEqual({ kind: "multiple", factor: 5 });
+    expect(topUpChoiceFor(40_000, 10_000)).toEqual({ kind: "custom", cents: 40_000 });
+    expect(topUpChoiceFor(20_000, 50_000)).toEqual({ kind: "custom", cents: 20_000 });
+    expect(() => topUpChoiceFor(-1, 10_000)).toThrow(RangeError);
+    expect(() => topUpChoiceFor(null, 1.5)).toThrow(RangeError);
+  });
+
+  it("sends null for the minimum and the recomputed amount for a multiple, so the pick follows a changed minimum", () => {
+    expect(topUpCentsFor({ kind: "minimum" }, 10_000)).toBeNull();
+    expect(topUpCentsFor({ kind: "multiple", factor: 2 }, 10_000)).toBe(20_000);
+    expect(topUpCentsFor({ kind: "multiple", factor: 2 }, 50_000)).toBe(100_000);
+    expect(topUpCentsFor({ kind: "custom", cents: 80_000 }, 50_000)).toBe(80_000);
+    expect(() => topUpCentsFor({ kind: "minimum" }, -1)).toThrow(RangeError);
   });
 });

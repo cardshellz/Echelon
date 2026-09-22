@@ -112,6 +112,7 @@ import {
   describeRoleGap,
   describeSavedCardAlternative,
   describeSourcePreselection,
+  describeTopUpOption,
   disabledReasonForRemoval,
   isEligibleBackupCard,
   isPendingStripeLive,
@@ -125,6 +126,9 @@ import {
   RECOMMENDED_SOURCE_RAIL,
   resolveStripeReturn,
   stripStripeReturn,
+  topUpCentsFor,
+  topUpChoiceFor,
+  topUpOptions,
   walletStepNumber,
   walletStepState,
   writeWalletDraft,
@@ -132,6 +136,8 @@ import {
   type StripeReturn,
   type WalletDraft,
   type WalletFlowState,
+  type WalletTopUpChoice,
+  type WalletTopUpOption,
   type WalletFlowStep,
   type WalletPlanInput,
   type WalletTerms,
@@ -1347,24 +1353,40 @@ function FloorStep({
   const options = minimumOptions(limits);
   // A minimum saved before the step offered only the two tiers opens on the tier it falls in.
   const [floorCents, setFloorCents] = useState(minimumOptionFor(initialFloorCents, limits));
-  const [topUpText, setTopUpText] = useState(initialTopUpCents === null ? "" : centsToDollarText(initialTopUpCents));
+  // The top-up amount: the minimum itself, a multiple of it that follows the minimum, or an amount of the vendor's own.
+  const [topUpChoice, setTopUpChoice] = useState<WalletTopUpChoice>(() => topUpChoiceFor(initialTopUpCents, minimumOptionFor(initialFloorCents, limits)));
+  const [customText, setCustomText] = useState(() => {
+    const initial = topUpChoiceFor(initialTopUpCents, minimumOptionFor(initialFloorCents, limits));
+    return initial.kind === "custom" ? centsToDollarText(initial.cents) : "";
+  });
   const [topUpError, setTopUpError] = useState("");
-  // The top-up amount: blank means the minimum; anything typed has to parse and clear the policy's smallest top-up.
-  const typedTopUp = topUpText.trim() ? tryParseDollarInputToCents(topUpText) : null;
-  const topUpCents = topUpError ? null : typedTopUp;
+  const topUpChoices = topUpOptions(floorCents, limits);
+  // A multiple the policy does not offer at this minimum (below its smallest top-up) reads as the minimum.
+  const effectiveTopUp: WalletTopUpChoice = topUpChoice.kind === "multiple" && !topUpChoices.some((option) => option.factor === topUpChoice.factor)
+    ? { kind: "minimum" }
+    : topUpChoice;
+  const topUpCents = topUpError ? null : topUpCentsFor(effectiveTopUp, floorCents);
   const boundCents = chargeBoundCents(floorCents, topUpCents);
   const holdMinutes = flow.holdTimeoutMinutes;
   const example = shortfallExample({ orderCents: EXAMPLE_SHORTFALL.orderCents, availableCents: EXAMPLE_SHORTFALL.availableCents, bps: wallet.cardFundingFeeBps });
   const exampleCardTopUp = quoteWalletFunding({ rail: "stripe_card", creditCents: EXAMPLE_CARD_TOP_UP_CENTS, cardFeeBps: wallet.cardFundingFeeBps });
   const activation = activationTopUp({ sourceRail, floorCents, topUpCents, availableCents: wallet.account.availableBalanceCents, pendingCents: wallet.account.pendingBalanceCents, bps: wallet.cardFundingFeeBps });
 
-  function applyTopUp(text: string) {
-    setTopUpText(text);
+  function chooseTopUp(factor: WalletTopUpOption["factor"]) {
+    setCustomText("");
     setTopUpError("");
-    if (!text.trim()) return;
+    setTopUpChoice(factor === 1 ? { kind: "minimum" } : { kind: "multiple", factor });
+  }
+
+  // Typing an amount of the vendor's own: it has to parse and clear the policy's smallest top-up; cleared, the minimum is back.
+  function applyCustomTopUp(text: string) {
+    setCustomText(text);
+    setTopUpError("");
+    if (!text.trim()) { setTopUpChoice({ kind: "minimum" }); return; }
     const cents = tryParseDollarInputToCents(text);
     if (cents === null) { setTopUpError("Enter a whole dollar amount like 250, or leave it blank."); return; }
     if (cents < limits.autoReloadMinAmountCents) { setTopUpError(`The top-up amount must be at least ${formatWholeDollars(limits.autoReloadMinAmountCents)}.`); return; }
+    setTopUpChoice({ kind: "custom", cents });
   }
 
   const valid = options.some((option) => option.cents === floorCents) && !topUpError;
@@ -1396,11 +1418,27 @@ function FloorStep({
         <p className="text-xs text-zinc-500" data-testid="wallet-tier-hint">Keep at least the tier you sell. You can change it any time.</p>
       </div>
 
-      <div className="mt-4 max-w-xs space-y-1" data-testid="wallet-top-up-amount">
-        <Label htmlFor="wallet-top-up-custom">Top-up amount (optional)</Label>
-        <Input id="wallet-top-up-custom" data-testid="wallet-top-up-custom" inputMode="numeric" placeholder={`${formatWholeDollars(floorCents)} — your minimum`} value={topUpText} disabled={feedback.busy} onChange={(event) => applyTopUp(event.target.value)} className="h-10" />
-        <p className="text-xs text-zinc-500">What autopay pulls when an order takes your balance below your minimum. Blank tops up by your minimum; a larger amount means fewer, bigger top-ups.</p>
-        {topUpError && <p role="alert" className="text-sm text-red-700">{topUpError}</p>}
+      <div role="radiogroup" aria-label="Top-up amount" className="mt-4 space-y-2" data-testid="wallet-top-up-amount">
+        <div className="text-sm font-medium">Top-up amount</div>
+        <div className="flex flex-wrap gap-2">
+          {topUpChoices.map((option) => (
+            <RadioChip
+              key={option.factor}
+              label={formatWholeDollars(option.cents)}
+              hint={describeTopUpOption(option)}
+              selected={effectiveTopUp.kind === "minimum" ? option.factor === 1 : effectiveTopUp.kind === "multiple" && option.factor === effectiveTopUp.factor}
+              disabled={feedback.busy}
+              onSelect={() => chooseTopUp(option.factor)}
+              testId={`wallet-top-up-${option.factor}x`}
+            />
+          ))}
+        </div>
+        <div className="max-w-xs space-y-1">
+          <Label htmlFor="wallet-top-up-custom">Another amount</Label>
+          <Input id="wallet-top-up-custom" data-testid="wallet-top-up-custom" inputMode="numeric" placeholder="Whole dollars" value={customText} disabled={feedback.busy} onChange={(event) => applyCustomTopUp(event.target.value)} className="h-10" />
+          {topUpError && <p role="alert" className="text-sm text-red-700">{topUpError}</p>}
+        </div>
+        <p className="text-xs text-zinc-500">What autopay pulls when an order takes your balance below your minimum. A larger amount means fewer, bigger top-ups.</p>
       </div>
 
       <div className="mt-4 space-y-2 rounded-md border border-violet-100 bg-violet-50 p-3 text-sm text-zinc-700" data-testid="wallet-floor-guidance">

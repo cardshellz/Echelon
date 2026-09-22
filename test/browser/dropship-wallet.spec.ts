@@ -401,9 +401,25 @@ test("bank vendor, end to end: intro, bank source, minimum with guidance and a t
   await expect(floor.getByTestId("wallet-daily-cost")).toHaveCount(0);
   await expect(floor.getByTestId("wallet-floor-custom")).toHaveCount(0);
   await expect(floor.getByTestId("wallet-tier-hint")).toContainText("Keep at least the tier you sell.");
+  // The top-up quick picks follow the minimum: at $100 they are $100, $200, $300 and $500.
+  await expect(radio(page, "Top-up amount", "$100")).toHaveAttribute("aria-checked", "true");
+  await expect(radio(page, "Top-up amount", "$100")).toContainText("Your minimum");
+  await expect(radio(page, "Top-up amount", "$200")).toContainText("2× your minimum");
+  await expect(radio(page, "Top-up amount", "$300")).toContainText("3× your minimum");
+  await expect(radio(page, "Top-up amount", "$500")).toContainText("5× your minimum");
   await shot(page, "03-floor-default");
+  await radio(page, "Top-up amount", "$200").click();
+  await expect(floor.getByTestId("wallet-guidance-parked")).toContainText("Autopay keeps at least $100 in the wallet, topping up by $200 at a time.");
   await radio(page, "Minimum", "$500").click();
   await expect(radio(page, "Minimum", "$500")).toHaveAttribute("aria-checked", "true");
+  // The pick was "2×", so it follows the new minimum: $1,000, still selected.
+  await expect(radio(page, "Top-up amount", "$1,000")).toHaveAttribute("aria-checked", "true");
+  await expect(radio(page, "Top-up amount", "$1,000")).toContainText("2× your minimum");
+  await expect(radio(page, "Top-up amount", "$1,500")).toContainText("3× your minimum");
+  await expect(radio(page, "Top-up amount", "$2,500")).toContainText("5× your minimum");
+  await expect(floor.getByTestId("wallet-guidance-parked")).toContainText("Autopay keeps at least $500 in the wallet, topping up by $1,000 at a time.");
+  await expect(floor.getByTestId("wallet-floor-limit-note")).toContainText("Autopay never takes more than $1,000 in one charge (your top-up amount)");
+  await radio(page, "Top-up amount", "$500").click();
   await expect(floor.getByTestId("wallet-impact")).toContainText("Keeping $500 means routine top-ups are free");
   await expect(floor.getByTestId("wallet-guidance-fee")).toContainText("Card fees: $0 on routine top-ups. Only a shortfall is charged 3% — for example a $75 order with $20 available charges your backup card $55 + $1.65.");
   await expect(floor.getByTestId("wallet-guidance-parked")).toContainText("Autopay keeps at least $500 in the wallet, topping up by $500 at a time.");
@@ -411,11 +427,12 @@ test("bank vendor, end to end: intro, bank source, minimum with guidance and a t
   await expect(floor.getByTestId("wallet-guidance-activation")).toContainText("first daily check after you activate");
   await expect(floor.getByTestId("wallet-floor-limit-note")).toContainText("Autopay never takes more than $500 in one charge (your minimum)");
   await expect(floor.getByTestId("wallet-floor-limit-note")).toContainText("2 hours");
-  // The optional top-up amount: fewer, bigger pulls; the bound follows it.
+  // An amount of the vendor's own: it has to clear the policy's smallest top-up, then the bound follows it and no quick pick is selected.
   await page.getByTestId("wallet-top-up-custom").fill("50");
   await expect(floor.getByRole("alert")).toHaveText("The top-up amount must be at least $100.");
   await expect(floor.getByRole("button", { name: "Continue" })).toBeDisabled();
   await page.getByTestId("wallet-top-up-custom").fill("800");
+  await expect(page.getByRole("radiogroup", { name: "Top-up amount" }).getByRole("radio", { checked: true })).toHaveCount(0);
   await expect(floor.getByTestId("wallet-guidance-parked")).toContainText("topping up by $800 at a time");
   await expect(floor.getByTestId("wallet-guidance-activation")).toContainText("$800 from Chase ending in 1234");
   await expect(floor.getByTestId("wallet-floor-limit-note")).toContainText("Autopay never takes more than $800 in one charge (your top-up amount)");
@@ -569,7 +586,10 @@ test("manage: changing the minimum moves the bound with it, the top-up amount is
   await expect(plan.getByTestId("wallet-plan-top-up")).toContainText("Top-up amount $250 (your minimum) · never more than $500 in one charge.");
   await plan.getByTestId("wallet-plan-floor").getByRole("button", { name: "Change" }).click();
   await expect(radio(page, "Minimum", "$100")).toHaveAttribute("aria-checked", "true");
+  await expect(radio(page, "Top-up amount", "$100")).toHaveAttribute("aria-checked", "true");
   await radio(page, "Minimum", "$500").click();
+  await expect(radio(page, "Top-up amount", "$500")).toHaveAttribute("aria-checked", "true");
+  await expect(radio(page, "Top-up amount", "$2,500")).toContainText("5× your minimum");
   await expect(plan.getByTestId("wallet-floor-limit-note")).toContainText("Autopay never takes more than $500 in one charge (your minimum)");
   await expectNoHorizontalScroll(page);
   await shot(page, "manage-02-floor-editor");

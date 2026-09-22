@@ -142,6 +142,13 @@ describe("DropshipPortalWallet contract", () => {
     expect(step).toContain("hint={describeMinimumOption(option.tier)}");
     expect(step).toContain("testId={`wallet-minimum-${option.tier}`}");
     expect(step).toContain("options.some((option) => option.cents === floorCents)");
+    // The top-up amount: the minimum, its multiples that follow the minimum, or the vendor's own number.
+    expect(step).toContain('aria-label="Top-up amount"');
+    expect(step).toContain("const topUpChoices = topUpOptions(floorCents, limits);");
+    expect(step).toContain("topUpChoiceFor(initialTopUpCents, minimumOptionFor(initialFloorCents, limits))");
+    expect(step).toContain("hint={describeTopUpOption(option)}");
+    expect(step).toContain("testId={`wallet-top-up-${option.factor}x`}");
+    expect(step).toContain("topUpCentsFor(effectiveTopUp, floorCents)");
     expect(step).toContain('data-testid="wallet-top-up-custom"');
     // The daily-cost guesser, the recommendation and the free-form amount are gone from the whole page.
     // (The deposit step keeps its own "Or another amount" input; only the minimum's free-form amount is gone.)
