@@ -690,3 +690,84 @@ describe("dropship wallet routes USDC deposits (funding design phase 6)", () => 
     }
   });
 });
+
+describe("dropship wallet routes funding method removal", () => {
+  const REMOVE_URL = "/api/dropship/wallet/funding-methods";
+  let server: { url: string; close: () => Promise<void> };
+  let removeFundingMethodForMember: ReturnType<typeof vi.fn>;
+  const archivedMethod = {
+    fundingMethodId: 30,
+    vendorId: 7,
+    rail: "stripe_ach",
+    status: "archived",
+    providerCustomerId: "cus_1",
+    providerPaymentMethodId: "pm_bank",
+    usdcWalletAddress: null,
+    displayLabel: "Chase ending in 5990",
+    isDefault: false,
+    metadata: { accountHolderType: "company", archivedByMemberId: "member-1", providerDetach: { outcome: "detached", errorCode: null, recordedAt: "2026-09-22T01:00:00.000Z" } },
+    createdAt: new Date("2026-09-20T12:00:00.000Z"),
+    updatedAt: new Date("2026-09-22T01:00:00.000Z"),
+  };
+
+  beforeEach(async () => {
+    for (const level of ["error", "warn", "info"] as const) {
+      vi.spyOn(console, level).mockImplementation(() => {});
+    }
+    removeFundingMethodForMember = vi.fn();
+    const service = { removeFundingMethodForMember } as unknown as DropshipWalletService;
+    server = await startServer(buildApp(service));
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await server.close();
+  });
+
+  it("archives the method for the signed-in member and reports the provider outcome", async () => {
+    removeFundingMethodForMember.mockResolvedValue({ fundingMethod: archivedMethod, idempotentReplay: false, providerDetach: "detached" });
+
+    const response = await jsonRequest(`${server.url}${REMOVE_URL}/30`, { method: "DELETE" });
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({
+      fundingMethod: {
+        fundingMethodId: 30,
+        rail: "stripe_ach",
+        status: "archived",
+        displayLabel: "Chase ending in 5990",
+        isDefault: false,
+        usdcWalletAddress: null,
+        accountHolderType: "company",
+        createdAt: "2026-09-20T12:00:00.000Z",
+        updatedAt: "2026-09-22T01:00:00.000Z",
+      },
+      idempotentReplay: false,
+      providerDetach: "detached",
+    });
+    expect(removeFundingMethodForMember).toHaveBeenCalledWith("member-1", { fundingMethodId: 30 });
+  });
+
+  it("returns each removal refusal as 409 with its structured code", async () => {
+    for (const code of [
+      "DROPSHIP_FUNDING_METHOD_IS_AUTO_RELOAD_SOURCE",
+      "DROPSHIP_FUNDING_METHOD_HAS_PENDING_FUNDING",
+      "DROPSHIP_FUNDING_METHOD_IS_BACKUP_CARD",
+    ]) {
+      removeFundingMethodForMember.mockRejectedValueOnce(new DropshipError(code, "Refused.", { vendorId: 7, fundingMethodId: 30, classification: "permanent" }));
+      const response = await jsonRequest(`${server.url}${REMOVE_URL}/30`, { method: "DELETE" });
+      expect(response.status).toBe(409);
+      expect(response.body.error).toMatchObject({ code, context: { classification: "permanent" } });
+    }
+  });
+
+  it("returns 404 for a method that is not on the wallet and 400 for an id that is not a positive whole number", async () => {
+    removeFundingMethodForMember.mockRejectedValueOnce(new DropshipError("DROPSHIP_FUNDING_METHOD_NOT_FOUND", "Not found.", { vendorId: 7, fundingMethodId: 31 }));
+    expect((await jsonRequest(`${server.url}${REMOVE_URL}/31`, { method: "DELETE" })).status).toBe(404);
+
+    const bad = await jsonRequest(`${server.url}${REMOVE_URL}/abc`, { method: "DELETE" });
+    expect(bad.status).toBe(400);
+    expect(bad.body.error.code).toBe("DROPSHIP_WALLET_INVALID_PATH_PARAMETER");
+    expect(removeFundingMethodForMember).toHaveBeenCalledTimes(1);
+  });
+});

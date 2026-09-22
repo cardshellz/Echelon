@@ -122,6 +122,41 @@ words above. A refill the bound cut short is logged (`refillPartial`) and
 continues on the next run; nothing more is sent, because autopay is still
 working.
 
+## Removing a saved method
+
+A funding method is never deleted: the ledger references it for as long as
+the ledger exists. Removal (`DELETE /api/dropship/wallet/funding-methods/:id`,
+behind the `remove_funding_method` step-up proof) archives the row, and every
+charge path requires `active`, so that alone stops the money. The decision is
+the pure rule in `domain/funding-method-removal.ts`, applied under the row
+lock of the one transaction that archives (`archiveFundingMethod`):
+
+- **Refused** while the method is the enabled autopay source
+  (`DROPSHIP_FUNDING_METHOD_IS_AUTO_RELOAD_SOURCE`), while a top-up from it is
+  still pending (`DROPSHIP_FUNDING_METHOD_HAS_PENDING_FUNDING`), or when it is
+  the only card a held order could be charged to and the vendor is active
+  (`DROPSHIP_FUNDING_METHOD_IS_BACKUP_CARD`) — the card backstop is a launch
+  requirement, as `assertAutoReloadMayBeDisabled` already enforces. Each is a
+  409; the page shows the reason and re-reads the wallet.
+- **Replayed** when the method is already archived: nothing changes and the
+  stored provider outcome is reported.
+- **Archived** otherwise: `status = 'archived'`, `is_default = false`, the
+  member and time in the metadata, and an audit row whose actor is the member.
+  No other method is promoted to default; the wallet flow picks the newest
+  active method of a rail on its own.
+
+Only after that commit is the payment method detached at Stripe
+(`paymentMethods.detach`). The outcome is recorded on the method
+(`metadata.providerDetach`) with its own audit row and returned as
+`providerDetach`: `detached`, `already_detached` (Stripe no longer had it),
+`pending` (Stripe unreachable; the detach is owed), `requires_review` (Stripe
+refused; a human reconciles Stripe's side) or `not_applicable` (USDC, manual).
+A detach that does not complete never un-archives anything, and nothing
+retries it automatically: the archived method is already unchargeable from
+our side, so what remains is hygiene an operator finishes from the audit
+trail. Re-adding the same bank account or card later goes through the normal
+link flow and creates a new Stripe payment method.
+
 ## USDC in a Card Shellz wallet (phase 6)
 
 No provider and no fee: Card Shellz holds the USDC itself. The operator

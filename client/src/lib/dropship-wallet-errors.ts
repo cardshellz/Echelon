@@ -60,6 +60,8 @@ export function describeWalletError(
       return { text: "This is your backup card. Choose another backup card first, then remove this one.", recovery: "refetch" };
     case "DROPSHIP_FUNDING_METHOD_IS_AUTO_RELOAD_SOURCE":
       return { text: "This is your autopay source. Choose another source first, then remove this one.", recovery: "refetch" };
+    case "DROPSHIP_FUNDING_METHOD_HAS_PENDING_FUNDING":
+      return { text: "A top-up from this method is still on its way. Remove it once that top-up lands or fails.", recovery: "refetch" };
     case "DROPSHIP_AUTO_RELOAD_REQUIRED_WHILE_ACTIVE":
       return { text: "Auto-reload stays on while your account is active or paused.", recovery: "refetch" };
     case "DROPSHIP_FUNDING_METHOD_NOT_FOUND":
