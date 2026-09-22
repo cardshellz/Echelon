@@ -1090,6 +1090,24 @@
   "public.scheduler_runs": [
     "server/infrastructure/scheduler-run-registry.ts"
   ],
+  "returns.customer_return_authorization_allocations": [
+    "modules/returns"
+  ],
+  "returns.customer_return_authorization_commands": [
+    "modules/returns"
+  ],
+  "returns.customer_return_authorization_events": [
+    "modules/returns"
+  ],
+  "returns.customer_return_authorization_lines": [
+    "modules/returns"
+  ],
+  "returns.customer_return_authorization_outbox": [
+    "modules/returns"
+  ],
+  "returns.customer_return_authorizations": [
+    "modules/returns"
+  ],
   "returns.return_case_commands": [
     "modules/returns"
   ],
