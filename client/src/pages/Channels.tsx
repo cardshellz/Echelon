@@ -1,4 +1,3 @@
-import WalmartConnectionPanel from "@/components/WalmartConnectionPanel";
 import { useState, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "@/lib/auth";
@@ -590,6 +589,11 @@ export default function Channels() {
                     Configure
                   </Button>
                 )}
+                {channel.provider === 'walmart' && (
+                  <Button variant="outline" size="sm" className="h-7 text-xs" onClick={event => {
+                    event.stopPropagation(); navigate(`/channels/walmart/${channel.id}`);
+                  }}><Settings className="h-3 w-3 mr-1" />Configure</Button>
+                )}
               </CardFooter>
             </Card>
           ))}
@@ -677,7 +681,16 @@ export default function Channels() {
                 </TabsContent>
                 
                 <TabsContent value="connection" className="space-y-4 mt-4">
-                  {selectedChannel.provider === "walmart" ? <WalmartConnectionPanel key={selectedChannel.id} channelId={selectedChannel.id} canEdit={canEdit} warehouses={warehouses} /> : <>
+                  {selectedChannel.provider === "walmart" ? <div className="space-y-4">
+                    <div className="flex items-center gap-3 p-3 bg-muted rounded-lg">
+                      <Badge variant={selectedChannel.connection ? "default" : "secondary"}>{selectedChannel.connection ? "Connected" : "Not connected"}</Badge>
+                      <span className="text-sm">Walmart US · Seller fulfilled</span>
+                    </div>
+                    <Button className="w-full min-h-[44px]" onClick={() => {
+                      const channelId = selectedChannel.id; setSelectedChannel(null); navigate(`/channels/walmart/${channelId}`);
+                    }}><Settings className="h-4 w-4 mr-2" />Open Walmart Configuration</Button>
+                    <p className="text-xs text-muted-foreground text-center">Store setup, listing feed, and SKU mapping</p>
+                  </div> : <>
 
                   {selectedChannel.connection ? (
                     <div className="space-y-4">

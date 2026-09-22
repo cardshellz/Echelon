@@ -93,7 +93,7 @@ export function registerChannelRoutes(app: Express) {
 
       const destination = await storage.getChannelById(channelId, transaction);
       if (!destination) return res.status(404).json({ error: "Channel not found" });
-      if (destination.provider === "walmart") return res.status(409).json({ error: "Verify and link the Walmart SKU in the channel connection panel" });
+      if (destination.provider === "walmart") return res.status(409).json({ error: "Link the Walmart SKU in the channel's Listing Feed" });
       if (destination.provider === "shopify") {
         const productLines = await storage.getProductLineIdsByProduct(variant.productId, transaction);
         const channelLines = await storage.getActiveChannelProductLineIds(channelId, transaction);

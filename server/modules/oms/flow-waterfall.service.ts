@@ -389,6 +389,20 @@ const BASE_ISSUES: FlowIssueDef[] = [
     `,
   },
   {
+    code: "SHIPSTATION_LABEL_RECOVERY_BLOCKED", kind: "stuck", stage: "shipped", severity: "critical",
+    message: "Some shipping-label corrections need attention",
+    why: "These orders could not finish void/relabel recovery. Other orders continue normally. The order and label identifiers below identify the affected shipment; no shipped quantities are guessed.",
+    remediation: "CODE_FIX", replaySafe: false,
+    count: () => sql`SELECT COUNT(*)::int AS count FROM oms.shipstation_label_recovery_work
+      WHERE state = 'review' OR (state = 'pending' AND next_attempt_at < NOW() - INTERVAL '30 minutes')`,
+    sample: () => sql`SELECT work.provider_order_id AS shipstation_order_id, work.provider_label_id AS shipstation_shipment_id,
+        work.tracking_number, label.provider_order_key AS order_reference, work.state, work.last_error_code, work.attempt_count, work.next_attempt_at, work.updated_at AS at
+      FROM oms.shipstation_label_recovery_work work
+      LEFT JOIN wms.shipping_provider_labels label ON label.provider = 'shipstation' AND label.provider_label_id = work.provider_label_id::text
+      WHERE work.state = 'review' OR (work.state = 'pending' AND work.next_attempt_at < NOW() - INTERVAL '30 minutes')
+      ORDER BY work.updated_at, work.provider_label_id LIMIT 50`,
+  },
+  {
     code: "SHOPIFY_RECOVERY_UNHEALTHY", kind: "stuck", stage: "intake", severity: "critical",
     message: "Shopify order recovery is not healthy",
     why: "The automatic Shopify cleanup has not completed recently or its latest run failed. Missing orders will still appear separately, but this safety net needs to be restored before another intake interruption.",

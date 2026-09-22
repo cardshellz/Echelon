@@ -3,7 +3,6 @@ import { z } from "zod";
 import { walmartStatusSchema, type WalmartChannelStatus, type WalmartConnectInput } from "@shared/types/walmart-channel";
 import type { FulfillmentProviderCredentialRecord } from "../../../shipping-engine/application/connected-fulfillment-method-catalog.service";
 import { WalmartApiError } from "./walmart-client";
-import { VARIANT_SALES_ELIGIBILITY_LOCK_NAMESPACE } from "@shared/catalog/variant-sales-eligibility";
 
 const LOCK_NAMESPACE = 94122;
 const positiveId = z.number().int().positive().max(2_147_483_647);
@@ -70,7 +69,7 @@ export class WalmartConnectionRepository {
       WHERE channel_id = $1 AND is_active = 1 AND quarantined_at IS NULL`, [channelId]);
     return walmartStatusSchema.parse({ channelId, connectionId: row.connection_id, partnerId: row.partner_id,
       partnerName: row.partner_name, environment: row.environment, shipNodeId: row.ship_node_id,
-      warehouseId: row.warehouse_id, ordersEnabled: row.orders_enabled && row.channel_status === "active", importSince: row.import_since.toISOString(),
+      warehouseId: row.warehouse_id, ordersEnabled: row.channel_status === "active", importSince: row.import_since.toISOString(),
       lastPollAt: row.last_poll_at?.toISOString() ?? null, lastSuccessAt: row.last_success_at?.toISOString() ?? null,
       lastErrorCode: row.last_error_code, revision: row.revision, mappedSkus: count.rows[0].count });
   }
@@ -111,26 +110,32 @@ export class WalmartConnectionRepository {
         await client.query(`INSERT INTO channels.channel_warehouse_assignments (channel_id,warehouse_id,enabled,priority)
           VALUES ($1,$2,true,0) ON CONFLICT (channel_id,warehouse_id) DO UPDATE SET enabled = true`, [channelId, input.warehouseId]);
       }
+      // Completing setup activates a pending channel. Preserve an explicit pause.
+      await client.query("UPDATE channels.channels SET status='active',updated_at=$2 WHERE id=$1 AND status='pending_setup'", [channelId, now]);
       await this.event(client, channelId, actor, before ? "credentials_rotated" : "connected",
         before ? { partnerId: before.partner_id, revision: before.revision } : null,
         { partnerId: input.expectedPartnerId, environment: input.environment, shipNodeId: input.shipNodeId,
-          warehouseId: input.warehouseId, revision: (before?.revision ?? 0) + 1 }, now);
+          warehouseId: input.warehouseId, revision: (before?.revision ?? 0) + 1,
+          channelStatusBefore: channel.rows[0].status,
+          channelStatusAfter: channel.rows[0].status === "pending_setup" ? "active" : channel.rows[0].status }, now);
     });
   }
 
   async control(channelId: number, enabled: boolean, revision: number, actor: string, now: Date): Promise<void> {
     await this.transaction(async client => {
-      const before = await client.query("SELECT orders_enabled, revision FROM channels.walmart_connections WHERE channel_id = $1 FOR UPDATE", [channelId]);
+      const before = await client.query(`SELECT wc.revision,c.status FROM channels.channels c
+        JOIN channels.walmart_connections wc ON wc.channel_id=c.id
+        WHERE c.id=$1 AND c.provider='walmart' FOR UPDATE OF c,wc`, [channelId]);
       if (before.rows[0]?.revision !== revision) throw new WalmartApiError("WALMART_REVISION_CONFLICT", "Connection settings changed; reload before saving", false);
       await client.query("UPDATE channels.walmart_connections SET orders_enabled=$2, revision=revision+1, updated_at=$3 WHERE channel_id=$1", [channelId, enabled, now]);
       await client.query("UPDATE channels.channels SET status=$2, updated_at=$3 WHERE id=$1 AND provider='walmart'", [channelId, enabled ? "active" : "paused", now]);
-      await this.event(client, channelId, actor, "order_intake_changed", { ordersEnabled: before.rows[0].orders_enabled }, { ordersEnabled: enabled }, now);
+      await this.event(client, channelId, actor, "order_intake_changed", { ordersEnabled: before.rows[0].status === "active" }, { ordersEnabled: enabled }, now);
     });
   }
 
   async enabledChannels(): Promise<number[]> {
     const result = await this.query<{ channel_id: number }>(`SELECT wc.channel_id FROM channels.walmart_connections wc
-      JOIN channels.channels c ON c.id = wc.channel_id WHERE wc.orders_enabled AND c.provider='walmart' AND c.status='active' ORDER BY wc.channel_id`);
+      JOIN channels.channels c ON c.id = wc.channel_id WHERE c.provider='walmart' AND c.status='active' ORDER BY wc.channel_id`);
     return result.rows.map(row => positiveId.parse(row.channel_id));
   }
   async assertWarehouse(row: WalmartConnectionRecord): Promise<void> {
@@ -157,48 +162,19 @@ export class WalmartConnectionRepository {
       FROM channels.walmart_order_receipts WHERE channel_id=$1 AND status='failed' ORDER BY observed_at DESC,purchase_order_id LIMIT 50`, [channelId]);
     return result.rows.map(row => ({ purchaseOrderId: row.purchase_order_id, errorCode: row.error_code, observedAt: row.observed_at.toISOString() }));
   }
-  async catalogSearch(query: string) {
-    const term = z.string().trim().min(2).max(100).parse(query);
-    const result = await this.query<{ id: number; sku: string; name: string }>(`SELECT id,sku,name FROM catalog.product_variants
-      WHERE is_active=true AND COALESCE(sales_eligibility,'sellable')='sellable'
-        AND requires_shipping IS DISTINCT FROM false AND track_inventory IS DISTINCT FROM false
-        AND sku ILIKE $1 ORDER BY sku,id LIMIT 25`, [`%${term.replace(/[\\%_]/g, "\\$&")}%`]);
-    return result.rows;
-  }
   async mappings(channelId: number) {
     const result = await this.query<{ product_variant_id: number; channel_sku: string }>(`SELECT product_variant_id,channel_sku
       FROM channels.channel_feeds WHERE channel_id=$1 AND is_active=1 AND quarantined_at IS NULL ORDER BY product_variant_id`, [channelId]);
     return result.rows;
   }
-  async linkSku(channelId: number, variantId: number, sku: string, actor: string, now: Date): Promise<void> {
-    await this.transaction(async client => {
-      const connection = await client.query("SELECT channel_id FROM channels.walmart_connections WHERE channel_id=$1 FOR UPDATE", [channelId]);
-      if (connection.rowCount !== 1) throw new WalmartApiError("WALMART_CONNECTION_REQUIRED", "Connect the Walmart account first", false);
-      await client.query("SELECT pg_advisory_xact_lock($1,$2)", [VARIANT_SALES_ELIGIBILITY_LOCK_NAMESPACE, variantId]);
-      const variant = await client.query(`SELECT id FROM catalog.product_variants WHERE id=$1 AND is_active=true
-        AND COALESCE(sales_eligibility,'sellable')='sellable' AND requires_shipping IS DISTINCT FROM false
-        AND track_inventory IS DISTINCT FROM false FOR SHARE`, [variantId]);
-      if (variant.rowCount !== 1) throw new WalmartApiError("WALMART_VARIANT_INVALID", "Select an active Echelon variant", false);
-      const prior = await client.query(`SELECT product_variant_id,channel_sku,is_active,quarantined_at FROM channels.channel_feeds
-        WHERE channel_id=$1 AND (product_variant_id=$2 OR channel_sku=$3) FOR UPDATE`, [channelId, variantId, sku]);
-      if (prior.rows.some(row => row.product_variant_id !== variantId || row.channel_sku !== sku)) {
-        throw new WalmartApiError("WALMART_MAPPING_CONFLICT", "The SKU or variant is already linked to another identity", false);
-      }
-      if (prior.rows.length) {
-        if (prior.rows[0].is_active !== 1 || prior.rows[0].quarantined_at !== null) {
-          throw new WalmartApiError("WALMART_MAPPING_INACTIVE", "This existing mapping is disabled or quarantined and needs reviewed repair", false);
-        }
-        return;
-      }
-      await client.query(`INSERT INTO channels.channel_feeds (channel_id,product_variant_id,channel_type,channel_variant_id,
-        channel_sku,channel_inventory_item_id,is_active,created_at,updated_at) VALUES ($1,$2,'walmart',$3,$3,$3,1,$4,$4)`, [channelId, variantId, sku, now]);
-      await this.event(client, channelId, actor, "sku_linked", null, { variantId, sku }, now);
-    });
-  }
   async markPoll(channelId: number, now: Date, outcome: { checkpoint?: Date; errorCode?: string } = {}): Promise<void> {
-    await this.query(`UPDATE channels.walmart_connections SET last_poll_at=$2,
+    await this.query(`WITH observed AS (UPDATE channels.walmart_connections SET last_poll_at=$2,
       checkpoint_at=COALESCE($3,checkpoint_at), last_success_at=CASE WHEN $3::timestamptz IS NOT NULL THEN $2 ELSE last_success_at END,
-      last_error_code=$4, updated_at=$2 WHERE channel_id=$1`, [channelId, now, outcome.checkpoint ?? null, outcome.errorCode ?? null]);
+      last_error_code=$4, updated_at=$2 WHERE channel_id=$1 RETURNING connection_id)
+      UPDATE channels.channel_connections SET sync_status=CASE WHEN $4::text IS NOT NULL THEN 'error'
+        WHEN $3::timestamptz IS NOT NULL THEN 'ok' ELSE 'syncing' END,
+        sync_error=$4,last_sync_at=CASE WHEN $3::timestamptz IS NOT NULL THEN $2 ELSE last_sync_at END,updated_at=$2
+      WHERE id IN (SELECT connection_id FROM observed)`, [channelId, now, outcome.checkpoint ?? null, outcome.errorCode ?? null]);
   }
   async receipt(channelId: number, purchaseOrderId: string): Promise<{ source_hash: string; status: string; oms_order_id: number | null } | null> {
     const row = (await this.query<{ source_hash: string; status: string; oms_order_id: string | null }>(`SELECT source_hash,status,oms_order_id

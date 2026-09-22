@@ -10,7 +10,11 @@ import {
   buildPlanSaveInput,
   buildRemoveFundingMethodPath,
   depositFundingMethodFor,
+  defaultMinimumCents,
   deriveWalletFlow,
+  describeMinimumOption,
+  minimumOptionFor,
+  minimumOptions,
   draftAfterBackupChoice,
   draftAfterFloorChoice,
   draftAfterIntro,
@@ -109,7 +113,8 @@ describe("deriveWalletFlow", () => {
     expect(derive(wallet({ fundingMethods: [CARD, BANK] }), started())).toMatchObject({ step: "source", suggestedSourceMethodId: 30 });
     // A saved card is never preselected: the picker opens on the recommended bank rail.
     expect(derive(wallet({ fundingMethods: [CARD] }), started())).toMatchObject({ step: "source", suggestedSourceMethodId: null });
-    expect(derive(wallet({ fundingMethods: [BANK] }), started({ sourceMethodId: 30 }))).toMatchObject({ step: "floor", floorCents: 25_000 });
+    // Nothing drafted or saved: the step opens on the pack minimum the policy serves.
+    expect(derive(wallet({ fundingMethods: [BANK] }), started({ sourceMethodId: 30 }))).toMatchObject({ step: "floor", floorCents: 5_000 });
     expect(derive(wallet({ fundingMethods: [BANK] }), started({ sourceMethodId: 30, floorCents: 4_000 }))).toMatchObject({ step: "floor" });
     expect(derive(wallet({ fundingMethods: [BANK] }), started({ sourceMethodId: 30, floorCents: 25_000 }))).toMatchObject({ step: "backup", backup: null, topUpCents: null, limitCents: 25_000 });
     expect(derive(wallet({ fundingMethods: [BANK, CARD] }), started({ sourceMethodId: 30, floorCents: 25_000 }))).toMatchObject({ step: "backup" });
@@ -317,21 +322,26 @@ describe("draft and redirects", () => {
   });
 
   it("reads a draft written before step navigation existed, and drops an unreadable override rather than the draft", () => {
-    // Exactly what v1 wrote before `stepOverride`: it still parses, with no override and every choice intact.
-    const legacy = { v: 1, seenIntro: true, sourceRail: "stripe_ach", sourceMethodId: 30, floorCents: 25_000, dailyCostCents: 2_000, backupMethodId: 10, pendingStripe: null, deposit: null };
+    // Exactly what v1 wrote before `stepOverride`, daily cost included: it still parses, minus that
+    // retired key, with no override and every choice intact.
+    const kept = { v: 1, seenIntro: true, sourceRail: "stripe_ach", sourceMethodId: 30, floorCents: 25_000, backupMethodId: 10, pendingStripe: null, deposit: null };
+    const legacy = { ...kept, dailyCostCents: 2_000 };
     // A draft from before the top-up amount existed reads as "the minimum".
-    expect(parseWalletDraft(JSON.stringify(legacy))).toEqual({ ...legacy, stepOverride: null, topUpCents: null });
+    expect(parseWalletDraft(JSON.stringify(legacy))).toEqual({ ...kept, stepOverride: null, topUpCents: null });
+    expect(parseWalletDraft(JSON.stringify(legacy))).not.toHaveProperty("dailyCostCents");
     expect(parseWalletDraft(JSON.stringify({ ...legacy, stepOverride: "floor" }))).toMatchObject({ stepOverride: "floor", floorCents: 25_000, topUpCents: null });
-    expect(parseWalletDraft(JSON.stringify({ ...legacy, stepOverride: "nowhere" }))).toEqual({ ...legacy, stepOverride: null, topUpCents: null });
-    expect(parseWalletDraft(JSON.stringify({ ...legacy, stepOverride: 3 }))).toEqual({ ...legacy, stepOverride: null, topUpCents: null });
+    expect(parseWalletDraft(JSON.stringify({ ...legacy, stepOverride: "nowhere" }))).toEqual({ ...kept, stepOverride: null, topUpCents: null });
+    expect(parseWalletDraft(JSON.stringify({ ...legacy, stepOverride: 3 }))).toEqual({ ...kept, stepOverride: null, topUpCents: null });
     expect(parseWalletDraft(JSON.stringify({ ...legacy, topUpCents: 40_000 }))).toMatchObject({ topUpCents: 40_000 });
+    // Any other unknown key is still a foreign draft, discarded rather than repaired.
+    expect(parseWalletDraft(JSON.stringify({ ...kept, somethingElse: 1 }))).toBeNull();
   });
 
   it("falls back to an in-memory draft when storage throws", () => {
     const store = new Map<string, string>();
     const storage = { getItem: (key: string) => store.get(key) ?? null, setItem: (key: string, value: string) => { store.set(key, value); }, removeItem: (key: string) => { store.delete(key); } };
-    expect(writeWalletDraft(storage, 1, draft({ dailyCostCents: 2_000 }))).toBe(true);
-    expect(readWalletDraft(storage, 1)).toEqual({ draft: draft({ dailyCostCents: 2_000 }), storageFailed: false });
+    expect(writeWalletDraft(storage, 1, draft({ floorCents: 25_000 }))).toBe(true);
+    expect(readWalletDraft(storage, 1)).toEqual({ draft: draft({ floorCents: 25_000 }), storageFailed: false });
     expect(readWalletDraft(storage, 2).draft).toEqual(EMPTY_DRAFT);
     const broken = { getItem: () => { throw new Error("blocked"); }, setItem: () => { throw new Error("blocked"); }, removeItem: () => {} };
     expect(readWalletDraft(broken, 1)).toEqual({ draft: EMPTY_DRAFT, storageFailed: true });
@@ -373,7 +383,7 @@ describe("draft and redirects", () => {
 });
 
 describe("moving through the flow", () => {
-  const reached = draft({ seenIntro: true, sourceRail: "stripe_ach", sourceMethodId: 30, floorCents: 25_000, dailyCostCents: 2_000, backupMethodId: 10, stepOverride: "source" });
+  const reached = draft({ seenIntro: true, sourceRail: "stripe_ach", sourceMethodId: 30, floorCents: 25_000, backupMethodId: 10, stepOverride: "source" });
 
   it("clicking a step changes only where the vendor is", () => {
     const before = { ...reached };
@@ -390,7 +400,7 @@ describe("moving through the flow", () => {
 
   it("keeps every downstream value on a Continue that changes nothing, and clears the floor only when the rail changes", () => {
     const bank31 = method({ fundingMethodId: 31, rail: "stripe_ach" });
-    // Same method: the floor, the backup card and the daily cost all stand; only the override is released.
+    // Same method: the floor and the backup card stand; only the override is released.
     expect(draftAfterSourceChoice(reached, BANK, BANK)).toEqual({ ...reached, stepOverride: null });
     // Another account on the same rail: the floor still means the same thing.
     expect(draftAfterSourceChoice(reached, bank31, BANK)).toEqual({ ...reached, stepOverride: null, sourceMethodId: 31 });
@@ -404,13 +414,12 @@ describe("moving through the flow", () => {
   });
 
   it("saves the floor and the backup card without touching anything else", () => {
-    expect(draftAfterFloorChoice(reached, 25_000, null, 2_000)).toEqual({ ...reached, stepOverride: null });
-    expect(draftAfterFloorChoice(reached, 50_000, null, null)).toEqual({ ...reached, stepOverride: null, floorCents: 50_000, dailyCostCents: null });
-    expect(draftAfterFloorChoice(reached, 50_000, 75_000, null)).toEqual({ ...reached, stepOverride: null, floorCents: 50_000, topUpCents: 75_000, dailyCostCents: null });
-    expect(() => draftAfterFloorChoice(reached, -1, null, null)).toThrow(RangeError);
-    expect(() => draftAfterFloorChoice(reached, 25_000.5, null, null)).toThrow(RangeError);
-    expect(() => draftAfterFloorChoice(reached, 25_000, -1, null)).toThrow(RangeError);
-    expect(() => draftAfterFloorChoice(reached, 25_000, null, -1)).toThrow(RangeError);
+    expect(draftAfterFloorChoice(reached, 25_000, null)).toEqual({ ...reached, stepOverride: null });
+    expect(draftAfterFloorChoice(reached, 50_000, null)).toEqual({ ...reached, stepOverride: null, floorCents: 50_000 });
+    expect(draftAfterFloorChoice(reached, 50_000, 75_000)).toEqual({ ...reached, stepOverride: null, floorCents: 50_000, topUpCents: 75_000 });
+    expect(() => draftAfterFloorChoice(reached, -1, null)).toThrow(RangeError);
+    expect(() => draftAfterFloorChoice(reached, 25_000.5, null)).toThrow(RangeError);
+    expect(() => draftAfterFloorChoice(reached, 25_000, -1)).toThrow(RangeError);
     expect(draftAfterBackupChoice(reached, CARD)).toEqual({ ...reached, stepOverride: null });
     expect(draftAfterBackupChoice(reached, method({ fundingMethodId: 11 }))).toEqual({ ...reached, stepOverride: null, backupMethodId: 11 });
   });
@@ -679,5 +688,38 @@ describe("USDC deposits in the wallet's words (funding design phase 6)", () => {
     expect(describeUsdcSourceNote(unwatched)).toContain("a member of our team credits your wallet after confirming the transfer");
     expect(describeUsdcSourceNote(null)).toContain("Card Shellz's deposit address");
     expect(describeUsdcSourceNote(notOffered)).toContain("Card Shellz's deposit address");
+  });
+});
+
+describe("the minimum: two tier options", () => {
+  const onSale = { tier: "pack" as const, eligible: true, reason: null, minimumCents: 5_000, shortfallCents: 0, upcoming: null };
+  const casesOnSale = { pack: onSale, case: { ...onSale, tier: "case" as const, minimumCents: 50_000 }, generatedAt: STAMP };
+  const casesOffSale = { ...casesOnSale, case: { ...casesOnSale.case, eligible: false, reason: "case_tier_balance_below_minimum" as const, shortfallCents: 38_000 } };
+
+  it("offers the pack and case minimums the policy serves, and only the pack one when the policy makes them equal", () => {
+    expect(minimumOptions(LIMITS)).toEqual([{ tier: "pack", cents: 5_000 }, { tier: "case", cents: 50_000 }]);
+    expect(minimumOptions({ autoReloadMinTriggerCents: 50_000, caseTierMinimumCents: 50_000 })).toEqual([{ tier: "pack", cents: 50_000 }]);
+    expect(minimumOptions({ autoReloadMinTriggerCents: 60_000, caseTierMinimumCents: 50_000 })).toEqual([{ tier: "pack", cents: 60_000 }]);
+    expect(describeMinimumOption("pack")).toBe("Singles, packs and inner packs");
+    expect(describeMinimumOption("case")).toBe("Cases too");
+  });
+
+  it("reads any saved amount as the tier it falls in", () => {
+    expect(minimumOptionFor(25_000, LIMITS)).toBe(5_000);
+    expect(minimumOptionFor(5_000, LIMITS)).toBe(5_000);
+    expect(minimumOptionFor(0, LIMITS)).toBe(5_000);
+    expect(minimumOptionFor(50_000, LIMITS)).toBe(50_000);
+    expect(minimumOptionFor(100_000, LIMITS)).toBe(50_000);
+    expect(minimumOptionFor(100_000, { autoReloadMinTriggerCents: 50_000, caseTierMinimumCents: 50_000 })).toBe(50_000);
+    expect(() => minimumOptionFor(-1, LIMITS)).toThrow(RangeError);
+    expect(() => minimumOptionFor(1.5, LIMITS)).toThrow(RangeError);
+  });
+
+  it("opens on the case minimum only while the vendor's cases are on sale", () => {
+    expect(defaultMinimumCents(wallet())).toBe(5_000);
+    expect(defaultMinimumCents(wallet({ listingTiers: casesOffSale }))).toBe(5_000);
+    expect(defaultMinimumCents(wallet({ listingTiers: casesOnSale }))).toBe(50_000);
+    // A policy with one option has nothing higher to open on.
+    expect(defaultMinimumCents({ limits: { ...LIMITS, autoReloadMinTriggerCents: 50_000 }, listingTiers: casesOnSale })).toBe(50_000);
   });
 });

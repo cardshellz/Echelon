@@ -101,7 +101,6 @@ export const walletDraftSchema = z.object({
   // The optional top-up amount (funding design phase 5); null is "the minimum".
   // Defaulted so a draft written before it existed still parses.
   topUpCents: optionalCents.default(null),
-  dailyCostCents: optionalCents,
   backupMethodId: z.number().int().positive().nullable(),
   pendingStripe: pendingStripeSchema.nullable(),
   deposit: z.enum(["pending", "skipped", "done"]).nullable(),
@@ -124,7 +123,6 @@ export const EMPTY_DRAFT: WalletDraft = Object.freeze({
   sourceMethodId: null,
   floorCents: null,
   topUpCents: null,
-  dailyCostCents: null,
   backupMethodId: null,
   pendingStripe: null,
   deposit: null,
@@ -135,11 +133,23 @@ export const EMPTY_DRAFT: WalletDraft = Object.freeze({
 export function parseWalletDraft(raw: unknown): WalletDraft | null {
   if (typeof raw !== "string") return null;
   try {
-    const parsed = walletDraftSchema.safeParse(JSON.parse(raw));
+    const parsed = walletDraftSchema.safeParse(withoutRetiredDraftKeys(JSON.parse(raw)));
     return parsed.success ? parsed.data : null;
   } catch {
     return null;
   }
+}
+
+/**
+ * Keys a v1 draft once carried and the schema no longer has. `dailyCostCents`
+ * was the vendor's own daily order cost, which drove a recommended minimum
+ * until the step became the two tier minimums; a draft written with it still
+ * reads, minus the key, so a vendor mid-setup loses nothing.
+ */
+function withoutRetiredDraftKeys(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const { dailyCostCents: _retired, ...rest } = value as Record<string, unknown>;
+  return rest;
 }
 
 export interface DraftStorageLike {
@@ -454,7 +464,7 @@ export function deriveWalletFlow(input: {
   const suggested = source ? null : (activeMethodsOfRail(wallet, RECOMMENDED_SOURCE_RAIL)[0] ?? null);
 
   const floorFromServer = authorized ? autoReload.minimumBalanceCents : null;
-  const floorCents = draft.floorCents ?? floorFromServer ?? (source ? derivedDefaultFloor(source.rail) : derivedDefaultFloor("stripe_ach"));
+  const floorCents = draft.floorCents ?? floorFromServer ?? defaultMinimumCents(wallet);
   const floorValid = (draft.floorCents ?? floorFromServer) !== null && floorCents >= wallet.limits.autoReloadMinTriggerCents;
 
   const eligibleCards = wallet.fundingMethods.filter((method) => isEligibleBackupCard(method, now));
@@ -547,8 +557,56 @@ export function deriveWalletFlow(input: {
   };
 }
 
-function derivedDefaultFloor(rail: WalletSourceRail): number {
-  return rail === "stripe_ach" ? 25_000 : 10_000;
+// ---------------------------------------------------------------------------
+// The minimum: one of the two tier minimums
+// ---------------------------------------------------------------------------
+
+export type WalletMinimumTier = "pack" | "case";
+
+export interface WalletMinimumOption {
+  tier: WalletMinimumTier;
+  cents: number;
+}
+
+/**
+ * The minimums a vendor can choose: the pack tier's and the case tier's, as
+ * the served policy sets them. There is no third amount — the minimum exists
+ * to decide what the vendor can sell, and those are the two gates. A policy
+ * whose case minimum is not above the pack minimum degrades to the one option
+ * rather than two that read the same.
+ */
+export function minimumOptions(limits: Pick<WalletLimits, "autoReloadMinTriggerCents" | "caseTierMinimumCents">): WalletMinimumOption[] {
+  const pack: WalletMinimumOption = { tier: "pack", cents: limits.autoReloadMinTriggerCents };
+  const cases: WalletMinimumOption = { tier: "case", cents: limits.caseTierMinimumCents };
+  return cases.cents > pack.cents ? [pack, cases] : [pack];
+}
+
+/** What each option lets the vendor sell, shown under its amount. */
+export function describeMinimumOption(tier: WalletMinimumTier): string {
+  return tier === "pack" ? "Singles, packs and inner packs" : "Cases too";
+}
+
+/**
+ * The option an amount reads as: the case minimum once it reaches it, else
+ * the pack minimum. A minimum saved before the step offered only the two
+ * tiers opens on the tier it falls in, and saving keeps that tier's amount.
+ */
+export function minimumOptionFor(cents: number, limits: Pick<WalletLimits, "autoReloadMinTriggerCents" | "caseTierMinimumCents">): number {
+  assertCents(cents, "cents");
+  const options = minimumOptions(limits);
+  const highest = options[options.length - 1];
+  return cents >= highest.cents ? highest.cents : options[0].cents;
+}
+
+/**
+ * The minimum the step opens on when nothing is saved or drafted: the case
+ * minimum while the vendor's case tier is on sale, because anything lower
+ * would take cases off sale; otherwise the pack minimum.
+ */
+export function defaultMinimumCents(wallet: Pick<DropshipWalletView, "limits" | "listingTiers">): number {
+  const options = minimumOptions(wallet.limits);
+  const cases = options.find((option) => option.tier === "case");
+  return wallet.listingTiers?.case.eligible && cases ? cases.cents : options[0].cents;
 }
 
 /** Manage-mode target for a `{ step }` recovery (spec §1.3 rule 12). */
@@ -648,12 +706,11 @@ export function draftAfterSourceChoice(draft: WalletDraft, method: WalletFunding
   };
 }
 
-/** Continue on the minimum step. The daily cost is the vendor's own note and never leaves the browser. */
-export function draftAfterFloorChoice(draft: WalletDraft, floorCents: number, topUpCents: number | null, dailyCostCents: number | null): WalletDraft {
+/** Continue on the minimum step. */
+export function draftAfterFloorChoice(draft: WalletDraft, floorCents: number, topUpCents: number | null): WalletDraft {
   assertCents(floorCents, "floorCents");
   if (topUpCents !== null) assertCents(topUpCents, "topUpCents");
-  if (dailyCostCents !== null) assertCents(dailyCostCents, "dailyCostCents");
-  return { ...draft, stepOverride: null, floorCents, topUpCents, dailyCostCents };
+  return { ...draft, stepOverride: null, floorCents, topUpCents };
 }
 
 /** Continue on the backup step. Nothing downstream depends on which card it is. */
@@ -943,7 +1000,8 @@ export function buildAutoReloadDisableInput(wallet: Pick<DropshipWalletView, "au
     enabled: false,
     fundingMethodId: existing?.fundingMethodId ?? null,
     backstopFundingMethodId: existing?.backstopFundingMethodId ?? null,
-    minimumBalanceCents: existing?.minimumBalanceCents ?? 25_000,
+    // No saved amount to keep: the policy's pack minimum, the same the step opens on.
+    minimumBalanceCents: existing?.minimumBalanceCents ?? wallet.limits.autoReloadMinTriggerCents,
     topUpAmountCents: existing?.topUpAmountCents ?? null,
     paymentHoldTimeoutMinutes: wallet.limits.defaultPaymentHoldTimeoutMinutes,
     acknowledgedCardFeeBps: null,

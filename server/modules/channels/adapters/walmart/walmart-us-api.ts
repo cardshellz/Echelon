@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { walmartIdentifier } from "@shared/types/walmart-channel";
 import { WalmartApiError, type WalmartClient } from "./walmart-client";
+import type { ChannelCatalogItem, ChannelCatalogPage, ChannelCatalogQuery } from "@shared/types/channel-catalog";
 
 const id = walmartIdentifier;
 const quantity = z.object({ unitOfMeasurement: z.enum(["EACH", "EA"]), amount: z.string().regex(/^\d+$/)
@@ -45,6 +46,16 @@ export interface WalmartUsApiPort {
   inventory(sku: string, node: string): Promise<number>;
   setInventory(sku: string, node: string, amount: number): Promise<void>;
   ship(id: string, body: unknown): Promise<void>;
+  catalogPage(query: ChannelCatalogQuery): Promise<ChannelCatalogPage>;
+  catalogItem(sku: string): Promise<ChannelCatalogItem>;
+}
+const catalogItemSchema = z.object({ sku: id, mart: z.literal("WALMART_US").optional(),
+  productName: z.string().min(1).max(1_000).optional(), wpid: id.nullish(),
+  lifecycleStatus: z.string().min(1).max(100).optional(), publishedStatus: z.string().min(1).max(100).optional() });
+function catalogItemView(item: z.infer<typeof catalogItemSchema>): ChannelCatalogItem {
+  return { sku: item.sku, title: item.productName ?? item.sku, externalProductId: item.wpid ?? null,
+    externalVariantId: item.sku, externalInventoryItemId: item.sku,
+    lifecycleStatus: item.lifecycleStatus ?? "UNKNOWN", publishedStatus: item.publishedStatus ?? "UNKNOWN" };
 }
 function parse<T extends z.ZodTypeAny>(schema: T, value: unknown): z.output<T> {
   const result = schema.safeParse(value);
@@ -55,6 +66,24 @@ export function parseWalmartOrder(value: unknown): WalmartOrder { return parse(w
 
 export class WalmartUsApi implements WalmartUsApiPort {
   constructor(private readonly client: Pick<WalmartClient, "request">) {}
+  async catalogPage(query: ChannelCatalogQuery): Promise<ChannelCatalogPage> {
+    if (query.sku) return { items: [await this.catalogItem(query.sku)], nextCursor: null, total: 1 };
+    const params = new URLSearchParams({ limit: "50", nextCursor: query.cursor ?? "*" });
+    const page = parse(z.object({ ItemResponse: z.array(catalogItemSchema).max(1_000),
+      nextCursor: z.string().max(8_000).nullish(), totalItems: z.number().int().nonnegative().nullish() }),
+    await this.client.request("GET", `/v3/items?${params}`));
+    if (page.ItemResponse.length === 50 && !page.nextCursor && (page.totalItems ?? 0) > 50) {
+      throw new WalmartApiError("WALMART_CATALOG_CURSOR_MISSING", "Walmart omitted the catalog continuation; refresh the listing feed", true);
+    }
+    return { items: page.ItemResponse.map(catalogItemView), nextCursor: page.ItemResponse.length ? page.nextCursor || null : null,
+      total: page.totalItems ?? null };
+  }
+  async catalogItem(sku: string): Promise<ChannelCatalogItem> {
+    const result = parse(z.object({ ItemResponse: z.array(catalogItemSchema).length(1) }),
+      await this.client.request("GET", `/v3/items/${encodeURIComponent(id.parse(sku))}?productIdType=SKU`));
+    if (result.ItemResponse[0].sku !== sku) throw new WalmartApiError("WALMART_SKU_MISMATCH", "Walmart returned a different catalog SKU", false);
+    return catalogItemView(result.ItemResponse[0]);
+  }
   async account() {
     const profile = parse(z.object({ partner: z.object({ partnerId: id, partnerDisplayName: z.string().min(1) }) }),
       await this.client.request("GET", "/v3/settings/partnerprofile"));

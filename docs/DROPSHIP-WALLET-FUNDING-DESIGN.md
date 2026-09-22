@@ -95,9 +95,15 @@ reversal is bounded by what the wallet received, and the fee is written off.
 
 The vendor keeps one number: the **minimum** (`minimum_balance_cents`,
 "keep $X"), at least the pack tier and at least the case tier to sell cases.
-An optional **top-up amount** (`top_up_amount_cents`, migration 0690; null
-pulls the minimum) says how much each automatic refill pulls, so a vendor
-who wants fewer pulls takes bigger ones. `domain/autopay-refill.ts`:
+The minimum step offers exactly those two amounts, as the served policy sets
+them (`minimumOptions` in `client/src/lib/dropship-wallet-flow.ts`): nothing
+else to type and nothing to guess — the earlier daily-cost guesser and
+free-form amount are gone. It opens on the pack minimum, or the case minimum
+while the vendor's cases are on sale; a minimum saved before the step was
+narrowed opens on the tier it falls in. An optional **top-up amount**
+(`top_up_amount_cents`, migration 0690; null pulls the minimum) says how
+much each automatic refill pulls, so a vendor who wants fewer pulls takes
+bigger ones. `domain/autopay-refill.ts`:
 
 - refill (after any order debit and at the daily check, while the balance
   counting pending is under the minimum): pull the top-up amount, or the

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { sql } from "drizzle-orm";
 import { sqlIntegerArray } from "../../infrastructure/postgres-array";
 import { projectPersistedDeclaredPackageLifecycleShadow } from "../shipping/declared-package-lifecycle-shadow.domain";
-import { decideEbayLabelReplacement } from "./ebay-label-replacement.domain";
+import { planLabelReplacement } from "./label-replacement-plan.domain";
 import {
   MAX_LABEL_REPLACEMENT_CANDIDATES,
   MAX_LABEL_REPLACEMENT_ITEMS,
@@ -16,9 +16,8 @@ export type EbayLabelReplacementResult =
   | { readonly outcome: "waiting" | "review" | "skipped"; readonly reason: string }
   | { readonly outcome: "applied"; readonly materialized: MaterializePhysicalPackageResult };
 export interface AuthorizedLabelReplacement {
-  /** Only Shopify package correction admission may authorize a source portion.
-   * Omitted for eBay, whose whole-source contract remains unchanged. */
-  readonly shopifyPackageScope?: true;
+  /** Granted only after the complete conserving package/repack plan is proven. */
+  readonly packageScope: true;
   readonly labelId: number;
   readonly sourceItemIds: readonly number[];
   readonly sourceItems: readonly { readonly sourceShipmentItemId: number; readonly quantity: number }[];
@@ -36,6 +35,51 @@ interface PreviousItem {
   label_status: "active" | "voided" | "superseded" | "unknown";
   carrier_possession: boolean; tracking_number: string;
   provider_order_id: string | null;
+}
+
+interface SourceItem { id: number; shipment_id: number; qty: number; provider: string; purpose: string }
+// A pathological graph must not hold the web pool indefinitely. Every normal
+// repack converges in a few expansions; no partial graph is admitted at this cap.
+const MAX_REPACK_DISCOVERY_ROUNDS = 20;
+async function readSources(tx: Transaction, sourceIds: readonly number[]): Promise<SourceItem[]> {
+  return rows<SourceItem>(await tx.execute(sql`
+    SELECT item.id, item.shipment_id, item.qty, channel.provider, item.shipment_item_purpose AS purpose
+    FROM wms.outbound_shipment_items item
+    JOIN wms.order_items order_item ON order_item.id = item.order_item_id
+    JOIN oms.oms_order_lines line ON line.id = order_item.oms_order_line_id
+    JOIN oms.oms_orders orders ON orders.id = line.order_id
+    JOIN channels.channels channel ON channel.id = orders.channel_id
+    WHERE item.id = ANY(${sqlIntegerArray(sourceIds)}) ORDER BY item.id`));
+}
+
+async function readPreviousItems(tx: Transaction, sourceIds: readonly number[], currentProviderLabelId: string): Promise<PreviousItem[]> {
+  // Expand to complete physical packages. A repack can move one old package's
+  // distinct source lines into different labels, even across WMS headers.
+  return rows<PreviousItem>(await tx.execute(sql`
+    WITH related_packages AS (
+      SELECT DISTINCT item.physical_shipment_id FROM wms.effective_physical_shipment_items item
+      LEFT JOIN wms.package_allocation_entries entry ON entry.id = item.package_allocation_entry_id
+      LEFT JOIN wms.package_allocation_source_lines source ON source.id = entry.package_allocation_source_line_id
+      WHERE COALESCE(item.legacy_wms_shipment_item_id, item.label_replacement_source_item_id, source.source_wms_shipment_item_id)
+        = ANY(${sqlIntegerArray(sourceIds)})
+    )
+    SELECT item.id, item.physical_shipment_id, item.quantity_shipped,
+      COALESCE(item.legacy_wms_shipment_item_id, item.label_replacement_source_item_id, source.source_wms_shipment_item_id) AS source_id,
+      old_label.id AS label_id, COALESCE(old_label.label_status, 'unknown') AS label_status, package.tracking_number,
+      old_label.provider_order_id,
+      EXISTS (SELECT 1 FROM wms.carrier_tracking_event_matches match
+        JOIN wms.carrier_tracking_events event ON event.id = match.carrier_tracking_event_id
+        WHERE match.shipping_provider_label_id = old_label.id AND event.dispatch_evidence = 'confirmed'
+          AND match.match_status IN ('matched', 'voided_label')) AS carrier_possession
+    FROM wms.effective_physical_shipment_items item
+    JOIN related_packages related ON related.physical_shipment_id = item.physical_shipment_id
+    JOIN wms.physical_shipments package ON package.id = item.physical_shipment_id
+    LEFT JOIN wms.package_allocation_entries entry ON entry.id = item.package_allocation_entry_id
+    LEFT JOIN wms.package_allocation_source_lines source ON source.id = entry.package_allocation_source_line_id
+    LEFT JOIN wms.shipping_provider_labels old_label ON old_label.provider = package.provider
+      AND old_label.provider_label_id = package.provider_physical_shipment_id
+    WHERE NOT (package.provider = 'shipstation' AND package.provider_physical_shipment_id = ${currentProviderLabelId})
+    ORDER BY item.id LIMIT ${MAX_LABEL_REPLACEMENT_ITEMS + 1}`));
 }
 
 /** Runs inside the canonical owner's transaction. Original allocation plans and
@@ -69,47 +113,11 @@ export async function reconcileEbayLabelReplacement(
   if (!contents) return null;
   const sourceIds = contents.map(item => item.sourceShipmentItemId);
   // Shared source locks serialize different labels even when their provider order IDs differ.
-  const sources = rows<{ id: number; shipment_id: number; qty: number; provider: string; purpose: string }>(await tx.execute(sql`
-    SELECT item.id, item.shipment_id, item.qty, channel.provider, item.shipment_item_purpose AS purpose
-    FROM wms.outbound_shipment_items item
-    JOIN wms.order_items order_item ON order_item.id = item.order_item_id
-    JOIN oms.oms_order_lines line ON line.id = order_item.oms_order_line_id
-    JOIN oms.oms_orders orders ON orders.id = line.order_id
-    JOIN channels.channels channel ON channel.id = orders.channel_id
-    WHERE item.id IN (${sql.join(sourceIds.map(id => sql`${id}`), sql`, `)}) ORDER BY item.id`));
+  const sources = await readSources(tx, sourceIds);
   const shopifyPackageScope = sources.length > 0 && sources.every(item => item.provider === "shopify");
   if (sources.length !== sourceIds.length || sources.some(item => item.purpose !== "customer_fulfillment")
     || (!shopifyPackageScope && sources.some(item => item.provider !== "ebay"))) return null;
-  await tx.execute(sql`SELECT id FROM wms.outbound_shipment_items WHERE id IN (
-    ${sql.join(sourceIds.map(id => sql`${id}`), sql`, `)}) ORDER BY id FOR UPDATE`);
-  const locked = await readLabelEvidence(tx, labelId, true);
-  if (JSON.stringify(locked.label) !== JSON.stringify(label)
-    || JSON.stringify(locked.events) !== JSON.stringify(events)) throw new Error("Label evidence changed during replacement admission; retry required");
-
-  const concurrentApplication = rows<{ physical_shipment_id: string }>(await tx.execute(sql`
-    SELECT physical_shipment_id FROM wms.ebay_label_replacement_work
-    WHERE shipping_provider_label_id = ${labelId} AND state = 'applied'`))[0];
-  if (concurrentApplication) return { outcome: "applied", materialized: await readLabelReplacementMaterialization(tx, Number(concurrentApplication.physical_shipment_id)) };
-
-  const allocated = rows<PreviousItem>(await tx.execute(sql`
-    SELECT item.id, item.physical_shipment_id, item.quantity_shipped,
-      COALESCE(item.legacy_wms_shipment_item_id, item.label_replacement_source_item_id, source.source_wms_shipment_item_id) AS source_id,
-      old_label.id AS label_id, COALESCE(old_label.label_status, 'unknown') AS label_status, package.tracking_number,
-      old_label.provider_order_id,
-      EXISTS (SELECT 1 FROM wms.carrier_tracking_event_matches match
-        JOIN wms.carrier_tracking_events event ON event.id = match.carrier_tracking_event_id
-        WHERE match.shipping_provider_label_id = old_label.id AND event.dispatch_evidence = 'confirmed'
-          AND match.match_status IN ('matched', 'voided_label')) AS carrier_possession
-    FROM wms.effective_physical_shipment_items item
-    JOIN wms.physical_shipments package ON package.id = item.physical_shipment_id
-    LEFT JOIN wms.package_allocation_entries entry ON entry.id = item.package_allocation_entry_id
-    LEFT JOIN wms.package_allocation_source_lines source ON source.id = entry.package_allocation_source_line_id
-    LEFT JOIN wms.shipping_provider_labels old_label ON old_label.provider = package.provider
-      AND old_label.provider_label_id = package.provider_physical_shipment_id
-    WHERE COALESCE(item.legacy_wms_shipment_item_id, item.label_replacement_source_item_id, source.source_wms_shipment_item_id)
-      IN (${sql.join(sourceIds.map(id => sql`${id}`), sql`, `)})
-      AND NOT (package.provider = 'shipstation' AND package.provider_physical_shipment_id = ${label.provider_label_id})
-    ORDER BY item.id LIMIT ${MAX_LABEL_REPLACEMENT_ITEMS + 1}`));
+  let allocated = await readPreviousItems(tx, sourceIds, label.provider_label_id);
   async function defer(state: "waiting" | "review", reason: string): Promise<EbayLabelReplacementResult> {
     await tx.execute(sql`INSERT INTO wms.ebay_label_replacement_work
       (shipping_provider_label_id, state, reason, source_item_ids, created_at, updated_at)
@@ -128,23 +136,73 @@ export async function reconcileEbayLabelReplacement(
   const scope = scopeLabelReplacementPredecessors({ providerOrderId: label.provider_order_id, sourceItemIds: sourceIds, previous: scopeInput });
   if (scope.outcome === "review") return defer("review", scope.reason);
   const priorIds = new Set(scope.physicalItemIds);
-  const prior = allocated.filter(item => priorIds.has(Number(item.id)));
-  if (shopifyPackageScope && prior.every(item => item.label_status !== "voided") && contents.every(content => {
+  const initiallyScoped = allocated.filter(item => priorIds.has(Number(item.id)));
+  if (initiallyScoped.every(item => item.label_status !== "voided") && contents.every(content => {
     const existing = allocated.filter(item => Number(item.source_id) === content.sourceShipmentItemId)
       .reduce((sum, item) => sum + Number(item.quantity_shipped), 0);
     return Number.isSafeInteger(existing) && existing + content.quantity <= Number(sources.find(item => item.id === content.sourceShipmentItemId)?.qty);
   })) return null; // An additional package fits without transferring anyone else's units.
-  const decision = decideEbayLabelReplacement({
-    contents: contents.map(item => ({ sourceItemId: item.sourceShipmentItemId, quantity: item.quantity })),
-    previous: prior.map(item => ({ sourceItemId: Number(item.source_id), quantity: Number(item.quantity_shipped),
-      physicalItemId: Number(item.id), labelStatus: item.label_status, carrierPossession: item.carrier_possession })),
-  });
-  if (sources.some(item => shopifyPackageScope
-    ? Number(item.qty) < Number(contents.find(content => content.sourceShipmentItemId === item.id)?.quantity)
-    : Number(item.qty) !== contents.find(content => content.sourceShipmentItemId === item.id)?.quantity)) {
-    return defer("review", "partial_source_replacement_requires_allocation_plan");
+  const evidenceById = new Map([[labelId, { label, events, lifecycle }]]);
+  const discoveredSourceIds = new Set(sourceIds);
+  let discoveryComplete = false;
+  for (let round = 0; round < MAX_REPACK_DISCOVERY_ROUNDS; round++) {
+    const previousSize = discoveredSourceIds.size + evidenceById.size;
+    const related = await readPreviousItems(tx, [...discoveredSourceIds], label.provider_label_id);
+    if (related.length > MAX_LABEL_REPLACEMENT_ITEMS) return defer('review', 'replacement_candidate_limit_exceeded');
+    for (const item of related) discoveredSourceIds.add(Number(item.source_id));
+    if (discoveredSourceIds.size > MAX_LABEL_REPLACEMENT_ITEMS) return defer('review', 'replacement_candidate_limit_exceeded');
+    const discoverySources = await readSources(tx, [...discoveredSourceIds]);
+    const candidates = rows<{ id: string }>(await tx.execute(sql`
+      SELECT DISTINCT label.id FROM wms.shipping_provider_labels label
+      JOIN wms.shipping_provider_label_links link ON link.shipping_provider_label_id = label.id
+      WHERE label.provider = 'shipstation' AND label.label_status = 'active' AND label.id <> ${labelId}
+        AND link.legacy_wms_shipment_id = ANY(${sqlIntegerArray(discoverySources.map(item => item.shipment_id))})
+        AND NOT EXISTS (SELECT 1 FROM wms.physical_shipments known_package
+          WHERE known_package.provider = label.provider AND known_package.provider_physical_shipment_id = label.provider_label_id)
+      ORDER BY label.id LIMIT ${MAX_LABEL_REPLACEMENT_CANDIDATES}`));
+    if (candidates.length >= MAX_LABEL_REPLACEMENT_CANDIDATES) return defer("review", "replacement_candidate_limit_exceeded");
+    for (const candidate of candidates) {
+      if (evidenceById.has(Number(candidate.id))) continue;
+      const evidence = await readLabelEvidence(tx, Number(candidate.id));
+      if (!evidence.label || evidence.label.label_direction === 'return') continue;
+      if (evidence.lifecycle?.outcome !== 'projected' || evidence.lifecycle.projection.contentsStatus !== 'authoritative'
+        || evidence.lifecycle.projection.reconciliationStatus !== 'clear') return defer('review', 'competing_replacement_evidence_unproven');
+      evidenceById.set(Number(candidate.id), { label: evidence.label, events: evidence.events, lifecycle: evidence.lifecycle });
+    }
+    for (const evidence of evidenceById.values()) for (const item of evidence.lifecycle.projection.authoritativeContents!) discoveredSourceIds.add(item.wmsShipmentItemId);
+    if (discoveredSourceIds.size > MAX_LABEL_REPLACEMENT_ITEMS || evidenceById.size > MAX_LABEL_REPLACEMENT_CANDIDATES) return defer('review', 'replacement_candidate_limit_exceeded');
+    if (previousSize === discoveredSourceIds.size + evidenceById.size) { discoveryComplete = true; break; }
   }
-  if (decision.outcome !== "transfer") return defer(decision.outcome, decision.reason);
+  if (!discoveryComplete) return defer('review', 'replacement_candidate_limit_exceeded');
+  const allSourceIds = [...discoveredSourceIds].sort((a, b) => a - b);
+  await tx.execute(sql`SELECT id FROM wms.outbound_shipment_items WHERE id = ANY(${sqlIntegerArray(allSourceIds)}) ORDER BY id FOR UPDATE`);
+  const concurrentApplication = rows<{ physical_shipment_id: string }>(await tx.execute(sql`
+    SELECT physical_shipment_id FROM wms.ebay_label_replacement_work
+    WHERE shipping_provider_label_id = ${labelId} AND state = 'applied'`))[0];
+  if (concurrentApplication) return { outcome: 'applied', materialized: await readLabelReplacementMaterialization(tx, Number(concurrentApplication.physical_shipment_id)) };
+  allocated = await readPreviousItems(tx, allSourceIds, label.provider_label_id);
+  if (allocated.some(item => !discoveredSourceIds.has(Number(item.source_id)))) throw new Error('Repack source graph changed during lock acquisition; retry required');
+  if (allocated.length > MAX_LABEL_REPLACEMENT_ITEMS) return defer('review', 'replacement_candidate_limit_exceeded');
+  const decision = planLabelReplacement({ labelId, previous: allocated.map(item => ({
+    sourceItemId: Number(item.source_id), quantity: Number(item.quantity_shipped), physicalItemId: Number(item.id),
+    physicalShipmentId: Number(item.physical_shipment_id), providerOrderId: item.provider_order_id,
+    labelStatus: item.label_status, carrierPossession: item.carrier_possession,
+  })), candidates: [...evidenceById].map(([id, evidence]) => ({ labelId: id, providerOrderId: evidence.label.provider_order_id,
+    contents: evidence.lifecycle.projection.authoritativeContents!.map(content => ({ sourceItemId: content.wmsShipmentItemId, quantity: content.quantity })) })) });
+  if (decision.outcome !== 'transfer') return defer(decision.outcome, decision.reason);
+  const prior = allocated.filter(item => decision.physicalItemIds.includes(Number(item.id)));
+  const targets = decision.labelIds.map(id => evidenceById.get(id)!);
+  for (const target of targets) {
+    const locked = await readLabelEvidence(tx, Number(target.label.id), true);
+    if (JSON.stringify(locked) !== JSON.stringify(target)) throw new Error('Label evidence changed during repack admission; retry required');
+  }
+  const targetSourceIds = [...new Set(targets.flatMap(target => target.lifecycle.projection.authoritativeContents!.map(item => item.wmsShipmentItemId)))];
+  const targetSources = await readSources(tx, targetSourceIds);
+  if (targetSources.length !== targetSourceIds.length || targetSources.some(source => source.purpose !== 'customer_fulfillment'
+    || source.provider !== (shopifyPackageScope ? 'shopify' : 'ebay'))) return defer('review', 'replacement_source_scope_conflict');
+  if (targets.some(target => target.lifecycle.projection.authoritativeContents!.some(item => item.quantity > Number(targetSources.find(source => source.id === item.wmsShipmentItemId)!.qty)))) {
+    return defer('review', 'replacement_quantity_exceeds_source');
+  }
   // A mutable label status alone is not void authority. Reuse the lifecycle
   // projector's hash, event ordering, direction and exact-content validation.
   for (const oldLabelId of [...new Set(prior.map(item => Number(item.label_id)))].sort((a, b) => a - b)) {
@@ -158,27 +216,6 @@ export async function reconcileEbayLabelReplacement(
     if (JSON.stringify(old.lifecycle.projection.authoritativeContents) !== JSON.stringify(expected)) {
       return defer("review", "predecessor_contents_do_not_match_allocation");
     }
-  }
-  const candidates = rows<{ id: string }>(await tx.execute(sql`
-    SELECT DISTINCT label.id FROM wms.shipping_provider_labels label
-    JOIN wms.shipping_provider_label_links link ON link.shipping_provider_label_id = label.id
-    WHERE label.provider = 'shipstation' AND label.label_status = 'active' AND label.id <> ${labelId}
-      AND link.legacy_wms_shipment_id IN (${sql.join(sources.map(item => sql`${item.shipment_id}`), sql`, `)})
-      AND NOT EXISTS (SELECT 1 FROM wms.physical_shipments known_package
-        WHERE known_package.provider = label.provider AND known_package.provider_physical_shipment_id = label.provider_label_id)
-    ORDER BY label.id LIMIT ${MAX_LABEL_REPLACEMENT_CANDIDATES + 1}`));
-  if (candidates.length > MAX_LABEL_REPLACEMENT_CANDIDATES) return defer("review", "replacement_candidate_limit_exceeded");
-  for (const candidate of candidates) {
-    // The WMS header only discovers related evidence. Competition means two
-    // labels claim the SAME old physical allocation, not merely the same order.
-    const evidence = await readLabelEvidence(tx, Number(candidate.id));
-    if (!evidence.label || evidence.label.label_direction === "return" || evidence.label.label_status !== "active") continue;
-    if (evidence.lifecycle?.outcome !== "projected" || evidence.lifecycle.projection.contentsStatus !== "authoritative"
-      || evidence.lifecycle.projection.reconciliationStatus !== "clear") return defer("review", "competing_replacement_evidence_unproven");
-    const competingScope = scopeLabelReplacementPredecessors({ providerOrderId: evidence.label.provider_order_id,
-      sourceItemIds: evidence.lifecycle.projection.authoritativeContents!.map(item => item.wmsShipmentItemId), previous: scopeInput });
-    if (competingScope.outcome === "review") return defer("review", competingScope.reason);
-    if (competingScope.physicalItemIds.some(id => priorIds.has(id))) return defer("review", "multiple_active_replacement_candidates");
   }
   const priorPackageIds = [...new Set(prior.map(item => Number(item.physical_shipment_id)))];
   const allPriorItems = rows<{ id: string }>(await tx.execute(sql`SELECT id FROM wms.effective_physical_shipment_items
@@ -197,36 +234,53 @@ export async function reconcileEbayLabelReplacement(
     if (corrections.length === 0) return defer('review', 'shopify_predecessor_command_missing');
     if (corrections.some(work => work.state !== 'complete')) return defer('waiting', 'shopify_predecessor_void_pending');
   }
-  const payload = events[0].sanitized_payload;
-  const carrier = typeof payload.carrierCode === "string" ? payload.carrierCode.trim() : "";
-  if (!carrier || !label.tracking_number || (!label.provider_order_id && !label.provider_order_key)) return defer("review", "replacement_provider_identity_missing");
+  if (targets.some(target => typeof target.events[0]?.sanitized_payload.carrierCode !== 'string'
+    || !(target.events[0].sanitized_payload.carrierCode as string).trim() || !target.label.tracking_number
+    || (!target.label.provider_order_id && !target.label.provider_order_key))) return defer('review', 'replacement_provider_identity_missing');
   await defer("waiting", "materializing_replacement");
-  const operationHash = createHash("sha256").update(`shipstation-label-replacement:${labelId}`).digest("hex");
+  const operationHash = createHash("sha256").update(`shipstation-label-repack:${decision.labelIds.join(',')}:${decision.physicalItemIds.join(',')}`).digest("hex");
   const operationId = `${operationHash.slice(0, 8)}-${operationHash.slice(8, 12)}-${operationHash.slice(12, 16)}-${operationHash.slice(16, 20)}-${operationHash.slice(20, 32)}`;
   for (const previous of prior) {
     await tx.execute(sql`INSERT INTO wms.physical_shipment_item_quantity_adjustments
       (physical_shipment_item_id, quantity_delta, adjustment_kind, repair_run_id, idempotency_key, operator, reason, metadata, created_at)
       VALUES (${Number(previous.id)}, ${-Number(previous.quantity_shipped)}, 'provider_label_replacement', ${operationId}::uuid,
-        ${`label-replacement:${labelId}:${previous.id}`}, 'system:shipstation_label_replacement',
-        'Transfer unchanged commercial quantity from a voided label to its exact replacement',
-        ${JSON.stringify({ matchingContract: "package-lineage-v1", replacementLabelId: labelId,
+        ${`label-repack:${operationId}:${previous.id}`}, 'system:shipstation_label_replacement',
+        'Transfer conserved source quantity across a complete void/relabel package plan',
+        ${JSON.stringify({ matchingContract: targets.length === 1 && priorPackageIds.length === 1 ? "package-lineage-v1" : "package-repack-v1",
+          replacementBatchId: operationId, replacementLabelIds: decision.labelIds, replacementLabelId: labelId,
           previousLabelId: Number(previous.label_id), previousPhysicalShipmentId: Number(previous.physical_shipment_id),
-          previousProviderOrderId: previous.provider_order_id, replacementProviderOrderId: label.provider_order_id,
+          previousProviderOrderId: previous.provider_order_id, replacementProviderOrderId: targets.length === 1 ? label.provider_order_id : null,
+          replacementProviderOrderIds: targets.map(target => ({ labelId: Number(target.label.id), providerOrderId: target.label.provider_order_id })),
           sourceItemId: previous.source_id, previousTrackingNumber: previous.tracking_number })}::jsonb, ${now})`);
   }
   await tx.execute(sql`UPDATE oms.channel_fulfillment_pushes SET push_status = 'review',
     last_error_code = 'PACKAGE_LABEL_SUPERSEDED', last_error = 'A verified void/relabel transition superseded this pending package', updated_at = ${now}
     WHERE physical_shipment_id IN (${sql.join(priorPackageIds.map(id => sql`${id}`), sql`, `)}) AND push_status IN ('pending', 'retry')`);
-  const materialized = await materialize({
-    legacyWmsShipmentIds: [...new Set(sources.map(item => item.shipment_id))], shippingProvider: "shipstation",
-    providerPhysicalShipmentId: label.provider_label_id, providerOrderId: label.provider_order_id,
-    providerOrderKey: label.provider_order_key, trackingNumber: label.tracking_number, carrier,
-    shippedAt: new Date(events[0].received_at), source: "shipstation_label_replacement", legacyHeaderPolicy: "aggregate_projection",
-    correlationId: `shipping-provider-label:${labelId}`,
-  }, { labelId, sourceItemIds: sourceIds, sourceItems: contents, ...(shopifyPackageScope ? { shopifyPackageScope: true as const } : {}) });
-  await tx.execute(sql`UPDATE wms.ebay_label_replacement_work SET state = 'applied', reason = NULL,
-    physical_shipment_id = ${materialized.physicalShipmentId}, updated_at = ${now} WHERE shipping_provider_label_id = ${labelId}`);
-  return { outcome: "applied", materialized };
+  let requested: MaterializePhysicalPackageResult | undefined;
+  for (const target of targets) {
+    const id = Number(target.label.id);
+    const items = target.lifecycle.projection.authoritativeContents!.map(item => ({ sourceShipmentItemId: item.wmsShipmentItemId, quantity: item.quantity }));
+    const ids = items.map(item => item.sourceShipmentItemId);
+    await tx.execute(sql`INSERT INTO wms.ebay_label_replacement_work
+      (shipping_provider_label_id, state, reason, source_item_ids, created_at, updated_at, replacement_batch_id)
+      VALUES (${id}, 'waiting', 'materializing_replacement', ${sqlIntegerArray(ids)}, ${now}, ${now}, ${operationId}::uuid)
+      ON CONFLICT (shipping_provider_label_id) DO UPDATE SET source_item_ids = EXCLUDED.source_item_ids,
+        replacement_batch_id = EXCLUDED.replacement_batch_id, updated_at = EXCLUDED.updated_at
+      WHERE ebay_label_replacement_work.state <> 'applied'`);
+    const materialized = await materialize({
+      legacyWmsShipmentIds: [...new Set(targetSources.filter(source => ids.includes(source.id)).map(source => source.shipment_id))], shippingProvider: 'shipstation',
+      providerPhysicalShipmentId: target.label.provider_label_id, providerOrderId: target.label.provider_order_id,
+      providerOrderKey: target.label.provider_order_key, trackingNumber: target.label.tracking_number,
+      carrier: (target.events[0].sanitized_payload.carrierCode as string).trim(),
+      shippedAt: new Date(target.events[0].received_at), source: 'shipstation_label_replacement', legacyHeaderPolicy: 'aggregate_projection',
+      correlationId: `shipping-provider-label:${id}`,
+    }, { labelId: id, sourceItemIds: ids, sourceItems: items, packageScope: true });
+    await tx.execute(sql`UPDATE wms.ebay_label_replacement_work SET state = 'applied', reason = NULL,
+      physical_shipment_id = ${materialized.physicalShipmentId}, updated_at = ${now} WHERE shipping_provider_label_id = ${id}`);
+    if (id === labelId) requested = materialized;
+  }
+  if (!requested) throw new Error('Repack plan omitted the requested label');
+  return { outcome: 'applied', materialized: requested };
 }
 
 export async function readLabelReplacementMaterialization(tx: Transaction, physicalShipmentId: number): Promise<MaterializePhysicalPackageResult> {
