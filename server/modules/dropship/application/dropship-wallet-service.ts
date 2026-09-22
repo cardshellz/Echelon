@@ -29,7 +29,11 @@ import {
   type DropshipAdvanceContext,
   type DropshipAdvanceStanding,
 } from "../domain/acceptance-funding";
-import { fundingMethodFinancialConnectionsAccountId } from "../domain/funding-method";
+import {
+  fundingMethodFinancialConnectionsAccountId,
+  fundingMethodProviderDetachOutcome,
+  type FundingMethodDetachOutcome,
+} from "../domain/funding-method";
 import {
   resolveDropshipWalletPolicyLimitsFromEnv,
   type DropshipWalletPolicyLimits,
@@ -303,6 +307,10 @@ export const recordDropshipWalletDisputeOutcomeInputSchema = z.object({
   status: dropshipDisputeStatusSchema,
   /** True when the funds came back to us: the dispute was won. */
   fundsReinstated: z.boolean(),
+}).strict();
+
+export const removeDropshipFundingMethodForMemberInputSchema = z.object({
+  fundingMethodId: positiveIdSchema,
 }).strict();
 
 export const registerDropshipFundingMethodInputSchema = z.object({
@@ -710,6 +718,37 @@ export interface DropshipFundingMethodMutationResult {
   idempotentReplay: boolean;
 }
 
+/** How the provider-side detach ended; see `FUNDING_METHOD_DETACH_OUTCOMES` in the domain. */
+export type DropshipFundingMethodDetachOutcome = FundingMethodDetachOutcome;
+
+export interface DropshipFundingMethodRemovalResult {
+  fundingMethod: DropshipFundingMethodRecord;
+  idempotentReplay: boolean;
+  providerDetach: DropshipFundingMethodDetachOutcome;
+}
+
+export interface ArchiveDropshipFundingMethodRepositoryInput {
+  vendorId: number;
+  fundingMethodId: number;
+  /** The signed-in member who asked; recorded as the audit row's actor. */
+  actorMemberId: string;
+  archivedAt: Date;
+}
+
+export interface RecordDropshipFundingMethodDetachOutcomeRepositoryInput {
+  vendorId: number;
+  fundingMethodId: number;
+  outcome: DropshipFundingMethodDetachOutcome;
+  /** The structured error code when the detach did not complete; null otherwise. */
+  errorCode: string | null;
+  recordedAt: Date;
+}
+
+/** The provider's answer to a detach request that completed. Failures throw a classified DropshipError. */
+export interface DropshipProviderDetachResult {
+  outcome: "detached" | "already_detached";
+}
+
 export interface DropshipStripeFundingSetupSession {
   checkoutUrl: string;
   providerSessionId: string;
@@ -788,6 +827,14 @@ export interface DropshipStripeRailAvailability {
 export interface DropshipWalletFundingProvider {
   /** Read-only: which rails the Stripe account can actually run. */
   readRailAvailability(): Promise<DropshipStripeRailAvailability>;
+  /**
+   * Detach a saved payment method from its customer at the provider, so it
+   * cannot be charged from the provider's side either. `already_detached`
+   * when the provider no longer has it. Any other failure throws a
+   * classified DropshipError; the caller decides what the archived method
+   * reports.
+   */
+  detachPaymentMethod(input: { providerPaymentMethodId: string }): Promise<DropshipProviderDetachResult>;
   createStripeSetupSession(input: {
     vendorId: number;
     memberId: string;
@@ -905,6 +952,17 @@ export interface DropshipWalletRepository {
    */
   failPendingFunding(input: FailDropshipPendingFundingRepositoryInput): Promise<DropshipWalletFundingFailureRepositoryResult | null>;
   upsertFundingMethod(input: UpsertDropshipFundingMethodRepositoryInput): Promise<DropshipFundingMethodMutationResult>;
+  /**
+   * Archive a funding method the vendor is removing: one transaction under
+   * the method's row lock, applying `decideFundingMethodRemoval` to facts
+   * read in that same transaction. A refusal throws its DropshipError; a
+   * method already archived is a replay and changes nothing.
+   */
+  archiveFundingMethod(input: ArchiveDropshipFundingMethodRepositoryInput): Promise<DropshipFundingMethodMutationResult>;
+  /** Record how the provider-side detach of an archived method ended, with its audit row. */
+  recordFundingMethodDetachOutcome(
+    input: RecordDropshipFundingMethodDetachOutcomeRepositoryInput,
+  ): Promise<DropshipFundingMethodRecord>;
   creditConfirmedUsdcFunding(input: CreateDropshipConfirmedUsdcFundingRepositoryInput): Promise<DropshipConfirmedUsdcFundingResult>;
   /** The facts the pending-ACH advance is decided from, read in one transaction; null when the policy is unreadable. */
   readAdvanceContext(input: { vendorId: number; now: Date }): Promise<DropshipAdvanceContext | null>;
@@ -2119,6 +2177,135 @@ export class DropshipWalletService {
   }
 
   /**
+   * Remove a saved funding method for the signed-in member (wallet "Saved
+   * methods"). The method is archived in our ledger first — every charge path
+   * requires `active`, so that alone stops the money — and only then detached
+   * at the provider. A detach that does not complete never un-archives
+   * anything: its outcome is recorded on the method and reported, so the
+   * vendor's screen and the audit trail both say the provider side is still
+   * owed. Replaying the request returns the stored state and detaches nothing
+   * twice.
+   */
+  async removeFundingMethodForMember(
+    memberId: string,
+    input: unknown,
+  ): Promise<DropshipFundingMethodRemovalResult> {
+    const parsed = parseWalletInput(removeDropshipFundingMethodForMemberInputSchema, input);
+    const provisioned = await this.provisionVendor(memberId);
+    const vendorId = provisioned.vendor.vendorId;
+    const archived = await this.deps.repository.archiveFundingMethod({
+      vendorId,
+      fundingMethodId: parsed.fundingMethodId,
+      actorMemberId: memberId,
+      archivedAt: this.deps.clock.now(),
+    });
+    if (archived.idempotentReplay) {
+      return {
+        fundingMethod: archived.fundingMethod,
+        idempotentReplay: true,
+        providerDetach: detachOutcomeOnReplay(archived.fundingMethod),
+      };
+    }
+    this.deps.logger.info({
+      code: "DROPSHIP_FUNDING_METHOD_ARCHIVED",
+      message: "Dropship funding method was removed from the wallet; nothing charges it from here on.",
+      context: {
+        vendorId,
+        fundingMethodId: archived.fundingMethod.fundingMethodId,
+        rail: archived.fundingMethod.rail,
+        memberId,
+      },
+    });
+    const detach = await this.detachArchivedMethodAtProvider(archived.fundingMethod);
+    const fundingMethod = await this.recordDetachOutcome(archived.fundingMethod, detach);
+    return { fundingMethod, idempotentReplay: false, providerDetach: detach.outcome };
+  }
+
+  /**
+   * The provider-side half of a removal. Only Stripe rails have something to
+   * detach; a failure is classified into what the archived method reports:
+   * `pending` when the provider could not be reached (the detach is owed) and
+   * `requires_review` when it refused (a human reconciles Stripe's side).
+   */
+  private async detachArchivedMethodAtProvider(
+    method: DropshipFundingMethodRecord,
+  ): Promise<{ outcome: DropshipFundingMethodDetachOutcome; errorCode: string | null }> {
+    const context = { vendorId: method.vendorId, fundingMethodId: method.fundingMethodId, rail: method.rail };
+    if (!isStripeRail(method.rail) || method.providerPaymentMethodId === null) {
+      return { outcome: "not_applicable", errorCode: null };
+    }
+    const provider = this.deps.fundingProvider;
+    if (!provider) {
+      this.deps.logger.warn({
+        code: "DROPSHIP_FUNDING_METHOD_DETACH_DEFERRED",
+        message: "No funding provider is configured; the provider-side removal of the method is still owed.",
+        context,
+      });
+      return { outcome: "pending", errorCode: "DROPSHIP_FUNDING_PROVIDER_NOT_CONFIGURED" };
+    }
+    try {
+      const result = await provider.detachPaymentMethod({ providerPaymentMethodId: method.providerPaymentMethodId });
+      this.deps.logger.info({
+        code: "DROPSHIP_FUNDING_METHOD_DETACHED",
+        message: "The removed funding method was detached at the provider.",
+        context: { ...context, outcome: result.outcome },
+      });
+      return { outcome: result.outcome, errorCode: null };
+    } catch (error) {
+      const classification = error instanceof DropshipError ? error.context?.classification : undefined;
+      const outcome: DropshipFundingMethodDetachOutcome = classification === "transient" ? "pending" : "requires_review";
+      const errorCode = error instanceof DropshipError
+        ? error.code
+        : error instanceof Error ? error.name : "unknown_error";
+      const event = {
+        code: "DROPSHIP_FUNDING_METHOD_DETACH_FAILED",
+        message: outcome === "pending"
+          ? "The provider could not be reached to detach a removed funding method; the method stays archived and the detach is owed."
+          : "The provider refused to detach a removed funding method; the method stays archived and the provider side needs review.",
+        context: { ...context, outcome, errorCode, classification: classification ?? null },
+      };
+      if (outcome === "pending") {
+        this.deps.logger.warn(event);
+      } else {
+        this.deps.logger.error(event);
+      }
+      return { outcome, errorCode };
+    }
+  }
+
+  private async recordDetachOutcome(
+    method: DropshipFundingMethodRecord,
+    detach: { outcome: DropshipFundingMethodDetachOutcome; errorCode: string | null },
+  ): Promise<DropshipFundingMethodRecord> {
+    try {
+      return await this.deps.repository.recordFundingMethodDetachOutcome({
+        vendorId: method.vendorId,
+        fundingMethodId: method.fundingMethodId,
+        outcome: detach.outcome,
+        errorCode: detach.errorCode,
+        recordedAt: this.deps.clock.now(),
+      });
+    } catch (error) {
+      // Deliberate: the removal is committed and nothing charges the method any
+      // more. Losing the bookkeeping of the provider outcome must not undo that
+      // or make the vendor retry, so it is an ERROR line for an operator rather
+      // than a failed request. The response still carries the outcome computed
+      // above.
+      this.deps.logger.error({
+        code: "DROPSHIP_FUNDING_METHOD_DETACH_RECORD_FAILED",
+        message: "The provider detach outcome of a removed funding method could not be recorded.",
+        context: {
+          vendorId: method.vendorId,
+          fundingMethodId: method.fundingMethodId,
+          outcome: detach.outcome,
+          error: error instanceof Error ? error.message : String(error),
+        },
+      });
+      return method;
+    }
+  }
+
+  /**
    * The wallet policy limits in force. The injected resolver reads the active
    * policy row; with no resolver wired the documented environment fallback is
    * used, which is what every caller got before the policy table existed.
@@ -2355,6 +2542,21 @@ function isChargeableCard(method: DropshipFundingMethodRecord): boolean {
     && method.status === "active"
     && method.providerCustomerId !== null
     && method.providerPaymentMethodId !== null;
+}
+
+/**
+ * What a replayed removal reports for the provider side: the stored outcome
+ * when one was recorded; otherwise a Stripe method is still owed its detach
+ * and any other rail never had one.
+ */
+function detachOutcomeOnReplay(method: DropshipFundingMethodRecord): DropshipFundingMethodDetachOutcome {
+  const stored = fundingMethodProviderDetachOutcome(method.metadata);
+  if (stored) return stored;
+  return isStripeRail(method.rail) && method.providerPaymentMethodId !== null ? "pending" : "not_applicable";
+}
+
+function isStripeRail(rail: string): boolean {
+  return rail === "stripe_card" || rail === "stripe_ach";
 }
 
 /**

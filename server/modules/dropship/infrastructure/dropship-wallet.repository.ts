@@ -2,13 +2,20 @@ import type { Pool, PoolClient } from "pg";
 import type { DropshipVendorStatus } from "../../../../shared/schema/dropship.schema";
 import { pool as defaultPool } from "../../../db";
 import { DropshipError } from "../domain/errors";
-import { FUNDING_METHOD_FINANCIAL_CONNECTIONS_ACCOUNT_KEY } from "../domain/funding-method";
+import {
+  FUNDING_METHOD_ARCHIVED_AT_KEY,
+  FUNDING_METHOD_ARCHIVED_BY_MEMBER_KEY,
+  FUNDING_METHOD_FINANCIAL_CONNECTIONS_ACCOUNT_KEY,
+  FUNDING_METHOD_PROVIDER_DETACH_KEY,
+} from "../domain/funding-method";
+import { decideFundingMethodRemoval } from "../domain/funding-method-removal";
 import type { DropshipAdvanceContext } from "../domain/acceptance-funding";
 import { decideFundingReversal } from "../domain/funding-reversal";
 import { pauseDropshipVendorWithClient } from "./dropship-vendor-standing.repository";
 import { usdcTransactionReferenceId } from "../application/dropship-wallet-service";
 import { loadAdvancePolicyWithClient, loadAdvanceSourcesWithClient } from "./dropship-advance.reader";
 import type {
+  ArchiveDropshipFundingMethodRepositoryInput,
   ConfigureDropshipAutoReloadRepositoryInput,
   CreateDropshipConfirmedUsdcFundingRepositoryInput,
   CreateDropshipWalletFundingLedgerInput,
@@ -29,6 +36,7 @@ import type {
   DropshipWalletRepository,
   FailDropshipPendingFundingRepositoryInput,
   RecordDropshipBankBalanceVerificationRepositoryInput,
+  RecordDropshipFundingMethodDetachOutcomeRepositoryInput,
   ReinstateDropshipReversedFundingRepositoryInput,
   ReverseDropshipSettledFundingRepositoryInput,
   UpsertDropshipFundingMethodRepositoryInput,
@@ -1631,11 +1639,144 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository, Dro
     }
   }
 
+  async archiveFundingMethod(
+    input: ArchiveDropshipFundingMethodRepositoryInput,
+  ): Promise<DropshipFundingMethodMutationResult> {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      // The row lock holds every fact below still while the decision is applied:
+      // a concurrent autopay change or a top-up landing on this method waits.
+      const row = await selectFundingMethodForUpdateWithClient(client, input);
+      const autoReload = await getAutoReloadSettingWithClient(client, input.vendorId);
+      const decision = decideFundingMethodRemoval({
+        method: {
+          fundingMethodId: row.id,
+          rail: row.rail,
+          status: row.status,
+          providerCustomerId: row.provider_customer_id,
+          providerPaymentMethodId: row.provider_payment_method_id,
+        },
+        autoReload: autoReload ? { enabled: autoReload.enabled, fundingMethodId: autoReload.fundingMethodId } : null,
+        pendingFundingCount: await countPendingFundingOnMethodWithClient(client, input),
+        otherChargeableCardCount: await countOtherChargeableCardsWithClient(client, input),
+        vendorStatus: await getVendorLifecycleStatusWithClient(client, input.vendorId),
+      });
+      if (decision.outcome === "refuse") {
+        throw new DropshipError(decision.code, decision.message, { vendorId: input.vendorId, ...decision.context });
+      }
+      if (decision.outcome === "replay") {
+        await client.query("COMMIT");
+        return { fundingMethod: mapFundingMethodRow(row), idempotentReplay: true };
+      }
+      const updated = await client.query<FundingMethodRow>(
+        `UPDATE dropship.dropship_funding_methods
+         SET status = 'archived',
+             is_default = false,
+             metadata = COALESCE(metadata, '{}'::jsonb) || $3::jsonb,
+             updated_at = $4
+         WHERE id = $1
+           AND vendor_id = $2
+           AND status <> 'archived'
+         RETURNING id, vendor_id, rail, status, provider_customer_id,
+                   provider_payment_method_id, usdc_wallet_address, display_label,
+                   is_default, metadata, created_at, updated_at`,
+        [
+          input.fundingMethodId,
+          input.vendorId,
+          JSON.stringify({
+            [FUNDING_METHOD_ARCHIVED_AT_KEY]: input.archivedAt.toISOString(),
+            [FUNDING_METHOD_ARCHIVED_BY_MEMBER_KEY]: input.actorMemberId,
+          }),
+          input.archivedAt,
+        ],
+      );
+      const fundingMethod = mapFundingMethodRow(requiredRow(
+        updated.rows[0],
+        "Dropship funding method archive did not return a row.",
+      ));
+      await recordWalletAuditEvent(client, {
+        vendorId: input.vendorId,
+        entityType: "dropship_funding_methods",
+        entityId: String(fundingMethod.fundingMethodId),
+        eventType: "funding_method_archived",
+        actor: { type: "member", id: input.actorMemberId },
+        payload: {
+          rail: row.rail,
+          previousStatus: row.status,
+          wasDefault: row.is_default,
+          providerPaymentMethodId: row.provider_payment_method_id,
+        },
+        createdAt: input.archivedAt,
+      });
+      await client.query("COMMIT");
+      return { fundingMethod, idempotentReplay: false };
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async recordFundingMethodDetachOutcome(
+    input: RecordDropshipFundingMethodDetachOutcomeRepositoryInput,
+  ): Promise<DropshipFundingMethodRecord> {
+    const client = await this.dbPool.connect();
+    try {
+      await client.query("BEGIN");
+      const result = await client.query<FundingMethodRow>(
+        `UPDATE dropship.dropship_funding_methods
+         SET metadata = COALESCE(metadata, '{}'::jsonb) || $3::jsonb,
+             updated_at = $4
+         WHERE id = $1
+           AND vendor_id = $2
+           AND status = 'archived'
+         RETURNING id, vendor_id, rail, status, provider_customer_id,
+                   provider_payment_method_id, usdc_wallet_address, display_label,
+                   is_default, metadata, created_at, updated_at`,
+        [
+          input.fundingMethodId,
+          input.vendorId,
+          JSON.stringify({
+            [FUNDING_METHOD_PROVIDER_DETACH_KEY]: {
+              outcome: input.outcome,
+              errorCode: input.errorCode,
+              recordedAt: input.recordedAt.toISOString(),
+            },
+          }),
+          input.recordedAt,
+        ],
+      );
+      const row = result.rows[0];
+      if (!row) {
+        throw new DropshipError(
+          "DROPSHIP_FUNDING_METHOD_NOT_ARCHIVED",
+          "Dropship funding method is not archived, so no provider detach outcome can be recorded on it.",
+          { vendorId: input.vendorId, fundingMethodId: input.fundingMethodId, classification: "permanent" },
+        );
+      }
+      const fundingMethod = mapFundingMethodRow(row);
+      await recordWalletAuditEvent(client, {
+        vendorId: input.vendorId,
+        entityType: "dropship_funding_methods",
+        entityId: String(fundingMethod.fundingMethodId),
+        eventType: "funding_method_provider_detach_recorded",
+        payload: { outcome: input.outcome, errorCode: input.errorCode },
+        createdAt: input.recordedAt,
+      });
+      await client.query("COMMIT");
+      return fundingMethod;
+    } catch (error) {
+      await rollbackQuietly(client);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async getVendorLifecycleStatus(vendorId: number): Promise<DropshipVendorStatus | null> {
-    const result = await this.dbPool.query<{ status: DropshipVendorStatus }>(
-      `SELECT status FROM dropship.dropship_vendors WHERE id = $1`,
-      [vendorId],
-    );
+    const result = await this.dbPool.query<{ status: DropshipVendorStatus }>(VENDOR_LIFECYCLE_STATUS_SQL, [vendorId]);
     return result.rows[0]?.status ?? null;
   }
 
@@ -2486,14 +2627,24 @@ async function updateWalletBalancesWithClient(
   ));
 }
 
-async function assertFundingMethodCanBeUsed(
+const VENDOR_LIFECYCLE_STATUS_SQL = `SELECT status FROM dropship.dropship_vendors WHERE id = $1`;
+
+async function getVendorLifecycleStatusWithClient(
+  client: PoolClient,
+  vendorId: number,
+): Promise<DropshipVendorStatus | null> {
+  const result = await client.query<{ status: DropshipVendorStatus }>(VENDOR_LIFECYCLE_STATUS_SQL, [vendorId]);
+  return result.rows[0]?.status ?? null;
+}
+
+/** The vendor's funding method, locked for the rest of the transaction; absent is a not-found error. */
+async function selectFundingMethodForUpdateWithClient(
   client: PoolClient,
   input: {
     vendorId: number;
-    fundingMethodId: number | null;
+    fundingMethodId: number;
   },
-): Promise<FundingMethodRow | null> {
-  if (!input.fundingMethodId) return null;
+): Promise<FundingMethodRow> {
   const result = await client.query<FundingMethodRow>(
     `SELECT id, vendor_id, rail, status, provider_customer_id,
             provider_payment_method_id, usdc_wallet_address, display_label,
@@ -2513,6 +2664,56 @@ async function assertFundingMethodCanBeUsed(
       { vendorId: input.vendorId, fundingMethodId: input.fundingMethodId },
     );
   }
+  return method;
+}
+
+/** Ledger entries still pending on the method: a bank debit that has neither landed nor failed. */
+async function countPendingFundingOnMethodWithClient(
+  client: PoolClient,
+  input: { vendorId: number; fundingMethodId: number },
+): Promise<number> {
+  const result = await client.query<{ count: number }>(
+    `SELECT COUNT(*)::int AS count
+     FROM dropship.dropship_wallet_ledger
+     WHERE vendor_id = $1
+       AND funding_method_id = $2
+       AND status = 'pending'`,
+    [input.vendorId, input.fundingMethodId],
+  );
+  return result.rows[0]?.count ?? 0;
+}
+
+/** Other cards of the vendor a held order could be charged to (the wallet service's `isChargeableCard`). */
+async function countOtherChargeableCardsWithClient(
+  client: PoolClient,
+  input: { vendorId: number; fundingMethodId: number },
+): Promise<number> {
+  const result = await client.query<{ count: number }>(
+    `SELECT COUNT(*)::int AS count
+     FROM dropship.dropship_funding_methods
+     WHERE vendor_id = $1
+       AND id <> $2
+       AND rail = 'stripe_card'
+       AND status = 'active'
+       AND provider_customer_id IS NOT NULL
+       AND provider_payment_method_id IS NOT NULL`,
+    [input.vendorId, input.fundingMethodId],
+  );
+  return result.rows[0]?.count ?? 0;
+}
+
+async function assertFundingMethodCanBeUsed(
+  client: PoolClient,
+  input: {
+    vendorId: number;
+    fundingMethodId: number | null;
+  },
+): Promise<FundingMethodRow | null> {
+  if (!input.fundingMethodId) return null;
+  const method = await selectFundingMethodForUpdateWithClient(client, {
+    vendorId: input.vendorId,
+    fundingMethodId: input.fundingMethodId,
+  });
   if (method.status !== "active") {
     throw new DropshipError(
       "DROPSHIP_FUNDING_METHOD_NOT_ACTIVE",
@@ -2839,6 +3040,8 @@ async function recordWalletAuditEvent(
     eventType: string;
     payload: Record<string, unknown>;
     createdAt: Date;
+    /** Who acted; the system when absent (a webhook, a worker, a reconciler). */
+    actor?: { type: string; id: string | null };
   },
 ): Promise<void> {
   await client.query(
@@ -2846,7 +3049,7 @@ async function recordWalletAuditEvent(
       (vendor_id, entity_type, entity_id, event_type,
        actor_type, actor_id, severity, payload, created_at)
      VALUES ($1, $2, $3, $4,
-             'system', NULL, 'info', $5::jsonb, $6)`,
+             $7, $8, 'info', $5::jsonb, $6)`,
     [
       input.vendorId,
       input.entityType,
@@ -2854,6 +3057,8 @@ async function recordWalletAuditEvent(
       input.eventType,
       JSON.stringify(input.payload),
       input.createdAt,
+      input.actor?.type ?? "system",
+      input.actor?.id ?? null,
     ],
   );
 }

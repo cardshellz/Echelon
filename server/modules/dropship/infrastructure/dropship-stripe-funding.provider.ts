@@ -17,6 +17,7 @@ import {
 import type {
   CreditDropshipWalletFundingInput,
   DropshipBankBalanceSnapshot,
+  DropshipProviderDetachResult,
   DropshipStripeAutoReloadPaymentIntent,
   DropshipStripeFundingSetupRail,
   DropshipStripeRailAvailability,
@@ -127,6 +128,28 @@ export class StripeDropshipFundingProvider implements DropshipWalletFundingProvi
       achPayments: account.capabilities?.us_bank_account_ach_payments ?? null,
       reason: null,
     };
+  }
+
+  /**
+   * Detach a saved payment method from its Stripe customer. Called only after
+   * the method is archived in our ledger: the ledger is what stops charges,
+   * Stripe's side is hygiene. A payment method Stripe no longer has
+   * (`resource_missing`) counts as already detached; every other refusal is
+   * thrown classified for the caller to record against the archived method.
+   */
+  async detachPaymentMethod(input: { providerPaymentMethodId: string }): Promise<DropshipProviderDetachResult> {
+    try {
+      await this.callStripe(
+        "paymentMethods.detach",
+        () => this.getStripe().paymentMethods.detach(input.providerPaymentMethodId),
+      );
+      return { outcome: "detached" };
+    } catch (error) {
+      if (error instanceof DropshipError && error.context?.stripeCode === "resource_missing") {
+        return { outcome: "already_detached" };
+      }
+      throw error;
+    }
   }
 
   async createStripeSetupSession(input: {

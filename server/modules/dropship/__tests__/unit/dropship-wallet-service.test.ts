@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type { DropshipVendorStandingReason, DropshipVendorStatus } from "../../../../../shared/schema/dropship.schema";
 import { DropshipError } from "../../domain/errors";
 import { decideFundingReversal } from "../../domain/funding-reversal";
+import { decideFundingMethodRemoval } from "../../domain/funding-method-removal";
 import type { DropshipAdvanceContext } from "../../domain/acceptance-funding";
 import type {
   DropshipWalletPolicyLimits,
@@ -52,6 +53,9 @@ import {
   type ReinstateDropshipReversedFundingRepositoryInput,
   type ReverseDropshipSettledFundingRepositoryInput,
   type UpsertDropshipFundingMethodRepositoryInput,
+  ArchiveDropshipFundingMethodRepositoryInput,
+  DropshipProviderDetachResult,
+  RecordDropshipFundingMethodDetachOutcomeRepositoryInput,
 } from "../../application/dropship-wallet-service";
 
 const now = new Date("2026-05-01T20:00:00.000Z");
@@ -1655,6 +1659,11 @@ class FakeFundingProvider implements DropshipWalletFundingProvider {
   /** What a bank balance read reports; USD by default so the wallet's currency resolves. */
   bankBalanceSnapshot: DropshipBankBalanceSnapshot = { status: "succeeded", availableByCurrency: { usd: 123_456 }, asOf: now };
   bankBalanceReads: string[] = [];
+  /** Every payment method the service asked to detach, in order. */
+  detachInputs: string[] = [];
+  detachOutcome: DropshipProviderDetachResult["outcome"] = "detached";
+  /** When set, the detach throws this instead of answering. */
+  detachError: unknown = null;
   fundingSessionInputs: Array<Parameters<DropshipWalletFundingProvider["createStripeWalletFundingSession"]>[0]> = [];
   paymentIntentInputs: Array<Parameters<DropshipWalletFundingProvider["createStripeAutoReloadPaymentIntent"]>[0]> = [];
   /** When set, the fake reports this charged amount instead of what it was asked for. */
@@ -1708,6 +1717,12 @@ class FakeFundingProvider implements DropshipWalletFundingProvider {
   async readBankBalance(input: { providerAccountId: string; now: Date }): Promise<DropshipBankBalanceSnapshot> {
     this.bankBalanceReads.push(input.providerAccountId);
     return this.bankBalanceSnapshot;
+  }
+
+  async detachPaymentMethod(input: { providerPaymentMethodId: string }): Promise<DropshipProviderDetachResult> {
+    this.detachInputs.push(input.providerPaymentMethodId);
+    if (this.detachError) throw this.detachError;
+    return { outcome: this.detachOutcome };
   }
 }
 
@@ -1974,6 +1989,12 @@ class FakeWalletRepository implements DropshipWalletRepository {
   /** The advance facts the view composes from; null models an unreadable policy. */
   advanceContext: DropshipAdvanceContext | null = null;
   verifications: RecordDropshipBankBalanceVerificationRepositoryInput[] = [];
+  archiveInputs: ArchiveDropshipFundingMethodRepositoryInput[] = [];
+  detachOutcomeInputs: RecordDropshipFundingMethodDetachOutcomeRepositoryInput[] = [];
+  /** Methods with a top-up still pending, as the archive would count them in the ledger. */
+  pendingFundingMethodIds: number[] = [];
+  /** When true, recording the detach outcome fails like a lost database connection. */
+  failDetachOutcomeRecord = false;
 
   async getOrCreateWalletAccount(): Promise<DropshipWalletAccountRecord> {
     return this.account;
@@ -2369,6 +2390,75 @@ class FakeWalletRepository implements DropshipWalletRepository {
       (method.rail === "stripe_card" || method.rail === "stripe_ach")
       && method.providerCustomerId
     )?.providerCustomerId ?? null;
+  }
+
+  async archiveFundingMethod(
+    input: ArchiveDropshipFundingMethodRepositoryInput,
+  ): Promise<DropshipFundingMethodMutationResult> {
+    this.archiveInputs.push(input);
+    const method = this.fundingMethods.find((candidate) =>
+      candidate.vendorId === input.vendorId && candidate.fundingMethodId === input.fundingMethodId
+    );
+    if (!method) {
+      throw new DropshipError(
+        "DROPSHIP_FUNDING_METHOD_NOT_FOUND",
+        "Dropship funding method was not found.",
+        { vendorId: input.vendorId, fundingMethodId: input.fundingMethodId },
+      );
+    }
+    const decision = decideFundingMethodRemoval({
+      method,
+      autoReload: this.autoReload ? { enabled: this.autoReload.enabled, fundingMethodId: this.autoReload.fundingMethodId } : null,
+      pendingFundingCount: this.pendingFundingMethodIds.filter((id) => id === input.fundingMethodId).length,
+      otherChargeableCardCount: this.fundingMethods.filter((candidate) =>
+        candidate.fundingMethodId !== input.fundingMethodId
+        && candidate.rail === "stripe_card"
+        && candidate.status === "active"
+        && candidate.providerCustomerId !== null
+        && candidate.providerPaymentMethodId !== null
+      ).length,
+      vendorStatus: this.vendorStatus,
+    });
+    if (decision.outcome === "refuse") {
+      throw new DropshipError(decision.code, decision.message, { vendorId: input.vendorId, ...decision.context });
+    }
+    if (decision.outcome === "replay") {
+      return { fundingMethod: method, idempotentReplay: true };
+    }
+    const archived: DropshipFundingMethodRecord = {
+      ...method,
+      status: "archived",
+      isDefault: false,
+      metadata: { ...method.metadata, archivedAt: input.archivedAt.toISOString(), archivedByMemberId: input.actorMemberId },
+      updatedAt: input.archivedAt,
+    };
+    this.fundingMethods = this.fundingMethods.map((candidate) =>
+      candidate.fundingMethodId === archived.fundingMethodId ? archived : candidate
+    );
+    return { fundingMethod: archived, idempotentReplay: false };
+  }
+
+  async recordFundingMethodDetachOutcome(
+    input: RecordDropshipFundingMethodDetachOutcomeRepositoryInput,
+  ): Promise<DropshipFundingMethodRecord> {
+    this.detachOutcomeInputs.push(input);
+    if (this.failDetachOutcomeRecord) throw new Error("connection terminated unexpectedly");
+    const method = this.fundingMethods.find((candidate) => candidate.fundingMethodId === input.fundingMethodId);
+    if (!method || method.status !== "archived") {
+      throw new DropshipError("DROPSHIP_FUNDING_METHOD_NOT_ARCHIVED", "Not archived.", { fundingMethodId: input.fundingMethodId });
+    }
+    const updated: DropshipFundingMethodRecord = {
+      ...method,
+      metadata: {
+        ...method.metadata,
+        providerDetach: { outcome: input.outcome, errorCode: input.errorCode, recordedAt: input.recordedAt.toISOString() },
+      },
+      updatedAt: input.recordedAt,
+    };
+    this.fundingMethods = this.fundingMethods.map((candidate) =>
+      candidate.fundingMethodId === updated.fundingMethodId ? updated : candidate
+    );
+    return updated;
   }
 
   async upsertFundingMethod(
@@ -2855,5 +2945,184 @@ describe("DropshipWalletService funding reversals (funding design phase 4)", () 
     expect(repository.reverseInputs).toEqual([]);
     expect(repository.reinstateInputs).toEqual([]);
     expect(logs).toEqual([]);
+  });
+});
+
+describe("DropshipWalletService.removeFundingMethodForMember (funding method removal)", () => {
+  let repository: FakeWalletRepository;
+  let fundingProvider: FakeFundingProvider;
+  let logs: Array<DropshipLogEvent & { level: "info" | "warn" | "error" }>;
+  let service: DropshipWalletService;
+
+  function buildRemovalService(provider: FakeFundingProvider | undefined): DropshipWalletService {
+    return new DropshipWalletService({
+      vendorProvisioning: new FakeVendorProvisioningService() as unknown as DropshipVendorProvisioningService,
+      repository,
+      fundingProvider: provider,
+      notificationSender: new FakeNotificationSender(),
+      clock: { now: () => now },
+      logger: {
+        info: (event) => logs.push({ ...event, level: "info" }),
+        warn: (event) => logs.push({ ...event, level: "warn" }),
+        error: (event) => logs.push({ ...event, level: "error" }),
+      },
+      cardFundingFeeBps: 300,
+    });
+  }
+
+  beforeEach(() => {
+    repository = new FakeWalletRepository();
+    fundingProvider = new FakeFundingProvider();
+    logs = [];
+    service = buildRemovalService(fundingProvider);
+  });
+
+  const codesLogged = () => logs.map((entry) => `${entry.level}:${entry.code}`);
+
+  it("archives the bank account, detaches it at Stripe, and records the outcome on the method", async () => {
+    const result = await service.removeFundingMethodForMember("member-1", { fundingMethodId: 100 });
+
+    expect(result.idempotentReplay).toBe(false);
+    expect(result.providerDetach).toBe("detached");
+    expect(result.fundingMethod).toMatchObject({
+      fundingMethodId: 100,
+      status: "archived",
+      isDefault: false,
+      metadata: { archivedByMemberId: "member-1", archivedAt: now.toISOString(), providerDetach: { outcome: "detached", errorCode: null } },
+    });
+    expect(repository.archiveInputs).toEqual([{ vendorId: 10, fundingMethodId: 100, actorMemberId: "member-1", archivedAt: now }]);
+    expect(fundingProvider.detachInputs).toEqual(["pm_4242"]);
+    expect(repository.detachOutcomeInputs).toEqual([{ vendorId: 10, fundingMethodId: 100, outcome: "detached", errorCode: null, recordedAt: now }]);
+    expect(codesLogged()).toEqual(["info:DROPSHIP_FUNDING_METHOD_ARCHIVED", "info:DROPSHIP_FUNDING_METHOD_DETACHED"]);
+    // The other method is untouched: nothing is promoted or demoted on its behalf.
+    expect(repository.fundingMethods.find((method) => method.fundingMethodId === 99)).toMatchObject({ status: "active", isDefault: true });
+  });
+
+  it("replays a second removal from the stored state without detaching twice", async () => {
+    await service.removeFundingMethodForMember("member-1", { fundingMethodId: 100 });
+    logs = [];
+
+    const replay = await service.removeFundingMethodForMember("member-1", { fundingMethodId: 100 });
+
+    expect(replay).toMatchObject({ idempotentReplay: true, providerDetach: "detached", fundingMethod: { status: "archived" } });
+    expect(fundingProvider.detachInputs).toEqual(["pm_4242"]);
+    expect(repository.detachOutcomeInputs).toHaveLength(1);
+    expect(logs).toEqual([]);
+  });
+
+  it("reports the detach as owed when Stripe cannot be reached, and as needing review when Stripe refuses", async () => {
+    fundingProvider.detachError = new DropshipError("DROPSHIP_STRIPE_UNREACHABLE", "Stripe could not be reached.", { classification: "transient" });
+    const unreachable = await service.removeFundingMethodForMember("member-1", { fundingMethodId: 100 });
+    expect(unreachable.providerDetach).toBe("pending");
+    expect(unreachable.fundingMethod).toMatchObject({ status: "archived", metadata: { providerDetach: { outcome: "pending", errorCode: "DROPSHIP_STRIPE_UNREACHABLE" } } });
+    expect(codesLogged()).toEqual(["info:DROPSHIP_FUNDING_METHOD_ARCHIVED", "warn:DROPSHIP_FUNDING_METHOD_DETACH_FAILED"]);
+
+    repository = new FakeWalletRepository();
+    fundingProvider = new FakeFundingProvider();
+    fundingProvider.detachError = new DropshipError("DROPSHIP_STRIPE_REQUEST_REJECTED", "Stripe rejected the request.", { classification: "permanent" });
+    logs = [];
+    service = buildRemovalService(fundingProvider);
+    const refused = await service.removeFundingMethodForMember("member-1", { fundingMethodId: 100 });
+    expect(refused.providerDetach).toBe("requires_review");
+    expect(repository.detachOutcomeInputs[0]).toMatchObject({ outcome: "requires_review", errorCode: "DROPSHIP_STRIPE_REQUEST_REJECTED" });
+    expect(codesLogged()).toEqual(["info:DROPSHIP_FUNDING_METHOD_ARCHIVED", "error:DROPSHIP_FUNDING_METHOD_DETACH_FAILED"]);
+    // A replay reports what was stored, not a fresh attempt.
+    fundingProvider.detachError = null;
+    const replay = await service.removeFundingMethodForMember("member-1", { fundingMethodId: 100 });
+    expect(replay).toMatchObject({ idempotentReplay: true, providerDetach: "requires_review" });
+    expect(fundingProvider.detachInputs).toEqual(["pm_4242"]);
+  });
+
+  it("treats a payment method Stripe no longer has as removed, and a USDC address as having nothing to detach", async () => {
+    fundingProvider.detachOutcome = "already_detached";
+    expect((await service.removeFundingMethodForMember("member-1", { fundingMethodId: 100 })).providerDetach).toBe("already_detached");
+
+    repository.fundingMethods.push(makeFundingMethod({
+      fundingMethodId: 200,
+      rail: "usdc_base",
+      providerCustomerId: null,
+      providerPaymentMethodId: null,
+      usdcWalletAddress: "0x2222222222222222222222222222222222222222",
+      displayLabel: "USDC on Base",
+      isDefault: false,
+    }));
+    const usdc = await service.removeFundingMethodForMember("member-1", { fundingMethodId: 200 });
+    expect(usdc.providerDetach).toBe("not_applicable");
+    expect(fundingProvider.detachInputs).toEqual(["pm_4242"]);
+    expect(repository.detachOutcomeInputs.at(-1)).toMatchObject({ fundingMethodId: 200, outcome: "not_applicable", errorCode: null });
+  });
+
+  it("refuses the autopay source, a method with a top-up pending, and the last card of a live vendor, detaching nothing", async () => {
+    repository.autoReload = {
+      autoReloadSettingId: 1,
+      vendorId: 10,
+      fundingMethodId: 100,
+      enabled: true,
+      minimumBalanceCents: 25_000,
+      maxSingleReloadCents: null,
+      topUpAmountCents: null,
+      paymentHoldTimeoutMinutes: 1440,
+      createdAt: now,
+      updatedAt: now,
+    };
+    await expect(service.removeFundingMethodForMember("member-1", { fundingMethodId: 100 })).rejects.toMatchObject({
+      code: "DROPSHIP_FUNDING_METHOD_IS_AUTO_RELOAD_SOURCE",
+      context: { vendorId: 10, fundingMethodId: 100, classification: "permanent" },
+    });
+
+    repository.autoReload = null;
+    repository.pendingFundingMethodIds = [100];
+    await expect(service.removeFundingMethodForMember("member-1", { fundingMethodId: 100 })).rejects.toMatchObject({
+      code: "DROPSHIP_FUNDING_METHOD_HAS_PENDING_FUNDING",
+    });
+
+    repository.vendorStatus = "active";
+    await expect(service.removeFundingMethodForMember("member-1", { fundingMethodId: 99 })).rejects.toMatchObject({
+      code: "DROPSHIP_FUNDING_METHOD_IS_BACKUP_CARD",
+    });
+
+    expect(fundingProvider.detachInputs).toEqual([]);
+    expect(repository.detachOutcomeInputs).toEqual([]);
+    expect(logs).toEqual([]);
+    expect(repository.fundingMethods.every((method) => method.status === "active")).toBe(true);
+  });
+
+  it("lets the only card go while the vendor is still onboarding", async () => {
+    repository.vendorStatus = "onboarding";
+    const result = await service.removeFundingMethodForMember("member-1", { fundingMethodId: 99 });
+    expect(result).toMatchObject({ idempotentReplay: false, providerDetach: "detached", fundingMethod: { fundingMethodId: 99, status: "archived", isDefault: false } });
+  });
+
+  it("keeps the removal when the detach outcome cannot be recorded, and says so at error level", async () => {
+    repository.failDetachOutcomeRecord = true;
+
+    const result = await service.removeFundingMethodForMember("member-1", { fundingMethodId: 100 });
+
+    expect(result.providerDetach).toBe("detached");
+    expect(result.fundingMethod).toMatchObject({ status: "archived" });
+    expect(result.fundingMethod.metadata.providerDetach).toBeUndefined();
+    expect(codesLogged()).toEqual([
+      "info:DROPSHIP_FUNDING_METHOD_ARCHIVED",
+      "info:DROPSHIP_FUNDING_METHOD_DETACHED",
+      "error:DROPSHIP_FUNDING_METHOD_DETACH_RECORD_FAILED",
+    ]);
+  });
+
+  it("owes the detach when no funding provider is configured", async () => {
+    service = buildRemovalService(undefined);
+
+    const result = await service.removeFundingMethodForMember("member-1", { fundingMethodId: 100 });
+
+    expect(result.providerDetach).toBe("pending");
+    expect(repository.detachOutcomeInputs[0]).toMatchObject({ outcome: "pending", errorCode: "DROPSHIP_FUNDING_PROVIDER_NOT_CONFIGURED" });
+    expect(codesLogged()).toEqual(["info:DROPSHIP_FUNDING_METHOD_ARCHIVED", "warn:DROPSHIP_FUNDING_METHOD_DETACH_DEFERRED"]);
+  });
+
+  it("rejects an id that is not a positive whole number and a method that is not on the wallet", async () => {
+    await expect(service.removeFundingMethodForMember("member-1", { fundingMethodId: 0 })).rejects.toMatchObject({ code: "DROPSHIP_WALLET_INVALID_INPUT" });
+    await expect(service.removeFundingMethodForMember("member-1", { fundingMethodId: 1.5 })).rejects.toMatchObject({ code: "DROPSHIP_WALLET_INVALID_INPUT" });
+    await expect(service.removeFundingMethodForMember("member-1", { fundingMethodId: 4040 })).rejects.toMatchObject({ code: "DROPSHIP_FUNDING_METHOD_NOT_FOUND" });
+    expect(repository.archiveInputs).toHaveLength(1);
+    expect(fundingProvider.detachInputs).toEqual([]);
   });
 });
