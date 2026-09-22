@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { eq } from "drizzle-orm";
@@ -14,6 +15,8 @@ import { removeChannelProductIdentities, upsertChannelProductIdentity } from "..
 import { PostgresInventoryAvailabilityClaimRepository } from "../../../inventory-planning/infrastructure/inventory-availability-claim.repository";
 import { productMethods } from "../../catalog.storage";
 import { updateProductInventoryTracking } from "../../inventory-tracking-policy.repository";
+import { createBulkInventoryTrackingService } from "../../bulk-inventory-tracking.service";
+import type { FinancialCommandDescriptor } from "../../../../platform/commands/transactional-command.service";
 import { resolveOrderLineCatalogIdentity } from "../../../oms/order-line-catalog-identity.service";
 import { createOmsService } from "../../../oms/oms.service";
 import { normalizeShopifyLineItems } from "../../../oms/shopify-line-item-normalizer";
@@ -36,6 +39,9 @@ describeDatabase.sequential("product inventory policy migration and transactions
       INSERT INTO catalog.product_variants(id,product_id,name,track_inventory)
       VALUES(1,1,'Tracked',true),(2,1,'Untracked',false),(3,1,'Legacy null',null);`);
     await database.pool.query(migration);
+    for (const file of ["136_financial_command_results.sql", "140_financial_command_operations.sql"]) {
+      await database.pool.query(await readFile(resolve("migrations", file), "utf8"));
+    }
     expect((await database.pool.query("SELECT inventory_tracking_override FROM catalog.product_variants ORDER BY id")).rows)
       .toEqual([{ inventory_tracking_override: null }, { inventory_tracking_override: false }, { inventory_tracking_override: null }]);
     orm = drizzle(database.pool, { schema });
@@ -47,7 +53,7 @@ describeDatabase.sequential("product inventory policy migration and transactions
       wms.orders, wms.order_items, wms.picking_logs, wms.allocation_exceptions, inventory.inventory_levels, inventory.inventory_lots,
       inventory.availability_claim_lines, inventory.availability_claim_resources,
       inventory.inventory_publication_outbox, inventory.availability_runtime_authority, inventory.availability_claim_commands,
-      public.audit_events RESTART IDENTITY CASCADE;
+      public.audit_events, public.financial_command_results RESTART IDENTITY CASCADE;
       INSERT INTO catalog.products(id,name,sku) VALUES(1,'Product','PRODUCT');
       INSERT INTO channels.channels(id,name,provider) VALUES(36,'Store','shopify'),(37,'Other store','shopify');`);
   });
@@ -57,6 +63,133 @@ describeDatabase.sequential("product inventory policy migration and transactions
     productId: 1, name: "Variant", sku: `V-${String(override).toUpperCase()}`,
     ...(override === undefined ? {} : { inventoryTrackingOverride: override }),
   }, tx));
+
+  const bulkService = () => createBulkInventoryTrackingService(orm, () => now);
+  function bulkCommand(input: unknown, key = "bulk-policy-test"): FinancialCommandDescriptor {
+    return { actorType: "user", actorId: "policy-test", method: "POST",
+      routeTemplate: "/api/products/inventory-tracking/bulk/apply", resourceKey: "product-inventory-tracking",
+      idempotencyKey: key, requestHash: createHash("sha256").update(JSON.stringify(input)).digest("hex"),
+      commandName: "catalog.inventory_tracking.bulk", contractVersion: 1 };
+  }
+
+  it("bulk changes product-only and variant products while preserving overrides in both directions", async () => {
+    await database.pool.query("INSERT INTO catalog.products(id,name) VALUES(2,'No variants'),(3,'Already set')");
+    const inherited = await createVariant();
+    const tracked = await createVariant(true);
+    const untracked = await createVariant(false);
+    // An explicit tracked override keeps its stock; it must not block a change
+    // that only affects the product default and inheriting variants.
+    await database.pool.query("INSERT INTO inventory.inventory_levels(product_variant_id,warehouse_location_id,variant_qty) VALUES($1,1,2)", [tracked.id]);
+    await orm.transaction(tx => updateProductInventoryTracking(tx, 3, false, "fixture", now));
+    const service = bulkService();
+    for (const next of [false, true]) {
+      const request = { productIds: [3, 2, 1], inventoryTrackingDefault: next };
+      const preview = await service.preview(request);
+      expect(preview.products.map(p => p.productId)).toEqual([1, 2, 3]);
+      expect(preview.products[0]).toMatchObject({ changingVariantCount: 1, trackedOverrideCount: 1, untrackedOverrideCount: 1 });
+      expect(preview.products[1]).toMatchObject({ variantCount: 0, status: "change" });
+      const input = { ...request, expectedPreviewHash: preview.previewHash };
+      const result = await service.apply(input, bulkCommand(input, `bulk-policy-${next}`));
+      expect(result).toMatchObject({ httpStatus: 200, replayed: false, body: { changedProductIds: next ? [1, 2, 3] : [1, 2],
+        unchangedProductIds: next ? [] : [3], trackedOverrideCount: 1, untrackedOverrideCount: 1, changingVariantCount: 1 } });
+      expect((await orm.select().from(schema.productVariants).orderBy(schema.productVariants.id)).map(v => [v.id, v.inventoryTrackingOverride, v.trackInventory]))
+        .toEqual([[inherited.id, null, next], [tracked.id, true, true], [untracked.id, false, false]]);
+    }
+    const audits = await orm.select().from(schema.auditEvents);
+    expect(audits.filter(a => a.action === "catalog.inventory_tracking_bulk.changed")).toHaveLength(2);
+    expect(audits.filter(a => a.action === "catalog.inventory_tracking_bulk.changed").every(a => a.actor === "user:policy-test")).toBe(true);
+  });
+
+  it("reports stock blockers before apply and changes none of the otherwise eligible products", async () => {
+    await database.pool.query("INSERT INTO catalog.products(id,name) VALUES(2,'Eligible')");
+    const variant = await createVariant();
+    await database.pool.query("INSERT INTO inventory.inventory_levels(product_variant_id,warehouse_location_id,variant_qty) VALUES($1,1,2)", [variant.id]);
+    const service = bulkService();
+    const request = { productIds: [2, 1], inventoryTrackingDefault: false };
+    const preview = await service.preview(request);
+    expect(preview.products[0]).toMatchObject({ status: "blocked", blockers: [{ variantId: variant.id, code: "stock" }] });
+    expect(preview.products[1].status).toBe("change");
+    const input = { ...request, expectedPreviewHash: preview.previewHash };
+    expect(await service.apply(input, bulkCommand(input))).toMatchObject({ httpStatus: 409, body: { code: "BULK_INVENTORY_TRACKING_BLOCKED" } });
+    expect((await orm.select().from(schema.products)).every(p => p.inventoryTrackingDefault)).toBe(true);
+    expect(await orm.select().from(schema.auditEvents)).toHaveLength(0);
+    expect((await orm.select().from(schema.inventoryLevels))[0].variantQty).toBe(2);
+  });
+
+  it.each(["stock", "override", "new-variant", "product"])("rejects a stale bulk preview after a %s change", async change => {
+    const variant = await createVariant();
+    const service = bulkService();
+    const request = { productIds: [1], inventoryTrackingDefault: false };
+    const preview = await service.preview(request);
+    if (change === "stock") await database.pool.query("INSERT INTO inventory.inventory_levels(product_variant_id,warehouse_location_id,variant_qty) VALUES($1,1,1)", [variant.id]);
+    if (change === "override") await orm.transaction(tx => productMethods.updateProductVariant(variant.id, { inventoryTrackingOverride: true }, tx));
+    if (change === "new-variant") await createVariant(false);
+    if (change === "product") await database.pool.query("UPDATE catalog.products SET name='Renamed' WHERE id=1");
+    const input = { ...request, expectedPreviewHash: preview.previewHash };
+    expect(await service.apply(input, bulkCommand(input))).toMatchObject({ httpStatus: 409, body: { code: "BULK_INVENTORY_PREVIEW_STALE" } });
+    expect((await orm.select().from(schema.products))[0].inventoryTrackingDefault).toBe(true);
+  });
+
+  it("blocks missing products without dropping them from the reviewed selection", async () => {
+    const service = bulkService();
+    const request = { productIds: [1, 999], inventoryTrackingDefault: false };
+    const preview = await service.preview(request);
+    expect(preview.products[1]).toMatchObject({ productId: 999, status: "blocked", blockers: [{ code: "CATALOG_PRODUCT_MISSING" }] });
+    const input = { ...request, expectedPreviewHash: preview.previewHash };
+    expect(await service.apply(input, bulkCommand(input))).toMatchObject({ httpStatus: 409 });
+    expect((await orm.select().from(schema.products))[0].inventoryTrackingDefault).toBe(true);
+  });
+
+  it("replays the exact committed result after a later edit and rejects key reuse with a different payload", async () => {
+    const service = bulkService();
+    const request = { productIds: [1], inventoryTrackingDefault: false };
+    const preview = await service.preview(request);
+    const input = { ...request, expectedPreviewHash: preview.previewHash };
+    const result = await service.apply(input, bulkCommand(input));
+    await orm.transaction(tx => updateProductInventoryTracking(tx, 1, true, "later-edit", now));
+    const auditCount = (await orm.select().from(schema.auditEvents)).length;
+    expect(await service.apply(input, bulkCommand(input))).toEqual({ ...result, replayed: true });
+    expect((await orm.select().from(schema.products))[0].inventoryTrackingDefault).toBe(true);
+    expect(await orm.select().from(schema.auditEvents)).toHaveLength(auditCount);
+    const altered = { ...input, inventoryTrackingDefault: true };
+    await expect(service.apply(altered, bulkCommand(altered))).rejects.toMatchObject({ statusCode: 422, code: "FINANCIAL_COMMAND_IDEMPOTENCY_KEY_REUSED" });
+  });
+
+  it("rolls back the entire bulk change and audit when the second product write fails", async () => {
+    const variant = await createVariant();
+    await orm.insert(schema.channelFeeds).values({ channelId: 36, productVariantId: variant.id, channelVariantId: "rollback-probe", isActive: 1 });
+    await database.pool.query(`INSERT INTO catalog.products(id,name) VALUES(2,'Failure probe');
+      CREATE FUNCTION catalog.fail_bulk_policy_probe() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN IF NEW.id=2 THEN RAISE EXCEPTION 'Injected second product failure'; END IF; RETURN NEW; END $$;
+      CREATE TRIGGER bulk_policy_failure BEFORE UPDATE ON catalog.products FOR EACH ROW EXECUTE FUNCTION catalog.fail_bulk_policy_probe();`);
+    try {
+      const service = bulkService();
+      const request = { productIds: [1, 2], inventoryTrackingDefault: false };
+      const preview = await service.preview(request);
+      const input = { ...request, expectedPreviewHash: preview.previewHash };
+      await expect(service.apply(input, bulkCommand(input))).rejects.toThrow();
+      expect((await orm.select().from(schema.products)).every(p => p.inventoryTrackingDefault)).toBe(true);
+      expect((await orm.select().from(schema.productVariants))[0].trackInventory).toBe(true);
+      expect((await orm.select().from(schema.channelFeeds))[0].isActive).toBe(1);
+      expect(await orm.select().from(schema.auditEvents)).toHaveLength(0);
+      expect((await database.pool.query("SELECT status FROM public.financial_command_results")).rows).toEqual([{ status: "retryable" }]);
+    } finally {
+      await database.pool.query("DROP TRIGGER bulk_policy_failure ON catalog.products; DROP FUNCTION catalog.fail_bulk_policy_probe()");
+    }
+  });
+
+  it("serializes overlapping batches selected in opposite orders and rejects the stale loser", async () => {
+    await database.pool.query("INSERT INTO catalog.products(id,name) VALUES(2,'Second')");
+    const service = bulkService();
+    const first = { productIds: [1, 2], inventoryTrackingDefault: false };
+    const second = { ...first, productIds: [2, 1] };
+    const preview = await service.preview(first);
+    const inputs = [first, second].map(request => ({ ...request, expectedPreviewHash: preview.previewHash }));
+    const results = await Promise.all(inputs.map((input, index) => service.apply(input, bulkCommand(input, `overlap-${index}`))));
+    expect(results.map(result => result.httpStatus).sort()).toEqual([200, 409]);
+    expect((await orm.select().from(schema.products)).every(p => !p.inventoryTrackingDefault)).toBe(true);
+    expect((await orm.select().from(schema.auditEvents)).filter(a => a.action === "catalog.inventory_tracking_bulk.changed")).toHaveLength(1);
+  });
 
   const importVariant = async (sku: string, requiresShipping: boolean) => {
     const result: BackfillResult = {
