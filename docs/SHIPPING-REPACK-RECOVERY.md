@@ -22,7 +22,7 @@ one transaction. The historical function/table names serve both Shopify and eBay
 Bounds are 100 new labels, 500 source/items and 20 discovery expansions. Exceeding
 a bound produces review, never admission from a truncated set.
 
-Migration `0697_shipping_repack_recovery.sql` adds an immutable applied batch ID.
+Migration `0698_shipping_repack_recovery.sql` adds an immutable applied batch ID.
 Deferred constraints balance negative predecessor adjustments against all targets
 for each source, fulfillment-plan line, order item and request item. The positive
 side is checked too. No negative-only, half-finished or inflated transfer commits.
@@ -101,8 +101,9 @@ Validated on 2026-09-22, with the shipping branch based on main `8d2cb07a4`:
 - Full shipping allocation PostgreSQL suite: **132 passed**, no skipped cases.
   The final recovery-waterfall tracking read also passed a focused rerun.
 - Application and server-test TypeScript checks passed; `git diff --check` passed.
-- Migration-prefix and writer-ownership guards passed. Main already owns `0696`;
-  this batch uses `0697`, which was free at the last main refresh.
+- Migration-prefix and writer-ownership guards passed. PR #1529 landed during
+  publication and claimed `0697`; after merging main `5033f71e2`, this batch was
+  moved to `0698` without changing its SQL contents.
 
 The local Windows checks used ignored test configs to resolve exact locked
 dependencies without modifying the shared `node_modules`. Seven untouched files
