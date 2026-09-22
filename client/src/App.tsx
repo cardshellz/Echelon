@@ -77,6 +77,7 @@ import PurchasingDashboard from "@/pages/PurchasingDashboard";
 import Returns from "@/pages/Returns";
 import ReturnCases from "@/pages/ReturnCases";
 import ReturnPolicies from "@/pages/ReturnPolicies";
+import CustomerReturnPortalPreview from "@/pages/CustomerReturnPortalPreview";
 import InboundShipments from "@/pages/InboundShipments";
 import OutboundShipments from "@/pages/OutboundShipments";
 import InboundShipmentDetail from "@/pages/InboundShipmentDetail";
@@ -521,6 +522,9 @@ function Router() {
         </Route>
         <Route path="/returns/cases">
           <ProtectedRoute component={ReturnCases} allowedRoles={["admin", "lead"]} />
+        </Route>
+        <Route path="/returns/portal-preview">
+          <ProtectedRoute component={CustomerReturnPortalPreview} allowedRoles={["admin"]} />
         </Route>
         <Route path="/returns/receiving">
           <ProtectedRoute component={Returns} allowedRoles={["admin", "lead"]} />

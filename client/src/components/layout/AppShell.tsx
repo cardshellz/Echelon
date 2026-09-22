@@ -197,6 +197,7 @@ const navStructure: NavEntry[] = [
     roles: ["admin", "lead"],
     children: [
       { label: "Cases", icon: ClipboardList, href: "/returns/cases" },
+      { label: "Portal preview", icon: Store, href: "/returns/portal-preview", roles: ["admin"] },
       { label: "Policies", icon: FileText, href: "/return-policies", roles: ["admin"] },
       { label: "Receiving", icon: PackageCheck, href: "/returns/receiving" },
     ],

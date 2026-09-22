@@ -2,7 +2,21 @@
 
 ## First increment: order access, eligibility and authorization persistence
 
-This increment implements the internal application/domain and persistence foundation for one customer return spanning original shipments. It does not register a public route or enable intake. The customer interface, verified access-token adapters, live Shopify source reader, operational child cases and shipping workers follow in subsequent increments.
+The foundation implements internal application/domain and persistence for one customer return spanning original shipments. An administrator-only preview now exercises the proposed customer flow with fictional sample orders. Neither increment registers public customer intake. Verified customer access-token adapters, the live Shopify source reader, operational child cases and shipping workers remain implementation gates.
+
+### Admin testing and customer visibility
+
+The owner requested that the developing portal stay hidden from customers until launch while remaining testable in the admin UI. The staff navigation exposes **Returns → Portal preview**, at `/returns/portal-preview`, only to the admin role. `registerCustomerReturnPreviewRoutes` protects the page prefix and every method under `/api/returns/admin/portal-preview` before the SPA fallback. It uses the session user ID to read current identity records; stored session role strings, customer/Dropship sessions and internal API keys do not grant preview access.
+
+Preview access requires an active account with both the current `users.role = admin` and the built-in system `Administrator` membership. Existing `seedRBACUseCase` assigns that membership for existing admin users. Those fields are independently editable, so either demotion denies access; incomplete admin configuration also denies access rather than auto-granting a role. The owner's production account configuration has not been read or changed by this work.
+
+All preview responses and the page have private/no-store and no-index headers. The service worker treats these prefixes as network-only. The client waits for fresh preview authorization, keeps data in component state rather than the shared query cache, and clears the flow when the authenticated identity changes or an API denies access. There is no customer link, launch toggle, preview bearer token, live submit endpoint, or public bypass.
+
+`CustomerReturnPreviewService` serves five deterministic fictional scenarios: delivered split shipments, partially delivered quantities, in-transit items, already claimed units and an elapsed return window. It calls the same `evaluateCustomerReturnEligibility` function as the authorization foundation. The sample clock is fixed at September 22, 2026, so test outcomes do not silently change with calendar time. Sample references are `TEST-1001` through `TEST-1005`; these are not current readings of orders #63210 or #63268.
+
+The preview walks through order reference entry, item quantities with optional reasons, exact contents for one or several return boxes, and server-validated review. Sample order lookup accepts an optional `#` using the existing reference normalizer. Review validates every selection against freshly evaluated sample eligibility and requires each selected unit to appear in exactly one box. No warehouse address, staff delivery evidence or internal provider identity is included in the preview DTO. Warehouse selection remains a future admin configuration capability, never a customer question.
+
+The preview has no authorization repository, shipping client, notification sender, inventory writer or refund executor. Finishing review creates no RMA, label, reservation or financial effect; the label action is unavailable and the admin frame identifies the missing live integrations. There is no persistence or cross-device resume for a sample session. Live order testing must be added behind this same admin boundary once the source/configuration adapters and shared-claim protections are complete. Customer launch remains a separate explicitly approved change after the gates below are satisfied.
 
 Confirmed commercial scope is domestic U.S. Shopify orders, a 365-day purchase window, delivered quantities (or audited staff verification), optional customer reasons, and manually issued Shopify refunds. Warehouse selection is staff configuration. No new send-back deadline or automatic refund operation is introduced.
 
@@ -43,6 +57,15 @@ node node_modules/typescript/bin/tsc --noEmit --incremental false
 These test databases must be disposable. The tests rebuild only their dedicated schemas after checking explicit opt-in and local database identity. Order lookup applies the original OMS table definition plus its customer identity migration. Authorization tests apply the complete new migration against prerequisite schemas. Provider APIs are represented by trusted test fixtures; passing these tests does not prove live Shopify or ShipStation acceptance.
 
 Both database suites are also registered in `scripts/ci/postgres-test-manifest.ts`. CI creates a fresh database and process per test file. The returns test guard accepts that exact owned-name convention, rejects remote/query-override/application targets and keeps the two local suite databases separate.
+
+The admin preview adds no schema or database writer. Real HTTP tests exercise its actual Express gate with injected Identity reads, including both independent demotions, direct page access, unsupported methods, malformed payloads and sanitized dependency failures. Unit tests cover sample eligibility, exact line/box conservation and service-worker cache isolation. Desktop/mobile browser tests use the real sample service through intercepted HTTP; they cover packing, optional reasons, identical product names, Back, scenario reset, denied access, malformed responses and delayed responses. These are application tests, not evidence of live provider acceptance or the owner's production permissions.
+
+```powershell
+node node_modules/vitest/vitest.mjs run server/modules/returns/__tests__/unit client/src/lib/__tests__/unit/customer-return-preview.test.ts client/src/lib/__tests__/unit/customer-return-preview-cache.test.ts
+node node_modules/@playwright/test/cli.js test --config playwright.returns-preview.config.ts
+```
+
+The browser suite uses its own local Vite port and fictional API responses; it never starts the application server, connects a database or contacts Shopify/ShipStation. On Windows an installed Chromium executable can be selected with `PLAYWRIGHT_CHROMIUM_EXECUTABLE`. CI installs an isolated browser and runs the same desktop/mobile suite.
 
 ### Verified integration boundaries
 
