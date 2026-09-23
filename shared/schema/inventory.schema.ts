@@ -857,7 +857,8 @@ export const replenTasks = inventorySchema.table("replen_tasks", {
   qtyCompleted: integer("qty_completed").notNull().default(0), // Eaches actually put
   status: varchar("status", { length: 20 }).notNull().default("pending"),
   priority: integer("priority").notNull().default(5),
-  triggeredBy: varchar("triggered_by", { length: 20 }).notNull().default("min_max"), // min_max, wave, manual, stockout
+  // Descriptive provenance grows as workflows are added; never truncate it.
+  triggeredBy: text("triggered_by").notNull().default("min_max"),
   executionMode: varchar("execution_mode", { length: 20 }).notNull().default("queue"), // queue, inline - based on warehouse settings
   replenMethod: varchar("replen_method", { length: 30 }).notNull().default("full_case"), // case_break, full_case, pallet_drop — persisted so executeTask knows how to run
   autoReplen: integer("auto_replen").notNull().default(0), // 1 = picker handles inline (auto-complete), 0 = worker queue
