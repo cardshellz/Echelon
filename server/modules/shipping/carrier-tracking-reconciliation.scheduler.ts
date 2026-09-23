@@ -1,4 +1,5 @@
 import type { CarrierTrackingLogger, CarrierTrackingService } from "./carrier-tracking.service";
+import { observeRuntimeWork } from "../../platform/observability/runtime-memory";
 
 const DEFAULT_INTERVAL_MS = 5 * 60 * 1_000;
 const DEFAULT_INITIAL_DELAY_MS = 60 * 1_000;
@@ -30,7 +31,7 @@ export function startCarrierTrackingReconciliationScheduler(
     if (running || stopped) return;
     running = true;
     try {
-      const result = await service.reconcileUnresolved(batchLimit);
+      const result = await observeRuntimeWork("shipping.carrier_reconciliation", () => service.reconcileUnresolved(batchLimit));
       if (result.hydrationsClaimed > 0
           || result.subscriptionsPrepared > 0
           || result.subscriptionLabelLinksPrepared > 0

@@ -3,6 +3,8 @@ import type {
   InventoryPublicationOutboxService,
 } from "./inventory-publication-outbox.service";
 
+import { observeRuntimeWork } from "../../../platform/observability/runtime-memory";
+
 const DEFAULT_INTERVAL_MS = 15_000;
 const LOG_PREFIX = "[Inventory Publication Worker]";
 
@@ -17,7 +19,7 @@ export async function runInventoryPublicationWorkerTick(
   if (inFlight) return null;
   inFlight = true;
   try {
-    const result = await processor.processDue();
+    const result = await observeRuntimeWork("inventory.publication", () => processor.processDue());
     if (result.claimed > 0) console.info(`${LOG_PREFIX} Batch complete`, result);
     return result;
   } catch (error) {

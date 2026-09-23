@@ -90,6 +90,9 @@ import {
 } from "./infrastructure/scheduler-config";
 import { reportError, runWithContext } from "./platform/observability";
 import { createHttpRequestLogger } from "./platform/observability/http-request-log";
+import { observeRuntimeRequests, observeRuntimeWork, startRuntimeMemoryTelemetry } from "./platform/observability/runtime-memory";
+import { getPostgresPoolSnapshot } from "./infrastructure/postgres-pool-observability";
+import { getSchedulerLockPoolSnapshot } from "./infrastructure/scheduler-lock";
 
 declare module "express-session" {
   interface SessionData {
@@ -99,6 +102,14 @@ declare module "express-session" {
 
 const app = express();
 const httpServer = createServer(app);
+const stopMemoryTelemetry = startRuntimeMemoryTelemetry({
+  readContext: () => ({
+    databasePool: getPostgresPoolSnapshot(dbPool),
+    schedulerPool: getSchedulerLockPoolSnapshot(),
+  }),
+});
+httpServer.once("close", stopMemoryTelemetry);
+app.use(observeRuntimeRequests);
 
 // setupWebSocket is deferred until sessionMiddleware is created
 
@@ -368,7 +379,7 @@ function startEchelonSyncScheduler(
 
   return startInventoryPublicationSweepScheduler({
     readControl: () => services.syncSettings.getGlobalSettings(),
-    runSweep,
+    runSweep: () => observeRuntimeWork("inventory.sync_sweep", runSweep),
     logger: {
       info: (message) => log(`[Echelon Sync] ${message}`, "echelon-sync"),
       error: (message) => console.warn(`[Echelon Sync] ${message}`),
@@ -637,8 +648,9 @@ function startEchelonSyncScheduler(
   if (!schedulersDisabled("EBAY_LISTING_RECONCILE_DISABLED")) {
     // Start after 2 minutes (let server settle), then every 30 min
     setTimeout(() => {
-      runEbayReconciliation();
-      setInterval(runEbayReconciliation, RECONCILE_INTERVAL_MS);
+      const runObserved = () => observeRuntimeWork("channels.ebay_listing_reconcile", runEbayReconciliation);
+      void runObserved();
+      setInterval(runObserved, RECONCILE_INTERVAL_MS);
       log("[eBay Reconcile] Scheduled reconciliation started (every 30 min)", "ebay-reconcile");
     }, 2 * 60 * 1000);
   } else {
@@ -1016,8 +1028,9 @@ function startEchelonSyncScheduler(
     };
     
     // Run immediately on boot, then every hour
-    setTimeout(runEbayReconcile, 5000);
-    setInterval(runEbayReconcile, 1 * 60 * 60 * 1000);
+    const runObservedEbayReconcile = () => observeRuntimeWork("channels.ebay_fulfillment_reconcile", runEbayReconcile);
+    setTimeout(runObservedEbayReconcile, 5000);
+    setInterval(runObservedEbayReconcile, 1 * 60 * 60 * 1000);
   } else {
     logSchedulerDisabled("ebay-reconcile", "eBay fulfillment reconciliation", "EBAY_FULFILLMENT_RECONCILE_DISABLED");
   }
@@ -1116,8 +1129,9 @@ function startEchelonSyncScheduler(
         console.warn("[OMS<->WMS Reconcile] Sweep error:", err?.message);
       }
     };
-    setTimeout(runOmsWmsReconcile, 15_000);
-    setInterval(runOmsWmsReconcile, 60 * 60 * 1000);
+    const runObservedOmsWmsReconcile = () => observeRuntimeWork("orders.oms_wms_reconcile", runOmsWmsReconcile);
+    setTimeout(runObservedOmsWmsReconcile, 15_000);
+    setInterval(runObservedOmsWmsReconcile, 60 * 60 * 1000);
   } else {
     logSchedulerDisabled("scheduler", "OMS WMS reconciliation", "OMS_WMS_RECONCILE_DISABLED");
   }
@@ -1136,8 +1150,9 @@ function startEchelonSyncScheduler(
       }
     };
     // Well clear of boot so a scan never competes with startup work.
-    setTimeout(runShopifyMappingReconcile, 5 * 60 * 1000);
-    setInterval(runShopifyMappingReconcile, 24 * 60 * 60 * 1000);
+    const runObservedShopifyMapping = () => observeRuntimeWork("channels.shopify_mapping_reconcile", runShopifyMappingReconcile);
+    setTimeout(runObservedShopifyMapping, 5 * 60 * 1000);
+    setInterval(runObservedShopifyMapping, 24 * 60 * 60 * 1000);
   } else {
     logSchedulerDisabled("scheduler", "Shopify mapping reconciliation", "SHOPIFY_MAPPING_RECONCILE_DISABLED");
   }
@@ -1721,8 +1736,9 @@ function startEchelonSyncScheduler(
       await engine?.sweepQueue?.().catch((e: any) => console.warn("[Engine Sweeper] error:", e.message));
     };
 
-    setTimeout(runShipStationReconcile, 30_000);
-    setInterval(runShipStationReconcile, 10 * 60 * 1000); // Every 10 minutes
+    const runObservedShipStationReconcile = () => observeRuntimeWork("shipping.wms_reconcile", runShipStationReconcile);
+    setTimeout(runObservedShipStationReconcile, 30_000);
+    setInterval(runObservedShipStationReconcile, 10 * 60 * 1000); // Every 10 minutes
   } else {
     logSchedulerDisabled("scheduler", "ShipStation reconciliation", "SHIPSTATION_RECONCILE_DISABLED");
   }
