@@ -5,19 +5,18 @@ import {
   BANK_SETTLEMENT_PHRASE,
   CARD_EXPIRY_WARNING_MONTHS,
   activationTopUp,
+  activationTopUpAmountCents,
   chargeBoundCents,
   cardExpiryState,
-  depositAmountDefault,
   firstFillFeeCents,
   formatDurationMinutes,
   formatSignedCents,
   formatWholeDollars,
   largestCoverableOrderCents,
-  presetsIncluding,
+  nextTopUpCents,
   shortfallExample,
 } from "../dropship-wallet-guidance";
 
-const LIMITS = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, caseTierMinimumCents: 50_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14, bankBalanceReadOffered: false };
 const BPS = 300;
 
 describe("constants", () => {
@@ -28,10 +27,21 @@ describe("constants", () => {
   });
 });
 
-describe("presets", () => {
-  it("adds what is already saved to the presets, sorted, and ignores blanks", () => {
-    expect(presetsIncluding([100, 300], 200, null, 300)).toEqual([100, 200, 300]);
-    expect(presetsIncluding([2_500, 5_000], 0, -1, 1.5)).toEqual([2_500, 5_000]);
+describe("what autopay pulls next", () => {
+  it("is the activation top-up while the balance is short of the minimum, else the top-up amount, the minimum by default", () => {
+    expect(activationTopUpAmountCents({ floorCents: 10_000, topUpCents: 20_000, availableCents: 0, pendingCents: 0 })).toBe(20_000);
+    expect(activationTopUpAmountCents({ floorCents: 10_000, topUpCents: null, availableCents: 5_000, pendingCents: 5_000 })).toBeNull();
+    expect(nextTopUpCents({ floorCents: 10_000, topUpCents: 20_000, availableCents: 0, pendingCents: 0 })).toBe(20_000);
+    expect(nextTopUpCents({ floorCents: 10_000, topUpCents: null, availableCents: 0, pendingCents: 0 })).toBe(10_000);
+    // At or above the minimum: the routine top-up amount, the minimum by default.
+    expect(nextTopUpCents({ floorCents: 10_000, topUpCents: 20_000, availableCents: 12_000, pendingCents: 0 })).toBe(20_000);
+    expect(nextTopUpCents({ floorCents: 10_000, topUpCents: null, availableCents: 12_000, pendingCents: 0 })).toBe(10_000);
+    // Below zero: the whole shortfall, never past the single-charge bound.
+    expect(nextTopUpCents({ floorCents: 10_000, topUpCents: 20_000, availableCents: -15_000, pendingCents: 0 })).toBe(20_000);
+    expect(nextTopUpCents({ floorCents: 10_000, topUpCents: null, availableCents: -5_000, pendingCents: 0 })).toBe(10_000);
+    // A top-up amount under the minimum: an empty wallet is filled to the minimum.
+    expect(nextTopUpCents({ floorCents: 50_000, topUpCents: 10_000, availableCents: 0, pendingCents: 0 })).toBe(50_000);
+    expect(() => nextTopUpCents({ floorCents: 10_000, topUpCents: null, availableCents: 1.5, pendingCents: 0 })).toThrow(RangeError);
   });
 });
 
@@ -55,10 +65,7 @@ describe("example A: bank vendor", () => {
 });
 
 describe("example B: bank vendor with a large minimum", () => {
-  it("defaults the deposit to the minimum within the funding limits, and quotes a large shortfall", () => {
-    expect(depositAmountDefault(300_000, LIMITS)).toBe(300_000);
-    expect(depositAmountDefault(600_000, LIMITS)).toBe(500_000);
-    expect(depositAmountDefault(500, LIMITS)).toBe(1_000);
+  it("quotes a large shortfall", () => {
     expect(shortfallExample({ orderCents: 40_000, availableCents: 5_000, bps: BPS })).toEqual({ shortfallCents: 35_000, feeCents: 1_050, chargedCents: 36_050 });
   });
 });

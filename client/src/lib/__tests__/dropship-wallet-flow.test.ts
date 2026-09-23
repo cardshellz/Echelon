@@ -10,11 +10,18 @@ import {
   buildPlanSaveInput,
   buildRemoveFundingMethodPath,
   depositFundingMethodFor,
+  depositDefaultCents,
+  depositOptions,
+  describeDepositOption,
   defaultMinimumCents,
   deriveWalletFlow,
   describeMinimumOption,
+  describeTopUpOption,
   minimumOptionFor,
   minimumOptions,
+  topUpCentsFor,
+  topUpChoiceFor,
+  topUpOptions,
   draftAfterBackupChoice,
   draftAfterFloorChoice,
   draftAfterIntro,
@@ -721,5 +728,74 @@ describe("the minimum: two tier options", () => {
     expect(defaultMinimumCents(wallet({ listingTiers: casesOnSale }))).toBe(50_000);
     // A policy with one option has nothing higher to open on.
     expect(defaultMinimumCents({ limits: { ...LIMITS, autoReloadMinTriggerCents: 50_000 }, listingTiers: casesOnSale })).toBe(50_000);
+  });
+});
+
+describe("the top-up amount's quick picks", () => {
+  it("offers the minimum and its 2×, 3× and 5× multiples, dropping a multiple under the policy's smallest top-up", () => {
+    expect(topUpOptions(10_000, LIMITS)).toEqual([
+      { factor: 1, cents: 10_000 }, { factor: 2, cents: 20_000 }, { factor: 3, cents: 30_000 }, { factor: 5, cents: 50_000 },
+    ]);
+    // LIMITS' smallest top-up is $100: at a $50 minimum only 2× and above clear it.
+    expect(topUpOptions(5_000, LIMITS)).toEqual([{ factor: 1, cents: 5_000 }, { factor: 2, cents: 10_000 }, { factor: 3, cents: 15_000 }, { factor: 5, cents: 25_000 }]);
+    expect(topUpOptions(2_000, LIMITS)).toEqual([{ factor: 1, cents: 2_000 }, { factor: 5, cents: 10_000 }]);
+    expect(describeTopUpOption({ factor: 1, cents: 10_000 })).toBe("Your minimum");
+    expect(describeTopUpOption({ factor: 2, cents: 20_000 })).toBe("2× your minimum");
+    expect(describeTopUpOption({ factor: 5, cents: 50_000 })).toBe("5× your minimum");
+    expect(() => topUpOptions(-1, LIMITS)).toThrow(RangeError);
+  });
+
+  it("reads a saved amount as the minimum, a multiple that will follow the minimum, or the vendor's own number", () => {
+    expect(topUpChoiceFor(null, 10_000)).toEqual({ kind: "minimum" });
+    expect(topUpChoiceFor(10_000, 10_000)).toEqual({ kind: "minimum" });
+    expect(topUpChoiceFor(20_000, 10_000)).toEqual({ kind: "multiple", factor: 2 });
+    expect(topUpChoiceFor(50_000, 10_000)).toEqual({ kind: "multiple", factor: 5 });
+    expect(topUpChoiceFor(40_000, 10_000)).toEqual({ kind: "custom", cents: 40_000 });
+    expect(topUpChoiceFor(20_000, 50_000)).toEqual({ kind: "custom", cents: 20_000 });
+    expect(() => topUpChoiceFor(-1, 10_000)).toThrow(RangeError);
+    expect(() => topUpChoiceFor(null, 1.5)).toThrow(RangeError);
+  });
+
+  it("sends null for the minimum and the recomputed amount for a multiple, so the pick follows a changed minimum", () => {
+    expect(topUpCentsFor({ kind: "minimum" }, 10_000)).toBeNull();
+    expect(topUpCentsFor({ kind: "multiple", factor: 2 }, 10_000)).toBe(20_000);
+    expect(topUpCentsFor({ kind: "multiple", factor: 2 }, 50_000)).toBe(100_000);
+    expect(topUpCentsFor({ kind: "custom", cents: 80_000 }, 50_000)).toBe(80_000);
+    expect(() => topUpCentsFor({ kind: "minimum" }, -1)).toThrow(RangeError);
+  });
+});
+
+describe("adding money: the top-up step's picks again", () => {
+  it("offers the minimum, its multiples and the vendor's own top-up amount, within the manual funding limits", () => {
+    expect(depositOptions({ minimumCents: 10_000, topUpCents: null, limits: LIMITS })).toEqual([
+      { factor: 1, cents: 10_000 }, { factor: 2, cents: 20_000 }, { factor: 3, cents: 30_000 }, { factor: 5, cents: 50_000 },
+    ]);
+    // A top-up amount that is already a pick is not offered twice; one of the vendor's own takes its place in the order.
+    expect(depositOptions({ minimumCents: 10_000, topUpCents: 20_000, limits: LIMITS })).toEqual([
+      { factor: 1, cents: 10_000 }, { factor: 2, cents: 20_000 }, { factor: 3, cents: 30_000 }, { factor: 5, cents: 50_000 },
+    ]);
+    expect(depositOptions({ minimumCents: 50_000, topUpCents: 80_000, limits: LIMITS })).toEqual([
+      { factor: 1, cents: 50_000 }, { factor: null, cents: 80_000 }, { factor: 2, cents: 100_000 }, { factor: 3, cents: 150_000 }, { factor: 5, cents: 250_000 },
+    ]);
+    // LIMITS cap manual funding at $5,000: picks past it are left out, a minimum past it included.
+    expect(depositOptions({ minimumCents: 200_000, topUpCents: null, limits: LIMITS })).toEqual([{ factor: 1, cents: 200_000 }, { factor: 2, cents: 400_000 }]);
+    expect(depositOptions({ minimumCents: 600_000, topUpCents: null, limits: LIMITS })).toEqual([]);
+    // A multiple the top-up step hides (under LIMITS' $100 smallest top-up) stays hidden here.
+    expect(depositOptions({ minimumCents: 2_000, topUpCents: null, limits: LIMITS })).toEqual([{ factor: 1, cents: 2_000 }, { factor: 5, cents: 10_000 }]);
+    expect(() => depositOptions({ minimumCents: 10_000, topUpCents: -1, limits: LIMITS })).toThrow(RangeError);
+    expect(describeDepositOption({ factor: 1, cents: 10_000 })).toBe("Your minimum");
+    expect(describeDepositOption({ factor: 3, cents: 30_000 })).toBe("3× your minimum");
+    expect(describeDepositOption({ factor: null, cents: 80_000 })).toBe("Your top-up amount");
+  });
+
+  it("opens on what autopay would pull next, else the minimum, else the smallest pick, and on nothing when nothing is offered", () => {
+    const options = depositOptions({ minimumCents: 50_000, topUpCents: 80_000, limits: LIMITS });
+    expect(depositDefaultCents(options, 80_000)).toBe(80_000);
+    expect(depositDefaultCents(options, 50_000)).toBe(50_000);
+    // The next top-up is not a pick (a shortfall past the minimum): the minimum.
+    expect(depositDefaultCents(options, 70_000)).toBe(50_000);
+    expect(depositDefaultCents([{ factor: 2, cents: 20_000 }, { factor: 5, cents: 50_000 }], 70_000)).toBe(20_000);
+    expect(depositDefaultCents([], 10_000)).toBeNull();
+    expect(() => depositDefaultCents(options, 1.5)).toThrow(RangeError);
   });
 });

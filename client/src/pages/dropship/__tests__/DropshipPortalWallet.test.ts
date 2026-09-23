@@ -142,11 +142,39 @@ describe("DropshipPortalWallet contract", () => {
     expect(step).toContain("hint={describeMinimumOption(option.tier)}");
     expect(step).toContain("testId={`wallet-minimum-${option.tier}`}");
     expect(step).toContain("options.some((option) => option.cents === floorCents)");
+    // The top-up amount: the minimum, its multiples that follow the minimum, or the vendor's own number.
+    expect(step).toContain('aria-label="Top-up amount"');
+    expect(step).toContain("const topUpChoices = topUpOptions(floorCents, limits);");
+    expect(step).toContain("topUpChoiceFor(initialTopUpCents, minimumOptionFor(initialFloorCents, limits))");
+    expect(step).toContain("hint={describeTopUpOption(option)}");
+    expect(step).toContain("testId={`wallet-top-up-${option.factor}x`}");
+    expect(step).toContain("topUpCentsFor(effectiveTopUp, floorCents)");
     expect(step).toContain('data-testid="wallet-top-up-custom"');
     // The daily-cost guesser, the recommendation and the free-form amount are gone from the whole page.
     // (The deposit step keeps its own "Or another amount" input; only the minimum's free-form amount is gone.)
     expect(source).not.toMatch(/daily (order )?cost|dailyCost|wallet-floor-custom|recommendedFloor|Keep my balance at/i);
     expect(step).not.toContain("initialDailyCostCents");
+  });
+
+  it("adds money with the top-up step's picks again, opening on what autopay would pull next", () => {
+    const controls = between("function FundingControls", "function UsdcFundingPanel");
+    expect(controls).toContain("const options = depositOptions({ minimumCents: floorCents, topUpCents, limits });");
+    expect(controls).toContain("depositDefaultCents(options, nextTopUpCents({ floorCents, topUpCents, availableCents: wallet.account.availableBalanceCents, pendingCents: wallet.account.pendingBalanceCents }))");
+    expect(controls).toContain("hint={describeDepositOption(option)}");
+    expect(controls).toContain('testId={`wallet-deposit-${option.factor === null ? "top-up" : `${option.factor}x`}`}');
+    // A pick the plan no longer offers counts as none, and nothing is sent without an amount.
+    expect(controls).toContain("const preset = options.some((option) => option.cents === presetCents) ? presetCents : null;");
+    expect(controls).toContain('if (amountCents === null) { setCustomError("Pick an amount or enter one."); return; }');
+    expect(controls).toContain('<Label htmlFor="wallet-custom-amount">Or another amount</Label>');
+    // Step 6 names the amount the controls open on, and both callers hand the controls the plan's top-up amount.
+    const step = between("function DepositStep", "function ManageView");
+    expect(step).toContain("formatWholeDollars(nextTopUpCents({ floorCents: terms.floorCents, topUpCents: terms.topUpCents, availableCents: wallet.account.availableBalanceCents, pendingCents: wallet.account.pendingBalanceCents }))");
+    expect(step).toContain("topUpCents={terms.topUpCents}");
+    const manage = between("function ManageView", "function ListingTiersSection");
+    expect(manage).toContain("const topUpCents = wallet.autoReload ? wallet.autoReload.topUpAmountCents : flow.topUpCents;");
+    expect(manage).toContain("topUpCents={topUpCents}");
+    // The fixed presets below the minimum are gone from the whole page.
+    expect(source).not.toMatch(/DEPOSIT_PRESETS_CENTS|presetsIncluding|depositAmountDefault|placeholder="75\.00"/);
   });
 
   it("states the intro in the words of what happens today, from one source of the copy", () => {
