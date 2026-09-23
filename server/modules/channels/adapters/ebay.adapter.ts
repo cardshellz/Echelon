@@ -39,6 +39,7 @@ import type {
   CancellationPushResult,
 } from "../channel-adapter.interface";
 import { InventoryPublicationConfigurationError } from "../channel-adapter.interface";
+import { QuantityPublicationAdmissionError } from "../../inventory-planning/domain/quantity-publication-admission";
 
 import { EbayAuthService, createEbayAuthConfig } from "./ebay/ebay-auth.service";
 import { EbayApiClient, createEbayApiClient } from "./ebay/ebay-api.client";
@@ -318,6 +319,9 @@ export class EbayAdapter implements IChannelAdapter {
             }
           }
         } catch (err: any) {
+          // Admission can reject locally before any eBay request. An offer lookup
+          // and individual retry cannot resolve that rejection and add churn.
+          if (err instanceof QuantityPublicationAdmissionError) throw err;
           // If bulk fails, try individual updates
           for (const item of itemsWithOffers) {
             try {

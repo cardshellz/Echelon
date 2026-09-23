@@ -93,9 +93,9 @@ dbDescribe.sequential("canonical catch-up completion uses exact current outbox l
     expect(await admission.complete(claim, await outbox(target))).toBe(true);
   });
   it("blocks even a current canonical handoff while a newer attempt remains uncertain", async () => {
-    const target = await scope(); const plan = await outbox(target); await pending(target);
+    const target = await scope(); const plan = await outbox(target); const claim = await pending(target);
     await expect(admission.runListing(target, async () => plan, async () => { throw new Error("Provider outcome unknown"); })).rejects.toThrow();
-    const claim = (await admission.listDue(100)).find(row => row.scope.externalInventoryItemId === target.externalInventoryItemId)!;
+    expect((await admission.listDue(100)).some(row => row.scope.externalInventoryItemId === target.externalInventoryItemId)).toBe(false);
     expect(await admission.complete(claim, plan)).toBe(false);
   });
 });

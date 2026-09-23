@@ -14,7 +14,7 @@ export const QUANTITY_PUBLICATION_LOCK_NAMESPACE = 918419;
 const session = new AsyncLocalStorage<{ scope: QuantityPublicationScope; externalSku: string | null; memberKeys: ReadonlySet<string> }>();
 // A catch-up expectation binds an eventual provider admission without itself
 // representing a provider request. Resolver failures must not create uncertainty.
-const legacyCatchupScope = new AsyncLocalStorage<QuantityPublicationScope>();
+const legacyCatchupScope = new AsyncLocalStorage<{ scope: QuantityPublicationScope; claim: QuantityPublicationCatchup | null }>();
 const hash = (value: unknown): string => createHash("sha256").update(canonicalJson(value)).digest("hex");
 export const quantityPublicationScopeLockKey = (scope: QuantityPublicationScope): string =>
   hash({ ...scope, productId: null, productVariantId: null });
@@ -174,12 +174,19 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
     }
   }
 
-  async withLegacyCatchupScope<T>(raw: QuantityPublicationScope, work: () => Promise<T>): Promise<T> {
+  async withLegacyCatchupScope<T>(raw: QuantityPublicationScope, work: () => Promise<T>,
+    claim: QuantityPublicationCatchup | null = null): Promise<T> {
     const scope = quantityPublicationScopeSchema.parse(raw);
+    if (claim) {
+      id(claim.catchupId); id(claim.revision);
+      if (key(quantityPublicationScopeSchema.parse(claim.scope)) !== key(scope)) {
+        fail("PUBLICATION_CATCHUP_SCOPE_MISMATCH", "A catch-up claim must match its exact provider destination and item.");
+      }
+    }
     if (legacyCatchupScope.getStore() || session.getStore()) {
       fail("PUBLICATION_CATCHUP_NESTING_INVALID", "A legacy catch-up scope cannot inherit or replace another provider capability.");
     }
-    return legacyCatchupScope.run(scope, work);
+    return legacyCatchupScope.run({ scope, claim }, work);
   }
 
   run<T>(raw: QuantityPublicationScope, work: () => Promise<T>): Promise<T> {
@@ -258,13 +265,24 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
   private async execute<T>(scope: QuantityPublicationScope, claim: QuantityPublicationOutboxClaim | null,
     work: () => Promise<T>, resolveCurrentPlan?: () => Promise<Array<{ outboxId: string; quantity: number; scope: QuantityPublicationScope }>>,
     memberScopes: readonly QuantityPublicationScope[] = []): Promise<T> {
-    const expectedScope = legacyCatchupScope.getStore();
-    if (expectedScope && (claim !== null || memberScopes.length > 0 || key(expectedScope) !== key(scope))) {
+    const expectedCatchup = legacyCatchupScope.getStore();
+    if (expectedCatchup && (claim !== null || memberScopes.length > 0 || key(expectedCatchup.scope) !== key(scope))) {
       fail("PUBLICATION_CATCHUP_SCOPE_MISMATCH", "A legacy catch-up retry can admit only its exact destination and item, without outbox or group expansion.");
     }
     // Catch-up restores quantity, not stale group metadata. Known members each get
     // their own resolvable obligation; the attempt still owns the entire group.
     const retainWork = async (connection: Client, runId: string | null, reason: string): Promise<void> => {
+      if (expectedCatchup?.claim) {
+        // A retry already owns a retained revision. Rewriting that revision here
+        // would make its later failure/backoff update miss and hot-loop forever.
+        // A newer producer revision must remain untouched.
+        await connection.query(`UPDATE inventory.quantity_publication_catchup SET
+          last_activation_run_id=COALESCE($3,last_activation_run_id),reason=$4,
+          next_attempt_at=GREATEST(next_attempt_at,$5::timestamptz+interval '1 minute'),updated_at=$5
+          WHERE id=$1 AND revision=$2 AND scope_key=$6 AND completed_revision<revision`,
+        [id(expectedCatchup.claim.catchupId),id(expectedCatchup.claim.revision),runId,reason,now(this.clock()),key(scope)]);
+        return;
+      }
       await retainCatchupScopes(connection, memberScopes.length ? memberScopes : [scope], runId, reason, this.clock());
     };
     if (this.active >= this.maximumConcurrentOwners) {
@@ -324,7 +342,7 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
           "SELECT authority FROM inventory.availability_runtime_authority WHERE singleton_key=true",
         )).rows[0];
         if (!authority) fail("PUBLICATION_AUTHORITY_MISSING", "Runtime publication authority is missing.");
-        if (expectedScope && authority.authority !== "legacy") {
+        if (expectedCatchup && authority.authority !== "legacy") {
           fail("PUBLICATION_AUTHORITY_CHANGED", "Legacy catch-up authority changed before actual provider admission; replan using the current owner.");
         }
         if (authority.authority === "legacy" && scope.destinationKind === "channel_connection") {
@@ -538,6 +556,9 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
     const client = await this.pool.connect();
     try { return (await client.query<{ id: string; revision: string; attempt_boundary_id: string; scope: unknown }>(`SELECT id::text,revision::text,attempt_boundary_id::text,scope
       FROM inventory.quantity_publication_catchup catchup WHERE completed_revision<revision AND next_attempt_at<=$1
+      AND NOT EXISTS (SELECT 1 FROM inventory.quantity_publication_attempts unresolved
+        WHERE unresolved.state IN ('running','uncertain')
+          AND unresolved.affected_scope_keys @> ARRAY[catchup.scope_key])
       AND NOT EXISTS (SELECT 1 FROM inventory.quantity_publication_cooldowns cooldown
         WHERE cooldown.provider_key=catchup.scope->>'providerKey' AND cooldown.provider_scope_type=catchup.scope->>'providerScopeType'
           AND cooldown.external_scope_id=catchup.scope->>'externalScopeId'
@@ -615,10 +636,25 @@ export class PostgresQuantityPublicationAdmission implements QuantityPublication
     } finally { client.release(discard); }
   }
   async fail(claim: QuantityPublicationCatchup, errorCode: string, message: string): Promise<void> {
+    const catchupId = id(claim.catchupId);
+    const revision = id(claim.revision);
+    const scopeKey = key(quantityPublicationScopeSchema.parse(claim.scope));
     const client = await this.pool.connect();
-    try { await client.query(`UPDATE inventory.quantity_publication_catchup SET next_attempt_at=$3::timestamptz+interval '1 minute',
-      last_error_code=$4,last_error_message=$5 WHERE id=$1 AND revision=$2`,
-    [id(claim.catchupId),id(claim.revision),now(this.clock()),errorCode.slice(0,200),message.slice(0,2000)]);
+    try {
+      const updated = await client.query(`UPDATE inventory.quantity_publication_catchup
+      SET next_attempt_at=GREATEST(next_attempt_at,$3::timestamptz+interval '1 minute'),
+      last_error_code=$4,last_error_message=$5
+      WHERE id=$1 AND revision=$2 AND completed_revision<revision AND scope_key=$6`,
+      [catchupId,revision,now(this.clock()),errorCode.slice(0,200),message.slice(0,2000),scopeKey]);
+      if (updated.rowCount === 1) return;
+      const current = (await client.query<{ revision: string; completed_revision: string; scope_key: string }>(
+        `SELECT revision::text,completed_revision::text,scope_key
+         FROM inventory.quantity_publication_catchup WHERE id=$1`, [catchupId])).rows[0];
+      // A newer producer event or another worker's completion supersedes this
+      // claim. Any other miss means the promised backoff was not persisted.
+      if (updated.rowCount === 0 && current?.scope_key === scopeKey
+        && (BigInt(current.revision) > BigInt(revision) || BigInt(current.completed_revision) >= BigInt(revision))) return;
+      fail("PUBLICATION_CATCHUP_BACKOFF_CONFLICT", "Catch-up failure backoff could not be persisted.", { catchupId, revision });
     } finally { client.release(); }
   }
 }
