@@ -71,6 +71,31 @@ test(
       await pool.query(
         `INSERT INTO oms.oms_orders(channel_id,external_order_id,raw_payload) VALUES(36,'shopify-1','{"source_name":"tiktok"}'),(37,'ebay-1','{}'),(80,'dropship:1:one','{"dropship":{"vendorId":1}}')`,
       );
+      await pool.query(
+        "UPDATE oms.oms_orders SET raw_payload=raw_payload || $1::jsonb WHERE external_order_id='shopify-1'",
+        [
+          JSON.stringify({
+            currency: "USD",
+            line_items: [
+              {
+                price: "10.00",
+                quantity: 1,
+                discount_allocations: [
+                  { amount: "1.00", discount_application_index: 0 },
+                ],
+              },
+            ],
+            discount_applications: [
+              {
+                type: "discount_code",
+                code: "WELCOME",
+                target_type: "line_item",
+              },
+            ],
+            shipping_lines: [],
+          }),
+        ],
+      );
       const payloads: any[] = [],
         errors: string[] = [];
       let duringSend: (() => Promise<void>) | undefined;
@@ -94,6 +119,20 @@ test(
       });
       await Promise.all([tick(), tick()]);
       expect(payloads).toHaveLength(3);
+      expect(
+        payloads.find((p) => p.order.commerce_origin.connector === "shopify")
+          .order.discount_evidence,
+      ).toMatchObject({
+        status: "complete",
+        grossMerchandiseCents: 1000,
+        merchandiseDiscountCents: 100,
+        shippingDiscountCents: 0,
+        applications: [{ code: "WELCOME", amountCents: 100 }],
+      });
+      expect(
+        payloads.find((p) => p.order.commerce_origin.connector === "ebay").order
+          .discount_evidence,
+      ).toBeUndefined();
       expect(
         new Set(payloads.map((p) => p.order.commerce_origin.connector)),
       ).toEqual(new Set(["shopify", "ebay", "dropship"]));

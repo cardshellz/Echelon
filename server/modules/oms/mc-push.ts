@@ -10,6 +10,7 @@ import { channels } from "@shared/schema";
 import { extractMarketingConsent } from "./marketing-consent";
 import { readStorefrontAcquisition } from "./archon-acquisition-contract";
 import { logger } from "../../platform/observability/logger";
+import { extractShopifyDiscountEvidence } from "./archon-discount-evidence";
 
 const MC_URL = process.env.MC_WEBHOOK_URL || "https://archon-os-20aa790cd70d.herokuapp.com";
 const MC_WEBHOOK_SECRET = process.env.MC_WEBHOOK_SECRET || "echelon-to-mc-sync-2026";
@@ -54,13 +55,17 @@ export async function pushToMissionControl(orderId: number, eventType: string): 
 
     // 2. Look up channel name
     let channelName = "Unknown";
+    let channelProvider: string | undefined;
     try {
       const [channel] = await db
-        .select({ name: channels.name })
+        .select({ name: channels.name, provider: channels.provider })
         .from(channels)
         .where(eq(channels.id, order.channelId))
         .limit(1);
-      if (channel) channelName = channel.name;
+      if (channel) {
+        channelName = channel.name;
+        channelProvider = channel.provider;
+      }
     } catch (e: any) {
       console.warn(`${LOG_PREFIX} Could not look up channel ${order.channelId}: ${e.message}`);
     }
@@ -142,6 +147,10 @@ export async function pushToMissionControl(orderId: number, eventType: string): 
         shipping_cents: order.shippingCents,
         tax_cents: order.taxCents,
         discount_cents: order.discountCents,
+        discount_evidence:
+          channelProvider === "shopify"
+            ? extractShopifyDiscountEvidence(order.rawPayload, order.currency)
+            : undefined,
         refund_cents: order.refundAmountCents || 0,
         discount_codes: discountCodes,
         tags,

@@ -4,6 +4,7 @@ import { commerceSnapshotSchema } from "../../../shared/archon-commerce-contract
 import { classifyCommerceOrigin } from "./archon-commerce-origin";
 import { readStorefrontAcquisition } from "./archon-acquisition-contract";
 import { extractMarketingConsent } from "./marketing-consent";
+import { extractShopifyDiscountEvidence } from "./archon-discount-evidence";
 /** Read one consistent OMS snapshot. No calls to marketplaces or inventory writes. */
 export async function loadArchonSnapshot(
   db: PoolClient,
@@ -61,6 +62,10 @@ export async function loadArchonSnapshot(
       shipping_cents: Number(o.shipping_cents),
       tax_cents: Number(o.tax_cents),
       discount_cents: Number(o.discount_cents),
+      discount_evidence:
+        origin.connector === "shopify"
+          ? extractShopifyDiscountEvidence(o.raw_payload, o.currency)
+          : undefined,
       refund_cents: Number(o.refund_amount_cents),
       currency: o.currency,
       financial_status:
