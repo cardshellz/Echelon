@@ -231,5 +231,68 @@ refuses a private key outright). Migration 0691; the words are in
   warning: only USDC on the Base network; anything else sent there cannot be
   recovered. The vendor is told when a deposit lands and if one is voided.
 
-All six phases of the funding design are delivered; later work (a USDC
-autopay pull from a self-custody wallet) is not designed here.
+Phases 1 to 6 are delivered. Phase 7 below records the pricing and rewards
+decisions of 2026-09-23 ahead of their build; a USDC autopay pull from a
+self-custody wallet is still not designed here.
+
+## Pricing and rewards (phase 7)
+
+Owner decisions of 2026-09-23. They replace the card fee described under
+"Sources" and in phase 5; the sections above stay as the record of what
+shipped.
+
+**Pricing.** No processing fee on any rail. A vendor already pays their
+marketplace's fees, and a second fee on top made every money screen harder
+to read. Card transfers are free but never below a card minimum deposit
+($100 at launch); bank and USDC keep the general minimum. The card fee stays
+a setting held at zero, so the disclosure machinery (the acknowledgement in
+the mandate, the fee on every quote) keeps working should a fee ever return.
+The fee and the per-rail minimum deposits become editable on the admin
+Wallet Policy tab; today the fee is an environment variable shown there
+read-only.
+
+**Rewards.** In place of a fee on card, an incentive on the free rails: every
+bank or USDC transfer earns rewards at a per-rail rate (1% at launch, card
+0%), credited when the transfer settles. Deposits and automatic top-ups
+alike, so the rule reads "bank and USDC earn 1%". Rewards are earned on
+transfers rather than on orders because that is the only way "card earns
+nothing" can be true: once money is in the wallet it is all the same money.
+
+Rewards are a third balance on the wallet account, integer cents, with their
+own ledger lines (earned, spent, reversed, redeemed). They are money Card
+Shellz issues, so:
+
+- spend-only: never paid out, and left out of any refund on account closure;
+- never counted toward the minimum, the credit allowance or a top-up trigger,
+  and never treated as cash by the treasury reconciliation;
+- a returned or disputed transfer takes back the rewards it earned; a part
+  already spent comes out of the cash balance through the existing reversal;
+- a cancelled or refunded order returns its rewards share to rewards, not to
+  cash;
+- the rate setting has a ceiling, so a typo cannot pay out 100%;
+- no expiry at launch (a setting later).
+
+**Spending.** The main use is lower product cost: by default each order debit
+takes rewards first and cash second, and the order shows both parts. A vendor
+can switch to "save my rewards" and spend the balance later. Redemption
+outside inventory comes later, each option behind an admin toggle: a coupon
+code for cardshellz.com, and one for the cardshellz.io store once it exists.
+A redemption debits the rewards balance and never touches the Shellz Club
+points ledger.
+
+**Separation from Shellz Club rewards.** The two programs never pool. A .ops
+member still earns Shellz Club rewards on retail purchases, and those can
+never be spent on .ops orders or product cost; wallet rewards never become
+Shellz Club points. Each balance is spent only in the system that owns it,
+so no order ever depends on a two-system transaction.
+
+**Queued with this phase, decided but not yet built:** the held-order
+backup-card charge covers the whole shortfall (today it is capped at the
+single-charge bound, a leftover of a setting vendors no longer see); the
+add-money step stops describing autopay, shows the balance as its own
+element and states each rail's terms as short bullets.
+
+**Still open, not designed here:** credit against a business account's first
+bank transfer (today one earlier transfer from the account must have
+settled), and a USDC pull contract for automatic top-ups from a
+self-custody wallet.
