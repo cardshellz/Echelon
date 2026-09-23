@@ -3,6 +3,8 @@ import type {
   ChannelFulfillmentBatchResult,
 } from "./channel-fulfillment-authority.service";
 
+import { observeRuntimeWork } from "../../platform/observability/runtime-memory";
+
 const DEFAULT_INTERVAL_MS = 15_000;
 const DEFAULT_BATCH_SIZE = 25;
 
@@ -44,7 +46,7 @@ export async function runChannelFulfillmentCommandWorkerOnce(
   runInFlight = true;
   lastRunAt = new Date();
   try {
-    const result = await service.runDueBatch({ limit: batchSize });
+    const result = await observeRuntimeWork("shipping.channel_commands", () => service.runDueBatch({ limit: batchSize }));
     lastSuccessAt = new Date();
     lastError = null;
     if (result.claimed > 0) {
@@ -70,7 +72,7 @@ export async function runChannelLabelLifecycleWorkerOnce(service: ChannelFulfill
   if (labelLifecycleInFlight || !service.runLabelLifecycleBatch) return;
   labelLifecycleInFlight = true;
   try {
-    await service.runLabelLifecycleBatch();
+    await observeRuntimeWork("shipping.label_lifecycle", () => service.runLabelLifecycleBatch!());
     labelLifecycleLastError = null;
   } catch (error) {
     labelLifecycleLastError = error instanceof Error ? error.message : String(error);

@@ -21,11 +21,12 @@ vi.mock("../../../../db", () => ({
                 shippingCents: 1000,
                 taxCents: 345,
                 discountCents: 0,
+                currency: "USD",
                 orderedAt: new Date("2026-09-13T12:00:00Z"),
               },
             ]
           : step === 1
-            ? [{ name: "Shopify" }]
+            ? [{ name: "Shopify", provider: "shopify" }]
             : [];
       return {
         from: () => ({
@@ -41,7 +42,7 @@ vi.mock("../../../../db", () => ({
 vi.mock("@shared/schema", () => ({
   omsOrders: { id: "id" },
   omsOrderLines: { orderId: "orderId" },
-  channels: { id: "id", name: "name" },
+  channels: { id: "id", name: "name", provider: "provider" },
 }));
 vi.mock("drizzle-orm", () => ({ eq: vi.fn() }));
 vi.mock("../../../../platform/observability/logger", () => ({
@@ -116,5 +117,32 @@ describe("OMS to Archon acquisition payload", () => {
     await pushToMissionControl(42, "order.created");
     expect(sent[0].order.marketing_attribution).toEqual([]);
     expect(fixture.logError).not.toHaveBeenCalled();
+  });
+  it("forwards allocated discount evidence through the legacy sender", async () => {
+    fixture.raw = {
+      currency: "USD",
+      line_items: [
+        {
+          price: "10.00",
+          quantity: 2,
+          discount_allocations: [
+            { amount: "2.00", discount_application_index: 0 },
+          ],
+        },
+      ],
+      discount_applications: [
+        { type: "discount_code", code: "WELCOME", target_type: "line_item" },
+      ],
+      shipping_lines: [],
+    };
+    await pushToMissionControl(42, "order.created");
+    expect(sent[0].order.discount_evidence).toMatchObject({
+      status: "complete",
+      grossMerchandiseCents: 2000,
+      merchandiseDiscountCents: 200,
+      shippingDiscountCents: 0,
+      applications: [{ code: "WELCOME", amountCents: 200 }],
+    });
+    expect(sent[0].order.total_cents).toBe(12345);
   });
 });

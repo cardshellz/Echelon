@@ -61,8 +61,8 @@ export class PostgresChannelQuantityPublicationCatchupRepository {
          JOIN channels.channel_warehouse_assignments assignment ON assignment.channel_id=feed.channel_id AND assignment.enabled=true
          JOIN warehouse.warehouses warehouse ON warehouse.id=assignment.warehouse_id
          WHERE feed.channel_id=$1 AND feed.is_active=1 AND feed.quarantined_at IS NULL
-           AND feed.channel_inventory_item_id IN ($2,'gid://shopify/InventoryItem/' || $2)
-           AND warehouse.shopify_location_id IN ($3,'gid://shopify/Location/' || $3)
+           AND feed.channel_inventory_item_id IN ($2::text,'gid://shopify/InventoryItem/' || $2::text)
+           AND warehouse.shopify_location_id IN ($3::text,'gid://shopify/Location/' || $3::text)
          ORDER BY feed.id,assignment.id LIMIT 2`,
         [owner.channel_id,scope.externalInventoryItemId,scope.externalScopeId],
       )).rows

@@ -18,6 +18,7 @@ import {
   EBAY_CATEGORIES,
 } from "../../adapters/ebay/ebay-category-map";
 import type { ChannelListingPayload } from "../../channel-adapter.interface";
+import { QuantityPublicationAdmissionError } from "../../../inventory-planning/domain/quantity-publication-admission";
 
 // ---------------------------------------------------------------------------
 // Mock DB
@@ -516,6 +517,25 @@ describe("eBay Listing Builder", () => {
   });
 
   describe("pushInventory", () => {
+    it("does not look up or retry an offer after local quantity admission rejects the write", async () => {
+      const adapter = new EbayAdapter(createMockDb());
+      const blocked = new QuantityPublicationAdmissionError(
+        "PUBLICATION_PRIOR_OUTCOME_UNRESOLVED", "A prior provider outcome requires reconciliation.");
+      const bulkUpdatePriceQuantity = vi.fn().mockRejectedValue(blocked);
+      const getOffers = vi.fn();
+      const updateOffer = vi.fn();
+      (adapter as any).getApiClient = vi.fn().mockResolvedValue({ bulkUpdatePriceQuantity, getOffers, updateOffer });
+      (adapter as any).delay = vi.fn();
+
+      await expect(adapter.pushInventory(2, [{ variantId: 101, sku: "CS-TL35-P25",
+        externalVariantId: "offer-101", externalInventoryItemId: null, allocatedQty: 5 }]))
+        .rejects.toBe(blocked);
+      expect(bulkUpdatePriceQuantity).toHaveBeenCalledOnce();
+      expect(getOffers).not.toHaveBeenCalled();
+      expect(updateOffer).not.toHaveBeenCalled();
+      expect((adapter as any).delay).not.toHaveBeenCalled();
+    });
+
     it("uses eBay bulk price/quantity request shape for offer quantity updates", async () => {
       const adapter = new EbayAdapter(createMockDb());
       const bulkUpdatePriceQuantity = vi.fn().mockResolvedValue({

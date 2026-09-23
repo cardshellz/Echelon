@@ -1,4 +1,5 @@
 import type { QuantityPublicationCatchupService } from "./quantity-publication-admission.port";
+import { observeRuntimeWork } from "../../../platform/observability/runtime-memory";
 
 const DEFAULT_INTERVAL_MS = 15_000;
 const STARTUP_DELAY_MS = 5_000;
@@ -23,7 +24,7 @@ export function startQuantityPublicationCatchupWorker(processor: Processor, opti
     if (stopped || running) return;
     running = (async () => {
       try {
-        const result = await processor.processDue();
+        const result = await observeRuntimeWork("inventory.publication_catchup", () => processor.processDue());
         if (result.completed > 0 || result.failed > 0) log({ event: "quantity_publication_catchup_batch", ...result });
       } catch {
         // Per-scope failures are retained by the owner; infrastructure failure is

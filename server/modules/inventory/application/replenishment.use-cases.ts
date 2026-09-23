@@ -1,5 +1,6 @@
 import { eq, and, or, sql, inArray, isNull, asc } from "drizzle-orm";
 import { logger } from "../../../platform/observability/logger";
+import { validateReplenishmentTrigger } from "../domain/replenishment-trigger";
 import {
   replenRules,
   replenTasks,
@@ -2177,6 +2178,7 @@ export class ReplenishmentUseCases {
     triggeredBy: string = "inline_pick",
     context?: ReplenOrderContext,
   ): Promise<ReplenTask | null> {
+    validateReplenishmentTrigger(triggeredBy);
     return this.withPickBinTaskLock(productVariantId, warehouseLocationId, () =>
       this.checkAndTriggerAfterPickLocked(productVariantId, warehouseLocationId, triggeredBy, context),
     );
@@ -2522,6 +2524,7 @@ export class ReplenishmentUseCases {
     userId?: string,
     context?: ReplenOrderContext,
   ): Promise<{ task: ReplenTask; moved: number } | null> {
+    validateReplenishmentTrigger(context?.triggeredBy ?? "inline_pick");
     return this.withPickBinTaskLock(pickVariantId, toLocationId, () =>
       this.createAndExecuteReplenLocked(pickVariantId, toLocationId, userId, context),
     );

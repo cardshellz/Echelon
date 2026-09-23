@@ -100,6 +100,6 @@ export function createQuantityPublicationCatchupService(input: {
     // Constrain the actual adapter admission, not the planning work. A resolver
     // failure before provider I/O must not manufacture an uncertain write.
     // The adapter still owns the gate, authority recheck and attempt journal.
-    await quantityPublicationAdmission.withLegacyCatchupScope(scope, () => input.refreshLegacyChannelScope(scope));
+    await quantityPublicationAdmission.withLegacyCatchupScope(scope, () => input.refreshLegacyChannelScope(scope), claim);
   });
 }

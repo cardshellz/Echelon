@@ -1,4 +1,5 @@
 import type { createShipStationLabelReconciliationService } from "./shipstation-label-reconciliation.service";
+import { observeRuntimeWork } from "../../platform/observability/runtime-memory";
 
 const INTERVAL_MS = 5 * 60 * 1_000;
 const INITIAL_DELAY_MS = 30 * 1_000;
@@ -12,7 +13,7 @@ export function startShipStationLabelReconciliationScheduler(
     if (running || stopped) return;
     running = true;
     try {
-      const result = await service.runOnce();
+      const result = await observeRuntimeWork("shipping.void_recovery", () => service.runOnce());
       if (result.outcome === "processed" || result.recovered || result.deferred || result.reviewRequired) logger.info(JSON.stringify({
         code: "SHIPSTATION_LABEL_RECONCILIATION_COMPLETED", ...result,
       }));

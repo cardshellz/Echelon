@@ -335,9 +335,10 @@ describe("D-NOENGINE Phase 4: legacy V1 reconciler is retired", () => {
     const schedulerBlock = sourceBetween(
       indexSrc,
       "const runShipStationReconcile = async () => {",
-      "setTimeout(runShipStationReconcile, 30_000)",
+      "setTimeout(runObservedShipStationReconcile, 30_000)",
     );
     expect(schedulerBlock).toContain("await runShipStationReconcileV2()");
+    expect(schedulerBlock).toContain('observeRuntimeWork("shipping.wms_reconcile", runShipStationReconcile)');
     expect(schedulerBlock).not.toContain("runShipStationReconcileV1");
     expect(indexSrc).not.toContain("RECONCILE_V2");
     expect(indexSrc).not.toContain("V1: legacy order-based reconcile");

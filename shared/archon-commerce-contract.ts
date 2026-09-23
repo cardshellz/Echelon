@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { shopifyDiscountEvidenceSchema } from "./shopify-discount-evidence";
 export const commerceOriginSchema = z
   .object({
     version: z.literal(1),
@@ -78,6 +79,7 @@ export const commerceSnapshotSchema = z
         shipping_cents: cents,
         tax_cents: cents,
         discount_cents: cents,
+        discount_evidence: shopifyDiscountEvidenceSchema.optional(),
         refund_cents: cents,
         currency: z.string().regex(/^[A-Z]{3}$/),
         financial_status: z.string().min(1).max(30),
