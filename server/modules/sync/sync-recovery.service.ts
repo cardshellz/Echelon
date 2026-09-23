@@ -17,6 +17,7 @@ import { runReconciliationNow as shopifyReconcile } from "../orders/shopify-orde
 import { backfillShopifyOrders } from "./shopify-bridge-wrapper";
 import { sql } from "drizzle-orm";
 import { envPositiveInteger } from "../../infrastructure/scheduler-config";
+import { observeRuntimeWork } from "../../platform/observability/runtime-memory";
 import {
   recordRunCompleted,
   runBootCatchUpIfBehind,
@@ -293,6 +294,7 @@ export class SyncRecoveryService {
     ),
   ) {
     const intervalMs = intervalMinutes * 60 * 1000;
+    const runObserved = () => observeRuntimeWork("orders.sync_recovery", () => this.runAll());
     console.log(
       `[SyncRecovery] Scheduled runs every ${intervalMinutes}min (first in ${
         initialDelayMs / 1000
@@ -308,13 +310,13 @@ export class SyncRecoveryService {
         jobKey: SYNC_RECOVERY_JOB_KEY,
         intervalMs,
         logPrefix: "[SyncRecovery]",
-        run: () => this.runAll(),
+        run: runObserved,
       }).catch((err) => {
         console.error("[SyncRecovery] Initial run failed:", err);
       });
 
       const loopTimer = setInterval(() => {
-        this.runAll()
+        runObserved()
           .then(() => recordRunCompleted(this.db, SYNC_RECOVERY_JOB_KEY))
           .catch((err) => {
             console.error("[SyncRecovery] Scheduled run failed:", err);

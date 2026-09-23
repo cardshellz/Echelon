@@ -1,4 +1,5 @@
 import { webhookRetryQueue } from "@shared/schema";
+import { observeRuntimeWork } from "../../platform/observability/runtime-memory";
 import { eq, lte, and, sql } from "drizzle-orm";
 import { incr } from "../../instrumentation/metrics";
 import { createShipmentForOrder } from "../wms/create-shipment";
@@ -140,7 +141,7 @@ export async function runWebhookRetryWorkerTick(
   retryWorkerLastRunAt = new Date();
 
   try {
-    await processor();
+    await observeRuntimeWork("webhooks.retry", processor);
     retryWorkerLastSuccessAt = new Date();
     retryWorkerLastError = null;
     return "success";

@@ -1,5 +1,6 @@
 import type { PoolClient } from "pg";
 import pg from "pg";
+import { observeRuntimeWork } from "../platform/observability/runtime-memory";
 import {
   getPostgresPoolSnapshot,
   type PostgresPoolSnapshot,
@@ -101,7 +102,7 @@ export function createAdvisoryLockRunner(
       }
 
       activeLocks.add(lockId);
-      return await fn();
+      return await observeRuntimeWork(`scheduler.lock_${lockId}`, fn);
     } catch (error) {
       logger.error(
         `[AdvisoryLock] Error running locked function for ${lockId}:`,
