@@ -33,6 +33,7 @@ import {
   recordChannelOrderObservation,
 } from "./channel-order-intake.service";
 import { envPositiveInteger } from "../../infrastructure/scheduler-config";
+import { observeRuntimeWork } from "../../platform/observability/runtime-memory";
 import {
   markEbayOrderPollFailed,
   markEbayOrderPollRunStarted,
@@ -416,7 +417,7 @@ export function startEbayOrderPolling(
     }
     pollInFlight = true;
     try {
-      await pollEbayOrders(omsService, ebayApiClient);
+      await observeRuntimeWork("channels.ebay_order_poll", () => pollEbayOrders(omsService, ebayApiClient));
     } catch (err: any) {
       console.error(`[eBay Orders] Poll error: ${err.message}`);
     } finally {

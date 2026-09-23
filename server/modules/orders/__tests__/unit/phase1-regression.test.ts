@@ -434,11 +434,12 @@ describe("Migrated writers use C4 functions", () => {
     const { resolve } = await import("path");
     const src = readFileSync(resolve(__dirname, "../../../../index.ts"), "utf-8");
     const reconcilerStart = src.indexOf("OMS<->WMS cancellation reconciliation");
-    const reconcilerEnd = src.indexOf("setInterval(runOmsWmsReconcile", reconcilerStart);
+    const reconcilerEnd = src.indexOf("setInterval(runObservedOmsWmsReconcile", reconcilerStart);
     const block = src.slice(reconcilerStart, reconcilerEnd);
 
     expect(reconcilerStart).toBeGreaterThanOrEqual(0);
     expect(reconcilerEnd).toBeGreaterThan(reconcilerStart);
+    expect(block).toContain('observeRuntimeWork("orders.oms_wms_reconcile", runOmsWmsReconcile)');
     expect(block).toContain("oms.status IN ('cancelled', 'refunded')");
     expect(block).toContain("cancelWmsOrderAndRelease(");
     expect(block).not.toContain("markOrderShipped(db,");

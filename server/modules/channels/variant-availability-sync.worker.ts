@@ -1,4 +1,5 @@
 import type { VariantAvailabilityBatchResult } from "./variant-availability-sync.service";
+import { observeRuntimeWork } from "../../platform/observability/runtime-memory";
 
 const DEFAULT_INTERVAL_MS = 15_000;
 const LOG_PREFIX = "[Variant Availability Worker]";
@@ -50,7 +51,7 @@ export async function runVariantAvailabilityWorkerTick(
   inFlight = true;
   lastRunAt = new Date();
   try {
-    const result = await processor.processDue();
+    const result = await observeRuntimeWork("inventory.variant_availability", () => processor.processDue());
     lastSuccessAt = new Date();
     lastError = null;
     if (result.claimed > 0) {

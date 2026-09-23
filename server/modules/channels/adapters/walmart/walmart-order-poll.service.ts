@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { observeRuntimeWork } from "../../../../platform/observability/runtime-memory";
 import type { OmsService } from "../../../oms/oms.service";
 import { ChannelOrderObservationError, type ChannelOrderObservationWriter } from "../../../oms/channel-order-observation";
 import { WalmartApiError } from "./walmart-client";
@@ -140,7 +141,7 @@ export function startWalmartOrderPolling(service: WalmartOrderPollService, chann
     running = true;
     try {
       for (const channelId of await channels.repository.enabledChannels()) {
-        try { await service.poll(channelId); }
+        try { await observeRuntimeWork("channels.walmart_order_poll", () => service.poll(channelId)); }
         catch (error) { console.error(JSON.stringify({ code: failureCode(error, "WALMART_POLL_FAILED"), channelId })); }
       }
     } catch { console.error(JSON.stringify({ code: "WALMART_CHANNEL_SCAN_FAILED" })); }
