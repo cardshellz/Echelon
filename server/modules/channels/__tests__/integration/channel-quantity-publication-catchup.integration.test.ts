@@ -14,7 +14,7 @@ const ddl = `CREATE SCHEMA channels; CREATE SCHEMA catalog; CREATE SCHEMA wareho
  CREATE TABLE channels.channel_feeds(id integer PRIMARY KEY,channel_id integer,product_variant_id integer,
   channel_inventory_item_id text,channel_sku text,is_active integer,quarantined_at timestamptz,UNIQUE(channel_id,product_variant_id));
  CREATE TABLE channels.channel_listings(id integer PRIMARY KEY,channel_id integer,product_variant_id integer,external_sku text,UNIQUE(channel_id,product_variant_id));
- CREATE TABLE warehouse.warehouses(id integer PRIMARY KEY,shopify_location_id text);
+ CREATE TABLE warehouse.warehouses(id integer PRIMARY KEY,shopify_location_id varchar(50));
  CREATE TABLE channels.channel_warehouse_assignments(id integer PRIMARY KEY,channel_id integer,warehouse_id integer,enabled boolean,UNIQUE(channel_id,warehouse_id));`;
 const seed = `TRUNCATE channels.channel_warehouse_assignments,warehouse.warehouses,channels.channel_feeds,channels.channel_listings,catalog.product_variants,channels.channel_connections,channels.channels;
  INSERT INTO channels.channels VALUES(36,'shopify','active',true),(67,'ebay','active',true),(103,'manual','active',true);
