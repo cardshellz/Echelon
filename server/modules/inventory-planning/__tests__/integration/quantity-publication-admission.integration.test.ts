@@ -90,7 +90,76 @@ dbDescribe.sequential("durable external quantity admission with actual migration
     const claim = (await admission.listDue(25)).find(row => row.scope.externalInventoryItemId === target.externalInventoryItemId)!;
     await suppress(); await expect(admission.run(target, async () => undefined)).rejects.toThrow(); await release();
     expect(await admission.complete(claim)).toBe(false);
-    expect((await admission.listDue(25)).find(row => row.catchupId === claim.catchupId)?.revision).not.toBe(claim.revision);
+    const newer = (await admission.listDue(25)).find(row => row.catchupId === claim.catchupId)!;
+    expect(newer.revision).not.toBe(claim.revision);
+    await suppress();
+    const staleProvider = vi.fn();
+    await expect(admission.withLegacyCatchupScope(target, () => admission.run(target, staleProvider), claim))
+      .rejects.toMatchObject({ code: "QUANTITY_PUBLICATION_SUPPRESSED" });
+    expect(staleProvider).not.toHaveBeenCalled();
+    const beforeFailure = (await database.pool.query<{ revision: string; reason: string }>(
+      `SELECT revision::text,reason FROM inventory.quantity_publication_catchup WHERE id=$1`, [claim.catchupId],
+    )).rows[0];
+    expect(beforeFailure).toEqual({ revision: newer.revision, reason: "suppressed_quantity_write" });
+    await admission.fail(claim, "STALE_RETRY_FAILURE", "An older retry failed after a new producer event.");
+    const retained = (await database.pool.query<{ revision: string; last_error_code: string | null }>(
+      `SELECT revision::text,last_error_code FROM inventory.quantity_publication_catchup WHERE id=$1`, [claim.catchupId],
+    )).rows[0];
+    expect(retained).toEqual({ revision: newer.revision, last_error_code: null });
+    await release();
+  });
+
+  it("backs off the same claimed revision after uncertain provider I/O and waits for its resolution", async () => {
+    const target = scope();
+    await suppress(); await expect(admission.run(target, async () => undefined)).rejects.toThrow(); await release();
+    const claim = (await admission.listDue(100)).find(row => row.scope.externalInventoryItemId === target.externalInventoryItemId)!;
+    const restarted = new PostgresQuantityPublicationAdmission(database.pool, clock);
+    const provider = vi.fn(async () => { throw new Error("Provider response was lost"); });
+    const replan = (currentScope: QuantityPublicationScope, currentClaim: typeof claim) =>
+      restarted.withLegacyCatchupScope(currentScope, () => restarted.run(currentScope, provider), currentClaim);
+    const service = new QuantityPublicationCatchupService({
+      listDue: async limit => (await restarted.listDue(limit)).filter(row => row.catchupId === claim.catchupId),
+      complete: restarted.complete.bind(restarted), fail: restarted.fail.bind(restarted),
+    }, replan);
+    expect(await service.processDue()).toEqual({ completed: 0, failed: 1 });
+    expect(provider).toHaveBeenCalledOnce();
+
+    const read = async () => (await database.pool.query<{
+      revision: string; next_attempt_at: Date; last_error_code: string | null;
+    }>(`SELECT revision::text,next_attempt_at,last_error_code FROM inventory.quantity_publication_catchup WHERE id=$1`,
+    [claim.catchupId])).rows[0];
+    expect(await read()).toEqual({ revision: claim.revision,
+      next_attempt_at: new Date("2026-09-08T15:01:00.000Z"), last_error_code: "PUBLICATION_CATCHUP_FAILED" });
+    expect(await service.processDue()).toEqual({ completed: 0, failed: 0 });
+
+    // A worker may have selected the claim just before the first attempt became
+    // uncertain. That stale selection must not rewrite the revision or bypass backoff.
+    const selectedBeforeUncertainty = new QuantityPublicationCatchupService({
+      listDue: async () => [claim], complete: restarted.complete.bind(restarted), fail: restarted.fail.bind(restarted),
+    }, replan);
+    expect(await selectedBeforeUncertainty.processDue()).toEqual({ completed: 0, failed: 1 });
+    expect(provider).toHaveBeenCalledOnce();
+    expect(await read()).toEqual({ revision: claim.revision,
+      next_attempt_at: new Date("2026-09-08T15:01:00.000Z"), last_error_code: "PUBLICATION_PRIOR_OUTCOME_UNRESOLVED" });
+    const afterDelay = new PostgresQuantityPublicationAdmission(database.pool,
+      () => new Date("2026-09-08T15:01:00.000Z"));
+    expect((await afterDelay.listDue(100)).some(row => row.catchupId === claim.catchupId)).toBe(false);
+
+    const proof = await suppress();
+    const attempt = proof.unresolvedAttempts.find(row => row.scope.externalInventoryItemId === target.externalInventoryItemId)!;
+    await transaction(client => attestQuantityPublicationAttemptInsideTransaction(client, { attemptId: attempt.attemptId,
+      idempotencyKey: `catchup-terminal-${sequence}`, actor: "operator",
+      reason: "Confirmed the provider request terminated before retry",
+      evidenceKind: "owner_process_and_request_termination_record", terminalOutcome: "not_sent",
+      evidenceReference: "terminal-catchup", evidenceHash: "e".repeat(64), now: clock() }));
+    await release();
+    expect((await afterDelay.listDue(100)).some(row => row.catchupId === claim.catchupId)).toBe(true);
+  });
+
+  it("reports a missing catch-up claim instead of silently dropping its failure backoff", async () => {
+    await expect(admission.fail({ catchupId: "9223372036854775807", revision: "1", attemptBoundaryId: "0",
+      scope: scope() }, "TEST_FAILURE", "The exact claim no longer exists."))
+      .rejects.toMatchObject({ code: "PUBLICATION_CATCHUP_BACKOFF_CONFLICT" });
   });
 
   it("retains uncertain provider outcomes across suppression and requires an audited operator attestation, not elapsed time", async () => {
@@ -307,7 +376,7 @@ dbDescribe.sequential("durable external quantity admission with actual migration
     expect(provider).toHaveBeenCalledOnce();
     expect((await database.pool.query("SELECT state FROM inventory.quantity_publication_attempts WHERE scope->>'externalInventoryItemId'=$1",
       [target.externalInventoryItemId])).rows).toEqual([{ state: "uncertain" }]);
-    expect((await admission.listDue(100)).some(claim => claim.scope.externalInventoryItemId === target.externalInventoryItemId)).toBe(true);
+    expect((await admission.listDue(100)).some(claim => claim.scope.externalInventoryItemId === target.externalInventoryItemId)).toBe(false);
   });
 
   it("retains timeout uncertainty and releases session ownership without claiming remote cancellation", async () => {

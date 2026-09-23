@@ -58,7 +58,7 @@ describe("legacy channel catch-up runtime boundary", () => {
     await expect(createQuantityPublicationCatchupService({ refreshLegacyChannelScope: refresh }).processDue())
       .resolves.toEqual({ completed: 1, failed: 0 });
     expect(refresh).toHaveBeenCalledExactlyOnceWith(scope);
-    expect(quantityPublicationAdmission.withLegacyCatchupScope).toHaveBeenCalledWith(scope, expect.any(Function));
+    expect(quantityPublicationAdmission.withLegacyCatchupScope).toHaveBeenCalledWith(scope, expect.any(Function), claim);
     expect(f.query).toHaveBeenCalledOnce();
   });
 
