@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, Redirect } from "wouter";
+import { z } from "zod";
 import {
   Loader2,
   LockKeyhole,
@@ -10,45 +11,60 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { useAuth } from "@/lib/auth";
 import {
-  assertPreviewOrderMatches,
+  PreviewAccessError,
   readPreviewResponse,
 } from "@/lib/customer-return-preview";
 import {
-  CustomerReturnFlow,
-  type CustomerReturnFlowGateway,
-} from "@/components/returns/CustomerReturnFlow";
+  createLiveReturnGateway,
+  createSampleReturnGateway,
+} from "@/lib/customer-return-gateway";
+import { CustomerReturnFlow } from "@/components/returns/CustomerReturnFlow";
 import {
   PreviewError,
   previewSelectClass,
 } from "@/components/returns/CustomerReturnPreviewSteps";
 import {
   returnPortalPreviewStateSchema,
-  returnPreviewLookupInputSchema,
-  returnPreviewOrderSchema,
-  returnPreviewReviewInputSchema,
-  returnPreviewReviewSchema,
   type ReturnPortalPreviewState,
 } from "@shared/returns/customer-return-preview.contract";
+import { customerReturnLiveStateSchema } from "@shared/returns/customer-return-live.contract";
 import {
   CUSTOMER_RETURN_PORTAL_ACCESS_PATH,
   CUSTOMER_RETURN_PREVIEW_API_PATH,
 } from "@shared/returns/customer-return-portal-paths";
 
+type OrderSource = "live" | "sample";
+type LiveState = z.infer<typeof customerReturnLiveStateSchema>;
+
 export default function CustomerReturnPortalPreview() {
   const { user, isLoading } = useAuth();
   if (isLoading) return <PortalLoading />;
   if (!user) return <Redirect to={CUSTOMER_RETURN_PORTAL_ACCESS_PATH} />;
-  // Server authority is fresh; session role strings are not authorization.
-  // Drafts never survive switching the authenticated identity.
+  // Fresh server authority controls access; order drafts never survive an identity switch.
   return <PortalWorkspace key={`${user.id}:${user.role}`} />;
 }
 
 function PortalWorkspace() {
   const [state, setState] = useState<ReturnPortalPreviewState | null>(null);
+  const [source, setSource] = useState<OrderSource>("live");
   const [scenarioId, setScenarioId] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [attempt, setAttempt] = useState(0);
+  const [catalog, setCatalog] = useState<LiveState | null>(null);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
+  const [catalogLoading, setCatalogLoading] = useState(false);
+  const [catalogAttempt, setCatalogAttempt] = useState(0);
+  const [channelId, setChannelId] = useState("");
+
+  const denyAccess = useCallback((message: string) => {
+    setState(null);
+    setCatalog(null);
+    setChannelId("");
+    setError(message);
+    setLoading(false);
+    setCatalogLoading(false);
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -88,59 +104,74 @@ function PortalWorkspace() {
     return () => controller.abort();
   }, [attempt]);
 
-  const denyAccess = useCallback((message: string) => {
-    setState(null);
-    setError(message);
-    setLoading(false);
-  }, []);
+  useEffect(() => {
+    setCatalog(null);
+    setCatalogError(null);
+    setChannelId("");
+    if (!state || source !== "live") {
+      setCatalogLoading(false);
+      return;
+    }
+    const controller = new AbortController();
+    setCatalogLoading(true);
+    async function loadCatalog() {
+      try {
+        const response = await fetch(
+          `${CUSTOMER_RETURN_PREVIEW_API_PATH}/live`,
+          {
+            credentials: "include",
+            cache: "no-store",
+            signal: controller.signal,
+          },
+        );
+        const parsed = await readPreviewResponse(
+          response,
+          customerReturnLiveStateSchema,
+        );
+        if (
+          new Set(parsed.shops.map((shop) => shop.channelId)).size !==
+          parsed.shops.length
+        ) {
+          throw new Error(
+            "The configured Shopify shops could not be verified. Please try again.",
+          );
+        }
+        if (!controller.signal.aborted) {
+          setCatalog(parsed);
+          if (parsed.shops.length === 1)
+            setChannelId(String(parsed.shops[0].channelId));
+        }
+      } catch (cause) {
+        if (controller.signal.aborted) return;
+        if (cause instanceof PreviewAccessError) denyAccess(cause.message);
+        else setCatalogError(errorMessage(cause));
+      } finally {
+        if (!controller.signal.aborted) setCatalogLoading(false);
+      }
+    }
+    void loadCatalog();
+    return () => controller.abort();
+  }, [state, source, catalogAttempt, denyAccess]);
+
   const scenario = state?.scenarios.find(
     (candidate) => candidate.id === scenarioId,
   );
-  const gateway = useMemo<CustomerReturnFlowGateway | null>(() => {
-    if (!scenario) return null;
-    return {
-      async lookup(reference, signal) {
-        const input = returnPreviewLookupInputSchema.parse({
-          scenarioId: scenario.id,
-          orderReference: reference,
-        });
-        const response = await fetch(
-          `${CUSTOMER_RETURN_PREVIEW_API_PATH}/order`,
-          {
-            method: "POST",
-            credentials: "include",
-            cache: "no-store",
-            signal,
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(input),
-          },
-        );
-        const order = await readPreviewResponse(
-          response,
-          returnPreviewOrderSchema,
-        );
-        assertPreviewOrderMatches(order, scenario.id, reference);
-        return order;
-      },
-      async review(rawInput, signal) {
-        const input = returnPreviewReviewInputSchema.parse(rawInput);
-        if (input.scenarioId !== scenario.id)
-          throw new Error("The test order changed. Find the order again.");
-        const response = await fetch(
-          `${CUSTOMER_RETURN_PREVIEW_API_PATH}/review`,
-          {
-            method: "POST",
-            credentials: "include",
-            cache: "no-store",
-            signal,
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(input),
-          },
-        );
-        return readPreviewResponse(response, returnPreviewReviewSchema);
-      },
-    };
-  }, [scenario]);
+  const shop = catalog?.shops.find(
+    (candidate) => String(candidate.channelId) === channelId,
+  );
+  const gateway = useMemo(() => {
+    if (!state) return null;
+    if (source === "sample")
+      return scenario ? createSampleReturnGateway(scenario.id) : null;
+    return shop ? createLiveReturnGateway(shop.channelId) : null;
+  }, [state, source, scenario, shop]);
+  function changeSource(next: string) {
+    if (next !== "live" && next !== "sample") return;
+    setSource(next);
+    setCatalog(null);
+    setChannelId("");
+    setCatalogError(null);
+  }
 
   return (
     <main
@@ -149,7 +180,7 @@ function PortalWorkspace() {
     >
       <title>Returns | Card Shellz</title>
       <div className="mx-auto max-w-3xl space-y-5">
-        {state && scenario && (
+        {state && (
           <aside
             className="rounded-lg border border-slate-200 bg-white px-4 py-3 text-slate-600"
             aria-label="Private testing controls"
@@ -157,7 +188,8 @@ function PortalWorkspace() {
             <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
               <span className="flex items-center gap-1.5">
                 <LockKeyhole className="h-3.5 w-3.5" aria-hidden="true" />
-                Private testing · Sample data
+                Private testing ·{" "}
+                {source === "live" ? "Live orders" : "Sample data"}
               </span>
               <span>Customer access is off</span>
             </div>
@@ -167,30 +199,102 @@ function PortalWorkspace() {
                 Testing controls
               </summary>
               <div className="space-y-3 border-t pt-3">
-                <Label htmlFor="portal-test-scenario">Sample order</Label>
-                <select
-                  id="portal-test-scenario"
-                  className={previewSelectClass}
-                  value={scenarioId}
-                  onChange={(event) => setScenarioId(event.target.value)}
-                >
-                  {state.scenarios.map((candidate) => (
-                    <option key={candidate.id} value={candidate.id}>
-                      {candidate.title}
-                    </option>
-                  ))}
-                </select>
-                <p className="text-sm">{scenario.description}</p>
+                <div className="space-y-2">
+                  <Label htmlFor="portal-order-source">Order source</Label>
+                  <select
+                    id="portal-order-source"
+                    className={previewSelectClass}
+                    value={source}
+                    onChange={(event) => changeSource(event.target.value)}
+                  >
+                    <option value="live">Shopify orders</option>
+                    <option value="sample">Sample orders</option>
+                  </select>
+                </div>
+                {source === "sample" && scenario && (
+                  <div className="space-y-2">
+                    <Label htmlFor="portal-test-scenario">Sample order</Label>
+                    <select
+                      id="portal-test-scenario"
+                      className={previewSelectClass}
+                      value={scenarioId}
+                      onChange={(event) => setScenarioId(event.target.value)}
+                    >
+                      {state.scenarios.map((candidate) => (
+                        <option key={candidate.id} value={candidate.id}>
+                          {candidate.title}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="text-sm">{scenario.description}</p>
+                  </div>
+                )}
+                {source === "live" && catalog && catalog.shops.length > 0 && (
+                  <div className="space-y-2">
+                    <Label htmlFor="portal-shop">Shopify shop</Label>
+                    <select
+                      id="portal-shop"
+                      className={previewSelectClass}
+                      value={channelId}
+                      disabled={catalog.shops.length === 1}
+                      onChange={(event) => setChannelId(event.target.value)}
+                    >
+                      {catalog.shops.length > 1 && (
+                        <option value="">Choose a Shopify shop</option>
+                      )}
+                      {catalog.shops.map((candidate) => (
+                        <option
+                          key={candidate.channelId}
+                          value={candidate.channelId}
+                        >
+                          {candidate.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
                 <p className="text-xs leading-relaxed">
-                  Live Shopify lookup, return creation, ShipStation labels and
-                  warehouse receiving still require their backend integrations.
-                  This private gate remains in place when those are connected.
+                  This private workspace supports order lookup and return
+                  review. Return creation, shipping labels and warehouse
+                  receiving remain disabled.
                 </p>
               </div>
             </details>
             <p id="return-testing-status" className="mt-2 text-xs">
-              Sample orders only. No returns, labels or refunds are created.
+              {source === "live"
+                ? "Live order lookup and review only."
+                : "Sample orders only."}{" "}
+              No returns, labels or refunds are created.
             </p>
+            {source === "live" && catalogLoading && (
+              <p role="status" className="mt-3 text-sm">
+                Loading configured Shopify shops…
+              </p>
+            )}
+            {source === "live" && catalogError && (
+              <div className="mt-3 space-y-3">
+                <PreviewError message={catalogError} />
+                <Button
+                  variant="outline"
+                  onClick={() => setCatalogAttempt((value) => value + 1)}
+                >
+                  Retry Shopify shops
+                </Button>
+              </div>
+            )}
+            {source === "live" && catalog && catalog.shops.length === 0 && (
+              <p role="status" className="mt-3 text-sm">
+                No Shopify shops are available for live testing.
+              </p>
+            )}
+            {source === "live" &&
+              catalog &&
+              catalog.shops.length > 1 &&
+              !shop && (
+                <p role="status" className="mt-3 text-sm">
+                  Choose a Shopify shop in Testing controls to find an order.
+                </p>
+              )}
           </aside>
         )}
         {loading && <PortalLoading embedded />}
@@ -217,10 +321,12 @@ function PortalWorkspace() {
             </div>
           </section>
         )}
-        {state && scenario && gateway && (
+        {state && gateway && (
           <CustomerReturnFlow
-            key={`${attempt}:${scenario.id}`}
-            initialOrderReference={scenario.orderReference}
+            key={`${attempt}:${source}:${source === "live" ? channelId : scenarioId}`}
+            initialOrderReference={
+              source === "sample" ? (scenario?.orderReference ?? "") : ""
+            }
             gateway={gateway}
             onAccessDenied={denyAccess}
           />
@@ -241,7 +347,6 @@ function PortalLoading({ embedded = false }: { embedded?: boolean }) {
     </div>
   );
 }
-
 function errorMessage(error: unknown): string {
   return error instanceof Error
     ? error.message

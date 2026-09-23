@@ -4,12 +4,17 @@ import {
   CustomerReturnPreviewService,
 } from "../../server/modules/returns/application/customer-return-preview.service";
 import { CUSTOMER_RETURN_PREVIEW_API_PATH } from "../../shared/returns/customer-return-portal-paths";
+import {
+  customerReturnLiveLookupInputSchema,
+  customerReturnLiveReviewInputSchema,
+} from "../../shared/returns/customer-return-live.contract";
 
 export const PREVIEW_API = CUSTOMER_RETURN_PREVIEW_API_PATH;
 
 interface ReturnPreviewFixtureOptions {
   role?: string | null;
   loginRole?: string | null;
+  shops?: { channelId: number; name: string }[];
 }
 
 /** Browser rendering/interaction adapter only. Every API request is intercepted;
@@ -27,6 +32,35 @@ export async function installReturnPreviewFixtures(
   let loginRole =
     configured.loginRole === undefined ? "admin" : configured.loginRole;
   const service = new CustomerReturnPreviewService();
+  const shops = configured.shops ?? [
+    { channelId: 36, name: "Fixture Shopify shop" },
+  ];
+  // Browser-only fixtures for the live HTTP shape. They exercise rendering and
+  // request binding, never real Shopify/provider reads or semantic revisions.
+  function liveState() {
+    return {
+      mode: "admin_live",
+      customerAccess: "disabled",
+      effects: "none",
+      shops,
+    };
+  }
+  function liveOrder(channelId = 36) {
+    const {
+      mode: _mode,
+      scenarioId: _scenario,
+      ...fields
+    } = service.lookup({
+      scenarioId: "split_delivered",
+      orderReference: "TEST-1001",
+    });
+    return {
+      ...fields,
+      mode: "admin_live",
+      orderReference: "#LIVE-1001",
+      sourceRevision: String(channelId).padStart(64, "0"),
+    };
+  }
   const failures: string[] = [];
   const previewRequests: { path: string; method: string; body: unknown }[] = [];
   // Record transport sequence without copying even fictional passwords into logs.
@@ -111,6 +145,59 @@ export async function installReturnPreviewFixtures(
       try {
         if (path === PREVIEW_API && request.method() === "GET")
           return route.fulfill({ json: service.getState() });
+        if (path === `${PREVIEW_API}/live` && request.method() === "GET")
+          return route.fulfill({ json: liveState() });
+        if (
+          (path === `${PREVIEW_API}/live/order` ||
+            path === `${PREVIEW_API}/live/review`) &&
+          request.method() === "POST"
+        ) {
+          const input = path.endsWith("/order")
+            ? customerReturnLiveLookupInputSchema.parse(body)
+            : customerReturnLiveReviewInputSchema.parse(body);
+          if (!shops.some((shop) => shop.channelId === input.channelId)) {
+            return route.fulfill({
+              status: 400,
+              json: { error: { message: "Choose a configured Shopify shop." } },
+            });
+          }
+          if (
+            input.orderReference.trim().replace(/^#\s*/, "") !== "LIVE-1001"
+          ) {
+            return route.fulfill({
+              status: 404,
+              json: { error: { message: "This order could not be found." } },
+            });
+          }
+          const order = liveOrder(input.channelId);
+          if (path.endsWith("/order")) return route.fulfill({ json: order });
+          const reviewInput = customerReturnLiveReviewInputSchema.parse(input);
+          if (reviewInput.sourceRevision !== order.sourceRevision) {
+            return route.fulfill({
+              status: 409,
+              json: {
+                error: {
+                  code: "RETURN_LIVE_REVIEW_CHANGED",
+                  message: "Order availability changed.",
+                },
+              },
+            });
+          }
+          const { mode: _mode, ...review } = service.review({
+            scenarioId: "split_delivered",
+            orderReference: "TEST-1001",
+            selections: reviewInput.selections,
+            parcels: reviewInput.parcels,
+          });
+          return route.fulfill({
+            json: {
+              ...review,
+              mode: "admin_live",
+              orderReference: order.orderReference,
+              sourceRevision: order.sourceRevision,
+            },
+          });
+        }
         if (path === `${PREVIEW_API}/order` && request.method() === "POST")
           return route.fulfill({ json: service.lookup(body) });
         if (path === `${PREVIEW_API}/review` && request.method() === "POST")
@@ -137,6 +224,8 @@ export async function installReturnPreviewFixtures(
   });
   return {
     service,
+    liveState,
+    liveOrder,
     failures,
     previewRequests,
     authRequests,

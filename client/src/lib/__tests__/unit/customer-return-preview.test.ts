@@ -1,12 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
-  assertPreviewOrderMatches,
+  assertReturnFlowOrderMatches,
   assertPreviewReviewMatches,
   buildPreviewReviewInput,
   describePreviewItem,
   initialPreviewSelections,
   normalizedPreviewReference,
   PreviewAccessError,
+  ReturnSourceChangedError,
   readPreviewQuantity,
   readPreviewResponse,
   samePreviewQuantities,
@@ -15,14 +16,14 @@ import {
   type PreviewSelections,
 } from "../../customer-return-preview";
 import {
-  returnPreviewReviewSchema,
-  type ReturnPreviewOrder,
-  type ReturnPreviewReview,
-} from "@shared/returns/customer-return-preview.contract";
+  customerReturnFlowOrderSchema,
+  customerReturnFlowReviewSchema,
+  type CustomerReturnFlowOrder,
+  type CustomerReturnFlowReview,
+} from "@shared/returns/customer-return-flow.contract";
 
-const order: ReturnPreviewOrder = {
-  mode: "admin_preview",
-  scenarioId: "split_delivered",
+const order: CustomerReturnFlowOrder = {
+  sourceRevision: null,
   orderReference: "#SAMPLE-1001",
   purchasedAt: "2026-01-01T00:00:00Z",
   evaluatedAt: "2026-02-01T00:00:00Z",
@@ -177,6 +178,19 @@ describe("customer return preview drafts", () => {
     ).toBe(true);
   });
 
+  it("carries the exact source revision into review instead of recomputing it in the browser", () => {
+    const sourceRevision = "a".repeat(64);
+    const result = buildPreviewReviewInput(
+      { ...order, sourceRevision },
+      selections,
+      singlePreviewParcel(selections),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.sourceRevision).toBe(sourceRevision);
+    expect(result.value).not.toHaveProperty("scenarioId");
+  });
+
   it("conserves every exact line across multiple boxes and omits zero entries", () => {
     const input = buildPreviewReviewInput(order, selections, [
       {
@@ -251,43 +265,112 @@ describe("customer return preview drafts", () => {
 });
 
 describe("customer return preview response verification", () => {
-  it("keeps order and quantity verification when the standalone flow leaves scenario verification to its gateway", () => {
+  it("retains unknown return history while allowing a different verified line", () => {
+    const unknownHistory = customerReturnFlowOrderSchema.parse({
+      ...order,
+      lines: order.lines.map((line, index) =>
+        index === 0
+          ? { ...line, alreadyReturningQuantity: null, eligibleQuantity: 0 }
+          : line,
+      ),
+    });
+    expect(unknownHistory.lines[0].alreadyReturningQuantity).toBeNull();
     expect(() =>
-      assertPreviewOrderMatches(order, undefined, order.orderReference),
+      assertReturnFlowOrderMatches(unknownHistory, order.orderReference),
     ).not.toThrow();
+    const drafts = initialPreviewSelections(unknownHistory);
+    expect(
+      validatePreviewSelections(
+        unknownHistory,
+        drafts.map((draft, index) => ({
+          ...draft,
+          quantity: index === 1 ? "1" : "0",
+        })),
+      ),
+    ).toEqual({
+      ok: true,
+      value: [{ lineId: "line-b", quantity: 1, reasonCode: null }],
+    });
     expect(() =>
-      assertPreviewOrderMatches(order, undefined, "OTHER-ORDER"),
-    ).toThrow();
+      assertReturnFlowOrderMatches(
+        {
+          ...unknownHistory,
+          lines: [{ ...unknownHistory.lines[0], eligibleQuantity: 1 }],
+        },
+        order.orderReference,
+      ),
+    ).toThrow("could not be verified");
+  });
+
+  it("accepts provider title and variant bounds in orders and review without truncation", () => {
+    const title = "T".repeat(1000);
+    const variant = "V".repeat(1000);
+    const result = customerReturnFlowOrderSchema.parse({
+      ...order,
+      lines: [{ ...order.lines[0], title, variant }],
+    });
+    expect(result.lines[0]).toMatchObject({ title, variant });
+    for (const field of ["title", "variant"] as const) {
+      expect(
+        customerReturnFlowOrderSchema.safeParse({
+          ...result,
+          lines: [{ ...result.lines[0], [field]: "X".repeat(1001) }],
+        }).success,
+      ).toBe(false);
+    }
+    const review: CustomerReturnFlowReview = {
+      sourceRevision: null,
+      effects: "none",
+      orderReference: order.orderReference,
+      selectedQuantity: 1,
+      refundMethod: "manual_shopify",
+      parcels: [
+        { number: 1, items: [{ lineId: "line-a", title, quantity: 1 }] },
+      ],
+    };
+    expect(
+      customerReturnFlowReviewSchema.parse(review).parcels[0].items[0].title,
+    ).toBe(title);
+    expect(
+      customerReturnFlowReviewSchema.safeParse({
+        ...review,
+        parcels: [
+          {
+            number: 1,
+            items: [{ lineId: "line-a", title: "T".repeat(1001), quantity: 1 }],
+          },
+        ],
+      }).success,
+    ).toBe(false);
+  });
+
+  it("keeps order and quantity verification when the standalone flow uses a source-neutral order", () => {
     expect(() =>
-      assertPreviewOrderMatches(
+      assertReturnFlowOrderMatches(order, order.orderReference),
+    ).not.toThrow();
+    expect(() => assertReturnFlowOrderMatches(order, "OTHER-ORDER")).toThrow();
+    expect(() =>
+      assertReturnFlowOrderMatches(
         { ...order, lines: [{ ...order.lines[2], eligibleQuantity: 1 }] },
-        undefined,
         order.orderReference,
       ),
     ).toThrow();
   });
 
-  it("rejects a response for another order/scenario, duplicate line IDs or impossible eligible quantities", () => {
+  it("rejects a response for another order, duplicate line IDs or impossible eligible quantities", () => {
     expect(() =>
-      assertPreviewOrderMatches(order, order.scenarioId, " SAMPLE-1001 "),
+      assertReturnFlowOrderMatches(order, " SAMPLE-1001 "),
     ).not.toThrow();
+    expect(() => assertReturnFlowOrderMatches(order, "SAMPLE-OTHER")).toThrow();
     expect(() =>
-      assertPreviewOrderMatches(order, "in_transit", order.orderReference),
-    ).toThrow();
-    expect(() =>
-      assertPreviewOrderMatches(order, order.scenarioId, "SAMPLE-OTHER"),
-    ).toThrow();
-    expect(() =>
-      assertPreviewOrderMatches(
+      assertReturnFlowOrderMatches(
         { ...order, lines: [order.lines[0], order.lines[0]] },
-        order.scenarioId,
         order.orderReference,
       ),
     ).toThrow();
     expect(() =>
-      assertPreviewOrderMatches(
+      assertReturnFlowOrderMatches(
         { ...order, lines: [{ ...order.lines[2], eligibleQuantity: 1 }] },
-        order.scenarioId,
         order.orderReference,
       ),
     ).toThrow();
@@ -300,8 +383,8 @@ describe("customer return preview response verification", () => {
       singlePreviewParcel(selections),
     );
     if (!input.ok) throw new Error(input.message);
-    const response: ReturnPreviewReview = {
-      mode: "admin_preview",
+    const response: CustomerReturnFlowReview = {
+      sourceRevision: null,
       effects: "none",
       orderReference: order.orderReference,
       selectedQuantity: 3,
@@ -319,6 +402,12 @@ describe("customer return preview response verification", () => {
     expect(() =>
       assertPreviewReviewMatches(response, input.value),
     ).not.toThrow();
+    expect(() =>
+      assertPreviewReviewMatches(
+        { ...response, sourceRevision: "a".repeat(64) },
+        input.value,
+      ),
+    ).toThrow();
     expect(() =>
       assertPreviewReviewMatches(
         { ...response, selectedQuantity: 4 },
@@ -350,7 +439,7 @@ describe("customer return preview response verification", () => {
       await expect(
         readPreviewResponse(
           new Response("Sign in", { status }),
-          returnPreviewReviewSchema,
+          customerReturnFlowReviewSchema,
         ),
       ).rejects.toBeInstanceOf(PreviewAccessError);
     },
@@ -358,14 +447,17 @@ describe("customer return preview response verification", () => {
 
   it("fails closed on malformed success JSON and exposes a bounded server error", async () => {
     await expect(
-      readPreviewResponse(new Response("not JSON"), returnPreviewReviewSchema),
+      readPreviewResponse(
+        new Response("not JSON"),
+        customerReturnFlowReviewSchema,
+      ),
     ).rejects.toThrow("could not be verified");
     await expect(
       readPreviewResponse(
         new Response(
           JSON.stringify({ mode: "admin_preview", effects: "return_created" }),
         ),
-        returnPreviewReviewSchema,
+        customerReturnFlowReviewSchema,
       ),
     ).rejects.toThrow("could not be verified");
     await expect(
@@ -376,8 +468,39 @@ describe("customer return preview response verification", () => {
           }),
           { status: 409 },
         ),
-        returnPreviewReviewSchema,
+        customerReturnFlowReviewSchema,
       ),
     ).rejects.toThrow("Choose an available quantity.");
+  });
+
+  it("classifies only the known stale-review response as a source change", async () => {
+    await expect(
+      readPreviewResponse(
+        new Response(
+          JSON.stringify({
+            error: {
+              code: "RETURN_LIVE_REVIEW_CHANGED",
+              message: "Provider-specific details must not be displayed.",
+            },
+          }),
+          { status: 409 },
+        ),
+        customerReturnFlowReviewSchema,
+      ),
+    ).rejects.toBeInstanceOf(ReturnSourceChangedError);
+    await expect(
+      readPreviewResponse(
+        new Response(
+          JSON.stringify({
+            error: {
+              code: "RETURN_LIVE_REVIEW_CHANGED",
+              message: "Provider-specific details must not be displayed.",
+            },
+          }),
+          { status: 503 },
+        ),
+        customerReturnFlowReviewSchema,
+      ),
+    ).rejects.not.toBeInstanceOf(ReturnSourceChangedError);
   });
 });

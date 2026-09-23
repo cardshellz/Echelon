@@ -14,11 +14,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
-  MAX_PREVIEW_PARCELS,
-  type ReturnPreviewOrder,
-  type ReturnPreviewReason,
-  type ReturnPreviewReview,
-} from "@shared/returns/customer-return-preview.contract";
+  MAX_RETURN_FLOW_PARCELS,
+  type CustomerReturnFlowOrder,
+  type CustomerReturnFlowReason,
+  type CustomerReturnFlowReview,
+} from "@shared/returns/customer-return-flow.contract";
 import {
   describePreviewItem,
   readPreviewQuantity,
@@ -29,7 +29,7 @@ import {
 
 export const previewSelectClass =
   "flex min-h-11 w-full min-w-0 rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50";
-const reasons: { value: ReturnPreviewReason; label: string }[] = [
+const reasons: { value: CustomerReturnFlowReason; label: string }[] = [
   { value: "no_longer_needed", label: "No longer needed" },
   { value: "ordered_by_mistake", label: "Ordered by mistake" },
   { value: "wrong_item", label: "Received the wrong item" },
@@ -96,7 +96,7 @@ export function PreviewItems({
   onContinue,
   onBack,
 }: {
-  order: ReturnPreviewOrder;
+  order: CustomerReturnFlowOrder;
   drafts: PreviewSelectionDraft[];
   onChange: (drafts: PreviewSelectionDraft[]) => void;
   onContinue: () => void;
@@ -141,10 +141,16 @@ export function PreviewItems({
                   </p>
                   <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
                     {line.purchasedQuantity} ordered · {line.deliveredQuantity}{" "}
-                    delivered
-                    {line.alreadyReturningQuantity > 0 &&
-                      ` · ${line.alreadyReturningQuantity} already returning`}
+                    confirmed delivered
+                    {line.alreadyReturningQuantity !== null &&
+                      line.alreadyReturningQuantity > 0 &&
+                      ` · ${line.alreadyReturningQuantity} already in a return`}
                   </p>
+                  {line.alreadyReturningQuantity === null && (
+                    <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                      Return history needs verification
+                    </p>
+                  )}
                   <p
                     className={`mt-2 text-xs font-medium ${disabled ? "text-muted-foreground" : "text-primary"}`}
                   >
@@ -255,7 +261,7 @@ export function PreviewPacking({
   onContinue,
   onBack,
 }: {
-  order: ReturnPreviewOrder;
+  order: CustomerReturnFlowOrder;
   selections: PreviewSelections;
   parcels: PreviewParcelDraft[];
   busy: boolean;
@@ -383,7 +389,7 @@ export function PreviewPacking({
       <Button
         variant="outline"
         className="min-h-11 w-full border-dashed"
-        disabled={busy || parcels.length >= MAX_PREVIEW_PARCELS}
+        disabled={busy || parcels.length >= MAX_RETURN_FLOW_PARCELS}
         onClick={addBox}
       >
         <Plus className="mr-2 h-4 w-4" />
@@ -475,8 +481,8 @@ export function PreviewReview({
   review,
   onBack,
 }: {
-  order: ReturnPreviewOrder;
-  review: ReturnPreviewReview;
+  order: CustomerReturnFlowOrder;
+  review: CustomerReturnFlowReview;
   onBack: () => void;
 }) {
   return (

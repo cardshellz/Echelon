@@ -3,17 +3,21 @@ import { resolveReturnsTestDatabase } from "../support/disposable-database";
 
 const portalUrl = "postgresql://returns_test:secret@127.0.0.1:55473/returns_portal_test";
 const accessUrl = "postgresql://returns_test:secret@127.0.0.1:55473/returns_access_test";
+const inspectionUrl = "postgresql://returns_test:secret@127.0.0.1:55474/returns_inspection_test";
 const ciUrl = "postgresql://returns_test:secret@127.0.0.1:55473/echelon_ci_s4_00000000000040008000000000000001";
 const localEnv: NodeJS.ProcessEnv = {
   ECHELON_TEST_DATABASE_DISPOSABLE: "true", ECHELON_TEST_DATABASE_URL: portalUrl,
   RETURNS_ACCESS_TEST_DATABASE_URL: accessUrl,
+  RETURNS_INSPECTION_TEST_DATABASE_URL: inspectionUrl,
 };
 
 describe("returns disposable PostgreSQL boundary", () => {
   it("selects separate local databases so schema rebuilds cannot overlap", () => {
     expect(resolveReturnsTestDatabase(localEnv, "authorization")).toBe(portalUrl);
     expect(resolveReturnsTestDatabase(localEnv, "access")).toBe(accessUrl);
+    expect(resolveReturnsTestDatabase(localEnv, "inspection")).toBe(inspectionUrl);
     expect(resolveReturnsTestDatabase({ ECHELON_TEST_DATABASE_URL: portalUrl }, "access")).toBeNull();
+    expect(resolveReturnsTestDatabase({ ECHELON_TEST_DATABASE_URL: portalUrl }, "inspection")).toBeNull();
     expect(resolveReturnsTestDatabase({}, "authorization")).toBeNull();
   });
 
@@ -21,6 +25,7 @@ describe("returns disposable PostgreSQL boundary", () => {
     const env = { ...localEnv, ECHELON_TEST_DATABASE_URL: ciUrl };
     expect(resolveReturnsTestDatabase(env, "authorization")).toBe(ciUrl);
     expect(resolveReturnsTestDatabase(env, "access")).toBe(ciUrl);
+    expect(resolveReturnsTestDatabase(env, "inspection")).toBe(ciUrl);
   });
 
   it.each([
@@ -52,4 +57,9 @@ describe("returns disposable PostgreSQL boundary", () => {
     expect(() => resolveReturnsTestDatabase({ ...localEnv, RETURNS_ACCESS_TEST_DATABASE_URL: accessUrl + "?host=remote" }, "access"))
       .toThrow();
   });
+
+  it.each([accessUrl, portalUrl, inspectionUrl + "?host=remote", inspectionUrl.replace("127.0.0.1", "remote.example")])(
+    "rejects cross-suite and remote inspection targets %s", url => {
+      expect(() => resolveReturnsTestDatabase({ ...localEnv, RETURNS_INSPECTION_TEST_DATABASE_URL: url }, "inspection")).toThrow();
+    });
 });

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { CustomerReturnBoxPlanError, validateCustomerReturnBoxPlan } from "./customer-return-box-plan";
 import {
   returnPortalPreviewStateSchema,
   returnPreviewLookupInputSchema,
@@ -48,49 +49,9 @@ export class CustomerReturnPreviewService {
       const input = parseInput(returnPreviewReviewInputSchema, raw);
       // Never trust a previous lookup response or customer-supplied eligibility.
       const order = loadSampleOrder(input);
-      const availableLines = new Map(order.lines.map(line => [line.id, line]));
-      const selections = new Map<string, { title: string; quantity: number }>();
-      let selectedQuantity = 0;
-      for (const selection of input.selections) {
-        const line = availableLines.get(selection.lineId);
-        if (!line || selections.has(selection.lineId)) {
-          throw new CustomerReturnPreviewError("RETURN_PREVIEW_SELECTION_INVALID", "Choose each available order line once.", 400);
-        }
-        if (selection.quantity > line.eligibleQuantity) {
-          throw new CustomerReturnPreviewError("RETURN_PREVIEW_QUANTITY_UNAVAILABLE", "The selected quantity is not available to return.", 409);
-        }
-        selectedQuantity += selection.quantity;
-        if (!Number.isSafeInteger(selectedQuantity)) {
-          throw new CustomerReturnPreviewError("RETURN_PREVIEW_SELECTION_INVALID", "The selected quantity is too large.", 400);
-        }
-        selections.set(selection.lineId, { title: line.title, quantity: selection.quantity });
-      }
-
-      const packedQuantities = new Map<string, number>();
-      const parcels = input.parcels.map((parcel, index) => {
-        const linesInParcel = new Set<string>();
-        const items = parcel.items.map(item => {
-          const selection = selections.get(item.lineId);
-          if (!selection || linesInParcel.has(item.lineId)) {
-            throw parcelError("Each box must contain selected items, with each line listed once per box.");
-          }
-          linesInParcel.add(item.lineId);
-          const packed = packedQuantities.get(item.lineId) ?? 0;
-          // Subtract before adding so even malicious safe-integer inputs cannot
-          // overflow the running total or borrow units from a different line.
-          if (item.quantity > selection.quantity - packed) {
-            throw parcelError("The boxes contain more items than the selected quantity.");
-          }
-          packedQuantities.set(item.lineId, packed + item.quantity);
-          return { lineId: item.lineId, title: selection.title, quantity: item.quantity };
-        });
-        return { number: index + 1, items };
+      const { selectedQuantity, parcels } = validateCustomerReturnBoxPlan(order.lines, {
+        selections: input.selections, parcels: input.parcels,
       });
-      for (const [lineId, selection] of selections) {
-        if (packedQuantities.get(lineId) !== selection.quantity) {
-          throw parcelError("Place every selected item into a box before reviewing.");
-        }
-      }
       return returnPreviewReviewSchema.parse({
         mode: "admin_preview", effects: "none", orderReference: order.orderReference,
         selectedQuantity, parcels, refundMethod: "manual_shopify",
@@ -141,15 +102,16 @@ function parseInput<T>(schema: z.ZodType<T>, input: unknown): T {
   return parsed.data;
 }
 
-function parcelError(message: string): CustomerReturnPreviewError {
-  return new CustomerReturnPreviewError("RETURN_PREVIEW_PARCELS_INVALID", message, 400);
-}
-
 function boundary<T>(work: () => T): T {
   try {
     return work();
   } catch (error) {
     if (error instanceof CustomerReturnPreviewError) throw error;
+    if (error instanceof CustomerReturnBoxPlanError) {
+      const code = error.kind === "quantity" ? "RETURN_PREVIEW_QUANTITY_UNAVAILABLE"
+        : error.kind === "parcels" ? "RETURN_PREVIEW_PARCELS_INVALID" : "RETURN_PREVIEW_SELECTION_INVALID";
+      throw new CustomerReturnPreviewError(code, error.message, error.kind === "quantity" ? 409 : 400);
+    }
     if (error instanceof CustomerReturnOrderReferenceError) {
       throw new CustomerReturnPreviewError("RETURN_PREVIEW_INPUT_INVALID", "Enter a valid fictional order reference.", 400);
     }
