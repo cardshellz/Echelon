@@ -3,6 +3,7 @@ import type { AddressInfo } from "node:net";
 import express from "express";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerCustomerReturnPreviewRoutes, type CustomerReturnPreviewRouteDependencies } from "../../interfaces/http/customer-return-preview.routes";
+import { CustomerReturnLiveError } from "../../application/customer-return-live-error";
 import { CustomerReturnPreviewService } from "../../application/customer-return-preview.service";
 import {
   CUSTOMER_RETURN_PORTAL_PATH, CUSTOMER_RETURN_PORTAL_ACCESS_PATH,
@@ -33,6 +34,11 @@ describe("private customer return preview HTTP boundaries", () => {
     lookup: ReturnType<typeof vi.fn<CustomerReturnPreviewService["lookup"]>>;
     review: ReturnType<typeof vi.fn<CustomerReturnPreviewService["review"]>>;
   };
+  let liveService: {
+    getState: ReturnType<typeof vi.fn>;
+    lookup: ReturnType<typeof vi.fn>;
+    review: ReturnType<typeof vi.fn>;
+  };
   const actual = new CustomerReturnPreviewService();
   const scenario = actual.getState().scenarios[0];
   const lookup = { scenarioId: scenario.id, orderReference: scenario.orderReference };
@@ -42,7 +48,7 @@ describe("private customer return preview HTTP boundaries", () => {
     // Match production's parser-before-session ordering without connecting a session DB.
     app.use(express.json({ limit: "100kb" }));
     app.use((req, _res, next) => { req.session = session as typeof req.session; next(); });
-    registerCustomerReturnPreviewRoutes(app, { service, reportFailure,
+    registerCustomerReturnPreviewRoutes(app, { service, liveService: liveService as CustomerReturnPreviewRouteDependencies["liveService"], reportFailure,
       ...(useDefaultReader ? {} : { identityReader: readIdentity }) });
     app.use((_req, res) => { fallback(); res.type("html").send("<html>application shell</html>"); });
     server = http.createServer(app);
@@ -68,6 +74,9 @@ describe("private customer return preview HTTP boundaries", () => {
     expect(service.getState).not.toHaveBeenCalled();
     expect(service.lookup).not.toHaveBeenCalled();
     expect(service.review).not.toHaveBeenCalled();
+    expect(liveService.getState).not.toHaveBeenCalled();
+    expect(liveService.lookup).not.toHaveBeenCalled();
+    expect(liveService.review).not.toHaveBeenCalled();
   }
 
   beforeEach(async () => {
@@ -76,6 +85,13 @@ describe("private customer return preview HTTP boundaries", () => {
     readIdentity = vi.fn<IdentityReader>(async () => { if (identityError) throw identityError; return identity; });
     reportFailure = vi.fn<FailureReporter>(); fallback = vi.fn<() => void>();
     service = { getState: vi.fn(() => actual.getState()), lookup: vi.fn(raw => actual.lookup(raw)), review: vi.fn(raw => actual.review(raw)) };
+    liveService = {
+      getState: vi.fn(async () => ({ mode: "admin_live", customerAccess: "disabled", effects: "none", shops: [{ channelId: 36, name: "Fixture" }] })),
+      lookup: vi.fn(async () => { const { scenarioId: _scenario, mode: _mode, ...order } = actual.lookup(lookup);
+        return { ...order, mode: "admin_live", sourceRevision: "a".repeat(64) }; }),
+      review: vi.fn(async () => ({ mode: "admin_live", sourceRevision: "a".repeat(64), effects: "none", orderReference: lookup.orderReference,
+        selectedQuantity: 1, parcels: [{ number: 1, items: [{ lineId: "sample-line-1", title: "Fixture", quantity: 1 }] }], refundMethod: "manual_shopify" })),
+    };
     identityStorage.getUser.mockReset(); identityStorage.getUserRoles.mockReset();
     await start();
   });
@@ -89,7 +105,7 @@ describe("private customer return preview HTTP boundaries", () => {
         : kind === "missing_id" ? { user: { role: "admin", active: 1 } }
         : kind === "numeric_id" ? { user: { id: 123, role: "admin" } } : {};
       const headers: Record<string, string> = kind === "internal_key" ? { Authorization: "Bearer synthetic-internal-key" } : {};
-      for (const path of [API, `${API}/order`, `${API}/review`, `${PAGE}/nested`]) {
+      for (const path of [API, `${API}/order`, `${API}/review`, `${API}/live`, `${API}/live/order`, `${API}/live/review`, `${PAGE}/nested`]) {
         const response = await request(path, "GET", undefined, headers);
         expect(response.status).toBe(401); expectPrivate(response);
         expect(response.text).not.toContain("application shell");
@@ -336,4 +352,49 @@ describe("private customer return preview HTTP boundaries", () => {
     expect(anonymous.headers.get("location")).toBe(ACCESS);
     expectNoService(); expect(fallback).not.toHaveBeenCalled();
   });
+  it("serves live catalog and exact-scoped lookup only through the fresh private gate", async () => {
+    const catalog = await request(`${API}/live`);
+    expect(catalog.status).toBe(200); expectPrivate(catalog);
+    expect(catalog.body.shops).toEqual([{ channelId: 36, name: "Fixture" }]);
+    const payload = { channelId: 36, orderReference: " # 0012-A " };
+    const order = await request(`${API}/live/order`, "POST", payload);
+    expect(order.status).toBe(200); expectPrivate(order);
+    expect(liveService.lookup).toHaveBeenCalledWith(payload);
+    identity = { ...admin(), active: 0 };
+    expect((await request(`${API}/live`)).status).toBe(403);
+    expect(liveService.getState).toHaveBeenCalledOnce();
+  });
+
+  it("validates live review without allowing source/scope overrides", async () => {
+    const payload = { channelId: 36, orderReference: lookup.orderReference, sourceRevision: "a".repeat(64),
+      selections: [{ lineId: "sample-line-1", quantity: 1, reasonCode: null }],
+      parcels: [{ items: [{ lineId: "sample-line-1", quantity: 1 }] }] };
+    const reviewed = await request(`${API}/live/review`, "POST", payload);
+    expect(reviewed.status).toBe(200); expectPrivate(reviewed);
+    expect(reviewed.body.effects).toBe("none"); expect(liveService.review).toHaveBeenCalledWith(payload);
+    for (const override of [{ sourceRevision: null }, { warehouseId: 1 }, { eligibleQuantity: 10 }, { channelId: "36" }]) {
+      expect((await request(`${API}/live/review`, "POST", { ...payload, ...override })).status).toBe(400);
+    }
+    expect(liveService.review).toHaveBeenCalledOnce();
+  });
+
+  it("sanitizes live source failures and rejects malformed service output", async () => {
+    liveService.lookup.mockRejectedValueOnce(new CustomerReturnLiveError("RETURN_LIVE_REVIEW_CHANGED", "Reload this order.", 409));
+    const conflict = await request(`${API}/live/order`, "POST", { channelId: 36, orderReference: "0012-A" });
+    expect(conflict.status).toBe(409); expectPrivate(conflict);
+    expect(conflict.body.error.code).toBe("RETURN_LIVE_REVIEW_CHANGED");
+    liveService.getState.mockRejectedValueOnce(new Error("credential-secret"));
+    const failed = await request(`${API}/live`);
+    expect(failed.status).toBe(503); expectPrivate(failed); expect(failed.text).not.toContain("credential-secret");
+    liveService.getState.mockResolvedValueOnce({ mode: "admin_live", customerAccess: "enabled", effects: "none", shops: [] });
+    expect((await request(`${API}/live`)).status).toBe(503);
+  });
+
+  it.each(["/live", "/live/order", "/live/review"])("keeps %s query and unsupported-method errors private", async endpoint => {
+    const queried = await request(`${API}${endpoint}?admin=true`, endpoint === "/live" ? "GET" : "POST", endpoint === "/live" ? undefined : {});
+    expect(queried.status).toBe(400); expectPrivate(queried);
+    const method = await request(`${API}${endpoint}`, "DELETE");
+    expect(method.status).toBe(405); expectPrivate(method); expectNoService();
+  });
+
 });

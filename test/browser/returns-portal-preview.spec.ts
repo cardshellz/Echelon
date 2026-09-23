@@ -26,11 +26,20 @@ async function expectStandalone(page: Page) {
 }
 
 async function showTestingControls(page: Page) {
-  const selector = page.getByLabel("Sample order", { exact: true });
+  const selector = page.getByLabel("Order source", { exact: true });
   if (!(await selector.isVisible())) {
     await page.getByText("Testing controls", { exact: true }).click();
   }
   await expect(selector).toBeVisible();
+}
+
+async function useSampleSource(page: Page) {
+  await showTestingControls(page);
+  await page.getByLabel("Order source", { exact: true }).selectOption("sample");
+  await expect(page.getByLabel("Order number", { exact: true })).toHaveValue(
+    "TEST-1001",
+  );
+  await page.getByText("Testing controls", { exact: true }).click();
 }
 
 async function signIn(page: Page) {
@@ -50,6 +59,7 @@ test("split shipments can be reviewed in two boxes without live effects", async 
 }, testInfo) => {
   const fixture = await installReturnPreviewFixtures(page);
   await page.goto(PORTAL_PATH);
+  await useSampleSource(page);
   await expect(page.getByTestId("preview-canvas")).toBeVisible();
   await expectStandalone(page);
   await expect(page.getByText("CARD SHELLZ", { exact: true })).toBeVisible();
@@ -170,6 +180,7 @@ test("changing scenario clears selections and shipped items cannot be returned",
 }) => {
   const fixture = await installReturnPreviewFixtures(page);
   await page.goto(PORTAL_PATH);
+  await useSampleSource(page);
   await page.getByRole("button", { name: "Find order", exact: true }).click();
   await page
     .getByTestId("preview-line-sample-line-1")
@@ -223,6 +234,7 @@ test("a server denial clears the customer canvas and allows a fresh retry", asyn
   denied = false;
   await page.getByRole("button", { name: /try again|retry/i }).click();
   await expect(page.getByTestId("preview-canvas")).toBeVisible();
+  await useSampleSource(page);
   await page.route(`**${PREVIEW_API}/order`, (route) =>
     route.fulfill({
       status: 403,
@@ -268,6 +280,7 @@ test("a malformed response cannot produce a review or stale sample order", async
     }),
   );
   await page.goto(PORTAL_PATH);
+  await useSampleSource(page);
   await page.getByRole("button", { name: "Find order", exact: true }).click();
   await expect(
     page.getByText(/sample order response could not be verified/i),
@@ -302,6 +315,7 @@ test("an old order response cannot replace a newly selected scenario", async ({
     await route.fulfill({ json: fixture.service.lookup(body) });
   });
   await page.goto(PORTAL_PATH);
+  await useSampleSource(page);
   await page.getByRole("button", { name: "Find order", exact: true }).click();
   await requested;
   await showTestingControls(page);
@@ -327,6 +341,7 @@ test("same-name purchased lines remain distinguishable by sight and accessible n
 }) => {
   const fixture = await installReturnPreviewFixtures(page);
   await page.goto(PORTAL_PATH);
+  await useSampleSource(page);
   await page.getByRole("button", { name: "Find order", exact: true }).click();
   await page
     .getByLabel(
@@ -609,3 +624,330 @@ for (const routeCase of [
     expect(fixture.failures).toEqual([]);
   });
 }
+
+test("live order lookup is the default and a review carries the selected shop and original revision", async ({
+  page,
+}) => {
+  const fixture = await installReturnPreviewFixtures(page);
+  await page.goto(PORTAL_PATH);
+  await expect(page.getByLabel("Order number", { exact: true })).toHaveValue(
+    "",
+  );
+  await showTestingControls(page);
+  await expect(page.getByLabel("Order source", { exact: true })).toHaveValue(
+    "live",
+  );
+  await expect(page.getByLabel("Shopify shop", { exact: true })).toHaveValue(
+    "36",
+  );
+  await expect(page.getByLabel("Shopify shop", { exact: true })).toBeDisabled();
+  await expect(
+    page
+      .getByTestId("preview-canvas")
+      .getByLabel("Shopify shop", { exact: true }),
+  ).toHaveCount(0);
+  await page.getByLabel("Order number", { exact: true }).fill(" # LIVE-1001 ");
+  await page.getByRole("button", { name: "Find order", exact: true }).click();
+  await page
+    .getByTestId("preview-line-sample-line-1")
+    .getByRole("spinbutton")
+    .fill("1");
+  await page
+    .getByRole("button", { name: "Continue to packing", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Review return", exact: true })
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "Review your return", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Get return labels", exact: true }),
+  ).toBeDisabled();
+  const review = fixture.previewRequests.find(
+    (request) => request.path === `${PREVIEW_API}/live/review`,
+  );
+  expect(review?.body).toMatchObject({
+    channelId: 36,
+    orderReference: "#LIVE-1001",
+    sourceRevision: fixture.liveOrder().sourceRevision,
+    selections: [{ lineId: "sample-line-1", quantity: 1, reasonCode: null }],
+  });
+  expect(
+    fixture.previewRequests.filter(
+      (request) =>
+        request.path === `${PREVIEW_API}/order` ||
+        request.path === `${PREVIEW_API}/review`,
+    ),
+  ).toEqual([]);
+  expect(fixture.failures).toEqual([]);
+});
+
+test("an unavailable live catalog stays visible and sample orders require an explicit switch", async ({
+  page,
+}) => {
+  const fixture = await installReturnPreviewFixtures(page);
+  await page.route(`**${PREVIEW_API}/live`, (route) =>
+    route.fulfill({
+      status: 503,
+      json: {
+        error: { message: "Shopify shops are temporarily unavailable." },
+      },
+    }),
+  );
+  await page.goto(PORTAL_PATH);
+  await expect(page.getByRole("alert")).toContainText(
+    "Shopify shops are temporarily unavailable",
+  );
+  await expect(page.getByTestId("preview-canvas")).toHaveCount(0);
+  await showTestingControls(page);
+  await expect(page.getByLabel("Order source", { exact: true })).toHaveValue(
+    "live",
+  );
+  await page.getByLabel("Order source", { exact: true }).selectOption("sample");
+  await expect(page.getByLabel("Order number", { exact: true })).toHaveValue(
+    "TEST-1001",
+  );
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  expect(fixture.failures).toEqual([]);
+});
+
+test("an empty live shop catalog keeps the private source controls available", async ({
+  page,
+}) => {
+  const fixture = await installReturnPreviewFixtures(page, { shops: [] });
+  await page.goto(PORTAL_PATH);
+  await expect(
+    page.getByText("No Shopify shops are available for live testing.", {
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(page.getByTestId("preview-canvas")).toHaveCount(0);
+  await useSampleSource(page);
+  await expect(page.getByTestId("preview-canvas")).toBeVisible();
+  expect(fixture.failures).toEqual([]);
+});
+
+test("multiple shops require a staff selection and switching shops discards the old order", async ({
+  page,
+}) => {
+  const fixture = await installReturnPreviewFixtures(page, {
+    shops: [
+      { channelId: 36, name: "Fixture shop A" },
+      { channelId: 37, name: "Fixture shop B" },
+    ],
+  });
+  await page.goto(PORTAL_PATH);
+  await expect(
+    page.getByText(
+      "Choose a Shopify shop in Testing controls to find an order.",
+      { exact: true },
+    ),
+  ).toBeVisible();
+  await expect(page.getByTestId("preview-canvas")).toHaveCount(0);
+  await showTestingControls(page);
+  await expect(page.getByLabel("Shopify shop", { exact: true })).toHaveValue(
+    "",
+  );
+  await page.getByLabel("Shopify shop", { exact: true }).selectOption("36");
+  await page.getByLabel("Order number", { exact: true }).fill("LIVE-1001");
+  await page.getByRole("button", { name: "Find order", exact: true }).click();
+  await page
+    .getByTestId("preview-line-sample-line-1")
+    .getByRole("spinbutton")
+    .fill("1");
+  await page.getByLabel("Shopify shop", { exact: true }).selectOption("37");
+  await expect(page.getByLabel("Order number", { exact: true })).toHaveValue(
+    "",
+  );
+  await expect(page.getByTestId("preview-line-sample-line-1")).toHaveCount(0);
+  await page.getByLabel("Order number", { exact: true }).fill("LIVE-1001");
+  await page.getByRole("button", { name: "Find order", exact: true }).click();
+  await expect(
+    page.getByTestId("preview-line-sample-line-1").getByRole("spinbutton"),
+  ).toHaveValue("0");
+  expect(
+    fixture.previewRequests
+      .filter((request) => request.path === `${PREVIEW_API}/live/order`)
+      .map((request) => request.body),
+  ).toEqual([
+    { channelId: 36, orderReference: "LIVE-1001" },
+    { channelId: 37, orderReference: "LIVE-1001" },
+  ]);
+  expect(fixture.failures).toEqual([]);
+});
+
+test("a stale live review clears old quantities and requires a fresh order lookup", async ({
+  page,
+}) => {
+  const fixture = await installReturnPreviewFixtures(page);
+  await page.route(`**${PREVIEW_API}/live/review`, (route) =>
+    route.fulfill({
+      status: 409,
+      json: {
+        error: {
+          code: "RETURN_LIVE_REVIEW_CHANGED",
+          message: "Availability changed.",
+        },
+      },
+    }),
+  );
+  await page.goto(PORTAL_PATH);
+  await page.getByLabel("Order number", { exact: true }).fill("LIVE-1001");
+  await page.getByRole("button", { name: "Find order", exact: true }).click();
+  await page
+    .getByTestId("preview-line-sample-line-1")
+    .getByRole("spinbutton")
+    .fill("1");
+  await page
+    .getByRole("button", { name: "Continue to packing", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Review return", exact: true })
+    .click();
+  await expect(page.getByRole("alert")).toContainText(
+    "return availability changed",
+  );
+  await expect(page.getByLabel("Order number", { exact: true })).toHaveValue(
+    "LIVE-1001",
+  );
+  await expect(page.getByTestId("preview-line-sample-line-1")).toHaveCount(0);
+  await expect(page.getByTestId("preview-box-1")).toHaveCount(0);
+  await expect(
+    page.getByRole("heading", { name: "Review your return", exact: true }),
+  ).toHaveCount(0);
+  await page.getByRole("button", { name: "Find order", exact: true }).click();
+  await expect(
+    page.getByTestId("preview-line-sample-line-1").getByRole("spinbutton"),
+  ).toHaveValue("0");
+  expect(fixture.failures).toEqual([]);
+});
+
+test("unknown return history blocks only its item while another item can be reviewed", async ({
+  page,
+}) => {
+  const fixture = await installReturnPreviewFixtures(page);
+  const order = fixture.liveOrder();
+  const message =
+    "These quantities need verification before a return can be started.";
+  await page.route(`**${PREVIEW_API}/live/order`, (route) =>
+    route.fulfill({
+      json: {
+        ...order,
+        lines: order.lines.map((line, index) =>
+          index === 0
+            ? {
+                ...line,
+                alreadyReturningQuantity: null,
+                eligibleQuantity: 0,
+                message,
+              }
+            : line,
+        ),
+      },
+    }),
+  );
+  await page.goto(PORTAL_PATH);
+  await page.getByLabel("Order number", { exact: true }).fill("LIVE-1001");
+  await page.getByRole("button", { name: "Find order", exact: true }).click();
+  const unknown = page.getByTestId("preview-line-sample-line-1");
+  const available = page.getByTestId("preview-line-sample-line-2");
+  await expect(
+    unknown.getByText("Return history needs verification", { exact: true }),
+  ).toBeVisible();
+  await expect(unknown.getByText(message, { exact: true })).toBeVisible();
+  await expect(unknown.getByText(/0 already in a return/)).toHaveCount(0);
+  await expect(unknown.getByRole("spinbutton")).toBeDisabled();
+  await expect(available.getByRole("spinbutton")).toBeEnabled();
+  await available.getByRole("spinbutton").fill("1");
+  await page
+    .getByRole("button", { name: "Continue to packing", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Review return", exact: true })
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "Review your return", exact: true }),
+  ).toBeVisible();
+  const request = fixture.previewRequests.find(
+    (entry) => entry.path === `${PREVIEW_API}/live/review`,
+  );
+  expect(request?.body).toMatchObject({
+    selections: [{ lineId: "sample-line-2", quantity: 1, reasonCode: null }],
+    parcels: [{ items: [{ lineId: "sample-line-2", quantity: 1 }] }],
+  });
+  expect(fixture.failures).toEqual([]);
+});
+
+test("unverified delivery stays unavailable with customer-safe explanation", async ({
+  page,
+}) => {
+  const fixture = await installReturnPreviewFixtures(page);
+  const order = fixture.liveOrder();
+  const message =
+    "We can't confirm delivery yet. Our team needs to verify it before you can return this item.";
+  await page.route(`**${PREVIEW_API}/live/order`, (route) =>
+    route.fulfill({
+      json: {
+        ...order,
+        lines: order.lines.map((line) => ({
+          ...line,
+          deliveredQuantity: 0,
+          eligibleQuantity: 0,
+          message,
+        })),
+      },
+    }),
+  );
+  await page.goto(PORTAL_PATH);
+  await page.getByLabel("Order number", { exact: true }).fill("LIVE-1001");
+  await page.getByRole("button", { name: "Find order", exact: true }).click();
+  const line = page.getByTestId("preview-line-sample-line-1");
+  await expect(line.getByText(message, { exact: true })).toBeVisible();
+  await expect(line.getByRole("spinbutton")).toBeDisabled();
+  await expect(line.getByText(/0 confirmed delivered/)).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Continue to packing", exact: true }),
+  ).toBeDisabled();
+  expect(fixture.failures).toEqual([]);
+});
+
+test("a live source outage during review preserves packing but never shows a successful review", async ({
+  page,
+}) => {
+  const fixture = await installReturnPreviewFixtures(page);
+  await page.route(`**${PREVIEW_API}/live/review`, (route) =>
+    route.fulfill({
+      status: 503,
+      json: {
+        error: {
+          message:
+            "Order availability is temporarily unavailable. Please try again.",
+        },
+      },
+    }),
+  );
+  await page.goto(PORTAL_PATH);
+  await page.getByLabel("Order number", { exact: true }).fill("LIVE-1001");
+  await page.getByRole("button", { name: "Find order", exact: true }).click();
+  await page
+    .getByTestId("preview-line-sample-line-1")
+    .getByRole("spinbutton")
+    .fill("1");
+  await page
+    .getByRole("button", { name: "Continue to packing", exact: true })
+    .click();
+  await page
+    .getByRole("button", { name: "Review return", exact: true })
+    .click();
+  await expect(page.getByRole("alert")).toContainText(
+    "temporarily unavailable",
+  );
+  await expect(
+    page.getByTestId("preview-box-1").getByRole("spinbutton"),
+  ).toHaveValue("1");
+  await expect(
+    page.getByRole("heading", { name: "Review your return", exact: true }),
+  ).toHaveCount(0);
+  expect(fixture.failures).toEqual([]);
+});

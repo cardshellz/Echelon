@@ -5,12 +5,13 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
 import {
-  assertPreviewOrderMatches,
+  assertReturnFlowOrderMatches,
   assertPreviewReviewMatches,
   buildPreviewReviewInput,
   initialPreviewSelections,
   normalizedPreviewReference,
   PreviewAccessError,
+  ReturnSourceChangedError,
   samePreviewQuantities,
   singlePreviewParcel,
   validatePreviewSelections,
@@ -18,10 +19,11 @@ import {
   type PreviewSelectionDraft,
 } from "@/lib/customer-return-preview";
 import type {
-  ReturnPreviewOrder,
-  ReturnPreviewReview,
-  ReturnPreviewReviewInput,
-} from "@shared/returns/customer-return-preview.contract";
+  CustomerReturnFlowOrder,
+  CustomerReturnFlowReview,
+} from "@shared/returns/customer-return-flow.contract";
+import type { CustomerReturnFlowGateway } from "@/lib/customer-return-gateway";
+export type { CustomerReturnFlowGateway } from "@/lib/customer-return-gateway";
 import {
   PreviewError,
   PreviewItems,
@@ -29,14 +31,6 @@ import {
   PreviewPromises,
   PreviewReview,
 } from "@/components/returns/CustomerReturnPreviewSteps";
-
-export interface CustomerReturnFlowGateway {
-  lookup(reference: string, signal: AbortSignal): Promise<ReturnPreviewOrder>;
-  review(
-    input: ReturnPreviewReviewInput,
-    signal: AbortSignal,
-  ): Promise<ReturnPreviewReview>;
-}
 
 export interface CustomerReturnFlowProps {
   initialOrderReference: string;
@@ -75,10 +69,10 @@ export function CustomerReturnFlow({
   const [reference, setReference] = useState(
     normalizedPreviewReference(initialOrderReference),
   );
-  const [order, setOrder] = useState<ReturnPreviewOrder | null>(null);
+  const [order, setOrder] = useState<CustomerReturnFlowOrder | null>(null);
   const [drafts, setDrafts] = useState<PreviewSelectionDraft[]>([]);
   const [parcels, setParcels] = useState<PreviewParcelDraft[]>([]);
-  const [review, setReview] = useState<ReturnPreviewReview | null>(null);
+  const [review, setReview] = useState<CustomerReturnFlowReview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const canvas = useRef<HTMLElement>(null);
@@ -123,7 +117,14 @@ export function CustomerReturnFlow({
   }
   function fail(cause: unknown) {
     if (cause instanceof PreviewAccessError) onAccessDenied(cause.message);
-    else setError(errorMessage(cause));
+    else if (cause instanceof ReturnSourceChangedError) {
+      setOrder(null);
+      setDrafts([]);
+      setParcels([]);
+      setReview(null);
+      setStep("find");
+      setError(cause.message);
+    } else setError(errorMessage(cause));
   }
 
   async function findOrder() {
@@ -137,7 +138,7 @@ export function CustomerReturnFlow({
     const { controller, sequence } = beginRequest();
     try {
       const found = await gateway.lookup(reference, controller.signal);
-      assertPreviewOrderMatches(found, undefined, reference);
+      assertReturnFlowOrderMatches(found, reference);
       if (!current(sequence, controller)) return;
       setOrder(found);
       setDrafts(initialPreviewSelections(found));
@@ -170,6 +171,7 @@ export function CustomerReturnFlow({
   }
   async function reviewReturn() {
     if (!order) return;
+    setReview(null);
     const selected = validatePreviewSelections(order, drafts);
     if (!selected.ok) {
       setError(selected.message);
