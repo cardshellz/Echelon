@@ -44,6 +44,14 @@ export interface StoredCarrierTrackingEvent {
   inserted: boolean;
 }
 
+// Reconciliation starts from an event already persisted in the ledger. Its
+// immutable payload stays in PostgreSQL; matching only needs the normalized
+// columns and the existing row identity.
+export type StoredCarrierTrackingReconciliationEvent = Omit<
+  NormalizedCarrierTrackingEvent,
+  "sanitizedPayload"
+> & { id: number };
+
 export interface StoredCarrierTrackingMatch {
   id: number;
   inserted: boolean;
@@ -305,7 +313,10 @@ export interface StoredCarrierTrackingWebhookHydrationAttempt {
 export interface CarrierTrackingTransaction {
   acquireTrackingLock(provider: string, normalizedTrackingNumber: string): Promise<void>;
   insertOrGetEvent(event: NormalizedCarrierTrackingEvent): Promise<StoredCarrierTrackingEvent>;
-  findMatchCandidates(event: NormalizedCarrierTrackingEvent): Promise<CarrierTrackingMatchCandidate[]>;
+  findMatchCandidates(event: Pick<
+    NormalizedCarrierTrackingEvent,
+    "provider" | "providerLabelId" | "normalizedTrackingNumber"
+  >): Promise<CarrierTrackingMatchCandidate[]>;
   appendMatchAttempt(
     eventId: number,
     resolution: CarrierTrackingMatchResolution,
@@ -414,7 +425,7 @@ export interface CarrierTrackingRepository {
   listEventsPendingReconciliation(
     limit: number,
     asOf: Date,
-  ): Promise<NormalizedCarrierTrackingEvent[]>;
+  ): Promise<StoredCarrierTrackingReconciliationEvent[]>;
   claimDispatchCommands(
     limit: number,
     asOf: Date,
@@ -709,7 +720,7 @@ function isStringEnumValue<TValue extends string>(
   return values.some((candidate) => candidate === value);
 }
 
-function normalizedEventFromRow(row: Record<string, unknown>): NormalizedCarrierTrackingEvent {
+function reconciliationEventFromRow(row: Record<string, unknown>): StoredCarrierTrackingReconciliationEvent {
   const providerStatusCode = requiredString(row.provider_status_code, "provider_status_code");
   if (!isStringEnumValue(SHIPSTATION_TRACKING_STATUS_CODES, providerStatusCode)) {
     throw new Error("Invalid provider_status_code returned by carrier tracking repository");
@@ -731,6 +742,7 @@ function normalizedEventFromRow(row: Record<string, unknown>): NormalizedCarrier
     throw new Error(`Unsupported carrier tracking provider returned by repository: ${provider}`);
   }
   return {
+    id: requiredId(row.id, "carrier_tracking_event_id"),
     provider,
     eventHash: requiredString(row.event_hash, "event_hash"),
     payloadHash: requiredString(row.payload_hash, "payload_hash"),
@@ -750,7 +762,6 @@ function normalizedEventFromRow(row: Record<string, unknown>): NormalizedCarrier
     eventTimeSource: eventTimeSource as NormalizedCarrierTrackingEvent["eventTimeSource"],
     estimatedDeliveryAt: dateOrNull(row.estimated_delivery_at, "estimated_delivery_at"),
     actualDeliveryAt: dateOrNull(row.actual_delivery_at, "actual_delivery_at"),
-    sanitizedPayload: requiredRecord(row.sanitized_payload, "sanitized_payload"),
     receivedAt: requiredDate(row.received_at, "received_at"),
   };
 }
@@ -3001,6 +3012,7 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
       }
       const result = await db.execute(sql`
         SELECT
+          event.id,
           event.provider,
           event.event_hash,
           event.payload_hash,
@@ -3020,7 +3032,6 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
           event.event_time_source,
           event.estimated_delivery_at,
           event.actual_delivery_at,
-          event.sanitized_payload,
           event.received_at
         FROM wms.carrier_tracking_events AS event
         LEFT JOIN wms.carrier_tracking_reconciliation_state AS state
@@ -3044,7 +3055,7 @@ export function createDrizzleCarrierTrackingRepository(db: any): CarrierTracking
           event.id
         LIMIT ${limit}
       `);
-      return resultRows(result).map(normalizedEventFromRow);
+      return resultRows(result).map(reconciliationEventFromRow);
     },
 
     async transaction<T>(work: (tx: CarrierTrackingTransaction) => Promise<T>): Promise<T> {
