@@ -323,9 +323,21 @@ are sized on the cash the order still needs. A dispute takes the credit's
 rewards back pro rata: what is still in the balance leaves it
 (`rewards_reversed`), the part already spent comes out of cash through the
 same `funding_reversal` row; a won dispute gives both back
-(`rewards_reinstated`). Not built yet: the vendor-facing rewards surface
-(balance, ledger words, the "save my rewards" switch), the rewards share of a
-return credit, coupon redemption (`rewards_redeemed` has no writer).
+(`rewards_reinstated`). The vendor surface: the rewards balance is its own
+figure under the cash balance with a line saying how it is used, and the
+choice is the page's radio pair ("Use on orders first" / "Save my rewards",
+`PUT /api/dropship/wallet/rewards/preference`, no step-up: a preference,
+not a charge); the rules page states the rule from the served rates ("bank
+and USDC transfers earn 1% in rewards when they land; a card charge earns
+none", USDC named only where offered, nothing said while every rate is
+zero); the add-money bullets and the USDC panel say what the picked rail
+earns and when; an activity row that moved rewards shows its rewards balance
+after, named as such, never the cash balance; and an order shows both parts
+of its payment (the order detail serves the `rewards_spent` row beside the
+`order_debit` row, a hold serves the rewards share its event recorded, and
+the accept response carries `rewardsCents`). Not built yet: the rewards
+share of a return credit, coupon redemption (`rewards_redeemed` has no
+writer), and the admin order view of the split.
 
 **Still open, not designed here:** credit against a business account's first
 bank transfer (today one earlier transfer from the account must have

@@ -1907,6 +1907,12 @@ export interface DropshipOrderListItem {
   /** What the order is waiting for; present only while it is held. */
   paymentHold: {
     totalDebitCents: number;
+    /**
+     * What rewards would pay of that total once the hold clears (funding
+     * design phase 7). Null when the hold predates rewards; absent from a
+     * server that does not serve it yet.
+     */
+    rewardsCents?: number | null;
     currency: string;
     expiresAt: string | null;
   } | null;
@@ -2006,6 +2012,18 @@ export interface DropshipOrderWalletLedgerEntry {
   settledAt: string | null;
 }
 
+/**
+ * The rewards part of an accepted order's payment (funding design phase 7):
+ * the ledger row that took rewards for it. Null when cash paid it all.
+ */
+export interface DropshipOrderWalletRewardsEntry {
+  walletLedgerEntryId: number;
+  /** Negative: what the rewards balance paid. */
+  amountCents: number;
+  rewardsBalanceAfterCents: number | null;
+  createdAt: string;
+}
+
 export interface DropshipOrderAuditEventDetail {
   eventType: string;
   actorType: string;
@@ -2050,7 +2068,10 @@ export interface DropshipOrderDetail extends DropshipOrderListItem {
   lines: DropshipOrderDetailLine[];
   economicsSnapshot: DropshipOrderEconomicsSnapshot | null;
   shippingQuoteSnapshot: DropshipOrderShippingQuoteSnapshot | null;
+  /** The cash part of the order's payment; null when rewards paid it all. */
   walletLedgerEntry: DropshipOrderWalletLedgerEntry | null;
+  /** Absent from a server that does not serve it yet. */
+  walletRewardsEntry?: DropshipOrderWalletRewardsEntry | null;
   trackingPushes: DropshipOrderTrackingPushSummary[];
   auditEvents: DropshipOrderAuditEventDetail[];
 }
@@ -2101,6 +2122,8 @@ export interface DropshipOrderAcceptResponse {
     walletLedgerEntryId: number | null;
     economicsSnapshotId: number | null;
     totalDebitCents: number;
+    /** The rewards part of the debit (funding design phase 7); absent from a server that does not serve it yet. */
+    rewardsCents?: number;
     currency: string;
     paymentHoldExpiresAt: string | null;
     idempotentReplay: boolean;

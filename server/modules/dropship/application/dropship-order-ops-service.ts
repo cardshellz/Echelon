@@ -89,6 +89,13 @@ export interface DropshipOrderOpsAuditSummary {
 /** What a held intake is waiting for: the debit acceptance will make, and the deadline. */
 export interface DropshipOrderOpsPaymentHold {
   totalDebitCents: number;
+  /**
+   * What the rewards balance would pay of that total once the hold clears
+   * (funding design phase 7), so the cash still needed is
+   * `totalDebitCents - rewardsCents`. Null when the hold event predates
+   * rewards and carried no figure.
+   */
+  rewardsCents: number | null;
   currency: string;
   expiresAt: Date | null;
 }
@@ -184,6 +191,19 @@ export interface DropshipOrderOpsWalletLedgerEntry {
   settledAt: Date | null;
 }
 
+/**
+ * The rewards part of an accepted order's payment (funding design phase 7):
+ * the `rewards_spent` ledger row an acceptance posts when rewards paid some
+ * or all of the order. Null when cash paid the whole order.
+ */
+export interface DropshipOrderOpsWalletRewardsEntry {
+  walletLedgerEntryId: number;
+  /** Negative: what the rewards balance paid. */
+  amountCents: number;
+  rewardsBalanceAfterCents: number | null;
+  createdAt: Date;
+}
+
 export interface DropshipOrderOpsAuditEventDetail extends DropshipOrderOpsAuditSummary {
   actorType: string;
   actorId: string | null;
@@ -224,7 +244,9 @@ export interface DropshipOrderOpsIntakeDetail extends DropshipOrderOpsIntakeList
   lines: DropshipOrderOpsIntakeLine[];
   economicsSnapshot: DropshipOrderOpsEconomicsSnapshot | null;
   shippingQuoteSnapshot: DropshipOrderOpsShippingQuoteSnapshot | null;
+  /** The cash part of the order's payment: the `order_debit` row, absent when rewards paid it all. */
   walletLedgerEntry: DropshipOrderOpsWalletLedgerEntry | null;
+  walletRewardsEntry: DropshipOrderOpsWalletRewardsEntry | null;
   trackingPushes: DropshipOrderOpsTrackingPushSummary[];
   auditEvents: DropshipOrderOpsAuditEventDetail[];
 }

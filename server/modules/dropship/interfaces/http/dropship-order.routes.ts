@@ -137,6 +137,9 @@ function serializeOrderAcceptanceWorkflowResult(
     walletLedgerEntryId: result.acceptance.walletLedgerEntryId,
     economicsSnapshotId: result.acceptance.economicsSnapshotId,
     totalDebitCents: result.acceptance.totalDebitCents,
+    // The rewards part of the debit (funding design phase 7): spent on an
+    // acceptance, what rewards would pay on a hold, zero on a replay.
+    rewardsCents: result.acceptance.rewardsCents,
     currency: result.acceptance.currency,
     paymentHoldExpiresAt: result.acceptance.paymentHoldExpiresAt?.toISOString() ?? null,
     idempotentReplay: result.acceptance.idempotentReplay || result.quote.idempotentReplay,

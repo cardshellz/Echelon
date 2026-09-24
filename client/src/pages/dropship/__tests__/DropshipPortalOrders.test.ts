@@ -33,7 +33,18 @@ describe("DropshipPortalOrders contract", () => {
   it("puts what each held order needs and how long it has under its status", () => {
     expect(source).toContain("const heldDetail = describeHeldOrder(order, now);");
     expect(source).toContain('data-testid="order-hold-detail"');
-    expect(source).toContain('<DetailField label="Amount needed" value={formatCents(order.paymentHold.totalDebitCents)} />');
+    // What the hold needs is split by the model (rewards part, cash still needed), never added up on the page.
+    expect(source).toContain("{order.paymentHold && describeHeldOrderNeed(order.paymentHold).map((part) => (");
+    expect(source).not.toContain("formatCents(order.paymentHold.totalDebitCents)");
+  });
+
+  it("shows both parts of an accepted order's payment from the model, and names the rewards part after Accept (funding design phase 7)", () => {
+    expect(source).toContain("const orderPayment = order ? describeOrderPayment(order) : null;");
+    expect(source).toContain('data-testid="order-wallet-payment"');
+    expect(source).toContain("{orderPayment.map((part) => <DetailField key={part.label} label={part.label} value={part.value} />)}");
+    expect(source).not.toContain("order.walletLedgerEntry.amountCents");
+    expect(source).toContain("setMessage(describeOrderAcceptance(response.result));");
+    expect(source).not.toContain("function orderAcceptanceMessage");
   });
 
   it("opens filtered to waiting orders when linked with ?status=, and only for statuses it offers", () => {

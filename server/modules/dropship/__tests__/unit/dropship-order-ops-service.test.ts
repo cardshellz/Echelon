@@ -524,6 +524,7 @@ class FakeOrderOpsRepository implements DropshipOrderOpsRepository {
       economicsSnapshot: null,
       shippingQuoteSnapshot: null,
       walletLedgerEntry: null,
+      walletRewardsEntry: null,
       trackingPushes: [{
         pushId: 40,
         wmsShipmentId: 700,
