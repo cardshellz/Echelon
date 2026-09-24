@@ -43,6 +43,11 @@ const LIMITS: DropshipWalletPolicyLimitsView = {
   advanceFeeBps: 100,
   advanceCapCents: 50_000,
   tierChangeGraceDays: 14,
+  cardFundingFeeBps: 0,
+  cardFundingMinCents: 10_000,
+  rewardsRateBankBps: 100,
+  rewardsRateUsdcBps: 100,
+  rewardsRateCardBps: 0,
 };
 
 function baselineForm(patch: Partial<DropshipWalletPolicyForm> = {}): DropshipWalletPolicyForm {
@@ -66,7 +71,7 @@ describe("describeDropshipWalletPolicyTierEnforcement", () => {
     const envKeys = Object.fromEntries(Object.keys(LIMITS).map((key) => [key, null]));
     const base = {
       policy: null, limitsSource: "environment", limits: LIMITS, envLimits: LIMITS,
-      envKeys, cardFundingFee: { bps: 300, envKey: "X", editable: false, readOnlyReason: "no" },
+      envKeys,
       impact: { proposedAutoReloadMinTriggerCents: 1, proposedAutoReloadMinAmountCents: 1, vendorsBelowMinimumFloor: 0, vendorsBelowMinimumSingleTopUpLimit: 0, activeVendorsWithAutoReloadSettings: 0, evaluatedAt: "2026-09-20T00:00:00.000Z" },
       generatedAt: "2026-09-20T00:00:00.000Z",
     };
@@ -98,6 +103,11 @@ describe("dropship wallet policy form model", () => {
       advanceFeePercent: "1.00",
       advanceCapDollars: "500.00",
       tierChangeGraceDays: "14",
+      cardFundingFeePercent: "0.00",
+      cardFundingMinDollars: "100.00",
+      rewardsRateBankPercent: "1.00",
+      rewardsRateUsdcPercent: "1.00",
+      rewardsRateCardPercent: "0.00",
       changeNote: "",
     });
     expect(centsToDollarInput(1)).toBe("0.01");
@@ -107,7 +117,7 @@ describe("dropship wallet policy form model", () => {
     expect(basisPointsToPercentInput(0)).toBe("0.00");
   });
 
-  it("lists the ten limits in display order, each mapped to its own form field", () => {
+  it("lists the fifteen limits in display order, each mapped to its own form field", () => {
     expect(DROPSHIP_WALLET_POLICY_LIMIT_DESCRIPTORS.map((descriptor) => descriptor.limitField)).toEqual([
       "autoReloadMinTriggerCents",
       "caseTierMinimumCents",
@@ -119,11 +129,16 @@ describe("dropship wallet policy form model", () => {
       "advanceFeeBps",
       "advanceCapCents",
       "tierChangeGraceDays",
+      "cardFundingFeeBps",
+      "cardFundingMinCents",
+      "rewardsRateBankBps",
+      "rewardsRateUsdcBps",
+      "rewardsRateCardBps",
     ]);
-    expect(new Set(DROPSHIP_WALLET_POLICY_LIMIT_DESCRIPTORS.map((descriptor) => descriptor.formField)).size).toBe(10);
-    // Only the advance fee, the advance cap and the grace may be zero.
+    expect(new Set(DROPSHIP_WALLET_POLICY_LIMIT_DESCRIPTORS.map((descriptor) => descriptor.formField)).size).toBe(15);
+    // Only the advance fee, the advance cap, the grace, the card fee and the rewards rates may be zero.
     expect(DROPSHIP_WALLET_POLICY_LIMIT_DESCRIPTORS.filter((descriptor) => descriptor.allowZero).map((descriptor) => descriptor.limitField))
-      .toEqual(["advanceFeeBps", "advanceCapCents", "tierChangeGraceDays"]);
+      .toEqual(["advanceFeeBps", "advanceCapCents", "tierChangeGraceDays", "cardFundingFeeBps", "rewardsRateBankBps", "rewardsRateUsdcBps", "rewardsRateCardBps"]);
   });
 
   it("parses dollars and percents into integers without floating-point arithmetic", () => {
@@ -174,6 +189,11 @@ describe("dropship wallet policy form model", () => {
       advanceFeePercent: "-1",
       advanceCapDollars: "abc",
       tierChangeGraceDays: "-1",
+      cardFundingFeePercent: "abc",
+      cardFundingMinDollars: "0",
+      rewardsRateBankPercent: "11",
+      rewardsRateUsdcPercent: "-1",
+      rewardsRateCardPercent: "1",
       changeNote: "",
     });
     expect(parsed.success).toBe(false);
@@ -181,6 +201,9 @@ describe("dropship wallet policy form model", () => {
     expect(parsed.errors.autoReloadMinTriggerDollars).toContain("greater than zero");
     expect(parsed.errors.caseTierMinimumDollars).toContain("greater than zero");
     expect(parsed.errors.autoReloadMinAmountDollars).toContain("at most two decimal places");
+    expect(parsed.errors.rewardsRateBankPercent).toBe("Rewards on bank transfers cannot exceed 10%.");
+    expect(parsed.errors.rewardsRateUsdcPercent).toContain("percentage of zero or more");
+    expect(parsed.errors.rewardsRateCardPercent).toBeUndefined();
     expect(parsed.errors.manualFundingMinDollars).toContain("greater than zero");
     expect(parsed.errors.manualFundingMaxDollars).toContain("at most two decimal places");
     expect(parsed.errors.defaultPaymentHoldTimeoutMinutes).toBe(
@@ -198,6 +221,10 @@ describe("dropship wallet policy form model", () => {
     expect(parsed.errors.tierChangeGraceDays).toBe(
       "Tier change grace must be a whole number of days, zero or more.",
     );
+    expect(parsed.errors.cardFundingFeePercent).toBe(
+      "Card funding fee must be a percentage of zero or more, with at most two decimal places.",
+    );
+    expect(parsed.errors.cardFundingMinDollars).toContain("greater than zero");
   });
 
   it("rejects an amount larger than the system can record as a range problem", () => {
@@ -313,10 +340,16 @@ describe("dropship wallet policy form model", () => {
       advanceFeeBps: 100,
       advanceCapCents: 50_000,
       tierChangeGraceDays: 14,
+      cardFundingFeeBps: 0,
+      cardFundingMinCents: 10_000,
+      rewardsRateBankBps: 100,
+      rewardsRateUsdcBps: 100,
+      rewardsRateCardBps: 0,
     }).map((violation) => violation.field)).toEqual([
       "manualFundingMaxCents",
       "autoReloadMinAmountCents",
       "caseTierMinimumCents",
+      "cardFundingMinCents",
       "holdExpiryWarningMinutes",
     ]);
   });
@@ -367,7 +400,9 @@ describe("dropship wallet policy form model", () => {
       "autoReloadMinTriggerCents=10000|caseTierMinimumCents=50000|autoReloadMinAmountCents=10000"
       + "|manualFundingMinCents=1000|manualFundingMaxCents=500000"
       + "|defaultPaymentHoldTimeoutMinutes=1440|holdExpiryWarningMinutes=120"
-      + "|advanceFeeBps=100|advanceCapCents=50000|tierChangeGraceDays=14",
+      + "|advanceFeeBps=100|advanceCapCents=50000|tierChangeGraceDays=14"
+      + "|cardFundingFeeBps=0|cardFundingMinCents=10000"
+      + "|rewardsRateBankBps=100|rewardsRateUsdcBps=100|rewardsRateCardBps=0",
     );
     expect(dropshipWalletPolicyLimitsKey({ ...LIMITS, advanceCapCents: 50_001 }))
       .not.toBe(dropshipWalletPolicyLimitsKey(LIMITS));
@@ -414,6 +449,8 @@ describe("dropship wallet policy form model", () => {
       "advanceFeeBps",
       "autoReloadMinAmountCents",
       "autoReloadMinTriggerCents",
+      "cardFundingFeeBps",
+      "cardFundingMinCents",
       "caseTierMinimumCents",
       "changeNote",
       "defaultPaymentHoldTimeoutMinutes",
@@ -421,6 +458,9 @@ describe("dropship wallet policy form model", () => {
       "idempotencyKey",
       "manualFundingMaxCents",
       "manualFundingMinCents",
+      "rewardsRateBankBps",
+      "rewardsRateCardBps",
+      "rewardsRateUsdcBps",
       "tierChangeGraceDays",
     ]);
     expect(request).toMatchObject({
@@ -516,12 +556,11 @@ describe("dropship wallet policy form model", () => {
         advanceFeeBps: null,
         advanceCapCents: null,
         tierChangeGraceDays: null,
-      },
-      cardFundingFee: {
-        bps: 290,
-        envKey: "DROPSHIP_CARD_FUNDING_FEE_BPS",
-        editable: false,
-        readOnlyReason: "Vendors agreed to the live rate.",
+        cardFundingFeeBps: "DROPSHIP_CARD_FUNDING_FEE_BPS",
+        cardFundingMinCents: null,
+        rewardsRateBankBps: null,
+        rewardsRateUsdcBps: null,
+        rewardsRateCardBps: null,
       },
       impact: {
         proposedAutoReloadMinTriggerCents: 10_000,
@@ -542,5 +581,35 @@ describe("dropship wallet policy form model", () => {
       .toThrow(/wallet policy response was not in the expected shape at limits.advanceCapCents/);
     expect(() => parseDropshipWalletPolicyMutation({ idempotentReplay: true }))
       .toThrow(/wallet policy save response was not in the expected shape/);
+  });
+});
+
+describe("the card fee and the card minimum deposit (funding design phase 7)", () => {
+  it("accepts a zero card fee, refuses one above the 10% guard, and holds the card minimum to the manual maximum", () => {
+    const zero = parseDropshipWalletPolicyForm(baselineForm({ cardFundingFeePercent: "0" }));
+    expect(zero.success && zero.limits.cardFundingFeeBps).toBe(0);
+
+    const tooHigh = parseDropshipWalletPolicyForm(baselineForm({ cardFundingFeePercent: "10.01" }));
+    if (tooHigh.success) throw new Error("expected a rejection");
+    expect(tooHigh.errors.cardFundingFeePercent).toBe("Card funding fee cannot exceed 10%.");
+
+    const atGuard = parseDropshipWalletPolicyForm(baselineForm({ cardFundingFeePercent: "10" }));
+    expect(atGuard.success && atGuard.limits.cardFundingFeeBps).toBe(1_000);
+
+    const aboveMax = parseDropshipWalletPolicyForm(baselineForm({ cardFundingMinDollars: "5000.01" }));
+    if (aboveMax.success) throw new Error("expected a rejection");
+    expect(aboveMax.errors.cardFundingMinDollars).toBe("Card minimum deposit must be at most the manual top-up maximum.");
+
+    const zeroMin = parseDropshipWalletPolicyForm(baselineForm({ cardFundingMinDollars: "0" }));
+    if (zeroMin.success) throw new Error("expected a rejection");
+    expect(zeroMin.errors.cardFundingMinDollars).toBe("Card minimum deposit must be a dollar amount greater than zero, with at most two decimal places.");
+  });
+
+  it("round-trips both values through the form without floating point", () => {
+    const form = dropshipWalletPolicyFormFromLimits({ ...LIMITS, cardFundingFeeBps: 275, cardFundingMinCents: 12_345 });
+    expect(form.cardFundingFeePercent).toBe("2.75");
+    expect(form.cardFundingMinDollars).toBe("123.45");
+    const parsed = parseDropshipWalletPolicyForm(form);
+    expect(parsed.success && parsed.limits).toMatchObject({ cardFundingFeeBps: 275, cardFundingMinCents: 12_345 });
   });
 });

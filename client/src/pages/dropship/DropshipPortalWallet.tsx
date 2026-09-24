@@ -107,6 +107,10 @@ import {
   depositDefaultCents,
   depositOptions,
   describeDepositOption,
+  cardFeeAt,
+  cardFeeNoun,
+  cardFeeOnTop,
+  describeCardFee,
   describeDepositRail,
   describePendingBalance,
   describePlanSentence,
@@ -392,7 +396,7 @@ export default function DropshipPortalWallet() {
       setNotice({ scope, tone: "error", text: caught instanceof Error && caught.message.trim() ? caught.message : "Wallet request failed." });
       return;
     }
-    const limits = wallet?.limits ?? { bankBalanceReadOffered: false, autoReloadMinTriggerCents: 0, caseTierMinimumCents: 0, autoReloadMinAmountCents: 0, manualFundingMinCents: 0, manualFundingMaxCents: 0, defaultPaymentHoldTimeoutMinutes: 1, holdExpiryWarningMinutes: 1, advanceFeeBps: 0, advanceCapCents: 0, tierChangeGraceDays: 0 };
+    const limits = wallet?.limits ?? { bankBalanceReadOffered: false, autoReloadMinTriggerCents: 0, caseTierMinimumCents: 0, autoReloadMinAmountCents: 0, manualFundingMinCents: 0, manualFundingMaxCents: 0, cardFundingMinCents: 0, defaultPaymentHoldTimeoutMinutes: 1, holdExpiryWarningMinutes: 1, advanceFeeBps: 0, advanceCapCents: 0, tierChangeGraceDays: 0, rewardsRateBankBps: 0, rewardsRateUsdcBps: 0, rewardsRateCardBps: 0 };
     const face = describeWalletError(caught.code, caught.message, caught.context, { surface, limits });
     if (caught.code === "DROPSHIP_CARD_FUNDING_FEE_MISCONFIGURED") setFeeMisconfigured(true);
     if (face.recovery === "verify") {
@@ -608,7 +612,7 @@ export default function DropshipPortalWallet() {
 
   const walletErrorText = walletQuery.error
     ? describeWalletError(walletQuery.error instanceof DropshipApiError ? walletQuery.error.code : null, queryErrorMessage(walletQuery.error, "Unable to load your wallet."), null, {
-      surface: "get", limits: { bankBalanceReadOffered: false, autoReloadMinTriggerCents: 0, caseTierMinimumCents: 0, autoReloadMinAmountCents: 0, manualFundingMinCents: 0, manualFundingMaxCents: 0, defaultPaymentHoldTimeoutMinutes: 1, holdExpiryWarningMinutes: 1, advanceFeeBps: 0, advanceCapCents: 0, tierChangeGraceDays: 0 },
+      surface: "get", limits: { bankBalanceReadOffered: false, autoReloadMinTriggerCents: 0, caseTierMinimumCents: 0, autoReloadMinAmountCents: 0, manualFundingMinCents: 0, manualFundingMaxCents: 0, cardFundingMinCents: 0, defaultPaymentHoldTimeoutMinutes: 1, holdExpiryWarningMinutes: 1, advanceFeeBps: 0, advanceCapCents: 0, tierChangeGraceDays: 0, rewardsRateBankBps: 0, rewardsRateUsdcBps: 0, rewardsRateCardBps: 0 },
     }).text
     : null;
 
@@ -986,7 +990,7 @@ function StepIndicator({ wallet, flow, draft, onSelect }: { wallet: DropshipWall
     } else if (step === "floor" && state === "done") {
       detail = formatWholeDollars(flow.floorCents);
     } else if (step === "backup" && flow.source?.rail === "stripe_card" && state !== "later") {
-      detail = `Backup card · ${describeFundingMethod(flow.source.method)} — the card you top up with is also your backup card. If an order needs more than your balance, the same card pays the shortfall plus ${fee}, up to ${formatWholeDollars(wallet.limits.manualFundingMaxCents)} in one payment.`;
+      detail = `Backup card · ${describeFundingMethod(flow.source.method)} — the card you top up with is also your backup card. If an order needs more than your balance, the same card pays the shortfall${cardFeeOnTop(wallet.cardFundingFeeBps)}, up to ${formatWholeDollars(wallet.limits.manualFundingMaxCents)} in one payment.`;
     } else if (step === "backup" && state === "done" && flow.backup) {
       detail = describeFundingMethodDetailed(flow.backup.method);
     } else if (step === "deposit" && flow.source?.rail === "stripe_card" && flow.backup) {
@@ -1120,14 +1124,14 @@ function SourcePicker({
       ["Fee", "None"],
       ["Speed", `Up to 5 business days to land (our assumption — Stripe gives us no date)`],
       ["Money parked", "Higher minimum recommended, so more of your money sits in the wallet"],
-      ["When an order needs more than your balance", `Your backup card pays the shortfall plus ${fee}, up to ${ceiling} in one payment`],
+      ["When an order needs more than your balance", `Your backup card pays the shortfall${cardFeeOnTop(wallet.cardFundingFeeBps)}, up to ${ceiling} in one payment`],
       ["Best for", "Most sellers: fees stay near zero when the minimum keeps up"],
     ]
     : [
-      ["Fee", `${fee} on every top-up, on top of the amount`],
+      ["Fee", wallet.cardFundingFeeBps > 0 ? `${fee} on every top-up, on top of the amount` : "None"],
       ["Speed", "Lands at once"],
-      ["Money parked", `A lower minimum is fine, so less of your money sits in the wallet — the first fill to the minimum is charged ${fee} once`],
-      ["When an order needs more than your balance", `The same card pays the shortfall plus ${fee}, up to ${ceiling} in one payment`],
+      ["Money parked", `A lower minimum is fine, so less of your money sits in the wallet${wallet.cardFundingFeeBps > 0 ? ` — the first fill to the minimum is charged ${fee} once` : ""}`],
+      ["When an order needs more than your balance", `The same card pays the shortfall${cardFeeOnTop(wallet.cardFundingFeeBps)}, up to ${ceiling} in one payment`],
       ["Best for", "Sellers who would rather park less money and pay the fee"],
     ];
 
@@ -1302,11 +1306,13 @@ function SourceStep({
         <p className="mt-3 text-sm text-zinc-500" data-testid="wallet-usdc-note">{describeUsdcSourceNote(wallet.usdcDeposit)}</p>
       )}
       {shownRail === "stripe_ach" && (
-        <Impact>Routine top-ups are free. While a transfer is landing, orders draw on what has already settled; if an order needs more, your backup card covers the shortfall plus {fee}, up to {formatWholeDollars(wallet.limits.manualFundingMaxCents)} in one payment. A higher minimum in the next step makes that rare.</Impact>
+        <Impact>Routine top-ups are free. While a transfer is landing, orders draw on what has already settled; if an order needs more, your backup card covers the shortfall{cardFeeOnTop(wallet.cardFundingFeeBps)}, up to {formatWholeDollars(wallet.limits.manualFundingMaxCents)} in one payment. A higher minimum in the next step makes that rare.</Impact>
       )}
       {shownRail === "stripe_card" && (
         <Impact>
-          Every top-up costs {fee}: for example, at {formatWholeDollars(EXAMPLE_MONTHLY_SPEND_CENTS)} of orders a month that is about {formatWholeDollars(exampleFee)} in fees. Your card is also your backup card, so there is nothing more to add.
+          {wallet.cardFundingFeeBps > 0
+            ? `Every top-up costs ${fee}: for example, at ${formatWholeDollars(EXAMPLE_MONTHLY_SPEND_CENTS)} of orders a month that is about ${formatWholeDollars(exampleFee)} in fees.`
+            : `Card top-ups carry no fee; a card deposit is ${formatWholeDollars(wallet.limits.cardFundingMinCents)} or more.`} Your card is also your backup card, so there is nothing more to add.
         </Impact>
       )}
       {pendingNotice && <PendingStripeNotice purpose={pendingNotice.purpose} onCheckAgain={onCheckAgain} />}
@@ -1400,7 +1406,9 @@ function FloorStep({
       <p className="mt-1 text-sm text-zinc-600">
         {sourceRail === "stripe_ach"
           ? "Your minimum is the balance autopay keeps your wallet at, and it decides what you can sell. With a bank account, a higher minimum means orders rarely outrun your settled money, so the backup card is rarely charged. The trade-off: more of your money sits in the wallet."
-          : `Your minimum is the balance autopay keeps your wallet at, and it decides what you can sell. With a card, top-ups land at once. The fee is ${fee} of everything you spend whatever minimum you choose — a higher minimum parks more of your money and costs ${fee} once on the first fill (${formatWholeDollars(firstFillFeeCents(FIRST_FILL_EXAMPLE_FLOORS_CENTS[0], wallet.cardFundingFeeBps))} at ${formatWholeDollars(FIRST_FILL_EXAMPLE_FLOORS_CENTS[0])}, ${formatWholeDollars(firstFillFeeCents(FIRST_FILL_EXAMPLE_FLOORS_CENTS[1], wallet.cardFundingFeeBps))} at ${formatWholeDollars(FIRST_FILL_EXAMPLE_FLOORS_CENTS[1])}).`}
+          : wallet.cardFundingFeeBps === 0
+            ? "Your minimum is the balance autopay keeps your wallet at, and it decides what you can sell. With a card, top-ups land at once and carry no fee, so the minimum only decides how much of your money sits in the wallet."
+            : `Your minimum is the balance autopay keeps your wallet at, and it decides what you can sell. With a card, top-ups land at once. The fee is ${fee} of everything you spend whatever minimum you choose — a higher minimum parks more of your money and costs ${fee} once on the first fill (${formatWholeDollars(firstFillFeeCents(FIRST_FILL_EXAMPLE_FLOORS_CENTS[0], wallet.cardFundingFeeBps))} at ${formatWholeDollars(FIRST_FILL_EXAMPLE_FLOORS_CENTS[0])}, ${formatWholeDollars(firstFillFeeCents(FIRST_FILL_EXAMPLE_FLOORS_CENTS[1], wallet.cardFundingFeeBps))} at ${formatWholeDollars(FIRST_FILL_EXAMPLE_FLOORS_CENTS[1])}).`}
       </p>
 
       <div role="radiogroup" aria-label="Minimum" className="mt-4 space-y-2">
@@ -1448,20 +1456,26 @@ function FloorStep({
         <p role="status" aria-live="polite" data-testid="wallet-impact">
           {sourceRail === "stripe_ach"
             ? `Keeping ${formatWholeDollars(floorCents)} means routine top-ups are free and the backup card is charged only when orders outrun your settled money.`
-            : `Keeping ${formatWholeDollars(floorCents)} means every top-up, whatever its size, costs ${fee}; the minimum changes how much of your money sits in the wallet, not the fee.`}
+            : wallet.cardFundingFeeBps > 0
+              ? `Keeping ${formatWholeDollars(floorCents)} means every top-up, whatever its size, costs ${fee}; the minimum changes how much of your money sits in the wallet, not the fee.`
+              : `Keeping ${formatWholeDollars(floorCents)} means every top-up lands at once with no fee; the minimum only changes how much of your money sits in the wallet.`}
         </p>
         <p data-testid="wallet-guidance-parked">
           Autopay keeps at least {formatWholeDollars(floorCents)} in the wallet, topping up by {formatWholeDollars(topUpCents ?? floorCents)} at a time.
-          {sourceRail === "stripe_ach" ? " Transfers on the way count." : ` The first fill to ${formatWholeDollars(floorCents)} is charged ${fee} once: ${formatWholeDollars(firstFillFeeCents(floorCents, wallet.cardFundingFeeBps))}.`}
+          {sourceRail === "stripe_ach" ? " Transfers on the way count." : wallet.cardFundingFeeBps > 0 ? ` The first fill to ${formatWholeDollars(floorCents)} is charged ${fee} once: ${formatWholeDollars(firstFillFeeCents(floorCents, wallet.cardFundingFeeBps))}.` : ""}
         </p>
         <p data-testid="wallet-guidance-fee">
           {sourceRail === "stripe_ach"
-            ? `Card fees: $0 on routine top-ups. Only a shortfall is charged ${fee} — for example a ${formatWholeDollars(EXAMPLE_SHORTFALL.orderCents)} order with ${formatWholeDollars(EXAMPLE_SHORTFALL.availableCents)} available charges your backup card ${formatWholeDollars(example.shortfallCents)} + ${formatWholeDollars(example.feeCents)}.`
-            : `Card fees: ${fee} of every top-up, whatever minimum you choose. For example a ${formatWholeDollars(exampleCardTopUp.creditCents)} top-up charges ${formatWholeDollars(exampleCardTopUp.chargedCents)}.`}
+            ? wallet.cardFundingFeeBps > 0
+              ? `Card fees: $0 on routine top-ups. Only a shortfall is charged ${fee} — for example a ${formatWholeDollars(EXAMPLE_SHORTFALL.orderCents)} order with ${formatWholeDollars(EXAMPLE_SHORTFALL.availableCents)} available charges your backup card ${formatWholeDollars(example.shortfallCents)} + ${formatWholeDollars(example.feeCents)}.`
+              : `Card fees: none. A shortfall goes to your backup card with no fee — for example a ${formatWholeDollars(EXAMPLE_SHORTFALL.orderCents)} order with ${formatWholeDollars(EXAMPLE_SHORTFALL.availableCents)} available charges your backup card ${formatWholeDollars(example.shortfallCents)}.`
+            : wallet.cardFundingFeeBps > 0
+              ? `Card fees: ${fee} of every top-up, whatever minimum you choose. For example a ${formatWholeDollars(exampleCardTopUp.creditCents)} top-up charges ${formatWholeDollars(exampleCardTopUp.chargedCents)}.`
+              : `Card fees: none. A ${formatWholeDollars(exampleCardTopUp.creditCents)} top-up charges exactly ${formatWholeDollars(exampleCardTopUp.creditCents)}.`}
         </p>
         <p data-testid="wallet-guidance-activation">
-          {activation.outcome === "top_up" && sourceRail === "stripe_ach" && `On the first daily check after you activate (about midnight UTC): we start a top-up of ${formatWholeDollars(activation.amountCents)} from ${sourceLabel} — free, ${BANK_SETTLEMENT_PHRASE} to land${activation.partial ? "; the most autopay takes in one charge, so the next daily check continues" : ""}. Until it lands, orders are charged to your backup card at ${fee}. Adding money by card now avoids that.`}
-          {activation.outcome === "top_up" && sourceRail === "stripe_card" && `On the first daily check after you activate (about midnight UTC): we charge ${sourceLabel} ${formatWholeDollars(activation.chargedCents)} (${formatWholeDollars(activation.amountCents)} + ${formatWholeDollars(activation.feeCents)} fee) at once${activation.partial ? "; the most autopay takes in one charge, so the next daily check continues" : ""}.`}
+          {activation.outcome === "top_up" && sourceRail === "stripe_ach" && `On the first daily check after you activate (about midnight UTC): we start a top-up of ${formatWholeDollars(activation.amountCents)} from ${sourceLabel} — free, ${BANK_SETTLEMENT_PHRASE} to land${activation.partial ? "; the most autopay takes in one charge, so the next daily check continues" : ""}. Until it lands, orders are charged to your backup card${cardFeeAt(wallet.cardFundingFeeBps)}. Adding money by card now avoids that.`}
+          {activation.outcome === "top_up" && sourceRail === "stripe_card" && `On the first daily check after you activate (about midnight UTC): we charge ${sourceLabel} ${formatWholeDollars(activation.chargedCents)}${wallet.cardFundingFeeBps > 0 ? ` (${formatWholeDollars(activation.amountCents)} + ${formatWholeDollars(activation.feeCents)} fee)` : " (no fee)"} at once${activation.partial ? "; the most autopay takes in one charge, so the next daily check continues" : ""}.`}
           {activation.outcome === "not_needed" && "On the first daily check after you activate: no top-up — your balance already covers your minimum."}
         </p>
         <p className="text-xs text-zinc-600" data-testid="wallet-floor-limit-note">
@@ -1537,7 +1551,7 @@ function BackupPicker({
           <Button type="button" variant="ghost" size="sm" className="h-8" disabled={busy} onClick={onAdd}>Add a card</Button>
         </>
       )}
-      <p className="text-sm text-zinc-500" data-testid="wallet-card-fee-note">Card charges carry a {fee} fee on top of the amount added. Bank accounts and USDC carry no fee.</p>
+      <p className="text-sm text-zinc-500" data-testid="wallet-card-fee-note">{wallet.cardFundingFeeBps > 0 ? `Card charges carry a ${fee} fee on top of the amount added. Bank accounts and USDC carry no fee.` : `No fee on cards, bank accounts or USDC. A card deposit is ${formatWholeDollars(wallet.limits.cardFundingMinCents)} or more.`}</p>
     </div>
   );
 }
@@ -1580,10 +1594,10 @@ function BackupStep({
     <section className={SECTION} data-testid="wallet-step-backup">
       <h2 className="text-lg font-semibold">Your backup card</h2>
       <p className="mt-1 text-sm text-zinc-600">
-        Bank transfers take days to land. A card lets an order go out when your balance is short: we charge it the shortfall plus the {fee} fee — never to refill the wallet — and accept the order right away, even while a bank top-up is still landing. It is never used for routine top-ups. Keep your minimum high and it may never be used.
+        Bank transfers take days to land. A card lets an order go out when your balance is short: we charge it the shortfall{wallet.cardFundingFeeBps > 0 ? ` plus the ${fee} fee` : " with no fee"} — never to refill the wallet — and accept the order right away, even while a bank top-up is still landing. It is never used for routine top-ups. Keep your minimum high and it may never be used.
       </p>
       <BackupPicker wallet={wallet} now={now} selectedId={selected?.fundingMethodId ?? null} onSelect={setSelectedId} busy={feedback.busy} onAdd={onAdd} confirmation={confirmation} onCheckAgain={onCheckAgain} />
-      <Impact>While your account is active, we only ever charge this card when an order needs more than your available balance, and only for the shortfall plus the {fee} fee, whatever its size (up to {formatWholeDollars(wallet.limits.manualFundingMaxCents)} in one payment). If a return fee has taken your balance below zero, the shortfall includes that amount. Your bank top-ups stay free.</Impact>
+      <Impact>While your account is active, we only ever charge this card when an order needs more than your available balance, and only for the shortfall{wallet.cardFundingFeeBps > 0 ? ` plus the ${fee} fee` : ", with no fee"}, whatever its size (up to {formatWholeDollars(wallet.limits.manualFundingMaxCents)} in one payment). If a return fee has taken your balance below zero, the shortfall includes that amount. Your bank top-ups stay free.</Impact>
       {pendingNotice && <PendingStripeNotice purpose={pendingNotice.purpose} onCheckAgain={onCheckAgain} />}
       {saveNote}
       <SectionFeedback {...feedback} />
@@ -1603,7 +1617,7 @@ function BackupStep({
 function buildReviewRows({ wallet, terms }: { wallet: DropshipWalletView; terms: WalletTerms }) {
   const topUp = terms.topUpCents ?? terms.floorCents;
   const rows: Array<[string, string, ("source" | "floor" | "backup") | null]> = [
-    ["Autopay from", terms.sourceRail === "stripe_ach" ? `${terms.sourceLabel} (bank account, no fee)` : `${terms.sourceLabel} (card, ${formatFeeRate(terms.cardFundingFeeBps)} fee)`, "source"],
+    ["Autopay from", terms.sourceRail === "stripe_ach" ? `${terms.sourceLabel} (bank account, no fee)` : `${terms.sourceLabel} (card, ${describeCardFee(terms.cardFundingFeeBps)})`, "source"],
     ["Minimum", formatWholeDollars(terms.floorCents), "floor"],
     ["Backup card", terms.sourceRail === "stripe_card" ? `${terms.backupLabel} — also your autopay source` : terms.backupLabel, terms.sourceRail === "stripe_card" ? null : "backup"],
     ["Top-up amount", `${formatWholeDollars(topUp)}${topUp === terms.floorCents ? " — your minimum" : ""}. Routine top-ups never take more than ${formatWholeDollars(terms.limitCents)} in one charge.`, "floor"],
@@ -1657,7 +1671,7 @@ function ReviewStep({
         {describeActivationQuote({ terms, availableCents: wallet.account.availableBalanceCents, pendingCents: wallet.account.pendingBalanceCents })}
       </p>
       <p className="mt-2 text-sm text-zinc-500" data-testid="wallet-fee-acknowledgement-line">
-        Clicking the button records that you agree to the {fee} fee on card charges, with today's date and the team member who agreed. You can change any of this later in Wallet.
+        Clicking the button records that you agree to {wallet.cardFundingFeeBps > 0 ? `the ${fee} fee on card charges` : "these terms, with no fee on card charges today"}, with today's date and the team member who agreed. You can change any of this later in Wallet.
       </p>
       <Impact>From now on we top up on our own as described above. Nothing is charged until you activate your account.</Impact>
       <SectionFeedback {...feedback} />
@@ -1695,7 +1709,8 @@ function FundingControls({
   const fee = formatFeeRate(wallet.cardFundingFeeBps);
   const [rail, setRail] = useState<WalletSourceRail | "usdc">("stripe_ach");
   // The top-up step's picks again, so the two cards agree; they open on what autopay would pull next.
-  const options = depositOptions({ minimumCents: floorCents, topUpCents, limits });
+  // The rail decides the minimum: a card deposit has its own (funding design phase 7).
+  const options = depositOptions({ minimumCents: floorCents, topUpCents, limits, rail: rail === "stripe_card" ? "stripe_card" : "stripe_ach" });
   const [presetCents, setPresetCents] = useState<number | null>(() => depositDefaultCents(options, nextTopUpCents({ floorCents, topUpCents, availableCents: wallet.account.availableBalanceCents, pendingCents: wallet.account.pendingBalanceCents })));
   const [customText, setCustomText] = useState("");
   const [customError, setCustomError] = useState("");
@@ -1714,8 +1729,9 @@ function FundingControls({
       amountCents = parsed;
     }
     if (amountCents === null) { setCustomError("Pick an amount or enter one."); return; }
-    if (amountCents < limits.manualFundingMinCents || amountCents > limits.manualFundingMaxCents) {
-      setCustomError(`Amounts must be between ${formatWholeDollars(limits.manualFundingMinCents)} and ${formatWholeDollars(limits.manualFundingMaxCents)}.`);
+    const minCents = rail === "stripe_card" ? limits.cardFundingMinCents : limits.manualFundingMinCents;
+    if (amountCents < minCents || amountCents > limits.manualFundingMaxCents) {
+      setCustomError(`Amounts must be between ${formatWholeDollars(minCents)} and ${formatWholeDollars(limits.manualFundingMaxCents)}.`);
       return;
     }
     setCustomError("");
@@ -1726,7 +1742,7 @@ function FundingControls({
     <div className="mt-4 space-y-4">
       <div role="radiogroup" aria-label="Pay with" className="flex flex-wrap gap-2">
         <RadioChip label="Bank account (no fee)" selected={rail === "stripe_ach"} disabled={busy} onSelect={() => setRail("stripe_ach")} />
-        <RadioChip label={`Card (${fee} fee)`} selected={rail === "stripe_card"} disabled={busy} onSelect={() => setRail("stripe_card")} />
+        <RadioChip label={`Card (${describeCardFee(wallet.cardFundingFeeBps)})`} selected={rail === "stripe_card"} disabled={busy} onSelect={() => setRail("stripe_card")} />
         {usdcOffered && <RadioChip label="USDC on Base" hint="No fee · manual" selected={rail === "usdc"} disabled={busy} onSelect={() => setRail("usdc")} />}
       </div>
       {rail === "usdc" && usdcOffered && onSaveUsdc ? (
@@ -1761,7 +1777,9 @@ function FundingControls({
             <p className="text-sm text-zinc-600" data-testid={quoteTestId}>
               {rail === "stripe_ach"
                 ? `No fee. ${formatCents(quote.creditCents)} goes into your wallet once the bank transfer settles — ${BANK_SETTLEMENT_PHRASE}. It cannot pay orders until then.`
-                : `Card fee (${fee}): ${formatCents(quote.feeCents)}. Your card is charged ${formatCents(quote.chargedCents)} and ${formatCents(quote.creditCents)} goes into your wallet, available at once.`}
+                : wallet.cardFundingFeeBps > 0
+                  ? `Card fee (${fee}): ${formatCents(quote.feeCents)}. Your card is charged ${formatCents(quote.chargedCents)} and ${formatCents(quote.creditCents)} goes into your wallet, available at once.`
+                  : `No fee. Your card is charged ${formatCents(quote.creditCents)}, and it goes into your wallet, available at once.`}
             </p>
           )}
           {method ? (
@@ -1878,6 +1896,7 @@ function DepositStep({
           rail,
           cardFundingFeeBps: wallet.cardFundingFeeBps,
           backupLabel: terms.backupLabel,
+          cardMinimumCents: wallet.limits.cardFundingMinCents,
           bankFundingMethodId: rail === "stripe_ach" && method ? method.fundingMethodId : null,
           advance: wallet.advance,
         })}
@@ -2079,7 +2098,7 @@ function ManageView({
         ) : (
           <dl className="mt-3 divide-y divide-zinc-200 rounded-md border border-zinc-200">
             <PlanRow testId="wallet-plan-source" label="Autopay from" busy={planFeedback.busy} onChange={editor === "source" ? null : () => setEditor("source")}>
-              {source ? `${describeFundingMethod(source)} · ${source.rail === "stripe_ach" ? "bank account · no fee" : `card · ${fee} fee`}` : "Not set"}
+              {source ? `${describeFundingMethod(source)} · ${source.rail === "stripe_ach" ? "bank account · no fee" : `card · ${describeCardFee(wallet.cardFundingFeeBps)}`}` : "Not set"}
             </PlanRow>
             <PlanRow testId="wallet-plan-floor" label="Minimum" busy={planFeedback.busy} onChange={editor === "floor" ? null : () => setEditor("floor")}>
               {formatWholeDollars(floorCents)} — autopay tops it up after any order that takes it lower, and at the daily check.
@@ -2097,7 +2116,7 @@ function ManageView({
               <span className="block text-xs text-zinc-500">
                 {source?.rail === "stripe_card"
                   ? "The same card you top up with."
-                  : `Charged only for the shortfall on an order, plus ${fee}, up to ${formatWholeDollars(wallet.limits.manualFundingMaxCents)} in one payment — even while a bank top-up is still landing.`}
+                  : `Charged only for the shortfall on an order${cardFeeOnTop(wallet.cardFundingFeeBps)}, up to ${formatWholeDollars(wallet.limits.manualFundingMaxCents)} in one payment — even while a bank top-up is still landing.`}
                 {backup?.card && cardExpiryState(backup.card, now) === "expired" && " Add a new backup card before it is needed — an expired card is declined at charge time and selling pauses."}
               </span>
             </PlanRow>
@@ -2108,8 +2127,8 @@ function ManageView({
               {wallet.autoReload?.acknowledgedAt === null || wallet.autoReload?.acknowledgedCardFeeBps === null
                 ? "Not on record — confirm your terms above."
                 : flow.feeChange
-                  ? `Recorded ${formatDateTime(wallet.autoReload?.acknowledgedAt)} at a ${formatFeeRate(flow.feeChange.recordedBps)} card fee; the card fee is now ${formatFeeRate(flow.feeChange.currentBps)} — confirm the new terms above.`
-                  : `Recorded ${formatDateTime(wallet.autoReload?.acknowledgedAt)} at a ${fee} card fee. The terms above are the current terms.`}
+                  ? `Recorded ${formatDateTime(wallet.autoReload?.acknowledgedAt)} with ${describeCardFee(flow.feeChange.recordedBps)} on card charges; card charges now carry ${cardFeeNoun(flow.feeChange.currentBps)} — confirm the new terms above.`
+                  : `Recorded ${formatDateTime(wallet.autoReload?.acknowledgedAt)} with ${describeCardFee(wallet.cardFundingFeeBps)} on card charges. The terms above are the current terms.`}
             </PlanRow>
             <PlanRow testId="wallet-plan-auto-reload" label="Autopay" busy={planFeedback.busy} onChange={null}>
               On
@@ -2409,7 +2428,7 @@ function ConfirmTermsEditor({
         {mandate.map((line) => <li key={line}>{line}</li>)}
       </ol>
       <p className="mt-3 text-sm text-zinc-500" data-testid="wallet-fee-acknowledgement-line">
-        Clicking the button records that you agree to the {fee} fee on card charges, with today's date and the team member who agreed.
+        Clicking the button records that you agree to {wallet.cardFundingFeeBps > 0 ? `the ${fee} fee on card charges` : "these terms, with no fee on card charges today"}, with today's date and the team member who agreed.
       </p>
       <Impact>This applies from the next top-up.</Impact>
       <SectionFeedback {...feedback} />
@@ -2536,7 +2555,7 @@ function ActivitySection({ wallet }: { wallet: DropshipWalletView }) {
                     <span className="block">{LEDGER_REASON_LABELS[entry.reason]}</span>
                     {entry.cardFee && (
                       <span className="block text-xs text-zinc-500">
-                        {labelFor(entry.fundingMethodId) ? `from ${labelFor(entry.fundingMethodId)} · ` : ""}charged {formatCents(entry.cardFee.chargedCents)} incl. {formatCents(entry.cardFee.feeCents)} fee ({formatFeeRate(entry.cardFee.feeBps)})
+                        {labelFor(entry.fundingMethodId) ? `from ${labelFor(entry.fundingMethodId)} · ` : ""}charged {formatCents(entry.cardFee.chargedCents)}{entry.cardFee.feeCents > 0 ? ` incl. ${formatCents(entry.cardFee.feeCents)} fee (${formatFeeRate(entry.cardFee.feeBps)})` : " (no fee)"}
                       </span>
                     )}
                     {entry.failure && <span className="block text-xs text-red-700">Failed: {entry.failure.code ?? entry.failure.message ?? "unknown"}</span>}

@@ -11,7 +11,7 @@ import {
 
 describe("calculateCardFundingFeeCents", () => {
   it("charges the launch rate exactly on whole-dollar amounts", () => {
-    expect(DEFAULT_CARD_FUNDING_FEE_BPS).toBe(300);
+    expect(DEFAULT_CARD_FUNDING_FEE_BPS).toBe(0);
     expect(calculateCardFundingFeeCents(10_000, 300)).toBe(300);
     expect(calculateCardFundingFeeCents(25_000, 300)).toBe(750);
     expect(calculateCardFundingFeeCents(5_500, 300)).toBe(165);

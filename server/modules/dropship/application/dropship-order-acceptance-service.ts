@@ -96,6 +96,13 @@ export interface DropshipOrderAcceptanceResult {
   walletLedgerEntryId: number | null;
   economicsSnapshotId: number | null;
   totalDebitCents: number;
+  /**
+   * The part of the debit the rewards balance pays (funding design phase 7):
+   * spent on an acceptance; for a hold, what rewards would pay, so the cash
+   * the order still needs is `totalDebitCents - rewardsCents`. Zero on a
+   * replay, which does not re-derive it.
+   */
+  rewardsCents: number;
   currency: string;
   paymentHoldExpiresAt: Date | null;
   /** Set when outcome is `payment_hold` and the reason is known; null on replays that do not re-derive it. */
@@ -240,6 +247,10 @@ export interface DropshipAcceptanceWalletState {
   walletAccountId: number;
   availableBalanceCents: number;
   pendingBalanceCents: number;
+  /** The spend-only rewards balance, read under the same lock (funding design phase 7). */
+  rewardsBalanceCents: number;
+  /** The vendor's choice: rewards pay first (default) or are saved. */
+  spendRewardsFirst: boolean;
   currency: string;
   /**
    * The facts the pending-ACH advance is decided from, read under the same
@@ -616,6 +627,7 @@ export function buildDropshipOrderAcceptancePlan(
       standingReason: input.vendor.vendorStandingReason,
     }) === "hold",
     advance: input.wallet.advance,
+    rewards: { balanceCents: input.wallet.rewardsBalanceCents, spendFirst: input.wallet.spendRewardsFirst },
   });
   const paymentHoldReason: DropshipPaymentHoldReason | null = funding.outcome === "payment_hold"
     ? funding.reason

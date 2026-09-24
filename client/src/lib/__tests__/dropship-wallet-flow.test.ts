@@ -28,7 +28,12 @@ import {
   draftAfterSourceChoice,
   draftAtStep,
   describeAcknowledgementBanner,
+  describeActivationQuote,
   describeActivationTopUp,
+  cardFeeAt,
+  cardFeeNoun,
+  cardFeeOnTop,
+  describeCardFee,
   describeDepositRail,
   describeBackupFollow,
   describeFundingMethod,
@@ -75,7 +80,7 @@ import type {
 const STAMP = "2026-09-15T00:00:00.000Z";
 const LATER = "2026-09-16T00:00:00.000Z";
 const NOW = new Date("2026-09-18T12:00:00.000Z");
-const LIMITS = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, caseTierMinimumCents: 50_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14, bankBalanceReadOffered: false };
+const LIMITS = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, cardFundingMinCents: 10_000, rewardsRateBankBps: 100, rewardsRateUsdcBps: 100, rewardsRateCardBps: 0, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, caseTierMinimumCents: 50_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14, bankBalanceReadOffered: false };
 
 function method(overrides: Partial<WalletFundingMethod> & { fundingMethodId: number }): WalletFundingMethod {
   const rail = overrides.rail ?? "stripe_card";
@@ -92,7 +97,7 @@ const BANK = method({ fundingMethodId: 30, rail: "stripe_ach" });
 
 function wallet(overrides: Partial<DropshipWalletView> = {}): DropshipWalletView {
   const base: DropshipWalletView = {
-    account: { availableBalanceCents: 0, pendingBalanceCents: 0, currency: "USD", status: "active" },
+    account: { availableBalanceCents: 0, pendingBalanceCents: 0, rewardsBalanceCents: 0, currency: "USD", status: "active" },
     autoReload: null, fundingMethods: [], recentLedger: [], cardFundingFeeBps: 300, usdcBaseDepositAddress: null, usdcDeposit: null,
     limits: LIMITS, setupStatus: { sourceReady: false, backupReady: false, acknowledged: false, done: false, launchReady: false }, listingTiers: null, advance: null,
     clientFallbacks: [],
@@ -102,7 +107,7 @@ function wallet(overrides: Partial<DropshipWalletView> = {}): DropshipWalletView
 
 function doneWallet(overrides: Partial<DropshipWalletView> = {}): DropshipWalletView {
   return wallet({
-    autoReload: { autoReloadSettingId: 5, enabled: true, minimumBalanceCents: 25_000, maxSingleReloadCents: 50_000, topUpAmountCents: null, paymentHoldTimeoutMinutes: 2_880, fundingMethodId: 30, updatedAt: STAMP, backstopFundingMethodId: 10, acknowledgedCardFeeBps: 300, acknowledgedAt: STAMP },
+    autoReload: { autoReloadSettingId: 5, enabled: true, minimumBalanceCents: 25_000, maxSingleReloadCents: 50_000, topUpAmountCents: null, paymentHoldTimeoutMinutes: 2_880, fundingMethodId: 30, updatedAt: STAMP, backstopFundingMethodId: 10, acknowledgedCardFeeBps: 300, acknowledgedAt: STAMP, spendRewardsFirst: true },
     fundingMethods: [{ ...CARD, roles: { isAutoReloadSource: false, isBackupCard: true, chargeable: true } }, { ...BANK, roles: { isAutoReloadSource: true, isBackupCard: false, chargeable: false } }],
     setupStatus: { sourceReady: true, backupReady: true, acknowledged: true, done: true, launchReady: true },
     ...overrides,
@@ -150,7 +155,7 @@ describe("deriveWalletFlow", () => {
   it("ends the flow in manage, with the deposit step only for a bank source below the floor", () => {
     expect(derive(doneWallet())).toMatchObject({ mode: "manage", step: null, canTurnOffAutoReload: true, authorized: true });
     expect(derive(doneWallet(), draft({ deposit: "pending" }))).toMatchObject({ mode: "flow", step: "deposit" });
-    expect(derive(doneWallet({ account: { availableBalanceCents: 0, pendingBalanceCents: 25_000, currency: "USD", status: "active" } }), draft({ deposit: "pending" }))).toMatchObject({ mode: "manage" });
+    expect(derive(doneWallet({ account: { availableBalanceCents: 0, pendingBalanceCents: 25_000, rewardsBalanceCents: 0, currency: "USD", status: "active" } }), draft({ deposit: "pending" }))).toMatchObject({ mode: "manage" });
     expect(derive(doneWallet(), draft({ deposit: "skipped" }))).toMatchObject({ mode: "manage" });
     const cardSource = doneWallet({ autoReload: { ...doneWallet().autoReload!, fundingMethodId: 10, backstopFundingMethodId: 10 } });
     expect(derive(cardSource, draft({ deposit: "pending" }))).toMatchObject({ mode: "manage" });
@@ -167,7 +172,7 @@ describe("deriveWalletFlow", () => {
   });
 
   it("treats the seed row (enabled, no method) as not authorized", () => {
-    const seed = wallet({ autoReload: { autoReloadSettingId: 1, enabled: true, minimumBalanceCents: 25_000, maxSingleReloadCents: null, topUpAmountCents: null, paymentHoldTimeoutMinutes: 2_880, fundingMethodId: null, updatedAt: STAMP, backstopFundingMethodId: null, acknowledgedCardFeeBps: null, acknowledgedAt: null } });
+    const seed = wallet({ autoReload: { autoReloadSettingId: 1, enabled: true, minimumBalanceCents: 25_000, maxSingleReloadCents: null, topUpAmountCents: null, paymentHoldTimeoutMinutes: 2_880, fundingMethodId: null, updatedAt: STAMP, backstopFundingMethodId: null, acknowledgedCardFeeBps: null, acknowledgedAt: null, spendRewardsFirst: true } });
     expect(derive(seed)).toMatchObject({ authorized: false, feeRecordMissing: false, roleGaps: { backupCard: false, source: false }, canTurnOffAutoReload: false });
   });
 
@@ -176,13 +181,13 @@ describe("deriveWalletFlow", () => {
     expect(derive(gone, draft(), "active").roleGaps).toEqual({ backupCard: true, source: false });
     const sourceGone = doneWallet({ fundingMethods: [{ ...CARD, roles: { isAutoReloadSource: false, isBackupCard: true, chargeable: true } }] });
     expect(derive(sourceGone, draft(), "active").roleGaps).toEqual({ backupCard: false, source: true });
-    const negative = { availableBalanceCents: -5_000, pendingBalanceCents: 0, currency: "USD", status: "active" };
+    const negative = { availableBalanceCents: -5_000, pendingBalanceCents: 0, rewardsBalanceCents: 0, currency: "USD", status: "active" };
     expect(() => derive(wallet({ account: negative }))).not.toThrow();
     expect(() => derive(doneWallet({ account: negative }), draft({ deposit: "pending" }))).not.toThrow();
   });
 
   it("derives the acknowledgement faces without overriding a server verdict", () => {
-    const missing = doneWallet({ autoReload: { ...doneWallet().autoReload!, acknowledgedCardFeeBps: null, acknowledgedAt: null }, setupStatus: { ...doneWallet().setupStatus, acknowledged: false, launchReady: false } });
+    const missing = doneWallet({ autoReload: { ...doneWallet().autoReload!, acknowledgedCardFeeBps: null, acknowledgedAt: null, spendRewardsFirst: true }, setupStatus: { ...doneWallet().setupStatus, acknowledged: false, launchReady: false } });
     expect(derive(missing)).toMatchObject({ needsAcknowledgement: true, feeRecordMissing: true, feeChange: null });
     const raised = doneWallet({ cardFundingFeeBps: 350, setupStatus: { ...doneWallet().setupStatus, acknowledged: false } });
     expect(derive(raised)).toMatchObject({ needsAcknowledgement: true, feeRecordMissing: false, feeChange: { recordedBps: 300, currentBps: 350 } });
@@ -262,7 +267,7 @@ describe("acknowledgementForSave and builders", () => {
     expect(acknowledgementForSave({ autoReload: doneWallet().autoReload, cardFundingFeeBps: 300 })).toEqual({ acknowledgedCardFeeBps: 300, saveLabel: "Save", feeChangeNote: null });
     const changed = acknowledgementForSave({ autoReload: doneWallet().autoReload, cardFundingFeeBps: 350 });
     expect(changed.acknowledgedCardFeeBps).toBe(300);
-    expect(changed.feeChangeNote).toBe("The card fee is now 3.5% (you agreed to 3%). Automatic top-ups and covers stay at 3% until you confirm the new terms above; this save does not change that.");
+    expect(changed.feeChangeNote).toBe("Card charges now carry a 3.5% fee (you agreed to a 3% fee). Automatic top-ups and covers stay at 3% until you confirm the new terms above; this save does not change that.");
     expect(acknowledgementForSave({ autoReload: { ...doneWallet().autoReload!, acknowledgedCardFeeBps: null }, cardFundingFeeBps: 300 })).toEqual({ acknowledgedCardFeeBps: 300, saveLabel: "Save and accept the 3% card fee", feeChangeNote: null });
   });
 
@@ -382,8 +387,8 @@ describe("draft and redirects", () => {
     const depositPending = buildPendingStripe({ rail: "stripe_ach", purpose: "deposit", wallet: w, startedAt: NOW, expiresAt: "2026-09-18T13:00:00.000Z" });
     expect(depositPending.ledgerMark).toEqual({ newestLedgerEntryId: null, availableBalanceCents: 0, pendingBalanceCents: 0 });
     expect(resolveStripeReturn(depositPending, w)).toBeNull();
-    expect(resolveStripeReturn(depositPending, wallet({ account: { availableBalanceCents: 0, pendingBalanceCents: 25_000, currency: "USD", status: "active" } }))).toEqual({ kind: "deposit_seen" });
-    const ledgered = wallet({ recentLedger: [{ ledgerEntryId: 4, type: "funding", status: "pending", amountCents: 25_000, currency: "USD", availableBalanceAfterCents: 0, pendingBalanceAfterCents: 25_000, createdAt: STAMP, settledAt: null, reason: "manual_top_up", fundingMethodId: 30, cardFee: null, failure: null }] });
+    expect(resolveStripeReturn(depositPending, wallet({ account: { availableBalanceCents: 0, pendingBalanceCents: 25_000, rewardsBalanceCents: 0, currency: "USD", status: "active" } }))).toEqual({ kind: "deposit_seen" });
+    const ledgered = wallet({ recentLedger: [{ ledgerEntryId: 4, type: "funding", status: "pending", amountCents: 25_000, currency: "USD", availableBalanceAfterCents: 0, pendingBalanceAfterCents: 25_000, rewardsBalanceAfterCents: null, createdAt: STAMP, settledAt: null, reason: "manual_top_up", fundingMethodId: 30, cardFee: null, failure: null }] });
     expect(resolveStripeReturn(depositPending, ledgered)).toEqual({ kind: "deposit_seen" });
     const marked = buildPendingStripe({ rail: "stripe_ach", purpose: "deposit", wallet: ledgered, startedAt: NOW, expiresAt: null });
     expect(resolveStripeReturn(marked, ledgered)).toBeNull();
@@ -484,7 +489,7 @@ describe("copy", () => {
   });
 
   it("pins the rules page: six topics, each a lead and its detail, quoting only the values the server enforces", () => {
-    const limits: WalletLimits = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, caseTierMinimumCents: 50_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14, bankBalanceReadOffered: false };
+    const limits: WalletLimits = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, cardFundingMinCents: 10_000, rewardsRateBankBps: 100, rewardsRateUsdcBps: 100, rewardsRateCardBps: 0, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, caseTierMinimumCents: 50_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14, bankBalanceReadOffered: false };
     const intro = describeIntro({ cardFundingFeeBps: 300, usdcOffered: true, holdTimeoutMinutes: 2_880, limits });
     expect(intro.lede).toBe("Your wallet is the deposit Card Shellz draws on for the orders you sell. Here is what it holds, what it lets you sell, how it stays funded, and what happens when a payment fails.");
     expect(intro.topics).toHaveLength(6);
@@ -601,7 +606,9 @@ describe("copy", () => {
     expect(describeFundingMethodDetailed(method({ fundingMethodId: 12, card: { brand: "Visa", last4: "4242", expMonth: null, expYear: null } }))).toBe("Visa ending in 4242");
     expect(describeFundingMethod(method({ fundingMethodId: 20, rail: "usdc_base", usdcWalletAddress: "0x1234567890abcdef1234567890abcdef12345678" }))).toBe("USDC · 0x1234…5678");
     expect(describeFundingMethod(method({ fundingMethodId: 13, card: null, displayLabel: "My card" }))).toBe("My card");
-    expect(Object.keys(LEDGER_REASON_LABELS)).toHaveLength(15);
+    expect(Object.keys(LEDGER_REASON_LABELS)).toHaveLength(20);
+    expect(LEDGER_REASON_LABELS.rewards_earned).toBe("Rewards earned");
+    expect(LEDGER_REASON_LABELS.rewards_spent).toBe("Rewards used on an order");
     expect(LEDGER_REASON_LABELS.covered_held_order).toBe("Covered a held order");
     expect(LEDGER_REASON_LABELS.advance_fee).toBe("Fee for paying an order from money on its way");
     expect(LEDGER_REASON_LABELS.funding_reversed).toBe("Payment reversed by your bank");
@@ -659,7 +666,7 @@ describe("advance copy (funding design phase 3)", () => {
 });
 
 describe("USDC deposits in the wallet's words (funding design phase 6)", () => {
-  const limits: WalletLimits = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, caseTierMinimumCents: 50_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14, bankBalanceReadOffered: false };
+  const limits: WalletLimits = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, cardFundingMinCents: 10_000, rewardsRateBankBps: 100, rewardsRateUsdcBps: 100, rewardsRateCardBps: 0, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, caseTierMinimumCents: 50_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14, bankBalanceReadOffered: false };
   const watched: WalletUsdcDeposit = { offered: true, watched: true, chainId: 8453, tokenAddress: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", minConfirmations: 6, settleTag: "safe", address: null };
   const unwatched: WalletUsdcDeposit = { ...watched, watched: false };
   const notOffered: WalletUsdcDeposit = { ...watched, offered: false, watched: false };
@@ -768,29 +775,29 @@ describe("the top-up amount's quick picks", () => {
 
 describe("adding money: the top-up step's picks again", () => {
   it("offers the minimum, its multiples and the vendor's own top-up amount, within the manual funding limits", () => {
-    expect(depositOptions({ minimumCents: 10_000, topUpCents: null, limits: LIMITS })).toEqual([
+    expect(depositOptions({ minimumCents: 10_000, topUpCents: null, limits: LIMITS, rail: "stripe_ach" })).toEqual([
       { factor: 1, cents: 10_000 }, { factor: 2, cents: 20_000 }, { factor: 3, cents: 30_000 }, { factor: 5, cents: 50_000 },
     ]);
     // A top-up amount that is already a pick is not offered twice; one of the vendor's own takes its place in the order.
-    expect(depositOptions({ minimumCents: 10_000, topUpCents: 20_000, limits: LIMITS })).toEqual([
+    expect(depositOptions({ minimumCents: 10_000, topUpCents: 20_000, limits: LIMITS, rail: "stripe_ach" })).toEqual([
       { factor: 1, cents: 10_000 }, { factor: 2, cents: 20_000 }, { factor: 3, cents: 30_000 }, { factor: 5, cents: 50_000 },
     ]);
-    expect(depositOptions({ minimumCents: 50_000, topUpCents: 80_000, limits: LIMITS })).toEqual([
+    expect(depositOptions({ minimumCents: 50_000, topUpCents: 80_000, limits: LIMITS, rail: "stripe_ach" })).toEqual([
       { factor: 1, cents: 50_000 }, { factor: null, cents: 80_000 }, { factor: 2, cents: 100_000 }, { factor: 3, cents: 150_000 }, { factor: 5, cents: 250_000 },
     ]);
     // LIMITS cap manual funding at $5,000: picks past it are left out, a minimum past it included.
-    expect(depositOptions({ minimumCents: 200_000, topUpCents: null, limits: LIMITS })).toEqual([{ factor: 1, cents: 200_000 }, { factor: 2, cents: 400_000 }]);
-    expect(depositOptions({ minimumCents: 600_000, topUpCents: null, limits: LIMITS })).toEqual([]);
+    expect(depositOptions({ minimumCents: 200_000, topUpCents: null, limits: LIMITS, rail: "stripe_ach" })).toEqual([{ factor: 1, cents: 200_000 }, { factor: 2, cents: 400_000 }]);
+    expect(depositOptions({ minimumCents: 600_000, topUpCents: null, limits: LIMITS, rail: "stripe_ach" })).toEqual([]);
     // A multiple the top-up step hides (under LIMITS' $100 smallest top-up) stays hidden here.
-    expect(depositOptions({ minimumCents: 2_000, topUpCents: null, limits: LIMITS })).toEqual([{ factor: 1, cents: 2_000 }, { factor: 5, cents: 10_000 }]);
-    expect(() => depositOptions({ minimumCents: 10_000, topUpCents: -1, limits: LIMITS })).toThrow(RangeError);
+    expect(depositOptions({ minimumCents: 2_000, topUpCents: null, limits: LIMITS, rail: "stripe_ach" })).toEqual([{ factor: 1, cents: 2_000 }, { factor: 5, cents: 10_000 }]);
+    expect(() => depositOptions({ minimumCents: 10_000, topUpCents: -1, limits: LIMITS, rail: "stripe_ach" })).toThrow(RangeError);
     expect(describeDepositOption({ factor: 1, cents: 10_000 })).toBe("Your minimum");
     expect(describeDepositOption({ factor: 3, cents: 30_000 })).toBe("3× your minimum");
     expect(describeDepositOption({ factor: null, cents: 80_000 })).toBe("Your top-up amount");
   });
 
   it("opens on what autopay would pull next, else the minimum, else the smallest pick, and on nothing when nothing is offered", () => {
-    const options = depositOptions({ minimumCents: 50_000, topUpCents: 80_000, limits: LIMITS });
+    const options = depositOptions({ minimumCents: 50_000, topUpCents: 80_000, limits: LIMITS, rail: "stripe_ach" });
     expect(depositDefaultCents(options, 80_000)).toBe(80_000);
     expect(depositDefaultCents(options, 50_000)).toBe(50_000);
     // The next top-up is not a pick (a shortfall past the minimum): the minimum.
@@ -802,11 +809,11 @@ describe("adding money: the top-up step's picks again", () => {
 });
 
 describe("the add-money step's terms per way to pay", () => {
-  const bank = { rail: "stripe_ach" as const, cardFundingFeeBps: 300, backupLabel: "Visa ending in 4242", bankFundingMethodId: 30, advance: null };
+  const bank = { rail: "stripe_ach" as const, cardFundingFeeBps: 300, backupLabel: "Visa ending in 4242", cardMinimumCents: 10_000, bankFundingMethodId: 30, advance: null };
 
   it("lists a card's fee and that the money is available at once; a zero fee reads as none", () => {
-    expect(describeDepositRail({ ...bank, rail: "stripe_card" })).toEqual(["Card fee: 3% on top of the amount.", "Available at once."]);
-    expect(describeDepositRail({ ...bank, rail: "stripe_card", cardFundingFeeBps: 0 })).toEqual(["No fee.", "Available at once."]);
+    expect(describeDepositRail({ ...bank, rail: "stripe_card" })).toEqual(["Card fee: 3% on top of the amount.", "Deposits of $100 or more.", "Available at once."]);
+    expect(describeDepositRail({ ...bank, rail: "stripe_card", cardFundingFeeBps: 0 })).toEqual(["No fee.", "Deposits of $100 or more.", "Available at once."]);
   });
 
   it("lists a bank transfer's fee, landing time, credit and backup-card terms without an advance position", () => {
@@ -842,5 +849,56 @@ describe("the add-money step's terms per way to pay", () => {
     expect(describeDepositRail({ ...bank, bankFundingMethodId: 99, advance: advance() })[2]).toBe(general);
     expect(describeDepositRail({ ...bank, advance: advance({ sources: [{ ...advance().sources[0], accountHolderType: null }] }) })[2]).toBe(general);
     expect(describeDepositRail({ ...bank, advance: advance({ policy: { feeBps: 100, capCents: 0, capSource: "vendor_override" } }) })[2]).toBe("Money on its way cannot pay for orders until it lands.");
+  });
+});
+
+describe("no card fee (funding design phase 7)", () => {
+  const free: WalletTerms = { sourceRail: "stripe_ach", sourceLabel: "Chase ending in 1234", backupLabel: "Visa ending in 4242", floorCents: 25_000, topUpCents: null, limitCents: 50_000, chargeCeilingCents: 500_000, holdTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, cardFundingFeeBps: 0 };
+
+  it("words the fee helpers as 'no fee' at zero and never as '0%'", () => {
+    expect([describeCardFee(300), describeCardFee(0)]).toEqual(["3% fee", "no fee"]);
+    expect([cardFeeNoun(250), cardFeeNoun(0)]).toEqual(["a 2.5% fee", "no fee"]);
+    expect([cardFeeOnTop(300), cardFeeOnTop(0)]).toEqual([" plus 3%", ""]);
+    expect([cardFeeAt(300), cardFeeAt(0)]).toEqual([" at 3%", " with no fee"]);
+  });
+
+  it("words the bank and card mandates, the plan sentence and the activation lines without a fee", () => {
+    const bank = describeMandate(free);
+    expect(bank[1]).toContain("the shortfall with no card fee, whatever its size (up to $5,000)");
+    expect(bank[1]).toContain("a $75 order with $20 available charges $55.");
+    expect(bank[5]).toContain("Card charges carry no fee today, and that is the rate you agree to for automatic top-ups and covers; if Card Shellz ever adds a fee, we ask you to confirm before charging one.");
+    const card = describeMandate({ ...free, sourceRail: "stripe_card", sourceLabel: "Visa ending in 4242", floorCents: 10_000, limitCents: 25_000 });
+    expect(card[0]).toBe("Charge Visa ending in 4242, with no fee, whenever an order takes your balance below your minimum of $100, and at the daily check: your top-up amount of $100 (your minimum), or more if that alone would not bring you back to $100.");
+    expect(card[1]).toContain("is charged the shortfall, whatever its size (up to $5,000), and goes out at once; the next routine top-up then brings the balance back to $100 (no fee)");
+    expect([...bank, ...card].join(" ")).not.toMatch(/0%|plus 0|\$0\.00 fee/);
+    expect(describePlanSentence(free)).toBe("In one sentence: you keep $250 in your wallet; when an order takes it lower, autopay pulls $250 from your bank for free, and your Visa ending in 4242 covers any shortfall.");
+    expect(describePlanSentence({ ...free, sourceRail: "stripe_card", sourceLabel: "Visa ending in 4242", floorCents: 10_000 })).toBe("In one sentence: you keep $100 in your wallet, topped up by $100 from your Visa ending in 4242 with no fee; the same card covers any shortfall.");
+    expect(describeActivationTopUp({ cardFundingFeeBps: 0 })).toContain("orders are charged to your backup card with no fee.");
+    expect(describeActivationQuote({ terms: { ...free, sourceRail: "stripe_card", sourceLabel: "Visa ending in 4242", floorCents: 10_000 }, availableCents: 0, pendingCents: 0 }))
+      .toBe("Balance now $0, so the first daily check after you activate charges $100 to Visa ending in 4242 (no fee), landing at once.");
+    expect(describeActivationQuote({ terms: free, availableCents: 0, pendingCents: 0 })).toContain("any shortfall goes to Visa ending in 4242 with no fee.");
+    expect(describeNegativeBalance({ availableCents: -1_250, advance: null, limitCents: 50_000, cardFundingFeeBps: 0 })).toContain("(order plus the amount below zero).");
+  });
+
+  it("tells the rules page a card costs nothing and names the card minimum", () => {
+    const intro = describeIntro({ cardFundingFeeBps: 0, usdcOffered: false, holdTimeoutMinutes: 1_440, limits: LIMITS });
+    expect(intro.topics[3].detail).toContain("A card lands at once and costs nothing either; a card deposit is $100 or more.");
+    expect(intro.topics[3].detail).not.toContain("0%");
+  });
+
+  it("explains a fee cut as free charges and a raise as waiting on the vendor's word", () => {
+    const cut = acknowledgementForSave({ autoReload: { ...doneWallet().autoReload!, acknowledgedCardFeeBps: 300 }, cardFundingFeeBps: 0 });
+    expect(cut).toMatchObject({ acknowledgedCardFeeBps: 300, saveLabel: "Save" });
+    expect(cut.feeChangeNote).toBe("Card charges now carry no fee (you agreed to a 3% fee); automatic top-ups and covers already use the lower rate. Confirm the new terms above when you like; this save keeps your record as it is.");
+    expect(acknowledgementForSave({ autoReload: { ...doneWallet().autoReload!, acknowledgedCardFeeBps: null }, cardFundingFeeBps: 0 }).saveLabel).toBe("Save and accept the card terms (no fee)");
+    expect(describeAcknowledgementBanner({ feeChange: { recordedBps: 300, currentBps: 0 }, onboarding: false }))
+      .toBe("Card Shellz removed the card fee (you agreed to a 3% fee). Automatic charges already use the lower rate; confirm to keep your record current.");
+    expect(describeAcknowledgementBanner({ feeChange: { recordedBps: 0, currentBps: 200 }, onboarding: false }))
+      .toBe("Card Shellz changed the card fee: card charges now carry a 2% fee (you agreed to no fee). Until you confirm, automatic top-ups and covers stay free; money you add yourself shows the current fee on Stripe's page before you pay.");
+  });
+
+  it("offers a card deposit only the picks at or above the card minimum", () => {
+    expect(depositOptions({ minimumCents: 5_000, topUpCents: null, limits: LIMITS, rail: "stripe_ach" }).map((pick) => pick.cents)).toEqual([5_000, 10_000, 15_000, 25_000]);
+    expect(depositOptions({ minimumCents: 5_000, topUpCents: null, limits: LIMITS, rail: "stripe_card" }).map((pick) => pick.cents)).toEqual([10_000, 15_000, 25_000]);
   });
 });

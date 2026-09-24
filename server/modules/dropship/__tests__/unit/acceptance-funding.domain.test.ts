@@ -124,7 +124,7 @@ describe("decideAcceptanceFunding", () => {
       standingHold: false,
       advance: null,
     });
-    expect(decision).toEqual({ outcome: "accepted", source: "available", advance: null });
+    expect(decision).toEqual({ outcome: "accepted", source: "available", advance: null, rewardsCents: 0 });
   });
 
   it("holds a vendor paused for funding whatever the balance", () => {
@@ -134,7 +134,7 @@ describe("decideAcceptanceFunding", () => {
       standingHold: true,
       advance: context(),
     });
-    expect(decision).toEqual({ outcome: "payment_hold", reason: "vendor_paused", advance: null, shortfall: null });
+    expect(decision).toEqual({ outcome: "payment_hold", reason: "vendor_paused", advance: null, rewardsCents: 0, shortfall: null });
   });
 
   it("advances the gap against eligible pending credit and posts the fee on the amount used", () => {
@@ -147,6 +147,7 @@ describe("decideAcceptanceFunding", () => {
     expect(decision).toEqual({
       outcome: "accepted",
       source: "advance",
+      rewardsCents: 0,
       advance: {
         advanceCents: 30_000,
         feeCents: 300,
@@ -187,6 +188,7 @@ describe("decideAcceptanceFunding", () => {
       outcome: "payment_hold",
       reason: "insufficient_balance",
       advance: null,
+      rewardsCents: 0,
       shortfall: {
         gapCents: 50_000,
         advanceRefusal: {
@@ -248,6 +250,96 @@ describe("decideAcceptanceFunding", () => {
       expect(() => decideAcceptanceFunding({ availableBalanceCents: 0, totalDebitCents, standingHold: false, advance: null }))
         .toThrowError(expect.objectContaining({ code: DROPSHIP_ACCEPTANCE_FUNDING_INVALID }));
     }
+  });
+});
+
+describe("decideAcceptanceFunding with rewards (funding design phase 7)", () => {
+  it("rewards pay first and cash pays the rest from the available balance", () => {
+    expect(decideAcceptanceFunding({
+      availableBalanceCents: 10_000,
+      totalDebitCents: 12_000,
+      standingHold: false,
+      advance: null,
+      rewards: { balanceCents: 3_000, spendFirst: true },
+    })).toEqual({ outcome: "accepted", source: "available", advance: null, rewardsCents: 3_000 });
+  });
+
+  it("rewards can pay the whole order, whatever the cash balance", () => {
+    expect(decideAcceptanceFunding({
+      availableBalanceCents: -2_000,
+      totalDebitCents: 5_000,
+      standingHold: false,
+      advance: null,
+      rewards: { balanceCents: 5_000, spendFirst: true },
+    })).toEqual({ outcome: "accepted", source: "rewards", advance: null, rewardsCents: 5_000 });
+  });
+
+  it("a vendor saving their rewards pays from cash alone", () => {
+    expect(decideAcceptanceFunding({
+      availableBalanceCents: 10_000,
+      totalDebitCents: 5_000,
+      standingHold: false,
+      advance: null,
+      rewards: { balanceCents: 5_000, spendFirst: false },
+    })).toEqual({ outcome: "accepted", source: "available", advance: null, rewardsCents: 0 });
+  });
+
+  it("the shortfall and the advance are sized on the cash the order still needs", () => {
+    const held = decideAcceptanceFunding({
+      availableBalanceCents: 1_000,
+      totalDebitCents: 12_000,
+      standingHold: false,
+      advance: null,
+      rewards: { balanceCents: 3_000, spendFirst: true },
+    });
+    expect(held).toEqual({
+      outcome: "payment_hold",
+      reason: "insufficient_balance",
+      advance: null,
+      rewardsCents: 3_000,
+      shortfall: { gapCents: 8_000, advanceRefusal: { code: "advance_unavailable" } },
+    });
+    const advanced = decideAcceptanceFunding({
+      availableBalanceCents: 1_000,
+      totalDebitCents: 12_000,
+      standingHold: false,
+      advance: context(),
+      rewards: { balanceCents: 3_000, spendFirst: true },
+    });
+    expect(advanced.outcome).toBe("accepted");
+    expect(advanced.rewardsCents).toBe(3_000);
+    if (advanced.outcome !== "accepted" || advanced.source !== "advance") throw new Error("expected an advance");
+    expect(advanced.advance.advanceCents).toBe(8_000);
+    expect(advanced.advance.feeCents).toBe(80);
+  });
+
+  it("a paused vendor is held whatever the rewards balance, and the hold still reports the rewards part", () => {
+    expect(decideAcceptanceFunding({
+      availableBalanceCents: 0,
+      totalDebitCents: 5_000,
+      standingHold: true,
+      advance: null,
+      rewards: { balanceCents: 5_000, spendFirst: true },
+    })).toEqual({ outcome: "payment_hold", reason: "vendor_paused", advance: null, rewardsCents: 5_000, shortfall: null });
+  });
+
+  it("without rewards facts the order is paid from cash alone", () => {
+    expect(decideAcceptanceFunding({
+      availableBalanceCents: 5_000,
+      totalDebitCents: 5_000,
+      standingHold: false,
+      advance: null,
+    })).toEqual({ outcome: "accepted", source: "available", advance: null, rewardsCents: 0 });
+  });
+
+  it("fails closed on a malformed rewards balance", () => {
+    expect(() => decideAcceptanceFunding({
+      availableBalanceCents: 5_000,
+      totalDebitCents: 5_000,
+      standingHold: false,
+      advance: null,
+      rewards: { balanceCents: -1, spendFirst: true },
+    })).toThrowError(DropshipError);
   });
 });
 
