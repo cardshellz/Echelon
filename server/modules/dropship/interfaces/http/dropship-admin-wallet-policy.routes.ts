@@ -6,7 +6,7 @@ import { createDropshipWalletPolicyServiceFromEnv } from "../../infrastructure/d
 
 /**
  * Admin surface for the staff-managed wallet policy (migrations 0682, 0683,
- * 0700) and the per-vendor credit profile.
+ * 0701) and the per-vendor credit profile.
  *
  * The limits are versioned and immutable: POST publishes a NEW VERSION and
  * retires the current one; there is no PATCH. The credit profile is mutable

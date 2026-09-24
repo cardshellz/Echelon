@@ -2,7 +2,7 @@
  * Dropship wallet policy — the limits the vendor wallet enforces.
  *
  * Twelve numbers, staff-managed as versioned data
- * (`dropship.dropship_wallet_policies`, migrations 0682, 0683 and 0700):
+ * (`dropship.dropship_wallet_policies`, migrations 0682, 0683 and 0701):
  *
  *   - the two LISTING TIER minimums. A vendor selling eaches and inner packs
  *     (variant type P, B) keeps at least the pack tier minimum; a vendor with
@@ -257,7 +257,7 @@ export interface WalletPolicyInvariantViolation {
 
 /**
  * The cross-field rules, mirroring the CHECK constraints in migrations 0682,
- * 0683 and 0700. Returns every violation rather than the first, so staff fix one form
+ * 0683 and 0701. Returns every violation rather than the first, so staff fix one form
  * instead of playing whack-a-mole. Per-field positivity/range is left to the
  * Zod schema at the boundary; this function assumes integers and checks the
  * relationships.

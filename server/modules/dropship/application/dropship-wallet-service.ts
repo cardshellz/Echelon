@@ -397,7 +397,7 @@ export interface DropshipAutoReloadSettingRecord {
   paymentHoldTimeoutMinutes: number;
   /**
    * The card fee rate the vendor agreed to when they turned autopay on, and
-   * when (migration 0700). Null on a row saved before the acknowledgement was
+   * when (migration 0701). Null on a row saved before the acknowledgement was
    * stored, or by a client that sent none; an unattended charge then carries
    * the live rate, as before.
    */
@@ -2351,7 +2351,7 @@ export class DropshipWalletService {
     setting: { acknowledgedCardFeeBps: number | null },
   ): number {
     const live = this.feeBpsFrom(limits);
-    // A row read before migration 0700 carries no acknowledgement at all.
+    // A row read before migration 0701 carries no acknowledgement at all.
     const acknowledged = setting.acknowledgedCardFeeBps ?? null;
     return acknowledged === null ? live : Math.min(live, acknowledged);
   }

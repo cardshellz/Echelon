@@ -687,7 +687,7 @@ export class PgDropshipWalletRepository implements DropshipWalletRepository, Dro
           input.updatedAt,
           input.topUpAmountCents,
           // The rate the vendor agreed to is stored with the row (migration
-          // 0700), so an unattended charge can be held to it; a client that
+          // 0701), so an unattended charge can be held to it; a client that
           // sent none leaves it null and pays the live rate.
           input.acknowledgedCardFeeBps ?? null,
           input.acknowledgedCardFeeBps === undefined ? null : input.updatedAt,

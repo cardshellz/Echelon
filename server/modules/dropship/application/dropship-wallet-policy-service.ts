@@ -29,7 +29,7 @@ import type { DropshipClock, DropshipLogEvent, DropshipLogger } from "./dropship
  *
  * Staff edit the wallet's limits here instead of through dyno config. A change
  * is a NEW VERSION of `dropship.dropship_wallet_policies` (migrations 0682,
- * 0683 and 0700); published rows are immutable, and exactly one row is active. Reads
+ * 0683 and 0701); published rows are immutable, and exactly one row is active. Reads
  * fall back to the documented defaults when no row exists, so an empty
  * database (dev) or the window before the migration lands still serves a
  * wallet.

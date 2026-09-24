@@ -123,11 +123,11 @@ describe("0681 dropship wallet policy migration", () => {
 });
 
 const cardFeeMigrationSql = readFileSync(
-  resolve(process.cwd(), "migrations/0700_dropship_wallet_card_fee_policy.sql"),
+  resolve(process.cwd(), "migrations/0701_dropship_wallet_card_fee_policy.sql"),
   "utf8",
 );
 
-describe("0700 dropship wallet card fee policy migration", () => {
+describe("0701 dropship wallet card fee policy migration", () => {
   it("adds the card fee (held at zero) and the card minimum deposit as policy columns, then drops their defaults", () => {
     for (const statement of [
       "ADD COLUMN IF NOT EXISTS card_funding_fee_bps integer NOT NULL DEFAULT 0",

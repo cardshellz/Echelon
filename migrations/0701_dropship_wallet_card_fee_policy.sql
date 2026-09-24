@@ -1,4 +1,4 @@
--- 0700: the card fee and the card minimum deposit become wallet policy
+-- 0701: the card fee and the card minimum deposit become wallet policy
 -- (funding design phase 7, owner decisions of 2026-09-23).
 --
 -- No processing fee on any rail: card deposits, routine card top-ups and
@@ -132,9 +132,9 @@ ALTER TABLE dropship.dropship_auto_reload_settings
     CHECK ((acknowledged_card_fee_bps IS NULL) = (acknowledged_at IS NULL));
 
 COMMENT ON COLUMN dropship.dropship_auto_reload_settings.acknowledged_card_fee_bps IS
-  'The card fee rate (basis points) the vendor agreed to when they last saved autopay; an unattended card charge never carries more than this. NULL: no acknowledgement stored, the live rate applies (migration 0700).';
+  'The card fee rate (basis points) the vendor agreed to when they last saved autopay; an unattended card charge never carries more than this. NULL: no acknowledgement stored, the live rate applies (migration 0701).';
 COMMENT ON COLUMN dropship.dropship_auto_reload_settings.acknowledged_at IS
-  'When the vendor agreed to acknowledged_card_fee_bps (migration 0700).';
+  'When the vendor agreed to acknowledged_card_fee_bps (migration 0701).';
 
 -- 6. Backfill from the audit trail, so a vendor who agreed to a rate before
 --    this migration keeps the protection: the most recent

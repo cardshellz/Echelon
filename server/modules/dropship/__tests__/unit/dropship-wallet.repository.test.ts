@@ -833,7 +833,7 @@ describe("PgDropshipWalletRepository.configureAutoReload (funding design phase 5
     );
 
     // Parameter order is the contract with the SQL: $7 is reused for both timestamps, $8 is the top-up amount,
-    // $9 and $10 the acknowledged card fee rate and when it was agreed (migration 0700).
+    // $9 and $10 the acknowledged card fee rate and when it was agreed (migration 0701).
     expect(captured.upsert).toEqual([10, 100, true, 50_000, 150_000, 1440, updatedAt, 150_000, 300, updatedAt]);
     expect(setting).toMatchObject({
       autoReloadSettingId: 7,
