@@ -1,4 +1,5 @@
 import { lockInventoryCostGraph, recordReceiptCostOrigin, recordLotCostContribution } from "../infrastructure/cost-evidence.repository";
+import { assertNoOpenPickCorrection } from "../../wms/pick-correction.repository";
 import { openOperationalQuantityPosting, type OperationalQuantityPosting } from "../infrastructure/operational-quantity-posting";
 import { assertLegacyQuantityImportAllowed } from "./legacy-quantity-import";
 import { sql } from "drizzle-orm";
@@ -891,6 +892,12 @@ export class InventoryUseCases {
       if (existingShipmentTx.rows.length > 0) {
         return;
       }
+    }
+
+    if (params.orderItemId) {
+      // Serialize missing-pick resolution and shipment inventory on the same order.
+      await tx.execute(sql`SELECT id FROM wms.orders WHERE id=${params.orderId} FOR UPDATE`);
+      await assertNoOpenPickCorrection(tx, params.orderItemId);
     }
 
     const level = await this.storage.lockInventoryLevel(

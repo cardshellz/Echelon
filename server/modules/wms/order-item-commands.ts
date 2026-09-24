@@ -322,6 +322,8 @@ export interface CanonicalWmsPickProgress {
   expectedPickedQuantity: number;
   /** Fulfilled units are a non-reversible floor within cumulative picked progress. */
   expectedFulfilledQuantity?: number;
+  pickCorrectionId?: number;
+  pickCorrectionRevision?: number;
   targetStatus: ItemStatus;
   targetPickedQuantity: number;
   targetShortReason?: string | null;
@@ -377,8 +379,8 @@ export async function persistCanonicalWmsPickProgress(
       );
     }
   }
-  if (expectedFulfilledQuantity > progress.expectedPickedQuantity
-    || expectedFulfilledQuantity > progress.targetPickedQuantity) {
+  if (!progress.pickCorrectionId && (expectedFulfilledQuantity > progress.expectedPickedQuantity
+    || expectedFulfilledQuantity > progress.targetPickedQuantity)) {
     throw new WmsOrderItemCommandError(
       "INVALID_WMS_PICK_PROGRESS",
       "Canonical WMS pick progress cannot move cumulative picked custody below fulfilled custody.",
@@ -387,6 +389,15 @@ export async function persistCanonicalWmsPickProgress(
   }
 
   if (input.movementType === "pick") {
+    if (progress.pickCorrectionId) {
+      const correction = await executor.query(`SELECT id FROM wms.pick_corrections
+        WHERE id=$1 AND order_item_id=$2 AND state='picking_required'
+          AND declared_quantity >= $3 AND revision=$4 FOR UPDATE`,
+        [progress.pickCorrectionId, input.orderItemId, progress.targetPickedQuantity,
+          progress.pickCorrectionRevision ?? null]);
+      if (correction.rows?.length !== 1) throw new WmsOrderItemCommandError("WMS_PICK_CORRECTION_CHANGED",
+        "The authorized corrective pick changed before inventory could be posted.");
+    }
     if (!["in_progress", "completed", "short"].includes(progress.targetStatus)
       || progress.targetPickedQuantity - progress.expectedPickedQuantity !== input.movementQuantity
       || progress.expectedPickedQuantity > progress.targetPickedQuantity
@@ -458,6 +469,7 @@ export async function persistCanonicalWmsPickProgress(
   }
 
   const expectedTargetQuantity = progress.expectedPickedQuantity - input.movementQuantity;
+  if (progress.pickCorrectionId) throw new WmsOrderItemCommandError("INVALID_WMS_PICK_PROGRESS", "A correction does not authorize an unpick.");
   const fullyUnpickedCanonicalCustody = expectedTargetQuantity === expectedFulfilledQuantity;
   const expectedTargetStatus = expectedTargetQuantity === 0 ? "pending" : "in_progress";
   if (!["completed", "in_progress", "short"].includes(progress.expectedStatus)
@@ -660,7 +672,6 @@ export async function finalizePhysicallyCompleteWmsOrderItems(
         THEN 'cancelled'
       WHEN COALESCE(requires_shipping, 0) <> 1
         OR COALESCE(picked_quantity, 0) >= quantity
-        OR COALESCE(fulfilled_quantity, 0) >= quantity
         THEN 'completed'
       ELSE status
     END

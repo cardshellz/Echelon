@@ -29,7 +29,7 @@ describe("derivePickerLineProgress", () => {
     });
   });
 
-  it("treats shipped quantity as the minimum proven picked quantity", () => {
+  it("does not manufacture a pick from a shipment declaration", () => {
     expect(derivePickerLineProgress({
       quantity: 2,
       pickedQuantity: 0,
@@ -37,7 +37,7 @@ describe("derivePickerLineProgress", () => {
       status: "in_progress",
     })).toEqual({
       targetQuantity: 2,
-      pickedQuantity: 1,
+      pickedQuantity: 0,
       status: "in_progress",
     });
   });

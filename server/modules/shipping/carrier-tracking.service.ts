@@ -631,12 +631,17 @@ export class CarrierTrackingService implements ShippingProviderLabelObserver {
         const consecutiveFailureCount = command.consecutiveFailureCount + 1;
         const retryable =
           evidence.retryable
-          && consecutiveFailureCount < DISPATCH_MAX_CONSECUTIVE_FAILURES;
+          // A human-owned correction is a durable wait, not an exhausted transport retry.
+          // Reuse this stored carrier event after the picker resolves the discrepancy.
+          && (evidence.code === "PICK_CORRECTION_REQUIRED"
+            || consecutiveFailureCount < DISPATCH_MAX_CONSECUTIVE_FAILURES);
         const completedAt = this.dependencies.clock.now();
         const retryAt = retryable
           ? new Date(
               completedAt.getTime()
-              + carrierDispatchRetryDelayMs(consecutiveFailureCount),
+              + (evidence.code === "PICK_CORRECTION_REQUIRED"
+                ? DISPATCH_RETRY_BASE_MS
+                : carrierDispatchRetryDelayMs(consecutiveFailureCount)),
             )
           : null;
         requestedOutcome = retryable ? "retry_scheduled" : "review_required";

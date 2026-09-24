@@ -5539,10 +5539,18 @@ describeWithDisposableDb("Package allocation ledger PostgreSQL guarantees", () =
         JOIN oms.oms_orders oms_order ON oms_order.id = line.order_id
         WHERE order_item.order_id = $1`, [source.order_id])).rows).toEqual([{
         fulfilled_quantity: 2,
-        picked_quantity: 2,
+        // The label declares package contents, not an inventory pick. Keep
+        // commercial fulfillment while preserving the missing physical record.
+        picked_quantity: 0,
         line_status: orderedQuantity === 2 ? "fulfilled" : "partial",
         order_status: orderedQuantity === 2 ? "fulfilled" : "partial",
       }]);
+      expect((await pool.query(`
+        SELECT declared_quantity, state, answer
+        FROM wms.pick_corrections correction
+        JOIN wms.order_items item ON item.id = correction.order_item_id
+        WHERE item.order_id = $1`, [source.order_id])).rows)
+        .toEqual([{ declared_quantity: 2, state: "confirmation_required", answer: null }]);
       if (orderedQuantity === 2) {
         // An extra label is not permission to fulfill a third ordered unit.
         await receiveLabel(44012);

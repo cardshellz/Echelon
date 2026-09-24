@@ -45,6 +45,7 @@ import { createReturnsService } from "../modules/orders/returns.service";
 import { createFulfillmentRouterService } from "../modules/orders/fulfillment-router.service";
 import { createSLAMonitorService } from "../modules/orders/sla-monitor.service";
 import { createPickingService } from "../modules/orders/picking.use-cases";
+import { createPickCorrectionService } from "../modules/orders/pick-correction.service";
 import { AssemblyExecutionService } from "../modules/warehouse/work/application/assembly-execution.service";
 import { AssemblyPackingService } from "../modules/warehouse/work/application/assembly-packing.service";
 import { AssemblyPackageReviewService } from "../modules/warehouse/work/application/assembly-package-review.service";
@@ -281,6 +282,7 @@ export function createServices(
     ...channelsStorage,
     ...identityStorage,
   }, channelSync, undefined, undefined, reservationRuntime.executor, assemblyExecution);
+  const pickCorrections = createPickCorrectionService(db, { ...ordersStorage, ...warehouseStorage }, picking);
 
   // Standalone
   const inventoryAlerts = createInventoryAlertService(db);
@@ -715,6 +717,7 @@ export function createServices(
     dropshipInventoryRuntimeAuthority,
     replenishment,
     picking,
+    pickCorrections,
     channelSync,
     returns,
     inventoryAlerts,

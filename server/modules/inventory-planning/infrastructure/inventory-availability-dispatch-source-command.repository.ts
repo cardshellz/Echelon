@@ -59,6 +59,7 @@ export class PostgresCanonicalClaimDispatchSourceCommandResolver implements Cano
       fail("CANONICAL_AUTHORITY_NOT_ACTIVE", "New source dispatch requires committed canonical authority");
     }
     const source = await this.sourceOwner.lockSourceForPreparation({ client, request });
+    await assertNoOpenPickCorrectionPg(client, request.orderItemId);
     const picked = selectCanonicalClaimDispatchPickedOwner(request, source, await loadPickedOwnership(client, request));
     if (source.warehouseLocationId === null) {
       await this.sourceOwner.bindSourceLocation({ client, request, warehouseLocationId: picked.warehouseLocationId });
@@ -138,3 +139,4 @@ async function loadPickedOwnership(client: CanonicalClaimTransactionClient, requ
     ORDER BY pick.id LIMIT $2 FOR UPDATE OF pick`, [resourceIds, MAX_ROWS + 1])).rows);
   return { claims, lines, resources, lots, picks };
 }
+import { assertNoOpenPickCorrectionPg } from "../../wms/pick-correction.repository";

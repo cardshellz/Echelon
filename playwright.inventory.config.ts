@@ -11,6 +11,7 @@ export default defineConfig({
   testMatch: [
     "bulk-inventory-tracking.spec.ts",
     "picking-inventory-policy.spec.ts",
+    "pick-corrections.spec.ts",
     "inventory-availability.spec.ts",
     "inventory-authority-gates.spec.ts",
     "inventory-publication-target-resume.spec.ts",

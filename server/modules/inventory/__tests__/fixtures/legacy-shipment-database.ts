@@ -1,7 +1,16 @@
-/** Reduced named schemas for actual shipment owner/Drizzle transaction tests. */
+import { readFileSync } from "node:fs";
+
+/** Reduced foreign-owner schemas; actual correction migration and shipment inventory owners. */
 export const legacyShipmentFixtureSql = `
   CREATE SCHEMA inventory;
   CREATE SCHEMA warehouse;
+  CREATE SCHEMA wms;
+  CREATE TABLE wms.orders (id integer PRIMARY KEY);
+  CREATE TABLE wms.order_items (id integer PRIMARY KEY, order_id integer REFERENCES wms.orders(id));
+  CREATE TABLE wms.physical_shipments (id bigint PRIMARY KEY);
+  INSERT INTO wms.orders VALUES (40);
+  INSERT INTO wms.order_items VALUES (50,40);
+  ${readFileSync("migrations/0703_corrective_picking.sql", "utf8")}
   CREATE TABLE inventory.availability_runtime_authority (
     singleton_key boolean PRIMARY KEY, authority text, revision bigint, activation_run_id bigint
   );

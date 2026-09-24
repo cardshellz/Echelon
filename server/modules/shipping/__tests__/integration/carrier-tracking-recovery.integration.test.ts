@@ -14,6 +14,7 @@ import {
   type FinalizeCarrierTrackingLabelPollAttemptInput,
 } from "../../carrier-tracking.repository";
 import { CarrierTrackingService } from "../../carrier-tracking.service";
+import { CarrierDispatchAuthorityError } from "../../carrier-dispatch-authority";
 import { ShipStationTrackingEventsError } from "../../shipstation-tracking-events.client";
 
 const databaseSuite = process.env.ECHELON_TEST_DATABASE_URL
@@ -25,6 +26,8 @@ const later = (milliseconds: number): Date => new Date(now.getTime() + milliseco
 // Only foreign-owner relations are reduced fixtures. All shipping tracking
 // tables, constraints and immutable-ledger triggers come from real migrations.
 const ownerFixture = `
+  CREATE SCHEMA oms;
+  CREATE TABLE oms.channel_fulfillment_pushes (id BIGINT PRIMARY KEY);
   CREATE SCHEMA wms;
   CREATE TABLE wms.orders (id INTEGER PRIMARY KEY, order_number TEXT NOT NULL);
   CREATE TABLE wms.outbound_shipments (
@@ -69,6 +72,7 @@ databaseSuite.sequential("carrier tracking recovery PostgreSQL guarantees", () =
     for (const name of [
       "154_carrier_tracking_event_authority.sql",
       "165_carrier_dispatch_authority_cutover.sql",
+      "171_historical_fulfillment_repair_audit.sql",
       "0603_shipping_provider_label_direction.sql",
       "184_shipping_provider_label_unknown_direction.sql",
       "0604_carrier_tracking_label_poll_fallback.sql",
@@ -207,6 +211,37 @@ databaseSuite.sequential("carrier tracking recovery PostgreSQL guarantees", () =
     expect((await pool.query("SELECT attempt_outcome FROM wms.carrier_tracking_label_poll_attempts")).rows)
       .toEqual([{ attempt_outcome: outcome }]);
     expect((await pool.query("SELECT COUNT(*)::int AS count FROM wms.carrier_dispatch_commands")).rows).toEqual([{ count: 0 }]);
+  });
+
+  it("retains a waiting correction without consuming transport retries, then resumes once", async () => {
+    await seedLabel("1ZTESTCORRECTIONWAIT");
+    await service().service.pollShipStationLabels(25);
+    await pool.query("UPDATE wms.carrier_dispatch_commands SET consecutive_failure_count=100");
+    let asOf = new Date(now);
+    const confirmDispatch = vi.fn()
+      .mockRejectedValueOnce(new CarrierDispatchAuthorityError("PICK_CORRECTION_REQUIRED", "Waiting", { retryable: true }))
+      .mockRejectedValueOnce(new CarrierDispatchAuthorityError("PICK_CORRECTION_REQUIRED", "Waiting", { retryable: true }))
+      .mockRejectedValueOnce(new CarrierDispatchAuthorityError("CARRIER_DISPATCH_PROVIDER_LOOKUP_FAILED", "Provider unavailable", { retryable: true }))
+      .mockResolvedValue({ processed: true, evidence: { corrected: true } });
+    const runner = new CarrierTrackingService({ repository, clock: { now: () => new Date(asOf) },
+      logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      dispatchLeaseOwner: "correction-retry-worker", dispatchAuthority: { confirmDispatch } });
+    for (let waiting = 0; waiting < 2; waiting++) {
+      expect(await runner.dispatchConfirmedPackages(25)).toMatchObject({ dispatchCommandsRetryScheduled: 1, errors: 0 });
+      expect((await pool.query("SELECT consecutive_failure_count FROM wms.carrier_dispatch_commands")).rows)
+        .toEqual([{ consecutive_failure_count: 0 }]);
+      asOf = new Date(asOf.getTime() + 5 * 60 * 1_000);
+    }
+    expect(await runner.dispatchConfirmedPackages(25)).toMatchObject({ dispatchCommandsRetryScheduled: 1, errors: 0 });
+    expect((await pool.query("SELECT consecutive_failure_count FROM wms.carrier_dispatch_commands")).rows)
+      .toEqual([{ consecutive_failure_count: 1 }]);
+    asOf = new Date(asOf.getTime() + 5 * 60 * 1_000);
+    expect(await runner.dispatchConfirmedPackages(25)).toMatchObject({ dispatchCommandsSucceeded: 1, errors: 0 });
+    expect(await runner.dispatchConfirmedPackages(25)).toMatchObject({ dispatchCommandsClaimed: 0 });
+    expect(confirmDispatch).toHaveBeenCalledTimes(4);
+    expect((await pool.query("SELECT attempt_outcome FROM wms.carrier_dispatch_attempts ORDER BY id")).rows)
+      .toEqual([{ attempt_outcome: "retry_scheduled" }, { attempt_outcome: "retry_scheduled" },
+        { attempt_outcome: "retry_scheduled" }, { attempt_outcome: "succeeded" }]);
   });
 
   it("reclaims an expired lease, rejects the stale worker and idempotently finalizes the current attempt", async () => {

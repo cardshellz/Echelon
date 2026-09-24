@@ -67,8 +67,8 @@ export const shipmentCompatibilitySeedSql = `
 TRUNCATE wms.ebay_label_replacement_work;
 TRUNCATE wms.shipping_engine_order_requests, wms.shipping_engine_order_provider_refs,
  wms.shipping_engine_orders RESTART IDENTITY;
-${dispatchRuntimeSeedSql.replace("TRUNCATE inventory.availability_claim_dispatch_movements",
-  "TRUNCATE inventory.operational_shipment_dispatch_lots, inventory.operational_shipment_dispatch_receipts, inventory.availability_claim_dispatch_movements").replace(
+${dispatchRuntimeSeedSql.replace("TRUNCATE ",
+  "TRUNCATE inventory.operational_shipment_dispatch_lots, inventory.operational_shipment_dispatch_receipts, ").replace(
   "INSERT INTO wms.outbound_shipment_items VALUES(101,90),(102,91);",
   "INSERT INTO wms.outbound_shipment_items(id,shipment_id,order_item_id,product_variant_id,from_location_id) VALUES(101,90,71,105,50),(102,91,71,105,50);",
 )}

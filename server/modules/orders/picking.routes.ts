@@ -19,9 +19,11 @@ import { reserveAndPushAfterHoldRelease } from "./release-hold-push";
 import { sql } from "drizzle-orm";
 import Papa from "papaparse";
 import { registerPickingHistoryRoutes } from "./picking-history.routes";
+import { registerPickCorrectionRoutes } from "./pick-correction.routes";
 
 export function registerPickingRoutes(app: Express) {
   registerPickingHistoryRoutes(app);
+  registerPickCorrectionRoutes(app, app.locals.services.pickCorrections);
   const { orderCombining } = app.locals.services;
   const pickerReplenAuthorityRemoved = (res: any) => res.status(410).json({
     error: "Picker replen confirmation has been removed",
