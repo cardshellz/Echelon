@@ -10,7 +10,7 @@ export const legacyShipmentFixtureSql = `
   CREATE TABLE wms.physical_shipments (id bigint PRIMARY KEY);
   INSERT INTO wms.orders VALUES (40);
   INSERT INTO wms.order_items VALUES (50,40);
-  ${readFileSync("migrations/0702_corrective_picking.sql", "utf8")}
+  ${readFileSync("migrations/0703_corrective_picking.sql", "utf8")}
   CREATE TABLE inventory.availability_runtime_authority (
     singleton_key boolean PRIMARY KEY, authority text, revision bigint, activation_run_id bigint
   );

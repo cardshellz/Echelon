@@ -32,7 +32,7 @@ The gun does **not** resend the original order, create a duplicate customer fulf
 
 ## Integrity and failure behavior
 
-- Migration `0702_corrective_picking.sql` creates workflow/audit tables only. There is no backfill, quantity adjustment or runtime ATP activation.
+- Migration `0703_corrective_picking.sql` creates workflow/audit tables only. There is no backfill, quantity adjustment or runtime ATP activation.
 - `confirmation_required -> picking_required -> resolved`. An unchanged old shipment replay cannot erase No. A changed authoritative declaration requires a new answer; a withdrawn declaration can close unnecessary work without moving stock.
 - The WMS owner is the sole writer of both correction tables. Audit events are append-only, protected by a database trigger. Command UUIDs have a unique constraint and are bound to a request hash and authenticated actor.
 - Lock order for correction decisions: WMS order, item, correction. Existing inventory owners keep their authority/graph locks before the order and their inventory/lot locks afterward. No DB transaction remains open across a provider call.

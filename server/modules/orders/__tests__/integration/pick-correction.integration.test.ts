@@ -27,7 +27,7 @@ suite("corrective picking durable PostgreSQL workflow", () => {
   let correctionId: number;
   beforeAll(async () => {
     database = await createInventoryCutoverTestDatabase(url, disposable,
-      foundation + readFileSync("migrations/0702_corrective_picking.sql", "utf8"));
+      foundation + readFileSync("migrations/0703_corrective_picking.sql", "utf8"));
     db = drizzle(database.pool);
   });
   afterAll(async () => { await database?.close(); });

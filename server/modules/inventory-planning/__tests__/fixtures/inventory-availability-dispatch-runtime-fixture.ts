@@ -28,7 +28,7 @@ ALTER TABLE wms.outbound_shipment_items ADD COLUMN order_item_id integer REFEREN
   ADD COLUMN replacement_for_order_item_id integer, ADD COLUMN correction_for_shipment_item_id integer,
   ADD COLUMN provider_membership_state varchar(30) NOT NULL DEFAULT 'authoritative';
 CREATE TABLE wms.physical_shipments(id bigint PRIMARY KEY, status varchar(30) NOT NULL);
-${readFileSync("migrations/0702_corrective_picking.sql", "utf8")}
+${readFileSync("migrations/0703_corrective_picking.sql", "utf8")}
 CREATE TABLE wms.physical_shipment_items(
   id bigint PRIMARY KEY, physical_shipment_id bigint NOT NULL REFERENCES wms.physical_shipments,
   legacy_wms_shipment_item_id integer REFERENCES wms.outbound_shipment_items,

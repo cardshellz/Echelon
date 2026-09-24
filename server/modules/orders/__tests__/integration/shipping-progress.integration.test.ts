@@ -59,7 +59,7 @@ suite("physical-line shipping status PostgreSQL guarantees", () => {
     database = await createInventoryCutoverTestDatabase(url, disposable,
       prerequisites + migration("115_fulfillment_canonical_shadow_tables.sql") + currentItemColumns
       + migration("182_physical_shipment_item_quantity_adjustments.sql")
-      + migration("0702_corrective_picking.sql"));
+      + migration("0703_corrective_picking.sql"));
     db = drizzle(database.pool);
   });
   beforeEach(async () => {
