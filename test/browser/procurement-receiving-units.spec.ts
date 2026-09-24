@@ -90,6 +90,11 @@ async function setup(page: Page, options: { legacy?: boolean; unresolved?: boole
 const control = (page: Page) => page.locator('[aria-label="Receive unit for line 7"]:visible');
 const count = (page: Page) => page.locator('input[aria-label="Received count for line 7"]:visible');
 const done = (page: Page) => page.locator('[data-testid="btn-complete-line-7"]:visible, [data-testid="btn-complete-line-mobile-7"]:visible');
+// The "Count saved" toast is raised by the same success handler that replaces the
+// line and drops its draft, so its title is the visible sign that a save landed.
+// Exact text keeps the toast's screen-reader announcement ("Notification Count
+// saved") out of the match.
+const expectCountSaved = (page: Page) => expect(page.getByText("Count saved", { exact: true })).toBeVisible();
 
 async function expectModalFits(page: Page, dialog: Locator) {
   await expect(dialog).toHaveCSS("opacity", "1");
@@ -111,12 +116,16 @@ test("opening a receipt does not mutate units; Save count preserves partial coun
   expect(state.commands).toEqual([]);
   await done(page).click(); await expect.poll(() => state.commands.length).toBe(1);
   expect(state.commands[0].body).toEqual({ receivedQty: 401, expectedUnitVersion: version });
+  // The save's success handler drops the line's count draft. A count typed before
+  // it runs is discarded with it, so wait for the page to confirm the save first.
+  await expectCountSaved(page);
   await count(page).fill("0");
   expect(state.commands).toHaveLength(1);
   await expect(page.getByTestId("btn-complete-all")).toBeDisabled();
   await expect(page.getByTestId("btn-close-receipt")).toBeDisabled();
   await done(page).click(); await expect.poll(() => state.commands.length).toBe(2);
   expect(state.commands[1].body).toEqual({ receivedQty: 0, expectedUnitVersion: nextVersion });
+  await expect(control(page)).toContainText("received: 0 pieces");
   await expect(count(page)).toHaveValue("0");
   await done(page).click(); await expect.poll(() => state.commands.length).toBe(3);
   expect(state.commands[2].body).toEqual({ receivedQty: 0, expectedUnitVersion: nextVersion });
