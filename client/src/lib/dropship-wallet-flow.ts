@@ -30,6 +30,7 @@ import {
 import type {
   DropshipWalletView,
   WalletFundingMethod,
+  WalletLedgerEntry,
   WalletLedgerReason,
   WalletLimits,
   WalletAdvance,
@@ -380,6 +381,106 @@ export const LEDGER_REASON_LABELS: Readonly<Record<WalletLedgerReason, string>> 
   insurance_pool_credit: "Insurance pool credit",
   other: "Other",
 });
+
+// ---------------------------------------------------------------------------
+// Rewards (funding design phase 7): a spend-only balance earned on bank and
+// USDC transfers when they land, at the per-rail rates the server serves.
+// ---------------------------------------------------------------------------
+
+/** The ledger kinds that move the rewards balance rather than the cash balance. */
+export const REWARDS_LEDGER_REASONS: ReadonlySet<WalletLedgerReason> = new Set<WalletLedgerReason>([
+  "rewards_earned", "rewards_spent", "rewards_reversed", "rewards_reinstated", "rewards_redeemed",
+]);
+
+export type WalletRewardsRates = Pick<WalletLimits, "rewardsRateBankBps" | "rewardsRateUsdcBps" | "rewardsRateCardBps">;
+export type WalletRewardsRail = WalletSourceRail | "usdc_base";
+
+const REWARDS_RATE_FIELDS = ["rewardsRateBankBps", "rewardsRateUsdcBps", "rewardsRateCardBps"] as const;
+
+/** Only the three rates are checked: callers pass the whole served limits object, which carries other fields. */
+function assertRewardsRates(rates: WalletRewardsRates): void {
+  for (const field of REWARDS_RATE_FIELDS) {
+    const value = rates[field];
+    if (!Number.isSafeInteger(value) || value < 0) throw new RangeError(`${field} must be a non-negative integer number of basis points, got ${value}`);
+  }
+}
+
+/** True while any way to pay earns rewards; with every rate at zero the program is off and nothing mentions it. */
+export function rewardsOffered(rates: WalletRewardsRates): boolean {
+  assertRewardsRates(rates);
+  return rates.rewardsRateBankBps > 0 || rates.rewardsRateUsdcBps > 0 || rates.rewardsRateCardBps > 0;
+}
+
+function rewardsRateForRail(rail: WalletRewardsRail, rates: WalletRewardsRates): number {
+  if (rail === "stripe_ach") return rates.rewardsRateBankBps;
+  if (rail === "usdc_base") return rates.rewardsRateUsdcBps;
+  return rates.rewardsRateCardBps;
+}
+
+/**
+ * One bullet for the way to pay the vendor picked: what it earns, and when
+ * (a bank or USDC transfer earns once it lands; a card charge, at once).
+ * A rail that earns nothing says so only while another rail earns, and
+ * nothing at all is said when the program is off.
+ */
+export function describeRewardsEarning(rail: WalletRewardsRail, rates: WalletRewardsRates): string | null {
+  if (!rewardsOffered(rates)) return null;
+  const bps = rewardsRateForRail(rail, rates);
+  if (bps === 0) return "Earns no rewards.";
+  const rate = formatFeeRate(bps);
+  if (rail === "stripe_card") return `Earns ${rate} in rewards, available at once.`;
+  if (rail === "usdc_base") return `Earns ${rate} in rewards once the transfer settles.`;
+  return `Earns ${rate} in rewards once it lands.`;
+}
+
+/**
+ * The rewards rule for the rules page: the per-rail rates, how rewards are
+ * spent, and what they can never do. Empty when the program is off. The
+ * rates are named per rail whenever they differ, and as one rate when bank
+ * and USDC match (the launch setting: "bank and USDC earn 1%").
+ */
+export function describeRewardsRule(rates: WalletRewardsRates, usdcOffered: boolean): string {
+  if (!rewardsOffered(rates)) return "";
+  const bank = formatFeeRate(rates.rewardsRateBankBps);
+  const usdc = formatFeeRate(rates.rewardsRateUsdcBps);
+  const card = formatFeeRate(rates.rewardsRateCardBps);
+  // USDC is named only where the vendor can pay with it, like the rest of the rules page.
+  const earning = !usdcOffered
+    ? `A bank transfer earns ${bank} in rewards when it lands`
+    : rates.rewardsRateBankBps === rates.rewardsRateUsdcBps
+      ? `Bank and USDC transfers earn ${bank} in rewards when they land`
+      : `A bank transfer earns ${bank} in rewards when it lands, a USDC transfer ${usdc}`;
+  const cardClause = rates.rewardsRateCardBps > 0 ? `a card charge earns ${card} at once` : "a card charge earns none";
+  return ` ${earning}; ${cardClause}. Rewards pay for your orders before your cash unless you choose to save them in Wallet. They are not cash: they cannot be paid out, do not count toward your minimum, and a payment your bank takes back takes its rewards back too.`;
+}
+
+/** The line under the rewards figure: how the balance is used today. */
+export function describeRewardsUse(spendRewardsFirst: boolean): string {
+  return spendRewardsFirst
+    ? "Pays for your orders before your cash. Not cash: it cannot be paid out and does not count toward your minimum."
+    : "Saved: your cash pays for orders while this is on. Not cash: it cannot be paid out and does not count toward your minimum.";
+}
+
+/** The request body of the save-my-rewards switch: on means rewards are kept, so the server's flag is the opposite. */
+export function buildRewardsPreferenceInput(saveRewards: boolean): { spendRewardsFirst: boolean } {
+  return { spendRewardsFirst: !saveRewards };
+}
+
+export function describeRewardsPreferenceSaved(saveRewards: boolean): string {
+  return saveRewards ? "Saved. Your cash pays for orders; your rewards stay put." : "Saved. Rewards pay for your orders before your cash.";
+}
+
+/**
+ * Which balance an activity row's "balance after" figure belongs to: a
+ * rewards row moved the rewards balance, every other row the cash balance.
+ * Null when the row did not record the balance it moved.
+ */
+export function ledgerBalanceAfter(entry: Pick<WalletLedgerEntry, "reason" | "availableBalanceAfterCents" | "rewardsBalanceAfterCents">): { balance: "cash" | "rewards"; cents: number } | null {
+  if (REWARDS_LEDGER_REASONS.has(entry.reason)) {
+    return entry.rewardsBalanceAfterCents === null ? null : { balance: "rewards", cents: entry.rewardsBalanceAfterCents };
+  }
+  return entry.availableBalanceAfterCents === null ? null : { balance: "cash", cents: entry.availableBalanceAfterCents };
+}
 
 export function isSourceRail(rail: string): rail is WalletSourceRail {
   return rail === "stripe_ach" || rail === "stripe_card";
@@ -943,6 +1044,7 @@ export function describeIntro(input: {
   const advanceCap = formatWholeDollars(input.limits.advanceCapCents);
   const ceiling = formatWholeDollars(input.limits.manualFundingMaxCents);
   const usdc = describeUsdcIntroSentence(input.usdcDeposit ?? null, input.usdcOffered);
+  const rewards = describeRewardsRule(input.limits, input.usdcOffered || (input.usdcDeposit?.offered ?? false));
   return {
     lede: "Your wallet is the deposit Card Shellz draws on for the orders you sell. Here is what it holds, what it lets you sell, how it stays funded, and what happens when a payment fails.",
     topics: [
@@ -960,7 +1062,7 @@ export function describeIntro(input: {
       },
       {
         lead: "Ways to pay, and what each costs.",
-        detail: `A bank account costs nothing and takes ${BANK_SETTLEMENT_DAYS_PHRASE} to land (our estimate). ${input.cardFundingFeeBps > 0 ? `A card lands at once and costs ${fee} on top of the amount, whether autopay charged it, you added money yourself, or it covered an order.` : `A card lands at once and costs nothing either; a card deposit is ${formatWholeDollars(input.limits.cardFundingMinCents)} or more.`}${usdc}`,
+        detail: `A bank account costs nothing and takes ${BANK_SETTLEMENT_DAYS_PHRASE} to land (our estimate). ${input.cardFundingFeeBps > 0 ? `A card lands at once and costs ${fee} on top of the amount, whether autopay charged it, you added money yourself, or it covered an order.` : `A card lands at once and costs nothing either; a card deposit is ${formatWholeDollars(input.limits.cardFundingMinCents)} or more.`}${usdc}${rewards}`,
       },
       {
         lead: "Orders while a transfer lands, and your backup card.",
@@ -1229,6 +1331,8 @@ export interface DepositRailNotesInput {
   bankFundingMethodId: number | null;
   /** The server's pending-transfer advance position; null when the server does not serve one. */
   advance: WalletAdvance | null;
+  /** The per-rail rewards rates in force (funding design phase 7). */
+  rewardsRates: WalletRewardsRates;
 }
 
 /**
@@ -1240,17 +1344,21 @@ export interface DepositRailNotesInput {
  */
 export function describeDepositRail(input: DepositRailNotesInput): string[] {
   const fee = formatFeeRate(input.cardFundingFeeBps);
+  const rewards = describeRewardsEarning(input.rail, input.rewardsRates);
+  const rewardsNotes = rewards === null ? [] : [rewards];
   if (input.rail === "stripe_card") {
     return [
       input.cardFundingFeeBps > 0 ? `Card fee: ${fee} on top of the amount.` : "No fee.",
       `Deposits of ${formatWholeDollars(input.cardMinimumCents)} or more.`,
       "Available at once.",
+      ...rewardsNotes,
     ];
   }
   const feeClause = input.cardFundingFeeBps > 0 ? ` plus ${fee}` : "";
   return [
     "No fee.",
     `Takes ${BANK_SETTLEMENT_PHRASE} to land, and counts toward your minimum as soon as it shows as on the way.`,
+    ...rewardsNotes,
     describeDepositCredit(input),
     `While it is on the way, an order it cannot pay for is charged to ${input.backupLabel} for the shortfall${feeClause}.`,
   ];

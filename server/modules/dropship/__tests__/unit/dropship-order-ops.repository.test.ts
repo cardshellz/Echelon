@@ -70,10 +70,12 @@ describe("PgDropshipOrderOpsRepository", () => {
       const sqlText = String(sql);
       if (sqlText.includes("COUNT(*) OVER()")) {
         expect(sqlText).toContain("hold.total_debit_cents AS hold_total_debit_cents");
+        expect(sqlText).toContain("hold.rewards_cents AS hold_rewards_cents");
+        expect(sqlText).toContain("WHEN ae.payload->>'rewardsCents' ~ '^[0-9]+$'");
         expect(sqlText).toContain("ae.event_type = 'order_acceptance_payment_hold'");
         expect(sqlText).toContain("LEFT JOIN dropship.dropship_wallet_accounts wa ON wa.vendor_id = oi.vendor_id");
         return { rows: [
-          makeListRow({ id: 1, status: "payment_hold", payment_hold_expires_at: now, hold_total_debit_cents: "9500", wallet_currency: "USD", total_count: "3" }),
+          makeListRow({ id: 1, status: "payment_hold", payment_hold_expires_at: now, hold_total_debit_cents: "9500", hold_rewards_cents: "500", wallet_currency: "USD", total_count: "3" }),
           // A hold whose event carried no amount stays visibly held, without the figure.
           makeListRow({ id: 2, status: "payment_hold", payment_hold_expires_at: now, hold_total_debit_cents: null, wallet_currency: "USD", total_count: "3" }),
           // An accepted intake never reports a hold even if an old hold event exists.
@@ -89,7 +91,7 @@ describe("PgDropshipOrderOpsRepository", () => {
     const result = await repository.listIntakes({ vendorId: 10, statuses: ["payment_hold", "accepted"], page: 1, limit: 25 });
 
     expect(result.items.map((item) => item.paymentHold)).toEqual([
-      { totalDebitCents: 9500, currency: "USD", expiresAt: now },
+      { totalDebitCents: 9500, rewardsCents: 500, currency: "USD", expiresAt: now },
       null,
       null,
     ]);
@@ -141,6 +143,8 @@ describe("PgDropshipOrderOpsRepository", () => {
       const sqlText = String(sql);
       if (sqlText.includes("LEFT JOIN dropship.dropship_order_economics_snapshots econ")) {
         expect(sqlText).toContain("WHERE oi.id = $1");
+        expect(sqlText).toContain("WHERE wl.reference_type = 'order_intake_rewards'");
+        expect(sqlText).toContain("AND wl.type = 'rewards_spent'");
         expect(params).toEqual([42]);
         return { rows: [makeDetailRow()] };
       }
@@ -227,6 +231,38 @@ describe("PgDropshipOrderOpsRepository", () => {
         quantity: 1,
       },
     ]);
+  });
+
+  it("serves both parts of an accepted order's payment: the cash row and the rewards row (funding design phase 7)", async () => {
+    const detailQuery = (row: Record<string, unknown>) => vi.fn(async (sql: string) => {
+      const sqlText = String(sql);
+      if (sqlText.includes("LEFT JOIN dropship.dropship_order_economics_snapshots econ")) return { rows: [row] };
+      if (sqlText.includes("FROM dropship.dropship_audit_events") && sqlText.includes("LIMIT 20")) return { rows: [] };
+      if (sqlText.includes("FROM dropship.dropship_marketplace_tracking_pushes tp")) return { rows: [] };
+      throw new Error(`Unexpected SQL in test: ${sqlText}`);
+    });
+
+    // Cash and rewards split the order: both rows are served, each with its own balance snapshot.
+    const split = await new PgDropshipOrderOpsRepository(makePool(makeClient(detailQuery(makeDetailRow({
+      wallet_ledger_entry_id: 70, wallet_ledger_type: "order_debit", wallet_ledger_status: "settled", wallet_ledger_amount_cents: "-9000", wallet_ledger_currency: "USD",
+      available_balance_after_cents: "41000", pending_balance_after_cents: "0", wallet_ledger_created_at: now, wallet_ledger_settled_at: now,
+      rewards_ledger_entry_id: 71, rewards_ledger_amount_cents: "-500", rewards_ledger_rewards_balance_after_cents: "250", rewards_ledger_created_at: now,
+    }))))).getIntakeDetail({ intakeId: 42 });
+    expect(split?.walletLedgerEntry).toMatchObject({ walletLedgerEntryId: 70, amountCents: -9000, availableBalanceAfterCents: 41000 });
+    expect(split?.walletRewardsEntry).toEqual({ walletLedgerEntryId: 71, amountCents: -500, rewardsBalanceAfterCents: 250, createdAt: now });
+
+    // Rewards paid the whole order: no cash row exists, and the rewards row still says what was paid.
+    const rewardsOnly = await new PgDropshipOrderOpsRepository(makePool(makeClient(detailQuery(makeDetailRow({
+      rewards_ledger_entry_id: 72, rewards_ledger_amount_cents: "-9500", rewards_ledger_rewards_balance_after_cents: "0", rewards_ledger_created_at: now,
+    }))))).getIntakeDetail({ intakeId: 42 });
+    expect(rewardsOnly?.walletLedgerEntry).toBeNull();
+    expect(rewardsOnly?.walletRewardsEntry).toEqual({ walletLedgerEntryId: 72, amountCents: -9500, rewardsBalanceAfterCents: 0, createdAt: now });
+
+    // An order from before rewards existed has neither, and a bad snapshot is refused rather than shown as a number.
+    expect((await new PgDropshipOrderOpsRepository(makePool(makeClient(detailQuery(makeDetailRow())))).getIntakeDetail({ intakeId: 42 }))?.walletRewardsEntry).toBeNull();
+    await expect(new PgDropshipOrderOpsRepository(makePool(makeClient(detailQuery(makeDetailRow({
+      rewards_ledger_entry_id: 73, rewards_ledger_amount_cents: "not-a-number", rewards_ledger_created_at: now,
+    }))))).getIntakeDetail({ intakeId: 42 })).rejects.toMatchObject({ code: "DROPSHIP_ORDER_OPS_INTEGER_RANGE_ERROR", context: { field: "rewards_ledger_amount_cents" } });
   });
 
   it("loads accepted intake target for WMS sync repair", async () => {
@@ -600,6 +636,7 @@ function makeListRow(overrides: Record<string, unknown> = {}) {
     latest_event_created_at: now,
     latest_event_payload: { errorCode: "CONFIG_MISSING" },
     hold_total_debit_cents: null,
+    hold_rewards_cents: null,
     wallet_currency: "USD",
     total_count: "1",
     ...overrides,
@@ -669,6 +706,10 @@ function makeDetailRow(overrides: Record<string, unknown> = {}) {
     pending_balance_after_cents: null,
     wallet_ledger_created_at: null,
     wallet_ledger_settled_at: null,
+    rewards_ledger_entry_id: null,
+    rewards_ledger_amount_cents: null,
+    rewards_ledger_rewards_balance_after_cents: null,
+    rewards_ledger_created_at: null,
     ...overrides,
   };
 }

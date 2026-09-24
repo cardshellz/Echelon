@@ -52,6 +52,8 @@ interface StubState {
   autoReload: Record<string, unknown> | null;
   balanceCents: number;
   pendingCents: number;
+  /** The spend-only rewards balance (funding design phase 7). */
+  rewardsCents: number;
   ledger: Record<string, unknown>[];
   cardFundingFeeBps: number;
   limits: Record<string, number> | null;
@@ -70,6 +72,7 @@ interface StubState {
   nextBankId: number;
   setupSessions: Record<string, unknown>[];
   autoReloadWrites: Record<string, unknown>[];
+  preferenceWrites: Record<string, unknown>[];
   fundingSessions: Record<string, unknown>[];
   usdcRegistrations: Record<string, unknown>[];
   usdcAddressRequests: number;
@@ -82,7 +85,7 @@ interface StubState {
 
 function doneAutoReload(overrides: Record<string, unknown> = {}) {
   return { autoReloadSettingId: 5, enabled: true, minimumBalanceCents: 25_000, maxSingleReloadCents: 50_000, topUpAmountCents: null, paymentHoldTimeoutMinutes: 2880, fundingMethodId: 30, updatedAt: STAMP,
-    backstopFundingMethodId: 10, acknowledgedCardFeeBps: 300, acknowledgedAt: STAMP, ...overrides };
+    backstopFundingMethodId: 10, acknowledgedCardFeeBps: 300, acknowledgedAt: STAMP, spendRewardsFirst: true, ...overrides };
 }
 
 function onboardingJson(state: StubState) {
@@ -102,7 +105,7 @@ function onboardingJson(state: StubState) {
 function walletJson(state: StubState) {
   const fundingMethods = state.methods.map(({ activatesAfterReads: _ignored, ...method }) => method);
   return { wallet: {
-    account: { walletAccountId: 1, vendorId: 1, availableBalanceCents: state.balanceCents, pendingBalanceCents: state.pendingCents, currency: "USD", status: "active", createdAt: STAMP, updatedAt: STAMP },
+    account: { walletAccountId: 1, vendorId: 1, availableBalanceCents: state.balanceCents, pendingBalanceCents: state.pendingCents, rewardsBalanceCents: state.rewardsCents, currency: "USD", status: "active", createdAt: STAMP, updatedAt: STAMP },
     autoReload: state.autoReload, fundingMethods, recentLedger: state.ledger, cardFundingFeeBps: state.cardFundingFeeBps, usdcBaseDepositAddress: state.usdcDepositAddress,
     ...(state.usdcDeposit ? { usdcDeposit: state.usdcDeposit } : {}),
     ...(state.limits ? { limits: state.limits } : {}),
@@ -134,9 +137,9 @@ function listingTiersJson() {
 }
 
 async function setup(page: Page, initial: Partial<StubState> = {}, path = HARNESS_PATH) {
-  const state: StubState = { methods: [], holdSetupConfirmation: false, usdcDepositAddress: null, usdcDeposit: null, autoReload: null, balanceCents: 0, pendingCents: 0, ledger: [], cardFundingFeeBps: 300, limits: null, listingTiers: null, advance: null,
+  const state: StubState = { methods: [], holdSetupConfirmation: false, usdcDepositAddress: null, usdcDeposit: null, autoReload: null, balanceCents: 0, pendingCents: 0, rewardsCents: 0, ledger: [], cardFundingFeeBps: 300, limits: null, listingTiers: null, advance: null,
     proofs: {}, failChallenge: false, deleteRefusal: null, detachOutcome: "detached", putRefusalOnce: null, vendorStatus: "onboarding", vendorStandingReason: null,
-    walletReads: 0, nextCardId: 10, nextBankId: 30, setupSessions: [], autoReloadWrites: [], fundingSessions: [], usdcRegistrations: [], usdcAddressRequests: 0, deletes: [], bodies: [],
+    walletReads: 0, nextCardId: 10, nextBankId: 30, setupSessions: [], autoReloadWrites: [], preferenceWrites: [], fundingSessions: [], usdcRegistrations: [], usdcAddressRequests: 0, deletes: [], bodies: [],
     codesSent: [], unexpected: [], errors: [], ...initial };
   // Fixtures are copied so a journey that archives or activates a row never leaks into the next one; new ids follow the fixtures.
   state.methods = state.methods.map((row) => ({ ...row }));
@@ -207,6 +210,13 @@ async function setup(page: Page, initial: Partial<StubState> = {}, path = HARNES
         acknowledgedAt: body.acknowledgedCardFeeBps === null ? null : LATER,
       };
       return route.fulfill({ json: { autoReload: state.autoReload, idempotentReplay: false } });
+    }
+    if (url.pathname === "/api/dropship/wallet/rewards/preference" && method === "PUT") {
+      const body = route.request().postDataJSON() as Record<string, unknown>;
+      state.preferenceWrites.push(body);
+      if (!state.autoReload) return route.fulfill({ status: 409, json: { error: { code: "DROPSHIP_AUTO_RELOAD_NOT_CONFIGURED", message: "No settings row." } } });
+      state.autoReload = { ...state.autoReload, spendRewardsFirst: body.spendRewardsFirst, updatedAt: LATER };
+      return route.fulfill({ json: { autoReload: state.autoReload } });
     }
     if (url.pathname === "/api/dropship/wallet/funding/stripe/checkout-session" && method === "POST") {
       const body = route.request().postDataJSON() as Record<string, unknown>;
@@ -341,7 +351,7 @@ test("bank vendor, end to end: intro, bank source, minimum with guidance and a t
   await expect(intro).toContainText("you keep selling for 14 days after the notice");
   await expect(intro).toContainText("takes up to 5 business days to land (our estimate)");
   await expect(intro).toContainText("costs 3% on top of the amount");
-  await expect(intro).toContainText("USDC costs nothing.");
+  await expect(intro).toContainText("USDC costs nothing. Bank and USDC transfers earn 1% in rewards when they land; a card charge earns none. Rewards pay for your orders before your cash unless you choose to save them in Wallet.");
   await expect(intro).toContainText("the same gap is never pulled twice");
   await expect(intro).toContainText("Routine top-ups never take more than the larger of your minimum and your top-up amount in one charge.");
   await expect(intro).toContainText("You can also add money yourself at any time.");
@@ -489,11 +499,12 @@ test("bank vendor, end to end: intro, bank source, minimum with guidance and a t
   await expect(deposit.getByTestId("wallet-rail-notes").getByRole("listitem")).toHaveText([
     "No fee.",
     "Takes up to 5 business days (our assumption) to land, and counts toward your minimum as soon as it shows as on the way.",
+    "Earns 1% in rewards once it lands.",
     "A business bank account can qualify to pay for orders while a transfer is still on the way; a personal account pays only once the money lands.",
     "While it is on the way, an order it cannot pay for is charged to Visa ending in 4242 for the shortfall plus 3%.",
   ]);
   await radio(page, "Pay with", "Card (3% fee)").click();
-  await expect(deposit.getByTestId("wallet-rail-notes").getByRole("listitem")).toHaveText(["Card fee: 3% on top of the amount.", "Deposits of $100 or more.", "Available at once."]);
+  await expect(deposit.getByTestId("wallet-rail-notes").getByRole("listitem")).toHaveText(["Card fee: 3% on top of the amount.", "Deposits of $100 or more.", "Available at once.", "Earns no rewards."]);
   await radio(page, "Pay with", "Bank account (no fee)").click();
   await expect(deposit).not.toContainText(/autopay|daily check|first top-up/i);
   await expect(deposit.getByTestId("wallet-impact")).toHaveCount(0);
@@ -709,6 +720,57 @@ test("manage: a server refusal to remove a method in a role renders the exact se
   await expect(page.getByTestId("wallet-role-warning")).toContainText("Backup card needed");
   await expect(page.getByTestId("wallet-role-warning")).not.toContainText("ending in");
   expect(state.deletes).toHaveLength(3);
+  finish(state);
+});
+
+test("manage: rewards are their own balance, the activity names the balance they moved, and saving them is one click (funding design phase 7)", async ({ page }) => {
+  const ledger = [
+    { ledgerEntryId: 101, type: "rewards_spent", status: "settled", amountCents: -250, currency: "USD", availableBalanceAfterCents: 4_250, pendingBalanceAfterCents: 0, rewardsBalanceAfterCents: 1_250, createdAt: LATER, settledAt: LATER, metadata: {} },
+    { ledgerEntryId: 100, type: "rewards_earned", status: "settled", amountCents: 1_500, currency: "USD", availableBalanceAfterCents: 4_250, pendingBalanceAfterCents: 0, rewardsBalanceAfterCents: 1_500, createdAt: STAMP, settledAt: STAMP, metadata: {} },
+    { ledgerEntryId: 99, type: "funding", status: "settled", amountCents: 150_000, currency: "USD", availableBalanceAfterCents: 150_000, pendingBalanceAfterCents: 0, rewardsBalanceAfterCents: 0, createdAt: STAMP, settledAt: STAMP, metadata: { provider: "stripe", fundingMethodId: 30 } },
+  ];
+  const state = await setup(page, { vendorStatus: "active", methods: [CARD, BANK], autoReload: doneAutoReload(), balanceCents: 4_250, rewardsCents: 1_250, ledger, usdcDepositAddress: DEPOSIT_ADDRESS, proofs: ALL_PROOFS });
+  const rewards = page.getByTestId("wallet-balance").getByTestId("wallet-rewards");
+  await expect(page.getByTestId("wallet-available")).toHaveText("$42.50");
+  await expect(rewards.getByTestId("wallet-rewards-balance")).toHaveText("$12.50");
+  await expect(rewards.getByTestId("wallet-rewards-use")).toHaveText("Pays for your orders before your cash. Not cash: it cannot be paid out and does not count toward your minimum.");
+  await expect(radio(page, "Rewards", "Use on orders first")).toHaveAttribute("aria-checked", "true");
+  await expect(radio(page, "Rewards", "Save my rewards")).toHaveAttribute("aria-checked", "false");
+  // The rewards figure never joins the cash figure anywhere on the page.
+  await expect(page.getByTestId("wallet-balance")).not.toContainText("$55.00");
+  await expectNoHorizontalScroll(page);
+  await shot(page, "manage-rewards-01-balance");
+
+  // Activity: rewards rows in plain words, their balance-after figure named as rewards, cash rows unchanged.
+  const activity = page.getByTestId("wallet-activity");
+  const rows = activity.getByRole("row");
+  await expect(rows.nth(1)).toContainText("Rewards used on an order");
+  await expect(rows.nth(1)).toContainText("$12.50 rewards");
+  await expect(rows.nth(2)).toContainText("Rewards earned");
+  await expect(rows.nth(2)).toContainText("$15.00 rewards");
+  await expect(rows.nth(3)).toContainText("Money you added");
+  await expect(rows.nth(3)).not.toContainText("rewards");
+
+  // The USDC panel says what a transfer earns, in the same words as the rules.
+  await page.getByRole("button", { name: "Add money" }).click();
+  await radio(page, "Pay with", "USDC on Base").click();
+  await expect(page.getByTestId("wallet-usdc-funding").getByTestId("wallet-usdc-rewards")).toHaveText("Earns 1% in rewards once the transfer settles.");
+  await page.getByRole("button", { name: "Close" }).click();
+
+  // Saving the rewards is one click, no code: the request carries the server's flag turned the vendor's way round.
+  await radio(page, "Rewards", "Save my rewards").click();
+  await expect(rewards.getByRole("status")).toContainText("Saved. Your cash pays for orders; your rewards stay put.");
+  expect(state.preferenceWrites).toEqual([{ spendRewardsFirst: false }]);
+  expect(state.codesSent).toEqual([]);
+  await expect(radio(page, "Rewards", "Save my rewards")).toHaveAttribute("aria-checked", "true");
+  await expect(rewards.getByTestId("wallet-rewards-use")).toHaveText("Saved: your cash pays for orders while this is on. Not cash: it cannot be paid out and does not count toward your minimum.");
+  // Clicking the chosen option again sends nothing; choosing the other sends the flag back.
+  await radio(page, "Rewards", "Save my rewards").click();
+  expect(state.preferenceWrites).toHaveLength(1);
+  await radio(page, "Rewards", "Use on orders first").click();
+  await expect(rewards.getByRole("status")).toContainText("Saved. Rewards pay for your orders before your cash.");
+  expect(state.preferenceWrites).toEqual([{ spendRewardsFirst: false }, { spendRewardsFirst: true }]);
+  await shot(page, "manage-rewards-02-saved");
   finish(state);
 });
 

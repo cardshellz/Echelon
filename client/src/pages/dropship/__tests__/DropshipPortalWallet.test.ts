@@ -83,6 +83,7 @@ describe("DropshipPortalWallet contract", () => {
       "\"/api/dropship/wallet/funding/stripe/checkout-session\"",
       "\"/api/dropship/wallet/funding-methods/usdc-base\"",
       "\"/api/dropship/wallet/usdc/deposit-address\"",
+      "\"/api/dropship/wallet/rewards/preference\"",
     ]));
     expect(source.match(/deleteJson</g)).toHaveLength(1);
     expect(between("function removeMethod", "function addFunds")).toContain("deleteJson<");
@@ -188,6 +189,7 @@ describe("DropshipPortalWallet contract", () => {
     expect(step).toContain("describePendingBalance(wallet.account.pendingBalanceCents, wallet.advance)");
     expect(step).toContain("railNotes={(rail, method) => describeDepositRail({");
     expect(step).toContain("bankFundingMethodId: rail === \"stripe_ach\" && method ? method.fundingMethodId : null,");
+    expect(step).toContain("rewardsRates: wallet.limits,");
     expect(step).toContain("Skip for now");
     // No autopay talk, no impact box, no Back: the autopay steps before it cover autopay, and the step list still opens the review.
     expect(step).not.toMatch(/autopay|auto-reload|daily check|first top-up|describeActivationTopUp|Not now|onBack|<Impact>/i);
@@ -272,6 +274,47 @@ describe("DropshipPortalWallet contract", () => {
       expect(tail).not.toContain("setDraft((current)");
     }
     expect(source).toContain("function commitDraftBeforeRedirect(next: WalletDraft)");
+  });
+});
+
+describe("rewards on the wallet page (funding design phase 7)", () => {
+  it("shows the rewards balance as its own element with the save-my-rewards switch, in the model's words", () => {
+    const block = between("function RewardsBalance", "function describeBalanceAfterCell");
+    expect(block).toContain('data-testid="wallet-rewards"');
+    expect(block).toContain('data-testid="wallet-rewards-balance"');
+    expect(block).toContain("formatCents(wallet.account.rewardsBalanceCents)");
+    expect(block).toContain("{describeRewardsUse(spendFirst)}");
+    // The choice is the page's radio pair, never a switch: "save my rewards" is the opposite of the server's spend-first flag,
+    // a re-click of the chosen option sends nothing, and both wait for the settings row the choice is saved on.
+    expect(block).toContain("const spendFirst = wallet.autoReload?.spendRewardsFirst ?? true;");
+    expect(block).toContain("const disabled = feedback.busy || !wallet.autoReload;");
+    expect(block).toContain('<div role="radiogroup" aria-label="Rewards"');
+    expect(block).toContain('<RadioChip label="Use on orders first" selected={spendFirst} disabled={disabled} onSelect={() => { if (!spendFirst) void onSave(false); }} testId="wallet-rewards-spend" />');
+    expect(block).toContain('<RadioChip label="Save my rewards" selected={!spendFirst} disabled={disabled} onSelect={() => { if (spendFirst) void onSave(true); }} testId="wallet-rewards-save" />');
+    expect(block).not.toMatch(/1%|\d+%|"\$|<Switch/);
+    // The balance section renders it once, above the add-money panel.
+    expect(between('data-testid="wallet-balance"', 'data-testid="wallet-add-money"')).toContain('<RewardsBalance wallet={wallet} feedback={feedback("rewards")} onSave={onSaveRewardsPreference} />');
+    expect(source.match(/<RewardsBalance /g)).toHaveLength(1);
+  });
+
+  it("saves the preference through the model's request and words, with no step-up and a refetch", () => {
+    const handler = between("function saveRewardsPreference", "function removeMethod");
+    expect(handler).toContain('run("rewards", "put", async () => {');
+    expect(handler).toContain('putJson<{ autoReload: unknown }>("/api/dropship/wallet/rewards/preference", buildRewardsPreferenceInput(saveRewards));');
+    expect(handler).toContain("await refreshAfterWalletChange();");
+    expect(handler).toContain("describeRewardsPreferenceSaved(saveRewards)");
+    expect(handler).not.toContain("withVerification");
+  });
+
+  it("names the balance a rewards row moved in Activity, and what USDC earns under its address", () => {
+    expect(source).toContain('<TableCell className="text-right font-mono">{describeBalanceAfterCell(entry)}</TableCell>');
+    expect(source).not.toContain("formatSignedCents(entry.availableBalanceAfterCents)");
+    const cell = between("function describeBalanceAfterCell", "function ActivitySection");
+    expect(cell).toContain("ledgerBalanceAfter(entry)");
+    expect(cell).toContain('`${formatSignedCents(after.cents)} rewards`');
+    expect(source.match(/data-testid="wallet-usdc-rewards"/g)).toHaveLength(2);
+    expect(source.match(/describeRewardsEarning\("usdc_base", wallet\.limits\)/g)).toHaveLength(1);
+    expect(source.match(/\{usdcRewards && <p className="text-sm text-zinc-600" data-testid="wallet-usdc-rewards">\{usdcRewards\}<\/p>\}/g)).toHaveLength(2);
   });
 });
 

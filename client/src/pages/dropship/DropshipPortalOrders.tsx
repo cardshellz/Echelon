@@ -68,6 +68,7 @@ import {
   type DropshipOrderTrackingLineItemSummary,
   type DropshipPaymentHoldSummaryResponse,
 } from "@/lib/dropship-ops-surface";
+import { describeHeldOrderNeed, describeOrderAcceptance, describeOrderPayment } from "@/lib/dropship-order-payment";
 import {
   dropshipPortalPath,
   isDropshipSensitiveProofActive,
@@ -197,7 +198,7 @@ export default function DropshipPortalOrders() {
       ]);
       setEmailCodeSent(false);
       setVerificationCode("");
-      setMessage(orderAcceptanceMessage(response.result));
+      setMessage(describeOrderAcceptance(response.result));
     });
   }
 
@@ -502,6 +503,9 @@ function OrderDetailSheet({
   open: boolean;
   order: DropshipOrderDetail | null;
 }) {
+  // The two ledger rows behind an accepted order (cash and rewards) are read
+  // into the page's words once per detail load, never added up in the JSX.
+  const orderPayment = order ? describeOrderPayment(order) : null;
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent className="w-full overflow-y-auto sm:max-w-2xl">
@@ -534,9 +538,9 @@ function OrderDetailSheet({
               <DetailField label="Accepted" value={formatDateTime(order.acceptedAt)} />
               <DetailField label="Marketplace status" value={order.marketplaceStatus || "Not recorded"} />
               <DetailField label="Payment hold" value={formatDateTime(order.paymentHoldExpiresAt)} />
-              {order.paymentHold && (
-                <DetailField label="Amount needed" value={formatCents(order.paymentHold.totalDebitCents)} />
-              )}
+              {order.paymentHold && describeHeldOrderNeed(order.paymentHold).map((part) => (
+                <DetailField key={part.label} label={part.label} value={part.value} />
+              ))}
             </section>
 
             <Separator />
@@ -684,12 +688,9 @@ function OrderDetailSheet({
             </OrderDetailSection>
 
             <OrderDetailSection icon={<Wallet className="h-4 w-4" />} title="Wallet Debit">
-              {order.walletLedgerEntry ? (
-                <div className="grid gap-2 text-sm sm:grid-cols-2">
-                  <DetailField label="Ledger entry" value={String(order.walletLedgerEntry.walletLedgerEntryId)} />
-                  <DetailField label="Status" value={formatStatus(order.walletLedgerEntry.status)} />
-                  <DetailField label="Amount" value={formatCents(order.walletLedgerEntry.amountCents)} />
-                  <DetailField label="Balance after" value={formatNullableCents(order.walletLedgerEntry.availableBalanceAfterCents)} />
+              {orderPayment ? (
+                <div className="grid gap-2 text-sm sm:grid-cols-2" data-testid="order-wallet-payment">
+                  {orderPayment.map((part) => <DetailField key={part.label} label={part.label} value={part.value} />)}
                 </div>
               ) : (
                 <p className="text-sm text-zinc-500">No wallet debit recorded.</p>
@@ -1032,13 +1033,6 @@ function canAcceptOrder(order: DropshipOrderListItem): boolean {
 
 function canRejectOrder(order: DropshipOrderListItem): boolean {
   return rejectionStatuses.has(order.status) && order.storeConnection.launchReady && order.omsOrderId === null;
-}
-
-function orderAcceptanceMessage(result: DropshipOrderAcceptResponse["result"]): string {
-  if (result.outcome === "payment_hold") {
-    return `Order intake ${result.intakeId} placed on payment hold for ${formatCents(result.totalDebitCents)}.`;
-  }
-  return `Order intake ${result.intakeId} accepted for ${formatCents(result.totalDebitCents)}.`;
 }
 
 function orderRejectionMessage(result: DropshipOrderRejectResponse["result"]): string {

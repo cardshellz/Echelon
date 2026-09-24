@@ -78,6 +78,7 @@ import {
   buildAutoReloadDisableInput,
   buildConfirmTermsInput,
   buildPendingStripe,
+  buildRewardsPreferenceInput,
   buildPlanSaveInput,
   buildRemoveFundingMethodPath,
   clearWalletDraft,
@@ -114,6 +115,9 @@ import {
   describeDepositRail,
   describePendingBalance,
   describePlanSentence,
+  describeRewardsEarning,
+  describeRewardsPreferenceSaved,
+  describeRewardsUse,
   describeRoleGap,
   describeSavedCardAlternative,
   describeSourcePreselection,
@@ -121,6 +125,7 @@ import {
   disabledReasonForRemoval,
   isEligibleBackupCard,
   isPendingStripeLive,
+  ledgerBalanceAfter,
   minimumOptionFor,
   minimumOptions,
   parseStripeReturn,
@@ -170,7 +175,7 @@ const SECTION = "mt-5 rounded-md border border-zinc-200 bg-white p-5";
 
 type WalletSensitiveAction = Extract<DropshipSensitiveAction, "add_funding_method" | "wallet_funding_high_value" | "remove_funding_method">;
 /** Which part of the page an action, its notice and its code prompt belong to. */
-type WalletScope = WalletFlowStep | "banner" | "money" | "plan" | "methods";
+type WalletScope = WalletFlowStep | "banner" | "money" | "rewards" | "plan" | "methods";
 type ManageEditor = "source" | "floor" | "backup" | "review" | null;
 
 interface WalletNotice {
@@ -543,6 +548,15 @@ export default function DropshipPortalWallet() {
     });
   }
 
+  /** The save-my-rewards choice (funding design phase 7): a preference, not a charge, so no step-up is asked. */
+  async function saveRewardsPreference(saveRewards: boolean): Promise<void> {
+    await run("rewards", "put", async () => {
+      await putJson<{ autoReload: unknown }>("/api/dropship/wallet/rewards/preference", buildRewardsPreferenceInput(saveRewards));
+      await refreshAfterWalletChange();
+      setNotice({ scope: "rewards", tone: "success", text: describeRewardsPreferenceSaved(saveRewards) });
+    });
+  }
+
   function removeMethod(method: WalletFundingMethod) {
     return withVerification("methods", "remove_funding_method", "delete", async () => {
       const response = await deleteJson<{ fundingMethod: unknown; idempotentReplay: boolean; providerDetach: string }>(buildRemoveFundingMethodPath(method.fundingMethodId));
@@ -795,6 +809,7 @@ export default function DropshipPortalWallet() {
             onAddFunds={(rail, amount) => addFunds("money", rail, amount)}
             onSaveUsdc={saveUsdcMethod}
             onRequestUsdcAddress={requestUsdcAddress}
+            onSaveRewardsPreference={saveRewardsPreference}
             onBackToOnboarding={() => setLocation(dropshipPortalPath("/onboarding"))}
           />
         )}
@@ -1807,6 +1822,8 @@ function UsdcFundingPanel({ wallet, busy, onSave, onRequestAddress }: {
   const [displayLabel, setDisplayLabel] = useState("USDC on Base");
   const registered = wallet.fundingMethods.filter((method) => method.rail === "usdc_base" && method.status === "active");
   const deposit = wallet.usdcDeposit;
+  // What a USDC transfer earns (funding design phase 7), in the same words as the rules page; null while the program is off.
+  const usdcRewards = describeRewardsEarning("usdc_base", wallet.limits);
   if (deposit?.offered) {
     // The vendor's own address (funding design phase 6): nothing to register,
     // nothing for staff to match. The words are the model's.
@@ -1824,6 +1841,7 @@ function UsdcFundingPanel({ wallet, busy, onSave, onRequestAddress }: {
           </Button>
         )}
         <p className="text-sm text-zinc-600" data-testid="wallet-usdc-timing">{copy.timing}</p>
+        {usdcRewards && <p className="text-sm text-zinc-600" data-testid="wallet-usdc-rewards">{usdcRewards}</p>}
         <p className="text-xs text-zinc-500" data-testid="wallet-usdc-warning">{copy.warning}</p>
       </div>
     );
@@ -1835,6 +1853,7 @@ function UsdcFundingPanel({ wallet, busy, onSave, onRequestAddress }: {
         <code className="mt-1 block break-all font-mono text-zinc-900" data-testid="wallet-usdc-deposit-address">{wallet.usdcBaseDepositAddress}</code>
       </div>
       <p className="text-sm text-zinc-600">No fee. A member of the Card Shellz team credits your wallet after confirming the transfer — this is not instant.</p>
+      {usdcRewards && <p className="text-sm text-zinc-600" data-testid="wallet-usdc-rewards">{usdcRewards}</p>}
       {registered.length > 0 && (
         <ul className="space-y-1 text-sm">
           {registered.map((method) => <li key={method.fundingMethodId}>Sending from {describeFundingMethod(method)}</li>)}
@@ -1898,6 +1917,7 @@ function DepositStep({
           backupLabel: terms.backupLabel,
           cardMinimumCents: wallet.limits.cardFundingMinCents,
           bankFundingMethodId: rail === "stripe_ach" && method ? method.fundingMethodId : null,
+          rewardsRates: wallet.limits,
           advance: wallet.advance,
         })}
         onContinue={onContinue}
@@ -1919,7 +1939,7 @@ function DepositStep({
 
 function ManageView({
   wallet, flow, draft, now, stillOnboarding, editor, setEditor, addMoneyOpen, setAddMoneyOpen, newMethodOffer, dismissOffer, returnBanner, dismissReturnBanner,
-  pendingNotice, onCheckAgain, feedback, feeMisconfigured, onSavePlan, onConfirmTerms, onTurnOff, onRemove, onAddMethod, onAddFunds, onSaveUsdc, onRequestUsdcAddress, onBackToOnboarding,
+  pendingNotice, onCheckAgain, feedback, feeMisconfigured, onSavePlan, onConfirmTerms, onTurnOff, onRemove, onAddMethod, onAddFunds, onSaveUsdc, onRequestUsdcAddress, onSaveRewardsPreference, onBackToOnboarding,
 }: {
   wallet: DropshipWalletView;
   flow: WalletFlowState;
@@ -1946,6 +1966,7 @@ function ManageView({
   onAddFunds: (rail: WalletSourceRail, amountCents: number) => Promise<void>;
   onSaveUsdc: (input: { walletAddress: string; displayLabel: string }) => Promise<void>;
   onRequestUsdcAddress: () => Promise<void>;
+  onSaveRewardsPreference: (saveRewards: boolean) => Promise<void>;
   onBackToOnboarding: () => void;
 }) {
   const plan = planFromWallet(wallet);
@@ -2064,6 +2085,7 @@ function ManageView({
             Add money by card before you activate, or start a bank transfer early enough to land, so your first orders do not run on the backup card.
           </p>
         )}
+        <RewardsBalance wallet={wallet} feedback={feedback("rewards")} onSave={onSaveRewardsPreference} />
         {addMoneyOpen && (
           <div className="mt-5 border-t border-zinc-200 pt-1" data-testid="wallet-add-money">
             <FundingControls
@@ -2524,6 +2546,42 @@ function SavedMethods({
   );
 }
 
+/**
+ * The rewards balance (funding design phase 7): its own figure next to the
+ * cash balance, the line saying how it is used, and the "save my rewards"
+ * choice as the page's whole-clickable radio pair (the page has no switches:
+ * a money choice is always a named option). "Save my rewards" is the
+ * opposite of the server's spend-first flag; the model does the turning.
+ */
+function RewardsBalance({ wallet, feedback, onSave }: { wallet: DropshipWalletView; feedback: Feedback; onSave: (saveRewards: boolean) => Promise<void> }) {
+  const spendFirst = wallet.autoReload?.spendRewardsFirst ?? true;
+  // Without a settings row there is nothing to save the choice on; the server scaffolds one with autopay.
+  const disabled = feedback.busy || !wallet.autoReload;
+  return (
+    <div className="mt-4 rounded-md border border-zinc-200 bg-zinc-50 p-3" data-testid="wallet-rewards">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <div className="text-sm text-zinc-500">Rewards</div>
+          <div className="mt-1 text-2xl font-semibold" data-testid="wallet-rewards-balance">{formatCents(wallet.account.rewardsBalanceCents)}</div>
+          <p className="mt-1 text-sm text-zinc-500" data-testid="wallet-rewards-use">{describeRewardsUse(spendFirst)}</p>
+        </div>
+        <div role="radiogroup" aria-label="Rewards" className="flex flex-wrap gap-2">
+          <RadioChip label="Use on orders first" selected={spendFirst} disabled={disabled} onSelect={() => { if (!spendFirst) void onSave(false); }} testId="wallet-rewards-spend" />
+          <RadioChip label="Save my rewards" selected={!spendFirst} disabled={disabled} onSelect={() => { if (spendFirst) void onSave(true); }} testId="wallet-rewards-save" />
+        </div>
+      </div>
+      <SectionFeedback {...feedback} />
+    </div>
+  );
+}
+
+/** "Balance after" for an activity row: the cash balance, or the rewards balance for a rewards row, named as such. */
+function describeBalanceAfterCell(entry: DropshipWalletView["recentLedger"][number]): string {
+  const after = ledgerBalanceAfter(entry);
+  if (after === null) return "—";
+  return after.balance === "rewards" ? `${formatSignedCents(after.cents)} rewards` : formatSignedCents(after.cents);
+}
+
 function ActivitySection({ wallet }: { wallet: DropshipWalletView }) {
   const labelFor = (id: number | null) => {
     if (id === null) return null;
@@ -2562,7 +2620,7 @@ function ActivitySection({ wallet }: { wallet: DropshipWalletView }) {
                   </TableCell>
                   <TableCell><Badge variant="outline">{formatStatus(entry.status)}</Badge></TableCell>
                   <TableCell className="text-right font-mono">{formatSignedCents(entry.amountCents)}</TableCell>
-                  <TableCell className="text-right font-mono">{entry.availableBalanceAfterCents === null ? "—" : formatSignedCents(entry.availableBalanceAfterCents)}</TableCell>
+                  <TableCell className="text-right font-mono">{describeBalanceAfterCell(entry)}</TableCell>
                   <TableCell className="whitespace-nowrap text-sm text-zinc-500">{formatDateTime(entry.createdAt)}</TableCell>
                 </TableRow>
               ))}

@@ -34,7 +34,15 @@ import {
   cardFeeNoun,
   cardFeeOnTop,
   describeCardFee,
+  REWARDS_LEDGER_REASONS,
+  buildRewardsPreferenceInput,
   describeDepositRail,
+  describeRewardsEarning,
+  describeRewardsPreferenceSaved,
+  describeRewardsRule,
+  describeRewardsUse,
+  ledgerBalanceAfter,
+  rewardsOffered,
   describeBackupFollow,
   describeFundingMethod,
   describeFundingMethodDetailed,
@@ -504,7 +512,7 @@ describe("copy", () => {
     expect(intro.topics[0].detail).toBe("A prepaid deposit Card Shellz holds for your store. Every order you accept is paid from it: the product cost plus shipping, with nothing added on top. A return fee comes out of it too, and so does a payment your bank takes back after it landed; either can take the balance below zero.");
     expect(intro.topics[1].detail).toBe("Singles, packs and inner packs are on sale while you keep at least $50 in your wallet. Cases are on sale once your balance, counting money on its way, has reached $500. If Card Shellz raises a minimum you keep selling for 14 days after the notice, then that tier comes off sale until you are back above it.");
     expect(intro.topics[2].detail).toBe("You choose the minimum you keep — at least $50, or $500 to sell cases. Whenever an order takes your balance below it, and at a daily check, autopay pulls a top-up from your bank account or card: your top-up amount, which is your minimum unless you set another, or more if that alone would not reach your minimum. Money already on its way counts, so the same gap is never pulled twice. Routine top-ups never take more than the larger of your minimum and your top-up amount in one charge. You can also add money yourself at any time.");
-    expect(intro.topics[3].detail).toBe("A bank account costs nothing and takes up to 5 business days to land (our estimate). A card lands at once and costs 3% on top of the amount, whether autopay charged it, you added money yourself, or it covered an order. USDC costs nothing.");
+    expect(intro.topics[3].detail).toBe("A bank account costs nothing and takes up to 5 business days to land (our estimate). A card lands at once and costs 3% on top of the amount, whether autopay charged it, you added money yourself, or it covered an order. USDC costs nothing." + REWARDS_RULE);
     expect(intro.topics[4].detail).toBe("Money that has landed pays for orders first. A bank transfer still on its way can pay too, once the account it comes from qualifies — a business account, a balance we could read when it was linked, and one earlier transfer from it landed — for a 1% fee on the amount used, at most $500 outstanding at a time. If an order still needs more than your balance, we charge your backup card for the whole difference plus 3%, up to $5,000 in one payment, and send the order out. An order the card cannot cover waits 48 hours for you to add money, then is cancelled.");
     expect(intro.topics[5].detail).toBe("Selling pauses: your listings show nothing for sale, and orders already waiting are cancelled after your hold time (48 hours). We email you, and we do not retry the charge ourselves. A payment your bank takes back after it landed is taken out of your wallet the same way. Selling starts again on its own once your balance is back at your minimum.");
     // USDC is named only where a deposit address exists, and never with a timing claim: nothing in the code watches the chain.
@@ -527,8 +535,12 @@ describe("copy", () => {
     // The old vocabulary is gone from the rules page.
     const whole = [intro.lede, ...intro.topics.flatMap((topic) => [topic.lead, topic.detail])].join(" ");
     expect(whole).not.toMatch(/single top-up limit|Never charge more than|step 5|floor|auto-reload|backstop/);
-    // Exactly the enforced amounts are quoted: the two tier minimums (twice), the card fee (twice), the advance fee and its cap, and the single-payment ceiling.
-    expect(whole.match(/\$[\d,]*\d|\d+(?:\.\d+)?%/g)).toEqual(["$50", "$500", "$50", "$500", "3%", "1%", "$500", "3%", "$5,000"]);
+    // Exactly the enforced amounts are quoted: the two tier minimums (twice), the card fee (twice), the rewards rate, the advance fee and its cap, and the single-payment ceiling.
+    expect(whole.match(/\$[\d,]*\d|\d+(?:\.\d+)?%/g)).toEqual(["$50", "$500", "$50", "$500", "3%", "1%", "1%", "$500", "3%", "$5,000"]);
+    // With the program off, the rules page says nothing about rewards; without USDC on offer, the rule names the bank alone.
+    const off = describeIntro({ cardFundingFeeBps: 300, usdcOffered: true, holdTimeoutMinutes: 2_880, limits: { ...limits, rewardsRateBankBps: 0, rewardsRateUsdcBps: 0, rewardsRateCardBps: 0 } });
+    expect([off.lede, ...off.topics.flatMap((topic) => [topic.lead, topic.detail])].join(" ")).not.toMatch(/reward/i);
+    expect(noUsdc.topics[3].detail).toContain(" A bank transfer earns 1% in rewards when it lands; a card charge earns none.");
     expect(describeActivationTopUp({ cardFundingFeeBps: 300 })).toBe("Your first automatic top-up runs on the first daily check after you activate (about midnight UTC). Until it lands, orders are charged to your backup card at 3%. Adding money by card now avoids that.");
     expect(describeHoldTimeLine(120)).toContain("for orders held from now on");
     expect(describeHoldTimeLine(120)).toContain("We email you 2 hours before.");
@@ -673,12 +685,12 @@ describe("USDC deposits in the wallet's words (funding design phase 6)", () => {
 
   it("says only what the watcher enforces in the intro: confirmations to show, the safe head to settle", () => {
     const base = { cardFundingFeeBps: 300, usdcOffered: true, holdTimeoutMinutes: 2_880, limits };
-    expect(describeIntro({ ...base, usdcDeposit: watched }).topics[3].detail).toMatch(/ USDC on Base costs nothing: a transfer to your own deposit address shows in your wallet after 6 confirmations and is available once the network settles it\.$/);
+    expect(describeIntro({ ...base, usdcDeposit: watched }).topics[3].detail).toContain(" USDC on Base costs nothing: a transfer to your own deposit address shows in your wallet after 6 confirmations and is available once the network settles it." + REWARDS_RULE);
     expect(describeIntro({ ...base, usdcDeposit: { ...watched, minConfirmations: 1 } }).topics[3].detail).toContain("after 1 confirmation and");
-    expect(describeIntro({ ...base, usdcDeposit: unwatched }).topics[3].detail).toMatch(/ USDC on Base costs nothing; a member of our team credits a transfer to your own deposit address after confirming it\.$/);
+    expect(describeIntro({ ...base, usdcDeposit: unwatched }).topics[3].detail).toContain(" USDC on Base costs nothing; a member of our team credits a transfer to your own deposit address after confirming it." + REWARDS_RULE);
     // Only the shared address: the old sentence, and nothing about timing.
-    expect(describeIntro({ ...base, usdcDeposit: null }).topics[3].detail).toMatch(/ USDC costs nothing\.$/);
-    expect(describeIntro({ ...base, usdcDeposit: notOffered }).topics[3].detail).toMatch(/ USDC costs nothing\.$/);
+    expect(describeIntro({ ...base, usdcDeposit: null }).topics[3].detail).toContain(" USDC costs nothing." + REWARDS_RULE);
+    expect(describeIntro({ ...base, usdcDeposit: notOffered }).topics[3].detail).toContain(" USDC costs nothing." + REWARDS_RULE);
     expect(describeIntro({ ...base, usdcOffered: false, usdcDeposit: notOffered }).topics[3].detail).not.toContain("USDC");
     expect(describeUsdcIntroSentence(null, false)).toBe("");
   });
@@ -808,47 +820,107 @@ describe("adding money: the top-up step's picks again", () => {
   });
 });
 
+/** The rewards rule as the rules page states it at the launch rates with USDC on offer. */
+const REWARDS_RULE = " Bank and USDC transfers earn 1% in rewards when they land; a card charge earns none. Rewards pay for your orders before your cash unless you choose to save them in Wallet. They are not cash: they cannot be paid out, do not count toward your minimum, and a payment your bank takes back takes its rewards back too.";
+
+describe("rewards in the wallet's words (funding design phase 7)", () => {
+  const rates = { rewardsRateBankBps: 100, rewardsRateUsdcBps: 100, rewardsRateCardBps: 0 };
+
+  it("names what each way to pay earns, and when, only while some rail earns", () => {
+    expect(describeRewardsEarning("stripe_ach", rates)).toBe("Earns 1% in rewards once it lands.");
+    expect(describeRewardsEarning("usdc_base", rates)).toBe("Earns 1% in rewards once the transfer settles.");
+    expect(describeRewardsEarning("stripe_card", rates)).toBe("Earns no rewards.");
+    expect(describeRewardsEarning("stripe_card", { ...rates, rewardsRateCardBps: 25 })).toBe("Earns 0.25% in rewards, available at once.");
+    expect(describeRewardsEarning("stripe_ach", { ...rates, rewardsRateBankBps: 150 })).toBe("Earns 1.5% in rewards once it lands.");
+    const off = { rewardsRateBankBps: 0, rewardsRateUsdcBps: 0, rewardsRateCardBps: 0 };
+    expect(rewardsOffered(off)).toBe(false);
+    expect(describeRewardsEarning("stripe_ach", off)).toBeNull();
+    expect(describeRewardsEarning("stripe_card", off)).toBeNull();
+    // A rate that is not a whole, non-negative number of basis points is refused, never rendered.
+    expect(() => describeRewardsEarning("stripe_ach", { ...rates, rewardsRateBankBps: -1 })).toThrow(RangeError);
+    expect(() => describeRewardsEarning("stripe_ach", { ...rates, rewardsRateUsdcBps: 1.5 })).toThrow(RangeError);
+  });
+
+  it("states the rule from the served rates: one sentence when bank and USDC match, each named when they differ, USDC only where offered", () => {
+    expect(describeRewardsRule(rates, true)).toBe(REWARDS_RULE);
+    expect(describeRewardsRule(rates, false)).toContain(" A bank transfer earns 1% in rewards when it lands; a card charge earns none.");
+    expect(describeRewardsRule(rates, false)).not.toContain("USDC");
+    expect(describeRewardsRule({ rewardsRateBankBps: 100, rewardsRateUsdcBps: 200, rewardsRateCardBps: 50 }, true))
+      .toContain(" A bank transfer earns 1% in rewards when it lands, a USDC transfer 2%; a card charge earns 0.5% at once.");
+    expect(describeRewardsRule({ rewardsRateBankBps: 0, rewardsRateUsdcBps: 0, rewardsRateCardBps: 0 }, true)).toBe("");
+  });
+
+  it("words the balance line, the switch's request and its confirmation from one flag, turned the vendor's way round", () => {
+    expect(describeRewardsUse(true)).toBe("Pays for your orders before your cash. Not cash: it cannot be paid out and does not count toward your minimum.");
+    expect(describeRewardsUse(false)).toBe("Saved: your cash pays for orders while this is on. Not cash: it cannot be paid out and does not count toward your minimum.");
+    // The switch is "save my rewards": on means the server must stop spending them first.
+    expect(buildRewardsPreferenceInput(true)).toEqual({ spendRewardsFirst: false });
+    expect(buildRewardsPreferenceInput(false)).toEqual({ spendRewardsFirst: true });
+    expect(describeRewardsPreferenceSaved(true)).toBe("Saved. Your cash pays for orders; your rewards stay put.");
+    expect(describeRewardsPreferenceSaved(false)).toBe("Saved. Rewards pay for your orders before your cash.");
+  });
+
+  it("points an activity row's balance-after figure at the balance the row moved", () => {
+    expect(ledgerBalanceAfter({ reason: "rewards_earned", availableBalanceAfterCents: 40_000, rewardsBalanceAfterCents: 400 })).toEqual({ balance: "rewards", cents: 400 });
+    expect(ledgerBalanceAfter({ reason: "rewards_spent", availableBalanceAfterCents: 40_000, rewardsBalanceAfterCents: 0 })).toEqual({ balance: "rewards", cents: 0 });
+    expect(ledgerBalanceAfter({ reason: "manual_top_up", availableBalanceAfterCents: 40_000, rewardsBalanceAfterCents: 400 })).toEqual({ balance: "cash", cents: 40_000 });
+    expect(ledgerBalanceAfter({ reason: "order", availableBalanceAfterCents: -500, rewardsBalanceAfterCents: null })).toEqual({ balance: "cash", cents: -500 });
+    // A row that never recorded the balance it moved shows nothing rather than the other balance.
+    expect(ledgerBalanceAfter({ reason: "rewards_reversed", availableBalanceAfterCents: 40_000, rewardsBalanceAfterCents: null })).toBeNull();
+    expect(ledgerBalanceAfter({ reason: "return_fee", availableBalanceAfterCents: null, rewardsBalanceAfterCents: 400 })).toBeNull();
+    expect([...REWARDS_LEDGER_REASONS].sort()).toEqual(["rewards_earned", "rewards_redeemed", "rewards_reinstated", "rewards_reversed", "rewards_spent"]);
+  });
+});
+
 describe("the add-money step's terms per way to pay", () => {
-  const bank = { rail: "stripe_ach" as const, cardFundingFeeBps: 300, backupLabel: "Visa ending in 4242", cardMinimumCents: 10_000, bankFundingMethodId: 30, advance: null };
+  const rates = { rewardsRateBankBps: 100, rewardsRateUsdcBps: 100, rewardsRateCardBps: 0 };
+  const bank = { rail: "stripe_ach" as const, cardFundingFeeBps: 300, backupLabel: "Visa ending in 4242", cardMinimumCents: 10_000, bankFundingMethodId: 30, advance: null, rewardsRates: rates };
 
   it("lists a card's fee and that the money is available at once; a zero fee reads as none", () => {
-    expect(describeDepositRail({ ...bank, rail: "stripe_card" })).toEqual(["Card fee: 3% on top of the amount.", "Deposits of $100 or more.", "Available at once."]);
-    expect(describeDepositRail({ ...bank, rail: "stripe_card", cardFundingFeeBps: 0 })).toEqual(["No fee.", "Deposits of $100 or more.", "Available at once."]);
+    expect(describeDepositRail({ ...bank, rail: "stripe_card" })).toEqual(["Card fee: 3% on top of the amount.", "Deposits of $100 or more.", "Available at once.", "Earns no rewards."]);
+    expect(describeDepositRail({ ...bank, rail: "stripe_card", cardFundingFeeBps: 0 })).toEqual(["No fee.", "Deposits of $100 or more.", "Available at once.", "Earns no rewards."]);
+    // A card rate says what a card earns; with the program off, no bullet mentions rewards at all.
+    expect(describeDepositRail({ ...bank, rail: "stripe_card", rewardsRates: { ...rates, rewardsRateCardBps: 50 } })[3]).toBe("Earns 0.5% in rewards, available at once.");
+    expect(describeDepositRail({ ...bank, rail: "stripe_card", rewardsRates: { rewardsRateBankBps: 0, rewardsRateUsdcBps: 0, rewardsRateCardBps: 0 } })).toHaveLength(3);
   });
 
   it("lists a bank transfer's fee, landing time, credit and backup-card terms without an advance position", () => {
     expect(describeDepositRail({ ...bank, advance: null })).toEqual([
       "No fee.",
       "Takes up to 5 business days (our assumption) to land, and counts toward your minimum as soon as it shows as on the way.",
+      "Earns 1% in rewards once it lands.",
       "A business bank account can qualify to pay for orders while a transfer is still on the way; a personal account pays only once the money lands.",
       "While it is on the way, an order it cannot pay for is charged to Visa ending in 4242 for the shortfall plus 3%.",
     ]);
     // A zero card fee drops the fee clause rather than promising "plus 0%".
-    expect(describeDepositRail({ ...bank, advance: null, cardFundingFeeBps: 0 })[3]).toBe("While it is on the way, an order it cannot pay for is charged to Visa ending in 4242 for the shortfall.");
+    expect(describeDepositRail({ ...bank, advance: null, cardFundingFeeBps: 0 })[4]).toBe("While it is on the way, an order it cannot pay for is charged to Visa ending in 4242 for the shortfall.");
+    // A bank rate of zero while the card earns: the bullet says so; the program off: no bullet.
+    expect(describeDepositRail({ ...bank, advance: null, rewardsRates: { rewardsRateBankBps: 0, rewardsRateUsdcBps: 0, rewardsRateCardBps: 100 } })[2]).toBe("Earns no rewards.");
+    expect(describeDepositRail({ ...bank, advance: null, rewardsRates: { rewardsRateBankBps: 0, rewardsRateUsdcBps: 0, rewardsRateCardBps: 0 } })).toHaveLength(4);
   });
 
   it("words the credit sentence from the account's three facts, not from the eligibility flag", () => {
     const source = advance().sources[0];
     // Company, balance read, one transfer landed: qualifies (even when nothing is on the way right now).
-    expect(describeDepositRail({ ...bank, advance: advance({ sources: [{ ...source, pendingCents: 0, eligible: false, reasons: ["no_pending_credit"] }] }) })[2])
+    expect(describeDepositRail({ ...bank, advance: advance({ sources: [{ ...source, pendingCents: 0, eligible: false, reasons: ["no_pending_credit"] }] }) })[3])
       .toBe("This business account qualifies: money still on its way from it can pay for orders, for a 1% fee on the amount used, up to $500 at a time.");
-    expect(describeDepositRail({ ...bank, advance: advance({ sources: [{ ...source, priorPullSettled: false, eligible: false, reasons: ["first_pull_not_settled"] }] }) })[2])
+    expect(describeDepositRail({ ...bank, advance: advance({ sources: [{ ...source, priorPullSettled: false, eligible: false, reasons: ["first_pull_not_settled"] }] }) })[3])
       .toBe("This is a business account: once one transfer from it has landed, later transfers can pay for orders while still on the way, for a 1% fee on the amount used, up to $500 at a time.");
-    expect(describeDepositRail({ ...bank, advance: advance({ sources: [{ ...source, balanceVerified: false, eligible: false, reasons: ["bank_balance_not_verified"] }] }) })[2])
+    expect(describeDepositRail({ ...bank, advance: advance({ sources: [{ ...source, balanceVerified: false, eligible: false, reasons: ["bank_balance_not_verified"] }] }) })[3])
       .toBe("This is a business account, but we could not read its balance when it was linked, so money on its way from it pays for orders only once it lands.");
-    expect(describeDepositRail({ ...bank, advance: advance({ sources: [{ ...source, accountHolderType: "individual", eligible: false, reasons: ["account_holder_not_company"] }] }) })[2])
+    expect(describeDepositRail({ ...bank, advance: advance({ sources: [{ ...source, accountHolderType: "individual", eligible: false, reasons: ["account_holder_not_company"] }] }) })[3])
       .toBe("This is a personal account: money on its way from it pays for orders only once it lands.");
     // The vendor's override terms are the ones quoted.
-    expect(describeDepositRail({ ...bank, advance: advance({ policy: { feeBps: 150, capCents: 100_000, capSource: "vendor_override" } }) })[2])
+    expect(describeDepositRail({ ...bank, advance: advance({ policy: { feeBps: 150, capCents: 100_000, capSource: "vendor_override" } }) })[3])
       .toBe("This business account qualifies: money still on its way from it can pay for orders, for a 1.5% fee on the amount used, up to $1,000 at a time.");
   });
 
   it("falls back to the general rule when the account is unknown, and to none at all when the cap is zero", () => {
     const general = "A business account can qualify to pay for orders while a transfer is still on the way — a balance we could read when it was linked, and one earlier transfer from it landed — for a 1% fee on the amount used, up to $500 at a time. A personal account pays only once the money lands.";
-    expect(describeDepositRail({ ...bank, bankFundingMethodId: null, advance: advance() })[2]).toBe(general);
-    expect(describeDepositRail({ ...bank, bankFundingMethodId: 99, advance: advance() })[2]).toBe(general);
-    expect(describeDepositRail({ ...bank, advance: advance({ sources: [{ ...advance().sources[0], accountHolderType: null }] }) })[2]).toBe(general);
-    expect(describeDepositRail({ ...bank, advance: advance({ policy: { feeBps: 100, capCents: 0, capSource: "vendor_override" } }) })[2]).toBe("Money on its way cannot pay for orders until it lands.");
+    expect(describeDepositRail({ ...bank, bankFundingMethodId: null, advance: advance() })[3]).toBe(general);
+    expect(describeDepositRail({ ...bank, bankFundingMethodId: 99, advance: advance() })[3]).toBe(general);
+    expect(describeDepositRail({ ...bank, advance: advance({ sources: [{ ...advance().sources[0], accountHolderType: null }] }) })[3]).toBe(general);
+    expect(describeDepositRail({ ...bank, advance: advance({ policy: { feeBps: 100, capCents: 0, capSource: "vendor_override" } }) })[3]).toBe("Money on its way cannot pay for orders until it lands.");
   });
 });
 

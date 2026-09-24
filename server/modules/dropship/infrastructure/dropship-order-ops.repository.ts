@@ -21,6 +21,7 @@ import type {
   DropshipOrderOpsPaymentHoldAggregate,
   DropshipOrderOpsTrackingPushSummary,
   DropshipOrderOpsWalletLedgerEntry,
+  DropshipOrderOpsWalletRewardsEntry,
   DropshipOrderOpsWmsSyncActionTarget,
 } from "../application/dropship-order-ops-service";
 import type { DropshipTrackingPushStatus } from "../application/dropship-tracking-push-ops-dtos";
@@ -59,6 +60,8 @@ interface OpsIntakeRow {
   latest_event_payload: Record<string, unknown> | null;
   /** What the latest payment hold on this intake needs; null unless the intake is held. */
   hold_total_debit_cents: string | number | null;
+  /** The rewards share of that hold, when the hold event recorded one (funding design phase 7). */
+  hold_rewards_cents: string | number | null;
   wallet_currency: string | null;
   total_count: string | number;
 }
@@ -120,6 +123,10 @@ interface OpsIntakeDetailRow extends OpsIntakeRow {
   pending_balance_after_cents: string | number | null;
   wallet_ledger_created_at: Date | null;
   wallet_ledger_settled_at: Date | null;
+  rewards_ledger_entry_id: number | null;
+  rewards_ledger_amount_cents: string | number | null;
+  rewards_ledger_rewards_balance_after_cents: string | number | null;
+  rewards_ledger_created_at: Date | null;
 }
 
 interface AuditEventRow {
@@ -729,6 +736,7 @@ function opsIntakeListSelectSql(): string {
       latest.created_at AS latest_event_created_at,
       latest.payload AS latest_event_payload,
       hold.total_debit_cents AS hold_total_debit_cents,
+      hold.rewards_cents AS hold_rewards_cents,
       wa.currency AS wallet_currency,
       COUNT(*) OVER() AS total_count
   ` + opsIntakeBaseFromSql() + opsIntakePaymentHoldJoinSql();
@@ -770,6 +778,7 @@ function opsIntakeDetailSelectSql(): string {
       latest.created_at AS latest_event_created_at,
       latest.payload AS latest_event_payload,
       hold.total_debit_cents AS hold_total_debit_cents,
+      hold.rewards_cents AS hold_rewards_cents,
       wa.currency AS wallet_currency,
       1 AS total_count,
       econ.id AS economics_snapshot_id,
@@ -805,7 +814,11 @@ function opsIntakeDetailSelectSql(): string {
       ledger.available_balance_after_cents,
       ledger.pending_balance_after_cents,
       ledger.created_at AS wallet_ledger_created_at,
-      ledger.settled_at AS wallet_ledger_settled_at
+      ledger.settled_at AS wallet_ledger_settled_at,
+      rewards.id AS rewards_ledger_entry_id,
+      rewards.amount_cents AS rewards_ledger_amount_cents,
+      rewards.rewards_balance_after_cents AS rewards_ledger_rewards_balance_after_cents,
+      rewards.created_at AS rewards_ledger_created_at
     ${opsIntakeBaseFromSql()}
     ${opsIntakePaymentHoldJoinSql()}
     LEFT JOIN dropship.dropship_order_economics_snapshots econ
@@ -837,6 +850,15 @@ function opsIntakeDetailSelectSql(): string {
       ORDER BY wl.id ASC
       LIMIT 1
     ) ledger ON true
+    LEFT JOIN LATERAL (
+      SELECT wl.id, wl.amount_cents, wl.rewards_balance_after_cents, wl.created_at
+      FROM dropship.dropship_wallet_ledger wl
+      WHERE wl.reference_type = 'order_intake_rewards'
+        AND wl.reference_id = oi.id::text
+        AND wl.type = 'rewards_spent'
+      ORDER BY wl.id ASC
+      LIMIT 1
+    ) rewards ON true
   `;
 }
 
@@ -870,7 +892,12 @@ function opsIntakePaymentHoldLateralSql(): string {
           WHEN ae.payload->>'totalDebitCents' ~ '^[0-9]+$'
           THEN (ae.payload->>'totalDebitCents')::bigint
           ELSE NULL
-        END AS total_debit_cents
+        END AS total_debit_cents,
+        CASE
+          WHEN ae.payload->>'rewardsCents' ~ '^[0-9]+$'
+          THEN (ae.payload->>'rewardsCents')::bigint
+          ELSE NULL
+        END AS rewards_cents
       FROM dropship.dropship_audit_events ae
       WHERE oi.status = 'payment_hold'
         AND ae.entity_type = 'dropship_order_intake'
@@ -1029,6 +1056,7 @@ function mapOpsIntakeDetailRow(
     economicsSnapshot: mapEconomicsSnapshot(row),
     shippingQuoteSnapshot: mapShippingQuoteSnapshot(row),
     walletLedgerEntry: mapWalletLedgerEntry(row),
+    walletRewardsEntry: mapWalletRewardsEntry(row),
     trackingPushes: trackingPushes.map(mapTrackingPushDetailRow),
     auditEvents: auditEvents.map(mapAuditEventDetail),
   };
@@ -1099,6 +1127,7 @@ function mapPaymentHold(row: OpsIntakeRow): DropshipOrderOpsPaymentHold | null {
   if (totalDebitCents === null) return null;
   return {
     totalDebitCents: toSafeInteger(totalDebitCents, "hold_total_debit_cents"),
+    rewardsCents: optionalSafeInteger(row.hold_rewards_cents, "hold_rewards_cents"),
     currency: row.wallet_currency ?? DEFAULT_WALLET_CURRENCY,
     expiresAt: row.payment_hold_expires_at,
   };
@@ -1187,6 +1216,16 @@ function mapWalletLedgerEntry(row: OpsIntakeDetailRow): DropshipOrderOpsWalletLe
     pendingBalanceAfterCents: optionalSafeInteger(row.pending_balance_after_cents, "pending_balance_after_cents"),
     createdAt: row.wallet_ledger_created_at,
     settledAt: row.wallet_ledger_settled_at,
+  };
+}
+
+function mapWalletRewardsEntry(row: OpsIntakeDetailRow): DropshipOrderOpsWalletRewardsEntry | null {
+  if (row.rewards_ledger_entry_id === null || row.rewards_ledger_created_at === null) return null;
+  return {
+    walletLedgerEntryId: row.rewards_ledger_entry_id,
+    amountCents: requiredSafeInteger(row.rewards_ledger_amount_cents, "rewards_ledger_amount_cents"),
+    rewardsBalanceAfterCents: optionalSafeInteger(row.rewards_ledger_rewards_balance_after_cents, "rewards_ledger_rewards_balance_after_cents"),
+    createdAt: row.rewards_ledger_created_at,
   };
 }
 
