@@ -11,7 +11,7 @@ const configured = { ...shop, type: "internal", provider: "shopify", status: "ac
 const order = { omsOrderId: 100, channelId: 36, externalOrderId: "1000", externalOrderNumber: "#TEST-1",
   purchasedAt: NOW.toISOString(), shipToCountry: "US", cancelledAt: null };
 const line = { omsOrderLineId: 101, externalLineItemId: "500", title: "Same product", variantTitle: null,
-  sku: "SAME", quantity: 4, requiresShipping: true };
+  sku: "SAME", quantity: 4, requiresShipping: true, unitWeightGrams: 12.34 };
 const item = { wmsOrderId: 201, wmsOrderItemId: 301, omsOrderLineId: 101, channelId: 36, source: "oms",
   omsOrderReference: "100", legacyOrderReference: null, externalOrderId: "1000", externalLineItemId: "500",
   quantity: 4, fulfilledQuantity: 4, warehouseStatus: "shipped" };

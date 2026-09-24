@@ -1,8 +1,10 @@
 import { z } from "zod";
+import { salesFinancialsSchema } from "./sales-financials";
 
 const cents = z.number().int().nonnegative().safe();
 export const shopifyDiscountEvidenceSchema = z
   .object({
+    financials: salesFinancialsSchema.optional(),
     version: z.literal(1),
     provider: z.literal("shopify"),
     currency: z.string().regex(/^[A-Z]{3}$/),
@@ -26,7 +28,21 @@ export const shopifyDiscountEvidenceSchema = z
       .max(1000),
     issues: z.array(z.string().max(100)).max(30),
   })
-  .strict();
+  .strict()
+  .superRefine((value, ctx) => {
+    const f = value.financials;
+    if (
+      f &&
+      (f.currency !== value.currency ||
+        f.grossMerchandiseCents !== value.grossMerchandiseCents ||
+        f.merchandiseDiscountCents !== value.merchandiseDiscountCents ||
+        f.shippingDiscountCents !== value.shippingDiscountCents)
+    )
+      ctx.addIssue({
+        code: "custom",
+        message: "Financial snapshot disagrees with discount evidence",
+      });
+  });
 export type ShopifyDiscountEvidence = z.infer<
   typeof shopifyDiscountEvidenceSchema
 >;

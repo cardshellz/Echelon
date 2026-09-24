@@ -1,7 +1,10 @@
 import { test, expect } from "vitest";
 import { Client, Pool } from "pg";
 import { readFile } from "node:fs/promises";
-import { createArchonOrderDelivery } from "../../archon-order-delivery";
+import {
+  loadArchonSnapshot,
+  createArchonOrderDelivery,
+} from "../../archon-order-delivery";
 import { queueHistoricalArchonOrders } from "../../archon-order-replay";
 const url =
   process.env.ECHELON_TEST_DATABASE_URL ?? process.env.ARCHON_TEST_DATABASE_URL;
@@ -272,6 +275,58 @@ test(
       expect(
         (await pool.query("SELECT * FROM oms.oms_orders ORDER BY id")).rows,
       ).toEqual(beforeOrders);
+      const providerRaw = {
+        id: 101,
+        source_name: "web",
+        currency: "USD",
+        updated_at: "2026-09-23T14:00:00Z",
+        taxes_included: false,
+        subtotal_price: "30.43",
+        total_price: "41.42",
+        total_tax: "0.00",
+        original_total_duties_set: null,
+        original_total_additional_fees_set: null,
+        total_tip_received: "0.00",
+        line_items: [{ price: "30.43", quantity: 1, discount_allocations: [] }],
+        shipping_lines: [
+          {
+            price: "10.99",
+            discounted_price: "10.99",
+            discount_allocations: [],
+          },
+        ],
+        discount_applications: [],
+      };
+      const inserted = await pool.query(
+        "INSERT INTO oms.oms_orders(channel_id,external_order_id,total_cents,subtotal_cents,raw_payload) VALUES(36,'101',3742,2643,$1) RETURNING id",
+        [JSON.stringify(providerRaw)],
+      );
+      const correctedId = inserted.rows[0].id;
+      const reader = await pool.connect();
+      let corrected;
+      try {
+        await reader.query("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY");
+        corrected = await loadArchonSnapshot(reader, correctedId, "1");
+        await reader.query("COMMIT");
+      } finally {
+        reader.release();
+      }
+      expect(corrected.order.total_cents).toBe(4142);
+      expect(corrected.order.subtotal_cents).toBe(3043);
+      expect(corrected.order.line_items).toMatchObject([
+        { quantity: 1, price_cents: 3043, discount_cents: 0 },
+      ]);
+      expect(
+        corrected.order.discount_evidence?.financials?.orderTotalCents,
+      ).toBe(4142);
+      expect(
+        (
+          await pool.query(
+            "SELECT total_cents FROM oms.oms_orders WHERE id=$1",
+            [correctedId],
+          )
+        ).rows[0].total_cents,
+      ).toBe("3742");
     } finally {
       await pool?.end();
       if (owned) await admin.query('DROP DATABASE "' + name + '"');

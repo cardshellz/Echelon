@@ -17,7 +17,7 @@ import { listCustomerReturnPreviewScenarios, readCustomerReturnPreviewScenario }
 
 type PreviewErrorCode = "RETURN_PREVIEW_INPUT_INVALID" | "RETURN_PREVIEW_ORDER_NOT_FOUND"
   | "RETURN_PREVIEW_SELECTION_INVALID" | "RETURN_PREVIEW_QUANTITY_UNAVAILABLE"
-  | "RETURN_PREVIEW_PARCELS_INVALID" | "RETURN_PREVIEW_DATA_INVALID";
+  | "RETURN_PREVIEW_PARCELS_INVALID" | "RETURN_PREVIEW_WEIGHT_UNAVAILABLE" | "RETURN_PREVIEW_DATA_INVALID";
 
 export class CustomerReturnPreviewError extends Error {
   constructor(readonly code: PreviewErrorCode, message: string, readonly status: number) {
@@ -51,7 +51,7 @@ export class CustomerReturnPreviewService {
       const order = loadSampleOrder(input);
       const { selectedQuantity, parcels } = validateCustomerReturnBoxPlan(order.lines, {
         selections: input.selections, parcels: input.parcels,
-      });
+      }, order.boxOptions);
       return returnPreviewReviewSchema.parse({
         mode: "admin_preview", effects: "none", orderReference: order.orderReference,
         selectedQuantity, parcels, refundMethod: "manual_shopify",
@@ -74,11 +74,13 @@ function loadSampleOrder(input: ReturnPreviewLookupInput): ReturnPreviewOrder {
     // Test-mode messaging belongs to the private wrapper, outside the shared
     // customer journey. Reserve this field for actual order-level information.
     message: null,
+    boxOptions: sample.boxOptions,
     lines: eligibility.lines.map(line => {
       const display = sample.displayLines.find(candidate => candidate.id === line.lineId);
       if (!display) throw new Error("A fictional order line is missing its display data.");
       return {
         id: line.lineId, title: display.title, variant: display.variant, sku: line.sku,
+        unitWeightGrams: display.unitWeightGrams,
         purchasedQuantity: line.purchasedQuantity, deliveredQuantity: line.deliveredQuantity,
         alreadyReturningQuantity: line.claimedQuantity, eligibleQuantity: line.eligibleQuantity,
         message: lineMessage(line),
@@ -109,8 +111,9 @@ function boundary<T>(work: () => T): T {
     if (error instanceof CustomerReturnPreviewError) throw error;
     if (error instanceof CustomerReturnBoxPlanError) {
       const code = error.kind === "quantity" ? "RETURN_PREVIEW_QUANTITY_UNAVAILABLE"
+        : error.kind === "weight" ? "RETURN_PREVIEW_WEIGHT_UNAVAILABLE"
         : error.kind === "parcels" ? "RETURN_PREVIEW_PARCELS_INVALID" : "RETURN_PREVIEW_SELECTION_INVALID";
-      throw new CustomerReturnPreviewError(code, error.message, error.kind === "quantity" ? 409 : 400);
+      throw new CustomerReturnPreviewError(code, error.message, error.kind === "quantity" || error.kind === "weight" ? 409 : 400);
     }
     if (error instanceof CustomerReturnOrderReferenceError) {
       throw new CustomerReturnPreviewError("RETURN_PREVIEW_INPUT_INVALID", "Enter a valid fictional order reference.", 400);

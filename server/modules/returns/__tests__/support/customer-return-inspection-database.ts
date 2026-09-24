@@ -43,8 +43,11 @@ export async function createInspectionTestSchema(pool: Pool): Promise<void> {
     if (!definition) throw new Error(`Legacy source column missing: ${column}`);
     await pool.query(`ALTER TABLE wms.${relation} ADD COLUMN ${definition}`);
   }
-  await pool.query(`CREATE TABLE catalog.product_variants (id INTEGER PRIMARY KEY);
-    CREATE TABLE warehouse.warehouses (id INTEGER PRIMARY KEY);
+  await pool.query(table("migrations/0002_concerned_darwin.sql", 'CREATE TABLE "product_variants" (')
+    .replace('CREATE TABLE "product_variants"', 'CREATE TABLE catalog."product_variants"'));
+  await pool.query(statement("migrations/185_dropship_package_data_consolidation.sql",
+    "ALTER TABLE catalog.product_variants\n  ALTER COLUMN weight_grams TYPE"));
+  await pool.query(`CREATE TABLE warehouse.warehouses (id INTEGER PRIMARY KEY);
     CREATE TABLE wms.outbound_shipments (id INTEGER PRIMARY KEY);
     CREATE TABLE wms.outbound_shipment_items (id INTEGER PRIMARY KEY, shipment_id INTEGER REFERENCES wms.outbound_shipments(id));
     CREATE TABLE dropship.dropship_vendors (id INTEGER PRIMARY KEY);
@@ -84,7 +87,7 @@ export async function createInspectionTestSchema(pool: Pool): Promise<void> {
 }
 
 export async function seedInspectionTestSchema(pool: Pool): Promise<void> {
-  await pool.query(`TRUNCATE channels.channels, channels.channel_connections, oms.oms_orders, oms.oms_order_lines,
+  await pool.query(`TRUNCATE channels.channels, channels.channel_connections, catalog.product_variants, oms.oms_orders, oms.oms_order_lines,
     wms.orders, wms.order_items, inventory.inventory_transactions, dropship.dropship_order_intake,
     wms.returns, wms.return_items, returns.customer_return_authorizations,
     wms.shipping_provider_labels, wms.carrier_tracking_events, wms.physical_shipments,
@@ -98,6 +101,10 @@ export async function seedInspectionTestSchema(pool: Pool): Promise<void> {
     INSERT INTO oms.oms_order_lines (id,order_id,external_line_item_id,title,sku,quantity,requires_shipping) OVERRIDING SYSTEM VALUE VALUES
       (101,100,'500','Same title','SAME',3,true), (102,100,'501','Same title','SAME',1,true),
       (103,100,'502','Digital item','DIGITAL',1,false), (201,200,'600','Other store item','SAME',1,true);
+    INSERT INTO catalog.product_variants(id,product_id,name,sku,weight_grams) OVERRIDING SYSTEM VALUE
+      VALUES(501,1,'First exact variant','SAME',12.34),(502,1,'Second exact variant','SAME',20.01),(503,1,'Missing weight','SAME',NULL);
+    UPDATE oms.oms_order_lines SET product_variant_id=501 WHERE id=101;
+    UPDATE oms.oms_order_lines SET product_variant_id=502 WHERE id=102;
     INSERT INTO wms.orders (id,oms_fulfillment_order_id,channel_id,source,external_order_id,order_number,customer_name,warehouse_status) OVERRIDING SYSTEM VALUE VALUES
       (201,'100',36,'oms','1000','TEST-PART-1','Synthetic','shipped'),
       (202,'100',36,'oms','1000','TEST-PART-2','Synthetic','shipped'),
