@@ -36,6 +36,9 @@ const fallbackLimits: DropshipWalletPolicyLimits = {
   tierChangeGraceDays: 14,
   cardFundingFeeBps: 0,
   cardFundingMinCents: 10_000,
+  rewardsRateBankBps: 100,
+  rewardsRateUsdcBps: 100,
+  rewardsRateCardBps: 0,
 };
 
 const publishedLimits: DropshipWalletPolicyLimits = {
@@ -51,6 +54,9 @@ const publishedLimits: DropshipWalletPolicyLimits = {
   tierChangeGraceDays: 21,
   cardFundingFeeBps: 250,
   cardFundingMinCents: 12_500,
+  rewardsRateBankBps: 100,
+  rewardsRateUsdcBps: 100,
+  rewardsRateCardBps: 0,
 };
 
 const validInput = {

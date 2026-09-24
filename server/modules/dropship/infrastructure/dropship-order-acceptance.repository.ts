@@ -132,6 +132,7 @@ interface WalletAccountRow {
   vendor_id: number;
   available_balance_cents: string | number;
   pending_balance_cents: string | number;
+  rewards_balance_cents: string | number;
   currency: string;
   status: string;
 }
@@ -366,8 +367,9 @@ async function acceptOrderWithClient(
       input,
       wallet,
       shortfall: plan.funding.outcome === "payment_hold" ? plan.funding.shortfall : null,
+      rewardsCents: plan.funding.rewardsCents,
     });
-    return paymentHoldResult(plan);
+    return paymentHoldResult(plan, plan.funding.rewardsCents);
   }
 
   const omsOrderId = await createOmsOrderWithClient(client, plan, intake);
@@ -429,6 +431,7 @@ async function acceptOrderWithClient(
     walletLedgerEntryId,
     economicsSnapshotId,
     totalDebitCents: plan.totalDebitCents,
+    rewardsCents: debit.rewardsCents,
     currency: plan.currency,
     paymentHoldExpiresAt: null,
     paymentHoldReason: null,
@@ -511,6 +514,7 @@ async function prepareCanonicalOrderWithClient(
         totalDebitCents: plan.totalDebitCents,
         standingHold: heldForStanding,
         advance: wallet.advance,
+        rewards: { balanceCents: wallet.rewardsBalanceCents, spendFirst: wallet.spendRewardsFirst },
       });
       if (funding.outcome === "payment_hold") {
         return {
@@ -519,7 +523,7 @@ async function prepareCanonicalOrderWithClient(
             outcome: "payment_hold",
             paymentHoldExpiresAt: intake.paymentHoldExpiresAt,
             paymentHoldReason: funding.reason,
-          }),
+          }, funding.rewardsCents),
           idempotentReplay: true,
         };
       }
@@ -575,8 +579,9 @@ async function prepareCanonicalOrderWithClient(
       input,
       wallet,
       shortfall: plan.funding.outcome === "payment_hold" ? plan.funding.shortfall : null,
+      rewardsCents: plan.funding.rewardsCents,
     });
-    return paymentHoldResult(plan);
+    return paymentHoldResult(plan, plan.funding.rewardsCents);
   }
 
   const omsOrderId = await createOmsOrderWithClient(client, plan, intake, {
@@ -768,6 +773,7 @@ async function finalizeCanonicalOrderWithClient(
     totalDebitCents: plan.totalDebitCents,
     standingHold: heldForStanding,
     advance: wallet.advance,
+    rewards: { balanceCents: wallet.rewardsBalanceCents, spendFirst: wallet.spendRewardsFirst },
   });
   if (paymentHoldExpired || funding.outcome === "payment_hold") {
     const timeoutMinutes = await loadPaymentHoldTimeoutWithClient(client, input.vendorId);
@@ -783,6 +789,7 @@ async function finalizeCanonicalOrderWithClient(
       input: stagedInput,
       wallet,
       shortfall: funding.outcome === "payment_hold" ? funding.shortfall : null,
+      rewardsCents: funding.rewardsCents,
     });
     await markCanonicalCompensationPendingWithClient(
       client,
@@ -809,7 +816,7 @@ async function finalizeCanonicalOrderWithClient(
         vendorStandingReason: vendor.vendorStandingReason,
       },
     });
-    return paymentHoldResult(paymentHoldPlan);
+    return paymentHoldResult(paymentHoldPlan, funding.rewardsCents);
   }
 
   const debit = await debitWalletWithClient(client, { plan, wallet, input: stagedInput, funding });
@@ -867,6 +874,7 @@ async function finalizeCanonicalOrderWithClient(
     walletLedgerEntryId,
     economicsSnapshotId,
     totalDebitCents: plan.totalDebitCents,
+    rewardsCents: debit.rewardsCents,
     currency: plan.currency,
     paymentHoldExpiresAt: null,
     paymentHoldReason: null,
@@ -1532,6 +1540,8 @@ async function replayAcceptedOrderWithClient(
     walletLedgerEntryId: ledgerEntryId,
     economicsSnapshotId: economics.id,
     totalDebitCents: toSafeInteger(economics.total_debit_cents, "total_debit_cents"),
+    // Not re-derived on a replay, like the advance: the ledger rows are the record.
+    rewardsCents: 0,
     currency: economics.currency,
     paymentHoldExpiresAt: null,
     paymentHoldReason: null,
@@ -1845,7 +1855,7 @@ async function getOrCreateWalletForUpdate(
     [input.vendorId, input.currency, input.now],
   );
   const result = await client.query<WalletAccountRow>(
-    `SELECT id, vendor_id, available_balance_cents, pending_balance_cents,
+    `SELECT id, vendor_id, available_balance_cents, pending_balance_cents, rewards_balance_cents,
             currency, status
      FROM dropship.dropship_wallet_accounts
      WHERE vendor_id = $1
@@ -1865,9 +1875,28 @@ async function getOrCreateWalletForUpdate(
     walletAccountId: row.id,
     availableBalanceCents: toSafeInteger(row.available_balance_cents, "available_balance_cents"),
     pendingBalanceCents: toSafeInteger(row.pending_balance_cents, "pending_balance_cents"),
+    rewardsBalanceCents: toSafeInteger(row.rewards_balance_cents, "rewards_balance_cents"),
+    spendRewardsFirst: await loadSpendRewardsFirstWithClient(client, input.vendorId),
     currency: row.currency,
     advance: await loadAdvanceContextWithClient(client, { vendorId: input.vendorId, walletAccountId: row.id }),
   };
+}
+
+/**
+ * The vendor's choice between spending rewards first and saving them
+ * (funding design phase 7), from their wallet settings row. A vendor with no
+ * row yet spends first, the documented default.
+ */
+async function loadSpendRewardsFirstWithClient(client: PoolClient, vendorId: number): Promise<boolean> {
+  const result = await client.query<{ spend_rewards_first: boolean }>(
+    `SELECT spend_rewards_first
+     FROM dropship.dropship_auto_reload_settings
+     WHERE vendor_id = $1
+     LIMIT 1`,
+    [vendorId],
+  );
+  const value = result.rows[0]?.spend_rewards_first;
+  return typeof value === "boolean" ? value : true;
 }
 
 /**
@@ -1935,6 +1964,8 @@ async function markIntakePaymentHoldWithClient(
     wallet: DropshipAcceptanceWalletState;
     /** What the order was short by and why pending money did not cover it; null for a standing hold. */
     shortfall: { gapCents: number; advanceRefusal: DropshipAdvanceRefusal } | null;
+    /** What rewards would pay of this order (funding design phase 7). */
+    rewardsCents: number;
   },
 ): Promise<void> {
   await client.query(
@@ -1958,6 +1989,8 @@ async function markIntakePaymentHoldWithClient(
     payload: {
       totalDebitCents: input.plan.totalDebitCents,
       availableBalanceCents: input.wallet.availableBalanceCents,
+      rewardsBalanceCents: input.wallet.rewardsBalanceCents,
+      rewardsCents: input.rewardsCents,
       pendingBalanceCents: input.wallet.pendingBalanceCents,
       paymentHoldExpiresAt: input.plan.paymentHoldExpiresAt?.toISOString() ?? null,
       shortfall: input.shortfall,
@@ -2145,20 +2178,28 @@ function validateInventoryAvailability(
 }
 
 interface WalletDebitOutcome {
+  /** The `order_debit` row when cash paid any part of the order; else the `rewards_spent` row. */
   ledgerEntryId: number;
+  /** The part of the debit the rewards balance paid, and its row (funding design phase 7). */
+  rewardsCents: number;
+  rewardsLedgerEntryId: number | null;
   advance: DropshipOrderAcceptanceAdvanceSummary | null;
 }
 
 /**
- * The order debit, and the advance fee when pending money paid part of it.
+ * The order debit: rewards first (funding design phase 7), cash second, and
+ * the advance fee when pending money paid part of the cash.
  *
- * Both rows post in this transaction under the wallet row lock. The available
- * balance may end negative only by what the funding decision allowed: the
- * eligible pending credits, never past the cap, fee included. That bound is
- * checked again here against the same locked balances the decision was made
- * from, so a caller that hands in a decision for another wallet state cannot
- * overdraw. The fee row references the same intake under its own reference
- * type (the ledger's reference index is unique) and its own idempotency key.
+ * Every row posts in this transaction under the wallet row lock. The
+ * rewards part never exceeds the rewards balance the decision was made from,
+ * and the available balance may end negative only by what the funding
+ * decision allowed: the eligible pending credits, never past the cap, fee
+ * included. Both bounds are checked again here against the same locked
+ * balances, so a caller that hands in a decision for another wallet state
+ * cannot overdraw either balance. Each row references the same intake under
+ * its own reference type (the ledger's reference index is unique) and its
+ * own idempotency key. An order the rewards balance pays in full posts no
+ * cash row: the ledger refuses a zero amount.
  */
 async function debitWalletWithClient(
   client: PoolClient,
@@ -2176,12 +2217,36 @@ async function debitWalletWithClient(
       { intakeId: input.plan.intakeId, walletAccountId: input.wallet.walletAccountId, classification: "fatal" },
     );
   }
+  const rewardsCents = input.funding.rewardsCents;
+  if (
+    !Number.isSafeInteger(rewardsCents)
+    || rewardsCents < 0
+    || rewardsCents > input.wallet.rewardsBalanceCents
+    || rewardsCents > input.plan.totalDebitCents
+  ) {
+    throw new DropshipError(
+      "DROPSHIP_WALLET_REWARDS_DEBIT_INVALID",
+      "Dropship wallet rewards debit does not fit the locked rewards balance or the order.",
+      {
+        intakeId: input.plan.intakeId,
+        walletAccountId: input.wallet.walletAccountId,
+        rewardsCents,
+        rewardsBalanceCents: input.wallet.rewardsBalanceCents,
+        totalDebitCents: input.plan.totalDebitCents,
+        classification: "fatal",
+      },
+    );
+  }
+  const cashDebitCents = input.plan.totalDebitCents - rewardsCents;
+  const rewardsAfterCents = input.wallet.rewardsBalanceCents - rewardsCents;
   const advance = input.funding.source === "advance" ? input.funding.advance : null;
   const feeCents = advance?.feeCents ?? 0;
-  const availableAfterDebitCents = input.wallet.availableBalanceCents - input.plan.totalDebitCents;
+  const availableAfterDebitCents = input.wallet.availableBalanceCents - cashDebitCents;
   const availableAfterFeeCents = availableAfterDebitCents - feeCents;
   const overdraftFloorCents = advance ? -Math.min(advance.eligiblePendingCents, advance.capCents) : 0;
-  if (availableAfterFeeCents < overdraftFloorCents) {
+  // An order rewards pay in full draws nothing from cash, so a balance already
+  // negative (an exposure being collected) is not this order's to refuse.
+  if (cashDebitCents + feeCents > 0 && availableAfterFeeCents < overdraftFloorCents) {
     throw new DropshipError(
       "DROPSHIP_WALLET_INSUFFICIENT_FUNDS",
       "Dropship wallet has insufficient available funds for order acceptance.",
@@ -2189,7 +2254,8 @@ async function debitWalletWithClient(
         intakeId: input.plan.intakeId,
         walletAccountId: input.wallet.walletAccountId,
         availableBalanceCents: input.wallet.availableBalanceCents,
-        requiredCents: input.plan.totalDebitCents + feeCents,
+        requiredCents: cashDebitCents + feeCents,
+        rewardsCents,
         overdraftFloorCents,
       },
     );
@@ -2197,7 +2263,8 @@ async function debitWalletWithClient(
   await client.query(
     `UPDATE dropship.dropship_wallet_accounts
      SET available_balance_cents = $3,
-         updated_at = $4
+         updated_at = $4,
+         rewards_balance_cents = $5
      WHERE id = $1
        AND vendor_id = $2`,
     [
@@ -2205,81 +2272,160 @@ async function debitWalletWithClient(
       input.plan.vendorId,
       availableAfterFeeCents,
       input.input.acceptedAt,
+      rewardsAfterCents,
     ],
   );
   const orderDebitKey = buildWalletLedgerIdempotencyKey(input.plan.intakeId, input.input.idempotencyKey);
-  const result = await client.query<WalletLedgerIdRow>(
-    `INSERT INTO dropship.dropship_wallet_ledger
-      (wallet_account_id, vendor_id, type, status, amount_cents, currency,
-       available_balance_after_cents, pending_balance_after_cents,
-       reference_type, reference_id, idempotency_key, metadata, created_at, settled_at)
-     VALUES ($1, $2, 'order_debit', 'settled', $3, $4,
-       $5, $6,
-       'order_intake', $7, $8, $9::jsonb, $10, $10)
-     RETURNING id`,
-    [
-      input.wallet.walletAccountId,
-      input.plan.vendorId,
-      -input.plan.totalDebitCents,
-      input.plan.currency,
-      availableAfterDebitCents,
-      input.wallet.pendingBalanceCents,
-      String(input.plan.intakeId),
-      orderDebitKey,
-      JSON.stringify({
-        requestHash: input.input.requestHash,
-        submittedIdempotencyKey: input.input.idempotencyKey,
-        shippingQuoteSnapshotId: input.plan.shippingQuoteSnapshotId,
-        wholesaleSubtotalCents: input.plan.wholesaleSubtotalCents,
-        shippingCents: input.plan.shippingCents,
-        feesCents: input.plan.feesCents,
-        // A single ledger row must explain its amount: the cost authority and the
-        // content hash of the .ops inputs that produced it.
-        pricingSnapshotVersion: DROPSHIP_PRICING_SNAPSHOT_VERSION,
-        costAuthority: "shellz_club_ops_product_cost",
-        costEvidenceHash: input.plan.costEvidenceHash,
-        // And, when pending money paid part of it, exactly what was advanced
-        // against what, so the negative balance it leaves is explained.
-        advance: advance
-          ? {
-              advanceCents: advance.advanceCents,
-              feeCents: advance.feeCents,
-              feeBps: advance.feeBps,
-              capCents: advance.capCents,
-              capSource: advance.capSource,
-              eligiblePendingCents: advance.eligiblePendingCents,
-              exposureBeforeCents: advance.exposureBeforeCents,
-              exposureAfterCents: advance.exposureAfterCents,
-              fundingMethodIds: advance.fundingMethodIds,
-            }
-          : null,
-      }),
-      input.input.acceptedAt,
-    ],
-  );
-  const ledgerEntryId = requiredRow(result.rows[0], "Dropship wallet ledger insert did not return a row.").id;
-  await client.query(
-    `INSERT INTO dropship.dropship_audit_events
-      (vendor_id, entity_type, entity_id, event_type,
-       actor_type, actor_id, severity, payload, created_at)
-     VALUES ($1, 'dropship_wallet_ledger', $2, 'wallet_order_debited',
-             'system', NULL, 'info', $3::jsonb, $4)`,
-    [
-      input.plan.vendorId,
-      String(ledgerEntryId),
-      JSON.stringify({
-        intakeId: input.plan.intakeId,
-        walletAccountId: input.wallet.walletAccountId,
-        amountCents: -input.plan.totalDebitCents,
-        availableBalanceBeforeCents: input.wallet.availableBalanceCents,
-        availableBalanceAfterCents: availableAfterDebitCents,
-        advanceCents: advance?.advanceCents ?? null,
-      }),
-      input.input.acceptedAt,
-    ],
-  );
+  const debitMetadata = {
+    requestHash: input.input.requestHash,
+    submittedIdempotencyKey: input.input.idempotencyKey,
+    shippingQuoteSnapshotId: input.plan.shippingQuoteSnapshotId,
+    wholesaleSubtotalCents: input.plan.wholesaleSubtotalCents,
+    shippingCents: input.plan.shippingCents,
+    feesCents: input.plan.feesCents,
+    // A single ledger row must explain its amount: the cost authority and the
+    // content hash of the .ops inputs that produced it.
+    pricingSnapshotVersion: DROPSHIP_PRICING_SNAPSHOT_VERSION,
+    costAuthority: "shellz_club_ops_product_cost",
+    costEvidenceHash: input.plan.costEvidenceHash,
+    // The order's whole cost and how it split between the two balances.
+    totalDebitCents: input.plan.totalDebitCents,
+    rewardsSpentCents: rewardsCents,
+    cashDebitCents,
+    // And, when pending money paid part of it, exactly what was advanced
+    // against what, so the negative balance it leaves is explained.
+    advance: advance
+      ? {
+          advanceCents: advance.advanceCents,
+          feeCents: advance.feeCents,
+          feeBps: advance.feeBps,
+          capCents: advance.capCents,
+          capSource: advance.capSource,
+          eligiblePendingCents: advance.eligiblePendingCents,
+          exposureBeforeCents: advance.exposureBeforeCents,
+          exposureAfterCents: advance.exposureAfterCents,
+          fundingMethodIds: advance.fundingMethodIds,
+        }
+      : null,
+  };
+  let orderDebitLedgerEntryId: number | null = null;
+  if (cashDebitCents > 0) {
+    const result = await client.query<WalletLedgerIdRow>(
+      `INSERT INTO dropship.dropship_wallet_ledger
+        (wallet_account_id, vendor_id, type, status, amount_cents, currency,
+         available_balance_after_cents, pending_balance_after_cents,
+         reference_type, reference_id, idempotency_key, metadata, created_at, settled_at,
+         rewards_balance_after_cents)
+       VALUES ($1, $2, 'order_debit', 'settled', $3, $4,
+         $5, $6,
+         'order_intake', $7, $8, $9::jsonb, $10, $10,
+         $11)
+       RETURNING id`,
+      [
+        input.wallet.walletAccountId,
+        input.plan.vendorId,
+        -cashDebitCents,
+        input.plan.currency,
+        availableAfterDebitCents,
+        input.wallet.pendingBalanceCents,
+        String(input.plan.intakeId),
+        orderDebitKey,
+        JSON.stringify(debitMetadata),
+        input.input.acceptedAt,
+        rewardsAfterCents,
+      ],
+    );
+    orderDebitLedgerEntryId = requiredRow(result.rows[0], "Dropship wallet ledger insert did not return a row.").id;
+    await client.query(
+      `INSERT INTO dropship.dropship_audit_events
+        (vendor_id, entity_type, entity_id, event_type,
+         actor_type, actor_id, severity, payload, created_at)
+       VALUES ($1, 'dropship_wallet_ledger', $2, 'wallet_order_debited',
+               'system', NULL, 'info', $3::jsonb, $4)`,
+      [
+        input.plan.vendorId,
+        String(orderDebitLedgerEntryId),
+        JSON.stringify({
+          intakeId: input.plan.intakeId,
+          walletAccountId: input.wallet.walletAccountId,
+          amountCents: -cashDebitCents,
+          totalDebitCents: input.plan.totalDebitCents,
+          rewardsCents,
+          availableBalanceBeforeCents: input.wallet.availableBalanceCents,
+          availableBalanceAfterCents: availableAfterDebitCents,
+          advanceCents: advance?.advanceCents ?? null,
+        }),
+        input.input.acceptedAt,
+      ],
+    );
+  }
+  let rewardsLedgerEntryId: number | null = null;
+  if (rewardsCents > 0) {
+    const result = await client.query<WalletLedgerIdRow>(
+      `INSERT INTO dropship.dropship_wallet_ledger
+        (wallet_account_id, vendor_id, type, status, amount_cents, currency,
+         available_balance_after_cents, pending_balance_after_cents,
+         reference_type, reference_id, idempotency_key, metadata, created_at, settled_at,
+         rewards_balance_after_cents)
+       VALUES ($1, $2, 'rewards_spent', 'settled', $3, $4,
+         $5, $6,
+         'order_intake_rewards', $7, $8, $9::jsonb, $10, $10,
+         $11)
+       RETURNING id`,
+      [
+        input.wallet.walletAccountId,
+        input.plan.vendorId,
+        -rewardsCents,
+        input.plan.currency,
+        availableAfterDebitCents,
+        input.wallet.pendingBalanceCents,
+        String(input.plan.intakeId),
+        `${orderDebitKey}:rewards`,
+        JSON.stringify({
+          intakeId: input.plan.intakeId,
+          orderDebitLedgerEntryId,
+          requestHash: input.input.requestHash,
+          totalDebitCents: input.plan.totalDebitCents,
+          cashDebitCents,
+          rewardsBalanceBeforeCents: input.wallet.rewardsBalanceCents,
+        }),
+        input.input.acceptedAt,
+        rewardsAfterCents,
+      ],
+    );
+    rewardsLedgerEntryId = requiredRow(result.rows[0], "Dropship wallet rewards spend insert did not return a row.").id;
+    await client.query(
+      `INSERT INTO dropship.dropship_audit_events
+        (vendor_id, entity_type, entity_id, event_type,
+         actor_type, actor_id, severity, payload, created_at)
+       VALUES ($1, 'dropship_wallet_ledger', $2, 'wallet_rewards_spent',
+               'system', NULL, 'info', $3::jsonb, $4)`,
+      [
+        input.plan.vendorId,
+        String(rewardsLedgerEntryId),
+        JSON.stringify({
+          intakeId: input.plan.intakeId,
+          walletAccountId: input.wallet.walletAccountId,
+          orderDebitLedgerEntryId,
+          amountCents: -rewardsCents,
+          totalDebitCents: input.plan.totalDebitCents,
+          rewardsBalanceBeforeCents: input.wallet.rewardsBalanceCents,
+          rewardsBalanceAfterCents: rewardsAfterCents,
+        }),
+        input.input.acceptedAt,
+      ],
+    );
+  }
+  const ledgerEntryId = orderDebitLedgerEntryId ?? rewardsLedgerEntryId;
+  if (ledgerEntryId === null) {
+    throw new DropshipError(
+      "DROPSHIP_WALLET_DEBIT_WROTE_NOTHING",
+      "Dropship wallet debit posted neither a cash row nor a rewards row.",
+      { intakeId: input.plan.intakeId, walletAccountId: input.wallet.walletAccountId, classification: "fatal" },
+    );
+  }
   if (!advance) {
-    return { ledgerEntryId, advance: null };
+    return { ledgerEntryId, rewardsCents, rewardsLedgerEntryId, advance: null };
   }
   // A zero fee (a zero-rate policy) posts no row: the ledger refuses a zero
   // amount, and the order debit's metadata already records the advance.
@@ -2289,10 +2435,12 @@ async function debitWalletWithClient(
       `INSERT INTO dropship.dropship_wallet_ledger
         (wallet_account_id, vendor_id, type, status, amount_cents, currency,
          available_balance_after_cents, pending_balance_after_cents,
-         reference_type, reference_id, idempotency_key, metadata, created_at, settled_at)
+         reference_type, reference_id, idempotency_key, metadata, created_at, settled_at,
+         rewards_balance_after_cents)
        VALUES ($1, $2, 'advance_fee', 'settled', $3, $4,
          $5, $6,
-         'order_intake_advance_fee', $7, $8, $9::jsonb, $10, $10)
+         'order_intake_advance_fee', $7, $8, $9::jsonb, $10, $10,
+         $11)
        RETURNING id`,
       [
         input.wallet.walletAccountId,
@@ -2314,6 +2462,7 @@ async function debitWalletWithClient(
           fundingMethodIds: advance.fundingMethodIds,
         }),
         input.input.acceptedAt,
+        rewardsAfterCents,
       ],
     );
     feeLedgerEntryId = requiredRow(fee.rows[0], "Dropship wallet advance fee insert did not return a row.").id;
@@ -2342,6 +2491,8 @@ async function debitWalletWithClient(
   }
   return {
     ledgerEntryId,
+    rewardsCents,
+    rewardsLedgerEntryId,
     advance: {
       advanceCents: advance.advanceCents,
       feeCents: advance.feeCents,
@@ -2479,7 +2630,22 @@ async function loadOrderDebitLedgerEntryIdWithClient(
      LIMIT 1`,
     [String(intakeId)],
   );
-  return result.rows[0]?.id ?? null;
+  if (result.rows[0]) {
+    return result.rows[0].id;
+  }
+  // An order the rewards balance paid in full has no cash row; its
+  // `rewards_spent` row is the record (funding design phase 7).
+  const rewards = await client.query<WalletLedgerIdRow>(
+    `SELECT id
+     FROM dropship.dropship_wallet_ledger
+     WHERE reference_type = 'order_intake_rewards'
+       AND reference_id = $1
+       AND type = 'rewards_spent'
+     ORDER BY id ASC
+     LIMIT 1`,
+    [String(intakeId)],
+  );
+  return rewards.rows[0]?.id ?? null;
 }
 
 function mapIntakeRow(row: IntakeRow): DropshipAcceptanceIntakeRecord {
@@ -2774,7 +2940,8 @@ function canonicalCompensationFromStage(
   return {
     outcome: "compensation_required",
     result: {
-      ...paymentHoldResult(plan),
+      // Compensation restates the stage; the rewards part is not re-derived.
+      ...paymentHoldResult(plan, 0),
       idempotentReplay: true,
     },
     omsOrderId: toSafeInteger(stage.oms_order_id, "stage.oms_order_id"),
@@ -2945,7 +3112,8 @@ function frozenAcceptanceInput(
   };
 }
 
-function paymentHoldResult(plan: AcceptanceFinancialPlan): DropshipOrderAcceptanceResult {
+/** `rewardsCents`: what rewards would pay of this order (funding design phase 7); zero when not re-derived. */
+function paymentHoldResult(plan: AcceptanceFinancialPlan, rewardsCents: number): DropshipOrderAcceptanceResult {
   return {
     outcome: "payment_hold",
     intakeId: plan.intakeId,
@@ -2956,6 +3124,7 @@ function paymentHoldResult(plan: AcceptanceFinancialPlan): DropshipOrderAcceptan
     walletLedgerEntryId: null,
     economicsSnapshotId: null,
     totalDebitCents: plan.totalDebitCents,
+    rewardsCents,
     currency: plan.currency,
     paymentHoldExpiresAt: plan.paymentHoldExpiresAt,
     paymentHoldReason: plan.paymentHoldReason,

@@ -80,7 +80,7 @@ import type {
 const STAMP = "2026-09-15T00:00:00.000Z";
 const LATER = "2026-09-16T00:00:00.000Z";
 const NOW = new Date("2026-09-18T12:00:00.000Z");
-const LIMITS = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, cardFundingMinCents: 10_000, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, caseTierMinimumCents: 50_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14, bankBalanceReadOffered: false };
+const LIMITS = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, cardFundingMinCents: 10_000, rewardsRateBankBps: 100, rewardsRateUsdcBps: 100, rewardsRateCardBps: 0, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, caseTierMinimumCents: 50_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14, bankBalanceReadOffered: false };
 
 function method(overrides: Partial<WalletFundingMethod> & { fundingMethodId: number }): WalletFundingMethod {
   const rail = overrides.rail ?? "stripe_card";
@@ -97,7 +97,7 @@ const BANK = method({ fundingMethodId: 30, rail: "stripe_ach" });
 
 function wallet(overrides: Partial<DropshipWalletView> = {}): DropshipWalletView {
   const base: DropshipWalletView = {
-    account: { availableBalanceCents: 0, pendingBalanceCents: 0, currency: "USD", status: "active" },
+    account: { availableBalanceCents: 0, pendingBalanceCents: 0, rewardsBalanceCents: 0, currency: "USD", status: "active" },
     autoReload: null, fundingMethods: [], recentLedger: [], cardFundingFeeBps: 300, usdcBaseDepositAddress: null, usdcDeposit: null,
     limits: LIMITS, setupStatus: { sourceReady: false, backupReady: false, acknowledged: false, done: false, launchReady: false }, listingTiers: null, advance: null,
     clientFallbacks: [],
@@ -107,7 +107,7 @@ function wallet(overrides: Partial<DropshipWalletView> = {}): DropshipWalletView
 
 function doneWallet(overrides: Partial<DropshipWalletView> = {}): DropshipWalletView {
   return wallet({
-    autoReload: { autoReloadSettingId: 5, enabled: true, minimumBalanceCents: 25_000, maxSingleReloadCents: 50_000, topUpAmountCents: null, paymentHoldTimeoutMinutes: 2_880, fundingMethodId: 30, updatedAt: STAMP, backstopFundingMethodId: 10, acknowledgedCardFeeBps: 300, acknowledgedAt: STAMP },
+    autoReload: { autoReloadSettingId: 5, enabled: true, minimumBalanceCents: 25_000, maxSingleReloadCents: 50_000, topUpAmountCents: null, paymentHoldTimeoutMinutes: 2_880, fundingMethodId: 30, updatedAt: STAMP, backstopFundingMethodId: 10, acknowledgedCardFeeBps: 300, acknowledgedAt: STAMP, spendRewardsFirst: true },
     fundingMethods: [{ ...CARD, roles: { isAutoReloadSource: false, isBackupCard: true, chargeable: true } }, { ...BANK, roles: { isAutoReloadSource: true, isBackupCard: false, chargeable: false } }],
     setupStatus: { sourceReady: true, backupReady: true, acknowledged: true, done: true, launchReady: true },
     ...overrides,
@@ -155,7 +155,7 @@ describe("deriveWalletFlow", () => {
   it("ends the flow in manage, with the deposit step only for a bank source below the floor", () => {
     expect(derive(doneWallet())).toMatchObject({ mode: "manage", step: null, canTurnOffAutoReload: true, authorized: true });
     expect(derive(doneWallet(), draft({ deposit: "pending" }))).toMatchObject({ mode: "flow", step: "deposit" });
-    expect(derive(doneWallet({ account: { availableBalanceCents: 0, pendingBalanceCents: 25_000, currency: "USD", status: "active" } }), draft({ deposit: "pending" }))).toMatchObject({ mode: "manage" });
+    expect(derive(doneWallet({ account: { availableBalanceCents: 0, pendingBalanceCents: 25_000, rewardsBalanceCents: 0, currency: "USD", status: "active" } }), draft({ deposit: "pending" }))).toMatchObject({ mode: "manage" });
     expect(derive(doneWallet(), draft({ deposit: "skipped" }))).toMatchObject({ mode: "manage" });
     const cardSource = doneWallet({ autoReload: { ...doneWallet().autoReload!, fundingMethodId: 10, backstopFundingMethodId: 10 } });
     expect(derive(cardSource, draft({ deposit: "pending" }))).toMatchObject({ mode: "manage" });
@@ -172,7 +172,7 @@ describe("deriveWalletFlow", () => {
   });
 
   it("treats the seed row (enabled, no method) as not authorized", () => {
-    const seed = wallet({ autoReload: { autoReloadSettingId: 1, enabled: true, minimumBalanceCents: 25_000, maxSingleReloadCents: null, topUpAmountCents: null, paymentHoldTimeoutMinutes: 2_880, fundingMethodId: null, updatedAt: STAMP, backstopFundingMethodId: null, acknowledgedCardFeeBps: null, acknowledgedAt: null } });
+    const seed = wallet({ autoReload: { autoReloadSettingId: 1, enabled: true, minimumBalanceCents: 25_000, maxSingleReloadCents: null, topUpAmountCents: null, paymentHoldTimeoutMinutes: 2_880, fundingMethodId: null, updatedAt: STAMP, backstopFundingMethodId: null, acknowledgedCardFeeBps: null, acknowledgedAt: null, spendRewardsFirst: true } });
     expect(derive(seed)).toMatchObject({ authorized: false, feeRecordMissing: false, roleGaps: { backupCard: false, source: false }, canTurnOffAutoReload: false });
   });
 
@@ -181,13 +181,13 @@ describe("deriveWalletFlow", () => {
     expect(derive(gone, draft(), "active").roleGaps).toEqual({ backupCard: true, source: false });
     const sourceGone = doneWallet({ fundingMethods: [{ ...CARD, roles: { isAutoReloadSource: false, isBackupCard: true, chargeable: true } }] });
     expect(derive(sourceGone, draft(), "active").roleGaps).toEqual({ backupCard: false, source: true });
-    const negative = { availableBalanceCents: -5_000, pendingBalanceCents: 0, currency: "USD", status: "active" };
+    const negative = { availableBalanceCents: -5_000, pendingBalanceCents: 0, rewardsBalanceCents: 0, currency: "USD", status: "active" };
     expect(() => derive(wallet({ account: negative }))).not.toThrow();
     expect(() => derive(doneWallet({ account: negative }), draft({ deposit: "pending" }))).not.toThrow();
   });
 
   it("derives the acknowledgement faces without overriding a server verdict", () => {
-    const missing = doneWallet({ autoReload: { ...doneWallet().autoReload!, acknowledgedCardFeeBps: null, acknowledgedAt: null }, setupStatus: { ...doneWallet().setupStatus, acknowledged: false, launchReady: false } });
+    const missing = doneWallet({ autoReload: { ...doneWallet().autoReload!, acknowledgedCardFeeBps: null, acknowledgedAt: null, spendRewardsFirst: true }, setupStatus: { ...doneWallet().setupStatus, acknowledged: false, launchReady: false } });
     expect(derive(missing)).toMatchObject({ needsAcknowledgement: true, feeRecordMissing: true, feeChange: null });
     const raised = doneWallet({ cardFundingFeeBps: 350, setupStatus: { ...doneWallet().setupStatus, acknowledged: false } });
     expect(derive(raised)).toMatchObject({ needsAcknowledgement: true, feeRecordMissing: false, feeChange: { recordedBps: 300, currentBps: 350 } });
@@ -387,8 +387,8 @@ describe("draft and redirects", () => {
     const depositPending = buildPendingStripe({ rail: "stripe_ach", purpose: "deposit", wallet: w, startedAt: NOW, expiresAt: "2026-09-18T13:00:00.000Z" });
     expect(depositPending.ledgerMark).toEqual({ newestLedgerEntryId: null, availableBalanceCents: 0, pendingBalanceCents: 0 });
     expect(resolveStripeReturn(depositPending, w)).toBeNull();
-    expect(resolveStripeReturn(depositPending, wallet({ account: { availableBalanceCents: 0, pendingBalanceCents: 25_000, currency: "USD", status: "active" } }))).toEqual({ kind: "deposit_seen" });
-    const ledgered = wallet({ recentLedger: [{ ledgerEntryId: 4, type: "funding", status: "pending", amountCents: 25_000, currency: "USD", availableBalanceAfterCents: 0, pendingBalanceAfterCents: 25_000, createdAt: STAMP, settledAt: null, reason: "manual_top_up", fundingMethodId: 30, cardFee: null, failure: null }] });
+    expect(resolveStripeReturn(depositPending, wallet({ account: { availableBalanceCents: 0, pendingBalanceCents: 25_000, rewardsBalanceCents: 0, currency: "USD", status: "active" } }))).toEqual({ kind: "deposit_seen" });
+    const ledgered = wallet({ recentLedger: [{ ledgerEntryId: 4, type: "funding", status: "pending", amountCents: 25_000, currency: "USD", availableBalanceAfterCents: 0, pendingBalanceAfterCents: 25_000, rewardsBalanceAfterCents: null, createdAt: STAMP, settledAt: null, reason: "manual_top_up", fundingMethodId: 30, cardFee: null, failure: null }] });
     expect(resolveStripeReturn(depositPending, ledgered)).toEqual({ kind: "deposit_seen" });
     const marked = buildPendingStripe({ rail: "stripe_ach", purpose: "deposit", wallet: ledgered, startedAt: NOW, expiresAt: null });
     expect(resolveStripeReturn(marked, ledgered)).toBeNull();
@@ -489,7 +489,7 @@ describe("copy", () => {
   });
 
   it("pins the rules page: six topics, each a lead and its detail, quoting only the values the server enforces", () => {
-    const limits: WalletLimits = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, cardFundingMinCents: 10_000, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, caseTierMinimumCents: 50_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14, bankBalanceReadOffered: false };
+    const limits: WalletLimits = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, cardFundingMinCents: 10_000, rewardsRateBankBps: 100, rewardsRateUsdcBps: 100, rewardsRateCardBps: 0, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, caseTierMinimumCents: 50_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14, bankBalanceReadOffered: false };
     const intro = describeIntro({ cardFundingFeeBps: 300, usdcOffered: true, holdTimeoutMinutes: 2_880, limits });
     expect(intro.lede).toBe("Your wallet is the deposit Card Shellz draws on for the orders you sell. Here is what it holds, what it lets you sell, how it stays funded, and what happens when a payment fails.");
     expect(intro.topics).toHaveLength(6);
@@ -606,7 +606,9 @@ describe("copy", () => {
     expect(describeFundingMethodDetailed(method({ fundingMethodId: 12, card: { brand: "Visa", last4: "4242", expMonth: null, expYear: null } }))).toBe("Visa ending in 4242");
     expect(describeFundingMethod(method({ fundingMethodId: 20, rail: "usdc_base", usdcWalletAddress: "0x1234567890abcdef1234567890abcdef12345678" }))).toBe("USDC · 0x1234…5678");
     expect(describeFundingMethod(method({ fundingMethodId: 13, card: null, displayLabel: "My card" }))).toBe("My card");
-    expect(Object.keys(LEDGER_REASON_LABELS)).toHaveLength(15);
+    expect(Object.keys(LEDGER_REASON_LABELS)).toHaveLength(20);
+    expect(LEDGER_REASON_LABELS.rewards_earned).toBe("Rewards earned");
+    expect(LEDGER_REASON_LABELS.rewards_spent).toBe("Rewards used on an order");
     expect(LEDGER_REASON_LABELS.covered_held_order).toBe("Covered a held order");
     expect(LEDGER_REASON_LABELS.advance_fee).toBe("Fee for paying an order from money on its way");
     expect(LEDGER_REASON_LABELS.funding_reversed).toBe("Payment reversed by your bank");
@@ -664,7 +666,7 @@ describe("advance copy (funding design phase 3)", () => {
 });
 
 describe("USDC deposits in the wallet's words (funding design phase 6)", () => {
-  const limits: WalletLimits = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, cardFundingMinCents: 10_000, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, caseTierMinimumCents: 50_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14, bankBalanceReadOffered: false };
+  const limits: WalletLimits = { autoReloadMinTriggerCents: 5_000, autoReloadMinAmountCents: 10_000, manualFundingMinCents: 1_000, manualFundingMaxCents: 500_000, cardFundingMinCents: 10_000, rewardsRateBankBps: 100, rewardsRateUsdcBps: 100, rewardsRateCardBps: 0, defaultPaymentHoldTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, caseTierMinimumCents: 50_000, advanceFeeBps: 100, advanceCapCents: 50_000, tierChangeGraceDays: 14, bankBalanceReadOffered: false };
   const watched: WalletUsdcDeposit = { offered: true, watched: true, chainId: 8453, tokenAddress: "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913", minConfirmations: 6, settleTag: "safe", address: null };
   const unwatched: WalletUsdcDeposit = { ...watched, watched: false };
   const notOffered: WalletUsdcDeposit = { ...watched, offered: false, watched: false };

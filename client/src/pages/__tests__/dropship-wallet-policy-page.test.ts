@@ -55,6 +55,9 @@ function overviewFixture(
       tierChangeGraceDays: 14,
       cardFundingFeeBps: 0,
       cardFundingMinCents: 10_000,
+      rewardsRateBankBps: 100,
+      rewardsRateUsdcBps: 100,
+      rewardsRateCardBps: 0,
     },
     limitsSource: "environment",
     envLimits: {
@@ -70,6 +73,9 @@ function overviewFixture(
       tierChangeGraceDays: 14,
       cardFundingFeeBps: 0,
       cardFundingMinCents: 10_000,
+      rewardsRateBankBps: 100,
+      rewardsRateUsdcBps: 100,
+      rewardsRateCardBps: 0,
     },
     envKeys: {
       autoReloadMinTriggerCents: "DROPSHIP_AUTO_RELOAD_MIN_TRIGGER_CENTS",
@@ -86,6 +92,9 @@ function overviewFixture(
       tierChangeGraceDays: null,
       cardFundingFeeBps: "DROPSHIP_CARD_FUNDING_FEE_BPS",
       cardFundingMinCents: null,
+      rewardsRateBankBps: null,
+      rewardsRateUsdcBps: null,
+      rewardsRateCardBps: null,
     },
     // Deliberately inconsistent with `limits`: a page that computed the counts
     // from the form could not produce these numbers.
@@ -216,7 +225,7 @@ describe("dropship wallet policy tab", () => {
     );
     const inputs = tags(html, "input");
     const textareas = tags(html, "textarea");
-    expect(inputs).toHaveLength(12);
+    expect(inputs).toHaveLength(15);
     expect(textareas).toHaveLength(1);
     for (const element of [...inputs, ...textareas]) {
       expect(element).toMatch(DISABLED_ATTRIBUTE);
@@ -227,10 +236,10 @@ describe("dropship wallet policy tab", () => {
     expect(tags(html, "fieldset")[0]).toMatch(DISABLED_ATTRIBUTE);
   });
 
-  it("opens the twelve limit boxes for an operator who may manage operations", () => {
+  it("opens the fifteen limit boxes for an operator who may manage operations", () => {
     const html = renderPanel({ canEdit: true, overview: overviewFixture() });
     const inputs = tags(html, "input");
-    expect(inputs).toHaveLength(12);
+    expect(inputs).toHaveLength(15);
     // The card fee and the card minimum are ordinary limits since funding design phase 7.
     expect(html).toContain("Card funding fee (%)");
     expect(html).toContain("Card minimum deposit ($)");
