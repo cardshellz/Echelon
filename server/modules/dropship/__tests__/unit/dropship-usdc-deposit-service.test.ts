@@ -188,7 +188,7 @@ class FakeLedgerRepository implements DropshipUsdcDepositLedgerRepository {
   account(vendorId: number): DropshipWalletAccountRecord {
     let account = this.accounts.get(vendorId);
     if (!account) {
-      account = { walletAccountId: vendorId * 100, vendorId, availableBalanceCents: 0, pendingBalanceCents: 0, currency: "USD", status: "active", createdAt: NOW, updatedAt: NOW };
+      account = { walletAccountId: vendorId * 100, vendorId, availableBalanceCents: 0, pendingBalanceCents: 0, rewardsBalanceCents: 0, currency: "USD", status: "active", createdAt: NOW, updatedAt: NOW };
       this.accounts.set(vendorId, account);
     }
     return account;
@@ -233,6 +233,7 @@ class FakeLedgerRepository implements DropshipUsdcDepositLedgerRepository {
         currency: input.currency,
         availableBalanceAfterCents: account.availableBalanceCents,
         pendingBalanceAfterCents: account.pendingBalanceCents,
+        rewardsBalanceAfterCents: null,
         referenceType: "usdc_base_transaction",
         referenceId: `${input.transfer.chainId}:${input.transfer.transactionHash}:${input.transfer.logIndex}`,
         idempotencyKey: null,

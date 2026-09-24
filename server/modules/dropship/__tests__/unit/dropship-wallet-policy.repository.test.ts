@@ -17,6 +17,9 @@ const limits = {
   tierChangeGraceDays: 21,
   cardFundingFeeBps: 250,
   cardFundingMinCents: 12_500,
+  rewardsRateBankBps: 100,
+  rewardsRateUsdcBps: 100,
+  rewardsRateCardBps: 0,
 };
 
 const command = {
@@ -156,6 +159,7 @@ describe("PgDropshipWalletPolicyRepository", () => {
       expect(insert).toContain("case_tier_minimum_cents");
       expect(insert).toContain("advance_fee_bps, advance_cap_cents, tier_change_grace_days");
       expect(insert).toContain("card_funding_fee_bps, card_funding_minimum_cents");
+      expect(insert).toContain("rewards_rate_bank_bps, rewards_rate_usdc_bps, rewards_rate_card_bps");
       expect(client.queries.some((query) => query.includes("INSERT INTO dropship.dropship_audit_events"))).toBe(true);
 
       // The audit row carries the real staff actor, never 'system'.
@@ -169,8 +173,8 @@ describe("PgDropshipWalletPolicyRepository", () => {
 
       // The insert carries integer cents, bps and days exactly as given, in column order.
       const insertParams = client.paramsFor("INSERT INTO dropship.dropship_wallet_policies");
-      expect(insertParams?.slice(0, 13)).toEqual([4, 9_000, 55_000, 20_000, 2_500, 60_000, 1_440, 45, 150, 75_000, 21, 250, 12_500]);
-      expect(insertParams?.slice(13)).toEqual(["Autumn cohort floors.", now, "admin", "admin-1"]);
+      expect(insertParams?.slice(0, 16)).toEqual([4, 9_000, 55_000, 20_000, 2_500, 60_000, 1_440, 45, 150, 75_000, 21, 250, 12_500, 100, 100, 0]);
+      expect(insertParams?.slice(16)).toEqual(["Autumn cohort floors.", now, "admin", "admin-1"]);
     });
 
     it("skips the retire when no version has ever been published", async () => {
@@ -330,6 +334,9 @@ function policyRow(): Record<string, unknown> {
     tier_change_grace_days: 21,
     card_funding_fee_bps: 250,
     card_funding_minimum_cents: "12500",
+    rewards_rate_bank_bps: 100,
+    rewards_rate_usdc_bps: 100,
+    rewards_rate_card_bps: 0,
     is_active: true,
     change_note: "Autumn cohort floors.",
     created_at: now,

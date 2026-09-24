@@ -469,7 +469,7 @@ describe("buildDropshipOrderAcceptancePlan", () => {
     expect(paused).toMatchObject({ outcome: "payment_hold", paymentHoldReason: "vendor_paused", paymentHoldExpiresAt: existingExpiresAt });
 
     const short = buildDropshipOrderAcceptancePlan(makePlanningInput({
-      wallet: { walletAccountId: 1, availableBalanceCents: 100, pendingBalanceCents: 0, currency: "USD", advance: null },
+      wallet: { walletAccountId: 1, availableBalanceCents: 100, pendingBalanceCents: 0, rewardsBalanceCents: 0, spendRewardsFirst: true, currency: "USD", advance: null },
     }));
     expect(short).toMatchObject({ outcome: "payment_hold", paymentHoldReason: "insufficient_balance" });
     expect(buildDropshipOrderAcceptancePlan(makePlanningInput())).toMatchObject({ outcome: "accepted", paymentHoldReason: null });
@@ -522,6 +522,8 @@ describe("buildDropshipOrderAcceptancePlan", () => {
         walletAccountId: 1,
         availableBalanceCents: 100,
         pendingBalanceCents: 10_000,
+        rewardsBalanceCents: 0,
+        spendRewardsFirst: true,
         currency: "USD",
         advance: null,
       },
@@ -544,6 +546,8 @@ describe("buildDropshipOrderAcceptancePlan", () => {
         walletAccountId: 1,
         availableBalanceCents: 100,
         pendingBalanceCents: 10_000,
+        rewardsBalanceCents: 0,
+        spendRewardsFirst: true,
         currency: "USD",
         advance: null,
       },
@@ -558,6 +562,8 @@ describe("buildDropshipOrderAcceptancePlan", () => {
         walletAccountId: 1,
         availableBalanceCents: 100,
         pendingBalanceCents: 10_000,
+        rewardsBalanceCents: 0,
+        spendRewardsFirst: true,
         currency: "USD",
         advance: null,
       },
@@ -837,6 +843,7 @@ class FakeAcceptanceRepository implements DropshipOrderAcceptanceRepository {
       walletLedgerEntryId: 2001,
       economicsSnapshotId: 3001,
       totalDebitCents: 2722,
+      rewardsCents: 0,
       currency: "USD",
       paymentHoldExpiresAt: null,
       paymentHoldReason: null,
@@ -1005,6 +1012,8 @@ function makePlanningInput(
       walletAccountId: 1,
       availableBalanceCents: 5000,
       pendingBalanceCents: 0,
+      rewardsBalanceCents: 0,
+      spendRewardsFirst: true,
       currency: "USD",
       advance: null,
     },

@@ -414,7 +414,9 @@ export class DropshipOrderProcessingService {
       ? {
           vendorId: input.claim.intake.vendorId,
           reason: "payment_hold" as const,
-          requiredBalanceCents: input.acceptance.totalDebitCents,
+          // Rewards pay first (funding design phase 7): the card covers only
+          // the cash the order still needs.
+          requiredBalanceCents: input.acceptance.totalDebitCents - input.acceptance.rewardsCents,
           intakeId: input.claim.intake.intakeId,
           idempotencyKey: deriveOrderProcessingIdempotencyKey("auto-reload-payment-hold", input.parsed),
         }

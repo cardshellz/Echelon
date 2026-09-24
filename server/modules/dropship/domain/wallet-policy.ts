@@ -1,8 +1,8 @@
 /**
  * Dropship wallet policy — the limits the vendor wallet enforces.
  *
- * Twelve numbers, staff-managed as versioned data
- * (`dropship.dropship_wallet_policies`, migrations 0682, 0683 and 0701):
+ * Fifteen numbers, staff-managed as versioned data
+ * (`dropship.dropship_wallet_policies`, migrations 0682, 0683, 0701 and 0702):
  *
  *   - the two LISTING TIER minimums. A vendor selling eaches and inner packs
  *     (variant type P, B) keeps at least the pack tier minimum; a vendor with
@@ -23,7 +23,11 @@
  *   - the CARD FEE (basis points) on top of every card charge, held at zero
  *     since funding design phase 7 (no processing fee on any rail), and the
  *     CARD MINIMUM DEPOSIT a vendor-initiated card top-up may not go below.
- *     Bank deposits keep the general manual minimum.
+ *     Bank deposits keep the general manual minimum;
+ *   - the REWARDS RATES (basis points), one per rail: what a settled transfer
+ *     earns into the spend-only rewards balance (1% on bank and USDC, 0% on
+ *     card at launch), each under a 10% ceiling so a typo cannot pay out
+ *     100% (domain/wallet-rewards.ts).
  *
  * This module holds the PURE part: the shape, the documented fallback used when
  * no policy row exists, and the invariants, so the SQL CHECK constraints and
@@ -41,6 +45,11 @@ import {
   isValidCardFundingFeeBps,
 } from "../../../../shared/dropship/wallet-funding-fee";
 import { DropshipError } from "./errors";
+import {
+  DEFAULT_REWARDS_RATE_BANK_BPS,
+  DEFAULT_REWARDS_RATE_CARD_BPS,
+  DEFAULT_REWARDS_RATE_USDC_BPS,
+} from "./wallet-rewards";
 
 /**
  * The resolved limits. Field names match the vendor wallet DTO
@@ -80,6 +89,14 @@ export interface DropshipWalletPolicyLimits {
   cardFundingFeeBps: number;
   /** Smallest vendor-initiated card deposit. Bank deposits keep `manualFundingMinCents`. */
   cardFundingMinCents: number;
+  /**
+   * Rewards earned on a settled transfer, in basis points of the amount
+   * credited, per rail (funding design phase 7). Spend-only money Card Shellz
+   * issues; `domain/wallet-rewards.ts` holds the rules.
+   */
+  rewardsRateBankBps: number;
+  rewardsRateUsdcBps: number;
+  rewardsRateCardBps: number;
 }
 
 /**
@@ -151,7 +168,7 @@ export const MAX_TIER_CHANGE_GRACE_DAYS = 365;
 /**
  * The environment variable each limit falls back to, for the admin read. The
  * limits introduced by the funding design (case tier, advance, grace, card
- * minimum) and the hold timeout have no environment override: their fallback
+ * minimum, rewards rates) and the hold timeout have no environment override: their fallback
  * is the documented default in this module, and the policy row is the only
  * way to move them. The card fee keeps its variable as the fallback only.
  */
@@ -170,6 +187,9 @@ export const DROPSHIP_WALLET_POLICY_ENV_KEYS = Object.freeze({
   tierChangeGraceDays: null,
   cardFundingFeeBps: "DROPSHIP_CARD_FUNDING_FEE_BPS",
   cardFundingMinCents: null,
+  rewardsRateBankBps: null,
+  rewardsRateUsdcBps: null,
+  rewardsRateCardBps: null,
 });
 
 /**
@@ -247,6 +267,9 @@ export function resolveDropshipWalletPolicyLimitsFromEnv(
     tierChangeGraceDays: DEFAULT_TIER_CHANGE_GRACE_DAYS,
     cardFundingFeeBps: resolveDropshipCardFundingFeeBps(env),
     cardFundingMinCents: DEFAULT_CARD_FUNDING_MIN_CENTS,
+    rewardsRateBankBps: DEFAULT_REWARDS_RATE_BANK_BPS,
+    rewardsRateUsdcBps: DEFAULT_REWARDS_RATE_USDC_BPS,
+    rewardsRateCardBps: DEFAULT_REWARDS_RATE_CARD_BPS,
   };
 }
 
@@ -257,7 +280,7 @@ export interface WalletPolicyInvariantViolation {
 
 /**
  * The cross-field rules, mirroring the CHECK constraints in migrations 0682,
- * 0683 and 0701. Returns every violation rather than the first, so staff fix one form
+ * 0683 and 0701 (0702 adds per-field ranges only). Returns every violation rather than the first, so staff fix one form
  * instead of playing whack-a-mole. Per-field positivity/range is left to the
  * Zod schema at the boundary; this function assumes integers and checks the
  * relationships.

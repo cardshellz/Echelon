@@ -41,6 +41,8 @@ export const DROPSHIP_WALLET_POLICY_MAX_TIER_CHANGE_GRACE_DAYS = 365;
 
 /** 10%. Mirrors MAX_CARD_FUNDING_FEE_BPS (the shared misconfiguration guard) and `dropship_wallet_policies_card_fee_chk`. */
 export const DROPSHIP_WALLET_POLICY_MAX_CARD_FEE_BPS = 1_000;
+/** 10%: the ceiling on each rewards rate (funding design phase 7), so a typo cannot pay out 100%. */
+export const DROPSHIP_WALLET_POLICY_MAX_REWARDS_RATE_BPS = 1_000;
 
 /** The server bound on every cents field (`positiveCentsSchema`). */
 const MAX_CENTS = Number.MAX_SAFE_INTEGER;
@@ -68,6 +70,10 @@ const walletPolicyLimitsSchema = z.object({
   // Funding design phase 7: the card fee (held at zero) and the card minimum deposit are limits too.
   cardFundingFeeBps: z.number().int(),
   cardFundingMinCents: z.number().int(),
+  // Funding design phase 7: what a settled transfer earns into the spend-only rewards balance, per rail.
+  rewardsRateBankBps: z.number().int(),
+  rewardsRateUsdcBps: z.number().int(),
+  rewardsRateCardBps: z.number().int(),
 });
 
 const walletPolicyRecordSchema = z.object({
@@ -109,6 +115,10 @@ const walletPolicyEnvKeysSchema = z.object({
   // The card fee keeps its variable as the fallback only; the card minimum is policy-only.
   cardFundingFeeBps: z.string().nullable(),
   cardFundingMinCents: z.string().nullable(),
+  // The rewards rates are policy-only.
+  rewardsRateBankBps: z.string().nullable(),
+  rewardsRateUsdcBps: z.string().nullable(),
+  rewardsRateCardBps: z.string().nullable(),
 });
 
 /**
@@ -243,6 +253,10 @@ export interface DropshipWalletPolicyForm {
   /** Percent as typed; converted to basis points on parse. Zero since the pricing decision of 2026-09-23. */
   cardFundingFeePercent: string;
   cardFundingMinDollars: string;
+  /** Percent as typed; converted to basis points on parse. What a settled transfer earns in rewards, per rail. */
+  rewardsRateBankPercent: string;
+  rewardsRateUsdcPercent: string;
+  rewardsRateCardPercent: string;
   /** Optional operator note recorded with the new version. */
   changeNote: string;
 }
@@ -365,6 +379,30 @@ export const DROPSHIP_WALLET_POLICY_LIMIT_DESCRIPTORS: readonly DropshipWalletPo
     allowZero: false,
     help: "Smallest card deposit a vendor may make. Bank deposits keep the manual top-up minimum. Never above the manual top-up maximum.",
   },
+  {
+    limitField: "rewardsRateBankBps",
+    formField: "rewardsRateBankPercent",
+    label: "Rewards on bank transfers",
+    unit: "bps",
+    allowZero: true,
+    help: "What a settled bank transfer (a deposit or an automatic top-up) earns into the vendor's spend-only rewards balance. 1% at launch; never above 10%.",
+  },
+  {
+    limitField: "rewardsRateUsdcBps",
+    formField: "rewardsRateUsdcPercent",
+    label: "Rewards on USDC transfers",
+    unit: "bps",
+    allowZero: true,
+    help: "What a settled USDC transfer earns into the vendor's spend-only rewards balance. 1% at launch; never above 10%.",
+  },
+  {
+    limitField: "rewardsRateCardBps",
+    formField: "rewardsRateCardPercent",
+    label: "Rewards on card charges",
+    unit: "bps",
+    allowZero: true,
+    help: "What a settled card charge earns in rewards. Zero at launch: cards earn nothing; never above 10%.",
+  },
 ];
 
 const FORM_FIELD_BY_LIMIT_FIELD: Record<
@@ -383,6 +421,9 @@ const FORM_FIELD_BY_LIMIT_FIELD: Record<
   tierChangeGraceDays: "tierChangeGraceDays",
   cardFundingFeeBps: "cardFundingFeePercent",
   cardFundingMinCents: "cardFundingMinDollars",
+  rewardsRateBankBps: "rewardsRateBankPercent",
+  rewardsRateUsdcBps: "rewardsRateUsdcPercent",
+  rewardsRateCardBps: "rewardsRateCardPercent",
 };
 
 /** A blank form, used before the overview has loaded. Never submitted. */
@@ -399,6 +440,9 @@ export const emptyDropshipWalletPolicyForm: DropshipWalletPolicyForm = Object.fr
   tierChangeGraceDays: "",
   cardFundingFeePercent: "",
   cardFundingMinDollars: "",
+  rewardsRateBankPercent: "",
+  rewardsRateUsdcPercent: "",
+  rewardsRateCardPercent: "",
   changeNote: "",
 });
 
@@ -419,6 +463,9 @@ export function dropshipWalletPolicyFormFromLimits(
     tierChangeGraceDays: String(limits.tierChangeGraceDays),
     cardFundingFeePercent: basisPointsToPercentInput(limits.cardFundingFeeBps),
     cardFundingMinDollars: centsToDollarInput(limits.cardFundingMinCents),
+    rewardsRateBankPercent: basisPointsToPercentInput(limits.rewardsRateBankBps),
+    rewardsRateUsdcPercent: basisPointsToPercentInput(limits.rewardsRateUsdcBps),
+    rewardsRateCardPercent: basisPointsToPercentInput(limits.rewardsRateCardBps),
     // A note describes THIS change, so it never carries over from the version in force.
     changeNote: "",
   };
@@ -543,6 +590,9 @@ export function parseDropshipWalletPolicyForm(
   const graceDays = readDays(form.tierChangeGraceDays, "Tier change grace", errors, "tierChangeGraceDays");
   const cardFee = readPercent(form.cardFundingFeePercent, "Card funding fee", errors, "cardFundingFeePercent", DROPSHIP_WALLET_POLICY_MAX_CARD_FEE_BPS);
   const cardMin = readDollars(form.cardFundingMinDollars, "Card minimum deposit", errors, "cardFundingMinDollars");
+  const rewardsBank = readPercent(form.rewardsRateBankPercent, "Rewards on bank transfers", errors, "rewardsRateBankPercent", DROPSHIP_WALLET_POLICY_MAX_REWARDS_RATE_BPS);
+  const rewardsUsdc = readPercent(form.rewardsRateUsdcPercent, "Rewards on USDC transfers", errors, "rewardsRateUsdcPercent", DROPSHIP_WALLET_POLICY_MAX_REWARDS_RATE_BPS);
+  const rewardsCard = readPercent(form.rewardsRateCardPercent, "Rewards on card charges", errors, "rewardsRateCardPercent", DROPSHIP_WALLET_POLICY_MAX_REWARDS_RATE_BPS);
 
   const note = form.changeNote.trim();
   if (note.length > MAX_CHANGE_NOTE_LENGTH) {
@@ -552,7 +602,7 @@ export function parseDropshipWalletPolicyForm(
   if (
     trigger === null || caseTier === null || amount === null || manualMin === null || manualMax === null
     || holdTimeout === null || warning === null || advanceFee === null || advanceCap === null || graceDays === null
-    || cardFee === null || cardMin === null
+    || cardFee === null || cardMin === null || rewardsBank === null || rewardsUsdc === null || rewardsCard === null
   ) {
     return { success: false, errors };
   }
@@ -570,6 +620,9 @@ export function parseDropshipWalletPolicyForm(
     tierChangeGraceDays: graceDays,
     cardFundingFeeBps: cardFee,
     cardFundingMinCents: cardMin,
+    rewardsRateBankBps: rewardsBank,
+    rewardsRateUsdcBps: rewardsUsdc,
+    rewardsRateCardBps: rewardsCard,
   };
   for (const violation of dropshipWalletPolicyInvariantViolations(limits)) {
     const field = FORM_FIELD_BY_LIMIT_FIELD[violation.field];
@@ -790,6 +843,9 @@ export interface DropshipWalletPolicyVersionRequest {
   tierChangeGraceDays: number;
   cardFundingFeeBps: number;
   cardFundingMinCents: number;
+  rewardsRateBankBps: number;
+  rewardsRateUsdcBps: number;
+  rewardsRateCardBps: number;
   changeNote: string | null;
   idempotencyKey: string;
 }
@@ -831,6 +887,9 @@ export function buildDropshipWalletPolicyVersionRequest(input: {
     tierChangeGraceDays: input.limits.tierChangeGraceDays,
     cardFundingFeeBps: input.limits.cardFundingFeeBps,
     cardFundingMinCents: input.limits.cardFundingMinCents,
+    rewardsRateBankBps: input.limits.rewardsRateBankBps,
+    rewardsRateUsdcBps: input.limits.rewardsRateUsdcBps,
+    rewardsRateCardBps: input.limits.rewardsRateCardBps,
     changeNote: changeNote ? changeNote : null,
     idempotencyKey,
   };

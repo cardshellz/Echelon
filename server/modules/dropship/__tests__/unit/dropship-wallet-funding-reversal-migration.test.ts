@@ -23,7 +23,9 @@ describe("0689 dropship wallet funding reversal migration", () => {
   it("keeps the Drizzle declaration in step with the constraint", () => {
     expect(schema).toContain('"funding_reversal"');
     expect(schema).toContain('"funding_reinstated"');
-    expect(schema).toContain(`IN (${LEDGER_KINDS.map((kind) => `'${kind}'`).join(",")})`);
+    // Later migrations append kinds after these (0702 adds the rewards kinds), so the
+    // 0689 list is pinned as a prefix of the declaration, not the whole of it.
+    expect(schema).toContain(`IN (${LEDGER_KINDS.map((kind) => `'${kind}'`).join(",")}`);
   });
 
   it("changes only the ledger kinds: no new tables, no balance rewrite, no lower bound on balances", () => {

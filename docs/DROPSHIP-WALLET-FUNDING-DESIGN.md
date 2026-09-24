@@ -306,6 +306,26 @@ the audit trail; an unattended card charge never carries more than it, an
 agreement at or above the live rate is current, and a fee cut applies at
 once. A card deposit is held to the card minimum on the server and in the
 add-money controls, and every vendor surface reads "no fee" at zero.
+The rewards money paths (migration 0702): the wallet account carries a
+third, spend-only `rewards_balance_cents` (never negative) and every ledger
+line snapshots it; a settled bank or USDC credit earns rewards in the
+settlement's own transaction, at the per-rail rate read on the same client
+from the policy in force (`rewards_rate_bank_bps`, `rewards_rate_usdc_bps`,
+`rewards_rate_card_bps`: 1%, 1%, 0% at launch, each under a 10% ceiling,
+editable on the Wallet Policy tab), rounded down, once per credit
+(`rewards_earned`); a manual staff credit earns nothing. Each order debit
+takes rewards first and cash second (`rewards_spent`, then `order_debit` for
+what cash still owes; an order rewards pay in full posts no cash row and is
+never refused for a negative cash balance), unless the vendor saved their
+rewards (`spend_rewards_first` on their settings row,
+`PUT /api/dropship/wallet/rewards/preference`); a hold and the card backstop
+are sized on the cash the order still needs. A dispute takes the credit's
+rewards back pro rata: what is still in the balance leaves it
+(`rewards_reversed`), the part already spent comes out of cash through the
+same `funding_reversal` row; a won dispute gives both back
+(`rewards_reinstated`). Not built yet: the vendor-facing rewards surface
+(balance, ledger words, the "save my rewards" switch), the rewards share of a
+return credit, coupon redemption (`rewards_redeemed` has no writer).
 
 **Still open, not designed here:** credit against a business account's first
 bank transfer (today one earlier transfer from the account must have

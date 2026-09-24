@@ -159,6 +159,8 @@ interface WalletLedgerRow {
   currency: string;
   available_balance_after_cents: string | number | null;
   pending_balance_after_cents: string | number | null;
+  /** Read for the record's shape; this writer never moves rewards, so its own rows carry NULL (migration 0702). */
+  rewards_balance_after_cents?: string | number | null;
   reference_type: string | null;
   reference_id: string | null;
   idempotency_key: string | null;
@@ -1055,7 +1057,7 @@ async function listRmaWalletLedgerWithClient(
 ): Promise<DropshipWalletLedgerRecord[]> {
   const result = await client.query<WalletLedgerRow>(
     `SELECT id, wallet_account_id, vendor_id, type, status, amount_cents, currency,
-            available_balance_after_cents, pending_balance_after_cents,
+            available_balance_after_cents, pending_balance_after_cents, rewards_balance_after_cents,
             reference_type, reference_id, idempotency_key, funding_method_id,
             external_transaction_id, metadata, created_at, settled_at
      FROM dropship.dropship_wallet_ledger
@@ -1525,7 +1527,7 @@ async function insertWalletLedger(
      VALUES ($1, $2, $3, 'settled', $4, 'USD', $5, $6,
              'dropship_rma', $7, $8, $9::jsonb, $10, $10)
      RETURNING id, wallet_account_id, vendor_id, type, status, amount_cents, currency,
-               available_balance_after_cents, pending_balance_after_cents,
+               available_balance_after_cents, pending_balance_after_cents, rewards_balance_after_cents,
                reference_type, reference_id, idempotency_key, funding_method_id,
                external_transaction_id, metadata, created_at, settled_at`,
     [
@@ -2023,6 +2025,10 @@ function mapWalletLedgerRow(row: WalletLedgerRow): DropshipWalletLedgerRecord {
       row.pending_balance_after_cents === null
         ? null
         : Number(row.pending_balance_after_cents),
+    rewardsBalanceAfterCents:
+      row.rewards_balance_after_cents === null || row.rewards_balance_after_cents === undefined
+        ? null
+        : Number(row.rewards_balance_after_cents),
     referenceType: row.reference_type,
     referenceId: row.reference_id,
     idempotencyKey: row.idempotency_key,

@@ -1,6 +1,7 @@
 import { createHash } from "crypto";
 import { z } from "zod";
 import { MAX_CARD_FUNDING_FEE_BPS } from "../../../../shared/dropship/wallet-funding-fee";
+import { MAX_REWARDS_RATE_BPS } from "../domain/wallet-rewards";
 import { DropshipError } from "../domain/errors";
 import {
   resolveEffectiveAdvanceCapCents,
@@ -75,6 +76,11 @@ export const createDropshipWalletPolicyVersionInputSchema = z.object({
   // business ceiling: zero is the policy since funding design phase 7.
   cardFundingFeeBps: z.number().int().min(0).max(MAX_CARD_FUNDING_FEE_BPS),
   cardFundingMinCents: positiveCentsSchema,
+  // What a settled transfer earns into the spend-only rewards balance, per
+  // rail (funding design phase 7), each under the 10% ceiling.
+  rewardsRateBankBps: z.number().int().min(0).max(MAX_REWARDS_RATE_BPS),
+  rewardsRateUsdcBps: z.number().int().min(0).max(MAX_REWARDS_RATE_BPS),
+  rewardsRateCardBps: z.number().int().min(0).max(MAX_REWARDS_RATE_BPS),
   changeNote: noteSchema,
   idempotencyKey: idempotencyKeySchema,
   actor: actorSchema,
@@ -351,6 +357,9 @@ export class DropshipWalletPolicyService implements DropshipWalletPolicyResolver
       tierChangeGraceDays: parsed.tierChangeGraceDays,
       cardFundingFeeBps: parsed.cardFundingFeeBps,
       cardFundingMinCents: parsed.cardFundingMinCents,
+      rewardsRateBankBps: parsed.rewardsRateBankBps,
+      rewardsRateUsdcBps: parsed.rewardsRateUsdcBps,
+      rewardsRateCardBps: parsed.rewardsRateCardBps,
     };
     const changeNote = parsed.changeNote ?? null;
     const now = this.deps.clock.now();
@@ -593,6 +602,9 @@ export function hashWalletPolicyRequest(value: {
       tierChangeGraceDays: value.limits.tierChangeGraceDays,
       cardFundingFeeBps: value.limits.cardFundingFeeBps,
       cardFundingMinCents: value.limits.cardFundingMinCents,
+      rewardsRateBankBps: value.limits.rewardsRateBankBps,
+      rewardsRateUsdcBps: value.limits.rewardsRateUsdcBps,
+      rewardsRateCardBps: value.limits.rewardsRateCardBps,
     },
     changeNote: value.changeNote,
   })).digest("hex");
