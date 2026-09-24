@@ -80,9 +80,10 @@ describe("PostgreSQL CI coverage and isolation", () => {
       "server/modules/returns/__tests__/integration/customer-return-order-access.repository.test.ts",
       "server/modules/returns/__tests__/integration/customer-return-authorization.repository.test.ts",
       "server/modules/returns/__tests__/integration/customer-return-local-inspection.reader.test.ts",
+      "server/modules/orders/__tests__/integration/pick-correction.integration.test.ts",
     ];
-    expect(POSTGRES_TEST_FILES).toHaveLength(94);
-    expect(new Set(POSTGRES_TEST_FILES).size).toBe(94);
+    expect(POSTGRES_TEST_FILES).toHaveLength(95);
+    expect(new Set(POSTGRES_TEST_FILES).size).toBe(95);
     expect(POSTGRES_TEST_FILES).toEqual(expect.arrayContaining(addedSuites));
     // Preserve the original inventory digest as well as the explicit additions;
     // adding hardening coverage must not silently remove an older suite.
@@ -124,7 +125,7 @@ describe("PostgreSQL CI coverage and isolation", () => {
         reports.push(args.at(-1)!);
       }
     }
-    expect(new Set(reports).size).toBe(94);
+    expect(new Set(reports).size).toBe(POSTGRES_TEST_FILES.length);
     expect(() => buildPostgresVitestArgs({ index: 1, count: 8 }, POSTGRES_TEST_FILES[1])).toThrow();
     const source = readFileSync(resolve(POSTGRES_REPOSITORY_ROOT, "scripts/ci/postgres-tests.ts"), "utf8");
     expect(source).toContain("spawnSync(process.execPath, [...args]");
