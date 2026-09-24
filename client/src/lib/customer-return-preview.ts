@@ -6,15 +6,23 @@ import {
   type CustomerReturnFlowReview,
   type CustomerReturnFlowReviewInput,
 } from "@shared/returns/customer-return-flow.contract";
+import { sameCustomerReturnDimensions } from "@shared/returns/customer-return-parcel";
+import {
+  initialPreviewParcelSize,
+  previewParcelProductWeight,
+  readPreviewParcelDimensions,
+  readPreviewQuantity,
+  type PreviewParcelDraft,
+} from "./customer-return-parcels";
+export {
+  readPreviewQuantity,
+  type PreviewParcelDraft,
+} from "./customer-return-parcels";
 
 export interface PreviewSelectionDraft {
   lineId: string;
   quantity: string;
   reasonCode: CustomerReturnFlowReason | null;
-}
-export interface PreviewParcelDraft {
-  key: number;
-  items: { lineId: string; quantity: string }[];
 }
 export type PreviewSelections = CustomerReturnFlowReviewInput["selections"];
 export type PreviewValidation<T> =
@@ -50,13 +58,6 @@ export function initialPreviewSelections(
     quantity: "0",
     reasonCode: null,
   }));
-}
-
-export function readPreviewQuantity(value: string): number | null {
-  if (value === "") return 0;
-  if (!/^\d+$/.test(value)) return null;
-  const parsed = Number(value);
-  return Number.isSafeInteger(parsed) ? parsed : null;
 }
 
 export function validatePreviewSelections(
@@ -107,14 +108,17 @@ export function samePreviewQuantities(
 
 export function singlePreviewParcel(
   selections: PreviewSelections,
+  order: CustomerReturnFlowOrder,
 ): PreviewParcelDraft[] {
+  const items = selections.map((item) => ({
+    lineId: item.lineId,
+    quantity: String(item.quantity),
+  }));
   return [
     {
       key: 1,
-      items: selections.map((item) => ({
-        lineId: item.lineId,
-        quantity: String(item.quantity),
-      })),
+      items,
+      size: initialPreviewParcelSize(order, items),
     },
   ];
 }
@@ -148,7 +152,21 @@ export function buildPreviewReviewInput(
     }
     if (!items.length)
       return invalid(`Add an item to box ${index + 1}, or remove that box.`);
-    parcelInputs.push({ items });
+    if (previewParcelProductWeight(order, parcel).status !== "ready") {
+      return invalid(
+        `We need to verify the product weight for box ${index + 1} before continuing.`,
+      );
+    }
+    try {
+      parcelInputs.push({
+        items,
+        ...readPreviewParcelDimensions(order, parcel),
+      });
+    } catch (cause) {
+      return invalid(
+        `Box ${index + 1}: ${cause instanceof Error ? cause.message : "Check the box dimensions."}`,
+      );
+    }
   }
   for (const selection of selections) {
     if ((totals.get(selection.lineId) ?? 0) !== selection.quantity) {
@@ -181,6 +199,19 @@ export function assertReturnFlowOrderMatches(
     normalizedPreviewReference(order.orderReference) !==
       normalizedPreviewReference(reference) ||
     new Set(order.lines.map((line) => line.id)).size !== order.lines.length ||
+    new Set(order.boxOptions.map((box) => box.id)).size !==
+      order.boxOptions.length ||
+    order.boxOptions.some(
+      (box) =>
+        new Set(box.items.map((item) => item.lineId)).size !==
+          box.items.length ||
+        box.items.some((item) => {
+          const line = order.lines.find(
+            (candidate) => candidate.id === item.lineId,
+          );
+          return !line || item.quantity > line.purchasedQuantity;
+        }),
+    ) ||
     order.lines.some(
       (line) =>
         line.deliveredQuantity > line.purchasedQuantity ||
@@ -203,6 +234,7 @@ export function assertReturnFlowOrderMatches(
 export function assertPreviewReviewMatches(
   review: CustomerReturnFlowReview,
   input: CustomerReturnFlowReviewInput,
+  order: CustomerReturnFlowOrder,
 ): void {
   const total = input.selections.reduce(
     (sum, selection) => sum + selection.quantity,
@@ -221,8 +253,17 @@ export function assertPreviewReviewMatches(
   }
   for (const [index, parcel] of review.parcels.entries()) {
     const expected = input.parcels[index];
+    const weight = previewParcelProductWeight(order, {
+      items: expected.items.map((item) => ({
+        lineId: item.lineId,
+        quantity: String(item.quantity),
+      })),
+    });
     if (
       parcel.number !== index + 1 ||
+      !sameCustomerReturnDimensions(parcel.dimensions, expected.dimensions) ||
+      weight.status !== "ready" ||
+      parcel.weightGrams !== weight.weightGrams ||
       parcel.items.length !== expected.items.length ||
       new Set(parcel.items.map((item) => item.lineId)).size !==
         parcel.items.length ||

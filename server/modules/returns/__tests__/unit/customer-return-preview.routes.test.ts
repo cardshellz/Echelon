@@ -90,7 +90,8 @@ describe("private customer return preview HTTP boundaries", () => {
       lookup: vi.fn(async () => { const { scenarioId: _scenario, mode: _mode, ...order } = actual.lookup(lookup);
         return { ...order, mode: "admin_live", sourceRevision: "a".repeat(64) }; }),
       review: vi.fn(async () => ({ mode: "admin_live", sourceRevision: "a".repeat(64), effects: "none", orderReference: lookup.orderReference,
-        selectedQuantity: 1, parcels: [{ number: 1, items: [{ lineId: "sample-line-1", title: "Fixture", quantity: 1 }] }], refundMethod: "manual_shopify" })),
+        selectedQuantity: 1, parcels: [{ number: 1, dimensions: { lengthMm: 254, widthMm: 203.2, heightMm: 101.6 }, weightGrams: 100,
+          items: [{ lineId: "sample-line-1", title: "Fixture", quantity: 1 }] }], refundMethod: "manual_shopify" })),
     };
     identityStorage.getUser.mockReset(); identityStorage.getUserRoles.mockReset();
     await start();
@@ -195,7 +196,7 @@ describe("private customer return preview HTTP boundaries", () => {
     const line = order.body.lines.find((candidate: { eligibleQuantity: number }) => candidate.eligibleQuantity > 0);
     const review = await request(`${API}/review`, "POST", { ...lookup,
       selections: [{ lineId: line.id, quantity: 1, reasonCode: null }],
-      parcels: [{ items: [{ lineId: line.id, quantity: 1 }] }] });
+      parcels: [{ dimensions: { lengthMm: 254, widthMm: 203.2, heightMm: 101.6 }, originalBoxId: null, items: [{ lineId: line.id, quantity: 1 }] }] });
     expect(review.status).toBe(200); expectPrivate(review);
     expect(review.body).toMatchObject({ effects: "none", mode: "admin_preview", selectedQuantity: 1 });
     expect(fallback).not.toHaveBeenCalled();
@@ -235,7 +236,8 @@ describe("private customer return preview HTTP boundaries", () => {
     } else {
       path = `${API}/review`;
       const line = actual.lookup(lookup).lines.find(candidate => candidate.eligibleQuantity > 0)!;
-      body = { ...lookup, selections: [{ lineId: line.id, quantity: 1, reasonCode: null }], parcels: [{ items: [{ lineId: line.id, quantity: 1 }] }] };
+      body = { ...lookup, selections: [{ lineId: line.id, quantity: 1, reasonCode: null }],
+        parcels: [{ dimensions: { lengthMm: 254, widthMm: 203.2, heightMm: 101.6 }, originalBoxId: null, items: [{ lineId: line.id, quantity: 1 }] }] };
       service.review.mockReturnValueOnce({ ...actual.review(body), effects: "label_purchased" } as never);
     }
     const response = await request(path, body ? "POST" : "GET", body);
@@ -368,7 +370,7 @@ describe("private customer return preview HTTP boundaries", () => {
   it("validates live review without allowing source/scope overrides", async () => {
     const payload = { channelId: 36, orderReference: lookup.orderReference, sourceRevision: "a".repeat(64),
       selections: [{ lineId: "sample-line-1", quantity: 1, reasonCode: null }],
-      parcels: [{ items: [{ lineId: "sample-line-1", quantity: 1 }] }] };
+      parcels: [{ dimensions: { lengthMm: 254, widthMm: 203.2, heightMm: 101.6 }, originalBoxId: null, items: [{ lineId: "sample-line-1", quantity: 1 }] }] };
     const reviewed = await request(`${API}/live/review`, "POST", payload);
     expect(reviewed.status).toBe(200); expectPrivate(reviewed);
     expect(reviewed.body.effects).toBe("none"); expect(liveService.review).toHaveBeenCalledWith(payload);

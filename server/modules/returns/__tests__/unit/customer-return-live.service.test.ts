@@ -2,23 +2,27 @@ import { describe, expect, it, vi } from "vitest";
 import { CustomerReturnLiveService } from "../../application/customer-return-live.service";
 import { CustomerReturnLocalInspectionError } from "../../application/customer-return-local-inspection.ports";
 import { CustomerReturnShopifySnapshotError } from "../../application/customer-return-shopify-snapshot.ports";
-import { LIVE_NOW, liveGid as gid, liveLocalFixture, liveNativeReturn, liveShop, liveShopifyFixture } from "../support/live-inspection-fixtures";
+import { LIVE_NOW, addLiveOriginalBox, liveGid as gid, liveLocalFixture, liveNativeReturn, liveShop, liveShopifyFixture } from "../support/live-inspection-fixtures";
 
 const lookup = { channelId: 36, orderReference: " # 0012-A " };
+const boxDimensions = { lengthMm: 300, widthMm: 200, heightMm: 100 };
 function setup() {
   const localFacts = liveLocalFixture(); const shopifyFacts = liveShopifyFixture();
   const local = { listShops: vi.fn(async () => [liveShop]), read: vi.fn(async () => structuredClone(localFacts)) };
   const shopify = { read: vi.fn(async () => structuredClone(shopifyFacts)) };
+  const dimensions = { read: vi.fn(async () => ({ ...boxDimensions })) };
+  const reportBoxDiagnostic = vi.fn();
   const now = vi.fn(() => new Date(LIVE_NOW));
-  const service = new CustomerReturnLiveService({ local, shopify, now });
-  return { service, local, shopify, now, localFacts, shopifyFacts };
+  const service = new CustomerReturnLiveService({ local, shopify, dimensions, reportBoxDiagnostic, now });
+  return { service, local, shopify, dimensions, reportBoxDiagnostic, now, localFacts, shopifyFacts };
 }
 async function reviewInput(service: CustomerReturnLiveService) {
   const order = await service.lookup(lookup);
   return { ...lookup, sourceRevision: order.sourceRevision,
     selections: [{ lineId: order.lines[0].id, quantity: 2, reasonCode: null }, { lineId: order.lines[1].id, quantity: 1, reasonCode: null }],
-    parcels: [{ items: [{ lineId: order.lines[0].id, quantity: 1 }, { lineId: order.lines[1].id, quantity: 1 }] },
-      { items: [{ lineId: order.lines[0].id, quantity: 1 }] }],
+    parcels: [{ dimensions: { ...boxDimensions }, originalBoxId: null as string | null,
+      items: [{ lineId: order.lines[0].id, quantity: 1 }, { lineId: order.lines[1].id, quantity: 1 }] },
+      { dimensions: { ...boxDimensions }, originalBoxId: null as string | null, items: [{ lineId: order.lines[0].id, quantity: 1 }] }],
   };
 }
 
@@ -180,11 +184,70 @@ describe("live box review", () => {
     const result = await service.review(input);
     expect(result).toMatchObject({ mode: "admin_live", sourceRevision: input.sourceRevision, selectedQuantity: 3, effects: "none", refundMethod: "manual_shopify" });
     expect(result.parcels.map(parcel => parcel.items.map(item => item.quantity))).toEqual([[1, 1], [1]]);
+    expect(result.parcels.map(parcel => parcel.weightGrams)).toEqual([33, 13]);
+    expect(result.parcels.map(parcel => parcel.dimensions)).toEqual([boxDimensions, boxDimensions]);
     expect(local.read).toHaveBeenCalledTimes(4); expect(shopify.read).toHaveBeenCalledTimes(2);
   });
   it("invalidates a reviewed plan after a newly created native return", async () => {
     const { service, shopifyFacts } = setup(); const input = await reviewInput(service); shopifyFacts.returns = [liveNativeReturn()];
     await expect(service.review(input)).rejects.toMatchObject({ code: "RETURN_LIVE_REVIEW_CHANGED", status: 409 });
+  });
+  it("keeps missing weight separate from eligibility and requires verification before review", async () => {
+    const { service, localFacts } = setup(); localFacts.lines[0].unitWeightGrams = null;
+    const order = await service.lookup(lookup);
+    expect(order.lines[0]).toMatchObject({ eligibleQuantity: 2, unitWeightGrams: null });
+    await expect(service.review(await reviewInput(service))).rejects.toMatchObject({ code: "RETURN_LIVE_WEIGHT_INVALID", status: 409 });
+  });
+  it("does not accept a browser-supplied parcel weight", async () => {
+    const { service } = setup(); const input = await reviewInput(service);
+    await expect(service.review({ ...input, parcels: input.parcels.map(parcel => ({ ...parcel, weightGrams: 1 })) }))
+      .rejects.toMatchObject({ code: "RETURN_LIVE_INPUT_INVALID", status: 400 });
+  });
+  it("binds changed product weights to the reviewed source revision", async () => {
+    const { service, localFacts } = setup(); const input = await reviewInput(service);
+    localFacts.lines[0].unitWeightGrams = 12.35;
+    await expect(service.review(input)).rejects.toMatchObject({ code: "RETURN_LIVE_REVIEW_CHANGED", status: 409 });
+  });
+  it("rereads verified original box sizes and invalidates a changed measurement", async () => {
+    const { service, localFacts, dimensions } = setup(); addLiveOriginalBox(localFacts);
+    const order = await service.lookup(lookup);
+    expect(order.boxOptions).toHaveLength(1);
+    expect(order.boxOptions[0].items).toEqual(expect.arrayContaining([
+      { lineId: order.lines[0].id, quantity: 2 }, { lineId: order.lines[1].id, quantity: 1 },
+    ]));
+    const input = await reviewInput(service);
+    input.parcels[0].originalBoxId = order.boxOptions[0].id;
+    expect((await service.review(input)).parcels[0].weightGrams).toBe(33);
+    expect(dimensions.read).toHaveBeenCalledTimes(3);
+    dimensions.read.mockResolvedValue({ ...boxDimensions, lengthMm: 301 });
+    await expect(service.review(input)).rejects.toMatchObject({ code: "RETURN_LIVE_PARCELS_INVALID", status: 400 });
+    dimensions.read.mockRejectedValue(new Error("private provider failure"));
+    await expect(service.review(input)).rejects.toMatchObject({ code: "RETURN_LIVE_PARCELS_INVALID", status: 400 });
+  });
+  it("keeps manual sizing and exact eligible quantities available during a dimensions outage", async () => {
+    const { service, localFacts, dimensions, reportBoxDiagnostic } = setup(); addLiveOriginalBox(localFacts);
+    dimensions.read.mockRejectedValue(new Error("private provider failure"));
+    const order = await service.lookup(lookup);
+    expect(order.boxOptions).toEqual([]);
+    expect(order.lines.map(line => line.eligibleQuantity)).toEqual([2, 1]);
+    expect((await service.review(await reviewInput(service))).parcels.map(parcel => parcel.weightGrams)).toEqual([33, 13]);
+    expect(JSON.stringify(reportBoxDiagnostic.mock.calls)).not.toContain("private provider failure");
+  });
+  it("keeps custom-box review stable when optional original dimensions become available", async () => {
+    const { service, localFacts, dimensions } = setup(); addLiveOriginalBox(localFacts);
+    dimensions.read.mockRejectedValue(new Error("private provider failure"));
+    const input = await reviewInput(service);
+    dimensions.read.mockResolvedValue({ ...boxDimensions });
+    expect((await service.review(input)).parcels.map(parcel => parcel.weightGrams)).toEqual([33, 13]);
+  });
+  it("suppresses a combined package's preset without changing eligible quantities for this order", async () => {
+    const { service, localFacts, dimensions } = setup(); addLiveOriginalBox(localFacts);
+    localFacts.packageItems.push({ ...localFacts.packageItems[0], physicalShipmentItemId: 999,
+      wmsOrderItemId: 999, omsOrderLineId: 999, originalQuantity: 1, effectiveQuantity: 1 });
+    const order = await service.lookup(lookup);
+    expect(order.boxOptions).toEqual([]);
+    expect(order.lines.map(line => line.eligibleQuantity)).toEqual([2, 1]);
+    expect(dimensions.read).not.toHaveBeenCalled();
   });
   it.each(["missing_box_unit", "extra_box_unit", "duplicate_selection", "duplicate_box_line", "unselected_line", "excess_selection"])("rejects %s", async kind => {
     const { service } = setup(); const input = await reviewInput(service);

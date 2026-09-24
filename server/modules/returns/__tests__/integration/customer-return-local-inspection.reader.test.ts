@@ -83,6 +83,22 @@ integration("private return inspection against migration-defined PostgreSQL", ()
     expect((await reader.read(input))?.issues).toEqual([]);
   });
 
+  it("reads fractional product-only grams by exact variant identity without same-SKU fallback", async () => {
+    const first = await reader.read(input);
+    expect(first?.lines.map(line => line.unitWeightGrams)).toEqual([12.34, 20.01, null]);
+    await pool.query("UPDATE oms.oms_order_lines SET product_variant_id=NULL WHERE id=101");
+    expect((await reader.read(input))?.lines[0].unitWeightGrams).toBeNull();
+    await pool.query("UPDATE oms.oms_order_lines SET product_variant_id=503 WHERE id=101");
+    for (const weight of [null, "0", "-1", "NaN"]) {
+      await pool.query("UPDATE catalog.product_variants SET weight_grams=$1 WHERE id=503", [weight]);
+      const snapshot = await reader.read(input);
+      expect(snapshot?.lines[0].unitWeightGrams).toBeNull();
+      expect(snapshot?.issues).toEqual([]);
+    }
+    await pool.query("UPDATE catalog.product_variants SET weight_grams=99.99 WHERE id=503");
+    expect((await reader.read(input))?.lines[0].unitWeightGrams).toBe(99.99);
+  });
+
   it("does not cast GID or oversized WMS references and retains conflicts instead of dropping rows", async () => {
     await pool.query("UPDATE wms.orders SET oms_fulfillment_order_id='gid://shopify/Order/1000' WHERE id=201");
     const snapshot = await reader.read(input);
@@ -188,6 +204,15 @@ integration("private return inspection against migration-defined PostgreSQL", ()
     expect(snapshot?.packageItems.find(item => item.physicalShipmentItemId === 1)).toMatchObject({ originalQuantity: 2, effectiveQuantity: 1 });
     expect(snapshot?.carrierEvents).toHaveLength(1);
     expect(snapshot?.rootClaims).toEqual([]);
+    expect(snapshot?.packageItems[0].providerPhysicalShipmentId).toBe("PKG1");
+  });
+
+  it("retains all contents of candidate physical packages, including unattributable items", async () => {
+    await packages();
+    await pool.query(`DELETE FROM oms.channel_fulfillment_receipt_items; DELETE FROM oms.channel_fulfillment_push_items;
+      INSERT INTO wms.physical_shipment_items(id,physical_shipment_id,sku,quantity_shipped) OVERRIDING SYSTEM VALUE
+      VALUES(50,1,'UNATTRIBUTED',1)`);
+    expect((await reader.read(input))?.packageItems.map(item => item.physicalShipmentItemId)).toEqual([1, 2, 50]);
   });
 
   it("returns zero effective quantity and retained inactive/replacement provenance without silently granting entitlement", async () => {

@@ -1,7 +1,7 @@
 import type { Pool, PoolClient } from "pg";
 import { z } from "zod";
 import {
-  CUSTOMER_RETURN_INSPECTION_LIMITS as limits, CustomerReturnLocalInspectionError,
+  CUSTOMER_RETURN_INSPECTION_LIMITS as limits, MAX_CATALOG_RETURN_UNIT_WEIGHT_GRAMS, CustomerReturnLocalInspectionError,
   customerReturnInspectionShopSchema, customerReturnLocalOrderSchema, customerReturnLocalLineSchema,
   customerReturnLocalWmsItemSchema, customerReturnLocalRootClaimSchema, customerReturnLocalLegacyClaimSchema,
   customerReturnLocalUnallocatedReturnSchema, customerReturnLocalInventoryReturnSchema,
@@ -92,7 +92,7 @@ export class PostgresCustomerReturnLocalInspectionReader implements CustomerRetu
     order: z.infer<typeof customerReturnLocalOrderSchema>): Promise<Omit<CustomerReturnLocalInspectionSnapshot, "observedAt" | "issues">> {
     const orderId = order.omsOrderId;
     const lines = await readRows(client, customerReturnLocalLineSchema, queries.lines, [orderId, limits.lines + 1], limits.lines,
-      ["omsOrderLineId", "quantity"]);
+      ["omsOrderLineId", "quantity"], [], ["unitWeightGrams"]);
     const wmsItems = await readRows(client, customerReturnLocalWmsItemSchema, queries.wmsItems,
       [orderId, String(orderId), limits.wmsItems + 1], limits.wmsItems,
       ["wmsOrderId", "wmsOrderItemId", "omsOrderLineId", "channelId", "quantity", "fulfilledQuantity"]);
@@ -163,7 +163,8 @@ export class PostgresCustomerReturnLocalInspectionReader implements CustomerRetu
 }
 
 async function readRows<T extends z.ZodTypeAny>(client: PoolClient, schema: T, text: string,
-  values: unknown[], maximum: number, integerKeys: readonly string[] = [], timestampKeys: readonly string[] = []): Promise<z.output<T>[]> {
+  values: unknown[], maximum: number, integerKeys: readonly string[] = [], timestampKeys: readonly string[] = [],
+  nullableWeightKeys: readonly string[] = []): Promise<z.output<T>[]> {
   const result = await client.query(text, values);
   if (!result || !Array.isArray(result.rows)) throw new z.ZodError([]);
   if (result.rows.length > maximum) throw failure("RETURN_INSPECTION_EVIDENCE_LIMIT", "This order has more evidence than private inspection can safely review.");
@@ -177,6 +178,14 @@ async function readRows<T extends z.ZodTypeAny>(client: PoolClient, schema: T, t
     for (const key of timestampKeys) {
       const value = row[key];
       if (value instanceof Date && Number.isFinite(value.getTime())) row[key] = value.toISOString();
+    }
+    for (const key of nullableWeightKeys) {
+      // Catalog numeric(10,2) values are product-only grams. Missing, zero,
+      // non-finite or malformed facts remain unknown; never invent a minimum.
+      const value = row[key];
+      const numeric = typeof value === "string" && /^\d+(?:\.\d{1,2})?$/.test(value) ? Number(value) : value;
+      row[key] = typeof numeric === "number" && Number.isFinite(numeric) && numeric > 0
+        && numeric <= MAX_CATALOG_RETURN_UNIT_WEIGHT_GRAMS ? numeric : null;
     }
     return schema.parse(row);
   });

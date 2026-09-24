@@ -3,6 +3,7 @@ import { CustomerReturnLiveError } from "../application/customer-return-live-err
 import { customerReturnShopifyDomainSchema } from "../application/customer-return-shopify-snapshot.ports";
 import { PostgresCustomerReturnLocalInspectionReader } from "./customer-return-local-inspection.reader";
 import { ShopifyCustomerReturnSnapshotReader } from "./customer-return-shopify-snapshot.reader";
+import { createCustomerReturnShipStationDimensionsReader } from "./customer-return-shipstation-dimensions.reader";
 
 /** Explicit scope: neither the default channel nor a shop name/currency establishes the approved store. */
 export function parseCustomerReturnShopDomains(raw: string | undefined): readonly string[] {
@@ -26,6 +27,8 @@ export async function createCustomerReturnLiveService(): Promise<CustomerReturnL
   return new CustomerReturnLiveService({
     local: new PostgresCustomerReturnLocalInspectionReader(pool, { approvedShopDomains, clock: now }),
     shopify: new ShopifyCustomerReturnSnapshotReader({ resolveConnection: channelId => identity.shopifyConnection(channelId), request: fetch, now }),
+    dimensions: createCustomerReturnShipStationDimensionsReader({ apiKey: process.env.SHIPSTATION_API_KEY,
+      apiSecret: process.env.SHIPSTATION_API_SECRET, request: fetch }),
     now,
   });
 }
