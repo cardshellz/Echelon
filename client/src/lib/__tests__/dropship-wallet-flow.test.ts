@@ -29,6 +29,7 @@ import {
   draftAtStep,
   describeAcknowledgementBanner,
   describeActivationTopUp,
+  describeDepositRail,
   describeBackupFollow,
   describeFundingMethod,
   describeFundingMethodDetailed,
@@ -441,17 +442,17 @@ describe("moving through the flow", () => {
 });
 
 describe("copy", () => {
-  const terms: WalletTerms = { sourceRail: "stripe_ach", sourceLabel: "Chase ending in 1234", backupLabel: "Visa ending in 4242", floorCents: 25_000, topUpCents: null, limitCents: 50_000, holdTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, cardFundingFeeBps: 300 };
+  const terms: WalletTerms = { sourceRail: "stripe_ach", sourceLabel: "Chase ending in 1234", backupLabel: "Visa ending in 4242", floorCents: 25_000, topUpCents: null, limitCents: 50_000, chargeCeilingCents: 500_000, holdTimeoutMinutes: 2_880, holdExpiryWarningMinutes: 120, cardFundingFeeBps: 300 };
 
   it("words the bank mandate from the numbers: the minimum, the top-up amount and the bound", () => {
     const lines = describeMandate(terms);
     expect(lines).toHaveLength(6);
     expect(lines[0]).toBe("Debit Chase ending in 1234 whenever an order takes your balance below your minimum of $250, and at the daily check: your top-up amount of $250 (your minimum), or more if that alone would not bring you back to $250. No fee. Money already on its way counts, so the same gap is not debited twice.");
-    expect(lines[1]).toContain("While your account is active, charge Visa ending in 4242 only when an order needs more than your available balance: the shortfall plus the 3% card fee, up to $500");
+    expect(lines[1]).toContain("While your account is active, charge Visa ending in 4242 only when an order needs more than your available balance: the shortfall plus the 3% card fee, whatever its size (up to $5,000)");
     expect(lines[1]).toContain("even while a bank top-up is still landing or your autopay source cannot be charged");
     expect(lines[1]).toContain("a $75 order with $20 available charges $55 + $1.65");
     expect(lines[1]).toContain("If a return fee has taken your balance below zero, the shortfall includes that amount.");
-    expect(lines[2]).toBe("Never take more than $500 in one charge — the larger of your minimum and your top-up amount. An order needing more than your available balance plus $500 is not charged: it waits for you to add money and is cancelled if still unpaid after 48 hours. We email you 2 hours before that.");
+    expect(lines[2]).toBe("Routine top-ups never take more than $500 in one charge — the larger of your minimum and your top-up amount. A held order is different: your backup card is charged its whole shortfall, up to $5,000, the most any single payment may be. An order short by more than $5,000 is not charged: it waits for you to add money and is cancelled if still unpaid after 48 hours. We email you 2 hours before that.");
     expect(lines[3]).toContain("first daily check after you activate (about midnight UTC)");
     expect(lines[3]).toContain("Adding money by card now avoids that");
     expect(lines[3]).toContain("debits Chase ending in 1234 for your top-up amount ($250), or more if that alone would not reach $250");
@@ -466,14 +467,14 @@ describe("copy", () => {
     // A top-up amount the vendor chose is named as theirs, not as the minimum.
     const chosen = describeMandate({ ...terms, topUpCents: 40_000, limitCents: 40_000 });
     expect(chosen[0]).toContain("your top-up amount of $400, or more if that alone would not bring you back to $250");
-    expect(chosen[2]).toContain("Never take more than $400 in one charge");
+    expect(chosen[2]).toContain("Routine top-ups never take more than $400 in one charge");
   });
 
   it("words the card mandate with the routine top-up's fee and the bank-return clause", () => {
     const lines = describeMandate({ ...terms, sourceRail: "stripe_card", sourceLabel: "Visa ending in 4242", floorCents: 10_000, limitCents: 25_000 });
     expect(lines[0]).toBe("Charge Visa ending in 4242, plus the 3% fee, whenever an order takes your balance below your minimum of $100, and at the daily check: your top-up amount of $100 (your minimum), or more if that alone would not bring you back to $100 ($100 + $3 = $103 for a routine top-up).");
     expect(lines[1]).toContain("Visa ending in 4242 is also your backup card");
-    expect(lines[1]).toContain("(up to $250)");
+    expect(lines[1]).toContain("whatever its size (up to $5,000)");
     expect(lines[1]).toContain("If a return fee has taken your balance below zero, the shortfall includes that amount.");
     expect(lines[3]).toContain("charges Visa ending in 4242 your top-up amount ($100), or more if that alone would not reach $100");
     expect(lines[4]).toContain("or a bank transfer you started is returned before it lands");
@@ -497,9 +498,9 @@ describe("copy", () => {
     ]);
     expect(intro.topics[0].detail).toBe("A prepaid deposit Card Shellz holds for your store. Every order you accept is paid from it: the product cost plus shipping, with nothing added on top. A return fee comes out of it too, and so does a payment your bank takes back after it landed; either can take the balance below zero.");
     expect(intro.topics[1].detail).toBe("Singles, packs and inner packs are on sale while you keep at least $50 in your wallet. Cases are on sale once your balance, counting money on its way, has reached $500. If Card Shellz raises a minimum you keep selling for 14 days after the notice, then that tier comes off sale until you are back above it.");
-    expect(intro.topics[2].detail).toBe("You choose the minimum you keep — at least $50, or $500 to sell cases. Whenever an order takes your balance below it, and at a daily check, autopay pulls a top-up from your bank account or card: your top-up amount, which is your minimum unless you set another, or more if that alone would not reach your minimum. Money already on its way counts, so the same gap is never pulled twice. Autopay never takes more than the larger of your minimum and your top-up amount in one charge. You can also add money yourself at any time.");
+    expect(intro.topics[2].detail).toBe("You choose the minimum you keep — at least $50, or $500 to sell cases. Whenever an order takes your balance below it, and at a daily check, autopay pulls a top-up from your bank account or card: your top-up amount, which is your minimum unless you set another, or more if that alone would not reach your minimum. Money already on its way counts, so the same gap is never pulled twice. Routine top-ups never take more than the larger of your minimum and your top-up amount in one charge. You can also add money yourself at any time.");
     expect(intro.topics[3].detail).toBe("A bank account costs nothing and takes up to 5 business days to land (our estimate). A card lands at once and costs 3% on top of the amount, whether autopay charged it, you added money yourself, or it covered an order. USDC costs nothing.");
-    expect(intro.topics[4].detail).toBe("Money that has landed pays for orders first. A bank transfer still on its way can pay too, once the account it comes from qualifies — a business account, a balance we could read when it was linked, and one earlier transfer from it landed — for a 1% fee on the amount used, at most $500 outstanding at a time. If an order still needs more than your balance, we charge your backup card for the difference plus 3% and send the order out. An order the card cannot cover waits 48 hours for you to add money, then is cancelled.");
+    expect(intro.topics[4].detail).toBe("Money that has landed pays for orders first. A bank transfer still on its way can pay too, once the account it comes from qualifies — a business account, a balance we could read when it was linked, and one earlier transfer from it landed — for a 1% fee on the amount used, at most $500 outstanding at a time. If an order still needs more than your balance, we charge your backup card for the whole difference plus 3%, up to $5,000 in one payment, and send the order out. An order the card cannot cover waits 48 hours for you to add money, then is cancelled.");
     expect(intro.topics[5].detail).toBe("Selling pauses: your listings show nothing for sale, and orders already waiting are cancelled after your hold time (48 hours). We email you, and we do not retry the charge ourselves. A payment your bank takes back after it landed is taken out of your wallet the same way. Selling starts again on its own once your balance is back at your minimum.");
     // USDC is named only where a deposit address exists, and never with a timing claim: nothing in the code watches the chain.
     const noUsdc = describeIntro({ cardFundingFeeBps: 300, usdcOffered: false, holdTimeoutMinutes: 2_880, limits });
@@ -521,8 +522,8 @@ describe("copy", () => {
     // The old vocabulary is gone from the rules page.
     const whole = [intro.lede, ...intro.topics.flatMap((topic) => [topic.lead, topic.detail])].join(" ");
     expect(whole).not.toMatch(/single top-up limit|Never charge more than|step 5|floor|auto-reload|backstop/);
-    // Exactly the enforced amounts are quoted: the two tier minimums (twice), the card fee (twice), the advance fee and its cap.
-    expect(whole.match(/\$[\d,]*\d|\d+(?:\.\d+)?%/g)).toEqual(["$50", "$500", "$50", "$500", "3%", "1%", "$500", "3%"]);
+    // Exactly the enforced amounts are quoted: the two tier minimums (twice), the card fee (twice), the advance fee and its cap, and the single-payment ceiling.
+    expect(whole.match(/\$[\d,]*\d|\d+(?:\.\d+)?%/g)).toEqual(["$50", "$500", "$50", "$500", "3%", "1%", "$500", "3%", "$5,000"]);
     expect(describeActivationTopUp({ cardFundingFeeBps: 300 })).toBe("Your first automatic top-up runs on the first daily check after you activate (about midnight UTC). Until it lands, orders are charged to your backup card at 3%. Adding money by card now avoids that.");
     expect(describeHoldTimeLine(120)).toContain("for orders held from now on");
     expect(describeHoldTimeLine(120)).toContain("We email you 2 hours before.");
@@ -797,5 +798,49 @@ describe("adding money: the top-up step's picks again", () => {
     expect(depositDefaultCents([{ factor: 2, cents: 20_000 }, { factor: 5, cents: 50_000 }], 70_000)).toBe(20_000);
     expect(depositDefaultCents([], 10_000)).toBeNull();
     expect(() => depositDefaultCents(options, 1.5)).toThrow(RangeError);
+  });
+});
+
+describe("the add-money step's terms per way to pay", () => {
+  const bank = { rail: "stripe_ach" as const, cardFundingFeeBps: 300, backupLabel: "Visa ending in 4242", bankFundingMethodId: 30, advance: null };
+
+  it("lists a card's fee and that the money is available at once; a zero fee reads as none", () => {
+    expect(describeDepositRail({ ...bank, rail: "stripe_card" })).toEqual(["Card fee: 3% on top of the amount.", "Available at once."]);
+    expect(describeDepositRail({ ...bank, rail: "stripe_card", cardFundingFeeBps: 0 })).toEqual(["No fee.", "Available at once."]);
+  });
+
+  it("lists a bank transfer's fee, landing time, credit and backup-card terms without an advance position", () => {
+    expect(describeDepositRail({ ...bank, advance: null })).toEqual([
+      "No fee.",
+      "Takes up to 5 business days (our assumption) to land, and counts toward your minimum as soon as it shows as on the way.",
+      "A business bank account can qualify to pay for orders while a transfer is still on the way; a personal account pays only once the money lands.",
+      "While it is on the way, an order it cannot pay for is charged to Visa ending in 4242 for the shortfall plus 3%.",
+    ]);
+    // A zero card fee drops the fee clause rather than promising "plus 0%".
+    expect(describeDepositRail({ ...bank, advance: null, cardFundingFeeBps: 0 })[3]).toBe("While it is on the way, an order it cannot pay for is charged to Visa ending in 4242 for the shortfall.");
+  });
+
+  it("words the credit sentence from the account's three facts, not from the eligibility flag", () => {
+    const source = advance().sources[0];
+    // Company, balance read, one transfer landed: qualifies (even when nothing is on the way right now).
+    expect(describeDepositRail({ ...bank, advance: advance({ sources: [{ ...source, pendingCents: 0, eligible: false, reasons: ["no_pending_credit"] }] }) })[2])
+      .toBe("This business account qualifies: money still on its way from it can pay for orders, for a 1% fee on the amount used, up to $500 at a time.");
+    expect(describeDepositRail({ ...bank, advance: advance({ sources: [{ ...source, priorPullSettled: false, eligible: false, reasons: ["first_pull_not_settled"] }] }) })[2])
+      .toBe("This is a business account: once one transfer from it has landed, later transfers can pay for orders while still on the way, for a 1% fee on the amount used, up to $500 at a time.");
+    expect(describeDepositRail({ ...bank, advance: advance({ sources: [{ ...source, balanceVerified: false, eligible: false, reasons: ["bank_balance_not_verified"] }] }) })[2])
+      .toBe("This is a business account, but we could not read its balance when it was linked, so money on its way from it pays for orders only once it lands.");
+    expect(describeDepositRail({ ...bank, advance: advance({ sources: [{ ...source, accountHolderType: "individual", eligible: false, reasons: ["account_holder_not_company"] }] }) })[2])
+      .toBe("This is a personal account: money on its way from it pays for orders only once it lands.");
+    // The vendor's override terms are the ones quoted.
+    expect(describeDepositRail({ ...bank, advance: advance({ policy: { feeBps: 150, capCents: 100_000, capSource: "vendor_override" } }) })[2])
+      .toBe("This business account qualifies: money still on its way from it can pay for orders, for a 1.5% fee on the amount used, up to $1,000 at a time.");
+  });
+
+  it("falls back to the general rule when the account is unknown, and to none at all when the cap is zero", () => {
+    const general = "A business account can qualify to pay for orders while a transfer is still on the way — a balance we could read when it was linked, and one earlier transfer from it landed — for a 1% fee on the amount used, up to $500 at a time. A personal account pays only once the money lands.";
+    expect(describeDepositRail({ ...bank, bankFundingMethodId: null, advance: advance() })[2]).toBe(general);
+    expect(describeDepositRail({ ...bank, bankFundingMethodId: 99, advance: advance() })[2]).toBe(general);
+    expect(describeDepositRail({ ...bank, advance: advance({ sources: [{ ...advance().sources[0], accountHolderType: null }] }) })[2]).toBe(general);
+    expect(describeDepositRail({ ...bank, advance: advance({ policy: { feeBps: 100, capCents: 0, capSource: "vendor_override" } }) })[2]).toBe("Money on its way cannot pay for orders until it lands.");
   });
 });

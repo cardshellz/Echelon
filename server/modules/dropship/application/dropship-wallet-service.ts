@@ -1635,12 +1635,19 @@ export class DropshipWalletService {
       return this.skipAutoReload(parsed, "funding_method_provider_identity_required", wallet.account.currency, chargeMethod.fundingMethodId);
     }
 
+    // A held order's card charge covers its whole gap (funding design phase 7);
+    // the only ceiling is the program's limit on any single payment. Routine
+    // reloads keep the vendor's own bound and need no policy read.
+    const chargeCeilingCents = parsed.reason === "payment_hold"
+      ? (await this.walletLimits()).manualFundingMaxCents
+      : null;
     const amount = calculateAutoReloadAmount({
       availableBalanceCents: wallet.account.availableBalanceCents,
       pendingBalanceCents: wallet.account.pendingBalanceCents,
       minimumBalanceCents: setting.minimumBalanceCents,
       topUpAmountCents: setting.topUpAmountCents,
       maxSingleReloadCents: setting.maxSingleReloadCents,
+      chargeCeilingCents,
       requiredBalanceCents: parsed.requiredBalanceCents ?? null,
       reason: parsed.reason,
     });
@@ -2480,6 +2487,8 @@ function calculateAutoReloadAmount(input: {
   minimumBalanceCents: number;
   topUpAmountCents: number | null;
   maxSingleReloadCents: number | null;
+  /** The program's ceiling on any single payment; only a held order's charge is measured against it. */
+  chargeCeilingCents: number | null;
   requiredBalanceCents: number | null;
   reason: HandleDropshipAutoReloadInput["reason"];
 }):
@@ -2491,12 +2500,13 @@ function calculateAutoReloadAmount(input: {
       minimumBalanceCents: input.minimumBalanceCents,
       requiredBalanceCents: input.requiredBalanceCents ?? 0,
       singleChargeLimitCents: input.maxSingleReloadCents,
+      chargeCeilingCents: input.chargeCeilingCents,
     });
     if (charge.outcome === "not_needed") {
       return { outcome: "skipped", skipReason: "balance_already_sufficient" };
     }
-    if (charge.outcome === "limit_below_gap") {
-      return { outcome: "skipped", skipReason: "amount_exceeds_max_single_reload" };
+    if (charge.outcome === "ceiling_below_gap") {
+      return { outcome: "skipped", skipReason: "amount_exceeds_funding_ceiling" };
     }
     return { outcome: "funding_created", amountCents: charge.amountCents, refill: null };
   }
@@ -2524,8 +2534,9 @@ function calculateAutoReloadAmount(input: {
  * Skip reasons that mean the wallet has no usable backstop. Each one leaves the
  * next order that outruns the balance in payment hold, so they are anomalies a
  * human should see, not routine outcomes. `auto_reload_disabled`,
- * `balance_already_sufficient` and `amount_exceeds_max_single_reload` are
- * deliberately absent: those are the policy working as configured.
+ * `balance_already_sufficient` and `amount_exceeds_funding_ceiling` are
+ * deliberately absent: those are the policy working as configured (a held
+ * order above the ceiling is already reported by the hold notice).
  */
 const AUTO_RELOAD_SKIPS_NEEDING_ATTENTION: ReadonlySet<string> = new Set([
   "funding_provider_not_configured",

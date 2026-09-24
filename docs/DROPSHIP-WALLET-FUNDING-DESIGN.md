@@ -46,9 +46,12 @@ zero for that tier's SKUs (`domain/listing-tiers.ts`, the hourly reconciler).
    cannot cover whole goes to the card. Eligibility is judged per bank
    account: company account holder, a balance read through Stripe Financial
    Connections when it was linked, and one earlier pull from it settled.
-3. **Card backstop** — the order-processing pass charges the card for
-   `min(back-to-minimum, single top-up limit)`, never less than the gap; when
-   even the limit cannot cover the gap nothing is charged and the order waits.
+3. **Card backstop** — the order-processing pass charges the card the whole
+   gap, plus a refill back to the minimum only within the single top-up bound,
+   and never more than the policy's manual funding maximum in one charge
+   (`decideCardBackstopCharge`). An order whose gap alone is above that
+   maximum is not charged and waits. Phase 7: the bound shapes routine
+   top-ups, not what a held order may be charged.
 4. **Payment hold** — 24 hours (policy), then the order is cancelled.
 
 When a pending credit settles, the existing settlement path adds it to
@@ -115,7 +118,9 @@ fixed presets below the minimum are gone. `domain/autopay-refill.ts`:
 
 - refill (after any order debit and at the daily check, while the balance
   counting pending is under the minimum): pull the top-up amount, or the
-  whole shortfall when that is more, never past the single-charge bound;
+  whole shortfall when that is more, never past the single-charge bound
+  (a held order's backup-card charge is not a refill: it takes the whole
+  gap, up to the policy's manual funding maximum — phase 3, item 3);
 - the bound is the server's, max(minimum, top-up amount), derived when the
   client sends none (`max_single_reload_cents` keeps it; an older client's
   own bound is honoured while it covers both amounts). A deep negative is
@@ -286,11 +291,14 @@ never be spent on .ops orders or product cost; wallet rewards never become
 Shellz Club points. Each balance is spent only in the system that owns it,
 so no order ever depends on a two-system transaction.
 
-**Queued with this phase, decided but not yet built:** the held-order
-backup-card charge covers the whole shortfall (today it is capped at the
-single-charge bound, a leftover of a setting vendors no longer see); the
-add-money step stops describing autopay, shows the balance as its own
-element and states each rail's terms as short bullets.
+**Built with this phase:** the held-order backup-card charge covers the
+whole shortfall, up to the policy's manual funding maximum in one payment
+(the single-charge bound now shapes routine top-ups only, and every vendor
+surface says so); the add-money step no longer describes autopay, shows the
+balance as its own element, and states the picked rail's terms as short
+bullets (`describeDepositRail`: fee, landing time, the credit rule from the
+account's three facts, and the backup card while a transfer lands), with
+"Skip for now" and no Back.
 
 **Still open, not designed here:** credit against a business account's first
 bank transfer (today one earlier transfer from the account must have

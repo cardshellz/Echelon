@@ -92,11 +92,15 @@ describe("DropshipPortalWallet contract", () => {
   });
 
   it("renders feedback and an impact statement in every step but the intro, and one button that authorizes", () => {
-    for (const [start, end] of [["function SourceStep", "function tryParseDollarInputToCents"], ["function FloorStep", "function centsToDollarText"], ["function BackupStep", "function buildReviewRows"], ["function ReviewStep", "function FundingControls"], ["function DepositStep", "function ManageView"]]) {
+    for (const [start, end] of [["function SourceStep", "function tryParseDollarInputToCents"], ["function FloorStep", "function centsToDollarText"], ["function BackupStep", "function buildReviewRows"], ["function ReviewStep", "function FundingControls"]]) {
       const body = between(start, end);
       expect(body, start).toContain("<SectionFeedback");
       expect(body, start).toMatch(/<Impact>|data-testid="wallet-impact"/);
     }
+    // The add-money step carries feedback but no impact box: its terms are the picked rail's bullets.
+    const deposit = between("function DepositStep", "function ManageView");
+    expect(deposit).toContain("<SectionFeedback");
+    expect(deposit).not.toContain("<Impact>");
     const intro = between("function IntroStep", "function SourcePicker");
     expect(intro).not.toContain("wallet-impact");
     const review = between("function ReviewStep", "function FundingControls");
@@ -166,9 +170,8 @@ describe("DropshipPortalWallet contract", () => {
     expect(controls).toContain("const preset = options.some((option) => option.cents === presetCents) ? presetCents : null;");
     expect(controls).toContain('if (amountCents === null) { setCustomError("Pick an amount or enter one."); return; }');
     expect(controls).toContain('<Label htmlFor="wallet-custom-amount">Or another amount</Label>');
-    // Step 6 names the amount the controls open on, and both callers hand the controls the plan's top-up amount.
+    // Both callers hand the controls the plan's top-up amount.
     const step = between("function DepositStep", "function ManageView");
-    expect(step).toContain("formatWholeDollars(nextTopUpCents({ floorCents: terms.floorCents, topUpCents: terms.topUpCents, availableCents: wallet.account.availableBalanceCents, pendingCents: wallet.account.pendingBalanceCents }))");
     expect(step).toContain("topUpCents={terms.topUpCents}");
     const manage = between("function ManageView", "function ListingTiersSection");
     expect(manage).toContain("const topUpCents = wallet.autoReload ? wallet.autoReload.topUpAmountCents : flow.topUpCents;");
@@ -177,9 +180,26 @@ describe("DropshipPortalWallet contract", () => {
     expect(source).not.toMatch(/DEPOSIT_PRESETS_CENTS|presetsIncluding|depositAmountDefault|placeholder="75\.00"/);
   });
 
+  it("adds money on its own terms: the balance stands alone, the picked rail lists its terms, nothing is said about autopay, and skipping is one click", () => {
+    const step = between("function DepositStep", "function ManageView");
+    expect(step).toContain('data-testid="wallet-deposit-balance"');
+    expect(step).toContain('data-testid="wallet-deposit-available"');
+    expect(step).toContain("formatSignedCents(wallet.account.availableBalanceCents)");
+    expect(step).toContain("describePendingBalance(wallet.account.pendingBalanceCents, wallet.advance)");
+    expect(step).toContain("railNotes={(rail, method) => describeDepositRail({");
+    expect(step).toContain("bankFundingMethodId: rail === \"stripe_ach\" && method ? method.fundingMethodId : null,");
+    expect(step).toContain("Skip for now");
+    // No autopay talk, no impact box, no Back: the autopay steps before it cover autopay, and the step list still opens the review.
+    expect(step).not.toMatch(/autopay|auto-reload|daily check|first top-up|describeActivationTopUp|Not now|onBack|<Impact>/i);
+    const controls = between("function FundingControls", "function UsdcFundingPanel");
+    expect(controls).toContain('data-testid="wallet-rail-notes"');
+    expect(controls).toContain("{railNotes(rail, method).map((note) => <li key={note}>{note}</li>)}");
+    // The activation sentence left the page with the paragraph that carried it.
+    expect(source).not.toContain("describeActivationTopUp");
+  });
+
   it("states the intro in the words of what happens today, from one source of the copy", () => {
     expect(source).not.toContain("passkey enrollment");
-    expect(source).toContain("describeActivationTopUp(");
     // Step 1 and the manage view's "How your wallet works" render the same component, so the rules are worded once.
     expect(source.match(/describeIntro\(/g)).toHaveLength(1);
     expect(source.match(/INTRO_VERIFICATION_NOTE/g)).toHaveLength(2);
@@ -222,15 +242,17 @@ describe("DropshipPortalWallet contract", () => {
       expect(source, transition).toContain(transition);
     }
     expect(source).toContain("revisited={flow.furthestStep !== \"intro\"}");
-    // Back is a plain control on every step screen but the intro, and it saves nothing.
+    // Back is a plain control on every step screen but the intro and the add-money step, and it saves nothing.
+    // (Past the plan there is nothing to go back and change; the step list still opens the review.)
     const back = between("function StepBack", "function Impact");
     expect(back).toContain("data-testid=\"wallet-step-back\"");
     expect(back).toContain("if (!onBack) return null;");
     for (const [start, end] of [["function SourceStep", "function tryParseDollarInputToCents"], ["function FloorStep", "function centsToDollarText"],
-      ["function BackupStep", "function buildReviewRows"], ["function ReviewStep", "function FundingControls"], ["function DepositStep", "function ManageView"]]) {
+      ["function BackupStep", "function buildReviewRows"], ["function ReviewStep", "function FundingControls"]]) {
       expect(between(start, end), start).toContain("<StepBack busy=");
     }
     expect(between("function IntroStep", "function SourcePicker")).not.toContain("<StepBack");
+    expect(between("function DepositStep", "function ManageView")).not.toContain("<StepBack");
     // Review's Change controls open a step; they no longer throw the choice away, and are not offered for a step that is closed.
     expect(between("function ReviewStep", "function FundingControls")).toContain("onChange(step)");
     expect(between("function ReviewStep", "function FundingControls")).toContain("{step && flow.reachableSteps.includes(step) && (");

@@ -1192,7 +1192,7 @@ describe("DropshipWalletService", () => {
     });
   });
 
-  it("skips payment-hold auto-reload when the needed amount exceeds the configured max", async () => {
+  it("charges a held order its whole gap even when the vendor's single-charge bound is below it", async () => {
     repository.autoReload = makeAutoReloadSetting({
       fundingMethodId: 99,
       minimumBalanceCents: 5000,
@@ -1207,11 +1207,41 @@ describe("DropshipWalletService", () => {
       idempotencyKey: "auto-reload-intake-456",
     });
 
-    expect(result).toMatchObject({
-      outcome: "skipped",
-      skipReason: "amount_exceeds_max_single_reload",
+    // The bound is a promise about routine top-ups; an order the vendor sold goes out.
+    expect(result).toMatchObject({ outcome: "funding_created", fundingMethodId: 99, amountCents: 7500 });
+    expect(repository.ledger[0]).toMatchObject({ amountCents: 7500, fundingMethodId: 99 });
+  });
+
+  it("holds the order when its gap is above the program's ceiling on a single payment", async () => {
+    repository.autoReload = makeAutoReloadSetting({
       fundingMethodId: 99,
+      minimumBalanceCents: 5000,
+      maxSingleReloadCents: 25000,
     });
+    const lowCeiling: DropshipWalletPolicyResolver = {
+      resolveWalletLimits: async () => ({
+        autoReloadMinTriggerCents: 5_000,
+        autoReloadMinAmountCents: 5_000,
+        manualFundingMinCents: 1_000,
+        manualFundingMaxCents: 6_000,
+        defaultPaymentHoldTimeoutMinutes: 1_440,
+        holdExpiryWarningMinutes: 120,
+        caseTierMinimumCents: 50_000,
+        advanceFeeBps: 100,
+        advanceCapCents: 50_000,
+        tierChangeGraceDays: 14,
+      }),
+    };
+
+    const result = await buildService({ walletPolicy: lowCeiling }).handleAutoReload({
+      vendorId: 10,
+      reason: "payment_hold",
+      requiredBalanceCents: 7500,
+      intakeId: 456,
+      idempotencyKey: "auto-reload-intake-456",
+    });
+
+    expect(result).toMatchObject({ outcome: "skipped", skipReason: "amount_exceeds_funding_ceiling", fundingMethodId: 99 });
     expect(repository.ledger).toHaveLength(0);
   });
 

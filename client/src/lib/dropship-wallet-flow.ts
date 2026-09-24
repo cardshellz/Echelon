@@ -841,8 +841,10 @@ export interface WalletTerms {
   floorCents: number;
   /** What each refill pulls; null is the minimum. */
   topUpCents: number | null;
-  /** The single-charge bound. */
+  /** The single-charge bound on routine top-ups. */
   limitCents: number;
+  /** The program's ceiling on any single payment (the policy's manual funding maximum). */
+  chargeCeilingCents: number;
   holdTimeoutMinutes: number;
   holdExpiryWarningMinutes: number;
   cardFundingFeeBps: number;
@@ -927,6 +929,7 @@ export function describeIntro(input: {
   const grace = `${input.limits.tierChangeGraceDays} day${input.limits.tierChangeGraceDays === 1 ? "" : "s"}`;
   const advanceFee = formatFeeRate(input.limits.advanceFeeBps);
   const advanceCap = formatWholeDollars(input.limits.advanceCapCents);
+  const ceiling = formatWholeDollars(input.limits.manualFundingMaxCents);
   const usdc = describeUsdcIntroSentence(input.usdcDeposit ?? null, input.usdcOffered);
   return {
     lede: "Your wallet is the deposit Card Shellz draws on for the orders you sell. Here is what it holds, what it lets you sell, how it stays funded, and what happens when a payment fails.",
@@ -941,7 +944,7 @@ export function describeIntro(input: {
       },
       {
         lead: "Keeping it funded: your minimum and autopay.",
-        detail: `You choose the minimum you keep — at least ${pack}, or ${cases} to sell cases. Whenever an order takes your balance below it, and at a daily check, autopay pulls a top-up from your bank account or card: your top-up amount, which is your minimum unless you set another, or more if that alone would not reach your minimum. Money already on its way counts, so the same gap is never pulled twice. Autopay never takes more than the larger of your minimum and your top-up amount in one charge. You can also add money yourself at any time.`,
+        detail: `You choose the minimum you keep — at least ${pack}, or ${cases} to sell cases. Whenever an order takes your balance below it, and at a daily check, autopay pulls a top-up from your bank account or card: your top-up amount, which is your minimum unless you set another, or more if that alone would not reach your minimum. Money already on its way counts, so the same gap is never pulled twice. Routine top-ups never take more than the larger of your minimum and your top-up amount in one charge. You can also add money yourself at any time.`,
       },
       {
         lead: "Ways to pay, and what each costs.",
@@ -949,7 +952,7 @@ export function describeIntro(input: {
       },
       {
         lead: "Orders while a transfer lands, and your backup card.",
-        detail: `Money that has landed pays for orders first. A bank transfer still on its way can pay too, once the account it comes from qualifies — a business account, a balance we could read when it was linked, and one earlier transfer from it landed — for a ${advanceFee} fee on the amount used, at most ${advanceCap} outstanding at a time. If an order still needs more than your balance, we charge your backup card for the difference plus ${fee} and send the order out. An order the card cannot cover waits ${hold} for you to add money, then is cancelled.`,
+        detail: `Money that has landed pays for orders first. A bank transfer still on its way can pay too, once the account it comes from qualifies — a business account, a balance we could read when it was linked, and one earlier transfer from it landed — for a ${advanceFee} fee on the amount used, at most ${advanceCap} outstanding at a time. If an order still needs more than your balance, we charge your backup card for the whole difference plus ${fee}, up to ${ceiling} in one payment, and send the order out. An order the card cannot cover waits ${hold} for you to add money, then is cancelled.`,
       },
       {
         lead: "If a payment fails or is taken back.",
@@ -975,6 +978,7 @@ export function describeMandate(terms: WalletTerms): string[] {
   const fee = formatFeeRate(terms.cardFundingFeeBps);
   const minimum = formatWholeDollars(terms.floorCents);
   const bound = formatWholeDollars(terms.limitCents);
+  const ceiling = formatWholeDollars(terms.chargeCeilingCents);
   const topUp = topUpForTerms(terms);
   const topUpText = `${formatWholeDollars(topUp.cents)}${topUp.isMinimum ? " (your minimum)" : ""}`;
   const hold = formatDurationMinutes(terms.holdTimeoutMinutes);
@@ -982,14 +986,14 @@ export function describeMandate(terms: WalletTerms): string[] {
   const example = shortfallExample({ orderCents: EXAMPLE_SHORTFALL.orderCents, availableCents: EXAMPLE_SHORTFALL.availableCents, bps: terms.cardFundingFeeBps });
   const exampleText = `a ${formatWholeDollars(EXAMPLE_SHORTFALL.orderCents)} order with ${formatWholeDollars(EXAMPLE_SHORTFALL.availableCents)} available charges ${formatWholeDollars(example.shortfallCents)} + ${formatWholeDollars(example.feeCents)}`;
   const belowZero = "If a return fee has taken your balance below zero, the shortfall includes that amount.";
-  const boundLine = `Never take more than ${bound} in one charge — the larger of your minimum and your top-up amount. An order needing more than your available balance plus ${bound} is not charged: it waits for you to add money and is cancelled if still unpaid after ${hold}. We email you ${warning} before that.`;
+  const boundLine = `Routine top-ups never take more than ${bound} in one charge — the larger of your minimum and your top-up amount. A held order is different: your backup card is charged its whole shortfall, up to ${ceiling}, the most any single payment may be. An order short by more than ${ceiling} is not charged: it waits for you to add money and is cancelled if still unpaid after ${hold}. We email you ${warning} before that.`;
   const termsLine = `While your account is active, autopay stays on; the source, minimum, top-up amount and backup card can be changed at any time in Wallet. The ${fee} card fee is the rate you agree to today for automatic top-ups and covers; if Card Shellz ever raises it, we ask you to confirm before charging those at the higher rate. Money you add yourself shows the current fee on Stripe's page before you pay.`;
 
   if (terms.sourceRail === "stripe_card") {
     const fill = firstFillFeeCents(topUp.cents, terms.cardFundingFeeBps);
     return [
       `Charge ${terms.sourceLabel}, plus the ${fee} fee, whenever an order takes your balance below your minimum of ${minimum}, and at the daily check: your top-up amount of ${topUpText}, or more if that alone would not bring you back to ${minimum} (${formatWholeDollars(topUp.cents)} + ${formatWholeDollars(fill)} = ${formatWholeDollars(topUp.cents + fill)} for a routine top-up).`,
-      `${terms.sourceLabel} is also your backup card: while your account is active, an order needing more than your available balance is charged the shortfall plus ${fee} (up to ${bound}) and goes out at once; the next routine top-up then brings the balance back to ${minimum} (also plus ${fee}). Example: ${exampleText}. ${belowZero}`,
+      `${terms.sourceLabel} is also your backup card: while your account is active, an order needing more than your available balance is charged the shortfall plus ${fee}, whatever its size (up to ${ceiling}), and goes out at once; the next routine top-up then brings the balance back to ${minimum} (also plus ${fee}). Example: ${exampleText}. ${belowZero}`,
       boundLine,
       `${describeActivationTopUp(terms)} Once it runs, it charges ${terms.sourceLabel} your top-up amount (${formatWholeDollars(topUp.cents)}), or more if that alone would not reach ${minimum} — unless you add money first.`,
       `Pause selling if a charge is declined, or a bank transfer you started is returned before it lands, and resume on its own once your balance is back to ${minimum}. We do not retry the failed charge ourselves; if a top-up fails for any other reason, we email you.`,
@@ -998,7 +1002,7 @@ export function describeMandate(terms: WalletTerms): string[] {
   }
   return [
     `Debit ${terms.sourceLabel} whenever an order takes your balance below your minimum of ${minimum}, and at the daily check: your top-up amount of ${topUpText}, or more if that alone would not bring you back to ${minimum}. No fee. Money already on its way counts, so the same gap is not debited twice.`,
-    `While your account is active, charge ${terms.backupLabel} only when an order needs more than your available balance: the shortfall plus the ${fee} card fee, up to ${bound}, and accept the order at once — even while a bank top-up is still landing or your autopay source cannot be charged. Example: ${exampleText}. Money still on its way counts only through the pending-transfer advance, when your account qualifies for it. ${belowZero}`,
+    `While your account is active, charge ${terms.backupLabel} only when an order needs more than your available balance: the shortfall plus the ${fee} card fee, whatever its size (up to ${ceiling}), and accept the order at once — even while a bank top-up is still landing or your autopay source cannot be charged. Example: ${exampleText}. Money still on its way counts only through the pending-transfer advance, when your account qualifies for it. ${belowZero}`,
     boundLine,
     `${describeActivationTopUp(terms)} Once it runs, it debits ${terms.sourceLabel} for your top-up amount (${formatWholeDollars(topUp.cents)}), or more if that alone would not reach ${minimum}, and that transfer takes ${BANK_SETTLEMENT_PHRASE} to land; a bank transfer you start now helps once it lands.`,
     `Pause selling if a top-up is declined or a bank transfer is returned before it lands, and resume on its own once settled money brings your balance back to ${minimum}. We do not retry the failed charge ourselves; if a top-up fails for any other reason, we email you.`,
@@ -1165,6 +1169,75 @@ export function depositFundingMethodFor(wallet: DropshipWalletView, rail: Wallet
   const configuredId = wallet.autoReload?.enabled ? wallet.autoReload.fundingMethodId : null;
   const active = activeMethodsOfRail(wallet, rail);
   return active.find((method) => method.fundingMethodId === configuredId) ?? active[0] ?? null;
+}
+
+/** What the add-money step tells the vendor about the way to pay they picked (funding design phase 7). */
+export interface DepositRailNotesInput {
+  rail: WalletSourceRail;
+  cardFundingFeeBps: number;
+  /** The card a short order is charged to while a bank transfer is still landing. */
+  backupLabel: string;
+  /** The bank account a bank deposit would come from, when one is on file. */
+  bankFundingMethodId: number | null;
+  /** The server's pending-transfer advance position; null when the server does not serve one. */
+  advance: WalletAdvance | null;
+}
+
+/**
+ * Short bullets, one per fact the vendor needs before paying this way: the
+ * fee, when the money can pay orders, and — for a bank transfer — whether
+ * money still on its way can pay for orders (the pending-transfer advance)
+ * and what happens to an order it cannot pay for. Nothing here is about
+ * autopay: the autopay steps before this one cover that.
+ */
+export function describeDepositRail(input: DepositRailNotesInput): string[] {
+  const fee = formatFeeRate(input.cardFundingFeeBps);
+  if (input.rail === "stripe_card") {
+    return [
+      input.cardFundingFeeBps > 0 ? `Card fee: ${fee} on top of the amount.` : "No fee.",
+      "Available at once.",
+    ];
+  }
+  const feeClause = input.cardFundingFeeBps > 0 ? ` plus ${fee}` : "";
+  return [
+    "No fee.",
+    `Takes ${BANK_SETTLEMENT_PHRASE} to land, and counts toward your minimum as soon as it shows as on the way.`,
+    describeDepositCredit(input),
+    `While it is on the way, an order it cannot pay for is charged to ${input.backupLabel} for the shortfall${feeClause}.`,
+  ];
+}
+
+/**
+ * The credit sentence for a bank deposit, from the three facts the server
+ * judges per bank account (company holder, balance read when linked, one
+ * earlier transfer landed) — never from the eligibility flag, which also
+ * turns false when nothing is on the way right now.
+ */
+function describeDepositCredit(input: DepositRailNotesInput): string {
+  const advance = input.advance;
+  if (advance === null) {
+    return "A business bank account can qualify to pay for orders while a transfer is still on the way; a personal account pays only once the money lands.";
+  }
+  if (advance.policy.capCents === 0) {
+    return "Money on its way cannot pay for orders until it lands.";
+  }
+  const terms = `for a ${formatFeeRate(advance.policy.feeBps)} fee on the amount used, up to ${formatWholeDollars(advance.policy.capCents)} at a time`;
+  const source = input.bankFundingMethodId === null
+    ? null
+    : advance.sources.find((candidate) => candidate.fundingMethodId === input.bankFundingMethodId) ?? null;
+  if (source?.accountHolderType === "individual") {
+    return "This is a personal account: money on its way from it pays for orders only once it lands.";
+  }
+  if (source?.accountHolderType === "company") {
+    if (!source.balanceVerified) {
+      return "This is a business account, but we could not read its balance when it was linked, so money on its way from it pays for orders only once it lands.";
+    }
+    if (!source.priorPullSettled) {
+      return `This is a business account: once one transfer from it has landed, later transfers can pay for orders while still on the way, ${terms}.`;
+    }
+    return `This business account qualifies: money still on its way from it can pay for orders, ${terms}.`;
+  }
+  return `A business account can qualify to pay for orders while a transfer is still on the way — a balance we could read when it was linked, and one earlier transfer from it landed — ${terms}. A personal account pays only once the money lands.`;
 }
 
 /** Copy for the Limits editor's hold-time line: the hold is CardShellz's setting, shown so the vendor knows the deadline their held orders get. */
