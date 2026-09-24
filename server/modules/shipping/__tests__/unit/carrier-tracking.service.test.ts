@@ -1,9 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { normalizeShipStationTrackingWebhook } from "../../carrier-tracking.domain";
+import {
+  normalizeShipStationTrackingWebhook,
+  type NormalizedCarrierTrackingEvent,
+} from "../../carrier-tracking.domain";
 import type {
   CarrierTrackingRepository,
   CarrierTrackingTransaction,
+  StoredCarrierTrackingReconciliationEvent,
 } from "../../carrier-tracking.repository";
 import { CarrierDispatchAuthorityError } from "../../carrier-dispatch-authority";
 import { CarrierTrackingService, type CarrierTrackingLogger } from "../../carrier-tracking.service";
@@ -48,6 +52,13 @@ function payload() {
 
 function logger(): CarrierTrackingLogger {
   return { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+}
+
+function storedReconciliationEvent(
+  event: NormalizedCarrierTrackingEvent,
+): StoredCarrierTrackingReconciliationEvent {
+  const { sanitizedPayload: _sanitizedPayload, ...normalizedColumns } = event;
+  return { id: 101, ...normalizedColumns };
 }
 
 function repositoryWithCandidates(candidates: Awaited<ReturnType<CarrierTrackingTransaction["findMatchCandidates"]>>) {
@@ -545,7 +556,7 @@ describe("CarrierTrackingService", () => {
   });
 
   it("hydrates a provider tracking identity and creates dispatch authority from confirmed carrier evidence", async () => {
-    const { repository, enqueueDispatchCommand } = repositoryWithCandidates([{
+    const { repository, insertOrGetEvent, enqueueDispatchCommand } = repositoryWithCandidates([{
       shippingProviderLabelId: 10,
       providerLabelId: "442000001",
       labelDirection: "outbound",
@@ -587,6 +598,7 @@ describe("CarrierTrackingService", () => {
       dispatchCommandInserted: true,
       webhookReceiptId: null,
     });
+    expect(insertOrGetEvent).toHaveBeenCalledOnce();
     expect(enqueueDispatchCommand).toHaveBeenCalledWith(
       101,
       10,
@@ -707,7 +719,7 @@ describe("CarrierTrackingService", () => {
   });
 
   it("matches carrier evidence to one existing provider label during reconciliation", async () => {
-    const { repository, enqueueDispatchCommand } = repositoryWithCandidates([{
+    const { repository, insertOrGetEvent, enqueueDispatchCommand } = repositoryWithCandidates([{
       shippingProviderLabelId: 10,
       providerLabelId: "442000001",
       labelDirection: "outbound",
@@ -724,7 +736,7 @@ describe("CarrierTrackingService", () => {
     });
 
     vi.mocked(repository.listEventsPendingReconciliation).mockResolvedValue([
-      normalizeShipStationTrackingWebhook(payload(), now),
+      storedReconciliationEvent(normalizeShipStationTrackingWebhook(payload(), now)),
     ]);
 
     await expect(service.reconcileUnresolved(25)).resolves.toMatchObject({
@@ -733,6 +745,7 @@ describe("CarrierTrackingService", () => {
       unresolved: 0,
     });
     expect(repository.listEventsPendingReconciliation).toHaveBeenCalledWith(25, now);
+    expect(insertOrGetEvent).not.toHaveBeenCalled();
     expect(enqueueDispatchCommand).toHaveBeenCalledWith(
       101,
       10,
@@ -760,7 +773,7 @@ describe("CarrierTrackingService", () => {
     });
 
     vi.mocked(repository.listEventsPendingReconciliation).mockResolvedValue([
-      normalizeShipStationTrackingWebhook(payload(), now),
+      storedReconciliationEvent(normalizeShipStationTrackingWebhook(payload(), now)),
     ]);
 
     await expect(service.reconcileUnresolved(25)).resolves.toMatchObject({
@@ -796,7 +809,7 @@ describe("CarrierTrackingService", () => {
       logger: logger(),
     });
     vi.mocked(repository.listEventsPendingReconciliation).mockResolvedValue([
-      notDispatched,
+      storedReconciliationEvent(notDispatched),
     ]);
 
     await service.reconcileUnresolved(25);
@@ -1074,7 +1087,7 @@ describe("CarrierTrackingService", () => {
       providerLabelId: "442000001",
     }]);
     vi.mocked(repository.listEventsPendingReconciliation).mockResolvedValue([
-      normalizeShipStationTrackingWebhook(payload(), now),
+      storedReconciliationEvent(normalizeShipStationTrackingWebhook(payload(), now)),
     ]);
     const service = new CarrierTrackingService({
       repository,
