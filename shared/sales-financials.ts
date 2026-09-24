@@ -81,6 +81,7 @@ export function matchesFinancialHeaders(
     subtotal_cents: number;
     shipping_cents: number;
     tax_cents: number;
+    discount_cents: number;
   },
 ): boolean {
   return (
@@ -90,6 +91,7 @@ export function matchesFinancialHeaders(
     f.orderTotalCents === order.total_cents &&
     f.netMerchandiseCents === order.subtotal_cents &&
     f.grossShippingCents === order.shipping_cents &&
-    f.taxAddedCents + f.taxIncludedCents === order.tax_cents
+    f.taxAddedCents + f.taxIncludedCents === order.tax_cents &&
+    f.merchandiseDiscountCents + f.shippingDiscountCents === order.discount_cents
   );
 }
