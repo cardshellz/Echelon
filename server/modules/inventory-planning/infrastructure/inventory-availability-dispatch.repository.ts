@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { assertNoOpenPickCorrectionPg } from "../../wms/pick-correction.repository";
 import type { Pool, PoolClient } from "pg";
 import { canonicalJson } from "@shared/utils/canonical-json";
 import {
@@ -99,6 +100,7 @@ export class PostgresCanonicalClaimDispatchRepository implements CanonicalClaimD
         }
         await requireCanonicalAuthority(client);
         const source = await this.sourceOwner.lockDispatchSource({ client, command });
+        await assertNoOpenPickCorrectionPg(client, command.orderItemId);
         const evidence = await loadEvidence(client, command, source, this.inventoryWriter);
         const plan = planCanonicalClaimDispatch(command, evidence);
         const mutation = await this.inventoryWriter.dispatchPickedResources({ client, plan, occurredAt });

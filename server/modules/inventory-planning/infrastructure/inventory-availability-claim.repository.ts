@@ -1,4 +1,5 @@
 import { lockInventoryCostGraph } from "../../inventory/infrastructure/cost-evidence.repository";
+import { lockClaimPickCorrection } from "../../wms/pick-correction.repository";
 import { costEvidenceTransactionFromPg } from "../../inventory/infrastructure/cost-evidence-pg";
 import { createHash } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
@@ -5083,7 +5084,8 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
         }
         await lockGraphProducts(client, graphProductIds);
         const order = await loadOrder(client, preliminaryClaim.orderId, true);
-        if (["cancelled", "shipped"].includes(order.warehouseStatus) || order.onHold) {
+        if (order.warehouseStatus === "cancelled" || order.onHold
+          || (order.warehouseStatus === "shipped" && !command.wmsProgress?.pickCorrectionId)) {
           throw new InventoryAvailabilityClaimRepositoryError(
             "CLAIM_ORDER_NOT_PICKABLE",
             "A cancelled, shipped, or held order cannot consume a canonical claim pick.",
@@ -5094,6 +5096,10 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
               onHold: order.onHold,
             },
           );
+        }
+        if (command.wmsProgress?.pickCorrectionId) {
+          await lockClaimPickCorrection(client, command.wmsProgress.pickCorrectionId, command.orderItemId,
+            command.wmsProgress.targetPickedQuantity, command.actor, command.wmsProgress.pickCorrectionRevision);
         }
         const claim = await loadClaimById(client, claimId, true);
         if (!claim || claim.status !== "active" || claim.orderId !== preliminaryClaim.orderId) {
@@ -5108,7 +5114,10 @@ export class PostgresInventoryAvailabilityClaimRepository implements InventoryAv
         if (command.wmsProgress) {
           const expectedPicked = BigInt(command.wmsProgress.expectedPickedQuantity);
           const expectedFulfilled = BigInt(command.wmsProgress.expectedFulfilledQuantity ?? 0);
-          const expectedClaimPicked = expectedPicked - expectedFulfilled;
+          // Provider-declared packed quantities can precede the missing pick.
+          // Only actual claim consumption, not that declaration, removes picked custody.
+          const expectedClaimPicked = expectedPicked - (command.wmsProgress.pickCorrectionId
+            ? line.consumedTargetQty : expectedFulfilled);
           const resourcePicked = line.resources.reduce((sum, resource) => sum + resource.pickedQty, BigInt(0));
           const lotsMatchResources = line.resources.every((resource) =>
             resource.lots.reduce((sum, lot) => sum + lot.pickedQty, BigInt(0)) === resource.pickedQty);

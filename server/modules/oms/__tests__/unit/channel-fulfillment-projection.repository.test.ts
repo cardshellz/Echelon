@@ -36,9 +36,8 @@ describe("canonical channel fulfillment projector", () => {
     expect(statements[1]).toContain("FOR UPDATE OF orders");
     expect(statements[2]).toContain("FROM wms.effective_physical_shipment_items");
     expect(statements[2]).toContain("package.status IN ('shipped', 'returned')");
-    expect(statements[2]).toMatch(
-      /GREATEST\(\s+COALESCE\(order_item\.picked_quantity, 0\),\s+COALESCE\(shipped\.shipped_quantity, 0\)\s+\) >= order_item\.quantity/,
-    );
+    expect(statements[2]).toContain("COALESCE(order_item.picked_quantity, 0) >= order_item.quantity");
+    expect(statements[2]).not.toContain("picked_quantity =");
     expect(statements[3]).toContain("authority_fulfillable_quantity");
     expect(statements[4]).toContain("oms_order.status IN ('cancelled', 'refunded')");
     expect(statements[4]).toContain("oms_order.financial_status IN ('refunded', 'voided')");

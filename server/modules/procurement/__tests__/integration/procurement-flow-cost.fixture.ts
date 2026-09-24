@@ -26,7 +26,7 @@ const TABLES = [
   schema.landedCostSnapshots, schema.landedCostAdjustments, schema.inboundShipmentStatusHistory,
   schema.warehouses, schema.warehouseLocations, schema.warehouseSettings, schema.productLocations, schema.echelonSettings,
   schema.inventoryLevels, schema.inventoryLots, schema.inventoryTransactions,
-  schema.orders, schema.orderItems, schema.orderItemCosts,
+  schema.orders, schema.orderItems, schema.orderItemCosts, schema.physicalShipments,
 ];
 
 /**
@@ -122,7 +122,8 @@ export async function createFlowCostHarness(url: string) {
 
     const rfqHelper = await import("./rfq-controlled-acceptance-helper");
     for (const migration of [...rfqHelper.RFQ_CONTROLLED_MIGRATIONS,
-      "221_receiving_unit_snapshots.sql", "222_procurement_cost_evidence.sql", "231_receipt_cost_recovery.sql"]) {
+      "221_receiving_unit_snapshots.sql", "222_procurement_cost_evidence.sql", "231_receipt_cost_recovery.sql",
+      "0703_corrective_picking.sql"]) {
       await pool.query(readFileSync(resolve(process.cwd(), "migrations", migration), "utf8"));
       if (migration === "136_financial_command_results.sql") {
         ownedPublicTables.push("financial_command_results");

@@ -22,19 +22,26 @@ const canonicalWmsPickProgressSchema = z.object({
    * commands omit this field and therefore retain the pre-cutover zero floor.
    */
   expectedFulfilledQuantity: nonnegativePostgresInteger.optional(),
+  /** Explicit durable missing-pick work; validated under the order lock by the owner. */
+  pickCorrectionId: positiveInteger.optional(),
+  pickCorrectionRevision: positiveInteger.optional(),
   targetStatus: z.enum(["pending", "in_progress", "completed", "short"]),
   targetPickedQuantity: nonnegativePostgresInteger,
   targetShortReason: nonblank(1000).nullable().optional(),
 }).strict().superRefine((progress, context) => {
+  if ((progress.pickCorrectionId === undefined) !== (progress.pickCorrectionRevision === undefined)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["pickCorrectionRevision"],
+      message: "Corrective picks require both the correction ID and its authorized revision" });
+  }
   const fulfilledQuantity = progress.expectedFulfilledQuantity ?? 0;
-  if (fulfilledQuantity > progress.expectedPickedQuantity) {
+  if (fulfilledQuantity > progress.expectedPickedQuantity && !progress.pickCorrectionId) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
       path: ["expectedFulfilledQuantity"],
       message: "expectedFulfilledQuantity cannot exceed expectedPickedQuantity",
     });
   }
-  if (fulfilledQuantity > progress.targetPickedQuantity) {
+  if (fulfilledQuantity > progress.targetPickedQuantity && !progress.pickCorrectionId) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
       path: ["targetPickedQuantity"],

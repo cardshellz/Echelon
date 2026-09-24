@@ -1462,6 +1462,12 @@
   "wms.physical_shipments": [
     "modules/oms"
   ],
+  "wms.pick_correction_events": [
+    "modules/wms"
+  ],
+  "wms.pick_corrections": [
+    "modules/wms"
+  ],
   "wms.picking_logs": [
     "modules/catalog",
     "modules/orders"

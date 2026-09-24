@@ -1,4 +1,5 @@
 import { dispatchOwnerFixtureSql, dispatchOwnerSeedSql } from "../../../inventory/__tests__/fixtures/canonical-claim-dispatch";
+import { readFileSync } from "node:fs";
 
 /**
  * Connected real-query prerequisites for WMS source, claim repository and stock
@@ -27,6 +28,7 @@ ALTER TABLE wms.outbound_shipment_items ADD COLUMN order_item_id integer REFEREN
   ADD COLUMN replacement_for_order_item_id integer, ADD COLUMN correction_for_shipment_item_id integer,
   ADD COLUMN provider_membership_state varchar(30) NOT NULL DEFAULT 'authoritative';
 CREATE TABLE wms.physical_shipments(id bigint PRIMARY KEY, status varchar(30) NOT NULL);
+${readFileSync("migrations/0703_corrective_picking.sql", "utf8")}
 CREATE TABLE wms.physical_shipment_items(
   id bigint PRIMARY KEY, physical_shipment_id bigint NOT NULL REFERENCES wms.physical_shipments,
   legacy_wms_shipment_item_id integer REFERENCES wms.outbound_shipment_items,
@@ -99,6 +101,7 @@ CREATE TRIGGER command_immutable BEFORE UPDATE OR DELETE ON inventory.availabili
 `;
 
 export const dispatchRuntimeTables = [
+  "wms.pick_correction_events", "wms.pick_corrections",
   "inventory.availability_claim_dispatch_movements", "inventory.availability_claim_dispatch_receipts",
   "inventory.availability_claim_events", "inventory.availability_claim_commands", "inventory.availability_claim_pick_movements",
   "inventory.availability_claim_lot_allocations", "inventory.availability_claim_resources", "inventory.availability_claim_lines",

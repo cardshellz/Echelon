@@ -109,6 +109,7 @@ export async function runMigrations(): Promise<void> {
     "migrations/0692_shopify_label_lifecycle.sql",
     "migrations/0693_shipstation_label_reconciliation.sql",
     "migrations/0698_shipping_repack_recovery.sql",
+    "migrations/0703_corrective_picking.sql",
   ].map((relativePath) => readFileSync(resolve(process.cwd(), relativePath), "utf8"));
   const client = await getTestPool().connect();
   let discardError: Error | undefined;

@@ -13,6 +13,8 @@ import { CustomerReturnLiveError } from "./customer-return-live-error";
 import { readCustomerReturnLiveClaims } from "./customer-return-live-claims";
 import { projectCustomerReturnLiveDelivery } from "./customer-return-live-delivery";
 import { customerReturnProviderGid as gid } from "./customer-return-live-identity";
+import { customerReturnPublicLineId, readCustomerReturnOriginalBoxes, type ReturnBoxReporter } from "./customer-return-live-packaging";
+import type { CustomerReturnPackageDimensionsReader } from "./customer-return-package-dimensions.ports";
 import { CustomerReturnLocalInspectionError, customerReturnInspectionShopSchema, customerReturnLocalInspectionSnapshotSchema,
   type CustomerReturnLocalInspectionReader, type CustomerReturnLocalInspectionSnapshot } from "./customer-return-local-inspection.ports";
 import { CustomerReturnShopifySnapshotError, customerReturnShopifySnapshotSchema,
@@ -23,6 +25,8 @@ const POLICY_VERSION = 1;
 export interface CustomerReturnLiveDependencies {
   local: CustomerReturnLocalInspectionReader;
   shopify: CustomerReturnShopifySnapshotReader;
+  dimensions: CustomerReturnPackageDimensionsReader;
+  reportBoxDiagnostic?: ReturnBoxReporter;
   now: () => Date;
 }
 
@@ -47,7 +51,7 @@ export class CustomerReturnLiveService {
       const input = parseInput(customerReturnLiveReviewInputSchema, raw);
       const order = await this.load({ channelId: input.channelId, orderReference: input.orderReference });
       if (order.sourceRevision !== input.sourceRevision) throw changed();
-      const plan = validateCustomerReturnBoxPlan(order.lines, { selections: input.selections, parcels: input.parcels });
+      const plan = validateCustomerReturnBoxPlan(order.lines, { selections: input.selections, parcels: input.parcels }, order.boxOptions);
       return customerReturnLiveReviewSchema.parse({ mode: "admin_live", sourceRevision: order.sourceRevision,
         effects: "none", orderReference: order.orderReference, ...plan, refundMethod: "manual_shopify" });
     });
@@ -76,6 +80,8 @@ export class CustomerReturnLiveService {
     const provider = customerReturnShopifySnapshotSchema.parse(await this.dependencies.shopify.read({
       shop, externalOrderId: first.order.externalOrderId,
     }));
+    verifyIdentity(first, provider, reference);
+    const boxOptions = await readCustomerReturnOriginalBoxes(first, this.dependencies.dimensions, this.dependencies.reportBoxDiagnostic);
     const finalRaw = await this.dependencies.local.read(lookup);
     if (finalRaw === null) throw changed();
     const local = customerReturnLocalInspectionSnapshotSchema.parse(finalRaw);
@@ -111,8 +117,10 @@ export class CustomerReturnLiveService {
       const blockedDelivery = line.allocations.some(allocation => allocation.sourceStatus === "active" && delivery.get(allocation.allocationId)?.blocked);
       const unexplainedQuantity = display.quantity - Math.min(display.currentQuantity, display.refundableQuantity) > known.reconciledRefundQuantity;
       const verificationNeeded = known.unresolved || unexplainedQuantity || known.unallocatedRefund;
-      const publicLineId = createHash("sha256").update(JSON.stringify([shop.channelId, provider.order.id, line.lineId])).digest("hex");
-      return { id: `line-${publicLineId}`, title: display.title, variant: display.variantTitle, sku: display.sku,
+      const unitWeightGrams = local.lines.find(candidate => candidate.externalLineItemId !== null
+        && gid("LineItem", candidate.externalLineItemId) === line.lineId)!.unitWeightGrams;
+      return { id: customerReturnPublicLineId(shop.channelId, provider.order.id, line.lineId),
+        title: display.title, variant: display.variantTitle, sku: display.sku, unitWeightGrams,
         purchasedQuantity: line.purchasedQuantity, deliveredQuantity: line.deliveredQuantity,
         alreadyReturningQuantity: known.returningQuantity,
         eligibleQuantity: cancelled || verificationNeeded ? 0 : line.eligibleQuantity,
@@ -123,10 +131,13 @@ export class CustomerReturnLiveService {
     });
     const message = cancelled ? "This order has been canceled. Contact us for help with a return."
       : provider.order.destinationCountryCode !== "US" ? "This return portal is available for U.S. orders only." : null;
+    // Optional provider measurements do not invalidate a custom box when a
+    // dimension service recovers. Claimed original boxes are checked against
+    // freshly read IDs and exact dimensions in validateCustomerReturnBoxPlan.
     const sourceRevision = createHash("sha256").update(canonical({ policy, local, provider, lines, message })).digest("hex");
     return customerReturnLiveOrderSchema.parse({ mode: "admin_live", sourceRevision, orderReference: reference,
       purchasedAt: provider.order.createdAt, evaluatedAt: eligibility.evaluatedAt,
-      returnWindowEndsAt: eligibility.returnWindowEndsAt, message, lines });
+      returnWindowEndsAt: eligibility.returnWindowEndsAt, message, lines, boxOptions });
   }
 
   private async boundary<T>(work: () => Promise<T>): Promise<T> {
@@ -136,7 +147,8 @@ export class CustomerReturnLiveService {
         throw new CustomerReturnLiveError("RETURN_LIVE_INPUT_INVALID", "Enter a valid order reference.", 400);
       }
       if (error instanceof CustomerReturnBoxPlanError) {
-        throw new CustomerReturnLiveError(`RETURN_LIVE_${error.kind.toUpperCase()}_INVALID`, error.message, error.kind === "quantity" ? 409 : 400);
+        throw new CustomerReturnLiveError(`RETURN_LIVE_${error.kind.toUpperCase()}_INVALID`, error.message,
+          error.kind === "quantity" || error.kind === "weight" ? 409 : 400);
       }
       if (error instanceof CustomerReturnShopifySnapshotError) {
         throw new CustomerReturnLiveError(error.code, "The Shopify order could not be verified. Please try again.", error.code === "RETURN_SHOPIFY_INPUT_INVALID" ? 503 : error.status);

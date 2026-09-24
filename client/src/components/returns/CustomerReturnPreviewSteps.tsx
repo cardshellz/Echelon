@@ -13,6 +13,14 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { CustomerReturnParcelDetails } from "./CustomerReturnParcelDetails";
+import {
+  customPreviewParcelSize,
+  formatPreviewDimensions,
+  formatPreviewProductWeight,
+  previewParcelProductWeight,
+  reconcilePreviewParcelSize,
+} from "@/lib/customer-return-parcels";
 import {
   MAX_RETURN_FLOW_PARCELS,
   type CustomerReturnFlowOrder,
@@ -249,8 +257,9 @@ export function PreviewItems({
                     className="h-11 w-full min-w-0 rounded-md border border-input bg-background px-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:h-9"
                     value={draft.reasonCode ?? ""}
                     title={
-                      reasons.find((reason) => reason.value === draft.reasonCode)
-                        ?.label ?? "Reason (optional)"
+                      reasons.find(
+                        (reason) => reason.value === draft.reasonCode,
+                      )?.label ?? "Reason (optional)"
                     }
                     onChange={(event) =>
                       onChange(
@@ -313,12 +322,19 @@ export function PreviewPacking({
   onContinue: () => void;
   onBack: () => void;
 }) {
+  const weightNeedsVerification = parcels.some(
+    (parcel) =>
+      previewParcelProductWeight(order, parcel).status === "unverified",
+  );
   function addBox() {
     const key = Math.max(0, ...parcels.map((parcel) => parcel.key)) + 1;
     onChange([
       ...parcels,
       {
         key,
+        size: order.boxOptions.length
+          ? { kind: "unselected" }
+          : customPreviewParcelSize(),
         items: selections.map((item) => ({
           lineId: item.lineId,
           quantity: "0",
@@ -368,6 +384,19 @@ export function PreviewPacking({
                 </Button>
               )}
             </div>
+            <CustomerReturnParcelDetails
+              order={order}
+              parcel={parcel}
+              boxNumber={index + 1}
+              busy={busy}
+              onChange={(next) =>
+                onChange(
+                  parcels.map((candidate) =>
+                    candidate.key === parcel.key ? next : candidate,
+                  ),
+                )
+              }
+            />
             <div className="space-y-4">
               {selections.map((selection, itemIndex) => {
                 const line = order.lines.find(
@@ -407,7 +436,7 @@ export function PreviewPacking({
                         onChange(
                           parcels.map((candidate) =>
                             candidate.key === parcel.key
-                              ? {
+                              ? reconcilePreviewParcelSize(order, {
                                   ...candidate,
                                   items: candidate.items.map((item) =>
                                     item.lineId === line.id
@@ -417,7 +446,7 @@ export function PreviewPacking({
                                         }
                                       : item,
                                   ),
-                                }
+                                })
                               : candidate,
                           ),
                         )
@@ -499,7 +528,11 @@ export function PreviewPacking({
           <ArrowLeft className="mr-2 h-4 w-4" />
           Back to items
         </Button>
-        <Button className="min-h-11" onClick={onContinue} disabled={busy}>
+        <Button
+          className="min-h-11"
+          onClick={onContinue}
+          disabled={busy || weightNeedsVerification}
+        >
           {busy ? (
             <>
               <Loader2
@@ -550,6 +583,10 @@ export function PreviewReview({
               <Package aria-hidden="true" className="h-5 w-5 text-primary" />
               Box {parcel.number}
             </h3>
+            <p className="mb-4 text-sm text-muted-foreground">
+              {formatPreviewDimensions(parcel.dimensions)} · Product weight:{" "}
+              {formatPreviewProductWeight(parcel.weightGrams)}
+            </p>
             <ul className="space-y-3">
               {parcel.items.map((item) => (
                 <li

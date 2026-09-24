@@ -9,8 +9,8 @@ export function liveLocalFixture(): CustomerReturnLocalInspectionSnapshot {
   return { observedAt: LIVE_NOW, shop: { ...liveShop },
     order: { omsOrderId: 100, channelId: 36, externalOrderId: "1001", externalOrderNumber: "#0012-A",
       purchasedAt: LIVE_PURCHASED, shipToCountry: "US", cancelledAt: null },
-    lines: [{ omsOrderLineId: 101, externalLineItemId: "501", title: "First", variantTitle: null, sku: "SAME", quantity: 3, requiresShipping: true },
-      { omsOrderLineId: 102, externalLineItemId: "502", title: "Second", variantTitle: null, sku: "SAME", quantity: 1, requiresShipping: true }],
+    lines: [{ omsOrderLineId: 101, externalLineItemId: "501", title: "First", variantTitle: null, sku: "SAME", quantity: 3, requiresShipping: true, unitWeightGrams: 12.34 },
+      { omsOrderLineId: 102, externalLineItemId: "502", title: "Second", variantTitle: null, sku: "SAME", quantity: 1, requiresShipping: true, unitWeightGrams: 20.01 }],
     wmsItems: [], rootClaims: [], legacyClaims: [], unallocatedReturns: [], inventoryReturnEvidence: [],
     fulfillmentBindings: [], packageItems: [], packageLabels: [], carrierEvents: [], issues: [],
   };
@@ -37,4 +37,20 @@ export function liveNativeReturn(quantity = 1): CustomerReturnShopifySnapshot["r
   return { id: liveGid("Return", 801), status: "OPEN", totalQuantity: quantity,
     lines: [{ id: liveGid("ReturnLineItem", 901), fulfillmentLineItemId: liveGid("FulfillmentLineItem", 701),
       lineItemId: liveGid("LineItem", 501), quantity, processedQuantity: 0, refundedQuantity: 0 }] };
+}
+
+/** One explicit whole physical package, containing two separate same-SKU lines. */
+export function addLiveOriginalBox(local: CustomerReturnLocalInspectionSnapshot): void {
+  local.wmsItems = local.lines.map((line, index) => ({ wmsOrderId: 200, wmsOrderItemId: 301 + index,
+    omsOrderLineId: line.omsOrderLineId, channelId: 36, source: "oms", omsOrderReference: "100", legacyOrderReference: null,
+    externalOrderId: "1001", externalLineItemId: line.externalLineItemId, quantity: line.quantity,
+    fulfilledQuantity: line.quantity, warehouseStatus: "shipped" }));
+  local.packageItems = local.lines.map((line, index) => ({ physicalShipmentId: 401, physicalShipmentItemId: 501 + index,
+    wmsOrderItemId: 301 + index, omsOrderLineId: line.omsOrderLineId, legacyShipmentItemId: null, legacyShipmentId: null,
+    purpose: "customer_fulfillment", replacementForOrderItemId: null, correctionForPhysicalShipmentItemId: null,
+    originalQuantity: index === 0 ? 2 : 1, effectiveQuantity: index === 0 ? 2 : 1, status: "shipped", provider: "shipstation",
+    providerPhysicalShipmentId: "601", trackingNumber: "TRACK601", carrier: "UPS" }));
+  local.packageLabels = [{ linkId: 701, labelId: 801, physicalShipmentId: 401, provider: "shipstation",
+    providerLabelId: "label601", trackingNumber: "TRACK601", normalizedTrackingNumber: "TRACK601", carrier: "UPS",
+    status: "active", direction: "outbound", voidedAt: null }];
 }
