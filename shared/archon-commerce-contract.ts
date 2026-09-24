@@ -1,3 +1,4 @@
+import { matchesFinancialHeaders } from "./sales-financials";
 import { z } from "zod";
 import { shopifyDiscountEvidenceSchema } from "./shopify-discount-evidence";
 export const commerceOriginSchema = z
@@ -102,7 +103,15 @@ export const commerceSnapshotSchema = z
         tracking_number: optionalText,
         tracking_carrier: optionalText,
       })
-      .passthrough(),
+      .passthrough()
+      .superRefine((order, ctx) => {
+        const f = order.discount_evidence?.financials;
+        if (f && !matchesFinancialHeaders(f, order))
+          ctx.addIssue({
+            code: "custom",
+            message: "Financial evidence disagrees with order headers",
+          });
+      }),
   })
   .strict();
 export type CommerceSnapshot = z.infer<typeof commerceSnapshotSchema>;
