@@ -23,6 +23,8 @@ import {
   chargeBoundCents,
   firstFillFeeCents,
   formatDurationMinutes,
+  formatPoints,
+  formatSignedCents,
   formatWholeDollars,
   shortfallExample,
   type WalletSourceRail,
@@ -383,8 +385,11 @@ export const LEDGER_REASON_LABELS: Readonly<Record<WalletLedgerReason, string>> 
 });
 
 // ---------------------------------------------------------------------------
-// Rewards (funding design phase 7): a spend-only balance earned on bank and
-// USDC transfers when they land, at the per-rail rates the server serves.
+// Rewards (funding design phase 7): points earned on bank and USDC transfers
+// when they land, at the per-rail rates the server serves, 100 points per
+// dollar (one point per cent, so the stored cents are the points). They are
+// used only on .ops orders, and only once the vendor chooses to auto-apply
+// them; until then they are saved. Auto-apply is never a default.
 // ---------------------------------------------------------------------------
 
 /** The ledger kinds that move the rewards balance rather than the cash balance. */
@@ -426,18 +431,19 @@ function rewardsRateForRail(rail: WalletRewardsRail, rates: WalletRewardsRates):
 export function describeRewardsEarning(rail: WalletRewardsRail, rates: WalletRewardsRates): string | null {
   if (!rewardsOffered(rates)) return null;
   const bps = rewardsRateForRail(rail, rates);
-  if (bps === 0) return "Earns no rewards.";
+  if (bps === 0) return "Earns no rewards points.";
   const rate = formatFeeRate(bps);
-  if (rail === "stripe_card") return `Earns ${rate} in rewards, available at once.`;
-  if (rail === "usdc_base") return `Earns ${rate} in rewards once the transfer settles.`;
-  return `Earns ${rate} in rewards once it lands.`;
+  if (rail === "stripe_card") return `Earns ${rate} in rewards points, at once.`;
+  if (rail === "usdc_base") return `Earns ${rate} in rewards points once the transfer settles.`;
+  return `Earns ${rate} in rewards points once it lands.`;
 }
 
 /**
- * The rewards rule for the rules page: the per-rail rates, how rewards are
- * spent, and what they can never do. Empty when the program is off. The
- * rates are named per rail whenever they differ, and as one rate when bank
- * and USDC match (the launch setting: "bank and USDC earn 1%").
+ * The rewards rule for the rules page: the per-rail rates, what a point is
+ * worth, how points are used, and what they can never do. Empty when the
+ * program is off. The rates are named per rail whenever they differ, and as
+ * one rate when bank and USDC match (the launch setting: "bank and USDC earn
+ * 1%").
  */
 export function describeRewardsRule(rates: WalletRewardsRates, usdcOffered: boolean): string {
   if (!rewardsOffered(rates)) return "";
@@ -446,28 +452,49 @@ export function describeRewardsRule(rates: WalletRewardsRates, usdcOffered: bool
   const card = formatFeeRate(rates.rewardsRateCardBps);
   // USDC is named only where the vendor can pay with it, like the rest of the rules page.
   const earning = !usdcOffered
-    ? `A bank transfer earns ${bank} in rewards when it lands`
+    ? `A bank transfer earns ${bank} in rewards points when it lands`
     : rates.rewardsRateBankBps === rates.rewardsRateUsdcBps
-      ? `Bank and USDC transfers earn ${bank} in rewards when they land`
-      : `A bank transfer earns ${bank} in rewards when it lands, a USDC transfer ${usdc}`;
+      ? `Bank and USDC transfers earn ${bank} in rewards points when they land`
+      : `A bank transfer earns ${bank} in rewards points when it lands, a USDC transfer ${usdc}`;
   const cardClause = rates.rewardsRateCardBps > 0 ? `a card charge earns ${card} at once` : "a card charge earns none";
-  return ` ${earning}; ${cardClause}. Rewards pay for your orders before your cash unless you choose to save them in Wallet. They are not cash: they cannot be paid out, do not count toward your minimum, and a payment your bank takes back takes its rewards back too.`;
+  return ` ${earning}; ${cardClause}. ${REWARDS_POINTS_SENTENCE} Points are used only on your orders here, and only once you choose in Wallet to auto-apply them; until you choose, they are saved up. They are not cash: they cannot be paid out, do not count toward your minimum, and a payment your bank takes back takes its points back too.`;
 }
 
-/** The line under the rewards figure: how the balance is used today. */
-export function describeRewardsUse(spendRewardsFirst: boolean): string {
+/** The one sentence that names the unit, worded once and quoted wherever points are explained. */
+export const REWARDS_POINTS_SENTENCE = "100 points are worth $1 on your orders.";
+
+/**
+ * The line under the points figure: what the vendor's choice is doing today,
+ * or that no choice has been made yet (auto-apply is never assumed).
+ */
+export function describeRewardsUse(spendRewardsFirst: boolean | null): string {
+  if (spendRewardsFirst === null) {
+    return `Not chosen yet, so your points are saved up. Choose to auto-apply them to your orders, or keep saving them. ${REWARDS_POINTS_SENTENCE}`;
+  }
   return spendRewardsFirst
-    ? "Pays for your orders before your cash. Not cash: it cannot be paid out and does not count toward your minimum."
-    : "Saved: your cash pays for orders while this is on. Not cash: it cannot be paid out and does not count toward your minimum.";
+    ? `Auto-applied to your orders before your cash. ${REWARDS_POINTS_SENTENCE}`
+    : `Saved up: your cash pays for orders. Auto-apply them whenever you want to use them. ${REWARDS_POINTS_SENTENCE}`;
 }
 
-/** The request body of the save-my-rewards switch: on means rewards are kept, so the server's flag is the opposite. */
-export function buildRewardsPreferenceInput(saveRewards: boolean): { spendRewardsFirst: boolean } {
-  return { spendRewardsFirst: !saveRewards };
+/** The request body of the choice: the server's flag is exactly the choice, true to auto-apply, false to save up. */
+export function buildRewardsPreferenceInput(spendRewardsFirst: boolean): { spendRewardsFirst: boolean } {
+  return { spendRewardsFirst };
 }
 
-export function describeRewardsPreferenceSaved(saveRewards: boolean): string {
-  return saveRewards ? "Saved. Your cash pays for orders; your rewards stay put." : "Saved. Rewards pay for your orders before your cash.";
+export function describeRewardsPreferenceSaved(spendRewardsFirst: boolean): string {
+  return spendRewardsFirst
+    ? "Saved. Your points are auto-applied to your orders before your cash."
+    : "Saved. Your points are kept; your cash pays for orders.";
+}
+
+/** The rewards figure as the vendor reads it: points first, the dollar value beside. */
+export function describeRewardsBalance(rewardsBalanceCents: number): { points: string; value: string } {
+  return { points: formatPoints(rewardsBalanceCents), value: formatSignedCents(rewardsBalanceCents) };
+}
+
+/** An activity row's amount in its own unit: points for a rewards row, money for every other row; a debit carries the minus. */
+export function describeLedgerAmount(entry: Pick<WalletLedgerEntry, "reason" | "amountCents">): string {
+  return REWARDS_LEDGER_REASONS.has(entry.reason) ? formatPoints(entry.amountCents) : formatSignedCents(entry.amountCents);
 }
 
 /**

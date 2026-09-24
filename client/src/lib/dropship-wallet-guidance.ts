@@ -225,6 +225,19 @@ export function formatWholeDollars(centsValue: number): string {
   return `${sign}$${dollars.toLocaleString("en-US")}.${String(remainder).padStart(2, "0")}`;
 }
 
+/**
+ * Rewards points (funding design phase 7): 100 points per dollar, which is
+ * exactly one point per cent, so the stored cents ARE the points and no
+ * conversion can drift. The vendor sees points; the dollar value sits beside.
+ */
+export const REWARDS_POINTS_PER_DOLLAR = 100;
+
+export function formatPoints(pointsValue: number): string {
+  if (!Number.isSafeInteger(pointsValue)) throw new RangeError(`points must be a safe integer, got ${pointsValue}`);
+  const magnitude = Math.abs(pointsValue).toLocaleString("en-US");
+  return `${pointsValue < 0 ? "−" : ""}${magnitude} ${Math.abs(pointsValue) === 1 ? "point" : "points"}`;
+}
+
 /** Signed money with a typographic minus: −$50.00. */
 export function formatSignedCents(centsValue: number): string {
   assertSignedCents(centsValue, "cents");

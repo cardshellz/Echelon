@@ -92,7 +92,8 @@ describe("adaptWalletView", () => {
 
     const older = adaptWalletView(rawWallet({ autoReload: rawAutoReload(), recentLedger: [{ ledgerEntryId: 2, type: "funding", status: "settled", amountCents: 5500, currency: "USD", availableBalanceAfterCents: 0, pendingBalanceAfterCents: 0, createdAt: STAMP, settledAt: STAMP }] }));
     expect(older.account.rewardsBalanceCents).toBe(0);
-    expect(older.autoReload?.spendRewardsFirst).toBe(true);
+    // No choice served is no choice: the page must not assume auto-apply.
+    expect(older.autoReload?.spendRewardsFirst).toBeNull();
     expect(older.limits).toMatchObject({ rewardsRateBankBps: 100, rewardsRateUsdcBps: 100, rewardsRateCardBps: 0 });
     expect(older.recentLedger[0].rewardsBalanceAfterCents).toBeNull();
     // A rewards balance is never negative: a body that says otherwise breaks the contract.

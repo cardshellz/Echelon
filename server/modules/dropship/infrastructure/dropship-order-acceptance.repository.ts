@@ -1883,12 +1883,13 @@ async function getOrCreateWalletForUpdate(
 }
 
 /**
- * The vendor's choice between spending rewards first and saving them
- * (funding design phase 7), from their wallet settings row. A vendor with no
- * row yet spends first, the documented default.
+ * The vendor's choice for their rewards points (funding design phase 7), from
+ * their wallet settings row: true auto-applies them, false saves them, and
+ * null (no choice yet, or no row yet) reads as saved. Auto-apply is never
+ * assumed (migration 0704).
  */
-async function loadSpendRewardsFirstWithClient(client: PoolClient, vendorId: number): Promise<boolean> {
-  const result = await client.query<{ spend_rewards_first: boolean }>(
+async function loadSpendRewardsFirstWithClient(client: PoolClient, vendorId: number): Promise<boolean | null> {
+  const result = await client.query<{ spend_rewards_first: boolean | null }>(
     `SELECT spend_rewards_first
      FROM dropship.dropship_auto_reload_settings
      WHERE vendor_id = $1
@@ -1896,7 +1897,7 @@ async function loadSpendRewardsFirstWithClient(client: PoolClient, vendorId: num
     [vendorId],
   );
   const value = result.rows[0]?.spend_rewards_first;
-  return typeof value === "boolean" ? value : true;
+  return typeof value === "boolean" ? value : null;
 }
 
 /**

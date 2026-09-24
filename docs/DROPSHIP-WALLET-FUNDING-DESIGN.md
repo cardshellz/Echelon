@@ -277,12 +277,15 @@ Shellz issues, so:
 - the rate setting has a ceiling, so a typo cannot pay out 100%;
 - no expiry at launch (a setting later).
 
-**Spending.** The main use is lower product cost: by default each order debit
-takes rewards first and cash second, and the order shows both parts. A vendor
-can switch to "save my rewards" and spend the balance later. Redemption
-outside inventory comes later, each option behind an admin toggle: a coupon
-code for cardshellz.com, and one for the cardshellz.io store once it exists.
-A redemption debits the rewards balance and never touches the Shellz Club
+**Spending.** Rewards are points, 100 per dollar (one per cent, so the
+stored cents are the points), and their only use is lower product cost on
+.ops orders: an order debit takes points first and cash second, and the
+order shows both parts. That happens only once the vendor chooses to
+auto-apply their points; until they choose, the points are saved up.
+Auto-apply is never a default (owner decision of 2026-09-24, which also
+dropped the earlier idea of redeeming points as store coupon codes: points
+never leave the wallet). Points get an expiry set by staff, with "never" as
+an option (to be built; none at launch). They never touch the Shellz Club
 points ledger.
 
 **Separation from Shellz Club rewards.** The two programs never pool. A .ops
@@ -324,20 +327,27 @@ rewards back pro rata: what is still in the balance leaves it
 (`rewards_reversed`), the part already spent comes out of cash through the
 same `funding_reversal` row; a won dispute gives both back
 (`rewards_reinstated`). The vendor surface: the rewards balance is its own
-figure under the cash balance with a line saying how it is used, and the
-choice is the page's radio pair ("Use on orders first" / "Save my rewards",
+figure under the cash balance, in points with the dollar value beside, with
+a line saying what the vendor's choice is doing or that none is made; the
+choice is the page's radio pair ("Auto-apply to orders" / "Save them up",
 `PUT /api/dropship/wallet/rewards/preference`, no step-up: a preference,
-not a charge); the rules page states the rule from the served rates ("bank
-and USDC transfers earn 1% in rewards when they land; a card charge earns
-none", USDC named only where offered, nothing said while every rate is
-zero); the add-money bullets and the USDC panel say what the picked rail
-earns and when; an activity row that moved rewards shows its rewards balance
-after, named as such, never the cash balance; and an order shows both parts
-of its payment (the order detail serves the `rewards_spent` row beside the
-`order_debit` row, a hold serves the rewards share its event recorded, and
-the accept response carries `rewardsCents`). Not built yet: the rewards
-share of a return credit, coupon redemption (`rewards_redeemed` has no
-writer), and the admin order view of the split.
+not a charge), and neither option is selected until the vendor chooses
+(migration 0704 made `spend_rewards_first` nullable with no default; NULL
+reads as saved everywhere, and rows that carried the old default without a
+recorded choice were reset); the rules page states the rule from the served
+rates ("bank and USDC transfers earn 1% in rewards points when they land; a
+card charge earns none", the 100-points-per-dollar sentence, points used
+only on orders and only once auto-apply is chosen, USDC named only where
+offered, nothing said while every rate is zero); the add-money bullets and
+the USDC panel say what the picked rail earns and when; an activity row
+that moved points shows its amount and its points balance after in points;
+and an order shows both parts of its payment (the order detail serves the
+`rewards_spent` row beside the `order_debit` row, a hold serves the points
+share its event recorded, and the accept response carries `rewardsCents`).
+Not built yet: the points expiry setting and its sweep, the points share
+of a return credit, and the admin order view of the split.
+`rewards_redeemed` stays in the ledger vocabulary with no writer; it is
+retired with the next ledger-kind change.
 
 **Still open, not designed here:** credit against a business account's first
 bank transfer (today one earlier transfer from the account must have

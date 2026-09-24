@@ -76,8 +76,12 @@ export interface WalletAutoReload {
   backstopFundingMethodId: number | null;
   acknowledgedCardFeeBps: number | null;
   acknowledgedAt: string | null;
-  /** True: rewards pay first on each order; false: the vendor saves them (funding design phase 7). */
-  spendRewardsFirst: boolean;
+  /**
+   * The vendor's choice for their rewards points (funding design phase 7):
+   * true auto-applies them to each order before cash, false saves them, null
+   * means not chosen yet, which the server reads as saved. Never a default.
+   */
+  spendRewardsFirst: boolean | null;
 }
 
 export type WalletLedgerReason =
@@ -326,7 +330,7 @@ const rawAutoReloadSchema = z.object({
   backstopFundingMethodId: z.number().int().nullable().optional(),
   acknowledgedCardFeeBps: z.number().int().nullable().optional(),
   acknowledgedAt: z.string().nullable().optional(),
-  spendRewardsFirst: z.boolean().optional(),
+  spendRewardsFirst: z.boolean().nullable().optional(),
 }).passthrough();
 
 const ledgerReasonSchema = z.enum([
@@ -734,8 +738,8 @@ export function adaptWalletView(raw: unknown): DropshipWalletView {
       backstopFundingMethodId: backstop.backstopFundingMethodId,
       acknowledgedCardFeeBps: acknowledgement.acknowledgedCardFeeBps,
       acknowledgedAt: acknowledgement.acknowledgedAt,
-      // An older server serves no preference; the documented default is to spend first.
-      spendRewardsFirst: wallet.autoReload.spendRewardsFirst ?? true,
+      // No choice served (an older server, or a vendor who has not chosen) is exactly that: not chosen.
+      spendRewardsFirst: wallet.autoReload.spendRewardsFirst ?? null,
     }
     : null;
 

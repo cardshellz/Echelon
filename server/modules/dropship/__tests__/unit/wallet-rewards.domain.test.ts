@@ -87,6 +87,17 @@ describe("decideRewardsSpend", () => {
     expect(decideRewardsSpend({ rewardsBalanceCents: 5_000, totalDebitCents: 1_000, spendRewardsFirst: false })).toEqual({ rewardsCents: 0, cashCents: 1_000 });
   });
 
+  it("a vendor who has not chosen keeps their rewards: auto-apply is never a default", () => {
+    expect(decideRewardsSpend({ rewardsBalanceCents: 5_000, totalDebitCents: 1_000, spendRewardsFirst: null })).toEqual({ rewardsCents: 0, cashCents: 1_000 });
+    // Anything that is not an explicit choice is refused, never read as one.
+    expect(() => decideRewardsSpend({ rewardsBalanceCents: 5_000, totalDebitCents: 1_000, spendRewardsFirst: undefined as unknown as boolean })).toThrowError(
+      expect.objectContaining({ code: "DROPSHIP_WALLET_REWARDS_INVALID" }),
+    );
+    expect(() => decideRewardsSpend({ rewardsBalanceCents: 5_000, totalDebitCents: 1_000, spendRewardsFirst: "true" as unknown as boolean })).toThrowError(
+      expect.objectContaining({ code: "DROPSHIP_WALLET_REWARDS_INVALID" }),
+    );
+  });
+
   it("no rewards means no rewards part", () => {
     expect(decideRewardsSpend({ rewardsBalanceCents: 0, totalDebitCents: 1_000, spendRewardsFirst: true })).toEqual({ rewardsCents: 0, cashCents: 1_000 });
   });

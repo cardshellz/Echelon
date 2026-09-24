@@ -1611,7 +1611,10 @@ export const dropshipAutoReloadSettings = dropshipSchema.table(
       .default(DROPSHIP_DEFAULT_PAYMENT_HOLD_TIMEOUT_MINUTES),
     // True: each order debit takes rewards first and cash second; false: the
     // vendor saves their rewards (migration 0702).
-    spendRewardsFirst: boolean("spend_rewards_first").notNull().default(true),
+    // The vendor's choice for their rewards points: true auto-applies them,
+    // false saves them, NULL means not chosen yet and reads as saved
+    // (migration 0704). Never defaulted: auto-apply must be chosen.
+    spendRewardsFirst: boolean("spend_rewards_first"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .defaultNow()
       .notNull(),
